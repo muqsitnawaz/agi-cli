@@ -68,9 +68,9 @@ agents teams list --json &
 wait
 ```
 
-## Case Study: Companion Foreman
+## Case Study: Swarmify Foreman
 
-Companion's Factory Floor ships a voice coordinator called Foreman. When the user
+Swarmify's Factory Floor ships a voice coordinator called Foreman. When the user
 asks "what's everyone doing?" the extension host calls all three JSON sources in
 parallel, cross-references with live VS Code terminals, and hands a unified digest
 to an OpenAI Realtime model that narrates the answer.
@@ -99,7 +99,7 @@ OpenAI Realtime (gpt-realtime)
      │
      ▼
 Voice response: "Claude is 12 minutes into auth refactor on agents
-                repo, last edited jwt.ts. Codex finished EXAMPLE-362.
+                repo, last edited jwt.ts. Codex finished RUSH-362.
                 Gemini stuck 40 min on staging timeout."
 ```
 

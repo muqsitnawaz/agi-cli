@@ -40,7 +40,7 @@ export interface BrowserProfile {
   viewport?: { width: number; height: number; x?: number; y?: number };
   /** Directory holding source-side JSONL logs (e.g. ~/.rush/logs). */
   logDir?: string;
-  /** Optional SSH host where logDir lives, e.g. "user@mac-mini". */
+  /** Optional SSH host where logDir lives, e.g. "muqsit@mac-mini". */
   logHost?: string;
 }
 

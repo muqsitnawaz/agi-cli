@@ -202,7 +202,7 @@ export interface RepoInfo {
 /** Canonical system repo cloned into ~/.agents-system/. */
 export const DEFAULT_SYSTEM_REPO = 'gh:phnx-labs/.agents-system';
 /** Legacy system repo — kept so existing installs still recognize their origin. */
-export const MIRROR_SYSTEM_REPO = 'gh:phnx-labs/.agents-system';
+export const MIRROR_SYSTEM_REPO = 'gh:muqsitnawaz/.agents-system';
 
 /** Strip the `gh:` prefix and `.git` suffix to get a GitHub `owner/repo` slug. */
 export function systemRepoSlug(repo: string = DEFAULT_SYSTEM_REPO): string {
@@ -514,7 +514,7 @@ export interface BrowserProfileConfig {
   viewport?: { width: number; height: number };
   /** Directory holding source-side JSONL logs (e.g. ~/.rush/logs). */
   logDir?: string;
-  /** Optional SSH host where logDir lives, e.g. "user@mac-mini". */
+  /** Optional SSH host where logDir lives, e.g. "muqsit@mac-mini". */
   logHost?: string;
 }
 

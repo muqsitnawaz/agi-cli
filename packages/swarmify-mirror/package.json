@@ -1,5 +1,5 @@
 {
-  "name": "@companion/agents-cli",
+  "name": "@swarmify/agents-cli",
   "version": "1.14.0",
   "description": "This package has moved to @phnx-labs/agents-cli. Install that instead.",
   "dependencies": {

@@ -4,9 +4,9 @@
 #
 # Publishes a single version to TWO npm packages:
 #   1. @phnx-labs/agents-cli  -- the canonical package (real code)
-#   2. @companion/agents-cli   -- legacy shim that re-exports @phnx-labs
+#   2. @swarmify/agents-cli   -- legacy shim that re-exports @phnx-labs
 #
-# The shim keeps existing @companion installs auto-updating into the new code.
+# The shim keeps existing @swarmify installs auto-updating into the new code.
 #
 # Usage: scripts/release.sh <version> [--apply]
 #
@@ -21,7 +21,7 @@
 set -euo pipefail
 
 PHNX_PKG="@phnx-labs/agents-cli"
-SWARMIFY_PKG="@companion/agents-cli"
+SWARMIFY_PKG="@swarmify/agents-cli"
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
@@ -84,7 +84,7 @@ REMOTE="$(git rev-parse origin/main)"
 # ----- npm auth via token (skips 2FA OTP prompts) -----
 # Resolve NPM_TOKEN from the keychain-backed secrets bundle and write a temp
 # .npmrc that the rest of the script will use via NPM_CONFIG_USERCONFIG. The
-# token must have publish access to both @phnx-labs and @companion; create
+# token must have publish access to both @phnx-labs and @swarmify; create
 # automation tokens at https://www.npmjs.com/settings/<user>/tokens with the
 # "Automation" type so 2FA is bypassed for publishes.
 # Use local build if available (has latest keychain fixes), fallback to global
@@ -159,13 +159,13 @@ if ! $is_valid_bump; then
   exit 1
 fi
 
-# Target must also be strictly newer than @companion latest (rare edge case).
+# Target must also be strictly newer than @swarmify latest (rare edge case).
 read -r SMAJ SMIN SPAT <<< "$(parse_v "$SWARMIFY_LATEST")"
 if [[ "$TMAJ$TMIN$TPAT" == "$SMAJ$SMIN$SPAT" ]] || \
    { [[ $TMAJ -lt $SMAJ ]] || \
      { [[ $TMAJ -eq $SMAJ ]] && [[ $TMIN -lt $SMIN ]]; } || \
      { [[ $TMAJ -eq $SMAJ ]] && [[ $TMIN -eq $SMIN ]] && [[ $TPAT -le $SPAT ]]; }; }; then
-  die "target $TARGET is not strictly newer than @companion latest $SWARMIFY_LATEST"
+  die "target $TARGET is not strictly newer than @swarmify latest $SWARMIFY_LATEST"
 fi
 
 green "Bump: $BUMP ($PHNX_LATEST -> $TARGET)"
@@ -286,7 +286,7 @@ echo
 
 # ----- Build the shim package on disk so we can preview/publish it -----
 bold "Building $SWARMIFY_PKG@$TARGET shim..."
-SHIM_SRC="$ROOT/scripts/companion-shim"
+SHIM_SRC="$ROOT/scripts/swarmify-shim"
 SHIM_TMP="$(mktemp -d -t agents-cli-shim)"
 # Cleanup of SHIM_TMP layered onto the existing EXIT trap (which restores
 # package.json on abort). bash only keeps the most recent EXIT trap, so we
@@ -386,7 +386,7 @@ else
 fi
 echo
 
-# ----- Publish @companion shim (skip if pre-flight saw it on registry) -----
+# ----- Publish @swarmify shim (skip if pre-flight saw it on registry) -----
 bold "Publishing $SWARMIFY_PKG@$TARGET shim..."
 if $SWARMIFY_TARGET_PUBLISHED; then
   yellow "$SWARMIFY_PKG@$TARGET is already on the registry, skipping publish"

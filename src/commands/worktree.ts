@@ -2,7 +2,7 @@
  * agents worktree -- provision, release, and prune per-terminal git worktrees.
  *
  * Used by surfaces that want to spawn each agent terminal in an isolated
- * working tree (Companion extension opt-in toggle). Mirrors the in-process
+ * working tree (Swarmify extension opt-in toggle). Mirrors the in-process
  * worktree helpers in lib/teams/worktree.ts but exposes them as a CLI so
  * other processes (IDE extensions, shell aliases, hooks) can call them.
  *

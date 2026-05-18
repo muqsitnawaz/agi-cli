@@ -13,7 +13,7 @@
  *                          `agents repo push`.
  *  - ~/.agents/.cache/   — regenerable runtime data (shims, packages, helpers
  *                          for daemon/pty, terminals, cloud, drive, browser
- *                          chrome-data, logs, companion). Gitignored.
+ *                          chrome-data, logs, swarmify). Gitignored.
  *
  * Resolution precedence for resources: project > user > system.
  * Every module that needs a path or reads/writes agents.yaml goes through here.
@@ -90,7 +90,7 @@ const DRIVE_DIR = path.join(CACHE_DIR, 'drive');
 const TERMINALS_DIR = path.join(CACHE_DIR, 'terminals');
 const LOGS_DIR = path.join(CACHE_DIR, 'logs');
 const RUNTIME_STATE_DIR = path.join(CACHE_DIR, 'state');
-const SWARMIFY_DIR = path.join(CACHE_DIR, 'companion');
+const SWARMIFY_DIR = path.join(CACHE_DIR, 'swarmify');
 const BROWSER_RUNTIME_DIR = path.join(CACHE_DIR, 'browser');
 const HELPERS_DIR = path.join(CACHE_DIR, 'helpers');
 const DAEMON_DIR = path.join(HELPERS_DIR, 'daemon');
@@ -355,8 +355,8 @@ export function getLogsDir(): string { return LOGS_DIR; }
 /** Path to per-process runtime state (~/.agents/.cache/state/). */
 export function getRuntimeStateDir(): string { return RUNTIME_STATE_DIR; }
 
-/** Path to companion-extension scratch (~/.agents/.cache/companion/). */
-export function getCompanionDir(): string { return SWARMIFY_DIR; }
+/** Path to swarmify-extension scratch (~/.agents/.cache/swarmify/). */
+export function getSwarmifyDir(): string { return SWARMIFY_DIR; }
 
 /** Path to browser runtime data — chrome-data, pids (~/.agents/.cache/browser/). */
 export function getBrowserRuntimeDir(): string { return BROWSER_RUNTIME_DIR; }

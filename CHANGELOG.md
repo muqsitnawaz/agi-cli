@@ -257,7 +257,7 @@
 **~/.agents split into .history/ and .cache/ buckets**
 
 - Durable runtime state (sessions, versions, runs, teams/agents, trash, backups) moves to ~/.agents/.history/.
-- Regenerable runtime state (shims, packages, cloud, logs, companion, helpers, browser runtime, fetch cache, dot-files) moves to ~/.agents/.cache/.
+- Regenerable runtime state (shims, packages, cloud, logs, swarmify, helpers, browser runtime, fetch cache, dot-files) moves to ~/.agents/.cache/.
 - Single-line gitignore for backing up ~/.agents/ — no more per-subdir cherry-picking.
 
 **Browser: profiles fold into agents.yaml + many new automation commands**
@@ -345,7 +345,7 @@
 
 - Added `--json` flag to `agents sessions list` and `agents sessions` for programmatic use
 - Output is a JSON array of session metadata (id, shortId, agent, version, account, project, cwd, filePath, topic, messageCount, tokenCount, timestamp)
-- Enables the Companion VS Code extension's "Agents: Session Resume" and "Agents: Session Trace" pickers
+- Enables the Swarmify VS Code extension's "Agents: Session Resume" and "Agents: Session Trace" pickers
 
 **OpenClaw workspace-aware sessions**
 

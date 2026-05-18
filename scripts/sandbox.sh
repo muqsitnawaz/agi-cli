@@ -26,7 +26,7 @@ PROFILE="${PROFILE:-default}"
 export PROFILE
 
 # GitHub .agents repo for syncing skills/commands
-AGENTS_REPO="${AGENTS_REPO:-git@github.com:phnx-labs/.agents.git}"
+AGENTS_REPO="${AGENTS_REPO:-git@github.com:muqsitnawaz/.agents.git}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -41,12 +41,12 @@ export HCLOUD_TOKEN
 # Generate GitHub App token for private repo access.
 # Resolves the installation ID dynamically from a target repo so the script
 # works regardless of whether the App is installed on a user or an org.
-# TOKEN_REPO env var (default: phnx-labs/.agents) picks which installation.
+# TOKEN_REPO env var (default: muqsitnawaz/.agents) picks which installation.
 generate_github_token() {
   eval "$(agents secrets export github.com 2>/dev/null)" || return 1
   [[ -n "${APP_ID:-}" && -n "${APP_PRIVATE_KEY:-}" ]] || return 1
 
-  local target_repo="${TOKEN_REPO:-phnx-labs/.agents}"
+  local target_repo="${TOKEN_REPO:-muqsitnawaz/.agents}"
   local jwt installation_id token
 
   jwt=$(APP_PRIVATE_KEY="$APP_PRIVATE_KEY" /usr/bin/python3 -c "

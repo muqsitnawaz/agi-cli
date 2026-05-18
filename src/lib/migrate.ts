@@ -755,7 +755,7 @@ function migratePluginsBackToUserRoot(): void {
  *   ~/.agents/drive/         -> ~/.agents/.cache/drive/
  *   ~/.agents/terminals/     -> ~/.agents/.cache/terminals/
  *   ~/.agents/logs/          -> ~/.agents/.cache/logs/
- *   ~/.agents/companion/      -> ~/.agents/.cache/companion/
+ *   ~/.agents/swarmify/      -> ~/.agents/.cache/swarmify/
  *   ~/.agents/runtime/       -> ~/.agents/.cache/state/
  *   ~/.agents/cache/         -> ~/.agents/.cache/   (flatten — already a cache subdir)
  *   ~/.agents/helpers/{daemon,pty,...} -> ~/.agents/.cache/helpers/...
@@ -785,7 +785,7 @@ function migrateRuntimeToCache(): void {
   // ~/.agents/terminals/live-terminals.json and would race with the move on
   // VS Code restart. Leave the path where the extension expects it.
   moveDirOnce(path.join(USER_DIR, 'logs'), path.join(CACHE_DIR, 'logs'));
-  moveDirOnce(path.join(USER_DIR, 'companion'), path.join(CACHE_DIR, 'companion'));
+  moveDirOnce(path.join(USER_DIR, 'swarmify'), path.join(CACHE_DIR, 'swarmify'));
   moveDirOnce(path.join(USER_DIR, 'runtime'), path.join(CACHE_DIR, 'state'));
 
   // Pre-existing user `cache/` dir (claude usage cache, cloud-runs, etc.) — flatten
@@ -829,7 +829,7 @@ function migrateRuntimeToCache(): void {
   moveDirOnce(path.join(SYSTEM_DIR, '.fetch'), path.join(CACHE_DIR, '.fetch'));
   moveDirOnce(path.join(SYSTEM_DIR, 'browser'), path.join(CACHE_DIR, 'browser'));
   moveDirOnce(path.join(SYSTEM_DIR, 'state'), path.join(CACHE_DIR, 'state'));
-  moveDirOnce(path.join(SYSTEM_DIR, 'companion'), path.join(CACHE_DIR, 'companion'));
+  moveDirOnce(path.join(SYSTEM_DIR, 'swarmify'), path.join(CACHE_DIR, 'swarmify'));
   moveFileOnce(path.join(SYSTEM_DIR, '.cli-version-cache.json'), path.join(CACHE_DIR, '.cli-version-cache.json'));
   moveFileOnce(path.join(SYSTEM_DIR, '.update-check'), path.join(CACHE_DIR, '.update-check'));
   moveFileOnce(path.join(SYSTEM_DIR, '.migrated'), path.join(CACHE_DIR, '.migrated'));

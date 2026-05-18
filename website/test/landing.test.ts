@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { LANDING_HTML } from '../src/landing';
 
-describe('LANDING_HTML required content (EXAMPLE-365 spec)', () => {
+describe('LANDING_HTML required content (RUSH-365 spec)', () => {
   it('has the "open client" lede exactly as the ticket requires', () => {
     expect(LANDING_HTML).toContain(
       'The open client for AI coding agents. Run Claude, Codex, Gemini, Cursor — same interface, on your machine.'
@@ -34,7 +34,7 @@ describe('LANDING_HTML required content (EXAMPLE-365 spec)', () => {
 
   it('install one-liner uses the canonical @phnx-labs scope', () => {
     expect(LANDING_HTML).toContain('@phnx-labs/agents-cli');
-    expect(LANDING_HTML).not.toContain('@companion/agents-cli');
+    expect(LANDING_HTML).not.toContain('@swarmify/agents-cli');
     expect(LANDING_HTML).not.toContain('madebyphoenix');
   });
 

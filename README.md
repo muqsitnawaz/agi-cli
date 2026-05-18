@@ -214,7 +214,7 @@ Custom endpoints (Ollama, vLLM) work too -- drop a YAML in `~/.agents/profiles/`
 name: local-qwen
 host: { agent: claude }
 env:
-  ANTHROPIC_BASE_URL: https://ollama.example.com
+  ANTHROPIC_BASE_URL: https://ollama.internal
   ANTHROPIC_MODEL: qwen3.6:35b
 auth:
   envVar: ANTHROPIC_AUTH_TOKEN

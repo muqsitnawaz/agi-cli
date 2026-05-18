@@ -34,7 +34,7 @@ Clone from `phnx-labs/.agents-system` to see exactly what ships. Nothing else be
 **User repo (`~/.agents/`)** — your resources + all operational state:
 - **Your resources** (git-tracked, top-level): `commands/`, `skills/`, `hooks/`, `rules/`, `mcp/`, `permissions/`, `profiles/`, `subagents/`, `plugins/`, `workflows/`, `routines/`, `agents.yaml`
 - **Durable runtime** (under `~/.agents/.history/`): `versions/`, `sessions/`, `runs/`, `trash/`, `backups/`, `teams/agents/`
-- **Regenerable runtime** (under `~/.agents/.cache/`): `shims/`, `bin/`, `packages/`, `cloud/`, `drive/`, `logs/`, `helpers/`, `state/`, `companion/`, the migration sentinel `.migrated`
+- **Regenerable runtime** (under `~/.agents/.cache/`): `shims/`, `bin/`, `packages/`, `cloud/`, `drive/`, `logs/`, `helpers/`, `state/`, `swarmify/`, the migration sentinel `.migrated`
 - **Browser:** `browser/profiles/` (YAML configs) + `~/.agents/.cache/browser/<profile>/` (runtime: chrome-data, pids)
 
 **Plugins (`~/.agents/plugins/`) are user-authored.** Each plugin is a directory with a `.claude-plugin/plugin.json` manifest, optionally containing `skills/`, `commands/`, `hooks/`, `subagents/`, `.mcp.json`. The CLI never migrates this directory into `.cache/` — that was the [issue #20](https://github.com/phnx-labs/agents-cli/issues/20) regression in 1.16.x–1.17.6, fixed in 1.18.0. Treat `plugins/` exactly like `skills/`.

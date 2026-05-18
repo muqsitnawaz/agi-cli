@@ -74,7 +74,7 @@ export AGENTS_BROWSER_TASK=$(browser start --profile work --url https://arxiv.or
 browser tabs
 
 # Agent 2 (different shell) — monitoring
-export AGENTS_BROWSER_TASK=$(browser start --profile work --url https://dashboards.example.com)
+export AGENTS_BROWSER_TASK=$(browser start --profile work --url https://grafana.internal)
 browser tabs   # only sees its own tabs
 
 # Completing one doesn't affect the other

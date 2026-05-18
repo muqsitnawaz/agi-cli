@@ -23,7 +23,7 @@ import { homedir } from 'os';
 import { betaEnableHint, isBetaEnabled } from '../lib/beta.js';
 import { insertTask } from '../lib/cloud/store.js';
 
-const FACTORY_URL = process.env.FACTORY_FLOOR_URL ?? 'https://factory.example.com';
+const FACTORY_URL = process.env.FACTORY_FLOOR_URL ?? 'https://agents.427yosemite.com';
 
 function die(msg: string, code = 1): never {
   console.error(chalk.red(msg));
@@ -74,8 +74,8 @@ export function registerFactoryCommands(program: Command): void {
     .description('Software Factory -- submit Linear tickets to the cloud orchestrator.')
     .addHelpText('after', `
 Examples:
-  agents factory submit EXAMPLE-2451
-  agents factory submit https://linear.app/example/issue/EXAMPLE-2451
+  agents factory submit RUSH-2451
+  agents factory submit https://linear.app/getrush/issue/RUSH-2451
 `);
 
   factory.hook('preAction', () => {
@@ -87,7 +87,7 @@ Examples:
 
   factory
     .command('submit <linear-ref>')
-    .description('Submit a Linear issue (EXAMPLE-123 or URL) to the Software Factory.')
+    .description('Submit a Linear issue (RUSH-123 or URL) to the Software Factory.')
     .option('--json', 'Output machine-readable JSON')
     .action(async (ref: string, opts: { json?: boolean }) => {
       const result = await postFactorySubmit(ref);
