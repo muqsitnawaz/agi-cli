@@ -27,6 +27,10 @@ vi.mock('./state.js', () => ({
   }; },
   get getEnabledExtraRepos() { return () => []; },
   get getVersionsDir() { return () => path.join(USER_DIR, '.history', 'versions'); },
+  // agents.ts calls getCliVersionCachePath() at module-load (not lazily) to
+  // build a const. Return an os.tmpdir()-based path because USER_DIR isn't
+  // initialized until beforeEach; runLaunchSync doesn't touch this file.
+  get getCliVersionCachePath() { return () => path.join(os.tmpdir(), 'agents-cli-version.json'); },
 }));
 
 import { runLaunchSync } from './project-launch.js';
