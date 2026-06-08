@@ -27,6 +27,7 @@
  */
 
 import * as fs from 'fs';
+import { agentConfigDirName } from './agents.js';
 import * as path from 'path';
 import type { AgentId, DiscoveredPlugin, PluginManifest } from './types.js';
 
@@ -67,7 +68,7 @@ interface MarketplaceManifest {
 }
 
 function pluginsRootForVersion(agent: AgentId, versionHome: string): string {
-  return path.join(versionHome, `.${agent}`, 'plugins');
+  return path.join(versionHome, agentConfigDirName(agent), 'plugins');
 }
 
 export function marketplaceRoot(agent: AgentId, versionHome: string, marketplaceName: string = MARKETPLACE_NAME): string {
@@ -87,7 +88,7 @@ export function knownMarketplacesPath(agent: AgentId, versionHome: string): stri
 }
 
 function settingsPath(agent: AgentId, versionHome: string): string {
-  return path.join(versionHome, `.${agent}`, 'settings.json');
+  return path.join(versionHome, agentConfigDirName(agent), 'settings.json');
 }
 
 /**

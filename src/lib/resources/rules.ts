@@ -10,6 +10,7 @@
  */
 
 import * as fs from 'fs';
+import { agentConfigDirName } from '../agents.js';
 import * as path from 'path';
 
 import type { AgentId, Layer, ResolvedItem, ResourceHandler } from './types.js';
@@ -166,7 +167,7 @@ export const RulesHandler: ResourceHandler<RuleItem> = {
     // Rules sync is handled by the compose module and syncResourcesToVersion.
     // This method ensures the agent config directory exists.
     // The actual composition and write happens in versions.ts via composeRulesFromState().
-    const targetDir = path.join(versionHome, `.${agent}`);
+    const targetDir = path.join(versionHome, agentConfigDirName(agent));
 
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true });
@@ -179,6 +180,6 @@ export const RulesHandler: ResourceHandler<RuleItem> = {
 
   targetDir(agent: AgentId): string {
     // Rules don't have a target subdirectory - they're written to the instructions file
-    return `.${agent}`;
+    return agentConfigDirName(agent);
   },
 };
