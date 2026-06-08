@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawnSync } from 'child_process';
 import { afterEach, describe, expect, it } from 'vitest';
-import { generateShimScript, hasAliasShadowingShim, SHIM_SCHEMA_VERSION } from './shims.js';
+import { generateShimScript, hasAliasShadowingShim, SHIM_SCHEMA_VERSION, switchConfigSymlink } from './shims.js';
 import { getProjectVersion } from './versions.js';
 
 const tempDirs: string[] = [];
@@ -96,6 +96,61 @@ describe('generateShimScript', () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('invalid version in agents.yaml for claude: ../../../tmp/pwn');
     expect(fs.existsSync(logPath)).toBe(false);
+  });
+
+  it('grok PATH fallback does not exec the agents-cli shim itself', () => {
+    const dir = makeTempDir();
+    const home = path.join(dir, 'home');
+    const project = path.join(dir, 'project');
+    const fakeAgents = path.join(dir, 'agents');
+    const shimsDir = path.join(home, '.agents', '.cache', 'shims');
+    const versionDir = path.join(home, '.agents', '.history', 'versions', 'grok', '0.2.32');
+
+    fs.mkdirSync(project, { recursive: true });
+    fs.mkdirSync(shimsDir, { recursive: true });
+    fs.mkdirSync(versionDir, { recursive: true });
+    fs.writeFileSync(path.join(home, '.agents', 'agents.yaml'), 'agents:\n  grok: "0.2.32"\n', 'utf-8');
+    fs.writeFileSync(fakeAgents, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+    const shimPath = path.join(shimsDir, 'grok');
+    const shim = generateShimScript('grok').replace(/^AGENTS_BIN=.*$/m, `AGENTS_BIN=${JSON.stringify(fakeAgents)}`);
+    fs.writeFileSync(shimPath, shim, { mode: 0o755 });
+
+    const result = spawnSync('/bin/bash', [shimPath, '--version'], {
+      cwd: project,
+      env: { ...process.env, HOME: home, PATH: `${shimsDir}:/bin:/usr/bin` },
+      encoding: 'utf-8',
+      timeout: 1000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('agents: grok@0.2.32 not installed');
+  });
+
+  it('does not replace ~/.grok because Grok stores launcher binaries there', async () => {
+    const dir = makeTempDir();
+    const home = path.join(dir, 'home');
+    const grokDir = path.join(home, '.grok');
+    const grokBin = path.join(grokDir, 'bin', 'grok');
+    const originalRealHome = process.env.AGENTS_REAL_HOME;
+
+    fs.mkdirSync(path.dirname(grokBin), { recursive: true });
+    fs.writeFileSync(grokBin, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+    process.env.AGENTS_REAL_HOME = home;
+    try {
+      const result = await switchConfigSymlink('grok', '0.2.32');
+      expect(result.success).toBe(true);
+    } finally {
+      if (originalRealHome === undefined) delete process.env.AGENTS_REAL_HOME;
+      else process.env.AGENTS_REAL_HOME = originalRealHome;
+    }
+
+    const stat = fs.lstatSync(grokDir);
+    expect(stat.isDirectory()).toBe(true);
+    expect(stat.isSymbolicLink()).toBe(false);
+    expect(fs.existsSync(grokBin)).toBe(true);
   });
 
   it('rejects traversal versions in getProjectVersion', () => {

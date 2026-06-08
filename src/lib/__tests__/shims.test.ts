@@ -84,8 +84,8 @@ describe('addShimsToPath', () => {
 });
 
 describe('SHIM_SCHEMA_VERSION', () => {
-  it('is 15 (launch shims do not run foreground resource sync)', () => {
-    expect(SHIM_SCHEMA_VERSION).toBe(15);
+  it('is 16 (grok launch shim skips agents-cli shims in PATH fallback)', () => {
+    expect(SHIM_SCHEMA_VERSION).toBe(16);
   });
 });
 
@@ -122,6 +122,13 @@ describe('generateShimScript — config-dir env vars', () => {
     const script = generateShimScript('opencode');
     expect(script).not.toContain('export CLAUDE_CONFIG_DIR=');
     expect(script).not.toContain('export CODEX_HOME=');
+  });
+
+  it('exports GROK_HOME and skips agents-cli shims in grok PATH fallback', () => {
+    const script = generateShimScript('grok');
+    expect(script).toContain('export GROK_HOME="$VERSION_DIR/home/.grok"');
+    expect(script).toContain('Skip agents-cli shims so this');
+    expect(script).toContain('"$AGENTS_USER_DIR/.cache/shims/"*)');
   });
 });
 

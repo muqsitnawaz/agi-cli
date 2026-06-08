@@ -72,6 +72,14 @@ export async function importAgentConfig(
   // mismatching the shim's expectation of `.gemini/antigravity-cli`.
   const versionConfigDir = path.join(versionHome, path.relative(os.homedir(), configDir));
 
+  if (agentId === 'grok') {
+    return {
+      success: false,
+      skipped: true,
+      error: 'Grok installer owns ~/.grok/bin and ~/.grok/downloads; config is isolated with GROK_HOME instead',
+    };
+  }
+
   if (fs.existsSync(versionConfigDir)) {
     return { success: false, skipped: true, error: `${version} already installed` };
   }

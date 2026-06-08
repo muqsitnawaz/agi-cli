@@ -179,6 +179,8 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
     if (stat.isSymbolicLink()) {
       configAlreadyManaged = true;
       console.log(`  config: ${chalk.gray(`${agent.configDir} (already managed — will skip)`)}`);
+    } else if (agentId === 'grok') {
+      console.log(`  config: ${chalk.gray(`${agent.configDir} (left in place — Grok installer owns bin/downloads)`)}`);
     } else {
       console.log(`  config: ${chalk.gray(`${agent.configDir} (will be moved into version home)`)}`);
     }
@@ -205,7 +207,7 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
   // user-visible side effect (renaming ~/.<agent>/), so if it fails we don't
   // want a stranded symlink farm. Binary registration is cheap and reversible
   // — if it fails after config, the next `agents import` call retries cleanly.
-  const willImportConfig = configDirExists && !configAlreadyManaged;
+  const willImportConfig = agentId !== 'grok' && configDirExists && !configAlreadyManaged;
   if (willImportConfig) {
     const cfgSpinner = ora(`Importing config dir for ${agentLabel(agentId)} v${version}...`).start();
     const cfgResult = await importAgentConfig(agentId, version);

@@ -19,4 +19,12 @@ describe('importAgentConfig version validation', () => {
       error: 'Invalid version: "1.0.0; rm -rf /"',
     });
   });
+
+  it('does not move Grok installer-owned ~/.grok into a version home', async () => {
+    await expect(importAgentConfig('grok', '0.2.32')).resolves.toMatchObject({
+      success: false,
+      skipped: true,
+      error: 'Grok installer owns ~/.grok/bin and ~/.grok/downloads; config is isolated with GROK_HOME instead',
+    });
+  });
 });

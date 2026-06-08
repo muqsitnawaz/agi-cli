@@ -215,8 +215,10 @@ async function promptConflictStrategy(
  *   v15 — remove foreground resource sync / rules refresh from launch shims.
  *         Version homes are reconciled by agents-cli management commands; the
  *         shim hot path only resolves a version and execs the agent binary.
+ *   v16 — Grok shim PATH fallback skips agents-cli shims so it cannot exec
+ *         itself when the real ~/.grok binary install is missing.
  */
-export const SHIM_SCHEMA_VERSION = 15;
+export const SHIM_SCHEMA_VERSION = 16;
 
 /** Internal marker string used to embed the schema version in shim scripts. */
 const SHIM_VERSION_MARKER = 'agents-shim-version:';
@@ -415,8 +417,24 @@ if [ "$AGENT" = "grok" ]; then
     fi
   fi
   if [ -z "$BINARY" ] || [ ! -x "$BINARY" ]; then
-    # Last resort: whatever is on PATH (user may have installed grok globally)
-    BINARY=$(command -v grok 2>/dev/null || echo "")
+    # Last resort: a real Grok binary on PATH. Skip agents-cli shims so this
+    # shim cannot resolve back to itself when shims are first in PATH.
+    OLD_IFS="$IFS"
+    IFS=:
+    for dir in $PATH; do
+      IFS="$OLD_IFS"
+      [ -z "$dir" ] && continue
+      CANDIDATE="$dir/grok"
+      case "$CANDIDATE" in
+        "$AGENTS_USER_DIR/.cache/shims/"*) IFS=:; continue ;;
+      esac
+      if [ -x "$CANDIDATE" ] && [ "$CANDIDATE" != "$0" ]; then
+        BINARY="$CANDIDATE"
+        break
+      fi
+      IFS=:
+    done
+    IFS="$OLD_IFS"
   fi
 else
   BINARY="$VERSION_DIR/node_modules/.bin/$CLI_COMMAND"
@@ -775,6 +793,13 @@ export async function switchConfigSymlink(
   agent: AgentId,
   version: string
 ): Promise<{ success: boolean; backupPath?: string; error?: string }> {
+  // Grok's installer owns ~/.grok/bin and ~/.grok/downloads in addition to
+  // config. The launch shim isolates config with GROK_HOME, so replacing
+  // ~/.grok with a version-home symlink can break the executable itself.
+  if (agent === 'grok') {
+    return { success: true };
+  }
+
   const configPath = getAgentConfigPath(agent);
   const versionConfigPath = getVersionConfigPath(agent, version);
 

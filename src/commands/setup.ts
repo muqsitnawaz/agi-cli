@@ -35,6 +35,14 @@ async function importAgent(agentId: AgentId, version: string): Promise<{ success
   const versionHome = path.join(versionsDir, agentId, version, 'home');
   const versionConfigDir = path.join(versionHome, `.${agentId}`);
 
+  if (agentId === 'grok') {
+    return {
+      success: false,
+      skipped: true,
+      error: 'Grok installer owns ~/.grok/bin and ~/.grok/downloads; use "agents import grok" to register the binary',
+    };
+  }
+
   // Skip if version dir already exists (collision)
   if (fs.existsSync(versionConfigDir)) {
     return { success: false, skipped: true, error: `${version} already installed` };

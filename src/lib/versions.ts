@@ -882,7 +882,10 @@ export function getVersionDir(agent: AgentId, version: string): string {
  */
 export function getBinaryPath(agent: AgentId, version: string): string {
   const agentConfig = AGENTS[agent];
+  const versionDir = getVersionDir(agent, version);
+  const managedBinary = path.join(versionDir, 'node_modules', '.bin', agentConfig.cliCommand);
   if (agent === 'grok') {
+    if (fs.existsSync(managedBinary)) return managedBinary;
     // Grok binaries live in the global ~/.grok/downloads, not per-version node_modules.
     // We return a best-effort path (used for display / checks). Real resolution
     // happens in agents.ts resolveGrokBinary + the generated shims.
@@ -897,8 +900,7 @@ export function getBinaryPath(agent: AgentId, version: string): string {
     } catch {}
     return path.join(grokDownloads, `grok-${version}`);
   }
-  const versionDir = getVersionDir(agent, version);
-  return path.join(versionDir, 'node_modules', '.bin', agentConfig.cliCommand);
+  return managedBinary;
 }
 
 /**

@@ -382,6 +382,20 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     jsonFlags: ['--output-format', 'streaming-json'],
     modelFlag: '--model',
   },
+  kimi: {
+    base: ['kimi'],
+    promptFlag: '-p',
+    modeFlags: {
+      // Kimi's --prompt mode cannot combine with --plan / --auto / --yolo.
+      // Modes are controlled via config.toml or interactive TUI.
+      plan: [],
+      edit: [],
+      auto: [],
+      skip: [],
+    },
+    jsonFlags: ['--output-format', 'stream-json'],
+    modelFlag: '--model',
+  },
 };
 
 /** Assemble the full CLI argument array for an agent invocation. */
