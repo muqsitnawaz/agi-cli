@@ -31,6 +31,10 @@ vi.mock('./state.js', () => ({
   // build a const. Return an os.tmpdir()-based path because USER_DIR isn't
   // initialized until beforeEach; runLaunchSync doesn't touch this file.
   get getCliVersionCachePath() { return () => path.join(os.tmpdir(), 'agents-cli-version.json'); },
+  // rules/compose.ts calls these to discover user + system rule layers.
+  // Point at directories that won't exist so only the project layer is active.
+  get getUserRulesDir() { return () => path.join(USER_DIR, 'rules'); },
+  get getResolvedRulesDir() { return () => path.join(SYSTEM_DIR, 'rules'); },
 }));
 
 import { runLaunchSync } from './project-launch.js';
