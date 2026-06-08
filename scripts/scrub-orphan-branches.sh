@@ -15,7 +15,7 @@ REMOTE_BRANCHES=(
   task-8b314ea9
   task-c5e76c39
   task-ebe4046a
-  agent/EXAMPLE-314
+  agent/RUSH-314
   agent/project-agents-yaml
   agent/session-search-p2-p9
 )

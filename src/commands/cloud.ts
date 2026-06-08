@@ -66,13 +66,13 @@ Providers:
 
 Examples:
   # Dispatch a quick fix to Rush Cloud and stream the output
-  agents cloud run "fix the flaky e2e in apps/web/tests/checkout.spec.ts" --provider rush --repo acme/example --branch main
+  agents cloud run "fix the flaky e2e in apps/web/tests/checkout.spec.ts" --provider rush --repo getrush/rush --branch main
 
   # Fire-and-forget (returns the task id, no streaming)
-  agents cloud run "bump tailwind to v4 and fix the breaks" --provider rush --repo acme/example --no-follow
+  agents cloud run "bump tailwind to v4 and fix the breaks" --provider rush --repo getrush/rush --no-follow
 
   # Multi-repo dispatch: touch both rush and rush-extension in one task
-  agents cloud run "rename POST /v1/charge -> /v2/charge across server + extension" --provider rush --repo acme/example --repo acme/example-extension
+  agents cloud run "rename POST /v1/charge -> /v2/charge across server + extension" --provider rush --repo getrush/rush --repo getrush/rush-extension
 
   # Codex Cloud against a saved environment
   agents cloud run "add pytest fixtures for the new billing module" --provider codex --env env_a1b2c3 --agent codex --timeout 30m

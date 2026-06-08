@@ -106,7 +106,7 @@ describe('extractConfiguredEndpoint', () => {
   });
 
   it('strips username from ssh://user@host:port', () => {
-    expect(extractConfiguredEndpoint(profile(['ssh://user@mac-mini:9222']))).toEqual({
+    expect(extractConfiguredEndpoint(profile(['ssh://muqsit@mac-mini:9222']))).toEqual({
       host: 'mac-mini',
       port: 9222,
     });
@@ -205,7 +205,7 @@ describe('extractConfiguredEndpoint', () => {
 
   it('reads ssh://user@host?port=N (query-string form with username)', () => {
     expect(
-      extractConfiguredEndpoint(profile(['ssh://user@mac-mini?port=18805']))
+      extractConfiguredEndpoint(profile(['ssh://muqsit@mac-mini?port=18805']))
     ).toEqual({ host: 'mac-mini', port: 18805 });
   });
 

@@ -534,7 +534,7 @@ Fair. Kicking off the local e2e in background now, then I'll show you the receip
 Now the receipts. Three pieces of evidence:
 
 ## PR link
-https://github.com/example/agents-cli/pull/8 (specifically commit `749ad1a` and the comment from `cloud-bot` bot at https://github.com/example/agents-cli/pull/8#issuecomment-4275941964)
+https://github.com/example/agents-cli/pull/8 (specifically commit `749ad1a` and the comment from `prix-cloud` bot at https://github.com/example/agents-cli/pull/8#issuecomment-4275941964)
 
 ## Receipt #1 — what the agent claimed in the PR comment
 
@@ -639,7 +639,7 @@ You now have the actual proof, sourced and timestamped. PR #8's schema is valida
 
 PR #8 (https://github.com/example/agents-cli/pull/8) is mergeable on the merits. Recommend:
 1. Approve and merge.
-2. Edit the PR comment from `cloud-bot` (or add a follow-up) noting that the original e2e block was unverified — the actual proof is what I just ran. Useful for a later honest record.
+2. Edit the PR comment from `prix-cloud` (or add a follow-up) noting that the original e2e block was unverified — the actual proof is what I just ran. Useful for a later honest record.
 3. Keep the lesson: the cloud agent's "I tested it" claims need backing transcript evidence before trusting at face value.
 
 Want me to post the real e2e proof as a comment on PR #8 so the merge log has it?
@@ -893,5 +893,5 @@ Goal: ship Codex hook sync support to `agents-cli` (EXAMPLE-390). PR #8 is open,
 2. **Force-push from user's local**: `git push --force-with-lease origin feat/codex-hook-sync` once the rebase is confirmed local-only.
 3. **Dismiss CHANGES_REQUESTED review** via `gh api .../pulls/8/reviews/{id}/dismissals` once rebase is on remote.
 4. **Squash-merge PR #8** via `gh pr merge 8 --squash --repo example/agents-cli`.
-5. **Optional cleanup**: post the real e2e proof I ran locally as a PR comment for the merge log (the existing `cloud-bot` comment is hallucinated and worth a correction note).
+5. **Optional cleanup**: post the real e2e proof I ran locally as a PR comment for the merge log (the existing `prix-cloud` comment is hallucinated and worth a correction note).
 6. **Memory write**: save lesson about hallucinated e2e claims from long cloud-agent runs — already documented in this conversation; consider persisting as a feedback memory so future dispatches always include verifiable proof requirements.

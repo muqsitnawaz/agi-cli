@@ -158,7 +158,7 @@ async function findInstallation(token: string, owner: string, repo: string): Pro
   }
 
   throw new Error(
-    `No GitHub App installation found for ${owner}/${repo}. Install the Rush GitHub App at https://github.com/apps/cloud-bot.`,
+    `No GitHub App installation found for ${owner}/${repo}. Install the Rush GitHub App at https://github.com/apps/prix-cloud.`,
   );
 }
 
