@@ -69,13 +69,31 @@ function isLockedCollectionError(stderr: string): boolean {
          /Prompt was dismissed/i.test(stderr);
 }
 
+/** True if the fallback dir has any committed encrypted items. Means an
+ *  earlier process (this one or another) already routed writes to the file
+ *  store, so this process must keep reading/writing from the same store —
+ *  otherwise `list` / `get` / `has` would silently miss them. */
+function fileFallbackPreviouslyActivated(): boolean {
+  try {
+    return fs.readdirSync(fileDir()).some((e) => e.endsWith('.enc'));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Decide which backend a given op should use. Activates file fallback if
- * `secret-tool` is missing and `AGENTS_SECRETS_PASSPHRASE` is set, so a
- * fresh install with no libsecret-tools but a passphrase still works.
+ * `secret-tool` is missing and `AGENTS_SECRETS_PASSPHRASE` is set, OR if a
+ * previous run already committed to the file fallback (encrypted items on
+ * disk). The latter check is what makes the fallback persistent across the
+ * many short-lived `agents secrets ...` Node processes a user invokes.
  */
 function preflight(): 'file' | 'secret-tool' {
   if (useFileFallback) return 'file';
+  if (fileFallbackPreviouslyActivated()) {
+    activateFileFallback();
+    return 'file';
+  }
   if (!checkedAvailability) {
     isAvailable = secretToolAvailable();
     checkedAvailability = true;

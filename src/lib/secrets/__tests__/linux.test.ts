@@ -186,4 +186,25 @@ describe('linuxBackend (via forced file fallback)', () => {
     expect(() => linuxBackend.set('agents-cli.bundles.x', '')).toThrow(/empty/i);
     expect(() => linuxBackend.set('agents-cli.bundles.x', '   ')).toThrow(/empty/i);
   });
+
+  it('a fresh process discovers existing .enc files and stays in file mode', () => {
+    // Simulate process #1: write a value via the linuxBackend with file
+    // fallback forced.
+    linuxBackend.set('agents-cli.bundles.persisted-probe', '{}');
+    linuxBackend.set('agents-cli.secrets.persisted-probe.API_KEY', 'kept-across-processes');
+
+    // Simulate process #2: fresh state. `useFileFallback` defaults to false,
+    // `forceFileFallback` is NOT passed — the same code path the real CLI hits
+    // when the second `agents secrets ...` Node invocation starts up. Only
+    // `fileDir` is preserved so we read the same on-disk store, like real
+    // life uses ~/.agents/.cache/secrets/.
+    _resetForTest({ fileDir: tmpDir, passphrase: PASS });
+
+    // Without the preflight `.enc`-file probe, `list` and `get` would hit
+    // secret-tool (or throw if it's not installed) and miss the on-disk items.
+    expect(linuxBackend.has('agents-cli.secrets.persisted-probe.API_KEY')).toBe(true);
+    expect(linuxBackend.get('agents-cli.secrets.persisted-probe.API_KEY')).toBe('kept-across-processes');
+    expect(linuxBackend.list('agents-cli.bundles.')).toEqual(['agents-cli.bundles.persisted-probe']);
+    expect(linuxBackend.list('agents-cli.secrets.persisted-probe.')).toEqual(['agents-cli.secrets.persisted-probe.API_KEY']);
+  });
 });
