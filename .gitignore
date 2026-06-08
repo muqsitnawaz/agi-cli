@@ -50,6 +50,7 @@ scripts/scrub-history.sh
 **/.claude
 **/.codex
 **/.gemini
+**/.antigravitycli
 **/.tmp
 **/.tmp-bun
 

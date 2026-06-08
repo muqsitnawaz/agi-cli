@@ -122,7 +122,7 @@ agents run codex "Fix the issues Claude found"
 agents run gemini "Write tests for the fixed code"
 ```
 
-Each resolves to the project-pinned version with skills, MCP servers, and permissions already synced.
+Each resolves to the project-pinned version with skills, MCP servers, and permissions already synced. Single-typo names auto-correct -- `agents run cladue` resolves to `claude`, `agents run grk` to `grok`.
 
 ### Rate-limited? Keep working.
 
@@ -216,7 +216,7 @@ Custom endpoints (Ollama, vLLM) work too -- drop a YAML in `~/.agents/profiles/`
 name: local-qwen
 host: { agent: claude }
 env:
-  ANTHROPIC_BASE_URL: https://ollama.example.com
+  ANTHROPIC_BASE_URL: https://ollama.internal
   ANTHROPIC_MODEL: qwen3.6:35b
 auth:
   envVar: ANTHROPIC_AUTH_TOKEN
@@ -641,23 +641,64 @@ By default, secrets sync via iCloud Keychain to your other Macs. With `--no-iclo
 
 ## Compatibility
 
-| Agent | Versions | MCP | Commands | Skills | Rules | Hooks | Plugins | Permissions | Routines | Teams |
-|-------|----------|-----|----------|--------|-------|-------|---------|-------------|----------|-------|
+Which DotAgents resources each agent CLI can actually load. Source of truth: [src/lib/agents.ts](src/lib/agents.ts) (`capabilities`) plus the `*_CAPABLE_AGENTS` lists in `src/lib/permissions.ts`, `src/lib/subagents.ts`, and `src/lib/workflows.ts`. Install paths call `supports(agent, cap, version)` before writing — out-of-range versions are skipped with a clear message instead of silently ignored config.
+
+| Agent | Versions | MCP | Commands | Skills | Rules | Hooks | Plugins | Permissions | Subagents | Workflows |
+|-------|----------|-----|----------|--------|-------|-------|---------|-------------|-----------|-----------|
 | Claude Code | yes | yes | yes | yes | CLAUDE.md | yes | yes | yes | yes | yes |
-| Codex CLI | yes | yes | yes | yes | AGENTS.md | yes (>= 0.116.0) | -- | yes | yes | yes |
-| Gemini CLI | yes | yes | yes | yes | GEMINI.md | yes (>= 0.26.0) | -- | -- | yes | yes |
-| OpenClaw | yes | yes | -- | yes | workspace/AGENTS.md | yes | yes | -- | -- | -- |
-| Cursor | yes | yes | yes | yes | .cursorrules | -- | -- | -- | -- | yes |
-| OpenCode | yes | yes | yes | yes | AGENTS.md | -- | -- | yes | -- | yes |
+| Codex CLI | yes | yes | yes (< 0.117) · skills ($name, >= 0.117) | yes | AGENTS.md | yes (>= 0.116.0) | yes (>= 0.128.0) | yes | -- | -- |
+| Gemini CLI | yes | yes | yes (.toml) | yes | GEMINI.md | yes (>= 0.26.0) | -- | yes | -- | -- |
+| Antigravity | yes | yes | yes | yes | AGENTS.md | yes | yes | yes | -- | -- |
+| Grok Build | yes | yes | skills ($name) | yes | AGENTS.md | yes | yes | yes | -- | -- |
+| OpenClaw | yes | yes | -- (gateway) | yes | workspace/AGENTS.md | yes | yes | -- | yes | -- |
+| Cursor | yes | yes | yes | yes | .cursorrules | -- | -- | -- | -- | -- |
+| OpenCode | yes | yes | yes | yes | AGENTS.md | -- | -- | yes | -- | -- |
 | Copilot | yes | yes | yes | yes | AGENTS.md | -- | -- | -- | -- | -- |
 | Amp | yes | yes | yes | yes | AGENTS.md | -- | -- | -- | -- | -- |
 | Kiro | yes | yes | yes | yes | AGENTS.md | -- | -- | -- | -- | -- |
 | Goose | yes | yes | -- | -- | AGENTS.md | -- | -- | -- | -- | -- |
 | Roo Code | yes | yes | yes | yes | AGENTS.md | -- | -- | -- | -- | -- |
 
-Hooks columns marked `yes (>= X.Y.Z)` are version-gated: `agents hooks add` skips with a clear message when the installed binary is older than the listed version, instead of writing config the older binary would silently ignore. OpenCode's plugin-based hook system is on the roadmap; the entry is `--` until a writer ships.
+**Legend:** `yes` = synced by agents-cli today. `--` = not supported by that agent (sync skips it). `skills ($name)` = no file-based slash-command dir; behavior ships as a generated skill invoked with `$command`. Version suffixes like `>= 0.116.0` are enforced at sync time.
 
-Codex command sync is version-aware: Codex `0.116.x` and older receive slash commands in `.codex/prompts/`; Codex `0.117.0+` receives those commands as generated skills so they can be invoked with `$name`.
+**Host CLIs** (`agents cli`) are a separate resource kind: YAML manifests under `~/.agents/cli/` that install binaries onto your PATH (`gh`, `higgsfield`, etc.). They are not copied into per-agent version homes and apply the same regardless of which coding agent you run.
+
+### agents-cli features (not agent-native resources)
+
+| Agent | Routines | Teams | Session index |
+|-------|----------|-------|---------------|
+| Claude Code | yes | yes | yes |
+| Codex CLI | yes | yes | yes |
+| Gemini CLI | yes | yes | yes |
+| Cursor | -- | yes | -- |
+| OpenCode | -- | yes | -- |
+| Grok Build | -- | yes | yes |
+| Antigravity | -- | yes | -- |
+| Copilot | -- | -- | yes |
+| OpenClaw, Amp, Kiro, Goose, Roo | -- | -- | -- |
+
+### Version-gated sync
+
+Several capabilities flip by installed binary version. agents-cli gates the write instead of polluting a config file the binary would ignore:
+
+| Capability | Agent | Gate |
+|------------|-------|------|
+| Hooks | Codex | >= 0.116.0 |
+| Hooks | Gemini | >= 0.26.0 |
+| File-based commands | Codex | < 0.117.0 (0.117+ uses command-as-skill) |
+| Plugins | Codex | >= 0.128.0 |
+
+Codex `0.117.0+` no longer reads `.codex/prompts/`; agents-cli converts slash commands into skills so they stay invocable as `$name`.
+
+### Per-command agent/version targeting (in progress)
+
+Today, version gates live on the agent capability table. Per-command overrides — e.g. shipping `/version` to Cursor but not Antigravity until the harness supports it — are not wired yet. The planned shape is YAML frontmatter on each `~/.agents/commands/*.md` file (`agents:`, `since:`, `until:`), mirroring hooks.
+
+| Slash command | Status |
+|---------------|--------|
+| `/version` (show agents-cli + pinned agent versions) | Under manual verification — reported working on Cursor; Antigravity support TBD |
+
+OpenCode's plugin-based hook system is on the roadmap; the hooks column stays `--` until a writer ships.
 
 ## FAQ
 

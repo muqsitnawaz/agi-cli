@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.20.4
+
+**`agents run` auto-corrects single-typo agent names**
+
+- `agents run cladue "..."` used to print `Unknown agent: cladue` and exit. It now resolves to `claude` and runs, logging `Resolved 'cladue' -> 'claude' (single-edit match)` on stderr. Same for `grk` -> `grok`, `codx` -> `codex`, etc. — any one-edit typo (insert / delete / substitute / adjacent transposition) of a canonical agent id auto-corrects.
+- Implemented with Damerau-Levenshtein distance at `maxDistance: 1`, so a transposed pair like `du` in `cladue` counts as a single edit. Ambiguous or 2+ edit inputs still fall through to the original `Unknown agent` error. Applies to `--fallback codx,gemni` too.
+
 ## 1.20.3
 
 **`agents run` startup latency (stale-while-revalidate the usage probe + memoize agents.yaml)**
@@ -397,7 +404,7 @@
 **~/.agents split into .history/ and .cache/ buckets**
 
 - Durable runtime state (sessions, versions, runs, teams/agents, trash, backups) moves to ~/.agents/.history/.
-- Regenerable runtime state (shims, packages, cloud, logs, companion, helpers, browser runtime, fetch cache, dot-files) moves to ~/.agents/.cache/.
+- Regenerable runtime state (shims, packages, cloud, logs, swarmify, helpers, browser runtime, fetch cache, dot-files) moves to ~/.agents/.cache/.
 - Single-line gitignore for backing up ~/.agents/ — no more per-subdir cherry-picking.
 
 **Browser: profiles fold into agents.yaml + many new automation commands**
@@ -485,7 +492,7 @@
 
 - Added `--json` flag to `agents sessions list` and `agents sessions` for programmatic use
 - Output is a JSON array of session metadata (id, shortId, agent, version, account, project, cwd, filePath, topic, messageCount, tokenCount, timestamp)
-- Enables the Companion VS Code extension's "Agents: Session Resume" and "Agents: Session Trace" pickers
+- Enables the Swarmify VS Code extension's "Agents: Session Resume" and "Agents: Session Trace" pickers
 
 **OpenClaw workspace-aware sessions**
 

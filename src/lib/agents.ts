@@ -466,6 +466,39 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
       rulesImports: true,
     },
   },
+  // Kimi Code CLI (`kimi`) — Moonshot AI coding agent. Single-binary install.
+  // Auth via OAuth device-code flow on first launch. Config lives in ~/.kimi-code/.
+  // Skills: ~/.kimi-code/skills/ (SKILL.md files).
+  // MCP: ~/.kimi-code/mcp.json.
+  // Hooks: [[hooks]] array in ~/.kimi-code/config.toml.
+  // Modes: plan (--plan), edit (default), auto (--auto), skip (--yolo).
+  // No file-based commands dir or traditional memory file.
+  kimi: {
+    id: 'kimi',
+    name: 'Kimi',
+    color: 'blue',
+    cliCommand: 'kimi',
+    npmPackage: '',
+    installScript: 'curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash',
+    configDir: path.join(HOME, '.kimi-code'),
+    commandsDir: '', // no file-based commands
+    commandsSubdir: '',
+    skillsDir: path.join(HOME, '.kimi-code', 'skills'),
+    hooksDir: 'hooks',
+    instructionsFile: '', // no traditional memory file
+    format: 'markdown',
+    variableSyntax: '$ARGUMENTS',
+    supportsHooks: true,
+    capabilities: {
+      hooks: true,
+      mcp: true,
+      allowlist: true,
+      skills: true,
+      commands: false,
+      plugins: true,
+      modes: ['plan', 'edit', 'auto', 'skip'],
+    },
+  },
 };
 
 /** All registered agent IDs derived from the AGENTS registry. */
@@ -674,7 +707,7 @@ export interface UnmanagedInstall {
  */
 export async function getUnmanagedAgentInstalls(): Promise<UnmanagedInstall[]> {
   const unmanaged: UnmanagedInstall[] = [];
-  const candidates: AgentId[] = ['claude', 'codex', 'gemini', 'grok'];
+  const candidates: AgentId[] = ['claude', 'codex', 'gemini', 'grok', 'kimi'];
 
   for (const agentId of candidates) {
     const agent = AGENTS[agentId];
@@ -882,6 +915,27 @@ export async function getAccountInfo(
         } catch {}
         return { ...empty, lastActive };
       }
+      case 'kimi': {
+        // Kimi stores OAuth credentials under ~/.kimi-code/oauth/.
+        // The exact file shape is not fully documented; best-effort email extraction.
+        try {
+          const oauthDir = path.join(base, '.kimi-code', 'oauth');
+          if (fs.existsSync(oauthDir)) {
+            const entries = fs.readdirSync(oauthDir);
+            for (const entry of entries) {
+              const oauthFile = path.join(oauthDir, entry);
+              try {
+                const data = JSON.parse(await fs.promises.readFile(oauthFile, 'utf-8'));
+                const email = data.email || data.user?.email || data.account?.email || null;
+                if (email) return { ...empty, email, lastActive };
+              } catch {
+                /* skip malformed oauth file */
+              }
+            }
+          }
+        } catch {}
+        return { ...empty, lastActive };
+      }
       default:
         return { ...empty, lastActive };
     }
@@ -929,6 +983,8 @@ function getSessionDir(agentId: AgentId, base: string): string | null {
       // Copilot persists sessions at ~/.copilot/session-state/<id>/events.jsonl.
       // The events.jsonl is the canonical NDJSON event stream per session.
       return path.join(base, '.copilot', 'session-state');
+    case 'kimi':
+      return path.join(base, '.kimi-code', 'sessions');
     default:
       return null;
   }
@@ -945,6 +1001,8 @@ function getSessionExtension(agentId: AgentId): string | null {
       return '.json';
     case 'grok':
       return '.json'; // sessions contain summary.json, events.jsonl, etc.
+    case 'kimi':
+      return '.jsonl'; // session_index.jsonl
     default:
       return null;
   }

@@ -9,7 +9,7 @@
 import { extractFileOpsFromBash } from './file_ops.js';
 
 /** Supported agent CLI types for team spawning. */
-export type AgentType = 'codex' | 'gemini' | 'cursor' | 'claude' | 'opencode' | 'grok' | 'antigravity';
+export type AgentType = 'codex' | 'gemini' | 'cursor' | 'claude' | 'opencode' | 'grok' | 'antigravity' | 'kimi';
 
 const claudeToolUseMap = new Map<string, { tool: string; command?: string; path?: string }>();
 
@@ -29,6 +29,8 @@ export function normalizeEvents(agentType: AgentType, raw: any): any[] {
     return normalizeGrok(raw);
   } else if (agentType === 'antigravity') {
     return normalizeAntigravity(raw);
+  } else if (agentType === 'kimi') {
+    return normalizeKimi(raw);
   }
 
   const timestamp = new Date().toISOString();

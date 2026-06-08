@@ -168,10 +168,24 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
     }
     delete result.CLAUDE_CONFIG_DIR;
     delete result.CODEX_HOME;
+  } else if (options.agent === 'kimi') {
+    const cwd = options.cwd || process.cwd();
+    const resolvedVersion = options.version ?? resolveVersion('kimi', cwd);
+    const version = options.version
+      ? resolvedVersion
+      : (resolvedVersion && isVersionInstalled('kimi', resolvedVersion) ? resolvedVersion : null);
+    if (version) {
+      result.KIMI_CODE_HOME = path.join(getVersionHomePath('kimi', version), '.kimi-code');
+    }
+    delete result.CLAUDE_CONFIG_DIR;
+    delete result.CODEX_HOME;
+    delete result.COPILOT_HOME;
+    delete result.GROK_HOME;
   } else {
     delete result.CLAUDE_CONFIG_DIR;
     delete result.CODEX_HOME;
     delete result.COPILOT_HOME;
+    delete result.GROK_HOME;
   }
 
   return {
@@ -361,6 +375,18 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
       skip: ['--always-approve'],
     },
     jsonFlags: ['--output-format', 'streaming-json'],
+    modelFlag: '--model',
+  },
+  kimi: {
+    base: ['kimi'],
+    promptFlag: '-p',
+    modeFlags: {
+      plan: ['--plan'],
+      edit: [],
+      auto: ['--auto'],
+      skip: ['--yolo'],
+    },
+    jsonFlags: ['--output-format', 'stream-json'],
     modelFlag: '--model',
   },
 };

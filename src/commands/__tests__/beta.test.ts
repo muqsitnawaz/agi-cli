@@ -57,7 +57,7 @@ describe('agents beta', () => {
     writeUpdateCache(home);
 
     const drive = runAgents(['drive', 'status'], home);
-    const factory = runAgents(['factory', 'submit', 'EXAMPLE-1'], home);
+    const factory = runAgents(['factory', 'submit', 'RUSH-1'], home);
 
     expect(drive.status).toBe(1);
     expect(outputOf(drive)).toContain('agents drive is in beta.');
@@ -92,7 +92,7 @@ describe('agents beta', () => {
     const enable = runAgents(['beta', 'enable', 'drive', 'factory'], home);
     const list = runAgents(['beta', 'list'], home);
     const drive = runAgents(['drive', 'status'], home);
-    const factory = runAgents(['factory', 'submit', 'EXAMPLE-1'], home);
+    const factory = runAgents(['factory', 'submit', 'RUSH-1'], home);
 
     expect(enable.status).toBe(0);
     expect(fs.readFileSync(path.join(home, '.agents', 'agents.yaml'), 'utf-8')).toContain('beta:');

@@ -2,7 +2,7 @@
  * Locks the package name and repo URL consistency.
  *
  * The canonical npm package is @phnx-labs/agents-cli, published from
- * github.com/phnx-labs/agents-cli. The old @companion scope is a
+ * github.com/phnx-labs/agents-cli. The old @swarmify scope is a
  * deprecated mirror. Every reference must use @phnx-labs.
  */
 
@@ -27,18 +27,18 @@ describe('package-name consistency (@phnx-labs canonical)', () => {
   it('package.json repository.url points to the real github repo', () => {
     const pkg = JSON.parse(read('package.json'));
     expect(pkg.repository?.url ?? '').toContain(GITHUB_REPO);
-    expect(pkg.repository?.url ?? '').not.toContain('github.com/companion');
+    expect(pkg.repository?.url ?? '').not.toContain('github.com/swarmify');
   });
 
   it('package.json bugs.url points to the real github repo', () => {
     const pkg = JSON.parse(read('package.json'));
     expect(pkg.bugs?.url ?? '').toContain(GITHUB_REPO);
-    expect(pkg.bugs?.url ?? '').not.toContain('github.com/companion');
+    expect(pkg.bugs?.url ?? '').not.toContain('github.com/swarmify');
   });
 
-  it('src/index.ts never references the old @companion npm scope', () => {
+  it('src/index.ts never references the old @swarmify npm scope', () => {
     const src = read('src/index.ts');
-    expect(src).not.toContain('@companion/agents-cli');
+    expect(src).not.toContain('@swarmify/agents-cli');
   });
 
   it('src/index.ts upgrade commands install the canonical package', () => {
@@ -54,19 +54,19 @@ describe('package-name consistency (@phnx-labs canonical)', () => {
     const src = read('src/index.ts');
     expect(src).toContain(`unpkg.com/${NPM_PACKAGE}`);
     expect(src).toContain(`registry.npmjs.org/${NPM_PACKAGE}/latest`);
-    expect(src).not.toContain('unpkg.com/@companion/agents-cli');
-    expect(src).not.toContain('registry.npmjs.org/@companion/agents-cli');
+    expect(src).not.toContain('unpkg.com/@swarmify/agents-cli');
+    expect(src).not.toContain('registry.npmjs.org/@swarmify/agents-cli');
   });
 
   it('postinstall script references the canonical package', () => {
     const post = read('scripts/postinstall.js');
     expect(post).toContain(NPM_PACKAGE);
-    expect(post).not.toContain('@companion/agents-cli');
+    expect(post).not.toContain('@swarmify/agents-cli');
   });
 
   it('public teams import path comment matches the canonical package', () => {
     const teamsIndex = read('src/lib/teams/index.ts');
     expect(teamsIndex).toContain("'@phnx-labs/agents-cli/teams'");
-    expect(teamsIndex).not.toContain('@companion');
+    expect(teamsIndex).not.toContain('@swarmify');
   });
 });
