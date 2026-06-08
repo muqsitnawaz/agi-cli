@@ -215,6 +215,12 @@ async function promptConflictStrategy(
  *   v15 — remove foreground resource sync / rules refresh from launch shims.
  *         Version homes are reconciled by agents-cli management commands; the
  *         shim hot path only resolves a version and execs the agent binary.
+ *   v16 — re-introduce project-scoped compile to the shim hot path via
+ *         `agents sync --launch`. This stays fast (filesystem-only): compiles
+ *         project rules, mirrors workspace resources, and synthesizes the
+ *         scoped plugin marketplaces (agents-cli/agents-system/extras-<alias>/
+ *         agents-project). Version-home reconciliation stays out of the hot
+ *         path — management commands still own that.
  */
 export const SHIM_SCHEMA_VERSION = 16;
 
@@ -500,6 +506,10 @@ if [ ! -x "$BINARY" ]; then
 fi
 
 ${managedEnv}
+
+# Project-scoped compile (rules, workspace resources, scoped plugin marketplaces).
+# Filesystem-only — sub-50ms steady state. Never blocks launch on failure.
+"$AGENTS_BIN" sync --agent "$AGENT" --agent-version "$VERSION" --launch --cwd "$PWD" --quiet 2>/dev/null || true
 
 exec "$BINARY"${launchArgs} "$@"
 `;
@@ -841,7 +851,7 @@ export async function switchConfigSymlink(
       // Different target - update it
       fs.unlinkSync(configPath);
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.symlinkSync(versionConfigPath, configPath);
+      fs.symlinkSync(versionConfigPath, configPath, process.platform === 'win32' ? 'junction' : undefined);
       return { success: true };
     } else if (stat.isDirectory()) {
       // Real directory exists - backup and replace with symlink
@@ -874,7 +884,7 @@ export async function switchConfigSymlink(
       }
 
       // Create symlink (parent already exists since the dir we just moved was here)
-      fs.symlinkSync(versionConfigPath, configPath);
+      fs.symlinkSync(versionConfigPath, configPath, process.platform === 'win32' ? 'junction' : undefined);
 
       return { success: true, backupPath: finalBackupPath };
     } else {
@@ -886,7 +896,7 @@ export async function switchConfigSymlink(
       // For nested layouts (e.g., ~/.gemini/antigravity-cli) the parent dir
       // may also be missing if the parent agent (Gemini) is not installed.
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.symlinkSync(versionConfigPath, configPath);
+      fs.symlinkSync(versionConfigPath, configPath, process.platform === 'win32' ? 'junction' : undefined);
       return { success: true };
     }
     return { success: false, error: (err as Error).message };
