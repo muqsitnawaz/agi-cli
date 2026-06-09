@@ -140,6 +140,7 @@ See `docs/`:
 - `04-landscape.md` — competitive landscape
 - `05-sessions.md` — session DB + indexer
 - `06-observability.md` — JSON outputs as an observability layer
+- `07-entrypoints-and-loops.md` — entrypoint packaging model, `run` target grammar, `loop:` block (design direction)
 
 ## Conventions
 
