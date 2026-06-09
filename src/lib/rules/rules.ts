@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { AGENTS, agentConfigDirName, ALL_AGENT_IDS } from '../agents.js';
+import { AGENTS, ALL_AGENT_IDS, agentConfigDirName } from '../agents.js';
 import { getResolvedRulesDir, getUserRulesDir, getProjectAgentsDir } from '../state.js';
 import { getEffectiveHome } from '../versions.js';
 import type { AgentId } from '../types.js';

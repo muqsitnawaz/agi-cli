@@ -316,7 +316,7 @@ export function getAgentSessionDirs(agent: string, subdir: string): string[] {
   }
 
   // Config-dir name relative to home — handles nested layouts (antigravity →
-  // .gemini/antigravity-cli), ~/.config agents (amp, goose), and kimi
+  // .gemini/antigravity-cli) and ~/.config agents (amp, goose) as well as kimi
   // (.kimi-code). Falls back to `.${agent}` for ids not in the registry.
   const configDirName = agent in AGENTS ? agentConfigDirName(agent as AgentId) : `.${agent}`;
 

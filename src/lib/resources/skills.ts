@@ -17,6 +17,7 @@ import {
   getProjectAgentsDir,
   getEnabledExtraRepos,
 } from '../state.js';
+import { agentConfigDirName } from '../agents.js';
 
 /**
  * Layer directory provider for dependency injection in tests.

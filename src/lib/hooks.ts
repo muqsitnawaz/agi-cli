@@ -12,7 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
 import * as TOML from 'smol-toml';
-import { AGENTS, agentConfigDirName, ALL_AGENT_IDS } from './agents.js';
+import { AGENTS, ALL_AGENT_IDS, agentConfigDirName } from './agents.js';
 import { supports, explainSkip, capableAgents } from './capabilities.js';
 import { setGeminiAutoUpdateDisabled, updateGeminiSettings } from './gemini-settings.js';
 import { getAgentsDir, getHooksDir as getSystemHooksDir, getUserHooksDir, getUserAgentsDir, getSystemAgentsDir, getProjectAgentsDir, getTrashHooksDir, getEnabledExtraRepos } from './state.js';

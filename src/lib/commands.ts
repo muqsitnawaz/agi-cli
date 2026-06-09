@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
-import { AGENTS, agentConfigDirName, ensureCommandsDir, resolveAgentName } from './agents.js';
+import { AGENTS, ensureCommandsDir, agentConfigDirName, resolveAgentName } from './agents.js';
 import { capableAgents, isCapable, supports } from './capabilities.js';
 import { markdownToToml } from './convert.js';
 import { getCommandsDir, getUserCommandsDir, getEnabledExtraRepos, getProjectAgentsDir, getSkillsDir, getTrashCommandsDir } from './state.js';
