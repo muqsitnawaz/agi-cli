@@ -20,7 +20,6 @@ import {
   getProjectAgentsDir,
   getEnabledExtraRepos,
 } from '../state.js';
-import { agentConfigDirName } from '../agents.js';
 
 const SUBRULES_DIR = 'subrules';
 const SUBRULES_README = 'README.md';
