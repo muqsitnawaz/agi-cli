@@ -3,6 +3,7 @@
  * whose contents match the central source. Mirrors versions.ts:391-421.
  */
 import * as fs from 'fs';
+import { agentConfigDirName } from '../../agents.js';
 import * as path from 'path';
 import type { AgentId } from '../../types.js';
 import { capableAgents } from '../../capabilities.js';
@@ -15,7 +16,7 @@ function buildHooksDetector(agent: AgentId): ResourceDetector {
     kind: 'hooks',
     agent,
     list({ versionHome }: DetectArgs): string[] {
-      const hooksDir = path.join(versionHome, `.${agent}`, 'hooks');
+      const hooksDir = path.join(versionHome, agentConfigDirName(agent), 'hooks');
       if (!fs.existsSync(hooksDir)) return [];
       const installed = fs.readdirSync(hooksDir).filter(f => !f.startsWith('.'));
 

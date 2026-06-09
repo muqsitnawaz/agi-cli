@@ -64,9 +64,9 @@ import { registerPullCommand } from './commands/pull.js';
 import { registerPushCommand } from './commands/push.js';
 import { registerRepoCommands } from './commands/repo.js';
 import { registerSetupCommand, runSetup } from './commands/setup.js';
-import { registerStatusCommand } from './commands/status.js';
 import { registerFeedbackCommand } from './commands/feedback.js';
 import { registerViewCommand } from './commands/view.js';
+import { registerInspectCommand } from './commands/inspect.js';
 import { registerCommandsCommands } from './commands/commands.js';
 import { registerHooksCommands } from './commands/hooks.js';
 import { registerSkillsCommands } from './commands/skills.js';
@@ -81,6 +81,7 @@ import { registerDaemonCommands } from './commands/daemon.js';
 import { registerRoutinesCommands } from './commands/routines.js';
 import { registerRunCommand } from './commands/exec.js';
 import { registerModelsCommand } from './commands/models.js';
+import { registerDefaultsCommands } from './commands/defaults.js';
 import { registerPruneCommand } from './commands/prune.js';
 import { registerTrashCommands } from './commands/trash.js';
 import { registerDoctorCommand } from './commands/doctor.js';
@@ -152,6 +153,7 @@ Agent versions:
   prune cleanup [target]          Remove orphan resources and older duplicate version installs
   trash                           Inspect and restore soft-deleted version directories
   view [agent[@version]]          List versions, or inspect one in detail
+  inspect <agent>[@version]       Deep details for one agent+version — paths, capabilities, resources, drill into any kind
 
 Agent configuration (synced across versions):
   rules                           Instructions given to agents (CLAUDE.md, etc.)
@@ -169,6 +171,7 @@ Packages:
 
 Run and dispatch:
   run <agent|profile> [prompt]    Run an agent. Omit prompt for interactive mode.
+  defaults                        Configure run defaults by agent/version selector
   teams                           Coordinate multiple agents on shared work
   routines                        Run agents on a cron schedule (scheduler auto-starts)
   sessions                        Browse, search, and replay past runs (live-search in TTY; grouped by workspace)
@@ -581,7 +584,7 @@ async function maybeBootstrapShimIntegration(
 
 // Register all commands
 registerViewCommand(program);
-registerStatusCommand(program);
+registerInspectCommand(program);
 registerFeedbackCommand(program);
 registerCommandsCommands(program);
 registerHooksCommands(program);
@@ -625,6 +628,7 @@ registerPackagesCommands(program);
 registerDaemonCommands(program);
 registerRoutinesCommands(program);
 registerRunCommand(program);
+registerDefaultsCommands(program);
 registerModelsCommand(program);
 registerPruneCommand(program);
 registerTrashCommands(program);
