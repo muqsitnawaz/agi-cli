@@ -5,6 +5,7 @@
  * stays in the orchestrator since it depends on the broader available set.
  */
 import * as fs from 'fs';
+import { agentConfigDirName } from '../../agents.js';
 import * as path from 'path';
 import type { AgentId } from '../../types.js';
 import { capableAgents } from '../../capabilities.js';
@@ -19,7 +20,7 @@ function buildHooksWriter(agent: AgentId): ResourceWriter<string[]> {
     kind: 'hooks',
     agent,
     write({ versionHome, selection }: WriteArgs<string[]>): WriteResult {
-      const agentDir = path.join(versionHome, `.${agent}`);
+      const agentDir = path.join(versionHome, agentConfigDirName(agent));
       const hooksTarget = path.join(agentDir, 'hooks');
       fs.mkdirSync(hooksTarget, { recursive: true });
 

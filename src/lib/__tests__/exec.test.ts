@@ -180,6 +180,34 @@ describe('buildExecCommand', () => {
       expect(cmd).toContain('--always-approve');
     });
 
+    it('kimi plan produces --plan', () => {
+      const cmd = buildExecCommand(opts({ agent: 'kimi', mode: 'plan' }));
+      expect(cmd).toContain('--plan');
+    });
+
+    it('kimi auto produces --auto', () => {
+      const cmd = buildExecCommand(opts({ agent: 'kimi', mode: 'auto' }));
+      expect(cmd).toContain('--auto');
+    });
+
+    it('kimi skip produces --yolo', () => {
+      const cmd = buildExecCommand(opts({ agent: 'kimi', mode: 'skip' }));
+      expect(cmd).toContain('--yolo');
+    });
+
+    it('kimi edit produces no mode flags', () => {
+      const cmd = buildExecCommand(opts({ agent: 'kimi', mode: 'edit' }));
+      expect(cmd).not.toContain('--plan');
+      expect(cmd).not.toContain('--auto');
+      expect(cmd).not.toContain('--yolo');
+    });
+
+    it('kimi json adds --output-format stream-json', () => {
+      const cmd = buildExecCommand(opts({ agent: 'kimi', prompt: 'do the thing', mode: 'edit', json: true }));
+      expect(cmd).toContain('--output-format');
+      expect(cmd[cmd.indexOf('--output-format') + 1]).toBe('stream-json');
+    });
+
     it('copilot uses -p (not positional) for the prompt', () => {
       const cmd = buildExecCommand(opts({ agent: 'copilot', prompt: 'do the thing', mode: 'edit' }));
       const idx = cmd.indexOf('-p');
@@ -506,6 +534,23 @@ describe('buildExecCommand', () => {
         expect(env.COPILOT_HOME).toBeUndefined();
       } finally {
         delete process.env.COPILOT_HOME;
+      }
+    });
+
+    it('injects KIMI_CODE_HOME for pinned Kimi versions', () => {
+      const env = buildExecEnv(opts({ agent: 'kimi', version: '0.11.0' }));
+      expect(env.KIMI_CODE_HOME).toBe(
+        `${process.env.HOME}/.agents/.history/versions/kimi/0.11.0/home/.kimi-code`
+      );
+    });
+
+    it('strips KIMI_CODE_HOME for non-Kimi agents', () => {
+      process.env.KIMI_CODE_HOME = '/tmp/leaked-kimi-home';
+      try {
+        const env = buildExecEnv(opts({ agent: 'claude', version: '2.1.98' }));
+        expect(env.KIMI_CODE_HOME).toBeUndefined();
+      } finally {
+        delete process.env.KIMI_CODE_HOME;
       }
     });
   });

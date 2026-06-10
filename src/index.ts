@@ -64,9 +64,9 @@ import { registerPullCommand } from './commands/pull.js';
 import { registerPushCommand } from './commands/push.js';
 import { registerRepoCommands } from './commands/repo.js';
 import { registerSetupCommand, runSetup } from './commands/setup.js';
-import { registerStatusCommand } from './commands/status.js';
 import { registerFeedbackCommand } from './commands/feedback.js';
 import { registerViewCommand } from './commands/view.js';
+import { registerInspectCommand } from './commands/inspect.js';
 import { registerCommandsCommands } from './commands/commands.js';
 import { registerHooksCommands } from './commands/hooks.js';
 import { registerSkillsCommands } from './commands/skills.js';
@@ -81,6 +81,7 @@ import { registerDaemonCommands } from './commands/daemon.js';
 import { registerRoutinesCommands } from './commands/routines.js';
 import { registerRunCommand } from './commands/exec.js';
 import { registerModelsCommand } from './commands/models.js';
+import { registerDefaultsCommands } from './commands/defaults.js';
 import { registerPruneCommand } from './commands/prune.js';
 import { registerTrashCommands } from './commands/trash.js';
 import { registerDoctorCommand } from './commands/doctor.js';
@@ -152,6 +153,7 @@ Agent versions:
   prune cleanup [target]          Remove orphan resources and older duplicate version installs
   trash                           Inspect and restore soft-deleted version directories
   view [agent[@version]]          List versions, or inspect one in detail
+  inspect <agent>[@version]       Deep details for one agent+version — paths, capabilities, resources, drill into any kind
 
 Agent configuration (synced across versions):
   rules                           Instructions given to agents (CLAUDE.md, etc.)
@@ -169,6 +171,7 @@ Packages:
 
 Run and dispatch:
   run <agent|profile> [prompt]    Run an agent. Omit prompt for interactive mode.
+  defaults                        Configure run defaults by agent/version selector
   teams                           Coordinate multiple agents on shared work
   routines                        Run agents on a cron schedule (scheduler auto-starts)
   sessions                        Browse, search, and replay past runs (live-search in TTY; grouped by workspace)
@@ -237,9 +240,13 @@ async function showWhatsNew(fromVersion: string, toVersion: string): Promise<voi
       const versionMatch = line.match(/^## (\d+\.\d+\.\d+)/);
       if (versionMatch) {
         currentVersion = versionMatch[1];
-        const isNewer = currentVersion !== fromVersion &&
-          compareVersions(currentVersion, fromVersion) > 0;
-        inRelevantSection = isNewer;
+        // Only the range the user actually moved through: (fromVersion, toVersion].
+        // Bounding the top end matters when upgrading to a specific older
+        // version, and guards against a changelog that lists unreleased entries.
+        const inRange =
+          compareVersions(currentVersion, fromVersion) > 0 &&
+          compareVersions(currentVersion, toVersion) <= 0;
+        inRelevantSection = inRange;
         if (inRelevantSection) {
           relevantChanges.push('');
           relevantChanges.push(chalk.bold(`v${currentVersion}`));
@@ -300,11 +307,14 @@ function saveUpdateCheck(latestVersion: string): void {
 }
 
 /** Fetch the exact latest npm version plus its registry integrity hash. */
-async function fetchLatestNpmPackageMetadata(timeoutMs = 5000): Promise<NpmPackageMetadata> {
-  const response = await fetch(`https://registry.npmjs.org/${NPM_PACKAGE_NAME}/latest`, {
+async function fetchNpmPackageMetadata(versionOrTag = 'latest', timeoutMs = 5000): Promise<NpmPackageMetadata> {
+  const response = await fetch(`https://registry.npmjs.org/${NPM_PACKAGE_NAME}/${versionOrTag}`, {
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error(`${NPM_PACKAGE_NAME}@${versionOrTag} not found on npm`);
+    }
     throw new Error('Could not reach npm registry');
   }
 
@@ -368,7 +378,7 @@ async function promptUpgrade(latestVersion: string): Promise<void> {
     const { spawnSync } = await import('child_process');
     let spinner = ora('Resolving package metadata...').start();
     try {
-      const metadata = await fetchLatestNpmPackageMetadata();
+      const metadata = await fetchNpmPackageMetadata();
       spinner.succeed(`Resolved ${NPM_PACKAGE_NAME}@${metadata.version}`);
       printResolvedPackage(metadata);
 
@@ -581,7 +591,7 @@ async function maybeBootstrapShimIntegration(
 
 // Register all commands
 registerViewCommand(program);
-registerStatusCommand(program);
+registerInspectCommand(program);
 registerFeedbackCommand(program);
 registerCommandsCommands(program);
 registerHooksCommands(program);
@@ -625,6 +635,7 @@ registerPackagesCommands(program);
 registerDaemonCommands(program);
 registerRoutinesCommands(program);
 registerRunCommand(program);
+registerDefaultsCommands(program);
 registerModelsCommand(program);
 registerPruneCommand(program);
 registerTrashCommands(program);
@@ -673,29 +684,34 @@ for (const alias of ['jobs', 'cron']) {
 
 program
     .command('upgrade')
-    .description('Upgrade agents-cli to the latest version')
+    .description('Upgrade agents-cli to the latest version (or a specific [version])')
+    .argument('[version]', 'Target version or dist-tag to install (default: latest)')
     .option('-y, --yes', 'Install without an interactive confirmation prompt')
-    .action(async (options: { yes?: boolean }) => {
-      let spinner = ora('Checking for updates...').start();
+    .action(async (version: string | undefined, options: { yes?: boolean }) => {
+      const target = version ?? 'latest';
+      let spinner = ora(version ? `Resolving ${NPM_PACKAGE_NAME}@${target}...` : 'Checking for updates...').start();
       try {
-        const metadata = await fetchLatestNpmPackageMetadata();
-        const latestVersion = metadata.version;
+        const metadata = await fetchNpmPackageMetadata(target);
+        const resolvedVersion = metadata.version;
 
-        if (latestVersion === VERSION) {
-          spinner.succeed(`Already on latest version (${VERSION})`);
+        if (resolvedVersion === VERSION) {
+          spinner.succeed(`Already on ${VERSION}`);
           return;
         }
 
-        if (compareVersions(latestVersion, VERSION) <= 0) {
-          spinner.succeed(`Already ahead of latest (${VERSION} >= ${latestVersion})`);
+        // For `latest` (no explicit version) skip when already ahead. When a
+        // version is named explicitly, honor it even if it's a downgrade.
+        if (!version && compareVersions(resolvedVersion, VERSION) <= 0) {
+          spinner.succeed(`Already ahead of latest (${VERSION} >= ${resolvedVersion})`);
           return;
         }
 
-        spinner.succeed(`Resolved ${NPM_PACKAGE_NAME}@${latestVersion}`);
+        const direction = compareVersions(resolvedVersion, VERSION) < 0 ? 'Downgrade' : 'Upgrade';
+        spinner.succeed(`Resolved ${NPM_PACKAGE_NAME}@${resolvedVersion}`);
         printResolvedPackage(metadata);
         if (isInteractiveTerminal() && !options.yes) {
           const approved = await confirm({
-            message: `Install ${NPM_PACKAGE_NAME}@${latestVersion}?`,
+            message: `Install ${NPM_PACKAGE_NAME}@${resolvedVersion}?`,
             default: false,
           });
           if (!approved) {
@@ -704,13 +720,16 @@ program
           }
         }
 
-        spinner = ora(`Upgrading ${VERSION} -> ${latestVersion}...`).start();
+        spinner = ora(`${direction === 'Downgrade' ? 'Downgrading' : 'Upgrading'} ${VERSION} -> ${resolvedVersion}...`).start();
         await installResolvedPackage(metadata);
-        spinner.succeed(`Upgraded to ${latestVersion}`);
-        await showWhatsNew(VERSION, latestVersion);
+        spinner.succeed(`${direction}d to ${resolvedVersion}`);
+        // Only show the changelog for a genuine upgrade range.
+        if (compareVersions(resolvedVersion, VERSION) > 0) {
+          await showWhatsNew(VERSION, resolvedVersion);
+        }
       } catch (err) {
         spinner.fail('Upgrade failed');
-        console.log(chalk.gray('Run manually: agents upgrade --yes'));
+        console.log(chalk.gray(`Run manually: agents upgrade ${version ? version + ' ' : ''}--yes`));
       }
     });
 

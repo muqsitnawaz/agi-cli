@@ -12,6 +12,22 @@ export type AgentId = 'claude' | 'codex' | 'gemini' | 'cursor' | 'opencode' | 'o
 /** How `agents run <agent>` chooses an installed version when none is pinned. */
 export type RunStrategy = 'pinned' | 'available' | 'balanced';
 
+/** Per-agent run strategy config. */
+export interface AgentRunConfig {
+  strategy?: RunStrategy;
+}
+
+/** Default launch options applied by `agents run` when flags are omitted. */
+export interface RunDefaults {
+  mode?: Mode;
+  model?: string;
+}
+
+/** `run:` section in agents.yaml. Agent keys keep strategy; `defaults` stores selector rules. */
+export type RunConfig = Partial<Record<AgentId, AgentRunConfig>> & {
+  defaults?: Record<string, RunDefaults>;
+};
+
 /** Preview features that users can opt into via `agents beta`. */
 export type BetaFeatureName = 'drive' | 'factory';
 
@@ -210,7 +226,7 @@ export interface InstalledHook {
 /** Package manifest (agents.yaml) found inside a cloned config repo or package. */
 export interface Manifest {
   agents?: Partial<Record<AgentId, string>>;
-  run?: Partial<Record<AgentId, { strategy?: RunStrategy }>>;
+  run?: RunConfig;
   beta?: {
     enabled?: BetaFeatureName[];
   };
@@ -478,6 +494,44 @@ export interface DiscoveredPlugin {
   hasMcp: boolean;
   /** Whether the plugin root contains a settings.json with non-permission keys to merge. */
   hasSettings: boolean;
+  /**
+   * Marketplace this plugin was discovered in (from marketplaceNameFor() of the
+   * owning MarketplaceSpec): "agents-cli" (user repo), "agents-<alias>" (extra
+   * repo), or "agents-project" (project repo). Absent on hand-built plugins
+   * (e.g. workflow-scoped) — those default to the user marketplace on sync.
+   */
+  marketplace?: string;
+}
+
+/**
+ * Identifies one DotAgents repo that contributes a plugin marketplace. Each
+ * repo synthesizes its own catalog and registers under its own name:
+ *   user    — ~/.agents/plugins/         → "agents-cli"   (the canonical name)
+ *   extra   — ~/.agents-<alias>/plugins/ → "agents-<alias>" (e.g. "agents-extras")
+ *   project — <cwd>/.agents/plugins/     → "agents-project"
+ *
+ * `root` on the extra/project variants is the absolute path to that repo's
+ * plugins/ directory (the source side). The user variant needs no path — it is
+ * always ~/.agents/plugins/ via getPluginsDir().
+ */
+export type MarketplaceSpec =
+  | { kind: 'user' }
+  | { kind: 'extra'; alias: string; root: string }
+  | { kind: 'project'; root: string }
+  | { kind: 'system'; root: string };
+
+/**
+ * A marketplace found on the source side (before any per-version sync), with
+ * its resolved name, source plugins directory, and catalog description.
+ */
+export interface DiscoveredMarketplace {
+  spec: MarketplaceSpec;
+  /** e.g. "agents-cli", "agents-extras", "agents-project". */
+  name: string;
+  /** Absolute path to the source plugins/ directory on disk. */
+  pluginsRoot: string;
+  /** Human description embedded in the synthesized catalog. */
+  description: string;
 }
 
 /** Frontmatter fields parsed from a subagent's agent.md file. */
@@ -520,7 +574,7 @@ export interface ExtraRepoConfig {
 /** Top-level structure of ~/.agents/.system/agents.yaml -- the CLI's persistent state. */
 export interface Meta {
   agents?: Partial<Record<AgentId, string>>;
-  run?: Partial<Record<AgentId, { strategy?: RunStrategy }>>;
+  run?: RunConfig;
   beta?: {
     enabled?: BetaFeatureName[];
   };
