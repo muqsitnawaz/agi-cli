@@ -16,7 +16,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import * as yaml from 'yaml';
 import type { AgentId, CapabilityName } from '../lib/types.js';
-import { AGENTS, getCliState } from '../lib/agents.js';
+import { AGENTS, getCliState, resolveAgentName } from '../lib/agents.js';
 import { supports } from '../lib/capabilities.js';
 import { readMeta } from '../lib/state.js';
 import { getVersionHomePath } from '../lib/versions.js';
@@ -123,13 +123,12 @@ export async function inspectAction(target: string, options: InspectOptions): Pr
 
 function parseTarget(target: string): { agent: AgentId; version: string } {
   const [rawAgent, rawVersion] = target.split('@');
-  const agentKey = (rawAgent || '').toLowerCase();
-  if (!(agentKey in AGENTS)) {
+  const agent = resolveAgentName(rawAgent || '');
+  if (!agent) {
     console.error(chalk.red(`Unknown agent: ${rawAgent}`));
     console.error(chalk.gray(`Known agents: ${Object.keys(AGENTS).join(', ')}`));
     process.exit(1);
   }
-  const agent = agentKey as AgentId;
 
   let version = rawVersion;
   if (!version || version === 'default') {

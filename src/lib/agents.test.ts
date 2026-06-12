@@ -4,7 +4,7 @@ import * as path from 'path';
 import { pathToFileURL } from 'url';
 import { spawnSync } from 'child_process';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AGENTS } from './agents.js';
+import { AGENTS, ALL_AGENT_IDS, resolveAgentName } from './agents.js';
 import type { CapabilityName } from './types.js';
 
 const tempDirs: string[] = [];
@@ -190,5 +190,47 @@ describe('AGENTS capability matrix', () => {
         expect(config.capabilities, `${agentId} missing ${capability}`).toHaveProperty(capability);
       }
     }
+  });
+});
+
+describe('resolveAgentName', () => {
+  it('resolves every canonical id, including ones missing from the alias map', () => {
+    for (const id of ALL_AGENT_IDS) {
+      expect(resolveAgentName(id), `canonical id ${id}`).toBe(id);
+    }
+  });
+
+  it('resolves aliases and shorthands case-insensitively', () => {
+    expect(resolveAgentName('claude-code')).toBe('claude');
+    expect(resolveAgentName('cc')).toBe('claude');
+    expect(resolveAgentName('CLAUDE')).toBe('claude');
+    expect(resolveAgentName('kimi-code')).toBe('kimi');
+  });
+
+  it('corrects a single typo against canonical ids', () => {
+    expect(resolveAgentName('cladue')).toBe('claude'); // transposition
+    expect(resolveAgentName('claud')).toBe('claude'); // deletion
+    expect(resolveAgentName('clude')).toBe('claude'); // deletion
+    expect(resolveAgentName('codx')).toBe('codex');
+    expect(resolveAgentName('kim')).toBe('kimi');
+    expect(resolveAgentName('gemni')).toBe('gemini');
+    expect(resolveAgentName('grook')).toBe('grok');
+  });
+
+  it('corrects a single typo against multi-letter aliases', () => {
+    expect(resolveAgentName('clw')).toBe('openclaw'); // claw minus a letter
+    expect(resolveAgentName('roocod')).toBe('roo'); // roocode minus a letter
+  });
+
+  it('returns null when the correction is ambiguous', () => {
+    // 'kiri' is one edit from both kiro and kimi
+    expect(resolveAgentName('kiri')).toBeNull();
+  });
+
+  it('returns null for short or unrecognizable input', () => {
+    expect(resolveAgentName('cl')).toBeNull();
+    expect(resolveAgentName('gpt')).toBeNull();
+    expect(resolveAgentName('')).toBeNull();
+    expect(resolveAgentName('definitely-not-an-agent')).toBeNull();
   });
 });
