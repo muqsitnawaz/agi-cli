@@ -44,6 +44,26 @@ export interface ResourceViewOptions {
   filterVersion?: string;
 }
 
+type ResourceColumnKey = 'name' | 'extra' | 'extra2' | 'description' | 'sync';
+
+interface ResourceColumnSpec {
+  key: ResourceColumnKey;
+  label: string;
+  values: string[];
+  min: number;
+  max: number;
+  floor: number;
+  priority: number;
+}
+
+interface ResourceColumnLayout extends ResourceColumnSpec {
+  width: number;
+}
+
+const TABLE_SEPARATOR = '  ';
+const DEFAULT_TABLE_WIDTH = 100;
+const MIN_TABLE_WIDTH = 32;
+
 /** Display a resource list: interactive picker in TTY mode, plain table otherwise. */
 export async function showResourceList(opts: ResourceViewOptions): Promise<void> {
   if (opts.rows.length === 0) {
@@ -56,13 +76,15 @@ export async function showResourceList(opts: ResourceViewOptions): Promise<void>
     return;
   }
 
+  const layout = buildResourceTableLayout(opts, currentTableWidth());
+
   let picked;
   try {
     picked = await itemPicker<ResourceRow>({
       message: buildPickerMessage(opts),
       items: opts.rows,
       filter: (query) => filterRows(opts.rows, query),
-      labelFor: (row) => formatPickerRow(row, opts),
+      labelFor: (row) => formatResourceRow(row, opts, layout, ''),
       buildPreview: (row) => row.buildDetail(),
       pageSize: 12,
       emptyMessage: `No matching ${opts.resourcePlural}.`,
@@ -101,40 +123,9 @@ function filterRows(rows: ResourceRow[], query: string): ResourceRow[] {
   );
 }
 
-/** Row label rendered inside the picker list. */
-function formatPickerRow(row: ResourceRow, opts: ResourceViewOptions): string {
-  const name = chalk.cyan(padRight(row.name, 22));
-  const extra = opts.extraLabel
-    ? chalk.gray(padRight(row.extra ?? '-', 10))
-    : '';
-  const extra2 = opts.extra2Label
-    ? chalk.gray(padRight(row.extra2 ?? '-', 16))
-    : '';
-  const descRaw = row.description ? truncate(row.description, 40) : '';
-  const desc = padRight(chalk.gray(descRaw), 42);
-  const sync = formatSyncSummary(row.targets, opts);
-  return `${name} ${extra}${extra2}${desc} ${sync}`;
-}
-
 /** Render resources as a plain-text table (used when output is piped). */
 function printResourceTable(opts: ResourceViewOptions): void {
-  const header = buildTableHeader(opts);
-  console.log(header);
-  console.log(chalk.gray('─'.repeat(Math.min(process.stdout.columns || 100, 120))));
-
-  for (const row of opts.rows) {
-    const name = chalk.cyan(padRight(row.name, 22));
-    const extra = opts.extraLabel
-      ? padRight(row.extra ?? '-', 10)
-      : '';
-    const extra2 = opts.extra2Label
-      ? padRight(row.extra2 ?? '-', 16)
-      : '';
-    const descRaw = row.description ? truncate(row.description, 40) : '-';
-    const desc = padRight(chalk.gray(descRaw), 42);
-    const sync = formatSyncSummary(row.targets, opts);
-    console.log(`${name} ${extra}${extra2}${desc} ${sync}`);
-  }
+  for (const line of buildResourceTableLines(opts)) console.log(line);
 
   console.log();
   const summary: string[] = [
@@ -146,18 +137,199 @@ function printResourceTable(opts: ResourceViewOptions): void {
   console.log(chalk.gray(summary.join(' · ')));
 }
 
-/** Build the column header line for the plain-text table. */
-function buildTableHeader(opts: ResourceViewOptions): string {
-  const name = chalk.bold(padRight('Name', 22));
-  const extra = opts.extraLabel
-    ? chalk.bold(padRight(opts.extraLabel, 10))
-    : '';
-  const extra2 = opts.extra2Label
-    ? chalk.bold(padRight(opts.extra2Label, 16))
-    : '';
-  const desc = padRight(chalk.bold('Description'), 42);
-  const sync = chalk.bold('Synced');
-  return `${name} ${extra}${extra2}${desc} ${sync}`;
+/** Build resource table lines sized to the terminal and row contents. */
+export function buildResourceTableLines(
+  opts: ResourceViewOptions,
+  terminalWidth = currentTableWidth(),
+): string[] {
+  const layout = buildResourceTableLayout(opts, terminalWidth);
+  return [
+    formatResourceHeader(layout),
+    chalk.gray('─'.repeat(layoutWidth(layout))),
+    ...opts.rows.map((row) => formatResourceRow(row, opts, layout, '-')),
+  ];
+}
+
+/** Build the column layout for resource tables and picker rows. */
+function buildResourceTableLayout(
+  opts: ResourceViewOptions,
+  terminalWidth: number,
+): ResourceColumnLayout[] {
+  const width = normalizeTerminalWidth(terminalWidth);
+  const columns = buildColumnSpecs(opts, width);
+  const separatorWidth = TABLE_SEPARATOR.length * Math.max(0, columns.length - 1);
+  const available = Math.max(columns.length, width - separatorWidth);
+  const minWidths = columns.map((column) => columnMinWidth(column));
+  const minTotal = minWidths.reduce((sum, value) => sum + value, 0);
+  const widths = [...minWidths];
+
+  if (minTotal <= available) {
+    let remaining = available - minTotal;
+    while (remaining > 0) {
+      const next = columns
+        .map((column, index) => ({
+          index,
+          priority: column.priority,
+          deficit: idealColumnWidth(column) - widths[index],
+        }))
+        .filter((candidate) => candidate.deficit > 0)
+        .sort((a, b) => b.priority - a.priority || b.deficit - a.deficit)[0];
+
+      if (!next) break;
+      widths[next.index]++;
+      remaining--;
+    }
+  } else {
+    let over = minTotal - available;
+    while (over > 0) {
+      const next = columns
+        .map((column, index) => ({
+          index,
+          priority: column.priority,
+          shrink: widths[index] - column.floor,
+        }))
+        .filter((candidate) => candidate.shrink > 0)
+        .sort((a, b) => b.shrink - a.shrink || a.priority - b.priority)[0];
+
+      if (!next) break;
+      widths[next.index]--;
+      over--;
+    }
+  }
+
+  return columns.map((column, index) => ({ ...column, width: widths[index] }));
+}
+
+function buildColumnSpecs(opts: ResourceViewOptions, terminalWidth: number): ResourceColumnSpec[] {
+  const rows = opts.rows;
+  const nameMax = Math.max(22, Math.floor(terminalWidth * 0.28));
+  const descriptionMax = Math.max(40, Math.floor(terminalWidth * 0.46));
+  const syncMax = Math.max(28, Math.floor(terminalWidth * 0.36));
+  const columns: ResourceColumnSpec[] = [
+    {
+      key: 'name',
+      label: 'Name',
+      values: rows.map((row) => row.name),
+      min: 12,
+      max: nameMax,
+      floor: 5,
+      priority: 4,
+    },
+  ];
+
+  if (opts.extraLabel) {
+    columns.push({
+      key: 'extra',
+      label: opts.extraLabel,
+      values: rows.map((row) => row.extra ?? '-'),
+      min: Math.max(6, visibleWidth(opts.extraLabel)),
+      max: 18,
+      floor: 4,
+      priority: 2,
+    });
+  }
+
+  if (opts.extra2Label) {
+    columns.push({
+      key: 'extra2',
+      label: opts.extra2Label,
+      values: rows.map((row) => row.extra2 ?? '-'),
+      min: Math.max(8, visibleWidth(opts.extra2Label)),
+      max: 24,
+      floor: 4,
+      priority: 2,
+    });
+  }
+
+  columns.push(
+    {
+      key: 'description',
+      label: 'Description',
+      values: rows.map((row) => row.description ?? '-'),
+      min: 14,
+      max: descriptionMax,
+      floor: 6,
+      priority: 5,
+    },
+    {
+      key: 'sync',
+      label: 'Synced',
+      values: rows.map((row) => formatSyncSummary(row.targets, opts)),
+      min: 12,
+      max: syncMax,
+      floor: 6,
+      priority: 3,
+    },
+  );
+
+  return columns;
+}
+
+function formatResourceHeader(layout: ResourceColumnLayout[]): string {
+  return layout
+    .map((column) => renderCell(column.label, column.width, chalk.bold))
+    .join(TABLE_SEPARATOR);
+}
+
+function formatResourceRow(
+  row: ResourceRow,
+  opts: ResourceViewOptions,
+  layout: ResourceColumnLayout[],
+  emptyDescription: string,
+): string {
+  return layout
+    .map((column) => {
+      switch (column.key) {
+        case 'name':
+          return renderCell(row.name, column.width, chalk.cyan);
+        case 'extra':
+          return renderCell(row.extra ?? '-', column.width);
+        case 'extra2':
+          return renderCell(row.extra2 ?? '-', column.width);
+        case 'description':
+          return renderCell(row.description ?? emptyDescription, column.width, chalk.gray);
+        case 'sync':
+          return renderCell(formatSyncSummary(row.targets, opts), column.width);
+      }
+    })
+    .join(TABLE_SEPARATOR);
+}
+
+function renderCell(
+  value: string,
+  width: number,
+  color?: (value: string) => string,
+): string {
+  const compact = oneLine(value);
+  const visible = padRight(truncate(compact, width), width);
+  return color ? color(visible) : visible;
+}
+
+function layoutWidth(layout: ResourceColumnLayout[]): number {
+  return layout.reduce((sum, column) => sum + column.width, 0) +
+    TABLE_SEPARATOR.length * Math.max(0, layout.length - 1);
+}
+
+function idealColumnWidth(column: ResourceColumnSpec): number {
+  const widest = Math.max(
+    visibleWidth(column.label),
+    ...column.values.map((value) => visibleWidth(oneLine(value))),
+  );
+  return Math.min(column.max, Math.max(columnMinWidth(column), widest));
+}
+
+function columnMinWidth(column: ResourceColumnSpec): number {
+  return Math.min(column.max, Math.max(column.min, visibleWidth(column.label)));
+}
+
+function currentTableWidth(): number {
+  const envColumns = Number(process.env.COLUMNS);
+  return normalizeTerminalWidth(process.stdout.columns || envColumns || DEFAULT_TABLE_WIDTH);
+}
+
+function normalizeTerminalWidth(width: number): number {
+  if (!Number.isFinite(width) || width <= 0) return DEFAULT_TABLE_WIDTH;
+  return Math.max(MIN_TABLE_WIDTH, Math.floor(width));
 }
 
 /** Compact sync summary: "everywhere", "14 of 16 installs", or "not installed". */
@@ -243,14 +415,53 @@ function formatVersionPill(t: SyncTarget): string {
 
 /** Pad a string to a fixed width, accounting for ANSI escape codes in length calculation. */
 function padRight(s: string, width: number): string {
-  // Strip ANSI for length calc
-  const raw = s.replace(/\x1b\[[0-9;]*m/g, '');
-  if (raw.length >= width) return s;
-  return s + ' '.repeat(width - raw.length);
+  const rawWidth = visibleWidth(s);
+  if (rawWidth >= width) return s;
+  return s + ' '.repeat(width - rawWidth);
 }
 
-/** Truncate a string to a maximum length, appending an ellipsis if needed. */
+/** Truncate a string to a maximum visible width, appending an ellipsis if needed. */
 function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + '…';
+  if (max <= 0) return '';
+  if (visibleWidth(s) <= max) return s;
+  if (max === 1) return '…';
+
+  const limit = max - 1;
+  let out = '';
+  let visible = 0;
+
+  for (let i = 0; i < s.length && visible < limit;) {
+    if (s.charCodeAt(i) === 27) {
+      const ansi = /^\x1b\[[0-9;]*m/.exec(s.slice(i));
+      if (ansi) {
+        out += ansi[0];
+        i += ansi[0].length;
+        continue;
+      }
+    }
+
+    const codePoint = s.codePointAt(i);
+    if (codePoint === undefined) break;
+    out += String.fromCodePoint(codePoint);
+    i += codePoint > 0xffff ? 2 : 1;
+    visible++;
+  }
+
+  return out + '…' + (hasAnsi(out) ? '\x1b[0m' : '');
+}
+
+function oneLine(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+function visibleWidth(s: string): number {
+  return stripAnsi(s).length;
+}
+
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function hasAnsi(s: string): boolean {
+  return /\x1b\[[0-9;]*m/.test(s);
 }

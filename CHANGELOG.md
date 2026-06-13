@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+**Responsive resource tables**
+
+- Resource list tables (`agents skills|commands|plugins|subagents|mcp|workflows list`) now size columns from terminal width and row content instead of fixed 22/10/16/42 character slots. Long names, metadata, descriptions, and sync summaries truncate to the computed visible width, while wide terminals show more description text.
+
 **Single-typo agent names auto-correct everywhere, not just `agents run`**
 
 - `agents view cladue` used to print `Unknown agent 'cladue'` even though `agents run cladue` auto-corrected. `resolveAgentName` — the canonical resolver behind `view`, `usage`, `inspect`, `doctor`, `sync`, `models`, `skills`, `hooks`, `import`, `sessions --agent`, and every `agent@version` spec (`agents add claud@latest`, `agents use codx@2.1.170`) — now falls back to Damerau-Levenshtein distance-1 matching against canonical ids and multi-letter aliases: `cladue` -> `claude` (transposition), `kim` -> `kimi`, `codx` -> `codex`, `gemni` -> `gemini`.
