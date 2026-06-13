@@ -106,6 +106,14 @@ describe('collectRepoKind', () => {
     const repo = resolveRepoTarget(root)!;
     expect(collectRepoKind(repo, 'workflows')).toEqual([]);
   });
+
+  it('skips build/tooling caches (__pycache__, node_modules)', () => {
+    const root = makeProjectRepo();
+    fs.mkdirSync(path.join(root, '.agents', 'commands', '__pycache__'));
+    fs.mkdirSync(path.join(root, '.agents', 'commands', 'node_modules'));
+    const repo = resolveRepoTarget(root)!;
+    expect(collectRepoKind(repo, 'commands').map(c => c.name)).toEqual(['plain', 'ship']);
+  });
 });
 
 describe('repoManifestSummary', () => {

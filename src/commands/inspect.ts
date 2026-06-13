@@ -296,6 +296,8 @@ export function collectRepoKind(repo: RepoTarget, kind: DrillableKind): Resource
   const items: ResourceItem[] = [];
   for (const entry of entries) {
     if (entry.name.startsWith('.')) continue;
+    // Build/tooling caches are never resources — they only inflate counts.
+    if (entry.name === '__pycache__' || entry.name === 'node_modules') continue;
     const p = path.join(dir, entry.name);
     items.push({
       name: entry.name.replace(/\.(md|yaml|yml|toml|json)$/, ''),
