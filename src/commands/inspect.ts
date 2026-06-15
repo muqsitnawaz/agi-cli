@@ -19,8 +19,8 @@ import * as path from 'path';
 import { Command } from 'commander';
 import chalk from 'chalk';
 import * as yaml from 'yaml';
-import type { AgentId, CapabilityName } from '../lib/types.js';
-import { AGENTS, getCliState } from '../lib/agents.js';
+import type { AgentId, CapabilityName, DiscoveredPlugin } from '../lib/types.js';
+import { AGENTS, getCliState, resolveAgentName } from '../lib/agents.js';
 import { supports } from '../lib/capabilities.js';
 import {
   readMeta,
@@ -37,7 +37,7 @@ import {
   type ResourceEntry,
   type SkillResourceEntry,
 } from '../lib/resources.js';
-import { discoverPlugins } from '../lib/plugins.js';
+import { discoverPlugins, discoverPluginsInDir } from '../lib/plugins.js';
 import { countSessionsInScope } from '../lib/session/discover.js';
 import type { SessionAgentId } from '../lib/session/types.js';
 import { damerauLevenshtein } from '../lib/fuzzy.js';
@@ -68,6 +68,8 @@ interface ResourceItem {
   linkTarget: string;
   /** One-line description (frontmatter `description:` or first non-frontmatter line). */
   description: string;
+  /** Extra detail rows surfaced in detail mode (e.g. a plugin's bundled skills/commands). */
+  extra?: Array<[string, string]>;
 }
 
 interface InspectOptions {
@@ -113,12 +115,16 @@ export async function inspectAction(target: string, options: InspectOptions): Pr
       await inspectRepo(repo, options);
       return;
     }
-    const extras = getEnabledExtraRepos();
-    console.error(chalk.red(`Unknown target: ${target}`));
-    console.error(chalk.gray(`Agents: ${Object.keys(AGENTS).join(', ')}`));
-    const aliases = extras.length > 0 ? `, ${extras.map(e => e.alias).join(', ')}` : '';
-    console.error(chalk.gray(`Repos:  user, system, project${aliases} — or a path to a repo with a .agents/ dir`));
-    process.exit(1);
+    // Repo targets take precedence over typo correction; only fall through to
+    // parseTarget when the key resolves to an agent (alias or single-edit fix).
+    if (!resolveAgentName(agentKey)) {
+      const extras = getEnabledExtraRepos();
+      console.error(chalk.red(`Unknown target: ${target}`));
+      console.error(chalk.gray(`Agents: ${Object.keys(AGENTS).join(', ')}`));
+      const aliases = extras.length > 0 ? `, ${extras.map(e => e.alias).join(', ')}` : '';
+      console.error(chalk.gray(`Repos:  user, system, project${aliases} — or a path to a repo with a .agents/ dir`));
+      process.exit(1);
+    }
   }
 
   const { agent, version } = parseTarget(target);
@@ -148,7 +154,12 @@ export async function inspectAction(target: string, options: InspectOptions): Pr
 
 function parseTarget(target: string): { agent: AgentId; version: string } {
   const [rawAgent, rawVersion] = target.split('@');
-  const agent = (rawAgent || '').toLowerCase() as AgentId;
+  const agent = resolveAgentName(rawAgent || '');
+  if (!agent) {
+    console.error(chalk.red(`Unknown agent: ${rawAgent}`));
+    console.error(chalk.gray(`Known agents: ${Object.keys(AGENTS).join(', ')}`));
+    process.exit(1);
+  }
 
   let version = rawVersion;
   if (!version || version === 'default') {
@@ -217,18 +228,23 @@ export function resolveRepoTarget(target: string, cwd?: string): RepoTarget | nu
   const stat = safeStat(abs);
   if (!stat || !stat.isDirectory()) return null;
 
-  // A dir that is itself a DotAgents root wins over its nested .agents/ —
-  // extra repos like ~/.agents-extras keep resources at the top level and use
-  // .agents/ only for worktrees.
-  if (isDotAgentsRoot(abs)) {
-    const label = path.basename(abs) === '.agents' ? path.basename(path.dirname(abs)) : path.basename(abs);
-    return { label, root: abs };
+  // A dir literally named `.agents` is the root itself.
+  if (path.basename(abs) === '.agents') {
+    return { label: path.basename(path.dirname(abs)), root: abs };
   }
-  if (path.basename(abs) !== '.agents') {
-    const nested = path.join(abs, '.agents');
-    if (safeStat(nested)?.isDirectory()) {
-      return { label: path.basename(abs), root: nested };
-    }
+  // A nested `.agents/` that is a populated DotAgents root wins over `abs` — the
+  // project case (`agents inspect .` from a repo root whose resources live under
+  // `.agents/`, while the repo's own top-level `skills/`, `agents.yaml` pin, etc.
+  // are unrelated source, not a DotAgents tree).
+  const nested = path.join(abs, '.agents');
+  if (isDotAgentsRoot(nested)) {
+    return { label: path.basename(abs), root: nested };
+  }
+  // Otherwise treat `abs` itself as the root: standalone clones and extra repos
+  // like ~/.agents-extras keep resources at the top level and use `.agents/`
+  // only for worktrees (so their nested `.agents/` is not a DotAgents root).
+  if (isDotAgentsRoot(abs)) {
+    return { label: path.basename(abs), root: abs };
   }
   return null;
 }
@@ -262,6 +278,15 @@ async function inspectRepo(repo: RepoTarget, options: InspectOptions): Promise<v
 
 /** List one resource kind from a single repo root — no layering, no overrides. */
 export function collectRepoKind(repo: RepoTarget, kind: DrillableKind): ResourceItem[] {
+  // Plugins are bundles with a manifest + nested skills/commands/hooks — read
+  // them through the plugin discoverer so the manifest description and bundled
+  // resources surface, rather than treating each as an opaque directory.
+  if (kind === 'plugins') {
+    return discoverPluginsInDir(path.join(repo.root, 'plugins'))
+      .map(p => pluginToItem(p, repo.label))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
   const dir = path.join(repo.root, kind);
   let entries: fs.Dirent[];
   try {
@@ -271,6 +296,8 @@ export function collectRepoKind(repo: RepoTarget, kind: DrillableKind): Resource
   const items: ResourceItem[] = [];
   for (const entry of entries) {
     if (entry.name.startsWith('.')) continue;
+    // Build/tooling caches are never resources — they only inflate counts.
+    if (entry.name === '__pycache__' || entry.name === 'node_modules') continue;
     const p = path.join(dir, entry.name);
     items.push({
       name: entry.name.replace(/\.(md|yaml|yml|toml|json)$/, ''),
@@ -283,15 +310,88 @@ export function collectRepoKind(repo: RepoTarget, kind: DrillableKind): Resource
   return items.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** A few resource names for the at-a-glance preview, with a `…(+N)` tail. */
+function previewNames(items: ResourceItem[], n: number): string {
+  if (items.length === 0) return '';
+  const shown = items.slice(0, n).map(i => i.name);
+  const extra = items.length - shown.length;
+  return shown.join(', ') + (extra > 0 ? ` …(+${extra})` : '');
+}
+
+/** Recursive size + file count of a path; symlinks are not followed. */
+export function pathSize(p: string): { bytes: number; files: number } {
+  let stat: fs.Stats;
+  try { stat = fs.lstatSync(p); } catch { return { bytes: 0, files: 0 }; }
+  if (stat.isSymbolicLink()) return { bytes: 0, files: 0 };
+  if (stat.isFile()) return { bytes: stat.size, files: 1 };
+  if (!stat.isDirectory()) return { bytes: 0, files: 0 };
+  let entries: fs.Dirent[];
+  try { entries = fs.readdirSync(p, { withFileTypes: true }); } catch { return { bytes: 0, files: 0 }; }
+  let bytes = 0, files = 0;
+  for (const e of entries) {
+    const sub = pathSize(path.join(p, e.name));
+    bytes += sub.bytes; files += sub.files;
+  }
+  return { bytes, files };
+}
+
+/** Human byte size: "84 KB", "3.1 MB". */
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+export interface ManifestSummary {
+  /** `run.<agent>.strategy` pairs from agents.yaml. */
+  strategies: Array<{ agent: string; strategy: string }>;
+  /** `agents.<agent>` version pins from agents.yaml, when present. */
+  versions: Array<{ agent: string; version: string }>;
+}
+
+/** Parse the repo's own agents.yaml into the version pins + run strategies it declares. */
+export function repoManifestSummary(root: string): ManifestSummary | null {
+  let parsed: unknown;
+  try {
+    parsed = yaml.parse(fs.readFileSync(path.join(root, 'agents.yaml'), 'utf-8'));
+  } catch { return null; }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const obj = parsed as Record<string, unknown>;
+
+  const strategies: ManifestSummary['strategies'] = [];
+  if (obj.run && typeof obj.run === 'object') {
+    for (const [agent, cfg] of Object.entries(obj.run as Record<string, unknown>)) {
+      const strategy = cfg && typeof cfg === 'object' ? (cfg as Record<string, unknown>).strategy : undefined;
+      if (typeof strategy === 'string') strategies.push({ agent, strategy });
+    }
+  }
+
+  const versions: ManifestSummary['versions'] = [];
+  if (obj.agents && typeof obj.agents === 'object') {
+    for (const [agent, ver] of Object.entries(obj.agents as Record<string, unknown>)) {
+      if (typeof ver === 'string') versions.push({ agent, version: ver });
+    }
+  }
+
+  if (strategies.length === 0 && versions.length === 0) return null;
+  return { strategies, versions };
+}
+
 function renderRepoSummary(repo: RepoTarget, options: InspectOptions): void {
   const git = repoGitInfo(repo.root);
   const manifests = REPO_MARKER_FILES.filter(m => fs.existsSync(path.join(repo.root, m)));
+  const manifest = repoManifestSummary(repo.root);
 
-  const counts = {} as Record<DrillableKind, { total: number; bySource: Record<string, number> }>;
+  const kindData = {} as Record<DrillableKind, { items: ResourceItem[]; size: { bytes: number; files: number } }>;
+  let totalBytes = 0, totalFiles = 0;
   if (!options.brief) {
     for (const kind of DRILLABLE_KINDS) {
       const items = collectRepoKind(repo, kind);
-      counts[kind] = { total: items.length, bySource: { [repo.label]: items.length } };
+      const size = pathSize(path.join(repo.root, kind));
+      kindData[kind] = { items, size };
+      totalBytes += size.bytes; totalFiles += size.files;
     }
   }
 
@@ -301,8 +401,15 @@ function renderRepoSummary(repo: RepoTarget, options: InspectOptions): void {
       root: repo.root,
       git,
       manifests,
+      manifest,
+      size: options.brief ? null : { bytes: totalBytes, files: totalFiles },
       resources: options.brief ? null : Object.fromEntries(
-        DRILLABLE_KINDS.map(kind => [kind, counts[kind].total]),
+        DRILLABLE_KINDS.map(kind => [kind, {
+          count: kindData[kind].items.length,
+          bytes: kindData[kind].size.bytes,
+          files: kindData[kind].size.files,
+          names: kindData[kind].items.map(i => i.name),
+        }]),
       ),
     }, null, 2));
     return;
@@ -310,19 +417,51 @@ function renderRepoSummary(repo: RepoTarget, options: InspectOptions): void {
 
   console.log('\n' + chalk.bold(repo.label) + '  ' + chalk.gray('[dotagents repo]') + '\n');
 
-  const rows: Array<[string, string]> = [['root', termLink(repo.root, repo.root)]];
+  // Indent for continuation sub-rows: 2 leading + 10 key column + 1 space.
+  const sub = (label: string, value: string) => console.log(`  ${''.padEnd(10)} ${chalk.gray(label.padEnd(8))} ${value}`);
+
+  console.log(`  ${'root'.padEnd(10)} ${termLink(repo.root, repo.root)}`);
+
   if (git) {
     const dirty = git.dirty > 0 ? ` ${chalk.gray('·')} ${chalk.yellow(`${git.dirty} dirty`)}` : '';
     const url = git.url ? ` ${chalk.gray('·')} ${chalk.gray(git.url)}` : '';
-    rows.push(['git', `${git.branch}${dirty}${url}`]);
+    console.log(`  ${'git'.padEnd(10)} ${git.branch}${dirty}${url}`);
+    if (git.lastCommit) {
+      const rel = git.lastCommit.relative ? `  ${chalk.gray(`(${git.lastCommit.relative})`)}` : '';
+      sub('last', `${chalk.cyan(git.lastCommit.sha)}  ${truncate(git.lastCommit.subject, 60)}${rel}`);
+    }
+    if (git.ahead !== null && git.behind !== null && (git.ahead > 0 || git.behind > 0)) {
+      sub('sync', `ahead ${git.ahead} ${chalk.gray('·')} behind ${git.behind}`);
+    }
+    if (git.dirtyFiles.length > 0) {
+      const shown = git.dirtyFiles.slice(0, 4).join(', ');
+      const extra = git.dirtyFiles.length - Math.min(4, git.dirtyFiles.length);
+      sub('dirty', chalk.yellow(shown + (extra > 0 ? ` …(+${extra})` : '')));
+    }
   }
-  if (manifests.length > 0) rows.push(['manifests', manifests.join(', ')]);
-  for (const [k, v] of rows) console.log(`  ${k.padEnd(10)} ${v}`);
+
+  if (manifests.length > 0) {
+    console.log(`  ${'manifests'.padEnd(10)} ${manifests.join(', ')}`);
+    if (manifest) {
+      if (manifest.versions.length > 0) {
+        sub('versions', manifest.versions.map(v => `${v.agent} ${chalk.cyan(v.version)}`).join(chalk.gray(' · ')));
+      }
+      if (manifest.strategies.length > 0) {
+        sub('run', manifest.strategies.map(s => `${s.agent}:${s.strategy}`).join(chalk.gray(' · ')));
+      }
+    }
+  }
 
   if (!options.brief) {
+    console.log(`  ${'size'.padEnd(10)} ${formatBytes(totalBytes)} ${chalk.gray('·')} ${totalFiles} files`);
+
     console.log('\n' + chalk.bold('Resources'));
     for (const kind of DRILLABLE_KINDS) {
-      console.log(`  ${kind.padEnd(10)} ${String(counts[kind].total).padStart(4)}`);
+      const { items, size } = kindData[kind];
+      const count = String(items.length).padStart(4);
+      const sz = items.length > 0 ? formatBytes(size.bytes).padStart(8) : ''.padEnd(8);
+      const preview = items.length > 0 ? chalk.gray(truncate(previewNames(items, 4), 60)) : '';
+      console.log(`  ${kind.padEnd(10)} ${count}  ${sz}  ${preview}`.trimEnd());
     }
   }
 
@@ -331,7 +470,17 @@ function renderRepoSummary(repo: RepoTarget, options: InspectOptions): void {
   console.log('');
 }
 
-function repoGitInfo(root: string): { branch: string; dirty: number; url: string | null } | null {
+export interface RepoGitInfo {
+  branch: string;
+  dirty: number;
+  dirtyFiles: string[];
+  url: string | null;
+  lastCommit: { sha: string; subject: string; relative: string } | null;
+  ahead: number | null;
+  behind: number | null;
+}
+
+export function repoGitInfo(root: string): RepoGitInfo | null {
   const git = (args: string): string | null => {
     try {
       return execSync(`git -C ${JSON.stringify(root)} ${args}`, { stdio: ['ignore', 'pipe', 'ignore'] })
@@ -340,9 +489,30 @@ function repoGitInfo(root: string): { branch: string; dirty: number; url: string
   };
   const branch = git('rev-parse --abbrev-ref HEAD');
   if (branch === null) return null;
-  const status = git('status --porcelain');
-  const dirty = status ? status.split('\n').filter(Boolean).length : 0;
-  return { branch, dirty, url: git('remote get-url origin') };
+
+  // Read status WITHOUT trimming — git()'s .trim() would strip the leading
+  // space of the first porcelain line (`XY path`), corrupting the path slice.
+  let statusRaw: string | null;
+  try {
+    statusRaw = execSync(`git -C ${JSON.stringify(root)} status --porcelain`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+  } catch { statusRaw = null; }
+  const dirtyFiles = statusRaw ? statusRaw.split('\n').filter(Boolean).map(l => l.slice(3)) : [];
+
+  let lastCommit: RepoGitInfo['lastCommit'] = null;
+  const log = git('log -1 --format=%h%x1f%s%x1f%cr');
+  if (log) {
+    const [sha, subject, relative] = log.split('\x1f');
+    if (sha) lastCommit = { sha, subject: subject ?? '', relative: relative ?? '' };
+  }
+
+  let ahead: number | null = null, behind: number | null = null;
+  const counts = git("rev-list --left-right --count '@{upstream}...HEAD'");
+  if (counts) {
+    const [b, a] = counts.split(/\s+/).map(n => parseInt(n, 10));
+    if (Number.isFinite(b) && Number.isFinite(a)) { behind = b; ahead = a; }
+  }
+
+  return { branch, dirty: dirtyFiles.length, dirtyFiles, url: git('remote get-url origin'), lastCommit, ahead, behind };
 }
 
 // ─── Summary mode ────────────────────────────────────────────────────────────
@@ -573,14 +743,31 @@ function collectKind(agent: AgentId, versionHome: string, kind: DrillableKind): 
 }
 
 function pluginItems(): ResourceItem[] {
-  const plugins = discoverPlugins();
-  return plugins.map(p => ({
-    name: p.name,
-    source: 'user',
-    path: p.root,
-    linkTarget: linkTarget(p.root),
-    description: p.manifest.description ?? '',
-  }));
+  return discoverPlugins().map(p => pluginToItem(p, 'user'));
+}
+
+/**
+ * Map a discovered plugin to a resource item, surfacing the manifest description
+ * and the bundle's nested resources (skills, commands, hooks, ...) as detail rows.
+ */
+function pluginToItem(plugin: DiscoveredPlugin, source: string): ResourceItem {
+  const extra: Array<[string, string]> = [];
+  const list = (names: string[]): string =>
+    names.length <= 8 ? names.join(', ') : `${names.slice(0, 8).join(', ')}, +${names.length - 8} more`;
+  if (plugin.skills.length) extra.push(['skills', `${plugin.skills.length}  (${list(plugin.skills)})`]);
+  if (plugin.commands.length) extra.push(['commands', `${plugin.commands.length}  (${list(plugin.commands)})`]);
+  if (plugin.agentDefs.length) extra.push(['subagents', `${plugin.agentDefs.length}  (${list(plugin.agentDefs)})`]);
+  if (plugin.hooks.length) extra.push(['hooks', String(plugin.hooks.length)]);
+  if (plugin.mcpServers.length) extra.push(['mcp', list(plugin.mcpServers)]);
+  if (plugin.manifest.version) extra.push(['version', plugin.manifest.version]);
+  return {
+    name: plugin.name,
+    source,
+    path: plugin.root,
+    linkTarget: linkTarget(plugin.root),
+    description: plugin.manifest.description ?? '',
+    extra,
+  };
 }
 
 function entriesFromAgentResources(agent: AgentId, versionHome: string, kind: 'commands' | 'hooks' | 'workflows'): ResourceItem[] {
@@ -649,6 +836,10 @@ function buildDetailRows(item: ResourceItem, kind: DrillableKind): Array<[string
       if (typeof fm.model === 'string') rows.push(['model', fm.model]);
       if (Array.isArray(fm.tools)) rows.push(['tools', fm.tools.join(', ')]);
     }
+  }
+  // Plugin bundles carry their nested resources as pre-built rows.
+  if (kind === 'plugins' && item.extra) {
+    rows.push(...item.extra);
   }
   return rows;
 }

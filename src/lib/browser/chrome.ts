@@ -11,6 +11,14 @@ import type { Readable, Writable } from 'stream';
 
 import type { BrowserType } from './types.js';
 
+// Windows install roots. Resolve from the environment (fall back to the usual
+// defaults) so per-user installs under %LOCALAPPDATA% and 64-bit Program Files
+// are found, not just the hardcoded x86 path. Only the `win32` entries below use
+// these; on other platforms they compute unused placeholder strings.
+const WIN_PROGRAMFILES = process.env.ProgramFiles || 'C:\\Program Files';
+const WIN_PROGRAMFILES_X86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+const WIN_LOCALAPPDATA = process.env.LOCALAPPDATA || `${os.homedir()}\\AppData\\Local`;
+
 const BROWSER_PATHS: Record<string, Record<BrowserType, string[]>> = {
   darwin: {
     chrome: [
@@ -33,16 +41,22 @@ const BROWSER_PATHS: Record<string, Record<BrowserType, string[]>> = {
   },
   win32: {
     chrome: [
-      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      `${WIN_PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${WIN_PROGRAMFILES_X86}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${WIN_LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`,
     ],
     comet: [],
-    chromium: [],
+    chromium: [
+      `${WIN_LOCALAPPDATA}\\Chromium\\Application\\chrome.exe`,
+    ],
     brave: [
-      'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+      `${WIN_PROGRAMFILES}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      `${WIN_PROGRAMFILES_X86}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      `${WIN_LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
     ],
     edge: [
-      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      `${WIN_PROGRAMFILES}\\Microsoft\\Edge\\Application\\msedge.exe`,
+      `${WIN_PROGRAMFILES_X86}\\Microsoft\\Edge\\Application\\msedge.exe`,
     ],
     custom: [],
   },
@@ -346,14 +360,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Is a TCP port currently bound? `lsof` on POSIX, `netstat -ano` on Windows
+ * (lsof doesn't exist there). Returns false on any tooling error so port
+ * allocation degrades to "assume free" rather than throwing.
+ */
+function isPortInUse(port: number): boolean {
+  if (process.platform === 'win32') {
+    try {
+      const out = execFileSync('netstat', ['-ano', '-p', 'TCP'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      // Lines look like: "  TCP    0.0.0.0:9200    0.0.0.0:0    LISTENING    1234"
+      return out.split('\n').some((line) => {
+        const f = line.trim().split(/\s+/);
+        return f[0] === 'TCP' && f[3] === 'LISTENING' && !!f[1]?.endsWith(`:${port}`);
+      });
+    } catch {
+      return false;
+    }
+  }
+  try {
+    execFileSync('lsof', ['-i', `:${port}`], { stdio: 'ignore' });
+    return true; // lsof found a binding
+  } catch {
+    return false; // nothing on the port
+  }
+}
+
 export function allocatePort(): number {
   const base = 9200;
   const max = 9300;
 
   for (let port = base; port < max; port++) {
-    try {
-      execFileSync('lsof', ['-i', `:${port}`], { stdio: 'ignore' });
-    } catch {
+    if (!isPortInUse(port)) {
       return port;
     }
   }
@@ -367,11 +408,42 @@ export interface PortOccupant {
 }
 
 /**
- * Identify the process listening on a TCP port via lsof. Returns null when nothing is bound.
- * Used for clearer error messages when a profile's configured port is taken by a non-debug
- * process (e.g. Comet running without --remote-debugging-port).
+ * Identify the process listening on a TCP port. Returns null when nothing is bound.
+ * Used for clearer error messages when a profile's configured port is taken by a
+ * non-debug process (e.g. Comet running without --remote-debugging-port).
+ * `lsof` on POSIX; `netstat -ano` + `tasklist` on Windows.
  */
 export function getPortOccupant(port: number): PortOccupant | null {
+  if (process.platform === 'win32') {
+    try {
+      const out = execFileSync('netstat', ['-ano', '-p', 'TCP'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      let pid = 0;
+      for (const line of out.split('\n')) {
+        const f = line.trim().split(/\s+/);
+        if (f[0] === 'TCP' && f[3] === 'LISTENING' && f[1]?.endsWith(`:${port}`)) {
+          pid = parseInt(f[4], 10) || 0;
+          break;
+        }
+      }
+      if (!pid) return null;
+      let command = 'unknown';
+      try {
+        // tasklist CSV row: "image.exe","1234","Console","1","12,345 K"
+        const tl = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        const m = tl.match(/^"([^"]+)"/);
+        if (m) command = m[1];
+      } catch { /* keep 'unknown' */ }
+      return { pid, command };
+    } catch {
+      return null;
+    }
+  }
   try {
     const out = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpcn'], {
       encoding: 'utf8',

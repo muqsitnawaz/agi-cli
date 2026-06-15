@@ -28,7 +28,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageJsonPath = path.join(__dirname, '..', 'package.json');
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
 const VERSION = packageJson.version;
-const NPM_PACKAGE_NAME = '@phnx-labs/agents-cli';
+import {
+  NPM_PACKAGE_NAME,
+  deriveGlobalPrefix,
+  installPackageIntoPrefix,
+  verifyInstalledVersion,
+  refreshAliasShims,
+} from './lib/self-update.js';
 
 interface NpmPackageMetadata {
   version: string;
@@ -293,34 +299,63 @@ async function showWhatsNew(fromVersion: string, toVersion: string): Promise<voi
 }
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
-import { getUpdateCheckPath, getMigratedSentinelPath, getUserAgentsDir } from './lib/state.js';
+import { getUpdateCheckPath, getMigratedSentinelPath, getUserAgentsDir, getRuntimeStateDir } from './lib/state.js';
+import {
+  readUpdateCache,
+  saveUpdateCheck,
+  dismissUpdateVersion,
+  shouldPromptUpgrade,
+  findAgentsCliInstalls,
+  type UpdateCheckCache,
+} from './lib/self-update.js';
 const UPDATE_CHECK_FILE = getUpdateCheckPath();
 
-/** Read the cached update-check state from disk. Returns null if the file is missing or corrupt. */
-function readUpdateCache(): { lastCheck: number; latestVersion: string; dismissed?: string } | null {
-  try {
-    return JSON.parse(fs.readFileSync(UPDATE_CHECK_FILE, 'utf-8'));
-  } catch {
-    /* cache file missing or corrupt */
-    return null;
+/**
+ * Warn once when PATH resolves `agents` to a different agents-cli install
+ * than the copy that is currently running (or to several). Divergent installs
+ * are how self-updates "succeed" without changing the command the user types.
+ * The warning re-fires only when the set of install roots changes; dev builds
+ * (0.0.0-dev) are ignored because side-by-side dev installs are a supported
+ * workflow.
+ */
+function maybeWarnMultiInstall(): void {
+  const sentinel = path.join(getRuntimeStateDir(), 'multi-install-warned');
+  const runningRoot = path.resolve(__dirname, '..');
+  const byRoot = new Map<string, { version: string; note: string }>();
+  byRoot.set(runningRoot, { version: VERSION, note: 'running' });
+  for (const install of findAgentsCliInstalls(process.env.PATH || '')) {
+    if (install.version.startsWith('0.0.0-dev')) continue;
+    if (!byRoot.has(install.packageRoot)) {
+      byRoot.set(install.packageRoot, { version: install.version, note: `agents on PATH: ${install.binPath}` });
+    }
   }
+
+  if (byRoot.size < 2) {
+    try { fs.unlinkSync(sentinel); } catch { /* nothing recorded */ }
+    return;
+  }
+
+  const key = [...byRoot.keys()].sort().join('\n');
+  try {
+    if (fs.readFileSync(sentinel, 'utf-8') === key) return;
+  } catch { /* not warned for this set yet */ }
+
+  console.error(chalk.yellow('Multiple agents-cli installs detected:'));
+  for (const [root, info] of byRoot) {
+    console.error(chalk.gray(`  ${root}  ${info.version}  (${info.note})`));
+  }
+  console.error(chalk.gray('Upgrades apply to the running copy. Remove a stale copy with: npm uninstall -g --prefix <prefix> @phnx-labs/agents-cli'));
+
+  try {
+    fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+    fs.writeFileSync(sentinel, key);
+  } catch { /* best-effort; worst case the warning repeats */ }
 }
 
 /** Determine whether enough time has elapsed since the last registry fetch. */
-function shouldFetchLatest(cache: { lastCheck: number } | null): boolean {
+function shouldFetchLatest(cache: UpdateCheckCache | null): boolean {
   if (!cache) return true;
   return Date.now() - cache.lastCheck > UPDATE_CHECK_INTERVAL_MS;
-}
-
-/** Persist the latest known version and current timestamp to the update-check cache. */
-function saveUpdateCheck(latestVersion: string): void {
-  try {
-    const dir = path.dirname(UPDATE_CHECK_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(UPDATE_CHECK_FILE, JSON.stringify({ lastCheck: Date.now(), latestVersion }));
-  } catch {
-    /* best-effort cache update */
-  }
 }
 
 /** Fetch the exact latest npm version plus its registry integrity hash. */
@@ -352,12 +387,28 @@ function printResolvedPackage(metadata: NpmPackageMetadata): void {
 }
 
 async function installResolvedPackage(metadata: NpmPackageMetadata): Promise<void> {
-  const { execFile } = await import('child_process');
-  const { promisify } = await import('util');
-  const execFileAsync = promisify(execFile);
-  const installArgs = ['install', '-g', '@phnx-labs/agents-cli', '--ignore-scripts'];
-  installArgs[2] = `${NPM_PACKAGE_NAME}@${metadata.version}`;
-  await execFileAsync('npm', installArgs);
+  const packageRoot = path.resolve(__dirname, '..');
+  const prefix = deriveGlobalPrefix(packageRoot);
+  await installPackageIntoPrefix(`${NPM_PACKAGE_NAME}@${metadata.version}`, prefix);
+  verifyInstalledVersion(packageRoot, metadata.version);
+  refreshAliasShims(packageRoot);
+  // The npm install above runs with --ignore-scripts, so the postinstall that
+  // installs the macOS Keychain helper never fires on upgrade. Force-refresh the
+  // helper here so a user upgrading FROM a broken build (e.g. the entitlement-less
+  // 1.20.4 helper that fails SecItemAdd with -34018) gets the fixed, signed bundle
+  // immediately — instead of waiting for the lazy staleness check in
+  // getKeychainHelperPath() to repair it on their next secret operation. The new
+  // package is already on disk, so the dynamic import resolves the freshly-installed
+  // helper module + bundle. Best-effort: an upgrade must never fail because the
+  // helper could not be reinstalled (`agents helper install --force` stays available).
+  if (process.platform === 'darwin') {
+    try {
+      const { ensureKeychainHelperInstalled } = await import('./lib/secrets/install-helper.js');
+      ensureKeychainHelperInstalled({ forceReinstall: true });
+    } catch {
+      // Non-fatal.
+    }
+  }
 }
 
 /** Present an interactive upgrade prompt (TTY) or a one-line hint (non-TTY). */
@@ -377,17 +428,7 @@ async function promptUpgrade(latestVersion: string): Promise<void> {
   });
 
   if (answer === 'dismiss') {
-    try {
-      const dir = path.dirname(UPDATE_CHECK_FILE);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const existing = readUpdateCache();
-      fs.writeFileSync(UPDATE_CHECK_FILE, JSON.stringify({
-        ...existing,
-        lastCheck: existing?.lastCheck ?? Date.now(),
-        latestVersion,
-        dismissed: latestVersion,
-      }));
-    } catch { /* best-effort */ }
+    dismissUpdateVersion(UPDATE_CHECK_FILE, latestVersion);
     return;
   }
 
@@ -396,6 +437,10 @@ async function promptUpgrade(latestVersion: string): Promise<void> {
     let spinner = ora('Resolving package metadata...').start();
     try {
       const metadata = await fetchNpmPackageMetadata();
+      // The prompt showed the cached latest, which can lag the registry (the
+      // 24h window) — sync the cache to what was actually resolved so later
+      // prompts and the install agree on the same version.
+      saveUpdateCheck(UPDATE_CHECK_FILE, metadata.version);
       spinner.succeed(`Resolved ${NPM_PACKAGE_NAME}@${metadata.version}`);
       printResolvedPackage(metadata);
 
@@ -413,14 +458,18 @@ async function promptUpgrade(latestVersion: string): Promise<void> {
       spinner.succeed(`Upgraded to ${metadata.version}`);
       await showWhatsNew(VERSION, metadata.version);
       console.log();
-      // Re-exec with new version and exit
-      const result = spawnSync('agents', process.argv.slice(2), {
+      // Re-exec the verified install's entrypoint and exit. PATH lookup of
+      // `agents` could resolve a different copy (dev build, another prefix)
+      // than the one that was just upgraded.
+      const entrypoint = path.resolve(__dirname, '..', 'dist', 'index.js');
+      const result = spawnSync(process.execPath, [entrypoint, ...process.argv.slice(2)], {
         stdio: 'inherit',
         shell: false,
       });
       process.exit(result.status ?? 0);
-    } catch {
-      spinner.fail('Upgrade failed');
+    } catch (err) {
+      if (isPromptCancelled(err)) return;
+      spinner.fail(`Upgrade failed: ${err instanceof Error ? err.message : String(err)}`);
       console.log(chalk.gray('Run manually: agents upgrade --yes'));
     }
     console.log();
@@ -441,7 +490,7 @@ function refreshUpdateCacheInBackground(): void {
     .then((response) => (response.ok ? response.json() : null))
     .then((data) => {
       if (data && typeof (data as any).version === 'string') {
-        saveUpdateCheck((data as any).version);
+        saveUpdateCheck(UPDATE_CHECK_FILE, (data as any).version);
       }
     })
     .catch(() => {
@@ -453,7 +502,9 @@ function refreshUpdateCacheInBackground(): void {
 async function checkForUpdates(): Promise<void> {
   if (process.env.AGENTS_CLI_DISABLE_AUTO_UPDATE) return;
 
-  const cache = readUpdateCache();
+  maybeWarnMultiInstall();
+
+  const cache = readUpdateCache(UPDATE_CHECK_FILE);
 
   // Kick off network refresh in background if stale. Does not block.
   if (shouldFetchLatest(cache)) {
@@ -463,9 +514,9 @@ async function checkForUpdates(): Promise<void> {
   // Prompt based on current cache (may be from a previous run's background refresh).
   // Skip if the user dismissed this exact version — they'll be prompted again when
   // a newer version appears.
-  if (cache?.latestVersion && cache.latestVersion !== VERSION && compareVersions(cache.latestVersion, VERSION) > 0 && cache.latestVersion !== cache.dismissed) {
+  if (shouldPromptUpgrade(cache, VERSION)) {
     try {
-      await promptUpgrade(cache.latestVersion);
+      await promptUpgrade(cache!.latestVersion);
     } catch (err) {
       if (isPromptCancelled(err)) return;
       /* prompt error, ignore */
@@ -753,7 +804,8 @@ program
           await showWhatsNew(VERSION, resolvedVersion);
         }
       } catch (err) {
-        spinner.fail('Upgrade failed');
+        if (isPromptCancelled(err)) return;
+        spinner.fail(`Upgrade failed: ${err instanceof Error ? err.message : String(err)}`);
         console.log(chalk.gray(`Run manually: agents upgrade ${version ? version + ' ' : ''}--yes`));
       }
     });
