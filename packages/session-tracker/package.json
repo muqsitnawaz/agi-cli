@@ -11,6 +11,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:smoke": "vitest run tests/smoke.test.ts",
+<<<<<<< HEAD
+=======
+    "test:cold-spawn": "vitest run tests/scenarios/cold-spawn.test.ts",
+    "test:report": "tsx tests/run-report.ts",
+>>>>>>> origin/main
     "install-hook": "tsx src/install-hook.ts"
   },
   "devDependencies": {

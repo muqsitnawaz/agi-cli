@@ -3,7 +3,11 @@ import * as os from 'os';
 import * as path from 'path';
 import type { SessionState } from './types.js';
 
+<<<<<<< HEAD
 export const STATE_DIR = path.join(os.homedir(), '.agents', '.cache', 'terminals', 'sessions');
+=======
+export const STATE_DIR = path.join(os.homedir(), '.agents', '.cache', 'state', 'sessions');
+>>>>>>> origin/main
 
 export function stateFilePath(pid: number): string {
   return path.join(STATE_DIR, `${pid}.json`);
@@ -40,16 +44,24 @@ export function parseState(raw: string): SessionState | null {
   const o = obj as Record<string, unknown>;
   if (
     typeof o.session_id !== 'string' ||
+<<<<<<< HEAD
+=======
+    typeof o.agent !== 'string' ||
+>>>>>>> origin/main
     typeof o.cwd !== 'string' ||
     typeof o.pid !== 'number' ||
     typeof o.ts !== 'number'
   ) {
     return null;
   }
+<<<<<<< HEAD
   // Legacy hooks (the pre-package SessionStart capture script) wrote a subset
   // of fields. Default the rest rather than reject — session_id is the load-
   // bearing field and is always present.
   if (typeof o.agent !== 'string') o.agent = 'unknown' as any;
+=======
+  // method is informational — older legacy hooks didn't write it. Default rather than reject.
+>>>>>>> origin/main
   if (typeof o.method !== 'string') o.method = 'hook-stdin';
   return o as unknown as SessionState;
 }

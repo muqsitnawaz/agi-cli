@@ -7,10 +7,15 @@
 #   - grok: GROK_SESSION_ID and GROK_WORKSPACE_ROOT env vars
 #   - gemini/antigravity: TBD — add branches below as upstream payloads land
 #
+<<<<<<< HEAD
 # Writes ~/.agents/.cache/terminals/sessions/<PPID>.json with the canonical
 # SessionState schema from src/types.ts. Atomic via mktemp + mv.
 # Distinct path from the legacy 04-capture hook (~/.agents/.cache/state/sessions/)
 # so the two writers don't race for the same file.
+=======
+# Writes ~/.agents/.cache/state/sessions/<PPID>.json with the canonical
+# SessionState schema from src/types.ts. Atomic via mktemp + mv.
+>>>>>>> origin/main
 #
 # Invocation:
 #   hook.sh <agent>            # required; selects which payload format to parse
@@ -24,8 +29,15 @@ if [ -z "$AGENT" ]; then
   exit 0
 fi
 
+<<<<<<< HEAD
 # Read stdin if any. macOS has no `timeout` in PATH by default, so we rely on
 # the host closing stdin promptly (claude/codex/cursor all do).
+=======
+# Read stdin if any (don't block forever).
+# Use `cat` only when stdin is not a TTY — and rely on hosts (claude, codex,
+# cursor) closing stdin promptly. macOS has no `timeout` in PATH by default,
+# so we don't use it.
+>>>>>>> origin/main
 STDIN_JSON=""
 if [ ! -t 0 ]; then
   STDIN_JSON="$(cat || true)"
@@ -36,7 +48,11 @@ CWD=""
 METHOD="hook-stdin"
 
 extract_stdin_json() {
+<<<<<<< HEAD
   local field_priority="$1"
+=======
+  local field_priority="$1"  # space-separated list of JSON keys to try in order
+>>>>>>> origin/main
   python3 -c "
 import json, sys
 try:
@@ -67,6 +83,10 @@ case "$AGENT" in
     METHOD="hook-env"
     ;;
   gemini|antigravity)
+<<<<<<< HEAD
+=======
+    # Try stdin JSON first (covers most cases); fall through if empty.
+>>>>>>> origin/main
     SID="$(printf '%s' "$STDIN_JSON" | extract_stdin_json 'session_id conversation_id sessionId')"
     CWD="$(printf '%s' "$STDIN_JSON" | extract_stdin_json 'cwd workspace_roots')"
     ;;
@@ -81,7 +101,11 @@ fi
 
 [ -z "$CWD" ] && CWD="$PWD"
 
+<<<<<<< HEAD
 STATE_DIR="$HOME/.agents/.cache/terminals/sessions"
+=======
+STATE_DIR="$HOME/.agents/.cache/state/sessions"
+>>>>>>> origin/main
 mkdir -p "$STATE_DIR"
 
 TID="${AGENT_TERMINAL_ID:-}"

@@ -10,6 +10,7 @@ const execAsync = promisify(exec);
 const PID_TREE_MAX_DEPTH = 5;
 const PID_TREE_MAX_NODES = 100;
 
+<<<<<<< HEAD
 // macOS `pgrep -P` silently misses children for some pids; `ps -eo` is reliable.
 async function buildChildIndex(): Promise<Map<number, number[]>> {
   const index = new Map<number, number[]>();
@@ -32,18 +33,40 @@ async function buildChildIndex(): Promise<Map<number, number[]>> {
 
 export async function descendantPids(rootPid: number): Promise<number[]> {
   const index = await buildChildIndex();
+=======
+export async function descendantPids(rootPid: number): Promise<number[]> {
+>>>>>>> origin/main
   const visited = new Set<number>([rootPid]);
   const out: number[] = [];
   const queue: { pid: number; depth: number }[] = [{ pid: rootPid, depth: 0 }];
   while (queue.length > 0 && visited.size < PID_TREE_MAX_NODES) {
     const { pid, depth } = queue.shift()!;
     if (depth >= PID_TREE_MAX_DEPTH) continue;
+<<<<<<< HEAD
     for (const c of index.get(pid) ?? []) {
+=======
+    let children: number[] = [];
+    try {
+      const { stdout } = await execAsync(`pgrep -P ${pid}`, { timeout: 1000 });
+      children = stdout
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean)
+        .map(Number)
+        .filter((n) => Number.isFinite(n) && n > 0);
+    } catch {
+      children = [];
+    }
+    for (const c of children) {
+>>>>>>> origin/main
       if (visited.has(c)) continue;
       visited.add(c);
       out.push(c);
       queue.push({ pid: c, depth: depth + 1 });
+<<<<<<< HEAD
       if (visited.size >= PID_TREE_MAX_NODES) break;
+=======
+>>>>>>> origin/main
     }
   }
   return out;
@@ -53,7 +76,12 @@ export async function findStateByPid(pid: number): Promise<SessionState | null> 
   try {
     const raw = await fs.promises.readFile(stateFilePath(pid), 'utf8');
     return parseState(raw);
+<<<<<<< HEAD
   } catch {
+=======
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+>>>>>>> origin/main
     return null;
   }
 }

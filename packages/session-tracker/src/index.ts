@@ -86,7 +86,12 @@ async function readStateIfPresent(p: string): Promise<SessionState | null> {
   try {
     const raw = await fs.promises.readFile(p, 'utf8');
     return parseState(raw);
+<<<<<<< HEAD
   } catch {
+=======
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+>>>>>>> origin/main
     return null;
   }
 }

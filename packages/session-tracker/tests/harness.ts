@@ -4,6 +4,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { awaitNewSession, snapshotSessions } from '../src/adapters/claude.js';
+<<<<<<< HEAD
+=======
+import { trackSpawn } from '../src/index.js';
+>>>>>>> origin/main
 import { clearSession } from '../src/writer.js';
 import type { AgentId, DetectionResult } from '../src/types.js';
 
@@ -14,6 +18,7 @@ export interface SpawnOpts {
   trackerTimeoutMs?: number;
   env?: Record<string, string>;
   args?: string[];
+<<<<<<< HEAD
   reuseCwd?: boolean;
   /**
    * Headless prompt; defaults to "say ok". Avoids needing a PTY.
@@ -22,6 +27,10 @@ export interface SpawnOpts {
    */
   prompt?: string;
   mode?: 'plan' | 'edit' | 'auto' | 'skip';
+=======
+  /** If true, do NOT create a fresh tmpdir cwd — use the user's actual one. */
+  reuseCwd?: boolean;
+>>>>>>> origin/main
 }
 
 export interface SpawnRun {
@@ -37,15 +46,23 @@ export interface SpawnRun {
 async function makeFreshCwd(): Promise<string> {
   const dir = path.join(os.tmpdir(), `session-tracker-test-${randomUUID()}`);
   await fs.promises.mkdir(dir, { recursive: true });
+<<<<<<< HEAD
   // macOS: /tmp -> /private/tmp. Resolve so Claude's workspace folder name
   // matches the realpath we'll be snapshotting against.
   return fs.promises.realpath(dir);
+=======
+  return dir;
+>>>>>>> origin/main
 }
 
 export async function spawnAndDetect(opts: SpawnOpts): Promise<SpawnRun> {
   const cwd = opts.cwd ?? (opts.reuseCwd ? process.cwd() : await makeFreshCwd());
   const launchId = randomUUID();
 
+<<<<<<< HEAD
+=======
+  // Ground-truth snapshot BEFORE spawn (Claude only for now).
+>>>>>>> origin/main
   const beforeFiles =
     opts.agent === 'claude' ? await snapshotSessions(cwd) : new Set<string>();
 
@@ -55,6 +72,7 @@ export async function spawnAndDetect(opts: SpawnOpts): Promise<SpawnRun> {
     ...opts.env,
   };
 
+<<<<<<< HEAD
   const headlessPrompt = opts.prompt ?? 'say ok';
   const mode = opts.mode ?? 'plan';
   const argv =
@@ -62,12 +80,16 @@ export async function spawnAndDetect(opts: SpawnOpts): Promise<SpawnRun> {
       ? ['run', opts.agent, ...opts.args]
       : ['run', opts.agent, headlessPrompt, '--mode', mode];
 
+=======
+  const argv = ['run', opts.agent, '--interactive', ...(opts.args ?? [])];
+>>>>>>> origin/main
   const proc = spawn('agents', argv, {
     cwd,
     env: childEnv,
     stdio: ['pipe', 'pipe', 'pipe'],
     detached: false,
   });
+<<<<<<< HEAD
   if (!proc.pid) {
     throw new Error(`spawn agents ${opts.agent} failed: no pid`);
   }
@@ -78,6 +100,20 @@ export async function spawnAndDetect(opts: SpawnOpts): Promise<SpawnRun> {
 
   const trackerTimeoutMs = opts.trackerTimeoutMs ?? 15_000;
   const truthTimeoutMs = opts.truthTimeoutMs ?? 15_000;
+=======
+
+  if (!proc.pid) {
+    throw new Error(`spawn agents ${opts.agent} failed: no pid`);
+  }
+
+  // Tracker polls for the state file at <agentPid>.json.
+  // The hook writes to $PPID which IS the agent process pid; in our spawn
+  // chain agents-cli -> agent CLI so we need to walk descendants.
+  // Use shellPid path (findStateInTree) via the index re-export — but
+  // trackSpawn polls a SPECIFIC pid. For early validation, walk the tree.
+  const trackerTimeoutMs = opts.trackerTimeoutMs ?? 6000;
+  const truthTimeoutMs = opts.truthTimeoutMs ?? 6000;
+>>>>>>> origin/main
 
   const [truth, detected] = await Promise.all([
     opts.agent === 'claude'
@@ -89,9 +125,26 @@ export async function spawnAndDetect(opts: SpawnOpts): Promise<SpawnRun> {
   const matched =
     truth !== null && detected.sessionId !== null && detected.sessionId === truth.sessionId;
 
+<<<<<<< HEAD
   return { agent: opts.agent, cwd, launchId, proc, truth, detected, matched };
 }
 
+=======
+  return {
+    agent: opts.agent,
+    cwd,
+    launchId,
+    proc,
+    truth,
+    detected,
+    matched,
+  };
+}
+
+// Wait up to timeoutMs for ANY pid in the tree under shellPid to have a state file.
+// This is the right primitive: the actual agent process is a descendant of the
+// `agents run ...` wrapper, and the hook writes under that agent pid.
+>>>>>>> origin/main
 async function trackByShellTree(
   shellPid: number,
   timeoutMs: number,
@@ -121,6 +174,7 @@ export async function killAndCleanup(run: SpawnRun): Promise<void> {
       proc.kill('SIGTERM');
       await new Promise<void>((resolve) => {
         const t = setTimeout(() => {
+<<<<<<< HEAD
           try { proc.kill('SIGKILL'); } catch {}
           resolve();
         }, 2000);
@@ -129,6 +183,26 @@ export async function killAndCleanup(run: SpawnRun): Promise<void> {
     }
   } catch {}
 
+=======
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            /* ignore */
+          }
+          resolve();
+        }, 2000);
+        proc.once('exit', () => {
+          clearTimeout(t);
+          resolve();
+        });
+      });
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // Clean up any state files written by this run.
+>>>>>>> origin/main
   try {
     const { descendantPids } = await import('../src/reader.js');
     if (run.proc.pid) {
@@ -137,10 +211,24 @@ export async function killAndCleanup(run: SpawnRun): Promise<void> {
         await clearSession(p).catch(() => undefined);
       }
     }
+<<<<<<< HEAD
   } catch {}
 
   if (run.cwd.includes('session-tracker-test-')) {
     try { await fs.promises.rm(run.cwd, { recursive: true, force: true }); } catch {}
+=======
+  } catch {
+    /* ignore */
+  }
+
+  // Remove the temp cwd we created (if we created one).
+  if (run.cwd.startsWith(path.join(os.tmpdir(), 'session-tracker-test-'))) {
+    try {
+      await fs.promises.rm(run.cwd, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+>>>>>>> origin/main
   }
 }
 

@@ -5,8 +5,12 @@ export type AgentId =
   | 'cursor'
   | 'grok'
   | 'antigravity'
+<<<<<<< HEAD
   | 'opencode'
   | 'unknown';
+=======
+  | 'opencode';
+>>>>>>> origin/main
 
 export interface TrackSpawnInput {
   agent: AgentId;

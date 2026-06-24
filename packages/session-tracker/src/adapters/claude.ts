@@ -9,6 +9,7 @@ export function claudeWorkspaceFolder(cwd: string): string {
   return cwd.replace(/[\/.]/g, '-');
 }
 
+<<<<<<< HEAD
 async function discoverClaudeProjectRoots(): Promise<string[]> {
   // agents-cli isolates per-version state: each installed claude version writes
   // session files under <ver-home>/.claude/projects/, NOT the symlinked
@@ -39,11 +40,14 @@ export async function claudeSessionDirs(cwd: string): Promise<string[]> {
 }
 
 // Legacy single-root helper kept for any single-version-aware caller.
+=======
+>>>>>>> origin/main
 export function claudeSessionDir(cwd: string): string {
   return path.join(CLAUDE_PROJECTS_ROOT, claudeWorkspaceFolder(cwd));
 }
 
 export async function snapshotSessions(cwd: string): Promise<Set<string>> {
+<<<<<<< HEAD
   const dirs = await claudeSessionDirs(cwd);
   const all = new Set<string>();
   for (const d of dirs) {
@@ -57,6 +61,14 @@ export async function snapshotSessions(cwd: string): Promise<Set<string>> {
     }
   }
   return all;
+=======
+  try {
+    const files = await fs.promises.readdir(claudeSessionDir(cwd));
+    return new Set(files.filter((f) => f.endsWith('.jsonl')));
+  } catch {
+    return new Set();
+  }
+>>>>>>> origin/main
 }
 
 export interface NewSession {
@@ -72,6 +84,7 @@ export async function awaitNewSession(
   pollMs = 50,
 ): Promise<NewSession | null> {
   const start = Date.now();
+<<<<<<< HEAD
   while (Date.now() - start < timeoutMs) {
     const dirs = await claudeSessionDirs(cwd);
     for (const dir of dirs) {
@@ -90,6 +103,23 @@ export async function awaitNewSession(
       } catch {
         /* dir may not exist yet */
       }
+=======
+  const dir = claudeSessionDir(cwd);
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const files = await fs.promises.readdir(dir);
+      for (const f of files) {
+        if (!f.endsWith('.jsonl')) continue;
+        if (before.has(f)) continue;
+        return {
+          sessionId: f.replace(/\.jsonl$/, ''),
+          latencyMs: Date.now() - start,
+          file: path.join(dir, f),
+        };
+      }
+    } catch {
+      /* dir may not exist yet */
+>>>>>>> origin/main
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }

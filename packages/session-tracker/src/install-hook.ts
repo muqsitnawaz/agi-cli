@@ -49,6 +49,7 @@ async function writeJsonAtomic(p: string, data: any): Promise<void> {
   await fs.promises.rename(tmp, p);
 }
 
+<<<<<<< HEAD
 async function discoverClaudeSettingsPaths(): Promise<string[]> {
   // agents-cli installs each Claude version under
   // ~/.agents/.history/versions/claude/<version>/home/.claude/settings.json
@@ -88,6 +89,25 @@ async function installClaudeAt(configPath: string, opts: InstallOptions): Promis
         !(h && h.command && String(h.command).includes('packages/session-tracker/src/hook.sh')),
     );
   }
+=======
+async function installClaude(opts: InstallOptions): Promise<InstallResult> {
+  const configPath = path.join(os.homedir(), '.claude', 'settings.json');
+  const command = hookCommand('claude', opts);
+  if (opts.dryRun) {
+    return { agent: 'claude', installed: false, configPath };
+  }
+  const cfg = await readJson(configPath);
+  cfg.hooks = cfg.hooks ?? {};
+  cfg.hooks.SessionStart = cfg.hooks.SessionStart ?? [];
+  // Remove any prior registration of THIS hook path (idempotency).
+  for (const entry of cfg.hooks.SessionStart) {
+    if (!entry || !Array.isArray(entry.hooks)) continue;
+    entry.hooks = entry.hooks.filter(
+      (h: any) => !(h && h.command && String(h.command).includes('packages/session-tracker/src/hook.sh')),
+    );
+  }
+  // Find or create the empty-matcher group and add our hook.
+>>>>>>> origin/main
   let group = cfg.hooks.SessionStart.find((e: any) => e && e.matcher === '');
   if (!group) {
     group = { matcher: '', hooks: [] };
@@ -95,6 +115,7 @@ async function installClaudeAt(configPath: string, opts: InstallOptions): Promis
   }
   group.hooks.push({ type: 'command', command, timeout: 5 });
   await writeJsonAtomic(configPath, cfg);
+<<<<<<< HEAD
 }
 
 async function installClaude(opts: InstallOptions): Promise<InstallResult> {
@@ -106,18 +127,28 @@ async function installClaude(opts: InstallOptions): Promise<InstallResult> {
     await installClaudeAt(p, opts);
   }
   return { agent: 'claude', installed: true, configPath: paths.join(';') };
+=======
+  return { agent: 'claude', installed: true, configPath };
+>>>>>>> origin/main
 }
 
 async function installCodex(opts: InstallOptions): Promise<InstallResult> {
   const configPath = path.join(os.homedir(), '.codex', 'hooks.json');
   const command = hookCommand('codex', opts);
+<<<<<<< HEAD
   if (opts.dryRun) return { agent: 'codex', installed: false, configPath };
+=======
+  if (opts.dryRun) {
+    return { agent: 'codex', installed: false, configPath };
+  }
+>>>>>>> origin/main
   const cfg = await readJson(configPath);
   cfg.hooks = cfg.hooks ?? {};
   cfg.hooks.SessionStart = cfg.hooks.SessionStart ?? [];
   for (const entry of cfg.hooks.SessionStart) {
     if (!entry || !Array.isArray(entry.hooks)) continue;
     entry.hooks = entry.hooks.filter(
+<<<<<<< HEAD
       (h: any) =>
         !(h && h.command && String(h.command).includes('packages/session-tracker/src/hook.sh')),
     );
@@ -125,6 +156,12 @@ async function installCodex(opts: InstallOptions): Promise<InstallResult> {
   let group = cfg.hooks.SessionStart.find(
     (e: any) => e && (e.matcher === '' || e.matcher === 'startup|resume'),
   );
+=======
+      (h: any) => !(h && h.command && String(h.command).includes('packages/session-tracker/src/hook.sh')),
+    );
+  }
+  let group = cfg.hooks.SessionStart.find((e: any) => e && (e.matcher === '' || e.matcher === 'startup|resume'));
+>>>>>>> origin/main
   if (!group) {
     group = { matcher: 'startup|resume', hooks: [] };
     cfg.hooks.SessionStart.push(group);
@@ -137,13 +174,23 @@ async function installCodex(opts: InstallOptions): Promise<InstallResult> {
 async function installCursor(opts: InstallOptions): Promise<InstallResult> {
   const configPath = path.join(os.homedir(), '.cursor', 'hooks.json');
   const command = hookCommand('cursor', opts);
+<<<<<<< HEAD
   if (opts.dryRun) return { agent: 'cursor', installed: false, configPath };
+=======
+  if (opts.dryRun) {
+    return { agent: 'cursor', installed: false, configPath };
+  }
+>>>>>>> origin/main
   const cfg = await readJson(configPath);
   cfg.hooks = cfg.hooks ?? {};
   cfg.hooks.sessionStart = cfg.hooks.sessionStart ?? [];
   cfg.hooks.sessionStart = cfg.hooks.sessionStart.filter(
+<<<<<<< HEAD
     (h: any) =>
       !(h && h.command && String(h.command).includes('packages/session-tracker/src/hook.sh')),
+=======
+    (h: any) => !(h && h.command && String(h.command).includes('packages/session-tracker/src/hook.sh')),
+>>>>>>> origin/main
   );
   cfg.hooks.sessionStart.push({ type: 'command', command, timeout: 5 });
   await writeJsonAtomic(configPath, cfg);
@@ -153,7 +200,13 @@ async function installCursor(opts: InstallOptions): Promise<InstallResult> {
 async function installGrok(opts: InstallOptions): Promise<InstallResult> {
   const configPath = path.join(os.homedir(), '.grok', 'hooks', 'session-start.json');
   const command = hookCommand('grok', opts);
+<<<<<<< HEAD
   if (opts.dryRun) return { agent: 'grok', installed: false, configPath };
+=======
+  if (opts.dryRun) {
+    return { agent: 'grok', installed: false, configPath };
+  }
+>>>>>>> origin/main
   await writeJsonAtomic(configPath, { command, timeout: 5 });
   return { agent: 'grok', installed: true, configPath };
 }
