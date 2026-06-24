@@ -6,27 +6,28 @@ import {
   formatBrowserDaemonNotRunningError,
   getSocketPath,
   sendIPCRequest,
+  shouldRestartStaleDaemon,
 } from './ipc.js';
 import { getHelpersDir } from '../state.js';
+import { startDaemon } from '../daemon.js';
 
-const paths = vi.hoisted(() => ({
-  helperDir: `/tmp/agents-cli-browser-ipc-${process.pid}`,
-}));
+const HELPER_DIR = `/tmp/agents-cli-browser-ipc-${process.pid}`;
 
+// vi.mock factories close over local state but vitest 4 hoists them above
+// const declarations. Keep everything the factories reference inline so the
+// hoist is safe, then retrieve the vi.fn() back through the mocked module
+// (`startDaemon`) for assertions.
 vi.mock('../state.js', () => ({
-  getHelpersDir: vi.fn(() => paths.helperDir),
-}));
-
-const daemon = vi.hoisted(() => ({
-  startDaemon: vi.fn(),
+  getHelpersDir: vi.fn(() => `/tmp/agents-cli-browser-ipc-${process.pid}`),
 }));
 
 vi.mock('../daemon.js', () => ({
-  startDaemon: daemon.startDaemon,
+  startDaemon: vi.fn(),
+  stopDaemon: vi.fn(),
 }));
 
 afterEach(() => {
-  rmSync(paths.helperDir, { recursive: true, force: true });
+  rmSync(HELPER_DIR, { recursive: true, force: true });
   vi.clearAllMocks();
 });
 
@@ -44,6 +45,23 @@ describe('sendIPCRequest', () => {
     await expect(
       sendIPCRequest({ action: 'status' }, { autoStartDaemon: false })
     ).rejects.toThrow(formatBrowserDaemonNotRunningError());
-    expect(daemon.startDaemon).not.toHaveBeenCalled();
+    expect(startDaemon).not.toHaveBeenCalled();
+  });
+});
+
+describe('shouldRestartStaleDaemon', () => {
+  it('restarts when the daemon reports a different concrete version', () => {
+    expect(shouldRestartStaleDaemon('1.2.0', '1.3.0')).toBe(true);
+    expect(shouldRestartStaleDaemon('0.0.0-dev.abc', '0.0.0-dev.def')).toBe(true);
+  });
+
+  it('does not restart when versions match', () => {
+    expect(shouldRestartStaleDaemon('1.3.0', '1.3.0')).toBe(false);
+  });
+
+  it('does not restart on an ambiguous daemon version', () => {
+    expect(shouldRestartStaleDaemon(undefined, '1.3.0')).toBe(false);
+    expect(shouldRestartStaleDaemon('', '1.3.0')).toBe(false);
+    expect(shouldRestartStaleDaemon('unknown', '1.3.0')).toBe(false);
   });
 });

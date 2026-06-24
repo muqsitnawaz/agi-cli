@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-import { registerHooksToSettings } from '../hooks.js';
+import { registerHooksToSettings, unmanagedHookNames } from '../hooks.js';
 import { CODEX_HOOKS_MIN_VERSION } from '../agents.js';
 import { compareVersions } from '../versions.js';
 import type { ManifestHook } from '../types.js';
@@ -24,6 +24,36 @@ function makeVersionHome(): string {
   fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
   return home;
 }
+
+describe('unmanagedHookNames', () => {
+  it('flags installed hooks whose name matches no manifest script basename', () => {
+    const installed = [
+      '00-agent-verify-work-complete', // system script, no manifest entry → dead
+      '02-expand-prompt-bang-commands', // dead
+      '03-linear-inject-tasks-context', // manifest-declared → registered
+      'git-guard', // manifest-declared → registered
+    ];
+    const manifestScripts = ['03-linear-inject-tasks-context.sh', 'git-guard.sh', 'rm-guard.sh'];
+    expect(unmanagedHookNames(installed, manifestScripts)).toEqual([
+      '00-agent-verify-work-complete',
+      '02-expand-prompt-bang-commands',
+    ]);
+  });
+
+  it('matches on script basename regardless of extension (.sh, .py)', () => {
+    // Manifest scripts can carry any extension; the installed name is ext-stripped.
+    expect(unmanagedHookNames(['guard'], ['guard.py'])).toEqual([]);
+    expect(unmanagedHookNames(['guard'], ['guard.sh'])).toEqual([]);
+  });
+
+  it('returns nothing when every installed hook is declared', () => {
+    expect(unmanagedHookNames(['a', 'b'], ['a.sh', 'b.sh'])).toEqual([]);
+  });
+
+  it('returns all installed hooks when the manifest is empty', () => {
+    expect(unmanagedHookNames(['a', 'b'], [])).toEqual(['a', 'b']);
+  });
+});
 
 describe('registerHooksToSettings - Codex', () => {
   beforeEach(() => {
@@ -531,5 +561,87 @@ describe('registerHooksToSettings - Antigravity', () => {
     const result = registerHooksToSettings('antigravity', versionHome, manifest, agentsDir);
     expect(result.errors.length).toBeGreaterThan(0);
     expect(result.errors[0]).toContain('missing');
+  });
+});
+
+describe('registerHooksToSettings - Claude', () => {
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-test-'));
+    agentsDir = path.join(tmpDir, '.agents');
+    fs.mkdirSync(path.join(agentsDir, 'hooks'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeClaudeVersionHome(): string {
+    const home = path.join(tmpDir, 'claude-home');
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    return home;
+  }
+
+  function readClaudeSettings(home: string): Record<string, any> {
+    return JSON.parse(
+      fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf-8')
+    );
+  }
+
+  it('preserves env, mcpServers, permissions, and custom top-level keys (regression #137)', () => {
+    const versionHome = makeClaudeVersionHome();
+    const settingsPath = path.join(versionHome, '.claude', 'settings.json');
+
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        env: { FOO: 'bar', DEBUG: 'true' },
+        mcpServers: {
+          fooServer: { command: '/bin/foo', args: ['--bar'] },
+        },
+        permissions: { allow: ['Bash(ls:*)'], deny: [] },
+        customKey: { nested: 'preserved' },
+      }, null, 2)
+    );
+
+    const scriptPath = makeScript('pre-tool.sh');
+    const manifest: Record<string, ManifestHook> = {
+      'pre-tool': { script: 'pre-tool.sh', events: ['PreToolUse'], matcher: 'Bash' },
+    };
+
+    const result = registerHooksToSettings('claude', versionHome, manifest, agentsDir);
+    expect(result.errors).toHaveLength(0);
+    expect(result.registered).toContain('pre-tool -> PreToolUse');
+
+    const settings = readClaudeSettings(versionHome);
+
+    expect(settings.env).toEqual({ FOO: 'bar', DEBUG: 'true' });
+    expect(settings.mcpServers).toEqual({
+      fooServer: { command: '/bin/foo', args: ['--bar'] },
+    });
+    expect(settings.permissions).toEqual({ allow: ['Bash(ls:*)'], deny: [] });
+    expect(settings.customKey).toEqual({ nested: 'preserved' });
+
+    expect(settings.hooks).toBeDefined();
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].matcher).toBe('Bash');
+    expect(settings.hooks.PreToolUse[0].hooks).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe(scriptPath);
+    expect(settings.hooks.PreToolUse[0].hooks[0].type).toBe('command');
+  });
+
+  it('writes hooks alongside an empty pre-existing settings.json', () => {
+    const versionHome = makeClaudeVersionHome();
+    const scriptPath = makeScript('on-prompt.sh');
+
+    const manifest: Record<string, ManifestHook> = {
+      'on-prompt': { script: 'on-prompt.sh', events: ['UserPromptSubmit'] },
+    };
+
+    const result = registerHooksToSettings('claude', versionHome, manifest, agentsDir);
+    expect(result.errors).toHaveLength(0);
+
+    const settings = readClaudeSettings(versionHome);
+    expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
+    expect(settings.hooks.UserPromptSubmit[0].hooks[0].command).toBe(scriptPath);
   });
 });

@@ -7,10 +7,26 @@
  */
 
 /** Unique identifier for a supported AI coding agent. */
-export type AgentId = 'claude' | 'codex' | 'gemini' | 'cursor' | 'opencode' | 'openclaw' | 'copilot' | 'amp' | 'kiro' | 'goose' | 'roo' | 'antigravity' | 'grok';
+export type AgentId = 'claude' | 'codex' | 'gemini' | 'cursor' | 'opencode' | 'openclaw' | 'copilot' | 'amp' | 'kiro' | 'goose' | 'roo' | 'antigravity' | 'grok' | 'kimi' | 'droid';
 
 /** How `agents run <agent>` chooses an installed version when none is pinned. */
 export type RunStrategy = 'pinned' | 'available' | 'balanced';
+
+/** Per-agent run strategy config. */
+export interface AgentRunConfig {
+  strategy?: RunStrategy;
+}
+
+/** Default launch options applied by `agents run` when flags are omitted. */
+export interface RunDefaults {
+  mode?: Mode;
+  model?: string;
+}
+
+/** `run:` section in agents.yaml. Agent keys keep strategy; `defaults` stores selector rules. */
+export type RunConfig = Partial<Record<AgentId, AgentRunConfig>> & {
+  defaults?: Record<string, RunDefaults>;
+};
 
 /** Preview features that users can opt into via `agents beta`. */
 export type BetaFeatureName = 'drive' | 'factory';
@@ -210,7 +226,7 @@ export interface InstalledHook {
 /** Package manifest (agents.yaml) found inside a cloned config repo or package. */
 export interface Manifest {
   agents?: Partial<Record<AgentId, string>>;
-  run?: Partial<Record<AgentId, { strategy?: RunStrategy }>>;
+  run?: RunConfig;
   beta?: {
     enabled?: BetaFeatureName[];
   };
@@ -262,7 +278,7 @@ export interface InstalledSkill {
   agent: AgentId;
 }
 
-/** Git remote metadata for the ~/.agents-system/ config repository. */
+/** Git remote metadata for the ~/.agents/.system/ config repository. */
 export interface RepoInfo {
   source: string;
   branch: string;
@@ -270,7 +286,7 @@ export interface RepoInfo {
   lastSync: string;
 }
 
-/** Canonical system repo cloned into ~/.agents-system/. */
+/** Canonical system repo cloned into ~/.agents/.system/. */
 export const DEFAULT_SYSTEM_REPO = 'gh:phnx-labs/.agents-system';
 
 /** Strip the `gh:` prefix and `.git` suffix to get a GitHub `owner/repo` slug. */
@@ -409,7 +425,7 @@ export type ResourceType = 'commands' | 'skills' | 'hooks' | 'memory' | 'mcp' | 
 
 /**
  * A resource selection pattern stored in agents.yaml versions:
- *   "system:*"      — all resources from ~/.agents-system/
+ *   "system:*"      — all resources from ~/.agents/.system/
  *   "user:*"        — all resources from ~/.agents/
  *   "rush:*"        — all resources from ~/.agents-rush/  (extra repo alias)
  *   "project:*"     — all resources from .agents/ in the project root
@@ -478,6 +494,44 @@ export interface DiscoveredPlugin {
   hasMcp: boolean;
   /** Whether the plugin root contains a settings.json with non-permission keys to merge. */
   hasSettings: boolean;
+  /**
+   * Marketplace this plugin was discovered in (from marketplaceNameFor() of the
+   * owning MarketplaceSpec): "agents-cli" (user repo), "agents-<alias>" (extra
+   * repo), or "agents-project" (project repo). Absent on hand-built plugins
+   * (e.g. workflow-scoped) — those default to the user marketplace on sync.
+   */
+  marketplace?: string;
+}
+
+/**
+ * Identifies one DotAgents repo that contributes a plugin marketplace. Each
+ * repo synthesizes its own catalog and registers under its own name:
+ *   user    — ~/.agents/plugins/         → "agents-cli"   (the canonical name)
+ *   extra   — ~/.agents-<alias>/plugins/ → "agents-<alias>" (e.g. "agents-extras")
+ *   project — <cwd>/.agents/plugins/     → "agents-project"
+ *
+ * `root` on the extra/project variants is the absolute path to that repo's
+ * plugins/ directory (the source side). The user variant needs no path — it is
+ * always ~/.agents/plugins/ via getPluginsDir().
+ */
+export type MarketplaceSpec =
+  | { kind: 'user' }
+  | { kind: 'extra'; alias: string; root: string }
+  | { kind: 'project'; root: string }
+  | { kind: 'system'; root: string };
+
+/**
+ * A marketplace found on the source side (before any per-version sync), with
+ * its resolved name, source plugins directory, and catalog description.
+ */
+export interface DiscoveredMarketplace {
+  spec: MarketplaceSpec;
+  /** e.g. "agents-cli", "agents-extras", "agents-project". */
+  name: string;
+  /** Absolute path to the source plugins/ directory on disk. */
+  pluginsRoot: string;
+  /** Human description embedded in the synthesized catalog. */
+  description: string;
 }
 
 /** Frontmatter fields parsed from a subagent's agent.md file. */
@@ -517,17 +571,17 @@ export interface ExtraRepoConfig {
   enabled: boolean;
 }
 
-/** Top-level structure of ~/.agents-system/agents.yaml -- the CLI's persistent state. */
+/** Top-level structure of ~/.agents/.system/agents.yaml -- the CLI's persistent state. */
 export interface Meta {
   agents?: Partial<Record<AgentId, string>>;
-  run?: Partial<Record<AgentId, { strategy?: RunStrategy }>>;
+  run?: RunConfig;
   beta?: {
     enabled?: BetaFeatureName[];
   };
   registries?: Record<RegistryType, Record<string, RegistryConfig>>;
   // Per-version resource tracking
   versions?: Partial<Record<AgentId, Record<string, VersionResources>>>;
-  // Git remote source URL (when ~/.agents-system/ is a git repo)
+  // Git remote source URL (when ~/.agents/.system/ is a git repo)
   source?: string;
   /**
    * Extra DotAgent repos merged after ~/.agents/. Managed clones live as peer
@@ -590,7 +644,7 @@ export interface BrowserProfileConfig {
   logHost?: string;
 }
 
-/** Options controlling which agents and resources are synced during `agents pull` / `agents use`. */
+/** Options controlling which agents and resources are synced during `agents repo refresh` / `agents use`. */
 export interface SyncOptions {
   agents?: AgentId[];
   yes?: boolean;

@@ -17,6 +17,7 @@ enum Events {
             throw RPCError.appMissing(pid)
         }
         try ensurePidAllowed(pid)
+        let front = try checkFrontmost(pid: pid, params: params)
 
         let chord = try parseChord(keys)
 
@@ -30,7 +31,63 @@ enum Events {
 
         down.postToPid(pid_t(pid))
         up.postToPid(pid_t(pid))
-        return ["ok": true]
+        return ["ok": true, "frontmost": front]
+    }
+
+    // Type an arbitrary unicode string into the focused field. Unlike sendKey
+    // (one chord, US-ANSI keycodes only), this emits the literal characters via
+    // CGEventKeyboardSetUnicodeString — punctuation, digits, mixed case, and
+    // non-ASCII all work without a keycode table. Posts to the pid; the caller
+    // is responsible for focusing the target first (click / set_focus).
+    static func typeText(params: [String: Any]) throws -> [String: Any] {
+        let pid = try Params.int(params, "pid")
+        let text = try Params.string(params, "text")
+        guard NSRunningApplication(processIdentifier: pid_t(pid)) != nil else {
+            throw RPCError.appMissing(pid)
+        }
+        try ensurePidAllowed(pid)
+        let front = try checkFrontmost(pid: pid, params: params)
+
+        // Inter-character delay. Default 4ms (backward compatible); lossy
+        // keyboard relays (Parallels/VM guests) can drop chars mid-stream at
+        // that rate, so callers may raise it. Clamp to [1, 250]ms.
+        let charDelayMs = min(250, max(1, Params.intOpt(params, "char_delay_ms") ?? 4))
+        let charDelay = Double(charDelayMs) / 1000.0
+
+        for scalar in text.unicodeScalars {
+            var utf16 = Array(String(scalar).utf16)
+            guard let down = CGEvent(keyboardEventSource: EventSynth.source, virtualKey: 0, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: EventSynth.source, virtualKey: 0, keyDown: false) else {
+                throw RPCError(code: "action_failed", message: "could not create key event")
+            }
+            down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+            up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+            down.postToPid(pid_t(pid))
+            up.postToPid(pid_t(pid))
+            Thread.sleep(forTimeInterval: charDelay)
+        }
+
+        if Params.bool(params, "commit") {
+            if let down = CGEvent(keyboardEventSource: EventSynth.source, virtualKey: 0x24, keyDown: true),
+               let up = CGEvent(keyboardEventSource: EventSynth.source, virtualKey: 0x24, keyDown: false) {
+                down.postToPid(pid_t(pid))
+                up.postToPid(pid_t(pid))
+            }
+        }
+        return ["ok": true, "chars": text.count, "frontmost": front]
+    }
+
+    // postToPid keyboard events are silently dropped by apps that gate input
+    // on key-window status (Parallels guest VMs, some Catalyst apps) — the
+    // caller would see ok:true while nothing landed. Always report whether
+    // the target was frontmost at post time; with require_frontmost the
+    // mismatch becomes a hard error instead of a warning.
+    private static func checkFrontmost(pid: Int, params: [String: Any]) throws -> Bool {
+        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid_t(pid)
+        if !front && Params.bool(params, "require_frontmost") {
+            throw RPCError(code: "not_frontmost", message: "pid \(pid) is not the frontmost app — keystrokes would be dropped by key-window-gated targets. Run `agents computer raise` first, then retry")
+        }
+        return front
     }
 
     private struct Chord {

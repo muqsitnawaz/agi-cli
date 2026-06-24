@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
 import type { AgentId } from './types.js';
+import { capableAgents } from './capabilities.js';
 import {
   getProjectAgentsDir,
   getSystemWorkflowsDir,
@@ -19,8 +20,9 @@ import {
 } from './state.js';
 import { listInstalledVersions, getVersionHomePath } from './versions.js';
 
-/** Agents that support running workflows via `agents run`. */
-export const WORKFLOW_CAPABLE_AGENTS: AgentId[] = ['claude'];
+// WORKFLOW_CAPABLE_AGENTS removed — use `capableAgents('workflows')` from
+// lib/capabilities.ts. The capability matrix on AgentConfig is the single
+// source of truth.
 
 /** Parsed WORKFLOW.md frontmatter. */
 export interface WorkflowFrontmatter {
@@ -48,7 +50,7 @@ export interface DiscoveredWorkflow {
   subagentCount: number;
 }
 
-/** A workflow in central storage (~/.agents/workflows/ or ~/.agents-system/workflows/). */
+/** A workflow in central storage (~/.agents/workflows/ or ~/.agents/.system/workflows/). */
 export interface InstalledWorkflow {
   name: string;
   path: string;
@@ -193,7 +195,7 @@ export function discoverWorkflowsFromRepo(repoPath: string): DiscoveredWorkflow[
 
 /**
  * List all workflows in central storage.
- * User layer (~/.agents/workflows/) wins over system (~/.agents-system/workflows/).
+ * User layer (~/.agents/workflows/) wins over system (~/.agents/.system/workflows/).
  */
 export function listInstalledWorkflows(): Map<string, InstalledWorkflow> {
   const result = new Map<string, InstalledWorkflow>();
@@ -320,7 +322,7 @@ export function removeWorkflowFromVersion(
 /** Iterate all installed (agent, version) pairs that support workflows. */
 export function iterWorkflowsCapableVersions(filter?: { agent?: AgentId; version?: string }): Array<{ agent: AgentId; version: string }> {
   const result: Array<{ agent: AgentId; version: string }> = [];
-  for (const agentId of WORKFLOW_CAPABLE_AGENTS) {
+  for (const agentId of capableAgents('workflows')) {
     if (filter?.agent && filter.agent !== agentId) continue;
     const versions = listInstalledVersions(agentId);
     for (const version of versions) {

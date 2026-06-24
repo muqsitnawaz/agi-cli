@@ -10,6 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
+import { capableAgents } from './capabilities.js';
 import { getSubagentsDir, getUserSubagentsDir, getTrashSubagentsDir } from './state.js';
 import { listInstalledVersions, getVersionHomePath } from './versions.js';
 import { safeJoin } from './paths.js';
@@ -262,6 +263,46 @@ export function transformSubagentForClaude(subagentDir: string): string {
 }
 
 /**
+ * Transform a subagent into a Factory AI Droid "custom droid" .md file.
+ *
+ * Mirrors transformSubagentForClaude (flatten frontmatter + body + appended
+ * .md sections), but emits only frontmatter keys Factory recognizes
+ * (name, description, model). Factory has no `color` field, so it is dropped.
+ * See https://docs.factory.ai/cli/configuration/custom-droids.
+ */
+export function transformSubagentForDroid(subagentDir: string): string {
+  const agentMd = path.join(subagentDir, 'AGENT.md');
+  const frontmatter = parseSubagentFrontmatter(agentMd);
+  const body = getSubagentBody(agentMd);
+
+  if (!frontmatter) {
+    throw new Error(`Invalid AGENT.md in ${subagentDir}`);
+  }
+
+  const frontmatterYaml = yaml.stringify({
+    name: frontmatter.name,
+    description: frontmatter.description,
+    ...(frontmatter.model && { model: frontmatter.model }),
+  }).trim();
+
+  let result = `---\n${frontmatterYaml}\n---\n\n${body}`;
+
+  const files = fs.readdirSync(subagentDir)
+    .filter(f => f.endsWith('.md') && f !== 'AGENT.md')
+    .sort();
+
+  for (const file of files) {
+    const filePath = path.join(subagentDir, file);
+    const content = fs.readFileSync(filePath, 'utf-8').trim();
+    const sectionName = file.replace('.md', '');
+    const title = sectionName.charAt(0).toUpperCase() + sectionName.slice(1).toLowerCase();
+    result += `\n\n## ${title}\n\n${content}`;
+  }
+
+  return result;
+}
+
+/**
  * Sync a subagent to an OpenClaw workspace
  * Copies full directory, renames AGENT.md to AGENTS.md
  */
@@ -385,8 +426,9 @@ export function subagentContentMatches(installedDir: string, sourceDir: string):
   return true;
 }
 
-/** Agents that support the subagent system (Claude via flattened .md, OpenClaw via directory copy). */
-export const SUBAGENT_CAPABLE_AGENTS: AgentId[] = ['claude', 'openclaw'];
+// SUBAGENT_CAPABLE_AGENTS removed — use `capableAgents('subagents')` from
+// lib/capabilities.ts. The capability matrix on AgentConfig is the single
+// source of truth.
 
 /**
  * List subagents installed to a specific agent's home
@@ -467,9 +509,6 @@ export function listSubagentsForAgent(
   return subagents;
 }
 
-// Agents that support subagents
-const SUBAGENTS_CAPABLE_AGENTS: AgentId[] = ['claude', 'openclaw'];
-
 export interface VersionSubagentDiff {
   agent: AgentId;
   version: string;
@@ -528,9 +567,9 @@ export function diffVersionSubagents(agent: AgentId, version: string): VersionSu
  */
 export function iterSubagentsCapableVersions(filter?: { agent?: AgentId; version?: string }): Array<{ agent: AgentId; version: string }> {
   const pairs: Array<{ agent: AgentId; version: string }> = [];
-  const agents = filter?.agent ? [filter.agent] : SUBAGENTS_CAPABLE_AGENTS;
+  const agents = filter?.agent ? [filter.agent] : capableAgents('subagents');
   for (const agent of agents) {
-    if (!SUBAGENTS_CAPABLE_AGENTS.includes(agent)) continue;
+    if (!capableAgents('subagents').includes(agent)) continue;
     const versions = listInstalledVersions(agent);
     for (const version of versions) {
       if (filter?.version && filter.version !== version) continue;

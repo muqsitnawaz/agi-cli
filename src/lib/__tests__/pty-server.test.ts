@@ -14,23 +14,33 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
+import * as os from 'os';
 import * as path from 'path';
 
-const { TEST_HOME } = vi.hoisted(() => {
-  const nodeOs = require('os');
-  const nodeFs = require('fs');
-  const nodePath = require('path');
-  // macOS sun_path is 104 chars; os.tmpdir() under /var/folders pushes the
-  // socket path over that and listen() returns EINVAL. /tmp resolves short
-  // on both Linux (/tmp) and macOS (/private/tmp) so the socket fits.
-  const tmpBase = process.platform === 'darwin' ? '/tmp' : nodeOs.tmpdir();
-  const testHome = nodeFs.mkdtempSync(nodePath.join(tmpBase, 'agents-pty-test-'));
-  // Set before state.ts loads so its module-level HOME constant picks up the override.
-  process.env.HOME = testHome;
-  return { TEST_HOME: testHome };
-});
+// macOS sun_path is 104 chars; os.tmpdir() under /var/folders pushes the
+// socket path over that and listen() returns EINVAL. /tmp resolves short
+// on both Linux (/tmp) and macOS (/private/tmp) so the socket fits.
+// Plain top-level statements run before the dynamic `await import` below,
+// so vi.hoisted is not needed (and is also not supported by Bun's native
+// test runner).
+const tmpBase = process.platform === 'darwin' ? '/tmp' : os.tmpdir();
+const TEST_HOME = fs.mkdtempSync(path.join(tmpBase, 'agents-pty-test-'));
+process.env.HOME = TEST_HOME;
 
-const { runPtyServer, captureProcessStartTime, getSocketPath } = await import('../pty-server.js');
+const { runPtyServer, captureProcessStartTime, getSocketPath, derivePtyEndpoint, buildSentinelCommand } = await import('../pty-server.js');
+
+// The multiarch fork BAKES Linux prebuilds (glibc + musl, all Node ABIs incl.
+// 22/24) into its npm tarball, so the native binary is present on Linux even
+// under CI's `bun install --ignore-scripts` — these server-boot tests run on
+// Linux runners (unlike mainline node-pty, which only ships darwin/win32 and
+// must compile on Linux). macOS/Windows fetch their prebuild via the trusted
+// postinstall. If the module still isn't loadable, skip rather than fail.
+let nodePtyLoadable = true;
+try {
+  await import('@homebridge/node-pty-prebuilt-multiarch');
+} catch {
+  nodePtyLoadable = false;
+}
 
 afterEach(async () => {
   // Belt-and-braces cleanup so a hanging server from one test doesn't
@@ -39,7 +49,7 @@ afterEach(async () => {
   await fsp.rm(sock, { force: true });
 });
 
-describe('PTY socket permission', () => {
+describe.skipIf(!nodePtyLoadable)('PTY socket permission', () => {
   it('chmods the socket to 0o600 immediately after listen', async () => {
     // runPtyServer awaits forever; kick it off without awaiting and poll
     // for the socket inode to appear.
@@ -84,7 +94,7 @@ describe('PTY socket permission', () => {
   }, 15_000);
 });
 
-describe('PTY duplicate-spawn race resolution', () => {
+describe.skipIf(!nodePtyLoadable)('PTY duplicate-spawn race resolution', () => {
   it('exits cleanly without touching the socket when a live PID file already exists', async () => {
     // Pre-stage a PID file pointing to a live process (this test runner). The
     // server boot must detect this via isPtyServerRunning() and exit cleanly
@@ -123,6 +133,54 @@ describe('PTY duplicate-spawn race resolution', () => {
     await fsp.rm(pidPath, { force: true });
     await fsp.rm(socketPath, { force: true });
   }, 15_000);
+});
+
+describe('derivePtyEndpoint (cross-platform transport)', () => {
+  const ptyDir = '/home/u/.agents/.cache/helpers/pty';
+
+  it('returns a pty.sock file path on unix platforms', () => {
+    expect(derivePtyEndpoint('linux', ptyDir)).toBe(path.join(ptyDir, 'pty.sock'));
+    expect(derivePtyEndpoint('darwin', ptyDir)).toBe(path.join(ptyDir, 'pty.sock'));
+  });
+
+  it('returns a \\\\.\\pipe\\ named pipe on win32 — never a filesystem path', () => {
+    const winDir = 'C:\\Users\\u\\.agents\\.cache\\helpers\\pty';
+    const endpoint = derivePtyEndpoint('win32', winDir);
+    // Named pipes must use the \\.\pipe\ prefix or net.createServer rejects them.
+    expect(endpoint).toMatch(/^\\\\\.\\pipe\\agents-pty-[0-9a-f]{16}$/);
+    // It must NOT be a real path under the scratch dir — fs.existsSync would
+    // always report false for a pipe, breaking the readiness probe if it were.
+    expect(endpoint.startsWith(winDir)).toBe(false);
+  });
+
+  it('is stable for a given dir and unique per dir (per-user pipe isolation)', () => {
+    const a1 = derivePtyEndpoint('win32', 'C:\\Users\\alice\\pty');
+    const a2 = derivePtyEndpoint('win32', 'C:\\Users\\alice\\pty');
+    const b = derivePtyEndpoint('win32', 'C:\\Users\\bob\\pty');
+    expect(a1).toBe(a2);        // same dir -> same pipe (client/server agree)
+    expect(a1).not.toBe(b);     // different user -> different pipe
+  });
+});
+
+describe('buildSentinelCommand (shell-aware exec wrapper)', () => {
+  it('uses POSIX `;` + `$?` for sh/zsh/bash', () => {
+    expect(buildSentinelCommand('/bin/zsh', 'ls')).toBe('ls; echo "__AGENTS_PTY_DONE__:$?"');
+    expect(buildSentinelCommand('/bin/bash', 'ls')).toBe('ls; echo "__AGENTS_PTY_DONE__:$?"');
+  });
+
+  it('uses cmd.exe `&` + %errorlevel% so the marker always prints', () => {
+    // `&&` would skip the echo on failure; `&` must be used so completion is
+    // always detected regardless of the command's exit status.
+    expect(buildSentinelCommand('C:\\Windows\\System32\\cmd.exe', 'dir'))
+      .toBe('dir & echo __AGENTS_PTY_DONE__:%errorlevel%');
+  });
+
+  it('uses PowerShell `;` + $LASTEXITCODE', () => {
+    expect(buildSentinelCommand('powershell.exe', 'Get-ChildItem'))
+      .toBe('Get-ChildItem; echo "__AGENTS_PTY_DONE__:$LASTEXITCODE"');
+    expect(buildSentinelCommand('pwsh', 'Get-ChildItem'))
+      .toBe('Get-ChildItem; echo "__AGENTS_PTY_DONE__:$LASTEXITCODE"');
+  });
 });
 
 describe('captureProcessStartTime', () => {

@@ -8,6 +8,7 @@
 import simpleGit, { SimpleGit } from 'simple-git';
 import * as fs from 'fs';
 import * as path from 'path';
+import { IS_WINDOWS, isWindowsAbsolutePath } from './platform/index.js';
 import { getPackageLocalPath } from './state.js';
 import { DEFAULT_SYSTEM_REPO, systemRepoSlug } from './types.js';
 
@@ -35,7 +36,12 @@ function installGithooksSymlinks(repoDir: string): void {
     if (fs.lstatSync(dest, { throwIfNoEntry: false })) {
       fs.rmSync(dest);
     }
-    fs.symlinkSync(target, dest);
+    try {
+      fs.symlinkSync(target, dest);
+    } catch (err) {
+      // Windows requires Developer Mode or elevated privileges for symlinks; skip gracefully.
+      if ((err as NodeJS.ErrnoException).code !== 'EPERM') throw err;
+    }
   }
 }
 
@@ -139,8 +145,12 @@ export function parseSource(source: string): GitSource {
     };
   }
 
-  // Local path (absolute or relative)
-  if (cleanSource.startsWith('/') || cleanSource.startsWith('./') || cleanSource.startsWith('../')) {
+  // Local path (absolute or relative). On Windows also recognize drive-letter
+  // (C:\…) and UNC (\\…) roots, which the POSIX prefixes miss.
+  if (
+    cleanSource.startsWith('/') || cleanSource.startsWith('./') || cleanSource.startsWith('../')
+    || (IS_WINDOWS && isWindowsAbsolutePath(cleanSource))
+  ) {
     if (fs.existsSync(cleanSource)) {
       return {
         type: 'local',

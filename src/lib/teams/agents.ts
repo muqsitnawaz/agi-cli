@@ -14,6 +14,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
 import { resolveAgentsDir } from './persistence.js';
+import { findExecutable } from '../platform/index.js';
 import { normalizeEvents, AgentType } from './parsers.js';
 import { debug } from './debug.js';
 import { setGeminiAutoUpdateDisabled, updateGeminiSettings } from '../gemini-settings.js';
@@ -181,7 +182,7 @@ export function captureProcessStartTime(pid: number): string | null {
 }
 
 /** Agent types the team runner supports. */
-const TEAM_AGENT_TYPES: AgentType[] = ['codex', 'cursor', 'gemini', 'claude', 'opencode', 'grok', 'antigravity'];
+const TEAM_AGENT_TYPES: AgentType[] = ['codex', 'cursor', 'gemini', 'claude', 'opencode', 'grok', 'antigravity', 'kimi', 'droid'];
 
 /**
  * Reasoning-intensity knob. Passed through to `agents run --effort`, which
@@ -331,12 +332,10 @@ export function checkCliAvailable(agentType: AgentType): [boolean, string | null
     return [false, `Unknown agent type: ${agentType}`];
   }
 
-  try {
-    const whichPath = execFileSync('which', [executable], { encoding: 'utf-8' }).trim();
-    return [true, whichPath];
-  } catch {
-    return [false, `CLI tool '${executable}' not found in PATH. Install it first.`];
-  }
+  const resolved = findExecutable(executable);
+  return resolved
+    ? [true, resolved]
+    : [false, `CLI tool '${executable}' not found in PATH. Install it first.`];
 }
 
 /** Check availability of all known agent CLIs. Returns a map of agent type to install status. */

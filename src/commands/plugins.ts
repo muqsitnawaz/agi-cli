@@ -10,9 +10,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { Command } from 'commander';
 import chalk from 'chalk';
+import { homeDir } from '../lib/platform/index.js';
 import { input } from '@inquirer/prompts';
 
-import { PLUGINS_CAPABLE_AGENTS, agentLabel } from '../lib/agents.js';
+import { agentLabel } from '../lib/agents.js';
+import { capableAgents, isCapable } from '../lib/capabilities.js';
 import type { AgentId, DiscoveredPlugin, PluginManifest } from '../lib/types.js';
 import {
   discoverPlugins,
@@ -30,6 +32,7 @@ import {
   pluginCapabilityLabels,
   parseInstallSpec,
   syncPluginToVersion,
+  pluginResourceGroups,
   type PluginCapabilities,
 } from '../lib/plugins.js';
 import {
@@ -55,10 +58,11 @@ import {
 } from './resource-view.js';
 import { getPluginsDir } from '../lib/state.js';
 import { safeJoin } from '../lib/paths.js';
+import { discoverMarketplaces } from '../lib/plugin-marketplace.js';
 
 /** Replace the home directory prefix with ~ for display. */
 function formatPath(p: string): string {
-  const home = process.env.HOME || '';
+  const home = homeDir();
   if (home && p.startsWith(home)) {
     return '~' + p.slice(home.length);
   }
@@ -110,6 +114,7 @@ When to use:
       resourcePlural: 'plugins',
       resourceSingular: 'plugin',
       extraLabel: 'Version',
+      extra2Label: 'Marketplace',
       rows: buildPluginRows(plugins),
       emptyMessage: 'No plugins in ~/.agents/plugins/.',
       centralPath: getPluginsDir(),
@@ -124,6 +129,53 @@ When to use:
     .command('list')
     .description('Show plugins in a table with sync status across agent versions')
     .action(runList);
+
+  // agents plugins marketplaces
+  const marketplacesCmd = pluginsCmd
+    .command('marketplaces')
+    .description('List plugin marketplaces — one per DotAgents repo with a plugins/ directory')
+    .option('--json', 'Emit machine-readable JSON')
+    .action((options: { json?: boolean }) => {
+      const rows = collectMarketplaceRows();
+
+      if (options.json) {
+        console.log(JSON.stringify(rows, null, 2));
+        return;
+      }
+
+      if (rows.length === 0) {
+        console.log(chalk.gray('No plugin marketplaces found.'));
+        console.log(chalk.gray('Add one with: agents repo add <path|gh:user/repo>'));
+        return;
+      }
+
+      const nameW = Math.max(12, ...rows.map((r) => r.name.length));
+      const srcW = Math.max(20, ...rows.map((r) => formatPath(r.source).length));
+      console.log();
+      console.log(
+        `  ${chalk.bold(padCol('NAME', nameW))}  ${chalk.bold(padCol('SOURCE', srcW))}  ${chalk.bold(padCol('PLUGINS', 7))}  ${chalk.bold('ENABLED')}`
+      );
+      for (const r of rows) {
+        console.log(
+          `  ${chalk.cyan(padCol(r.name, nameW))}  ${chalk.gray(padCol(formatPath(r.source), srcW))}  ${padCol(String(r.plugins), 7)}  ${r.enabled}`
+        );
+      }
+      console.log();
+      console.log(chalk.gray(`${rows.length} marketplace(s) — manage via 'agents repo'.`));
+    });
+
+  // Redirect add/remove/etc. on marketplaces to repo commands.
+  const marketplaceRedirect = (verb: string) => () => {
+    console.log(
+      chalk.gray(`Use 'agents repo ${verb === 'add' ? 'add' : verb} <path|gh:user/repo>' to ${verb} a marketplace (one repo = one marketplace).`)
+    );
+  };
+  for (const verb of ['add', 'remove', 'enable', 'disable', 'install', 'rm']) {
+    marketplacesCmd
+      .command(`${verb} [target]`)
+      .description(`Redirects to 'agents repo ${verb}' — marketplaces follow repos`)
+      .action(marketplaceRedirect(verb));
+  }
 
   // agents plugins info [name]
   pluginsCmd
@@ -194,7 +246,7 @@ Examples:
       console.log(`  ${chalk.gray(`Version: ${plugin.manifest.version}`)}`);
       console.log(`  ${chalk.gray(`Path: ${formatPath(plugin.root)}`)}`);
 
-      const agents = PLUGINS_CAPABLE_AGENTS
+      const agents = capableAgents('plugins')
         .filter(a => pluginSupportsAgent(plugin, a))
         .map(a => agentLabel(a));
       console.log(`  ${chalk.gray(`Agents: ${agents.join(', ')}`)}`);
@@ -270,7 +322,7 @@ Examples:
       // Show installation status per agent version
       console.log(chalk.bold('\n  Installation Status'));
       let anyInstalled = false;
-      for (const agentId of PLUGINS_CAPABLE_AGENTS) {
+      for (const agentId of capableAgents('plugins')) {
         if (!pluginSupportsAgent(plugin, agentId)) continue;
         const versions = listInstalledVersions(agentId);
         if (versions.length === 0) continue;
@@ -296,14 +348,17 @@ Examples:
   // agents plugins sync <name> [agent]
   pluginsCmd
     .command('sync <name> [agent]')
-    .description('Apply a plugin to the default version of an agent (or all supported agents if none specified)')
+    .description('Apply a plugin to an agent. Syncs every installed version (pass agent@version to target one).')
     .option('--allow-exec-surfaces', 'Enable the plugin even when it ships hooks/, .mcp.json, bin/, scripts/, settings.json, or permissions/')
     .addHelpText('after', `
 Examples:
-  # Sync a plugin to a specific agent (default version)
+  # Sync a plugin to every installed version of an agent
   agents plugins sync rush-toolkit claude
 
-  # Sync to all supported agents
+  # Sync to one specific version (parity with 'agents sync')
+  agents plugins sync rush-toolkit claude@2.1.142
+
+  # Sync to all supported agents (every installed version of each)
   agents plugins sync rush-toolkit
 
   # Re-affirm consent for a hooks-bearing plugin
@@ -316,12 +371,23 @@ Examples:
         process.exit(1);
       }
 
+      // Accept the same "agent@version" form as `agents sync`. Splitting here
+      // also means an unknown spec is reported cleanly rather than crashing
+      // isCapable() with a bare "claude@2.1.168".
+      let versionArg: string | undefined;
+      let agentName: string | undefined = agentArg;
+      if (agentArg && agentArg.includes('@')) {
+        const at = agentArg.lastIndexOf('@');
+        agentName = agentArg.slice(0, at);
+        versionArg = agentArg.slice(at + 1);
+      }
+
       // Determine target agents
       let targetAgents: AgentId[];
-      if (agentArg) {
-        const agentId = agentArg as AgentId;
-        if (!PLUGINS_CAPABLE_AGENTS.includes(agentId)) {
-          console.log(chalk.red(`Agent '${agentArg}' does not support plugins`));
+      if (agentName) {
+        const agentId = agentName as AgentId;
+        if (!isCapable(agentId, 'plugins')) {
+          console.log(chalk.red(`Agent '${agentName}' does not support plugins`));
           process.exit(1);
         }
         if (!pluginSupportsAgent(plugin, agentId)) {
@@ -330,7 +396,11 @@ Examples:
         }
         targetAgents = [agentId];
       } else {
-        targetAgents = PLUGINS_CAPABLE_AGENTS.filter(a => pluginSupportsAgent(plugin, a));
+        if (versionArg) {
+          console.log(chalk.red(`A version (@${versionArg}) requires naming the agent, e.g. claude@${versionArg}`));
+          process.exit(1);
+        }
+        targetAgents = capableAgents('plugins').filter(a => pluginSupportsAgent(plugin, a));
       }
 
       const allowExec = options.allowExecSurfaces === true;
@@ -339,8 +409,20 @@ Examples:
         const versions = listInstalledVersions(agentId);
         if (versions.length === 0) continue;
 
-        const defaultVer = getGlobalDefault(agentId);
-        const targetVersions = defaultVer ? [defaultVer] : [versions[versions.length - 1]];
+        // Default to EVERY installed version. The previous behaviour synced only
+        // the global default, which silently skipped non-default versions used
+        // by balanced rotation -- so a rotated version would lack the plugin's
+        // slash commands. An explicit agent@version narrows back to one.
+        let targetVersions: string[];
+        if (versionArg) {
+          if (!versions.includes(versionArg)) {
+            console.log(chalk.red(`${agentLabel(agentId)} has no installed version ${versionArg} (installed: ${versions.join(', ')})`));
+            process.exit(1);
+          }
+          targetVersions = [versionArg];
+        } else {
+          targetVersions = versions;
+        }
 
         for (const version of targetVersions) {
           const didSync = allowExec
@@ -379,7 +461,7 @@ Examples:
         });
       }
       const name = nameArg;
-      const pluginsDir = path.join(process.env.HOME || '', '.agents', 'plugins');
+      const pluginsDir = path.join(homeDir(), '.agents', 'plugins');
       const pluginRoot = safeJoin(pluginsDir, name);
 
       // Use discovered plugin when present; fall back to name+root if source is already gone
@@ -393,7 +475,7 @@ Examples:
 
       // Build list of targets that have this plugin synced
       const availableTargets: Array<{ agent: AgentId; version: string }> = [];
-      for (const agentId of PLUGINS_CAPABLE_AGENTS) {
+      for (const agentId of capableAgents('plugins')) {
         if (plugin && !pluginSupportsAgent(plugin, agentId)) continue;
         const versions = listInstalledVersions(agentId);
         for (const version of versions) {
@@ -559,7 +641,7 @@ Examples:
       // Sync to all supported installed versions
       console.log();
       let synced = 0;
-      for (const agentId of PLUGINS_CAPABLE_AGENTS) {
+      for (const agentId of capableAgents('plugins')) {
         if (!pluginSupportsAgent(plugin, agentId)) continue;
         const versions = listInstalledVersions(agentId);
         if (versions.length === 0) continue;
@@ -620,7 +702,7 @@ Examples:
         console.log(chalk.green('done'));
 
         // Re-sync to all supported installed versions
-        for (const agentId of PLUGINS_CAPABLE_AGENTS) {
+        for (const agentId of capableAgents('plugins')) {
           if (!pluginSupportsAgent(plugin, agentId)) continue;
           const versions = listInstalledVersions(agentId);
           const defaultVer = getGlobalDefault(agentId);
@@ -672,6 +754,66 @@ async function promptUserConfig(
   return result;
 }
 
+function padCol(s: string, w: number): string {
+  const raw = s.replace(/\x1b\[[0-9;]*m/g, '');
+  if (raw.length >= w) return s;
+  return s + ' '.repeat(w - raw.length);
+}
+
+interface MarketplaceRow {
+  name: string;
+  source: string;
+  plugins: number;
+  enabled: number;
+}
+
+/**
+ * Build one row per discovered marketplace. `plugins` counts plugin manifests
+ * under the marketplace's source pluginsRoot; `enabled` counts entries in the
+ * default Claude version's settings.json#enabledPlugins keyed on @<marketplace>.
+ */
+export function collectMarketplaceRows(): MarketplaceRow[] {
+  const marketplaces = discoverMarketplaces();
+  const rows: MarketplaceRow[] = [];
+
+  // Find the default Claude version (if any) and read its enabledPlugins map.
+  const claudeDefault = isCapable('claude', 'plugins') ? getGlobalDefault('claude') : null;
+  let enabledMap: Record<string, boolean> = {};
+  if (claudeDefault) {
+    const versionHome = getVersionHomePath('claude', claudeDefault);
+    const settingsPath = path.join(versionHome, '.claude', 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+          enabledPlugins?: Record<string, boolean>;
+        };
+        enabledMap = parsed.enabledPlugins ?? {};
+      } catch { /* ignore parse errors */ }
+    }
+  }
+
+  for (const m of marketplaces) {
+    let pluginCount = 0;
+    try {
+      for (const entry of fs.readdirSync(m.pluginsRoot, { withFileTypes: true })) {
+        if (entry.name.startsWith('.')) continue;
+        const root = path.join(m.pluginsRoot, entry.name);
+        const manifestFile = path.join(root, '.claude-plugin', 'plugin.json');
+        if (fs.existsSync(manifestFile)) pluginCount++;
+      }
+    } catch { /* ignore unreadable dir */ }
+
+    const suffix = `@${m.name}`;
+    const enabled = Object.entries(enabledMap)
+      .filter(([key, val]) => val === true && key.endsWith(suffix))
+      .length;
+
+    rows.push({ name: m.name, source: m.pluginsRoot, plugins: pluginCount, enabled });
+  }
+
+  return rows;
+}
+
 /** Convert discovered plugins into rows suitable for the resource list view. */
 function buildPluginRows(plugins: DiscoveredPlugin[]): ResourceRow[] {
   const rows: ResourceRow[] = [];
@@ -679,7 +821,7 @@ function buildPluginRows(plugins: DiscoveredPlugin[]): ResourceRow[] {
   // Cache version lists per agent once.
   const versionsByAgent = new Map<AgentId, string[]>();
   const defaultsByAgent = new Map<AgentId, string | null>();
-  for (const agent of PLUGINS_CAPABLE_AGENTS) {
+  for (const agent of capableAgents('plugins')) {
     versionsByAgent.set(agent, listInstalledVersions(agent));
     defaultsByAgent.set(agent, getGlobalDefault(agent));
   }
@@ -687,7 +829,7 @@ function buildPluginRows(plugins: DiscoveredPlugin[]): ResourceRow[] {
   for (const plugin of plugins) {
     const targets: SyncTarget[] = [];
 
-    for (const agent of PLUGINS_CAPABLE_AGENTS) {
+    for (const agent of capableAgents('plugins')) {
       if (!pluginSupportsAgent(plugin, agent)) continue;
       for (const version of versionsByAgent.get(agent) || []) {
         const versionHome = getVersionHomePath(agent, version);
@@ -705,6 +847,7 @@ function buildPluginRows(plugins: DiscoveredPlugin[]): ResourceRow[] {
       name: plugin.name,
       description: plugin.manifest.description,
       extra: plugin.manifest.version ? `v${plugin.manifest.version}` : '-',
+      extra2: plugin.marketplace ?? '-',
       targets,
       buildDetail: () => formatPluginDetail(plugin, targets),
     });
@@ -720,6 +863,34 @@ function buildPluginRows(plugins: DiscoveredPlugin[]): ResourceRow[] {
   return rows;
 }
 
+/** Per-category color for a plugin resource breakdown (shared with `agents inspect`). */
+export const PLUGIN_GROUP_COLORS: Record<string, (s: string) => string> = {
+  skills: chalk.cyan,
+  commands: chalk.cyan,
+  subagents: chalk.magenta,
+  hooks: chalk.yellow,
+  mcp: chalk.green,
+  lsp: chalk.green,
+  monitors: chalk.blue,
+  bin: chalk.white,
+  scripts: chalk.white,
+  settings: chalk.gray,
+};
+
+/** Human-readable section header per category, used by the picker detail pane. */
+const PLUGIN_GROUP_TITLES: Record<string, string> = {
+  skills: 'Skills',
+  commands: 'Commands',
+  subagents: 'Subagents',
+  hooks: 'Hooks',
+  mcp: 'MCP Servers',
+  lsp: 'LSP Servers',
+  monitors: 'Monitors',
+  bin: 'Bin',
+  scripts: 'Scripts',
+  settings: 'Settings',
+};
+
 /** Build the multi-line detail pane shown when a plugin is selected in the picker. */
 function formatPluginDetail(plugin: DiscoveredPlugin, targets: SyncTarget[]): string {
   const lines: string[] = [];
@@ -733,7 +904,7 @@ function formatPluginDetail(plugin: DiscoveredPlugin, targets: SyncTarget[]): st
     lines.push(chalk.gray(plugin.manifest.description));
   }
 
-  const supported = PLUGINS_CAPABLE_AGENTS
+  const supported = capableAgents('plugins')
     .filter((a) => pluginSupportsAgent(plugin, a))
     .map((a) => agentLabel(a));
   if (supported.length > 0) {
@@ -741,24 +912,11 @@ function formatPluginDetail(plugin: DiscoveredPlugin, targets: SyncTarget[]): st
   }
   lines.push('  ' + chalk.gray(formatPath(plugin.root)));
 
-  const section = (label: string, items: string[], colorFn: (s: string) => string) => {
-    if (items.length === 0) return;
+  for (const group of pluginResourceGroups(plugin)) {
+    const colorFn = PLUGIN_GROUP_COLORS[group.label] ?? chalk.white;
     lines.push('');
-    lines.push(chalk.bold(`  ${label}`));
-    lines.push('  ' + items.map(colorFn).join(chalk.gray(', ')));
-  };
-
-  section('Skills', plugin.skills.map((s) => `/${plugin.name}:${s}`), chalk.cyan);
-  section('Commands', plugin.commands.map((c) => `/${plugin.name}:${c}`), chalk.cyan);
-  section('Subagents', plugin.agentDefs, chalk.magenta);
-  section('Hooks', plugin.hooks, chalk.yellow);
-  section('MCP Servers', plugin.mcpServers, chalk.green);
-  section('LSP Servers', plugin.lspServers, chalk.green);
-  section('Monitors', plugin.monitors, chalk.blue);
-  section('Bin', plugin.bin, chalk.white);
-  section('Scripts', plugin.scripts, chalk.white);
-  if (plugin.hasSettings) {
-    section('Settings', ['settings.json'], chalk.gray);
+    lines.push(chalk.bold(`  ${PLUGIN_GROUP_TITLES[group.label] ?? group.label}`));
+    lines.push('  ' + group.items.map((s) => colorFn(s)).join(chalk.gray(', ')));
   }
 
   if (targets.length > 0) {

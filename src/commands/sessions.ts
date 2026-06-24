@@ -18,6 +18,7 @@ import type { AgentId } from '../lib/types.js';
 import type { SessionAgentId, SessionMeta, ViewMode } from '../lib/session/types.js';
 import { SESSION_AGENTS } from '../lib/session/types.js';
 import { discoverArtifacts, readArtifact, resolveArtifact } from '../lib/session/artifacts.js';
+import { looksLikePath, toComparablePath, homeDir } from '../lib/platform/index.js';
 import { getActiveSessions, type ActiveSession } from '../lib/session/active.js';
 import { discoverSessions, countSessionsInScope, resolveSessionById, searchContentIndex, parseTimeFilter, type DiscoverOptions, type ScanProgress } from '../lib/session/discover.js';
 import { filterTeamSessions } from '../lib/session/team-filter.js';
@@ -25,6 +26,7 @@ import { parseSession } from '../lib/session/parse.js';
 import { renderConversationMarkdown, renderSummary, renderSummaryHeader, computeSummaryStats, renderJson, filterEvents, parseRoleList, type FilterOptions } from '../lib/session/render.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { colorAgent, resolveAgentName } from '../lib/agents.js';
+import { fuzzyMatch, FUZZY_PRESETS } from '../lib/fuzzy.js';
 import { resolveVersionAliasLoose } from '../lib/versions.js';
 import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
 import { sessionPicker, type PickedSession } from './sessions-picker.js';
@@ -127,16 +129,6 @@ const PICKER_RECENT_COUNT = 15;
 const PICKER_POOL_LIMIT = 200;
 
 /**
- * Detect whether a positional argument looks like a filesystem path.
- * Naked paths (., ./, ../, /, ~) filter sessions by project directory.
- * Everything else is treated as a search query string.
- */
-function isPathLike(query: string): boolean {
-  return query === '.' || query.startsWith('./') || query.startsWith('../')
-    || query.startsWith('/') || query.startsWith('~');
-}
-
-/**
  * Resolve a path-like query to an absolute directory path.
  */
 function resolvePathFilter(query: string): string {
@@ -224,8 +216,13 @@ function contextColor(context: ActiveSession['context']): (s: string) => string 
 
 function shortCwd(cwd?: string): string {
   if (!cwd) return '-';
-  const home = os.homedir();
-  return cwd.startsWith(home) ? '~' + cwd.slice(home.length) : cwd;
+  const home = homeDir();
+  // Compare in normalized form so the `~` shorthand also lands on Windows
+  // (case-insensitive, backslash paths); on POSIX this is byte-identical to the
+  // previous `cwd.startsWith(home)`. The displayed tail keeps original casing.
+  return toComparablePath(cwd).startsWith(toComparablePath(home))
+    ? '~' + cwd.slice(home.length)
+    : cwd;
 }
 
 function formatStartedAt(startedAtMs?: number): string {
@@ -426,7 +423,7 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
   // Path-like queries filter by project directory instead of text search.
   let pathFilter: string | undefined;
   let searchQuery: string | undefined;
-  if (query && isPathLike(query)) {
+  if (query && looksLikePath(query)) {
     const resolved = resolvePathFilter(query);
     if (!fs.existsSync(resolved)) {
       console.log(chalk.yellow(`Path not found: ${resolved}`));
@@ -875,6 +872,7 @@ export function buildResumeCommand(session: SessionMeta): string[] | null {
     case 'rush':
     case 'hermes':
     case 'grok':
+    case 'kimi':
       // Grok (and some others) sessions are captured artifacts, not resumable the same way.
       return null;
   }
@@ -976,8 +974,21 @@ interface AgentFilter {
 function parseAgentFilter(agentName?: string): AgentFilter {
   if (!agentName) return {};
   const [name, version] = agentName.split('@', 2);
-  const agent = name as SessionAgentId;
-  if (!SESSION_AGENTS.includes(agent)) {
+  let agent: SessionAgentId | null = SESSION_AGENTS.includes(name as SessionAgentId)
+    ? (name as SessionAgentId)
+    : null;
+  if (!agent) {
+    // Aliases and single-typo corrections (cladue -> claude). SESSION_AGENTS
+    // includes ids (rush, hermes) that resolveAgentName doesn't know, so fall
+    // back to fuzzy-matching the session list directly.
+    const resolved = resolveAgentName(name);
+    if (resolved && SESSION_AGENTS.includes(resolved as SessionAgentId)) {
+      agent = resolved as SessionAgentId;
+    } else {
+      agent = fuzzyMatch(name, SESSION_AGENTS, FUZZY_PRESETS.agents);
+    }
+  }
+  if (!agent) {
     console.error(chalk.red(`Unknown agent: ${name}. Use: ${SESSION_AGENTS.join(', ')}`));
     process.exit(1);
   }

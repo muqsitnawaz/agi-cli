@@ -16,8 +16,9 @@ import * as os from 'os';
 import * as TOML from 'smol-toml';
 import chalk from 'chalk';
 import type { AgentConfig, AgentId } from './types.js';
-import { walkForFiles } from './fs-walk.js';
-import { getVersionsDir, getShimsDir, getCliVersionCachePath } from './state.js';
+import { latestFileMtimeMs } from './fs-walk.js';
+import { damerauLevenshtein } from './fuzzy.js';
+import { getCacheDir, getVersionsDir, getShimsDir, getCliVersionCachePath } from './state.js';
 import { resolveVersion, getVersionHomePath, getBinaryPath } from './versions.js';
 
 /** Represents the installation state of an agent's CLI binary. */
@@ -104,39 +105,41 @@ function findInPath(command: string): string | null {
 }
 
 /** Grok-specific binary resolution.
- * Grok does not live in node_modules/.bin. Its versioned binaries live in
- * ~/.grok/downloads/ with names like `grok-0.1.218-macos-aarch64`.
- * We still use the agents-cli version dir for *config isolation* via GROK_HOME.
+ * Grok does not live in node_modules/.bin. Its versioned binaries live in each
+ * managed version home under `.grok/downloads/`, so detection must not follow
+ * the host ~/.grok config symlink.
  */
 function resolveGrokBinary(version?: string): string | null {
-  const grokDownloads = path.join(HOME, '.grok', 'downloads');
-  if (!fs.existsSync(grokDownloads)) return null;
-
-  const entries = fs.readdirSync(grokDownloads);
-  // Prefer exact version match in filename
   if (version && version !== 'latest') {
-    const match = entries.find((e) => e.includes(version) && e.startsWith('grok-'));
-    if (match) return path.join(grokDownloads, match);
+    const binaryPath = getBinaryPath('grok', version);
+    if (fs.existsSync(binaryPath)) return binaryPath;
+    return null;
   }
 
-  // Fallback: the "current" symlink or the plain `grok-*` without version in name
-  const current = entries.find((e) => e === 'grok' || e.startsWith('grok-') && !e.match(/grok-\d/));
-  if (current) return path.join(grokDownloads, current);
+  const resolvedVersion = resolveVersion('grok', process.cwd());
+  if (resolvedVersion) {
+    const binaryPath = getBinaryPath('grok', resolvedVersion);
+    if (fs.existsSync(binaryPath)) return binaryPath;
+  }
 
-  // Last resort: newest file by mtime
+  const grokVersionsDir = path.join(getVersionsDir(), 'grok');
+  if (!fs.existsSync(grokVersionsDir)) return null;
+
   let latest: string | null = null;
   let latestMtime = 0;
-  for (const e of entries) {
-    if (!e.startsWith('grok-')) continue;
+  for (const entry of fs.readdirSync(grokVersionsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const binaryPath = getBinaryPath('grok', entry.name);
+    if (!fs.existsSync(binaryPath)) continue;
     try {
-      const stat = fs.statSync(path.join(grokDownloads, e));
+      const stat = fs.statSync(binaryPath);
       if (stat.mtimeMs > latestMtime) {
         latestMtime = stat.mtimeMs;
-        latest = e;
+        latest = binaryPath;
       }
     } catch {}
   }
-  return latest ? path.join(grokDownloads, latest) : null;
+  return latest;
 }
 
 function splitCommandLine(command: string): string[] {
@@ -469,35 +472,89 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
       rulesImports: true,
     },
   },
+  // Kimi Code CLI (`kimi`) — Moonshot AI coding agent.
+  // Install: `curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash`
+  //    or: `npm install -g @moonshot-ai/kimi-code`
+  // Config: `~/.kimi-code/config.toml`, `~/.kimi-code/mcp.json`,
+  //         `~/.kimi-code/skills/`, `~/.kimi-code/hooks/`
+  kimi: {
+    id: 'kimi',
+    name: 'Kimi',
+    color: 'magentaBright',
+    cliCommand: 'kimi',
+    npmPackage: '@moonshot-ai/kimi-code',
+    installScript: 'curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash',
+    configDir: path.join(HOME, '.kimi-code'),
+    commandsDir: '',
+    commandsSubdir: '',
+    skillsDir: path.join(HOME, '.kimi-code', 'skills'),
+    hooksDir: path.join(HOME, '.kimi-code', 'hooks'),
+    instructionsFile: 'AGENTS.md',
+    format: 'markdown',
+    variableSyntax: '$ARGUMENTS',
+    supportsHooks: true,
+    capabilities: {
+      hooks: true,
+      mcp: true,
+      allowlist: true,
+      skills: true,
+      commands: false,
+      plugins: true,
+      subagents: false,
+      rules: { file: 'AGENTS.md' },
+      workflows: false,
+      modes: ['plan', 'edit', 'auto', 'skip'],
+      rulesImports: false,
+    },
+  },
+  // Factory AI Droid CLI (`droid`) — agentic coding CLI from factory.ai.
+  // Install: `curl -fsSL https://app.factory.ai/cli | sh` (no npm package).
+  // Binary is NOT in node_modules/.bin — resolved via resolveDroidBinary().
+  // Config: `~/.factory/` (settings.json, mcp.json, droids/, commands/).
+  // Memory: native AGENTS.md. Subagents = custom droids (top-level .md files
+  // in ~/.factory/droids/). Config isolation rides the ~/.factory symlink
+  // switch (no FACTORY_HOME env var exists). Headless: `droid exec "<prompt>"`
+  // with --auto low|medium|high, -o stream-json, -m <model>, -r <effort>.
+  droid: {
+    id: 'droid',
+    name: 'Droid',
+    color: 'yellowBright',
+    cliCommand: 'droid',
+    npmPackage: '',
+    installScript: 'curl -fsSL https://app.factory.ai/cli | sh',
+    configDir: path.join(HOME, '.factory'),
+    commandsDir: path.join(HOME, '.factory', 'commands'),
+    commandsSubdir: 'commands',
+    skillsDir: '', // no skills concept
+    hooksDir: 'hooks',
+    instructionsFile: 'AGENTS.md',
+    format: 'markdown',
+    variableSyntax: '$ARGUMENTS',
+    supportsHooks: false,
+    capabilities: {
+      hooks: false,
+      mcp: true,
+      allowlist: false,
+      skills: false,
+      commands: true,
+      plugins: false,
+      subagents: true,
+      rules: { file: 'AGENTS.md' },
+      workflows: false,
+      modes: ['plan', 'edit', 'auto', 'skip'],
+      rulesImports: false,
+    },
+  },
 };
 
 /** All registered agent IDs derived from the AGENTS registry. */
 export const ALL_AGENT_IDS: AgentId[] = Object.keys(AGENTS) as AgentId[];
 
-/** Agents that support MCP (Model Context Protocol) server integration. */
-export const MCP_CAPABLE_AGENTS: AgentId[] = ALL_AGENT_IDS.filter(
-  (id) => AGENTS[id].capabilities.mcp
-);
-
-/** Agents that support skills (SKILL.md + rules/ bundles). */
-export const SKILLS_CAPABLE_AGENTS: AgentId[] = ALL_AGENT_IDS.filter(
-  (id) => AGENTS[id].capabilities.skills
-);
-
-/** Agents that support file-based slash commands. */
-export const COMMANDS_CAPABLE_AGENTS: AgentId[] = ALL_AGENT_IDS.filter(
-  (id) => AGENTS[id].capabilities.commands
-);
-
-/** Agents that support event hooks (pre/post lifecycle callbacks). */
-export const HOOKS_CAPABLE_AGENTS: readonly AgentId[] = ALL_AGENT_IDS.filter(
-  (id) => AGENTS[id].capabilities.hooks !== false
-);
-
-/** Agents that support the plugin system. */
-export const PLUGINS_CAPABLE_AGENTS: AgentId[] = ALL_AGENT_IDS.filter(
-  (id) => AGENTS[id].capabilities.plugins !== false
-);
+// Capability-filtered agent lists used to live here as `*_CAPABLE_AGENTS`
+// constants. They were a frequent source of silent-skip bugs (e.g. grok
+// rules sync gated on `COMMANDS_CAPABLE_AGENTS`). Use `capableAgents(cap)`
+// from `./capabilities.js` instead — it consults the AgentConfig matrix
+// directly, so a single source of truth drives every gate.
 
 /** Get the chalk color function for an agent. Works for any AgentId or SessionAgentId. */
 export function colorAgent(agentId: string): (s: string) => string {
@@ -672,14 +729,27 @@ export interface UnmanagedInstall {
 }
 
 /**
+ * Agents that `agents setup` probes for pre-existing native installations
+ * (i.e., a config dir present before agents-cli took over). Add an agent here
+ * once its `cliCommand` reports a usable `--version` and its session dir is
+ * wired into `getSessionDir`.
+ */
+export const UNMANAGED_DETECTION_CANDIDATES: AgentId[] = [
+  'claude',
+  'codex',
+  'gemini',
+  'grok',
+  'copilot',
+];
+
+/**
  * Detect existing agent installations that are NOT yet managed by agents-cli.
  * Returns agents whose config dir exists as a real directory (not a symlink).
  */
 export async function getUnmanagedAgentInstalls(): Promise<UnmanagedInstall[]> {
   const unmanaged: UnmanagedInstall[] = [];
-  const candidates: AgentId[] = ['claude', 'codex', 'gemini', 'grok'];
 
-  for (const agentId of candidates) {
+  for (const agentId of UNMANAGED_DETECTION_CANDIDATES) {
     const agent = AGENTS[agentId];
     try {
       const stat = fs.lstatSync(agent.configDir);
@@ -709,6 +779,25 @@ export function ensureSkillsDir(agentId: AgentId): void {
   if (!fs.existsSync(agent.skillsDir)) {
     fs.mkdirSync(agent.skillsDir, { recursive: true });
   }
+}
+
+/**
+ * The agent's config-dir name relative to $HOME — e.g. '.claude',
+ * '.gemini/antigravity-cli', '.config/amp', '.kimi-code'.
+ *
+ * Path segment to join onto a (version) home root when locating an agent's
+ * commands/skills/plugins. Do NOT hardcode `.${agentId}`: it is wrong for
+ * every agent whose config dir is nested or under ~/.config — antigravity
+ * (~/.gemini/antigravity-cli), amp (~/.config/amp), goose (~/.config/goose),
+ * kimi (~/.kimi-code). Mirrors the shim configDirName derivation in shims.ts.
+ *
+ * Relativized against the module-level HOME constant (the same value used to
+ * build every `configDir`), NOT a fresh `os.homedir()` — so the result stays a
+ * clean relative name even when HOME is overridden after module load (tests,
+ * sandboxes). Using `os.homedir()` here would yield `../../real/home/.claude`.
+ */
+export function agentConfigDirName(agentId: AgentId): string {
+  return path.relative(HOME, AGENTS[agentId].configDir);
 }
 
 /** Account identity and billing information extracted from an agent's auth config. */
@@ -894,18 +983,64 @@ export async function getAccountInfo(
   }
 }
 
-/** Determine when the agent was last used by checking session file mtimes, falling back to config mtime. */
-function resolveLastActive(
+// Fresh window for the cached session walk. Matches USAGE_CACHE_FRESH_MS in
+// usage.ts so a launch storm reuses both probes for the same period.
+const LAST_ACTIVE_CACHE_FRESH_MS = 2 * 60 * 1000;
+
+const getLastActiveCachePath = () => path.join(getCacheDir(), 'last-active.json');
+
+interface LastActiveCacheEntry {
+  /** Newest session-file mtime (ms), or null when the home had no sessions. */
+  mtimeMs: number | null;
+  /** When the walk that produced this entry ran (ms since epoch). */
+  computedAt: number;
+}
+
+/**
+ * Determine when the agent was last used by checking session file mtimes,
+ * falling back to config mtime.
+ *
+ * The session walk stats every transcript under the home's session dir —
+ * thousands of files on long-lived installs — and `agents run` rotation calls
+ * this once per installed version on every launch. The walk result is cached
+ * on disk for a short window so back-to-back launches skip it entirely.
+ * Cache read/write is best-effort: any failure falls back to walking.
+ */
+export function resolveLastActive(
   agentId: AgentId,
   base: string,
-  configPath?: string
+  configPath?: string,
+  cachePath = getLastActiveCachePath(),
+  now = new Date()
 ): Date | null {
   const sessionDir = getSessionDir(agentId, base);
   const sessionExt = getSessionExtension(agentId);
   if (sessionDir && sessionExt) {
-    const latestSession = getLatestFileMtime(sessionDir, sessionExt);
-    if (latestSession) {
-      return latestSession;
+    const key = `${agentId}:${base}`;
+    const cache = readLastActiveCacheFile(cachePath);
+    const entry = cache[key];
+    const fresh =
+      entry &&
+      typeof entry.computedAt === 'number' &&
+      now.getTime() - entry.computedAt >= 0 &&
+      now.getTime() - entry.computedAt < LAST_ACTIVE_CACHE_FRESH_MS;
+
+    if (fresh) {
+      if (entry.mtimeMs !== null) return new Date(entry.mtimeMs);
+      // Fresh entry with no sessions: fall through to the config mtime below.
+    } else {
+      const mtimeMs = latestFileMtimeMs(sessionDir, sessionExt);
+      cache[key] = { mtimeMs, computedAt: now.getTime() };
+      // Stale entries are never served, so drop them on write — keeps homes
+      // that no longer exist (removed versions, test temp dirs) from
+      // accumulating in the file.
+      for (const [k, v] of Object.entries(cache)) {
+        if (k !== key && !(typeof v?.computedAt === 'number' && now.getTime() - v.computedAt < LAST_ACTIVE_CACHE_FRESH_MS)) {
+          delete cache[k];
+        }
+      }
+      writeLastActiveCacheFile(cache, cachePath);
+      if (mtimeMs !== null) return new Date(mtimeMs);
     }
   }
 
@@ -914,6 +1049,27 @@ function resolveLastActive(
     return fs.statSync(configPath).mtime;
   } catch {
     return null;
+  }
+}
+
+/** Read the entire last-active cache file. Missing or corrupt file reads as empty. */
+function readLastActiveCacheFile(cachePath: string): Record<string, LastActiveCacheEntry> {
+  if (!fs.existsSync(cachePath)) return {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as Record<string, LastActiveCacheEntry>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Write the entire last-active cache. Best-effort; a failed write just means the next call walks again. */
+function writeLastActiveCacheFile(cache: Record<string, LastActiveCacheEntry>, cachePath: string): void {
+  try {
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fs.writeFileSync(cachePath, JSON.stringify(cache), 'utf-8');
+  } catch {
+    /* best-effort */
   }
 }
 
@@ -979,18 +1135,6 @@ export function countSessionFiles(agentId: AgentId): number {
   };
   walk(sessionDir);
   return count;
-}
-
-/** Walk a directory for files matching the extension and return the mtime of the most recent one. */
-function getLatestFileMtime(dir: string, ext: string): Date | null {
-  if (!fs.existsSync(dir)) return null;
-  const [latest] = walkForFiles(dir, ext, 1);
-  if (!latest) return null;
-  try {
-    return fs.statSync(latest).mtime;
-  } catch {
-    return null;
-  }
 }
 
 /** Decode the payload section of a JWT token without verifying its signature. */
@@ -1413,6 +1557,9 @@ export function getUserMcpConfigPath(agentId: AgentId): string {
     case 'grok':
       // grok mcp.json — exact field schema verified at first install
       return path.join(agent.configDir, 'mcp.json');
+    case 'droid':
+      // Factory AI Droid stores MCPs in ~/.factory/mcp.json
+      return path.join(agent.configDir, 'mcp.json');
     default:
       // Gemini and others use settings.json
       return path.join(agent.configDir, 'settings.json');
@@ -1448,8 +1595,10 @@ export function getMcpConfigPathForHome(agentId: AgentId, home: string): string 
       return path.join(home, '.gemini', 'antigravity-cli', 'mcp_config.json');
     case 'grok':
       return path.join(home, '.grok', 'config.toml');
+    case 'droid':
+      return path.join(home, '.factory', 'mcp.json');
     default:
-      return path.join(home, `.${agentId}`, 'settings.json');
+      return path.join(home, agentConfigDirName(agentId), 'settings.json');
   }
 }
 
@@ -1485,6 +1634,8 @@ function getProjectMcpConfigPath(agentId: AgentId, cwd: string = process.cwd()):
       return path.join(cwd, '.gemini', 'antigravity-cli', 'mcp_config.json');
     case 'grok':
       return path.join(cwd, '.grok', 'config.toml');
+    case 'droid':
+      return path.join(cwd, '.factory', 'mcp.json');
     default:
       return path.join(cwd, `.${agentId}`, 'settings.json');
   }
@@ -1641,11 +1792,30 @@ export const AGENT_NAME_ALIASES: Record<string, AgentId> = {
   'grok-build': 'grok',
   'xai-grok': 'grok',
   gk: 'grok',
+  kimi: 'kimi',
+  'kimi-code': 'kimi',
 };
 
-/** Resolve a user-provided agent name (alias, shorthand, or canonical) to its AgentId. */
+/**
+ * Resolve a user-provided agent name (alias, shorthand, or canonical) to its AgentId.
+ * Tolerates a single typo (insertion/deletion/substitution/transposition) against
+ * canonical ids and aliases — `cladue` -> claude, `kim` -> kimi, `codx` -> codex —
+ * but only when the correction is unambiguous (all distance-1 candidates agree on
+ * one agent). Two-letter shorthands are excluded as fuzzy candidates.
+ */
 export function resolveAgentName(input: string): AgentId | null {
-  return AGENT_NAME_ALIASES[input.toLowerCase()] || null;
+  const lower = input.toLowerCase();
+  const exact = AGENT_NAME_ALIASES[lower] ?? (AGENTS[lower as AgentId] ? (lower as AgentId) : null);
+  if (exact || lower.length < 3) return exact;
+
+  const hits = new Set<AgentId>();
+  for (const id of ALL_AGENT_IDS) {
+    if (damerauLevenshtein(lower, id) === 1) hits.add(id);
+  }
+  for (const [key, id] of Object.entries(AGENT_NAME_ALIASES)) {
+    if (key.length >= 3 && damerauLevenshtein(lower, key) === 1) hits.add(id);
+  }
+  return hits.size === 1 ? hits.values().next().value! : null;
 }
 
 /** Check whether the input string matches any known agent name or alias. */

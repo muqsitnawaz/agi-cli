@@ -21,8 +21,8 @@ import {
   parsePermissionSet,
   applyPermissionsToVersion,
   mergePermissionSets,
-  PERMISSIONS_CAPABLE_AGENTS,
 } from '../permissions.js';
+import { isCapable } from '../capabilities.js';
 
 export type PermissionItem = PermissionSet;
 
@@ -85,6 +85,8 @@ function getAgentConfigPath(agent: AgentId, versionHome: string): string | null 
       return path.join(versionHome, '.codex', 'config.toml');
     case 'opencode':
       return path.join(versionHome, '.opencode', 'opencode.jsonc');
+    case 'kimi':
+      return path.join(versionHome, '.kimi-code', 'config.toml');
     default:
       return null;
   }
@@ -177,7 +179,7 @@ export const PermissionsHandler: ResourceHandler<PermissionItem> = {
    */
   sync(agent: AgentId, versionHome: string, cwd?: string): void {
     // Only sync to agents that support permissions
-    if (!PERMISSIONS_CAPABLE_AGENTS.includes(agent)) {
+    if (!isCapable(agent, 'allowlist')) {
       return;
     }
 

@@ -12,18 +12,18 @@ const PACKAGE_VERSION = JSON.parse(
 
 function makeTempHome(): string {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-non-interactive-'));
+  // User dir: commands, agents.yaml live here
+  const userDir = path.join(home, '.agents');
+  fs.mkdirSync(userDir, { recursive: true });
   // System dir: update-check and versions live here.
   // Needs a .git dir so ensureInitialized() doesn't block commands.
-  const systemDir = path.join(home, '.agents-system');
+  const systemDir = path.join(userDir, '.system');
   fs.mkdirSync(systemDir, { recursive: true });
   fs.mkdirSync(path.join(systemDir, '.git'), { recursive: true });
   fs.writeFileSync(
     path.join(systemDir, '.update-check'),
     JSON.stringify({ lastCheck: Date.now(), latestVersion: PACKAGE_VERSION.version }),
   );
-  // User dir: commands, agents.yaml live here
-  const userDir = path.join(home, '.agents');
-  fs.mkdirSync(userDir, { recursive: true });
   return home;
 }
 
@@ -74,6 +74,13 @@ function writeFakeNpmInstaller(home: string, version: string): string {
     npmPath,
     [
       '#!/bin/sh',
+      // Production install probes `npm --version` before `npm install` —
+      // respond so the install path proceeds instead of bailing with
+      // "npm is not installed". See src/lib/versions.ts:1124.
+      'if [ "$1" = "--version" ]; then',
+      '  echo "10.0.0"',
+      '  exit 0',
+      'fi',
       'if [ "$1" = "install" ]; then',
       '  mkdir -p node_modules/@openai/codex node_modules/.bin',
       `  printf '{"version":"${version}"}' > node_modules/@openai/codex/package.json`,
@@ -246,7 +253,7 @@ describe('non-interactive CLI usage', () => {
     expect(result.status).toBe(0);
     expect(combined).toContain(`Moved Claude@${version} to trash`);
     expect(combined).toContain('Sessions remain accessible via `agents sessions`.');
-    expect(combined).toContain(`Restore with: agents trash restore claude@${version}`);
+    expect(combined).toContain(`Restore with: agents restore claude@${version}`);
     expect(fs.existsSync(versionDir)).toBe(false);
 
     const trashAgentDir = path.join(home, '.agents', '.history', 'trash', 'versions', 'claude', version);
@@ -278,6 +285,56 @@ describe('non-interactive CLI usage', () => {
     expect(combined).toContain(`Moved Codex@${version} to trash`);
     expect(fs.existsSync(versionDir)).toBe(false);
     expect(fs.existsSync(path.join(home, '.agents', '.history', 'trash', 'versions', 'codex', version))).toBe(true);
+  });
+
+  it.each(['rm', 'purge'])('treats %s as an alias for version prune', (verb) => {
+    const home = makeTempHome();
+    tempHomes.push(home);
+    const version = '0.131.0';
+    writeFakeManagedVersion(home, 'codex', version, 'codex');
+
+    const versionDir = path.join(home, '.agents', '.history', 'versions', 'codex', version);
+    const result = runAgents(home, [verb, `codex@${version}`]);
+    const combined = `${result.stdout}\n${result.stderr}`;
+
+    expect(result.status).toBe(0);
+    expect(combined).toContain(`Moved Codex@${version} to trash`);
+    expect(fs.existsSync(versionDir)).toBe(false);
+    expect(fs.existsSync(path.join(home, '.agents', '.history', 'trash', 'versions', 'codex', version))).toBe(true);
+  });
+
+  it('restores a soft-deleted version via the top-level restore command', () => {
+    const home = makeTempHome();
+    tempHomes.push(home);
+    const version = '0.132.0';
+    writeFakeManagedVersion(home, 'codex', version, 'codex');
+
+    const versionDir = path.join(home, '.agents', '.history', 'versions', 'codex', version);
+    expect(runAgents(home, ['remove', `codex@${version}`]).status).toBe(0);
+    expect(fs.existsSync(versionDir)).toBe(false);
+
+    const result = runAgents(home, ['restore', `codex@${version}`]);
+    const combined = `${result.stdout}\n${result.stderr}`;
+
+    expect(result.status).toBe(0);
+    expect(combined).toContain(`Restored Codex@${version}`);
+    // Version directory is back where it was, binary intact.
+    expect(fs.existsSync(versionDir)).toBe(true);
+    expect(fs.existsSync(path.join(versionDir, 'node_modules', '.bin', 'codex'))).toBe(true);
+    // Trash entry for this version is emptied out after the move.
+    const trashVersionDir = path.join(home, '.agents', '.history', 'trash', 'versions', 'codex', version);
+    expect(fs.existsSync(trashVersionDir)).toBe(false);
+  });
+
+  it('exits non-zero when restoring a version that is not in trash', () => {
+    const home = makeTempHome();
+    tempHomes.push(home);
+
+    const result = runAgents(home, ['restore', 'codex@9.9.9']);
+    const combined = `${result.stdout}\n${result.stderr}`;
+
+    expect(result.status).toBe(1);
+    expect(combined).toContain('No trashed copy found for codex@9.9.9');
   });
 
   it('does not hard-delete trash entries through cleanup', () => {

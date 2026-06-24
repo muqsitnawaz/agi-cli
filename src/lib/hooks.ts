@@ -9,11 +9,12 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as yaml from 'yaml';
 import * as TOML from 'smol-toml';
-import { AGENTS, ALL_AGENT_IDS, HOOKS_CAPABLE_AGENTS } from './agents.js';
-import { supports, explainSkip } from './capabilities.js';
+import { AGENTS, ALL_AGENT_IDS, agentConfigDirName } from './agents.js';
+import { supports, explainSkip, capableAgents } from './capabilities.js';
 import { setGeminiAutoUpdateDisabled, updateGeminiSettings } from './gemini-settings.js';
 import { getAgentsDir, getHooksDir as getSystemHooksDir, getUserHooksDir, getUserAgentsDir, getSystemAgentsDir, getProjectAgentsDir, getTrashHooksDir, getEnabledExtraRepos } from './state.js';
 
@@ -56,9 +57,40 @@ function getManagedHookPrefixes(): string[] {
   ];
 }
 
+/**
+ * Convert an absolute path under HOME to a portable ~/... form with forward
+ * slashes. Hook commands stored this way work on both macOS and Windows:
+ * absolute Windows paths break in bash because backslashes are stripped as
+ * escape characters, whereas ~/... paths expand correctly via the ~/.claude
+ * symlink/junction on both platforms.
+ */
+function toPortableCommand(absPath: string): string {
+  const home = os.homedir();
+  const normalized = absPath.split(path.sep).join('/');
+  const homeNorm = home.split(path.sep).join('/');
+  if (normalized.startsWith(homeNorm + '/')) {
+    return '~/' + normalized.slice(homeNorm.length + 1);
+  }
+  return normalized;
+}
+
 function isManagedHookCommand(command: string, prefixes: string[]): boolean {
+  // Expand ~/... so tilde-form portable commands can be matched against
+  // absolute managed prefixes.
+  let expanded = command;
+  if (command.startsWith('~/')) {
+    expanded = path.join(os.homedir(), command.slice(2));
+  }
+  // Resolve the directory through symlinks/junctions (e.g. ~/.claude on
+  // Windows is a junction to the versioned home dir where prefixes live).
+  // Resolve the dir, not the full path — the file may not exist after removal.
+  const dir = path.dirname(expanded);
+  let resolvedDir = dir;
+  try { resolvedDir = fs.realpathSync(dir); } catch { /* absent or broken link */ }
+  const resolved = path.join(resolvedDir, path.basename(expanded));
+
   for (const prefix of prefixes) {
-    if (command.startsWith(prefix)) return true;
+    if (resolved.startsWith(prefix)) return true;
   }
   return false;
 }
@@ -89,9 +121,9 @@ function resolveHookCommand(
     // No caching opted in — make sure a previously generated shim from an
     // earlier `cache:` config is gone so the JSONL doesn't keep claiming hits.
     removeHookShim(name);
-    return scriptPath;
+    return toPortableCommand(scriptPath);
   }
-  return generateHookShim({ name, scriptPath, cache });
+  return toPortableCommand(generateHookShim({ name, scriptPath, cache }));
 }
 
 /**
@@ -130,7 +162,7 @@ function isExecutable(mode: number): boolean {
 function getHooksDir(agentId: AgentId): string {
   const agent = AGENTS[agentId];
   const home = getEffectiveHome(agentId);
-  return path.join(home, `.${agentId}`, agent.hooksDir);
+  return path.join(home, agentConfigDirName(agentId), agent.hooksDir);
 }
 
 function getProjectHooksDirs(agentId: AgentId, cwd: string): string[] {
@@ -377,7 +409,7 @@ export function listInstalledHooksWithScope(
 
   // User-scoped hooks (version-aware when home is provided)
   const home = options?.home || getEffectiveHome(agentId);
-  const userDir = path.join(home, `.${agentId}`, agent.hooksDir);
+  const userDir = path.join(home, agentConfigDirName(agentId), agent.hooksDir);
   const userHooks = listHookEntriesFromDir(userDir);
   for (const hook of userHooks) {
     addHook(hook, 'user', agentId);
@@ -428,7 +460,7 @@ export async function installHooks(
  */
 export function getVersionHooksDir(agent: AgentId, version: string): string {
   const home = getVersionHomePath(agent, version);
-  return path.join(home, `.${agent}`, AGENTS[agent].hooksDir);
+  return path.join(home, agentConfigDirName(agent), AGENTS[agent].hooksDir);
 }
 
 /**
@@ -576,7 +608,7 @@ export function removeHookFromVersion(
  */
 export function iterHooksCapableVersions(filter?: { agent?: AgentId; version?: string }): Array<{ agent: AgentId; version: string }> {
   const pairs: Array<{ agent: AgentId; version: string }> = [];
-  const hookAgents: AgentId[] = HOOKS_CAPABLE_AGENTS as unknown as AgentId[];
+  const hookAgents: AgentId[] = capableAgents('hooks');
   const agents = filter?.agent ? [filter.agent] : hookAgents;
   for (const agent of agents) {
     if (!hookAgents.includes(agent)) continue;
@@ -702,7 +734,7 @@ export async function installHooksCentrally(
 }
 
 /**
- * List hooks from user (~/.agents/hooks/) and system (~/.agents-system/hooks/) dirs.
+ * List hooks from user (~/.agents/hooks/) and system (~/.agents/.system/hooks/) dirs.
  * User dir takes priority; deduplication preserves first occurrence.
  */
 export function listCentralHooks(): HookEntry[] {
@@ -720,7 +752,7 @@ export function listCentralHooks(): HookEntry[] {
 }
 
 /**
- * Parse hook manifests. Reads system hooks from ~/.agents-system/hooks.yaml
+ * Parse hook manifests. Reads system hooks from ~/.agents/.system/hooks.yaml
  * (npm-shipped defaults) and user hooks from the `hooks:` section of
  * ~/.agents/agents.yaml. Merges with user-wins-on-key-collision precedence.
  * A user entry with `enabled: false` disables the system-shipped hook of
@@ -728,7 +760,8 @@ export function listCentralHooks(): HookEntry[] {
  *
  * Hooks marked `enabled: false` are dropped from the returned map.
  */
-export function parseHookManifest(): Record<string, ManifestHook> {
+export function parseHookManifest(opts: { warn?: boolean } = {}): Record<string, ManifestHook> {
+  const warn = opts.warn !== false;
   const merged: Record<string, ManifestHook> = {};
   const systemHooks: Record<string, ManifestHook> = {};
 
@@ -750,7 +783,7 @@ export function parseHookManifest(): Record<string, ManifestHook> {
     try {
       const meta = yaml.parse(fs.readFileSync(userMetaPath, 'utf-8')) as { hooks?: Record<string, ManifestHook> } | null;
       if (meta?.hooks) for (const [name, def] of Object.entries(meta.hooks)) {
-        if (systemHooks[name] && def.override !== true) {
+        if (warn && systemHooks[name] && def.override !== true) {
           const action = def.enabled === false ? 'disables' : 'shadows';
           console.warn(
             `[agents hooks] User-layer hook '${name}' ${action} system-shipped hook. Set 'override: true' to silence this warning.`,
@@ -766,6 +799,36 @@ export function parseHookManifest(): Record<string, ManifestHook> {
     if (def.enabled === false) delete merged[name];
   }
   return merged;
+}
+
+/**
+ * Hook script files present on disk that no manifest entry declares — "dead"
+ * hooks. The registrar only wires manifest-declared hooks into an agent's
+ * native config (settings.json / config.toml), matching the installed file to a
+ * manifest entry by script basename. So a file whose basename matches no
+ * manifest `script:` is never registered: it occupies the hooks dir and shows
+ * up in listings, but no lifecycle event ever fires it.
+ *
+ * Pure on purpose (no disk reads) so it is trivially testable; callers pass the
+ * installed hook names and the manifest's script paths.
+ */
+export function unmanagedHookNames(installedHookNames: string[], manifestScripts: string[]): string[] {
+  const managed = new Set(manifestScripts.map((s) => path.basename(s).replace(/\.[^.]+$/, '')));
+  return installedHookNames.filter((name) => !managed.has(name)).sort();
+}
+
+/**
+ * The dead hooks (see {@link unmanagedHookNames}) sitting in one version home.
+ * Reads the merged hook manifest silently — a diagnostic must not emit the
+ * shadow/override warnings the registrar path prints.
+ */
+export function listUnmanagedHooksInVersionHome(agent: AgentId, version: string): string[] {
+  if (!AGENTS[agent].supportsHooks) return [];
+  const scripts = Object.values(parseHookManifest({ warn: false }))
+    .map((h) => h.script)
+    .filter((s): s is string => typeof s === 'string');
+  const installed = listHooksInVersionHome(agent, version).map((e) => e.name);
+  return unmanagedHookNames(installed, scripts);
 }
 
 // Codex events that support a matcher field (matches tool name or session type).
@@ -785,7 +848,7 @@ type CodexHooksFile = {
  * Register hooks as lifecycle events in an agent's config.
  * Reads hooks.yaml manifest, merges into the agent's config file(s).
  * Only manages hooks whose command paths are under ~/.agents/hooks/ or
- * ~/.agents-system/hooks/. Does not remove user-added hooks.
+ * ~/.agents/.system/hooks/. Does not remove user-added hooks.
  *
  * @param agentsDirOverride - When provided, treats this single dir as the
  *   only managed hook root. Used by tests to inject a temp path. In normal
@@ -825,7 +888,7 @@ export function registerHooksToSettings(
   // Scripts are copied into the version home during sync — prefer that stable
   // local path so registered commands don't break when source dirs change.
   const localHooksDir = !overrideRoots
-    ? path.join(versionHome, `.${agentId}`, AGENTS[agentId].hooksDir)
+    ? path.join(versionHome, agentConfigDirName(agentId), AGENTS[agentId].hooksDir)
     : null;
   const resolveScript = (script: string): string | null => {
     if (overrideRoots) {
@@ -862,6 +925,9 @@ export function registerHooksToSettings(
   }
   if (agentId === 'grok') {
     return registerHooksForGrok(versionHome, manifest, resolveScript, managedPrefixes);
+  }
+  if (agentId === 'kimi') {
+    return registerHooksForKimi(versionHome, manifest, resolveScript, managedPrefixes);
   }
   return { registered: [], errors: [] };
 }
@@ -1431,6 +1497,103 @@ function registerHooksForGrok(
     } catch (e) {
       errors.push(`Failed to write ${fileName}: ${(e as Error).message}`);
     }
+  }
+
+  return { registered, errors };
+}
+
+function registerHooksForKimi(
+  versionHome: string,
+  manifest: Record<string, ManifestHook>,
+  resolveScript: (script: string) => string | null,
+  managedPrefixes: string[]
+): { registered: string[]; errors: string[] } {
+  const registered: string[] = [];
+  const errors: string[] = [];
+
+  const configPath = path.join(versionHome, '.kimi-code', 'config.toml');
+
+  // Read existing config.toml
+  let config: Record<string, unknown> = {};
+  if (fs.existsSync(configPath)) {
+    try {
+      config = TOML.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    } catch {
+      errors.push('Failed to parse config.toml');
+      return { registered, errors };
+    }
+  }
+
+  // Build set of current manifest command paths for GC
+  const currentManifestPaths = new Set<string>();
+  for (const [hookName, hookDef] of Object.entries(manifest)) {
+    if (!hookDef.events || hookDef.events.length === 0) continue;
+    const resolved = resolveHookCommand(hookName, hookDef, resolveScript);
+    if (resolved) currentManifestPaths.add(resolved);
+  }
+
+  // Remove stale managed hooks from existing hooks array
+  let hooksArray: Array<Record<string, unknown>> = [];
+  if (Array.isArray(config.hooks)) {
+    hooksArray = config.hooks as Array<Record<string, unknown>>;
+  }
+
+  const filteredHooks = hooksArray.filter((h) => {
+    const cmd = typeof h.command === 'string' ? h.command : '';
+    if (!cmd) return true;
+    if (!isManagedHookCommand(cmd, managedPrefixes)) return true;
+    return currentManifestPaths.has(cmd);
+  });
+
+  // Add/update hooks from manifest
+  for (const [name, hookDef] of Object.entries(manifest)) {
+    if (!hookDef.events || hookDef.events.length === 0) continue;
+
+    const commandPath = resolveHookCommand(name, hookDef, resolveScript);
+    if (!commandPath) {
+      errors.push(`${name}: script not found in user or system hooks dir`);
+      continue;
+    }
+
+    const timeout = hookDef.timeout ?? 30;
+
+    for (const event of hookDef.events) {
+      const matcher = hookDef.matcher;
+
+      // Find existing hook with same event, command, and matcher
+      const existingIdx = filteredHooks.findIndex((h) => {
+        const sameEvent = h.event === event;
+        const sameCmd = h.command === commandPath;
+        const sameMatcher = (h.matcher ?? '') === (matcher ?? '');
+        return sameEvent && sameCmd && sameMatcher;
+      });
+
+      const hookEntry: Record<string, unknown> = {
+        event,
+        command: commandPath,
+        timeout,
+      };
+      if (matcher) {
+        hookEntry.matcher = matcher;
+      }
+
+      if (existingIdx >= 0) {
+        filteredHooks[existingIdx] = hookEntry;
+      } else {
+        filteredHooks.push(hookEntry);
+      }
+
+      registered.push(`${name} -> ${event}`);
+    }
+  }
+
+  config.hooks = filteredHooks;
+
+  try {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, TOML.stringify(config as Parameters<typeof TOML.stringify>[0]), 'utf-8');
+  } catch (err) {
+    errors.push(`Failed to write config.toml: ${(err as Error).message}`);
   }
 
   return { registered, errors };

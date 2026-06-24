@@ -14,6 +14,7 @@ import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { confirm, select } from '@inquirer/prompts';
 import type { AgentId } from './types.js';
+import { IS_WINDOWS, prependToWindowsUserPath } from './platform/index.js';
 import { getShimsDir, getVersionsDir, getBackupsDir, ensureAgentsDir } from './state.js';
 export { getShimsDir };
 import { AGENTS } from './agents.js';
@@ -215,8 +216,22 @@ async function promptConflictStrategy(
  *   v15 — remove foreground resource sync / rules refresh from launch shims.
  *         Version homes are reconciled by agents-cli management commands; the
  *         shim hot path only resolves a version and execs the agent binary.
+ *   v16 — re-introduce project-scoped compile to the shim hot path via
+ *         `agents sync --launch`. This stays fast (filesystem-only): compiles
+ *         project rules, mirrors workspace resources, and synthesizes the
+ *         scoped plugin marketplaces (agents-cli/agents-system/extras-<alias>/
+ *         agents-project). Version-home reconciliation stays out of the hot
+ *         path — management commands still own that.
+ *   v17 — bash-side skip-fast sentinel under ~/.agents/.cache/launch-sync/.
+ *         When the sentinel mtime is newer than every source dir, exec the
+ *         agent binary directly without spawning node. Cuts steady-state
+ *         hot-path latency from ~680ms (node startup + module init) to ~11ms
+ *         (a few stat calls). Node writes the sentinel after each successful
+ *         sync. Documented limitation: POSIX dir mtime only updates on
+ *         top-level entry add/remove — deep edits to plugin contents won't
+ *         trigger auto-resync, run `agents sync` for that.
  */
-export const SHIM_SCHEMA_VERSION = 15;
+export const SHIM_SCHEMA_VERSION = 18;
 
 /** Internal marker string used to embed the schema version in shim scripts. */
 const SHIM_VERSION_MARKER = 'agents-shim-version:';
@@ -277,7 +292,13 @@ export COPILOT_HOME="$VERSION_DIR/home/${configDirName}"
 # This gives agents-cli full versioned isolation + resource sync for grok.
 export GROK_HOME="$VERSION_DIR/home/.grok"
 `
-          : '';
+          : agent === 'kimi'
+            ? `
+# Kimi Code CLI honors KIMI_CODE_HOME to relocate ~/.kimi-code (config.toml,
+# mcp.json, sessions, skills, hooks). Point it at the versioned home.
+export KIMI_CODE_HOME="$VERSION_DIR/home/${configDirName}"
+`
+            : '';
 
   const launchArgs = agent === 'codex' ? ' -c check_for_update_on_startup=false' : '';
 
@@ -286,8 +307,7 @@ export GROK_HOME="$VERSION_DIR/home/.grok"
 # Shim for ${agentConfig.name}
 # ${SHIM_VERSION_MARKER} ${SHIM_SCHEMA_VERSION}
 
-AGENTS_SYSTEM_DIR="$HOME/.agents-system"
-AGENTS_USER_DIR="$HOME/.agents"
+AGENTS_USER_DIR="\${AGENTS_USER_DIR:-$HOME/.agents}"
 AGENTS_BIN=${agentsBin}
 AGENT="${agent}"
 CLI_COMMAND="${cliCommand}"
@@ -297,10 +317,10 @@ if [ -z "$AGENTS_BIN" ] || [ ! -x "$AGENTS_BIN" ]; then
   exit 127
 fi
 
-# Find project agents.yaml walking up from cwd (skip $HOME/.agents-system/agents.yaml)
+# Find project agents.yaml walking up from cwd (skip $HOME/.agents/agents.yaml)
 find_project_version() {
   local dir="$PWD"
-  local user_agents_yaml="$AGENTS_SYSTEM_DIR/agents.yaml"
+  local user_agents_yaml="$AGENTS_USER_DIR/agents.yaml"
   while [ "$dir" != "/" ]; do
     local candidate="$dir/agents.yaml"
     if [ -f "$candidate" ] && [ "$candidate" != "$user_agents_yaml" ]; then
@@ -419,6 +439,16 @@ if [ "$AGENT" = "grok" ]; then
     # Last resort: whatever is on PATH (user may have installed grok globally)
     BINARY=$(command -v grok 2>/dev/null || echo "")
   fi
+# Kimi special case: binary lives in ~/.kimi-code/bin/, not node_modules.
+# We still use the agents-cli version dir purely for KIMI_CODE_HOME isolation.
+elif [ "$AGENT" = "kimi" ]; then
+  KIMI_BINARY="$HOME/.kimi-code/bin/kimi"
+  if [ -x "$KIMI_BINARY" ]; then
+    BINARY="$KIMI_BINARY"
+  else
+    # Last resort: whatever is on PATH
+    BINARY=$(command -v kimi 2>/dev/null || echo "")
+  fi
 else
   BINARY="$VERSION_DIR/node_modules/.bin/$CLI_COMMAND"
 fi
@@ -486,6 +516,34 @@ fi
 
 ${managedEnv}
 
+# Project-scoped compile (rules, workspace resources, scoped plugin marketplaces).
+# Skip-fast: if a sentinel from the last sync exists and is newer than all
+# source dirs (project .agents/, user plugins, system plugins), exec the
+# agent binary directly without spawning node. Cuts steady-state hot-path
+# latency from ~680ms (node startup + agents-cli module init) to ~11ms (a
+# handful of stat calls). Never blocks launch on failure of the sync itself.
+#
+# Known limitation: POSIX dir mtime updates only on entry add/remove at that
+# level. Deep edits to existing plugin contents (e.g. editing a SKILL.md
+# inside a plugin) won't bump the parent dir's mtime — the marketplace copy
+# stays stale until \`agents sync\` runs explicitly or a top-level entry
+# changes. Advanced users hot-iterating on plugins know to run sync.
+PROJECT_SLUG=\$(printf '%s' "\$PWD" | tr / _ | tr ' ' _)
+LAUNCH_SENTINEL="\$AGENTS_USER_DIR/.cache/launch-sync/\${AGENT}@\${VERSION}@\${PROJECT_SLUG}"
+LAUNCH_SKIP=0
+if [ -f "\$LAUNCH_SENTINEL" ]; then
+  LAUNCH_SKIP=1
+  for LAUNCH_SRC in "\$PWD/.agents" "\$AGENTS_USER_DIR/plugins" "\$AGENTS_USER_DIR/.system/plugins"; do
+    if [ -e "\$LAUNCH_SRC" ] && [ "\$LAUNCH_SRC" -nt "\$LAUNCH_SENTINEL" ]; then
+      LAUNCH_SKIP=0
+      break
+    fi
+  done
+fi
+if [ "\$LAUNCH_SKIP" = "0" ]; then
+  "\$AGENTS_BIN" sync --agent "\$AGENT" --agent-version "\$VERSION" --launch --cwd "\$PWD" --quiet 2>/dev/null || true
+fi
+
 exec "$BINARY"${launchArgs} "$@"
 `;
 }
@@ -502,7 +560,30 @@ export function createShim(agent: AgentId): string {
   const script = generateShimScript(agent);
   fs.writeFileSync(shimPath, script, { mode: 0o755 });
 
+  // Windows can't execute the bash shim directly. Drop a `.cmd` companion next
+  // to it that delegates to the node-side transparent resolver (`agents __shim`),
+  // so the version resolution stays single-sourced instead of reimplemented in batch.
+  if (IS_WINDOWS) {
+    writeWindowsCmdShim(shimPath + '.cmd', agentConfig.cliCommand);
+  }
+
   return shimPath;
+}
+
+/**
+ * Generate a Windows `.cmd` launcher that delegates to `agents __shim <spec>`.
+ * `spec` is the agent's cliCommand for the default-version shim, or
+ * `cliCommand@version` for a versioned alias. node + the dist entrypoint are
+ * resolved at generation time so the launcher does not depend on `agents`
+ * already being on PATH.
+ */
+function writeWindowsCmdShim(cmdPath: string, spec: string): void {
+  const indexJs = getAgentsBinForGeneratedShim();
+  const content =
+    `@echo off\r\n` +
+    `rem Auto-generated by agents-cli - do not edit\r\n` +
+    `node "${indexJs}" __shim ${spec} %*\r\n`;
+  fs.writeFileSync(cmdPath, content);
 }
 
 /**
@@ -515,6 +596,7 @@ export function removeShim(agent: AgentId): boolean {
 
   if (fs.existsSync(shimPath)) {
     fs.unlinkSync(shimPath);
+    if (IS_WINDOWS) { try { fs.unlinkSync(shimPath + '.cmd'); } catch {} }
     return true;
   }
 
@@ -586,7 +668,13 @@ export CODEX_HOME="$HOME/.agents/.history/versions/${agent}/${version}/home/${co
 # version MCP and session state are isolated.
 export COPILOT_HOME="$HOME/.agents/.history/versions/${agent}/${version}/home/${configDirName}"
 `
-        : '';
+        : agent === 'kimi'
+          ? `
+# Kimi Code CLI honors KIMI_CODE_HOME to relocate ~/.kimi-code (config.toml,
+# mcp.json, sessions, skills, hooks). Point direct aliases at the versioned home.
+export KIMI_CODE_HOME="$HOME/.agents/.history/versions/${agent}/${version}/home/${configDirName}"
+`
+          : '';
   const launchArgs = agent === 'codex' ? ' -c check_for_update_on_startup=false' : '';
 
   return `#!/bin/bash
@@ -670,6 +758,10 @@ export function createVersionedAlias(agent: AgentId, version: string): string {
   const script = generateVersionedAliasScript(agent, version);
   fs.writeFileSync(aliasPath, script, { mode: 0o755 });
 
+  if (IS_WINDOWS) {
+    writeWindowsCmdShim(aliasPath + '.cmd', `${agentConfig.cliCommand}@${version}`);
+  }
+
   return aliasPath;
 }
 
@@ -683,6 +775,7 @@ export function removeVersionedAlias(agent: AgentId, version: string): boolean {
 
   if (fs.existsSync(aliasPath)) {
     fs.unlinkSync(aliasPath);
+    if (IS_WINDOWS) { try { fs.unlinkSync(aliasPath + '.cmd'); } catch {} }
     return true;
   }
 
@@ -820,7 +913,7 @@ export async function switchConfigSymlink(
       // Different target - update it
       fs.unlinkSync(configPath);
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.symlinkSync(versionConfigPath, configPath);
+      fs.symlinkSync(versionConfigPath, configPath, process.platform === 'win32' ? 'junction' : undefined);
       return { success: true };
     } else if (stat.isDirectory()) {
       // Real directory exists - backup and replace with symlink
@@ -833,8 +926,27 @@ export async function switchConfigSymlink(
       fs.mkdirSync(agentBackupDir, { recursive: true });
       fs.renameSync(configPath, finalBackupPath);
 
+      // Session JSONLs that lived under the old configPath have just moved to
+      // finalBackupPath on disk. Rewrite any DB rows pointing at the old prefix
+      // so querySessions stops returning phantom rows (issue #136). The
+      // discoverer at src/lib/session/discover.ts already scans backup dirs, so
+      // future indexer runs will find the new files — this just keeps the
+      // existing rows valid in the meantime.
+      //
+      // Dynamic import so loading shims.ts doesn't transitively open the
+      // sessions DB — many tests partially mock state.js and would break.
+      try {
+        const { updateSessionFilePaths } = await import('./session/db.js');
+        updateSessionFilePaths(configPath, finalBackupPath);
+      } catch (err) {
+        console.error(
+          `Warning: failed to update session file_paths after backing up ${configPath}: ` +
+            `${(err as Error).message}. Stale rows may appear in session listings until the next scan.`
+        );
+      }
+
       // Create symlink (parent already exists since the dir we just moved was here)
-      fs.symlinkSync(versionConfigPath, configPath);
+      fs.symlinkSync(versionConfigPath, configPath, process.platform === 'win32' ? 'junction' : undefined);
 
       return { success: true, backupPath: finalBackupPath };
     } else {
@@ -846,7 +958,7 @@ export async function switchConfigSymlink(
       // For nested layouts (e.g., ~/.gemini/antigravity-cli) the parent dir
       // may also be missing if the parent agent (Gemini) is not installed.
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
-      fs.symlinkSync(versionConfigPath, configPath);
+      fs.symlinkSync(versionConfigPath, configPath, process.platform === 'win32' ? 'junction' : undefined);
       return { success: true };
     }
     return { success: false, error: (err as Error).message };
@@ -1343,24 +1455,61 @@ export function removeLegacyUserShim(agent: AgentId, overrides?: { homeDir?: str
  * Shell aliases live in the user's session and aren't visible from a Node.js
  * child process. We do a best-effort scan of common RC files for `alias
  * <command>=` patterns. Returns false when detection is inconclusive.
+ *
+ * Tracks the LAST `alias` / `unalias` action for this command per rc file —
+ * a trailing `unalias codex` cancels an earlier `alias codex=...`, and
+ * `unalias` can name multiple commands on one line. Without this, an
+ * `alias` line elsewhere in the file would surface as a false positive
+ * (e.g. seen in zshrc setups that conditionally clear an alias later).
  */
-export function hasAliasShadowingShim(agent: AgentId): boolean {
-  const cliCommand = AGENTS[agent].cliCommand;
-  const HOME = os.homedir();
-  const rcFiles = [
-    path.join(HOME, '.zshrc'),
-    path.join(HOME, '.bashrc'),
-    path.join(HOME, '.bash_profile'),
-    path.join(HOME, '.profile'),
-  ];
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
-  const pattern = new RegExp(`^\\s*alias\\s+${cliCommand}\\s*=`, 'm');
+/** Walk rc lines in order; a later `unalias` clears an earlier `alias`. */
+function isAliasActiveInRcContent(content: string, cliCommand: string): boolean {
+  let active = false;
+  const aliasPattern = new RegExp(`^\\s*alias\\s+${escapeRegex(cliCommand)}\\s*=`);
+
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    if (aliasPattern.test(line)) {
+      active = true;
+      continue;
+    }
+
+    const unaliasMatch = trimmed.match(/^unalias\s+(.+)$/);
+    if (!unaliasMatch) continue;
+
+    const tokens = unaliasMatch[1].split(/\s+/).filter((token) => !token.startsWith('-'));
+    if (tokens.includes(cliCommand)) {
+      active = false;
+    }
+  }
+
+  return active;
+}
+
+export function hasAliasShadowingShim(
+  agent: AgentId,
+  overrides?: { homeDir?: string },
+): boolean {
+  const cliCommand = AGENTS[agent].cliCommand;
+  const homeDir = overrides?.homeDir ?? os.homedir();
+  const rcFiles = [
+    path.join(homeDir, '.zshrc'),
+    path.join(homeDir, '.bashrc'),
+    path.join(homeDir, '.bash_profile'),
+    path.join(homeDir, '.profile'),
+  ];
 
   for (const rcFile of rcFiles) {
     try {
       if (!fs.existsSync(rcFile)) continue;
       const content = fs.readFileSync(rcFile, 'utf-8');
-      if (pattern.test(content)) return true;
+      if (isAliasActiveInRcContent(content, cliCommand)) return true;
     } catch {
       // unreadable rc file — skip
     }
@@ -1398,6 +1547,7 @@ function isShimPathCommandLine(line: string, shimsDir: string): boolean {
   const markerRegexes = exactMarkers.map((marker) => new RegExp(`${escapeRegex(marker)}(?=$|[:\\s])`));
   const suffixRegexes = [
     /\/\.agents-system\/shims(?=$|[:\s])/,
+    /\/\.agents\/\.cache\/shims(?=$|[:\s])/,
     /\/\.agents\/shims(?=$|[:\s])/,
   ];
 
@@ -1472,22 +1622,39 @@ export function getPathSetupInstructions(): string {
   fish_add_path ${shimsDir}`;
   }
 
-  return `Add to ~/${rcFile} (AFTER any nvm/node setup):
+  return `Add to the end of ~/${rcFile} (after any nvm/node setup and agent installers):
   export PATH="${shimsDir}:$PATH"
 
-IMPORTANT: Shims must come FIRST in PATH to override global installs.
+IMPORTANT: Shims must be the last PATH prepend in your shell config to override global installs.
 
 Then restart your shell or run:
   source ~/${rcFile}`;
 }
 
+interface ShimPathResult {
+  success: boolean;
+  alreadyPresent?: boolean;
+  rcFile?: string;
+  /** Human label of where the entry landed, e.g. `~/.zshrc` or `your user PATH`. */
+  location?: string;
+  /** Per-platform "how to pick it up" hint, e.g. `source ~/.zshrc` / open a new terminal. */
+  reloadHint?: string;
+  error?: string;
+}
+
 /**
- * Add shims directory to shell PATH configuration.
- * Returns true if added, false if already present or failed.
+ * Add the shims directory to PATH: edits the shell rc file on POSIX, or registers
+ * it on the Windows User PATH (registry + WM_SETTINGCHANGE). Idempotent.
  */
 export function addShimsToPath(
   overrides?: { homeDir?: string; shell?: string; shimsDir?: string },
-): { success: boolean; alreadyPresent?: boolean; rcFile?: string; error?: string } {
+): ShimPathResult {
+  // Windows has no shell rc file to edit. Register the shims dir on the User PATH
+  // via the platform-native mechanism instead. (The `shell` override is the test
+  // hook for exercising the POSIX path, so it bypasses this branch.)
+  if (IS_WINDOWS && !overrides?.shell) {
+    return addShimsToWindowsUserPath(overrides?.shimsDir || getShimsDir());
+  }
   const shimsDir = overrides?.shimsDir || getShimsDir();
   const { rcFile, rcPath, shell } = getShellRcFile(overrides);
 
@@ -1511,27 +1678,6 @@ export function addShimsToPath(
 
   const contentWithoutShimLines = stripShimPathLines(content, shimsDir);
 
-  // Find insertion point - AFTER node/nvm/fnm setup if present, otherwise append.
-  const insertAfterPatterns = [
-    /^export NVM_DIR=/m,
-    /^source.*nvm/m,
-    /^\[ -s.*nvm/m,
-    /^eval.*fnm/m,
-    /^export PATH.*node/m,
-    /^export PATH.*npm/m,
-  ];
-
-  let insertIndex = -1;
-  const lines = contentWithoutShimLines.split('\n');
-  let offset = 0;
-  for (const line of lines) {
-    const lineWithNewline = `${line}\n`;
-    if (insertAfterPatterns.some((pattern) => pattern.test(line))) {
-      insertIndex = offset + lineWithNewline.length;
-    }
-    offset += lineWithNewline.length;
-  }
-
   // Write the updated content
   try {
     // Ensure parent directories exist (especially for fish: ~/.config/fish/)
@@ -1540,29 +1686,44 @@ export function addShimsToPath(
       fs.mkdirSync(rcDir, { recursive: true });
     }
 
-    let newContent: string;
-    if (insertIndex >= 0) {
-      // Insert after the last node/nvm/fnm-related line so our prepend wins.
-      const before = contentWithoutShimLines.slice(0, insertIndex);
-      const separator = before.length > 0 && !before.endsWith('\n\n') ? '\n' : '';
-      newContent = before + separator + exportBlock + contentWithoutShimLines.slice(insertIndex);
-    } else {
-      // Append to end
-      const separator = contentWithoutShimLines.length > 0 && !contentWithoutShimLines.endsWith('\n') ? '\n' : '';
-      newContent = contentWithoutShimLines + separator + exportBlock;
-    }
-
+    // Append at EOF so later installer PATH prepends cannot shadow the shims.
+    const separator = contentWithoutShimLines.length > 0 && !contentWithoutShimLines.endsWith('\n') ? '\n' : '';
+    let newContent = contentWithoutShimLines + separator + exportBlock;
     newContent = newContent.replace(/\n{2,}$/g, '\n');
 
+    const location = `~/${rcFile}`;
+    const reloadHint = `Restart your shell or run: source ~/${rcFile}`;
     if (newContent === content) {
-      return { success: true, alreadyPresent: true, rcFile };
+      return { success: true, alreadyPresent: true, rcFile, location, reloadHint };
     }
 
     fs.writeFileSync(rcPath, newContent, 'utf-8');
-    return { success: true, rcFile };
+    return { success: true, rcFile, location, reloadHint };
   } catch (err) {
     return { success: false, error: `Could not write ${rcFile}: ${(err as Error).message}` };
   }
+}
+
+/**
+ * Register the shims dir on the Windows User PATH via the .NET environment API,
+ * which writes the registry AND broadcasts WM_SETTINGCHANGE — the correct analog
+ * of editing a shell rc file (no `setx` truncation, no manual step). Idempotent:
+ * a no-op when the shims dir is already first in the User PATH. Moves it to the
+ * front when it exists but is in the wrong position (e.g. appended by an old
+ * install) so it overrides any npm/global installs that appear later. The shims
+ * dir is passed via an env var so it is never interpolated into the script text.
+ */
+function addShimsToWindowsUserPath(shimsDir: string): ShimPathResult {
+  const r = prependToWindowsUserPath(shimsDir);
+  if (!r.success) {
+    return { success: false, error: r.error };
+  }
+  return {
+    success: true,
+    alreadyPresent: r.alreadyPresent,
+    location: 'your user PATH',
+    reloadHint: 'Open a new terminal for the change to take effect.',
+  };
 }
 
 export function listAgentsWithInstalledVersions(): AgentId[] {

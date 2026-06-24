@@ -10,10 +10,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
-import { AGENTS, COMMANDS_CAPABLE_AGENTS, ensureCommandsDir } from './agents.js';
+import { AGENTS, ensureCommandsDir, agentConfigDirName, resolveAgentName } from './agents.js';
+import { capableAgents, isCapable, supports } from './capabilities.js';
 import { markdownToToml } from './convert.js';
 import { getCommandsDir, getUserCommandsDir, getEnabledExtraRepos, getProjectAgentsDir, getSkillsDir, getTrashCommandsDir } from './state.js';
-import { getEffectiveHome, getVersionHomePath, listInstalledVersions } from './versions.js';
+import { getEffectiveHome, getVersionHomePath, listInstalledVersions, resolveVersion } from './versions.js';
 import type { AgentId, CommandInstallation } from './types.js';
 import {
   commandSkillMatches,
@@ -30,6 +31,95 @@ export type CommandScope = 'user' | 'project';
 export interface CommandMetadata {
   name: string;
   description: string;
+  /** When set, sync only to these agents (aliases resolved at parse time). */
+  agents?: AgentId[];
+  /** Minimum agent CLI version (inclusive) for this command. */
+  since?: string;
+  /** Exclusive upper bound on agent CLI version for this command. */
+  until?: string;
+}
+
+export type CommandApplyFailReason = 'unsupported' | 'agent_excluded' | 'too_old' | 'too_new';
+
+export type CommandApplyResult =
+  | { ok: true }
+  | { ok: false; reason: CommandApplyFailReason; need?: string };
+
+function compareVersions(a: string, b: string): number {
+  const aParts = a.split('.').map((n) => parseInt(n, 10) || 0);
+  const bParts = b.split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+    const aVal = aParts[i] || 0;
+    const bVal = bParts[i] || 0;
+    if (aVal !== bVal) return aVal - bVal;
+  }
+  return 0;
+}
+
+function parseAgentsField(raw: unknown): AgentId[] | undefined {
+  if (raw == null) return undefined;
+  const tokens = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string'
+      ? raw.split(/[,\s]+/)
+      : [];
+  const out: AgentId[] = [];
+  for (const token of tokens) {
+    const id = resolveAgentName(String(token).trim());
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Whether a slash command should sync to the given agent@version. Checks
+ * frontmatter `agents` / `since` / `until` after the agent-level commands
+ * (or commands-as-skills) capability gate.
+ */
+export function commandAppliesTo(
+  agent: AgentId,
+  version: string,
+  metadata: Pick<CommandMetadata, 'agents' | 'since' | 'until'> | null | undefined
+): CommandApplyResult {
+  if (!supports(agent, 'commands', version).ok && !shouldInstallCommandAsSkill(agent, version)) {
+    return { ok: false, reason: 'unsupported' };
+  }
+
+  if (metadata?.agents?.length && !metadata.agents.includes(agent)) {
+    return { ok: false, reason: 'agent_excluded' };
+  }
+
+  if (metadata?.since && compareVersions(version, metadata.since) < 0) {
+    return { ok: false, reason: 'too_old', need: `>= ${metadata.since}` };
+  }
+
+  if (metadata?.until && compareVersions(version, metadata.until) >= 0) {
+    return { ok: false, reason: 'too_new', need: `< ${metadata.until}` };
+  }
+
+  return { ok: true };
+}
+
+export function explainCommandSkip(
+  agent: AgentId,
+  version: string,
+  commandName: string,
+  result: CommandApplyResult
+): string {
+  if (result.ok) return '';
+  const tag = `${agent}@${version}`;
+  switch (result.reason) {
+    case 'unsupported':
+      return `${tag}: /${commandName} not supported for this agent version`;
+    case 'agent_excluded':
+      return `${tag}: /${commandName} excluded by command frontmatter agents list`;
+    case 'too_old':
+      return `${tag}: /${commandName} requires ${result.need}`;
+    case 'too_new':
+      return `${tag}: /${commandName} requires ${result.need}`;
+    default:
+      return `${tag}: /${commandName} skipped`;
+  }
 }
 
 /** Result of validating command metadata. */
@@ -56,8 +146,8 @@ export interface InstalledCommand {
   description?: string;
 }
 
-/** Parse command metadata (name, description) from YAML frontmatter or TOML headers. */
-function parseCommandMetadata(filePath: string): CommandMetadata | null {
+/** Parse command metadata (name, description, targeting) from YAML frontmatter or TOML headers. */
+export function parseCommandMetadata(filePath: string): CommandMetadata | null {
   if (!fs.existsSync(filePath)) {
     return null;
   }
@@ -75,6 +165,9 @@ function parseCommandMetadata(filePath: string): CommandMetadata | null {
         return {
           name: parsed.name || '',
           description: parsed.description || '',
+          agents: parseAgentsField(parsed.agents),
+          since: typeof parsed.since === 'string' ? parsed.since : undefined,
+          until: typeof parsed.until === 'string' ? parsed.until : undefined,
         };
       }
     }
@@ -195,11 +288,24 @@ export function installCommand(
     };
   }
 
+  const pinnedVersion = resolveVersion(agentId, process.cwd());
+  if (pinnedVersion) {
+    const gate = commandAppliesTo(agentId, pinnedVersion, metadata);
+    if (!gate.ok) {
+      return {
+        path: '',
+        method: 'copy',
+        error: explainCommandSkip(agentId, pinnedVersion, commandName, gate),
+        warnings: validation.warnings,
+      };
+    }
+  }
+
   const agent = AGENTS[agentId];
   ensureCommandsDir(agentId);
 
   const home = getEffectiveHome(agentId);
-  const commandsDir = path.join(home, `.${agentId}`, agent.commandsSubdir);
+  const commandsDir = path.join(home, agentConfigDirName(agentId), agent.commandsSubdir);
   fs.mkdirSync(commandsDir, { recursive: true });
 
   const ext = agent.format === 'toml' ? '.toml' : '.md';
@@ -234,7 +340,7 @@ export function installCommand(
  */
 export function getVersionCommandsDir(agent: AgentId, version: string): string {
   const home = getVersionHomePath(agent, version);
-  return path.join(home, `.${agent}`, AGENTS[agent].commandsSubdir);
+  return path.join(home, agentConfigDirName(agent), AGENTS[agent].commandsSubdir);
 }
 
 /**
@@ -242,7 +348,7 @@ export function getVersionCommandsDir(agent: AgentId, version: string): string {
  */
 export function listCommandsInVersionHome(agent: AgentId, version: string): string[] {
   const versionHome = getVersionHomePath(agent, version);
-  const agentDir = path.join(versionHome, `.${agent}`);
+  const agentDir = path.join(versionHome, agentConfigDirName(agent));
   if (shouldInstallCommandAsSkill(agent, version)) {
     return listCommandSkillsInVersion(agentDir);
   }
@@ -265,7 +371,7 @@ function versionCommandMatches(agent: AgentId, version: string, commandName: str
   if (!fs.existsSync(sourcePath)) return false;
 
   const versionHome = getVersionHomePath(agent, version);
-  const agentDir = path.join(versionHome, `.${agent}`);
+  const agentDir = path.join(versionHome, agentConfigDirName(agent));
   if (shouldInstallCommandAsSkill(agent, version)) {
     return commandSkillMatches(agentDir, commandName, sourcePath);
   }
@@ -295,6 +401,8 @@ export interface VersionCommandDiff {
   toAdd: string[];
   toUpdate: string[];
   matched: string[];
+  /** Installed but excluded by frontmatter agents/since/until — safe to remove. */
+  toRemove: string[];
   orphans: string[];
 }
 
@@ -308,9 +416,14 @@ export function diffVersionCommands(agent: AgentId, version: string): VersionCom
   const toAdd: string[] = [];
   const toUpdate: string[] = [];
   const matched: string[] = [];
+  const toRemove: string[] = [];
   const orphans: string[] = [];
 
   for (const name of central) {
+    const sourcePath = path.join(getCommandsDir(), `${name}.md`);
+    const metadata = parseCommandMetadata(sourcePath);
+    if (!commandAppliesTo(agent, version, metadata).ok) continue;
+
     if (!installed.has(name)) {
       toAdd.push(name);
     } else if (!versionCommandMatches(agent, version, name)) {
@@ -321,10 +434,26 @@ export function diffVersionCommands(agent: AgentId, version: string): VersionCom
   }
 
   for (const name of installed) {
-    if (!central.has(name)) orphans.push(name);
+    if (!central.has(name)) {
+      orphans.push(name);
+      continue;
+    }
+    const sourcePath = path.join(getCommandsDir(), `${name}.md`);
+    const metadata = parseCommandMetadata(sourcePath);
+    if (!commandAppliesTo(agent, version, metadata).ok) {
+      toRemove.push(name);
+    }
   }
 
-  return { agent, version, toAdd: toAdd.sort(), toUpdate: toUpdate.sort(), matched, orphans: orphans.sort() };
+  return {
+    agent,
+    version,
+    toAdd: toAdd.sort(),
+    toUpdate: toUpdate.sort(),
+    matched,
+    toRemove: toRemove.sort(),
+    orphans: orphans.sort(),
+  };
 }
 
 /**
@@ -336,14 +465,20 @@ export function installCommandToVersion(
   version: string,
   commandName: string,
   method: 'symlink' | 'copy' = 'copy'
-): { success: boolean; error?: string } {
+): { success: boolean; error?: string; skipped?: boolean; skipReason?: string } {
   const sourcePath = path.join(getCommandsDir(), `${commandName}.md`);
   if (!fs.existsSync(sourcePath)) {
     return { success: false, error: `Command '${commandName}' not found in central` };
   }
 
+  const metadata = parseCommandMetadata(sourcePath);
+  const gate = commandAppliesTo(agent, version, metadata);
+  if (!gate.ok) {
+    return { success: true, skipped: true, skipReason: explainCommandSkip(agent, version, commandName, gate) };
+  }
+
   const versionHome = getVersionHomePath(agent, version);
-  const agentDir = path.join(versionHome, `.${agent}`);
+  const agentDir = path.join(versionHome, agentConfigDirName(agent));
   if (shouldInstallCommandAsSkill(agent, version)) {
     return installCommandSkillToVersion(
       agentDir,
@@ -392,7 +527,7 @@ export function removeCommandFromVersion(
   commandName: string
 ): { success: boolean; error?: string } {
   const versionHome = getVersionHomePath(agent, version);
-  const agentDir = path.join(versionHome, `.${agent}`);
+  const agentDir = path.join(versionHome, agentConfigDirName(agent));
   if (shouldInstallCommandAsSkill(agent, version)) {
     return removeCommandSkillFromVersion(agentDir, commandName);
   }
@@ -419,9 +554,9 @@ export function removeCommandFromVersion(
  */
 export function iterCommandsCapableVersions(filter?: { agent?: AgentId; version?: string }): Array<{ agent: AgentId; version: string }> {
   const pairs: Array<{ agent: AgentId; version: string }> = [];
-  const agents = filter?.agent ? [filter.agent] : COMMANDS_CAPABLE_AGENTS;
+  const agents = filter?.agent ? [filter.agent] : capableAgents('commands');
   for (const agent of agents) {
-    if (!COMMANDS_CAPABLE_AGENTS.includes(agent)) continue;
+    if (!isCapable(agent, 'commands')) continue;
     const versions = listInstalledVersions(agent);
     for (const version of versions) {
       if (filter?.version && filter.version !== version) continue;
@@ -435,7 +570,7 @@ export function iterCommandsCapableVersions(filter?: { agent?: AgentId; version?
 export function uninstallCommand(agentId: AgentId, commandName: string): boolean {
   const agent = AGENTS[agentId];
   const home = getEffectiveHome(agentId);
-  const commandsDir = path.join(home, `.${agentId}`, agent.commandsSubdir);
+  const commandsDir = path.join(home, agentConfigDirName(agentId), agent.commandsSubdir);
   const ext = agent.format === 'toml' ? '.toml' : '.md';
   const targetPath = path.join(commandsDir, `${commandName}${ext}`);
 
@@ -450,7 +585,7 @@ export function uninstallCommand(agentId: AgentId, commandName: string): boolean
 function listInstalledCommands(agentId: AgentId): string[] {
   const agent = AGENTS[agentId];
   const home = getEffectiveHome(agentId);
-  const commandsDir = path.join(home, `.${agentId}`, agent.commandsSubdir);
+  const commandsDir = path.join(home, agentConfigDirName(agentId), agent.commandsSubdir);
   if (!fs.existsSync(commandsDir)) {
     return [];
   }
@@ -468,7 +603,7 @@ function listInstalledCommands(agentId: AgentId): string[] {
 function commandExists(agentId: AgentId, commandName: string): boolean {
   const agent = AGENTS[agentId];
   const home = getEffectiveHome(agentId);
-  const commandsDir = path.join(home, `.${agentId}`, agent.commandsSubdir);
+  const commandsDir = path.join(home, agentConfigDirName(agentId), agent.commandsSubdir);
   const ext = agent.format === 'toml' ? '.toml' : '.md';
   const targetPath = path.join(commandsDir, `${commandName}${ext}`);
   return fs.existsSync(targetPath);
@@ -492,7 +627,7 @@ function commandContentMatches(
 ): boolean {
   const agent = AGENTS[agentId];
   const home = getEffectiveHome(agentId);
-  const commandsDir = path.join(home, `.${agentId}`, agent.commandsSubdir);
+  const commandsDir = path.join(home, agentConfigDirName(agentId), agent.commandsSubdir);
   const ext = agent.format === 'toml' ? '.toml' : '.md';
   const installedPath = path.join(commandsDir, `${commandName}${ext}`);
 
@@ -590,7 +725,7 @@ export function listInstalledCommandsWithScope(
 
   // User-scoped commands (version-aware when home is provided)
   const home = options?.home || getEffectiveHome(agentId);
-  const userCommandsDir = path.join(home, `.${agentId}`, agent.commandsSubdir);
+  const userCommandsDir = path.join(home, agentConfigDirName(agentId), agent.commandsSubdir);
   const userExts = [ext];
   const userCommands = listCommandsFromDir(userCommandsDir, userExts);
   for (const name of userCommands) {
@@ -654,7 +789,7 @@ export function installCommandCentrally(
 }
 
 /**
- * List commands from user (~/.agents/commands/) and system (~/.agents-system/commands/) dirs.
+ * List commands from user (~/.agents/commands/) and system (~/.agents/.system/commands/) dirs.
  * User dir takes priority; deduplication preserves first occurrence.
  */
 export function listCentralCommands(): string[] {

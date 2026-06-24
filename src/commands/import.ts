@@ -29,9 +29,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { confirm } from '@inquirer/prompts';
 
-import type { AgentId } from '../lib/types.js';
 import { ALL_AGENT_IDS } from '../lib/agents.js';
-import { AGENTS, getCliPath, getCliVersion, agentLabel } from '../lib/agents.js';
+import { AGENTS, getCliPath, getCliVersion, agentLabel, resolveAgentName } from '../lib/agents.js';
 import { getVersionDir } from '../lib/versions.js';
 import {
   finalizeImport,
@@ -49,17 +48,13 @@ interface ImportOptions {
   yes?: boolean;
 }
 
-function isValidAgentId(value: string): value is AgentId {
-  return (ALL_AGENT_IDS as string[]).includes(value);
-}
-
 async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
-  if (!isValidAgentId(agentArg)) {
+  const agentId = resolveAgentName(agentArg);
+  if (!agentId) {
     console.error(chalk.red(`Unknown agent: ${agentArg}`));
     console.error(chalk.gray(`Known agents: ${ALL_AGENT_IDS.join(', ')}`));
     process.exit(1);
   }
-  const agentId = agentArg;
   const agent = AGENTS[agentId];
 
   // installScript-based agents (Grok, Antigravity, Cursor, Kiro, Goose, Roo)
@@ -67,6 +62,12 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
   // installer dropped it. We adopt by symlinking that PATH binary directly
   // into the version's `node_modules/.bin/`. No package.json walk.
   const isInstallScriptAgent = !agent.npmPackage;
+
+  // Whether to adopt the binary by a direct symlink (installScript style) vs.
+  // the npm package.json walk. Starts equal to isInstallScriptAgent, but an
+  // npm-capable agent that turns out to be installed as a standalone binary
+  // (see the resolvePackageDirFromBinary fallback below) flips this to true.
+  let useDirectBinaryImport = isInstallScriptAgent;
 
   let globalPath: string | null = null;
   let installScriptBinary: string | null = null;
@@ -106,9 +107,15 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
     } else {
       globalPath = resolvePackageDirFromBinary(binary);
       if (!globalPath) {
-        console.error(chalk.red(`Could not resolve npm package for binary: ${binary}`));
-        console.error(chalk.gray('Pass --from-path <dir> with the package directory explicitly.'));
-        process.exit(1);
+        // npmPackage is declared, but the binary on PATH doesn't live inside an
+        // npm package layout — e.g. Kimi installed via its curl install.sh,
+        // which drops a standalone bundled binary at ~/.kimi-code/bin/kimi
+        // rather than into node_modules/<pkg>/. The binary is valid and
+        // self-contained, so adopt it the same way as an installScript agent:
+        // a direct symlink. Key the decision on the on-disk layout, not on
+        // whether an npmPackage label happens to exist.
+        installScriptBinary = binary;
+        useDirectBinaryImport = true;
       }
     }
   }
@@ -135,7 +142,7 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
 
   let version = opts.version;
   if (!version) {
-    if (!isInstallScriptAgent && globalPath) {
+    if (!useDirectBinaryImport && globalPath) {
       try {
         const pkg = JSON.parse(fs.readFileSync(path.join(globalPath, 'package.json'), 'utf8'));
         version = typeof pkg.version === 'string' ? pkg.version : undefined;
@@ -166,7 +173,7 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
   }
 
   const versionDir = getVersionDir(agentId, version);
-  const fromLabel = isInstallScriptAgent ? (installScriptBinary as string) : (globalPath as string);
+  const fromLabel = useDirectBinaryImport ? (installScriptBinary as string) : (globalPath as string);
 
   console.log(chalk.bold(`\nImport ${agentLabel(agentId)} v${version}`));
   console.log(`  from: ${chalk.gray(fromLabel)}`);
@@ -221,7 +228,7 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
   }
 
   const binSpinner = ora(`Registering ${agentLabel(agentId)} v${version} binary...`).start();
-  const binResult = isInstallScriptAgent
+  const binResult = useDirectBinaryImport
     ? importInstallScriptBinary(
         { agentId, npmPackage: agent.npmPackage, cliCommand: agent.cliCommand },
         version,

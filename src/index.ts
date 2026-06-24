@@ -28,7 +28,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageJsonPath = path.join(__dirname, '..', 'package.json');
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
 const VERSION = packageJson.version;
-const NPM_PACKAGE_NAME = '@phnx-labs/agents-cli';
+import {
+  NPM_PACKAGE_NAME,
+  deriveGlobalPrefix,
+  installPackageIntoPrefix,
+  verifyInstalledVersion,
+  refreshAliasShims,
+} from './lib/self-update.js';
 
 interface NpmPackageMetadata {
   version: string;
@@ -61,11 +67,12 @@ if (IS_DEV_BUILD) {
 
 // Import command registrations
 import { registerPullCommand } from './commands/pull.js';
+import { registerPushCommand } from './commands/push.js';
 import { registerRepoCommands } from './commands/repo.js';
 import { registerSetupCommand, runSetup } from './commands/setup.js';
-import { registerStatusCommand } from './commands/status.js';
 import { registerFeedbackCommand } from './commands/feedback.js';
 import { registerViewCommand } from './commands/view.js';
+import { registerInspectCommand } from './commands/inspect.js';
 import { registerCommandsCommands } from './commands/commands.js';
 import { registerHooksCommands } from './commands/hooks.js';
 import { registerSkillsCommands } from './commands/skills.js';
@@ -80,8 +87,9 @@ import { registerDaemonCommands } from './commands/daemon.js';
 import { registerRoutinesCommands } from './commands/routines.js';
 import { registerRunCommand } from './commands/exec.js';
 import { registerModelsCommand } from './commands/models.js';
+import { registerDefaultsCommands } from './commands/defaults.js';
 import { registerPruneCommand } from './commands/prune.js';
-import { registerTrashCommands } from './commands/trash.js';
+import { registerTrashCommands, registerRestoreCommand } from './commands/trash.js';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { registerSubagentsCommands } from './commands/subagents.js';
 import { registerPluginsCommands } from './commands/plugins.js';
@@ -91,10 +99,12 @@ import { registerSyncCommand } from './commands/sync.js';
 import { registerRefreshRulesCommand } from './commands/refresh-rules.js';
 import { registerDriveCommands } from './commands/drive.js';
 import { registerPtyCommands } from './commands/pty.js';
+import { registerTmuxCommands } from './commands/tmux.js';
 import { registerBrowserCommand } from './commands/browser.js';
 import { registerComputerCommand } from './commands/computer.js';
 import { registerProfilesCommands } from './commands/profiles.js';
 import { registerSecretsCommands } from './commands/secrets.js';
+import { registerWalletCommands } from './commands/wallet.js';
 import { registerHelperCommand } from './commands/helper.js';
 import { registerFactoryCommands } from './commands/factory.js';
 import { registerUsageCommand } from './commands/usage.js';
@@ -111,11 +121,28 @@ import {
   ensureVersionedAliasCurrent,
   getPathShadowingExecutable,
   getPathSetupInstructions,
-  hasAliasShadowingShim,
+  getShimsDir,
   isShimsInPath,
   listAgentsWithInstalledVersions,
   removeLegacyUserShim,
 } from './lib/shims.js';
+import type { AgentId } from './lib/types.js';
+import { IS_WINDOWS } from './lib/platform/index.js';
+
+// Transparent shim delegate: the generated Windows `.cmd` shims invoke
+// `agents __shim <agent>[@version] <raw args>`. Intercept here, before commander
+// parses anything, so the agent's own flags (`--help`, `--version`, etc.) pass
+// through completely untouched and we skip registering the full command tree.
+if (process.argv[2] === '__shim') {
+  const spec = process.argv[3] || '';
+  const rawArgs = process.argv.slice(4);
+  const atIndex = spec.indexOf('@');
+  const agent = atIndex === -1 ? spec : spec.slice(0, atIndex);
+  const pinned = atIndex === -1 ? undefined : spec.slice(atIndex + 1);
+  const { execShimPassthrough } = await import('./lib/exec.js');
+  const code = await execShimPassthrough(agent as AgentId, rawArgs, process.cwd(), pinned || undefined);
+  process.exit(code);
+}
 
 const program = new Command();
 
@@ -150,6 +177,7 @@ Agent versions:
   prune cleanup [target]          Remove orphan resources and older duplicate version installs
   trash                           Inspect and restore soft-deleted version directories
   view [agent[@version]]          List versions, or inspect one in detail
+  inspect <target>                Deep details for one agent+version, or a DotAgents repo (user|system|project|alias|path)
 
 Agent configuration (synced across versions):
   rules                           Instructions given to agents (CLAUDE.md, etc.)
@@ -167,6 +195,7 @@ Packages:
 
 Run and dispatch:
   run <agent|profile> [prompt]    Run an agent. Omit prompt for interactive mode.
+  defaults                        Configure run defaults by agent/version selector
   teams                           Coordinate multiple agents on shared work
   routines                        Run agents on a cron schedule (scheduler auto-starts)
   sessions                        Browse, search, and replay past runs (live-search in TTY; grouped by workspace)
@@ -183,7 +212,7 @@ Diagnostics:
 
 Config sync:
   drive                           Sync session history across machines via rsync
-  pull                            Clone or pull the system repo at ~/.agents-system/
+  pull                            Clone or pull the system repo at ~/.agents/.system/
   repo init --path <dir>          Scaffold your own editable repo from a template
   repo add <path|gh:user/repo>    Merge an extra repo after the system repo
 
@@ -201,7 +230,7 @@ Options:
   -V, --version                   Show version number
   -h, --help                      Show help
 
-System config lives in ~/.agents-system/. Run 'agents <command> --help' for details.
+System config lives in ~/.agents/.system/. Run 'agents <command> --help' for details.
 `;
   }
   return originalHelpInformation();
@@ -235,9 +264,13 @@ async function showWhatsNew(fromVersion: string, toVersion: string): Promise<voi
       const versionMatch = line.match(/^## (\d+\.\d+\.\d+)/);
       if (versionMatch) {
         currentVersion = versionMatch[1];
-        const isNewer = currentVersion !== fromVersion &&
-          compareVersions(currentVersion, fromVersion) > 0;
-        inRelevantSection = isNewer;
+        // Only the range the user actually moved through: (fromVersion, toVersion].
+        // Bounding the top end matters when upgrading to a specific older
+        // version, and guards against a changelog that lists unreleased entries.
+        const inRange =
+          compareVersions(currentVersion, fromVersion) > 0 &&
+          compareVersions(currentVersion, toVersion) <= 0;
+        inRelevantSection = inRange;
         if (inRelevantSection) {
           relevantChanges.push('');
           relevantChanges.push(chalk.bold(`v${currentVersion}`));
@@ -267,42 +300,74 @@ async function showWhatsNew(fromVersion: string, toVersion: string): Promise<voi
 }
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
-import { getUpdateCheckPath, getMigratedSentinelPath, getUserAgentsDir } from './lib/state.js';
+import { getUpdateCheckPath, getMigratedSentinelPath, getUserAgentsDir, getRuntimeStateDir } from './lib/state.js';
+import {
+  readUpdateCache,
+  saveUpdateCheck,
+  dismissUpdateVersion,
+  shouldPromptUpgrade,
+  findAgentsCliInstalls,
+  type UpdateCheckCache,
+} from './lib/self-update.js';
 const UPDATE_CHECK_FILE = getUpdateCheckPath();
 
-/** Read the cached update-check state from disk. Returns null if the file is missing or corrupt. */
-function readUpdateCache(): { lastCheck: number; latestVersion: string; dismissed?: string } | null {
-  try {
-    return JSON.parse(fs.readFileSync(UPDATE_CHECK_FILE, 'utf-8'));
-  } catch {
-    /* cache file missing or corrupt */
-    return null;
+/**
+ * Warn once when PATH resolves `agents` to a different agents-cli install
+ * than the copy that is currently running (or to several). Divergent installs
+ * are how self-updates "succeed" without changing the command the user types.
+ * The warning re-fires only when the set of install roots changes; dev builds
+ * (0.0.0-dev) are ignored because side-by-side dev installs are a supported
+ * workflow.
+ */
+function maybeWarnMultiInstall(): void {
+  const sentinel = path.join(getRuntimeStateDir(), 'multi-install-warned');
+  const runningRoot = path.resolve(__dirname, '..');
+  const byRoot = new Map<string, { version: string; note: string }>();
+  byRoot.set(runningRoot, { version: VERSION, note: 'running' });
+  for (const install of findAgentsCliInstalls(process.env.PATH || '')) {
+    if (install.version.startsWith('0.0.0-dev')) continue;
+    if (!byRoot.has(install.packageRoot)) {
+      byRoot.set(install.packageRoot, { version: install.version, note: `agents on PATH: ${install.binPath}` });
+    }
   }
+
+  if (byRoot.size < 2) {
+    try { fs.unlinkSync(sentinel); } catch { /* nothing recorded */ }
+    return;
+  }
+
+  const key = [...byRoot.keys()].sort().join('\n');
+  try {
+    if (fs.readFileSync(sentinel, 'utf-8') === key) return;
+  } catch { /* not warned for this set yet */ }
+
+  console.error(chalk.yellow('Multiple agents-cli installs detected:'));
+  for (const [root, info] of byRoot) {
+    console.error(chalk.gray(`  ${root}  ${info.version}  (${info.note})`));
+  }
+  console.error(chalk.gray('Upgrades apply to the running copy. Remove a stale copy with: npm uninstall -g --prefix <prefix> @phnx-labs/agents-cli'));
+
+  try {
+    fs.mkdirSync(path.dirname(sentinel), { recursive: true });
+    fs.writeFileSync(sentinel, key);
+  } catch { /* best-effort; worst case the warning repeats */ }
 }
 
 /** Determine whether enough time has elapsed since the last registry fetch. */
-function shouldFetchLatest(cache: { lastCheck: number } | null): boolean {
+function shouldFetchLatest(cache: UpdateCheckCache | null): boolean {
   if (!cache) return true;
   return Date.now() - cache.lastCheck > UPDATE_CHECK_INTERVAL_MS;
 }
 
-/** Persist the latest known version and current timestamp to the update-check cache. */
-function saveUpdateCheck(latestVersion: string): void {
-  try {
-    const dir = path.dirname(UPDATE_CHECK_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(UPDATE_CHECK_FILE, JSON.stringify({ lastCheck: Date.now(), latestVersion }));
-  } catch {
-    /* best-effort cache update */
-  }
-}
-
 /** Fetch the exact latest npm version plus its registry integrity hash. */
-async function fetchLatestNpmPackageMetadata(timeoutMs = 5000): Promise<NpmPackageMetadata> {
-  const response = await fetch(`https://registry.npmjs.org/${NPM_PACKAGE_NAME}/latest`, {
+async function fetchNpmPackageMetadata(versionOrTag = 'latest', timeoutMs = 5000): Promise<NpmPackageMetadata> {
+  const response = await fetch(`https://registry.npmjs.org/${NPM_PACKAGE_NAME}/${versionOrTag}`, {
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error(`${NPM_PACKAGE_NAME}@${versionOrTag} not found on npm`);
+    }
     throw new Error('Could not reach npm registry');
   }
 
@@ -323,12 +388,28 @@ function printResolvedPackage(metadata: NpmPackageMetadata): void {
 }
 
 async function installResolvedPackage(metadata: NpmPackageMetadata): Promise<void> {
-  const { execFile } = await import('child_process');
-  const { promisify } = await import('util');
-  const execFileAsync = promisify(execFile);
-  const installArgs = ['install', '-g', '@phnx-labs/agents-cli', '--ignore-scripts'];
-  installArgs[2] = `${NPM_PACKAGE_NAME}@${metadata.version}`;
-  await execFileAsync('npm', installArgs);
+  const packageRoot = path.resolve(__dirname, '..');
+  const prefix = deriveGlobalPrefix(packageRoot);
+  await installPackageIntoPrefix(`${NPM_PACKAGE_NAME}@${metadata.version}`, prefix);
+  verifyInstalledVersion(packageRoot, metadata.version);
+  refreshAliasShims(packageRoot);
+  // The npm install above runs with --ignore-scripts, so the postinstall that
+  // installs the macOS Keychain helper never fires on upgrade. Force-refresh the
+  // helper here so a user upgrading FROM a broken build (e.g. the entitlement-less
+  // 1.20.4 helper that fails SecItemAdd with -34018) gets the fixed, signed bundle
+  // immediately — instead of waiting for the lazy staleness check in
+  // getKeychainHelperPath() to repair it on their next secret operation. The new
+  // package is already on disk, so the dynamic import resolves the freshly-installed
+  // helper module + bundle. Best-effort: an upgrade must never fail because the
+  // helper could not be reinstalled (`agents helper install --force` stays available).
+  if (process.platform === 'darwin') {
+    try {
+      const { ensureKeychainHelperInstalled } = await import('./lib/secrets/install-helper.js');
+      ensureKeychainHelperInstalled({ forceReinstall: true });
+    } catch {
+      // Non-fatal.
+    }
+  }
 }
 
 /** Present an interactive upgrade prompt (TTY) or a one-line hint (non-TTY). */
@@ -348,17 +429,7 @@ async function promptUpgrade(latestVersion: string): Promise<void> {
   });
 
   if (answer === 'dismiss') {
-    try {
-      const dir = path.dirname(UPDATE_CHECK_FILE);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      const existing = readUpdateCache();
-      fs.writeFileSync(UPDATE_CHECK_FILE, JSON.stringify({
-        ...existing,
-        lastCheck: existing?.lastCheck ?? Date.now(),
-        latestVersion,
-        dismissed: latestVersion,
-      }));
-    } catch { /* best-effort */ }
+    dismissUpdateVersion(UPDATE_CHECK_FILE, latestVersion);
     return;
   }
 
@@ -366,7 +437,11 @@ async function promptUpgrade(latestVersion: string): Promise<void> {
     const { spawnSync } = await import('child_process');
     let spinner = ora('Resolving package metadata...').start();
     try {
-      const metadata = await fetchLatestNpmPackageMetadata();
+      const metadata = await fetchNpmPackageMetadata();
+      // The prompt showed the cached latest, which can lag the registry (the
+      // 24h window) — sync the cache to what was actually resolved so later
+      // prompts and the install agree on the same version.
+      saveUpdateCheck(UPDATE_CHECK_FILE, metadata.version);
       spinner.succeed(`Resolved ${NPM_PACKAGE_NAME}@${metadata.version}`);
       printResolvedPackage(metadata);
 
@@ -384,14 +459,18 @@ async function promptUpgrade(latestVersion: string): Promise<void> {
       spinner.succeed(`Upgraded to ${metadata.version}`);
       await showWhatsNew(VERSION, metadata.version);
       console.log();
-      // Re-exec with new version and exit
-      const result = spawnSync('agents', process.argv.slice(2), {
+      // Re-exec the verified install's entrypoint and exit. PATH lookup of
+      // `agents` could resolve a different copy (dev build, another prefix)
+      // than the one that was just upgraded.
+      const entrypoint = path.resolve(__dirname, '..', 'dist', 'index.js');
+      const result = spawnSync(process.execPath, [entrypoint, ...process.argv.slice(2)], {
         stdio: 'inherit',
         shell: false,
       });
       process.exit(result.status ?? 0);
-    } catch {
-      spinner.fail('Upgrade failed');
+    } catch (err) {
+      if (isPromptCancelled(err)) return;
+      spinner.fail(`Upgrade failed: ${err instanceof Error ? err.message : String(err)}`);
       console.log(chalk.gray('Run manually: agents upgrade --yes'));
     }
     console.log();
@@ -412,7 +491,7 @@ function refreshUpdateCacheInBackground(): void {
     .then((response) => (response.ok ? response.json() : null))
     .then((data) => {
       if (data && typeof (data as any).version === 'string') {
-        saveUpdateCheck((data as any).version);
+        saveUpdateCheck(UPDATE_CHECK_FILE, (data as any).version);
       }
     })
     .catch(() => {
@@ -424,7 +503,9 @@ function refreshUpdateCacheInBackground(): void {
 async function checkForUpdates(): Promise<void> {
   if (process.env.AGENTS_CLI_DISABLE_AUTO_UPDATE) return;
 
-  const cache = readUpdateCache();
+  maybeWarnMultiInstall();
+
+  const cache = readUpdateCache(UPDATE_CHECK_FILE);
 
   // Kick off network refresh in background if stale. Does not block.
   if (shouldFetchLatest(cache)) {
@@ -434,9 +515,9 @@ async function checkForUpdates(): Promise<void> {
   // Prompt based on current cache (may be from a previous run's background refresh).
   // Skip if the user dismissed this exact version — they'll be prompted again when
   // a newer version appears.
-  if (cache?.latestVersion && cache.latestVersion !== VERSION && compareVersions(cache.latestVersion, VERSION) > 0 && cache.latestVersion !== cache.dismissed) {
+  if (shouldPromptUpgrade(cache, VERSION)) {
     try {
-      await promptUpgrade(cache.latestVersion);
+      await promptUpgrade(cache!.latestVersion);
     } catch (err) {
       if (isPromptCancelled(err)) return;
       /* prompt error, ignore */
@@ -444,8 +525,18 @@ async function checkForUpdates(): Promise<void> {
   }
 }
 
-async function maybeBootstrapShimIntegration(requestedCommand: string | undefined): Promise<void> {
+async function maybeBootstrapShimIntegration(
+  requestedCommand: string | undefined,
+  helpOrVersionRequested: boolean,
+): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return;
+  }
+  // Pure documentation paths must never trigger interactive repair — mirrors
+  // the helpOrVersionRequested gate around ensureInitialized below. Covers
+  // both bare `agents --version` (requestedCommand === undefined) and
+  // `agents <subcommand> --help` (requestedCommand === subcommand name).
+  if (helpOrVersionRequested) {
     return;
   }
   if (requestedCommand === 'sync' || requestedCommand === 'refresh-rules') {
@@ -482,17 +573,26 @@ async function maybeBootstrapShimIntegration(requestedCommand: string | undefine
     removeLegacyUserShim(agent);
   }
 
+  // The remaining flow is rc-file PATH repair, which is POSIX-only. On Windows
+  // the shims were just regenerated (incl. `.cmd` companions) above; PATH setup
+  // is covered by the install-time guidance, so stop here rather than printing
+  // shell-rc instructions that don't apply.
+  if (IS_WINDOWS) {
+    return;
+  }
+
   const defaultAgents = installedAgents.filter((agent) => getGlobalDefault(agent));
   const shadowed = defaultAgents
     .map((agent) => ({ agent, shadowedBy: getPathShadowingExecutable(agent) }))
     .filter((item): item is { agent: keyof typeof AGENTS; shadowedBy: string } => Boolean(item.shadowedBy));
 
-  // Also check for shell aliases that shadow the shim
-  const aliased = defaultAgents.filter((agent) => hasAliasShadowingShim(agent));
-
-  // If shims are in PATH and nothing is binary-shadowing, we're done.
   // Shell aliases that call the same command with extra flags are intentional
-  // customization and don't break shim integration.
+  // customization and don't break shim integration — `addShimsToPath` cannot
+  // touch them, so they don't belong in the repair prompt. We previously
+  // computed an `aliased` list here and inserted it into `affected`, which
+  // contradicted the comment below and surfaced false positives (e.g. an
+  // earlier `alias codex=...` cancelled by a later `unalias codex` was
+  // reported because the detector did a static rc-file regex).
   if (shadowed.length === 0 && isShimsInPath()) {
     return;
   }
@@ -511,14 +611,11 @@ async function maybeBootstrapShimIntegration(requestedCommand: string | undefine
   for (const { agent, shadowedBy } of shadowed) {
     affected.push(`${AGENTS[agent].cliCommand} -> ${shadowedBy}`);
   }
-  for (const agent of aliased) {
-    if (!shadowed.some((s) => s.agent === agent)) {
-      affected.push(`${AGENTS[agent].cliCommand} (alias)`);
-    }
-  }
   if (affected.length === 0) {
-    // PATH issue - show all installed agents
-    affected.push(...installedAgents.map((agent) => AGENTS[agent].cliCommand));
+    // Pure PATH-not-loaded case: rc may already have the shim block, but the
+    // running shell hasn't sourced it. Don't list agents here — they aren't
+    // broken; only the PATH is stale. The prompt + post-message handle it.
+    affected.push('PATH entry missing');
   }
 
   const shouldRepair = await confirm({
@@ -537,22 +634,41 @@ async function maybeBootstrapShimIntegration(requestedCommand: string | undefine
   if (!pathResult.success) {
     console.log(chalk.yellow('Could not repair shim PATH setup automatically.'));
     console.log(chalk.gray(pathResult.error || getPathSetupInstructions()));
+    // Write the sentinel even on failure — otherwise an unwritable rc file
+    // re-prompts every invocation in the same shell. The user opens a new
+    // terminal (new PPID) to retry.
+    try { fs.writeFileSync(sentinelPath, '1'); } catch { /* best-effort */ }
     return;
   }
 
+  // When the rc file already has the canonical shim block, `addShimsToPath`
+  // is a no-op — re-emitting produced byte-identical content. In this branch
+  // the user clicked "Yes" but nothing changed on disk, AND the underlying
+  // cause (a real binary shadow, or a stale shell PATH) is unaffected by
+  // this command. Be honest about it and point at the actual action.
   if (pathResult.alreadyPresent) {
-    console.log(chalk.yellow('Shim PATH entry is already in your shell config, but this shell has not reloaded it yet.'));
+    if (shadowed.length > 0) {
+      const targets = shadowed
+        .map(({ agent, shadowedBy }) => `  ${AGENTS[agent].cliCommand}: ${shadowedBy}`)
+        .join('\n');
+      console.log(chalk.yellow('Repair could not change anything — the shim is shadowed by another binary on PATH:'));
+      console.log(chalk.gray(targets));
+      console.log(chalk.gray(`Fix it by removing or reordering that binary, or making sure ${getShimsDir()} appears earlier in PATH than its parent dir.`));
+    } else {
+      console.log(chalk.yellow(`Shim PATH entry is already in ~/${pathResult.rcFile} — this shell just needs to reload it.`));
+      console.log(chalk.gray(`Run: source ~/${pathResult.rcFile}   (or open a new terminal)`));
+    }
   } else {
     console.log(chalk.green(`Repaired shim PATH setup in ~/${pathResult.rcFile}`));
+    console.log(chalk.gray(getPathSetupInstructions()));
   }
-  console.log(chalk.gray(getPathSetupInstructions()));
   try { fs.writeFileSync(sentinelPath, '1'); } catch { /* best-effort */ }
 }
 
 
 // Register all commands
 registerViewCommand(program);
-registerStatusCommand(program);
+registerInspectCommand(program);
 registerFeedbackCommand(program);
 registerCommandsCommands(program);
 registerHooksCommands(program);
@@ -596,9 +712,11 @@ registerPackagesCommands(program);
 registerDaemonCommands(program);
 registerRoutinesCommands(program);
 registerRunCommand(program);
+registerDefaultsCommands(program);
 registerModelsCommand(program);
 registerPruneCommand(program);
 registerTrashCommands(program);
+registerRestoreCommand(program);
 registerDoctorCommand(program);
 
 // Deprecated 'exec' alias for 'run'
@@ -615,6 +733,7 @@ program
 
 registerProfilesCommands(program);
 registerSecretsCommands(program);
+registerWalletCommands(program);
 registerHelperCommand(program);
 registerBetaCommands(program);
 registerSyncCommand(program);
@@ -624,6 +743,7 @@ registerFactoryCommands(program);
 registerUsageCommand(program);
 registerAliasCommand(program);
 registerPtyCommands(program);
+registerTmuxCommands(program);
 registerBrowserCommand(program);
 registerComputerCommand(program);
 
@@ -643,29 +763,34 @@ for (const alias of ['jobs', 'cron']) {
 
 program
     .command('upgrade')
-    .description('Upgrade agents-cli to the latest version')
+    .description('Upgrade agents-cli to the latest version (or a specific [version])')
+    .argument('[version]', 'Target version or dist-tag to install (default: latest)')
     .option('-y, --yes', 'Install without an interactive confirmation prompt')
-    .action(async (options: { yes?: boolean }) => {
-      let spinner = ora('Checking for updates...').start();
+    .action(async (version: string | undefined, options: { yes?: boolean }) => {
+      const target = version ?? 'latest';
+      let spinner = ora(version ? `Resolving ${NPM_PACKAGE_NAME}@${target}...` : 'Checking for updates...').start();
       try {
-        const metadata = await fetchLatestNpmPackageMetadata();
-        const latestVersion = metadata.version;
+        const metadata = await fetchNpmPackageMetadata(target);
+        const resolvedVersion = metadata.version;
 
-        if (latestVersion === VERSION) {
-          spinner.succeed(`Already on latest version (${VERSION})`);
+        if (resolvedVersion === VERSION) {
+          spinner.succeed(`Already on ${VERSION}`);
           return;
         }
 
-        if (compareVersions(latestVersion, VERSION) <= 0) {
-          spinner.succeed(`Already ahead of latest (${VERSION} >= ${latestVersion})`);
+        // For `latest` (no explicit version) skip when already ahead. When a
+        // version is named explicitly, honor it even if it's a downgrade.
+        if (!version && compareVersions(resolvedVersion, VERSION) <= 0) {
+          spinner.succeed(`Already ahead of latest (${VERSION} >= ${resolvedVersion})`);
           return;
         }
 
-        spinner.succeed(`Resolved ${NPM_PACKAGE_NAME}@${latestVersion}`);
+        const direction = compareVersions(resolvedVersion, VERSION) < 0 ? 'Downgrade' : 'Upgrade';
+        spinner.succeed(`Resolved ${NPM_PACKAGE_NAME}@${resolvedVersion}`);
         printResolvedPackage(metadata);
         if (isInteractiveTerminal() && !options.yes) {
           const approved = await confirm({
-            message: `Install ${NPM_PACKAGE_NAME}@${latestVersion}?`,
+            message: `Install ${NPM_PACKAGE_NAME}@${resolvedVersion}?`,
             default: false,
           });
           if (!approved) {
@@ -674,17 +799,22 @@ program
           }
         }
 
-        spinner = ora(`Upgrading ${VERSION} -> ${latestVersion}...`).start();
+        spinner = ora(`${direction === 'Downgrade' ? 'Downgrading' : 'Upgrading'} ${VERSION} -> ${resolvedVersion}...`).start();
         await installResolvedPackage(metadata);
-        spinner.succeed(`Upgraded to ${latestVersion}`);
-        await showWhatsNew(VERSION, latestVersion);
+        spinner.succeed(`${direction}d to ${resolvedVersion}`);
+        // Only show the changelog for a genuine upgrade range.
+        if (compareVersions(resolvedVersion, VERSION) > 0) {
+          await showWhatsNew(VERSION, resolvedVersion);
+        }
       } catch (err) {
-        spinner.fail('Upgrade failed');
-        console.log(chalk.gray('Run manually: agents upgrade --yes'));
+        if (isPromptCancelled(err)) return;
+        spinner.fail(`Upgrade failed: ${err instanceof Error ? err.message : String(err)}`);
+        console.log(chalk.gray(`Run manually: agents upgrade ${version ? version + ' ' : ''}--yes`));
       }
     });
 
 registerPullCommand(program);
+registerPushCommand(program);
 registerRepoCommands(program);
 registerSetupCommand(program);
 
@@ -810,6 +940,20 @@ const helpOrVersionRequested = passedArgs.some(
   (arg) => arg === '--help' || arg === '-h' || arg === '--version' || arg === '-V',
 );
 
+// Fold legacy ~/.agents-system/ into ~/.agents/.system/ BEFORE ensureInitialized
+// runs. ensureInitialized checks for .git inside the new path; if the user is
+// upgrading from a layout where .git lives under the legacy path, the check
+// would fail and exit before the migrator ever runs. Also runs outside the
+// sentinel guard below because the sentinel was set by pre-fold releases and
+// would otherwise skip this step on every existing install. Idempotent —
+// no-ops when legacy is missing or already a symlink.
+if (process.env.AGENTS_SKIP_MIGRATION !== '1') {
+  try {
+    const { foldLegacySystemRepo } = await import('./lib/migrate.js');
+    foldLegacySystemRepo();
+  } catch { /* must never block CLI startup */ }
+}
+
 if (
   !firstRun &&
   requestedCommand &&
@@ -852,7 +996,7 @@ if (process.env.AGENTS_SKIP_MIGRATION !== '1') {
 }
 
 try {
-  await maybeBootstrapShimIntegration(requestedCommand);
+  await maybeBootstrapShimIntegration(requestedCommand, helpOrVersionRequested);
   await program.parseAsync();
 } catch (err) {
   if (err instanceof Error && err.name === 'ExitPromptError') {

@@ -6,15 +6,17 @@
  */
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
+import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentId, Mode } from './types.js';
 import { ALL_MODES } from './types.js';
 import { AGENTS } from './agents.js';
 import { parseTimeout } from './routines.js';
-import { getVersionHomePath, isVersionInstalled, resolveVersion } from './versions.js';
+import { getBinaryPath, getVersionHomePath, isVersionInstalled, resolveVersion } from './versions.js';
 import { resolveModel, buildReasoningFlags } from './models.js';
 import { emitStart, maybeRotate, createTimer, redactPrompt, redactArgs } from './events.js';
 import { sanitizeProcessEnv } from './secrets/bundles.js';
+import { getShimsDir } from './state.js';
 
 /**
  * Agent execution modes. Canonical name `skip` (dangerously skip permissions);
@@ -37,6 +39,38 @@ export function normalizeMode(input: string | null | undefined): Mode {
   if (v === 'full') return 'skip';
   if ((ALL_MODES as readonly string[]).includes(v)) return v as Mode;
   throw new Error(`Invalid mode '${input}'. Use one of: ${ALL_MODES.join(', ')} (or 'full' as a deprecated alias for 'skip').`);
+}
+
+/**
+ * Detect the headless-plan stall footgun.
+ *
+ * A slash command (e.g. `/code:commit`) run headless under the IMPLICIT default
+ * `plan` mode hangs forever: plan is read-only, so the agent calls ExitPlanMode
+ * to start working, and in a headless run there is no TTY to approve it. The
+ * process just sits there. Callers use this to fail fast with a fix instead.
+ *
+ * Returns the offending command token (e.g. `/code:commit`) when the run should
+ * be blocked, else null. Guards are deliberately narrow:
+ *   - interactive runs / no prompt        -> not headless, never blocks
+ *   - explicit --mode (modeIsDefault false) -> respected; `--mode plan` is a
+ *     legitimate read-only command run and must not be blocked
+ *   - resolved mode is not `plan`          -> only plan stalls at ExitPlanMode
+ *   - prompt is not a slash command        -> natural-language read-only prompts
+ *     ("summarize commits") are a valid default-plan use and must not be blocked
+ */
+export function headlessPlanStallCommand(args: {
+  prompt: string | undefined;
+  interactive: boolean | undefined;
+  mode: string;
+  modeIsDefault: boolean;
+}): string | null {
+  const { prompt, interactive, mode, modeIsDefault } = args;
+  if (interactive === true || prompt === undefined) return null;
+  if (!modeIsDefault) return null;
+  if (normalizeMode(mode) !== 'plan') return null;
+  const trimmed = prompt.trimStart();
+  if (!trimmed.startsWith('/')) return null;
+  return trimmed.split(/\s+/)[0];
 }
 
 /**
@@ -64,6 +98,23 @@ export function resolveMode(agent: AgentId, requested: Mode): Mode {
   );
 }
 
+/**
+ * The mode an agent should run in when the caller has no preference.
+ *
+ * Returns the first entry in the agent's `capabilities.modes` table — the
+ * declaration order is the source of truth for "the safest mode this agent
+ * supports." Agents that include `plan` list it first; agents like
+ * antigravity that have no read-only mode list `edit` first.
+ *
+ * Use this when the user did not pass `--mode` explicitly. When the user
+ * *did* pass `--mode plan` and the agent doesn't support it, call
+ * `resolveMode` instead so the user sees a loud error rather than a silent
+ * elevation from read-only to writable.
+ */
+export function defaultModeFor(agent: AgentId): Mode {
+  return AGENTS[agent].capabilities.modes[0];
+}
+
 /** Reasoning effort levels passed to agents that support them. 'auto' defers to the agent's default. */
 export type ExecEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
 
@@ -73,11 +124,12 @@ export interface ExecOptions {
   version?: string;
   /** Omit to launch the CLI interactively -- no prompt, no --print, stdio fully inherited. */
   prompt?: string;
-  /** Force interactive mode even when a prompt is provided. */
+  /** Force interactive mode even when a prompt is provided. Wins over `headless`. */
   interactive?: boolean;
   mode: ExecMode;
   effort: ExecEffort;
   cwd?: string;
+  /** Force headless mode even when no prompt is provided (e.g. piping via stdin). */
   headless?: boolean;
   json?: boolean;
   model?: string;
@@ -86,6 +138,20 @@ export interface ExecOptions {
   sessionId?: string;
   verbose?: boolean;
   env?: Record<string, string>;
+}
+
+/**
+ * Resolve interactive vs headless. Explicit flags are definitive and win over
+ * inference: `--interactive` forces interactive, `--headless` forces headless.
+ * With neither flag, prompt presence decides (prompt -> headless, none -> interactive).
+ * `--interactive` takes precedence over `--headless`; the CLI layer rejects passing both.
+ */
+export function resolveInteractive(
+  options: Pick<ExecOptions, 'interactive' | 'headless' | 'prompt'>,
+): boolean {
+  if (options.interactive === true) return true;
+  if (options.headless === true) return false;
+  return options.prompt === undefined;
 }
 
 /** Pattern for valid environment variable names (C identifier rules). */
@@ -143,6 +209,7 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
     }
     delete result.CODEX_HOME;
     delete result.COPILOT_HOME;
+    delete result.KIMI_CODE_HOME;
   } else if (options.agent === 'codex') {
     const cwd = options.cwd || process.cwd();
     const resolvedVersion = options.version ?? resolveVersion('codex', cwd);
@@ -154,6 +221,7 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
     }
     delete result.CLAUDE_CONFIG_DIR;
     delete result.COPILOT_HOME;
+    delete result.KIMI_CODE_HOME;
   } else if (options.agent === 'copilot') {
     // Copilot honors COPILOT_HOME (relocates ~/.copilot, including settings,
     // mcp-config.json, sessions, logs). Pin it at the per-version home so
@@ -168,10 +236,26 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
     }
     delete result.CLAUDE_CONFIG_DIR;
     delete result.CODEX_HOME;
+    delete result.KIMI_CODE_HOME;
+  } else if (options.agent === 'kimi') {
+    // Kimi honors KIMI_CODE_HOME (relocates ~/.kimi-code, including config,
+    // skills, hooks, sessions). Pin it at the per-version home.
+    const cwd = options.cwd || process.cwd();
+    const resolvedVersion = options.version ?? resolveVersion('kimi', cwd);
+    const version = options.version
+      ? resolvedVersion
+      : (resolvedVersion && isVersionInstalled('kimi', resolvedVersion) ? resolvedVersion : null);
+    if (version) {
+      result.KIMI_CODE_HOME = path.join(getVersionHomePath('kimi', version), '.kimi-code');
+    }
+    delete result.CLAUDE_CONFIG_DIR;
+    delete result.CODEX_HOME;
+    delete result.COPILOT_HOME;
   } else {
     delete result.CLAUDE_CONFIG_DIR;
     delete result.CODEX_HOME;
     delete result.COPILOT_HOME;
+    delete result.KIMI_CODE_HOME;
   }
 
   return {
@@ -227,9 +311,9 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
       // "workspace-write but no auto-approval" — closer to plan-as-restraint.
       // True read-only requires --sandbox read-only which we haven't wired.
       plan: ['--sandbox', 'workspace-write'],
-      edit: ['--sandbox', 'workspace-write', '--full-auto'],
-      // skip drops the sandbox entirely; --full-auto then approves anything.
-      skip: ['--full-auto'],
+      edit: ['--sandbox', 'workspace-write', '--dangerously-bypass-approvals-and-sandbox'],
+      // skip drops the sandbox entirely; --dangerously-bypass-approvals-and-sandbox then approves anything.
+      skip: ['--dangerously-bypass-approvals-and-sandbox'],
     },
     jsonFlags: ['--json'],
     modelFlag: '--model',
@@ -363,23 +447,78 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     jsonFlags: ['--output-format', 'streaming-json'],
     modelFlag: '--model',
   },
+  kimi: {
+    base: ['kimi'],
+    promptFlag: '-p',
+    modeFlags: {
+      plan: ['--plan'],
+      edit: [],
+      auto: ['--auto'],
+      skip: ['--yolo'],
+    },
+    jsonFlags: ['--output-format', 'stream-json'],
+    modelFlag: '--model',
+  },
+  // Factory AI Droid (`droid exec` for headless, `droid` for TUI). Flags from
+  // docs.factory.ai CLI reference: prompt is positional; --auto low|medium|high
+  // escalates autonomy (default is read-only); --skip-permissions-unsafe drops
+  // all guardrails; -o stream-json streams JSONL events; -m selects the model.
+  // The `exec` subcommand is dropped for interactive runs (see buildExecCommand).
+  droid: {
+    base: ['droid', 'exec'],
+    promptFlag: 'positional',
+    modeFlags: {
+      plan: [],                          // droid's default exec mode is read-only
+      edit: ['--auto', 'low'],           // create/edit files, non-destructive
+      auto: ['--auto', 'high'],          // full autonomy
+      skip: ['--skip-permissions-unsafe'],
+    },
+    jsonFlags: ['-o', 'stream-json'],
+    modelFlag: '-m',
+  },
 };
 
 /** Assemble the full CLI argument array for an agent invocation. */
 export function buildExecCommand(options: ExecOptions): string[] {
   const template = AGENT_COMMANDS[options.agent];
   const cmd: string[] = [...template.base];
-  const interactive = options.interactive === true || options.prompt === undefined;
+  const interactive = resolveInteractive(options);
 
-  // For Codex, 'exec' is the headless subcommand -- drop it for interactive mode
-  // so we run 'codex' (TUI) instead of 'codex exec' (one-shot)
-  if (options.agent === 'codex' && interactive && cmd[1] === 'exec') {
-    cmd.splice(1, 1);
+  // For Codex and Droid, 'exec' is the headless subcommand; for OpenCode, 'run'
+  // is. Drop it for interactive mode so we launch the TUI (`codex` / `droid` /
+  // `opencode`, each agent's default command) instead of the one-shot headless
+  // subcommand ('codex exec' / 'droid exec' / 'opencode run').
+  if (interactive) {
+    if ((options.agent === 'codex' || options.agent === 'droid') && cmd[1] === 'exec') {
+      cmd.splice(1, 1);
+    } else if (options.agent === 'opencode' && cmd[1] === 'run') {
+      cmd.splice(1, 1);
+    }
   }
 
-  // Use versioned alias if a specific version was requested (e.g., claude@2.1.98)
+  // Use versioned alias if a specific version was requested (e.g., claude@2.1.98).
+  // Resolve to the absolute path of the shim so spawn doesn't depend on PATH —
+  // on Linux installs where the shims dir isn't on PATH, spawning the bare
+  // versioned name fails with ENOENT even though `agents view` shows the agent.
+  //
+  // On Windows, shims are bash scripts and cannot be executed by spawn() directly.
+  // buildExecEnv() already sets the isolation env vars (CLAUDE_CONFIG_DIR, CODEX_HOME,
+  // etc.) that the bash shim would set, so we can skip the shim entirely and resolve
+  // straight to the real binary via getBinaryPath.
   if (options.version && cmd.length > 0) {
-    cmd[0] = `${cmd[0]}@${options.version}`;
+    if (process.platform === 'win32') {
+      const binaryPath = getBinaryPath(options.agent, options.version);
+      const binaryPathCmd = binaryPath + '.cmd';
+      if (fs.existsSync(binaryPathCmd)) {
+        cmd[0] = binaryPathCmd;
+      } else if (fs.existsSync(binaryPath)) {
+        cmd[0] = binaryPath;
+      }
+    } else {
+      const versionedName = `${cmd[0]}@${options.version}`;
+      const absPath = path.join(getShimsDir(), versionedName);
+      cmd[0] = fs.existsSync(absPath) ? absPath : versionedName;
+    }
   }
 
   // Add reasoning effort flags (before mode flags for codex -c positioning)
@@ -455,7 +594,11 @@ export function buildExecCommand(options: ExecOptions): string[] {
   // so the CLI launches its TUI. When --interactive is passed alongside a prompt
   // we still forward the prompt so the agent receives it as the first message.
   if (options.prompt !== undefined) {
-    if (template.promptFlag === 'positional') {
+    if (interactive && options.agent === 'opencode') {
+      // The OpenCode TUI takes an initial prompt via --prompt; a bare positional
+      // on the default command is parsed as a project path, not a message.
+      cmd.push('--prompt', options.prompt);
+    } else if (template.promptFlag === 'positional') {
       cmd.push(options.prompt);
     } else {
       cmd.push(template.promptFlag, options.prompt);
@@ -476,6 +619,50 @@ export function buildExecCommand(options: ExecOptions): string[] {
 export async function execAgent(options: ExecOptions): Promise<number> {
   const { exitCode } = await spawnAgent(options);
   return exitCode;
+}
+
+/**
+ * Transparent passthrough exec for generated shims — the node-side delegate that
+ * Windows `.cmd` shims call. Resolves the active version (explicit pin, else
+ * project/default) and execs the real binary with the user's RAW args and the
+ * per-version env isolation, WITHOUT injecting mode/model/reasoning flags. This
+ * mirrors what the POSIX bash shim does inline (`exec $BINARY $launchArgs "$@"`),
+ * keeping version resolution in one place instead of reimplementing it in batch.
+ */
+export async function execShimPassthrough(
+  agent: AgentId,
+  rawArgs: string[],
+  cwd: string,
+  pinnedVersion?: string,
+): Promise<number> {
+  const version = pinnedVersion ?? resolveVersion(agent, cwd) ?? undefined;
+  if (!version || !isVersionInstalled(agent, version)) {
+    process.stderr.write(`agents: no installed default for ${agent}. Set one with: agents use ${agent} <version>\n`);
+    return 127;
+  }
+
+  let binary = getBinaryPath(agent, version);
+  if (process.platform === 'win32') {
+    // npm ships <cmd>.cmd alongside the bare script on Windows; that's the runnable form.
+    const cmdPath = binary + '.cmd';
+    if (fs.existsSync(cmdPath)) binary = cmdPath;
+  }
+
+  // The only flag the bash shim injects (codex); everything else is transparent.
+  const launchArgs = agent === 'codex' ? ['-c', 'check_for_update_on_startup=false'] : [];
+  // mode/effort are required by ExecOptions but unused by buildExecEnv (which only
+  // derives the per-version config-dir env); pass the agent's default to satisfy the type.
+  const env = buildExecEnv({ agent, version, cwd, mode: defaultModeFor(agent), effort: 'auto' });
+  const useShell = process.platform === 'win32' && (!path.isAbsolute(binary) || binary.endsWith('.cmd'));
+
+  return new Promise((resolve) => {
+    const child = spawn(binary, [...launchArgs, ...rawArgs], { cwd, stdio: 'inherit', env, shell: useShell });
+    child.on('exit', (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+    child.on('error', (err) => {
+      process.stderr.write(`agents: failed to launch ${agent}: ${err.message}\n`);
+      resolve(127);
+    });
+  });
 }
 
 /** Exit code and captured stderr from a spawned agent process. */
@@ -500,7 +687,7 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
 
   const timeoutMs = options.timeout ? parseTimeout(options.timeout) : undefined;
   const piped = !process.stdout.isTTY;
-  const interactive = options.interactive === true || options.prompt === undefined;
+  const interactive = resolveInteractive(options);
 
   maybeRotate();
   const timer = createTimer('agent.run', {
@@ -525,11 +712,16 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
       ? ['inherit', 'inherit', 'inherit']
       : ['inherit', piped ? 'pipe' : 'inherit', 'pipe'];
 
+    // On Windows, .cmd batch wrappers (npm-installed CLIs) require shell:true
+    // whether addressed by name or absolute path.
+    const useShell = process.platform === 'win32' && (
+      !path.isAbsolute(executable) || executable.endsWith('.cmd')
+    );
     const child = spawn(executable, args, {
       cwd: options.cwd || process.cwd(),
       stdio,
       env: buildExecEnv(options),
-      shell: false,
+      shell: useShell,
     });
 
     // Mark startup time (time from function call to process spawn)

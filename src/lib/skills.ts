@@ -12,7 +12,8 @@ import * as path from 'path';
 import * as os from 'os';
 import * as yaml from 'yaml';
 import type { AgentId, SkillMetadata, InstalledSkill } from './types.js';
-import { AGENTS, SKILLS_CAPABLE_AGENTS, ensureSkillsDir } from './agents.js';
+import { AGENTS, ensureSkillsDir, agentConfigDirName } from './agents.js';
+import { capableAgents, isCapable } from './capabilities.js';
 import { getAgentsDir, getUserSkillsDir, getSkillsDir as getSystemSkillsDir, getProjectAgentsDir, getEnabledExtraRepos, getTrashSkillsDir } from './state.js';
 import { getEffectiveHome, getVersionHomePath, listInstalledVersions } from './versions.js';
 import { emit } from './events.js';
@@ -33,7 +34,7 @@ export function ensureCentralSkillsDir(): void {
 
 export function getAgentSkillsDir(agentId: AgentId): string {
   const home = getEffectiveHome(agentId);
-  return path.join(home, `.${agentId}`, 'skills');
+  return path.join(home, agentConfigDirName(agentId), 'skills');
 }
 
 export function getProjectSkillsDir(agentId: AgentId, cwd: string = process.cwd()): string {
@@ -283,7 +284,7 @@ export function installSkill(
 
   // Symlink to each agent
   for (const agentId of agents) {
-    if (!SKILLS_CAPABLE_AGENTS.includes(agentId)) {
+    if (!isCapable(agentId, 'skills')) {
       continue;
     }
 
@@ -401,7 +402,7 @@ export function skillContentMatches(
 }
 
 /**
- * List skill names from user (~/.agents/skills/) and system (~/.agents-system/skills/) dirs.
+ * List skill names from user (~/.agents/skills/) and system (~/.agents/.system/skills/) dirs.
  * User dir takes priority; deduplication preserves first occurrence.
  */
 export function listCentralSkills(): string[] {
@@ -456,7 +457,7 @@ export function listAllSkills(): string[] {
  */
 export function getVersionSkillsDir(agent: AgentId, version: string): string {
   const home = getVersionHomePath(agent, version);
-  return path.join(home, `.${agent}`, 'skills');
+  return path.join(home, agentConfigDirName(agent), 'skills');
 }
 
 /**
@@ -676,9 +677,9 @@ export function removeSkillFromVersion(
  */
 export function iterSkillsCapableVersions(filter?: { agent?: AgentId; version?: string }): Array<{ agent: AgentId; version: string }> {
   const pairs: Array<{ agent: AgentId; version: string }> = [];
-  const agents = filter?.agent ? [filter.agent] : SKILLS_CAPABLE_AGENTS;
+  const agents = filter?.agent ? [filter.agent] : capableAgents('skills');
   for (const agent of agents) {
-    if (!SKILLS_CAPABLE_AGENTS.includes(agent)) continue;
+    if (!capableAgents('skills').includes(agent)) continue;
     const versions = listInstalledVersions(agent);
     for (const version of versions) {
       if (filter?.version && filter.version !== version) continue;
@@ -696,7 +697,7 @@ export function uninstallSkill(skillName: string): { success: boolean; error?: s
   }
 
   // Remove from all agents
-  for (const agentId of SKILLS_CAPABLE_AGENTS) {
+  for (const agentId of capableAgents('skills')) {
     const agentSkillPath = path.join(getAgentSkillsDir(agentId), skillName);
     if (fs.existsSync(agentSkillPath)) {
       try {
@@ -822,7 +823,7 @@ export function listInstalledSkillsWithScope(
 
   // User-scoped skills (version-aware when home is provided)
   const userSkillsDir = options?.home
-    ? path.join(options.home, `.${agentId}`, 'skills')
+    ? path.join(options.home, agentConfigDirName(agentId), 'skills')
     : getAgentSkillsDir(agentId);
   if (fs.existsSync(userSkillsDir)) {
     try {

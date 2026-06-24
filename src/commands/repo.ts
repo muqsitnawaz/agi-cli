@@ -2,7 +2,7 @@
  * Extra DotAgent repo management.
  *
  * Registers `agents repo add|init|list|remove|enable|disable` which manage
- * additional DotAgent repos alongside the primary ~/.agents-system/ repo so
+ * additional DotAgent repos alongside the primary ~/.agents/.system/ repo so
  * private, work, or team skills can ship separately from public ones.
  *
  * Extras are user-level config: managed clones live at ~/.agents-<alias>/ as
@@ -39,6 +39,7 @@ function resolveRepoPath(target?: string): string {
 }
 
 import {
+  applyExtraAliasToVersions,
   ensureAgentsDir,
   getExtraRepoDir,
   getSystemAgentsDir,
@@ -49,7 +50,29 @@ import {
 } from '../lib/state.js';
 import { parseSource, pullRepo, commitAndPush, isGitRepo, isSystemRepoOrigin } from '../lib/git.js';
 import { DEFAULT_SYSTEM_REPO } from '../lib/types.js';
-import type { ExtraRepoConfig } from '../lib/types.js';
+import type { AgentId, ExtraRepoConfig } from '../lib/types.js';
+import { ALL_AGENT_IDS, isAgentName, resolveAgentName } from '../lib/agents.js';
+import { refresh } from '../lib/refresh.js';
+import { capableAgents } from '../lib/capabilities.js';
+import { getGlobalDefault, getVersionHomePath, listInstalledVersions } from '../lib/versions.js';
+import { syncAllMarketplaces } from '../lib/plugin-marketplace.js';
+
+/**
+ * After a repo add/remove/enable/disable, reconcile each plugins-capable
+ * agent's default version against the new marketplace set. Re-synthesizes
+ * catalogs and known_marketplaces.json entries. Source-copy of plugins is
+ * out of scope here — full sync still goes through `agents repo refresh`.
+ */
+function syncMarketplacesForDefaults(): void {
+  for (const agent of capableAgents('plugins')) {
+    const def = getGlobalDefault(agent);
+    if (!def) continue;
+    if (!listInstalledVersions(agent).includes(def)) continue;
+    try {
+      syncAllMarketplaces(agent, getVersionHomePath(agent, def));
+    } catch { /* best-effort */ }
+  }
+}
 
 const ALIAS_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
@@ -68,15 +91,110 @@ function deriveAlias(source: string): string {
   return base.replace(/^\.+/, '').replace(/^agents-/, '') || 'repo';
 }
 
-/** Get the last commit short hash for a repo, or null if unavailable. */
-async function getShortCommit(repoDir: string): Promise<string | null> {
-  try {
-    const git = simpleGit(repoDir);
-    const log = await git.log({ maxCount: 1 });
-    return log.latest?.hash.slice(0, 8) || null;
-  } catch {
-    return null;
+/**
+ * Categorized working-tree summary: `M:2 A:1 D:1 ?:3` — letters match the git
+ * porcelain shorthand (Modified / Added / Deleted / Renamed / Unmerged /
+ * Untracked). Zero counts are omitted so the column stays compact.
+ */
+function formatDirtyCounts(status: {
+  modified: string[];
+  created: string[];
+  deleted: string[];
+  renamed: unknown[];
+  conflicted: string[];
+  not_added: string[];
+}): string {
+  const parts: string[] = [];
+  if (status.modified.length) parts.push(chalk.yellow(`M:${status.modified.length}`));
+  if (status.created.length) parts.push(chalk.green(`A:${status.created.length}`));
+  if (status.deleted.length) parts.push(chalk.red(`D:${status.deleted.length}`));
+  if (status.renamed.length) parts.push(chalk.cyan(`R:${status.renamed.length}`));
+  if (status.conflicted.length) parts.push(chalk.magenta(`U:${status.conflicted.length}`));
+  if (status.not_added.length) parts.push(chalk.gray(`?:${status.not_added.length}`));
+  return parts.join(' ');
+}
+
+/** Visible character width of a string with embedded ANSI color codes. */
+function visibleWidth(s: string): number {
+  return s.replace(/\[[0-9;]*m/g, '').length;
+}
+
+/** Pad string with trailing spaces to a target visible column width. */
+function padVisible(s: string, width: number): string {
+  return s + ' '.repeat(Math.max(0, width - visibleWidth(s)));
+}
+
+/**
+ * Render one row of the unified repo table: alias / branch / ahead-behind /
+ * dirty counts / url+commit. Used by `agents repo list` and the hidden
+ * `agents repo status` alias.
+ */
+async function renderRepoRow(t: RepoTarget): Promise<string> {
+  const aliasCol = chalk.cyan(t.alias.padEnd(12));
+
+  if (!fs.existsSync(t.dir)) {
+    return `  ${aliasCol} ${chalk.red('missing')} ${chalk.gray(t.dir)}`;
   }
+  if (!isGitRepo(t.dir)) {
+    return `  ${aliasCol} ${chalk.gray('local (no git remote)')} ${chalk.gray(t.dir)}`;
+  }
+
+  try {
+    const git = simpleGit(t.dir);
+    const status = await git.status();
+    const branch = status.tracking || status.current || '(detached)';
+
+    const inSync = (status.ahead ?? 0) === 0 && (status.behind ?? 0) === 0;
+    const remoteRaw = inSync ? 'in sync' : `+${status.ahead ?? 0} -${status.behind ?? 0}`;
+    const remoteColored = inSync ? chalk.green(remoteRaw) : chalk.yellow(remoteRaw);
+    const remotePad = ' '.repeat(Math.max(0, 12 - remoteRaw.length));
+
+    const tree = status.isClean() ? chalk.green('clean') : formatDirtyCounts(status);
+
+    const remotes = await git.getRemotes(true);
+    const origin = remotes.find((r) => r.name === 'origin');
+    const url = origin?.refs?.fetch || '';
+    const commit = (await git.log({ maxCount: 1 })).latest?.hash.slice(0, 8) || '';
+    const tail = url
+      ? chalk.gray(`${url}${commit ? ` (${commit})` : ''}`)
+      : commit
+        ? chalk.gray(`(${commit})`)
+        : '';
+
+    return `  ${aliasCol} ${branch.padEnd(28)}  ${remoteColored}${remotePad}  ${padVisible(tree, 14)}  ${tail}`;
+  } catch (err) {
+    return `  ${aliasCol} ${chalk.red('error')} ${(err as Error).message}`;
+  }
+}
+
+/**
+ * Shared action body for `agents repo list` and the hidden `agents repo status`
+ * alias. Prints a unified table: alias, branch, ahead/behind, dirty counts,
+ * remote URL and short commit hash.
+ */
+async function listRepos(alias: string | undefined): Promise<void> {
+  const targets = collectRepoTargets(alias);
+  if (!targets) {
+    process.exitCode = 1;
+    return;
+  }
+  if (targets.length === 0) {
+    console.log(chalk.gray('No repos to show.'));
+    return;
+  }
+  console.log('');
+  console.log(
+    `  ${chalk.gray('REPO'.padEnd(12))} ${chalk.gray('BRANCH'.padEnd(28))}  ${chalk.gray('REMOTE'.padEnd(12))}  ${chalk.gray('LOCAL'.padEnd(14))}  ${chalk.gray('URL')}`,
+  );
+  for (const t of targets) {
+    console.log(await renderRepoRow(t));
+  }
+
+  const userDir = getUserAgentsDir();
+  if (!isGitRepo(userDir) && fs.existsSync(userDir)) {
+    console.log(chalk.gray('\n  user repo has no git remote — scaffold one with: agents repo init'));
+  }
+  console.log('');
 }
 
 /** Register the `agents repo` command tree. */
@@ -182,6 +300,7 @@ export function registerRepoCommands(program: Command): void {
         const commit = log.latest?.hash.slice(0, 8) || 'unknown';
         extras[alias] = { url: targetDir, path: targetDir, enabled: true };
         updateMeta({ extraRepos: extras });
+        syncExtraAliasAcrossVersions(alias, true);
         spinner.succeed(`Created ${targetDir} (${commit})`);
         console.log(chalk.gray(`\nRegistered as "${alias}". Edit files there, then add your own git remote when ready.`));
       } catch (err) {
@@ -230,6 +349,8 @@ export function registerRepoCommands(program: Command): void {
       if (parsed.type === 'local') {
         extras[alias] = { url: parsed.url, path: parsed.url, enabled: true };
         updateMeta({ extraRepos: extras });
+        syncExtraAliasAcrossVersions(alias, true);
+        syncMarketplacesForDefaults();
         console.log(chalk.green(`Registered local repo "${alias}" -> ${parsed.url}`));
         return;
       }
@@ -266,84 +387,19 @@ export function registerRepoCommands(program: Command): void {
 
       extras[alias] = { url: parsed.url, path: targetDir, enabled: true };
       updateMeta({ extraRepos: extras });
+      syncExtraAliasAcrossVersions(alias, true);
+      syncMarketplacesForDefaults();
 
       console.log(chalk.gray(`\nRegistered as "${alias}". Skills and commands from this repo will be`));
       console.log(chalk.gray(`picked up automatically the next time you launch any agent.`));
     });
 
   repoCmd
-    .command('list')
+    .command('list [alias]')
     .alias('ls')
-    .description('Show all repos: system, user, and any registered extras')
-    .action(async () => {
-      const meta = readMeta();
-      console.log('');
-
-      // System repo
-      const systemUrl = meta.source || DEFAULT_SYSTEM_REPO;
-      const systemDir = getSystemAgentsDir();
-      const systemOnDisk = fs.existsSync(systemDir);
-      const systemIsGit = systemOnDisk && isGitRepo(systemDir);
-      const systemCommit = systemIsGit ? await getShortCommit(systemDir) : null;
-      const systemStatus = !systemOnDisk
-        ? chalk.red('missing')
-        : !systemIsGit
-          ? chalk.yellow('not a git repo — run: agents setup')
-          : chalk.green('cloned');
-      const systemCommitLabel = systemCommit ? chalk.gray(`(${systemCommit})`) : '';
-      console.log(chalk.bold('System  (~/.agents-system/)'));
-      console.log(`  ${chalk.cyan('system'.padEnd(12))}  ${systemUrl}  ${systemStatus}  ${systemCommitLabel}`);
-
-      // User repo
-      const userDir = getUserAgentsDir();
-      const userOnDisk = fs.existsSync(userDir);
-      const userIsGit = userOnDisk && isGitRepo(userDir);
-      const userCommit = userIsGit ? await getShortCommit(userDir) : null;
-      let userRemoteUrl = '';
-      if (userIsGit) {
-        try {
-          const git = simpleGit(userDir);
-          const remotes = await git.getRemotes(true);
-          const origin = remotes.find(r => r.name === 'origin');
-          userRemoteUrl = origin?.refs?.fetch || '';
-        } catch { /* no remote */ }
-      }
-      const userStatus = !userOnDisk
-        ? chalk.gray('not created')
-        : !userIsGit
-          ? chalk.gray('local (no remote)')
-          : chalk.green('cloned');
-      const userCommitLabel = userCommit ? chalk.gray(`(${userCommit})`) : '';
-      console.log(chalk.bold('\nUser  (~/.agents/)'));
-      console.log(`  ${chalk.cyan('user'.padEnd(12))}  ${userRemoteUrl || '~/.agents/'}  ${userStatus}  ${userCommitLabel}`);
-      if (!userIsGit) {
-        console.log(chalk.gray(`  ${''.padEnd(12)}  scaffold one with: agents repo init`));
-      }
-
-      // Extra repos
-      const extras = meta.extraRepos || {};
-      const aliases = Object.keys(extras);
-      console.log(chalk.bold('\nExtras:'));
-      if (aliases.length === 0) {
-        console.log(chalk.gray('  (none — add one with `agents repo add <source>`)\n'));
-        return;
-      }
-
-      for (const alias of aliases) {
-        const config = extras[alias];
-        const dir = resolveExtraRepoDir(alias, config);
-        const onDisk = fs.existsSync(dir);
-        const commit = onDisk ? await getShortCommit(dir) : null;
-
-        const status = !config.enabled
-          ? chalk.yellow('disabled')
-          : !onDisk
-            ? chalk.red('missing')
-            : chalk.green('enabled');
-        const commitLabel = commit ? chalk.gray(`(${commit})`) : '';
-        console.log(`  ${chalk.cyan(alias.padEnd(12))}  ${config.url}  ${status}  ${commitLabel}`);
-      }
-      console.log('');
+    .description('Show all repos: branch, ahead/behind, dirty counts, URL, commit.')
+    .action(async (alias: string | undefined) => {
+      await listRepos(alias);
     });
 
   repoCmd
@@ -373,6 +429,8 @@ export function registerRepoCommands(program: Command): void {
 
       delete extras[alias];
       updateMeta({ extraRepos: extras });
+      syncExtraAliasAcrossVersions(alias, false);
+      syncMarketplacesForDefaults();
       console.log(chalk.green(`Removed "${alias}"`));
     });
 
@@ -392,7 +450,7 @@ export function registerRepoCommands(program: Command): void {
 
   repoCmd
     .command('pull [alias]')
-    .description('Pull updates. Aliases: "system" (~/.agents-system/), "user" (~/.agents/), or any registered extra. No arg pulls all.')
+    .description('Pull updates. Aliases: "system" (~/.agents/.system/), "user" (~/.agents/), or any registered extra. No arg pulls all.')
     .action(async (alias: string | undefined) => {
       const targets = collectRepoTargets(alias);
       if (!targets) {
@@ -512,47 +570,43 @@ export function registerRepoCommands(program: Command): void {
     });
 
   repoCmd
-    .command('status [alias]')
-    .description('Per-repo summary: branch, ahead/behind upstream, working-tree state')
+    .command('refresh [agent]')
+    .description('Re-materialize resources into installed agent version homes. No git, no network.')
+    .option('-y, --yes', 'Auto-sync everything without prompting')
+    .option('--skip-clis', 'Skip CLI version install/upgrade from agents.yaml')
+    .action(async (arg: string | undefined, options: { yes?: boolean; skipClis?: boolean }) => {
+      let agentFilter: AgentId | undefined;
+      if (arg) {
+        if (!isAgentName(arg)) {
+          console.log(chalk.red(`Unknown agent "${arg}".`));
+          console.log(chalk.gray(`Available: ${ALL_AGENT_IDS.join(', ')}`));
+          process.exitCode = 1;
+          return;
+        }
+        agentFilter = resolveAgentName(arg)!;
+      }
+      try {
+        await refresh({
+          agentFilter,
+          skipPrompts: options.yes,
+          skipClis: options.skipClis,
+        });
+        console.log(chalk.green('\nRefresh complete'));
+      } catch (err) {
+        if (isPromptCancelled(err)) {
+          console.log(chalk.yellow('\nCancelled'));
+          return;
+        }
+        console.error(chalk.red((err as Error).message));
+        process.exit(1);
+      }
+    });
+
+  repoCmd
+    .command('status [alias]', { hidden: true })
+    .description('Alias of `list` (kept for muscle memory).')
     .action(async (alias: string | undefined) => {
-      const targets = collectRepoTargets(alias) || [];
-      if (targets.length === 0) {
-        console.log(chalk.gray('No git repos found.'));
-        return;
-      }
-      console.log('');
-      console.log(`  ${chalk.gray('REPO'.padEnd(12))} ${chalk.gray('BRANCH'.padEnd(28))}  ${chalk.gray('REMOTE'.padEnd(12))}  ${chalk.gray('LOCAL')}`);
-      for (const t of targets) {
-        if (!fs.existsSync(t.dir)) {
-          console.log(`  ${chalk.cyan(t.alias.padEnd(12))} ${chalk.red('missing')} ${chalk.gray(t.dir)}`);
-          continue;
-        }
-        if (!isGitRepo(t.dir)) {
-          console.log(`  ${chalk.cyan(t.alias.padEnd(12))} ${chalk.gray('not a git repo')} ${chalk.gray(t.dir)}`);
-          continue;
-        }
-        try {
-          const git = simpleGit(t.dir);
-          const status = await git.status();
-          const branch = status.tracking || status.current || '(detached)';
-          const remoteRaw =
-            (status.ahead ?? 0) === 0 && (status.behind ?? 0) === 0
-              ? 'in sync'
-              : `+${status.ahead ?? 0} -${status.behind ?? 0}`;
-          const remoteColored =
-            (status.ahead ?? 0) === 0 && (status.behind ?? 0) === 0
-              ? chalk.green(remoteRaw)
-              : chalk.yellow(remoteRaw);
-          const tree = status.isClean()
-            ? chalk.green('clean')
-            : chalk.yellow(`${status.files.length} uncommitted`);
-          const remotePad = ' '.repeat(Math.max(0, 12 - remoteRaw.length));
-          console.log(`  ${chalk.cyan(t.alias.padEnd(12))} ${branch.padEnd(28)}  ${remoteColored}${remotePad}  ${tree}`);
-        } catch (err) {
-          console.log(`  ${chalk.cyan(t.alias.padEnd(12))} ${chalk.red('error')} ${(err as Error).message}`);
-        }
-      }
-      console.log('');
+      await listRepos(alias);
     });
 }
 
@@ -588,6 +642,20 @@ function collectRepoTargets(alias: string | undefined): RepoTarget[] | null {
   return [found];
 }
 
+/**
+ * Keep already-installed versions' selectors in sync with an extra-repo change:
+ * add `<alias>:*` when the repo is registered/enabled, strip it when removed.
+ * Newly-installed versions inherit it from `defaultPatterns()` at scaffold time,
+ * so without this a repo added after install is invisible to existing versions.
+ */
+function syncExtraAliasAcrossVersions(alias: string, add: boolean): void {
+  const n = applyExtraAliasToVersions(alias, add);
+  if (n > 0) {
+    const verb = add ? 'Added to' : 'Removed from';
+    console.log(chalk.gray(`${verb} ${n} existing version selector${n === 1 ? '' : 's'}.`));
+  }
+}
+
 async function toggle(alias: string, enabled: boolean): Promise<void> {
   const meta = readMeta();
   const extras: Record<string, ExtraRepoConfig> = { ...(meta.extraRepos || {}) };
@@ -602,5 +670,9 @@ async function toggle(alias: string, enabled: boolean): Promise<void> {
   }
   extras[alias] = { ...extras[alias], enabled };
   updateMeta({ extraRepos: extras });
+  // Re-enabling backfills the alias into existing versions; disabling leaves the
+  // selectors (resolution skips disabled extras) so a later enable is a no-op.
+  if (enabled) syncExtraAliasAcrossVersions(alias, true);
+  syncMarketplacesForDefaults();
   console.log(chalk.green(`${enabled ? 'Enabled' : 'Disabled'} "${alias}"`));
 }

@@ -14,6 +14,8 @@ import * as path from 'path';
 import { checkbox } from '@inquirer/prompts';
 
 import { AGENTS, agentLabel } from '../lib/agents.js';
+import { homeDir } from '../lib/platform/index.js';
+import { capableAgents } from '../lib/capabilities.js';
 import type { AgentId } from '../lib/types.js';
 import { cloneRepo } from '../lib/git.js';
 import {
@@ -23,7 +25,6 @@ import {
   listInstalledSubagents,
   getInstalledSubagent,
   listSubagentsForAgent,
-  SUBAGENT_CAPABLE_AGENTS,
   iterSubagentsCapableVersions,
   removeSubagentFromVersion,
 } from '../lib/subagents.js';
@@ -55,7 +56,7 @@ import {
 
 /** Replace the home directory prefix with ~ for display. */
 function formatPath(p: string): string {
-  const home = process.env.HOME || '';
+  const home = homeDir();
   if (home && p.startsWith(home)) {
     return '~' + p.slice(home.length);
   }
@@ -232,7 +233,7 @@ Examples:
       let versionSelections: Map<AgentId, string[]>;
 
       if (agentsArg) {
-        const result = await resolveAgentTargetsAutoInstalling(agentsArg, SUBAGENT_CAPABLE_AGENTS, { yes: options.yes });
+        const result = await resolveAgentTargetsAutoInstalling(agentsArg, capableAgents('subagents'), { yes: options.yes });
         if (!result) {
           console.log(chalk.gray('Cancelled.'));
           return;
@@ -240,7 +241,7 @@ Examples:
         selectedAgents = result.selectedAgents;
         versionSelections = result.versionSelections;
       } else {
-        const result = await promptAgentVersionSelection(SUBAGENT_CAPABLE_AGENTS, {
+        const result = await promptAgentVersionSelection(capableAgents('subagents'), {
           skipPrompts: options.yes,
         });
         selectedAgents = result.selectedAgents;
@@ -368,7 +369,7 @@ import type { InstalledSubagent } from '../lib/types.js';
 /** Every (agent, version) that supports subagents and is installed. */
 function iterSubagentCapableVersions(): Array<{ agent: AgentId; version: string; home: string }> {
   const out: Array<{ agent: AgentId; version: string; home: string }> = [];
-  for (const agent of SUBAGENT_CAPABLE_AGENTS) {
+  for (const agent of capableAgents('subagents')) {
     for (const version of listInstalledVersions(agent)) {
       out.push({ agent, version, home: getVersionHomePath(agent, version) });
     }

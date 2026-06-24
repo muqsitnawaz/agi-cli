@@ -14,7 +14,7 @@ import { listInstalledInstructionsWithScope } from './rules/rules.js';
 import { getEffectiveHome } from './versions.js';
 import { listMcpServerConfigs } from './mcp.js';
 import { WorkflowsHandler } from './resources/workflows.js';
-import { WORKFLOW_CAPABLE_AGENTS } from './workflows.js';
+import { isCapable } from './capabilities.js';
 import {
   getProjectAgentsDir,
   getUserAgentsDir,
@@ -141,6 +141,8 @@ export interface ResourceEntry {
   name: string;
   path: string;
   scope: 'user' | 'project';
+  /** One-line description pulled from frontmatter; not all resource kinds have one. */
+  description?: string;
 }
 
 /** A skill resource entry with optional rule count. */
@@ -197,7 +199,7 @@ export function getAgentResources(
   const commands: ResourceEntry[] = [];
   for (const cmd of listInstalledCommandsWithScope(agentId, cwd, { home })) {
     if (shouldInclude(cmd.scope)) {
-      commands.push({ name: cmd.name, path: cmd.path, scope: cmd.scope });
+      commands.push({ name: cmd.name, path: cmd.path, scope: cmd.scope, description: cmd.description });
     }
   }
 
@@ -211,6 +213,7 @@ export function getAgentResources(
         path: skill.path,
         scope: skill.scope,
         ruleCount: skill.ruleCount,
+        description: skill.metadata.description || undefined,
       });
     }
   }
@@ -261,7 +264,7 @@ export function getAgentResources(
 
   // Workflows (claude only)
   const workflows: ResourceEntry[] = [];
-  if (WORKFLOW_CAPABLE_AGENTS.includes(agentId as 'claude')) {
+  if (isCapable(agentId, 'workflows')) {
     for (const w of WorkflowsHandler.listAll(agentId as 'claude', cwd)) {
       workflows.push({ name: w.name, path: w.path, scope: w.layer === 'project' ? 'project' : 'user' });
     }

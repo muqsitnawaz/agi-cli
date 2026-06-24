@@ -59,15 +59,17 @@ import {
   removeShim,
 } from '../lib/shims.js';
 import { getAgentResources, listResources } from '../lib/resources.js';
-import { WORKFLOW_CAPABLE_AGENTS } from '../lib/workflows.js';
+import { listCliStatus } from '../lib/cli-resources.js';
+import { isCapable } from '../lib/capabilities.js';
 import { discoverPlugins, pluginSupportsAgent } from '../lib/plugins.js';
-import { PLUGINS_CAPABLE_AGENTS } from '../lib/agents.js';
 import { getAgentsDir, getUserAgentsDir, getEffectivePromptcutsPath, readMergedPromptcuts } from '../lib/state.js';
 import { isGitRepo, getGitSyncStatus } from '../lib/git.js';
 import { getCentralRulesFileName } from '../lib/rules/rules.js';
 import { composeRulesFromState, type ComposedSubrule } from '../lib/rules/compose.js';
 import { getConfiguredRunStrategy } from '../lib/rotate.js';
+import { resolveRunDefaults } from '../lib/run-defaults.js';
 import { listProfiles, profileSummary, type ProfileSummary } from '../lib/profiles.js';
+import { loadManifest, isStale } from '../lib/staleness/index.js';
 import { confirm } from '@inquirer/prompts';
 import { formatPath, isInteractiveTerminal, isPromptCancelled } from './utils.js';
 
@@ -167,6 +169,43 @@ interface ResourceWithSync {
   ruleCount?: number;
   syncState?: SyncState;
   scope?: 'user' | 'project';
+  description?: string;
+}
+
+/** Per-section filter flags. When any are true, only those sections render. */
+export interface ViewSectionFilter {
+  commands?: boolean;
+  skills?: boolean;
+  mcp?: boolean;
+  workflows?: boolean;
+  plugins?: boolean;
+  rules?: boolean;
+  hooks?: boolean;
+  promptcuts?: boolean;
+  cli?: boolean;
+}
+
+const SECTION_KEYS = ['commands', 'skills', 'mcp', 'workflows', 'plugins', 'rules', 'hooks', 'promptcuts', 'cli'] as const;
+type SectionKey = (typeof SECTION_KEYS)[number];
+
+/**
+ * Decide whether a section should render given the filter. If no flags are set,
+ * everything renders (current behavior). If any flag is set, only those sections
+ * render — flags are additive.
+ */
+function shouldRenderSection(key: SectionKey, filter: ViewSectionFilter | undefined): boolean {
+  if (!filter) return true;
+  const anySet = SECTION_KEYS.some((k) => filter[k]);
+  if (!anySet) return true;
+  return filter[key] === true;
+}
+
+/** Trim a description to a column-friendly snippet. Strips newlines, collapses whitespace. */
+function summarizeDescription(desc: string | undefined, maxLen = 80): string {
+  if (!desc) return '';
+  const cleaned = desc.replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= maxLen) return cleaned;
+  return cleaned.slice(0, maxLen - 1).trimEnd() + '…';
 }
 
 function getProfileSummaries(filterAgentId?: AgentId): ProfileSummary[] {
@@ -207,6 +246,48 @@ function renderProfilesSection(profiles: ProfileSummary[]): void {
  * Show installed versions for one or all agents.
  * Called when: `agents view` or `agents view claude`
  */
+/** Color the source-layer tag for a host CLI, matching the rules-section convention. */
+function hostCliSourceTag(source: string): string {
+  if (source === 'project') return chalk.blue('[project]');
+  if (source === 'user') return chalk.cyan('[user]');
+  if (source === 'system') return chalk.gray('[system]');
+  // Anything else is an extra repo, tagged by its alias.
+  return chalk.magenta(`[${source}]`);
+}
+
+/**
+ * Render the host-CLI section. Host CLIs are host-global: declared in any
+ * DotAgents repo's `cli/` (project > user > system > extras), installed to PATH
+ * rather than copied into a version home. They render identically in the overview
+ * and in a per-agent detail view because every agent on the host shares them.
+ * The source tag shows which repo layer declared each — so user-level and
+ * extra-repo manifests are visibly supported.
+ */
+function renderHostClisSection(cwd: string): void {
+  const { statuses, errors } = listCliStatus(cwd);
+  console.log(chalk.bold('\nHost CLIs\n'));
+  if (statuses.length === 0) {
+    console.log(`  ${chalk.gray('none declared')} ${chalk.gray('— add one with `agents cli add <name>`')}`);
+  } else {
+    const nameWidth = Math.max(...statuses.map((s) => s.manifest.name.length));
+    let anyMissing = false;
+    for (const { manifest, installed } of statuses) {
+      if (!installed) anyMissing = true;
+      const status = installed ? chalk.green('installed') : chalk.red('missing  ');
+      const linkedName = termLink(manifest.name.padEnd(nameWidth), linkTarget(manifest.path));
+      const tag = hostCliSourceTag(manifest.source);
+      const desc = manifest.description ? chalk.gray(`  ${summarizeDescription(manifest.description, 60)}`) : '';
+      console.log(`  ${status}  ${chalk.cyan(linkedName)} ${tag}${desc}`);
+    }
+    if (anyMissing) {
+      console.log(chalk.gray('  Install missing with `agents cli install`'));
+    }
+  }
+  for (const err of errors) {
+    console.log(`  ${chalk.red('error')}      ${chalk.gray(err.file)}: ${chalk.gray(err.reason)}`);
+  }
+}
+
 async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
   const spinnerText = filterAgentId
     ? `Checking ${agentLabel(filterAgentId)} agents...`
@@ -413,6 +494,10 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
         // Otherwise it reflects install time (misleading "just now" for fresh installs).
         const activeStr = vInfo && hasEmail ? formatLastActive(vInfo.lastActive) : '';
         const hasActive = activeStr.length > 0;
+        const runDefaults = resolveRunDefaults(agentId, version);
+        const runDefaultBits: string[] = [];
+        if (runDefaults.mode) runDefaultBits.push(`mode:${runDefaults.mode}`);
+        if (runDefaults.model) runDefaultBits.push(`model:${runDefaults.model}`);
 
         if (!hasEmail && !hasUsage) {
           // Installed but never signed in
@@ -432,6 +517,9 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
             parts.push(statusStr + statusPad);
           }
           if (hasActive) parts.push(activeStr);
+        }
+        if (runDefaultBits.length > 0) {
+          parts.push(chalk.gray(`run ${runDefaultBits.join(' ')}`));
         }
 
         console.log(parts.join('  '));
@@ -595,21 +683,21 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
     console.log();
   }
 
-  // Show shims path status at the end (only for full list with managed versions)
-  if (versionManaged.length > 0 && !filterAgentId) {
-    const shimsDir = getShimsDir();
-    if (isShimsInPath()) {
-      console.log(chalk.gray(`Shims: ${shimsDir} (in PATH)`));
-    } else {
-      console.log(chalk.yellow(`Shims: ${shimsDir} (not in PATH)`));
-      console.log(chalk.gray('Add to PATH for automatic version switching'));
-    }
+  // Host CLIs are host-global, not per-agent — show them once in the overview.
+  if (!filterAgentId) {
+    renderHostClisSection(process.cwd());
   }
 
   // Check for new resources when viewing a specific agent
   if (filterAgentId && versionManaged.length > 0) {
     const defaultVersion = getGlobalDefault(filterAgentId);
     if (defaultVersion) {
+      const manifest = loadManifest(filterAgentId, defaultVersion);
+      const cwd = process.cwd();
+      if (manifest && !isStale(manifest, filterAgentId, defaultVersion, cwd)) {
+        return;
+      }
+
       const available = getAvailableResources();
       const synced = getActuallySyncedResources(filterAgentId, defaultVersion);
       const projectOnly = getProjectOnlyResources();
@@ -647,7 +735,11 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
  * Show detailed resources for a specific agent version.
  * Called when: `agents view claude@2.0.65` or `agents view claude@default`
  */
-async function showAgentResources(agentId: AgentId, requestedVersion: string): Promise<void> {
+async function showAgentResources(
+  agentId: AgentId,
+  requestedVersion: string,
+  filter?: ViewSectionFilter,
+): Promise<void> {
   const spinner = ora({ text: 'Loading...', isSilent: !process.stdout.isTTY }).start();
 
   const cwd = process.cwd();
@@ -767,6 +859,8 @@ async function showAgentResources(agentId: AgentId, requestedVersion: string): P
     })),
     skills: resources.skills.map(r => ({
       ...r,
+      // ruleCount of 0 is noise — every skill has 0 unless it ships subrules, which is rare.
+      ruleCount: r.ruleCount && r.ruleCount > 0 ? r.ruleCount : undefined,
       syncState: r.scope === 'project' ? undefined : getSyncState(r.name, 'skills', skillsSync),
     })),
     skillErrors: resources.skillErrors,
@@ -816,7 +910,9 @@ async function showAgentResources(agentId: AgentId, requestedVersion: string): P
         : chalk.gray('[system]');
       display += ` ${sourceTag}`;
       const syncStr = r.syncState ? chalk.gray(` [${r.syncState}]`) : '';
-      console.log(`    ${display}${syncStr}`);
+      const descSnippet = summarizeDescription(r.description);
+      const descStr = descSnippet ? chalk.gray(`  ${descSnippet}`) : '';
+      console.log(`    ${display}${syncStr}${descStr}`);
     }
   }
 
@@ -835,49 +931,60 @@ async function showAgentResources(agentId: AgentId, requestedVersion: string): P
     console.log(`  ${chalk.green(label).padEnd(24)} ${chalk.gray(formatPath(getEffectivePromptcutsPath(), cwd))}`);
   }
 
-  // 1. Agent CLI info
-  console.log(chalk.bold('Agent CLIs\n'));
-  const accountInfo = await getAccountInfo(agentId, home);
-  const usageInfo = await getUsageInfoForIdentity({
-    agentId,
-    home,
-    cliVersion: version,
-    info: accountInfo,
-  });
-  const emailStr = accountInfo.email ? chalk.cyan(`  ${accountInfo.email}`) : '';
-  const status = chalk.green(version);
-  const usageStr = formatUsageSummary(accountInfo.plan, null);
-  const usagePart = usageStr ? `  ${usageStr}` : '';
-  console.log(`  ${colorAgent(agentId)(AGENTS[agentId].name.padEnd(14))} ${status}${emailStr}${usagePart}`);
+  const anyFilterSet = filter && SECTION_KEYS.some((k) => filter[k]);
 
-  const usageLines = formatUsageSection(usageInfo);
-  if (usageLines.length > 0) {
-    console.log();
-    for (const line of usageLines) {
-      console.log(line);
+  // 1. Agent CLI info — skip the header entirely when the user asked for a
+  // specific section. They want "nothing more or less."
+  if (!anyFilterSet) {
+    console.log(chalk.bold('Agent CLIs\n'));
+    const accountInfo = await getAccountInfo(agentId, home);
+    const usageInfo = await getUsageInfoForIdentity({
+      agentId,
+      home,
+      cliVersion: version,
+      info: accountInfo,
+    });
+    const emailStr = accountInfo.email ? chalk.cyan(`  ${accountInfo.email}`) : '';
+    const status = chalk.green(version);
+    const usageStr = formatUsageSummary(accountInfo.plan, null);
+    const usagePart = usageStr ? `  ${usageStr}` : '';
+    console.log(`  ${colorAgent(agentId)(AGENTS[agentId].name.padEnd(14))} ${status}${emailStr}${usagePart}`);
+
+    const usageLines = formatUsageSection(usageInfo);
+    if (usageLines.length > 0) {
+      console.log();
+      for (const line of usageLines) {
+        console.log(line);
+      }
     }
   }
 
   // 2. Resources
-  renderSection('Commands', agentData.commands);
-  renderSection('Skills', agentData.skills);
+  if (shouldRenderSection('commands', filter)) {
+    renderSection('Commands', agentData.commands);
+  }
+  if (shouldRenderSection('skills', filter)) {
+    renderSection('Skills', agentData.skills);
 
-  // Show skill parse errors if any
-  if (agentData.skillErrors.length > 0) {
-    console.log(`\n  ${chalk.red('Skill Errors')}:`);
-    for (const err of agentData.skillErrors) {
-      console.log(`    ${chalk.red(err.name.padEnd(20))} ${chalk.gray(err.error)}`);
-      console.log(`      ${chalk.gray(formatPath(err.path, cwd))}`);
+    // Show skill parse errors only when skills section is visible
+    if (agentData.skillErrors.length > 0) {
+      console.log(`\n  ${chalk.red('Skill Errors')}:`);
+      for (const err of agentData.skillErrors) {
+        console.log(`    ${chalk.red(err.name.padEnd(20))} ${chalk.gray(err.error)}`);
+        console.log(`      ${chalk.gray(formatPath(err.path, cwd))}`);
+      }
     }
   }
 
-  renderSection('MCP Servers', agentData.mcp);
+  if (shouldRenderSection('mcp', filter)) {
+    renderSection('MCP Servers', agentData.mcp);
+  }
 
-  if (WORKFLOW_CAPABLE_AGENTS.includes(agentId)) {
+  if (shouldRenderSection('workflows', filter) && isCapable(agentId, 'workflows')) {
     renderSection('Workflows', agentData.workflows);
   }
 
-  if (PLUGINS_CAPABLE_AGENTS.includes(agentId)) {
+  if (shouldRenderSection('plugins', filter) && isCapable(agentId, 'plugins')) {
     const plugins = discoverPlugins().filter(p => pluginSupportsAgent(p, agentId));
     console.log(chalk.bold('\nPlugins\n'));
     if (plugins.length === 0) {
@@ -957,13 +1064,23 @@ async function showAgentResources(agentId: AgentId, requestedVersion: string): P
       }
     }
   }
-  renderRulesSection();
+  if (shouldRenderSection('rules', filter)) {
+    renderRulesSection();
+  }
 
-  renderSection('Hooks', agentData.hooks);
-  renderPromptcuts();
+  if (shouldRenderSection('hooks', filter)) {
+    renderSection('Hooks', agentData.hooks);
+  }
+  if (shouldRenderSection('promptcuts', filter)) {
+    renderPromptcuts();
+  }
+  if (shouldRenderSection('cli', filter)) {
+    renderHostClisSection(cwd);
+  }
 
-  // Show legend at the end if git repo exists
-  if (hasGitRepo) {
+  // Show legend at the end if git repo exists and we showed all sections.
+  // Filtered single-section views skip it — noise for promptcuts or plugins.
+  if (hasGitRepo && !anyFilterSet) {
     console.log();
     console.log(chalk.gray('Legend:'), chalk.green('Tracked'), chalk.blue('Local-only'), chalk.yellow('Modified'), chalk.red('Deleted'));
   }
@@ -1316,12 +1433,29 @@ export async function pruneDuplicates(
  */
 export async function viewAction(
   agentArg?: string,
-  options?: { json?: boolean; prune?: boolean; yes?: boolean; dryRun?: boolean }
+  options?: {
+    json?: boolean;
+    prune?: boolean;
+    yes?: boolean;
+    dryRun?: boolean;
+  } & ViewSectionFilter,
 ): Promise<void> {
   const json = options?.json === true;
   const prune = options?.prune === true;
   const yes = options?.yes === true;
   const dryRun = options?.dryRun === true;
+  const filter: ViewSectionFilter = {
+    commands: options?.commands,
+    skills: options?.skills,
+    mcp: options?.mcp,
+    workflows: options?.workflows,
+    plugins: options?.plugins,
+    rules: options?.rules,
+    hooks: options?.hooks,
+    promptcuts: options?.promptcuts,
+    cli: options?.cli,
+  };
+  const filterIsSet = SECTION_KEYS.some((k) => filter[k]);
 
   if (!agentArg) {
     if (prune) {
@@ -1377,7 +1511,11 @@ export async function viewAction(
 
   if (requestedVersion) {
     // Specific version requested: show detailed resources
-    await showAgentResources(agentId, requestedVersion);
+    await showAgentResources(agentId, requestedVersion, filter);
+  } else if (filterIsSet) {
+    // `agents view claude --skills` → fall through to detail view on default.
+    // Section filters only make sense for the per-version detail view.
+    await showAgentResources(agentId, 'default', filter);
   } else {
     // Just agent name: show versions for that agent
     await showInstalledVersions(agentId);
@@ -1393,6 +1531,15 @@ export function registerViewCommand(program: Command): void {
     .option('--prune', 'Remove older installed versions that share an account with a newer installed version. Skips the global default.')
     .option('--dry-run', 'With --prune, show duplicate versions without deleting')
     .option('-y, --yes', 'Skip the prune confirmation prompt.')
+    .option('--commands', 'Show only commands in the detail view.')
+    .option('--skills', 'Show only skills in the detail view.')
+    .option('--mcp', 'Show only MCP servers in the detail view.')
+    .option('--workflows', 'Show only workflows in the detail view.')
+    .option('--plugins', 'Show only plugins in the detail view.')
+    .option('--rules', 'Show only rules in the detail view.')
+    .option('--hooks', 'Show only hooks in the detail view.')
+    .option('--promptcuts', 'Show only promptcuts in the detail view.')
+    .option('--cli', 'Show only host CLIs (declared in cli/, installed to PATH).')
     .addHelpText('after', `
 Examples:
   # Show all installed agents with versions, accounts, and usage
@@ -1413,6 +1560,11 @@ Examples:
   agents view claude --prune
   agents view claude --prune -y
 
+  # Filter the detail view to a single section (combinable)
+  agents view claude@default --skills
+  agents view claude@default --plugins --workflows
+  agents view claude --commands    # implicitly the default version
+
 When to use:
   - Checking which agents are installed and what their default versions are
   - Seeing which account each version is logged into (useful for multi-account setups)
@@ -1429,5 +1581,13 @@ Output:
   - With --prune: plan of which older versions will be removed, then confirm
   - With --prune --dry-run: preview only, no deletions
 `)
-    .action((agentArg: string | undefined, options: { json?: boolean; prune?: boolean; yes?: boolean; dryRun?: boolean }) => viewAction(agentArg, options));
+    .action((
+      agentArg: string | undefined,
+      options: {
+        json?: boolean;
+        prune?: boolean;
+        yes?: boolean;
+        dryRun?: boolean;
+      } & ViewSectionFilter,
+    ) => viewAction(agentArg, options));
 }

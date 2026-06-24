@@ -25,7 +25,7 @@ function runVersionSync(home: string, expression: string): unknown {
   const moduleUrl = pathToFileURL(path.resolve('src/lib/versions.ts')).href;
   const tsxBin = path.resolve('node_modules/.bin/tsx');
   const child = spawnSync(tsxBin, ['-e', `
-    import { syncResourcesToVersion } from ${JSON.stringify(moduleUrl)};
+    import { listInstalledVersions, syncResourcesToVersion } from ${JSON.stringify(moduleUrl)};
     const home = ${JSON.stringify(home)};
     const result = ${expression};
     console.log(JSON.stringify(result));
@@ -42,8 +42,8 @@ describe('version resource sync path handling', () => {
   it('intersects explicit resource selections with discovered resources before syncing', async () => {
     const home = makeTempHome();
 
-    fs.mkdirSync(path.join(home, '.agents-system', 'commands'), { recursive: true });
-    fs.writeFileSync(path.join(home, '.agents-system', 'commands', 'safe.md'), 'safe command', 'utf-8');
+    fs.mkdirSync(path.join(home, '.agents', '.system', 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.agents', '.system', 'commands', 'safe.md'), 'safe command', 'utf-8');
 
     const result = runVersionSync(
       home,
@@ -58,9 +58,9 @@ describe('version resource sync path handling', () => {
   it('keeps prompts for Codex 0.116.x and converts commands to generated skills for Codex 0.117.0+', async () => {
     const home = makeTempHome();
 
-    fs.mkdirSync(path.join(home, '.agents-system', 'commands'), { recursive: true });
+    fs.mkdirSync(path.join(home, '.agents', '.system', 'commands'), { recursive: true });
     fs.writeFileSync(
-      path.join(home, '.agents-system', 'commands', 'recap.md'),
+      path.join(home, '.agents', '.system', 'commands', 'recap.md'),
       ['---', 'description: Summarize the current session', '---', '', 'Recap the conversation so far.'].join('\n'),
       'utf-8'
     );
@@ -91,10 +91,46 @@ describe('version resource sync path handling', () => {
     expect(skill).toContain('Recap the conversation so far.');
   });
 
+  it('keeps grok command-generated skills authoritative over marker-bearing source skills', async () => {
+    const home = makeTempHome();
+    const commandPath = path.join(home, '.agents', 'commands', 'debug.md');
+    const sourceSkillPath = path.join(home, '.agents', 'skills', 'debug', 'SKILL.md');
+    const binaryPath = path.join(home, '.agents', '.history', 'versions', 'grok', '0.2.33', 'home', '.grok', 'downloads', 'grok-0.2.33-macos-aarch64');
+
+    fs.mkdirSync(path.dirname(commandPath), { recursive: true });
+    fs.mkdirSync(path.dirname(sourceSkillPath), { recursive: true });
+    fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
+    fs.writeFileSync(
+      commandPath,
+      ['---', 'description: Fresh debug command', '---', '', 'fresh command body'].join('\n'),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      sourceSkillPath,
+      ['---', 'name: "debug"', 'description: "old generated command"', 'agents_command: "debug"', '---', '', 'old source skill body'].join('\n'),
+      'utf-8'
+    );
+    fs.writeFileSync(binaryPath, '#!/bin/sh\nexit 0\n', 'utf-8');
+    fs.chmodSync(binaryPath, 0o755);
+
+    const result = runVersionSync(
+      home,
+      "syncResourcesToVersion('grok', '0.2.33', { commands: ['debug'], skills: ['debug'] }, { cwd: home })"
+    ) as { commands: boolean; skills: boolean };
+
+    const syncedSkillPath = path.join(home, '.agents', '.history', 'versions', 'grok', '0.2.33', 'home', '.grok', 'skills', 'debug', 'SKILL.md');
+    const syncedSkill = fs.readFileSync(syncedSkillPath, 'utf-8');
+    expect(result.commands).toBe(true);
+    expect(result.skills).toBe(false);
+    expect(syncedSkill).toContain('fresh command body');
+    expect(syncedSkill).not.toContain('old source skill body');
+    expect(fs.existsSync(binaryPath)).toBe(true);
+  });
+
   it('does not follow symlinks inside copied skill resources', async () => {
     const home = makeTempHome();
 
-    const skillDir = path.join(home, '.agents-system', 'skills', 'leaky');
+    const skillDir = path.join(home, '.agents', '.system', 'skills', 'leaky');
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, 'SKILL.md'), 'skill body', 'utf-8');
     const secretPath = path.join(home, 'secret.txt');
@@ -115,7 +151,7 @@ describe('version resource sync path handling', () => {
   it('skips a clean full sync after expanding persisted resource patterns', async () => {
     const home = makeTempHome();
 
-    const skillDir = path.join(home, '.agents-system', 'skills', 'tiny');
+    const skillDir = path.join(home, '.agents', '.system', 'skills', 'tiny');
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(path.join(skillDir, 'SKILL.md'), 'skill body', 'utf-8');
 
@@ -161,5 +197,108 @@ describe('version resource sync path handling', () => {
     expect(result.mcp).toEqual(['safe']);
     expect(settings.mcpServers?.safe).toBeDefined();
     expect(settings.mcpServers?.evil).toBeUndefined();
+  });
+
+  it('writes missing grok AGENTS.md when syncing a partial selection without memory', async () => {
+    const home = makeTempHome();
+    const rulesDir = path.join(home, '.agents', '.system', 'rules');
+
+    fs.mkdirSync(path.join(rulesDir, 'subrules'), { recursive: true });
+    fs.writeFileSync(
+      path.join(rulesDir, 'rules.yaml'),
+      'presets:\n  default:\n    subrules:\n      - core\n',
+      'utf-8'
+    );
+    fs.writeFileSync(path.join(rulesDir, 'subrules', 'core.md'), 'Grok memory body\n', 'utf-8');
+
+    const result = runVersionSync(
+      home,
+      "syncResourcesToVersion('grok', '0.2.33', { skills: [] }, { cwd: home })"
+    ) as { memory: string[] };
+
+    const agentsPath = path.join(home, '.agents', '.history', 'versions', 'grok', '0.2.33', 'home', '.grok', 'AGENTS.md');
+    expect(result.memory).toContain('AGENTS.md');
+    expect(fs.existsSync(agentsPath)).toBe(true);
+    expect(fs.readFileSync(agentsPath, 'utf-8')).toContain('Grok memory body');
+  });
+
+  it('detects grok binaries from the per-version home, not the host .grok symlink', async () => {
+    const home = makeTempHome();
+    const installedDownloads = path.join(home, '.agents', '.history', 'versions', 'grok', '0.2.33', 'home', '.grok', 'downloads');
+    const emptyConfigDir = path.join(home, '.agents', '.history', 'versions', 'grok', '0.2.32', 'home', '.grok');
+    const hostGrok = path.join(home, '.grok');
+
+    fs.mkdirSync(installedDownloads, { recursive: true });
+    fs.mkdirSync(path.join(emptyConfigDir, 'downloads'), { recursive: true });
+    fs.writeFileSync(path.join(installedDownloads, 'grok-0.2.33-macos-aarch64'), '#!/bin/sh\nexit 0\n', 'utf-8');
+    fs.chmodSync(path.join(installedDownloads, 'grok-0.2.33-macos-aarch64'), 0o755);
+    fs.symlinkSync(emptyConfigDir, hostGrok, 'dir');
+
+    const result = runVersionSync(home, "listInstalledVersions('grok')") as string[];
+
+    expect(result).toEqual(['0.2.33']);
+  });
+});
+
+// `installVersion` derives an `npm install <pkg>@<version>` spec from `version`,
+// which originates from the `agents add pkg@<version>` CLI arg or a
+// `.agents-version` pin. The argv-form execFile call cannot be reached for a
+// tainted version because VERSION_RE rejects it at the source (versions.ts).
+// These tests assert the rejection happens before any npm exec, so a malicious
+// version can never escape into a shell.
+function runInstallVersion(home: string, agent: string, version: string): { ok: boolean; error?: string } {
+  const moduleUrl = pathToFileURL(path.resolve('src/lib/versions.ts')).href;
+  const tsxBin = path.resolve('node_modules/.bin/tsx');
+  const child = spawnSync(tsxBin, ['-e', `
+    import { installVersion } from ${JSON.stringify(moduleUrl)};
+    (async () => {
+      try {
+        const r = await installVersion(${JSON.stringify(agent)}, ${JSON.stringify(version)});
+        console.log(JSON.stringify({ ok: true, result: r }));
+      } catch (err) {
+        console.log(JSON.stringify({ ok: false, error: err.message }));
+      }
+    })();
+  `], {
+    env: { ...process.env, HOME: home },
+    encoding: 'utf-8',
+  });
+  expect(child.status, child.stderr).toBe(0);
+  return JSON.parse(child.stdout.trim());
+}
+
+describe('installVersion version validation', () => {
+  const malicious = [
+    'latest; touch /tmp/pwned',
+    '1.0.0 && rm -rf ~',
+    '$(touch /tmp/pwned)',
+    '`touch /tmp/pwned`',
+    '1.0.0|cat /etc/passwd',
+    '--registry=http://evil.example.com',
+  ];
+
+  for (const version of malicious) {
+    it(`rejects malicious version before any npm exec: ${JSON.stringify(version)}`, () => {
+      const home = makeTempHome();
+      const outcome = runInstallVersion(home, 'codex', version);
+      expect(outcome.ok).toBe(false);
+      expect(outcome.error).toContain('Invalid version');
+      // No version dir was created — rejection happened at the source, before
+      // ensureAgentsDir / npm install could run.
+      expect(fs.existsSync(path.join(home, '.agents', '.history', 'versions', 'codex'))).toBe(false);
+    });
+  }
+
+  it('accepts a well-formed semver version through the validation guard', () => {
+    const home = makeTempHome();
+    // A valid version passes VERSION_RE. `kiro` has no npmPackage and a
+    // non-VERSION installScript, so installVersion returns a benign,
+    // network-free error AFTER the guard — proving valid input is not rejected.
+    const outcome = runInstallVersion(home, 'kiro', '0.0.0-rc.1');
+    expect(outcome.ok).toBe(true);
+    const result = (outcome as { result?: { success: boolean; error?: string } }).result;
+    expect(result?.success).toBe(false);
+    expect(result?.error ?? '').not.toContain('Invalid version');
+    expect(result?.error ?? '').toContain('does not support version-pinned installs');
   });
 });

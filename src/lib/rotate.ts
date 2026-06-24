@@ -6,13 +6,12 @@
  */
 
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
-import * as yaml from 'yaml';
 import type { AgentId, RunStrategy } from './types.js';
 import { getAccountInfo, type AccountInfo } from './agents.js';
-import { readMeta, writeMeta, getHelpersDir, getUserAgentsDir } from './state.js';
+import { readMeta, writeMeta, getHelpersDir } from './state.js';
 import { listInstalledVersions, getVersionHomePath, resolveVersion } from './versions.js';
+import { getProjectRunConfigs } from './run-config.js';
 import {
   getUsageInfoByIdentity,
   getUsageLookupKey,
@@ -29,6 +28,13 @@ export interface RotateCandidate {
   agent: AgentId;
   version: string;
   email: string | null;
+  /**
+   * Per-org usage/quota key (e.g. `claude:org=<orgUuid>`) — the unit rate
+   * limits are actually measured in. Distinct orgs signed in under the same
+   * email have distinct keys, so this is the correct dedup boundary; null when
+   * no usage identity is available (then we fall back to email).
+   */
+  usageKey: string | null;
   usageStatus: AccountInfo['usageStatus'];
   usageSnapshot: UsageSnapshot | null;
   authValid: boolean;
@@ -61,21 +67,9 @@ export function normalizeRunStrategy(value: unknown): RunStrategy | null {
 
 /** Read project-local run strategy from the nearest agents.yaml, if present. */
 export function getProjectRunStrategy(agent: AgentId, startPath: string): RunStrategy | null {
-  let dir = path.resolve(startPath);
-  const userAgentsYaml = path.join(getUserAgentsDir(), 'agents.yaml');
-
-  while (dir !== path.dirname(dir)) {
-    const manifestPath = path.join(dir, 'agents.yaml');
-    if (manifestPath !== userAgentsYaml && fs.existsSync(manifestPath)) {
-      try {
-        const parsed = yaml.parse(fs.readFileSync(manifestPath, 'utf-8'));
-        const strategy = normalizeRunStrategy(parsed?.run?.[agent]?.strategy);
-        if (strategy) return strategy;
-      } catch {
-        // Ignore malformed project config and keep walking, matching version resolution.
-      }
-    }
-    dir = path.dirname(dir);
+  for (const runConfig of getProjectRunConfigs(startPath)) {
+    const strategy = normalizeRunStrategy(runConfig[agent]?.strategy);
+    if (strategy) return strategy;
   }
 
   return null;
@@ -84,7 +78,7 @@ export function getProjectRunStrategy(agent: AgentId, startPath: string): RunStr
 /**
  * Resolve the configured strategy. Lookup order:
  *   1. project-local agents.yaml (nearest to `startPath`)
- *   2. ~/.agents-system/agents.yaml
+ *   2. ~/.agents/.system/agents.yaml
  *   3. default: `available` (use the pinned default version when healthy,
  *      otherwise fall through to a healthy account so a single rate-limited
  *      account doesn't block the run).
@@ -151,19 +145,30 @@ function compareCandidates(a: RotateCandidate, b: RotateCandidate): number {
   return Math.random() - 0.5;
 }
 
+/**
+ * Identity a candidate dedups on. Quota is tracked per-org, so two versions
+ * that share an org are the same rate-limit bucket and must collapse — but two
+ * orgs under the same email (e.g. Enterprise + Personal on one Google identity)
+ * are genuinely separate buckets and must stay distinct. Prefer the org usage
+ * key; fall back to email only when no usage identity is available.
+ */
+function candidateIdentity(c: RotateCandidate): string {
+  return c.usageKey ?? c.email!;
+}
+
 function dedupeAndSortCandidates(candidates: RotateCandidate[]): RotateCandidate[] {
-  const byEmail = new Map<string, RotateCandidate>();
+  const byIdentity = new Map<string, RotateCandidate>();
   for (const c of candidates) {
-    const email = c.email!;
-    const existing = byEmail.get(email);
+    const id = candidateIdentity(c);
+    const existing = byIdentity.get(id);
     if (!existing) {
-      byEmail.set(email, c);
+      byIdentity.set(id, c);
       continue;
     }
-    if (compareCandidates(c, existing) < 0) byEmail.set(email, c);
+    if (compareCandidates(c, existing) < 0) byIdentity.set(id, c);
   }
 
-  return [...byEmail.values()].sort(compareCandidates);
+  return [...byIdentity.values()].sort(compareCandidates);
 }
 
 /**
@@ -310,7 +315,7 @@ async function collectRunCandidates(agent: AgentId): Promise<RotateCandidate[]> 
     const usageSnapshot = usageKey
       ? usageByKey.get(usageKey)?.snapshot ?? null
       : null;
-    return { ...candidate, usageSnapshot };
+    return { ...candidate, usageKey, usageSnapshot };
   });
 }
 

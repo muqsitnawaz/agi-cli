@@ -25,12 +25,12 @@ Every agents-cli installation maintains two repos:
 
 | Repo | Path | Owner | Purpose |
 |------|------|-------|---------|
-| **System repo** | `~/.agents-system/` | agents-cli maintainers | Core resources and defaults shipped with every install. Updated via `npm update -g agents-cli`. |
+| **System repo** | `~/.agents/.system/` | agents-cli maintainers | Core resources and defaults shipped with every install. Updated via `npm update -g agents-cli`. |
 | **User repo** | `~/.agents/` | You | Your personal additions and overrides. Synced with `agents repo push` / `agents repo pull`. |
 
 A project can also have a local repo — drop a `.agents/` directory at the project root. Its resources apply only while you're inside that project tree.
 
-Extra repos can be registered via `agents repo add <source>`. They clone into `~/.agents-system/.repos/<alias>/` and participate in resolution after the user repo.
+Extra repos can be registered via `agents repo add <source>`. They clone into `~/.agents-<alias>/` (peer of `~/.agents/`) and participate in resolution after the user repo.
 
 ---
 
@@ -62,8 +62,8 @@ When agents-cli resolves a resource it searches four layers in order and stops a
 ```
 project (.agents/ at project root)
   └─ user (~/.agents/)
-       └─ extra repos (~/.agents-system/.repos/<alias>/)
-            └─ system (~/.agents-system/)
+       └─ extra repos (~/.agents-<alias>/)
+            └─ system (~/.agents/.system/)
 ```
 
 **Same-named resource wins at the highest layer.** A `commands/deploy.md` in your user repo overrides the system default. Everything without a name collision unions in — you get all resources from all layers, with higher layers taking precedence on conflicts.
@@ -80,7 +80,7 @@ The resolution logic lives in `src/lib/resources.ts` — `resolveResource(kind, 
 
 ## Version homes
 
-Each installed agent CLI version gets an isolated **version home** — a directory under `~/.agents-system/versions/<agent>/<version>/home/` that contains a complete config environment for that version. Syncing copies (or symlinks) the resolved resource set into the version home in the format each agent expects.
+Each installed agent CLI version gets an isolated **version home** — a directory under `~/.agents/.history/versions/<agent>/<version>/home/` that contains a complete config environment for that version. Syncing copies (or symlinks) the resolved resource set into the version home in the format each agent expects.
 
 When you run `claude` (via the shim), agents-cli reads `agents.yaml`, resolves the version, and sets `HOME` to the matching version home before exec-ing the binary. The agent sees only its version-specific config — no bleed between versions.
 
@@ -95,15 +95,34 @@ See [01-version-management.md](01-version-management.md) for install and switchi
 | Agent | Hooks | MCP | Permissions | Skills | Commands | Plugins | Subagents | Rules | Workflows |
 |------|-------|-----|-------------|--------|----------|---------|-----------|-------|-----------|
 | Claude | yes | yes | yes | yes | yes | yes | yes | `CLAUDE.md` | yes |
-| Codex | >= 0.116.0 | yes | no | yes | < 0.117.0 | >= 0.128.0 | no | `AGENTS.md` | no |
-| Gemini | >= 0.26.0 | yes | no | yes | yes | no | no | `GEMINI.md` | no |
+| Codex | >= 0.116.0 | yes | no | yes | < 0.117.0 · skills ($name, >= 0.117) | >= 0.128.0 | no | `AGENTS.md` | no |
+| Gemini | >= 0.26.0 | yes | no | yes | yes (.toml) | no | no | `GEMINI.md` | no |
 | Cursor | no | yes | no | yes | yes | no | no | `.cursorrules` | no |
 | OpenCode | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
-| OpenClaw | yes | yes | no | yes | no | yes | yes | `workspace/AGENTS.md` | no |
+| OpenClaw | yes | yes | no | yes | gateway | yes | yes | `workspace/AGENTS.md` | no |
 | Copilot | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
 | Amp | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
 | Kiro | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
 | Goose | no | yes | no | no | no | no | no | `AGENTS.md` | no |
 | Roo Code | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
 | Antigravity | yes | yes | yes | yes | yes | yes | no | `AGENTS.md` | no |
-| Grok | yes | yes | yes | yes | no | yes | no | `AGENTS.md` | no |
+| Grok | yes | yes | yes | yes | skills ($name) | yes | no | `AGENTS.md` | no |
+
+Permissions sync is gated on the `allowlist` capability (Claude, Antigravity, Grok only). **Host CLIs** (`agents cli`) are agent-agnostic PATH binaries — not in this matrix. Install paths call `supports(agent, cap, version)` before writing; gated capabilities skip with a clear reason instead of silently ignored config.
+
+### Per-command targeting
+
+Slash commands in `commands/*.md` can narrow sync with optional YAML frontmatter:
+
+```yaml
+---
+description: Required one-line summary
+agents: [claude, cursor, codex]   # omit = all command-capable agents
+since: "0.116.0"                  # minimum agent CLI version (inclusive)
+until: "0.117.0"                  # exclusive upper bound
+---
+```
+
+`commandAppliesTo()` in `src/lib/commands.ts` evaluates these fields after the agent-level `commands` / commands-as-skills gate. The check runs on central sync (`~/.agents/commands/` user/system → version home) and on `agents commands install`; project `.agents/commands/` files are discovered in place and are not filtered by `agents:`.
+
+Example: `.agents/commands/version.md` targets Claude, Codex, Gemini, Cursor, OpenCode, Copilot, and Grok; Antigravity is excluded until harness support is verified.

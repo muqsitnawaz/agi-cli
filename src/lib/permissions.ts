@@ -22,17 +22,17 @@ import type {
 } from './types.js';
 import { getPermissionsDir, getUserPermissionsDir, ensureAgentsDir } from './state.js';
 import { safeJoin } from './paths.js';
-import { AGENTS } from './agents.js';
+import { AGENTS, agentConfigDirName } from './agents.js';
 import { updateGeminiSettings } from './gemini-settings.js';
 
 const HOME = os.homedir();
 
-/** Agents that support the permissions subsystem. */
-// antigravity: permissions in ~/.gemini/antigravity-cli/settings.json under
-// `permissions: { allow: [...], deny: [...] }`. Serializer is a follow-up.
-// grok: permissions via --allow/--deny CLI flags or [permission] block in
-// ~/.grok/config.toml. Serializer is a follow-up.
-export const PERMISSIONS_CAPABLE_AGENTS: AgentId[] = ['claude', 'codex', 'opencode', 'antigravity', 'grok', 'gemini'];
+// PERMISSIONS_CAPABLE_AGENTS removed — use `capableAgents('allowlist')`
+// from lib/capabilities.ts. The capability matrix on AgentConfig is the
+// single source of truth. (Per-agent native format details:
+//   antigravity → ~/.gemini/antigravity-cli/settings.json `permissions.{allow,deny}`
+//   grok        → ~/.grok/config.toml `[permission].rules`
+// the writer in `applyPermissionsToVersion` handles the format dispatch.)
 
 /** Filename used for Codex Starlark deny-rules generated from permission groups. */
 export const CODEX_RULES_FILENAME = 'agents-deny.rules';
@@ -496,6 +496,208 @@ export function convertToGeminiFormat(set: PermissionSet): { tools: { allowed: s
     }
   }
   return { tools: { allowed: Array.from(allowed) } };
+}
+
+/**
+ * Strip Claude's `:*` subcommand-wildcard suffix and return a space-glob form.
+ * "mq:*" -> "mq *", "git status" -> "git status", "*" -> "*".
+ * Used by serializers whose native pattern grammar uses ` *` instead of `:*`.
+ */
+function normalizeBashPattern(pattern: string): string {
+  if (pattern === '*' || pattern === '**') return '*';
+  if (pattern.endsWith(':*')) return pattern.slice(0, -2) + ' *';
+  return pattern;
+}
+
+/**
+ * Convert canonical permission set to Antigravity format.
+ * Antigravity reads ~/.gemini/antigravity-cli/settings.json with
+ *   { permissions: { allow: [...], deny: [...] } }
+ * where each entry is action-namespaced: command(...), read_file(...),
+ * write_file(...), read_url(...), mcp(...).
+ * Bash maps to `command`, Read to `read_file`, Write to `write_file`,
+ * WebFetch to `read_url`. Other canonical tools are skipped.
+ * Note: Antigravity matches `command(npm install)` as an exact string,
+ * not a prefix — `Bash(npm:*)` becomes `command(npm *)` which is a glob
+ * but Antigravity upstream has a known exact-match bug for some forms.
+ */
+export function convertToAntigravityFormat(set: PermissionSet): { permissions: { allow: string[]; deny?: string[] } } {
+  const allow = serializeAntigravityEntries(set.allow);
+  const deny = set.deny ? serializeAntigravityEntries(set.deny) : [];
+  return {
+    permissions: {
+      allow,
+      ...(deny.length ? { deny } : {}),
+    },
+  };
+}
+
+function serializeAntigravityEntries(perms: string[]): string[] {
+  const out = new Set<string>();
+  for (const perm of perms) {
+    if (BLANKET_BASH_FORMS.has(perm)) {
+      out.add('command(*)');
+      continue;
+    }
+    const parsed = parseCanonicalPattern(perm);
+    if (!parsed) continue;
+    const action = ANTIGRAVITY_ACTION_BY_TOOL[parsed.tool];
+    if (!action) continue;
+    if (parsed.tool === 'bash') {
+      out.add(`${action}(${normalizeBashPattern(parsed.pattern)})`);
+    } else {
+      const p = parsed.pattern === '**' ? '*' : parsed.pattern;
+      out.add(`${action}(${p})`);
+    }
+  }
+  return Array.from(out);
+}
+
+const ANTIGRAVITY_ACTION_BY_TOOL: Record<string, string | undefined> = {
+  bash: 'command',
+  read: 'read_file',
+  write: 'write_file',
+  webfetch: 'read_url',
+};
+
+/**
+ * Convert canonical permission set to Grok format.
+ * Grok reads ~/.grok/config.toml with
+ *   [permission]
+ *   rules = [ { action = "allow", tool = "bash", pattern = "git *" }, ... ]
+ * Tool names are lowercase: bash, read, edit, grep, mcptool, webfetch.
+ * Canonical Write maps to Grok's `edit` tool.
+ */
+export function convertToGrokFormat(set: PermissionSet): { permission: { rules: GrokRule[] } } {
+  const rules: GrokRule[] = [];
+  for (const perm of set.allow) {
+    const rule = canonicalToGrokRule(perm, 'allow');
+    if (rule) rules.push(rule);
+  }
+  if (set.deny) {
+    for (const perm of set.deny) {
+      const rule = canonicalToGrokRule(perm, 'deny');
+      if (rule) rules.push(rule);
+    }
+  }
+  return { permission: { rules } };
+}
+
+export type GrokRule = { action: 'allow' | 'deny'; tool: string; pattern?: string };
+
+const GROK_TOOL_BY_CANONICAL: Record<string, string | undefined> = {
+  bash: 'bash',
+  read: 'read',
+  write: 'edit',
+  grep: 'grep',
+  webfetch: 'webfetch',
+};
+
+function canonicalToGrokRule(perm: string, action: 'allow' | 'deny'): GrokRule | null {
+  if (BLANKET_BASH_FORMS.has(perm)) {
+    return { action, tool: 'bash', pattern: '*' };
+  }
+  const parsed = parseCanonicalPattern(perm);
+  if (!parsed) return null;
+  const tool = GROK_TOOL_BY_CANONICAL[parsed.tool];
+  if (!tool) return null;
+  const pattern = parsed.tool === 'bash' ? normalizeBashPattern(parsed.pattern) : parsed.pattern;
+  if (pattern === '' || pattern === undefined) {
+    return { action, tool };
+  }
+  return { action, tool, pattern };
+}
+
+export type KimiRule = { decision: 'allow' | 'deny'; pattern: string };
+
+/**
+ * Parse a canonical permission string preserving the tool's original casing.
+ * `parseCanonicalPattern` lowercases the tool name, which is fine for Grok
+ * (lowercase tool vocabulary) but wrong for Kimi, whose tool names are
+ * capitalized (`Bash`, `Read`, `Grep`). Bare tool names (no parens, e.g.
+ * `Read` or an MCP id like `mcp__server__tool`) return `pattern: null`.
+ */
+function parseCanonicalPreserveCase(perm: string): { tool: string; pattern: string | null } {
+  const m = perm.match(/^([\w-]+)\((.*)\)$/);
+  if (m) return { tool: m[1], pattern: m[2] };
+  return { tool: perm, pattern: null };
+}
+
+/**
+ * Translate a canonical Bash arg-glob (`cmd:*`) into the Kimi pattern(s) that
+ * actually match that command's invocations.
+ *
+ * Kimi matches Bash arg-globs with picomatch, where `*` does NOT cross `/` and a
+ * `**` only globstars when it is its own path segment (`*​/**`, `**​/`). A plain
+ * `cmd*` therefore matches `git status -s` but NOT `git push origin feat/x` or
+ * `cat dir/file` — any argument containing a slash falls through to a prompt
+ * (verified interactively against kimi 0.12.1). We emit TWO patterns so the
+ * command auto-approves whether its args contain a slash or not:
+ *   - `cmd*`     — no-slash args (and the bare command; `*` is zero-or-more).
+ *   - `cmd*​/**` — args with a path: `*` consumes up to the first `/`, then the
+ *                 bounded globstar crosses the remaining slashes.
+ * "git push:*" -> ["git push*", "git push*​/**"].
+ */
+function kimiBashPatterns(pattern: string): string[] {
+  if (pattern === '*' || pattern === '**') return ['*'];
+  if (pattern.endsWith(':*')) {
+    const prefix = pattern.slice(0, -2);
+    return [`${prefix}*`, `${prefix}*/**`];
+  }
+  // Exact command (no `:*`, e.g. `env`, `pwd`, `true`) — no path args expected.
+  return [pattern];
+}
+
+function canonicalToKimiRules(perm: string, decision: 'allow' | 'deny'): KimiRule[] {
+  if (BLANKET_BASH_FORMS.has(perm)) {
+    return [{ decision, pattern: 'Bash' }];
+  }
+  const { tool, pattern } = parseCanonicalPreserveCase(perm);
+  // Bare tool name (no parens) — name-only match. Covers `Read`, `Grep`, and
+  // MCP tool ids, which Kimi can only match by name anyway.
+  if (pattern === null) {
+    return [{ decision, pattern: tool }];
+  }
+  if (tool.toLowerCase() === 'bash') {
+    return kimiBashPatterns(pattern).map((p) => ({
+      decision,
+      pattern: p === '*' ? 'Bash' : `Bash(${p})`,
+    }));
+  }
+  // Non-Bash built-ins (Read/Write/Edit/Grep/Glob/WebFetch...) share Kimi's
+  // capitalized tool vocabulary, so pass the tool+pattern through. A `**`/`*`
+  // glob means "any" — collapse to a name-only rule.
+  if (pattern === '*' || pattern === '**') {
+    return [{ decision, pattern: tool }];
+  }
+  return [{ decision, pattern: `${tool}(${pattern})` }];
+}
+
+/**
+ * Convert a canonical permission set to Kimi Code's `[permission].rules` format.
+ * Kimi (`~/.kimi-code/config.toml`) reads rules of the form
+ *   [[permission.rules]]
+ *   decision = "allow"
+ *   pattern  = "Bash(git status*)"
+ * Tool names are capitalized and the Bash arg-glob uses a trailing `*` (no
+ * Claude `:*` separator). Without this conversion the canonical strings match
+ * nothing in Kimi's engine and every tool call falls through to a prompt.
+ *
+ * Each `:*` Bash rule expands to TWO patterns (`cmd*` and `cmd*​/**`) so the
+ * command auto-approves whether or not its arguments contain a slash — see
+ * `kimiBashPatterns` for why Kimi's picomatch matcher needs both.
+ */
+export function convertToKimiFormat(set: PermissionSet): { permission: { rules: KimiRule[] } } {
+  const rules: KimiRule[] = [];
+  for (const perm of set.allow) {
+    rules.push(...canonicalToKimiRules(perm, 'allow'));
+  }
+  if (set.deny) {
+    for (const perm of set.deny) {
+      rules.push(...canonicalToKimiRules(perm, 'deny'));
+    }
+  }
+  return { permission: { rules } };
 }
 
 /**
@@ -964,7 +1166,7 @@ export function applyPermissionsToVersion(
   versionHome: string,
   merge: boolean = true
 ): { success: boolean; error?: string } {
-  const configDir = path.join(versionHome, `.${agentId}`);
+  const configDir = path.join(versionHome, agentConfigDirName(agentId));
 
   try {
     fs.mkdirSync(configDir, { recursive: true });
@@ -1081,6 +1283,95 @@ export function applyPermissionsToVersion(
         }
         settings.tools = tools;
       });
+      return { success: true };
+    }
+
+    if (agentId === 'antigravity') {
+      const antigravityPerms = convertToAntigravityFormat(set);
+      const settingsPath = path.join(versionHome, '.gemini', 'antigravity-cli', 'settings.json');
+      updateGeminiSettings(settingsPath, (settings) => {
+        const perms = (typeof settings.permissions === 'object' && settings.permissions !== null && !Array.isArray(settings.permissions))
+          ? settings.permissions as Record<string, unknown>
+          : {};
+        if (merge) {
+          const existingAllow = Array.isArray(perms.allow) ? (perms.allow as string[]) : [];
+          const existingDeny = Array.isArray(perms.deny) ? (perms.deny as string[]) : [];
+          perms.allow = Array.from(new Set([...existingAllow, ...antigravityPerms.permissions.allow]));
+          const mergedDeny = Array.from(new Set([...existingDeny, ...(antigravityPerms.permissions.deny ?? [])]));
+          if (mergedDeny.length) perms.deny = mergedDeny;
+          else delete perms.deny;
+        } else {
+          perms.allow = antigravityPerms.permissions.allow;
+          if (antigravityPerms.permissions.deny?.length) perms.deny = antigravityPerms.permissions.deny;
+          else delete perms.deny;
+        }
+        settings.permissions = perms;
+      });
+      return { success: true };
+    }
+
+    if (agentId === 'grok') {
+      const grokPerms = convertToGrokFormat(set);
+      const configPath = path.join(versionHome, '.grok', 'config.toml');
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        config = TOML.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+      }
+      const existingPermission = (typeof config.permission === 'object' && config.permission !== null && !Array.isArray(config.permission))
+        ? config.permission as Record<string, unknown>
+        : {};
+      if (merge) {
+        const existingRules = Array.isArray(existingPermission.rules) ? (existingPermission.rules as GrokRule[]) : [];
+        const seen = new Set<string>();
+        const dedup: GrokRule[] = [];
+        for (const r of [...existingRules, ...grokPerms.permission.rules]) {
+          const key = `${r.action}|${r.tool}|${r.pattern ?? ''}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          dedup.push(r);
+        }
+        existingPermission.rules = dedup;
+      } else {
+        existingPermission.rules = grokPerms.permission.rules;
+      }
+      config.permission = existingPermission;
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, TOML.stringify(config as any), 'utf-8');
+      return { success: true };
+    }
+
+    if (agentId === 'kimi') {
+      const configPath = path.join(versionHome, '.kimi-code', 'config.toml');
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        config = TOML.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+      }
+
+      const newRules: Array<{ decision: string; pattern: string }> = convertToKimiFormat(set).permission.rules;
+
+      if (merge) {
+        const existingPermission = (typeof config.permission === 'object' && config.permission !== null && !Array.isArray(config.permission))
+          ? config.permission as Record<string, unknown>
+          : {};
+        const existingRules = Array.isArray(existingPermission.rules)
+          ? (existingPermission.rules as Array<{ decision?: string; pattern?: string }>)
+          : [];
+        const seen = new Set<string>();
+        const dedup: Array<{ decision: string; pattern: string }> = [];
+        for (const r of [...existingRules, ...newRules]) {
+          if (!r.decision || !r.pattern) continue;
+          const key = `${r.decision}|${r.pattern}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          dedup.push({ decision: r.decision, pattern: r.pattern });
+        }
+        config.permission = { rules: dedup };
+      } else {
+        config.permission = { rules: newRules };
+      }
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, TOML.stringify(config as any), 'utf-8');
       return { success: true };
     }
 

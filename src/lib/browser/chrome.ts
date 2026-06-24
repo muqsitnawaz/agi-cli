@@ -11,6 +11,14 @@ import type { Readable, Writable } from 'stream';
 
 import type { BrowserType } from './types.js';
 
+// Windows install roots. Resolve from the environment (fall back to the usual
+// defaults) so per-user installs under %LOCALAPPDATA% and 64-bit Program Files
+// are found, not just the hardcoded x86 path. Only the `win32` entries below use
+// these; on other platforms they compute unused placeholder strings.
+const WIN_PROGRAMFILES = process.env.ProgramFiles || 'C:\\Program Files';
+const WIN_PROGRAMFILES_X86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+const WIN_LOCALAPPDATA = process.env.LOCALAPPDATA || `${os.homedir()}\\AppData\\Local`;
+
 const BROWSER_PATHS: Record<string, Record<BrowserType, string[]>> = {
   darwin: {
     chrome: [
@@ -33,28 +41,109 @@ const BROWSER_PATHS: Record<string, Record<BrowserType, string[]>> = {
   },
   win32: {
     chrome: [
-      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      `${WIN_PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${WIN_PROGRAMFILES_X86}\\Google\\Chrome\\Application\\chrome.exe`,
+      `${WIN_LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`,
     ],
     comet: [],
-    chromium: [],
+    chromium: [
+      `${WIN_LOCALAPPDATA}\\Chromium\\Application\\chrome.exe`,
+    ],
     brave: [
-      'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+      `${WIN_PROGRAMFILES}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      `${WIN_PROGRAMFILES_X86}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
+      `${WIN_LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`,
     ],
     edge: [
-      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      `${WIN_PROGRAMFILES}\\Microsoft\\Edge\\Application\\msedge.exe`,
+      `${WIN_PROGRAMFILES_X86}\\Microsoft\\Edge\\Application\\msedge.exe`,
     ],
     custom: [],
   },
 };
 
 
+/**
+ * On Debian/Ubuntu the canonical launchers under `/usr/bin`
+ * (`brave-browser`, `google-chrome`, `chromium`) are not the browser ELF —
+ * they're `#!/bin/bash` wrapper scripts (the upstream Chromium wrapper) that,
+ * as their final step, run the real binary as a NON-exec child:
+ *
+ *     exec < /dev/null
+ *     exec > >(exec cat)
+ *     exec 2> >(exec cat >&2)
+ *     "$HERE/brave" "$@" || true
+ *
+ * That breaks `launchBrowser`'s `--remote-debugging-pipe` transport two ways:
+ * the std-fd sanitization (and the extra `cat` process-substitution children)
+ * disturbs the inherited CDP pipe on fd 3/4, and the pid we record is the
+ * wrapper's, not the browser's. The symptom is `read ECONNRESET` /
+ * `CDP connection closed` right after spawn (issue #229).
+ *
+ * Follow the wrapper to the ELF it execs. The wrapper sets
+ * `HERE="dirname(readlink -f "$0")"` and invokes `"$HERE/<name>"`, so we
+ * resolve the script path, scan for that invocation line, and join the two.
+ * Returns the original path untouched when it's already an ELF, when it's not
+ * a resolvable wrapper, or on any non-Linux platform.
+ */
+function readsAsShebangScript(binaryPath: string): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(binaryPath, 'r');
+  } catch {
+    return false;
+  }
+  try {
+    const head = Buffer.alloc(2);
+    fs.readSync(fd, head, 0, 2, 0);
+    // ELF binaries start with 0x7f 'E'; shebang scripts with '#!'.
+    return head[0] === 0x23 && head[1] === 0x21;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * True when `binaryPath` is a shebang script rather than a native browser
+ * executable. The Linux distro launchers (`/usr/bin/brave-browser`, …) are such
+ * scripts; `launchBrowser` can't drive one over `--remote-debugging-pipe` (see
+ * resolveBrowserBinary). `profiles doctor` uses this to flag a profile whose
+ * binary resolves to a wrapper we couldn't unwrap. Shebang scripts are a
+ * Linux/Unix concept — returns false on Windows/macOS app bundles.
+ */
+export function isLauncherScript(binaryPath: string): boolean {
+  if (os.platform() === 'win32') return false;
+  return readsAsShebangScript(binaryPath);
+}
+
+export function resolveBrowserBinary(binaryPath: string): string {
+  if (os.platform() !== 'linux') return binaryPath;
+  // Only shebang scripts need unwrapping; a real ELF passes straight through.
+  if (!readsAsShebangScript(binaryPath)) return binaryPath;
+
+  let script: string;
+  let realScriptPath: string;
+  try {
+    realScriptPath = fs.realpathSync(binaryPath);
+    script = fs.readFileSync(realScriptPath, 'utf8');
+  } catch {
+    return binaryPath;
+  }
+  // Match the Chromium wrapper's launch line: `"$HERE/<name>" "$@"`, optionally
+  // prefixed with `exec -a "$0"`. The captured name is the real ELF, sitting in
+  // the same directory as the resolved wrapper.
+  const match = script.match(/"\$HERE\/([A-Za-z0-9._-]+)"\s+"\$@"/);
+  if (!match) return binaryPath;
+  const realBinary = path.join(path.dirname(realScriptPath), match[1]);
+  return fs.existsSync(realBinary) ? realBinary : binaryPath;
+}
+
 export function findBrowserPath(browserType: BrowserType, customBinary?: string): string {
   if (customBinary) {
     if (!fs.existsSync(customBinary)) {
       throw new Error(`Custom binary not found: ${customBinary}`);
     }
-    return customBinary;
+    return resolveBrowserBinary(customBinary);
   }
 
   if (browserType === 'custom') {
@@ -70,10 +159,13 @@ export function findBrowserPath(browserType: BrowserType, customBinary?: string)
   const candidates = platformPaths[browserType] || [];
   for (const p of candidates) {
     if (fs.existsSync(p)) {
-      return p;
+      return resolveBrowserBinary(p);
     }
   }
 
+  if (browserType === 'comet' && platform !== 'darwin') {
+    throw new Error('Browser "comet" is macOS-only (Comet is a macOS Chromium fork). Use chrome, chromium, brave, or edge on this platform.');
+  }
   throw new Error(`Browser "${browserType}" not found. Install it first.`);
 }
 
@@ -111,7 +203,7 @@ export function findFirstInstalledBrowser(
     const candidates = platformPaths[browserType] || [];
     for (const p of candidates) {
       if (fs.existsSync(p)) {
-        return { browserType, binary: p };
+        return { browserType, binary: resolveBrowserBinary(p) };
       }
     }
   }
@@ -268,14 +360,41 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Is a TCP port currently bound? `lsof` on POSIX, `netstat -ano` on Windows
+ * (lsof doesn't exist there). Returns false on any tooling error so port
+ * allocation degrades to "assume free" rather than throwing.
+ */
+function isPortInUse(port: number): boolean {
+  if (process.platform === 'win32') {
+    try {
+      const out = execFileSync('netstat', ['-ano', '-p', 'TCP'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      // Lines look like: "  TCP    0.0.0.0:9200    0.0.0.0:0    LISTENING    1234"
+      return out.split('\n').some((line) => {
+        const f = line.trim().split(/\s+/);
+        return f[0] === 'TCP' && f[3] === 'LISTENING' && !!f[1]?.endsWith(`:${port}`);
+      });
+    } catch {
+      return false;
+    }
+  }
+  try {
+    execFileSync('lsof', ['-i', `:${port}`], { stdio: 'ignore' });
+    return true; // lsof found a binding
+  } catch {
+    return false; // nothing on the port
+  }
+}
+
 export function allocatePort(): number {
   const base = 9200;
   const max = 9300;
 
   for (let port = base; port < max; port++) {
-    try {
-      execFileSync('lsof', ['-i', `:${port}`], { stdio: 'ignore' });
-    } catch {
+    if (!isPortInUse(port)) {
       return port;
     }
   }
@@ -289,11 +408,42 @@ export interface PortOccupant {
 }
 
 /**
- * Identify the process listening on a TCP port via lsof. Returns null when nothing is bound.
- * Used for clearer error messages when a profile's configured port is taken by a non-debug
- * process (e.g. Comet running without --remote-debugging-port).
+ * Identify the process listening on a TCP port. Returns null when nothing is bound.
+ * Used for clearer error messages when a profile's configured port is taken by a
+ * non-debug process (e.g. Comet running without --remote-debugging-port).
+ * `lsof` on POSIX; `netstat -ano` + `tasklist` on Windows.
  */
 export function getPortOccupant(port: number): PortOccupant | null {
+  if (process.platform === 'win32') {
+    try {
+      const out = execFileSync('netstat', ['-ano', '-p', 'TCP'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      let pid = 0;
+      for (const line of out.split('\n')) {
+        const f = line.trim().split(/\s+/);
+        if (f[0] === 'TCP' && f[3] === 'LISTENING' && f[1]?.endsWith(`:${port}`)) {
+          pid = parseInt(f[4], 10) || 0;
+          break;
+        }
+      }
+      if (!pid) return null;
+      let command = 'unknown';
+      try {
+        // tasklist CSV row: "image.exe","1234","Console","1","12,345 K"
+        const tl = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        const m = tl.match(/^"([^"]+)"/);
+        if (m) command = m[1];
+      } catch { /* keep 'unknown' */ }
+      return { pid, command };
+    } catch {
+      return null;
+    }
+  }
   try {
     const out = execFileSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fpcn'], {
       encoding: 'utf8',

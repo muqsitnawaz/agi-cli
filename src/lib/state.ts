@@ -1,22 +1,26 @@
 /**
  * Filesystem layout and persistent state for agents-cli.
  *
- * Two roots:
- *  - ~/.agents-system/ — system repo (npm-shipped resources, read-only defaults)
- *  - ~/.agents/        — user repo (resources + agents.yaml + operational state)
+ * Single root at ~/.agents/ with three internal buckets:
  *
- * Inside ~/.agents/, top-level paths hold ONLY resources + agents.yaml.
- * Operational state lives in two sibling buckets:
- *
- *  - ~/.agents/.history/ — durable runtime data (sessions, versions, runs,
+ *   ~/.agents/           — user repo: user-authored resources + agents.yaml
+ *                          (git-tracked via `agents repo push`).
+ *   ~/.agents/.system/   — system repo: npm-shipped resources, regenerable.
+ *                          Don't hand-edit; maintained by npm install /
+ *                          `agents repo pull system`.
+ *   ~/.agents/.history/  — durable runtime data (sessions, versions, runs,
  *                          teams/agents, trash, backups). Backed up by
  *                          `agents repo push`.
- *  - ~/.agents/.cache/   — regenerable runtime data (shims, packages, helpers
+ *   ~/.agents/.cache/    — regenerable runtime data (shims, packages, helpers
  *                          for daemon/pty, terminals, cloud, drive, browser
  *                          chrome-data, logs, companion). Gitignored.
  *
  * Resolution precedence for resources: project > user > system.
  * Every module that needs a path or reads/writes agents.yaml goes through here.
+ *
+ * Legacy layout (pre-fold): system repo lived at ~/.agents-system/ as a peer
+ * of ~/.agents/. runMigration() folds it into ~/.agents/.system/ on first run
+ * and leaves a back-compat symlink at the old path.
  */
 
 import * as fs from 'fs';
@@ -31,11 +35,18 @@ const HOME = process.env.HOME ?? os.homedir();
 
 // ─── Root directories ─────────────────────────────────────────────────────────
 
-/** System repo — npm-shipped, read-only from user commands. */
-const SYSTEM_AGENTS_DIR = path.join(HOME, '.agents-system');
-
 /** User repo — user-authored resources and agents.yaml. Always-on. */
 const USER_AGENTS_DIR = path.join(HOME, '.agents');
+
+/** System repo — npm-shipped, read-only from user commands. Lives inside the user repo. */
+const SYSTEM_AGENTS_DIR = path.join(USER_AGENTS_DIR, '.system');
+
+/**
+ * Legacy system-repo location (pre-fold). Exported so the migrator can fold
+ * it into SYSTEM_AGENTS_DIR. No runtime code outside the migrator should
+ * reference this — use SYSTEM_AGENTS_DIR.
+ */
+const LEGACY_SYSTEM_AGENTS_DIR = path.join(HOME, '.agents-system');
 
 // ─── Meta file (agents.yaml lives in the user repo) ──────────────────────────
 
@@ -53,6 +64,7 @@ const SYSTEM_MCP_DIR = path.join(SYSTEM_AGENTS_DIR, 'mcp');
 const SYSTEM_PERMISSIONS_DIR = path.join(SYSTEM_AGENTS_DIR, 'permissions');
 const SYSTEM_SUBAGENTS_DIR = path.join(SYSTEM_AGENTS_DIR, 'subagents');
 const SYSTEM_WORKFLOWS_DIR = path.join(SYSTEM_AGENTS_DIR, 'workflows');
+const SYSTEM_PLUGINS_DIR = path.join(SYSTEM_AGENTS_DIR, 'plugins');
 const SYSTEM_PROMPTCUTS_FILE = path.join(SYSTEM_AGENTS_DIR, 'hooks', 'promptcuts.yaml');
 const SYSTEM_MCP_CONFIG_FILE = path.join(SYSTEM_AGENTS_DIR, 'mcp.json');
 const SYSTEM_INSTRUCTIONS_FILE = path.join(SYSTEM_AGENTS_DIR, 'instructions.md');
@@ -97,6 +109,7 @@ const BROWSER_RUNTIME_DIR = path.join(CACHE_DIR, 'browser');
 const HELPERS_DIR = path.join(CACHE_DIR, 'helpers');
 const DAEMON_DIR = path.join(HELPERS_DIR, 'daemon');
 const PTY_DIR = path.join(HELPERS_DIR, 'pty');
+const TMUX_DIR = path.join(HELPERS_DIR, 'tmux');
 const FETCH_CACHE_DIR = path.join(CACHE_DIR, '.fetch');
 const CLI_VERSION_CACHE_FILE = path.join(CACHE_DIR, '.cli-version-cache.json');
 const MODELS_CACHE_FILE = path.join(CACHE_DIR, '.models-cache.json');
@@ -124,14 +137,19 @@ const META_HEADER = `# agents-cli metadata
 
 // ─── Root getters ─────────────────────────────────────────────────────────────
 
-/** Root of the system data directory (~/.agents-system/). */
+/** Root of the system data directory (~/.agents/.system/). */
 export function getAgentsDir(): string {
   return SYSTEM_AGENTS_DIR;
 }
 
-/** Root of the system data directory (~/.agents-system/). */
+/** Root of the system data directory (~/.agents/.system/). */
 export function getSystemAgentsDir(): string {
   return SYSTEM_AGENTS_DIR;
+}
+
+/** Legacy system-repo location (~/.agents-system/). Exported for migration only. */
+export function getLegacySystemAgentsDir(): string {
+  return LEGACY_SYSTEM_AGENTS_DIR;
 }
 
 /** Root of the user repo (~/.agents/). Always present after ensureAgentsDir(). */
@@ -219,7 +237,7 @@ export function getPermissionsDir(): string { return SYSTEM_PERMISSIONS_DIR; }
 /** Path to subagent definition directories — system repo. */
 export function getSubagentsDir(): string { return SYSTEM_SUBAGENTS_DIR; }
 
-/** Path to ~/.agents-system/hooks/promptcuts.yaml (system defaults). */
+/** Path to ~/.agents/.system/hooks/promptcuts.yaml (system defaults). */
 export function getPromptcutsPath(): string { return SYSTEM_PROMPTCUTS_FILE; }
 
 /**
@@ -306,6 +324,20 @@ export function getPackagesDir(): string { return PACKAGES_DIR; }
 /** Path to routine YAML definitions (~/.agents/routines/). */
 export function getRoutinesDir(): string { return ROUTINES_DIR; }
 
+/**
+ * Path to a project-scoped routines directory (`<project>/.agents/routines/`),
+ * or null when no project `.agents/` is found by walking up from cwd.
+ *
+ * Project routines participate in `list`/`view`/`run` for inspection but are
+ * NOT fired by the daemon (which runs from $HOME and only loads user routines).
+ * Opt-in firing for project routines is tracked as a follow-up.
+ */
+export function getProjectRoutinesDir(cwd: string = process.cwd()): string | null {
+  const projectAgentsDir = getProjectAgentsDir(cwd);
+  if (!projectAgentsDir) return null;
+  return path.join(projectAgentsDir, 'routines');
+}
+
 /** Path to routine execution logs (~/.agents/.history/runs/). */
 export function getRunsDir(): string { return RUNS_DIR; }
 
@@ -329,6 +361,21 @@ export function getBackupsDir(): string { return BACKUPS_DIR; }
 
 /** Path to plugin bundles (~/.agents/plugins/) — user-authored resource. */
 export function getPluginsDir(): string { return PLUGINS_DIR; }
+
+/** Path to system plugin bundles (~/.agents/.system/plugins/) — npm-shipped, read-only defaults. */
+export function getSystemPluginsDir(): string { return SYSTEM_PLUGINS_DIR; }
+
+/** Path to an extra repo's plugin bundles (~/.agents-<alias>/plugins/). */
+export function getExtraPluginsDir(alias: string): string {
+  return path.join(getExtraRepoDir(alias), 'plugins');
+}
+
+/** Path to a project-scoped plugins directory (<project>/.agents/plugins/), or null when none. */
+export function getProjectPluginsDir(cwd: string = process.cwd()): string | null {
+  const projectAgentsDir = getProjectAgentsDir(cwd);
+  if (!projectAgentsDir) return null;
+  return path.join(projectAgentsDir, 'plugins');
+}
 
 /** Path to synced remote session data (~/.agents/.cache/drive/). */
 export function getDriveDir(): string { return DRIVE_DIR; }
@@ -377,6 +424,9 @@ export function getDaemonDir(): string { return DAEMON_DIR; }
 
 /** Path to PTY server scratch (~/.agents/.cache/helpers/pty/). */
 export function getPtyDir(): string { return PTY_DIR; }
+
+/** Path to tmux scratch (~/.agents/.cache/helpers/tmux/) — shared server socket + per-session meta JSONs. */
+export function getTmuxDir(): string { return TMUX_DIR; }
 
 /** Path to remote-resource auto-pull cache (~/.agents/.cache/.fetch/). */
 export function getFetchCacheDir(): string { return FETCH_CACHE_DIR; }
@@ -755,6 +805,75 @@ export function ensureVersionResourcePatterns(
     }
   }
   if (changed) writeMeta(meta);
+}
+
+/**
+ * Resource types that resolve across the extra-repo layer. Mirrors
+ * `defaultPatterns()`: extras feed commands/skills/hooks/subagents/plugins/
+ * workflows, but never permissions (`system:*`) or mcp (`user:*`).
+ */
+const EXTRA_ELIGIBLE_TYPES: readonly (keyof VersionResources)[] = [
+  'commands', 'skills', 'hooks', 'subagents', 'plugins', 'workflows',
+];
+
+/**
+ * Insert `<alias>:*` at the canonical position (after the system/user/other-extra
+ * includes, before `project:*`), unless the alias is already referenced — as an
+ * include (`alias:...`) or an exclude (`!alias:...`). Returns a new array when it
+ * changes, otherwise the same reference (so callers can detect no-ops cheaply).
+ */
+export function withAlias(list: ResourcePattern[], alias: string): ResourcePattern[] {
+  const prefix = `${alias}:`;
+  if (list.some(p => p === `${alias}:*` || p.startsWith(prefix) || p.startsWith(`!${prefix}`))) {
+    return list;
+  }
+  const next = [...list];
+  const projIdx = next.findIndex(p => p === 'project:*' || p.startsWith('project:'));
+  if (projIdx >= 0) next.splice(projIdx, 0, `${alias}:*`);
+  else next.push(`${alias}:*`);
+  return next;
+}
+
+/** Strip every reference to `<alias>:...` / `!<alias>:...` from a selector list. */
+export function withoutAlias(list: ResourcePattern[], alias: string): ResourcePattern[] {
+  const prefix = `${alias}:`;
+  const next = list.filter(p => !(p.startsWith(prefix) || p.startsWith(`!${prefix}`)));
+  return next.length === list.length ? list : next;
+}
+
+/**
+ * Backfill (add=true) or strip (add=false) an extra-repo alias across every
+ * already-installed version's selectors. New versions get the alias via
+ * `defaultPatterns()` at scaffold time; this keeps existing versions in sync
+ * when an extra repo is registered/enabled or removed. Only touches selector
+ * lists that are already set — an unset list is left for `defaultPatterns()`.
+ * Returns the number of (agent, version) pairs changed.
+ */
+export function applyExtraAliasToVersions(alias: string, add: boolean): number {
+  const meta = readMeta();
+  if (!meta.versions) return 0;
+  let changed = false;
+  let count = 0;
+  for (const versions of Object.values(meta.versions)) {
+    if (!versions) continue;
+    for (const vr of Object.values(versions)) {
+      if (!vr) continue;
+      let touched = false;
+      for (const type of EXTRA_ELIGIBLE_TYPES) {
+        const cur = (vr as Record<string, ResourcePattern[] | undefined>)[type];
+        if (!Array.isArray(cur) || cur.length === 0) continue;
+        const next = add ? withAlias(cur, alias) : withoutAlias(cur, alias);
+        if (next !== cur) {
+          (vr as Record<string, ResourcePattern[]>)[type] = next;
+          touched = true;
+          changed = true;
+        }
+      }
+      if (touched) count++;
+    }
+  }
+  if (changed) writeMeta(meta);
+  return count;
 }
 
 export function getVersionResources(

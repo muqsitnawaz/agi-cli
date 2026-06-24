@@ -1,9 +1,10 @@
 import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
+import { IS_WINDOWS, ipcEndpoint } from '../platform/index.js';
 import { getHelpersDir } from '../state.js';
 import { BrowserService } from './service.js';
-import { startDaemon } from '../daemon.js';
+import { startDaemon, stopDaemon } from '../daemon.js';
 import { getCliVersion } from '../version.js';
 import type { IPCRequest, IPCResponse, RefNodeJson } from './types.js';
 
@@ -33,10 +34,39 @@ export function getSocketPath(): string {
   return path.join(getHelpersDir(), 'browser', SOCKET_NAME);
 }
 
+/**
+ * The address the daemon actually listens on / clients connect to: the unix
+ * socket file on POSIX, a `\\.\pipe\` named pipe on Windows. `getSocketPath`
+ * stays the canonical key (and the POSIX socket path); on Windows it's only used
+ * to derive a stable pipe name, never touched on disk.
+ */
+function getIpcEndpoint(): string {
+  return ipcEndpoint(getSocketPath());
+}
+
+/** Can we open a connection to the daemon right now? Used on Windows where a
+ * named pipe can't be probed with fs.existsSync. Resolves false on any error. */
+function probeDaemon(endpoint: string, timeoutMs = 500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = net.createConnection(endpoint);
+    let done = false;
+    const finish = (ok: boolean) => { if (done) return; done = true; sock.destroy(); resolve(ok); };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    sock.on('connect', () => { clearTimeout(timer); finish(true); });
+    sock.on('error', () => { clearTimeout(timer); finish(false); });
+  });
+}
+
+/** Is the daemon reachable? existsSync probe on POSIX, connect probe on Windows. */
+async function isDaemonReachable(): Promise<boolean> {
+  if (IS_WINDOWS) return probeDaemon(getIpcEndpoint());
+  return fs.existsSync(getSocketPath());
+}
+
 async function waitForSocket(socketPath: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (fs.existsSync(socketPath)) return;
+    if (IS_WINDOWS ? await probeDaemon(getIpcEndpoint()) : fs.existsSync(socketPath)) return;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error('Timeout waiting for browser daemon socket');
@@ -52,12 +82,17 @@ export class BrowserIPCServer {
 
   async start(): Promise<void> {
     const socketPath = getSocketPath();
+    const endpoint = getIpcEndpoint();
     const socketDir = path.dirname(socketPath);
     fs.mkdirSync(socketDir, { recursive: true, mode: 0o700 });
-    fs.chmodSync(socketDir, 0o700);
 
-    if (fs.existsSync(socketPath)) {
-      fs.unlinkSync(socketPath);
+    if (!IS_WINDOWS) {
+      fs.chmodSync(socketDir, 0o700);
+      // Remove a stale unix socket from a prior crash. (Named pipes are not
+      // filesystem objects and vanish with their owning process.)
+      if (fs.existsSync(socketPath)) {
+        fs.unlinkSync(socketPath);
+      }
     }
 
     this.server = net.createServer((socket) => {
@@ -88,6 +123,13 @@ export class BrowserIPCServer {
     });
 
     return new Promise((resolve, reject) => {
+      if (IS_WINDOWS) {
+        // Windows named pipe: no umask/chmod — filesystem perms don't apply and
+        // pipe ACLs default to the creating user.
+        this.server!.listen(endpoint, () => resolve());
+        this.server!.on('error', (err) => reject(err));
+        return;
+      }
       // Lock down the browser socket dir before opening the socket; on macOS
       // the parent dir is the real local-user boundary for AF_UNIX sockets.
       const prevUmask = process.umask(0o077);
@@ -120,9 +162,11 @@ export class BrowserIPCServer {
       this.server = null;
     }
 
-    const socketPath = getSocketPath();
-    if (fs.existsSync(socketPath)) {
-      fs.unlinkSync(socketPath);
+    if (!IS_WINDOWS) {
+      const socketPath = getSocketPath();
+      if (fs.existsSync(socketPath)) {
+        fs.unlinkSync(socketPath);
+      }
     }
 
     await this.service.shutdown();
@@ -478,45 +522,61 @@ export class BrowserIPCServer {
   }
 }
 
-let versionCheckedThisProcess = false;
+let versionReconciledThisProcess = false;
 
 /**
- * Check the daemon's version against ours and warn loudly when they
- * differ. Fires at most once per CLI process — successive calls in the
- * same `agents browser ...` invocation are cheap. The whole reason this
- * code exists: a launchd-managed registry daemon kept serving stale code
- * to a dev-build CLI for an entire session and nothing surfaced it.
+ * Decide whether a running daemon is stale and must be restarted. A daemon
+ * is stale when it reports a concrete version that differs from this CLI's.
+ * `undefined`/`'unknown'` means the daemon is too old to answer the `version`
+ * action reliably — don't churn it on that ambiguous signal.
  */
-async function maybeWarnVersionMismatch(): Promise<void> {
-  if (versionCheckedThisProcess) return;
-  versionCheckedThisProcess = true;
+export function shouldRestartStaleDaemon(
+  daemonVersion: string | undefined,
+  clientVersion: string
+): boolean {
+  if (!daemonVersion || daemonVersion === 'unknown') return false;
+  return daemonVersion !== clientVersion;
+}
+
+/**
+ * Reconcile the running daemon's version with ours. If the daemon is serving
+ * stale code, stop and restart it so this request — and the rest of the
+ * session — runs the current build. Runs at most once per CLI process. The
+ * whole reason this exists: a launchd-managed daemon kept serving stale code
+ * to a dev-build CLI for an entire session and nothing surfaced it (#291).
+ */
+async function reconcileDaemonVersion(socketPath: string): Promise<void> {
+  if (versionReconciledThisProcess) return;
+  versionReconciledThisProcess = true;
+
+  let daemon: string | undefined;
   try {
-    const resp = await sendRawIPCRequest({ action: 'version' });
-    const daemon = resp.version;
-    const client = getCliVersion();
-    if (!daemon || daemon === 'unknown' || daemon === client) return;
-    process.stderr.write(
-      `\nwarning: browser daemon is on ${daemon} but this CLI is on ${client}.\n` +
-        `         Run \`agents daemon restart\` to load the current code.\n\n`
-    );
+    const resp = await sendRawIPCRequest({ action: 'version' }, { autoStartDaemon: false });
+    daemon = resp.version;
   } catch {
-    // daemon might be an older build that doesn't speak 'version' — that's
-    // itself a hint, but a noisy one. Stay silent on this path.
+    // Daemon unreachable or too old to speak 'version' — leave it alone.
+    return;
   }
+
+  const client = getCliVersion();
+  if (!shouldRestartStaleDaemon(daemon, client)) return;
+
+  process.stderr.write(
+    `\nbrowser daemon was on ${daemon}, this CLI is on ${client} — restarting it to load current code.\n\n`
+  );
+  stopDaemon();
+  startDaemon();
+  if (!(await isDaemonReachable())) {
+    await waitForSocket(socketPath, 6000);
+  }
+  await new Promise((r) => setTimeout(r, 300));
 }
 
 export async function sendIPCRequest(
   request: IPCRequest,
   opts: IPCRequestOptions = {}
 ): Promise<IPCResponse> {
-  const result = await sendRawIPCRequest(request, opts);
-  // Run the version check after the user's request returns — keeps the
-  // critical path zero-overhead and ensures `start` doesn't get blocked
-  // on a daemon-restart warning that the user hasn't read yet.
-  if (request.action !== 'version') {
-    maybeWarnVersionMismatch().catch(() => {});
-  }
-  return result;
+  return sendRawIPCRequest(request, opts);
 }
 
 async function sendRawIPCRequest(
@@ -524,26 +584,36 @@ async function sendRawIPCRequest(
   opts: IPCRequestOptions = {}
 ): Promise<IPCResponse> {
   const socketPath = getSocketPath();
+  const endpoint = getIpcEndpoint();
   const autoStartDaemon = opts.autoStartDaemon ?? true;
 
-  if (!fs.existsSync(socketPath)) {
+  if (!(await isDaemonReachable())) {
     if (!autoStartDaemon) {
       throw new BrowserDaemonNotRunningError();
     }
-    await fs.promises.mkdir(path.dirname(socketPath), { recursive: true, mode: 0o700 });
-    await fs.promises.chmod(path.dirname(socketPath), 0o700);
+    if (!IS_WINDOWS) {
+      await fs.promises.mkdir(path.dirname(socketPath), { recursive: true, mode: 0o700 });
+      await fs.promises.chmod(path.dirname(socketPath), 0o700);
+    }
     startDaemon();
-    if (!fs.existsSync(socketPath)) {
+    if (!(await isDaemonReachable())) {
       await waitForSocket(socketPath, 6000);
     }
-    if (!fs.existsSync(socketPath)) {
+    if (!(await isDaemonReachable())) {
       throw new Error('Failed to start browser daemon');
     }
     await new Promise((r) => setTimeout(r, 300));
   }
 
+  // Before serving a real request, make sure the daemon isn't running stale
+  // code. Skips the internal `version` probe (avoids recursion) and callers
+  // that opt out of auto-start. No-ops once reconciled or when versions match.
+  if (request.action !== 'version' && autoStartDaemon) {
+    await reconcileDaemonVersion(socketPath);
+  }
+
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath);
+    const socket = net.createConnection(endpoint);
     let buffer = '';
 
     socket.on('connect', () => {

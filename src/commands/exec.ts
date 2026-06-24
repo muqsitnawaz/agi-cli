@@ -10,6 +10,7 @@ import type { Command } from 'commander';
 import chalk from 'chalk';
 import type { ExecOptions, ExecMode, ExecEffort, FallbackEntry } from '../lib/exec.js';
 import type { AgentId } from '../lib/types.js';
+import type { ResolvedRunDefaults } from '../lib/run-defaults.js';
 import { setHelpSections } from '../lib/help.js';
 import type { RotateResult } from '../lib/rotate.js';
 import { AGENTS } from '../lib/agents.js';
@@ -84,8 +85,8 @@ export function registerRunCommand(program: Command): void {
     )
     .option('--json', 'Stream events as JSON lines (for parsing by other tools)')
     .option('--quiet', 'Suppress preamble (rotation banner, "Running:" line). Useful when piping JSON events to a parser.', false)
-    .option('--headless', 'Non-interactive mode (auto-enabled when prompt provided)', false)
-    .option('-i, --interactive', 'Force interactive mode even when a prompt is provided')
+    .option('--headless', 'Force headless mode. Auto-enabled when a prompt is provided; pass explicitly to stay headless with no prompt (reads the prompt from stdin).', false)
+    .option('-i, --interactive', 'Force interactive mode even when a prompt is provided. Mutually exclusive with --headless.')
     .option('--session-id <id>', 'Resume a previous conversation (Claude only)')
     .option('--verbose', 'Show detailed execution logs')
     .option('--timeout <duration>', 'Kill the agent after this duration (e.g., 30m, 1h, 2h30m)')
@@ -148,14 +149,15 @@ export function registerRunCommand(program: Command): void {
 
   runCmd.action(async (agentSpec: string, prompt: string | undefined, options: ExecCommandActionOptions) => {
       const [
-        { buildExecCommand, parseExecEnv, execAgent, runWithFallback, normalizeMode, resolveMode },
+        { buildExecCommand, parseExecEnv, execAgent, runWithFallback, normalizeMode, resolveMode, defaultModeFor, headlessPlanStallCommand },
         { ALL_AGENT_IDS },
         { profileExists, resolveProfileForRun },
         { readAndResolveBundleEnv, describeBundle },
         { getConfiguredRunStrategy, normalizeRunStrategy, resolveRunVersion, RUN_STRATEGIES },
-        { getGlobalDefault, getVersionHomePath, resolveVersionAlias },
+        { getGlobalDefault, getVersionHomePath, resolveVersion, resolveVersionAlias },
         { buildDiscoveredPlugin, loadPluginManifest, syncPluginToVersion },
         { parseWorkflowFrontmatter, resolveWorkflowRef },
+        { resolveRunDefaults },
       ] = await Promise.all([
         import('../lib/exec.js'),
         import('../lib/agents.js'),
@@ -165,6 +167,7 @@ export function registerRunCommand(program: Command): void {
         import('../lib/versions.js'),
         import('../lib/plugins.js'),
         import('../lib/workflows.js'),
+        import('../lib/run-defaults.js'),
       ]);
       const isValidAgent = (agent: string): agent is AgentId => ALL_AGENT_IDS.includes(agent as AgentId);
 
@@ -174,6 +177,7 @@ export function registerRunCommand(program: Command): void {
       let version: string | undefined = rawVersion || undefined;
       let profileEnv: Record<string, string> | undefined;
       let fromProfile = false;
+      let workflowModel: string | undefined;
       const cwd = options.cwd ?? process.cwd();
 
       if (isValidAgent(rawAgent)) {
@@ -202,6 +206,10 @@ export function registerRunCommand(program: Command): void {
         //   subagents/*.md     ← flat .md files copied to ~/.claude/agents/ for Agent tool discovery
         const workflowDir = resolveWorkflowRef(rawAgent, cwd)!;
         agent = 'claude';
+        const workflowFrontmatter = parseWorkflowFrontmatter(workflowDir);
+        if (typeof workflowFrontmatter?.model === 'string' && workflowFrontmatter.model.trim() !== '') {
+          workflowModel = workflowFrontmatter.model.trim();
+        }
 
         const resolvedVersion = resolveVersionAlias('claude', version);
         const versionHome = getVersionHomePath('claude', resolvedVersion ?? getGlobalDefault('claude') ?? '');
@@ -255,8 +263,7 @@ export function registerRunCommand(program: Command): void {
         // Auto-inject secrets bundles declared in the workflow's frontmatter `secrets:` field.
         // Union with any --secrets flags the user passed; dedupe. Skip when --no-auto-secrets is set.
         if (!options.noAutoSecrets) {
-          const fm = parseWorkflowFrontmatter(workflowDir);
-          const declared = fm?.secrets ?? [];
+          const declared = workflowFrontmatter?.secrets ?? [];
           if (declared.length > 0) {
             const existing = new Set(options.secrets);
             const added: string[] = [];
@@ -278,10 +285,19 @@ export function registerRunCommand(program: Command): void {
           : 0;
         process.stderr.write(chalk.gray(`Workflow '${rawAgent}' → claude (${subagentCount} subagents)\n`));
       } else {
-        console.error(chalk.red(`Unknown agent: ${rawAgent}`));
-        console.error(chalk.gray(`Available agents: ${ALL_AGENT_IDS.join(', ')}`));
-        console.error(chalk.gray(`Or add a profile: agents profiles add <name>`));
-        process.exit(1);
+        // Smart pick: auto-correct a single typo (insertion/deletion/substitution/transposition)
+        // against the known agent ids before giving up. Example: `cladue` -> `claude`, `grk` -> `grok`.
+        const { fuzzyMatch, FUZZY_PRESETS } = await import('../lib/fuzzy.js');
+        const suggested = fuzzyMatch(rawAgent, ALL_AGENT_IDS, FUZZY_PRESETS.agents);
+        if (suggested && isValidAgent(suggested)) {
+          process.stderr.write(chalk.gray(`Resolved '${rawAgent}' -> '${suggested}' (single-edit match)\n`));
+          agent = suggested;
+        } else {
+          console.error(chalk.red(`Unknown agent: ${rawAgent}`));
+          console.error(chalk.gray(`Available agents: ${ALL_AGENT_IDS.join(', ')}`));
+          console.error(chalk.gray(`Or add a profile: agents profiles add <name>`));
+          process.exit(1);
+        }
       }
 
       version = resolveVersionAlias(agent, version);
@@ -327,21 +343,67 @@ export function registerRunCommand(program: Command): void {
         }
       }
 
+      const defaultVersion = version ?? resolveVersion(agent, cwd);
+      const runDefaults: ResolvedRunDefaults = fromProfile
+        ? { sources: {} }
+        : resolveRunDefaults(agent, defaultVersion, cwd);
+
       // Accept the four canonical modes plus 'full' as a permanent silent
       // alias for 'skip' (rewritten downstream by normalizeMode in exec.ts).
-      const mode = options.mode as ExecMode;
+      let mode = options.mode as ExecMode;
+      const modeSource = runCmd.getOptionValueSource('mode');
+      const modeFromRunDefault = modeSource === 'default' && !!runDefaults.mode;
+      if (modeFromRunDefault) {
+        mode = runDefaults.mode as ExecMode;
+      }
       if (!['plan', 'edit', 'auto', 'skip', 'full'].includes(mode)) {
         console.error(chalk.red(`Invalid mode: ${mode}. Use plan, edit, auto, or skip ('full' accepted as alias for skip).`));
         process.exit(1);
       }
 
-      // Surface capability errors as a clean CLI message instead of a stack
-      // trace from buildExecCommand. resolveMode degrades 'auto' silently and
-      // throws on unsupported 'plan'/'skip' — we catch and pretty-print.
+      // When the user did not pass --mode explicitly, the default is the
+      // generic 'plan'. Some agents (antigravity: edit/skip only, grok in some
+      // configurations) do not support plan. For implicit defaults, degrade
+      // silently to the agent's first listed mode rather than throwing — the
+      // user did not ask for read-only, they asked for "just run it." An
+      // explicit --mode plan still throws (see resolveMode), because silently
+      // elevating an explicit read-only request to edit is unsafe.
+      const modeIsDefault = modeSource === 'default';
       try {
         resolveMode(agent, normalizeMode(mode));
       } catch (err) {
-        console.error(chalk.red((err as Error).message));
+        if (modeIsDefault && !modeFromRunDefault) {
+          mode = defaultModeFor(agent) as ExecMode;
+          if (!options.quiet) {
+            process.stderr.write(chalk.gray(`[agents] ${agent} has no '${options.mode}' mode; using '${mode}'\n`));
+          }
+        } else {
+          console.error(chalk.red((err as Error).message));
+          process.exit(1);
+        }
+      }
+
+      // Fail fast on the headless-plan stall footgun: a slash command run
+      // headless under the implicit default 'plan' mode hangs forever at
+      // ExitPlanMode (no TTY to approve the plan). Tell the user how to fix it
+      // instead of leaving them staring at a frozen process. Explicit
+      // `--mode plan` is respected for genuine read-only command runs.
+      const stallCmd = headlessPlanStallCommand({
+        prompt,
+        interactive: options.interactive,
+        mode,
+        modeIsDefault,
+      });
+      if (stallCmd) {
+        console.error(
+          chalk.red(`Refusing to run ${stallCmd} headless in read-only 'plan' mode — it would hang at ExitPlanMode (no TTY to approve the plan).`)
+        );
+        console.error(
+          chalk.yellow(`Re-run with an explicit mode: --mode auto (recommended — auto-approves safe ops, blocks risky ones), --mode edit, or --mode full.`)
+        );
+        console.error(
+          chalk.gray(`Pass --mode plan explicitly if you really want a read-only run.`)
+        );
         process.exit(1);
       }
 
@@ -388,6 +450,12 @@ export function registerRunCommand(program: Command): void {
         ? { ...(profileEnv ?? {}), ...secretsEnv, ...(userEnv ?? {}) }
         : undefined;
 
+      const modelSource = runCmd.getOptionValueSource('model');
+      const model = options.model
+        ?? (!fromProfile && modelSource === undefined
+          ? (workflowModel ?? (options.fallback ? undefined : runDefaults.model))
+          : undefined);
+
       const execOptions: ExecOptions = {
         agent,
         version,
@@ -396,15 +464,20 @@ export function registerRunCommand(program: Command): void {
         mode,
         effort,
         cwd: options.cwd,
-        model: options.model,
+        model,
         addDirs: options.addDir,
         json: options.json,
-        headless: options.headless ?? true,
+        headless: options.headless,
         sessionId: options.sessionId,
         verbose: options.verbose,
         timeout: options.timeout,
         env,
       };
+
+      if (options.interactive && options.headless) {
+        console.error(chalk.red('--interactive and --headless are mutually exclusive. Pass one, or neither (mode is inferred from prompt presence).'));
+        process.exit(1);
+      }
 
       if (options.interactive) {
         if (options.fallback) {
@@ -424,12 +497,22 @@ export function registerRunCommand(program: Command): void {
           process.exit(1);
         }
         const entries = options.fallback.split(',').map(s => s.trim()).filter(Boolean);
+        const { fuzzyMatch: fuzzyFb, FUZZY_PRESETS: PRESETS_FB } = await import('../lib/fuzzy.js');
         for (const entry of entries) {
-          const [fbAgent, fbVersion] = entry.split('@');
-          if (!isValidAgent(fbAgent)) {
-            console.error(chalk.red(`Unknown fallback agent: ${fbAgent}`));
-            console.error(chalk.gray(`Available: ${ALL_AGENT_IDS.join(', ')}`));
-            process.exit(1);
+          const [rawFbAgent, fbVersion] = entry.split('@');
+          let fbAgent: AgentId;
+          if (isValidAgent(rawFbAgent)) {
+            fbAgent = rawFbAgent;
+          } else {
+            const suggested = fuzzyFb(rawFbAgent, ALL_AGENT_IDS, PRESETS_FB.agents);
+            if (suggested && isValidAgent(suggested)) {
+              process.stderr.write(chalk.gray(`Resolved fallback '${rawFbAgent}' -> '${suggested}' (single-edit match)\n`));
+              fbAgent = suggested;
+            } else {
+              console.error(chalk.red(`Unknown fallback agent: ${rawFbAgent}`));
+              console.error(chalk.gray(`Available: ${ALL_AGENT_IDS.join(', ')}`));
+              process.exit(1);
+            }
           }
           if (fbAgent === agent) {
             console.error(chalk.red(`Fallback cannot include the primary agent (${agent}). Rate-limit fallback only helps when switching providers.`));

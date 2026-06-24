@@ -16,6 +16,7 @@ import { select, checkbox } from '@inquirer/prompts';
 
 import {
   AGENTS,
+  agentConfigDirName,
   ALL_AGENT_IDS,
   resolveAgentName,
   formatAgentError,
@@ -507,7 +508,7 @@ Examples:
           return;
         }
         const home = getVersionHomePath(agentId, requestedVersion);
-        const filePath = path.join(home, `.${agentId}`, AGENTS[agentId].instructionsFile);
+        const filePath = path.join(home, agentConfigDirName(agentId), AGENTS[agentId].instructionsFile);
         if (!fs.existsSync(filePath)) {
           console.log(chalk.yellow(`No user rules found for ${agentLabel(agentId)}@${requestedVersion}`));
           return;
@@ -574,7 +575,7 @@ Examples:
         }
         const home = getVersionHomePath(agentId, requestedVersion);
         const agent = AGENTS[agentId];
-        const filePath = path.join(home, `.${agentId}`, agent.instructionsFile);
+        const filePath = path.join(home, agentConfigDirName(agentId), agent.instructionsFile);
 
         if (fs.existsSync(filePath)) {
           fs.unlinkSync(filePath);
@@ -643,7 +644,7 @@ Examples:
         }
         const presets = Array.from(presetSet).sort();
         if (presets.length === 0) {
-          console.log(chalk.red('No presets found. Define presets in ~/.agents-system/rules/rules.yaml or ~/.agents/rules/rules.yaml.'));
+          console.log(chalk.red('No presets found. Define presets in ~/.agents/.system/rules/rules.yaml or ~/.agents/rules/rules.yaml.'));
           process.exit(1);
         }
 

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildExecCommand,
+  resolveInteractive,
   buildExecEnv,
   buildFallbackPrompt,
   detectRateLimit,
@@ -8,6 +9,8 @@ import {
   parseExecEnv,
   normalizeMode,
   resolveMode,
+  defaultModeFor,
+  headlessPlanStallCommand,
   type ExecOptions,
 } from '../exec.js';
 import type { AgentId, Mode } from '../types.js';
@@ -62,18 +65,18 @@ describe('buildExecCommand', () => {
       const cmd = buildExecCommand(opts({ agent: 'codex', mode: 'plan' }));
       expect(cmd).toContain('--sandbox');
       expect(cmd[cmd.indexOf('--sandbox') + 1]).toBe('workspace-write');
-      expect(cmd).not.toContain('--full-auto');
+      expect(cmd).not.toContain('--dangerously-bypass-approvals-and-sandbox');
     });
 
-    it('codex edit produces --sandbox workspace-write --full-auto', () => {
+    it('codex edit produces --sandbox workspace-write --dangerously-bypass-approvals-and-sandbox', () => {
       const cmd = buildExecCommand(opts({ agent: 'codex', mode: 'edit' }));
       expect(cmd).toContain('--sandbox');
-      expect(cmd).toContain('--full-auto');
+      expect(cmd).toContain('--dangerously-bypass-approvals-and-sandbox');
     });
 
-    it('codex skip produces --full-auto without --sandbox', () => {
+    it('codex skip produces --dangerously-bypass-approvals-and-sandbox without --sandbox', () => {
       const cmd = buildExecCommand(opts({ agent: 'codex', mode: 'skip' }));
-      expect(cmd).toContain('--full-auto');
+      expect(cmd).toContain('--dangerously-bypass-approvals-and-sandbox');
       expect(cmd).not.toContain('--sandbox');
     });
 
@@ -179,6 +182,34 @@ describe('buildExecCommand', () => {
       expect(cmd).toContain('--always-approve');
     });
 
+    it('kimi plan produces --plan', () => {
+      const cmd = buildExecCommand(opts({ agent: 'kimi', mode: 'plan' }));
+      expect(cmd).toContain('--plan');
+    });
+
+    it('kimi auto produces --auto', () => {
+      const cmd = buildExecCommand(opts({ agent: 'kimi', mode: 'auto' }));
+      expect(cmd).toContain('--auto');
+    });
+
+    it('kimi skip produces --yolo', () => {
+      const cmd = buildExecCommand(opts({ agent: 'kimi', mode: 'skip' }));
+      expect(cmd).toContain('--yolo');
+    });
+
+    it('kimi edit produces no mode flags', () => {
+      const cmd = buildExecCommand(opts({ agent: 'kimi', mode: 'edit' }));
+      expect(cmd).not.toContain('--plan');
+      expect(cmd).not.toContain('--auto');
+      expect(cmd).not.toContain('--yolo');
+    });
+
+    it('kimi json adds --output-format stream-json', () => {
+      const cmd = buildExecCommand(opts({ agent: 'kimi', prompt: 'do the thing', mode: 'edit', json: true }));
+      expect(cmd).toContain('--output-format');
+      expect(cmd[cmd.indexOf('--output-format') + 1]).toBe('stream-json');
+    });
+
     it('copilot uses -p (not positional) for the prompt', () => {
       const cmd = buildExecCommand(opts({ agent: 'copilot', prompt: 'do the thing', mode: 'edit' }));
       const idx = cmd.indexOf('-p');
@@ -249,14 +280,89 @@ describe('buildExecCommand', () => {
       expect(cmd).toContain('fix auth');
     });
 
-    it('no prompt behaves as interactive by default (no --print)', () => {
-      const cmd = buildExecCommand(opts({ agent: 'claude', prompt: undefined, headless: true }));
+    it('no prompt and no flag behaves as interactive by default (no --print)', () => {
+      const cmd = buildExecCommand(opts({ agent: 'claude', prompt: undefined }));
       expect(cmd).not.toContain('--print');
     });
 
     it('prompt without interactive behaves as headless (adds --print)', () => {
       const cmd = buildExecCommand(opts({ agent: 'claude', prompt: 'fix auth', headless: true }));
       expect(cmd).toContain('--print');
+    });
+
+    it('--headless with no prompt forces headless (adds --print, reads stdin)', () => {
+      const cmd = buildExecCommand(opts({ agent: 'claude', prompt: undefined, headless: true }));
+      expect(cmd).toContain('--print');
+    });
+
+    it('--headless with no prompt keeps codex in headless exec subcommand', () => {
+      const cmd = buildExecCommand(opts({ agent: 'codex', mode: 'edit', prompt: undefined, headless: true }));
+      expect(cmd.slice(0, 2)).toEqual(['codex', 'exec']);
+    });
+
+    it('no flag and no prompt drops the codex exec subcommand (interactive TUI)', () => {
+      const cmd = buildExecCommand(opts({ agent: 'codex', mode: 'edit', prompt: undefined }));
+      expect(cmd[0]).toBe('codex');
+      expect(cmd).not.toContain('exec');
+    });
+
+    it('no flag and no prompt drops the opencode run subcommand (interactive TUI)', () => {
+      const cmd = buildExecCommand(opts({ agent: 'opencode', prompt: undefined }));
+      expect(cmd[0]).toBe('opencode');
+      expect(cmd).not.toContain('run');
+    });
+
+    it('--headless with no prompt keeps opencode in headless run subcommand', () => {
+      const cmd = buildExecCommand(opts({ agent: 'opencode', prompt: undefined, headless: true }));
+      expect(cmd.slice(0, 2)).toEqual(['opencode', 'run']);
+    });
+
+    it('prompt without flags keeps opencode headless with the prompt as a positional', () => {
+      const cmd = buildExecCommand(opts({ agent: 'opencode', prompt: 'fix auth' }));
+      expect(cmd.slice(0, 2)).toEqual(['opencode', 'run']);
+      expect(cmd[cmd.length - 1]).toBe('fix auth');
+      expect(cmd).not.toContain('--prompt');
+    });
+
+    it('--interactive with a prompt launches the opencode TUI and forwards via --prompt', () => {
+      const cmd = buildExecCommand(opts({ agent: 'opencode', prompt: 'fix auth', interactive: true }));
+      expect(cmd[0]).toBe('opencode');
+      expect(cmd).not.toContain('run');
+      const flagIdx = cmd.indexOf('--prompt');
+      expect(flagIdx).toBeGreaterThan(-1);
+      expect(cmd[flagIdx + 1]).toBe('fix auth');
+    });
+  });
+
+  // --- resolveInteractive precedence ---
+
+  describe('resolveInteractive precedence', () => {
+    it('no flags + no prompt -> interactive', () => {
+      expect(resolveInteractive({ prompt: undefined })).toBe(true);
+    });
+
+    it('no flags + prompt -> headless', () => {
+      expect(resolveInteractive({ prompt: 'do x' })).toBe(false);
+    });
+
+    it('--headless + no prompt -> headless (definitive)', () => {
+      expect(resolveInteractive({ prompt: undefined, headless: true })).toBe(false);
+    });
+
+    it('--headless + prompt -> headless', () => {
+      expect(resolveInteractive({ prompt: 'do x', headless: true })).toBe(false);
+    });
+
+    it('--interactive + no prompt -> interactive', () => {
+      expect(resolveInteractive({ prompt: undefined, interactive: true })).toBe(true);
+    });
+
+    it('--interactive + prompt -> interactive (definitive)', () => {
+      expect(resolveInteractive({ prompt: 'do x', interactive: true })).toBe(true);
+    });
+
+    it('--interactive wins over --headless at the resolver level', () => {
+      expect(resolveInteractive({ prompt: 'do x', interactive: true, headless: true })).toBe(true);
     });
   });
 
@@ -507,6 +613,23 @@ describe('buildExecCommand', () => {
         delete process.env.COPILOT_HOME;
       }
     });
+
+    it('injects KIMI_CODE_HOME for pinned Kimi versions', () => {
+      const env = buildExecEnv(opts({ agent: 'kimi', version: '0.11.0' }));
+      expect(env.KIMI_CODE_HOME).toBe(
+        `${process.env.HOME}/.agents/.history/versions/kimi/0.11.0/home/.kimi-code`
+      );
+    });
+
+    it('strips KIMI_CODE_HOME for non-Kimi agents', () => {
+      process.env.KIMI_CODE_HOME = '/tmp/leaked-kimi-home';
+      try {
+        const env = buildExecEnv(opts({ agent: 'claude', version: '2.1.98' }));
+        expect(env.KIMI_CODE_HOME).toBeUndefined();
+      } finally {
+        delete process.env.KIMI_CODE_HOME;
+      }
+    });
   });
 
   // --- Version pinning ---
@@ -526,6 +649,26 @@ describe('buildExecCommand', () => {
       const cmd = buildExecCommand(opts({ agent: 'codex', version: '0.98.0', mode: 'skip' }));
       expect(cmd[0]).toBe('codex@0.98.0');
       expect(cmd[1]).toBe('exec');
+    });
+
+    it('resolves to absolute shim path when the shim exists on disk (closes #196)', async () => {
+      // Linux installs without ~/.agents/.cache/shims on PATH would otherwise
+      // spawn the bare versioned name and fail with ENOENT.
+      const fs = await import('fs');
+      const path = await import('path');
+      const { getShimsDir } = await import('../state.js');
+      const shimsDir = getShimsDir();
+      fs.mkdirSync(shimsDir, { recursive: true });
+      const fakeShim = path.join(shimsDir, 'claude@9.9.9-test');
+      const preexisted = fs.existsSync(fakeShim);
+      if (!preexisted) fs.writeFileSync(fakeShim, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      try {
+        const cmd = buildExecCommand(opts({ agent: 'claude', version: '9.9.9-test', mode: 'skip' }));
+        expect(cmd[0]).toBe(fakeShim);
+        expect(path.isAbsolute(cmd[0])).toBe(true);
+      } finally {
+        if (!preexisted) fs.rmSync(fakeShim, { force: true });
+      }
     });
   });
 
@@ -559,7 +702,7 @@ describe('buildExecCommand', () => {
       }));
       expect(cmd).toEqual([
         'codex', 'exec',
-        '--full-auto',
+        '--dangerously-bypass-approvals-and-sandbox',
         'fix the bug',
       ]);
     });
@@ -590,7 +733,7 @@ describe('buildExecCommand', () => {
         'codex',
         '-c', 'model_reasoning_effort=medium',
         'exec',
-        '--full-auto',
+        '--dangerously-bypass-approvals-and-sandbox',
         'fix the bug',
       ]);
     });
@@ -705,5 +848,76 @@ describe('resolveMode', () => {
   it("throws on 'skip' for kiro (edit-only agent)", () => {
     expect(() => resolveMode('kiro', 'skip'))
       .toThrow(/kiro does not support 'skip' mode\. Supported modes: edit\./);
+  });
+});
+
+describe('defaultModeFor', () => {
+  it('returns the first listed mode for each agent', () => {
+    // Antigravity: ['edit', 'skip'] — no plan, so default must be edit.
+    expect(defaultModeFor('antigravity')).toBe('edit');
+    // Cursor: ['edit', 'skip'] — same.
+    expect(defaultModeFor('cursor')).toBe('edit');
+    // Claude: ['plan', 'edit', 'auto', 'skip'] — plan is safest.
+    expect(defaultModeFor('claude')).toBe('plan');
+    // Kiro: edit-only.
+    expect(defaultModeFor('kiro')).toBe('edit');
+  });
+
+  it('agrees with capabilities.modes[0] for every agent (single source of truth)', () => {
+    for (const agent of ALL_AGENTS) {
+      expect(defaultModeFor(agent)).toBe(AGENTS[agent].capabilities.modes[0]);
+    }
+  });
+});
+
+describe('headlessPlanStallCommand', () => {
+  // The footgun: `ag run claude "/code:commit"` with no --mode defaults to
+  // read-only plan, then hangs forever at ExitPlanMode in a headless run.
+  it('blocks a slash command run headless under implicit-default plan', () => {
+    expect(
+      headlessPlanStallCommand({ prompt: '/code:commit', interactive: undefined, mode: 'plan', modeIsDefault: true })
+    ).toBe('/code:commit');
+  });
+
+  it('returns the bare command token, dropping arguments', () => {
+    expect(
+      headlessPlanStallCommand({ prompt: '/code:loop RUSH-1 RUSH-2', interactive: undefined, mode: 'plan', modeIsDefault: true })
+    ).toBe('/code:loop');
+  });
+
+  it('does not block an EXPLICIT --mode plan (modeIsDefault false) — read-only command runs are valid', () => {
+    expect(
+      headlessPlanStallCommand({ prompt: '/code-review', interactive: undefined, mode: 'plan', modeIsDefault: false })
+    ).toBeNull();
+  });
+
+  it('does not block a natural-language prompt under default plan (valid research run)', () => {
+    expect(
+      headlessPlanStallCommand({ prompt: 'summarize recent git commits', interactive: undefined, mode: 'plan', modeIsDefault: true })
+    ).toBeNull();
+  });
+
+  it('does not block interactive runs', () => {
+    expect(
+      headlessPlanStallCommand({ prompt: '/code:commit', interactive: true, mode: 'plan', modeIsDefault: true })
+    ).toBeNull();
+  });
+
+  it('does not block when no prompt (interactive TUI)', () => {
+    expect(
+      headlessPlanStallCommand({ prompt: undefined, interactive: undefined, mode: 'plan', modeIsDefault: true })
+    ).toBeNull();
+  });
+
+  it.each(['edit', 'auto', 'skip', 'full'])('does not block under non-plan mode %s', (mode) => {
+    expect(
+      headlessPlanStallCommand({ prompt: '/code:commit', interactive: undefined, mode, modeIsDefault: true })
+    ).toBeNull();
+  });
+
+  it('tolerates leading whitespace before the slash command', () => {
+    expect(
+      headlessPlanStallCommand({ prompt: '  /deploy staging', interactive: undefined, mode: 'plan', modeIsDefault: true })
+    ).toBe('/deploy');
   });
 });

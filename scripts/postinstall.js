@@ -11,9 +11,11 @@ import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const HOME = os.homedir();
-const SHIMS_DIR = path.join(HOME, '.agents', '.cache', 'shims');
-const SYSTEM_DIR = path.join(HOME, '.agents-system');
 const USER_DIR = path.join(HOME, '.agents');
+const SHIMS_DIR = path.join(USER_DIR, '.cache', 'shims');
+// System repo lives inside the user repo (folded in v1.21). Legacy installs at
+// ~/.agents-system/ are migrated by src/lib/migrate.ts on first CLI invocation.
+const SYSTEM_DIR = path.join(USER_DIR, '.system');
 const AGENTS_BIN = fileURLToPath(new URL('../dist/index.js', import.meta.url));
 const INSTALL_HELPER_SCRIPT = fileURLToPath(new URL('./install-helper.js', import.meta.url));
 
@@ -30,6 +32,35 @@ function shellQuote(value) {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+// Shorthands that delegate to the installed agents-cli entrypoint.
+const ALIASES = ['sessions', 'secrets', 'browser', 'pty', 'teams'];
+
+function writeAliasShims() {
+  const written = [];
+  for (const name of ALIASES) {
+    const target = path.join(SHIMS_DIR, name);
+    const script = `#!/bin/sh\nAGENTS_BIN=${shellQuote(AGENTS_BIN)}\nif [ -z "$AGENTS_BIN" ] || [ ! -x "$AGENTS_BIN" ]; then\n  echo "agents: agents-cli entrypoint missing or not executable: $AGENTS_BIN" >&2\n  exit 127\nfi\nexec "$AGENTS_BIN" ${name} "$@"\n`;
+    fs.writeFileSync(target, script, { mode: 0o755 });
+    // Windows can't run the POSIX shim; drop a `.cmd` companion that invokes the
+    // entrypoint via node so the bare shorthand works in a Windows shell.
+    if (process.platform === 'win32') {
+      fs.writeFileSync(target + '.cmd', `@echo off\r\nnode "${AGENTS_BIN}" ${name} %*\r\n`);
+    }
+    written.push(name);
+  }
+  return written;
+}
+
+// Self-updater entry: the upgrade installs with --ignore-scripts (skipping
+// this script as an npm lifecycle hook), then re-invokes it with this env var
+// so the alias shims are refreshed from the newly installed copy. Shims only —
+// no prompts, no rc-file edits, no output.
+if (process.env.AGENTS_POSTINSTALL_SHIMS_ONLY === '1') {
+  fs.mkdirSync(SHIMS_DIR, { recursive: true });
+  writeAliasShims();
+  process.exit(0);
+}
+
 // For local installs, create directories and show a message
 const isGlobalInstall = process.env.npm_config_global || process.argv.includes('-g');
 if (!isGlobalInstall) {
@@ -43,72 +74,23 @@ To complete setup, run: npx agents setup
   process.exit(0);
 }
 
-// Create directories
-fs.mkdirSync(SHIMS_DIR, { recursive: true });
-fs.mkdirSync(SYSTEM_DIR, { recursive: true });
+// Create directories. The full migration (legacy ~/.agents-system/ fold,
+// runtime-state bucket moves, etc.) runs from src/lib/migrate.ts on the first
+// CLI invocation — we don't duplicate it here.
+//
+// SYSTEM_DIR is intentionally NOT pre-created: if a legacy ~/.agents-system/
+// exists, the migrator's fast-path rename needs SYSTEM_DIR to be absent so it
+// can move the legacy tree in one shot (including .git). Pre-creating an empty
+// skeleton forces the slower merge path AND can leave the new dir without
+// `.git`, which makes ensureInitialized() exit "not set up" before the
+// migrator runs. The migrator + first `agents setup` create SYSTEM_DIR as
+// needed.
 fs.mkdirSync(USER_DIR, { recursive: true, mode: 0o700 });
+fs.mkdirSync(SHIMS_DIR, { recursive: true });
 
 // Copy the signed macOS Keychain helper to a stable user path so its trusted-app
 // ACLs survive future npm publishes (which re-sign the bundle).
 installKeychainHelper();
-
-// One-shot idempotent migrations
-function runMigrations() {
-  // 1. Move agents.yaml from system to user repo
-  const src = path.join(SYSTEM_DIR, 'agents.yaml');
-  const dest = path.join(USER_DIR, 'agents.yaml');
-  if (fs.existsSync(src) && !fs.existsSync(dest)) {
-    try { fs.renameSync(src, dest); } catch { /* best-effort */ }
-  }
-
-  // 2. Delete dead prompts.json
-  const promptsJson = path.join(SYSTEM_DIR, 'prompts.json');
-  if (fs.existsSync(promptsJson)) {
-    try { fs.unlinkSync(promptsJson); } catch { /* best-effort */ }
-  }
-
-  // 3. Move legacy config.json to ~/.agents/teams/config.json
-  const configSrc = path.join(SYSTEM_DIR, 'config.json');
-  const configDest = path.join(USER_DIR, 'teams', 'config.json');
-  if (fs.existsSync(configSrc) && !fs.existsSync(configDest)) {
-    try {
-      fs.mkdirSync(path.dirname(configDest), { recursive: true });
-      fs.copyFileSync(configSrc, configDest);
-      fs.unlinkSync(configSrc);
-    } catch { /* best-effort */ }
-  }
-
-  // 4. Move installed agent versions from ~/.agents/versions/ -> ~/.agents-system/versions/
-  // Pre-split layout put binaries under the user repo. Post-split, listInstalledVersions
-  // only scans the system root, so legacy installs become invisible without this move.
-  const userVersions = path.join(USER_DIR, 'versions');
-  const sysVersions = path.join(SYSTEM_DIR, 'versions');
-  if (fs.existsSync(userVersions)) {
-    try {
-      let moved = 0;
-      let skipped = 0;
-      for (const agent of fs.readdirSync(userVersions, { withFileTypes: true })) {
-        if (!agent.isDirectory()) continue;
-        const srcAgentDir = path.join(userVersions, agent.name);
-        const dstAgentDir = path.join(sysVersions, agent.name);
-        try { fs.mkdirSync(dstAgentDir, { recursive: true }); } catch {}
-        for (const ver of fs.readdirSync(srcAgentDir, { withFileTypes: true })) {
-          if (!ver.isDirectory()) continue;
-          const src = path.join(srcAgentDir, ver.name);
-          const dst = path.join(dstAgentDir, ver.name);
-          if (fs.existsSync(dst)) { skipped++; continue; }
-          try { fs.renameSync(src, dst); moved++; } catch {}
-        }
-        try { if (fs.readdirSync(srcAgentDir).length === 0) fs.rmdirSync(srcAgentDir); } catch {}
-      }
-      try { if (fs.readdirSync(userVersions).length === 0) fs.rmdirSync(userVersions); } catch {}
-      if (moved > 0) console.log(`  Migrated ${moved} agent version dir(s) to ~/.agents-system/versions/`);
-      if (skipped > 0) console.log(`  Kept ${skipped} legacy version dir(s) at ~/.agents/versions/ (already present in system root)`);
-    } catch { /* best-effort */ }
-  }
-}
-
-runMigrations();
 
 const shellName = path.basename(process.env.SHELL || '/bin/bash');
 
@@ -132,20 +114,6 @@ function getShellRc() {
 const exportLine = shellName === 'fish'
   ? `fish_add_path ${SHIMS_DIR}`
   : `export PATH="${SHIMS_DIR}:$PATH"`;
-
-// Shorthands that delegate to the installed agents-cli entrypoint.
-const ALIASES = ['sessions', 'secrets', 'browser', 'pty', 'teams'];
-
-function writeAliasShims() {
-  const written = [];
-  for (const name of ALIASES) {
-    const target = path.join(SHIMS_DIR, name);
-    const script = `#!/bin/sh\nAGENTS_BIN=${shellQuote(AGENTS_BIN)}\nif [ -z "$AGENTS_BIN" ] || [ ! -x "$AGENTS_BIN" ]; then\n  echo "agents: agents-cli entrypoint missing or not executable: $AGENTS_BIN" >&2\n  exit 127\nfi\nexec "$AGENTS_BIN" ${name} "$@"\n`;
-    fs.writeFileSync(target, script, { mode: 0o755 });
-    written.push(name);
-  }
-  return written;
-}
 
 function getVersion() {
   const pkgPath = new URL('../package.json', import.meta.url).pathname;
@@ -186,8 +154,48 @@ function isAlreadyConfigured(rcFile) {
 }
 
 async function main() {
+  // Windows has no shell rc files to edit. Write the `.cmd` shorthands here, then
+  // make sure npm's global-bin dir is on the User PATH so the `agents` command
+  // itself resolves: Node's installer normally adds it, but winget / portable /
+  // nvm-windows setups often don't — and then `npm i -g` succeeds yet `agents`
+  // is "not recognized". The shims dir (claude/codex/...) is still left to
+  // `agents setup`, which the user can now run because `agents` is discoverable.
+  if (process.platform === 'win32') {
+    console.log(`\nagents-cli installed.`);
+    const written = writeAliasShims();
+    console.log(`  Installed shorthands: ${written.join(', ')}`);
+
+    // Best-effort: import the platform leaf module from the just-installed dist.
+    // If it's missing or PowerShell is unavailable we degrade to plain guidance.
+    try {
+      const { prependToWindowsUserPath, getEffectiveExecutionPolicy, blocksLocalScripts, npmGlobalBinFromEntry } =
+        await import('../dist/lib/platform/winpath.js');
+
+      const npmBinDir = npmGlobalBinFromEntry(AGENTS_BIN);
+      const pathResult = prependToWindowsUserPath(npmBinDir);
+      if (pathResult.success && !pathResult.alreadyPresent) {
+        console.log(`  Added npm's global bin to your user PATH so 'agents' resolves:\n    ${npmBinDir}`);
+      } else if (!pathResult.success) {
+        console.log(`  Could not update PATH automatically. Add this to your user PATH manually:\n    ${npmBinDir}`);
+      }
+
+      // .ps1 launchers (npm.ps1, agents.ps1) are blocked under Restricted/AllSigned;
+      // we can't safely weaken a security setting from an installer, so guide instead.
+      const policy = getEffectiveExecutionPolicy();
+      if (blocksLocalScripts(policy)) {
+        console.log(`\n  PowerShell execution policy is '${policy}', which blocks the 'agents' launcher (a .ps1).`);
+        console.log(`  Allow local scripts for your user:`);
+        console.log(`    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`);
+      }
+    } catch {
+      /* dist or PowerShell unavailable — skip; `agents setup` still wires shims */
+    }
+
+    console.log(`\nNext: open a new terminal, then run  agents setup`);
+    console.log(`(adds the shims dir so bare ${ALIASES.join(', ')} and versioned aliases work).`);
+  }
   // Opt-in: AGENTS_INIT_SHELL=1 npm install -g @phnx-labs/agents-cli
-  if (process.env.AGENTS_INIT_SHELL === '1') {
+  else if (process.env.AGENTS_INIT_SHELL === '1') {
     const rcFile = getShellRc();
     if (!isAlreadyConfigured(rcFile)) {
       const addition = `\n# agents-cli: version switching for AI coding agents\n${exportLine}\n`;

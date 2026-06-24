@@ -61,11 +61,11 @@ describe('PermissionsHandler', () => {
       const home = makeTempHome();
 
       // Create system and user directories
-      fs.mkdirSync(path.join(home, '.agents-system'), { recursive: true });
+      fs.mkdirSync(path.join(home, '.agents', '.system'), { recursive: true });
       fs.mkdirSync(path.join(home, '.agents'), { recursive: true });
 
       // Create permissions in both layers
-      writePermissionYaml(home, '.agents-system', 'base', {
+      writePermissionYaml(home, path.join('.agents', '.system'), 'base', {
         name: 'base',
         description: 'Base permissions',
         allow: ['Bash(git *)'],
@@ -95,11 +95,11 @@ describe('PermissionsHandler', () => {
     it('user layer wins on name conflict', () => {
       const home = makeTempHome();
 
-      fs.mkdirSync(path.join(home, '.agents-system'), { recursive: true });
+      fs.mkdirSync(path.join(home, '.agents', '.system'), { recursive: true });
       fs.mkdirSync(path.join(home, '.agents'), { recursive: true });
 
       // Same name in both layers - user should win
-      writePermissionYaml(home, '.agents-system', 'shared', {
+      writePermissionYaml(home, path.join('.agents', '.system'), 'shared', {
         name: 'shared',
         description: 'System version',
         allow: ['Bash(git *)'],
@@ -125,11 +125,11 @@ describe('PermissionsHandler', () => {
       const home = makeTempHome();
       const projectDir = makeTempHome();
 
-      fs.mkdirSync(path.join(home, '.agents-system'), { recursive: true });
+      fs.mkdirSync(path.join(home, '.agents', '.system'), { recursive: true });
       fs.mkdirSync(path.join(home, '.agents'), { recursive: true });
       fs.mkdirSync(path.join(projectDir, '.agents'), { recursive: true });
 
-      writePermissionYaml(home, '.agents-system', 'perms', {
+      writePermissionYaml(home, path.join('.agents', '.system'), 'perms', {
         name: 'perms',
         description: 'System',
         allow: ['Read(**)'],
@@ -165,7 +165,7 @@ describe('PermissionsHandler', () => {
     it('returns null for non-existent permission', () => {
       const home = makeTempHome();
 
-      fs.mkdirSync(path.join(home, '.agents-system'), { recursive: true });
+      fs.mkdirSync(path.join(home, '.agents', '.system'), { recursive: true });
       fs.mkdirSync(path.join(home, '.agents'), { recursive: true });
 
       const result = runPermissionsExpression(home, `PermissionsHandler.resolve('claude', 'nonexistent')`);
@@ -175,10 +175,10 @@ describe('PermissionsHandler', () => {
     it('resolves from user layer when name exists in both', () => {
       const home = makeTempHome();
 
-      fs.mkdirSync(path.join(home, '.agents-system'), { recursive: true });
+      fs.mkdirSync(path.join(home, '.agents', '.system'), { recursive: true });
       fs.mkdirSync(path.join(home, '.agents'), { recursive: true });
 
-      writePermissionYaml(home, '.agents-system', 'dev', {
+      writePermissionYaml(home, path.join('.agents', '.system'), 'dev', {
         name: 'dev',
         description: 'System dev',
         allow: ['Bash(ls)'],
@@ -200,7 +200,7 @@ describe('PermissionsHandler', () => {
     it('supports both .yaml and .yml extensions', () => {
       const home = makeTempHome();
 
-      fs.mkdirSync(path.join(home, '.agents-system'), { recursive: true });
+      fs.mkdirSync(path.join(home, '.agents', '.system'), { recursive: true });
       fs.mkdirSync(path.join(home, '.agents'), { recursive: true });
 
       // Write with .yml extension
@@ -224,10 +224,10 @@ describe('PermissionsHandler', () => {
       const home = makeTempHome();
       const versionHome = makeTempHome();
 
-      fs.mkdirSync(path.join(home, '.agents-system'), { recursive: true });
+      fs.mkdirSync(path.join(home, '.agents', '.system'), { recursive: true });
       fs.mkdirSync(path.join(home, '.agents'), { recursive: true });
 
-      writePermissionYaml(home, '.agents-system', 'base', {
+      writePermissionYaml(home, path.join('.agents', '.system'), 'base', {
         name: 'base',
         allow: ['Read(**)', 'Bash(git *)'],
       });
@@ -257,7 +257,7 @@ describe('PermissionsHandler', () => {
       const home = makeTempHome();
       const versionHome = makeTempHome();
 
-      fs.mkdirSync(path.join(home, '.agents-system'), { recursive: true });
+      fs.mkdirSync(path.join(home, '.agents', '.system'), { recursive: true });
       fs.mkdirSync(path.join(home, '.agents'), { recursive: true });
 
       writePermissionYaml(home, '.agents', 'test', {
@@ -265,12 +265,16 @@ describe('PermissionsHandler', () => {
         allow: ['Bash(*)'],
       });
 
-      // Gemini doesn't support permissions
-      runPermissionsExpression(home, `PermissionsHandler.sync('gemini', ${JSON.stringify(versionHome)})`);
+      // Cursor doesn't support permissions (`allowlist: false` in the capability matrix).
+      // Gemini was capable as of 236b4105 — pick an agent that's still on the
+      // excluded list, otherwise this test silently flips when capability is
+      // added.
+      runPermissionsExpression(home, `PermissionsHandler.sync('cursor', ${JSON.stringify(versionHome)})`);
 
-      // No config should be written
-      const configPath = path.join(versionHome, '.gemini', 'settings.json');
-      expect(fs.existsSync(configPath)).toBe(false);
+      // No config should be written for a non-capable agent. Probe both the
+      // canonical settings file paths a capable agent would have used.
+      expect(fs.existsSync(path.join(versionHome, '.cursor', 'settings.json'))).toBe(false);
+      expect(fs.existsSync(path.join(versionHome, '.claude', 'settings.json'))).toBe(false);
     });
   });
 
@@ -288,6 +292,11 @@ describe('PermissionsHandler', () => {
     it('returns correct path for OpenCode', () => {
       const result = PermissionsHandler.configPath!('opencode', '/test/home');
       expect(result).toBe('/test/home/.opencode/opencode.jsonc');
+    });
+
+    it('returns correct path for Kimi', () => {
+      const result = PermissionsHandler.configPath!('kimi', '/test/home');
+      expect(result).toBe('/test/home/.kimi-code/config.toml');
     });
 
     it('returns null for unsupported agents', () => {

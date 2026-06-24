@@ -1,5 +1,95 @@
 # Changelog
 
+## Unreleased
+
+**`agents inspect` summary: expanded detail for hooks, plugins, and MCP**
+
+- The bare `agents inspect <agent>` / `agents inspect <repo>` summary no longer collapses everything to a count table. Simple kinds (commands, skills, rules, subagents, workflows) keep a count line but now preview a few names; the rich kinds get their own expanded sections: **hooks** show their events + `matches:` predicates + cache (`PreToolUse(Bash) · git_dirty · prompt~"deploy" (5m cache)`), **plugins** show version + bundle contents (`v2.1.0  skills:6 commands:5 hooks:2 mcp:1`), and **MCP** show transport + url/command. Drill-down flags (`--hooks`, `--plugins`, `--mcp`) and `--brief` are unchanged; `--json` gains the structured detail additively (existing keys retained).
+- Hook detail joins installed hooks to the manifest by **script basename** (installed hooks are named after their script file while the manifest keys on the logical name), and the repo Hooks section uses the grouped hook reader so a script + its data file collapse to one clean entry.
+
+**Plugin hooks were misreported — fixed**
+
+- `discoverPluginHooks` read the **top-level** keys of a plugin's `hooks/hooks.json`, so the official `{ description, hooks: { SessionStart: [...] } }` format surfaced as `description, hooks` instead of the real events. It now reads the `hooks` wrapper when present (falling back to top-level keys for the flat format), so `agents inspect --plugin <name>` and the plugin row show the actual lifecycle events (e.g. `SessionStart, PreToolUse, …`).
+
+**`agents doctor` / `agents prune`: precise orphan-hooks detection**
+
+- Orphan-hook detection now flags hook scripts present in a version home that **no `agents.yaml`/`hooks.yaml` entry registers** — i.e. scripts that sync to disk but are never wired to a lifecycle event, so they never fire. This replaces the source-diff heuristic, which compared only against the user hooks dir and so **false-flagged valid system-sourced, registered hooks** (e.g. `03-linear-inject`, `04-capture`) as orphans — meaning `agents prune cleanup` could have deleted live hooks. Doctor's Orphans section and `prune cleanup hooks` now share this single manifest-based definition. `parseHookManifest` gained a silent (`{ warn: false }`) option so the diagnostic doesn't emit shadow/override warnings.
+
+**Regression coverage: resource sync from extras repos**
+
+- Added end-to-end regression tests (`src/lib/__tests__/extras-sync.test.ts`) locking in two behaviors for repos registered via `agents repo add` (`~/.agents-<alias>/`): a top-level `commands/<name>.md` is written into the agent's version home on `agents sync`, and plugins under `plugins/<name>/` are synthesized into a registered `agents-<alias>` marketplace on launch. Both already work in `main`; the tests exercise the real sync path (no mocking, isolated `$HOME`) so the extras-repo behavior can't silently regress (#313, #314).
+
+**Windows: `agents` is discoverable right after `npm i -g`**
+
+- On a global Windows install, postinstall now prepends npm's global-bin dir (where `agents.cmd`/`agents.ps1` live) to the **User PATH** via the .NET environment API. Node's installer normally adds it, but winget / portable / nvm-windows setups often don't — and then `npm i -g @phnx-labs/agents-cli` succeeds yet `agents` is "not recognized". The shims dir (claude/codex/…) is still left to `agents setup`, which the user can now run because `agents` resolves.
+- Postinstall also detects a `Restricted`/`AllSigned` PowerShell execution policy (which blocks the generated `.ps1` launchers, so even an on-PATH `agents` fails in PowerShell) and prints the one-line fix (`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`). The policy is a security setting, so it is never changed silently — only surfaced.
+- Refactor: the Windows User-PATH prepend logic moved from `shims.ts` into a new `src/lib/platform/winpath.ts` leaf module (`prependToWindowsUserPath`, `getEffectiveExecutionPolicy`, `blocksLocalScripts`, `npmGlobalBinFromEntry`); `addShimsToWindowsUserPath` now delegates to it. Pure helpers are unit-tested.
+
+**Factory AI Droid (first-class support)**
+
+- Add `droid` as a first-class supported agent (AgentId + full registry entry for Factory AI's `droid` CLI, config in `~/.factory/`). Installs via the official script (`curl -fsSL https://app.factory.ai/cli | sh`); the binary is resolved through the standard install-script path and isolated per version via the `~/.factory` config symlink (Droid has no `*_HOME` override).
+- Resource sync wired for the four resource types Droid supports natively: **MCP** (`~/.factory/mcp.json`), **rules** (native `AGENTS.md`), **subagents** (custom droids flattened to `~/.factory/droids/*.md`, with the unsupported `color` frontmatter key stripped), and **commands** (`~/.factory/commands/`). Skills/plugins/workflows have no Droid equivalent and are disabled; hooks/permissions are deferred.
+- `agents run droid` and `agents teams add … droid` work end-to-end: headless `droid exec` with mode mapping (plan → read-only, edit → `--auto low`, auto → `--auto high`, skip → `--skip-permissions-unsafe`), `-o stream-json` output, `-m` model selection, and `-r` reasoning effort. Routine/daemon jobs (`buildJobCommand`) support Droid too.
+- Known limitation: `agents teams` renders Droid events through the generic normalizer pending a verified `droid exec -o stream-json` event schema; structured tool/file categorization will follow. Session reading and Factory cloud dispatch remain follow-ups.
+
+**`agents upgrade` now refreshes the macOS Keychain helper**
+
+- Upgrading runs `npm install -g … --ignore-scripts`, so the postinstall that installs the signed Keychain helper never fired — a user upgrading away from a broken build (e.g. the entitlement-less 1.20.4 helper that failed `SecItemAdd` with `errSecMissingEntitlement -34018`) kept the broken helper until the lazy staleness check in `getKeychainHelperPath()` happened to repair it on their next secret operation. `installResolvedPackage` now force-refreshes the helper (`ensureKeychainHelperInstalled({ forceReinstall: true })`) on darwin after the install, so both the explicit `agents upgrade` and the auto-update prompt land the fixed helper immediately. Best-effort and non-fatal: an upgrade never fails because the helper could not be reinstalled, and `agents helper install --force` remains the manual path.
+
+**`agents inspect <repo>` summary now shows what's actually inside, not just counts**
+
+- The bare repo summary gained four enrichments so it reads as an inventory instead of a tally: (1) **resource name previews** — each kind lists its first few names with a `…(+N)` tail; (2) **manifest summary** — `agents.yaml` is parsed for its `run.<agent>.strategy` and any `agents.<agent>` version pins, shown under `manifests` instead of just the filename; (3) **git detail** — last commit (sha, subject, relative time), ahead/behind upstream when non-zero, and the names of dirty files; (4) **size + file counts** — total repo size and a per-kind byte size. `--json` carries all of it (`git.lastCommit`, `git.ahead/behind`, `manifest`, `size`, and per-kind `{count, bytes, files, names}`); `--brief` still skips resources and size.
+- Fixed a path-parse bug surfaced by the dirty-files list: the shared git helper trimmed leading whitespace, which clipped the first character off the first `git status --porcelain` path; status is now read untrimmed.
+
+**`agents inspect .` reads the project `.agents/`, and plugin drill-down shows bundled skills**
+
+- `agents inspect .` (and any path to a repo root) now resolves to the project's nested `.agents/` tree when that tree is a populated DotAgents root, instead of the project root itself. Previously a top-level `agents.yaml` version-pin or an unrelated source `skills/` dir at the repo root was mistaken for a DotAgents root, so `inspect .` reported the wrong directory's resources (e.g. `plugins 0` while the real `.agents/plugins/` held a plugin). A bare `.agents`-named dir still resolves to itself, and standalone clones / extra repos that keep resources at the top level (using `.agents/` only for worktrees) are unaffected — their nested `.agents/` is not a DotAgents root, so the top level still wins.
+- `agents inspect <repo> --plugins` now reads plugin bundles through the plugin discoverer: the list shows each plugin's manifest description, and drilling into one (`--plugins <name>`) reports its bundled skills, commands, subagents, hooks, MCP servers, and version. Previously plugins were treated as opaque directories with no description and no view into what they ship.
+
+**Single-typo agent names auto-correct everywhere, not just `agents run`**
+
+- `agents view cladue` used to print `Unknown agent 'cladue'` even though `agents run cladue` auto-corrected. `resolveAgentName` — the canonical resolver behind `view`, `usage`, `inspect`, `doctor`, `sync`, `models`, `skills`, `hooks`, `import`, `sessions --agent`, and every `agent@version` spec (`agents add claud@latest`, `agents use codx@2.1.170`) — now falls back to Damerau-Levenshtein distance-1 matching against canonical ids and multi-letter aliases: `cladue` -> `claude` (transposition), `kim` -> `kimi`, `codx` -> `codex`, `gemni` -> `gemini`.
+- Corrections apply only when unambiguous: every distance-1 candidate must agree on one agent. `kiri` (one edit from both `kiro` and `kimi`) and inputs under 3 characters still error. `agents run` keeps its existing exact -> profile -> workflow -> fuzzy precedence, so a profile named `claud` still beats the typo correction.
+- Fixes `kimi` being listed as a valid agent but missing from the alias map — `agents view kimi` previously errored. Added `kimi` / `kimi-code` entries.
+
+## 1.20.7
+
+**`agents inspect` — DotAgents repo targets (#256)**
+
+- `agents inspect` now accepts a DotAgents repo as the target, not just an installed agent: `user` (~/.agents/), `system` (~/.agents/.system/), `project` (nearest `.agents/` from cwd), any extra-repo alias registered via `agents repo add`, or a filesystem path. Paths accept either a repo containing a `.agents/` dir or a DotAgents root directly.
+- Repo summary shows the root (OSC-8 linked), git branch / dirty count / origin URL, manifest files (`agents.yaml`, `hooks.yaml`), and per-kind resource counts. All existing drill-down flags (`--commands`, `--skills`, `--plugins`, ... with fuzzy queries and `--json`) work against the single repo root — what is physically in that repo, with no layered resolution or same-name overrides.
+- Resolution precedence: a directory that is itself a DotAgents root wins over its nested `.agents/`, so extra repos that keep resources at the top level and use `.agents/` only for worktrees resolve to their real resources.
+- Unknown targets now error with both halves of the namespace: the known agent ids and the available repo targets (built-in layers plus registered aliases).
+
+**`scripts/install.sh` — bash 3.2 fix (#256)**
+
+- `set -u` plus `"${BUILD_ARGS[@]}"` on an empty array aborted the dev install with `BUILD_ARGS[@]: unbound variable` under macOS system bash; the expansion is now guarded with `${BUILD_ARGS[@]+...}`.
+
+## 1.20.5
+
+**`agents inspect` — per-agent+version detail view with drill-down (#217)**
+
+- New top-level command `agents inspect <agent>[@version]`. Summary mode shows install path, config symlink target, shim path, versioned alias, run strategy, capability table (`hooks`/`mcp`/`skills`/`commands`/`subagents`/`plugins`/`workflows`/`rules`/`allowlist`), resource counts with project/user/system scope breakdown, and session total. Replaces the awkward `agents view <agent>@<version>` deep-detail mode as a dedicated verb; `view` itself is unchanged.
+- Drill-down flags for every resource kind — `--commands`, `--skills`, `--hooks`, `--mcp`, `--rules`, `--plugins`, `--workflows`, `--subagents`. Bare flag lists every entry; passing a positional query fuzzy-searches that kind, ranking exact > substring > Damerau-Levenshtein. Zero matches exit 1 with the three closest names as suggestions. One drill-down at a time (validation error otherwise). `--json` works with summary and every drill-down for scriptable consumption.
+- Resource names render as OSC-8 terminal hyperlinks to the marker file (`SKILL.md` / `WORKFLOW.md` / `AGENT.md`) for clickable navigation in modern terminals (Ghostty, iTerm2, WezTerm) — no inline path noise. Plain text on terminals without OSC-8 support.
+- MCP detail intentionally suppresses path and env values to avoid leaking secrets — only the server name, scope, and version reach the output.
+- Removes the deprecated `agents status` alias for `view @default`. Top-level help text updated; no consumers referenced it.
+
+**Headless Linux: encrypted-file fallback when libsecret collection is locked (#183)**
+
+- On server-class Linux (Ubuntu 24.04 over SSH on the reporter's box), `agents secrets create x` failed with `secret-tool: Cannot create an item in a locked collection`. Diagnosis in the issue: `gnome-keyring-daemon` is running and D-Bus is reachable, but the default `login` collection is locked because no graphical login has fed the daemon the passphrase, and `secret-tool` from `libsecret-tools` has no `--collection` flag so it can't target the unlocked `session` collection. This made `agents secrets` effectively macOS-only on any headless box.
+- `src/lib/secrets/linux.ts` now transparently falls back to a file-based AES-256-GCM encrypted store at `~/.agents/.cache/secrets/<item>.enc` (mode 0600, per-file random scrypt salt + 96-bit IV, GCM auth tag). The encryption key is scrypt-derived from a passphrase read from `AGENTS_SECRETS_PASSPHRASE` (preferred) or a TTY prompt via `/dev/tty` with `stty -echo` for non-echoing input. The fallback also activates when `libsecret-tools` is not installed at all but `AGENTS_SECRETS_PASSPHRASE` is set, so a fresh install can store secrets without any apt-get step.
+- The decision is cached per process; on first activation we emit one stderr line: `[agents] secret-service collection locked, using file-based store at <dir>`. The `KeychainBackend` interface in `src/lib/secrets/index.ts` is unchanged — `has`/`get`/`set`/`delete`/`list` work identically against either backend, so `bundles.ts`, `sync.ts`, and every consumer above it sees no API change.
+- Items written into the file store before the fallback was added remain accessible only via libsecret if/when the collection is later unlocked; this PR does not migrate stranded items in either direction — the user simply re-creates them on a freshly headless box.
+
+## 1.20.4
+
+**Plugin marketplace sync (skip outside-pointing symlinks)**
+
+- `copyPluginToMarketplace` used `fs.cpSync(plugin.root, dest, { recursive: true, dereference: false })`, which faithfully preserved every symlink — including the ones plugin authors put at the top of their plugin source for prompt-side references (the rush plugin's `app -> ../../../rush/app`, `web -> rush/web`, `widgets -> rush/widgets`). Those targets resolve to the rush monorepo (~8.7 GB of `app/` including node_modules + .next builds, 782 MB of `web/`, plus 463 MB brand-assets). Every claude version got a full set of those symlinks in `~/.claude/plugins/marketplaces/agents-cli/plugins/rush/`. When the consumer (Claude Code, OpenClaw) discovers plugins, it walks the marketplace tree and follows those symlinks — producing multi-minute startup hangs.
+- The copy now walks the source tree and drops symlinks whose `realpath` escapes the plugin root, leaving internal symlinks intact (cpSync rewrites internal targets to absolute paths into the source tree, which the consumer still resolves correctly). One informational line per plugin lists the skipped names so plugin authors notice.
+- Existing per-version marketplace directories still hold the bloat from prior syncs; clean up with `rm` against `~/.claude/plugins/marketplaces/agents-cli/plugins/*/{app,web,widgets,*-symlinks-that-escaped}` then re-run `agents pull` or any plugin sync to re-copy with the filter.
+
 ## 1.20.3
 
 **`agents run` startup latency (stale-while-revalidate the usage probe + memoize agents.yaml)**

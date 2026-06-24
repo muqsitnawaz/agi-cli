@@ -82,28 +82,31 @@ REMOTE="$(git rev-parse origin/main)"
 [[ "$LOCAL" == "$REMOTE" ]] || die "main is not in sync with origin/main (run 'git push' first)"
 
 # ----- npm auth via token (skips 2FA OTP prompts) -----
-# Resolve NPM_TOKEN from the keychain-backed secrets bundle and write a temp
-# .npmrc that the rest of the script will use via NPM_CONFIG_USERCONFIG. The
-# token must have publish access to both @phnx-labs and @companion; create
-# automation tokens at https://www.npmjs.com/settings/<user>/tokens with the
-# "Automation" type so 2FA is bypassed for publishes.
-# Use local build if available (has latest keychain fixes), fallback to global
-if [[ -f "$ROOT/dist/index.js" ]]; then
-  AGENTS_CMD="node $ROOT/dist/index.js"
-else
-  command -v agents >/dev/null || die "'agents' CLI not on PATH (needed to read npmjs.com secrets bundle)"
-  AGENTS_CMD="agents"
+# Resolve NPM_TOKEN. Honor an env-supplied token first (lets CI and machines
+# whose keychain helper is broken publish without the bundle); otherwise read
+# from the keychain-backed `npmjs.com` secrets bundle. The token must have
+# publish access to both @phnx-labs and @companion; create automation tokens
+# at https://www.npmjs.com/settings/<user>/tokens with the "Automation" type
+# so 2FA is bypassed for publishes.
+if [[ -z "${NPM_TOKEN:-}" ]]; then
+  # Use local build if available (has latest keychain fixes), fallback to global
+  if [[ -f "$ROOT/dist/index.js" ]]; then
+    AGENTS_CMD="node $ROOT/dist/index.js"
+  else
+    command -v agents >/dev/null || die "'agents' CLI not on PATH (needed to read npmjs.com secrets bundle)"
+    AGENTS_CMD="agents"
+  fi
+  NPM_BUNDLE_OUT="$($AGENTS_CMD secrets export npmjs.com --plaintext 2>/dev/null || true)"
+  [[ -n "$NPM_BUNDLE_OUT" ]] || die "could not read 'npmjs.com' secrets bundle -- create it with: agents secrets create npmjs.com && agents secrets add npmjs.com NPM_TOKEN  (or export NPM_TOKEN=<token> before running this script)"
+  NPM_TOKEN_LINE="$(printf '%s\n' "$NPM_BUNDLE_OUT" | grep -E '^export NPM_TOKEN=' | head -1)"
+  [[ -n "$NPM_TOKEN_LINE" ]] || die "secrets bundle 'npmjs.com' is missing key NPM_TOKEN"
+  # Strip 'export NPM_TOKEN=' prefix and surrounding quotes if any.
+  NPM_TOKEN="${NPM_TOKEN_LINE#export NPM_TOKEN=}"
+  NPM_TOKEN="${NPM_TOKEN%\"}"
+  NPM_TOKEN="${NPM_TOKEN#\"}"
+  NPM_TOKEN="${NPM_TOKEN%\'}"
+  NPM_TOKEN="${NPM_TOKEN#\'}"
 fi
-NPM_BUNDLE_OUT="$($AGENTS_CMD secrets export npmjs.com --plaintext 2>/dev/null || true)"
-[[ -n "$NPM_BUNDLE_OUT" ]] || die "could not read 'npmjs.com' secrets bundle -- create it with: agents secrets create npmjs.com && agents secrets add npmjs.com NPM_TOKEN"
-NPM_TOKEN_LINE="$(printf '%s\n' "$NPM_BUNDLE_OUT" | grep -E '^export NPM_TOKEN=' | head -1)"
-[[ -n "$NPM_TOKEN_LINE" ]] || die "secrets bundle 'npmjs.com' is missing key NPM_TOKEN"
-# Strip 'export NPM_TOKEN=' prefix and surrounding quotes if any.
-NPM_TOKEN="${NPM_TOKEN_LINE#export NPM_TOKEN=}"
-NPM_TOKEN="${NPM_TOKEN%\"}"
-NPM_TOKEN="${NPM_TOKEN#\"}"
-NPM_TOKEN="${NPM_TOKEN%\'}"
-NPM_TOKEN="${NPM_TOKEN#\'}"
 [[ -n "$NPM_TOKEN" ]] || die "NPM_TOKEN resolved to empty string"
 
 NPMRC_TMP="$(mktemp -t agents-cli-npmrc)"
@@ -138,9 +141,12 @@ read -r CMAJ CMIN CPAT <<< "$(parse_v "$PHNX_LATEST")"
 read -r TMAJ TMIN TPAT <<< "$(parse_v "$TARGET")"
 
 # Strict single-step bump from $PHNX_LATEST, OR equal to $PHNX_LATEST when the
-# shim is still behind (shim catch-up rerun after a partial publish).
+# shim is still behind (shim catch-up rerun after a partial publish), OR equal
+# to package.json on main when several patch commits accumulated without ever
+# being published (phnx catch-up — main is ahead of registry).
 is_valid_bump=false
 read -r SMAJ SMIN SPAT <<< "$(parse_v "$SWARMIFY_LATEST")"
+PKG_JSON_VERSION="$(jq -r .version package.json)"
 if [[ $TMAJ -eq $CMAJ && $TMIN -eq $CMIN && $TPAT -eq $((CPAT + 1)) ]]; then
   BUMP="patch"
   is_valid_bump=true
@@ -156,6 +162,14 @@ elif [[ "$TARGET" == "$PHNX_LATEST" ]] && \
        { [[ $TMAJ -eq $SMAJ ]] && [[ $TMIN -eq $SMIN ]] && [[ $TPAT -gt $SPAT ]]; }; }; then
   BUMP="shim-catchup"
   is_valid_bump=true
+elif [[ "$TARGET" == "$PKG_JSON_VERSION" ]] && \
+     { [[ $TMAJ -gt $CMAJ ]] || \
+       { [[ $TMAJ -eq $CMAJ ]] && [[ $TMIN -gt $CMIN ]]; } || \
+       { [[ $TMAJ -eq $CMAJ ]] && [[ $TMIN -eq $CMIN ]] && [[ $TPAT -gt $CPAT ]]; }; }; then
+  # Catch-up: main has accumulated unpublished patch commits (chore(release):
+  # N bumps that never reached the registry). Publish what main says.
+  BUMP="phnx-catchup"
+  is_valid_bump=true
 fi
 
 if ! $is_valid_bump; then
@@ -164,6 +178,7 @@ if ! $is_valid_bump; then
   red "  $((CMAJ)).$((CMIN)).$((CPAT + 1))   (patch)"
   red "  $((CMAJ)).$((CMIN + 1)).0   (minor)"
   red "  $((CMAJ + 1)).0.0   (major)"
+  red "  $PKG_JSON_VERSION              (phnx-catchup: package.json is ahead of registry)"
   exit 1
 fi
 
@@ -382,7 +397,7 @@ fi
 bold "Publishing $PHNX_PKG@$TARGET..."
 if $PHNX_TARGET_PUBLISHED; then
   yellow "$PHNX_PKG@$TARGET is already on the registry, skipping publish"
-elif ! npm publish --access=public; then
+elif ! npm publish --access=public --provenance=false; then
   red "publish failed for $PHNX_PKG"
   red "the version commit and tag remain locally; rerun: $0 $TARGET --apply"
   exit 1

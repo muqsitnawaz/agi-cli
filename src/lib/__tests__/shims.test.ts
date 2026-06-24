@@ -7,6 +7,7 @@ import {
   addShimsToPath,
   generateShimScript,
   generateVersionedAliasScript,
+  hasAliasShadowingShim,
   removeLegacyUserShim,
   SHIM_SCHEMA_VERSION,
   VERSIONED_ALIAS_SCHEMA_VERSION,
@@ -58,6 +59,7 @@ describe('addShimsToPath', () => {
     'bash-insert-before-node-path',
     'fish-replace-legacy-path',
     'zsh-ignore-lookalike-paths',
+    'zsh-append-after-installer-blocks',
   ] as const;
 
   for (const fixtureName of cases) {
@@ -75,17 +77,20 @@ describe('addShimsToPath', () => {
         success: true,
         ...(fixture.meta.alreadyPresent ? { alreadyPresent: true } : {}),
         rcFile,
+        location: `~/${rcFile}`,
+        reloadHint: `Restart your shell or run: source ~/${rcFile}`,
       });
 
       const content = fs.readFileSync(rcPath, 'utf8');
-      expect(content).toBe(fixture.after.replaceAll('__SHIMS_DIR__', shimsDir));
+      const expected = fixture.after.replaceAll('__SHIMS_DIR__', shimsDir).trimEnd();
+      expect(content.trimEnd()).toBe(expected);
     });
   }
 });
 
 describe('SHIM_SCHEMA_VERSION', () => {
-  it('is 15 (launch shims do not run foreground resource sync)', () => {
-    expect(SHIM_SCHEMA_VERSION).toBe(15);
+  it('is 18 (overridable AGENTS_USER_DIR for routines sandbox)', () => {
+    expect(SHIM_SCHEMA_VERSION).toBe(18);
   });
 });
 
@@ -116,6 +121,12 @@ describe('generateShimScript — config-dir env vars', () => {
     expect(script).toContain('export CODEX_HOME=');
     expect(script).toContain('"$VERSION_DIR/home/.codex"');
     expect(script).not.toContain('export CLAUDE_CONFIG_DIR=');
+  });
+
+  it('exports KIMI_CODE_HOME for kimi so config/sessions/skills are versioned', () => {
+    const script = generateShimScript('kimi');
+    expect(script).toContain('export KIMI_CODE_HOME=');
+    expect(script).toContain('"$VERSION_DIR/home/.kimi-code"');
   });
 
   it('does not export a managed config-dir var for other agents', () => {
@@ -191,10 +202,10 @@ describe('generateShimScript', () => {
     expect(script).toContain('agents.yaml');
   });
 
-  it('skips $HOME/.agents-system/agents.yaml when walking up', () => {
+  it('skips $HOME/.agents/agents.yaml when walking up', () => {
     const script = generateShimScript('claude');
     expect(script).toContain('user_agents_yaml');
-    expect(script).toContain('$HOME/.agents-system/agents.yaml');
+    expect(script).toContain('$HOME/.agents/agents.yaml');
     expect(script).toContain('"$candidate" != "$user_agents_yaml"');
   });
 
@@ -204,10 +215,12 @@ describe('generateShimScript', () => {
     expect(script).not.toContain('required by .agents-version');
   });
 
-  it('does not run project resource sync on the launch hot path', () => {
+  it('does not run foreground project resource sync on the launch hot path', () => {
     const script = generateShimScript('claude');
     expect(script).not.toContain('find_project_agents_dir');
-    expect(script).not.toContain('sync --agent "$AGENT"');
+    // sync IS allowed on the hot path, but only with --launch (filesystem-only,
+    // sub-50ms, non-blocking). A foreground sync without --launch is forbidden.
+    expect(script).not.toMatch(/\bsync --agent "\$AGENT"(?![^\n]*--launch)/);
     expect(script).not.toContain('refresh-rules --agent "$AGENT"');
   });
 
@@ -251,7 +264,9 @@ describe('generateShimScript', () => {
     expect(script).toContain('"$AGENTS_BIN" add "$AGENT@$VERSION" --yes');
     expect(script).not.toMatch(/^\s*agents (refresh-rules|use|add|sync)\b/m);
     expect(script).not.toContain('"$AGENTS_BIN" refresh-rules');
-    expect(script).not.toContain('"$AGENTS_BIN" sync');
+    // sync IS called on the hot path, but only with --launch (filesystem-only,
+    // sub-50ms, non-blocking). A foreground sync without --launch is forbidden.
+    expect(script).not.toMatch(/"\$AGENTS_BIN" sync\b(?![^\n]*--launch)/);
   });
 
   it('fails clearly when the embedded agents-cli entrypoint is not executable', () => {
@@ -259,5 +274,46 @@ describe('generateShimScript', () => {
     expect(script).toContain('if [ -z "$AGENTS_BIN" ] || [ ! -x "$AGENTS_BIN" ]; then');
     expect(script).toContain('agents: agents-cli entrypoint missing or not executable: $AGENTS_BIN');
     expect(script).toContain('exit 127');
+  });
+});
+
+describe('hasAliasShadowingShim', () => {
+  let home: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    originalHome = process.env.HOME;
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-alias-test-'));
+    process.env.HOME = home;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('returns true when an alias is defined without a later unalias', () => {
+    fs.writeFileSync(
+      path.join(home, '.zshrc'),
+      'alias codex="codex --sandbox workspace-write"\n',
+      'utf8',
+    );
+    expect(hasAliasShadowingShim('codex', { homeDir: home })).toBe(true);
+  });
+
+  it('returns false when a later unalias removes the alias', () => {
+    fs.writeFileSync(
+      path.join(home, '.zshrc'),
+      [
+        'alias codex="codex --sandbox workspace-write"',
+        'unalias claude codex gemini 2>/dev/null || true',
+      ].join('\n'),
+      'utf8',
+    );
+    expect(hasAliasShadowingShim('codex', { homeDir: home })).toBe(false);
   });
 });

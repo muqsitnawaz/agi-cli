@@ -2,7 +2,7 @@
  * First-run setup command.
  *
  * Registers the `agents setup` command which clones the system repo into
- * ~/.agents-system/ and installs agent CLIs with resource syncing.
+ * ~/.agents/.system/ and installs agent CLIs with resource syncing.
  */
 
 import type { Command } from 'commander';
@@ -17,7 +17,7 @@ import { DEFAULT_SYSTEM_REPO, systemRepoSlug } from '../lib/types.js';
 import { getAgentsDir, getVersionsDir, ensureAgentsDir } from '../lib/state.js';
 import { isGitRepo, cloneIntoExisting, pullRepo } from '../lib/git.js';
 import { isPromptCancelled, isInteractiveTerminal } from './utils.js';
-import { AGENTS, getUnmanagedAgentInstalls, countSessionFiles, agentLabel } from '../lib/agents.js';
+import { AGENTS, agentConfigDirName, getUnmanagedAgentInstalls, countSessionFiles, agentLabel } from '../lib/agents.js';
 import { setGlobalDefault } from '../lib/versions.js';
 import { ensureShimCurrent, switchHomeFileSymlinks, isShimsInPath, addShimsToPath, getPathSetupInstructions } from '../lib/shims.js';
 import { setHelpSections } from '../lib/help.js';
@@ -33,7 +33,7 @@ async function importAgent(agentId: AgentId, version: string): Promise<{ success
   const configDir = agent.configDir;
   const versionsDir = getVersionsDir();
   const versionHome = path.join(versionsDir, agentId, version, 'home');
-  const versionConfigDir = path.join(versionHome, `.${agentId}`);
+  const versionConfigDir = path.join(versionHome, agentConfigDirName(agentId));
 
   // Skip if version dir already exists (collision)
   if (fs.existsSync(versionConfigDir)) {
@@ -65,13 +65,13 @@ async function importAgent(agentId: AgentId, version: string): Promise<{ success
   }
 }
 
-/** First-run setup. Clones ~/.agents-system/ from the system repo if needed. */
+/** First-run setup. Clones ~/.agents/.system/ from the system repo if needed. */
 export async function runSetup(program: Command, options: { force?: boolean; suppressFooter?: boolean; systemRepo?: boolean } = {}): Promise<void> {
   const agentsDir = getAgentsDir();
   const alreadyConfigured = isGitRepo(agentsDir);
 
   if (alreadyConfigured && !options.force) {
-    console.log(chalk.gray('~/.agents-system/ is already set up.'));
+    console.log(chalk.gray('~/.agents/.system/ is already set up.'));
     console.log(chalk.gray('\nTo sync updates:      agents repo pull system'));
     console.log(chalk.gray('To re-run setup:      agents setup --force'));
     return;
@@ -91,9 +91,9 @@ export async function runSetup(program: Command, options: { force?: boolean; sup
   if (options.systemRepo === false) {
     ensureAgentsDir();
     console.log(chalk.gray('Skipping system repo clone (--no-system-repo).'));
-    console.log(chalk.gray(`Populate ~/.agents-system/ yourself before running other commands that depend on it.\n`));
+    console.log(chalk.gray(`Populate ~/.agents/.system/ yourself before running other commands that depend on it.\n`));
   } else {
-    console.log(chalk.gray(`Cloning the system repo from ${systemRepoSlug(systemRepo)} into ~/.agents-system/.\n`));
+    console.log(chalk.gray(`Cloning the system repo from ${systemRepoSlug(systemRepo)} into ~/.agents/.system/.\n`));
 
     ensureAgentsDir();
 
@@ -112,7 +112,7 @@ export async function runSetup(program: Command, options: { force?: boolean; sup
       // Check git is available
       try {
         const { execSync } = await import('child_process');
-        execSync('which git', { stdio: 'ignore' });
+        execSync('git --version', { stdio: 'ignore' });
       } catch {
         spinner.fail('git is not installed');
         console.log(chalk.gray('Install git first: https://git-scm.com/downloads'));
@@ -168,8 +168,8 @@ export async function runSetup(program: Command, options: { force?: boolean; sup
       if (!isShimsInPath()) {
         const pathResult = addShimsToPath();
         if (pathResult.success && !pathResult.alreadyPresent) {
-          console.log(chalk.green(`\nAdded shims to ~/${pathResult.rcFile}`));
-          console.log(chalk.gray('Restart your shell or run: source ~/' + pathResult.rcFile));
+          console.log(chalk.green(`\nAdded shims to ${pathResult.location}`));
+          console.log(chalk.gray(pathResult.reloadHint));
         } else if (!pathResult.success) {
           console.log(chalk.yellow('\nTo enable version switching, add shims to PATH:'));
           console.log(chalk.gray(getPathSetupInstructions()));
@@ -200,7 +200,7 @@ export async function runSetup(program: Command, options: { force?: boolean; sup
 
 /**
  * Ensure the system repo exists before running a command that needs it.
- * If ~/.agents-system/ is not a git repo AND we're in an interactive TTY,
+ * If ~/.agents/.system/ is not a git repo AND we're in an interactive TTY,
  * prompt the user to run setup now. In non-interactive mode, print a clear
  * error and exit.
  */
@@ -232,24 +232,24 @@ export function registerSetupCommand(program: Command): void {
   const setupCmd = program
     .command('setup')
     .description('First-time setup. Clones a config repo and installs agent CLIs.')
-    .option('-f, --force', 'Re-run setup even if ~/.agents-system/ already exists (use with caution)')
-    .option('--no-system-repo', 'Skip cloning the system repo (you must populate ~/.agents-system/ yourself)');
+    .option('-f, --force', 'Re-run setup even if ~/.agents/.system/ already exists (use with caution)')
+    .option('--no-system-repo', 'Skip cloning the system repo (you must populate ~/.agents/.system/ yourself)');
 
   setHelpSections(setupCmd, {
     examples: `
-      # First-time setup (clones the system repo into ~/.agents-system/)
+      # First-time setup (clones the system repo into ~/.agents/.system/)
       agents setup
 
-      # Re-run after corruption or to repair ~/.agents-system/
+      # Re-run after corruption or to repair ~/.agents/.system/
       agents setup --force
     `,
     notes: `
       What it does:
-        1. Clones the system repo into ~/.agents-system/
-        2. Installs agent CLIs based on agents.yaml in that repo
-        3. Syncs commands, skills, hooks, and MCP servers to each version
+        1. Clones the system repo into ~/.agents/.system/
+        2. Imports any unmanaged agent installations it finds
 
-      Non-interactive alternative: agents pull
+      To install CLIs from agents.yaml and sync resources into version homes:
+        agents repo refresh -y
     `,
   });
 

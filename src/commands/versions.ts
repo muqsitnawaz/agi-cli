@@ -38,6 +38,7 @@ import {
   listInstalledVersions,
   isVersionInstalled,
   isLatestInstalled,
+  isOldestInstalled,
   getGlobalDefault,
   setGlobalDefault,
   getVersionHomePath,
@@ -55,6 +56,7 @@ import {
   printTrashFooter,
   type ResourceSelection,
 } from '../lib/versions.js';
+import { carryForwardSettings } from '../lib/settings-manifest.js';
 import {
   createShim,
   createVersionedAlias,
@@ -86,18 +88,6 @@ function fixSessionFilePaths(agent: AgentId, version: string, oldVersionDir: str
   if (stamps.length === 0) return;
   const trashPath = path.join(trashAgentDir, stamps[0]);
   updateSessionFilePaths(oldVersionDir, trashPath);
-}
-
-/**
- * Helper to get actual installed version for an agent.
- * Returns the latest installed version, or throws if none installed.
- */
-async function getInstalledVersionForAgent(agent: AgentId): Promise<string> {
-  const versions = listInstalledVersions(agent);
-  if (versions.length > 0) {
-    return versions[versions.length - 1];
-  }
-  throw new Error(`No versions of ${agent} installed`);
 }
 
 function formatAccountHint(info: AccountInfo, usage: UsageSnapshot | null): string {
@@ -148,7 +138,18 @@ function warnIfShimShadowed(agent: AgentId): void {
 
   console.log(chalk.yellow(`  Warning: ${AGENTS[agent].cliCommand} currently resolves to ${shadowedBy}`));
   console.log(chalk.gray(`  Managed shim: ${getShimPath(agent)}`));
-  console.log(chalk.gray(`  ${getPathSetupInstructions().split('\n').join('\n  ')}`));
+
+  const result = addShimsToPath();
+  if (!result.success) {
+    console.log(chalk.gray(`  ${getPathSetupInstructions().split('\n').join('\n  ')}`));
+    return;
+  }
+  if (result.alreadyPresent) {
+    console.log(chalk.gray(`  Shim PATH entry already set — ${AGENTS[agent].cliCommand} is shadowed by another binary. Remove or reorder it so ${getShimPath(agent)} takes priority.`));
+    return;
+  }
+  console.log(chalk.green(`  Added shim directory to ${result.location}.`));
+  console.log(chalk.gray(`  ${result.reloadHint}`));
 }
 
 type VersionPruneVerb = 'prune' | 'remove';
@@ -172,7 +173,7 @@ async function versionPruneAction(
     const { agent, version } = parsed;
     const agentConfig = AGENTS[agent];
 
-    if (version === 'latest' || !spec.includes('@')) {
+    if (version === 'latest' || version === 'oldest' || !spec.includes('@')) {
       const versions = listInstalledVersions(agent);
       if (versions.length === 0) {
         console.log(chalk.gray(`No versions of ${agentLabel(agentConfig.id)} installed`));
@@ -210,7 +211,11 @@ async function versionPruneAction(
 
         for (const v of toRemove) {
           const versionDir = getVersionDir(agent, v);
-          removeVersion(agent, v);
+          const removed = removeVersion(agent, v);
+          if (!removed) {
+            console.log(chalk.red(`Failed to move ${agentLabel(agentConfig.id)}@${v} to trash — a file may be locked by a running process. Close any active sessions and try again.`));
+            continue;
+          }
           fixSessionFilePaths(agent, v, versionDir);
           console.log(chalk.green(`Moved ${agentLabel(agentConfig.id)}@${v} to trash`));
           moved.push({ agent, version: v });
@@ -236,7 +241,11 @@ async function versionPruneAction(
       console.log(chalk.gray(`${agentLabel(agentConfig.id)}@${version} not installed`));
     } else {
       const versionDir = getVersionDir(agent, version);
-      removeVersion(agent, version);
+      const removed = removeVersion(agent, version);
+      if (!removed) {
+        console.log(chalk.red(`Failed to move ${agentLabel(agentConfig.id)}@${version} to trash — a file may be locked by a running process. Close any active sessions and try again.`));
+        continue;
+      }
       fixSessionFilePaths(agent, version, versionDir);
       console.log(chalk.green(`Moved ${agentLabel(agentConfig.id)}@${version} to trash`));
       moved.push({ agent, version });
@@ -306,6 +315,9 @@ export function registerVersionsCommands(program: Command): void {
       # Install the latest version of an agent
       agents add claude@latest
 
+      # Install the oldest published version of an agent
+      agents add claude@oldest
+
       # Install a specific version (reproducibility)
       agents add claude@2.1.112
 
@@ -342,7 +354,7 @@ export function registerVersionsCommands(program: Command): void {
           continue;
         }
 
-        // Check if already installed (handle 'latest' specially)
+        // Check if already installed (resolve 'latest'/'oldest' against npm first)
         let alreadyInstalled = false;
         let installedAsVersion = version;
         if (version === 'latest') {
@@ -350,6 +362,12 @@ export function registerVersionsCommands(program: Command): void {
           if (latestCheck.installed && latestCheck.version) {
             alreadyInstalled = true;
             installedAsVersion = latestCheck.version;
+          }
+        } else if (version === 'oldest') {
+          const oldestCheck = await isOldestInstalled(agent);
+          if (oldestCheck.installed && oldestCheck.version) {
+            alreadyInstalled = true;
+            installedAsVersion = oldestCheck.version;
           }
         } else {
           alreadyInstalled = isVersionInstalled(agent, version);
@@ -377,6 +395,24 @@ export function registerVersionsCommands(program: Command): void {
             }
 
             const installedVersion = result.installedVersion || version;
+            // Track the concrete version so a `--project` pin records it instead
+            // of the `latest`/`oldest` alias.
+            installedAsVersion = installedVersion;
+
+            // Seed the fresh version home with user settings from the current
+            // default version (settings.json, keybindings, codex config/auth).
+            // Gap-filling only — never overwrites what the new home has.
+            const carrySource = getGlobalDefault(agent);
+            if (carrySource && carrySource !== installedVersion) {
+              const carried = carryForwardSettings(
+                agent,
+                getVersionHomePath(agent, carrySource),
+                getVersionHomePath(agent, installedVersion)
+              );
+              if (carried.applied.length > 0) {
+                console.log(chalk.gray(`  Carried settings from ${agent}@${carrySource}: ${carried.applied.map(r => path.basename(r)).join(', ')}`));
+              }
+            }
 
             // Smart resource detection: compare available vs ACTUALLY synced (source of truth: files)
             const available = getAvailableResources();
@@ -484,8 +520,8 @@ export function registerVersionsCommands(program: Command): void {
             if (!isShimsInPath()) {
               const pathResult = addShimsToPath();
               if (pathResult.success && !pathResult.alreadyPresent) {
-                console.log(chalk.green(`  Added shims to ~/${pathResult.rcFile}`));
-                console.log(chalk.gray('  Restart your shell or run: source ~/' + pathResult.rcFile));
+                console.log(chalk.green(`  Added shims to ${pathResult.location}`));
+                console.log(chalk.gray('  ' + pathResult.reloadHint));
               } else if (!pathResult.success) {
                 console.log(chalk.yellow('\nCould not auto-add shims to PATH:'));
                 console.log(chalk.gray(getPathSetupInstructions()));
@@ -512,7 +548,9 @@ export function registerVersionsCommands(program: Command): void {
             : createDefaultManifest();
 
           manifest.agents = manifest.agents || {};
-          manifest.agents[agent] = version === 'latest' ? (await getInstalledVersionForAgent(agent)) : version;
+          manifest.agents[agent] = (version === 'latest' || version === 'oldest')
+            ? installedAsVersion
+            : version;
 
           writeManifest(process.cwd(), manifest);
           console.log(chalk.green(`  Pinned ${agentLabel(agentConfig.id)}@${version} in .agents/agents.yaml`));
@@ -521,7 +559,13 @@ export function registerVersionsCommands(program: Command): void {
     });
 
   configureVersionPruneCommand(program.command('prune <specs...>'), 'prune');
-  configureVersionPruneCommand(program.command('remove <specs...>', { hidden: true }), 'remove');
+  // `rm` and `purge` are commander aliases for `remove` (which is itself an
+  // alias for `prune`). Native `.aliases()` keeps them in lockstep — same
+  // action, same options, no duplicate registration.
+  configureVersionPruneCommand(
+    program.command('remove <specs...>', { hidden: true }).aliases(['rm', 'purge']),
+    'remove',
+  );
 
   const useCmd = program
     .command('use <agent> [version]')
@@ -550,11 +594,11 @@ export function registerVersionsCommands(program: Command): void {
   useCmd.action(async (agentArg: string, versionArg: string | undefined, options) => {
       try {
         const skipPrompts = options.yes || !isInteractiveTerminal();
-        // Auto-pull ~/.agents-system if it's a git repo with remote (silent on success)
+        // Auto-pull ~/.agents/.system if it's a git repo with remote (silent on success)
         const agentsDir = getAgentsDir();
         const pullResult = await tryAutoPull(agentsDir);
         if (pullResult.pulled) {
-          console.log(chalk.gray('Synced ~/.agents-system from remote'));
+          console.log(chalk.gray('Synced ~/.agents/.system from remote'));
         }
 
         // Support both "claude 2.0.65" and "claude@2.0.65" formats
@@ -569,7 +613,7 @@ export function registerVersionsCommands(program: Command): void {
             return;
           }
           agent = parsed.agent;
-          version = parsed.version === 'latest' ? undefined : parsed.version;
+          version = (parsed.version === 'latest' || parsed.version === 'oldest') ? undefined : parsed.version;
         } else {
           const agentLower = agentArg.toLowerCase();
           if (!AGENTS[agentLower as AgentId]) {
@@ -768,6 +812,23 @@ export function registerVersionsCommands(program: Command): void {
           }
 
           const previousDefault = getGlobalDefault(agentId);
+
+          // Carry user settings from the outgoing default into the target
+          // version home before switching. Gap-filling only, so versions that
+          // already have their own settings are left untouched.
+          if (previousDefault && previousDefault !== finalVersion) {
+            const carried = carryForwardSettings(
+              agentId,
+              getVersionHomePath(agentId, previousDefault),
+              getVersionHomePath(agentId, finalVersion)
+            );
+            if (carried.applied.length > 0) {
+              console.log(chalk.gray(`Carried settings from ${agentId}@${previousDefault}: ${carried.applied.map(r => path.basename(r)).join(', ')}`));
+              if (carried.backupDir) {
+                console.log(chalk.gray(`  Pre-merge backup: ${carried.backupDir}`));
+              }
+            }
+          }
 
           // Set global default
           setGlobalDefault(agentId, finalVersion);
