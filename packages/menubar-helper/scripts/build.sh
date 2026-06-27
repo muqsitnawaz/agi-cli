@@ -6,8 +6,16 @@ cd "$(dirname "$0")/.."
 MODE="${1:-debug}"
 
 if [ "$MODE" = "release" ]; then
-    swift build -c release --arch arm64 --arch x86_64
-    SRC=".build/apple/Products/Release/MenubarHelper"
+    # Universal build needs Xcode's xcbuild. Fall back to a native single-arch
+    # release build when only the Command Line Tools are installed, so a release
+    # can still be cut on a machine without full Xcode.
+    if swift build -c release --arch arm64 --arch x86_64 2>/dev/null; then
+        SRC=".build/apple/Products/Release/MenubarHelper"
+    else
+        echo "  universal build unavailable (no Xcode/xcbuild); building native single-arch release"
+        swift build -c release
+        SRC="$(swift build -c release --show-bin-path)/MenubarHelper"
+    fi
 else
     swift build
     SRC=".build/debug/MenubarHelper"
