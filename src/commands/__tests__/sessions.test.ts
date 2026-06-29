@@ -4,21 +4,20 @@ import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { spawnSync } from 'child_process';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { buildResumeCommand } from '../sessions.js';
-import { needsWindowsShell } from '../../lib/platform/index.js';
 import type { SessionMeta } from '../../lib/session/types.js';
 
 const repoRoot = process.cwd();
 const cliEntry = path.join(repoRoot, 'src', 'index.ts');
-// npm writes a bare `tsx` shim (POSIX) and a `tsx.cmd` launcher (Windows) into
-// node_modules/.bin. Use the platform-correct one; the absolute path keeps tsx
-// resolvable regardless of the spawn cwd (which we point at the project dir).
-const tsxBin = path.join(
-  repoRoot,
-  'node_modules',
-  '.bin',
-  process.platform === 'win32' ? 'tsx.cmd' : 'tsx',
-);
+// Run the CLI as `node --import <tsx loader> src/index.ts`: spawning `node`
+// (always on PATH, no .cmd shell launcher) with the tsx ESM loader resolved to
+// an absolute file URL keeps tsx loadable regardless of the spawn cwd (which we
+// point at the project dir). Avoids both the Windows `tsx.cmd`-needs-a-shell
+// problem and shell:true arg-concatenation (which would split multi-word query
+// args like "prompt text").
+const tsxLoaderUrl = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
 
 function writeUpdateCache(tempHome: string): void {
   const packageJson = JSON.parse(
@@ -261,12 +260,8 @@ exit 1
 }
 
 function runAgents(args: string[], cwd: string, home: string) {
-  // tsx.cmd is a batch launcher: Node refuses to spawn .cmd/.bat without a
-  // shell, so route through one on Windows (needsWindowsShell). POSIX spawns
-  // the bare shim directly.
-  return spawnSync(tsxBin, [cliEntry, ...args], {
+  return spawnSync(process.execPath, ['--import', tsxLoaderUrl, cliEntry, ...args], {
     cwd,
-    shell: needsWindowsShell(tsxBin),
     env: {
       ...process.env,
       HOME: home,
