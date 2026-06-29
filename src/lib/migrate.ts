@@ -11,6 +11,7 @@ import * as os from 'os';
 import * as yaml from 'yaml';
 import type { AgentId } from './types.js';
 import { AGENTS, agentConfigDirName, findInPath } from './agents.js';
+import { createLink } from './platform/index.js';
 
 const HOME = process.env.HOME ?? os.homedir();
 const USER_DIR = path.join(HOME, '.agents');
@@ -731,7 +732,10 @@ export function repairSelfReferentialBinShims(
       const realBinary = findInPath(cli);
       try {
         fs.unlinkSync(binLink);
-        if (realBinary) fs.symlinkSync(realBinary, binLink);
+        // createLink: a real symlink where the OS allows it (POSIX, and Windows
+        // with the symlink privilege), copy-fallback otherwise — so the repair
+        // lands a working binary on Windows runners without the symlink right.
+        if (realBinary) createLink(realBinary, binLink);
         repaired++;
       } catch { /* best-effort */ }
     }
