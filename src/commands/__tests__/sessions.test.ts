@@ -5,11 +5,20 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { spawnSync } from 'child_process';
 import { buildResumeCommand } from '../sessions.js';
+import { needsWindowsShell } from '../../lib/platform/index.js';
 import type { SessionMeta } from '../../lib/session/types.js';
 
 const repoRoot = process.cwd();
 const cliEntry = path.join(repoRoot, 'src', 'index.ts');
-const tsxBin = path.join(repoRoot, 'node_modules', '.bin', 'tsx');
+// npm writes a bare `tsx` shim (POSIX) and a `tsx.cmd` launcher (Windows) into
+// node_modules/.bin. Use the platform-correct one; the absolute path keeps tsx
+// resolvable regardless of the spawn cwd (which we point at the project dir).
+const tsxBin = path.join(
+  repoRoot,
+  'node_modules',
+  '.bin',
+  process.platform === 'win32' ? 'tsx.cmd' : 'tsx',
+);
 
 function writeUpdateCache(tempHome: string): void {
   const packageJson = JSON.parse(
@@ -252,11 +261,18 @@ exit 1
 }
 
 function runAgents(args: string[], cwd: string, home: string) {
+  // tsx.cmd is a batch launcher: Node refuses to spawn .cmd/.bat without a
+  // shell, so route through one on Windows (needsWindowsShell). POSIX spawns
+  // the bare shim directly.
   return spawnSync(tsxBin, [cliEntry, ...args], {
     cwd,
+    shell: needsWindowsShell(tsxBin),
     env: {
       ...process.env,
       HOME: home,
+      // os.homedir() (used via homeDir() in discovery) reads USERPROFILE on
+      // Windows and ignores HOME, so set both to redirect the home to tempHome.
+      USERPROFILE: home,
       PATH: `${path.join(home, 'bin')}${path.delimiter}${process.env.PATH || ''}`,
       // Some fixtures place files at $HOME/.agents/versions/<agent>/<ver>/ as
       // legacy / synthetic state. The bootstrap-time migration would otherwise
@@ -555,7 +571,10 @@ describe('agents sessions', () => {
     }
   });
 
-  it('shows OpenClaw synthetic sessions from the configured workspace without --all', () => {
+  // The fixture's openclaw binary is a `#!/bin/sh` script and the assertions
+  // depend on its stdout (channels status / cron list) — shebang scripts don't
+  // execute on Windows, so there's no synthetic-session data to discover there.
+  it.skipIf(process.platform === 'win32')('shows OpenClaw synthetic sessions from the configured workspace without --all', () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-sessions-openclaw-cwd-'));
 
     try {
