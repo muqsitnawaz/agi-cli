@@ -96,6 +96,10 @@ function deviceNameFor(raw: RawTsNode, dnsName: string | undefined): string | nu
  * `agents devices sync` registered for this host — letting `list` flag "this
  * machine" without a live tailscale call, and staying correct even when the
  * registry is synced across machines.
+ *
+ * Limitation: if the device's MagicDNS name was renamed in the Tailscale admin
+ * console after the last `sync`, the registry key no longer matches the local
+ * hostname and the "this machine" marker silently won't fire until re-sync.
  */
 export function deviceNameFromHostname(hostname: string): string {
   const label = hostname.split('.')[0];
