@@ -15,9 +15,9 @@ by name from a small local registry, over plain SSH, with no central service to
 run or pay for:
 
 ```
-agents run claude "fix the auth bug"   --on mac-mini
-agents run codex  "port this to rust"  --on spark-0
-agents run droid  "triage the inbox"   --on win-mini
+agents run claude "fix the auth bug"   --host mac-mini
+agents run codex  "port this to rust"  --host spark-0
+agents run droid  "triage the inbox"   --host win-mini
 ```
 
 It sits next to the vendor clouds (`agents cloud run --provider rush|codex|…`),
@@ -193,7 +193,7 @@ is a fast-follow `HostProvider`, opt-in when logged in — not a v1 dependency.
 ## Architecture
 
 ```
-agents run <agent> "<task>" --on <host>
+agents run <agent> "<task>" --host <name>
   │
   ├─ resolveHost(name)         registry lookup in agents.yaml → {address,user,caps} [Phase 1]
   │
@@ -234,12 +234,12 @@ This is the answer to "I need machines but don't own enough": when the laptop is
 starving, lease one.
 
 ```
-agents run claude "big refactor" --on new           # crabbox warmup (default provider) → run → idle-release
-agents run codex  "gpu eval"     --on new:aws        # provider/class selector → EC2 → run
-agents run droid  "triage"       --on mac-mini       # owned, always-on
+agents run claude "big refactor" --host new           # crabbox warmup (default provider) → run → idle-release
+agents run codex  "gpu eval"     --host new:aws       # provider/class selector → EC2 → run
+agents run droid  "triage"       --host mac-mini      # owned, always-on
 ```
 
-`--on new[:<provider/class>]` leases via crabbox, registers the leased box as a
+`--host new[:<provider/class>]` leases via crabbox, registers the leased box as a
 **transient registry entry** (its `crabbox ssh` address), runs headless, and
 releases on idle/TTL — tearing the entry down on release. agents-cli **does not**
 reimplement provisioning — crabbox owns lease lifecycle, cost, and multi-cloud;
@@ -288,6 +288,32 @@ agent routing a GPU eval to a host tagged `gpu`).
 Resolution for an address: `hosts.<name>.address`, else error with the list of
 known names. (No tailnet lookup, no DNS guessing — a name is either registered or
 it isn't.)
+
+#### Tracking dispatched runs
+
+```
+agents run droid "triage the inbox" --host mac-mini          # followed (default)
+agents run droid "triage the inbox" --host mac-mini --no-follow  # detached
+```
+
+`--no-follow` dispatches and returns immediately — the agent keeps running on the
+host. The dispatch prints: `Dispatched to mac-mini. Track: agents hosts ps · Follow: agents hosts logs <id> -f`.
+
+```
+agents hosts ps             # list dispatched runs and their status
+agents hosts ps --json      # machine-readable
+agents hosts logs <id>      # print captured output (fetches from host on demand for detached runs)
+agents hosts logs <id> -f   # stream live output until the run finishes
+```
+
+`agents hosts ps` probes the remote exit file for each `running` task and updates
+its status to `completed`/`failed` when the remote agent has finished — so `ps`
+reflects reality, not a stale dispatch snapshot.
+
+`agents hosts logs <id>` (without `-f`) works for both followed and detached runs:
+if no local log mirror exists, it does a one-shot SSH fetch of the remote log and
+caches it locally for subsequent calls. A running task will also print:
+`Task still running. Follow live: agents hosts logs <id> -f`.
 
 ### 2. Transport — plain SSH (reuse, don't reinvent)
 
@@ -357,7 +383,7 @@ efficiently — like the ssh/remote-browser pattern."
 
 Scheduled fleet dispatch needs **no new machinery**: the routines scheduler
 (`src/lib/daemon.ts`) fires jobs on cron; a job whose command is `agents run …
---on <host>` is a scheduled remote dispatch. Online-gating is the same lazy SSH
+--host <host>` is a scheduled remote dispatch. Online-gating is the same lazy SSH
 probe `ensureHostReady` already does (skip/retry if the one targeted host is
 unreachable) — no fleet poll. (We do **not** turn the scheduler into an RPC
 server — see Non-goals.)
@@ -421,7 +447,7 @@ replicates **that one session** selectively — never the whole tree.
 
 ## Phase 2 — session handoff (the differentiator)
 
-`agents run --resume <session-id> --on <host>` — move a live session, *including
+`agents run --resume <session-id> --host <host>` — move a live session, *including
 uncommitted work*, to another box and continue:
 
 1. **Code**: push/sync the git branch; **`rsync` the working tree** (uncommitted
@@ -495,10 +521,10 @@ just relocates the storm):
   --from-tailscale` can prefill `local` entries.
 - **Driver-agent first.** The primary caller is a conversational driver agent that
   reads the registry metadata (`agents hosts list --json`), picks a host by
-  task/capability, and dispatches (`agents run --on <name> --json`). The VS Code
+  task/capability, and dispatches (`agents run --host <name> --json`). The VS Code
   extension is a second front-end onto the same commands. So Phase 1 prioritizes
-  clean, deterministic, machine-readable `--json` on `hosts list` and `run --on`.
-- **Naming** — `agents hosts` (list/check/add/remove) + `agents run --on <host>`.
+  clean, deterministic, machine-readable `--json` on `hosts list` and `run --host`.
+- **Naming** — `agents hosts` (list/check/add/remove) + `agents run --host <name>` (`--on` is a hidden alias).
   (The singular `agents computer` macOS-accessibility command is unrelated, stays.)
 - **Provider model** — keep named-SSH dispatch as its own clean path; fold *tracked*
   host runs into the existing cloud store as a `host` provider so `agents cloud
@@ -529,7 +555,7 @@ just relocates the storm):
 - **Phase 1 (v1, no Rush)**: the `HostProvider` seam + the **`local`** provider only.
   `agents hosts add/list/check/remove` (registry in `Meta.hosts`; `add` scans SSH
   sources + `checkbox` multi-select enroll, ensures key auth, bootstraps/upgrades
-  agents-cli to match the local version) + `agents run --on <host>` →
+  agents-cli to match the local version) + `agents run --host <host>` →
   `ensureHostReady` (lazy SSH probe + config/agent/branch) → remote `agents run
   --json` → transcript-tailed progress + a `host` row in the cloud store. Verify
   end-to-end against the live peer node `yosemite-s1`, registered from `yosemite-s0`:

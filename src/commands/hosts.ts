@@ -20,7 +20,8 @@ import {
   bootstrapAgentsCli,
   localCliVersion,
 } from '../lib/hosts/ready.js';
-import { listTasks } from '../lib/hosts/tasks.js';
+import { listTasks, updateTask } from '../lib/hosts/tasks.js';
+import { refreshRunningTasks } from '../lib/hosts/progress.js';
 import { showHostTaskLog } from '../lib/hosts/logs.js';
 
 interface AddOptions { cap?: string[]; os?: string; enroll?: boolean; }
@@ -175,7 +176,14 @@ async function doRemove(name: string): Promise<void> {
 }
 
 async function doPs(json: boolean): Promise<void> {
-  const tasks = listTasks();
+  let tasks = listTasks();
+
+  // Probe running tasks for their terminal status (updates the store on disk),
+  // then re-read so `agents hosts ps` reflects reality rather than a stale
+  // dispatch snapshot. Single source of truth in progress.ts.
+  refreshRunningTasks(tasks);
+  tasks = listTasks();
+
   if (json) {
     console.log(JSON.stringify(tasks, null, 2));
     return;
