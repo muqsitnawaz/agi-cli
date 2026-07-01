@@ -20,7 +20,8 @@ import {
   bootstrapAgentsCli,
   localCliVersion,
 } from '../lib/hosts/ready.js';
-import { listTasks } from '../lib/hosts/tasks.js';
+import { listTasks, updateTask } from '../lib/hosts/tasks.js';
+import { checkRemoteExit } from '../lib/hosts/progress.js';
 import { showHostTaskLog } from '../lib/hosts/logs.js';
 
 interface AddOptions { cap?: string[]; os?: string; enroll?: boolean; }
@@ -175,7 +176,25 @@ async function doRemove(name: string): Promise<void> {
 }
 
 async function doPs(json: boolean): Promise<void> {
-  const tasks = listTasks();
+  let tasks = listTasks();
+
+  // Probe running tasks for terminal status by checking the remote exit file.
+  // This makes `agents hosts ps` reflect reality rather than a stale dispatch snapshot.
+  let refreshed = false;
+  for (const t of tasks) {
+    if (t.status !== 'running') continue;
+    const code = checkRemoteExit(t.target, t.remoteExit);
+    if (code !== null) {
+      updateTask(t.id, {
+        status: code === 0 ? 'completed' : 'failed',
+        exitCode: code,
+        finishedAt: new Date().toISOString(),
+      });
+      refreshed = true;
+    }
+  }
+  if (refreshed) tasks = listTasks();
+
   if (json) {
     console.log(JSON.stringify(tasks, null, 2));
     return;

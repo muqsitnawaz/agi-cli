@@ -16,7 +16,7 @@
 
 import * as fs from 'fs';
 import { sshExec } from '../ssh-exec.js';
-import { localLogPath } from './tasks.js';
+import { localLogPath, updateTask, type HostTask } from './tasks.js';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -85,6 +85,44 @@ export function fetchProgress(
     `cat ${opts.remoteExit} 2>/dev/null`;
   const res = sshExec(target, remote, { timeoutMs: 20000 });
   return splitProgressOutput(res.stdout, opts.taskId);
+}
+
+/** One-shot full fetch of a remote log file. Returns null on ssh error or if the file is absent. */
+export function fetchRemoteLog(target: string, remoteLog: string): string | null {
+  const r = sshExec(target, `cat ${remoteLog} 2>/dev/null`, { timeoutMs: 20000, multiplex: true });
+  if (r.code !== 0) return null;
+  return r.stdout;
+}
+
+/**
+ * Check if a remote task's exit file has appeared; returns the exit code or null
+ * when the file is absent (run still in progress or not yet flushed).
+ */
+export function checkRemoteExit(target: string, remoteExit: string): number | null {
+  const r = sshExec(target, `cat ${remoteExit} 2>/dev/null`, { timeoutMs: 10000, multiplex: true });
+  const s = r.stdout.trim();
+  if (!s) return null;
+  const code = parseInt(s, 10);
+  return Number.isFinite(code) ? code : 0;
+}
+
+/**
+ * For each task still recorded as 'running', probe the remote exit file and
+ * update the local record to its terminal status. Mutates the task store on
+ * disk. Called by `agents hosts ps` so the table reflects reality.
+ */
+export function refreshRunningTasks(tasks: HostTask[]): void {
+  for (const t of tasks) {
+    if (t.status !== 'running') continue;
+    const code = checkRemoteExit(t.target, t.remoteExit);
+    if (code !== null) {
+      updateTask(t.id, {
+        status: code === 0 ? 'completed' : 'failed',
+        exitCode: code,
+        finishedAt: new Date().toISOString(),
+      });
+    }
+  }
 }
 
 /** Tail the remote log to stdout until the run finishes; return its exit code. */
