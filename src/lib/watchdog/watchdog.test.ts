@@ -66,6 +66,25 @@ describe('classifyTerminal', () => {
     expect(r.kind).toBe('opted_out');
   });
 
+  it('exactly at the dormant threshold is stalled, not dormant (age === dormantMs)', () => {
+    // Pins the `age > dormantMs` operator: equal must NOT be dormant.
+    const r = classifyTerminal({ ...base, lastActivityMs: base.nowMs - base.dormantMs });
+    expect(r.kind).toBe('stalled');
+    if (r.kind === 'stalled') {
+      expect(r.stalledForMs).toBe(base.dormantMs);
+    }
+  });
+
+  it('cooldown exactly expired lets terminal go back to stalled (sinceNudge === cooldownMs)', () => {
+    // Pins the `sinceNudge < cooldownMs` operator: equal must NOT be rate_limited.
+    const r = classifyTerminal({
+      ...base,
+      lastActivityMs: base.nowMs - 400_000,
+      lastNudgeMs: base.nowMs - base.cooldownMs,
+    });
+    expect(r.kind).toBe('stalled');
+  });
+
   it('cooldown expired lets terminal go back to stalled', () => {
     const r = classifyTerminal({
       ...base,
