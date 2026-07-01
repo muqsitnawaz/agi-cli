@@ -11,7 +11,7 @@
  *
  *  - native command file — `{agentDir}/<commandsSubdir>/<name>.md` (or .toml
  *    when the agent's format is toml). Standard path for Claude, Codex
- *    < 0.117.0, Gemini, Cursor, OpenCode, Copilot, Amp, Kiro, Roo,
+ *    < 0.117.0, Gemini, Cursor, OpenCode, Copilot, Amp, Kiro,
  *    Antigravity.
  *
  * Source resolution is `resolveCommandSource` (user → system → extras —

@@ -57,7 +57,7 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
   }
   const agent = AGENTS[agentId];
 
-  // installScript-based agents (Grok, Antigravity, Cursor, Kiro, Goose, Roo)
+  // installScript-based agents (Grok, Antigravity, Cursor, Kiro, Goose)
   // don't have an npm package; their binary lives wherever the curl/brew
   // installer dropped it. We adopt by symlinking that PATH binary directly
   // into the version's `node_modules/.bin/`. No package.json walk.
@@ -293,7 +293,7 @@ When to use:
   pointing at the existing install — nothing is copied or moved (except the
   agent's config dir, which is moved into the version's home). Works for both
   npm-style packages (claude, codex, gemini, opencode, openclaw) and
-  installScript-based agents (grok, antigravity, cursor, kiro, goose, roo).
+  installScript-based agents (grok, antigravity, cursor, kiro, goose).
 `)
     .action(runImport);
 }
