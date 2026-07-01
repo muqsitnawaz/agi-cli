@@ -10,15 +10,19 @@ let CACHE_ROOT: string;
 vi.spyOn(state, 'getCacheDir').mockImplementation(() => CACHE_ROOT);
 
 // Mock progress.ts functions that open SSH connections so unit tests run without
-// a live host. Each test can override via vi.mocked().mockReturnValueOnce().
+// a live host. vi.hoisted() creates the refs before the module factory runs.
+const { mockFollowHostTask, mockFetchRemoteLog } = vi.hoisted(() => ({
+  mockFollowHostTask: vi.fn().mockResolvedValue(0),
+  mockFetchRemoteLog: vi.fn().mockReturnValue(null as string | null),
+}));
+
 vi.mock('./progress.js', () => ({
-  followHostTask: vi.fn().mockResolvedValue(0),
-  fetchRemoteLog: vi.fn().mockReturnValue(null),
+  followHostTask: mockFollowHostTask,
+  fetchRemoteLog: mockFetchRemoteLog,
 }));
 
 import { showHostTaskLog } from './logs.js';
 import { saveTask, loadTask, localLogPath, type HostTask } from './tasks.js';
-import { followHostTask, fetchRemoteLog } from './progress.js';
 
 function makeTask(overrides: Partial<HostTask> = {}): HostTask {
   return {
@@ -53,8 +57,8 @@ beforeEach(() => {
     errOut += String(chunk);
     return true;
   });
-  vi.mocked(fetchRemoteLog).mockReturnValue(null);
-  vi.mocked(followHostTask).mockResolvedValue(0);
+  mockFetchRemoteLog.mockReturnValue(null);
+  mockFollowHostTask.mockResolvedValue(0);
 });
 
 afterEach(() => {
@@ -83,7 +87,7 @@ describe('showHostTaskLog', () => {
     expect(res.exitCode).toBe(0);
     expect(out).toBe('PONG\n');
     // No SSH call needed when local mirror exists.
-    expect(vi.mocked(fetchRemoteLog)).not.toHaveBeenCalled();
+    expect(mockFetchRemoteLog).not.toHaveBeenCalled();
   });
 
   it('does NOT follow (no SSH) a finished task even when follow is requested', async () => {
@@ -97,7 +101,7 @@ describe('showHostTaskLog', () => {
     expect(res.found).toBe(true);
     expect(res.exitCode).toBe(0);
     expect(out).toBe('final output\n');
-    expect(vi.mocked(followHostTask)).not.toHaveBeenCalled();
+    expect(mockFollowHostTask).not.toHaveBeenCalled();
   });
 
   // --- Issue 1 fix: detached-run on-demand remote fetch ---
@@ -106,35 +110,35 @@ describe('showHostTaskLog', () => {
     // Simulate a --no-follow dispatch: task record exists, no local log written.
     const task = makeTask({ id: 'detach01', status: 'completed' });
     saveTask(task);
-    vi.mocked(fetchRemoteLog).mockReturnValueOnce('remote output\n');
+    mockFetchRemoteLog.mockReturnValueOnce('remote output\n');
 
     const res = await showHostTaskLog(task.id, false);
 
     expect(res.found).toBe(true);
     expect(out).toBe('remote output\n');
-    expect(vi.mocked(fetchRemoteLog)).toHaveBeenCalledWith(task.target, task.remoteLog);
+    expect(mockFetchRemoteLog).toHaveBeenCalledWith(task.target, task.remoteLog);
   });
 
   it('caches the remote fetch locally so subsequent calls are SSH-free', async () => {
     const task = makeTask({ id: 'detach02', status: 'completed' });
     saveTask(task);
-    vi.mocked(fetchRemoteLog).mockReturnValueOnce('cached content\n');
+    mockFetchRemoteLog.mockReturnValueOnce('cached content\n');
 
     await showHostTaskLog(task.id, false);
 
     // Second call: local mirror now exists, no second SSH call.
     out = '';
-    vi.mocked(fetchRemoteLog).mockClear();
+    mockFetchRemoteLog.mockClear();
     await showHostTaskLog(task.id, false);
 
     expect(out).toBe('cached content\n');
-    expect(vi.mocked(fetchRemoteLog)).not.toHaveBeenCalled();
+    expect(mockFetchRemoteLog).not.toHaveBeenCalled();
   });
 
   it('hints at -f when the remote fetch succeeds but the task is still running', async () => {
     const task = makeTask({ id: 'detach03', status: 'running' });
     saveTask(task);
-    vi.mocked(fetchRemoteLog).mockReturnValueOnce('partial output\n');
+    mockFetchRemoteLog.mockReturnValueOnce('partial output\n');
 
     await showHostTaskLog(task.id, false);
 
@@ -145,14 +149,13 @@ describe('showHostTaskLog', () => {
   it('reports unavailable gracefully when the host is offline for a detached run', async () => {
     const task = makeTask({ id: 'detach04', status: 'completed' });
     saveTask(task);
-    // fetchRemoteLog already defaults to null — host unreachable.
+    // mockFetchRemoteLog already defaults to null — host unreachable.
 
     const res = await showHostTaskLog(task.id, false);
 
     expect(res.found).toBe(true);
+    // No stdout output (the "unavailable" notice goes to console.log).
     expect(out).toBe('');
-    // Console.log to stdout via chalk.gray — check via the captured out or the
-    // direct console mock. The message should not be the old "no local log" phrasing.
   });
 
   // --- Issue 2 fix: status updated after following to completion ---
@@ -160,7 +163,7 @@ describe('showHostTaskLog', () => {
   it('updates task status to completed after following a running task to completion', async () => {
     const task = makeTask({ id: 'follow01', status: 'running' });
     saveTask(task);
-    vi.mocked(followHostTask).mockResolvedValueOnce(0);
+    mockFollowHostTask.mockResolvedValueOnce(0);
 
     await showHostTaskLog(task.id, true);
 
@@ -173,7 +176,7 @@ describe('showHostTaskLog', () => {
   it('updates task status to failed when the agent exits non-zero', async () => {
     const task = makeTask({ id: 'follow02', status: 'running' });
     saveTask(task);
-    vi.mocked(followHostTask).mockResolvedValueOnce(1);
+    mockFollowHostTask.mockResolvedValueOnce(1);
 
     await showHostTaskLog(task.id, true);
 
@@ -185,7 +188,7 @@ describe('showHostTaskLog', () => {
   it('records unknown status when followHostTask times out (exit -1)', async () => {
     const task = makeTask({ id: 'follow03', status: 'running' });
     saveTask(task);
-    vi.mocked(followHostTask).mockResolvedValueOnce(-1);
+    mockFollowHostTask.mockResolvedValueOnce(-1);
 
     const res = await showHostTaskLog(task.id, true);
 

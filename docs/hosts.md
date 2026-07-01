@@ -15,9 +15,9 @@ by name from a small local registry, over plain SSH, with no central service to
 run or pay for:
 
 ```
-agents run claude "fix the auth bug"   --on mac-mini
-agents run codex  "port this to rust"  --on spark-0
-agents run droid  "triage the inbox"   --on win-mini
+agents run claude "fix the auth bug"   --host mac-mini
+agents run codex  "port this to rust"  --host spark-0
+agents run droid  "triage the inbox"   --host win-mini
 ```
 
 It sits next to the vendor clouds (`agents cloud run --provider rush|codex|…`),
@@ -193,7 +193,7 @@ is a fast-follow `HostProvider`, opt-in when logged in — not a v1 dependency.
 ## Architecture
 
 ```
-agents run <agent> "<task>" --on <host>
+agents run <agent> "<task>" --host <name>
   │
   ├─ resolveHost(name)         registry lookup in agents.yaml → {address,user,caps} [Phase 1]
   │
@@ -234,9 +234,9 @@ This is the answer to "I need machines but don't own enough": when the laptop is
 starving, lease one.
 
 ```
-agents run claude "big refactor" --on new           # crabbox warmup (default provider) → run → idle-release
-agents run codex  "gpu eval"     --on new:aws        # provider/class selector → EC2 → run
-agents run droid  "triage"       --on mac-mini       # owned, always-on
+agents run claude "big refactor" --host new           # crabbox warmup (default provider) → run → idle-release
+agents run codex  "gpu eval"     --host new:aws       # provider/class selector → EC2 → run
+agents run droid  "triage"       --host mac-mini      # owned, always-on
 ```
 
 `--on new[:<provider/class>]` leases via crabbox, registers the leased box as a
@@ -288,6 +288,32 @@ agent routing a GPU eval to a host tagged `gpu`).
 Resolution for an address: `hosts.<name>.address`, else error with the list of
 known names. (No tailnet lookup, no DNS guessing — a name is either registered or
 it isn't.)
+
+#### Tracking dispatched runs
+
+```
+agents run droid "triage the inbox" --host mac-mini          # followed (default)
+agents run droid "triage the inbox" --host mac-mini --no-follow  # detached
+```
+
+`--no-follow` dispatches and returns immediately — the agent keeps running on the
+host. The dispatch prints: `Dispatched to mac-mini. Track: agents hosts ps · Follow: agents hosts logs <id> -f`.
+
+```
+agents hosts ps             # list dispatched runs and their status
+agents hosts ps --json      # machine-readable
+agents hosts logs <id>      # print captured output (fetches from host on demand for detached runs)
+agents hosts logs <id> -f   # stream live output until the run finishes
+```
+
+`agents hosts ps` probes the remote exit file for each `running` task and updates
+its status to `completed`/`failed` when the remote agent has finished — so `ps`
+reflects reality, not a stale dispatch snapshot.
+
+`agents hosts logs <id>` (without `-f`) works for both followed and detached runs:
+if no local log mirror exists, it does a one-shot SSH fetch of the remote log and
+caches it locally for subsequent calls. A running task will also print:
+`Task still running. Follow live: agents hosts logs <id> -f`.
 
 ### 2. Transport — plain SSH (reuse, don't reinvent)
 
@@ -498,7 +524,7 @@ just relocates the storm):
   task/capability, and dispatches (`agents run --on <name> --json`). The VS Code
   extension is a second front-end onto the same commands. So Phase 1 prioritizes
   clean, deterministic, machine-readable `--json` on `hosts list` and `run --on`.
-- **Naming** — `agents hosts` (list/check/add/remove) + `agents run --on <host>`.
+- **Naming** — `agents hosts` (list/check/add/remove) + `agents run --host <name>` (`--on` is a hidden alias).
   (The singular `agents computer` macOS-accessibility command is unrelated, stays.)
 - **Provider model** — keep named-SSH dispatch as its own clean path; fold *tracked*
   host runs into the existing cloud store as a `host` provider so `agents cloud
