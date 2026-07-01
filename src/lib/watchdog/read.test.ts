@@ -99,6 +99,20 @@ describe('findSessionJsonlIn', () => {
     expect(found!).toContain(sessionId);
   });
 
+  it('finds a Codex rollout in a DEEP date partition (sessions/YYYY/MM/DD/)', () => {
+    // Real Codex layout is 3 levels deep — the sessions root is passed, not the
+    // leaf. A one-level scan (the pre-fix bug) descends into `2026/` and stops,
+    // never reaching the `.jsonl`, so this fixture returns [] against the old code.
+    const deepSid = 'deadbeef-1111-2222-3333-444455556666';
+    const sessionsRoot = path.join(root, 'sessions-deep');
+    const partition = path.join(sessionsRoot, '2026', '05', '27');
+    fs.mkdirSync(partition, { recursive: true });
+    const rollout = path.join(partition, `rollout-2026-05-27T09-30-00-${deepSid}.jsonl`);
+    fs.writeFileSync(rollout, '{}\n');
+    const found = findSessionJsonlIn([sessionsRoot], deepSid);
+    expect(found).toBe(rollout);
+  });
+
   it('returns undefined when the session is absent', () => {
     expect(findSessionJsonlIn([path.join(root, 'projects')], 'ffffffff-0000-0000-0000-000000000000')).toBeUndefined();
   });
