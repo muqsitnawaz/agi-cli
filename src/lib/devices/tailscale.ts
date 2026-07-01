@@ -10,6 +10,7 @@
  * unit-testable without a live tailnet.
  */
 import { spawnSync } from 'child_process';
+import * as os from 'os';
 import {
   type DeviceInput,
   type DevicePlatform,
@@ -84,6 +85,25 @@ function deviceNameFor(raw: RawTsNode, dnsName: string | undefined): string | nu
   if (!host) return null;
   const slug = slugifyHostName(host);
   return slug.length > 0 ? slug : null;
+}
+
+/**
+ * The logical device name of the machine this process is running on, derived
+ * the same way `deviceNameFor` derives a node's name from Tailscale: take the
+ * first label of the hostname (drop any DNS domain like macOS's `.local`) and
+ * slugify it into the ssh-alias charset. This mirrors the MagicDNS label
+ * Tailscale assigns to Self, so the result matches the name that
+ * `agents devices sync` registered for this host — letting `list` flag "this
+ * machine" without a live tailscale call, and staying correct even when the
+ * registry is synced across machines.
+ */
+export function deviceNameFromHostname(hostname: string): string {
+  const label = hostname.split('.')[0];
+  return slugifyHostName(label);
+}
+
+export function currentDeviceName(): string {
+  return deviceNameFromHostname(os.hostname());
 }
 
 function toNode(raw: RawTsNode): TailscaleNode | null {
