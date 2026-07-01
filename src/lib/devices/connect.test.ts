@@ -12,6 +12,12 @@ import { describe, expect, it } from 'vitest';
 import { buildSshInvocation, sshTargetFor, wrapRemoteCommand, ASKPASS_BUNDLE_ENV, ASKPASS_KEY_ENV } from './connect.js';
 import type { DeviceProfile } from './registry.js';
 
+function decodeEncodedCommand(wrapped: string): string {
+  const encoded = wrapped.split(' ').at(-1);
+  if (!encoded) throw new Error(`missing encoded command in ${wrapped}`);
+  return Buffer.from(encoded, 'base64').toString('utf16le');
+}
+
 function dev(over: Partial<DeviceProfile> & { name: string }): DeviceProfile {
   return {
     name: over.name,
@@ -34,8 +40,12 @@ describe('sshTargetFor', () => {
 });
 
 describe('wrapRemoteCommand', () => {
-  it('wraps Windows commands in PowerShell, leaves POSIX verbatim, undefined for interactive', () => {
-    expect(wrapRemoteCommand(dev({ name: 'w', shell: 'powershell' }), ['hostname'])).toBe("powershell -NoProfile -Command hostname");
+  it('wraps Windows commands in PowerShell EncodedCommand, leaves POSIX verbatim, undefined for interactive', () => {
+    const command = 'echo AGENTS_HELLO_123';
+    const wrapped = wrapRemoteCommand(dev({ name: 'w', shell: 'powershell' }), [command]);
+
+    expect(wrapped).toMatch(/^powershell -NoProfile -EncodedCommand [A-Za-z0-9+/=]+$/);
+    expect(decodeEncodedCommand(wrapped!)).toBe(command);
     expect(wrapRemoteCommand(dev({ name: 'l', shell: 'posix' }), ['uptime', '-p'])).toBe('uptime -p');
     expect(wrapRemoteCommand(dev({ name: 'i', shell: 'posix' }), [])).toBeUndefined();
   });
@@ -72,7 +82,8 @@ describe('buildSshInvocation', () => {
       ['hostname'],
       '/shim',
     );
-    expect(args[args.length - 1]).toBe('powershell -NoProfile -Command hostname');
+    expect(args[args.length - 1]).toMatch(/^powershell -NoProfile -EncodedCommand [A-Za-z0-9+/=]+$/);
+    expect(decodeEncodedCommand(args[args.length - 1]!)).toBe('hostname');
     expect(env.SSH_ASKPASS).toBe('/shim');
   });
 

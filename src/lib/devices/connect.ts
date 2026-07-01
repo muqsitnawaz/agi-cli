@@ -15,6 +15,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { encodePwshBase64 } from '../pwsh.js';
 import { assertValidSshTarget, shellQuote } from '../ssh-exec.js';
 import { getCacheDir } from '../state.js';
 import { hostNameFor } from './ssh-config.js';
@@ -42,14 +43,15 @@ export function sshTargetFor(device: DeviceProfile): string {
 /**
  * Wrap a remote command for the device's shell. Windows devices speak
  * PowerShell, so a bare command is run through `powershell -NoProfile
- * -Command`; POSIX devices get the command verbatim (the remote login shell
- * parses it). Returns undefined when no command was given (interactive login).
+ * -EncodedCommand`; POSIX devices get the command verbatim (the remote login
+ * shell parses it). Returns undefined when no command was given (interactive
+ * login).
  */
 export function wrapRemoteCommand(device: DeviceProfile, cmd: string[]): string | undefined {
   if (cmd.length === 0) return undefined;
   const joined = cmd.join(' ');
   if (device.shell === 'powershell') {
-    return `powershell -NoProfile -Command ${shellQuote(joined)}`;
+    return `powershell -NoProfile -EncodedCommand ${encodePwshBase64(joined)}`;
   }
   return joined;
 }
