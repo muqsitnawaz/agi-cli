@@ -6,7 +6,7 @@
  * IPv6 address ssh can't use, and mislabeling a relayed connection as direct.
  */
 import { describe, expect, it } from 'vitest';
-import { parseTailscaleStatus, nodeToDeviceInput, slugifyHostName } from './tailscale.js';
+import { parseTailscaleStatus, nodeToDeviceInput, slugifyHostName, deviceNameFromHostname } from './tailscale.js';
 
 const FIXTURE = JSON.stringify({
   Self: {
@@ -81,6 +81,14 @@ describe('parseTailscaleStatus', () => {
     expect(slugifyHostName("Bisma's MacBook Pro")).toBe('bismas-macbook-pro');
     expect(slugifyHostName('WIN-MINI')).toBe('win-mini');
     expect(slugifyHostName('  edge_case! ')).toBe('edge_case');
+  });
+
+  it('derives the current device name the same way a node name is derived', () => {
+    // Linux: bare hostname is already the MagicDNS label.
+    expect(deviceNameFromHostname('yosemite-s0')).toBe('yosemite-s0');
+    // macOS: LocalHostName carries a `.local` domain that must be dropped, and
+    // the label slugified to match the tailnet's derived name.
+    expect(deviceNameFromHostname('Bismas-MacBook-Pro.local')).toBe('bismas-macbook-pro');
   });
 
   it('projects a node into registry fields', () => {

@@ -28,6 +28,7 @@ import {
   type DeviceProfile,
 } from '../lib/devices/registry.js';
 import {
+  currentDeviceName,
   nodeToDeviceInput,
   parseTailscaleStatus,
   tailscaleStatusJson,
@@ -47,8 +48,9 @@ function parseTarget(target: string): { host: string; user?: string } {
   return { user: target.slice(0, at), host: target.slice(at + 1) };
 }
 
-/** One-line summary of a device for `list`. */
-function deviceSummary(d: DeviceProfile): string {
+/** One-line summary of a device for `list`. `isSelf` marks the machine this
+ * command is running on so it stands out from the rest of the tailnet. */
+function deviceSummary(d: DeviceProfile, isSelf = false): string {
   const addr = hostNameFor(d) ?? chalk.gray('no address');
   const online = d.tailscale
     ? d.tailscale.online
@@ -56,7 +58,10 @@ function deviceSummary(d: DeviceProfile): string {
       : chalk.gray('offline')
     : chalk.gray('unknown');
   const reach = d.tailscale?.online && !d.tailscale.direct ? chalk.yellow(' (relayed)') : '';
-  return `  ${chalk.bold(d.name.padEnd(16))} ${String(d.platform).padEnd(8)} ${(d.user ? d.user + '@' : '') + addr}  ${online}${reach}`;
+  const marker = isSelf ? chalk.cyan('▸ ') : '  ';
+  const name = isSelf ? chalk.bold.cyan(d.name.padEnd(16)) : chalk.bold(d.name.padEnd(16));
+  const here = isSelf ? chalk.cyan('  ← this machine') : '';
+  return `${marker}${name} ${String(d.platform).padEnd(8)} ${(d.user ? d.user + '@' : '') + addr}  ${online}${reach}${here}`;
 }
 
 /** Resolve a device or exit with a clear error. */
@@ -111,8 +116,9 @@ Typical workflow:
         console.log(chalk.gray("No devices. Run 'agents devices sync' or 'agents devices add <name> <user@host>'."));
         return;
       }
+      const self = currentDeviceName();
       console.log(chalk.bold(`Devices (${names.length})`));
-      for (const name of names) console.log(deviceSummary(reg[name]));
+      for (const name of names) console.log(deviceSummary(reg[name], name === self));
     });
 
   devicesCmd
