@@ -27,6 +27,12 @@ import {
   machinePassphraseExists,
   _resetFileStoreForTest,
 } from './filestore.js';
+import {
+  noteNativeShadow,
+  _resetFallbackNoticeForTest,
+  type NativeImportReport,
+  type NativeImportResult,
+} from './fallback.js';
 
 // Re-exported so existing importers (and tests) can keep reaching these via
 // './linux.js'. The implementations live in ./filestore.ts.
@@ -55,14 +61,23 @@ let isAvailable = false;
 
 let useFileFallback = false;
 let warnedFallback = false;
+// Set once the Secret Service is observed locked/unreachable in this process, so
+// read-through probes (which spawn secret-tool) stop retrying a collection we
+// already know we can't read.
+let nativeUnreachable = false;
 
-function activateFileFallback(): void {
+function activateFileFallback(opts?: { nativeUnreachable?: boolean }): void {
+  // When the fallback fires because the Secret Service was locked, record that so
+  // read-through probes don't keep re-spawning secret-tool for a collection we
+  // already know we can't read. The sticky path (file store already has items)
+  // leaves this false — the keyring may still be unlocked and readable.
+  if (opts?.nativeUnreachable) nativeUnreachable = true;
   if (useFileFallback) return;
   useFileFallback = true;
   if (!warnedFallback) {
     warnedFallback = true;
     process.stderr.write(
-      `[agents] secret-service collection locked, using file-based store at ${fileDir()}\n`
+      `[agents] using the encrypted file store at ${fileDir()}\n`
     );
   }
 }
@@ -70,6 +85,77 @@ function activateFileFallback(): void {
 function isLockedCollectionError(stderr: string): boolean {
   return /locked collection/i.test(stderr) ||
          /Prompt was dismissed/i.test(stderr);
+}
+
+/**
+ * Read one item straight from the Secret Service, bypassing preflight routing.
+ * Powers the read-through (so the file store can't silently shadow a keyring
+ * item) and `import-keyring`. Returns `{ value }` on a hit, `{ locked: true }`
+ * when the collection is locked, or `{}` on a plain miss / no tooling. Never
+ * writes to stderr — callers decide whether to surface a notice.
+ */
+function readNativeItemRaw(item: string): { value?: string; locked?: boolean } {
+  if (nativeUnreachable) return { locked: true };
+  if (!secretToolAvailable()) return {};
+  const user = os.userInfo().username;
+  const r = spawnSync('secret-tool', [
+    'lookup', 'service', SERVICE, 'account', user, 'item', item,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  if (r.status === 0) {
+    const v = r.stdout?.toString().trim();
+    return { value: v && v.length > 0 ? v : undefined };
+  }
+  const stderr = r.stderr?.toString() ?? '';
+  if (isLockedCollectionError(stderr)) {
+    nativeUnreachable = true;
+    return { locked: true };
+  }
+  return {};
+}
+
+/**
+ * Enumerate every `service=agents-cli` item held in the Secret Service,
+ * regardless of preflight routing. The `service` attribute already scopes this
+ * to items agents-cli stored (including bare names like `linear-api-key`), so an
+ * empty `prefix` is safe. `locked` distinguishes "store locked" from "store
+ * empty"; `available` is false when secret-tool isn't installed.
+ */
+function listNativeItemsRaw(prefix: string): { items: string[]; locked: boolean; available: boolean } {
+  if (!secretToolAvailable()) return { items: [], locked: false, available: false };
+  const r = spawnSync('secret-tool', [
+    'search', '--all', 'service', SERVICE,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+  if (r.status !== 0) {
+    const stderr = r.stderr?.toString() ?? '';
+    const locked = isLockedCollectionError(stderr);
+    if (locked) nativeUnreachable = true;
+    return { items: [], locked, available: true };
+  }
+  const output = `${r.stdout?.toString() || ''}\n${r.stderr?.toString() || ''}`;
+  return { items: parseSecretToolItems(output, prefix), locked: false, available: true };
+}
+
+/**
+ * Copy every Secret Service item under `prefix` that isn't already in the file
+ * store into it, so the file store becomes the complete headless-readable source
+ * of truth. Requires an unlocked keyring (a locked one can't be read). Dry-run
+ * unless `commit`. Consumed by `agents secrets import-keyring`.
+ */
+export function importNativeSecretToolItems(prefix: string, commit: boolean): NativeImportReport {
+  const { items, locked, available } = listNativeItemsRaw(prefix);
+  if (!available || locked) return { available, locked, results: [] };
+  const results: NativeImportResult[] = [];
+  for (const item of items) {
+    if (fileStore.has(item)) { results.push({ item, status: 'exists' }); continue; }
+    const probe = readNativeItemRaw(item);
+    if (probe.value === undefined) {
+      results.push({ item, status: 'failed', detail: probe.locked ? 'keyring locked' : 'could not read value' });
+      continue;
+    }
+    if (commit) fileStore.set(item, probe.value);
+    results.push({ item, status: commit ? 'imported' : 'would-import' });
+  }
+  return { available, locked, results };
 }
 
 /**
@@ -138,7 +224,15 @@ export function usesFileFallback(): boolean {
 /** secret-tool lookup attributes:
  *   service=agents-cli account=<user> item=<itemName> */
 export function hasSecretToolToken(item: string): boolean {
-  if (preflight() === 'file') return fileStore.has(item);
+  if (preflight() === 'file') {
+    if (fileStore.has(item)) return true;
+    // Read-through: the item may predate the fallback and still live in an
+    // unlocked keyring. Don't let the file store silently shadow it.
+    const probe = readNativeItemRaw(item);
+    if (probe.value !== undefined) { noteNativeShadow('shadowed', fileDir()); return true; }
+    if (probe.locked) noteNativeShadow('locked', fileDir());
+    return false;
+  }
   const user = os.userInfo().username;
   const result = spawnSync('secret-tool', [
     'lookup',
@@ -151,14 +245,22 @@ export function hasSecretToolToken(item: string): boolean {
   }
   const stderr = result.stderr?.toString() ?? '';
   if (isLockedCollectionError(stderr)) {
-    activateFileFallback();
+    activateFileFallback({ nativeUnreachable: true });
     return fileStore.has(item);
   }
   return false;
 }
 
 export function getSecretToolToken(item: string): string {
-  if (preflight() === 'file') return fileStore.get(item);
+  if (preflight() === 'file') {
+    if (fileStore.has(item)) return fileStore.get(item);
+    // Read-through: don't let a file-store miss shadow an item that still lives
+    // in an unlocked keyring (e.g. a bare `linear-api-key` a hook reads).
+    const probe = readNativeItemRaw(item);
+    if (probe.value !== undefined) { noteNativeShadow('shadowed', fileDir()); return probe.value; }
+    if (probe.locked) noteNativeShadow('locked', fileDir());
+    throw new Error(`Secret '${item}' not found in the file store or keyring.`);
+  }
   const user = os.userInfo().username;
   const result = spawnSync('secret-tool', [
     'lookup',
@@ -173,7 +275,7 @@ export function getSecretToolToken(item: string): string {
   }
   const stderr = result.stderr?.toString() ?? '';
   if (isLockedCollectionError(stderr)) {
-    activateFileFallback();
+    activateFileFallback({ nativeUnreachable: true });
     return fileStore.get(item);
   }
   throw new Error(`Secret '${item}' not found in keyring.`);
@@ -198,7 +300,7 @@ export function setSecretToolToken(item: string, value: string): void {
 
   const stderr = result.stderr?.toString().trim() ?? '';
   if (isLockedCollectionError(stderr)) {
-    activateFileFallback();
+    activateFileFallback({ nativeUnreachable: true });
     fileStore.set(item, value);
     return;
   }
@@ -221,7 +323,7 @@ export function deleteSecretToolToken(item: string): boolean {
   if (result.status === 0) return true;
   const stderr = result.stderr?.toString() ?? '';
   if (isLockedCollectionError(stderr)) {
-    activateFileFallback();
+    activateFileFallback({ nativeUnreachable: true });
     return fileStore.delete(item);
   }
   // secret-tool clear returns 0 whether the item existed or not.
@@ -315,8 +417,10 @@ export function _resetForTest(opts: {
   passphrase?: string | null;
 } = {}): void {
   _resetFileStoreForTest({ fileDir: opts.fileDir ?? null, passphrase: opts.passphrase ?? null });
+  _resetFallbackNoticeForTest();
   useFileFallback = opts.forceFileFallback ?? false;
   warnedFallback = false;
+  nativeUnreachable = false;
   checkedAvailability = false;
   isAvailable = false;
 }

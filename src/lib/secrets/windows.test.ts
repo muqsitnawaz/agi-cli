@@ -17,6 +17,7 @@ import {
   windowsBackend,
   getCredManToken,
   setCredManToken,
+  importNativeCredManItems,
   CRED_MAX_CREDENTIAL_BLOB_SIZE,
   _resetForTest,
 } from './windows.js';
@@ -195,6 +196,66 @@ describe('CRED_MAX_CREDENTIAL_BLOB_SIZE guard', () => {
     const atLimit = 'x'.repeat(CRED_MAX_CREDENTIAL_BLOB_SIZE);
     setCredManToken('agents-cli.secrets.demo.MAX', atLimit);
     expect(sawSet).toBe(true);
+  });
+});
+
+// (d2) read-through de-shadow — under the file fallback, a file-store miss must
+// fall through to Credential Manager instead of silently returning "not found".
+describe('read-through under file fallback', () => {
+  it('reads a CredMan item that is not in the file store', () => {
+    _resetForTest({ forceFileFallback: true, fileDir: tmpDir, passphrase: 'test-pass' });
+    // File store is empty, so this item only lives in CredMan (get op).
+    responder = (op, ctx) => {
+      if (op === 'get') {
+        expect(ctx.env.AGENTS_CRED_TARGET).toBe('linear-api-key');
+        return { status: 0, stdout: Buffer.from('lin_api_shadowed', 'utf8').toString('base64') };
+      }
+      throw new Error(`unexpected op ${op}`);
+    };
+    expect(getCredManToken('linear-api-key')).toBe('lin_api_shadowed');
+  });
+
+  it('reports missing (not throwing a false "found") when neither store has it', () => {
+    _resetForTest({ forceFileFallback: true, fileDir: tmpDir, passphrase: 'test-pass' });
+    responder = (op) => (op === 'get' ? { status: 3 } : (() => { throw new Error(`unexpected op ${op}`); })());
+    expect(() => getCredManToken('nope')).toThrow(/not found/i);
+  });
+});
+
+// (d3) import-keyring — migrate CredMan items into the file store.
+describe('importNativeCredManItems', () => {
+  it('copies items not already in the file store and skips existing ones (commit)', () => {
+    // Force the file-fallback path so the pre-seed set() lands in the file store
+    // (import compares against the file store, not CredMan).
+    _resetForTest({ forceFileFallback: true, fileDir: tmpDir, passphrase: 'test-pass' });
+    // Pre-seed one item into the file store so import reports it as "exists".
+    windowsBackend.set('agents-cli.bundles.demo', 'already-here');
+    responder = (op, ctx) => {
+      if (op === 'set') return { status: 0 };
+      if (op === 'list') return { status: 0, stdout: 'agents-cli.bundles.demo\nagents-cli.secrets.demo.A\n' };
+      if (op === 'get') {
+        return ctx.env.AGENTS_CRED_TARGET === 'agents-cli.secrets.demo.A'
+          ? { status: 0, stdout: Buffer.from('valA', 'utf8').toString('base64') }
+          : { status: 3 };
+      }
+      throw new Error(`unexpected op ${op}`);
+    };
+    const report = importNativeCredManItems('', true);
+    expect(report.available).toBe(true);
+    expect(report.locked).toBe(false);
+    const byItem = Object.fromEntries(report.results.map((r) => [r.item, r.status]));
+    expect(byItem['agents-cli.bundles.demo']).toBe('exists');
+    expect(byItem['agents-cli.secrets.demo.A']).toBe('imported');
+    // The imported value now round-trips out of the file store.
+    expect(getCredManToken('agents-cli.secrets.demo.A')).toBe('valA');
+  });
+
+  it('reports locked (nothing read) when CredMan is unreachable', () => {
+    _resetForTest({ forceAvailable: true, fileDir: tmpDir, passphrase: 'test-pass' });
+    responder = (op) => (op === 'list' ? { status: 1, stderr: 'CredMan error 1312' } : (() => { throw new Error(`unexpected op ${op}`); })());
+    const report = importNativeCredManItems('', true);
+    expect(report.locked).toBe(true);
+    expect(report.results).toEqual([]);
   });
 });
 

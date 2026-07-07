@@ -37,6 +37,12 @@ import {
   machinePassphraseExists,
   _resetFileStoreForTest,
 } from './filestore.js';
+import {
+  noteNativeShadow,
+  _resetFallbackNoticeForTest,
+  type NativeImportReport,
+  type NativeImportResult,
+} from './fallback.js';
 
 // Re-exported so importers (and tests) can keep reaching these via './windows.js'.
 export {
@@ -285,14 +291,22 @@ let isAvailable = false;
 
 let useFileFallback = false;
 let warnedFallback = false;
+// Set once Credential Manager is observed unreachable in this process, so the
+// read-through in get/has stops re-spawning PowerShell for a store we can't read.
+let nativeUnreachable = false;
 
-function activateFileFallback(): void {
+function activateFileFallback(opts?: { nativeUnreachable?: boolean }): void {
+  // When the fallback fires because Credential Manager itself was unreachable
+  // (no logon session), record that so read-through probes don't keep re-spawning
+  // PowerShell for a store we already know we can't reach. The sticky path
+  // (file store already has items) leaves this false — CredMan may still be live.
+  if (opts?.nativeUnreachable) nativeUnreachable = true;
   if (useFileFallback) return;
   useFileFallback = true;
   if (!warnedFallback) {
     warnedFallback = true;
     process.stderr.write(
-      `[agents] Windows Credential Manager unavailable, using file-based store at ${fileDir()}\n`
+      `[agents] using the encrypted file store at ${fileDir()}\n`
     );
   }
 }
@@ -308,6 +322,71 @@ function activateFileFallback(): void {
 function isCredManUnavailableError(r: CredResult): boolean {
   if (r.spawnError) return true; // powershell.exe not found
   return /\b1312\b/.test(r.stderr) || /NO_SUCH_LOGON_SESSION/i.test(r.stderr);
+}
+
+/**
+ * Read one item straight from Credential Manager, bypassing preflight routing.
+ * Powers the read-through (so the file store can't silently shadow a CredMan
+ * item) and `import-keyring`. Returns `{ value }` on a hit, `{ locked: true }`
+ * when the store is unreachable (no logon session), or `{}` on a plain miss / no
+ * PowerShell. Reading a specific target by name is always safe. No stderr.
+ */
+function readNativeItemRaw(item: string): { value?: string; locked?: boolean } {
+  if (nativeUnreachable) return { locked: true };
+  if (!powershellAvailable()) return {};
+  const r = runCred('get', { target: item });
+  if (r.status === 0) {
+    const v = Buffer.from(r.stdout.trim(), 'base64').toString('utf8');
+    return { value: v.length > 0 ? v : undefined };
+  }
+  if (r.status === 3) return {}; // clean not-found
+  if (isCredManUnavailableError(r)) {
+    nativeUnreachable = true;
+    return { locked: true };
+  }
+  return {};
+}
+
+/**
+ * Enumerate Credential Manager targets under `prefix`. CredMan has no service
+ * namespace — the target name is the only scope — so enumeration is floored to
+ * `agents-cli.` and never returns unrelated machine credentials. (Bare targets
+ * like `linear-api-key` are therefore out of scope for enumeration on Windows;
+ * they are still reachable by exact name via read-through.) `locked` marks an
+ * unreachable store; `available` is false when PowerShell is missing.
+ */
+function listNativeItemsRaw(prefix: string): { items: string[]; locked: boolean; available: boolean } {
+  if (!powershellAvailable()) return { items: [], locked: false, available: false };
+  const floor = prefix && prefix.length > 0 ? prefix : 'agents-cli.';
+  const r = runCred('list', { prefix: floor });
+  if (r.status === 0) return { items: parseWindowsCredList(r.stdout, floor), locked: false, available: true };
+  if (isCredManUnavailableError(r)) {
+    nativeUnreachable = true;
+    return { items: [], locked: true, available: true };
+  }
+  return { items: [], locked: false, available: true };
+}
+
+/**
+ * Copy every Credential Manager item under `prefix` that isn't already in the
+ * file store into it. Requires a reachable store (a no-logon-session store can't
+ * be read). Dry-run unless `commit`. Consumed by `agents secrets import-keyring`.
+ */
+export function importNativeCredManItems(prefix: string, commit: boolean): NativeImportReport {
+  const { items, locked, available } = listNativeItemsRaw(prefix);
+  if (!available || locked) return { available, locked, results: [] };
+  const results: NativeImportResult[] = [];
+  for (const item of items) {
+    if (fileStore.has(item)) { results.push({ item, status: 'exists' }); continue; }
+    const probe = readNativeItemRaw(item);
+    if (probe.value === undefined) {
+      results.push({ item, status: 'failed', detail: probe.locked ? 'Credential Manager unreachable' : 'could not read value' });
+      continue;
+    }
+    if (commit) fileStore.set(item, probe.value);
+    results.push({ item, status: commit ? 'imported' : 'would-import' });
+  }
+  return { available, locked, results };
 }
 
 /**
@@ -357,19 +436,31 @@ export function usesFileFallback(): boolean {
 // ---------- Credential Manager ops with fallback ----------
 
 export function hasCredManToken(item: string): boolean {
-  if (preflight() === 'file') return fileStore.has(item);
+  if (preflight() === 'file') {
+    if (fileStore.has(item)) return true;
+    const probe = readNativeItemRaw(item);
+    if (probe.value !== undefined) { noteNativeShadow('shadowed', fileDir()); return true; }
+    if (probe.locked) noteNativeShadow('locked', fileDir());
+    return false;
+  }
   const r = runCred('has', { target: item });
   if (r.status === 0) return true;
   if (r.status === 3) return false;
   if (isCredManUnavailableError(r)) {
-    activateFileFallback();
+    activateFileFallback({ nativeUnreachable: true });
     return fileStore.has(item);
   }
   return false;
 }
 
 export function getCredManToken(item: string): string {
-  if (preflight() === 'file') return fileStore.get(item);
+  if (preflight() === 'file') {
+    if (fileStore.has(item)) return fileStore.get(item);
+    const probe = readNativeItemRaw(item);
+    if (probe.value !== undefined) { noteNativeShadow('shadowed', fileDir()); return probe.value; }
+    if (probe.locked) noteNativeShadow('locked', fileDir());
+    throw new Error(`Secret '${item}' not found in the file store or Credential Manager.`);
+  }
   const r = runCred('get', { target: item });
   if (r.status === 0) {
     // stdout is base64 of the raw UTF-8 blob (dodges PowerShell encoding corruption).
@@ -377,7 +468,7 @@ export function getCredManToken(item: string): string {
   }
   if (r.status === 3) throw new Error(`Secret '${item}' not found in Credential Manager.`);
   if (isCredManUnavailableError(r)) {
-    activateFileFallback();
+    activateFileFallback({ nativeUnreachable: true });
     return fileStore.get(item);
   }
   throw new Error(`Failed to read secret '${item}': ${r.stderr.trim() || 'unknown error'}`);
@@ -397,7 +488,7 @@ export function setCredManToken(item: string, value: string): void {
   const r = runCred('set', { target: item, input: value });
   if (r.status === 0) return;
   if (isCredManUnavailableError(r)) {
-    activateFileFallback();
+    activateFileFallback({ nativeUnreachable: true });
     fileStore.set(item, value);
     return;
   }
@@ -410,7 +501,7 @@ export function deleteCredManToken(item: string): boolean {
   if (r.status === 0) return true;
   if (r.status === 3) return false;
   if (isCredManUnavailableError(r)) {
-    activateFileFallback();
+    activateFileFallback({ nativeUnreachable: true });
     return fileStore.delete(item);
   }
   return false;
@@ -421,7 +512,7 @@ export function listCredManItems(prefix: string): string[] {
   const r = runCred('list', { prefix });
   if (r.status === 0) return parseWindowsCredList(r.stdout, prefix);
   if (isCredManUnavailableError(r)) {
-    activateFileFallback();
+    activateFileFallback({ nativeUnreachable: true });
     return fileStore.list(prefix);
   }
   return [];
@@ -478,8 +569,10 @@ export function _resetForTest(opts: {
   forceAvailable?: boolean | null;
 } = {}): void {
   _resetFileStoreForTest({ fileDir: opts.fileDir ?? null, passphrase: opts.passphrase ?? null });
+  _resetFallbackNoticeForTest();
   useFileFallback = opts.forceFileFallback ?? false;
   warnedFallback = false;
+  nativeUnreachable = false;
   if (opts.forceAvailable === undefined || opts.forceAvailable === null) {
     checkedAvailability = false;
     isAvailable = false;

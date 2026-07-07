@@ -27,9 +27,12 @@ import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { linuxBackend, usesFileFallback as linuxUsesFileFallback } from './linux.js';
-import { windowsBackend, usesFileFallback as windowsUsesFileFallback } from './windows.js';
+import { linuxBackend, usesFileFallback as linuxUsesFileFallback, importNativeSecretToolItems } from './linux.js';
+import { windowsBackend, usesFileFallback as windowsUsesFileFallback, importNativeCredManItems } from './windows.js';
 import { getKeychainHelperPath } from './install-helper.js';
+import type { NativeImportReport } from './fallback.js';
+
+export type { NativeImportReport, NativeImportResult, NativeImportStatus } from './fallback.js';
 
 const SERVICE_PREFIX = 'agents-cli';
 const SECRETS_ITEM_PREFIX = `${SERVICE_PREFIX}.secrets.`;
@@ -530,6 +533,23 @@ export function migrateOrphanedKeychainItems(prefix: string): OrphanMigrationRes
     throw new Error(msg || `Failed to migrate orphaned keychain items with prefix '${prefix}'.`);
   }
   return parseOrphanMigrationOutput(result.stdout?.toString() || '');
+}
+
+/**
+ * Migrate secrets that live in the native store (GNOME Keyring / Windows
+ * Credential Manager) into the encrypted file store, so the file store becomes
+ * the complete headless-readable source of truth. This is the Linux/Windows
+ * counterpart to macOS's orphan/legacy migration: it exists because the file
+ * fallback would otherwise silently shadow those native items. macOS never uses
+ * the file fallback, so it returns an empty report there. Powers
+ * `agents secrets import-keyring`; dry-run unless `commit`.
+ */
+export function importNativeItems(prefix: string, commit: boolean): NativeImportReport {
+  if (backend) return { available: false, locked: false, results: [] };
+  assertSupportedPlatform();
+  if (isLinux()) return importNativeSecretToolItems(prefix, commit);
+  if (isWindows()) return importNativeCredManItems(prefix, commit);
+  return { available: false, locked: false, results: [] };
 }
 
 /** Options controlling how secret refs are resolved. */
