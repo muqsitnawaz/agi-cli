@@ -381,10 +381,13 @@ describe('shouldRaise', () => {
 });
 
 describe('appPathIsElectron', () => {
-  const framework = 'Contents/Frameworks/Electron Framework.framework';
+  // Build the expected path with path.join so the fake `exists` matches what
+  // appPathIsElectron computes on any platform (Windows uses backslashes).
+  const appPath = '/Applications/VSCodium.app';
+  const frameworkPath = path.join(appPath, 'Contents', 'Frameworks', 'Electron Framework.framework');
   it('is true when the .app bundles the Electron framework', () => {
-    const exists = (p: string) => p === `/Applications/VSCodium.app/${framework}`;
-    expect(appPathIsElectron('/Applications/VSCodium.app', exists)).toBe(true);
+    const exists = (p: string) => p === frameworkPath;
+    expect(appPathIsElectron(appPath, exists)).toBe(true);
   });
 
   it('is false for a native .app with no Electron framework', () => {
