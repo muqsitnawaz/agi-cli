@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+**[secrets] Headless file-store fallback no longer silently shadows the keyring; new `secrets import-keyring`**
+
+- On Linux/Windows the encrypted-file fallback is sticky: the moment any item lands on disk, `preflight()` routes every op to the file store and never consults the native credential store (GNOME Keyring / Windows Credential Manager) again. Secrets that live in the native store — e.g. a bare `linear-api-key` a SessionStart hook reads — became invisible with no warning, reading back empty. A read now **reads through** to the native store on a file-store miss (short-circuiting once the store is seen locked/unreachable, so it never re-spawns for a dead store), and emits a one-time stderr hint pointing at the new migration command. macOS is unaffected — it has no file fallback and uses `migrate-acl` for its own item-visibility classes. Source: `src/lib/secrets/linux.ts`, `src/lib/secrets/windows.ts`, `src/lib/secrets/fallback.ts`.
+- New `agents secrets import-keyring` (Linux + Windows; dry-run by default, `--commit` to write) migrates the items agents-cli owns in the native store into the file store, so the file store becomes the complete headless-readable source of truth — parity with macOS's `migrate-orphans`. The keyring must be unlocked (a locked collection can't be read; the command reports that). Source: `src/commands/secrets-import.ts`, `src/lib/secrets/index.ts`.
+
 ## 1.20.36
 
 **[windows] `agents sessions --active` detects sessions on Windows, and shim launches carry cwd + session identity everywhere**

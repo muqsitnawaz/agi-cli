@@ -193,7 +193,8 @@ See [The secrets-agent](#the-secrets-agent-macos) below for the model and the se
 | `secrets generate --strong` | All character classes | `agents secrets generate 48 --strong` |
 | `secrets generate -c` / `--copy` | Copy to clipboard, do not print | `agents secrets generate --copy` |
 | `secrets migrate` | Interactively migrate legacy YAML bundles into Keychain | `agents secrets migrate` |
-| `secrets migrate-acl` | Upgrade legacy keychain items to the biometry ACL | `agents secrets migrate-acl` |
+| `secrets migrate-acl` | Upgrade legacy keychain items to the biometry ACL (macOS) | `agents secrets migrate-acl` |
+| `secrets import-keyring` | Migrate keyring / Credential Manager items into the file store (Linux/Windows headless) | `agents secrets import-keyring --commit` |
 
 ## Configuration Schema
 
@@ -487,6 +488,27 @@ process running as the same user. For a key held **off disk**, set
 `AGENTS_SECRETS_PASSPHRASE` (it always takes precedence) or unlock the keyring
 (e.g. configure `pam_gnome_keyring` for SSH login). To rotate, set a new
 `AGENTS_SECRETS_PASSPHRASE`, re-add the secrets, and delete `.passphrase`.
+
+### Migrating keyring secrets into the file store (`import-keyring`)
+
+Once any secret lands in the file store, that store is the source of truth for
+this machine — later reads route there. If you had already stored secrets in the
+keyring (from a session when it was unlocked), a plain file-store miss now
+**reads through** to the keyring so those items aren't silently hidden, and prints
+a one-time hint. To make them permanent (readable even after the keyring
+re-locks, and without a per-read keyring lookup), migrate them in:
+
+```bash
+agents secrets import-keyring            # dry-run: shows what would move
+agents secrets import-keyring --commit   # copy keyring items into the file store
+```
+
+It enumerates the items agents-cli owns in the native store and copies any that
+aren't already in the file store. The keyring must be **unlocked** at the time —
+a locked collection can't be read, so unlock it first (or the command reports
+that it's locked). Windows behaves the same against Credential Manager; macOS is
+unaffected (it reads the keychain directly and has no file fallback — use
+`migrate-acl` there instead).
 
 ## See Also
 
