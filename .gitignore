@@ -8,6 +8,8 @@ dist/
 
 # Compiled keychain helper + provisioning profile (rebuild via scripts/build-keychain-helper.sh)
 /bin/
+# Same regenerable helper bundles after the apps/ + packages/ restructure (#724)
+/apps/cli/bin/
 
 # Caches
 .npm-cache/
