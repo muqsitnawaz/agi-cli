@@ -6,6 +6,24 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.9.285] - 2026-07-07
+
+### Added
+
+- **Factory Floor now matches the redesign mockup.** A structural pass over the shell:
+  - **Icon rail** — the left nav is a compact column of icon buttons with count/needs
+    badges (All · Needs · Backlog · Projects · Hosts); the `»` button expands to the
+    full text sidebar, which gains a `«` to collapse back.
+  - **Human session labels** — cards show `terminal-race-fix` (from the session
+    label/autoLabel) instead of the raw `claude-596c4c07` hash, with a compact
+    `<agent>·<id>` provenance chip beside it.
+  - **Project group headers** — grouped-by-project headers show `N agents` and a
+    Linear project link pill.
+  - **Detail-pane artifacts row** — clicking an agent shows its outputs as color-coded
+    chips: PR (click-through), CI, spawned team, created tickets.
+  - **Foreman corner FAB** — the voice orb is smaller and tucked into the bottom-right
+    corner rather than dominating the floor.
+
 ## [0.9.284] - 2026-07-07
 
 ### Added
