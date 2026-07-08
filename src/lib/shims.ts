@@ -489,17 +489,27 @@ fi
 
 VERSION_DIR="$AGENTS_USER_DIR/.history/versions/$AGENT/$VERSION"
 
-# Grok special case: binary lives in ~/.grok/downloads/, not node_modules.
-# We still use the agents-cli version dir purely for GROK_HOME isolation.
+# Grok special case: binary lives in the versioned home's .grok/downloads,
+# not node_modules. We still use the agents-cli version dir for GROK_HOME isolation.
 if [ "$AGENT" = "grok" ]; then
-  # Try to find a matching binary for the pinned version in the global grok downloads dir.
-  GROK_DOWNLOADS="$HOME/.grok/downloads"
+  # Check the versioned home first — this is where the binary lands when the
+  # installer runs with GROK_HOME set, or when grok self-updates under the shim.
+  GROK_DOWNLOADS="$VERSION_DIR/home/.grok/downloads"
   if [ -d "$GROK_DOWNLOADS" ]; then
     # Prefer a binary whose filename contains the exact version
     BINARY=$(ls "$GROK_DOWNLOADS"/grok-* 2>/dev/null | grep -i "$VERSION" | head -1)
     if [ -z "$BINARY" ]; then
-      # Fallback to the "current" grok binary (symlink or latest)
       BINARY=$(ls "$GROK_DOWNLOADS"/grok-* 2>/dev/null | head -1)
+    fi
+  fi
+  # Fall back to the global grok home (binary installed without GROK_HOME set)
+  if [ -z "$BINARY" ] || [ ! -x "$BINARY" ]; then
+    GROK_DOWNLOADS="$HOME/.grok/downloads"
+    if [ -d "$GROK_DOWNLOADS" ]; then
+      BINARY=$(ls "$GROK_DOWNLOADS"/grok-* 2>/dev/null | grep -i "$VERSION" | head -1)
+      if [ -z "$BINARY" ]; then
+        BINARY=$(ls "$GROK_DOWNLOADS"/grok-* 2>/dev/null | head -1)
+      fi
     fi
   fi
   if [ -z "$BINARY" ] || [ ! -x "$BINARY" ]; then
@@ -857,12 +867,20 @@ export KIMI_CODE_HOME="$HOME/.agents/.history/versions/${agent}/${version}/home/
   const versionDir = `$HOME/.agents/.history/versions/${agent}/${version}`;
   const binaryResolution =
     agent === 'grok'
-      ? `# Grok ships its native binary in ~/.grok/downloads, not node_modules.
-GROK_DOWNLOADS="$HOME/.grok/downloads"
+      ? `# Grok ships its native binary in the versioned home's .grok/downloads, not node_modules.
+GROK_DOWNLOADS="${versionDir}/home/.grok/downloads"
 BINARY=""
 if [ -d "$GROK_DOWNLOADS" ]; then
   BINARY=$(ls "$GROK_DOWNLOADS"/grok-* 2>/dev/null | grep -i "${version}" | head -1)
   [ -n "$BINARY" ] || BINARY=$(ls "$GROK_DOWNLOADS"/grok-* 2>/dev/null | head -1)
+fi
+# Fall back to the global grok home (binary installed without GROK_HOME set)
+if [ -z "$BINARY" ] || [ ! -x "$BINARY" ]; then
+  GROK_GLOBAL_DOWNLOADS="$HOME/.grok/downloads"
+  if [ -d "$GROK_GLOBAL_DOWNLOADS" ]; then
+    BINARY=$(ls "$GROK_GLOBAL_DOWNLOADS"/grok-* 2>/dev/null | grep -i "${version}" | head -1)
+    [ -n "$BINARY" ] || BINARY=$(ls "$GROK_GLOBAL_DOWNLOADS"/grok-* 2>/dev/null | head -1)
+  fi
 fi
 # Refuse a PATH match under our own shims dir — it resolves to this alias's
 # sibling dispatcher shim (shims dir is ahead of ~/.local/bin on PATH) and

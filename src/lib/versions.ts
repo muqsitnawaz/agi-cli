@@ -885,16 +885,29 @@ export function getVersionDir(agent: AgentId, version: string): string {
 export function getBinaryPath(agent: AgentId, version: string): string {
   const agentConfig = AGENTS[agent];
   if (agent === 'grok') {
-    const grokDownloads = path.join(getVersionHomePath(agent, version), '.grok', 'downloads');
-    // Best effort: first matching file for this version
+    // Prefer the versioned home — this is where the binary lands when the
+    // installer runs with GROK_HOME set (i.e. via the shim or a correct
+    // `agents add grok`), or when grok self-updates from within the shim.
+    const versionedDownloads = path.join(getVersionHomePath(agent, version), '.grok', 'downloads');
     try {
-      const entries = fs.readdirSync(grokDownloads);
+      const entries = fs.readdirSync(versionedDownloads);
       const match = entries.find((e: string) => e.includes(version) && e.startsWith('grok-'));
-      if (match) return path.join(grokDownloads, match);
+      if (match) return path.join(versionedDownloads, match);
       const first = entries.find((e: string) => e.startsWith('grok-'));
-      if (first) return path.join(grokDownloads, first);
+      if (first) return path.join(versionedDownloads, first);
     } catch {}
-    return path.join(grokDownloads, `grok-${version}`);
+    // Fall back to the global grok home. The install script may have dropped the
+    // binary here if GROK_HOME was not set at install time (e.g. an earlier
+    // `agents add grok@latest` before this fix).
+    const globalDownloads = path.join(getHomeDir(), '.grok', 'downloads');
+    try {
+      const entries = fs.readdirSync(globalDownloads);
+      const match = entries.find((e: string) => e.includes(version) && e.startsWith('grok-'));
+      if (match) return path.join(globalDownloads, match);
+      const first = entries.find((e: string) => e.startsWith('grok-'));
+      if (first) return path.join(globalDownloads, first);
+    } catch {}
+    return path.join(versionedDownloads, `grok-${version}`);
   }
   if (agent === 'droid') {
     // Factory's installer drops a standalone native binary (no npm package,
@@ -1169,7 +1182,20 @@ export async function installVersion(
     try {
       const script = agentConfig.installScript.replaceAll('VERSION', version);
       onProgress?.(`Installing ${agentConfig.name}@${version} via official installer...`);
-      await execAsync(script, { timeout: 120000 });
+      // For grok, pre-create a staging home dir and point GROK_HOME at it so the
+      // official installer drops the binary inside the versioned home where
+      // getBinaryPath() will find it. We stage under 'latest' because the concrete
+      // version isn't known until after the install; reconcileStaleLatestDir renames
+      // it to the real version afterward. Without GROK_HOME the installer writes to
+      // ~/.grok/downloads, which getBinaryPath doesn't check.
+      const installEnv = agent === 'grok'
+        ? (() => {
+            const stagingGrokHome = path.join(getVersionDir(agent, 'latest'), 'home', '.grok');
+            fs.mkdirSync(stagingGrokHome, { recursive: true });
+            return { ...process.env, GROK_HOME: stagingGrokHome };
+          })()
+        : undefined;
+      await execAsync(script, { timeout: 120000, env: installEnv });
 
       if (version === 'latest') {
         installedVersion = await getCliVersionFromPath(agent) || version;
