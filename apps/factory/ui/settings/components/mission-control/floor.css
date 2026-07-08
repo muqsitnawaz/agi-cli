@@ -226,7 +226,16 @@
 .swarmify-root .fitem .sid { font-family: "Geist Mono", monospace; font-size: 10.5px; color: var(--ds-text-faint); background: var(--ds-bg-recessed); border: 1px solid var(--ds-border); border-radius: 5px; padding: 1px 6px; flex: none; }
 .swarmify-root .fitem .path { color: var(--ds-text-dim); font-size: 11px; }
 .swarmify-root .fitem .when { margin-left: auto; color: var(--ds-text-dim); font-size: 11px; display: flex; align-items: center; gap: 8px; }
-.swarmify-root .fitem .resp { font-size: 12.5px; color: var(--ds-text); line-height: 1.5; margin: 2px 0 8px; border-left: 2px solid var(--ds-border); padding-left: 10px; }
+/* Original prompt / task topic — the card's prominent FIRST line (RUSH-1531): what the
+   session is ABOUT, so a card is identifiable at a glance. The last message (.resp) sits
+   below it and now reads as secondary. */
+.swarmify-root .fitem .prompt { margin: 2px 0 8px; }
+.swarmify-root .fitem .prompt .prompt-text { font-size: 13px; font-weight: 600; color: var(--ds-text); line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.swarmify-root .fitem .prompt .prompt-text.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.swarmify-root .fitem .prompt .prompt-toggle { margin-top: 3px; padding: 0; background: none; border: none; color: var(--brand); font-size: 11px; font-family: inherit; cursor: pointer; }
+.swarmify-root .fitem .prompt .prompt-toggle:hover { text-decoration: underline; }
+/* Last message — secondary to the prompt above it: dimmer + slightly smaller. */
+.swarmify-root .fitem .resp { font-size: 12px; color: var(--ds-text-muted); line-height: 1.5; margin: 2px 0 8px; border-left: 2px solid var(--ds-border); padding-left: 10px; }
 .swarmify-root .fitem .resp .q { color: var(--status-pending); font-weight: 600; }
 /* Produced-artifact chips: what the agent SPAWNED (a team) or CREATED (tickets),
    distinct from the injected/worked-on ticket. Cyan-tinted, sits below the response. */

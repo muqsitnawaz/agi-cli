@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import { Icon } from './icons'
 import { AgentAvatar, agentIdFromPrefix } from './AgentAvatar'
 import { StructuredReply, type ReplyCallbacks } from './StructuredReply'
-import { heartbeatLevel, sessionTaskLine, type FloorAgent, type FloorTicket } from './floorModel'
+import { heartbeatLevel, type FloorAgent, type FloorTicket } from './floorModel'
 import { sinceFromMs } from './floorAdapter'
 import { useNow } from './useNow'
 import { CardChecklist } from './TodoChecklist'
@@ -35,6 +35,8 @@ interface FeedItemProps {
 }
 
 function FeedItemImpl({ agent: a, selected, plain, onSelect, onOption, onFreeText, onAttach }: FeedItemProps) {
+  // A long original prompt is clamped to a few lines with an expand toggle (see below).
+  const [promptExpanded, setPromptExpanded] = useState(false)
   // Live heartbeat: only a running / stalled agent with a known last-activity stamp ticks.
   // The shared 1s ticker re-renders just this leaf, never the parent list.
   const now = useNow(1000)
@@ -67,17 +69,18 @@ function FeedItemImpl({ agent: a, selected, plain, onSelect, onOption, onFreeTex
   const destructive = a.question?.kind === 'destructive'
   const attn = a.phase === 'failed' ? 'fail' : stalled ? 'stall' : a.needs ? 'attn' : ''
 
-  // Rolling summary line: the agent's own words for a running/stalled agent. Skip it
-  // when it just echoes the response block. Suppress the now-line when the summary
-  // already says the same thing (summary fell back to the now-line's activity string).
   const nowlineText = `${a.verb} ${a.target}`.trim()
-  // One canonical task line (summary/preview -> response -> worktree/branch). This is
-  // what fixes the identical, contextless "needs you" cards: a waiting session with no
-  // narrative still shows its worktree slug instead of just "Edit <file>". Shown unless
-  // it merely echoes the response block or the now-line.
-  const taskLine = sessionTaskLine(a)
-  const showSummary = !plain && !!taskLine && taskLine !== a.resp.trim() && taskLine !== nowlineText
-  const showNowline = !plain && !!a.verb && !(showSummary && taskLine === nowlineText)
+  // The session TOPIC line — the ORIGINAL prompt / task this session is about (RUSH-1531).
+  // Rendered prominently as the card's first content line so a card is identifiable at a
+  // glance, independent of the last message (`resp`, shown separately below). Suppressed
+  // when empty or when it would merely echo the last message.
+  const promptText = a.summary.trim()
+  const showPrompt = !plain && !!promptText && promptText !== a.resp.trim()
+  // A long prompt is clamped to a few lines with a Show more/less toggle, so the card
+  // stays compact but the full prompt is never silently truncated (acceptance #3).
+  const promptClampable = promptText.length > 160
+  // The now-line (verb + target) still shows the live activity, distinct from the topic.
+  const showNowline = !plain && !!a.verb && nowlineText !== promptText
 
   const marker =
     a.pr ? (
@@ -126,7 +129,20 @@ function FeedItemImpl({ agent: a, selected, plain, onSelect, onOption, onFreeTex
           </span>
         </span>
       </div>
-      <div className="resp">{destructive ? <span className="q">{a.resp}</span> : a.resp}</div>
+      {showPrompt && (
+        <div className="prompt">
+          <div className={`prompt-text${promptClampable && !promptExpanded ? ' clamp' : ''}`}>{promptText}</div>
+          {promptClampable && (
+            <button
+              className="prompt-toggle"
+              onClick={(e) => { e.stopPropagation(); setPromptExpanded((v) => !v) }}
+            >
+              {promptExpanded ? 'Show less' : 'Show more'}
+            </button>
+          )}
+        </div>
+      )}
+      {a.resp && <div className="resp">{destructive ? <span className="q">{a.resp}</span> : a.resp}</div>}
       {!plain && (a.spawnedTeam || (a.createdTickets?.length ?? 0) > 0) && (
         <div className="artifacts" onClick={(e) => e.stopPropagation()}>
           {a.spawnedTeam && (
@@ -142,7 +158,6 @@ function FeedItemImpl({ agent: a, selected, plain, onSelect, onOption, onFreeTex
         </div>
       )}
       {!plain && a.todos.length > 0 && <CardChecklist todos={a.todos} />}
-      {showSummary && <div className="summary">{taskLine}</div>}
       {showNowline && (
         <div className={`nowline ${stalled ? 'stall' : ''}`}>
           <Icon name="chevR" size={11} /> <span className="v">{a.verb}</span> {a.target}

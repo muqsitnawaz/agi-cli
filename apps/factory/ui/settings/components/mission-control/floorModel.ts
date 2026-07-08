@@ -142,7 +142,7 @@ export interface FloorAgent {
   question: StructuredQuestion | null
   reply: ReplyTarget     // how a user reply reaches this agent (host dispatches on kind)
   todos: TodoItem[]      // task checklist from the latest TodoWrite; empty when none
-  summary: string        // the "what is it doing" line (CLI-provided); '' when unknown
+  summary: string        // the session TOPIC line: the original CLI prompt / task the session is about (falls back to the live narrative); '' when unknown. Rendered as the card's prominent first line, distinct from `resp` (the last message).
   recent: RecentToolCall[] // rolling window of this session's recent tool calls; [] when none
   pane?: string          // tmux `%N` pane handle for unique addressing; undefined for non-tmux
   viewingIn?: string     // "Codium tab 3" / "Ghostty tab 2" / "detached"; undefined when unknown

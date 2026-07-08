@@ -166,6 +166,35 @@ describe('toFloorAgentFromUnified', () => {
     expect(a.lastActivityMs).toBe(NOW - 5000)
   })
 
+  test('summary carries the ORIGINAL prompt (firstUserMessage), kept distinct from the last message (RUSH-1531)', () => {
+    const a = toFloorAgentFromUnified(
+      baseUnified({
+        terminal: {
+          id: 't1',
+          firstUserMessage: 'Fix the session card so it shows the original prompt',
+          narrative: 'Reading FeedItem.tsx',
+          currentActivity: 'Editing FeedItem.tsx',
+        },
+        agent: { last_messages: ['Done — the card now renders the prompt.'] },
+      }),
+      { pinned: new Set(), workspaceRepo: null, nowMs: NOW },
+    )
+    // The topic line is the original prompt, NOT the rolling narrative or the last message.
+    expect(a.summary).toBe('Fix the session card so it shows the original prompt')
+    // The last message stays separate so the card can render both.
+    expect(a.resp).toBe('Done — the card now renders the prompt.')
+  })
+
+  test('summary falls back to the live narrative when no original prompt was captured', () => {
+    const a = toFloorAgentFromUnified(
+      baseUnified({
+        terminal: { id: 't1', narrative: 'Reading the remote adapter', currentActivity: 'Editing adapter.ts' },
+      }),
+      { pinned: new Set(), workspaceRepo: null, nowMs: NOW },
+    )
+    expect(a.summary).toBe('Reading the remote adapter')
+  })
+
   test('a completed agent with an open PR is done + unreviewed (needs you)', () => {
     const a = toFloorAgentFromUnified(
       baseUnified({ status: 'completed', active: false, prUrl: 'https://github.com/o/r/pull/9' }),

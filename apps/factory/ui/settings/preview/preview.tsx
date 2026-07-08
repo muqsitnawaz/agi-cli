@@ -103,7 +103,8 @@ const running: FloorAgent[] = [
     pr: '#148', ci: 'running', tok: 41, files: 9, since: '3s', lastActivityMs: Date.now() - 3000,
     pane: '%42', viewingIn: 'Codium tab 3',
     verb: 'Porting', target: 'the group-by control into the shared model',
-    summary: 'Collapsed the three ticket surfaces into one list; now porting the group-by control into the shared model.',
+    summary: 'Merge the three ticket surfaces (markdown TODOs, Linear, and GitHub issues) into one unified list model, then port the group-by control onto it and delete the two dead view components it replaces.',
+    resp: 'Collapsed the surfaces into one model; wiring the group-by control now.',
     createdTickets: ['RUSH-1519', 'RUSH-1520'],
     todos: [
       { content: 'Merge ticket surfaces', status: 'completed' },

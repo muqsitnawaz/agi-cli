@@ -52,6 +52,7 @@ export interface UnifiedAgentLike {
     cwd?: string | null
     branch?: string | null
     waitingForInput?: boolean
+    firstUserMessage?: string
     lastUserMessage?: string
     currentActivity?: string
     narrative?: string
@@ -293,10 +294,12 @@ export function toFloorAgentFromUnified(
     question: parseStructuredQuestion(resp, phase),
     reply,
     todos: latestTodos(u.terminal?.recentToolCalls),
-    // The rolling summary line + recent tool calls already flow over the wire on the
-    // terminal. Prefer the agent's own prose (narrative); fall back to the now-line
-    // (currentActivity) when it hasn't spoken between tool calls yet.
-    summary: u.terminal?.narrative || u.terminal?.currentActivity || '',
+    // The card's topic line: what this session is ABOUT, not what it's doing right now.
+    // Prefer the original CLI prompt (firstUserMessage) so a card is identifiable at a
+    // glance (RUSH-1531); fall back to the agent's own prose (narrative) and then the
+    // now-line (currentActivity) when the prompt wasn't captured. The last response is
+    // shown separately by the card, so it is NOT part of this line.
+    summary: u.terminal?.firstUserMessage || u.terminal?.narrative || u.terminal?.currentActivity || '',
     recent: u.terminal?.recentToolCalls ?? [],
   }
 }
