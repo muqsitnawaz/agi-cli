@@ -6,6 +6,8 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.9.287] - 2026-07-08
+
 ### Fixed
 
 - **Shell (`SH`) tabs now load your full interactive shell environment.** Every
