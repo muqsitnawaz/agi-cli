@@ -14,7 +14,9 @@ import { Icon } from '../components/mission-control/icons'
 import { FeedItem, TicketStrip } from '../components/mission-control/FeedItem'
 import { SavedViews } from '../components/mission-control/SavedViewsBar'
 import { DispatchPanel } from '../components/mission-control/DispatchPanel'
-import type { FloorAgent, FloorTicket, StructuredQuestion } from '../components/mission-control/floorModel'
+import { FloorSubtabs, type FixedTab, type TaskTab, closeTaskTab } from '../components/mission-control/FloorSubtabs'
+import { FloorControls, floorControlsMode } from '../components/mission-control/FloorControls'
+import type { CenterMode, FloorAgent, FloorTicket, StructuredQuestion } from '../components/mission-control/floorModel'
 import type { UnifiedTask } from '../types'
 import type { InstalledAgent, DispatchHost, DispatchTarget } from '../components/mission-control/dispatch.types'
 
@@ -187,11 +189,89 @@ function Feed() {
   )
 }
 
+// The new Floor sub-tab strip + ONE contextual controls bar, on top of the feed.
+// Shows the fixed center pills (Agents active = lime, with count + needs badge), a
+// couple of open task tabs with their x, the Dispatch button on the right, and the
+// contextual FloorControls that swaps its pills per active center. ?view=subtabs.
+function Subtabs() {
+  const initialCenter = (new URLSearchParams(location.search).get('center') as CenterMode) || 'agents'
+  const [center, setCenter] = useState<CenterMode>(initialCenter)
+  const [taskTabs, setTaskTabs] = useState<TaskTab[]>([
+    { id: 'RUSH-1262', title: 'PKCE token exchange', source: 'LN' },
+    { id: '#418', title: 'Kanban feed views', source: 'GH' },
+  ])
+  const [activeTaskTab, setActiveTaskTab] = useState<string | null>(null)
+  const [group, setGroup] = useState<'project' | 'priority' | 'source' | 'status'>('project')
+
+  const fixed: FixedTab[] = [
+    { center: 'agents', label: 'Agents', count: running.length + done.length, needs: 2 },
+    { center: 'backlog', label: 'Backlog', count: tickets.length },
+    { center: 'host', label: 'Hosts', count: 3 },
+  ]
+  const controlsMode = activeTaskTab ? null : floorControlsMode(center)
+
+  return (
+    <div className="sw-floor-dashboard" style={{ padding: 0 }}>
+      <FloorSubtabs
+        fixed={fixed}
+        center={center}
+        taskTabs={taskTabs}
+        activeTaskTab={activeTaskTab}
+        onSelectCenter={(c) => { setActiveTaskTab(null); setCenter(c) }}
+        onSelectTaskTab={setActiveTaskTab}
+        onCloseTaskTab={(id) => {
+          const res = closeTaskTab(taskTabs, activeTaskTab, id)
+          setTaskTabs(res.tabs)
+          setActiveTaskTab(res.activeId)
+        }}
+        onDispatch={noop}
+      />
+      {controlsMode && (
+        <FloorControls
+          mode={controlsMode}
+          runningCount={2}
+          totalCount={running.length + done.length}
+          sidebarOpen
+          onToggleSidebar={noop}
+          rightOpen
+          onToggleRight={noop}
+          plain={false}
+          onTogglePlain={noop}
+          sort="needs"
+          onSort={noop}
+          activeStatus={[]}
+          onToggleStatus={noop}
+          activeAbbrs={[]}
+          onToggleAbbr={noop}
+          ticketGroup={group}
+          onTicketGroup={setGroup}
+          ticketSort="priority"
+          onTicketSort={noop}
+          srcFilter={{ LN: true, GH: true }}
+          onToggleSrc={noop}
+          search=""
+          onSearch={noop}
+        />
+      )}
+      <div className="page">
+        <div className="feed-col"><Feed /></div>
+      </div>
+    </div>
+  )
+}
+
 function Preview() {
   const params = new URLSearchParams(location.search)
   const theme = params.get('theme') === 'light' ? 'theme-light' : 'theme-dark'
   const view = params.get('view') ?? 'feed'
   const [dispatchOpen] = useState(view === 'dispatch')
+  if (view === 'subtabs') {
+    return (
+      <div className={`swarmify-root ${theme}`} style={{ minHeight: '100vh' }}>
+        <Subtabs />
+      </div>
+    )
+  }
   return (
     <div className={`swarmify-root ${theme}`} style={{ minHeight: '100vh' }}>
       <div className="sw-floor-dashboard" style={{ padding: 0 }}>

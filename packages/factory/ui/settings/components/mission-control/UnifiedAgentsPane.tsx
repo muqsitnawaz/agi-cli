@@ -20,10 +20,13 @@ import {
   PENDING_DISPATCH_TTL_MS,
   type PendingDispatch,
 } from './dispatch'
-import { FloorControls, type StatusChip } from './FloorControls'
+import { FloorControls, floorControlsMode, type StatusChip } from './FloorControls'
+import { FloorSubtabs, openTaskTab, closeTaskTab, type FixedTab, type TaskTab } from './FloorSubtabs'
 import { FloorSidebar } from './FloorSidebar'
 import { BacklogCenter } from './BacklogCenter'
 import { TicketDetail } from './TicketDetail'
+import { TaskDetail } from '../bench/TaskDetail'
+import type { FlatTask } from '../bench/TaskCard'
 import { HostDetail } from './HostDetail'
 import { FeedItem, FollowUpBox } from './FeedItem'
 import { TodoChecklist } from './TodoChecklist'
@@ -34,6 +37,7 @@ import {
   sortAgents,
   latestTodos,
   type FloorAgent,
+  type FloorTicket,
   type CenterMode,
   type HostInventory,
   type FloorGroupBy,
@@ -572,6 +576,11 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   // ---------- Floor 3-pane shell state ----------
   const floorPrefs0 = useRef(loadFloorPrefs()).current
   const [center, setCenter] = useState<CenterMode>('agents')
+  // Dynamic task tabs: double-clicking a backlog ticket or agent card opens a
+  // closeable tab in the sub-tab strip. activeTaskTab === null means a fixed center
+  // tab is showing; otherwise the named task tab owns the center pane.
+  const [openTaskTabs, setOpenTaskTabs] = useState<TaskTab[]>([])
+  const [activeTaskTab, setActiveTaskTab] = useState<string | null>(null)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null)
   const [projFilter, setProjFilter] = useState<string | null>(null)
@@ -1483,6 +1492,7 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   }, [])
 
   const onScope = useCallback((value: string) => {
+    setActiveTaskTab(null)
     if (value === '__queue') { setCenter('backlog'); return }
     if (value === '__needs') { setCenter('agents'); setProjFilter(null); setHostFilter(null); return }
     if (value.startsWith('host:')) {
@@ -1497,13 +1507,52 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   }, [])
 
   const selectFloorAgent = useCallback((id: string) => {
+    setActiveTaskTab(null)
     setCenter('agents')
     setSelectedAgentId(id)
+  }, [])
+
+  // ---------- sub-tab strip: fixed center tabs + dynamic task tabs ----------
+  // Switch to a fixed center tab (Agents / Backlog / Hosts). Clears any active task
+  // tab so the strip highlights the center pill and the center pane shows that view.
+  const selectCenter = useCallback((c: CenterMode) => {
+    setActiveTaskTab(null)
+    setCenter(c)
+  }, [])
+
+  // Open (or focus) a task tab from a backlog ticket — the primary open path.
+  const openTaskFromTicket = useCallback((ticket: FloorTicket) => {
+    setOpenTaskTabs((prev) => openTaskTab(prev, { id: ticket.id, title: ticket.title, source: ticket.source }))
+    setActiveTaskTab(ticket.id)
+  }, [])
+
+  // Open (or focus) a task tab from an agent card. Keys off the agent's linked ticket
+  // when it has one (so it collapses with the ticket's tab); otherwise the agent id.
+  const openTaskFromAgent = useCallback((a: FloorAgent) => {
+    const id = a.ticket ?? a.id
+    const source: TicketSource = a.ticket?.startsWith('#') ? 'GH' : 'LN'
+    setOpenTaskTabs((prev) => openTaskTab(prev, { id, title: a.ticket ?? a.name, source }))
+    setActiveTaskTab(id)
+  }, [])
+
+  const selectTaskTab = useCallback((id: string) => setActiveTaskTab(id), [])
+
+  const handleCloseTaskTab = useCallback((id: string) => {
+    setActiveTaskTab((curActive) => {
+      let nextActive = curActive
+      setOpenTaskTabs((prev) => {
+        const res = closeTaskTab(prev, curActive, id)
+        nextActive = res.activeId
+        return res.tabs
+      })
+      return nextActive
+    })
   }, [])
 
   // Host detail pane: clicking a host in the sidebar opens its detail/config on
   // the right and fetches its inventory (cached backend-side).
   const onSelectHost = useCallback((hostName: string) => {
+    setActiveTaskTab(null)
     setCenter('host')
     setSelectedHostId(hostName)
     setHostConfigError(null)
@@ -1601,7 +1650,65 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
     )
   }
 
-  const centerContent = center === 'backlog' ? (
+  // A feed row: the shared FeedItem (single-click selects → right-pane preview) wrapped
+  // in a display:contents span whose double-click opens the agent as a task tab. The
+  // wrapper adds no layout box, so it can't disturb the .feed spacing.
+  const renderAgentFeedItem = (a: FloorAgent) => (
+    <span key={a.id} style={{ display: 'contents' }} onDoubleClick={() => openTaskFromAgent(a)}>
+      <FeedItem
+        agent={a}
+        selected={selectedFloorAgent?.id === a.id}
+        plain={plain}
+        onSelect={selectFloorAgent}
+        onOption={onAgentOption}
+        onFreeText={replyToAgent}
+        onAttach={onAttachScreenshot}
+      />
+    </span>
+  )
+
+  // Sub-tab strip model: three fixed center tabs with live counts + needs badge.
+  const backlogOpenCount = useMemo(() => floorTickets.filter((t) => t.status !== 'done').length, [floorTickets])
+  const hostsCount = dispatchDevices.length || fleetDevices.length
+  const fixedTabs: FixedTab[] = [
+    { center: 'agents', label: 'Agents', count: floorAgents.length, needs: needsAgents.length },
+    { center: 'backlog', label: 'Backlog', count: backlogOpenCount },
+    { center: 'host', label: 'Hosts', count: hostsCount },
+  ]
+
+  // Active task tab (if any) + its backing FlatTask, resolved from the unified queue
+  // by id or Linear/GitHub identifier so the bench TaskDetail can render it read-only.
+  const activeTab = activeTaskTab ? openTaskTabs.find((t) => t.id === activeTaskTab) ?? null : null
+  const activeTabTask: FlatTask | null = activeTab
+    ? (() => {
+        const ut = unifiedTasks.find((t) => t.id === activeTab.id || t.metadata.identifier === activeTab.id)
+        return ut
+          ? { id: ut.id, source: ut.source, title: ut.title, description: ut.description, status: ut.status, priority: ut.priority, metadata: ut.metadata }
+          : null
+      })()
+    : null
+
+  const centerContent = activeTab ? (
+    <div className="feed sw-tasktab-pane">
+      <div className="sw-bench-detail">
+        {activeTabTask ? (
+          <TaskDetail
+            task={activeTabTask}
+            onDispatch={(t) => openDispatch({ ticketId: t.id })}
+            onDismiss={() => handleCloseTaskTab(activeTab.id)}
+            onOpenExternal={(url) => postMessage({ type: 'openExternal', url })}
+          />
+        ) : (
+          <div className="detail-empty" style={{ flexDirection: 'column', gap: 12 }}>
+            <span>{activeTab.title}</span>
+            <button className="disp" onClick={() => openDispatch({ ticketId: activeTab.id })}>
+              <Icon name="zap" size={12} /> Dispatch
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  ) : center === 'backlog' ? (
     <BacklogCenter
       tickets={floorTickets}
       group={ticketGroup}
@@ -1610,11 +1717,8 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
       projFilter={projFilter}
       search={floorSearch}
       selectedTicketId={selectedTicketId}
-      onGroup={setTicketGroup}
-      onSort={setTicketSort}
-      onToggleSrc={(src) => setTicketSrc((p) => ({ ...p, [src]: !p[src] }))}
       onSelectTicket={(id) => setSelectedTicketId(id)}
-      onBackToAgents={() => setCenter('agents')}
+      onOpenTask={openTaskFromTicket}
     />
   ) : (
     <div className="feed">
@@ -1644,18 +1748,7 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
             onBatchReply={onBatchReply}
             onReplyOne={selectFloorAgent}
           />
-          {questionClusters.filter((c) => c.length === 1).map((c) => (
-            <FeedItem
-              key={c[0].id}
-              agent={c[0]}
-              selected={selectedFloorAgent?.id === c[0].id}
-              plain={plain}
-              onSelect={selectFloorAgent}
-              onOption={onAgentOption}
-              onFreeText={replyToAgent}
-              onAttach={onAttachScreenshot}
-            />
-          ))}
+          {questionClusters.filter((c) => c.length === 1).map((c) => renderAgentFeedItem(c[0]!))}
           {failedAgents.map((a) => (
             <FailureCard
               key={a.id}
@@ -1665,18 +1758,7 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
               onReassign={(toAgent) => reassignFloorAgent(a, toAgent)}
             />
           ))}
-          {reviewNeedsAgents.map((a) => (
-            <FeedItem
-              key={a.id}
-              agent={a}
-              selected={selectedFloorAgent?.id === a.id}
-              plain={plain}
-              onSelect={selectFloorAgent}
-              onOption={onAgentOption}
-              onFreeText={replyToAgent}
-              onAttach={onAttachScreenshot}
-            />
-          ))}
+          {reviewNeedsAgents.map((a) => renderAgentFeedItem(a))}
         </>
       )}
 
@@ -1694,34 +1776,12 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
               : 'not synced yet'}
         </span>
       </div>
-      {runningFeed.map((a) => (
-        <FeedItem
-          key={a.id}
-          agent={a}
-          selected={selectedFloorAgent?.id === a.id}
-          plain={plain}
-          onSelect={selectFloorAgent}
-          onOption={onAgentOption}
-          onFreeText={replyToAgent}
-          onAttach={onAttachScreenshot}
-        />
-      ))}
+      {runningFeed.map((a) => renderAgentFeedItem(a))}
 
       {doneFeed.length > 0 && (
         <>
           <div className="feed-sec">DONE TODAY · {doneFeed.length}<span className="ln" /></div>
-          {doneFeed.map((a) => (
-            <FeedItem
-              key={a.id}
-              agent={a}
-              selected={selectedFloorAgent?.id === a.id}
-              plain={plain}
-              onSelect={selectFloorAgent}
-              onOption={onAgentOption}
-              onFreeText={replyToAgent}
-              onAttach={onAttachScreenshot}
-            />
-          ))}
+          {doneFeed.map((a) => renderAgentFeedItem(a))}
         </>
       )}
     </div>
@@ -1745,27 +1805,51 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
       : <div className="detail-empty">Select a ticket to see its details and dispatch an agent onto it.</div>)
     : renderAgentDetail()
 
+  // The contextual controls bar renders only for a center that has controls, and never
+  // while a task tab owns the pane (the task detail carries its own header). host/other
+  // centers get no bar — this is the LAYOUT fix that killed the double Group/Sort bar.
+  const controlsMode = activeTaskTab ? null : floorControlsMode(center)
+
   return (
     <div className="sw-floor-dashboard" style={{ padding: 0, overflow: 'hidden' }}>
-      <FloorControls
-        runningCount={floorRunning}
-        totalCount={floorAgents.length}
-        sidebarOpen={sidebarOpen}
-        onToggleSidebar={() => setSidebarOpen((o) => !o)}
-        rightOpen={rightOpen}
-        onToggleRight={() => setRightOpen((o) => !o)}
-        plain={plain}
-        onTogglePlain={() => setPlain((o) => !o)}
-        sort={floorSort}
-        onSort={setFloorSort}
-        activeStatus={statusChips}
-        onToggleStatus={(chip) => setStatusChips((prev) => (prev.includes(chip) ? prev.filter((c) => c !== chip) : [...prev, chip]))}
-        activeAbbrs={abbrChips}
-        onToggleAbbr={(ab) => setAbbrChips((prev) => (prev.includes(ab) ? prev.filter((c) => c !== ab) : [...prev, ab]))}
-        search={floorSearch}
-        onSearch={setFloorSearch}
+      <FloorSubtabs
+        fixed={fixedTabs}
+        center={center}
+        taskTabs={openTaskTabs}
+        activeTaskTab={activeTaskTab}
+        onSelectCenter={selectCenter}
+        onSelectTaskTab={selectTaskTab}
+        onCloseTaskTab={handleCloseTaskTab}
         onDispatch={() => openDispatch(selectedTicketId ? { ticketId: selectedTicketId } : undefined)}
       />
+
+      {controlsMode && (
+        <FloorControls
+          mode={controlsMode}
+          runningCount={floorRunning}
+          totalCount={floorAgents.length}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={() => setSidebarOpen((o) => !o)}
+          rightOpen={rightOpen}
+          onToggleRight={() => setRightOpen((o) => !o)}
+          plain={plain}
+          onTogglePlain={() => setPlain((o) => !o)}
+          sort={floorSort}
+          onSort={setFloorSort}
+          activeStatus={statusChips}
+          onToggleStatus={(chip) => setStatusChips((prev) => (prev.includes(chip) ? prev.filter((c) => c !== chip) : [...prev, chip]))}
+          activeAbbrs={abbrChips}
+          onToggleAbbr={(ab) => setAbbrChips((prev) => (prev.includes(ab) ? prev.filter((c) => c !== ab) : [...prev, ab]))}
+          ticketGroup={ticketGroup}
+          onTicketGroup={setTicketGroup}
+          ticketSort={ticketSort}
+          onTicketSort={setTicketSort}
+          srcFilter={ticketSrc}
+          onToggleSrc={(src) => setTicketSrc((p) => ({ ...p, [src]: !p[src] }))}
+          search={floorSearch}
+          onSearch={setFloorSearch}
+        />
+      )}
 
       <div className="page" style={{ flex: 1, minHeight: 0, height: 'auto' }}>
         {sidebarOpen && (
@@ -1791,7 +1875,7 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
           />
         )}
         <div className="feed-col">{centerContent}</div>
-        {rightOpen && <div className="detail-col">{rightContent}</div>}
+        {rightOpen && !activeTab && <div className="detail-col">{rightContent}</div>}
       </div>
 
       {cardDragActive && (
