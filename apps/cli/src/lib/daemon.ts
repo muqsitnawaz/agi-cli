@@ -646,14 +646,26 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin:${os.homedir()}/.nvm/versions/node
 WantedBy=default.target`;
 }
 
-function getAgentsBinPath(): string {
+export function getAgentsBinPath(): string {
   // Prefer the binary actively executing this code. `which agents` returns
   // whatever happens to be first on PATH, which means a side-by-side dev
   // build at ~/.local/bin would silently spawn the registry-installed
   // daemon and run stale code. process.argv[1] is the absolute path of
   // the JS entrypoint the user actually invoked.
   const argv1 = process.argv[1];
-  if (argv1 && fs.existsSync(argv1)) return argv1;
+  if (argv1 && fs.existsSync(argv1)) {
+    // The package's browser/computer entrypoints are sibling shims without a
+    // `daemon` command. A daemon started as their IPC side effect must launch
+    // through the main agents entrypoint instead of replaying the shim path.
+    if (/^(browser|computer)\.(c|m)?js$/.test(path.basename(argv1))) {
+      const agentsEntry = path.join(path.dirname(argv1), 'index.js');
+      if (!fs.existsSync(agentsEntry)) {
+        throw new Error(`Cannot start agents daemon: main CLI entry not found at ${agentsEntry}`);
+      }
+      return agentsEntry;
+    }
+    return argv1;
+  }
   try {
     return execFileSync('which', ['agents'], { encoding: 'utf-8' }).trim();
   } catch {
