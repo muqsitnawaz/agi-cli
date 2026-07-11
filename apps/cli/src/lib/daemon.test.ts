@@ -272,6 +272,24 @@ describe('getAgentsBinPath (sibling shim resolution)', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it('resolves the installed browser shim to the sibling agents launcher', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-shim-'));
+    fs.writeFileSync(path.join(tmpDir, 'agents'), '');
+    fs.writeFileSync(path.join(tmpDir, 'browser'), '');
+    process.argv[1] = path.join(tmpDir, 'browser');
+    expect(getAgentsBinPath()).toBe(path.join(tmpDir, 'agents'));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('resolves the installed computer shim to the sibling agents launcher', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-shim-'));
+    fs.writeFileSync(path.join(tmpDir, 'agents'), '');
+    fs.writeFileSync(path.join(tmpDir, 'computer'), '');
+    process.argv[1] = path.join(tmpDir, 'computer');
+    expect(getAgentsBinPath()).toBe(path.join(tmpDir, 'agents'));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   it('keeps index.js as the main CLI entry', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-shim-'));
     const indexJs = path.join(tmpDir, 'index.js');
@@ -299,6 +317,15 @@ describe('getAgentsBinPath (sibling shim resolution)', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it('refuses an installed sibling shim when the agents launcher is missing', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-shim-'));
+    const browser = path.join(tmpDir, 'browser');
+    fs.writeFileSync(browser, '');
+    process.argv[1] = browser;
+    expect(() => getAgentsBinPath()).toThrow(`main CLI entry not found at ${path.join(tmpDir, 'agents')}`);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
   it('generates a launchd plist targeting index.js from a sibling shim', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-plist-'));
     const indexJs = path.join(tmpDir, 'index.js');
@@ -309,6 +336,21 @@ describe('getAgentsBinPath (sibling shim resolution)', () => {
     const plist = generateLaunchdPlist();
     expect(plist).toContain(`<string>${indexJs}</string>`);
     expect(plist).not.toContain(`<string>${browserJs}</string>`);
+    expect(plist).toContain('<string>daemon</string>');
+    expect(plist).toContain('<string>_run</string>');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('generates a launchd plist targeting agents from an installed browser shim', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-plist-'));
+    const agentsBin = path.join(tmpDir, 'agents');
+    const browserBin = path.join(tmpDir, 'browser');
+    fs.writeFileSync(agentsBin, '');
+    fs.writeFileSync(browserBin, '');
+    process.argv[1] = browserBin;
+    const plist = generateLaunchdPlist();
+    expect(plist).toContain(`<string>${agentsBin}</string>`);
+    expect(plist).not.toContain(`<string>${browserBin}</string>`);
     expect(plist).toContain('<string>daemon</string>');
     expect(plist).toContain('<string>_run</string>');
     fs.rmSync(tmpDir, { recursive: true, force: true });
