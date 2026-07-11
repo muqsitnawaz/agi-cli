@@ -14,9 +14,10 @@ export type MessageResolution =
 
 /**
  * The mailbox id a live session's box is keyed by. Teams stamp a durable
- * `agentId` (== the Claude session id for Claude teammates); a bare run has
- * only its `sessionId`. The spawn-time `AGENTS_MAILBOX_DIR` wiring must key the
- * box by this same id — this is the single source of truth for both sides.
+ * `agentId` and pass it as `--session-id` at spawn so buildExecEnv keys
+ * AGENTS_MAILBOX_DIR by the same value — single source of truth for both
+ * the writer (this function) and the reader (the PreToolUse drain hook).
+ * A bare run has only its `sessionId`.
  */
 export function mailboxIdForActiveSession(s: ActiveSession): string | undefined {
   return s.agentId ?? s.sessionId;
