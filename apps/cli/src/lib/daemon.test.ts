@@ -22,6 +22,7 @@ import {
   readDaemonClaudeOAuthToken,
   buildDetachedDaemonEnv,
   getDaemonLaunch,
+  getAgentsBinPath,
   startDetached,
   writeOwnerOnlyServiceManifest,
   ensureDaemonStarted,
@@ -232,6 +233,69 @@ describe('getDaemonLaunch', () => {
     const { command, args } = getDaemonLaunch('/usr/local/bin/agents');
     expect(command).toBe('/usr/local/bin/agents');
     expect(args).toEqual(['daemon', '_run']);
+  });
+});
+
+// RUSH-1527: when the process was started via a sibling shim (browser.js,
+// computer.js), getAgentsBinPath must resolve to the sibling index.js so
+// the daemon launches `agents daemon _run`, not `browser daemon _run`.
+describe('getAgentsBinPath (sibling shim resolution)', () => {
+  let savedArgv1: string | undefined;
+
+  beforeEach(() => { savedArgv1 = process.argv[1]; });
+  afterEach(() => {
+    if (savedArgv1 !== undefined) process.argv[1] = savedArgv1;
+  });
+
+  it('resolves browser.js to the sibling index.js', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-shim-'));
+    fs.writeFileSync(path.join(tmpDir, 'index.js'), '');
+    fs.writeFileSync(path.join(tmpDir, 'browser.js'), '');
+    process.argv[1] = path.join(tmpDir, 'browser.js');
+    expect(getAgentsBinPath()).toBe(path.join(tmpDir, 'index.js'));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('resolves computer.js to the sibling index.js', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-shim-'));
+    fs.writeFileSync(path.join(tmpDir, 'index.js'), '');
+    fs.writeFileSync(path.join(tmpDir, 'computer.js'), '');
+    process.argv[1] = path.join(tmpDir, 'computer.js');
+    expect(getAgentsBinPath()).toBe(path.join(tmpDir, 'index.js'));
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('keeps index.js as-is (the main CLI entry)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-shim-'));
+    const indexJs = path.join(tmpDir, 'index.js');
+    fs.writeFileSync(indexJs, '');
+    process.argv[1] = indexJs;
+    expect(getAgentsBinPath()).toBe(indexJs);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('keeps a non-JS entry as-is (native launcher)', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-shim-'));
+    const agentsBin = path.join(tmpDir, 'agents');
+    fs.writeFileSync(agentsBin, '');
+    process.argv[1] = agentsBin;
+    expect(getAgentsBinPath()).toBe(agentsBin);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('generates a launchd plist targeting index.js even when argv[1] is a sibling shim', () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agd-plist-'));
+    const indexJs = path.join(tmpDir, 'index.js');
+    const browserJs = path.join(tmpDir, 'browser.js');
+    fs.writeFileSync(indexJs, '');
+    fs.writeFileSync(browserJs, '');
+    process.argv[1] = browserJs;
+    const plist = generateLaunchdPlist();
+    expect(plist).toContain(`<string>${indexJs}</string>`);
+    expect(plist).not.toContain(`<string>${browserJs}</string>`);
+    expect(plist).toContain('<string>daemon</string>');
+    expect(plist).toContain('<string>_run</string>');
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 });
 

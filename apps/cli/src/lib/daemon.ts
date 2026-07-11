@@ -646,14 +646,27 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin:${os.homedir()}/.nvm/versions/node
 WantedBy=default.target`;
 }
 
-function getAgentsBinPath(): string {
+export function getAgentsBinPath(): string {
   // Prefer the binary actively executing this code. `which agents` returns
   // whatever happens to be first on PATH, which means a side-by-side dev
   // build at ~/.local/bin would silently spawn the registry-installed
   // daemon and run stale code. process.argv[1] is the absolute path of
   // the JS entrypoint the user actually invoked.
   const argv1 = process.argv[1];
-  if (argv1 && fs.existsSync(argv1)) return argv1;
+  if (argv1 && fs.existsSync(argv1)) {
+    // The npm package ships sibling bin entries (browser.js, computer.js) that
+    // are standalone shims without a `daemon` subcommand. When the daemon is
+    // started as a side-effect of one of those shims (e.g. `browser start`
+    // triggers startDaemon via IPC), argv[1] points at the shim, not the main
+    // CLI entry — and launching `<shim> daemon _run` crashes because the shim
+    // doesn't handle it. Resolve to the sibling index.js (the `agents` entry)
+    // so the daemon always launches through the full CLI.
+    if (/\.(c|m)?js$/.test(argv1) && !/\bindex\.(c|m)?js$/.test(argv1)) {
+      const sibling = path.join(path.dirname(argv1), 'index.js');
+      if (fs.existsSync(sibling)) return sibling;
+    }
+    return argv1;
+  }
   try {
     return execFileSync('which', ['agents'], { encoding: 'utf-8' }).trim();
   } catch {
