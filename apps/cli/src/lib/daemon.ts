@@ -661,8 +661,11 @@ export function getAgentsBinPath(): string {
     // The package's browser/computer entrypoints are sibling shims without a
     // `daemon` command. A daemon started as their IPC side effect must launch
     // through the main agents entrypoint instead of replaying the shim path.
-    if (/^(browser|computer)\.(c|m)?js$/.test(path.basename(argv1))) {
-      const agentsEntry = path.join(path.dirname(argv1), 'index.js');
+    const entryName = path.basename(argv1);
+    const compiledShim = /^(browser|computer)\.(c|m)?js$/.test(entryName);
+    const installedShim = /^(browser|computer)$/.test(entryName);
+    if (compiledShim || installedShim) {
+      const agentsEntry = path.join(path.dirname(argv1), compiledShim ? 'index.js' : 'agents');
       if (!fs.existsSync(agentsEntry)) {
         throw new Error(`Cannot start agents daemon: main CLI entry not found at ${agentsEntry}`);
       }
