@@ -698,7 +698,14 @@ export function enrichWithSessionContent(
   const parsable = agentType as ParsableAgentType;
   const activity = extractCurrentActivity(sessionContent, parsable);
   const tokPerSec = computeOutputTokensPerSec(sessionContent, parsable, 60, now);
-  const waiting = detectWaitingForInput(sessionContent, parsable);
+  // Apply the prose-"?" freshness decay when the fan-out stamped a last-write time
+  // (lastActivityMs > 0), so a long-finished session stops reading as waiting
+  // (RUSH-1522). A structural AskUserQuestion is exempt from the decay.
+  const waiting = detectWaitingForInput(
+    sessionContent,
+    parsable,
+    session.lastActivityMs > 0 ? { lastWriteMs: session.lastActivityMs, nowMs: now } : undefined
+  );
   const nextPhase: RemotePhase =
     waiting && session.phase !== 'failed' && session.phase !== 'done'
       ? 'waiting'
