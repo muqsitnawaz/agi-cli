@@ -48,4 +48,4 @@ echo "Extension installed to $INSTALLED editor(s)."
 
 # Installed to disk != active in a running editor. Reload running windows and
 # verify activation from exthost.log (best-effort reload, authoritative verify).
-bash "$(dirname "${BASH_SOURCE[0]}")/activate.sh" "swarmify.swarm-ext"
+bash "$PROJECT_ROOT/scripts/activate.sh" "swarmify.swarm-ext"
