@@ -436,6 +436,18 @@ describe('enrichWithSessionContent', () => {
     expect(s.phase).toBe('running'); // untouched: the CLI-reported phase stands
   });
 
+  test('freshness clears a stale waiting flag and phase from an older CLI (RUSH-1522)', () => {
+    const content = fs.readFileSync(path.join(TESTDATA, 'claude-waiting.jsonl'), 'utf-8');
+    const s = enrichWithSessionContent({
+      ...base,
+      phase: 'waiting',
+      waitingForInput: true,
+      lastActivityMs: now - 2 * 60 * 60_000,
+    }, content, now);
+    expect(s.waitingForInput).toBe(false);
+    expect(s.phase).toBe('idle');
+  });
+
   test('a structural AskUserQuestion never decays, however stale', () => {
     const content = [
       JSON.stringify({ type: 'assistant', timestamp: '2026-06-30T10:00:00.000Z', message: { content: [{ type: 'tool_use', name: 'AskUserQuestion', input: { questions: [{ question: 'Prod or staging?' }] } }] } }),
