@@ -34,6 +34,11 @@ if [ ! -d "node_modules" ]; then
     bun install
 fi
 
+if [ ! -d "ui/node_modules" ]; then
+    echo "Installing UI dependencies..."
+    (cd ui && bun install)
+fi
+
 # Compile TypeScript
 echo "Compiling TypeScript..."
 bun run compile
