@@ -7,7 +7,7 @@
  */
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { listBlocks, type OpenBlock } from '../lib/feed.js';
+import { listBlocks, ensureFeedPublishHook, type OpenBlock } from '../lib/feed.js';
 import { machineId } from '../lib/machine-id.js';
 import { relTime } from '../lib/format.js';
 
@@ -38,6 +38,7 @@ export function registerFeedCommand(program: Command): void {
     .description('List open blocks -- decisions agents are waiting on')
     .option('--json', 'Output as JSON')
     .action(async (opts: { json?: boolean }) => {
+      ensureFeedPublishHook();
       const blocks = listBlocks();
 
       if (opts.json) {

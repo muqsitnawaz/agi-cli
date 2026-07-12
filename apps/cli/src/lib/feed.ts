@@ -62,7 +62,7 @@ export function publishBlock(block: OpenBlock, root?: string): void {
   fs.renameSync(tmp, target);
 }
 
-/** Read all block records. Returns them sorted by filename (time-ordered). */
+/** Read all block records. Returns them sorted by filename. */
 export function listBlocks(root?: string): OpenBlock[] {
   const dir = root ?? getFeedDir();
   let names: string[];
@@ -88,6 +88,7 @@ export function listBlocks(root?: string): OpenBlock[] {
 
 /** Remove a block record. Returns true if the file was deleted. */
 export function removeBlock(blockId: string, root?: string): boolean {
+  if (!/^[A-Za-z0-9._-]+$/.test(blockId) || blockId === '.' || blockId === '..') return false;
   const dir = root ?? getFeedDir();
   try {
     fs.unlinkSync(path.join(dir, `${blockId}.json`));
@@ -208,9 +209,8 @@ if __name__ == "__main__":
         pass  # fail open
 `;
 
-/** Manifest entry for the feed-publish hook, matching the ManifestHook shape. */
+/** Manifest entry for the feed-publish hook. */
 export const FEED_PUBLISH_HOOK_MANIFEST = {
-  name: 'feed-publish',
   events: ['PreToolUse'],
   matcher: 'AskUserQuestion',
   script: '10-feed-publish.py',
