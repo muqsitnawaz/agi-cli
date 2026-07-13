@@ -47,6 +47,7 @@ const REMOTE_PASSTHROUGH: Record<string, RemoteSpec> = {
   sync: { nonInteractive: ['--yes'] },
   teams: {},
   message: {},
+  routines: {},
 };
 
 /** `--no-tty` is stripped like the routing flags but carries no value. */
@@ -128,10 +129,12 @@ export async function maybeRunOnHost(command: string, allArgs: string[]): Promis
     return true;
   }
 
-  // `--devices` / `--hosts` fan out to every registered device locally; don't
-  // let a per-host passthrough turn it into a cascading remote fan-out.
+  // `--devices`/`--hosts` on teams/list fan out locally; don't cascade remotely.
+  // But on `routines`, `--devices` is a placement flag (which devices may run
+  // the routine) and must be forwarded to the remote host, not treated as
+  // fan-out.
   const fleetFlag = allArgs.includes('--devices') || allArgs.includes('--hosts');
-  if (fleetFlag) return false;
+  if (fleetFlag && command !== 'routines') return false;
 
   const hostName = hostFlag ?? deviceFlag;
   if (!hostName) return false;
