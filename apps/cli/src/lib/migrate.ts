@@ -1734,6 +1734,61 @@ export function migrateExtrasExtrasToAgentsExtras(historyDir: string = HISTORY_D
   }
 }
 
+/**
+ * Rewrite every routine YAML that carries the legacy singular `device: <value>`
+ * field to the new plural `devices: [<value>]` format. Preserves all other
+ * fields. Idempotent: a routine that already has `devices:` (or neither field)
+ * is left untouched.
+ *
+ * Params default to the real routines dir; injectable for tests.
+ */
+export function migrateRoutineDeviceToDevices(routinesDir?: string): void {
+  const dir = routinesDir ?? path.join(USER_DIR, 'routines');
+  if (!fs.existsSync(dir)) return;
+
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'));
+  } catch { return; }
+
+  let migrated = 0;
+  for (const file of files) {
+    const filePath = path.join(dir, file);
+    let raw: string;
+    try {
+      raw = fs.readFileSync(filePath, 'utf-8');
+    } catch { continue; }
+
+    let doc: Record<string, unknown>;
+    try {
+      doc = yaml.parse(raw) as Record<string, unknown>;
+      if (!doc || typeof doc !== 'object') continue;
+    } catch { continue; }
+
+    if (!('device' in doc)) continue;
+    if ('devices' in doc) {
+      delete doc.device;
+      try { fs.writeFileSync(filePath, yaml.stringify(doc), 'utf-8'); } catch { /* best-effort */ }
+      continue;
+    }
+
+    const val = doc.device;
+    delete doc.device;
+    if (typeof val === 'string' && val.trim()) {
+      doc.devices = [val.trim()];
+    }
+
+    try {
+      fs.writeFileSync(filePath, yaml.stringify(doc), 'utf-8');
+      migrated++;
+    } catch { /* best-effort */ }
+  }
+
+  if (migrated > 0) {
+    console.error(`Migrated ${migrated} routine${migrated === 1 ? '' : 's'}: device → devices`);
+  }
+}
+
 /** Run all idempotent migrations. Safe to call multiple times. */
 export async function runMigration(): Promise<void> {
   // MUST run first: every other migrator reads SYSTEM_DIR (the new path).
@@ -1788,6 +1843,9 @@ export async function runMigration(): Promise<void> {
   // installed version-home. Runs after migrateRuntimeToHistory so the version
   // homes are at their canonical HISTORY_DIR location.
   migrateExtrasExtrasToAgentsExtras();
+
+  // Rewrite routine YAML files: singular `device:` -> plural `devices: []`.
+  migrateRoutineDeviceToDevices();
 
   // Symlink repair runs LAST so it can find the post-move version homes.
   repairAgentConfigSymlinks();
