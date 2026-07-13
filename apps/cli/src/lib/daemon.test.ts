@@ -202,8 +202,10 @@ describe('generateSystemdUnit', () => {
     fs.writeFileSync(indexJs, '');
     process.argv[1] = indexJs;
     try {
+      const escapedExecPath = process.execPath.replaceAll('\\', '\\\\');
+      const escapedIndexJs = indexJs.replaceAll('\\', '\\\\');
       expect(generateSystemdUnit()).toContain(
-        `ExecStart="${process.execPath}" "${indexJs}" "daemon" "_run"`,
+        `ExecStart="${escapedExecPath}" "${escapedIndexJs}" "daemon" "_run"`,
       );
     } finally {
       process.argv[1] = savedArgv1;
