@@ -35,6 +35,8 @@ import {
   getJobPath,
   parseAtTime,
   jobRunsOnThisDevice,
+  normalizeDevices,
+  jobDeviceOwners,
 } from '../lib/routines.js';
 import type { JobConfig } from '../lib/routines.js';
 import { fireWebhookJobs, matchJobsToWebhook, type GithubWebhook } from '../lib/triggers/webhook.js';
@@ -46,6 +48,8 @@ import { JobScheduler } from '../lib/scheduler.js';
 import { detectOverdueJobs } from '../lib/overdue.js';
 import { isInteractiveTerminal, requireInteractiveSelection } from './utils.js';
 import { setHelpSections } from '../lib/help.js';
+import { addHostOption } from '../lib/hosts/option.js';
+import { loadDevicesSync } from '../lib/devices/registry.js';
 
 /**
  * Human-friendly wall-clock a run took (e.g. "  · 3 min", "  · 45 sec"), or ""
@@ -157,9 +161,9 @@ async function pickJob(
 
 /** Register the `agents routines` command tree. */
 export function registerRoutinesCommands(program: Command): void {
-  const routinesCmd = program
+  const routinesCmd = addHostOption(program
     .command('routines')
-    .description('Schedule agents to run on a cron schedule or at a specific time. The scheduler auto-starts on first add.');
+    .description('Schedule agents to run on a cron schedule or at a specific time. The scheduler auto-starts on first add.'));
 
   setHelpSections(routinesCmd, {
     examples: `
@@ -249,6 +253,7 @@ export function registerRoutinesCommands(program: Command): void {
             trigger: job.trigger ?? null,
             timezone: job.timezone ?? null,
             device: job.device ?? null,
+            devices: job.devices ?? null,
             runsHere: jobRunsOnThisDevice(job),
             enabled: job.enabled,
             overdue: overdueSet.has(job.name),
@@ -311,12 +316,13 @@ export function registerRoutinesCommands(program: Command): void {
         const enabledWord = job.enabled ? 'yes' : 'no';
         const enabledPad = Math.max(0, ENABLED_W - enabledWord.length);
 
-        // Unpinned jobs run everywhere; a pin that names another machine is
-        // grayed — this machine never fires it.
-        const deviceWord = job.device || '-';
-        const deviceCell = !job.device
+        const deviceWord = job.devices && job.devices.length > 0
+          ? job.devices.join(',')
+          : job.device || '-';
+        const runsHere = jobRunsOnThisDevice(job);
+        const deviceCell = deviceWord === '-'
           ? chalk.gray('-')
-          : jobRunsOnThisDevice(job)
+          : runsHere
             ? deviceWord
             : chalk.gray(deviceWord);
         const devicePad = Math.max(0, DEVICE_W - deviceWord.length);
@@ -358,6 +364,7 @@ export function registerRoutinesCommands(program: Command): void {
     .option('-t, --timeout <timeout>', 'Kill the agent if it runs longer than this (e.g., 10m, 2h, 3d, 1w; max 1w)', '10m')
     .option('--timezone <tz>', 'Interpret schedule in this timezone (e.g., America/Los_Angeles)')
     .option('--device <name>', 'Pin to one machine (routines are fleet-synced): only the device with this name schedules and fires the job')
+    .option('--devices <names>', 'Allowlist of devices that may execute this routine (comma-separated, e.g. yosemite-s0,mac-mini)')
     .option('--at <time>', 'One-shot mode: run once at this time (e.g., "14:30" or "2026-02-24 09:00"), then disable')
     .option('--end-at <iso>', 'Stop firing on or after this ISO 8601 timestamp (e.g., "2026-12-31T23:59:00Z"); routine auto-disables.')
     .option('--disabled', 'Create the routine but keep it paused (enable later with resume)')
@@ -409,6 +416,10 @@ export function registerRoutinesCommands(program: Command): void {
           process.exit(1);
         }
 
+        const parsedDevices = options.devices
+          ? normalizeDevices(options.devices.split(',').map((s: string) => s.trim()).filter(Boolean))
+          : undefined;
+
         const config: JobConfig = {
           name: nameOrPath,
           schedule,
@@ -421,6 +432,7 @@ export function registerRoutinesCommands(program: Command): void {
           prompt: options.prompt,
           timezone: options.timezone,
           ...(options.device ? { device: options.device } : {}),
+          ...(parsedDevices && parsedDevices.length > 0 ? { devices: parsedDevices } : {}),
           ...(runOnce ? { runOnce: true } : {}),
           ...(options.endAt ? { endAt: options.endAt } : {}),
         };
@@ -641,8 +653,14 @@ export function registerRoutinesCommands(program: Command): void {
       }
 
       if (!jobRunsOnThisDevice(job)) {
-        console.log(chalk.red(`Job '${name}' is pinned to device '${job.device}' and never runs here.`));
-        console.log(chalk.gray(`  Run it there: agents ssh ${job.device} 'agents routines run ${name}'`));
+        const owners = jobDeviceOwners(job);
+        const ownerList = owners.join(', ');
+        console.log(chalk.red(`Job '${name}' is restricted to device(s) ${ownerList} and never runs here.`));
+        if (owners.length === 1) {
+          console.log(chalk.gray(`  Run it there: agents ssh ${owners[0]} 'agents routines run ${name}'`));
+        } else {
+          console.log(chalk.gray(`  Run it on one of them: agents routines run ${name} --host <device>`));
+        }
         process.exit(1);
       }
 
@@ -720,6 +738,72 @@ export function registerRoutinesCommands(program: Command): void {
         }
       }
       console.log(chalk.gray('\nTrack progress with: agents routines runs <name>'));
+    });
+
+  routinesCmd
+    .command('devices [name]')
+    .description('View or update the device allowlist for a routine. Without flags, shows current devices. Use --set to replace or --clear to remove the allowlist.')
+    .option('--set <names>', 'Replace the allowlist with a comma-separated list of device names')
+    .option('--clear', 'Remove the device allowlist (routine becomes unrestricted)')
+    .action(async (name: string | undefined, options: { set?: string; clear?: boolean }) => {
+      if (!name) {
+        name = await pickJob('Select routine', undefined, ['agents routines devices <name>']) ?? undefined;
+        if (!name) return;
+      }
+
+      const job = readJob(name);
+      if (!job) {
+        console.log(chalk.red(`Job '${name}' not found`));
+        process.exit(1);
+      }
+
+      if (!options.set && !options.clear) {
+        // Display mode: show current devices
+        const owners = jobDeviceOwners(job);
+        if (owners.length === 0) {
+          console.log(chalk.gray(`'${name}' has no device restriction (runs on any device)`));
+        } else {
+          console.log(chalk.bold(`Devices for '${name}':\n`));
+          for (const d of owners) {
+            const here = jobRunsOnThisDevice({ devices: [d] }) ? chalk.green(' (this machine)') : '';
+            console.log(`  ${d}${here}`);
+          }
+        }
+        return;
+      }
+
+      if (options.clear) {
+        delete job.device;
+        delete job.devices;
+        writeJob(job);
+        console.log(chalk.green(`Cleared device restriction for '${name}' — runs on any device`));
+        if (isDaemonRunning()) signalDaemonReload();
+        return;
+      }
+
+      if (options.set) {
+        const raw = options.set.split(',').map((s) => s.trim()).filter(Boolean);
+        if (raw.length === 0) {
+          console.log(chalk.red('--set requires at least one device name'));
+          process.exit(1);
+        }
+
+        const normalized = normalizeDevices(raw);
+
+        // Validate against fleet
+        const registry = loadDevicesSync();
+        const known = new Set(Object.keys(registry).map((k) => k.toLowerCase()));
+        const unknown = normalized.filter((d) => !known.has(d));
+        if (unknown.length > 0) {
+          console.log(chalk.yellow(`Unknown device(s): ${unknown.join(', ')} — not in the registry (agents devices). Saving anyway.`));
+        }
+
+        delete job.device;
+        job.devices = normalized;
+        writeJob(job);
+        console.log(chalk.green(`Set devices for '${name}': ${normalized.join(', ')}`));
+        if (isDaemonRunning()) signalDaemonReload();
+      }
     });
 
   routinesCmd
