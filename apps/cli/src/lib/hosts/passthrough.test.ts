@@ -66,12 +66,12 @@ describe('maybeRunOnHost — local short-circuits (no SSH attempted)', () => {
     process.exitCode = 0;
   });
 
-  it('routes routines --host to a non-self target (enters SSH path)', async () => {
+  it('routes routines --host to a non-self target (rejected by assertValidSshTarget)', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
-    // A non-self host enters the SSH resolve + sshStream path. sshStream
-    // returns 255 for unreachable hosts. Returning true proves the routing
-    // path was entered, not short-circuited.
-    const result = await maybeRunOnHost('routines', ['routines', 'list', '--host', 'other-box']);
+    // --evil starts with '-' so assertValidSshTarget rejects it before any
+    // SSH connection is attempted. Returning true with exitCode > 0 proves
+    // the routing path was entered, not short-circuited.
+    const result = await maybeRunOnHost('routines', ['routines', 'list', '--host', '--evil']);
     expect(result).toBe(true);
     expect(process.exitCode).toBeGreaterThan(0);
     process.exitCode = 0;
@@ -79,7 +79,7 @@ describe('maybeRunOnHost — local short-circuits (no SSH attempted)', () => {
 
   it('routes routines --device alias to a non-self target', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
-    const result = await maybeRunOnHost('routines', ['routines', 'run', 'x', '--device', 'other-box']);
+    const result = await maybeRunOnHost('routines', ['routines', 'run', 'x', '--device', '--evil']);
     expect(result).toBe(true);
     expect(process.exitCode).toBeGreaterThan(0);
     process.exitCode = 0;
@@ -88,9 +88,9 @@ describe('maybeRunOnHost — local short-circuits (no SSH attempted)', () => {
   it('does NOT bail on --devices for routines with --host (placement, not fan-out)', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
     // --devices on routines is placement; --host should still route remotely.
-    // A non-self target enters the SSH path (returns true), proving --devices
-    // did not bail.
-    const result = await maybeRunOnHost('routines', ['routines', 'add', 'x', '--host', 'other-box', '--devices', 'a,b']);
+    // The invalid target is rejected by assertValidSshTarget (returns true,
+    // exitCode > 0), proving --devices did not bail.
+    const result = await maybeRunOnHost('routines', ['routines', 'add', 'x', '--host', '--evil', '--devices', 'a,b']);
     expect(result).toBe(true);
     expect(process.exitCode).toBeGreaterThan(0);
     process.exitCode = 0;
@@ -100,11 +100,11 @@ describe('maybeRunOnHost — local short-circuits (no SSH attempted)', () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
     // --devices on a non-routines command triggers the fleet-flag bailout,
     // returning false even with a non-self --host.
-    expect(await maybeRunOnHost('list', ['list', '--host', 'other-box', '--devices'])).toBe(false);
+    expect(await maybeRunOnHost('list', ['list', '--host', '--evil', '--devices'])).toBe(false);
   });
 
   it('bails on --hosts for non-routines commands (fan-out)', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
-    expect(await maybeRunOnHost('list', ['list', '--host', 'other-box', '--hosts'])).toBe(false);
+    expect(await maybeRunOnHost('list', ['list', '--host', '--evil', '--hosts'])).toBe(false);
   });
 });
