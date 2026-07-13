@@ -704,13 +704,27 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin:${os.homedir()}/.nvm/versions/node
 WantedBy=default.target`;
 }
 
-export function getAgentsBinPath(): string {
+const BUN_VIRTUAL_ROOT = /[/\\]\$bunfs[/\\]root[/\\]/;
+
+export function getAgentsBinPath(
+  argv1: string | undefined = process.argv[1],
+  execPath: string = process.execPath,
+): string {
   // Prefer the binary actively executing this code. `which agents` returns
   // whatever happens to be first on PATH, which means a side-by-side dev
   // build at ~/.local/bin would silently spawn the registry-installed
-  // daemon and run stale code. process.argv[1] is the absolute path of
-  // the JS entrypoint the user actually invoked.
-  const argv1 = process.argv[1];
+  // daemon and run stale code. For a JS install, process.argv[1] is the
+  // absolute entrypoint the user actually invoked. A Bun standalone instead
+  // exposes its embedded /$bunfs/root entry at argv[1] and its physical signed
+  // executable at process.execPath; Bun reports both as existing paths.
+  if (argv1 && BUN_VIRTUAL_ROOT.test(argv1)) {
+    if (!execPath || BUN_VIRTUAL_ROOT.test(execPath) || !fs.existsSync(execPath)) {
+      throw new Error(
+        `Cannot start agents daemon: Bun standalone executable not found at ${execPath || '(empty path)'}`,
+      );
+    }
+    return execPath;
+  }
   if (argv1 && fs.existsSync(argv1)) {
     // The package's browser/computer entrypoints are sibling shims without a
     // `daemon` command. A daemon started as their IPC side effect must launch
@@ -906,7 +920,7 @@ export function getDaemonLaunch(agentsBin: string = getAgentsBinPath()): { comma
 
 export function validateDaemonBinary(binPath: string): { warnings: string[] } {
   const warnings: string[] = [];
-  if (/\/\$bunfs\/root\//.test(binPath)) {
+  if (BUN_VIRTUAL_ROOT.test(binPath)) {
     throw new Error(
       `Refusing to supervise daemon: resolved binary is a bun virtual path (${binPath}). ` +
       `Install agents globally (npm i -g @phnx-labs/agents-cli) and restart.`,

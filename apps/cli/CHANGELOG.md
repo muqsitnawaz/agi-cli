@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.20.56
+
+- **Fix native routine schedulers rejecting the published CLI as a Bun virtual path.** Bun's standalone runtime reports the embedded `/$bunfs/root/agents` entry as existing at `process.argv[1]`, while the real signed executable lives at `process.execPath`. Daemon resolution now substitutes that physical executable before generating launchd/systemd manifests or detached launches; the existing virtual-path guard still rejects any virtual path that reaches supervision. Source: `apps/cli/src/lib/daemon.ts`.
+
 ## 1.20.55
 
 - **Routine scheduler health is now observable and self-healing.** `agents routines status` distinguishes `running`, `wedged`, and `stopped`, and reports the daemon binary plus heartbeat age. Routine listing/status opportunistically finalize orphaned runs; PID reuse checks and a 24-hour wall-clock limit prevent stale `running` records; daemon startup rejects bun virtual paths and warns about worktree binaries that can disappear. Source: `apps/cli/src/lib/daemon.ts`, `apps/cli/src/lib/runner.ts`, `apps/cli/src/commands/routines.ts`.
