@@ -378,10 +378,14 @@ A background scheduler (historically called "the daemon" internally) watches for
 ```bash
 agents routines start     # Start manually (usually unnecessary)
 agents routines stop      # Stop
-agents routines status    # Check PID, uptime, and upcoming runs
+agents routines status    # Check health, PID, binary, heartbeat, and upcoming runs
 ```
 
 The scheduler **auto-starts on the first `agents routines add`**, so in most cases you never invoke `start` manually. When you `add`, `remove`, `pause`, or `resume` a job, it auto-reloads -- no manual restart needed.
+
+`agents routines status` reports the scheduler as `running`, `wedged`, or `stopped`. A live PID whose heartbeat is more than three monitor ticks old is `wedged`; the status output includes the restart command. Both `routines list` and `routines status` also finalize orphaned `running` records before rendering. Run metadata records process birth time to reject recycled PIDs, and any run still active after 24 hours is finalized as a timeout.
+
+The status output includes the resolved daemon binary. Startup rejects bun virtual-filesystem paths and warns when the binary lives inside `.agents/worktrees/`, because deleting that worktree would strand the service.
 
 The legacy `agents daemon <cmd>` subcommands still work but print a deprecation warning and will be removed in v2.0.
 
