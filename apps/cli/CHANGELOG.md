@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.20.57
+
+- **Fix global npm upgrades restarting the routines daemon through `scripts/postinstall.js`.** The postinstall process is itself `process.argv[1]`, so its daemon self-heal could stamp `node scripts/postinstall.js daemon _run` into launchd; the lifecycle script then printed the local-install message and exited on every restart. Daemon startup now accepts an explicit CLI entry and postinstall passes the resolved signed native binary (or JavaScript entrypoint), with the same value threaded through launchd, systemd, and detached startup. Source: `apps/cli/scripts/postinstall.js`, `apps/cli/src/lib/daemon.ts`.
+
 - **Clarified `agents secrets list` POLICY column labels.** The column previously mixed policy names, runtime state, and implementation jargon (`daily · 7d left`, `always ask`, `never · NO ACL`). It now uses a consistent `policy · state` form: `daily`, `daily · held 7d`, `always · prompt`, and `never · no prompt`. Source: `apps/cli/src/commands/secrets.ts` (`renderPolicyCol`).
 
 ## 1.20.56

@@ -638,8 +638,10 @@ export function writeOwnerOnlyServiceManifest(filePath: string, content: string)
 }
 
 /** Generate a macOS launchd plist for auto-starting the daemon. */
-export function generateLaunchdPlist(oauthToken: string | null = readDaemonClaudeOAuthToken()): string {
-  const agentsBin = getAgentsBinPath();
+export function generateLaunchdPlist(
+  oauthToken: string | null = readDaemonClaudeOAuthToken(),
+  agentsBin: string = getAgentsBinPath(),
+): string {
   const launch = getDaemonLaunch(agentsBin);
   const logPath = getLogPath();
   const oauthEntry = oauthToken
@@ -681,8 +683,10 @@ function systemdExecArg(value: string): string {
 }
 
 /** Generate a Linux systemd user unit for auto-starting the daemon. */
-export function generateSystemdUnit(oauthToken: string | null = readDaemonClaudeOAuthToken()): string {
-  const agentsBin = getAgentsBinPath();
+export function generateSystemdUnit(
+  oauthToken: string | null = readDaemonClaudeOAuthToken(),
+  agentsBin: string = getAgentsBinPath(),
+): string {
   const launch = getDaemonLaunch(agentsBin);
   const execStart = [launch.command, ...launch.args].map(systemdExecArg).join(' ');
   const oauthLine = oauthToken
@@ -779,7 +783,7 @@ function readServiceManagerPid(platform: NodeJS.Platform = os.platform()): numbe
 }
 
 /** Start the daemon via launchd, systemd, or as a detached process. */
-export function startDaemon(): { pid: number | null; method: string } {
+export function startDaemon(agentsBin?: string): { pid: number | null; method: string } {
   if (isDaemonRunning()) {
     const pid = readDaemonPid();
     return { pid, method: 'already-running' };
@@ -793,7 +797,7 @@ export function startDaemon(): { pid: number | null; method: string } {
   }
 
   try {
-    return startDaemonLocked();
+    return startDaemonLocked(agentsBin ?? getAgentsBinPath());
   } finally {
     releaseLock();
   }
@@ -817,7 +821,7 @@ export function ensureDaemonStarted(): { pid: number | null; method: string } | 
   }
 }
 
-function startDaemonLocked(): { pid: number | null; method: string } {
+function startDaemonLocked(agentsBin: string): { pid: number | null; method: string } {
   const platform = os.platform();
 
   if (platform === 'darwin') {
@@ -829,7 +833,7 @@ function startDaemonLocked(): { pid: number | null; method: string } {
       }
       // The plist may embed a long-lived OAuth token in EnvironmentVariables;
       // create owner-only atomically (no world-readable window before chmod).
-      writeOwnerOnlyServiceManifest(plistPath, generateLaunchdPlist());
+      writeOwnerOnlyServiceManifest(plistPath, generateLaunchdPlist(undefined, agentsBin));
 
       try {
         execFileSync('launchctl', ['unload', plistPath], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
@@ -845,7 +849,7 @@ function startDaemonLocked(): { pid: number | null; method: string } {
     } catch {
       // load threw — fall through to detached spawn
     }
-    return startDetached();
+    return startDetached({ agentsBin });
   }
 
   if (platform === 'linux') {
@@ -856,7 +860,7 @@ function startDaemonLocked(): { pid: number | null; method: string } {
         fs.mkdirSync(unitDir, { recursive: true });
       }
       // May embed a long-lived OAuth token in an Environment= line; owner-only.
-      writeOwnerOnlyServiceManifest(unitPath, generateSystemdUnit());
+      writeOwnerOnlyServiceManifest(unitPath, generateSystemdUnit(undefined, agentsBin));
 
       execFileSync('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf-8' });
       execFileSync('systemctl', ['--user', 'enable', SYSTEMD_UNIT], { encoding: 'utf-8' });
@@ -869,10 +873,10 @@ function startDaemonLocked(): { pid: number | null; method: string } {
     } catch {
       // start threw — fall through to detached spawn
     }
-    return startDetached();
+    return startDetached({ agentsBin });
   }
 
-  return startDetached();
+  return startDetached({ agentsBin });
 }
 
 /**
