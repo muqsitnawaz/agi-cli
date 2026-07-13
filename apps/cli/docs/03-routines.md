@@ -111,10 +111,11 @@ branch in the execution flow above) and runs the agent with your real `HOME`, wh
 
 The daemon reads `CLAUDE_CODE_OAUTH_TOKEN` from the claude secrets bundle at startup
 and injects it into child processes — but only when the bundle is present in the
-agent's version store. Even with that token injected, the sandboxed process still
-has no `~/.claude/` directory (the overlay is empty), so the claude binary cannot
-fully initialize. `sandbox: false` is therefore the reliable workaround today;
-forwarding credentials into the sandbox overlay is a planned improvement.
+agent's version store. Even with that token injected, the sandboxed process's
+`~/.claude/` contains only a generated `settings.json` with tool permissions (no
+OAuth credentials or session tokens), so the claude binary cannot authenticate.
+`sandbox: false` is therefore the reliable workaround today; forwarding credentials
+into the sandbox overlay is a planned improvement.
 
 ## Execution Flow
 
