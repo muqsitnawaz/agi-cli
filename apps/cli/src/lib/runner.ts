@@ -656,17 +656,9 @@ export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<Ru
 /** Spawn a job as a detached process and return immediately with run metadata. */
 export async function executeJobDetached(config: JobConfig): Promise<RunMeta> {
   if (!jobRunsOnThisDevice(config)) {
-    process.stderr.write(`[agents] daemon: skipping job '${config.name}' — restricted to device(s): ${(config.devices ?? []).join(', ')}\n`);
-    return {
-      jobName: config.name,
-      runId: 'skipped',
-      agent: config.agent,
-      pid: null,
-      status: 'failed',
-      startedAt: new Date().toISOString(),
-      completedAt: new Date().toISOString(),
-      exitCode: 1,
-    };
+    const allowed = (config.devices ?? []).join(', ');
+    process.stderr.write(`[agents] daemon: skipping job '${config.name}' — restricted to device(s): ${allowed}\n`);
+    throw new Error(`Job '${config.name}' is restricted to device(s): ${allowed}`);
   }
   // Pre-flight: pick a healthy version/account so the daemon does not launch
   // into a credit-exhausted install. Detached cannot mid-run failover (no exit

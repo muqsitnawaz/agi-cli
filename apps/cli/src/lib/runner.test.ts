@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
 import { executeJob, executeJobDetached } from './runner.js';
+import { getRunDir } from './routines.js';
 import type { JobConfig } from './routines.js';
 
 function baseConfig(partial: Partial<JobConfig> = {}): JobConfig {
@@ -30,27 +33,12 @@ describe('runner device enforcement', () => {
     await expect(executeJob(config)).rejects.toThrow(/restricted to device\(s\)/);
   });
 
-  it('executeJobDetached returns a skipped meta when this machine is not allowed', async () => {
+  it('executeJobDetached throws when this machine is not in the devices allowlist', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
-    const config = baseConfig({ devices: ['yosemite-s0'] });
-    const meta = await executeJobDetached(config);
-    expect(meta.status).toBe('failed');
-    expect(meta.runId).toBe('skipped');
-    expect(meta.exitCode).toBe(1);
-  });
+    const config = baseConfig({ name: 'guard-reject', devices: ['yosemite-s0'] });
+    await expect(executeJobDetached(config)).rejects.toThrow(/restricted to device\(s\)/);
 
-  it('executeJobDetached passes for unrestricted jobs (no device guard)', async () => {
-    process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
-    const config = baseConfig({ devices: undefined });
-    const meta = await executeJobDetached(config);
-    // Unrestricted: the device guard does not reject, so runId is NOT 'skipped'.
-    expect(meta.runId).not.toBe('skipped');
-  });
-
-  it('executeJobDetached passes when this machine is in the allowlist', async () => {
-    process.env.AGENTS_SYNC_MACHINE_ID = 'yosemite-s0';
-    const config = baseConfig({ devices: ['yosemite-s0'] });
-    const meta = await executeJobDetached(config);
-    expect(meta.runId).not.toBe('skipped');
+    const runDir = path.dirname(getRunDir(config.name, 'any'));
+    expect(fs.existsSync(runDir)).toBe(false);
   });
 });
