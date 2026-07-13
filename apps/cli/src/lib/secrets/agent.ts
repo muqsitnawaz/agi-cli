@@ -445,6 +445,32 @@ export async function runSecretsAgent(
     } catch { /* gone or no longer ours */ }
   };
 
+  // Register lifecycle handlers before socket arbitration. A persistent
+  // launchd service may spend its whole lifetime as the standby loser, and a
+  // kickstart/bootout during that wait must still release its pid-file lease.
+  let standbyTimer: NodeJS.Timeout | null = null;
+  let cleanupActive: (() => void) | null = null;
+  let shuttingDown = false;
+  const onSigterm = () => shutdown(0);
+  const onSigint = () => shutdown(0);
+  const detachSignals = () => {
+    process.off('SIGTERM', onSigterm);
+    process.off('SIGINT', onSigint);
+  };
+  const shutdown = (code: number) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    if (standbyTimer) {
+      clearTimeout(standbyTimer);
+      standbyTimer = null;
+    }
+    if (cleanupActive) cleanupActive();
+    else releasePid();
+    process.exit(code);
+  };
+  process.on('SIGTERM', onSigterm);
+  process.on('SIGINT', onSigint);
+
   // Capture the version of the code we're running so the sweep can detect when
   // an in-place upgrade has landed and self-heal onto it. getCliVersion caches
   // this value for the process lifetime; getCliVersionFresh re-reads on disk.
@@ -509,6 +535,7 @@ export async function runSecretsAgent(
     try {
       server = await bindBrokerSocket(sock, onConnection);
     } catch (err) {
+      detachSignals();
       releasePid();
       throw err;
     }
@@ -518,19 +545,24 @@ export async function runSecretsAgent(
       // daemon-hosted owner goes away. The pid file keeps launchd/manual starts
       // from creating additional waiters while this process is standing by.
       do {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise<void>((resolve) => {
+          standbyTimer = setTimeout(() => {
+            standbyTimer = null;
+            resolve();
+          }, 1000);
+        });
       } while ((await agentPing()).reachable);
     }
   } while (!server && persistent);
   if (!server) {
+    detachSignals();
     releasePid();
     return null;
   }
 
   let watcher: ChildProcess | null = null;
   let sweepTimer: NodeJS.Timeout | null = null;
-  let shuttingDown = false;
-  const cleanup = () => {
+  cleanupActive = () => {
     store.clear();
     if (sweepTimer) clearInterval(sweepTimer);
     try { watcher?.kill(); } catch { /* already gone */ }
@@ -538,17 +570,6 @@ export async function runSecretsAgent(
     try { fs.unlinkSync(sock); } catch { /* gone */ }
     releasePid();
   };
-  const shutdown = (code: number) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    cleanup();
-    process.exit(code);
-  };
-
-  const onSigterm = () => shutdown(0);
-  const onSigint = () => shutdown(0);
-  process.on('SIGTERM', onSigterm);
-  process.on('SIGINT', onSigint);
 
   sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
 
@@ -578,9 +599,8 @@ export async function runSecretsAgent(
     close() {
       if (shuttingDown) return;
       shuttingDown = true;
-      process.off('SIGTERM', onSigterm);
-      process.off('SIGINT', onSigint);
-      cleanup();
+      detachSignals();
+      cleanupActive?.();
     },
   };
 }
