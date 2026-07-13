@@ -49,7 +49,10 @@ effort: default               # fast, default, or detailed
 timeout: 10m
 runOnce: false                # true for one-shot jobs (--at)
 endAt: "2026-12-31T23:59:00Z" # optional: auto-disable on/after this time
-device: yosemite-s0           # optional: pin to one machine (see Device Pinning)
+device: yosemite-s0           # optional: pin to ONE machine (see Device Pinning)
+devices:                       # optional: allowlist — each listed device fires independently
+  - yosemite-s0                # (see Device Allowlist; mutually exclusive with device:)
+  - mac-mini
 
 prompt: |
   Review open PRs and summarize status.
@@ -95,6 +98,82 @@ job is fully inert:
 
 `agents routines list` shows the pin in a Device column (grayed when it names
 another machine) and in `--json` as `device` + `runsHere`.
+
+### Device Allowlist
+
+`device:` pins a job to exactly one machine. `devices:` is an **allowlist**: every
+listed machine runs the job independently — both `yosemite-s0` and `mac-mini` fire
+their own run on schedule, with their own run history.
+
+```yaml
+# ~/.agents/routines/drain.yml
+name: drain
+schedule: "0 3 * * *"
+agent: claude
+devices:
+  - yosemite-s0
+  - mac-mini
+prompt: "Drain the local work queue"
+```
+
+Or via flag when creating:
+
+```bash
+agents routines add drain --schedule "0 3 * * *" --agent claude \
+  --devices yosemite-s0,mac-mini --prompt "Drain the local work queue"
+```
+
+**Omitting `devices:` means unrestricted** — the job fires on every device running
+the scheduler. `devices: []` (empty list) or `--clear` removes the constraint and
+restores unrestricted behavior.
+
+On a device not in the allowlist:
+- the cron scheduler skips the job
+- webhook triggers do not match it
+- it is never counted overdue; `catchup` and daemon nags ignore it
+- `agents routines run <name>` errors and prints which devices the job runs on,
+  with a `--host <device>` hint to run it remotely
+
+#### Managing the allowlist interactively
+
+`agents routines devices <name>` opens a preselected multi-select so you can
+toggle devices without editing the YAML manually:
+
+```bash
+agents routines devices drain
+```
+
+The picker starts with the current allowlist pre-checked. Confirm to overwrite.
+
+For scripting:
+
+```bash
+agents routines devices drain --set yosemite-s0,mac-mini  # replace allowlist
+agents routines devices drain --clear                      # remove allowlist (unrestricted)
+```
+
+`agents routines list` shows the allowlist in a **Devices** column; `--json` includes
+a `devices` array alongside `device` and `runsHere`.
+
+### Remote Routing
+
+`--host <device>` (alias: `--device`) routes a `routines` subcommand to run on a
+remote machine via SSH:
+
+```bash
+# Query another device's routine state
+agents routines list --host yosemite-s0
+
+# Trigger a job on a specific machine right now
+agents routines run drain --host yosemite-s0
+
+# Combine with --devices: create a job pre-assigned to a set of hosts
+agents routines add drain --schedule "0 3 * * *" --agent claude \
+  --devices yosemite-s0,mac-mini --prompt "Drain queue" --host yosemite-s0
+```
+
+When you try to run a job on a host outside its allowlist, the CLI errors with the
+names of the allowed devices and a ready-to-paste `--host` command.
 
 ## Sandbox Isolation
 
@@ -329,7 +408,10 @@ Each execution creates a run directory with structured output:
 ```bash
 # Lifecycle
 agents routines list                  # List all jobs with next run + status
+agents routines list --host yosemite-s0  # Query another device's routines
 agents routines add <name> --schedule "0 9 * * *" --agent claude --prompt "..."  # Inline
+agents routines add <name> --devices yosemite-s0,mac-mini --schedule "0 3 * * *" \
+  --agent claude --prompt "..."       # Add with device allowlist
 agents routines add <path.yml>        # Add from YAML file
 agents routines add <name> --at "14:30" --agent claude --prompt "..."            # One-shot
 agents routines edit <name>           # Open job in $EDITOR
@@ -337,8 +419,14 @@ agents routines remove <name>         # Delete a job
 agents routines pause <name>          # Disable a job
 agents routines resume <name>         # Re-enable a paused job
 
+# Device allowlist management
+agents routines devices <name>                         # Interactive multi-select picker
+agents routines devices <name> --set yosemite-s0,mac-mini  # Replace allowlist
+agents routines devices <name> --clear                 # Remove allowlist (unrestricted)
+
 # Execution
 agents routines run <name>            # Run immediately in foreground
+agents routines run <name> --host yosemite-s0  # Run on a specific remote device
 agents routines view <name>           # Show job config
 agents routines runs <name>           # View execution history (last 10)
 agents routines logs <name>           # Show stdout from latest run
