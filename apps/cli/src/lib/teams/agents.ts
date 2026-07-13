@@ -1679,16 +1679,27 @@ export class AgentManager {
     }
 
     const resume = { id: agent.remoteSessionId ?? agent.agentId, message };
+    const priorStatus = agent.status;
+    const priorCompletedAt = agent.completedAt;
     // Flip to RUNNING up front so a concurrent status poll can't reap the
     // teammate between the exit-sentinel clear and the new PID landing; the
-    // launch re-persists with the fresh pid/startTime.
+    // launch re-persists with the fresh pid/startTime. If relaunch fails before
+    // that happens, restore the stopped lifecycle state and keep its existing
+    // metadata/log directory intact so the user can retry.
     agent.status = AgentStatus.RUNNING;
     agent.completedAt = null;
 
-    if (agent.hostName) {
-      await this.launchRemoteProcess(agent, resume);
-    } else {
-      await this.launchProcess(agent, resume);
+    try {
+      if (agent.hostName) {
+        await this.launchRemoteProcess(agent, resume);
+      } else {
+        await this.launchProcess(agent, resume);
+      }
+    } catch (err) {
+      agent.status = priorStatus;
+      agent.completedAt = priorCompletedAt;
+      await agent.saveMeta();
+      throw err;
     }
     return agent;
   }
@@ -1771,7 +1782,10 @@ export class AgentManager {
       agent.startedAt = new Date();
       await agent.saveMeta();
     } catch (err: any) {
-      await this.cleanupPartialAgent(agent);
+      // Fresh spawns own a newly-created directory, so a failed launch removes
+      // that partial record. A resume reuses an existing teammate: its caller
+      // restores the prior terminal state and preserves the directory for retry.
+      if (!resume) await this.cleanupPartialAgent(agent);
       console.error(`Failed to spawn agent ${agent.agentId}:`, err);
       throw new Error(`Failed to spawn agent: ${err.message}`);
     }
