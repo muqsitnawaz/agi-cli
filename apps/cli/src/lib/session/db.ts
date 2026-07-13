@@ -944,7 +944,7 @@ export function latestSessionFileForCwd(agent: SessionAgentId, cwd: string, opti
   if (options?.maxAgeMs != null) {
     if (!isSessionActivityFresh(row, options.maxAgeMs, options.nowMs ?? Date.now())) return undefined;
   }
-  return row?.file_path;
+  return row.file_path;
 }
 
 /** Build a parameterized WHERE clause from query options. */
