@@ -44,7 +44,7 @@ name: daily-review
 schedule: "0 9 * * *"         # 9am daily (cron syntax)
 agent: claude
 version: 2.0.65               # Optional, uses global default if omitted
-mode: plan                    # plan (read-only) or edit
+mode: auto                    # auto (default), plan (read-only), edit, or skip
 effort: default               # fast, default, or detailed
 timeout: 10m
 runOnce: false                # true for one-shot jobs (--at)
