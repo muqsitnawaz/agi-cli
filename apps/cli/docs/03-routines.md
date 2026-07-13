@@ -86,6 +86,36 @@ The agent can only:
 - Use tools listed in `allow.tools`
 - Cannot access `~/.ssh`, `~/.gitconfig`, etc.
 
+### Headless claude auth
+
+The sandbox overlay sets `HOME` to the job's overlay directory, which contains
+no claude credentials. A routine whose agent is `claude` — or any routine that
+spawns headless `claude` as a sub-step — will therefore fail to authenticate
+inside the sandbox.
+
+**Current workaround — `sandbox: false`:**
+
+```yaml
+name: my-claude-routine
+agent: claude
+sandbox: false      # skip the HOME overlay; claude reads credentials from your real HOME
+prompt: |
+  ...
+```
+
+Setting `sandbox: false` bypasses `prepareJobHome` entirely (see the `if sandbox≠false`
+branch in the execution flow above) and runs the agent with your real `HOME`, where
+`~/.claude/` and the OAuth session live.
+
+**Why the daemon token alone is not enough:**
+
+The daemon reads `CLAUDE_CODE_OAUTH_TOKEN` from the claude secrets bundle at startup
+and injects it into child processes — but only when the bundle is present in the
+agent's version store. Even with that token injected, the sandboxed process still
+has no `~/.claude/` directory (the overlay is empty), so the claude binary cannot
+fully initialize. `sandbox: false` is therefore the reliable workaround today;
+forwarding credentials into the sandbox overlay is a planned improvement.
+
 ## Execution Flow
 
 Temporal sequence from cron fire to report saved.
