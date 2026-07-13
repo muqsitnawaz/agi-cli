@@ -4,7 +4,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { describe, it, expect } from 'vitest';
 import type { SecretsBundle } from './bundles.js';
-import { handleAgentRequest, shouldSelfHealForUpgrade, shouldTeardownVersionSkewedBroker, realBundleCount, shouldWipeOnWatchEvent, agentEvictSync, startHostedBroker, agentPing, META_CACHE_PREFIX, type StoredBundle, type Request } from './agent.js';
+import { handleAgentRequest, shouldSelfHealForUpgrade, shouldTeardownVersionSkewedBroker, realBundleCount, shouldWipeOnWatchEvent, agentEvictSync, startHostedBroker, runSecretsAgent, agentPing, META_CACHE_PREFIX, type StoredBundle, type Request } from './agent.js';
 
 /**
  * These tests target the broker's store semantics — the part with real bug
@@ -306,6 +306,33 @@ describe.skipIf(process.platform !== 'darwin')('startHostedBroker (#416: broker 
       expect((await agentPing()).reachable).toBe(true);
     } finally {
       first?.close();
+      if (prevDir === undefined) delete process.env.AGENTS_SECRETS_AGENT_DIR;
+      else process.env.AGENTS_SECRETS_AGENT_DIR = prevDir;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the daemon-hosted socket when the standalone service starts afterward', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-hosted-then-standalone-'));
+    const prevDir = process.env.AGENTS_SECRETS_AGENT_DIR;
+    process.env.AGENTS_SECRETS_AGENT_DIR = dir;
+    const sock = path.join(dir, 'agent.sock');
+    const pid = path.join(dir, 'agent.pid');
+    let hosted: { close(): void } | null = null;
+    try {
+      hosted = await startHostedBroker();
+      expect(hosted).not.toBeNull();
+      expect((await agentPing()).reachable).toBe(true);
+
+      // Reproduces postinstall ownership order: the daemon has already bound
+      // the broker and launchd then starts the installed standalone service.
+      await runSecretsAgent({ service: true });
+
+      expect(fs.existsSync(sock)).toBe(true);
+      expect(fs.existsSync(pid)).toBe(false);
+      expect((await agentPing()).reachable).toBe(true);
+    } finally {
+      hosted?.close();
       if (prevDir === undefined) delete process.env.AGENTS_SECRETS_AGENT_DIR;
       else process.env.AGENTS_SECRETS_AGENT_DIR = prevDir;
       fs.rmSync(dir, { recursive: true, force: true });
