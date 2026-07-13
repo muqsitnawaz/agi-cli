@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Feed high-consequence authz uses the canonical operator registry (RUSH-1618).** `recordAnswer` no longer looks for `operators.yaml` under the feed root; it resolves operators from `~/.agents/` via `loadOperators()`. Source: `apps/cli/src/lib/feed.ts`.
 - **Per-session rate-limit detection + feed badge (RUSH-1523).** The session state engine flags rate/usage-limit text in the transcript (`detectRateLimited`); `ActiveSession.rateLimited` flows through remote fan-out into Factory's `FloorAgent.rateLimited`, which renders a **rate limited** pill on the feed card. Source: `apps/cli/src/lib/session/state.ts`, `apps/factory/.../floorAdapter.ts`, `FeedItem.tsx`.
 - **Kiro launches with `--v3` so standalone hooks actually fire (RUSH-1612).** Agents-cli writes Kiro hooks as v3 standalone files under `~/.kiro/hooks/*.json`, but those only load on the v3 engine. `AGENT_COMMANDS.kiro.base` now includes `--v3` so `agents run kiro` opts into the engine that reads them. Source: `apps/cli/src/lib/exec.ts`.
 
