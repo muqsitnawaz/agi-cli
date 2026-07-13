@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Startup shim self-heal stays silent by default, with `--verbose` diagnostics on stderr.**
+  The unified shim/shadow/PATH repair path no longer pollutes command stdout, including
+  `agents sessions --active --json`; `agents --verbose <cmd>` now prints a concise
+  startup self-heal summary to stderr for debugging. Source: `apps/cli/src/index.ts`,
+  `apps/cli/src/lib/shim-heal.ts`. (RUSH-1533)
 - **Wire allowlist support for OpenCode.** OpenCode stores per-tool allow/ask/deny rules in `opencode.json`/`opencode.jsonc` under `permission` (bash patterns etc.; present since ~1.1.1). Flip `allowlist: { since: '1.1.1' }` so the existing `convertToOpenCodeFormat` / `applyPermissionsToVersion` / detector path actually runs. Source: `apps/cli/src/lib/agents.ts`, `apps/cli/src/lib/permissions.ts`. (RUSH-1385)
 - **Wire subagents support for Grok CLI.** Grok discovers agent definitions as Claude-compatible `.md` files under `~/.grok/agents/` (docs: user-guide/16-subagents.md). Flip `subagents: true`, reuse the Claude flatten transform for install/writer paths, and register a detector plus list/diff/remove. Source: `apps/cli/src/lib/agents.ts`, `apps/cli/src/lib/subagents.ts`, `apps/cli/src/lib/staleness/writers/subagents.ts`, `apps/cli/src/lib/staleness/detectors/subagents.ts`. (RUSH-1384)
 - **Wire subagents support for Kimi CLI.** Kimi Code loads custom agents as YAML under `~/.kimi-code/agents/*.yaml` with a sibling `*.system.md` referenced via `system_prompt_path` (Kimi has no inline `system_prompt` field) and a managed parent `_agents-cli.yaml` that declares `agent.subagents` for `--agent-file`. Flip `subagents: true`, add `transformSubagentForKimi` / `writeKimiSubagentFiles`, list/diff/remove paths, and wire the subagents writer + detector (underscore-prefixed parent excluded from the installed name list). Source: `apps/cli/src/lib/agents.ts`, `apps/cli/src/lib/subagents.ts`, `apps/cli/src/lib/staleness/writers/subagents.ts`, `apps/cli/src/lib/staleness/detectors/subagents.ts`. (RUSH-1383)
