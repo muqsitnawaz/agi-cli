@@ -62,7 +62,11 @@ enum LocalState {
             .map { normalizeAgent(String($0).trimmingCharacters(in: .whitespacesAndNewlines)) } ?? []
         if configured.isEmpty { return desiredAgents }
 
-        let filtered = configured.compactMap { id in desiredAgents.first { $0.id == id } }
+        var seen = Set<String>()
+        let filtered = configured.compactMap { id -> MenuAgent? in
+            guard seen.insert(id).inserted else { return nil }
+            return desiredAgents.first { $0.id == id }
+        }
         return filtered.isEmpty ? desiredAgents : filtered
     }
 

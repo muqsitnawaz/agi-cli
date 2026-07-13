@@ -209,21 +209,28 @@ final class PromptPanelController: NSObject, NSTextFieldDelegate {
 
     @objc private func onModeChanged(_ sender: NSSegmentedControl) {
         action = QuickDispatchAction(rawValue: sender.selectedSegment) ?? .fileTicket
+        normalizeSelectionForAction()
+        updateAgentButtons()
         updateHint()
     }
 
     @objc private func onAgentToggle(_ sender: NSButton) {
         guard sender.tag >= 0, sender.tag < roster.count else { return }
         let id = roster[sender.tag].id
-        if sender.state == .on {
-            selectedAgents.insert(id)
-        } else {
-            selectedAgents.remove(id)
+        switch action {
+        case .fileTicket:
+            selectedAgents = [id]
+        case .fix:
+            if sender.state == .on {
+                selectedAgents.insert(id)
+            } else {
+                selectedAgents.remove(id)
+            }
+            if selectedAgents.isEmpty {
+                selectedAgents.insert(id)
+            }
         }
-        if selectedAgents.isEmpty {
-            selectedAgents.insert(id)
-            sender.state = .on
-        }
+        updateAgentButtons()
         updateHint()
     }
 
@@ -243,10 +250,8 @@ final class PromptPanelController: NSObject, NSTextFieldDelegate {
         }
         for button in agentButtons { agentStrip.addArrangedSubview(button) }
         selectedAgents = defaultAgentSelection()
-        for (index, button) in agentButtons.enumerated() {
-            let id = roster[index].id
-            button.state = selectedAgents.contains(id) ? .on : .off
-        }
+        normalizeSelectionForAction()
+        updateAgentButtons()
     }
 
     private func defaultAgentSelection() -> Set<String> {
@@ -261,6 +266,24 @@ final class PromptPanelController: NSObject, NSTextFieldDelegate {
     private func selectedAgentList() -> [String] {
         let ordered = roster.map(\.id).filter { selectedAgents.contains($0) }
         return ordered.isEmpty ? [roster.first?.id ?? "claude"] : ordered
+    }
+
+    private func normalizeSelectionForAction() {
+        let visible = Set(roster.map(\.id))
+        selectedAgents = selectedAgents.intersection(visible)
+        if selectedAgents.isEmpty {
+            selectedAgents = [roster.first?.id ?? "claude"]
+        }
+        if action == .fileTicket, let first = selectedAgentList().first {
+            selectedAgents = [first]
+        }
+    }
+
+    private func updateAgentButtons() {
+        for (index, button) in agentButtons.enumerated() {
+            let id = roster[index].id
+            button.state = selectedAgents.contains(id) ? .on : .off
+        }
     }
 
     // MARK: Thumbnails

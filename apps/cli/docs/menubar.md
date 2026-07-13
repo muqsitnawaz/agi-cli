@@ -19,8 +19,8 @@ out with `agents menubar disable`.
 ## Quick dispatch
 
 `Cmd-Shift-O` opens the Spotlight-style capture panel. Type a short request,
-optionally attach recent screenshots from the thumbnail strip, pick one or more
-agents from the roster, then press Return.
+optionally attach recent screenshots from the thumbnail strip, then pick one
+agent for **File Ticket** or one or more agents for **Fix**.
 
 - **File Ticket** sends the note and selected screenshots to the selected ticket
   agent, which investigates and files one Linear ticket.

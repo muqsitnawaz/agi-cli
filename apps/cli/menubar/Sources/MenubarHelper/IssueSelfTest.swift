@@ -120,13 +120,20 @@ enum IssueSelfTest {
         check("default quick-dispatch roster uses desired agents",
               defaultRoster.map(\.id) == LocalState.desiredAgents.map(\.id))
 
-        let filtered = LocalState.quickDispatchRoster(env: ["AGENTS_QUICK_DISPATCH_ROSTER": "codex,claude,missing"])
-        check("configured quick-dispatch roster preserves valid configured order",
+        let filtered = LocalState.quickDispatchRoster(env: ["AGENTS_QUICK_DISPATCH_ROSTER": "codex,claude,missing,codex"])
+        check("configured quick-dispatch roster preserves valid configured order and dedups",
               filtered.map(\.id) == ["codex", "claude"], detail: filtered.map(\.id).joined(separator: ","))
 
         let invalid = LocalState.quickDispatchRoster(env: ["AGENTS_QUICK_DISPATCH_ROSTER": "missing"])
         check("invalid quick-dispatch roster falls back to desired agents",
               invalid.map(\.id) == LocalState.desiredAgents.map(\.id))
+
+        let preselected = IssueSelfTest.preselectedAgents(
+            env: ["AGENTS_QUICK_DISPATCH_AGENTS": "codex,claude,missing,codex"],
+            roster: filtered
+        )
+        check("configured quick-dispatch preselection stays visible and deduped",
+              preselected == ["codex", "claude"], detail: preselected.joined(separator: ","))
     }
 
     // The recent-tickets ledger merge: newest-first, dedup by id, capped.
@@ -161,5 +168,14 @@ enum IssueSelfTest {
             failures += 1
             print("  FAIL  \(name)" + (detail.map { "  (got: \($0))" } ?? ""))
         }
+    }
+
+    private static func preselectedAgents(env: [String: String], roster: [MenuAgent]) -> [String] {
+        let visible = Set(roster.map(\.id))
+        var seen = Set<String>()
+        return env["AGENTS_QUICK_DISPATCH_AGENTS"]?
+            .split(separator: ",")
+            .map { LocalState.normalizeAgent(String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { visible.contains($0) && seen.insert($0).inserted } ?? []
     }
 }
