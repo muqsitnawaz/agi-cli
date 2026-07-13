@@ -41,22 +41,28 @@ export function registerFeedCommand(program: Command): void {
     .description('List open blocks -- decisions agents are waiting on')
     .option('--json', 'Output as JSON')
     .action(async (opts: { json?: boolean }) => {
+      const setupWarnings: string[] = [];
       const hookInstall = ensureFeedPublishHook();
       if (hookInstall.error) {
-        throw new Error(hookInstall.error);
-      }
-      const [{ iterHooksCapableVersions, parseHookManifest, registerHooksToSettings }, { getVersionHomePath }] = await Promise.all([
-        import('../lib/hooks.js'),
-        import('../lib/versions.js'),
-      ]);
-      const manifest = parseHookManifest({ warn: false });
-      for (const { agent, version } of iterHooksCapableVersions({ agent: 'claude' })) {
-        const result = registerHooksToSettings(agent, getVersionHomePath(agent, version), manifest);
-        if (result.errors.length > 0) {
-          throw new Error(`Failed to register feed hook for ${agent}@${version}: ${result.errors.join('; ')}`);
+        setupWarnings.push(hookInstall.error);
+      } else {
+        const [{ iterHooksCapableVersions, parseHookManifest, registerHooksToSettings }, { getVersionHomePath }] = await Promise.all([
+          import('../lib/hooks.js'),
+          import('../lib/versions.js'),
+        ]);
+        const manifest = parseHookManifest({ warn: false });
+        for (const { agent, version } of iterHooksCapableVersions({ agent: 'claude' })) {
+          const result = registerHooksToSettings(agent, getVersionHomePath(agent, version), manifest);
+          if (result.errors.length > 0) {
+            setupWarnings.push(`${agent}@${version}: ${result.errors.join('; ')}`);
+          }
         }
       }
       const blocks = listBlocks();
+
+      for (const warning of setupWarnings) {
+        console.error(chalk.yellow(`Feed hook setup warning: ${warning}`));
+      }
 
       if (opts.json) {
         console.log(JSON.stringify(blocks, null, 2));
