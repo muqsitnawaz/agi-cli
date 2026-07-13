@@ -403,8 +403,10 @@ async function bindBrokerSocket(
  * `agents secrets _agent-run`. Holds the store in memory, serves the socket,
  * sweeps expired entries, wipes on sleep, and self-exits when idle.
  */
-export async function runSecretsAgent(opts: { service?: boolean } = {}): Promise<void> {
-  if (!onDarwin()) return; // nothing to broker without biometry prompts
+export async function runSecretsAgent(
+  opts: { service?: boolean } = {},
+): Promise<{ close(): void } | null> {
+  if (!onDarwin()) return null; // nothing to broker without biometry prompts
   // When launchd keeps us alive as a persistent service, never idle-exit:
   // exiting would just make launchd cold-start us again, reintroducing the
   // startup-under-load fragility the service exists to avoid.
@@ -420,7 +422,7 @@ export async function runSecretsAgent(opts: { service?: boolean } = {}): Promise
   } catch (err: any) {
     if (err?.code === 'EEXIST') {
       const holder = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-      if (!isNaN(holder) && isAlive(holder)) return; // another broker is live
+      if (!isNaN(holder) && isAlive(holder)) return null; // another broker is live
       // Stale pid — reclaim it.
       try { fs.unlinkSync(pidFile); } catch { /* race; fall through */ }
       fs.writeFileSync(pidFile, String(process.pid));
@@ -502,35 +504,51 @@ export async function runSecretsAgent(opts: { service?: boolean } = {}): Promise
     conn.on('error', () => { /* client vanished mid-request; ignore */ });
   };
 
-  let server: net.Server | null;
-  try {
-    server = await bindBrokerSocket(sock, onConnection);
-  } catch (err) {
-    releasePid();
-    throw err;
-  }
+  let server: net.Server | null = null;
+  do {
+    try {
+      server = await bindBrokerSocket(sock, onConnection);
+    } catch (err) {
+      releasePid();
+      throw err;
+    }
+    if (!server && persistent) {
+      // launchd KeepAlive would immediately relaunch a persistent loser if it
+      // returned here. Stay quiescent instead, then claim the socket if the
+      // daemon-hosted owner goes away. The pid file keeps launchd/manual starts
+      // from creating additional waiters while this process is standing by.
+      do {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      } while ((await agentPing()).reachable);
+    }
+  } while (!server && persistent);
   if (!server) {
     releasePid();
-    return;
+    return null;
   }
 
   let watcher: ChildProcess | null = null;
   let sweepTimer: NodeJS.Timeout | null = null;
   let shuttingDown = false;
-  const shutdown = (code: number) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
+  const cleanup = () => {
     store.clear();
     if (sweepTimer) clearInterval(sweepTimer);
     try { watcher?.kill(); } catch { /* already gone */ }
     try { server.close(); } catch { /* not listening */ }
     try { fs.unlinkSync(sock); } catch { /* gone */ }
     releasePid();
+  };
+  const shutdown = (code: number) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    cleanup();
     process.exit(code);
   };
 
-  process.on('SIGTERM', () => shutdown(0));
-  process.on('SIGINT', () => shutdown(0));
+  const onSigterm = () => shutdown(0);
+  const onSigint = () => shutdown(0);
+  process.on('SIGTERM', onSigterm);
+  process.on('SIGINT', onSigint);
 
   sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
 
@@ -555,6 +573,16 @@ export async function runSecretsAgent(opts: { service?: boolean } = {}): Promise
   } catch {
     watcher = null;
   }
+
+  return {
+    close() {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      process.off('SIGTERM', onSigterm);
+      process.off('SIGINT', onSigint);
+      cleanup();
+    },
+  };
 }
 
 /**

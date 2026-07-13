@@ -312,13 +312,14 @@ describe.skipIf(process.platform !== 'darwin')('startHostedBroker (#416: broker 
     }
   });
 
-  it('keeps the daemon-hosted socket when the standalone service starts afterward', async () => {
+  it('keeps a persistent loser quiescent, then takes over after the hosted broker stops', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-hosted-then-standalone-'));
     const prevDir = process.env.AGENTS_SECRETS_AGENT_DIR;
     process.env.AGENTS_SECRETS_AGENT_DIR = dir;
     const sock = path.join(dir, 'agent.sock');
     const pid = path.join(dir, 'agent.pid');
     let hosted: { close(): void } | null = null;
+    let standalone: { close(): void } | null = null;
     try {
       hosted = await startHostedBroker();
       expect(hosted).not.toBeNull();
@@ -326,12 +327,35 @@ describe.skipIf(process.platform !== 'darwin')('startHostedBroker (#416: broker 
 
       // Reproduces postinstall ownership order: the daemon has already bound
       // the broker and launchd then starts the installed standalone service.
-      await runSecretsAgent({ service: true });
+      const starting = runSecretsAgent({ service: true });
+      const state = await Promise.race([
+        starting.then(() => 'returned'),
+        new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 600)),
+      ]);
 
+      // Returning would make launchd KeepAlive restart the loser forever. It
+      // must stay alive as the single pid-file owner without touching the live
+      // daemon socket.
+      expect(state).toBe('waiting');
       expect(fs.existsSync(sock)).toBe(true);
-      expect(fs.existsSync(pid)).toBe(false);
+      expect(fs.readFileSync(pid, 'utf-8')).toBe(String(process.pid));
+      expect((await agentPing()).reachable).toBe(true);
+
+      // If the daemon owner stops, the quiescent service becomes the broker
+      // instead of leaving the socket unavailable until launchd retries it.
+      hosted.close();
+      hosted = null;
+      standalone = await new Promise<{ close(): void } | null>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('standalone takeover timed out')), 3000);
+        starting.then((handle) => {
+          clearTimeout(timer);
+          resolve(handle);
+        }, reject);
+      });
+      expect(standalone).not.toBeNull();
       expect((await agentPing()).reachable).toBe(true);
     } finally {
+      standalone?.close();
       hosted?.close();
       if (prevDir === undefined) delete process.env.AGENTS_SECRETS_AGENT_DIR;
       else process.env.AGENTS_SECRETS_AGENT_DIR = prevDir;

@@ -13,8 +13,8 @@
 
 - **Daemon-hosted and standalone secrets brokers share one race-safe socket
   binder.** Either startup order now preserves the live owner; the losing broker
-  exits without unlinking the shared socket, and only an unreachable stale socket
-  is reclaimed.
+  stays quiescent without triggering launchd restart churn, takes over if the
+  owner stops, and only reclaims an unreachable stale socket.
 
 - **Daemon service manifests pin the active Node runtime.** Symlinked and
   extension-less Node entrypoints launch through `process.execPath`, and service
