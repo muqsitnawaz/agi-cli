@@ -65,4 +65,9 @@ describe('maybeRunOnHost — local short-circuits (no SSH attempted)', () => {
     expect(process.exitCode).toBe(1);
     process.exitCode = 0;
   });
+
+  it('accepts routines as a host-routable command', async () => {
+    process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
+    expect(await maybeRunOnHost('routines', ['routines', 'list', '--host', 'mybox'])).toBe(false);
+  });
 });
