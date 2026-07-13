@@ -320,6 +320,9 @@ export function validateJob(config: Partial<JobConfig>): string[] {
       errors.push('endAt must be a parseable ISO 8601 / RFC3339 timestamp (e.g., 2026-12-31T23:59:00Z)');
     }
   }
+  if ((config as Record<string, unknown>).device !== undefined) {
+    errors.push('singular "device" key is no longer supported — use "devices" (an array). Run the v12 migration: agents migrate');
+  }
   if (config.devices !== undefined) {
     if (!Array.isArray(config.devices)) {
       errors.push('devices must be an array of device names (as shown by `agents devices`)');
