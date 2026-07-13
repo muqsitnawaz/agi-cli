@@ -321,7 +321,7 @@ export function validateJob(config: Partial<JobConfig>): string[] {
     }
   }
   if ((config as Record<string, unknown>).device !== undefined) {
-    errors.push('singular "device" key is no longer supported — use "devices" (an array). Run the v12 migration: agents migrate');
+    errors.push('singular "device" key is no longer supported — replace with devices: [<name>] (an array)');
   }
   if (config.devices !== undefined) {
     if (!Array.isArray(config.devices)) {

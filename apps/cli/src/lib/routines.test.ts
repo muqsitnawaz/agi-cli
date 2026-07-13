@@ -147,7 +147,7 @@ describe('validateJob — devices', () => {
   it('rejects a stale singular "device" key after v12', () => {
     const config = { ...baseJob({ schedule: '0 3 * * *' }), device: 'yosemite-s0' } as Record<string, unknown>;
     const errors = validateJob(config as Partial<JobConfig>);
-    expect(errors.some((e) => /singular "device" key is no longer supported/.test(e))).toBe(true);
+    expect(errors.some((e) => /singular "device" key is no longer supported/.test(e) && /devices:/.test(e))).toBe(true);
   });
 });
 
