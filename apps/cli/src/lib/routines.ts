@@ -104,6 +104,14 @@ export interface JobConfig {
    * inert and `run` refuses with an `agents ssh` pointer.
    */
   device?: string;
+  /**
+   * Allowlist of devices that may execute this routine. When set, only devices
+   * whose `machineId()` matches one of the entries (after `normalizeHost`) may
+   * schedule, fire, catch up, or manually run the job. Omitted means
+   * unrestricted (any device may execute). Takes precedence over `device` when
+   * both are set (but setting both is unusual — prefer `devices`).
+   */
+  devices?: string[];
   variables?: Record<string, string>;
   sandbox?: boolean;
   allow?: JobAllowConfig;
@@ -130,14 +138,44 @@ export interface RunMeta {
 }
 
 /**
- * True when the job may execute on this machine: no `device` pin, or the pin
- * names this device. Both sides go through `normalizeHost` so `Yosemite-S0`,
+ * True when the job may execute on this machine. Checks both `devices` (the
+ * allowlist) and `device` (the legacy single pin). When `devices` is set, the
+ * machine must appear in the list. When only `device` is set, the machine must
+ * match the pin. When neither is set, the job is unrestricted and runs
+ * everywhere. Both sides go through `normalizeHost` so `Yosemite-S0`,
  * `yosemite-s0.tailnet.ts.net`, and `yosemite-s0` all agree. Every fire path
  * (cron scheduler, webhook, catchup/overdue, manual run) gates on this.
  */
-export function jobRunsOnThisDevice(config: Pick<JobConfig, 'device'>): boolean {
+export function jobRunsOnThisDevice(config: Pick<JobConfig, 'device' | 'devices'>): boolean {
+  const id = machineId();
+  if (config.devices && config.devices.length > 0) {
+    return config.devices.some((d) => normalizeHost(d) === id);
+  }
   if (!config.device) return true;
-  return normalizeHost(config.device) === machineId();
+  return normalizeHost(config.device) === id;
+}
+
+/**
+ * Normalize and deduplicate a `devices` array: lowercase, strip domain suffix,
+ * collapse duplicates. Returns a new sorted array.
+ */
+export function normalizeDevices(raw: string[]): string[] {
+  const seen = new Set<string>();
+  for (const d of raw) {
+    const n = normalizeHost(d);
+    if (n) seen.add(n);
+  }
+  return [...seen].sort();
+}
+
+/**
+ * Return the list of device names that own a job (for error messages).
+ * Prefers `devices` over `device`.
+ */
+export function jobDeviceOwners(config: Pick<JobConfig, 'device' | 'devices'>): string[] {
+  if (config.devices && config.devices.length > 0) return normalizeDevices(config.devices);
+  if (config.device) return [normalizeHost(config.device)];
+  return [];
 }
 
 /** Default values applied to every job config when fields are omitted. */
@@ -233,6 +271,7 @@ export function writeJob(config: JobConfig): void {
   if (output.timeout === '10m') delete output.timeout;
   if (output.enabled === true) delete output.enabled;
   if (output.runOnce === false || output.runOnce === undefined) delete output.runOnce;
+  if (output.devices && Array.isArray(output.devices) && output.devices.length === 0) delete output.devices;
 
   fs.writeFileSync(filePath, yaml.stringify(output), 'utf-8');
 }
@@ -320,6 +359,18 @@ export function validateJob(config: Partial<JobConfig>): string[] {
   if (config.device !== undefined) {
     if (typeof config.device !== 'string' || config.device.trim() === '') {
       errors.push('device must be a non-empty device name (as shown by `agents devices`, e.g. yosemite-s0)');
+    }
+  }
+  if (config.devices !== undefined) {
+    if (!Array.isArray(config.devices)) {
+      errors.push('devices must be an array of device names');
+    } else {
+      for (const d of config.devices) {
+        if (typeof d !== 'string' || d.trim() === '') {
+          errors.push('each entry in devices must be a non-empty device name');
+          break;
+        }
+      }
     }
   }
 

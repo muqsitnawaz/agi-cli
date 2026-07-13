@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { validateJob, validateTrigger, normalizeTriggerEvent, writeJob, readJob, deleteJob, jobRunsOnThisDevice, type JobConfig } from './routines.js';
+import { validateJob, validateTrigger, normalizeTriggerEvent, writeJob, readJob, deleteJob, jobRunsOnThisDevice, normalizeDevices, jobDeviceOwners, type JobConfig } from './routines.js';
 import { getRoutinesDir, ensureAgentsDir } from './state.js';
 
 /** Minimal valid schedule-based job. */
@@ -141,6 +141,22 @@ describe('validateJob — device', () => {
   });
 });
 
+describe('validateJob — devices array', () => {
+  it('accepts a job with a devices allowlist', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *', devices: ['yosemite-s0', 'mac-mini'] }))).toEqual([]);
+  });
+
+  it('rejects a non-array devices', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', devices: 'yosemite-s0' as never }));
+    expect(errors.some((e) => /devices must be an array/.test(e))).toBe(true);
+  });
+
+  it('rejects an empty-string entry in devices', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', devices: ['yosemite-s0', ''] }));
+    expect(errors.some((e) => /each entry in devices must be a non-empty device name/.test(e))).toBe(true);
+  });
+});
+
 describe('jobRunsOnThisDevice', () => {
   const savedId = process.env.AGENTS_SYNC_MACHINE_ID;
 
@@ -168,5 +184,59 @@ describe('jobRunsOnThisDevice', () => {
   it('rejects a pin naming another machine', () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
     expect(jobRunsOnThisDevice({ device: 'yosemite-s0' })).toBe(false);
+  });
+
+  it('matches when this machine is in the devices allowlist', () => {
+    process.env.AGENTS_SYNC_MACHINE_ID = 'yosemite-s0';
+    expect(jobRunsOnThisDevice({ devices: ['yosemite-s0', 'mac-mini'] })).toBe(true);
+  });
+
+  it('rejects when this machine is not in the devices allowlist', () => {
+    process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
+    expect(jobRunsOnThisDevice({ devices: ['yosemite-s0', 'mac-mini'] })).toBe(false);
+  });
+
+  it('devices takes precedence over device', () => {
+    process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
+    expect(jobRunsOnThisDevice({ device: 'zion', devices: ['yosemite-s0'] })).toBe(false);
+  });
+
+  it('normalizes devices entries', () => {
+    process.env.AGENTS_SYNC_MACHINE_ID = 'yosemite-s0';
+    expect(jobRunsOnThisDevice({ devices: ['Yosemite-S0.tailnet.ts.net'] })).toBe(true);
+  });
+
+  it('empty devices array means unrestricted (falls through to device)', () => {
+    process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
+    expect(jobRunsOnThisDevice({ devices: [], device: 'zion' })).toBe(true);
+    expect(jobRunsOnThisDevice({ devices: [] })).toBe(true);
+  });
+});
+
+describe('normalizeDevices', () => {
+  it('lowercases, deduplicates, and sorts', () => {
+    expect(normalizeDevices(['Mac-Mini', 'yosemite-s0', 'mac-mini'])).toEqual(['mac-mini', 'yosemite-s0']);
+  });
+
+  it('strips domain suffixes', () => {
+    expect(normalizeDevices(['yosemite-s0.tailnet.ts.net'])).toEqual(['yosemite-s0']);
+  });
+
+  it('returns empty for empty input', () => {
+    expect(normalizeDevices([])).toEqual([]);
+  });
+});
+
+describe('jobDeviceOwners', () => {
+  it('returns devices when set', () => {
+    expect(jobDeviceOwners({ devices: ['Mac-Mini', 'yosemite-s0'] })).toEqual(['mac-mini', 'yosemite-s0']);
+  });
+
+  it('returns device when devices is not set', () => {
+    expect(jobDeviceOwners({ device: 'Yosemite-S0' })).toEqual(['yosemite-s0']);
+  });
+
+  it('returns empty when neither is set', () => {
+    expect(jobDeviceOwners({})).toEqual([]);
   });
 });
