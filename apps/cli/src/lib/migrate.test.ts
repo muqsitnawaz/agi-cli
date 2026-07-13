@@ -357,4 +357,18 @@ describe('migrateRoutineDeviceToDevices', () => {
     migrateRoutineDeviceToDevices(dir);
     expect(fs.readFileSync(path.join(dir, 'f.yml'), 'utf-8')).toBe(raw);
   });
+
+  it('propagates a write failure (no silent swallowing)', () => {
+    const dir = makeRoutinesDir();
+    fs.writeFileSync(path.join(dir, 'g.yml'), yaml.stringify({
+      name: 'g', schedule: '0 3 * * *', agent: 'claude', prompt: 'hi', device: 'zion',
+    }));
+    // Make the directory read-only so the atomic write (temp file + rename) fails.
+    fs.chmodSync(dir, 0o555);
+    try {
+      expect(() => migrateRoutineDeviceToDevices(dir)).toThrow();
+    } finally {
+      fs.chmodSync(dir, 0o755);
+    }
+  });
 });

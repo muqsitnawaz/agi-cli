@@ -1768,7 +1768,7 @@ export function migrateRoutineDeviceToDevices(routinesDir?: string): void {
     if (!('device' in doc)) continue;
     if ('devices' in doc) {
       delete doc.device;
-      try { fs.writeFileSync(filePath, yaml.stringify(doc), 'utf-8'); } catch { /* best-effort */ }
+      atomicWriteFileSync(filePath, yaml.stringify(doc));
       continue;
     }
 
@@ -1778,10 +1778,8 @@ export function migrateRoutineDeviceToDevices(routinesDir?: string): void {
       doc.devices = [val.trim()];
     }
 
-    try {
-      fs.writeFileSync(filePath, yaml.stringify(doc), 'utf-8');
-      migrated++;
-    } catch { /* best-effort */ }
+    atomicWriteFileSync(filePath, yaml.stringify(doc));
+    migrated++;
   }
 
   if (migrated > 0) {
