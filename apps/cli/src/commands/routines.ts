@@ -301,7 +301,7 @@ export function registerRoutinesCommands(program: Command): void {
       const NAME_W = 24;
       const AGENT_W = 10;
       const REPO_W = REPO_DISPLAY_MAX;
-      const DEVICE_W = 13;
+      const DEVICE_W = 22;
       const SCHED_W = 22;
       const ENABLED_W = 10;
       const NEXT_W = 22;
@@ -335,7 +335,8 @@ export function registerRoutinesCommands(program: Command): void {
         const enabledWord = job.enabled ? 'yes' : 'no';
         const enabledPad = Math.max(0, ENABLED_W - enabledWord.length);
 
-        const deviceWord = job.devices && job.devices.length > 0 ? job.devices.join(',') : '-';
+        const deviceFull = job.devices && job.devices.length > 0 ? job.devices.join(',') : '-';
+        const deviceWord = deviceFull.length > DEVICE_W ? deviceFull.slice(0, DEVICE_W - 1) + '…' : deviceFull;
         const deviceCell = !job.devices || job.devices.length === 0
           ? chalk.gray('-')
           : jobRunsOnThisDevice(job)
