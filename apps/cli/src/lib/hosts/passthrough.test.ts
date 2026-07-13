@@ -66,30 +66,45 @@ describe('maybeRunOnHost — local short-circuits (no SSH attempted)', () => {
     process.exitCode = 0;
   });
 
-  it('routes routines --host to remote', async () => {
-    // routines is in the passthrough table; with --host naming a non-self
-    // machine, maybeRunOnHost should return true (it would SSH if the host
-    // were reachable — we only test the selection logic here).
+  it('routes routines --host to a non-self target (enters SSH path)', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
-    // Self-machine check: --host mybox is local.
-    expect(await maybeRunOnHost('routines', ['routines', 'list', '--host', 'mybox'])).toBe(false);
+    // A non-self host enters the SSH resolve + sshStream path. sshStream
+    // returns 255 for unreachable hosts. Returning true proves the routing
+    // path was entered, not short-circuited.
+    const result = await maybeRunOnHost('routines', ['routines', 'list', '--host', 'other-box']);
+    expect(result).toBe(true);
+    expect(process.exitCode).toBeGreaterThan(0);
+    process.exitCode = 0;
   });
 
-  it('does NOT bail on --devices for routines (placement, not fan-out)', async () => {
+  it('routes routines --device alias to a non-self target', async () => {
+    process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
+    const result = await maybeRunOnHost('routines', ['routines', 'run', 'x', '--device', 'other-box']);
+    expect(result).toBe(true);
+    expect(process.exitCode).toBeGreaterThan(0);
+    process.exitCode = 0;
+  });
+
+  it('does NOT bail on --devices for routines with --host (placement, not fan-out)', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
     // --devices on routines is placement; --host should still route remotely.
-    // Self-machine short-circuit makes this false, confirming --devices didn't bail.
-    expect(await maybeRunOnHost('routines', ['routines', 'add', 'x', '--host', 'mybox', '--devices', 'a,b'])).toBe(false);
+    // A non-self target enters the SSH path (returns true), proving --devices
+    // did not bail.
+    const result = await maybeRunOnHost('routines', ['routines', 'add', 'x', '--host', 'other-box', '--devices', 'a,b']);
+    expect(result).toBe(true);
+    expect(process.exitCode).toBeGreaterThan(0);
+    process.exitCode = 0;
   });
 
   it('bails on --devices for non-routines commands (fan-out)', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
-    expect(await maybeRunOnHost('list', ['list', '--host', 'other', '--devices'])).toBe(false);
+    // --devices on a non-routines command triggers the fleet-flag bailout,
+    // returning false even with a non-self --host.
+    expect(await maybeRunOnHost('list', ['list', '--host', 'other-box', '--devices'])).toBe(false);
   });
 
-  it('treats --device as alias of --host for routines routing', async () => {
+  it('bails on --hosts for non-routines commands (fan-out)', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
-    // --device naming self -> local.
-    expect(await maybeRunOnHost('routines', ['routines', 'run', 'x', '--device', 'mybox'])).toBe(false);
+    expect(await maybeRunOnHost('list', ['list', '--host', 'other-box', '--hosts'])).toBe(false);
   });
 });
