@@ -129,12 +129,12 @@ export async function maybeRunOnHost(command: string, allArgs: string[]): Promis
     return true;
   }
 
-  // `--devices`/`--hosts` on teams/list fan out locally; don't cascade remotely.
-  // But on `routines`, `--devices` is a placement flag (which devices may run
-  // the routine) and must be forwarded to the remote host, not treated as
-  // fan-out.
-  const fleetFlag = allArgs.includes('--devices') || allArgs.includes('--hosts');
-  if (fleetFlag && command !== 'routines') return false;
+  // `--hosts` is always a generic fleet flag — bail for every command so the
+  // local aggregator handles it. `--devices` is fan-out on most commands but
+  // a placement flag on `routines` (which devices may run the routine), so
+  // only exempt routines from the bail.
+  if (allArgs.includes('--hosts')) return false;
+  if (allArgs.includes('--devices') && command !== 'routines') return false;
 
   const hostName = hostFlag ?? deviceFlag;
   if (!hostName) return false;

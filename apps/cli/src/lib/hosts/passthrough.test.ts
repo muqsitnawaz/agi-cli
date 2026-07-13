@@ -107,4 +107,9 @@ describe('maybeRunOnHost — local short-circuits (no SSH attempted)', () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
     expect(await maybeRunOnHost('list', ['list', '--host', '--evil', '--hosts'])).toBe(false);
   });
+
+  it('bails on --hosts for routines too (generic fleet flag, not placement)', async () => {
+    process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
+    expect(await maybeRunOnHost('routines', ['routines', 'list', '--host', '--evil', '--hosts'])).toBe(false);
+  });
 });

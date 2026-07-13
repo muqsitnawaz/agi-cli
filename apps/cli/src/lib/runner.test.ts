@@ -30,13 +30,13 @@ describe('runner device enforcement', () => {
   it('executeJob throws when this machine is not in the devices allowlist', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
     const config = baseConfig({ devices: ['yosemite-s0', 'mac-mini'] });
-    await expect(executeJob(config)).rejects.toThrow(/restricted to device\(s\)/);
+    await expect(executeJob(config)).rejects.toThrow(/can only run on/);
   });
 
   it('executeJobDetached throws when this machine is not in the devices allowlist', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
     const config = baseConfig({ name: 'guard-reject', devices: ['yosemite-s0'] });
-    await expect(executeJobDetached(config)).rejects.toThrow(/restricted to device\(s\)/);
+    await expect(executeJobDetached(config)).rejects.toThrow(/can only run on/);
 
     const runDir = path.dirname(getRunDir(config.name, 'any'));
     expect(fs.existsSync(runDir)).toBe(false);

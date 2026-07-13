@@ -48,6 +48,7 @@ import { isInteractiveTerminal, requireInteractiveSelection } from './utils.js';
 import { setHelpSections } from '../lib/help.js';
 import { loadDevices } from '../lib/devices/registry.js';
 import { normalizeHost } from '../lib/machine-id.js';
+import { addHostOption } from '../lib/hosts/option.js';
 
 /**
  * Human-friendly wall-clock a run took (e.g. "  · 3 min", "  · 45 sec"), or ""
@@ -185,6 +186,8 @@ export function registerRoutinesCommands(program: Command): void {
     .command('routines')
     .description('Schedule agents to run on a cron schedule or at a specific time. The scheduler auto-starts on first add.');
 
+  addHostOption(routinesCmd);
+
   setHelpSections(routinesCmd, {
     examples: `
       # Cron routine: Claude every weekday at 9 AM (scheduler auto-starts)
@@ -229,11 +232,12 @@ export function registerRoutinesCommands(program: Command): void {
     `,
   });
 
-  routinesCmd
-    .command('list')
-    .description('See all scheduled jobs, when they run next, and their last execution status')
-    .option('--json', 'Emit machine-readable JSON instead of the table (used by the menu bar helper)')
-    .action((options: { json?: boolean }) => {
+  addHostOption(
+    routinesCmd
+      .command('list')
+      .description('See all scheduled jobs, when they run next, and their last execution status')
+      .option('--json', 'Emit machine-readable JSON instead of the table (used by the menu bar helper)'),
+  ).action((options: { json?: boolean }) => {
       const jobs = listAllJobs(process.cwd());
       if (jobs.length === 0) {
         if (options.json) {
@@ -671,8 +675,8 @@ export function registerRoutinesCommands(program: Command): void {
 
       if (!jobRunsOnThisDevice(job)) {
         const allowed = (job.devices ?? []).join(', ');
-        console.log(chalk.red(`Job '${name}' is restricted to device(s): ${allowed}`));
-        console.log(chalk.gray(`  Run it there: agents routines run ${name} --host ${(job.devices ?? [])[0]}`));
+        console.log(chalk.red(`Job '${name}' can only run on: ${allowed}`));
+        console.log(chalk.gray(`  agents routines run ${name} --host ${(job.devices ?? [])[0]}`));
         process.exit(1);
       }
 
@@ -985,6 +989,11 @@ export function registerRoutinesCommands(program: Command): void {
     .option('--set <devices>', 'Replace the allowlist with this comma-separated list (strict fleet validation)')
     .option('--clear', 'Remove the allowlist so the routine runs on every device')
     .action(async (name: string | undefined, options: { set?: string; clear?: boolean }) => {
+      if (options.set && options.clear) {
+        console.log(chalk.red('--set and --clear are mutually exclusive'));
+        process.exit(1);
+      }
+
       if (!name) {
         name = await pickJob('Select routine', undefined, ['agents routines devices <name>']) ?? undefined;
         if (!name) return;

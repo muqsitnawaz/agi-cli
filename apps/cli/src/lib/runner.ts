@@ -464,7 +464,7 @@ function spawnJobAttempt(
 export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<RunResult> {
   if (!jobRunsOnThisDevice(config)) {
     const allowed = (config.devices ?? []).join(', ');
-    throw new Error(`Job '${config.name}' is restricted to device(s): ${allowed}`);
+    throw new Error(`Job '${config.name}' can only run on: ${allowed}`);
   }
   maybeRotate();
 
@@ -657,8 +657,8 @@ export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<Ru
 export async function executeJobDetached(config: JobConfig): Promise<RunMeta> {
   if (!jobRunsOnThisDevice(config)) {
     const allowed = (config.devices ?? []).join(', ');
-    process.stderr.write(`[agents] daemon: skipping job '${config.name}' — restricted to device(s): ${allowed}\n`);
-    throw new Error(`Job '${config.name}' is restricted to device(s): ${allowed}`);
+    process.stderr.write(`[agents] daemon: skipping '${config.name}' — can only run on: ${allowed}\n`);
+    throw new Error(`Job '${config.name}' can only run on: ${allowed}`);
   }
   // Pre-flight: pick a healthy version/account so the daemon does not launch
   // into a credit-exhausted install. Detached cannot mid-run failover (no exit

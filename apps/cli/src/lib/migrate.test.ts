@@ -371,4 +371,38 @@ describe('migrateRoutineDeviceToDevices', () => {
       fs.chmodSync(dir, 0o755);
     }
   });
+
+  it('throws on malformed legacy device value (not a nonempty string)', () => {
+    const dir = makeRoutinesDir();
+    fs.writeFileSync(path.join(dir, 'h.yml'), yaml.stringify({
+      name: 'h', schedule: '0 3 * * *', agent: 'claude', prompt: 'hi', device: '',
+    }));
+    expect(() => migrateRoutineDeviceToDevices(dir)).toThrow(/not a valid device name/);
+    const result = yaml.parse(fs.readFileSync(path.join(dir, 'h.yml'), 'utf-8'));
+    expect(result.device).toBe('');
+  });
+
+  it('throws on non-string legacy device value (number)', () => {
+    const dir = makeRoutinesDir();
+    fs.writeFileSync(path.join(dir, 'i.yml'), yaml.stringify({
+      name: 'i', schedule: '0 3 * * *', agent: 'claude', prompt: 'hi', device: 42,
+    }));
+    expect(() => migrateRoutineDeviceToDevices(dir)).toThrow(/not a valid device name/);
+    const result = yaml.parse(fs.readFileSync(path.join(dir, 'i.yml'), 'utf-8'));
+    expect(result.device).toBe(42);
+  });
+
+  it('propagates a readFile error for candidate YAML', () => {
+    const dir = makeRoutinesDir();
+    const filePath = path.join(dir, 'j.yml');
+    fs.writeFileSync(filePath, yaml.stringify({
+      name: 'j', schedule: '0 3 * * *', agent: 'claude', prompt: 'hi', device: 'zion',
+    }));
+    fs.chmodSync(filePath, 0o000);
+    try {
+      expect(() => migrateRoutineDeviceToDevices(dir)).toThrow();
+    } finally {
+      fs.chmodSync(filePath, 0o644);
+    }
+  });
 });

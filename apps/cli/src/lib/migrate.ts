@@ -1746,18 +1746,12 @@ export function migrateRoutineDeviceToDevices(routinesDir?: string): void {
   const dir = routinesDir ?? path.join(USER_DIR, 'routines');
   if (!fs.existsSync(dir)) return;
 
-  let files: string[];
-  try {
-    files = fs.readdirSync(dir).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'));
-  } catch { return; }
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'));
 
   let migrated = 0;
   for (const file of files) {
     const filePath = path.join(dir, file);
-    let raw: string;
-    try {
-      raw = fs.readFileSync(filePath, 'utf-8');
-    } catch { continue; }
+    const raw = fs.readFileSync(filePath, 'utf-8');
 
     let doc: Record<string, unknown>;
     try {
@@ -1773,10 +1767,11 @@ export function migrateRoutineDeviceToDevices(routinesDir?: string): void {
     }
 
     const val = doc.device;
-    delete doc.device;
-    if (typeof val === 'string' && val.trim()) {
-      doc.devices = [val.trim()];
+    if (typeof val !== 'string' || !val.trim()) {
+      throw new Error(`${file}: legacy 'device' field is not a valid device name — repair the file and retry`);
     }
+    delete doc.device;
+    doc.devices = [val.trim()];
 
     atomicWriteFileSync(filePath, yaml.stringify(doc));
     migrated++;

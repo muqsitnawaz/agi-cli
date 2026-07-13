@@ -226,3 +226,49 @@ describe('routines devices no-flags nonTTY names --set/--clear', () => {
     }
   });
 });
+
+describe('routines list --host self runs locally', () => {
+  it('exits 0 and lists when --host matches AGENTS_SYNC_MACHINE_ID', () => {
+    const job = { ...baseJob, devices: ['zion'] };
+    const home = makeHome({ jobs: [job], registry });
+    try {
+      const res = run(home, ['list', '--host', 'zion'], { AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain('test-job');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('routines --help documents --host and --device', () => {
+  it('help output contains --host and --device', () => {
+    const home = makeHome();
+    try {
+      const res = run(home, ['--help']);
+      const output = res.stdout + res.stderr;
+      expect(output).toContain('--host');
+      expect(output).toContain('--device');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('routines devices --set and --clear are mutually exclusive', () => {
+  it('exits nonzero without mutation when both are given', () => {
+    const job = { ...baseJob, devices: ['yosemite-s0'] };
+    const home = makeHome({ jobs: [job], registry });
+    try {
+      const before = fs.readFileSync(path.join(home, '.agents', 'routines', 'test-job.yml'), 'utf-8');
+      const res = run(home, ['devices', 'test-job', '--set', 'mac-mini', '--clear']);
+      expect(res.status).not.toBe(0);
+      const output = res.stdout + res.stderr;
+      expect(output).toMatch(/mutually exclusive/);
+      const after = fs.readFileSync(path.join(home, '.agents', 'routines', 'test-job.yml'), 'utf-8');
+      expect(after).toBe(before);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
