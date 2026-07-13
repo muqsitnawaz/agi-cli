@@ -1,3 +1,7 @@
+## Unreleased
+
+- **Remote plan previews are isolated by source path (RUSH-1631).** Cache key is `host/sha1(path)/basename` so two worktrees sharing a plan basename no longer clobber each other. Source: `apps/factory/src/vscode/settings.vscode.ts`.
+
 # Changelog
 
 All notable changes to the Factory extension are documented here. Format follows
