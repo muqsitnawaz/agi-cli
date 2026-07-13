@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **PR outcome keys include repository identity (RUSH-1630).** Full GitHub pull URLs normalize to `owner/repo#N` so two repos' PR #10 no longer collide under `pr:#10`. Source: `apps/cli/src/lib/feed-outcome.ts`.
+
 - **Per-session rate-limit detection + feed badge (RUSH-1523).** The session state engine flags rate/usage-limit text in the transcript (`detectRateLimited`); `ActiveSession.rateLimited` flows through remote fan-out into Factory's `FloorAgent.rateLimited`, which renders a **rate limited** pill on the feed card. Source: `apps/cli/src/lib/session/state.ts`, `apps/factory/.../floorAdapter.ts`, `FeedItem.tsx`.
 - **Kiro launches with `--v3` so standalone hooks actually fire (RUSH-1612).** Agents-cli writes Kiro hooks as v3 standalone files under `~/.kiro/hooks/*.json`, but those only load on the v3 engine. `AGENT_COMMANDS.kiro.base` now includes `--v3` so `agents run kiro` opts into the engine that reads them. Source: `apps/cli/src/lib/exec.ts`.
 
