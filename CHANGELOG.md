@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+## 1.20.57
+
+### Fixed
+
+- **Global npm upgrades restart the scheduler through the installed CLI.** The
+  macOS postinstall self-heal now passes the resolved signed CLI path into daemon
+  startup explicitly. This prevents launchd from recording
+  `scripts/postinstall.js daemon _run`, which exited immediately and left the
+  routine scheduler in a restart loop after an upgrade.
+
+### Added
+
+- **Stopped teammates can resume with a follow-up message.**
+  `agents teams resume` re-enters the teammate's own captured session, while
+  `agents teams message` routes to a live mailbox or resumes a stopped teammate
+  based on its reconciled status.
+
+- **The always-on daemon hosts the secrets broker without clobbering a live
+  socket.** Secret reads can use the supervised daemon immediately after start,
+  while a reachable standalone broker remains untouched.
+
+### Changed
+
+- **Secret policy labels use one `policy · state` vocabulary.**
+  `agents secrets list` now reports `daily`, `daily · held 7d`,
+  `always · prompt`, and `never · no prompt` instead of mixing policy names,
+  runtime state, and implementation terminology.
+
 ## 1.20.56
 
 ### Fixed
