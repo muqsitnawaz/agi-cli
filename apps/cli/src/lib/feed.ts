@@ -199,7 +199,11 @@ def main():
         "questions": normalized_questions,
     }
 
-    feed_dir = os.path.join(os.path.expanduser("~"), ".agents", ".history", "feed")
+    # Python's expanduser() ignores HOME on Windows, while agents-cli honors a
+    # HOME override on every platform. Use the same anchor so hooks and the CLI
+    # always read/write one feed store (including temp-home and sandbox runs).
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    feed_dir = os.path.join(home, ".agents", ".history", "feed")
     os.makedirs(feed_dir, exist_ok=True)
 
     target = os.path.join(feed_dir, f"{block_id}.json")
