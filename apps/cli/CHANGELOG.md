@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Menu bar groups worktree sessions under the real repo name (RUSH-1635).** Paths under `.agents/worktrees/<slug>` use the enclosing repository directory as the grouping key instead of the worktree slug. Source: `apps/cli/menubar/.../LocalState.swift`.
+
 - **Kiro launches with `--v3` so standalone hooks actually fire (RUSH-1612).** Agents-cli writes Kiro hooks as v3 standalone files under `~/.kiro/hooks/*.json`, but those only load on the v3 engine. `AGENT_COMMANDS.kiro.base` now includes `--v3` so `agents run kiro` opts into the engine that reads them. Source: `apps/cli/src/lib/exec.ts`.
 
 - **Ask classifier + stall suppression for the agent feed (RUSH-1477).** Every open block is classified as Decision / Approval / Clarification / Stall / Fyi. Workflow-stalls ("should I…?", "what's next?", "looks good?") are auto-answered and removed so they never render as cards; Decisions and Approvals still surface. `agents feed` reports a digest (`N stalls auto-resolved by policy`); `--all` shows suppressed items; `--json` stamps each block with its `ask` classification. Agent-tagged `blockClass: decision` is never auto-suppressed. Source: `apps/cli/src/lib/ask-classifier.ts`, `apps/cli/src/commands/feed.ts`.
