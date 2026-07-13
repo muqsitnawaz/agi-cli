@@ -8,7 +8,7 @@
  * builders; resumeTeammate drives a real AgentProcess loaded from disk.
  */
 import { describe, it, expect } from 'vitest';
-import { spawn, type ChildProcess } from 'child_process';
+import { execFileSync, spawn, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -162,39 +162,52 @@ describe('resumeTeammate — resume-id guard', () => {
 });
 
 describe.skipIf(IS_WINDOWS)('resumeTeammate — launch failure', () => {
-  it('preserves the stopped teammate metadata and files when relaunch fails', async () => {
+  it('terminates the replacement and restores all prior state when persistence fails after spawn', async () => {
     const base = tmpBase();
     const id = 'claude-agent-relaunch-failure';
     const dir = path.join(base, id);
+    const marker = `resume-transaction-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const startedAt = new Date('2026-07-13T12:00:00.000Z');
     const completedAt = new Date('2026-07-13T12:34:56.000Z');
     fs.mkdirSync(dir, { recursive: true });
 
     const agent = new AgentProcess(
       id, 'failure-team', 'claude', 'do a thing',
-      null, 'edit', null, AgentStatus.COMPLETED, new Date(), completedAt, base,
+      null, 'edit', null, AgentStatus.COMPLETED, startedAt, completedAt, base,
     );
     await agent.saveMeta();
     fs.writeFileSync(path.join(dir, 'prior-turn.log'), 'preserve me');
     const stdoutPath = path.join(dir, 'stdout.log');
     fs.writeFileSync(stdoutPath, 'prior stdout');
-    // A read-only stdout mirror produces a real EACCES failure when the local
-    // launcher opens the resume log for writing. AgentManager.get() can still
-    // load and reconcile the stopped teammate before launch reaches that point.
-    fs.chmodSync(stdoutPath, 0o400);
+    const metaPath = path.join(dir, 'meta.json');
+    const metaTarget = path.join(dir, 'meta-original.json');
+    fs.renameSync(metaPath, metaTarget);
+    fs.chmodSync(metaTarget, 0o400);
+    fs.symlinkSync(path.basename(metaTarget), metaPath);
 
     const mgr = new AgentManager(50, base);
     try {
-      await expect(mgr.resumeTeammate(id, 'keep going')).rejects.toThrow(/Failed to spawn agent/);
+      // The real local launcher reaches spawn, then saveMeta follows the
+      // read-only symlink and fails. The transactional catch must terminate the
+      // detached process before resumeTeammate restores the original lifecycle.
+      await expect(mgr.resumeTeammate(id, marker)).rejects.toThrow();
 
-      expect((mgr as any).agents.has(id)).toBe(true);
+      const retained = (mgr as any).agents.get(id) as AgentProcess | undefined;
+      expect(retained).toBeDefined();
+      expect(retained!.status).toBe(AgentStatus.COMPLETED);
+      expect(retained!.completedAt?.toISOString()).toBe(completedAt.toISOString());
+      expect(retained!.startedAt.toISOString()).toBe(startedAt.toISOString());
+      expect(retained!.pid).toBeNull();
+      expect(retained!.startTime).toBeNull();
       expect(fs.readFileSync(path.join(dir, 'prior-turn.log'), 'utf-8')).toBe('preserve me');
       expect(fs.readFileSync(stdoutPath, 'utf-8')).toBe('prior stdout');
       const restored = await AgentProcess.loadFromDisk(id, base);
       expect(restored).not.toBeNull();
       expect(restored!.status).toBe(AgentStatus.COMPLETED);
       expect(restored!.completedAt?.toISOString()).toBe(completedAt.toISOString());
+      expect(() => execFileSync('pgrep', ['-f', marker], { stdio: 'ignore' })).toThrow();
     } finally {
-      if (fs.existsSync(stdoutPath)) fs.chmodSync(stdoutPath, 0o600);
+      if (fs.existsSync(metaTarget)) fs.chmodSync(metaTarget, 0o600);
       fs.rmSync(base, { recursive: true, force: true });
     }
   });
