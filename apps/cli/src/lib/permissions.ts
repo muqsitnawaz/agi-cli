@@ -739,6 +739,75 @@ export function convertToKimiFormat(set: PermissionSet): { permission: { rules: 
   return { permission: { rules } };
 }
 
+export type KiroRule = { capability: string; effect: 'allow' | 'deny'; match?: string[]; exclude?: string[] };
+
+const KIRO_CAPABILITY_BY_TOOL: Record<string, string | undefined> = {
+  bash: 'shell',
+  read: 'fs_read',
+  write: 'fs_write',
+  edit: 'fs_write',
+  grep: 'fs_read',
+  glob: 'fs_read',
+  webfetch: 'web_fetch',
+  websearch: 'web_search',
+  mcp: 'mcp',
+  subagent: 'subagent',
+  skill: 'skill',
+};
+
+function normalizeKiroPattern(tool: string, pattern: string): string {
+  const t = tool.toLowerCase();
+  if (t === 'bash') {
+    return normalizeBashPattern(pattern);
+  }
+  if ((t === 'webfetch' || t === 'websearch') && pattern.startsWith('domain:')) {
+    return pattern.slice('domain:'.length);
+  }
+  return pattern;
+}
+
+function canonicalToKiroRule(perm: string, effect: 'allow' | 'deny'): KiroRule | null {
+  if (BLANKET_BASH_FORMS.has(perm)) {
+    return { capability: 'shell', effect };
+  }
+  const { tool, pattern } = parseCanonicalPreserveCase(perm);
+  const capability = KIRO_CAPABILITY_BY_TOOL[tool.toLowerCase()];
+  if (!capability) return null;
+  if (pattern === null || pattern === '*' || pattern === '**') {
+    return { capability, effect };
+  }
+  const normalized = normalizeKiroPattern(tool, pattern);
+  return { capability, effect, match: [normalized] };
+}
+
+/**
+ * Convert a canonical permission set to Kiro CLI's declarative `permissions.yaml`
+ * format (shipped in kiro-cli v2.8.0). Kiro reads `~/.kiro/settings/permissions.yaml`
+ * as an array of capability rules:
+ *   - capability: shell
+ *     effect: allow
+ *     match:
+ *       - "git *"
+ * Rules resolve by restrictiveness (deny > ask > allow). We map canonical Bash
+ * rules to Kiro's `shell` capability, Read/Grep/Glob to `fs_read`, Write/Edit to
+ * `fs_write`, WebFetch to `web_fetch`, WebSearch to `web_search`, and MCP/Subagent/
+ * Skill to their named capabilities.
+ */
+export function convertToKiroFormat(set: PermissionSet): { rules: KiroRule[] } {
+  const rules: KiroRule[] = [];
+  for (const perm of set.allow) {
+    const rule = canonicalToKiroRule(perm, 'allow');
+    if (rule) rules.push(rule);
+  }
+  if (set.deny) {
+    for (const perm of set.deny) {
+      const rule = canonicalToKiroRule(perm, 'deny');
+      if (rule) rules.push(rule);
+    }
+  }
+  return { rules };
+}
+
 /**
  * Convert canonical permission set to OpenCode format.
  * OpenCode uses: { permission: { bash: { "git *": "allow", "rm *": "deny" } } }
@@ -1411,6 +1480,34 @@ export function applyPermissionsToVersion(
 
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
       fs.writeFileSync(configPath, TOML.stringify(config as any), 'utf-8');
+      return { success: true };
+    }
+
+    if (agentId === 'kiro') {
+      const configPath = path.join(versionHome, '.kiro', 'settings', 'permissions.yaml');
+      const kiroRules = convertToKiroFormat(set).rules;
+
+      let existingRules: KiroRule[] = [];
+      if (merge && fs.existsSync(configPath)) {
+        try {
+          const existing = yaml.parse(fs.readFileSync(configPath, 'utf-8')) as { rules?: KiroRule[] } | null;
+          if (existing && Array.isArray(existing.rules)) {
+            existingRules = existing.rules;
+          }
+        } catch { /* parse fail — overwrite below */ }
+      }
+
+      const seen = new Set<string>();
+      const dedup: KiroRule[] = [];
+      for (const r of [...existingRules, ...kiroRules]) {
+        const key = `${r.effect}|${r.capability}|${(r.match ?? []).join(',')}|${(r.exclude ?? []).join(',')}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        dedup.push(r);
+      }
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, yaml.stringify({ rules: dedup }), 'utf-8');
       return { success: true };
     }
 

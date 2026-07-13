@@ -302,6 +302,11 @@ describe('PermissionsHandler', () => {
       expect(result).toBe(path.join('/test/home', '.kimi-code', 'config.toml'));
     });
 
+    it('returns correct path for Kiro', () => {
+      const result = PermissionsHandler.configPath!('kiro', '/test/home');
+      expect(result).toBe(path.join('/test/home', '.kiro', 'settings', 'permissions.yaml'));
+    });
+
     it('returns null for unsupported agents', () => {
       const result = PermissionsHandler.configPath!('gemini', '/test/home');
       expect(result).toBeNull();

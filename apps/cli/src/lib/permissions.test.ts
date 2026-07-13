@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as TOML from 'smol-toml';
+import * as yaml from 'yaml';
 import {
   COMPUTER_APP_GATED_VERBS,
   applyPermissionsToVersion,
@@ -10,6 +11,7 @@ import {
   containsBroadGrants,
   convertDenyToCodexRules,
   convertToKimiFormat,
+  convertToKiroFormat,
   formatComputerPermissionGrantHint,
 } from './permissions.js';
 
@@ -148,5 +150,42 @@ describe('convertToKimiFormat', () => {
     ]);
     // The pre-fix bug would have left the un-matchable Claude `:*` form on disk.
     expect(raw).not.toContain(':*');
+  });
+});
+
+describe('convertToKiroFormat', () => {
+  it('maps canonical tools to Kiro capabilities and strips the domain: prefix', () => {
+    const { rules } = convertToKiroFormat({
+      name: 'core',
+      allow: ['Bash(git status:*)', 'Read(**)', 'Write(src/**)', 'WebFetch(domain:docs.example.com/*)', 'WebSearch'],
+      deny: ['Bash(sudo:*)'],
+    });
+
+    expect(rules).toEqual([
+      { capability: 'shell', effect: 'allow', match: ['git status *'] },
+      { capability: 'fs_read', effect: 'allow' },
+      { capability: 'fs_write', effect: 'allow', match: ['src/**'] },
+      { capability: 'web_fetch', effect: 'allow', match: ['docs.example.com/*'] },
+      { capability: 'web_search', effect: 'allow' },
+      { capability: 'shell', effect: 'deny', match: ['sudo *'] },
+    ]);
+  });
+
+  it('writes a re-parseable permissions.yaml under the Kiro settings dir', () => {
+    const home = makeTempHome();
+    const res = applyPermissionsToVersion(
+      'kiro',
+      { name: 'set', allow: ['Bash(ls:*)', 'Read(**)'], deny: ['Bash(rm -rf:*)'] },
+      home,
+      false,
+    );
+    expect(res.success).toBe(true);
+
+    const configPath = path.join(home, '.kiro', 'settings', 'permissions.yaml');
+    expect(fs.existsSync(configPath)).toBe(true);
+    const parsed = yaml.parse(fs.readFileSync(configPath, 'utf-8')) as { rules: Array<{ capability: string; effect: string; match?: string[] }> };
+    expect(parsed.rules).toContainEqual({ capability: 'shell', effect: 'allow', match: ['ls *'] });
+    expect(parsed.rules).toContainEqual({ capability: 'fs_read', effect: 'allow' });
+    expect(parsed.rules).toContainEqual({ capability: 'shell', effect: 'deny', match: ['rm -rf *'] });
   });
 });

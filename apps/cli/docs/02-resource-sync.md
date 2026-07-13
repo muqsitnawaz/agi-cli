@@ -200,6 +200,11 @@ Per-agent conversion is lossy in both directions:
 - Codex emits Starlark deny rules to a generated `agents-deny.rules` file
   (`permissions.ts:38-56`). Allow rules aren't expressed; Codex defaults to
   deny-unless-allowed elsewhere.
+- Kiro writes declarative `~/.kiro/settings/permissions.yaml` rules with
+  `capability`/`effect`/`match` (kiro-cli v2.8.0+). Bash maps to `shell`,
+  Read/Grep/Glob to `fs_read`, Write/Edit to `fs_write`, WebFetch to
+  `web_fetch`, WebSearch to `web_search`, and MCP/Subagent/Skill to their
+  named capabilities (`permissions.ts` Kiro converter).
 
 ## Plugins: Synthetic Marketplace + Exec-Surface Gate
 
