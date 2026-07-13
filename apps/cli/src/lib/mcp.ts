@@ -495,7 +495,7 @@ function installMcpToFactoryConfig(server: InstalledMcpServer, versionHome: stri
 }
 
 function installMcpToOpenCodeConfig(server: InstalledMcpServer, versionHome: string): void {
-  const configPath = path.join(versionHome, '.opencode', 'opencode.jsonc');
+  const configPath = path.join(versionHome, '.config', 'opencode', 'opencode.jsonc');
 
   let config: Record<string, unknown> = {};
   if (fs.existsSync(configPath)) {
