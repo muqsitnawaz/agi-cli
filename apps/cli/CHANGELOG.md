@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **PR outcome keys include repository identity (RUSH-1630).** Full GitHub pull URLs normalize to `owner/repo#N` so two repos' PR #10 no longer collide under `pr:#10`. Source: `apps/cli/src/lib/feed-outcome.ts`.
+
 - **Kiro launches with `--v3` so standalone hooks actually fire (RUSH-1612).** Agents-cli writes Kiro hooks as v3 standalone files under `~/.kiro/hooks/*.json`, but those only load on the v3 engine. `AGENT_COMMANDS.kiro.base` now includes `--v3` so `agents run kiro` opts into the engine that reads them. Source: `apps/cli/src/lib/exec.ts`.
 
 - **Ask classifier + stall suppression for the agent feed (RUSH-1477).** Every open block is classified as Decision / Approval / Clarification / Stall / Fyi. Workflow-stalls ("should I…?", "what's next?", "looks good?") are auto-answered and removed so they never render as cards; Decisions and Approvals still surface. `agents feed` reports a digest (`N stalls auto-resolved by policy`); `--all` shows suppressed items; `--json` stamps each block with its `ask` classification. Agent-tagged `blockClass: decision` is never auto-suppressed. Source: `apps/cli/src/lib/ask-classifier.ts`, `apps/cli/src/commands/feed.ts`.
