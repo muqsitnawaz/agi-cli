@@ -22,8 +22,11 @@ out with `agents menubar disable`.
 optionally attach recent screenshots from the thumbnail strip, then pick one
 agent for **File Ticket** or one or more agents for **Fix**.
 
-- **File Ticket** sends the note and selected screenshots to the selected ticket
-  agent, which investigates and files one Linear ticket.
+- **File Ticket** sends the note and selected screenshot paths to the selected
+  ticket agent as user-provided ticket material. The agent investigates, files
+  one Linear ticket, and uploads every selected file to the issue using the
+  placement that best communicates the problem (description, comment, or another
+  appropriate attachment surface).
 - **Fix** fans out to every selected agent with `agents run <agent> --mode auto
   --name quick-<agent>-<timestamp>`, so the resulting sessions appear in normal
   `agents sessions` and menu-bar surfaces instead of as opaque background work.
