@@ -161,6 +161,45 @@ describe('resumeTeammate — resume-id guard', () => {
   });
 });
 
+describe.skipIf(IS_WINDOWS)('resumeTeammate — launch failure', () => {
+  it('preserves the stopped teammate metadata and files when relaunch fails', async () => {
+    const base = tmpBase();
+    const id = 'claude-agent-relaunch-failure';
+    const dir = path.join(base, id);
+    const completedAt = new Date('2026-07-13T12:34:56.000Z');
+    fs.mkdirSync(dir, { recursive: true });
+
+    const agent = new AgentProcess(
+      id, 'failure-team', 'claude', 'do a thing',
+      null, 'edit', null, AgentStatus.COMPLETED, new Date(), completedAt, base,
+    );
+    await agent.saveMeta();
+    fs.writeFileSync(path.join(dir, 'prior-turn.log'), 'preserve me');
+    const stdoutPath = path.join(dir, 'stdout.log');
+    fs.writeFileSync(stdoutPath, 'prior stdout');
+    // A read-only stdout mirror produces a real EACCES failure when the local
+    // launcher opens the resume log for writing. AgentManager.get() can still
+    // load and reconcile the stopped teammate before launch reaches that point.
+    fs.chmodSync(stdoutPath, 0o400);
+
+    const mgr = new AgentManager(50, base);
+    try {
+      await expect(mgr.resumeTeammate(id, 'keep going')).rejects.toThrow(/Failed to spawn agent/);
+
+      expect((mgr as any).agents.has(id)).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'prior-turn.log'), 'utf-8')).toBe('preserve me');
+      expect(fs.readFileSync(stdoutPath, 'utf-8')).toBe('prior stdout');
+      const restored = await AgentProcess.loadFromDisk(id, base);
+      expect(restored).not.toBeNull();
+      expect(restored!.status).toBe(AgentStatus.COMPLETED);
+      expect(restored!.completedAt?.toISOString()).toBe(completedAt.toISOString());
+    } finally {
+      if (fs.existsSync(stdoutPath)) fs.chmodSync(stdoutPath, 0o600);
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
 /**
  * The resume hazard: the status reader re-reads the whole stdout.log from byte 0
  * every poll and marks terminal status from the last `result` event it sees, with
