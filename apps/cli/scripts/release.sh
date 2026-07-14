@@ -408,6 +408,9 @@ if [[ "$(git show "origin/$DEFAULT_BRANCH:apps/cli/package.json" 2>/dev/null | j
   MAIN_AT_TARGET=true   # a prior run already merged the chore(release) PR
 fi
 EXISTING_PR="$(gh pr list --head "$RELEASE_BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+MERGED_RELEASE_JSON="$(gh pr list --head "$RELEASE_BRANCH" --base "$DEFAULT_BRANCH" --state merged --limit 1 --json number,mergeCommit 2>/dev/null || echo '[]')"
+MERGED_RELEASE_PR="$(jq -r '.[0].number // empty' <<<"$MERGED_RELEASE_JSON")"
+MERGED_RELEASE_SHA="$(jq -r '.[0].mergeCommit.oid // empty' <<<"$MERGED_RELEASE_JSON")"
 
 # ----- Bail out here in DRY-RUN mode -----
 if ! $APPLY; then
@@ -418,6 +421,7 @@ if ! $APPLY; then
   gray "  $PHNX_PKG@$TARGET on npm     $($PHNX_TARGET_PUBLISHED && echo yes || echo no)"
   gray "  origin/$DEFAULT_BRANCH at $TARGET   $($MAIN_AT_TARGET && echo yes || echo no)"
   gray "  open release PR           ${EXISTING_PR:-none} ($RELEASE_BRANCH)"
+  gray "  merged release PR         ${MERGED_RELEASE_PR:-none} ($RELEASE_BRANCH)"
   echo
   yellow "Will run on --apply (NPM_TOKEN from npmjs.com bundle, no 2FA prompts):"
   yellow "  1. roll CHANGELOG '## Unreleased' -> '## $TARGET'"
@@ -493,6 +497,19 @@ wait_for_ci_green() {
   (( problem == 0 )) || die "CI not all-green on PR #$pr -- PR left OPEN. Fix on a normal PR to $DEFAULT_BRANCH, then re-run this script."
   green "CI all-green on PR #$pr."
 }
+
+# A prior normal release run can merge its PR and then fail before publishing.
+# Re-running must reuse that exact, already-reviewed tree — never treat a manual
+# package.json bump on main as proof that the full release matrix ran. This is
+# the catch-up hole that let 1.20.58 publish before its Windows tag matrix failed.
+if $MAIN_AT_TARGET && ! $PHNX_TARGET_PUBLISHED; then
+  [[ -n "$MERGED_RELEASE_PR" && -n "$MERGED_RELEASE_SHA" ]] \
+    || die "main is already at $TARGET but no merged $RELEASE_BRANCH PR exists -- refusing an unverified catch-up publish; cut the next patch through the normal release PR flow"
+  [[ "$MERGED_RELEASE_SHA" == "$BASE_SHA" ]] \
+    || die "merged release PR #$MERGED_RELEASE_PR ended at ${MERGED_RELEASE_SHA:0:9}, but main is now ${BASE_SHA:0:9} -- refusing to publish unvalidated commits under $TARGET"
+  bold "Re-validating CI from merged release PR #$MERGED_RELEASE_PR before catch-up publish..."
+  wait_for_ci_green "$MERGED_RELEASE_PR"
+fi
 
 # ----- Open (or reuse) the release PR + merge, unless already merged -----
 if ! $MAIN_AT_TARGET; then
