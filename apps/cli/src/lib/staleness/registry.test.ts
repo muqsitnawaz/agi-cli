@@ -101,6 +101,20 @@ describe('staleness/registry', () => {
     expect(DETECTORS.subagents.kiro).toBeDefined();
   });
 
+  it('gemini has plugins and subagents writers + detectors', () => {
+    expect(WRITERS.plugins.gemini).toBeDefined();
+    expect(DETECTORS.plugins.gemini).toBeDefined();
+    expect(WRITERS.subagents.gemini).toBeDefined();
+    expect(DETECTORS.subagents.gemini).toBeDefined();
+  });
+
+  it('goose has workflows and permissions writers + detectors', () => {
+    expect(WRITERS.workflows.goose).toBeDefined();
+    expect(DETECTORS.workflows.goose).toBeDefined();
+    expect(WRITERS.permissions.goose).toBeDefined();
+    expect(DETECTORS.permissions.goose).toBeDefined();
+  });
+
   it('droid has a generic skills writer + detector', () => {
     expect(WRITERS.skills.droid).toBeDefined();
     expect(DETECTORS.skills.droid).toBeDefined();
@@ -216,5 +230,5 @@ describe('staleness/registry', () => {
 
   // Gemini's allowlist capability is `false` in the matrix today even though
   // applyPermissionsToVersion has a Gemini branch. Flipping that capability
-  // is its own PR — when it lands, add the assertion here.
+  // is its own PR.
 });

@@ -342,6 +342,11 @@ describe('PermissionsHandler', () => {
       expect(result).toBe(path.join('/test/home', '.factory', 'settings.json'));
     });
 
+    it('returns correct path for Goose', () => {
+      const result = PermissionsHandler.configPath!('goose', '/test/home');
+      expect(result).toBe(path.join('/test/home', '.config', 'goose', 'permission.yaml'));
+    });
+
     it('returns null for unsupported agents', () => {
       const result = PermissionsHandler.configPath!('gemini', '/test/home');
       expect(result).toBeNull();
