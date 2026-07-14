@@ -1,0 +1,296 @@
+/**
+ * Sandbox environment for routine job execution.
+ *
+ * Creates an overlay HOME directory per job with symlinked allowed
+ * directories and agent-specific config files (permissions, settings).
+ * The spawned agent process sees only the overlay, limiting filesystem
+ * access to explicitly allowed paths.
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import type { JobConfig } from './routines.js';
+import { setGeminiAutoUpdateDisabled, updateGeminiSettings } from './gemini-settings.js';
+import { getRoutinesDir, getUserAgentsDir } from './state.js';
+import { createLink } from './platform/index.js';
+
+function resolveRealHome(): string {
+  const home = os.homedir();
+  try {
+    return fs.realpathSync(home);
+  } catch {
+    return home;
+  }
+}
+
+/** Environment variables forwarded from the parent process into the sandbox. */
+const ENV_ALLOWLIST = [
+  'PATH',
+  'SHELL',
+  'TERM',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'USER',
+  'LOGNAME',
+  'TMPDIR',
+  'XDG_RUNTIME_DIR',
+  'XDG_CONFIG_HOME',
+  'XDG_DATA_HOME',
+  'XDG_CACHE_HOME',
+  'NODE_PATH',
+  'NVM_DIR',
+  'BUN_INSTALL',
+  'EDITOR',
+  'VISUAL',
+  'NO_COLOR',
+  'FORCE_COLOR',
+  // Headless Claude auth: the routines daemon injects CLAUDE_CODE_OAUTH_TOKEN
+  // from the `claude` secrets bundle (see daemon.ts). Without this allowlist
+  // entry, sandboxed routine spawns drop the token and look "unconfigured".
+  // Intentionally NOT ANTHROPIC_API_KEY / other provider secrets — those stay
+  // stripped (see tests/sandbox.test.ts "does not include sensitive env vars").
+  'CLAUDE_CODE_OAUTH_TOKEN',
+];
+
+/** Tools safe to grant as wildcards (no filesystem access). */
+const SAFE_TOOLS: Record<string, string> = {
+  web_search: 'WebSearch(*)',
+  web_fetch: 'WebFetch(*)',
+};
+
+/** Bare tool names that get scoped to allow.dirs, never wildcarded. */
+const DIR_SCOPED_TOOLS = new Set(['read', 'write', 'edit', 'glob', 'grep', 'notebook_edit']);
+
+function tomlString(value: string): string {
+  if (/[\r\n]/.test(value)) {
+    throw new Error(`TOML value contains newline: ${JSON.stringify(value)}`);
+  }
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/** Build a restricted environment for a sandboxed process, setting HOME to the overlay. */
+export function buildSpawnEnv(overlayHome: string, extraEnv?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {
+    HOME: overlayHome,
+    AGENTS_USER_DIR: getUserAgentsDir(),
+  };
+
+  for (const key of ENV_ALLOWLIST) {
+    if (process.env[key]) {
+      env[key] = process.env[key]!;
+    }
+  }
+
+  if (extraEnv) {
+    Object.assign(env, extraEnv);
+  }
+
+  return env;
+}
+
+/** Get the overlay HOME directory path for a named job. */
+export function getJobHomePath(name: string): string {
+  return path.join(getRoutinesDir(), name, 'home');
+}
+
+/** Create a fresh overlay HOME for a job, including agent config and allowed-dir symlinks. */
+export function prepareJobHome(config: JobConfig): string {
+  const overlayHome = getJobHomePath(config.name);
+
+  cleanJobHome(config.name);
+  fs.mkdirSync(overlayHome, { recursive: true });
+
+  if (config.agent === 'claude') {
+    generateClaudeConfig(overlayHome, config);
+  } else if (config.agent === 'codex') {
+    generateCodexConfig(overlayHome, config);
+  } else if (config.agent === 'gemini') {
+    generateGeminiConfig(overlayHome, config);
+  }
+
+  if (config.allow?.dirs) {
+    symlinkAllowedDirs(overlayHome, config.allow.dirs);
+  }
+
+  return overlayHome;
+}
+
+/** Remove a job's overlay HOME directory entirely. */
+export function cleanJobHome(name: string): void {
+  const overlayHome = getJobHomePath(name);
+  if (fs.existsSync(overlayHome)) {
+    fs.rmSync(overlayHome, { recursive: true, force: true });
+  }
+}
+
+/** Symlink allowed directories into the overlay HOME, skipping paths outside the real HOME. */
+export function symlinkAllowedDirs(overlayHome: string, dirs: string[]): void {
+  const realHome = resolveRealHome();
+  for (const dir of dirs) {
+    const expanded = dir.replace(/^~/, realHome);
+
+    // Resolve .. and symlinks to prevent path traversal outside HOME
+    let realPath: string;
+    try {
+      // Use realpath if the directory exists (resolves symlinks)
+      realPath = fs.realpathSync(expanded);
+    } catch {
+      // Directory doesn't exist yet — resolve .. components without following symlinks
+      realPath = path.resolve(expanded);
+    }
+
+    if (!realPath.startsWith(realHome + path.sep) && realPath !== realHome) {
+      continue;
+    }
+
+    const relativePath = path.relative(realHome, realPath);
+    const symlinkTarget = path.join(overlayHome, relativePath);
+    const parentDir = path.dirname(symlinkTarget);
+
+    fs.mkdirSync(parentDir, { recursive: true });
+
+    if (!fs.existsSync(symlinkTarget)) {
+      try {
+        // createLink uses a junction for directories on Windows (no elevation),
+        // a plain symlink on POSIX — allowed dirs are directories.
+        createLink(realPath, symlinkTarget);
+      } catch { /* link already exists or refused */ }
+    }
+  }
+}
+
+/** Generate a Claude settings.json in the overlay with scoped permissions from the job config. */
+export function generateClaudeConfig(overlayHome: string, config: JobConfig): void {
+  const realHome = resolveRealHome();
+  const claudeDir = path.join(overlayHome, '.claude');
+  fs.mkdirSync(claudeDir, { recursive: true });
+
+  const allowPermissions: string[] = [];
+  const enabledTools = new Set(config.allow?.tools || []);
+
+  if (config.allow?.tools) {
+    for (const tool of config.allow.tools) {
+      // Safe wildcards (no filesystem access)
+      if (tool in SAFE_TOOLS) {
+        allowPermissions.push(SAFE_TOOLS[tool]);
+        continue;
+      }
+
+      // Bare filesystem tool names — permissions come from allow.dirs
+      if (DIR_SCOPED_TOOLS.has(tool)) {
+        continue;
+      }
+
+      // Bare "bash" — must use scoped pattern like "Bash(git *)"
+      if (tool === 'bash') {
+        throw new Error(
+          'Bare "bash" not allowed in sandbox — use scoped patterns like "Bash(git *)"'
+        );
+      }
+
+      // Reject wildcard patterns like Bash(*), Read(*)
+      if (/^\w+\(\*\)$/.test(tool)) {
+        throw new Error(
+          `Wildcard "${tool}" not allowed in sandbox — use scoped patterns`
+        );
+      }
+
+      // Scoped pattern like "Bash(git *)" — pass through
+      allowPermissions.push(tool);
+    }
+  }
+
+  // Scope filesystem tools to allowed dirs
+  if (config.allow?.dirs) {
+    for (const dir of config.allow.dirs) {
+      const resolved = dir.replace(/^~/, realHome);
+
+      // Read always granted for allowed dirs
+      allowPermissions.push(`Read(${resolved}/**)`);
+
+      if (config.mode === 'edit') {
+        allowPermissions.push(`Write(${resolved}/**)`);
+        allowPermissions.push(`Edit(${resolved}/**)`);
+      }
+
+      if (enabledTools.has('glob')) {
+        allowPermissions.push(`Glob(${resolved}/**)`);
+      }
+      if (enabledTools.has('grep')) {
+        allowPermissions.push(`Grep(${resolved}/**)`);
+      }
+      if (enabledTools.has('notebook_edit') && config.mode === 'edit') {
+        allowPermissions.push(`NotebookEdit(${resolved}/**)`);
+      }
+    }
+  }
+
+  const settings: Record<string, unknown> = {
+    permissions: {
+      allow: allowPermissions,
+      deny: [],
+    },
+  };
+
+  fs.writeFileSync(
+    path.join(claudeDir, 'settings.json'),
+    JSON.stringify(settings, null, 2),
+    'utf-8'
+  );
+}
+
+/** Generate a Codex config.toml in the overlay with model and approval-mode settings. */
+export function generateCodexConfig(overlayHome: string, config: JobConfig): void {
+  const codexDir = path.join(overlayHome, '.codex');
+  fs.mkdirSync(codexDir, { recursive: true });
+
+  const lines: string[] = [];
+
+  const model = config.config?.model as string | undefined;
+  if (model) {
+    lines.push(`model = ${tomlString(model)}`);
+  }
+
+  if (config.mode === 'edit') {
+    lines.push('approval_mode = "full-auto"');
+  } else {
+    lines.push('approval_mode = "suggest"');
+  }
+
+  if (config.config) {
+    for (const [key, value] of Object.entries(config.config)) {
+      if (key === 'model') continue;
+      if (typeof value === 'string') {
+        lines.push(`${key} = ${tomlString(value)}`);
+      } else if (typeof value === 'boolean' || typeof value === 'number') {
+        lines.push(`${key} = ${value}`);
+      }
+    }
+  }
+
+  fs.writeFileSync(
+    path.join(codexDir, 'config.toml'),
+    lines.join('\n') + '\n',
+    'utf-8'
+  );
+}
+
+/** Generate a Gemini settings.json in the overlay from the job's config block. */
+export function generateGeminiConfig(overlayHome: string, config: JobConfig): void {
+  const settingsPath = path.join(overlayHome, '.gemini', 'settings.json');
+  updateGeminiSettings(settingsPath, (settings) => {
+    if (config.config?.model) {
+      settings.model = config.config.model;
+    }
+
+    if (config.config) {
+      for (const [key, value] of Object.entries(config.config)) {
+        settings[key] = value;
+      }
+    }
+
+    setGeminiAutoUpdateDisabled(settings);
+  });
+}
