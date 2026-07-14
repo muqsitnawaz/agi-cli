@@ -116,19 +116,25 @@ describe('goose workflows and allowlist support', () => {
   });
 });
 
+describe('gemini allowlist', () => {
+  it('is capable of allowlist', () => {
+    expect(supports('gemini', 'allowlist')).toEqual({ ok: true });
+    expect(capableAgents('allowlist')).toContain('gemini');
+  });
+});
+
 describe('unsupported agents skip regardless of version', () => {
-    it('cursor hooks are supported', () => {
-      expect(supports('cursor', 'hooks').ok).toBe(true);
-      expect(supports('cursor', 'hooks', '999.0.0').ok).toBe(true);
-    });
+  it('cursor hooks are supported', () => {
+    expect(supports('cursor', 'hooks').ok).toBe(true);
+    expect(supports('cursor', 'hooks', '999.0.0').ok).toBe(true);
+  });
 
-    it('opencode plugins are supported (TS module install path)', () => {
-      expect(supports('opencode', 'plugins').ok).toBe(true);
-    });
+  it('opencode plugins are supported (TS module install path)', () => {
+    expect(supports('opencode', 'plugins').ok).toBe(true);
+  });
 
-    it('amp plugins always unsupported (writer not implemented)', () => {
-      expect(supports('amp', 'plugins', '999.0.0').ok).toBe(false);
-    });
+  it('amp plugins always unsupported (writer not implemented)', () => {
+    expect(supports('amp', 'plugins', '999.0.0').ok).toBe(false);
   });
 });
 
@@ -349,4 +355,6 @@ describe('explainSkip()', () => {
   it('returns empty string when ok', () => {
     expect(explainSkip('claude', 'hooks', { ok: true })).toBe('');
   });
+});
+
 });
