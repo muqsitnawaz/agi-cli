@@ -18,7 +18,9 @@ import {
   writeClaudeUsageCache,
   normalizeKimiWindows,
   formatKimiPlan,
+  normalizeDroidWindows,
   type KimiUsagesResponse,
+  type DroidLimitsResponse,
   type UsageSnapshot,
   type UsageWindow,
 } from '../usage.js';
@@ -450,5 +452,67 @@ describe('normalizeKimiWindows', () => {
     expect(formatKimiPlan(payload)).toBe('Intermediate');
     expect(formatKimiPlan({ subType: 'TYPE_PURCHASE' })).toBe('Purchase');
     expect(formatKimiPlan({})).toBeNull();
+  });
+});
+
+describe('normalizeDroidWindows', () => {
+  // A real body captured live from GET https://api.factory.ai/api/billing/limits.
+  // Factory meters three independent rolling windows; `core` is the free
+  // fallback pool we deliberately do not surface.
+  const payload: DroidLimitsResponse = {
+    usesTokenRateLimitsBilling: true,
+    limits: {
+      standard: {
+        fiveHour: { usedPercent: 4, windowEnd: '2026-07-16T00:38:43.866Z', secondsRemaining: 17959 },
+        weekly: { usedPercent: 37, windowEnd: '2026-07-15T21:12:50.339Z', secondsRemaining: 5605 },
+        monthly: { usedPercent: 18, windowEnd: '2026-07-30T23:17:08.296Z', secondsRemaining: 1309063 },
+      },
+    },
+  };
+
+  it('maps fiveHour/weekly/monthly to session/week/month bars with reset times', () => {
+    const windows = normalizeDroidWindows(payload);
+    expect(windows.map((w) => w.key)).toEqual(['session', 'week', 'month']);
+    expect(windows.map((w) => w.shortLabel)).toEqual(['S', 'W', 'M']);
+    expect(windows.map((w) => w.usedPercent)).toEqual([4, 37, 18]);
+    const week = windows.find((w) => w.key === 'week')!;
+    expect(week.resetsAt?.toISOString()).toBe('2026-07-15T21:12:50.339Z');
+    expect(week.windowMinutes).toBe(10080);
+    expect(windows.find((w) => w.key === 'month')!.windowMinutes).toBe(43200);
+  });
+
+  it('returns no windows when the standard pool is absent (legacy billing)', () => {
+    expect(normalizeDroidWindows({ usesTokenRateLimitsBilling: false })).toEqual([]);
+    expect(normalizeDroidWindows({ limits: { standard: null } })).toEqual([]);
+  });
+
+  it('skips a window whose usedPercent is missing rather than rendering an empty bar', () => {
+    const windows = normalizeDroidWindows({
+      limits: { standard: { fiveHour: { usedPercent: 10 }, weekly: {}, monthly: null } },
+    });
+    expect(windows.map((w) => w.key)).toEqual(['session']);
+  });
+
+  it('clamps an out-of-range usedPercent into 0..100', () => {
+    const windows = normalizeDroidWindows({
+      limits: { standard: { fiveHour: { usedPercent: 140 }, weekly: { usedPercent: -5 } } },
+    });
+    expect(windows.find((w) => w.key === 'session')!.usedPercent).toBe(100);
+    expect(windows.find((w) => w.key === 'week')!.usedPercent).toBe(0);
+  });
+
+  it('treats a maxed monthly window as a real throttle (not a hidden sub-limit)', () => {
+    const windows = normalizeDroidWindows({
+      limits: { standard: { fiveHour: { usedPercent: 5 }, weekly: { usedPercent: 20 }, monthly: { usedPercent: 100 } } },
+    });
+    const snapshot: UsageSnapshot = {
+      source: 'live', sourceLabel: 'live account data', capturedAt: new Date('2026-07-15T12:00:00Z'), windows,
+    };
+    expect(deriveUsageStatusFromSnapshot(snapshot)).toBe('rate_limited');
+    // ...but the compact summary keeps to session + week bars.
+    const summary = stripAnsi(formatUsageSummary(null, snapshot));
+    expect(summary).toContain('S:');
+    expect(summary).toContain('W:');
+    expect(summary).not.toContain('M:');
   });
 });
