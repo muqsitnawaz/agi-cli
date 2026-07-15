@@ -35,6 +35,7 @@ import {
   getUsageInfoForIdentity,
   getUsageInfoByIdentity,
   getUsageLookupKey,
+  type UsageWindowKey,
 } from '../lib/usage.js';
 import { readManifest } from '../lib/manifest.js';
 import {
@@ -1117,7 +1118,7 @@ export interface ViewJsonVersion {
   // outstanding overage credits, undefined means we haven't fetched / can't say.
   overageCredits?: { amount: number; currency: string } | null;
   windows: Array<{
-    key: 'session' | 'week' | 'sonnet_week';
+    key: UsageWindowKey;
     usedPercent: number;
     resetsAt: string | null;
   }>;

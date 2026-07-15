@@ -1058,10 +1058,20 @@ function resolveAccountCredentialPath(base: string, ...segments: string[]): stri
  * Every failure (missing key file — e.g. a keyring-v2/legacy login with no
  * on-disk key, a bad GCM tag, malformed JSON, or no email claim) returns null so
  * the caller falls back to the file-presence signed-in signal. Never throws.
+ *
+ * Also surfaces the raw `access_token` and its `exp` (seconds) so the usage
+ * layer can call Factory's billing API with the same locally-decrypted token —
+ * see getDroidUsageInfo in usage.ts.
  */
-function decryptDroidCredential(
+export function decryptDroidCredential(
   base: string
-): { email: string | null; orgId: string | null; role: string | null } | null {
+): {
+  email: string | null;
+  orgId: string | null;
+  role: string | null;
+  accessToken: string | null;
+  expSeconds: number | null;
+} | null {
   const filePath = resolveAccountCredentialPath(base, '.factory', 'auth.v2.file');
   const keyPath = resolveAccountCredentialPath(base, '.factory', 'auth.v2.key');
   if (!filePath || !keyPath) return null;
@@ -1084,6 +1094,8 @@ function decryptDroidCredential(
       email: typeof claims.email === 'string' ? claims.email : null,
       orgId: normalizeIdentityPart(claims.org_id ?? cred.active_organization_id),
       role: typeof claims.role === 'string' ? claims.role : null,
+      accessToken: typeof cred.access_token === 'string' ? cred.access_token : null,
+      expSeconds: typeof claims.exp === 'number' ? claims.exp : null,
     };
   } catch {
     return null;
