@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Signed webhook ingress for routines via Tailscale Funnel (RUSH-1456, RUSH-1459, RUSH-1460, RUSH-1461).**
+  Routine triggers now understand both GitHub and Linear event sources, including
+  Linear action/team/label filters. `agents webhook serve --secrets-bundle <name>`
+  exposes signed localhost endpoints at `/hooks/github` and `/hooks/linear` with
+  raw-body HMAC verification, Linear timestamp checks, duplicate delivery
+  suppression, and rate limiting. `agents funnel status/up` wraps the allowed
+  Tailscale Funnel ports through the existing SSH/device path so a webhook
+  receiver can be exposed without hand-written SSH commands. Source:
+  `apps/cli/src/lib/routines.ts`, `apps/cli/src/lib/triggers/webhook.ts`,
+  `apps/cli/src/commands/routines.ts`, `apps/cli/src/commands/webhook.ts`,
+  `apps/cli/src/commands/funnel.ts`, `apps/cli/src/lib/funnel.ts`.
 - **`agents fleet` alias + fleet-wide rollout (RUSH-1632).** `fleet` is an alias
   for `devices`. New subcommands `update [version]` and `run <cmd…>` roll out
   across every online device with a per-device result table. Source:
