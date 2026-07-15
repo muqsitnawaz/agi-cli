@@ -2,40 +2,11 @@
 
 ## Unreleased
 
-- **`agents fleet` alias + fleet-wide rollout (RUSH-1632).** `fleet` is an alias
-  for `devices`. New subcommands `update [version]` and `run <cmd…>` roll out
-  across every online device with a per-device result table. Source:
-  `apps/cli/src/commands/ssh.ts`, `apps/cli/src/lib/devices/fleet.ts`.
-- **`agents hosts stop <id>` (alias `kill`) terminates a detached host run from the origin machine (RUSH-1360).**
-  Sends SIGTERM to the remote process group, writes exit `143` only when a live
-  group was signaled (or no `.exit` existed), and keeps the remote log for
-  `agents hosts logs <id>`. Source: `apps/cli/src/lib/hosts/dispatch.ts`,
-  `apps/cli/src/commands/hosts.ts`.
-- **Fix: mailbox GC actually archives expired messages on live boxes (RUSH-1611).**
-  The live-box branch of `gcMailbox` only incremented `messagesDroppedExpired`
-  without moving the file to `consumed/`, so `agents feed --dispatch` could report
-  drops while leaving expired messages in `inbox/`/`processing/`. GC now reuses
-  `sweepExpired` (the same path as drain/peek). Source: `apps/cli/src/lib/mailbox-gc.ts`.
-- **Fix: Antigravity sign-in detection on Linux when the OAuth grant lives in Secret Service (RUSH-1329).** `agy` uses the Go keyring library, which prefers libsecret (gnome-keyring) over the file fallback whenever a Secret Service daemon is running — so `~/.gemini/antigravity-cli/antigravity-oauth-token` may be absent even when the user is signed in. After the file check, `getAccountInfo` now probes `secret-tool lookup service gemini username antigravity` (exit 0 = present; stdout discarded), mirroring the macOS `security find-generic-password` probe from #506. Missing `secret-tool`, locked collections, and timeouts all read as signed out. Opt out with `AGENTS_NO_KEYCHAIN_PROBE=1`. Source: `apps/cli/src/lib/agents.ts`, `apps/cli/src/lib/agents.test.ts`.
 - **Extend session sync to Droid, Grok, Kimi, and OpenCode (RUSH-1467).** `agents sessions sync` now includes these four agents in its upload/download matrix. `SyncAgentSpec` gains an optional `ext` field so agents with non-`.jsonl` transcript files (e.g., Kimi `state.json`) are walked correctly. Droid `.jsonl` rollouts, Grok `events.jsonl` streams, and Kimi `state.json` metadata files round-trip through the R2 mirror; OpenCode is slotted in `SYNC_AGENTS` but remains a placeholder because its sessions live in a SQLite DB and still require an SQLite-to-JSONL export step. Source: `apps/cli/src/lib/session/sync/agents.ts`, `apps/cli/src/lib/session/sync/agents.test.ts`, `apps/cli/src/commands/sessions-sync.ts`.
-<<<<<<< HEAD
-- **`agents hosts stop <id>` (alias `kill`) terminates a detached host run from the origin machine (RUSH-1360).**
-  Sends SIGTERM to the remote process group, writes exit `143` to the remote
-  `.exit` marker so `hosts ps` shows a terminal `failed` status, and keeps the
-  remote log for `agents hosts logs <id>`. Complements the existing on-demand
-  log fetch and `.exit` reconcile that already landed for detached `--no-follow`
-  runs. Source: `apps/cli/src/lib/hosts/dispatch.ts`, `apps/cli/src/commands/hosts.ts`.
-=======
-- **`agents fleet` alias + fleet-wide rollout (RUSH-1632).** `fleet` is an alias
-  for `devices` (`agents fleet list` == `agents devices list`). New subcommands
-  `update [version]` and `run <cmd…>` roll out `agents upgrade --yes` (or an
-  arbitrary command) to every online registered device and print a per-device
-  result table; offline / no-address devices are skipped with a clear note.
-  Source: `apps/cli/src/commands/ssh.ts`, `apps/cli/src/lib/devices/fleet.ts`,
-  `apps/cli/src/lib/startup/command-registry.ts`, `skills/devices/SKILL.md`.
->>>>>>> 8ac12843 (feat(devices): fleet alias + fleet-wide update/run (RUSH-1632))
+- **Public signed webhook ingress for routines via Tailscale Funnel (RUSH-1456, RUSH-1459, RUSH-1460, RUSH-1461).** Routines can now declare source-aware webhook triggers: existing GitHub triggers keep `type: github_event`, and Linear triggers use `type: linear_event` with `action`, `teamKey`, and `label` filters for flows like “Linear issue labeled `agent` → run an agent.” `agents webhook serve --secrets-bundle <name>` runs a localhost receiver for `POST /hooks/github` and `/hooks/linear`, verifying raw-body HMAC signatures (`X-Hub-Signature-256` / `Linear-Signature`), rejecting stale Linear timestamps, deduping delivery IDs, and rate-limiting per source. `agents funnel status <host>` and `agents funnel up <host> --local-port N --port 443|8443|10000` wrap the remote Tailscale CLI through existing host/device SSH resolution and validate Funnel’s public-port limits before enabling public HTTPS ingress. Source: `apps/cli/src/lib/triggers/webhook.ts`, `apps/cli/src/commands/webhook.ts`, `apps/cli/src/lib/funnel.ts`, `apps/cli/src/commands/funnel.ts`, `apps/cli/src/lib/routines.ts`, `apps/cli/src/commands/routines.ts`.
 
 ## 1.20.62
+
 - **Wire Goose commands support (RUSH-1572).** `agents` now syncs slash commands to Goose as recipe YAML files under `~/.config/goose/commands/<name>.yaml`, each registered in `~/.config/goose/config.yaml` under a `slash_commands: [{ command, recipe_path }]` array (Goose has no native slash-command file format — a slash command IS a recipe). The command recipes live in a dir distinct from the workflow recipes dir (`~/.config/goose/recipes/`) so the workflow detector never treats a command recipe as a workflow. Registration is a read-modify-write that preserves every other `config.yaml` key (`mcp_servers`, `extensions`, …) and other `slash_commands` entries, and removal soft-deletes the recipe + unregisters the entry. Flip Goose's `commands` capability and add `goose` branches to install/list/match/remove, the staleness commands writer, and doctor-diff, backed by a new `goose-commands.ts` module + a `markdownToGooseRecipe` converter. Source: `apps/cli/src/lib/agents.ts`, `apps/cli/src/lib/goose-commands.ts`, `apps/cli/src/lib/commands.ts`, `apps/cli/src/lib/convert.ts`, `apps/cli/src/lib/staleness/writers/commands.ts`, `apps/cli/src/lib/doctor-diff.ts`.
 - **Fix: Hermes plugin sync no longer disables a plugin the user explicitly enabled.** The plugin install path (RUSH-1688) unconditionally forced `plugins.enabled` to the exec-surface trust verdict on every sync. An ordinary un-flagged background re-sync computes `enable=false` for a plugin with hooks/tools, so it stripped that plugin from the `~/.hermes/config.yaml` allowlist — clobbering a plugin the user deliberately enabled with `--allow-exec-surfaces`. The install path now enables only when trusted and never down-toggles (matching the marketplace flow's add-if-trusted semantics); removal still unregisters explicitly. Source: `apps/cli/src/lib/plugins.ts`.
 - **Wire Goose subagents support (RUSH-1573).** `agents` now syncs subagents to Goose as recipe YAML files under `~/.config/goose/agents/<name>.yaml` — Goose has no dedicated subagent format, so a named subagent IS a recipe (goose auto-discovers `~/.config/goose/agents/` and delegates to them by name in autonomous mode). `transformSubagentForGoose` emits the same recipe schema agents-cli already uses for Goose workflow recipes (`version`/`title`/`description`/`instructions`/`prompt`, plus optional `settings.goose_model`). Flip Goose's `subagents` capability and wire the install/remove/list/orphan/version-remove branches plus the staleness subagents writer and detector. Source: `apps/cli/src/lib/agents.ts`, `apps/cli/src/lib/subagents.ts`, `apps/cli/src/lib/staleness/{writers,detectors}/subagents.ts`.
