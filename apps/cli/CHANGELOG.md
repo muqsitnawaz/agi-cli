@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Signed webhook ingress for routines via Tailscale Funnel (RUSH-1456, RUSH-1459, RUSH-1460, RUSH-1461).**
+  Routine triggers now understand both GitHub and Linear event sources, including
+  Linear action/team/label filters. `agents webhook serve --secrets-bundle <name>`
+  exposes signed localhost endpoints at `/hooks/github` and `/hooks/linear` with
+  raw-body HMAC verification, Linear timestamp checks, duplicate delivery
+  suppression, and rate limiting. `agents funnel status/up` wraps the allowed
+  Tailscale Funnel ports through the existing SSH/device path so a webhook
+  receiver can be exposed without hand-written SSH commands. Source:
+  `apps/cli/src/lib/routines.ts`, `apps/cli/src/lib/triggers/webhook.ts`,
+  `apps/cli/src/commands/routines.ts`, `apps/cli/src/commands/webhook.ts`,
+  `apps/cli/src/commands/funnel.ts`, `apps/cli/src/lib/funnel.ts`.
 - **Guided session-sync provisioning in `agents setup` and `agents sessions sync --setup` (RUSH-1468).** Joining a machine to the cross-machine session-sync fabric no longer requires hand-running four `agents secrets add r2.backups …` commands. A new interactive step mints the `r2.backups` bundle (R2 account/bucket/access-key/secret + a generated `R2_SYNC_ENC_KEY`), probes read+write connectivity with a throwaway object, and opts the machine into the `session-sync` beta on success. The first machine mints and prints the shared encryption key; every other machine pastes it so the whole fabric shares one key (an existing key is reused, never overwritten — overwriting would orphan peers' encrypted transcripts). `agents setup` offers it opt-in (default No, never blocks setup); `agents sessions sync --setup` runs it explicitly and can re-show the shared key. Source: `apps/cli/src/lib/session/sync/provision.ts`, `apps/cli/src/lib/session/sync/provision.test.ts`, `apps/cli/src/commands/sync-provision.ts`, `apps/cli/src/commands/setup.ts`, `apps/cli/src/commands/sessions-sync.ts`.
 - **`agents fleet` alias + fleet-wide rollout (RUSH-1632).** `fleet` is an alias
   for `devices`. New subcommands `update [version]` and `run <cmd…>` roll out
