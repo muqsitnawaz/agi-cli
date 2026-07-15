@@ -175,6 +175,17 @@ export interface FiredJob {
   runId: string;
 }
 
+export class WebhookDispatchError extends Error {
+  constructor(
+    message: string,
+    readonly fired: FiredJob[],
+    readonly failures: { jobName: string; error: Error }[],
+  ) {
+    super(message);
+    this.name = 'WebhookDispatchError';
+  }
+}
+
 /**
  * Match an incoming webhook against the persisted routines and fire each match
  * through the cron dispatch path. Returns one entry per fired job.
@@ -188,9 +199,21 @@ export async function fireWebhookJobs(
   const matched = matchJobsToWebhook(jobs, webhook);
 
   const fired: FiredJob[] = [];
+  const failures: { jobName: string; error: Error }[] = [];
   for (const job of matched) {
-    const meta = await dispatch(job);
-    fired.push({ jobName: job.name, runId: meta.runId });
+    try {
+      const meta = await dispatch(job);
+      fired.push({ jobName: job.name, runId: meta.runId });
+    } catch (err) {
+      failures.push({ jobName: job.name, error: err as Error });
+    }
+  }
+  if (failures.length > 0) {
+    throw new WebhookDispatchError(
+      `failed to dispatch ${failures.length} webhook routine(s): ${failures.map((f) => f.jobName).join(', ')}`,
+      fired,
+      failures,
+    );
   }
   return fired;
 }
@@ -383,8 +406,8 @@ export function startWebhookServer(options: WebhookServerOptions): http.Server {
           event: source === 'github' ? (header(req.headers, 'x-github-event') ?? '') : String(payload.type ?? ''),
           payload,
         };
-        deliveryStore.mark(id);
         const fired = await fireWebhookJobs(webhook, options.fire);
+        deliveryStore.mark(id);
         options.onDelivery?.(webhook, fired);
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true, fired: fired.map((f) => f.jobName), runs: fired }));

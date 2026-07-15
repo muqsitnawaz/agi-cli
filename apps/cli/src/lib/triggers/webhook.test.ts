@@ -413,22 +413,40 @@ describe('startWebhookServer', () => {
     }
   });
 
-  it('marks an accepted delivery before dispatch so retry cannot replay partial fires', async () => {
+  it('does not mark a delivery when dispatch fails so retry can finish matched routines', async () => {
     const secret = 'linear-secret';
     const jobs = [
       job({
         name: 'linear-agent',
         trigger: { type: 'linear_event', event: 'Issue', action: 'update', teamKey: 'RUSH', label: 'agent' },
       }),
+      job({
+        name: 'linear-followup',
+        trigger: { type: 'linear_event', event: 'Issue', action: 'update', teamKey: 'RUSH', label: 'agent' },
+      }),
     ];
     const dispatched: string[] = [];
+    let shouldFailFollowup = true;
     const server = startWebhookServer({
       secrets: { linear: secret },
       fire: {
         jobs,
         dispatch: async (config: JobConfig): Promise<RunMeta> => {
           dispatched.push(config.name);
-          throw new Error('dispatch failed after accepting delivery');
+          if (config.name === 'linear-followup' && shouldFailFollowup) {
+            shouldFailFollowup = false;
+            throw new Error('dispatch failed after a previous match fired');
+          }
+          return {
+            jobName: config.name,
+            runId: `run-${config.name}`,
+            agent: config.agent,
+            pid: 1234,
+            status: 'running',
+            startedAt: new Date().toISOString(),
+            completedAt: null,
+            exitCode: null,
+          };
         },
       },
     });
@@ -460,8 +478,8 @@ describe('startWebhookServer', () => {
       expect((await send()).status).toBe(400);
       const retry = await send();
       expect(retry.status).toBe(200);
-      expect(JSON.parse(retry.body).duplicate).toBe(true);
-      expect(dispatched).toEqual(['linear-agent']);
+      expect(JSON.parse(retry.body).duplicate).toBeUndefined();
+      expect(dispatched).toEqual(['linear-agent', 'linear-followup', 'linear-agent', 'linear-followup']);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

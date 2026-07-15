@@ -6,6 +6,7 @@
  * rotated without changing the Tailscale Funnel config.
  */
 import type { Command } from 'commander';
+import type { Server } from 'http';
 import chalk from 'chalk';
 import { readAndResolveBundleEnv } from '../lib/secrets/bundles.js';
 import { startWebhookServer, type WebhookSecrets } from '../lib/triggers/webhook.js';
@@ -33,6 +34,26 @@ function readWebhookSecrets(bundleName: string): WebhookSecrets {
   return secrets;
 }
 
+function waitForListening(server: Server): Promise<void> {
+  if (server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      server.off('listening', onListening);
+      server.off('error', onError);
+    };
+    const onListening = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+    server.once('listening', onListening);
+    server.once('error', onError);
+  });
+}
+
 export function registerWebhookCommand(program: Command): void {
   const webhook = program
     .command('webhook')
@@ -45,7 +66,7 @@ export function registerWebhookCommand(program: Command): void {
     .option('--host <addr>', `Bind address (default ${DEFAULT_HOST})`, DEFAULT_HOST)
     .option('-p, --port <n>', `Local port (default ${DEFAULT_PORT})`, String(DEFAULT_PORT))
     .option('--rate-limit <n>', 'Accepted deliveries per source per minute', '60')
-    .action((opts: { secretsBundle: string; host?: string; port?: string; rateLimit?: string }) => {
+    .action(async (opts: { secretsBundle: string; host?: string; port?: string; rateLimit?: string }) => {
       let secrets: WebhookSecrets;
       try {
         secrets = readWebhookSecrets(opts.secretsBundle);
@@ -70,6 +91,7 @@ export function registerWebhookCommand(program: Command): void {
             );
           },
         });
+        await waitForListening(server);
         const address = server.address();
         const bound = typeof address === 'object' && address ? address.port : port;
         console.log(`${chalk.green('agents webhook')} ${chalk.dim('→')} ${chalk.cyan(`http://${opts.host ?? DEFAULT_HOST}:${bound}`)}`);

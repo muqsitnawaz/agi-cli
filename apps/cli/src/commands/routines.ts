@@ -38,8 +38,9 @@ import {
   parseAtTime,
   jobRunsOnThisDevice,
   checkJobDeviceEligibility,
+  normalizeTriggerEvent,
 } from '../lib/routines.js';
-import type { GithubTriggerEvent, JobConfig, JobTrigger, LinearTriggerEvent } from '../lib/routines.js';
+import type { JobConfig, JobTrigger, LinearTriggerEvent } from '../lib/routines.js';
 import { fireWebhookJobs, matchJobsToWebhook, type IncomingWebhook, type WebhookSource } from '../lib/triggers/webhook.js';
 import { getRoutinesDir } from '../lib/state.js';
 import { IS_WINDOWS } from '../lib/platform/index.js';
@@ -99,7 +100,9 @@ function parseRoutineTrigger(options: Record<string, unknown>): JobTrigger | und
   if (!raw) return undefined;
   const [sourceMaybe, eventMaybe] = raw.includes(':') ? raw.split(':', 2) : ['github', raw];
   if (sourceMaybe === 'github') {
-    const trigger: JobTrigger = { type: 'github_event', event: eventMaybe as GithubTriggerEvent };
+    const event = normalizeTriggerEvent(eventMaybe);
+    if (!event) throw new Error(`Unknown GitHub trigger event '${eventMaybe}'`);
+    const trigger: JobTrigger = { type: 'github_event', event };
     if (typeof options.repo === 'string') trigger.repo = options.repo;
     if (typeof options.branch === 'string') trigger.branch = options.branch;
     return trigger;
