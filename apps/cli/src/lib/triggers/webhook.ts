@@ -347,12 +347,6 @@ export function startWebhookServer(options: WebhookServerOptions): http.Server {
         return;
       }
 
-      if (!rateLimiter.take(source)) {
-        res.writeHead(429, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'rate limit exceeded' }));
-        return;
-      }
-
       try {
         const rawBody = await readRawBody(req, maxBodyBytes);
         const valid = source === 'github'
@@ -370,12 +364,17 @@ export function startWebhookServer(options: WebhookServerOptions): http.Server {
           res.end(JSON.stringify({ ok: true, duplicate: true, fired: [] }));
           return;
         }
-        deliveryStore.mark(id);
 
         const payload = rawBody.length > 0 ? JSON.parse(rawBody.toString('utf-8')) as Record<string, unknown> : {};
         if (source === 'linear' && !verifyLinearTimestamp(payload)) {
           res.writeHead(401, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'stale linear webhook timestamp' }));
+          return;
+        }
+
+        if (!rateLimiter.take(source)) {
+          res.writeHead(429, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'rate limit exceeded' }));
           return;
         }
 
@@ -385,6 +384,7 @@ export function startWebhookServer(options: WebhookServerOptions): http.Server {
           payload,
         };
         const fired = await fireWebhookJobs(webhook, options.fire);
+        deliveryStore.mark(id);
         options.onDelivery?.(webhook, fired);
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true, fired: fired.map((f) => f.jobName), runs: fired }));
