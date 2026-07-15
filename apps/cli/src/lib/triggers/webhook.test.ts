@@ -412,4 +412,58 @@ describe('startWebhookServer', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it('marks an accepted delivery before dispatch so retry cannot replay partial fires', async () => {
+    const secret = 'linear-secret';
+    const jobs = [
+      job({
+        name: 'linear-agent',
+        trigger: { type: 'linear_event', event: 'Issue', action: 'update', teamKey: 'RUSH', label: 'agent' },
+      }),
+    ];
+    const dispatched: string[] = [];
+    const server = startWebhookServer({
+      secrets: { linear: secret },
+      fire: {
+        jobs,
+        dispatch: async (config: JobConfig): Promise<RunMeta> => {
+          dispatched.push(config.name);
+          throw new Error('dispatch failed after accepting delivery');
+        },
+      },
+    });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address();
+    if (!address || typeof address !== 'object') throw new Error('server did not bind');
+    try {
+      const payload = Buffer.from(JSON.stringify(linearIssueWebhook(['agent']).payload));
+      const signedHeaders = {
+        'linear-signature': crypto.createHmac('sha256', secret).update(payload).digest('hex'),
+        'linear-delivery': 'delivery-partial',
+      };
+      const send = () => new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1',
+          port: address.port,
+          path: '/hooks/linear',
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'content-length': String(payload.length), ...signedHeaders },
+        }, (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c) => chunks.push(c as Buffer));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf-8') }));
+        });
+        req.on('error', reject);
+        req.end(payload);
+      });
+
+      expect((await send()).status).toBe(400);
+      const retry = await send();
+      expect(retry.status).toBe(200);
+      expect(JSON.parse(retry.body).duplicate).toBe(true);
+      expect(dispatched).toEqual(['linear-agent']);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
 });
