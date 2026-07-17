@@ -17,7 +17,7 @@ import type { AgentId } from './types.js';
 import { IS_WINDOWS, prependToWindowsUserPath } from './platform/index.js';
 import { getShimsDir, getVersionsDir, getBackupsDir, getHistoryDir, ensureAgentsDir } from './state.js';
 export { getShimsDir };
-import { AGENTS, agentConfigDirName } from './agents.js';
+import { AGENTS, agentConfigDirName, readAuthAccountIdentity } from './agents.js';
 
 /**
  * Files and directories to always skip during conflict detection and migration.
@@ -1207,43 +1207,19 @@ function detectMigrationConflicts(agent: AgentId, version: string): ConflictInfo
  * ping-pong. Best-effort: a failed copy just means the user re-logs in.
  */
 /**
- * Best-effort account identity for an auth-credential file, or null when the
- * file is absent, unreadable, not JSON, or carries no recognizable account claim
- * (opaque OAuth blobs like antigravity's token have none). Scans the parsed JSON
- * for a small allowlist of stable identity keys (email / account / user ids) and
- * returns a sorted, joined signature so two files for the SAME account compare
- * equal. Used by carryForwardAuthFiles to refuse overwriting one account's login
- * with a newer file that belongs to a DIFFERENT account (RUSH-1764).
+ * Best-effort account identity for the credential *directory* of a file-auth
+ * agent (droid / kimi / antigravity), or null when the directory holds no
+ * decodable account claim. Delegates to readAuthAccountIdentity, which decrypts
+ * / decodes each agent's REAL on-disk format (droid AES-256-GCM + WorkOS JWT,
+ * kimi access-token JWT, antigravity refresh-token) — the earlier plaintext
+ * top-level-key scan matched NO real credential file, so the guard below never
+ * engaged. Two dirs for the SAME account compare equal; DIFFERENT accounts
+ * compare distinct. Used by carryForwardAuthFiles to refuse overwriting one
+ * account's login with a credential that belongs to a DIFFERENT account
+ * (RUSH-1764).
  */
-const AUTH_IDENTITY_KEYS = new Set([
-  'email', 'emailaddress', 'accountuuid', 'accountid', 'account_id',
-  'chatgpt_account_id', 'userid', 'user_id', 'principal_id', 'sub',
-]);
-
-export function readAuthFileIdentity(filePath: string): string | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return null; // missing / unreadable / not JSON (opaque token) — no identity
-  }
-  const found: string[] = [];
-  const seen = new Set<unknown>();
-  const walk = (node: unknown, depth: number): void => {
-    if (depth > 6 || node === null || typeof node !== 'object' || seen.has(node)) return;
-    seen.add(node);
-    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
-      if (AUTH_IDENTITY_KEYS.has(k.toLowerCase()) && (typeof v === 'string' || typeof v === 'number')) {
-        const s = String(v).trim();
-        if (s) found.push(`${k.toLowerCase()}=${s}`);
-      } else if (v && typeof v === 'object') {
-        walk(v, depth + 1);
-      }
-    }
-  };
-  walk(parsed, 0);
-  if (found.length === 0) return null;
-  return Array.from(new Set(found)).sort().join('|');
+export function readAuthFileIdentity(agent: AgentId, configDir: string): string | null {
+  return readAuthAccountIdentity(agent, configDir);
 }
 
 export function carryForwardAuthFiles(agent: AgentId, toConfigDir: string): void {
@@ -1261,22 +1237,33 @@ export function carryForwardAuthFiles(agent: AgentId, toConfigDir: string): void
     return; // no installed versions to source from
   }
 
+  // Account identity currently installed at the destination home (null when the
+  // dest is empty or its credential can't be decoded). When it IS known, only a
+  // source home whose credential decodes to the SAME account is eligible to
+  // overwrite it — so a newer login for a DIFFERENT account sitting in another
+  // version-home can't silently replace the account the user is signed into
+  // (RUSH-1764). An empty destination still seeds from the freshest source (the
+  // version-switch case). Identity is a per-DIR/account property, not per-file:
+  // for droid it comes from decrypting auth.v2.file with auth.v2.key, so it must
+  // gate BOTH files as a unit (never carry account B's key over account A's).
+  const toResolved = path.resolve(toConfigDir);
+  const destIdentity = readAuthFileIdentity(agent, toConfigDir);
+  const identityCache = new Map<string, string | null>();
+  const dirIdentity = (dir: string): string | null => {
+    const key = path.resolve(dir);
+    if (!identityCache.has(key)) identityCache.set(key, readAuthFileIdentity(agent, dir));
+    return identityCache.get(key) ?? null;
+  };
+
   for (const rel of authFiles) {
     const dest = path.join(toConfigDir, rel);
     const destResolved = path.resolve(dest);
-
-    // Identity of the credential already at the destination (null when the file
-    // is missing or carries no recognizable account claim). When it IS known,
-    // only a source for the SAME account is eligible to overwrite it — so a
-    // newer login for a DIFFERENT account sitting in another version-home can't
-    // silently replace the account the user is signed into (RUSH-1764). An empty
-    // destination still seeds from the freshest source (the version-switch case).
-    const destIdentity = readAuthFileIdentity(dest);
 
     // Newest existing source copy across all version homes (excluding dest),
     // constrained to the destination's account identity when it is known.
     let newest: { path: string; mtimeMs: number } | null = null;
     for (const dir of sourceDirs) {
+      if (path.resolve(dir) === toResolved) continue; // never source from self
       const src = path.join(dir, rel);
       if (path.resolve(src) === destResolved) continue;
       let st: fs.Stats;
@@ -1284,7 +1271,7 @@ export function carryForwardAuthFiles(agent: AgentId, toConfigDir: string): void
       if (!st.isFile()) continue;
       // Account-identity guard: never carry a different account's credential over
       // an existing login. Only enforced when the destination's identity is known.
-      if (destIdentity !== null && readAuthFileIdentity(src) !== destIdentity) continue;
+      if (destIdentity !== null && dirIdentity(dir) !== destIdentity) continue;
       if (!newest || st.mtimeMs > newest.mtimeMs) newest = { path: src, mtimeMs: st.mtimeMs };
     }
     if (!newest) continue;
