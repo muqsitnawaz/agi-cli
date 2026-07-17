@@ -24,7 +24,7 @@ vi.mock('./state.js', async () => {
   };
 });
 
-import { switchConfigSymlink, carryForwardAuthFiles } from './shims.js';
+import { switchConfigSymlink, carryForwardAuthFiles, readAuthFileIdentity } from './shims.js';
 import { getAccountInfo } from './agents.js';
 
 const tempDirs: string[] = [];
@@ -56,9 +56,101 @@ function writeDroidAuth(home: string, body: string, mtimeMs?: number): void {
   }
 }
 
+/** Droid auth.v2.file with a real, parseable account identity (accountUuid +
+ * email) plus a distinct token blob, at a controlled mtime. The .key is a fixed
+ * placeholder so the identity-bearing file is the only thing under test. */
+function writeDroidAuthJson(
+  home: string,
+  identity: { accountUuid: string; email: string },
+  tokenBlob: string,
+  mtimeMs: number,
+): void {
+  const dir = path.join(home, '.factory');
+  fs.mkdirSync(dir, { recursive: true });
+  const body = JSON.stringify({
+    oauth: { accountUuid: identity.accountUuid, emailAddress: identity.email },
+    token: tokenBlob,
+  });
+  fs.writeFileSync(path.join(dir, 'auth.v2.file'), body, { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, 'auth.v2.key'), 'KEY', { mode: 0o600 });
+  const t = new Date(mtimeMs);
+  fs.utimesSync(path.join(dir, 'auth.v2.file'), t, t);
+  fs.utimesSync(path.join(dir, 'auth.v2.key'), t, t);
+}
+
 afterEach(() => {
   delete process.env.AGENTS_REAL_HOME;
   for (const d of tempDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+});
+
+describe('carryForwardAuthFiles — account-identity guard (RUSH-1764)', () => {
+  beforeEach(() => { makeHome(); });
+
+  it('does NOT overwrite an existing login with a NEWER file for a DIFFERENT account', () => {
+    const v1 = droidHome('latest');    // foreign account B, newer mtime
+    const v2 = droidHome('0.159.1');   // active account A, older mtime
+    writeDroidAuthJson(v2, { accountUuid: 'A', email: 'a@x.com' }, 'TOKEN_A', 1_000_000);
+    writeDroidAuthJson(v1, { accountUuid: 'B', email: 'b@x.com' }, 'TOKEN_B', 2_000_000);
+
+    carryForwardAuthFiles('droid', path.join(v2, '.factory'));
+
+    // Account B's newer file must NOT have replaced account A's login.
+    const body = JSON.parse(fs.readFileSync(path.join(v2, '.factory', 'auth.v2.file'), 'utf8'));
+    expect(body.oauth.accountUuid).toBe('A');
+    expect(body.token).toBe('TOKEN_A');
+  });
+
+  it('DOES carry a newer refreshed token for the SAME account', () => {
+    const v1 = droidHome('latest');
+    const v2 = droidHome('0.159.1');
+    writeDroidAuthJson(v2, { accountUuid: 'A', email: 'a@x.com' }, 'OLD_TOKEN', 1_000_000);
+    writeDroidAuthJson(v1, { accountUuid: 'A', email: 'a@x.com' }, 'REFRESHED_TOKEN', 2_000_000);
+
+    carryForwardAuthFiles('droid', path.join(v2, '.factory'));
+
+    const body = JSON.parse(fs.readFileSync(path.join(v2, '.factory', 'auth.v2.file'), 'utf8'));
+    expect(body.token).toBe('REFRESHED_TOKEN');
+  });
+
+  it('seeds an EMPTY target from the freshest source (no identity to protect yet)', () => {
+    const v1 = droidHome('latest');
+    const v2 = droidHome('0.159.1'); // no auth files written -> empty target
+    writeDroidAuthJson(v1, { accountUuid: 'A', email: 'a@x.com' }, 'TOKEN_A', 2_000_000);
+
+    carryForwardAuthFiles('droid', path.join(v2, '.factory'));
+
+    expect(fs.existsSync(path.join(v2, '.factory', 'auth.v2.file'))).toBe(true);
+    const body = JSON.parse(fs.readFileSync(path.join(v2, '.factory', 'auth.v2.file'), 'utf8'));
+    expect(body.oauth.accountUuid).toBe('A');
+  });
+});
+
+describe('readAuthFileIdentity', () => {
+  it('returns null for an opaque token, a missing file, and non-JSON', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-id-'));
+    tempDirs.push(dir);
+    const opaque = path.join(dir, 'opaque');
+    fs.writeFileSync(opaque, '{"token":{"refresh_token":"r"}}'); // no account claim
+    expect(readAuthFileIdentity(opaque)).toBeNull();
+    expect(readAuthFileIdentity(path.join(dir, 'missing'))).toBeNull();
+    const raw = path.join(dir, 'raw');
+    fs.writeFileSync(raw, 'not json at all');
+    expect(readAuthFileIdentity(raw)).toBeNull();
+  });
+
+  it('is equal for two files of the SAME account, different for a DIFFERENT account', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-id-'));
+    tempDirs.push(dir);
+    const a1 = path.join(dir, 'a1');
+    const a2 = path.join(dir, 'a2');
+    const b = path.join(dir, 'b');
+    fs.writeFileSync(a1, JSON.stringify({ oauth: { accountUuid: 'A', emailAddress: 'a@x' }, token: 't1' }));
+    fs.writeFileSync(a2, JSON.stringify({ oauth: { accountUuid: 'A', emailAddress: 'a@x' }, token: 't2' }));
+    fs.writeFileSync(b, JSON.stringify({ oauth: { accountUuid: 'B', emailAddress: 'b@x' }, token: 't' }));
+    expect(readAuthFileIdentity(a1)).not.toBeNull();
+    expect(readAuthFileIdentity(a1)).toBe(readAuthFileIdentity(a2)); // token differs, account same
+    expect(readAuthFileIdentity(a1)).not.toBe(readAuthFileIdentity(b));
+  });
 });
 
 describe('carryForwardAuthFiles / switchConfigSymlink — auth survives version switch (RUSH-1318)', () => {

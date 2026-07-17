@@ -1206,6 +1206,46 @@ function detectMigrationConflicts(agent: AgentId, version: string): ConflictInfo
  * preserved so the "freshest" comparison stays stable and switches don't
  * ping-pong. Best-effort: a failed copy just means the user re-logs in.
  */
+/**
+ * Best-effort account identity for an auth-credential file, or null when the
+ * file is absent, unreadable, not JSON, or carries no recognizable account claim
+ * (opaque OAuth blobs like antigravity's token have none). Scans the parsed JSON
+ * for a small allowlist of stable identity keys (email / account / user ids) and
+ * returns a sorted, joined signature so two files for the SAME account compare
+ * equal. Used by carryForwardAuthFiles to refuse overwriting one account's login
+ * with a newer file that belongs to a DIFFERENT account (RUSH-1764).
+ */
+const AUTH_IDENTITY_KEYS = new Set([
+  'email', 'emailaddress', 'accountuuid', 'accountid', 'account_id',
+  'chatgpt_account_id', 'userid', 'user_id', 'principal_id', 'sub',
+]);
+
+export function readAuthFileIdentity(filePath: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null; // missing / unreadable / not JSON (opaque token) — no identity
+  }
+  const found: string[] = [];
+  const seen = new Set<unknown>();
+  const walk = (node: unknown, depth: number): void => {
+    if (depth > 6 || node === null || typeof node !== 'object' || seen.has(node)) return;
+    seen.add(node);
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      if (AUTH_IDENTITY_KEYS.has(k.toLowerCase()) && (typeof v === 'string' || typeof v === 'number')) {
+        const s = String(v).trim();
+        if (s) found.push(`${k.toLowerCase()}=${s}`);
+      } else if (v && typeof v === 'object') {
+        walk(v, depth + 1);
+      }
+    }
+  };
+  walk(parsed, 0);
+  if (found.length === 0) return null;
+  return Array.from(new Set(found)).sort().join('|');
+}
+
 export function carryForwardAuthFiles(agent: AgentId, toConfigDir: string): void {
   const authFiles = AGENTS[agent].authFiles;
   if (!authFiles || authFiles.length === 0) return;
@@ -1225,7 +1265,16 @@ export function carryForwardAuthFiles(agent: AgentId, toConfigDir: string): void
     const dest = path.join(toConfigDir, rel);
     const destResolved = path.resolve(dest);
 
-    // Newest existing source copy across all version homes (excluding dest).
+    // Identity of the credential already at the destination (null when the file
+    // is missing or carries no recognizable account claim). When it IS known,
+    // only a source for the SAME account is eligible to overwrite it — so a
+    // newer login for a DIFFERENT account sitting in another version-home can't
+    // silently replace the account the user is signed into (RUSH-1764). An empty
+    // destination still seeds from the freshest source (the version-switch case).
+    const destIdentity = readAuthFileIdentity(dest);
+
+    // Newest existing source copy across all version homes (excluding dest),
+    // constrained to the destination's account identity when it is known.
     let newest: { path: string; mtimeMs: number } | null = null;
     for (const dir of sourceDirs) {
       const src = path.join(dir, rel);
@@ -1233,6 +1282,9 @@ export function carryForwardAuthFiles(agent: AgentId, toConfigDir: string): void
       let st: fs.Stats;
       try { st = fs.statSync(src); } catch { continue; }
       if (!st.isFile()) continue;
+      // Account-identity guard: never carry a different account's credential over
+      // an existing login. Only enforced when the destination's identity is known.
+      if (destIdentity !== null && readAuthFileIdentity(src) !== destIdentity) continue;
       if (!newest || st.mtimeMs > newest.mtimeMs) newest = { path: src, mtimeMs: st.mtimeMs };
     }
     if (!newest) continue;
