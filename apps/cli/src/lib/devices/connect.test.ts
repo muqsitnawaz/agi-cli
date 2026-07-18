@@ -90,6 +90,13 @@ describe('buildSshInvocation', () => {
     expect(args[args.length - 1]).toBe('me@i.ts.net');
   });
 
+  it('term override sets env.TERM; absent leaves it untouched', () => {
+    const withTerm = buildSshInvocation(dev({ name: 't', user: 'me' }), [], '/shim', { term: 'xterm-256color' });
+    expect(withTerm.env.TERM).toBe('xterm-256color');
+    const noTerm = buildSshInvocation(dev({ name: 't', user: 'me' }), [], '/shim');
+    expect(noTerm.env.TERM).toBeUndefined();
+  });
+
   it('password auth without a bundle is a hard error', () => {
     expect(() => buildSshInvocation(dev({ name: 'b', auth: { method: 'password' } }), [], '/shim')).toThrow(/no secrets bundle/);
   });

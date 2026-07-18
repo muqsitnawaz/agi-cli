@@ -114,6 +114,24 @@
 
 ### Fixed
 
+- **`agents ssh` no longer lands you in a broken remote session from Ghostty,
+  kitty, or WezTerm.** These emulators ship their own terminfo entry and export
+  an exotic `$TERM` (`xterm-ghostty`, `xterm-kitty`, `wezterm`, …). A plain
+  interactive `ssh -tt` forwards that `$TERM` to the remote, and if the remote's
+  terminfo database has no matching entry every ncurses program breaks —
+  `clear`, `tput`, `vim`, `less`, `tmux`, and the shell line editor all error
+  with `'xterm-ghostty': unknown terminal type`. `agents ssh` now handles this
+  the way the emulators themselves do: on an interactive login to a POSIX device
+  it **propagates** the local terminfo entry to the remote (`infocmp` piped into
+  `tic`, installed under the remote user's `~/.terminfo`) so the real `$TERM`
+  works with full fidelity, and **falls back** to a universally-present
+  `xterm-256color` when propagation can't happen (the local box has no entry to
+  copy, or the remote lacks `tic`). The propagation decision is cached per
+  (host, terminal) so the handshake is a once-per-host cost. Set
+  `AGENTS_SSH_TERM=<value>` to force a specific remote `$TERM`, or
+  `AGENTS_SSH_TERM=keep` to forward the local one unchanged. Source:
+  `apps/cli/src/lib/devices/terminfo.ts`, `apps/cli/src/lib/devices/connect.ts`,
+  `apps/cli/src/commands/ssh.ts`.
 - **`agents run <agent> --fallback …` no longer disables account rotation.**
   A `--fallback` chain skipped strategy resolution entirely ("strategy balanced
   ignored: --fallback pins versions directly"), so the bare primary always ran on

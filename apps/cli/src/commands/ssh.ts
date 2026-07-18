@@ -53,6 +53,13 @@ import {
 } from '../lib/devices/connect.js';
 import { ensureManagedKnownHostsDir, isHostPinned } from '../lib/devices/known-hosts.js';
 import {
+  isManagedTerm,
+  propagateTerminfo,
+  readTerminfoDecision,
+  resolveLoginTerm,
+  writeTerminfoDecision,
+} from '../lib/devices/terminfo.js';
+import {
   fanOutDevices,
   planFleetTargets,
   remoteFleetTargets,
@@ -704,6 +711,53 @@ Typical workflow:
     });
 }
 
+/**
+ * Decide the `$TERM` an interactive login should request on the remote, fixing
+ * the "exotic terminal → broken remote session" problem (Ghostty/kitty/WezTerm
+ * forward an `xterm-ghostty`/`xterm-kitty`/… the remote can't render). Returns
+ * an override to force, or undefined to forward the local `$TERM` unchanged.
+ *
+ * Only interactive logins to POSIX devices are handled — a remote command gets
+ * no pty (so no `$TERM` is sent) and Windows/PowerShell doesn't use terminfo.
+ * `AGENTS_SSH_TERM` is an escape hatch: a literal value forces that `$TERM`;
+ * `keep` disables all handling and forwards the local one verbatim.
+ */
+function resolveInteractiveTerm(
+  device: DeviceProfile,
+  cmd: string[],
+  shim: string,
+  hostKey: { pinned?: boolean },
+): string | undefined {
+  if (cmd.length > 0 || device.shell === 'powershell') return undefined;
+
+  const forced = process.env.AGENTS_SSH_TERM;
+  if (forced) return forced === 'keep' ? undefined : forced;
+
+  const localTerm = process.env.TERM;
+  if (!isManagedTerm(localTerm)) return undefined;
+
+  const host = hostNameFor(device) ?? device.name;
+  const cached = readTerminfoDecision(host, localTerm);
+  const propagated =
+    cached !== null
+      ? cached === 'ok'
+      : (() => {
+          const ok = propagateTerminfo(device, localTerm, shim, hostKey);
+          writeTerminfoDecision(host, localTerm, ok ? 'ok' : 'downgrade');
+          return ok;
+        })();
+
+  const override = resolveLoginTerm(localTerm, propagated);
+  if (override) {
+    console.error(
+      chalk.gray(
+        `Terminal '${localTerm}' isn't installed on '${device.name}' — using ${override} for this session.`,
+      ),
+    );
+  }
+  return override;
+}
+
 /** Register the `agents ssh` smart wrapper. */
 function registerSshWrapper(program: Command): void {
   const sshCmd = program
@@ -718,6 +772,11 @@ Examples:
 
 Devices come from 'agents devices'. Password auth pulls the secret from a
 secrets bundle via an askpass shim — the password never touches argv.
+
+From a Ghostty/kitty/WezTerm terminal, an interactive login propagates your
+local terminfo entry to the remote (or falls back to xterm-256color) so clear,
+vim, less and tmux work. Override with AGENTS_SSH_TERM=<value>, or
+AGENTS_SSH_TERM=keep to forward your local \$TERM unchanged.
 `)
     .action(async (name: string, cmd: string[]) => {
       // Hidden askpass bridge: ssh execs the shim, which re-invokes us here.
@@ -755,7 +814,8 @@ secrets bundle via an askpass shim — the password never touches argv.
         ensureManagedKnownHostsDir();
         const addr = hostNameFor(device);
         const pinned = addr ? isHostPinned(addr) : false;
-        const { args, env } = buildSshInvocation(device, cmd, shim, { pinned });
+        const term = resolveInteractiveTerm(device, cmd, shim, { pinned });
+        const { args, env } = buildSshInvocation(device, cmd, shim, { pinned, term });
         const res = spawnSync('ssh', args, {
           stdio: 'inherit',
           env: { ...process.env, ...env },

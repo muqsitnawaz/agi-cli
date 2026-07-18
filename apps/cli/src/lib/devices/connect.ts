@@ -69,6 +69,14 @@ export interface SshHostKeyOptions {
   pinned?: boolean;
   /** Managed known_hosts path override (tests). Defaults to the CLI-managed store. */
   knownHostsFile?: string;
+  /**
+   * Override the `$TERM` the ssh child requests for the remote pty. Set by the
+   * interactive login path when the local terminal's terminfo entry is missing
+   * on the remote and couldn't be propagated — a universally-present
+   * `xterm-256color` is forced so ncurses programs work. Undefined leaves the
+   * inherited `$TERM` alone. See `terminfo.ts`.
+   */
+  term?: string;
 }
 
 /**
@@ -107,6 +115,12 @@ export function buildSshInvocation(
   } else {
     args.push('-o', 'BatchMode=yes');
   }
+
+  // Force a working remote pty terminal type when the caller resolved one
+  // (an exotic local $TERM the remote can't render — see terminfo.ts). ssh
+  // derives the pty's terminal type from the client env's $TERM, so overriding
+  // it here is what the remote sees.
+  if (hostKey.term) env.TERM = hostKey.term;
 
   // An interactive login (no remote command) needs a real tty.
   if (!remote) args.push('-tt');
