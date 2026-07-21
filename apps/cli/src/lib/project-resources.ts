@@ -119,7 +119,7 @@ function listProjectHookEntries(dir: string): HookEntry[] {
     const script = group.find((f) => SCRIPT_EXTENSIONS.has(f.ext)) || group.find((f) => f.isExec && !NON_SCRIPT_EXTENSIONS.has(f.ext));
     if (!script) continue;
     const data = group.find((f) => f !== script && !['.md', '.markdown', '.rst'].includes(f.ext));
-    out.push({ name: base, scriptPath: script.fullPath, dataFile: data?.fullPath });
+    out.push({ name: script.name, scriptPath: script.fullPath, dataFile: data?.fullPath });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -166,6 +166,10 @@ function trustedSourceExists(kind: ManagedKind, name: string): boolean {
   return false;
 }
 
+function projectResourceMayMaterialize(cwd: string, kind: Exclude<ManagedKind, 'mcp'>, name: string): boolean {
+  return !!projectSource(cwd, kind, name) && trustedSourceExists(kind, name);
+}
+
 export function filterVersionHomeSelection(
   kind: ManagedKind,
   names: string[],
@@ -191,6 +195,7 @@ function composeCommands(cwd: string, agent: AgentId, version: string, names: st
   for (const name of names) {
     const src = projectSource(cwd, 'commands', name);
     if (!src) continue;
+    if (!projectResourceMayMaterialize(cwd, 'commands', name)) continue;
     const metadata = parseCommandMetadata(src);
     if (!commandAppliesTo(agent, version, metadata).ok) continue;
     fs.mkdirSync(targetDir, { recursive: true });
@@ -210,6 +215,7 @@ function composeSkills(cwd: string, agent: AgentId, version: string, names: stri
   for (const name of names) {
     const src = projectSource(cwd, 'skills', name);
     if (!src) continue;
+    if (!projectResourceMayMaterialize(cwd, 'skills', name)) continue;
     const dest = safeJoin(targetRoot, name);
     removePath(dest);
     copyDir(src, dest);
@@ -241,6 +247,7 @@ function composeHooks(cwd: string, agent: AgentId, version: string, names: strin
   for (const name of names) {
     const entry = entries.get(name);
     if (!entry) continue;
+    if (!projectResourceMayMaterialize(cwd, 'hooks', name)) continue;
     fs.mkdirSync(targetDir, { recursive: true });
     const written: string[] = [];
     const scriptDest = safeJoin(targetDir, path.basename(entry.scriptPath));
@@ -256,7 +263,10 @@ function composeHooks(cwd: string, agent: AgentId, version: string, names: strin
     synced.push(name);
   }
   const hookManifest = readProjectHookManifest(cwd);
-  const selectedHookManifest = Object.fromEntries(Object.entries(hookManifest).filter(([name]) => synced.includes(name)));
+  const syncedSet = new Set(synced);
+  const selectedHookManifest = Object.fromEntries(
+    Object.entries(hookManifest).filter(([name, hook]) => syncedSet.has(name) || syncedSet.has(hook.script))
+  );
   if (Object.keys(selectedHookManifest).length > 0) {
     registerHooksToSettings(agent, cwd, selectedHookManifest, projectDir);
   }
@@ -271,6 +281,7 @@ function composeSubagents(cwd: string, agent: AgentId, version: string, names: s
     for (const name of names) {
       const src = projectSource(cwd, 'subagents', name);
       if (!src) continue;
+      if (!projectResourceMayMaterialize(cwd, 'subagents', name)) continue;
       fs.mkdirSync(dir, { recursive: true });
       const dest = safeJoin(dir, `${name}.md`);
       fs.writeFileSync(dest, transformSubagentForOpenCode(src));
@@ -287,6 +298,7 @@ function composeSubagents(cwd: string, agent: AgentId, version: string, names: s
   for (const name of names) {
     const src = projectSource(cwd, 'subagents', name);
     if (!src) continue;
+    if (!projectResourceMayMaterialize(cwd, 'subagents', name)) continue;
     target.write(dir, { name, path: src });
     addManaged(manifest, 'subagents', name, target.occupied(dir, name).map((e) => relativeToProjectDir(cwd, agent, e.path)));
     synced.push(name);
@@ -325,7 +337,7 @@ function composeMcp(cwd: string, agent: AgentId, version: string, names: string[
   const projectNames = names.filter((name) => !!projectSource(cwd, 'mcp', name));
   const previousNames = Object.keys(previous.managed.mcp ?? {});
   removeMcpEntries(agent, cwd, previousNames.filter((name) => !projectNames.includes(name)));
-  const servers = getMcpServersByName(projectNames, { cwd, enforceProjectTrust: false })
+  const servers = getMcpServersByName(projectNames, { cwd, enforceProjectTrust: true })
     .filter((server) => server.scope === 'project')
     .map((server): WritableMcpServer => ({
       name: server.config.name,

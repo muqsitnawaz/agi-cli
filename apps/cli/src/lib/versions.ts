@@ -2402,7 +2402,8 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   // path below reassigns `selection`, but for manifest write semantics we
   // care about the ORIGINAL intent: a caller passing no selection means
   // "full sync; persist the staleness manifest after."
-  const userPassedSelection = selection !== undefined;
+  const explicitSelection = selection;
+  const userPassedSelection = explicitSelection !== undefined;
 
   const result: SyncResult = { commands: false, skills: false, hooks: false, memory: [], permissions: false, mcp: [], subagents: [], plugins: [], workflows: [] };
   const cwd = options.cwd || process.cwd();
@@ -2539,12 +2540,13 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
     return [];
   };
 
+  const projectSelection = userPassedSelection ? explicitSelection : undefined;
   const selectedProjectResources = {
-    commands: selection ? resolveSelection(selection.commands, available.commands) : available.commands,
-    skills: selection ? resolveSelection(selection.skills, available.skills) : available.skills,
-    hooks: selection ? resolveSelection(selection.hooks, available.hooks) : available.hooks,
-    subagents: selection ? resolveSelection(selection.subagents, available.subagents) : available.subagents,
-    mcp: selection ? resolveSelection(selection.mcp, available.mcp) : available.mcp,
+    commands: projectSelection ? resolveSelection(projectSelection.commands, available.commands) : available.commands,
+    skills: projectSelection ? resolveSelection(projectSelection.skills, available.skills) : available.skills,
+    hooks: projectSelection ? resolveSelection(projectSelection.hooks, available.hooks) : available.hooks,
+    subagents: projectSelection ? resolveSelection(projectSelection.subagents, available.subagents) : available.subagents,
+    mcp: projectSelection ? resolveSelection(projectSelection.mcp, available.mcp) : available.mcp,
   };
   const projectResult = composeProjectResources(cwd, agent, version, selectedProjectResources);
   migrateProjectResourcesOutOfVersionHome();
@@ -2711,7 +2713,7 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
             }
           }
         }
-        result.hooks = r.synced.length > 0;
+        result.hooks ||= r.synced.length > 0;
       }
     }
   }

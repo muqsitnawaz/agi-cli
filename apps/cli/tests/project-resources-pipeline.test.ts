@@ -277,6 +277,59 @@ describe('project-resources: syncResourcesToVersion security defense', () => {
     const versionSkill = path.join(VERSIONS_DIR, 'claude', '99.99.99', 'home', '.claude', 'skills', 'myskill');
     expect(fs.existsSync(versionSkill)).toBe(false);
   });
+
+  it('does NOT materialize project-only resources into project agent dirs', async () => {
+    const { repoRoot } = setupFixture();
+    const projectAgentsDir = path.join(repoRoot, '.agents');
+    fs.mkdirSync(path.join(projectAgentsDir, 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(projectAgentsDir, 'hooks', 'evil.sh'), '#!/bin/sh\necho evil\n', { mode: 0o755 });
+    fs.mkdirSync(path.join(projectAgentsDir, 'subagents', 'evilagent'), { recursive: true });
+    fs.writeFileSync(path.join(projectAgentsDir, 'subagents', 'evilagent', 'AGENT.md'), [
+      '---',
+      'name: evilagent',
+      'description: project-only subagent',
+      '---',
+      '',
+      'SUBAGENT_TOKEN_PROJECT_ONLY',
+      '',
+    ].join('\n'));
+
+    const { syncResourcesToVersion } = await import('../src/lib/versions.js');
+
+    const result = syncResourcesToVersion('claude', '99.99.99', undefined, { cwd: repoRoot, force: true });
+
+    expect(result.commands).toBe(false);
+    expect(result.skills).toBe(false);
+    expect(result.hooks).toBe(false);
+    expect(result.mcp).not.toContain('proj-mcp-fixture');
+    expect(result.subagents).not.toContain('evilagent');
+    expect(fs.existsSync(path.join(repoRoot, '.claude', 'commands', 'myproj.md'))).toBe(false);
+    expect(fs.existsSync(path.join(repoRoot, '.claude', 'skills', 'myskill'))).toBe(false);
+    expect(fs.existsSync(path.join(repoRoot, '.claude', 'hooks', 'evil.sh'))).toBe(false);
+    expect(fs.existsSync(path.join(repoRoot, '.claude', 'agents', 'evilagent.md'))).toBe(false);
+    expect(fs.existsSync(path.join(repoRoot, '.mcp.json'))).toBe(false);
+  });
+
+  it('materializes a project hook override when a trusted same-name hook exists', async () => {
+    const { repoRoot } = setupFixture();
+    const projectHooksDir = path.join(repoRoot, '.agents', 'hooks');
+    const userHooksDir = path.join(USER_DIR, 'hooks');
+    fs.mkdirSync(projectHooksDir, { recursive: true });
+    fs.mkdirSync(userHooksDir, { recursive: true });
+    fs.writeFileSync(path.join(projectHooksDir, 'shared.sh'), '#!/bin/sh\necho project-hook\n', { mode: 0o755 });
+    fs.writeFileSync(path.join(userHooksDir, 'shared.sh'), '#!/bin/sh\necho user-hook\n', { mode: 0o755 });
+
+    const { syncResourcesToVersion } = await import('../src/lib/versions.js');
+    const { getAvailableResources } = await import('../src/lib/versions.js');
+
+    expect(getAvailableResources(repoRoot).hooks).toContain('shared.sh');
+    const result = syncResourcesToVersion('claude', '99.99.99', undefined, { cwd: repoRoot, force: true });
+
+    expect(result.hooks).toBe(true);
+    const projectHook = path.join(repoRoot, '.claude', 'hooks', 'shared.sh');
+    expect(fs.existsSync(projectHook)).toBe(true);
+    expect(fs.readFileSync(projectHook, 'utf-8')).toContain('project-hook');
+  });
 });
 
 describe('project-resources: listMcpServerConfigs', () => {
