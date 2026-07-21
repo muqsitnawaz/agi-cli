@@ -114,4 +114,35 @@ describe('listResources', () => {
       },
     ]);
   });
+
+  // RUSH-1770: `agents resources --merged` surfaces plugins and workflows, so
+  // listResources must resolve those kinds too (they were absent from
+  // ResourceKind before). Plugins live as directories, workflows as .yaml files.
+  it('merges the plugins kind (directories) across layers with layer tags', () => {
+    fs.mkdirSync(path.join(userAgentsDir, 'plugins', 'shared-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(projectAgentsDir, 'plugins', 'shared-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(systemAgentsDir, 'plugins', 'system-plugin'), { recursive: true });
+
+    const resources = listResources('plugins', tmpDir);
+
+    expect(resources).toEqual([
+      { name: 'shared-plugin', path: path.join(projectAgentsDir, 'plugins', 'shared-plugin'), source: 'project' },
+      { name: 'system-plugin', path: path.join(systemAgentsDir, 'plugins', 'system-plugin'), source: 'system' },
+    ]);
+  });
+
+  it('merges the workflows kind (.yaml files) across layers with layer tags', () => {
+    fs.mkdirSync(path.join(userAgentsDir, 'workflows'), { recursive: true });
+    fs.mkdirSync(path.join(systemAgentsDir, 'workflows'), { recursive: true });
+    fs.writeFileSync(path.join(userAgentsDir, 'workflows', 'deploy.yaml'), 'user');
+    fs.writeFileSync(path.join(systemAgentsDir, 'workflows', 'deploy.yaml'), 'system');
+    fs.writeFileSync(path.join(systemAgentsDir, 'workflows', 'audit.yaml'), 'system');
+
+    const resources = listResources('workflows', tmpDir);
+
+    expect(resources).toEqual([
+      { name: 'deploy', path: path.join(userAgentsDir, 'workflows', 'deploy.yaml'), source: 'user' },
+      { name: 'audit', path: path.join(systemAgentsDir, 'workflows', 'audit.yaml'), source: 'system' },
+    ]);
+  });
 });

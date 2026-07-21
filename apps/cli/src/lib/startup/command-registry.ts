@@ -41,6 +41,7 @@ export const loadPermissions: ModuleLoader = async () => (await import('../../co
 export const loadMcp: ModuleLoader = async () => (await import('../../commands/mcp.js')).registerMcpCommands;
 export const loadCli: ModuleLoader = async () => (await import('../../commands/cli.js')).registerCliCommands;
 export const loadSubagents: ModuleLoader = async () => (await import('../../commands/subagents.js')).registerSubagentsCommands;
+export const loadResources: ModuleLoader = async () => (await import('../../commands/resources.js')).registerResourcesCommand;
 export const loadPlugins: ModuleLoader = async () => (await import('../../commands/plugins.js')).registerPluginsCommands;
 export const loadWorkflows: ModuleLoader = async () => (await import('../../commands/workflows.js')).registerWorkflowsCommands;
 export const loadWorktree: ModuleLoader = async () => (await import('../../commands/worktree.js')).registerWorktreeCommands;
@@ -140,6 +141,7 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   mcp: [loadMcp],
   cli: [loadCli],
   subagents: [loadSubagents],
+  resources: [loadResources],
   plugins: [loadPlugins],
   workflows: [loadWorkflows],
   worktree: [loadWorktree],

@@ -85,6 +85,7 @@ import {
   loadMcp,
   loadCli,
   loadSubagents,
+  loadResources,
   loadPlugins,
   loadWorkflows,
   loadWorktree,
@@ -815,6 +816,7 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadMcp);
   await reg(loadCli);
   await reg(loadSubagents);
+  await reg(loadResources);
   await reg(loadPlugins);
   await reg(loadWorkflows);
   await reg(loadWorktree);

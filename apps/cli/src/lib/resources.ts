@@ -35,7 +35,9 @@ export type ResourceKind =
   | 'permissions'
   | 'subagents'
   | 'profiles'
-  | 'secrets';
+  | 'secrets'
+  | 'plugins'
+  | 'workflows';
 
 /** A resource resolved with its origin. */
 export interface ResolvedResource {
