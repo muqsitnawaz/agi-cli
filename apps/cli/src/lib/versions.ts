@@ -47,9 +47,10 @@ import { composeRulesFromState } from './rules/compose.js';
 import { loadManifest, saveManifest, buildManifest as buildSyncManifest, isStale } from './staleness/index.js';
 import { emit } from './events.js';
 import { safeJoin } from './paths.js';
-import { installCommandSkillToVersion, listCommandSkillsInVersion, readSkillSourceCommandMarker, shouldInstallCommandAsSkill } from './command-skills.js';
+import { commandSkillName, installCommandSkillToVersion, listCommandSkillsInVersion, readSkillSourceCommandMarker, shouldInstallCommandAsSkill } from './command-skills.js';
 import { getWriter, getDetector } from './staleness/registry.js';
 import { syncMemoryToVersionHome } from './memory.js';
+import { composeProjectResources, filterVersionHomeSelection } from './project-resources.js';
 
 /** Promisified exec for running shell commands. */
 const execAsync = promisify(exec);
@@ -2406,6 +2407,58 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   const extraRepos = getEnabledExtraRepos();
   const available = getAvailableResources(cwd);
 
+  // Helper: remove a path (symlink or real) if it exists
+  const removePath = (p: string) => {
+    try {
+      const stat = fs.lstatSync(p);
+      if (stat.isSymbolicLink() || stat.isFile()) {
+        fs.unlinkSync(p);
+      } else if (stat.isDirectory()) {
+        fs.rmSync(p, { recursive: true, force: true });
+      }
+    } catch { /* file already removed or inaccessible */ }
+  };
+
+  const isProjectFingerprintPath = (p: string): boolean => {
+    const resolved = path.resolve(p);
+    const trustedRoots = [getUserAgentsDir(), getAgentsDir(), ...extraRepos.map((e) => e.dir)].map((d) => path.resolve(d));
+    if (trustedRoots.some((root) => resolved === root || resolved.startsWith(root + path.sep))) return false;
+    return resolved.split(path.sep).includes('.agents');
+  };
+
+  const migrateProjectResourcesOutOfVersionHome = () => {
+    const manifest = loadManifest(agent, version);
+    if (!manifest) return;
+    const sourceIsProject = (entry: { source?: { path?: string }; dirPath?: string; files?: Array<{ path: string }> } | undefined): boolean => {
+      if (!entry) return false;
+      if (entry.source?.path && isProjectFingerprintPath(entry.source.path)) return true;
+      if (entry.dirPath && isProjectFingerprintPath(entry.dirPath)) return true;
+      return Array.isArray(entry.files) && entry.files.some((f) => isProjectFingerprintPath(f.path));
+    };
+    const commandsAsSkillsForMigration = shouldInstallCommandAsSkill(agent, version);
+    for (const [name, entry] of Object.entries(manifest.commands ?? {})) {
+      if (!sourceIsProject(entry)) continue;
+      if (commandsAsSkillsForMigration) removePath(path.join(agentDir, 'skills', commandSkillName(name)));
+      else removePath(path.join(agentDir, agentConfig.commandsSubdir, `${name}${agentConfig.format === 'toml' ? '.toml' : '.md'}`));
+    }
+    for (const [name, entry] of Object.entries(manifest.skills ?? {})) {
+      if (sourceIsProject(entry)) removePath(path.join(agentDir, 'skills', name));
+    }
+    for (const [name, entry] of Object.entries(manifest.hooks ?? {})) {
+      if (!sourceIsProject(entry)) continue;
+      const hooksDir = path.join(agentDir, agentConfig.hooksDir);
+      if (fs.existsSync(hooksDir)) {
+        for (const file of fs.readdirSync(hooksDir)) {
+          if (path.basename(file, path.extname(file)) === name) removePath(path.join(hooksDir, file));
+        }
+      }
+    }
+    const subagentTargetDir = agent === 'claude' ? path.join(agentDir, 'agents') : null;
+    for (const [name, entry] of Object.entries(manifest.subagents ?? {})) {
+      if (sourceIsProject(entry) && subagentTargetDir) removePath(path.join(subagentTargetDir, `${name}.md`));
+    }
+  };
+
   // Write default resource selection patterns for this version (idempotent —
   // only sets fields that aren't already present, preserving user edits).
   {
@@ -2471,6 +2524,30 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
     }
   }
 
+  const resolveSelection = (sel: string[] | 'all' | undefined, available: string[]): string[] => {
+    if (sel === 'all') return available;
+    if (Array.isArray(sel)) {
+      const availableSet = new Set(available);
+      return sel.filter((item) => availableSet.has(item));
+    }
+    return [];
+  };
+
+  const selectedProjectResources = {
+    commands: selection ? resolveSelection(selection.commands, available.commands) : available.commands,
+    skills: selection ? resolveSelection(selection.skills, available.skills) : available.skills,
+    hooks: selection ? resolveSelection(selection.hooks, available.hooks) : available.hooks,
+    subagents: selection ? resolveSelection(selection.subagents, available.subagents) : available.subagents,
+    mcp: selection ? resolveSelection(selection.mcp, available.mcp) : available.mcp,
+  };
+  const projectResult = composeProjectResources(cwd, agent, version, selectedProjectResources);
+  migrateProjectResourcesOutOfVersionHome();
+  result.commands ||= projectResult.commands.length > 0;
+  result.skills ||= projectResult.skills.length > 0;
+  result.hooks ||= projectResult.hooks.length > 0;
+  result.subagents.push(...projectResult.subagents);
+  result.mcp.push(...projectResult.mcp);
+
   // Fast guard: skip the entire sync when the caller requested a full sync and
   // nothing has changed since the last full sync. Pattern-derived selections
   // still count as full syncs because they are the persisted intended scope,
@@ -2481,18 +2558,6 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
       return { commands: false, skills: false, hooks: false, memory: [], permissions: false, mcp: [], subagents: [], plugins: [], workflows: [] };
     }
   }
-
-  // Helper: remove a path (symlink or real) if it exists
-  const removePath = (p: string) => {
-    try {
-      const stat = fs.lstatSync(p);
-      if (stat.isSymbolicLink() || stat.isFile()) {
-        fs.unlinkSync(p);
-      } else if (stat.isDirectory()) {
-        fs.rmSync(p, { recursive: true, force: true });
-      }
-    } catch { /* file already removed or inaccessible */ }
-  };
 
   // Helper: copy a directory recursively
   const copyDir = (src: string, dest: string) => {
@@ -2511,16 +2576,6 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
     }
   };
 
-  // Helper: resolve selection to list of items
-  const resolveSelection = (sel: string[] | 'all' | undefined, available: string[]): string[] => {
-    if (sel === 'all') return available;
-    if (Array.isArray(sel)) {
-      const availableSet = new Set(available);
-      return sel.filter((item) => availableSet.has(item));
-    }
-    return [];
-  };
-
   // Sync commands — dispatch through WRITERS.commands. The writer dispatches
   // between native (file copy / TOML conversion) and commands-as-skills
   // (grok, Codex >= 0.117.0) based on `shouldInstallCommandAsSkill`. The
@@ -2528,8 +2583,8 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   // takes the commands-as-skills path — silently dropping every command.
   const commandsWriter = getWriter('commands', agent);
   const commandsToSync = selection
-    ? resolveSelection(selection.commands, available.commands)
-    : available.commands; // No selection = sync all
+    ? filterVersionHomeSelection('commands', resolveSelection(selection.commands, available.commands), cwd, agent, version)
+    : filterVersionHomeSelection('commands', available.commands, cwd, agent, version); // No selection = sync all
   const commandsAsSkills = shouldInstallCommandAsSkill(agent, version);
 
   if (commandsToSync.length > 0 && commandsWriter) {
@@ -2569,8 +2624,8 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   // skills dir for them so a stale per-version copy never shadows central.
   const skillsWriter = getWriter('skills', agent);
   let skillsToSync = selection
-    ? resolveSelection(selection.skills, available.skills)
-    : available.skills;
+    ? filterVersionHomeSelection('skills', resolveSelection(selection.skills, available.skills), cwd, agent, version)
+    : filterVersionHomeSelection('skills', available.skills, cwd, agent, version);
   if (commandsAsSkills && commandsToSync.length > 0 && skillsToSync.length > 0) {
     const commandNames = new Set(commandsToSync);
     const skillRoots = [
@@ -2623,8 +2678,8 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
       console.warn(explainSkip(agent, 'hooks', hooksGate, version) + ' -- skipped');
     } else {
       const hooksToSync = selection
-        ? resolveSelection(selection.hooks, available.hooks)
-        : available.hooks;
+        ? filterVersionHomeSelection('hooks', resolveSelection(selection.hooks, available.hooks), cwd, agent, version)
+        : filterVersionHomeSelection('hooks', available.hooks, cwd, agent, version);
 
       if (hooksToSync.length > 0) {
         const r = hooksWriter.write({ version, versionHome, selection: hooksToSync, cwd });
@@ -2738,8 +2793,8 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   );
   const mcpWriter = getWriter('mcp', agent);
   const mcpToSyncAll = selection
-    ? resolveSelection(selection.mcp, available.mcp)
-    : (mcpWriter ? available.mcp : []);
+    ? filterVersionHomeSelection('mcp', resolveSelection(selection.mcp, available.mcp), cwd, agent, version)
+    : (mcpWriter ? filterVersionHomeSelection('mcp', available.mcp, cwd, agent, version) : []);
   const mcpToSync = mcpToSyncAll.filter(n => !untrustedProjectMcpNames.has(n));
 
   if (mcpToSync.length > 0 && mcpWriter) {
@@ -2754,8 +2809,8 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   const subagentsWriter = getWriter('subagents', agent);
   const subagentsGate = supports(agent, 'subagents', version);
   const subagentsRequested = selection
-    ? resolveSelection(selection.subagents, available.subagents)
-    : (subagentsWriter ? available.subagents : []);
+    ? filterVersionHomeSelection('subagents', resolveSelection(selection.subagents, available.subagents), cwd, agent, version)
+    : (subagentsWriter ? filterVersionHomeSelection('subagents', available.subagents, cwd, agent, version) : []);
   const subagentsToSync = subagentsGate.ok ? subagentsRequested : [];
 
   if (subagentsRequested.length > 0 && !subagentsGate.ok) {

@@ -14,6 +14,7 @@ import type {
   Capability,
   CapabilityName,
   CapabilityResult,
+  ProjectScopedResourceKind,
   RulesCapability,
 } from './types.js';
 
@@ -68,6 +69,24 @@ export function supports(
 
   if (!version) return { ok: true };
 
+  if (c.since && compareVersions(version, c.since) < 0) {
+    return { ok: false, reason: 'too_old', need: `>= ${c.since}` };
+  }
+  if (c.until && compareVersions(version, c.until) >= 0) {
+    return { ok: false, reason: 'too_new', need: `< ${c.until}` };
+  }
+  return { ok: true };
+}
+
+export function supportsProjectScope(
+  agent: AgentId,
+  kind: ProjectScopedResourceKind,
+  version?: string
+): CapabilityResult {
+  const c = AGENTS[agent]?.capabilities.projectScope?.[kind] ?? false;
+  if (c === false) return { ok: false, reason: 'unsupported' };
+  if (c === true) return { ok: true };
+  if (!version) return { ok: true };
   if (c.since && compareVersions(version, c.since) < 0) {
     return { ok: false, reason: 'too_old', need: `>= ${c.since}` };
   }

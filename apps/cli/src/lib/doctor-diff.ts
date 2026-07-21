@@ -49,9 +49,10 @@ import { markdownToToml } from './convert.js';
 import { listCommandsInVersionHome, getVersionCommandsDir, listPluginCommandNames } from './commands.js';
 import { shouldInstallCommandAsSkill, commandSkillMatches, commandSkillName } from './command-skills.js';
 import { gooseCommandMatches, gooseCommandsDir } from './goose-commands.js';
-import { supports } from './capabilities.js';
+import { supports, supportsProjectScope } from './capabilities.js';
 import { listSkillsInVersionHome, getVersionSkillsDir } from './skills.js';
 import { listHooksInVersionHome, getVersionHooksDir, listHookEntriesFromDir } from './hooks.js';
+import { projectAgentDir } from './project-resources.js';
 
 const RULES_DOC_FILENAME = 'README.md';
 
@@ -172,6 +173,13 @@ function diffCommands(agent: AgentId, version: string, cwd: string, excludeProje
   if (!asSkill && !supports(agent, 'commands', version).ok) return [];
   const agentDir = path.join(getVersionHomePath(agent, version), agentConfigDirName(agent));
   const installed = new Set(listCommandsInVersionHome(agent, version));
+  const projectCommandsDir = path.join(projectAgentDir(cwd, agent), agentConfig.commandsSubdir || 'commands');
+  const projectInstalled = new Set<string>();
+  if (supportsProjectScope(agent, 'commands', version).ok && fs.existsSync(projectCommandsDir)) {
+    for (const file of fs.readdirSync(projectCommandsDir)) {
+      if (file.endsWith(ext)) projectInstalled.add(file.slice(0, -ext.length));
+    }
+  }
   const layerBases = buildLayerBases(cwd, 'commands', { excludeProject });
 
   const sourceByName = new Map<string, SourceCandidate>();
@@ -192,8 +200,25 @@ function diffCommands(agent: AgentId, version: string, cwd: string, excludeProje
 
   for (const [name, src] of sourceByName) {
     seen.add(name);
-    if (!installed.has(name)) {
+    const isProject = src.layer === 'project' && supportsProjectScope(agent, 'commands', version).ok;
+    const isInstalled = isProject ? projectInstalled.has(name) : installed.has(name);
+    if (!isInstalled) {
       rows.push({ kind: 'commands', name, status: 'missing', source: src.layer, sourcePath: src.path });
+      continue;
+    }
+    if (isProject) {
+      const homePath = path.join(projectCommandsDir, `${name}${ext}`);
+      const installedContent = readSafe(homePath);
+      const sourceContent = readSafe(src.path);
+      const expected = isToml && sourceContent != null ? markdownToToml(name, sourceContent) : sourceContent;
+      rows.push({
+        kind: 'commands',
+        name,
+        status: installedContent != null && expected != null && normalize(installedContent) === normalize(expected) ? 'ok' : 'diff',
+        source: src.layer,
+        sourcePath: src.path,
+        homePath,
+      });
       continue;
     }
     if (asSkill) {
@@ -246,7 +271,7 @@ function diffCommands(agent: AgentId, version: string, cwd: string, excludeProje
   // `agents doctor` shows every plugin command (swarm-plan, code-review, …) as an
   // unmanaged extra, mirroring the orphan false-positive the prune path had.
   const pluginCommands = listPluginCommandNames();
-  for (const name of installed) {
+  for (const name of new Set([...installed, ...projectInstalled])) {
     if (seen.has(name)) continue;
     if (pluginCommands.has(name)) continue;
     const extraHome = asSkill
@@ -305,6 +330,13 @@ function diffSkills(agent: AgentId, version: string, cwd: string, excludeProject
   if (AGENTS[agent].nativeAgentsSkillsDir) return [];
   const homeDir = getVersionSkillsDir(agent, version);
   const installed = new Set(listSkillsInVersionHome(agent, version));
+  const projectSkillsDir = path.join(projectAgentDir(cwd, agent), 'skills');
+  const projectInstalled = new Set<string>();
+  if (supportsProjectScope(agent, 'skills', version).ok && fs.existsSync(projectSkillsDir)) {
+    for (const entry of fs.readdirSync(projectSkillsDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && fs.existsSync(path.join(projectSkillsDir, entry.name, 'SKILL.md'))) projectInstalled.add(entry.name);
+    }
+  }
   const layerBases = buildLayerBases(cwd, 'skills', { excludeProject });
 
   const sourceByName = new Map<string, SourceCandidate>();
@@ -324,8 +356,10 @@ function diffSkills(agent: AgentId, version: string, cwd: string, excludeProject
   const seen = new Set<string>();
   for (const [name, src] of sourceByName) {
     seen.add(name);
-    const homePath = path.join(homeDir, name);
-    if (!installed.has(name)) {
+    const isProject = src.layer === 'project' && supportsProjectScope(agent, 'skills', version).ok;
+    const homePath = isProject ? path.join(projectSkillsDir, name) : path.join(homeDir, name);
+    const isInstalled = isProject ? projectInstalled.has(name) : installed.has(name);
+    if (!isInstalled) {
       rows.push({ kind: 'skills', name, status: 'missing', source: src.layer, sourcePath: src.path });
       continue;
     }
@@ -340,7 +374,7 @@ function diffSkills(agent: AgentId, version: string, cwd: string, excludeProject
     });
   }
 
-  for (const name of installed) {
+  for (const name of new Set([...installed, ...projectInstalled])) {
     if (seen.has(name)) continue;
     rows.push({ kind: 'skills', name, status: 'extra', homePath: path.join(homeDir, name) });
   }
@@ -353,9 +387,11 @@ function diffSkills(agent: AgentId, version: string, cwd: string, excludeProject
 function diffHooks(agent: AgentId, version: string, cwd: string): ResourceDiff[] {
   if (!AGENTS[agent].supportsHooks) return [];
   const installedEntries = listHooksInVersionHome(agent, version);
+  if (supportsProjectScope(agent, 'hooks', version).ok) {
+    installedEntries.push(...listHookEntriesFromDir(path.join(projectAgentDir(cwd, agent), AGENTS[agent].hooksDir || 'hooks')));
+  }
   const installedByName = new Map(installedEntries.map((e) => [e.name, e]));
-  // Sync intentionally excludes project/.agents/hooks/ — mirror that.
-  const layerBases = buildLayerBases(cwd, 'hooks', { excludeProject: true });
+  const layerBases = buildLayerBases(cwd, 'hooks', { excludeProject: !supportsProjectScope(agent, 'hooks', version).ok });
 
   // Group source files the same way the hook installer does (basename across
   // script + sidecar data file); first-layer wins on name collision.

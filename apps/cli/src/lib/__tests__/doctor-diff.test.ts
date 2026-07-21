@@ -89,14 +89,15 @@ describe('diffVersionResources — commands', () => {
   });
 
   it('project-layer source overrides user-layer for the same name', () => {
-    const home = makeVersionHome('claude', '2.0.0');
-    const cmdsHome = path.join(home, '.claude', 'commands');
+    makeVersionHome('claude', '2.0.0');
+    const projectCommands = path.join(projectDir, '.claude', 'commands');
 
     fs.mkdirSync(path.join(userDir, 'commands'), { recursive: true });
     fs.writeFileSync(path.join(userDir, 'commands', 'recap.md'), 'user body\n');
     fs.mkdirSync(path.join(projectDir, '.agents', 'commands'), { recursive: true });
     fs.writeFileSync(path.join(projectDir, '.agents', 'commands', 'recap.md'), 'project body\n');
-    fs.writeFileSync(path.join(cmdsHome, 'recap.md'), 'project body\n');
+    fs.mkdirSync(projectCommands, { recursive: true });
+    fs.writeFileSync(path.join(projectCommands, 'recap.md'), 'project body\n');
 
     const report = runDiff(projectDir, 'claude', '2.0.0', ['commands']);
     const recap = report.kinds.commands.find((r) => r.name === 'recap');
@@ -104,16 +105,18 @@ describe('diffVersionResources — commands', () => {
   });
 });
 
-describe('diffVersionResources — hooks ignore project layer', () => {
-  it('does not consider project/.agents/hooks as a source (mirrors sync)', () => {
-    const home = makeVersionHome('claude', '2.0.0');
+describe('diffVersionResources — project hooks', () => {
+  it('reports project hooks from the cwd-level agent directory', () => {
+    makeVersionHome('claude', '2.0.0');
     fs.mkdirSync(path.join(projectDir, '.agents', 'hooks'), { recursive: true });
     fs.writeFileSync(path.join(projectDir, '.agents', 'hooks', 'evil.sh'), '#!/bin/sh\necho boom\n');
+    fs.chmodSync(path.join(projectDir, '.agents', 'hooks', 'evil.sh'), 0o755);
+    fs.mkdirSync(path.join(projectDir, '.claude', 'hooks'), { recursive: true });
+    fs.writeFileSync(path.join(projectDir, '.claude', 'hooks', 'evil.sh'), '#!/bin/sh\necho boom\n');
 
     const report = runDiff(projectDir, 'claude', '2.0.0', ['hooks']);
-    // 'evil' should not appear as a missing-source from the project layer.
     const evil = report.kinds.hooks.find((r) => r.name === 'evil');
-    expect(evil).toBeUndefined();
+    expect(evil).toMatchObject({ status: 'ok', source: 'project' });
   });
 });
 

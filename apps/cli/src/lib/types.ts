@@ -187,6 +187,12 @@ export interface AgentConfig {
      * rules file (inline all @-imports) when syncing it into the version home.
      */
     rulesImports?: boolean;
+    /**
+     * Resource kinds the agent natively loads from the current project. Kinds
+     * not listed here stay in the version home so unsupported project paths do
+     * not become silent no-ops.
+     */
+    projectScope?: Partial<Record<ProjectScopedResourceKind, Capability>>;
   };
 }
 
@@ -200,6 +206,8 @@ export type Capability = boolean | { since?: string; until?: string };
 
 /** Rules sync writes one composed instructions file per supported agent. */
 export type RulesCapability = false | { file: string };
+
+export type ProjectScopedResourceKind = 'commands' | 'skills' | 'hooks' | 'subagents' | 'mcp';
 
 /** Names of every gateable capability on AgentConfig. */
 export type CapabilityName = 'hooks' | 'mcp' | 'mcpHttp' | 'mcpHeaders' | 'allowlist' | 'skills' | 'commands' | 'plugins' | 'subagents' | 'rules' | 'workflows' | 'memory';

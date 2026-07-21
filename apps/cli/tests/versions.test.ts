@@ -957,6 +957,24 @@ describe('syncResourcesToVersion', () => {
       expect(content).not.toContain('Project debug — must NOT land in version home');
     });
 
+    it('composes project-only commands into cwd and not the shared version home', () => {
+      setupCentralResources();
+      const projectRoot = path.join(TEST_ROOT, 'project-compose');
+      const projectAgents = path.join(projectRoot, '.agents');
+      fs.mkdirSync(path.join(projectAgents, 'commands'), { recursive: true });
+      fs.writeFileSync(path.join(projectAgents, 'commands', 'local.md'), 'Project-only command');
+      PROJECT_AGENTS_DIR = projectAgents;
+      hoistedState.PROJECT_AGENTS_DIR = PROJECT_AGENTS_DIR;
+
+      const result = syncResourcesToVersion('claude', '2.0.65', undefined, { projectDir: projectAgents, cwd: projectRoot, force: true });
+
+      expect(result.commands).toBe(true);
+      expect(fs.readFileSync(path.join(projectRoot, '.claude', 'commands', 'local.md'), 'utf-8')).toBe('Project-only command');
+      expect(fs.existsSync(path.join(getVersionHomePath('claude', '2.0.65'), '.claude', 'commands', 'local.md'))).toBe(false);
+      const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, '.claude', '.agents-cli-manifest.json'), 'utf-8'));
+      expect(manifest.managed.commands.local).toEqual(['commands/local.md']);
+    });
+
     it('empty selection syncs nothing', () => {
       setupCentralResources();
 
@@ -1029,6 +1047,26 @@ describe('syncResourcesToVersion', () => {
       expect(fs.existsSync(path.join(centralSkillsDir, 'mq', 'SKILL.md'))).toBe(true);
       expect(fs.lstatSync(versionSkillsDir).isSymbolicLink()).toBe(false);
       expect(fs.existsSync(path.join(versionSkillsDir, 'mq', 'SKILL.md'))).toBe(true);
+    });
+
+    it('cleans removed project skill entries from the cwd manifest without touching user files', () => {
+      setupCentralResources();
+      const projectRoot = path.join(TEST_ROOT, 'project-skill-compose');
+      const projectAgents = path.join(projectRoot, '.agents');
+      const skillDir = path.join(projectAgents, 'skills', 'local-skill');
+      fs.mkdirSync(skillDir, { recursive: true });
+      fs.writeFileSync(path.join(skillDir, 'SKILL.md'), 'project skill');
+      PROJECT_AGENTS_DIR = projectAgents;
+      hoistedState.PROJECT_AGENTS_DIR = PROJECT_AGENTS_DIR;
+
+      syncResourcesToVersion('claude', '2.0.65', undefined, { projectDir: projectAgents, cwd: projectRoot, force: true });
+      fs.mkdirSync(path.join(projectRoot, '.claude', 'skills', 'user-authored'), { recursive: true });
+      fs.writeFileSync(path.join(projectRoot, '.claude', 'skills', 'user-authored', 'SKILL.md'), 'keep');
+      fs.rmSync(skillDir, { recursive: true, force: true });
+      syncResourcesToVersion('claude', '2.0.65', undefined, { projectDir: projectAgents, cwd: projectRoot, force: true });
+
+      expect(fs.existsSync(path.join(projectRoot, '.claude', 'skills', 'local-skill'))).toBe(false);
+      expect(fs.existsSync(path.join(projectRoot, '.claude', 'skills', 'user-authored', 'SKILL.md'))).toBe(true);
     });
   });
 

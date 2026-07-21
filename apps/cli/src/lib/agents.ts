@@ -236,7 +236,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     // Claude Code has no headless Anthropic-hosted dispatch CLI (only
     // --remote-control, which bridges a *local* session). Its cloud is Rush.
     cloudProvider: 'rush',
-    capabilities: { hooks: true, mcp: true, mcpHttp: true, mcpHeaders: true, allowlist: true, skills: true, commands: true, plugins: true, subagents: true, rules: { file: 'CLAUDE.md' }, workflows: true, memory: true, modes: ['plan', 'edit', 'auto', 'skip'], rulesImports: true },
+    capabilities: { hooks: true, mcp: true, mcpHttp: true, mcpHeaders: true, allowlist: true, skills: true, commands: true, plugins: true, subagents: true, rules: { file: 'CLAUDE.md' }, workflows: true, memory: true, modes: ['plan', 'edit', 'auto', 'skip'], rulesImports: true, projectScope: { commands: true, skills: true, hooks: true, subagents: true, mcp: true } },
   },
   // codex hooks: gated to >= 0.116.0 (introduced [features] codex_hooks flag).
   codex: {
@@ -258,7 +258,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     cloudProvider: 'codex',
     // Subagents: multi-agent plumbing since 0.117.0; custom agents as
     // ~/.codex/agents/*.toml (name, description, developer_instructions).
-    capabilities: { hooks: { since: '0.116.0' }, mcp: true, mcpHttp: true, mcpHeaders: false, allowlist: { since: '0.138.0' }, skills: true, commands: { until: '0.117.0' }, plugins: { since: '0.128.0' }, subagents: { since: '0.117.0' }, rules: { file: 'AGENTS.md' }, workflows: false, memory: true, modes: ['plan', 'edit', 'skip'] },
+    capabilities: { hooks: { since: '0.116.0' }, mcp: true, mcpHttp: true, mcpHeaders: false, allowlist: { since: '0.138.0' }, skills: true, commands: { until: '0.117.0' }, plugins: { since: '0.128.0' }, subagents: { since: '0.117.0' }, rules: { file: 'AGENTS.md' }, workflows: false, memory: true, modes: ['plan', 'edit', 'skip'], projectScope: { commands: { until: '0.117.0' }, skills: true, hooks: { since: '0.116.0' }, subagents: { since: '0.117.0' }, mcp: true } },
   },
   gemini: {
     id: 'gemini',
@@ -288,7 +288,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     },
     // gemini hooks: shipped in v0.26.0 (Jan 2026); older binaries silently ignore the `hooks` key.
     // extensions: gemini-extension.json bundles shipped in v0.8.0; custom subagents in v0.36.0.
-    capabilities: { hooks: { since: '0.26.0' }, mcp: true, mcpHttp: true, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: { since: '0.8.0' }, subagents: { since: '0.36.0' }, rules: { file: 'GEMINI.md' }, workflows: false, memory: false, modes: ['plan', 'edit', 'skip'], rulesImports: true },
+    capabilities: { hooks: { since: '0.26.0' }, mcp: true, mcpHttp: true, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: { since: '0.8.0' }, subagents: { since: '0.36.0' }, rules: { file: 'GEMINI.md' }, workflows: false, memory: false, modes: ['plan', 'edit', 'skip'], rulesImports: true, projectScope: { commands: true, hooks: { since: '0.26.0' }, subagents: { since: '0.36.0' }, mcp: true } },
   },
   cursor: {
     id: 'cursor',
@@ -321,7 +321,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     // + warns for pre-2.4 installs); the direct `subagents add --agents cursor` path
     // writes unconditionally, same as the other since-gated agents.
     // See transformSubagentForCursor / https://cursor.com/docs/subagents.
-    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '2026.1.22' }, rules: { file: '.cursorrules' }, workflows: false, memory: false, modes: ['edit', 'skip'] }, // allowlist: ~/.cursor/cli-config.json
+    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '2026.1.22' }, rules: { file: '.cursorrules' }, workflows: false, memory: false, modes: ['edit', 'skip'], projectScope: { commands: true, hooks: true, subagents: { since: '2026.1.22' }, mcp: true } }, // allowlist: ~/.cursor/cli-config.json
   },
   opencode: {
     id: 'opencode',
@@ -341,7 +341,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     format: 'markdown',
     variableSyntax: '$ARGUMENTS',
     supportsHooks: false,
-    capabilities: { hooks: false, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: { since: '1.1.1' }, skills: true, commands: true, plugins: true, subagents: true, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit'] },
+    capabilities: { hooks: false, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: { since: '1.1.1' }, skills: true, commands: true, plugins: true, subagents: true, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit'], projectScope: { commands: true, subagents: true, mcp: true } },
   },
   openclaw: {
     id: 'openclaw',

@@ -751,7 +751,7 @@ export interface WritableMcpServer {
  * Agents whose config file format is implemented by `writeMcpConfig`.
  * Others are intentionally skipped until their schema is added.
  */
-function writeMcpConfigSupportsAgent(agentId: AgentId): boolean {
+export function writeMcpConfigSupportsAgent(agentId: AgentId): boolean {
   switch (agentId) {
     case 'claude':
     case 'cursor':
