@@ -398,6 +398,29 @@ describe('version resource sync path handling', () => {
     expect(fs.existsSync(path.join(syncedSkillDir, 'secret-link'))).toBe(false);
   });
 
+  it('syncs hook directories through resource discovery', async () => {
+    const home = makeTempHome();
+
+    const hookDir = path.join(home, '.agents', 'hooks', 'tests');
+    fs.mkdirSync(path.join(hookDir, 'fixtures'), { recursive: true });
+    fs.writeFileSync(path.join(hookDir, 'fixtures', 'input.json'), '{"ok":true}\n', 'utf-8');
+
+    const result = runVersionSync(
+      home,
+      "syncResourcesToVersion('claude', '2.1.143', undefined, { cwd: home })"
+    ) as { hooks: boolean };
+
+    const copied = path.join(home, '.agents', '.history', 'versions', 'claude', '2.1.143', 'home', '.claude', 'hooks', 'tests', 'fixtures', 'input.json');
+    expect(result.hooks).toBe(true);
+    expect(fs.readFileSync(copied, 'utf-8')).toBe('{"ok":true}\n');
+
+    const second = runVersionSync(
+      home,
+      "syncResourcesToVersion('claude', '2.1.143', undefined, { cwd: home })"
+    ) as { hooks: boolean };
+    expect(second.hooks).toBe(false);
+  });
+
   it('skips a clean full sync after expanding persisted resource patterns', async () => {
     const home = makeTempHome();
 
@@ -417,6 +440,58 @@ describe('version resource sync path handling', () => {
 
     expect(first.skills).toBe(true);
     expect(second.skills).toBe(false);
+  });
+
+  it('force-refreshes plugin-only skills into top-level skill homes and prunes stale orphans', async () => {
+    const home = makeTempHome();
+    const pluginRoot = path.join(home, '.agents', 'plugins', 'agents');
+    const pluginSkillDir = path.join(pluginRoot, 'skills', 'routines');
+    const versionSkillRoot = path.join(home, '.agents', '.history', 'versions', 'claude', '2.0.65', 'home', '.claude', 'skills');
+
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginRoot, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'agents', version: '1.0.0', description: 'Fixture plugin' }),
+      'utf-8'
+    );
+    fs.mkdirSync(pluginSkillDir, { recursive: true });
+    fs.writeFileSync(path.join(pluginSkillDir, 'SKILL.md'), 'fresh continuous ticket drain recipe\n', 'utf-8');
+    fs.mkdirSync(path.join(versionSkillRoot, 'routines'), { recursive: true });
+    fs.writeFileSync(path.join(versionSkillRoot, 'routines', 'SKILL.md'), 'stale routines body\n', 'utf-8');
+    fs.mkdirSync(path.join(versionSkillRoot, 'old-shadow'), { recursive: true });
+    fs.writeFileSync(path.join(versionSkillRoot, 'old-shadow', 'SKILL.md'), 'orphaned body\n', 'utf-8');
+
+    const result = runVersionSync(
+      home,
+      "syncResourcesToVersion('claude', '2.0.65', undefined, { cwd: home, force: true })"
+    ) as { skills: boolean; plugins: string[] };
+
+    const refreshed = fs.readFileSync(path.join(versionSkillRoot, 'routines', 'SKILL.md'), 'utf-8');
+    const marketplaceSkill = path.join(
+      home,
+      '.agents',
+      '.history',
+      'versions',
+      'claude',
+      '2.0.65',
+      'home',
+      '.claude',
+      'plugins',
+      'marketplaces',
+      'agents-cli',
+      'plugins',
+      'agents',
+      'skills',
+      'routines',
+      'SKILL.md'
+    );
+
+    expect(result.skills).toBe(true);
+    expect(result.plugins).toEqual(['agents']);
+    expect(refreshed).toContain('fresh continuous ticket drain recipe');
+    expect(refreshed).not.toContain('stale routines body');
+    expect(fs.existsSync(path.join(versionSkillRoot, 'old-shadow'))).toBe(false);
+    expect(fs.existsSync(marketplaceSkill)).toBe(true);
   });
 
   it('does not sync project MCP servers under the default user-only MCP policy', async () => {
@@ -1050,4 +1125,3 @@ describe('removeVersion — default reassignment when removing the pinned defaul
     expect(defaultAfter).toBe(null);
   });
 });
-
