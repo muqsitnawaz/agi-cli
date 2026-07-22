@@ -678,6 +678,8 @@ input[type="number"]::-webkit-inner-spin-button {
   color: var(--ds-text-muted);
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
 .swarmify-root .sw-logs-panel {
   display: grid;
   grid-template-rows: auto auto 1fr;
