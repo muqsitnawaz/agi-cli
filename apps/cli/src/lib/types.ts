@@ -69,6 +69,20 @@ export interface BudgetConfig {
   require_confirm_over?: number;
 }
 
+/** Fleet-synced endpoint config for `agents share`. Secrets stay in the `share` bundle. */
+export interface ShareMeta {
+  /** Public base, e.g. `https://share.agents-cli.sh` or a `workers.dev` endpoint. */
+  baseUrl?: string;
+  /** Cloudflare account id that owns the Worker/R2 resources. */
+  accountId?: string;
+  /** Cloudflare Worker name. */
+  workerName?: string;
+  /** R2 bucket name. */
+  bucketName?: string;
+  /** Custom domain when mapped. */
+  domain?: string;
+}
+
 /** Preview features that users can opt into via `agents beta`. */
 export type BetaFeatureName = 'drive' | 'factory' | 'session-sync';
 
@@ -803,13 +817,7 @@ export interface Meta {
   /** `agents share` endpoint (Cloudflare R2 + Worker). Set by `agents share
    * setup`/`join`; syncs fleet-wide via `agents repo push/pull`. The write token
    * lives in the `share` secrets bundle, not here. */
-  share?: {
-    baseUrl?: string;
-    accountId?: string;
-    workerName?: string;
-    bucketName?: string;
-    domain?: string;
-  };
+  share?: ShareMeta;
 }
 
 /** Persisted agent-host entry in agents.yaml (overlay or inline). */
