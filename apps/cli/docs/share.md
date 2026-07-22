@@ -14,7 +14,7 @@ agents share plan.html --json                  # machine-readable URL for hooks
 agents share status                             # show the configured endpoint
 ```
 
-`setup` reads a Cloudflare API token from your `cloudflare.com` secrets bundle (or pass
+`setup` reads a Cloudflare API token from your `cloudflare` secrets bundle (or pass
 `--token`), creates an R2 bucket, installs the share lifecycle rule, uploads the Worker, sets
 the `WRITE_TOKEN` Worker secret, and enables the free
 `*.workers.dev` subdomain. It maps `share.agents-cli.sh` when the token owns the
@@ -64,7 +64,7 @@ agent makes plan.html
 ```
 agents.yaml            share:                         # baseUrl / accountId / worker / bucket / domain
   (Meta.share)                                        # syncs fleet-wide via `agents repo push/pull`
-secrets bundle `share` SHARE_WRITE_TOKEN              # the raw write token — keychain-backed, never in config
+secrets bundle `share` WRITE_TOKEN                    # the raw write token — keychain-backed, never in config
 ```
 
 Config is safe to sync (no secret); the write token lives only in the `share` bundle
