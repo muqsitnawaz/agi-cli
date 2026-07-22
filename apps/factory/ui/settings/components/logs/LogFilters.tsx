@@ -49,4 +49,3 @@ export function LogFilters({ filters, paused, pendingCount, onFiltersChange, onP
     </div>
   );
 }
-

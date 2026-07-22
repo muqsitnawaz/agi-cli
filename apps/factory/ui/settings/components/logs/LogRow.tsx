@@ -36,4 +36,3 @@ export function LogRow({ entry }: { entry: LogEntry }) {
     </div>
   );
 }
-
