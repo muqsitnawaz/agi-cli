@@ -957,7 +957,7 @@ describe('syncResourcesToVersion', () => {
       expect(content).not.toContain('Project debug — must NOT land in version home');
     });
 
-    it('composes project-only commands into cwd and not the shared version home', () => {
+    it('does not compose project-only commands into cwd or the shared version home', () => {
       setupCentralResources();
       const projectRoot = path.join(TEST_ROOT, 'project-compose');
       const projectAgents = path.join(projectRoot, '.agents');
@@ -966,13 +966,11 @@ describe('syncResourcesToVersion', () => {
       PROJECT_AGENTS_DIR = projectAgents;
       hoistedState.PROJECT_AGENTS_DIR = PROJECT_AGENTS_DIR;
 
-      const result = syncResourcesToVersion('claude', '2.0.65', undefined, { projectDir: projectAgents, cwd: projectRoot, force: true });
+      syncResourcesToVersion('claude', '2.0.65', undefined, { projectDir: projectAgents, cwd: projectRoot, force: true });
 
-      expect(result.commands).toBe(true);
-      expect(fs.readFileSync(path.join(projectRoot, '.claude', 'commands', 'local.md'), 'utf-8')).toBe('Project-only command');
+      expect(fs.existsSync(path.join(projectRoot, '.claude', 'commands', 'local.md'))).toBe(false);
       expect(fs.existsSync(path.join(getVersionHomePath('claude', '2.0.65'), '.claude', 'commands', 'local.md'))).toBe(false);
-      const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, '.claude', '.agents-cli-manifest.json'), 'utf-8'));
-      expect(manifest.managed.commands.local).toEqual(['commands/local.md']);
+      expect(fs.existsSync(path.join(projectRoot, '.claude', '.agents-cli-manifest.json'))).toBe(false);
     });
 
     it('empty selection syncs nothing', () => {
