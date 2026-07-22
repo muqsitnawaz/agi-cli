@@ -123,23 +123,46 @@ function parseRoutineTrigger(options: Record<string, unknown>): JobTrigger | und
   throw new Error('--on source must be github or linear');
 }
 
-/** Start or reload the background scheduler so newly-added jobs fire on time. */
-// `quiet` suppresses the human status lines (used by --json callers so the
-// scheduler-start banner never pollutes the machine-readable stdout stream).
-function ensureSchedulerRunning(opts: { quiet?: boolean } = {}): void {
+/**
+ * Start or reload the background scheduler so newly-added jobs fire on time.
+ * `quiet` suppresses human status lines for JSON callers.
+ */
+function ensureSchedulerRunning(opts: { quiet?: boolean; stderr?: boolean } = {}): void {
+  const log = opts.stderr ? console.error : console.log;
   if (isDaemonRunning()) {
     signalDaemonReload();
-    if (!opts.quiet) console.log(chalk.gray('Scheduler reloaded'));
+    if (!opts.quiet) log(chalk.gray('Scheduler reloaded'));
     return;
   }
   const result = startDaemon();
   if (opts.quiet) return;
   if (result.pid) {
-    console.log(chalk.green(`Scheduler started (PID: ${result.pid}). It will run in the background and fire routines on schedule.`));
-    console.log(chalk.gray(`Stop anytime with: agents routines stop`));
+    log(chalk.green(`Scheduler started (PID: ${result.pid}). It will run in the background and fire routines on schedule.`));
+    log(chalk.gray(`Stop anytime with: agents routines stop`));
   } else {
-    console.log(chalk.yellow('Could not start the scheduler. Start it manually with: agents routines start'));
+    log(chalk.yellow('Could not start the scheduler. Start it manually with: agents routines start'));
   }
+}
+
+function writeJson(payload: unknown): void {
+  process.stdout.write(JSON.stringify(payload) + '\n');
+}
+
+function runMetaJson(run: RunMeta): Record<string, unknown> {
+  return {
+    jobId: run.jobName,
+    jobName: run.jobName,
+    runId: run.runId,
+    status: run.status,
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+    exitCode: run.exitCode,
+    errorMessage: run.errorMessage ?? null,
+  };
+}
+
+export function buildRunsJson(runs: RunMeta[]): Record<string, unknown>[] {
+  return runs.map(runMetaJson);
 }
 
 /** Detect Ctrl+C or premature stream close during an interactive prompt. */
@@ -222,15 +245,6 @@ async function parseAndValidateDevices(raw: string): Promise<string[]> {
     process.exit(1);
   }
   return names;
-}
-
-/**
- * Shape the `routines runs --json` payload from a job's run history. Pure — takes
- * the already-read {@link RunMeta} list so it is unit-testable without disk I/O.
- * Mirrors the human table row: run id, status, and start time.
- */
-export function buildRunsJson(runs: RunMeta[]): Array<{ runId: string; status: RunMeta['status']; startedAt: string }> {
-  return runs.map((r) => ({ runId: r.runId, status: r.status, startedAt: r.startedAt }));
 }
 
 /** Register the `agents routines` command tree. */
@@ -473,7 +487,7 @@ export function registerRoutinesCommands(program: Command): void {
     .option('--end-at <iso>', 'Stop firing on or after this ISO 8601 timestamp (e.g., "2026-12-31T23:59:00Z"); routine auto-disables.')
     .option('--disabled', 'Create the routine but keep it paused (enable later with resume)')
     .option('--resume <sessionId>', 'At fire time, resume this existing session id (via `agents run <agent> --resume`) instead of starting fresh — the actual session reopens with full context and the prompt becomes its next turn. Powers self-scheduled wake-ups (e.g. /hibernate). Requires --agent claude or codex; runs un-sandboxed (the session store lives in the real home, not the job overlay).')
-    .option('--json', 'Emit machine-readable JSON')
+    .option('--json', 'Emit machine-readable JSON with the created routine id and status')
     .action(async (nameOrPath: string | undefined, options) => {
       // Check if inline mode (has flags) or file mode
       const hasInlineFlags = options.schedule || options.agent || options.workflow || options.command || options.prompt || options.at || options.on;
@@ -541,7 +555,7 @@ export function registerRoutinesCommands(program: Command): void {
         // this machine unless the user chose an explicit eligibility set.
         if (options.runOn && !devices) {
           devices = [machineId()];
-          console.log(chalk.gray(`--run-on set with no --devices: pinned firing to this machine (${devices[0]}).`));
+          console.error(chalk.gray(`--run-on set with no --devices: pinned firing to this machine (${devices[0]}).`));
         }
 
         const config: JobConfig = {
@@ -576,7 +590,17 @@ export function registerRoutinesCommands(program: Command): void {
 
         writeJob(config);
         if (options.json) {
-          process.stdout.write(JSON.stringify({ ok: true, added: nameOrPath, job: config }) + '\n');
+          writeJson({
+            ok: true,
+            added: nameOrPath,
+            job: config,
+            jobId: config.name,
+            name: config.name,
+            status: 'added',
+            enabled: config.enabled,
+            schedule: config.schedule ?? null,
+            trigger: config.trigger ?? null,
+          });
           ensureSchedulerRunning({ quiet: true });
           return;
         }
@@ -634,12 +658,22 @@ export function registerRoutinesCommands(program: Command): void {
         // with no eligibility pin would fire from every daemon in the fleet.
         if (config.host && (!config.devices || config.devices.length === 0)) {
           config.devices = [machineId()];
-          console.log(chalk.gray(`host: set with no devices pin: pinned firing to this machine (${config.devices[0]}).`));
+          console.error(chalk.gray(`host: set with no devices pin: pinned firing to this machine (${config.devices[0]}).`));
         }
 
         writeJob(config);
         if (options.json) {
-          process.stdout.write(JSON.stringify({ ok: true, added: name, job: config }) + '\n');
+          writeJson({
+            ok: true,
+            added: name,
+            job: config,
+            jobId: config.name,
+            name: config.name,
+            status: 'added',
+            enabled: config.enabled,
+            schedule: config.schedule ?? null,
+            trigger: config.trigger ?? null,
+          });
           ensureSchedulerRunning({ quiet: true });
           return;
         }
@@ -753,7 +787,7 @@ export function registerRoutinesCommands(program: Command): void {
   routinesCmd
     .command('runs [name]')
     .description('See execution history: run IDs, completion status, and start times (up to last 10 runs)')
-    .option('--json', 'Emit machine-readable JSON')
+    .option('--json', 'Emit machine-readable JSON with run ids and statuses')
     .action(async (name: string | undefined, options: { json?: boolean }) => {
       if (!name) {
         name = await pickJob('Select job to view runs', undefined, ['agents routines runs <name>']) ?? undefined;
@@ -762,7 +796,11 @@ export function registerRoutinesCommands(program: Command): void {
 
       const runs = listRuns(name);
       if (options.json) {
-        process.stdout.write(JSON.stringify(buildRunsJson(runs.slice(-10))) + '\n');
+        writeJson({
+          jobId: name,
+          name,
+          runs: buildRunsJson(runs.slice(-10)),
+        });
         return;
       }
       if (runs.length === 0) {
@@ -784,7 +822,7 @@ export function registerRoutinesCommands(program: Command): void {
   routinesCmd
     .command('run [name]')
     .description('Execute a routine right now in the foreground. Ignores the schedule; useful for testing before enabling.')
-    .option('--json', 'Emit machine-readable JSON')
+    .option('--json', 'Emit machine-readable JSON with the run id and status')
     .action(async (name: string | undefined, options: { json?: boolean }) => {
       if (!name) {
         name = await pickJob('Select job to run', undefined, ['agents routines run <name>']) ?? undefined;
@@ -800,7 +838,7 @@ export function registerRoutinesCommands(program: Command): void {
       const job = readJob(name);
       if (!job) {
         if (options.json) {
-          process.stdout.write(JSON.stringify({ error: `Job '${name}' not found` }) + '\n');
+          writeJson({ error: `Job '${name}' not found` });
           process.exit(1);
         }
         console.error(chalk.red(`Job '${name}' not found`));
@@ -810,7 +848,7 @@ export function registerRoutinesCommands(program: Command): void {
       const eligibility = checkJobDeviceEligibility(job);
       if (eligibility) {
         if (options.json) {
-          process.stdout.write(JSON.stringify({ error: eligibility.message, hint: eligibility.suggestion }) + '\n');
+          writeJson({ error: eligibility.message, hint: eligibility.suggestion });
           process.exit(1);
         }
         console.error(chalk.red(eligibility.message));
@@ -825,13 +863,16 @@ export function registerRoutinesCommands(program: Command): void {
 
       try {
         const result = await executeJob(job);
+        const logPath = `${getRunDir(name, result.meta.runId)}/stdout.log`;
         if (options.json) {
-          process.stdout.write(JSON.stringify({
+          writeJson({
             ok: true,
             job: name,
-            runId: result.meta.runId,
             logDir: getRunDir(name, result.meta.runId),
-          }) + '\n');
+            ...runMetaJson(result.meta),
+            logPath,
+            reportPath: result.reportPath ?? null,
+          });
           return;
         }
         if (result.meta.status === 'completed') {
@@ -843,7 +884,7 @@ export function registerRoutinesCommands(program: Command): void {
         }
 
         console.log(chalk.gray(`  Run: ${result.meta.runId}`));
-        console.log(chalk.gray(`  Log: ${getRunDir(name, result.meta.runId)}/stdout.log`));
+        console.log(chalk.gray(`  Log: ${logPath}`));
 
         if (result.reportPath) {
           console.log(chalk.bold('\nReport:\n'));
@@ -851,7 +892,7 @@ export function registerRoutinesCommands(program: Command): void {
         }
       } catch (err) {
         if (options.json) {
-          process.stdout.write(JSON.stringify({ error: (err as Error).message }) + '\n');
+          writeJson({ error: (err as Error).message });
           process.exit(1);
         }
         spinner!.fail('Execution failed');
