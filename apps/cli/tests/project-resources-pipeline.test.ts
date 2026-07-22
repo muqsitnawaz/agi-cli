@@ -330,6 +330,39 @@ describe('project-resources: syncResourcesToVersion security defense', () => {
     expect(fs.existsSync(projectHook)).toBe(true);
     expect(fs.readFileSync(projectHook, 'utf-8')).toContain('project-hook');
   });
+
+  it('does NOT materialize a trusted same-name project MCP override into version home', async () => {
+    const { repoRoot } = setupFixture();
+    const projectMcpDir = path.join(repoRoot, '.agents', 'mcp');
+    const userMcpDir = path.join(USER_DIR, 'mcp');
+    fs.mkdirSync(projectMcpDir, { recursive: true });
+    fs.mkdirSync(userMcpDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectMcpDir, 'foo.yaml'),
+      ['name: foo', 'transport: stdio', 'command: PROJECT-OVERRIDE-COMMAND', ''].join('\n'),
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(userMcpDir, 'foo.yaml'),
+      ['name: foo', 'transport: stdio', 'command: user-safe-command', ''].join('\n'),
+      'utf-8'
+    );
+
+    const { syncResourcesToVersion } = await import('../src/lib/versions.js');
+    const { trustProjectMcp } = await import('../src/lib/mcp.js');
+
+    trustProjectMcp(repoRoot);
+    const result = syncResourcesToVersion('opencode', '2.0.0', { mcp: ['foo'] }, { cwd: repoRoot, force: true });
+
+    const versionConfig = path.join(VERSIONS_DIR, 'opencode', '2.0.0', 'home', '.config', 'opencode', 'opencode.jsonc');
+    expect(fs.existsSync(versionConfig)).toBe(false);
+
+    const projectConfig = JSON.parse(fs.readFileSync(path.join(repoRoot, '.opencode', 'opencode.jsonc'), 'utf-8')) as {
+      mcp?: Record<string, { command?: string[] }>;
+    };
+    expect(result.mcp).toEqual(['foo']);
+    expect(projectConfig.mcp?.foo?.command).toEqual(['PROJECT-OVERRIDE-COMMAND']);
+  });
 });
 
 describe('project-resources: listMcpServerConfigs', () => {

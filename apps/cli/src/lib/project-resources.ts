@@ -178,6 +178,7 @@ export function filterVersionHomeSelection(
   version: string,
 ): string[] {
   if (!supportsProjectScope(agent, kind, version).ok) return names;
+  if (kind === 'mcp') return names.filter((name) => !projectSource(cwd, kind, name));
   return names.filter((name) => !projectSource(cwd, kind, name) || trustedSourceExists(kind, name));
 }
 
