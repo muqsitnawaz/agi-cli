@@ -73,6 +73,11 @@ function relativeToProjectDir(cwd: string, agent: AgentId, p: string): string {
 function cleanupRemoved(cwd: string, agent: AgentId, previous: ProjectResourceManifest, next: ProjectResourceManifest): void {
   const base = projectAgentDir(cwd, agent);
   for (const kind of Object.keys(previous.managed) as ManagedKind[]) {
+    // MCP servers are tracked by the shared config file path, not a per-entry path.
+    // Removing a dropped server is owned by removeMcpEntries (a surgical per-key delete
+    // in composeMcp); deleting the file here would wipe still-selected and user-authored
+    // entries out of the same config. Skip mcp entirely.
+    if (kind === 'mcp') continue;
     const oldEntries = previous.managed[kind] ?? {};
     const newEntries = next.managed[kind] ?? {};
     for (const [name, rels] of Object.entries(oldEntries)) {

@@ -363,6 +363,50 @@ describe('project-resources: syncResourcesToVersion security defense', () => {
     expect(result.mcp).toEqual(['foo']);
     expect(projectConfig.mcp?.foo?.command).toEqual(['PROJECT-OVERRIDE-COMMAND']);
   });
+
+  it('shrinking the project MCP selection removes only the dropped server, not the whole config file', async () => {
+    // Regression: cleanupRemoved used to treat the shared MCP config file as a
+    // per-server managed path and delete the entire file when any server dropped
+    // out of the selection, wiping still-selected + user-authored entries. The
+    // surgical per-key delete lives in removeMcpEntries; cleanupRemoved must skip mcp.
+    const { repoRoot } = setupFixture();
+    const projectMcpDir = path.join(repoRoot, '.agents', 'mcp');
+    const userMcpDir = path.join(USER_DIR, 'mcp');
+    fs.mkdirSync(projectMcpDir, { recursive: true });
+    fs.mkdirSync(userMcpDir, { recursive: true });
+    for (const name of ['foo', 'bar']) {
+      fs.writeFileSync(
+        path.join(projectMcpDir, `${name}.yaml`),
+        ['name: ' + name, 'transport: stdio', 'command: cmd-' + name, ''].join('\n'),
+        'utf-8'
+      );
+      fs.writeFileSync(
+        path.join(userMcpDir, `${name}.yaml`),
+        ['name: ' + name, 'transport: stdio', 'command: user-' + name, ''].join('\n'),
+        'utf-8'
+      );
+    }
+
+    const { syncResourcesToVersion } = await import('../src/lib/versions.js');
+    const { trustProjectMcp } = await import('../src/lib/mcp.js');
+    trustProjectMcp(repoRoot);
+
+    // First sync: both servers selected.
+    const first = syncResourcesToVersion('opencode', '2.0.0', { mcp: ['foo', 'bar'] }, { cwd: repoRoot, force: true });
+    expect(first.mcp.sort()).toEqual(['bar', 'foo']);
+    const configFile = path.join(repoRoot, '.opencode', 'opencode.jsonc');
+    expect(fs.existsSync(configFile)).toBe(true);
+
+    // Second sync: selection shrinks to just foo. bar must be surgically removed
+    // while the config file (and foo) survive.
+    const second = syncResourcesToVersion('opencode', '2.0.0', { mcp: ['foo'] }, { cwd: repoRoot, force: true });
+    expect(second.mcp).toEqual(['foo']);
+
+    expect(fs.existsSync(configFile)).toBe(true);
+    const config = JSON.parse(fs.readFileSync(configFile, 'utf-8')) as { mcp?: Record<string, unknown> };
+    expect(Object.keys(config.mcp ?? {})).toEqual(['foo']);
+    expect(config.mcp?.bar).toBeUndefined();
+  });
 });
 
 describe('project-resources: listMcpServerConfigs', () => {
