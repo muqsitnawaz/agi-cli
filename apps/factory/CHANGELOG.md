@@ -6,6 +6,18 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
+- **agents-dbg now has a 0.1.0 Mac release pipeline (RUSH-1015).** The standalone
+  Electron app packages as `agents-dbg.app` with the `com.phnxlabs.agents-dbg`
+  bundle id, hardened-runtime entitlements, Developer ID signing, and
+  electron-builder notarization when Apple credentials are present. The new
+  root `scripts/release.sh` dry-runs by default, builds and verifies the
+  notarized app on `--confirm`, uploads GitHub release assets, and updates
+  `muqsitnawaz/tap` formula/cask entries through `scripts/bottle.sh`, while
+  `scripts/install-agents-dbg.sh` provides the public curl installer. Source:
+  `apps/factory/app/package.json`, `apps/factory/app/scripts/build.sh`,
+  `.github/workflows/agents-dbg-release.yml`, `scripts/release.sh`,
+  `scripts/bottle.sh`, `scripts/install-agents-dbg.sh`.
+
 ## [0.9.295] - 2026-07-21
 
 - **Fleet-aware Launch Matrix — spawn a Quick Launch agent on a specific device or balanced across the fleet.** Each Quick Launch slot (⌘⇧0–9) gains a **Run on** target: this Mac (default, unchanged), a registered device (offloaded over SSH via `agents run --host`), or ⚖ Balanced — auto-pick the least-busy online device, with an optional pool restriction. The collapsed row shows the target (`↗ <device>` / `⚖ balanced`); a new optional chord **⌘⌥⇧0–9** fires a slot but prompts for the host once. Every non-shell agent (Claude, Codex, Gemini, OpenCode, Cursor, Antigravity, Grok, Kimi, Droid) also gains palette commands mirroring the version triad on a host axis — **(Pick Host)**, **(Pick Version & Host)**, **(Auto Host)** — plus generic `New Agent (Pick Host)` / `(Pick Version & Host)`; a host target routes ANY agent through `agents run --host` so grok/kimi/droid (raw-binary local launches) get parity. Balanced picks by fewest running agents, excluding the local interactive machine. Source: `apps/factory/src/core/settings.ts`, `apps/factory/src/core/launchHost.ts`, `apps/factory/src/vscode/extension.ts`, `apps/factory/ui/settings/components/panel/LaunchMatrix.tsx`, `apps/factory/package.json`.
