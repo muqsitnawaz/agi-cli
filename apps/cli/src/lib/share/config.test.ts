@@ -23,6 +23,7 @@ function makeMemoryBackend(): { backend: KeychainBackend; store: Map<string, Sto
 }
 
 let tmpHome = '';
+let previousHome: string | undefined;
 let previousEnvToken: string | undefined;
 
 async function freshShareConfig() {
@@ -32,51 +33,94 @@ async function freshShareConfig() {
   secrets.setKeychainBackendForTest(mem.backend);
   const filestore = await import('../secrets/filestore.js');
   filestore._resetFileStoreForTest({ fileDir: path.join(tmpHome, '.file-secrets') });
-  return import('./config.js');
+  const config = await import('./config.js');
+  return { config, mem };
 }
 
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-share-config-'));
-  process.env.HOME = tmpHome;
+  previousHome = process.env.HOME;
   previousEnvToken = process.env.SHARE_WRITE_TOKEN;
+  process.env.HOME = tmpHome;
   delete process.env.SHARE_WRITE_TOKEN;
 });
 
 afterEach(() => {
   vi.resetModules();
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
   if (previousEnvToken === undefined) delete process.env.SHARE_WRITE_TOKEN;
   else process.env.SHARE_WRITE_TOKEN = previousEnvToken;
   fs.rmSync(tmpHome, { recursive: true, force: true });
 });
 
+describe('share config and token store', () => {
+  it('mints a 32-byte hex write token', async () => {
+    const { config } = await freshShareConfig();
+    expect(config.generateWriteToken()).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('stores endpoint config under redirected HOME', async () => {
+    const { config } = await freshShareConfig();
+
+    config.writeShareConfig({
+      baseUrl: 'https://share.example.com/',
+      accountId: 'acct_1',
+      workerName: 'agents-share',
+      bucketName: 'agents-share',
+      domain: 'share.example.com',
+    });
+
+    expect(config.readShareConfig()).toEqual({
+      baseUrl: 'https://share.example.com',
+      accountId: 'acct_1',
+      workerName: 'agents-share',
+      bucketName: 'agents-share',
+      domain: 'share.example.com',
+    });
+    expect(fs.existsSync(path.join(tmpHome, '.agents', 'agents.yaml'))).toBe(true);
+  });
+
+  it('stores the write token in the share secrets bundle and reads it back', async () => {
+    const { config, mem } = await freshShareConfig();
+    const token = config.generateWriteToken();
+
+    config.storeWriteToken(token);
+
+    expect(config.readWriteToken()).toBe(token);
+    expect(mem.store.get('agents-cli.secrets.share.SHARE_WRITE_TOKEN')?.value).toBe(token);
+    expect(fs.readFileSync(path.join(tmpHome, '.agents', 'agents.yaml'), 'utf8')).not.toContain(token);
+  });
+});
+
 describe('share write-token resolution', () => {
   it('prefers an injected SHARE_WRITE_TOKEN over the local bundle', async () => {
-    const { readWriteToken, storeWriteToken } = await freshShareConfig();
-    storeWriteToken('bundle-token');
+    const { config } = await freshShareConfig();
+    config.storeWriteToken('bundle-token');
     process.env.SHARE_WRITE_TOKEN = 'env-token';
 
-    expect(readWriteToken()).toBe('env-token');
+    expect(config.readWriteToken()).toBe('env-token');
   });
 
   it('builds runtime env only when synced share config exists', async () => {
-    const { shareRuntimeEnv, storeWriteToken, writeShareConfig } = await freshShareConfig();
-    storeWriteToken('bundle-token');
+    const { config } = await freshShareConfig();
+    config.storeWriteToken('bundle-token');
 
-    expect(shareRuntimeEnv()).toBeUndefined();
+    expect(config.shareRuntimeEnv()).toBeUndefined();
 
-    writeShareConfig({
+    config.writeShareConfig({
       baseUrl: 'https://share.example.com',
       accountId: 'acct',
       workerName: 'agents-share',
       bucketName: 'agents-share',
     });
 
-    expect(shareRuntimeEnv()).toEqual({ SHARE_WRITE_TOKEN: 'bundle-token' });
+    expect(config.shareRuntimeEnv()).toEqual({ SHARE_WRITE_TOKEN: 'bundle-token' });
   });
 
   it('uses the injected token for runtime env without touching the bundle', async () => {
-    const { shareRuntimeEnv, writeShareConfig } = await freshShareConfig();
-    writeShareConfig({
+    const { config } = await freshShareConfig();
+    config.writeShareConfig({
       baseUrl: 'https://share.example.com',
       accountId: 'acct',
       workerName: 'agents-share',
@@ -84,6 +128,6 @@ describe('share write-token resolution', () => {
     });
     process.env.SHARE_WRITE_TOKEN = 'env-token';
 
-    expect(shareRuntimeEnv({ agentOnly: true })).toEqual({ SHARE_WRITE_TOKEN: 'env-token' });
+    expect(config.shareRuntimeEnv({ agentOnly: true })).toEqual({ SHARE_WRITE_TOKEN: 'env-token' });
   });
 });
