@@ -47,6 +47,8 @@
   "scripts": {
     "build": "tsc && rm -rf 'dist/lib/secrets/AgentsKeychain.app' 'dist/lib/secrets/Agents CLI.app' 'dist/lib/menubar/MenubarHelper.app' && ([ -d 'bin/Agents CLI.app' ] && cp -R 'bin/Agents CLI.app' 'dist/lib/secrets/Agents CLI.app' || true) && ([ -d 'bin/MenubarHelper.app' ] && mkdir -p 'dist/lib/menubar' && cp -R 'bin/MenubarHelper.app' 'dist/lib/menubar/MenubarHelper.app' || true) && ([ -f 'bin/agents-macos' ] && mkdir -p dist/bin && cp -f 'bin/agents-macos' 'dist/bin/agents' && chmod 755 'dist/bin/agents' || true)",
     "build:bin": "scripts/build-bin.sh",
+    "dbg:build": "vite build --config vite.agents-dbg.config.ts",
+    "dbg:dev": "vite --config vite.agents-dbg.config.ts --host 127.0.0.1",
     "prepare": "npm run build",
     "prepack": "cp ../../README.md README.md && scripts/verify-keychain-helper.sh && scripts/verify-menubar-helper.sh && scripts/verify-cli-binary.sh",
     "postinstall": "node scripts/postinstall.js",
@@ -98,6 +100,9 @@
     "marked-terminal": "7.3.0",
     "ora": "9.4.1",
     "proper-lockfile": "4.1.2",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "lucide-react": "0.562.0",
     "simple-git": "3.36.0",
     "smol-toml": "1.7.0",
     "ws": "^8.21.0",
@@ -107,9 +112,25 @@
     "@types/diff": "8.0.0",
     "@types/marked-terminal": "6.1.1",
     "@types/node": "26.1.0",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
     "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "6.0.3",
+    "electron": "43.2.0",
+    "electron-builder": "26.15.3",
     "tsx": "4.23.0",
     "typescript": "6.0.3",
+    "vite": "8.1.5",
     "vitest": "4.1.9"
+  },
+  "build": {
+    "appId": "ai.getrush.agents-dbg",
+    "productName": "agents-dbg",
+    "files": [
+      "dist/agents-dbg/**"
+    ],
+    "mac": {
+      "icon": "assets/agents-dbg.svg"
+    }
   }
 }

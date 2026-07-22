@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="agents-dbg Rush icon">
+  <defs>
+    <linearGradient id="rush-bg" x1="128" x2="896" y1="96" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#241d12" />
+      <stop offset="0.52" stop-color="#100d08" />
+      <stop offset="1" stop-color="#17130c" />
+    </linearGradient>
+    <linearGradient id="rush-gold" x1="263" x2="787" y1="226" y2="789" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f1d590" />
+      <stop offset="0.48" stop-color="#d7b56d" />
+      <stop offset="1" stop-color="#6f5124" />
+    </linearGradient>
+    <filter id="rush-glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="18" result="blur" />
+      <feColorMatrix in="blur" type="matrix" values="1 0 0 0 0.843 0 1 0 0 0.710 0 0 1 0 0.427 0 0 0 0.42 0" />
+      <feBlend in="SourceGraphic" mode="screen" />
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" rx="216" fill="url(#rush-bg)" />
+  <path d="M190 686 481 190h86L834 686l-70 148H648L513 560 378 834H260l74-148h210l-69-140-68 140H190Z" fill="url(#rush-gold)" filter="url(#rush-glow)" />
+  <path d="M514 260 724 686h-93L514 448 397 686h-94L514 260Z" fill="#f8f0da" opacity=".18" />
+  <path d="M276 756h476" stroke="#f1d590" stroke-width="32" stroke-linecap="round" opacity=".88" />
+</svg>

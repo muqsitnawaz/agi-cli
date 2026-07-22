@@ -37,9 +37,12 @@ export class R2Client {
 
   /** Upload an object. Overwrites unconditionally. */
   async put(key: string, body: string | Uint8Array, contentType = 'application/octet-stream'): Promise<void> {
+    const requestBody: BodyInit = typeof body === 'string'
+      ? body
+      : toArrayBuffer(body);
     const res = await this.aws.fetch(this.url(key), {
       method: 'PUT',
-      body,
+      body: requestBody,
       headers: { 'content-type': contentType },
     });
     if (!res.ok) throw new Error(`R2 PUT ${key} failed: ${res.status} ${await safeText(res)}`);
@@ -109,6 +112,12 @@ export class R2Client {
     } while (token);
     return keys;
   }
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
 function decodeXml(s: string): string {
