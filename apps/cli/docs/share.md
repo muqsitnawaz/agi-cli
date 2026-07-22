@@ -43,8 +43,9 @@ agent makes plan.html
   `SHARE_WRITE_TOKEN`, and `agents share join <baseUrl>` still joins an explicit
   endpoint without provisioning.
 - **Expiry.** `--expire 30d|12h|2026-08-01` writes `expires-at` into the object's metadata;
-  the Worker `410`s and lazily deletes past that instant. Setup also installs a bucket
-  lifecycle rule that deletes share objects after 90 days as the durable cleanup floor.
+  the Worker `410`s and lazily deletes past that instant. `setup` also installs an R2
+  lifecycle rule so old share objects are removed automatically even if nobody opens
+  the expired link again.
 - **Preview cards (OG images).** Publishing an HTML page screenshots its own hero at
   1200×630 and attaches it as `og:image` + `twitter:card`, so the link unfurls into a
   rich card in Slack, iMessage, Twitter/X, and Discord. Capture is client-side (headless
