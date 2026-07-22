@@ -26,7 +26,7 @@ export function ServersSidebar({ servers = DEBUG_SERVERS, activeId = 'mcp' }: {
           <ShieldCheck size={18} strokeWidth={1.8} />
         </div>
         <div className="dbg-brand-copy">
-          <div className="dbg-kicker">Rush Debug</div>
+          <div className="dbg-kicker">Debug Console</div>
           <div className="dbg-title">agents-dbg</div>
         </div>
       </div>

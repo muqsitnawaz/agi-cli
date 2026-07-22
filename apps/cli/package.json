@@ -124,7 +124,7 @@
     "vitest": "4.1.9"
   },
   "build": {
-    "appId": "ai.getrush.agents-dbg",
+    "appId": "dev.phoenixlabs.agents-dbg",
     "productName": "agents-dbg",
     "files": [
       "dist/agents-dbg/**"
