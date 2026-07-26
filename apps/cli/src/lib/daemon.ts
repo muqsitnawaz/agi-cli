@@ -173,16 +173,6 @@ function removeChildPid(name: DaemonChildName): void {
   try { fs.unlinkSync(getChildPidPath(name)); } catch { /* already removed */ }
 }
 
-/** Read a supervised daemon child's current PID from disk, if it's running. */
-export function readDaemonChildPid(name: DaemonChildName): number | null {
-  try {
-    const pid = parseInt(fs.readFileSync(getChildPidPath(name), 'utf-8').trim(), 10);
-    return isNaN(pid) ? null : pid;
-  } catch {
-    return null;
-  }
-}
-
 export interface DaemonHeartbeat {
   lastTick: string;
   pid: number;

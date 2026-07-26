@@ -543,6 +543,138 @@ describe('startDetached (integration: daemon stays alive)', () => {
   }, 30_000);
 });
 
+// #417: browser IPC (external CDP connections + SSH tunnels — the daemon's
+// highest-blast-radius code) now runs as its own supervised OS process instead
+// of in-core (daemon.ts previously created BrowserService/BrowserIPCServer
+// directly inside runDaemon(), right after the pre-#417 orphan-reap block).
+// Drives the REAL built CLI the same way the "startDetached (integration)"
+// suite above does: no mocking, a real daemon process spawns a real child
+// process, and the test kills it directly to simulate a crash.
+describe('supervised daemon children (#417)', () => {
+  function setupRealDaemon() {
+    if (!fs.existsSync(DIST_ENTRY)) {
+      execFileSync('npm', ['run', 'build'], { cwd: REPO_ROOT, stdio: 'ignore' });
+    }
+
+    // Short POSIX base keeps the AF_UNIX browser socket under the 104-byte
+    // sun_path cap (see the integration test above for the rationale).
+    const tmpRoot = process.platform === 'win32' ? os.tmpdir() : '/tmp';
+    const tmpHome = fs.mkdtempSync(path.join(tmpRoot, 'agdc-'));
+    const systemDir = path.join(tmpHome, '.agents', '.system');
+    fs.mkdirSync(systemDir, { recursive: true });
+    execFileSync('git', ['init', '-q', systemDir]);
+
+    const logPath = path.join(tmpHome, 'daemon-stdio.log');
+    const socketPath = path.join(tmpHome, '.agents', '.cache', 'helpers', 'browser', 'browser.sock');
+    const endpoint = ipcEndpoint(socketPath);
+    const daemonDir = path.join(tmpHome, '.agents', '.cache', 'helpers', 'daemon');
+    const daemonLog = path.join(daemonDir, 'logs.jsonl');
+    const childPidFile = path.join(daemonDir, 'daemon-child-browser-ipc.pid');
+
+    const childEnv = { ...process.env, HOME: tmpHome };
+    delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
+
+    const { pid: daemonPid } = startDetached({ agentsBin: DIST_ENTRY, logPath, env: childEnv });
+    if (!daemonPid) throw new Error('daemon failed to start (no PID)');
+
+    return { tmpHome, daemonPid, endpoint, daemonLog, childPidFile };
+  }
+
+  function readChildPid(childPidFile: string): number | null {
+    try {
+      const n = parseInt(fs.readFileSync(childPidFile, 'utf-8').trim(), 10);
+      return Number.isFinite(n) ? n : null;
+    } catch {
+      return null;
+    }
+  }
+
+  const isAlivePid = (pid: number): boolean => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+
+  async function waitUntil(cond: () => boolean, timeoutMs: number): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (cond()) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return cond();
+  }
+
+  async function waitForEndpoint(endpoint: string, timeoutMs: number): Promise<boolean> {
+    const start = Date.now();
+    let up = false;
+    while (Date.now() - start < timeoutMs && !up) {
+      up = await probeEndpoint(endpoint);
+      if (!up) await new Promise((r) => setTimeout(r, 100));
+    }
+    return up;
+  }
+
+  function teardown(daemonPid: number | null, childPidFile: string, tmpHome: string): void {
+    try { if (daemonPid) process.kill(daemonPid, 'SIGKILL'); } catch { /* already gone */ }
+    const leftoverChild = readChildPid(childPidFile);
+    if (leftoverChild) { try { process.kill(leftoverChild, 'SIGKILL'); } catch { /* already gone */ } }
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  }
+
+  it('(b) spawns the browser-IPC child as a separate OS process with its own PID', async () => {
+    const { tmpHome, daemonPid, endpoint, childPidFile } = setupRealDaemon();
+    try {
+      expect(await waitForEndpoint(endpoint, 8_000)).toBe(true);
+
+      const childPid = readChildPid(childPidFile);
+      expect(childPid).toBeTruthy();
+      expect(childPid).not.toBe(daemonPid);
+      expect(isAlivePid(childPid!)).toBe(true);
+      expect(isAlivePid(daemonPid!)).toBe(true);
+    } finally {
+      teardown(daemonPid, childPidFile, tmpHome);
+    }
+  }, 30_000);
+
+  it('(a) a crashed browser-IPC child is logged and restarted without killing the daemon (broker survives)', async () => {
+    const { tmpHome, daemonPid, endpoint, daemonLog, childPidFile } = setupRealDaemon();
+    try {
+      expect(await waitForEndpoint(endpoint, 8_000)).toBe(true);
+
+      const firstChildPid = readChildPid(childPidFile);
+      expect(firstChildPid).toBeTruthy();
+
+      // Simulate a crash: kill the child directly, never the daemon.
+      process.kill(firstChildPid!, 'SIGKILL');
+      expect(await waitUntil(() => !isAlivePid(firstChildPid!), 5_000)).toBe(true);
+
+      // The whole point of #417: the daemon (which hosts the secrets broker,
+      // #416) must survive a crash in the code it used to run in-core.
+      expect(isAlivePid(daemonPid!)).toBe(true);
+
+      // The crash must be logged...
+      expect(await waitUntil(() => {
+        const text = fs.existsSync(daemonLog) ? fs.readFileSync(daemonLog, 'utf-8') : '';
+        return text.includes("daemon child 'browser-ipc' exited unexpectedly");
+      }, 10_000)).toBe(true);
+
+      // ...and the child restarted under a genuinely new PID.
+      expect(await waitUntil(() => {
+        const pid = readChildPid(childPidFile);
+        return pid !== null && pid !== firstChildPid && isAlivePid(pid);
+      }, 20_000)).toBe(true);
+
+      // The browser IPC socket is reachable again, served by the new child.
+      expect(await waitForEndpoint(endpoint, 8_000)).toBe(true);
+
+      // The daemon itself never shut down — the crash stayed fully contained.
+      const logText = fs.readFileSync(daemonLog, 'utf-8');
+      expect(logText).not.toContain('Daemon shutting down');
+      expect(isAlivePid(daemonPid!)).toBe(true);
+    } finally {
+      teardown(daemonPid, childPidFile, tmpHome);
+    }
+  }, 60_000);
+});
+
 // #414: enforce a single daemon instance and never report a null PID.
 //  - A second concurrent `__daemon-run` must exit without clobbering the live
 //    daemon's pid file (else two schedulers double-fire every routine).
