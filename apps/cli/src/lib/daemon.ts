@@ -465,6 +465,13 @@ export async function runDaemon(): Promise<void> {
   // Cross-machine session sync: push this machine's transcripts to R2 and pull
   // every other machine's, ~every 90s. Skipped silently when the r2.backups
   // bundle is absent. An overlap guard prevents a slow cycle from stacking.
+  // #417 follow-up: this is the other heavy service docs/08 calls out for
+  // supervised-child isolation (network I/O + disk merges, on a 90s clock).
+  // It stays in-core for now — moving it out cleanly also needs the SIGHUP
+  // R2-config-cache-clear below (handleReload) to reach a separate process,
+  // which is a second PR's worth of surface on top of browser-IPC isolation.
+  // Landing browser IPC (by far the higher blast radius: it drives external
+  // CDP connections and SSH tunnels) first, per the issue's own split guidance.
   let syncing = false;
   const runSessionSync = async () => {
     if (syncing) return;
@@ -723,7 +730,7 @@ export async function runDaemon(): Promise<void> {
     log('INFO', 'Daemon shutting down');
     scheduler.stopAll();
     monitorEngine.stop();
-    await browserIPC.stop();
+    browserIPCSupervisor.stop();
     clearInterval(monitorInterval);
     clearInterval(syncInterval);
     clearInterval(healInterval);
@@ -748,6 +755,65 @@ export async function runDaemon(): Promise<void> {
   process.on('SIGHUP', handleReload);
   process.on('SIGTERM', () => handleShutdown());
   process.on('SIGINT', () => handleShutdown());
+
+  await new Promise(() => {});
+}
+
+/**
+ * Entrypoint for `agents __daemon-child <name>` — the process body of a
+ * supervised daemon child (#417). Spawned and restarted-on-crash by
+ * superviseDaemonChild(), never by a user directly. Deliberately NOT wrapped in
+ * a try/catch here: a throw exits this process non-zero, which is exactly the
+ * signal the supervisor's 'exit' handler watches for to log the crash and
+ * relaunch us — swallowing it would turn a real crash into a silent hang.
+ */
+export async function runDaemonChild(name: string): Promise<void> {
+  switch (name as DaemonChildName) {
+    case 'browser-ipc':
+      return runBrowserIPCChild();
+    default:
+      throw new Error(`Unknown daemon child: '${name}'`);
+  }
+}
+
+async function runBrowserIPCChild(): Promise<void> {
+  // Reap browser + tunnel processes left behind by a previous incarnation of
+  // this child (a prior crash the supervisor restarted us from, or a previous
+  // daemon's browser-ipc child) before binding the socket ourselves. This used
+  // to run once in the top daemon right before constructing BrowserService
+  // in-core (see the #417 comment in runDaemon() above); now that browser-ipc
+  // is its own process, running the reap here means it also self-heals on
+  // every restart, not just when the whole daemon restarts.
+  try {
+    const { reapOrphanedProcesses } = await import('./browser/runtime-state.js');
+    const result = reapOrphanedProcesses();
+    if (result.reaped > 0) {
+      log('INFO', `Reaped ${result.reaped} orphan process(es) from prior daemon(s)`);
+      for (const d of result.details) log('INFO', `  ${d}`);
+    }
+  } catch (err) {
+    log('ERROR', `Orphan reaper failed: ${(err as Error).message}`);
+  }
+
+  const browserService = new BrowserService();
+  const browserIPC = new BrowserIPCServer(browserService);
+  try {
+    await browserIPC.start();
+    log('INFO', 'Browser IPC server started');
+  } catch (err) {
+    log('ERROR', `Browser IPC failed to start: ${(err as Error).message}`);
+    throw err; // let the supervisor observe the exit and restart us
+  }
+
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try { await browserIPC.stop(); } catch { /* best effort */ }
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => void shutdown());
+  process.on('SIGINT', () => void shutdown());
 
   await new Promise(() => {});
 }
