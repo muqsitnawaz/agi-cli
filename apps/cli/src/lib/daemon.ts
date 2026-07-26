@@ -7,7 +7,7 @@
  * log output, reload (SIGHUP), and graceful shutdown are handled here.
  */
 
-import { spawn, execFileSync } from 'child_process';
+import { spawn, execFileSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -34,6 +34,26 @@ const PLIST_NAME = 'com.phnx-labs.agents-daemon';
 const SYSTEMD_UNIT = 'agents-daemon.service';
 const MONITOR_TICK_MS = 60_000;
 const WEDGE_THRESHOLD_TICKS = 3;
+
+// #417: heavy/crash-prone daemon services run as supervised children instead of
+// in-core, so a crash there can't take the always-on secrets broker down with
+// it. A crashed child is always restarted (never given up on) but backed off
+// exponentially, capped, so a hard crash-loop doesn't spin the CPU or spam the
+// log; DAEMON_CHILD_CRASH_WINDOW_MS bounds how far back crashes count toward
+// that backoff, so a child that's been healthy for a while resets to the fast
+// restart on its next single crash.
+const DAEMON_CHILD_RESTART_BASE_DELAY_MS = 1_000;
+const DAEMON_CHILD_RESTART_MAX_DELAY_MS = 60_000;
+const DAEMON_CHILD_CRASH_WINDOW_MS = 5 * 60_000;
+const DAEMON_CHILD_CRASHLOOP_WARN_THRESHOLD = 8;
+
+/**
+ * Daemon services heavy/risky enough to run as their own OS process rather
+ * than in-core (#417). Session-sync is the other candidate called out in
+ * docs/08-secrets-agent-process-model.md but stays in-core for now (follow-up:
+ * see the comment at its setInterval in runDaemon()).
+ */
+export type DaemonChildName = 'browser-ipc';
 
 // A long-lived `claude setup-token` value stored in this secrets bundle/key is
 // baked into the daemon's service-manager environment so headless routine runs
@@ -138,6 +158,28 @@ export function removeDaemonPid(): void {
   const pidPath = getPidPath();
   if (fs.existsSync(pidPath)) {
     fs.unlinkSync(pidPath);
+  }
+}
+
+function getChildPidPath(name: DaemonChildName): string {
+  return path.join(getDaemonDir(), `daemon-child-${name}.pid`);
+}
+
+function writeChildPid(name: DaemonChildName, pid: number): void {
+  try { fs.writeFileSync(getChildPidPath(name), String(pid), 'utf-8'); } catch { /* best effort */ }
+}
+
+function removeChildPid(name: DaemonChildName): void {
+  try { fs.unlinkSync(getChildPidPath(name)); } catch { /* already removed */ }
+}
+
+/** Read a supervised daemon child's current PID from disk, if it's running. */
+export function readDaemonChildPid(name: DaemonChildName): number | null {
+  try {
+    const pid = parseInt(fs.readFileSync(getChildPidPath(name), 'utf-8').trim(), 10);
+    return isNaN(pid) ? null : pid;
+  } catch {
+    return null;
   }
 }
 
@@ -403,31 +445,16 @@ export async function runDaemon(): Promise<void> {
     log('ERROR', `Overdue detection failed: ${(err as Error).message}`);
   }
 
-  // Before the BrowserService comes up, reap browser + tunnel processes
-  // spawned by previous daemons that are no longer alive. Without this,
-  // a daemon hard-crash (SIGKILL, OOM) would leak every browser and SSH
-  // tunnel it had open — and the next session would either hijack those
-  // (cdp:// profile silently driven via stale ssh tunnel) or fail to
-  // bind because the ports are still claimed.
-  try {
-    const { reapOrphanedProcesses } = await import('./browser/runtime-state.js');
-    const result = reapOrphanedProcesses();
-    if (result.reaped > 0) {
-      log('INFO', `Reaped ${result.reaped} orphan process(es) from prior daemon(s)`);
-      for (const d of result.details) log('INFO', `  ${d}`);
-    }
-  } catch (err) {
-    log('ERROR', `Orphan reaper failed: ${(err as Error).message}`);
-  }
-
-  const browserService = new BrowserService();
-  const browserIPC = new BrowserIPCServer(browserService);
-  try {
-    await browserIPC.start();
-    log('INFO', 'Browser IPC server started');
-  } catch (err) {
-    log('ERROR', `Browser IPC failed to start: ${(err as Error).message}`);
-  }
+  // #417: browser IPC (external CDP connections, SSH tunnels, driving
+  // third-party browsers) is the daemon's highest-blast-radius code, so it runs
+  // as its own supervised OS process instead of in-core — a crash there is
+  // logged and the child restarted, but can never take the daemon (and the
+  // secrets broker hosted in it, above) down with it. The orphan-reap that used
+  // to run here (right before constructing BrowserService in-core) now runs
+  // inside the child itself, on every one of its startups — see
+  // runBrowserIPCChild below — since it's the browser-IPC child, not the top
+  // daemon, that now owns spawning/reaping browser + tunnel processes.
+  const browserIPCSupervisor = superviseDaemonChild('browser-ipc', log, { agentsBin: getAgentsBinPath() });
 
   writeHeartbeat();
   const monitorInterval = setInterval(() => {
@@ -1061,6 +1088,23 @@ export function getAgentsInvocation(
   return getCliLaunch(subArgs, agentsBin);
 }
 
+/**
+ * Resolve how to launch a supervised daemon child (#417): `agents __daemon-child
+ * <name>`, going through the same bun-standalone-safe binary validation and
+ * relaunch resolution as the top-level daemon itself (getDaemonLaunch above) —
+ * a child is spawned by the daemon the same way the daemon is spawned by
+ * `startDaemon`, so it must be immune to the same bunfs-virtual-path and
+ * worktree footguns.
+ */
+export function getDaemonChildLaunch(
+  name: DaemonChildName,
+  agentsBin: string = getAgentsBinPath(),
+): { command: string; args: string[] } {
+  const { warnings } = validateDaemonBinary(agentsBin);
+  for (const w of warnings) process.stderr.write(`[agents] ${w}\n`);
+  return getCliLaunch(['__daemon-child', name], agentsBin);
+}
+
 export function validateDaemonBinary(binPath: string): { warnings: string[] } {
   const warnings: string[] = [];
   if (BUN_VIRTUAL_ROOT.test(binPath)) {
@@ -1122,6 +1166,111 @@ export function startDetached(opts: StartDetachedOptions = {}): { pid: number | 
     throw new Error(`Failed to start daemon: spawning '${command}' produced no PID (binary missing or not executable?)`);
   }
   return { pid: child.pid, method: 'detached' };
+}
+
+export interface DaemonChildSupervisor {
+  /** PID of the currently-running child instance, or null between a crash and its restart. */
+  currentPid(): number | null;
+  /** Forward SIGHUP to the current child instance (e.g. to make it reload config). */
+  reload(): void;
+  /** Stop supervising and terminate the current child instance. Idempotent. */
+  stop(): void;
+}
+
+interface SuperviseDaemonChildOptions {
+  /** CLI entry to launch (defaults to the running binary). Injectable for tests. */
+  agentsBin?: string;
+  /** Environment for the child (defaults to inheriting this process's env). */
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Spawn `name` as a supervised child of the daemon and keep it alive (#417): a
+ * crash (non-zero exit or a killing signal) is logged and the child is
+ * restarted with an exponential backoff (never given up on — see the
+ * DAEMON_CHILD_* constants above), so a bug in browser IPC — the daemon's
+ * highest-blast-radius code, driving external CDP connections and SSH tunnels —
+ * can never take the always-on secrets broker down with it.
+ *
+ * Deliberately not `startDetached`: that helper fully unrefs and forgets its
+ * child (fire-and-forget, for launching the daemon itself as a background
+ * process detached from a foreground CLI command). Here the daemon must keep
+ * the `ChildProcess` handle so it can observe 'exit' and restart — but the
+ * underlying bun-standalone-safe spawn is the same idiom: binary validation via
+ * getDaemonChildLaunch (which itself calls validateDaemonBinary, exactly as
+ * getDaemonLaunch does for the top-level daemon), backgroundSpawnOptions for
+ * the platform-correct detached/windowsHide combination, stdio redirected to a
+ * log file, and the ENOENT/EACCES "no PID means the spawn failed" guard.
+ */
+export function superviseDaemonChild(
+  name: DaemonChildName,
+  onLog: (level: string, message: string) => void,
+  opts: SuperviseDaemonChildOptions = {},
+): DaemonChildSupervisor {
+  const agentsBin = opts.agentsBin ?? getAgentsBinPath();
+  const stdioLogPath = path.join(getDaemonDir(), `daemon-child-${name}.stdio.log`);
+  let stopping = false;
+  let child: ChildProcess | null = null;
+  let restartTimer: NodeJS.Timeout | null = null;
+  let crashTimestamps: number[] = [];
+
+  const spawnChild = () => {
+    const { command, args } = getDaemonChildLaunch(name, agentsBin);
+    const logFd = fs.openSync(stdioLogPath, 'a');
+    const c = spawn(command, args, {
+      stdio: ['ignore', logFd, logFd],
+      ...backgroundSpawnOptions({ fdStdio: true }),
+      env: opts.env ?? process.env,
+    });
+    c.on('error', () => { /* reported synchronously via the pid guard below */ });
+    fs.closeSync(logFd);
+
+    if (!c.pid) {
+      throw new Error(`Failed to start daemon child '${name}': spawning '${command}' produced no PID (binary missing or not executable?)`);
+    }
+    child = c;
+    writeChildPid(name, c.pid);
+    onLog('INFO', `daemon child '${name}' started (PID: ${c.pid})`);
+
+    c.on('exit', (code, signal) => {
+      if (child === c) child = null;
+      removeChildPid(name);
+      if (stopping) return;
+      onLog('ERROR', `daemon child '${name}' exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'}); restarting`);
+
+      const now = Date.now();
+      crashTimestamps = crashTimestamps.filter((t) => now - t < DAEMON_CHILD_CRASH_WINDOW_MS);
+      crashTimestamps.push(now);
+      if (crashTimestamps.length > DAEMON_CHILD_CRASHLOOP_WARN_THRESHOLD) {
+        onLog('WARN', `daemon child '${name}' is crash-looping (${crashTimestamps.length}x in the last ${DAEMON_CHILD_CRASH_WINDOW_MS / 60_000}m)`);
+      }
+      const delay = Math.min(
+        DAEMON_CHILD_RESTART_BASE_DELAY_MS * 2 ** Math.max(0, crashTimestamps.length - 1),
+        DAEMON_CHILD_RESTART_MAX_DELAY_MS,
+      );
+      restartTimer = setTimeout(() => { restartTimer = null; spawnChild(); }, delay);
+    });
+  };
+
+  try {
+    spawnChild();
+  } catch (err) {
+    onLog('ERROR', `daemon child '${name}' failed to spawn: ${(err as Error).message}`);
+    restartTimer = setTimeout(spawnChild, DAEMON_CHILD_RESTART_BASE_DELAY_MS);
+  }
+
+  return {
+    currentPid: () => child?.pid ?? null,
+    reload: () => { try { child?.kill('SIGHUP'); } catch { /* already gone */ } },
+    stop: () => {
+      stopping = true;
+      if (restartTimer) clearTimeout(restartTimer);
+      restartTimer = null;
+      removeChildPid(name);
+      if (child?.pid) killTree(child.pid);
+      child = null;
+    },
+  };
 }
 
 function waitForPid(timeoutMs: number): number | null {

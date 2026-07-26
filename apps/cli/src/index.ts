@@ -179,6 +179,18 @@ if (process.argv[2] === '__daemon-run') {
   process.exit(process.exitCode ?? 0);
 }
 
+// A supervised daemon child (#417): heavy/crash-prone daemon services (browser
+// IPC today; session-sync stays in-core, see daemon.ts) run as their own OS
+// process, spawned by the daemon and re-launched on crash, so a bug there can
+// never take the always-on secrets broker down with it. Not caught here — a
+// throw exits this process non-zero, which is exactly the signal the daemon's
+// supervisor watches for to log the crash and restart.
+if (process.argv[2] === '__daemon-child') {
+  const { runDaemonChild } = await import('./lib/daemon.js');
+  await runDaemonChild(process.argv[3] ?? '');
+  process.exit(process.exitCode ?? 0);
+}
+
 const program = new Command();
 
 program
