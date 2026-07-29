@@ -70,8 +70,17 @@ function run(home: string, args: string[]): ReturnType<typeof spawnSync> {
     env: {
       ...process.env,
       HOME: home,
+      // os.homedir() reads USERPROFILE on Windows, so HOME alone leaves the
+      // spawned CLI resolving the real profile ('agents-cli is not set up').
       USERPROFILE: home,
-      PATH: '/usr/local/bin:/usr/bin:/bin',
+      // The pinned PATH keeps the run hermetic on POSIX — it must NOT be
+      // widened to include the running node's dir, because that also exposes a
+      // second globally-installed `agents` (e.g. /opt/homebrew/bin) and the CLI
+      // then prints "Multiple agents-cli installs detected" on stderr. Fixtures
+      // that need node spell it absolutely instead. The pin can't apply on
+      // Windows, where those directories don't exist and the child would lose
+      // node/git entirely (that failure showed as empty stderr).
+      PATH: process.platform === 'win32' ? (process.env.PATH ?? '') : '/usr/local/bin:/usr/bin:/bin',
       AGENTS_SKIP_MIGRATION: '1',
       FORCE_COLOR: '0',
       NO_COLOR: '1',
@@ -109,10 +118,30 @@ describe('monitors inspection JSON and stderr', () => {
 
   it('test --json evaluates once, prints the dry-run decision as JSON, and writes no state', () => {
     const home = makeHome();
+    // The monitor command runs through the host shell, so it has to be
+    // shell-portable. printf doesn't exist on cmd.exe, and node -e "..." loses
+    // its quoting there (node received a literal leading quote and threw
+    // SyntaxError). A script file sidesteps shell quoting entirely: the command
+    // doesn't open with a quote, and run() puts the running node's directory on
+    // PATH so the bare name resolves on both platforms.
+    const emitter = path.join(home, 'emit-fixture.cjs');
+    fs.writeFileSync(emitter, "process.stdout.write('build fail\\nnext\\n');\n");
     writeMonitor(home, {
       name: 'ci',
       enabled: true,
-      source: { type: 'command', command: "printf 'build fail\\nnext\\n'" },
+      // Unquoted: on Windows the quotes survive into the argument and node
+      // looks for a path with literal quote characters in it. mkdtemp paths
+      // carry no spaces on either platform, so they aren't needed.
+      //
+      // POSIX spells node absolutely because the pinned PATH above deliberately
+      // excludes it. Windows can't: process.execPath there is
+      // "C:\Program Files\nodejs\node.exe" and cmd.exe mangles a command line
+      // opening with a quoted path containing spaces — but PATH is inherited on
+      // Windows, so the bare name resolves.
+      source: {
+        type: 'command',
+        command: process.platform === 'win32' ? `node ${emitter}` : `${process.execPath} ${emitter}`,
+      },
       condition: { mode: 'match', match: 'fail' },
       action: { type: 'notify', notifyChannel: 'telegram' },
     });
