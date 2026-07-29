@@ -892,7 +892,21 @@ export async function getCliState(agentId: AgentId): Promise<CliState> {
     }
   }
 
-  // Non-version-managed: single PATH lookup + cached version read
+  return getUnmanagedCliState(agentId);
+}
+
+/**
+ * Resolve the agent's OWN install — the one agents-cli does not manage — by plain
+ * PATH lookup, ignoring the version dirs entirely.
+ *
+ * Callers that specifically mean "the user's own globally-installed CLI" must use
+ * this rather than `getCliState`, whose managed fast path reports an installed
+ * version (any version dir, in readdir order) and would therefore hand back an
+ * isolated copy — a copy that is deliberately unreachable from PATH — labelled as
+ * the global install.
+ */
+export async function getUnmanagedCliState(agentId: AgentId): Promise<CliState> {
+  const agent = AGENTS[agentId];
   // Special case for grok: it manages its own binaries in ~/.grok/downloads/
   if (agentId === 'grok') {
     const grokBin = resolveGrokBinary();

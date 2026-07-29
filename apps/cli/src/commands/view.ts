@@ -20,13 +20,14 @@ import {
   ALL_AGENT_IDS,
   accountDisplayLabel,
   getAllCliStates,
+  getUnmanagedCliState,
   getAccountInfo,
   resolveAgentName,
   formatAgentError,
   agentLabel,
   colorAgent,
 } from '../lib/agents.js';
-import type { AccountInfo } from '../lib/agents.js';
+import type { AccountInfo, CliState } from '../lib/agents.js';
 import { loginHint } from '../lib/signin-badge.js';
 import type { AgentId } from '../lib/types.js';
 import { machineId } from '../lib/machine-id.js';
@@ -61,6 +62,7 @@ import {
   reconcileStaleLatestForAgent,
   isGlobalBinaryAgent,
   getLiveVersion,
+  isVersionIsolated,
 } from '../lib/versions.js';
 import {
   getShimsDir,
@@ -327,7 +329,15 @@ async function showInstalledVersions(
     ? `Checking ${agentLabel(filterAgentId)} agents...`
     : 'Checking installed agents...';
   const spinner = ora({ text: spinnerText, isSilent: !process.stdout.isTTY }).start();
-  const cliStates = await getAllCliStates();
+  // Every `cliStates` read in this function feeds the "Not Managed by Agents CLI"
+  // block, so resolve it the way that block means it: the user's own CLI on PATH.
+  // `getCliState` would answer with a version-dir install — including an isolated
+  // copy that is deliberately absent from PATH — and print it as "(global)".
+  const cliStates = Object.fromEntries(
+    await Promise.all(
+      ALL_AGENT_IDS.map(async (agentId) => [agentId, await getUnmanagedCliState(agentId)] as const)
+    )
+  ) as Partial<Record<AgentId, CliState>>;
   spinner.stop();
 
   const agentsToShow = filterAgentId ? [filterAgentId] : ALL_AGENT_IDS;
@@ -361,24 +371,33 @@ async function showInstalledVersions(
   // Read the auth-health cache once (not per version row — see the batching note above).
   const authCache = readAuthHealthCache();
 
+  // A globally-installed CLI is superseded only by a NORMAL managed version — that
+  // is when agents-cli owns the launcher and a "global" row would just be our own
+  // shim reported back. `--isolated` promises the opposite: no default, no bare
+  // shim, no adopted launcher, the user's own `~/.<agent>` untouched. So an
+  // isolated-only install must not make that still-live global CLI disappear from
+  // `agents view` — the two are genuinely separate installs and both get listed.
+  const hasNonIsolatedVersion = (agentId: AgentId): boolean =>
+    listInstalledVersions(agentId).some((v) => !isVersionIsolated(agentId, v));
+
   // Pre-fetch account info for all versions in parallel
   const infoFetches: Promise<{ agentId: AgentId; version: string; home: string; info: AccountInfo }>[] = [];
   const globalInfoFetches: Promise<{ agentId: AgentId; cliVersion: string | null; info: AccountInfo }>[] = [];
   for (const agentId of agentsToShow) {
-    const versions = listInstalledVersions(agentId);
-    if (versions.length > 0) {
-      for (const ver of versions) {
-        const home = getVersionHomePath(agentId, ver);
-        infoFetches.push(
-          getAccountInfo(agentId, home).then((info) => ({
-            agentId,
-            version: ver,
-            home,
-            info,
-          }))
-        );
-      }
-    } else {
+    for (const ver of listInstalledVersions(agentId)) {
+      const home = getVersionHomePath(agentId, ver);
+      infoFetches.push(
+        getAccountInfo(agentId, home).then((info) => ({
+          agentId,
+          version: ver,
+          home,
+          info,
+        }))
+      );
+    }
+    // Mirrors the classification below: fetch the global account whenever the
+    // global install will still be rendered (no versions at all, or isolated-only).
+    if (!hasNonIsolatedVersion(agentId)) {
       globalInfoFetches.push(
         getAccountInfo(agentId).then((info) => ({
           agentId,
@@ -451,9 +470,11 @@ async function showInstalledVersions(
 
     if (versions.length > 0) {
       versionManaged.push(agentId);
-    } else if (cliState?.installed) {
-      globallyInstalled.push(agentId);
-    } else if (hasProfiles) {
+    }
+    if (cliState?.installed) {
+      // Isolated-only installs sit alongside the global CLI rather than replacing it.
+      if (!hasNonIsolatedVersion(agentId)) globallyInstalled.push(agentId);
+    } else if (versions.length === 0 && hasProfiles) {
       profileOnly.push(agentId);
     }
   }
@@ -474,6 +495,16 @@ async function showInstalledVersions(
   const displayVersion = (agentId: AgentId, dirVersion: string): string =>
     liveVersionByAgent.get(agentId) ?? dirVersion;
 
+  // Uncolored row label, shared by the width pass and the render so padding lines
+  // up. An isolated copy is never the global default (installing one deliberately
+  // records no default), so the two tags can't collide.
+  const versionRowLabel = (agentId: AgentId, version: string, globalDefault: string | null): string => {
+    const shown = displayVersion(agentId, version);
+    if (version === globalDefault) return `${shown} (default)`;
+    if (isVersionIsolated(agentId, version)) return `${shown} (isolated)`;
+    return shown;
+  };
+
   // Show version-managed agents
   if (versionManaged.length > 0) {
     // Calculate column widths across all agents for alignment
@@ -486,9 +517,7 @@ async function showInstalledVersions(
       const versions = listInstalledVersions(agentId);
       const globalDefault = getGlobalDefault(agentId);
       for (const v of versions) {
-        const shown = displayVersion(agentId, v);
-        const label = v === globalDefault ? `${shown} (default)` : shown;
-        maxVerLabel = Math.max(maxVerLabel, label.length);
+        maxVerLabel = Math.max(maxVerLabel, versionRowLabel(agentId, v, globalDefault).length);
         const rawInfo = infoMap.get(`${agentId}:${v}`);
         const info = rawInfo ? mergeCanonical(rawInfo) : undefined;
         const accountLabel = accountColumnLabel(info);
@@ -541,10 +570,15 @@ async function showInstalledVersions(
 
       for (const version of sortedVersions) {
         const isDefault = version === globalDefault;
+        const isolated = !isDefault && isVersionIsolated(agentId, version);
         const shown = displayVersion(agentId, version);
-        const base = isDefault ? `${shown} (default)` : shown;
-        const padded = base.padEnd(maxVerLabel);
-        const label = isDefault ? `${shown}${chalk.green(' (default)')}${' '.repeat(maxVerLabel - base.length)}` : padded;
+        const base = versionRowLabel(agentId, version, globalDefault);
+        const tagPad = ' '.repeat(maxVerLabel - base.length);
+        const label = isDefault
+          ? `${shown}${chalk.green(' (default)')}${tagPad}`
+          : isolated
+            ? `${shown}${chalk.gray(' (isolated)')}${tagPad}`
+            : base.padEnd(maxVerLabel);
         const rawInfo = infoMap.get(`${agentId}:${version}`);
         const vInfo = rawInfo ? mergeCanonical(rawInfo) : undefined;
         const usageKey = getUsageLookupKey(vInfo);
@@ -682,7 +716,9 @@ async function showInstalledVersions(
       // Profile rows under a globally-installed harness. Use a simpler
       // alignment here since this section doesn't share column state with
       // the version-managed block.
-      const profilesHere = profilesByAgent.get(agentId) ?? [];
+      // An isolated-only agent now appears in BOTH blocks; its profiles already
+      // rendered under the version-managed one, so don't print them twice.
+      const profilesHere = versionManaged.includes(agentId) ? [] : (profilesByAgent.get(agentId) ?? []);
       if (profilesHere.length > 0) {
         const nameWidth = Math.max(globalMaxVerLabel, ...profilesHere.map((p) => p.name.length));
         const authWidth = Math.max(...profilesHere.map((p) => p.auth.length));
