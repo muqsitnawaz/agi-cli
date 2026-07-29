@@ -337,6 +337,58 @@ function foldUserHooksYamlIntoAgentsYaml(): void {
 }
 
 /**
+ * Fold the legacy GLOBAL browser captures root
+ * (`~/.agents/.cache/browser/sessions/<task>/`) into the new PER-PROFILE layout
+ * (`~/.agents/.cache/browser/<profile>/sessions/<task>/`), so each profile is one
+ * self-contained tree and the new `browser sessions` listing finds old captures.
+ *
+ * Attribution: a legacy `sessions/<task>` dir is owned by whichever profile's
+ * `tasks.json` still lists that task name. Tasks no profile claims (the profile
+ * was deleted, or tasks.json was cleared) move under a `_legacy` pseudo-profile so
+ * nothing is lost. Idempotent — once the global `sessions/` root is gone it no-ops.
+ */
+export function foldBrowserSessionsIntoProfiles(browserDir: string = path.join(CACHE_DIR, 'browser')): void {
+  const legacySessionsDir = path.join(browserDir, 'sessions');
+
+  let taskDirs: fs.Dirent[];
+  try {
+    taskDirs = fs.readdirSync(legacySessionsDir, { withFileTypes: true });
+  } catch {
+    return; // no legacy global sessions/ root — already folded or never existed
+  }
+
+  // Map task name -> owning profile from every profile's tasks.json (first wins).
+  const taskOwner = new Map<string, string>();
+  let profileDirs: fs.Dirent[] = [];
+  try {
+    profileDirs = fs.readdirSync(browserDir, { withFileTypes: true });
+  } catch { /* browserDir vanished mid-run */ }
+  for (const p of profileDirs) {
+    if (!p.isDirectory() || p.name === 'sessions' || p.name === '_legacy') continue;
+    try {
+      const state = JSON.parse(fs.readFileSync(path.join(browserDir, p.name, 'tasks.json'), 'utf-8'));
+      for (const taskName of Object.keys(state)) {
+        if (!taskOwner.has(taskName)) taskOwner.set(taskName, p.name);
+      }
+    } catch { /* missing or invalid tasks.json */ }
+  }
+
+  for (const taskEntry of taskDirs) {
+    if (!taskEntry.isDirectory()) continue;
+    const owner = taskOwner.get(taskEntry.name) ?? '_legacy';
+    // A capture dir can hold a nested recordings/ subdir and may collide with a
+    // dest that already has newer captures — moveDirOnce merges (skip-existing),
+    // moveFileOnce would EISDIR on unlink and silently strand the captures.
+    moveDirOnce(
+      path.join(legacySessionsDir, taskEntry.name),
+      path.join(browserDir, owner, 'sessions', taskEntry.name)
+    );
+  }
+
+  rmEmptyDirTree(legacySessionsDir);
+}
+
+/**
  * Fold ~/.agents/browser/profiles/*.yaml into ~/.agents/agents.yaml under a
  * `browser:` key, then delete the profiles directory. Single user file to sync.
  *
@@ -1438,7 +1490,7 @@ function containsOnlyDsStore(dir: string): boolean {
 function warnSystemOrphans(): void {
   const SHIPPED_ALLOWLIST = new Set<string>([
     // resource directories shipped by the npm package
-    'commands', 'hooks', 'skills', 'rules', 'mcp', 'cli', 'permissions', 'subagents', 'profiles', 'agents',
+    'commands', 'hooks', 'skills', 'rules', 'mcp', 'cli', 'permissions', 'subagents', 'profiles', 'agents', 'routines',
     // top-level metadata files
     'agents.yaml', 'hooks.yaml', 'README.md', 'CHANGELOG.md',
     // git + repo metadata
@@ -1734,6 +1786,54 @@ export function migrateExtrasExtrasToAgentsExtras(historyDir: string = HISTORY_D
   }
 }
 
+/**
+ * Rewrite every routine YAML that carries the legacy singular `device: <value>`
+ * field to the new plural `devices: [<value>]` format. Preserves all other
+ * fields. Idempotent: a routine that already has `devices:` (or neither field)
+ * is left untouched.
+ *
+ * Params default to the real routines dir; injectable for tests.
+ */
+export function migrateRoutineDeviceToDevices(routinesDir?: string): void {
+  const dir = routinesDir ?? path.join(USER_DIR, 'routines');
+  if (!fs.existsSync(dir)) return;
+
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'));
+
+  let migrated = 0;
+  for (const file of files) {
+    const filePath = path.join(dir, file);
+    const raw = fs.readFileSync(filePath, 'utf-8');
+
+    let doc: Record<string, unknown>;
+    try {
+      doc = yaml.parse(raw) as Record<string, unknown>;
+      if (!doc || typeof doc !== 'object') continue;
+    } catch { continue; }
+
+    if (!('device' in doc)) continue;
+    if ('devices' in doc) {
+      delete doc.device;
+      atomicWriteFileSync(filePath, yaml.stringify(doc));
+      continue;
+    }
+
+    const val = doc.device;
+    if (typeof val !== 'string' || !val.trim()) {
+      throw new Error(`${file}: legacy 'device' field is not a valid device name — repair the file and retry`);
+    }
+    delete doc.device;
+    doc.devices = [val.trim()];
+
+    atomicWriteFileSync(filePath, yaml.stringify(doc));
+    migrated++;
+  }
+
+  if (migrated > 0) {
+    console.error(`Migrated ${migrated} routine${migrated === 1 ? '' : 's'}: device → devices`);
+  }
+}
+
 /** Run all idempotent migrations. Safe to call multiple times. */
 export async function runMigration(): Promise<void> {
   // MUST run first: every other migrator reads SYSTEM_DIR (the new path).
@@ -1769,6 +1869,10 @@ export async function runMigration(): Promise<void> {
   // migrateRuntimeToCache so any legacy plugins/ still at the user-root from
   // very-old layouts have already been handled.
   migratePluginsBackToUserRoot();
+  // Browser captures: fold the legacy global browser/sessions/<task> root into the
+  // per-profile browser/<profile>/sessions/<task> layout. After the cache moves so
+  // the browser dir is at its canonical .cache location.
+  foldBrowserSessionsIntoProfiles();
 
   // System-repo sweep: move every remaining operational dir into its canonical
   // user-bucket location, then drop known-dead artifacts and warn about
@@ -1788,6 +1892,9 @@ export async function runMigration(): Promise<void> {
   // installed version-home. Runs after migrateRuntimeToHistory so the version
   // homes are at their canonical HISTORY_DIR location.
   migrateExtrasExtrasToAgentsExtras();
+
+  // Rewrite routine YAML files: singular `device:` -> plural `devices: []`.
+  migrateRoutineDeviceToDevices();
 
   // Symlink repair runs LAST so it can find the post-move version homes.
   repairAgentConfigSymlinks();

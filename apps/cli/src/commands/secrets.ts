@@ -11,9 +11,11 @@ import chalk from 'chalk';
 import { visibleWidth, padVisible, readStdinSync } from '../lib/format.js';
 import { terminalWidth, truncateToWidth, stringWidth } from '../lib/session/width.js';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { SSH_TARGET_RE, assertValidSshTarget, sshExec, type SshExecResult } from '../lib/ssh-exec.js';
 import { quoteWin32ExecArg, composeWin32CommandLine } from '../lib/platform/index.js';
-import { ensureDaemonStarted } from '../lib/daemon.js';
+import { ensureDaemonStarted, isDaemonRunning } from '../lib/daemon.js';
 import {
   parseHostsOption,
   remoteResolveEnv,
@@ -36,6 +38,7 @@ import {
   migrateLegacyBundles,
   parseDotenv,
   readAndResolveBundleEnv,
+  isHeadlessSecretsContext,
   readBundle,
   renameBundle,
   rotateBundleSecret,
@@ -45,11 +48,13 @@ import {
   validateExpiresFutureDated,
   validateSecretType,
   writeBundle,
+  writeBundleWithItems,
   type SecretsBackend,
   type SecretsBundle,
   type SecretsPolicy,
   type VarMeta,
 } from '../lib/secrets/bundles.js';
+import { encryptForFallback, decryptForFallback, type EncFile } from '../lib/secrets/filestore.js';
 import {
   getKeychainToken,
   getKeychainTokens,
@@ -68,21 +73,30 @@ import {
   type OpVault,
 } from '../lib/onepassword.js';
 import {
-  DEFAULT_TTL_MS,
+  secretsHoldMs,
+  secretsAgentDurable,
   agentLoad,
   agentLock,
+  agentPing,
   agentStatus,
   ensureAgentRunning,
-  installSecretsAgentService,
   runAgentLoadFromStdin,
   runSecretsAgent,
-  secretsAgentServiceInstalled,
   uninstallSecretsAgentService,
 } from '../lib/secrets/agent.js';
+import { saveSession, deleteSession, deleteAllSessions } from '../lib/secrets/session-store.js';
+import { getCliVersionFresh } from '../lib/version.js';
+import { readMeta } from '../lib/state.js';
 import { parseDuration } from '../lib/hooks/cache.js';
 import { emit } from '../lib/events.js';
 import { registerCommandGroups, setHelpSections } from '../lib/help.js';
 import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
+import {
+  discoverSyncedBundles,
+  importSyncedBundle,
+  type SyncedBundleCandidate,
+} from '../lib/secrets/icloud-import.js';
+import { getVaultSession, vaultExists } from '../lib/secrets/vault.js';
 import { registerSecretsSyncCommands } from './secrets-sync.js';
 import { registerSecretsMigrateAclCommand } from './secrets-migrate.js';
 import { registerSecretsImportKeyringCommand } from './secrets-import.js';
@@ -198,6 +212,120 @@ export function readImportDotenv(from: string): string {
   return from === '-' ? readStdinSync() : fs.readFileSync(from, 'utf-8');
 }
 
+/** Where `secrets import` pulls keys from, parsed off the unified `--from`. */
+export type ImportSource =
+  | { kind: 'dotenv'; path: string }
+  | { kind: '1password'; vault?: string }
+  | { kind: 'icloud' };
+
+/**
+ * Parse the unified `--from <source>` value: a .env path (`-` reads stdin),
+ * `1password:<vault>` (bare `1password` prompts for the vault), or `icloud`
+ * (legacy iCloud Keychain bundles). The deprecated `--from-1password --vault`
+ * pair maps onto the 1password source. A file literally named `icloud` or
+ * `1password` can still be imported via an explicit path (`./icloud`).
+ */
+export function parseImportSource(opts: {
+  from?: string;
+  from1password?: boolean;
+  vault?: string;
+}): ImportSource {
+  if (opts.from && opts.from1password) {
+    throw new Error('--from and --from-1password are mutually exclusive.');
+  }
+  if (opts.from1password) return { kind: '1password', vault: opts.vault };
+  if (!opts.from) {
+    throw new Error(
+      "Pass --from <source>: a .env path (- reads stdin), '1password:<vault>', or 'icloud'.",
+    );
+  }
+  if (opts.from === 'icloud') return { kind: 'icloud' };
+  if (opts.from === '1password') return { kind: '1password', vault: opts.vault };
+  if (opts.from.startsWith('1password:')) {
+    const vault = opts.from.slice('1password:'.length);
+    return { kind: '1password', vault: vault || opts.vault };
+  }
+  return { kind: 'dotenv', path: opts.from };
+}
+
+/**
+ * `secrets import --from icloud` — recover bundles stranded in the iCloud
+ * Keychain by the device-local cutover. With a bundle name, imports exactly
+ * that bundle; without one, interactively multi-selects from everything
+ * discovered (all pre-checked — the common case is "bring them all back").
+ */
+async function importFromICloud(
+  bundleName: string | undefined,
+  opts: { force?: boolean; allPlaintext?: boolean; backend?: 'file' | 'vault'; purge?: boolean },
+): Promise<void> {
+  if (process.platform !== 'darwin') {
+    throw new Error('--from icloud reads the macOS iCloud Keychain and is only available on macOS.');
+  }
+  const candidates = discoverSyncedBundles();
+  if (candidates.length === 0) {
+    console.log('No legacy iCloud Keychain bundles found.');
+    return;
+  }
+  const describe = (c: SyncedBundleCandidate) =>
+    `${c.name} (${c.keys.length} key${c.keys.length === 1 ? '' : 's'}${c.hasMeta ? '' : ', no metadata'})`;
+  let chosen: SyncedBundleCandidate[];
+  if (bundleName) {
+    const hit = candidates.find((c) => c.name === bundleName);
+    if (!hit) {
+      throw new Error(
+        `No iCloud Keychain bundle named '${bundleName}'. Found: ${candidates.map((c) => c.name).join(', ')}`,
+      );
+    }
+    chosen = [hit];
+  } else if (!isInteractiveTerminal()) {
+    throw new Error(
+      `Found ${candidates.length} iCloud Keychain bundle(s): ${candidates.map((c) => c.name).join(', ')}. ` +
+        'Pass a bundle name to import non-interactively.',
+    );
+  } else {
+    const { checkbox } = await import('@inquirer/prompts');
+    chosen = await checkbox({
+      message: 'Which iCloud Keychain bundles to import?',
+      choices: candidates.map((c) => ({ name: describe(c), value: c, checked: true })),
+    });
+    if (chosen.length === 0) {
+      console.log('Nothing selected.');
+      return;
+    }
+  }
+  for (const candidate of chosen) {
+    const result = importSyncedBundle(candidate, opts);
+    const parts = [`imported ${result.added} key(s)`];
+    if (result.skipped) parts.push(`skipped ${result.skipped} (already set, pass --force)`);
+    if (result.missing.length) parts.push(`unreadable (left in iCloud): ${result.missing.join(', ')}`);
+    if (result.unimportable.length) parts.push(`reserved, not importable (left in iCloud): ${result.unimportable.join(', ')}`);
+    if (opts.purge) parts.push(`purged ${result.purged} iCloud item(s)`);
+    const line = `${candidate.name}: ${parts.join(', ')}`;
+    const warn = result.missing.length > 0 || result.unimportable.length > 0;
+    console.log(warn ? chalk.yellow(line) : chalk.green(line));
+  }
+}
+
+/**
+ * Printed under a "bundle not found" failure: if the name matches a bundle
+ * stranded in the iCloud Keychain (pre-device-local-cutover era), point at the
+ * recovery command instead of leaving a dead end.
+ */
+function maybePrintSyncedHint(name: string): void {
+  if (process.platform !== 'darwin') return;
+  try {
+    if (discoverSyncedBundles().some((c) => c.name === name)) {
+      console.error(
+        chalk.yellow(
+          `A legacy iCloud Keychain copy of '${name}' exists. Recover it with: agents secrets import ${name} --from icloud`,
+        ),
+      );
+    }
+  } catch {
+    // Hint only — never mask the original error.
+  }
+}
+
 /**
  * Build the remote `agents secrets unlock` argv for `unlock --host`. `--all`
  * forwards verbatim; otherwise the explicit bundle names. A `--ttl` is passed
@@ -205,11 +333,14 @@ export function readImportDotenv(from: string): string {
  * defaults). Shared with the command action so the wiring is unit-testable
  * without a live SSH session.
  */
-export function buildRemoteUnlockArgs(names: string[], opts: { all?: boolean; ttl?: string }): string[] {
+export function buildRemoteUnlockArgs(names: string[], opts: { all?: boolean; ttl?: string; durable?: boolean }): string[] {
   return [
     'unlock',
     ...(opts.all ? ['--all'] : names),
     ...(opts.ttl ? ['--ttl', opts.ttl] : []),
+    // Forward --durable so a remote unlock honors it too; without this the remote
+    // silently falls back to its own secrets.agent.durable default (off).
+    ...(opts.durable ? ['--durable'] : []),
   ];
 }
 
@@ -273,6 +404,58 @@ export function bundleEnvToDotenv(env: Record<string, string>): string {
 }
 
 /**
+ * Encrypt a resolved env map to an offline bundle file using AES-256-GCM
+ * (the same EncFile envelope as the per-item file store). Inner plaintext is
+ * JSON so multi-line values round-trip losslessly. Written with mode 0600;
+ * the passphrase must be supplied explicitly — never auto-provisioned.
+ */
+export function exportBundleToFile(
+  env: Record<string, string>,
+  filePath: string,
+  passphrase: string,
+): void {
+  const enc = encryptForFallback(JSON.stringify(env), passphrase);
+  fs.writeFileSync(filePath, JSON.stringify(enc), { mode: 0o600 });
+}
+
+/**
+ * Decrypt and parse an offline bundle file produced by exportBundleToFile.
+ * Throws on a missing file, an invalid JSON envelope, or a wrong passphrase.
+ */
+export function importBundleFromFile(
+  filePath: string,
+  passphrase: string,
+): Record<string, string> {
+  const raw = fs.readFileSync(filePath, 'utf-8');
+  let enc: EncFile;
+  try {
+    enc = JSON.parse(raw) as EncFile;
+  } catch {
+    throw new Error(`Encrypted bundle file ${filePath} is corrupt (not valid JSON).`);
+  }
+  let plaintext: string;
+  try {
+    plaintext = decryptForFallback(enc, passphrase);
+  } catch {
+    throw new Error(`Failed to decrypt bundle file ${filePath}. Wrong passphrase or tampered file.`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(plaintext);
+  } catch {
+    throw new Error(`Decrypted bundle file ${filePath} has invalid content (expected JSON).`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`Bundle file ${filePath} has unexpected structure.`);
+  }
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    result[k] = typeof v === 'string' ? v : String(v);
+  }
+  return result;
+}
+
+/**
  * Browse `agents secrets <args>` on one or more remote hosts over SSH and print
  * each host's stdout verbatim (lossless — no parsing). With >1 host the output
  * is grouped under a `── <host> ──` header. `tty` forces an interactive ssh
@@ -298,11 +481,11 @@ async function browseRemote(targets: string[], args: string[], tty: boolean): Pr
   if (tty) {
     for (const t of targets) {
       const target = await resolveSshTarget(t);
-      render(t, remoteSecretsRaw(target, args, { tty: true }));
+      render(t, remoteSecretsRaw(target, args, { tty: true, osLookupName: t }));
     }
   } else {
-    const resolved = await Promise.all(targets.map((t) => resolveSshTarget(t)));
-    const results = resolved.map((target) => remoteSecretsRaw(target, args));
+    const resolved = await Promise.all(targets.map(async (t) => ({ name: t, target: await resolveSshTarget(t) })));
+    const results = resolved.map(({ name, target }) => remoteSecretsRaw(target, args, { osLookupName: name }));
     targets.forEach((t, i) => render(t, results[i]));
   }
   if (failures > 0) process.exit(1);
@@ -348,15 +531,31 @@ function compactRemaining(expiresAt: number): string {
   return `${Math.round(hours / 24)}d`;
 }
 
-/** The POLICY column for `secrets list`: the prompt policy, plus a "Nh left"
- * hint when a `daily` bundle is currently held by the secrets-agent. `held`
+/** The POLICY column for `secrets list`: the prompt policy, plus a concise
+ * state hint. `daily` shows `held Nh` when the secrets-agent is currently
+ * caching the bundle; `always` and `never` show whether they prompt. `held`
  * maps bundle name → expiry epoch-ms (from agentStatus()). */
 export function renderPolicyCol(b: SecretsBundle, held?: Map<string, number>): string {
   // `never` is loud on purpose — it's the only tier with no user-presence gate.
-  if (bundlePolicy(b) === 'never') return chalk.red.bold('never · NO ACL');
-  if (bundlePolicy(b) === 'always') return chalk.yellow('always ask');
+  if (bundlePolicy(b) === 'never') return chalk.red.bold('never · no prompt');
+  if (bundlePolicy(b) === 'always') return chalk.yellow('always · prompt');
   const exp = held?.get(b.name);
-  return exp ? chalk.green(`daily · ${compactRemaining(exp)} left`) : chalk.gray('daily');
+  return exp ? chalk.green(`daily · held ${compactRemaining(exp)}`) : chalk.gray('daily');
+}
+
+/** Human-readable hold window for `secrets status`. Sub-hour values render in
+ * minutes (so a near-floor `holdMs` never shows a confusing "0 hours"), whole
+ * hours up to 2 days, whole days beyond. Pure — unit-tested. */
+export function formatHoldWindow(ms: number): string {
+  if (ms < 3_600_000) { // under an hour → minutes (never a confusing "0 hours")
+    const mins = Math.max(1, Math.round(ms / 60_000));
+    if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'}`;
+    // 59.99m rounds to 60 — call it 1 hour rather than "60 minutes".
+  }
+  const hrs = Math.round(ms / 3_600_000);
+  if (hrs < 48) return `${hrs} hour${hrs === 1 ? '' : 's'}`;
+  const days = Math.round(hrs / 24);
+  return `${days} day${days === 1 ? '' : 's'}`;
 }
 
 /** Below this width the fixed date columns no longer fit; `list` uses cards. */
@@ -387,8 +586,12 @@ function renderBundleRow(b: SecretsBundle, held?: Map<string, number>, cols = te
     `${padVisible(created, 9)} ` +
     `${padVisible(updated, 9)} ` +
     `${padVisible(used, 7)}`;
-  // Mark file-backed bundles so `list` distinguishes them from keychain ones.
-  const tag = b.backend === 'file' ? chalk.magenta('[file] ') : '';
+  // Mark non-keychain bundles so `list` distinguishes storage at a glance.
+  const tag = b.backend === 'file'
+    ? chalk.magenta('[file] ')
+    : b.backend === 'vault'
+      ? chalk.blue('[synced] ')
+      : '';
   // Cap the free-form description to whatever space is left on the line so a long
   // description can't push the row to 200+ chars and wrap into a smear.
   const budget = cols - stringWidth(head) - 1 - stringWidth(tag);
@@ -403,7 +606,11 @@ function renderBundleRow(b: SecretsBundle, held?: Map<string, number>, cols = te
 function renderBundleCard(b: SecretsBundle, held: Map<string, number> | undefined, cols: number): string {
   const keys = describeBundle(b).length;
   const used = b.last_used ? relativeAge(b.last_used) : (b.created_at ? 'never' : '?');
-  const tag = b.backend === 'file' ? chalk.magenta(' [file]') : '';
+  const tag = b.backend === 'file'
+    ? chalk.magenta(' [file]')
+    : b.backend === 'vault'
+      ? chalk.blue(' [synced]')
+      : '';
   const meta = chalk.gray(`${keys} key${keys === 1 ? '' : 's'} · `) + renderPolicyCol(b, held) + chalk.gray(` · used ${used}`);
   const line1 = `${chalk.cyan(b.name)}  ${meta}${tag}`;
   if (!b.description) return line1;
@@ -527,6 +734,59 @@ function countExpiringSoon(meta: Record<string, VarMeta> | undefined): number {
   return n;
 }
 
+/**
+ * Resolve an existing import target bundle (inheriting its backend) or create a
+ * new one with the requested backend. Refuses to silently downgrade a
+ * keychain-backed bundle to `file` — shared by every `import` source so the
+ * guard can't drift between them.
+ */
+function resolveImportBundle(name: string, backendOpt: string | undefined, synced = false): SecretsBundle {
+  const requestedBackend = synced ? 'vault' : parseBackendOpt(backendOpt);
+  if (bundleExists(name)) {
+    const bundle = readBundle(name);
+    if (requestedBackend !== 'keychain' && bundle.backend !== requestedBackend) {
+      throw new Error(
+        `Bundle '${name}' already exists with a different backend; ` +
+        `delete it first to recreate it as ${requestedBackend === 'vault' ? 'synced' : `${requestedBackend}-backed`}.`
+      );
+    }
+    return bundle;
+  }
+  return { name, backend: requestedBackend === 'keychain' ? undefined : requestedBackend, vars: {} };
+}
+
+/**
+ * Apply KEY=VALUE entries into a bundle (keychain item or plaintext literal),
+ * honoring `--force`, then persist. Returns the added/skipped tally. Shared by
+ * the .env, --from-file, and --from-ssh import paths.
+ */
+function applyEnvToBundle(
+  bundle: SecretsBundle,
+  env: Record<string, string>,
+  opts: { force?: boolean; allPlaintext?: boolean }
+): { added: number; skipped: number } {
+  const storedItems = new Map<string, string>();
+  let added = 0;
+  let skipped = 0;
+  for (const [key, value] of Object.entries(env)) {
+    if (!opts.force && key in bundle.vars) { skipped++; continue; }
+    if (opts.allPlaintext) {
+      bundle.vars[key] = { value };
+    } else {
+      const item = secretsKeychainItem(bundle.name, key);
+      storedItems.set(item, value);
+      bundle.vars[key] = keychainRef(key);
+    }
+    added++;
+  }
+  if (storedItems.size > 0) {
+    writeBundleWithItems(bundle, storedItems);
+  } else {
+    writeBundle(bundle);
+  }
+  return { added, skipped };
+}
+
 /** Register the `agents secrets` command tree. */
 export function registerSecretsCommands(program: Command): void {
   const cmd = program
@@ -585,7 +845,8 @@ export function registerSecretsCommands(program: Command): void {
         agents secrets status                          show held bundles + when they lock
         agents secrets rotate <bundle> <key>           rotate value, preserve metadata
         agents secrets import <bundle> --from .env     bulk import from .env
-        agents secrets import <bundle> --from-1password --vault <name>
+        agents secrets import <bundle> --from 1password:<vault>
+        agents secrets import --from icloud            recover legacy iCloud Keychain bundles
         agents secrets generate [length]               generate a random password / PIN / hex
         agents secrets migrate-acl                     upgrade legacy items to the biometry ACL
     `,
@@ -606,20 +867,16 @@ export function registerSecretsCommands(program: Command): void {
     .description('List configured secrets bundles (use --host/--hosts to list bundles on other machines over SSH)')
     .option('--host <target>', 'List bundles on a remote host over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)')
     .option('--hosts <list>', 'Comma-separated hosts to list in one shot, e.g. yosemite-s0,yosemite-s1')
-    .action(async (opts: { host?: string; hosts?: string }) => {
+    .option('--json', 'Emit machine-readable JSON (bundle metadata only — never secret values) instead of the table')
+    .action(async (opts: { host?: string; hosts?: string; json?: boolean }) => {
       const targets = parseHostsOption(opts);
       if (targets.length > 0) {
-        await browseRemote(targets, ['list'], false);
+        await browseRemote(targets, opts.json ? ['list', '--json'] : ['list'], false);
         return;
       }
       const bundles = listBundles();
-      if (bundles.length === 0) {
-        console.log(chalk.gray('No secrets bundles configured.'));
-        console.log(chalk.gray('Try: agents secrets create <name>'));
-        return;
-      }
       // Cross-reference the secrets-agent so `daily` bundles that are currently
-      // held can show "· Nh left". Soft-fails to no hint if the broker is down.
+      // held can show "· held Nh". Soft-fails to no hint if the broker is down.
       const held = new Map<string, number>();
       if (process.platform === 'darwin') {
         try {
@@ -627,6 +884,31 @@ export function registerSecretsCommands(program: Command): void {
         } catch {
           /* broker not running — render policy without the countdown */
         }
+      }
+      if (opts.json) {
+        // Discovery payload for agents: metadata only, no secret values. Gated on
+        // the explicit --json flag (not stdout.isTTY) so piping the human table to
+        // a pager never silently swaps formats.
+        const payload = bundles.map((b) => ({
+          name: b.name,
+          keys: describeBundle(b).length,
+          policy: bundlePolicy(b),
+          backend: b.backend === 'file' ? 'file' : 'keychain',
+          allowExec: Boolean(b.allow_exec),
+          expiringSoon: countExpiringSoon(b.meta),
+          description: b.description ?? null,
+          createdAt: b.created_at ?? null,
+          updatedAt: b.updated_at ?? null,
+          lastUsed: b.last_used ?? null,
+          heldExpiresAt: held.get(b.name) ?? null,
+        }));
+        process.stdout.write(JSON.stringify(payload) + '\n');
+        return;
+      }
+      if (bundles.length === 0) {
+        console.log(chalk.gray('No secrets bundles configured.'));
+        console.log(chalk.gray('Try: agents secrets create <name>'));
+        return;
       }
       const cols = terminalWidth();
       if (cols >= SECRETS_WIDE) {
@@ -649,9 +931,10 @@ export function registerSecretsCommands(program: Command): void {
     .description('Show a bundle. Keychain values are masked by default — pass --reveal to see them.')
     .option('--reveal', 'Print keychain-backed values in the clear (TTY only unless --plaintext)')
     .option('--plaintext', 'Allow --reveal in non-interactive shells (use with care)')
+    .option('--json', 'Emit machine-readable JSON (values masked unless --reveal) instead of the human view')
     .option('--host <target>', 'Show a bundle on a remote host over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)')
     .option('--hosts <list>', 'Comma-separated hosts to show in one shot, e.g. yosemite-s0,yosemite-s1')
-    .action(async (name: string | undefined, opts: { reveal?: boolean; plaintext?: boolean; host?: string; hosts?: string }) => {
+    .action(async (name: string | undefined, opts: { reveal?: boolean; plaintext?: boolean; json?: boolean; host?: string; hosts?: string }) => {
       try {
         const targets = parseHostsOption(opts);
         if (targets.length > 0) {
@@ -662,6 +945,7 @@ export function registerSecretsCommands(program: Command): void {
           const args = ['view', name];
           if (opts.reveal) args.push('--reveal');
           if (opts.plaintext) args.push('--plaintext');
+          if (opts.json) args.push('--json');
           // With --reveal, force a TTY so the remote keychain prompt can surface
           // (and the remote's "--reveal in a non-TTY needs --plaintext" gate is
           // satisfied) — only when this side is itself interactive.
@@ -670,12 +954,88 @@ export function registerSecretsCommands(program: Command): void {
           return;
         }
         const resolvedName = name ?? (await pickBundleName('view'));
-        const bundle = readBundle(resolvedName);
+        let bundle: SecretsBundle;
+        try {
+          bundle = readBundle(resolvedName);
+        } catch (err) {
+          console.error(chalk.red((err as Error).message));
+          maybePrintSyncedHint(resolvedName);
+          process.exit(1);
+        }
         const entries = describeBundle(bundle);
+        if (opts.json) {
+          // Machine-readable discovery for agents. Values are null unless --reveal
+          // (which still routes through the same non-TTY/plaintext gate + audit
+          // event as the human path). Gated on the explicit flag, not stdout.isTTY,
+          // so a piped human view never silently swaps formats.
+          const reveal = Boolean(opts.reveal);
+          if (reveal && !isInteractiveTerminal() && !opts.plaintext) {
+            console.error(chalk.red('--reveal in a non-TTY requires --plaintext.'));
+            process.exit(1);
+          }
+          const revealed = new Map<string, string>();
+          if (reveal) {
+            const items = entries
+              .filter((e) => e.kind === 'keychain')
+              .map((e) => secretsKeychainItem(bundle.name, e.detail));
+            try {
+              for (const [item, value] of getKeychainTokens(items)) revealed.set(item, value);
+            } catch {
+              /* cancelled / batch failure — fall through to masked (null) values */
+            }
+            const exposed = revealed.size + entries.filter((e) => e.kind === 'literal').length;
+            if (exposed > 0) {
+              emit('secrets.get', {
+                module: 'secrets',
+                bundle: bundle.name,
+                operation: 'view --reveal --json',
+                source: 'reveal',
+                status: 'success',
+                keyCount: exposed,
+              });
+            }
+          }
+          const keys = entries.map((e) => {
+            const row: { key: string; kind: string; detail: string | null; stored?: boolean; value: string | null } = {
+              key: e.key,
+              kind: e.kind,
+              detail: e.detail || null,
+              value: null,
+            };
+            if (e.kind === 'keychain') {
+              const item = secretsKeychainItem(bundle.name, e.detail);
+              row.stored = hasKeychainToken(item);
+              if (reveal && revealed.has(item)) row.value = revealed.get(item)!;
+            } else if (e.kind === 'literal' && reveal) {
+              const raw = bundle.vars[e.key];
+              row.value =
+                typeof raw === 'string'
+                  ? raw
+                  : (raw && typeof raw === 'object' && 'value' in raw ? (raw as any).value : '');
+            }
+            return row;
+          });
+          process.stdout.write(
+            JSON.stringify({
+              name: bundle.name,
+              description: bundle.description ?? null,
+              policy: bundlePolicy(bundle),
+              backend: bundle.backend === 'file' ? 'file' : 'keychain',
+              allowExec: Boolean(bundle.allow_exec),
+              createdAt: bundle.created_at ?? null,
+              updatedAt: bundle.updated_at ?? null,
+              lastUsed: bundle.last_used ?? null,
+              revealed: reveal,
+              keys,
+            }) + '\n',
+          );
+          return;
+        }
         console.log(chalk.bold(bundle.name));
         if (bundle.description) console.log(chalk.gray(safePrint(bundle.description)));
         if (bundle.allow_exec) console.log(chalk.yellow('allow_exec: true'));
         if (bundle.backend === 'file') console.log(chalk.gray('backend: file (passphrase-encrypted; reads need AGENTS_SECRETS_PASSPHRASE, no Touch ID)'));
+        if (bundle.backend === 'vault') console.log(chalk.gray('storage: synced (age-encrypted ~/.agents/vault.age; needs agents login)'));
         if (bundlePolicy(bundle) === 'never') {
           console.log(chalk.red.bold('policy: never — NO biometry ACL; reads are silent (no Touch ID, no user-presence check). Automation-only.'));
         } else {
@@ -698,15 +1058,18 @@ export function registerSecretsCommands(program: Command): void {
           console.error(chalk.red('--reveal in a non-TTY requires --plaintext.'));
           process.exit(1);
         }
-        // Batch every keychain read into one helper call so --reveal pops
-        // Touch ID once for the whole bundle instead of once per key.
+        // Batch every backend read into one helper call where supported, so
+        // keychain --reveal pops Touch ID once and synced/file bundles use
+        // their declared storage.
         const revealedValues = new Map<string, string>();
         if (reveal) {
           const items = entries
             .filter((e) => e.kind === 'keychain')
             .map((e) => secretsKeychainItem(bundle.name, e.detail));
           try {
-            const fetched = getKeychainTokens(items);
+            const fetched = bundle.backend
+              ? new Map(items.map((item) => [item, bundleItemStore(bundle.backend).get(item)]))
+              : getKeychainTokens(items);
             for (const [item, value] of fetched) revealedValues.set(item, value);
           } catch {
             // Fall through to masked output on cancellation / batch failure.
@@ -725,7 +1088,7 @@ export function registerSecretsCommands(program: Command): void {
             emit('secrets.get', {
               module: 'secrets',
               bundle: bundle.name,
-              caller: 'view --reveal',
+              operation: 'view --reveal',
               source: 'reveal',
               status: 'success',
               keyCount: exposedCount,
@@ -735,7 +1098,7 @@ export function registerSecretsCommands(program: Command): void {
         for (const e of entries) {
           if (e.kind === 'keychain') {
             const item = secretsKeychainItem(bundle.name, e.detail);
-            const stored = hasKeychainToken(item);
+            const stored = bundleItemStore(bundle.backend).has(item);
             const marker = stored ? chalk.green('stored') : chalk.red('missing');
             let valueCol = `[keychain:${e.detail}] ${marker}`;
             if (reveal && revealedValues.has(item)) {
@@ -763,23 +1126,49 @@ export function registerSecretsCommands(program: Command): void {
     });
 
   cmd
-    .command('get <item>')
-    .description('Print a raw keychain item by name (for shell hooks/automation). Cross-platform; no bundle required.')
-    .action((item: string) => {
+    .command('get <item> [key]')
+    .description('Print one secret value for shell hooks/automation. One arg = a raw keychain item by name; two args = one KEY out of a bundle (`get <bundle> <KEY>`). Cross-platform.')
+    .action((item: string, key: string | undefined) => {
+      if (key === undefined) {
+        // Raw keychain item path — unchanged.
+        try {
+          // Routes through the platform keychain layer: macOS reads bare items
+          // via /usr/bin/security (no Touch ID), Linux via secret-tool with the
+          // encrypted-file fallback. The value goes to stdout (newline-terminated
+          // so `$(agents secrets get NAME)` captures it cleanly); diagnostics go
+          // to stderr so they never pollute the captured value.
+          const value = getKeychainToken(item);
+          // Raw item reads bypass readAndResolveBundleEnv, so audit here too.
+          // `item` is the keychain service name, never the value.
+          emit('secrets.get', { module: 'secrets', item, source: 'raw-item', status: 'success' });
+          process.stdout.write(value.endsWith('\n') ? value : `${value}\n`);
+        } catch {
+          // Missing item is a normal, quiet outcome for a hook probe: exit 1,
+          // print nothing to stdout. Callers test the exit code / empty capture.
+          process.exit(1);
+        }
+        return;
+      }
+      // Bundle-key path: `get <bundle> <KEY>` prints exactly one resolved value.
+      // Ungated like the raw path (it IS the automation primitive); the
+      // `secrets.get` audit event is emitted inside readAndResolveBundleEnv.
       try {
-        // Routes through the platform keychain layer: macOS reads bare items
-        // via /usr/bin/security (no Touch ID), Linux via secret-tool with the
-        // encrypted-file fallback. The value goes to stdout (newline-terminated
-        // so `$(agents secrets get NAME)` captures it cleanly); diagnostics go
-        // to stderr so they never pollute the captured value.
-        const value = getKeychainToken(item);
-        // Raw item reads bypass readAndResolveBundleEnv, so audit here too.
-        // `item` is the keychain service name, never the value.
-        emit('secrets.get', { module: 'secrets', item, source: 'raw-item', status: 'success' });
+        if (!bundleExists(item) && !(vaultExists() && !getVaultSession().loggedIn)) {
+          console.error(chalk.red(`Secrets bundle '${item}' not found.`));
+          process.exit(1);
+        }
+        // `secrets get` is the scriptable automation primitive ($(agents secrets
+        // get bundle KEY)); when embedded in a headless routine/CI script it must
+        // not pop an unwatched Touch ID prompt. Interactive use still prompts.
+        const { env } = readAndResolveBundleEnv(item, { caller: 'secrets get', keys: [key], keyMode: 'storage', agentOnly: isHeadlessSecretsContext() });
+        if (!(key in env)) {
+          console.error(chalk.red(`Key '${key}' not in bundle '${item}'.`));
+          process.exit(1);
+        }
+        const value = env[key];
         process.stdout.write(value.endsWith('\n') ? value : `${value}\n`);
-      } catch {
-        // Missing item is a normal, quiet outcome for a hook probe: exit 1,
-        // print nothing to stdout. Callers test the exit code / empty capture.
+      } catch (err) {
+        console.error(chalk.red((err as Error).message));
         process.exit(1);
       }
     });
@@ -822,9 +1211,10 @@ export function registerSecretsCommands(program: Command): void {
     .option('--policy <policy>', 'prompt policy: daily (default, ask once a week), always (ask every time), or never (silent, NO biometry ACL — needs --i-understand)')
     .addOption(new Option('--tier <policy>', 'deprecated alias for --policy').hideHelp())
     .option('--i-understand', 'Confirm creating a "never"-policy bundle (no biometry ACL) without an interactive prompt')
-    .option('--backend <backend>', 'storage backend: keychain (default) or file (passphrase-encrypted, headless-readable)', 'keychain')
+    .option('--backend <backend>', 'storage backend: keychain (default) or file (passphrase-encrypted)', 'keychain')
+    .option('--synced', 'Store this bundle in the age-encrypted synced secrets file for user-managed cross-machine file sync')
     .option('--force', 'Overwrite an existing bundle')
-    .action(async (name: string | undefined, opts: { description?: string; allowExec?: boolean; policy?: string; tier?: string; iUnderstand?: boolean; backend?: string; force?: boolean }) => {
+    .action(async (name: string | undefined, opts: { description?: string; allowExec?: boolean; policy?: string; tier?: string; iUnderstand?: boolean; backend?: string; synced?: boolean; force?: boolean }) => {
       try {
         const resolvedName = name ?? (await promptBundleName());
         validateBundleName(resolvedName);
@@ -832,7 +1222,7 @@ export function registerSecretsCommands(program: Command): void {
         // inherits the configured default (`daily`) instead of being pinned.
         const policyOpt = opts.policy ?? opts.tier;
         const policy = policyOpt ? parsePolicyOpt(policyOpt) : undefined;
-        const backend = parseBackendOpt(opts.backend);
+        const backend = opts.synced ? 'vault' : parseBackendOpt(opts.backend);
         if (bundleExists(resolvedName) && !opts.force) {
           console.error(chalk.red(`Bundle '${resolvedName}' already exists. Use --force to overwrite.`));
           process.exit(1);
@@ -848,7 +1238,7 @@ export function registerSecretsCommands(program: Command): void {
           name: resolvedName,
           description: opts.description,
           allow_exec: opts.allowExec,
-          backend: backend === 'file' ? 'file' : undefined,
+          backend: backend === 'keychain' ? undefined : backend,
           policy,
           vars: {},
         };
@@ -858,13 +1248,20 @@ export function registerSecretsCommands(program: Command): void {
           : bundlePolicy(bundle) === 'always'
             ? 'policy: always ask'
             : 'policy: never (NO biometry ACL)';
-        const tags = [policyTag, backend === 'file' ? 'backend: file' : null].filter(Boolean);
+        const tags = [
+          policyTag,
+          backend === 'file' ? 'backend: file' : null,
+          backend === 'vault' ? 'synced' : null,
+        ].filter(Boolean);
         console.log(chalk.green(`Bundle '${resolvedName}' created (${tags.join(', ')}).`));
         if (bundlePolicy(bundle) === 'never') {
           console.log(chalk.red('Stored without biometry protection — reads are silent. Automation-only; rotate anything sensitive out of it.'));
         }
         if (backend === 'file') {
           console.log(chalk.gray('File-backed: items are AES-256-GCM encrypted under AGENTS_SECRETS_PASSPHRASE (no Touch ID).'));
+        }
+        if (backend === 'vault') {
+          console.log(chalk.gray('Synced: items are encrypted in ~/.agents/vault.age. Copy that file with your sync tool of choice.'));
         }
         console.log(chalk.gray(`Try: agents secrets add ${resolvedName} MY_KEY`));
       } catch (err) {
@@ -1001,11 +1398,14 @@ export function registerSecretsCommands(program: Command): void {
           secretValue = await promptForSecret(`Enter value for ${resolvedBundleName}.${resolvedKey}`);
         }
         const item = secretsKeychainItem(resolvedBundleName, resolvedKey);
-        bundleItemStore(bundle.backend, { noAcl: bundlePolicy(bundle) === 'never' }).set(item, secretValue);
         bundle.vars[resolvedKey] = keychainRef(resolvedKey);
         applyMeta();
-        writeBundle(bundle);
-        const where = bundle.backend === 'file' ? 'encrypted file store' : 'keychain';
+        writeBundleWithItems(bundle, new Map([[item, secretValue]]));
+        const where = bundle.backend === 'file'
+          ? 'encrypted file store'
+          : bundle.backend === 'vault'
+            ? 'synced secrets file'
+            : 'keychain';
         console.log(chalk.green(`${resolvedBundleName}.${resolvedKey} stored in ${where} (${item}).`));
       } catch (err) {
         if (isPromptCancelled(err)) return;
@@ -1069,7 +1469,8 @@ Examples:
           clearMeta: opts.clearMeta,
           meta: metaPatch,
         });
-        console.log(chalk.green(`${resolvedBundleName}.${resolvedKey} rotated in keychain.`));
+        const where = bundle.backend === 'vault' ? 'synced secrets file' : bundle.backend === 'file' ? 'encrypted file store' : 'keychain';
+        console.log(chalk.green(`${resolvedBundleName}.${resolvedKey} rotated in ${where}.`));
       } catch (err) {
         if (isPromptCancelled(err)) return;
         console.error(chalk.red((err as Error).message));
@@ -1117,7 +1518,11 @@ Examples:
           const item = secretsKeychainItem(resolvedBundleName, raw.slice('keychain:'.length));
           const removed = bundleItemStore(bundle.backend).delete(item);
           if (removed) {
-            const where = bundle.backend === 'file' ? 'encrypted file item' : 'keychain item';
+            const where = bundle.backend === 'file'
+              ? 'encrypted file item'
+              : bundle.backend === 'vault'
+                ? 'synced secrets item'
+                : 'keychain item';
             console.log(chalk.green(`Removed ${resolvedBundleName}.${resolvedKey} and purged ${where}.`));
             return;
           }
@@ -1212,97 +1617,115 @@ Examples:
 
   cmd
     .command('import [bundle]')
-    .description('Import keys from a .env file or a 1Password vault into a bundle. The bundle is created if it does not exist. Values are stored in the bundle\'s backend (keychain by default).')
-    .option('--from <path>', 'Path to a .env file (use - to read the .env from stdin)')
-    .option('--from-1password', 'Import secrets from a 1Password vault (requires the op CLI)')
-    .option('--vault <name>', '1Password vault name (used with --from-1password)')
+    .description('Import keys into a bundle from a .env file, a 1Password vault, or legacy iCloud Keychain bundles. The bundle is created if it does not exist. Values are stored in the bundle\'s backend (keychain by default).')
+    .option('--from <source>', "Source: a .env path (- reads stdin), '1password:<vault>', or 'icloud' (legacy iCloud Keychain bundles)")
+    .addOption(new Option('--from-1password', 'deprecated alias for --from 1password:<vault>').hideHelp())
+    .addOption(new Option('--vault <name>', 'deprecated: name the vault in --from 1password:<vault>').hideHelp())
     .option('--all-plaintext', 'Store every imported value as a literal in the bundle metadata (skip keychain item creation)')
-    .option('--backend <backend>', 'When creating the bundle: keychain (default) or file (passphrase-encrypted, headless-readable)', 'keychain')
+    .option('--backend <backend>', 'When creating the bundle: keychain (default) or file (passphrase-encrypted)', 'keychain')
+    .option('--synced', 'When creating the bundle, store it in the age-encrypted synced secrets file')
     .option('--force', 'Overwrite an existing key in the bundle')
+    .option('--purge', 'With --from icloud: delete the iCloud copies after a successful import (iCloud propagates the deletion to your other devices)')
+    .option('--from-file <path>', 'Import from an AES-256-GCM encrypted offline bundle file (needs AGENTS_SECRETS_PASSPHRASE; symmetric counterpart of export --to-file)')
+    .option('--from-ssh', 'Pull the bundle from a fleet peer over SSH and import it locally (requires --host)')
+    .option('--host <peer>', 'SSH peer to pull from when using --from-ssh (host alias or user@host)')
     .action(async (bundleName: string | undefined, opts: {
       from?: string;
       from1password?: boolean;
       vault?: string;
       allPlaintext?: boolean;
       backend?: string;
+      synced?: boolean;
       force?: boolean;
+      purge?: boolean;
+      fromFile?: string;
+      fromSsh?: boolean;
+      host?: string;
     }) => {
       try {
-        if (!opts.from && !opts.from1password) {
-          throw new Error('Pass --from <path> to import a .env file, or --from-1password to import from a 1Password vault.');
+        // A single import can name only one source. --from-file / --from-ssh are
+        // early-return paths, so guard them against each other and the --from /
+        // --from-1password pair (which parseImportSource guards on its own).
+        const namedFileOrSsh = [
+          opts.fromFile ? '--from-file' : null,
+          opts.fromSsh ? '--from-ssh' : null,
+        ].filter(Boolean);
+        if (namedFileOrSsh.length > 1 || (namedFileOrSsh.length > 0 && (opts.from || opts.from1password))) {
+          throw new Error(
+            '--from-file, --from-ssh, and --from/--from-1password are mutually exclusive; pick one import source.'
+          );
         }
-        if (opts.from && opts.from1password) {
-          throw new Error('--from and --from-1password are mutually exclusive.');
+        if (opts.fromFile) {
+          const passphrase = process.env.AGENTS_SECRETS_PASSPHRASE ?? '';
+          if (!passphrase) {
+            throw new Error(
+              '--from-file needs AGENTS_SECRETS_PASSPHRASE set to decrypt the bundle file.'
+            );
+          }
+          const env = importBundleFromFile(opts.fromFile, passphrase);
+          const resolvedBundleName = bundleName ?? (await pickBundleName('import into'));
+          const bundle = resolveImportBundle(resolvedBundleName, opts.backend, opts.synced);
+          const { added, skipped } = applyEnvToBundle(bundle, env, opts);
+          console.log(chalk.green(`Imported ${added} key(s) from file${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
+          return;
+        }
+
+        if (opts.fromSsh) {
+          if (!opts.host) {
+            throw new Error('--from-ssh requires --host <peer>.');
+          }
+          assertValidSshTarget(opts.host);
+          const resolvedBundleName = bundleName ?? (await pickBundleName('import into'));
+          const target = await resolveSshTarget(opts.host);
+          const env = await remoteResolveEnv(target, resolvedBundleName, { osLookupName: opts.host });
+          const bundle = resolveImportBundle(resolvedBundleName, opts.backend, opts.synced);
+          const { added, skipped } = applyEnvToBundle(bundle, env, opts);
+          console.log(chalk.green(`Imported ${added} key(s) from ${opts.host}${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
+          return;
+        }
+
+        const source = parseImportSource(opts);
+        if (opts.purge && source.kind !== 'icloud') {
+          throw new Error('--purge only applies to --from icloud.');
+        }
+        if (opts.from1password) {
+          console.log(chalk.yellow('--from-1password is deprecated; use --from 1password:<vault>.'));
+        }
+        const requestedBackend = opts.synced ? 'vault' : parseBackendOpt(opts.backend);
+
+        if (source.kind === 'icloud') {
+          await importFromICloud(bundleName, {
+            force: opts.force,
+            allPlaintext: opts.allPlaintext,
+            backend: requestedBackend === 'keychain' ? undefined : requestedBackend,
+            purge: opts.purge,
+          });
+          return;
         }
 
         const resolvedBundleName = bundleName ?? (await pickBundleName('import into'));
-        const requestedBackend = parseBackendOpt(opts.backend);
-        // Read the bundle if it exists (inheriting its backend); otherwise
-        // create it with the requested backend so a single `import --backend
-        // file` works (this is what `export --host ... --remote-backend file`
-        // drives on the remote).
-        let bundle: SecretsBundle;
-        if (bundleExists(resolvedBundleName)) {
-          bundle = readBundle(resolvedBundleName);
-          if (requestedBackend === 'file' && bundle.backend !== 'file') {
-            throw new Error(
-              `Bundle '${resolvedBundleName}' already exists with a keychain backend; ` +
-              `--backend file cannot change it. Delete it first to recreate as file-backed.`
-            );
-          }
-        } else {
-          bundle = {
-            name: resolvedBundleName,
-            backend: requestedBackend === 'file' ? 'file' : undefined,
-            vars: {},
-          };
-        }
-        const store = bundleItemStore(bundle.backend, { noAcl: bundlePolicy(bundle) === 'never' });
-        let added = 0;
-        let skipped = 0;
+        // resolveImportBundle inherits an existing bundle's backend (and refuses
+        // to downgrade keychain -> file) or creates it with the requested backend
+        // so a single `import --backend file` works (what `export --host ...
+        // --remote-backend file` drives on the remote).
+        const bundle = resolveImportBundle(resolvedBundleName, opts.backend, opts.synced);
 
-        if (opts.from1password) {
+        if (source.kind === '1password') {
           assertOpAvailable();
-          const vault = await resolveVault(opts.vault);
+          const vault = await resolveVault(source.vault);
           const items = listItems(vault);
           const { secrets, skipped: opSkipped } = extractSecrets(items, vault);
-          for (const { envKey, value } of secrets) {
-            if (!opts.force && envKey in bundle.vars) {
-              skipped++;
-              continue;
-            }
-            if (opts.allPlaintext) {
-              bundle.vars[envKey] = { value };
-            } else {
-              const item = secretsKeychainItem(resolvedBundleName, envKey);
-              store.set(item, value);
-              bundle.vars[envKey] = keychainRef(envKey);
-            }
-            added++;
-          }
-          writeBundle(bundle);
+          const env: Record<string, string> = {};
+          for (const { envKey, value } of secrets) env[envKey] = value;
+          const { added, skipped } = applyEnvToBundle(bundle, env, opts);
           if (opSkipped.length) {
             console.log(chalk.yellow(`Skipped ${opSkipped.length} item(s) with no importable fields.`));
           }
           console.log(chalk.green(`Imported ${added} key(s) from 1Password vault '${vault}'${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
         } else {
-          const raw = readImportDotenv(opts.from!);
+          const raw = readImportDotenv(source.path);
           const pairs = parseDotenv(raw);
-          for (const [key, value] of Object.entries(pairs)) {
-            if (!opts.force && key in bundle.vars) {
-              skipped++;
-              continue;
-            }
-            if (opts.allPlaintext) {
-              bundle.vars[key] = { value };
-            } else {
-              const item = secretsKeychainItem(resolvedBundleName, key);
-              store.set(item, value);
-              bundle.vars[key] = keychainRef(key);
-            }
-            added++;
-          }
-          writeBundle(bundle);
+          const { added, skipped } = applyEnvToBundle(bundle, pairs, opts);
           console.log(chalk.green(`Imported ${added} key(s)${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
         }
       } catch (err) {
@@ -1322,6 +1745,7 @@ Examples:
     .option('--remote-backend <backend>', 'Backend for the bundle on the remote (with --host): keychain (default) or file (passphrase-encrypted, headless-readable). file forwards AGENTS_SECRETS_PASSPHRASE over stdin.', 'keychain')
     .option('--force', 'Overwrite existing keys/items on the target (used with --to-1password and --host)')
     .option('--format <shell|json>', 'Output for --plaintext export: shell (default) or json (lossless, machine-readable; used by remote resolve)', 'shell')
+    .option('--to-file <path>', 'Write the bundle as an AES-256-GCM encrypted offline file (needs AGENTS_SECRETS_PASSPHRASE; symmetric counterpart of import --from-file)')
     .action(async (bundleName: string | undefined, opts: {
       plaintext?: boolean;
       to1password?: boolean;
@@ -1330,10 +1754,25 @@ Examples:
       remoteBackend?: string;
       force?: boolean;
       format?: string;
+      toFile?: string;
     }) => {
       try {
         const { readAndResolveBundleEnv, bundleToEnvPrefix, isReservedEnvName } = await import('../lib/secrets/bundles.js');
         const resolvedBundleName = bundleName ?? (await pickBundleName('export'));
+
+        if (opts.toFile) {
+          const passphrase = process.env.AGENTS_SECRETS_PASSPHRASE ?? '';
+          if (!passphrase) {
+            throw new Error(
+              '--to-file needs AGENTS_SECRETS_PASSPHRASE set to encrypt the bundle. ' +
+              'Set it for this command, then supply the same value when importing.'
+            );
+          }
+          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: 'export --to-file', keyMode: 'storage', agentOnly: isHeadlessSecretsContext() });
+          exportBundleToFile(env, opts.toFile, passphrase);
+          console.log(chalk.green(`Exported ${Object.keys(env).length} key(s) to ${opts.toFile}`));
+          return;
+        }
 
         // The presence of --host selects SSH push: --host is the destination
         // and carries the mode (no separate --to-ssh needed — it would be
@@ -1358,7 +1797,7 @@ Examples:
               );
             }
           }
-          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `ssh export` });
+          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `ssh export`, keyMode: 'storage', agentOnly: isHeadlessSecretsContext() });
           const dotenv = bundleEnvToDotenv(env);
           const keyCount = Object.keys(env).length;
           // Drive the remote's own `agents secrets import --from -` so the values
@@ -1402,7 +1841,7 @@ Examples:
               res = remoteSecretsRaw(
                 host,
                 ['import', resolvedBundleName, '--from', '-', ...(opts.force ? ['--force'] : [])],
-                { input: dotenv },
+                { input: dotenv, osLookupName: host },
               );
             }
             if (res.code === null) {
@@ -1426,7 +1865,7 @@ Examples:
         if (opts.to1password) {
           assertOpAvailable();
           const vault = await resolveVault(opts.vault);
-          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `1Password vault ${vault}` });
+          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `1Password vault ${vault}`, keyMode: 'storage', agentOnly: isHeadlessSecretsContext() });
           let created = 0;
           let overwritten = 0;
           let skipped = 0;
@@ -1461,10 +1900,19 @@ Examples:
           console.error(chalk.red('export prints secrets in the clear and requires --plaintext (works for TTY and pipes alike).'));
           process.exit(1);
         }
-        const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `export to shell` });
+        // `agents secrets export --plaintext` is what release/CI scripts eval.
+        // When it runs detached (both stdio non-TTY) or under a headless agent,
+        // resolve broker-only so it can never pop a Touch ID sheet on the
+        // interactive user's screen. An interactive `eval "$(...)"` keeps its
+        // terminal stdin, so it is not headless and still prompts.
+        const { env } = readAndResolveBundleEnv(resolvedBundleName, {
+          caller: `export to shell`,
+          keyMode: 'process',
+          agentOnly: isHeadlessSecretsContext(),
+        });
         if (opts.format === 'json') {
-          // Lossless, machine-readable form consumed by `remoteResolveEnv` over
-          // SSH. Single object of KEY -> value; values verbatim (newlines, quotes).
+          // Machine-readable form consumed by `remoteResolveEnv` over SSH.
+          // Single object of injected env KEY -> value; values verbatim.
           process.stdout.write(JSON.stringify(env));
           return;
         }
@@ -1512,13 +1960,14 @@ Examples:
             { keys: keysSubset, allowExpired: execOpts.allowExpired },
             { keysFlag: '--keys', allowExpiredFlag: '--allow-expired' },
           );
-          secretEnv = await remoteResolveEnv(await resolveSshTarget(execOpts.host), bundleName);
+          secretEnv = await remoteResolveEnv(await resolveSshTarget(execOpts.host), bundleName, { osLookupName: execOpts.host });
         } else {
           const { readAndResolveBundleEnv } = await import('../lib/secrets/bundles.js');
           secretEnv = readAndResolveBundleEnv(bundleName, {
             caller: `command ${cmd}`,
             keys: keysSubset,
             allowExpired: execOpts.allowExpired,
+            agentOnly: isHeadlessSecretsContext(),
           }).env;
         }
         const { spawn } = await import('child_process');
@@ -1559,6 +2008,60 @@ Examples:
       // process.env. stdout is the JSON-RPC channel — nothing else may print there.
       const { runSecretsMcpServer } = await import('../lib/secrets/mcp.js');
       await runSecretsMcpServer({ version: getCliVersion() });
+    });
+
+  const openclawKeychain = cmd
+    .command('openclaw-keychain')
+    .description('Migrate supported OpenClaw credentials from plaintext config to macOS Keychain-backed SecretRefs');
+
+  openclawKeychain
+    .command('migrate [config]')
+    .description('Rewrite supported OpenClaw plaintext secrets to exec SecretRefs backed by macOS Keychain')
+    .option('--account <name>', 'Keychain account name', 'openclaw')
+    .option('--dry-run', 'Inspect the migration without writing Keychain or config changes')
+    .action(async (configArg: string | undefined, opts: { account: string; dryRun?: boolean }) => {
+      try {
+        const configPath = configArg || path.join(os.homedir(), '.openclaw', 'openclaw.json');
+        const { migrateOpenClawConfigToKeychainRefs, storeOpenClawKeychainServices } = await import('../lib/openclaw-keychain.js');
+        const before = fs.readFileSync(configPath, 'utf-8');
+        const config = JSON.parse(before) as Record<string, unknown>;
+        const result = migrateOpenClawConfigToKeychainRefs(config, { account: opts.account });
+        if (result.unsupportedEnvKeys.length > 0) {
+          throw new Error(
+            `OpenClaw top-level env keys have no supported SecretRef target: ${result.unsupportedEnvKeys.join(', ')}. ` +
+            `Move them to a supported credential field before removing plaintext.`
+          );
+        }
+        if (!opts.dryRun) {
+          storeOpenClawKeychainServices(result.services, opts.account);
+          if (result.changed) fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf-8');
+        }
+        console.log(`OpenClaw Keychain migration ${opts.dryRun ? 'plan' : 'complete'}: ${result.services.length} secret${result.services.length === 1 ? '' : 's'}, ${result.replacedPaths.length} ref${result.replacedPaths.length === 1 ? '' : 's'}, ${result.removedEnvPaths.length} env entr${result.removedEnvPaths.length === 1 ? 'y' : 'ies'} removed.`);
+        for (const p of result.replacedPaths) console.log(`ref ${p}`);
+        for (const p of result.removedEnvPaths) console.log(`removed ${p}`);
+        process.exit(0);
+      } catch (err) {
+        console.error(chalk.red((err as Error).message));
+        process.exit(1);
+      }
+    });
+
+  openclawKeychain
+    .command('resolve')
+    .description('OpenClaw exec SecretRef resolver for Keychain service ids')
+    .option('--account <name>', 'Keychain account name', 'openclaw')
+    .action(async (opts: { account: string }) => {
+      try {
+        const { readOpenClawKeychainService, resolveOpenClawKeychainRequest } = await import('../lib/openclaw-keychain.js');
+        const raw = readStdinSync();
+        const request = raw.trim() ? JSON.parse(raw) : {};
+        const response = resolveOpenClawKeychainRequest(request, (service) => readOpenClawKeychainService(service, opts.account));
+        process.stdout.write(JSON.stringify(response));
+        process.exit(0);
+      } catch {
+        process.stdout.write(JSON.stringify({ protocolVersion: 1, values: {}, errors: { value: { code: 'NOT_FOUND' } } }));
+        process.exit(1);
+      }
     });
 
   cmd
@@ -1648,9 +2151,10 @@ Examples:
     .command('unlock [names...]')
     .description('Hold a bundle in the secrets-agent after one Touch ID, so concurrent runs read it without re-prompting (macOS). With --host, unlock FILE-backed bundle(s) on a remote (the passphrase prompt surfaces over the SSH TTY); keychain/biometry bundles are GUI-only and can\'t be remote-unlocked.')
     .option('--ttl <duration>', 'How long to hold it (e.g. 30m, 8h, 3d). Default 7d.')
+    .option('--durable', 'Keep the unlock across sleep + reboot too (default: survives upgrade/restart but re-locks on sleep). Set secrets.agent.durable in agents.yaml to make this the default.')
     .option('--all', 'Unlock every configured bundle')
     .option('--host <target>', 'Unlock the bundle(s) on this remote machine over SSH instead of locally (file-backed bundles only — the remote\'s passphrase prompt surfaces on your terminal over a -tt session). Single-valued (NOT variadic) so it never swallows the bundle name: `unlock <name> --host <machine>`.')
-    .action(async (names: string[], opts: { ttl?: string; all?: boolean; host?: string }) => {
+    .action(async (names: string[], opts: { ttl?: string; durable?: boolean; all?: boolean; host?: string }) => {
       // Single-valued (not variadic): a variadic --host greedily consumes the
       // positional bundle name (`unlock --host mac wztest` -> host=[mac,wztest],
       // names=[]). Unlock targets one remote at a time anyway.
@@ -1674,7 +2178,7 @@ Examples:
           // sees a real TTY, which requires our local terminal to pass straight
           // through. The remote's prompt + output stream to this terminal; we get
           // back only the exit code.
-          const code = remoteSecretsStream(target, unlockArgs);
+          const code = remoteSecretsStream(target, unlockArgs, { osLookupName: h });
           if (code === 0) {
             console.log(chalk.green(`${h}: unlocked`));
           } else {
@@ -1686,15 +2190,19 @@ Examples:
         return;
       }
       if (process.platform !== 'darwin') {
-        console.error(chalk.red('secrets-agent is macOS-only (no biometry prompt to deduplicate elsewhere).'));
-        process.exit(1);
+        // No broker + no biometry prompt off darwin: secrets already resolve
+        // durably from the OS store (libsecret / Credential Manager) on every
+        // read with no prompt, so an unlock is a friendly no-op — not an error.
+        // Accept --durable as a documented no-op so the command is uniform.
+        console.log(chalk.gray('Nothing to unlock: secrets already persist on this OS — reads never re-prompt.'));
+        return;
       }
       let targets = opts.all ? listBundles().map((b) => b.name) : names;
       if (!targets || targets.length === 0) {
         console.error(chalk.red('Specify one or more bundle names, or --all.'));
         process.exit(1);
       }
-      let ttlMs = DEFAULT_TTL_MS;
+      let ttlMs = secretsHoldMs(); // default hold, capped by secrets.agent.holdMs
       if (opts.ttl) {
         const secs = parseDuration(opts.ttl);
         if (!secs) {
@@ -1704,13 +2212,13 @@ Examples:
         ttlMs = secs * 1000;
       }
       if (!(await ensureAgentRunning())) {
-        console.error(chalk.red('Could not start the secrets-agent.'));
+        console.error(chalk.red('Could not start the secrets broker.'));
         process.exit(1);
       }
       // #415: the daemon should be always-on for any background need, not only
-      // after `routines add`. A user who only ever unlocks secrets still gets
-      // the daemon installed + running here. `ensureAgentRunning` above only
-      // brings up the standalone secrets broker, not the daemon. Idempotent
+      // after `routines add`. `ensureAgentRunning` prefers the daemon (it hosts
+      // the broker, #416), but can fall back to a one-off broker spawn when the
+      // daemon can't come up — so ensure the daemon is up regardless. Idempotent
       // (single-instance start lock, #414) and best-effort — never blocks unlock.
       ensureDaemonStarted();
       let loaded = 0;
@@ -1718,9 +2226,17 @@ Examples:
         try {
           // noAgent: read the real keychain (one Touch ID) rather than the
           // agent we're about to populate.
-          const { bundle, env } = readAndResolveBundleEnv(name, { noAgent: true, caller: 'unlock' });
+          const { bundle, env } = readAndResolveBundleEnv(name, { noAgent: true, caller: 'unlock', keyMode: 'storage' });
           if (await agentLoad(name, bundle, env, ttlMs)) {
             loaded++;
+            // Persist a durable session snapshot so the unlock survives a daemon
+            // restart / upgrade (and sleep too, with --durable). session-store.ts.
+            saveSession(name, {
+              bundle,
+              env,
+              expiresAt: Date.now() + ttlMs,
+              sleepPersist: opts.durable ?? secretsAgentDurable(),
+            });
             console.log(`${chalk.green('unlocked')} ${chalk.cyan(name)} ${chalk.gray(`(${Object.keys(env).length} keys, ${humanRemaining(Date.now() + ttlMs)})`)}`);
           } else {
             console.error(chalk.red(`Failed to load '${name}' into the agent.`));
@@ -1744,10 +2260,14 @@ Examples:
       if (process.platform !== 'darwin') return; // nothing to lock off darwin
       if (names && names.length > 0 && !opts.all) {
         let total = 0;
-        for (const name of names) total += await agentLock(name);
+        for (const name of names) {
+          total += await agentLock(name);
+          deleteSession(name); // also drop the durable snapshot, or a restart re-warms it
+        }
         console.log(total > 0 ? chalk.green(`Locked ${total} bundle(s).`) : chalk.gray('Nothing to lock.'));
       } else {
         const wiped = await agentLock();
+        deleteAllSessions();
         console.log(wiped > 0 ? chalk.green(`Locked ${wiped} bundle(s).`) : chalk.gray('Nothing to lock.'));
       }
     });
@@ -1760,22 +2280,42 @@ Examples:
         console.log(chalk.gray('secrets-agent is macOS-only.'));
         return;
       }
+      const ping = await agentPing();
+      const brokerUp = ping.reachable;
       console.log(
-        chalk.gray('service: ') +
-        (secretsAgentServiceInstalled()
-          ? chalk.green('installed (persistent)')
-          : chalk.yellow('not installed — run `agents secrets start` for a persistent broker')),
+        chalk.gray('broker: ') +
+        (brokerUp
+          ? chalk.green('running') + chalk.gray(isDaemonRunning() ? ' (hosted by the daemon)' : ' (standalone)')
+          : chalk.yellow('not running — starts on demand, or run `agents secrets start` to bring the daemon up now')),
       );
+      // Diagnostic: version skew is the top reason a `daily` bundle keeps
+      // re-prompting — a broker on an older build gets torn down when the CLI
+      // version changes (e.g. `agents-cli-update`), wiping every held bundle.
+      const onDisk = getCliVersionFresh();
+      if (brokerUp && ping.cliVersion && ping.cliVersion !== onDisk) {
+        console.log(chalk.yellow(
+          `  warning: broker is running an older build (${ping.cliVersion} vs ${onDisk} on disk). ` +
+          `A version change can wipe held bundles — reads re-warm on the next access.`,
+        ));
+      }
+      // Surface the hold window so "why did it prompt again" is answerable.
+      const holdStr = formatHoldWindow(secretsHoldMs());
+      // Only claim "(secrets.agent.holdMs)" when the config is actually honored —
+      // an invalid value (0/NaN/negative) falls back to the default via
+      // clampHoldMs, so it must read "(default)", not misattribute to config.
+      const configured = (() => { try { const v = readMeta().secrets?.agent?.holdMs; return typeof v === 'number' && Number.isFinite(v) && v > 0; } catch { return false; } })();
+      console.log(chalk.gray(`hold: ${holdStr}${configured ? ' (secrets.agent.holdMs)' : ' (default)'} — a daily bundle prompts once, then stays silent for this long or until sleep/logout.`));
       const entries = await agentStatus();
       if (entries.length === 0) {
-        console.log(chalk.gray('No bundles unlocked. The secrets-agent is idle or not running.'));
-        console.log(chalk.gray('Try: agents secrets unlock <bundle>'));
+        console.log(chalk.gray('No bundles held. The next read of each daily bundle will prompt once, then hold.'));
+        console.log(chalk.gray('Pre-warm now with: agents secrets unlock <bundle>  (or --all)'));
         return;
       }
       console.log(chalk.bold(`${'BUNDLE'.padEnd(24)} ${'KEYS'.padEnd(5)} LOCKS IN`));
       for (const e of entries) {
         console.log(`${chalk.cyan(e.name.padEnd(24))} ${String(e.keyCount).padEnd(5)} ${humanRemaining(e.expiresAt)}`);
       }
+      console.log(chalk.gray('Reads of held bundles are silent; any bundle not listed prompts once on its next read.'));
     });
 
   cmd
@@ -1797,17 +2337,11 @@ Examples:
           console.error(chalk.yellow('Aborted.'));
           return;
         }
-        const wasDaily = bundlePolicy(bundle) === 'daily';
         bundle.policy = next;
+        // writeBundle evicts any broker-held copy, so tightening daily ->
+        // always/never takes effect NOW: the next read re-prompts (`always`)
+        // or reads its no-ACL item directly (`never`).
         writeBundle(bundle);
-        // Tightening daily -> always/never must take effect NOW, not up to the
-        // ~7d hold later. If the broker is already serving this bundle silently
-        // (auto-cached under the old `daily` policy), evict it so the next read
-        // re-prompts (`always`) or reads its no-ACL item directly (`never`).
-        // macOS-only + best-effort; agentLock no-ops off darwin / with no broker.
-        if (wasDaily && next !== 'daily') {
-          try { await agentLock(bundle.name); } catch { /* broker down — nothing held */ }
-        }
         console.log(chalk.green(`${bundle.name} policy set to ${next}.`));
         if (next === 'daily') {
           console.log(chalk.gray('Held by the secrets-agent for ~7 days after one unlock (auto-cache is on by default; disable with `secrets.agent.auto: false` in agents.yaml).'));
@@ -1824,28 +2358,36 @@ Examples:
 
   cmd
     .command('start')
-    .description('Install + start the secrets-agent as a persistent background service (macOS). Survives heavy load; reads connect instantly.')
+    .description('Bring up the always-on daemon that hosts the secrets broker (macOS). Survives heavy load; reads connect instantly.')
     .action(async () => {
       if (process.platform !== 'darwin') {
-        console.error(chalk.red('secrets-agent service is macOS-only.'));
+        console.error(chalk.red('The secrets broker is macOS-only.'));
         process.exit(1);
       }
-      process.stdout.write(chalk.gray('Installing launchd service…\n'));
-      if (await installSecretsAgentService()) {
-        console.log(chalk.green('secrets-agent service running.') + chalk.gray(' It stays up across your macOS login session; unlock/auto-cache now connect instantly.'));
+      process.stdout.write(chalk.gray('Starting the daemon…\n'));
+      ensureDaemonStarted();
+      // The daemon hosts the broker socket-first; wait briefly for it to answer.
+      const deadline = Date.now() + 10000;
+      let reachable = (await agentPing()).reachable;
+      while (!reachable && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 200));
+        reachable = (await agentPing()).reachable;
+      }
+      if (reachable) {
+        console.log(chalk.green('secrets broker running.') + chalk.gray(' Hosted by the always-on daemon; unlock/auto-cache now connect instantly.'));
       } else {
-        console.error(chalk.red('Service installed but did not become reachable in time (machine may be heavily loaded — launchd will keep retrying).'));
+        console.error(chalk.red('Daemon started but the broker did not become reachable in time (machine may be heavily loaded — it will keep retrying).'));
         process.exit(1);
       }
     });
 
   cmd
     .command('stop')
-    .description('Stop + remove the persistent secrets-agent service and wipe what it held.')
+    .description('Lock all bundles and retire any legacy standalone service. The always-on daemon (which hosts the broker) is left running.')
     .action(async () => {
       if (process.platform !== 'darwin') return;
       await uninstallSecretsAgentService();
-      console.log(chalk.green('secrets-agent service stopped and removed.'));
+      console.log(chalk.green('Locked all bundles.') + chalk.gray(' The broker stays hosted by the always-on daemon; a legacy standalone service, if any, was retired.'));
     });
 
   cmd
@@ -1922,7 +2464,7 @@ async function confirmNeverPolicyInteractive(bundleName: string): Promise<boolea
 function parseBackendOpt(raw: string | undefined): SecretsBackend {
   const v = (raw ?? 'keychain').toLowerCase();
   if (v === 'keychain' || v === 'file') return v;
-  console.error(chalk.red(`Invalid --backend '${raw}'. Use 'keychain' or 'file'.`));
+  console.error(chalk.red(`Invalid --backend '${raw}'. Use 'keychain' or 'file'. For cross-machine file sync, pass --synced.`));
   process.exit(1);
 }
 

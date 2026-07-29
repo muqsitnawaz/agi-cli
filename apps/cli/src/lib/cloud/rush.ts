@@ -21,7 +21,7 @@ import type {
   ImageAttachment,
   SkillRef,
 } from './types.js';
-import { resolveDispatchRepos, MAX_IMAGES_PER_DISPATCH } from './types.js';
+import { resolveDispatchRepos, normalizeProviderStatus, MAX_IMAGES_PER_DISPATCH } from './types.js';
 import { parseSSE } from './stream.js';
 import { listInstalledVersions, getVersionHomePath } from '../versions.js';
 import { getAccountInfo } from '../agents.js';
@@ -88,19 +88,6 @@ interface Installation {
   account_login: string;
   repositories?: { name: string; full_name: string }[];
   repository_selection?: string;
-}
-
-/** Map a Factory Floor status string to the canonical CloudTaskStatus enum. */
-function mapStatus(s: string): CloudTaskStatus {
-  switch (s) {
-    case 'allocating': return 'allocating';
-    case 'running': return 'running';
-    case 'needs_review': return 'input_required';
-    case 'completed': return 'completed';
-    case 'failed': return 'failed';
-    case 'cancelled': return 'cancelled';
-    default: return 'running';
-  }
 }
 
 /** Read the Rush session access token from ~/.rush/user.yaml. */
@@ -235,8 +222,14 @@ function parsePromptCode(body: string): string | null {
  *
  * Returns null when no credentials are findable — caller treats as "version
  * is installed but not signed in" and skips it from the manifest.
+ *
+ * NOTE: the darwin branch returns the UNWRAPPED oauth sub-object (what the Rush
+ * server re-wraps). It is NOT the shape Claude Code reads back from
+ * `.credentials.json`. The lease exporter (crabbox/runtimes.ts) therefore only
+ * reuses the Linux `.credentials.json` branch here and reads the wrapped raw
+ * Keychain payload itself on darwin.
  */
-async function readClaudeCredentialsBlob(home: string): Promise<string | null> {
+export async function readClaudeCredentialsBlob(home: string): Promise<string | null> {
   if (process.platform === 'darwin') {
     const oauth = await loadClaudeOauth(home);
     if (oauth && oauth.accessToken) {
@@ -329,7 +322,7 @@ export function accountTokensFingerprint(tokens: AccountTokenEntry[]): string {
  * Build the POST body for /api/v1/cloud-runs. Exported so tests can verify
  * the back-compat shape (singular fields + repos[]) without needing real
  * GitHub installations or a live Rush session. `findInstallation` is the
- * only other I/O and it's tested by the halo/proxy integration suite.
+ * only other I/O and it's tested by the cloud proxy integration suite.
  */
 export function buildDispatchBody(input: {
   agent?: string;
@@ -350,6 +343,8 @@ export function buildDispatchBody(input: {
    * MAX_IMAGES_PER_DISPATCH — extras are dropped, never sent. Omitted when empty.
    */
   images?: ImageAttachment[] | null;
+  /** Runtime env vars mounted into the cloud agent process. */
+  env?: Record<string, string> | null;
 }): Record<string, unknown> {
   if (input.resolvedRepos.length === 0) {
     throw new Error('buildDispatchBody: resolvedRepos must have at least one entry');
@@ -378,6 +373,9 @@ export function buildDispatchBody(input: {
   }
   if (input.images && input.images.length > 0) {
     body.images = input.images.slice(0, MAX_IMAGES_PER_DISPATCH);
+  }
+  if (input.env && Object.keys(input.env).length > 0) {
+    body.env = input.env;
   }
   return body;
 }
@@ -461,6 +459,7 @@ export class RushCloudProvider implements CloudProvider {
       strategy,
       skills: options.skills,
       images: options.images,
+      env: options.env,
     });
 
     let res = await api('POST', '/api/v1/cloud-runs', token, body);
@@ -514,6 +513,7 @@ export class RushCloudProvider implements CloudProvider {
           accountTokens,
           skills: options.skills,
           images: options.images,
+          env: options.env,
         });
         res = await api('POST', '/api/v1/cloud-runs', token, retryBody);
 
@@ -557,7 +557,7 @@ export class RushCloudProvider implements CloudProvider {
     return {
       id: taskId,
       provider: 'rush',
-      status: mapStatus(data.status as string),
+      status: normalizeProviderStatus('rush', data.status as string),
       agent: (data.agent as string) || undefined,
       prompt: (data.prompt as string) || '',
       repo: data.repo_owner && data.repo_name ? `${data.repo_owner}/${data.repo_name}` : undefined,
@@ -582,7 +582,7 @@ export class RushCloudProvider implements CloudProvider {
     return (data.executions ?? []).map((e) => ({
       id: e.execution_id as string,
       provider: 'rush' as const,
-      status: mapStatus(e.status as string),
+      status: normalizeProviderStatus('rush', e.status as string),
       agent: (e.agent as string) || undefined,
       prompt: (e.prompt as string) || '',
       repo: e.repo_owner && e.repo_name ? `${e.repo_owner}/${e.repo_name}` : undefined,

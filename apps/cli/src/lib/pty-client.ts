@@ -12,10 +12,22 @@ import { fileURLToPath } from 'url';
 import * as path from 'path';
 import { getSocketPath, getPtyPidPath, getPtyLogPath, isPtyServerRunning } from './pty-server.js';
 import { backgroundSpawnOptions } from './platform/process.js';
+import { BUN_VIRTUAL_ROOT } from './cli-entry.js';
 
 const CONNECT_TIMEOUT_MS = 5000;
 const RESPONSE_TIMEOUT_MS = 30000;
+const START_TIMEOUT_MS = 5000;
 const IS_WINDOWS = process.platform === 'win32';
+
+export interface ServerSpawnArgs {
+  bin: string;
+  args: string[];
+}
+
+export interface ServerExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
 
 /** JSON response envelope from the PTY server. */
 export interface PtyResponse {
@@ -48,37 +60,106 @@ async function ensureServer(): Promise<void> {
   const { bin, args } = getServerSpawnArgs();
 
   const logPath = getPtyLogPath();
-  const logFd = fs.openSync(logPath, 'a');
+  let logFd: number;
+  try {
+    logFd = fs.openSync(logPath, 'a');
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error([
+      'PTY server failed to start before spawning.',
+      `Spawned: ${formatCommand({ bin, args })}`,
+      `Log: ${logPath}`,
+      `Log open error: ${message}`,
+    ].join('\n'));
+  }
 
-  const child = spawn(bin, args, {
-    stdio: ['ignore', logFd, logFd],
-    ...backgroundSpawnOptions({ fdStdio: true }),
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(bin, args, {
+      stdio: ['ignore', logFd, logFd],
+      ...backgroundSpawnOptions({ fdStdio: true }),
+    });
+  } finally {
+    fs.closeSync(logFd);
+  }
+  let childExit: ServerExit | undefined;
+  let childError: Error | undefined;
+  let lastReadinessError: Error | undefined;
+
+  child.once('exit', (code, signal) => {
+    childExit = { code, signal };
+  });
+  child.once('error', (err) => {
+    childError = err;
   });
   child.unref();
-  fs.closeSync(logFd);
 
   // Wait for the server to become reachable. On Unix the socket file appearing is
   // a cheap readiness signal; on Windows the named pipe is not a filesystem object
   // (fs.existsSync always returns false), so we just attempt the ping directly.
   const socketPath = getSocketPath();
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (IS_WINDOWS || fs.existsSync(socketPath)) {
       // Verify we can connect
       try {
         await sendRequest({ action: 'ping' });
         return;
-      } catch {
-        // Not ready yet
+      } catch (err) {
+        lastReadinessError = err instanceof Error ? err : new Error(String(err));
       }
     }
+    if (childError || childExit) break;
     await new Promise(r => setTimeout(r, 100));
   }
 
-  throw new Error('PTY server failed to start within 5 seconds. Check ~/.agents/.system/helpers/pty/logs.jsonl');
+  throw new Error(buildPtyStartFailureMessage({
+    timeoutMs: START_TIMEOUT_MS,
+    spawn: { bin, args },
+    exit: childExit,
+    spawnError: childError,
+    lastReadinessError,
+    logPath,
+  }));
 }
 
-function getServerSpawnArgs(): { bin: string; args: string[] } {
+export function getServerSpawnArgs(
+  options: {
+    isStandaloneExecutable?: boolean;
+    /** Physical binary path (test seam). Defaults to `process.execPath`. */
+    execPath?: string;
+    /** Locate a real `node` (test seam). Defaults to `which/where node`. */
+    resolveNode?: () => string | undefined;
+    /** File-existence check (test seam). Defaults to `fs.existsSync`. */
+    fileExists?: (p: string) => boolean;
+  } = {},
+): ServerSpawnArgs {
+  const isStandaloneExecutable = options.isStandaloneExecutable
+    ?? isBunStandaloneExecutable();
+  if (isStandaloneExecutable) {
+    // A Bun `--compile` standalone binary cannot `require()` a native addon, so
+    // running the PTY sidecar AS this binary fails to load node-pty's pty.node
+    // (fatal on macOS; see #315). Prefer a real `node` running the dist/index.js
+    // that ships beside the binary — there node-pty loads from the on-disk
+    // prebuild. We can't do `<binary> dist/index.js` (the standalone misparses a
+    // script arg as a subcommand), so a genuine `node` is required. Fall back to
+    // the binary itself only when no node / no dist is found (a bare standalone
+    // install with no Node — PTY may then be unavailable, but nothing else can
+    // load the addon anyway).
+    const node = (options.resolveNode ?? resolveNodeExecutable)();
+    const exists = options.fileExists ?? fs.existsSync;
+    const execPath = options.execPath ?? process.execPath;
+    if (node) {
+      try {
+        const distIndex = path.join(path.dirname(execPath), '..', 'index.js');
+        if (exists(distIndex)) {
+          return { bin: node, args: [distIndex, 'pty', '_server'] };
+        }
+      } catch {}
+    }
+    return { bin: process.execPath, args: ['pty', '_server'] };
+  }
+
   // Prefer the dist/index.js from the same installation as this code.
   // This avoids version mismatch when a globally installed `agents` is older.
   try {
@@ -100,6 +181,78 @@ function getServerSpawnArgs(): { bin: string; args: string[] } {
   } catch {}
 
   return { bin: 'agents', args: ['pty', '_server'] };
+}
+
+export function isBunStandaloneExecutable(moduleUrl: string = import.meta.url): boolean {
+  return BUN_VIRTUAL_ROOT.test(moduleUrl);
+}
+
+/**
+ * Locate a real `node` on PATH for running the sidecar's dist/index.js from a
+ * Bun standalone binary (which cannot itself load native addons). Returns
+ * undefined when no node is found — the caller then falls back to the binary.
+ */
+function resolveNodeExecutable(): string | undefined {
+  try {
+    const lookup = IS_WINDOWS ? 'where node' : 'which node';
+    const node = execSync(lookup, { encoding: 'utf-8' }).split(/\r?\n/)[0].trim();
+    if (node && fs.existsSync(node)) return node;
+  } catch {}
+  return undefined;
+}
+
+export function readRecentLogLines(logPath: string, maxLines = 20): string[] {
+  try {
+    if (!fs.existsSync(logPath)) return [];
+    return fs.readFileSync(logPath, 'utf-8')
+      .split(/\r?\n/)
+      .filter(line => line.trim().length > 0)
+      .slice(-maxLines);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return [`Unable to read PTY server log: ${message}`];
+  }
+}
+
+export function buildPtyStartFailureMessage(details: {
+  timeoutMs: number;
+  spawn: ServerSpawnArgs;
+  exit?: ServerExit;
+  spawnError?: Error;
+  lastReadinessError?: Error;
+  logPath: string;
+}): string {
+  const lines = [
+    `PTY server failed to start within ${Math.round(details.timeoutMs / 1000)} seconds.`,
+    `Spawned: ${formatCommand(details.spawn)}`,
+  ];
+  if (details.spawnError) {
+    lines.push(`Spawn error: ${details.spawnError.message}`);
+  }
+  if (details.exit) {
+    const reason = details.exit.signal
+      ? `signal ${details.exit.signal}`
+      : `code ${details.exit.code ?? 'unknown'}`;
+    lines.push(`PTY server process exited with ${reason} before listening.`);
+  }
+  if (details.lastReadinessError) {
+    lines.push(`Last readiness error: ${details.lastReadinessError.message}`);
+  }
+  lines.push(`Log: ${details.logPath}`);
+
+  const logLines = readRecentLogLines(details.logPath);
+  if (logLines.length > 0) {
+    lines.push('Recent PTY server log:');
+    lines.push(...logLines.map(line => `  ${line}`));
+  } else {
+    lines.push('No PTY server log output was written.');
+  }
+
+  return lines.join('\n');
+}
+
+function formatCommand(spawnArgs: ServerSpawnArgs): string {
+  return [spawnArgs.bin, ...spawnArgs.args].map((part) => JSON.stringify(part)).join(' ');
 }
 
 /**

@@ -18,6 +18,7 @@ import * as yaml from 'yaml';
 import {
   AGENTS,
   ALL_AGENT_IDS,
+  accountDisplayLabel,
   getAllCliStates,
   getAccountInfo,
   resolveAgentName,
@@ -26,8 +27,12 @@ import {
   colorAgent,
 } from '../lib/agents.js';
 import type { AccountInfo } from '../lib/agents.js';
+import { loginHint } from '../lib/signin-badge.js';
 import type { AgentId } from '../lib/types.js';
+import { machineId } from '../lib/machine-id.js';
+import { authCacheKey, formatCheckedAge, readAuthHealthCache, type AuthHealth } from '../lib/auth-health.js';
 import {
+  agentReportsUsage,
   deriveUsageStatusFromSnapshot,
   formatUsageSection,
   formatUsageSummary,
@@ -54,6 +59,8 @@ import {
   removeVersion,
   printTrashFooter,
   reconcileStaleLatestForAgent,
+  isGlobalBinaryAgent,
+  getLiveVersion,
 } from '../lib/versions.js';
 import {
   getShimsDir,
@@ -78,25 +85,8 @@ import { confirm } from '@inquirer/prompts';
 import { formatPath, isInteractiveTerminal, isPromptCancelled } from './utils.js';
 import { terminalWidth, truncateToWidth, stringWidth } from '../lib/session/width.js';
 
-// Shown in the email column for agents that are signed in but expose no email
-// address locally (Antigravity stores an opaque OAuth grant with no identity).
-const SIGNED_IN_LABEL = 'signed in';
-
-/**
- * Text for the account (email) column. Prefers the real email; otherwise, for a
- * signed-in agent whose credential carries no email but does carry an opaque
- * account id (Kimi's user_id), show `id:<user_id>` so distinct accounts read
- * distinctly instead of a generic "signed in". Falls back to "signed in" when we
- * have neither (Antigravity), and empty when signed out.
- */
-function accountColumnLabel(
-  info?: Pick<AccountInfo, 'email' | 'accountId' | 'signedIn'> | null
-): string {
-  if (!info) return '';
-  if (info.email) return info.email;
-  if (info.signedIn) return info.accountId ? `id:${info.accountId}` : SIGNED_IN_LABEL;
-  return '';
-}
+/** Shared account identity formatter, re-exported for the view-specific tests. */
+export const accountColumnLabel = accountDisplayLabel;
 
 /**
  * Group profile summaries by their host harness, optionally filtered to a
@@ -313,7 +303,26 @@ function renderHostClisSection(cwd: string): void {
   }
 }
 
-async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
+/**
+ * A compact live-auth chip for a version row, read from the fleet auth-health
+ * cache (written by `agents fleet ping` / the daemon). Empty when the install
+ * hasn't been probed — this is the local "signed in" flag's ground-truth
+ * companion: ● live, ○ revoked (re-login), ◐ unverified/limited, plus its age.
+ */
+function liveAuthChip(cache: Record<string, AuthHealth>, host: string, agentId: AgentId, version: string): string {
+  const h = cache[authCacheKey(host, agentId, version)];
+  if (!h) return '';
+  const glyph = h.verdict === 'live' ? chalk.green('●')
+    : h.verdict === 'revoked' ? chalk.red('○')
+    : h.verdict === 'expired' ? chalk.yellow('○')
+    : chalk.yellow('◐');
+  return `${glyph} ${chalk.gray(formatCheckedAge(h.checkedAt))}`;
+}
+
+async function showInstalledVersions(
+  filterAgentId?: AgentId,
+  viewOpts?: { forceRefresh?: boolean },
+): Promise<void> {
   const spinnerText = filterAgentId
     ? `Checking ${agentLabel(filterAgentId)} agents...`
     : 'Checking installed agents...';
@@ -347,6 +356,10 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
   // Shim healing is silent — users don't need to know about internal repairs
 
   console.log(chalk.bold('Installed Agent CLIs\n'));
+
+  const selfHost = machineId();
+  // Read the auth-health cache once (not per version row — see the batching note above).
+  const authCache = readAuthHealthCache();
 
   // Pre-fetch account info for all versions in parallel
   const infoFetches: Promise<{ agentId: AgentId; version: string; home: string; info: AccountInfo }>[] = [];
@@ -404,7 +417,7 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
       cliVersion,
       info,
     })),
-  ]);
+  ], { forceRefresh: viewOpts?.forceRefresh });
 
   const mergeCanonical = (info: AccountInfo): AccountInfo => {
     const key = getUsageLookupKey(info);
@@ -445,6 +458,22 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
     }
   }
 
+  // For self-updating global-binary agents (droid) the on-disk version-dir name
+  // is a stale label — the real version is whatever `<cli> --version` reports.
+  // Resolve it once so every row/width pass shows the live version, while the
+  // per-version home + account lookups keep using the real dir name.
+  const liveVersionByAgent = new Map<AgentId, string>();
+  await Promise.all(
+    versionManaged
+      .filter((agentId) => isGlobalBinaryAgent(agentId))
+      .map(async (agentId) => {
+        const live = await getLiveVersion(agentId);
+        if (live) liveVersionByAgent.set(agentId, live);
+      })
+  );
+  const displayVersion = (agentId: AgentId, dirVersion: string): string =>
+    liveVersionByAgent.get(agentId) ?? dirVersion;
+
   // Show version-managed agents
   if (versionManaged.length > 0) {
     // Calculate column widths across all agents for alignment
@@ -457,7 +486,8 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
       const versions = listInstalledVersions(agentId);
       const globalDefault = getGlobalDefault(agentId);
       for (const v of versions) {
-        const label = v === globalDefault ? `${v} (default)` : v;
+        const shown = displayVersion(agentId, v);
+        const label = v === globalDefault ? `${shown} (default)` : shown;
         maxVerLabel = Math.max(maxVerLabel, label.length);
         const rawInfo = infoMap.get(`${agentId}:${v}`);
         const info = rawInfo ? mergeCanonical(rawInfo) : undefined;
@@ -480,7 +510,8 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
         const info = rawInfo ? mergeCanonical(rawInfo) : undefined;
         const usageKey = getUsageLookupKey(info);
         const usageInfo = usageKey ? usageByKey.get(usageKey) : undefined;
-        const usageStr = formatUsageSummary(info?.plan || null, usageInfo?.snapshot || null, maxPlanWidth);
+        const usageUnavailable = agentReportsUsage(agentId) && !!info?.signedIn && !usageInfo?.snapshot;
+        const usageStr = formatUsageSummary(info?.plan || null, usageInfo?.snapshot || null, maxPlanWidth, { unavailable: usageUnavailable });
         maxUsageWidth = Math.max(maxUsageWidth, visibleWidth(usageStr));
         const statusStr = formatUsageStatusBadge(info?.usageStatus);
         maxStatusWidth = Math.max(maxStatusWidth, visibleWidth(statusStr));
@@ -510,9 +541,10 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
 
       for (const version of sortedVersions) {
         const isDefault = version === globalDefault;
-        const base = isDefault ? `${version} (default)` : version;
+        const shown = displayVersion(agentId, version);
+        const base = isDefault ? `${shown} (default)` : shown;
         const padded = base.padEnd(maxVerLabel);
-        const label = isDefault ? `${version}${chalk.green(' (default)')}${' '.repeat(maxVerLabel - base.length)}` : padded;
+        const label = isDefault ? `${shown}${chalk.green(' (default)')}${' '.repeat(maxVerLabel - base.length)}` : padded;
         const rawInfo = infoMap.get(`${agentId}:${version}`);
         const vInfo = rawInfo ? mergeCanonical(rawInfo) : undefined;
         const usageKey = getUsageLookupKey(vInfo);
@@ -522,7 +554,8 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
         const parts = [`    ${label}`];
         const hasEmail = !!vInfo?.email;
         const signedIn = !!vInfo?.signedIn;
-        const usageStr = formatUsageSummary(vInfo?.plan || null, usageInfo?.snapshot || null, maxPlanWidth);
+        const usageUnavailable = agentReportsUsage(agentId) && signedIn && !usageInfo?.snapshot;
+        const usageStr = formatUsageSummary(vInfo?.plan || null, usageInfo?.snapshot || null, maxPlanWidth, { unavailable: usageUnavailable });
         const hasUsage = usageStr.length > 0;
         // Only show lastActive for versions with an actual logged-in account.
         // Otherwise it reflects install time (misleading "just now" for fresh installs).
@@ -535,7 +568,7 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
 
         if (!hasEmail && !hasUsage && !signedIn) {
           // Installed but never signed in
-          parts.push(chalk.gray('(not signed in — run ' + agent.cliCommand + ' to log in)'));
+          parts.push(chalk.gray('(logged out — log in with: ' + loginHint(agentId) + ')'));
         } else {
           if (hasEmail || hasUsage || hasActive || signedIn) {
             // Signed-in agents without a local email show their account id
@@ -559,6 +592,8 @@ async function showInstalledVersions(filterAgentId?: AgentId): Promise<void> {
         if (runDefaultBits.length > 0) {
           parts.push(chalk.gray(`run ${runDefaultBits.join(' ')}`));
         }
+        const authChip = liveAuthChip(authCache, selfHost, agentId, version);
+        if (authChip) parts.push(authChip);
 
         console.log(parts.join('  '));
         if (showPaths) {
@@ -1090,6 +1125,12 @@ export interface ViewJsonVersion {
   // Opaque account identifier when the credential exposes one but no email
   // (Kimi's user_id). Optional for backward compatibility with older consumers.
   accountId?: string | null;
+  // Claude-only raw org identity from .claude.json's oauthAccount
+  // ("claude_max", "claude_team", ...). Raw values, no display label baked in —
+  // renderers map them via formatClaudeOrgLabel/accountOrgBadge. Optional for
+  // backward compatibility with older consumers.
+  organizationType?: string | null;
+  organizationName?: string | null;
   plan: string | null;
   usageStatus: 'available' | 'rate_limited' | 'out_of_credits' | null;
   // Optional so existing TypeScript consumers compiled against the prior
@@ -1097,7 +1138,7 @@ export interface ViewJsonVersion {
   // outstanding overage credits, undefined means we haven't fetched / can't say.
   overageCredits?: { amount: number; currency: string } | null;
   windows: Array<{
-    key: 'session' | 'week' | 'sonnet_week';
+    key: 'session' | 'week' | 'sonnet_week' | 'month';
     usedPercent: number;
     resetsAt: string | null;
   }>;
@@ -1357,6 +1398,8 @@ async function collectAgentsJson(filterAgentId?: AgentId, resourceSections?: Set
       signedIn: info.signedIn,
       email: info.email,
       accountId: info.accountId,
+      organizationType: info.organizationType ?? null,
+      organizationName: info.organizationName ?? null,
       plan: info.plan,
       usageStatus: info.usageStatus,
       overageCredits: info.overageCredits,
@@ -1420,6 +1463,20 @@ interface AgentPrunePlan {
   skippedDefaults: PrunePlanEntry[];
 }
 
+/**
+ * Identity key for duplicate-install detection. Prefers accountKey — which
+ * encodes account AND org — over the bare email: two installs can share an
+ * email yet belong to different orgs (a personal Max plan and a Team seat),
+ * and grouping those by email alone would propose pruning a live account.
+ * Falls back to the lowercased email for agents whose credentials expose no
+ * identity key. Null when there is no usable identity.
+ */
+export function pruneGroupKey(
+  info: Pick<AccountInfo, 'accountKey' | 'email'>
+): string | null {
+  return info.accountKey ?? info.email?.toLowerCase() ?? null;
+}
+
 async function buildAgentPrunePlan(agentId: AgentId): Promise<AgentPrunePlan> {
   const dirInfos = listInstalledVersionDirs(agentId);
   const entries = await Promise.all(
@@ -1438,16 +1495,17 @@ async function buildAgentPrunePlan(agentId: AgentId): Promise<AgentPrunePlan> {
   // working binary — those are the things that compete for "the live install
   // for this account."
   const installed = entries.filter((e) => e.hasBinary);
-  const byEmail = new Map<string, typeof installed>();
+  const byAccount = new Map<string, typeof installed>();
   for (const e of installed) {
     if (!e.info.email) continue;
-    const key = e.info.email.toLowerCase();
-    const list = byEmail.get(key) ?? [];
+    const key = pruneGroupKey(e.info);
+    if (!key) continue;
+    const list = byAccount.get(key) ?? [];
     list.push(e);
-    byEmail.set(key, list);
+    byAccount.set(key, list);
   }
 
-  for (const [, group] of byEmail) {
+  for (const [, group] of byAccount) {
     if (group.length < 2) continue;
     const sorted = [...group].sort((a, b) => compareVersions(b.version, a.version));
     const keeper = sorted[0].version;
@@ -1640,8 +1698,12 @@ export async function viewAction(
     dryRun?: boolean;
     resources?: string | boolean;
     detailed?: boolean;
+    refresh?: boolean;
+    live?: boolean;
   } & ViewSectionFilter,
 ): Promise<void> {
+  // --live is a shorter-to-type alias of --refresh; both force a live probe.
+  const forceRefresh = options?.refresh === true || options?.live === true;
   // --resources / --detailed imply --json (they only shape structured output).
   const explicitResources = options?.detailed === true || options?.resources !== undefined;
   const json = options?.json === true || explicitResources;
@@ -1684,7 +1746,7 @@ export async function viewAction(
       return;
     }
     // No argument: show all installed versions
-    await showInstalledVersions();
+    await showInstalledVersions(undefined, { forceRefresh });
     return;
   }
 
@@ -1746,7 +1808,7 @@ export async function viewAction(
     await showAgentResources(agentId, 'default', filter);
   } else {
     // Just agent name: show versions for that agent
-    await showInstalledVersions(agentId);
+    await showInstalledVersions(agentId, { forceRefresh });
   }
 }
 
@@ -1757,6 +1819,8 @@ export function registerViewCommand(program: Command): void {
     .option('--json', 'Emit machine-readable JSON (version list, usage, signed-in status).')
     .option('--resources [sections]', 'In --json mode, include each version\'s resources: "all" (default) or a comma list (skills,plugins,mcp,commands,workflows,memory,hooks). Implies --json.')
     .option('--detailed', 'Include all resources in --json output (alias for --resources all). Implies --json.')
+    .option('-r, --refresh', 'Force a live usage refresh, bypassing the cache (slower). Repopulates the S:/W: limit bars for every account whose token is reachable.')
+    .option('--live', 'Alias of --refresh (shorter to type).')
     .option('--prune', 'Remove older installed versions that share an account with a newer installed version. Skips the global default.')
     .option('--dry-run', 'With --prune, show duplicate versions without deleting')
     .option('-y, --yes', 'Skip the prune confirmation prompt.')
@@ -1824,6 +1888,7 @@ Output:
         dryRun?: boolean;
         resources?: string | boolean;
         detailed?: boolean;
+        refresh?: boolean;
       } & ViewSectionFilter,
     ) => viewAction(agentArg, options));
 }

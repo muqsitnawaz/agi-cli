@@ -15,11 +15,13 @@ import * as yaml from 'yaml';
 
 import {
   isDaemonRunning,
+  isDaemonWedged,
   signalDaemonReload,
   startDaemon,
   stopDaemon,
   readDaemonPid,
   readDaemonLog,
+  getDaemonStatus,
 } from '../lib/daemon.js';
 import { humanizeCron, humanizeNextRun, formatRepoLink, REPO_DISPLAY_MAX } from '../lib/routines-format.js';
 import {
@@ -34,17 +36,23 @@ import {
   getRunDir,
   getJobPath,
   parseAtTime,
+  jobRunsOnThisDevice,
+  checkJobDeviceEligibility,
+  normalizeTriggerEvent,
 } from '../lib/routines.js';
-import type { JobConfig } from '../lib/routines.js';
-import { fireWebhookJobs, matchJobsToWebhook, type GithubWebhook } from '../lib/triggers/webhook.js';
+import type { JobConfig, JobTrigger, LinearTriggerEvent, RunMeta } from '../lib/routines.js';
+import { fireWebhookJobs, matchJobsToWebhook, type IncomingWebhook, type WebhookSource } from '../lib/triggers/webhook.js';
 import { getRoutinesDir } from '../lib/state.js';
 import { IS_WINDOWS } from '../lib/platform/index.js';
 import { safeJoin } from '../lib/paths.js';
-import { executeJob, executeJobDetached } from '../lib/runner.js';
+import { executeJob, executeJobDetached, monitorRunningJobs } from '../lib/runner.js';
 import { JobScheduler } from '../lib/scheduler.js';
 import { detectOverdueJobs } from '../lib/overdue.js';
 import { isInteractiveTerminal, requireInteractiveSelection } from './utils.js';
 import { setHelpSections } from '../lib/help.js';
+import { loadDevices } from '../lib/devices/registry.js';
+import { machineId, normalizeHost } from '../lib/machine-id.js';
+import { addHostOption } from '../lib/hosts/option.js';
 
 /**
  * Human-friendly wall-clock a run took (e.g. "  · 3 min", "  · 45 sec"), or ""
@@ -71,28 +79,90 @@ export function formatRunDuration(startedAt: string, completedAt: string | null)
 function fireConditionLabel(job: JobConfig): string {
   if (job.schedule) return humanizeCron(job.schedule, job.timezone);
   if (job.trigger) {
-    const scope = job.trigger.repo
-      ? ` (${job.trigger.repo}${job.trigger.branch ? `@${job.trigger.branch}` : ''})`
-      : '';
-    return `on ${job.trigger.event}${scope}`;
+    if (job.trigger.type === 'github_event') {
+      const scope = job.trigger.repo
+        ? ` (${job.trigger.repo}${job.trigger.branch ? `@${job.trigger.branch}` : ''})`
+        : '';
+      const filters = [
+        job.trigger.action ? `action=${job.trigger.action}` : null,
+        job.trigger.label ? `label=${job.trigger.label}` : null,
+      ].filter(Boolean).join(', ');
+      return `on github:${job.trigger.event}${scope}${filters ? ` (${filters})` : ''}`;
+    }
+    const filters = [
+      job.trigger.action ? `action=${job.trigger.action}` : null,
+      job.trigger.teamKey ? `team=${job.trigger.teamKey}` : null,
+      job.trigger.label ? `label=${job.trigger.label}` : null,
+    ].filter(Boolean).join(', ');
+    return `on linear:${job.trigger.event}${filters ? ` (${filters})` : ''}`;
   }
   return '-';
 }
 
-/** Start or reload the background scheduler so newly-added jobs fire on time. */
-function ensureSchedulerRunning(): void {
+function parseRoutineTrigger(options: Record<string, unknown>): JobTrigger | undefined {
+  const raw = typeof options.on === 'string' ? options.on : undefined;
+  if (!raw) return undefined;
+  const [sourceMaybe, eventMaybe] = raw.includes(':') ? raw.split(':', 2) : ['github', raw];
+  if (sourceMaybe === 'github') {
+    const event = normalizeTriggerEvent(eventMaybe);
+    if (!event) throw new Error(`Unknown GitHub trigger event '${eventMaybe}'`);
+    const trigger: JobTrigger = { type: 'github_event', event };
+    if (typeof options.repo === 'string') trigger.repo = options.repo;
+    if (typeof options.branch === 'string') trigger.branch = options.branch;
+    if (typeof options.action === 'string') trigger.action = options.action;
+    if (typeof options.label === 'string') trigger.label = options.label;
+    return trigger;
+  }
+  if (sourceMaybe === 'linear') {
+    const trigger: JobTrigger = { type: 'linear_event', event: eventMaybe as LinearTriggerEvent };
+    if (typeof options.action === 'string') trigger.action = options.action;
+    if (typeof options.teamKey === 'string') trigger.teamKey = options.teamKey;
+    if (typeof options.label === 'string') trigger.label = options.label;
+    return trigger;
+  }
+  throw new Error('--on source must be github or linear');
+}
+
+/**
+ * Start or reload the background scheduler so newly-added jobs fire on time.
+ * `quiet` suppresses human status lines for JSON callers.
+ */
+function ensureSchedulerRunning(opts: { quiet?: boolean; stderr?: boolean } = {}): void {
+  const log = opts.stderr ? console.error : console.log;
   if (isDaemonRunning()) {
     signalDaemonReload();
-    console.log(chalk.gray('Scheduler reloaded'));
+    if (!opts.quiet) log(chalk.gray('Scheduler reloaded'));
     return;
   }
   const result = startDaemon();
+  if (opts.quiet) return;
   if (result.pid) {
-    console.log(chalk.green(`Scheduler started (PID: ${result.pid}). It will run in the background and fire routines on schedule.`));
-    console.log(chalk.gray(`Stop anytime with: agents routines stop`));
+    log(chalk.green(`Scheduler started (PID: ${result.pid}). It will run in the background and fire routines on schedule.`));
+    log(chalk.gray(`Stop anytime with: agents routines stop`));
   } else {
-    console.log(chalk.yellow('Could not start the scheduler. Start it manually with: agents routines start'));
+    log(chalk.yellow('Could not start the scheduler. Start it manually with: agents routines start'));
   }
+}
+
+function writeJson(payload: unknown): void {
+  process.stdout.write(JSON.stringify(payload) + '\n');
+}
+
+function runMetaJson(run: RunMeta): Record<string, unknown> {
+  return {
+    jobId: run.jobName,
+    jobName: run.jobName,
+    runId: run.runId,
+    status: run.status,
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+    exitCode: run.exitCode,
+    errorMessage: run.errorMessage ?? null,
+  };
+}
+
+export function buildRunsJson(runs: RunMeta[]): Record<string, unknown>[] {
+  return runs.map(runMetaJson);
 }
 
 /** Detect Ctrl+C or premature stream close during an interactive prompt. */
@@ -142,7 +212,7 @@ async function pickJob(
       message,
       choices: jobs.map((job) => ({
         value: job.name,
-        name: `${job.name} ${chalk.gray(`(${job.workflow ? `wf:${job.workflow}` : job.agent}, ${job.schedule ?? fireConditionLabel(job)})`)}`,
+        name: `${job.name} ${chalk.gray(`(${job.command ? 'command' : job.workflow ? `wf:${job.workflow}` : job.agent}, ${job.schedule ?? fireConditionLabel(job)})`)}`,
       })),
     });
   } catch (err) {
@@ -154,11 +224,36 @@ async function pickJob(
   }
 }
 
+/**
+ * Parse a comma-separated devices string, normalize, deduplicate, and validate
+ * each entry against the registered fleet. Exits nonzero on empty/whitespace
+ * input or unknown devices.
+ */
+async function parseAndValidateDevices(raw: string): Promise<string[]> {
+  const names = [...new Set(raw.split(',').map((s) => s.trim()).filter(Boolean).map((s) => normalizeHost(s)))];
+  if (names.length === 0) {
+    console.log(chalk.red('--devices requires at least one non-empty device name'));
+    process.exit(1);
+  }
+  const registry = await loadDevices();
+  const registered = new Set(Object.keys(registry).map((k) => normalizeHost(k)));
+  const unknown = names.filter((n) => !registered.has(n));
+  if (unknown.length > 0) {
+    console.log(chalk.red(`Unknown device(s): ${unknown.join(', ')}`));
+    console.log(chalk.gray(`Registered: ${[...registered].sort().join(', ') || '(none)'}`));
+    console.log(chalk.gray('Enroll devices with: agents devices sync'));
+    process.exit(1);
+  }
+  return names;
+}
+
 /** Register the `agents routines` command tree. */
 export function registerRoutinesCommands(program: Command): void {
   const routinesCmd = program
     .command('routines')
     .description('Schedule agents to run on a cron schedule or at a specific time. The scheduler auto-starts on first add.');
+
+  addHostOption(routinesCmd);
 
   setHelpSections(routinesCmd, {
     examples: `
@@ -173,6 +268,15 @@ export function registerRoutinesCommands(program: Command): void {
 
       # List all routines and their next run times
       agents routines list
+
+      # List routines on a specific device
+      agents routines list --host yosemite-s0
+
+      # Create a routine restricted to specific devices
+      agents routines add nightly --schedule "0 2 * * *" --agent claude --prompt "Summarize today's commits" --devices yosemite-s0,mac-mini
+
+      # Interactively manage which devices may run a routine
+      agents routines devices nightly
 
       # Run a routine right now in the foreground (ignores schedule)
       agents routines run daily-standup
@@ -189,6 +293,18 @@ export function registerRoutinesCommands(program: Command): void {
 
       The background scheduler auto-starts the first time you add a routine.
       Manage it with 'agents routines start|stop|status'.
+
+      Version / credit failover (same semantics as 'agents run'):
+        - Omit 'version:' to let the configured run strategy (default: balanced)
+          pick a healthy install and skip accounts that are out of credits or
+          rate-limited. Pin with 'version: 2.1.x' when you want one install only.
+        - Foreground 'agents routines run' re-dispatches to the next healthy
+          same-agent account when a mid-run rate/usage limit is detected.
+        - Detached/daemon fires use the pre-flight pick only (next tick re-selects).
+        - Diagnostic lines log which account was picked, which were skipped, and
+          each failover hop: look for "[agents] routine <name>:" in the run log.
+        - Headless Claude auth: store CLAUDE_CODE_OAUTH_TOKEN in the 'claude'
+          secrets bundle so the daemon can inject it into routine spawns.
     `,
   });
 
@@ -197,6 +313,7 @@ export function registerRoutinesCommands(program: Command): void {
     .description('See all scheduled jobs, when they run next, and their last execution status')
     .option('--json', 'Emit machine-readable JSON instead of the table (used by the menu bar helper)')
     .action((options: { json?: boolean }) => {
+      try { monitorRunningJobs(); } catch { /* best-effort orphan reap */ }
       const jobs = listAllJobs(process.cwd());
       if (jobs.length === 0) {
         if (options.json) {
@@ -230,16 +347,22 @@ export function registerRoutinesCommands(program: Command): void {
             name: job.name,
             agent: job.agent ?? null,
             workflow: job.workflow ?? null,
+            command: job.command ?? null,
             repo: job.repo ?? null,
             schedule: job.schedule ?? null,
             scheduleHuman: fireConditionLabel(job),
             trigger: job.trigger ?? null,
             timezone: job.timezone ?? null,
+            devices: job.devices ?? [],
+            host: job.host ?? null,
+            runsHere: jobRunsOnThisDevice(job),
             enabled: job.enabled,
             overdue: overdueSet.has(job.name),
             nextRun: nextRun ? nextRun.toISOString() : null,
             nextRunHuman: humanizeNextRun(nextRun ?? null, nowJson, job.timezone),
             lastStatus: latestRun?.status ?? null,
+            exitCode: latestRun?.exitCode ?? null,
+            failureReason: latestRun?.errorMessage ?? null,
             lastRunStartedAt: latestRun?.startedAt ?? null,
             lastRunCompletedAt: latestRun?.completedAt ?? null,
           };
@@ -262,14 +385,15 @@ export function registerRoutinesCommands(program: Command): void {
       const NAME_W = 24;
       const AGENT_W = 10;
       const REPO_W = REPO_DISPLAY_MAX;
+      const DEVICE_W = 22;
       const SCHED_W = 22;
       const ENABLED_W = 10;
       const NEXT_W = 22;
 
       const header =
-        `  ${'Name'.padEnd(NAME_W)} ${'Agent'.padEnd(AGENT_W)} ${'Repo'.padEnd(REPO_W)} ${'Schedule'.padEnd(SCHED_W)} ${'Enabled'.padEnd(ENABLED_W)} ${'Next Run'.padEnd(NEXT_W)} Last Status`;
+        `  ${'Name'.padEnd(NAME_W)} ${'Agent'.padEnd(AGENT_W)} ${'Repo'.padEnd(REPO_W)} ${'Devices'.padEnd(DEVICE_W)} ${'Schedule'.padEnd(SCHED_W)} ${'Enabled'.padEnd(ENABLED_W)} ${'Next Run'.padEnd(NEXT_W)} Last Status`;
       console.log(chalk.gray(header));
-      console.log(chalk.gray('  ' + '-'.repeat(NAME_W + AGENT_W + REPO_W + SCHED_W + ENABLED_W + NEXT_W + 20)));
+      console.log(chalk.gray('  ' + '-'.repeat(NAME_W + AGENT_W + REPO_W + DEVICE_W + SCHED_W + ENABLED_W + NEXT_W + 20)));
 
       for (const job of jobs) {
         const nextRun = scheduler.getNextRun(job.name);
@@ -295,6 +419,22 @@ export function registerRoutinesCommands(program: Command): void {
         const enabledWord = job.enabled ? 'yes' : 'no';
         const enabledPad = Math.max(0, ENABLED_W - enabledWord.length);
 
+        // Placement (`→host`) rides in the Devices cell: eligibility →execution.
+        const deviceFull = [job.devices?.join(',') ?? '', job.host ? `→${job.host}` : '']
+          .filter(Boolean)
+          .join(' ');
+        const deviceWord = deviceFull.length === 0
+          ? 'all'
+          : deviceFull.length > DEVICE_W
+            ? deviceFull.slice(0, DEVICE_W - 1) + '…'
+            : deviceFull;
+        const deviceCell = deviceFull.length === 0
+          ? chalk.gray('all')
+          : jobRunsOnThisDevice(job)
+            ? deviceWord
+            : chalk.gray(deviceWord);
+        const devicePad = Math.max(0, DEVICE_W - deviceWord.length);
+
         const statusColor =
           lastStatus === 'completed' ? chalk.green
           : lastStatus === 'failed' ? chalk.red
@@ -303,11 +443,13 @@ export function registerRoutinesCommands(program: Command): void {
 
         const overdueTag = overdueSet.has(job.name) ? chalk.yellow(' (overdue)') : '';
 
-        const agentLabelPadded = job.workflow
-          ? chalk.magenta(`wf:${job.workflow}`.padEnd(10))
-          : (job.agent || '').padEnd(10);
+        const agentLabelPadded = job.command
+          ? chalk.magenta('command'.padEnd(10))
+          : job.workflow
+            ? chalk.magenta(`wf:${job.workflow}`.padEnd(10))
+            : (job.agent || '').padEnd(10);
         console.log(
-          `  ${chalk.cyan(job.name.padEnd(NAME_W))} ${agentLabelPadded} ${repoCell}${' '.repeat(repoPadding)} ${schedStr.padEnd(SCHED_W)} ${enabledStr}${' '.repeat(enabledPad)} ${chalk.gray(nextStr.padEnd(NEXT_W))} ${statusColor(lastStatus)}${overdueTag}`
+          `  ${chalk.cyan(job.name.padEnd(NAME_W))} ${agentLabelPadded} ${repoCell}${' '.repeat(repoPadding)} ${deviceCell}${' '.repeat(devicePad)} ${schedStr.padEnd(SCHED_W)} ${enabledStr}${' '.repeat(enabledPad)} ${chalk.gray(nextStr.padEnd(NEXT_W))} ${statusColor(lastStatus)}${overdueTag}`
         );
       }
 
@@ -326,87 +468,142 @@ export function registerRoutinesCommands(program: Command): void {
     .option('-s, --schedule <cron>', 'Cron schedule in standard format (5 fields: minute hour day month weekday)')
     .option('-a, --agent <agent>', 'Which agent runs this routine: claude, codex, gemini, cursor, or opencode')
     .option('--workflow <name>', 'Run an installed workflow (~/.agents/workflows/<name>) via `agents run`. Mutually exclusive with --agent.')
+    .option('--command <sh>', 'Run a plain shell command directly (no agent, no auth, no sandbox) — for deterministic housekeeping routines. Mutually exclusive with --agent and --workflow; --prompt is not used.')
     .option('-p, --prompt <prompt>', 'Task instruction for the agent')
-    .option('-m, --mode <mode>', "Execution mode: plan (read-only), edit (can write files), auto (smart classifier), or skip (bypass all permission prompts). 'full' accepted as alias for skip.", 'plan')
+    .option('-m, --mode <mode>', "Execution mode: plan (read-only), edit (can write files), auto (smart classifier, the default), or skip (bypass all permission prompts). 'full' accepted as alias for skip.", 'auto')
     .option('-e, --effort <effort>', 'Reasoning effort: low | medium | high | xhigh | max | auto', 'auto')
     .option('-t, --timeout <timeout>', 'Kill the agent if it runs longer than this (e.g., 10m, 2h, 3d, 1w; max 1w)', '10m')
     .option('--timezone <tz>', 'Interpret schedule in this timezone (e.g., America/Los_Angeles)')
+    .option('--devices <names>', 'Fleet allowlist (comma-separated): only listed devices schedule and fire this routine. Omit for unrestricted.')
+    .option('--run-on <name>', 'Execute the job body on this machine over SSH (a registered host, device, capability tag, or user@host). Placement, not eligibility — see --devices. Auto-pins devices to THIS machine unless --devices is given.')
+    .option('--run-cwd <dir>', 'Working directory on the --run-on host (--remote-cwd is taken by the remote-management passthrough)')
     .option('--at <time>', 'One-shot mode: run once at this time (e.g., "14:30" or "2026-02-24 09:00"), then disable')
+    .option('--on <source:event>', 'Webhook trigger instead of/in addition to a schedule: github:pull_request or linear:Issue')
+    .option('--repo <owner/name>', 'GitHub repo filter for --on github:<event>')
+    .option('--branch <name>', 'GitHub branch filter for --on github:<event>')
+    .option('--action <name>', 'Webhook action filter for --on triggers (GitHub: labeled/opened; Linear: update)')
+    .option('--team-key <key>', 'Linear team key filter for --on linear:<event> (e.g. RUSH)')
+    .option('--label <name>', 'Label filter for --on triggers (GitHub label name or Linear issue label)')
     .option('--end-at <iso>', 'Stop firing on or after this ISO 8601 timestamp (e.g., "2026-12-31T23:59:00Z"); routine auto-disables.')
     .option('--disabled', 'Create the routine but keep it paused (enable later with resume)')
+    .option('--resume <sessionId>', 'At fire time, resume this existing session id (via `agents run <agent> --resume`) instead of starting fresh — the actual session reopens with full context and the prompt becomes its next turn. Powers self-scheduled wake-ups (e.g. /hibernate). Requires --agent claude or codex; runs un-sandboxed (the session store lives in the real home, not the job overlay).')
+    .option('--json', 'Emit machine-readable JSON with the created routine id and status')
     .action(async (nameOrPath: string | undefined, options) => {
       // Check if inline mode (has flags) or file mode
-      const hasInlineFlags = options.schedule || options.agent || options.workflow || options.prompt || options.at;
+      const hasInlineFlags = options.schedule || options.agent || options.workflow || options.command || options.prompt || options.at || options.on;
 
       if (hasInlineFlags) {
         // Inline mode: create job from flags
         if (!nameOrPath) {
-          console.log(chalk.red('Job name is required'));
-          console.log(chalk.gray('Usage: agents routines add <name> --schedule "..." --agent <agent> --prompt "..."'));
+          console.error(chalk.red('Job name is required'));
+          console.error(chalk.gray('Usage: agents routines add <name> --schedule "..." --agent <agent> --prompt "..."'));
           process.exit(1);
         }
 
-        // Validate mutually exclusive --agent / --workflow
-        if (options.agent && options.workflow) {
-          console.log(chalk.red('--agent and --workflow are mutually exclusive; specify exactly one'));
+        // Validate mutually exclusive --agent / --workflow / --command
+        if ([options.agent, options.workflow, options.command].filter(Boolean).length > 1) {
+          console.error(chalk.red('--agent, --workflow, and --command are mutually exclusive; specify exactly one'));
           process.exit(1);
         }
 
         let schedule = options.schedule;
+        let trigger: JobTrigger | undefined;
         let runOnce = false;
+        try {
+          trigger = parseRoutineTrigger(options);
+        } catch (err) {
+          console.error(chalk.red((err as Error).message));
+          process.exit(1);
+        }
 
         // Handle --at for one-shot jobs
         if (options.at) {
           const parsed = parseAtTime(options.at);
           if (!parsed) {
-            console.log(chalk.red(`Invalid --at format: ${options.at}`));
-            console.log(chalk.gray('Supported formats: "14:30" or "2026-02-24 09:00"'));
+            console.error(chalk.red(`Invalid --at format: ${options.at}`));
+            console.error(chalk.gray('Supported formats: "14:30" or "2026-02-24 09:00"'));
             process.exit(1);
           }
           schedule = parsed.schedule;
           runOnce = parsed.runOnce;
         }
 
-        if (!schedule) {
-          console.log(chalk.red('Schedule is required (use --schedule or --at)'));
+        if (!schedule && !trigger) {
+          console.error(chalk.red('Schedule or trigger is required (use --schedule, --at, or --on)'));
           process.exit(1);
         }
 
-        if (!options.agent && !options.workflow) {
-          console.log(chalk.red('An agent or workflow is required (use --agent or --workflow)'));
+        if (!options.agent && !options.workflow && !options.command) {
+          console.error(chalk.red('An agent, workflow, or command is required (use --agent, --workflow, or --command)'));
           process.exit(1);
         }
 
-        if (!options.prompt) {
-          console.log(chalk.red('Prompt is required (use --prompt)'));
+        // Command routines run a plain shell and take no prompt; agent/workflow routines require one.
+        if (!options.command && !options.prompt) {
+          console.error(chalk.red('Prompt is required (use --prompt)'));
           process.exit(1);
+        }
+
+        // Parse and validate --devices against the fleet registry.
+        let devices: string[] | undefined;
+        if (options.devices !== undefined) {
+          devices = await parseAndValidateDevices(options.devices);
+        }
+
+        // --run-on without a --devices pin would fire on EVERY daemon in the
+        // fleet, each dispatching to the same host — duplicate runs. Pin to
+        // this machine unless the user chose an explicit eligibility set.
+        if (options.runOn && !devices) {
+          devices = [machineId()];
+          console.error(chalk.gray(`--run-on set with no --devices: pinned firing to this machine (${devices[0]}).`));
         }
 
         const config: JobConfig = {
           name: nameOrPath,
-          schedule,
-          agent: options.agent,
+          ...(schedule ? { schedule } : {}),
+          ...(trigger ? { trigger } : {}),
+          ...(options.agent ? { agent: options.agent } : {}),
           ...(options.workflow ? { workflow: options.workflow } : {}),
+          ...(options.command ? { command: options.command } : {}),
           mode: options.mode,
           effort: options.effort,
           timeout: options.timeout,
           enabled: !options.disabled,
-          prompt: options.prompt,
+          prompt: options.prompt ?? '',
           timezone: options.timezone,
+          ...(devices ? { devices } : {}),
+          ...(options.runOn ? { host: options.runOn } : {}),
+          ...(options.runCwd ? { remoteCwd: options.runCwd } : {}),
           ...(runOnce ? { runOnce: true } : {}),
           ...(options.endAt ? { endAt: options.endAt } : {}),
+          ...(options.resume ? { resume: options.resume } : {}),
         };
 
         const errors = validateJob(config);
         if (errors.length > 0) {
-          console.log(chalk.red('Validation errors:'));
+          console.error(chalk.red('Validation errors:'));
           for (const err of errors) {
-            console.log(chalk.red(`  - ${err}`));
+            console.error(chalk.red(`  - ${err}`));
           }
           process.exit(1);
         }
 
         writeJob(config);
+        if (options.json) {
+          writeJson({
+            ok: true,
+            added: nameOrPath,
+            job: config,
+            jobId: config.name,
+            name: config.name,
+            status: 'added',
+            enabled: config.enabled,
+            schedule: config.schedule ?? null,
+            trigger: config.trigger ?? null,
+          });
+          ensureSchedulerRunning({ quiet: true });
+          return;
+        }
         console.log(chalk.green(`Job '${nameOrPath}' added`));
         if (runOnce) {
           console.log(chalk.gray(`One-shot job scheduled for: ${options.at}`));
@@ -416,15 +613,15 @@ export function registerRoutinesCommands(program: Command): void {
       } else {
         // File mode: load from YAML file
         if (!nameOrPath) {
-          console.log(chalk.red('File path or job name with flags is required'));
-          console.log(chalk.gray('Usage: agents routines add <path-to-job.yml>'));
-          console.log(chalk.gray('   or: agents routines add <name> --schedule "..." --agent <agent> --prompt "..."'));
+          console.error(chalk.red('File path or job name with flags is required'));
+          console.error(chalk.gray('Usage: agents routines add <path-to-job.yml>'));
+          console.error(chalk.gray('   or: agents routines add <name> --schedule "..." --agent <agent> --prompt "..."'));
           process.exit(1);
         }
 
         const resolved = path.resolve(nameOrPath);
         if (!fs.existsSync(resolved)) {
-          console.log(chalk.red(`File not found: ${resolved}`));
+          console.error(chalk.red(`File not found: ${resolved}`));
           process.exit(1);
         }
 
@@ -433,7 +630,7 @@ export function registerRoutinesCommands(program: Command): void {
         try {
           parsed = yaml.parse(content);
         } catch (err) {
-          console.log(chalk.red(`Invalid YAML: ${(err as Error).message}`));
+          console.error(chalk.red(`Invalid YAML: ${(err as Error).message}`));
           process.exit(1);
         }
 
@@ -442,22 +639,44 @@ export function registerRoutinesCommands(program: Command): void {
 
         const errors = validateJob(parsed);
         if (errors.length > 0) {
-          console.log(chalk.red('Validation errors:'));
+          console.error(chalk.red('Validation errors:'));
           for (const err of errors) {
-            console.log(chalk.red(`  - ${err}`));
+            console.error(chalk.red(`  - ${err}`));
           }
           process.exit(1);
         }
 
         const config: JobConfig = {
-          mode: 'plan',
+          mode: 'auto',
           effort: 'auto',
           timeout: '10m',
           enabled: true,
           ...parsed,
         } as JobConfig;
 
+        // Same duplicate-fire guard as the --run-on flag: a host-placed routine
+        // with no eligibility pin would fire from every daemon in the fleet.
+        if (config.host && (!config.devices || config.devices.length === 0)) {
+          config.devices = [machineId()];
+          console.error(chalk.gray(`host: set with no devices pin: pinned firing to this machine (${config.devices[0]}).`));
+        }
+
         writeJob(config);
+        if (options.json) {
+          writeJson({
+            ok: true,
+            added: name,
+            job: config,
+            jobId: config.name,
+            name: config.name,
+            status: 'added',
+            enabled: config.enabled,
+            schedule: config.schedule ?? null,
+            trigger: config.trigger ?? null,
+          });
+          ensureSchedulerRunning({ quiet: true });
+          return;
+        }
         console.log(chalk.green(`Job '${name}' added`));
 
         ensureSchedulerRunning();
@@ -568,13 +787,22 @@ export function registerRoutinesCommands(program: Command): void {
   routinesCmd
     .command('runs [name]')
     .description('See execution history: run IDs, completion status, and start times (up to last 10 runs)')
-    .action(async (name: string | undefined) => {
+    .option('--json', 'Emit machine-readable JSON with run ids and statuses')
+    .action(async (name: string | undefined, options: { json?: boolean }) => {
       if (!name) {
         name = await pickJob('Select job to view runs', undefined, ['agents routines runs <name>']) ?? undefined;
         if (!name) return;
       }
 
       const runs = listRuns(name);
+      if (options.json) {
+        writeJson({
+          jobId: name,
+          name,
+          runs: buildRunsJson(runs.slice(-10)),
+        });
+        return;
+      }
       if (runs.length === 0) {
         console.log(chalk.yellow(`No runs found for job '${name}'`));
         return;
@@ -594,7 +822,8 @@ export function registerRoutinesCommands(program: Command): void {
   routinesCmd
     .command('run [name]')
     .description('Execute a routine right now in the foreground. Ignores the schedule; useful for testing before enabling.')
-    .action(async (name: string | undefined) => {
+    .option('--json', 'Emit machine-readable JSON with the run id and status')
+    .action(async (name: string | undefined, options: { json?: boolean }) => {
       if (!name) {
         name = await pickJob('Select job to run', undefined, ['agents routines run <name>']) ?? undefined;
         if (!name) return;
@@ -608,33 +837,65 @@ export function registerRoutinesCommands(program: Command): void {
       // the trusted user layer.
       const job = readJob(name);
       if (!job) {
-        console.log(chalk.red(`Job '${name}' not found`));
+        if (options.json) {
+          writeJson({ error: `Job '${name}' not found` });
+          process.exit(1);
+        }
+        console.error(chalk.red(`Job '${name}' not found`));
         process.exit(1);
       }
 
-      const runLabel = job.workflow ? `workflow: ${job.workflow}` : `agent: ${job.agent}`;
-      console.log(chalk.bold(`Running job '${name}' (${runLabel}, mode: ${job.mode})\n`));
-      const spinner = ora('Executing...').start();
+      const eligibility = checkJobDeviceEligibility(job);
+      if (eligibility) {
+        if (options.json) {
+          writeJson({ error: eligibility.message, hint: eligibility.suggestion });
+          process.exit(1);
+        }
+        console.error(chalk.red(eligibility.message));
+        console.error(chalk.gray(`  ${eligibility.suggestion}`));
+        process.exit(1);
+      }
+
+      const runLabel = job.command ? 'command' : job.workflow ? `workflow: ${job.workflow}` : `agent: ${job.agent}`;
+      // A spinner writes to stderr but its human framing is noise for a JSON consumer.
+      const spinner = options.json ? null : ora('Executing...').start();
+      if (!options.json) console.log(chalk.bold(`Running job '${name}' (${runLabel}, mode: ${job.mode})\n`));
 
       try {
         const result = await executeJob(job);
+        const logPath = `${getRunDir(name, result.meta.runId)}/stdout.log`;
+        if (options.json) {
+          writeJson({
+            ok: true,
+            job: name,
+            logDir: getRunDir(name, result.meta.runId),
+            ...runMetaJson(result.meta),
+            logPath,
+            reportPath: result.reportPath ?? null,
+          });
+          return;
+        }
         if (result.meta.status === 'completed') {
-          spinner.succeed(`Job completed (exit code: ${result.meta.exitCode})`);
+          spinner!.succeed(`Job completed (exit code: ${result.meta.exitCode})`);
         } else if (result.meta.status === 'timeout') {
-          spinner.warn(`Job timed out after ${job.timeout}`);
+          spinner!.warn(`Job timed out after ${job.timeout}`);
         } else {
-          spinner.fail(`Job failed (exit code: ${result.meta.exitCode})`);
+          spinner!.fail(`Job failed (exit code: ${result.meta.exitCode})`);
         }
 
         console.log(chalk.gray(`  Run: ${result.meta.runId}`));
-        console.log(chalk.gray(`  Log: ${getRunDir(name, result.meta.runId)}/stdout.log`));
+        console.log(chalk.gray(`  Log: ${logPath}`));
 
         if (result.reportPath) {
           console.log(chalk.bold('\nReport:\n'));
           console.log(fs.readFileSync(result.reportPath, 'utf-8'));
         }
       } catch (err) {
-        spinner.fail('Execution failed');
+        if (options.json) {
+          writeJson({ error: (err as Error).message });
+          process.exit(1);
+        }
+        spinner!.fail('Execution failed');
         console.error(chalk.red((err as Error).message));
         process.exit(1);
       }
@@ -690,11 +951,17 @@ export function registerRoutinesCommands(program: Command): void {
 
   routinesCmd
     .command('webhook')
-    .description('Fire trigger-based routines from a single GitHub webhook payload (read from --file or stdin). One-shot: matches and fires, then exits. For a long-running receiver, run this behind your own HTTP forwarder.')
-    .requiredOption('--event <name>', 'GitHub event name, as sent in the X-GitHub-Event header (e.g. pull_request, push, workflow_run)')
+    .description('Fire trigger-based routines from a single webhook payload (read from --file or stdin). One-shot: matches and fires, then exits.')
+    .option('--source <name>', 'Webhook source: github or linear', 'github')
+    .requiredOption('--event <name>', 'Source event name: GitHub X-GitHub-Event value, or Linear payload type')
     .option('--file <path>', 'Read the webhook JSON payload from this file instead of stdin')
     .option('--dry-run', 'Show which routines would fire without firing them')
-    .action(async (options: { event: string; file?: string; dryRun?: boolean }) => {
+    .action(async (options: { source?: string; event: string; file?: string; dryRun?: boolean }) => {
+      const source = options.source as WebhookSource;
+      if (source !== 'github' && source !== 'linear') {
+        console.log(chalk.red(`Unknown webhook source "${options.source}". Use github or linear.`));
+        process.exit(1);
+      }
       // Load the raw JSON payload: --file wins, else drain stdin.
       let raw: string;
       if (options.file) {
@@ -726,7 +993,7 @@ export function registerRoutinesCommands(program: Command): void {
         process.exit(1);
       }
 
-      const webhook: GithubWebhook = { event: options.event, payload };
+      const webhook: IncomingWebhook = { source, event: options.event, payload };
 
       // Matching is intentionally user-layer only (fireWebhookJobs defaults to
       // listJobs() with no cwd), mirroring `run`/`catchup`: a webhook must never
@@ -735,10 +1002,10 @@ export function registerRoutinesCommands(program: Command): void {
       if (options.dryRun) {
         const matched = matchJobsToWebhook(listAllJobs(), webhook);
         if (matched.length === 0) {
-          console.log(chalk.gray(`No routines match a ${options.event} event for this payload.`));
+          console.log(chalk.gray(`No routines match a ${source}:${options.event} event for this payload.`));
           return;
         }
-        console.log(chalk.bold(`${matched.length} routine(s) would fire on ${options.event}:\n`));
+        console.log(chalk.bold(`${matched.length} routine(s) would fire on ${source}:${options.event}:\n`));
         for (const job of matched) {
           console.log(`  ${chalk.cyan(job.name)} — ${fireConditionLabel(job)}`);
         }
@@ -757,11 +1024,11 @@ export function registerRoutinesCommands(program: Command): void {
 
       const fired = await fireWebhookJobs(webhook);
       if (fired.length === 0) {
-        console.log(chalk.gray(`No routines match a ${options.event} event for this payload.`));
+        console.log(chalk.gray(`No routines match a ${source}:${options.event} event for this payload.`));
         return;
       }
 
-      console.log(chalk.bold(`Fired ${fired.length} routine(s) on ${options.event}:\n`));
+      console.log(chalk.bold(`Fired ${fired.length} routine(s) on ${source}:${options.event}:\n`));
       for (const f of fired) {
         console.log(`  ${chalk.cyan(f.jobName)} → ${chalk.green('started')} (run: ${f.runId})`);
       }
@@ -914,6 +1181,90 @@ export function registerRoutinesCommands(program: Command): void {
       }
     });
 
+  // Fleet allowlist management for a single routine.
+  routinesCmd
+    .command('devices [name]')
+    .description('View or change which devices may run a routine. Without flags, opens an interactive picker (requires a TTY).')
+    .option('--set <devices>', 'Replace the allowlist with this comma-separated list (strict fleet validation)')
+    .option('--clear', 'Remove the allowlist so the routine runs on every device')
+    .action(async (name: string | undefined, options: { set?: string; clear?: boolean }) => {
+      const hasSet = options.set !== undefined;
+      if (hasSet && options.clear) {
+        console.log(chalk.red('--set and --clear are mutually exclusive'));
+        process.exit(1);
+      }
+
+      if (!name) {
+        name = await pickJob('Select routine', undefined, ['agents routines devices <name>']) ?? undefined;
+        if (!name) return;
+      }
+      const job = readJob(name);
+      if (!job) {
+        console.log(chalk.red(`Job '${name}' not found`));
+        process.exit(1);
+      }
+
+      if (options.clear) {
+        job.devices = undefined;
+        writeJob(job);
+        console.log(chalk.green(`Devices cleared for '${name}' — runs on all devices`));
+        if (isDaemonRunning()) signalDaemonReload();
+        return;
+      }
+
+      if (hasSet) {
+        const devices = await parseAndValidateDevices(options.set!);
+        job.devices = devices;
+        writeJob(job);
+        console.log(chalk.green(`Devices for '${name}' set to: ${devices.join(', ')}`));
+        if (isDaemonRunning()) signalDaemonReload();
+        return;
+      }
+
+      // Interactive picker
+      if (!isInteractiveTerminal()) {
+        requireInteractiveSelection('device allowlist', ['agents routines devices <name> --set a,b', 'agents routines devices <name> --clear']);
+      }
+
+      const registry = await loadDevices();
+      const registeredNames = Object.keys(registry).map((k) => normalizeHost(k)).sort();
+      if (registeredNames.length === 0) {
+        console.log(chalk.yellow('No devices registered. Enroll with: agents devices sync'));
+        return;
+      }
+
+      const currentSet = new Set((job.devices ?? []).map((d) => normalizeHost(d)));
+
+      try {
+        const { checkbox } = await import('@inquirer/prompts');
+        const selected = await checkbox({
+          message: `Devices allowed to run '${name}' (space to toggle, enter to confirm, empty = unrestricted):`,
+          choices: registeredNames.map((d) => ({
+            value: d,
+            name: d,
+            checked: currentSet.has(d),
+          })),
+        });
+
+        if (selected.length === 0) {
+          job.devices = undefined;
+          writeJob(job);
+          console.log(chalk.green(`Devices cleared for '${name}' — runs on all devices`));
+        } else {
+          job.devices = selected;
+          writeJob(job);
+          console.log(chalk.green(`Devices for '${name}' set to: ${selected.join(', ')}`));
+        }
+        if (isDaemonRunning()) signalDaemonReload();
+      } catch (err) {
+        if (isPromptCancelled(err)) {
+          console.log(chalk.gray('Cancelled'));
+          return;
+        }
+        throw err;
+      }
+    });
+
   // Scheduler lifecycle — usually auto-managed by `routines add`, exposed here for manual control.
 
   routinesCmd
@@ -946,18 +1297,32 @@ export function registerRoutinesCommands(program: Command): void {
     .command('status')
     .description('Show scheduler status, enabled routines, and when each one fires next.')
     .action(() => {
-      const running = isDaemonRunning();
-      const pid = readDaemonPid();
+      try { monitorRunningJobs(); } catch { /* best-effort orphan reap */ }
+      const status = getDaemonStatus();
 
       console.log(chalk.bold('Scheduler\n'));
-      console.log(`  Status:    ${running ? chalk.green('running') : chalk.gray('stopped')}`);
-      if (pid) console.log(`  PID:       ${pid}`);
+      const stateLabel = status.state === 'running'
+        ? chalk.green('running')
+        : status.state === 'wedged'
+          ? chalk.red('wedged')
+          : chalk.gray('stopped');
+      console.log(`  Status:    ${stateLabel}`);
+      if (status.pid) console.log(`  PID:       ${status.pid}`);
+      if (status.binaryPath) console.log(`  Binary:    ${chalk.gray(status.binaryPath)}`);
+      if (status.heartbeat) {
+        const ago = Math.round((Date.now() - Date.parse(status.heartbeat.lastTick)) / 1000);
+        console.log(`  Heartbeat: ${chalk.gray(`${ago} sec ago`)}`);
+      }
 
       const jobs = listAllJobs();
       const enabled = jobs.filter((j) => j.enabled);
       console.log(`  Routines:  ${enabled.length} enabled / ${jobs.length} total`);
 
-      if (running && enabled.length > 0) {
+      if (status.state === 'wedged') {
+        console.log(chalk.red('\n  The daemon is wedged (heartbeat stale). Restart with: agents routines stop && agents routines start'));
+      }
+
+      if (status.running && enabled.length > 0) {
         const scheduler = new JobScheduler(async () => {});
         scheduler.loadAll();
         const scheduled = scheduler.listScheduled();
@@ -967,7 +1332,7 @@ export function registerRoutinesCommands(program: Command): void {
           console.log(`    ${chalk.cyan(job.name.padEnd(24))} next: ${chalk.gray(next)}`);
         }
         scheduler.stopAll();
-      } else if (!running && jobs.length > 0) {
+      } else if (!status.running && jobs.length > 0) {
         console.log(chalk.gray('\n  Start the scheduler to begin firing routines: agents routines start'));
       }
     });
@@ -997,4 +1362,10 @@ export function registerRoutinesCommands(program: Command): void {
         console.log(chalk.gray('No scheduler logs'));
       }
     });
+
+  // Every direct routines subcommand accepts the shared --host family so remote
+  // fall-through works and each subcommand's --help documents the flags.
+  for (const sub of routinesCmd.commands) {
+    addHostOption(sub);
+  }
 }

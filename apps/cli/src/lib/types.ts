@@ -9,7 +9,7 @@
 import type { CloudProviderId } from './cloud/types.js';
 
 /** Unique identifier for a supported AI coding agent. */
-export type AgentId = 'claude' | 'codex' | 'gemini' | 'cursor' | 'opencode' | 'openclaw' | 'copilot' | 'amp' | 'kiro' | 'goose' | 'antigravity' | 'grok' | 'kimi' | 'droid';
+export type AgentId = 'claude' | 'codex' | 'gemini' | 'cursor' | 'opencode' | 'openclaw' | 'copilot' | 'amp' | 'kiro' | 'goose' | 'antigravity' | 'grok' | 'kimi' | 'droid' | 'hermes' | 'forge';
 
 /** How `agents run <agent>` chooses an installed version when none is pinned. */
 export type RunStrategy = 'pinned' | 'available' | 'balanced';
@@ -160,11 +160,27 @@ export interface AgentConfig {
     rules: RulesCapability;
     workflows: Capability;
     /**
+     * Portable knowledge-store memory (`agents memory` / ~/.agents/memory/).
+     * Distinct from `rules` (instructions). When true, sync fans facts into
+     * the agent version home (see memoryTargetDir).
+     */
+    memory: Capability;
+    /**
      * Permission modes this agent natively supports. Modes outside this set
      * are gated by buildExecCommand: `auto` silently degrades to `edit`,
      * `skip` errors with a clear message naming the supported modes.
      */
     modes: Mode[];
+    /**
+     * Whether `plan` mode works in a HEADLESS run (`--prompt`/`-p`). Some CLIs
+     * list a `plan` mode that only works interactively — kimi refuses `--prompt`
+     * combined with `--plan`, and grok's `--permission-mode plan` silently stalls
+     * a headless run at its ExitPlanMode gate. Absent (undefined) means true:
+     * headless plan is assumed to work unless a agent opts out with `false`, in
+     * which case a headless `--mode plan` request auto-downgrades to `auto`
+     * (see resolveHeadlessMode). Interactive plan is unaffected.
+     */
+    headlessPlan?: boolean;
     /**
      * Whether the agent natively resolves `@path/to/file` imports inside its
      * rules file at session start. If false, agents-cli must pre-compile the
@@ -186,8 +202,7 @@ export type Capability = boolean | { since?: string; until?: string };
 export type RulesCapability = false | { file: string };
 
 /** Names of every gateable capability on AgentConfig. */
-export type CapabilityName = 'hooks' | 'mcp' | 'mcpHttp' | 'mcpHeaders' | 'allowlist' | 'skills' | 'commands' | 'plugins' | 'subagents' | 'rules' | 'workflows';
-
+export type CapabilityName = 'hooks' | 'mcp' | 'mcpHttp' | 'mcpHeaders' | 'allowlist' | 'skills' | 'commands' | 'plugins' | 'subagents' | 'rules' | 'workflows' | 'memory';
 /**
  * Permission modes controlling agent autonomy.
  *   plan  read-only investigation; no writes, no shell side-effects
@@ -487,6 +502,12 @@ export interface SkillEntry {
   tags?: string[];
   /** Registry-specific trust signal (e.g. 'builtin', 'trusted', 'community'). */
   trustLevel?: string;
+  /**
+   * Lowercase hex sha256 of the skill's SKILL.md, as recorded by
+   * `agents publish`. When present, install verifies the cloned SKILL.md
+   * against it and aborts on mismatch.
+   */
+  sha256?: string;
 }
 
 /** Paginated response from a skill registry search endpoint. */
@@ -547,6 +568,31 @@ export interface VersionResources {
   mcp?:         ResourcePattern[];
 }
 
+/** Resource-kind selectors controlled by top-level resource profiles. */
+export interface ResourceProfilePreset {
+  description?: string;
+  commands?: ResourcePattern[];
+  skills?: ResourcePattern[];
+  hooks?: ResourcePattern[];
+  subagents?: ResourcePattern[];
+  plugins?: ResourcePattern[];
+  workflows?: ResourcePattern[];
+  permissions?: ResourcePattern[];
+  mcp?: ResourcePattern[];
+  /** Rule preset name to compose while this profile is active. */
+  rules?: string;
+  /** Alias for rules, accepted so YAML can mirror VersionResources naming. */
+  rulesPreset?: string;
+  /** Secrets bundle names, or "*" for every bundle. */
+  secrets?: string[];
+}
+
+/** Top-level profiles/presets that switch the resolved resource view. */
+export interface ResourceProfilesConfig {
+  active?: string;
+  presets?: Record<string, ResourceProfilePreset>;
+}
+
 /** A userConfig field declared in a plugin manifest. */
 export interface PluginUserConfigField {
   key: string;
@@ -565,6 +611,20 @@ export interface PluginManifest {
   userConfig?: PluginUserConfigField[];
   /** Other plugin names this plugin depends on. Missing deps produce a warning. */
   dependencies?: string[];
+  /**
+   * Inline hook configuration (or a path to a hooks JSON file) declared directly
+   * in the manifest, per the official plugin format — an execution surface even
+   * when the plugin ships no `hooks/` directory. Untyped because the shape is a
+   * path string or an inline event map; capability detection only needs to know
+   * whether it is present and non-empty.
+   */
+  hooks?: unknown;
+  /**
+   * Inline MCP-server configuration (or a path to an MCP JSON file) declared
+   * directly in the manifest — an execution surface even when the plugin ships
+   * no `.mcp.json`. Untyped for the same reason as `hooks`.
+   */
+  mcpServers?: unknown;
 }
 
 /** A plugin found on disk with its parsed manifest and resource inventory. */
@@ -579,6 +639,8 @@ export interface DiscoveredPlugin {
   commands: string[];
   /** Subagent .md files in the plugin's agents/ directory (names without extension). */
   agentDefs: string[];
+  /** Memory fact basenames from the plugin's memory/ directory (without .md). */
+  memory: string[];
   /** Executable files in the plugin's bin/ directory. */
   bin: string[];
   /** MCP server names parsed from .mcp.json. */
@@ -668,19 +730,59 @@ export interface ExtraRepoConfig {
   enabled: boolean;
 }
 
+/**
+ * A white-label brand — a personally-named CLI (e.g. `jack`) that IS agents-cli,
+ * minted by `agents setup mine` / `agents mine`. The brand's shim exports
+ * `AGENTS_BRAND=<name>`; the entrypoint reads it to present under this name and
+ * apply the customization below. Portable user config — rides `agents repo
+ * push/pull`. See lib/brand.ts.
+ */
+export interface BrandConfig {
+  /** The brand name; also the binary name on PATH. */
+  name: string;
+  /** Built-in top-level commands this brand hides/disables (e.g. `["teams"]`). */
+  disabledCommands?: string[];
+  /**
+   * Resource-profile preset this brand pins (a key in `profiles.presets`). When
+   * the CLI runs under this brand, that preset becomes the active profile, so
+   * skills/plugins/mcp/hooks/etc. filter to the brand's curated set. Defaults to
+   * `mine-<name>`.
+   */
+  profile?: string;
+  /** False to keep the config but stop minting/using the brand. */
+  enabled: boolean;
+}
+
 /** Top-level structure of ~/.agents/.system/agents.yaml -- the CLI's persistent state. */
 export interface Meta {
   agents?: Partial<Record<AgentId, string>>;
   run?: RunConfig;
+  /**
+   * `agents run --lease` config. `secretsBundle` names the keychain secrets bundle
+   * whose provider token (e.g. `HCLOUD_TOKEN`) crabbox uses to reach the cloud API.
+   * When unset, the bundle is resolved by env (`AGENTS_LEASE_SECRETS_BUNDLE`) then
+   * auto-detected (the first bundle that declares a provider token key).
+   */
+  lease?: {
+    secretsBundle?: string;
+  };
   /** macOS secrets-agent config. `policy` is the default prompt policy for
    * bundles without an explicit per-bundle policy: `daily` (the default) asks
    * once per ~7 days, `always` asks every time. `auto` (default on) lets the
    * first real keychain read of a `daily` bundle populate the broker so
-   * concurrent runs read silently — set it `false` to force a prompt on every read. */
+   * concurrent runs read silently — set it `false` to force a prompt on every read.
+   * `holdMs` caps how long an unlocked/auto-cached bundle is held before the next
+   * read re-prompts (default 7 days; e.g. 86400000 for a 24h cap). Clamped to
+   * [1 minute, 30 days]. `durable` (default off) makes every `agents secrets
+   * unlock` survive sleep + reboot as well as upgrade/restart — the same effect as
+   * passing `--durable` per unlock; off means the secure split default (survive
+   * upgrade/restart, re-lock on sleep). */
   secrets?: {
     policy?: 'always' | 'daily';
     agent?: {
       auto?: boolean;
+      holdMs?: number;
+      durable?: boolean;
     };
   };
   /** Spend guardrails (issue #346). User-global caps; project agents.yaml overrides. */
@@ -689,16 +791,34 @@ export interface Meta {
     enabled?: BetaFeatureName[];
   };
   registries?: Record<RegistryType, Record<string, RegistryConfig>>;
+  /**
+   * Top-level resource profiles. Activating one filters the resolved resource
+   * set across commands, skills, hooks, rules, MCP, permissions, and secrets.
+   * Model-provider run profiles are separate YAML files under profiles/.
+   */
+  profiles?: ResourceProfilesConfig;
   // Per-version resource tracking
   versions?: Partial<Record<AgentId, Record<string, VersionResources>>>;
   // Git remote source URL (when ~/.agents/.system/ is a git repo)
   source?: string;
+  /**
+   * Projects root for the `agents run --project <slug>` shorthand, e.g.
+   * `~/src/github.com/<user>`. Auto-inferred from the repo you launch inside and
+   * cached here; stored home-relative (`~/…`) so it resolves on remote hosts too.
+   */
+  projectRoot?: string;
   /**
    * Extra DotAgent repos merged after ~/.agents/. Managed clones live as peer
    * dirs at ~/.agents-<alias>/; user-owned repos can point at arbitrary paths
    * via the `path` field.
    */
   extraRepos?: Record<string, ExtraRepoConfig>;
+  /**
+   * White-label brands keyed by name. Each mints a personally-named binary
+   * (e.g. `jack`) that runs agents-cli under that name with its own disabled
+   * commands + curated resource profile. See lib/brand.ts.
+   */
+  brands?: Record<string, BrandConfig>;
   /**
    * Keys like `skill.hermes` — registries seeded from SEEDED_REGISTRIES exactly
    * once. Tracked so a user `registry remove` won't silently re-seed.
@@ -733,6 +853,36 @@ export interface Meta {
    * are never copied. `inline` hosts carry their own address/user.
    */
   hosts?: Record<string, HostEntry>;
+  /**
+   * Declarative fleet profile (`agents apply` / `ag apply`). Additive to the
+   * schema — project `agents:` version-pins are untouched. Declares which agents
+   * every device should have, which config to sync, and how login propagates.
+   * Full shape in `lib/fleet/types.ts` (FleetManifest).
+   */
+  fleet?: import('./fleet/types.js').FleetManifest;
+  /** `agents share` endpoint (Cloudflare R2 + Worker). Set by `agents share
+   * setup`/`join`; syncs fleet-wide via `agents repo push/pull`. The write token
+   * lives in the `share` secrets bundle, not here. */
+  share?: {
+    baseUrl?: string;
+    accountId?: string;
+    workerName?: string;
+    bucketName?: string;
+    domain?: string;
+    /** Cloudflare Web Analytics token injected into published HTML pages. */
+    analyticsToken?: string;
+  };
+  /**
+   * Owner/channel notification config for `agents send` / `agents notify`.
+   * `owner` is the default recipient for `agents notify` (channel + target).
+   * `transports` maps a user-facing channel name to the provider that actually
+   * delivers it — explicit, one provider per channel, no fallback. Omitted keys
+   * default to name-identity (channel `slack` -> provider `slack`).
+   */
+  notify?: {
+    owner?: { channel: string; to: string };
+    transports?: Record<string, string>;
+  };
 }
 
 /** Persisted agent-host entry in agents.yaml (overlay or inline). */
@@ -818,6 +968,14 @@ export interface ClaudePermissions {
     allow: string[];
     deny: string[];
     additionalDirectories?: string[];
+  };
+}
+
+/** Cursor CLI native format in ~/.cursor/cli-config.json (Shell/Read/Write/WebFetch/Mcp). */
+export interface CursorPermissions {
+  permissions: {
+    allow: string[];
+    deny: string[];
   };
 }
 

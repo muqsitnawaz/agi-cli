@@ -1,7 +1,8 @@
 /**
- * Usage and rate-limit tracking for Claude and Codex agents.
+ * Usage and rate-limit tracking for Claude, Codex, Kimi, and Droid agents.
  *
- * Fetches live usage data from the Anthropic OAuth API (Claude) or parses
+ * Fetches live usage data from each agent's usage API (Anthropic OAuth for
+ * Claude, Kimi Code /usages, Factory billing limits for Droid) or parses
  * rate-limit events from Codex session logs. Results are normalized into a
  * common UsageSnapshot shape, cached to disk, and rendered as terminal
  * progress bars for the `agents view` command.
@@ -15,7 +16,7 @@ import * as readline from 'readline';
 import { promisify } from 'util';
 import chalk from 'chalk';
 
-import type { AccountInfo } from './agents.js';
+import { decodeJwtPayload, decryptDroidAuthPayload, type AccountInfo } from './agents.js';
 import { walkForFiles } from './fs-walk.js';
 import {
   getKeychainToken,
@@ -32,6 +33,25 @@ const CLAUDE_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 const CLAUDE_OAUTH_BETA_HEADER = 'oauth-2025-04-20';
 const CLAUDE_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
+
+/**
+ * True when a Claude OAuth access token is within the refresh leeway of expiry
+ * (or already expired) — i.e. it "would need a refresh" before the next use.
+ *
+ * Single source of truth for the expiry gate, shared by the two callers that
+ * must agree on it but act differently: the run/usage hot path
+ * (`getClaudeAccessToken`) refreshes when this is true; the health probe
+ * (`probeClaudeStatus`) must NOT refresh and instead reports the non-fatal
+ * `expired` state (RUSH-1822). A missing `expiresAt` is treated as "still
+ * fresh" (never force a refresh on a token with no known expiry).
+ */
+export function claudeAccessTokenNeedsRefresh(
+  expiresAt: number | null | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  if (expiresAt == null) return false;
+  return nowMs + CLAUDE_REFRESH_LEEWAY_MS >= expiresAt;
+}
 const CLAUDE_SCOPES = [
   'user:profile',
   'user:inference',
@@ -45,13 +65,15 @@ const CACHED_CLAUDE_USAGE_SOURCE_LABEL = 'last seen live account data';
 
 const KIMI_USAGES_URL = 'https://api.kimi.com/coding/v1/usages';
 
+const DROID_USAGE_URL = 'https://api.factory.ai/api/billing/limits';
+
 const COMPACT_BAR_LEN = 5;
 const USAGE_BAR_LEN = 10;
 const FULL = '\u2588';
 const EMPTY = '\u2591';
 
 /** Discriminator for usage window types. */
-export type UsageWindowKey = 'session' | 'week' | 'sonnet_week';
+export type UsageWindowKey = 'session' | 'week' | 'sonnet_week' | 'month';
 
 /** A single rate-limit window with utilization percentage and reset time. */
 export interface UsageWindow {
@@ -188,6 +210,8 @@ export async function getUsageInfo(agentId: AgentId, options?: UsageOptions): Pr
       return getCodexUsageInfo(options);
     case 'kimi':
       return getKimiUsageInfo(options);
+    case 'droid':
+      return getDroidUsageInfo(options);
     default:
       return { snapshot: null, error: null };
   }
@@ -234,8 +258,22 @@ export function buildCanonicalUsageContext(inputs: UsageIdentityInput[]): {
   return { canonicalByUsageKey, usageFetchInputs };
 }
 
+/**
+ * Whether an agent exposes usage/limit data we can render — Claude/Kimi/Droid via
+ * a live API, Codex via local session logs. Everything else has no usage concept,
+ * so callers use this to decide whether a missing snapshot is worth flagging as
+ * "usage unavailable" (a signed-in Claude account with no data) versus simply not
+ * applicable (Antigravity, Grok, OpenCode).
+ */
+export function agentReportsUsage(agentId: AgentId): boolean {
+  return agentId === 'claude' || agentId === 'codex' || agentId === 'kimi' || agentId === 'droid';
+}
+
 /** Fetch usage info for all unique accounts in parallel, keyed by usage key. */
-export async function getUsageInfoByIdentity(inputs: UsageIdentityInput[]): Promise<{
+export async function getUsageInfoByIdentity(
+  inputs: UsageIdentityInput[],
+  opts?: { forceRefresh?: boolean }
+): Promise<{
   canonicalByUsageKey: Map<string, AccountInfo>;
   usageByKey: Map<string, UsageInfo>;
 }> {
@@ -248,7 +286,7 @@ export async function getUsageInfoByIdentity(inputs: UsageIdentityInput[]): Prom
         home: input.home,
         cliVersion: input.cliVersion,
         info: canonicalByUsageKey.get(key)!,
-      }),
+      }, opts),
     }))
   );
 
@@ -276,16 +314,22 @@ const inFlightRefreshes = new Map<string, Promise<void>>();
  * cache; every run after that returns instantly while the cache silently
  * refreshes in the background.
  */
-export async function getUsageInfoForIdentity(input: UsageIdentityInput): Promise<UsageInfo> {
+export async function getUsageInfoForIdentity(
+  input: UsageIdentityInput,
+  opts?: { forceRefresh?: boolean }
+): Promise<UsageInfo> {
   const usageKey = getUsageLookupKey(input.info);
+  const forceRefresh = opts?.forceRefresh === true;
 
-  // Agents whose usage comes from a live network call (Claude, Kimi) go through
-  // the stale-while-revalidate cache below so `agents run`/`agents view` stay off
-  // the network on the hot path. Everything else (Codex reads local session
-  // logs) takes the legacy blocking path. The on-disk cache is shared and keyed
-  // by usageKey, which is namespaced per agent (`claude:org=…`, `kimi:user=…`),
-  // so one cache file holds every account without collision.
-  const usesNetworkUsage = input.agentId === 'claude' || input.agentId === 'kimi';
+  // Agents whose usage comes from a live network call (Claude, Kimi, Droid) go
+  // through the stale-while-revalidate cache below so `agents run`/`agents view`
+  // stay off the network on the hot path. Everything else (Codex reads local
+  // session logs) takes the legacy blocking path. The on-disk cache is shared and
+  // keyed by usageKey, which is namespaced per agent (`claude:org=…`,
+  // `kimi:user=…`, `droid:org=…`), so one cache file holds every account without
+  // collision.
+  const usesNetworkUsage =
+    input.agentId === 'claude' || input.agentId === 'kimi' || input.agentId === 'droid';
   if (!usesNetworkUsage || !usageKey) {
     return getUsageInfo(input.agentId, {
       home: input.home,
@@ -297,16 +341,21 @@ export async function getUsageInfoForIdentity(input: UsageIdentityInput): Promis
   const cached = readClaudeUsageCache(usageKey);
   const ageMs = cached?.capturedAt ? Date.now() - cached.capturedAt.getTime() : Infinity;
 
-  // Fresh: cache is recent enough, skip network entirely.
-  if (cached && ageMs < USAGE_CACHE_FRESH_MS) {
-    return { snapshot: cached, error: null };
-  }
+  // `--refresh` (forceRefresh) skips both cache short-circuits and blocks on a
+  // live fetch below, so `agents view --refresh` repopulates every account we can
+  // actually reach a token for.
+  if (!forceRefresh) {
+    // Fresh: cache is recent enough, skip network entirely.
+    if (cached && ageMs < USAGE_CACHE_FRESH_MS) {
+      return { snapshot: cached, error: null };
+    }
 
-  // Stale-while-revalidate: cache exists and isn't ancient, return it now and
-  // refresh in the background so the next invocation has fresh data.
-  if (cached && ageMs < USAGE_CACHE_SWR_MS) {
-    triggerBackgroundUsageRefresh(input, usageKey);
-    return { snapshot: cached, error: null };
+    // Stale-while-revalidate: cache exists and isn't ancient, return it now and
+    // refresh in the background so the next invocation has fresh data.
+    if (cached && ageMs < USAGE_CACHE_SWR_MS) {
+      triggerBackgroundUsageRefresh(input, usageKey);
+      return { snapshot: cached, error: null };
+    }
   }
 
   // Cold cache or > 24h old: block on live fetch.
@@ -366,7 +415,8 @@ function triggerBackgroundUsageRefresh(input: UsageIdentityInput, usageKey: stri
 export function formatUsageSummary(
   plan: string | null,
   snapshot: UsageSnapshot | null,
-  planWidth = 3
+  planWidth = 3,
+  opts?: { unavailable?: boolean }
 ): string {
   const parts: string[] = [];
 
@@ -375,14 +425,29 @@ export function formatUsageSummary(
   }
 
   if (snapshot) {
+    // Compact rows show every BLOCKING window — the same set
+    // deriveUsageStatusFromSnapshot uses for the rate-limited badge — so an
+    // account throttled by its month window (Droid meters on 5h/week/month)
+    // shows the bar that explains why. Claude's Sonnet week is a per-model
+    // sub-limit, not a blocking window; it renders only in the full
+    // per-version usage section. Each window reads "S: ███░░ 58% (3d)" — the
+    // gauge, the exact percentage, and a compact hint of when it resets.
     const windows = snapshot.windows
       .filter((window) => window.key !== 'sonnet_week')
-      .map((window) =>
-      `${chalk.gray(`${window.shortLabel}:`)} ${renderCompactUsageBar(window.usedPercent)}`
-    );
+      .map((window) => {
+        const bar = renderCompactUsageBar(window.usedPercent);
+        const pct = colorUsage(`${Math.round(window.usedPercent)}%`, window.usedPercent);
+        const reset = window.resetsAt ? chalk.dim(` (${formatResetHint(window.resetsAt)})`) : '';
+        return `${chalk.gray(`${window.shortLabel}:`)} ${bar} ${pct}${reset}`;
+      });
     if (windows.length > 0) {
-      parts.push(windows.join(' '));
+      parts.push(windows.join('  '));
     }
+  } else if (opts?.unavailable) {
+    // Signed-in account we could NOT fetch usage for (no live token in a reachable
+    // home / org mismatch / fetch error). Say so explicitly instead of drawing a
+    // blank gauge that reads like "0% used".
+    parts.push(chalk.dim('usage unavailable'));
   }
 
   return parts.join('  ');
@@ -741,6 +806,223 @@ export function formatKimiPlan(data: KimiUsagesResponse): string | null {
   return tail.charAt(0).toUpperCase() + tail.slice(1).toLowerCase();
 }
 
+/** A single Droid token-rate-limit window from /api/billing/limits. */
+interface DroidLimitWindow {
+  usedPercent?: number | null;
+  windowEnd?: string | null;
+}
+
+/** Response shape from Factory's billing limits endpoint (subset we render). */
+export interface DroidBillingLimitsResponse {
+  usesTokenRateLimitsBilling?: boolean | null;
+  limits?: {
+    standard?: {
+      fiveHour?: DroidLimitWindow | null;
+      weekly?: DroidLimitWindow | null;
+      monthly?: DroidLimitWindow | null;
+    } | null;
+  } | null;
+}
+
+/**
+ * Fetch Droid usage via Factory's billing limits API — the same endpoint the
+ * droid CLI polls for its token-limit banner. The WorkOS access token comes
+ * from the locally decrypted ~/.factory/auth.v2.file (the same credential
+ * account identity in agents.ts reads).
+ *
+ * Deliberately NO token refresh, for a sharper reason than Kimi's: WorkOS
+ * refresh tokens are single-use and rotate on every exchange, so refreshing
+ * here would race a concurrently running droid session and can permanently
+ * invalidate the user's login chain. Droid refreshes its own credential when
+ * it runs; if the stored token is expired we skip the live fetch and let the
+ * SWR cache serve the last-seen snapshot.
+ */
+async function getDroidUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
+  try {
+    const cred = decryptDroidAuthPayload(options?.home || os.homedir());
+    const accessToken = cred?.access_token;
+    if (typeof accessToken !== 'string' || !accessToken) {
+      return { snapshot: null, error: null };
+    }
+
+    const exp = decodeJwtPayload(accessToken)?.exp;
+    if (typeof exp === 'number' && Date.now() / 1000 >= exp) {
+      return { snapshot: null, error: null };
+    }
+
+    const response = await fetch(DROID_USAGE_URL, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+
+    // 401 => revoked/expired token; render nothing rather than a misleading
+    // empty bar.
+    if (!response.ok) {
+      return { snapshot: null, error: null };
+    }
+
+    const data = await response.json() as DroidBillingLimitsResponse;
+    const windows = normalizeDroidWindows(data);
+    if (windows.length === 0) {
+      return { snapshot: null, error: null };
+    }
+
+    return {
+      snapshot: {
+        source: 'live',
+        sourceLabel: 'live account data',
+        capturedAt: new Date(),
+        windows,
+      },
+      error: null,
+    };
+  } catch {
+    return { snapshot: null, error: null };
+  }
+}
+
+/**
+ * Live auth probes — the same authenticated GET the usage fetchers above do,
+ * but surfacing the raw HTTP status instead of swallowing 401/expired to null.
+ * These back `agents fleet ping` and the fleet auth-health cache: completing a
+ * real request is the only proof a token is accepted. The local "signed in"
+ * flag cannot tell a revoked-but-unexpired token from a good one. Classification
+ * of the returned status into a verdict lives in lib/auth-health.ts (kept there
+ * so it stays pure/testable and to avoid an import cycle).
+ */
+export interface ProviderProbe {
+  /** HTTP status of the probe request, or null when no request was made (missing/expired token) or the request threw. */
+  status: number | null;
+  /** Local credential state observed before the request. */
+  token: 'present' | 'missing' | 'expired';
+  /** Network/parse error message when status is null but a token was present. */
+  error?: string;
+}
+
+/** Probe Claude's OAuth token against the usage endpoint. Never refreshes — reports `expired` for a near-expiry token; see the comment below (RUSH-1822). */
+export async function probeClaudeStatus(home?: string, cliVersion?: string | null): Promise<ProviderProbe> {
+  const oauth = await loadClaudeOauth(home);
+  const accessToken = oauth?.accessToken?.trim();
+  if (!accessToken) return { status: null, token: 'missing' };
+  // Never refresh from a health probe. Claude's refresh token is single-use and
+  // rotates on every refresh; with one account signed into several machines the
+  // daemon's every-3-min fleet-cache warm (probeLocalFleetAuth -> here) would
+  // stampede that one rotating token and silently invalidate every other
+  // holder, dropping the fleet to "run /login" (RUSH-1822). Mirror the sibling
+  // Kimi/Droid probes, which never refresh: if the stored token is within the
+  // refresh leeway of expiry, report the non-fatal `expired` state ("would need
+  // a refresh") instead of rotating it, and leave the single legitimate refresh
+  // to the run/usage hot path (getClaudeAccessToken).
+  if (claudeAccessTokenNeedsRefresh(oauth?.expiresAt ?? null)) {
+    return { status: null, token: 'expired' };
+  }
+  try {
+    const response = await fetch(CLAUDE_USAGE_URL, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'anthropic-beta': CLAUDE_OAUTH_BETA_HEADER,
+        'User-Agent': getClaudeUserAgent(cliVersion),
+      },
+      signal: AbortSignal.timeout(8000),
+    });
+    return { status: response.status, token: 'present' };
+  } catch (err) {
+    return { status: null, token: 'present', error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Probe Kimi's OAuth token against the /usages endpoint. Never refreshes (single-use rotation — see getKimiUsageInfo). */
+export async function probeKimiStatus(home?: string): Promise<ProviderProbe> {
+  const credPath = resolveKimiCredentialPath(home);
+  if (!credPath) return { status: null, token: 'missing' };
+  let accessToken: string | undefined;
+  let expiresAt: number | null = null;
+  try {
+    const cred = JSON.parse(fs.readFileSync(credPath, 'utf-8'));
+    accessToken = typeof cred?.access_token === 'string' ? cred.access_token : undefined;
+    expiresAt = typeof cred?.expires_at === 'number' ? cred.expires_at : null;
+  } catch {
+    return { status: null, token: 'missing' };
+  }
+  if (!accessToken) return { status: null, token: 'missing' };
+  if (expiresAt !== null && Date.now() / 1000 >= expiresAt) return { status: null, token: 'expired' };
+  try {
+    const response = await fetch(KIMI_USAGES_URL, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
+    return { status: response.status, token: 'present' };
+  } catch (err) {
+    return { status: null, token: 'present', error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Probe Droid's WorkOS token against the billing-limits endpoint. Never refreshes (single-use rotation — see getDroidUsageInfo). */
+export async function probeDroidStatus(home?: string): Promise<ProviderProbe> {
+  const cred = decryptDroidAuthPayload(home || os.homedir());
+  const accessToken = cred?.access_token;
+  if (typeof accessToken !== 'string' || !accessToken) return { status: null, token: 'missing' };
+  const exp = decodeJwtPayload(accessToken)?.exp;
+  if (typeof exp === 'number' && Date.now() / 1000 >= exp) return { status: null, token: 'expired' };
+  try {
+    const response = await fetch(DROID_USAGE_URL, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
+    return { status: response.status, token: 'present' };
+  } catch (err) {
+    return { status: null, token: 'present', error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Normalize the Factory billing-limits payload into the common UsageWindow
+ * shape. Orgs on the legacy (non token-rate-limit) billing model have no
+ * meaningful windows, so they render nothing — mirrors droid's own gate on
+ * `usesTokenRateLimitsBilling` before it reads `limits.standard`.
+ */
+export function normalizeDroidWindows(data: DroidBillingLimitsResponse): UsageWindow[] {
+  if (data.usesTokenRateLimitsBilling !== true) return [];
+  const standard = data.limits?.standard;
+  if (!standard) return [];
+
+  const windows = [
+    normalizeDroidWindow(standard.fiveHour, 'session', 'Current session', 'S'),
+    normalizeDroidWindow(standard.weekly, 'week', 'Current week', 'W'),
+    normalizeDroidWindow(standard.monthly, 'month', 'Current month', 'M'),
+  ];
+
+  return windows.filter((window): window is UsageWindow => window !== null);
+}
+
+/** Normalize a single Droid billing-limits window. */
+function normalizeDroidWindow(
+  window: DroidLimitWindow | null | undefined,
+  key: UsageWindowKey,
+  label: string,
+  shortLabel: string
+): UsageWindow | null {
+  const usedPercent = normalizePercent(window?.usedPercent);
+  if (usedPercent === null) return null;
+
+  return {
+    key,
+    label,
+    shortLabel,
+    usedPercent,
+    resetsAt: parseDateValue(window?.windowEnd),
+    windowMinutes: inferWindowMinutes(key),
+  };
+}
+
 /** Collect Codex JSONL session files sorted newest-first. */
 function collectCodexSessionFiles(home?: string): string[] {
   const base = home || os.homedir();
@@ -855,20 +1137,16 @@ function normalizeClaudeWindow(
   };
 }
 
-/** Load Claude OAuth credentials from the system keychain/keyring. */
-export async function loadClaudeOauth(home?: string): Promise<ClaudeOauthCredentials | null> {
-  // Windows not yet supported
-  if (process.platform !== 'darwin' && process.platform !== 'linux') {
-    return null;
-  }
-
+/**
+ * Parse a wrapped Claude OAuth payload — the `{ claudeAiOauth, organizationUuid }`
+ * shape written by BOTH the macOS Keychain item and the Linux `.credentials.json`
+ * file — into our credential struct. Returns null when there is no usable access
+ * token. Never throws (malformed JSON => null).
+ */
+function parseClaudeOauthPayload(raw: string): ClaudeOauthCredentials | null {
   try {
-    const service = getClaudeKeychainService(home);
-    const stdout = getKeychainToken(service);
-
-    const payload = JSON.parse(stdout.trim()) as ClaudeKeychainPayload;
-    if (typeof payload?.claudeAiOauth?.accessToken !== 'string') return null;
-    if (!payload.claudeAiOauth) {
+    const payload = JSON.parse(raw.trim()) as ClaudeKeychainPayload;
+    if (!payload?.claudeAiOauth || typeof payload.claudeAiOauth.accessToken !== 'string') {
       return null;
     }
     return {
@@ -878,6 +1156,47 @@ export async function loadClaudeOauth(home?: string): Promise<ClaudeOauthCredent
   } catch {
     return null;
   }
+}
+
+/**
+ * Load a version home's Claude OAuth credential from the two stores Claude Code
+ * uses, tried in order:
+ *
+ *  1. The OS keychain (`getKeychainToken`). Canonical on macOS — Claude Code
+ *     writes the token to the login keychain and we read it via `/usr/bin/security`.
+ *  2. `<home>/.claude/.credentials.json`. On a headless Linux box (the
+ *     `agents view --host <linux>` case) there is no reachable Secret Service, so
+ *     the Claude CLI stores its OAuth token in this plaintext file instead. The
+ *     keychain read above finds nothing on that platform, so we fall back to the
+ *     file. Same wrapped `{ claudeAiOauth }` shape, so one parser handles both.
+ *     Mirrors `readClaudeCredentialsBlob` (cloud/rush.ts), the proven pattern.
+ *
+ * Without step 2 the live usage fetch got no token on Linux, so `agents view`
+ * (run remotely over SSH by `--host`) rendered no usage bars even though the
+ * account + plan — read from the plaintext `.claude.json` — showed fine.
+ */
+export async function loadClaudeOauth(home?: string): Promise<ClaudeOauthCredentials | null> {
+  // The OS keychain/keyring step is macOS/Linux-only. Windows skips straight
+  // to the .credentials.json fallback — the Claude CLI has no keychain
+  // integration there and stores its OAuth token in that file too.
+  if (process.platform === 'darwin' || process.platform === 'linux') {
+    try {
+      const fromKeychain = parseClaudeOauthPayload(getKeychainToken(getClaudeKeychainService(home)));
+      if (fromKeychain) return fromKeychain;
+    } catch {
+      // No keychain item, or no reachable keyring (headless Linux) — fall through.
+    }
+  }
+
+  const credsPath = path.join(home ?? os.homedir(), '.claude', '.credentials.json');
+  try {
+    if (fs.existsSync(credsPath)) {
+      return parseClaudeOauthPayload(fs.readFileSync(credsPath, 'utf-8'));
+    }
+  } catch {
+    // Unreadable file — treat as not signed in.
+  }
+  return null;
 }
 
 /**
@@ -1094,8 +1413,7 @@ async function getClaudeAccessToken(oauth: ClaudeOauthCredentials, home?: string
     return null;
   }
 
-  const expiresAt = oauth.expiresAt ?? null;
-  if (expiresAt === null || Date.now() + CLAUDE_REFRESH_LEEWAY_MS < expiresAt) {
+  if (!claudeAccessTokenNeedsRefresh(oauth.expiresAt ?? null)) {
     return accessToken;
   }
 
@@ -1196,6 +1514,8 @@ function inferWindowMinutes(key: UsageWindowKey): number | null {
     case 'week':
     case 'sonnet_week':
       return 10080;
+    case 'month':
+      return 43200;
   }
 }
 
@@ -1262,6 +1582,23 @@ function getUsageColor(usedPercent: number): (text: string) => string {
 function formatPercent(value: number): string {
   const rounded = Math.round(value * 10) / 10;
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+/**
+ * Compact "time until reset" hint for the inline usage bars: "5m", "2h", "3d",
+ * or "now" once elapsed. Deliberately coarse (single unit, whole numbers) so it
+ * fits after a bar without wrapping the row — the detailed section
+ * (`formatResetAt`) carries the precise clock time.
+ */
+function formatResetHint(date: Date): string {
+  const diffMs = date.getTime() - Date.now();
+  if (diffMs <= 0) return 'now';
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 60) return `${Math.max(1, mins)}m`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  return `${days}d`;
 }
 
 /** Format a reset timestamp as a human-readable relative or absolute time. */

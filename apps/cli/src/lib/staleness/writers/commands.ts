@@ -26,6 +26,7 @@ import { safeJoin } from '../../paths.js';
 import { markdownToToml } from '../../convert.js';
 import { commandAppliesTo, parseCommandMetadata } from '../../commands.js';
 import { installCommandSkillToVersion, shouldInstallCommandAsSkill } from '../../command-skills.js';
+import { installGooseCommandToVersion } from '../../goose-commands.js';
 import type { ResourceWriter, WriteArgs, WriteResult } from './types.js';
 import { resolveCommandSource, trustedSkillRoots } from './sources.js';
 import { lazyAgentMap } from './lazy-map.js';
@@ -40,10 +41,10 @@ function buildCommandsWriter(agent: AgentId): ResourceWriter<string[]> {
       const commandsAsSkills = shouldInstallCommandAsSkill(agent, version);
       const supportsCommands = supports(agent, 'commands', version).ok;
 
-      // Writers fire only after supports() OR commands-as-skills says yes —
-      // both paths produce a usable result here.
+      // Version-gated agents (e.g. goose skills >= 1.25.0) are registered but
+      // may be called at a version too old for both paths — skip gracefully.
       if (!commandsAsSkills && !supportsCommands) {
-        throw new Error(`commands writer reached for ${agent}@${version} with no path (cmd=false, asSkill=false)`);
+        return { synced: [] };
       }
 
       const skillRoots = trustedSkillRoots();
@@ -62,6 +63,10 @@ function buildCommandsWriter(agent: AgentId): ResourceWriter<string[]> {
 
         if (commandsAsSkills) {
           const installed = installCommandSkillToVersion(agentDir, cmd, srcFile, skillRoots);
+          if (!installed.success) continue;
+        } else if (agent === 'goose') {
+          // Goose: recipe YAML + config.yaml slash_commands entry, not a file copy.
+          const installed = installGooseCommandToVersion(versionHome, cmd, srcFile);
           if (!installed.success) continue;
         } else if (agentConfig.format === 'toml') {
           const content = fs.readFileSync(srcFile, 'utf-8');

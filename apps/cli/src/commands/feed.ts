@@ -1,0 +1,466 @@
+/**
+ * `agents feed` -- list open blocks (decisions agents are waiting on).
+ *
+ * Aggregates block records from the local feed store and, with --host, from
+ * reachable remote hosts via SSH passthrough. Each block carries enough
+ * identity for `agents message` to route a reply back to the right agent.
+ *
+ * Default view groups by **outcome** (ticket / PR / worktree / Unassigned) so
+ * an operator sees dozens of deliverables, not ~1,100 agents. Pass `--flat`
+ * for the legacy per-agent list.
+ */
+import type { Command } from 'commander';
+import chalk from 'chalk';
+import { ensureFeedPublishHook, listAskStats, listBlocks, recordNotified, type OpenBlock } from '../lib/feed.js';
+import {
+  enrichBlocksFromSessions,
+  groupBlocksByOutcome,
+  isUnambiguousOutcomeAnswer,
+  openBlocksForOutcome,
+  stampBlockOutcomes,
+  type OutcomeGroup,
+  type SessionOutcomeHint,
+} from '../lib/feed-outcome.js';
+import {
+  classifyBlock,
+  filterBlocksForFeed,
+  suppressionDigest,
+} from '../lib/ask-classifier.js';
+import { machineId, normalizeHost } from '../lib/machine-id.js';
+import { relTime } from '../lib/format.js';
+import { gatherRemoteAgentsJson } from '../lib/remote-agents-json.js';
+import { loadPolicy, applyPolicyToBlock, isPhoneUrgent } from '../lib/feed-policy.js';
+import { notifyUrgentBlock } from '../lib/notify.js';
+import { gcMailbox } from '../lib/mailbox-gc.js';
+import { isValidMailboxId } from '../lib/mailbox.js';
+import { getActiveSessions } from '../lib/session/active.js';
+import { mailboxIdForActiveSession } from '../lib/mailbox-target.js';
+import { GLYPH, masthead } from '../lib/comms-render.js';
+import { discoverSessions } from '../lib/session/discover.js';
+import { resolveProvider } from '../lib/cloud/registry.js';
+import {
+  buildSessionSignals,
+  rankFeedBlocks,
+  synthesizeControlCards,
+  type FeedSessionSignal,
+} from '../lib/feed-ranking.js';
+
+export const FEED_NO_FANOUT_ENV = 'AGENTS_FEED_LOCAL';
+
+/** Right-hand masthead summary: `N blocks · M agents`. */
+export function formatFeedMastheadRight(blocks: OpenBlock[]): string {
+  const agents = new Set(blocks.map((b) => b.mailboxId)).size;
+  return `${blocks.length} block${blocks.length === 1 ? '' : 's'} · ${agents} agent${agents === 1 ? '' : 's'}`;
+}
+
+/** Reply hint matching the shared fleet-comms reply line. */
+export function formatFeedReplyHint(mailboxId: string): string {
+  return `↳ ag message ${mailboxId} "…"`;
+}
+
+export function parseRemoteFeed(stdout: string, machine: string): OpenBlock[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const blocks: OpenBlock[] = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const block = item as Partial<OpenBlock>;
+    if (!block.blockId || !block.sessionId || !block.mailboxId || !block.questions?.length) continue;
+    // A crafted mailboxId (path separators, `.`/`..`) would throw inside
+    // mailboxDir() when policy runs against the block, aborting the whole
+    // dispatch loop — drop it here so a malicious peer can't smuggle one in.
+    if (!isValidMailboxId(block.mailboxId)) continue;
+    blocks.push({ ...block, host: machine } as OpenBlock);
+  }
+  return blocks;
+}
+
+/** Merge local and remote rows, keeping the first copy of a host/session block. */
+export function mergeFeedBlocks(...groups: OpenBlock[][]): OpenBlock[] {
+  const byIdentity = new Map<string, OpenBlock>();
+  for (const block of groups.flat()) {
+    const key = `${normalizeHost(block.host)}:${block.blockId}`;
+    if (!byIdentity.has(key)) byIdentity.set(key, block);
+  }
+  return [...byIdentity.values()].sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
+}
+
+export type FeedControlAction = 'pause' | 'kill';
+
+function matchesControlTarget(signal: FeedSessionSignal, target: string): boolean {
+  return [
+    signal.mailboxId,
+    signal.sessionId,
+    signal.cloudTaskId,
+    signal.pid !== undefined ? String(signal.pid) : undefined,
+  ].some((value) => value === target);
+}
+
+export async function controlFeedSession(
+  action: FeedControlAction,
+  target: string,
+  signals: FeedSessionSignal[],
+): Promise<string> {
+  const signal = signals.find((s) => matchesControlTarget(s, target));
+  if (!signal) throw new Error(`No live feed session matches '${target}'.`);
+
+  if (signal.cloudProvider && signal.cloudTaskId) {
+    const provider = resolveProvider(signal.cloudProvider);
+    await provider.cancel(signal.cloudTaskId);
+    return `${action === 'pause' ? 'paused' : 'killed'} cloud task ${signal.cloudTaskId}`;
+  }
+
+  if (!signal.pid) {
+    throw new Error(`Session '${target}' has no local pid or cancellable cloud task.`);
+  }
+
+  if (action === 'pause') {
+    if (process.platform === 'win32') {
+      throw new Error('Pause is not supported for local Windows processes; use --kill.');
+    }
+    process.kill(signal.pid, 'SIGSTOP');
+    return `paused pid ${signal.pid}`;
+  }
+
+  process.kill(signal.pid, 'SIGTERM');
+  return `killed pid ${signal.pid}`;
+}
+
+function hostToken(host: string): string {
+  return normalizeHost(host.split('@').pop() || host);
+}
+
+export function shouldIncludeLocalFeed(hosts: string[] | undefined, self: string): boolean {
+  return !hosts?.length || hosts.some((host) => hostToken(host) === self);
+}
+
+export function remoteFeedHostsToDial(hosts: string[] | undefined, self: string): string[] | undefined {
+  if (!hosts?.length) return undefined;
+  return hosts.filter((host) => hostToken(host) !== self);
+}
+
+export function prepareLocalFeedBlocks(
+  localBlocks: OpenBlock[],
+  opts: { includeLocal: boolean; all?: boolean; dispatch?: boolean },
+): { visible: OpenBlock[]; dispatch: OpenBlock[]; filter: ReturnType<typeof filterBlocksForFeed> } {
+  const filter = filterBlocksForFeed(localBlocks, {
+    apply: opts.includeLocal && (!opts.all || opts.dispatch === true),
+  });
+  return {
+    visible: opts.all ? localBlocks : filter.surfaced,
+    dispatch: filter.surfaced,
+    filter,
+  };
+}
+
+function renderBlock(b: OpenBlock, localHost: string, indent = ''): void {
+  const host = b.host !== localHost ? chalk.yellow(` [${b.host}]`) : '';
+  const runtime = chalk.gray(b.runtime);
+  const age = chalk.gray(relTime(b.ts));
+  const cls = b.blockClass ? chalk.gray(`(${b.blockClass})`) : '';
+  const consequence = b.consequence && b.consequence !== 'normal' ? chalk.red(`[${b.consequence}]`) : '';
+  const cost = b.costOfDelay ? chalk.gray(`cost:${b.costOfDelay}`) : '';
+  const rank = b.delayRank ? chalk.gray(`rank:${Math.round(b.delayRank.score)}`) : '';
+  // Shared fleet-comms glyphs: ▲ open ask, ✓ answered (see comms-render GLYPH).
+  const marker = b.answer
+    ? chalk.green(GLYPH.delivered)
+    : b.kind === 'control'
+      ? chalk.red('!')
+    : !b.parkedAt
+      ? chalk.yellow(GLYPH.ask)
+      : ' ';
+  console.log(`${indent}${marker} ${chalk.cyan(b.mailboxId)}${host}  ${runtime}  ${age}  ${cls} ${consequence} ${cost} ${rank}`.trimEnd());
+  for (const question of b.questions) {
+    const header = question.header ? chalk.gray(`[${question.header}] `) : '';
+    console.log(`${indent}  ${header}${question.text}`);
+    if (question.options?.length) {
+      for (let i = 0; i < question.options.length; i++) {
+        const o = question.options[i];
+        const desc = o.description ? chalk.gray(` -- ${o.description}`) : '';
+        console.log(`${indent}    ${chalk.dim(`${i + 1}.`)} ${o.label}${desc}`);
+      }
+    }
+  }
+  if (b.ticket || b.pr || b.worktreeSlug) {
+    const meta = [b.ticket, b.pr, b.worktreeSlug].filter(Boolean).join('  ');
+    console.log(`${indent}  ${chalk.gray(meta)}`);
+  }
+
+  if (b.answer) {
+    const verified = b.answer.verified ? chalk.green(GLYPH.delivered) : chalk.yellow('?');
+    const who = b.answer.answeredFrom + (b.answer.answeredBy ? ` (${b.answer.answeredBy})` : '');
+    console.log(`${indent}  ${chalk.green('answered')} by ${who} ${verified}`);
+  }
+  if (b.parkedAt) {
+    console.log(`${indent}  ${chalk.red('hard-parked')} ${relTime(b.parkedAt)}`);
+  }
+  if (b.defaultedAt) {
+    console.log(`${indent}  ${chalk.yellow('defaulted')} ${relTime(b.defaultedAt)}`);
+  }
+  if (b.receipts && b.receipts.length > 0) {
+    const latest = b.receipts[b.receipts.length - 1];
+    console.log(`${indent}  ${chalk.dim('delivery:')} ${latest.status}`);
+  }
+  if (b.continuedAt) {
+    console.log(`${indent}  ${chalk.green('continued')} ${relTime(b.continuedAt)}`);
+  }
+  if (b.notifiedAt) {
+    console.log(`${indent}  ${chalk.dim('notified')} ${relTime(b.notifiedAt)}`);
+  }
+  if (b.runaway) {
+    console.log(`${indent}  ${chalk.red('runaway:')} ${b.runaway.reason}`);
+    console.log(`${indent}  ${chalk.dim(`control: ag feed --pause ${b.mailboxId}  ·  ag feed --kill ${b.mailboxId}`)}`);
+  }
+  if (b.needy) {
+    console.log(`${indent}  ${chalk.yellow('needy:')} ${b.needy.askCountLastHour}/${b.needy.threshold} asks in the last hour`);
+    console.log(`${indent}  ${chalk.dim(`inspect: ag sessions ${b.sessionId}`)}`);
+  }
+
+  if (!b.answer && !b.parkedAt && b.kind !== 'control') {
+    console.log(`${indent}  ${chalk.dim(formatFeedReplyHint(b.mailboxId))}`);
+  }
+  console.log();
+}
+
+/** Human summary line for one outcome rollup. */
+export function formatOutcomeHeader(group: OutcomeGroup): string {
+  const { agents, open, answered, parked } = group.counts;
+  const parts = [
+    `${agents} agent${agents === 1 ? '' : 's'}`,
+    open > 0 ? `${open} needs you` : null,
+    answered > 0 ? `${answered} answered` : null,
+    parked > 0 ? `${parked} parked` : null,
+  ].filter(Boolean);
+  return `${group.outcome.label} · ${parts.join(' · ')}`;
+}
+
+function renderOutcomeGroup(group: OutcomeGroup, localHost: string): void {
+  console.log(chalk.bold(formatOutcomeHeader(group)));
+  if (isUnambiguousOutcomeAnswer(group) && openBlocksForOutcome(group).length > 1) {
+    const ids = openBlocksForOutcome(group).map((b) => b.mailboxId).join(', ');
+    console.log(chalk.dim(`  same question on ${openBlocksForOutcome(group).length} agents — fan-out safe: ${ids}`));
+  }
+  for (const b of group.blocks) {
+    renderBlock(b, localHost, '  ');
+  }
+}
+
+/** Map active sessions into the lightweight hints outcome enrichment needs. */
+export function sessionHintsFromActive(
+  sessions: Array<{
+    sessionId?: string;
+    agentId?: string;
+    ticket?: { id?: string };
+    pr?: { url?: string; number?: number };
+    worktree?: { slug?: string };
+  }>,
+): SessionOutcomeHint[] {
+  return sessions.map((s) => ({
+    sessionId: s.sessionId,
+    agentId: s.agentId,
+    // Same precedence as mailboxIdForActiveSession (agentId ?? sessionId).
+    mailboxId: s.agentId ?? s.sessionId,
+    ticketId: s.ticket?.id,
+    prNumber: s.pr?.number,
+    prUrl: s.pr?.url,
+    worktreeSlug: s.worktree?.slug,
+  }));
+}
+
+export function registerFeedCommand(program: Command): void {
+  program
+    .command('feed')
+    .description('List open blocks -- decisions agents are waiting on (grouped by outcome)')
+    .option('--json', 'Output as JSON (each block stamped with its outcome + ask class)')
+    .option('--flat', 'List one block per agent instead of grouping by outcome')
+    .option('--all', 'Include stalls/FYIs that policy would suppress (default: hide them)')
+    .option('--local', 'Only this machine -- skip the cross-machine SSH fan-out')
+    .option('-H, --host <target...>', 'Scope to remote machine(s) over SSH; repeatable')
+    .option('--device <target...>', 'Alias for --host; repeatable')
+    .option('--dispatch', 'Run stall suppression + default-on-no-answer policy and urgent notifications')
+    .option('--pause <id>', 'Pause a runaway/needy local process (SIGSTOP) or cancel a cloud task')
+    .option('--kill <id>', 'Kill a runaway/needy local process (SIGTERM) or cancel a cloud task')
+    .action(async (opts: {
+      json?: boolean;
+      flat?: boolean;
+      all?: boolean;
+      local?: boolean;
+      host?: string[];
+      device?: string[];
+      dispatch?: boolean;
+      pause?: string;
+      kill?: string;
+    }) => {
+      if (opts.device?.length) opts.host = [...(opts.host ?? []), ...opts.device];
+      const self = machineId();
+      const includeLocal = shouldIncludeLocalFeed(opts.host, self);
+      const setupWarnings: string[] = [];
+      if (includeLocal) {
+        const hookInstall = ensureFeedPublishHook();
+        if (hookInstall.error) {
+          setupWarnings.push(hookInstall.error);
+        } else {
+          const [{ iterHooksCapableVersions, parseHookManifest, registerHooksToSettings }, { getVersionHomePath }] = await Promise.all([
+            import('../lib/hooks.js'),
+            import('../lib/versions.js'),
+          ]);
+          const manifest = parseHookManifest({ warn: false });
+          for (const { agent, version } of iterHooksCapableVersions({ agent: 'claude' })) {
+            const result = registerHooksToSettings(agent, getVersionHomePath(agent, version), manifest);
+            if (result.errors.length > 0) {
+              setupWarnings.push(`${agent}@${version}: ${result.errors.join('; ')}`);
+            }
+          }
+        }
+      }
+
+      // Active sessions feed both the GC sweep and outcome enrichment (ticket/PR).
+      let sessions: Awaited<ReturnType<typeof getActiveSessions>> = [];
+      if (includeLocal) {
+        sessions = await getActiveSessions();
+      }
+      const sessionMetas = includeLocal && sessions.length > 0 ? await discoverSessions({ all: true, limit: 5000 }) : [];
+      const localSignals = buildSessionSignals(sessions, sessionMetas);
+
+      if (opts.pause || opts.kill) {
+        if (!includeLocal) {
+          throw new Error('Feed controls run on the local machine. Re-run against the target host with --local.');
+        }
+        const action = opts.pause ? 'pause' : 'kill';
+        const target = opts.pause ?? opts.kill ?? '';
+        console.log(await controlFeedSession(action, target, localSignals));
+        return;
+      }
+
+      if (opts.dispatch && includeLocal) {
+        // Liveness sweep: drop messages to dead agents and retire stale blocks
+        // before we render the feed.
+        const activeBoxIds = new Set(sessions.map(mailboxIdForActiveSession).filter((id): id is string => !!id));
+        const gcResult = gcMailbox(activeBoxIds);
+        if (gcResult.blocksRemoved > 0 || gcResult.messagesDroppedDead > 0) {
+          console.log(
+            chalk.yellow(`gc: ${gcResult.messagesDroppedDead} dead messages, ${gcResult.blocksRemoved} stale blocks removed`),
+          );
+        }
+      }
+
+      let localBlocks = includeLocal
+        ? [...listBlocks(), ...synthesizeControlCards(localSignals, listAskStats())]
+        : [];
+
+      // Fill missing ticket/PR/worktree from live session meta before local
+      // policy mutates the store, so outcome keys land even when the publish
+      // hook had no deliverable stamp.
+      if (sessions.length > 0) {
+        localBlocks = enrichBlocksFromSessions(localBlocks, sessionHintsFromActive(sessions));
+      }
+
+      // Stall suppression (RUSH-1477) must only mutate blocks owned by this
+      // machine. Remote peers run their own `feed --json`; never enqueue a
+      // policy answer into a local mailbox for a remote agent.
+      const preparedLocal = prepareLocalFeedBlocks(localBlocks, {
+        includeLocal,
+        all: opts.all,
+        dispatch: opts.dispatch,
+      });
+      const visibleLocalBlocks = preparedLocal.visible;
+      const dispatchBlocks = preparedLocal.dispatch;
+
+      let blocks = visibleLocalBlocks;
+      const forceLocal = opts.local === true || process.env[FEED_NO_FANOUT_ENV] === '1';
+      if (!forceLocal) {
+        const remoteHosts = remoteFeedHostsToDial(opts.host, self);
+        if (!opts.host?.length || (remoteHosts && remoteHosts.length > 0)) {
+          const remote = await gatherRemoteAgentsJson({
+            // Bare --json stays a block array so older peers and scripts keep working.
+            args: ['feed', '--json'],
+            noFanoutEnv: FEED_NO_FANOUT_ENV,
+            hosts: remoteHosts,
+            parse: parseRemoteFeed,
+          });
+          blocks = mergeFeedBlocks(visibleLocalBlocks, remote.items);
+        }
+      }
+
+      blocks = rankFeedBlocks(blocks, localSignals);
+      const digest = suppressionDigest(preparedLocal.filter);
+      if (digest && !opts.json) {
+        console.log(chalk.dim(digest));
+      }
+
+      if (opts.dispatch) {
+        const policy = loadPolicy();
+        const now = new Date();
+        for (const b of dispatchBlocks) {
+          // Wrap per-block policy so one malformed block (e.g. a crafted
+          // mailboxId that throws in mailboxDir) can't abort the whole loop and
+          // strand every remaining block's dispatch.
+          try {
+            const result = applyPolicyToBlock(b, policy, now);
+            if (result.action !== 'none') {
+              console.log(`${chalk.yellow('policy')} ${b.blockId}: ${result.action}`);
+            }
+            if (isPhoneUrgent(b, policy)) {
+              const notifyResult = await notifyUrgentBlock(b, { dryRun: opts.json });
+              if (notifyResult.ok && !notifyResult.skipped) {
+                recordNotified(b.blockId);
+                console.log(`${chalk.green('notified')} ${b.blockId}`);
+              } else if (notifyResult.error) {
+                console.error(chalk.yellow(`Notification failed for ${b.blockId}: ${notifyResult.error}`));
+              }
+            }
+          } catch (err) {
+            console.error(chalk.yellow(`Skipped block ${b.blockId}: ${(err as Error).message}`));
+          }
+        }
+      }
+
+      for (const warning of setupWarnings) {
+        console.error(chalk.yellow(`Feed hook setup warning: ${warning}`));
+      }
+
+      if (opts.json) {
+        // Always a block array (stamped with outcome + ask class) so remote fan-out
+        // and scripts keep a stable contract. Human grouping is text-only.
+        const stamped = stampBlockOutcomes(blocks).map((b) => ({
+          ...b,
+          ask: classifyBlock(b),
+        }));
+        console.log(JSON.stringify(stamped, null, 2));
+        return;
+      }
+
+      if (blocks.length === 0) {
+        console.log(chalk.gray(digest ? 'No open blocks after stall suppression.' : 'No open blocks.'));
+        return;
+      }
+
+      // Shared fleet-comms masthead (same family as `agents mailboxes`).
+      console.log(
+        masthead({
+          title: 'they need you',
+          accent: 'amber',
+          host: self,
+          right: formatFeedMastheadRight(blocks),
+        }),
+      );
+      console.log();
+
+      if (opts.flat) {
+        for (const b of blocks) renderBlock(b, self);
+        return;
+      }
+
+      const groups = groupBlocksByOutcome(blocks).sort((a, b) => {
+        const ar = Math.max(...a.blocks.map((block) => block.delayRank?.score ?? 0));
+        const br = Math.max(...b.blocks.map((block) => block.delayRank?.score ?? 0));
+        return br - ar;
+      });
+      for (const g of groups) renderOutcomeGroup(g, self);
+    });
+}

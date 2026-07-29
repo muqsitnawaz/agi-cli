@@ -15,8 +15,12 @@
  * shape + mtime — same function, driven off the normalized events.
  */
 
-import type { SessionEvent } from './types.js';
+import type { SessionAttachment, SessionEvent, TodoItem, TodoProgress } from './types.js';
 import { summarizeToolUse } from './parse.js';
+
+// TodoItem / TodoProgress moved to ./types.ts so SessionMeta can carry `todos`
+// without a state↔types import cycle; re-exported here for existing importers.
+export type { TodoItem, TodoProgress };
 
 export type SessionActivity = 'working' | 'waiting_input' | 'idle';
 export type AwaitingReason = 'question' | 'plan_review' | 'permission';
@@ -64,6 +68,27 @@ export interface DetectedTicket {
   url?: string;
 }
 
+/**
+ * Detect per-session rate-limit / usage-limit signals in assistant or error
+ * text (RUSH-1523). Matches the same shapes Factory's prewarm detectBlockingPrompt
+ * uses, plus common Claude/Codex/Gemini limit strings.
+ */
+export function detectRateLimited(text?: string): boolean {
+  if (!text) return false;
+  const t = text.toLowerCase();
+  return (
+    /\brate[- ]?limit(ed|s)?\b/.test(t) ||
+    /\btoo many requests\b/.test(t) ||
+    /\b429\b/.test(t) ||
+    /\busage[- ]?limit(ed)?\b/.test(t) ||
+    /\bhit your (usage |rate )?limit\b/.test(t) ||
+    /\byou('ve| have) (hit|reached|exceeded) (your |the )?(rate |usage )?limit\b/.test(t) ||
+    /\bout of (credits|quota)\b/.test(t) ||
+    /\bquota exceeded\b/.test(t) ||
+    /\btry again (in|later|after)\b/.test(t) && /\b(limit|rate|quota|throttl)\b/.test(t)
+  );
+}
+
 export interface SessionState {
   activity: SessionActivity;
   awaitingReason?: AwaitingReason;
@@ -71,6 +96,11 @@ export interface SessionState {
   lastEventKind?: SessionEvent['type'];
   /** Single-line description of the latest turn (message text or tool action). */
   preview?: string;
+  /**
+   * True when the transcript shows the session is rate/usage limited (RUSH-1523).
+   * Distinct from account-level usageStatus — this is per-session evidence.
+   */
+  rateLimited?: boolean;
   /**
    * The structured decision the agent is waiting on (question / plan / permission),
    * with its options when it offered any. Set only when activity is waiting_input.
@@ -84,6 +114,12 @@ export interface SessionState {
    * render the actual plan without re-parsing the transcript.
    */
   plan?: string;
+  /**
+   * Live plan progress from the most recent `TodoWrite` (RUSH-1380). Present when
+   * the session has written a todo list; drives the Factory Floor N/M pill +
+   * checklist, notably for remote/device-dispatched agents with no local stream.
+   */
+  todos?: TodoProgress;
   /** Last few assistant turns (most-recent last), one line each — panel context. */
   tail?: string[];
   lastActivityMs?: number;
@@ -94,6 +130,8 @@ export interface SessionState {
   createdTickets?: string[];
   /** Team name this session SPAWNED via `agents teams create/add`. */
   spawnedTeam?: string;
+  /** Displayable files/screenshots attached to the session prompt. */
+  attachments?: SessionAttachment[];
 }
 
 export interface StateContext {
@@ -122,6 +160,51 @@ const PROSE_QUESTION_FRESH_MS = 30 * 60_000;
 /** Claude tool names that structurally mean "the agent handed control back to you". */
 const PLAN_TOOL = 'ExitPlanMode';
 const ASK_TOOL = 'AskUserQuestion';
+
+/** The live plan/checklist tools: Claude's `TodoWrite` and Codex's `update_plan`. */
+const TODO_TOOL = 'TodoWrite';
+const CODEX_PLAN_TOOL = 'update_plan';
+
+/**
+ * Derive live plan progress from a checklist tool call's args. Accepts both
+ * Claude's `TodoWrite` (`todos: [{content,status,activeForm}]`) and Codex's
+ * `update_plan` (`plan: [{step,status}]`) shapes, so the CLI is the single source
+ * of checklist state for every agent. Returns undefined when there is no usable
+ * list, so a session with no plan carries no `todos` field.
+ */
+export function extractTodoProgress(args?: Record<string, any>): TodoProgress | undefined {
+  const raw = Array.isArray(args?.todos)
+    ? args!.todos
+    : Array.isArray(args?.plan)
+      ? args!.plan
+      : undefined;
+  if (!Array.isArray(raw) || raw.length === 0) return undefined;
+  const items: TodoItem[] = [];
+  for (const t of raw) {
+    const activeForm = typeof t?.activeForm === 'string' && t.activeForm ? t.activeForm : undefined;
+    const content =
+      typeof t?.content === 'string' && t.content
+        ? t.content
+        : typeof t?.text === 'string' && t.text
+          ? t.text
+          : typeof t?.step === 'string' && t.step
+            ? t.step
+            : activeForm ?? '';
+    if (!content) continue;
+    const status: TodoItem['status'] =
+      t?.status === 'completed' || t?.status === 'in_progress' ? t.status : 'pending';
+    items.push(activeForm ? { content, status, activeForm } : { content, status });
+  }
+  if (items.length === 0) return undefined;
+  const done = items.filter(i => i.status === 'completed').length;
+  const inProgress = items.find(i => i.status === 'in_progress');
+  return {
+    items,
+    done,
+    total: items.length,
+    activeForm: inProgress ? inProgress.activeForm ?? inProgress.content : undefined,
+  };
+}
 
 /** Trailing '?' or a leading interrogative — a question aimed at the user. */
 const QUESTION_TRAILING = /\?["'”)\]]?\s*$/;
@@ -358,12 +441,19 @@ export function inferActivity(events: SessionEvent[], ctx: StateContext = {}): S
     .map(e => oneLine(e.content ?? ''))
     .filter(Boolean);
 
+  // Live plan progress: the most recent TodoWrite's checklist (RUSH-1380). Attached
+  // to `base` so every return path below carries it — a working, waiting, or idle
+  // session all keep showing how far the plan got.
+  const lastTodo = lastOf(meaningful, e => e.type === 'tool_use' && (e.tool === TODO_TOOL || e.tool === CODEX_PLAN_TOOL));
+  const todos = lastTodo ? extractTodoProgress(lastTodo.args) : undefined;
+
   const base: SessionState = {
     activity: 'idle',
     lastRole: lastMsg?.role,
     lastEventKind: last?.type,
     lastActivityMs: ctx.mtimeMs,
     preview: previewSource ? describeEvent(previewSource) : undefined,
+    todos,
     tail: tail.length ? tail : undefined,
   };
 
@@ -434,6 +524,7 @@ export function detectDurableSignals(events: SessionEvent[]): {
   ticket?: DetectedTicket;
   createdTickets?: string[];
   spawnedTeam?: string;
+  attachments?: SessionAttachment[];
 } {
   let pr: DetectedPr | undefined;
   let sawPrCreate = false;
@@ -441,6 +532,8 @@ export function detectDurableSignals(events: SessionEvent[]): {
   let sawTicketCreate = false;
   let spawnedTeam: string | undefined;
   const createdTickets = new Set<string>();
+  const attachments: SessionAttachment[] = [];
+  const seenAttachments = new Set<string>();
 
   for (const e of events) {
     // Structural PR signal: a real `gh pr create` tool call, then the pull URL
@@ -467,20 +560,49 @@ export function detectDurableSignals(events: SessionEvent[]): {
     if (!ticket && e.type === 'message' && e.role === 'user') {
       ticket = detectTicket(e.content);
     }
+    if (e.type === 'attachment') {
+      const mediaType = e.mediaType || 'application/octet-stream';
+      const key = e.path || e.name || `${mediaType}:${e.sizeBytes ?? 0}:${e.timestamp}`;
+      if (key && !seenAttachments.has(key)) {
+        seenAttachments.add(key);
+        attachments.push({
+          path: e.path,
+          name: e.name,
+          mediaType,
+          sizeBytes: e.sizeBytes,
+        });
+      }
+    }
   }
   return {
     pr,
     ticket,
     createdTickets: createdTickets.size > 0 ? [...createdTickets] : undefined,
     spawnedTeam,
+    attachments: attachments.length > 0 ? attachments : undefined,
   };
 }
 
 /** Full inference: activity + preview + durable signals + worktree/ticket from ctx. */
 export function inferSessionState(events: SessionEvent[], ctx: StateContext = {}): SessionState {
   const state = inferActivity(events, ctx);
-  const { pr, ticket, createdTickets, spawnedTeam } = detectDurableSignals(events);
+  const { pr, ticket, createdTickets, spawnedTeam, attachments } = detectDurableSignals(events);
   const worktree = detectWorktree(ctx.cwd, ctx.gitBranch);
+  // Rate-limit: scan the most recent assistant messages + tool errors (tail-first).
+  let rateLimited = false;
+  for (let i = events.length - 1; i >= 0 && i >= events.length - 12; i--) {
+    const e = events[i];
+    if (!e) continue;
+    if (e.type === 'message' && e.role === 'assistant' && detectRateLimited(e.content)) {
+      rateLimited = true;
+      break;
+    }
+    if (e.type === 'tool_result' && detectRateLimited(e.output)) {
+      rateLimited = true;
+      break;
+    }
+  }
+  if (!rateLimited && detectRateLimited(state.preview)) rateLimited = true;
   return {
     ...state,
     pr: pr ?? state.pr,
@@ -488,5 +610,7 @@ export function inferSessionState(events: SessionEvent[], ctx: StateContext = {}
     ticket: ticket ?? detectTicket(undefined, ctx.gitBranch) ?? state.ticket,
     createdTickets,
     spawnedTeam,
+    attachments,
+    rateLimited: rateLimited || undefined,
   };
 }

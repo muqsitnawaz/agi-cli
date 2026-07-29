@@ -6,11 +6,12 @@
  * source parsing for GitHub shorthand, SSH, HTTPS, and local paths.
  */
 import simpleGit, { SimpleGit } from 'simple-git';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { IS_WINDOWS, isWindowsAbsolutePath } from './platform/index.js';
-import { getPackageLocalPath } from './state.js';
+import { getPackageLocalPath, getDeviceMetaPath } from './state.js';
 import { DEFAULT_SYSTEM_REPO, systemRepoSlug } from './types.js';
 
 /**
@@ -60,6 +61,42 @@ export function assertSafeGitTransport(source: string): void {
     }
   }
   // No scheme -> SCP-style SSH ("git@host:path") or a local path; both safe.
+}
+
+/**
+ * Validate a branch name before it is passed to `git push` / `git pull`.
+ *
+ * A name beginning with `-` is parsed by git as a command-line option
+ * (e.g. `--mirror`, `--receive-pack=…`), not a ref. Pure string check —
+ * identical on every OS, no spawn.
+ *
+ * @throws Error if the name is empty or would be interpreted as a git option.
+ */
+export function assertValidBranchName(branch: string): void {
+  const b = branch.trim();
+  if (!b) {
+    throw new Error(
+      `Invalid branch name ${JSON.stringify(branch)}: branch name is empty.`,
+    );
+  }
+  if (b.startsWith('-')) {
+    throw new Error(
+      `Invalid branch name ${JSON.stringify(branch)}: a name starting with "-" is interpreted as a git option.`,
+    );
+  }
+}
+
+/**
+ * `git push origin <branch>` with option-injection hardening:
+ *   1. {@link assertValidBranchName} rejects leading `-`
+ *   2. `--` ends option parsing so a hostile ref cannot be read as a flag
+ *
+ * Prefer this over `git.push(remote, branch)` whenever the branch comes from
+ * repo state rather than a hard-coded literal.
+ */
+export async function pushOrigin(git: SimpleGit, branch: string): Promise<void> {
+  assertValidBranchName(branch);
+  await git.raw(['push', '--', 'origin', branch]);
 }
 
 /**
@@ -383,6 +420,47 @@ export async function getGitHubUsername(): Promise<string | null> {
   }
 }
 
+const GITHUB_USER_ENV = 'AGENTS_SHARE_GITHUB_USER';
+
+/** Best-effort sync read of `github.user` from git config. */
+function readGitConfigUser(): string | null {
+  try {
+    return execFileSync('git', ['config', '--global', 'github.user'], { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the GitHub username synchronously for `agents share`. Order:
+ *   1. `AGENTS_SHARE_GITHUB_USER` env override
+ *   2. `git config --global github.user`
+ * Falls back to null so callers can decide whether to require auth or proceed
+ * without a namespace.
+ */
+export function resolveGitHubUsernameSync(): string | null {
+  const env = process.env[GITHUB_USER_ENV]?.trim();
+  if (env) return env;
+  return readGitConfigUser();
+}
+
+/**
+ * Resolve the GitHub username asynchronously. Order:
+ *   1. `AGENTS_SHARE_GITHUB_USER` env override
+ *   2. `gh api user --jq ".login"`
+ *   3. `git config --global github.user`
+ * Returns null if none succeed.
+ */
+export async function resolveGitHubUsername(): Promise<string | null> {
+  const env = process.env[GITHUB_USER_ENV]?.trim();
+  if (env) return env;
+  const gh = await getGitHubUsername();
+  if (gh) return gh;
+  return readGitConfigUser();
+}
+
 /**
  * Get the remote URL for origin in a git repo.
  */
@@ -396,6 +474,30 @@ export async function getRemoteUrl(repoPath: string): Promise<string | null> {
     /* not a git repo or no remotes */
     return null;
   }
+}
+
+/**
+ * Canonical `host/owner/repo` form of a git remote, transport-agnostic, so the
+ * same repo cloned over SSH vs HTTPS compares equal. Strips protocol, any
+ * `user@`, a trailing `.git`, and folds the scp-style `host:owner/repo` colon to
+ * a slash. Lower-cased. Used to decide whether an existing checkout is "the same
+ * repo" as a requested source before adopting it.
+ */
+export function canonicalGitRemote(url: string): string {
+  return url
+    .trim()
+    .replace(/\/+$/, '') // trailing slashes first, so a trailing-slash-after-.git still strips
+    .replace(/\.git$/i, '')
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '') // strip scheme (https://, ssh://, git://)
+    .replace(/^[^@/]+@/, '') // strip user@ (git@, ssh user)
+    .replace(':', '/') // scp-style host:owner/repo → host/owner/repo (first colon only)
+    .toLowerCase();
+}
+
+/** True when two git remote URLs point at the same repo across transport forms. */
+export function sameGitRemote(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  return canonicalGitRemote(a) === canonicalGitRemote(b);
 }
 
 /**
@@ -429,29 +531,86 @@ export async function checkGitHubRepoExists(owner: string, repo: string): Promis
   }
 }
 
+/** Result of {@link commitAndPush}. */
+export type CommitAndPushResult = {
+  success: boolean;
+  error?: string;
+  /** Human detail for success: "already up to date", "pushed abc..def", "committed and pushed …". */
+  detail?: string;
+  branch?: string;
+  committed?: boolean;
+  pushed?: boolean;
+};
+
 /**
- * Commit and push changes in a repo.
+ * Commit (if dirty) and push a repo.
+ *
+ * Clean tree + local ahead of origin still pushes — "nothing to commit" is not
+ * "nothing to push". Reports "already up to date" only when `ahead === 0` and
+ * there is nothing to commit.
  */
-export async function commitAndPush(repoPath: string, message: string): Promise<{ success: boolean; error?: string }> {
+export async function commitAndPush(repoPath: string, message: string): Promise<CommitAndPushResult> {
   try {
     const git = simpleGit(repoPath);
+    let status = await git.status();
+    const branch = status.current || 'main';
+    assertValidBranchName(branch);
 
-    // Check for changes
-    const status = await git.status();
-    if (status.files.length === 0) {
-      return { success: true }; // Nothing to commit
+    let committed = false;
+    if (status.files.length > 0) {
+      await git.add('-A');
+      await git.commit(message);
+      committed = true;
+      status = await git.status();
     }
 
-    // Stage all changes
-    await git.add('-A');
+    const ahead = status.ahead ?? 0;
+    if (!committed && ahead === 0) {
+      return {
+        success: true,
+        detail: 'already up to date',
+        branch,
+        committed: false,
+        pushed: false,
+      };
+    }
 
-    // Commit
-    await git.commit(message);
+    // Capture remote tip before push for a real ref range in the detail string.
+    let before = '';
+    try {
+      before = (await git.raw(['rev-parse', '--short=8', `origin/${branch}`])).trim();
+    } catch {
+      /* origin/<branch> may not exist yet (first push) */
+    }
 
-    // Push
-    await git.push('origin', 'main');
+    await pushOrigin(git, branch);
 
-    return { success: true };
+    let after = '';
+    try {
+      after = (await git.raw(['rev-parse', '--short=8', 'HEAD'])).trim();
+    } catch {
+      after = 'unknown';
+    }
+
+    const range =
+      before && after && before !== after
+        ? `${before}..${after}`
+        : after || undefined;
+    const detail = committed
+      ? range
+        ? `committed and pushed ${range}`
+        : 'committed and pushed'
+      : range
+        ? `pushed ${range}`
+        : 'pushed';
+
+    return {
+      success: true,
+      detail,
+      branch,
+      committed,
+      pushed: true,
+    };
   } catch (err) {
     return { success: false, error: (err as Error).message };
   }
@@ -472,10 +631,43 @@ export async function hasUncommittedChanges(repoPath: string): Promise<boolean> 
 }
 
 /**
- * Check if a directory is a git repository.
+ * Check if a directory is a git repository (**synchronous, root-only**).
+ *
+ * Tests for a `.git` entry directly under `dir`, so it recognizes only a
+ * repository *root* — it returns false inside a subdirectory and for linked
+ * worktrees (whose `.git` is a file pointing elsewhere is caught, but a nested
+ * cwd is not). This is deliberate: the system-repo sync callers here always
+ * pass a known root. For the async, worktree-correct predicate used by teams,
+ * see `isGitRepo` in `lib/teams/worktree.ts` (which shells out to
+ * `git rev-parse --git-dir`). The two are intentionally **not** merged.
  */
 export function isGitRepo(dir: string): boolean {
   return fs.existsSync(path.join(dir, '.git'));
+}
+
+/**
+ * Return the absolute path to the git working-tree root containing `dir`.
+ *
+ * Shells out to `git rev-parse --show-toplevel`, so it resolves correctly from
+ * any subdirectory and for linked worktrees (unlike the root-only, synchronous
+ * {@link isGitRepo} above). Throws if `dir` is not inside a git repository.
+ */
+export async function getGitRoot(dir: string): Promise<string> {
+  const root = await simpleGit(dir).revparse(['--show-toplevel']);
+  return root.trim();
+}
+
+/**
+ * Return the absolute path to the **main** working-tree root for `dir`.
+ *
+ * Unlike {@link getGitRoot}, this stays correct when `dir` is inside a *linked*
+ * worktree: `--show-toplevel` there returns the worktree's own path, but the
+ * common git dir (`--git-common-dir`) always points at the primary repo's
+ * `.git`, whose parent is the main checkout. Throws if `dir` is not in a repo.
+ */
+export async function getMainRepoRoot(dir: string): Promise<string> {
+  const common = await simpleGit(dir).raw(['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  return path.dirname(common.trim());
 }
 
 /**
@@ -687,22 +879,106 @@ export function displayHomePath(dir: string): string {
 /**
  * Pull changes in an existing repo.
  * Refuses to pull if the working tree is dirty -- user must commit or discard changes first.
+ *
+ * Uses `git pull --rebase` (same strategy as {@link syncRepoGit}) so a diverged
+ * branch reconciles instead of failing with "Need to specify how to reconcile
+ * divergent branches".
  */
-export async function pullRepo(dir: string): Promise<{ success: boolean; commit: string; error?: string }> {
+/**
+ * Auto-commit the machine's OWN generated per-device meta file
+ * (`devices/<machineId>/agents.yaml`) if it's the dirty state blocking a pull.
+ *
+ * That file is committed + synced (so every machine can introspect every other
+ * machine's pins), but each box rewrites its own copy whenever a pin changes —
+ * leaving the tree perpetually dirty and wedging `agents repo pull` (which
+ * refuses a dirty tree). This durably commits just that one path (explicit
+ * pathspec) so the pull can proceed; genuine user edits to OTHER files are left
+ * untouched and still (correctly) block the pull. No-op when the meta path isn't
+ * inside `dir` (system/extra repos) or isn't dirty. Returns the committed rel
+ * path, or null. `metaAbs` is injectable for tests; defaults to the live path.
+ */
+export async function commitOwnDeviceMeta(
+  dir: string,
+  metaAbs: string = getDeviceMetaPath(),
+): Promise<string | null> {
+  const resolvedDir = path.resolve(dir);
+  const resolvedMeta = path.resolve(metaAbs);
+  if (resolvedMeta !== resolvedDir && !resolvedMeta.startsWith(resolvedDir + path.sep)) {
+    return null; // meta lives outside this repo — not ours to commit here
+  }
+  const rel = path.relative(resolvedDir, resolvedMeta).split(path.sep).join('/');
   try {
     const git = simpleGit(dir);
+    const status = await git.status();
+    const dirty = status.files.some((f) => f.path === rel);
+    if (!dirty) return null;
+    await git.add([rel]);
+    const machine = path.basename(path.dirname(resolvedMeta));
+    await git.commit(`chore(devices): snapshot ${machine} agent pins`, [rel]);
+    return rel;
+  } catch {
+    return null; // best-effort — never let this block the pull path
+  }
+}
+
+export async function pullRepo(
+  dir: string,
+): Promise<{ success: boolean; commit: string; error?: string; branch?: string }> {
+  try {
+    const git = simpleGit(dir);
+    // Commit this machine's own device-meta first so a per-machine pin change
+    // never wedges the pull. Genuine edits elsewhere still block below.
+    await commitOwnDeviceMeta(dir);
     const status = await git.status();
 
     if (!status.isClean()) {
       return {
         success: false,
         commit: '',
-        error: `Working tree has uncommitted changes. Commit or discard them before pulling.\n\n  cd ${displayHomePath(dir)} && git status`,
+        error: `Blocked by local changes. Commit or discard them before pulling.\n\n  cd ${displayHomePath(dir)} && git status`,
       };
     }
 
-    await git.fetch();
-    await git.pull();
+    const branch = status.current || 'main';
+    await git.fetch('origin');
+
+    // Resolve the upstream ref to fast-forward against. Prefer the local
+    // branch's tracking config; otherwise ask origin for its default branch.
+    let tracking = status.tracking;
+    if (!tracking) {
+      try {
+        await git.raw(['remote', 'set-head', 'origin', '--auto']);
+        const sym = await git.raw(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+        tracking = sym.trim();
+      } catch {
+        tracking = `origin/${branch}`;
+      }
+    }
+
+    const localRef = await git.revparse(['HEAD']);
+    const remoteRef = await git.revparse([tracking]).catch(() => null);
+    if (!remoteRef) {
+      return { success: false, commit: '', error: `Could not resolve upstream ref ${tracking}` };
+    }
+
+    if (localRef === remoteRef) {
+      const log = await git.log({ maxCount: 1 });
+      return {
+        success: true,
+        commit: log.latest?.hash.slice(0, 8) || 'unknown',
+        branch,
+      };
+    }
+
+    try {
+      await git.merge(['--ff-only', tracking]);
+    } catch {
+      return {
+        success: false,
+        commit: '',
+        error: `Blocked by local commits. Push or reset them before pulling.\n\n  cd ${displayHomePath(dir)} && git log --oneline HEAD...${tracking}`,
+      };
+    }
 
     installGithooksSymlinks(dir);
 
@@ -710,6 +986,7 @@ export async function pullRepo(dir: string): Promise<{ success: boolean; commit:
     return {
       success: true,
       commit: log.latest?.hash.slice(0, 8) || 'unknown',
+      branch,
     };
   } catch (err) {
     return { success: false, commit: '', error: (err as Error).message };
@@ -751,6 +1028,7 @@ export async function syncRepoGit(
     }
 
     const branch = status.current || 'main';
+    assertValidBranchName(branch);
     await git.fetch('origin');
     await git.pull('origin', branch, { '--rebase': 'true' });
 
@@ -758,7 +1036,7 @@ export async function syncRepoGit(
 
     let pushed = false;
     if (opts.push) {
-      await git.push('origin', branch);
+      await pushOrigin(git, branch);
       pushed = true;
     }
 

@@ -17,7 +17,7 @@ const SESSIONS_DIR = getSessionsDir();
 const DB_PATH = getSessionsDbPath();
 
 /** Current schema version; bumped when migrations are added. */
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 13;
 
 /**
  * Canonicalize a file path for use as a scan_ledger key. The same physical
@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   short_id TEXT NOT NULL,
   agent TEXT NOT NULL,
+  origin TEXT DEFAULT 'cli',
+  routine_name TEXT,
+  routine_run_id TEXT,
   version TEXT,
   account TEXT,
   timestamp TEXT NOT NULL,
@@ -59,6 +62,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   label TEXT,
   message_count INTEGER,
   token_count INTEGER,
+  output_tokens INTEGER,
   cost_usd REAL,
   duration_ms INTEGER,
   file_path TEXT NOT NULL,
@@ -109,6 +113,9 @@ export interface SessionRow {
   id: string;
   short_id: string;
   agent: string;
+  origin: string | null;
+  routine_name: string | null;
+  routine_run_id: string | null;
   version: string | null;
   account: string | null;
   timestamp: string;
@@ -120,6 +127,7 @@ export interface SessionRow {
   label: string | null;
   message_count: number | null;
   token_count: number | null;
+  output_tokens: number | null;
   cost_usd: number | null;
   duration_ms: number | null;
   file_path: string;
@@ -145,6 +153,7 @@ export interface ScanStamp {
 export interface QueryOptions {
   agent?: SessionAgentId;
   agents?: SessionAgentId[];
+  origin?: 'cli' | 'routine';
   version?: string;
   cwd?: string;
   /** Match any session whose cwd equals this or is a descendant of it. */
@@ -289,6 +298,28 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
     if (!cols.some(c => c.name === 'plan')) db.exec(`ALTER TABLE sessions ADD COLUMN plan TEXT`);
     db.exec(`DELETE FROM scan_ledger;`);
   }
+
+  if (fromVersion < 12) {
+    // v11 → v12: `output_tokens` — the real generated-token count, kept separate
+    // from `token_count` (which sums cache-read/-write and so is dominated by
+    // cheap re-counted context). This is the honest "output" metric powering
+    // `agents output`. Additive column; rescan to backfill from transcripts.
+    const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'output_tokens')) db.exec(`ALTER TABLE sessions ADD COLUMN output_tokens INTEGER`);
+    db.exec(`DELETE FROM scan_ledger;`);
+  }
+
+  if (fromVersion < 13) {
+    // v12 → v13: routine runs archive their sandboxed transcript into the run
+    // directory and get indexed as origin='routine', linked by routine_name and
+    // routine_run_id. Existing rows are normal CLI-origin sessions.
+    const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'origin')) db.exec(`ALTER TABLE sessions ADD COLUMN origin TEXT DEFAULT 'cli'`);
+    if (!cols.some(c => c.name === 'routine_name')) db.exec(`ALTER TABLE sessions ADD COLUMN routine_name TEXT`);
+    if (!cols.some(c => c.name === 'routine_run_id')) db.exec(`ALTER TABLE sessions ADD COLUMN routine_run_id TEXT`);
+    db.exec(`UPDATE sessions SET origin = 'cli' WHERE origin IS NULL OR origin = ''`);
+    db.exec(`DELETE FROM scan_ledger;`);
+  }
 }
 
 /** Open (or return the cached) sessions database, applying migrations as needed. */
@@ -322,6 +353,8 @@ export function getDB(): Database.Database {
   // run. It must NOT live in SCHEMA (executed before migration) or an existing
   // DB would fail the index build on a column it doesn't have yet.
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity DESC)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_origin ON sessions(origin)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_routine_run_id ON sessions(routine_run_id)`);
 
   // One-shot cleanup of the pre-SQLite JSONL indexes. Safe — nothing reads
   // them anymore. Guarded by a meta flag so we only try once.
@@ -513,21 +546,26 @@ export function recordScans(entries: Array<{ filePath: string; scan: ScanStamp }
 
 const upsertSessionStmt = (db: Database.Database) => db.prepare(`
   INSERT INTO sessions (
-    id, short_id, agent, version, account, timestamp, last_activity,
+    id, short_id, agent, origin, routine_name, routine_run_id,
+    version, account, timestamp, last_activity,
     project, cwd, git_branch, topic, label, message_count, token_count,
-    cost_usd, duration_ms,
+    output_tokens, cost_usd, duration_ms,
     file_path, file_mtime_ms, file_size, scanned_at, is_team_origin,
     pr_url, pr_number, worktree_slug, ticket_id, plan
   ) VALUES (
-    @id, @short_id, @agent, @version, @account, @timestamp, @last_activity,
+    @id, @short_id, @agent, @origin, @routine_name, @routine_run_id,
+    @version, @account, @timestamp, @last_activity,
     @project, @cwd, @git_branch, @topic, @label, @message_count, @token_count,
-    @cost_usd, @duration_ms,
+    @output_tokens, @cost_usd, @duration_ms,
     @file_path, @file_mtime_ms, @file_size, @scanned_at, @is_team_origin,
     @pr_url, @pr_number, @worktree_slug, @ticket_id, @plan
   )
   ON CONFLICT(id) DO UPDATE SET
     short_id = excluded.short_id,
     agent = excluded.agent,
+    origin = excluded.origin,
+    routine_name = excluded.routine_name,
+    routine_run_id = excluded.routine_run_id,
     version = excluded.version,
     account = excluded.account,
     timestamp = excluded.timestamp,
@@ -539,6 +577,7 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     label = excluded.label,
     message_count = excluded.message_count,
     token_count = excluded.token_count,
+    output_tokens = excluded.output_tokens,
     cost_usd = excluded.cost_usd,
     duration_ms = excluded.duration_ms,
     file_path = excluded.file_path,
@@ -586,6 +625,9 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
     id: meta.id,
     short_id: meta.shortId,
     agent: meta.agent,
+    origin: meta.origin ?? 'cli',
+    routine_name: meta.routineName ?? null,
+    routine_run_id: meta.routineRunId ?? null,
     version: meta.version ?? null,
     account: meta.account ?? null,
     timestamp: meta.timestamp,
@@ -597,6 +639,7 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
     label: meta.label ?? null,
     message_count: meta.messageCount ?? null,
     token_count: meta.tokenCount ?? null,
+    output_tokens: meta.outputTokens ?? null,
     cost_usd: meta.costUsd ?? null,
     duration_ms: meta.durationMs ?? null,
     file_path: meta.filePath,
@@ -688,6 +731,9 @@ export function upsertSessionsBatch(
         id: meta.id,
         short_id: meta.shortId,
         agent: meta.agent,
+        origin: meta.origin ?? 'cli',
+        routine_name: meta.routineName ?? null,
+        routine_run_id: meta.routineRunId ?? null,
         version: meta.version ?? null,
         account: meta.account ?? null,
         timestamp: meta.timestamp,
@@ -699,6 +745,7 @@ export function upsertSessionsBatch(
         label: meta.label ?? null,
         message_count: meta.messageCount ?? null,
         token_count: meta.tokenCount ?? null,
+        output_tokens: meta.outputTokens ?? null,
         cost_usd: meta.costUsd ?? null,
         duration_ms: meta.durationMs ?? null,
         file_path: meta.filePath,
@@ -875,6 +922,9 @@ function rowToMeta(row: SessionRow): SessionMeta {
     id: row.id,
     shortId: row.short_id,
     agent: row.agent as SessionAgentId,
+    origin: (row.origin === 'routine' ? 'routine' : 'cli'),
+    routineName: row.routine_name ?? undefined,
+    routineRunId: row.routine_run_id ?? undefined,
     timestamp: row.timestamp,
     lastActivity: row.last_activity ?? undefined,
     project: row.project ?? undefined,
@@ -883,6 +933,7 @@ function rowToMeta(row: SessionRow): SessionMeta {
     gitBranch: row.git_branch ?? undefined,
     messageCount: row.message_count ?? undefined,
     tokenCount: row.token_count ?? undefined,
+    outputTokens: row.output_tokens ?? undefined,
     costUsd: row.cost_usd ?? undefined,
     durationMs: row.duration_ms ?? undefined,
     version: row.version ?? undefined,
@@ -912,21 +963,39 @@ function resolveLastActivity(meta: SessionMeta, scan?: ScanStamp): string {
   return meta.timestamp;
 }
 
+export function isSessionActivityFresh(
+  row: { last_activity: string | null; timestamp: string; file_mtime_ms: number | null },
+  maxAgeMs: number,
+  nowMs: number,
+): boolean {
+  const parsedActivityMs = Date.parse(row.last_activity ?? row.timestamp);
+  const activityMs = Number.isFinite(parsedActivityMs) ? parsedActivityMs : row.file_mtime_ms ?? undefined;
+  return activityMs != null && nowMs - activityMs <= maxAgeMs;
+}
+
 /**
  * Newest indexed session file for an agent working in `cwd`. Lets the live
  * `--active` scanner locate a Codex transcript (whose files are date-partitioned,
  * not cwd-keyed like Claude's) by reusing the index. Returns undefined if the
  * session hasn't been scanned yet — the caller degrades to no live state.
  */
-export function latestSessionFileForCwd(agent: SessionAgentId, cwd: string): string | undefined {
+export function latestSessionFileForCwd(agent: SessionAgentId, cwd: string, options?: { maxAgeMs?: number; nowMs?: number }): string | undefined {
   if (!cwd) return undefined;
   let normalized = cwd;
   try { normalized = fs.realpathSync(cwd); } catch { /* use as-is */ }
   const db = getDB();
   const row = db
-    .prepare(`SELECT file_path FROM sessions WHERE agent = ? AND cwd = ? ORDER BY timestamp DESC LIMIT 1`)
-    .get(agent, normalized) as { file_path: string } | undefined;
-  return row?.file_path;
+    .prepare(`SELECT file_path, last_activity, timestamp, file_mtime_ms
+              FROM sessions
+              WHERE agent = ? AND cwd = ?
+              ORDER BY COALESCE(last_activity, timestamp) DESC
+              LIMIT 1`)
+    .get(agent, normalized) as { file_path: string; last_activity: string | null; timestamp: string; file_mtime_ms: number | null } | undefined;
+  if (!row) return undefined;
+  if (options?.maxAgeMs != null) {
+    if (!isSessionActivityFresh(row, options.maxAgeMs, options.nowMs ?? Date.now())) return undefined;
+  }
+  return row.file_path;
 }
 
 /** Build a parameterized WHERE clause from query options. */
@@ -945,6 +1014,11 @@ function buildSessionWhere(options: QueryOptions): { clause: string; params: any
   if (options.version) {
     where.push('version = ?');
     params.push(options.version);
+  }
+
+  if (options.origin) {
+    where.push("IFNULL(origin, 'cli') = ?");
+    params.push(options.origin);
   }
 
   if (options.cwd) {
@@ -970,12 +1044,12 @@ function buildSessionWhere(options: QueryOptions): { clause: string; params: any
   // for the same reason. short_id carries its own index (idx_sessions_short_id);
   // id is the PRIMARY KEY.
   if (options.idExact) {
-    where.push('(id = ? COLLATE NOCASE OR short_id = ? COLLATE NOCASE)');
-    params.push(options.idExact, options.idExact);
+    where.push('(id = ? COLLATE NOCASE OR short_id = ? COLLATE NOCASE OR routine_run_id = ? COLLATE NOCASE)');
+    params.push(options.idExact, options.idExact, options.idExact);
   }
   if (options.idPrefix) {
-    where.push('(id LIKE ? OR short_id LIKE ?)');
-    params.push(`${options.idPrefix}%`, `${options.idPrefix}%`);
+    where.push('(id LIKE ? OR short_id LIKE ? OR routine_run_id LIKE ?)');
+    params.push(`${options.idPrefix}%`, `${options.idPrefix}%`, `${options.idPrefix}%`);
   }
 
   if (typeof options.sinceMs === 'number') {
@@ -1048,6 +1122,8 @@ export interface UsageRollupRow {
   durationMs: number;
   sessionCount: number;
   tokenCount: number;
+  /** Real generated (output) tokens — excludes cache-read/-write context. */
+  outputTokens: number;
 }
 
 /** What to group a usage rollup by. */
@@ -1079,7 +1155,8 @@ export function queryUsageRollup(
       IFNULL(SUM(cost_usd), 0) AS costUsd,
       IFNULL(SUM(duration_ms), 0) AS durationMs,
       COUNT(*) AS sessionCount,
-      IFNULL(SUM(token_count), 0) AS tokenCount
+      IFNULL(SUM(token_count), 0) AS tokenCount,
+      IFNULL(SUM(output_tokens), 0) AS outputTokens
     FROM sessions
     ${clause}
     GROUP BY key

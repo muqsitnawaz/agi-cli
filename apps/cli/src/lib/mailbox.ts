@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { getMailboxRootDir } from './state.js';
+import { recordMessageReceipt } from './feed.js';
 
 /** A single mailbox message. `text` may embed `host:/path` clip tokens. */
 export interface MailboxMessage {
@@ -30,8 +31,21 @@ export interface MailboxMessage {
   from?: string;
   /** ISO-8601 creation time. */
   ts: string;
+  /** Optional ISO-8601 expiry time. Expired messages are dropped, not delivered. */
+  expiresAt?: string;
   /** The message body. */
   text: string;
+  /**
+   * The feed block this message answers. Set by `agents message` when the
+   * target has an open block, so the drain can surface consumed/continued
+   * receipts back to the feed store.
+   */
+  blockId?: string;
+  /**
+   * Drop reason when a message is archived without delivery (expired, dead box, etc.).
+   * Set by the TTL/liveness layer, not by writers.
+   */
+  dropped?: string;
 }
 
 /**
@@ -88,17 +102,22 @@ function newMsgId(): string {
  * Enqueue a message into `boxDir` atomically. Returns the msgId. The `to` field
  * is stamped so a drain can refuse a message that lands in the wrong box.
  */
-export function enqueue(boxDir: string, msg: { to: string; text: string; from?: string }): string {
+export function enqueue(boxDir: string, msg: { to: string; text: string; from?: string; blockId?: string; ttlSeconds?: number }): string {
   assertValidMailboxId(msg.to);
   ensureDirs(boxDir);
   const msgId = newMsgId();
+  const now = new Date();
   const record: MailboxMessage = {
     msgId,
     to: msg.to,
     from: msg.from,
-    ts: new Date().toISOString(),
+    ts: now.toISOString(),
     text: msg.text,
+    blockId: msg.blockId,
   };
+  if (msg.ttlSeconds != null && msg.ttlSeconds > 0) {
+    record.expiresAt = new Date(now.getTime() + msg.ttlSeconds * 1000).toISOString();
+  }
   const target = path.join(inboxDir(boxDir), `${msgId}.json`);
   const tmp = `${target}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(record, null, 2), 'utf-8');
@@ -107,7 +126,7 @@ export function enqueue(boxDir: string, msg: { to: string; text: string; from?: 
 }
 
 /** Parse a message file. Returns null on missing/corrupt/invalid-shape. */
-function readMessage(file: string): MailboxMessage | null {
+export function readMessage(file: string): MailboxMessage | null {
   let raw: string;
   try {
     raw = fs.readFileSync(file, 'utf-8');
@@ -124,7 +143,61 @@ function readMessage(file: string): MailboxMessage | null {
   if (typeof m?.msgId !== 'string' || typeof m?.to !== 'string' || typeof m?.text !== 'string') {
     return null;
   }
-  return { msgId: m.msgId, to: m.to, from: m.from, ts: m.ts ?? '', text: m.text };
+  return { msgId: m.msgId, to: m.to, from: m.from, ts: m.ts ?? '', text: m.text, expiresAt: m.expiresAt, blockId: m.blockId, dropped: m.dropped };
+}
+
+/** True when a message has a parsed expiry in the past. */
+export function isExpired(msg: MailboxMessage, now: Date = new Date()): boolean {
+  if (!msg.expiresAt) return false;
+  const ts = Date.parse(msg.expiresAt);
+  return !Number.isNaN(ts) && ts <= now.getTime();
+}
+
+function archiveDropped(boxDir: string, name: string, reason: string): void {
+  const src = path.join(inboxDir(boxDir), name);
+  const dest = path.join(consumedDir(boxDir), name);
+  try {
+    const msg = readMessage(src);
+    if (msg) {
+      msg.dropped = reason;
+      fs.writeFileSync(`${dest}.tmp`, JSON.stringify(msg, null, 2), 'utf-8');
+      fs.renameSync(`${dest}.tmp`, dest);
+      fs.unlinkSync(src);
+    } else {
+      // corrupt — just move it out of inbox
+      fs.renameSync(src, dest);
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Move expired messages from inbox/ and processing/ into consumed/ with a
+ * `dropped: expired` marker. Called by drain/peek before returning messages.
+ */
+export function sweepExpired(boxDir: string, boxId: string = path.basename(boxDir), now: Date = new Date()): number {
+  ensureDirs(boxDir);
+  let n = 0;
+  for (const dir of [inboxDir(boxDir), processingDir(boxDir)]) {
+    for (const name of jsonFiles(dir)) {
+      const msg = readMessage(path.join(dir, name));
+      if (msg && msg.to === boxId && isExpired(msg, now)) {
+        try {
+          const dest = path.join(consumedDir(boxDir), name);
+          msg.dropped = 'expired';
+          const tmp = `${dest}.${process.pid}.tmp`;
+          fs.writeFileSync(tmp, JSON.stringify(msg, null, 2), 'utf-8');
+          fs.renameSync(tmp, dest);
+          fs.unlinkSync(path.join(dir, name));
+          n++;
+        } catch {
+          // ignore racing claimers
+        }
+      }
+    }
+  }
+  return n;
 }
 
 function jsonFiles(dir: string): string[] {
@@ -142,6 +215,9 @@ function jsonFiles(dir: string): string[] {
  * to this box, then archive to `consumed/`. Returns the message iff valid AND
  * addressed here; a mismatched/corrupt file is archived (dropped) so it never
  * loops. Returns null when the file vanished (a racing drain took it).
+ *
+ * When the message carries a `blockId`, the consumed event is surfaced back to
+ * the feed store so the operator can see delivery confirmation.
  */
 function consumeClaimed(boxDir: string, name: string, expectedTo: string): MailboxMessage | null {
   const src = path.join(processingDir(boxDir), name);
@@ -153,6 +229,14 @@ function consumeClaimed(boxDir: string, name: string, expectedTo: string): Mailb
     return null; // already archived/claimed elsewhere
   }
   if (!msg || msg.to !== expectedTo) return null; // dropped (corrupt or wrong box)
+  if (msg.blockId) {
+    try {
+      const feedRoot = process.env.AGENTS_FEED_DIR;
+      recordMessageReceipt(msg.blockId, { msgId: msg.msgId, status: 'consumed', at: new Date().toISOString(), from: msg.from }, feedRoot);
+    } catch {
+      // Receipt surfacing is best-effort; never stall delivery.
+    }
+  }
   return msg;
 }
 
@@ -164,8 +248,9 @@ function consumeClaimed(boxDir: string, name: string, expectedTo: string): Mailb
  *
  * `boxId` defaults to the box's directory name — the id it was created under.
  */
-export function drain(boxDir: string, boxId: string = path.basename(boxDir)): MailboxMessage[] {
+export function drain(boxDir: string, boxId: string = path.basename(boxDir), now: Date = new Date()): MailboxMessage[] {
   ensureDirs(boxDir);
+  sweepExpired(boxDir, boxId, now);
   const out: MailboxMessage[] = [];
 
   // 1. Recover orphans left in processing/ by a prior interrupted drain.
@@ -191,7 +276,8 @@ export function drain(boxDir: string, boxId: string = path.basename(boxDir)): Ma
 }
 
 /** Read pending messages (inbox + in-flight) without consuming them. FIFO. */
-export function peek(boxDir: string, boxId: string = path.basename(boxDir)): MailboxMessage[] {
+export function peek(boxDir: string, boxId: string = path.basename(boxDir), now: Date = new Date()): MailboxMessage[] {
+  sweepExpired(boxDir, boxId, now);
   const out: MailboxMessage[] = [];
   for (const dir of [processingDir(boxDir), inboxDir(boxDir)]) {
     for (const name of jsonFiles(dir)) {
@@ -214,4 +300,138 @@ export function clear(boxDir: string): number {
     }
   }
   return n;
+}
+
+/** Which bucket a stored message currently sits in. */
+export type MailboxState = 'inbox' | 'processing' | 'consumed';
+
+/** A message read back from a box, tagged with the bucket it was found in. */
+export interface StoredMessage extends MailboxMessage {
+  state: MailboxState;
+}
+
+/** A stored message enriched with the mailbox identity used by comms renderers. */
+export interface CommsMsg {
+  from: string;
+  to: string;
+  toLabel: string;
+  ts: string;
+  text: string;
+  state: MailboxState;
+  box: string;
+}
+
+/**
+ * Enumerate the box ids under `root` (directory names that are valid mailbox
+ * ids). Read-only; does not create the root. Sorted for stable output.
+ */
+export function listBoxes(root: string = getMailboxRootDir()): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(root);
+  } catch {
+    return [];
+  }
+  return names.filter((n) => isValidMailboxId(n) && fs.statSync(path.join(root, n)).isDirectory()).sort();
+}
+
+/**
+ * Read every message in a box across all three buckets (inbox, processing,
+ * consumed) WITHOUT consuming, sweeping, or archiving anything. Unlike `peek`,
+ * this includes `consumed/` — the delivered history — so callers can surface a
+ * communication log. Each row is tagged with its bucket. Sorted FIFO by msgId
+ * (which is time-sortable), oldest first.
+ */
+export function readBox(boxDir: string): StoredMessage[] {
+  const out: StoredMessage[] = [];
+  const buckets: [string, MailboxState][] = [
+    [inboxDir(boxDir), 'inbox'],
+    [processingDir(boxDir), 'processing'],
+    [consumedDir(boxDir), 'consumed'],
+  ];
+  for (const [dir, state] of buckets) {
+    for (const name of jsonFiles(dir)) {
+      const msg = readMessage(path.join(dir, name));
+      if (msg) out.push({ ...msg, state });
+    }
+  }
+  out.sort((a, b) => (a.msgId < b.msgId ? -1 : a.msgId > b.msgId ? 1 : 0));
+  return out;
+}
+
+/**
+ * Poll the complete spool and yield each message once when its box/msgId pair
+ * first appears. Existing messages establish the initial baseline unless
+ * `backfill` is requested; moving a message between buckets does not re-emit it.
+ */
+export async function* watchMessages(
+  root: string,
+  opts: { signal?: AbortSignal; intervalMs?: number; backfill?: boolean },
+): AsyncGenerator<CommsMsg> {
+  const seen = new Set<string>();
+  const requestedInterval = opts.intervalMs ?? 500;
+  const intervalMs = Number.isFinite(requestedInterval) ? Math.max(1, requestedInterval) : 500;
+  let firstPoll = true;
+
+  while (!opts.signal?.aborted) {
+    const fresh: Array<{ key: string; message: CommsMsg }> = [];
+    for (const box of listBoxes(root)) {
+      for (const stored of readBox(mailboxDir(box, root))) {
+        const key = `${box}\0${stored.msgId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (firstPoll && !opts.backfill) continue;
+        fresh.push({
+          key,
+          message: {
+            from: stored.from || 'operator',
+            to: stored.to,
+            toLabel: box.slice(0, 8),
+            ts: stored.ts,
+            text: stored.text,
+            state: stored.state,
+            box,
+          },
+        });
+      }
+    }
+    firstPoll = false;
+
+    fresh.sort((a, b) =>
+      compareWatched(a.message.ts, b.message.ts) ||
+      compareWatched(a.key, b.key));
+    for (const { message } of fresh) {
+      if (opts.signal?.aborted) return;
+      yield message;
+    }
+
+    if (!await waitForMailboxPoll(intervalMs, opts.signal)) return;
+  }
+}
+
+function compareWatched(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Wait for the next poll, resolving immediately when the watcher is aborted. */
+function waitForMailboxPoll(intervalMs: number, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const finish = (keepWatching: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(keepWatching);
+    };
+    const onAbort = () => finish(false);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) {
+      finish(false);
+      return;
+    }
+    timer = setTimeout(() => finish(true), intervalMs);
+  });
 }

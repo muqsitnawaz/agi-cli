@@ -15,20 +15,25 @@ import { getDaemonDir as getDaemonDirRoot } from './state.js';
 import { isAlive, killTree, backgroundSpawnOptions } from './platform/index.js';
 import { listJobs as listAllJobs } from './routines.js';
 import { JobScheduler } from './scheduler.js';
+import { MonitorEngine } from './monitors/engine.js';
 import { executeJobDetached, monitorRunningJobs } from './runner.js';
 import { detectOverdueJobs, notifyOverdue } from './overdue.js';
 import { BrowserService } from './browser/service.js';
 import { BrowserIPCServer } from './browser/ipc.js';
 import { readAndResolveBundleEnv } from './secrets/bundles.js';
 import { redactSecrets } from './redact.js';
+import { getAgentsBinPath, getCliLaunch, BUN_VIRTUAL_ROOT } from './cli-entry.js';
 
 const PID_FILE = 'daemon.pid';
 const LOCK_FILE = 'daemon.lock';
 const LOG_FILE = 'logs.jsonl';
+const HEARTBEAT_FILE = 'heartbeat.json';
 const LOG_MAX_SIZE = 5 * 1024 * 1024; // 5 MB
 const LOG_ROTATE_COUNT = 3;
 const PLIST_NAME = 'com.phnx-labs.agents-daemon';
 const SYSTEMD_UNIT = 'agents-daemon.service';
+const MONITOR_TICK_MS = 60_000;
+const WEDGE_THRESHOLD_TICKS = 3;
 
 // A long-lived `claude setup-token` value stored in this secrets bundle/key is
 // baked into the daemon's service-manager environment so headless routine runs
@@ -36,6 +41,18 @@ const SYSTEMD_UNIT = 'agents-daemon.service';
 // session (which expires between runs and produces intermittent 401s).
 const DAEMON_OAUTH_BUNDLE = 'claude';
 const DAEMON_OAUTH_KEY = 'CLAUDE_CODE_OAUTH_TOKEN';
+
+/**
+ * RUSH-1817: decide whether the daemon should (re)take over hosting the secrets
+ * broker. The startup host decision is one-shot; this drives the periodic
+ * self-heal re-check. Take over ONLY when the daemon is not already hosting AND
+ * no healthy broker answers a ping — i.e. a standalone the daemon deferred to at
+ * start has since died or crash-looped. Never take over while our in-process
+ * broker is hosting, and never clobber a reachable (healthy) broker.
+ */
+export function shouldTakeOverBroker(isHosting: boolean, brokerReachable: boolean): boolean {
+  return !isHosting && !brokerReachable;
+}
 
 function getDaemonDir(): string {
   const dir = getDaemonDirRoot();
@@ -124,6 +141,48 @@ export function removeDaemonPid(): void {
   }
 }
 
+export interface DaemonHeartbeat {
+  lastTick: string;
+  pid: number;
+}
+
+function getHeartbeatPath(): string {
+  return path.join(getDaemonDir(), HEARTBEAT_FILE);
+}
+
+export function writeHeartbeat(pid: number = process.pid): void {
+  const hb: DaemonHeartbeat = { lastTick: new Date().toISOString(), pid };
+  try {
+    fs.writeFileSync(getHeartbeatPath(), JSON.stringify(hb), 'utf-8');
+  } catch { /* best effort */ }
+}
+
+export function readHeartbeat(): DaemonHeartbeat | null {
+  try {
+    const raw = fs.readFileSync(getHeartbeatPath(), 'utf-8');
+    const hb = JSON.parse(raw) as DaemonHeartbeat;
+    if (!hb.lastTick || !hb.pid) return null;
+    return hb;
+  } catch {
+    return null;
+  }
+}
+
+export function removeHeartbeat(): void {
+  try { fs.unlinkSync(getHeartbeatPath()); } catch { /* already removed */ }
+}
+
+export function isDaemonWedged(): boolean {
+  const pid = readDaemonPid();
+  if (!pid) return false;
+  if (!isAlive(pid)) return false;
+  const hb = readHeartbeat();
+  if (!hb) return false;
+  if (hb.pid !== pid) return false;
+  const elapsed = Date.now() - Date.parse(hb.lastTick);
+  return elapsed > WEDGE_THRESHOLD_TICKS * MONITOR_TICK_MS;
+}
+
 /** Check if the daemon process is alive by sending signal 0 to the stored PID. */
 export function isDaemonRunning(): boolean {
   const pid = readDaemonPid();
@@ -134,9 +193,9 @@ export function isDaemonRunning(): boolean {
 }
 
 /**
- * Single-instance claim for the daemon `_run` entrypoint.
+ * Single-instance claim for the daemon foreground entrypoint.
  *
- * `agents daemon _run` is reachable directly — a manual invocation, or a
+ * `agents __daemon-run` is reachable directly — a manual invocation, or a
  * service-manager restart that races a still-alive predecessor — bypassing the
  * start lock in startDaemon(). Without this guard runDaemon() would call
  * writeDaemonPid() unconditionally, clobber a live daemon's recorded PID, and
@@ -163,7 +222,7 @@ export function claimDaemonInstance(): boolean {
 }
 
 /**
- * Reap stray duplicate daemon processes — a `daemon _run` of THIS install that
+ * Reap stray duplicate daemon processes — a `__daemon-run` of THIS install that
  * isn't this process and isn't the pid-file owner. Mirrors the browser orphan
  * reaper (below): a predecessor that was SIGKILLed/OOM-ed without cleaning up,
  * or a duplicate that lost the pid-file write race, would otherwise keep a
@@ -197,9 +256,9 @@ export function reapStrayDaemons(keepPid: number = process.pid): { reaped: numbe
     const pid = parseInt(m[1], 10);
     const args = m[2];
     if (isNaN(pid) || pid === keepPid || pid === process.pid || pid === ownerPid) continue;
-    // Same install (same launch entry) AND a `daemon _run` command line.
+    // Same install (same launch entry) AND a `__daemon-run` command line.
     if (!args.includes(selfEntry)) continue;
-    if (!/\bdaemon\b.*\b_run\b/.test(args)) continue;
+    if (!/\b__daemon-run\b/.test(args)) continue;
     try {
       process.kill(pid, 'SIGTERM');
       reaped++;
@@ -233,7 +292,7 @@ export function log(level: string, message: string): void {
 
 /** Main daemon loop: load jobs, schedule crons, monitor runs, and handle signals. */
 export async function runDaemon(): Promise<void> {
-  // Single-instance guard: a direct `agents daemon _run` (manual, or a
+  // Single-instance guard: a direct `agents __daemon-run` (manual, or a
   // service-manager restart racing a live predecessor) must not clobber a
   // running daemon's pid file and start a second scheduler.
   if (!claimDaemonInstance()) {
@@ -244,6 +303,22 @@ export async function runDaemon(): Promise<void> {
     process.exit(0);
   }
   log('INFO', `Daemon started (PID: ${process.pid})`);
+
+  // RUSH-1759: the launchd plist / systemd unit no longer bake the Claude OAuth
+  // token onto disk. Obtain it here from the secure `claude` secrets bundle and
+  // inject into this process's env so every routine run this daemon spawns still
+  // receives it (via the sandbox allowlist), without the token ever being
+  // persisted in the service manifest. A read from a file-backed store (Linux)
+  // needs no prompt; on macOS it resolves broker-only from an unlocked
+  // secrets-agent and is otherwise absent (leaving the daemon on its existing
+  // interactive OAuth session), matching the detached-start path. Never blocks.
+  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    const oauthToken = readDaemonClaudeOAuthToken();
+    if (oauthToken) {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
+      log('INFO', 'Loaded Claude OAuth token from secrets bundle for routine runs');
+    }
+  }
 
   // Reap any stray duplicate daemon of this install that slipped past the start
   // lock or was orphaned by a hard-crash — before it can double-fire jobs.
@@ -257,8 +332,33 @@ export async function runDaemon(): Promise<void> {
     log('ERROR', `Stray daemon reaper failed: ${(err as Error).message}`);
   }
 
+  // #416: host the secrets broker socket-first — before the scheduler and the
+  // heavy browser/session-sync services — so `agents secrets` resolves within
+  // ms of daemon start. Only host when no broker is already reachable, so we
+  // never orphan a live standalone broker's clients (that broker stays the
+  // server until it idle-exits or the daemon restarts). Best-effort: a failure
+  // here must not stop the daemon. Retiring the standalone launchd service is
+  // the follow-on (#416 step 2 / #417).
+  let hostedBroker: { close(): void } | null = null;
+  try {
+    const { agentPing, startHostedBroker } = await import('./secrets/agent.js');
+    if ((await agentPing()).reachable) {
+      log('INFO', 'Secrets broker already running (standalone); daemon not hosting it');
+    } else {
+      hostedBroker = await startHostedBroker();
+      if (hostedBroker) log('INFO', 'Secrets broker hosted in daemon (socket-first)');
+    }
+  } catch (err) {
+    log('WARN', `Secrets broker host skipped: ${(err as Error).message}`);
+  }
+
   const scheduler = new JobScheduler(async (config) => {
-    log('INFO', `Triggering job '${config.name}' (agent: ${config.agent})`);
+    const jobLabel = config.command
+      ? 'command'
+      : config.workflow
+        ? `workflow: ${config.workflow}`
+        : `agent: ${config.agent}`;
+    log('INFO', `Triggering job '${config.name}' (${jobLabel})`);
     try {
       const meta = await executeJobDetached(config);
       log('INFO', `Job '${config.name}' spawned (run: ${meta.runId}, PID: ${meta.pid})`);
@@ -272,6 +372,16 @@ export async function runDaemon(): Promise<void> {
   log('INFO', `Loaded ${scheduled.length} jobs`);
   for (const job of scheduled) {
     log('INFO', `  ${job.name} -> next: ${job.nextRun?.toISOString() || 'unknown'}`);
+  }
+
+  // Monitor engine: event-triggered watchers, beside the cron scheduler. Same
+  // daemon, same dispatch seam — a monitor is a routine whose trigger is a
+  // watched source instead of a clock. Reloads on SIGHUP alongside the scheduler.
+  const monitorEngine = new MonitorEngine((level, message) => log(level, message));
+  try {
+    monitorEngine.start();
+  } catch (err) {
+    log('ERROR', `Monitor engine failed to start: ${(err as Error).message}`);
   }
 
   // Backlog detection: any enabled recurring job whose most-recent expected
@@ -319,9 +429,11 @@ export async function runDaemon(): Promise<void> {
     log('ERROR', `Browser IPC failed to start: ${(err as Error).message}`);
   }
 
+  writeHeartbeat();
   const monitorInterval = setInterval(() => {
+    writeHeartbeat();
     monitorRunningJobs();
-  }, 60_000);
+  }, MONITOR_TICK_MS);
 
   // Cross-machine session sync: push this machine's transcripts to R2 and pull
   // every other machine's, ~every 90s. Skipped silently when the r2.backups
@@ -344,6 +456,7 @@ export async function runDaemon(): Promise<void> {
         log('INFO', `sessions sync: pushed ${r.pushed}, pulled ${r.pulled}, merged ${r.merged}` +
           (r.errors.length ? `, ${r.errors.length} error(s): ${r.errors[0]}` : ''));
       }
+      if (r.warnings.length) log('WARN', `sessions sync: ${r.warnings[0]}`);
     } catch (err) {
       log('ERROR', `sessions sync failed: ${(err as Error).message}`);
     } finally {
@@ -501,11 +614,79 @@ export async function runDaemon(): Promise<void> {
   const launchHealthInterval = setInterval(() => { void runLaunchHealthCheck(); }, 6 * 60 * 60_000);
   const launchHealthKickoff = setTimeout(() => { void runLaunchHealthCheck(); }, 90_000);
 
+  // Fleet cache warm: keep the caches that `agents devices list`, `fleet status`,
+  // and `agents view` read cache-first actually fresh, so a default read never
+  // has to ssh out. Two cheap refreshes: (1) this host's auth-health verdicts
+  // (also feeds the `doctor --json` Auth rollup other hosts read), and (2) the
+  // fleet resource-stats cache (one bounded parallel probe of the tailnet). Both
+  // best-effort + overlap-guarded like the probes above. ~every 3 min, plus once
+  // ~60s after startup (staggered off launch).
+  let warmingFleetCache = false;
+  const runFleetCacheWarm = async () => {
+    if (warmingFleetCache) return;
+    warmingFleetCache = true;
+    try {
+      const { machineId } = await import('./machine-id.js');
+      const self = machineId();
+      const { probeLocalFleetAuth, writeFleetAuthRows } = await import('./auth-health.js');
+      const { getCliVersion } = await import('./version.js');
+      const authRows = await probeLocalFleetAuth({ cliVersion: getCliVersion() });
+      writeFleetAuthRows(self, authRows);
+
+      const { loadDevices } = await import('./devices/registry.js');
+      const { planFleetTargets } = await import('./devices/fleet.js');
+      const { loadFleetStats } = await import('./devices/stats-cache.js');
+      const reg = await loadDevices();
+      const probeable = planFleetTargets(reg).filter((t) => !t.skip).map((t) => t.device);
+      const res = await loadFleetStats(probeable, { forceRefresh: true, selfName: self });
+      log('INFO', `fleet cache warm: ${authRows.length} auth row(s), ${res.stats.size} device stat(s)`);
+    } catch (err) {
+      log('ERROR', `fleet cache warm failed: ${(err as Error).message}`);
+    } finally {
+      warmingFleetCache = false;
+    }
+  };
+  const fleetCacheInterval = setInterval(() => { void runFleetCacheWarm(); }, 3 * 60_000);
+  const fleetCacheKickoff = setTimeout(() => { void runFleetCacheWarm(); }, 60_000);
+
+  // RUSH-1817: the startup host decision above is one-shot. If a standalone
+  // broker answered agentPing() at daemon start, the daemon declined to host —
+  // but should that standalone later die or crash-loop, nothing takes over and
+  // every `agents secrets unlock|export|start` fails until a manual restart
+  // (this wedged all keychain-backed secrets on zion and blocked a release).
+  // Re-probe on a cadence: whenever the daemon is NOT itself hosting AND no
+  // healthy broker answers a ping, take over hosting. startHostedBroker binds
+  // the socket only when it is free, so a take-over never races a live broker.
+  let selfHealingBroker = false;
+  const runBrokerSelfHeal = async () => {
+    if (selfHealingBroker) return;
+    selfHealingBroker = true;
+    try {
+      const { agentPing, startHostedBroker } = await import('./secrets/agent.js');
+      const reachable = (await agentPing()).reachable;
+      if (!shouldTakeOverBroker(hostedBroker != null, reachable)) return;
+      hostedBroker = await startHostedBroker();
+      if (hostedBroker) {
+        log('WARN', 'Secrets broker was unreachable; daemon took over hosting (self-heal)');
+      }
+    } catch (err) {
+      log('WARN', `Secrets broker self-heal skipped: ${(err as Error).message}`);
+    } finally {
+      selfHealingBroker = false;
+    }
+  };
+  const brokerSelfHealInterval = setInterval(() => { void runBrokerSelfHeal(); }, 60_000);
+
   const handleReload = () => {
     log('INFO', 'Reloading jobs (SIGHUP)');
     scheduler.reloadAll();
     const reloaded = scheduler.listScheduled();
     log('INFO', `Reloaded ${reloaded.length} jobs`);
+    try {
+      monitorEngine.reload();
+    } catch (err) {
+      log('ERROR', `Monitor engine reload failed: ${(err as Error).message}`);
+    }
     // Drop the memoized R2 config so rotated/added sync credentials are re-read
     // on the next cycle instead of waiting for a restart.
     void import('./session/sync/config.js').then(m => m.clearR2ConfigCache());
@@ -514,6 +695,7 @@ export async function runDaemon(): Promise<void> {
   const handleShutdown = async () => {
     log('INFO', 'Daemon shutting down');
     scheduler.stopAll();
+    monitorEngine.stop();
     await browserIPC.stop();
     clearInterval(monitorInterval);
     clearInterval(syncInterval);
@@ -527,7 +709,12 @@ export async function runDaemon(): Promise<void> {
     clearTimeout(tmuxReconcileKickoff);
     clearInterval(launchHealthInterval);
     clearTimeout(launchHealthKickoff);
+    clearInterval(fleetCacheInterval);
+    clearTimeout(fleetCacheKickoff);
+    clearInterval(brokerSelfHealInterval);
+    hostedBroker?.close();
     removeDaemonPid();
+    removeHeartbeat();
     process.exit(0);
   };
 
@@ -589,15 +776,20 @@ export function writeOwnerOnlyServiceManifest(filePath: string, content: string)
   fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o600 });
 }
 
-/** Generate a macOS launchd plist for auto-starting the daemon. */
-export function generateLaunchdPlist(oauthToken: string | null = readDaemonClaudeOAuthToken()): string {
-  const agentsBin = getAgentsBinPath();
+/**
+ * Generate a macOS launchd plist for auto-starting the daemon.
+ *
+ * The plist never embeds the Claude OAuth token (RUSH-1759): a persisted service
+ * manifest is a plaintext credential on disk even at 0600. The daemon instead
+ * obtains the token at startup from the `claude` secrets bundle
+ * (readDaemonClaudeOAuthToken, injected in runDaemon), so it stays in the
+ * Keychain-backed secure store and never touches the unit file.
+ */
+export function generateLaunchdPlist(
+  agentsBin: string = getAgentsBinPath(),
+): string {
+  const launch = getDaemonLaunch(agentsBin);
   const logPath = getLogPath();
-  const oauthEntry = oauthToken
-    ? `
-    <key>${DAEMON_OAUTH_KEY}</key>
-    <string>${xmlEscape(oauthToken)}</string>`
-    : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -607,9 +799,7 @@ export function generateLaunchdPlist(oauthToken: string | null = readDaemonClaud
   <string>${PLIST_NAME}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${agentsBin}</string>
-    <string>daemon</string>
-    <string>_run</string>
+${[launch.command, ...launch.args].map((arg) => `    <string>${xmlEscape(arg)}</string>`).join('\n')}
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -622,18 +812,31 @@ export function generateLaunchdPlist(oauthToken: string | null = readDaemonClaud
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:${os.homedir()}/.bun/bin:${os.homedir()}/.nvm/versions/node/v24.0.0/bin</string>${oauthEntry}
+    <string>${daemonNodeBinDir()}:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:${os.homedir()}/.bun/bin</string>
   </dict>
 </dict>
 </plist>`;
 }
 
-/** Generate a Linux systemd user unit for auto-starting the daemon. */
-export function generateSystemdUnit(oauthToken: string | null = readDaemonClaudeOAuthToken()): string {
-  const agentsBin = getAgentsBinPath();
-  const oauthLine = oauthToken
-    ? `\nEnvironment=${DAEMON_OAUTH_KEY}=${oauthToken}`
-    : '';
+/** Quote one systemd ExecStart argument without delegating parsing to a shell. */
+function systemdExecArg(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Generate a Linux systemd user unit for auto-starting the daemon.
+ *
+ * The unit never embeds the Claude OAuth token (RUSH-1759): a persisted service
+ * manifest is a plaintext credential on disk even at 0600. The daemon instead
+ * obtains the token at startup from the `claude` secrets bundle
+ * (readDaemonClaudeOAuthToken, injected in runDaemon), so it stays in the secure
+ * store and never touches the unit file.
+ */
+export function generateSystemdUnit(
+  agentsBin: string = getAgentsBinPath(),
+): string {
+  const launch = getDaemonLaunch(agentsBin);
+  const execStart = [launch.command, ...launch.args].map(systemdExecArg).join(' ');
 
   return `[Unit]
 Description=Agents Daemon - Scheduled Job Runner
@@ -641,44 +844,20 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${agentsBin} daemon _run
+ExecStart=${execStart}
 Restart=always
 RestartSec=10
-Environment=PATH=/usr/local/bin:/usr/bin:/bin:${os.homedir()}/.nvm/versions/node/v24.0.0/bin${oauthLine}
+Environment=PATH=${daemonNodeBinDir()}:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target`;
 }
 
-export function getAgentsBinPath(): string {
-  // Prefer the binary actively executing this code. `which agents` returns
-  // whatever happens to be first on PATH, which means a side-by-side dev
-  // build at ~/.local/bin would silently spawn the registry-installed
-  // daemon and run stale code. process.argv[1] is the absolute path of
-  // the JS entrypoint the user actually invoked.
-  const argv1 = process.argv[1];
-  if (argv1 && fs.existsSync(argv1)) {
-    // The package's browser/computer entrypoints are sibling shims without a
-    // `daemon` command. A daemon started as their IPC side effect must launch
-    // through the main agents entrypoint instead of replaying the shim path.
-    const entryName = path.basename(argv1);
-    const compiledShim = /^(browser|computer)\.(c|m)?js$/.test(entryName);
-    const installedShim = /^(browser|computer)$/.test(entryName);
-    if (compiledShim || installedShim) {
-      const agentsEntry = path.join(path.dirname(argv1), compiledShim ? 'index.js' : 'agents');
-      if (!fs.existsSync(agentsEntry)) {
-        throw new Error(`Cannot start agents daemon: main CLI entry not found at ${agentsEntry}`);
-      }
-      return agentsEntry;
-    }
-    return argv1;
-  }
-  try {
-    return execFileSync('which', ['agents'], { encoding: 'utf-8' }).trim();
-  } catch {
-    return 'agents';
-  }
-}
+// Binary-resolution helpers (getAgentsBinPath / isNodeScriptEntry / getCliLaunch)
+// live in ./cli-entry.js — a leaf module the secrets broker also imports without
+// forming a cycle. Re-exported so existing `from './daemon.js'` importers of
+// getAgentsBinPath keep resolving.
+export { getAgentsBinPath };
 
 /**
  * Ask the service manager for the daemon's live PID. Used as a fallback when
@@ -708,7 +887,7 @@ function readServiceManagerPid(platform: NodeJS.Platform = os.platform()): numbe
 }
 
 /** Start the daemon via launchd, systemd, or as a detached process. */
-export function startDaemon(): { pid: number | null; method: string } {
+export function startDaemon(agentsBin?: string): { pid: number | null; method: string } {
   if (isDaemonRunning()) {
     const pid = readDaemonPid();
     return { pid, method: 'already-running' };
@@ -722,7 +901,7 @@ export function startDaemon(): { pid: number | null; method: string } {
   }
 
   try {
-    return startDaemonLocked();
+    return startDaemonLocked(agentsBin ?? getAgentsBinPath());
   } finally {
     releaseLock();
   }
@@ -746,7 +925,7 @@ export function ensureDaemonStarted(): { pid: number | null; method: string } | 
   }
 }
 
-function startDaemonLocked(): { pid: number | null; method: string } {
+function startDaemonLocked(agentsBin: string): { pid: number | null; method: string } {
   const platform = os.platform();
 
   if (platform === 'darwin') {
@@ -756,9 +935,10 @@ function startDaemonLocked(): { pid: number | null; method: string } {
       if (!fs.existsSync(plistDir)) {
         fs.mkdirSync(plistDir, { recursive: true });
       }
-      // The plist may embed a long-lived OAuth token in EnvironmentVariables;
-      // create owner-only atomically (no world-readable window before chmod).
-      writeOwnerOnlyServiceManifest(plistPath, generateLaunchdPlist());
+      // The plist carries no credential (RUSH-1759 — the daemon reads the OAuth
+      // token itself at startup); still create owner-only atomically to match the
+      // detached path and keep the log/PATH surface owner-private.
+      writeOwnerOnlyServiceManifest(plistPath, generateLaunchdPlist(agentsBin));
 
       try {
         execFileSync('launchctl', ['unload', plistPath], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
@@ -774,7 +954,7 @@ function startDaemonLocked(): { pid: number | null; method: string } {
     } catch {
       // load threw — fall through to detached spawn
     }
-    return startDetached();
+    return startDetached({ agentsBin });
   }
 
   if (platform === 'linux') {
@@ -784,8 +964,9 @@ function startDaemonLocked(): { pid: number | null; method: string } {
       if (!fs.existsSync(unitDir)) {
         fs.mkdirSync(unitDir, { recursive: true });
       }
-      // May embed a long-lived OAuth token in an Environment= line; owner-only.
-      writeOwnerOnlyServiceManifest(unitPath, generateSystemdUnit());
+      // Carries no credential (RUSH-1759 — the daemon reads the OAuth token
+      // itself at startup); owner-only to keep the PATH/log surface private.
+      writeOwnerOnlyServiceManifest(unitPath, generateSystemdUnit(agentsBin));
 
       execFileSync('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf-8' });
       execFileSync('systemctl', ['--user', 'enable', SYSTEMD_UNIT], { encoding: 'utf-8' });
@@ -798,10 +979,10 @@ function startDaemonLocked(): { pid: number | null; method: string } {
     } catch {
       // start threw — fall through to detached spawn
     }
-    return startDetached();
+    return startDetached({ agentsBin });
   }
 
-  return startDetached();
+  return startDetached({ agentsBin });
 }
 
 /**
@@ -824,8 +1005,8 @@ export function buildDetachedDaemonEnv(
 }
 
 /**
- * Resolve how to launch the daemon: `node <entry> daemon _run`, matching the
- * exact form that works under a direct `daemon _run`.
+ * Resolve how to launch the daemon: `node <entry> __daemon-run`, matching the
+ * exact form that works under a direct `__daemon-run`.
  *
  * We spawn the Node runtime (`process.execPath`) with the CLI entry as an
  * argument rather than executing the entry path directly. Executing the `.js`
@@ -838,14 +1019,66 @@ export function buildDetachedDaemonEnv(
  * Going through `process.execPath` means a real PE/binary is spawned with
  * `detached: true` and no console, so nothing signals the daemon after launch.
  *
- * When the entry isn't a JS file (e.g. a native launcher resolved via
- * `which agents`), run it directly — it owns its own runtime resolution.
+ * When the entry isn't a Node script (e.g. a native compiled launcher), run it
+ * directly — it owns its own runtime resolution.
  */
 export function getDaemonLaunch(agentsBin: string = getAgentsBinPath()): { command: string; args: string[] } {
-  if (/\.(c|m)?js$/.test(agentsBin)) {
-    return { command: process.execPath, args: [agentsBin, 'daemon', '_run'] };
+  const { warnings } = validateDaemonBinary(agentsBin);
+  for (const w of warnings) process.stderr.write(`[agents] ${w}\n`);
+  return getCliLaunch(['__daemon-run'], agentsBin);
+}
+
+/**
+ * The directory of the Node runtime that generated this service manifest, kept
+ * first on the daemon's PATH. Both the shim's shebang and any child routine
+ * process then resolve the exact Node that installed the service — never an
+ * ancient system node or a pruned nvm version. Replaces the old hardcoded
+ * `~/.nvm/versions/node/v24.0.0/bin`, which went stale the moment that patch
+ * release was upgraded away and bricked the daemon fleet-wide.
+ */
+function daemonNodeBinDir(): string {
+  return path.dirname(process.execPath);
+}
+
+/**
+ * Build the argv to relaunch the `agents` CLI with the given subcommand args.
+ *
+ * Resolves the real on-disk binary via getAgentsBinPath(), then dispatches: a
+ * `.js` entry runs under node (`node <entry> …`), a native/compiled binary runs
+ * directly (`<bin> …`).
+ *
+ * Callers MUST route self-spawns through this rather than hand-rolling
+ * `[process.execPath, process.argv[1], …]`: under the compiled standalone binary
+ * (#315) `process.argv[1]` is the bun virtual entry `/$bunfs/root/agents`, so the
+ * hand-rolled form becomes `agents /$bunfs/root/agents …` → the CLI receives the
+ * bunfs path as a subcommand and dies with "unknown command '/$bunfs/root/agents'".
+ * getAgentsBinPath() resolves that virtual entry to the physical process.execPath.
+ */
+export function getAgentsInvocation(
+  subArgs: string[],
+  agentsBin: string = getAgentsBinPath(),
+): { command: string; args: string[] } {
+  return getCliLaunch(subArgs, agentsBin);
+}
+
+export function validateDaemonBinary(binPath: string): { warnings: string[] } {
+  const warnings: string[] = [];
+  if (BUN_VIRTUAL_ROOT.test(binPath)) {
+    throw new Error(
+      `Refusing to supervise daemon: resolved binary is a bun virtual path (${binPath}). ` +
+      `Install agents globally (npm i -g @phnx-labs/agents-cli) and restart.`,
+    );
   }
-  return { command: agentsBin, args: ['daemon', '_run'] };
+  if (/[/\\]\.agents[/\\]worktrees[/\\]/.test(binPath)) {
+    warnings.push(
+      `Warning: daemon binary is inside a git worktree (${binPath}). ` +
+      `A worktree deletion will wedge the daemon. Use the globally installed binary instead.`,
+    );
+  }
+  if (!fs.existsSync(binPath) && !/\.(c|m)?js$/.test(binPath)) {
+    warnings.push(`Warning: daemon binary does not exist on disk (${binPath}).`);
+  }
+  return { warnings };
 }
 
 interface StartDetachedOptions {
@@ -960,12 +1193,16 @@ export function stopDaemon(): boolean {
 
 /** Get current daemon status including running state, PID, and enabled job count. */
 export function getDaemonStatus(): {
+  state: 'running' | 'wedged' | 'stopped';
   running: boolean;
   pid: number | null;
   jobCount: number;
   logPath: string;
+  binaryPath: string | null;
+  heartbeat: DaemonHeartbeat | null;
 } {
   const running = isDaemonRunning();
+  const wedged = running && isDaemonWedged();
   const pid = readDaemonPid();
 
   let jobCount = 0;
@@ -973,7 +1210,20 @@ export function getDaemonStatus(): {
     jobCount = listAllJobs().filter((j) => j.enabled).length;
   } catch { /* job listing failed */ }
 
-  return { running, pid, jobCount, logPath: getLogPath() };
+  let binaryPath: string | null = null;
+  try {
+    binaryPath = getAgentsBinPath();
+  } catch { /* resolution failed */ }
+
+  return {
+    state: wedged ? 'wedged' : running ? 'running' : 'stopped',
+    running,
+    pid,
+    jobCount,
+    logPath: getLogPath(),
+    binaryPath,
+    heartbeat: readHeartbeat(),
+  };
 }
 
 /** Read the daemon log, optionally limited to the last N lines. */

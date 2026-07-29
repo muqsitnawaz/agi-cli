@@ -21,6 +21,10 @@ import { AGENTS, agentConfigDirName, getUnmanagedAgentInstalls, countSessionFile
 import { setGlobalDefault } from '../lib/versions.js';
 import { ensureShimCurrent, switchHomeFileSymlinks, isShimsInPath, addShimsToPath, getPathSetupInstructions } from '../lib/shims.js';
 import { setHelpSections } from '../lib/help.js';
+import { registerSetupBrowserCommand, runBrowserWizard } from './setup-browser.js';
+import { registerSetupComputerCommand, runComputerWizard } from './setup-computer.js';
+import { registerSetupShareCommand, runShareWizard } from './setup-share.js';
+import { registerSetupMineCommand } from './setup-mine.js';
 
 const HOME = os.homedir();
 
@@ -144,6 +148,15 @@ export async function runSetup(program: Command, options: { force?: boolean; sup
     console.log(chalk.gray(`Discovered ${dev.synced} device${dev.synced === 1 ? '' : 's'} on your tailnet (agents devices list).`));
   }
 
+  // Offer guided cross-machine session-sync provisioning (interactive, opt-in,
+  // and never blocking — any failure/decline falls through to the rest of setup).
+  try {
+    const { promptAndProvisionSessionSync } = await import('./sync-provision.js');
+    await promptAndProvisionSessionSync({ explicit: false });
+  } catch (err) {
+    console.log(chalk.yellow(`Session-sync setup skipped: ${(err as Error).message}`));
+  }
+
   // Offer to import existing unmanaged installations
   if (unmanaged.length > 0 && isInteractiveTerminal()) {
     console.log(chalk.bold('\nFound existing installations:\n'));
@@ -206,6 +219,11 @@ export async function runSetup(program: Command, options: { force?: boolean; sup
 
   if (options.suppressFooter) return;
 
+  // Fresh-machine hub: offer to set up the optional capabilities that need their
+  // own guided flow. TTY-only and fully opt-in — a non-interactive `agents setup`
+  // stops at the system-repo bootstrap above, unchanged.
+  await runSetupHub();
+
   console.log(chalk.bold('\nSetup complete. Try:'));
   console.log(chalk.cyan('  agents view                 ') + chalk.gray(' # see what\'s installed'));
   console.log(chalk.cyan('  agents run <agent> "hello"  ') + chalk.gray(' # run an agent'));
@@ -242,13 +260,49 @@ export async function ensureInitialized(program: Command): Promise<void> {
   await runSetup(program, { suppressFooter: true });
 }
 
-/** Register the `agents setup` command. */
+/**
+ * Interactive "what else do you want to set up?" menu shown after the bare
+ * `agents setup` finishes on a TTY. Each pick runs that capability's guided
+ * wizard. Never throws — a cancel or an optional wizard's error just skips the
+ * rest and lets core setup complete.
+ */
+async function runSetupHub(): Promise<void> {
+  if (!isInteractiveTerminal()) return;
+  try {
+    const { checkbox } = await import('@inquirer/prompts');
+    const picks = await checkbox<'browser' | 'computer' | 'share'>({
+      message: 'Set up optional capabilities now? (space to select, enter to confirm)',
+      choices: [
+        { name: 'browser  — drive a real Chrome/Brave/Edge for web automation', value: 'browser' },
+        { name: 'computer — control native macOS apps (screenshot, click, type)', value: 'computer' },
+        { name: 'share    — publish shareable links (Cloudflare R2 + Worker)', value: 'share' },
+      ],
+    });
+    for (const pick of picks) {
+      console.log();
+      if (pick === 'browser') await runBrowserWizard();
+      else if (pick === 'computer') await runComputerWizard();
+      else if (pick === 'share') await runShareWizard();
+    }
+  } catch (err) {
+    if (isPromptCancelled(err)) return;
+    console.log(chalk.yellow(`Optional setup skipped: ${(err as Error).message}`));
+  }
+}
+
+/** Register the `agents setup` command and its capability subcommands. */
 export function registerSetupCommand(program: Command): void {
   const setupCmd = program
     .command('setup')
     .description('First-time setup. Clones a config repo and installs agent CLIs.')
     .option('-f, --force', 'Re-run setup even if ~/.agents/.system/ already exists (use with caution)')
     .option('--no-system-repo', 'Skip cloning the system repo (you must populate ~/.agents/.system/ yourself)');
+
+  // Capability subcommands: `agents setup browser|computer|share|mine`.
+  registerSetupBrowserCommand(setupCmd);
+  registerSetupComputerCommand(setupCmd);
+  registerSetupShareCommand(setupCmd);
+  registerSetupMineCommand(setupCmd);
 
   setHelpSections(setupCmd, {
     examples: `
@@ -257,11 +311,22 @@ export function registerSetupCommand(program: Command): void {
 
       # Re-run after corruption or to repair ~/.agents/.system/
       agents setup --force
+
+      # Set up a specific capability on its own
+      agents setup browser
+      agents setup computer
+      agents setup share
     `,
     notes: `
       What it does:
         1. Clones the system repo into ~/.agents/.system/
         2. Imports any unmanaged agent installations it finds
+        3. On a TTY, offers to set up optional capabilities (browser/computer/share)
+
+      Capability setup can also be run any time on its own:
+        agents setup browser    # detect a browser + create the default profile
+        agents setup computer    # install the signed macOS helper + grant permissions
+        agents setup share       # provision or join a Cloudflare share endpoint
 
       To install CLIs from agents.yaml and sync resources into version homes:
         agents repo refresh -y

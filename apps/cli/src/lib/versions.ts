@@ -23,17 +23,18 @@ import { promisify } from 'util';
 import chalk from 'chalk';
 import * as TOML from 'smol-toml';
 import { checkbox, select, confirm } from '@inquirer/prompts';
-import type { AgentId, VersionResources } from './types.js';
+import type { AgentId, DiscoveredPlugin, VersionResources } from './types.js';
 import { getVersionsDir, getShimsDir, ensureAgentsDir, readMeta, writeMeta, getCommandsDir, getSkillsDir, getHooksDir, getResolvedRulesDir, getUserRulesDir, getPermissionsDir, getSubagentsDir, getVersionResources, recordVersionResources, ensureVersionResourcePatterns, getMcpDir, getProjectAgentsDir, getPromptcutsPath, getUserPromptcutsPath, getEnabledExtraRepos, getAgentsDir, getOptionalUserAgentsDir, getUserAgentsDir, getTrashVersionsDir, getActiveRulesPreset, getHomeDir } from './state.js';
 import { defaultPatterns, expandPatterns } from './resource-patterns.js';
 import { resolveResource, listResources } from './resources.js';
+import { activeRulesPreset, filterNamesForActiveResourceProfile } from './resource-profiles.js';
 // VERSION_RE + compareVersions are owned by the agent-spec engine primitives
 // (single source of truth). Re-exported below so existing importers of
 // `compareVersions` from './versions.js' keep working.
 import { VERSION_RE, compareVersions } from './agent-spec/primitives.js';
-import { AGENTS, agentConfigDirName, getAccountEmail, getMcpConfigPathForHome, parseMcpConfig, resolveAgentName, formatAgentError, findInPath } from './agents.js';
+import { AGENTS, agentConfigDirName, getAccountEmail, getMcpConfigPathForHome, parseMcpConfig, resolveAgentName, formatAgentError, findInPath, isSelfUpdatingAgent } from './agents.js';
 import { getDefaultPermissionSet, applyPermissionsToVersion as applyPermsToVersion, discoverPermissionGroups, getTotalPermissionRuleCount, buildPermissionsFromGroups, CODEX_RULES_FILENAME, getActivePermissionPresetName, readPermissionPresetRecipe, PERMISSION_PRESET_ENV_VAR } from './permissions.js';
-import { installMcpServers, parseMcpServerConfig } from './mcp.js';
+import { installMcpServers, parseMcpServerConfig, isProjectMcpTrusted } from './mcp.js';
 import { markdownToToml } from './convert.js';
 import { createVersionedAlias, removeVersionedAlias, switchConfigSymlink, getConfigSymlinkVersion, ensureClaudeInsideSymlink } from './shims.js';
 import { importInstallScriptBinary } from './import.js';
@@ -42,13 +43,16 @@ import { listInstalledSubagents, transformSubagentForClaude, syncSubagentToOpenc
 import { listInstalledWorkflows, syncWorkflowToVersion } from './workflows.js';
 import { parseHookManifest, registerHooksToSettings, pruneVersionHomeHookEntriesFromSettings } from './hooks.js';
 import { supports, explainSkip, capableAgents } from './capabilities.js';
-import { discoverPlugins, syncPluginToVersion, isPluginSynced, pluginSupportsAgent, cleanOrphanedPluginSkills } from './plugins.js';
+import { discoverPlugins, syncPluginToVersion, isPluginSynced, pluginSupportsAgent, cleanOrphanedPluginSkills, marketplaceSpecForName } from './plugins.js';
 import { composeRulesFromState } from './rules/compose.js';
 import { loadManifest, saveManifest, buildManifest as buildSyncManifest, isStale } from './staleness/index.js';
 import { emit } from './events.js';
 import { safeJoin } from './paths.js';
 import { installCommandSkillToVersion, listCommandSkillsInVersion, readSkillSourceCommandMarker, shouldInstallCommandAsSkill } from './command-skills.js';
 import { getWriter, getDetector } from './staleness/registry.js';
+import { syncMemoryToVersionHome } from './memory.js';
+import { listPluginSkillNames, resolveCommandSource, resolveSkillSource } from './staleness/writers/sources.js';
+import { syncProjectResourcesToAgent } from './project-resources.js';
 
 /** Promisified exec for running shell commands. */
 const execAsync = promisify(exec);
@@ -98,23 +102,31 @@ export interface AvailableResources {
   promptcuts: boolean;
 }
 
+type LayeredResourceBase = { source: string; base: string };
 type ResourceBase = { scope: 'project' | 'user'; base: string };
 type ScopedMcpResource = { name: string; scope: 'project' | 'user' };
 
-function getResourceBases(cwd: string): ResourceBase[] {
+function getLayeredResourceBases(cwd: string): LayeredResourceBase[] {
   const projectAgentsDir = getProjectAgentsDir(cwd);
   const userBase = getUserAgentsDir();
   const systemBase = getAgentsDir();
-  const resourceBases: ResourceBase[] = [];
+  const resourceBases: LayeredResourceBase[] = [];
   if (projectAgentsDir) {
-    resourceBases.push({ scope: 'project', base: projectAgentsDir });
+    resourceBases.push({ source: 'project', base: projectAgentsDir });
   }
-  resourceBases.push({ scope: 'user', base: userBase });
-  resourceBases.push({ scope: 'user', base: systemBase });
+  resourceBases.push({ source: 'user', base: userBase });
+  resourceBases.push({ source: 'system', base: systemBase });
   for (const extra of getEnabledExtraRepos()) {
-    resourceBases.push({ scope: 'user', base: extra.dir });
+    resourceBases.push({ source: extra.alias, base: extra.dir });
   }
   return resourceBases;
+}
+
+function getResourceBases(cwd: string): ResourceBase[] {
+  return getLayeredResourceBases(cwd).map(({ base, source }) => ({
+    base,
+    scope: source === 'project' ? 'project' : 'user',
+  }));
 }
 
 function getScopedMcpResources(cwd: string): ScopedMcpResource[] {
@@ -132,6 +144,65 @@ function getScopedMcpResources(cwd: string): ScopedMcpResource[] {
     }
   }
   return Array.from(resources.values());
+}
+
+function sourceMapFromResources(kind: 'commands' | 'skills' | 'hooks' | 'subagents', cwd: string): Map<string, string> {
+  return new Map(listResources(kind, cwd).map(r => [r.name, r.source]));
+}
+
+function sourceMapFromLayeredDirectory(cwd: string, relativePath: string[], listNames: (dir: string) => string[]): Map<string, string> {
+  const resources = new Map<string, string>();
+  for (const { base, source } of getLayeredResourceBases(cwd)) {
+    const dir = path.join(base, ...relativePath);
+    if (!fs.existsSync(dir)) continue;
+    for (const name of listNames(dir)) {
+      if (!resources.has(name)) resources.set(name, source);
+    }
+  }
+  return resources;
+}
+
+function sourceMapFromPermissionGroups(cwd: string): Map<string, string> {
+  return sourceMapFromLayeredDirectory(
+    cwd,
+    ['permissions', 'groups'],
+    (dir) => fs.readdirSync(dir)
+      .filter(f => f.endsWith('.yaml') || f.endsWith('.yml'))
+      .map(f => f.replace(/\.(yaml|yml)$/, '')),
+  );
+}
+
+function sourceMapFromWorkflows(cwd: string): Map<string, string> {
+  return sourceMapFromLayeredDirectory(
+    cwd,
+    ['workflows'],
+    (dir) => fs.readdirSync(dir, { withFileTypes: true })
+      .filter(d => d.isDirectory() && fs.existsSync(path.join(dir, d.name, 'WORKFLOW.md')))
+      .map(d => d.name),
+  );
+}
+
+function sourceMapFromPluginSkills(plugins: DiscoveredPlugin[], activePluginNames: Set<string>, cwd: string): Map<string, string> {
+  const sourceRank = new Map<string, number>([
+    ['user', 0],
+    ['system', 1],
+    ['project', 3],
+  ]);
+  const entries = plugins
+    .filter(plugin => activePluginNames.has(plugin.name))
+    .map(plugin => {
+      const spec = marketplaceSpecForName(plugin.marketplace, cwd);
+      const source = spec.kind === 'extra' ? spec.alias : spec.kind;
+      return { plugin, source, rank: sourceRank.get(source) ?? 2 };
+    })
+    .sort((a, b) => a.rank - b.rank);
+  const sources = new Map<string, string>();
+  for (const { plugin, source } of entries) {
+    for (const skill of plugin.skills) {
+      if (!sources.has(skill)) sources.set(skill, source);
+    }
+  }
+  return sources;
 }
 
 /**
@@ -166,7 +237,7 @@ export function getAvailableResources(cwd: string = process.cwd()): AvailableRes
       commandNames.add(name);
     }
   }
-  result.commands = Array.from(commandNames);
+  result.commands = filterNamesForActiveResourceProfile('commands', Array.from(commandNames), sourceMapFromResources('commands', cwd));
 
   // Skills (directories, excluding hidden)
   const skillNames = new Set<string>();
@@ -180,14 +251,14 @@ export function getAvailableResources(cwd: string = process.cwd()): AvailableRes
       skillNames.add(name);
     }
   }
-  result.skills = Array.from(skillNames);
+  result.skills = filterNamesForActiveResourceProfile('skills', Array.from(skillNames), sourceMapFromResources('skills', cwd));
 
-  // Hooks (files). A hook is an actual script: known script extension, OR
-  // executable bit on a file with a non-data extension. Auxiliary content
-  // like `README.md` (docs) or `promptcuts.yaml` (data read directly by the
-  // expand-promptcuts script) lives in hooks/ but is not a hook. Older sync
-  // runs chmod 0o755'd everything they copied, so an exec bit alone can no
-  // longer be trusted as the signal.
+  // Hooks. A hook is either a directory bundle or an actual script file: known
+  // script extension, OR executable bit on a file with a non-data extension.
+  // Auxiliary content like `README.md` (docs) or `promptcuts.yaml` (data read
+  // directly by the expand-promptcuts script) lives in hooks/ but is not a
+  // hook. Older sync runs chmod 0o755'd everything they copied, so an exec bit
+  // alone can no longer be trusted as the signal.
   const NON_SCRIPT_EXTS = new Set(['.md', '.markdown', '.rst', '.txt', '.yaml', '.yml', '.json', '.toml', '.ini', '.conf']);
   const SCRIPT_EXTS     = new Set(['.sh', '.bash', '.zsh', '.py', '.js', '.ts', '.mjs', '.cjs', '.rb', '.pl', '.ps1']);
   const hookNames = new Set<string>();
@@ -197,7 +268,9 @@ export function getAvailableResources(cwd: string = process.cwd()): AvailableRes
     for (const name of fs.readdirSync(hooksDir)) {
       if (name.startsWith('.')) continue;
       try {
-        const stat = fs.statSync(path.join(hooksDir, name));
+        const stat = fs.lstatSync(path.join(hooksDir, name));
+        if (stat.isSymbolicLink()) continue;
+        if (stat.isDirectory()) { hookNames.add(name); continue; }
         if (!stat.isFile()) continue;
         const ext = path.extname(name).toLowerCase();
         if (SCRIPT_EXTS.has(ext)) { hookNames.add(name); continue; }
@@ -205,7 +278,7 @@ export function getAvailableResources(cwd: string = process.cwd()): AvailableRes
       } catch { /* ignore unreadable */ }
     }
   }
-  result.hooks = Array.from(hookNames);
+  result.hooks = filterNamesForActiveResourceProfile('hooks', Array.from(hookNames), sourceMapFromResources('hooks', cwd));
 
   // Rules — list available presets across layers (project > user > extras > system).
   // The composer selects exactly one preset per sync; this list drives the
@@ -231,23 +304,18 @@ export function getAvailableResources(cwd: string = process.cwd()): AvailableRes
       // malformed rules.yaml — skip silently; the composer will surface the error.
     }
   }
-  result.memory = Array.from(presetNames);
+  result.memory = filterNamesForActiveResourceProfile('memory', Array.from(presetNames));
 
-  result.mcp = getScopedMcpResources(cwd).map(resource => resource.name);
+  const scopedMcp = getScopedMcpResources(cwd);
+  result.mcp = filterNamesForActiveResourceProfile(
+    'mcp',
+    scopedMcp.map(resource => resource.name),
+    new Map(scopedMcp.map(resource => [resource.name, resource.scope])),
+  );
 
   // Permission groups (from permissions/groups/*.yaml)
-  const permissionNames = new Set<string>();
-  for (const { base } of resourceBases) {
-    const permsGroupsDir = path.join(base, 'permissions', 'groups');
-    if (!fs.existsSync(permsGroupsDir)) continue;
-    const names = fs.readdirSync(permsGroupsDir)
-      .filter(f => f.endsWith('.yaml') || f.endsWith('.yml'))
-      .map(f => f.replace(/\.(yaml|yml)$/, ''));
-    for (const name of names) {
-      permissionNames.add(name);
-    }
-  }
-  result.permissions = Array.from(permissionNames);
+  const permissionSources = sourceMapFromPermissionGroups(cwd);
+  result.permissions = filterNamesForActiveResourceProfile('permissions', Array.from(permissionSources.keys()), permissionSources);
 
   // Subagents (directories with AGENT.md)
   const subagentNames = new Set<string>();
@@ -261,25 +329,24 @@ export function getAvailableResources(cwd: string = process.cwd()): AvailableRes
       subagentNames.add(name);
     }
   }
-  result.subagents = Array.from(subagentNames);
+  result.subagents = filterNamesForActiveResourceProfile('subagents', Array.from(subagentNames), sourceMapFromResources('subagents', cwd));
 
   // Workflows (directories with WORKFLOW.md)
-  const workflowNames = new Set<string>();
-  for (const { base } of resourceBases) {
-    const workflowsDir = path.join(base, 'workflows');
-    if (!fs.existsSync(workflowsDir)) continue;
-    const names = fs.readdirSync(workflowsDir, { withFileTypes: true })
-      .filter(d => d.isDirectory() && fs.existsSync(path.join(workflowsDir, d.name, 'WORKFLOW.md')))
-      .map(d => d.name);
-    for (const name of names) {
-      workflowNames.add(name);
-    }
-  }
-  result.workflows = Array.from(workflowNames);
+  const workflowSources = sourceMapFromWorkflows(cwd);
+  result.workflows = filterNamesForActiveResourceProfile('workflows', Array.from(workflowSources.keys()), workflowSources);
 
   // Plugins (directories with .claude-plugin/plugin.json)
   const allPlugins = discoverPlugins();
-  result.plugins = allPlugins.map(p => p.name);
+  result.plugins = filterNamesForActiveResourceProfile('plugins', allPlugins.map(p => p.name), new Map(allPlugins.map(p => [p.name, 'user'])));
+  const activePlugins = new Set(result.plugins);
+  const pluginSkillNames = filterNamesForActiveResourceProfile(
+    'skills',
+    listPluginSkillNames({ plugins: activePlugins }),
+    sourceMapFromPluginSkills(allPlugins, activePlugins, cwd),
+  );
+  for (const name of pluginSkillNames) {
+    if (!skillNames.has(name)) result.skills.push(name);
+  }
 
   // Promptcuts — present if either layer exists. Reads merge user + system
   // with user precedence (see readMergedPromptcuts); writes always go to user.
@@ -914,6 +981,66 @@ export function getBinaryPath(agent: AgentId, version: string): string {
 }
 
 /**
+ * Does this agent resolve to ONE global binary that is the same file regardless
+ * of the `version` argument? (droid → always `~/.local/bin/droid`.) Computed
+ * generically by probing `getBinaryPath` with two distinct versions rather than
+ * hardcoding an agent id, so it stays correct if another global-binary agent is
+ * added.
+ *
+ * This is the narrower cousin of `isSelfUpdatingAgent`: every global-binary
+ * agent is self-updating, but grok is self-updating WITHOUT a global binary — it
+ * stores a real per-version binary copy under each version-home
+ * (`versions/grok/<v>/home/.grok/downloads/grok-<v>`), so its version-homes are
+ * genuinely distinct and must NOT be collapsed. Gate the single-binary
+ * collapse/live-version logic on THIS predicate; gate pin-refusal / "switch
+ * profile" copy on `isSelfUpdatingAgent`.
+ */
+export function isGlobalBinaryAgent(agent: AgentId): boolean {
+  return getBinaryPath(agent, '0.0.0-probe-a') === getBinaryPath(agent, '0.0.0-probe-b');
+}
+
+// Live-version cache for self-updating global binaries. `<cli> --version` is a
+// ~real shell-out, so hold the result briefly: the same `agents view` render
+// asks for it from both listInstalledVersions (sync) and the label path (async).
+const LIVE_VERSION_TTL_MS = 5000;
+const liveVersionCache = new Map<AgentId, { at: number; version: string | null }>();
+
+/** Drop the live-version cache (call after an install/remove that changes the
+ * running binary, e.g. `agents add droid@latest`). */
+export function invalidateLiveVersionCache(agent?: AgentId): void {
+  if (agent) liveVersionCache.delete(agent);
+  else liveVersionCache.clear();
+}
+
+/**
+ * Resolve the version the ONE globally-installed binary actually reports via
+ * `<cli> --version`, cached for {@link LIVE_VERSION_TTL_MS}. For a self-updating
+ * global-binary agent (droid) this is the single source of truth for "which
+ * version is installed" — the on-disk version-dir NAMES are just stale labels
+ * left behind by successive `agents add`/self-update cycles. Returns null when
+ * the binary isn't on PATH or the probe fails.
+ */
+export async function getLiveVersion(agent: AgentId): Promise<string | null> {
+  const cached = liveVersionCache.get(agent);
+  if (cached && Date.now() - cached.at < LIVE_VERSION_TTL_MS) return cached.version;
+  const version = await getCliVersionFromPath(agent);
+  liveVersionCache.set(agent, { at: Date.now(), version });
+  return version;
+}
+
+/**
+ * Synchronous, non-blocking read of the live-version cache — returns the value
+ * only if a recent {@link getLiveVersion} call already warmed it, else null.
+ * `listInstalledVersions` is sync and must not shell out, so it prefers this
+ * warm value (accurate) and otherwise falls back to the newest on-disk dir.
+ */
+export function getCachedLiveVersion(agent: AgentId): string | null {
+  const cached = liveVersionCache.get(agent);
+  if (cached && Date.now() - cached.at < LIVE_VERSION_TTL_MS) return cached.version;
+  return null;
+}
+
+/**
  * Get the isolated HOME directory for a specific agent version.
  * Each version has its own config isolation (like jobs sandbox).
  */
@@ -1049,7 +1176,40 @@ export function invalidateInstalledVersionsCache(agent?: AgentId): void {
 }
 
 /**
+ * Choose the single canonical version-dir to represent a self-updating
+ * global-binary agent (droid). All its version dirs map to ONE binary, so
+ * exactly one is real; the rest are stale labels. Prefer, in order: the dir the
+ * live config symlink points at (what actually runs), the recorded global
+ * default, the live `--version` (when the cache is warm), else the newest dir.
+ * `versions` MUST be sorted ascending. Callers guarantee it is non-empty.
+ */
+function pickCanonicalGlobalBinaryVersion(agent: AgentId, versions: string[]): string {
+  const symlinkVersion = getConfigSymlinkVersion(agent);
+  if (symlinkVersion && versions.includes(symlinkVersion)) return symlinkVersion;
+  const globalDefault = getGlobalDefault(agent);
+  if (globalDefault && versions.includes(globalDefault)) return globalDefault;
+  const live = getCachedLiveVersion(agent);
+  if (live && versions.includes(live)) return live;
+  return versions[versions.length - 1];
+}
+
+/**
+ * Collapse a global-binary agent's phantom version dirs to the single canonical
+ * one (see {@link pickCanonicalGlobalBinaryVersion}). No-op for npm-packaged and
+ * per-version agents (claude/codex/grok/…), whose version dirs are genuinely
+ * distinct installs.
+ */
+function collapseGlobalBinaryVersions(agent: AgentId, versions: string[]): string[] {
+  if (!isGlobalBinaryAgent(agent) || versions.length === 0) return versions;
+  return [pickCanonicalGlobalBinaryVersion(agent, versions)];
+}
+
+/**
  * List all installed versions for an agent (cached by versions-dir mtime).
+ *
+ * For a self-updating global-binary agent (droid) every version dir resolves to
+ * the SAME binary, so this collapses them to a single canonical entry — one
+ * install, one row in `agents view`, never the phantom set of semver dir names.
  */
 export function listInstalledVersions(agent: AgentId): string[] {
   const agentVersionsDir = path.join(getVersionsDir(), agent);
@@ -1063,7 +1223,9 @@ export function listInstalledVersions(agent: AgentId): string[] {
 
   const cached = installedVersionsCache.get(agent);
   if (cached && cached.stamp === stamp) {
-    return cached.versions;
+    // Collapse is applied per-call (not cached): it depends on the live-version
+    // cache + config symlink, which can change without the versions-dir mtime.
+    return collapseGlobalBinaryVersions(agent, cached.versions);
   }
 
   const entries = fs.readdirSync(agentVersionsDir, { withFileTypes: true });
@@ -1082,7 +1244,7 @@ export function listInstalledVersions(agent: AgentId): string[] {
 
   versions.sort(compareVersions);
   installedVersionsCache.set(agent, { stamp, versions });
-  return versions;
+  return collapseGlobalBinaryVersions(agent, versions);
 }
 
 /**
@@ -1136,6 +1298,107 @@ export function setGlobalDefault(agent: AgentId, version: string | undefined): v
 }
 
 /**
+ * Path to the sentinel file that marks a version as an isolated install.
+ *
+ * It lives at the version-dir root (a sibling of `home/`), so it is carried
+ * along when `softDeleteVersionDir` moves the whole directory to trash and is
+ * restored intact by `agents trash restore`. Its mere presence is the marker;
+ * the contents are an informational timestamp only.
+ */
+function getIsolatedMarkerPath(agent: AgentId, version: string): string {
+  return path.join(getVersionDir(agent, version), '.isolated');
+}
+
+/**
+ * Mark an installed version as an isolated install (`agents add --isolated`).
+ *
+ * Isolated versions are fully self-contained: they never become the global
+ * default and never own the user's real `~/.<agent>` config directory. This
+ * flag is what keeps every "adopting" code path away from them.
+ */
+export function markVersionIsolated(agent: AgentId, version: string): void {
+  fs.writeFileSync(getIsolatedMarkerPath(agent, version), `${new Date().toISOString()}\n`, { mode: 0o600 });
+}
+
+/**
+ * Whether a version was installed as an isolated install (`agents add --isolated`).
+ *
+ * Used to exclude such versions from global-default promotion and from any
+ * flow that would touch the user's real `~/.<agent>` directory, and to gate the
+ * `--isolated` safety check on `agents remove`.
+ */
+export function isVersionIsolated(agent: AgentId, version: string): boolean {
+  return fs.existsSync(getIsolatedMarkerPath(agent, version));
+}
+
+/**
+ * Grok's official installer writes into ~/.grok/downloads, which (because we
+ * symlink ~/.grok to the active version home) resolves to the PREVIOUS default
+ * home during `agents add grok@<new>`. Move the freshly-downloaded binary and
+ * its generic platform copy into the target version's isolated home so
+ * `listInstalledVersions` and the shim resolve the right binary.
+ */
+function relocateGrokBinaryToVersionHome(installedVersion: string): void {
+  const hostGrokLink = path.join(getHomeDir(), agentConfigDirName('grok'));
+  let sourceDownloads: string;
+  try {
+    sourceDownloads = path.join(fs.readlinkSync(hostGrokLink), 'downloads');
+  } catch {
+    sourceDownloads = path.join(hostGrokLink, 'downloads');
+  }
+  const targetDownloads = path.join(
+    getVersionHomePath('grok', installedVersion),
+    agentConfigDirName('grok'),
+    'downloads'
+  );
+
+  if (!fs.existsSync(sourceDownloads)) return;
+  if (path.resolve(sourceDownloads) === path.resolve(targetDownloads)) return;
+
+  const entries = fs.readdirSync(sourceDownloads).filter((e) => e.startsWith('grok-'));
+  if (entries.length === 0) return;
+
+  fs.mkdirSync(targetDownloads, { recursive: true });
+
+  const escapedVersion = installedVersion.replace(/\./g, '\\.');
+  const versionedPattern = new RegExp(`^grok-${escapedVersion}-`);
+  const movedPaths: string[] = [];
+
+  // Move the versioned binary first.
+  for (const entry of entries) {
+    if (!versionedPattern.test(entry)) continue;
+    const src = path.join(sourceDownloads, entry);
+    const dst = path.join(targetDownloads, entry);
+    if (fs.existsSync(dst)) continue;
+    try {
+      fs.renameSync(src, dst);
+      movedPaths.push(dst);
+    } catch {
+      /* ignore per-file failures */
+    }
+  }
+
+  if (movedPaths.length === 0) return;
+
+  // The installer also creates a generic platform binary (e.g. grok-macos-aarch64)
+  // that is a copy of the versioned binary. Move it too if its size matches.
+  const movedSize = fs.statSync(movedPaths[0]).size;
+  for (const entry of entries) {
+    if (versionedPattern.test(entry)) continue; // already handled
+    const src = path.join(sourceDownloads, entry);
+    const dst = path.join(targetDownloads, entry);
+    if (fs.existsSync(dst)) continue;
+    try {
+      if (fs.statSync(src).size === movedSize) {
+        fs.renameSync(src, dst);
+      }
+    } catch {
+      /* ignore per-file failures */
+    }
+  }
+}
+
+/**
  * Install a specific version of an agent.
  */
 export async function installVersion(
@@ -1158,19 +1421,31 @@ export async function installVersion(
       return { success: false, installedVersion: version, error: 'Agent has no npm package' };
     }
 
-    if (version !== 'latest' && !agentConfig.installScript.includes('VERSION')) {
-      return {
-        success: false,
-        installedVersion: version,
-        error: `${agentConfig.name} installer does not support version-pinned installs. Use ${agent}@latest.`,
-      };
+    // A self-updating agent (droid, grok, …) is a single global binary whose
+    // installer only ever fetches the CURRENT release — there is no semver to
+    // pin. Rather than hard-refuse `<agent>@1.2.3` (the old behavior):
+    //   - if the binary is already installed, a pin is a no-op — it self-updates
+    //     in place, so skip the installer and just refresh our bookkeeping;
+    //   - otherwise redirect the pin to a current-release install.
+    let runInstaller = true;
+    if (version !== 'latest' && isSelfUpdatingAgent(agent)) {
+      const liveVersion = await getLiveVersion(agent);
+      if (liveVersion) {
+        onProgress?.(`${agentConfig.name} is a single self-updating binary — @${version} maps to the already-installed current release (${liveVersion}); nothing to install.`);
+        runInstaller = false;
+      } else {
+        onProgress?.(`${agentConfig.name} is a single self-updating binary with no pinnable versions — installing the current release (ignoring @${version}).`);
+      }
+      version = 'latest';
     }
 
     let installedVersion = version;
     try {
-      const script = agentConfig.installScript.replaceAll('VERSION', version);
-      onProgress?.(`Installing ${agentConfig.name}@${version} via official installer...`);
-      await execAsync(script, { timeout: 120000 });
+      if (runInstaller) {
+        const script = agentConfig.installScript.replaceAll('VERSION', version);
+        onProgress?.(`Installing ${agentConfig.name}@${version} via official installer...`);
+        await execAsync(script, { timeout: 120000 });
+      }
 
       if (version === 'latest') {
         installedVersion = await getCliVersionFromPath(agent) || version;
@@ -1189,6 +1464,13 @@ export async function installVersion(
     const versionDir = getVersionDir(agent, installedVersion);
     fs.mkdirSync(versionDir, { recursive: true });
     fs.mkdirSync(path.join(versionDir, 'home'), { recursive: true });
+
+    // Grok's installer drops the binary into ~/.grok/downloads, which currently
+    // resolves to the PREVIOUS default home. Move it into the target version home
+    // so version isolation is correct.
+    if (agent === 'grok') {
+      relocateGrokBinaryToVersionHome(installedVersion);
+    }
 
     // Symlink the installed binary into the version's node_modules/.bin so
     // listInstalledVersions (which checks getBinaryPath) sees this version as
@@ -1226,23 +1508,35 @@ export async function installVersion(
     }
 
     createVersionedAlias(agent, installedVersion);
+    // The self-updating binary just changed on disk — drop the cached
+    // `--version` so `agents view` reflects the freshly-installed release.
+    invalidateLiveVersionCache(agent);
     emit('version.install', { agent, version: installedVersion });
     return { success: true, installedVersion };
   }
 
-  // Resolve the `oldest` alias to a concrete npm version up front so the rest
-  // of the install path treats it as an ordinary pinned install. (`latest`
-  // keeps its bare-package-name + post-install-rename handling below.)
-  if (version === 'oldest') {
-    const oldest = await getOldestNpmVersion(agent);
-    if (!oldest) {
+  // Resolve the `latest`/`oldest` aliases to a concrete npm version up front so
+  // the rest of the install path treats them as an ordinary pinned install.
+  // This is what keeps concurrent installs safe: resolving `latest` only AFTER
+  // npm finished meant the install ran in a shared, well-known
+  // `versions/<agent>/latest/` scratch dir that was renamed to the real version
+  // at the end — so a concurrent `agents view` reconcile
+  // (reconcileStaleLatestForAgent) or a second `latest` install could rename
+  // that dir out from under npm mid-extraction and corrupt the install (the
+  // seeded package.json and half-extracted node_modules would vanish, yielding
+  // ENOENT). A concrete dir per version has no shared name to race on.
+  if (version === 'latest' || version === 'oldest') {
+    const resolved = version === 'latest'
+      ? await getLatestNpmVersion(agent)
+      : await getOldestNpmVersion(agent);
+    if (!resolved) {
       return {
         success: false,
         installedVersion: version,
-        error: `Could not resolve the oldest published version for ${agentConfig.name} from npm.`,
+        error: `Could not resolve the ${version} published version for ${agentConfig.name} from npm.`,
       };
     }
-    version = oldest;
+    version = resolved;
   }
 
   ensureAgentsDir();
@@ -1269,12 +1563,11 @@ export async function installVersion(
   };
   fs.writeFileSync(path.join(versionDir, 'package.json'), JSON.stringify(packageJson, null, 2));
 
-  // Install the package
-  const packageSpec = version === 'latest'
-    ? agentConfig.npmPackage
-    : `${agentConfig.npmPackage}@${version}`;
-  // The `${agentConfig.npmPackage}@` prefix is load-bearing: it ensures `version`
-  // (which VERSION_RE permits to start with `-`) is never passed as a standalone npm CLI flag.
+  // Install the package. `version` is always concrete here (`latest`/`oldest`
+  // were resolved above), so the spec is always pinned. The `@` prefix is
+  // load-bearing: it ensures `version` (which VERSION_RE permits to start with
+  // `-`) is never passed as a standalone npm CLI flag.
+  const packageSpec = `${agentConfig.npmPackage}@${version}`;
 
   try {
     // Check npm is available
@@ -1290,37 +1583,13 @@ export async function installVersion(
     }
 
     onProgress?.(`Installing ${packageSpec}...`);
-    const { stdout } = await execFileAsync('npm', ['install', packageSpec, '--ignore-scripts'], { cwd: versionDir, shell: winShell });
+    await execFileAsync('npm', ['install', packageSpec, '--ignore-scripts'], { cwd: versionDir, shell: winShell });
 
-    // Determine the actual installed version
-    let installedVersion = version;
-    if (version === 'latest') {
-      const pkgJsonPath = path.join(versionDir, 'node_modules', agentConfig.npmPackage.replace(/^@/, '').split('/')[0], 'package.json');
-      // Try to read the actual version from installed package
-      try {
-        const installedPkgPath = path.join(versionDir, 'node_modules', agentConfig.npmPackage, 'package.json');
-        if (fs.existsSync(installedPkgPath)) {
-          const installedPkg = JSON.parse(fs.readFileSync(installedPkgPath, 'utf-8'));
-          installedVersion = installedPkg.version;
-
-          // Rename the directory to the actual version
-          if (installedVersion !== 'latest') {
-            const actualVersionDir = getVersionDir(agent, installedVersion);
-            if (!fs.existsSync(actualVersionDir)) {
-              fs.renameSync(versionDir, actualVersionDir);
-            } else {
-              // Already exists — drop the 'latest' install artifacts but keep
-              // `home/` (may contain conversation history from sessions that
-              // ran while the user was on `latest`).
-              removeInstallArtifacts(versionDir);
-            }
-          }
-        }
-      } catch (e) {
-        // Failed to determine version - this shouldn't happen
-        throw new Error(`Failed to determine installed version: ${(e as Error).message}`);
-      }
-    }
+    // `version` is concrete (the `latest`/`oldest` aliases were resolved up
+    // front), so the package installed directly into its final versioned dir —
+    // no post-install rename, and no shared `latest/` dir for a concurrent
+    // process to move out from under us.
+    const installedVersion = version;
 
     // Create versioned alias (e.g., claude@2.0.65)
     createVersionedAlias(agent, installedVersion);
@@ -1352,9 +1621,9 @@ export async function installVersion(
     // binary (postinstall failed, or a platform with no published native dep)
     // fails there with the correct message rather than throwing here.
     if (agentConfig.npmPackage) {
-      // Recompute from installedVersion, not the (possibly renamed) `versionDir`:
-      // the `latest` branch above may have renamed the dir to its concrete version.
-      const pkgRoot = path.join(getVersionDir(agent, installedVersion), 'node_modules', agentConfig.npmPackage);
+      // `installedVersion === version`, so this is exactly `versionDir` — the
+      // install landed in its final dir with no rename to chase.
+      const pkgRoot = path.join(versionDir, 'node_modules', agentConfig.npmPackage);
       try {
         const pkg = JSON.parse(fs.readFileSync(path.join(pkgRoot, 'package.json'), 'utf-8'));
         const postinstall = pkg?.scripts?.postinstall;
@@ -1446,11 +1715,87 @@ function removeInstallArtifacts(versionDir: string): void {
  * renaming that dir would dangle the live symlink.
  */
 export async function reconcileStaleLatestForAgent(agent: AgentId): Promise<void> {
+  // Global-binary agents (droid) can accumulate MANY stale semver dirs — not
+  // just a literal `latest` — because every `agents add` after an in-place
+  // self-update creates a fresh dir for the same one binary. Fold them all.
+  if (isGlobalBinaryAgent(agent)) {
+    await reconcileGlobalBinaryVersions(agent);
+    return;
+  }
   if (!fs.existsSync(getVersionDir(agent, 'latest'))) return;
   if (getConfigSymlinkVersion(agent) === 'latest') return;
   const concrete = await getCliVersionFromPath(agent);
   if (concrete && concrete !== 'latest') {
     await reconcileStaleLatestDir(agent, concrete);
+  }
+}
+
+/**
+ * Fold every stale version-dir of a global-binary agent (droid) into the single
+ * canonical survivor. All its dirs point at ONE binary, so the extras — left by
+ * successive `agents add` + in-place self-updates, and by probe-failed installs
+ * that created a literal `latest` dir — are phantom labels. Soft-delete each
+ * non-survivor dir (its `home/` stays recoverable via `agents restore`) so disk
+ * converges to a single install matching what `agents view` shows.
+ *
+ * Survivor selection matches listInstalledVersions' canonical choice
+ * (config-symlink target → global default → live version → newest). The survivor
+ * is NOT renamed: droid's ~/.factory symlink points inside its home, and the
+ * live version label is surfaced by the view renderer via getLiveVersion.
+ */
+async function reconcileGlobalBinaryVersions(agent: AgentId): Promise<void> {
+  // Step 1 — preserve the original literal-`latest` reconcile: a probe-failed
+  // install leaves a `versions/<agent>/latest/` dir; fold it onto the concrete
+  // live version (rename if that dir is absent, else trash). Skipped while the
+  // config symlink still points at `latest` (renaming would dangle it).
+  if (fs.existsSync(getVersionDir(agent, 'latest')) && getConfigSymlinkVersion(agent) !== 'latest') {
+    const concrete = await getCliVersionFromPath(agent);
+    if (concrete && concrete !== 'latest') {
+      await reconcileStaleLatestDir(agent, concrete);
+    }
+  }
+
+  // Step 2 — collapse any remaining phantom SEMVER dirs (successive `agents add`
+  // after in-place self-updates) into a single survivor.
+  const agentVersionsDir = path.join(getVersionsDir(), agent);
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(agentVersionsDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name).sort(compareVersions);
+  if (dirs.length <= 1) return;
+
+  // Warm the live-version cache so the survivor pick (and later view labels) can
+  // prefer the version the binary actually reports.
+  await getLiveVersion(agent);
+  const survivor = pickCanonicalGlobalBinaryVersion(agent, dirs);
+  const symlinkVersion = getConfigSymlinkVersion(agent);
+
+  let foldedAny = false;
+  for (const version of dirs) {
+    if (version === survivor) continue;
+    // Never trash the dir the live config symlink points at — that would dangle
+    // the symlink. pickCanonical already prefers it as survivor; this guards the
+    // rare mismatch.
+    if (version === symlinkVersion) continue;
+    const staleDir = getVersionDir(agent, version);
+    const trashPath = softDeleteVersionDir(agent, version);
+    if (trashPath) {
+      const { updateSessionFilePaths } = await import('./session/db.js');
+      updateSessionFilePaths(staleDir, trashPath);
+      foldedAny = true;
+    }
+  }
+
+  if (foldedAny) {
+    invalidateInstalledVersionsCache(agent);
+    // Keep the recorded default pointing at a dir that still exists on disk.
+    const def = getGlobalDefault(agent);
+    if (!def || !fs.existsSync(getVersionDir(agent, def))) {
+      setGlobalDefault(agent, survivor);
+    }
   }
 }
 
@@ -1552,13 +1897,19 @@ export function removeVersion(agent: AgentId, version: string): boolean {
   // broke every launcher after removing the pinned default.
   if (getGlobalDefault(agent) === version) {
     const remaining = listInstalledVersions(agent);
-    if (remaining.length > 0) {
-      const newestRemaining = remaining[remaining.length - 1];
+    // Never auto-promote an isolated install to the global default: it was
+    // installed to stay separate from the user's setup, and promoting it would
+    // silently make `<agent>` resolve to it (and let a later `use` adopt its
+    // home into `~/.<agent>`). Prefer the newest NON-isolated survivor; if every
+    // survivor is isolated, clear the default rather than adopt one.
+    const promotable = remaining.filter((v) => !isVersionIsolated(agent, v));
+    if (promotable.length > 0) {
+      const newestRemaining = promotable[promotable.length - 1];
       setGlobalDefault(agent, newestRemaining);
       console.log(chalk.yellow(`Default ${agent} was ${version} (removed); reassigned to ${newestRemaining}. Change it with: agents use ${agent}@<version>`));
     } else {
       setGlobalDefault(agent, undefined);
-      console.log(chalk.yellow(`Removed the last installed ${agent} version and cleared its default. Reinstall with: agents add ${agent}, then set one with: agents use ${agent}@<version>`));
+      console.log(chalk.yellow(`Removed the last non-isolated ${agent} version and cleared its default. Reinstall with: agents add ${agent}, then set one with: agents use ${agent}@<version>`));
     }
   }
 
@@ -1996,9 +2347,10 @@ type SelectableKind = 'commands' | 'skills' | 'hooks' | 'subagents' | 'permissio
  * `expandPatterns` matches `source:*` patterns against. This is the single
  * source of truth for how each kind attributes its source layer:
  *   - commands/skills/hooks/subagents → real layer from `listResources`
- *   - permissions                     → always the system repo
+ *   - permissions                     → real layer from permissions/groups
  *   - mcp                             → project vs user scope preserved
- *   - plugins/workflows               → user repo
+ *   - plugins                         → user repo
+ *   - workflows                       → real layer from workflow directories
  * Both the persisted-pattern sync path and `buildRepoScopedSelection` use it
  * so the attribution can't drift between the two.
  */
@@ -2009,14 +2361,24 @@ function resourceSourceMap(kind: SelectableKind, cwd: string, available: Availab
     case 'hooks':
     case 'subagents':
       return new Map(listResources(kind, cwd).map(r => [r.name, r.source]));
-    case 'permissions':
-      return new Map(available.permissions.map(n => [n, 'system']));
+    case 'permissions': {
+      const sources = sourceMapFromPermissionGroups(cwd);
+      return new Map(available.permissions.flatMap((n) => {
+        const source = sources.get(n);
+        return source ? [[n, source] as [string, string]] : [];
+      }));
+    }
     case 'mcp':
       return new Map(getScopedMcpResources(cwd).map(r => [r.name, r.scope]));
     case 'plugins':
       return new Map(available.plugins.map(n => [n, 'user']));
-    case 'workflows':
-      return new Map(available.workflows.map(n => [n, 'user']));
+    case 'workflows': {
+      const sources = sourceMapFromWorkflows(cwd);
+      return new Map(available.workflows.flatMap((n) => {
+        const source = sources.get(n);
+        return source ? [[n, source] as [string, string]] : [];
+      }));
+    }
   }
 }
 
@@ -2125,11 +2487,10 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   // only sets fields that aren't already present, preserving user edits).
   {
     const extraAliases = extraRepos.map(e => e.alias);
-    const allLayers = defaultPatterns(extraAliases);
     const noProject = defaultPatterns(extraAliases, false);
     ensureVersionResourcePatterns(agent, version, {
-      commands:    allLayers,
-      skills:      allLayers,
+      commands:    noProject,
+      skills:      noProject,
       hooks:       noProject,     // hooks: no project layer (security)
       subagents:   noProject,
       plugins:     noProject,
@@ -2186,6 +2547,10 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
     }
   }
 
+  if (projectAgentsDir) {
+    syncProjectResourcesToAgent(agent, version, projectAgentsDir);
+  }
+
   // Fast guard: skip the entire sync when the caller requested a full sync and
   // nothing has changed since the last full sync. Pattern-derived selections
   // still count as full syncs because they are the persisted intended scope,
@@ -2236,6 +2601,8 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
     return [];
   };
 
+  const trustedCommandNames = (names: string[]): string[] => names.filter((name) => resolveCommandSource(name) !== null);
+
   // Sync commands — dispatch through WRITERS.commands. The writer dispatches
   // between native (file copy / TOML conversion) and commands-as-skills
   // (grok, Codex >= 0.117.0) based on `shouldInstallCommandAsSkill`. The
@@ -2243,8 +2610,8 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   // takes the commands-as-skills path — silently dropping every command.
   const commandsWriter = getWriter('commands', agent);
   const commandsToSync = selection
-    ? resolveSelection(selection.commands, available.commands)
-    : available.commands; // No selection = sync all
+    ? trustedCommandNames(resolveSelection(selection.commands, available.commands))
+    : trustedCommandNames(available.commands); // No selection = sync all trusted commands, excluding project-only commands
   const commandsAsSkills = shouldInstallCommandAsSkill(agent, version);
 
   if (commandsToSync.length > 0 && commandsWriter) {
@@ -2283,9 +2650,19 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   // ~/.agents/skills/ (Gemini) are not registered; we clear the version-home
   // skills dir for them so a stale per-version copy never shadows central.
   const skillsWriter = getWriter('skills', agent);
-  let skillsToSync = selection
-    ? resolveSelection(selection.skills, available.skills)
-    : available.skills;
+  const pluginsWriter = getWriter('plugins', agent);
+  const pluginsToSync = selection
+    ? resolveSelection(selection.plugins, available.plugins)
+    : (pluginsWriter ? available.plugins : []);
+  const pluginSkillsToSync = listPluginSkillNames({ agent, plugins: new Set(pluginsToSync) });
+  const trustedSkillNames = (names: string[]): string[] =>
+    names.filter((name) => resolveSkillSource(name, { agent, plugins: new Set(pluginsToSync) }) !== null);
+  const selectedSkillsToSync = selection
+    ? trustedSkillNames(resolveSelection(selection.skills, available.skills))
+    : trustedSkillNames(available.skills);
+  let skillsToSync = userPassedSelection
+    ? selectedSkillsToSync
+    : Array.from(new Set([...selectedSkillsToSync, ...pluginSkillsToSync]));
   if (commandsAsSkills && commandsToSync.length > 0 && skillsToSync.length > 0) {
     const commandNames = new Set(commandsToSync);
     const skillRoots = [
@@ -2377,7 +2754,7 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
       const overridePreset = Array.isArray(selection?.memory) && selection!.memory.length === 1 && selection!.memory[0] !== 'AGENTS'
         ? selection!.memory[0]
         : null;
-      const preset = overridePreset || getActiveRulesPreset(agent, version);
+      const preset = overridePreset || activeRulesPreset() || getActiveRulesPreset(agent, version);
       const r = rulesWriter.write({ version, versionHome, selection: { preset }, cwd });
       result.memory.push(...r.synced);
       // rulesPreset is tracked separately via setActiveRulesPreset.
@@ -2437,22 +2814,25 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   // For Claude/Codex: uses CLI commands (claude mcp add, codex mcp add)
   // For others: edits config files directly
   //
-  // Mirror the hooks defense: exclude project-scoped MCPs from the sync. An
-  // MCP server is an executable invoked under the agent's authority, so a
-  // cloned public repo's .agents/mcp/foo.yaml could install an arbitrary
-  // command. We pre-compute the set of project-scoped names and drop them
-  // before handing the list to installMcpServers. (The deeper helper-side
-  // dedup in lib/mcp.ts still lets a project entry shadow a same-named
-  // user entry, so name-collision shadowing is not fully closed here —
-  // tracked separately for a follow-up in lib/mcp.ts.)
-  const projectScopedMcpNames = new Set(
-    getScopedMcpResources(cwd).filter(r => r.scope === 'project').map(r => r.name)
+  // Mirror the hooks defense: an MCP server is an executable invoked under the
+  // agent's authority, so a cloned public repo's .agents/mcp/foo.yaml could
+  // install an arbitrary command (RUSH-1776). Project-scoped MCPs are UNTRUSTED
+  // by default — drop them before handing the list to installMcpServers unless
+  // the user has explicitly trusted this project (`agents mcp trust`). The
+  // register/spawn choke in lib/mcp.ts (getMcpServersByName) enforces the same
+  // trust gate and drops untrusted project entries before dedup, so a project
+  // entry can no longer shadow a same-named user entry either.
+  const projectMcpTrusted = projectAgentsDir ? isProjectMcpTrusted(projectAgentsDir) : false;
+  const untrustedProjectMcpNames = new Set(
+    projectMcpTrusted
+      ? []
+      : getScopedMcpResources(cwd).filter(r => r.scope === 'project').map(r => r.name)
   );
   const mcpWriter = getWriter('mcp', agent);
   const mcpToSyncAll = selection
     ? resolveSelection(selection.mcp, available.mcp)
     : (mcpWriter ? available.mcp : []);
-  const mcpToSync = mcpToSyncAll.filter(n => !projectScopedMcpNames.has(n));
+  const mcpToSync = mcpToSyncAll.filter(n => !untrustedProjectMcpNames.has(n));
 
   if (mcpToSync.length > 0 && mcpWriter) {
     const r = mcpWriter.write({ version, versionHome, selection: mcpToSync, cwd });
@@ -2464,9 +2844,17 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   // reads only user + system layers (project excluded for the same defense
   // as commands/skills/hooks).
   const subagentsWriter = getWriter('subagents', agent);
-  const subagentsToSync = selection
-    ? resolveSelection(selection.subagents, available.subagents)
-    : (subagentsWriter ? available.subagents : []);
+  const subagentsGate = supports(agent, 'subagents', version);
+  const installedSubagentNames = new Set(listInstalledSubagents().map((subagent) => subagent.name));
+  const trustedSubagentNames = (names: string[]): string[] => names.filter((name) => installedSubagentNames.has(name));
+  const subagentsRequested = selection
+    ? trustedSubagentNames(resolveSelection(selection.subagents, available.subagents))
+    : (subagentsWriter ? trustedSubagentNames(available.subagents) : []);
+  const subagentsToSync = subagentsGate.ok ? subagentsRequested : [];
+
+  if (subagentsRequested.length > 0 && !subagentsGate.ok) {
+    console.warn(explainSkip(agent, 'subagents', subagentsGate, version) + ' -- skipped');
+  }
 
   if (subagentsToSync.length > 0 && subagentsWriter) {
     const r = subagentsWriter.write({ version, versionHome, selection: subagentsToSync, cwd });
@@ -2492,11 +2880,6 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   }
 
   // Sync plugins — dispatch through WRITERS.plugins.
-  const pluginsWriter = getWriter('plugins', agent);
-  const pluginsToSync = selection
-    ? resolveSelection(selection.plugins, available.plugins)
-    : (pluginsWriter ? available.plugins : []);
-
   if (pluginsToSync.length > 0 && pluginsWriter) {
     const r = pluginsWriter.write({ version, versionHome, selection: pluginsToSync, cwd });
     result.plugins.push(...r.synced);
@@ -2504,13 +2887,31 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
 
   // Sync workflows — dispatch through WRITERS.workflows.
   const workflowsWriter = getWriter('workflows', agent);
-  const workflowsToSync = selection
-    ? resolveSelection(selection.workflows, available.workflows)
-    : (workflowsWriter ? available.workflows : []);
+  const workflowsGate = supports(agent, 'workflows', version);
+  const trustedWorkflowNames = (names: string[]): string[] => {
+    if (names.length === 0) return [];
+    const installedWorkflowNames = new Set(listInstalledWorkflows().keys());
+    return names.filter((name) => installedWorkflowNames.has(name));
+  };
+  const workflowsRequested = selection
+    ? trustedWorkflowNames(resolveSelection(selection.workflows, available.workflows))
+    : (workflowsWriter ? trustedWorkflowNames(available.workflows) : []);
+  const workflowsToSync = workflowsGate.ok ? workflowsRequested : [];
+
+  if (workflowsRequested.length > 0 && !workflowsGate.ok) {
+    console.warn(explainSkip(agent, 'workflows', workflowsGate, version) + ' -- skipped');
+  }
 
   if (workflowsToSync.length > 0 && workflowsWriter) {
     const r = workflowsWriter.write({ version, versionHome, selection: workflowsToSync, cwd });
     result.workflows.push(...r.synced);
+  }
+
+  // Knowledge memory (RUSH-1330) — distinct from selection.memory which still
+  // means the composed *rules* file. Always fan out ~/.agents/memory/ facts
+  // into capable agent version homes on every full or partial sync.
+  if (supports(agent, 'memory', version).ok) {
+    syncMemoryToVersionHome(agent, versionHome, cwd);
   }
 
   // Write manifest after a full sync (no user-passed selection) so the next

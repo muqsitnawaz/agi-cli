@@ -24,14 +24,16 @@
 import type { Command } from 'commander';
 import { addHostOption } from '../lib/hosts/option.js';
 import { buildRemoteAgentsInvocation } from '../lib/hosts/remote-cmd.js';
-import { loadDevices } from '../lib/devices/registry.js';
+import { loadDevices, isControlDevice } from '../lib/devices/registry.js';
+import { fanOutDevices } from '../lib/devices/fleet.js';
 import { resolveHost } from '../lib/hosts/registry.js';
-import { sshExec } from '../lib/ssh-exec.js';
+import { sshExecAsync } from '../lib/ssh-exec.js';
 import { sshTargetFor } from '../lib/hosts/types.js';
 import { machineId } from '../lib/session/sync/config.js';
 import chalk from 'chalk';
 import { checkAllClis, collectTeamsDoctorData, type TeamsDoctorEntry } from '../lib/teams/agents.js';
-import { AGENTS, ALL_AGENT_IDS, resolveAgentName, formatAgentError } from '../lib/agents.js';
+import { AGENTS, ALL_AGENT_IDS, resolveAgentName, formatAgentError, getAccountInfo, type AccountInfo } from '../lib/agents.js';
+import { formatSignInBadge } from '../lib/signin-badge.js';
 import type { AgentId } from '../lib/types.js';
 import {
   getGlobalDefault,
@@ -49,6 +51,7 @@ import {
   type VersionResourceReport,
 } from '../lib/doctor-diff.js';
 import { checkSyncStatus, countOrphans, type SyncStatusRow, type OrphanRow } from '../lib/drift.js';
+import { readAuthHealthCache, summarizeHostAuth } from '../lib/auth-health.js';
 import { unifiedDiff, colorizeUnifiedDiff } from '../lib/diff-text.js';
 import { listCliStatus } from '../lib/cli-resources.js';
 import { setHelpSections } from '../lib/help.js';
@@ -116,6 +119,7 @@ function renderOverviewText(
   syncRows: SyncStatusRow[],
   orphanRows: OrphanRow[],
   hostClis: ReturnType<typeof listCliStatus>,
+  signIn: Record<string, Pick<AccountInfo, 'signedIn' | 'email' | 'accountId'>>,
 ): void {
   console.log(chalk.bold('Agent CLIs'));
   // Show the fleet you actually run — agents that are ready in PATH, plus any
@@ -132,7 +136,9 @@ function renderOverviewText(
     for (const [name, entry] of shown) {
       const pretty = (AGENT_NAMES[name] || name).padEnd(11);
       if (entry.installed) {
-        console.log(`  ${chalk.green('ready')}  ${pretty} ${chalk.gray(entry.path || '')}`);
+        const badge = formatSignInBadge(signIn[name]);
+        const pathHint = entry.path ? chalk.gray(`  ${entry.path}`) : '';
+        console.log(`  ${chalk.green('ready')}  ${pretty} ${badge}${pathHint}`);
       } else {
         console.log(`  ${chalk.red('no   ')}  ${pretty} ${chalk.gray(entry.error || 'not installed')}`);
       }
@@ -320,6 +326,9 @@ async function resolveFleetTargets(opts: DoctorOptions): Promise<FleetTarget[]> 
   const localName = machineId();
   return Object.values(registry)
     .filter((d) => d.name.toLowerCase() !== localName)
+    // Control devices (a cockpit) never run agents — skip them in the fleet
+    // fan-out (an explicit --device <name> still resolves above).
+    .filter((d) => !isControlDevice(d))
     .map((d) => ({
       name: d.name,
       sshTarget: d.name,
@@ -339,7 +348,7 @@ async function probeFleetTarget(target: FleetTarget): Promise<DeviceDoctorResult
     // prevent $HOME expansion there, so skip the bootstrap on Windows.
     isWin ? undefined : { PATH: '$HOME/.agents/.cache/shims:$HOME/.local/bin:$PATH' },
   );
-  const res = sshExec(target.sshTarget, remoteCmd, { timeoutMs: 30000, multiplex: true });
+  const res = await sshExecAsync(target.sshTarget, remoteCmd, { timeoutMs: 30000, multiplex: true });
   if (res.code !== 0) {
     return {
       name: target.name,
@@ -373,9 +382,17 @@ async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
     results.push({ name: localName, online: true, agents: await collectTeamsDoctorData() });
   }
 
-  // Remote targets in parallel.
-  const remoteResults = await Promise.all(targets.map(probeFleetTarget));
-  results.push(...remoteResults);
+  // Remote targets in parallel, through the shared fleet fan-out helper.
+  const remoteResults = await fanOutDevices(targets, probeFleetTarget);
+  results.push(...remoteResults.map((r): DeviceDoctorResult => {
+    if (r.status === 'ok' && r.value) return r.value;
+    return {
+      name: r.name,
+      online: false,
+      error: r.error ?? String(r.reason ?? 'skipped'),
+      agents: {},
+    };
+  }));
 
   if (opts.json) {
     console.log(JSON.stringify({ devices: results }, null, 2));
@@ -795,9 +812,29 @@ export function registerDoctorCommand(program: Command): void {
         const syncRows = checkSyncStatus(cwd);
         const orphanRows = countOrphans();
         const hostClis = listCliStatus(cwd);
+        // Advisory login state per installed agent (file-based getAccountInfo,
+        // no home → the account-global/active credential). Best-effort: a probe
+        // failure just leaves that agent's badge as "logged out".
+        const signIn: Record<string, Pick<AccountInfo, 'signedIn' | 'email' | 'accountId'>> = {};
+        await Promise.all(
+          Object.entries(clis)
+            .filter(([, e]) => e.installed)
+            .map(async ([name]) => {
+              try {
+                signIn[name] = await getAccountInfo(name as AgentId);
+              } catch {
+                /* advisory only */
+              }
+            }),
+        );
         if (opts.json) {
           console.log(JSON.stringify({
             clis,
+            signIn,
+            // Cached auth-health rollup for THIS host — lets `agents fleet status`
+            // show a live-verified Auth column from the same fan-out it already
+            // runs, without a separate fleet-wide `fleet ping`.
+            auth: summarizeHostAuth(readAuthHealthCache(), machineId()),
             sync: syncRows,
             orphans: orphanRows,
             hostClis: {
@@ -812,7 +849,7 @@ export function registerDoctorCommand(program: Command): void {
           }, null, 2));
           return;
         }
-        renderOverviewText(clis, syncRows, orphanRows, hostClis);
+        renderOverviewText(clis, syncRows, orphanRows, hostClis, signIn);
         // Point at the interactive reconcile when anything is out of sync — the
         // report shouldn't be a dead end. `agents status` runs the unified
         // home-reading engine and offers to sync (opt-in, never auto-fires here).

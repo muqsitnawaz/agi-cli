@@ -11,16 +11,18 @@ import type { JobTrigger } from '../routines.js';
 /**
  * Identifier for a supported cloud dispatch backend.
  *
- * Each id is one agent's *own* cloud:
+ * Each id is one agent's *own* cloud — plus your own machines:
  *   - `rush`        — Rush Cloud (runs Claude against a GitHub repo → PR)
  *   - `codex`       — OpenAI Codex Cloud (`codex cloud exec`)
  *   - `factory`     — Factory Droid Computers (`droid computer ssh` + remote `droid exec`)
  *   - `antigravity` — Google Gemini Managed Agents (Interactions API)
+ *   - `host`        — a machine you own (`agents hosts` / `agents devices`), over SSH
  *
  * Agents route to their native cloud automatically (see `cloudProvider` in the
- * agent registry); `--provider` overrides.
+ * agent registry); `--provider` overrides. Nothing auto-routes to `host` — it
+ * is always an explicit `--provider host` (or `--host <name>`) choice.
  */
-export type CloudProviderId = 'rush' | 'codex' | 'factory' | 'antigravity';
+export type CloudProviderId = 'rush' | 'codex' | 'factory' | 'antigravity' | 'host';
 
 /**
  * Lifecycle state of a cloud-dispatched task.
@@ -38,6 +40,85 @@ export type CloudTaskStatus =
   | 'completed'
   | 'failed'
   | 'cancelled';
+
+/** Cloud backends whose wire status is normalized by `normalizeProviderStatus`. */
+export type StatusNormalizingProvider = 'rush' | 'codex' | 'antigravity';
+
+/**
+ * Normalize a provider's raw wire status into the canonical `CloudTaskStatus`.
+ *
+ * Each cloud backend speaks its own status vocabulary and had its own copy of
+ * this mapping, which had drifted. This dispatches per provider while keeping
+ * provider-specific defaults explicit:
+ *   - `rush`        — switch over the Factory Floor's known strings; includes
+ *                     `allocating` and stopped/resumable `idle` states, has no
+ *                     `queued`, default `running`.
+ *   - `codex`       — substring match on the lowercased CLI status; default
+ *                     `running`.
+ *   - `antigravity` — substring match on the (possibly `undefined`) Interactions
+ *                     API status; default `completed` (its synchronous response
+ *                     is terminal), and `undefined`-safe.
+ *
+ * Factory's `mapResultStatus` is structurally different (it maps a droid *exit*
+ * result, not a lifecycle string) and deliberately stays in `factory.ts`.
+ */
+export function normalizeProviderStatus(
+  provider: StatusNormalizingProvider,
+  wireStatus: string | undefined,
+): CloudTaskStatus {
+  switch (provider) {
+    case 'rush':
+      return normalizeRushStatus(wireStatus ?? '');
+    case 'codex':
+      return normalizeCodexStatus(wireStatus ?? '');
+    case 'antigravity':
+      return normalizeAntigravityStatus(wireStatus);
+  }
+}
+
+/** Rush Factory Floor status → canonical enum. Default `running`; no `queued`. */
+function normalizeRushStatus(s: string): CloudTaskStatus {
+  switch (s) {
+    case 'allocating': return 'allocating';
+    case 'running': return 'running';
+    case 'idle':
+    case 'paused':
+    case 'needs_review': return 'idle';
+    case 'input_required': return 'input_required';
+    case 'completed': return 'completed';
+    case 'failed': return 'failed';
+    case 'cancelled': return 'cancelled';
+    default: return 'running';
+  }
+}
+
+/** Codex Cloud CLI status → canonical enum. Substring match; default `running`. */
+function normalizeCodexStatus(s: string): CloudTaskStatus {
+  const lower = s.toLowerCase();
+  if (lower.includes('queued') || lower.includes('pending')) return 'queued';
+  if (lower.includes('running') || lower.includes('in_progress')) return 'running';
+  if (lower.includes('idle') || lower.includes('paused') || lower.includes('needs_review')) return 'idle';
+  if (lower.includes('completed') || lower.includes('succeeded') || lower.includes('success')) return 'completed';
+  if (lower.includes('failed') || lower.includes('error')) return 'failed';
+  if (lower.includes('cancelled') || lower.includes('canceled')) return 'cancelled';
+  return 'running';
+}
+
+/**
+ * Antigravity Interactions API status → canonical enum. Substring match,
+ * `undefined`-safe; default `completed` because the synchronous response is
+ * already terminal.
+ */
+function normalizeAntigravityStatus(s: string | undefined): CloudTaskStatus {
+  const lower = (s ?? '').toLowerCase();
+  if (lower.includes('queue') || lower.includes('pending')) return 'queued';
+  if (lower.includes('run') || lower.includes('progress')) return 'running';
+  if (lower.includes('idle') || lower.includes('paused') || lower.includes('needs_review')) return 'idle';
+  if (lower.includes('complete') || lower.includes('success')) return 'completed';
+  if (lower.includes('fail') || lower.includes('error')) return 'failed';
+  if (lower.includes('cancel')) return 'cancelled';
+  return 'completed';
+}
 
 /** Snapshot of a dispatched task, stored locally and refreshed from the provider. */
 export interface CloudTask {
@@ -141,6 +222,8 @@ export interface DispatchOptions {
   images?: ImageAttachment[];
   /** Provider-specific options (e.g., codex env ID, factory computer name). */
   providerOptions?: Record<string, unknown>;
+  /** Runtime env vars to inject into the remote agent process when the provider supports it. */
+  env?: Record<string, string>;
 }
 
 /**
@@ -200,7 +283,7 @@ export interface CloudTarget {
 }
 
 /** Which dispatch option a provider's pre-provisioned target maps to. */
-export type TargetKind = 'env' | 'computer';
+export type TargetKind = 'env' | 'computer' | 'host';
 
 /**
  * Thrown by a provider's `dispatch()` when it needs a pre-provisioned target

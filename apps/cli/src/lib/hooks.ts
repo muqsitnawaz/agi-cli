@@ -1131,6 +1131,21 @@ export function registerHooksToSettings(
   if (agentId === 'kimi') {
     return registerHooksForKimi(versionHome, manifest, resolveScript, managedPrefixes);
   }
+  if (agentId === 'copilot') {
+    return registerHooksForCopilot(versionHome, manifest, resolveScript, managedPrefixes);
+  }
+  if (agentId === 'kiro') {
+    return registerHooksForKiro(versionHome, manifest, resolveScript, managedPrefixes);
+  }
+  if (agentId === 'goose') {
+    return registerHooksForGoose(versionHome, manifest, resolveScript, managedPrefixes);
+  }
+  if (agentId === 'cursor') {
+    return registerHooksForCursor(versionHome, manifest, resolveScript, managedPrefixes);
+  }
+  if (agentId === 'hermes') {
+    return registerHooksForHermes(versionHome, manifest, resolveScript, managedPrefixes);
+  }
   return { registered: [], errors: [] };
 }
 
@@ -1176,9 +1191,11 @@ function registerHooksForClaude(
   const settingsPath = path.join(configDir, 'settings.json');
 
   let config: Record<string, unknown> = {};
+  let existingRaw: string | undefined;
   if (fs.existsSync(settingsPath)) {
     try {
-      config = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      existingRaw = fs.readFileSync(settingsPath, 'utf-8');
+      config = JSON.parse(existingRaw);
     } catch {
       errors.push('Failed to parse settings.json');
       return { registered, errors };
@@ -1278,7 +1295,10 @@ function registerHooksForClaude(
 
   try {
     fs.mkdirSync(configDir, { recursive: true });
-    fs.writeFileSync(settingsPath, JSON.stringify(config, null, 2), 'utf-8');
+    const nextRaw = JSON.stringify(config, null, 2);
+    if (existingRaw !== nextRaw) {
+      fs.writeFileSync(settingsPath, nextRaw, 'utf-8');
+    }
   } catch (err) {
     errors.push(`Failed to write settings.json: ${(err as Error).message}`);
   }
@@ -1733,12 +1753,15 @@ function registerHooksForAntigravity(
       if (!hooks[agyEvent]) {
         hooks[agyEvent] = [];
       }
-      const list = hooks[agyEvent] as Array<{ command: string }>;
+      // Antigravity settings entries: command + optional matcher (tool scope).
+      // Without matcher every PreToolUse guard fires on ALL tools (RUSH-1353).
+      const list = hooks[agyEvent] as Array<{ command: string; matcher?: string }>;
 
       const existingIdx = list.findIndex(
         (e) => e && typeof e === 'object' && e.command === commandPath
       );
-      const entry = { command: commandPath };
+      const entry: { command: string; matcher?: string } = { command: commandPath };
+      if (hookDef.matcher) entry.matcher = hookDef.matcher;
       if (existingIdx >= 0) {
         list[existingIdx] = entry;
       } else {
@@ -1760,8 +1783,44 @@ function registerHooksForAntigravity(
 }
 
 /**
+ * Grok events that accept a `matcher` field. Per the Grok hooks guide
+ * (docs/user-guide/10-hooks.md, "Key Fields"): the matcher applies to the tool
+ * events — `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied`
+ * (matches the tool name) — and to `Notification` (matches the notification
+ * type). The lifecycle events `SessionStart`, `SessionEnd`, `Stop`,
+ * `UserPromptSubmit` REJECT a matcher (they raise loading errors); other events
+ * ignore it. Of the events this registrar emits (see GROK_EVENT_MAP), only these
+ * three accept a matcher, so we emit it for these alone.
+ */
+const GROK_MATCHER_EVENTS = new Set(['PreToolUse', 'PostToolUse', 'Notification']);
+
+/**
+ * Tool-name matcher aliases for tools Grok does NOT auto-alias. Grok maps common
+ * Claude tool names to its own (Bash → run_terminal_command, Read → read_file,
+ * etc. — docs/user-guide/10-hooks.md, "Tool Name Aliases") and "a matcher keeps
+ * its original name too", so most matchers need no translation. But there is no
+ * alias for `ExitPlanMode`: Grok's plan tools are `enter_plan_mode` /
+ * `exit_plan_mode` (docs/user-guide/19-plan-mode.md line 14), so a bare
+ * `ExitPlanMode` matcher would never fire. Broaden it to a regex that matches
+ * both names. Keep this an explicit, minimal map — not a general translation
+ * engine.
+ */
+const GROK_MATCHER_ALIASES: Record<string, string> = {
+  ExitPlanMode: 'ExitPlanMode|exit_plan_mode',
+};
+
+/**
  * Register hooks for Grok Build.
- * Grok uses per-event JSON files under .grok/hooks/ (e.g. session-start.json).
+ *
+ * Grok merges ALL of `~/.grok/hooks/*.json` (docs/user-guide/10-hooks.md, "Hook
+ * Locations"), so this registrar writes exactly ONE manifest file, `hooks.json`,
+ * and prunes any stale per-event files (`pretooluse.json`, …) that an older
+ * build wrote — otherwise every hook would run twice per event, forever, on
+ * already-synced installs.
+ *
+ * Matchers are grouped one-per-distinct-matcher (like the Claude writer) and are
+ * emitted only for the events that accept them (GROK_MATCHER_EVENTS); tool-name
+ * matchers Grok does not auto-alias are translated via GROK_MATCHER_ALIASES.
  */
 function registerHooksForGrok(
   versionHome: string,
@@ -1786,7 +1845,11 @@ function registerHooksForGrok(
     Notification: 'Notification',
   };
 
-  const grokHooks: Record<string, any> = { hooks: {} };
+  type GrokGroup = {
+    matcher?: string;
+    hooks: Array<{ type: 'command'; command: string; timeout: number }>;
+  };
+  const grokHooks: { hooks: Record<string, GrokGroup[]> } = { hooks: {} };
 
   for (const [name, hookDef] of Object.entries(manifest)) {
     if (!hookDef.events || hookDef.events.length === 0) continue;
@@ -1805,15 +1868,37 @@ function registerHooksForGrok(
       if (!grokHooks.hooks[grokEvent]) {
         grokHooks.hooks[grokEvent] = [];
       }
+      const groups = grokHooks.hooks[grokEvent];
 
-      grokHooks.hooks[grokEvent].push({
-        hooks: [{ type: 'command' as const, command: commandPath, timeout }],
-      });
+      // Emit the matcher only for events that accept one; translate tool names
+      // Grok does not auto-alias. Empty/omitted matcher matches everything.
+      let matcher: string | undefined;
+      if (GROK_MATCHER_EVENTS.has(grokEvent) && hookDef.matcher) {
+        matcher = GROK_MATCHER_ALIASES[hookDef.matcher] ?? hookDef.matcher;
+      }
+
+      // Group by matcher the way the Claude writer does: one group per distinct
+      // matcher, hooks appended into the group — not one group per hook.
+      let group = groups.find((g) => (g.matcher ?? '') === (matcher ?? ''));
+      if (!group) {
+        group = matcher ? { matcher, hooks: [] } : { hooks: [] };
+        groups.push(group);
+      }
+
+      const hookEntry = { type: 'command' as const, command: commandPath, timeout };
+      const existingIdx = group.hooks.findIndex((h) => h.command === commandPath);
+      if (existingIdx >= 0) {
+        group.hooks[existingIdx] = hookEntry;
+      } else {
+        group.hooks.push(hookEntry);
+      }
 
       registered.push(`${name} -> ${grokEvent}`);
     }
   }
 
+  // Single source of truth: hooks.json. Written fresh from the manifest every
+  // sync, so the registrar owns it outright.
   const mainHooksPath = path.join(grokHooksDir, 'hooks.json');
   try {
     fs.writeFileSync(mainHooksPath, JSON.stringify(grokHooks, null, 2));
@@ -1821,17 +1906,59 @@ function registerHooksForGrok(
     errors.push(`Failed to write hooks.json: ${(e as Error).message}`);
   }
 
-  for (const [eventName, groups] of Object.entries(grokHooks.hooks)) {
-    const fileName = eventName.toLowerCase().replace(/([a-z])([A-Z])/g, '$1-$2') + '.json';
-    const eventFile = path.join(grokHooksDir, fileName);
-    try {
-      fs.writeFileSync(eventFile, JSON.stringify({ hooks: { [eventName]: groups } }, null, 2));
-    } catch (e) {
-      errors.push(`Failed to write ${fileName}: ${(e as Error).message}`);
+  // Clean up stale per-event files (pretooluse.json, session-start.json, …) that
+  // older builds double-wrote. Grok merges every *.json in this dir, so leaving
+  // them would run each hook twice per event. Only remove files whose contents
+  // are entirely managed by us (a lone `hooks` object referencing our managed
+  // command paths); a user's own custom *.json is left untouched.
+  try {
+    for (const file of fs.readdirSync(grokHooksDir)) {
+      if (!file.endsWith('.json') || file === 'hooks.json') continue;
+      const filePath = path.join(grokHooksDir, file);
+      if (isManagedGrokHookFile(filePath, managedPrefixes)) {
+        fs.rmSync(filePath, { force: true });
+      }
     }
+  } catch (e) {
+    errors.push(`Failed to prune stale grok hook files: ${(e as Error).message}`);
   }
 
   return { registered, errors };
+}
+
+/**
+ * A per-event Grok hook file is "ours" (safe to prune) when it is a
+ * `{ hooks: { <Event>: [...] } }` document in which every command entry points
+ * at a managed path (see isManagedHookCommand). This is exactly the shape older
+ * builds double-wrote; a user's hand-authored *.json that mixes in unmanaged
+ * commands is preserved. A file we can't parse is treated as not-ours.
+ */
+function isManagedGrokHookFile(filePath: string, managedPrefixes: string[]): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  } catch {
+    return false;
+  }
+  if (!parsed || typeof parsed !== 'object') return false;
+  const hooks = (parsed as { hooks?: unknown }).hooks;
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return false;
+
+  const commands: string[] = [];
+  for (const groups of Object.values(hooks as Record<string, unknown>)) {
+    if (!Array.isArray(groups)) return false;
+    for (const group of groups) {
+      const entries = (group as { hooks?: unknown }).hooks;
+      if (!Array.isArray(entries)) return false;
+      for (const entry of entries) {
+        const cmd = (entry as { command?: unknown }).command;
+        if (typeof cmd !== 'string') return false;
+        commands.push(cmd);
+      }
+    }
+  }
+  if (commands.length === 0) return false;
+  return commands.every((cmd) => isManagedHookCommand(cmd, managedPrefixes));
 }
 
 function registerHooksForKimi(
@@ -1926,6 +2053,643 @@ function registerHooksForKimi(
     fs.writeFileSync(configPath, TOML.stringify(config as Parameters<typeof TOML.stringify>[0]), 'utf-8');
   } catch (err) {
     errors.push(`Failed to write config.toml: ${(err as Error).message}`);
+  }
+
+  return { registered, errors };
+}
+
+
+/**
+ * Canonical hooks.yaml event names → Copilot camelCase event names.
+ * Copilot accepts both camelCase (native) and PascalCase (VS Code-compatible).
+ * We emit camelCase, the format documented at
+ * https://docs.github.com/en/copilot/reference/hooks-configuration.
+ * Unmapped events are skipped so a Claude-only event does not land in the file.
+ */
+const COPILOT_EVENT_MAP: Record<string, string> = {
+  SessionStart: 'sessionStart',
+  SessionEnd: 'sessionEnd',
+  UserPromptSubmit: 'userPromptSubmitted',
+  PreToolUse: 'preToolUse',
+  PostToolUse: 'postToolUse',
+  PostToolUseFailure: 'postToolUseFailure',
+  Stop: 'agentStop',
+  SubagentStart: 'subagentStart',
+  SubagentStop: 'subagentStop',
+  OnError: 'errorOccurred',
+  PreCompact: 'preCompact',
+  Notification: 'notification',
+  PermissionRequest: 'permissionRequest',
+};
+
+/**
+ * Copilot events that accept a `matcher` field (regex, full-string match).
+ * See "Matcher filtering" in the Copilot hooks reference.
+ */
+const COPILOT_MATCHER_EVENTS = new Set([
+  'preToolUse',
+  'postToolUse',
+  'permissionRequest',
+  'preCompact',
+  'notification',
+  'subagentStart',
+]);
+
+/** Managed filename under ~/.copilot/hooks/ — we own this file entirely. */
+const COPILOT_MANAGED_HOOKS_FILE = 'agents-cli-hooks.json';
+
+/**
+ * Register hooks for GitHub Copilot CLI.
+ *
+ * Copilot loads every `*.json` under `~/.copilot/hooks/` (and project
+ * `.github/hooks/`). Schema: `{ "version": 1, "hooks": { event: [entries] } }`
+ * with command entries `{ type: "command", bash|command, timeoutSec?, matcher? }`.
+ *
+ * We rewrite a single managed file (`agents-cli-hooks.json`) on every sync so
+ * GC is trivial — user-authored sibling JSON files are never touched.
+ */
+function registerHooksForCopilot(
+  versionHome: string,
+  manifest: Record<string, ManifestHook>,
+  resolveScript: (script: string) => string | null,
+  _managedPrefixes: string[]
+): { registered: string[]; errors: string[] } {
+  const registered: string[] = [];
+  const errors: string[] = [];
+
+  const copilotHooksDir = path.join(versionHome, '.copilot', 'hooks');
+  fs.mkdirSync(copilotHooksDir, { recursive: true });
+
+  type CopilotEntry = {
+    type: 'command';
+    command: string;
+    timeoutSec: number;
+    matcher?: string;
+  };
+  const hooks: Record<string, CopilotEntry[]> = {};
+
+  for (const [name, hookDef] of Object.entries(manifest)) {
+    if (!hookDef.events || hookDef.events.length === 0) continue;
+
+    const commandPath = resolveHookCommand(name, hookDef, resolveScript);
+    if (!commandPath) {
+      errors.push(`${name}: script not found in user or system hooks dir`);
+      continue;
+    }
+
+    const timeoutSec = hookDef.timeout ?? 30;
+
+    for (const event of hookDef.events) {
+      const copilotEvent = COPILOT_EVENT_MAP[event];
+      if (!copilotEvent) continue; // unmapped — skip silently
+
+      if (!hooks[copilotEvent]) hooks[copilotEvent] = [];
+
+      const entry: CopilotEntry = {
+        type: 'command',
+        command: commandPath,
+        timeoutSec,
+      };
+      if (COPILOT_MATCHER_EVENTS.has(copilotEvent) && hookDef.matcher) {
+        entry.matcher = hookDef.matcher;
+      }
+
+      // De-dupe on (event, command, matcher) so repeated sync is idempotent.
+      const existingIdx = hooks[copilotEvent].findIndex(
+        (h) => h.command === entry.command && (h.matcher ?? '') === (entry.matcher ?? '')
+      );
+      if (existingIdx >= 0) {
+        hooks[copilotEvent][existingIdx] = entry;
+      } else {
+        hooks[copilotEvent].push(entry);
+      }
+
+      registered.push(`${name} -> ${copilotEvent}`);
+    }
+  }
+
+  const outPath = path.join(copilotHooksDir, COPILOT_MANAGED_HOOKS_FILE);
+  try {
+    // Always rewrite: empty manifest → empty hooks object (GC of prior managed entries).
+    fs.writeFileSync(
+      outPath,
+      JSON.stringify({ version: 1, hooks }, null, 2) + '\n',
+      'utf-8'
+    );
+  } catch (err) {
+    errors.push(`Failed to write ${COPILOT_MANAGED_HOOKS_FILE}: ${(err as Error).message}`);
+  }
+
+  return { registered, errors };
+}
+
+
+/**
+ * Canonical hooks.yaml event names → Kiro v3 trigger names.
+ * Kiro v3 uses PascalCase triggers under `.kiro/hooks/*.json`
+ * (https://kiro.dev/docs/cli/v3/hooks/). Unmapped events are skipped.
+ */
+const KIRO_EVENT_MAP: Record<string, string> = {
+  SessionStart: 'SessionStart',
+  Stop: 'Stop',
+  PreToolUse: 'PreToolUse',
+  PostToolUse: 'PostToolUse',
+  UserPromptSubmit: 'UserPromptSubmit',
+};
+
+/**
+ * Kiro triggers that evaluate the `matcher` regex (tool name, file path, or
+ * prompt text depending on the trigger). Lifecycle SessionStart/Stop always fire.
+ */
+const KIRO_MATCHER_EVENTS = new Set([
+  'PreToolUse',
+  'PostToolUse',
+  'UserPromptSubmit',
+]);
+
+/** Managed filename under ~/.kiro/hooks/ — we own this file entirely. */
+const KIRO_MANAGED_HOOKS_FILE = 'agents-cli-hooks.json';
+
+/**
+ * Register hooks for Kiro CLI (v3 standalone hooks format).
+ *
+ * Each file under `~/.kiro/hooks/*.json` is:
+ *   { "version": "v1", "hooks": [ { name, trigger, matcher?, action, timeout?, enabled? } ] }
+ *
+ * We rewrite a single managed file so GC is a rewrite and user-authored sibling
+ * JSON files are never touched. Embedded agent-config hooks (2.x) still work
+ * in Kiro but we only write the v3 path.
+ */
+function registerHooksForKiro(
+  versionHome: string,
+  manifest: Record<string, ManifestHook>,
+  resolveScript: (script: string) => string | null,
+  _managedPrefixes: string[]
+): { registered: string[]; errors: string[] } {
+  const registered: string[] = [];
+  const errors: string[] = [];
+
+  const kiroHooksDir = path.join(versionHome, '.kiro', 'hooks');
+  fs.mkdirSync(kiroHooksDir, { recursive: true });
+
+  type KiroHook = {
+    name: string;
+    trigger: string;
+    matcher?: string;
+    action: { type: 'command'; command: string };
+    timeout: number;
+    enabled: boolean;
+  };
+  const hooks: KiroHook[] = [];
+
+  for (const [name, hookDef] of Object.entries(manifest)) {
+    if (!hookDef.events || hookDef.events.length === 0) continue;
+
+    const commandPath = resolveHookCommand(name, hookDef, resolveScript);
+    if (!commandPath) {
+      errors.push(`${name}: script not found in user or system hooks dir`);
+      continue;
+    }
+
+    const timeout = hookDef.timeout ?? 60;
+
+    for (const event of hookDef.events) {
+      const trigger = KIRO_EVENT_MAP[event];
+      if (!trigger) continue;
+
+      const entry: KiroHook = {
+        name,
+        trigger,
+        action: { type: 'command', command: commandPath },
+        timeout,
+        enabled: true,
+      };
+      if (KIRO_MATCHER_EVENTS.has(trigger) && hookDef.matcher) {
+        entry.matcher = hookDef.matcher;
+      }
+
+      // De-dupe on (name, trigger, matcher)
+      const existingIdx = hooks.findIndex(
+        (h) =>
+          h.name === entry.name &&
+          h.trigger === entry.trigger &&
+          (h.matcher ?? '') === (entry.matcher ?? '')
+      );
+      if (existingIdx >= 0) {
+        hooks[existingIdx] = entry;
+      } else {
+        hooks.push(entry);
+      }
+
+      registered.push(`${name} -> ${trigger}`);
+    }
+  }
+
+  const outPath = path.join(kiroHooksDir, KIRO_MANAGED_HOOKS_FILE);
+  try {
+    fs.writeFileSync(
+      outPath,
+      JSON.stringify({ version: 'v1', hooks }, null, 2) + '\n',
+      'utf-8'
+    );
+  } catch (err) {
+    errors.push(`Failed to write ${KIRO_MANAGED_HOOKS_FILE}: ${(err as Error).message}`);
+  }
+
+  return { registered, errors };
+}
+
+
+/**
+ * Canonical hooks.yaml event names that goose supports (Open Plugins PascalCase).
+ * Unmapped events are skipped. Goose ≥ 1.34.0.
+ */
+const GOOSE_EVENT_MAP: Record<string, string> = {
+  SessionStart: 'SessionStart',
+  SessionEnd: 'SessionEnd',
+  Stop: 'Stop',
+  UserPromptSubmit: 'UserPromptSubmit',
+  PreToolUse: 'PreToolUse',
+  PostToolUse: 'PostToolUse',
+  PostToolUseFailure: 'PostToolUseFailure',
+  BeforeReadFile: 'BeforeReadFile',
+  AfterFileEdit: 'AfterFileEdit',
+  BeforeShellExecution: 'BeforeShellExecution',
+  AfterShellExecution: 'AfterShellExecution',
+  // SubagentStart/SubagentStop are not emitted by Goose — do not advertise them.
+};
+
+/** Managed Open Plugins directory name under ~/.agents/plugins/. */
+const GOOSE_MANAGED_PLUGIN_NAME = 'agents-cli-hooks';
+
+/**
+ * Register hooks for Goose (block-goose-cli ≥ 1.34.0).
+ *
+ * Goose auto-discovers Open Plugins under `$HOME/.agents/plugins/<name>/` that
+ * contain `hooks/hooks.json` (HOME is the version home under the agents-cli
+ * shim). Schema (Open Plugins / Claude-shaped):
+ *   { "hooks": { Event: [ { matcher?, hooks: [{ type: "command", command }] } ] } }
+ *
+ * We own a single managed plugin (`agents-cli-hooks`) under the version home
+ * and rewrite its hooks.json on every sync. Command paths are absolute
+ * (portable ~/ form) pointing at the already-copied hook scripts.
+ */
+function registerHooksForGoose(
+  versionHome: string,
+  manifest: Record<string, ManifestHook>,
+  resolveScript: (script: string) => string | null,
+  _managedPrefixes: string[]
+): { registered: string[]; errors: string[] } {
+  const registered: string[] = [];
+  const errors: string[] = [];
+
+  type GooseCmd = { type: 'command'; command: string; timeout?: number };
+  type GooseGroup = { matcher?: string; hooks: GooseCmd[] };
+  const eventHooks: Record<string, GooseGroup[]> = {};
+
+  for (const [name, hookDef] of Object.entries(manifest)) {
+    if (!hookDef.events || hookDef.events.length === 0) continue;
+
+    const commandPath = resolveHookCommand(name, hookDef, resolveScript);
+    if (!commandPath) {
+      errors.push(`${name}: script not found in user or system hooks dir`);
+      continue;
+    }
+
+    const timeout = hookDef.timeout ?? 60;
+    const cmd: GooseCmd = { type: 'command', command: commandPath, timeout };
+
+    for (const event of hookDef.events) {
+      const gooseEvent = GOOSE_EVENT_MAP[event];
+      if (!gooseEvent) continue;
+
+      if (!eventHooks[gooseEvent]) eventHooks[gooseEvent] = [];
+      const groups = eventHooks[gooseEvent];
+      const matcher = hookDef.matcher || undefined;
+
+      let group = groups.find((g) => (g.matcher || undefined) === matcher);
+      if (!group) {
+        group = { hooks: [] };
+        if (matcher) group.matcher = matcher;
+        groups.push(group);
+      }
+
+      const existingIdx = group.hooks.findIndex((h) => h.command === cmd.command);
+      if (existingIdx >= 0) {
+        group.hooks[existingIdx] = cmd;
+      } else {
+        group.hooks.push(cmd);
+      }
+
+      registered.push(`${name} -> ${gooseEvent}`);
+    }
+  }
+
+  // Goose discovers Open Plugins at ~/.agents/plugins/<name>/ when HOME is the
+  // version home (shim sets HOME). Write under versionHome so each installed
+  // goose version gets its own managed plugin and tests stay hermetic.
+  const pluginRoot = path.join(versionHome, '.agents', 'plugins', GOOSE_MANAGED_PLUGIN_NAME);
+  const hooksDir = path.join(pluginRoot, 'hooks');
+  const outPath = path.join(hooksDir, 'hooks.json');
+
+  try {
+    fs.mkdirSync(hooksDir, { recursive: true });
+    // Minimal plugin marker so the directory is a valid Open Plugins bundle.
+    const markerPath = path.join(pluginRoot, '.agents-cli-managed');
+    if (!fs.existsSync(markerPath)) {
+      fs.writeFileSync(markerPath, 'managed by agents-cli hooks sync\n', 'utf-8');
+    }
+    fs.writeFileSync(
+      outPath,
+      JSON.stringify({ hooks: eventHooks }, null, 2) + '\n',
+      'utf-8'
+    );
+  } catch (err) {
+    errors.push(`Failed to write goose hooks plugin: ${(err as Error).message}`);
+  }
+
+  return { registered, errors };
+}
+
+
+/**
+ * Canonical → Cursor CLI camelCase events.
+ *
+ * Only events verified to fire in cursor-agent CLI (not full IDE parity).
+ * Ticket RUSH-1326 note (2026-06): working = sessionStart, stop, preToolUse,
+ * postToolUse, beforeShellExecution, afterShellExecution, beforeReadFile,
+ * afterFileEdit. Also map SessionEnd / beforeSubmitPrompt / preCompact /
+ * subagent* which Cursor documents for agent hooks.
+ * Unmapped events (e.g. afterAgentResponse) are skipped.
+ */
+const CURSOR_EVENT_MAP: Record<string, string> = {
+  SessionStart: 'sessionStart',
+  SessionEnd: 'sessionEnd',
+  Stop: 'stop',
+  UserPromptSubmit: 'beforeSubmitPrompt',
+  PreToolUse: 'preToolUse',
+  PostToolUse: 'postToolUse',
+  PostToolUseFailure: 'postToolUseFailure',
+  PreCompact: 'preCompact',
+  SubagentStart: 'subagentStart',
+  SubagentStop: 'subagentStop',
+  BeforeShellExecution: 'beforeShellExecution',
+  AfterShellExecution: 'afterShellExecution',
+  BeforeReadFile: 'beforeReadFile',
+  AfterFileEdit: 'afterFileEdit',
+};
+
+/**
+ * Register hooks for Cursor CLI (`cursor-agent`).
+ *
+ * Writes `~/.cursor/hooks.json` (under version home):
+ *   { "version": 1, "hooks": { event: [{ command, timeout?, matcher? }] } }
+ *
+ * GC: rewrite managed entries by command path under managedPrefixes; preserve
+ * user-authored entries whose command is outside managed roots.
+ */
+function registerHooksForCursor(
+  versionHome: string,
+  manifest: Record<string, ManifestHook>,
+  resolveScript: (script: string) => string | null,
+  managedPrefixes: string[]
+): { registered: string[]; errors: string[] } {
+  const registered: string[] = [];
+  const errors: string[] = [];
+
+  const configDir = path.join(versionHome, '.cursor');
+  const hooksPath = path.join(configDir, 'hooks.json');
+
+  type CursorEntry = {
+    command: string;
+    timeout?: number;
+    matcher?: string;
+  };
+
+  let existing: { version?: number; hooks?: Record<string, CursorEntry[]> } = { version: 1, hooks: {} };
+  if (fs.existsSync(hooksPath)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+      if (!existing.hooks || typeof existing.hooks !== 'object') existing.hooks = {};
+    } catch {
+      errors.push('Failed to parse existing hooks.json');
+      return { registered, errors };
+    }
+  }
+
+  // Desired managed entries keyed by event|command|matcher so a matcher or
+  // event change drops the stale entry instead of retaining it by command path alone.
+  const desiredManaged = new Set<string>();
+  for (const [hookName, hookDef] of Object.entries(manifest)) {
+    if (!hookDef.events || hookDef.events.length === 0) continue;
+    const resolved = resolveHookCommand(hookName, hookDef, resolveScript);
+    if (!resolved) continue;
+    for (const event of hookDef.events) {
+      const cursorEvent = CURSOR_EVENT_MAP[event];
+      if (!cursorEvent) continue;
+      desiredManaged.add(`${cursorEvent}|${resolved}|${hookDef.matcher ?? ''}`);
+    }
+  }
+
+  // GC managed entries that are no longer in the manifest (by event+command+matcher)
+  const hooks: Record<string, CursorEntry[]> = {};
+  for (const [event, entries] of Object.entries(existing.hooks || {})) {
+    if (!Array.isArray(entries)) continue;
+    hooks[event] = entries.filter((e) => {
+      if (typeof e?.command !== 'string') return true;
+      if (!isManagedHookCommand(e.command, managedPrefixes)) return true;
+      return desiredManaged.has(`${event}|${e.command}|${e.matcher ?? ''}`);
+    });
+    if (hooks[event].length === 0) delete hooks[event];
+  }
+
+  for (const [name, hookDef] of Object.entries(manifest)) {
+    if (!hookDef.events || hookDef.events.length === 0) continue;
+
+    const commandPath = resolveHookCommand(name, hookDef, resolveScript);
+    if (!commandPath) {
+      errors.push(`${name}: script not found in user or system hooks dir`);
+      continue;
+    }
+
+    const timeout = hookDef.timeout ?? 30;
+
+    for (const event of hookDef.events) {
+      const cursorEvent = CURSOR_EVENT_MAP[event];
+      if (!cursorEvent) continue;
+
+      if (!hooks[cursorEvent]) hooks[cursorEvent] = [];
+
+      const entry: CursorEntry = { command: commandPath, timeout };
+      if (hookDef.matcher) entry.matcher = hookDef.matcher;
+
+      const existingIdx = hooks[cursorEvent].findIndex(
+        (h) => h.command === entry.command && (h.matcher ?? '') === (entry.matcher ?? '')
+      );
+      if (existingIdx >= 0) {
+        hooks[cursorEvent][existingIdx] = entry;
+      } else {
+        hooks[cursorEvent].push(entry);
+      }
+
+      registered.push(`${name} -> ${cursorEvent}`);
+    }
+  }
+
+  try {
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(
+      hooksPath,
+      JSON.stringify({ version: 1, hooks }, null, 2) + '\n',
+      'utf-8'
+    );
+  } catch (err) {
+    errors.push(`Failed to write hooks.json: ${(err as Error).message}`);
+  }
+
+  return { registered, errors };
+}
+
+/**
+ * Canonical → Hermes (Nous Research) snake_case lifecycle events.
+ *
+ * Hermes ≥ 0.11.0 runs configurable hooks declared under `hooks:` in
+ * ~/.hermes/config.yaml. Only events with a documented Hermes equivalent are
+ * mapped; unmapped canonical events (the manifest may declare events for other
+ * agents) are skipped silently. UserPromptSubmit maps to `pre_llm_call` (the
+ * closest pre-turn phase) and Stop to `on_session_finalize`.
+ */
+const HERMES_EVENT_MAP: Record<string, string> = {
+  SessionStart: 'on_session_start',
+  SessionEnd: 'on_session_end',
+  PreToolUse: 'pre_tool_call',
+  PostToolUse: 'post_tool_call',
+  SubagentStop: 'subagent_stop',
+  UserPromptSubmit: 'pre_llm_call',
+  Stop: 'on_session_finalize',
+};
+
+/** Hermes caps hook timeouts at 300s (default 60s). */
+const HERMES_TIMEOUT_CAP = 300;
+const HERMES_TIMEOUT_DEFAULT = 60;
+
+/**
+ * Register hooks for Hermes Agent (Nous Research ≥ 0.11.0).
+ *
+ * Read-modify-writes the shared `~/.hermes/config.yaml` (under the version
+ * home): it merges a `hooks:` block of the form
+ *   hooks: { <event>: [ { command, timeout, matcher? } ] }
+ * into the YAML doc WITHOUT touching sibling keys (`mcp_servers` in
+ * particular — a naive overwrite would wipe the user's MCP servers). No
+ * `version` wrapper: Hermes' config is a flat YAML map.
+ *
+ * GC: rewrite managed entries by command path under managedPrefixes; preserve
+ * user-authored entries whose command is outside managed roots. Keyed by
+ * event|command|matcher so a matcher or event change drops the stale entry.
+ */
+function registerHooksForHermes(
+  versionHome: string,
+  manifest: Record<string, ManifestHook>,
+  resolveScript: (script: string) => string | null,
+  managedPrefixes: string[]
+): { registered: string[]; errors: string[] } {
+  const registered: string[] = [];
+  const errors: string[] = [];
+
+  const configDir = path.join(versionHome, '.hermes');
+  const configPath = path.join(configDir, 'config.yaml');
+
+  type HermesEntry = { command: string; timeout: number; matcher?: string };
+
+  // Read-modify-write: preserve the full existing YAML doc (mcp_servers, etc.).
+  let config: Record<string, unknown> = {};
+  if (fs.existsSync(configPath)) {
+    try {
+      const parsed = yaml.parse(fs.readFileSync(configPath, 'utf-8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        config = parsed as Record<string, unknown>;
+      }
+    } catch {
+      errors.push('Failed to parse existing config.yaml');
+      return { registered, errors };
+    }
+  }
+
+  const existingHooks =
+    config.hooks && typeof config.hooks === 'object' && !Array.isArray(config.hooks)
+      ? (config.hooks as Record<string, HermesEntry[]>)
+      : {};
+
+  // Desired managed entries keyed by event|command|matcher so a matcher or
+  // event change drops the stale entry instead of retaining it by command alone.
+  const desiredManaged = new Set<string>();
+  for (const [hookName, hookDef] of Object.entries(manifest)) {
+    if (!hookDef.events || hookDef.events.length === 0) continue;
+    const resolved = resolveHookCommand(hookName, hookDef, resolveScript);
+    if (!resolved) continue;
+    for (const event of hookDef.events) {
+      const hermesEvent = HERMES_EVENT_MAP[event];
+      if (!hermesEvent) continue;
+      desiredManaged.add(`${hermesEvent}|${resolved}|${hookDef.matcher ?? ''}`);
+    }
+  }
+
+  // GC managed entries that are no longer in the manifest; preserve user entries.
+  const hooks: Record<string, HermesEntry[]> = {};
+  for (const [event, entries] of Object.entries(existingHooks)) {
+    if (!Array.isArray(entries)) continue;
+    hooks[event] = entries.filter((e) => {
+      if (typeof e?.command !== 'string') return true;
+      if (!isManagedHookCommand(e.command, managedPrefixes)) return true;
+      return desiredManaged.has(`${event}|${e.command}|${e.matcher ?? ''}`);
+    });
+    if (hooks[event].length === 0) delete hooks[event];
+  }
+
+  for (const [name, hookDef] of Object.entries(manifest)) {
+    if (!hookDef.events || hookDef.events.length === 0) continue;
+
+    const commandPath = resolveHookCommand(name, hookDef, resolveScript);
+    if (!commandPath) {
+      errors.push(`${name}: script not found in user or system hooks dir`);
+      continue;
+    }
+
+    const timeout = Math.min(HERMES_TIMEOUT_CAP, hookDef.timeout ?? HERMES_TIMEOUT_DEFAULT);
+
+    for (const event of hookDef.events) {
+      const hermesEvent = HERMES_EVENT_MAP[event];
+      if (!hermesEvent) continue;
+
+      if (!hooks[hermesEvent]) hooks[hermesEvent] = [];
+
+      const entry: HermesEntry = { command: commandPath, timeout };
+      if (hookDef.matcher) entry.matcher = hookDef.matcher;
+
+      const existingIdx = hooks[hermesEvent].findIndex(
+        (h) => h.command === entry.command && (h.matcher ?? '') === (entry.matcher ?? '')
+      );
+      if (existingIdx >= 0) {
+        hooks[hermesEvent][existingIdx] = entry;
+      } else {
+        hooks[hermesEvent].push(entry);
+      }
+
+      registered.push(`${name} -> ${hermesEvent}`);
+    }
+  }
+
+  if (Object.keys(hooks).length > 0) {
+    config.hooks = hooks;
+  } else {
+    delete config.hooks;
+  }
+
+  try {
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(configPath, yaml.stringify(config), 'utf-8');
+  } catch (err) {
+    errors.push(`Failed to write config.yaml: ${(err as Error).message}`);
   }
 
   return { registered, errors };

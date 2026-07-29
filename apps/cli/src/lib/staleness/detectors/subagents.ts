@@ -1,69 +1,26 @@
 /**
- * Subagents detector. Claude: flat .md files under `<agentDir>/agents/`.
- * Droid: flat .md files under `<versionHome>/.factory/droids/`.
- * OpenClaw: subdirectories containing AGENTS.md under `<versionHome>/.openclaw/`.
- * Mirrors versions.ts:521-539.
+ * Subagents detector. The installed-name enumeration for every agent's on-disk
+ * layout is declared once in the subagent registry; this detector is generic
+ * and delegates to `listInstalledSubagentNames` instead of a per-agent builder.
  */
-import * as fs from 'fs';
-import * as path from 'path';
 import type { AgentId } from '../../types.js';
 import { capableAgents } from '../../capabilities.js';
+import { listInstalledSubagentNames } from '../../subagents-registry.js';
 import type { ResourceDetector, DetectArgs } from './types.js';
 import { lazyAgentMap } from '../writers/lazy-map.js';
 
-function buildClaudeDetector(): ResourceDetector {
+function buildSubagentsDetector(agent: AgentId): ResourceDetector {
   return {
     kind: 'subagents',
-    agent: 'claude',
+    agent,
     list({ versionHome }: DetectArgs): string[] {
-      const agentsDir = path.join(versionHome, '.claude', 'agents');
-      if (!fs.existsSync(agentsDir)) return [];
-      return fs.readdirSync(agentsDir)
-        .filter(f => f.endsWith('.md'))
-        .map(f => f.replace('.md', ''));
+      return listInstalledSubagentNames(agent, versionHome);
     },
   };
 }
-
-function buildDroidDetector(): ResourceDetector {
-  return {
-    kind: 'subagents',
-    agent: 'droid',
-    list({ versionHome }: DetectArgs): string[] {
-      const droidsDir = path.join(versionHome, '.factory', 'droids');
-      if (!fs.existsSync(droidsDir)) return [];
-      return fs.readdirSync(droidsDir)
-        .filter(f => f.endsWith('.md'))
-        .map(f => f.replace('.md', ''));
-    },
-  };
-}
-
-function buildOpenclawDetector(): ResourceDetector {
-  return {
-    kind: 'subagents',
-    agent: 'openclaw',
-    list({ versionHome }: DetectArgs): string[] {
-      const openclawDir = path.join(versionHome, '.openclaw');
-      if (!fs.existsSync(openclawDir)) return [];
-      return fs.readdirSync(openclawDir, { withFileTypes: true })
-        .filter(d => d.isDirectory() && fs.existsSync(path.join(openclawDir, d.name, 'AGENTS.md')))
-        .map(d => d.name);
-    },
-  };
-}
-
-const handlers: Partial<Record<AgentId, () => ResourceDetector>> = {
-  claude: buildClaudeDetector,
-  droid: buildDroidDetector,
-  openclaw: buildOpenclawDetector,
-};
 
 export const subagentsDetectors = lazyAgentMap<ResourceDetector>(() => {
   const m: Partial<Record<AgentId, ResourceDetector>> = {};
-  for (const agent of capableAgents('subagents')) {
-    const f = handlers[agent];
-    if (f) m[agent] = f();
-  }
+  for (const agent of capableAgents('subagents')) m[agent] = buildSubagentsDetector(agent);
   return m;
 });

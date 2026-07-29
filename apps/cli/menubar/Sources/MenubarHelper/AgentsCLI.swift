@@ -1,5 +1,11 @@
 import Foundation
 
+struct TicketCompletion {
+    let id: String
+    let url: String?
+    let attachmentArgs: [String]?
+}
+
 // Thin bridge to the `agents` CLI. The helper never owns state or reimplements
 // scheduling — it shells the CLI for data and actions. TS stays the source of
 // truth (see CLAUDE.md: "Swift reads, TS owns truth").
@@ -63,6 +69,15 @@ enum AgentsCLI {
         return (try? JSONDecoder().decode([RecentSession].self, from: data)) ?? []
     }
 
+    // The session engine's live view — every local session (tmux, IDE, headless),
+    // not just extension-registered terminals. Costs seconds (transcript tails
+    // across version homes), so it is ONLY called from the warm-cache refreshers,
+    // never on the menu-open click path.
+    static func activeSessions() -> [ActiveSession] {
+        guard let data = capture(argv(["sessions", "--active", "--local", "--json"])) else { return [] }
+        return (try? JSONDecoder().decode([ActiveSession].self, from: data)) ?? []
+    }
+
     static func doctorOverview() -> DoctorOverview? {
         guard let data = capture(argv(["doctor", "--json"])) else { return nil }
         return try? JSONDecoder().decode(DoctorOverview.self, from: data)
@@ -104,9 +119,14 @@ enum AgentsCLI {
     static func routinePause(_ name: String) { runDetached(argv(["routines", "pause", name])) }
     static func routineResume(_ name: String) { runDetached(argv(["routines", "resume", name])) }
     static func routineLogs(_ name: String) {
-        let cmd = "\(shellQuote(binary)) routines logs \(shellQuote(name))"
-        let script = "tell application \"Terminal\"\nactivate\ndo script \"\(cmd)\"\nend tell"
-        runDetached(["/usr/bin/osascript", "-e", script])
+        runMonitored(argv(["routines", "logs", name])) { text, ok in
+            let safeName = name.replacingOccurrences(of: "[^A-Za-z0-9._-]", with: "-", options: .regularExpression)
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("agents-routine-\(safeName)-logs.txt")
+            let body = ok ? text : (text.isEmpty ? "Unable to load logs for routine '\(name)'.\n" : text)
+            try? body.write(to: url, atomically: true, encoding: .utf8)
+            runDetached(["/usr/bin/open", url.path])
+        }
     }
 
     static func openPath(_ path: String) { runDetached(["/usr/bin/open", path]) }
@@ -131,7 +151,7 @@ enum AgentsCLI {
     // KeepAlive policy, then the app terminates.
     static func menubarDisable() { runDetached(argv(["menubar", "disable"])) }
 
-    // MARK: Quick issue capture (Cmd-Shift-O)
+    // MARK: Quick dispatch capture (Cmd-Shift-O)
 
     // Image extensions the clip hotkey / screenshot tools produce.
     static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "tiff", "webp", "bmp"]
@@ -192,13 +212,83 @@ enum AgentsCLI {
         return found.sorted { $0.mtime > $1.mtime }.prefix(limit).map { $0.path }
     }
 
+    static func linearSkillBinary() -> String {
+        "\(home)/.agents/skills/linear/scripts/linear"
+    }
+
     // The standing brief handed to the ticket agent. It embeds the user's note
-    // and the screenshot path; the agent does project detection + investigation
-    // itself (Swift pre-computes nothing). `linear create` takes a POSITIONAL
-    // title, no --json, and prints `Created RUSH-###: <title>` — parsed back in
-    // the termination handler for the completion notification.
+    // and every selected screenshot path as user-provided ticket material so the
+    // issue body can describe what the user selected. The menu-bar helper owns
+    // the upload after creation; this prompt must not rely on the agent to
+    // remember a second attachment command. Project detection + investigation
+    // remain agent-owned (Swift pre-computes nothing).
+    // `linear create` takes a POSITIONAL title, no --json, and prints `Created
+    // RUSH-###: <title>` — parsed back in the termination handler.
     static func ticketAgentPrompt(note: String, screenshotPaths: [String]) -> String {
-        let linear = "\(home)/.agents/skills/linear/scripts/linear"
+        let linear = linearSkillBinary()
+        let shots: String
+        let attachmentStep: String
+        if screenshotPaths.isEmpty {
+            shots = "No screenshots were attached; work from the note alone."
+            attachmentStep = "6. No user-provided files were attached; skip attachment handling."
+        } else if screenshotPaths.count == 1 {
+            shots = "The user attached this screenshot for the ticket: \(screenshotPaths[0]) — read it first with your image tools."
+            attachmentStep = ticketAttachmentStep()
+        } else {
+            let list = screenshotPaths.map { "  - \($0)" }.joined(separator: "\n")
+            shots = "The user attached \(screenshotPaths.count) screenshots for the ticket — read each with your image tools:\n\(list)"
+            attachmentStep = ticketAttachmentStep()
+        }
+        return """
+        You are filing exactly ONE Linear ticket from a quick capture bar. Do not ask \
+        questions — make your best call and act.
+
+        User note: \(note)
+        \(shots)
+
+        Steps:
+        1. If files are attached, inspect every one to understand what the user is pointing at. \
+        They are user-provided ticket material, not analysis-only references.
+        2. Run `agents sessions --all --limit 20` and skim the recent local sessions to \
+        identify which repository / project this concerns (match the note + screenshot to a \
+        repo you have been working in). Derive the repo name (e.g. `agents-cli`).
+        3. Do a brief investigation for real context — name the likely file/area, a \
+        reproduction path, or at minimum a crisp problem statement. Do NOT over-investigate; \
+        a couple of focused reads is enough.
+        4. Determine the best delegate agent for this ticket:
+           - The workspace agent roster is: Antigravity, Claude, Codex, Droid, Grok, Kimi, OpenClaw.
+           - Run `agents sessions --active` and cross-check the roster against actually active local sessions.
+           - Pick the agent whose recent work and strengths best fit the ticket content. Use your own judgment; do not ask the user.
+           - If no agent clearly fits better than the others, default to `claude`.
+           - If delegate resolution fails or produces no available candidate, omit the `--delegate` flag from the next step instead of failing.
+        5. File the ticket, piping a proper multi-line description via stdin:
+
+           printf '%s' "<your markdown description>" | \\
+             \(linear) create "<crisp imperative title>" \\
+               --priority <urgent|high|medium|low> \\
+               --project "<Linear project name matching the repo>" \\
+               --label "repo:<repo-name>" \\
+               --delegate <agent> \\
+               --description-file -
+
+           Pick an HONEST priority. Keep the title short and specific.
+           Omit `--delegate <agent>` entirely if delegate resolution in step 4 failed or produced no candidate.
+        \(attachmentStep)
+        7. Print the resulting `Created RUSH-###: <title>` line, then on the NEXT line print
+        the ticket's Linear URL as `URL: https://linear.app/…` (the `linear create` output or
+        `\(linear) tasks <id>` gives it). Nothing else — no commentary.
+        """
+    }
+
+    private static func ticketAttachmentStep() -> String {
+        return """
+        6. Include what the attached screenshot(s) show in the issue description. Do not run a \
+        separate upload command: after you print the created ticket id, the menu-bar helper \
+        uploads every selected file to that issue automatically.
+        """
+    }
+
+    static func quickFixPrompt(note: String, screenshotPaths: [String]) -> String {
         let shots: String
         if screenshotPaths.isEmpty {
             shots = "No screenshots were attached; work from the note alone."
@@ -209,33 +299,21 @@ enum AgentsCLI {
             shots = "\(screenshotPaths.count) screenshots are attached — read each with your image tools:\n\(list)"
         }
         return """
-        You are filing exactly ONE Linear ticket from a quick capture bar. Do not ask \
-        questions — make your best call and act.
+        You are an autonomous quick-dispatch agent launched from the agents menu-bar \
+        screenshot panel. Do not ask questions — make your best call and act.
 
-        User note: \(note)
+        User request: \(note)
         \(shots)
 
         Steps:
-        1. If screenshots are attached, inspect them to understand what the user is pointing at.
+        1. If screenshots are attached, inspect them to understand the visible problem.
         2. Run `agents sessions --all --limit 20` and skim the recent local sessions to \
-        identify which repository / project this concerns (match the note + screenshot to a \
-        repo you have been working in). Derive the repo name (e.g. `agents-cli`).
-        3. Do a brief investigation for real context — name the likely file/area, a \
-        reproduction path, or at minimum a crisp problem statement. Do NOT over-investigate; \
-        a couple of focused reads is enough.
-        4. File the ticket, piping a proper multi-line description via stdin:
-
-           printf '%s' "<your markdown description>" | \\
-             \(linear) create "<crisp imperative title>" \\
-               --priority <urgent|high|medium|low> \\
-               --project "<Linear project name matching the repo>" \\
-               --label "repo:<repo-name>" \\
-               --description-file -
-
-           Pick an HONEST priority. Keep the title short and specific.
-        5. Print the resulting `Created RUSH-###: <title>` line, then on the NEXT line print
-        the ticket's Linear URL as `URL: https://linear.app/…` (the `linear create` output or
-        `\(linear) tasks <id>` gives it). Nothing else — no commentary.
+        identify the most likely repository / project for this request.
+        3. Work in the correct repo, follow its AGENTS.md instructions, and implement the \
+        smallest fix that satisfies the request.
+        4. Verify with the focused tests or real flow that proves the user-visible outcome.
+        5. Commit, open a PR when the repo workflow requires it, and print the final proof \
+        URL or local verification evidence.
         """
     }
 
@@ -247,24 +325,46 @@ enum AgentsCLI {
     // destructive ops still gate. It runs as a MONITORED async process (not fully
     // detached) so its `Created RUSH-###` line drives a real completion
     // notification without blocking the panel/UI.
-    static func dispatchTicketAgent(note: String, screenshotPaths: [String]) {
+    static func dispatchTicketAgent(note: String, screenshotPaths: [String], agent: String? = nil) {
         let prompt = ticketAgentPrompt(note: note, screenshotPaths: screenshotPaths)
-        let agent = env["AGENTS_ISSUE_AGENT"] ?? "claude"
+        let agent = agent ?? env["AGENTS_ISSUE_AGENT"] ?? "claude"
         Notifier.post(title: "Filing ticket…", body: shortenForNotice(note))
         runMonitored(argv(["run", agent, prompt, "--mode", "auto"])) { output, ok in
-            guard ok, let id = parseCreatedTicketID(output) else {
+            guard ok, let completion = ticketCompletion(output: output, screenshotPaths: screenshotPaths) else {
                 Notifier.post(title: "Ticket agent finished",
                               body: ok ? "Could not confirm a ticket was created."
                                        : "The ticket agent exited with an error.")
                 return
             }
-            let url = parseTicketURL(output)
-            // Persist to the ledger so the menu bar's RECENT TICKETS section can
-            // surface it beyond the transient notification.
-            RecentTickets.record(id: id, title: note, url: url,
-                                 createdAt: ISO8601DateFormatter().string(from: Date()))
-            // Attach the ticket URL so the notification is clickable → opens it.
-            Notifier.post(title: "Created \(id)", body: shortenForNotice(note), url: url)
+            let finish: (Bool) -> Void = { attached in
+                // Persist to the ledger so the menu bar's RECENT TICKETS section can
+                // surface it beyond the transient notification.
+                RecentTickets.record(id: completion.id, title: note, url: completion.url,
+                                     createdAt: ISO8601DateFormatter().string(from: Date()))
+                // Attach the ticket URL so the notification is clickable → opens it.
+                let body = attached ? shortenForNotice(note) : "Created ticket, but screenshot upload failed."
+                Notifier.post(title: "Created \(completion.id)", body: body, url: completion.url)
+            }
+            if let attachmentArgs = completion.attachmentArgs {
+                runMonitored(attachmentArgs) { _, attached in finish(attached) }
+            } else {
+                finish(true)
+            }
+        }
+    }
+
+    static func dispatchQuickFix(note: String, screenshotPaths: [String], agents: [String]) {
+        let selected = agents.isEmpty ? ["claude"] : agents
+        let prompt = quickFixPrompt(note: note, screenshotPaths: screenshotPaths)
+        Notifier.post(title: "Dispatching \(selected.count) agent\(selected.count == 1 ? "" : "s")…",
+                      body: shortenForNotice(note))
+        for agent in selected {
+            let name = quickDispatchName(agent: agent)
+            runMonitored(argv(quickFixRunArgs(agent: agent, prompt: prompt, name: name))) { _, ok in
+                let label = LocalState.agentLabel(agent)
+                Notifier.post(title: ok ? "\(label) finished" : "\(label) failed",
+                              body: shortenForNotice(note))
+            }
         }
     }
 
@@ -294,9 +394,37 @@ enum AgentsCLI {
         return nil
     }
 
+    static func ticketCompletion(output: String, screenshotPaths: [String]) -> TicketCompletion? {
+        guard let id = parseCreatedTicketID(output) else { return nil }
+        return TicketCompletion(id: id,
+                                url: parseTicketURL(output),
+                                attachmentArgs: ticketProofUpdateArgs(ticketID: id,
+                                                                       screenshotPaths: screenshotPaths))
+    }
+
+    static func ticketProofUpdateArgs(ticketID: String, screenshotPaths: [String]) -> [String]? {
+        guard !screenshotPaths.isEmpty else { return nil }
+        var args = [linearSkillBinary(), "update", ticketID]
+        for path in screenshotPaths {
+            args.append("--proof")
+            args.append(path)
+        }
+        return args
+    }
+
     private static func shortenForNotice(_ s: String) -> String {
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.count > 80 ? String(t.prefix(79)) + "…" : t
+    }
+
+    static func quickDispatchName(agent: String, date: Date = Date()) -> String {
+        let stamp = Int(date.timeIntervalSince1970)
+        let clean = LocalState.normalizeAgent(agent).replacingOccurrences(of: "[^a-z0-9-]", with: "-", options: .regularExpression)
+        return "quick-\(clean)-\(stamp)"
+    }
+
+    static func quickFixRunArgs(agent: String, prompt: String, name: String) -> [String] {
+        ["run", agent, prompt, "--mode", "auto", "--name", name]
     }
 
     // MARK: Process helpers

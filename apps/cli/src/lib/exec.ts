@@ -119,6 +119,29 @@ export function resolveMode(agent: AgentId, requested: Mode): Mode {
 }
 
 /**
+ * Resolve a requested mode for a run, honoring whether the run is HEADLESS.
+ *
+ * Wraps resolveMode with one extra rule: an agent may list `plan` in its modes
+ * (so interactive plan works) yet declare `capabilities.headlessPlan === false`
+ * because plan is broken in a headless `--prompt`/`-p` run — kimi refuses
+ * `--prompt` + `--plan`, and grok's `--permission-mode plan` silently stalls at
+ * its ExitPlanMode gate. For those agents, a headless plan request degrades to
+ * `auto` (kimi -p auto-runs; grok maps auto→edit via resolveMode) with a visible
+ * one-line stderr warning, mirroring the graceful plan→edit degrade cursor and
+ * antigravity get for having no plan flag at all. Interactive runs are never
+ * downgraded. This is the single source of truth shared by buildExecCommand
+ * (agents run / teams) and the routine runner.
+ */
+export function resolveHeadlessMode(agent: AgentId, requested: Mode, interactive: boolean): Mode {
+  const mode = resolveMode(agent, requested);
+  if (!interactive && mode === 'plan' && AGENTS[agent].capabilities.headlessPlan === false) {
+    process.stderr.write(`warning: ${agent} has no headless plan mode; running --mode auto instead\n`);
+    return resolveMode(agent, 'auto');
+  }
+  return mode;
+}
+
+/**
  * The mode an agent should run in when the caller has no preference.
  *
  * Returns the first entry in the agent's `capabilities.modes` table — the
@@ -191,6 +214,15 @@ export interface ExecOptions {
   /** Raw args captured after `--` on the command line, forwarded verbatim to the underlying agent CLI. */
   passthroughArgs?: string[];
   /**
+   * Tee-and-tail the child's stdout even when no budget cap is active, so the
+   * caller can scan it for rate/usage-limit messages. Claude prints billing
+   * refusals ("monthly spend limit", "out of usage credits") to STDOUT, not
+   * stderr — a fallback chain that only inspects stderr never cascades on
+   * them. Set by runWithFallback for every chain entry; harmless elsewhere
+   * (output is mirrored to the parent's stdout exactly like stdio:'inherit').
+   */
+  captureStdoutTail?: boolean;
+  /**
    * Escape hatch for the interactive tmux spawn-wrap (see shouldWrapInTmux):
    * when true, spawn the agent directly instead of inside a shared-socket tmux
    * session. Also forced off by AGENTS_NO_TMUX=1. No effect on headless runs.
@@ -213,6 +245,24 @@ export function resolveInteractive(
 }
 
 /**
+ * True when a run resolved to *inferred* interactive intent — no prompt and no
+ * explicit `--interactive` — but there is no terminal to host the REPL. Launching
+ * would attach a TUI to a dead stdin and hang forever, so the caller should fail
+ * fast with the headless alternatives instead (RUSH-1829).
+ *
+ * An explicit `--interactive` is the caller's deliberate choice and is never
+ * blocked (they may be driving a PTY we can't detect). Pure — the TTY state is a
+ * parameter so this is unit-testable without touching `process.std*`.
+ */
+export function inferredInteractiveWithoutTty(
+  options: Pick<ExecOptions, 'interactive' | 'headless' | 'prompt'>,
+  isTty: boolean,
+): boolean {
+  if (options.interactive === true) return false;
+  return resolveInteractive(options) && !isTty;
+}
+
+/**
  * Decide whether spawnAgent must capture (PIPE + tee) the child's stdout so the
  * live budget watcher can parse it (issue #346, FIX 3).
  *
@@ -228,11 +278,12 @@ export function resolveInteractive(
  * @param piped        true when the parent's stdout is NOT a TTY (output piped)
  * @param capsActive   true when a budget watcher is attached (caps configured)
  */
-export function shouldTapStdout(interactive: boolean, piped: boolean, capsActive: boolean): boolean {
+export function shouldTapStdout(interactive: boolean, piped: boolean, capsActive: boolean, captureTail = false): boolean {
   if (interactive) return false;
   // Always pipe when the caller pipes us downstream (preserve composability),
-  // OR when caps are active so the watcher can read the stream at a TTY.
-  return piped || capsActive;
+  // when caps are active so the watcher can read the stream at a TTY, or when
+  // a fallback chain needs a stdout tail for rate-limit detection.
+  return piped || capsActive || captureTail;
 }
 
 /** Pattern for valid environment variable names (C identifier rules). */
@@ -355,6 +406,7 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
   if (options.sessionId && isValidMailboxId(options.sessionId)) {
     result.AGENTS_MAILBOX_DIR = mailboxDir(options.sessionId);
   }
+  result.AGENTS_RUNTIME = resolveInteractive(options) ? 'terminal' : 'headless';
 
   // Export the run's durable name (companion to AGENT_SESSION_ID) so a
   // SessionStart hook / the agent can associate its transcript with the handle
@@ -513,7 +565,10 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     modelFlag: '--model',
   },
   kiro: {
-    base: ['kiro-cli'],
+    // Standalone hooks live under ~/.kiro/hooks/*.json and only fire on the
+    // v3 engine (opt-in via --v3; see https://kiro.dev/docs/cli/v3/hooks/).
+    // Without this flag agents-cli would write v3 hook files that never run.
+    base: ['kiro-cli', '--v3'],
     promptFlag: 'positional',
     modeFlags: {
       // kiro-cli has no permission flags — edit is the default behavior.
@@ -585,6 +640,21 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     },
     jsonFlags: ['-o', 'stream-json'],
     modelFlag: '-m',
+  },
+  hermes: {
+    base: ['hermes', 'chat'],
+    promptFlag: 'positional',
+    modeFlags: {
+      edit: [],
+    },
+    modelFlag: '--model',
+  },
+  forge: {
+    base: ['forge'],
+    promptFlag: 'positional',
+    modeFlags: {
+      edit: [],
+    },
   },
 };
 
@@ -672,9 +742,11 @@ export function buildExecCommand(options: ExecOptions): string[] {
   // Resolve the requested mode against the agent's capability table.
   // - `auto` on an agent without auto support → silently degrades to `edit`
   // - `plan` on an agent without a read-only mode → degrades to modes[0]
+  // - headless `plan` on an agent with headlessPlan:false (kimi, grok) →
+  //   degrades to `auto` with a stderr warning (see resolveHeadlessMode)
   // - `skip` on an unsupported agent → throws a clear error
-  // After resolveMode, the chosen mode is guaranteed to be in template.modeFlags.
-  const resolvedMode = resolveMode(options.agent, normalizeMode(options.mode));
+  // After resolution, the chosen mode is guaranteed to be in template.modeFlags.
+  const resolvedMode = resolveHeadlessMode(options.agent, normalizeMode(options.mode), interactive);
   const modeFlags = template.modeFlags[resolvedMode];
   if (!modeFlags) {
     // Defense in depth: would only fire if AGENTS.capabilities.modes and
@@ -707,12 +779,13 @@ export function buildExecCommand(options: ExecOptions): string[] {
     // all abort with "Cannot combine --prompt with --X" (verified against the live
     // kimi CLI). The write-capable modes (edit/auto/skip) all collapse to kimi's
     // default `-p` behavior, which already auto-approves tool calls, so we emit no
-    // mode flag. Plan (read-only) has no headless equivalent, so fail closed rather
-    // than silently letting a plan-mode run mutate the workspace.
+    // mode flag. Plan can't reach here headless — resolveHeadlessMode already
+    // downgraded it to auto (kimi's headlessPlan:false); this asserts that
+    // invariant so a plan-mode run can never silently mutate the workspace.
     if (resolvedMode === 'plan') {
       throw new Error(
-        'kimi has no headless read-only mode: `--prompt` cannot be combined with `--plan`. ' +
-          'Run kimi in plan mode interactively (omit the prompt), or use --mode edit, auto, or skip.',
+        `Internal error: kimi reached headless command build with resolved mode 'plan'; ` +
+          `resolveHeadlessMode should have downgraded it to auto (capabilities.headlessPlan is false).`,
       );
     }
     // edit/auto/skip: emit no mode flag — `kimi -p` auto-runs.
@@ -945,10 +1018,17 @@ export async function execShimPassthrough(
   });
 }
 
-/** Exit code and captured stderr from a spawned agent process. */
+/** Exit code and captured output from a spawned agent process. */
 interface SpawnResult {
   exitCode: number;
   stderr: string;
+  /**
+   * Rolling tail of the child's stdout, captured only when the stream was
+   * tapped (budget watcher, piped caller, or captureStdoutTail). Empty when
+   * stdout was inherited. Used by runWithFallback to detect billing refusals
+   * Claude prints to stdout rather than stderr.
+   */
+  stdout: string;
 }
 
 /** Inputs that decide whether an interactive spawn is wrapped in a shared-socket tmux session. */
@@ -1005,11 +1085,22 @@ export function shouldWrapInTmux(ctx: TmuxWrapContext): boolean {
  *     `#{pane_pid}`, clean signal delivery on detach/kill).
  * Keys are filtered to valid identifiers so exported shell functions
  * (`BASH_FUNC_*%%`) can't make `env` choke.
+ *
+ * `redactEnvValues` replaces every value with a `<redacted>` marker while keeping
+ * the KEY names. The env map here carries resolved secrets bundles (options.env),
+ * so the real string would embed secret VALUES — which get persisted verbatim
+ * into SessionMeta.cmd on disk (tmux/session.ts). The launched command uses the
+ * real values; the stored/informational copy uses the redacted form (RUSH-1758).
  */
-export function buildTmuxAgentCommand(executable: string, args: string[], env: NodeJS.ProcessEnv): string {
+export function buildTmuxAgentCommand(
+  executable: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  opts: { redactEnvValues?: boolean } = {},
+): string {
   const envPrefix = Object.entries(env)
     .filter(([k, v]) => v !== undefined && EXEC_ENV_KEY_PATTERN.test(k))
-    .map(([k, v]) => `${k}=${shellQuote(String(v))}`)
+    .map(([k, v]) => `${k}=${opts.redactEnvValues ? '<redacted>' : shellQuote(String(v))}`)
     .join(' ');
   const agentCmd = [executable, ...args].map(shellQuote).join(' ');
   return `exec env ${envPrefix} ${agentCmd}`;
@@ -1059,26 +1150,32 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
   const cwd = options.cwd || process.cwd();
   const idSeed = (options.sessionId ?? randomUUID()).slice(0, 8);
   const name = slugifyName(`ag-${options.agent}-${idSeed}`);
-  const cmd = buildTmuxAgentCommand(executable, args, buildExecEnv(options));
+  const execEnv = buildExecEnv(options);
+  // Launch with the real env (secret VALUES materialized into the pane); persist
+  // only a value-redacted copy in SessionMeta.cmd so resolved secrets never hit
+  // disk via the informational cmd field (RUSH-1758).
+  const cmd = buildTmuxAgentCommand(executable, args, execEnv);
+  const metaCmd = buildTmuxAgentCommand(executable, args, execEnv, { redactEnvValues: true });
 
   const labels: Record<string, string> = { agent: options.agent };
   if (options.sessionId) labels.sessionId = options.sessionId;
 
-  const meta = await createSession({ name, cmd, cwd, socket, source: 'cli', labels });
+  const meta = await createSession({ name, cmd, metaCmd, cwd, socket, source: 'cli', labels });
   const pane = meta.pane;
 
   if (pane) {
     // When the AGENT pane dies, detach the client (don't kill) so the session
     // survives just long enough to read the dead pane's exit status below. The
     // `#{hook_pane}` guard scopes this to the agent pane only: if the user splits
-    // the window and exits one of THEIR panes, the else-branch `kill-pane` closes
-    // that split in place instead of detaching everyone (the pane-died hook runs
-    // in the dead pane's context, so bare `kill-pane` targets it). Without the
-    // guard, exiting any split kicked the user clean out of tmux.
-    await setSessionHook(name, 'pane-died', agentPaneDiedHook(name, pane), socket);
-    // Stamp the schema marker so the daemon reconcile (which retrofits older
-    // sessions) recognizes this one as already current and skips it.
-    await markSessionHookSchema(name, socket);
+    // the window and exits one of THEIR panes, the else-branch closes that split
+    // in place instead of detaching everyone (`run-shell -C` executes the
+    // targeted kill inside tmux's server command queue, avoiding a second
+    // client racing the same socket under load, #965). Without the guard,
+    // exiting any split kicked the user clean out of tmux.
+    const hookInstalled = await setSessionHook(name, 'pane-died', agentPaneDiedHook(name, pane), socket);
+    // Stamp the schema marker only after tmux accepted the hook. A failed
+    // install stays unmarked so daemon reconciliation retries it later.
+    if (hookInstalled) await markSessionHookSchema(name, socket);
 
     // Record the agent's OS pid (the pane leaf, thanks to `exec`) WITH its tmux
     // pane so the active-scan attributes it exactly and shows the %pane.
@@ -1131,7 +1228,7 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
       await surfacePaneFailure(before.status, `${options.agent} exited before it could start`);
     }
     await killSession(name, socket).catch(() => {});
-    return { exitCode: before.status ?? 0, stderr: '' };
+    return { exitCode: before.status ?? 0, stderr: '', stdout: '' };
   }
 
   await attachTmux({ socket, args: ['attach-session', '-t', name] });
@@ -1146,10 +1243,10 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
       await surfacePaneFailure(after.status, `${options.agent} exited`);
     }
     await killSession(name, socket).catch(() => {});
-    return { exitCode: after.status ?? 0, stderr: '' };
+    return { exitCode: after.status ?? 0, stderr: '', stdout: '' };
   }
   // Pane still alive → the user detached; keep the session for `agents focus`.
-  return { exitCode: 0, stderr: '' };
+  return { exitCode: 0, stderr: '', stdout: '' };
 }
 
 /**
@@ -1240,7 +1337,7 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
     // PIPE (and later tee) stdout whenever the live budget watcher must read it
     // — for ALL non-interactive runs when caps are active, regardless of TTY.
     // See shouldTapStdout() for the rationale (FIX 3, issue #346).
-    const tapStdout = shouldTapStdout(interactive, piped, watcherState !== null);
+    const tapStdout = shouldTapStdout(interactive, piped, watcherState !== null, options.captureStdoutTail);
     const stdio: ('inherit' | 'pipe')[] = interactive
       ? ['inherit', 'inherit', 'inherit']
       : ['inherit', tapStdout ? 'pipe' : 'inherit', 'pipe'];
@@ -1281,10 +1378,17 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
 
     let budgetKilled = false;
     let budgetKillTimer: ReturnType<typeof setTimeout> | undefined;
+    let stdoutTail = '';
+    const STDOUT_TAIL_CAP = 16 * 1024;
     if (!interactive && tapStdout && child.stdout) {
       // TEE the child's stdout back to the parent's so the user still sees
       // output (mirrors stdio:'inherit') while we tap the same stream for usage.
       child.stdout.pipe(process.stdout);
+      // Keep a rolling TAIL (billing refusals arrive at the very end of a run)
+      // for the fallback chain's rate-limit scan.
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdoutTail = (stdoutTail + chunk.toString('utf-8')).slice(-STDOUT_TAIL_CAP);
+      });
       // Tap the same stream for budget usage events without consuming the pipe
       // (a 'data' listener and .pipe() both receive every chunk). Kill on breach.
       if (watcherState) {
@@ -1347,7 +1451,7 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
       // teams/cloud can tell a budget termination apart from a normal failure.
       const exitCode = budgetKilled ? BUDGET_KILL_EXIT_CODE : (code ?? 0);
       timer.end({ exitCode, status: budgetKilled ? 'budget_killed' : code === 0 ? 'success' : 'failed' });
-      resolve({ exitCode, stderr: stderrBuffer });
+      resolve({ exitCode, stderr: stderrBuffer, stdout: stdoutTail });
     });
   });
 }
@@ -1442,6 +1546,12 @@ export const RATE_LIMIT_PATTERNS: RegExp[] = [
   /too many requests/i,
   /api[\s_-]?overloaded/i,
   /\boverloaded\b/i,
+  // Claude billing refusals — "You've hit your org's monthly spend limit" and
+  // "You're out of usage credits". Both end the run with exit 1 and are exactly
+  // the condition a fallback chain exists to recover from. Printed to STDOUT,
+  // hence the stdout tail in SpawnResult.
+  /spend[\s-]?limit/i,
+  /out of (?:usage )?credits/i,
 ];
 
 /** Return true if the text contains any known rate-limit or overload indicator. */
@@ -1579,6 +1689,9 @@ export async function runWithFallback(options: FallbackOptions): Promise<number>
       prompt,
       env: envOverride ? { ...(options.env ?? {}), ...envOverride } : options.env,
       sessionId: pinnedSessionId ?? (i === 0 ? options.sessionId : undefined),
+      // Claude prints billing refusals (spend limit / out of credits) to
+      // stdout; tail it so the cascade check below can see them.
+      captureStdoutTail: true,
     };
 
     const label = version ? `${agent}@${version}` : agent;
@@ -1608,7 +1721,7 @@ export async function runWithFallback(options: FallbackOptions): Promise<number>
     const isLast = i === chain.length - 1;
     if (isLast) return result.exitCode;
 
-    if (!detectRateLimit(result.stderr)) {
+    if (!detectRateLimit(result.stderr) && !detectRateLimit(result.stdout)) {
       return result.exitCode;
     }
 

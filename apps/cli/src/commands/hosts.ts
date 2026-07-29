@@ -11,8 +11,10 @@ import type { Command } from 'commander';
 import chalk from 'chalk';
 import { terminalWidth, truncateToWidth, stringWidth } from '../lib/session/width.js';
 import { checkbox, confirm } from '@inquirer/prompts';
+import { isInteractiveTerminal } from './utils.js';
 import { assertValidSshTarget } from '../lib/ssh-exec.js';
 import { getProvider, listAllHosts, resolveHost } from '../lib/hosts/registry.js';
+import { getDevice } from '../lib/devices/registry.js';
 import { sshTargetFor, type Host } from '../lib/hosts/types.js';
 import { listSshConfigHosts, listKnownHosts, isSshConfigHost } from '../lib/hosts/ssh-config.js';
 import {
@@ -25,6 +27,7 @@ import { resolveRemoteOsSync } from '../lib/hosts/remote-os.js';
 import { listTasks, loadTask, findTaskByName, findTaskBySessionId } from '../lib/hosts/tasks.js';
 import { reconcileRunningTasks } from '../lib/hosts/reconcile.js';
 import { showHostTaskLog } from '../lib/hosts/logs.js';
+import { stopDispatchedTask } from '../lib/hosts/dispatch.js';
 
 interface AddOptions { cap?: string[]; os?: string; enroll?: boolean; }
 
@@ -54,6 +57,12 @@ async function maybeBootstrap(
   const remoteVer = remoteAgentsVersion(target, os);
   const localVer = localCliVersion();
   if (!remoteVer) {
+    // Non-TTY: this is a best-effort bootstrap prompt, so report and return
+    // instead of hanging on confirm() in a headless/piped shell.
+    if (!isInteractiveTerminal()) {
+      console.log(chalk.gray(`  agents-cli not found on ${hostName} — install it there, then: agents hosts check ${hostName}`));
+      return;
+    }
     const ok = await confirm({ message: `  agents-cli not found on ${hostName}. Install ${localVer ? `v${localVer}` : 'latest'} now?`, default: true });
     if (ok) {
       console.log(chalk.gray('  Installing agents-cli on the host…'));
@@ -64,6 +73,10 @@ async function maybeBootstrap(
   }
   const remoteClean = remoteVer.replace(/^v/, '');
   if (localVer && remoteClean !== localVer) {
+    if (!isInteractiveTerminal()) {
+      console.log(chalk.gray(`  ${hostName} has agents-cli ${remoteClean}, you have ${localVer} — versions differ; upgrade the host to match when convenient.`));
+      return;
+    }
     const ok = await confirm({ message: `  ${hostName} has agents-cli ${remoteClean}, you have ${localVer}. Upgrade to match?`, default: false });
     if (ok) {
       const r = bootstrapAgentsCli(target, localVer, os);
@@ -108,8 +121,8 @@ async function doAdd(name: string | undefined, target: string | undefined, opts:
     return;
   }
 
-  let spec: Host;
-  let sshTarget: string;
+  let spec: Host | undefined;
+  let sshTarget = '';
   if (target) {
     assertValidSshTarget(target);
     const { address, user } = parseTarget(target);
@@ -119,9 +132,35 @@ async function doAdd(name: string | undefined, target: string | undefined, opts:
     spec = { name, provider: 'local', source: 'ssh-config', caps: opts.cap, os: opts.os };
     sshTarget = name;
   } else {
-    console.log(chalk.red(`"${name}" is not in ~/.ssh/config. Pass a target: agents hosts add ${name} <user@host>`));
-    process.exitCode = 1;
-    return;
+    // A registered device enrolls with no target — connection details come from
+    // the device profile. The main reason to enroll one at all is the overlay
+    // metadata (capability tags); plain dispatch already works via the devices
+    // provider.
+    const device = await getDevice(name);
+    if (device && device.auth.method !== 'password') {
+      const address = device.address.dnsName ?? device.address.ip;
+      if (address) {
+        spec = {
+          name,
+          provider: 'local',
+          source: 'inline',
+          address,
+          user: device.user,
+          caps: opts.cap,
+          os: opts.os ?? (device.platform !== 'unknown' ? device.platform : undefined),
+        };
+        sshTarget = device.user ? `${device.user}@${address}` : address;
+      }
+    }
+    if (!spec) {
+      if (device?.auth.method === 'password') {
+        console.log(chalk.red(`Device "${name}" uses password auth — dispatch needs key auth. Switch it first: agents devices set ${name} --auth key`));
+      } else {
+        console.log(chalk.red(`"${name}" is not in ~/.ssh/config or the devices registry. Pass a target: agents hosts add ${name} <user@host>`));
+      }
+      process.exitCode = 1;
+      return;
+    }
   }
 
   const probe = probeHost(sshTarget);
@@ -147,8 +186,12 @@ async function doList(json: boolean): Promise<void> {
     // Cap TARGET at its column so a long user@host can't shove CAPS out of alignment.
     const tgtW = stringWidth(tgt);
     const tgtCol = tgtW > 28 ? truncateToWidth(tgt, 28) : tgt + ' '.repeat(28 - tgtW);
-    const mark = h.enrolled ? '' : chalk.gray(' ·available');
-    console.log(h.name.padEnd(20) + h.source.padEnd(13) + tgtCol + (h.caps?.join(',') ?? '') + mark);
+    // Devices surface their registry as SOURCE (they're synced, not enrolled here).
+    const source = h.provider === 'devices' ? 'devices' : h.source;
+    const mark = h.dispatchable === false
+      ? chalk.yellow(' ·password-auth (no dispatch)')
+      : h.enrolled ? '' : chalk.gray(' ·available');
+    console.log(h.name.padEnd(20) + source.padEnd(13) + tgtCol + (h.caps?.join(',') ?? '') + mark);
   }
 }
 
@@ -177,6 +220,12 @@ async function doRemove(name: string): Promise<void> {
   const host = await resolveHost(name);
   if (!host || !host.enrolled) {
     console.log(chalk.yellow(`"${name}" is not enrolled (nothing to remove).`));
+    return;
+  }
+  if (host.provider === 'devices') {
+    // The devices registry owns this entry — hosts remove would silently no-op.
+    console.log(chalk.yellow(`"${name}" comes from the devices registry. Remove it there: agents devices rm ${name}`));
+    process.exitCode = 1;
     return;
   }
   await getProvider('local').remove!(name);
@@ -218,6 +267,46 @@ async function doLogs(ref: string, follow: boolean, full: boolean): Promise<void
     return;
   }
   if (res.exitCode !== undefined) process.exitCode = res.exitCode;
+}
+
+/** Resolve a host-task ref (id, --name handle, or session id) or null. */
+function resolveTaskRef(ref: string) {
+  return loadTask(ref) ?? findTaskByName(ref) ?? findTaskBySessionId(ref);
+}
+
+async function doStop(ref: string): Promise<void> {
+  // Heal first so we don't try to kill a process that already exited.
+  const current = resolveTaskRef(ref);
+  if (!current) {
+    console.log(chalk.red(`Unknown task "${ref}".`));
+    process.exitCode = 1;
+    return;
+  }
+  const task = reconcileRunningTasks([current])[0] ?? current;
+  if (task.status !== 'running') {
+    console.log(chalk.gray(`Task ${task.id} is already ${task.status}` + (task.exitCode !== undefined ? ` (exit ${task.exitCode})` : '') + '.'));
+    return;
+  }
+  try {
+    const stopped = stopDispatchedTask(task);
+    const statusColor = stopped.status === 'completed' ? chalk.green : chalk.yellow;
+    const exitNote =
+      stopped.exitCode === 143
+        ? 'exit 143 / SIGTERM'
+        : stopped.exitCode !== undefined
+          ? `exit ${stopped.exitCode}`
+          : stopped.status;
+    console.log(
+      chalk.green(`Stopped ${stopped.id}`) +
+        chalk.gray(` on ${stopped.host}`) +
+        '  ' + statusColor(stopped.status) +
+        chalk.gray(` (${exitNote})`),
+    );
+    console.log(chalk.gray(`Logs: agents hosts logs ${stopped.id}`));
+  } catch (err: any) {
+    console.error(chalk.red(err?.message ?? err));
+    process.exitCode = 1;
+  }
 }
 
 /** Register the `agents hosts` command tree. */
@@ -264,4 +353,10 @@ export function registerHostsCommand(program: Command): void {
     .option('-f, --follow', 'Follow live output')
     .option('-m, --full', 'Show the full raw combined-stdout log instead of the concise summary')
     .action((id: string, opts: { follow?: boolean; full?: boolean }) => doLogs(id, !!opts.follow, !!opts.full));
+
+  hosts
+    .command('stop <id>')
+    .alias('kill')
+    .description('Terminate a running host task from this machine (SIGTERM process group; marks failed/143).')
+    .action((id: string) => doStop(id));
 }

@@ -1,9 +1,9 @@
 /**
  * Extra DotAgent repo management.
  *
- * Registers `agents repo add|init|list|remove|enable|disable` which manage
- * additional DotAgent repos alongside the primary ~/.agents/.system/ repo so
- * private, work, or team skills can ship separately from public ones.
+ * Registers `agents repos add|init|list|remove|enable|disable` (`repo` alias)
+ * which manage additional DotAgent repos alongside the primary ~/.agents/.system/
+ * repo so private, work, or team skills can ship separately from public ones.
  *
  * Extras are user-level config: managed clones live at ~/.agents-<alias>/ as
  * peer dirs to ~/.agents/, and user-owned repos may live anywhere. All extras
@@ -13,15 +13,17 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import { visibleWidth, padVisible } from '../lib/format.js';
+import { stripAnsi } from '../lib/session/width.js';
 import ora from 'ora';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import simpleGit from 'simple-git';
-import { confirm, input } from '@inquirer/prompts';
+import { input } from '@inquirer/prompts';
 import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
 import { setHelpSections } from '../lib/help.js';
 import { itemPicker } from '../lib/picker.js';
+import { addHostOption } from '../lib/hosts/option.js';
 import {
   inspectRepo,
   resolveRepoTarget,
@@ -56,7 +58,17 @@ import {
   resolveExtraRepoDir,
   updateMeta,
 } from '../lib/state.js';
-import { parseSource, pullRepo, commitAndPush, isGitRepo, isSystemRepoOrigin, adoptRepo } from '../lib/git.js';
+import {
+  parseSource,
+  pullRepo,
+  commitAndPush,
+  isGitRepo,
+  isSystemRepoOrigin,
+  adoptRepo,
+  getRemoteUrl,
+  sameGitRemote,
+  displayHomePath,
+} from '../lib/git.js';
 import { DEFAULT_SYSTEM_REPO } from '../lib/types.js';
 import type { AgentId, ExtraRepoConfig } from '../lib/types.js';
 import { ALL_AGENT_IDS, isAgentName, resolveAgentName } from '../lib/agents.js';
@@ -531,18 +543,31 @@ function renderCards(rows: RepoRow[], cols: number): void {
  * CHANGES cells; a narrow one gets one card per repo with wrapping detail;
  * `--verbose` forces the full-detail table at any width.
  */
-async function listRepos(alias: string | undefined, opts: { verbose?: boolean } = {}): Promise<void> {
+async function listRepos(alias: string | undefined, opts: { verbose?: boolean; json?: boolean } = {}): Promise<void> {
   const targets = collectRepoTargets(alias);
   if (!targets) {
     process.exitCode = 1;
     return;
   }
   if (targets.length === 0) {
+    if (opts.json) {
+      console.log('[]');
+      return;
+    }
     console.log(chalk.gray('No repos to show.'));
     return;
   }
 
   const rows = await Promise.all(targets.map(renderRepoRow));
+
+  if (opts.json) {
+    // Structured dump of the same rows so agents can enumerate repos + sync state.
+    // `raw` (the missing / no-git-remote human label) is the only colored field —
+    // strip ANSI so the JSON stays clean; every other field is already structured.
+    const clean = rows.map((r) => (r.raw !== undefined ? { ...r, raw: stripAnsi(r.raw) } : r));
+    console.log(JSON.stringify(clean, null, 2));
+    return;
+  }
   // TTY width when interactive; fall back to $COLUMNS (honored when piped) then 80.
   const cols = process.stdout.columns || Number(process.env.COLUMNS) || 80;
 
@@ -562,35 +587,48 @@ async function listRepos(alias: string | undefined, opts: { verbose?: boolean } 
   console.log('');
 }
 
-/** Register the `agents repo` command tree. */
+/**
+ * Label for push/pull spinners and results: alias + resolved dir + tracking ref.
+ * e.g. `user (~/.agents → origin/main)`.
+ */
+function formatRepoTarget(alias: string, dir: string, branch?: string): string {
+  const ref = branch ? `origin/${branch}` : 'origin';
+  return `${alias} (${displayHomePath(dir)} → ${ref})`;
+}
+
+/** Register the `agents repos` command tree (`repo` is a convenience alias). */
 export function registerRepoCommands(program: Command): void {
-  const repoCmd = program
-    .command('repo')
-    .alias('repos')
-    .description('Manage extra DotAgent repos alongside ~/.agents/ (for private or team skills).');
+  // addHostOption on the group so --help documents --host/--device; remote
+  // routing is handled pre-parse by maybeRunOnHost (passthrough.ts).
+  const repoCmd = addHostOption(
+    program
+      .command('repos')
+      .alias('repo')
+      .description('Manage extra DotAgent repos alongside ~/.agents/ (for private or team skills).'),
+  );
 
   setHelpSections(repoCmd, {
     examples: `
       # Scaffold an editable repo (default: ~/.agents/)
-      agents repo init
+      agents repos init
 
       # Scaffold a named repo at ~/.agents-work/
-      agents repo init work
+      agents repos init work
 
       # Register an existing repo (clones to ~/.agents-<alias>/)
-      agents repo add gh:yourname/.agents-work
+      agents repos add gh:yourname/.agents-work
 
       # Register with a custom alias
-      agents repo add git@github.com:acme/team-skills.git --as acme
+      agents repos add git@github.com:acme/team-skills.git --as acme
 
       # See what's registered
-      agents repo list
+      agents repos list
 
       # View one repo's contents (git state + resource counts); omit the name for a picker
       agents repos view system
 
       # Temporarily disable without deleting
-      agents repo disable acme
+      agents repos disable acme
     `,
     notes: `
       Managed extras live at ~/.agents-<alias>/ as peer dirs to ~/.agents/. User-owned
@@ -687,7 +725,8 @@ export function registerRepoCommands(program: Command): void {
     .command('add <source>')
     .description('Register an existing local repo or clone a remote repo into ~/.agents-<alias>/')
     .option('--as <alias>', 'Override the auto-derived alias (letters, digits, _ or -)')
-    .action(async (source: string, options: { as?: string }) => {
+    .option('--adopt', 'If the target directory already holds a git checkout, register it in place instead of erroring (even if its origin differs)')
+    .action(async (source: string, options: { as?: string; adopt?: boolean }) => {
       const meta = readMeta();
       const extras: Record<string, ExtraRepoConfig> = { ...(meta.extraRepos || {}) };
 
@@ -727,7 +766,36 @@ export function registerRepoCommands(program: Command): void {
       ensureAgentsDir();
       const targetDir = getExtraRepoDir(alias);
       if (fs.existsSync(targetDir)) {
-        console.log(chalk.red(`Directory already exists: ${targetDir}`));
+        // Adopt an existing checkout instead of hard-erroring. The common case:
+        // the user already cloned ~/.agents-<alias> by hand, then ran `repos add`
+        // and hit a dead end — which forced a second, inconsistent install method.
+        // If it's already a git repo whose origin matches the requested source,
+        // register it in place (no re-clone); adopt a mismatched/remoteless repo
+        // only with an explicit --adopt.
+        if (isGitRepo(targetDir)) {
+          const existingUrl = await getRemoteUrl(targetDir);
+          const matches = sameGitRemote(existingUrl, parsed.url);
+          if (matches || options.adopt) {
+            const log = await simpleGit(targetDir).log({ maxCount: 1 }).catch(() => null);
+            const commit = log?.latest?.hash.slice(0, 8) || 'unknown';
+            extras[alias] = { url: parsed.url, path: targetDir, enabled: true };
+            updateMeta({ extraRepos: extras });
+            syncExtraAliasAcrossVersions(alias, true);
+            syncMarketplacesForDefaults();
+            console.log(chalk.green(`Adopted existing repo "${alias}" -> ${targetDir} (${commit})`));
+            if (!matches) {
+              console.log(chalk.gray(`  note: its origin is ${existingUrl ?? '(none)'}, not ${parsed.url} — adopted via --adopt.`));
+            }
+            console.log(chalk.gray(`Skills and commands from this repo will be picked up the next time you launch any agent.`));
+            return;
+          }
+          console.log(chalk.red(`Directory already exists and is a different repo: ${targetDir}`));
+          console.log(chalk.gray(`  its origin is ${existingUrl ?? '(none)'}, not ${parsed.url}.`));
+          console.log(chalk.gray('  Adopt it anyway with --adopt, or pick a different alias with --as.'));
+          process.exitCode = 1;
+          return;
+        }
+        console.log(chalk.red(`Directory already exists (and is not a git repo): ${targetDir}`));
         console.log(chalk.gray('Remove it manually or pick a different alias with --as.'));
         process.exitCode = 1;
         return;
@@ -768,7 +836,8 @@ export function registerRepoCommands(program: Command): void {
     .alias('ls')
     .description('Show all repos with resource-level sync (skills/commands/plugins to pull or push) and local changes.')
     .option('-v, --verbose', 'Full per-resource detail in a table, regardless of terminal width')
-    .action(async (alias: string | undefined, options: { verbose?: boolean }) => {
+    .option('--json', 'machine-readable JSON output')
+    .action(async (alias: string | undefined, options: { verbose?: boolean; json?: boolean }) => {
       await listRepos(alias, options);
     });
 
@@ -898,62 +967,16 @@ export function registerRepoCommands(program: Command): void {
             continue;
           }
         }
-        if (t.alias === 'system') {
+        if (t.alias === 'system' && alias !== 'system') {
           // Skip system repo unless explicitly requested
-          if (alias !== 'system') continue;
-
-          // User explicitly asked for system repo — show status and offer to pull
-          try {
-            const git = simpleGit(t.dir);
-            await git.fetch();
-            const status = await git.status();
-            const behind = status.behind ?? 0;
-            if (behind === 0) {
-              console.log(chalk.green('Up to date'));
-            } else {
-              // Count changed resources by type
-              const diff = await git.diff(['--name-only', 'HEAD..@{upstream}']);
-              const files = diff.split('\n').filter(Boolean);
-              const counts: Record<string, number> = {};
-              for (const f of files) {
-                if (f.startsWith('skills/')) counts['skills'] = (counts['skills'] || 0) + 1;
-                else if (f.startsWith('commands/')) counts['commands'] = (counts['commands'] || 0) + 1;
-                else if (f.startsWith('hooks/')) counts['hooks'] = (counts['hooks'] || 0) + 1;
-                else if (f.startsWith('rules/')) counts['rules'] = (counts['rules'] || 0) + 1;
-                else counts['other'] = (counts['other'] || 0) + 1;
-              }
-              const parts: string[] = [];
-              if (counts['skills']) parts.push(`${counts['skills']} skill${counts['skills'] > 1 ? 's' : ''}`);
-              if (counts['commands']) parts.push(`${counts['commands']} command${counts['commands'] > 1 ? 's' : ''}`);
-              if (counts['hooks']) parts.push(`${counts['hooks']} hook${counts['hooks'] > 1 ? 's' : ''}`);
-              if (counts['rules']) parts.push(`${counts['rules']} rule${counts['rules'] > 1 ? 's' : ''}`);
-              if (counts['other']) parts.push(`${counts['other']} other`);
-              const summary = parts.length > 0 ? parts.join(', ') : `${behind} update${behind > 1 ? 's' : ''}`;
-              console.log(chalk.yellow(`${summary} available`));
-
-              if (isInteractiveTerminal()) {
-                const doPull = await confirm({ message: 'Pull now?', default: true });
-                if (doPull) {
-                  const result = await pullRepo(t.dir);
-                  if (result.success) {
-                    console.log(chalk.green('Updated'));
-                  } else {
-                    console.log(chalk.red(result.error || 'Pull failed'));
-                  }
-                }
-              }
-            }
-          } catch (err) {
-            console.log(chalk.red((err as Error).message));
-          }
           continue;
         }
-        const spinner = ora(`Pulling ${t.alias}...`).start();
+        const spinner = ora(`Pulling ${formatRepoTarget(t.alias, t.dir)}...`).start();
         const result = await pullRepo(t.dir);
         if (result.success) {
-          spinner.succeed(`${t.alias} -> ${result.commit}`);
+          spinner.succeed(`${formatRepoTarget(t.alias, t.dir, result.branch)}: ${result.commit}`);
         } else {
-          spinner.fail(`${t.alias}: ${result.error}`);
+          spinner.fail(`${formatRepoTarget(t.alias, t.dir)}: ${result.error}`);
         }
       }
     });
@@ -961,7 +984,7 @@ export function registerRepoCommands(program: Command): void {
   repoCmd
     .command('push [alias]')
     .description('Commit and push the user repo or a user-owned extra. Refuses to push the system repo.')
-    .option('-m, --message <msg>', 'Commit message', 'Update via agents repo push')
+    .option('-m, --message <msg>', 'Commit message', 'Update via agents repos push')
     .action(async (alias: string | undefined, options: { message: string }) => {
       const targets = collectRepoTargets(alias);
       if (!targets) {
@@ -991,12 +1014,14 @@ export function registerRepoCommands(program: Command): void {
         return;
       }
       for (const t of pushable) {
-        const spinner = ora(`Pushing ${t.alias}...`).start();
+        const spinner = ora(`Pushing ${formatRepoTarget(t.alias, t.dir)}...`).start();
         const result = await commitAndPush(t.dir, options.message);
         if (result.success) {
-          spinner.succeed(`${t.alias} pushed`);
+          spinner.succeed(
+            `${formatRepoTarget(t.alias, t.dir, result.branch)}: ${result.detail ?? 'pushed'}`,
+          );
         } else {
-          spinner.fail(`${t.alias}: ${result.error}`);
+          spinner.fail(`${formatRepoTarget(t.alias, t.dir)}: ${result.error}`);
         }
       }
     });
@@ -1038,7 +1063,8 @@ export function registerRepoCommands(program: Command): void {
     .command('status [alias]', { hidden: true })
     .description('Alias of `list` (kept for muscle memory).')
     .option('-v, --verbose', 'Full per-resource detail in a table, regardless of terminal width')
-    .action(async (alias: string | undefined, options: { verbose?: boolean }) => {
+    .option('--json', 'machine-readable JSON output')
+    .action(async (alias: string | undefined, options: { verbose?: boolean; json?: boolean }) => {
       await listRepos(alias, options);
     });
 }

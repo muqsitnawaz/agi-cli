@@ -13,6 +13,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as TOML from 'smol-toml';
+import * as yaml from 'yaml';
 import type { AgentId } from '../../types.js';
 import { capableAgents } from '../../capabilities.js';
 import {
@@ -87,7 +88,7 @@ function buildOpenCodeDetector(): ResourceDetector {
     kind: 'permissions',
     agent: 'opencode',
     list({ versionHome }: DetectArgs): string[] {
-      const opencodeConfigPath = path.join(versionHome, '.opencode', 'opencode.jsonc');
+      const opencodeConfigPath = path.join(versionHome, '.config', 'opencode', 'opencode.jsonc');
       if (!fs.existsSync(opencodeConfigPath)) return [];
       try {
         const content = fs.readFileSync(opencodeConfigPath, 'utf-8');
@@ -111,8 +112,11 @@ function buildGeminiDetector(): ResourceDetector {
       if (!fs.existsSync(settingsPath)) return [];
       try {
         const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-        const allowed: unknown = settings?.tools?.allowed;
-        if (Array.isArray(allowed) && allowed.length > 0) {
+        const core: unknown = settings?.tools?.core;
+        const exclude: unknown = settings?.tools?.exclude;
+        const hasCore = Array.isArray(core) && core.length > 0;
+        const hasExclude = Array.isArray(exclude) && exclude.length > 0;
+        if (hasCore || hasExclude) {
           return discoverPermissionGroups().map(g => g.name);
         }
       } catch { /* parse fail */ }
@@ -161,6 +165,29 @@ function buildGrokDetector(): ResourceDetector {
   };
 }
 
+function buildGooseDetector(): ResourceDetector {
+  return {
+    kind: 'permissions',
+    agent: 'goose',
+    list({ versionHome }: DetectArgs): string[] {
+      const permissionsPath = path.join(versionHome, '.config', 'goose', 'permission.yaml');
+      if (!fs.existsSync(permissionsPath)) return [];
+      try {
+        const config = yaml.parse(fs.readFileSync(permissionsPath, 'utf-8')) as {
+          user?: { always_allow?: unknown[]; ask_before?: unknown[]; never_allow?: unknown[] };
+        } | null;
+        const user = config?.user;
+        const count =
+          (Array.isArray(user?.always_allow) ? user.always_allow.length : 0) +
+          (Array.isArray(user?.ask_before) ? user.ask_before.length : 0) +
+          (Array.isArray(user?.never_allow) ? user.never_allow.length : 0);
+        if (count > 0) return discoverPermissionGroups().map(g => g.name);
+      } catch { /* parse fail */ }
+      return [];
+    },
+  };
+}
+
 function buildKimiDetector(): ResourceDetector {
   return {
     kind: 'permissions',
@@ -180,6 +207,148 @@ function buildKimiDetector(): ResourceDetector {
   };
 }
 
+function buildCursorDetector(): ResourceDetector {
+  return {
+    kind: 'permissions',
+    agent: 'cursor',
+    list({ versionHome }: DetectArgs): string[] {
+      const configPath = path.join(versionHome, '.cursor', 'cli-config.json');
+      if (!fs.existsSync(configPath)) return [];
+      try {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+          permissions?: { allow?: string[]; deny?: string[] };
+        };
+        const allow = config.permissions?.allow?.length ?? 0;
+        const deny = config.permissions?.deny?.length ?? 0;
+        if (allow + deny > 0) return discoverPermissionGroups().map(g => g.name);
+      } catch { /* parse fail */ }
+      return [];
+    },
+  };
+}
+
+function buildDroidDetector(): ResourceDetector {
+  return {
+    kind: 'permissions',
+    agent: 'droid',
+    list({ versionHome }: DetectArgs): string[] {
+      const settingsPath = path.join(versionHome, '.factory', 'settings.json');
+      if (!fs.existsSync(settingsPath)) return [];
+      try {
+        const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+        const hasAllow = Array.isArray(settings.commandAllowlist) && settings.commandAllowlist.length > 0;
+        const hasDeny = Array.isArray(settings.commandDenylist) && settings.commandDenylist.length > 0;
+        if (hasAllow || hasDeny) return discoverPermissionGroups().map(g => g.name);
+      } catch { /* parse fail */ }
+      return [];
+    },
+  };
+}
+
+function buildKiroDetector(): ResourceDetector {
+  return {
+    kind: 'permissions',
+    agent: 'kiro',
+    list({ versionHome }: DetectArgs): string[] {
+      const permissionsPath = path.join(versionHome, '.kiro', 'settings', 'permissions.yaml');
+      if (!fs.existsSync(permissionsPath)) return [];
+      try {
+        const config = yaml.parse(fs.readFileSync(permissionsPath, 'utf-8')) as { rules?: unknown[] } | null;
+        if (config && Array.isArray(config.rules) && config.rules.length > 0) {
+          return discoverPermissionGroups().map(g => g.name);
+        }
+      } catch { /* parse fail */ }
+      return [];
+    },
+  };
+}
+
+function buildOpenClawDetector(): ResourceDetector {
+  return {
+    kind: 'permissions',
+    agent: 'openclaw',
+    list({ versionHome }: DetectArgs): string[] {
+      const configPath = path.join(versionHome, '.openclaw', 'openclaw.json');
+      if (!fs.existsSync(configPath)) return [];
+      try {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+          tools?: { alsoAllow?: unknown[]; deny?: unknown[] };
+        };
+        const tools = config.tools;
+        const hasAllow = Array.isArray(tools?.alsoAllow) && tools.alsoAllow.length > 0;
+        const hasDeny = Array.isArray(tools?.deny) && tools.deny.length > 0;
+        if (hasAllow || hasDeny) {
+          return discoverPermissionGroups().map(g => g.name);
+        }
+      } catch { /* parse fail */ }
+      return [];
+    },
+  };
+}
+
+function buildCopilotDetector(): ResourceDetector {
+  return {
+    kind: 'permissions',
+    agent: 'copilot',
+    list({ versionHome, cwd }: DetectArgs): string[] {
+      const configPath = path.join(versionHome, '.copilot', 'permissions-config.json');
+      if (!fs.existsSync(configPath)) return [];
+      try {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+          locations?: Record<string, { tool_approvals?: unknown[]; allowed_directories?: unknown[] }>;
+        };
+        const locations = config.locations && typeof config.locations === 'object' && !Array.isArray(config.locations)
+          ? config.locations
+          : {};
+        const location = locations[path.resolve(cwd)];
+        const hasApprovals = Array.isArray(location?.tool_approvals) && location.tool_approvals.length > 0;
+        const hasDirectories = Array.isArray(location?.allowed_directories) && location.allowed_directories.length > 0;
+        if (hasApprovals || hasDirectories) return discoverPermissionGroups().map(g => g.name);
+      } catch { /* parse fail */ }
+      return [];
+    },
+  };
+}
+
+function buildForgeDetector(): ResourceDetector {
+  return {
+    kind: 'permissions',
+    agent: 'forge',
+    list({ versionHome }: DetectArgs): string[] {
+      const permissionsPath = path.join(versionHome, '.forge', 'permissions.yaml');
+      if (!fs.existsSync(permissionsPath)) return [];
+      try {
+        const config = yaml.parse(fs.readFileSync(permissionsPath, 'utf-8')) as { policies?: unknown[] } | null;
+        if (config && Array.isArray(config.policies) && config.policies.length > 0) {
+          return discoverPermissionGroups().map(g => g.name);
+        }
+      } catch { /* parse fail */ }
+      return [];
+    },
+  };
+}
+
+function buildHermesDetector(): ResourceDetector {
+  return {
+    kind: 'permissions',
+    agent: 'hermes',
+    list({ versionHome }: DetectArgs): string[] {
+      const configPath = path.join(versionHome, '.hermes', 'config.yaml');
+      if (!fs.existsSync(configPath)) return [];
+      try {
+        const config = yaml.parse(fs.readFileSync(configPath, 'utf-8')) as {
+          command_allowlist?: unknown[];
+          approvals?: { deny?: unknown[] };
+        } | null;
+        const hasAllow = Array.isArray(config?.command_allowlist) && config.command_allowlist.length > 0;
+        const hasDeny = Array.isArray(config?.approvals?.deny) && config.approvals.deny.length > 0;
+        if (hasAllow || hasDeny) return discoverPermissionGroups().map(g => g.name);
+      } catch { /* parse fail */ }
+      return [];
+    },
+  };
+}
+
 const handlers: Partial<Record<AgentId, () => ResourceDetector>> = {
   claude: buildClaudeDetector,
   codex: buildCodexDetector,
@@ -187,7 +356,15 @@ const handlers: Partial<Record<AgentId, () => ResourceDetector>> = {
   gemini: buildGeminiDetector,
   antigravity: buildAntigravityDetector,
   grok: buildGrokDetector,
+  goose: buildGooseDetector,
   kimi: buildKimiDetector,
+  cursor: buildCursorDetector,
+  droid: buildDroidDetector,
+  kiro: buildKiroDetector,
+  openclaw: buildOpenClawDetector,
+  copilot: buildCopilotDetector,
+  forge: buildForgeDetector,
+  hermes: buildHermesDetector,
 };
 
 export const permissionsDetectors = lazyAgentMap<ResourceDetector>(() => {

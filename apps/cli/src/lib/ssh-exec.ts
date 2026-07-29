@@ -8,7 +8,7 @@
  * canonical definition; `commands/secrets.ts` re-exports it.
  */
 
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getCacheDir } from './state.js';
@@ -94,6 +94,19 @@ export function controlOpts(): string[] {
   ];
 }
 
+/**
+ * Compose an ssh connection-option prefix.
+ *
+ * `hostKeyOpts` (a caller's host-key posture, e.g. a pinned
+ * `StrictHostKeyChecking=yes` + managed `UserKnownHostsFile`) go FIRST, ahead of
+ * the `SSH_OPTS` baseline: ssh honors the *first* value it sees for each option,
+ * so an override placed after the baseline's `accept-new` would be silently
+ * ignored. Pure so the ordering contract is unit-testable. See RUSH-1767.
+ */
+export function sshConnectOpts(mux: string[], hostKeyOpts?: string[]): string[] {
+  return [...(hostKeyOpts ?? []), ...SSH_OPTS, ...mux];
+}
+
 export interface SshExecOptions {
   /** Piped to the remote command's stdin (never interpolated into the shell). */
   input?: string;
@@ -103,6 +116,13 @@ export interface SshExecOptions {
   extraSshArgs?: string[];
   /** Reuse a persistent control socket across calls (default true; see `controlOpts`). */
   multiplex?: boolean;
+  /**
+   * Host-key `-o` options that OVERRIDE the accept-new baseline — prepended so
+   * ssh's first-value-wins rule takes them (see {@link sshConnectOpts}). Used to
+   * force strict verification against the managed known_hosts store on the
+   * credential-copy path (RUSH-1767).
+   */
+  hostKeyOpts?: string[];
 }
 
 export interface SshExecResult {
@@ -122,7 +142,7 @@ export interface SshExecResult {
 export function sshExec(target: string, remoteCmd: string, opts: SshExecOptions = {}): SshExecResult {
   assertValidSshTarget(target);
   const mux = opts.multiplex === false ? [] : controlOpts();
-  const args = [...SSH_OPTS, ...mux, ...(opts.extraSshArgs ?? []), target, remoteCmd];
+  const args = [...sshConnectOpts(mux, opts.hostKeyOpts), ...(opts.extraSshArgs ?? []), target, remoteCmd];
   const res = spawnSync('ssh', args, {
     input: opts.input,
     encoding: 'utf-8',
@@ -137,6 +157,58 @@ export function sshExec(target: string, remoteCmd: string, opts: SshExecOptions 
     stderr: res.stderr ?? '',
     timedOut,
   };
+}
+
+/**
+ * Async variant of {@link sshExec}. Same hardened argv composition, but uses
+ * child_process.spawn so fleet fan-outs can probe multiple hosts concurrently.
+ */
+export function sshExecAsync(target: string, remoteCmd: string, opts: SshExecOptions = {}): Promise<SshExecResult> {
+  assertValidSshTarget(target);
+  const mux = opts.multiplex === false ? [] : controlOpts();
+  const args = [...sshConnectOpts(mux, opts.hostKeyOpts), ...(opts.extraSshArgs ?? []), target, remoteCmd];
+  return new Promise((resolve) => {
+    const child = spawn('ssh', args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let timedOut = false;
+    const timer = opts.timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill('SIGTERM');
+        }, opts.timeoutMs)
+      : null;
+
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+
+    // Guard the stdin pipe: if the child closes stdin early (e.g. exits fast), the
+    // end()/write below emits EPIPE on the stream. With no listener Node escalates
+    // that to an uncaught exception that kills the whole CLI. Swallow it — the real
+    // outcome is still reported by the 'close'/'error' handlers below.
+    child.stdin.on('error', () => {});
+    if (opts.input !== undefined) child.stdin.end(opts.input);
+    else child.stdin.end();
+
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ code: null, stdout, stderr: stderr + err.message, timedOut });
+    });
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve({ code, stdout, stderr, timedOut });
+    });
+  });
 }
 
 export interface SshExecRawResult {
@@ -156,7 +228,7 @@ export interface SshExecRawResult {
 export function sshExecRaw(target: string, remoteCmd: string, opts: SshExecOptions = {}): SshExecRawResult {
   assertValidSshTarget(target);
   const mux = opts.multiplex === false ? [] : controlOpts();
-  const args = [...SSH_OPTS, ...mux, ...(opts.extraSshArgs ?? []), target, remoteCmd];
+  const args = [...sshConnectOpts(mux, opts.hostKeyOpts), ...(opts.extraSshArgs ?? []), target, remoteCmd];
   const res = spawnSync('ssh', args, {
     input: opts.input,
     // No `encoding` → spawnSync returns Buffers.
@@ -171,6 +243,74 @@ export function sshExecRaw(target: string, remoteCmd: string, opts: SshExecOptio
     stderr: (res.stderr as Buffer | null) ?? Buffer.alloc(0),
     timedOut,
   };
+}
+
+export interface SshExecRawStreamOptions extends SshExecOptions {
+  onStdout: (chunk: Buffer) => void;
+  onStderr?: (chunk: Buffer) => void;
+  signal?: AbortSignal;
+}
+
+/**
+ * Stream raw stdout from a long-lived remote command over ssh.
+ *
+ * Unlike {@link sshStream}, this does not inherit local stdio: callers receive
+ * byte-exact stdout chunks and decide how to account for them. That matters for
+ * offset-resumed log following where a UTF-8 decode boundary must not shift the
+ * byte cursor.
+ */
+export function sshExecRawStream(
+  target: string,
+  remoteCmd: string,
+  opts: SshExecRawStreamOptions,
+): Promise<Omit<SshExecRawResult, 'stdout'>> {
+  assertValidSshTarget(target);
+  const mux = opts.multiplex === false ? [] : controlOpts();
+  const args = [...sshConnectOpts(mux, opts.hostKeyOpts), ...(opts.extraSshArgs ?? []), target, remoteCmd];
+  return new Promise((resolve) => {
+    const child = spawn('ssh', args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    const stderr: Buffer[] = [];
+    let settled = false;
+    let timedOut = false;
+    let aborted = false;
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', abort);
+      resolve({ code, stderr: Buffer.concat(stderr), timedOut });
+    };
+    const abort = () => {
+      aborted = true;
+      child.kill('SIGTERM');
+    };
+    const timer = opts.timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill('SIGTERM');
+        }, opts.timeoutMs)
+      : null;
+
+    child.stdout.on('data', (chunk: Buffer) => { opts.onStdout(chunk); });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr.push(chunk);
+      opts.onStderr?.(chunk);
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(opts.input ?? '');
+    opts.signal?.addEventListener('abort', abort, { once: true });
+
+    child.on('error', (err) => {
+      stderr.push(Buffer.from(err.message));
+      finish(null);
+    });
+    child.on('close', (code) => {
+      finish(aborted ? null : code);
+    });
+  });
 }
 
 /** True if `target` is reachable over ssh (a passwordless `true` succeeds quickly). */
@@ -188,6 +328,13 @@ export interface SshStreamOptions {
   tty?: boolean;
   /** Reuse a persistent control socket across calls (default true; see `controlOpts`). */
   multiplex?: boolean;
+  /**
+   * Host-key `-o` options that OVERRIDE the accept-new baseline — prepended so
+   * ssh's first-value-wins rule takes them (see {@link sshConnectOpts}). Used to
+   * force strict verification against the managed known_hosts store on the
+   * interactive credential-copy path (RUSH-1767).
+   */
+  hostKeyOpts?: string[];
 }
 
 /**
@@ -201,7 +348,7 @@ export function sshStream(target: string, remoteCmd: string, opts: SshStreamOpti
   assertValidSshTarget(target);
   const mux = opts.multiplex === false ? [] : controlOpts();
   const tty = opts.tty ? ['-tt'] : [];
-  const args = [...SSH_OPTS, ...mux, ...tty, target, remoteCmd];
+  const args = [...sshConnectOpts(mux, opts.hostKeyOpts), ...tty, target, remoteCmd];
   const res = spawnSync('ssh', args, { stdio: 'inherit' });
   if (typeof res.status === 'number') return res.status;
   return 255; // spawn error / signal — treat as a connection-layer failure

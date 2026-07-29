@@ -28,8 +28,8 @@ import type {
   DispatchOptions,
   ProviderCapabilities,
 } from './types.js';
-import { resolveDispatchRepos } from './types.js';
-import { readAndResolveBundleEnv } from '../secrets/bundles.js';
+import { resolveDispatchRepos, normalizeProviderStatus } from './types.js';
+import { readAndResolveBundleEnv, isHeadlessSecretsContext } from '../secrets/bundles.js';
 
 const INTERACTIONS_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const DEFAULT_MODEL = 'antigravity-preview-05-2026';
@@ -43,17 +43,6 @@ interface InteractionResponse {
   status?: string;
   output_text?: string;
   error?: { message?: string } | string;
-}
-
-/** Map an Interactions API status string to the canonical CloudTaskStatus. */
-export function mapStatus(s: string | undefined): CloudTaskStatus {
-  const lower = (s ?? '').toLowerCase();
-  if (lower.includes('queue') || lower.includes('pending')) return 'queued';
-  if (lower.includes('run') || lower.includes('progress')) return 'running';
-  if (lower.includes('complete') || lower.includes('success')) return 'completed';
-  if (lower.includes('fail') || lower.includes('error')) return 'failed';
-  if (lower.includes('cancel')) return 'cancelled';
-  return 'completed';
 }
 
 /** Build the Interactions API request body for a fresh dispatch. */
@@ -70,7 +59,7 @@ export function parseInteraction(resp: InteractionResponse): { id: string; statu
   const id = resp.id ?? resp.interaction_id ?? `antigravity-${Date.now()}`;
   return {
     id,
-    status: mapStatus(resp.status),
+    status: normalizeProviderStatus('antigravity', resp.status),
     summary: resp.output_text,
     environmentId: resp.environment_id,
   };
@@ -108,7 +97,7 @@ export class AntigravityCloudProvider implements CloudProvider {
   private resolveApiKey(): string {
     if (this.secretsBundle) {
       try {
-        const { env } = readAndResolveBundleEnv(this.secretsBundle, { caller: 'cloud:antigravity' });
+        const { env } = readAndResolveBundleEnv(this.secretsBundle, { caller: 'cloud:antigravity', agentOnly: isHeadlessSecretsContext() });
         for (const k of KEY_NAMES) {
           if (env[k]) return env[k];
         }

@@ -13,6 +13,7 @@ import { addHostOption } from '../lib/hosts/option.js';
 import * as path from 'path';
 import {
   AgentManager,
+  AgentStatus,
   checkCliSignedIn,
   collectTeamsDoctorData,
   getAgentsDir,
@@ -21,8 +22,11 @@ import {
   type TaskType,
   type TeamsDoctorEntry,
 } from '../lib/teams/agents.js';
+import { mailboxDir, enqueue } from '../lib/mailbox.js';
 import { resolveProvider } from '../lib/cloud/registry.js';
 import type { CloudProviderId, DispatchOptions } from '../lib/cloud/types.js';
+import { emit } from '../lib/events.js';
+import { shareRuntimeEnv } from '../lib/share/config.js';
 import { runSupervisor } from '../lib/teams/supervisor.js';
 import { debug } from '../lib/teams/debug.js';
 import {
@@ -106,8 +110,6 @@ const VALID_CLOUD_PROVIDERS = ['rush', 'codex', 'factory'] as const satisfies re
 type Mode = (typeof VALID_MODES)[number];
 type Effort = (typeof VALID_EFFORTS)[number];
 
-// Auto-enable JSON mode when piped / not a TTY so AI agent consumers get
-// parseable output by default.
 function statusColor(status: string): (s: string) => string {
   switch (status) {
     case 'pending': return chalk.blue;
@@ -195,6 +197,28 @@ function parseTeammate(spec: string): {
 
 function shortId(id: string): string {
   return id.slice(0, 8);
+}
+
+/** Where `teams message`/`teams resume` routes a follow-up, by teammate status. */
+export type TeamMessageRoute =
+  | { kind: 'steer' }        // running -> mailbox, delivered at next tool call
+  | { kind: 'resume' }       // stopped/completed/failed -> re-enter its session
+  | { kind: 'need-message' } // actionable, but no message was supplied
+  | { kind: 'not-started' }; // pending --after deps, never launched
+
+/**
+ * Decide how a follow-up to a teammate is delivered from its reconciled status.
+ * Pure — the source of truth for the routing table, unit-tested without I/O.
+ *   - pending                       -> not-started (tell them to `teams start`)
+ *   - running     + message         -> steer (mailbox)
+ *   - stopped/etc + message         -> resume (re-enter session)
+ *   - any actionable + no message   -> need-message
+ */
+export function decideTeamMessageRoute(status: AgentStatus, hasMessage: boolean): TeamMessageRoute {
+  if (status === AgentStatus.PENDING) return { kind: 'not-started' };
+  if (!hasMessage) return { kind: 'need-message' };
+  if (status === AgentStatus.RUNNING) return { kind: 'steer' };
+  return { kind: 'resume' };
 }
 
 /**
@@ -957,6 +981,26 @@ async function pickTeamOr(
   }
 }
 
+/**
+ * `teams add --remote-cwd` is a no-op trap. `--remote-cwd` comes from the shared
+ * `--host` option family (option.ts) and is meaningful for commands that *route*
+ * to a host, but `teams add` special-cases `--host`/`--device` as PLACEMENT, so
+ * the flag is never read — a teammate's directory is the team's repo plus its
+ * `--worktree`, not a path passed here. Silently ignoring it misleads you into
+ * thinking it set the teammate's repo path (the exact wrong model that turns one
+ * team into a teardown-and-rebuild). Reject with guidance instead. Exported for
+ * the unit test that pins the message.
+ */
+export function remoteCwdOnAddError(team: string): string {
+  return (
+    `--remote-cwd has no effect on 'teams add' — it does not set a teammate's repo or directory.\n` +
+    `  A teammate works in the team's repo plus its own --worktree:\n` +
+    `    • Set the repo once, on the team:  agents teams create ${team} --repo <url|path>\n` +
+    `    • Place the teammate on a machine: agents teams add ${team} <agent> "<task>" --device <host> --worktree <name>\n` +
+    `  (Remote worktrees fork from the host's freshly-fetched origin/<default> automatically.)`
+  );
+}
+
 /** Register the `agents teams` command tree (list, create, add, status, start, remove, disband, logs, doctor). */
 export function registerTeamsCommands(program: Command): void {
   const teams = program
@@ -983,6 +1027,12 @@ export function registerTeamsCommands(program: Command): void {
       # Delta-poll status without rereading everything
       agents teams status pricing-page --since 2026-04-24T09:00:00-07:00
 
+      # Nudge a teammate that stopped with more to do — resumes its own session
+      agents teams resume pricing-page backend "Review's in — rebase-merge the PR, then release"
+
+      # Steer a still-running teammate mid-flight (delivered at its next tool call)
+      agents teams message pricing-page qa "Skip the flaky screenshot test for now"
+
       # Wind everyone down when shipped
       agents teams disband pricing-page
     `,
@@ -995,6 +1045,20 @@ export function registerTeamsCommands(program: Command): void {
         'claude@2.1.112'   a specific installed version (see 'agents view')
         '<profile>'        a profile from 'agents view' — runs through 'agents
                            run <profile>' with the profile's host harness
+
+      Placement & repos (the part people get wrong):
+        --remote-cwd does NOT place a teammate or set its repo — it is ignored on
+        'teams add' (and rejected, so you find out immediately). A teammate's
+        directory is the team's repo plus its --worktree:
+          --device <host>     run THIS teammate on <host>
+          create --repo <r>   ONE repo for the whole team (defaults to this
+                              checkout's origin). Work spanning repos → one team
+                              per repo — don't build a cross-repo team then rebuild.
+        With --enable-worktrees each teammate gets its own worktree + branch:
+          local teammate      forks from your CURRENT local HEAD — no fetch, so
+                              pull/sync the checkout first or it forks stale
+          remote (--device)   forks from the freshly-fetched origin/<default> on
+                              the host (no manual sync needed)
 
       Short aliases:
         teams c  = create    teams a  = add       teams s  = status
@@ -1136,7 +1200,7 @@ export function registerTeamsCommands(program: Command): void {
     .option('--use-worktree <path>', 'All teammates share this existing worktree path (mutually exclusive with --enable-worktrees)')
     .option('--devices <list>', 'Pool of machines this team may run teammates on (comma-separated). Enables distributed auto-scheduling.')
     .option('--hosts <list>', 'Alias for --devices.')
-    .option('--repo <urlOrPath>', 'How each device gets the code (git URL to clone, or a path). Defaults to the local checkout origin.')
+    .option('--repo <urlOrPath>', 'How each remote (--device) teammate gets the code — ONE git URL/path for the whole team (existing checkout reused, else cloned). A team is single-repo; for work across repos, make one team per repo. Defaults to this checkout origin.')
     .option('--json', 'Output machine-readable JSON')
     .action(async (team: string, opts: { description?: string; enableWorktrees?: boolean; useWorktree?: string; devices?: string; hosts?: string; repo?: string; json?: boolean }) => {
       try {
@@ -1215,7 +1279,7 @@ export function registerTeamsCommands(program: Command): void {
     .alias('a')
     .description("Add a teammate to work on a task. Runs in background; returns immediately. Use 'status' to check in.")
     .option('-n, --name <name>', 'Friendly name for this teammate (e.g. alice). Required if using --after. Unique within team.')
-    .option('-m, --mode <mode>', `Permissions: plan (read-only) | edit (can write files) | auto (smart classifier auto-approves safe ops) | skip (bypass all permission prompts). 'full' accepted as alias for skip.`, 'edit')
+    .option('-m, --mode <mode>', `Permissions: plan (read-only) | edit (can write files) | auto (smart classifier auto-approves safe ops) | skip (bypass all permission prompts). 'full' accepted as alias for skip. Teammates run headless: plan works headless on claude/codex/droid/opencode; kimi/grok/cursor/antigravity have no headless plan mode and auto-downgrade a plan request to auto.`, 'edit')
     .option('-e, --effort <effort>', `Reasoning intensity: ${VALID_EFFORTS.join('|')}`, 'medium')
     .option('--model <model>', 'Override the effort tier and use this specific model (e.g. claude-opus-4-6)')
     .option(
@@ -1237,7 +1301,15 @@ export function registerTeamsCommands(program: Command): void {
       name?: string; mode: string; effort: string; model?: string; env: string[];
       cwd?: string; worktree?: string; after?: string; json?: boolean;
       taskType?: string; cloud?: string; host?: string; device?: string; repo?: string; branch?: string; force?: boolean;
+      remoteCwd?: string;
     }) => {
+      // `--remote-cwd` rides the shared --host option family but is never read by
+      // `teams add` (placement, not routing). Fail loud with guidance rather than
+      // silently ignoring it — see remoteCwdOnAddError. `!== undefined` so even an
+      // explicit empty value (`--remote-cwd ""`) is rejected, not silently dropped.
+      if (opts.remoteCwd !== undefined) {
+        die(remoteCwdOnAddError(team));
+      }
       if (!(VALID_MODES as readonly string[]).includes(opts.mode)) {
         die(`Invalid mode '${opts.mode}'. Use one of: ${VALID_MODES.join(', ')}`);
       }
@@ -1494,6 +1566,7 @@ export function registerTeamsCommands(program: Command): void {
             repo: opts.repo,
             branch: opts.branch,
             model: a.model ?? undefined,
+            env: shareRuntimeEnv({ agentOnly: true }),
           };
           const cloudTask = await prov.dispatch(dispatchOpts);
           return { cloudSessionId: cloudTask.id };
@@ -1512,6 +1585,7 @@ export function registerTeamsCommands(program: Command): void {
           repo: opts.repo,
           branch: opts.branch,
           model: opts.model,
+          env: shareRuntimeEnv({ agentOnly: true }),
         };
         try {
           const cloudTask = await prov.dispatch(dispatchOpts);
@@ -1549,6 +1623,8 @@ export function registerTeamsCommands(program: Command): void {
           hostTarget,
           hostRepoPath,
         );
+
+        emit('teams.add', { module: 'teams', team, agent, name: result.name, agent_id: result.agent_id, status: result.status });
 
         if (isJsonMode(opts)) {
           console.log(JSON.stringify(result, null, 2));
@@ -1735,6 +1811,8 @@ export function registerTeamsCommands(program: Command): void {
         await warnThrottledTeammates(mgr, team);
       }
 
+      emit('teams.start', { module: 'teams', team, watch: Boolean(opts.watch) });
+
       if (!opts.watch) {
         await runOneWave(mgr, team, Boolean(opts.json));
         return;
@@ -1782,6 +1860,8 @@ export function registerTeamsCommands(program: Command): void {
       });
 
       const elapsed = Math.floor(result.elapsed_ms / 1000);
+      emit('teams.complete', { module: 'teams', team, stoppedBy: result.stoppedBy, waves: result.waves, durationMs: result.elapsed_ms });
+
       if (result.stoppedBy === 'drained') {
         console.log(chalk.green(`Factory drained in ${elapsed}s (${result.waves} waves).`));
       } else if (result.stoppedBy === 'max-waves') {
@@ -1908,7 +1988,7 @@ export function registerTeamsCommands(program: Command): void {
 
   // stop
   addHostOption(teams.command('stop [team] [teammate]'))
-    .description('Stop a running teammate. Can be restarted later. Cleans up worktree if no uncommitted changes.')
+    .description('Stop a running teammate. Resume it later with `agents teams resume`. Cleans up worktree if no uncommitted changes.')
     .option('--json', 'Output machine-readable JSON')
     .action(async (team: string | undefined, ref: string | undefined, opts: { json?: boolean }) => {
       const mgr = mkManager();
@@ -1995,6 +2075,97 @@ export function registerTeamsCommands(program: Command): void {
       if (worktreeKept && agent?.worktreeName) {
         console.log(chalk.yellow(`Worktree '${agent.worktreeName}' has uncommitted changes. Keeping it at: ${agent.worktreePath}`));
       }
+    });
+
+  // message / resume — send a follow-up message to a teammate. Routes by the
+  // teammate's reconciled status: a RUNNING teammate is STEERED via its mailbox
+  // (delivered at its next tool call); a STOPPED one (completed/failed/stopped)
+  // is RESUMED — re-entering its own session with the message as the next user
+  // turn, re-attaching it to the team as live.
+  async function teamMessageAction(
+    team: string,
+    ref: string,
+    message: string | undefined,
+    opts: { json?: boolean; from?: string },
+  ): Promise<void> {
+    const mgr = mkManager();
+
+    const lookup = await mgr.resolveAgentIdInTask(team, ref);
+    if (lookup.kind === 'none') die(`No teammate matching '${ref}' in team ${team}`, 2);
+    if (lookup.kind === 'ambiguous') {
+      const shorts = lookup.matches.map(shortId).join(', ');
+      die(`'${ref}' matches multiple teammates: ${shorts}. Use more characters or a name.`, 2);
+    }
+    const agentId = (lookup as { kind: 'ok'; agentId: string }).agentId;
+
+    // mgr.get reconciles the teammate's status (PID + start-time guard / remote
+    // .exit sentinel / exit-code reap) before we branch — so running-vs-stopped
+    // is a fact, not a guess.
+    const agent = await mgr.get(agentId);
+    if (!agent) die(`Teammate ${shortId(agentId)} vanished from team ${team}.`);
+    const display = agent!.name || shortId(agentId);
+    const status = agent!.status;
+    const hasMessage = message != null && message.trim().length > 0;
+
+    const route = decideTeamMessageRoute(status, hasMessage);
+    switch (route.kind) {
+      case 'not-started':
+        die(`Teammate '${display}' hasn't started yet (waiting on --after deps). Run \`agents teams start ${team}\` to launch it.`);
+        return;
+      case 'need-message':
+        if (status === AgentStatus.RUNNING) {
+          die(`Teammate '${display}' is running — pass a message to steer it.`);
+        }
+        die(`Teammate '${display}' is ${status} — pass a message to resume it: \`agents teams resume ${team} ${display} "<message>"\`.`);
+        return;
+      case 'steer': {
+        // Running -> steer via mailbox; never re-launch (that forks a 2nd session).
+        enqueue(mailboxDir(agentId), { to: agentId, text: message!, from: opts.from });
+        if (isJsonMode(opts)) {
+          console.log(JSON.stringify({ team, agent_id: agentId, name: agent!.name ?? null, action: 'steer', status }, null, 2));
+          return;
+        }
+        console.log(
+          chalk.green(`Steering ${chalk.cyan(display)} (running) — `) +
+            chalk.dim('message queued; it will see it at its next tool call.'),
+        );
+        return;
+      }
+      case 'resume': {
+        // Stopped / completed / failed -> resume its own session with the message.
+        try {
+          await mgr.resumeTeammate(agentId, message!);
+        } catch (err) {
+          die((err as Error).message);
+        }
+        if (isJsonMode(opts)) {
+          console.log(JSON.stringify({ team, agent_id: agentId, name: agent!.name ?? null, action: 'resume', prior_status: status }, null, 2));
+          return;
+        }
+        console.log(
+          chalk.green(`Resuming ${chalk.cyan(display)} `) +
+            chalk.dim(`(was ${status}) in team ${team} — re-entering its session with your message.`),
+        );
+        console.log(chalk.dim(`Track it with \`agents teams status ${team}\`.`));
+        return;
+      }
+    }
+  }
+
+  addHostOption(teams.command('message <team> <teammate> <message>'))
+    .description('Send a follow-up message to a teammate. A running teammate is steered via its mailbox; a stopped one is resumed — re-entering its own session with the message.')
+    .option('--from <who>', 'Label recorded as the sender of this message')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (team: string, ref: string, message: string, opts: { json?: boolean; from?: string }) => {
+      await teamMessageAction(team, ref, message, opts);
+    });
+
+  addHostOption(teams.command('resume <team> <teammate> [message]'))
+    .description("Resume a stopped teammate (completed/failed/stopped) by re-entering its own session with a message as the next user turn. If the teammate is still running, the message is steered via its mailbox instead.")
+    .option('--from <who>', 'Label recorded as the sender of this message')
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (team: string, ref: string, message: string | undefined, opts: { json?: boolean; from?: string }) => {
+      await teamMessageAction(team, ref, message, opts);
     });
 
   // remove

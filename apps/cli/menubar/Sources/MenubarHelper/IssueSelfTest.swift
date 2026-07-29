@@ -15,7 +15,12 @@ enum IssueSelfTest {
         testImageFilePick()
         testTicketIDParse()
         testPromptContract()
+        testTicketCompletionAttachesScreenshots()
+        testQuickFixContract()
+        testQuickDispatchRoster()
         testRecentTicketsMerge()
+        testDraftPreservation()
+        testRoutineFailureReason()
         if failures == 0 {
             print("\nALL PASS")
             exit(0)
@@ -73,14 +78,21 @@ enum IssueSelfTest {
         check("no URL → nil", AgentsCLI.parseTicketURL("Created RUSH-200: real") == nil)
     }
 
-    // The meta-prompt must carry the user's note and the screenshot path forward
-    // to the agent, and drop the screenshot line when there is none.
+    // The meta-prompt must carry the user's note and every user-provided file
+    // forward for investigation, but leave the actual upload to the helper's
+    // deterministic post-create step.
     private static func testPromptContract() {
         let oneShot = AgentsCLI.ticketAgentPrompt(note: "cards show raw uuids",
-                                                  screenshotPaths: ["/tmp/clip-1.png"])
+                                                  screenshotPaths: ["/tmp/clip one.png"])
         check("prompt embeds the note", oneShot.contains("cards show raw uuids"))
-        check("prompt embeds the screenshot path", oneShot.contains("/tmp/clip-1.png"))
+        check("prompt embeds the screenshot path", oneShot.contains("/tmp/clip one.png"))
         check("prompt names the linear create step", oneShot.contains("linear create"))
+        check("prompt identifies user-provided ticket material",
+              oneShot.contains("user-provided ticket material"))
+        check("prompt says the helper uploads selected files",
+              oneShot.contains("menu-bar helper") && oneShot.contains("uploads every selected file"))
+        check("prompt does not make the agent run a proof upload",
+              !oneShot.contains("--proof"))
 
         let multi = AgentsCLI.ticketAgentPrompt(note: "before/after",
                                                 screenshotPaths: ["/tmp/a.png", "/tmp/b.png"])
@@ -91,6 +103,94 @@ enum IssueSelfTest {
         let noShot = AgentsCLI.ticketAgentPrompt(note: "flaky test", screenshotPaths: [])
         check("no-screenshot prompt says so", noShot.contains("No screenshots"))
         check("no-screenshot prompt has no /tmp path", !noShot.contains("/tmp/"))
+        check("no-screenshot prompt has no upload command", !noShot.contains("--proof"))
+        check("no-screenshot prompt skips attachment handling", noShot.contains("skip attachment handling"))
+
+        // RUSH-1636: the ticket agent must assign a delegate via linear create --delegate.
+        let delegate = AgentsCLI.ticketAgentPrompt(note: "assign a delegate", screenshotPaths: ["/tmp/a.png"])
+        check("prompt instructs delegate resolution", delegate.contains("agents sessions --active"))
+        check("prompt lists the workspace delegate roster",
+              delegate.contains("Antigravity") && delegate.contains("OpenClaw"))
+        check("prompt templates --delegate on linear create", delegate.contains("--delegate <agent>"))
+        check("prompt defaults to claude when inconclusive", delegate.contains("default to `claude`"))
+        check("prompt omits --delegate on resolution failure",
+              delegate.contains("omit the `--delegate` flag"))
+    }
+
+    // Once the ticket agent creates an issue, selected screenshots must become a
+    // real Linear update invocation against that created id, with each path
+    // passed as its own --proof arg so spaces/apostrophes are not shell-parsed.
+    private static func testTicketCompletionAttachesScreenshots() {
+        let output = """
+        Created RUSH-200: Cards show raw uuids
+        URL: https://linear.app/getrush/issue/RUSH-200/cards-show-raw-uuids
+        """
+        let completion = AgentsCLI.ticketCompletion(
+            output: output,
+            screenshotPaths: ["/tmp/clip one.png", "/tmp/Muqsit's shot.png"]
+        )
+        check("ticket completion parses the created id", completion?.id == "RUSH-200")
+        check("ticket completion preserves the Linear URL",
+              completion?.url == "https://linear.app/getrush/issue/RUSH-200/cards-show-raw-uuids")
+        let expected = [
+            AgentsCLI.linearSkillBinary(),
+            "update",
+            "RUSH-200",
+            "--proof",
+            "/tmp/clip one.png",
+            "--proof",
+            "/tmp/Muqsit's shot.png",
+        ]
+        check("created ticket gets every selected screenshot as proof args",
+              completion?.attachmentArgs == expected,
+              detail: (completion?.attachmentArgs ?? []).joined(separator: " "))
+
+        let noShots = AgentsCLI.ticketCompletion(output: output, screenshotPaths: [])
+        check("created ticket with no screenshots skips proof update",
+              noShots?.attachmentArgs == nil)
+        check("no created id yields no completion",
+              AgentsCLI.ticketCompletion(output: "ticket create failed", screenshotPaths: ["/tmp/a.png"]) == nil)
+    }
+
+    // The autonomous fix path must carry screenshots through and name runs with
+    // a stable quick-dispatch handle so the tray/session index can surface them.
+    private static func testQuickFixContract() {
+        let prompt = AgentsCLI.quickFixPrompt(note: "button is off-screen",
+                                              screenshotPaths: ["/tmp/panel.png"])
+        check("quick-fix prompt embeds the request", prompt.contains("button is off-screen"))
+        check("quick-fix prompt embeds the screenshot", prompt.contains("/tmp/panel.png"))
+        check("quick-fix prompt requires repo discovery", prompt.contains("agents sessions --all --limit 20"))
+        check("quick-fix prompt requires verification", prompt.contains("Verify with the focused tests"))
+
+        let name = AgentsCLI.quickDispatchName(agent: "Codex_Cli", date: Date(timeIntervalSince1970: 1234))
+        check("quick-dispatch names are durable and normalized", name == "quick-codex-cli-1234", detail: name)
+
+        let args = AgentsCLI.quickFixRunArgs(agent: "codex", prompt: "<prompt>", name: "quick-codex-1234")
+        check("quick-fix runs in autonomous mode",
+              args == ["run", "codex", "<prompt>", "--mode", "auto", "--name", "quick-codex-1234"],
+              detail: args.joined(separator: " "))
+    }
+
+    // The picker roster is configurable but remains pinned to supported agents.
+    private static func testQuickDispatchRoster() {
+        let defaultRoster = LocalState.quickDispatchRoster(env: [:])
+        check("default quick-dispatch roster uses desired agents",
+              defaultRoster.map(\.id) == LocalState.desiredAgents.map(\.id))
+
+        let filtered = LocalState.quickDispatchRoster(env: ["AGENTS_QUICK_DISPATCH_ROSTER": "codex,claude,missing,codex"])
+        check("configured quick-dispatch roster preserves valid configured order and dedups",
+              filtered.map(\.id) == ["codex", "claude"], detail: filtered.map(\.id).joined(separator: ","))
+
+        let invalid = LocalState.quickDispatchRoster(env: ["AGENTS_QUICK_DISPATCH_ROSTER": "missing"])
+        check("invalid quick-dispatch roster falls back to desired agents",
+              invalid.map(\.id) == LocalState.desiredAgents.map(\.id))
+
+        let preselected = IssueSelfTest.preselectedAgents(
+            env: ["AGENTS_QUICK_DISPATCH_AGENTS": "codex,claude,missing,codex"],
+            roster: filtered
+        )
+        check("configured quick-dispatch preselection stays visible and deduped",
+              preselected == ["codex", "claude"], detail: preselected.joined(separator: ","))
     }
 
     // The recent-tickets ledger merge: newest-first, dedup by id, capped.
@@ -109,6 +209,83 @@ enum IssueSelfTest {
         check("capped at 10", many.count == 10 && many.first?.id == "RUSH-99")
     }
 
+    // The draft state machine that survives a focus-steal: dismissing WITHOUT
+    // submitting preserves an in-progress note (PromptDraft.forDismissal), while
+    // submit/Escape clear it. summon() rehydrates from the saved draft, or a clean
+    // slate when it was cleared. Exercised as pure logic — no live NSPanel needed.
+    private static func testDraftPreservation() {
+        // (a) An empty or whitespace-only note preserves nothing: the panel
+        //     dismisses clean so the next summon starts fresh.
+        check("empty note clears the draft",
+              PromptDraft.forDismissal(note: "", selectedPaths: [],
+                                       selectedAgents: [], action: .fileTicket) == nil)
+        check("whitespace/newline-only note clears the draft",
+              PromptDraft.forDismissal(note: "  \n\t ", selectedPaths: ["/tmp/a.png"],
+                                       selectedAgents: ["codex"], action: .fix) == nil)
+
+        // (b) A real note round-trips every field verbatim through save→restore.
+        let saved = PromptDraft.forDismissal(note: "  cards show raw uuids  ",
+                                             selectedPaths: ["/tmp/a.png", "/tmp/b.png"],
+                                             selectedAgents: ["codex", "claude"],
+                                             action: .fix)
+        check("non-empty note preserves a draft", saved != nil,
+              detail: saved.map { $0.note } ?? "nil")
+        check("draft preserves the raw (untrimmed) note",
+              saved?.note == "  cards show raw uuids  ")
+        check("draft preserves selectedPaths in order",
+              saved?.selectedPaths == ["/tmp/a.png", "/tmp/b.png"],
+              detail: (saved?.selectedPaths ?? []).joined(separator: ","))
+        check("draft preserves selectedAgents",
+              saved?.selectedAgents == ["codex", "claude"],
+              detail: (saved?.selectedAgents ?? []).sorted().joined(separator: ","))
+        check("draft preserves the dispatch action", saved?.action == .fix)
+
+        // The restore side (summon's `draft?.field ?? default`): a saved draft
+        // rehydrates its fields; a nil draft — what submit and Escape leave behind
+        // via clearDraft — restores to a clean slate.
+        check("restore rehydrates note+action from a saved draft",
+              (saved?.note ?? "") == "  cards show raw uuids  " &&
+              (saved?.action ?? .fileTicket) == .fix)
+        let cleared: PromptDraft? = nil   // what submit/Escape (clearDraft) leave
+        check("submit/Escape leave no draft → restore yields empty note",
+              (cleared?.note ?? "") == "")
+        check("submit/Escape leave no draft → restore yields default action + no selection",
+              (cleared?.action ?? .fileTicket) == .fileTicket &&
+              (cleared?.selectedPaths ?? []).isEmpty &&
+              (cleared?.selectedAgents ?? []).isEmpty)
+    }
+
+    // Overdue is a current scheduler condition, not proof that the previous run
+    // failed. A last-successful routine with exitCode 0 must render as overdue,
+    // not "exit 0", across summary, submenu header, and all-routines rows.
+    private static func testRoutineFailureReason() {
+        let succeededButOverdue = routine(
+            lastStatus: "completed",
+            exitCode: 0,
+            failureReason: nil,
+            overdue: true
+        )
+        check("overdue successful routine summary says overdue",
+              routineFailureSummary(succeededButOverdue, max: 48) == "overdue",
+              detail: routineFailureSummary(succeededButOverdue, max: 48))
+        check("overdue successful routine detail says overdue",
+              routineFailureDetail(succeededButOverdue, max: 72) == "overdue",
+              detail: routineFailureDetail(succeededButOverdue, max: 72) ?? "nil")
+        check("overdue successful routine all-row detail says overdue",
+              routineFailureDetail(succeededButOverdue, max: 52) == "overdue",
+              detail: routineFailureDetail(succeededButOverdue, max: 52) ?? "nil")
+
+        let failed = routine(
+            lastStatus: "failed",
+            exitCode: 2,
+            failureReason: nil,
+            overdue: false
+        )
+        check("failed routine still falls back to exit code",
+              routineFailureDetail(failed, max: 72) == "exit 2",
+              detail: routineFailureDetail(failed, max: 72) ?? "nil")
+    }
+
     // MARK: helpers
 
     private static func write(_ dir: URL, _ name: String, modified offset: TimeInterval) {
@@ -125,5 +302,39 @@ enum IssueSelfTest {
             failures += 1
             print("  FAIL  \(name)" + (detail.map { "  (got: \($0))" } ?? ""))
         }
+    }
+
+    private static func preselectedAgents(env: [String: String], roster: [MenuAgent]) -> [String] {
+        let visible = Set(roster.map(\.id))
+        var seen = Set<String>()
+        return env["AGENTS_QUICK_DISPATCH_AGENTS"]?
+            .split(separator: ",")
+            .map { LocalState.normalizeAgent(String($0).trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .filter { visible.contains($0) && seen.insert($0).inserted } ?? []
+    }
+
+    private static func routine(
+        lastStatus: String?,
+        exitCode: Int?,
+        failureReason: String?,
+        overdue: Bool
+    ) -> Routine {
+        Routine(
+            name: "nightly",
+            agent: "claude",
+            workflow: nil,
+            repo: nil,
+            schedule: "0 3 * * *",
+            scheduleHuman: nil,
+            enabled: true,
+            overdue: overdue,
+            nextRun: nil,
+            nextRunHuman: "tomorrow",
+            lastStatus: lastStatus,
+            exitCode: exitCode,
+            failureReason: failureReason,
+            lastRunStartedAt: "2026-07-20T03:00:00.000Z",
+            lastRunCompletedAt: "2026-07-20T03:00:05.000Z"
+        )
     }
 }

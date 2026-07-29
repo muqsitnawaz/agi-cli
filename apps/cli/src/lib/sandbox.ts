@@ -13,6 +13,7 @@ import * as os from 'os';
 import type { JobConfig } from './routines.js';
 import { setGeminiAutoUpdateDisabled, updateGeminiSettings } from './gemini-settings.js';
 import { getRoutinesDir, getUserAgentsDir } from './state.js';
+import { safeJoin } from './paths.js';
 import { createLink } from './platform/index.js';
 
 function resolveRealHome(): string {
@@ -46,6 +47,12 @@ const ENV_ALLOWLIST = [
   'VISUAL',
   'NO_COLOR',
   'FORCE_COLOR',
+  // Headless Claude auth: the routines daemon injects CLAUDE_CODE_OAUTH_TOKEN
+  // from the `claude` secrets bundle (see daemon.ts). Without this allowlist
+  // entry, sandboxed routine spawns drop the token and look "unconfigured".
+  // Intentionally NOT ANTHROPIC_API_KEY / other provider secrets — those stay
+  // stripped (see tests/sandbox.test.ts "does not include sensitive env vars").
+  'CLAUDE_CODE_OAUTH_TOKEN',
 ];
 
 /** Tools safe to grant as wildcards (no filesystem access). */
@@ -84,9 +91,17 @@ export function buildSpawnEnv(overlayHome: string, extraEnv?: Record<string, str
   return env;
 }
 
-/** Get the overlay HOME directory path for a named job. */
+/**
+ * Get the overlay HOME directory path for a named job.
+ *
+ * The job name originates from routine YAML (`name:` field or file basename),
+ * which can arrive from a synced user/system config repo. `safeJoin` contains
+ * it to a single segment beneath the routines dir so a crafted name such as
+ * `../../../..` cannot steer `prepareJobHome`/`cleanJobHome` (which does a
+ * recursive `rmSync`) at a path outside `~/.agents/routines`.
+ */
 export function getJobHomePath(name: string): string {
-  return path.join(getRoutinesDir(), name, 'home');
+  return path.join(safeJoin(getRoutinesDir(), name), 'home');
 }
 
 /** Create a fresh overlay HOME for a job, including agent config and allowed-dir symlinks. */

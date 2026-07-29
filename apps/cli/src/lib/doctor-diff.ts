@@ -33,7 +33,9 @@ import {
   getUserRulesDir,
   getPromptcutsPath,
   getEffectivePromptcutsPath,
+  getActiveRulesPreset,
 } from './state.js';
+import { composeRulesFromState } from './rules/compose.js';
 import {
   getAvailableResources,
   getActuallySyncedResources,
@@ -44,17 +46,14 @@ import { discoverPlugins, marketplaceSpecForName } from './plugins.js';
 import type { DiscoveredPlugin } from './types.js';
 import { pluginInstallDir, repairableManifestFields } from './plugin-marketplace.js';
 import { markdownToToml } from './convert.js';
-import { resolveImports, supportsRulesImports } from './rules/compile.js';
-import { listCommandsInVersionHome, getVersionCommandsDir } from './commands.js';
+import { listCommandsInVersionHome, getVersionCommandsDir, listPluginCommandNames } from './commands.js';
 import { shouldInstallCommandAsSkill, commandSkillMatches, commandSkillName } from './command-skills.js';
+import { gooseCommandMatches, gooseCommandsDir } from './goose-commands.js';
 import { supports } from './capabilities.js';
 import { listSkillsInVersionHome, getVersionSkillsDir } from './skills.js';
 import { listHooksInVersionHome, getVersionHooksDir, listHookEntriesFromDir } from './hooks.js';
 
 const RULES_DOC_FILENAME = 'README.md';
-const COMPILED_HEADER =
-  '<!-- Auto-compiled by agents-cli from ~/.agents/rules/AGENTS.md + imports.\n' +
-  '     Edit the source files under ~/.agents/rules/ — edits to this file will be overwritten on next sync. -->\n\n';
 
 export type DoctorKind =
   | 'commands'
@@ -210,6 +209,19 @@ function diffCommands(agent: AgentId, version: string, cwd: string, excludeProje
       });
       continue;
     }
+    if (agent === 'goose') {
+      // Compare against the installed Goose recipe YAML + slash_commands registration.
+      const matches = gooseCommandMatches(getVersionHomePath(agent, version), name, src.path);
+      rows.push({
+        kind: 'commands',
+        name,
+        status: matches ? 'ok' : 'diff',
+        source: src.layer,
+        sourcePath: src.path,
+        homePath: path.join(gooseCommandsDir(getVersionHomePath(agent, version)), `${name}.yaml`),
+      });
+      continue;
+    }
     const homePath = path.join(homeDir, `${name}${ext}`);
     const installedContent = readSafe(homePath);
     const sourceContent = readSafe(src.path);
@@ -229,11 +241,19 @@ function diffCommands(agent: AgentId, version: string, cwd: string, excludeProje
     });
   }
 
+  // Plugin-bundled commands (installed as `<plugin>-<cmd>`) are source-managed by
+  // their plugin, tracked under the `plugins` kind — not extras. Without this,
+  // `agents doctor` shows every plugin command (swarm-plan, code-review, …) as an
+  // unmanaged extra, mirroring the orphan false-positive the prune path had.
+  const pluginCommands = listPluginCommandNames();
   for (const name of installed) {
     if (seen.has(name)) continue;
+    if (pluginCommands.has(name)) continue;
     const extraHome = asSkill
       ? path.join(agentDir, 'skills', commandSkillName(name), 'SKILL.md')
-      : path.join(homeDir, `${name}${ext}`);
+      : agent === 'goose'
+        ? path.join(gooseCommandsDir(getVersionHomePath(agent, version)), `${name}.yaml`)
+        : path.join(homeDir, `${name}${ext}`);
     rows.push({ kind: 'commands', name, status: 'extra', homePath: extraHome });
   }
 
@@ -276,6 +296,13 @@ function dirsContentMatch(src: string, dst: string): boolean {
 }
 
 function diffSkills(agent: AgentId, version: string, cwd: string, excludeProject = false): ResourceDiff[] {
+  // Native ~/.agents/skills consumers (Gemini, …) read central skills directly.
+  // The orchestrator DELETES their version-home skills dir (syncResourcesToVersion)
+  // and registers no skills writer, so there is nothing in the version home to
+  // reconcile. Mirror diffVersionSkills' native gate (skills.ts) — without it
+  // every central skill is false-reported `missing` and held as unreconcilable
+  // forever (drift never clears for these agents).
+  if (AGENTS[agent].nativeAgentsSkillsDir) return [];
   const homeDir = getVersionSkillsDir(agent, version);
   const installed = new Set(listSkillsInVersionHome(agent, version));
   const layerBases = buildLayerBases(cwd, 'skills', { excludeProject });
@@ -408,17 +435,26 @@ function listRulesNames(cwd: string, excludeProject = false): Map<string, Source
   return out;
 }
 
-function expectedRuleContent(agent: AgentId, name: string, sourcePath: string): string | null {
-  // AGENTS.md on agents without native @-import support is compiled with imports inlined.
-  if (name === 'AGENTS' && !supportsRulesImports(agent)) {
-    const root = readSafe(sourcePath);
-    if (root == null) return null;
-    // Compile relative to the source's own dir so project-layer AGENTS.md resolves
-    // its imports relative to the project rules dir, not the user one.
-    const baseDir = path.dirname(sourcePath);
-    const { content } = resolveImports(root, baseDir);
-    return COMPILED_HEADER + content;
+function expectedRuleContent(agent: AgentId, name: string, version: string, sourcePath: string): string | null {
+  // The instruction file (AGENTS → the agent's CLAUDE.md/GEMINI.md/AGENTS.md)
+  // is COMPOSED from `subrules/` fragments for the version's active preset —
+  // that is exactly what the rules writer emits (see
+  // staleness/writers/rules.ts → composeRulesFromState). Compare against the
+  // same rendering so a correctly-synced home file reconciles instead of being
+  // held forever against the raw `rules/AGENTS.md` (the whole-repo doc, which a
+  // preset composition deliberately never equals — system subrules don't
+  // auto-append). The `agent` is not part of the rendering (every capable agent
+  // gets identical composed bytes); it is kept for symmetry with the writer's
+  // per-agent dispatch and future per-agent presets.
+  if (name === 'AGENTS') {
+    try {
+      return composeRulesFromState({ preset: getActiveRulesPreset(agent, version) }).content;
+    } catch {
+      // No rules.yaml / unknown preset — the writer skips too; treat as unknown.
+      return null;
+    }
   }
+  // Any sibling top-level rules file syncs as a raw copy.
   return readSafe(sourcePath);
 }
 
@@ -449,7 +485,7 @@ function diffRules(agent: AgentId, version: string, cwd: string, excludeProject 
       rows.push({ kind: 'rules', name, status: 'missing', source: src.layer, sourcePath: src.path });
       continue;
     }
-    const expected = expectedRuleContent(agent, name, src.path);
+    const expected = expectedRuleContent(agent, name, version, src.path);
     const actual = readSafe(homePath);
     if (expected == null || actual == null) {
       rows.push({ kind: 'rules', name, status: 'diff', source: src.layer, sourcePath: src.path, homePath });

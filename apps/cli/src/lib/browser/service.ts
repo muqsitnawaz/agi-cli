@@ -1,8 +1,6 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import {
   BrowserCdpConnectionError,
   CDPClient,
@@ -12,6 +10,8 @@ import {
 import {
   getProfile,
   getProfileRuntimeDir,
+  getProfileDownloadsDir,
+  getProfileSessionsDir,
   getBrowserRuntimeDir,
   listProfiles,
   extractConfiguredPort,
@@ -45,6 +45,7 @@ import {
   uploadViaFileChooser,
 } from './upload.js';
 import { emit } from '../events.js';
+import { sshExecAsync } from '../ssh-exec.js';
 import type { TargetFilter } from './types.js';
 
 export type UploadMode = 'auto' | 'input' | 'drop' | 'chooser';
@@ -183,8 +184,6 @@ export function pickWindowTarget<T extends { type: string; url?: string; title?:
   return pages[0];
 }
 
-const execFileP = promisify(execFile);
-
 /**
  * Parse a `--since`/`--until` value. Accepts ISO-8601 absolute timestamps
  * or relative offsets like `30s`, `5m`, `2h`, `1d`.
@@ -200,11 +199,11 @@ export function parseSinceUntil(s: string): Date {
 }
 
 async function execSSH(host: string, cmd: string): Promise<string> {
-  const { stdout } = await execFileP('ssh', [host, cmd], {
-    timeout: 10_000,
-    maxBuffer: 10_000_000,
-  });
-  return stdout;
+  const res = await sshExecAsync(host, cmd, { timeoutMs: 10_000 });
+  if (res.code !== 0) {
+    throw new Error(`ssh ${host} failed${res.stderr.trim() ? `: ${res.stderr.trim()}` : ''}`);
+  }
+  return res.stdout;
 }
 
 export function readNewestMatchingRemoteFileCommand(
@@ -270,6 +269,13 @@ interface ProfileConnection {
   electron?: boolean;
   /** Raw `url:<v>` / `title:<v>` filter copied from the profile config. */
   targetFilter?: string;
+  /**
+   * The composite key this connection is registered under in `this.connections`
+   * (`<profile>` / `<profile>@<endpoint>` / `<profile>.<fork>`). It is the same
+   * name used to key the profile's runtime dir, so downloads and session
+   * captures land under `.cache/browser/<profileName>/`. Set at registration.
+   */
+  profileName?: string;
   forkedFrom?: string;
   tasks: Map<string, Task>;
   windowId?: string; // single window shared by all tasks
@@ -388,7 +394,9 @@ export class BrowserService {
       }
     } else if (!conn) {
       conn = await this.connectProfile(effectiveProfile, resolved.target);
+      conn.profileName = composite;
       this.connections.set(composite, conn);
+      await this.applyDefaultDownloadBehavior(conn, composite);
     }
 
     // Browsers launch with --no-startup-window (session-cookie persistence,
@@ -807,7 +815,7 @@ export class BrowserService {
     outputPath?: string,
     quality: 'compressed' | 'raw' = 'compressed'
   ): Promise<{ path: string; bytes: number; width: number; height: number }> {
-    const { conn, task } = await this.findTask(taskId);
+    const { conn, task, profileName } = await this.findTask(taskId);
 
     const shortId = tabHint ? await this.resolveTabHint(conn, task, tabHint) : this.resolveCurrentTab(task);
     const cdpTargetId = this.getCdpTargetId(task, shortId);
@@ -859,7 +867,7 @@ export class BrowserService {
       extension = 'jpg';
     }
 
-    const sessionsDir = path.join(getBrowserRuntimeDir(), 'sessions', task.name);
+    const sessionsDir = getProfileSessionsDir(profileName, task.name);
     const automaticPath = path.join(sessionsDir, `${Date.now()}.${extension}`);
     const finalPath = resolveScreenshotOutputPath(outputPath, automaticPath);
     await fs.promises.mkdir(path.dirname(finalPath), { recursive: true });
@@ -883,7 +891,7 @@ export class BrowserService {
     tabHint?: string,
     outputPath?: string
   ): Promise<{ path: string; bytes: number }> {
-    const { conn, task } = await this.findTask(taskId);
+    const { conn, task, profileName } = await this.findTask(taskId);
 
     const shortId = tabHint ? await this.resolveTabHint(conn, task, tabHint) : this.resolveCurrentTab(task);
     const cdpTargetId = this.getCdpTargetId(task, shortId);
@@ -902,7 +910,7 @@ export class BrowserService {
     )) as { data: string };
     const buffer = Buffer.from(data, 'base64');
 
-    const sessionsDir = path.join(getBrowserRuntimeDir(), 'sessions', task.name);
+    const sessionsDir = getProfileSessionsDir(profileName, task.name);
     const automaticPath = path.join(sessionsDir, `${Date.now()}.pdf`);
     const finalPath = resolveScreenshotOutputPath(outputPath, automaticPath);
     await fs.promises.mkdir(path.dirname(finalPath), { recursive: true });
@@ -942,7 +950,7 @@ export class BrowserService {
       throw new Error(`Task "${taskId}" is already recording. Call record stop first.`);
     }
 
-    const { conn, task } = await this.findTask(taskId);
+    const { conn, task, profileName } = await this.findTask(taskId);
     const shortId = tabHint ? await this.resolveTabHint(conn, task, tabHint) : this.resolveCurrentTab(task);
     const cdpTargetId = this.getCdpTargetId(task, shortId);
     const target = await this.getTarget(conn, cdpTargetId);
@@ -956,7 +964,7 @@ export class BrowserService {
     if (durationSec < 1 || durationSec > 3600) throw new Error('--duration must be between 1 and 3600 seconds');
     if (maxMb < 1 || maxMb > 500) throw new Error('--max-mb must be between 1 and 500');
 
-    const recordingsDir = path.join(getBrowserRuntimeDir(), 'sessions', task.name, 'recordings');
+    const recordingsDir = path.join(getProfileSessionsDir(profileName, task.name), 'recordings');
     await fs.promises.mkdir(recordingsDir, { recursive: true });
     const outputPath = path.join(recordingsDir, `${Date.now()}.webm`);
 
@@ -1866,8 +1874,34 @@ export class BrowserService {
 
   // ─── Downloads ───────────────────────────────────────────────────────────────
 
-  async setDownloadPath(taskId: string, downloadPath: string, tabHint?: string): Promise<void> {
-    const { conn, task } = await this.findTask(taskId);
+  /**
+   * Point the browser's default download destination at the profile's downloads
+   * dir, browser-global, at connect time. Without this a download the agent never
+   * explicitly routed (`browser download --path`) falls to Chromium's own default
+   * — for an attached user browser, wherever that browser was last configured,
+   * which is how downloads used to escape into random locations. Sent on the root
+   * session (no sessionId) so every current and future tab inherits it. Best
+   * effort: a remote CDP endpoint that doesn't expose the Browser domain must not
+   * fail the whole connect.
+   */
+  private async applyDefaultDownloadBehavior(conn: ProfileConnection, profileName: string): Promise<void> {
+    const downloadPath = getProfileDownloadsDir(profileName);
+    try {
+      await fs.promises.mkdir(downloadPath, { recursive: true });
+      await conn.cdp.send('Browser.setDownloadBehavior', {
+        behavior: 'allow',
+        downloadPath,
+        eventsEnabled: true,
+      });
+    } catch {
+      // Best effort: a remote CDP endpoint (ssh://, ws(s)://) may not expose the
+      // Browser domain. Downloads then keep the endpoint's own default; the connect
+      // must still succeed.
+    }
+  }
+
+  async setDownloadPath(taskId: string, downloadPath?: string, tabHint?: string): Promise<string> {
+    const { conn, task, profileName } = await this.findTask(taskId);
     const shortId = tabHint ? await this.resolveTabHint(conn, task, tabHint) : this.resolveCurrentTab(task);
     const cdpTargetId = this.getCdpTargetId(task, shortId);
     const target = await this.getTarget(conn, cdpTargetId);
@@ -1875,17 +1909,22 @@ export class BrowserService {
 
     const sessionId = await this.getSessionId(conn, target.targetId);
 
+    // No explicit --path: fall back to the profile's downloads dir, the same
+    // destination already set browser-global at connect (applyDefaultDownloadBehavior).
+    const resolvedPath = downloadPath ?? getProfileDownloadsDir(profileName);
+    await fs.promises.mkdir(resolvedPath, { recursive: true });
+
     await conn.cdp.send(
       'Browser.setDownloadBehavior',
       {
         behavior: 'allow',
-        downloadPath,
+        downloadPath: resolvedPath,
         eventsEnabled: true,
       },
       sessionId
     );
 
-    this.pendingDownloads.set(taskId, { path: downloadPath, completed: false });
+    this.pendingDownloads.set(taskId, { path: resolvedPath, completed: false });
 
     conn.cdp.on('Browser.downloadProgress', (params: any) => {
       if (params.state === 'completed') {
@@ -1896,6 +1935,8 @@ export class BrowserService {
         }
       }
     });
+
+    return resolvedPath;
   }
 
   async waitForDownload(taskId: string, timeout: number = 60000): Promise<string> {
@@ -1994,11 +2035,13 @@ export class BrowserService {
       pid,
       electron: true,
       targetFilter: profile.targetFilter,
+      profileName: forkName,
       forkedFrom: profile.name,
       tasks: new Map(),
       sessionCache: new Map(),
     };
     this.connections.set(forkName, connection);
+    await this.applyDefaultDownloadBehavior(connection, forkName);
 
     return { forkName, connection };
   }
@@ -2205,7 +2248,7 @@ export class BrowserService {
   private async findTask(
     taskId: string,
     profileName?: string
-  ): Promise<{ conn: ProfileConnection; task: Task }> {
+  ): Promise<{ conn: ProfileConnection; task: Task; profileName: string }> {
     if (profileName) {
       const conn = this.connections.get(profileName);
       if (!conn) {
@@ -2215,13 +2258,13 @@ export class BrowserService {
       if (!task) {
         throw new Error(`Task "${taskId}" not found on profile "${profileName}"`);
       }
-      return { conn, task };
+      return { conn, task, profileName };
     }
 
-    for (const [, conn] of this.connections) {
+    for (const [key, conn] of this.connections) {
       const task = conn.tasks.get(taskId);
       if (task) {
-        return { conn, task };
+        return { conn, task, profileName: conn.profileName ?? key };
       }
     }
 

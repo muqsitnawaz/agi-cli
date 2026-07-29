@@ -32,6 +32,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageJsonPath = path.join(__dirname, '..', 'package.json');
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
 const VERSION = packageJson.version;
+
+if (process.argv[2] === '__vault-age-helper') {
+  const { runVaultAgeHelperCli } = await import('./lib/secrets/vault-age-helper.js');
+  await runVaultAgeHelperCli();
+  process.exit(process.exitCode ?? 0);
+}
+
 import {
   NPM_PACKAGE_NAME,
   deriveGlobalPrefix,
@@ -40,11 +47,13 @@ import {
   installPackageWithBun,
   verifyInstalledVersion,
   refreshAliasShims,
+  downloadVerifiedTarball,
 } from './lib/self-update.js';
 
 interface NpmPackageMetadata {
   version: string;
   integrity: string;
+  tarball: string;
 }
 
 // Detect dev/working-tree builds and default the noisy startup steps off.
@@ -73,11 +82,13 @@ import {
   LAZY_COMMAND_NAMES,
   loadView,
   loadInspect,
+  loadResources,
   loadFeedback,
   loadCommands,
   loadHooks,
   loadSkills,
   loadRules,
+  loadMemory,
   loadPermissions,
   loadMcp,
   loadCli,
@@ -88,19 +99,22 @@ import {
   loadVersions,
   loadImport,
   loadPackages,
-  loadDaemon,
   loadRoutines,
+  loadMonitors,
   loadRun,
+  loadFork,
   loadDefaults,
   loadModels,
   loadPrune,
   loadTrash,
   loadRestore,
   loadDoctor,
+  loadApply,
   loadCheck,
   loadStatus,
   loadProfiles,
   loadSecrets,
+  loadLogin,
   loadWallet,
   loadHelper,
   loadMenubar,
@@ -112,8 +126,10 @@ import {
   loadFactory,
   loadUsage,
   loadCost,
+  loadOutput,
   loadBudget,
   loadAlias,
+  loadMine,
   loadPty,
   loadTmux,
   loadWatchdog,
@@ -123,11 +139,19 @@ import {
   loadLogs,
   loadEvents,
   loadAudit,
+  loadWebhook,
+  loadFunnel,
   loadSsh,
   loadPull,
   loadPush,
   loadRepo,
   loadSetup,
+  loadUninstall,
+  loadShare,
+  loadSend,
+  loadHq,
+  loadFeed,
+  loadMailboxes,
   type ModuleLoader,
 } from './lib/startup/command-registry.js';
 import { applyGlobalHelpConventions } from './lib/help.js';
@@ -151,12 +175,24 @@ if (process.argv[2] === '__shim') {
   process.exit(code);
 }
 
+if (process.argv[2] === '__daemon-run') {
+  const { runDaemon } = await import('./lib/daemon.js');
+  await runDaemon();
+  process.exit(process.exitCode ?? 0);
+}
+
+// White-label: the shim for a brand (e.g. `jack`) exports AGENTS_BRAND, so the
+// CLI presents its own name/help/errors as the brand. Unbranded (AGENTS_BRAND
+// unset) resolves to 'agents' and everything below is byte-identical to before.
+const BRAND = resolveBrandName();
+
 const program = new Command();
 
 program
-  .name('agents')
+  .name(BRAND)
   .description('Environment manager for AI agents')
   .version(VERSION)
+  .option('--verbose', 'Show startup self-heal details on stderr')
   .helpOption('-h, --help', 'Show help')
   .addHelpCommand(false);
 
@@ -171,7 +207,7 @@ program
 function auditCommandPath(cmd: Command): string[] {
   const parts: string[] = [];
   let c: Command | null | undefined = cmd;
-  while (c && c.name() && c.name() !== 'agents') {
+  while (c && c.name() && c.name() !== BRAND) {
     parts.unshift(c.name());
     c = c.parent;
   }
@@ -188,7 +224,10 @@ program.hook('preAction', (_thisCommand, actionCommand) => {
     emit('command.start', {
       module: parts[0],
       command: parts.join(' '),
-      args: redactArgs(actionCommand.args),
+      // Commander exposes positional operands in actionCommand.args but omits
+      // parsed option values. Audit the real argv so sensitive flags are seen
+      // and redacted instead of silently bypassing the policy.
+      args: redactArgs(process.argv.slice(2, 22)),
       cwd: process.cwd(),
     });
   } catch {
@@ -211,11 +250,37 @@ program.hook('postAction', (_thisCommand, actionCommand) => {
   }
 });
 
+/**
+ * Skin the static root help for a brand: rewrite the visible `agents` command
+ * examples to the brand name and drop lines for commands this brand disabled.
+ * A no-op for the unbranded `agents` CLI with nothing disabled.
+ */
+function brandRootHelp(raw: string): string {
+  let text = raw;
+  if (BRAND !== 'agents') {
+    text = text
+      .replace(/Usage: agents /g, `Usage: ${BRAND} `)
+      .replace(/^ {2}agents /gm, `  ${BRAND} `)
+      .replace(/Run 'agents /g, `Run '${BRAND} `);
+  }
+  const disabled = disabledCommandsForActiveBrand();
+  if (disabled.size > 0) {
+    text = text
+      .split('\n')
+      .filter((line) => {
+        const m = line.match(/^ {2}([a-z][\w-]*)/);
+        return !(m && disabled.has(m[1]));
+      })
+      .join('\n');
+  }
+  return text;
+}
+
 // Custom help for the main program only
 const originalHelpInformation = program.helpInformation.bind(program);
 program.helpInformation = function () {
-  if (this.name() === 'agents' && !this.parent) {
-    return `Usage: agents [command] [options]
+  if (this.name() === BRAND && !this.parent) {
+    return brandRootHelp(`Usage: agents [command] [options]
 
 Install, configure, run, and dispatch AI coding agents from one place.
 Works with Claude, Codex, Gemini, Cursor, OpenCode, OpenClaw, and Droid.
@@ -236,6 +301,7 @@ Agent versions:
   trash                           Inspect and restore soft-deleted version directories
   view [agent[@version]]          List versions, or inspect one in detail
   inspect <target>                Deep details for one agent+version, or a DotAgents repo (user|system|project|alias|path)
+  resources                       Show merged DotAgents resources with their winning layer
 
 Agent configuration (synced across versions):
   rules                           Instructions given to agents (CLAUDE.md, etc.)
@@ -255,13 +321,17 @@ Run and dispatch:
   run <agent|profile> [prompt]    Run an agent. Omit prompt for interactive mode.
   defaults                        Configure run defaults by agent/version selector
   teams                           Coordinate multiple agents on shared work
+  hq                              JSON bridge for the interactive Agents HQ floor
   routines                        Run agents on a cron schedule (scheduler auto-starts)
+  webhook                         Receive signed GitHub/Linear webhooks for trigger routines
+  funnel                          Expose a webhook receiver through Tailscale Funnel
   sessions                        Browse, search, and replay past runs (live-search in TTY; grouped by workspace)
   logs [id]                       Show a run's log — host-dispatch task or session; -f to follow
   browser                         Automate a browser — navigate, click, screenshot, console, network
   pty                             Drive interactive terminal programs (REPLs, TUIs) via a persistent PTY session
 
 Credentials and profiles:
+  profile                         Activate resource profiles across skills, MCP, permissions, and secrets
   profiles                        Bundles of (host CLI, endpoint, model, auth)
   secrets                         Keychain-backed env bundles; use 'secrets exec <bundle> -- <cmd>' to inject into a subprocess
 
@@ -290,9 +360,10 @@ Automation tips:
 Options:
   -V, --version                   Show version number
   -h, --help                      Show help
+  --verbose                       Show startup self-heal details on stderr
 
 System config lives in ~/.agents/.system/. Run 'agents <command> --help' for details.
-`;
+`);
   }
   return originalHelpInformation();
 };
@@ -331,6 +402,7 @@ async function showWhatsNew(fromVersion: string, toVersion: string): Promise<voi
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 import { getUpdateCheckPath, getMigratedSentinelPath, getUserAgentsDir, getRuntimeStateDir } from './lib/state.js';
+import { resolveBrandName, disabledCommandsForActiveBrand } from './lib/brand.js';
 import {
   readUpdateCache,
   saveUpdateCheck,
@@ -403,13 +475,17 @@ async function fetchNpmPackageMetadata(versionOrTag = 'latest', timeoutMs = 5000
 
   const data = await response.json() as {
     version?: unknown;
-    dist?: { integrity?: unknown };
+    dist?: { integrity?: unknown; tarball?: unknown };
   };
-  if (typeof data.version !== 'string' || typeof data.dist?.integrity !== 'string') {
-    throw new Error('npm registry response did not include version and integrity');
+  if (
+    typeof data.version !== 'string' ||
+    typeof data.dist?.integrity !== 'string' ||
+    typeof data.dist?.tarball !== 'string'
+  ) {
+    throw new Error('npm registry response did not include version, integrity, and tarball');
   }
 
-  return { version: data.version, integrity: data.dist.integrity };
+  return { version: data.version, integrity: data.dist.integrity, tarball: data.dist.tarball };
 }
 
 function printResolvedPackage(metadata: NpmPackageMetadata): void {
@@ -419,15 +495,29 @@ function printResolvedPackage(metadata: NpmPackageMetadata): void {
 
 async function installResolvedPackage(metadata: NpmPackageMetadata): Promise<void> {
   const packageRoot = path.resolve(__dirname, '..');
-  const spec = `${NPM_PACKAGE_NAME}@${metadata.version}`;
-  // Upgrade with the package manager that owns this install. A bun global
-  // install lives at <bunGlobalDir>/node_modules/... (no `lib` segment), so an
-  // `npm install --prefix` would write to <bunGlobalDir>/lib/node_modules and
-  // never touch the running copy — npm exits 0, the verify below fails.
-  if (detectPackageManager(packageRoot) === 'bun') {
-    await installPackageWithBun(spec);
-  } else {
-    await installPackageIntoPrefix(spec, deriveGlobalPrefix(packageRoot));
+  // Download the published tarball and prove its bytes match the registry
+  // integrity BEFORE installing anything. A `name@version` spec would let the
+  // package manager fetch and install whatever the registry serves with no
+  // hash check on our side; instead we verify here and install the LOCAL, now
+  // trusted .tgz. A mismatch throws and nothing below runs — fail closed.
+  const tarball = await downloadVerifiedTarball(metadata.tarball, metadata.integrity);
+  try {
+    // Upgrade with the package manager that owns this install. A bun global
+    // install lives at <bunGlobalDir>/node_modules/... (no `lib` segment), so an
+    // `npm install --prefix` would write to <bunGlobalDir>/lib/node_modules and
+    // never touch the running copy — npm exits 0, the verify below fails.
+    if (detectPackageManager(packageRoot) === 'bun') {
+      await installPackageWithBun(tarball);
+    } else {
+      await installPackageIntoPrefix(tarball, deriveGlobalPrefix(packageRoot));
+    }
+  } finally {
+    // Best-effort cleanup of the verified tarball and its temp dir.
+    try {
+      fs.rmSync(path.dirname(tarball), { recursive: true, force: true });
+    } catch {
+      /* leave it for the OS temp sweep */
+    }
   }
   verifyInstalledVersion(packageRoot, metadata.version);
   refreshAliasShims(packageRoot);
@@ -570,8 +660,9 @@ async function checkForUpdates(): Promise<void> {
 async function maybeBootstrapShimIntegration(
   requestedCommand: string | undefined,
   helpOrVersionRequested: boolean,
+  verboseStartup: boolean,
 ): Promise<void> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  if (!verboseStartup && (!process.stdin.isTTY || !process.stdout.isTTY)) {
     return;
   }
   // Pure documentation paths must never trigger interactive repair — mirrors
@@ -594,8 +685,12 @@ async function maybeBootstrapShimIntegration(
   // (a real native binary shadowing the shim) or is worth saying once (a PATH entry
   // just added). Suppression is persistent and keyed to the condition — a new
   // terminal no longer re-nags (the old per-PPID sentinel did, every shell).
-  const { healShimsInteractive } = await import('./lib/shim-heal.js');
-  const noticeLines = await healShimsInteractive();
+  const { runInteractiveShimHeal } = await import('./lib/shim-heal.js');
+  const { summarizeSelfHeal } = await import('./lib/self-heal/registry.js');
+  const { noticeLines, report } = await runInteractiveShimHeal();
+  if (verboseStartup) {
+    process.stderr.write(`[agents] startup self-heal: ${summarizeSelfHeal(report)}\n`);
+  }
   if (noticeLines) {
     for (const line of noticeLines) console.log(chalk.gray(line));
   }
@@ -608,17 +703,8 @@ async function maybeBootstrapShimIntegration(
 // upgrade helpers). The lazy registrar and the all-commands fallback below both
 // call them, so the behavior is identical to the old eager registration.
 
-/** Deprecated `memory` command — hard error pointing users at `rules`. */
-function registerMemoryCommand(p: Command): void {
-  p.command('memory', { hidden: true })
-    .allowUnknownOption()
-    .allowExcessArguments()
-    .action(() => {
-      console.error(chalk.red('"agents memory" has been renamed to "agents rules".'));
-      console.error(chalk.gray('Run "agents rules --help" for usage.\n'));
-      process.exit(1);
-    });
-}
+// memory is a first-class resource command (see commands/memory.ts via
+// COMMAND_LOADERS). The old memory→rules tombstone was removed in RUSH-1330.
 
 /** Deprecated `perms` alias — re-parses as `permissions`. */
 function registerPermsAliasCommand(p: Command): void {
@@ -734,9 +820,6 @@ async function reg(loader: ModuleLoader): Promise<void> {
  */
 async function registerEagerForRequest(name: string): Promise<boolean> {
   switch (name) {
-    case 'memory':
-      registerMemoryCommand(program);
-      return true;
     case 'perms':
       // The action re-parses as `permissions`, so that target must exist too.
       registerPermsAliasCommand(program);
@@ -771,13 +854,16 @@ async function registerEagerForRequest(name: string): Promise<boolean> {
  */
 async function registerAllEagerCommands(): Promise<void> {
   await reg(loadView);
+  await reg(loadShare);
+  await reg(loadSend);
   await reg(loadInspect);
+  await reg(loadResources);
   await reg(loadFeedback);
   await reg(loadCommands);
   await reg(loadHooks);
   await reg(loadSkills);
   await reg(loadRules);
-  registerMemoryCommand(program);
+  await reg(loadMemory);
   await reg(loadPermissions);
   registerPermsAliasCommand(program);
   await reg(loadMcp);
@@ -789,20 +875,23 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadVersions);
   await reg(loadImport);
   await reg(loadPackages);
-  await reg(loadDaemon);
   await reg(loadRoutines);
+  await reg(loadMonitors);
   await reg(loadRun);
+  await reg(loadFork);
   await reg(loadDefaults);
   await reg(loadModels);
   await reg(loadPrune);
   await reg(loadTrash);
   await reg(loadRestore);
   await reg(loadDoctor);
+  await reg(loadApply);
   await reg(loadCheck);
   await reg(loadStatus);
   registerExecAliasCommand(program);
   await reg(loadProfiles);
   await reg(loadSecrets);
+  await reg(loadLogin);
   await reg(loadWallet);
   await reg(loadHelper);
   await reg(loadMenubar);
@@ -814,8 +903,10 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadFactory);
   await reg(loadUsage);
   await reg(loadCost);
+  await reg(loadOutput);
   await reg(loadBudget);
   await reg(loadAlias);
+  await reg(loadMine);
   await reg(loadPty);
   await reg(loadTmux);
   await reg(loadWatchdog);
@@ -825,6 +916,11 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadLogs);
   await reg(loadEvents);
   await reg(loadAudit);
+  await reg(loadWebhook);
+  await reg(loadFunnel);
+  await reg(loadHq);
+  await reg(loadFeed);
+  await reg(loadMailboxes);
   await reg(loadSsh);
   registerJobsCronAliasCommand(program, 'jobs');
   registerJobsCronAliasCommand(program, 'cron');
@@ -833,6 +929,7 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadPush);
   await reg(loadRepo);
   await reg(loadSetup);
+  await reg(loadUninstall);
 }
 
 /** Calculate the Levenshtein edit distance between two strings. */
@@ -889,11 +986,19 @@ program.on('command:*', (operands) => {
 // and whether the update check + background sync run at all.
 const passedArgs = process.argv.slice(2);
 const requestedCommand = passedArgs.find((arg) => !arg.startsWith('-'));
+const verboseStartup = passedArgs.includes('--verbose');
 // Help and version output are pure documentation — they must never gate on
 // setup, otherwise `agents <cmd> --help` becomes useless on a fresh box.
 const helpOrVersionRequested = passedArgs.some(
   (arg) => arg === '--help' || arg === '-h' || arg === '--version' || arg === '-V',
 );
+
+// White-label: a brand can hide built-in top-level commands. A hidden command
+// must behave as if it doesn't exist under this brand (unknown-command +
+// spellcheck), while `agents` itself is unaffected. `brandDisabled` is empty for
+// the unbranded CLI, so all of this is a no-op there.
+const brandDisabled = disabledCommandsForActiveBrand();
+const requestedIsDisabled = requestedCommand !== undefined && brandDisabled.has(requestedCommand);
 
 // `--host` passthrough: run this invocation on a remote machine over SSH instead
 // of locally. Handled before any local command registration / update check /
@@ -901,7 +1006,7 @@ const helpOrVersionRequested = passedArgs.some(
 // read-only + config + teams commands route here; `run`/`sessions` are absent
 // from the table and fall through to their own richer `--host` handling below.
 // `--help`/`--version` stay local (docs must work without a reachable host).
-if (requestedCommand !== undefined && !helpOrVersionRequested) {
+if (requestedCommand !== undefined && !helpOrVersionRequested && !requestedIsDisabled) {
   const { maybeRunOnHost } = await import('./lib/hosts/passthrough.js');
   if (await maybeRunOnHost(requestedCommand, passedArgs)) {
     process.exit(process.exitCode ?? 0);
@@ -911,7 +1016,12 @@ if (requestedCommand !== undefined && !helpOrVersionRequested) {
 // Register only the command(s) this invocation actually uses. Lazy commands
 // (sessions/teams/cloud) are handled after applyGlobalHelpConventions below.
 const isLazyRequest = requestedCommand !== undefined && LAZY_COMMAND_NAMES.has(requestedCommand);
-if (requestedCommand !== undefined && !isLazyRequest) {
+if (requestedIsDisabled) {
+  // The brand turned this command off: register the full tree so the "did you
+  // mean" picker still works, then strip the disabled commands below so the
+  // request resolves as unknown.
+  await registerAllEagerCommands();
+} else if (requestedCommand !== undefined && !isLazyRequest) {
   const known = await registerEagerForRequest(requestedCommand);
   if (!known) {
     // Unknown top-level command: register the full tree so the "did you mean"
@@ -931,8 +1041,18 @@ applyGlobalHelpConventions(program);
 
 // Lazy commands pull in the SQLite-backed session/cloud stack; register them
 // only when explicitly requested, keeping lightweight commands off that path.
-if (isLazyRequest) {
+if (isLazyRequest && !requestedIsDisabled) {
   for (const loader of COMMAND_LOADERS[requestedCommand!]) await reg(loader);
+}
+
+// White-label: remove any commands this brand disabled so they resolve as
+// unknown (the command:* handler then reports "unknown command"). Unbranded or
+// nothing-disabled → no-op. Done after all registration paths above.
+if (brandDisabled.size > 0) {
+  const kept = program.commands.filter((c) => !brandDisabled.has(c.name()));
+  if (kept.length !== program.commands.length) {
+    (program as unknown as { commands: typeof program.commands }).commands = kept;
+  }
 }
 
 // Pure documentation paths (--version / --help / -h) return immediately: skip
@@ -973,8 +1093,9 @@ if (firstRun) {
 }
 
 // Every command requires the system repo to be cloned first. `setup` is the
-// only exemption — it's the command that does the cloning.
-const SETUP_EXEMPT_COMMANDS = new Set(['setup', 'help']);
+// command that does the cloning; `uninstall` is its reverse and must run even
+// from a broken/half-setup state (that is exactly when you want to tear down).
+const SETUP_EXEMPT_COMMANDS = new Set(['setup', 'help', 'uninstall']);
 
 // Fold legacy ~/.agents-system/ into ~/.agents/.system/ BEFORE ensureInitialized
 // runs. ensureInitialized checks for .git inside the new path; if the user is
@@ -1014,7 +1135,7 @@ if (process.env.AGENTS_SKIP_MIGRATION !== '1') {
     // Bumping the suffix re-runs migrations for every user; binary releases that
     // don't change the schema must NOT re-run (they would destroy user content
     // when migration steps overlap with user-authored paths). See issue #20.
-    const sentinelValue = 'v11';
+    const sentinelValue = 'v13';
     let needRun = true;
     try {
       if (fs.existsSync(sentinel) && fs.readFileSync(sentinel, 'utf-8').trim() === sentinelValue) {
@@ -1056,7 +1177,7 @@ if (passedArgs.length === 0) {
 }
 
 try {
-  await maybeBootstrapShimIntegration(requestedCommand, helpOrVersionRequested);
+  await maybeBootstrapShimIntegration(requestedCommand, helpOrVersionRequested, verboseStartup);
   await program.parseAsync();
 } catch (err) {
   if (err instanceof Error && err.name === 'ExitPromptError') {

@@ -13,9 +13,12 @@
  *    SSH). The item-name scheme is identical, so the only difference is where
  *    bytes land. A file-backed bundle is discovered by the presence of its
  *    metadata item in the file store.
+ *  - `vault`: a single age-encrypted ~/.agents/vault.age file unlocked by
+ *    `agents login`; intended for user-managed cross-machine file sync.
  *
- * Cross-machine sync is handled by src/lib/secrets/sync.ts via an explicit
- * encrypted export/import flow; the bundle layer is sync-agnostic.
+ * Server-backed cross-machine sync is handled by src/lib/secrets/sync.ts via
+ * an explicit encrypted export/import flow; the bundle layer also supports the
+ * local vault backend for user-managed file sync.
  */
 
 import * as fs from 'fs';
@@ -28,6 +31,7 @@ import {
   getKeychainTokens,
   hasKeychainToken,
   isKeychainBackendOverridden,
+  keychainServiceAlias,
   keychainUsesFileFallback,
   listKeychainItems,
   parseBundleValue,
@@ -38,13 +42,26 @@ import {
   type SecretRef,
 } from './index.js';
 import { fileStore } from './filestore.js';
+import {
+  getVaultSession,
+  vaultDeleteItem,
+  vaultExists,
+  vaultGetItems,
+  vaultGetItem,
+  vaultHasItem,
+  vaultListItems,
+  vaultSetItems,
+  vaultSetItem,
+} from './vault.js';
 import { emit } from '../events.js';
 import { readMeta } from '../state.js';
-import { agentGetSync, agentAutoLoadSync, agentGetMetaSync, agentAutoLoadMetaSync, secretsAgentAutoEnabled, DEFAULT_TTL_MS } from './agent.js';
+import { assertNameActiveInResourceProfile, filterNamesForActiveResourceProfile } from '../resource-profiles.js';
+import { agentGetSync, agentAutoLoadSync, agentGetMetaSync, agentAutoLoadMetaSync, agentEvictSync, secretsAgentAutoEnabled, secretsHoldMs } from './agent.js';
+import { loadSession, deleteSession } from './session-store.js';
 import { createHash } from 'node:crypto';
 
 /** Which store carries a bundle's items. */
-export type SecretsBackend = 'keychain' | 'file';
+export type SecretsBackend = 'keychain' | 'file' | 'vault';
 
 /**
  * Uniform read/write surface over a secret store, so the bundle functions
@@ -58,6 +75,7 @@ interface ItemStore {
    * `never` prompt-policy). Backends with no ACL concept (file store, test
    * backend) ignore it. */
   set(item: string, value: string, opts?: { noAcl?: boolean }): void;
+  setBatch(items: Map<string, string>, opts?: { noAcl?: boolean }): void;
   delete(item: string): boolean;
   list(prefix: string): string[];
 }
@@ -67,6 +85,9 @@ const keychainStore: ItemStore = {
   get: getKeychainToken,
   getBatch: getKeychainTokens,
   set: setKeychainToken,
+  setBatch: (items, opts) => {
+    for (const [item, value] of items) setKeychainToken(item, value, opts);
+  },
   delete: deleteKeychainToken,
   list: listKeychainItems,
 };
@@ -94,12 +115,29 @@ const fileItemStore: ItemStore = {
     return out;
   },
   set: (item, value) => fileStore.set(item, value, { allowAutoProvision: FILE_ALLOW_AUTO_PROVISION }),
+  setBatch: (items) => {
+    for (const [item, value] of items) {
+      fileStore.set(item, value, { allowAutoProvision: FILE_ALLOW_AUTO_PROVISION });
+    }
+  },
   delete: (item) => fileStore.delete(item),
   list: (prefix) => fileStore.list(prefix),
 };
 
+const vaultStore: ItemStore = {
+  has: vaultHasItem,
+  get: vaultGetItem,
+  getBatch: vaultGetItems,
+  set: (item, value) => vaultSetItem(item, value),
+  setBatch: (items) => vaultSetItems(items),
+  delete: vaultDeleteItem,
+  list: vaultListItems,
+};
+
 function itemStore(backend: SecretsBackend): ItemStore {
-  return backend === 'file' ? fileItemStore : keychainStore;
+  if (backend === 'file') return fileItemStore;
+  if (backend === 'vault') return vaultStore;
+  return keychainStore;
 }
 
 /**
@@ -109,7 +147,17 @@ function itemStore(backend: SecretsBackend): ItemStore {
  * "read metadata to learn where metadata lives." Absent ⇒ keychain.
  */
 export function bundleBackend(name: string): SecretsBackend {
-  return fileStore.has(BUNDLE_META_PREFIX + name) ? 'file' : 'keychain';
+  const item = BUNDLE_META_PREFIX + name;
+  if (fileStore.has(item)) return 'file';
+  if (vaultExists() && getVaultSession().loggedIn) {
+    try {
+      if (vaultHasItem(item)) return 'vault';
+    } catch {
+      // A vault problem should not hide a keychain/file bundle that already
+      // resolved above; exact vault reads surface the decrypt/login error.
+    }
+  }
+  return 'keychain';
 }
 
 /**
@@ -128,6 +176,11 @@ function assertFileBackendUsable(name: string): void {
     `(no biometry prompt is available headlessly). Set it for this run, e.g.\n` +
     `  AGENTS_SECRETS_PASSPHRASE=… agents secrets exec ${name} -- <command>`
   );
+}
+
+function assertVaultBackendUsable(name: string): void {
+  if (getVaultSession().loggedIn) return;
+  throw new Error(`Synced bundle '${name}' needs an active login. Run: agents login`);
 }
 
 /** Allowed values for a secret's `type` metadata field. */
@@ -210,9 +263,10 @@ export interface LegacyBundleCandidate {
 /** Minimum gap between last_used updates so the keychain isn't written on every secrets injection. */
 const LAST_USED_THROTTLE_MS = 60_000;
 
-const BUNDLE_NAME_PATTERN = /^[a-z0-9][a-z0-9\-_.]{0,48}$/i;
-const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const BUNDLE_META_PREFIX = 'agents-cli.bundles.';
+export const BUNDLE_NAME_PATTERN = /^[a-z0-9][a-z0-9\-_.]{0,48}$/i;
+export const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const BUNDLE_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_-]+)?$/;
+export const BUNDLE_META_PREFIX = 'agents-cli.bundles.';
 const SECRETS_ITEM_PREFIX = 'agents-cli.secrets.';
 
 export const RESERVED_ENV_NAMES = new Set([
@@ -227,6 +281,11 @@ export function bundleToEnvPrefix(name: string): string {
 
 export function isReservedEnvName(key: string): boolean {
   return RESERVED_ENV_NAMES.has(key.toUpperCase());
+}
+
+export function bundleKeyToEnvKey(key: string): string {
+  const dot = key.indexOf('.');
+  return dot === -1 ? key : key.slice(0, dot);
 }
 
 export function isLoaderOrInterpreterEnv(name: string): boolean {
@@ -265,10 +324,11 @@ export function validateBundleName(name: string): void {
 }
 
 export function validateEnvKey(key: string): void {
-  if (!ENV_KEY_PATTERN.test(key)) {
-    throw new Error(`Invalid environment variable name '${key}'. Must match [A-Za-z_][A-Za-z0-9_]*.`);
+  if (!BUNDLE_KEY_PATTERN.test(key)) {
+    throw new Error(`Invalid bundle key '${key}'. Must match [A-Za-z_][A-Za-z0-9_]* with optional .account suffix.`);
   }
-  if (isLoaderOrInterpreterEnv(key) || isReservedEnvName(key)) {
+  const envKey = bundleKeyToEnvKey(key);
+  if (isLoaderOrInterpreterEnv(envKey) || isReservedEnvName(envKey)) {
     throw new Error(`Env key "${key}" is reserved — cannot be used in a secrets bundle. Reserved keys include PATH, HOME, USER, and dynamic-loader/interpreter vars (LD_*, DYLD_*, NODE_OPTIONS, etc.).`);
   }
 }
@@ -309,6 +369,7 @@ export function readBundle(name: string): SecretsBundle {
   validateBundleName(name);
   const backend = bundleBackend(name);
   if (backend === 'file') assertFileBackendUsable(name);
+  if (backend === 'vault') assertVaultBackendUsable(name);
   let json: string;
   try {
     json = itemStore(backend).get(bundleMetaItem(name));
@@ -319,6 +380,9 @@ export function readBundle(name: string): SecretsBundle {
       throw new Error(
         `Bundle '${name}': failed to decrypt — wrong AGENTS_SECRETS_PASSPHRASE or tampered file store. (${(err as Error).message})`,
       );
+    }
+    if (vaultExists() && !getVaultSession().loggedIn) {
+      throw new Error(`Synced secrets are locked. Run: agents login`);
     }
     throw new Error(`Secrets bundle '${name}' not found.`);
   }
@@ -338,9 +402,9 @@ export function readBundle(name: string): SecretsBundle {
     name,
     description: parsed.description,
     allow_exec: Boolean(parsed.allow_exec),
-    // Absent ⇒ keychain; only set when file-backed so a keychain bundle
+    // Absent ⇒ keychain; only set when non-keychain so a keychain bundle
     // round-trips byte-for-byte.
-    backend: backend === 'file' ? 'file' : undefined,
+    backend: backend === 'keychain' ? undefined : backend,
     // Legacy wire key: the policy is persisted under `tier` (`session` == `daily`).
     policy: parsePolicy((parsed as { tier?: unknown }).tier),
     vars: parsed.vars && typeof parsed.vars === 'object' ? parsed.vars : {},
@@ -387,10 +451,50 @@ export function bundlePolicy(bundle: SecretsBundle): SecretsPolicy {
   return bundle.policy ?? secretsDefaultPolicy();
 }
 
-export function writeBundle(bundle: SecretsBundle): void {
+/** Options for writeBundle. */
+export interface WriteBundleOptions {
+  /**
+   * Skip evicting the bundle from the secrets-agent broker after the write.
+   * Only for writers that change nothing the broker serves — today that is
+   * stampLastUsed (a usage-telemetry timestamp, fired on every broker HIT):
+   * evicting there would make the cache destroy itself on first use. Every
+   * mutating writer (add / rotate / remove / rename / policy / import) must
+   * leave this unset so a broker-held copy never serves stale values for up
+   * to the ~7d hold.
+   */
+  skipBrokerEviction?: boolean;
+}
+
+/**
+ * Whether a bundle write should evict the broker-held copy. Pure + exported
+ * for regression coverage. Skips when the writer opted out (stampLastUsed),
+ * when the broker integration is disabled (AGENTS_SECRETS_NO_AGENT — the same
+ * kill-switch the read fast-path honors), or when a test keychain backend is
+ * installed (an in-memory backend has no real keychain behind it, and a test
+ * writing bundle 'prod' must never evict the user's real 'prod' unlock).
+ */
+export function shouldEvictAfterBundleWrite(
+  skipRequested: boolean,
+  noAgentEnv: string | undefined,
+  backendOverridden: boolean,
+): boolean {
+  if (skipRequested) return false;
+  if (noAgentEnv === '1') return false;
+  if (backendOverridden) return false;
+  return true;
+}
+
+interface PreparedBundleWrite {
+  backend: SecretsBackend;
+  metadataItem: string;
+  metadataJson: string;
+}
+
+function prepareBundleWrite(bundle: SecretsBundle): PreparedBundleWrite {
   validateBundleName(bundle.name);
   const backend: SecretsBackend = bundle.backend ?? 'keychain';
   if (backend === 'file') assertFileBackendUsable(bundle.name);
+  if (backend === 'vault') assertVaultBackendUsable(bundle.name);
   for (const key of Object.keys(bundle.vars)) {
     validateEnvKey(key);
   }
@@ -415,9 +519,13 @@ export function writeBundle(bundle: SecretsBundle): void {
   if (!bundle.created_at) bundle.created_at = now;
   bundle.updated_at = now;
   const payload = {
+    // The bundle's own name, persisted since #316: with hashed service names
+    // the keychain item name is opaque, so listBundles recovers the display
+    // name from this field. Older CLIs drop unknown fields on read — safe.
+    name: bundle.name,
     description: bundle.description,
     allow_exec: bundle.allow_exec ? true : undefined,
-    backend: backend === 'file' ? 'file' : undefined,
+    backend: backend === 'keychain' ? undefined : backend,
     // Wire format: persist the policy under the legacy `tier` token so older CLI
     // versions on other synced machines keep reading it — `daily`⇒`session`,
     // explicit `always`⇒`biometry`, `never`⇒`none`. An absent policy omits the
@@ -434,13 +542,45 @@ export function writeBundle(bundle: SecretsBundle): void {
     vars: bundle.vars,
     meta,
   };
-  const json = JSON.stringify(payload);
+  return {
+    backend,
+    metadataItem: bundleMetaItem(bundle.name),
+    metadataJson: JSON.stringify(payload),
+  };
+}
+
+function finishBundleWrite(bundle: SecretsBundle, opts: WriteBundleOptions): void {
+  emit('secrets.set', { module: 'secrets', bundle: bundle.name });
+  // A broker-held snapshot predates this write; evict it so the next read
+  // re-resolves from the keychain instead of serving stale values.
+  if (shouldEvictAfterBundleWrite(Boolean(opts.skipBrokerEviction), process.env.AGENTS_SECRETS_NO_AGENT, isKeychainBackendOverridden())) {
+    agentEvictSync(bundle.name);
+    // Also drop any durable session snapshot, or a broker restart would rehydrate
+    // the stale env after a rotate/rename (session-store.ts).
+    deleteSession(bundle.name);
+  }
+}
+
+export function writeBundle(bundle: SecretsBundle, opts: WriteBundleOptions = {}): void {
+  const prepared = prepareBundleWrite(bundle);
   // A `never` bundle's metadata is stored without the biometry ACL too, so
   // `view` and the metadata half of a read resolve silently — the whole point
   // of the tier. On an un-updated pinned helper this write fails loudly (the
   // no-ACL command is missing) rather than silently landing an ACL'd item.
-  itemStore(backend).set(bundleMetaItem(bundle.name), json, { noAcl: bundle.policy === 'never' });
-  emit('secrets.set', { module: 'secrets', bundle: bundle.name });
+  itemStore(prepared.backend).set(prepared.metadataItem, prepared.metadataJson, { noAcl: bundle.policy === 'never' });
+  finishBundleWrite(bundle, opts);
+}
+
+export function writeBundleWithItems(
+  bundle: SecretsBundle,
+  items: Map<string, string>,
+  opts: WriteBundleOptions = {},
+): void {
+  const prepared = prepareBundleWrite(bundle);
+  const batch = new Map(items);
+  batch.set(prepared.metadataItem, prepared.metadataJson);
+  itemStore(prepared.backend).setBatch(batch, { noAcl: bundle.policy === 'never' });
+  finishBundleWrite(bundle, opts);
 }
 
 export function deleteBundle(name: string): boolean {
@@ -448,6 +588,10 @@ export function deleteBundle(name: string): boolean {
   const deleted = itemStore(bundleBackend(name)).delete(bundleMetaItem(name));
   if (deleted) {
     emit('secrets.delete', { module: 'secrets', bundle: name });
+    if (shouldEvictAfterBundleWrite(false, process.env.AGENTS_SECRETS_NO_AGENT, isKeychainBackendOverridden())) {
+      agentEvictSync(name);
+      deleteSession(name); // a deleted bundle must not be rehydratable
+    }
   }
   return deleted;
 }
@@ -457,8 +601,14 @@ export function deleteBundle(name: string): boolean {
  * posture listBundles wants (skip malformed / invalid-key bundles rather than
  * throw). `backend` is authoritative from where the item was found. Returns
  * null to skip.
+ *
+ * `nameHint` is the name recovered from a cleartext service name (Linux, the
+ * file store, pre-re-key items) — authoritative when present, and the only
+ * source for legacy metadata that predates the persisted `name` field. With
+ * hashed service names (macOS, #316) the hint is undefined and the name comes
+ * from the JSON payload written by writeBundle.
  */
-function parseBundleMeta(name: string, json: string, backend: SecretsBackend): SecretsBundle | null {
+function parseBundleMeta(nameHint: string | undefined, json: string, backend: SecretsBackend): SecretsBundle | null {
   let parsed: Partial<SecretsBundle>;
   try {
     parsed = JSON.parse(json) as Partial<SecretsBundle>;
@@ -466,11 +616,13 @@ function parseBundleMeta(name: string, json: string, backend: SecretsBackend): S
     return null;
   }
   if (!parsed || typeof parsed !== 'object') return null;
+  const name = nameHint ?? (typeof parsed.name === 'string' ? parsed.name : undefined);
+  if (!name || !BUNDLE_NAME_PATTERN.test(name)) return null;
   const bundle: SecretsBundle = {
     name,
     description: parsed.description,
     allow_exec: Boolean(parsed.allow_exec),
-    backend: backend === 'file' ? 'file' : undefined,
+    backend: backend === 'keychain' ? undefined : backend,
     // Legacy wire key: the policy is persisted under `tier` (`session` == `daily`).
     policy: parsePolicy((parsed as { tier?: unknown }).tier),
     vars: parsed.vars && typeof parsed.vars === 'object' ? parsed.vars : {},
@@ -480,7 +632,7 @@ function parseBundleMeta(name: string, json: string, backend: SecretsBackend): S
   if (typeof parsed.last_used === 'string') bundle.last_used = parsed.last_used;
   if (parsed.meta && typeof parsed.meta === 'object') bundle.meta = parsed.meta;
   for (const key of Object.keys(bundle.vars)) {
-    if (!ENV_KEY_PATTERN.test(key)) return null;
+    if (!BUNDLE_KEY_PATTERN.test(key)) return null;
   }
   return bundle;
 }
@@ -506,10 +658,12 @@ export function listBundles(): SecretsBundle[] {
     } catch {
       keychainServices = [];
     }
-    const keychainNames = keychainServices
-      .map((s) => s.slice(BUNDLE_META_PREFIX.length))
-      .filter((n) => BUNDLE_NAME_PATTERN.test(n));
-    if (keychainNames.length > 0) {
+    // With hashed service names (macOS, #316) the enumerated services are
+    // opaque (`agents-cli.h.<ns>.m`) — the display name is recovered from the
+    // metadata JSON after the batch read below. Cleartext services (Linux,
+    // pre-re-key items) still carry the name; it's kept as the parse hint so
+    // legacy metadata without the persisted `name` field keeps listing.
+    if (keychainServices.length > 0) {
       // Daily-policy fast-path (macOS). Bundle metadata items are biometry-gated,
       // so the getKeychainTokens batch below pops Touch ID on every `secrets
       // list` — the broker/`daily` mechanism only ever covered value reads, not
@@ -528,25 +682,31 @@ export function listBundles(): SecretsBundle[] {
         !isKeychainBackendOverridden() &&
         secretsAgentAutoEnabled();
       const nameSetHash = createHash('sha256')
-        .update([...keychainNames].sort().join('\n'))
+        .update([...keychainServices].sort().join('\n'))
         .digest('hex')
         .slice(0, 32);
       const cached = useAgent ? agentGetMetaSync(nameSetHash) : null;
       if (cached) {
         for (const bundle of cached) out.push(bundle);
       } else {
-        const fetched = getKeychainTokens(keychainNames.map(bundleMetaItem));
+        const fetched = getKeychainTokens(keychainServices);
         const keychainBundles: SecretsBundle[] = [];
-        for (const name of keychainNames) {
-          const json = fetched.get(bundleMetaItem(name));
+        for (const service of keychainServices) {
+          const json = fetched.get(service);
           if (json === undefined) continue;
-          const bundle = parseBundleMeta(name, json, 'keychain');
+          const nameHint = service.startsWith(BUNDLE_META_PREFIX)
+            ? service.slice(BUNDLE_META_PREFIX.length)
+            : undefined;
+          const bundle = parseBundleMeta(nameHint, json, 'keychain');
           if (bundle) keychainBundles.push(bundle);
         }
         for (const bundle of keychainBundles) out.push(bundle);
         // Populate the broker for the rest of the hold window (fire-and-forget).
+        // Same configurable cap as the value read-path — otherwise `secrets list`
+        // would keep serving a stale metadata snapshot for 7d even when the user
+        // capped the hold at 24h via secrets.agent.holdMs.
         if (useAgent && keychainBundles.length > 0) {
-          agentAutoLoadMetaSync(nameSetHash, keychainBundles, DEFAULT_TTL_MS);
+          agentAutoLoadMetaSync(nameSetHash, keychainBundles, secretsHoldMs());
         }
       }
     }
@@ -578,7 +738,30 @@ export function listBundles(): SecretsBundle[] {
     if (bundle) out.push(bundle);
   }
 
-  return out.sort((a, b) => a.name.localeCompare(b.name));
+  if (getVaultSession().loggedIn && vaultExists()) {
+    let vaultServices: string[] = [];
+    try {
+      vaultServices = vaultListItems(BUNDLE_META_PREFIX);
+    } catch {
+      vaultServices = [];
+    }
+    for (const service of vaultServices) {
+      const name = service.slice(BUNDLE_META_PREFIX.length);
+      if (!BUNDLE_NAME_PATTERN.test(name)) continue;
+      let json: string;
+      try {
+        json = vaultStore.get(bundleMetaItem(name));
+      } catch {
+        out.push({ name, backend: 'vault', vars: {} });
+        continue;
+      }
+      const bundle = parseBundleMeta(name, json, 'vault');
+      if (bundle) out.push(bundle);
+    }
+  }
+
+  const activeNames = new Set(filterNamesForActiveResourceProfile('secrets', out.map((b) => b.name)));
+  return out.filter((bundle) => activeNames.has(bundle.name)).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // Classify each var for UI rendering.
@@ -614,7 +797,9 @@ function stampLastUsed(bundle: SecretsBundle): void {
   }
   try {
     bundle.last_used = new Date(nowMs).toISOString();
-    writeBundle(bundle);
+    // skipBrokerEviction: this stamp fires on every broker HIT; letting it
+    // evict would make the cache destroy itself on first use.
+    writeBundle(bundle, { skipBrokerEviction: true });
   } catch {
     // Swallow — telemetry must never block secret resolution.
   }
@@ -657,6 +842,12 @@ export interface ResolveBundleOptions {
    * bundle-level expiry has passed) aborts the run before Touch ID is popped.
    */
   allowExpired?: boolean;
+  /**
+   * `process` projects dotted account keys like `GITHUB_USERNAME.personal` to
+   * the shell-safe base env name (`GITHUB_USERNAME`). Direct value lookups and
+   * backup/export flows use `storage` to preserve the exact bundle key names.
+   */
+  keyMode?: 'process' | 'storage';
 }
 
 /**
@@ -702,6 +893,80 @@ function selectRequestedKeys(bundle: SecretsBundle, requested: string[] | undefi
   return new Set(req ?? Object.keys(bundle.vars));
 }
 
+function assignResolvedEnvValue(
+  env: Record<string, string>,
+  bundle: SecretsBundle,
+  storageKey: string,
+  value: string,
+  keyMode: ResolveBundleOptions['keyMode'],
+  owners: Map<string, string>,
+): void {
+  const envKey = keyMode === 'storage' ? storageKey : bundleKeyToEnvKey(storageKey);
+  const previous = owners.get(envKey);
+  if (previous && previous !== storageKey) {
+    throw new Error(
+      `Bundle '${bundle.name}' maps multiple keys to '${envKey}': ${previous}, ${storageKey}. ` +
+      `Select one account variant with --keys.`,
+    );
+  }
+  owners.set(envKey, storageKey);
+  env[envKey] = value;
+}
+
+function projectResolvedEnv(
+  bundle: SecretsBundle,
+  env: Record<string, string>,
+  selectedKeys: Set<string>,
+  keyMode: ResolveBundleOptions['keyMode'],
+): Record<string, string> {
+  if (keyMode === 'storage') {
+    const out: Record<string, string> = {};
+    for (const key of selectedKeys) {
+      if (key in env) out[key] = env[key];
+    }
+    return out;
+  }
+
+  let needsProjection = false;
+  const owners = new Map<string, string>();
+  for (const key of selectedKeys) {
+    const envKey = bundleKeyToEnvKey(key);
+    if (envKey !== key) needsProjection = true;
+    const previous = owners.get(envKey);
+    if (previous && previous !== key) {
+      throw new Error(
+        `Bundle '${bundle.name}' maps multiple keys to '${envKey}': ${previous}, ${key}. ` +
+        `Select one account variant with --keys.`,
+      );
+    }
+    owners.set(envKey, key);
+  }
+  if (!needsProjection) {
+    const envKeys = Object.keys(env);
+    if (selectedKeys.size === envKeys.length && envKeys.every((key) => selectedKeys.has(key))) return env;
+    const out: Record<string, string> = {};
+    for (const key of selectedKeys) {
+      if (key in env) out[key] = env[key];
+    }
+    return out;
+  }
+
+  const out: Record<string, string> = {};
+  for (const key of selectedKeys) {
+    if (key in env) out[bundleKeyToEnvKey(key)] = env[key];
+  }
+  return out;
+}
+
+export function canCacheResolvedEnv(bundle: SecretsBundle, selectedKeys: Set<string>, keyMode: ResolveBundleOptions['keyMode']): boolean {
+  if (selectedKeys.size !== Object.keys(bundle.vars).length) return false;
+  if (keyMode === 'storage') return true;
+  for (const key of selectedKeys) {
+    if (bundleKeyToEnvKey(key) !== key) return false;
+  }
+  return true;
+}
+
 /**
  * Apply the --keys subset + expiry gate to an already-resolved snapshot from
  * the secrets-agent fast-path. The agent stores the FULL bundle env, so a
@@ -718,13 +983,10 @@ export function filterAgentHitBySubsetAndExpiry(
 ): { bundle: SecretsBundle; env: Record<string, string> } {
   const selectedKeys = selectRequestedKeys(hit.bundle, opts.keys);
   assertNotExpired(hit.bundle, [...selectedKeys], opts.allowExpired ?? false);
-  // When no subset was requested, return the cached env untouched — same
-  // reference the agent handed back, so no per-call allocation on the hot path.
-  if (!opts.keys?.length) return hit;
-  const env: Record<string, string> = {};
-  for (const key of selectedKeys) {
-    if (key in hit.env) env[key] = hit.env[key];
-  }
+  const env = projectResolvedEnv(hit.bundle, hit.env, selectedKeys, opts.keyMode);
+  // When no subset/projection was requested, return the cached env untouched —
+  // same reference the agent handed back, so no per-call allocation on the hot path.
+  if (env === hit.env) return hit;
   return { bundle: hit.bundle, env };
 }
 
@@ -784,11 +1046,12 @@ export function resolveBundleEnv(bundle: SecretsBundle, _opts: ResolveBundleOpti
     : new Map<string, string>();
 
   const env: Record<string, string> = {};
+  const owners = new Map<string, string>();
   for (const [key, raw] of Object.entries(bundle.vars)) {
     if (!selectedKeys.has(key)) continue;
     const parsed = parsedByKey.get(key)!;
     if ('literal' in parsed) {
-      env[key] = parsed.literal;
+      assignResolvedEnvValue(env, bundle, key, parsed.literal, _opts.keyMode, owners);
       continue;
     }
     if (parsed.ref.provider === 'keychain') {
@@ -800,14 +1063,15 @@ export function resolveBundleEnv(bundle: SecretsBundle, _opts: ResolveBundleOpti
           `Run: agents secrets add ${bundle.name} ${key}`
         );
       }
-      env[key] = value;
+      assignResolvedEnvValue(env, bundle, key, value, _opts.keyMode, owners);
       continue;
     }
     try {
-      env[key] = resolveRef(parsed.ref, {
+      const value = resolveRef(parsed.ref, {
         allowExec: bundle.allow_exec,
         keychainItemFor: (shortId: string) => secretsKeychainItem(bundle.name, shortId),
       });
+      assignResolvedEnvValue(env, bundle, key, value, _opts.keyMode, owners);
     } catch (err) {
       throw new Error(`Bundle '${bundle.name}' key '${key}': ${(err as Error).message}`);
     }
@@ -815,6 +1079,44 @@ export function resolveBundleEnv(bundle: SecretsBundle, _opts: ResolveBundleOpti
   // `caller` is intentionally unused; see ResolveBundleOptions.
   void _opts.caller;
   return env;
+}
+
+/**
+ * True when the current process is a background / non-interactive context that
+ * must NEVER raise a Keychain biometry prompt on the interactive user's screen —
+ * a prompt nobody is watching. Two signals, either sufficient:
+ *   - `AGENTS_RUNTIME` is `headless` or `teams` (set on the child env by
+ *     `agents run --headless`, scheduled routines, and teammates — see
+ *     exec.ts:resolveInteractive, runner.ts, teams/agents.ts).
+ *   - neither stdin nor stdout is a TTY (a detached/backgrounded task whose
+ *     stdio is redirected to a log — e.g. a release script run in the
+ *     background as `( ... ) >log 2>&1 </dev/null`).
+ * `AGENTS_SECRETS_NO_PROMPT=1` forces headless-safe; `=0` force-allows a prompt
+ * even in a non-TTY context. An interactive `eval "$(agents secrets export X)"`
+ * keeps its terminal stdin, so it is NOT classified headless and still prompts.
+ *
+ * Only **macOS keychain** reads pop an interactive Touch ID sheet — the secrets
+ * broker itself is a no-op off darwin (see agent.ts), and libsecret (Linux) /
+ * the Windows credential store resolve without any prompt. So off-darwin this
+ * ALWAYS returns false: forcing broker-only there would break every headless
+ * Linux/Windows read (CI, `agents run --headless`, routines, the Linux-driven
+ * release flow) for no benefit — there is no prompt to suppress.
+ *
+ * A read in a macOS headless context resolves broker-only (agentOnly) and fails
+ * fast with an actionable error instead of hijacking Touch ID. This generalizes
+ * the per-caller pattern already used by the daemon (daemon.ts:readDaemonClaudeOAuthToken).
+ */
+export function isHeadlessSecretsContext(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform !== 'darwin') return false; // no biometry prompt to suppress off-darwin
+  const override = env.AGENTS_SECRETS_NO_PROMPT;
+  if (override === '1') return true;
+  if (override === '0') return false;
+  const runtime = env.AGENTS_RUNTIME;
+  if (runtime === 'headless' || runtime === 'teams') return true;
+  return !process.stdin.isTTY && !process.stdout.isTTY;
 }
 
 /**
@@ -835,6 +1137,7 @@ export function readAndResolveBundleEnv(
   opts: ResolveBundleOptions = {},
 ): { bundle: SecretsBundle; env: Record<string, string> } {
   validateBundleName(name);
+  assertNameActiveInResourceProfile('secrets', name);
 
   const backend = bundleBackend(name);
 
@@ -856,20 +1159,54 @@ export function readAndResolveBundleEnv(
       emit('secrets.get', {
         module: 'secrets',
         bundle: name,
-        caller: opts.caller,
+        operation: opts.caller,
         status: 'success',
         source: 'agent',
         keyCount: Object.keys(filtered.env).length,
       });
       return filtered;
     }
+
+    // Durable-session fallback (Correction B). After a daemon restart / agents-cli
+    // upgrade the broker RAM is empty, so the fast-path above misses — but the
+    // unlock persisted a no-ACL session item (session-store.ts) that reads with NO
+    // Touch ID. Serve from it and re-warm the broker, so a warm bundle stays warm
+    // across restart — this fixes BOTH the interactive re-prompt and the headless
+    // throw below (which now fires only when there is genuinely no session).
+    const session = loadSession(name);
+    if (session) {
+      const filtered = filterAgentHitBySubsetAndExpiry({ bundle: session.bundle, env: session.env }, opts);
+      stampLastUsed(filtered.bundle);
+      // Re-warm the broker with the remaining TTL so later reads hit RAM and
+      // `agents secrets status` is honest. Best-effort; no-ops off darwin.
+      agentAutoLoadSync(name, session.bundle, session.env, Math.max(1, session.expiresAt - Date.now()));
+      emit('secrets.get', {
+        module: 'secrets',
+        bundle: name,
+        operation: opts.caller,
+        status: 'success',
+        source: 'session',
+        keyCount: Object.keys(filtered.env).length,
+      });
+      return filtered;
+    }
   }
 
-  if (opts.agentOnly) {
-    throw new Error(`Secrets bundle '${name}' is not unlocked in the secrets agent.`);
+  // Only keychain-backed bundles can pop a Touch ID prompt and are the only ones
+  // the broker ever holds. A file-backed bundle resolves via passphrase with no
+  // prompt, so agentOnly must never block it — the broker never holds file
+  // bundles, so the throw would fire unconditionally and break a legitimate read.
+  if (opts.agentOnly && backend === 'keychain') {
+    throw new Error(
+      `Secrets bundle '${name}' is not unlocked in the secrets agent, and this is a ` +
+      `headless/background process that must not raise a Touch ID prompt on the ` +
+      `interactive user's screen. Run 'agents secrets unlock ${name}' in a terminal ` +
+      `first, or set AGENTS_SECRETS_NO_PROMPT=0 to force an interactive prompt.`
+    );
   }
 
   if (backend === 'file') assertFileBackendUsable(name);
+  if (backend === 'vault') assertVaultBackendUsable(name);
   const store = itemStore(backend);
 
   const metaItem = bundleMetaItem(name);
@@ -886,7 +1223,11 @@ export function readAndResolveBundleEnv(
     : `read ${name} secrets`;
 
   void reason;
-  const fetched = store.getBatch([metaItem, ...secretItems]);
+  // secretItems are storage names as enumerated (opaque hashed names on macOS
+  // with #316 hashing active, cleartext elsewhere); metaItem is cleartext and
+  // hashed inside getBatch. Deduped because the hashed enumeration spans the
+  // bundle's whole namespace.
+  const fetched = store.getBatch([...new Set([metaItem, ...secretItems])]);
 
   const json = fetched.get(metaItem);
   if (json === undefined) {
@@ -898,6 +1239,9 @@ export function readAndResolveBundleEnv(
       throw new Error(
         `Bundle '${name}': failed to decrypt — wrong AGENTS_SECRETS_PASSPHRASE or tampered file store.`,
       );
+    }
+    if (vaultExists() && !getVaultSession().loggedIn) {
+      throw new Error(`Synced secrets are locked. Run: agents login`);
     }
     throw new Error(`Secrets bundle '${name}' not found.`);
   }
@@ -914,7 +1258,7 @@ export function readAndResolveBundleEnv(
     name,
     description: parsed.description,
     allow_exec: Boolean(parsed.allow_exec),
-    backend: backend === 'file' ? 'file' : undefined,
+    backend: backend === 'keychain' ? undefined : backend,
     // Legacy wire key: the policy is persisted under `tier` (`session` == `daily`).
     policy: parsePolicy((parsed as { tier?: unknown }).tier),
     vars: parsed.vars && typeof parsed.vars === 'object' ? parsed.vars : {},
@@ -954,7 +1298,7 @@ export function readAndResolveBundleEnv(
     emit('secrets.get', {
       module: 'secrets',
       bundle: bundle.name,
-      caller: opts.caller,
+      operation: opts.caller,
       status,
       keyCount: keys.length,
       keys,
@@ -966,30 +1310,35 @@ export function readAndResolveBundleEnv(
 
   try {
     const env: Record<string, string> = {};
+    const owners = new Map<string, string>();
     for (const [key] of Object.entries(bundle.vars)) {
       if (!selectedKeys.has(key)) continue;
       const p = parsedByKey.get(key)!;
       if ('literal' in p) {
-        env[key] = p.literal;
+        assignResolvedEnvValue(env, bundle, key, p.literal, opts.keyMode, owners);
         continue;
       }
       if (p.ref.provider === 'keychain') {
         const item = secretsKeychainItem(bundle.name, p.ref.value);
-        const value = fetched.get(item);
+        // The batch keys results by the names it was ASKED for: the cleartext
+        // metaItem, plus enumerated storage names. Look up the cleartext name
+        // first (Linux / file store), then its hashed storage alias (macOS).
+        const value = fetched.get(item) ?? fetched.get(keychainServiceAlias(item));
         if (value === undefined) {
           throw new Error(
             `Bundle '${bundle.name}' key '${key}': stored item '${item}' not found. ` +
             `Run: agents secrets add ${bundle.name} ${key}`,
           );
         }
-        env[key] = value;
+        assignResolvedEnvValue(env, bundle, key, value, opts.keyMode, owners);
         continue;
       }
       try {
-        env[key] = resolveRef(p.ref, {
+        const value = resolveRef(p.ref, {
           allowExec: bundle.allow_exec,
           keychainItemFor: (shortId: string) => secretsKeychainItem(bundle.name, shortId),
         });
+        assignResolvedEnvValue(env, bundle, key, value, opts.keyMode, owners);
       } catch (err) {
         throw new Error(`Bundle '${bundle.name}' key '${key}': ${(err as Error).message}`);
       }
@@ -997,17 +1346,21 @@ export function readAndResolveBundleEnv(
     emitReadAudit('success');
     // Auto-cache: this was a real keychain read (the agent fast-path returned
     // earlier on a hit). If the bundle opts into the `daily` policy and the user
-    // enabled `secrets.agent.auto`, populate the broker in the background so the
-    // next concurrent run reads silently. Skipped when noAgent (e.g. `unlock`,
-    // which loads the agent itself). Fire-and-forget — never blocks this read.
+    // enabled `secrets.agent.auto`, populate the broker so the next concurrent
+    // run reads silently. Skipped when noAgent (e.g. `unlock`, which loads the
+    // agent itself). When a broker is already up this warms it synchronously
+    // (bounded ~3s) so `daily` reliably sticks; only a cold-start broker uses the
+    // detached fire-and-forget path (see agentAutoLoadSync). The costly Touch ID
+    // prompt already happened, so the bounded wait is invisible.
     if (
       backend === 'keychain' &&
       !opts.noAgent &&
       process.env.AGENTS_SECRETS_NO_AGENT !== '1' &&
       bundlePolicy(bundle) === 'daily' &&
-      secretsAgentAutoEnabled()
+      secretsAgentAutoEnabled() &&
+      canCacheResolvedEnv(bundle, selectedKeys, opts.keyMode)
     ) {
-      agentAutoLoadSync(name, bundle, env, DEFAULT_TTL_MS);
+      agentAutoLoadSync(name, bundle, env, secretsHoldMs());
     }
     return { bundle, env };
   } catch (err) {
@@ -1194,7 +1547,7 @@ export function parseDotenv(content: string): Record<string, string> {
     ) {
       value = value.slice(1, -1);
     }
-    if (ENV_KEY_PATTERN.test(key)) {
+    if (BUNDLE_KEY_PATTERN.test(key)) {
       out[key] = value;
     }
   }

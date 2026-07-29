@@ -6,11 +6,8 @@ import { parseEndpointUrl } from '../profiles.js';
 import { writeProfileRuntime, clearProfileRuntime } from '../runtime-state.js';
 import type { BrowserProfile } from '../types.js';
 // shellQuote lives in the shared ssh-exec helper (single choke point); re-export
-// so existing importers of `shellQuote` from this module keep working. SSH_OPTS
-// is the shared hardened baseline (BatchMode + ConnectTimeout + keepalive) —
-// reuse it so the raw-ssh spawns below fail fast on an unreachable host instead
-// of hanging on the default ~127s TCP timeout, rather than re-listing options.
-import { shellQuote, SSH_OPTS } from '../../ssh-exec.js';
+// so existing importers of `shellQuote` from this module keep working.
+import { shellQuote, assertValidSshTarget, controlOpts, sshConnectOpts } from '../../ssh-exec.js';
 export { shellQuote };
 // The `ssh -L` tunnel spawn is shared with `agents computer --host`; it lives in
 // the single ssh-tunnel helper. Calling it with no options preserves this
@@ -348,6 +345,12 @@ export async function ensureRemoteBrowser(
   remoteOs: RemoteOs,
   customBinary?: string
 ): Promise<void> {
+  // `user`/`host` derive from an ssh:// profile endpoint (git-tracked user
+  // config). Validate the composed target before it reaches the raw `ssh` spawn:
+  // an endpoint like `ssh://-Fattack@victim` would otherwise place `-Fattack` at
+  // the target position, where OpenSSH parses it as `-F <file>` and an
+  // attacker-supplied ssh config's ProxyCommand yields local code execution.
+  assertValidSshTarget(`${user}@${host}`);
   const remoteCmd = buildLaunchCmd(remoteOs, browserType, port, customBinary);
 
   return new Promise((resolve, reject) => {
@@ -362,7 +365,7 @@ export async function ensureRemoteBrowser(
     const child = spawn(
       'ssh',
       [
-        ...SSH_OPTS,
+        ...sshConnectOpts(controlOpts()),
         `${user}@${host}`,
         remoteCmd,
       ],
@@ -442,12 +445,22 @@ export function killRemoteBrowser(
 }
 
 function runSSHCommand(user: string, host: string, cmd: string): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    // Reject an option-injecting target (e.g. a `-`-leading user from a crafted
+    // ssh:// profile) before it reaches the raw `ssh` spawn. Reject rather than
+    // throw synchronously so `killRemoteBrowser(...).catch()` stays best-effort.
+    // See ensureRemoteBrowser.
+    try {
+      assertValidSshTarget(`${user}@${host}`);
+    } catch (err) {
+      reject(err as Error);
+      return;
+    }
     // Reuse the shared hardened baseline so a hung TCP SYN to an unreachable
     // host is bounded by ConnectTimeout (the local 3s kill below only bounds a
     // connected-but-slow command, not the connect itself). Options precede the
     // target — see ensureRemoteBrowser.
-    const child = spawn('ssh', [...SSH_OPTS, `${user}@${host}`, cmd], {
+    const child = spawn('ssh', [...sshConnectOpts(controlOpts()), `${user}@${host}`, cmd], {
       stdio: 'ignore',
       windowsHide: true,
     });

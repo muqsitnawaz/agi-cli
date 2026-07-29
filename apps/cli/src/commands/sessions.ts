@@ -19,7 +19,7 @@ import type { AgentId } from '../lib/types.js';
 import type { SessionAgentId, SessionMeta, ViewMode } from '../lib/session/types.js';
 import { SESSION_AGENTS } from '../lib/session/types.js';
 import { discoverArtifacts, readArtifact, resolveArtifact } from '../lib/session/artifacts.js';
-import { looksLikePath, toComparablePath, homeDir, needsWindowsShell, findExecutable } from '../lib/platform/index.js';
+import { looksLikePath, toComparablePath, homeDir, needsWindowsShell, findExecutable, composeWin32CommandLine } from '../lib/platform/index.js';
 import { getActiveSessions, type ActiveSession } from '../lib/session/active.js';
 import { enumerateGhosttyTabs, assignGhosttyTabs } from '../lib/session/ghostty-tabs.js';
 import { mapPanesToTargets, listClients } from '../lib/tmux/session.js';
@@ -29,10 +29,11 @@ import { gatherRemoteActive, NO_FANOUT_ENV } from '../lib/session/remote-active.
 import { gatherRemoteList, runOnPeer } from '../lib/session/remote-list.js';
 import { stringWidth, truncateToWidth, padToWidth, terminalWidth } from '../lib/session/width.js';
 import type { SessionActivity, AwaitingReason } from '../lib/session/state.js';
-import { discoverSessions, countSessionsInScope, resolveSessionById, searchContentIndex, parseTimeFilter, type DiscoverOptions, type ScanProgress } from '../lib/session/discover.js';
+import { inferSessionState } from '../lib/session/state.js';
+import { discoverSessions, countSessionsInScope, resolveSessionById, searchContentIndex, parseTimeFilter, getSessionRoots, type DiscoverOptions, type ScanProgress } from '../lib/session/discover.js';
 import { filterTeamSessions } from '../lib/session/team-filter.js';
 import { parseSession } from '../lib/session/parse.js';
-import { runRemoteSessions, buildForwardedArgs } from '../lib/session/remote.js';
+import { runRemoteSessions, buildForwardedArgs, ensureWholeIndex } from '../lib/session/remote.js';
 import { formatRelativeTime } from '../lib/session/relative-time.js';
 import { renderConversationMarkdown, renderSummary, renderSummaryHeader, computeSummaryStats, renderJson, filterEvents, parseRoleList, type FilterOptions } from '../lib/session/render.js';
 import { renderMarkdown } from '../lib/markdown.js';
@@ -40,7 +41,7 @@ import { colorAgent, resolveAgentName } from '../lib/agents.js';
 import { fuzzyMatch, FUZZY_PRESETS } from '../lib/fuzzy.js';
 import { resolveVersionAliasLoose } from '../lib/versions.js';
 import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
-import { sessionPicker, type PickedSession } from './sessions-picker.js';
+import { sessionPicker, buildPreview, type PickedSession } from './sessions-picker.js';
 import { setHelpSections } from '../lib/help.js';
 import { registerSessionsTailCommand } from './sessions-tail.js';
 import { registerSessionsSyncCommand } from './sessions-sync.js';
@@ -48,6 +49,9 @@ import { registerSessionsResumeCommand } from './sessions-resume.js';
 import { registerGoCommand } from './go.js';
 import { registerFocusCommand } from './focus.js';
 import { registerSessionsInjectCommand } from './sessions-inject.js';
+import { registerSessionsExportCommand } from './sessions-export.js';
+import { registerSessionsImportCommand } from './sessions-import.js';
+import { runBrowserSessions } from '../lib/browser/sessions-list.js';
 
 const SESSION_AGENT_FILTER_HELP = `Filter by agent, e.g. claude, codex, claude@2.0.65`;
 
@@ -56,6 +60,7 @@ interface SessionFilterOptions {
   project?: string;
   all?: boolean;
   teams?: boolean;
+  routine?: boolean;
   since?: string;
   until?: string;
 }
@@ -66,7 +71,8 @@ interface SessionsOptions extends SessionFilterOptions {
   sort?: string;
   json?: boolean;
   markdown?: boolean;
-  noRedact?: boolean;
+  /** Commander populates this from `--no-redact`: true by default, false when the flag is passed. */
+  redact?: boolean;
   include?: string;
   exclude?: string;
   first?: string;
@@ -74,6 +80,8 @@ interface SessionsOptions extends SessionFilterOptions {
   artifacts?: boolean;
   artifact?: string;
   active?: boolean;
+  /** Emit the on-disk session-scan directories (requires --json); for watchers. */
+  roots?: boolean;
   cloud?: boolean;
   host?: string[];
   /** Group the listing by directory and drop the id/version columns. */
@@ -97,6 +105,14 @@ interface SessionsOptions extends SessionFilterOptions {
   antigravity?: boolean;
   grok?: boolean;
   opencode?: boolean;
+  /** Force the printed listing even on a TTY. Commander's `--no-` convention:
+   * `--no-interactive` sets this false, opting out of the interactive browser. */
+  interactive?: boolean;
+  /** Print the canonical `ag sessions …` command for the given flags and exit —
+   * the non-interactive twin of the browser's `y` hotkey. */
+  printCmd?: boolean;
+  /** Print a compact preview of the matched session and exit (no pager). */
+  preview?: boolean;
 }
 
 /**
@@ -664,8 +680,10 @@ export function serializeSessionsJson(sessions: SessionMeta[]): string {
  */
 async function runRemoteSessionsJson(hosts: string[]): Promise<void> {
   // Forward the caller's own filters (query, --limit, --since, …) minus --host,
-  // and guarantee --json so each peer answers with a parseable array.
-  const forwarded = buildForwardedArgs(process.argv, new Set(hosts));
+  // and guarantee --json so each peer answers with a parseable array. Force
+  // whole-index scope: an explicit --host means "that box's index", not the
+  // slice that happens to sit under the peer's SSH-login home dir.
+  const forwarded = ensureWholeIndex(buildForwardedArgs(process.argv, new Set(hosts)));
   if (!forwarded.includes('--json')) forwarded.push('--json');
   const { sessions } = await gatherRemoteList(forwarded, hosts);
   process.stdout.write(serializeSessionsJson(sessions));
@@ -895,6 +913,53 @@ function printCrossMachineTip(): void {
   ));
 }
 
+/**
+ * True when the interactive session browser should open instead of a printed
+ * listing: a real TTY, no `--json`, and `--no-interactive` not set. The bare
+ * listing and `--active` both default to it; scripts/pipes/agents fall through
+ * to the existing printed/JSON paths.
+ */
+function useInteractiveBrowser(options: SessionsOptions): boolean {
+  return options.interactive !== false && !options.json && isInteractiveTerminal();
+}
+
+/** The canonical `ag sessions …` command for a set of flags — the twin of the
+ * browser's `y` hotkey (see --print-cmd). Normalizes to the stable flag form. */
+function canonicalSessionsCommand(query: string | undefined, options: SessionsOptions): string {
+  const a = ['sessions'];
+  if (options.active) a.push('--active');
+  if (options.teams) a.push('--teams');
+  if (options.routine) a.push('--routine');
+  if (options.agent) a.push('-a', options.agent);
+  for (const h of options.host ?? []) a.push('--device', h);
+  if (options.project) a.push('--project', options.project);
+  if (options.all) a.push('--all');
+  if (options.since) a.push('--since', options.since);
+  if (options.until) a.push('--until', options.until);
+  if (options.local) a.push('--local');
+  if (options.waiting) a.push('--waiting');
+  const q = (query ?? '').trim();
+  if (q) a.push(JSON.stringify(q));
+  return 'ag ' + a.join(' ');
+}
+
+/** Resolve a session by id/query globally and print its compact preview (no pager).
+ * Backs `--preview` — the fast path for the "peek before resume" hot loop. */
+async function renderSessionPreview(
+  query: string,
+  scope: { agent?: string; project?: string },
+): Promise<void> {
+  const discovered = await discoverSessions({ all: true, cwd: process.cwd(), limit: 5000 });
+  const pool = applyScopeFilters(discovered, scope);
+  const matches = resolveSessionById(pool, query);
+  const session = (matches.length > 0 ? matches : filterSessionsByQuery(pool, query))[0];
+  if (!session) {
+    console.log(chalk.gray(`No session matches "${query}".`));
+    return;
+  }
+  console.log(buildPreview(session));
+}
+
 /** Main action handler for `agents sessions`. Routes to picker, table, or single-session render. */
 async function sessionsAction(query: string | undefined, options: SessionsOptions): Promise<void> {
   // Explicit --query is interchangeable with the positional; it's how you search
@@ -907,6 +972,23 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
   applyAgentShorthands(options);
   if (options.device && options.device.length > 0) {
     options.host = [...(options.host ?? []), ...options.device];
+  }
+
+  // --print-cmd: echo the canonical `ag sessions …` for the given flags and exit.
+  // The non-interactive twin of the browser's `y` hotkey — lets an agent compose
+  // (or a human copy) the exact command a view maps to.
+  if (options.printCmd) {
+    process.stdout.write(canonicalSessionsCommand(query, options) + '\n');
+    return;
+  }
+
+  // --roots: emit the local session-scan directories, per agent, as JSON. A pure
+  // machine-readable query (no listing/render) — external watchers (the Factory
+  // extension's fs.watch) read it to track the same dirs the CLI scans, instead
+  // of hardcoding `~/.claude|.codex|.gemini`. Always local; ignores other flags.
+  if (options.roots) {
+    process.stdout.write(JSON.stringify(getSessionRoots(), null, 2) + '\n');
+    return;
   }
 
   // --host WITHOUT --active. `--json` fans the recent listing out and emits ONE
@@ -929,7 +1011,45 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
     return;
   }
 
+  // --preview <id/query>: resolve one session and print its compact preview, then
+  // exit — checked before --active so `--active --preview <id>` peeks the id
+  // rather than being swallowed by the active listing.
+  if (options.preview) {
+    if (!query) {
+      console.error(chalk.red('--preview requires a session id or query.'));
+      process.exit(1);
+    }
+    await renderSessionPreview(query, { agent: options.agent, project: options.project });
+    return;
+  }
+
   if (options.active) {
+    // On a TTY (and not a scripting path), open the interactive browser seeded to
+    // running-only. --json / --waiting / --no-interactive / a peer fan-out keep the
+    // static dump untouched, so scripts and agents are unaffected. An explicit
+    // --since seeds the window; --until / --project (no browser field) or a
+    // multi-host scope fall through to the static dump that already honors them.
+    if (
+      useInteractiveBrowser(options) &&
+      !options.waiting &&
+      !options.until &&
+      !options.project &&
+      !options.sort &&
+      (options.host?.length ?? 0) <= 1 &&
+      process.env.AGENTS_SESSIONS_LOCAL !== '1'
+    ) {
+      const { runSessionBrowser, activeBrowserSeed } = await import('./sessions-browser.js');
+      await runSessionBrowser(
+        activeBrowserSeed({
+          teams: options.teams,
+          agent: options.agent,
+          host: options.host,
+          since: options.since,
+        }),
+        { local: options.local === true, hosts: options.host },
+      );
+      return;
+    }
     // AGENTS_SESSIONS_LOCAL is set by a parent fan-out invocation (see
     // remote-active.ts) so a peer answers for itself without recursing.
     const forceLocal = options.local === true || process.env.AGENTS_SESSIONS_LOCAL === '1';
@@ -942,6 +1062,37 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
 
   if (options.cloud) {
     await runCloudSessions(query, options);
+    return;
+  }
+
+  // Bare interactive listing → the interactive fleet browser (humans). A query,
+  // a render/filter flag, --flat/--tree, --json, --until, --project (a named-project
+  // filter the browser can't represent), or --no-interactive keep the existing
+  // printed/render paths (agents and scripts unaffected). An explicit --since seeds
+  // the browser's window so the flag is honored, not swallowed.
+  if (
+    useInteractiveBrowser(options) &&
+    !query &&
+    !options.routine &&
+    !options.flat &&
+    !options.tree &&
+    !options.markdown &&
+    !options.until &&
+    !options.project &&
+    !options.sort &&
+    !options.artifacts &&
+    options.artifact === undefined
+  ) {
+    const { runSessionBrowser, bareBrowserSeed } = await import('./sessions-browser.js');
+    await runSessionBrowser(
+      bareBrowserSeed({
+        teams: options.teams,
+        agent: options.agent,
+        all: options.all,
+        since: options.since,
+      }),
+      { local: options.local === true, hosts: options.host },
+    );
     return;
   }
 
@@ -989,7 +1140,7 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
   // When the user explicitly asks to render (via mode flag), resolve the
   // query globally so sessions outside the default cwd/30d window are found.
   if (wantsRender && searchQuery) {
-    await renderOneSession(searchQuery, mode, { agent: options.agent, project: options.project, filter: filterOpts, noRedact: options.noRedact });
+    await renderOneSession(searchQuery, mode, { agent: options.agent, project: options.project, filter: filterOpts, redact: options.redact });
     return;
   }
 
@@ -1033,6 +1184,7 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
       since,
       until: options.until,
       sortBy,
+      origin: options.routine ? 'routine' : undefined,
     };
 
     let sessions = await discoverSessions({
@@ -1068,7 +1220,7 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
         return;
       }
       if (idMatches.length === 0 && looksLikeSessionId(searchQuery)) {
-        await renderOneSession(searchQuery, mode, { agent: options.agent, project: options.project, filter: filterOpts, noRedact: options.noRedact });
+        await renderOneSession(searchQuery, mode, { agent: options.agent, project: options.project, filter: filterOpts, redact: options.redact });
         return;
       }
     }
@@ -1167,6 +1319,11 @@ function teamTag(session: SessionMeta): string {
   return parts ? `[${parts}] ` : '[team] ';
 }
 
+function originTag(session: SessionMeta): string {
+  if (session.origin !== 'routine') return '';
+  return `[routine${session.routineName ? ` · ${session.routineName}` : ''}] `;
+}
+
 /** Adapt a SessionMeta's persisted signals to the badge renderer's shape. */
 function metaSignals(s: SessionMeta): Parameters<typeof signalBadges>[0] {
   return {
@@ -1186,7 +1343,7 @@ function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket =
   const agentColor = colorAgent(session.agent);
   const when = formatRelativeTime(session.lastActivity ?? session.timestamp);
   const project = session.project || '-';
-  const tag = teamTag(session);
+  const tag = originTag(session) || teamTag(session);
   const label = (session as any).label;
   const { glyph, preview } = liveGlyphAndPreview(live);
   // A running session's live preview says what the agent is doing now; a
@@ -1230,7 +1387,7 @@ function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket =
 function treeSessionRow(session: SessionMeta, live?: ActiveSession): string {
   const agentColor = colorAgent(session.agent);
   const when = formatRelativeTime(session.lastActivity ?? session.timestamp);
-  const tag = teamTag(session);
+  const tag = originTag(session) || teamTag(session);
   const label = (session as any).label;
   const { glyph, preview } = liveGlyphAndPreview(live);
   const topic = (preview || (tag ? `${tag}${session.topic ?? ''}` : session.topic)) || '-';
@@ -1446,11 +1603,20 @@ export async function renderSessionLog(session: SessionMeta, mode: ViewMode = 's
   await renderSession(session, mode, {});
 }
 
+/**
+ * Emit one session exactly as `agents sessions <id> --json` does — the same
+ * redact-by-default `{ session, events }` shape — so `agents logs <id> --json`
+ * shares one machine-readable session contract instead of inventing another.
+ */
+export async function renderSessionLogJson(session: SessionMeta): Promise<void> {
+  await renderSession(session, 'json', {});
+}
+
 async function renderSession(
   session: SessionMeta,
   mode: ViewMode,
   filters: FilterOptions,
-  options: Pick<SessionsOptions, 'noRedact'> = {},
+  options: { redact?: boolean } = {},
 ): Promise<void> {
   // OpenCode stores sessions in SQLite; filePath is "db_path#session_id"
   const realPath = session.filePath.split('#')[0];
@@ -1465,10 +1631,10 @@ async function renderSession(
   }
 
   const spinner = ora(`Parsing ${session.agent} session...`).start();
-  let events = parseSession(session.filePath, session.agent);
+  const parsedEvents = parseSession(session.filePath, session.agent);
   spinner.stop();
 
-  events = filterEvents(events, filters);
+  let events = filterEvents(parsedEvents, filters);
 
   const agentColor = colorAgent(session.agent);
   console.log('');
@@ -1511,7 +1677,7 @@ async function renderSession(
       (session.account ? chalk.gray(` (${session.account})`) : '')
     );
     console.log(chalk.gray('─'.repeat(60)));
-    process.stdout.write(renderMarkdown(renderConversationMarkdown(events, { redact: options.noRedact !== true })));
+    process.stdout.write(renderMarkdown(renderConversationMarkdown(events, { redact: options.redact !== false })));
     return;
   }
 
@@ -1519,7 +1685,13 @@ async function renderSession(
   // engine (plan text, PR, worktree, ticket). Pre-1.20.51 emitted a bare event
   // array; consumers that JSON.parse this now read `output.events` for the
   // array. See issue #743 (plan surfaced) and CHANGELOG for the shape change.
-  process.stdout.write(renderJson(events, session));
+  // `todos` (RUSH-1503) is computed from the UNFILTERED transcript so the
+  // checklist reflects true session state regardless of any `--include` filter;
+  // it lets the Factory panel read the CLI's checklist instead of re-parsing.
+  const todos = inferSessionState(parsedEvents, { cwd: session.cwd }).todos;
+  process.stdout.write(
+    renderJson(events, todos ? { ...session, todos } : session, { redact: options.redact !== false }),
+  );
 }
 
 function renderTopicCell(
@@ -1640,7 +1812,7 @@ export function formatPickerLabel(s: SessionMeta, query: string, cols: PickerCol
   const agentColor = colorAgent(s.agent);
   const when = formatRelativeTime(s.lastActivity ?? s.timestamp);
   const project = s.project || '-';
-  const tag = teamTag(s);
+  const tag = originTag(s) || teamTag(s);
   const label = (s as any).label;
   const topic = tag ? `${tag}${s.topic ?? ''}` : s.topic;
   const versionStr = s.version || '-';
@@ -1747,7 +1919,7 @@ function warnNoPeerTarget(machine: string, session: SessionMeta): void {
   console.log(chalk.gray(`Register/wake it (ag devices), or run there: agents ssh ${machine}`));
 }
 
-async function handlePickedSession(picked: PickedSession): Promise<void> {
+export async function handlePickedSession(picked: PickedSession): Promise<void> {
   // A session on another machine is read/resumed ON that machine over SSH — its
   // transcript and agent binary live there. Both actions execute on the peer
   // (not a local `--host` hop, which would discover locally and dead-end for a
@@ -1814,10 +1986,38 @@ export async function resumeSessionInPlace(session: SessionMeta): Promise<void> 
 }
 
 /**
+ * Map a resume argv to the spawn(command, args, {shell}) triple.
+ *
+ * On Windows the agent launcher is a `.cmd`/PATHEXT shim and needs shell:true.
+ * With shell:true, Node concatenates args into the cmd.exe line unescaped
+ * (DEP0190 + injection). A session.id derived from a filename can carry
+ * metacharacters (`&|<>`); compose a fully-quoted line and pass an EMPTY args
+ * array so cmd.exe cannot reparse them (RUSH-1753). See composeWin32CommandLine.
+ *
+ * `platform` is injectable so the win32 shell path is unit-testable on any host.
+ */
+export function resumeSpawnInvocation(
+  cmd: string[],
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[]; shell: boolean } {
+  const shell = needsWindowsShell(cmd[0], platform);
+  if (shell) {
+    return {
+      command: composeWin32CommandLine(cmd[0], cmd.slice(1)),
+      args: [],
+      shell: true,
+    };
+  }
+  return { command: cmd[0], args: cmd.slice(1), shell: false };
+}
+
+/**
  * Spawn a resume command as a foreground takeover (inherited stdio), resolving
  * when it exits. On Windows the agent launcher is a `.cmd`/PATHEXT shim that
  * `spawn` can't exec directly — a bare-name `shell:false` spawn throws
  * `EFTYPE`/`ENOENT` there — so we go through the shell via `needsWindowsShell`.
+ * When shell:true, argv is composed via resumeSpawnInvocation (quoted line +
+ * empty args) so an untrusted session.id cannot inject through cmd.exe.
  * The spawn is guarded because such a failure can be thrown synchronously;
  * without the guard it would surface under an unrelated "Failed to discover
  * sessions" catch upstream instead of a truthful launch error.
@@ -1826,10 +2026,11 @@ function spawnResumeCommand(cmd: string[], cwd: string): Promise<void> {
   return new Promise<void>((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawn(cmd[0], cmd.slice(1), {
+      const { command, args, shell } = resumeSpawnInvocation(cmd);
+      child = spawn(command, args, {
         cwd,
         stdio: 'inherit',
-        shell: needsWindowsShell(cmd[0]),
+        shell,
       });
     } catch (err: any) {
       console.error(chalk.red(`Failed to launch ${cmd[0]}: ${err.message}`));
@@ -2180,7 +2381,7 @@ async function renderArtifactsGlobal(
 async function renderOneSession(
   query: string,
   mode: ViewMode,
-  scope: { agent?: string; project?: string; filter: FilterOptions; noRedact?: boolean },
+  scope: { agent?: string; project?: string; filter: FilterOptions; redact?: boolean },
 ): Promise<void> {
   const spinner = ora().start();
   const tracker = createScanProgressTracker(FIND_VERBS, 'session', spinner);
@@ -2250,7 +2451,7 @@ async function renderOneSession(
     }
 
     spinner.stop();
-    await renderSession(session, mode, scope.filter, { noRedact: scope.noRedact });
+    await renderSession(session, mode, scope.filter, { redact: scope.redact });
   } catch (err: any) {
     if (isPromptCancelled(err)) return;
     tracker.stop();
@@ -2276,13 +2477,14 @@ export function registerSessionsCommands(program: Command): void {
     .option('--opencode', 'Shorthand for --agent opencode')
     .option('--all', 'Include sessions from every directory (not just current project)')
     .option('--teams', 'Include team-spawned sessions (hidden by default)')
-    .option('--project <name>', 'Filter by project name (searches across all directories)')
+    .option('--routine', 'Show only sessions archived from routine runs')
+    .option('-p, --project <name>', 'Filter by project name (searches across all directories)')
     .option('--since <time>', 'Only sessions newer than this (e.g., 2h, 7d, 4w, or ISO date)')
     .option('--until <time>', 'Only sessions older than this (ISO timestamp)')
     .option('-n, --limit <n>', 'Maximum number of sessions to return', '50')
     .option('--sort <field>', 'Sort the list by: recent (default), cost, or duration')
     .option('--markdown', 'Render the session as markdown (user, assistant, thinking, tool calls)')
-    .option('--no-redact', 'Disable default secret redaction in markdown session output')
+    .option('--no-redact', 'Disable default secret redaction in rendered session output (--markdown and --json)')
     .option('--json', 'Output JSON (session list when browsing, event array when rendering one session)')
     .option('--include <roles>', 'Only include these roles (comma-separated): user, assistant, thinking, tools')
     .option('--exclude <roles>', 'Exclude these roles (comma-separated): user, assistant, thinking, tools')
@@ -2291,6 +2493,7 @@ export function registerSessionsCommands(program: Command): void {
     .option('--artifacts', 'List all files written or edited during a session')
     .option('--artifact <name>', 'Read a specific artifact by filename or path (outputs to stdout)')
     .option('--active', 'Show only sessions running right now across terminals, teams, cloud, and headless agents')
+    .option('--roots', 'With --json: emit the on-disk directories scanned for session transcripts, per agent (for external watchers)')
     .option('--local', 'Only this machine — skip the cross-machine SSH fan-out (default listing and --active)')
     .option('--waiting', 'With --active: show only sessions waiting on your input (exits non-zero if any)')
     .option('--tree', 'Group the listing by directory; drops the id/version columns for readability')
@@ -2298,7 +2501,11 @@ export function registerSessionsCommands(program: Command): void {
     .option('--no-live', 'Do not enrich the listing with live status/preview for running sessions')
     .option('--cloud', 'Source sessions from Rush Cloud (captured runs) instead of local disk')
     .option('-H, --host <target...>', 'Run this query on remote machine(s) over SSH (host alias or user@host; repeatable)')
-    .option('--device <target...>', 'Alias for --host (device alias from `agents devices`; repeatable)');
+    .option('--device <target...>', 'Alias for --host (device alias from `agents devices`; repeatable)')
+    .option('--browser', 'List browser-profile captures (screenshots, PDFs, recordings, downloads) instead of agent transcripts — alias of `agents browser sessions`')
+    .option('--no-interactive', 'Print the listing instead of opening the interactive browser (default on a TTY for the bare listing and --active)')
+    .option('--print-cmd', 'Print the canonical `ag sessions …` command for the given flags and exit (the twin of the browser’s `y` hotkey)')
+    .option('--preview', 'With a session id/query: print a compact preview and exit (no pager)');
 
   setHelpSections(sessionsCmd, {
     examples: `
@@ -2321,6 +2528,10 @@ export function registerSessionsCommands(program: Command): void {
       # Search across every directory, not just this project
       agents sessions "topic" --all
 
+      # Show routine-run sessions and open one by routine run id
+      agents sessions --routine --all
+      agents sessions 2026-07-21T10-30-00-000Z
+
       # Export for analysis
       agents sessions --since 30d --limit 200 --json > sessions.json
 
@@ -2337,11 +2548,17 @@ export function registerSessionsCommands(program: Command): void {
       - --first and --last are mutually exclusive.
       - A filter flag (--include/--exclude/--first/--last) without --markdown/--json defaults to --markdown output.
       - --cloud sources from Rush Cloud captured runs instead of local disk.
+      - --routine shows only transcripts archived from routine run directories; routine rows also resolve by run id.
       - Without --teams, team-spawned sessions are hidden by default.
     `,
   });
 
   sessionsCmd.action(async (query: string | undefined, options: SessionsOptions) => {
+    if ((options as { browser?: boolean }).browser) {
+      // Alias for `agents browser sessions`: a profile positional narrows to one profile.
+      runBrowserSessions({ profile: query, json: options.json });
+      return;
+    }
     await sessionsAction(query, options);
   });
 
@@ -2351,6 +2568,8 @@ export function registerSessionsCommands(program: Command): void {
   registerGoCommand(sessionsCmd);
   registerFocusCommand(sessionsCmd);
   registerSessionsInjectCommand(sessionsCmd);
+  registerSessionsExportCommand(sessionsCmd);
+  registerSessionsImportCommand(sessionsCmd);
 }
 
 function formatNoSessionsMessage(
@@ -2582,5 +2801,3 @@ function formatAbsoluteTime(isoTimestamp: string): string {
   const mm = String(d.getMinutes()).padStart(2, '0');
   return `${months[d.getMonth()]} ${d.getDate()} ${hh}:${mm}`;
 }
-
-

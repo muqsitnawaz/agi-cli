@@ -15,7 +15,7 @@ import * as readline from 'readline';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import Database from '../sqlite.js';
-import { getAgentsDir, getUserAgentsDir, getHistoryDir } from '../state.js';
+import { getAgentsDir, getUserAgentsDir, getHistoryDir, getRunsDir } from '../state.js';
 
 const execFileAsync = promisify(execFile);
 import type { SessionAgentId, SessionMeta } from './types.js';
@@ -84,6 +84,8 @@ export interface DiscoverOptions {
   excludeTeamOrigin?: boolean;
   /** Keep only team-spawned sessions (used for hidden-count queries). */
   onlyTeamOrigin?: boolean;
+  /** Keep only sessions from this source. */
+  origin?: 'cli' | 'routine';
   /** Column to order results by (all descending): 'timestamp' (default), 'cost', or 'duration'. */
   sortBy?: 'timestamp' | 'cost' | 'duration';
   /** Called as each agent makes parsing progress. Totals count only files that need re-parsing (cache misses). */
@@ -106,6 +108,8 @@ interface ClaudeSessionScan {
   topic?: string;
   messageCount: number;
   tokenCount?: number;
+  /** Real generated (output) tokens, excluding cache-read/-write context. */
+  outputTokens?: number;
   /** Total USD cost accumulated from per-(model, direction) token usage. */
   costUsd?: number;
   /** Wall-clock duration in ms between the first and last timestamped event. */
@@ -142,6 +146,8 @@ interface CodexSessionScan {
   topic?: string;
   messageCount: number;
   tokenCount?: number;
+  /** Real generated (output) tokens, excluding cache-read/-write context. */
+  outputTokens?: number;
   costUsd?: number;
   durationMs?: number;
   lastActivity?: string;
@@ -187,6 +193,7 @@ export async function discoverSessions(options?: DiscoverOptions): Promise<Sessi
       // reads to behavioral EDR (CrowdStrike Falcon) as a ransomware-style bulk
       // file-enumeration sweep. Same dirs, same results — just not all at once.
       await scanAgentsBounded(agents, agent => dispatchAgentScan(agent, onProgress));
+      await scanAgentsBounded(agents, agent => scanRoutineArchivesIncremental(agent, onProgress));
       // Seed labels from `agents run --name` handles onto the freshly-scanned
       // rows by id. Runs AFTER the per-agent scans (which applied agent-generated
       // titles via syncLabels), so a real title always wins and the seed only
@@ -301,6 +308,7 @@ function buildQueryOptions(
     limit: opts.includeLimit ? (options?.limit ?? 50) : undefined,
     excludeTeamOrigin: options?.excludeTeamOrigin,
     onlyTeamOrigin: options?.onlyTeamOrigin,
+    origin: options?.origin,
     sortBy: options?.sortBy,
   };
 }
@@ -320,11 +328,15 @@ function normalizeCwd(cwd?: string): string {
 export function resolveSessionById(sessions: SessionMeta[], idQuery: string): SessionMeta[] {
   const query = idQuery.toLowerCase();
   const exact = sessions.filter(s =>
-    s.id.toLowerCase() === query || s.shortId.toLowerCase() === query,
+    s.id.toLowerCase() === query ||
+    s.shortId.toLowerCase() === query ||
+    s.routineRunId?.toLowerCase() === query,
   );
   if (exact.length > 0) return exact;
   return sessions.filter(s =>
-    s.id.toLowerCase().startsWith(query) || s.shortId.toLowerCase().startsWith(query),
+    s.id.toLowerCase().startsWith(query) ||
+    s.shortId.toLowerCase().startsWith(query) ||
+    s.routineRunId?.toLowerCase().startsWith(query),
   );
 }
 
@@ -456,6 +468,161 @@ export function getAgentSessionDirs(agent: string, subdir: string): string[] {
   }
 
   return dirs;
+}
+
+/**
+ * The (agent, subdir) pairs `discoverSessions` walks for JSONL transcripts —
+ * the single source of truth for which directories hold live session files.
+ * `getSessionRoots` expands each pair to its concrete directories so a consumer
+ * (the Factory extension's fs.watch, see issue #741) can configure its watcher
+ * from the CLI instead of hardcoding `~/.claude|.codex|.gemini`. Adding a new
+ * on-disk agent here makes every consumer watch it automatically.
+ */
+const SESSION_ROOT_SPECS: ReadonlyArray<{ agent: SessionAgentId; subdir: string }> = [
+  { agent: 'claude', subdir: 'projects' },
+  { agent: 'codex', subdir: 'sessions' },
+  { agent: 'gemini', subdir: 'tmp' },
+  { agent: 'antigravity', subdir: 'conversations' },
+  { agent: 'droid', subdir: 'sessions' },
+  { agent: 'kimi', subdir: 'sessions' },
+];
+
+function sessionRootSubdir(agent: SessionAgentId): string | null {
+  return SESSION_ROOT_SPECS.find((spec) => spec.agent === agent)?.subdir ?? null;
+}
+
+/** A session-agent's on-disk watch roots (every version home + backup mirror). */
+export interface SessionRoots {
+  agent: SessionAgentId;
+  /** Absolute directories that hold this agent's transcripts, existing right now. */
+  dirs: string[];
+}
+
+/**
+ * The directories `agents sessions` scans for each on-disk session agent,
+ * resolved to what exists on this machine. Emitted by `agents sessions --roots
+ * --json` so external watchers stay in lockstep with the CLI's discovery paths.
+ * Agents with no directories present are omitted.
+ */
+export function getSessionRoots(): SessionRoots[] {
+  const out: SessionRoots[] = [];
+  for (const { agent, subdir } of SESSION_ROOT_SPECS) {
+    const dirs = getAgentSessionDirs(agent, subdir);
+    dirs.push(...getRoutineArchiveSessionDirs(agent, subdir));
+    if (dirs.length > 0) out.push({ agent, dirs });
+  }
+  return out;
+}
+
+function getRoutineArchiveSessionDirs(agent: SessionAgentId, subdir: string): string[] {
+  const runsDir = getRunsDir();
+  if (!fs.existsSync(runsDir)) return [];
+  const dirs: string[] = [];
+
+  let jobDirs: fs.Dirent[];
+  try {
+    jobDirs = fs.readdirSync(runsDir, { withFileTypes: true });
+  } catch {
+    return dirs;
+  }
+
+  for (const jobDir of jobDirs) {
+    if (!jobDir.isDirectory()) continue;
+    const jobRunsDir = path.join(runsDir, jobDir.name);
+    let runDirs: fs.Dirent[];
+    try {
+      runDirs = fs.readdirSync(jobRunsDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const runDir of runDirs) {
+      if (!runDir.isDirectory()) continue;
+      const dir = path.join(jobRunsDir, runDir.name, 'sessions', agent, subdir);
+      if (fs.existsSync(dir)) dirs.push(dir);
+    }
+  }
+
+  return dirs;
+}
+
+function routineArchiveInfo(filePath: string): { jobName: string; runId: string } | null {
+  const rel = path.relative(getRunsDir(), filePath);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  const parts = rel.split(path.sep);
+  if (parts.length < 6 || parts[2] !== 'sessions') return null;
+  return { jobName: parts[0], runId: parts[1] };
+}
+
+function decorateRoutineSession(
+  meta: SessionMeta,
+  info: { jobName: string; runId: string },
+): SessionMeta {
+  return {
+    ...meta,
+    origin: 'routine',
+    routineName: info.jobName,
+    routineRunId: info.runId,
+    project: info.jobName,
+    label: info.jobName,
+  };
+}
+
+async function readRoutineArchiveMeta(
+  agent: SessionAgentId,
+  filePath: string,
+): Promise<{ meta: SessionMeta; content: string } | null> {
+  const info = routineArchiveInfo(filePath);
+  if (!info) return null;
+
+  if (agent === 'claude') {
+    const sessionId = path.basename(filePath).replace(/\.jsonl$/, '');
+    const result = await readClaudeMeta(filePath, sessionId);
+    return result ? { ...result, meta: decorateRoutineSession(result.meta, info) } : null;
+  }
+
+  if (agent === 'codex') {
+    const result = await readCodexMeta(filePath);
+    return result ? { ...result, meta: decorateRoutineSession(result.meta, info) } : null;
+  }
+
+  return null;
+}
+
+async function scanRoutineArchivesIncremental(
+  agent: SessionAgentId,
+  onProgress?: (p: ScanProgress) => void,
+): Promise<void> {
+  const subdir = sessionRootSubdir(agent);
+  if (!subdir) return;
+
+  const ext = agent === 'gemini' ? '.json' : '.jsonl';
+  const filePaths: string[] = [];
+  for (const sessionsDir of getRoutineArchiveSessionDirs(agent, subdir)) {
+    for (const fp of walkForFiles(sessionsDir, ext, 100_000)) filePaths.push(fp);
+  }
+
+  const changed = filterChangedFiles(filePaths);
+  if (changed.length === 0) return;
+
+  onProgress?.({ agent, parsed: 0, total: changed.length });
+
+  const entries: ScanEntry[] = [];
+  const touched: Array<{ filePath: string; scan: ScanStamp }> = [];
+  let parsed = 0;
+  for (const { filePath, scan } of changed) {
+    try {
+      const result = await readRoutineArchiveMeta(agent, filePath);
+      if (result) entries.push({ meta: result.meta, content: result.content, scan });
+      else touched.push({ filePath, scan });
+    } catch {
+      touched.push({ filePath, scan });
+    }
+    parsed++;
+    onProgress?.({ agent, parsed, total: changed.length });
+  }
+
+  upsertSessionsBatch(entries);
+  recordScans(touched);
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +810,7 @@ async function readClaudeMeta(
       label,
       messageCount: scan.messageCount,
       tokenCount: scan.tokenCount,
+      outputTokens: scan.outputTokens,
       costUsd: scan.costUsd,
       durationMs: scan.durationMs,
       isTeamOrigin,
@@ -667,6 +835,7 @@ async function readClaudeMeta(
       label,
       messageCount: scan.messageCount,
       tokenCount: scan.tokenCount,
+      outputTokens: scan.outputTokens,
       costUsd: scan.costUsd,
       durationMs: scan.durationMs,
       topic: scan.topic,
@@ -895,6 +1064,7 @@ export async function readCodexMeta(
     topic: scan.topic,
     messageCount: scan.messageCount,
     tokenCount: scan.tokenCount,
+    outputTokens: scan.outputTokens,
     costUsd: scan.costUsd,
     durationMs: scan.durationMs,
     account: resolveAccount?.(),
@@ -1032,6 +1202,7 @@ function readGeminiMeta(
   let topic: string | undefined;
   let messageCount = 0;
   let tokenCount = 0;
+  let outputTokens = 0;
   let sawTokenCount = false;
   let costUsd = 0;
   let sawCost = false;
@@ -1067,6 +1238,16 @@ function readGeminiMeta(
     if (total !== null) {
       tokenCount += total;
       sawTokenCount = true;
+    }
+    // Output tokens: sum directional generation fields per message (output +
+    // thoughts + tool), mirroring the cost path — never `tokens.total`, which
+    // may be cumulative and would double-count when summed.
+    const gtk = message.tokens;
+    if (gtk && typeof gtk === 'object') {
+      outputTokens +=
+        (typeof gtk.output === 'number' ? gtk.output : 0) +
+        (typeof gtk.thoughts === 'number' ? gtk.thoughts : 0) +
+        (typeof gtk.tool === 'number' ? gtk.tool : 0);
     }
 
     // Per-message cost: directional tokens × this message's model price.
@@ -1107,6 +1288,7 @@ function readGeminiMeta(
     topic,
     messageCount,
     tokenCount: sawTokenCount ? tokenCount : undefined,
+    outputTokens: sawTokenCount ? outputTokens : undefined,
     costUsd: sawCost ? costUsd : undefined,
     durationMs,
   };
@@ -1333,6 +1515,7 @@ async function scanOpenCodeIncremental(): Promise<void> {
         s.time_updated AS time_updated,
         COALESCE(stats.message_count, 0) AS message_count,
         stats.token_count AS token_count,
+        stats.output_tokens AS output_tokens,
         COALESCE(stats.has_token_data, 0) AS has_token_data
       FROM session s
       LEFT JOIN (
@@ -1346,6 +1529,7 @@ async function scanOpenCodeIncremental(): Promise<void> {
             COALESCE(json_extract(data, '$.tokens.cache.read'), 0) +
             COALESCE(json_extract(data, '$.tokens.cache.write'), 0)
           ) AS token_count,
+          SUM(COALESCE(json_extract(data, '$.tokens.output'), 0)) AS output_tokens,
           MAX(CASE WHEN json_type(data, '$.tokens') IS NOT NULL THEN 1 ELSE 0 END) AS has_token_data
         FROM message
         GROUP BY session_id
@@ -1365,6 +1549,7 @@ async function scanOpenCodeIncremental(): Promise<void> {
       time_updated: unknown;
       message_count: unknown;
       token_count: unknown;
+      output_tokens: unknown;
       has_token_data: unknown;
     }>;
 
@@ -1382,6 +1567,7 @@ async function scanOpenCodeIncremental(): Promise<void> {
       const timeUpdated = asInt(row.time_updated);
       const messageCount = asInt(row.message_count);
       const tokenCount = asInt(row.token_count);
+      const outputTokens = asInt(row.output_tokens);
       const hasTokenData = asInt(row.has_token_data) === 1;
       const timestamp = isNaN(timeCreated) ? new Date().toISOString() : new Date(timeCreated).toISOString();
       // OpenCode is one shared DB, not one file per session — its row carries a
@@ -1404,6 +1590,7 @@ async function scanOpenCodeIncremental(): Promise<void> {
         topic,
         messageCount: Number.isNaN(messageCount) ? undefined : messageCount,
         tokenCount: hasTokenData && !Number.isNaN(tokenCount) ? tokenCount : undefined,
+        outputTokens: hasTokenData && !Number.isNaN(outputTokens) ? outputTokens : undefined,
       };
 
       entries.push({ meta, content: topic || '', scan: currentScan });
@@ -1898,6 +2085,7 @@ async function readDroidMeta(
     topic: scan.topic,
     messageCount: scan.messageCount,
     tokenCount,
+    outputTokens: settings.usage?.outputTokens,
     costUsd: costUsd > 0 ? costUsd : undefined,
     durationMs: scan.durationMs,
   };
@@ -2052,6 +2240,7 @@ export async function scanClaudeSession(filePath: string): Promise<ClaudeSession
   let entrypoint: string | undefined;
   let messageCount = 0;
   let tokenCount = 0;
+  let outputTokens = 0;
   let sawTokenCount = false;
   let costUsd = 0;
   let sawCost = false;
@@ -2207,6 +2396,7 @@ export async function scanClaudeSession(filePath: string): Promise<ClaudeSession
         tokenCount += usage;
         sawTokenCount = true;
       }
+      if (typeof usageObj?.output_tokens === 'number') outputTokens += usageObj.output_tokens;
       // Per-assistant-message cost: each event carries its own model, so we
       // multiply that event's raw token directions by that model's price.
       const model = parsed.message?.model;
@@ -2249,6 +2439,7 @@ export async function scanClaudeSession(filePath: string): Promise<ClaudeSession
     entrypoint,
     messageCount,
     tokenCount: sawTokenCount ? tokenCount : undefined,
+    outputTokens: sawTokenCount ? outputTokens : undefined,
     costUsd: sawCost ? costUsd : undefined,
     durationMs,
     lastActivity: lastTsMs !== undefined ? new Date(lastTsMs).toISOString() : undefined,
@@ -2412,6 +2603,9 @@ async function scanCodexSession(filePath: string): Promise<CodexSessionScan> {
     topic,
     messageCount,
     tokenCount,
+    outputTokens: lastTotalTokenUsage
+      ? (lastTotalTokenUsage.output_tokens ?? 0) + (lastTotalTokenUsage.reasoning_output_tokens ?? 0)
+      : undefined,
     costUsd,
     durationMs,
     lastActivity: lastTsMs !== undefined ? new Date(lastTsMs).toISOString() : undefined,
@@ -2767,7 +2961,7 @@ export function readKimiMeta(filePath: string): { meta: SessionMeta; content: st
   }
 
   // Parse wire.jsonl to extract message count and token usage
-  const { messageCount, tokenCount } = parseKimiWireMetrics(sessionDir);
+  const { messageCount, tokenCount, outputTokens } = parseKimiWireMetrics(sessionDir);
 
   const meta: SessionMeta = {
     id: sessionId,
@@ -2779,6 +2973,7 @@ export function readKimiMeta(filePath: string): { meta: SessionMeta; content: st
     topic,
     messageCount,
     tokenCount: tokenCount > 0 ? tokenCount : undefined,
+    outputTokens: outputTokens > 0 ? outputTokens : undefined,
   };
 
   return { meta, content: lastPrompt || '' };
@@ -2788,13 +2983,14 @@ export function readKimiMeta(filePath: string): { meta: SessionMeta; content: st
  * TODO: optimize to stream (like scanClaudeSession) to avoid loading large files into memory.
  * For now, synchronous readFileSync matches the pattern of reading state.json and is acceptable
  * since session dirs are usually fresh in FS cache during incremental scans. */
-function parseKimiWireMetrics(sessionDir: string): { messageCount: number; tokenCount: number } {
+function parseKimiWireMetrics(sessionDir: string): { messageCount: number; tokenCount: number; outputTokens: number } {
   const wirePath = path.join(sessionDir, 'agents', 'main', 'wire.jsonl');
   let messageCount = 0;
   let tokenCount = 0;
+  let outputTokens = 0;
 
   if (!fs.existsSync(wirePath)) {
-    return { messageCount: 0, tokenCount: 0 };
+    return { messageCount: 0, tokenCount: 0, outputTokens: 0 };
   }
 
   try {
@@ -2809,6 +3005,7 @@ function parseKimiWireMetrics(sessionDir: string): { messageCount: number; token
           // Kimi usage structure: inputOther + output + inputCacheRead + inputCacheCreation
           const u = event.usage;
           tokenCount += (u.inputOther || 0) + (u.output || 0) + (u.inputCacheRead || 0) + (u.inputCacheCreation || 0);
+          outputTokens += (u.output || 0);
         }
       } catch {
         // Malformed line, skip
@@ -2818,12 +3015,14 @@ function parseKimiWireMetrics(sessionDir: string): { messageCount: number; token
     // If wire.jsonl can't be read, return 0s (graceful degradation)
   }
 
-  return { messageCount, tokenCount };
+  return { messageCount, tokenCount, outputTokens };
 }
 
 /** Parse a time filter string (relative like '7d' or ISO timestamp) into epoch milliseconds. */
 export function parseTimeFilter(input: string): number {
-  const relativeMatch = input.match(/^(\d+)([mhdw])$/i);
+  // Units: m=minute, h=hour, d=day, w=week, mo=month(30d), y=year(365d). `mo`
+  // must precede the single-letter alternatives so "1mo" isn't read as "1m"+"o".
+  const relativeMatch = input.match(/^(\d+)(mo|[mhdwy])$/i);
   if (relativeMatch) {
     const value = parseInt(relativeMatch[1], 10);
     const unit = relativeMatch[2].toLowerCase();
@@ -2831,6 +3030,8 @@ export function parseTimeFilter(input: string): number {
     if (unit === 'h') return Date.now() - value * 3_600_000;
     if (unit === 'd') return Date.now() - value * 86_400_000;
     if (unit === 'w') return Date.now() - value * 7 * 86_400_000;
+    if (unit === 'mo') return Date.now() - value * 30 * 86_400_000;
+    if (unit === 'y') return Date.now() - value * 365 * 86_400_000;
   }
   const ts = new Date(input).getTime();
   return Number.isNaN(ts) ? 0 : ts;

@@ -81,6 +81,10 @@ const SYSTEM_PERMISSIONS_DIR = path.join(SYSTEM_AGENTS_DIR, 'permissions');
 const SYSTEM_SUBAGENTS_DIR = path.join(SYSTEM_AGENTS_DIR, 'subagents');
 const SYSTEM_WORKFLOWS_DIR = path.join(SYSTEM_AGENTS_DIR, 'workflows');
 const SYSTEM_PLUGINS_DIR = path.join(SYSTEM_AGENTS_DIR, 'plugins');
+// Built-in routines shipped in the system repo (gh:phnx-labs/.agents-system).
+// Unioned under user routines by listJobs()/readJob() so a routine shipped here
+// fires for every install, while a user routine of the same name overrides it.
+const SYSTEM_ROUTINES_DIR = path.join(SYSTEM_AGENTS_DIR, 'routines');
 const SYSTEM_PROMPTCUTS_FILE = path.join(SYSTEM_AGENTS_DIR, 'hooks', 'promptcuts.yaml');
 const SYSTEM_MCP_CONFIG_FILE = path.join(SYSTEM_AGENTS_DIR, 'mcp.json');
 const SYSTEM_INSTRUCTIONS_FILE = path.join(SYSTEM_AGENTS_DIR, 'instructions.md');
@@ -95,6 +99,9 @@ const CACHE_DIR = path.join(USER_AGENTS_DIR, '.cache');
 
 // Top-level user dirs (config/definitions only — runtime moves into .history/.cache).
 const ROUTINES_DIR = path.join(USER_AGENTS_DIR, 'routines');
+// Monitor definitions (event-triggered watchers). Sibling of ROUTINES_DIR: a
+// monitor is a routine whose trigger is a watched source instead of a clock.
+const MONITORS_DIR = path.join(USER_AGENTS_DIR, 'monitors');
 const TEAMS_DIR = path.join(USER_AGENTS_DIR, 'teams');
 
 // History bucket (durable).
@@ -102,10 +109,15 @@ const SESSIONS_DIR = path.join(HISTORY_DIR, 'sessions');
 const SESSIONS_DB_PATH = path.join(SESSIONS_DIR, 'sessions.db');
 const VERSIONS_DIR = path.join(HISTORY_DIR, 'versions');
 const RUNS_DIR = path.join(HISTORY_DIR, 'runs');
+// Durable per-monitor state-diff store + fire history (last-seen value/hash,
+// fires/<id>/). Sibling of RUNS_DIR — the native diff store that replaces the
+// hand-rolled markdown memory files monitors used to need.
+const MONITORS_HISTORY_DIR = path.join(HISTORY_DIR, 'monitors');
 const TEAMS_AGENTS_DIR = path.join(HISTORY_DIR, 'teams', 'agents');
 const BACKUPS_DIR = path.join(HISTORY_DIR, 'backups');
 const TRASH_DIR = path.join(HISTORY_DIR, 'trash');
 const MAILBOX_DIR = path.join(HISTORY_DIR, 'mailbox');
+const FEED_DIR = path.join(HISTORY_DIR, 'feed');
 
 // Cache bucket (regenerable).
 const SHIMS_DIR = path.join(CACHE_DIR, 'shims');
@@ -345,12 +357,21 @@ export function getPackagesDir(): string { return PACKAGES_DIR; }
 export function getRoutinesDir(): string { return ROUTINES_DIR; }
 
 /**
+ * Path to built-in routine definitions shipped in the system repo
+ * (`~/.agents/.system/routines/`). Unioned under the user routines dir by
+ * listJobs()/readJob(): a routine shipped here fires for every install, and a
+ * user routine of the same name overrides it (a user copy with `enabled: false`
+ * disables the built-in). The daemon fires these; the directory need not exist.
+ */
+export function getSystemRoutinesDir(): string { return SYSTEM_ROUTINES_DIR; }
+
+/**
  * Path to a project-scoped routines directory (`<project>/.agents/routines/`),
  * or null when no project `.agents/` is found by walking up from cwd.
  *
  * Project routines participate in `list`/`view`/`run` for inspection but are
- * NOT fired by the daemon (which runs from $HOME and only loads user routines).
- * Opt-in firing for project routines is tracked as a follow-up.
+ * NOT fired by the daemon (which runs from $HOME and loads only user + system
+ * routines). Opt-in firing for project routines is tracked as a follow-up.
  */
 export function getProjectRoutinesDir(cwd: string = process.cwd()): string | null {
   const projectAgentsDir = getProjectAgentsDir(cwd);
@@ -361,8 +382,18 @@ export function getProjectRoutinesDir(cwd: string = process.cwd()): string | nul
 /** Path to routine execution logs (~/.agents/.history/runs/). */
 export function getRunsDir(): string { return RUNS_DIR; }
 
+/** Path to monitor YAML definitions (~/.agents/monitors/). */
+export function getMonitorsDir(): string { return MONITORS_DIR; }
+
+/** Path to the durable per-monitor state-diff store + fire history
+ * (~/.agents/.history/monitors/). */
+export function getMonitorsHistoryDir(): string { return MONITORS_HISTORY_DIR; }
+
 /** Root for per-agent mailboxes (~/.agents/.history/mailbox/). */
 export function getMailboxRootDir(): string { return MAILBOX_DIR; }
+
+/** Root for open-block feed records (~/.agents/.history/feed/). */
+export function getFeedDir(): string { return FEED_DIR; }
 
 /** Path to installed agent CLI binaries (~/.agents/.history/versions/). */
 export function getVersionsDir(): string { return VERSIONS_DIR; }

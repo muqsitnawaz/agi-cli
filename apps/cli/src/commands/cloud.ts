@@ -18,6 +18,9 @@ import type { CloudProvider, CloudProviderId, CloudTarget, CloudTaskStatus, Disp
 import { MissingTargetError, MAX_IMAGES_PER_DISPATCH } from '../lib/cloud/types.js';
 import type { JobConfig, JobTrigger } from '../lib/routines.js';
 import { normalizeTriggerEvent, validateTrigger, writeJob, jobExists, GITHUB_TRIGGER_EVENTS } from '../lib/routines.js';
+import { machineId } from '../lib/machine-id.js';
+import { emit } from '../lib/events.js';
+import { shareRuntimeEnv } from '../lib/share/config.js';
 
 /** Map a supported image file extension to its wire mimeType. Rejects anything else. */
 function imageMimeFromPath(file: string): ImageAttachment['mimeType'] {
@@ -48,11 +51,12 @@ function parseSkillRef(raw: string): SkillRef {
 
 /** Print an error message to stderr and exit. */
 /** Return a chalk color function appropriate for the given task status. */
-function statusColor(status: string): (s: string) => string {
+export function statusColor(status: string): (s: string) => string {
   switch (status) {
     case 'queued':
     case 'allocating': return chalk.blue;
     case 'running': return chalk.yellow;
+    case 'idle': return chalk.gray;
     case 'completed': return chalk.green;
     case 'input_required': return chalk.magenta;
     case 'failed': return chalk.red;
@@ -161,7 +165,7 @@ Examples:
   cloud
     .command('run [prompt]')
     .description('Dispatch a task to a cloud agent.')
-    .option('--provider <id>', 'Cloud backend: rush, codex, factory, antigravity (overrides agent auto-routing)')
+    .option('--provider <id>', 'Cloud backend: rush, codex, factory, antigravity, host (overrides agent auto-routing)')
     .option('--agent <name>', 'Agent to run: claude, codex, droid, antigravity (auto-routes to its native cloud)')
     .option(
       '--repo <owner/repo>',
@@ -177,12 +181,17 @@ Examples:
       '--on <event>',
       'Register this run as an event trigger instead of dispatching now: pull_request (pr), push, issue_comment, workflow_run. Persists a trigger-bound routine.',
     )
+    .option('--action <name>', 'GitHub webhook action filter for --on triggers (e.g. labeled)')
+    .option('--label <name>', 'GitHub label filter for --on triggers')
     .option('--name <name>', 'Routine name to register under (with --on). Defaults to a generated name.')
     .option('-p, --prompt <text>', 'Inline prompt (alternative to positional argument)')
     .option('--timeout <duration>', 'Kill after duration (e.g., 30m, 2h)')
     .option('--model <model>', 'Model override')
     .option('--env <id>', 'Codex Cloud environment ID')
     .option('--computer <name>', 'Factory/Droid computer target')
+    .option('--host <name>', 'One of your machines as the target (a registered host, device, capability tag, or user@host). Implies --provider host.')
+    .option('--remote-cwd <dir>', 'Working directory on the host (--provider host only)')
+    .option('--any', 'With --host <cap> (a capability tag), pick any matching host instead of erroring when several match')
     .option('--autonomy <level>', 'Factory/Droid autonomy: low, medium, high (default high)')
     .option('--mode <mode>', 'Execution mode (e.g., plan, edit, full)')
     .option(
@@ -229,6 +238,10 @@ Examples:
   # Codex Cloud
   agents cloud run "add auth tests" --provider codex --env env_abc123
 
+  # One of your own machines (agents hosts / agents devices), over SSH
+  agents cloud run "run the nightly benchmark" --host gpu-box --agent claude
+  agents cloud run "rebuild the index" --host gpu --any --remote-cwd ~/proj
+
   # Default provider (set in ~/.agents/agents.yaml)
   agents cloud run "refactor auth module" --repo user/repo
 `)
@@ -237,7 +250,7 @@ Examples:
 
       // Resolve prompt: --prompt flag, positional arg, or file
       let prompt = (options.prompt as string) || positionalPrompt;
-      if (!prompt) die('Prompt is required. Pass it as an argument or with --prompt.');
+      if (!prompt) die('Prompt is required. Pass it as an argument or with --prompt.', 1, { json, hint: 'agents cloud run "<task>" --repo <owner/repo>' });
 
       // If prompt is a file path, read it and tell the user
       if (fs.existsSync(prompt) && fs.statSync(prompt).isFile()) {
@@ -250,9 +263,17 @@ Examples:
         }
       }
 
+      // --host names one of YOUR machines as the target — that only means
+      // something to the host provider, so it implies --provider host rather
+      // than silently riding along to a cloud backend that would ignore it.
+      if (options.host && options.provider && options.provider !== 'host') {
+        die(`--host targets your own machines (--provider host), not ${options.provider}. Drop --host, or use --provider host.`, 1, { json });
+      }
+      const explicitProvider = (options.provider as string | undefined) ?? (options.host ? 'host' : undefined);
+
       // Agent-aware: with no --provider, the agent routes to its native cloud
       // (claude→rush, codex→codex, droid→factory, antigravity→antigravity).
-      const provider = resolveProvider(options.provider as string | undefined, options.agent as string | undefined);
+      const provider = resolveProvider(explicitProvider, options.agent as string | undefined);
 
       // --repo is repeatable: commander gives us an array via our collector.
       // A single --repo value arrives as a one-element array; keep the legacy
@@ -274,9 +295,14 @@ Examples:
         model: options.model as string | undefined,
         providerOptions: {},
       };
+      const shareEnv = shareRuntimeEnv({ agentOnly: true });
+      if (shareEnv) dispatchOptions.env = shareEnv;
 
       if (options.env) dispatchOptions.providerOptions!.env = options.env as string;
       if (options.computer) dispatchOptions.providerOptions!.computer = options.computer as string;
+      if (options.host) dispatchOptions.providerOptions!.host = options.host as string;
+      if (options.remoteCwd) dispatchOptions.providerOptions!.remoteCwd = options.remoteCwd as string;
+      if (options.any) dispatchOptions.providerOptions!.any = true;
       if (options.autonomy) dispatchOptions.providerOptions!.autonomy = options.autonomy as string;
       if (options.mode) dispatchOptions.providerOptions!.mode = options.mode as string;
       if (options.balanced || (options.strategy as string) === 'balanced') {
@@ -292,21 +318,23 @@ Examples:
       if (options.on) {
         const event = normalizeTriggerEvent(options.on as string);
         if (!event) {
-          die(`Unknown --on event "${options.on}". Use one of: ${GITHUB_TRIGGER_EVENTS.join(', ')} (aliases: pr, comment, workflow).`);
+          die(`Unknown --on event "${options.on}". Use one of: ${GITHUB_TRIGGER_EVENTS.join(', ')} (aliases: pr, comment, workflow).`, 1, { json });
         }
         const trigger: JobTrigger = { type: 'github_event', event: event! };
         if (repoValues[0]) trigger.repo = repoValues[0];
         if (options.branch) trigger.branch = options.branch as string;
+        if (options.action) trigger.action = options.action as string;
+        if (options.label) trigger.label = options.label as string;
 
         const triggerErrors = validateTrigger(trigger);
-        if (triggerErrors.length > 0) die(`Invalid trigger: ${triggerErrors.join(', ')}`);
+        if (triggerErrors.length > 0) die(`Invalid trigger: ${triggerErrors.join(', ')}`, 1, { json });
 
         dispatchOptions.trigger = trigger;
 
         const routineName = (options.name as string | undefined)
           || `cloud-${event}-${(repoValues[0] || 'any').replace(/[^a-z0-9]+/gi, '-')}`.toLowerCase();
         if (jobExists(routineName)) {
-          die(`A routine named "${routineName}" already exists. Pass --name to register under a different name.`);
+          die(`A routine named "${routineName}" already exists. Pass --name to register under a different name.`, 1, { json });
         }
 
         const routine: JobConfig = {
@@ -320,6 +348,14 @@ Examples:
           prompt,
         };
         if (repoValues[0]) routine.repo = repoValues[0];
+        // --host with --on: the webhook-fired run places on that machine (the
+        // routine carries the placement, and firing pins to THIS device so a
+        // fleet of receivers can't each dispatch a duplicate).
+        if (options.host) {
+          routine.host = options.host as string;
+          if (options.remoteCwd) routine.remoteCwd = options.remoteCwd as string;
+          routine.devices = [machineId()];
+        }
         writeJob(routine);
 
         if (json) {
@@ -340,14 +376,14 @@ Examples:
       const skillIds = Array.isArray(options.skill) ? (options.skill as string[]) : [];
       const caps = provider.capabilities();
       if (imagePaths.length > 0) {
-        if (!caps.images) die(`${provider.name} does not support image attachments.`);
+        if (!caps.images) die(`${provider.name} does not support image attachments.`, 1, { json });
         if (imagePaths.length > MAX_IMAGES_PER_DISPATCH) {
-          die(`Too many images: ${imagePaths.length}. Max is ${MAX_IMAGES_PER_DISPATCH} per dispatch.`);
+          die(`Too many images: ${imagePaths.length}. Max is ${MAX_IMAGES_PER_DISPATCH} per dispatch.`, 1, { json });
         }
         dispatchOptions.images = imagePaths.map(readImageAttachment);
       }
       if (skillIds.length > 0) {
-        if (!caps.skills) die(`${provider.name} does not support ride-along skills.`);
+        if (!caps.skills) die(`${provider.name} does not support ride-along skills.`, 1, { json });
         dispatchOptions.skills = skillIds.map(parseSkillRef);
       }
 
@@ -372,21 +408,22 @@ Examples:
         if (err instanceof MissingTargetError) {
           const picked = await pickMissingTarget(provider, err, json);
           if (!picked) {
-            die(err.guidance ? `${err.message}\n\n${err.guidance}` : err.message);
+            die(err.guidance ? `${err.message}\n\n${err.guidance}` : err.message, 1, { json });
           }
           dispatchOptions.providerOptions![err.kind] = picked;
           try {
             task = await dispatchOnce();
           } catch (err2) {
-            die((err2 as Error).message);
+            die((err2 as Error).message, 1, { json });
           }
         } else {
-          die((err as Error).message);
+          die((err as Error).message, 1, { json });
         }
       }
 
       // Persist locally
       insertTask(task);
+      emit('cloud.dispatch', { module: 'cloud', taskId: task.id, agent: task.agent, provider: task.provider, status: task.status });
 
       if (json) {
         process.stdout.write(JSON.stringify(task) + '\n');
@@ -414,6 +451,7 @@ Examples:
           summary: result.summary,
           prUrl: result.prUrl,
         });
+        emit('cloud.complete', { module: 'cloud', taskId: task.id, status: result.status, prUrl: result.prUrl });
         if (gated?.gate.breached()) {
           const b = gated.gate.breach();
           process.stderr.write(
@@ -586,6 +624,7 @@ Examples:
           summary: result.summary,
           prUrl: result.prUrl,
         });
+        emit('cloud.complete', { module: 'cloud', taskId: id, status: result.status, prUrl: result.prUrl });
         if (gated?.gate.breached()) {
           process.exitCode = 7;
         }
@@ -607,6 +646,7 @@ Examples:
       try {
         await provider.cancel(id);
         updateTaskStatus(id, 'cancelled');
+        emit('cloud.cancel', { module: 'cloud', taskId: id, provider: task.provider });
         console.log(chalk.green(`Task ${id} cancelled.`));
       } catch (err) {
         die((err as Error).message);
@@ -626,6 +666,7 @@ Examples:
       try {
         await provider.message(id, text);
         updateTaskStatus(id, 'running');
+        emit('cloud.message', { module: 'cloud', taskId: id });
         console.log(chalk.green(`Message sent to task ${id}. Agent is continuing.`));
       } catch (err) {
         die((err as Error).message);

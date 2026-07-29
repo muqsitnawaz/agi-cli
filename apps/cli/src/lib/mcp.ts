@@ -15,10 +15,10 @@ import * as TOML from 'smol-toml';
 import { execFileSync } from 'child_process';
 import * as os from 'os';
 import type { AgentId } from './types.js';
-import { getMcpDir, getUserMcpDir, getProjectAgentsDir, getVersionsDir } from './state.js';
+import { getMcpDir, getUserMcpDir, getProjectAgentsDir, getVersionsDir, getUserAgentsDir } from './state.js';
 import { getBinaryPath, getVersionHomePath } from './versions.js';
-import { IS_WINDOWS, needsWindowsShell } from './platform/index.js';
-import { AGENTS } from './agents.js';
+import { IS_WINDOWS, execFileShellSpec } from './platform/index.js';
+import { AGENTS, getMcpConfigPathForHome, getProjectMcpConfigPath } from './agents.js';
 import { isCapable } from './capabilities.js';
 import { setGeminiAutoUpdateDisabled, updateGeminiSettings } from './gemini-settings.js';
 
@@ -132,13 +132,119 @@ function isStringRecord(value: unknown): value is Record<string, string> {
   return Object.values(value).every((item) => typeof item === 'string');
 }
 
+// ─── Project MCP trust (RUSH-1776) ───────────────────────────────────────────
+// Project-scoped MCP configs (<repo>/.agents/mcp/*.yaml) are UNTRUSTED by
+// default. An MCP server is an arbitrary command spawned under the agent's
+// authority, so merely cloning a hostile repo must never auto-register or run
+// it. A project's MCP servers enter the register/spawn path only after the user
+// explicitly trusts that project (`agents mcp trust`), recorded in a user-owned
+// store OUTSIDE any repo so a cloned repo can't grant itself trust. User- and
+// system-scoped MCPs (~/.agents/mcp/*) are always trusted.
+
+/** Path to the user-owned project-trust store (never inside a repo). */
+export function getMcpTrustStorePath(): string {
+  return path.join(getUserAgentsDir(), 'mcp-trust.yaml');
+}
+
+/**
+ * Key a project by its ROOT (parent of `.agents/`), resolved through symlinks
+ * so the key is stable no matter how the cwd was spelled.
+ */
+function normalizeProjectKey(projectAgentsDir: string): string {
+  const root = path.dirname(projectAgentsDir);
+  try {
+    return fs.realpathSync(root);
+  } catch {
+    return path.resolve(root);
+  }
+}
+
+function readTrustedProjects(): Set<string> {
+  const storePath = getMcpTrustStorePath();
+  if (!fs.existsSync(storePath)) return new Set();
+  let parsed: unknown;
+  try {
+    parsed = yaml.parse(fs.readFileSync(storePath, 'utf-8'));
+  } catch {
+    return new Set();
+  }
+  const list = parsed && typeof parsed === 'object' && Array.isArray((parsed as { trustedProjects?: unknown }).trustedProjects)
+    ? (parsed as { trustedProjects: unknown[] }).trustedProjects
+    : [];
+  const out = new Set<string>();
+  for (const entry of list) {
+    if (typeof entry !== 'string' || entry.length === 0) continue;
+    try {
+      out.add(fs.realpathSync(entry));
+    } catch {
+      out.add(path.resolve(entry));
+    }
+  }
+  return out;
+}
+
+function writeTrustedProjects(trusted: Set<string>): void {
+  const storePath = getMcpTrustStorePath();
+  fs.mkdirSync(path.dirname(storePath), { recursive: true });
+  fs.writeFileSync(storePath, yaml.stringify({ trustedProjects: Array.from(trusted).sort() }), 'utf-8');
+}
+
+/**
+ * Whether the project that owns `projectAgentsDir` has been explicitly trusted
+ * for MCP auto-apply. Untrusted by default (fail closed).
+ */
+export function isProjectMcpTrusted(projectAgentsDir: string): boolean {
+  return readTrustedProjects().has(normalizeProjectKey(projectAgentsDir));
+}
+
+/**
+ * Record explicit trust for the project containing `cwd` so its project-scoped
+ * MCP servers may be registered/spawned. Returns the trusted project root, or
+ * null when `cwd` is not inside a project (no `.agents/` to trust).
+ */
+export function trustProjectMcp(cwd: string = process.cwd()): string | null {
+  const projectAgentsDir = getProjectAgentsDir(cwd);
+  if (!projectAgentsDir) return null;
+  const key = normalizeProjectKey(projectAgentsDir);
+  const trusted = readTrustedProjects();
+  if (!trusted.has(key)) {
+    trusted.add(key);
+    writeTrustedProjects(trusted);
+  }
+  return key;
+}
+
+/** Revoke MCP trust for the project containing `cwd`. Returns true if it was trusted. */
+export function untrustProjectMcp(cwd: string = process.cwd()): boolean {
+  const projectAgentsDir = getProjectAgentsDir(cwd);
+  if (!projectAgentsDir) return false;
+  const key = normalizeProjectKey(projectAgentsDir);
+  const trusted = readTrustedProjects();
+  if (!trusted.delete(key)) return false;
+  writeTrustedProjects(trusted);
+  return true;
+}
+
 /**
  * List all MCP server configs from ~/.agents/mcp/.
+ *
+ * When `enforceProjectTrust` is set, project-scoped configs are included only
+ * for a project the user has explicitly trusted (see `isProjectMcpTrusted`) —
+ * this is the choke point that keeps an untrusted cloned repo's MCP servers out
+ * of the register/spawn path. It ALSO fixes name-collision shadowing: an
+ * untrusted project entry is dropped before dedup, so it can never mask a
+ * same-named user entry. Display callers omit the flag to surface project
+ * entries (command+args and all) regardless of trust.
  */
-export function listMcpServerConfigs(cwd: string = process.cwd()): InstalledMcpServer[] {
+export function listMcpServerConfigs(
+  cwd: string = process.cwd(),
+  options: { enforceProjectTrust?: boolean } = {}
+): InstalledMcpServer[] {
   const dirs: Array<{ scope: 'project' | 'user'; dir: string }> = [];
   const projectAgentsDir = getProjectAgentsDir(cwd);
-  if (projectAgentsDir) {
+  const includeProject = projectAgentsDir !== null
+    && (!options.enforceProjectTrust || isProjectMcpTrusted(projectAgentsDir));
+  if (projectAgentsDir && includeProject) {
     dirs.push({ scope: 'project', dir: path.join(projectAgentsDir, 'mcp') });
   }
   // User dir first (wins on name collision), then system
@@ -218,8 +324,14 @@ export function installMcpConfigCentrally(
  * If names is provided, returns only those servers.
  * Otherwise returns all servers.
  */
-export function getMcpServersByName(names?: string[], options: { cwd?: string } = {}): InstalledMcpServer[] {
-  const allServers = listMcpServerConfigs(options.cwd);
+export function getMcpServersByName(
+  names?: string[],
+  options: { cwd?: string; enforceProjectTrust?: boolean } = {}
+): InstalledMcpServer[] {
+  // This feeds the register/spawn path (installMcpServers, workflow assembly),
+  // so untrusted project-scoped servers are excluded by default (fail closed).
+  const enforceProjectTrust = options.enforceProjectTrust ?? true;
+  const allServers = listMcpServerConfigs(options.cwd, { enforceProjectTrust });
   if (!names || names.length === 0) {
     return allServers;
   }
@@ -274,19 +386,23 @@ function installMcpViaClaude(binaryPath: string, server: InstalledMcpServer, ver
       ...(server.config.args || [])
     ];
 
-    execFileSync(binaryPath, args, {
+    // RUSH-1752: user-controlled MCP command/args must not reach cmd.exe unquoted.
+    const spec = execFileShellSpec(binaryPath, args);
+    execFileSync(spec.command, spec.args, {
       stdio: 'pipe',
       timeout: 30000,
       env: execEnv,
-      shell: needsWindowsShell(binaryPath),
+      shell: spec.shell,
     });
   } else {
     // claude mcp add --scope user --transport http -- <name> <url>
-    execFileSync(binaryPath, ['mcp', 'add', '--scope', 'user', '--transport', 'http', '--', server.name, server.config.url!], {
+    const httpArgs = ['mcp', 'add', '--scope', 'user', '--transport', 'http', '--', server.name, server.config.url!];
+    const spec = execFileShellSpec(binaryPath, httpArgs);
+    execFileSync(spec.command, spec.args, {
       stdio: 'pipe',
       timeout: 30000,
       env: execEnv,
-      shell: needsWindowsShell(binaryPath),
+      shell: spec.shell,
     });
   }
 }
@@ -306,11 +422,13 @@ function installMcpViaCodex(binaryPath: string, server: InstalledMcpServer, vers
       ...(server.config.args || [])
     ];
 
-    execFileSync(binaryPath, args, {
+    // RUSH-1752: user-controlled MCP command/args must not reach cmd.exe unquoted.
+    const spec = execFileShellSpec(binaryPath, args);
+    execFileSync(spec.command, spec.args, {
       stdio: 'pipe',
       timeout: 30000,
       env: { ...process.env, HOME: versionHome },
-      shell: needsWindowsShell(binaryPath),
+      shell: spec.shell,
     });
   }
   // Note: Codex may not support HTTP MCPs
@@ -353,13 +471,34 @@ function registerMcpCommand(
 ): { success: boolean; error?: string } {
   try {
     validateMcpServerName(name);
+    if (agentId === 'hermes' || agentId === 'forge') {
+      const server: InstalledMcpServer = {
+        name,
+        path: '',
+        config: {
+          name,
+          transport: transport === 'http' ? 'http' : 'stdio',
+          ...(transport === 'http'
+            ? { url: commandSpec.command }
+            : { command: commandSpec.command, args: commandSpec.args }),
+        },
+      };
+      if (agentId === 'hermes') {
+        installMcpToHermesConfig(server, options.home || os.homedir());
+      } else {
+        installMcpToForgeConfig(server, options.home || os.homedir());
+      }
+      return { success: true };
+    }
     const bin = options.binary || AGENTS[agentId].cliCommand;
     const commandArgs = [commandSpec.command, ...commandSpec.args];
     const args = agentId === 'claude'
       ? ['mcp', 'add', '--transport', transport, '--scope', scope, '--', name, ...commandArgs]
       : ['mcp', 'add', '--', name, ...commandArgs];
     const env = options.home ? { ...process.env, HOME: options.home } : process.env;
-    execFileSync(bin, args, { stdio: 'pipe', timeout: 30000, env, shell: needsWindowsShell(bin) });
+    // RUSH-1752: user-controlled MCP command/args must not reach cmd.exe unquoted.
+    const spec = execFileShellSpec(bin, args);
+    execFileSync(spec.command, spec.args, { stdio: 'pipe', timeout: 30000, env, shell: spec.shell });
     return { success: true };
   } catch (err) {
     return { success: false, error: (err as Error).message };
@@ -494,8 +633,69 @@ function installMcpToFactoryConfig(server: InstalledMcpServer, versionHome: stri
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
 }
 
+function installMcpToHermesConfig(server: InstalledMcpServer, versionHome: string): void {
+  const configPath = path.join(versionHome, '.hermes', 'config.yaml');
+
+  let config: Record<string, unknown> = {};
+  if (fs.existsSync(configPath)) {
+    const parsed = yaml.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      config = parsed as Record<string, unknown>;
+    }
+  }
+
+  if (!config.mcp_servers || typeof config.mcp_servers !== 'object' || Array.isArray(config.mcp_servers)) {
+    config.mcp_servers = {};
+  }
+
+  const mcpServers = config.mcp_servers as Record<string, unknown>;
+  if (server.config.transport === 'stdio') {
+    mcpServers[server.name] = {
+      command: server.config.command,
+      args: server.config.args || [],
+      ...(server.config.env && { env: server.config.env }),
+    };
+  } else {
+    mcpServers[server.name] = {
+      url: server.config.url,
+    };
+  }
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, yaml.stringify(config), 'utf-8');
+}
+
+function installMcpToForgeConfig(server: InstalledMcpServer, versionHome: string): void {
+  const configPath = path.join(versionHome, '.forge', '.mcp.json');
+
+  let config: Record<string, unknown> = {};
+  if (fs.existsSync(configPath)) {
+    config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  }
+
+  if (!config.mcpServers || typeof config.mcpServers !== 'object' || Array.isArray(config.mcpServers)) {
+    config.mcpServers = {};
+  }
+
+  const mcpServers = config.mcpServers as Record<string, unknown>;
+  if (server.config.transport === 'stdio') {
+    mcpServers[server.name] = {
+      command: server.config.command,
+      args: server.config.args || [],
+      ...(server.config.env && { env: server.config.env }),
+    };
+  } else {
+    mcpServers[server.name] = {
+      url: server.config.url,
+    };
+  }
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+}
+
 function installMcpToOpenCodeConfig(server: InstalledMcpServer, versionHome: string): void {
-  const configPath = path.join(versionHome, '.opencode', 'opencode.jsonc');
+  const configPath = path.join(versionHome, '.config', 'opencode', 'opencode.jsonc');
 
   let config: Record<string, unknown> = {};
   if (fs.existsSync(configPath)) {
@@ -535,6 +735,262 @@ function installMcpToOpenCodeConfig(server: InstalledMcpServer, versionHome: str
 }
 
 /**
+ * MCP server shaped for direct config-file serialization.
+ */
+export interface WritableMcpServer {
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}
+
+/**
+ * Agents whose config file format is implemented by `writeMcpConfig`.
+ * Others are intentionally skipped until their schema is added.
+ */
+function writeMcpConfigSupportsAgent(agentId: AgentId): boolean {
+  switch (agentId) {
+    case 'claude':
+    case 'cursor':
+    case 'gemini':
+    case 'kimi':
+    case 'droid':
+    case 'forge':
+    case 'openclaw':
+    case 'codex':
+    case 'grok':
+    case 'opencode':
+    case 'hermes':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Serialize MCP servers into an agent-specific config file.
+ *
+ * `mode: 'overwrite'` replaces the whole MCP section (used for tool-managed
+ * version-home configs). `mode: 'merge'` updates/adds the provided server
+ * entries while preserving existing entries (used for project-level configs
+ * that users may hand-edit or populate via agent CLI commands).
+ */
+export function writeMcpConfig(
+  agentId: AgentId,
+  configPath: string,
+  servers: WritableMcpServer[],
+  mode: 'overwrite' | 'merge' = 'overwrite'
+): void {
+  if (servers.length === 0) {
+    return;
+  }
+
+  switch (agentId) {
+    case 'claude':
+    case 'cursor':
+    case 'gemini':
+    case 'kimi':
+    case 'droid':
+    case 'forge': {
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        try {
+          config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        } catch {
+          config = {};
+        }
+      }
+
+      const mcpServers: Record<string, unknown> =
+        mode === 'merge' && config.mcpServers && typeof config.mcpServers === 'object'
+          ? { ...(config.mcpServers as Record<string, unknown>) }
+          : {};
+
+      for (const server of servers) {
+        if (server.transport === 'stdio') {
+          mcpServers[server.name] = {
+            command: server.command,
+            args: server.args || [],
+            env: server.env || {},
+          };
+        } else {
+          mcpServers[server.name] = {
+            url: server.url,
+            ...(server.headers && { headers: server.headers }),
+          };
+        }
+      }
+
+      config.mcpServers = mcpServers;
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+      break;
+    }
+    case 'openclaw': {
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        try {
+          config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        } catch {
+          config = {};
+        }
+      }
+
+      if (!config.mcp || typeof config.mcp !== 'object') {
+        config.mcp = {};
+      }
+      const mcp = config.mcp as Record<string, unknown>;
+
+      const mcpServers: Record<string, unknown> =
+        mode === 'merge' && mcp.servers && typeof mcp.servers === 'object'
+          ? { ...(mcp.servers as Record<string, unknown>) }
+          : {};
+
+      for (const server of servers) {
+        if (server.transport === 'stdio') {
+          mcpServers[server.name] = {
+            command: server.command,
+            args: server.args || [],
+            env: server.env || {},
+          };
+        } else {
+          mcpServers[server.name] = {
+            url: server.url,
+            transport: server.transport,
+            ...(server.headers && { headers: server.headers }),
+          };
+        }
+      }
+
+      mcp.servers = mcpServers;
+      config.mcp = mcp;
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+      break;
+    }
+    case 'codex':
+    case 'grok': {
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        try {
+          config = TOML.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+        } catch {
+          config = {};
+        }
+      }
+
+      const mcpServers: Record<string, unknown> =
+        mode === 'merge' && config.mcp_servers && typeof config.mcp_servers === 'object'
+          ? { ...(config.mcp_servers as Record<string, unknown>) }
+          : {};
+
+      for (const server of servers) {
+        if (server.transport === 'stdio') {
+          mcpServers[server.name] = {
+            command: server.command,
+            args: server.args || [],
+            ...(server.env && { env: server.env }),
+          };
+        } else {
+          mcpServers[server.name] = {
+            url: server.url,
+            ...(server.headers && { headers: server.headers }),
+          };
+        }
+      }
+
+      config.mcp_servers = mcpServers;
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, TOML.stringify(config), 'utf-8');
+      break;
+    }
+    case 'opencode': {
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        try {
+          const content = fs.readFileSync(configPath, 'utf-8');
+          const jsonContent = content.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+          config = JSON.parse(jsonContent);
+        } catch {
+          config = {};
+        }
+      }
+
+      const mcp: Record<string, unknown> =
+        mode === 'merge' && config.mcp && typeof config.mcp === 'object'
+          ? { ...(config.mcp as Record<string, unknown>) }
+          : {};
+
+      for (const server of servers) {
+        if (server.transport === 'stdio') {
+          const commandArray = [server.command, ...(server.args || [])];
+          mcp[server.name] = {
+            type: 'local',
+            command: commandArray,
+            ...(server.env && { env: server.env }),
+          };
+        } else {
+          mcp[server.name] = {
+            type: 'remote',
+            url: server.url,
+          };
+        }
+      }
+
+      config.mcp = mcp;
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+      break;
+    }
+    case 'hermes': {
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        try {
+          const parsed = yaml.parse(fs.readFileSync(configPath, 'utf-8'));
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            config = parsed as Record<string, unknown>;
+          }
+        } catch {
+          config = {};
+        }
+      }
+
+      const mcpServers: Record<string, unknown> =
+        mode === 'merge' && config.mcp_servers && typeof config.mcp_servers === 'object' && !Array.isArray(config.mcp_servers)
+          ? { ...(config.mcp_servers as Record<string, unknown>) }
+          : {};
+
+      for (const server of servers) {
+        if (server.transport === 'stdio') {
+          mcpServers[server.name] = {
+            command: server.command,
+            args: server.args || [],
+            ...(server.env && { env: server.env }),
+          };
+        } else {
+          mcpServers[server.name] = {
+            url: server.url,
+          };
+        }
+      }
+
+      config.mcp_servers = mcpServers;
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, yaml.stringify(config), 'utf-8');
+      break;
+    }
+  }
+}
+
+/**
  * Install MCP servers to an agent.
  * For Claude/Codex: uses CLI commands (claude mcp add, codex mcp add)
  * For others: edits config files directly
@@ -568,32 +1024,85 @@ export function installMcpServers(
   }
 
   for (const server of servers) {
+    let handled = false;
+
     try {
       if (agentId === 'claude') {
         installMcpViaClaude(binaryPath, server, versionHome);
-        applied.push(server.name);
+        handled = true;
       } else if (agentId === 'codex') {
         installMcpViaCodex(binaryPath, server, versionHome);
-        applied.push(server.name);
+        handled = true;
       } else if (agentId === 'gemini') {
         installMcpToGeminiConfig(server, versionHome);
-        applied.push(server.name);
+        handled = true;
       } else if (agentId === 'cursor') {
         installMcpToCursorConfig(server, versionHome);
-        applied.push(server.name);
+        handled = true;
       } else if (agentId === 'opencode') {
         installMcpToOpenCodeConfig(server, versionHome);
-        applied.push(server.name);
+        handled = true;
+      } else if (agentId === 'openclaw') {
+        // OpenClaw has no install CLI; write the JSON config directly.
+        // Use merge because this loop runs once per server.
+        const userConfigPath = getMcpConfigPathForHome(agentId, versionHome);
+        const writableServer: WritableMcpServer = {
+          name: server.config.name,
+          transport: server.config.transport,
+          command: server.config.command,
+          args: server.config.args,
+          env: server.config.env,
+          url: server.config.url,
+        };
+        writeMcpConfig(agentId, userConfigPath, [writableServer], 'merge');
+        handled = true;
       } else if (agentId === 'grok') {
-        // Grok primarily uses [mcp_servers] in ~/.grok/config.toml (or project .grok/config.toml).
-        // We have the path helper; full writer can be added (reuse codex toml pattern).
-        // For now the general sync + toml editing via agents mcp works via the path helpers.
-        applied.push(server.name);
+        // Grok has no working `grok mcp add` CLI, so write the TOML config
+        // directly into the version-home directory for all scopes.
+        // Use merge because this loop runs once per server.
+        const userConfigPath = getMcpConfigPathForHome(agentId, versionHome);
+        const writableServer: WritableMcpServer = {
+          name: server.config.name,
+          transport: server.config.transport,
+          command: server.config.command,
+          args: server.config.args,
+          env: server.config.env,
+          url: server.config.url,
+        };
+        writeMcpConfig(agentId, userConfigPath, [writableServer], 'merge');
+        handled = true;
       } else if (agentId === 'kimi') {
         installMcpToKimiConfig(server, versionHome);
-        applied.push(server.name);
+        handled = true;
       } else if (agentId === 'droid') {
         installMcpToFactoryConfig(server, versionHome);
+        handled = true;
+      } else if (agentId === 'hermes') {
+        installMcpToHermesConfig(server, versionHome);
+        handled = true;
+      } else if (agentId === 'forge') {
+        installMcpToForgeConfig(server, versionHome);
+        handled = true;
+      }
+
+      // Project-layer servers also get merged into the agent's project-level
+      // config (e.g., .mcp.json, .codex/config.toml) so the CLI discovers them
+      // when run inside the repo.
+      if (server.scope === 'project' && options.cwd && writeMcpConfigSupportsAgent(agentId)) {
+        const projectConfigPath = getProjectMcpConfigPath(agentId, options.cwd);
+        const writableServer: WritableMcpServer = {
+          name: server.config.name,
+          transport: server.config.transport,
+          command: server.config.command,
+          args: server.config.args,
+          env: server.config.env,
+          url: server.config.url,
+        };
+        writeMcpConfig(agentId, projectConfigPath, [writableServer], 'merge');
+        handled = true;
+      }
+
+      if (handled) {
         applied.push(server.name);
       }
     } catch (err) {

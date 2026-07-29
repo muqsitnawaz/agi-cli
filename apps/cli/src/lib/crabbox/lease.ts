@@ -8,8 +8,17 @@
  */
 
 import type { AgentId } from '../types.js';
-import { crabboxWarmup, crabboxWaitReady, crabboxRunScript, crabboxStop, type CrabboxBox } from './cli.js';
-import { buildCredentialScript, type DetectedRuntime } from './runtimes.js';
+import { crabboxFind, crabboxWarmup, crabboxWaitReady, crabboxRunScript, crabboxStop, type CrabboxBox } from './cli.js';
+import * as yaml from 'yaml';
+import { buildCredentialScript, buildHomeFileWriteScript, CLAUDE_TOKEN_REMOTE, type DetectedRuntime } from './runtimes.js';
+import { LEASE_AGENT_MARKER } from './progress.js';
+
+/** Phase signal for a lease run, so the command layer can drive a progress UI. */
+export type LeasePhase =
+  | { kind: 'warmup'; backend?: string }
+  | { kind: 'reuse'; slug: string }
+  | { kind: 'ready'; box: CrabboxBox; elapsedMs: number }
+  | { kind: 'teardown' };
 
 export interface LeaseRunOptions {
   agent: string;
@@ -20,14 +29,39 @@ export interface LeaseRunOptions {
   backend?: string;
   boxClass?: string;
   profile?: string;
-  /** Runtimes to install + authenticate on the box (from the picker). */
+  /** Runtimes to install on the box. */
   runtimes: AgentId[];
+  /** Runtime credentials to copy; defaults to `runtimes`. */
+  credentialRuntimes?: AgentId[];
   detected: DetectedRuntime[];
+  /** Profile-dispatch config to materialize on the leased box before the run. */
+  dispatchProfile?: LeaseDispatchProfile;
   /** Secrets bundle providing crabbox's provider token. */
   secretsBundle?: string;
   onData?: (s: string) => void;
+  /** Progress phases (warmup → ready → teardown) for a command-layer spinner. */
+  onPhase?: (phase: LeasePhase) => void;
   /** Keep the box after the run instead of stopping it. */
   keep?: boolean;
+  /** Existing warm crabbox slug to reuse instead of provisioning a new lease. */
+  reuseBox?: string;
+  /**
+   * Raw wrapped Claude OAuth payload (from `resolveClaudeCredentialsBlob`), written
+   * to `~/.claude/.credentials.json` on the box. The command layer resolves it
+   * (after consent) so this module stays free of Keychain I/O and unit-testable.
+   */
+  claudeCredentialsJson?: string | null;
+}
+
+export interface LeaseDispatchProfile {
+  name: string;
+  agent: AgentId;
+  version?: string;
+  env: Record<string, string>;
+  description?: string;
+  preset?: string;
+  provider?: string;
+  fallbackModel?: string;
 }
 
 export interface LeaseRunResult {
@@ -39,6 +73,33 @@ export interface LeaseRunResult {
 /** POSIX single-quote for safe embedding in the generated bootstrap script. */
 function q(s: string): string {
   return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+function profileRemotePath(name: string): string {
+  return `.agents/profiles/${name}.yml`;
+}
+
+function buildProfileScript(profile: LeaseDispatchProfile): string {
+  const body = yaml.stringify({
+    name: profile.name,
+    ...(profile.description ? { description: profile.description } : {}),
+    host: {
+      agent: profile.agent,
+      ...(profile.version ? { version: profile.version } : {}),
+    },
+    env: profile.env,
+    ...(profile.fallbackModel ? { fallback_model: profile.fallbackModel } : {}),
+    ...(profile.preset ? { preset: profile.preset } : {}),
+    ...(profile.provider ? { provider: profile.provider } : {}),
+  });
+  return buildHomeFileWriteScript(profileRemotePath(profile.name), body);
+}
+
+function runtimeInstallSpec(id: AgentId, dispatchProfile?: LeaseDispatchProfile): string {
+  if (dispatchProfile?.agent === id && dispatchProfile.version) {
+    return `${id}@${dispatchProfile.version}`;
+  }
+  return id;
 }
 
 /**
@@ -76,27 +137,38 @@ const ENSURE_AGENTS_CLI = [
  * the credential files. Best-effort install steps never abort the run.
  */
 export function buildBootstrapScript(opts: LeaseRunOptions): string {
-  const credScript = buildCredentialScript(opts.runtimes, opts.detected);
+  const credentialRuntimes = opts.credentialRuntimes ?? opts.runtimes;
+  const credScript = buildCredentialScript(credentialRuntimes, opts.detected, {
+    claudeCredentialsJson: opts.claudeCredentialsJson,
+  });
+  const profileScript = opts.dispatchProfile ? buildProfileScript(opts.dispatchProfile) : '';
   const runParts = ['agents', 'run', q(opts.agent), q(opts.prompt), '--quiet'];
   if (opts.mode) runParts.push('--mode', q(opts.mode));
   if (opts.model) runParts.push('--model', q(opts.model));
 
   // Credential files to shred after the run (home-level paths written above).
-  const shred = opts.runtimes
-    .map((id) => {
-      const cred = { claude: '.claude.json', codex: '.codex/auth.json', gemini: '.gemini/google_accounts.json', grok: '.grok/auth.json' }[id as string];
-      return cred ? `rm -f "$HOME/${cred}" 2>/dev/null || true` : '';
-    })
-    .filter(Boolean)
-    .join('\n');
+  // Runs regardless of --keep-box (it's in the box body, not teardown), so a kept
+  // box still loses the token after the run — minimizing the credential window.
+  const shredPaths = credentialRuntimes.flatMap((id) => {
+    const paths = { claude: ['.claude.json', CLAUDE_TOKEN_REMOTE], codex: ['.codex/auth.json'], gemini: ['.gemini/google_accounts.json'], grok: ['.grok/auth.json'] }[id as string];
+    return paths ?? [];
+  });
+  if (opts.dispatchProfile) shredPaths.push(profileRemotePath(opts.dispatchProfile.name));
+  const shred = shredPaths.map((p) => `rm -f "$HOME/${p}" 2>/dev/null || true`).join('\n');
 
-  const installRuntimes = opts.runtimes.map((id) => `agents add ${q(id)} >/dev/null 2>&1 || true`).join('\n');
+  const installRuntimes = opts.runtimes
+    .map((id) => `agents add ${q(runtimeInstallSpec(id, opts.dispatchProfile))} >/dev/null 2>&1 || true`)
+    .join('\n');
 
   return [
     'set -uo pipefail',
     ENSURE_AGENTS_CLI,
     installRuntimes,
     credScript,
+    profileScript,
+    // Marker on its own line: the command layer shows everything before this as
+    // setup progress and everything after (the agent's output) verbatim.
+    `echo ${q(LEASE_AGENT_MARKER)}`,
     `${runParts.join(' ')}`,
     'rc=$?',
     shred,
@@ -107,13 +179,26 @@ export function buildBootstrapScript(opts: LeaseRunOptions): string {
 }
 
 export async function leaseAndRun(opts: LeaseRunOptions): Promise<LeaseRunResult> {
-  const box = crabboxWarmup({
-    class: opts.boxClass,
-    profile: opts.profile,
-    provider: opts.backend,
-    secretsBundle: opts.secretsBundle,
-  });
-  await crabboxWaitReady(box.slug, { secretsBundle: opts.secretsBundle });
+  const startedAt = Date.now();
+  let box: CrabboxBox;
+  if (opts.reuseBox) {
+    opts.onPhase?.({ kind: 'reuse', slug: opts.reuseBox });
+    const found = crabboxFind(opts.reuseBox, { secretsBundle: opts.secretsBundle });
+    if (!found) throw new Error(`crabbox box "${opts.reuseBox}" was not found. Check \`crabbox list\` or pass a different --box slug.`);
+    box = found.ready
+      ? found
+      : await crabboxWaitReady(opts.reuseBox, { secretsBundle: opts.secretsBundle });
+  } else {
+    opts.onPhase?.({ kind: 'warmup', backend: opts.backend });
+    box = await crabboxWarmup({
+      class: opts.boxClass,
+      profile: opts.profile,
+      provider: opts.backend,
+      secretsBundle: opts.secretsBundle,
+    });
+    await crabboxWaitReady(box.slug, { secretsBundle: opts.secretsBundle });
+  }
+  opts.onPhase?.({ kind: 'ready', box, elapsedMs: Date.now() - startedAt });
 
   const script = buildBootstrapScript(opts);
   let exitCode: number | null = null;
@@ -125,8 +210,11 @@ export async function leaseAndRun(opts: LeaseRunOptions): Promise<LeaseRunResult
     });
   } finally {
     // Always attempt teardown (bounds credential lifetime to the run) unless the
-    // caller explicitly asked to keep the box.
-    if (!opts.keep) toreDown = crabboxStop(box.slug, { secretsBundle: opts.secretsBundle });
+    // caller explicitly asked to keep the box or targeted an existing warm box.
+    if (!opts.keep && !opts.reuseBox) {
+      opts.onPhase?.({ kind: 'teardown' });
+      toreDown = crabboxStop(box.slug, { secretsBundle: opts.secretsBundle });
+    }
   }
   return { box, exitCode, toreDown };
 }

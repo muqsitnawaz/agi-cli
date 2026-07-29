@@ -15,6 +15,7 @@ import { capableAgents, isCapable, supports } from './capabilities.js';
 import { markdownToToml } from './convert.js';
 import { getCommandsDir, getUserCommandsDir, getEnabledExtraRepos, getProjectAgentsDir, getSkillsDir, getTrashCommandsDir } from './state.js';
 import { getEffectiveHome, getVersionHomePath, listInstalledVersions, resolveVersion } from './versions.js';
+import { discoverPlugins } from './plugins.js';
 import type { AgentId, CommandInstallation } from './types.js';
 import {
   commandSkillMatches,
@@ -23,6 +24,12 @@ import {
   removeCommandSkillFromVersion,
   shouldInstallCommandAsSkill,
 } from './command-skills.js';
+import {
+  installGooseCommandToVersion,
+  listGooseCommandsInVersion,
+  gooseCommandMatches,
+  removeGooseCommandFromVersion,
+} from './goose-commands.js';
 
 /** Scope of a command: user-global or project-local. */
 export type CommandScope = 'user' | 'project';
@@ -305,6 +312,21 @@ export function installCommand(
   ensureCommandsDir(agentId);
 
   const home = getEffectiveHome(agentId);
+
+  // Goose: a slash command is a recipe YAML registered in config.yaml, not a
+  // native command file under commandsSubdir.
+  if (agentId === 'goose') {
+    const result = installGooseCommandToVersion(home, commandName, sourcePath);
+    if (!result.success) {
+      return { path: '', method: 'copy', error: result.error, warnings: validation.warnings };
+    }
+    return {
+      path: path.join(home, '.config', 'goose', 'commands', `${commandName}.yaml`),
+      method: 'copy',
+      warnings: validation.warnings,
+    };
+  }
+
   const commandsDir = path.join(home, agentConfigDirName(agentId), agent.commandsSubdir);
   fs.mkdirSync(commandsDir, { recursive: true });
 
@@ -352,6 +374,9 @@ export function listCommandsInVersionHome(agent: AgentId, version: string): stri
   if (shouldInstallCommandAsSkill(agent, version)) {
     return listCommandSkillsInVersion(agentDir);
   }
+  if (agent === 'goose') {
+    return listGooseCommandsInVersion(versionHome);
+  }
 
   const dir = getVersionCommandsDir(agent, version);
   if (!fs.existsSync(dir)) return [];
@@ -374,6 +399,9 @@ function versionCommandMatches(agent: AgentId, version: string, commandName: str
   const agentDir = path.join(versionHome, agentConfigDirName(agent));
   if (shouldInstallCommandAsSkill(agent, version)) {
     return commandSkillMatches(agentDir, commandName, sourcePath);
+  }
+  if (agent === 'goose') {
+    return gooseCommandMatches(versionHome, commandName, sourcePath);
   }
 
   const agentConfig = AGENTS[agent];
@@ -409,8 +437,26 @@ export interface VersionCommandDiff {
 /**
  * Compare a version home's commands against central. Returns the reconciliation diff.
  */
+/**
+ * Flattened names of plugin-bundled commands (`<plugin>-<command>`), matching
+ * exactly how `syncPluginToVersion` installs a plugin's `commands/<cmd>.md` as a
+ * command-skill (plugins.ts → `installCommandSkillToVersion(agentDir,
+ * `${plugin.name}-${cmd}`, …)`). These are source-managed by their plugin, so
+ * the orphan detector must NOT flag them — else `prune cleanup` proposes
+ * deleting live plugin commands (swarm-plan, code-review, …). Scans user +
+ * system + extra marketplaces (no project layer), matching the trusted sources.
+ */
+export function listPluginCommandNames(): Set<string> {
+  const names = new Set<string>();
+  for (const plugin of discoverPlugins()) {
+    for (const cmd of plugin.commands) names.add(`${plugin.name}-${cmd}`);
+  }
+  return names;
+}
+
 export function diffVersionCommands(agent: AgentId, version: string): VersionCommandDiff {
   const central = new Set(listCentralCommands());
+  const pluginCommands = listPluginCommandNames();
   const installed = new Set(listCommandsInVersionHome(agent, version));
 
   const toAdd: string[] = [];
@@ -434,15 +480,19 @@ export function diffVersionCommands(agent: AgentId, version: string): VersionCom
   }
 
   for (const name of installed) {
-    if (!central.has(name)) {
-      orphans.push(name);
+    if (central.has(name)) {
+      const sourcePath = path.join(getCommandsDir(), `${name}.md`);
+      const metadata = parseCommandMetadata(sourcePath);
+      if (!commandAppliesTo(agent, version, metadata).ok) {
+        toRemove.push(name);
+      }
       continue;
     }
-    const sourcePath = path.join(getCommandsDir(), `${name}.md`);
-    const metadata = parseCommandMetadata(sourcePath);
-    if (!commandAppliesTo(agent, version, metadata).ok) {
-      toRemove.push(name);
-    }
+    // A plugin-bundled command (installed as `<plugin>-<cmd>`) is source-managed
+    // by its plugin — not an orphan. Only a name with no central AND no plugin
+    // source is genuinely unmanaged.
+    if (pluginCommands.has(name)) continue;
+    orphans.push(name);
   }
 
   return {
@@ -491,6 +541,12 @@ export function installCommandToVersion(
     );
   }
 
+  // Goose: a slash command is a recipe YAML registered in config.yaml, not a
+  // native command file. Write the recipe + slash_commands entry.
+  if (agent === 'goose') {
+    return installGooseCommandToVersion(versionHome, commandName, sourcePath);
+  }
+
   const agentConfig = AGENTS[agent];
   const commandsDir = getVersionCommandsDir(agent, version);
   fs.mkdirSync(commandsDir, { recursive: true });
@@ -530,6 +586,10 @@ export function removeCommandFromVersion(
   const agentDir = path.join(versionHome, agentConfigDirName(agent));
   if (shouldInstallCommandAsSkill(agent, version)) {
     return removeCommandSkillFromVersion(agentDir, commandName);
+  }
+  if (agent === 'goose') {
+    const trashDir = path.join(getTrashCommandsDir(), agent, version, commandName);
+    return removeGooseCommandFromVersion(versionHome, commandName, trashDir);
   }
 
   const ext = AGENTS[agent].format === 'toml' ? '.toml' : '.md';

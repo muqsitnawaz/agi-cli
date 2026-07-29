@@ -4,7 +4,7 @@
  * Permissions are stored as YAML files in permissions/ directories at each layer.
  * Resolution: project > user > system (higher layer wins on name conflict).
  * Unlike other resources, permissions merge into agent-specific config files
- * (Claude: settings.json, Codex: config.toml, OpenCode: opencode.jsonc).
+ * (Claude/Gemini: settings.json, Codex: config.toml, OpenCode: opencode.jsonc).
  */
 
 import * as fs from 'fs';
@@ -83,10 +83,26 @@ function getAgentConfigPath(agent: AgentId, versionHome: string): string | null 
       return path.join(versionHome, '.claude', 'settings.json');
     case 'codex':
       return path.join(versionHome, '.codex', 'config.toml');
+    case 'gemini':
+      return path.join(versionHome, '.gemini', 'settings.json');
     case 'opencode':
-      return path.join(versionHome, '.opencode', 'opencode.jsonc');
+      return path.join(versionHome, '.config', 'opencode', 'opencode.jsonc');
     case 'kimi':
       return path.join(versionHome, '.kimi-code', 'config.toml');
+    case 'droid':
+      return path.join(versionHome, '.factory', 'settings.json');
+    case 'kiro':
+      return path.join(versionHome, '.kiro', 'settings', 'permissions.yaml');
+    case 'openclaw':
+      return path.join(versionHome, '.openclaw', 'openclaw.json');
+    case 'copilot':
+      return path.join(versionHome, '.copilot', 'permissions-config.json');
+    case 'forge':
+      return path.join(versionHome, '.forge', 'permissions.yaml');
+    case 'hermes':
+      return path.join(versionHome, '.hermes', 'config.yaml');
+    case 'goose':
+      return path.join(versionHome, '.config', 'goose', 'permission.yaml');
     default:
       return null;
   }
@@ -199,7 +215,7 @@ export const PermissionsHandler: ResourceHandler<PermissionItem> = {
     }
 
     // Apply to the agent's config file
-    applyPermissionsToVersion(agent, merged, versionHome, true);
+    applyPermissionsToVersion(agent, merged, versionHome, true, cwd);
   },
 
   /**

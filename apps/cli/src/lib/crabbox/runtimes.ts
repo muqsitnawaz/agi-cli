@@ -18,6 +18,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import type { AgentId } from '../types.js';
 import { getAccountInfo } from '../agents.js';
+import { getKeychainToken } from '../secrets/index.js';
+import { getClaudeKeychainService } from '../usage.js';
+import { listInstalledVersions, getVersionHomePath } from '../versions.js';
+import { readClaudeCredentialsBlob } from '../cloud/rush.js';
 
 /**
  * Credential file locations per runtime. `localCandidates` are read in order
@@ -103,18 +107,181 @@ export async function pickRuntimes(
   return checkbox({ message: 'Provision which runtime(s) on the leased box?', choices });
 }
 
+/**
+ * The lease runtime to provision for a headless run of `agentName`.
+ *
+ * When the agent is itself a lease-capable runtime (claude/codex/gemini/grok)
+ * that IS the runtime to install. Otherwise fall back to the single signed-in
+ * lease runtime (preferring claude), or null when none is signed in. This is the
+ * non-interactive replacement for the runtime checkbox picker: `--lease` requires
+ * a prompt, so it is headless by contract and must never block on a TTY.
+ *
+ * Profile-dispatch agents (kimi/deepseek) and custom workflow agents that run
+ * under a non-obvious runtime are resolved separately — see RUSH-1725.
+ */
+export function inferLeaseRuntime(agentName: string, detected: DetectedRuntime[]): AgentId | null {
+  const signedIn = detected.filter((d) => d.signedIn && d.credPath);
+  // The agent names a lease runtime directly: require that runtime to be signed
+  // in — never silently substitute a different one for an explicit `run <runtime>`
+  // (that would lease a billable box only to boot it "Not logged in"). Not signed
+  // in → null, so the caller exits with "sign into it locally first".
+  if (LEASE_RUNTIMES.some((c) => c.id === agentName)) {
+    return signedIn.find((d) => d.id === agentName)?.id ?? null;
+  }
+  // Custom/workflow agent: fall back to the signed-in runtime (preferring claude).
+  return signedIn.find((d) => d.id === 'claude')?.id ?? signedIn[0]?.id ?? null;
+}
+
+const PROFILE_AUTH_ENV_KEYS_BY_RUNTIME: Partial<Record<AgentId, readonly string[]>> = {
+  claude: [
+    'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'AWS_ACCESS_KEY_ID',
+    'AWS_PROFILE',
+    'AWS_BEARER_TOKEN_BEDROCK',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'GOOGLE_CLOUD_PROJECT',
+    'ANTHROPIC_FOUNDRY_API_KEY',
+  ],
+  codex: ['OPENAI_API_KEY'],
+  gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+  grok: ['XAI_API_KEY', 'GROK_API_KEY'],
+};
+
+/** True when a profile already carries auth for its host runtime via env. */
+export function profileNeedsBaseRuntimeCredentials(agent: AgentId, env: Record<string, string>, authEnvVar?: string): boolean {
+  if (!LEASE_RUNTIMES.some((c) => c.id === agent)) return false;
+  if (authEnvVar && typeof env[authEnvVar] === 'string' && env[authEnvVar].trim() !== '') return false;
+  const keys = PROFILE_AUTH_ENV_KEYS_BY_RUNTIME[agent] ?? [];
+  return !keys.some((key) => typeof env[key] === 'string' && env[key].trim() !== '');
+}
+
 // A long random sentinel makes an accidental (or malicious) collision with a
 // token's contents effectively impossible, so the quoted heredoc can never be
 // closed early by the credential body.
 const CRED_EOF = 'AGENTS_LEASE_CRED_EOF_9f3c1a7b5e2d4068';
+
+/** Build a quoted heredoc write to a path under the remote user's home. */
+export function buildHomeFileWriteScript(remote: string, contents: string): string {
+  const dir = path.posix.dirname(remote);
+  const mkdir = dir && dir !== '.' ? `mkdir -p "$HOME/${dir}"\n` : '';
+  return (
+    `${mkdir}cat > "$HOME/${remote}" <<'${CRED_EOF}'\n${contents}${contents.endsWith('\n') ? '' : '\n'}${CRED_EOF}\n` +
+    `chmod 600 "$HOME/${remote}"`
+  );
+}
+
+/**
+ * Where Claude Code reads its OAuth token on the box. `.claude.json` (the file
+ * LEASE_RUNTIMES copies) is config/account-metadata ONLY — the actual token
+ * lives here, so without it the box boots "Not logged in".
+ */
+export const CLAUDE_TOKEN_REMOTE = '.claude/.credentials.json';
+
+/** True when `s` parses to a Claude keychain payload with an OAuth access token. */
+function isClaudeCredentialsBlob(s: string): boolean {
+  try {
+    const p = JSON.parse(s) as { claudeAiOauth?: { accessToken?: unknown } };
+    return typeof p?.claudeAiOauth?.accessToken === 'string';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The RAW wrapped Claude credential payload (`{"claudeAiOauth":{…}}`) to write to
+ * the box's `~/.claude/.credentials.json`, or null if no signed-in token is found.
+ *
+ * On macOS the token is in the login Keychain, read SILENTLY via
+ * `getKeychainToken` (the `/usr/bin/security … -w` path — Claude's item trusts it,
+ * no Touch ID). A default native install uses the bare `Claude Code-credentials`
+ * service; an agents-cli managed install (where `~/.claude` symlinks into a
+ * versioned home) uses a hash-suffixed service, so we try the bare service first,
+ * then enumerate installed version homes (preferring the account whose email
+ * matches `preferEmail`, so the token matches the `.claude.json` config we copy).
+ * Off macOS the local Claude CLI stores the token in `.credentials.json` already —
+ * reuse the rush.ts Linux branch verbatim.
+ *
+ * The reader/service/version helpers are injected so unit tests never touch the
+ * real Keychain.
+ */
+export async function resolveClaudeCredentialsBlob(opts?: {
+  preferEmail?: string | null;
+  readItem?: (service: string) => string;
+  service?: (home?: string) => string;
+  listVersions?: () => string[];
+  versionHome?: (version: string) => string;
+  accountEmail?: (home: string) => Promise<string | null>;
+}): Promise<string | null> {
+  const readItem = opts?.readItem ?? getKeychainToken;
+  const service = opts?.service ?? getClaudeKeychainService;
+  const listVersions = opts?.listVersions ?? (() => listInstalledVersions('claude'));
+  const versionHome = opts?.versionHome ?? ((v: string) => getVersionHomePath('claude', v));
+  const accountEmail = opts?.accountEmail ?? (async (home: string) => (await getAccountInfo('claude', home)).email);
+
+  const tryRead = (svc: string): string | null => {
+    try {
+      const raw = readItem(svc).trim();
+      return isClaudeCredentialsBlob(raw) ? raw : null;
+    } catch {
+      return null;
+    }
+  };
+
+  if (process.platform === 'darwin') {
+    // 1) Bare service — the default native (non-managed) install.
+    const bare = tryRead(service(undefined));
+    if (bare) {
+      if (!opts?.preferEmail) return bare;
+      // preferEmail is set — verify the bare service belongs to the right account
+      // before handing it back; on mismatch fall through to managed installs.
+      const realHome = process.env.AGENTS_REAL_HOME || os.homedir();
+      const bareEmail = await accountEmail(realHome).catch(() => null);
+      if (bareEmail === opts.preferEmail) return bare;
+      // email mismatch — fall through
+    }
+
+    // 2) Managed installs — hash-suffixed service keyed to each version home.
+    //    Prefer the version whose account email matches the copied config.
+    let homes: string[];
+    try {
+      homes = listVersions().map(versionHome);
+    } catch {
+      homes = [];
+    }
+    if (opts?.preferEmail) {
+      const scored = await Promise.all(
+        homes.map(async (home) => ({ home, match: (await accountEmail(home).catch(() => null)) === opts.preferEmail })),
+      );
+      homes = [...scored.filter((s) => s.match), ...scored.filter((s) => !s.match)].map((s) => s.home);
+    }
+    for (const home of homes) {
+      const hit = tryRead(service(home));
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  // Off darwin: the local Claude CLI already stores the wrapped blob on disk.
+  const home = process.env.AGENTS_REAL_HOME || os.homedir();
+  return readClaudeCredentialsBlob(home);
+}
 
 /**
  * Build a bash snippet that writes each picked runtime's token file to the box's
  * home-level config path (0600), from the token contents read locally. Returns
  * `''` when no runtimes were selected. The snippet is meant to be embedded in
  * the `--script-stdin` body (never argv).
+ *
+ * `extras.claudeCredentialsJson` (the raw wrapped payload from
+ * `resolveClaudeCredentialsBlob`) is written to `~/.claude/.credentials.json` in
+ * ADDITION to claude's `.claude.json` config — without it the box is "Not logged in".
  */
-export function buildCredentialScript(picked: AgentId[], detected: DetectedRuntime[]): string {
+export function buildCredentialScript(
+  picked: AgentId[],
+  detected: DetectedRuntime[],
+  extras?: { claudeCredentialsJson?: string | null },
+): string {
   const byId = new Map(detected.map((d) => [d.id, d]));
   const parts: string[] = [];
   for (const id of picked) {
@@ -127,12 +294,12 @@ export function buildCredentialScript(picked: AgentId[], detected: DetectedRunti
     } catch {
       continue;
     }
-    const dir = path.posix.dirname(cred.remote);
-    const mkdir = dir && dir !== '.' ? `mkdir -p "$HOME/${dir}"\n` : '';
-    parts.push(
-      `${mkdir}cat > "$HOME/${cred.remote}" <<'${CRED_EOF}'\n${contents}${contents.endsWith('\n') ? '' : '\n'}${CRED_EOF}\n` +
-        `chmod 600 "$HOME/${cred.remote}"`,
-    );
+    parts.push(buildHomeFileWriteScript(cred.remote, contents));
+    // For claude the file above is config/state only; the OAuth token is a
+    // second artifact — without it the box comes up "Not logged in".
+    if (id === 'claude' && extras?.claudeCredentialsJson) {
+      parts.push(buildHomeFileWriteScript(CLAUDE_TOKEN_REMOTE, extras.claudeCredentialsJson));
+    }
   }
   return parts.join('\n');
 }

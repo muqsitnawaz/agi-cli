@@ -11,6 +11,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as yaml from 'yaml';
 import { execFileSync } from 'child_process';
 import type { AgentId, DiscoveredPlugin, PluginManifest, MarketplaceSpec } from './types.js';
 import { getPluginsDir, getTrashPluginsDir, getExtraPluginsDir, getProjectPluginsDir, getSystemPluginsDir } from './state.js';
@@ -46,6 +47,8 @@ import {
 
 const PLUGIN_MANIFEST_DIR = '.claude-plugin';
 const PLUGIN_MANIFEST_FILE = 'plugin.json';
+const GEMINI_EXTENSION_MANIFEST_FILE = 'gemini-extension.json';
+const HERMES_PLUGIN_MANIFEST_FILE = 'plugin.yaml';
 const USER_CONFIG_FILE = '.user-config.json';
 const SOURCE_FILE = '.source';
 
@@ -141,6 +144,7 @@ export function buildDiscoveredPlugin(
     scripts: discoverPluginScripts(pluginRoot),
     commands: discoverPluginCommands(pluginRoot),
     agentDefs: discoverPluginAgentDefs(pluginRoot),
+    memory: discoverPluginMemory(pluginRoot),
     bin: discoverPluginBin(pluginRoot),
     mcpServers: discoverPluginMcpServers(pluginRoot),
     lspServers: discoverPluginLspServers(pluginRoot),
@@ -170,6 +174,7 @@ export function pluginResourceGroups(plugin: DiscoveredPlugin): PluginResourceGr
     { label: 'commands', items: plugin.commands.map((c) => `/${plugin.name}:${c}`) },
     { label: 'subagents', items: plugin.agentDefs },
     { label: 'hooks', items: plugin.hooks },
+    { label: 'memory', items: plugin.memory },
     { label: 'mcp', items: plugin.mcpServers },
     { label: 'lsp', items: plugin.lspServers },
     { label: 'monitors', items: plugin.monitors },
@@ -181,12 +186,34 @@ export function pluginResourceGroups(plugin: DiscoveredPlugin): PluginResourceGr
   return out;
 }
 
+/**
+ * True when a manifest field declares an inline execution surface — a non-empty
+ * path string, a non-empty array, or an object with at least one key. The
+ * official plugin format lets `hooks`/`mcpServers` live inline in the manifest
+ * (a path or an inline map) instead of as a `hooks/` dir or `.mcp.json` file, so
+ * filesystem-only detection would miss them and auto-enable a hostile plugin.
+ */
+function manifestDeclaresExecSurface(value: unknown): boolean {
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (value && typeof value === 'object') return Object.keys(value).length > 0;
+  return false;
+}
+
 export function inspectPluginCapabilities(pluginRoot: string): PluginCapabilities {
   const manifest = loadPluginManifest(pluginRoot);
   const plugin = manifest ? buildDiscoveredPlugin(pluginRoot, manifest) : null;
   return {
-    hasHooks: (plugin?.hooks.length || 0) > 0 || pluginHasDirectoryEntries(pluginRoot, 'hooks'),
-    hasMcp: fs.existsSync(path.join(pluginRoot, '.mcp.json')),
+    // Inline manifest `hooks`/`mcpServers` are execution surfaces too — a cloned
+    // repo's project plugin must not be auto-enabled just because it ships the
+    // exec config inline in plugin.json rather than as a hooks/ dir or .mcp.json.
+    hasHooks:
+      (plugin?.hooks.length || 0) > 0 ||
+      pluginHasDirectoryEntries(pluginRoot, 'hooks') ||
+      manifestDeclaresExecSurface(manifest?.hooks),
+    hasMcp:
+      fs.existsSync(path.join(pluginRoot, '.mcp.json')) ||
+      manifestDeclaresExecSurface(manifest?.mcpServers),
     hasBin: (plugin?.bin.length || 0) > 0,
     hasScripts: (plugin?.scripts.length || 0) > 0,
     hasSettings: pluginHasNonPermissionSettings(pluginRoot),
@@ -284,6 +311,21 @@ export function pluginSupportsAgent(plugin: DiscoveredPlugin, agent: AgentId): b
 }
 
 // ─── Discovery helpers ────────────────────────────────────────────────────────
+
+/** Fact basenames (no .md) from a plugin's memory/ directory. */
+export function discoverPluginMemory(pluginRoot: string): string[] {
+  const dir = path.join(pluginRoot, 'memory');
+  if (!fs.existsSync(dir)) return [];
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.md') && f.toLowerCase() !== 'memory.md')
+      .map((f) => f.replace(/\.md$/i, ''))
+      .sort();
+  } catch {
+    return [];
+  }
+}
 
 function discoverPluginSkills(pluginRoot: string): string[] {
   const skillsDir = path.join(pluginRoot, 'skills');
@@ -563,6 +605,64 @@ export function syncPluginToVersion(
   };
 
   if (!pluginSupportsAgent(plugin, agent)) {
+    return result;
+  }
+
+  // OpenCode uses TS/JS modules under ~/.config/opencode/plugins/, not the
+  // Claude marketplace layout. Install those modules and return early.
+  if (agent === 'opencode') {
+    // Trust gate (RUSH-1756): OpenCode plugins are raw executable TS/JS modules,
+    // so they must clear the same consent check as every other exec surface
+    // before install — this branch used to return early, bypassing the gate the
+    // Gemini/Hermes/marketplace branches all apply.
+    const enablePlugin = options.allowExecSurfaces === true || !hasPluginExecSurfaces(inspectPluginCapabilities(plugin.root));
+    if (!enablePlugin) {
+      return result;
+    }
+    const ok = installOpenCodePlugin(plugin, versionHome);
+    result.success = ok;
+    if (ok) result.skills.push(plugin.name);
+    return result;
+  }
+
+  // Gemini CLI loads extensions from $HOME/.gemini/extensions/<name>/.
+  // Copy the plugin bundle as an extension and synthesize gemini-extension.json.
+  if (agent === 'gemini') {
+    const enablePlugin = options.allowExecSurfaces === true || !hasPluginExecSurfaces(inspectPluginCapabilities(plugin.root));
+    if (!enablePlugin) {
+      return result;
+    }
+    const ok = installGeminiPlugin(plugin, versionHome);
+    result.success = ok;
+    if (ok) {
+      result.skills = plugin.skills.map(s => `${plugin.name}:${s}`);
+      result.commands = plugin.commands.map(c => `${plugin.name}:${c}`);
+      result.agentDefs = plugin.agentDefs.map(a => `${plugin.name}:${a}`);
+      result.bin = plugin.bin;
+      result.hooks = plugin.hooks;
+      result.mcp = plugin.hasMcp;
+      result.settings = plugin.hasSettings;
+      result.permissions = pluginHasPermissions(plugin);
+    }
+    return result;
+  }
+
+  // Goose loads Open Plugins from $HOME/.agents/plugins/<name>/ (same layout as
+  // agents-cli's source tree). Under the shim HOME is the version home.
+  if (agent === 'goose') {
+    const ok = installGoosePlugin(plugin, versionHome);
+    result.success = ok;
+    if (ok) result.skills.push(plugin.name);
+    return result;
+  }
+
+  // Hermes loads plugins from a flat $HOME/.hermes/plugins/<name>/ dir with a
+  // plugin.yaml manifest, gated by a plugins.enabled allowlist in config.yaml.
+  if (agent === 'hermes') {
+    const enablePlugin = options.allowExecSurfaces === true || !hasPluginExecSurfaces(inspectPluginCapabilities(plugin.root));
+    const ok = installHermesPlugin(plugin, versionHome, enablePlugin);
+    result.success = ok;
+    if (ok) result.skills.push(plugin.name);
     return result;
   }
 
@@ -849,6 +949,450 @@ function migrateLegacyFlatLayout(
   }
 }
 
+
+// ─── OpenCode plugins (TS/JS modules) ─────────────────────────────────────────
+
+/**
+ * OpenCode loads JS/TS modules from `$HOME/.config/opencode/plugins/` (global)
+ * and `<project>/.opencode/plugins/` (project). Under agents-cli version
+ * isolation HOME is the version home, so we write:
+ *   {versionHome}/.config/opencode/plugins/
+ *
+ * Claude-style marketplace plugins are NOT auto-converted; we install modules
+ * from (in order):
+ *   1. pluginRoot/opencode/*.{ts,js,mjs,cjs}
+ *   2. pluginRoot/plugins/*.{ts,js,mjs,cjs}
+ *   3. pluginRoot/*.{ts,js,mjs,cjs} (excluding *.test.* / *.spec.*)
+ * If none exist, install still succeeds by writing a marker + copying any
+ * package.json so empty plugins don't break sync; opencode simply has nothing
+ * to load until a real module appears.
+ */
+export function openCodePluginsDir(versionHome: string): string {
+  return path.join(versionHome, '.config', 'opencode', 'plugins');
+}
+
+// OpenCode's local-plugin loader only auto-loads direct *.ts / *.js files under
+// plugins/ — not nested dirs and not .mjs/.cjs (see opencode.ai/docs/plugins).
+const OPENCODE_MODULE_RE = /\.(ts|js)$/i;
+const OPENCODE_TEST_RE = /\.(test|spec)\./i;
+
+function listOpenCodeModules(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  // readdir without recursion — only loader-visible direct children.
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile() && OPENCODE_MODULE_RE.test(e.name) && !OPENCODE_TEST_RE.test(e.name) && !e.name.startsWith('.'))
+    .map((e) => e.name);
+}
+
+/** Resolve source module files for an agents-cli plugin to install into OpenCode. */
+export function resolveOpenCodePluginSources(pluginRoot: string): string[] {
+  for (const sub of ['opencode', 'plugins']) {
+    const dir = path.join(pluginRoot, sub);
+    const files = listOpenCodeModules(dir);
+    if (files.length > 0) return files.map((f) => path.join(dir, f));
+  }
+  return listOpenCodeModules(pluginRoot).map((f) => path.join(pluginRoot, f));
+}
+
+export function installOpenCodePlugin(plugin: DiscoveredPlugin, versionHome: string): boolean {
+  const destDir = openCodePluginsDir(versionHome);
+  fs.mkdirSync(destDir, { recursive: true });
+
+  const sources = resolveOpenCodePluginSources(plugin.root);
+  const destPluginDir = path.join(destDir, plugin.name);
+
+  // Clean previous install of this plugin name (file or dir)
+  const bareTs = path.join(destDir, `${plugin.name}.ts`);
+  const bareJs = path.join(destDir, `${plugin.name}.js`);
+  for (const p of [bareTs, bareJs, destPluginDir]) {
+    try {
+      if (fs.existsSync(p)) fs.rmSync(p, { recursive: true, force: true });
+    } catch { /* best effort */ }
+  }
+
+  if (sources.length === 0) {
+    // No TS/JS modules — still create a managed marker so isPluginSynced can
+    // track that we processed the plugin (and so re-sync is idempotent).
+    fs.mkdirSync(destPluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(destPluginDir, '.agents-cli-managed'),
+      `plugin=${plugin.name}\n# no opencode modules found under ${plugin.root}\n`,
+      'utf-8'
+    );
+    return true;
+  }
+
+  // Install each module as a direct file under plugins/ so the loader sees it.
+  // Multi-module plugins get `<name>` or `<name>-<stem>` basenames (never a
+  // nested directory — OpenCode does not scan nested plugin dirs).
+  for (let i = 0; i < sources.length; i++) {
+    const src = sources[i];
+    const ext = path.extname(src);
+    const stem = path.basename(src, ext);
+    const destName = sources.length === 1
+      ? `${plugin.name}${ext}`
+      : (stem === 'index' || stem === plugin.name
+          ? `${plugin.name}${ext}`
+          : `${plugin.name}-${stem}${ext}`);
+    fs.copyFileSync(src, path.join(destDir, destName));
+  }
+  // Marker file so isOpenCodePluginInstalled / remove can track multi-file installs.
+  fs.mkdirSync(destPluginDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(destPluginDir, '.agents-cli-managed'),
+    `plugin=${plugin.name}\nfiles=${sources.map((s) => path.basename(s)).join(',')}\n`,
+    'utf-8'
+  );
+  return true;
+}
+
+export function isOpenCodePluginInstalled(pluginName: string, versionHome: string): boolean {
+  const destDir = openCodePluginsDir(versionHome);
+  if (!fs.existsSync(destDir)) return false;
+  for (const candidate of [
+    path.join(destDir, `${pluginName}.ts`),
+    path.join(destDir, `${pluginName}.js`),
+    path.join(destDir, `${pluginName}.mjs`),
+    path.join(destDir, `${pluginName}.cjs`),
+    path.join(destDir, pluginName),
+  ]) {
+    if (fs.existsSync(candidate)) return true;
+  }
+  return false;
+}
+
+export function removeOpenCodePlugin(pluginName: string, versionHome: string): boolean {
+  const destDir = openCodePluginsDir(versionHome);
+  let removed = false;
+  for (const candidate of [
+    path.join(destDir, `${pluginName}.ts`),
+    path.join(destDir, `${pluginName}.js`),
+    path.join(destDir, pluginName),
+  ]) {
+    if (fs.existsSync(candidate)) {
+      fs.rmSync(candidate, { recursive: true, force: true });
+      removed = true;
+    }
+  }
+  // Flat multi-module installs: <name>-<stem>.ts/js next to the marker dir.
+  if (fs.existsSync(destDir)) {
+    for (const entry of fs.readdirSync(destDir)) {
+      if (entry.startsWith(`${pluginName}-`) && /\.(ts|js)$/i.test(entry)) {
+        try {
+          fs.rmSync(path.join(destDir, entry), { force: true });
+          removed = true;
+        } catch { /* ignore */ }
+      }
+    }
+  }
+  return removed;
+}
+
+
+// ─── Gemini extensions ───────────────────────────────────────────────────────
+
+/**
+ * Gemini CLI extensions live under `$HOME/.gemini/extensions/<name>/` and
+ * require a `gemini-extension.json` manifest at the extension root.
+ */
+export function geminiExtensionsDir(versionHome: string): string {
+  return path.join(versionHome, '.gemini', 'extensions');
+}
+
+function readPluginMcpConfigForGemini(pluginRoot: string): Record<string, unknown> | undefined {
+  const mcpPath = path.join(pluginRoot, '.mcp.json');
+  if (!fs.existsSync(mcpPath)) return undefined;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(mcpPath, 'utf-8')) as { mcpServers?: Record<string, unknown> };
+    if (!parsed.mcpServers || typeof parsed.mcpServers !== 'object') return undefined;
+    return rewriteGeminiExtensionVars(parsed.mcpServers) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+function rewriteGeminiExtensionVars(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return value
+      .replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, '${extensionPath}')
+      .replace(/\$\{CLAUDE_PLUGIN_DATA\}/g, '${extensionPath}/.data');
+  }
+  if (Array.isArray(value)) return value.map(rewriteGeminiExtensionVars);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, rewriteGeminiExtensionVars(item)])
+    );
+  }
+  return value;
+}
+
+function writeGeminiExtensionManifest(plugin: DiscoveredPlugin, destRoot: string): void {
+  const manifest: Record<string, unknown> = {
+    name: plugin.manifest.name,
+    version: plugin.manifest.version,
+    description: plugin.manifest.description,
+  };
+  const mcpServers = readPluginMcpConfigForGemini(destRoot);
+  if (mcpServers && Object.keys(mcpServers).length > 0) {
+    manifest.mcpServers = mcpServers;
+  }
+  fs.writeFileSync(
+    path.join(destRoot, GEMINI_EXTENSION_MANIFEST_FILE),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    'utf-8'
+  );
+}
+
+/**
+ * Security (RUSH-1755): `fs.cpSync(..., { recursive: true })` copies symlinks
+ * verbatim (dereference defaults to false), so a malicious plugin can ship a
+ * symlink whose target escapes the install root — e.g.
+ * `.agents-cli-managed -> ~/.bashrc`. The managed-marker / manifest writes that
+ * follow the copy would then write THROUGH the link, clobbering an
+ * attacker-chosen path outside the install root.
+ *
+ * Walk destRoot after the recursive copy, lstat each entry, and remove any
+ * symlink whose resolved target escapes BOTH destRoot and sourceRoot. Both roots
+ * matter because Node's cpSync rewrites a *relative* internal symlink
+ * (`./x`) into an *absolute* link back into the source tree, so a legitimate
+ * internal symlink resolves under sourceRoot (not destRoot) after the copy.
+ * Keeping targets within sourceRoot preserves those internal symlinks — matching
+ * copyPluginToMarketplace's policy — while genuinely external escapes are
+ * dropped, neutralizing the write-through.
+ */
+function stripEscapingSymlinks(destRoot: string, sourceRoot: string): string[] {
+  const realRoots = [destRoot, sourceRoot].map((r) => {
+    try { return fs.realpathSync(r); }
+    catch { return r; }
+  });
+  const within = (target: string): boolean =>
+    realRoots.some((root) => target === root || target.startsWith(root + path.sep));
+  const removed: string[] = [];
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        let escapes: boolean;
+        try {
+          escapes = !within(fs.realpathSync(full));
+        } catch {
+          // Dangling / unresolvable symlink — treat as escaping and drop it.
+          escapes = true;
+        }
+        if (escapes) {
+          try {
+            fs.rmSync(full, { force: true });
+            removed.push(path.relative(destRoot, full) || entry.name);
+          } catch { /* best effort */ }
+        }
+      } else if (entry.isDirectory()) {
+        // Do not descend into symlinked dirs — isDirectory() is false for a
+        // symlink even when it points at a directory, so this only recurses
+        // into real subdirectories, keeping the walk inside destRoot.
+        walk(full);
+      }
+    }
+  };
+  walk(destRoot);
+  return removed;
+}
+
+export function installGeminiPlugin(plugin: DiscoveredPlugin, versionHome: string): boolean {
+  const destRoot = path.join(geminiExtensionsDir(versionHome), plugin.name);
+  try {
+    if (fs.existsSync(destRoot)) {
+      fs.rmSync(destRoot, { recursive: true, force: true });
+    }
+    fs.cpSync(plugin.root, destRoot, { recursive: true });
+    stripEscapingSymlinks(destRoot, plugin.root);
+    const userConfig = loadUserConfig(plugin.name);
+    if (Object.keys(userConfig).length > 0) {
+      expandUserConfigInDir(destRoot, userConfig);
+    }
+    writeGeminiExtensionManifest(plugin, destRoot);
+    fs.writeFileSync(
+      path.join(destRoot, '.agents-cli-managed'),
+      `plugin=${plugin.name}\n`,
+      'utf-8'
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isGeminiPluginInstalled(pluginName: string, versionHome: string): boolean {
+  return fs.existsSync(path.join(geminiExtensionsDir(versionHome), pluginName, GEMINI_EXTENSION_MANIFEST_FILE));
+}
+
+export function removeGeminiPlugin(pluginName: string, versionHome: string): boolean {
+  const destRoot = path.join(geminiExtensionsDir(versionHome), pluginName);
+  if (!fs.existsSync(destRoot)) return false;
+  fs.rmSync(destRoot, { recursive: true, force: true });
+  return true;
+}
+
+
+// ─── Goose plugins (Open Plugins under .agents/plugins/) ─────────────────────
+
+/**
+ * Goose auto-discovers Open Plugins at `$HOME/.agents/plugins/<name>/`.
+ * Under agents-cli version isolation HOME is the version home, so we install to:
+ *   {versionHome}/.agents/plugins/<name>/
+ *
+ * Full plugin directory copy (not marketplace) — same layout goose and
+ * agents-cli share for source plugins.
+ */
+export function goosePluginsDir(versionHome: string): string {
+  return path.join(versionHome, '.agents', 'plugins');
+}
+
+export function installGoosePlugin(plugin: DiscoveredPlugin, versionHome: string): boolean {
+  const destRoot = path.join(goosePluginsDir(versionHome), plugin.name);
+  try {
+    if (fs.existsSync(destRoot)) {
+      fs.rmSync(destRoot, { recursive: true, force: true });
+    }
+    fs.cpSync(plugin.root, destRoot, { recursive: true });
+    stripEscapingSymlinks(destRoot, plugin.root);
+    fs.writeFileSync(
+      path.join(destRoot, '.agents-cli-managed'),
+      `plugin=${plugin.name}\n`,
+      'utf-8'
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isGoosePluginInstalled(pluginName: string, versionHome: string): boolean {
+  return fs.existsSync(path.join(goosePluginsDir(versionHome), pluginName));
+}
+
+export function removeGoosePlugin(pluginName: string, versionHome: string): boolean {
+  const destRoot = path.join(goosePluginsDir(versionHome), pluginName);
+  if (!fs.existsSync(destRoot)) return false;
+  fs.rmSync(destRoot, { recursive: true, force: true });
+  return true;
+}
+
+// ─── Hermes plugins (flat ~/.hermes/plugins/ + config.yaml enable toggle) ─────
+
+/**
+ * Hermes (Nous Research) loads plugins from a flat `$HOME/.hermes/plugins/<name>/`
+ * directory holding a `plugin.yaml` manifest — NOT the Claude marketplace layout.
+ * Under agents-cli version isolation HOME is the version home, so we install to:
+ *   {versionHome}/.hermes/plugins/<name>/
+ * A plugin does not load until its name is added to `plugins.enabled` (a YAML
+ * array) in `{versionHome}/.hermes/config.yaml`; a deny-list `plugins.disabled`
+ * wins on conflict, so agents-cli only manages the `enabled` allowlist and never
+ * touches `disabled` (user-owned).
+ */
+export function hermesPluginsDir(versionHome: string): string {
+  return path.join(versionHome, '.hermes', 'plugins');
+}
+
+function hermesConfigPath(versionHome: string): string {
+  return path.join(versionHome, '.hermes', 'config.yaml');
+}
+
+function writeHermesPluginManifest(plugin: DiscoveredPlugin, destRoot: string): void {
+  const manifest: Record<string, unknown> = {
+    name: plugin.manifest.name,
+    version: plugin.manifest.version,
+    description: plugin.manifest.description,
+  };
+  fs.writeFileSync(
+    path.join(destRoot, HERMES_PLUGIN_MANIFEST_FILE),
+    yaml.stringify(manifest),
+    'utf-8'
+  );
+}
+
+/**
+ * Add or remove a plugin name in `plugins.enabled` within ~/.hermes/config.yaml,
+ * preserving every other key (read → mutate → write). Never touches
+ * `plugins.disabled`. No-op (no rewrite) when the desired state already holds.
+ */
+export function setHermesPluginEnabled(pluginName: string, versionHome: string, enabled: boolean): void {
+  const configPath = hermesConfigPath(versionHome);
+
+  let config: Record<string, unknown> = {};
+  if (fs.existsSync(configPath)) {
+    const parsed = yaml.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      config = parsed as Record<string, unknown>;
+    }
+  }
+
+  if (!config.plugins || typeof config.plugins !== 'object' || Array.isArray(config.plugins)) {
+    config.plugins = {};
+  }
+  const plugins = config.plugins as Record<string, unknown>;
+  const current = Array.isArray(plugins.enabled) ? (plugins.enabled as unknown[]).filter((n): n is string => typeof n === 'string') : [];
+  const has = current.includes(pluginName);
+
+  if (enabled && !has) {
+    plugins.enabled = [...current, pluginName];
+  } else if (!enabled && has) {
+    plugins.enabled = current.filter((n) => n !== pluginName);
+  } else {
+    return; // desired state already holds — no rewrite
+  }
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, yaml.stringify(config), 'utf-8');
+}
+
+export function installHermesPlugin(plugin: DiscoveredPlugin, versionHome: string, enable: boolean): boolean {
+  const destRoot = path.join(hermesPluginsDir(versionHome), plugin.name);
+  try {
+    if (fs.existsSync(destRoot)) {
+      fs.rmSync(destRoot, { recursive: true, force: true });
+    }
+    fs.cpSync(plugin.root, destRoot, { recursive: true });
+    stripEscapingSymlinks(destRoot, plugin.root);
+    const userConfig = loadUserConfig(plugin.name);
+    if (Object.keys(userConfig).length > 0) {
+      expandUserConfigInDir(destRoot, userConfig);
+    }
+    writeHermesPluginManifest(plugin, destRoot);
+    fs.writeFileSync(
+      path.join(destRoot, '.agents-cli-managed'),
+      `plugin=${plugin.name}\n`,
+      'utf-8'
+    );
+    // Enable only when trusted — never DOWN-toggle here. An un-flagged background
+    // re-sync of an exec-surface plugin passes enable=false; forcing the allowlist
+    // to false then would clobber a plugin the user deliberately enabled with
+    // --allow-exec-surfaces. Mirror addPluginToSettings: add-if-trusted, else leave
+    // the existing enabled state untouched. (Removal still unregisters explicitly.)
+    if (enable) {
+      setHermesPluginEnabled(plugin.name, versionHome, true);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isHermesPluginInstalled(pluginName: string, versionHome: string): boolean {
+  return fs.existsSync(path.join(hermesPluginsDir(versionHome), pluginName, HERMES_PLUGIN_MANIFEST_FILE));
+}
+
+export function removeHermesPlugin(pluginName: string, versionHome: string): boolean {
+  const destRoot = path.join(hermesPluginsDir(versionHome), pluginName);
+  const existed = fs.existsSync(destRoot);
+  if (existed) fs.rmSync(destRoot, { recursive: true, force: true });
+  // Always drop it from the enabled allowlist, even if the dir was already gone.
+  setHermesPluginEnabled(pluginName, versionHome, false);
+  return existed;
+}
+
 // ─── Sync status ──────────────────────────────────────────────────────────────
 
 /**
@@ -862,6 +1406,18 @@ export function isPluginSynced(
   versionHome: string
 ): boolean {
   if (!isCapable(agent, 'plugins')) return false;
+  if (agent === 'opencode') {
+    return isOpenCodePluginInstalled(plugin.name, versionHome);
+  }
+  if (agent === 'gemini') {
+    return isGeminiPluginInstalled(plugin.name, versionHome);
+  }
+  if (agent === 'goose') {
+    return isGoosePluginInstalled(plugin.name, versionHome);
+  }
+  if (agent === 'hermes') {
+    return isHermesPluginInstalled(plugin.name, versionHome);
+  }
   const spec = marketplaceSpecForName(plugin.marketplace);
   if (!isInstalledInMarketplace(plugin.name, spec, agent, versionHome)) return false;
   // Droid additionally requires its installed_plugins.json registry entry —
@@ -903,6 +1459,38 @@ export function removePluginFromVersion(
     permissions: 0,
     mcp: 0,
   };
+
+  // OpenCode: remove TS/JS modules from ~/.config/opencode/plugins/.
+  if (agent === 'opencode') {
+    if (removeOpenCodePlugin(pluginName, versionHome)) {
+      result.skills.push(pluginName);
+    }
+    return result;
+  }
+
+  // Gemini: remove extension directory from ~/.gemini/extensions/.
+  if (agent === 'gemini') {
+    if (removeGeminiPlugin(pluginName, versionHome)) {
+      result.skills.push(pluginName);
+    }
+    return result;
+  }
+
+  // Goose: remove Open Plugin directory from versionHome/.agents/plugins/.
+  if (agent === 'goose') {
+    if (removeGoosePlugin(pluginName, versionHome)) {
+      result.skills.push(pluginName);
+    }
+    return result;
+  }
+
+  // Hermes: remove the flat plugin dir and drop it from config.yaml plugins.enabled.
+  if (agent === 'hermes') {
+    if (removeHermesPlugin(pluginName, versionHome)) {
+      result.skills.push(pluginName);
+    }
+    return result;
+  }
 
   // 1. Remove the plugin from every marketplace it's installed under. A name can
   //    appear in more than one (collision across repos), so we sweep them all.
@@ -1361,7 +1949,49 @@ export function getUpstreamManifestVersion(info: PluginSourceInfo): string | nul
  * Update an installed plugin by re-pulling from its original source.
  * Returns true if the update succeeded.
  */
-export async function updatePlugin(name: string): Promise<{ success: boolean; error?: string }> {
+/**
+ * Labels of exec surfaces present in `after` that were NOT present in `before`.
+ * Used by updatePlugin to distinguish a newly-appearing execution surface
+ * (upstream compromise → renewed consent required) from one the user already
+ * trusted (leave enablement alone).
+ */
+export function newExecSurfaceLabels(
+  before: PluginCapabilities,
+  after: PluginCapabilities,
+): string[] {
+  return (Object.keys(PLUGIN_EXEC_SURFACE_LABELS) as Array<keyof PluginCapabilities>)
+    .filter((key) => after[key] && !before[key])
+    .map((key) => PLUGIN_EXEC_SURFACE_LABELS[key]);
+}
+
+/**
+ * Re-fetch a plugin from its recorded source and apply the update to disk.
+ *
+ * Security (RUSH-1757): a plugin's upstream is mutable. `updatePlugin` never
+ * mutates the live plugin tree before it has inspected the incoming content —
+ * the new revision is fetched into a **quarantine** dir first, its capabilities
+ * are diffed against the current on-disk baseline, and the update is applied to
+ * `plugin.root` only after the trust decision. If the update introduces a NEW
+ * executable surface (hooks/, .mcp.json, bin/, scripts/, settings.json,
+ * permissions/) that the current revision did not carry, the update is refused
+ * unless `options.allowExecSurfaces` is set — the last-good content is kept in
+ * place, so a benign-then-compromised upstream can never execute on the next
+ * update without renewed consent. A surface the user already trusted is not a
+ * "new" surface and does not re-trigger the gate.
+ */
+export async function updatePlugin(
+  name: string,
+  options: { allowExecSurfaces?: boolean } = {},
+): Promise<{
+  success: boolean;
+  error?: string;
+  /** True when the update was refused because it introduced new exec surfaces. */
+  blockedByExecSurfaces?: boolean;
+  /** Labels of exec surfaces newly introduced by this update, if any. */
+  newExecSurfaces?: string[];
+  /** Whether the applied revision carries executable surfaces (for the caller's re-sync). */
+  hasExecSurfaces?: boolean;
+}> {
   const plugin = getPlugin(name);
   if (!plugin) {
     return { success: false, error: `Plugin '${name}' not found` };
@@ -1379,25 +2009,66 @@ export async function updatePlugin(name: string): Promise<{ success: boolean; er
     return { success: false, error: `Could not read source info for '${name}'` };
   }
 
+  // Baseline: what the live (already-trusted) revision ships today.
+  const before = inspectPluginCapabilities(plugin.root);
+
+  // Quarantine dir lives beside plugin.root (same filesystem) so the final
+  // apply can be a rename. The dot-prefix keeps it out of plugin discovery.
+  const quarantine = path.join(
+    path.dirname(plugin.root),
+    `.${path.basename(plugin.root)}.update-quarantine`,
+  );
+  const cleanupQuarantine = () => {
+    try { fs.rmSync(quarantine, { recursive: true, force: true }); } catch { /* best effort */ }
+  };
+  cleanupQuarantine();
+
   try {
+    // 1. Fetch the incoming revision into quarantine — never touch plugin.root yet.
     if (sourceInfo.isGit) {
-      execFileSync('git', ['-C', plugin.root, 'pull', '--ff-only'], { stdio: 'pipe' });
+      // Copy the working checkout (with its .git) and fast-forward the copy, so a
+      // hostile upstream diff lands in the quarantine, not the live tree.
+      fs.cpSync(plugin.root, quarantine, { recursive: true });
+      execFileSync('git', ['-C', quarantine, 'pull', '--ff-only'], { stdio: 'pipe' });
     } else {
       const resolvedSource = sourceInfo.source.replace(/^~/, homeDir());
       if (!fs.existsSync(resolvedSource)) {
+        cleanupQuarantine();
         return { success: false, error: `Source path no longer exists: ${resolvedSource}` };
       }
-      // Preserve .user-config.json and .source during re-copy
-      const userConfigPath = path.join(plugin.root, USER_CONFIG_FILE);
-      const userConfigBackup = fs.existsSync(userConfigPath)
-        ? fs.readFileSync(userConfigPath, 'utf-8')
-        : null;
-      fs.rmSync(plugin.root, { recursive: true, force: true });
-      fs.cpSync(resolvedSource, plugin.root, { recursive: true });
-      if (userConfigBackup !== null) {
-        fs.writeFileSync(userConfigPath, userConfigBackup, 'utf-8');
-      }
+      fs.cpSync(resolvedSource, quarantine, { recursive: true });
     }
+
+    // 2. Diff capabilities of the incoming revision against the baseline.
+    const after = inspectPluginCapabilities(quarantine);
+    const newSurfaces = newExecSurfaceLabels(before, after);
+
+    // 3. Refuse a surface-introducing update without renewed consent. The
+    //    last-good content stays in place untouched.
+    if (newSurfaces.length > 0 && options.allowExecSurfaces !== true) {
+      cleanupQuarantine();
+      return {
+        success: false,
+        blockedByExecSurfaces: true,
+        newExecSurfaces: newSurfaces,
+        error:
+          `Update refused: '${name}' introduces new executable surfaces (${newSurfaces.join(', ')}). ` +
+          `Re-run with --allow-exec-surfaces if you trust the source.`,
+      };
+    }
+
+    // 4. Apply: swap the quarantined revision into plugin.root, preserving the
+    //    user config and re-stamping .source.
+    const userConfigPath = path.join(plugin.root, USER_CONFIG_FILE);
+    const userConfigBackup = fs.existsSync(userConfigPath)
+      ? fs.readFileSync(userConfigPath, 'utf-8')
+      : null;
+    fs.rmSync(plugin.root, { recursive: true, force: true });
+    fs.renameSync(quarantine, plugin.root);
+    if (userConfigBackup !== null) {
+      fs.writeFileSync(userConfigPath, userConfigBackup, 'utf-8');
+    }
+
     // Re-stamp .source with the freshly pulled manifest version so the baseline
     // tracks what's now on disk (keeps the heal "unmodified?" check honest).
     const freshVersion = loadPluginManifest(plugin.root)?.version;
@@ -1406,9 +2077,10 @@ export async function updatePlugin(name: string): Promise<{ success: boolean; er
       JSON.stringify({ ...sourceInfo, version: freshVersion }),
       'utf-8',
     );
+
+    return { success: true, newExecSurfaces: newSurfaces, hasExecSurfaces: hasPluginExecSurfaces(after) };
   } catch (err) {
+    cleanupQuarantine();
     return { success: false, error: (err as Error).message };
   }
-
-  return { success: true };
 }

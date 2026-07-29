@@ -62,6 +62,93 @@ export const HOST_ROUTING_SPECS: StripSpec[] = [
   { long: 'remote-cwd', takesValue: true },
 ];
 
+/** How one `agents run` option behaves when the run is offloaded with `--host`. */
+export type RunOptionForwarding =
+  /** Appended to the remote `agents run` argv — same behavior local or remote. */
+  | 'forward'
+  /** Refused with an actionable error BEFORE dispatch — never silently dropped. */
+  | 'reject'
+  /** Consumed by the dispatching side (routing, follow rendering, cwd portability). */
+  | 'local-only';
+
+/**
+ * The forwarding contract for `agents run … --host`: every option of the `run`
+ * command is classified here, keyed by its commander attribute name. A
+ * commander-introspection test (run-forwarding.test.ts) fails when a run
+ * option is missing from this table, so a new option can never silently drop
+ * at the SSH boundary again — the exact bug this table exists to prevent
+ * (--secrets/--effort/--env/--timeout historically vanished on --host runs
+ * with no error).
+ *
+ * Rejections are value-aware at the call site (exec.ts): `--secrets` only
+ * rejects when a bundle was actually passed, `--resume` only when bare.
+ */
+export const RUN_OPTION_FORWARDING: Record<string, RunOptionForwarding> = {
+  // forwarded — the remote run behaves exactly like a local one
+  mode: 'forward',
+  effort: 'forward',
+  model: 'forward',
+  env: 'forward',
+  addDir: 'forward',
+  name: 'forward',
+  resume: 'forward', // concrete id only — bare `--resume` rejects (picker can't cross SSH)
+  sessionId: 'forward',
+  timeout: 'forward',
+  fallback: 'forward',
+  balanced: 'forward',
+  strategy: 'forward',
+  loop: 'forward',
+  maxIterations: 'forward',
+  budget: 'forward',
+  until: 'forward',
+  interval: 'forward',
+  json: 'forward', // remote emits ndjson into its log; the local follow streams it verbatim
+  verbose: 'forward',
+  yes: 'forward', // a detached remote run can't answer the budget-confirm prompt
+  acp: 'forward', // the remote CLI routes through ACP on ITS side of the wire
+  autoSecrets: 'forward', // workflow frontmatter secrets resolve on the REMOTE keychain
+
+  // rejected — cannot cross the SSH boundary; fail loud, never degrade
+  secrets: 'reject',
+  secretsKeys: 'reject',
+  allowExpired: 'reject',
+  resumeCheckpoint: 'reject',
+
+  // local-only — routing, dispatch-path choice, and follow rendering
+  quiet: 'local-only', // the remote argv always carries --quiet
+  headless: 'local-only',
+  interactive: 'local-only', // the interactive path forwards --interactive itself
+  cwd: 'local-only', // made portable into remoteCwd
+  project: 'local-only',
+  remoteCwd: 'local-only',
+  raw: 'local-only', // interactive builder forwards --raw itself
+  tmux: 'local-only',
+  disableTmux: 'local-only',
+  host: 'local-only',
+  device: 'local-only',
+  on: 'local-only',
+  computer: 'local-only',
+  any: 'local-only',
+  follow: 'local-only',
+  lease: 'local-only',
+  box: 'local-only',
+  keepBox: 'local-only',
+  copyCreds: 'local-only', // copies creds TO the host before dispatch — local concern only
+  authCheck: 'local-only', // --no-auth-check gates the local interactive login preflight; --host runs skip that preflight entirely
+};
+
+/** Actionable messages for value-aware rejections, keyed by attribute name. */
+export const RUN_OPTION_REJECT_MESSAGES: Record<string, string> = {
+  secrets:
+    '--secrets cannot cross the SSH boundary — Keychain values are never sent to a host implicitly. ' +
+    'Provision the bundle on the host first (agents secrets export --host <name>), then run without --secrets; ' +
+    'workflow frontmatter secrets resolve from the HOST\'s own keychain.',
+  secretsKeys: '--secrets-keys applies to --secrets bundles, which cannot cross the SSH boundary (see --secrets).',
+  allowExpired: '--allow-expired applies to --secrets bundles, which cannot cross the SSH boundary (see --secrets).',
+  resumeCheckpoint: '--resume-checkpoint reads a local checkpoint.json — it cannot resume a run on another machine. Run it locally, or start a fresh --loop run on the host.',
+  resumeBare: '--resume with no id opens the interactive picker, which cannot run across a detached host dispatch. Pass a concrete session id: agents run <agent> --resume <id> --host <name>.',
+};
+
 /**
  * Build the single command string for `ssh <target> <cmd>`. The forwarded args
  * are quoted for the inner login shell, then the whole `agents …` invocation is
@@ -160,9 +247,22 @@ export interface WindowsAgentsCommand {
  * `& agents …` invokes the CLI from the machine PATH (Windows has no login
  * shell, so there is no `bash -lc` equivalent — the shim is simply on PATH).
  */
+/**
+ * PowerShell prelude that silences the progress stream. PowerShell 5.1 serializes
+ * progress records ("Preparing modules for first use.") to CLIXML when stderr is a
+ * redirected pipe (an ssh capture, not a console), so a remote `agents …` result
+ * otherwise comes back wrapped in a raw `#< CLIXML <Objs …>` blob — unreadable to
+ * humans and to the JSON parsers that consume doctor / fleet-status output. Prepend
+ * this to EVERY Windows script that invokes `agents` (there is more than one builder
+ * in this file). Verified against a live win-mini (PowerShell 5.1): this clears it.
+ * (`-OutputFormat Text` does NOT — it governs success-stream object serialization,
+ * not the progress stream.)
+ */
+export const POWERSHELL_PROGRESS_SILENCE = "$ProgressPreference = 'SilentlyContinue'";
+
 export function windowsAgentsScript(cmd: WindowsAgentsCommand): string {
   const { args, env, cwd, propagateExit = true } = cmd;
-  const parts: string[] = [];
+  const parts: string[] = [POWERSHELL_PROGRESS_SILENCE];
   if (env) for (const [k, v] of Object.entries(env)) parts.push(`$env:${k} = ${powershellQuote(v)}`);
   if (cwd) parts.push(`Set-Location -LiteralPath ${powershellQuote(cwd)}`);
   parts.push(`& ${['agents', ...args].map(powershellQuote).join(' ')}`);
@@ -195,12 +295,19 @@ export function buildWindowsAgentsCommand(cmd: WindowsAgentsCommand): string {
  */
 export function buildWindowsStdinImportCommand(bundle: string, opts: { force?: boolean } = {}): string {
   const force = opts.force ? ' --force' : '';
+  // Create AND write the temp file INSIDE the try so its finally always cleans
+  // up: if GetTempFileName succeeds but WriteAllText (or the import) then throws,
+  // the secret-bearing temp file would otherwise be left behind (RUSH-1764). $tmp
+  // starts null so a GetTempFileName that itself throws leaves nothing to remove.
   const script = [
+    // Same CLIXML guard as windowsAgentsScript — this builder also runs `& agents …`
+    // and its raw stderr is printed to the user on failure (secrets export --host <win>).
+    POWERSHELL_PROGRESS_SILENCE,
     '$in = [Console]::In.ReadToEnd()',
-    '$tmp = [System.IO.Path]::GetTempFileName()',
-    '[System.IO.File]::WriteAllText($tmp, $in)',
-    `try { & agents secrets import ${powershellQuote(bundle)} --from $tmp${force}; $code = $LASTEXITCODE } ` +
-      `finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }`,
+    '$tmp = $null',
+    `try { $tmp = [System.IO.Path]::GetTempFileName(); [System.IO.File]::WriteAllText($tmp, $in); ` +
+      `& agents secrets import ${powershellQuote(bundle)} --from $tmp${force}; $code = $LASTEXITCODE } ` +
+      `finally { if ($tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue } }`,
     'if ($null -eq $code) { $code = 1 }',
     'exit $code',
   ].join('; ');

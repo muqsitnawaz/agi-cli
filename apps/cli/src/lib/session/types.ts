@@ -35,8 +35,42 @@ export interface SessionEvent {
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
   // Fields for attachment events (type === 'attachment')
+  name?: string;
   mediaType?: string;
   sizeBytes?: number;
+}
+
+/** A displayable file attachment discovered in a session transcript. */
+export interface SessionAttachment {
+  path?: string;
+  name?: string;
+  mediaType: string;
+  sizeBytes?: number;
+}
+
+/** One checklist item, as Claude's `TodoWrite` (`content`) or Codex's `update_plan` (`step`) emits it. */
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  /** Present-continuous label shown while this item is the active step. */
+  activeForm?: string;
+}
+
+/**
+ * Live plan progress derived from the most recent checklist write in the transcript
+ * (Claude `TodoWrite` / Codex `update_plan`, RUSH-1380). Lets consumers show "N/M
+ * done" + the current step for any session — including remote / device-dispatched
+ * agents that carry no local tool-call stream — instead of only a coarse
+ * working/idle verb.
+ */
+export interface TodoProgress {
+  items: TodoItem[];
+  /** Count of completed items. */
+  done: number;
+  /** Total items. */
+  total: number;
+  /** The in-progress item's activeForm (falls back to its content). The live step. */
+  activeForm?: string;
 }
 
 /** Metadata attached when a session was spawned by `agents teams`. */
@@ -52,6 +86,12 @@ export interface SessionMeta {
   id: string;
   shortId: string;
   agent: SessionAgentId;
+  /** Where the indexed transcript came from. Routine rows are archived from a run directory. */
+  origin?: 'cli' | 'routine';
+  /** Routine name for transcripts archived from ~/.agents/.history/runs/<name>/<runId>/. */
+  routineName?: string;
+  /** Routine run id for transcripts archived from ~/.agents/.history/runs/<name>/<runId>/. */
+  routineRunId?: string;
   timestamp: string;
   /**
    * Last-activity time (ISO): the last message timestamp when a parser computed
@@ -65,6 +105,8 @@ export interface SessionMeta {
   gitBranch?: string;
   messageCount?: number;
   tokenCount?: number;
+  /** Real generated (output) tokens — excludes cache-read/-write context (issue: `agents output`). */
+  outputTokens?: number;
   /** Total USD cost, computed at scan time from per-model token usage (issue #323). */
   costUsd?: number;
   /** Wall-clock duration in ms (lastTs − firstTs), persisted at scan time. */
@@ -113,6 +155,13 @@ export interface SessionMeta {
    * recover the plan text — the CLI now carries it on the metadata row.
    */
   plan?: string;
+  /**
+   * Live plan progress from the most recent checklist write (Claude `TodoWrite`
+   * / Codex `update_plan`, RUSH-1503). Populated on `agents sessions <id> --json`
+   * from the state engine so the Factory panel reads the CLI's computed checklist
+   * instead of re-parsing the transcript. Absent when the session wrote no list.
+   */
+  todos?: TodoProgress;
   /**
    * True when the session was spawned programmatically (SDK entrypoint) rather
    * than by a human at the Claude CLI. Captured at scan time from the JSONL

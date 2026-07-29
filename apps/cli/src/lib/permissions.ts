@@ -17,6 +17,7 @@ import type {
   PermissionSet,
   InstalledPermission,
   ClaudePermissions,
+  CursorPermissions,
   OpenCodePermissions,
   CodexPermissions,
 } from './types.js';
@@ -351,14 +352,22 @@ export function buildPermissionsFromGroups(groupNames: string[]): PermissionSet 
       // Matches lines like: - "Bash(git *)" or   - "WebFetch(domain:example.com)"
       // Handles nested quotes that break YAML parsers
       const lines = content.split('\n');
+      let section: 'allow' | 'deny' | null = null;
       for (const line of lines) {
+        const sectionMatch = line.match(/^\s*(allow|deny)\s*:\s*(?:#.*)?$/);
+        if (sectionMatch) {
+          section = sectionMatch[1] as 'allow' | 'deny';
+          continue;
+        }
+
         // Match: optional whitespace, dash, whitespace, quote, content, quote
         // Use greedy match to capture everything between first and last quote
         const match = line.match(/^\s*-\s*"(.+)"$/);
         if (match) {
           const rule = match[1];
-          // 99-deny group rules go to deny, others to allow
-          if (groupName === '99-deny' || groupName.includes('-deny')) {
+          // 99-deny group rules go to deny, others follow their YAML section.
+          // Legacy group files used bare lists with no section; keep those as allow.
+          if (section === 'deny' || groupName === '99-deny' || groupName.includes('-deny')) {
             allDeny.push(rule);
           } else {
             allAllow.push(rule);
@@ -481,18 +490,77 @@ export function removePermissionSet(name: string): { success: boolean; error?: s
 // ============================================================================
 
 /**
+ * Map a canonical rule to Claude settings.json syntax.
+ * Claude's file-permission checks only match Edit(path) rules — an Edit rule
+ * covers every file-editing tool (Write, Edit, NotebookEdit) — and Claude
+ * warns at startup about unmatched Write(path) rules. Canonical Write(path)
+ * stays for other agents' converters; for Claude it is emitted as Edit(path).
+ */
+function canonicalToClaudeRule(perm: string): string {
+  if (perm.startsWith('Write(')) {
+    return perm.replace(/^Write/, 'Edit');
+  }
+  return perm;
+}
+
+/**
  * Convert canonical permission set to Claude format.
  * Claude uses: { permissions: { allow: ["Bash(*)", "Read(**)"], deny: [] } }
  */
 export function convertToClaudeFormat(set: PermissionSet): ClaudePermissions {
   const permissions: ClaudePermissions['permissions'] = {
-    allow: [...set.allow],
-    deny: set.deny ? [...set.deny] : [],
+    allow: [...new Set(set.allow.map(canonicalToClaudeRule))],
+    deny: set.deny ? [...new Set(set.deny.map(canonicalToClaudeRule))] : [],
   };
   if (set.additionalDirectories?.length) {
     permissions.additionalDirectories = [...set.additionalDirectories];
   }
   return { permissions };
+}
+
+/**
+ * Map a canonical rule to Cursor CLI syntax.
+ * Cursor uses Shell(...) instead of Bash(...); other tools keep TitleCase names.
+ * https://cursor.com/docs/cli/reference/permissions
+ */
+function canonicalToCursorRule(perm: string): string {
+  if (perm === 'Bash' || perm.startsWith('Bash(')) {
+    return perm.replace(/^Bash/, 'Shell');
+  }
+  // Canonical WebSearch maps to WebFetch family for network allow.
+  if (perm.startsWith('WebSearch(')) {
+    return perm.replace(/^WebSearch/, 'WebFetch');
+  }
+  // Cursor has no Edit prefix — file writes use Write(...).
+  if (perm === 'Edit' || perm.startsWith('Edit(')) {
+    return perm.replace(/^Edit/, 'Write');
+  }
+  return perm;
+}
+
+/**
+ * Convert canonical permission set to Cursor CLI format
+ * (`~/.cursor/cli-config.json` permissions.allow/deny).
+ */
+export function convertToCursorFormat(set: PermissionSet): CursorPermissions {
+  return {
+    permissions: {
+      allow: set.allow.map(canonicalToCursorRule),
+      deny: (set.deny ?? []).map(canonicalToCursorRule),
+    },
+  };
+}
+
+type CopilotToolApproval =
+  | { kind: 'commands'; commandIdentifiers: string[] }
+  | { kind: 'read' | 'write' }
+  | { kind: 'mcp'; serverName: string; toolName: string | null };
+
+export interface CopilotPermissionsConfig {
+  locations: Record<string, {
+    tool_approvals?: CopilotToolApproval[];
+    allowed_directories?: string[];
+  }>;
 }
 
 /**
@@ -511,30 +579,39 @@ const BLANKET_BASH_FORMS = new Set(['Bash', 'Bash(*)', 'Bash(**)']);
 
 /**
  * Convert canonical permission set to Gemini format.
- * Gemini reads tool allow-lists from settings.json under `tools.allowed`.
- * Bash permissions map to run_shell_command(prefix) — the prefix is extracted
- * from the canonical "Bash(cmd:*)" pattern by stripping the trailing ":*".
- * Blanket Bash grants map to bare "run_shell_command" (no prefix filter).
+ * Gemini reads tool allow/deny lists from settings.json under
+ * `tools.core` / `tools.exclude`. Bash permissions map to ShellTool(pattern).
+ * Blanket Bash grants map to bare "ShellTool" (no command filter).
  * Non-Bash tool patterns are skipped; Gemini uses different tool names.
  */
-export function convertToGeminiFormat(set: PermissionSet): { tools: { allowed: string[] } } {
-  const allowed = new Set<string>();
-  for (const perm of set.allow) {
-    if (BLANKET_BASH_FORMS.has(perm)) {
-      allowed.add('run_shell_command');
-      continue;
+export function convertToGeminiFormat(set: PermissionSet): { tools: { core: string[]; exclude?: string[] } } {
+  const serialize = (permissions: string[]): string[] => {
+    const tools = new Set<string>();
+    for (const perm of permissions) {
+      if (BLANKET_BASH_FORMS.has(perm)) {
+        tools.add('ShellTool');
+        continue;
+      }
+      const parsed = parseCanonicalPattern(perm);
+      if (!parsed || parsed.tool !== 'bash') continue;
+      const command = normalizeBashPattern(parsed.pattern);
+      if (command === '*') {
+        tools.add('ShellTool');
+      } else {
+        tools.add(`ShellTool(${command})`);
+      }
     }
-    const parsed = parseCanonicalPattern(perm);
-    if (!parsed || parsed.tool !== 'bash') continue;
-    const colonIdx = parsed.pattern.lastIndexOf(':');
-    const prefix = colonIdx > 0 ? parsed.pattern.slice(0, colonIdx) : parsed.pattern;
-    if (prefix === '*' || prefix === '**') {
-      allowed.add('run_shell_command');
-    } else {
-      allowed.add(`run_shell_command(${prefix})`);
-    }
-  }
-  return { tools: { allowed: Array.from(allowed) } };
+    return Array.from(tools);
+  };
+
+  const core = serialize(set.allow);
+  const exclude = serialize(set.deny ?? []);
+  return {
+    tools: {
+      core,
+      ...(exclude.length ? { exclude } : {}),
+    },
+  };
 }
 
 /**
@@ -546,6 +623,241 @@ function normalizeBashPattern(pattern: string): string {
   if (pattern === '*' || pattern === '**') return '*';
   if (pattern.endsWith(':*')) return pattern.slice(0, -2) + ' *';
   return pattern;
+}
+
+function canonicalBashToCopilotCommandIdentifier(pattern: string): string | null {
+  if (pattern === '*' || pattern === '**') return null;
+  if (pattern.endsWith(':*')) return pattern;
+  if (pattern.endsWith(' *')) return `${pattern.slice(0, -2)}:*`;
+  return pattern;
+}
+
+function canonicalToCopilotMcpApproval(parsed: { pattern: string }): CopilotToolApproval | null {
+  const parts = parsed.pattern.split(/[.:/]/).filter(Boolean);
+  if (parts.length === 0) return null;
+  const [serverName, toolName] = parts;
+  return { kind: 'mcp', serverName, toolName: toolName ?? null };
+}
+
+function canonicalToCopilotApproval(permission: string): CopilotToolApproval | null {
+  const parsed = parseCanonicalPattern(permission);
+  if (!parsed) return null;
+  if (parsed.tool === 'bash') {
+    const identifier = canonicalBashToCopilotCommandIdentifier(parsed.pattern);
+    return identifier ? { kind: 'commands', commandIdentifiers: [identifier] } : null;
+  }
+  if ((parsed.tool === 'write' || parsed.tool === 'edit') && (parsed.pattern === '*' || parsed.pattern === '**')) {
+    return { kind: 'write' };
+  }
+  if (parsed.tool === 'read' && (parsed.pattern === '*' || parsed.pattern === '**')) {
+    return { kind: 'read' };
+  }
+  if (parsed.tool === 'mcp') {
+    return canonicalToCopilotMcpApproval(parsed);
+  }
+  return null;
+}
+
+function mergeCopilotApprovals(existing: unknown[], incoming: CopilotToolApproval[]): CopilotToolApproval[] {
+  const byKey = new Map<string, CopilotToolApproval>();
+  const add = (approval: CopilotToolApproval): void => {
+    if (approval.kind === 'commands') {
+      const current = byKey.get('commands') as { kind: 'commands'; commandIdentifiers: string[] } | undefined;
+      const commandIdentifiers = new Set([...(current?.commandIdentifiers ?? []), ...approval.commandIdentifiers]);
+      byKey.set('commands', { kind: 'commands', commandIdentifiers: Array.from(commandIdentifiers).sort() });
+      return;
+    }
+    byKey.set(JSON.stringify(approval), approval);
+  };
+
+  for (const approval of existing) {
+    if (!approval || typeof approval !== 'object' || Array.isArray(approval)) continue;
+    const record = approval as Record<string, unknown>;
+    if (record.kind === 'commands' && Array.isArray(record.commandIdentifiers)) {
+      add({ kind: 'commands', commandIdentifiers: record.commandIdentifiers.filter((v): v is string => typeof v === 'string') });
+    } else if (record.kind === 'read' || record.kind === 'write') {
+      add({ kind: record.kind });
+    } else if (record.kind === 'mcp' && typeof record.serverName === 'string' && (typeof record.toolName === 'string' || record.toolName === null)) {
+      add({ kind: 'mcp', serverName: record.serverName, toolName: record.toolName });
+    }
+  }
+  for (const approval of incoming) add(approval);
+  return Array.from(byKey.values());
+}
+
+export function convertToCopilotFormat(set: PermissionSet, location: string): CopilotPermissionsConfig {
+  const approvals: CopilotToolApproval[] = [];
+  for (const permission of set.allow) {
+    const approval = canonicalToCopilotApproval(permission);
+    if (approval) approvals.push(approval);
+  }
+  const allowedDirectories = (set.additionalDirectories ?? [])
+    .filter((dir) => dir.trim().length > 0)
+    .map((dir) => path.isAbsolute(dir) ? dir : path.resolve(location, dir));
+  return {
+    locations: {
+      [location]: {
+        ...(approvals.length > 0 ? { tool_approvals: mergeCopilotApprovals([], approvals) } : {}),
+        ...(allowedDirectories.length > 0 ? { allowed_directories: Array.from(new Set(allowedDirectories)).sort() } : {}),
+      },
+    },
+  };
+}
+
+/** Convert canonical Bash rules into Droid's command arrays. */
+export function convertToDroidFormat(set: PermissionSet): {
+  commandAllowlist: string[];
+  commandDenylist: string[];
+} {
+  const commands = (permissions: string[]): string[] => {
+    const result = new Set<string>();
+    for (const permission of permissions) {
+      if (BLANKET_BASH_FORMS.has(permission)) {
+        result.add('*');
+        continue;
+      }
+      const parsed = parseCanonicalPattern(permission);
+      if (parsed?.tool === 'bash') result.add(normalizeBashPattern(parsed.pattern));
+    }
+    return Array.from(result);
+  };
+
+  return {
+    commandAllowlist: commands(set.allow),
+    commandDenylist: commands(set.deny ?? []),
+  };
+}
+
+/**
+ * Canonical tool -> OpenClaw tool id. OpenClaw gates at TOOL granularity only
+ * (no sub-command/path/domain patterns), so only these whole-tool ids exist.
+ * Any canonical tool not in this map is unsupported and skipped.
+ */
+const CANONICAL_TO_OPENCLAW_TOOL: Record<string, string> = {
+  bash: 'exec',
+  read: 'read',
+  write: 'write',
+  edit: 'write',
+  webfetch: 'web_fetch',
+  websearch: 'web_search',
+};
+
+/**
+ * Convert canonical permission set to OpenClaw's `tools.alsoAllow`/`tools.deny`.
+ *
+ * OpenClaw's allowlist is tool-level only, so ONLY blanket (whole-tool) rules
+ * map — a rule is blanket iff it's a bare tool with no parens (`Bash`), it's in
+ * BLANKET_BASH_FORMS, or its pattern is `*`/`**` (`Read(**)`, `Write(*)`).
+ * Sub-command/path/domain rules (`Bash(git:*)`, `Write(secrets/**)`,
+ * `WebFetch(domain:x)`) are SKIPPED — coarse-mapping a specific deny to a whole
+ * tool would wrongly gate every use of that tool. Output arrays are deduped and
+ * sorted for deterministic writes/tests.
+ */
+export function convertToOpenClawFormat(set: PermissionSet): { alsoAllow: string[]; deny: string[] } {
+  const map = (permissions: string[]): string[] => {
+    const tools = new Set<string>();
+    for (const perm of permissions) {
+      // Bare tool name with no parens (e.g. "Bash", "Read") is a blanket grant;
+      // parseCanonicalPattern requires parens, so handle it first.
+      const bare = perm.match(/^(\w+)$/);
+      if (bare) {
+        const id = CANONICAL_TO_OPENCLAW_TOOL[bare[1].toLowerCase()];
+        if (id) tools.add(id);
+        continue;
+      }
+      const parsed = parseCanonicalPattern(perm);
+      if (!parsed) continue;
+      const isBlanket = BLANKET_BASH_FORMS.has(perm) || parsed.pattern === '*' || parsed.pattern === '**';
+      if (!isBlanket) continue;
+      const id = CANONICAL_TO_OPENCLAW_TOOL[parsed.tool];
+      if (id) tools.add(id);
+    }
+    return Array.from(tools).sort();
+  };
+
+  return {
+    alsoAllow: map(set.allow),
+    deny: map(set.deny ?? []),
+  };
+}
+
+export type ForgePermission = 'allow' | 'deny' | 'confirm';
+export type ForgeOperation = 'read' | 'write' | 'command' | 'url';
+export type ForgePolicy = { permission: ForgePermission; rule: Partial<Record<ForgeOperation, string>> };
+
+const FORGE_OPERATION_BY_CANONICAL: Record<string, ForgeOperation | undefined> = {
+  bash: 'command',
+  read: 'read',
+  grep: 'read',
+  glob: 'read',
+  write: 'write',
+  edit: 'write',
+  notebookedit: 'write',
+  webfetch: 'url',
+  websearch: 'url',
+};
+
+function canonicalToForgePolicy(perm: string, permission: ForgePermission): ForgePolicy | null {
+  if (BLANKET_BASH_FORMS.has(perm)) {
+    return { permission, rule: { command: '*' } };
+  }
+  const parsed = parseCanonicalPattern(perm);
+  if (!parsed) return null;
+  const operation = FORGE_OPERATION_BY_CANONICAL[parsed.tool];
+  if (!operation) return null;
+  const pattern = parsed.tool === 'bash'
+    ? normalizeBashPattern(parsed.pattern)
+    : (parsed.tool === 'webfetch' || parsed.tool === 'websearch') && parsed.pattern.startsWith('domain:')
+      ? `${parsed.pattern.slice('domain:'.length)}*`
+      : parsed.pattern === '**'
+        ? '**/*'
+        : parsed.pattern;
+  return { permission, rule: { [operation]: pattern } };
+}
+
+/**
+ * Convert canonical permissions to ForgeCode's permissions.yaml policy list.
+ *
+ * ForgeCode gates built-in tools by operation family (`read`, `write`,
+ * `command`, `url`) plus glob patterns, optionally scoped by `dir`. The policy
+ * file is ignored unless `.forge.toml` has `restricted = true`, and MCP tools
+ * bypass permissions.yaml entirely; agents-cli therefore maps only canonical
+ * built-in allow/deny rules and does not try to express per-named-MCP-tool
+ * grants.
+ */
+export function convertToForgeFormat(set: PermissionSet): { policies: ForgePolicy[] } {
+  const policies: ForgePolicy[] = [];
+  const seen = new Set<string>();
+  const add = (policy: ForgePolicy | null): void => {
+    if (!policy) return;
+    const key = `${policy.permission}|${JSON.stringify(policy.rule)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    policies.push(policy);
+  };
+  for (const perm of set.allow) add(canonicalToForgePolicy(perm, 'allow'));
+  for (const perm of set.deny ?? []) add(canonicalToForgePolicy(perm, 'deny'));
+  return { policies };
+}
+
+export function convertToHermesFormat(set: PermissionSet): { command_allowlist: string[]; approvals: { deny: string[] } } {
+  const commands = (permissions: string[]): string[] => {
+    const out = new Set<string>();
+    for (const perm of permissions) {
+      if (BLANKET_BASH_FORMS.has(perm)) {
+        out.add('*');
+        continue;
+      }
+      const parsed = parseCanonicalPattern(perm);
+      if (parsed?.tool === 'bash') out.add(normalizeBashPattern(parsed.pattern));
+    }
+    return Array.from(out).sort();
+  };
+
+  return {
+    command_allowlist: commands(set.allow),
+    approvals: { deny: commands(set.deny ?? []) },
+  };
 }
 
 /**
@@ -599,6 +911,56 @@ const ANTIGRAVITY_ACTION_BY_TOOL: Record<string, string | undefined> = {
   webfetch: 'read_url',
 };
 
+export interface GoosePermissionConfig {
+  user: {
+    always_allow: string[];
+    ask_before: string[];
+    never_allow: string[];
+  };
+}
+
+const GOOSE_TOOL_BY_CANONICAL: Record<string, string | undefined> = {
+  bash: 'developer__shell',
+  read: 'developer__text_editor',
+  write: 'developer__text_editor',
+  edit: 'developer__text_editor',
+  grep: 'developer__analyze',
+  glob: 'developer__analyze',
+  webfetch: 'developer__fetch',
+  mcp: undefined,
+};
+
+function canonicalToGooseTool(permission: string): string | null {
+  if (BLANKET_BASH_FORMS.has(permission)) return 'developer__shell';
+  const parsed = parseCanonicalPattern(permission);
+  if (!parsed) return null;
+  return GOOSE_TOOL_BY_CANONICAL[parsed.tool] ?? null;
+}
+
+/** Convert canonical permissions to Goose's per-tool permission.yaml shape. */
+export function convertToGooseFormat(set: PermissionSet): GoosePermissionConfig {
+  const alwaysAllow = new Set<string>();
+  const neverAllow = new Set<string>();
+  for (const permission of set.allow) {
+    const tool = canonicalToGooseTool(permission);
+    if (tool) alwaysAllow.add(tool);
+  }
+  for (const permission of set.deny ?? []) {
+    const tool = canonicalToGooseTool(permission);
+    if (tool) neverAllow.add(tool);
+  }
+  for (const tool of neverAllow) {
+    alwaysAllow.delete(tool);
+  }
+  return {
+    user: {
+      always_allow: Array.from(alwaysAllow).sort(),
+      ask_before: [],
+      never_allow: Array.from(neverAllow).sort(),
+    },
+  };
+}
+
 /**
  * Convert canonical permission set to Grok format.
  * Grok reads ~/.grok/config.toml with
@@ -648,6 +1010,67 @@ function canonicalToGrokRule(perm: string, action: 'allow' | 'deny'): GrokRule |
 }
 
 export type KimiRule = { decision: 'allow' | 'deny'; pattern: string };
+
+export type KiroRule = {
+  capability: string;
+  effect: 'allow' | 'deny';
+  match?: string[];
+  exclude?: string[];
+};
+
+/**
+ * Convert canonical permissions to Kiro CLI v3 capability rules.
+ * Kiro stores these rules in ~/.kiro/settings/permissions.yaml.
+ */
+export function convertToKiroFormat(set: PermissionSet): { rules: KiroRule[] } {
+  const rules: KiroRule[] = [];
+  for (const perm of set.allow) {
+    const rule = canonicalToKiroRule(perm, 'allow');
+    if (rule) rules.push(rule);
+  }
+  for (const perm of set.deny ?? []) {
+    const rule = canonicalToKiroRule(perm, 'deny');
+    if (rule) rules.push(rule);
+  }
+  return { rules };
+}
+
+function canonicalToKiroRule(perm: string, effect: 'allow' | 'deny'): KiroRule | null {
+  if (BLANKET_BASH_FORMS.has(perm)) {
+    return { capability: 'shell', effect };
+  }
+
+  const parsed = parseCanonicalPreserveCase(perm);
+
+  const capability = KIRO_CAPABILITY_BY_TOOL[parsed.tool.toLowerCase()];
+  if (!capability) return null;
+
+  if (parsed.pattern === null || parsed.pattern === '*' || parsed.pattern === '**') {
+    return { capability, effect };
+  }
+  const lowerTool = parsed.tool.toLowerCase();
+  const pattern = lowerTool === 'bash'
+    ? normalizeBashPattern(parsed.pattern)
+    : (lowerTool === 'webfetch' || lowerTool === 'websearch') && parsed.pattern.startsWith('domain:')
+      ? parsed.pattern.slice('domain:'.length)
+      : parsed.pattern;
+  return { capability, effect, match: [pattern] };
+}
+
+const KIRO_CAPABILITY_BY_TOOL: Record<string, string | undefined> = {
+  bash: 'shell',
+  read: 'fs_read',
+  grep: 'fs_read',
+  glob: 'fs_read',
+  write: 'fs_write',
+  edit: 'fs_write',
+  notebookedit: 'fs_write',
+  webfetch: 'web_fetch',
+  websearch: 'web_search',
+  mcp: 'mcp',
+  subagent: 'subagent',
+  skill: 'skill',
+};
 
 /**
  * Parse a canonical permission string preserving the tool's original casing.
@@ -923,9 +1346,7 @@ function readOpenCodePermissions(
   options?: { home?: string }
 ): OpenCodePermissions | null {
   const home = options?.home || HOME;
-  const configPath = scope === 'user'
-    ? path.join(home, '.opencode', 'opencode.jsonc')
-    : path.join(cwd || process.cwd(), '.opencode', 'opencode.jsonc');
+  const configPath = openCodeConfigPath(scope, cwd, home);
 
   if (!fs.existsSync(configPath)) {
     return null;
@@ -1045,8 +1466,9 @@ export function applyClaudePermissions(
 
     if (merge && config.permissions) {
       const existing = config.permissions as { allow?: string[]; deny?: string[] };
-      const mergedAllow = new Set([...(existing.allow || []), ...newPermissions.permissions.allow]);
-      const mergedDeny = new Set([...(existing.deny || []), ...newPermissions.permissions.deny]);
+      // Rewrite stale Write(path) rules already installed in settings.json too.
+      const mergedAllow = new Set([...(existing.allow || []).map(canonicalToClaudeRule), ...newPermissions.permissions.allow]);
+      const mergedDeny = new Set([...(existing.deny || []).map(canonicalToClaudeRule), ...newPermissions.permissions.deny]);
       config.permissions = {
         allow: [...mergedAllow],
         deny: [...mergedDeny],
@@ -1063,6 +1485,29 @@ export function applyClaudePermissions(
 }
 
 /**
+ * Path OpenCode actually loads for global config:
+ *   ~/.config/opencode/opencode.jsonc  (or .json)
+ * Project: <cwd>/opencode.jsonc (or .json) at project root — not .opencode/.
+ * See https://opencode.ai/docs/config/
+ */
+export function openCodeConfigPath(scope: 'user' | 'project', cwd?: string, home: string = HOME): string {
+  if (scope === 'project') {
+    const root = cwd || process.cwd();
+    for (const name of ['opencode.jsonc', 'opencode.json']) {
+      const candidate = path.join(root, name);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+    return path.join(root, 'opencode.jsonc');
+  }
+  const globalDir = path.join(home, '.config', 'opencode');
+  for (const name of ['opencode.jsonc', 'opencode.json']) {
+    const candidate = path.join(globalDir, name);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return path.join(globalDir, 'opencode.jsonc');
+}
+
+/**
  * Apply a permission set to OpenCode's opencode.jsonc.
  */
 function applyOpenCodePermissions(
@@ -1071,10 +1516,8 @@ function applyOpenCodePermissions(
   cwd?: string,
   merge: boolean = true
 ): { success: boolean; error?: string } {
-  const configDir = scope === 'user'
-    ? path.join(HOME, '.opencode')
-    : path.join(cwd || process.cwd(), '.opencode');
-  const configPath = path.join(configDir, 'opencode.jsonc');
+  const configPath = openCodeConfigPath(scope, cwd);
+  const configDir = path.dirname(configPath);
 
   try {
     // Ensure directory exists
@@ -1203,7 +1646,8 @@ export function applyPermissionsToVersion(
   agentId: AgentId,
   set: PermissionSet,
   versionHome: string,
-  merge: boolean = true
+  merge: boolean = true,
+  cwd?: string
 ): { success: boolean; error?: string } {
   const configDir = path.join(versionHome, agentConfigDirName(agentId));
 
@@ -1221,8 +1665,9 @@ export function applyPermissionsToVersion(
 
       if (merge && config.permissions) {
         const existing = config.permissions as { allow?: string[]; deny?: string[]; additionalDirectories?: string[] };
-        const mergedAllow = new Set([...(existing.allow || []), ...newPermissions.permissions.allow]);
-        const mergedDeny = new Set([...(existing.deny || []), ...newPermissions.permissions.deny]);
+        // Rewrite stale Write(path) rules already installed in settings.json too.
+        const mergedAllow = new Set([...(existing.allow || []).map(canonicalToClaudeRule), ...newPermissions.permissions.allow]);
+        const mergedDeny = new Set([...(existing.deny || []).map(canonicalToClaudeRule), ...newPermissions.permissions.deny]);
         const mergedDirs = new Set([...(existing.additionalDirectories || []), ...(newPermissions.permissions.additionalDirectories || [])]);
         const perms: Record<string, unknown> = {
           allow: [...mergedAllow],
@@ -1241,7 +1686,10 @@ export function applyPermissionsToVersion(
     }
 
     if (agentId === 'opencode') {
-      const configPath = path.join(configDir, 'opencode.jsonc');
+      // OpenCode loads ~/.config/opencode/opencode.jsonc under the version home
+      // (HOME isolation), not ~/.opencode/opencode.jsonc.
+      const configPath = openCodeConfigPath('user', undefined, versionHome);
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
       let config: Record<string, unknown> = {};
       if (fs.existsSync(configPath)) {
         const content = stripJsonComments(fs.readFileSync(configPath, 'utf-8'));
@@ -1309,16 +1757,24 @@ export function applyPermissionsToVersion(
       const geminiPerms = convertToGeminiFormat(set);
       const settingsPath = path.join(versionHome, '.gemini', 'settings.json');
       updateGeminiSettings(settingsPath, (settings) => {
-        // Remove stale permissions key written by earlier versions of this serializer.
+        // Remove stale keys written by earlier serializer versions:
+        // top-level `permissions`, and Gemini's pre-core/exclude `tools.allowed`.
         delete (settings as Record<string, unknown>).permissions;
         const tools = (typeof settings.tools === 'object' && settings.tools !== null && !Array.isArray(settings.tools))
           ? settings.tools as Record<string, unknown>
           : {};
+        delete tools.allowed;
         if (merge) {
-          const existing = Array.isArray(tools.allowed) ? (tools.allowed as string[]) : [];
-          tools.allowed = Array.from(new Set([...existing, ...geminiPerms.tools.allowed]));
+          const existingCore = Array.isArray(tools.core) ? (tools.core as string[]) : [];
+          const existingExclude = Array.isArray(tools.exclude) ? (tools.exclude as string[]) : [];
+          tools.core = Array.from(new Set([...existingCore, ...geminiPerms.tools.core]));
+          const mergedExclude = Array.from(new Set([...existingExclude, ...(geminiPerms.tools.exclude ?? [])]));
+          if (mergedExclude.length) tools.exclude = mergedExclude;
+          else delete tools.exclude;
         } else {
-          tools.allowed = geminiPerms.tools.allowed;
+          tools.core = geminiPerms.tools.core;
+          if (geminiPerms.tools.exclude?.length) tools.exclude = geminiPerms.tools.exclude;
+          else delete tools.exclude;
         }
         settings.tools = tools;
       });
@@ -1379,6 +1835,49 @@ export function applyPermissionsToVersion(
       return { success: true };
     }
 
+    if (agentId === 'goose') {
+      const permissionsPath = path.join(versionHome, '.config', 'goose', 'permission.yaml');
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(permissionsPath)) {
+        const parsed = yaml.parse(fs.readFileSync(permissionsPath, 'utf-8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          config = parsed as Record<string, unknown>;
+        }
+      }
+
+      const converted = convertToGooseFormat(set).user;
+      const user = (typeof config.user === 'object' && config.user !== null && !Array.isArray(config.user))
+        ? config.user as Record<string, unknown>
+        : {};
+
+      const currentAlways = Array.isArray(user.always_allow) ? user.always_allow.filter((v): v is string => typeof v === 'string') : [];
+      const currentAsk = Array.isArray(user.ask_before) ? user.ask_before.filter((v): v is string => typeof v === 'string') : [];
+      const currentNever = Array.isArray(user.never_allow) ? user.never_allow.filter((v): v is string => typeof v === 'string') : [];
+
+      if (merge) {
+        const incomingAlways = new Set(converted.always_allow);
+        const incomingNever = new Set(converted.never_allow);
+        const touched = new Set([...incomingAlways, ...incomingNever]);
+        const always = new Set(currentAlways.filter(tool => !touched.has(tool)));
+        const ask = new Set(currentAsk.filter(tool => !touched.has(tool)));
+        const never = new Set(currentNever.filter(tool => !touched.has(tool)));
+        for (const tool of incomingAlways) always.add(tool);
+        for (const tool of incomingNever) never.add(tool);
+        user.always_allow = Array.from(always).sort();
+        user.ask_before = Array.from(ask).sort();
+        user.never_allow = Array.from(never).sort();
+      } else {
+        user.always_allow = converted.always_allow;
+        user.ask_before = converted.ask_before;
+        user.never_allow = converted.never_allow;
+      }
+
+      config.user = user;
+      fs.mkdirSync(path.dirname(permissionsPath), { recursive: true });
+      fs.writeFileSync(permissionsPath, yaml.stringify(config), 'utf-8');
+      return { success: true };
+    }
+
     if (agentId === 'kimi') {
       const configPath = path.join(versionHome, '.kimi-code', 'config.toml');
       let config: Record<string, unknown> = {};
@@ -1411,6 +1910,227 @@ export function applyPermissionsToVersion(
 
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
       fs.writeFileSync(configPath, TOML.stringify(config as any), 'utf-8');
+      return { success: true };
+    }
+
+    if (agentId === 'cursor') {
+      // Cursor CLI permissions live in ~/.cursor/cli-config.json
+      const configPath = path.join(configDir, 'cli-config.json');
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        try {
+          config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+        } catch { /* start fresh */ }
+      }
+      const converted = convertToCursorFormat(set);
+      if (merge && config.permissions && typeof config.permissions === 'object') {
+        const existing = config.permissions as { allow?: string[]; deny?: string[] };
+        const allow = new Set([...(existing.allow || []), ...converted.permissions.allow]);
+        const deny = new Set([...(existing.deny || []), ...converted.permissions.deny]);
+        config.permissions = { allow: [...allow], deny: [...deny] };
+      } else {
+        config.permissions = converted.permissions;
+      }
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+      return { success: true };
+    }
+
+    if (agentId === 'droid') {
+      const configPath = path.join(versionHome, '.factory', 'settings.json');
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+      }
+      const converted = convertToDroidFormat(set);
+      if (merge) {
+        const existingAllow = Array.isArray(config.commandAllowlist) ? config.commandAllowlist as string[] : [];
+        const existingDeny = Array.isArray(config.commandDenylist) ? config.commandDenylist as string[] : [];
+        config.commandAllowlist = Array.from(new Set([...existingAllow, ...converted.commandAllowlist]));
+        config.commandDenylist = Array.from(new Set([...existingDeny, ...converted.commandDenylist]));
+      } else {
+        config.commandAllowlist = converted.commandAllowlist;
+        config.commandDenylist = converted.commandDenylist;
+      }
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+      return { success: true };
+    }
+
+    if (agentId === 'copilot') {
+      const configPath = path.join(versionHome, '.copilot', 'permissions-config.json');
+      let config: CopilotPermissionsConfig = { locations: {} };
+      if (fs.existsSync(configPath)) {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as CopilotPermissionsConfig;
+      }
+
+      const location = path.resolve(cwd ?? process.cwd());
+      const converted = convertToCopilotFormat(set, location);
+      const incoming = converted.locations[location]?.tool_approvals ?? [];
+      const incomingDirectories = converted.locations[location]?.allowed_directories ?? [];
+      if (merge && incoming.length === 0 && incomingDirectories.length === 0) return { success: true };
+
+      const locations = (typeof config.locations === 'object' && config.locations !== null && !Array.isArray(config.locations))
+        ? config.locations
+        : {};
+      const existingLocation = (typeof locations[location] === 'object' && locations[location] !== null && !Array.isArray(locations[location]))
+        ? locations[location]
+        : {};
+      const existingApprovals = Array.isArray(existingLocation.tool_approvals) ? existingLocation.tool_approvals : [];
+      const nextApprovals = merge ? mergeCopilotApprovals(existingApprovals, incoming) : incoming;
+      const existingDirectories = Array.isArray(existingLocation.allowed_directories)
+        ? existingLocation.allowed_directories.filter((v): v is string => typeof v === 'string')
+        : [];
+      const nextDirectories = merge
+        ? Array.from(new Set([...existingDirectories, ...incomingDirectories])).sort()
+        : incomingDirectories;
+      const nextLocation = { ...existingLocation };
+      if (nextApprovals.length > 0) nextLocation.tool_approvals = nextApprovals;
+      else delete nextLocation.tool_approvals;
+      if (nextDirectories.length > 0) nextLocation.allowed_directories = nextDirectories;
+      else delete nextLocation.allowed_directories;
+
+      if (Object.keys(nextLocation).length > 0) locations[location] = nextLocation;
+      else delete locations[location];
+      config.locations = locations;
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+      return { success: true };
+    }
+
+    if (agentId === 'kiro') {
+      const permissionsPath = path.join(versionHome, '.kiro', 'settings', 'permissions.yaml');
+      let config: { rules?: unknown[] } = {};
+      if (fs.existsSync(permissionsPath)) {
+        const parsed = yaml.parse(fs.readFileSync(permissionsPath, 'utf-8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          config = parsed as { rules?: unknown[] };
+        }
+      }
+
+      const newRules = convertToKiroFormat(set).rules;
+      if (merge) {
+        const existingRules = Array.isArray(config.rules) ? config.rules : [];
+        const seen = new Set<string>();
+        config.rules = [...existingRules, ...newRules].filter((rule) => {
+          if (!rule || typeof rule !== 'object' || Array.isArray(rule)) return false;
+          const record = rule as { capability?: unknown; effect?: unknown; match?: unknown; exclude?: unknown };
+          const key = `${String(record.effect)}|${String(record.capability)}|${JSON.stringify(record.match ?? [])}|${JSON.stringify(record.exclude ?? [])}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      } else {
+        config.rules = newRules;
+      }
+
+      fs.mkdirSync(path.dirname(permissionsPath), { recursive: true });
+      fs.writeFileSync(permissionsPath, yaml.stringify(config), 'utf-8');
+      return { success: true };
+    }
+
+    if (agentId === 'openclaw') {
+      // OpenClaw's allowlist lives in ~/.openclaw/openclaw.json under `tools`.
+      // Only blanket tool-level rules map (see convertToOpenClawFormat). We
+      // read-modify-write to preserve all other keys (mcp, exec, agents, …) and
+      // never touch `tools.allow` (the absolute allowlist that replaces defaults).
+      const configPath = path.join(versionHome, '.openclaw', 'openclaw.json');
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+      }
+      const converted = convertToOpenClawFormat(set);
+
+      const existingTools = (typeof config.tools === 'object' && config.tools !== null && !Array.isArray(config.tools))
+        ? config.tools as Record<string, unknown>
+        : {};
+      let alsoAllow: string[];
+      let deny: string[];
+      if (merge) {
+        const existingAllow = Array.isArray(existingTools.alsoAllow) ? existingTools.alsoAllow as string[] : [];
+        const existingDeny = Array.isArray(existingTools.deny) ? existingTools.deny as string[] : [];
+        alsoAllow = Array.from(new Set([...existingAllow, ...converted.alsoAllow]));
+        deny = Array.from(new Set([...existingDeny, ...converted.deny]));
+      } else {
+        alsoAllow = converted.alsoAllow;
+        deny = converted.deny;
+      }
+
+      // Set or delete each key: avoid writing empty arrays (churn). On a
+      // non-merge replace with nothing to write, delete the stale key.
+      const tools: Record<string, unknown> = { ...existingTools };
+      if (alsoAllow.length > 0) tools.alsoAllow = alsoAllow;
+      else delete tools.alsoAllow;
+      if (deny.length > 0) tools.deny = deny;
+      else delete tools.deny;
+
+      if (Object.keys(tools).length > 0) config.tools = tools;
+      else delete config.tools;
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+      return { success: true };
+    }
+
+    if (agentId === 'forge') {
+      const permissionsPath = path.join(versionHome, '.forge', 'permissions.yaml');
+      let config: { policies?: unknown[] } = {};
+      if (fs.existsSync(permissionsPath)) {
+        const parsed = yaml.parse(fs.readFileSync(permissionsPath, 'utf-8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          config = parsed as { policies?: unknown[] };
+        }
+      }
+
+      const newPolicies = convertToForgeFormat(set).policies;
+      if (merge) {
+        const existingPolicies = Array.isArray(config.policies) ? config.policies : [];
+        const seen = new Set<string>();
+        config.policies = [...existingPolicies, ...newPolicies].filter((policy) => {
+          if (!policy || typeof policy !== 'object' || Array.isArray(policy)) return false;
+          const key = JSON.stringify(policy);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      } else {
+        config.policies = newPolicies;
+      }
+
+      fs.mkdirSync(path.dirname(permissionsPath), { recursive: true });
+      fs.writeFileSync(permissionsPath, yaml.stringify(config), 'utf-8');
+      return { success: true };
+    }
+
+    if (agentId === 'hermes') {
+      const configPath = path.join(versionHome, '.hermes', 'config.yaml');
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        const parsed = yaml.parse(fs.readFileSync(configPath, 'utf-8'));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          config = parsed as Record<string, unknown>;
+        }
+      }
+
+      const converted = convertToHermesFormat(set);
+      const approvals = (typeof config.approvals === 'object' && config.approvals !== null && !Array.isArray(config.approvals))
+        ? config.approvals as Record<string, unknown>
+        : {};
+
+      if (merge) {
+        const existingAllow = Array.isArray(config.command_allowlist) ? config.command_allowlist as string[] : [];
+        const existingDeny = Array.isArray(approvals.deny) ? approvals.deny as string[] : [];
+        config.command_allowlist = Array.from(new Set([...existingAllow, ...converted.command_allowlist])).sort();
+        approvals.deny = Array.from(new Set([...existingDeny, ...converted.approvals.deny])).sort();
+      } else {
+        config.command_allowlist = converted.command_allowlist;
+        approvals.deny = converted.approvals.deny;
+      }
+
+      config.approvals = approvals;
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, yaml.stringify(config), 'utf-8');
       return { success: true };
     }
 
@@ -1529,7 +2249,7 @@ export function exportPermissionsFromPath(filePath: string): PermissionSet | nul
 
   if (fileName === 'settings.json' && parentDir === '.claude') {
     agentId = 'claude';
-  } else if (fileName === 'opencode.jsonc' || parentDir === '.opencode') {
+  } else if (fileName === 'opencode.jsonc' || fileName === 'opencode.json' || parentDir === 'opencode' || parentDir === '.opencode') {
     agentId = 'opencode';
   } else if (fileName === 'config.toml' && parentDir === '.codex') {
     agentId = 'codex';

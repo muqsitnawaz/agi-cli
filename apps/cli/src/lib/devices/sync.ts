@@ -14,10 +14,12 @@
  *   - soft (`soft: true`): auto-callers must never abort setup/sync because a
  *     machine has no tailscale — they get a result with `ok: false` instead.
  */
+import * as os from 'os';
 import {
   loadDevices,
   loadIgnored,
   upsertDevice,
+  type DeviceInput,
 } from './registry.js';
 import {
   nodeToDeviceInput,
@@ -26,6 +28,52 @@ import {
   type TailscaleNode,
 } from './tailscale.js';
 import type { PendingDevice } from './pending.js';
+
+/**
+ * The login user to stamp onto newly-synced devices. Tailscale status carries a
+ * node's OS and address but NOT the account you ssh in as, so we materialize the
+ * local operator's username — tailnet devices are overwhelmingly one person's
+ * boxes, and this is exactly the account ssh would already fall back to. Pinning
+ * it in the registry makes `--host <device>` dial that account no matter which
+ * machine launches the fan-out (a peer whose local user differs otherwise dials
+ * the wrong account). Returns undefined when the username isn't a safe ssh
+ * identifier, so a weird value never lands in the registry. */
+export function localLoginUser(): string | undefined {
+  let u: string | undefined;
+  try {
+    u = os.userInfo().username;
+  } catch {
+    u = process.env.USER || process.env.USERNAME || undefined;
+  }
+  return sanitizeLoginUser(u);
+}
+
+/**
+ * Reduce a raw OS username to a safe ssh account, or undefined. Windows reports
+ * the login as `COMPUTER\user` / `DOMAIN\user`; the ssh account is the bare name
+ * after the backslash — without this strip the `\` fails the charset guard and
+ * Windows boxes never pin a user. Pure, so the platform-specific munging is
+ * unit-tested without reading the real OS user. */
+export function sanitizeLoginUser(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const bare = raw.includes('\\') ? raw.slice(raw.lastIndexOf('\\') + 1) : raw;
+  return /^[a-zA-Z0-9._-]+$/.test(bare) ? bare : undefined;
+}
+
+/**
+ * Fill in a device's login user during sync WITHOUT ever clobbering an account
+ * the user pinned. Precedence: an existing registered user wins; else the local
+ * operator's username; else leave it unset (ssh's implicit local default still
+ * applies). Pure so the "never overwrite an explicit user" guard is unit-tested
+ * without a tailnet. */
+export function withDefaultUser(
+  input: DeviceInput,
+  prevUser: string | undefined,
+  localUser: string | undefined,
+): DeviceInput {
+  if (input.user || prevUser || !localUser) return input;
+  return { ...input, user: localUser };
+}
 
 /**
  * bootstrap — register every non-ignored node (opt-out). First-run `agents
@@ -113,8 +161,10 @@ export async function runDeviceSync(
     }));
 
     const toUpsert = selectNodesToUpsert(nodes, registered, ignored, mode);
+    const localUser = localLoginUser();
     for (const node of toUpsert) {
-      await upsertDevice(node.name, nodeToDeviceInput(node));
+      const input = withDefaultUser(nodeToDeviceInput(node), registeredBefore[node.name]?.user, localUser);
+      await upsertDevice(node.name, input);
     }
 
     return { ok: true, synced: toUpsert.length, pending };
@@ -124,6 +174,80 @@ export async function runDeviceSync(
     }
     throw err;
   }
+}
+
+export interface EnsureDevicesResult {
+  /** Names newly resolved from Tailscale and upserted into the registry. */
+  registered: string[];
+  /** Names that could not be resolved (not on the tailnet / tailscale absent). */
+  unresolved: string[];
+}
+
+/**
+ * Pure decision for `ensureDevicesRegistered`: split the wanted names into those
+ * to resolve+register (missing from the registry, present on the tailnet, not
+ * ignored) vs. unresolved (missing and either off-tailnet or ignored). Already-
+ * registered names need nothing. Pure so the bootstrap's filter matrix is
+ * unit-testable without a tailnet or registry writes.
+ */
+export interface WantedPartition {
+  toRegister: string[];
+  unresolved: string[];
+}
+
+export function partitionWantedDevices(
+  wanted: string[],
+  registered: Set<string>,
+  tailscaleNames: Set<string>,
+  ignored: Set<string>,
+): WantedPartition {
+  const out: WantedPartition = { toRegister: [], unresolved: [] };
+  for (const name of wanted) {
+    if (registered.has(name)) continue;
+    if (tailscaleNames.has(name) && !ignored.has(name)) out.toRegister.push(name);
+    else out.unresolved.push(name);
+  }
+  return out;
+}
+
+/**
+ * Fresh-machine bootstrap for `agents apply`: given the device names a `fleet:`
+ * manifest wants, register any that aren't in the local registry by resolving
+ * them LIVE from Tailscale — so a freshly-cloned `agents.yaml` (which carries
+ * names only, never IPs/usernames) reconstructs its roster with zero committed
+ * connection details. Soft by design: a missing tailscale binary or an offline
+ * name yields `unresolved` rather than throwing, so `apply` degrades to "these
+ * devices aren't reachable yet" instead of aborting. Reuses the same
+ * parse→withDefaultUser→upsert path as `runDeviceSync`, so a bootstrapped device
+ * is identical to a synced one.
+ */
+export async function ensureDevicesRegistered(wantedNames: string[]): Promise<EnsureDevicesResult> {
+  const registryBefore = await loadDevices();
+  const registered = new Set(Object.keys(registryBefore));
+  const missing = wantedNames.filter((n) => !registered.has(n));
+  if (missing.length === 0) return { registered: [], unresolved: [] };
+
+  let nodes: TailscaleNode[];
+  try {
+    nodes = parseTailscaleStatus(tailscaleStatusJson());
+  } catch {
+    // Tailscale absent/unreachable — nothing resolvable; report all missing.
+    return { registered: [], unresolved: missing };
+  }
+
+  const ignored = await loadIgnored();
+  const tailscaleNames = new Set(nodes.map((n) => n.name));
+  const { toRegister, unresolved } = partitionWantedDevices(missing, registered, tailscaleNames, ignored);
+
+  const byName = new Map(nodes.map((n) => [n.name, n]));
+  const localUser = localLoginUser();
+  const done: string[] = [];
+  for (const name of toRegister) {
+    const input = withDefaultUser(nodeToDeviceInput(byName.get(name)!), registryBefore[name]?.user, localUser);
+    await upsertDevice(name, input);
+    done.push(name);
+  }
+  return { registered: done, unresolved };
 }
 
 /**

@@ -22,14 +22,41 @@ import { emit } from '../events.js';
 import { sshTargetFor } from '../hosts/types.js';
 import { buildRemoteAgentsInvocation } from '../hosts/remote-cmd.js';
 import { resolveRemoteOsSync } from '../hosts/remote-os.js';
+import { isLoaderOrInterpreterEnv } from './bundles.js';
 
 const REMOTE_TIMEOUT_MS = 30_000;
 
-/** Remote OS for a target string (bare alias matches a device entry; a raw
- * `user@host` falls back to POSIX). Threaded into the command builder so a
- * Windows host gets PowerShell instead of `bash -lc`. */
-function osForTarget(target: string): string | undefined {
-  return resolveRemoteOsSync(target.split('@').pop() ?? target);
+/**
+ * Trust boundary for a remote-resolved env map. A peer's `secrets export` output
+ * is untrusted input: a compromised or misconfigured host could return keys that
+ * silently reshape THIS process's behavior once merged into the agent env
+ * (bundles.ts:251 `sanitizeProcessEnv` only strips loader vars from process.env,
+ * never the remote bundle). Block the dangerous-override classes here — at the
+ * source — so every consumer (`run --secrets b@host`, `secrets exec --host`) is
+ * protected, not just one call site:
+ *   - LD_* / DYLD_* / NODE_OPTIONS and the other loader/interpreter injections
+ *     (reuses the canonical bundles.ts predicate);
+ *   - GIT_*        — GIT_SSH_COMMAND et al. hijack every git subprocess;
+ *   - *_PROXY      — HTTP(S)_PROXY / ALL_PROXY reroute outbound traffic (MITM);
+ *   - *_BASE_URL   — ANTHROPIC_BASE_URL / OPENAI_BASE_URL redirect the model API.
+ * These keys are already rejected on the ADD side (validateEnvKey for loaders),
+ * so a legitimate bundle never carries them — only a hostile peer would.
+ */
+export function isDangerousRemoteEnvKey(name: string): boolean {
+  const upper = name.toUpperCase();
+  if (isLoaderOrInterpreterEnv(upper)) return true;
+  if (upper.startsWith('GIT_')) return true;
+  if (upper.endsWith('_PROXY')) return true;
+  if (upper.endsWith('_BASE_URL')) return true;
+  return false;
+}
+
+/** Remote OS for a host name or target string. Prefer the original host name
+ * because enrolled inline hosts resolve to `user@address`, while the OS
+ * registry is keyed by the host name. */
+function osForTarget(target: string, lookupName?: string): string | undefined {
+  const byName = lookupName ? resolveRemoteOsSync(lookupName) : undefined;
+  return byName ?? resolveRemoteOsSync(target.split('@').pop() ?? target);
 }
 
 /**
@@ -90,13 +117,14 @@ export function splitBundleRef(ref: string): { bundle: string; host?: string } {
 export function remoteSecretsRaw(
   target: string,
   args: string[],
-  opts: { tty?: boolean; input?: string } = {},
+  opts: { tty?: boolean; input?: string; osLookupName?: string } = {},
 ): SshExecResult {
-  const remoteCmd = buildRemoteAgentsInvocation(['secrets', ...args], undefined, osForTarget(target));
+  const remoteCmd = buildRemoteAgentsInvocation(['secrets', ...args], undefined, osForTarget(target, opts.osLookupName));
   return sshExec(target, remoteCmd, {
     timeoutMs: REMOTE_TIMEOUT_MS,
     input: opts.input,
     extraSshArgs: opts.tty ? ['-tt'] : undefined,
+    multiplex: opts.tty ? false : undefined,
   });
 }
 
@@ -113,8 +141,8 @@ export function remoteSecretsRaw(
  * bundle's passphrase at your own terminal. Output is NOT captured (it streams
  * to the terminal); only the exit code is returned.
  */
-export function remoteSecretsStream(target: string, args: string[]): number {
-  const remoteCmd = buildRemoteAgentsInvocation(['secrets', ...args], undefined, osForTarget(target));
+export function remoteSecretsStream(target: string, args: string[], opts: { osLookupName?: string } = {}): number {
+  const remoteCmd = buildRemoteAgentsInvocation(['secrets', ...args], undefined, osForTarget(target, opts.osLookupName));
   return sshStream(target, remoteCmd, { tty: true });
 }
 
@@ -131,12 +159,16 @@ export function remoteSecretsStream(target: string, args: string[]): number {
  * SSH will block on Touch-ID — use `view`/`exec` with a remote `file` bundle,
  * an already-unlocked remote secrets-agent, or an interactive `-tt` session.)
  */
-export async function remoteResolveEnv(target: string, bundle: string): Promise<Record<string, string>> {
+export async function remoteResolveEnv(
+  target: string,
+  bundle: string,
+  opts: { osLookupName?: string } = {},
+): Promise<Record<string, string>> {
   assertValidSshTarget(target);
   const remoteCmd = buildRemoteAgentsInvocation(
     ['secrets', 'export', bundle, '--plaintext', '--format', 'json'],
     undefined,
-    osForTarget(target),
+    osForTarget(target, opts.osLookupName),
   );
   const res: SshExecResult = sshExec(target, remoteCmd, {
     timeoutMs: REMOTE_TIMEOUT_MS,
@@ -166,8 +198,21 @@ export async function remoteResolveEnv(target: string, bundle: string): Promise<
     throw new Error(`Unexpected payload resolving '${bundle}' on ${target}.`);
   }
   const env: Record<string, string> = {};
+  const blocked: string[] = [];
   for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    // Drop dangerous-override keys returned by the (untrusted) peer before they
+    // can reshape this process — see isDangerousRemoteEnvKey.
+    if (isDangerousRemoteEnvKey(k)) {
+      blocked.push(k);
+      continue;
+    }
     env[k] = typeof v === 'string' ? v : String(v);
+  }
+  if (blocked.length > 0) {
+    process.stderr.write(
+      `[secrets] Dropped ${blocked.length} dangerous key(s) from '${bundle}'@${target} ` +
+        `(remote override blocked): ${blocked.join(', ')}\n`,
+    );
   }
   // The remote host audits its own `secrets export` read; this emit records the
   // event on the INITIATING host too (values were pulled into this process and
@@ -176,7 +221,7 @@ export async function remoteResolveEnv(target: string, bundle: string): Promise<
   emit('secrets.get', {
     module: 'secrets',
     bundle,
-    caller: 'remote resolve',
+    operation: 'remote resolve',
     source: 'remote',
     host: target,
     status: 'success',
