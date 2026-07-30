@@ -27,6 +27,7 @@ import {
   stripShimPathLines,
   releaseAdoptedLauncher,
 } from './shims.js';
+import { moveDirCrossDevice, copyDirStrippingAgentsSymlinks } from './config-transfer.js';
 import {
   getUserAgentsDir,
   getBackupsDir,
@@ -114,49 +115,6 @@ function symlinkTarget(p: string): string | null {
  */
 function removeLink(p: string): void {
   fs.unlinkSync(p);
-}
-
-/**
- * Move `source` onto `dest` across possibly-different volumes. `renameSync` is
- * atomic but throws EXDEV when `~/.agents` lives on a different filesystem than
- * `$HOME`; fall back to copy-then-remove so the restore still completes. The
- * source (a backup inside `~/.agents`) is removed only after the copy succeeds,
- * so a mid-copy failure never destroys the sole surviving copy.
- */
-function moveDirCrossDevice(source: string, dest: string): void {
-  try {
-    fs.renameSync(source, dest);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
-    fs.cpSync(source, dest, { recursive: true });
-    fs.rmSync(source, { recursive: true, force: true });
-  }
-}
-
-/**
- * Copy `source` to `dest`, dropping any symlink whose target resolves back into
- * `~/.agents`. Adoption syncs managed resources (skills/commands) into the
- * version home as symlinks into `~/.agents`; copying them verbatim would leave
- * the restored config full of links that dangle the moment `~/.agents` is
- * disposed. Stripping them yields a clean, self-contained restore.
- */
-function copyDirStrippingAgentsSymlinks(source: string, dest: string, agentsDir: string): void {
-  const inside = agentsDir + path.sep;
-  fs.cpSync(source, dest, {
-    recursive: true,
-    filter: (src) => {
-      try {
-        const st = fs.lstatSync(src);
-        if (st.isSymbolicLink()) {
-          const tgt = path.resolve(path.dirname(src), fs.readlinkSync(src));
-          if (tgt === agentsDir || tgt.startsWith(inside)) return false;
-        }
-      } catch {
-        /* unreadable entry — let cpSync surface it on the real copy */
-      }
-      return true;
-    },
-  });
 }
 
 /** Classify one agent's config dir without mutating anything. */
