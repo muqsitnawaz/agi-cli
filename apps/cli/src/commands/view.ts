@@ -63,6 +63,7 @@ import {
   isGlobalBinaryAgent,
   getLiveVersion,
   isVersionIsolated,
+  getIsolatedDefault,
 } from '../lib/versions.js';
 import {
   getShimsDir,
@@ -509,7 +510,13 @@ async function showInstalledVersions(
   const versionRowLabel = (agentId: AgentId, version: string, globalDefault: string | null): string => {
     const shown = displayVersion(agentId, version);
     if (version === globalDefault) return `${shown} (default)`;
-    if (isVersionIsolated(agentId, version)) return `${shown} (isolated)`;
+    if (isVersionIsolated(agentId, version)) {
+      // The isolated default is what a bare `agents run <agent>` reaches, so it is
+      // worth distinguishing from the other isolated copies sitting beside it.
+      return getIsolatedDefault(agentId) === version
+        ? `${shown} (isolated default)`
+        : `${shown} (isolated)`;
+    }
     return shown;
   };
 
@@ -579,13 +586,14 @@ async function showInstalledVersions(
       for (const version of sortedVersions) {
         const isDefault = version === globalDefault;
         const isolated = !isDefault && isVersionIsolated(agentId, version);
+        const isolatedTag = getIsolatedDefault(agentId) === version ? ' (isolated default)' : ' (isolated)';
         const shown = displayVersion(agentId, version);
         const base = versionRowLabel(agentId, version, globalDefault);
         const tagPad = ' '.repeat(maxVerLabel - base.length);
         const label = isDefault
           ? `${shown}${chalk.green(' (default)')}${tagPad}`
           : isolated
-            ? `${shown}${chalk.gray(' (isolated)')}${tagPad}`
+            ? `${shown}${chalk.gray(isolatedTag)}${tagPad}`
             : base.padEnd(maxVerLabel);
         const rawInfo = infoMap.get(`${agentId}:${version}`);
         const vInfo = rawInfo ? mergeCanonical(rawInfo) : undefined;

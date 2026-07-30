@@ -247,6 +247,41 @@ removal and is restored intact. Two consequences follow from the marker:
 `--isolated` cannot be combined with `--project` (an isolated copy is
 global-but-separate; a project pin selects a shared install for one directory).
 
+### The isolated default
+
+`agents use <agent>@<isolated-version>` records which isolated copy a bare
+`agents run <agent>` should reach. It is scoped to the sandbox: unlike a normal
+`use` it sets no global default, creates no bare shim, and never repoints the real
+`~/.<agent>` config symlink.
+
+```yaml
+# ~/.agents/agents.yaml
+agents:                 # global defaults — own the launcher, shim and config symlink
+  claude: 2.1.220
+isolatedAgents:         # sandbox pointers — own nothing
+  codex: 0.144.6
+```
+
+The two maps are kept separate deliberately. An entry under `agents:` arms the
+self-heal `shadowing` check and is what `getGlobalDefault` returns; an isolated
+copy must never acquire that, so it is recorded somewhere `getGlobalDefault`
+cannot see.
+
+Resolution order for a bare agent name (`resolveVersion`):
+
+```
+project pin  ->  global default  ->  isolated default
+```
+
+Strictly a fallback, so nothing changes for anyone who has a global default.
+Without it an isolated-only user could not reach their installs by bare name at
+all — the chain ended at the global default, so `agents run codex` fell through to
+whatever `codex` meant on PATH and only `agents run codex@<version>` worked.
+
+The pointer is verified on read (installed *and* still isolated), and `removeVersion`
+re-points it at the newest surviving isolated copy — or clears it — so it can never
+resolve to a directory that is not there.
+
 ## Resource Syncing
 
 `syncResourcesToVersion()` copies user/system resources into version homes and
