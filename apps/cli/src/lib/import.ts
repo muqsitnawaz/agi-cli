@@ -24,7 +24,7 @@ import type { AgentId } from './types.js';
 import { AGENTS } from './agents.js';
 import { getUserAgentsDir, getVersionsDir } from './state.js';
 import { setGlobalDefault } from './versions.js';
-import { createShim, createVersionedAlias, ensureShimCurrent, switchHomeFileSymlinks } from './shims.js';
+import { createShim, createVersionedAlias, ensureShimCurrent, switchHomeFileSymlinks, assertIsolationBoundary } from './shims.js';
 
 export interface ImportConfigResult {
   success: boolean;
@@ -61,6 +61,12 @@ export async function importAgentConfig(
     return { success: false, error: `Invalid version: ${JSON.stringify(version)}` };
   }
 
+  // Adoption, done inline rather than via switchConfigSymlink — so it needs the gate
+  // directly. commands/import.ts checks at its entry point too (it must: it registers
+  // a normal version first, which would un-protect the agent before this runs), but
+  // an exported function that moves the user's real config must not depend on every
+  // future caller remembering.
+  assertIsolationBoundary(agentId, 'adopt your existing install');
   const agent = AGENTS[agentId];
   const configDir = agent.configDir;
   const versionsDir = getVersionsDir();

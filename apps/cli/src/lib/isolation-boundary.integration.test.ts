@@ -122,6 +122,25 @@ describe.skipIf(process.platform === 'win32')('isolation boundary', () => {
     expect(r.out).not.toContain('installed only as isolated copies');
   }, 180_000);
 
+  it("setup's own hand-rolled adoption is closed too — and scaffolding can't disarm the check", () => {
+    plant('codex', V, 'codex');
+    // The real unmanaged config is still there: isolated installs never touch it,
+    // so this is the ordinary state, and it is what setup offers to adopt.
+    fs.mkdirSync(realConfig(), { recursive: true });
+    fs.writeFileSync(path.join(realConfig(), 'config.toml'), 'model = "mine"\n');
+
+    // setup adopts inline (rename + symlink) without calling switchConfigSymlink, and
+    // its FIRST action creates <version>/home — which, if bare dirs counted as
+    // non-isolated installs, would flip protection off before any gate is reached.
+    const r = run('setup', '--force');
+    expect(r.out).not.toContain('is now managed');
+
+    // The real config is still a real directory holding the user's content.
+    expect(fs.lstatSync(realConfig()).isSymbolicLink()).toBe(false);
+    expect(fs.readFileSync(path.join(realConfig(), 'config.toml'), 'utf-8')).toContain('mine');
+    expect(fs.readlinkSync(launcher())).toBe('../lib/node_modules/@openai/codex/bin/codex.js');
+  }, 180_000);
+
   it('removing the isolated copies drops protection — the inherent escape hatch', () => {
     plant('codex', V, 'codex');
     expect(run('import', 'codex').status).not.toBe(0);

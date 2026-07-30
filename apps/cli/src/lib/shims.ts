@@ -2641,8 +2641,18 @@ export function isIsolationProtected(agent: AgentId): boolean {
   } catch {
     return false;
   }
-  if (dirs.length === 0) return false;
-  return dirs.every((v) => isInstalledVersionIsolated(agent, v));
+  // Count only directories that are actually an install. A bare version dir is
+  // scaffolding, not a non-isolated version — and treating it as one would disable
+  // protection at exactly the wrong moment: an adopting path that does
+  // `mkdirSync(<version>/home)` before adopting would flip this to false with its own
+  // first line and then walk straight through the gates. Ignoring scaffolding biases
+  // the predicate toward protecting, which is the safe direction to fail in.
+  const installed = dirs.filter((v) => {
+    const dir = path.join(agentVersionsDir, v);
+    return fs.existsSync(path.join(dir, 'node_modules')) || fs.existsSync(path.join(dir, 'package.json'));
+  });
+  if (installed.length === 0) return false;
+  return installed.every((v) => isInstalledVersionIsolated(agent, v));
 }
 
 /** Refuse `operation` when `agent` is isolated-only. */

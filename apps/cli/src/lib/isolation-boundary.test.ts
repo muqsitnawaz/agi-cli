@@ -61,6 +61,49 @@ describe('isolation boundary — the gate is on every adopting primitive', () =>
     expect(offenders).toEqual([]);
   });
 
+  it('no file outside the gated primitives hand-rolls config-dir adoption', () => {
+    // The first version of this test scanned only shims.ts — which is exactly why
+    // setup.ts's second, hand-rolled adoption (rename + symlink inline, never calling
+    // switchConfigSymlink) went unnoticed: it bypassed every primitive gate. Scan the
+    // whole command/lib surface for the adoption SHAPE instead of trusting that all
+    // adoption goes through the primitives.
+    const roots = ['src/commands', 'src/lib'];
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of fs.readdirSync(path.resolve(process.cwd(), dir), { withFileTypes: true })) {
+        const rel = `${dir}/${e.name}`;
+        if (e.isDirectory()) walk(rel);
+        else if (e.name.endsWith('.ts') && !e.name.includes('.test.')) files.push(rel);
+      }
+    };
+    roots.forEach(walk);
+
+    const offenders: string[] = [];
+    for (const f of files) {
+      const src = read(f);
+      // Adoption's signature is precise: MOVE the user's real config dir somewhere
+      // else. Matching "renames something, and mentions configDir" is too loose — it
+      // flagged migrate.ts, which only repoints an already-symlinked config for an
+      // agent that has a recorded default pin (something a protected agent cannot
+      // have) and never moves a real directory. Match the move itself.
+      if (!/renameSync\(\s*(configDir|getAgentConfigPath\()/.test(src)) continue;
+      if (src.includes('assertIsolationBoundary')) continue;
+      offenders.push(f);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('the predicate ignores scaffolding, so an adopting path cannot disarm it', () => {
+    // `isIsolationProtected` reads the versions dir. An adopting path that creates
+    // `<version>/home` before adopting would, if bare dirs counted, flip protection
+    // off with its own first line and then sail through every gate. Counting only
+    // real installs (node_modules/ or package.json present) closes that.
+    const src = read('src/lib/shims.ts');
+    const start = src.indexOf('export function isIsolationProtected');
+    const body = src.slice(start, src.indexOf('\n}', start));
+    expect(body).toMatch(/node_modules|package\.json/);
+  });
+
   it('the predicate is derived from the .isolated markers, not from stored config', () => {
     // Protection must not depend on a setting someone can leave in the wrong state —
     // it is computed from what is actually installed.
