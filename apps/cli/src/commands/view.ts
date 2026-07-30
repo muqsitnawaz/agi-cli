@@ -573,7 +573,14 @@ async function showInstalledVersions(
 	      const runStrategy = getConfiguredRunStrategy(agentId);
 
 	      const strategyLabel = chalk.gray(` (${runStrategy})`);
-	      const noDefaultLabel = !globalDefault ? chalk.yellow(' (no default)') : '';
+	      // `(no default)` is a nudge to go set one. It would read as a contradiction
+	      // directly above a row tagged `(isolated default)`, and it would be bad
+	      // advice besides: for an isolated-only agent the pointer below IS how a
+	      // bare `agents run <agent>` resolves, and setting a global default is
+	      // precisely what `--isolated` exists to avoid.
+	      const noDefaultLabel = !globalDefault && !getIsolatedDefault(agentId)
+	        ? chalk.yellow(' (no default)')
+	        : '';
 	      console.log(`  ${chalk.bold(agentLabel(agentId))}${strategyLabel}${noDefaultLabel}`);
 
 	      // Sort versions with default first, then by semver descending
