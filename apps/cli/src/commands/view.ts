@@ -329,18 +329,35 @@ async function showInstalledVersions(
     ? `Checking ${agentLabel(filterAgentId)} agents...`
     : 'Checking installed agents...';
   const spinner = ora({ text: spinnerText, isSilent: !process.stdout.isTTY }).start();
+
+  const agentsToShow = filterAgentId ? [filterAgentId] : ALL_AGENT_IDS;
+
+  // A globally-installed CLI is superseded only by a NORMAL managed version — that
+  // is when agents-cli owns the launcher and a "global" row would just be our own
+  // shim reported back. `--isolated` promises the opposite: no default, no bare
+  // shim, no adopted launcher, the user's own `~/.<agent>` untouched. So an
+  // isolated-only install must not make that still-live global CLI disappear from
+  // `agents view` — the two are genuinely separate installs and both get listed.
+  const hasNonIsolatedVersion = (agentId: AgentId): boolean =>
+    listInstalledVersions(agentId).some((v) => !isVersionIsolated(agentId, v));
+
   // Every `cliStates` read in this function feeds the "Not Managed by Agents CLI"
   // block, so resolve it the way that block means it: the user's own CLI on PATH.
   // `getCliState` would answer with a version-dir install — including an isolated
   // copy that is deliberately absent from PATH — and print it as "(global)".
+  //
+  // Resolved only for agents that can actually reach that block. `getCliState`
+  // deliberately avoids subprocesses for a version-managed agent, and PATH
+  // resolution costs a `<cli> --version` spawn on a cold cache — so probing an
+  // agent whose global row is suppressed anyway would be pure added latency.
   const cliStates = Object.fromEntries(
     await Promise.all(
-      ALL_AGENT_IDS.map(async (agentId) => [agentId, await getUnmanagedCliState(agentId)] as const)
+      agentsToShow
+        .filter((agentId) => !hasNonIsolatedVersion(agentId))
+        .map(async (agentId) => [agentId, await getUnmanagedCliState(agentId)] as const)
     )
   ) as Partial<Record<AgentId, CliState>>;
   spinner.stop();
-
-  const agentsToShow = filterAgentId ? [filterAgentId] : ALL_AGENT_IDS;
   const showPaths = !!filterAgentId;
   const profilesByAgent = getProfilesByAgent(filterAgentId);
   const profileSummaries = [...profilesByAgent.values()].flat();
@@ -370,15 +387,6 @@ async function showInstalledVersions(
   const selfHost = machineId();
   // Read the auth-health cache once (not per version row — see the batching note above).
   const authCache = readAuthHealthCache();
-
-  // A globally-installed CLI is superseded only by a NORMAL managed version — that
-  // is when agents-cli owns the launcher and a "global" row would just be our own
-  // shim reported back. `--isolated` promises the opposite: no default, no bare
-  // shim, no adopted launcher, the user's own `~/.<agent>` untouched. So an
-  // isolated-only install must not make that still-live global CLI disappear from
-  // `agents view` — the two are genuinely separate installs and both get listed.
-  const hasNonIsolatedVersion = (agentId: AgentId): boolean =>
-    listInstalledVersions(agentId).some((v) => !isVersionIsolated(agentId, v));
 
   // Pre-fetch account info for all versions in parallel
   const infoFetches: Promise<{ agentId: AgentId; version: string; home: string; info: AccountInfo }>[] = [];
