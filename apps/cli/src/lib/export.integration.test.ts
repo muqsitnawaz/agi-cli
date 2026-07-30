@@ -7,14 +7,18 @@ import path from 'node:path';
 // `agents export` is the exit door for `--isolated`: it copies a sandboxed install's
 // config out to the user's real ~/.<agent> so they can keep their settings and delete
 // agents-cli. Drives the real CLI against a throwaway HOME — no mocking — because the
-// whole feature is filesystem behavior (backup, replace, symlink stripping).
-describe.skipIf(process.platform === 'win32')('agents export — isolated config out to the real config dir', () => {
+// whole feature is filesystem behavior (additive merge, conflict siblings, receipt).
+describe.skipIf(process.platform === 'win32')('agents export', () => {
   let home: string;
   const V = '9.9.4';
+  const RECEIPT = '.agents-cli-export.json';
+  const SUFFIX = '.from-agents-cli';
 
   const versionDir = (v = V) => path.join(home, '.agents', '.history', 'versions', 'codex', v);
   const isolatedConfig = (v = V) => path.join(versionDir(v), 'home', '.codex');
   const realConfig = () => path.join(home, '.codex');
+  const read = (...p: string[]) => fs.readFileSync(path.join(...p), 'utf-8');
+  const receipt = () => JSON.parse(read(realConfig(), RECEIPT));
 
   function plantIsolated(v = V, { isolated = true } = {}) {
     const binDir = path.join(versionDir(v), 'node_modules', '.bin');
@@ -22,8 +26,9 @@ describe.skipIf(process.platform === 'win32')('agents export — isolated config
     // isVersionInstalled resolves the launch binary, so the fixture needs a real file.
     fs.writeFileSync(path.join(binDir, 'codex'), '#!/bin/sh\nexit 0\n');
     fs.chmodSync(path.join(binDir, 'codex'), 0o755);
-    fs.mkdirSync(isolatedConfig(v), { recursive: true });
+    fs.mkdirSync(path.join(isolatedConfig(v), 'prompts'), { recursive: true });
     fs.writeFileSync(path.join(isolatedConfig(v), 'config.toml'), 'model = "sandboxed"\n');
+    fs.writeFileSync(path.join(isolatedConfig(v), 'prompts', 'review.md'), '# review\n');
     if (isolated) fs.writeFileSync(path.join(versionDir(v), '.isolated'), '2026-07-30T00:00:00.000Z\n');
   }
 
@@ -49,85 +54,142 @@ describe.skipIf(process.platform === 'win32')('agents export — isolated config
   });
   afterEach(() => { fs.rmSync(home, { recursive: true, force: true }); });
 
-  it('creates the real config dir when the user has none', () => {
-    plantIsolated();
-    const r = run('export', `codex@${V}`, '--yes');
-    expect(r.status).toBe(0);
-    expect(fs.readFileSync(path.join(realConfig(), 'config.toml'), 'utf-8')).toContain('sandboxed');
-  }, 120_000);
+  describe('merge (default)', () => {
+    it('NEVER modifies a file the user already has — writes the incoming copy beside it', () => {
+      plantIsolated();
+      fs.mkdirSync(realConfig(), { recursive: true });
+      fs.writeFileSync(path.join(realConfig(), 'config.toml'), '# my note\nmodel = "mine"\n');
 
-  it('backs up an existing real config instead of destroying it', () => {
-    plantIsolated();
-    fs.mkdirSync(realConfig(), { recursive: true });
-    fs.writeFileSync(path.join(realConfig(), 'config.toml'), 'model = "my-original"\n');
+      const r = run('export', `codex@${V}`);
+      expect(r.status).toBe(0);
 
-    const r = run('export', `codex@${V}`, '--yes');
-    expect(r.status).toBe(0);
-    // New config landed...
-    expect(fs.readFileSync(path.join(realConfig(), 'config.toml'), 'utf-8')).toContain('sandboxed');
-    // ...and the original survives somewhere under the backups dir.
-    const backupsRoot = path.join(home, '.agents', '.history', 'backups', 'codex');
-    const stamps = fs.existsSync(backupsRoot) ? fs.readdirSync(backupsRoot) : [];
-    expect(stamps.length).toBeGreaterThan(0);
-    const restored = path.join(backupsRoot, stamps[0], 'config.toml');
-    expect(fs.readFileSync(restored, 'utf-8')).toContain('my-original');
-  }, 120_000);
+      // The user's file is byte-identical, comment and all.
+      expect(read(realConfig(), 'config.toml')).toBe('# my note\nmodel = "mine"\n');
+      // ...and the incoming one sits next to it for them to diff.
+      expect(read(realConfig(), `config.toml${SUFFIX}`)).toContain('sandboxed');
+      // A non-colliding file lands normally.
+      expect(read(realConfig(), 'prompts', 'review.md')).toContain('# review');
+    }, 120_000);
 
-  it('strips symlinks into ~/.agents so the export stands alone', () => {
-    plantIsolated();
-    // Managed resources are synced into a version home as links into ~/.agents.
-    const skillsSrc = path.join(home, '.agents', 'skills');
-    fs.mkdirSync(skillsSrc, { recursive: true });
-    fs.writeFileSync(path.join(skillsSrc, 'SKILL.md'), '# managed\n');
-    fs.symlinkSync(skillsSrc, path.join(isolatedConfig(), 'skills'));
-    // A link to something OUTSIDE ~/.agents is the user's own and must survive.
-    const mine = path.join(home, 'my-notes');
-    fs.mkdirSync(mine, { recursive: true });
-    fs.symlinkSync(mine, path.join(isolatedConfig(), 'notes'));
+    it('records provenance in the receipt: what was added vs what was left alone', () => {
+      plantIsolated();
+      fs.mkdirSync(realConfig(), { recursive: true });
+      fs.writeFileSync(path.join(realConfig(), 'config.toml'), 'model = "mine"\n');
 
-    expect(run('export', `codex@${V}`, '--yes').status).toBe(0);
-    expect(fs.existsSync(path.join(realConfig(), 'skills'))).toBe(false);
-    expect(fs.existsSync(path.join(realConfig(), 'notes'))).toBe(true);
-    expect(fs.readFileSync(path.join(realConfig(), 'config.toml'), 'utf-8')).toContain('sandboxed');
-  }, 120_000);
+      expect(run('export', `codex@${V}`).status).toBe(0);
+      const rec = receipt();
+      expect(rec.mode).toBe('merge');
+      expect(rec.from).toContain(`codex@${V}`);
+      expect(rec.written).toContain(path.join('prompts', 'review.md'));
+      expect(rec.written).not.toContain('config.toml');
+      expect(rec.conflicts.map((c: { path: string }) => c.path)).toContain('config.toml');
+    }, 120_000);
 
-  it('--dry-run writes nothing', () => {
-    plantIsolated();
-    fs.mkdirSync(realConfig(), { recursive: true });
-    fs.writeFileSync(path.join(realConfig(), 'config.toml'), 'model = "my-original"\n');
+    it('adds everything when the user has no config at all', () => {
+      plantIsolated();
+      expect(run('export', `codex@${V}`).status).toBe(0);
+      expect(read(realConfig(), 'config.toml')).toContain('sandboxed');
+      expect(read(realConfig(), 'prompts', 'review.md')).toContain('# review');
+      expect(receipt().conflicts).toEqual([]);
+    }, 120_000);
 
-    const r = run('export', `codex@${V}`, '--dry-run');
-    expect(r.status).toBe(0);
-    expect(r.out).toContain('Dry run');
-    expect(fs.readFileSync(path.join(realConfig(), 'config.toml'), 'utf-8')).toContain('my-original');
-  }, 120_000);
+    it('strips symlinks into ~/.agents but keeps the user\'s own', () => {
+      plantIsolated();
+      const managed = path.join(home, '.agents', 'skills');
+      fs.mkdirSync(managed, { recursive: true });
+      fs.symlinkSync(managed, path.join(isolatedConfig(), 'skills'));
+      const mine = path.join(home, 'my-notes');
+      fs.mkdirSync(mine, { recursive: true });
+      fs.symlinkSync(mine, path.join(isolatedConfig(), 'notes'));
 
-  it('refuses a NON-isolated version and changes nothing', () => {
-    plantIsolated(V, { isolated: false });
-    const r = run('export', `codex@${V}`, '--yes');
-    expect(r.status).not.toBe(0);
-    expect(r.out).toContain('not an isolated install');
-    expect(fs.existsSync(realConfig())).toBe(false);
-  }, 120_000);
+      expect(run('export', `codex@${V}`).status).toBe(0);
+      expect(fs.existsSync(path.join(realConfig(), 'skills'))).toBe(false);
+      expect(fs.existsSync(path.join(realConfig(), 'notes'))).toBe(true);
+    }, 120_000);
+  });
 
-  it('refuses when the real config is a symlink agents-cli already adopted', () => {
-    plantIsolated();
-    // Another version adopted ~/.codex — writing there would mutate ITS home.
-    plantIsolated('9.9.5', { isolated: false });
-    fs.symlinkSync(isolatedConfig('9.9.5'), realConfig());
+  describe('--replace', () => {
+    it('replaces wholesale and backs up the previous config', () => {
+      plantIsolated();
+      fs.mkdirSync(realConfig(), { recursive: true });
+      fs.writeFileSync(path.join(realConfig(), 'config.toml'), 'model = "my-original"\n');
 
-    const r = run('export', `codex@${V}`, '--yes');
-    expect(r.status).not.toBe(0);
-    expect(r.out).toContain('managed by agents-cli');
-    // The adopted target is untouched.
-    expect(fs.readFileSync(path.join(isolatedConfig('9.9.5'), 'config.toml'), 'utf-8')).toContain('sandboxed');
-    expect(fs.lstatSync(realConfig()).isSymbolicLink()).toBe(true);
-  }, 120_000);
+      expect(run('export', `codex@${V}`, '--replace', '--yes').status).toBe(0);
+      expect(read(realConfig(), 'config.toml')).toContain('sandboxed');
 
-  it('resolves the version when exactly one isolated copy exists', () => {
-    plantIsolated();
-    const r = run('export', 'codex', '--yes');
-    expect(r.status).toBe(0);
-    expect(fs.readFileSync(path.join(realConfig(), 'config.toml'), 'utf-8')).toContain('sandboxed');
-  }, 120_000);
+      const backupsRoot = path.join(home, '.agents', '.history', 'backups', 'codex');
+      const stamps = fs.readdirSync(backupsRoot);
+      expect(stamps.length).toBeGreaterThan(0);
+      expect(read(backupsRoot, stamps[0], 'config.toml')).toContain('my-original');
+      expect(receipt().mode).toBe('replace');
+    }, 120_000);
+
+    it('refuses without confirmation in a non-interactive shell', () => {
+      plantIsolated();
+      fs.mkdirSync(realConfig(), { recursive: true });
+      fs.writeFileSync(path.join(realConfig(), 'config.toml'), 'model = "mine"\n');
+
+      const r = run('export', `codex@${V}`, '--replace');
+      expect(r.status).not.toBe(0);
+      expect(read(realConfig(), 'config.toml')).toContain('mine');
+    }, 120_000);
+  });
+
+  describe('--staged', () => {
+    it('activates nothing — the real config is untouched', () => {
+      plantIsolated();
+      fs.mkdirSync(realConfig(), { recursive: true });
+      fs.writeFileSync(path.join(realConfig(), 'config.toml'), 'model = "mine"\n');
+
+      expect(run('export', `codex@${V}`, '--staged').status).toBe(0);
+      expect(read(realConfig(), 'config.toml')).toContain('mine');
+      const staged = fs.readdirSync(realConfig()).find((n) => n.startsWith('.agents-export-'));
+      expect(staged).toBeTruthy();
+      expect(read(realConfig(), staged!, 'config.toml')).toContain('sandboxed');
+      expect(receipt().mode).toBe('staged');
+    }, 120_000);
+  });
+
+  describe('refusals and resolution', () => {
+    it('--dry-run writes nothing at all, not even a receipt', () => {
+      plantIsolated();
+      const r = run('export', `codex@${V}`, '--dry-run');
+      expect(r.status).toBe(0);
+      expect(r.out).toContain('Dry run');
+      expect(fs.existsSync(realConfig())).toBe(false);
+    }, 120_000);
+
+    it('refuses a NON-isolated version and changes nothing', () => {
+      plantIsolated(V, { isolated: false });
+      const r = run('export', `codex@${V}`);
+      expect(r.status).not.toBe(0);
+      expect(r.out).toContain('not an isolated install');
+      expect(fs.existsSync(realConfig())).toBe(false);
+    }, 120_000);
+
+    it('refuses when the real config is a symlink agents-cli already adopted', () => {
+      plantIsolated();
+      plantIsolated('9.9.5', { isolated: false });
+      fs.symlinkSync(isolatedConfig('9.9.5'), realConfig());
+
+      const r = run('export', `codex@${V}`);
+      expect(r.status).not.toBe(0);
+      expect(r.out).toContain('managed by agents-cli');
+      expect(read(isolatedConfig('9.9.5'), 'config.toml')).toContain('sandboxed');
+      expect(fs.lstatSync(realConfig()).isSymbolicLink()).toBe(true);
+    }, 120_000);
+
+    it('rejects --replace together with --staged', () => {
+      plantIsolated();
+      const r = run('export', `codex@${V}`, '--replace', '--staged');
+      expect(r.status).not.toBe(0);
+      expect(r.out).toContain('mutually exclusive');
+    }, 120_000);
+
+    it('resolves the version when exactly one isolated copy exists', () => {
+      plantIsolated();
+      expect(run('export', 'codex').status).toBe(0);
+      expect(read(realConfig(), 'config.toml')).toContain('sandboxed');
+    }, 120_000);
+  });
 });

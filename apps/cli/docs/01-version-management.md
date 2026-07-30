@@ -254,29 +254,43 @@ install's config dir out to the user's real `~/.<agent>` — promoting a sandbox
 setup to the normal one, or taking the settings and dropping agents-cli entirely.
 
 ```
-agents export codex@0.144.6 --dry-run   # show what would change
-agents export codex                     # version optional when only one is isolated
-```
-
-```
 versions/codex/0.144.6/home/.codex  ──copy──▶  ~/.codex
 ```
 
-Three properties make it safe to run:
+| Mode | Behavior |
+|------|----------|
+| **merge** (default) | Additive. Copies only paths the user doesn't have. A collision is **not** silently skipped — the incoming file is written beside theirs as `<name>.from-agents-cli`. Their file is never modified. |
+| `--replace` | The isolated config becomes `~/.<agent>`; theirs moves to `backups/<agent>/<ts>`. The only mode that requires confirmation. |
+| `--staged` | Writes the tree to `~/.<agent>/.agents-export-<ts>/` and activates nothing. |
 
-- **Symlinks into `~/.agents` are stripped** (`copyDirStrippingAgentsSymlinks`).
-  Synced resources live in a version home as links back into `~/.agents`; copying
-  them verbatim would leave the exported config full of links that dangle the
-  moment `~/.agents` is removed. What lands in `~/.<agent>` stands alone.
-- **An existing real `~/.<agent>` is moved to `backups/<agent>/<ts>`**, never
-  deleted. Export replaces rather than merges, so `--dry-run` first is worthwhile
-  when the destination already holds a config you care about.
+```
+agents export codex --dry-run     # show the plan
+agents export codex --diff        # ...and the delta on every colliding file
+agents export codex               # additive; nothing of yours changes
+```
+
+Properties that hold in every mode:
+
+- **Symlinks into `~/.agents` are stripped.** Synced resources live in a version
+  home as links back into `~/.agents`; copying them verbatim would leave the
+  exported config full of links that dangle the moment `~/.agents` is removed.
+  What lands in `~/.<agent>` stands alone. The user's own symlinks survive.
+- **A receipt is written to `~/.<agent>/.agents-cli-export.json`** recording the
+  source version, mode, files `written`, and `conflicts` (with the path of each
+  incoming sibling). This is what makes provenance answerable — which files are
+  the user's and which came from the CLI — and the export reversible.
 - **A `~/.<agent>` that agents-cli already adopted is refused.** That path is a
   symlink into some version's home, so writing there would silently mutate that
   install instead of the user's real config. `agents uninstall` un-adopts.
 
 Only isolated versions can be exported. A normal install's config dir already IS
 `~/.<agent>` by way of the adoption symlink, so there is nothing to copy.
+
+File **contents** are never auto-merged. `smol-toml` does not preserve comments
+across parse+stringify, so unioning keys into a user's `config.toml` would delete
+every comment in it. Export hands over both files and a diff instead. A
+format-preserving TOML editor would be the prerequisite for real key-level
+merging; that is a dependency decision, not a detail of this command.
 
 ## Resource Syncing
 
