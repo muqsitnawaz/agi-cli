@@ -22,6 +22,8 @@
  */
 
 import type { Command } from 'commander';
+import { withIsolationBoundary } from '../lib/isolation-boundary-report.js';
+import { assertIsolationBoundary } from '../lib/shims.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import * as fs from 'fs';
@@ -56,6 +58,13 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
     process.exit(1);
   }
   const agent = AGENTS[agentId];
+
+  // Import registers the adopted install as a NORMAL version and only then sets the
+  // default / creates the shim / repoints the config. By that point the agent has a
+  // non-isolated version, so it is no longer protected and the primitive gates —
+  // which read the state as it is at call time — would let the adoption through.
+  // The boundary has to be checked against the state BEFORE the import mutates it.
+  assertIsolationBoundary(agentId, 'adopt your existing install');
 
   // installScript-based agents (Grok, Antigravity, Cursor, Kiro, Goose, Roo)
   // don't have an npm package; their binary lives wherever the curl/brew
@@ -295,5 +304,6 @@ When to use:
   npm-style packages (claude, codex, gemini, opencode, openclaw) and
   installScript-based agents (grok, antigravity, cursor, kiro, goose).
 `)
-    .action(runImport);
+    .action((...args: Parameters<typeof runImport>) =>
+      withIsolationBoundary(() => runImport(...args)));
 }
