@@ -255,12 +255,16 @@ global-but-separate; a project pin selects a shared install for one directory).
 `~/.<agent>` config symlink.
 
 ```yaml
-# ~/.agents/agents.yaml
+# ~/.agents/devices/<machine>/agents.yaml   (device-local, never synced)
 agents:                 # global defaults — own the launcher, shim and config symlink
   claude: 2.1.220
 isolatedAgents:         # sandbox pointers — own nothing
   codex: 0.144.6
 ```
+
+Both maps are device-local for the same reason: each names a version installed on
+*this* machine, so syncing either would hand another machine a pointer to a copy it
+does not have.
 
 The two maps are kept separate deliberately. An entry under `agents:` arms the
 self-heal `shadowing` check and is what `getGlobalDefault` returns; an isolated

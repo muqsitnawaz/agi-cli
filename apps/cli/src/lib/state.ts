@@ -691,18 +691,24 @@ function writeIfChanged(filePath: string, content: string): void {
  * `agents:` / `versions:` are not written (no empty committed files).
  */
 function writeMetaUnlocked(meta: Meta): void {
-  const { agents, versions, defaultBrowserProfile, ...central } = meta;
+  const { agents, isolatedAgents, versions, defaultBrowserProfile, ...central } = meta;
 
   // Write the machine-local files FIRST, then strip central — so a crash mid-write
   // never removes pins/versions from central before they're persisted elsewhere.
   const devicePath = getDeviceMetaPath();
   const hasAgents = !!agents && Object.keys(agents).length > 0;
+  // The isolated pointer names a version installed on THIS machine, exactly like a
+  // global pin, so it belongs beside `agents:` in the device file rather than in the
+  // central doc that syncs — otherwise another machine inherits a pointer to a copy
+  // it does not have.
+  const hasIsolatedAgents = !!isolatedAgents && Object.keys(isolatedAgents).length > 0;
   const hasDefaultBrowser = !!defaultBrowserProfile;
-  if (hasAgents || hasDefaultBrowser) {
+  if (hasAgents || hasIsolatedAgents || hasDefaultBrowser) {
     // Device-local doc carries `agents:` pins and `defaultBrowserProfile:` — both
     // are per-machine and must never land in central agents.yaml (which syncs).
     const deviceDoc: Partial<Meta> = {};
     if (hasAgents) deviceDoc.agents = agents;
+    if (hasIsolatedAgents) deviceDoc.isolatedAgents = isolatedAgents;
     if (hasDefaultBrowser) deviceDoc.defaultBrowserProfile = defaultBrowserProfile;
     fs.mkdirSync(path.dirname(devicePath), { recursive: true });
     writeIfChanged(devicePath, META_HEADER + yaml.stringify(deviceDoc));
@@ -726,8 +732,9 @@ function writeMetaUnlocked(meta: Meta): void {
 
 /**
  * Overlay this machine's local state onto a central-portable Meta:
- *   - `agents:` from the device file (device wins; the union both preserves the
- *     one-level merge and self-heals a pre-migration central that still has pins)
+ *   - `agents:` and `isolatedAgents:` from the device file (device wins; the union
+ *     both preserves the one-level merge and self-heals a pre-migration central that
+ *     still has pins)
  *   - `defaultBrowserProfile:` from the device file (device is the sole source;
  *     the field is stripped from central on write, so nothing to merge against)
  *   - `versions:` from the history JSON (wholesale replace; falls back to
@@ -739,6 +746,7 @@ function overlayMachineLocal(meta: Meta): Meta {
     try {
       const dm = yaml.parse(fs.readFileSync(devicePath, 'utf-8')) as Meta;
       if (dm?.agents) meta.agents = { ...meta.agents, ...dm.agents };
+      if (dm?.isolatedAgents) meta.isolatedAgents = { ...meta.isolatedAgents, ...dm.isolatedAgents };
       if (dm?.defaultBrowserProfile) meta.defaultBrowserProfile = dm.defaultBrowserProfile;
     } catch { /* ignore malformed device file */ }
   }

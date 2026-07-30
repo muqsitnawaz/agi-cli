@@ -18,7 +18,12 @@ describe.skipIf(process.platform === 'win32')('isolated default', () => {
   const B = '9.9.5';
 
   const versionDir = (v: string) => path.join(home, '.agents', '.history', 'versions', 'codex', v);
-  const metaPath = () => path.join(home, '.agents', 'agents.yaml');
+  /** The pointer is device-local, like global pins: ~/.agents/devices/<id>/agents.yaml */
+  const devicePins = () => {
+    const dir = path.join(home, '.agents', 'devices');
+    const ids = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+    return ids.length ? path.join(dir, ids[0], 'agents.yaml') : '';
+  };
   const shimsDir = () => path.join(home, '.agents', '.cache', 'shims');
 
   function plant(v: string, { isolated = true } = {}) {
@@ -78,9 +83,13 @@ describe.skipIf(process.platform === 'win32')('isolated default', () => {
     plant(A);
     expect(run('use', `codex@${A}`).status).toBe(0);
 
-    const meta = fs.readFileSync(metaPath(), 'utf-8');
-    // Recorded under isolatedAgents, never under the global `agents:` map.
+    // Recorded device-locally under isolatedAgents — a pointer to a version
+    // installed on THIS machine, so it must not sync, exactly like a global pin.
+    const meta = fs.readFileSync(devicePins(), 'utf-8');
     expect(meta).toContain('isolatedAgents');
+    // ...and never in the central doc that syncs across machines.
+    expect(fs.readFileSync(path.join(home, '.agents', 'agents.yaml'), 'utf-8'))
+      .not.toContain('isolatedAgents');
     // The five adopting side effects of a normal `use` are all absent.
     const shims = fs.existsSync(shimsDir()) ? fs.readdirSync(shimsDir()) : [];
     expect(shims).not.toContain('codex');
