@@ -247,6 +247,37 @@ removal and is restored intact. Two consequences follow from the marker:
 `--isolated` cannot be combined with `--project` (an isolated copy is
 global-but-separate; a project pin selects a shared install for one directory).
 
+### Exporting an isolated config back out
+
+`agents export <agent>[@<version>]` is the exit door. It copies an isolated
+install's config dir out to the user's real `~/.<agent>` — promoting a sandboxed
+setup to the normal one, or taking the settings and dropping agents-cli entirely.
+
+```
+agents export codex@0.144.6 --dry-run   # show what would change
+agents export codex                     # version optional when only one is isolated
+```
+
+```
+versions/codex/0.144.6/home/.codex  ──copy──▶  ~/.codex
+```
+
+Three properties make it safe to run:
+
+- **Symlinks into `~/.agents` are stripped** (`copyDirStrippingAgentsSymlinks`).
+  Synced resources live in a version home as links back into `~/.agents`; copying
+  them verbatim would leave the exported config full of links that dangle the
+  moment `~/.agents` is removed. What lands in `~/.<agent>` stands alone.
+- **An existing real `~/.<agent>` is moved to `backups/<agent>/<ts>`**, never
+  deleted. Export replaces rather than merges, so `--dry-run` first is worthwhile
+  when the destination already holds a config you care about.
+- **A `~/.<agent>` that agents-cli already adopted is refused.** That path is a
+  symlink into some version's home, so writing there would silently mutate that
+  install instead of the user's real config. `agents uninstall` un-adopts.
+
+Only isolated versions can be exported. A normal install's config dir already IS
+`~/.<agent>` by way of the adoption symlink, so there is nothing to copy.
+
 ## Resource Syncing
 
 `syncResourcesToVersion()` copies user/system resources into version homes and

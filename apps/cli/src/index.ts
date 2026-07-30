@@ -98,6 +98,7 @@ import {
   loadWorktree,
   loadVersions,
   loadImport,
+  loadExport,
   loadPackages,
   loadRoutines,
   loadMonitors,
@@ -875,6 +876,7 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadWorktree);
   await reg(loadVersions);
   await reg(loadImport);
+  await reg(loadExport);
   await reg(loadPackages);
   await reg(loadRoutines);
   await reg(loadMonitors);
