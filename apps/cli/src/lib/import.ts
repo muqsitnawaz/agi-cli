@@ -22,7 +22,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { AgentId } from './types.js';
 import { AGENTS } from './agents.js';
-import { getVersionsDir } from './state.js';
+import { getUserAgentsDir, getVersionsDir } from './state.js';
 import { setGlobalDefault } from './versions.js';
 import { createShim, createVersionedAlias, ensureShimCurrent, switchHomeFileSymlinks } from './shims.js';
 
@@ -308,4 +308,74 @@ export function resolvePackageDirFromBinary(binaryPath: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Seed an ISOLATED version's home from the user's real `~/.<agent>` — the mirror of
+ * {@link importAgentConfig}, which adopts.
+ *
+ * The difference is the whole point: this COPIES and leaves the original in place,
+ * never symlinks it, never sets a default, never creates a shim. So an isolated copy
+ * can start from the setup the user already has instead of from nothing, which was
+ * the only way to get a working sandbox before.
+ *
+ * Credentials are skipped by default and reported, not silently included. An isolated
+ * copy is a separate principal — `agents add --isolated` already tells the user to
+ * sign in on first run — and copying tokens into it should be a choice, not a side
+ * effect of wanting your settings. `--with-auth` opts in.
+ */
+export function seedIsolatedConfigFromLocal(
+  agentId: AgentId,
+  version: string,
+  opts: { withAuth?: boolean } = {},
+): { seeded: boolean; from: string; to: string; skippedAuth: string[]; error?: string } {
+  const agent = AGENTS[agentId];
+  const configDir = agent.configDir;
+  const versionHome = path.join(getVersionsDir(), agentId, version, 'home');
+  // Mirror importAgentConfig's derivation so nested config dirs (e.g. Antigravity's
+  // ~/.gemini/antigravity-cli) land where the shim expects them.
+  const dest = path.join(versionHome, path.relative(os.homedir(), configDir));
+  const result = { seeded: false, from: configDir, to: dest, skippedAuth: [] as string[] };
+
+  if (!fs.existsSync(configDir)) return result;
+
+  // Known credential paths, relative to the config dir. `authFiles` covers the agents
+  // that declare them for cross-version carry; the rest are verified filenames for
+  // agents that do not declare any (codex `auth.json`, claude `.credentials.json`).
+  const authRel = new Set<string>([
+    ...(agent.authFiles ?? []),
+    'auth.json',
+    '.credentials.json',
+    'credentials.json',
+  ]);
+
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    const agentsDir = getUserAgentsDir();
+    const inside = agentsDir + path.sep;
+    fs.cpSync(configDir, dest, {
+      recursive: true,
+      filter: (src) => {
+        const rel = path.relative(configDir, src);
+        if (!opts.withAuth && rel && (authRel.has(rel) || rel.startsWith('credentials' + path.sep))) {
+          result.skippedAuth.push(rel);
+          return false;
+        }
+        // Same rule as the export path: a link into ~/.agents would dangle for a copy
+        // that is supposed to stand on its own.
+        try {
+          const st = fs.lstatSync(src);
+          if (st.isSymbolicLink()) {
+            const tgt = path.resolve(path.dirname(src), fs.readlinkSync(src));
+            if (tgt === agentsDir || tgt.startsWith(inside)) return false;
+          }
+        } catch { /* let cpSync surface unreadable entries */ }
+        return true;
+      },
+    });
+    result.seeded = true;
+  } catch (err) {
+    return { ...result, error: (err as Error).message };
+  }
+  return result;
 }

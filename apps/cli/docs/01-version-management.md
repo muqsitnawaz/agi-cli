@@ -295,6 +295,28 @@ any other exported function that both resolves the real config dir and mutates t
 filesystem without the gate — so a sixth way in fails there rather than silently
 reopening the hole.
 
+### Bringing an existing install into the sandbox
+
+`agents import <agent> --isolated` is the mirror of a plain import. Where the latter
+*adopts* — moving `~/.<agent>` into a version home, symlinking the original away,
+setting the global default and creating a shim — `--isolated` **copies**:
+
+```
+~/.codex  ──copy──▶  versions/codex/1.2.3/home/.codex     (original untouched)
+```
+
+and finalizes the way `agents add --isolated` does: versioned alias plus the
+`.isolated` marker, no default, no bare shim, no config symlink.
+
+This is the supported way in while an agent is protected — plain `import` is refused
+there precisely because adoption is its purpose.
+
+Credentials are **skipped by default and reported**, not silently included. An
+isolated copy is a separate principal that signs in on its own, so copying tokens
+into it should be a choice rather than a side effect of wanting your settings.
+`--with-auth` opts in. Symlinks into `~/.agents` are dropped, as with `agents export`,
+so the copied config does not depend on the CLI's own tree.
+
 ### The isolated default
 
 `agents use <agent>@<isolated-version>` records which isolated copy a bare
