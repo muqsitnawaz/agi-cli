@@ -19,7 +19,7 @@ import { isGitRepo, cloneIntoExisting, pullRepo } from '../lib/git.js';
 import { isPromptCancelled, isInteractiveTerminal } from './utils.js';
 import { AGENTS, agentConfigDirName, getUnmanagedAgentInstalls, countSessionFiles, agentLabel } from '../lib/agents.js';
 import { setGlobalDefault } from '../lib/versions.js';
-import { ensureShimCurrent, switchHomeFileSymlinks, isShimsInPath, addShimsToPath, getPathSetupInstructions } from '../lib/shims.js';
+import { ensureShimCurrent, switchHomeFileSymlinks, isShimsInPath, addShimsToPath, getPathSetupInstructions, assertIsolationBoundary } from '../lib/shims.js';
 import { setHelpSections } from '../lib/help.js';
 import { registerSetupBrowserCommand, runBrowserWizard } from './setup-browser.js';
 import { registerSetupComputerCommand, runComputerWizard } from './setup-computer.js';
@@ -34,6 +34,11 @@ const HOME = os.homedir();
  */
 async function importAgent(agentId: AgentId, version: string): Promise<{ success: boolean; skipped?: boolean; error?: string }> {
   const agent = AGENTS[agentId];
+  // setup has its own hand-rolled adoption (rename + symlink inline, rather than
+  // calling switchConfigSymlink), so the primitive gates never see it. Check the
+  // boundary here, before the first mkdirSync — which would otherwise create the
+  // scaffolding this very check reads.
+  assertIsolationBoundary(agentId, 'adopt your existing install');
   const configDir = agent.configDir;
   const versionsDir = getVersionsDir();
   const versionHome = path.join(versionsDir, agentId, version, 'home');

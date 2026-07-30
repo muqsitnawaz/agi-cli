@@ -36,7 +36,14 @@ import { AGENTS, agentConfigDirName, getAccountEmail, getMcpConfigPathForHome, p
 import { getDefaultPermissionSet, applyPermissionsToVersion as applyPermsToVersion, discoverPermissionGroups, getTotalPermissionRuleCount, buildPermissionsFromGroups, CODEX_RULES_FILENAME, getActivePermissionPresetName, readPermissionPresetRecipe, PERMISSION_PRESET_ENV_VAR } from './permissions.js';
 import { installMcpServers, parseMcpServerConfig, isProjectMcpTrusted } from './mcp.js';
 import { markdownToToml } from './convert.js';
-import { createVersionedAlias, removeVersionedAlias, switchConfigSymlink, getConfigSymlinkVersion, ensureClaudeInsideSymlink } from './shims.js';
+import {
+  createVersionedAlias,
+  removeVersionedAlias,
+  switchConfigSymlink,
+  getConfigSymlinkVersion,
+  ensureClaudeInsideSymlink,
+  assertIsolationBoundary,
+} from './shims.js';
 import { importInstallScriptBinary } from './import.js';
 import { IS_WINDOWS, composeWin32CommandLine } from './platform/index.js';
 import { listInstalledSubagents, transformSubagentForClaude, syncSubagentToOpenclaw } from './subagents.js';
@@ -1284,6 +1291,14 @@ export function getGlobalDefault(agent: AgentId): string | null {
  * Set the global default version for an agent.
  */
 export function setGlobalDefault(agent: AgentId, version: string | undefined): void {
+  // A global default is what owns the launcher and arms the self-heal `shadowing`
+  // check, so recording one for an isolated-only agent is the root of the original
+  // breach. Clearing is always allowed — `removeVersion` legitimately clears a
+  // default as the last non-isolated version goes away, which is the very moment
+  // an agent BECOMES isolated-only.
+  if (version !== undefined) {
+    assertIsolationBoundary(agent, 'set a global default');
+  }
   const meta = readMeta();
   if (!meta.agents) {
     meta.agents = {};

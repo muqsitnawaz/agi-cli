@@ -68,6 +68,7 @@ import {
   createShim,
   createVersionedAlias,
   supportsIsolatedInstall,
+  isIsolationProtected,
   CONFIG_ENV_ISOLATED_AGENTS,
   removeShim,
   shimExists,
@@ -441,6 +442,21 @@ export function registerVersionsCommands(program: Command): void {
         // from the user's real ~/.<agent>. Agents without one isolate only by
         // adopting ~/.<agent> (which --isolated skips), so an isolated copy
         // would silently read/write the real config. Refuse rather than lie.
+        // A normal install of a currently isolated-only agent would adopt it: set the
+        // global default, create the bare shim, and repoint the real ~/.<agent>. The
+        // primitives refuse that outright, so catch it here — before spending a
+        // network install on something that cannot finish — and say what to do.
+        if (!isIsolated && isIsolationProtected(agent)) {
+          console.log(chalk.red(`${agentLabel(agentConfig.id)} is installed only as isolated copies.`));
+          console.log(chalk.gray(`  A normal install would adopt ${agentConfig.configDir} and your ${agentConfig.cliCommand} launcher.`));
+          console.log(chalk.gray(`  Keep the sandbox:  agents add ${agent}@${version ?? 'latest'} --isolated`));
+          console.log(chalk.gray('  Or manage it normally by removing the isolated copies first:'));
+          for (const v of listInstalledVersions(agent)) {
+            console.log(chalk.gray(`    agents remove ${agent}@${v} --isolated`));
+          }
+          continue;
+        }
+
         if (isIsolated && !supportsIsolatedInstall(agent)) {
           console.log(chalk.red(`${agentLabel(agentConfig.id)} does not support --isolated installs.`));
           console.log(chalk.gray(`  It has no config-directory env var, so it can only isolate by adopting ${agentConfig.configDir} — which --isolated deliberately avoids.`));

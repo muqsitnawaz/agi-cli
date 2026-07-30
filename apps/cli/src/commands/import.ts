@@ -22,6 +22,9 @@
  */
 
 import type { Command } from 'commander';
+import { withIsolationBoundary } from '../lib/isolation-boundary-report.js';
+import { assertIsolationBoundary, createVersionedAlias } from '../lib/shims.js';
+import { markVersionIsolated } from '../lib/versions.js';
 import chalk from 'chalk';
 import ora from 'ora';
 import * as fs from 'fs';
@@ -37,12 +40,15 @@ import {
   importAgentBinary,
   importAgentConfig,
   importInstallScriptBinary,
+  seedIsolatedConfigFromLocal,
   isValidImportVersion,
   resolvePackageDirFromBinary,
 } from '../lib/import.js';
 import { isPromptCancelled, isInteractiveTerminal } from './utils.js';
 
 interface ImportOptions {
+  isolated?: boolean;
+  withAuth?: boolean;
   version?: string;
   fromPath?: string;
   yes?: boolean;
@@ -56,6 +62,17 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
     process.exit(1);
   }
   const agent = AGENTS[agentId];
+
+  // Import registers the adopted install as a NORMAL version and only then sets the
+  // default / creates the shim / repoints the config. By that point the agent has a
+  // non-isolated version, so it is no longer protected and the primitive gates —
+  // which read the state as it is at call time — would let the adoption through.
+  // The boundary has to be checked against the state BEFORE the import mutates it.
+  // --isolated adopts nothing, so the boundary does not apply to it — it is in fact
+  // the supported way to bring a local install in while protection is on.
+  if (!opts.isolated) {
+    assertIsolationBoundary(agentId, 'adopt your existing install');
+  }
 
   // installScript-based agents (Grok, Antigravity, Cursor, Kiro, Goose, Roo)
   // don't have an npm package; their binary lives wherever the curl/brew
@@ -212,7 +229,25 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
   // user-visible side effect (renaming ~/.<agent>/), so if it fails we don't
   // want a stranded symlink farm. Binary registration is cheap and reversible
   // — if it fails after config, the next `agents import` call retries cleanly.
-  const willImportConfig = configDirExists && !configAlreadyManaged;
+  const willImportConfig = configDirExists && !configAlreadyManaged && !opts.isolated;
+  if (opts.isolated && configDirExists) {
+    // COPY the user's settings in; never move, never symlink. The original stays
+    // exactly where it is — that is what separates this from adoption.
+    const seedSpinner = ora(`Copying ${agent.configDir} into the isolated copy...`).start();
+    const seed = seedIsolatedConfigFromLocal(agentId, version, { withAuth: opts.withAuth });
+    if (seed.error) {
+      seedSpinner.fail(`Config: ${seed.error}`);
+      process.exit(1);
+    } else if (seed.seeded) {
+      seedSpinner.succeed(`Settings copied (${seed.from} -> ${seed.to}); your original is untouched`);
+      if (seed.skippedAuth.length > 0) {
+        console.log(chalk.gray(`  Credentials NOT copied: ${seed.skippedAuth.join(', ')}`));
+        console.log(chalk.gray('  The copy signs in separately. Use --with-auth to copy them too.'));
+      }
+    } else {
+      seedSpinner.info('No existing config to copy.');
+    }
+  }
   if (willImportConfig) {
     const cfgSpinner = ora(`Importing config dir for ${agentLabel(agentId)} v${version}...`).start();
     const cfgResult = await importAgentConfig(agentId, version);
@@ -253,6 +288,20 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
   // Wire the imported version into the resolver: global default, main shim,
   // versioned alias, home-file symlinks. Idempotent — safe to call even if
   // importAgentConfig already set the global default.
+  if (opts.isolated) {
+    // The isolated finalizer: launchable alias + marker, and nothing else. No global
+    // default, no bare shim, no config symlink — the same shape as
+    // `agents add --isolated`.
+    createVersionedAlias(agentId, version);
+    markVersionIsolated(agentId, version);
+    console.log();
+    console.log(chalk.green(`${agentLabel(agentId)} v${version} imported as an isolated copy.`));
+    console.log(chalk.gray(`  Your ${agent.configDir} and ${agent.cliCommand} launcher are untouched.`));
+    console.log(chalk.gray(`  Run it:  agents run ${agentId}@${version}`));
+    console.log(chalk.gray(`  Or make it the default isolated copy:  agents use ${agentId}@${version}`));
+    return;
+  }
+
   const finalizeSpinner = ora(`Wiring ${agentLabel(agentId)} v${version} as the active version...`).start();
   try {
     finalizeImport(agentId, version);
@@ -274,6 +323,8 @@ export function registerImportCommand(program: Command): void {
     .description('Import an existing unmanaged agent install into agents-cli')
     .option('--version <version>', 'Pin a version label (otherwise read from package.json)')
     .option('--from-path <path>', 'Path to the npm package dir (otherwise auto-detected from PATH)')
+    .option('--isolated', 'Copy the install into a self-contained isolated version instead of adopting it')
+    .option('--with-auth', 'With --isolated, also copy credentials into the sandbox (skipped by default)')
     .option('-y, --yes', 'Skip the confirmation prompt')
     .addHelpText('after', `
 Examples:
@@ -295,5 +346,6 @@ When to use:
   npm-style packages (claude, codex, gemini, opencode, openclaw) and
   installScript-based agents (grok, antigravity, cursor, kiro, goose).
 `)
-    .action(runImport);
+    .action((...args: Parameters<typeof runImport>) =>
+      withIsolationBoundary(() => runImport(...args)));
 }

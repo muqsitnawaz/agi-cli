@@ -700,6 +700,9 @@ export function shimTargetsFor(platform: NodeJS.Platform): { bash: boolean; cmd:
  * Create a shim for an agent.
  */
 export function createShim(agent: AgentId): string {
+  // A bare shim puts agents-cli first on PATH for this agent — the opposite of what
+  // an isolated-only install promises.
+  assertIsolationBoundary(agent, 'create the bare shim');
   ensureAgentsDir();
   const shimsDir = getShimsDir();
   const agentConfig = AGENTS[agent];
@@ -1394,6 +1397,8 @@ export async function switchConfigSymlink(
   agent: AgentId,
   version: string
 ): Promise<{ success: boolean; backupPath?: string; error?: string }> {
+  // Moves the user's real ~/.<agent> aside and symlinks it into a version home.
+  assertIsolationBoundary(agent, 'repoint your real config directory');
   const configPath = getAgentConfigPath(agent);
   const versionConfigPath = getVersionConfigPath(agent, version);
 
@@ -1509,6 +1514,8 @@ export function switchHomeFileSymlinks(
   agent: AgentId,
   version: string
 ): { switched: string[]; errors: string[] } {
+  // Same, for home-level files such as ~/.claude.json.
+  assertIsolationBoundary(agent, 'repoint your home-level config files');
   const agentConfig = AGENTS[agent];
   const homeFiles = agentConfig.homeFiles;
   if (!homeFiles || homeFiles.length === 0) return { switched: [], errors: [] };
@@ -2189,6 +2196,9 @@ export function adoptShadowingLauncher(
   agent: AgentId,
   overrides?: { shadowedBy?: string; shimsDir?: string; historyDir?: string },
 ): AdoptResult {
+  // Repoints the user's OWN launcher symlink at our shim — the most invasive thing
+  // in the codebase, and the one with no isolated-scoped equivalent at all.
+  assertIsolationBoundary(agent, 'adopt your launcher');
   const shimsDir = overrides?.shimsDir ?? getShimsDir();
   const shimPath = path.join(shimsDir, AGENTS[agent].cliCommand);
   const shimReal = canonical(shimPath);
@@ -2592,6 +2602,62 @@ export function listAgentsWithInstalledVersions(): AgentId[] {
 
 function isInstalledVersionIsolated(agent: AgentId, version: string): boolean {
   return fs.existsSync(path.join(getVersionsDir(), agent, version, '.isolated'));
+}
+
+/**
+ * Thrown when an operation would carry an isolated-only agent across the isolation
+ * boundary. Callers that can explain the situation catch it and print guidance; the
+ * throw is what makes the boundary a property of the code rather than a convention
+ * every future call site has to remember.
+ */
+export class IsolationBoundaryError extends Error {
+  constructor(readonly agent: AgentId, readonly operation: string) {
+    super(
+      `${agent} is installed only as isolated copies; "${operation}" would adopt it into your local setup.`,
+    );
+    this.name = 'IsolationBoundaryError';
+  }
+}
+
+/**
+ * True when EVERY installed version of `agent` is isolated (and at least one is).
+ *
+ * This is the switch: installing with `--isolated` is itself the act of opting in,
+ * so there is no mode to set and none to forget. It is per-agent, so an isolated
+ * codex constrains nothing about claude. And the escape hatch is inherent — remove
+ * the isolated copies and the agent is ordinary again, which means the state that
+ * grants protection is the same state you delete to drop it.
+ *
+ * An agent with any NORMAL version is not protected: that install already owns the
+ * launcher and the real `~/.<agent>`, so there is no boundary left to defend.
+ */
+export function isIsolationProtected(agent: AgentId): boolean {
+  const agentVersionsDir = path.join(getVersionsDir(), agent);
+  let dirs: string[];
+  try {
+    dirs = fs.readdirSync(agentVersionsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return false;
+  }
+  // Count only directories that are actually an install. A bare version dir is
+  // scaffolding, not a non-isolated version — and treating it as one would disable
+  // protection at exactly the wrong moment: an adopting path that does
+  // `mkdirSync(<version>/home)` before adopting would flip this to false with its own
+  // first line and then walk straight through the gates. Ignoring scaffolding biases
+  // the predicate toward protecting, which is the safe direction to fail in.
+  const installed = dirs.filter((v) => {
+    const dir = path.join(agentVersionsDir, v);
+    return fs.existsSync(path.join(dir, 'node_modules')) || fs.existsSync(path.join(dir, 'package.json'));
+  });
+  if (installed.length === 0) return false;
+  return installed.every((v) => isInstalledVersionIsolated(agent, v));
+}
+
+/** Refuse `operation` when `agent` is isolated-only. */
+export function assertIsolationBoundary(agent: AgentId, operation: string): void {
+  if (isIsolationProtected(agent)) throw new IsolationBoundaryError(agent, operation);
 }
 
 export function listAgentsWithNonIsolatedInstalledVersions(): AgentId[] {

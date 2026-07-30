@@ -247,6 +247,76 @@ removal and is restored intact. Two consequences follow from the marker:
 `--isolated` cannot be combined with `--project` (an isolated copy is
 global-but-separate; a project pin selects a shared install for one directory).
 
+### The isolation boundary
+
+Once an agent is installed **only** as isolated copies, nothing the framework does
+can adopt it. Protection is derived from the `.isolated` markers already on disk —
+there is no mode to set, and none to forget:
+
+```ts
+isIsolationProtected(agent)   // >=1 installed version, and every one is isolated
+```
+
+Two properties fall out of deriving it that way:
+
+- **Per-agent.** An isolated codex constrains nothing about claude.
+- **The escape hatch is inherent.** Remove the isolated copies and the agent is
+  ordinary again — the state that grants protection is the state you delete to drop
+  it. No `--force` flag, nothing to leave switched off.
+
+Five primitives can carry an agent across the boundary. Each calls
+`assertIsolationBoundary` before doing any work, so the refusal is a property of the
+code rather than a check every future call site must remember:
+
+| Primitive | What it would do |
+|-----------|------------------|
+| `setGlobalDefault` | records the default that owns the launcher and arms `shadowing` |
+| `createShim` | puts a bare `<cli>` shim first on PATH |
+| `switchConfigSymlink` | moves the real `~/.<agent>` aside and symlinks it into a version home |
+| `switchHomeFileSymlinks` | the same for `~/.claude.json` and friends |
+| `adoptShadowingLauncher` | repoints the user's own launcher symlink at our shim |
+
+Clearing a global default is always allowed — `removeVersion` clears one as the last
+non-isolated version goes away, which is the moment an agent *becomes* isolated-only.
+
+`agents add` (without `--isolated`) and `agents import` additionally check the
+boundary at the command entry point. That is not redundant: **import registers the
+adopted install as a normal version first**, so by the time it reaches
+`setGlobalDefault` the agent already has a non-isolated version and the primitive
+gate — which reads state at call time — would let the adoption through. The boundary
+has to be evaluated against the state before the command mutates it.
+
+`doctor --adopt` is the one operation with no isolated-scoped equivalent: hijacking
+PATH is its entire purpose, and isolated copies are deliberately absent from PATH.
+It refuses and explains.
+
+`src/lib/isolation-boundary.test.ts` pins the primitive list and scans `shims.ts` for
+any other exported function that both resolves the real config dir and mutates the
+filesystem without the gate — so a sixth way in fails there rather than silently
+reopening the hole.
+
+### Bringing an existing install into the sandbox
+
+`agents import <agent> --isolated` is the mirror of a plain import. Where the latter
+*adopts* — moving `~/.<agent>` into a version home, symlinking the original away,
+setting the global default and creating a shim — `--isolated` **copies**:
+
+```
+~/.codex  ──copy──▶  versions/codex/1.2.3/home/.codex     (original untouched)
+```
+
+and finalizes the way `agents add --isolated` does: versioned alias plus the
+`.isolated` marker, no default, no bare shim, no config symlink.
+
+This is the supported way in while an agent is protected — plain `import` is refused
+there precisely because adoption is its purpose.
+
+Credentials are **skipped by default and reported**, not silently included. An
+isolated copy is a separate principal that signs in on its own, so copying tokens
+into it should be a choice rather than a side effect of wanting your settings.
+`--with-auth` opts in. Symlinks into `~/.agents` are dropped, as with `agents export`,
+so the copied config does not depend on the CLI's own tree.
+
 ### The isolated default
 
 `agents use <agent>@<isolated-version>` records which isolated copy a bare

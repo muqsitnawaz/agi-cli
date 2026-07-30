@@ -22,6 +22,8 @@
  * apply pending sync.
  */
 import type { Command } from 'commander';
+import { IsolationBoundaryError } from '../lib/shims.js';
+import { explainIsolationBoundary } from '../lib/isolation-boundary-report.js';
 import { addHostOption } from '../lib/hosts/option.js';
 import { buildRemoteAgentsInvocation } from '../lib/hosts/remote-cmd.js';
 import { loadDevices, isControlDevice } from '../lib/devices/registry.js';
@@ -783,7 +785,13 @@ export function registerDoctorCommand(program: Command): void {
         // adoptShadowingLauncher resolves the launcher itself (PATH shadow, then
         // the durable ~/.local/bin symlink), so it forces the take-over even when
         // this shell's PATH already has the shim first.
-        const result = adoptShadowingLauncher(agent);
+        let result;
+        try {
+          result = adoptShadowingLauncher(agent);
+        } catch (err) {
+          if (err instanceof IsolationBoundaryError) { explainIsolationBoundary(err); process.exit(1); }
+          throw err;
+        }
         if (result.adopted) {
           console.log(chalk.green(`Adopted ${AGENTS[agent].cliCommand} launcher (${result.launcher} -> shim). Original recorded for --release; version management now wins regardless of PATH order.`));
         } else if (result.reason === 'already-adopted') {
