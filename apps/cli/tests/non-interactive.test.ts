@@ -465,13 +465,14 @@ describe.skipIf(process.platform === 'win32')('non-interactive CLI usage', () =>
     expect(fs.lstatSync(codexSymlink).isSymbolicLink()).toBe(true);
   });
 
-  it('refuses to `use` an isolated install as the active version (never repoints the real config)', () => {
+  it('`use` on an isolated install sets the ISOLATED default and never repoints the real config', () => {
     const home = makeTempHome();
     tempHomes.push(home);
     writeFakeManagedVersion(home, 'codex', '0.1.0', 'codex');
     // Mark it isolated the way `agents add --isolated` does: a `.isolated` marker
-    // in the version dir. `agents use codex@0.1.0` must refuse it rather than
-    // repoint the real ~/.codex at (and carry settings into) an isolated home.
+    // in the version dir. `use` records which isolated copy a bare `agents run
+    // codex` should reach — it must NOT repoint the real ~/.codex at (or carry
+    // settings into) an isolated home, nor pin it as the global default.
     fs.writeFileSync(
       path.join(home, '.agents', '.history', 'versions', 'codex', '0.1.0', '.isolated'),
       '',
@@ -481,11 +482,16 @@ describe.skipIf(process.platform === 'win32')('non-interactive CLI usage', () =>
     const codexSymlink = path.join(home, '.codex');
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('isolated install');
-    // The isolation guarantee: the real ~/.codex is never created/repointed and
-    // no default pin is written for the isolated version.
+    expect(result.stdout).toContain('default ISOLATED copy');
+    // The isolation guarantee, unchanged: the real ~/.codex is never created or
+    // repointed...
     expect(fs.existsSync(codexSymlink)).toBe(false);
-    expect(fs.existsSync(devicePinsPath(home))).toBe(false);
+    // ...and the pointer is recorded under `isolatedAgents:`, never as a global
+    // `agents:` pin — the separation that keeps getGlobalDefault unable to return
+    // an isolated version.
+    const pins = fs.readFileSync(devicePinsPath(home), 'utf-8');
+    expect(pins).toContain('isolatedAgents');
+    expect(pins).not.toMatch(/^agents:\s*\n\s+codex:/m);
   });
 
   it('does not switch an existing default during non-interactive add', () => {

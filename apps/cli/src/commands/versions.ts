@@ -46,6 +46,7 @@ import {
   getGlobalDefault,
   setGlobalDefault,
   markVersionIsolated,
+  setIsolatedDefault,
   isVersionIsolated,
   getVersionHomePath,
   getVersionDir,
@@ -835,10 +836,26 @@ export function registerVersionsCommands(program: Command): void {
         // Refuse for both the explicit `use <agent>@<isolated>` path (the picker
         // above already filters isolated versions out of the interactive path).
         // Isolated copies are launched explicitly via `agents run <agent>@<v>`.
+        // ...so `use` is scoped to the sandbox rather than refused. Setting the
+        // ISOLATED default records which copy a bare `agents run <agent>` should
+        // reach, and touches none of the five adopting side effects above. The
+        // pointer lives in `meta.isolatedAgents`, never in `meta.agents`, so
+        // `getGlobalDefault` still cannot return an isolated version.
         if (isVersionIsolated(agentId, finalVersion)) {
-          console.log(chalk.red(`${agentLabel(agentConfig.id)}@${finalVersion} is an isolated install and can't be set as your active version.`));
-          console.log(chalk.gray(`Isolated copies stay walled off from your real ${agentConfig.configDir}. Run it directly: agents run ${agentId}@${finalVersion}`));
-          console.log(chalk.gray(`To install this version normally: agents add ${agentId}@${finalVersion}`));
+          if (options.project) {
+            console.log(chalk.yellow(`${agentLabel(agentConfig.id)}@${finalVersion} is an isolated install; --project pins are for shared versions.`));
+            console.log(chalk.gray(`Run it directly instead: agents run ${agentId}@${finalVersion}`));
+            return;
+          }
+          setIsolatedDefault(agentId, finalVersion);
+          console.log(chalk.green(`Set ${agentLabel(agentConfig.id)}@${finalVersion} as your default ISOLATED copy.`));
+          console.log(chalk.gray(`  agents run ${agentId}   now reaches it (no @version needed).`));
+          const globalDefault = getGlobalDefault(agentId);
+          if (globalDefault) {
+            console.log(chalk.gray(`  Your default ${agentConfig.cliCommand} is still ${globalDefault}; ${agentConfig.configDir} is untouched.`));
+          } else {
+            console.log(chalk.gray(`  ${agentConfig.configDir} and your ${agentConfig.cliCommand} launcher are untouched.`));
+          }
           return;
         }
 

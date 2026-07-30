@@ -1298,6 +1298,35 @@ export function setGlobalDefault(agent: AgentId, version: string | undefined): v
 }
 
 /**
+ * Get the preferred ISOLATED version for an agent — the copy a bare
+ * `agents run <agent>` falls back to when there is no global default.
+ */
+export function getIsolatedDefault(agent: AgentId): string | null {
+  const meta = readMeta();
+  return meta.isolatedAgents?.[agent] || null;
+}
+
+/**
+ * Set (or clear, with `undefined`) the preferred isolated version.
+ *
+ * Deliberately does NOT touch the launcher, the bare shim, the `~/.<agent>` config
+ * symlink or the global default — the five things `setDefaultVersion` does. This is
+ * a pointer inside the sandbox, so it stays inside the sandbox.
+ */
+export function setIsolatedDefault(agent: AgentId, version: string | undefined): void {
+  const meta = readMeta();
+  if (!meta.isolatedAgents) {
+    meta.isolatedAgents = {};
+  }
+  if (version === undefined) {
+    delete meta.isolatedAgents[agent];
+  } else {
+    meta.isolatedAgents[agent] = version;
+  }
+  writeMeta(meta);
+}
+
+/**
  * Path to the sentinel file that marks a version as an isolated install.
  *
  * It lives at the version-dir root (a sibling of `home/`), so it is carried
@@ -1924,6 +1953,14 @@ export function removeVersion(agent: AgentId, version: string): boolean {
     }
   }
 
+  // Same for the isolated pointer: a removed version must not stay the answer to a
+  // bare `agents run <agent>`. Prefer the newest remaining isolated copy so removing
+  // one of several does not silently drop the user back to their PATH binary.
+  if (getIsolatedDefault(agent) === version) {
+    const survivors = listInstalledVersions(agent).filter((v) => isVersionIsolated(agent, v));
+    setIsolatedDefault(agent, survivors.length > 0 ? survivors[survivors.length - 1] : undefined);
+  }
+
   // Clean up dangling config symlink if it pointed to the removed version
   const symlinkVersion = getConfigSymlinkVersion(agent);
   if (symlinkVersion === version) {
@@ -2000,7 +2037,23 @@ export function resolveVersion(agent: AgentId, projectPath?: string): string | n
   }
 
   // Fall back to global default
-  return getGlobalDefault(agent);
+  const globalDefault = getGlobalDefault(agent);
+  if (globalDefault) return globalDefault;
+
+  // Last resort: the preferred isolated copy. Strictly a fallback — a global
+  // default always wins, so nothing changes for anyone who has one. Without this,
+  // an isolated-only user cannot reach their installs by bare name at all: the
+  // resolution chain ended here, so `agents run codex` fell through to whatever
+  // `codex` meant on PATH, and only `agents run codex@<version>` worked.
+  //
+  // The pointer is verified on read. It survives in agents.yaml across a trash +
+  // restore cycle, but a version removed for good would otherwise leave a dangling
+  // pin that resolves to a directory that is not there.
+  const isolated = getIsolatedDefault(agent);
+  if (isolated && isVersionInstalled(agent, isolated) && isVersionIsolated(agent, isolated)) {
+    return isolated;
+  }
+  return null;
 }
 
 /**

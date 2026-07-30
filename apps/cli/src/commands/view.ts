@@ -63,6 +63,7 @@ import {
   isGlobalBinaryAgent,
   getLiveVersion,
   isVersionIsolated,
+  getIsolatedDefault,
 } from '../lib/versions.js';
 import {
   getShimsDir,
@@ -509,7 +510,13 @@ async function showInstalledVersions(
   const versionRowLabel = (agentId: AgentId, version: string, globalDefault: string | null): string => {
     const shown = displayVersion(agentId, version);
     if (version === globalDefault) return `${shown} (default)`;
-    if (isVersionIsolated(agentId, version)) return `${shown} (isolated)`;
+    if (isVersionIsolated(agentId, version)) {
+      // The isolated default is what a bare `agents run <agent>` reaches, so it is
+      // worth distinguishing from the other isolated copies sitting beside it.
+      return getIsolatedDefault(agentId) === version
+        ? `${shown} (isolated default)`
+        : `${shown} (isolated)`;
+    }
     return shown;
   };
 
@@ -566,7 +573,14 @@ async function showInstalledVersions(
 	      const runStrategy = getConfiguredRunStrategy(agentId);
 
 	      const strategyLabel = chalk.gray(` (${runStrategy})`);
-	      const noDefaultLabel = !globalDefault ? chalk.yellow(' (no default)') : '';
+	      // `(no default)` is a nudge to go set one. It would read as a contradiction
+	      // directly above a row tagged `(isolated default)`, and it would be bad
+	      // advice besides: for an isolated-only agent the pointer below IS how a
+	      // bare `agents run <agent>` resolves, and setting a global default is
+	      // precisely what `--isolated` exists to avoid.
+	      const noDefaultLabel = !globalDefault && !getIsolatedDefault(agentId)
+	        ? chalk.yellow(' (no default)')
+	        : '';
 	      console.log(`  ${chalk.bold(agentLabel(agentId))}${strategyLabel}${noDefaultLabel}`);
 
 	      // Sort versions with default first, then by semver descending
@@ -579,13 +593,14 @@ async function showInstalledVersions(
       for (const version of sortedVersions) {
         const isDefault = version === globalDefault;
         const isolated = !isDefault && isVersionIsolated(agentId, version);
+        const isolatedTag = getIsolatedDefault(agentId) === version ? ' (isolated default)' : ' (isolated)';
         const shown = displayVersion(agentId, version);
         const base = versionRowLabel(agentId, version, globalDefault);
         const tagPad = ' '.repeat(maxVerLabel - base.length);
         const label = isDefault
           ? `${shown}${chalk.green(' (default)')}${tagPad}`
           : isolated
-            ? `${shown}${chalk.gray(' (isolated)')}${tagPad}`
+            ? `${shown}${chalk.gray(isolatedTag)}${tagPad}`
             : base.padEnd(maxVerLabel);
         const rawInfo = infoMap.get(`${agentId}:${version}`);
         const vInfo = rawInfo ? mergeCanonical(rawInfo) : undefined;

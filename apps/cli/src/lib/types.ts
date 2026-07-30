@@ -756,6 +756,17 @@ export interface BrandConfig {
 /** Top-level structure of ~/.agents/.system/agents.yaml -- the CLI's persistent state. */
 export interface Meta {
   agents?: Partial<Record<AgentId, string>>;
+  /**
+   * Per-agent preferred ISOLATED version — which copy a bare `agents run <agent>`
+   * resolves to when the agent has no global default.
+   *
+   * Kept separate from `agents` on purpose. An entry there is the global default,
+   * which owns the launcher, the bare shim and the real `~/.<agent>` config
+   * symlink, and arms the self-heal `shadowing` check. An isolated copy must never
+   * acquire any of that, so it cannot be recorded in the same place — the
+   * separation is what keeps `getGlobalDefault` incapable of returning one.
+   */
+  isolatedAgents?: Partial<Record<AgentId, string>>;
   run?: RunConfig;
   /**
    * `agents run --lease` config. `secretsBundle` names the keychain secrets bundle
