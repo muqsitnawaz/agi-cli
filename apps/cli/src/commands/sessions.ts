@@ -1960,8 +1960,8 @@ export async function handlePickedSession(picked: PickedSession): Promise<void> 
  * Resume a session in the current terminal — a foreground takeover of this
  * process. Used by the single-select picker and by `sessions resume` when the
  * chosen destination is "in place" (unknown emulator / off-macOS, single pick).
- * Falls back to the current version via `/continue` when the version-pinned
- * binary is missing (ENOENT).
+ * Falls back to the same resume invocation against the current version when the
+ * version-pinned launcher is genuinely missing.
  */
 export async function resumeSessionInPlace(session: SessionMeta): Promise<void> {
   const cwd = session.cwd && fs.existsSync(session.cwd)
@@ -1983,7 +1983,7 @@ export async function resumeSessionInPlace(session: SessionMeta): Promise<void> 
   // agent shim is a `.cmd`/`.ps1` and, under the shell needed to run it (see
   // spawnResumeCommand), a missing command exits non-zero rather than emitting
   // an ENOENT `error` event — so detect a removed version here instead of
-  // relying on that event, keeping the /continue fallback working on every OS.
+  // relying on that event, keeping the fallback working on every OS.
   // `resume[0]` is an absolute alias path when one exists on disk, so only a bare
   // name still needs a PATH lookup. Checking existsSync first is what keeps an
   // isolated install (shims deliberately off PATH) out of the fallback.
