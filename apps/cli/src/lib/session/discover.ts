@@ -16,6 +16,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import Database from '../sqlite.js';
 import { getAgentsDir, getUserAgentsDir, getHistoryDir, getRunsDir } from '../state.js';
+import { shortCodexHome } from '../codex-home.js';
 
 const execFileAsync = promisify(execFile);
 import type { SessionAgentId, SessionMeta } from './types.js';
@@ -69,6 +70,14 @@ let cachedOpenClawWorkspaces: Map<string, string> | null = null;
 /** Options controlling which sessions to discover and how to report progress. */
 export interface DiscoverOptions {
   agent?: SessionAgentId;
+  /**
+   * Include sessions from the user's own (unmanaged) `~/.<agent>` alongside managed
+   * version homes. Defaults to true only when the agent has no managed versions, so
+   * a user who has never run `agents add` sees exactly what they see today.
+   */
+  includeUnmanaged?: boolean;
+  /** Called with how many rows the managed-only default hid, so callers can say so. */
+  onHiddenUnmanaged?: (count: number) => void;
   version?: string;
   project?: string;
   all?: boolean;
@@ -206,7 +215,54 @@ export async function discoverSessions(options?: DiscoverOptions): Promise<Sessi
 
   const sessions = querySessions(buildQueryOptions(options, agents, { includeLimit: true }));
   for (const s of sessions) s.machine = machineForSessionFile(s.filePath, s.agent);
-  return sessions;
+  return scopeToManaged(sessions, agents, options);
+}
+
+/**
+ * Drop unmanaged rows for agents that HAVE managed versions.
+ *
+ * Scoping happens here, at query time, rather than by narrowing the scan: the index
+ * stays complete, so `--unmanaged` needs no re-scan and every other consumer of the
+ * DB (watchdog, the Factory watcher, `--roots`) is unaffected.
+ *
+ * An agent with no managed versions is left alone entirely — someone who has never
+ * run `agents add` sees exactly what they saw before.
+ */
+function scopeToManaged(
+  sessions: SessionMeta[],
+  agents: readonly SessionAgentId[],
+  options?: DiscoverOptions,
+): SessionMeta[] {
+  if (options?.includeUnmanaged) return sessions;
+  if (!anyManagedVersions()) return sessions;
+
+  const kept = sessions.filter((s) => isManagedSessionFile(s.filePath));
+  const hidden = sessions.length - kept.length;
+  if (hidden > 0) options?.onHiddenUnmanaged?.(hidden);
+  return kept;
+}
+
+/**
+ * True once agents-cli manages ANY agent version. Until then it manages nothing, so
+ * scoping to "managed only" would leave the listing empty for a user who has never
+ * run `agents add` — the browser is most of the tool's value before you install
+ * anything through it.
+ */
+function anyManagedVersions(): boolean {
+  for (const root of VERSIONS_ROOTS) {
+    const base = path.join(root, 'versions');
+    let agentDirs: fs.Dirent[];
+    try {
+      agentDirs = fs.readdirSync(base, { withFileTypes: true });
+    } catch { continue; }
+    for (const a of agentDirs) {
+      if (!a.isDirectory()) continue;
+      try {
+        if (fs.readdirSync(path.join(base, a.name), { withFileTypes: true }).some((e) => e.isDirectory())) return true;
+      } catch { /* unreadable */ }
+    }
+  }
+  return false;
 }
 
 /**
@@ -257,6 +313,47 @@ let _localMachineId: string | undefined;
  * when the path sits under the agent's backups root, the first segment below it
  * is the origin machine id; otherwise it's the local machine.
  */
+/**
+ * True when this transcript belongs to a version agents-cli manages — i.e. it lives
+ * under a version home (or a backup mirror of one) rather than in the user's own
+ * `~/.<agent>`.
+ *
+ * `agents sessions` scans both, which is right for indexing: the DB stays a complete
+ * picture and `--unmanaged` can surface everything without a re-scan. But listing
+ * *by default* is a different question. Once you have managed versions, an unmanaged
+ * install's history is not really agents-cli's to show — most visibly after
+ * `agents add --isolated`, where the whole point was to keep the two apart.
+ */
+export function isManagedSessionFile(filePath: string): boolean {
+  // Synthetic rows (OpenClaw workspace sessions, cloud/remote entries) have no local
+  // transcript to classify. They are produced BY agents-cli rather than read out of
+  // someone's dotfile dir, so scoping must not silently swallow them.
+  if (!filePath || !path.isAbsolute(filePath)) return true;
+
+  const roots = [
+    ...VERSIONS_ROOTS.map((root) => path.join(root, 'versions')),
+    path.join(getHistoryDir(), 'backups'),
+    // Codex's managed home is not always under versions/. On macOS the versioned path
+    // overflows SUN_LEN for codex's control socket, so the shim relocates it to
+    // `<agentsUserDir>/.codex-homes/<version>/` (lib/codex-home.ts).
+    path.join(getUserAgentsDir(), '.codex-homes'),
+    // Routine archives are agents-cli's OWN run output — managed by definition.
+    getRunsDir(),
+  ];
+
+  // Compare realpaths as well as the literal roots. A transcript's stored path is
+  // resolved, so on macOS (`/var` -> `/private/var`) a temp-dir HOME yields
+  // `/private/var/...` for the file and `/var/...` for the root, and a plain prefix
+  // test silently classifies every managed session as the user's own.
+  const real = safeRealpathSync(filePath) || filePath;
+  return roots.some((root) => {
+    if (filePath.startsWith(root + path.sep)) return true;
+    const realRoot = safeRealpathSync(root);
+    return !!realRoot && real.startsWith(realRoot + path.sep);
+  });
+}
+
+
 export function machineForSessionFile(filePath: string, agent: string): string {
   const base = path.join(getHistoryDir(), 'backups', agent) + path.sep;
   if (filePath.startsWith(base)) {
@@ -454,6 +551,17 @@ export function getAgentSessionDirs(agent: string, subdir: string): string[] {
     try {
       for (const version of fs.readdirSync(versionsBase)) {
         addDir(path.join(versionsBase, version, 'home', configDirName, subdir));
+        // Codex's managed home is not always where the version layout says. On macOS
+        // the versioned path overflows SUN_LEN (104 bytes) for codex's control
+        // socket, so the shim relocates the home to
+        // `<agentsUserDir>/.codex-homes/<version>/.codex` (lib/codex-home.ts). Every
+        // transcript an isolated codex writes lands there, and nothing scanned it —
+        // `agents sessions --roots` listed only the user's own ~/.codex, so a managed
+        // copy's own history was invisible. addDir skips what does not exist, so this
+        // is inert on Linux and for versions that never needed relocating.
+        if (agent === 'codex') {
+          addDir(path.join(shortCodexHome(getUserAgentsDir(), version), subdir));
+        }
       }
     } catch { /* dir unreadable */ }
   }

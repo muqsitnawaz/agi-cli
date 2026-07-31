@@ -66,6 +66,8 @@ interface SessionFilterOptions {
 }
 
 interface SessionsOptions extends SessionFilterOptions {
+  /** Also list sessions from the user's own unmanaged ~/.<agent> installs. */
+  unmanaged?: boolean;
   query?: string;
   limit?: string;
   sort?: string;
@@ -1187,11 +1189,14 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
       origin: options.routine ? 'routine' : undefined,
     };
 
+    let hiddenUnmanaged = 0;
     let sessions = await discoverSessions({
       ...scope,
       limit,
       excludeTeamOrigin: !options.teams,
       onProgress: tracker.onProgress,
+      includeUnmanaged: options.unmanaged,
+      onHiddenUnmanaged: (n) => { hiddenUnmanaged = n; },
     });
 
     tracker.stop();
@@ -1268,6 +1273,9 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
       if (hiddenCount > 0) {
         console.log(chalk.gray(formatTeamHiddenFooter(hiddenCount)));
       }
+      if (hiddenUnmanaged > 0) {
+        console.log(chalk.gray(formatUnmanagedHiddenFooter(hiddenUnmanaged)));
+      }
       return;
     }
 
@@ -1278,7 +1286,7 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
       const liveIndex = await maybeLiveIndex(options);
       // Per-project row cap is fixed (--limit carries a default of 50 and drives
       // the fetch pool, not the display); `--all` expands every group instead.
-      printSessionOverview(sessions, hiddenCount, liveIndex, { perProjectCap: OVERVIEW_ROWS_PER_PROJECT, expand: !!options.all });
+      printSessionOverview(sessions, hiddenCount, liveIndex, { perProjectCap: OVERVIEW_ROWS_PER_PROJECT, expand: !!options.all, hiddenUnmanaged });
       return;
     }
 
@@ -1300,6 +1308,9 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
     const filtered = searchQuery ? filterSessionsByQuery(sessions, searchQuery) : sessions;
     const liveIndex = await maybeLiveIndex(options);
     printSessionTable(filtered, hiddenCount, options.tree === true, liveIndex);
+    // Every listing path must say what it dropped — a hidden default that stays
+    // silent in one render mode is the failure this footer exists to prevent.
+    if (hiddenUnmanaged > 0) console.log(chalk.gray(formatUnmanagedHiddenFooter(hiddenUnmanaged)));
   } catch (err: any) {
     tracker.stop();
     spinner?.stop();
@@ -1483,7 +1494,7 @@ function printSessionOverview(
   pool: SessionMeta[],
   hiddenCount: number,
   liveIndex: Map<string, ActiveSession> | undefined,
-  opts: { perProjectCap: number; expand: boolean },
+  opts: { perProjectCap: number; expand: boolean; hiddenUnmanaged?: number },
 ): void {
   const { groups } = buildOverviewGroups(pool, opts.expand ? Infinity : opts.perProjectCap);
   const shownGroups = opts.expand ? groups : groups.slice(0, OVERVIEW_MAX_PROJECTS);
@@ -1512,6 +1523,7 @@ function printSessionOverview(
   parts.push(chalk.gray('agents sessions --all spans every project on disk · <project> to drill in · --flat for the plain list'));
   console.log(parts.join(chalk.gray('  ·  ')));
   if (hiddenCount > 0) console.log(chalk.gray(formatTeamHiddenFooter(hiddenCount)));
+  if (opts.hiddenUnmanaged) console.log(chalk.gray(formatUnmanagedHiddenFooter(opts.hiddenUnmanaged)));
 }
 
 function printSessionTable(sessions: SessionMeta[], hiddenCount = 0, tree = false, liveIndex?: Map<string, ActiveSession>): void {
@@ -2476,6 +2488,7 @@ export function registerSessionsCommands(program: Command): void {
     .option('--grok', 'Shorthand for --agent grok')
     .option('--opencode', 'Shorthand for --agent opencode')
     .option('--all', 'Include sessions from every directory (not just current project)')
+    .option('--unmanaged', "Also show sessions from your own ~/.<agent> installs (hidden once agents-cli manages that agent)")
     .option('--teams', 'Include team-spawned sessions (hidden by default)')
     .option('--routine', 'Show only sessions archived from routine runs')
     .option('-p, --project <name>', 'Filter by project name (searches across all directories)')
@@ -2583,6 +2596,11 @@ function formatNoSessionsMessage(
   if (showAll) return 'No sessions found.';
   const command = 'agents sessions --all';
   return `No sessions found for ${process.cwd()}. Run "${command}" to see sessions from every directory.`;
+}
+
+function formatUnmanagedHiddenFooter(hiddenCount: number): string {
+  const noun = hiddenCount === 1 ? 'session' : 'sessions';
+  return `(${hiddenCount} ${noun} from your own unmanaged installs hidden — use --unmanaged to show)`;
 }
 
 function formatTeamHiddenFooter(hiddenCount: number): string {
