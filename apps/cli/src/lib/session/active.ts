@@ -529,14 +529,16 @@ export async function listTeamsActive(): Promise<ActiveSession[]> {
 }
 
 /** Live editor-terminal agents across every IDE window. */
-export async function listTerminalsActive(): Promise<ActiveSession[]> {
+export async function listTerminalsActive(procTable?: ProcRow[]): Promise<ActiveSession[]> {
   const entries = readLiveTerminals();
   if (entries.length === 0) return [];
 
   // Walk the shell PIDs through the process table once so we can name the host
-  // (code / cursor / codium) per entry rather than a generic 'terminal'.
+  // (code / cursor / codium) per entry rather than a generic 'terminal'. The
+  // caller (getActiveSessions) reads the table once and shares it so a single
+  // `--active` invocation spawns one `ps` instead of one per list function.
   const procByPid = new Map<number, ProcRow>();
-  for (const r of await readProcessTable()) procByPid.set(r.pid, r);
+  for (const r of procTable ?? (await readProcessTable())) procByPid.set(r.pid, r);
 
   // Build label map from Claude's sessions/*.json for /rename support
   const labelMap = buildClaudeLabelMap();
@@ -897,8 +899,8 @@ export function foldSubordinateAgents(
  * helper, terminal-app, or multiplexer) means `terminal`; nothing of the
  * sort means `headless` (daemon, launchd-spawned, orphan).
  */
-export async function listUnattributedActive(attributed: Set<number>): Promise<ActiveSession[]> {
-  const table = await readProcessTable();
+export async function listUnattributedActive(attributed: Set<number>, procTable?: ProcRow[]): Promise<ActiveSession[]> {
+  const table = procTable ?? (await readProcessTable());
   const procByPid = new Map<number, ProcRow>();
   const ppidMap = new Map<number, number>();
   for (const r of table) {
@@ -1073,10 +1075,15 @@ export async function listTmuxAgentSessions(): Promise<ActiveSession[]> {
  * terminal/headless row for the same session id.
  */
 export async function getActiveSessions(opts: ActiveQueryOptions = {}): Promise<ActiveSession[]> {
+  // One process-table snapshot for the whole invocation: both listTerminalsActive
+  // and listUnattributedActive need it, and it's identical within a single call —
+  // reading it once turns two `ps -A` spawns into one.
+  const procTable = await readProcessTable();
+
   const [tmuxAgents, teams, terminals, cloud] = await Promise.all([
     listTmuxAgentSessions().catch(() => [] as ActiveSession[]),
     listTeamsActive().catch(() => [] as ActiveSession[]),
-    listTerminalsActive().catch(() => [] as ActiveSession[]),
+    listTerminalsActive(procTable).catch(() => [] as ActiveSession[]),
     Promise.resolve(listCloudActive()),
   ]);
 
@@ -1085,7 +1092,7 @@ export async function getActiveSessions(opts: ActiveQueryOptions = {}): Promise<
   for (const s of teams) if (s.pid) knownPids.add(s.pid);
   for (const s of terminals) if (s.pid) knownPids.add(s.pid);
 
-  const unattributed = opts.skipHeadless ? [] : await listUnattributedActive(knownPids);
+  const unattributed = opts.skipHeadless ? [] : await listUnattributedActive(knownPids, procTable);
 
   const merged = dedupeBySession([...tmuxAgents, ...teams, ...terminals, ...cloud, ...unattributed]);
   await enrichProvenance(merged);
