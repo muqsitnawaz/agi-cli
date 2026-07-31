@@ -47,9 +47,10 @@ import {
 import { isPromptCancelled, isInteractiveTerminal } from './utils.js';
 
 interface ImportOptions {
+  /** Version label to import as. Named `--as`, not `--version`: see registerImportCommand. */
+  as?: string;
   isolated?: boolean;
   withAuth?: boolean;
-  version?: string;
   fromPath?: string;
   yes?: boolean;
 }
@@ -157,7 +158,7 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
     }
   }
 
-  let version = opts.version;
+  let version = opts.as;
   if (!version) {
     if (!useDirectBinaryImport && globalPath) {
       try {
@@ -180,7 +181,7 @@ async function runImport(agentArg: string, opts: ImportOptions): Promise<void> {
 
   if (!version) {
     console.error(chalk.red(`Could not determine version for ${agentLabel(agentId)}.`));
-    console.error(chalk.gray('Pass --version <version> explicitly.'));
+    console.error(chalk.gray('Pass --as <version> explicitly.'));
     process.exit(1);
   }
   if (!isValidImportVersion(version)) {
@@ -321,7 +322,13 @@ export function registerImportCommand(program: Command): void {
     .command('import')
     .argument('<agent>', 'Agent id (e.g. openclaw, claude, codex)')
     .description('Import an existing unmanaged agent install into agents-cli')
-    .option('--version <version>', 'Pin a version label (otherwise read from package.json)')
+    // NOT `--version`. The program declares `.version(VERSION)` (src/index.ts), which
+    // claims `-V, --version` globally and wins over a subcommand option of the same
+    // name — so `agents import codex --version 1.2.3` printed the CLI's own version
+    // and exited without importing anything. The flag had been unreachable since it
+    // was introduced, and the "could not determine version" error even advised using
+    // it. Renamed so it actually reaches the command.
+    .option('--as <version>', 'Version label to import as (otherwise read from package.json)')
     .option('--from-path <path>', 'Path to the npm package dir (otherwise auto-detected from PATH)')
     .option('--isolated', 'Copy the install into a self-contained isolated version instead of adopting it')
     .option('--with-auth', 'With --isolated, also copy credentials into the sandbox (skipped by default)')
@@ -329,7 +336,7 @@ export function registerImportCommand(program: Command): void {
     .addHelpText('after', `
 Examples:
   $ agents import openclaw                          Auto-detect via PATH
-  $ agents import openclaw --version 2026.3.8       Pin a version label
+  $ agents import openclaw --as 2026.3.8            Pin a version label
   $ agents import openclaw --from-path /opt/homebrew/lib/node_modules/openclaw
 
   # installScript-based agents (curl/brew installers, no npm package):
@@ -337,6 +344,11 @@ Examples:
   $ agents import antigravity                       Adopt ~/.local/bin/agy
   $ agents import cursor                            Adopt ~/.local/bin/cursor-agent
   $ agents import antigravity --from-path ~/.local/bin/agy
+
+  # Copy your setup into a sandbox instead of adopting it:
+  $ agents import codex --isolated                  New isolated copy at the local version
+  $ agents import codex --isolated --as 0.146.0     Re-seed an EXISTING isolated copy
+  $ agents import codex --isolated --with-auth      ...and share credentials with it
 
 When to use:
   When an agent CLI is already installed globally and you want to bring it

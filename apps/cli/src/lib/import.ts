@@ -361,6 +361,10 @@ export function seedIsolatedConfigFromLocal(
     const inside = agentsDir + path.sep;
     fs.cpSync(configDir, dest, {
       recursive: true,
+      // `force: true` is Node's default, but Bun drops it when a `filter` is supplied —
+      // existing files are then silently left alone. `dist/bin/agents` is bun-compiled,
+      // so this is a production path, not just a test artifact. State it explicitly.
+      force: true,
       filter: (src) => {
         const rel = path.relative(configDir, src);
         if (!opts.withAuth && rel && (authRel.has(rel) || rel.startsWith('credentials' + path.sep))) {
