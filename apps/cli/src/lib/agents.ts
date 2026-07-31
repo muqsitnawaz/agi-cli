@@ -512,8 +512,12 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     npmPackage: '',
     installScript: 'curl -fsSL https://x.ai/cli/install.sh | bash',
     configDir: path.join(HOME, '.grok'),
-    commandsDir: '', // Grok primarily uses skills + slash commands from skills
-    commandsSubdir: '',
+    // Grok discovers file-based slash commands from ~/.agents/commands/ (the
+    // cross-agent compat dir it mirrors from Claude Code) as well as the legacy
+    // ~/.claude/commands/ symlink. We write there directly so the per-agent
+    // install path and the central user repo stay in sync.
+    commandsDir: path.join(HOME, '.agents', 'commands'),
+    commandsSubdir: path.join('..', '.agents', 'commands'),
     skillsDir: path.join(HOME, '.grok', 'skills'),
     hooksDir: path.join(HOME, '.grok', 'hooks'),
     instructionsFile: 'AGENTS.md',
@@ -527,7 +531,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
       mcpHeaders: false,
       allowlist: true, // maps to Grok's granular Bash/Edit/Write/Read/Grep/WebFetch/MCPTool rules
       skills: true,
-      commands: false, // covered by skills
+      commands: true, // Grok >= 0.2.111: file-based slash commands from ~/.agents/commands/ (docs) + ~/.claude/commands/ (Claude Code compat)
       plugins: true,
       subagents: true, // ~/.grok/agents/*.md (Claude-compatible agent defs)
       rules: { file: 'AGENTS.md' },

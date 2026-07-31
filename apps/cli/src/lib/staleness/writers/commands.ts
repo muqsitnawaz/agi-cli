@@ -4,10 +4,10 @@
  * Two physical formats, picked per-(agent, version) at write time:
  *
  *  - command-as-skill — fires when `shouldInstallCommandAsSkill(agent, version)`
- *    is true. Used for grok (no native commands, but skills/) and Codex
- *    >= 0.117.0 (commands capability ends, skills capability remains).
- *    Writes `{agentDir}/skills/<name>/SKILL.md` with the `agents_command`
- *    marker; the agent picks it up as a slash-command equivalent.
+ *    is true. Used for Codex >= 0.117.0 (commands capability ends, skills
+ *    capability remains) and agents with skills but no native command-file dir
+ *    such as kimi. Writes `{agentDir}/skills/<name>/SKILL.md` with the
+ *    `agents_command` marker; the agent picks it up as a slash-command equivalent.
  *
  *  - native command file — `{agentDir}/<commandsSubdir>/<name>.md` (or .toml
  *    when the agent's format is toml). Standard path for Claude, Codex
@@ -85,8 +85,8 @@ function buildCommandsWriter(agent: AgentId): ResourceWriter<string[]> {
 // Built lazily on first access — see lazy-map.ts for the cycle rationale.
 //
 // Registration covers two cases:
-//   - native commands (claude, codex < 0.117.0, gemini, etc.) — `commands` cap
-//   - commands-as-skills (grok, codex >= 0.117.0)
+//   - native commands (claude, codex < 0.117.0, gemini, grok, etc.) — `commands` cap
+//   - commands-as-skills (kimi, codex >= 0.117.0)
 //
 // Agents that have skills but use a NATIVE non-file slash-command system
 // (openclaw → Gateway-based commands) are NOT registered. They declare
@@ -98,7 +98,7 @@ export const commandsWriters = lazyAgentMap<ResourceWriter<string[]>>(() => {
     const cfg = AGENTS[id];
     if (cfg.capabilities.commands === false && (!cfg.skillsDir || cfg.skillsDir === '')) continue;
     // Skills-capable agent with no native command-file dir: convert commands to
-    // skills by default (grok, kimi, …). Opt out only agents with their own
+    // skills by default (kimi, …). Opt out only agents with their own
     // slash-command runtime (openclaw).
     if (cfg.capabilities.commands === false && (!cfg.commandsSubdir || cfg.commandsSubdir === '')) {
       if (cfg.nativeCommandRuntime) continue;
