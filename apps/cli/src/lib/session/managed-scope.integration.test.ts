@@ -120,6 +120,24 @@ describe.skipIf(process.platform === 'win32')('agents sessions — managed-only 
     }
   }, 180_000);
 
+  it("counts codex's RELOCATED short home as managed, not as the user's own", () => {
+    // On macOS the versioned home overflows SUN_LEN for codex's control socket, so
+    // the shim relocates it to `<agentsUserDir>/.codex-homes/<version>/.codex` and
+    // symlinks the versioned path at it. Transcripts then live outside `versions/`.
+    // The first cut classified that root under getAgentsDir() (~/.agents/.system)
+    // instead of getUserAgentsDir() (~/.agents), so a relocated install's own
+    // sessions were filed as the user's — the exact case this scoping exists for.
+    // Planted directly (no symlink) so the classifier is what is under test.
+    plantManagedVersion('0.146.0');
+    fs.writeFileSync(path.join(home, '.agents', '.history', 'versions', 'codex', '0.146.0', '.isolated'), 'x\n');
+    const relocated = path.join(home, '.agents', '.codex-homes', '0.146.0', '.codex', 'sessions', '2026', '07', '30');
+    writeRollout(relocated, MANAGED, home);
+
+    const out = ids(run('--all', '-n', '50', '--json'));
+    expect(out).toContain(MANAGED);
+    expect(out).not.toContain(UNMANAGED);
+  }, 180_000);
+
   it('an isolated install is managed too — its sessions survive the filter', () => {
     plantManagedVersion('0.146.0');
     fs.writeFileSync(path.join(home, '.agents', '.history', 'versions', 'codex', '0.146.0', '.isolated'), 'x\n');

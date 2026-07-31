@@ -336,7 +336,7 @@ export function isManagedSessionFile(filePath: string): boolean {
     // Codex's managed home is not always under versions/. On macOS the versioned path
     // overflows SUN_LEN for codex's control socket, so the shim relocates it to
     // `<agentsUserDir>/.codex-homes/<version>/` (lib/codex-home.ts).
-    path.join(getAgentsDir(), '.codex-homes'),
+    path.join(getUserAgentsDir(), '.codex-homes'),
     // Routine archives are agents-cli's OWN run output — managed by definition.
     getRunsDir(),
   ];
