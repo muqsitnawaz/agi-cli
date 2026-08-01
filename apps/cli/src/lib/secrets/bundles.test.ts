@@ -29,6 +29,7 @@ describe('humanUnlockDuration', () => {
   it('renders the actual configured hold for prompt text', () => {
     expect(humanUnlockDuration(2 * 60 * 60 * 1000)).toBe('2 hours');
     expect(humanUnlockDuration(3 * 24 * 60 * 60 * 1000)).toBe('3 days');
+    expect(humanUnlockDuration(60 * 1000)).toBe('1 minute');
   });
 });
 

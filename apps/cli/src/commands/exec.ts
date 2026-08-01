@@ -2180,11 +2180,12 @@ export function registerRunCommand(program: Command): void {
           } else {
             const { bundle, env: bundleEnv } = readAndResolveBundleEnv(bundleName, {
               caller: `agent ${agent}`,
+              agent,
+              agent,
               keys: secretsKeysSubset,
               allowExpired: options.allowExpired,
-              // A headless/background run (routine, teammate, detached) must not
-              // pop a Touch ID sheet nobody can answer — resolve broker-only and
-              // fail fast with an actionable error. Interactive runs still prompt.
+              // The harness identity scopes any cached grant and allows this
+              // requesting agent to wait for interactive approval.
               agentOnly: isHeadlessSecretsContext(),
             });
             const entries = describeBundle(bundle);

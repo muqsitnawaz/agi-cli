@@ -202,7 +202,13 @@ export function deleteAllSessions(): void {
   if (!shouldPersist()) return;
   try {
     for (const name of Object.keys(readIndex().bundles)) {
-      const meta = readIndex().bundles[name]; try { deleteKeychainToken(sessionBlobItem(name.split(':').slice(1).join(':'), meta.harness || 'cli')); } catch { /* keep going */ }
+      const meta = readIndex().bundles[name];
+      const bundleName = name.includes(':') ? name.split(':').slice(1).join(':') : name;
+      try {
+        deleteKeychainToken(name.includes(':')
+          ? sessionBlobItem(bundleName, meta.harness || 'cli')
+          : `${SESSION_ITEM_PREFIX}${bundleName}`);
+      } catch { /* keep going */ }
     }
     deleteKeychainToken(SESSION_INDEX_ITEM);
   } catch {

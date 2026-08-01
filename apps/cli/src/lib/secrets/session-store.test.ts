@@ -185,6 +185,16 @@ describe.each([
     expect(loadSession('a')).toBeNull();
     expect(loadSession('b')).toBeNull();
   });
+
+  it('deleteAllSessions removes a pre-harness legacy blob', () => {
+    const expiresAt = FAR + Date.now();
+    setKeychainToken(`${SESSION_ITEM_PREFIX}legacy-all`, JSON.stringify(entry('legacy-all', expiresAt, false)), { noAcl: true });
+    setKeychainToken(SESSION_INDEX_ITEM, JSON.stringify({
+      bundles: { 'legacy-all': { expiresAt, sleepPersist: false } },
+    }), { noAcl: true });
+    deleteAllSessions();
+    expect(hasKeychainToken(`${SESSION_ITEM_PREFIX}legacy-all`)).toBe(false);
+  });
 });
 
 function now(): number { return Date.now() + FAR; }

@@ -1370,6 +1370,15 @@ export function readAndResolveBundleEnv(
     ? `read ${name} secrets (for ${opts.caller})`
     : `read ${name} secrets`;
 
+  let promptDuration = opts.duration;
+  if (!promptDuration) {
+    try {
+      if (bundlePolicy(readBundle(name)) === 'daily') {
+        promptDuration = humanUnlockDuration(secretsHoldMs());
+      }
+    } catch { /* metadata read below reports the concrete error */ }
+  }
+
   // secretItems are storage names as enumerated (opaque hashed names on macOS
   // with #316 hashing active, cleartext elsewhere); metaItem is cleartext and
   // hashed inside getBatch. Deduped because the hashed enumeration spans the
@@ -1379,7 +1388,7 @@ export function readAndResolveBundleEnv(
         agent: opts.agent || process.env.AGENTS_AGENT_NAME || 'Agents CLI',
         bundle: name,
         reason: opts.caller ? `to ${opts.caller}` : reason,
-        duration: opts.duration || humanUnlockDuration(secretsHoldMs()),
+        duration: promptDuration,
       })
     : store.getBatch([...new Set([metaItem, ...secretItems])]);
 
@@ -1526,8 +1535,10 @@ export function readAndResolveBundleEnv(
 export function humanUnlockDuration(ms: number): string {
   const days = Math.round(ms / (24 * 60 * 60 * 1000));
   if (days >= 1) return `${days} day${days === 1 ? '' : 's'}`;
-  const hours = Math.max(1, Math.round(ms / (60 * 60 * 1000)));
-  return `${hours} hour${hours === 1 ? '' : 's'}`;
+  const hours = Math.round(ms / (60 * 60 * 1000));
+  if (hours >= 1) return `${hours} hour${hours === 1 ? '' : 's'}`;
+  const minutes = Math.max(1, Math.round(ms / (60 * 1000)));
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
 // Build a keychain ref expression from a bundle+key pair, for storage in the bundle metadata.
