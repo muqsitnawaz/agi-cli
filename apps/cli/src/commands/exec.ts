@@ -2181,7 +2181,6 @@ export function registerRunCommand(program: Command): void {
             const { bundle, env: bundleEnv } = readAndResolveBundleEnv(bundleName, {
               caller: `agent ${agent}`,
               agent,
-              agent,
               keys: secretsKeysSubset,
               allowExpired: options.allowExpired,
               // The harness identity scopes any cached grant and allows this
