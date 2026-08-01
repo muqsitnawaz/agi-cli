@@ -1337,6 +1337,15 @@ export function readAndResolveBundleEnv(
 
   // A headless harness may initiate the macOS authentication sheet itself and
   // synchronously wait for approval. Never/no-ACL bundles remain prompt-free.
+  // The always-on daemon has no requesting agent waiting on the result, so it
+  // remains prompt-free unless the bundle is explicitly no-ACL.
+  if (opts.agentOnly && backend === 'keychain' && opts.caller === 'daemon') {
+    let noAclBundle = false;
+    try { noAclBundle = bundlePolicy(readBundle(name)) === 'never'; } catch { /* fail closed */ }
+    if (!noAclBundle) {
+      throw new Error(`Secrets bundle '${name}' is not unlocked in the secrets agent.`);
+    }
+  }
 
   if (backend === 'file') assertFileBackendUsable(name);
   if (backend === 'vault') assertVaultBackendUsable(name);

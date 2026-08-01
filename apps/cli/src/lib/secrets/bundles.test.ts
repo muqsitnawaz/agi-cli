@@ -207,7 +207,7 @@ describe('readAndResolveBundleEnv agent-only reads', () => {
       { name: 'apple.com', policy: 'daily', vars: { APPLE_TEAM_ID: 'keychain:APPLE_TEAM_ID' } },
       new Map([[secretsKeychainItem('apple.com', 'APPLE_TEAM_ID'), '2HTP252L87']]),
     );
-    expect(readAndResolveBundleEnv('apple.com', { caller: 'daemon', agentOnly: true }).env)
+    expect(readAndResolveBundleEnv('apple.com', { caller: 'command deploy', agent: 'claude', agentOnly: true }).env)
       .toEqual({ APPLE_TEAM_ID: '2HTP252L87' });
   });
 
