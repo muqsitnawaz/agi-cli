@@ -78,6 +78,10 @@ function run(
       ...process.env,
       HOME: home,
       USERPROFILE: home,
+      // Point the device registry at this test's home (RUSH-2042): getDevicesDir()
+      // reads AGENTS_DEVICES_DIR, and the parent vitest fork exports its own via
+      // setup.ts — override it so the child reads the registry makeHome() wrote.
+      AGENTS_DEVICES_DIR: path.join(home, '.agents', '.history', 'devices'),
       AGENTS_SKIP_MIGRATION: '1',
       ...extraEnv,
     },
