@@ -2,9 +2,10 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { hostSessionMeta, registerHostSession, registerInteractiveHostSession } from './session-index.js';
+import { hostSessionMeta, registerHostSession, registerInteractiveHostSession, captureRemoteSessionId } from './session-index.js';
 import { findSessionsById, querySessions, closeDB } from '../session/db.js';
-import type { HostTask } from './tasks.js';
+import { saveTask, loadTask, localLogPath, hostsCacheDir, type HostTask } from './tasks.js';
+import { sessionIdMarkerLine } from './session-marker.js';
 
 // Isolate the sessions DB under a temp HOME. db.js reads its base dir lazily
 // (at getDB() time), so setting HOME here — before any test calls getDB — is
@@ -98,6 +99,51 @@ describe('registerHostSession', () => {
     // real local session with a missing file would be dropped here.
     const all = querySessions({ idPrefix: 'aaaaaaaa' });
     expect(all).toHaveLength(1);
+
+    closeDB();
+  });
+});
+
+describe('captureRemoteSessionId', () => {
+  // The full non-Claude host path: a run that took no forced --session-id, whose
+  // remote coined its own id and printed it via --emit-session-id into the log.
+  function writeLog(id: string, marker: string): void {
+    fs.mkdirSync(hostsCacheDir(), { recursive: true });
+    fs.writeFileSync(localLogPath(id), `booting codex...\ndid the work\n${marker}exited 0\n`);
+  }
+
+  it('captures the remote-coined id from the followed log and stamps it on the task', () => {
+    const t = task({ id: 'feed0001', agent: 'codex', sessionId: undefined });
+    saveTask(t);
+    writeLog('feed0001', sessionIdMarkerLine('codex-real-9f3a'));
+
+    const updated = captureRemoteSessionId(t);
+    expect(updated).not.toBeNull();
+    expect(updated!.sessionId).toBe('codex-real-9f3a');
+    // Persisted, not just returned — so findTaskBySessionId works after this.
+    expect(loadTask('feed0001')!.sessionId).toBe('codex-real-9f3a');
+
+    // And the captured id makes the run registerable + resolvable by id.
+    registerHostSession(updated!, { cwd: '/home/me/proj', prompt: 'do it' });
+    expect(findSessionsById('codex-real-9f3a')).toHaveLength(1);
+  });
+
+  it('is a no-op when the task already carries a forced id (never overwrites Claude/resume)', () => {
+    const t = task({ id: 'feed0002', agent: 'claude', sessionId: 'forced-claude-id' });
+    saveTask(t);
+    // Even if a stray marker sat in the log, the authoritative forced id wins.
+    writeLog('feed0002', sessionIdMarkerLine('should-be-ignored'));
+    expect(captureRemoteSessionId(t)).toBeNull();
+    expect(loadTask('feed0002')!.sessionId).toBe('forced-claude-id');
+  });
+
+  it('returns null when the log carries no marker (hookless remote agent)', () => {
+    const t = task({ id: 'feed0003', agent: 'codex', sessionId: undefined });
+    saveTask(t);
+    fs.mkdirSync(hostsCacheDir(), { recursive: true });
+    fs.writeFileSync(localLogPath('feed0003'), 'ran, but printed no session marker\n');
+    expect(captureRemoteSessionId(t)).toBeNull();
+    expect(loadTask('feed0003')!.sessionId).toBeUndefined();
 
     closeDB();
   });
