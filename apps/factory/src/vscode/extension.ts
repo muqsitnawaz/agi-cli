@@ -82,11 +82,14 @@ import {
   createTmuxTerminal,
   getTmuxState,
   isTmuxTerminal,
-  registerTmuxCleanup,
+  cleanupTmuxTerminal,
+  getTmuxCoords,
+  reattachTmuxTerminal,
   tmuxSplitH,
   tmuxSplitV,
   isTmuxAvailable
 } from './tmux';
+import { registerReconnect, hasTmuxMapping, NonRetryableError, type ReattachTarget, type ReconnectDeps } from './reconnect';
 import { normalizeTerminalMode, resolveTerminalMode } from '../core/terminalMode';
 import { DEFAULT_DISPLAY_PREFERENCES } from '../core/settings';
 import * as readiness from './terminalReadiness';
@@ -888,6 +891,15 @@ export async function activate(context: vscode.ExtensionContext) {
   agentStatusBarItem.show();
   context.subscriptions.push(agentStatusBarItem);
 
+  // Snapshot the durable terminal↔tmux mapping BEFORE restore clears it, so the
+  // reconnect scan (below) can re-attach to sessions that were live at the last
+  // reload. This is the reload/crash arm of reconnect resilience; the
+  // window-focus arm reads the live in-window mappings.
+  const reconnectWorkspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const persistedAtActivation = reconnectWorkspacePath
+    ? terminals.loadPersistedSessions(reconnectWorkspacePath)
+    : [];
+
   // Scan existing terminals in the editor area to register any agent terminals
   // Then restore persisted sessions with proper icons/titles
   terminals.scanExisting(
@@ -904,6 +916,12 @@ export async function activate(context: vscode.ExtensionContext) {
           armShellAdoptionForTerminal(entry.terminal, context);
         }
       }
+    })
+    .then(() => {
+      // Reconnect resilience: after the terminal scan/restore has settled (so
+      // trackedTerminalIds is populated and we never double-attach a tab VS Code
+      // restored), wire the reconnect triggers and run the activation pass.
+      registerReconnect(context, buildReconnectDeps(context, persistedAtActivation));
     })
     .catch(err => {
       console.error('[EXTENSION] Error scanning/restoring terminals:', err);
@@ -960,7 +978,11 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  registerTmuxCleanup(context);
+  // Tmux cleanup no longer registers its own onDidCloseTerminal listener: the
+  // single close handler below owns the whole close lifecycle so the kill
+  // decision (cleanupTmuxTerminal) and the un-track/persist decision are made
+  // from ONE detach-vs-exit classification — otherwise a live detach unregisters
+  // the entry and wipes its mapping before the reconnect pass can re-attach.
 
   // Start watchdog MCP bridge for smart agent mode
   const watchdogBridge = startWatchdogBridge(context);
@@ -1722,38 +1744,69 @@ export async function activate(context: vscode.ExtensionContext) {
     );
   }
 
-  // Listen for terminal closures to update our tracking
+  // Single terminal-close handler. It owns BOTH the tmux kill decision
+  // (cleanupTmuxTerminal) and the un-track/persist decision, from one
+  // detach-vs-exit classification. This is deliberate: a Remote-SSH network drop
+  // closes the tab without an extension reload, firing this on a still-live
+  // agent. If we unconditionally unregister + push-to-closed + release the
+  // worktree, `terminals.unregister` overwrites the on-disk mapping to exclude
+  // the session (buildPersistedSessions only sees live editorTerminals), so the
+  // reconnect pass — which loads that mapping — can never find and re-attach the
+  // detached agent. On a live detach we therefore mark the entry detached and
+  // preserve everything, leaving it for the reconnect pass; only a true agent
+  // exit (or a non-tmux terminal) tears the entry down.
   context.subscriptions.push(
     vscode.window.onDidCloseTerminal((terminal) => {
-      // Capture session info before unregistering (for reopen)
-      const entry = terminals.getByTerminal(terminal);
-      if (entry?.agentConfig && entry.sessionId) {
-        terminals.pushClosedSession({
-          terminalId: entry.id,
-          prefix: entry.agentConfig.prefix,
-          sessionId: entry.sessionId,
-          label: entry.label,
-          agentType: entry.agentType,
-          version: entry.version,
-          account: entry.account || entry.statusAccount || undefined,
-          agentConfig: entry.agentConfig,
-          closedAt: Date.now()
-        });
-      }
+      void (async () => {
+        const entry = terminals.getByTerminal(terminal);
+        // Snapshot the tmux coords BEFORE cleanup runs — cleanupTmuxTerminal
+        // clears tmux.ts's live map synchronously, so this is our last chance to
+        // read them for the detach mapping.
+        const coords = getTmuxCoords(terminal);
+        // cleanupTmuxTerminal kills the tmux session ONLY on a true agent exit
+        // and reports how the close resolved. It also stops tmux-tracking the
+        // terminal, so it must run exactly once — hence the single handler.
+        const close = await cleanupTmuxTerminal(terminal);
 
-      // Lazy release of the per-terminal worktree (no-op unless
-      // agents.worktreePerTerminal is enabled). Safe-by-default: only removes
-      // when clean and merged; otherwise leaves the worktree for the user to
-      // inspect or for `agents worktree prune` to revisit later.
-      if (entry?.id) {
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (workspaceFolder) {
-          tryReleaseWorktreeForTerminal(workspaceFolder, entry.id);
+        if (close.liveDetach) {
+          // Live agent, client gone: keep the entry (and its durable mapping) so
+          // the reconnect pass can re-attach. Don't push-to-closed (the agent is
+          // still running) and don't release the worktree (it's in use).
+          terminals.markDetached(terminal, coords);
+          updateActiveAgentContextKey(vscode.window.activeTerminal, context.extensionPath);
+          return;
         }
-      }
 
-      terminals.unregister(terminal);
-      updateActiveAgentContextKey(vscode.window.activeTerminal, context.extensionPath);
+        // True exit, or a non-tmux terminal: normal teardown.
+        // Capture session info before unregistering (for reopen).
+        if (entry?.agentConfig && entry.sessionId) {
+          terminals.pushClosedSession({
+            terminalId: entry.id,
+            prefix: entry.agentConfig.prefix,
+            sessionId: entry.sessionId,
+            label: entry.label,
+            agentType: entry.agentType,
+            version: entry.version,
+            account: entry.account || entry.statusAccount || undefined,
+            agentConfig: entry.agentConfig,
+            closedAt: Date.now()
+          });
+        }
+
+        // Lazy release of the per-terminal worktree (no-op unless
+        // agents.worktreePerTerminal is enabled). Safe-by-default: only removes
+        // when clean and merged; otherwise leaves the worktree for the user to
+        // inspect or for `agents worktree prune` to revisit later.
+        if (entry?.id) {
+          const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+          if (workspaceFolder) {
+            tryReleaseWorktreeForTerminal(workspaceFolder, entry.id);
+          }
+        }
+
+        terminals.unregister(terminal);
+        updateActiveAgentContextKey(vscode.window.activeTerminal, context.extensionPath);
+      })();
     })
   );
 
@@ -4378,9 +4431,26 @@ async function restoreAgentTerminals(context: vscode.ExtensionContext): Promise<
   const tracked = terminals.getAllTerminals();
   const trackedIds = new Set(tracked.map(e => e.id));
 
-  const toRestore = persisted.filter(p => !trackedIds.has(p.terminalId));
+  // Tmux-backed sessions are the EXCLUSIVE responsibility of the reconnect pass
+  // (registerReconnect, wired right after this restore settles). Their agent is
+  // still LIVE in a detached tmux session, so the correct recovery is
+  // `agents tmux attach` — NOT recreating a plain terminal and resuming from the
+  // CLI session file (which restarts the agent, the very bug reconnect fixes).
+  // Skip them here and, crucially, do NOT clear their persisted mapping below —
+  // the reconnect scan (and any future reload) needs it to re-attach.
+  const toRestore = persisted.filter(
+    p => !trackedIds.has(p.terminalId) && !hasTmuxMapping(p),
+  );
+  const tmuxBacked = persisted.filter(hasTmuxMapping);
   if (toRestore.length === 0) {
-    terminals.clearPersistedSessions(workspacePath);
+    // Preserve tmux-backed mappings for the reconnect pass; only drop what we
+    // (non-tmux) would have restored. If everything is tmux-backed, the store is
+    // left intact so the reattach path — and a second reload — still recover it.
+    if (tmuxBacked.length > 0) {
+      terminals.saveOnlyTmuxPersistedSessions(workspacePath, tmuxBacked);
+    } else {
+      terminals.clearPersistedSessions(workspacePath);
+    }
     return;
   }
 
@@ -4463,8 +4533,119 @@ async function restoreAgentTerminals(context: vscode.ExtensionContext): Promise<
     }
   }
 
-  terminals.clearPersistedSessions(workspacePath);
-  console.log(`[RESTORE] Restored ${toRestore.length} agent terminal(s)`);
+  // Clear only what we restored (the non-tmux sessions). Tmux-backed mappings are
+  // preserved so the reconnect pass can `agents tmux attach` the still-live
+  // sessions and a subsequent reload still has them to recover from.
+  if (tmuxBacked.length > 0) {
+    terminals.saveOnlyTmuxPersistedSessions(workspacePath, tmuxBacked);
+  } else {
+    terminals.clearPersistedSessions(workspacePath);
+  }
+  console.log(`[RESTORE] Restored ${toRestore.length} agent terminal(s); preserved ${tmuxBacked.length} tmux-backed mapping(s) for reconnect`);
+}
+
+// Assemble the deps the reconnect orchestrator (reconnect.ts) needs from the
+// extension host. `persistedAtActivation` is the on-disk mapping snapshot taken
+// before restore cleared it — the durable reload arm. On every pass we also
+// fold in the LIVE in-window mappings (buildPersistedSessions, always fresh,
+// carries tmux coords), deduped by terminalId, so a window-focus reconnect
+// re-attaches sessions whose client died mid-session too.
+function buildReconnectDeps(
+  context: vscode.ExtensionContext,
+  persistedAtActivation: import('./terminals.vscode').PersistedSession[],
+): ReconnectDeps {
+  return {
+    loadPersisted: () => {
+      const byId = new Map<string, import('./terminals.vscode').PersistedSession>();
+      for (const s of persistedAtActivation) byId.set(s.terminalId, s);
+      // Live in-window mappings win on conflict — they carry the current pid.
+      for (const s of terminals.buildPersistedSessions()) byId.set(s.terminalId, s);
+      return Array.from(byId.values());
+    },
+    // Only entries with a LIVE tab count as "tracked" — a detached entry (its
+    // tab closed on an SSH drop, agent still running) is exactly what the
+    // reconnect pass must re-attach, so it must NOT be filtered out as tracked.
+    trackedTerminalIds: () =>
+      new Set(terminals.getAllTerminals().filter((e) => !e.detached).map((e) => e.id)),
+    reattachOne: (target) => reattachSession(context, target),
+    resumePanelPolling: () => settings.resumeFloorPolling(),
+  };
+}
+
+// Re-attach to ONE still-live detached tmux session after a reconnect. Rebuilds
+// the agent's icon/title from the persisted prefix, spawns a terminal that runs
+// only the attach chain (reattachTmuxTerminal — never a new session, so the
+// agent is not restarted), and registers it marked `restored:true` (the agent
+// is already up; don't probe for boot). Throws on spawn failure so the caller's
+// bounded-backoff retry can re-try a transient SSH/attach error.
+async function reattachSession(
+  context: vscode.ExtensionContext,
+  target: ReattachTarget,
+): Promise<void> {
+  const session = target.session;
+  let agentConfig: Omit<import('./agents.vscode').AgentConfig, 'count'>;
+  let displayTitle: string;
+
+  if (session.prefix.toLowerCase() === 'sh') {
+    agentConfig = createAgentConfig(context.extensionPath, 'SH', '', 'agents.png', 'sh');
+    displayTitle = 'SH';
+  } else {
+    const def = getBuiltInByPrefix(session.prefix);
+    // An unknown prefix is a permanent mapping error — a retry can never resolve
+    // it. Mark it non-retryable so withRetry skips the ~3.5s backoff it would
+    // otherwise burn on every window-focus reconnect pass.
+    if (!def) throw new NonRetryableError(`unknown prefix for reattach: ${session.prefix}`);
+    agentConfig = createAgentConfig(context.extensionPath, def.title, def.command, def.icon, def.prefix);
+    displayTitle = def.title;
+  }
+
+  const title = buildTerminalTitle(displayTitle, session.label, context, session.sessionId || null);
+  const agentType = session.agentType ?? prefixToAgentType(session.prefix) ?? displayTitle;
+
+  const terminal = reattachTmuxTerminal(
+    title,
+    agentType,
+    target.tmuxSession,
+    target.tmuxSocket,
+    {
+      iconPath: agentConfig.iconPath as vscode.Uri,
+      viewColumn: vscode.ViewColumn.Active,
+      // Carry the persisted terminal id (+ kind/session/version) in the terminal
+      // env, exactly like every other spawn site (createTmuxTerminal /
+      // restoreAgentTerminals). Without it, onDidOpenTerminal — which fires for
+      // this terminal and name-parses it as an agent — would register it under a
+      // FRESH nextId() (the await terminal.processId below gives that async
+      // handler room to win), drifting the durable terminalId↔tmux identity this
+      // whole feature keys on. With the id present, that handler derives the SAME
+      // id and register()'s duplicate guard makes the race harmless.
+      env: buildAgentTerminalEnv(
+        session.terminalId,
+        session.sessionId ?? null,
+        undefined,
+        session.version,
+        { kind: session.prefix.toLowerCase() === 'sh' ? 'shell' : 'agent' },
+      ),
+    },
+  );
+
+  const pid = await terminal.processId;
+  terminals.register(terminal, session.terminalId, agentConfig, pid, context, session.label);
+  // The agent is already running in the session we just attached to — mark all
+  // readiness events fired so nothing probes it as if it were booting.
+  readiness.registerTerminal(terminal, { restored: true });
+
+  if (session.version) terminals.setVersion(terminal, session.version);
+  if (session.agentType) {
+    terminals.setAgentType(terminal, session.agentType as SessionAgentType);
+    if (session.sessionId) {
+      terminals.setSessionId(terminal, session.sessionId);
+      startAutoLabelPollerForTerminal(terminal, context);
+    }
+  }
+  if (session.prefix.toLowerCase() === 'sh') {
+    armShellAdoptionForTerminal(terminal, context);
+  }
+  console.log(`[RECONNECT] re-attached ${target.tmuxSession} (${session.terminalId})`);
 }
 
 async function reopenLastClosedSession(context: vscode.ExtensionContext): Promise<void> {

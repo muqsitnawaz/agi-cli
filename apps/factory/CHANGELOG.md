@@ -6,6 +6,46 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
+- **A dropped SSH connection no longer destroys running agents (reconnect
+  resilience).** Agents run in detached tmux sessions on the shared socket, so
+  they survive a network drop — but on a Remote-SSH teardown VS Code fires
+  `onDidCloseTerminal` for every editor terminal, and the old cleanup
+  unconditionally ran `agents tmux kill`, killing healthy agents just because
+  the client blinked. `cleanupTmuxTerminal` now queries the shared server first
+  and kills ONLY on a true agent exit (session gone or every pane dead); a live
+  pane is treated as a client/network detach and left alive for re-attach. The
+  liveness probe fails SAFE: when no tmux binary is reachable (an install outside
+  the probed paths — asdf, mise, Nix, Linuxbrew, a container prefix) the probe
+  reports "couldn't confirm" rather than "gone", and the kill decision declines
+  to kill, so a non-standard tmux location can no longer silently destroy live
+  agents on every detach. The
+  terminal↔tmux mapping (session/socket/pane/pid) is persisted so it survives an
+  extension reload, and on reconnect (window regains focus, or the extension
+  reactivates) every mapped session that is still live but has no attached
+  client is re-attached via `agents tmux attach` — never a new session, so the
+  agent is never restarted — with bounded-backoff retry on transient SSH
+  failures. On a real extension-host reload, tmux-backed sessions are now the
+  exclusive responsibility of the reconnect pass: `restoreAgentTerminals` skips
+  any persisted session carrying a tmux mapping (it no longer recreates a plain
+  terminal and resumes it from the CLI session file, which would restart the
+  agent) and preserves that mapping on disk instead of wiping it, so the pass can
+  `agents tmux attach` the still-live session and a subsequent reload still has
+  the mapping to recover from. On a network drop that does NOT reload the
+  extension host (the common Remote-SSH case), a single `onDidCloseTerminal`
+  handler now decides the whole close from one detach-vs-exit classification: on a
+  live detach it marks the entry detached and preserves its durable mapping (so
+  the reconnect pass can re-attach even a session spawned in the current window),
+  instead of unconditionally unregistering it and overwriting the on-disk mapping
+  to exclude it — the previous behavior orphaned freshly-spawned agents. A
+  permanent reattach failure (an unknown agent prefix) is now non-retryable, so it
+  no longer burns the backoff budget on every window-focus event. The Factory
+  Floor grid re-arms its polling on reconnect so it no longer looks frozen.
+  Source: `apps/factory/src/vscode/tmux.ts`,
+  `apps/factory/src/vscode/reconnect.ts`, `apps/factory/src/vscode/extension.ts`,
+  `apps/factory/src/vscode/terminals.vscode.ts`,
+  `apps/factory/src/core/sessions.persist.ts`,
+  `apps/factory/src/vscode/settings.vscode.ts`.
+
 - **Detach / Attach — send a running agent to the background from the editor.**
   Two commands: **Agents: Detach (Send to Background)** (`agents.detach`,
   `cmd+k cmd+b` on a focused agent terminal, also in the terminal right-click menu)
