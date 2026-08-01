@@ -774,7 +774,21 @@ export function rekeyStatus(): {
   };
 }
 
-/** Check if a keychain/keyring item exists. Never prompts for biometry. */
+/**
+ * Check if a keychain/keyring item exists. Never prompts for biometry.
+ *
+ * Throws when the item cannot be reached — on macOS, when the signed helper is
+ * unavailable. That is deliberate: this primitive gates destructive writes as
+ * well as reads. Through `bundleExists()` it guards the `--force` overwrite
+ * checks in `agents secrets create` (`../../commands/secrets.ts`), the
+ * bundle-rename purge (`./bundles.ts`), the pull-rollback bookkeeping
+ * (`./sync.ts`), and the reuse-never-overwrite rule for `R2_SYNC_ENC_KEY`
+ * (`../session/sync/provision.ts`). A false "absent" silently disarms every one
+ * of them, so an unreachable keychain must fail loudly rather than answer "no".
+ *
+ * Tests needing this path without a helper install a backend via
+ * `setKeychainBackendForTest()`, which short-circuits on the next line.
+ */
 export function hasKeychainToken(item: string): boolean {
   item = prepareServiceName(item);
   if (backend) return backend.has(item);
@@ -799,7 +813,24 @@ export function hasKeychainToken(item: string): boolean {
  * call in the same process). For bundles, prefer getKeychainTokens() so a
  * single biometric prompt covers every key in the batch.
  */
-export function getKeychainToken(item: string): string {
+export interface KeychainReadContext {
+  agent?: string;
+  bundle?: string;
+  reason?: string;
+  duration?: string;
+  defaultPolicy?: 'daily' | 'always' | 'never';
+  forceDuration?: boolean;
+}
+
+export function keychainOperationPrompt(context: KeychainReadContext = {}): string {
+  const agent = context.agent || 'Agents CLI';
+  const bundle = context.bundle ? ` the '${context.bundle}' bundle` : ' secrets';
+  const duration = context.duration ? ` for ${context.duration}` : '';
+  const reason = context.reason ? ` ${context.reason}` : '';
+  return `${agent} is requesting to unlock${bundle}${duration}${reason}.`;
+}
+
+export function getKeychainToken(item: string, context: KeychainReadContext = {}): string {
   // Errors keep the requested (human-readable) name; the storage name may be
   // an opaque hash.
   const requested = item;
@@ -820,6 +851,11 @@ export function getKeychainToken(item: string): string {
   }
   const bin = getKeychainHelperPath();
   const result = spawnSync(bin, ['get', item, os.userInfo().username], {
+    env: {
+      ...process.env,
+      AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context),
+      AGENTS_KEYCHAIN_PROMPT_BASE: keychainOperationPrompt({ ...context, duration: undefined }),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (result.status === 1) throw new Error(`Keychain item '${requested}' not found.`);
@@ -843,7 +879,7 @@ export function getKeychainToken(item: string): string {
  * On Linux or when a test backend is installed, falls back to individual
  * lookups — no biometric prompt path on those platforms.
  */
-export function getKeychainTokens(items: string[]): Map<string, string> {
+export function getKeychainTokens(items: string[], context: KeychainReadContext = {}): Map<string, string> {
   const result = new Map<string, string>();
   if (items.length === 0) return result;
   // Resolve storage names up front, remembering which requested name each one
@@ -879,6 +915,13 @@ export function getKeychainTokens(items: string[]): Map<string, string> {
   }
   const bin = getKeychainHelperPath();
   const child = spawnSync(bin, ['get-batch', os.userInfo().username, ...storageItems], {
+    env: {
+      ...process.env,
+      AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context),
+      AGENTS_KEYCHAIN_PROMPT_BASE: keychainOperationPrompt({ ...context, duration: undefined }),
+      AGENTS_KEYCHAIN_DEFAULT_POLICY: context.defaultPolicy || 'daily',
+      AGENTS_KEYCHAIN_FORCE_DURATION: context.forceDuration ? '1' : '0',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (child.status === 4) {

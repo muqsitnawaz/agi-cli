@@ -6,7 +6,7 @@ import * as crypto from 'crypto';
 import { spawnSync } from 'child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { buildResumeCommand, resumeSpawnInvocation } from '../sessions.js';
+import { buildResumeCommand, resumeSpawnInvocation, resolveSessionQuery } from '../sessions.js';
 import { needsWindowsShell, composeWin32CommandLine } from '../../lib/platform/index.js';
 import type { SessionMeta } from '../../lib/session/types.js';
 
@@ -942,5 +942,85 @@ describe('buildResumeCommand version-pinned resume', () => {
       expect(inv.command).toBe(composeWin32CommandLine(cmd[0], cmd.slice(1)));
       expect(inv.command).toContain(`"${evilId}"`);
     }
+  });
+});
+
+describe('resolveSessionQuery id-vs-search resolution', () => {
+  const meta = (over: Partial<SessionMeta> & { id: string }): SessionMeta => ({
+    shortId: over.id.slice(0, 8),
+    agent: 'claude',
+    timestamp: '2026-08-01T12:00:00.000Z',
+    filePath: '/fake/path.jsonl',
+    ...over,
+  });
+
+  // The session the user actually asked for is absent from the pool (it lives on
+  // another machine); the pool holds an unrelated session whose topic merely
+  // quotes that id — the exact shape that made `sessions <uuid>` render the wrong
+  // transcript and advise "Pass a longer ID" for an already-complete id.
+  const wanted = 'd3470b57-2af6-4c11-b1de-3fab94f43603';
+  const decoy = meta({
+    id: 'ffa1f432-1a9e-4a81-8e93-e70aa8df1c95',
+    topic: `Resume previous work: ${wanted}`,
+  });
+
+  it('does not answer a complete id with a session that merely mentions it', () => {
+    const r = resolveSessionQuery([decoy], wanted);
+    expect(r.matches).toEqual([]);
+    expect(r.completeId).toBe(true);
+    expect(r.byId).toBe(true);
+  });
+
+  it('still resolves a complete id that is genuinely present', () => {
+    const real = meta({ id: wanted, topic: 'Improve session display' });
+    const r = resolveSessionQuery([decoy, real], wanted);
+    expect(r.matches.map(s => s.id)).toEqual([wanted]);
+    expect(r.byId).toBe(true);
+  });
+
+  it('keeps short-id prefix lookup working', () => {
+    const real = meta({ id: wanted, topic: 'Improve session display' });
+    const r = resolveSessionQuery([real], 'd3470b57');
+    expect(r.matches.map(s => s.id)).toEqual([wanted]);
+    expect(r.byId).toBe(true);
+    expect(r.completeId).toBe(false);
+  });
+
+  it('still falls through to text search for a real search phrase', () => {
+    const r = resolveSessionQuery([decoy], 'Resume previous');
+    expect(r.matches.map(s => s.id)).toEqual([decoy.id]);
+    expect(r.byId).toBe(false);
+    expect(r.completeId).toBe(false);
+  });
+
+  // isCompleteSessionId trims but resolveSessionById does not, so without a
+  // single normalization point a pasted, padded id classified as complete and
+  // then missed the lookup — reporting a session that IS here as absent.
+  it('resolves a padded id instead of declaring it missing', () => {
+    const real = meta({ id: wanted, topic: 'Improve session display' });
+    const r = resolveSessionQuery([decoy, real], `  ${wanted} `);
+    expect(r.matches.map(s => s.id)).toEqual([wanted]);
+    expect(r.completeId).toBe(true);
+  });
+
+  // Synthetic ids, so these assert the resolver and never the developer's own
+  // session index (a complete id that MISSES the pool now also consults the DB,
+  // so a real id here would resolve from disk and make the test machine-specific).
+  it('resolves a session_-prefixed complete id by id, not by content', () => {
+    const prefixed = 'session_00000000-0000-4000-8000-000000000001';
+    const mentions = meta({ id: 'aaaa1111-2222-4333-8444-555566667777', topic: `see ${prefixed}` });
+    const r = resolveSessionQuery([mentions], prefixed);
+    expect(r.completeId).toBe(true);
+    expect(r.matches.map(s => s.id)).not.toContain(mentions.id);
+    const real = meta({ id: prefixed, topic: 'kimi run' });
+    expect(resolveSessionQuery([mentions, real], prefixed).matches.map(s => s.id)).toEqual([prefixed]);
+  });
+
+  it('resolves a ses_ ULID complete id by id, not by content', () => {
+    const ses = 'ses_00000000000000000000000001';
+    const mentions = meta({ id: 'bbbb1111-2222-4333-8444-555566667777', topic: `see ${ses}` });
+    const r = resolveSessionQuery([mentions], ses);
+    expect(r.completeId).toBe(true);
+    expect(r.matches.map(s => s.id)).not.toContain(mentions.id);
   });
 });

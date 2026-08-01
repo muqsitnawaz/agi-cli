@@ -15,7 +15,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
 import { resolveAgentsDir } from './persistence.js';
-import { findExecutable } from '../platform/index.js';
+import { findExecutable, captureProcessStartTime } from '../platform/index.js';
 import { normalizeEvents, AgentType } from './parsers.js';
 import { debug } from './debug.js';
 import { setGeminiAutoUpdateDisabled, updateGeminiSettings } from '../gemini-settings.js';
@@ -24,6 +24,7 @@ import { getAgentsDir as getSystemAgentsDir, getShimsDir } from '../state.js';
 import { AGENTS, getAccountInfo } from '../agents.js';
 import { resolveVersion, isVersionInstalled, verifyInstalledBinaryLaunches } from '../versions.js';
 import { sanitizeProcessEnv } from '../secrets/bundles.js';
+import { resolveActor, actorEnv } from '../actor.js';
 import { recordRunName } from '../session/run-names.js';
 import { sshExec, shellQuote } from '../ssh-exec.js';
 import { resolveHost } from '../hosts/registry.js';
@@ -182,39 +183,34 @@ export function buildSentinelCommand(cmd: string[], exitCodePath: string): strin
 }
 
 /**
- * Capture a stable identifier for a process at the moment it was started.
- * Used to defeat PID reuse: a kill(pid, ...) is only safe when the process
- * still occupies the PID we observed at spawn time. A bare kill(pid, 0)
- * probe cannot tell whether the OS has recycled the slot to an unrelated
- * process — combined with detached spawns and unref(), that's exactly how
- * `agents teams stop` ends up SIGKILLing random process groups.
- *
- * Linux:  field 22 of /proc/<pid>/stat (starttime in clock ticks since boot).
- * macOS:  output of `ps -o lstart= -p <pid>` (start time in human format).
- * Returns null on any error so callers can skip the guard rather than crash.
+ * Env for a locally-spawned teammate. Freezes ONE actor for the whole spawn
+ * tree: actorEnv(resolveActor()) stamps AGENTS_ACTOR* onto the child env, so the
+ * teammate's inner `agents run` reads it via inheritedActor and short-circuits
+ * computeActor instead of re-resolving — every teammate under one orchestrator
+ * shares the orchestrator's single frozen actor (see actor.ts). Precedence:
+ * process env < actor < the teammate's --env overrides, so an explicit override
+ * still wins. Single source of truth shared by launchProcess() and its test.
  */
-export function captureProcessStartTime(pid: number): string | null {
-  if (!pid || pid <= 0) return null;
-  try {
-    if (process.platform === 'linux') {
-      const stat = fsSync.readFileSync(`/proc/${pid}/stat`, 'utf-8');
-      const lastParen = stat.lastIndexOf(')');
-      if (lastParen < 0) return null;
-      const tail = stat.slice(lastParen + 2);
-      const fields = tail.split(' ');
-      // After comm we are at field 3; starttime is field 22, so index 19 here.
-      return fields[19] || null;
-    }
-    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    const trimmed = out.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  } catch {
-    return null;
-  }
+export function buildTeammateSpawnEnv(
+  envOverrides: Record<string, string> | null,
+): NodeJS.ProcessEnv {
+  return {
+    ...sanitizeProcessEnv(process.env),
+    ...actorEnv(resolveActor()),
+    ...(envOverrides ?? {}),
+  };
 }
+
+/**
+ * Re-exported from `platform/process.ts`, which owns the one implementation.
+ *
+ * This module used to carry its own near-identical copy, and that copy had no
+ * Windows branch — it fell through to `ps`, which does not exist there, so
+ * `captureProcessStartTime` always returned null and the pid-reuse guard at
+ * `stop()` was silently inert on Windows. That is exactly how `agents teams stop`
+ * ends up SIGKILLing an unrelated process group once the OS recycles a pid.
+ */
+export { captureProcessStartTime };
 
 /** Agent types the team runner supports. */
 const TEAM_AGENT_TYPES: AgentType[] = ['codex', 'cursor', 'gemini', 'claude', 'opencode', 'grok', 'antigravity', 'kimi', 'droid'];
@@ -541,6 +537,12 @@ export class AgentProcess {
   startedAt: Date = new Date();
   completedAt: Date | null = null;
   parentSessionId: string | null = null;
+  // Frozen actor (resolveActor().id) this teammate runs under. Stamped onto the
+  // local spawn env via actorEnv (buildTeammateSpawnEnv) so the teammate's inner
+  // `agents run` inherits one actor for the whole tree instead of re-resolving,
+  // and persisted so the record shows who ran it. Set from the resolved actor at
+  // construction; loadFromDisk restores the persisted value.
+  actor: string | null = null;
   cloudSessionId: string | null = null;
   cloudProvider: string | null = null;
   prUrl: string | null = null;
@@ -657,6 +659,7 @@ export class AgentProcess {
     this.completedAt = completedAt;
     this.baseDir = baseDir;
     this.parentSessionId = parentSessionId;
+    this.actor = resolveActor().id;
     this.cloudSessionId = cloudSessionId;
     this.cloudProvider = cloudProvider;
     this.prUrl = prUrl;
@@ -744,6 +747,7 @@ export class AgentProcess {
       duration: this.duration(),
       mode: this.mode,
       parent_session_id: this.parentSessionId,
+      actor: this.actor,
       workspace_dir: this.workspaceDir,
       cloud_session_id: this.cloudSessionId,
       cloud_provider: this.cloudProvider,
@@ -1008,6 +1012,7 @@ export class AgentProcess {
       started_at: this.startedAt.toISOString(),
       completed_at: this.completedAt?.toISOString() || null,
       parent_session_id: this.parentSessionId,
+      actor: this.actor,
       cloud_session_id: this.cloudSessionId,
       cloud_provider: this.cloudProvider,
       pr_url: this.prUrl,
@@ -1107,6 +1112,10 @@ export class AgentProcess {
         meta.profile_name || null,
       );
       agent.startTime = typeof meta.start_time === 'string' ? meta.start_time : null;
+      // The persisted actor is the truth for a reload; the constructor set it to
+      // THIS process's resolved actor, which is wrong for a teammate someone else
+      // ran. Legacy teammates predating the field carry no actor -> null.
+      agent.actor = meta.actor ?? null;
       // Distributed-team fields: set post-construction (like startTime) so the
       // constructor signature stays fixed. Null on every pre-existing teammate.
       agent.hostName = meta.host_name || null;
@@ -1857,9 +1866,7 @@ export class AgentManager {
         stdio: ['ignore', stdoutFd, stdoutFd],
         cwd: agent.cwd || undefined,
         detached: true,
-        env: agent.envOverrides
-          ? { ...sanitizeProcessEnv(process.env), ...agent.envOverrides }
-          : sanitizeProcessEnv(process.env),
+        env: buildTeammateSpawnEnv(agent.envOverrides),
       });
 
       await new Promise<void>((resolve, reject) => {

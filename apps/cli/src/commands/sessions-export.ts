@@ -22,7 +22,8 @@ import * as path from 'path';
 import chalk from 'chalk';
 import type { Command } from 'commander';
 import type { SessionMeta } from '../lib/session/types.js';
-import { discoverSessions, resolveSessionById } from '../lib/session/discover.js';
+import { discoverSessions, resolveSessionById, isCompleteSessionId } from '../lib/session/discover.js';
+import { findSessionsById } from '../lib/session/db.js';
 import { filterSessionsByQuery, parseAgentFilter } from './sessions.js';
 import { listLocalTranscripts, SYNC_AGENTS, type LocalTranscript } from '../lib/session/sync/agents.js';
 import { machineId } from '../lib/machine-id.js';
@@ -254,13 +255,26 @@ function selectSessions(metas: SessionMeta[], selectors: string[]): SessionMeta[
   const byId: SessionMeta[] = [];
   const unmatched: string[] = [];
   for (const sel of selectors) {
-    const hits = resolveSessionById(metas, sel);
-    if (hits.length > 0) byId.push(...hits);
-    else unmatched.push(sel);
+    const trimmed = sel.trim();
+    // Same reason as resolveSessionQuery: the discovered pool is a minority of
+    // the index, so a complete id absent from it may still be indexed here.
+    const hits = resolveSessionById(metas, trimmed);
+    const resolved = hits.length > 0 || !isCompleteSessionId(trimmed) ? hits : findSessionsById(trimmed);
+    if (resolved.length > 0) byId.push(...resolved);
+    else unmatched.push(trimmed);
   }
   if (byId.length > 0 && unmatched.length === 0) {
     const seen = new Set<string>();
     return byId.filter(s => (seen.has(s.id) ? false : (seen.add(s.id), true)));
+  }
+  // A selector that is a COMPLETE session id and still missed cannot be widened:
+  // the id is unique, so the text query below could only bundle sessions that
+  // merely mention it. Bundling those would ship unrelated transcripts to
+  // whoever receives the export, so select nothing and let the caller report it.
+  const missingIds = unmatched.filter(isCompleteSessionId);
+  if (missingIds.length > 0) {
+    process.stderr.write(chalk.red(`No session with id ${missingIds.join(', ')} on this machine.\n`));
+    return [];
   }
   // Any selector that isn't an id → treat the whole thing as a text query.
   return filterSessionsByQuery(metas, selectors.join(' '));

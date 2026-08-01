@@ -30,7 +30,8 @@ import { gatherRemoteList, runOnPeer } from '../lib/session/remote-list.js';
 import { stringWidth, truncateToWidth, padToWidth, terminalWidth } from '../lib/session/width.js';
 import type { SessionActivity, AwaitingReason } from '../lib/session/state.js';
 import { inferSessionState } from '../lib/session/state.js';
-import { discoverSessions, countSessionsInScope, resolveSessionById, searchContentIndex, parseTimeFilter, getSessionRoots, type DiscoverOptions, type ScanProgress } from '../lib/session/discover.js';
+import { discoverSessions, countSessionsInScope, resolveSessionById, isCompleteSessionId, searchContentIndex, parseTimeFilter, getSessionRoots, type DiscoverOptions, type ScanProgress } from '../lib/session/discover.js';
+import { findSessionsById } from '../lib/session/db.js';
 import { filterTeamSessions } from '../lib/session/team-filter.js';
 import { parseSession } from '../lib/session/parse.js';
 import { runRemoteSessions, buildForwardedArgs, ensureWholeIndex } from '../lib/session/remote.js';
@@ -448,7 +449,9 @@ function signalBadges(s: Pick<ActiveSession, 'awaitingReason' | 'pr' | 'worktree
 function locatorBadge(s: ActiveSession): string {
   const p = s.provenance;
   const parts: string[] = [];
-  if (p?.transport === 'ssh') parts.push(chalk.red('ssh'));
+  // An ssh-launched session shows where it was launched FROM when the client IP
+  // resolves to a registered device (`ssh←zion`); bare `ssh` when it doesn't.
+  if (p?.transport === 'ssh') parts.push(chalk.red(p.origin ? `ssh←${p.origin.device}` : 'ssh'));
   if (p?.mux?.kind === 'tmux' && (s.tmuxTarget || p.mux.pane)) {
     parts.push(chalk.green(s.tmuxTarget ?? p.mux.pane!));
     // For a tmux-hosted session, say which app+tab is looking at it right now
@@ -986,10 +989,13 @@ async function renderSessionPreview(
 ): Promise<void> {
   const discovered = await discoverSessions({ all: true, cwd: process.cwd(), limit: 5000 });
   const pool = applyScopeFilters(discovered, scope);
-  const matches = resolveSessionById(pool, query);
-  const session = (matches.length > 0 ? matches : filterSessionsByQuery(pool, query))[0];
+  const { matches, completeId } = resolveSessionQuery(pool, query);
+  const session = matches[0];
   if (!session) {
-    console.log(chalk.gray(`No session matches "${query}".`));
+    // A complete id that missed is not "no match for this text" — say which, and
+    // give the same fleet pointer the render paths give.
+    if (completeId) notFoundByIdMessage(query).forEach(l => console.log(l));
+    else console.log(chalk.gray(`No session matches "${query}".`));
     return;
   }
   console.log(buildPreview(session));
@@ -1352,8 +1358,14 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
   }
 }
 
+/** Whether a query should route to the single-session render rather than the
+ * listing. The hex-ish test catches a bare id prefix; `isCompleteSessionId`
+ * additionally catches the prefixed whole ids (`session_…`, `ses_…`) that the
+ * hex test rejects — without it those never reach the id-only resolution and
+ * still content-search. */
 function looksLikeSessionId(query: string): boolean {
-  return /^[0-9a-f-]{6,}$/i.test(query.trim());
+  const trimmed = query.trim();
+  return /^[0-9a-f-]{6,}$/i.test(trimmed) || isCompleteSessionId(trimmed);
 }
 
 function teamTag(session: SessionMeta): string {
@@ -1783,6 +1795,13 @@ function renderTopicCell(
 }
 
 /** Column-visibility flags for the picker row, computed once over the whole pool. */
+/** The SSH-launch origin for a picker row, resolved from the live session's
+ * provenance (transport 'ssh'). `device` is set when the client IP matched a
+ * registered device; absent for an unresolved IP (renders a bare `ssh`). */
+export interface SshOriginTag {
+  device?: string;
+}
+
 export interface PickerColumns {
   /** Render the machine column (only when the pool spans more than one machine). */
   showMachine?: boolean;
@@ -1853,10 +1872,23 @@ export function pickerColumnsFor(sessions: SessionMeta[]): PickerColumns {
   };
 }
 
-export function formatPickerLabel(s: SessionMeta, query: string, cols: PickerColumns = {}): string {
+export function formatPickerLabel(
+  s: SessionMeta,
+  query: string,
+  cols: PickerColumns = {},
+  ssh?: SshOriginTag,
+): string {
   const agentColor = colorAgent(s.agent);
   const when = formatRelativeTime(s.lastActivity ?? s.timestamp);
   const project = s.project || '-';
+  // SSH-launch origin (live rows only): mirrors the flat listing's `ssh←<device>`
+  // badge. Rendered as its OWN red segment before the topic cell — folding it into
+  // the topic string loses the colour, because renderTopicCell strips ANSI and
+  // re-whitens every slice. Its width is reserved from the topic budget below
+  // (exactly like `wt`), so the fixed-width columns stay aligned.
+  const sshPlain = ssh ? (ssh.device ? `ssh←${ssh.device} ` : 'ssh ') : '';
+  const sshSeg = sshPlain ? chalk.red(sshPlain) : '';
+  const sshW = sshPlain ? stringWidth(sshPlain) : 0;
   const tag = originTag(s) || teamTag(s);
   const label = (s as any).label;
   const topic = tag ? `${tag}${s.topic ?? ''}` : s.topic;
@@ -1882,7 +1914,7 @@ export function formatPickerLabel(s: SessionMeta, query: string, cols: PickerCol
   const wtW = wt ? stringWidth(wt) + 1 : 0;
   const topicW = Math.max(
     16,
-    terminalWidth() - gutter - (10 + 9 + 8 + 16) - machineColW - ticketW - wtW - stringWidth(when) - 1,
+    terminalWidth() - gutter - (10 + 9 + 8 + 16) - machineColW - ticketW - wtW - sshW - stringWidth(when) - 1,
   );
 
   return (
@@ -1891,6 +1923,7 @@ export function formatPickerLabel(s: SessionMeta, query: string, cols: PickerCol
     chalk.yellow(padRight(truncate(versionStr, 7), 8)) +
     machineCell +
     chalk.cyan(padRight(truncate(project, 14), 16)) +
+    sshSeg +
     renderTopicCell(label, topic, query, topicW, topicW) +
     ticketCell +
     (wt ? wt + ' ' : '') +
@@ -2303,6 +2336,67 @@ function formatSearchMessage(options: SessionFilterOptions): string {
   return `Search sessions (${filters.join(', ')}):`;
 }
 
+/**
+ * How a `sessions <query>` argument was resolved against the pool.
+ *
+ * `byId` records that the rows came from an id lookup, so only then does an
+ * ambiguous result mean "your id prefix is too short". `completeId` records that
+ * the query was a whole session id: it is unique by construction, so a miss is
+ * final and must NOT widen into a text/content search.
+ */
+export interface SessionQueryResolution {
+  matches: SessionMeta[];
+  byId: boolean;
+  completeId: boolean;
+}
+
+/**
+ * The single entry point for turning a `sessions <query>` argument into rows.
+ *
+ * A complete session id resolves by id alone. Anything else keeps the existing
+ * ladder: id lookup first (so a short id still wins), then the ranked
+ * metadata+content search.
+ */
+export function resolveSessionQuery(pool: SessionMeta[], query: string): SessionQueryResolution {
+  // Normalize ONCE here. isCompleteSessionId trims but resolveSessionById does
+  // not, so a padded id ("<uuid> ", e.g. pasted from a terminal) would classify
+  // as complete and then miss the id lookup — reporting a session that IS on
+  // this machine as absent.
+  const normalized = query.trim();
+  const completeId = isCompleteSessionId(normalized);
+  const byIdMatches = resolveSessionById(pool, normalized);
+  if (byIdMatches.length > 0) return { matches: byIdMatches, byId: true, completeId };
+
+  if (completeId) {
+    // The pool is only what discoverSessions walked — a minority of the index
+    // (measured: 2,798 of 7,614 rows), because it re-reads live agent homes and
+    // skips whole classes of indexed session. Declaring absence from the pool
+    // alone denied 1,315 sessions whose transcript is on this disk right now.
+    // Ask the index itself, the same authoritative lookup `fork` and `exec` use.
+    return { matches: findSessionsById(normalized), byId: true, completeId };
+  }
+  return { matches: filterSessionsByQuery(pool, normalized), byId: false, completeId };
+}
+
+/** Explain an ambiguous resolution. Only a short id can be lengthened: a complete
+ * id is already maximal, and a search phrase was never an id to begin with. */
+function ambiguityHint(byId: boolean, completeId: boolean): string {
+  if (completeId) return 'That is already a complete id — these rows share it as a prefix.';
+  return byId
+    ? 'Pass a longer ID to narrow it down.'
+    : 'That matched on text, not an id. Pass a session id, or narrow the search.';
+}
+
+/** Explain a complete-id miss, which no local rephrasing can fix. Echoes the
+ * normalized id so a pasted, padded argument doesn't produce an unrunnable hint. */
+function notFoundByIdMessage(query: string): string[] {
+  const id = query.trim();
+  return [
+    chalk.red(`No session with id ${id} on this machine.`),
+    chalk.gray(`Search the fleet with: agents sessions ${id} --device <host>`),
+  ];
+}
+
 /** Filter and rank sessions by a multi-term search query across metadata and content. */
 export function filterSessionsByQuery(
   sessions: SessionMeta[],
@@ -2445,12 +2539,12 @@ async function renderArtifactsGlobal(
     tracker.stop();
 
     const allSessions = applyScopeFilters(discovered, scope);
-    const matches = resolveSessionById(allSessions, query);
-    const queryMatches = matches.length > 0 ? matches : filterSessionsByQuery(allSessions, query);
+    const { matches: queryMatches, byId, completeId } = resolveSessionQuery(allSessions, query);
 
     if (queryMatches.length === 0) {
       spinner.stop();
-      console.error(chalk.red(`No session found matching: ${query}`));
+      if (completeId) notFoundByIdMessage(query).forEach(l => console.error(l));
+      else console.error(chalk.red(`No session found matching: ${query}`));
       process.exit(1);
     }
     if (queryMatches.length > 1) {
@@ -2459,7 +2553,7 @@ async function renderArtifactsGlobal(
       for (const m of queryMatches.slice(0, 10)) {
         console.error(chalk.cyan(`  ${m.shortId}  ${m.id}  ${(m as any).label ?? m.topic ?? ''}`));
       }
-      console.error(chalk.gray('Pass a longer ID to narrow it down.'));
+      console.error(chalk.gray(ambiguityHint(byId, completeId)));
       process.exit(1);
     }
 
@@ -2494,14 +2588,21 @@ async function renderOneSession(
     const allSessions = applyScopeFilters(discovered, scope);
     let session: SessionMeta | undefined;
 
-    const matches = resolveSessionById(allSessions, query);
-    let queryMatches: SessionMeta[] = matches.length > 0 ? matches : filterSessionsByQuery(allSessions, query);
+    const resolution = resolveSessionQuery(allSessions, query);
+    let queryMatches: SessionMeta[] = resolution.matches;
+    let byId = resolution.byId;
+    const completeId = resolution.completeId;
 
-    if (queryMatches.length === 0) {
+    // Widen to the transcript content index only for a genuine search phrase. A
+    // complete id is unique, so widening could only ever surface a DIFFERENT
+    // session that happens to mention the id — which is what made `sessions
+    // <uuid>` render an unrelated transcript.
+    if (queryMatches.length === 0 && !completeId) {
       const contentResults = searchContentIndex(allSessions, query);
       if (contentResults.size > 0) {
         const matchedSessions = Array.from(contentResults.values())
           .sort((a, b) => (b._bm25Score ?? 0) - (a._bm25Score ?? 0));
+        byId = false;
         if (matchedSessions.length === 1) {
           session = matchedSessions[0];
         } else {
@@ -2521,6 +2622,9 @@ async function renderOneSession(
           renderClaudeHistoryOnlyId(query, historyEntry, allSessions);
           process.exit(1);
         }
+      } else if (completeId) {
+        notFoundByIdMessage(query).forEach(l => console.error(l));
+        process.exit(1);
       } else {
         console.error(chalk.red(`No session found matching: ${query}`));
         console.error(chalk.gray('Run "agents sessions" to browse sessions.'));
@@ -2535,7 +2639,7 @@ async function renderOneSession(
         for (const match of queryMatches.slice(0, 10)) {
           console.error(chalk.cyan(`  ${match.shortId}  ${match.id}  ${(match as any).label ?? match.topic ?? ''}`));
         }
-        console.error(chalk.gray('Pass a longer ID to narrow it down.'));
+        console.error(chalk.gray(ambiguityHint(byId, completeId)));
         process.exit(1);
       } else {
         session = queryMatches[0];

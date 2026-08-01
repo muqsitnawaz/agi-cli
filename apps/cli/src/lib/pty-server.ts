@@ -16,41 +16,11 @@ import * as crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { getPtyDir as getPtyDirRoot } from './state.js';
-import { isAlive } from './platform/index.js';
+import { isAlive, captureProcessStartTime } from './platform/index.js';
 
-/**
- * Capture a stable identifier for a process at the moment it was started.
- * Used to defeat PID reuse: a kill(pid, ...) is only safe when the process
- * still occupies the PID we observed at spawn time.
- *
- * Linux:  field 22 of /proc/<pid>/stat (starttime in clock ticks since boot).
- * macOS:  output of `ps -o lstart= -p <pid>` (start time in human format).
- * Returns null on any error so callers can skip the guard rather than crash.
- */
-export function captureProcessStartTime(pid: number): string | null {
-  if (!pid || pid <= 0) return null;
-  try {
-    if (process.platform === 'linux') {
-      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8');
-      // The comm field (#2) is wrapped in parens and may contain spaces, so
-      // split off everything after the last `)` to get a clean field list.
-      const lastParen = stat.lastIndexOf(')');
-      if (lastParen < 0) return null;
-      const tail = stat.slice(lastParen + 2);
-      const fields = tail.split(' ');
-      // After comm we are at field 3; starttime is field 22, so index 19 here.
-      return fields[19] || null;
-    }
-    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    const trimmed = out.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  } catch {
-    return null;
-  }
-}
+// Re-exported for the existing importers of this module; the implementation is
+// in platform/process.ts, shared with teams/agents.ts so the two cannot drift.
+export { captureProcessStartTime };
 
 // --- Constants ---
 
