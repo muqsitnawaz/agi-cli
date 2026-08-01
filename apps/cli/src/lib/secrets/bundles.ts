@@ -955,6 +955,12 @@ export interface ResolveBundleOptions {
    * about to read the bundle.
    */
   caller?: string;
+  /** Harness type whose unlock may be reused (claude, codex, kimi, ...). */
+  agent?: string;
+  /** Human duration rendered in the Touch ID prompt. */
+  duration?: string;
+  /** Explicitly permit this agent request to raise interactive authentication. */
+  interactiveUnlock?: boolean;
   /**
    * Skip the secrets-agent fast-path and read straight from the keychain
    * (popping Touch ID). Set by callers that must NOT serve a cached snapshot —
@@ -1288,7 +1294,8 @@ export function readAndResolveBundleEnv(
   // file-backed bundle has none to dedup. The never-unlocked path is a single
   // stat (agentSocketExists) so it costs nothing when the agent isn't running.
   if (backend === 'keychain' && !opts.noAgent && process.env.AGENTS_SECRETS_NO_AGENT !== '1') {
-    const hit = agentGetSync(name);
+    const harness = opts.agent || process.env.AGENTS_AGENT_NAME || 'cli';
+    const hit = agentGetSync(name, harness);
     if (hit) {
       // The agent stores the FULL bundle env. Apply the same subset filter and
       // expiry gate as the slow path — without this, `--secrets-keys X` would
@@ -1313,13 +1320,13 @@ export function readAndResolveBundleEnv(
     // Touch ID. Serve from it and re-warm the broker, so a warm bundle stays warm
     // across restart — this fixes BOTH the interactive re-prompt and the headless
     // throw below (which now fires only when there is genuinely no session).
-    const session = loadSession(name);
+    const session = loadSession(name, Date.now(), harness);
     if (session) {
       const filtered = filterAgentHitBySubsetAndExpiry({ bundle: session.bundle, env: session.env }, opts);
       stampLastUsed(filtered.bundle);
       // Re-warm the broker with the remaining TTL so later reads hit RAM and
       // `agents secrets status` is honest. Best-effort; no-ops off darwin.
-      agentAutoLoadSync(name, session.bundle, session.env, Math.max(1, session.expiresAt - Date.now()));
+      agentAutoLoadSync(name, session.bundle, session.env, Math.max(1, session.expiresAt - Date.now()), harness);
       emit('secrets.get', {
         module: 'secrets',
         bundle: name,
@@ -1332,33 +1339,18 @@ export function readAndResolveBundleEnv(
     }
   }
 
-  // The headless guard exists only to keep a Touch ID sheet off the interactive
-  // user's screen — so it must block ONLY reads that can actually raise one.
-  // A file-backed bundle resolves via passphrase with no prompt (handled below,
-  // never held by the broker). A `never`/no-ACL keychain bundle is written
-  // WITHOUT the biometry access control at every tier (see writeBundle), so its
-  // reads are fully silent (no Touch ID, no broker) — exactly like a file
-  // bundle, and exactly the "automation-only" tier a headless daemon reads
-  // (daemon.ts:readDaemonClaudeOAuthToken). Learning the policy here is itself
-  // prompt-less: metadata items are written no-ACL at every tier, so readBundle
-  // reads them silently. An unreadable metadata read is treated as prompt-risky
-  // (throw) — the safe default.
-  if (opts.agentOnly && backend === 'keychain') {
+  // A headless harness may initiate the macOS authentication sheet itself and
+  // synchronously wait for approval. Never/no-ACL bundles remain prompt-free.
+  // The always-on daemon has no requesting agent waiting on the result, so it
+  // remains prompt-free unless the bundle is explicitly no-ACL.
+  const interactiveUnlock = opts.interactiveUnlock
+    ?? (Boolean(opts.agent || process.env.AGENTS_AGENT_NAME) && process.env.AGENTS_SECRETS_NO_PROMPT !== '1');
+  if (opts.agentOnly && backend === 'keychain' && !interactiveUnlock) {
     let noAclBundle = false;
-    try {
-      noAclBundle = bundlePolicy(readBundle(name)) === 'never';
-    } catch {
-      noAclBundle = false;
-    }
+    try { noAclBundle = bundlePolicy(readBundle(name)) === 'never'; } catch { /* fail closed */ }
     if (!noAclBundle) {
-      throw new Error(
-        `Secrets bundle '${name}' is not unlocked in the secrets agent, and this is a ` +
-        `headless/background process that must not raise a Touch ID prompt on the ` +
-        `interactive user's screen. Run 'agents secrets unlock ${name}' in a terminal ` +
-        `first, or set AGENTS_SECRETS_NO_PROMPT=0 to force an interactive prompt.`
-      );
+      throw new Error(`Secrets bundle '${name}' is not unlocked in the secrets agent.`);
     }
-    // never/no-ACL ⇒ fall through to the prompt-less keychain read below.
   }
 
   if (backend === 'file') assertFileBackendUsable(name);
@@ -1378,12 +1370,20 @@ export function readAndResolveBundleEnv(
     ? `read ${name} secrets (for ${opts.caller})`
     : `read ${name} secrets`;
 
-  void reason;
   // secretItems are storage names as enumerated (opaque hashed names on macOS
   // with #316 hashing active, cleartext elsewhere); metaItem is cleartext and
   // hashed inside getBatch. Deduped because the hashed enumeration spans the
   // bundle's whole namespace.
-  const fetched = store.getBatch([...new Set([metaItem, ...secretItems])]);
+  const fetched = backend === 'keychain'
+    ? getKeychainTokens([...new Set([metaItem, ...secretItems])], {
+        agent: opts.agent || process.env.AGENTS_AGENT_NAME || 'Agents CLI',
+        bundle: name,
+        reason: opts.caller ? `to ${opts.caller}` : reason,
+        duration: opts.duration || humanUnlockDuration(secretsHoldMs()),
+        defaultPolicy: secretsDefaultPolicy(),
+        forceDuration: Boolean(opts.duration),
+      })
+    : store.getBatch([...new Set([metaItem, ...secretItems])]);
 
   const json = fetched.get(metaItem);
   if (json === undefined) {
@@ -1516,13 +1516,22 @@ export function readAndResolveBundleEnv(
       secretsAgentAutoEnabled() &&
       canCacheResolvedEnv(bundle, selectedKeys, opts.keyMode)
     ) {
-      agentAutoLoadSync(name, bundle, env, secretsHoldMs());
+      agentAutoLoadSync(name, bundle, env, secretsHoldMs(), opts.agent || process.env.AGENTS_AGENT_NAME || 'cli');
     }
     return { bundle, env };
   } catch (err) {
     emitReadAudit('error', err);
     throw err;
   }
+}
+
+export function humanUnlockDuration(ms: number): string {
+  const days = Math.round(ms / (24 * 60 * 60 * 1000));
+  if (days >= 1) return `${days} day${days === 1 ? '' : 's'}`;
+  const hours = Math.round(ms / (60 * 60 * 1000));
+  if (hours >= 1) return `${hours} hour${hours === 1 ? '' : 's'}`;
+  const minutes = Math.max(1, Math.round(ms / (60 * 1000)));
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
 // Build a keychain ref expression from a bundle+key pair, for storage in the bundle metadata.

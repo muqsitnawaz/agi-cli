@@ -12,6 +12,7 @@ import {
   writeBundle,
   writeBundleWithItems,
   healKeychainBundleMetadata,
+  humanUnlockDuration,
   type SecretsBundle,
 } from './bundles.js';
 import {
@@ -23,6 +24,14 @@ import {
   type KeychainBackend,
 } from './index.js';
 import { saveSession } from './session-store.js';
+
+describe('humanUnlockDuration', () => {
+  it('renders the actual configured hold for prompt text', () => {
+    expect(humanUnlockDuration(2 * 60 * 60 * 1000)).toBe('2 hours');
+    expect(humanUnlockDuration(3 * 24 * 60 * 60 * 1000)).toBe('3 days');
+    expect(humanUnlockDuration(60 * 1000)).toBe('1 minute');
+  });
+});
 
 /**
  * Regression tests for the two least-privilege bypasses on the
@@ -202,13 +211,13 @@ describe('readAndResolveBundleEnv agent-only reads', () => {
     else process.env.AGENTS_SECRETS_NO_AGENT = prevNoAgent;
   });
 
-  it('throws for an ACL-gated (daily) bundle with no broker/session snapshot — never raises a Touch ID sheet headlessly', () => {
+  it('allows an agent-triggered interactive read for a daily bundle with no broker/session snapshot', () => {
     writeBundleWithItems(
       { name: 'apple.com', policy: 'daily', vars: { APPLE_TEAM_ID: 'keychain:APPLE_TEAM_ID' } },
       new Map([[secretsKeychainItem('apple.com', 'APPLE_TEAM_ID'), '2HTP252L87']]),
     );
-    expect(() => readAndResolveBundleEnv('apple.com', { caller: 'daemon', agentOnly: true }))
-      .toThrow("Secrets bundle 'apple.com' is not unlocked in the secrets agent");
+    expect(readAndResolveBundleEnv('apple.com', { caller: 'command deploy', agent: 'claude', agentOnly: true }).env)
+      .toEqual({ APPLE_TEAM_ID: '2HTP252L87' });
   });
 
   it('resolves a never/no-ACL bundle silently in a headless read — the daemon automation path (no unlock, no session, no throw)', () => {
@@ -431,23 +440,23 @@ describe('durable session read fallback', () => {
 
   it('a headless read resolves from a live session instead of throwing "not unlocked"', () => {
     const { bundle, env } = seed('apple.com', { APPLE_TEAM_ID: '2HTP252L87' });
-    // No session yet → the headless (agentOnly) read must throw.
-    expect(() => readAndResolveBundleEnv('apple.com', { agentOnly: true })).toThrow(/not unlocked in the secrets agent/);
+    // No session yet → the agent may unlock interactively.
+    expect(readAndResolveBundleEnv('apple.com', { agentOnly: true, agent: 'cli', interactiveUnlock: true }).env).toEqual(env);
     // Persist an unlock → the SAME headless read now resolves silently.
     saveSession('apple.com', { bundle, env, expiresAt: Date.now() + 60_000, sleepPersist: false });
-    expect(readAndResolveBundleEnv('apple.com', { agentOnly: true }).env).toEqual({ APPLE_TEAM_ID: '2HTP252L87' });
+    expect(readAndResolveBundleEnv('apple.com', { agentOnly: true, agent: 'cli' }).env).toEqual({ APPLE_TEAM_ID: '2HTP252L87' });
   });
 
   it('honors --keys subset from the session snapshot', () => {
     const { bundle, env } = seed('multi', { A: '1', B: '2' });
     saveSession('multi', { bundle, env, expiresAt: Date.now() + 60_000, sleepPersist: true });
-    expect(readAndResolveBundleEnv('multi', { agentOnly: true, keys: ['A'] }).env).toEqual({ A: '1' });
+    expect(readAndResolveBundleEnv('multi', { agentOnly: true, agent: 'cli', keys: ['A'] }).env).toEqual({ A: '1' });
   });
 
   it('an expired session does not satisfy the read', () => {
     const { bundle, env } = seed('stale', { T: 'x' });
     saveSession('stale', { bundle, env, expiresAt: Date.now() - 1000, sleepPersist: true });
-    expect(() => readAndResolveBundleEnv('stale', { agentOnly: true })).toThrow(/not unlocked/);
+    expect(readAndResolveBundleEnv('stale', { agentOnly: true, agent: 'cli', interactiveUnlock: true }).env).toEqual(env);
   });
 });
 
