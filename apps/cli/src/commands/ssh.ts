@@ -271,15 +271,7 @@ function loadLeasedBoxesSection(): string[] {
       agentOnly: true,
     });
     return renderLeasedBoxesSection(boxes, Math.floor(Date.now() / 1000));
-  } catch (e) {
-    // A locked bundle is the one failure with a fix the user can act on, and
-    // agentOnly above makes it the normal cold-broker outcome — say so instead of
-    // silently dropping the section. Everything else (crabbox absent, no provider
-    // creds) is genuinely not actionable here.
-    const msg = (e as Error).message ?? '';
-    if (msg.includes('not unlocked in the secrets agent')) {
-      return [chalk.gray('  leased boxes hidden — run `agents secrets unlock <bundle>` to show them')];
-    }
+  } catch {
     return []; // crabbox not installed / no provider creds — omit the section
   }
 }
@@ -294,14 +286,13 @@ function loadLeasedBoxesSection(): string[] {
 function trySshLeasedBox(name: string, cmd: string[]): boolean {
   let box: CrabboxBox | null;
   try {
-    // agentOnly: this runs for ANY unrecognized `agents ssh <name>` — including a
-    // typo'd device name — so discovery must never pop Touch ID. The connect below
-    // keeps the auto-detect: by then the box is confirmed and the user meant it.
-    box = crabboxFind(name, {
-      secretsBundle: process.env.AGENTS_LEASE_SECRETS_BUNDLE,
-      timeoutMs: 5000,
-      agentOnly: true,
-    });
+    // Deliberately NOT agentOnly, unlike the devices-list render above. This runs
+    // only for a name the user typed, and a broker-only failure here is
+    // indistinguishable downstream from "no such box" — the catch below returns
+    // false and the caller prints "Unknown device '<name>'". Reporting a real
+    // leased box as nonexistent is a worse outcome than one prompt on a path the
+    // user initiated. `agents run --lease` keeps its prompt for the same reason.
+    box = crabboxFind(name, { secretsBundle: process.env.AGENTS_LEASE_SECRETS_BUNDLE, timeoutMs: 5000 });
   } catch {
     return false; // crabbox unavailable — not a leased-box target
   }

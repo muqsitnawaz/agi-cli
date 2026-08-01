@@ -885,9 +885,17 @@ export function listBundles(opts: { agentOnly?: boolean } = {}): SecretsBundle[]
 
   // vaultExists() (a file stat) FIRST — getVaultSession() reads a keychain item,
   // so the original order spawned the helper on every enumeration even for the
-  // overwhelming majority of users who have no vault at all. Every other call
-  // site already orders it this way (lines 152, 422, 1388); this one was the
-  // outlier, and it defeated the agentOnly guard above.
+  // overwhelming majority of users who have no vault at all. Every other guarded
+  // call site in this file already orders it this way; this one was the outlier,
+  // and it defeated the agentOnly guard above. (The login path calls
+  // getVaultSession() with no vaultExists() guard at all, which is correct there —
+  // a vault is presumed.)
+  //
+  // One behavior does change: getVaultSession() garbage-collects a malformed or
+  // expired session item via clearVaultKey() (vault.ts:276/280/284). With no vault
+  // file present we now short-circuit before that, so an orphaned session item
+  // survives instead of being swept. It is inert — every reader gates on
+  // vaultExists() — and `agents secrets vault` cleans it up on next use.
   if (vaultExists() && getVaultSession().loggedIn) {
     let vaultServices: string[] = [];
     try {
