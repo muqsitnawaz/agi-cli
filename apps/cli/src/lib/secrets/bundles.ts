@@ -1335,12 +1335,8 @@ export function readAndResolveBundleEnv(
     }
   }
 
-  // Only keychain-backed bundles can pop a Touch ID prompt and are the only ones
-  // the broker ever holds. A file-backed bundle resolves via passphrase with no
-  // prompt, so agentOnly must never block it — the broker never holds file
-  // bundles, so the throw would fire unconditionally and break a legitimate read.
   // A headless harness may initiate the macOS authentication sheet itself and
-  // synchronously wait for approval. Cancellation still fails closed.
+  // synchronously wait for approval. Never/no-ACL bundles remain prompt-free.
 
   if (backend === 'file') assertFileBackendUsable(name);
   if (backend === 'vault') assertVaultBackendUsable(name);
