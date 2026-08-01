@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "paths": [
+    "commands/version.md",
+    "skills/cgraph",
+    "skills/docs",
+    "skills/reflect",
+    "skills/release",
+    "skills/scripts",
+    "skills/security",
+    "skills/sessions"
+  ]
+}

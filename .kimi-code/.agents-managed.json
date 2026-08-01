@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "paths": [
+    "skills/cgraph",
+    "skills/docs",
+    "skills/reflect",
+    "skills/release",
+    "skills/scripts",
+    "skills/security",
+    "skills/sessions"
+  ]
+}
