@@ -6,6 +6,8 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.9.299] - 2026-08-01
+
 - **A dropped SSH connection no longer destroys running agents (reconnect
   resilience).** Agents run in detached tmux sessions on the shared socket, so
   they survive a network drop — but on a Remote-SSH teardown VS Code fires
