@@ -417,3 +417,140 @@ describe('rotatePassphrase (RUSH-1975)', () => {
     expect(() => rotatePassphrase()).toThrow(/machine-local passphrase/i);
   });
 });
+
+/**
+ * Co-located legacy key layout (pre-#479): the machine-local key lives INSIDE the
+ * store dir as `.passphrase`, so `keyColocated` is true and the swap is a single
+ * directory rename that carries both ciphertext and key. Every fixture in the
+ * block above puts the key in a separate `keyDir`, so that path had zero coverage.
+ */
+describe('rotatePassphrase — co-located legacy key layout (RUSH-1975)', () => {
+  let tmpRoot: string;
+  let storeDir: string;
+  let emptyKeyDir: string;
+  let keyFile: string; // storeDir/.passphrase — the co-located legacy key
+  const OLD_KEY = 'old-colocated-key-value';
+  let prevTty: boolean | undefined;
+
+  function seed(bundle: string, key: string, value: string): string {
+    const item = `agents-cli.secrets.${bundle}.${key}`;
+    fileStore.set(item, value);
+    return `${item}.enc`;
+  }
+
+  beforeEach(() => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-rotate-colo-'));
+    storeDir = path.join(tmpRoot, 'store');
+    emptyKeyDir = path.join(tmpRoot, 'key'); // canonical passphrase dir, kept empty
+    keyFile = path.join(storeDir, '.passphrase');
+    delete process.env.AGENTS_SECRETS_PASSPHRASE;
+    prevTty = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    // Provision the key at the legacy co-located path (inside the store dir) and
+    // point the canonical passphrase dir at an empty dir, so the source resolves the
+    // key to storeDir/.passphrase and `dirname(keyPath) === fileDir()` (colocated).
+    fs.mkdirSync(storeDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(emptyKeyDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(keyFile, OLD_KEY, { mode: 0o600 });
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: emptyKeyDir });
+  });
+
+  afterEach(() => {
+    delete process.env.AGENTS_SECRETS_PASSPHRASE;
+    Object.defineProperty(process.stdin, 'isTTY', { value: prevTty, configurable: true });
+    _resetFileStoreForTest();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('re-keys through a single directory rename and rewrites the co-located key in place', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+    // Prove the fixture actually exercises the colocated path (dirname === storeDir).
+    expect(machinePassphraseSourcePath()).toBe(keyFile);
+    expect(path.dirname(keyFile)).toBe(storeDir);
+
+    const rep = rotatePassphrase({ newPassphrase: 'colo-new' });
+    expect(rep.committed).toBe(true);
+    expect(rep.bundleCount).toBe(2);
+    expect(rep.roundTripOk).toBe(true);
+
+    // The key file INSIDE the swapped store dir now holds the NEW passphrase, 0600.
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe('colo-new');
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(keyFile).mode & 0o777).toBe(0o600);
+    }
+    // Values still resolve after the rotation, under the new key and not the old.
+    expect(fileStore.get('agents-cli.secrets.prod.A')).toBe('value-a');
+    expect(fileStore.get('agents-cli.secrets.prod.B')).toBe('value-b');
+    const encA = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encA, 'colo-new')).toBe('value-a');
+    expect(() => decryptForFallback(encA, OLD_KEY)).toThrow();
+
+    // No stray rotate artifacts, and the key stayed co-located (never leaked to keyDir).
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-'))).toEqual([]);
+    expect(fs.readdirSync(emptyKeyDir)).toEqual([]);
+  });
+
+  it('crash in the single-rename window (store dir absent) recovers to the old store+key, then a retry rotates cleanly', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+    const beforeStore = fs.readdirSync(storeDir).sort()
+      .map((f) => [f, fs.readFileSync(path.join(storeDir, f), 'utf8')]);
+
+    // Crash after the live store is moved aside but before the staged store lands —
+    // the store dir is absent, the old store+key sit in `store.rotate-old-*`, the new
+    // store+key sit in the staging dir. This is the ONLY crash window for a colocated
+    // key: one rename carries both, so there is no NEW-store/OLD-key mismatch to leave.
+    expect(() => rotatePassphrase({
+      newPassphrase: 'colo-crash',
+      onStoreMovedAsideBeforeSwap: () => { throw new Error('crash in single-rename window'); },
+    })).toThrow(/single-rename window/);
+
+    // Prove the crashed on-disk state: store dir gone, backup present, key file gone
+    // (it travelled into the backup with the store), no partial NEW/OLD split.
+    expect(fs.existsSync(storeDir)).toBe(false);
+    expect(fs.existsSync(keyFile)).toBe(false);
+    const bakName = fs.readdirSync(tmpRoot).find((e) => e.startsWith('store.rotate-old-'));
+    expect(bakName).toBeTruthy();
+    expect(fs.readFileSync(path.join(tmpRoot, bakName!, '.passphrase'), 'utf8')).toBe(OLD_KEY);
+
+    // Next run recovers: the backup (old store + old key) is restored intact, so the
+    // store is readable under the OLD key again — strictly safer than the four-rename
+    // non-colocated path, which can strand a NEW-key store beside an OLD key file.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: emptyKeyDir });
+    const rep = rotatePassphrase({ newPassphrase: 'colo-final' });
+    expect(rep.committed).toBe(true);
+
+    // Old ciphertext survived the round trip byte-for-byte through the backup, and the
+    // retry re-keyed cleanly to the final key.
+    expect(fileStore.get('agents-cli.secrets.prod.A')).toBe('value-a');
+    expect(fileStore.get('agents-cli.secrets.prod.B')).toBe('value-b');
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe('colo-final');
+    const encAfter = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encAfter, 'colo-final')).toBe('value-a');
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-'))).toEqual([]);
+    // The store held the same item set before the crash and after recovery+retry.
+    expect(fs.readdirSync(storeDir).filter((f) => f.endsWith('.enc')).sort())
+      .toEqual(beforeStore.map(([f]) => f).filter((f) => f.endsWith('.enc')).sort());
+  });
+
+  it('copies a non-UTF-8 file through the rotation byte-for-byte (no U+FFFD corruption)', () => {
+    seed('prod', 'A', 'value-a');
+    // A raw binary blob with byte sequences that are not valid UTF-8 (0xff/0xfe are
+    // never legal UTF-8 lead bytes; the lone 0x80 continuation is invalid too). A
+    // decode/re-encode round-trip would replace each with U+FFFD and corrupt it.
+    const rawName = 'not-utf8.bin';
+    const rawBytes = Buffer.from([0x00, 0xff, 0xfe, 0x80, 0x41, 0xc3, 0x28, 0x99]);
+    fs.writeFileSync(path.join(storeDir, rawName), rawBytes, { mode: 0o600 });
+
+    const rep = rotatePassphrase({ newPassphrase: 'colo-bin' });
+    expect(rep.committed).toBe(true);
+
+    // The blob survived the whole-store rewrite byte-for-byte.
+    const after = fs.readFileSync(path.join(storeDir, rawName));
+    expect(Buffer.compare(after, rawBytes)).toBe(0);
+    // And the real item was still re-keyed.
+    const encA = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encA, 'colo-bin')).toBe('value-a');
+  });
+});

@@ -408,6 +408,25 @@ function resolveInterruptedKeyPath(): string | null {
   for (const fp of [passphraseFilePath(), legacyPassphraseFilePath()]) {
     if (fs.existsSync(`${fp}.rotate-new`) || fs.existsSync(`${fp}.rotate-oldkey`)) return fp;
   }
+  // Co-located layout: the key lives inside the store dir and travels with it in a
+  // single rename, so no `.rotate-new`/`.rotate-oldkey` key artifacts are ever
+  // written. A crash in that rename leaves the store dir absent with its old store +
+  // co-located key sitting in the `<dir>.rotate-old-*` backup, and the canonical/
+  // legacy key files both gone — so the checks above return null and recovery would
+  // never run. If a backup holding a co-located `.passphrase` is present, the
+  // interrupted rotation's key target is that legacy co-located path; return it so
+  // recovery restores the backup (old store + old key) and heals the store.
+  const dir = fileDir();
+  if (!fs.existsSync(dir)) {
+    const parent = path.dirname(dir);
+    const base = path.basename(dir);
+    let entries: string[];
+    try { entries = fs.readdirSync(parent); } catch { return null; }
+    const bak = entries.find((e) => e.startsWith(`${base}.rotate-old-`));
+    if (bak && fs.existsSync(path.join(parent, bak, '.passphrase'))) {
+      return legacyPassphraseFilePath();
+    }
+  }
   return null;
 }
 
@@ -428,10 +447,13 @@ export interface RotatePassphraseReport {
 }
 
 /** Flush a file's data to disk (durability before the atomic swap). */
-function writeFileFsync(fp: string, data: string, mode: number): void {
+function writeFileFsync(fp: string, data: string | Buffer, mode: number): void {
   const fd = fs.openSync(fp, 'w', mode);
   try {
-    fs.writeSync(fd, data);
+    // Narrow to one of fs.writeSync's overloads: the string form encodes as UTF-8,
+    // the Buffer form writes raw bytes verbatim (binary-safe copy-through).
+    if (typeof data === 'string') fs.writeSync(fd, data);
+    else fs.writeSync(fd, data);
     fs.fsyncSync(fd);
   } finally {
     fs.closeSync(fd);
@@ -631,6 +653,7 @@ export function rotatePassphrase(opts: {
   dryRun?: boolean;
   newPassphrase?: string;
   onStagedBeforeCommit?: () => void;
+  onStoreMovedAsideBeforeSwap?: () => void;
   onStoreSwappedBeforeKeySwap?: () => void;
   onKeyBackedUpBeforeNewKey?: () => void;
   tamperStaged?: boolean;
@@ -714,7 +737,9 @@ export function rotatePassphrase(opts: {
     if (keyColocated && entry === path.basename(keyPath)) continue; // rewritten below, not copied
     const src = path.join(dir, entry);
     if (!fs.statSync(src).isFile()) continue;
-    writeFileFsync(path.join(stageDir, entry), fs.readFileSync(src, 'utf8'), 0o600);
+    // Copy through as raw bytes — reading as 'utf8' would decode any non-UTF-8
+    // byte to U+FFFD and silently corrupt the file on the way through the swap.
+    writeFileFsync(path.join(stageDir, entry), fs.readFileSync(src), 0o600);
   }
   // A co-located legacy key travels with the store: write the new value into the
   // staged dir so a single directory swap commits both ciphertext and key.
@@ -738,6 +763,10 @@ export function rotatePassphrase(opts: {
   // absent; recoverInterruptedRotation restores it from the backup on next run.
   const bakDir = `${dir}.rotate-old-${rand}`;
   fs.renameSync(dir, bakDir);
+  // Test seam: crash after the live store is moved aside, before the staged store
+  // lands (the store dir is absent). For a co-located key this is the ONLY swap
+  // window — the single rename carries both ciphertext and key.
+  opts.onStoreMovedAsideBeforeSwap?.();
   fs.renameSync(stageDir, dir);
   fsyncDir(path.dirname(dir));
   const keyBak = `${keyPath}.rotate-oldkey`;
