@@ -28,6 +28,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { KeychainBackend } from './index.js';
 import { encodePwshBase64 } from '../pwsh.js';
+import { withFileLock, ensureLockTarget } from '../fs-atomic.js';
 
 // ---------- file store location ----------
 
@@ -42,6 +43,33 @@ export function fileDir(): string {
 
 function ensureFileDir(): void {
   fs.mkdirSync(fileDir(), { recursive: true, mode: 0o700 });
+}
+
+// ---------- cross-process store lock (RUSH-1975) ----------
+
+// Every mutation of the store (a `secrets set`/`delete`) and every rotation runs
+// under one exclusive lock, so a write can never land in the store dir between a
+// rotation's store-swap and key-swap renames (which would forge a MIXED store —
+// items sealed under two keys at once — with no crash involved) and two rotations
+// can never run concurrently. The macOS-only broker-unlock guard (`agentStatus`)
+// does nothing on the Linux headless targets this command exists for, so this is
+// the real serialization. The lock target is a SIBLING of the store dir, never a
+// file inside it — so it is never copied through a rotation nor swept as a
+// `.rotate-*` artifact, and it stays put across a mid-swap store-dir rename.
+let lockAcquireTimeoutMsOverride: number | null = null;
+
+function fileStoreLockPath(): string {
+  return `${fileDir()}.lock`;
+}
+
+function withStoreLock<T>(fn: () => T): T {
+  const lock = fileStoreLockPath();
+  ensureLockTarget(lock);
+  return withFileLock(
+    lock,
+    fn,
+    lockAcquireTimeoutMsOverride != null ? { acquireTimeoutMs: lockAcquireTimeoutMsOverride } : {},
+  );
 }
 
 // ---------- passphrase ----------
@@ -323,15 +351,23 @@ function fileGet(item: string, opts: { allowAutoProvision?: boolean } = {}): str
 
 function fileSet(item: string, value: string, opts: { allowAutoProvision?: boolean } = {}): void {
   ensureFileDir();
-  const enc = encryptForFallback(value, getPassphrase(opts));
-  fs.writeFileSync(fileFor(item), JSON.stringify(enc), { mode: 0o600 });
+  // Under the store lock: a write must not interleave with a rotation's swap.
+  withStoreLock(() => {
+    const enc = encryptForFallback(value, getPassphrase(opts));
+    fs.writeFileSync(fileFor(item), JSON.stringify(enc), { mode: 0o600 });
+  });
 }
 
 function fileDelete(item: string): boolean {
   const fp = fileFor(item);
   if (!fs.existsSync(fp)) return true; // idempotent, matches secret-tool clear
-  fs.unlinkSync(fp);
-  return true;
+  return withStoreLock(() => {
+    // Re-check under the lock — a rotation may have swapped the dir since the
+    // pre-lock existence probe above.
+    if (!fs.existsSync(fp)) return true;
+    fs.unlinkSync(fp);
+    return true;
+  });
 }
 
 function fileList(prefix: string): string[] {
@@ -477,19 +513,52 @@ function fsyncDir(dir: string): void {
   }
 }
 
-/** True if any `.enc` item in `dir` decrypts under `keyVal`. A store may hold
- *  orphan items sealed under other keys, so "opens" means at least one item
- *  round-trips — enough to prove the key matches the store's live contents. */
-function storeOpensUnder(dir: string, keyVal: string | null): boolean {
-  if (keyVal == null) return false;
+/** True if `enc` decrypts (auth-tag verifies) under `keyVal`. */
+function opensUnder(enc: EncFile, keyVal: string): boolean {
+  try { decryptForFallback(enc, keyVal); return true; } catch { return false; }
+}
+
+/** How a candidate key relates to a store's `.enc` items. */
+type StoreKeyMatch = 'all' | 'some' | 'none';
+
+/**
+ * Classify how the `.enc` items in `dir` relate to `keyVal`, so recovery can tell
+ * a single-key store (safe to sweep) apart from a MIXED store (live data sealed
+ * under two keys at once — unsafe). `candidateKeys` is every key a mid-rotation
+ * crash could have left on disk: the live key file, `<key>.rotate-new` (the
+ * incoming key), and `<key>.rotate-oldkey` (the retired key). An item that opens
+ * under NONE of them is a genuine orphan — sealed under a third key and carried
+ * through a rotation verbatim — and is ignored: it neither proves nor disproves
+ * consistency. Among the remaining, non-orphan items:
+ *   'all'  — every one opens under `keyVal`  → `keyVal` is the store's one key
+ *   'some' — at least one opens under `keyVal` AND at least one does not → MIXED
+ *   'none' — none open under `keyVal`
+ *
+ * Only 'all' is safe to sweep against. The original "any one item opens" heuristic
+ * returned true for a mixed store — so a single stray item sealed under the live
+ * key (an interstitial `secrets set` after a mid-swap crash) made recovery sweep
+ * `<key>.rotate-new`, the only surviving copy of the key the *other* items need,
+ * destroying every one of them silently (RUSH-1975).
+ */
+function classifyStore(dir: string, keyVal: string | null, candidateKeys: (string | null)[]): StoreKeyMatch {
+  if (keyVal == null) return 'none';
   let names: string[];
-  try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.enc')); } catch { return false; }
+  try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.enc')); } catch { return 'none'; }
+  const otherKeys = candidateKeys.filter((k): k is string => k != null && k !== keyVal);
+  let nonOrphan = 0;
+  let openUnderKey = 0;
   for (const name of names) {
     let enc: EncFile;
     try { enc = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) as EncFile; } catch { continue; }
-    try { decryptForFallback(enc, keyVal); return true; } catch { /* try the next item */ }
+    const opensKey = opensUnder(enc, keyVal);
+    // Ignore genuine orphans (open under no candidate key) — a third-party cache
+    // carried through verbatim is not evidence of a mixed store.
+    if (!opensKey && !otherKeys.some((k) => opensUnder(enc, k))) continue;
+    nonOrphan++;
+    if (opensKey) openUnderKey++;
   }
-  return false;
+  if (openUnderKey === 0) return 'none';
+  return openUnderKey === nonOrphan ? 'all' : 'some';
 }
 
 /** True if `dir` holds at least one `.enc` item. */
@@ -507,27 +576,34 @@ function readKeyFile(fp: string): string | null {
  * Recover from a rotation that was interrupted mid-swap on a prior run, so the
  * store is always left in a single, self-consistent, readable state.
  *
- * Recovery is CONTENT-aware, not presence-aware. The mere existence of the store
- * dir and the key file does not prove they match (RUSH-1975 data-loss window): on
- * the non-co-located key path the swap is four renames, and a crash after the
- * store swap (`stageDir`->`dir`) but before the key swap (`keyTmp`->`keyPath`)
- * finishes leaves a NEW-key store next to the OLD key file, both present. A
- * presence check would see "both here" and wrongly sweep the only copies of the
- * old ciphertext (`<dir>.rotate-old-*`) and the new key (`<key>.rotate-new`),
- * permanently orphaning every secret. So we probe the actual ciphertext:
+ * Recovery is CONTENT-aware, not presence-aware, and it classifies the WHOLE
+ * store, not just one item. The mere existence of the store dir and the key file
+ * does not prove they match (RUSH-1975 data-loss window): on the non-co-located
+ * key path the swap is four renames, and a crash after the store swap
+ * (`stageDir`->`dir`) but before the key swap (`keyTmp`->`keyPath`) finishes
+ * leaves a NEW-key store next to the OLD key file, both present. A presence check
+ * would see "both here" and wrongly sweep the only copies of the old ciphertext
+ * (`<dir>.rotate-old-*`) and the new key (`<key>.rotate-new`), permanently
+ * orphaning every secret. So we probe the actual ciphertext with `classifyStore`,
+ * which distinguishes a store that opens fully under one key ('all') from one that
+ * is MIXED — some items under the live key, others under the incoming key ('some',
+ * e.g. after a mid-swap crash contaminated by a later `secrets set`):
  *
- *  1. If the live store decrypts under the live key file, the rotation is complete
- *     and consistent (or was never interrupted) — sweeping the `<dir>.rotate-*` /
- *     `<key>.rotate-*` artifacts is safe.
- *  2. Else, if it decrypts under `<key>.rotate-new`, the crash landed after the
- *     store swap but before the key swap finished — finish the rotation forward by
- *     installing `.rotate-new` as the live key, then sweep.
- *  3. Else roll back: restore the `<dir>.rotate-old-*` backup over `dir` and
- *     `<key>.rotate-oldkey` over the key file — but only once the backup is proven
- *     to decrypt under the old key.
- *  4. If neither forward nor rollback can be proven, leave every artifact in place;
- *     a leftover temp dir is recoverable, deleting the only copy of a key or
- *     ciphertext is not.
+ *  1. The live key opens EVERY non-orphan item ('all') → rotation complete and
+ *     consistent (or never interrupted); sweeping the `.rotate-*` artifacts is safe.
+ *  2. Else, if `<key>.rotate-new` opens every non-orphan item ('all'), the crash
+ *     landed after the store swap but before the key swap finished → finish the
+ *     rotation forward by installing `.rotate-new` as the live key, then sweep.
+ *  3. Else, if neither key opens any item, roll back: restore the
+ *     `<dir>.rotate-old-*` backup over `dir` and `<key>.rotate-oldkey` over the key
+ *     file — but only once the backup is proven to open fully under the old key.
+ *  4. If a key opens SOME but not all items ('some'), the store is MIXED — an
+ *     interrupted rotation contaminated by a later write, with live data under two
+ *     keys at once. Sweeping would delete the only copy of one of those keys, so we
+ *     REFUSE: throw an actionable error and preserve every recovery artifact for
+ *     out-of-band repair. Likewise, if neither forward nor rollback can be proven,
+ *     leave every artifact in place — a leftover temp dir is recoverable, deleting
+ *     the only copy of a key or ciphertext is not.
  *
  * A phase-marker / journal file was considered and deliberately skipped: the
  * AES-256-GCM auth tag already makes the decrypt probe an authoritative,
@@ -535,6 +611,7 @@ function readKeyFile(fp: string): string | null {
  * be a second source of truth that can disagree with reality — its own write has
  * crash windows, and a stale marker misleads — so it would weaken, not strengthen,
  * this guarantee. Idempotent; a no-op when no rotation artifacts are present.
+ * Callers run this under the store lock (see `withStoreLock`).
  */
 function recoverInterruptedRotation(keyPath: string): void {
   const dir = fileDir();
@@ -581,26 +658,53 @@ function recoverInterruptedRotation(keyPath: string): void {
     return;
   }
 
-  // 1. Live key opens the store -> rotation complete/consistent. Sweep is safe.
-  if (storeOpensUnder(dir, readKeyFile(keyPath))) { sweep(); return; }
+  const liveKey = readKeyFile(keyPath);
+  const newKey = readKeyFile(keyNew);
+  const oldKey = readKeyFile(keyOld);
+  const candidates = [liveKey, newKey, oldKey];
 
-  // 2. `.rotate-new` opens the store but the live key does not -> the crash landed
-  //    after the store swap, before the key swap finished. Finish the rotation
-  //    forward by installing the new key, then sweep.
-  if (fs.existsSync(keyNew) && storeOpensUnder(dir, readKeyFile(keyNew))) {
+  // A MIXED store cannot be swept safely: live data is sealed under two keys at
+  // once, so deleting either `.rotate-new` or the old-ciphertext backup destroys
+  // one class permanently. Refuse loudly and keep every artifact for out-of-band
+  // repair — never report success over a store we would be corrupting.
+  const refuseMixed = (label: string): never => {
+    throw new Error(
+      `Interrupted secrets rotation left a MIXED store at ${dir}: ${label}. This ` +
+      `happens when a \`secrets set\` landed between a crashed rotation and this ` +
+      `recovery. Refusing to sweep — every recovery artifact is preserved. Recover ` +
+      `out of band: for each ${dir}/*.enc, decrypt it under whichever of ${keyPath}` +
+      (fs.existsSync(keyNew) ? `, ${keyNew}` : '') +
+      (fs.existsSync(keyOld) ? `, ${keyOld}` : '') +
+      ` opens it, re-seal all items under one key, then re-run \`rotate-passphrase\`.`,
+    );
+  };
+
+  // 1. Live key opens the WHOLE store -> rotation complete/consistent. Sweep safe.
+  //    Opens only some items -> MIXED, refuse.
+  const liveMatch = classifyStore(dir, liveKey, candidates);
+  if (liveMatch === 'all') { sweep(); return; }
+  if (liveMatch === 'some') refuseMixed('some items open under the live key and others do not');
+
+  // 2. `.rotate-new` opens the whole store, the live key none of it -> the crash
+  //    landed after the store swap, before the key swap finished. Finish the
+  //    rotation forward by installing the new key, then sweep. Opens only some ->
+  //    MIXED, refuse.
+  const newMatch = classifyStore(dir, newKey, candidates);
+  if (newMatch === 'all') {
     try { fs.rmSync(keyPath, { force: true }); } catch { /* may be absent mid-key-swap */ }
     fs.renameSync(keyNew, keyPath);
     fsyncDir(path.dirname(keyPath));
     sweep();
     return;
   }
+  if (newMatch === 'some') refuseMixed('some items open under the incoming (.rotate-new) key and others do not');
 
-  // 3. Neither key opens the live store -> roll back to the pre-rotation state,
-  //    but only once the backup store is proven to decrypt under the old key.
-  const oldKey = readKeyFile(keyOld);
-  const rollbackKey = bakDir && storeOpensUnder(bakDir, oldKey)
+  // 3. Neither key opens the live store -> roll back to the pre-rotation state, but
+  //    only once the backup store is proven to open FULLY under the old key (or the
+  //    live key, when `.rotate-oldkey` was not written yet — Window A).
+  const rollbackKey = bakDir && classifyStore(bakDir, oldKey, candidates) === 'all'
     ? oldKey
-    : (bakDir && storeOpensUnder(bakDir, readKeyFile(keyPath)) ? readKeyFile(keyPath) : null);
+    : (bakDir && classifyStore(bakDir, liveKey, candidates) === 'all' ? liveKey : null);
   if (bakDir && fs.existsSync(bakDir) && rollbackKey != null) {
     fs.rmSync(dir, { recursive: true, force: true });
     fs.renameSync(bakDir, dir);
@@ -649,7 +753,7 @@ function recoverInterruptedRotation(keyPath: string): void {
  * point, and next-run recovery must heal it without data loss. `tamperStaged` forces
  * a staged item to fail its round-trip check, exercising the verify-before-swap abort.
  */
-export function rotatePassphrase(opts: {
+export interface RotatePassphraseOpts {
   dryRun?: boolean;
   newPassphrase?: string;
   onStagedBeforeCommit?: () => void;
@@ -657,7 +761,18 @@ export function rotatePassphrase(opts: {
   onStoreSwappedBeforeKeySwap?: () => void;
   onKeyBackedUpBeforeNewKey?: () => void;
   tamperStaged?: boolean;
-} = {}): RotatePassphraseReport {
+}
+
+/**
+ * Rotate under the exclusive store lock, so no `secrets set`/`delete` and no
+ * second rotation can interleave with the swap (see `withStoreLock`). The whole
+ * run — recovery, verify, swap — holds the lock; it is released on return or throw.
+ */
+export function rotatePassphrase(opts: RotatePassphraseOpts = {}): RotatePassphraseReport {
+  return withStoreLock(() => rotatePassphraseLocked(opts));
+}
+
+function rotatePassphraseLocked(opts: RotatePassphraseOpts): RotatePassphraseReport {
   const dryRun = opts.dryRun ?? false;
   // Resolve the key path. If the live key file is absent because a prior rotation
   // crashed mid-key-swap, fall back to the interrupted rotation's target so
@@ -820,4 +935,16 @@ export function _resetFileStoreForTest(opts: {
   }
   cachedPassphrase = opts.passphrase ?? null;
   warnedAutoPassphrase = false;
+  lockAcquireTimeoutMsOverride = null;
+}
+
+/** Test-only: shorten the store-lock acquire timeout so a contended-lock assertion
+ *  fails fast instead of waiting out the 30s production budget. */
+export function _setFileStoreLockTimeoutForTest(ms: number | null): void {
+  lockAcquireTimeoutMsOverride = ms;
+}
+
+/** Test-only: the cross-process store-lock target (sibling of the store dir). */
+export function _fileStoreLockPathForTest(): string {
+  return fileStoreLockPath();
 }

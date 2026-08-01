@@ -7,12 +7,18 @@
   exposure being fixed). The new command decrypts every `<item>.enc` under the
   current key, re-encrypts under a freshly generated one, and swaps both the
   ciphertext and the 0600 key file by directory rename after verifying every item
-  round-trips. A crash at any point self-heals on the next run to a single readable
-  store — content-aware recovery probes which key actually decrypts the live store
-  (not merely which files are present) and either completes the rotation forward or
-  rolls back, so a crash between the store swap and the key swap can never orphan
-  the store under a mismatched key. No plaintext secret or passphrase is ever
-  written to disk, argv, or a log. Items
+  round-trips. A crash at any point self-heals on the next *rotate* run to a single
+  readable store — content-aware recovery probes which key actually decrypts the
+  live store (not merely which files are present) and classifies the WHOLE store:
+  it completes the rotation forward or rolls back only when one key opens every
+  item, and if a later `secrets set` contaminated a crashed rotation into a MIXED
+  store (items under two keys at once) it refuses with an actionable error and
+  preserves every recovery artifact rather than sweeping the only copy of a key —
+  so a crash between the store swap and the key swap can never orphan the store,
+  even when a write landed in between. The rotation and every store write run under
+  one cross-process lock, so a `secrets set` or a second rotation can never
+  interleave with a swap in the first place. No plaintext secret or passphrase is
+  ever written to disk, argv, or a log. Items
   that don't decrypt under the current key (orphan caches, stale test artifacts)
   are carried through verbatim, never re-keyed. Dry-run by default (`--commit` to
   apply); refuses while the secrets-agent holds live unlocks or while

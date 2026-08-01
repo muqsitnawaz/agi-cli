@@ -27,6 +27,7 @@ import { execSync } from 'child_process';
 import {
   fileStore, getPassphrase, disableTtyEchoOrThrow, _resetFileStoreForTest,
   rotatePassphrase, machinePassphraseSourcePath, encryptForFallback, decryptForFallback,
+  _setFileStoreLockTimeoutForTest,
   type EncFile,
 } from './filestore.js';
 
@@ -407,6 +408,129 @@ describe('rotatePassphrase (RUSH-1975)', () => {
     // The real items are re-keyed.
     const encA = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
     expect(decryptForFallback(encA, 'nk')).toBe('value-a');
+  });
+
+  it('MIXED store (Window A crash + an interstitial write) is REFUSED, not swept — no silent loss', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+
+    // Crash in Window A: the NEW-key store is live, the OLD key file is still in
+    // place, `.rotate-new` (= new key) and the old-store backup are on disk.
+    expect(() => rotatePassphrase({
+      newPassphrase: 'winA-newkey',
+      onStoreSwappedBeforeKeySwap: () => { throw new Error('crash in Window A'); },
+    })).toThrow(/Window A/);
+
+    // An ordinary `secrets set` now seals ONE item under the stale on-disk (OLD)
+    // key, INTO the already-NEW-key store dir. The store is now MIXED: A and B under
+    // the new key, C under the old key. This is exactly the reviewer's repro.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    fileStore.set('agents-cli.secrets.prod.C', 'value-c', { allowAutoProvision: true });
+
+    // The next rotate must NOT read "one item opens under the live key" as
+    // "consistent, sweep". It must detect the mixed store and refuse, preserving
+    // BOTH the only copy of the new key (`.rotate-new`) and the old-ciphertext
+    // backup — nothing reports success, no secret is destroyed.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    expect(() => rotatePassphrase({ newPassphrase: 'winA-again' })).toThrow(/MIXED/i);
+
+    // Every recovery artifact survived.
+    expect(fs.readFileSync(`${keyFile}.rotate-new`, 'utf8')).toBe('winA-newkey');
+    expect(fs.readdirSync(tmpRoot).some((e) => e.startsWith('store.rotate-old-'))).toBe(true);
+
+    // And every pre-rotation secret is still recoverable off disk: A and B under the
+    // preserved new key, C under the live old key. Under the old "any item opens"
+    // sweep, A and B were unreadable under every key left on disk.
+    const encA = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    const encB = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.B.enc'), 'utf8')) as EncFile;
+    const encC = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.C.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encA, 'winA-newkey')).toBe('value-a');
+    expect(decryptForFallback(encB, 'winA-newkey')).toBe('value-b');
+    expect(decryptForFallback(encC, OLD_KEY)).toBe('value-c');
+  });
+
+  it('MIXED store (Window B crash + an interstitial write under a fresh key) is REFUSED, not swept', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+
+    // Crash in Window B: the NEW-key store is live, the key file is ABSENT (moved to
+    // `.rotate-oldkey`), `.rotate-new` holds the new key.
+    expect(() => rotatePassphrase({
+      newPassphrase: 'winB-newkey',
+      onKeyBackedUpBeforeNewKey: () => { throw new Error('crash in Window B'); },
+    })).toThrow(/Window B/);
+    expect(fs.existsSync(keyFile)).toBe(false);
+
+    // With the key file gone, an ordinary `secrets set` auto-provisions a THIRD key
+    // and seals C under it — while A and B are still under the new key. Mixed store.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    fileStore.set('agents-cli.secrets.prod.C', 'value-c', { allowAutoProvision: true });
+    const thirdKey = fs.readFileSync(keyFile, 'utf8'); // the freshly provisioned key
+
+    // Recovery must refuse the mixed store rather than sweep the new key.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    expect(() => rotatePassphrase({ newPassphrase: 'winB-again' })).toThrow(/MIXED/i);
+
+    expect(fs.readFileSync(`${keyFile}.rotate-new`, 'utf8')).toBe('winB-newkey');
+    expect(fs.readFileSync(`${keyFile}.rotate-oldkey`, 'utf8')).toBe(OLD_KEY);
+    expect(fs.readdirSync(tmpRoot).some((e) => e.startsWith('store.rotate-old-'))).toBe(true);
+
+    const encA = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    const encC = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.C.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encA, 'winB-newkey')).toBe('value-a');
+    expect(decryptForFallback(encC, thirdKey)).toBe('value-c');
+  });
+
+  it('a store where no item opens under any candidate key is left intact (no sweep)', () => {
+    // Seed a store that decrypts under NO key on disk: one .enc sealed under a key
+    // that is neither the live key nor any rotation artifact.
+    const strayEnc = encryptForFallback('stray-secret', 'a-key-nobody-has');
+    fs.mkdirSync(storeDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(storeDir, 'agents-cli.secrets.gone.X.enc'), JSON.stringify(strayEnc), { mode: 0o600 });
+    // A dangling `.rotate-new` artifact (under yet another key) makes recovery run,
+    // but there is no backup dir, so neither forward nor rollback is provable.
+    fs.writeFileSync(`${keyFile}.rotate-new`, 'another-unrelated-key', { mode: 0o600 });
+    const encBefore = fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.gone.X.enc'), 'utf8');
+
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    // The rotation itself has nothing it can decrypt, so it aborts — but recovery
+    // must NOT have swept the artifacts on the way in.
+    expect(() => rotatePassphrase({ newPassphrase: 'nk' })).toThrow(/No item decrypted/i);
+
+    expect(fs.existsSync(`${keyFile}.rotate-new`)).toBe(true);
+    expect(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.gone.X.enc'), 'utf8')).toBe(encBefore);
+  });
+
+  it('the store lock serializes a concurrent write and a second rotation against a rotation in progress', () => {
+    seed('prod', 'A', 'value-a');
+    _setFileStoreLockTimeoutForTest(150); // fail fast instead of the 30s budget
+
+    let setError: unknown;
+    let rotError: unknown;
+    // The rotation holds the store lock for its whole run. Fire a competing write
+    // and a competing rotation from inside the mid-swap window: both must find the
+    // lock held and fail to acquire (rather than interleave into a mixed store).
+    const rep = rotatePassphrase({
+      newPassphrase: 'nk',
+      onStoreSwappedBeforeKeySwap: () => {
+        try { fileStore.set('agents-cli.secrets.prod.C', 'racer', { allowAutoProvision: true }); }
+        catch (e) { setError = e; }
+        try { rotatePassphrase({ newPassphrase: 'nk2' }); }
+        catch (e) { rotError = e; }
+      },
+    });
+
+    expect(rep.committed).toBe(true); // the holder finished; the challengers were blocked
+    expect((setError as Error)?.message).toMatch(/Could not acquire lock/);
+    expect((rotError as Error)?.message).toMatch(/Could not acquire lock/);
+    // The blocked write never landed — no stray item forged a mixed store.
+    expect(fs.existsSync(path.join(storeDir, 'agents-cli.secrets.prod.C.enc'))).toBe(false);
+
+    // With the lock free, a write and a rotation both succeed normally.
+    fileStore.set('agents-cli.secrets.prod.C', 'value-c', { allowAutoProvision: true });
+    expect(fileStore.get('agents-cli.secrets.prod.C')).toBe('value-c');
+    const rep2 = rotatePassphrase({ newPassphrase: 'nk3' });
+    expect(rep2.committed).toBe(true);
   });
 
   it('throws when there is no machine-local passphrase to rotate', () => {

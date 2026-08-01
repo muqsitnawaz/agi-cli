@@ -29,9 +29,10 @@ export function registerSecretsRotatePassphraseCommand(secrets: Command): void {
     .addHelpText('after', `
 Rotates the auto-provisioned file-store key at ~/.agents/.secrets-key/passphrase:
 decrypts every item under the current key, re-encrypts under a new one, verifies
-every item round-trips, then swaps the store and key file atomically. A crash at
-any point leaves the old store readable with the old key. No plaintext secret
-value or passphrase is ever written to disk, argv, or a log.
+every item round-trips, then swaps the store and key file atomically. A crash
+before the swap leaves the old store readable with the old key; a crash inside the
+swap self-heals on the next rotate-passphrase run (not on an ordinary get). No
+plaintext secret value or passphrase is ever written to disk, argv, or a log.
 
 Examples:
   # Report what would rotate (no writes)
