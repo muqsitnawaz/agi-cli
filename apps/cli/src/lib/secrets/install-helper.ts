@@ -189,29 +189,6 @@ export function getKeychainHelperPath(): string {
   return exec;
 }
 
-/**
- * True when `getKeychainHelperPath()` can return a path without throwing —
- * the helper is already installed, or a source bundle exists to install from.
- * Never throws, and never installs anything.
- *
- * Existence probes need this. `getKeychainHelperPath()` throws when the signed
- * bundle is absent, which is correct for a read or a write — the user must be
- * told their keychain is unreachable. It is wrong for a boolean query like
- * `hasKeychainToken()`, where an unreachable helper means "no readable item",
- * not "abort the caller". A machine with no bundle is a real state, not a bug:
- * the npm tarball can be built without the helper, and CI runners never have it.
- */
-export function keychainHelperAvailable(): boolean {
-  if (process.platform !== 'darwin') return false;
-  if (fs.existsSync(installedExecutablePath())) return true;
-  try {
-    sourceAppPath();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** Diagnostic snapshot used by `agents helper status`. */
 export interface KeychainHelperStatus {
   source: string | null;
