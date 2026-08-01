@@ -53,20 +53,25 @@ describe('snapshotAuth + materializeAuth round-trip', () => {
     expect(snap.bound).toEqual([]);
   });
 
-  it('classifies claude + antigravity as keychain-bound on macOS (never captured)', () => {
+  it('never captures the setup-token agent (claude); antigravity is keychain-bound on macOS', () => {
     const src = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-src-'));
-    // Even if a stale file exists, darwin must treat these as bound.
+    // Even if a stale login file exists, claude is skipped: its auth is the
+    // file-based setup-token bundle, never a copied interactive login. So it is
+    // neither captured NOR surfaced as `bound` (there is nothing to hand-login).
     seedFile(src, '.claude/.credentials.json', '{"claudeAiOauth":"x"}');
     const snap = snapshotAuth(['claude', 'antigravity', 'codex'], { home: src, platform: 'darwin' });
-    expect(snap.bound.sort()).toEqual(['antigravity', 'claude']);
     expect(snap.files.map((f) => f.agent)).not.toContain('claude');
+    expect(snap.bound).toEqual(['antigravity']);
   });
 
-  it('captures claude credentials on Linux (portable there)', () => {
+  it('never captures claude on Linux either — the copy that logged the fleet out is gone', () => {
     const src = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-src-'));
+    // The daily-logout bug: copying claude's rotating .credentials.json across
+    // boxes invalidated it on the source. It is a setup-token agent now, so it is
+    // never captured on any platform — its auth travels as the synced auth bundle.
     seedFile(src, '.claude/.credentials.json', '{"claudeAiOauth":"linux-token"}');
     const snap = snapshotAuth(['claude'], { home: src, platform: 'linux' });
-    expect(snap.files.map((f) => f.agent)).toEqual(['claude']);
+    expect(snap.files).toEqual([]);
     expect(snap.bound).toEqual([]);
   });
 });

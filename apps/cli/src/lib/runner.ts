@@ -50,9 +50,7 @@ import { loadTask as loadHostTask } from './hosts/tasks.js';
 import { reconcileTask as reconcileHostTask } from './hosts/reconcile.js';
 import { backgroundSpawnOptions } from './platform/process.js';
 import { walkForFiles } from './fs-walk.js';
-import { getBinaryPath, getVersionHomePath, isVersionInstalled, resolveVersion } from './versions.js';
-import { claudeHomeHasOwnCredential } from './agents.js';
-import { resolveAccountSetupToken } from './secrets/account-token.js';
+import { getBinaryPath, isVersionInstalled, resolveVersion } from './versions.js';
 import {
   getConfiguredRunStrategy,
   resolveRunVersion,
@@ -486,28 +484,10 @@ export function buildRoutineSpawnEnv(
   for (const [k, v] of Object.entries(execEnv)) {
     if (v !== undefined) out[k] = v;
   }
-  // A headless routine should authenticate the rotation-pinned account via its
-  // long-lived, NON-rotating setup-token, not the interactive OAuth session.
-  // Claude Code's interactive session uses single-use rotating refresh tokens: one
-  // fleet machine refreshing invalidates that account on every other machine, so
-  // they 401 and log out (Claude Code #25609 / #56339) — the fleet-wide daily
-  // logout. If the daemon injected this account's per-account
-  // CLAUDE_CODE_OAUTH_TOKEN_<slug> (from a headless-readable no-ACL bundle), use it;
-  // that also works on macOS, where the drop path below is inert
-  // (claudeHomeHasOwnCredential is false on darwin, agents.ts).
-  //
-  // Fallback (RUSH-1979): with no per-account token, keep the prior behavior — drop
-  // the single ambient CLAUDE_CODE_OAUTH_TOKEN when the pinned account has its own
-  // on-disk credential (Linux) so it isn't shadowed; keep it otherwise.
-  if (agent === 'claude' && version && out.CLAUDE_CONFIG_DIR) {
-    const home = getVersionHomePath('claude', version);
-    const accountToken = resolveAccountSetupToken(baseEnv, home);
-    if (accountToken) {
-      out.CLAUDE_CODE_OAUTH_TOKEN = accountToken;
-    } else if (claudeHomeHasOwnCredential(home)) {
-      delete out.CLAUDE_CODE_OAUTH_TOKEN;
-    }
-  }
+  // Auth is handled by buildExecEnv above: it injects the account's file-backed,
+  // non-rotating CLAUDE_CODE_OAUTH_TOKEN on the standard path, identical for
+  // interactive and routine runs. Nothing routine-specific to do here — the daemon
+  // holds and injects no token of its own (Muqsit's requirement #1).
   if (timezone) out.TZ = timezone;
   return out;
 }

@@ -38,13 +38,6 @@ const SYSTEMD_UNIT = 'agents-daemon.service';
 const MONITOR_TICK_MS = 60_000;
 const WEDGE_THRESHOLD_TICKS = 3;
 
-// A long-lived `claude setup-token` value stored in this secrets bundle/key is
-// baked into the daemon's service-manager environment so headless routine runs
-// authenticate without depending on the short-lived interactive Keychain OAuth
-// session (which expires between runs and produces intermittent 401s).
-const DAEMON_OAUTH_BUNDLE = 'claude';
-const DAEMON_OAUTH_KEY = 'CLAUDE_CODE_OAUTH_TOKEN';
-
 /**
  * RUSH-1817: decide whether the daemon should (re)take over hosting the secrets
  * broker. The startup host decision is one-shot; this drives the periodic
@@ -307,49 +300,12 @@ export async function runDaemon(): Promise<void> {
   }
   log('INFO', `Daemon started (PID: ${process.pid})`);
 
-  // RUSH-1759: the launchd plist / systemd unit no longer bake the Claude OAuth
-  // token onto disk. Obtain it here from the secure `claude` secrets bundle and
-  // inject into this process's env so every routine run this daemon spawns still
-  // receives it (via the sandbox allowlist), without the token ever being
-  // persisted in the service manifest. A read from a file-backed store (Linux)
-  // needs no prompt; on macOS it resolves broker-only from an unlocked
-  // secrets-agent and is otherwise absent (leaving the daemon on its existing
-  // interactive OAuth session), matching the detached-start path. Never blocks.
-  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN) {
-    const bundleEnv = readDaemonClaudeBundleEnv();
-    const oauthToken = (bundleEnv[DAEMON_OAUTH_KEY] ?? '').trim();
-    if (oauthToken) {
-      process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
-      // Also inject each per-account CLAUDE_CODE_OAUTH_TOKEN_<slug> present in the
-      // bundle, so a routine authenticates its rotation-pinned account via that
-      // account's own long-lived, non-rotating setup-token (runner.ts
-      // buildRoutineSpawnEnv) instead of the interactive session that rotates and
-      // logs the fleet out (Claude Code #25609 / #56339).
-      let perAccount = 0;
-      for (const [k, v] of Object.entries(bundleEnv)) {
-        if (k.startsWith('CLAUDE_CODE_OAUTH_TOKEN_') && (v ?? '').trim() && !process.env[k]) {
-          process.env[k] = v!.trim();
-          perAccount++;
-        }
-      }
-      log('INFO', `Loaded Claude OAuth token from secrets bundle for routine runs${perAccount ? ` (+${perAccount} per-account)` : ''}`);
-    } else {
-      // No token available (e.g. a headless macOS daemon whose keychain was
-      // locked at start resolves broker-only and gets nothing). Historically
-      // this was silent, so every Claude routine the daemon spawned failed auth
-      // with no signal. Make it loud: WARN in the log and fire a desktop alert.
-      log(
-        'WARN',
-        'No Claude OAuth token available — Claude routine runs will fail auth on this host. ' +
-          'Restart the daemon with the keychain unlocked, or unlock the `claude` secrets bundle.',
-      );
-      notifyDesktop({
-        title: 'agents daemon: no Claude credential',
-        body: 'Claude routines will fail auth on this host. Restart the daemon with the keychain unlocked.',
-        action: 'routines:list',
-      });
-    }
-  }
+  // The daemon holds and injects NO Claude token of its own (Muqsit's requirement
+  // #1). Every routine it spawns goes through the standard buildExecEnv path, which
+  // resolves the rotation-pinned account's file-backed, non-rotating setup-token and
+  // injects CLAUDE_CODE_OAUTH_TOKEN per run — identical to an interactive `agents
+  // run`. No ambient token on the daemon process, no interactive/rotating credential
+  // ever read or copied.
 
   // Reap any stray duplicate daemon of this install that slipped past the start
   // lock or was orphaned by a hard-crash — before it can double-fire jobs.
@@ -804,43 +760,6 @@ export async function runDaemon(): Promise<void> {
   await new Promise(() => {});
 }
 
-/**
- * Read the long-lived Claude OAuth token (from `claude setup-token`) that the
- * user stored under the `claude` secrets bundle. Resolves the bundle the same
- * way `agents run --secrets` does. Interactive starts may prompt Keychain;
- * headless auto-starts are broker-only and return null unless the user already
- * unlocked the bundle in the secrets agent. That keeps a background browser
- * command from hanging on an unseen biometric prompt. Never throws: an absent
- * token leaves the daemon on its existing interactive OAuth session.
- */
-export function readDaemonClaudeOAuthToken(
-  opts: { allowPrompt?: boolean } = {},
-): string | null {
-  const token = (readDaemonClaudeBundleEnv(opts)[DAEMON_OAUTH_KEY] ?? '').trim();
-  return token.length > 0 ? token : null;
-}
-
-/**
- * Read the FULL `claude` bundle env — the main `CLAUDE_CODE_OAUTH_TOKEN` plus any
- * per-account `CLAUDE_CODE_OAUTH_TOKEN_<slug>` setup-tokens. Same resolution and
- * never-throws contract as {@link readDaemonClaudeOAuthToken}; returns `{}` when
- * the bundle can't be read (broker-only headless miss, absent bundle, etc.).
- */
-export function readDaemonClaudeBundleEnv(
-  opts: { allowPrompt?: boolean } = {},
-): Record<string, string> {
-  try {
-    const allowPrompt = opts.allowPrompt ?? Boolean(process.stdin.isTTY);
-    const { env } = readAndResolveBundleEnv(DAEMON_OAUTH_BUNDLE, {
-      caller: 'daemon',
-      agentOnly: !allowPrompt,
-    });
-    return env;
-  } catch {
-    return {};
-  }
-}
-
 /** Escape a string for safe inclusion in an XML <string> node. */
 function xmlEscape(s: string): string {
   return s
@@ -1077,31 +996,16 @@ function startDaemonLocked(agentsBin: string): { pid: number | null; method: str
 }
 
 /**
- * Environment for the detached daemon fallback. The launchd/systemd paths
- * deliver the long-lived OAuth token via the service manifest's environment;
- * the detached path has no manifest, so inject it here. Read happens during an
- * interactive `routines start`, so a Keychain Touch ID prompt can be satisfied;
- * the daemon then passes it to every routine run it spawns. An already-set
- * value (e.g. inherited from launchd) is left untouched.
+ * Environment for the detached daemon fallback. The daemon injects NO Claude token
+ * of its own — every routine it spawns resolves the account's file-backed
+ * setup-token on the standard buildExecEnv path (see runDaemon). So this is just
+ * the inherited process environment; kept as a seam for tests and future daemon-env
+ * needs.
  */
 export function buildDetachedDaemonEnv(
   baseEnv: NodeJS.ProcessEnv = process.env,
-  bundleEnv: Record<string, string> = readDaemonClaudeBundleEnv(),
 ): NodeJS.ProcessEnv {
-  const env = { ...baseEnv };
-  if (!env.CLAUDE_CODE_OAUTH_TOKEN) {
-    const main = (bundleEnv[DAEMON_OAUTH_KEY] ?? '').trim();
-    if (main) env.CLAUDE_CODE_OAUTH_TOKEN = main;
-  }
-  // Per-account setup-tokens — same rationale as the runDaemon startup injection:
-  // a routine authenticates its rotation-pinned account via that account's own
-  // long-lived, non-rotating token. An already-set value wins.
-  for (const [k, v] of Object.entries(bundleEnv)) {
-    if (k.startsWith('CLAUDE_CODE_OAUTH_TOKEN_') && (v ?? '').trim() && !env[k]) {
-      env[k] = v.trim();
-    }
-  }
-  return env;
+  return { ...baseEnv };
 }
 
 /**

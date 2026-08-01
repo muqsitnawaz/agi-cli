@@ -18,6 +18,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { readAndResolveBundleEnv, isHeadlessSecretsContext } from './bundles.js';
+
+/**
+ * The reserved, file-backed secrets bundle that holds the per-account Claude
+ * setup-tokens (`CLAUDE_CODE_OAUTH_TOKEN_<slug>` keys). File-backed → reads need
+ * only the passphrase, never the OS keychain, so they never pop Touch ID. This is
+ * THE canonical source for headless Claude auth and usage reads; the interactive
+ * login keychain is never consulted.
+ */
+export const CLAUDE_SETUP_TOKEN_BUNDLE = 'claude.ai';
+
 /** The `CLAUDE_CODE_OAUTH_TOKEN_<slug>` env key for a given account email/id. */
 export function accountTokenKey(account: string): string {
   const slug = account
@@ -67,4 +78,34 @@ export function resolveAccountSetupToken(
   if (!email) return null;
   const token = env[accountTokenKey(email)];
   return typeof token === 'string' && token.trim().length > 0 ? token.trim() : null;
+}
+
+/**
+ * Read the per-account Claude setup-token for the account pinned to `home`,
+ * straight from the file-backed {@link CLAUDE_SETUP_TOKEN_BUNDLE}. This is the
+ * canonical resolver for the STANDARD run path (`buildExecEnv`), usage reads, and
+ * the daemon — one source, identical for interactive and headless. NEVER touches
+ * the OS keychain or the interactive login credential.
+ *
+ * Returns null when the home has no known account, no matching per-account token
+ * is seeded, or the bundle can't be resolved (e.g. a headless macOS read with no
+ * passphrase). The caller then leaves Claude Code to authenticate itself — a safe
+ * no-op, not a keychain fallback. `agentOnly` in a headless context means the read
+ * fails fast instead of hanging on a prompt nobody can answer.
+ */
+export function readAccountSetupToken(home: string): string | null {
+  const email = readClaudeAccountEmail(home);
+  if (!email) return null;
+  const key = accountTokenKey(email);
+  try {
+    const { env } = readAndResolveBundleEnv(CLAUDE_SETUP_TOKEN_BUNDLE, {
+      caller: 'account-token',
+      keys: [key],
+      agentOnly: isHeadlessSecretsContext(),
+    });
+    const token = (env[key] ?? '').trim();
+    return token.length > 0 ? token : null;
+  } catch {
+    return null;
+  }
 }

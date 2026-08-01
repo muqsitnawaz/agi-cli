@@ -17,6 +17,7 @@ import { promisify } from 'util';
 import chalk from 'chalk';
 
 import { decodeJwtPayload, decryptDroidAuthPayload, type AccountInfo } from './agents.js';
+import { readAccountSetupToken } from './secrets/account-token.js';
 import { walkForFiles } from './fs-walk.js';
 import {
   getKeychainToken,
@@ -573,47 +574,18 @@ async function getCodexUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
   }
 }
 
-/**
- * The access token to use for a READ-ONLY Claude usage fetch, or null when the
- * stored token is within the refresh leeway.
- *
- * Returns null instead of refreshing on purpose. Claude's refresh token is
- * single-use and rotates server-side on every refresh; with one account signed
- * into several machines, refreshing here would stampede that one token and
- * silently invalidate every other holder — the RUSH-1822 failure, except in the
- * usage path (fired in the background by the SWR cache and by `agents run`'s
- * default "balanced" rotation on every unpinned run) rather than the health
- * probe. So a usage read must never rotate: a near-expiry token yields "no usage
- * right now" instead of a fleet-wide logout. Mirrors {@link probeClaudeStatus};
- * the single legitimate refresh belongs to the actual claude run, never a read.
- * Pure — unit-tested.
- */
-export function claudeUsageAccessTokenNoRefresh(
-  oauth: Pick<ClaudeOauthCredentials, 'accessToken' | 'expiresAt'>,
-): string | null {
-  if (claudeAccessTokenNeedsRefresh(oauth.expiresAt ?? null)) return null;
-  const token = oauth.accessToken?.trim();
-  return token ? token : null;
-}
 
 /** Fetch Claude usage via the Anthropic OAuth usage API. */
 async function getClaudeUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
   try {
-    // Opt into the no-ACL access-token cache: this is the every-60s watchdog hot
-    // path and usage needs only the access token, so it kills the Touch ID storm.
-    const oauth = await loadClaudeOauth(options?.home, { accessTokenCache: true });
-    if (!oauth?.accessToken) {
-      return { snapshot: null, error: null };
-    }
-
-    const requestedOrgId = normalizeString(options?.organizationId);
-    const liveOrgId = normalizeString(oauth.organizationUuid);
-    if (!isClaudeUsageOrgMatch(requestedOrgId, liveOrgId)) {
-      return { snapshot: null, error: null };
-    }
-
-    // Read-only: never refresh a single-use token just to read usage (RUSH-1822).
-    const accessToken = claudeUsageAccessTokenNoRefresh(oauth);
+    // Usage is drawn from this account's file-backed setup-token (resolved per
+    // account from the home's signed-in email) — NEVER the interactive login
+    // keychain. That is what removes the `agents view` Touch ID storm: a file-backed
+    // read has no keychain ACL to authorize. A setup-token is long-lived and
+    // non-rotating, so it needs no refresh and no org-match gate. No token seeded
+    // for the account → no bar, and we never fall back to the login credential
+    // (Muqsit's requirement #2/#5).
+    const accessToken = options?.home ? readAccountSetupToken(options.home) : null;
     if (!accessToken) {
       return { snapshot: null, error: null };
     }
@@ -930,26 +902,15 @@ export interface ProviderProbe {
   error?: string;
 }
 
-/** Probe Claude's OAuth token against the usage endpoint. Never refreshes — reports `expired` for a near-expiry token; see the comment below (RUSH-1822). */
+/** Probe Claude's setup-token against the usage endpoint. Reads the file-backed per-account setup-token (no keychain, no Touch ID); never refreshes (a setup-token is non-rotating). */
 export async function probeClaudeStatus(home?: string, cliVersion?: string | null): Promise<ProviderProbe> {
-  // Opt into the no-ACL access-token cache: the daemon warms this probe every ~3
-  // min per account and it never refreshes (access token only), so caching is safe
-  // and stops it from adding to the Touch ID storm.
-  const oauth = await loadClaudeOauth(home, { accessTokenCache: true });
-  const accessToken = oauth?.accessToken?.trim();
+  // Health/auth probe (fleet ping + the daemon's ~3-min fleet-cache warm). Read the
+  // account's file-backed setup-token, NOT the interactive login keychain — the
+  // keychain read here was the daemon-warm half of the Touch ID storm, and copying
+  // the rotating login is what logged the fleet out. A setup-token is long-lived and
+  // non-rotating, so there is nothing to refresh or stampede.
+  const accessToken = home ? readAccountSetupToken(home) : null;
   if (!accessToken) return { status: null, token: 'missing' };
-  // Never refresh from a health probe. Claude's refresh token is single-use and
-  // rotates on every refresh; with one account signed into several machines the
-  // daemon's every-3-min fleet-cache warm (probeLocalFleetAuth -> here) would
-  // stampede that one rotating token and silently invalidate every other
-  // holder, dropping the fleet to "run /login" (RUSH-1822). Mirror the sibling
-  // Kimi/Droid probes, which never refresh: if the stored token is within the
-  // refresh leeway of expiry, report the non-fatal `expired` state ("would need
-  // a refresh") instead of rotating it, and leave the single legitimate refresh
-  // to the run/usage hot path (getClaudeAccessToken).
-  if (claudeAccessTokenNeedsRefresh(oauth?.expiresAt ?? null)) {
-    return { status: null, token: 'expired' };
-  }
   try {
     const response = await fetch(CLAUDE_USAGE_URL, {
       method: 'GET',
@@ -1441,19 +1402,6 @@ export function getClaudeKeychainService(home?: string): string {
   const configDir = path.join(home, '.claude').normalize('NFC');
   const hash = createHash('sha256').update(configDir).digest('hex').slice(0, 8);
   return `${CLAUDE_KEYCHAIN_SERVICE}-${hash}`;
-}
-
-/**
- * Check whether a requested org ID matches the live OAuth org ID.
- * Returns true when either is absent (no filtering) or when they match.
- */
-export function isClaudeUsageOrgMatch(
-  requestedOrgId: string | null | undefined,
-  liveOrgId: string | null | undefined
-): boolean {
-  const requested = normalizeString(requestedOrgId);
-  const live = normalizeString(liveOrgId);
-  return !requested || !live || requested === live;
 }
 
 /** Read a cached usage snapshot for a given usage key. Returns null if absent or stale. */

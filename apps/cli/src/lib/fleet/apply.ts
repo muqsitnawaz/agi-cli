@@ -9,6 +9,8 @@
  */
 
 import * as os from 'os';
+import type { AgentId } from '../types.js';
+import { isSetupTokenAgent } from '../credentials.js';
 import type { DeviceProfile } from '../devices/registry.js';
 import { sshTargetFor } from '../devices/connect.js';
 import { readyProbe, bootstrapAgentsCli } from '../hosts/ready.js';
@@ -120,6 +122,10 @@ export interface SourceAuth {
  */
 export function canPushLogin(agent: string, targetPlatform: string | undefined, src: SourceAuth): boolean {
   if (!isPropagatableAgent(agent)) return false;
+  // Never push a setup-token harness (claude): its auth is the file-based auth
+  // bundle, never a copied INTERACTIVE login (which rotates→revokes and logs the
+  // fleet out — req #2). Seeded via `/fleet:mint-auth`, synced as the auth bundle.
+  if (isSetupTokenAgent(agent as AgentId)) return false;
   if (src.bound.has(agent)) return false;
   if (targetPlatform === 'macos' && KEYCHAIN_BOUND_ON_MAC.has(agent)) return false;
   return src.available.has(agent);
@@ -184,6 +190,7 @@ export function diffFleet(desired: DeviceDesired[], probes: Map<string, DevicePr
             rowActions.push({ device: d.device, kind: 'push-login', agent: id, detail: `propagate ${id} login` });
           } else if (
             isPropagatableAgent(id) &&
+            !isSetupTokenAgent(id as AgentId) &&
             (ctx.sourceAuth.bound.has(id) || (probe.platform === 'macos' && KEYCHAIN_BOUND_ON_MAC.has(id)))
           ) {
             // A login-propagation candidate we still can't push: the source token

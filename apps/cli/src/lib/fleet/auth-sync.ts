@@ -17,6 +17,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { AuthFilePayload, AuthBundle, AuthSnapshotResult } from './types.js';
+import type { AgentId } from '../types.js';
+import { isSetupTokenAgent } from '../credentials.js';
 
 /** A portable credential file location, relative to $HOME. */
 interface AuthFileSpec {
@@ -43,8 +45,14 @@ export const FLEET_AUTH_FILES: Record<string, AuthFileSpec[]> = {
   antigravity: [{ rel: '.gemini/antigravity-cli/antigravity-oauth-token', mode: 0o600 }],
 };
 
-/** Agents whose macOS credentials live in the ACL-bound login keychain. */
-export const KEYCHAIN_BOUND_ON_MAC: ReadonlySet<string> = new Set(['claude', 'antigravity']);
+/**
+ * Agents whose macOS credentials live in the ACL-bound login keychain and can only
+ * be provisioned by a manual per-machine login. Claude is NOT here: it is a
+ * setup-token agent (see {@link isSetupTokenAgent}) — its auth is the file-based
+ * auth bundle, resolved on the standard run path, so it is neither copied nor
+ * surfaced as a manual keychain login.
+ */
+export const KEYCHAIN_BOUND_ON_MAC: ReadonlySet<string> = new Set(['antigravity']);
 
 /** Which agents `apply` can propagate auth for at all. */
 export function isPropagatableAgent(agent: string): boolean {
@@ -210,6 +218,12 @@ export function snapshotAuth(agents: string[], opts: SnapshotOptions): AuthSnaps
   for (const agent of agents) {
     const specs = FLEET_AUTH_FILES[agent];
     if (!specs) continue; // not propagatable — caller surfaces separately if desired
+    // Never capture a setup-token harness (claude): its auth travels as the
+    // file-based auth bundle (synced on its own), NEVER as a copied INTERACTIVE
+    // login — copying a rotating login invalidates it on the source and logs the
+    // fleet out (Muqsit's requirement #2). Onboarding seeds the auth bundle; see
+    // `/fleet:mint-auth`.
+    if (isSetupTokenAgent(agent as AgentId)) continue;
     if (opts.platform === 'darwin' && KEYCHAIN_BOUND_ON_MAC.has(agent)) {
       bound.push(agent);
       continue;

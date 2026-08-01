@@ -16,6 +16,7 @@ import { getBinaryPath, getVersionHomePath, isVersionInstalled, resolveVersion }
 import { resolveModel, buildReasoningFlags } from './models.js';
 import { emitStart, maybeRotate, createTimer, redactPrompt, redactArgs } from './events.js';
 import { sanitizeProcessEnv } from './secrets/bundles.js';
+import { readAccountSetupToken } from './secrets/account-token.js';
 import { resolveActor, actorEnv } from './actor.js';
 import { getShimsDir, getHistoryDir } from './state.js';
 import { resolveCodexHome } from './codex-home.js';
@@ -370,7 +371,8 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
       ? resolvedVersion
       : (resolvedVersion && isVersionInstalled('claude', resolvedVersion) ? resolvedVersion : null);
     if (version) {
-      result.CLAUDE_CONFIG_DIR = path.join(getVersionHomePath('claude', version), '.claude');
+      const claudeHome = getVersionHomePath('claude', version);
+      result.CLAUDE_CONFIG_DIR = path.join(claudeHome, '.claude');
       // A managed pin lives in a per-version dir; Claude Code's own background
       // auto-updater would rewrite that pinned binary in place (and has left it
       // half-swapped and broken). Disable it so a pin stays a pin. Honor an
@@ -378,6 +380,19 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
       // options.env (spread over result below).
       if (result.DISABLE_AUTOUPDATER === undefined) {
         result.DISABLE_AUTOUPDATER = '1';
+      }
+      // Inject the account's file-backed setup-token as CLAUDE_CODE_OAUTH_TOKEN on
+      // the STANDARD run path — interactive AND daemon/routine runs both flow through
+      // buildExecEnv, so this is the single injection point (no daemon-special
+      // handling). Claude Code prefers this env var over the login keychain, so it
+      // never opens the keychain → zero Touch ID, and headless auth works on macOS.
+      // Resolved per-account from the version home's signed-in email. An explicit
+      // user value wins (process.env already in result, or options.env spread below).
+      // No token seeded for the account → leave it unset and let Claude Code use its
+      // own login; that is non-interference, not a keychain fallback.
+      if (result.CLAUDE_CODE_OAUTH_TOKEN === undefined) {
+        const token = readAccountSetupToken(claudeHome);
+        if (token) result.CLAUDE_CODE_OAUTH_TOKEN = token;
       }
     }
     delete result.CODEX_HOME;

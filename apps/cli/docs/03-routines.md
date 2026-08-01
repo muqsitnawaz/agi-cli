@@ -353,38 +353,33 @@ The sandbox overlay builds a clean `HOME` with no Claude credentials — the rea
 A routine that drives headless `claude` will fail authentication unless one of two
 conditions is met.
 
-**Current workaround — `sandbox: false`**
+**How auth works — the account's file-backed setup-token (no daemon token, no keychain)**
 
-Set `sandbox: false` on the routine to skip overlay creation. The agent inherits
-the daemon's full environment, including `CLAUDE_CODE_OAUTH_TOKEN` if the daemon
-was started with it (`runner.ts:218`):
+A routine authenticates exactly like an interactive `agents run`: `buildExecEnv`
+(the standard run path) resolves the rotation-pinned account's long-lived,
+non-rotating `claude setup-token` from the file-backed auth bundle and injects it as
+`CLAUDE_CODE_OAUTH_TOKEN` (`exec.ts` `buildExecEnv` → `readAccountSetupToken`).
+Claude Code prefers that env var over the login keychain, so a routine authenticates
+with no Touch ID and no dependency on `~/.claude` inside the sandbox overlay. The
+daemon holds and injects **no** token of its own.
 
-```yaml
-name: my-claude-routine
-schedule: "0 9 * * *"
-agent: claude
-sandbox: false            # overlay HOME has no claude credentials
-prompt: |
-  Do something useful.
-```
+`sandbox: true` (the default) works: `buildSpawnEnv`'s `ENV_ALLOWLIST` forwards
+`CLAUDE_CODE_OAUTH_TOKEN` (and every per-account `CLAUDE_CODE_OAUTH_TOKEN_<slug>`),
+and `buildExecEnv` injects the account's token, so it reaches the sandboxed agent
+even though the overlay `HOME` has no `~/.claude`. You no longer need `sandbox:
+false` for auth.
 
-**Why `sandbox: false` works, and why the default does not**
+Seed or refresh a setup-token — no manual copy — with `/fleet:mint-auth` (it drives
+the OAuth flow via a pty + a logged-in browser and stores the token file-backed,
+keyed per account). Per-account tokens live in the file-backed `claude.ai` secrets
+bundle, keyed by email (`accountTokenKey`, e.g. `muqsit@trp.so` →
+`CLAUDE_CODE_OAUTH_TOKEN_MUQSIT_AT_TRP_DOT_SO`).
 
-When the daemon starts, it reads `CLAUDE_CODE_OAUTH_TOKEN` from the `claude`
-secrets bundle (`daemon.ts:550-563`) and bakes it into the daemon process
-environment (`daemon.ts:820-821`). With `sandbox: true` (the default),
-`buildSpawnEnv` only forwards keys in `ENV_ALLOWLIST` — `CLAUDE_CODE_OAUTH_TOKEN`
-is not on that list (`sandbox.ts:28-49`), so the token is stripped before the
-agent launches. `sandbox: false` sidesteps this by passing `process.env` directly,
-which includes the daemon-level token.
-
-To store the token in the `claude` secrets bundle:
-
-```bash
-agents secrets set claude CLAUDE_CODE_OAUTH_TOKEN <token>
-# Restart the daemon so the updated token is baked into its environment:
-agents routines stop && agents routines start
-```
+> **macOS headless note.** A file-backed bundle read on a *headless* macOS process
+> (the daemon with no TTY) needs the file-store passphrase available via
+> `AGENTS_SECRETS_PASSPHRASE`; interactive runs and Linux daemons resolve it from the
+> passphrase file automatically. If a macOS routine reports no credential, export
+> `AGENTS_SECRETS_PASSPHRASE` for the daemon or run the routines on a Linux node.
 
 ### Pinning an account (avoid the OAuth-rotation revocation storm)
 

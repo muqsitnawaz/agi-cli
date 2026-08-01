@@ -125,17 +125,24 @@ login on the source.
 Portable credential files are captured on the source and streamed to each target
 over the encrypted SSH channel (`sshExec` **stdin** — never shell-interpolated) by
 an internal `--recv-auth` receiver that materializes them at `0600` and rejects
-path traversal. Agents with a portable credential:
+path traversal. Agents whose login file is propagated:
 
-> `claude`, `codex`, `gemini`, `grok`, `kimi`, `opencode`, `droid`, `antigravity`
+> `codex`, `gemini`, `grok`, `kimi`, `opencode`, `droid`, `antigravity`
 
-**Honest boundary — never faked.** macOS keychain-bound tokens (`claude`,
-`antigravity`) can't be read from the ACL-locked keychain on a **macOS target**,
-and a token that is keychain-bound on the **source** can't be extracted to push.
-Those cases surface as a one-time **manual login** in the plan, not a fake
-success. Agents with no portable credential (e.g. `cursor`), and a source that
-simply isn't signed into an agent, produce no login action at all — the same on
-every OS.
+**Claude is deliberately NOT propagated.** Its login (`~/.claude/.credentials.json`
+/ login keychain) is a short-lived, single-use **rotating** OAuth credential —
+copying it across machines invalidates it on the source and logs the fleet out. It
+is a **setup-token agent** instead: its auth is a long-lived, non-rotating
+`claude setup-token` held in the file-backed `claude.ai` bundle and injected on the
+standard run path. Seed a new machine with `/fleet:mint-auth` (mints the token by
+driving the OAuth flow) and sync the auth bundle — never a login-file copy.
+
+**Honest boundary — never faked.** A macOS keychain-bound token (`antigravity`)
+can't be read from the ACL-locked keychain on a **macOS target**, and a token that
+is keychain-bound on the **source** can't be extracted to push. Those cases surface
+as a one-time **manual login** in the plan, not a fake success. Agents with no
+portable credential (e.g. `cursor`), a setup-token agent (`claude`), and a source
+that simply isn't signed into an agent produce no login action at all.
 
 ## Flags
 

@@ -15,7 +15,6 @@ import {
   loadClaudeOauth,
   getUsageInfoForIdentity,
   readClaudeUsageCache,
-  isClaudeUsageOrgMatch,
   writeClaudeUsageCache,
   normalizeKimiWindows,
   formatKimiPlan,
@@ -330,14 +329,6 @@ describe('Claude usage scoping', () => {
     }
   });
 
-  it('keeps usage eligible when the live org is missing', () => {
-    expect(isClaudeUsageOrgMatch('org-requested', null)).toBe(true);
-  });
-
-  it('rejects usage only when both org ids exist and mismatch', () => {
-    expect(isClaudeUsageOrgMatch('org-requested', 'org-live')).toBe(false);
-    expect(isClaudeUsageOrgMatch('org-requested', 'org-requested')).toBe(true);
-  });
 });
 
 describe('Claude usage cache', () => {

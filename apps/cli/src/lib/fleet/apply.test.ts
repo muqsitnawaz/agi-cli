@@ -57,7 +57,10 @@ describe('diffFleet', () => {
     expect(kinds).toContain('install-cli');
     expect(kinds.filter((k) => k === 'add-agent')).toHaveLength(2);
     expect(kinds).toContain('sync-config');
-    expect(kinds.filter((k) => k === 'push-login')).toHaveLength(2);
+    // Only codex propagates its login file. claude is a setup-token agent — its auth
+    // is the synced auth bundle, never a copied login — so it plans no push-login.
+    expect(kinds.filter((k) => k === 'push-login')).toHaveLength(1);
+    expect(plan.actions.find((a) => a.kind === 'push-login')?.agent).toBe('codex');
     expect(plan.devices[0].loginBlocked).toEqual([]);
   });
 
@@ -70,9 +73,10 @@ describe('diffFleet', () => {
     expect(kinds).not.toContain('install-cli');
     expect(kinds).not.toContain('upgrade-cli');
     expect(kinds).not.toContain('add-agent');
-    // sync + login are push operations, still present
+    // sync + login are push operations, still present (codex login only; claude is a
+    // setup-token agent and never propagates a login).
     expect(kinds).toContain('sync-config');
-    expect(kinds.filter((k) => k === 'push-login')).toHaveLength(2);
+    expect(kinds.filter((k) => k === 'push-login')).toHaveLength(1);
   });
 
   it('plans upgrade-cli on a version mismatch', () => {
@@ -83,20 +87,32 @@ describe('diffFleet', () => {
     expect(plan.actions.map((a) => a.kind)).toContain('upgrade-cli');
   });
 
-  it('surfaces a macOS keychain login as needs-login, not push', () => {
+  it('surfaces a macOS keychain login (antigravity) as needs-login, not push', () => {
     const macDesired: DeviceDesired[] = [
-      { device: 'mac', agents: ['claude@latest', 'codex@latest'], sync: [], login: 'sync' },
+      { device: 'mac', agents: ['antigravity@latest', 'codex@latest'], sync: [], login: 'sync' },
     ];
     const probes = new Map<string, DeviceProbe>([
-      ['mac', { device: 'mac', reachable: true, platform: 'macos', cliVersion: CLI, installedAgents: ['claude', 'codex'] }],
+      ['mac', { device: 'mac', reachable: true, platform: 'macos', cliVersion: CLI, installedAgents: ['antigravity', 'codex'] }],
     ]);
-    const plan = diffFleet(macDesired, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['claude', 'codex']) });
-    const claudeActions = plan.actions.filter((a) => a.agent === 'claude');
-    expect(claudeActions.some((a) => a.kind === 'needs-login')).toBe(true);
-    expect(claudeActions.some((a) => a.kind === 'push-login')).toBe(false);
+    const plan = diffFleet(macDesired, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['antigravity', 'codex']) });
+    const agActions = plan.actions.filter((a) => a.agent === 'antigravity');
+    expect(agActions.some((a) => a.kind === 'needs-login')).toBe(true);
+    expect(agActions.some((a) => a.kind === 'push-login')).toBe(false);
     // codex is portable on macOS -> still pushes
     expect(plan.actions.some((a) => a.agent === 'codex' && a.kind === 'push-login')).toBe(true);
-    expect(plan.devices[0].loginBlocked).toContain('claude');
+    expect(plan.devices[0].loginBlocked).toContain('antigravity');
+  });
+
+  it('never surfaces claude as needs-login on macOS — setup-token, handled by the auth bundle', () => {
+    const macDesired: DeviceDesired[] = [
+      { device: 'mac', agents: ['claude@latest'], sync: [], login: 'sync' },
+    ];
+    const probes = new Map<string, DeviceProbe>([
+      ['mac', { device: 'mac', reachable: true, platform: 'macos', cliVersion: CLI, installedAgents: ['claude'] }],
+    ]);
+    const plan = diffFleet(macDesired, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['claude']) });
+    expect(plan.actions.some((a) => a.agent === 'claude')).toBe(false);
+    expect(plan.devices[0].loginBlocked).toEqual([]);
   });
 
   it('does not flag a non-propagatable agent as needs-login on a macOS target', () => {
@@ -129,14 +145,18 @@ describe('diffFleet', () => {
   });
 
   it('flags a keychain-bound source token as needs-login on a linux target', () => {
-    // claude bound on the source (unextractable) → can't push, must surface manual.
+    // antigravity bound on the source (unextractable) → can't push, must surface
+    // manual. (claude is exempt — it's a setup-token agent, never a copied login.)
+    const boundDesired: DeviceDesired[] = [
+      { device: 's1', agents: ['antigravity@latest', 'codex@latest'], sync: ['user'], login: 'sync' },
+    ];
     const probes = new Map<string, DeviceProbe>([
-      ['s1', { device: 's1', reachable: true, platform: 'linux', cliVersion: CLI, installedAgents: ['claude', 'codex'] }],
+      ['s1', { device: 's1', reachable: true, platform: 'linux', cliVersion: CLI, installedAgents: ['antigravity', 'codex'] }],
     ]);
-    const plan = diffFleet(desired, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['codex'], ['claude']) });
-    const claudeActions = plan.actions.filter((a) => a.agent === 'claude');
-    expect(claudeActions.some((a) => a.kind === 'needs-login')).toBe(true);
-    expect(plan.devices[0].loginBlocked).toContain('claude');
+    const plan = diffFleet(boundDesired, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['codex'], ['antigravity']) });
+    const agActions = plan.actions.filter((a) => a.agent === 'antigravity');
+    expect(agActions.some((a) => a.kind === 'needs-login')).toBe(true);
+    expect(plan.devices[0].loginBlocked).toContain('antigravity');
     // codex is portable and available → still pushes.
     expect(plan.actions.some((a) => a.agent === 'codex' && a.kind === 'push-login')).toBe(true);
   });
@@ -309,7 +329,7 @@ describe('diffFleet — version-aware add-agent', () => {
     expect(plan.actions.filter((a) => a.kind === 'add-agent')).toHaveLength(2);
   });
 
-  it('propagates login once per id even when @all names claude many times', () => {
+  it('never propagates a login for claude — it is a setup-token agent, not a copied login', () => {
     const roster: DeviceDesired[] = [
       { device: 's0', agents: ['claude@2.1.170', 'claude@2.1.207'], sync: [], login: 'sync' },
     ];
@@ -320,6 +340,10 @@ describe('diffFleet — version-aware add-agent', () => {
       }],
     ]);
     const plan = diffFleet(roster, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['claude']) });
-    expect(plan.actions.filter((a) => a.kind === 'push-login')).toHaveLength(1);
+    // claude's auth is the file-based setup-token bundle (synced separately), never a
+    // copied interactive login — so apply plans neither a push-login nor a needs-login.
+    expect(plan.actions.filter((a) => a.kind === 'push-login')).toHaveLength(0);
+    expect(plan.actions.filter((a) => a.kind === 'needs-login')).toHaveLength(0);
+    expect(plan.devices[0].loginBlocked).toEqual([]);
   });
 });
