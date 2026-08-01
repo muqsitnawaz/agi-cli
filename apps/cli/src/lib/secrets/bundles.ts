@@ -955,6 +955,8 @@ export interface ResolveBundleOptions {
    * about to read the bundle.
    */
   caller?: string;
+  /** Harness type whose unlock may be reused (claude, codex, kimi, ...). */
+  agent?: string;
   /**
    * Skip the secrets-agent fast-path and read straight from the keychain
    * (popping Touch ID). Set by callers that must NOT serve a cached snapshot —
@@ -1288,7 +1290,8 @@ export function readAndResolveBundleEnv(
   // file-backed bundle has none to dedup. The never-unlocked path is a single
   // stat (agentSocketExists) so it costs nothing when the agent isn't running.
   if (backend === 'keychain' && !opts.noAgent && process.env.AGENTS_SECRETS_NO_AGENT !== '1') {
-    const hit = agentGetSync(name);
+    const harness = opts.agent || process.env.AGENTS_AGENT_NAME || 'cli';
+    const hit = agentGetSync(name, harness);
     if (hit) {
       // The agent stores the FULL bundle env. Apply the same subset filter and
       // expiry gate as the slow path — without this, `--secrets-keys X` would
@@ -1313,13 +1316,13 @@ export function readAndResolveBundleEnv(
     // Touch ID. Serve from it and re-warm the broker, so a warm bundle stays warm
     // across restart — this fixes BOTH the interactive re-prompt and the headless
     // throw below (which now fires only when there is genuinely no session).
-    const session = loadSession(name);
+    const session = loadSession(name, Date.now(), harness);
     if (session) {
       const filtered = filterAgentHitBySubsetAndExpiry({ bundle: session.bundle, env: session.env }, opts);
       stampLastUsed(filtered.bundle);
       // Re-warm the broker with the remaining TTL so later reads hit RAM and
       // `agents secrets status` is honest. Best-effort; no-ops off darwin.
-      agentAutoLoadSync(name, session.bundle, session.env, Math.max(1, session.expiresAt - Date.now()));
+      agentAutoLoadSync(name, session.bundle, session.env, Math.max(1, session.expiresAt - Date.now()), harness);
       emit('secrets.get', {
         module: 'secrets',
         bundle: name,
@@ -1336,14 +1339,8 @@ export function readAndResolveBundleEnv(
   // the broker ever holds. A file-backed bundle resolves via passphrase with no
   // prompt, so agentOnly must never block it — the broker never holds file
   // bundles, so the throw would fire unconditionally and break a legitimate read.
-  if (opts.agentOnly && backend === 'keychain') {
-    throw new Error(
-      `Secrets bundle '${name}' is not unlocked in the secrets agent, and this is a ` +
-      `headless/background process that must not raise a Touch ID prompt on the ` +
-      `interactive user's screen. Run 'agents secrets unlock ${name}' in a terminal ` +
-      `first, or set AGENTS_SECRETS_NO_PROMPT=0 to force an interactive prompt.`
-    );
-  }
+  // A headless harness may initiate the macOS authentication sheet itself and
+  // synchronously wait for approval. Cancellation still fails closed.
 
   if (backend === 'file') assertFileBackendUsable(name);
   if (backend === 'vault') assertVaultBackendUsable(name);
@@ -1362,12 +1359,18 @@ export function readAndResolveBundleEnv(
     ? `read ${name} secrets (for ${opts.caller})`
     : `read ${name} secrets`;
 
-  void reason;
   // secretItems are storage names as enumerated (opaque hashed names on macOS
   // with #316 hashing active, cleartext elsewhere); metaItem is cleartext and
   // hashed inside getBatch. Deduped because the hashed enumeration spans the
   // bundle's whole namespace.
-  const fetched = store.getBatch([...new Set([metaItem, ...secretItems])]);
+  const fetched = backend === 'keychain'
+    ? getKeychainTokens([...new Set([metaItem, ...secretItems])], {
+        agent: opts.agent || process.env.AGENTS_AGENT_NAME || 'Agents CLI',
+        bundle: name,
+        reason: opts.caller ? `to ${opts.caller}` : reason,
+        duration: '7 days',
+      })
+    : store.getBatch([...new Set([metaItem, ...secretItems])]);
 
   const json = fetched.get(metaItem);
   if (json === undefined) {
@@ -1500,7 +1503,7 @@ export function readAndResolveBundleEnv(
       secretsAgentAutoEnabled() &&
       canCacheResolvedEnv(bundle, selectedKeys, opts.keyMode)
     ) {
-      agentAutoLoadSync(name, bundle, env, secretsHoldMs());
+      agentAutoLoadSync(name, bundle, env, secretsHoldMs(), opts.agent || process.env.AGENTS_AGENT_NAME || 'cli');
     }
     return { bundle, env };
   } catch (err) {

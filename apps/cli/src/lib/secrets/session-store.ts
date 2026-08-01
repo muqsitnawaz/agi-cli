@@ -42,6 +42,7 @@ export interface SessionEntry {
   expiresAt: number;
   /** true only for `--durable` unlocks — survives SLEEP. */
   sleepPersist: boolean;
+  harness?: string;
 }
 
 /** Metadata for one held bundle, kept in the index so we can rehydrate / prune
@@ -49,6 +50,7 @@ export interface SessionEntry {
 export interface SessionIndexMeta {
   expiresAt: number;
   sleepPersist: boolean;
+  harness?: string;
 }
 export interface SessionIndex {
   bundles: Record<string, SessionIndexMeta>;
@@ -110,8 +112,8 @@ function shouldPersist(): boolean {
   return process.platform === 'darwin' || isKeychainBackendOverridden();
 }
 
-function sessionBlobItem(name: string): string {
-  return `${SESSION_ITEM_PREFIX}${name}`;
+function sessionBlobItem(name: string, harness: string): string {
+  return `${SESSION_ITEM_PREFIX}${harness}.${name}`;
 }
 
 /** Read the session index by its fixed name. `{bundles:{}}` when absent/unreadable. */
@@ -143,22 +145,24 @@ export function writeIndex(index: SessionIndex): void {
 export function saveSession(name: string, entry: SessionEntry): void {
   if (!shouldPersist()) return;
   try {
-    setKeychainToken(sessionBlobItem(name), JSON.stringify(entry), { noAcl: true });
-    writeIndex(upsertEntry(readIndex(), name, { expiresAt: entry.expiresAt, sleepPersist: entry.sleepPersist }));
+    const harness = entry.harness || 'cli';
+    const key = `${harness}:${name}`;
+    setKeychainToken(sessionBlobItem(name, harness), JSON.stringify({ ...entry, harness }), { noAcl: true });
+    writeIndex(upsertEntry(readIndex(), key, { expiresAt: entry.expiresAt, sleepPersist: entry.sleepPersist, harness }));
   } catch {
     /* best-effort — persistence is an optimization */
   }
 }
 
 /** Read one session blob by known name. Null when absent/expired/malformed. */
-export function loadSession(name: string, now: number = Date.now()): SessionEntry | null {
+export function loadSession(name: string, now: number = Date.now(), harness: string = 'cli'): SessionEntry | null {
   if (!shouldPersist()) return null;
   try {
-    const raw = getKeychainToken(sessionBlobItem(name));
+    const raw = getKeychainToken(sessionBlobItem(name, harness));
     const entry = JSON.parse(raw) as SessionEntry;
     if (!entry || typeof entry !== 'object' || !entry.bundle || !entry.env) return null;
     if (now >= entry.expiresAt) {
-      deleteSession(name); // drop expired on read, mirroring the broker's get handler
+      deleteSession(name, harness); // drop expired on read
       return null;
     }
     return entry;
@@ -168,11 +172,11 @@ export function loadSession(name: string, now: number = Date.now()): SessionEntr
 }
 
 /** Delete one bundle's session blob and prune it from the index. */
-export function deleteSession(name: string): void {
+export function deleteSession(name: string, harness: string = 'cli'): void {
   if (!shouldPersist()) return;
   try {
-    deleteKeychainToken(sessionBlobItem(name));
-    writeIndex(removeEntry(readIndex(), name));
+    deleteKeychainToken(sessionBlobItem(name, harness));
+    writeIndex(removeEntry(readIndex(), `${harness}:${name}`));
   } catch {
     /* best-effort */
   }
@@ -183,7 +187,7 @@ export function deleteAllSessions(): void {
   if (!shouldPersist()) return;
   try {
     for (const name of Object.keys(readIndex().bundles)) {
-      try { deleteKeychainToken(sessionBlobItem(name)); } catch { /* keep going */ }
+      const meta = readIndex().bundles[name]; try { deleteKeychainToken(sessionBlobItem(name.split(':').slice(1).join(':'), meta.harness || 'cli')); } catch { /* keep going */ }
     }
     deleteKeychainToken(SESSION_INDEX_ITEM);
   } catch {
@@ -201,12 +205,13 @@ export function rehydrateSessions(now: number = Date.now()): Array<{ name: strin
     const index = readIndex();
     const { survivors, expiredNames } = pruneExpired(index, now);
     for (const name of expiredNames) {
-      try { deleteKeychainToken(sessionBlobItem(name)); } catch { /* keep going */ }
+      const meta = index.bundles[name]; try { deleteKeychainToken(sessionBlobItem(name.split(':').slice(1).join(':'), meta.harness || 'cli')); } catch { /* keep going */ }
     }
     if (expiredNames.length) writeIndex(survivors);
     for (const name of selectRehydratable(survivors, now)) {
-      const entry = loadSession(name, now);
-      if (entry) out.push({ name, entry });
+      const meta = survivors.bundles[name]; const bundleName = name.split(':').slice(1).join(':');
+      const entry = loadSession(bundleName, now, meta.harness || 'cli');
+      if (entry) out.push({ name: bundleName, entry });
     }
   } catch {
     /* best-effort */
@@ -221,7 +226,8 @@ export function pruneSessionsOnSleep(): void {
   try {
     const { survivors, deletedNames } = pruneOnSleep(readIndex());
     for (const name of deletedNames) {
-      try { deleteKeychainToken(sessionBlobItem(name)); } catch { /* keep going */ }
+      const meta = readIndex().bundles[name];
+      try { deleteKeychainToken(sessionBlobItem(name.split(':').slice(1).join(':'), meta.harness || 'cli')); } catch { /* keep going */ }
     }
     writeIndex(survivors);
   } catch {

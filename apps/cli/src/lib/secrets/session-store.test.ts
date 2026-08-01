@@ -108,7 +108,13 @@ describe.each([
     expect(got?.env.TOKEN).toBe('secret-apple.com');
     expect(got?.bundle.name).toBe('apple.com');
     // index reflects the hold
-    expect(Object.keys(readIndex().bundles)).toEqual(['apple.com']);
+    expect(Object.keys(readIndex().bundles)).toEqual(['cli:apple.com']);
+  });
+
+  it('does not reuse a persisted grant across harness types', () => {
+    saveSession('prod', { ...entry('prod', FAR + Date.now(), false), harness: 'claude' });
+    expect(loadSession('prod', Date.now(), 'claude')?.env.TOKEN).toBe('secret-prod');
+    expect(loadSession('prod', Date.now(), 'codex')).toBeNull();
   });
 
   it('delete removes both the blob and the index entry', () => {
@@ -142,7 +148,7 @@ describe.each([
     pruneSessionsOnSleep();
     expect(loadSession('def')).toBeNull();
     expect(loadSession('dur')?.bundle.name).toBe('dur');
-    expect(Object.keys(readIndex().bundles)).toEqual(['dur']);
+    expect(Object.keys(readIndex().bundles)).toEqual(['cli:dur']);
   });
 
   it('deleteAllSessions clears everything', () => {

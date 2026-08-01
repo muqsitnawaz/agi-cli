@@ -2174,9 +2174,10 @@ Examples:
     .description('Hold a bundle in the secrets-agent after one Touch ID, so concurrent runs read it without re-prompting (macOS). With --host, unlock FILE-backed bundle(s) on a remote (the passphrase prompt surfaces over the SSH TTY); keychain/biometry bundles are GUI-only and can\'t be remote-unlocked.')
     .option('--ttl <duration>', 'How long to hold it (e.g. 30m, 8h, 3d). Default 7d.')
     .option('--durable', 'Keep the unlock across sleep + reboot too (default: survives upgrade/restart but re-locks on sleep). Set secrets.agent.durable in agents.yaml to make this the default.')
+    .option('--for <agent>', 'Scope the unlock to one harness type (for example claude, codex, or kimi).')
     .option('--all', 'Unlock every configured bundle')
     .option('--host <target>', 'Unlock the bundle(s) on this remote machine over SSH instead of locally (file-backed bundles only — the remote\'s passphrase prompt surfaces on your terminal over a -tt session). Single-valued (NOT variadic) so it never swallows the bundle name: `unlock <name> --host <machine>`.')
-    .action(async (names: string[], opts: { ttl?: string; durable?: boolean; all?: boolean; host?: string }) => {
+    .action(async (names: string[], opts: { ttl?: string; durable?: boolean; all?: boolean; host?: string; for?: string }) => {
       // Single-valued (not variadic): a variadic --host greedily consumes the
       // positional bundle name (`unlock --host mac wztest` -> host=[mac,wztest],
       // names=[]). Unlock targets one remote at a time anyway.
@@ -2244,12 +2245,13 @@ Examples:
       // (single-instance start lock, #414) and best-effort — never blocks unlock.
       ensureDaemonStarted();
       let loaded = 0;
+      const harness = opts.for || process.env.AGENTS_AGENT_NAME || 'cli';
       for (const name of targets) {
         try {
           // noAgent: read the real keychain (one Touch ID) rather than the
           // agent we're about to populate.
-          const { bundle, env } = readAndResolveBundleEnv(name, { noAgent: true, caller: 'unlock', keyMode: 'storage' });
-          if (await agentLoad(name, bundle, env, ttlMs)) {
+          const { bundle, env } = readAndResolveBundleEnv(name, { noAgent: true, caller: 'unlock secrets', agent: harness, keyMode: 'storage' });
+          if (await agentLoad(name, bundle, env, ttlMs, harness)) {
             loaded++;
             // Persist a durable session snapshot so the unlock survives a daemon
             // restart / upgrade (and sleep too, with --durable). session-store.ts.
@@ -2258,6 +2260,7 @@ Examples:
               env,
               expiresAt: Date.now() + ttlMs,
               sleepPersist: opts.durable ?? secretsAgentDurable(),
+              harness,
             });
             console.log(`${chalk.green('unlocked')} ${chalk.cyan(name)} ${chalk.gray(`(${Object.keys(env).length} keys, ${humanRemaining(Date.now() + ttlMs)})`)}`);
           } else {

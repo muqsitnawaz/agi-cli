@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Secrets: name the requesting harness, bundle, reason, and duration in macOS
+  Touch ID prompts; allow agent-triggered approval and scope cached unlocks to
+  the harness type, with `secrets unlock --for <agent>`.
+
 ### Added
 
 - **`agents sessions migrate` (alias `detach`) relocates a RUNNING session onto another

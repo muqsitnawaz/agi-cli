@@ -175,7 +175,7 @@ describe('canCacheResolvedEnv (broker cache shape)', () => {
 });
 
 describe('readAndResolveBundleEnv agent-only reads', () => {
-  it('fails before touching Keychain when the broker has no unlocked snapshot', () => {
+  it('allows an agent-triggered interactive read when the broker has no snapshot', () => {
     let keychainCalls = 0;
     const fail = () => { keychainCalls++; throw new Error('keychain must not be read'); };
     const backend: KeychainBackend = {
@@ -190,8 +190,8 @@ describe('readAndResolveBundleEnv agent-only reads', () => {
     process.env.AGENTS_SECRETS_NO_AGENT = '1';
     try {
       expect(() => readAndResolveBundleEnv('claude', { caller: 'daemon', agentOnly: true }))
-        .toThrow("Secrets bundle 'claude' is not unlocked in the secrets agent");
-      expect(keychainCalls).toBe(0);
+        .toThrow("Secrets bundle 'claude' not found");
+      expect(keychainCalls).toBeGreaterThan(0);
     } finally {
       setKeychainBackendForTest(previousBackend);
       if (previousNoAgent === undefined) delete process.env.AGENTS_SECRETS_NO_AGENT;
@@ -407,8 +407,8 @@ describe('durable session read fallback', () => {
 
   it('a headless read resolves from a live session instead of throwing "not unlocked"', () => {
     const { bundle, env } = seed('apple.com', { APPLE_TEAM_ID: '2HTP252L87' });
-    // No session yet → the headless (agentOnly) read must throw.
-    expect(() => readAndResolveBundleEnv('apple.com', { agentOnly: true })).toThrow(/not unlocked in the secrets agent/);
+    // No session yet → the agent may unlock interactively.
+    expect(readAndResolveBundleEnv('apple.com', { agentOnly: true }).env).toEqual(env);
     // Persist an unlock → the SAME headless read now resolves silently.
     saveSession('apple.com', { bundle, env, expiresAt: Date.now() + 60_000, sleepPersist: false });
     expect(readAndResolveBundleEnv('apple.com', { agentOnly: true }).env).toEqual({ APPLE_TEAM_ID: '2HTP252L87' });
@@ -423,7 +423,7 @@ describe('durable session read fallback', () => {
   it('an expired session does not satisfy the read', () => {
     const { bundle, env } = seed('stale', { T: 'x' });
     saveSession('stale', { bundle, env, expiresAt: Date.now() - 1000, sleepPersist: true });
-    expect(() => readAndResolveBundleEnv('stale', { agentOnly: true })).toThrow(/not unlocked/);
+    expect(readAndResolveBundleEnv('stale', { agentOnly: true }).env).toEqual(env);
   });
 });
 

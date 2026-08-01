@@ -1,6 +1,8 @@
 import Foundation
 import Security
 import LocalAuthentication
+
+let operationPrompt = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_PROMPT"] ?? "Unlock agents-cli secrets"
 import AppKit
 
 func writeStderr(_ message: String) {
@@ -171,7 +173,7 @@ func readItem(service: String, account: String) -> ReadOutcome {
     dpQuery[kSecMatchLimit] = kSecMatchLimitOne
     dpQuery[kSecUseAuthenticationContext] = authContext
     dpQuery[kSecUseAuthenticationUI] = kSecUseAuthenticationUIAllow
-    dpQuery[kSecUseOperationPrompt] = "Unlock agents-cli secrets" as CFString
+    dpQuery[kSecUseOperationPrompt] = operationPrompt as CFString
     var dpResult: AnyObject?
     let dpStatus = SecItemCopyMatching(dpQuery as CFDictionary, &dpResult)
     if dpStatus == errSecSuccess,
@@ -194,7 +196,7 @@ func readItem(service: String, account: String) -> ReadOutcome {
     orphanQuery[kSecMatchLimit] = kSecMatchLimitOne
     orphanQuery[kSecUseAuthenticationContext] = authContext
     orphanQuery[kSecUseAuthenticationUI] = kSecUseAuthenticationUIAllow
-    orphanQuery[kSecUseOperationPrompt] = "Unlock agents-cli secrets" as CFString
+    orphanQuery[kSecUseOperationPrompt] = operationPrompt as CFString
     var orphanResult: AnyObject?
     let orphanStatus = SecItemCopyMatching(orphanQuery as CFDictionary, &orphanResult)
     if orphanStatus == errSecSuccess,
@@ -213,7 +215,7 @@ func readItem(service: String, account: String) -> ReadOutcome {
     fileQuery[kSecMatchLimit] = kSecMatchLimitOne
     fileQuery[kSecUseAuthenticationContext] = authContext
     fileQuery[kSecUseAuthenticationUI] = kSecUseAuthenticationUIAllow
-    fileQuery[kSecUseOperationPrompt] = "Unlock agents-cli secrets" as CFString
+    fileQuery[kSecUseOperationPrompt] = operationPrompt as CFString
     var fileResult: AnyObject?
     let fileStatus = SecItemCopyMatching(fileQuery as CFDictionary, &fileResult)
     guard fileStatus == errSecSuccess,
