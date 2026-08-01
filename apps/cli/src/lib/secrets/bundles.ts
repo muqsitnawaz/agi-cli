@@ -957,6 +957,10 @@ export interface ResolveBundleOptions {
   caller?: string;
   /** Harness type whose unlock may be reused (claude, codex, kimi, ...). */
   agent?: string;
+  /** Human duration rendered in the Touch ID prompt. */
+  duration?: string;
+  /** Explicitly permit this agent request to raise interactive authentication. */
+  interactiveUnlock?: boolean;
   /**
    * Skip the secrets-agent fast-path and read straight from the keychain
    * (popping Touch ID). Set by callers that must NOT serve a cached snapshot —
@@ -1339,7 +1343,9 @@ export function readAndResolveBundleEnv(
   // synchronously wait for approval. Never/no-ACL bundles remain prompt-free.
   // The always-on daemon has no requesting agent waiting on the result, so it
   // remains prompt-free unless the bundle is explicitly no-ACL.
-  if (opts.agentOnly && backend === 'keychain' && opts.caller === 'daemon') {
+  const interactiveUnlock = opts.interactiveUnlock
+    ?? (Boolean(opts.agent || process.env.AGENTS_AGENT_NAME) && process.env.AGENTS_SECRETS_NO_PROMPT !== '1');
+  if (opts.agentOnly && backend === 'keychain' && !interactiveUnlock) {
     let noAclBundle = false;
     try { noAclBundle = bundlePolicy(readBundle(name)) === 'never'; } catch { /* fail closed */ }
     if (!noAclBundle) {
@@ -1373,7 +1379,7 @@ export function readAndResolveBundleEnv(
         agent: opts.agent || process.env.AGENTS_AGENT_NAME || 'Agents CLI',
         bundle: name,
         reason: opts.caller ? `to ${opts.caller}` : reason,
-        duration: '7 days',
+        duration: opts.duration || humanUnlockDuration(secretsHoldMs()),
       })
     : store.getBatch([...new Set([metaItem, ...secretItems])]);
 
@@ -1515,6 +1521,13 @@ export function readAndResolveBundleEnv(
     emitReadAudit('error', err);
     throw err;
   }
+}
+
+export function humanUnlockDuration(ms: number): string {
+  const days = Math.round(ms / (24 * 60 * 60 * 1000));
+  if (days >= 1) return `${days} day${days === 1 ? '' : 's'}`;
+  const hours = Math.max(1, Math.round(ms / (60 * 60 * 1000)));
+  return `${hours} hour${hours === 1 ? '' : 's'}`;
 }
 
 // Build a keychain ref expression from a bundle+key pair, for storage in the bundle metadata.

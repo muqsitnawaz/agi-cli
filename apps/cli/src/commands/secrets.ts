@@ -85,7 +85,7 @@ import {
   runSecretsAgent,
   uninstallSecretsAgentService,
 } from '../lib/secrets/agent.js';
-import { saveSession, deleteSession, deleteAllSessions } from '../lib/secrets/session-store.js';
+import { saveSession, deleteBundleSessions, deleteAllSessions } from '../lib/secrets/session-store.js';
 import { getCliVersionFresh } from '../lib/version.js';
 import { readMeta } from '../lib/state.js';
 import { parseDuration } from '../lib/hooks/cache.js';
@@ -2250,7 +2250,13 @@ Examples:
         try {
           // noAgent: read the real keychain (one Touch ID) rather than the
           // agent we're about to populate.
-          const { bundle, env } = readAndResolveBundleEnv(name, { noAgent: true, caller: 'unlock secrets', agent: harness, keyMode: 'storage' });
+          const { bundle, env } = readAndResolveBundleEnv(name, {
+            noAgent: true,
+            caller: 'unlock secrets',
+            agent: harness,
+            duration: humanRemaining(Date.now() + ttlMs),
+            keyMode: 'storage',
+          });
           if (await agentLoad(name, bundle, env, ttlMs, harness)) {
             loaded++;
             // Persist a durable session snapshot so the unlock survives a daemon
@@ -2287,7 +2293,7 @@ Examples:
         let total = 0;
         for (const name of names) {
           total += await agentLock(name);
-          deleteSession(name); // also drop the durable snapshot, or a restart re-warms it
+          deleteBundleSessions(name); // drop every harness scope
         }
         console.log(total > 0 ? chalk.green(`Locked ${total} bundle(s).`) : chalk.gray('Nothing to lock.'));
       } else {

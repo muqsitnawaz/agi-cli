@@ -171,6 +171,21 @@ export function loadSession(name: string, now: number = Date.now(), harness: str
   }
 }
 
+/** Remove every persisted harness grant for one bundle. */
+export function deleteBundleSessions(name: string): void {
+  if (!shouldPersist()) return;
+  const index = readIndex();
+  let next = index;
+  for (const [key, meta] of Object.entries(index.bundles)) {
+    const scopedName = key.includes(':') ? key.split(':').slice(1).join(':') : key;
+    if (scopedName !== name) continue;
+    const harness = meta.harness || 'cli';
+    try { deleteKeychainToken(key.includes(':') ? sessionBlobItem(name, harness) : `${SESSION_ITEM_PREFIX}${name}`); } catch { /* keep going */ }
+    next = removeEntry(next, key);
+  }
+  writeIndex(next);
+}
+
 /** Delete one bundle's session blob and prune it from the index. */
 export function deleteSession(name: string, harness: string = 'cli'): void {
   if (!shouldPersist()) return;
@@ -203,6 +218,25 @@ export function rehydrateSessions(now: number = Date.now()): Array<{ name: strin
   const out: Array<{ name: string; entry: SessionEntry }> = [];
   try {
     const index = readIndex();
+    // One-time source migration from the pre-harness layout. Move each legacy
+    // bundle-name index/blob to the explicit cli scope, then delete the old blob.
+    let migratedIndex = index;
+    for (const [key, meta] of Object.entries(index.bundles)) {
+      if (key.includes(':')) continue;
+      try {
+        const raw = getKeychainToken(`${SESSION_ITEM_PREFIX}${key}`);
+        const legacy = JSON.parse(raw) as SessionEntry;
+        setKeychainToken(sessionBlobItem(key, 'cli'), JSON.stringify({ ...legacy, harness: 'cli' }), { noAcl: true });
+        deleteKeychainToken(`${SESSION_ITEM_PREFIX}${key}`);
+        migratedIndex = upsertEntry(removeEntry(migratedIndex, key), `cli:${key}`, {
+          expiresAt: meta.expiresAt,
+          sleepPersist: meta.sleepPersist,
+          harness: 'cli',
+        });
+      } catch { /* malformed/absent legacy entry is pruned below */ }
+    }
+    writeIndex(migratedIndex);
+    index.bundles = migratedIndex.bundles;
     const { survivors, expiredNames } = pruneExpired(index, now);
     for (const name of expiredNames) {
       const meta = index.bundles[name]; try { deleteKeychainToken(sessionBlobItem(name.split(':').slice(1).join(':'), meta.harness || 'cli')); } catch { /* keep going */ }

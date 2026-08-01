@@ -4,6 +4,8 @@ import {
   KeychainBackend,
   setKeychainBackendForTest,
   setKeychainServiceHashingForTest,
+  setKeychainToken,
+  hasKeychainToken,
 } from './index.js';
 import type { SecretsBundle } from './bundles.js';
 import {
@@ -16,11 +18,14 @@ import {
   loadSession,
   deleteSession,
   deleteAllSessions,
+  deleteBundleSessions,
   rehydrateSessions,
   pruneSessionsOnSleep,
   readIndex,
   type SessionIndex,
   type SessionEntry,
+  SESSION_INDEX_ITEM,
+  SESSION_ITEM_PREFIX,
 } from './session-store.js';
 
 const FAR = 10 * 24 * 60 * 60 * 1000; // 10 days out
@@ -115,6 +120,27 @@ describe.each([
     saveSession('prod', { ...entry('prod', FAR + Date.now(), false), harness: 'claude' });
     expect(loadSession('prod', Date.now(), 'claude')?.env.TOKEN).toBe('secret-prod');
     expect(loadSession('prod', Date.now(), 'codex')).toBeNull();
+  });
+
+  it('bundle lock removes every harness grant', () => {
+    saveSession('prod', { ...entry('prod', FAR + Date.now(), false), harness: 'claude' });
+    saveSession('prod', { ...entry('prod', FAR + Date.now(), false), harness: 'codex' });
+    deleteBundleSessions('prod');
+    expect(loadSession('prod', Date.now(), 'claude')).toBeNull();
+    expect(loadSession('prod', Date.now(), 'codex')).toBeNull();
+  });
+
+  it('migrates a pre-harness durable grant into the cli scope', () => {
+    const expiresAt = FAR + Date.now();
+    const legacy = entry('legacy', expiresAt, false);
+    setKeychainToken(`${SESSION_ITEM_PREFIX}legacy`, JSON.stringify(legacy), { noAcl: true });
+    setKeychainToken(SESSION_INDEX_ITEM, JSON.stringify({
+      bundles: { legacy: { expiresAt, sleepPersist: false } },
+    }), { noAcl: true });
+    const restored = rehydrateSessions();
+    expect(restored[0]?.entry.harness).toBe('cli');
+    expect(loadSession('legacy', Date.now(), 'cli')?.env.TOKEN).toBe('secret-legacy');
+    expect(hasKeychainToken(`${SESSION_ITEM_PREFIX}legacy`)).toBe(false);
   });
 
   it('delete removes both the blob and the index entry', () => {
