@@ -1370,15 +1370,6 @@ export function readAndResolveBundleEnv(
     ? `read ${name} secrets (for ${opts.caller})`
     : `read ${name} secrets`;
 
-  let promptDuration = opts.duration;
-  if (!promptDuration) {
-    try {
-      if (bundlePolicy(readBundle(name)) === 'daily') {
-        promptDuration = humanUnlockDuration(secretsHoldMs());
-      }
-    } catch { /* metadata read below reports the concrete error */ }
-  }
-
   // secretItems are storage names as enumerated (opaque hashed names on macOS
   // with #316 hashing active, cleartext elsewhere); metaItem is cleartext and
   // hashed inside getBatch. Deduped because the hashed enumeration spans the
@@ -1388,7 +1379,7 @@ export function readAndResolveBundleEnv(
         agent: opts.agent || process.env.AGENTS_AGENT_NAME || 'Agents CLI',
         bundle: name,
         reason: opts.caller ? `to ${opts.caller}` : reason,
-        duration: promptDuration,
+        duration: opts.duration || humanUnlockDuration(secretsHoldMs()),
       })
     : store.getBatch([...new Set([metaItem, ...secretItems])]);
 

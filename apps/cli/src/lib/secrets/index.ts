@@ -844,7 +844,11 @@ export function getKeychainToken(item: string, context: KeychainReadContext = {}
   }
   const bin = getKeychainHelperPath();
   const result = spawnSync(bin, ['get', item, os.userInfo().username], {
-    env: { ...process.env, AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context) },
+    env: {
+      ...process.env,
+      AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context),
+      AGENTS_KEYCHAIN_PROMPT_BASE: keychainOperationPrompt({ ...context, duration: undefined }),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (result.status === 1) throw new Error(`Keychain item '${requested}' not found.`);

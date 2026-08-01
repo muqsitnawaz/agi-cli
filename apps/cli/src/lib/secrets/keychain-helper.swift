@@ -2,7 +2,8 @@ import Foundation
 import Security
 import LocalAuthentication
 
-let operationPrompt = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_PROMPT"] ?? "Unlock agents-cli secrets"
+var operationPrompt = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_PROMPT"] ?? "Unlock agents-cli secrets"
+let operationPromptWithoutDuration = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_PROMPT_BASE"] ?? operationPrompt
 import AppKit
 
 func writeStderr(_ message: String) {
@@ -486,6 +487,15 @@ case "get-batch":
         let outcome = readItem(service: service, account: account)
         dieIfCancelled(outcome.status)
         if let value = outcome.value {
+            // Bundle metadata is the first batch item and is no-ACL, so it can
+            // refine the prompt before the first protected value triggers UI.
+            // Only daily bundles are auto-held; always/never reads must not
+            // claim a duration that does not exist.
+            if let data = value.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               (json["tier"] as? String) != "daily" {
+                operationPrompt = operationPromptWithoutDuration
+            }
             if service.hasPrefix("agents-cli.") {
                 if outcome.needsMigration {
                     migrateInline(service: service, account: account, value: value)
