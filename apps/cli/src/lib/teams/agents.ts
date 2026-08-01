@@ -15,7 +15,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
 import { resolveAgentsDir } from './persistence.js';
-import { findExecutable } from '../platform/index.js';
+import { findExecutable, captureProcessStartTime } from '../platform/index.js';
 import { normalizeEvents, AgentType } from './parsers.js';
 import { debug } from './debug.js';
 import { setGeminiAutoUpdateDisabled, updateGeminiSettings } from '../gemini-settings.js';
@@ -202,39 +202,15 @@ export function buildTeammateSpawnEnv(
 }
 
 /**
- * Capture a stable identifier for a process at the moment it was started.
- * Used to defeat PID reuse: a kill(pid, ...) is only safe when the process
- * still occupies the PID we observed at spawn time. A bare kill(pid, 0)
- * probe cannot tell whether the OS has recycled the slot to an unrelated
- * process — combined with detached spawns and unref(), that's exactly how
- * `agents teams stop` ends up SIGKILLing random process groups.
+ * Re-exported from `platform/process.ts`, which owns the one implementation.
  *
- * Linux:  field 22 of /proc/<pid>/stat (starttime in clock ticks since boot).
- * macOS:  output of `ps -o lstart= -p <pid>` (start time in human format).
- * Returns null on any error so callers can skip the guard rather than crash.
+ * This module used to carry its own near-identical copy, and that copy had no
+ * Windows branch — it fell through to `ps`, which does not exist there, so
+ * `captureProcessStartTime` always returned null and the pid-reuse guard at
+ * `stop()` was silently inert on Windows. That is exactly how `agents teams stop`
+ * ends up SIGKILLing an unrelated process group once the OS recycles a pid.
  */
-export function captureProcessStartTime(pid: number): string | null {
-  if (!pid || pid <= 0) return null;
-  try {
-    if (process.platform === 'linux') {
-      const stat = fsSync.readFileSync(`/proc/${pid}/stat`, 'utf-8');
-      const lastParen = stat.lastIndexOf(')');
-      if (lastParen < 0) return null;
-      const tail = stat.slice(lastParen + 2);
-      const fields = tail.split(' ');
-      // After comm we are at field 3; starttime is field 22, so index 19 here.
-      return fields[19] || null;
-    }
-    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    const trimmed = out.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  } catch {
-    return null;
-  }
-}
+export { captureProcessStartTime };
 
 /** Agent types the team runner supports. */
 const TEAM_AGENT_TYPES: AgentType[] = ['codex', 'cursor', 'gemini', 'claude', 'opencode', 'grok', 'antigravity', 'kimi', 'droid'];

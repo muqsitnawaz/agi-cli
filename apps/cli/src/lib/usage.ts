@@ -1329,8 +1329,12 @@ export async function loadClaudeOauth(
 ): Promise<ClaudeOauthCredentials | null> {
   // The OS keychain/keyring step is macOS/Linux-only. Windows skips straight
   // to the .credentials.json fallback — the Claude CLI has no keychain
-  // integration there and stores its OAuth token in that file too.
-  if (process.platform === 'darwin' || process.platform === 'linux') {
+  // integration there and stores its OAuth token in that file too. An injected
+  // test backend is the exception: it makes the keychain path exercisable
+  // anywhere, so the platform check must yield to it exactly as the inner
+  // claudeOauthCacheActive() gate does — otherwise this whole block is dead on
+  // a Windows runner and the tests below it read an empty home.
+  if (process.platform === 'darwin' || process.platform === 'linux' || isKeychainBackendOverridden()) {
     const service = getClaudeKeychainService(home);
     // Serve the no-ACL cache first (opt-in, macOS/test only) so the ACL-gated read
     // below — the one that pops Touch ID — happens at most once per token lifetime
