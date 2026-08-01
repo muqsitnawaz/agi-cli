@@ -175,17 +175,28 @@ export function buildRemoteAgentsInvocation(
   }
   const inner = ['agents', ...forwardedArgs].map(shellQuote).join(' ');
   const withCwd = remoteCwd ? `cd ${shellQuote(remoteCwd)} && ${inner}` : inner;
-  if (!env || Object.keys(env).length === 0) {
-    return `bash -lc ${shellQuote(withCwd)}`;
-  }
   // Prepend env exports so the remote command sees the shims dir even when the
   // login shell hasn't sourced the interactive rc files that usually add it.
-  // Values are double-quoted (not single-quoted) so remote variables like
-  // $HOME and $PATH are expanded by the login shell.
-  const exports = Object.entries(env)
+  const exports = posixEnvExports(env);
+  if (!exports) {
+    return `bash -lc ${shellQuote(withCwd)}`;
+  }
+  return `bash -lc ${shellQuote(`${exports}; ${withCwd}`)}`;
+}
+
+/**
+ * Build a POSIX `export K="V"; …` prefix from an env map — empty string when the
+ * map is missing or empty. Values are double-quoted (not single-quoted) so remote
+ * variables like `$HOME`/`$PATH` still expand under the login shell; embedded `\`
+ * and `"` are escaped. Shared by {@link buildRemoteAgentsInvocation} and the
+ * detached/interactive dispatch builders (dispatch.ts) so every remote path
+ * exports env identically.
+ */
+export function posixEnvExports(env?: Record<string, string>): string {
+  if (!env || Object.keys(env).length === 0) return '';
+  return Object.entries(env)
     .map(([k, v]) => `export ${shellQuote(k)}="${v.replace(/[\\"]/g, '\\$&')}"`)
     .join('; ');
-  return `bash -lc ${shellQuote(`${exports}; ${withCwd}`)}`;
 }
 
 /** The two remote shell dialects we build commands for. */
