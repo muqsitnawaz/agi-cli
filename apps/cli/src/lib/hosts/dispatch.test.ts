@@ -368,12 +368,15 @@ describe('withActorEnv — forward actor provenance across the SSH hop (RUSH-202
 
     // ...and they land in the actual remote command string maybeRunOnHost ships.
     const cmd = buildRemoteAgentsInvocation(['view', 'claude'], undefined, undefined, env);
-    expect(cmd).toContain('export AGENTS_ACTOR="muqsit@example.com"');
-    expect(cmd).toContain('export GIT_AUTHOR_EMAIL="muqsit@example.com"');
-    expect(cmd).toContain('export GIT_COMMITTER_NAME="Muqsit"');
+    // Values are rendered as shell literals (unquoted when safe), NOT an
+    // expanding double-quote context — see the posixEnvExports injection tests in
+    // remote-cmd.test.ts for why (untrusted actor names must not run as shell).
+    expect(cmd).toContain('export AGENTS_ACTOR=muqsit@example.com');
+    expect(cmd).toContain('export GIT_AUTHOR_EMAIL=muqsit@example.com');
+    expect(cmd).toContain('export GIT_COMMITTER_NAME=Muqsit');
     // The detached (run/teams) + interactive dispatch builders export via the
     // same helper, so this prefix is exactly what they prepend too.
-    expect(posixEnvExports(env)).toContain('export AGENTS_ACTOR="muqsit@example.com"');
+    expect(posixEnvExports(env)).toContain('export AGENTS_ACTOR=muqsit@example.com');
   });
 
   it('merges the actor UNDER a caller env — the caller value wins, the doctor PATH coexists', () => {
@@ -399,10 +402,10 @@ describe('withActorEnv — forward actor provenance across the SSH hop (RUSH-202
     });
     const b = buildRemoteAgentsInvocation(['run', 'claude', 'hi', '--quiet'], undefined, undefined, withActorEnv());
 
-    expect(a).toContain('export AGENTS_ACTOR="alice@example.com"');
-    expect(a).toContain('export GIT_AUTHOR_NAME="Alice"');
-    expect(b).toContain('export AGENTS_ACTOR="bob@example.com"');
-    expect(b).toContain('export GIT_AUTHOR_NAME="Bob"');
+    expect(a).toContain('export AGENTS_ACTOR=alice@example.com');
+    expect(a).toContain('export GIT_AUTHOR_NAME=Alice');
+    expect(b).toContain('export AGENTS_ACTOR=bob@example.com');
+    expect(b).toContain('export GIT_AUTHOR_NAME=Bob');
     expect(a).not.toBe(b);
     expect(a).not.toContain('bob@example.com');
     expect(b).not.toContain('alice@example.com');
@@ -414,6 +417,6 @@ describe('withActorEnv — forward actor provenance across the SSH hop (RUSH-202
     expect(env.AGENTS_ACTOR).toMatch(/^UNRESOLVED@/);
     expect(env.GIT_AUTHOR_NAME).toBeUndefined();
     const cmd = buildRemoteAgentsInvocation(['view'], undefined, undefined, env);
-    expect(cmd).toContain('export AGENTS_ACTOR="UNRESOLVED@');
+    expect(cmd).toContain('export AGENTS_ACTOR=UNRESOLVED@');
   });
 });
