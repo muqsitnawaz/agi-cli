@@ -40,6 +40,9 @@ function normalize(changed: Array<{ filePath: string; scan: { fileMtimeMs: numbe
 
 beforeAll(async () => {
   process.env.HOME = tmpHome;
+  // USERPROFILE too: os.homedir() ignores HOME on Windows, and discover.ts
+  // captures its scan root from os.homedir() at import time (discover.ts:58).
+  process.env.USERPROFILE = tmpHome;
   db = await import('./db.js');
   discover = await import('./discover.js');
   walk = await import('../fs-walk.js');

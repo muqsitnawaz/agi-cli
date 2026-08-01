@@ -1289,9 +1289,12 @@ function buildSessionWhere(options: QueryOptions): { clause: string; params: any
   }
 
   if (options.cwdPrefix) {
-    // Stored cwd uses the host path separator (normalizeCwd → path.resolve), so
-    // the subdir wildcard must too — a hardcoded '/' never matches a Windows
-    // `C:\a\b` subpath and the listing comes back empty.
+    // A LOCAL stored cwd uses the host path separator (normalizeCwd runs
+    // path.normalize on it), so the subdir wildcard must too — a hardcoded '/'
+    // never matches a Windows `C:\a\b` subpath and the listing comes back empty.
+    // A cwd recorded on another machine keeps its own separators, so this
+    // wildcard does not match foreign subpaths; both sides go through
+    // normalizeCwd, so the exact `cwd = ?` comparison still holds for them.
     where.push('(cwd = ? OR cwd LIKE ?)');
     params.push(options.cwdPrefix, options.cwdPrefix + path.sep + '%');
   }

@@ -447,20 +447,48 @@ function buildQueryOptions(
   };
 }
 
-/** Resolve and canonicalize a working directory path (follows symlinks). */
+/**
+ * Canonicalize a working directory path (follows symlinks when it is local).
+ *
+ * Most callers pass a cwd RECORDED in a transcript, which may name a directory
+ * on another machine — a POSIX path read on a Windows host, say. `path.resolve()`
+ * rebases such a path onto the current drive (`/Users/me` -> `D:\Users\me`),
+ * inventing a location that never existed. So an absolute path is normalized but
+ * never rebased; only a genuinely relative one resolves against the process cwd.
+ *
+ * `path.normalize()` still runs on every branch: it collapses `.`, `..`, and
+ * duplicate separators, and folds separators on Windows. Both sides of the cwd
+ * filter in `db.ts` (`cwd = ?` and `cwd LIKE ? || path.sep || '%'`) come through
+ * here, so dropping that would leave a trailing slash or a `..` segment in one
+ * side and match nothing.
+ *
+ * Realpath is attempted only for a path that is absolute in THIS platform's
+ * terms. A POSIX-rooted path on Windows is drive-relative to `fs.realpathSync`,
+ * which would resolve `/Users/me` against the current drive and reintroduce the
+ * graft for any path that happens to exist locally.
+ */
+export function _normalizeCwdForTest(cwd?: string): string {
+  return normalizeCwd(cwd);
+}
+
 function normalizeCwd(cwd?: string): string {
   if (!cwd) return '';
-  // Most callers pass a cwd RECORDED in a transcript, which may name a
-  // directory on another machine — a POSIX path read on a Windows host, say.
-  // path.resolve() rebases such a path onto the current drive ('/Users/me' ->
-  // 'D:\Users\me'), inventing a location that never existed. An already-
-  // absolute path is therefore passed through untouched; only a genuinely
-  // relative one is resolved against the process cwd.
-  if (!path.isAbsolute(cwd)) {
-    const resolved = path.resolve(cwd);
-    return safeRealpathSync(resolved) || resolved;
+  // A POSIX-rooted path on Windows belongs to another machine. Normalize it with
+  // POSIX rules so its separators survive — path.win32.normalize would fold them
+  // to backslashes, mangling the very path we are trying to preserve — and never
+  // realpath it, since fs.realpathSync would resolve it against the current drive.
+  if (process.platform === 'win32' && /^\//.test(cwd) && !/^[a-zA-Z]:/.test(cwd)) {
+    return stripTrailingSep(path.posix.normalize(cwd));
   }
-  return safeRealpathSync(cwd) || cwd;
+  const normalized = path.isAbsolute(cwd) ? stripTrailingSep(path.normalize(cwd)) : path.resolve(cwd);
+  return safeRealpathSync(normalized) || normalized;
+}
+
+/** Drop a trailing separator so `cwd = ?` and the `cwd LIKE ? + sep` subdir
+ *  wildcard agree; a root path (`/`, `C:\`) keeps its separator. */
+function stripTrailingSep(p: string): string {
+  const stripped = p.replace(/[\\/]+$/, '');
+  return stripped.length > 0 && !/^[a-zA-Z]:$/.test(stripped) ? stripped : p;
 }
 
 /**
