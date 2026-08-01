@@ -450,8 +450,17 @@ function buildQueryOptions(
 /** Resolve and canonicalize a working directory path (follows symlinks). */
 function normalizeCwd(cwd?: string): string {
   if (!cwd) return '';
-  const resolved = path.resolve(cwd);
-  return safeRealpathSync(resolved) || resolved;
+  // Most callers pass a cwd RECORDED in a transcript, which may name a
+  // directory on another machine — a POSIX path read on a Windows host, say.
+  // path.resolve() rebases such a path onto the current drive ('/Users/me' ->
+  // 'D:\Users\me'), inventing a location that never existed. An already-
+  // absolute path is therefore passed through untouched; only a genuinely
+  // relative one is resolved against the process cwd.
+  if (!path.isAbsolute(cwd)) {
+    const resolved = path.resolve(cwd);
+    return safeRealpathSync(resolved) || resolved;
+  }
+  return safeRealpathSync(cwd) || cwd;
 }
 
 /**
