@@ -65,6 +65,16 @@ export interface CrabboxOptions {
    * path (devices list, `agents ssh` fall-through) pass a shorter bound.
    */
   timeoutMs?: number;
+  /**
+   * Force broker-only secret resolution, overriding the headless auto-detect.
+   * Set by ambient/passive callers that render leased boxes as a side effect of
+   * another command (`agents devices list`): those run in a TTY, so the
+   * auto-detect would classify them interactive and let every bundle resolve
+   * pop its own Touch ID sheet — one per keychain-backed bundle, on every
+   * SessionStart hook that shells out to `agents devices`. Broker-only makes a
+   * cold read fail fast instead, and the caller drops the section.
+   */
+  agentOnly?: boolean;
 }
 
 /** Locate the crabbox binary, or throw an actionable error. */
@@ -183,9 +193,24 @@ export function setLeaseSecretsBundle(name: string): void {
   leaseBundleMemo = undefined; // invalidate so the next resolve sees the new config
 }
 
+/**
+ * Whether crabbox's secret resolution must stay broker-only (never prompt).
+ *
+ * An explicit `agentOnly` always wins — including `false`, which is how an
+ * interactive `agents run --lease` keeps its one legitimate Touch ID prompt.
+ * Only an omitted value falls back to the headless auto-detect. (`??`, not
+ * `||`: `false || detect()` would silently re-enable prompting for the caller
+ * that explicitly asked for it to be allowed.)
+ */
+export function resolveBrokerOnly(opts: Pick<CrabboxOptions, 'agentOnly'>): boolean {
+  return opts.agentOnly ?? isHeadlessSecretsContext();
+}
+
 /** Build the child env for crabbox, injecting a secrets bundle when configured. */
 export function crabboxEnv(opts: CrabboxOptions): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...process.env };
+
+  const brokerOnly = resolveBrokerOnly(opts);
 
   const resolved: ResolvedLeaseBundle | undefined = opts.secretsBundle
     ? { name: opts.secretsBundle }
@@ -202,7 +227,7 @@ export function crabboxEnv(opts: CrabboxOptions): NodeJS.ProcessEnv {
         // --lease is headless by contract and crabboxEnv is called several times
         // per run (list/wait/spawn/stop) — resolve broker-only so a keychain bundle
         // can't pop repeated unwatched Touch ID sheets mid-lease.
-        agentOnly: isHeadlessSecretsContext(),
+        agentOnly: brokerOnly,
       });
       Object.assign(out, env);
     } catch (e) {
@@ -225,7 +250,7 @@ export function crabboxEnv(opts: CrabboxOptions): NodeJS.ProcessEnv {
         const { env } = readAndResolveBundleEnv(ts.name, {
           caller: 'agents run --lease (crabbox tailscale)',
           keys: [ts.key],
-          agentOnly: isHeadlessSecretsContext(),
+          agentOnly: brokerOnly,
         });
         const value = env[ts.key];
         if (value) out.CRABBOX_TAILSCALE_AUTH_KEY = value;

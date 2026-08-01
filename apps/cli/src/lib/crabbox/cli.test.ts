@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -10,6 +10,7 @@ import {
   pickTailscaleBundleFromList,
   crabboxList,
   crabboxWarmup,
+  resolveBrokerOnly,
   parseCrabboxSshArgv,
   type CrabboxBox,
 } from './cli.js';
@@ -298,5 +299,44 @@ describe('parseCrabboxSshArgv', () => {
 
   it('returns null when no ssh command line is present', () => {
     expect(parseCrabboxSshArgv('lease not found\nsome error\n')).toBeNull();
+  });
+});
+
+describe('resolveBrokerOnly', () => {
+  // Regression guard for the macOS Touch ID storm: `agents devices list` renders
+  // the leased-boxes section inside a TTY, so the headless auto-detect returns
+  // false and every keychain-backed bundle resolve was allowed to pop its own
+  // Touch ID sheet (one helper process per read, so no assertion reuse). The
+  // passive caller now forces broker-only.
+  it('honors an explicit true regardless of the ambient context', () => {
+    expect(resolveBrokerOnly({ agentOnly: true })).toBe(true);
+  });
+
+  it('honors an explicit false regardless of the ambient context', () => {
+    expect(resolveBrokerOnly({ agentOnly: false })).toBe(false);
+  });
+
+  // The auto-detect is a no-op off darwin (no biometry prompt to suppress), so
+  // the fallback and the `??`-vs-`||` distinction are only observable there.
+  describe.skipIf(process.platform !== 'darwin')('on darwin', () => {
+    const prior = process.env.AGENTS_SECRETS_NO_PROMPT;
+    afterEach(() => {
+      if (prior === undefined) delete process.env.AGENTS_SECRETS_NO_PROMPT;
+      else process.env.AGENTS_SECRETS_NO_PROMPT = prior;
+    });
+
+    it('falls back to the headless auto-detect when agentOnly is omitted', () => {
+      process.env.AGENTS_SECRETS_NO_PROMPT = '1';
+      expect(resolveBrokerOnly({})).toBe(true);
+      process.env.AGENTS_SECRETS_NO_PROMPT = '0';
+      expect(resolveBrokerOnly({})).toBe(false);
+    });
+
+    it('does not let an explicit false fall through to a headless context', () => {
+      // `false || isHeadlessSecretsContext()` would return true here and strip
+      // the prompt from an interactive `agents run --lease` that asked for one.
+      process.env.AGENTS_SECRETS_NO_PROMPT = '1';
+      expect(resolveBrokerOnly({ agentOnly: false })).toBe(false);
+    });
   });
 });

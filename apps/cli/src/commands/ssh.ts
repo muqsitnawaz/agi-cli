@@ -259,7 +259,17 @@ export function renderLeasedBoxesSection(boxes: CrabboxBox[], nowSecs: number): 
 /** The leased-box rows for the devices list, or [] when crabbox can't be read. */
 function loadLeasedBoxesSection(): string[] {
   try {
-    const boxes = crabboxList({ secretsBundle: process.env.AGENTS_LEASE_SECRETS_BUNDLE, timeoutMs: 5000 });
+    // agentOnly: this section is a passive render inside `agents devices list`,
+    // which SessionStart hooks shell out to on every new agent terminal. Without
+    // it the resolve runs "interactive" (a TTY) and every keychain-backed bundle
+    // pops its own Touch ID sheet — each read is a separate helper process, so
+    // the assertion is never reused. Broker-only: warm bundles still render, a
+    // cold read throws and the catch below drops the section.
+    const boxes = crabboxList({
+      secretsBundle: process.env.AGENTS_LEASE_SECRETS_BUNDLE,
+      timeoutMs: 5000,
+      agentOnly: true,
+    });
     return renderLeasedBoxesSection(boxes, Math.floor(Date.now() / 1000));
   } catch {
     return []; // crabbox not installed / no provider creds — omit the section
