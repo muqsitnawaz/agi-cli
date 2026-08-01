@@ -23,11 +23,13 @@ vi.mock('child_process', async () => {
   return { ...actual, spawnSync: spawnSyncMock };
 });
 
+import lockfile from 'proper-lockfile';
 import { execSync } from 'child_process';
+import { sleepSync } from '../fs-atomic.js';
 import {
   fileStore, getPassphrase, disableTtyEchoOrThrow, _resetFileStoreForTest,
   rotatePassphrase, machinePassphraseSourcePath, encryptForFallback, decryptForFallback,
-  _setFileStoreLockTimeoutForTest,
+  _setFileStoreLockTimeoutForTest, _setFileStoreLockStaleMsForTest, _fileStoreLockPathForTest,
   type EncFile,
 } from './filestore.js';
 
@@ -644,6 +646,41 @@ describe('rotatePassphrase (RUSH-1975)', () => {
     expect(decryptForFallback(encABak, OLD_KEY)).toBe('value-a');
     expect(decryptForFallback(encBBak, OLD_KEY)).toBe('value-b');
     expect(decryptForFallback(encC, OLD_KEY)).toBe('value-c');
+  });
+
+  it('rotation heartbeats the store lock so a long synchronous hold is not stolen as stale', () => {
+    seed('prod', 'A', 'value-a');
+    // Shrink the 5s stale window so the assertion runs in ms. A real rotation is
+    // scrypt-bound and outlives the production window; here we simulate a hold that
+    // outlives the (tiny) window while the rotation keeps the lock fresh.
+    _setFileStoreLockStaleMsForTest(60);
+
+    let stole = false;
+    let blocked = false;
+    const rep = rotatePassphrase({
+      newPassphrase: 'hb-key',
+      // Fires mid-swap with the store lock held. Hold ~150ms — well past the 60ms
+      // stale window — calling the rotation's own heartbeat every 30ms. A peer's
+      // lock attempt must still find the lock HELD (fresh), not stale-and-stealable.
+      // Without the heartbeat the lock would age out and this steal would succeed.
+      onStoreSwappedBeforeKeySwap: (heartbeat) => {
+        for (let i = 0; i < 5; i++) { heartbeat(); sleepSync(30); }
+        try {
+          const release = lockfile.lockSync(_fileStoreLockPathForTest(), { stale: 60 });
+          release();
+          stole = true;
+        } catch {
+          blocked = true;
+        }
+      },
+    });
+
+    expect(rep.committed).toBe(true);
+    expect(stole).toBe(false);
+    expect(blocked).toBe(true);
+    // The rotation still committed cleanly with the value intact.
+    expect(fileStore.get('agents-cli.secrets.prod.A')).toBe('value-a');
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe('hb-key');
   });
 });
 

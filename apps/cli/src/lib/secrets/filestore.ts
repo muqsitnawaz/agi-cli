@@ -56,20 +56,26 @@ function ensureFileDir(): void {
 // the real serialization. The lock target is a SIBLING of the store dir, never a
 // file inside it — so it is never copied through a rotation nor swept as a
 // `.rotate-*` artifact, and it stays put across a mid-swap store-dir rename.
+//
+// A rotation's critical section is fully synchronous and scrypt-bound, so on a real
+// store it runs well past the lock's stale window. It calls `withFileLock`'s
+// `heartbeat()` through the re-encrypt and staging loops to keep the lockfile mtime
+// fresh — otherwise a peer would see the live holder as crashed, break the lock, and
+// interleave a write into the swap (a live lock-steal, no crash needed).
 let lockAcquireTimeoutMsOverride: number | null = null;
+let lockStaleMsOverride: number | null = null;
 
 function fileStoreLockPath(): string {
   return `${fileDir()}.lock`;
 }
 
-function withStoreLock<T>(fn: () => T): T {
+function withStoreLock<T>(fn: (heartbeat: () => void) => T): T {
   const lock = fileStoreLockPath();
   ensureLockTarget(lock);
-  return withFileLock(
-    lock,
-    fn,
-    lockAcquireTimeoutMsOverride != null ? { acquireTimeoutMs: lockAcquireTimeoutMsOverride } : {},
-  );
+  const opts: { acquireTimeoutMs?: number; staleMs?: number } = {};
+  if (lockAcquireTimeoutMsOverride != null) opts.acquireTimeoutMs = lockAcquireTimeoutMsOverride;
+  if (lockStaleMsOverride != null) opts.staleMs = lockStaleMsOverride;
+  return withFileLock(lock, fn, opts);
 }
 
 // ---------- passphrase ----------
@@ -800,7 +806,7 @@ export interface RotatePassphraseOpts {
   newPassphrase?: string;
   onStagedBeforeCommit?: () => void;
   onStoreMovedAsideBeforeSwap?: () => void;
-  onStoreSwappedBeforeKeySwap?: () => void;
+  onStoreSwappedBeforeKeySwap?: (heartbeat: () => void) => void;
   onKeyBackedUpBeforeNewKey?: () => void;
   tamperStaged?: boolean;
 }
@@ -811,10 +817,10 @@ export interface RotatePassphraseOpts {
  * run — recovery, verify, swap — holds the lock; it is released on return or throw.
  */
 export function rotatePassphrase(opts: RotatePassphraseOpts = {}): RotatePassphraseReport {
-  return withStoreLock(() => rotatePassphraseLocked(opts));
+  return withStoreLock((heartbeat) => rotatePassphraseLocked(opts, heartbeat));
 }
 
-function rotatePassphraseLocked(opts: RotatePassphraseOpts): RotatePassphraseReport {
+function rotatePassphraseLocked(opts: RotatePassphraseOpts, heartbeat: () => void = () => {}): RotatePassphraseReport {
   const dryRun = opts.dryRun ?? false;
   // Resolve the key path. If the live key file is absent because a prior rotation
   // crashed mid-key-swap, fall back to the interrupted rotation's target so
@@ -849,6 +855,11 @@ function rotatePassphraseLocked(opts: RotatePassphraseOpts): RotatePassphraseRep
   const staged: Array<{ name: string; enc: string }> = [];
   const skipped: string[] = [];
   for (const name of names) {
+    // Keep the store lock fresh across the scrypt-bound loop: each item runs the
+    // KDF three times (decrypt, re-encrypt, verify), so on a real store this loop
+    // outlives the lock's stale window — without this a peer could break the lock
+    // as "stale" mid-run and interleave a write (see `withFileLock`'s heartbeat).
+    heartbeat();
     const raw = fs.readFileSync(path.join(dir, name), 'utf8');
     let parsed: EncFile;
     try { parsed = JSON.parse(raw); } catch { skipped.push(`${name} (not valid EncFile JSON)`); continue; }
@@ -887,6 +898,7 @@ function rotatePassphraseLocked(opts: RotatePassphraseOpts): RotatePassphraseRep
   fs.mkdirSync(stageDir, { recursive: true, mode: 0o700 });
   const stagedNames = new Set(staged.map((s) => s.name));
   for (const { name, enc } of staged) {
+    heartbeat(); // each write is an fsync; keep the lock fresh across the batch
     writeFileFsync(path.join(stageDir, name), enc, 0o600);
   }
   for (const entry of fs.readdirSync(dir)) {
@@ -894,6 +906,7 @@ function rotatePassphraseLocked(opts: RotatePassphraseOpts): RotatePassphraseRep
     if (keyColocated && entry === path.basename(keyPath)) continue; // rewritten below, not copied
     const src = path.join(dir, entry);
     if (!fs.statSync(src).isFile()) continue;
+    heartbeat();
     // Copy through as raw bytes — reading as 'utf8' would decode any non-UTF-8
     // byte to U+FFFD and silently corrupt the file on the way through the swap.
     writeFileFsync(path.join(stageDir, entry), fs.readFileSync(src), 0o600);
@@ -929,7 +942,8 @@ function rotatePassphraseLocked(opts: RotatePassphraseOpts): RotatePassphraseRep
   const keyBak = `${keyPath}.rotate-oldkey`;
   if (!keyColocated) {
     // Test seam: crash after the store swap, before the key swap begins (Window A).
-    opts.onStoreSwappedBeforeKeySwap?.();
+    // Also receives the lock heartbeat so a test can prove a long hold stays fresh.
+    opts.onStoreSwappedBeforeKeySwap?.(heartbeat);
     fs.renameSync(keyPath, keyBak);
     // Test seam: crash after the old key is moved aside, before the new key lands (Window B).
     opts.onKeyBackedUpBeforeNewKey?.();
@@ -978,12 +992,19 @@ export function _resetFileStoreForTest(opts: {
   cachedPassphrase = opts.passphrase ?? null;
   warnedAutoPassphrase = false;
   lockAcquireTimeoutMsOverride = null;
+  lockStaleMsOverride = null;
 }
 
 /** Test-only: shorten the store-lock acquire timeout so a contended-lock assertion
  *  fails fast instead of waiting out the 30s production budget. */
 export function _setFileStoreLockTimeoutForTest(ms: number | null): void {
   lockAcquireTimeoutMsOverride = ms;
+}
+
+/** Test-only: shrink the store-lock stale window so a heartbeat/steal assertion runs
+ *  in milliseconds instead of the 5s production window. */
+export function _setFileStoreLockStaleMsForTest(ms: number | null): void {
+  lockStaleMsOverride = ms;
 }
 
 /** Test-only: the cross-process store-lock target (sibling of the store dir). */
