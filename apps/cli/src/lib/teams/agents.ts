@@ -24,6 +24,7 @@ import { getAgentsDir as getSystemAgentsDir, getShimsDir } from '../state.js';
 import { AGENTS, getAccountInfo } from '../agents.js';
 import { resolveVersion, isVersionInstalled, verifyInstalledBinaryLaunches } from '../versions.js';
 import { sanitizeProcessEnv } from '../secrets/bundles.js';
+import { resolveActor, actorEnv } from '../actor.js';
 import { recordRunName } from '../session/run-names.js';
 import { sshExec, shellQuote } from '../ssh-exec.js';
 import { resolveHost } from '../hosts/registry.js';
@@ -179,6 +180,25 @@ function shSingleQuote(value: string): string {
  */
 export function buildSentinelCommand(cmd: string[], exitCodePath: string): string {
   return `${cmd.map(shSingleQuote).join(' ')}; echo $? > ${shSingleQuote(exitCodePath)}`;
+}
+
+/**
+ * Env for a locally-spawned teammate. Freezes ONE actor for the whole spawn
+ * tree: actorEnv(resolveActor()) stamps AGENTS_ACTOR* onto the child env, so the
+ * teammate's inner `agents run` reads it via inheritedActor and short-circuits
+ * computeActor instead of re-resolving — every teammate under one orchestrator
+ * shares the orchestrator's single frozen actor (see actor.ts). Precedence:
+ * process env < actor < the teammate's --env overrides, so an explicit override
+ * still wins. Single source of truth shared by launchProcess() and its test.
+ */
+export function buildTeammateSpawnEnv(
+  envOverrides: Record<string, string> | null,
+): NodeJS.ProcessEnv {
+  return {
+    ...sanitizeProcessEnv(process.env),
+    ...actorEnv(resolveActor()),
+    ...(envOverrides ?? {}),
+  };
 }
 
 /**
@@ -517,6 +537,12 @@ export class AgentProcess {
   startedAt: Date = new Date();
   completedAt: Date | null = null;
   parentSessionId: string | null = null;
+  // Frozen actor (resolveActor().id) this teammate runs under. Stamped onto the
+  // local spawn env via actorEnv (buildTeammateSpawnEnv) so the teammate's inner
+  // `agents run` inherits one actor for the whole tree instead of re-resolving,
+  // and persisted so the record shows who ran it. Set from the resolved actor at
+  // construction; loadFromDisk restores the persisted value.
+  actor: string | null = null;
   cloudSessionId: string | null = null;
   cloudProvider: string | null = null;
   prUrl: string | null = null;
@@ -633,6 +659,7 @@ export class AgentProcess {
     this.completedAt = completedAt;
     this.baseDir = baseDir;
     this.parentSessionId = parentSessionId;
+    this.actor = resolveActor().id;
     this.cloudSessionId = cloudSessionId;
     this.cloudProvider = cloudProvider;
     this.prUrl = prUrl;
@@ -720,6 +747,7 @@ export class AgentProcess {
       duration: this.duration(),
       mode: this.mode,
       parent_session_id: this.parentSessionId,
+      actor: this.actor,
       workspace_dir: this.workspaceDir,
       cloud_session_id: this.cloudSessionId,
       cloud_provider: this.cloudProvider,
@@ -984,6 +1012,7 @@ export class AgentProcess {
       started_at: this.startedAt.toISOString(),
       completed_at: this.completedAt?.toISOString() || null,
       parent_session_id: this.parentSessionId,
+      actor: this.actor,
       cloud_session_id: this.cloudSessionId,
       cloud_provider: this.cloudProvider,
       pr_url: this.prUrl,
@@ -1083,6 +1112,10 @@ export class AgentProcess {
         meta.profile_name || null,
       );
       agent.startTime = typeof meta.start_time === 'string' ? meta.start_time : null;
+      // The persisted actor is the truth for a reload; the constructor set it to
+      // THIS process's resolved actor, which is wrong for a teammate someone else
+      // ran. Legacy teammates predating the field carry no actor -> null.
+      agent.actor = meta.actor ?? null;
       // Distributed-team fields: set post-construction (like startTime) so the
       // constructor signature stays fixed. Null on every pre-existing teammate.
       agent.hostName = meta.host_name || null;
@@ -1833,9 +1866,7 @@ export class AgentManager {
         stdio: ['ignore', stdoutFd, stdoutFd],
         cwd: agent.cwd || undefined,
         detached: true,
-        env: agent.envOverrides
-          ? { ...sanitizeProcessEnv(process.env), ...agent.envOverrides }
-          : sanitizeProcessEnv(process.env),
+        env: buildTeammateSpawnEnv(agent.envOverrides),
       });
 
       await new Promise<void>((resolve, reject) => {
