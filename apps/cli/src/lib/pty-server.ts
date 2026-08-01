@@ -25,11 +25,32 @@ import { isAlive } from './platform/index.js';
  *
  * Linux:  field 22 of /proc/<pid>/stat (starttime in clock ticks since boot).
  * macOS:  output of `ps -o lstart= -p <pid>` (start time in human format).
+ * Windows: CreationDate from WMIC/CIM (a WMI datetime string).
  * Returns null on any error so callers can skip the guard rather than crash.
+ *
+ * Windows had no branch at all and fell into the `ps` call, which does not
+ * exist there — so this always returned null and every caller silently ran
+ * WITHOUT PID-reuse protection. The value is only ever compared for equality
+ * against an earlier capture of the same PID, so the format just has to be
+ * stable, not parseable.
  */
 export function captureProcessStartTime(pid: number): string | null {
   if (!pid || pid <= 0) return null;
   try {
+    if (process.platform === 'win32') {
+      const out = execFileSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CreationDate`,
+        ],
+        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] },
+      );
+      const trimmed = out.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
     if (process.platform === 'linux') {
       const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8');
       // The comm field (#2) is wrapped in parens and may contain spaces, so
