@@ -2,6 +2,7 @@
  * Process liveness / control, platform-aware.
  */
 import { execFileSync } from 'child_process';
+import { readFileSync } from 'fs';
 
 /**
  * Forcefully terminate a process AND its descendant tree.
@@ -77,5 +78,77 @@ export function isAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Memoized per pid: a process's start time cannot change while it lives, and a
+ *  recycled pid is precisely what the caller is trying to detect — so a stale
+ *  hit still compares unequal against the recorded value. Bounded by the pids a
+ *  single CLI invocation asks about. */
+const startTimeByPid = new Map<number, string | null>();
+
+/**
+ * A stable identifier for the process at `pid` as of when it started, or null if
+ * unknowable. Used to defeat PID reuse: acting on a pid is only safe when the
+ * process still occupies the slot we observed earlier. The value is only ever
+ * compared for equality against an earlier capture of the SAME pid, so the format
+ * need only be stable, not parseable.
+ *
+ * Linux:   field 22 of /proc/<pid>/stat (starttime in clock ticks since boot).
+ * macOS:   `ps -o lstart= -p <pid>`.
+ * Windows: CreationDate from Win32_Process, as a culture-independent FILETIME.
+ *
+ * This is the single source of truth. `pty-server.ts` and `teams/agents.ts` each
+ * carried their own copy; the Windows branch was missing from both, so every
+ * caller there silently ran with NO pid-reuse protection — including
+ * `agents teams stop`, which is how it could SIGKILL an unrelated process group.
+ */
+export function captureProcessStartTime(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const cached = startTimeByPid.get(pid);
+  if (cached !== undefined) return cached;
+  const value = readProcessStartTime(pid);
+  startTimeByPid.set(pid, value);
+  return value;
+}
+
+function readProcessStartTime(pid: number): string | null {
+  try {
+    if (process.platform === 'win32') {
+      // ToFileTimeUtc() rather than the raw DateTime: the default string form is
+      // rendered in the current culture, so a persisted fingerprint would stop
+      // comparing equal across a locale change.
+      const out = execFileSync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CreationDate.ToFileTimeUtc()`,
+        ],
+        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, timeout: 5000 },
+      );
+      const trimmed = out.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+      // The comm field (#2) is parenthesized and may contain spaces, so split
+      // off everything after the last ')' to get a clean field list.
+      const lastParen = stat.lastIndexOf(')');
+      if (lastParen < 0) return null;
+      const fields = stat.slice(lastParen + 2).split(' ');
+      // After comm we are at field 3; starttime is field 22, so index 19 here.
+      return fields[19] || null;
+    }
+    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+    });
+    const trimmed = out.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
   }
 }
