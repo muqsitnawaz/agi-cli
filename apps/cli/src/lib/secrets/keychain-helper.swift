@@ -4,6 +4,8 @@ import LocalAuthentication
 
 var operationPrompt = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_PROMPT"] ?? "Unlock agents-cli secrets"
 let operationPromptWithoutDuration = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_PROMPT_BASE"] ?? operationPrompt
+let defaultBundlePolicy = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_DEFAULT_POLICY"] ?? "daily"
+let forcePromptDuration = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_FORCE_DURATION"] == "1"
 import AppKit
 
 func writeStderr(_ message: String) {
@@ -492,9 +494,12 @@ case "get-batch":
             // Only daily bundles are auto-held; always/never reads must not
             // claim a duration that does not exist.
             if let data = value.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               (json["tier"] as? String) != "daily" {
-                operationPrompt = operationPromptWithoutDuration
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let tier = json["tier"] as? String
+                let daily = tier == "daily" || tier == "session" || (tier == nil && defaultBundlePolicy == "daily")
+                if !forcePromptDuration && !daily {
+                    operationPrompt = operationPromptWithoutDuration
+                }
             }
             if service.hasPrefix("agents-cli.") {
                 if outcome.needsMigration {

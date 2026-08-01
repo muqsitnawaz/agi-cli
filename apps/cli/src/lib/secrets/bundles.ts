@@ -1380,6 +1380,8 @@ export function readAndResolveBundleEnv(
         bundle: name,
         reason: opts.caller ? `to ${opts.caller}` : reason,
         duration: opts.duration || humanUnlockDuration(secretsHoldMs()),
+        defaultPolicy: secretsDefaultPolicy(),
+        forceDuration: Boolean(opts.duration),
       })
     : store.getBatch([...new Set([metaItem, ...secretItems])]);
 

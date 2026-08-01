@@ -813,7 +813,14 @@ export function hasKeychainToken(item: string): boolean {
  * call in the same process). For bundles, prefer getKeychainTokens() so a
  * single biometric prompt covers every key in the batch.
  */
-export interface KeychainReadContext { agent?: string; bundle?: string; reason?: string; duration?: string }
+export interface KeychainReadContext {
+  agent?: string;
+  bundle?: string;
+  reason?: string;
+  duration?: string;
+  defaultPolicy?: 'daily' | 'always' | 'never';
+  forceDuration?: boolean;
+}
 
 export function keychainOperationPrompt(context: KeychainReadContext = {}): string {
   const agent = context.agent || 'Agents CLI';
@@ -908,7 +915,13 @@ export function getKeychainTokens(items: string[], context: KeychainReadContext 
   }
   const bin = getKeychainHelperPath();
   const child = spawnSync(bin, ['get-batch', os.userInfo().username, ...storageItems], {
-    env: { ...process.env, AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context) },
+    env: {
+      ...process.env,
+      AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context),
+      AGENTS_KEYCHAIN_PROMPT_BASE: keychainOperationPrompt({ ...context, duration: undefined }),
+      AGENTS_KEYCHAIN_DEFAULT_POLICY: context.defaultPolicy || 'daily',
+      AGENTS_KEYCHAIN_FORCE_DURATION: context.forceDuration ? '1' : '0',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (child.status === 4) {
