@@ -88,6 +88,9 @@ afterEach(() => {
 });
 
 afterAll(() => {
+  // Close before removing the tree: Windows refuses to unlink an open file, so
+  // a leaked connection (plus its WAL sidecars) fails the whole suite there.
+  db.closeDB();
   if (REAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = REAL_HOME;
   if (REAL_USERPROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = REAL_USERPROFILE;
   fs.rmSync(tmpHome, { recursive: true, force: true });

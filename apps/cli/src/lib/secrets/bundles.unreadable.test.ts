@@ -26,7 +26,7 @@ import {
   writeBundle,
 } from './bundles.js';
 import { _resetFileStoreForTest } from './filestore.js';
-import { setKeychainBackendForTest } from './index.js';
+import { setKeychainBackendForTest, type KeychainBackend } from './index.js';
 
 const NAME = 'unreadable-fixture.test';
 let dir: string;
@@ -43,12 +43,31 @@ function usePassphrase(phrase: string): void {
   _resetFileStoreForTest({ fileDir: dir, passphrase: null });
 }
 
+/**
+ * An always-empty keychain. `setKeychainBackendForTest(null)` does not mean
+ * "no keychain" — it CLEARS the override and restores production resolution,
+ * which on macOS routes `bundleExists()` into the signed helper. That helper
+ * ships only in a built npm tarball, so on CI (and any source checkout) the
+ * final `expect(bundleExists(NAME)).toBe(false)` threw "Source Agents CLI.app
+ * not found" instead of answering. An empty in-memory backend expresses the
+ * same intent — the keychain holds nothing, so the file store is what matters —
+ * without depending on a helper that cannot exist here.
+ */
+class EmptyKeychain implements KeychainBackend {
+  store = new Map<string, string>();
+  has(item: string) { return this.store.has(item); }
+  get(item: string): string { throw new Error(`missing ${item}`); }
+  set(item: string, value: string) { this.store.set(item, value); }
+  delete(item: string) { return this.store.delete(item); }
+  list(prefix: string) { return [...this.store.keys()].filter((k) => k.startsWith(prefix)); }
+}
+
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'secrets-unreadable-'));
   prevPassphrase = process.env.AGENTS_SECRETS_PASSPHRASE;
   // No OS keychain: force the encrypted file store, the backend that can lose
   // its passphrase.
-  prevBackend = setKeychainBackendForTest(null);
+  prevBackend = setKeychainBackendForTest(new EmptyKeychain());
   usePassphrase('the-original-passphrase');
 });
 

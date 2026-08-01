@@ -20,7 +20,6 @@ import {
   startWatchdog,
   setWatchdogMonitorConnectivity,
   setWatchdogArmSink,
-  ingestWatchdogStallFact,
   ingestWatchdogVersionsFact,
 } from './watchdog.vscode';
 import { startWatchdogBridge } from '../mcp/watchdog-bridge';
@@ -995,15 +994,17 @@ export async function activate(context: vscode.ExtensionContext) {
     console.warn('[WATCHDOG] ensureWatchdogMcpInstalled failed:', err);
   });
 
+  // Version auto-rotate loop. NOT a nudger — autonomous stall detection and
+  // nudge injection were retired; the CLI daemon watchdog is the sole injector.
+  // The extension keeps only the rotate-on-exhaustion capability the CLI lacks.
   context.subscriptions.push(
-    startWatchdog(context, {
+    startWatchdog({
       rotateTerminal: (entry) =>
         rotateTerminalToBestVersion(context, entry, {
           closeOldTerminal: true,
           focusNewTerminal: false,
           notifyOnFailure: false,
         }),
-      mcpServerPath: watchdogBridge.mcpServerPath,
     })
   );
 
@@ -3690,8 +3691,22 @@ function startAutoLabelPollerForTerminal(terminal: vscode.Terminal, context: vsc
 
   terminals.startAutoLabelPoller(terminal, async () => {
     const autoLabel = await fetchAndSetAutoLabel(terminal, entry);
-    if (autoLabel && vscode.window.activeTerminal === terminal) {
-      updateStatusBarForTerminal(terminal, context.extensionPath);
+    if (!autoLabel || vscode.window.activeTerminal !== terminal) return;
+    updateStatusBarForTerminal(terminal, context.extensionPath);
+    // Refresh the tab title too, not just the status bar — otherwise a label
+    // that resolves while you're sitting on the tab never shows until the next
+    // focus change. Renaming briefly activates the terminal, so this is gated
+    // on the terminal already being active (same focus-safe guard as
+    // tryFetchLabelOnFocus).
+    const display = getDisplayPrefs(context);
+    if (display.showLabelsInTitles && display.autoLabelInTabTitles && entry.agentConfig) {
+      const newTitle = buildTerminalTitle(
+        entry.agentConfig.title,
+        autoLabel,
+        context,
+        entry.sessionId
+      );
+      await terminals.renameTerminal(terminal, newTitle);
     }
   });
 }
@@ -4883,8 +4898,6 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
       sessionTracker.ingestSessionFact(event.payload);
     } else if (proto.isSessionWarmth(event)) {
       sessionTracker.ingestSessionWarmth(event.payload.filePath);
-    } else if (proto.isWatchdogStall(event)) {
-      ingestWatchdogStallFact(event.payload);
     } else if (proto.isWatchdogVersions(event)) {
       ingestWatchdogVersionsFact(event.payload);
     } else if (proto.isPanelSnapshot(event)) {

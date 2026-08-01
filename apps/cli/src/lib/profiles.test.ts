@@ -13,18 +13,42 @@ import {
   writeProfile,
   type Profile,
 } from './profiles.js';
+import { setKeychainBackendForTest, type KeychainBackend } from './secrets/index.js';
 
 let TEST_ROOT: string;
 let USER_DIR: string;
+let prevBackend: ReturnType<typeof setKeychainBackendForTest>;
+
+/**
+ * An always-empty keychain. `resolveProfileEnv` probes for a stored token, and
+ * on macOS that probe resolves the signed helper — which ships only in a built
+ * npm tarball, so on CI and on any source checkout it threw "Source Agents
+ * CLI.app not found" before the authOptional branch could be reached. Installing
+ * the sanctioned test backend gives the probe a real answer (no token stored)
+ * without a helper, and keeps the production primitive failing loudly, which is
+ * what protects the --force overwrite guards that also call it.
+ */
+class EmptyKeychain implements KeychainBackend {
+  store = new Map<string, string>();
+  has(item: string) { return this.store.has(item); }
+  // Mirrors the production wording so the required-auth test still asserts on
+  // the message a real missing item produces.
+  get(item: string): string { throw new Error(`Keychain item not found: ${item}`); }
+  set(item: string, value: string) { this.store.set(item, value); }
+  delete(item: string) { return this.store.delete(item); }
+  list(prefix: string) { return [...this.store.keys()].filter((k) => k.startsWith(prefix)); }
+}
 
 beforeEach(() => {
   TEST_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'profiles-test-'));
   USER_DIR = path.join(TEST_ROOT, '.agents');
   fs.mkdirSync(path.join(USER_DIR, 'profiles'), { recursive: true });
   vi.spyOn(state, 'getUserAgentsDir').mockReturnValue(USER_DIR);
+  prevBackend = setKeychainBackendForTest(new EmptyKeychain());
 });
 
 afterEach(() => {
+  setKeychainBackendForTest(prevBackend);
   vi.restoreAllMocks();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });

@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import Database from '../../sqlite.js';
 import { buildFtsQuery, getDB } from '../db.js';
-import { scanClaudeSession, parseCodexThreadNameIndex, shouldDeferRecentAppend, machineForSessionFile, discoverSessions, resolveSessionById, readGrokMeta } from '../discover.js';
+import { scanClaudeSession, parseCodexThreadNameIndex, shouldDeferRecentAppend, machineForSessionFile, discoverSessions, resolveSessionById, isCompleteSessionId, readGrokMeta } from '../discover.js';
 import { machineId } from '../sync/config.js';
 import { getHistoryDir } from '../../state.js';
 
@@ -362,5 +362,53 @@ describe('readGrokMeta', () => {
     const fp = path.join(dir, uuid, 'summary.json');
     fs.writeFileSync(fp, '{ not valid json');
     expect(readGrokMeta(fp)).toBeNull();
+  });
+});
+
+describe('isCompleteSessionId', () => {
+  it('accepts a bare 36-char UUID, in either case', () => {
+    expect(isCompleteSessionId('d3470b57-2af6-4c11-b1de-3fab94f43603')).toBe(true);
+    expect(isCompleteSessionId('D3470B57-2AF6-4C11-B1DE-3FAB94F43603')).toBe(true);
+  });
+
+  it('accepts a v7 UUID (the shape newer harnesses mint)', () => {
+    expect(isCompleteSessionId('019fbd2f-971a-7fb0-a213-3709a27cd12b')).toBe(true);
+  });
+
+  // The prefixed shapes are the ones the index actually holds — verified against
+  // a live 12,507-row index: session_+UUID (kimi, rush) and ses_+26-char ULID
+  // (opencode). `ses_` is NOT a UUID, so it needs its own shape, and `api-`
+  // appears zero times and is deliberately not claimed.
+  it('accepts session_ + UUID, the shape kimi and rush mint', () => {
+    expect(isCompleteSessionId('session_933f4131-f3ed-495d-946b-71825e9f6a25')).toBe(true);
+  });
+
+  it('accepts ses_ + 26-char ULID, the shape opencode actually mints', () => {
+    expect(isCompleteSessionId('ses_0485d75c1ffewpzVfoI0ni6hW1')).toBe(true);
+    expect(isCompleteSessionId('ses_0e508fa24ffeZe0092umrYovhg')).toBe(true);
+  });
+
+  it('rejects ses_ + UUID — a shape no harness mints', () => {
+    expect(isCompleteSessionId('ses_933f4131-f3ed-495d-946b-71825e9f6a25')).toBe(false);
+  });
+
+  it('rejects a truncated ULID, so a ses_ prefix stays searchable', () => {
+    expect(isCompleteSessionId('ses_0485d75c')).toBe(false);
+  });
+
+  it('accepts a padded id, matching the resolver that trims before lookup', () => {
+    expect(isCompleteSessionId('  d3470b57-2af6-4c11-b1de-3fab94f43603 ')).toBe(true);
+  });
+
+  it('rejects a short id, a truncated id, and a search phrase', () => {
+    expect(isCompleteSessionId('d3470b57')).toBe(false);
+    expect(isCompleteSessionId('d3470b57-2af6-4c11-b1de')).toBe(false);
+    expect(isCompleteSessionId('add auth middleware')).toBe(false);
+    expect(isCompleteSessionId('')).toBe(false);
+  });
+
+  it('rejects a UUID with trailing text, so a phrase quoting an id stays a search', () => {
+    expect(isCompleteSessionId('resume d3470b57-2af6-4c11-b1de-3fab94f43603')).toBe(false);
+    expect(isCompleteSessionId('d3470b57-2af6-4c11-b1de-3fab94f43603.jsonl')).toBe(false);
   });
 });
