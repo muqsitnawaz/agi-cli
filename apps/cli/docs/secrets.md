@@ -614,10 +614,12 @@ files are present, classifies the whole store, and either completes the rotation
 forward or rolls back **only when one key opens every item** — so a crash in the
 gap between the store swap and the key swap can never strand the store under a
 mismatched key. If a `secrets set` slipped in between a crashed rotation and the
-recovery and left a **mixed** store (some items under the new key, some under the
-old), recovery refuses with an actionable error and preserves every recovery
-artifact rather than deleting the only copy of a key — so nothing is ever lost
-silently; you decrypt each item under whichever key opens it and re-run. Rotation
+recovery and left a **mixed** store — items under two keys at once, or a store dir
+an interstitial write recreated after the crash left it absent, so its backup holds
+items the live dir does not — recovery refuses with an actionable error and
+preserves every recovery artifact rather than deleting the only copy of a key or
+of the backed-up ciphertext — so nothing is ever lost silently; you merge or
+re-seal each item under whichever key opens it and re-run. Rotation
 and every store write take one cross-process lock, so a `secrets set` or a second
 rotation can never interleave with a swap to begin with. No plaintext secret value
 or passphrase is ever written to

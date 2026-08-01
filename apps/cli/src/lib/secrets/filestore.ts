@@ -566,6 +566,24 @@ function storeHasEnc(dir: string): boolean {
   try { return fs.readdirSync(dir).some((f) => f.endsWith('.enc')); } catch { return false; }
 }
 
+/**
+ * `.enc` basenames present in the `<dir>.rotate-old-*` backup but ABSENT from the
+ * live `dir` — ciphertext that lives ONLY in the backup. A genuine post-swap store
+ * is always a superset of the pre-swap store (rotation re-keys every item and copies
+ * orphans/non-.enc files through verbatim — nothing is dropped), so this set is empty
+ * for any real completed/interrupted rotation. It is non-empty only when the live
+ * `dir` is NOT the post-swap store: an interstitial `secrets set` recreated the store
+ * dir after a crash in the move-aside window left it absent (RUSH-1975). Sweeping the
+ * backup then destroys those items — so recovery refuses instead.
+ */
+function backupOnlyEnc(bak: string, dir: string): string[] {
+  let bakNames: string[];
+  try { bakNames = fs.readdirSync(bak).filter((f) => f.endsWith('.enc')); } catch { return []; }
+  let dirNames: Set<string>;
+  try { dirNames = new Set(fs.readdirSync(dir).filter((f) => f.endsWith('.enc'))); } catch { dirNames = new Set(); }
+  return bakNames.filter((n) => !dirNames.has(n));
+}
+
 /** Read a key file's trimmed contents, or null if absent/empty. */
 function readKeyFile(fp: string): string | null {
   try { const v = fs.readFileSync(fp, 'utf8').trim(); return v.length > 0 ? v : null; }
@@ -590,7 +608,11 @@ function readKeyFile(fp: string): string | null {
  * e.g. after a mid-swap crash contaminated by a later `secrets set`):
  *
  *  1. The live key opens EVERY non-orphan item ('all') → rotation complete and
- *     consistent (or never interrupted); sweeping the `.rotate-*` artifacts is safe.
+ *     consistent (or never interrupted); sweeping the `.rotate-*` artifacts is safe —
+ *     unless a `<dir>.rotate-old-*` backup still holds `.enc` items absent from the
+ *     live dir. That means the live dir is not the post-swap store but a fresh dir an
+ *     interstitial `secrets set` created after a crash in the move-aside window left
+ *     the store dir absent, so the backup is the only copy of those items → REFUSE.
  *  2. Else, if `<key>.rotate-new` opens every non-orphan item ('all'), the crash
  *     landed after the store swap but before the key swap finished → finish the
  *     rotation forward by installing `.rotate-new` as the live key, then sweep.
@@ -679,10 +701,30 @@ function recoverInterruptedRotation(keyPath: string): void {
     );
   };
 
-  // 1. Live key opens the WHOLE store -> rotation complete/consistent. Sweep safe.
-  //    Opens only some items -> MIXED, refuse.
+  // 1. Live key opens the WHOLE store -> rotation complete/consistent. Sweep safe,
+  //    UNLESS a `<dir>.rotate-old-*` backup still holds items absent from the live
+  //    dir: then the live dir is not the post-swap store but a fresh dir an
+  //    interstitial `secrets set` created after a crash in the move-aside window
+  //    (store dir absent), and the backup is the ONLY copy of those items. Sweeping
+  //    would destroy them, so refuse. Opens only some items -> MIXED, refuse.
   const liveMatch = classifyStore(dir, liveKey, candidates);
-  if (liveMatch === 'all') { sweep(); return; }
+  if (liveMatch === 'all') {
+    const orphaned = bakDir && fs.existsSync(bakDir) ? backupOnlyEnc(bakDir, dir) : [];
+    if (orphaned.length > 0) {
+      const shown = orphaned.slice(0, 3).join(', ') + (orphaned.length > 3 ? ', …' : '');
+      throw new Error(
+        `Interrupted secrets rotation left a MIXED (split) store: the live key opens ` +
+        `${dir}, but its backup ${bakDir} holds ${orphaned.length} item(s) absent from ` +
+        `the live store (${shown}) — so the live dir is not the whole store. This ` +
+        `happens when a \`secrets set\` recreated the store dir after a crash left it ` +
+        `absent. Refusing to sweep — every recovery artifact is preserved. Recover out ` +
+        `of band: merge ${bakDir}/*.enc into ${dir} (both open under ${keyPath}), then ` +
+        `re-run \`rotate-passphrase\`.`,
+      );
+    }
+    sweep();
+    return;
+  }
   if (liveMatch === 'some') refuseMixed('some items open under the live key and others do not');
 
   // 2. `.rotate-new` opens the whole store, the live key none of it -> the crash

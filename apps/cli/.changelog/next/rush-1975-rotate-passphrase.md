@@ -12,10 +12,12 @@
   live store (not merely which files are present) and classifies the WHOLE store:
   it completes the rotation forward or rolls back only when one key opens every
   item, and if a later `secrets set` contaminated a crashed rotation into a MIXED
-  store (items under two keys at once) it refuses with an actionable error and
-  preserves every recovery artifact rather than sweeping the only copy of a key —
-  so a crash between the store swap and the key swap can never orphan the store,
-  even when a write landed in between. The rotation and every store write run under
+  store (items under two keys at once, or a store dir recreated by an interstitial
+  write after the crash left it absent, so its backup holds items the live dir does
+  not) it refuses with an actionable error and preserves every recovery artifact
+  rather than sweeping the only copy of a key or the backed-up ciphertext — so a
+  crash anywhere in the swap can never orphan the store, even when a write landed in
+  between. The rotation and every store write run under
   one cross-process lock, so a `secrets set` or a second rotation can never
   interleave with a swap in the first place. No plaintext secret or passphrase is
   ever written to disk, argv, or a log. Items

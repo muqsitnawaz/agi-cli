@@ -540,6 +540,111 @@ describe('rotatePassphrase (RUSH-1975)', () => {
     expect(machinePassphraseSourcePath()).toBeNull();
     expect(() => rotatePassphrase()).toThrow(/machine-local passphrase/i);
   });
+
+  it('Window M (non-co-located): crash after the store dir is moved aside, before the staged store lands — next run restores the backup and the OLD key opens the whole store', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+    const beforeEnc = fs.readdirSync(storeDir).filter((f) => f.endsWith('.enc')).sort();
+
+    // Crash at `onStoreMovedAsideBeforeSwap` on the canonical layout: the live store
+    // dir has just been renamed to `store.rotate-old-*` (so `storeDir` is ABSENT) and
+    // the staged NEW-key store has NOT yet landed. Unlike the co-located single-rename
+    // window, the key file lives in its OWN dir, so it is NOT carried into the backup:
+    // it stays untouched at OLD_KEY. This is the exact window `filestore.test.ts:506`
+    // (the co-located test) exercises, now for the layout every non-legacy machine
+    // (incl. yosemite-s0/s1) actually runs.
+    expect(() => rotatePassphrase({
+      newPassphrase: 'winM-crash',
+      onStoreMovedAsideBeforeSwap: () => { throw new Error('crash before staged store lands'); },
+    })).toThrow(/before staged store lands/);
+
+    // Crashed on-disk state: store dir ABSENT, `store.rotate-old-*` backup PRESENT,
+    // key file UNTOUCHED (still OLD_KEY, in its own dir — never swept into the backup).
+    expect(fs.existsSync(storeDir)).toBe(false);
+    const bakName = fs.readdirSync(tmpRoot).find((e) => e.startsWith('store.rotate-old-'));
+    expect(bakName).toBeTruthy();
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe(OLD_KEY);
+    // The old ciphertext rode into the backup intact, still under the OLD key.
+    const encABak = JSON.parse(fs.readFileSync(path.join(tmpRoot, bakName!, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encABak, OLD_KEY)).toBe('value-a');
+
+    // A dry-run rotation triggers recovery WITHOUT re-keying: it must restore the
+    // backup over the absent store dir, and the OLD key must then open the WHOLE
+    // restored store. Every `.rotate-*` artifact is swept only once that is proven.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    const dry = rotatePassphrase({ dryRun: true, newPassphrase: 'winM-probe' });
+    expect(dry.committed).toBe(false);
+    expect(fs.existsSync(storeDir)).toBe(true);
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe(OLD_KEY);
+    for (const [item, want] of [
+      ['agents-cli.secrets.prod.A', 'value-a'],
+      ['agents-cli.secrets.prod.B', 'value-b'],
+    ] as const) {
+      const enc = JSON.parse(fs.readFileSync(path.join(storeDir, `${item}.enc`), 'utf8')) as EncFile;
+      expect(decryptForFallback(enc, OLD_KEY)).toBe(want);
+    }
+    // No `.rotate-*` artifact left behind once recovery completes.
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-'))).toEqual([]);
+
+    // Every seeded value reads back through the live resolver under the restored key.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir, passphrase: OLD_KEY });
+    expect(fileStore.get('agents-cli.secrets.prod.A')).toBe('value-a');
+    expect(fileStore.get('agents-cli.secrets.prod.B')).toBe('value-b');
+
+    // A real rotation now completes cleanly to a fresh key, values intact.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    const rep = rotatePassphrase({ newPassphrase: 'winM-final' });
+    expect(rep.committed).toBe(true);
+    expect(fileStore.get('agents-cli.secrets.prod.A')).toBe('value-a');
+    expect(fileStore.get('agents-cli.secrets.prod.B')).toBe('value-b');
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe('winM-final');
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-'))).toEqual([]);
+    // Same item set before the crash and after recovery + retry — nothing dropped.
+    expect(fs.readdirSync(storeDir).filter((f) => f.endsWith('.enc')).sort()).toEqual(beforeEnc);
+  });
+
+  it('MIXED/split store (Window M crash + an interstitial write) is REFUSED, not swept — no silent loss', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+
+    // Crash in the move-aside window: the store dir is renamed to `store.rotate-old-*`
+    // (so `storeDir` is ABSENT) and the staged store has not landed. The OLD key file
+    // and `.rotate-new` (the incoming key) are on disk; A and B live ONLY in the backup.
+    expect(() => rotatePassphrase({
+      newPassphrase: 'winM-newkey',
+      onStoreMovedAsideBeforeSwap: () => { throw new Error('crash before staged store lands'); },
+    })).toThrow(/before staged store lands/);
+    expect(fs.existsSync(storeDir)).toBe(false);
+
+    // With the store dir gone but the OLD key file intact, an ordinary `secrets set`
+    // recreates the dir and seals C under the OLD key. The live dir now holds ONLY C —
+    // A and B survive solely in the `store.rotate-old-*` backup. A presence/"any item
+    // opens" recovery would see "the live key opens the whole (C-only) store", call it
+    // consistent, and sweep the backup — permanently orphaning A and B (silent loss).
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    fileStore.set('agents-cli.secrets.prod.C', 'value-c', { allowAutoProvision: true });
+
+    // Recovery must detect that the backup holds items absent from the live dir and
+    // REFUSE, preserving every artifact — never report success over a store it would
+    // be corrupting.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    expect(() => rotatePassphrase({ newPassphrase: 'winM-again' })).toThrow(/MIXED/i);
+
+    // Every recovery artifact survived: the new-key temp and the old-store backup.
+    expect(fs.readFileSync(`${keyFile}.rotate-new`, 'utf8')).toBe('winM-newkey');
+    const bakName = fs.readdirSync(tmpRoot).find((e) => e.startsWith('store.rotate-old-'));
+    expect(bakName).toBeTruthy();
+
+    // And every pre-rotation secret is still recoverable off disk: A and B under the
+    // OLD key in the preserved backup, C under the OLD key in the live dir. Under the
+    // old "any item opens" sweep, A and B were unreadable under every key left on disk.
+    const encABak = JSON.parse(fs.readFileSync(path.join(tmpRoot, bakName!, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    const encBBak = JSON.parse(fs.readFileSync(path.join(tmpRoot, bakName!, 'agents-cli.secrets.prod.B.enc'), 'utf8')) as EncFile;
+    const encC = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.C.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encABak, OLD_KEY)).toBe('value-a');
+    expect(decryptForFallback(encBBak, OLD_KEY)).toBe('value-b');
+    expect(decryptForFallback(encC, OLD_KEY)).toBe('value-c');
+  });
 });
 
 /**
