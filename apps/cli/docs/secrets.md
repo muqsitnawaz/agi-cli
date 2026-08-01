@@ -270,6 +270,7 @@ See [The secrets-agent](#the-secrets-agent-macos) below for the model and the se
 | `secrets migrate` | Interactively migrate legacy YAML bundles into Keychain | `agents secrets migrate` |
 | `secrets migrate-acl` | Upgrade legacy keychain items to the biometry ACL (macOS) | `agents secrets migrate-acl` |
 | `secrets import-keyring` | Migrate secrets out of the OS keyring / Credential Manager into the encrypted file store (Linux/Windows). Dry-run by default; `--commit` to write | `agents secrets import-keyring --commit` |
+| `secrets rotate-passphrase` | Re-key the whole encrypted file store under a new machine-local passphrase, atomically (see [File store](#linux-headless-servers-and-the-encrypted-file-fallback)). Dry-run by default; `--commit` to write | `agents secrets rotate-passphrase --commit` |
 | `secrets openclaw-keychain migrate [config]` | Move supported OpenClaw plaintext credentials into macOS Keychain and rewrite them as exec SecretRefs | `agents secrets openclaw-keychain migrate ~/.openclaw/openclaw.json` |
 
 `secrets openclaw-keychain migrate` targets OpenClaw surfaces that accept
@@ -592,8 +593,27 @@ private key, and identical to the common `export AGENTS_SECRETS_PASSPHRASE=… `
 exposure (backups, accidental commits, `.env` leaks), not against another
 process running as the same user. For a key held **off disk**, set
 `AGENTS_SECRETS_PASSPHRASE` (it always takes precedence) or unlock the keyring
-(e.g. configure `pam_gnome_keyring` for SSH login). To rotate, set a new
-`AGENTS_SECRETS_PASSPHRASE`, re-add the secrets, and delete `.passphrase`.
+(e.g. configure `pam_gnome_keyring` for SSH login).
+
+**Rotating the passphrase.** When the machine-local key is compromised (e.g. it
+was exported into the process environment and captured), rotate it with:
+
+```bash
+agents secrets rotate-passphrase            # dry-run: report the item count + round-trip
+agents secrets rotate-passphrase --commit   # re-encrypt the store under a fresh key
+```
+
+This decrypts every item under the current key, re-encrypts it under a newly
+generated one, and swaps both the ciphertext and the 0600 key file atomically —
+staged in a temp dir, verified (every item must round-trip under the new key),
+then swapped by directory rename, so a crash at any point leaves the old store
+intact and readable. No plaintext secret value or passphrase is ever written to
+disk, argv, or a log. Items that don't decrypt under the current key (orphan
+caches, stale artifacts) are carried through untouched and reported. It refuses
+to run while the secrets-agent holds live unlocks, or while
+`AGENTS_SECRETS_PASSPHRASE` is exported in the environment (that stale export
+would shadow the new key), unless you pass `--force`. Any process still holding
+the old passphrase in its environment must be restarted afterward.
 
 ## See Also
 

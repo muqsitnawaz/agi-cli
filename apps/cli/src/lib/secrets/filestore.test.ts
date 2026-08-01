@@ -24,7 +24,11 @@ vi.mock('child_process', async () => {
 });
 
 import { execSync } from 'child_process';
-import { fileStore, getPassphrase, disableTtyEchoOrThrow, _resetFileStoreForTest } from './filestore.js';
+import {
+  fileStore, getPassphrase, disableTtyEchoOrThrow, _resetFileStoreForTest,
+  rotatePassphrase, machinePassphraseSourcePath, encryptForFallback, decryptForFallback,
+  type EncFile,
+} from './filestore.js';
 
 describe('disableTtyEchoOrThrow (RUSH-1764: fail closed so a passphrase never echoes)', () => {
   it('throws (fail closed) when echo cannot be disabled — never falls through', () => {
@@ -171,5 +175,169 @@ describe('filestore win32 interactive passphrase branch', () => {
       status: 1, stdout: Buffer.from(''), stderr: Buffer.from(''), error: new Error('spawn ENOENT'),
     }));
     expect(() => getPassphrase()).toThrow(/AGENTS_SECRETS_PASSPHRASE/);
+  });
+});
+
+// RUSH-1975: rotate the file store's machine-local master passphrase. The
+// catastrophic failure this guards is a half-re-keyed store (every secret lost),
+// so these pin the atomic contract: verify before swap, a crash leaves the old
+// store readable, a bad round-trip aborts, and dry-run writes nothing.
+describe('rotatePassphrase (RUSH-1975)', () => {
+  let tmpRoot: string;
+  let storeDir: string;
+  let keyDir: string;
+  let keyFile: string;
+  const OLD_KEY = 'old-machine-key-value';
+  let prevTty: boolean | undefined;
+
+  /** Seed a keychain-named item into the file store under the current key. */
+  function seed(bundle: string, key: string, value: string): string {
+    const item = `agents-cli.secrets.${bundle}.${key}`;
+    fileStore.set(item, value);
+    return `${item}.enc`;
+  }
+
+  beforeEach(() => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-rotate-'));
+    storeDir = path.join(tmpRoot, 'store');
+    keyDir = path.join(tmpRoot, 'key');
+    keyFile = path.join(keyDir, 'passphrase');
+    delete process.env.AGENTS_SECRETS_PASSPHRASE;
+    prevTty = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    // Provision a known machine-local key so the store is encrypted under a value
+    // the test controls (rather than an auto-generated one).
+    fs.mkdirSync(keyDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(keyFile, OLD_KEY, { mode: 0o600 });
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+  });
+
+  afterEach(() => {
+    delete process.env.AGENTS_SECRETS_PASSPHRASE;
+    Object.defineProperty(process.stdin, 'isTTY', { value: prevTty, configurable: true });
+    _resetFileStoreForTest();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('happy path: re-encrypts every item under a new key and rewrites the 0600 key file', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+    seed('daily', 'C', 'value-c');
+
+    const rep = rotatePassphrase({ newPassphrase: 'brand-new-key' });
+    expect(rep.committed).toBe(true);
+    expect(rep.dryRun).toBe(false);
+    expect(rep.bundleCount).toBe(3);
+    expect(rep.roundTripOk).toBe(true);
+    expect(rep.skipped).toEqual([]);
+
+    // Key file rewritten in place with the new value, still 0600.
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe('brand-new-key');
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(keyFile).mode & 0o777).toBe(0o600);
+    }
+
+    // Every item now decrypts under the NEW key and NOT the old one.
+    for (const [item, want] of [
+      ['agents-cli.secrets.prod.A', 'value-a'],
+      ['agents-cli.secrets.prod.B', 'value-b'],
+      ['agents-cli.secrets.daily.C', 'value-c'],
+    ] as const) {
+      const enc = JSON.parse(fs.readFileSync(path.join(storeDir, `${item}.enc`), 'utf8')) as EncFile;
+      expect(decryptForFallback(enc, 'brand-new-key')).toBe(want);
+      expect(() => decryptForFallback(enc, OLD_KEY)).toThrow();
+    }
+    // The live resolver reads the rotated values transparently.
+    expect(fileStore.get('agents-cli.secrets.prod.A')).toBe('value-a');
+
+    // No staging/backup dirs or key temp files left behind.
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-'))).toEqual([]);
+    expect(fs.readdirSync(keyDir)).toEqual(['passphrase']);
+  });
+
+  it('dry-run reports the count and round-trip but writes nothing', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+    const beforeStore = fs.readdirSync(storeDir).sort().map((f) => [f, fs.readFileSync(path.join(storeDir, f), 'utf8')]);
+    const beforeKey = fs.readFileSync(keyFile, 'utf8');
+
+    const rep = rotatePassphrase({ dryRun: true, newPassphrase: 'unused' });
+    expect(rep.dryRun).toBe(true);
+    expect(rep.committed).toBe(false);
+    expect(rep.bundleCount).toBe(2);
+    expect(rep.roundTripOk).toBe(true);
+
+    // Byte-for-byte unchanged: no ciphertext rewritten, key file untouched.
+    expect(fs.readdirSync(storeDir).sort().map((f) => [f, fs.readFileSync(path.join(storeDir, f), 'utf8')])).toEqual(beforeStore);
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe(beforeKey);
+  });
+
+  it('a crash mid-run (after staging, before the swap) leaves the old store readable under the old key', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+    const beforeStore = fs.readdirSync(storeDir).sort().map((f) => [f, fs.readFileSync(path.join(storeDir, f), 'utf8')]);
+
+    expect(() => rotatePassphrase({
+      newPassphrase: 'never-lands',
+      onStagedBeforeCommit: () => { throw new Error('simulated crash'); },
+    })).toThrow(/simulated crash/);
+
+    // The live store and key file are exactly as they were — old key still works.
+    expect(fs.readdirSync(storeDir).sort().map((f) => [f, fs.readFileSync(path.join(storeDir, f), 'utf8')])).toEqual(beforeStore);
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe(OLD_KEY);
+    expect(fileStore.get('agents-cli.secrets.prod.A')).toBe('value-a');
+    const enc = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    expect(() => decryptForFallback(enc, 'never-lands')).toThrow();
+
+    // A subsequent rotation recovers past the abandoned staging dir and succeeds.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir, passphrase: OLD_KEY });
+    const rep = rotatePassphrase({ newPassphrase: 'clean-key' });
+    expect(rep.committed).toBe(true);
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-'))).toEqual([]);
+    expect(fileStore.get('agents-cli.secrets.prod.B')).toBe('value-b');
+  });
+
+  it('aborts (writing nothing) when a re-encrypted item fails to round-trip under the new key', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+    const beforeStore = fs.readdirSync(storeDir).sort().map((f) => [f, fs.readFileSync(path.join(storeDir, f), 'utf8')]);
+
+    expect(() => rotatePassphrase({ newPassphrase: 'nk', tamperStaged: true }))
+      .toThrow(/verify|round-trip/i);
+
+    // Verify-before-swap: nothing was written, key file untouched.
+    expect(fs.readdirSync(storeDir).sort().map((f) => [f, fs.readFileSync(path.join(storeDir, f), 'utf8')])).toEqual(beforeStore);
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe(OLD_KEY);
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-'))).toEqual([]);
+  });
+
+  it('re-keys valid items and copies through an orphan encrypted under a different key', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+    // An orphan: valid EncFile JSON, but sealed under a key the store does not use.
+    const orphanEnc = encryptForFallback('orphan-secret', 'some-other-key');
+    const orphanName = 'agents-cli.secrets.orphan.X.enc';
+    fs.writeFileSync(path.join(storeDir, orphanName), JSON.stringify(orphanEnc), { mode: 0o600});
+    const orphanBefore = fs.readFileSync(path.join(storeDir, orphanName), 'utf8');
+
+    const rep = rotatePassphrase({ newPassphrase: 'nk' });
+    expect(rep.committed).toBe(true);
+    expect(rep.bundleCount).toBe(2);
+    expect(rep.skipped.length).toBe(1);
+    expect(rep.skipped[0]).toContain('orphan.X');
+
+    // The orphan is carried through byte-identical (never re-keyed, never dropped).
+    expect(fs.readFileSync(path.join(storeDir, orphanName), 'utf8')).toBe(orphanBefore);
+    // The real items are re-keyed.
+    const encA = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encA, 'nk')).toBe('value-a');
+  });
+
+  it('throws when there is no machine-local passphrase to rotate', () => {
+    seed('prod', 'A', 'value-a');
+    fs.rmSync(keyFile);
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    expect(machinePassphraseSourcePath()).toBeNull();
+    expect(() => rotatePassphrase()).toThrow(/machine-local passphrase/i);
   });
 });

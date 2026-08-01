@@ -377,6 +377,271 @@ export function resolvePassphraseDir(): string {
   return passphraseDir();
 }
 
+// ---------- passphrase rotation (RUSH-1975) ----------
+
+/**
+ * Path of the machine-local passphrase file that currently holds the file-store
+ * key, or null if none is provisioned. Prefers the canonical #479 location and
+ * falls back to the legacy co-located path, mirroring `readMachinePassphrase`.
+ */
+export function machinePassphraseSourcePath(): string | null {
+  for (const fp of [passphraseFilePath(), legacyPassphraseFilePath()]) {
+    try {
+      if (fs.readFileSync(fp, 'utf8').trim().length > 0) return fp;
+    } catch {
+      // try next location
+    }
+  }
+  return null;
+}
+
+/** Outcome of a `rotatePassphrase` run. Carries no secret material. */
+export interface RotatePassphraseReport {
+  /** True when nothing was written (report-only). */
+  dryRun: boolean;
+  /** True when the store was re-encrypted and the key file swapped. */
+  committed: boolean;
+  /** Encrypted items that decrypt under the current key and were (or would be) re-keyed. */
+  bundleCount: number;
+  /** `.enc` files that do NOT decrypt under the current key — left untouched, never re-keyed. */
+  skipped: string[];
+  /** Every re-keyed item round-tripped (decrypt) under the new key before any swap. */
+  roundTripOk: boolean;
+  /** The machine-local passphrase file that was (or would be) rewritten in place. */
+  keyFilePath: string;
+}
+
+/** Flush a file's data to disk (durability before the atomic swap). */
+function writeFileFsync(fp: string, data: string, mode: number): void {
+  const fd = fs.openSync(fp, 'w', mode);
+  try {
+    fs.writeSync(fd, data);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  // A freshly-created file needs its mode set explicitly — the open() mode is
+  // masked by the process umask, so 0600 is not guaranteed by the flag alone.
+  try { fs.chmodSync(fp, mode); } catch { /* best effort on platforms without chmod */ }
+}
+
+/** fsync a directory so a rename/create in it is durable. Best-effort: some
+ *  filesystems reject O_RDONLY fsync on a directory. */
+function fsyncDir(dir: string): void {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(dir, 'r');
+    fs.fsyncSync(fd);
+  } catch {
+    // filesystem doesn't support directory fsync — the rename is still ordered
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+}
+
+/**
+ * Recover from a rotation that was interrupted mid-swap on a prior run, so the
+ * store is always left in a single, readable state. The swap sequence moves the
+ * live store aside to a `<dir>.rotate-old-*` backup before moving the staged
+ * store into place; a crash in the sub-millisecond gap between those two renames
+ * would leave the store dir missing with its content safe in the backup. This
+ * restores it, and sweeps abandoned `<dir>.rotate-*` staging/backup dirs and the
+ * `<key>.rotate-*` temp files. Idempotent; a no-op when nothing was interrupted.
+ */
+function recoverInterruptedRotation(keyPath: string): void {
+  const dir = fileDir();
+  const parent = path.dirname(dir);
+  const base = path.basename(dir);
+  let entries: string[];
+  try { entries = fs.readdirSync(parent); } catch { return; }
+  // If the live store dir vanished mid-swap, restore it from its backup.
+  if (!fs.existsSync(dir)) {
+    const bak = entries.find((e) => e.startsWith(`${base}.rotate-old-`));
+    if (bak) fs.renameSync(path.join(parent, bak), dir);
+  }
+  // Restore the key file if it was moved aside but the new one never landed.
+  if (!fs.existsSync(keyPath) && fs.existsSync(`${keyPath}.rotate-oldkey`)) {
+    fs.renameSync(`${keyPath}.rotate-oldkey`, keyPath);
+  }
+  // Sweep abandoned staging/backup dirs and key temp files — only ever safe to
+  // drop once the live store + key file are both present again.
+  if (fs.existsSync(dir) && fs.existsSync(keyPath)) {
+    for (const e of fs.readdirSync(parent)) {
+      if (e.startsWith(`${base}.rotate-`)) {
+        try { fs.rmSync(path.join(parent, e), { recursive: true, force: true }); } catch { /* best effort */ }
+      }
+    }
+    for (const suffix of ['.rotate-new', '.rotate-oldkey']) {
+      try { fs.rmSync(`${keyPath}${suffix}`, { force: true }); } catch { /* best effort */ }
+    }
+  }
+}
+
+/**
+ * Rotate the machine-local file-store passphrase: decrypt every `.enc` item
+ * under the current key and re-encrypt it under a freshly generated one, then
+ * swap both the ciphertext and the key file atomically.
+ *
+ * Safety contract (RUSH-1975):
+ *  - Verify before writing: every re-keyed item must round-trip decrypt under
+ *    the new key, and the re-keyed count must reconcile with the source, or the
+ *    run aborts having written nothing.
+ *  - Atomic: the new store is staged in a sibling temp dir, fsync'd, then swapped
+ *    into place by directory rename; the new key file is fsync'd and swapped the
+ *    same way. A crash before the swap leaves the old store and old key fully
+ *    intact and readable; a crash inside the swap self-heals on the next run
+ *    (see `recoverInterruptedRotation`). No half-re-keyed store is ever exposed.
+ *  - No plaintext (secret value or passphrase) is ever written to disk, argv, or
+ *    a log — only ciphertext is staged, and the new key lands only in the 0600
+ *    key file.
+ *  - Items that do not decrypt under the current key (orphan caches, stale test
+ *    artifacts written under another key) are copied through verbatim, never
+ *    re-keyed, and reported in `skipped`.
+ *
+ * `newPassphrase` and `onStagedBeforeCommit` are test seams: the former pins the
+ * generated key so a test can assert the swap; the latter fires after staging
+ * but before any swap, so a test can throw to simulate a mid-run crash and prove
+ * the old store survives. `tamperStaged` forces a staged item to fail its
+ * round-trip check, exercising the verify-before-swap abort.
+ */
+export function rotatePassphrase(opts: {
+  dryRun?: boolean;
+  newPassphrase?: string;
+  onStagedBeforeCommit?: () => void;
+  tamperStaged?: boolean;
+} = {}): RotatePassphraseReport {
+  const dryRun = opts.dryRun ?? false;
+  const keyPath = machinePassphraseSourcePath();
+  if (!keyPath) {
+    throw new Error(
+      'No machine-local passphrase to rotate. `rotate-passphrase` re-keys the ' +
+      'file store\'s auto-provisioned key; none is provisioned on this machine.',
+    );
+  }
+  recoverInterruptedRotation(keyPath);
+
+  const oldPass = fs.readFileSync(keyPath, 'utf8').trim();
+  if (!oldPass) throw new Error(`Machine-local passphrase file ${keyPath} is empty.`);
+  const newPass = opts.newPassphrase ?? randomBytes(32).toString('base64');
+  if (newPass === oldPass) throw new Error('New passphrase equals the current one — refusing a no-op rotation.');
+
+  const dir = fileDir();
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter((f) => f.endsWith('.enc'));
+  } catch {
+    names = [];
+  }
+  if (names.length === 0) {
+    throw new Error(`No encrypted items in ${dir} — nothing to rotate.`);
+  }
+
+  // Phase 1 — decrypt-all, re-encrypt, re-verify in memory. Nothing on disk is
+  // touched here, so any throw leaves the live store and key file untouched.
+  const staged: Array<{ name: string; enc: string }> = [];
+  const skipped: string[] = [];
+  for (const name of names) {
+    const raw = fs.readFileSync(path.join(dir, name), 'utf8');
+    let parsed: EncFile;
+    try { parsed = JSON.parse(raw); } catch { skipped.push(`${name} (not valid EncFile JSON)`); continue; }
+    let plain: string;
+    try { plain = decryptForFallback(parsed, oldPass); }
+    catch { skipped.push(`${name} (does not decrypt under the current key — orphan)`); continue; }
+    let reEnc = encryptForFallback(plain, newPass);
+    if (opts.tamperStaged) reEnc = { ...reEnc, ciphertext: `00${reEnc.ciphertext.slice(2)}` };
+    let check: string;
+    try { check = decryptForFallback(reEnc, newPass); }
+    catch { throw new Error(`Re-encryption of ${name} failed to verify under the new key — aborted, nothing written.`); }
+    if (check !== plain) throw new Error(`Round-trip mismatch on ${name} — aborted, nothing written.`);
+    staged.push({ name, enc: JSON.stringify(reEnc) });
+  }
+  if (staged.length === 0) {
+    throw new Error('No item decrypted under the current machine-local key — aborted, nothing written.');
+  }
+
+  const report: RotatePassphraseReport = {
+    dryRun,
+    committed: false,
+    bundleCount: staged.length,
+    skipped,
+    roundTripOk: true,
+    keyFilePath: keyPath,
+  };
+  if (dryRun) return report;
+
+  // Phase 2 — stage the complete replacement store in a sibling temp dir, fsync,
+  // then swap. Orphans and any non-.enc files are copied through verbatim so the
+  // swapped dir is a complete superset of the old one (nothing is dropped).
+  const keyColocated = path.dirname(keyPath) === dir;
+  const rand = randomBytes(6).toString('hex');
+  const stageDir = `${dir}.rotate-${rand}`;
+  fs.rmSync(stageDir, { recursive: true, force: true });
+  fs.mkdirSync(stageDir, { recursive: true, mode: 0o700 });
+  const stagedNames = new Set(staged.map((s) => s.name));
+  for (const { name, enc } of staged) {
+    writeFileFsync(path.join(stageDir, name), enc, 0o600);
+  }
+  for (const entry of fs.readdirSync(dir)) {
+    if (stagedNames.has(entry)) continue;
+    if (keyColocated && entry === path.basename(keyPath)) continue; // rewritten below, not copied
+    const src = path.join(dir, entry);
+    if (!fs.statSync(src).isFile()) continue;
+    writeFileFsync(path.join(stageDir, entry), fs.readFileSync(src, 'utf8'), 0o600);
+  }
+  // A co-located legacy key travels with the store: write the new value into the
+  // staged dir so a single directory swap commits both ciphertext and key.
+  if (keyColocated) writeFileFsync(path.join(stageDir, path.basename(keyPath)), newPass, 0o600);
+  fsyncDir(stageDir);
+
+  // Test seam: simulate a crash after staging but before the swap. The live store
+  // and key file are still untouched at this point.
+  opts.onStagedBeforeCommit?.();
+
+  // For a non-co-located key, stage the new key beside the old one first so the
+  // swap is two quick renames with no I/O between them.
+  const keyTmp = `${keyPath}.rotate-new`;
+  if (!keyColocated) {
+    writeFileFsync(keyTmp, newPass, 0o600);
+    fsyncDir(path.dirname(keyPath));
+  }
+
+  // Swap. Move the live store aside, then the staged store into place. The gap
+  // between these two renames is the only crash window that leaves the store dir
+  // absent; recoverInterruptedRotation restores it from the backup on next run.
+  const bakDir = `${dir}.rotate-old-${rand}`;
+  fs.renameSync(dir, bakDir);
+  fs.renameSync(stageDir, dir);
+  fsyncDir(path.dirname(dir));
+  const keyBak = `${keyPath}.rotate-oldkey`;
+  if (!keyColocated) {
+    fs.renameSync(keyPath, keyBak);
+    fs.renameSync(keyTmp, keyPath);
+    fsyncDir(path.dirname(keyPath));
+  }
+
+  // Verify a real read out of the now-live store under the new key. On failure,
+  // roll the store (and key) back to the backup — the old passphrase still works.
+  try {
+    const probe = JSON.parse(fs.readFileSync(path.join(dir, staged[0].name), 'utf8')) as EncFile;
+    decryptForFallback(probe, newPass);
+  } catch (err) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.renameSync(bakDir, dir);
+    if (!keyColocated && fs.existsSync(keyBak)) {
+      try { fs.rmSync(keyPath, { force: true }); } catch { /* may not exist */ }
+      fs.renameSync(keyBak, keyPath);
+    }
+    throw new Error(`Post-swap verification failed; rolled back to the old key. (${(err as Error).message})`);
+  }
+
+  // Committed. Drop the old ciphertext and old key — both hold the retired key.
+  fs.rmSync(bakDir, { recursive: true, force: true });
+  if (!keyColocated) fs.rmSync(keyBak, { force: true });
+  cachedPassphrase = newPass;
+  report.committed = true;
+  return report;
+}
+
 /** Test-only: reset module state (file dir + cached passphrase). */
 export function _resetFileStoreForTest(opts: {
   fileDir?: string | null;
