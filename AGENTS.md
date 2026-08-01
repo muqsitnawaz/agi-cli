@@ -90,6 +90,17 @@ the exception.
   `SUBAGENT_TARGETS` in `apps/cli/src/lib/subagents-registry.ts`, gated by
   `capableAgents(...)` — not near-identical `else if (agent === '...')` arms), and the
   completeness tests that pin the registry to the capability list must still pass.
+- **Surface parity for propagation / cross-cutting features.** When a change adds data
+  that must ride the exec env or a spawn — actor/provenance, identity, session lineage,
+  credentials — it must be wired through **every** exec boundary that data is meant to
+  reach: the local spawn (`buildExecEnv`), `--host` SSH dispatch, `agents ssh`
+  passthrough, teams (local **and** remote teammates), and routines/cron — or the PR
+  states which boundaries are out of scope and why. The tell is an **absence** at a
+  remote call site (no `SetEnv`/`--env` forwarding across the SSH hop), so check the
+  remote dispatch builders (`apps/cli/src/lib/hosts/dispatch.ts`, `hosts/remote-cmd.ts`),
+  not just the changed files — a diff that wires only the local path and silently drops
+  the data at the first SSH boundary is incomplete. (RUSH-2028 fixed exactly this gap for
+  actor provenance, which PR #1525 shipped local-only.)
 - **Docs stay in sync with behavior.** A change to a flag, command, config key, or
   user-visible behavior updates the docs that cover it — the relevant component
   `AGENTS.md`, its `README.md`, and `apps/cli/docs/`. Flag a diff that adds or changes a
