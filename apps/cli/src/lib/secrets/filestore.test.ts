@@ -297,6 +297,82 @@ describe('rotatePassphrase (RUSH-1975)', () => {
     expect(fileStore.get('agents-cli.secrets.prod.B')).toBe('value-b');
   });
 
+  it('Window A: crash after the store swap, before the key swap — next run recovers a readable store instead of sweeping the artifacts', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+
+    // Crash in Window A: the NEW-key store is live, the OLD key file is still in
+    // place, and both recovery artifacts (`.rotate-new` = new key, `.rotate-old-*`
+    // = old store) are on disk. The presence-based recovery would see store+key
+    // both present and sweep both artifacts, orphaning every secret permanently.
+    expect(() => rotatePassphrase({
+      newPassphrase: 'winA-key',
+      onStoreSwappedBeforeKeySwap: () => { throw new Error('crash in Window A'); },
+    })).toThrow(/Window A/);
+
+    // Prove the dangerous on-disk state the crash left: store is NEW-key, key file
+    // is still OLD (a mismatch), and neither artifact has been swept.
+    const encCrash = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encCrash, 'winA-key')).toBe('value-a');
+    expect(() => decryptForFallback(encCrash, OLD_KEY)).toThrow();
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe(OLD_KEY);
+    expect(fs.existsSync(`${keyFile}.rotate-new`)).toBe(true);
+    expect(fs.readdirSync(tmpRoot).some((e) => e.startsWith('store.rotate-old-'))).toBe(true);
+
+    // Next run recovers. Under the old presence-based code this second rotation
+    // would abort ("No item decrypted under the current machine-local key") with
+    // every secret unreadable; content-aware recovery installs the new key first.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    const rep = rotatePassphrase({ newPassphrase: 'winA-final' });
+    expect(rep.committed).toBe(true);
+
+    // Store and key are paired again (no mismatch), every value survived, and the
+    // artifacts are gone only now that a forward decrypt was proven.
+    expect(fileStore.get('agents-cli.secrets.prod.A')).toBe('value-a');
+    expect(fileStore.get('agents-cli.secrets.prod.B')).toBe('value-b');
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe('winA-final');
+    const encAfter = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encAfter, 'winA-final')).toBe('value-a');
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-'))).toEqual([]);
+    expect(fs.readdirSync(keyDir).sort()).toEqual(['passphrase']);
+  });
+
+  it('Window B: crash after the old key is moved aside, before the new key lands — next run recovers forward, not onto the wrong key', () => {
+    seed('prod', 'A', 'value-a');
+    seed('prod', 'B', 'value-b');
+
+    // Crash in Window B: the NEW-key store is live, the key file is ABSENT (moved to
+    // `.rotate-oldkey`), and `.rotate-new` holds the new key. The presence-based code
+    // restores the OLD key from `.rotate-oldkey` onto the NEW store (wrong key), then
+    // sweeps `.rotate-new` + the old-store backup, orphaning every secret.
+    expect(() => rotatePassphrase({
+      newPassphrase: 'winB-key',
+      onKeyBackedUpBeforeNewKey: () => { throw new Error('crash in Window B'); },
+    })).toThrow(/Window B/);
+
+    // Prove the on-disk state the crash left.
+    const encCrash = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encCrash, 'winB-key')).toBe('value-a');
+    expect(fs.existsSync(keyFile)).toBe(false);
+    expect(fs.readFileSync(`${keyFile}.rotate-oldkey`, 'utf8')).toBe(OLD_KEY);
+    expect(fs.readFileSync(`${keyFile}.rotate-new`, 'utf8')).toBe('winB-key');
+    expect(fs.readdirSync(tmpRoot).some((e) => e.startsWith('store.rotate-old-'))).toBe(true);
+
+    // Next run must finish the rotation forward — install the NEW key from
+    // `.rotate-new` — not restore the OLD key onto the NEW store.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    const rep = rotatePassphrase({ newPassphrase: 'winB-final' });
+    expect(rep.committed).toBe(true);
+
+    expect(fileStore.get('agents-cli.secrets.prod.A')).toBe('value-a');
+    expect(fileStore.get('agents-cli.secrets.prod.B')).toBe('value-b');
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe('winB-final');
+    const encAfter = JSON.parse(fs.readFileSync(path.join(storeDir, 'agents-cli.secrets.prod.A.enc'), 'utf8')) as EncFile;
+    expect(decryptForFallback(encAfter, 'winB-final')).toBe('value-a');
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-'))).toEqual([]);
+    expect(fs.readdirSync(keyDir).sort()).toEqual(['passphrase']);
+  });
+
   it('aborts (writing nothing) when a re-encrypted item fails to round-trip under the new key', () => {
     seed('prod', 'A', 'value-a');
     seed('prod', 'B', 'value-b');

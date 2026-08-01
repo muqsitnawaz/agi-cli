@@ -395,6 +395,22 @@ export function machinePassphraseSourcePath(): string | null {
   return null;
 }
 
+/**
+ * Resolve the key path for a rotation that crashed mid-key-swap and left the live
+ * key file absent (Window B: `keyPath` moved to `<key>.rotate-oldkey`, the new key
+ * not yet landed). `machinePassphraseSourcePath` returns null in that state because
+ * neither canonical nor legacy file has content, so recovery would never run. If a
+ * rotation artifact (`.rotate-new` / `.rotate-oldkey`) exists for a canonical key
+ * path, that path is the interrupted rotation's target — return it so recovery can
+ * finish forward. Null when no such artifact is present.
+ */
+function resolveInterruptedKeyPath(): string | null {
+  for (const fp of [passphraseFilePath(), legacyPassphraseFilePath()]) {
+    if (fs.existsSync(`${fp}.rotate-new`) || fs.existsSync(`${fp}.rotate-oldkey`)) return fp;
+  }
+  return null;
+}
+
 /** Outcome of a `rotatePassphrase` run. Carries no secret material. */
 export interface RotatePassphraseReport {
   /** True when nothing was written (report-only). */
@@ -439,14 +455,64 @@ function fsyncDir(dir: string): void {
   }
 }
 
+/** True if any `.enc` item in `dir` decrypts under `keyVal`. A store may hold
+ *  orphan items sealed under other keys, so "opens" means at least one item
+ *  round-trips — enough to prove the key matches the store's live contents. */
+function storeOpensUnder(dir: string, keyVal: string | null): boolean {
+  if (keyVal == null) return false;
+  let names: string[];
+  try { names = fs.readdirSync(dir).filter((f) => f.endsWith('.enc')); } catch { return false; }
+  for (const name of names) {
+    let enc: EncFile;
+    try { enc = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) as EncFile; } catch { continue; }
+    try { decryptForFallback(enc, keyVal); return true; } catch { /* try the next item */ }
+  }
+  return false;
+}
+
+/** True if `dir` holds at least one `.enc` item. */
+function storeHasEnc(dir: string): boolean {
+  try { return fs.readdirSync(dir).some((f) => f.endsWith('.enc')); } catch { return false; }
+}
+
+/** Read a key file's trimmed contents, or null if absent/empty. */
+function readKeyFile(fp: string): string | null {
+  try { const v = fs.readFileSync(fp, 'utf8').trim(); return v.length > 0 ? v : null; }
+  catch { return null; }
+}
+
 /**
  * Recover from a rotation that was interrupted mid-swap on a prior run, so the
- * store is always left in a single, readable state. The swap sequence moves the
- * live store aside to a `<dir>.rotate-old-*` backup before moving the staged
- * store into place; a crash in the sub-millisecond gap between those two renames
- * would leave the store dir missing with its content safe in the backup. This
- * restores it, and sweeps abandoned `<dir>.rotate-*` staging/backup dirs and the
- * `<key>.rotate-*` temp files. Idempotent; a no-op when nothing was interrupted.
+ * store is always left in a single, self-consistent, readable state.
+ *
+ * Recovery is CONTENT-aware, not presence-aware. The mere existence of the store
+ * dir and the key file does not prove they match (RUSH-1975 data-loss window): on
+ * the non-co-located key path the swap is four renames, and a crash after the
+ * store swap (`stageDir`->`dir`) but before the key swap (`keyTmp`->`keyPath`)
+ * finishes leaves a NEW-key store next to the OLD key file, both present. A
+ * presence check would see "both here" and wrongly sweep the only copies of the
+ * old ciphertext (`<dir>.rotate-old-*`) and the new key (`<key>.rotate-new`),
+ * permanently orphaning every secret. So we probe the actual ciphertext:
+ *
+ *  1. If the live store decrypts under the live key file, the rotation is complete
+ *     and consistent (or was never interrupted) — sweeping the `<dir>.rotate-*` /
+ *     `<key>.rotate-*` artifacts is safe.
+ *  2. Else, if it decrypts under `<key>.rotate-new`, the crash landed after the
+ *     store swap but before the key swap finished — finish the rotation forward by
+ *     installing `.rotate-new` as the live key, then sweep.
+ *  3. Else roll back: restore the `<dir>.rotate-old-*` backup over `dir` and
+ *     `<key>.rotate-oldkey` over the key file — but only once the backup is proven
+ *     to decrypt under the old key.
+ *  4. If neither forward nor rollback can be proven, leave every artifact in place;
+ *     a leftover temp dir is recoverable, deleting the only copy of a key or
+ *     ciphertext is not.
+ *
+ * A phase-marker / journal file was considered and deliberately skipped: the
+ * AES-256-GCM auth tag already makes the decrypt probe an authoritative,
+ * self-validating record of which key matches the store. A separate marker would
+ * be a second source of truth that can disagree with reality — its own write has
+ * crash windows, and a stale marker misleads — so it would weaken, not strengthen,
+ * this guarantee. Idempotent; a no-op when no rotation artifacts are present.
  */
 function recoverInterruptedRotation(keyPath: string): void {
   const dir = fileDir();
@@ -454,18 +520,27 @@ function recoverInterruptedRotation(keyPath: string): void {
   const base = path.basename(dir);
   let entries: string[];
   try { entries = fs.readdirSync(parent); } catch { return; }
-  // If the live store dir vanished mid-swap, restore it from its backup.
-  if (!fs.existsSync(dir)) {
-    const bak = entries.find((e) => e.startsWith(`${base}.rotate-old-`));
-    if (bak) fs.renameSync(path.join(parent, bak), dir);
+
+  const keyNew = `${keyPath}.rotate-new`;
+  const keyOld = `${keyPath}.rotate-oldkey`;
+  const bakName = entries.find((e) => e.startsWith(`${base}.rotate-old-`));
+  let bakDir = bakName ? path.join(parent, bakName) : null;
+
+  // Nothing rotation-related on disk -> no interrupted rotation to recover.
+  const hasArtifacts = bakDir != null
+    || fs.existsSync(keyNew) || fs.existsSync(keyOld)
+    || entries.some((e) => e.startsWith(`${base}.rotate-`));
+  if (!hasArtifacts) return;
+
+  // If the live store dir vanished mid-swap (crash between the two store renames,
+  // before the new store landed), restore the old store from its backup — the key
+  // was not touched yet, so old store + old key is a consistent state.
+  if (!fs.existsSync(dir) && bakDir && fs.existsSync(bakDir)) {
+    fs.renameSync(bakDir, dir);
+    bakDir = null; // consumed
   }
-  // Restore the key file if it was moved aside but the new one never landed.
-  if (!fs.existsSync(keyPath) && fs.existsSync(`${keyPath}.rotate-oldkey`)) {
-    fs.renameSync(`${keyPath}.rotate-oldkey`, keyPath);
-  }
-  // Sweep abandoned staging/backup dirs and key temp files — only ever safe to
-  // drop once the live store + key file are both present again.
-  if (fs.existsSync(dir) && fs.existsSync(keyPath)) {
+
+  const sweep = (): void => {
     for (const e of fs.readdirSync(parent)) {
       if (e.startsWith(`${base}.rotate-`)) {
         try { fs.rmSync(path.join(parent, e), { recursive: true, force: true }); } catch { /* best effort */ }
@@ -474,7 +549,51 @@ function recoverInterruptedRotation(keyPath: string): void {
     for (const suffix of ['.rotate-new', '.rotate-oldkey']) {
       try { fs.rmSync(`${keyPath}${suffix}`, { force: true }); } catch { /* best effort */ }
     }
+  };
+
+  // An empty or unreadable store holds no ciphertext at risk. Only sweep once the
+  // live key file is present again; never delete recovery artifacts for a store we
+  // cannot probe.
+  if (!storeHasEnc(dir)) {
+    if (fs.existsSync(keyPath)) sweep();
+    return;
   }
+
+  // 1. Live key opens the store -> rotation complete/consistent. Sweep is safe.
+  if (storeOpensUnder(dir, readKeyFile(keyPath))) { sweep(); return; }
+
+  // 2. `.rotate-new` opens the store but the live key does not -> the crash landed
+  //    after the store swap, before the key swap finished. Finish the rotation
+  //    forward by installing the new key, then sweep.
+  if (fs.existsSync(keyNew) && storeOpensUnder(dir, readKeyFile(keyNew))) {
+    try { fs.rmSync(keyPath, { force: true }); } catch { /* may be absent mid-key-swap */ }
+    fs.renameSync(keyNew, keyPath);
+    fsyncDir(path.dirname(keyPath));
+    sweep();
+    return;
+  }
+
+  // 3. Neither key opens the live store -> roll back to the pre-rotation state,
+  //    but only once the backup store is proven to decrypt under the old key.
+  const oldKey = readKeyFile(keyOld);
+  const rollbackKey = bakDir && storeOpensUnder(bakDir, oldKey)
+    ? oldKey
+    : (bakDir && storeOpensUnder(bakDir, readKeyFile(keyPath)) ? readKeyFile(keyPath) : null);
+  if (bakDir && fs.existsSync(bakDir) && rollbackKey != null) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.renameSync(bakDir, dir);
+    fsyncDir(path.dirname(dir));
+    if (rollbackKey === oldKey && fs.existsSync(keyOld)) {
+      try { fs.rmSync(keyPath, { force: true }); } catch { /* may be absent */ }
+      fs.renameSync(keyOld, keyPath);
+      fsyncDir(path.dirname(keyPath));
+    }
+    sweep();
+    return;
+  }
+
+  // 4. Neither forward nor rollback is provable -> leave every artifact untouched
+  //    for out-of-band recovery. Do NOT sweep: that is the data-loss bug.
 }
 
 /**
@@ -498,20 +617,29 @@ function recoverInterruptedRotation(keyPath: string): void {
  *    artifacts written under another key) are copied through verbatim, never
  *    re-keyed, and reported in `skipped`.
  *
- * `newPassphrase` and `onStagedBeforeCommit` are test seams: the former pins the
- * generated key so a test can assert the swap; the latter fires after staging
- * but before any swap, so a test can throw to simulate a mid-run crash and prove
- * the old store survives. `tamperStaged` forces a staged item to fail its
- * round-trip check, exercising the verify-before-swap abort.
+ * `newPassphrase` and the `on*` callbacks are test seams. `newPassphrase` pins the
+ * generated key so a test can assert the swap. `onStagedBeforeCommit` fires after
+ * staging but before any swap (a crash here leaves the old store fully intact).
+ * `onStoreSwappedBeforeKeySwap` fires after the store swap but before the key swap
+ * begins (Window A: NEW-key store beside the OLD key file). `onKeyBackedUpBeforeNewKey`
+ * fires after the old key is moved aside but before the new key lands (Window B: NEW
+ * store, key file absent). Each throws to simulate a mid-swap crash at that exact
+ * point, and next-run recovery must heal it without data loss. `tamperStaged` forces
+ * a staged item to fail its round-trip check, exercising the verify-before-swap abort.
  */
 export function rotatePassphrase(opts: {
   dryRun?: boolean;
   newPassphrase?: string;
   onStagedBeforeCommit?: () => void;
+  onStoreSwappedBeforeKeySwap?: () => void;
+  onKeyBackedUpBeforeNewKey?: () => void;
   tamperStaged?: boolean;
 } = {}): RotatePassphraseReport {
   const dryRun = opts.dryRun ?? false;
-  const keyPath = machinePassphraseSourcePath();
+  // Resolve the key path. If the live key file is absent because a prior rotation
+  // crashed mid-key-swap, fall back to the interrupted rotation's target so
+  // recovery below can still run and heal the store (RUSH-1975 Window B).
+  const keyPath = machinePassphraseSourcePath() ?? resolveInterruptedKeyPath();
   if (!keyPath) {
     throw new Error(
       'No machine-local passphrase to rotate. `rotate-passphrase` re-keys the ' +
@@ -614,7 +742,11 @@ export function rotatePassphrase(opts: {
   fsyncDir(path.dirname(dir));
   const keyBak = `${keyPath}.rotate-oldkey`;
   if (!keyColocated) {
+    // Test seam: crash after the store swap, before the key swap begins (Window A).
+    opts.onStoreSwappedBeforeKeySwap?.();
     fs.renameSync(keyPath, keyBak);
+    // Test seam: crash after the old key is moved aside, before the new key lands (Window B).
+    opts.onKeyBackedUpBeforeNewKey?.();
     fs.renameSync(keyTmp, keyPath);
     fsyncDir(path.dirname(keyPath));
   }

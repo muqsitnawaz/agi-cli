@@ -606,8 +606,12 @@ agents secrets rotate-passphrase --commit   # re-encrypt the store under a fresh
 This decrypts every item under the current key, re-encrypts it under a newly
 generated one, and swaps both the ciphertext and the 0600 key file atomically —
 staged in a temp dir, verified (every item must round-trip under the new key),
-then swapped by directory rename, so a crash at any point leaves the old store
-intact and readable. No plaintext secret value or passphrase is ever written to
+then swapped by directory rename. A crash at any point self-heals on the next run
+to a single readable store: recovery probes which key actually decrypts the live
+store rather than guessing from which files are present, and either completes the
+rotation forward or rolls back — so a crash in the gap between the store swap and
+the key swap can never strand the store under a mismatched key. No plaintext
+secret value or passphrase is ever written to
 disk, argv, or a log. Items that don't decrypt under the current key (orphan
 caches, stale artifacts) are carried through untouched and reported. It refuses
 to run while the secrets-agent holds live unlocks, or while
