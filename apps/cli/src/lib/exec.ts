@@ -16,6 +16,7 @@ import { getBinaryPath, getVersionHomePath, isVersionInstalled, resolveVersion }
 import { resolveModel, buildReasoningFlags } from './models.js';
 import { emitStart, maybeRotate, createTimer, redactPrompt, redactArgs } from './events.js';
 import { sanitizeProcessEnv } from './secrets/bundles.js';
+import { resolveActor, actorEnv } from './actor.js';
 import { getShimsDir, getHistoryDir } from './state.js';
 import { resolveCodexHome } from './codex-home.js';
 import { readCodexConfiguredModel } from './shims.js';
@@ -441,6 +442,12 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
   if (options.name) {
     result.AGENT_SESSION_NAME = options.name;
   }
+
+  // Actor provenance -- who initiated this run. Rides the env so the whole spawn
+  // tree shares one actor, and (for a resolved human) so the agent's own git
+  // commits are credited to the person instead of the shared account. options.env
+  // (spread last) overrides any of these keys a caller sets explicitly.
+  Object.assign(result, actorEnv(resolveActor()));
 
   return {
     ...result,

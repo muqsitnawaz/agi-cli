@@ -753,6 +753,27 @@ export interface BrandConfig {
   enabled: boolean;
 }
 
+/**
+ * An actor -- a responsible entity behind a run (a human today, a top-level
+ * agent later). Keyed in the `actors:` map by a short slug. Every field is
+ * optional enrichment over what `tailscale whois` already resolves: pin a
+ * preferred git email, add a github handle, or override the display name.
+ * `login` is the tailnet login-name to match against (defaults to the map key).
+ * See lib/actor.ts.
+ */
+export interface ActorConfig {
+  /** 'human' (default) or 'agent'. Only humans get personal git credit. */
+  kind?: 'human' | 'agent';
+  /** Display + git author name. Overrides the tailnet DisplayName. */
+  name?: string;
+  /** Git author email. Overrides the tailnet login email. */
+  email?: string;
+  /** GitHub handle, for PR attribution. */
+  github?: string;
+  /** Tailnet login-name this entry matches. Defaults to the map key. */
+  login?: string;
+}
+
 /** Top-level structure of ~/.agents/.system/agents.yaml -- the CLI's persistent state. */
 export interface Meta {
   agents?: Partial<Record<AgentId, string>>;
@@ -830,6 +851,12 @@ export interface Meta {
    * commands + curated resource profile. See lib/brand.ts.
    */
   brands?: Record<string, BrandConfig>;
+  /**
+   * Actors keyed by slug -- who is behind a run. Enriches or overrides the
+   * identity `tailscale whois` resolves (git email, github handle, display
+   * name, human vs agent). See lib/actor.ts.
+   */
+  actors?: Record<string, ActorConfig>;
   /**
    * Removal tombstones for SEEDED_REGISTRIES presets, keyed like `skill.hermes`.
    *
