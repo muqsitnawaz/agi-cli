@@ -33,7 +33,7 @@ import { windowsBackend, usesFileFallback as windowsUsesFileFallback, importNati
 import type { NativeImportReport } from './fallback.js';
 
 export type { NativeImportReport, NativeImportResult, NativeImportStatus } from './fallback.js';
-import { getKeychainHelperPath } from './install-helper.js';
+import { getKeychainHelperPath, keychainHelperAvailable } from './install-helper.js';
 
 const SERVICE_PREFIX = 'agents-cli';
 export const SECRETS_ITEM_PREFIX = `${SERVICE_PREFIX}.secrets.`;
@@ -774,7 +774,18 @@ export function rekeyStatus(): {
   };
 }
 
-/** Check if a keychain/keyring item exists. Never prompts for biometry. */
+/**
+ * Check if a keychain/keyring item exists. Never prompts for biometry, and
+ * never throws — an item we cannot reach reads as absent.
+ *
+ * Our own items are only readable through the signed helper, so when that
+ * helper is unavailable the honest answer to "is there a usable item?" is no.
+ * Reporting it by throwing an install error breaks every caller that asks the
+ * question in passing: `resolveProfileEnv` skipping optional auth
+ * (`../profiles.ts`) and `bundleExists` (`./bundles.ts`) both want a boolean,
+ * not an exception. `getKeychainToken()` still throws on a missing helper —
+ * that path is a real read, and its failure must stay loud.
+ */
 export function hasKeychainToken(item: string): boolean {
   item = prepareServiceName(item);
   if (backend) return backend.has(item);
@@ -786,6 +797,10 @@ export function hasKeychainToken(item: string): boolean {
       stdio: ['ignore', 'ignore', 'ignore'],
     }).status === 0;
   }
+  // Our own items are readable only through the signed helper. With no helper
+  // there is no readable item, which is the answer this probe owes its caller —
+  // getKeychainHelperPath() would throw an install error instead.
+  if (!keychainHelperAvailable()) return false;
   const bin = getKeychainHelperPath();
   return spawnSync(bin, ['has', item, os.userInfo().username], {
     stdio: ['ignore', 'pipe', 'pipe'],
