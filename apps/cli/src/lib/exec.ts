@@ -445,8 +445,8 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
 
   // Actor provenance -- who initiated this run. Rides the env so the whole spawn
   // tree shares one actor, and (for a resolved human) so the agent's own git
-  // commits are credited to the person instead of the shared account. A caller
-  // that pins an actor via options.env still wins (spread last).
+  // commits are credited to the person instead of the shared account. options.env
+  // (spread last) overrides any of these keys a caller sets explicitly.
   Object.assign(result, actorEnv(resolveActor()));
 
   return {

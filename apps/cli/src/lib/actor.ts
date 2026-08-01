@@ -44,22 +44,30 @@ export interface ResolvedActor {
 }
 
 /** Result of `tailscale whois --json <ip>` we care about. */
-interface WhoisIdentity {
+export interface WhoisIdentity {
   login?: string;
   displayName?: string;
 }
 
+/** Hard cap on the whois shell-out — it runs on the spawn hot path. */
+const WHOIS_TIMEOUT_MS = 2000;
+
 /**
  * Resolve the tailnet identity behind an IP via `tailscale whois`. Returns
- * undefined when tailscale is absent, the peer is unknown, or the call fails --
- * every one of those falls back to an unresolved actor, never an error.
+ * undefined when tailscale is absent, the peer is unknown, the call fails, or it
+ * exceeds WHOIS_TIMEOUT_MS -- every one of those falls back to an unresolved
+ * actor, never an error and never a hang (a wedged tailscaled is timed out, not
+ * waited on, since this sits in buildExecEnv on every agent spawn).
  */
 function tailscaleWhois(ip: string): WhoisIdentity | undefined {
   try {
     const res = spawnSync('tailscale', ['whois', '--json', ip], {
       encoding: 'utf-8',
       windowsHide: true,
+      timeout: WHOIS_TIMEOUT_MS,
     });
+    // A timeout leaves status null (child killed by SIGTERM) -- the status guard
+    // below treats it as an unresolved actor, same as any other failure.
     if (res.status !== 0 || !res.stdout) return undefined;
     const data = JSON.parse(res.stdout) as { UserProfile?: { LoginName?: string; DisplayName?: string } };
     const up = data.UserProfile;
@@ -83,14 +91,40 @@ function readActors(): Record<string, ActorConfig> {
  * Find the actors-map entry for a resolved tailnet login. Matches on an entry's
  * explicit `login`, its map key, or its `email` (all case-insensitive).
  */
-function findActorConfig(login: string): ActorConfig | undefined {
+function findActorConfig(login: string, actors: Record<string, ActorConfig>): ActorConfig | undefined {
   const needle = login.toLowerCase();
-  const actors = readActors();
   for (const [key, cfg] of Object.entries(actors)) {
     const candidates = [cfg.login, key, cfg.email].filter((v): v is string => !!v);
     if (candidates.some((c) => c.toLowerCase() === needle)) return cfg;
   }
   return undefined;
+}
+
+/**
+ * Map a resolved tailnet identity (+ the actors map) to a ResolvedActor. Pure --
+ * the impure whois/config reads happen in computeActor -- so the enrich/override
+ * path is fully testable. No login (local, or an unnameable peer) yields the
+ * honest `UNRESOLVED@<host>`; a login without a config entry still credits git
+ * from the tailnet DisplayName + login email.
+ */
+export function actorFromIdentity(
+  who: WhoisIdentity | undefined,
+  host: string,
+  actors: Record<string, ActorConfig>,
+): ResolvedActor {
+  const login = who?.login;
+  if (!login) {
+    return { id: `UNRESOLVED@${host}`, kind: 'human' };
+  }
+  const cfg = findActorConfig(login, actors);
+  const emailFromLogin = login.includes('@') ? login : undefined;
+  return {
+    id: login,
+    kind: cfg?.kind ?? 'human',
+    name: cfg?.name ?? who?.displayName,
+    email: cfg?.email ?? emailFromLogin,
+    github: cfg?.github,
+  };
 }
 
 /** Reconstruct an actor an ancestor process already resolved into the env. */
@@ -115,25 +149,9 @@ export function computeActor(env: NodeJS.ProcessEnv = process.env): ResolvedActo
   const inherited = inheritedActor(env);
   if (inherited) return inherited;
 
-  const host = machineId();
   const ssh = env.SSH_CONNECTION ? parseSshConnection(env.SSH_CONNECTION) : undefined;
   const who = ssh?.clientIp ? tailscaleWhois(ssh.clientIp) : undefined;
-
-  const login = who?.login;
-  if (!login) {
-    // Local, or an SSH peer tailscale can't name -- honest over convenient.
-    return { id: `UNRESOLVED@${host}`, kind: 'human' };
-  }
-
-  const cfg = findActorConfig(login);
-  const emailFromLogin = login.includes('@') ? login : undefined;
-  return {
-    id: login,
-    kind: cfg?.kind ?? 'human',
-    name: cfg?.name ?? who?.displayName,
-    email: cfg?.email ?? emailFromLogin,
-    github: cfg?.github,
-  };
+  return actorFromIdentity(who, machineId(), readActors());
 }
 
 let cached: ResolvedActor | undefined;
