@@ -46,6 +46,9 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  // Close before removing the tree: Windows refuses to unlink an open file, so
+  // a leaked connection (plus its WAL sidecars) fails the whole suite there.
+  db.closeDB();
   if (REAL_HOME === undefined) delete process.env.HOME;
   else process.env.HOME = REAL_HOME;
   fs.rmSync(tmpHome, { recursive: true, force: true });

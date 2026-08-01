@@ -49,6 +49,19 @@ function db(): Database.Database {
   return _db;
 }
 
+/**
+ * Release the tasks.db connection so the file (and its WAL sidecars) can be
+ * removed. The mirror of `closeDB()` in `../session/db.ts`, which this module
+ * had no counterpart for — on Windows an open handle makes the file
+ * un-unlinkable, so anything tearing down a temp home must close this too.
+ */
+export function closeStore(): void {
+  if (_db) {
+    _db.close();
+    _db = null;
+  }
+}
+
 /** Persist a task snapshot, replacing any existing row with the same ID. */
 export function insertTask(task: CloudTask): void {
   db().prepare(`
