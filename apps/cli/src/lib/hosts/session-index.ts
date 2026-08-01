@@ -13,10 +13,12 @@
  * `[cloud/<status>]` convention.
  */
 
+import * as fs from 'fs';
 import { upsertSession } from '../session/db.js';
 import type { SessionMeta, SessionAgentId } from '../session/types.js';
 import { SESSION_AGENTS } from '../session/types.js';
-import type { HostTask } from './tasks.js';
+import { localLogPath, updateTask, type HostTask } from './tasks.js';
+import { parseSessionIdMarker } from './session-marker.js';
 
 export interface HostSessionContext {
   /** Local directory the `agents run --host` was invoked from. */
@@ -65,6 +67,35 @@ export function registerHostSession(task: HostTask, ctx: HostSessionContext): vo
   } catch {
     /* index write is best-effort; the run is already live on the host */
   }
+}
+
+/**
+ * Relate a remote-created session id back to a followed host dispatch.
+ *
+ * The remote run (dispatched with `--emit-session-id`) prints its resolved id as
+ * a stdout sentinel (see session-marker.ts) that rides the followed log into the
+ * task's local mirror. Read that mirror, parse the id, and stamp it on the task
+ * so `findTaskBySessionId` and the session-index registration work for agents
+ * that never take a forced `--session-id` — closing the gap where every
+ * non-Claude host run was orphaned.
+ *
+ * Returns the updated task when an id was captured (and differs from what's on
+ * the record), else null. A task that already carries an id (Claude's forced id,
+ * a resume) is left untouched — the marker only fills a genuinely empty slot, so
+ * it can never overwrite an authoritative id with a stale echo. Best-effort: a
+ * missing/unreadable mirror or absent marker yields null, never an exception.
+ */
+export function captureRemoteSessionId(task: HostTask): HostTask | null {
+  if (task.sessionId) return null;
+  let text: string;
+  try {
+    text = fs.readFileSync(localLogPath(task.id), 'utf8');
+  } catch {
+    return null; // no local mirror (unfollowed run, or read raced the follow)
+  }
+  const captured = parseSessionIdMarker(text);
+  if (!captured) return null;
+  return updateTask(task.id, { sessionId: captured });
 }
 
 export interface InteractiveHostSessionContext {
