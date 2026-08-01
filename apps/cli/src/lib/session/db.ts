@@ -379,6 +379,11 @@ export function closeDB(): void {
   if (dbInstance) {
     dbInstance.close();
     dbInstance = null;
+    // Closing the connection finalizes every prepared statement it owns. Drop
+    // the cached upsert/FTS statements too, so the next getDB() rebuilds them
+    // against the fresh connection instead of re-running a finalized statement
+    // (which throws "statement has been finalized" on the first upsert).
+    cachedStmts = {};
   }
 }
 
