@@ -6,6 +6,7 @@ import {
   canCacheResolvedEnv,
   isHeadlessSecretsContext,
   listBundles,
+  BUNDLE_META_PREFIX,
   readAndResolveBundleEnv,
   readBundle,
   shouldEvictAfterBundleWrite,
@@ -171,6 +172,59 @@ describe('canCacheResolvedEnv (broker cache shape)', () => {
 
   it('does not cache process-mode env when account suffixes would be stripped', () => {
     expect(canCacheResolvedEnv(bundle, new Set(Object.keys(bundle.vars)), 'process')).toBe(false);
+  });
+});
+
+describe('listBundles agent-only enumeration', () => {
+  // The Touch ID storm fix: bundle METADATA items are biometry-gated too, so
+  // enumerating bundles on a broker miss popped a sheet even when no value was
+  // ever read. `agents devices list` reaches this twice per invocation (crabbox
+  // lease auto-detect + tailscale probe), and a SessionStart hook shells out to
+  // it on every new agent terminal. A broker-only caller must enumerate from the
+  // cached snapshot or come back empty — never fall through to the keychain.
+  const countingBackend = () => {
+    const calls = { get: 0, list: 0 };
+    const backend: KeychainBackend = {
+      has: () => false,
+      get: (item: string) => { calls.get++; throw new Error(`keychain must not be read: ${item}`); },
+      set: () => { throw new Error('keychain must not be written'); },
+      delete: () => false,
+      list: () => { calls.list++; return [`${BUNDLE_META_PREFIX}hetzner.com`]; },
+    };
+    return { calls, backend };
+  };
+
+  it('never reads a keychain metadata item when agentOnly and the snapshot missed', () => {
+    const { calls, backend } = countingBackend();
+    const previousBackend = setKeychainBackendForTest(backend);
+    const previousNoAgent = process.env.AGENTS_SECRETS_NO_AGENT;
+    process.env.AGENTS_SECRETS_NO_AGENT = '1'; // force the snapshot to miss
+    try {
+      const bundles = listBundles({ agentOnly: true });
+      expect(calls.get).toBe(0);
+      expect(bundles.some((b) => b.name === 'hetzner.com')).toBe(false);
+    } finally {
+      setKeychainBackendForTest(previousBackend);
+      if (previousNoAgent === undefined) delete process.env.AGENTS_SECRETS_NO_AGENT;
+      else process.env.AGENTS_SECRETS_NO_AGENT = previousNoAgent;
+    }
+  });
+
+  it('still reads the keychain for a normal (non-agentOnly) enumeration', () => {
+    const { calls, backend } = countingBackend();
+    const previousBackend = setKeychainBackendForTest(backend);
+    const previousNoAgent = process.env.AGENTS_SECRETS_NO_AGENT;
+    process.env.AGENTS_SECRETS_NO_AGENT = '1';
+    try {
+      // The counting backend throws on get, which listBundles tolerates — the
+      // point is that it ATTEMPTED the read the agentOnly path must skip.
+      try { listBundles(); } catch { /* enumeration is best-effort */ }
+      expect(calls.get).toBeGreaterThan(0);
+    } finally {
+      setKeychainBackendForTest(previousBackend);
+      if (previousNoAgent === undefined) delete process.env.AGENTS_SECRETS_NO_AGENT;
+      else process.env.AGENTS_SECRETS_NO_AGENT = previousNoAgent;
+    }
   });
 });
 

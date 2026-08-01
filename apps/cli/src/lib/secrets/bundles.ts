@@ -766,7 +766,7 @@ function healKeychainBundleMetadataAclOnce(metaJsonByName: Map<string, string>):
   }
 }
 
-export function listBundles(): SecretsBundle[] {
+export function listBundles(opts: { agentOnly?: boolean } = {}): SecretsBundle[] {
   const out: SecretsBundle[] = [];
 
   // Keychain-backed bundles: batch all metadata reads behind ONE Touch ID
@@ -817,6 +817,11 @@ export function listBundles(): SecretsBundle[] {
       const cached = useAgent ? agentGetMetaSync(nameSetHash) : null;
       if (cached) {
         for (const bundle of cached) out.push(bundle);
+      } else if (opts.agentOnly) {
+        // Broker-only caller (a passive render — see CrabboxOptions.agentOnly) and
+        // the metadata snapshot missed. The batch below is biometry-gated, so
+        // running it here would pop the exact Touch ID sheet agentOnly exists to
+        // prevent. Omit keychain-backed bundles instead; the caller degrades.
       } else {
         const fetched = getKeychainTokens(keychainServices);
         const keychainBundles: SecretsBundle[] = [];
@@ -878,7 +883,12 @@ export function listBundles(): SecretsBundle[] {
     if (bundle) out.push(bundle);
   }
 
-  if (getVaultSession().loggedIn && vaultExists()) {
+  // vaultExists() (a file stat) FIRST — getVaultSession() reads a keychain item,
+  // so the original order spawned the helper on every enumeration even for the
+  // overwhelming majority of users who have no vault at all. Every other call
+  // site already orders it this way (lines 152, 422, 1388); this one was the
+  // outlier, and it defeated the agentOnly guard above.
+  if (vaultExists() && getVaultSession().loggedIn) {
     let vaultServices: string[] = [];
     try {
       vaultServices = vaultListItems(BUNDLE_META_PREFIX);

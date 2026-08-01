@@ -121,18 +121,21 @@ export function pickTailscaleBundleFromList(bundles: SecretsBundle[]): { name: s
 }
 
 /** Process-lifetime memo so the tailscale bundle `listBundles()` scan runs at most once. */
-let tailscaleBundleMemo: { value: { name: string; key: string } | undefined } | undefined;
-function resolveTailscaleBundleMemo(): { name: string; key: string } | undefined {
-  if (!tailscaleBundleMemo) {
+// Keyed by brokerOnly: a broker-only scan can legitimately come back empty (the
+// metadata batch is skipped rather than prompting), and caching that miss under
+// the same key would make a later interactive lease silently skip the bundle.
+const tailscaleBundleMemo = new Map<boolean, { name: string; key: string } | undefined>();
+function resolveTailscaleBundleMemo(brokerOnly: boolean): { name: string; key: string } | undefined {
+  if (!tailscaleBundleMemo.has(brokerOnly)) {
     let value: { name: string; key: string } | undefined;
     try {
-      value = pickTailscaleBundleFromList(listBundles());
+      value = pickTailscaleBundleFromList(listBundles({ agentOnly: brokerOnly }));
     } catch {
       /* secrets unreadable — no auto-detect */
     }
-    tailscaleBundleMemo = { value };
+    tailscaleBundleMemo.set(brokerOnly, value);
   }
-  return tailscaleBundleMemo.value;
+  return tailscaleBundleMemo.get(brokerOnly);
 }
 
 /** A resolved lease bundle: its name, plus (auto-detect only) the exact keys to inject. */
@@ -156,7 +159,7 @@ export interface ResolvedLeaseBundle {
  * time). Once `lease setup` persists the choice (tier 2), tier 3 never runs.
  * Returns undefined when nothing matches — crabbox then falls back to `crabbox login`.
  */
-export function resolveLeaseBundle(): ResolvedLeaseBundle | undefined {
+export function resolveLeaseBundle(opts: { agentOnly?: boolean } = {}): ResolvedLeaseBundle | undefined {
   const env = process.env.AGENTS_LEASE_SECRETS_BUNDLE;
   if (env) return { name: env };
   try {
@@ -166,7 +169,7 @@ export function resolveLeaseBundle(): ResolvedLeaseBundle | undefined {
     /* config unreadable — fall through to auto-detect */
   }
   try {
-    const bundles = listBundles();
+    const bundles = listBundles({ agentOnly: opts.agentOnly });
     const name = pickLeaseBundleFromList(bundles);
     if (name) {
       const b = bundles.find((x) => x.name === name);
@@ -180,17 +183,17 @@ export function resolveLeaseBundle(): ResolvedLeaseBundle | undefined {
 }
 
 /** Process-lifetime memo so the tier-3 `listBundles()` scan runs at most once. */
-let leaseBundleMemo: { value: ResolvedLeaseBundle | undefined } | undefined;
-function resolveLeaseBundleMemo(): ResolvedLeaseBundle | undefined {
-  if (!leaseBundleMemo) leaseBundleMemo = { value: resolveLeaseBundle() };
-  return leaseBundleMemo.value;
+const leaseBundleMemo = new Map<boolean, ResolvedLeaseBundle | undefined>();
+function resolveLeaseBundleMemo(brokerOnly: boolean): ResolvedLeaseBundle | undefined {
+  if (!leaseBundleMemo.has(brokerOnly)) leaseBundleMemo.set(brokerOnly, resolveLeaseBundle({ agentOnly: brokerOnly }));
+  return leaseBundleMemo.get(brokerOnly);
 }
 
 /** Persist `lease.secretsBundle` in agents config so `--lease` needs no env var. */
 export function setLeaseSecretsBundle(name: string): void {
   const meta = readMeta();
   writeMeta({ ...meta, lease: { ...meta.lease, secretsBundle: name } });
-  leaseBundleMemo = undefined; // invalidate so the next resolve sees the new config
+  leaseBundleMemo.clear(); // invalidate so the next resolve sees the new config
 }
 
 /**
@@ -202,8 +205,11 @@ export function setLeaseSecretsBundle(name: string): void {
  * `||`: `false || detect()` would silently re-enable prompting for the caller
  * that explicitly asked for it to be allowed.)
  */
-export function resolveBrokerOnly(opts: Pick<CrabboxOptions, 'agentOnly'>): boolean {
-  return opts.agentOnly ?? isHeadlessSecretsContext();
+export function resolveBrokerOnly(
+  opts: Pick<CrabboxOptions, 'agentOnly'>,
+  detect: () => boolean = isHeadlessSecretsContext,
+): boolean {
+  return opts.agentOnly ?? detect();
 }
 
 /** Build the child env for crabbox, injecting a secrets bundle when configured. */
@@ -214,7 +220,7 @@ export function crabboxEnv(opts: CrabboxOptions): NodeJS.ProcessEnv {
 
   const resolved: ResolvedLeaseBundle | undefined = opts.secretsBundle
     ? { name: opts.secretsBundle }
-    : resolveLeaseBundleMemo();
+    : resolveLeaseBundleMemo(brokerOnly);
   if (resolved) {
     try {
       // Auto-detected bundle → inject ONLY the provider token key(s) (least
@@ -244,7 +250,7 @@ export function crabboxEnv(opts: CrabboxOptions): NodeJS.ProcessEnv {
   // public-network lease; `crabboxWarmup({ netMode: 'tailscale' })` is what decides
   // whether the key is actually used.
   if (!out.CRABBOX_TAILSCALE_AUTH_KEY) {
-    const ts = resolveTailscaleBundleMemo();
+    const ts = resolveTailscaleBundleMemo(brokerOnly);
     if (ts) {
       try {
         const { env } = readAndResolveBundleEnv(ts.name, {

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -306,37 +306,29 @@ describe('resolveBrokerOnly', () => {
   // Regression guard for the macOS Touch ID storm: `agents devices list` renders
   // the leased-boxes section inside a TTY, so the headless auto-detect returns
   // false and every keychain-backed bundle resolve was allowed to pop its own
-  // Touch ID sheet (one helper process per read, so no assertion reuse). The
-  // passive caller now forces broker-only.
-  it('honors an explicit true regardless of the ambient context', () => {
-    expect(resolveBrokerOnly({ agentOnly: true })).toBe(true);
+  // Touch ID sheet (one helper process per read, so no assertion reuse). Passive
+  // callers now force broker-only.
+  //
+  // The detector is injected rather than driven through env + process.platform so
+  // these run on the Linux CI that actually gates the merge. With the real
+  // detector the off-darwin short-circuit (bundles.ts:1253) makes every case
+  // return false, and a `||` implementation would pass identically — the guard
+  // would be green on CI while broken on the only platform that prompts.
+  const headless = () => true;
+  const interactive = () => false;
+
+  it('honors an explicit true even when the context looks interactive', () => {
+    expect(resolveBrokerOnly({ agentOnly: true }, interactive)).toBe(true);
   });
 
-  it('honors an explicit false regardless of the ambient context', () => {
-    expect(resolveBrokerOnly({ agentOnly: false })).toBe(false);
+  it('does not let an explicit false fall through to a headless context', () => {
+    // `false || detect()` returns true here, stripping the prompt from an
+    // interactive `agents run --lease` that deliberately asked to allow one.
+    expect(resolveBrokerOnly({ agentOnly: false }, headless)).toBe(false);
   });
 
-  // The auto-detect is a no-op off darwin (no biometry prompt to suppress), so
-  // the fallback and the `??`-vs-`||` distinction are only observable there.
-  describe.skipIf(process.platform !== 'darwin')('on darwin', () => {
-    const prior = process.env.AGENTS_SECRETS_NO_PROMPT;
-    afterEach(() => {
-      if (prior === undefined) delete process.env.AGENTS_SECRETS_NO_PROMPT;
-      else process.env.AGENTS_SECRETS_NO_PROMPT = prior;
-    });
-
-    it('falls back to the headless auto-detect when agentOnly is omitted', () => {
-      process.env.AGENTS_SECRETS_NO_PROMPT = '1';
-      expect(resolveBrokerOnly({})).toBe(true);
-      process.env.AGENTS_SECRETS_NO_PROMPT = '0';
-      expect(resolveBrokerOnly({})).toBe(false);
-    });
-
-    it('does not let an explicit false fall through to a headless context', () => {
-      // `false || isHeadlessSecretsContext()` would return true here and strip
-      // the prompt from an interactive `agents run --lease` that asked for one.
-      process.env.AGENTS_SECRETS_NO_PROMPT = '1';
-      expect(resolveBrokerOnly({ agentOnly: false })).toBe(false);
-    });
+  it('falls back to the detector only when agentOnly is omitted', () => {
+    expect(resolveBrokerOnly({}, headless)).toBe(true);
+    expect(resolveBrokerOnly({}, interactive)).toBe(false);
   });
 });
