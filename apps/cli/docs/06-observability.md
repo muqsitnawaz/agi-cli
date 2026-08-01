@@ -36,6 +36,37 @@ So "was this agent started on the host by a remote user?" is answerable for any
 event, not just runs. The write is a synchronous single-line append (durable
 before the action proceeds); `AGENTS_DISABLE_EVENT_LOG=1` turns it off.
 
+### Actor provenance — which *human* is behind a run
+
+`osUser` answers "which OS account", but on a shared fleet that is one account for
+everyone. The **actor** layer ([`src/lib/actor.ts`](../src/lib/actor.ts)) answers
+"which *person*". `resolveActor()` runs once per process:
+
+- **Over SSH** it `tailscale whois`es the client IP to the connecting tailnet
+  identity — a real name and login email.
+- **Locally** (no `$SSH_CONNECTION`) it stays honest: `UNRESOLVED@<host>`, claiming
+  no personal identity rather than guessing the box owner.
+- **Inherited** — a child spawn trusts the `AGENTS_ACTOR*` env its parent stamped
+  instead of re-resolving, so the whole spawn tree shares one actor.
+
+The resolved actor rides the agent's process env (`AGENTS_ACTOR`,
+`AGENTS_ACTOR_KIND`, and `AGENTS_ACTOR_NAME`/`_EMAIL`/`_GITHUB` when known). For a
+resolved **human**, that env also carries `GIT_AUTHOR_*` / `GIT_COMMITTER_*`, so the
+agent's own `git commit` is credited to the person, not the shared account. An
+unresolved actor injects no git identity — local runs keep their ambient git config.
+
+The optional `actors:` map in `agents.yaml` enriches or overrides a resolved
+identity, keyed by a short slug:
+
+```yaml
+actors:
+  bisma:
+    login: bisma@example.com   # tailnet login to match (defaults to the key)
+    name: Bisma Ansari
+    email: bisma@company.com    # pin a preferred git email
+    github: bisma
+```
+
 ```bash
 agents events                          # recent activity across everything
 agents events --module teams           # team lifecycle (create / add / disband)
