@@ -20,8 +20,12 @@ import * as path from 'path';
 
 // Set HOME before state.ts loads so its module-level root picks up the override
 // (both the devices registry and the hosts providers resolve paths from it).
+// USERPROFILE too: os.homedir() ignores HOME on Windows, and ssh-config.ts
+// builds ~/.ssh from os.homedir() — with only HOME set, the stanza written
+// below is invisible there and every lookup falls through.
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-host-resolve-test-'));
 process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
 
 const { resolveHost, listAllHosts, DeviceOffloadUnsupportedError } = await import('./registry.js');
 const { sshTargetFor } = await import('./types.js');

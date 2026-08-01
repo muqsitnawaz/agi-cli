@@ -16,8 +16,12 @@ import * as path from 'path';
 
 // HOME must be set before state.ts loads so the device registry, the agents.yaml
 // overlay, and ~/.ssh/config all resolve under the temp root.
+// USERPROFILE too: os.homedir() ignores HOME on Windows, and ssh-config.ts
+// builds ~/.ssh from os.homedir() — with only HOME set, the stanza written
+// below is invisible there and every lookup falls through.
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-resolve-target-test-'));
 process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
 
 const { resolveExplicitTargets, resolveDeviceTarget } = await import('../resolve-target.js');
 const { resolveHost } = await import('../../hosts/registry.js');
