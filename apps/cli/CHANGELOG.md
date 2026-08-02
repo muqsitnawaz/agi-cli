@@ -2,13 +2,18 @@
 
 ## 1.20.86
 
-- **Webhook handlers can now inject environment variables via `run.env`.**
+- **Webhook handlers can now inject environment variables via `run.env` and
+  place execution on another host via `host`.**
   One-off handler runs are sandboxed with an overlay `HOME`, which hides tools
   like the `linear` CLI that resolve credentials from the real user home. A
   handler can now declare `run.env.HOME: /home/muqsit` (or any other variable)
-  and it is applied on top of the sandbox env. Source:
+  and it is applied on top of the sandbox env. `host` accepts a specific device
+  name (`yosemite-s0`), `fleet` for any online worker, or `fleet/<platform>`
+  / `<platform>/fleet` (e.g. `fleet/linux`) for any online worker on that OS.
+  Agent version selection is automatic; handlers use the same strategy as
+  `agents run` to pick a healthy installed version. Source:
   `apps/cli/src/lib/triggers/handlers.ts`, `apps/cli/src/lib/routines.ts`,
-  `apps/cli/src/lib/runner.ts`.
+  `apps/cli/src/lib/runner.ts`, `apps/cli/src/lib/routines-placement.ts`.
 
 - **`agents sessions` now shows a Kimi session's todo list and its file-touching
   tool calls.** Kimi writes its checklist with `TodoList` (items shaped

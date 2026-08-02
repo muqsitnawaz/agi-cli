@@ -243,7 +243,8 @@ event: Issue
 action: update
 stateTo: Plan
 devices:
-  - mac-mini
+  - yosemite-s0
+host: fleet/linux
 run:
   agent: claude
   prompt: |
@@ -257,7 +258,8 @@ run:
 | --- | --- |
 | `name` | Unique handler name. |
 | `enabled` | Set to `false` to disable without deleting the file. |
-| `devices` | Same fleet allowlist as routines — only matching devices run the handler. |
+| `devices` | Same fleet allowlist as routines — only matching devices receive and fire the handler. |
+| `host` | Where the handler body executes. A specific device name, `fleet` (any online worker), or `fleet/<platform>` / `<platform>/fleet` (e.g. `fleet/linux`, `linux/fleet`). Omitted means run on the receiving device. |
 | `source` | `github` or `linear`. |
 | `event` | Source event name (e.g. `Issue`, `pull_request`). |
 | `action` | Webhook action (e.g. `update`, `opened`, `labeled`). |
@@ -288,6 +290,17 @@ Handlers support the same filters as routine triggers:
 process. Use it to point tools at the real user home without breaking sandbox
 isolation, for example `HOME: /home/muqsit` so a child `linear` CLI finds
 `~/.linear-cli/config.json`.
+
+#### Devices vs host
+
+`devices` says which daemon may **receive and fire** the handler. `host` says
+where the handler body **executes** once fired. In the example above only
+`yosemite-s0` receives the webhook, but it then runs the agent on any online
+Linux worker (`fleet/linux`). Omit `host` to execute on the receiving device.
+
+Agent version selection is automatic: handlers use the same strategy as
+`agents run` (default `balanced`) to pick a healthy installed version of the
+requested agent. You do not need to pin a version number.
 
 #### Prompt variables
 
