@@ -282,12 +282,29 @@ async function probeFleetInventory(target: FleetTarget): Promise<FleetInventory 
  * which is honest and already rendered, instead of aborting the whole fan-out.
  */
 function asFleetInventory(value: unknown): FleetInventory | null {
-  if (!value || typeof value !== 'object') return null;
-  const v = value as Partial<FleetInventory>;
-  if (!v.resources || typeof v.resources !== 'object') return null;
-  if (!v.agentVersions || typeof v.agentVersions !== 'object') return null;
-  if (!v.repos || typeof v.repos !== 'object') return null;
-  return v as FleetInventory;
+  // `typeof [] === 'object'`, so a shallow object check is not enough: an array
+  // passes it, every `inv.resources[kind] ?? []` then yields empty, and the
+  // comparison reports EVERY baseline resource as missing on that device — a
+  // screenful of false findings, worse than the crash this guard replaced.
+  const isMap = (x: unknown): x is Record<string, unknown> =>
+    !!x && typeof x === 'object' && !Array.isArray(x);
+  const isStringArray = (x: unknown): x is string[] =>
+    Array.isArray(x) && x.every((e) => typeof e === 'string');
+
+  if (!isMap(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (!isMap(v.resources) || !Object.values(v.resources).every(isStringArray)) return null;
+  if (!isMap(v.agentVersions) || !Object.values(v.agentVersions).every(isStringArray)) return null;
+  if (!isMap(v.repos)) return null;
+  // `signIn` is optional (older remotes omit it) but must be well-formed if sent.
+  if (v.signIn !== undefined) {
+    if (!isMap(v.signIn)) return null;
+    const rowsOk = Object.values(v.signIn).every(
+      (rows) => Array.isArray(rows) && rows.every((r) => isMap(r) && typeof r.version === 'string'),
+    );
+    if (!rowsOk) return null;
+  }
+  return v as unknown as FleetInventory;
 }
 
 async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
@@ -339,8 +356,8 @@ async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
         localName,
       );
 
-  if (opts.json) {
-    console.log(JSON.stringify({ devices: results, fleet: divergence }, null, 2));
+  if (opts.json && results.length === 0) {
+    console.log(JSON.stringify({ devices: results, fleet: divergence, findings: [] }, null, 2));
     return;
   }
 
@@ -424,6 +441,16 @@ async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
   // warnings, attributed to the lagging box.
   if (divergence) {
     findings.push(...fleetDivergenceToFindings(divergence.divergences, divergence.baseline));
+  }
+
+  // `--json` emits HERE, not before the findings are built: a consumer that reads
+  // the JSON must see the same finding set the text renders — same membership,
+  // same severities, so the CRITICAL `(N)` and each device's `✗ N critical`
+  // reconcile. Emitting early left `--devices --json` with no `findings` at all
+  // while the bare `--json` had one.
+  if (opts.json) {
+    console.log(JSON.stringify({ devices: results, fleet: divergence, findings }, null, 2));
+    return;
   }
 
   const header = `${chalk.gray('agents doctor ·')} ${chalk.hex('#a3e635')(String(results.length))} ${chalk.gray('devices · baseline')} ${chalk.hex('#a3e635')(localName)}`;
