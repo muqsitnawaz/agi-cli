@@ -99,7 +99,112 @@ question, and a new health check goes in the one whose scope it matches.
 |---|---|---|
 | `agents fleet status` | Coarse **device** health across the fleet | Are devices online, do they have the agent CLIs installed, are they signed in, what is the agents-cli **version skew**. NOT fine-grained resource divergence. |
 | `agents inspect <agent>[@version]` | Deep **single-harness** diagnosis | Per-resource diff between one version home and its resolved sources; manifest staleness; orphans. One harness, one machine. |
-| `agents doctor` | **Umbrella** — overall fleet + harness health | Local diagnostics (CLI presence, sign-in, per-version sync, orphans) **and** cross-device divergence. The single command a user runs to discover problems before runtime. |
+| `agents doctor` | **Umbrella** — overall fleet + harness health | Local diagnostics (CLI presence, per-version sign-in, per-version sync, orphans) **and** cross-device divergence, rendered as the prioritized critical-at-top + per-computer hybrid below. The single command a user runs to discover problems before runtime. |
+
+**`agents doctor` is a prioritized, comprehensive-by-default hybrid (RUSH-2069).**
+There is no `--verbose`. A top `✗ CRITICAL — needs you now (N)` section lists every
+critical across the whole fleet worst-first; a `─── by computer ───` section then
+gives each device its warnings plus a compact accounts/versions line (every
+installed version + its account, provable ✓ / ✗). Single-machine `agents doctor`
+collapses to the CRITICAL section plus one `▸ <machine>` block. Severity:
+**critical** is `logged-out` (provable), `missing-hook`, `missing-plugin`,
+`unwired-hook`, `never-synced` *when the version's declared resources are
+therefore absent*, `duplicate-hook-drift`, and `cli-missing`; **warning** is
+`logout-unprovable`, `missing-resource`, `content-drift`, `stale`, `never-synced`
+when the version declares nothing to miss, `repo-behind`, `repo-drift`,
+`version-skew`, `fleet-resource-gap`, `orphan`, `duplicate-hook`,
+`host-cli-missing`, `host-cli-invalid`, `rc-secret-export`, `exec-policy` and
+`stale-cli`. The same list is in the `doctor-findings.ts` module docblock — keep
+both exhaustive, since a kind missing from either is a doc that lies. The findings model,
+builders, `remediationFor`, and the pure `renderFindings` live in
+[`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts).
+
+**One root cause is one line.** A readout the user cannot scan is as useless as no
+readout, so the builders de-duplicate before rendering — on a real machine this
+takes ~57 rows down to ~16, and the rules are unit-pinned in
+`doctor-findings.test.ts`:
+
+- **Per version, per kind, one row.** `emitGroup` names a lone resource in full
+  (`hook 'git-guard' missing`) and otherwise emits a count plus two examples
+  (`32 hooks missing (incl. 'a', 'b')`). Never one row per resource.
+- **Per agent, one row across versions.** `collapseAcrossVersions` folds findings
+  with the same `(device, agent, kind, severity, account, message)` into a single
+  row carrying `versions`, rendered `claude (5 versions)`, and widens the
+  remediation to the agent-wide sweep. Three exclusions, each because the widened
+  remediation would be wrong: **isolated copies** (`runFix` skips them, so the
+  sweep would leave one broken — the caller passes `isolatedVersions` from
+  `isVersionIsolated`); **findings with no agent** (their `version` is a repo
+  alias); and **logouts** (`NEVER_COLLAPSED`) — a login is inherently per-version,
+  there is no `@all` for it, and dropping the version falls back to the bare
+  native hint, which the shim points at the *default* version.
+- **Orphans are one line per machine.** They are cleanup-only and
+  `agents prune cleanup --all` fixes every version at once — **`--all` is load
+  bearing**: without it cleanup sweeps only each agent's default version
+  (`commands/prune.ts:351`).
+- **Duplicate version-home hooks are one line per (agent, severity).**
+  `agents sync <agent>@all --yes` reconciles every copy at once, and a
+  machine with five installed claudes otherwise emits two dozen identical rows.
+- **No vaguer restatement.** A version that just listed its drifted/missing
+  resources gets no `sources changed since last sync` row on top, and a
+  never-synced version reports one critical (`agents sync <agent>@<version>
+  --yes`) instead of one per absent resource.
+
+**Every check the old overview printed is a finding now.** `renderOverviewText`
+was the ONLY text renderer for several independent checks, so deleting it dropped
+each of them from the command — the top defect this redesign had to answer for, and
+it recurred three times during review. They all enter `buildLocalFindings` as
+plain **inputs** (never probes, so the module stays pure and every branch is
+testable without a shell, PowerShell, or an installed CLI):
+
+| Check | Input | Finding kind |
+|---|---|---|
+| Credential-shaped shell-rc exports (RUSH-1968) | `rcSecrets` | `rc-secret-export` |
+| Windows exec policy blocking `agents.ps1` | `execPolicy` | `exec-policy` |
+| Hooks duplicated across version homes | `duplicateHooks` | `duplicate-hook{,-drift}` |
+| Declared host CLIs not on PATH | `hostClis.statuses` | `host-cli-missing` |
+| Host-CLI manifests the loader rejected | `hostClis.errors` | `host-cli-invalid` |
+
+**Before deleting any renderer here, enumerate what it called.**
+
+**A remediation must fix EVERY version in its row, and must be a command that
+exists.** Three separate rounds of review here found remediations naming a command
+form that does not do what the row claims — `agents sync <agent>` (default version
+only), `agents repo pull` (skips the system repo), `agents prune cleanup` (default
+versions only), `agents cli install <a> <b>` (takes one name), and
+`agents run <agent>@<v>, then <cli> login` (the second command resolves through the
+shim to the *default* version, not the one that is logged out — use
+`agents run <agent>@<v> -- login`, since `--` forwards verbatim into that version
+home). **Open the command definition and check arity, flags, and scope before
+writing a remediation string.** `agents sync <agent>` targets
+only the default/sole installed version (`commands/sync.ts:8`), so a row collapsed
+across versions uses the `@all` selector — `agents sync <agent>@all --yes`. A fleet
+resource gap is absent from that box's *central repos*, so the central-to-home
+`agents doctor --fix` cannot close it — and neither `agents repo pull` nor the sync
+umbrella touches the **system** repo (`commands/repo.ts:1186`,
+`lib/sync-umbrella.ts:104`), which moves with the npm package instead, so that row
+names both paths rather than one command that quietly covers half the cases. A
+`repo-drift` row carries the repo alias (`user` / `system`) rather than hardcoding
+one.
+
+**Sign-in is per installed VERSION, and a logged-out claim must be provable.**
+[`credentialPresence(agent, versionHome)`](src/lib/agents.ts) splits a credential's
+existence into the per-version home and the active/global HOME; a logged-out
+critical is emitted only when BOTH are absent (`provable = !perVersion && !active`).
+A version sharing the global login is signed in, not out; an agent with no
+inspectable identity (`!supportsAccountInspection`) never yields a logout finding,
+not even the hedged warning. **Do not enumerate that set here or in tests** —
+`ACCOUNT_INSPECTION_AGENT_IDS` and `CREDENTIAL_FILE_SEGMENTS`
+([`src/lib/agents.ts`](src/lib/agents.ts)) are the source of truth and agents move
+between them (antigravity and cursor both did, mid-review, each time turning a
+hardcoded list into a false doc claim or a red test). Derive it:
+`ALL_AGENT_IDS.filter(supportsAccountInspection)`. Login remediation is version-targeted via
+`agents run <agent>@<version>` + the harness-native login (`loginHint`) — but ONLY
+for the per-version-isolated set (claude/codex/grok/kimi/opencode/copilot);
+gemini/antigravity/droid/cursor share their login, so the fix says so instead of
+faking a per-version repair. Per-version sign-in rides the device inventory
+(`FleetInventory.signIn`, populated by `collectLocalFleetSignIn` in
+[`src/lib/devices/fleet-inventory.ts`](src/lib/devices/fleet-inventory.ts)); an
+older remote CLI that omits it degrades to an "older agents-cli — upgrade" warning.
 
 **Cross-device divergence lives in `agents doctor --devices`.** It compares each
 device's self-reported harness inventory against the local baseline and flags a
@@ -114,7 +219,10 @@ resource / agent-version / config-repo present on one box but missing on another
 - `runDevicesDoctor` ([`src/commands/doctor.ts`](src/commands/doctor.ts)) fans that
   payload out per device and runs the **pure comparator**
   [`compareFleetInventories`](src/lib/devices/fleet-divergence.ts) — SSH-free, so
-  it's unit-tested against fixtures with no live fleet.
+  it's unit-tested against fixtures with no live fleet — then maps the divergences
+  and each box's per-version sign-in into the hybrid via `fleetDivergenceToFindings`
+  / `signInToFindings` / `renderFindings`
+  ([`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts)).
 - `agents fleet status` reuses the same comparator inside `buildFleetHealthReport`
   ([`src/lib/devices/health-report.ts`](src/lib/devices/health-report.ts)) to add a
   per-device `divergence` warning to its rollup.

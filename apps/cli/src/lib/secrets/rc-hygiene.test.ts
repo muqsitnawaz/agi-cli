@@ -6,7 +6,6 @@ import {
   isCredentialName,
   scanRcExports,
   scanUserRcFiles,
-  rcSecretWarningLines,
 } from './rc-hygiene.js';
 
 describe('isCredentialName', () => {
@@ -139,34 +138,5 @@ describe('scanUserRcFiles', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
-  });
-});
-
-describe('rcSecretWarningLines', () => {
-  it('is silent with no findings', () => {
-    expect(rcSecretWarningLines([])).toEqual([]);
-  });
-
-  it('calls out the master passphrase with the off-env remediation', () => {
-    const lines = rcSecretWarningLines([
-      { file: '.zshenv', line: 3, name: 'AGENTS_SECRETS_PASSPHRASE', isMasterPassphrase: true },
-    ]);
-    expect(lines[0]).toContain('1 credential-shaped export');
-    expect(lines.some((l) => l.includes('AGENTS_SECRETS_PASSPHRASE') && l.includes('.secrets-key/passphrase'))).toBe(true);
-  });
-
-  it('points non-master credentials at `agents secrets exec`', () => {
-    const lines = rcSecretWarningLines([
-      { file: '.zshrc', line: 5, name: 'NPM_TOKEN', isMasterPassphrase: false },
-    ]);
-    expect(lines.some((l) => l.includes('NPM_TOKEN') && l.includes('agents secrets exec'))).toBe(true);
-  });
-
-  it('never echoes a value (there is none to echo) and pluralizes correctly', () => {
-    const lines = rcSecretWarningLines([
-      { file: '.zshenv', line: 3, name: 'AGENTS_SECRETS_PASSPHRASE', isMasterPassphrase: true },
-      { file: '.zshrc', line: 5, name: 'NPM_TOKEN', isMasterPassphrase: false },
-    ]);
-    expect(lines[0]).toContain('2 credential-shaped exports');
   });
 });

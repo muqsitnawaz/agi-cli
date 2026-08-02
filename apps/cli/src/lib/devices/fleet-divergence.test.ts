@@ -115,17 +115,38 @@ describe('compareFleetInventories', () => {
       'zion',
     );
     drift = report.divergences.find((d) => d.kind === 'repo-drift');
-    expect(drift?.message).toContain('remote tree has uncommitted changes');
+    expect(drift?.message).toContain('box .agents tree has uncommitted changes');
 
-    // Symmetric: local baseline dirty while the remote is clean → still flagged, names local.
+    // Symmetric: the local baseline is dirty while the remote is clean. The row
+    // must be filed against the BASELINE — blaming the clean remote sends the
+    // user to the wrong machine, and `agents repo pull` there fixes nothing.
     const cleanRemote = inventory({ repos: { agents: repo({ head: 'aaaaaaaa', branch: 'main', dirty: false }) } });
     const dirtyLocal = inventory({ repos: { agents: repo({ head: 'aaaaaaaa', branch: 'main', dirty: true }) } });
     report = compareFleetInventories(
       [{ name: 'zion', inventory: dirtyLocal }, { name: 'box', inventory: cleanRemote }],
       'zion',
     );
-    drift = report.divergences.find((d) => d.kind === 'repo-drift');
-    expect(drift?.message).toContain('local tree has uncommitted changes');
+    const localDrift = report.divergences.filter((d) => d.kind === 'repo-drift');
+    expect(localDrift).toHaveLength(1);
+    expect(localDrift[0].device).toBe('zion');
+    expect(localDrift[0].message).toBe('zion .agents tree has uncommitted changes');
+  });
+
+  it('a dirty LOCAL tree is one finding, not one per remote it was compared against', () => {
+    const clean = inventory({ repos: { agents: repo({ head: 'aaaaaaaa', branch: 'main', dirty: false }) } });
+    const dirtyLocal = inventory({ repos: { agents: repo({ head: 'aaaaaaaa', branch: 'main', dirty: true }) } });
+    const report = compareFleetInventories(
+      [
+        { name: 'zion', inventory: dirtyLocal },
+        { name: 'box1', inventory: clean },
+        { name: 'box2', inventory: clean },
+        { name: 'box3', inventory: clean },
+      ],
+      'zion',
+    );
+    const drifts = report.divergences.filter((d) => d.kind === 'repo-drift');
+    expect(drifts).toHaveLength(1);
+    expect(drifts[0].device).toBe('zion');
   });
 
   it('reports no divergence when a compared device matches the baseline exactly', () => {

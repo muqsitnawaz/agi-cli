@@ -684,7 +684,9 @@ access control (that is 1Password/Vault; this tool is device-local first).
   failure) — those MUST surface.
 - **SEC-17 (SHOULD).** `agents doctor` SHOULD warn (name + line only, never the
   value) when a credential-shaped var is exported from a shell rc file, and point
-  the user at `agents secrets exec` (`lib/secrets/rc-hygiene.ts:16-17,157-179`).
+  the user at `agents secrets` (`lib/secrets/rc-hygiene.ts:16-17` for the scan;
+  the `rc-secret-export` finding in `lib/devices/doctor-findings.ts` for the
+  warning the user sees).
 
 #### 3.4 Authorization model
 
