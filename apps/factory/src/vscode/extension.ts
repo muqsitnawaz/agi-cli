@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { BUILT_IN_AGENTS, getBuiltInByKey, getBuiltInDefByTitle, getBuiltInByPrefix, STRATEGY_LAUNCH_AGENTS, modeFlagForAgent, AgentLaunchMode, RunStrategy, buildAgentLaunchCommand, wrapNativeAgentCommand, shquote } from '../core/agents';
-import { loadAutoLaunchPreferences, isAutoLaunchEnabled } from '../core/deviceAutoLaunch';
+import { loadAutoLaunchPreferences, isAutoLaunchEnabled, isAutoLaunchPreferred } from '../core/deviceAutoLaunch';
 import { parseSpawnRequest, SpawnRequest } from '../core/spawn';
 import {
   AgentConfig,
@@ -415,7 +415,12 @@ async function resolveBalancedHost(pool?: string[], agentKey?: string): Promise<
   const preferences = loadAutoLaunchPreferences();
   const fleet = devices
     .filter(d => isAutoLaunchEnabled(preferences, d.name))
-    .map(d => ({ name: d.name, online: !!d.online, running: 0 }));
+    .map(d => ({
+      name: d.name,
+      online: !!d.online,
+      running: 0,
+      preferred: isAutoLaunchPreferred(preferences, d.name),
+    }));
   const eligible = resolveBalancePool(fleet, { localName, pool }).filter(c => c.online);
   if (eligible.length === 0) {
     vscode.window.showInformationMessage('Balanced launch: no online device available — running locally.');

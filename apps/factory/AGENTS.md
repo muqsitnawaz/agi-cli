@@ -46,8 +46,8 @@ bash scripts/install.sh <version>   # Package .vsix and install to Cursor + Code
 Factory's auto-host selection reads per-device enable/prefer flags managed by the CLI (`agents devices enable|disable|prefer|unprefer <name>`). The store is `~/.agents/.history/devices/auto-launch.json`.
 
 - A **disabled** device is excluded from `New <Agent>` auto picks. It remains manually pickable via `New <Agent> (Pick Host)`.
-- A **preferred** device gets a rank boost in the auto pool, so it wins ties against otherwise-equivalent machines.
-- Defaults: every registered device is enabled and not preferred.
+- A **preferred** device gets a `PREFERENCE_BONUS` (20 pts, ≈ two running agents) shaved off its `hostScore`, so it wins ties against otherwise-equivalent machines but never outranks one that is genuinely swamped. The bonus lives in `hostScore` itself, so both ranking paths — the warm-cache pick and the balanced pool pick — apply it identically.
+- Defaults: every registered device is enabled and not preferred. An unregistered name is rejected by the CLI rather than written as a dead entry.
 
 Source of truth:
 - Persistence + CLI commands: `apps/cli/src/lib/devices/registry.ts` (`loadAutoLaunchPreferences`, `setAutoLaunchEnabled`, `setAutoLaunchPreferred`) and `apps/cli/src/commands/ssh.ts`.

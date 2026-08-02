@@ -18,8 +18,15 @@ function autoLaunchPath(): string {
 
 /**
  * Load auto-launch preferences written by `agents devices enable/disable/prefer`.
- * Missing or malformed file => empty map. Synchronous because callers need it
- * during ranking without awaiting another turn.
+ * Synchronous because callers need it during ranking without awaiting another turn.
+ *
+ * Corruption handling deliberately differs from the CLI's reader of this same
+ * file (`apps/cli/src/lib/devices/registry.ts loadAutoLaunchPreferences`, which
+ * throws): there, the user typed a command and can act on the error. Here, the
+ * caller is a launch the user just triggered, and a bad prefs file must not stop
+ * them getting a terminal — so this degrades to "every device enabled, none
+ * preferred" (the documented default) and says so on the extension log. It is a
+ * stated fallback to a defined state, not a silent swallow.
  */
 export function loadAutoLaunchPreferences(): Record<string, AutoLaunchPreference> {
   try {
