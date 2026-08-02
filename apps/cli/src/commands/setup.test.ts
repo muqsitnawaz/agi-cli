@@ -64,31 +64,59 @@ describe('agents setup secrets', () => {
   });
 
   it('makes future secrets create/import use the saved backend default', async () => {
+    const originalPassphrase = process.env.AGENTS_SECRETS_PASSPHRASE;
+    const originalNoAgent = process.env.AGENTS_SECRETS_NO_AGENT;
     process.env.AGENTS_SECRETS_PASSPHRASE = 'setup-test-passphrase';
+    process.env.AGENTS_SECRETS_NO_AGENT = '1';
 
-    const setupProgram = new Command();
-    setupProgram.exitOverride();
-    registerSetupCommand(setupProgram);
-    await setupProgram.parseAsync(['setup', 'secrets', '--backend', 'file', '--policy', 'daily'], {
-      from: 'user',
-    });
+    try {
+      const setupProgram = new Command();
+      setupProgram.exitOverride();
+      registerSetupCommand(setupProgram);
+      await setupProgram.parseAsync(['setup', 'secrets', '--backend', 'file', '--policy', 'daily'], {
+        from: 'user',
+      });
 
-    const { registerSecretsCommands } = await import('./secrets.js');
-    const { readBundle } = await import('../lib/secrets/bundles.js');
+      const { registerSecretsCommands } = await import('./secrets.js');
+      const { readBundle } = await import('../lib/secrets/bundles.js');
+      const { setKeychainBackendForTest } = await import('../lib/secrets/index.js');
+      const restoreBackend = setKeychainBackendForTest({
+        has: () => false,
+        get: (item: string) => { throw new Error(`missing test keychain item ${item}`); },
+        set: () => {},
+        delete: () => false,
+        list: () => [],
+      });
 
-    const createProgram = new Command();
-    createProgram.exitOverride();
-    registerSecretsCommands(createProgram);
-    await createProgram.parseAsync(['secrets', 'create', 'setup-default-create'], { from: 'user' });
-    expect(readBundle('setup-default-create')?.backend).toBe('file');
+      try {
+        const createProgram = new Command();
+        createProgram.exitOverride();
+        registerSecretsCommands(createProgram);
+        await createProgram.parseAsync(['secrets', 'create', 'setup-default-create'], { from: 'user' });
+        expect(readBundle('setup-default-create')?.backend).toBe('file');
 
-    const envPath = path.join(TEST_HOME, 'setup-default.env');
-    fs.writeFileSync(envPath, 'SETUP_DEFAULT=1\n');
-    const importProgram = new Command();
-    importProgram.exitOverride();
-    registerSecretsCommands(importProgram);
-    await importProgram.parseAsync(['secrets', 'import', 'setup-default-import', '--from', envPath], { from: 'user' });
-    expect(readBundle('setup-default-import')?.backend).toBe('file');
+        const envPath = path.join(TEST_HOME, 'setup-default.env');
+        fs.writeFileSync(envPath, 'SETUP_DEFAULT=1\n');
+        const importProgram = new Command();
+        importProgram.exitOverride();
+        registerSecretsCommands(importProgram);
+        await importProgram.parseAsync(['secrets', 'import', 'setup-default-import', '--from', envPath], { from: 'user' });
+        expect(readBundle('setup-default-import')?.backend).toBe('file');
+      } finally {
+        setKeychainBackendForTest(restoreBackend);
+      }
+    } finally {
+      if (originalPassphrase === undefined) {
+        delete process.env.AGENTS_SECRETS_PASSPHRASE;
+      } else {
+        process.env.AGENTS_SECRETS_PASSPHRASE = originalPassphrase;
+      }
+      if (originalNoAgent === undefined) {
+        delete process.env.AGENTS_SECRETS_NO_AGENT;
+      } else {
+        process.env.AGENTS_SECRETS_NO_AGENT = originalNoAgent;
+      }
+    }
   });
 });
 
