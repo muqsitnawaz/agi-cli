@@ -181,8 +181,33 @@ describe('devices auto-launch preferences', () => {
     return path.join(testHome, '.agents', '.history', 'devices', 'auto-launch.json');
   }
 
+  // These commands refuse a device that is not registered, so the fixture has
+  // to contain one — seeding the registry the CLI reads is the cheapest way to
+  // exercise the real command path end to end.
+  function registerDevice(name: string): void {
+    const dir = path.join(testHome, '.agents', '.history', 'devices');
+    fs.mkdirSync(dir, { recursive: true });
+    const now = new Date().toISOString();
+    fs.writeFileSync(
+      path.join(dir, 'registry.json'),
+      JSON.stringify({
+        [name]: {
+          name,
+          platform: 'macos',
+          shell: 'posix',
+          user: 'someone',
+          address: { via: 'tailscale', dnsName: `${name}.example.ts.net` },
+          auth: { method: 'key' },
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    );
+  }
+
   it('disable and enable persist through the CLI', () => {
     guardedHome();
+    registerDevice('zion');
 
     expect(run(['devices', 'disable', 'zion']).status).toBe(0);
     const disabled = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
@@ -195,6 +220,7 @@ describe('devices auto-launch preferences', () => {
 
   it('prefer and unprefer persist through the CLI', () => {
     guardedHome();
+    registerDevice('mac-mini');
 
     expect(run(['devices', 'prefer', 'mac-mini']).status).toBe(0);
     const preferred = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
@@ -205,10 +231,12 @@ describe('devices auto-launch preferences', () => {
     expect(unpreferred.devices['mac-mini']).toBeUndefined();
   });
 
-  it('rejects an invalid device name', () => {
+  it('refuses a device that is not registered instead of writing a dead entry', () => {
     guardedHome();
-    const r = run(['devices', 'disable', 'bad;name']);
+    registerDevice('zion');
+    const r = run(['devices', 'disable', 'zoin']);
     expect(r.status).toBe(1);
-    expect(r.stderr).toMatch(/Invalid device name/);
+    expect(r.stderr).toMatch(/Unknown device 'zoin'/);
+    expect(fs.existsSync(autoLaunchPath())).toBe(false);
   });
 });
