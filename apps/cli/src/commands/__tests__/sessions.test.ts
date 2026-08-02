@@ -531,7 +531,7 @@ describe('agents sessions', () => {
       // Table simplification dropped the "codex@<version>" suffix from the
       // agent column; still verify the codex session is discovered & listed.
       expect(output).toContain('codex');
-      expect(output).toContain('Show codex versions in the session l');
+      expect(output).toContain('Show codex versions in the session list');
       expect(output).toContain('abababab');
     } finally {
       fs.rmSync(tempHome, { recursive: true, force: true });
@@ -560,7 +560,7 @@ describe('agents sessions', () => {
       // Version suffix in the agent column was removed by the table
       // simplification. Still verify the session is discovered & listed.
       expect(output).toContain('gemini');
-      expect(output).toContain('Show gemini versions in the session');
+      expect(output).toContain('Show gemini versions in the session list');
       expect(output).toContain('f0f0f0f0');
     } finally {
       fs.rmSync(tempHome, { recursive: true, force: true });

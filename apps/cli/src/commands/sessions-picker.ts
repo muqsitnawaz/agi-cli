@@ -455,16 +455,19 @@ function formatCompactPreview(events: ReturnType<typeof parseSession>, session: 
 }
 
 function classifySessionTool(tool: string, command: string): string[] {
-  const value = `${tool} ${command}`.toLowerCase();
+  const toolName = tool.toLowerCase();
+  const commandUses = (surface: 'browser' | 'computer') => (
+    new RegExp(`\\b(?:agents|ag)\\b[^\\n;&|]*\\b${surface}\\b`).test(command.toLowerCase())
+  );
   const tags: string[] = [];
-  if (/\b(browser|webfetch|websearch|agents browser)\b/.test(value)) tags.push('browser');
-  if (/\b(computer|screenshot|click|type-text|agents computer)\b/.test(value)) tags.push('computer');
+  if (/browser|webfetch|websearch/.test(toolName) || commandUses('browser')) tags.push('browser');
+  if (/computer/.test(toolName) || commandUses('computer')) tags.push('computer');
   return tags;
 }
 
 function isSubAgentTool(tool: string, command: string): boolean {
   if (/^(Agent|Task)$/i.test(tool)) return true;
-  return /\bagents\s+(?:run|teams\s+add|cloud\s+run)\b/.test(command);
+  return /\b(?:agents|ag)\b[^\n;&|]*\b(?:run|cloud\s+run|teams\s+(?:add|start))\b/.test(command);
 }
 
 /**

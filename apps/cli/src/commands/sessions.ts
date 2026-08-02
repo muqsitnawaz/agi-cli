@@ -508,12 +508,12 @@ function ticketUrl(s: Pick<SessionMeta, 'ticketId' | 'prNumber' | 'prUrl'>): str
   return s.prNumber ? s.prUrl : undefined;
 }
 
-function linkTicketCell(s: Pick<SessionMeta, 'ticketId' | 'prNumber' | 'prUrl'>, label: string): string {
+export function linkTicketCell(s: Pick<SessionMeta, 'ticketId' | 'prNumber' | 'prUrl'>, label: string): string {
   const url = ticketUrl(s);
   return url && label.trim() !== '-' ? linkUrl(url, label) : label;
 }
 
-function linkCwdCell(s: Pick<SessionMeta, 'cwd' | '_remote'>, label: string): string {
+export function linkCwdCell(s: Pick<SessionMeta, 'cwd' | '_remote'>, label: string): string {
   return s.cwd && !s._remote ? linkPath(s.cwd, label) : label;
 }
 
@@ -1580,7 +1580,7 @@ function metaSignals(s: SessionMeta): Parameters<typeof signalBadges>[0] {
  * (tracker/PR ref, pulled out of the badge blob so refs align) is only rendered
  * when `showTicket` — otherwise a listing with no refs would waste a column of
  * dashes and needlessly truncate the topic. Worktree stays a trailing badge. */
-function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket = false, cols: PickerColumns = {}): string {
+export function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket = false, cols: PickerColumns = {}): string {
   const agentColor = colorAgent(session.agent);
   const when = formatRelativeTime(session.lastActivity ?? session.timestamp);
   const project = session.project || '-';
@@ -1614,14 +1614,14 @@ function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket =
   const machineW = cols.showMachine ? machineColW : 0;
   const ticketW = showTicket ? TICKET_W + 1 : 0;
   const wtW = wt ? stringWidth(wt) + 1 : 0;
-  const modelW = 13;
+  const modelW = cols.showModel ? (cols.modelWidth ?? PICKER_MODEL_MAX) : 0;
   const topicW = Math.max(16, terminalWidth() - (10 + 9 + 8 + modelW + 16) - glyphW - statusW - machineW - ticketW - wtW - stringWidth(when) - 1);
 
   return (
     chalk.white(padToWidth(truncateToWidth(session.shortId, 9), 10)) +
     agentColor(padToWidth(truncateToWidth(session.agent, 8), 9)) +
     chalk.yellow(padToWidth(truncateToWidth(session.version || '-', 7), 8)) +
-    chalk.yellow(padToWidth(truncateToWidth(modelLabel(session.model), modelW - 1), modelW)) +
+    (modelW ? chalk.yellow(padToWidth(truncateToWidth(modelLabel(session.model), modelW - 1), modelW)) : '') +
     machineCell +
     chalk.cyan(linkCwdCell(session, padToWidth(truncateToWidth(project, 14), 16))) +
     (glyph ? glyph + ' ' : '') +
@@ -2012,6 +2012,10 @@ export interface PickerColumns {
   /** Total width of the machine column, sized to the widest compacted hostname
    * in the pool (capped). Falls back to PICKER_MACHINE_W when absent. */
   machineWidth?: number;
+  /** Render the model column only when at least one row carries a model. */
+  showModel?: boolean;
+  /** Pool-sized model column width, including one trailing separator cell. */
+  modelWidth?: number;
   /** Render the ticket/PR column (only when at least one row carries a ref). */
   showTicket?: boolean;
   /**
@@ -2036,12 +2040,21 @@ export interface PickerColumns {
 const PICKER_MACHINE_W = 11;
 const PICKER_MACHINE_MIN = 8;
 const PICKER_MACHINE_MAX = 18;
+const PICKER_MODEL_MIN = 6;
+const PICKER_MODEL_MAX = 13;
 
 /** Column width that shows every compacted hostname in `machines` whole (one
  * trailing space for separation), bounded by MIN/MAX. */
 function machineColumnWidth(machines: string[], label: (m: string) => string): number {
   const widest = machines.reduce((w, m) => Math.max(w, stringWidth(label(m))), 0);
   return Math.min(PICKER_MACHINE_MAX, Math.max(PICKER_MACHINE_MIN, widest + 1));
+}
+
+function modelColumnWidth(sessions: SessionMeta[]): number {
+  const widest = sessions.reduce((width, session) => (
+    Math.max(width, session.model ? stringWidth(modelLabel(session.model)) : 0)
+  ), 0);
+  return Math.min(PICKER_MODEL_MAX, Math.max(PICKER_MODEL_MIN, widest + 1));
 }
 
 /**
@@ -2077,6 +2090,8 @@ export function pickerColumnsFor(sessions: SessionMeta[]): PickerColumns {
     showMachine: distinct.length > 1,
     machineLabel,
     machineWidth: machineColumnWidth(distinct, machineLabel),
+    showModel: sessions.some((s) => !!s.model),
+    modelWidth: modelColumnWidth(sessions),
     showTicket: sessions.some((s) => ticketLabel(s) !== ''),
   };
 }
