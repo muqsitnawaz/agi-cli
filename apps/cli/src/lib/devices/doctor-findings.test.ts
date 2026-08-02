@@ -269,7 +269,9 @@ describe('host CLIs (restored — `renderOverviewText` was its only text rendere
     const f = findings.find((x) => x.kind === 'host-cli-missing');
     expect(f?.severity).toBe('warning');
     expect(f?.message).toBe('2 declared host CLIs not installed (mq, fd)');
-    expect(f?.remediation).toBe('agents cli install mq …');
+    // Bare `agents cli install` installs every missing declared CLI; a second
+    // positional (or an ellipsis) would not be a runnable command.
+    expect(f?.remediation).toBe('agents cli install');
   });
 
   it('a single missing host CLI is named in full with its exact install command', () => {

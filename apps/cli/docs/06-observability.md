@@ -349,7 +349,7 @@ rendered, so a real machine shows ~16 rows rather than ~57:
 | One row per missing resource | `32 hooks missing (incl. 'a', 'b')` — a lone one is still named in full |
 | The same problem on 5 installed claudes | `claude (5 versions) …`, fixed by the agent-wide `agents doctor claude --fix` |
 | One orphan row per version | one `orphans` line per machine — `agents prune cleanup` clears them all |
-| One row per hook duplicated across version homes | one row per (agent, severity) — `agents sync <agent>@<authoritative> --yes` reconciles them all |
+| One row per hook duplicated across version homes | one row per (agent, severity) — `agents sync <agent>@all --yes` reconciles them all |
 | `sources changed since last sync` on a version that already listed its drift | nothing — the specific row already said it |
 | One critical per absent resource on a never-synced version | one critical → `agents sync <agent>@<version> --yes` |
 

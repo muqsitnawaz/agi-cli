@@ -133,7 +133,7 @@ takes ~57 rows down to ~16, and the rules are unit-pinned in
 - **Orphans are one line per machine.** They are cleanup-only and
   `agents prune cleanup` fixes every version at once.
 - **Duplicate version-home hooks are one line per (agent, severity).**
-  `agents sync <agent>@<authoritative> --yes` reconciles every copy at once, and a
+  `agents sync <agent>@all --yes` reconciles every copy at once, and a
   machine with five installed claudes otherwise emits two dozen identical rows.
 - **No vaguer restatement.** A version that just listed its drifted/missing
   resources gets no `sources changed since last sync` row on top, and a

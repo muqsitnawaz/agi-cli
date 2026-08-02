@@ -427,7 +427,12 @@ export function buildLocalFindings(input: LocalFindingInputs): DoctorFinding[] {
       message: missingClis.length === 1
         ? `host CLI '${missingClis[0]}' declared but not installed`
         : `${missingClis.length} declared host CLIs not installed (${missingClis.slice(0, 2).join(', ')}${missingClis.length > 2 ? ', …' : ''})`,
-      remediation: `agents cli install ${missingClis[0]}${missingClis.length > 1 ? ' …' : ''}`,
+      // `agents cli install <name>` takes ONE optional name; with none it installs
+      // every declared CLI that is missing (`commands/cli.ts:118,133-146`). A
+      // second positional — or a literal ellipsis — is not a runnable command.
+      remediation: missingClis.length === 1
+        ? `agents cli install ${missingClis[0]}`
+        : 'agents cli install',
     });
   }
   // A manifest the loader rejected declares a CLI that can never install — one
