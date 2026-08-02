@@ -36,6 +36,7 @@ import {
   pickBestVersion,
   sessionUsedPercent,
   buildLaunchCommand,
+  buildHostLaunchCommand,
   buildResumeInput,
   isVersionStillUsable,
 } from '../core/resumeInBest';
@@ -138,7 +139,9 @@ let defaultAgentTitle: string = CLAUDE_TITLE;
 let secondaryAgentTitle: string = CODEX_TITLE;
 let lastFocusedTerminal: vscode.Terminal | null = null;
 const STATUS_BAR_AGENTS_VIEW_TTL_MS = 30_000;
-const agentsViewCache = new Map<PrewarmAgentType, { fetchedAtMs: number; data: AgentsViewJsonAgent | null }>();
+// Keyed by agent, or `agent@host` for an offloaded terminal — account usage is
+// per machine, so a device's view must never be served from this box's entry.
+const agentsViewCache = new Map<string, { fetchedAtMs: number; data: AgentsViewJsonAgent | null }>();
 const statusBarMetaInFlight = new Set<string>();
 
 // BUILT_IN_AGENTS is now imported from ./agents
@@ -2836,11 +2839,16 @@ async function resumeSession(context: vscode.ExtensionContext) {
 
 async function fetchAgentsViewJson(
   agentKey: PrewarmAgentType,
-  opts: { quiet?: boolean; useCache?: boolean } = {}
+  opts: { quiet?: boolean; useCache?: boolean; host?: string } = {}
 ): Promise<AgentsViewJsonAgent | null> {
+  // Accounts and their remaining usage are PER MACHINE. A terminal offloaded to
+  // a device must be judged against that device's installs, not this box's, or
+  // the caller reads one machine's quota and acts on another's.
+  const host = opts.host;
+  const cacheKey = host ? `${agentKey}@${host}` : agentKey;
   const useCache = opts.useCache === true;
   if (useCache) {
-    const cached = agentsViewCache.get(agentKey);
+    const cached = agentsViewCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAtMs < STATUS_BAR_AGENTS_VIEW_TTL_MS) {
       return cached.data;
     }
@@ -2848,23 +2856,25 @@ async function fetchAgentsViewJson(
 
   const { runAgents } = await import('../core/agentsBin');
   try {
-    const { stdout } = await runAgents(`view ${agentKey} --json`, {
+    const target = host ? ` --host ${shquote(host)} --no-tty` : '';
+    const { stdout } = await runAgents(`view ${agentKey}${target} --json`, {
       maxBuffer: 5 * 1024 * 1024,
+      timeout: host ? 30_000 : undefined,
     });
     const parsed = JSON.parse(stdout) as AgentsViewJsonAgent;
     if (!parsed || !Array.isArray(parsed.versions)) {
       if (useCache) {
-        agentsViewCache.set(agentKey, { fetchedAtMs: Date.now(), data: null });
+        agentsViewCache.set(cacheKey, { fetchedAtMs: Date.now(), data: null });
       }
       return null;
     }
     if (useCache) {
-      agentsViewCache.set(agentKey, { fetchedAtMs: Date.now(), data: parsed });
+      agentsViewCache.set(cacheKey, { fetchedAtMs: Date.now(), data: parsed });
     }
     return parsed;
   } catch (err: any) {
     if (useCache) {
-      agentsViewCache.set(agentKey, { fetchedAtMs: Date.now(), data: null });
+      agentsViewCache.set(cacheKey, { fetchedAtMs: Date.now(), data: null });
     }
     if (!opts.quiet) {
       const msg = err?.stderr || err?.message || String(err);
@@ -2924,7 +2934,11 @@ export async function rotateTerminalToBestVersion(
     return { status: 'unsupported_agent' };
   }
 
-  const data = await fetchAgentsViewJson(agentKey);
+  // Read the accounts on the machine this terminal runs on. Rotating a device's
+  // exhausted account against THIS box's quota would pick a version the device
+  // may not even have installed.
+  const host = terminalEntry.host;
+  const data = await fetchAgentsViewJson(agentKey, { host });
   if (!data) return { status: 'view_unavailable' };
 
   // If the active terminal already sits on a version that still has usage,
@@ -2932,7 +2946,7 @@ export async function rotateTerminalToBestVersion(
   // a usable current version IS the best. Skip the terminal churn and the
   // /continue round-trip. Undefined version falls through to the legacy
   // switch path (we can't reason about untagged terminals).
-  const currentVersion = terminalEntry.version;
+  const currentVersion = terminalEntry.version ?? terminalEntry.statusVersion;
   if (currentVersion) {
     const currentVersionData = data.versions.find(v => v.version === currentVersion);
     if (isVersionStillUsable(currentVersionData)) {
@@ -2999,12 +3013,17 @@ export async function rotateTerminalToBestVersion(
   // back to reusing the old id and the generic ps/pgrep probe.
   const supportsSessionIdFlag = agentKey === 'claude';
   const newSessionId = supportsSessionIdFlag ? randomUUID() : oldSessionId;
-  const launchCmd = buildLaunchCommand(
-    builtIn.command,
-    best.version,
-    agentKey,
-    supportsSessionIdFlag ? newSessionId : null,
-  );
+  // An offloaded terminal has to be relaunched ON its device — the raw
+  // `claude@<version>` form would silently move the work to this box, which is
+  // the opposite of what a rotate is for.
+  const launchCmd = host
+    ? buildHostLaunchCommand(agentKey, best.version, host, supportsSessionIdFlag ? newSessionId : null)
+    : buildLaunchCommand(
+        builtIn.command,
+        best.version,
+        agentKey,
+        supportsSessionIdFlag ? newSessionId : null,
+      );
 
   const terminalId = terminals.nextId(builtIn.prefix);
   const title = buildTerminalTitle(agentConfig.title, undefined, context, newSessionId);
@@ -3023,17 +3042,22 @@ export async function rotateTerminalToBestVersion(
   terminals.setAgentType(terminal, agentKey);
   terminals.setVersion(terminal, best.version);
   terminals.setAccount(terminal, best.email);
+  if (host) terminals.setHost(terminal, host);
   startAutoLabelPollerForTerminal(terminal, context);
 
   // /continue takes the OLD session id (the transcript we want to load),
   // not the new one (which is just the container for the fresh process).
   // Prefer the /continue slash command if it's synced to this version's
   // home; otherwise inline the full instructions.
+  // Whether `/continue` is synced into the target version's home is a question
+  // about THAT machine's filesystem. For a remote rotate we cannot answer it
+  // from here, so we inline the instructions instead of gambling on a slash
+  // command the device may not have.
   const versionHomeCommand = path.join(
     os.homedir(), '.agents-system', 'versions', agentKey, best.version,
     'home', '.claude', 'commands', 'continue.md'
   );
-  const hasContinueCmd = fsSync.existsSync(versionHomeCommand);
+  const hasContinueCmd = !host && fsSync.existsSync(versionHomeCommand);
 
   let centralContinueMdBody: string | null = null;
   if (!hasContinueCmd) {
