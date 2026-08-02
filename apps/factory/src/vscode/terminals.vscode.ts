@@ -92,6 +92,7 @@ export interface EditorTerminal {
   account?: string;         // Resolved account email for this terminal when known
   statusVersion?: string;   // Display-only version from agents-cli metadata
   statusAccount?: string;   // Display-only account from agents-cli metadata
+  host?: string;            // Launch host; undefined means this extension host
   approvalStatus?: 'pending' | 'approved' | 'running' | 'complete'; // Swarm approval status
   autoLabelPollerId?: NodeJS.Timeout; // Poller for auto-label fetch (cleared once label is set)
   detached?: boolean;       // The client tab closed on a live tmux detach (SSH drop) but the
@@ -576,6 +577,11 @@ export function getSessionId(terminal: vscode.Terminal): string | undefined {
 export function getAgentType(terminal: vscode.Terminal): SessionAgentType | undefined {
   const entry = getByTerminal(terminal);
   return entry?.agentType;
+}
+
+export function setHost(terminal: vscode.Terminal, host: string | undefined): void {
+  const entry = getByTerminal(terminal);
+  if (entry) entry.host = host?.trim() || undefined;
 }
 
 // Message queue management
