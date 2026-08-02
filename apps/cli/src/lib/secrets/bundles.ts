@@ -1253,8 +1253,9 @@ export function resolveBundleEnv(bundle: SecretsBundle, _opts: ResolveBundleOpti
  * release flow) for no benefit — there is no prompt to suppress.
  *
  * A read in a macOS headless context resolves broker-only (agentOnly) and fails
- * fast with an actionable error instead of hijacking Touch ID. This generalizes
- * the per-caller pattern already used by the daemon (daemon.ts:readDaemonClaudeOAuthToken).
+ * fast with an actionable error instead of hijacking Touch ID. Callers pass
+ * `agentOnly: isHeadlessSecretsContext()` (e.g. account-token.ts, exec.ts) so a
+ * headless read never pops a Touch ID sheet nobody can answer.
  */
 export function isHeadlessSecretsContext(
   env: NodeJS.ProcessEnv = process.env,

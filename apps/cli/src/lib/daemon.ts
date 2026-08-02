@@ -19,11 +19,9 @@ import { JobScheduler } from './scheduler.js';
 import { MonitorEngine } from './monitors/engine.js';
 import { executeJobDetached, monitorRunningJobs } from './runner.js';
 import { detectOverdueJobs, notifyOverdue } from './overdue.js';
-import { notifyDesktop } from './menubar/notify-desktop.js';
 import { notifyRoutineStart, notifyRoutineFinish, notifyRoutineStartFailed } from './routine-notify.js';
 import { BrowserService } from './browser/service.js';
 import { BrowserIPCServer } from './browser/ipc.js';
-import { readAndResolveBundleEnv } from './secrets/bundles.js';
 import { redactSecrets } from './redact.js';
 import { getAgentsBinPath, getCliLaunch, BUN_VIRTUAL_ROOT } from './cli-entry.js';
 
@@ -790,10 +788,10 @@ export function writeOwnerOnlyServiceManifest(filePath: string, content: string)
  * Generate a macOS launchd plist for auto-starting the daemon.
  *
  * The plist never embeds the Claude OAuth token (RUSH-1759): a persisted service
- * manifest is a plaintext credential on disk even at 0600. The daemon instead
- * obtains the token at startup from the `claude` secrets bundle
- * (readDaemonClaudeOAuthToken, injected in runDaemon), so it stays in the
- * Keychain-backed secure store and never touches the unit file.
+ * manifest is a plaintext credential on disk even at 0600. The daemon injects no
+ * token of its own — every routine it spawns resolves the account's file-backed
+ * setup-token on the standard buildExecEnv path — so no credential ever touches
+ * the unit file.
  */
 export function generateLaunchdPlist(
   agentsBin: string = getAgentsBinPath(),
@@ -837,10 +835,10 @@ function systemdExecArg(value: string): string {
  * Generate a Linux systemd user unit for auto-starting the daemon.
  *
  * The unit never embeds the Claude OAuth token (RUSH-1759): a persisted service
- * manifest is a plaintext credential on disk even at 0600. The daemon instead
- * obtains the token at startup from the `claude` secrets bundle
- * (readDaemonClaudeOAuthToken, injected in runDaemon), so it stays in the secure
- * store and never touches the unit file.
+ * manifest is a plaintext credential on disk even at 0600. The daemon injects no
+ * token of its own — every routine it spawns resolves the account's file-backed
+ * setup-token on the standard buildExecEnv path — so no credential ever touches
+ * the unit file.
  */
 export function generateSystemdUnit(
   agentsBin: string = getAgentsBinPath(),
