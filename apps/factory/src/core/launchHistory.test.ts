@@ -69,3 +69,21 @@ test('LaunchHistoryRecorder serializes concurrent read-modify-write updates', as
 
   expect(stored['yosemite-s0']).toEqual({ launches: 2, successes: 2, lastLaunchAt: NOW });
 });
+
+test('LaunchHistoryRecorder continues after one persistence failure', async () => {
+  let stored: LaunchHistory = {};
+  let attempts = 0;
+  const recorder = new LaunchHistoryRecorder(
+    () => stored,
+    async (history) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('storage unavailable');
+      stored = history;
+    },
+  );
+
+  await expect(recorder.record('yosemite-s0', true, NOW - 1)).rejects.toThrow('storage unavailable');
+  await recorder.record('yosemite-s0', true, NOW);
+
+  expect(stored['yosemite-s0']).toEqual({ launches: 1, successes: 1, lastLaunchAt: NOW });
+});

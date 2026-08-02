@@ -37,10 +37,11 @@ export class LaunchHistoryRecorder {
   ) {}
 
   record(device: string, success: boolean, launchedAt = Date.now()): Promise<void> {
-    this.pending = this.pending.then(async () => {
+    const operation = this.pending.then(async () => {
       await this.save(recordLaunch(this.load(), device, success, launchedAt));
     });
-    return this.pending;
+    this.pending = operation.catch(() => {});
+    return operation;
   }
 }
 
