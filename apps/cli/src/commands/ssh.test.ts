@@ -12,6 +12,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const INDEX = path.join(REPO_ROOT, 'src', 'index.ts');
 
 let testHome = '';
+const ORIGINAL_DEVICES_DIR = process.env.AGENTS_DEVICES_DIR;
 
 // On macOS, seeding a bundle via `secrets create --backend file` stores its
 // metadata in the Keychain, which needs the signed `Agents CLI.app` helper.
@@ -29,10 +30,12 @@ const keychainHelperAvailable =
 afterEach(() => {
   if (testHome) fs.rmSync(testHome, { recursive: true, force: true });
   testHome = '';
+  process.env.AGENTS_DEVICES_DIR = ORIGINAL_DEVICES_DIR;
 });
 
 function guardedHome(): void {
   testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-devices-home-'));
+  process.env.AGENTS_DEVICES_DIR = path.join(testHome, '.agents', '.history', 'devices');
   const systemDir = path.join(testHome, '.agents', '.system');
   fs.mkdirSync(path.join(systemDir, '.git'), { recursive: true });
   fs.writeFileSync(
@@ -52,6 +55,7 @@ function run(args: string[], extraEnv: Record<string, string> = {}): { stdout: s
       USERPROFILE: testHome,
       AGENTS_NO_UPDATE_CHECK: '1',
       AGENTS_NO_USAGE_TRACK: '1',
+      AGENTS_DEVICES_DIR: process.env.AGENTS_DEVICES_DIR,
       ...extraEnv,
     },
   });
@@ -209,11 +213,13 @@ describe('devices auto-launch preferences', () => {
     guardedHome();
     registerDevice('zion');
 
-    expect(run(['devices', 'disable', 'zion']).status).toBe(0);
+    const disable = run(['devices', 'disable', 'zion']);
+    expect(disable.status).toBe(0);
     const disabled = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
     expect(disabled.devices.zion).toEqual({ enabled: false });
 
-    expect(run(['devices', 'enable', 'zion']).status).toBe(0);
+    const enable = run(['devices', 'enable', 'zion']);
+    expect(enable.status).toBe(0);
     const enabled = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
     expect(enabled.devices.zion).toBeUndefined();
   });
