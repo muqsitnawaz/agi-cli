@@ -154,22 +154,35 @@ function repoLabel(repo: 'agents' | 'system'): string {
   return repo === 'agents' ? '.agents' : '.system';
 }
 
+/** A repo divergence plus WHICH box owns it. `blame` decides the device the
+ *  finding is filed against, so the row lands on the machine a human has to go
+ *  fix. */
+interface RepoDrift {
+  detail: string;
+  blame: 'remote' | 'local';
+}
+
 /** Describe how a remote repo state diverges from the local baseline, or null
  *  when they match. Compares HEAD first (the load-bearing difference), then
- *  branch, then a dirty tree on either side (naming which side is dirty). */
-function describeRepoDrift(local: RepoState, remote: RepoState): string | null {
+ *  branch, then a dirty tree on either side.
+ *
+ *  HEAD and branch differences are symmetric — by convention the remote is the
+ *  one "diverged from the baseline" — but a dirty tree belongs to exactly one
+ *  box, and blaming the wrong one sends the user to a clean machine. */
+function describeRepoDrift(local: RepoState, remote: RepoState): RepoDrift | null {
   if (local.head && remote.head && local.head !== remote.head) {
-    return `HEAD ${remote.head} != local ${local.head}`;
+    return { detail: `repo diverged: HEAD ${remote.head} != local ${local.head}`, blame: 'remote' };
   }
   if (local.branch !== remote.branch) {
-    return `branch ${remote.branch ?? 'detached'} != local ${local.branch ?? 'detached'}`;
+    return {
+      detail: `repo diverged: branch ${remote.branch ?? 'detached'} != local ${local.branch ?? 'detached'}`,
+      blame: 'remote',
+    };
   }
-  // Flag a dirty tree on EITHER side (symmetric with HEAD/branch above), and name
-  // the side that has the uncommitted changes — the remote, or the local baseline.
   if (remote.dirty !== local.dirty) {
     return remote.dirty
-      ? 'remote tree has uncommitted changes'
-      : 'local tree has uncommitted changes';
+      ? { detail: 'tree has uncommitted changes', blame: 'remote' }
+      : { detail: 'tree has uncommitted changes', blame: 'local' };
   }
   return null;
 }
@@ -193,6 +206,9 @@ export function compareFleetInventories(
   const comparedDevices: string[] = [];
   const skippedDevices: string[] = [];
   const divergences: FleetDivergence[] = [];
+  /** Repos already reported as the BASELINE's problem — one dirty local tree is
+   *  one finding, not one per remote compared against. */
+  const localBlamed = new Set<'agents' | 'system'>();
 
   if (!baseline) {
     // No local baseline to compare against — record every remote as skipped so
@@ -281,15 +297,29 @@ export function compareFleetInventories(
       const remoteRepo = inv.repos[repo];
       if (!localRepo || !remoteRepo) continue; // one side isn't a readable repo
       const drift = describeRepoDrift(localRepo, remoteRepo);
-      if (drift) {
+      if (!drift) continue;
+      if (drift.blame === 'local') {
+        // The BASELINE owns this one. File it against the baseline, and only
+        // once: the local tree being dirty is a single fact about this machine,
+        // not one problem per remote we happened to compare against.
+        if (localBlamed.has(repo)) continue;
+        localBlamed.add(repo);
         divergences.push({
           kind: 'repo-drift',
-          device: remote.name,
+          device: baselineName,
           category: repo,
           name: repoLabel(repo),
-          message: `${remote.name} ${repoLabel(repo)} repo diverged: ${drift}`,
+          message: `${baselineName} ${repoLabel(repo)} ${drift.detail}`,
         });
+        continue;
       }
+      divergences.push({
+        kind: 'repo-drift',
+        device: remote.name,
+        category: repo,
+        name: repoLabel(repo),
+        message: `${remote.name} ${repoLabel(repo)} ${drift.detail}`,
+      });
     }
   }
 
