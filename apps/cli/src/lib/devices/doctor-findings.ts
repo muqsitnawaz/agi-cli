@@ -639,7 +639,10 @@ export function collapseAcrossVersions(
     const mergeable = f.agent && f.version && !isolated.has(`${f.agent}@${f.version}`);
     // A non-mergeable finding gets a unique key so it passes through untouched.
     const key = mergeable
-      ? `${f.device} ${f.agent} ${f.kind} ${f.severity} ${f.message}`
+      // `account` is part of the key: two versions with the SAME problem but
+      // DIFFERENT signed-in accounts are not one row — merging them would
+      // attribute every version to the first member's account.
+      ? `${f.device}\0${f.agent}\0${f.kind}\0${f.severity}\0${f.account ?? ''}\0${f.message}`
       : `${order.length}`;
     if (!groups.has(key)) { groups.set(key, []); order.push(key); }
     groups.get(key)!.push(f);
@@ -812,8 +815,36 @@ export function renderFindings(
   if (opts.header) lines.push(opts.header);
   lines.push('');
 
-  // ── CRITICAL section — all devices, worst-first (device order stable) ──
-  const criticals = findings.filter((f) => f.severity === 'critical');
+  // Group by device up front: the CRITICAL section orders its rows by the SAME
+  // worst-device-first ranking the per-computer blocks use, so the two sections
+  // agree and the worst machine's criticals lead.
+  const byDevice = new Map<string, DoctorFinding[]>();
+  for (const f of findings) {
+    (byDevice.get(f.device) ?? byDevice.set(f.device, []).get(f.device)!).push(f);
+  }
+  // Also include devices that have accounts but no findings (a clean box still
+  // needs its block + accounts line).
+  for (const device of Object.keys(accounts)) {
+    if (!byDevice.has(device)) byDevice.set(device, []);
+  }
+
+  const devices = Array.from(byDevice.keys()).sort((a, b) => {
+    const ra = deviceSeverityRank(byDevice.get(a)!);
+    const rb = deviceSeverityRank(byDevice.get(b)!);
+    if (rb !== ra) return rb - ra; // worst first
+    // Baseline (local) first among ties, then alphabetical.
+    if (a === opts.baseline) return -1;
+    if (b === opts.baseline) return 1;
+    return a.localeCompare(b);
+  });
+  const deviceOrder = new Map(devices.map((d, i) => [d, i]));
+
+  // ── CRITICAL section — all devices, worst device first, input order within ──
+  // Array.prototype.sort is stable, so equal device ranks keep the order the
+  // builders emitted — deterministic across runs.
+  const criticals = findings
+    .filter((f) => f.severity === 'critical')
+    .sort((a, b) => (deviceOrder.get(a.device) ?? 0) - (deviceOrder.get(b.device) ?? 0));
   lines.push(`${chalk.red('✗')} ${chalk.red('CRITICAL — needs you now')}  (${criticals.length})`);
   if (criticals.length === 0) {
     lines.push(`  ${chalk.green('✓')} ${chalk.gray('nothing critical across the fleet')}`);
@@ -837,26 +868,6 @@ export function renderFindings(
   }
 
   // ── by-computer section ──
-  const byDevice = new Map<string, DoctorFinding[]>();
-  for (const f of findings) {
-    (byDevice.get(f.device) ?? byDevice.set(f.device, []).get(f.device)!).push(f);
-  }
-  // Also include devices that have accounts but no findings (a clean box still
-  // needs its block + accounts line).
-  for (const device of Object.keys(accounts)) {
-    if (!byDevice.has(device)) byDevice.set(device, []);
-  }
-
-  const devices = Array.from(byDevice.keys()).sort((a, b) => {
-    const ra = deviceSeverityRank(byDevice.get(a)!);
-    const rb = deviceSeverityRank(byDevice.get(b)!);
-    if (rb !== ra) return rb - ra; // worst first
-    // Baseline (local) first among ties, then alphabetical.
-    if (a === opts.baseline) return -1;
-    if (b === opts.baseline) return 1;
-    return a.localeCompare(b);
-  });
-
   if (opts.fleet) {
     lines.push('');
     lines.push(chalk.gray('─── by computer ───'));

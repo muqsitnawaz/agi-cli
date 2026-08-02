@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildLocalFindings,
+  collapseAcrossVersions,
   fleetDivergenceToFindings,
   signInToFindings,
   remediationFor,
@@ -146,6 +147,30 @@ describe('de-noise — one root cause is one line', () => {
     expect(crits[0].version).toBeUndefined();
     // The agent-wide sweep heals every (non-isolated) version in one command.
     expect(crits[0].remediation).toBe('agents doctor claude --fix');
+  });
+
+  it('versions signed into DIFFERENT accounts never merge — a merged row would misattribute one', () => {
+    const findings = signInToFindings('boxA', {
+      claude: [
+        { version: '2.1.170', signedIn: false, account: 'work@x.com', provable: false },
+        { version: '2.1.181', signedIn: false, account: 'personal@y.com', provable: false },
+      ],
+    });
+    const collapsed = collapseAcrossVersions(findings, new Set());
+    expect(collapsed).toHaveLength(2);
+    expect(collapsed.map((f) => f.account).sort()).toEqual(['personal@y.com', 'work@x.com']);
+  });
+
+  it('versions sharing ONE account still merge', () => {
+    const findings = signInToFindings('boxA', {
+      claude: [
+        { version: '2.1.170', signedIn: false, account: 'me@x.com', provable: false },
+        { version: '2.1.181', signedIn: false, account: 'me@x.com', provable: false },
+      ],
+    });
+    const collapsed = collapseAcrossVersions(findings, new Set());
+    expect(collapsed).toHaveLength(1);
+    expect(collapsed[0].versions).toEqual(['2.1.170', '2.1.181']);
   });
 
   it('an ISOLATED copy never folds into a collapsed row — the sweep skips it', () => {
@@ -615,6 +640,24 @@ describe('renderFindings — exact layout', () => {
     // Both rows put the arrow at the same terminal column.
     const arrowCols = rows.map((l) => stringWidth(l.slice(0, l.indexOf('→'))));
     expect(arrowCols[0]).toBe(arrowCols[1]);
+  });
+
+  it('the CRITICAL section leads with the WORST device, not input order', () => {
+    // boxA has one critical, boxB has three — boxB's rows must come first even
+    // though boxA appears first in the input.
+    const crit = (device: string, agent: 'codex' | 'claude' | 'grok', msg: string): DoctorFinding =>
+      ({ severity: 'critical', kind: 'missing-hook', device, agent, version: '1.0', message: msg, remediation: 'x' });
+    const findings: DoctorFinding[] = [
+      crit('boxA', 'codex', 'a-only'),
+      crit('boxB', 'claude', 'b-one'),
+      crit('boxB', 'grok', 'b-two'),
+      crit('boxB', 'codex', 'b-three'),
+    ];
+    const out = stripAnsi(renderFindings(findings, {}, { fleet: true, baseline: 'boxA', header: 'h' }).join('\n'));
+    expect(out.indexOf('b-one')).toBeLessThan(out.indexOf('a-only'));
+    // Stable within a device: b-one, b-two, b-three keep their emitted order.
+    expect(out.indexOf('b-one')).toBeLessThan(out.indexOf('b-two'));
+    expect(out.indexOf('b-two')).toBeLessThan(out.indexOf('b-three'));
   });
 
   it('all-clear: no criticals, no warnings → ✓ lines only', () => {
