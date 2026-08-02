@@ -149,28 +149,19 @@ describe('de-noise — one root cause is one line', () => {
     expect(crits[0].remediation).toBe('agents doctor claude --fix');
   });
 
-  it('versions signed into DIFFERENT accounts never merge — a merged row would misattribute one', () => {
-    const findings = signInToFindings('boxA', {
-      claude: [
-        { version: '2.1.170', signedIn: false, account: 'work@x.com', provable: false },
-        { version: '2.1.181', signedIn: false, account: 'personal@y.com', provable: false },
-      ],
+  it('a collapsible row keyed on a DIFFERENT account stays separate; the same account merges', () => {
+    // `collapseAcrossVersions` is exported and generic, so pin its grouping
+    // contract directly: a merged row copies the first member wholesale, so two
+    // members that disagree on `account` must never become one row.
+    const row = (version: string, account: string): DoctorFinding => ({
+      severity: 'warning', kind: 'content-drift', device: 'boxA', agent: 'claude',
+      version, account, message: "plugin 'code' — mirror missing", remediation: '',
     });
-    const collapsed = collapseAcrossVersions(findings, new Set());
-    expect(collapsed).toHaveLength(2);
-    expect(collapsed.map((f) => f.account).sort()).toEqual(['personal@y.com', 'work@x.com']);
-  });
-
-  it('versions sharing ONE account still merge', () => {
-    const findings = signInToFindings('boxA', {
-      claude: [
-        { version: '2.1.170', signedIn: false, account: 'me@x.com', provable: false },
-        { version: '2.1.181', signedIn: false, account: 'me@x.com', provable: false },
-      ],
-    });
-    const collapsed = collapseAcrossVersions(findings, new Set());
-    expect(collapsed).toHaveLength(1);
-    expect(collapsed[0].versions).toEqual(['2.1.170', '2.1.181']);
+    expect(collapseAcrossVersions([row('2.1.170', 'work@x.com'), row('2.1.181', 'personal@y.com')], new Set()))
+      .toHaveLength(2);
+    const merged = collapseAcrossVersions([row('2.1.170', 'me@x.com'), row('2.1.181', 'me@x.com')], new Set());
+    expect(merged).toHaveLength(1);
+    expect(merged[0].versions).toEqual(['2.1.170', '2.1.181']);
   });
 
   it('an ISOLATED copy never folds into a collapsed row — the sweep skips it', () => {

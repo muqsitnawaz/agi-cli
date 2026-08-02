@@ -125,11 +125,15 @@ takes ~57 rows down to ~16, and the rules are unit-pinned in
   (`hook 'git-guard' missing`) and otherwise emits a count plus two examples
   (`32 hooks missing (incl. 'a', 'b')`). Never one row per resource.
 - **Per agent, one row across versions.** `collapseAcrossVersions` folds findings
-  with the same `(device, agent, kind, severity, message)` into a single row
-  carrying `versions`, rendered `claude (5 versions)`, and widens the remediation
-  to the agent-wide sweep. **Isolated copies are excluded** — `runFix` skips them,
-  so folding one in would print a command that leaves it broken; the caller passes
-  `isolatedVersions` from `isVersionIsolated`.
+  with the same `(device, agent, kind, severity, account, message)` into a single
+  row carrying `versions`, rendered `claude (5 versions)`, and widens the
+  remediation to the agent-wide sweep. Three exclusions, each because the widened
+  remediation would be wrong: **isolated copies** (`runFix` skips them, so the
+  sweep would leave one broken — the caller passes `isolatedVersions` from
+  `isVersionIsolated`); **findings with no agent** (their `version` is a repo
+  alias); and **logouts** (`NEVER_COLLAPSED`) — a login is inherently per-version,
+  there is no `@all` for it, and dropping the version falls back to the bare
+  native hint, which the shim points at the *default* version.
 - **Orphans are one line per machine.** They are cleanup-only and
   `agents prune cleanup --all` fixes every version at once — **`--all` is load
   bearing**: without it cleanup sweeps only each agent's default version

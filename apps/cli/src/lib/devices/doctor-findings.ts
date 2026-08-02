@@ -66,6 +66,12 @@ const LOGIN_SUBCOMMAND: Partial<Record<AgentId, string>> = {
   opencode: 'auth login',
 };
 
+/** Kinds whose fix is inherently PER VERSION, so a row collapsed across versions
+ *  could not carry a correct remediation. A login is the whole set: there is no
+ *  `@all` selector for it, and dropping the version falls back to the bare native
+ *  hint, which the shim points at the DEFAULT version. */
+const NEVER_COLLAPSED = new Set<FindingKind>(['logged-out', 'logout-unprovable']);
+
 function loginShape(agent: AgentId): 'subcommand' | 'in-tui' | 'on-launch' {
   if (LOGIN_SUBCOMMAND[agent]) return 'subcommand';
   return agent === 'claude' ? 'in-tui' : 'on-launch';
@@ -624,10 +630,19 @@ function execPolicyFinding(
  * go). Five identical `plugin 'code' — mirror missing` rows, one per installed
  * claude, is the same fact five times.
  *
- * Isolated copies never merge: the agent-wide sweep deliberately skips them
- * (`runFix`), so folding one in would print a command that leaves it broken.
- * Findings with no agent (repo-behind, rc-secret-export, …) never merge either —
- * their `version` field is an alias, not a version. Pure; input order is kept.
+ * Three things never merge, because for each of them the widened remediation
+ * would be wrong:
+ *  - **Isolated copies** — the agent-wide sweep deliberately skips them
+ *    (`runFix`), so a folded row would print a command that leaves one broken.
+ *  - **Findings with no agent** (repo-behind, rc-secret-export, …) — their
+ *    `version` field is an alias, not a version.
+ *  - **Logouts** ({@link NEVER_COLLAPSED}) — a login is inherently per-version:
+ *    the fix is `agents run <agent>@<version> -- login`, and there is no `@all`
+ *    equivalent. Dropping `version` would fall back to the bare native hint,
+ *    which the shim resolves to the DEFAULT version — logging into the wrong one
+ *    and leaving the finding to reappear.
+ *
+ * Pure; input order is kept.
  */
 export function collapseAcrossVersions(
   findings: DoctorFinding[],
@@ -636,7 +651,9 @@ export function collapseAcrossVersions(
   const groups = new Map<string, DoctorFinding[]>();
   const order: string[] = [];
   for (const f of findings) {
-    const mergeable = f.agent && f.version && !isolated.has(`${f.agent}@${f.version}`);
+    const mergeable = f.agent && f.version
+      && !isolated.has(`${f.agent}@${f.version}`)
+      && !NEVER_COLLAPSED.has(f.kind);
     // A non-mergeable finding gets a unique key so it passes through untouched.
     const key = mergeable
       // `account` is part of the key: two versions with the SAME problem but
