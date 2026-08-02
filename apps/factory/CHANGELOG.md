@@ -6,7 +6,9 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
-- **The Harness Roster's run-strategy control now reads and writes the config the CLI actually uses.** `agentInventory.ts` pointed at `~/.agents-system/agents.yaml` — a directory that was folded into `~/.agents/.system/` and no longer holds `agents.yaml` (the CLI reads `run.<agent>.strategy` from `~/.agents/agents.yaml`, `apps/cli/src/lib/state.ts`). Every read returned `{}`, so the roster showed the same fallback for every agent and every toggle wrote to a file nothing reads. The fallback was also wrong: it reported `pinned`, while a bare `agents run <agent>` with no configured strategy is `balanced` (`getConfiguredRunStrategy`, `apps/cli/src/lib/rotate.ts`). On a machine with `run.codex.strategy: available` set, the roster reported `pinned` for all five managed harnesses; it now reports `balanced / available / balanced / balanced / balanced`, matching the CLI exactly. Source: `apps/factory/src/core/agentInventory.ts`.
+## [0.9.301] - 2026-08-02
+
+- **The Harness Roster's run-strategy control now reads and writes the config the CLI actually uses.** `agentInventory.ts` pointed at `~/.agents-system/agents.yaml` — a directory that was folded into `~/.agents/.system/` and no longer holds `agents.yaml` (the CLI reads `run.<agent>.strategy` from `~/.agents/agents.yaml`, `apps/cli/src/lib/state.ts`). Every read returned `{}`, so the roster showed the same fallback for every agent and every toggle wrote to a file nothing reads. The fallback was also wrong: it reported `pinned`, while a bare `agents run <agent>` with no configured strategy is `balanced` (`getConfiguredRunStrategy`, `apps/cli/src/lib/rotate.ts`). On a machine with a `run.codex.strategy: available` override set, the roster reported `pinned` for all five managed harnesses; it now reports whatever `getConfiguredRunStrategy` resolves per agent (`balanced` for an unconfigured harness, `available` for that codex override), matching the CLI exactly. Source: `apps/factory/src/core/agentInventory.ts`.
 
 ## [0.9.300] - 2026-08-02
 
