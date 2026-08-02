@@ -280,6 +280,12 @@ async function probeFleetInventory(target: FleetTarget): Promise<FleetInventory 
  * `Object.keys(inv.agentVersions)` unconditionally and throws. Returning null
  * routes that device into the existing "older agents-cli / no inventory" path,
  * which is honest and already rendered, instead of aborting the whole fan-out.
+ *
+ * This validates EVERY field of {@link FleetInventory} that anything downstream
+ * reads — `resources`, `agentVersions`, `repos` and each optional `signIn` row.
+ * It was tightened four times during review, each round finding the next
+ * unvalidated layer, so treat partial validation here as a bug: a field added to
+ * the inventory must be checked here in the same change.
  */
 function asFleetInventory(value: unknown): FleetInventory | null {
   // `typeof [] === 'object'`, so a shallow object check is not enough: an array
@@ -306,11 +312,21 @@ function asFleetInventory(value: unknown): FleetInventory | null {
       && (x.head === null || typeof x.head === 'string')
       && typeof x.dirty === 'boolean');
   if (!isMap(v.repos) || !Object.values(v.repos).every(isRepoState)) return null;
-  // `signIn` is optional (older remotes omit it) but must be well-formed if sent.
+  // `signIn` is optional (older remotes omit it) but every FIELD must be
+  // well-formed if sent — not just `version`. `provable` and `signedIn` are read
+  // as booleans to decide a CRITICAL vs a hedged warning, so a remote sending
+  // `provable: "yes"` would print a logged-out critical for a signed-in version,
+  // and a non-string `account` would render straight into the accounts line.
   if (v.signIn !== undefined) {
     if (!isMap(v.signIn)) return null;
+    const isSignInRow = (r: unknown): boolean =>
+      isMap(r)
+      && typeof r.version === 'string'
+      && typeof r.signedIn === 'boolean'
+      && typeof r.provable === 'boolean'
+      && (r.account === null || typeof r.account === 'string');
     const rowsOk = Object.values(v.signIn).every(
-      (rows) => Array.isArray(rows) && rows.every((r) => isMap(r) && typeof r.version === 'string'),
+      (rows) => Array.isArray(rows) && rows.every(isSignInRow),
     );
     if (!rowsOk) return null;
   }
