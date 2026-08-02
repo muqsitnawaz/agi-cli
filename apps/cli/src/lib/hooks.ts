@@ -152,12 +152,117 @@ function isStaleSiblingVersionCommand(
   return id !== null && id.agent === current.agent && id.version !== current.version;
 }
 
-import { getEffectiveHome, getVersionHomePath, listInstalledVersions } from './versions.js';
+function hookResourceName(command: string): string {
+  const withoutArgs = command.trim().split(/\s+/)[0];
+  return path.basename(withoutArgs).replace(/\.[^.]+$/, '');
+}
+
+/**
+ * Collapse version-scoped registrations by logical resource identity rather
+ * than absolute command path. When the same resource is present in several
+ * homes, the active home's command wins even if it appears later. Commands
+ * outside version homes are user-owned and remain untouched.
+ */
+export function deduplicateVersionHookCommands(
+  commands: string[],
+  activeVersionHome: string,
+): string[] {
+  const active = versionHomeIdentity(activeVersionHome);
+  if (!active) return [...commands];
+
+  const selected = new Map<string, { command: string; active: boolean }>();
+  const passthrough: string[] = [];
+  for (const command of commands) {
+    const identity = versionHomeIdentity(command);
+    if (!identity || identity.agent !== active.agent) {
+      passthrough.push(command);
+      continue;
+    }
+    const key = `${identity.agent}\0${hookResourceName(command)}`;
+    const candidateIsActive = identity.version === active.version;
+    const prior = selected.get(key);
+    if (!prior || (!prior.active && candidateIsActive)) {
+      selected.set(key, { command, active: candidateIsActive });
+    }
+  }
+  return [...passthrough, ...Array.from(selected.values(), ({ command }) => command)];
+}
+
+import { getEffectiveHome, getVersionHomePath, listInstalledVersions, resolveVersion } from './versions.js';
 import type { AgentId, InstalledHook, ManifestHook } from './types.js';
 import { generateHookShim, getHookShimPath, isValidHookShimName, parseCacheConfig, removeHookShim } from './hooks/cache.js';
 import { getHookShimsDir } from './state.js';
 
 export type HookEntry = { name: string; scriptPath: string; dataFile?: string };
+
+export interface VersionHookCopy {
+  agent: AgentId;
+  version: string;
+  name: string;
+  path: string;
+  hash: string;
+  active: boolean;
+}
+
+export interface DuplicateVersionHook {
+  agent: AgentId;
+  name: string;
+  kind: 'duplicate' | 'drift';
+  authoritative: VersionHookCopy;
+  copies: VersionHookCopy[];
+}
+
+function hookContentHash(scriptPath: string): string {
+  return crypto.createHash('sha256').update(fs.readFileSync(scriptPath)).digest('hex');
+}
+
+/**
+ * Inspect every installed hooks-capable harness without assuming a native
+ * settings format. Same-name copies with one content hash are installation
+ * noise; multiple hashes are drift. The active version is always selected as
+ * the authoritative copy when it participates in the group.
+ */
+export function inspectDuplicateVersionHooks(cwd = process.cwd()): DuplicateVersionHook[] {
+  const byResource = new Map<string, VersionHookCopy[]>();
+  for (const { agent, version } of iterHooksCapableVersions()) {
+    const activeVersion = resolveVersion(agent, cwd);
+    for (const entry of listHooksInVersionHome(agent, version)) {
+      let hash: string;
+      try {
+        hash = hookContentHash(entry.scriptPath);
+      } catch {
+        continue;
+      }
+      const copy: VersionHookCopy = {
+        agent,
+        version,
+        name: entry.name,
+        path: entry.scriptPath,
+        hash,
+        active: version === activeVersion,
+      };
+      const key = `${agent}\0${entry.name}`;
+      const copies = byResource.get(key) ?? [];
+      copies.push(copy);
+      byResource.set(key, copies);
+    }
+  }
+
+  const findings: DuplicateVersionHook[] = [];
+  for (const copies of byResource.values()) {
+    if (copies.length < 2) continue;
+    copies.sort((a, b) => a.version.localeCompare(b.version, undefined, { numeric: true }));
+    const authoritative = copies.find((copy) => copy.active) ?? copies[copies.length - 1];
+    findings.push({
+      agent: authoritative.agent,
+      name: authoritative.name,
+      kind: new Set(copies.map((copy) => copy.hash)).size === 1 ? 'duplicate' : 'drift',
+      authoritative,
+      copies,
+    });
+  }
+  return findings.sort((a, b) => `${a.agent}/${a.name}`.localeCompare(`${b.agent}/${b.name}`));
+}
 
 /**
  * Resolve the command path to register for a hook.
@@ -1546,8 +1651,13 @@ function registerHooksForClaude(
       hooks?: Array<{ type: string; command: string; timeout?: number }>;
     }>) {
       if (!group.hooks) continue;
+      const selectedCommands = new Set(deduplicateVersionHookCommands(
+        group.hooks.map((hook) => hook.command),
+        versionHome,
+      ));
       group.hooks = group.hooks.filter(
         (h) =>
+          selectedCommands.has(h.command) &&
           (!isManagedHookCommand(h.command, managedPrefixes) || currentManifestPaths.has(h.command)) &&
           !isStaleSiblingVersionCommand(h.command, currentVh)
       );
@@ -1733,8 +1843,13 @@ function registerHooksForCodex(
   for (const eventGroups of Object.values(hooksFile.hooks)) {
     for (const group of eventGroups) {
       if (!group.hooks) continue;
+      const selectedCommands = new Set(deduplicateVersionHookCommands(
+        group.hooks.map((hook) => hook.command),
+        versionHome,
+      ));
       group.hooks = group.hooks.filter(
         (h) =>
+          selectedCommands.has(h.command) &&
           (!isManagedHookCommand(h.command, managedPrefixes) || currentManifestPaths.has(h.command)) &&
           !isStaleSiblingVersionCommand(h.command, currentVh)
       );

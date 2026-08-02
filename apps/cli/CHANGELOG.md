@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+- Deduplicate same-name hook registrations by logical resource identity across
+  installed version homes, preferring the active version's copy. `agents doctor`
+  now reports identical copies as warnings and same-name content drift as a
+  critical finding, including every affected version (RUSH-2077).
+
 ## 1.20.81
 
 - **Generic `--device all` / `--host all` fleet fan-out for every fleet-aware

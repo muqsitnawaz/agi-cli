@@ -55,7 +55,7 @@ import {
   type ResourceDiff,
   type VersionResourceReport,
 } from '../lib/doctor-diff.js';
-import { checkVersionHookWiring, registerHooksToSettings, type HookWiringReport } from '../lib/hooks.js';
+import { checkVersionHookWiring, inspectDuplicateVersionHooks, registerHooksToSettings, type DuplicateVersionHook, type HookWiringReport } from '../lib/hooks.js';
 import { isVersionIsolated } from '../lib/versions.js';
 import { computeDrift, checkSyncStatus, countOrphans, computeSourceBehind, type SyncStatusRow, type OrphanRow } from '../lib/drift.js';
 import { readAuthHealthCache, summarizeHostAuth } from '../lib/auth-health.js';
@@ -132,11 +132,12 @@ function renderOverviewText(
   hostClis: ReturnType<typeof listCliStatus>,
   signIn: Record<string, Pick<AccountInfo, 'signedIn' | 'email' | 'accountId'>>,
   repoBehindMarkers: FetchStatusMarker[],
+  duplicateHooks: DuplicateVersionHook[],
 ): void {
   // Triaged health banner FIRST, so a user running bare `agents doctor` sees what
   // is unhealthy, why it matters, and the exact fix before scrolling the detail
   // sections below. Same triage model as target mode, aggregated across versions.
-  const overviewHealth = computeOverviewHealth(syncRows, orphanRows, repoBehindMarkers);
+  const overviewHealth = computeOverviewHealth(syncRows, orphanRows, repoBehindMarkers, duplicateHooks);
   console.log(chalk.bold('Health'));
   renderHealthBlock(overviewHealth, {
     healthySummary: syncRows.length
@@ -989,9 +990,28 @@ export function computeOverviewHealth(
   syncRows: SyncStatusRow[],
   orphanRows: OrphanRow[],
   repoBehindMarkers: FetchStatusMarker[],
+  duplicateHooks: DuplicateVersionHook[] = [],
 ): DoctorVerdict {
   const issues: VerdictIssue[] = [];
   const pretty = (agent: string, version: string) => `${AGENT_NAMES[agent] || agent}@${version}`;
+
+  // critical/warning: same hook resource materialized in several version homes.
+  // Different content is more severe because a stale copy can disagree with
+  // the active gate; byte-identical copies are noise and duplicate runtime cost.
+  for (const finding of duplicateHooks) {
+    const versions = finding.copies.map((copy) => copy.version).join(', ');
+    const active = finding.authoritative.version;
+    const drift = finding.kind === 'drift';
+    issues.push({
+      severity: drift ? 'critical' : 'warning',
+      category: drift ? 'duplicate-hook-drift' : 'duplicate-hook',
+      subject: `${finding.agent}/${finding.name}`,
+      impact: `${drift ? 'different content' : 'identical content'} across versions ${versions}; ${active} is authoritative`,
+      fix: `agents sync ${finding.agent}@${active} --yes`,
+      text: `${finding.name} ${drift ? 'drift' : 'duplicated'} across ${versions}`,
+      color: drift ? 'red' : 'yellow',
+    });
+  }
 
   // critical: unwired hooks / broken settings.json per version
   for (const row of syncRows) {
@@ -1605,6 +1625,7 @@ export function registerDoctorCommand(program: Command): void {
         const orphanRows = countOrphans();
         const hostClis = listCliStatus(cwd);
         const repoBehindMarkers = readRepoBehindMarkers();
+        const duplicateHooks = inspectDuplicateVersionHooks(cwd);
         // Advisory login state per installed agent (file-based getAccountInfo,
         // no home → the account-global/active credential). Best-effort: a probe
         // failure just leaves that agent's badge as "logged out".
@@ -1633,7 +1654,8 @@ export function registerDoctorCommand(program: Command): void {
             // Triaged overview health — severity/category/subject/impact/fix per
             // finding, aggregated across versions. Additive; existing consumers
             // reading `sync`/`orphans`/`repos` are unaffected.
-            health: computeOverviewHealth(syncRows, orphanRows, repoBehindMarkers),
+            health: computeOverviewHealth(syncRows, orphanRows, repoBehindMarkers, duplicateHooks),
+            duplicateHooks,
             // This host's harness inventory — installed resources per kind,
             // installed version ids per agent, and `.agents`/`.system` repo
             // state — so `agents doctor --devices` can compare presence across
@@ -1661,7 +1683,7 @@ export function registerDoctorCommand(program: Command): void {
           }, null, 2));
           return;
         }
-        renderOverviewText(clis, syncRows, orphanRows, hostClis, signIn, repoBehindMarkers);
+        renderOverviewText(clis, syncRows, orphanRows, hostClis, signIn, repoBehindMarkers, duplicateHooks);
         // Point at the interactive reconcile when anything is out of sync — the
         // report shouldn't be a dead end. `agents status` runs the unified
         // home-reading engine and offers to sync (opt-in, never auto-fires here).
