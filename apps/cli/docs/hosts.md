@@ -413,6 +413,15 @@ guarantee (see Context, below).
 - `--remote-cwd <dir>` is the explicit escape hatch — a literal remote path used
   verbatim (never re-rooted). Precedence: `--remote-cwd` > `--project`/`--cwd`;
   `--project` is mutually exclusive with `--cwd`/`--remote-cwd`.
+- **With none of them, the run mirrors your local cwd** (`deriveMirroredCwd`): a
+  cwd under the local home is re-rooted onto the remote home, so launching from
+  `~/src/x` lands the agent in the host's `~/src/x` rather than its bare `$HOME`.
+  This is the fleet layout where every box holds the same checkout at the same
+  home-relative path. A mirror is best-effort — a host without that directory
+  falls back to its home rather than failing the run — whereas an explicit
+  `--cwd`/`--remote-cwd` you named is never softened: a missing one fails the
+  `cd`. A cwd outside the local home is not mirrored at all, since a path like
+  `/opt/thing` says nothing about the target's filesystem.
 
 Workspace (where the run executes) is a deliberate scoping choice — see Open
 Questions. Phase 1 default: a caller-specified `--remote-cwd` (or the repo's

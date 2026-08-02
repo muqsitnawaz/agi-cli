@@ -871,3 +871,53 @@ export function groupByHost(
   }
   return groups;
 }
+
+/** The two label-bearing fields of one `agents sessions <id> --json` record. */
+export interface SessionLabelSource {
+  /** The session's persisted name, when it has a real one. */
+  label: string | null;
+  /** The session's first user message — the summarizer's input. */
+  topic: string | null;
+}
+
+/**
+ * Pull the label inputs out of `agents sessions <id> --json`.
+ *
+ * A tab whose agent runs on another machine has no local transcript to read, so
+ * this is the only way it can ever show anything but the bare agent prefix. The
+ * CLI already resolves both fields on whichever host owns the session.
+ *
+ * `label` is dropped when it is Claude's derived `<dirname>-<n>` placeholder —
+ * that names the repo, not the work, and surfacing it would also stop the caller
+ * from falling through to the summarizer (same rule as readClaudeSessionName).
+ */
+export function parseSessionLabelSource(rawJson: string): SessionLabelSource | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(rawJson);
+  } catch {
+    return null;
+  }
+  if (!data || typeof data !== 'object') return null;
+  const session = (data as Record<string, unknown>).session;
+  if (!session || typeof session !== 'object') return null;
+  const s = session as Record<string, unknown>;
+  const label = typeof s.label === 'string' && s.label.trim() ? s.label.trim() : null;
+  const topic = typeof s.topic === 'string' && s.topic.trim() ? s.topic.trim() : null;
+  const cwd = typeof s.cwd === 'string' ? s.cwd : '';
+  return { label: label && isDerivedSessionName(label, cwd) ? null : label, topic };
+}
+
+/**
+ * True for Claude's auto-derived `<dirname>-<n>` session name (e.g. a session in
+ * `~/src/agents-cli` named "agents-cli-55").
+ *
+ * Anchored on the session's own cwd rather than a shape like `<word>-<digits>`,
+ * which would also swallow a real ticket-style title ("RUSH-2058") and silently
+ * replace it with a summarized one.
+ */
+export function isDerivedSessionName(name: string, cwd: string): boolean {
+  const dir = cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop();
+  if (!dir) return false;
+  return new RegExp(`^${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d+$`).test(name);
+}

@@ -286,6 +286,35 @@ describe('buildVersionedResumeCommand', () => {
     expect(buildVersionedResumeCommand('codex', 'def456', '0.124.0')).toBe('codex@0.124.0 resume def456');
     expect(buildVersionedResumeCommand('cursor', 'ghi789', '1.2.3')).toBe('cursor-agent@1.2.3 --resume=ghi789');
   });
+
+  test('routes an offloaded session back to its own host instead of resuming locally', () => {
+    // The transcript lives on the device; `claude -r <id>` here would start a
+    // fresh LOCAL agent against an id this machine has never seen.
+    expect(buildVersionedResumeCommand('claude', 'abc123', undefined, 'yosemite-s1')).toBe(
+      "agents run claude --interactive --host 'yosemite-s1' --resume abc123",
+    );
+  });
+
+  test('keeps the version pin on a host-routed resume', () => {
+    expect(buildVersionedResumeCommand('claude', 'abc123', '2.1.113', 'yosemite-s0')).toBe(
+      "agents run claude@2.1.113 --interactive --host 'yosemite-s0' --resume abc123",
+    );
+  });
+
+  test('host-routes every prewarmable agent, not just Claude', () => {
+    expect(buildVersionedResumeCommand('codex', 'def456', undefined, 'zion')).toBe(
+      "agents run codex --interactive --host 'zion' --resume def456",
+    );
+    expect(buildVersionedResumeCommand('gemini', 'ghi789', undefined, 'zion')).toBe(
+      "agents run gemini --interactive --host 'zion' --resume ghi789",
+    );
+  });
+
+  test('quotes a device name so it cannot break out of the command', () => {
+    expect(buildVersionedResumeCommand('claude', 'abc123', undefined, "a'; rm -rf /; #")).toBe(
+      `agents run claude --interactive --host 'a'\\''; rm -rf /; #' --resume abc123`,
+    );
+  });
 });
 
 describe('supportsPrewarming', () => {

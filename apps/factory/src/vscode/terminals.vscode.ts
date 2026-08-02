@@ -87,6 +87,10 @@ export interface EditorTerminal {
   pid?: number;             // Shell process ID
   messageQueue: string[];   // Queued messages to send after terminal ready
   sessionId?: string;       // CLI session ID (for resume, history reading)
+  host?: string;            // Device the agent runs on when offloaded via `agents run --host`;
+                            // undefined for a local tab. The session's transcript lives on THAT
+                            // machine, so every by-session lookup (label, preview, resume) has to
+                            // route through `--host <name>` instead of the local filesystem.
   agentType?: SessionAgentType; // Agent type for session operations
   version?: string;         // Pinned agent version ("2.1.113"); undefined when unknown
   account?: string;         // Resolved account email for this terminal when known
@@ -147,6 +151,8 @@ export interface ClosedSession {
   terminalId: string;
   prefix: string;
   sessionId?: string;
+  /** Device the closed session ran on, so reopening resumes it there. */
+  host?: string;
   label?: string;
   agentType?: SessionAgentType;
   version?: string;
@@ -541,6 +547,17 @@ export function adoptShellAsAgent(
   schedulePersist();
   maybeRegisterWithSessionTracker(terminal, agentType, entry.sessionId);
   return true;
+}
+
+/** Record the device an offloaded terminal runs on (see EditorTerminal.host). */
+export function setHost(terminal: vscode.Terminal, host: string): void {
+  const entry = getByTerminal(terminal);
+  if (entry) {
+    entry.host = host;
+    schedulePersist();
+  } else {
+    console.error(`[TERMINALS] FAILED to set host - terminal "${terminal.name}" not found in registry.`);
+  }
 }
 
 export function setVersion(terminal: vscode.Terminal, version: string): void {
@@ -1340,6 +1357,7 @@ export function buildPersistedSessions(): sessionsPersist.PersistedSession[] {
       terminalId: entry.id,
       prefix: entry.agentConfig.prefix,
       sessionId: entry.sessionId,
+      host: entry.host,
       label: entry.label,
       agentType: entry.agentType,
       version: entry.version,
