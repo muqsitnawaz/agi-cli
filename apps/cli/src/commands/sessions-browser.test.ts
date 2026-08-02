@@ -7,6 +7,7 @@ import {
   normalizeDeviceSeed,
   activeBrowserSeed,
   bareBrowserSeed,
+  buildInitialFilter,
   liveRowKey,
   indexLiveRows,
   liveSessionToMeta,
@@ -74,6 +75,14 @@ describe('browserFilterToArgv — the human↔agent contract', () => {
       '--all',
       '--since',
       '7d',
+    ]);
+  });
+
+  it('round-trips the team filter as --in-team', () => {
+    expect(browserFilterToArgv({ ...base, team: 'redesign' })).toEqual([
+      'sessions',
+      '--in-team',
+      'redesign',
     ]);
   });
 
@@ -166,6 +175,86 @@ describe('bareBrowserSeed — the bare-listing call-site filter', () => {
     expect(bareBrowserSeed({ all: true }).window).toBeUndefined();
     // an explicit --since still wins over --all's all-time default
     expect(bareBrowserSeed({ all: true, since: '7d' }).window).toBe('7d');
+  });
+});
+
+describe('bareBrowserSeed — an explicit --device scope', () => {
+  it('forces all-dirs scope so a peer\'s rows are not filtered away', () => {
+    // Every fetched row is the peer's, and no peer cwd sits under OUR
+    // process.cwd() — with the default 'repo' scope the browser renders empty.
+    expect(bareBrowserSeed({ host: ['zion'] }).projectScope).toBe('all');
+    expect(bareBrowserSeed({ host: ['zion', 'mac-mini'] }).projectScope).toBe('all');
+  });
+
+  it('seeds the device chip only when the scope names exactly one host', () => {
+    expect(bareBrowserSeed({ host: ['user@Zion.local'] }).device).toBe('zion');
+    // Two hosts: seeding the first would narrow the view to it and hide the other.
+    expect(bareBrowserSeed({ host: ['zion', 'mac-mini'] }).device).toBeUndefined();
+    expect(bareBrowserSeed({}).device).toBeUndefined();
+  });
+
+  it('leaves the no-host behaviour untouched', () => {
+    expect(bareBrowserSeed({}).projectScope).toBe('repo');
+    expect(bareBrowserSeed({}).window).toBe('30d');
+  });
+
+  it('seeds the team filter from --in-team', () => {
+    expect(bareBrowserSeed({ inTeam: 'redesign' }).team).toBe('redesign');
+    expect(bareBrowserSeed({}).team).toBeUndefined();
+  });
+
+  it('widens scope and window for --in-team, since a team outlives both defaults', () => {
+    // The browser is the path a human actually reaches, so seeding the filter
+    // without widening left the interactive default hiding exactly the rows the
+    // flag exists to surface: teammates run in their own worktrees (a different
+    // cwd), and the team itself is often older than the 30-day window.
+    const seed = bareBrowserSeed({ inTeam: 'redesign' });
+    expect(seed.projectScope).toBe('all');
+    expect(seed.window).toBeUndefined();
+  });
+
+  it('lets an explicit --since still bound an --in-team view', () => {
+    expect(bareBrowserSeed({ inTeam: 'redesign', since: '7d' }).window).toBe('7d');
+  });
+});
+
+describe('buildInitialFilter — the seed must survive into the live filter', () => {
+  // The seed is copied field-by-field, and every field is optional, so a dropped
+  // one is invisible to the compiler and silent at runtime: `team` was omitted
+  // here, which made --in-team a no-op interactively while the scope half of the
+  // same seed still applied — the browser opened wide and looked filtered.
+  it('carries every seeded field through, not just the ones with defaults', () => {
+    const seed = bareBrowserSeed({ inTeam: 'redesign', agent: 'codex', host: ['zion'] });
+    const filter = buildInitialFilter(seed);
+
+    expect(filter.team).toBe('redesign');
+    expect(filter.agent).toBe('codex');
+    expect(filter.device).toBe('zion');
+    expect(filter.projectScope).toBe('all');
+    expect(filter.window).toBeUndefined();
+  });
+
+  it('loses no key of the seed', () => {
+    // Guards the next filter field someone adds: if the seed sets it and the
+    // filter doesn't carry it, this fails without anyone having to remember.
+    const seed = bareBrowserSeed({ inTeam: 'redesign', agent: 'codex', host: ['zion'], teams: true });
+    const filter = buildInitialFilter(seed) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(seed)) {
+      expect({ key, value: filter[key] }).toEqual({ key, value });
+    }
+  });
+
+  it('applies its own defaults only where the seed is silent', () => {
+    const filter = buildInitialFilter({});
+    expect(filter.running).toBe(false);
+    expect(filter.teams).toBe(false);
+    expect(filter.projectScope).toBe('repo');
+    expect(filter.window).toBe('30d');
+    expect(filter.team).toBeUndefined();
+  });
+
+  it('honors an explicit undefined window as all-time', () => {
+    expect(buildInitialFilter({ window: undefined }).window).toBeUndefined();
   });
 });
 

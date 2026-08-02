@@ -80,6 +80,7 @@ import { buildPreview as buildSessionPreview } from './sessions-picker.js';
 import { parseExecEnv } from '../lib/exec.js';
 import { checkRunAccountReadiness, type AccountReadiness } from '../lib/rotate.js';
 import { teamPicker, printTeamTable, type TeamRow } from './teams-picker.js';
+import { teamSpawners, type TeamSpawner } from '../lib/session/db.js';
 import { itemPicker } from '../lib/picker.js';
 import type { AgentProcess } from '../lib/teams/agents.js';
 import { profileExists, readProfile } from '../lib/profiles.js';
@@ -1035,7 +1036,9 @@ function buildTasksFromSnapshots(agents: TeamListAgentSnapshot[]): TaskInfo[] {
 
 export function buildTeamRowsFromSnapshots(
   registry: TeamRegistry,
-  agents: TeamListAgentSnapshot[]
+  agents: TeamListAgentSnapshot[],
+  /** team name -> the session that spawned it (see teamSpawners). */
+  spawners?: Map<string, TeamSpawner>
 ): { rows: TeamRow[]; teams: TaskInfo[]; names: string[] } {
   const byTeam = new Map<string, AgentStatusDetail[]>();
   for (const agent of agents) {
@@ -1051,6 +1054,7 @@ export function buildTeamRowsFromSnapshots(
       team,
       agents: byTeam.get(team.task_name) || [],
       description: registry[team.task_name]?.description,
+      spawnedBy: spawners?.get(team.task_name)?.shortId,
     })),
     names: teams.map((team) => team.task_name),
   };
@@ -1107,7 +1111,16 @@ async function loadTeamRows(
   _mgr: AgentManager
 ): Promise<{ rows: TeamRow[]; names: string[] }> {
   const [registry, agents] = await Promise.all([loadTeams(), loadTeamAgentSnapshots()]);
-  return buildTeamRowsFromSnapshots(registry, agents);
+  // Lineage is read off the session index, not the team registry: the registry is
+  // per-machine runtime state, while the transcript that ran `teams create` is
+  // indexed, survives the teammate cleanup, and covers teams created before this.
+  let spawners: Map<string, TeamSpawner> | undefined;
+  try {
+    spawners = teamSpawners();
+  } catch {
+    // The index is an enrichment here — a missing/locked DB just drops the column.
+  }
+  return buildTeamRowsFromSnapshots(registry, agents, spawners);
 }
 
 // Picker fallback for `teams logs` when the teammate ref is omitted. Shows a
@@ -1302,7 +1315,15 @@ export function registerTeamsCommands(program: Command): void {
         byTeam.set(a.task_name, arr);
       }
 
-      let rows = buildTeamRowsFromSnapshots(registry, everyAgent).rows;
+      // Same lineage enrichment as loadTeamRows — without it this listing is the
+      // one `teams list` surface that silently drops the "spawned by" column.
+      let spawners: Map<string, TeamSpawner> | undefined;
+      try {
+        spawners = teamSpawners();
+      } catch {
+        // The session index is an enrichment here; a missing one drops the column.
+      }
+      let rows = buildTeamRowsFromSnapshots(registry, everyAgent, spawners).rows;
 
       // --- query: substring match on team name ---
       if (query) {
@@ -1891,23 +1912,25 @@ export function registerTeamsCommands(program: Command): void {
     .option('-f, --filter <state>', 'Show only teammates in this state: running, completed, failed, stopped, or all (default: all)', 'all')
     .option('-s, --since <iso>', 'Cursor from a previous status call; only show updates after this timestamp (enables efficient polling)')
     .option('--agent-id <id>', 'Show only this one teammate (by UUID or UUID prefix)')
+    .option('--parent-session <id>', 'Show the teammates spawned BY this session, across teams. Resolves only teammates whose record survives the teams cleanup window.')
     .option('-v, --verbose', 'Emit the full per-teammate detail (prompt, all file paths, all messages). Default is a compact summary.')
     .option('--json', 'Output machine-readable JSON')
     .action(async (team: string | undefined, opts: {
-      filter: string; since?: string; agentId?: string; json?: boolean; verbose?: boolean;
+      filter: string; since?: string; agentId?: string; parentSession?: string; json?: boolean; verbose?: boolean;
     }) => {
       const filter = opts.filter;
       const mgr = mkManager();
 
       // No team given → drop into the picker (TTY) or fail clearly (script).
-      if (!team) {
+      // --parent-session is its own lookup key, so it needs no team at all.
+      if (!team && !opts.parentSession) {
         const picked = await pickTeamOr(mgr, 'agents teams status');
         if (!picked) return;
         team = picked;
       }
 
       try {
-        const result = await handleStatus(mgr, team, filter, opts.since);
+        const result = await handleStatus(mgr, team, filter, opts.since, opts.parentSession);
         const agents = opts.agentId
           ? result.agents.filter((a) => a.agent_id.startsWith(opts.agentId!))
           : result.agents;
@@ -1924,19 +1947,33 @@ export function registerTeamsCommands(program: Command): void {
           return;
         }
 
-        const exists = await teamExists(team);
-        if (!exists && result.agents.length === 0) {
-          console.log(chalk.yellow(`No team called '${team}'. Create it with: agents teams create ${team}`));
+        // A --parent-session lookup spans teams, so there is no single team to
+        // check for existence — its label is the session that spawned them.
+        const label = team ?? `session ${opts.parentSession!.slice(0, 8)}`;
+        if (team) {
+          const exists = await teamExists(team);
+          if (!exists && result.agents.length === 0) {
+            console.log(chalk.yellow(`No team called '${team}'. Create it with: agents teams create ${team}`));
+            return;
+          }
+        } else if (result.agents.length === 0) {
+          console.log(chalk.yellow(`No teammates recorded for ${label}.`));
+          console.log(chalk.gray('Teammate records are cleaned up after 7 days; an older team may have aged out.'));
           return;
         }
 
         if (opts.verbose) {
-          await printTeamStatus(team, filtered);
+          await printTeamStatus(label, filtered);
         } else {
-          printTeamSummary(team, toTaskStatusSummary(filtered));
+          printTeamSummary(label, toTaskStatusSummary(filtered));
         }
       } catch (err) {
-        dieFriction('teams', 'status-failed', `Could not check on team ${team}: ${(err as Error).message}`);
+        // `team` is undefined for a --parent-session lookup, which spans teams.
+        dieFriction(
+          'teams',
+          'status-failed',
+          `Could not check on ${team ? `team ${team}` : 'the requested session'}: ${(err as Error).message}`
+        );
       }
     });
 

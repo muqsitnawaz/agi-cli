@@ -32,7 +32,7 @@ import type { SessionActivity, AwaitingReason } from '../lib/session/state.js';
 import { inferSessionState } from '../lib/session/state.js';
 import { discoverSessions, countSessionsInScope, resolveSessionById, isCompleteSessionId, looksLikeSessionId, searchContentIndex, parseTimeFilter, getSessionRoots, type DiscoverOptions, type ScanProgress } from '../lib/session/discover.js';
 import { findSessionsById } from '../lib/session/db.js';
-import { filterTeamSessions } from '../lib/session/team-filter.js';
+import { filterTeamSessions, safeTeamText } from '../lib/session/team-filter.js';
 import { parseSession } from '../lib/session/parse.js';
 import { runRemoteSessions, buildForwardedArgs, ensureWholeIndex } from '../lib/session/remote.js';
 import { formatRelativeTime } from '../lib/session/relative-time.js';
@@ -72,6 +72,7 @@ interface SessionFilterOptions {
   project?: string;
   all?: boolean;
   teams?: boolean;
+  inTeam?: string;
   routine?: boolean;
   since?: string;
   until?: string;
@@ -214,7 +215,15 @@ function createScanProgressTracker(
 }
 
 const PICKER_RECENT_COUNT = 15;
-const PICKER_POOL_LIMIT = 200;
+/**
+ * The `--limit` default, shared with its `.option()` registration. Commander fills
+ * the default in, so `options.limit` is never falsy — code that wants to know
+ * whether the USER set a limit has to compare against this rather than test
+ * truthiness.
+ */
+const DEFAULT_LIMIT = '50';
+/** Pool size for `--in-team`: one team's rows can sit anywhere in the history. */
+const WHOLE_TEAM_POOL_LIMIT = 5000;
 // The grouped default view ("overview"): fetch a generous recency-ordered pool
 // for accurate per-project totals, show each project's most-recent rows grouped
 // by project, newest-active project first.
@@ -1145,7 +1154,14 @@ function useInteractiveBrowser(options: SessionsOptions): boolean {
  * browser (preview-rich, selectable) instead of the legacy per-host raw stream.
  */
 export function isBareBrowserListing(options: SessionsOptions, query: string | undefined): boolean {
-  return useInteractiveBrowser(options) && hasNoBrowserDisqualifyingFlags(options, query);
+  return (
+    useInteractiveBrowser(options) &&
+    // A peer answering a fan-out must never open a TUI. It has no TTY either, so
+    // this is the explicit half of a guard that otherwise rests on the implicit
+    // invariant that peers are always dialed with --json (see remote-list.ts).
+    process.env.AGENTS_SESSIONS_LOCAL !== '1' &&
+    hasNoBrowserDisqualifyingFlags(options, query)
+  );
 }
 
 /**
@@ -1167,7 +1183,15 @@ export function hasNoBrowserDisqualifyingFlags(
     !options.project &&
     !options.sort &&
     !options.artifacts &&
-    options.artifact === undefined
+    options.artifact === undefined &&
+    // --cloud lists a provider's tasks, not the transcript index, and
+    // runCloudSessions has no host scope — letting a `--device X --cloud` fall
+    // through to the browser gate would silently drop the X the user asked for.
+    !options.cloud &&
+    // The browser carries ONE device in its filter and `y` copies back exactly
+    // one --device, so a multi-host scope can't round-trip. Those stay on the
+    // legacy per-host stream, which prints each peer under its own banner.
+    (options.host?.length ?? 0) <= 1
   );
 }
 
@@ -1177,6 +1201,7 @@ function canonicalSessionsCommand(query: string | undefined, options: SessionsOp
   const a = ['sessions'];
   if (options.active) a.push('--active');
   if (options.teams) a.push('--teams');
+  if (options.inTeam) a.push('--in-team', options.inTeam);
   if (options.routine) a.push('--routine');
   if (options.agent) a.push('-a', options.agent);
   for (const h of options.host ?? []) a.push('--device', h);
@@ -1226,7 +1251,16 @@ async function renderSessionPreview(
 }
 
 /** Main action handler for `agents sessions`. Routes to picker, table, or single-session render. */
-async function sessionsAction(query: string | undefined, options: SessionsOptions): Promise<void> {
+async function sessionsAction(
+  query: string | undefined,
+  options: SessionsOptions,
+  /**
+   * Where commander got `--limit` from: 'cli'/'env' when the user supplied it,
+   * 'default' when it filled in its own. Truthiness can't tell those apart,
+   * because the default arrives as a string like any typed value.
+   */
+  limitSource?: string
+): Promise<void> {
   // Explicit --query is interchangeable with the positional; it's how you search
   // for text that collides with a subcommand name (e.g. `sessions --query go`).
   query = query ?? options.query;
@@ -1263,6 +1297,16 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
   // `── host ──` banner). With --active, the hosts are folded into the merged
   // machine-grouped view instead (handled below).
   if (options.host && options.host.length > 0 && !options.active) {
+    // --local means "skip the SSH fan-out"; --host means "look only over there".
+    // Together they ask for a peer's sessions without dialing the peer, which can
+    // only ever be empty — so say that instead of rendering a blank list.
+    if (options.local === true && !shouldIncludeLocal(options.host, machineId())) {
+      console.error(
+        chalk.red('--local and --device name opposite scopes: --local skips the SSH fan-out that --device needs.')
+      );
+      console.error(chalk.gray('Drop one — `--device <box>` to read that machine, `--local` to stay on this one.'));
+      process.exit(1);
+    }
     if (options.json) {
       await runRemoteSessionsJson(options.host);
       return;
@@ -1296,6 +1340,15 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
   }
 
   if (options.active) {
+    // The running view is built from the live scan, which carries no team lineage
+    // (that comes off the transcript index and the teams meta dir), so --in-team
+    // has nothing to match on here. Say so rather than ignoring the flag.
+    if (options.inTeam) {
+      console.error(chalk.red('--in-team does not apply to --active: the running view carries no team lineage.'));
+      console.error(chalk.gray('Drop --active to filter by team, or use `agents teams status <name>` for a live team.'));
+      process.exit(1);
+    }
+
     // On a TTY (and not a scripting path), open the interactive browser seeded to
     // running-only. --json / --waiting / --no-interactive / a peer fan-out keep the
     // static dump untouched, so scripts and agents are unaffected. An explicit
@@ -1351,6 +1404,8 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
         agent: options.agent,
         all: options.all,
         since: options.since,
+        host: options.host,
+        inTeam: options.inTeam,
       }),
       { local: options.local === true, hosts: options.host },
     );
@@ -1412,14 +1467,28 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
   // no query, no path drill-in, not explicitly --flat/--tree. It drops the silent
   // cwd-scope + 50-cap + 30-day window that hide most of a large index.
   const wantsOverview = isInteractive && !searchQuery && !pathFilter && !options.flat && !options.tree;
+  // --in-team asks for ONE team's whole lineage, which is a handful of rows that
+  // can sit anywhere in history. Bounding it by the default top-50 / 30-day window
+  // silently returns nothing for any team older than that — so the flag widens its
+  // own scope, the way --all does, unless the caller set an explicit --limit.
+  const wantsWholeTeam = !!options.inTeam;
+  // `--limit` has a commander default, so an untouched flag still arrives as a
+  // string and truthiness can't tell it from a typed one. Commander records where
+  // each value came from, which is the only signal that distinguishes an explicit
+  // `--limit 50` from no flag at all — a script asking for 50 must get 50, not the
+  // whole-team pool.
+  const userSetLimit = limitSource === 'cli' || limitSource === 'env';
   const limit = wantsOverview
     ? OVERVIEW_POOL_LIMIT
-    : parseInt(options.limit || (isInteractive ? String(PICKER_POOL_LIMIT) : '50'), 10);
+    : parseInt(
+        userSetLimit ? options.limit! : wantsWholeTeam ? String(WHOLE_TEAM_POOL_LIMIT) : DEFAULT_LIMIT,
+        10
+      );
   // Overview: recency order across the whole index, no default window; an explicit
   // --since still narrows. Non-overview keeps the prior interactive-30d default.
   const since = wantsOverview
     ? options.since
-    : (options.since ?? (isInteractive && !options.all ? '30d' : undefined));
+    : (options.since ?? (isInteractive && !options.all && !wantsWholeTeam ? '30d' : undefined));
   const spinner = options.json ? null : ora().start();
   const tracker = createScanProgressTracker(LOAD_VERBS, 'sessions', spinner);
 
@@ -1435,12 +1504,15 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
     const scope: DiscoverOptions = {
       agent,
       version,
-      all: pathFilter ? undefined : options.all,
+      // --in-team spans directories by construction: a team's teammates run in
+      // their own worktrees, so scoping to the current cwd hides most of the
+      // lineage the flag exists to show.
+      all: pathFilter ? undefined : options.all || wantsWholeTeam,
       cwd: process.cwd(),
       // Default overview scopes to the current repo SUBTREE (prefix match), so a
       // monorepo shows its sub-projects grouped instead of collapsing to the one
       // exact-cwd project. `--all` clears the prefix and spans the whole index.
-      cwdPrefix: pathFilter ?? (wantsOverview && !options.all ? process.cwd() : undefined),
+      cwdPrefix: pathFilter ?? (wantsOverview && !options.all && !wantsWholeTeam ? process.cwd() : undefined),
       project: options.project,
       since,
       until: options.until,
@@ -1470,7 +1542,15 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
     const { visible: visibleSessions } = filterTeamSessions(sessions, !!options.teams);
     sessions = visibleSessions;
 
-    const hiddenCount = options.teams
+    // --in-team spans both ends of the lineage, so it can't be one SQL predicate:
+    // the orchestrator matches on the scan-derived `spawnedTeam` column, while a
+    // teammate only knows its team from the meta.json filterTeamSessions just
+    // read. Match either, after that pass has populated `teamOrigin`.
+    if (options.inTeam) sessions = sessions.filter((s) => matchesTeam(s, options.inTeam!));
+
+    // Under --in-team the visible list is one team, so the whole-index team-origin
+    // count would be a non-sequitur next to it.
+    const hiddenCount = options.teams || options.inTeam
       ? 0
       : countSessionsInScope({ ...scope, onlyTeamOrigin: true });
 
@@ -1593,11 +1673,56 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
   }
 }
 
+/**
+ * Prefix marking a row as somebody's teammate: `[<team>/<handle>] `, falling back
+ * to the handle alone when the record predates team-name capture. The mode is
+ * deliberately dropped here (it survives in the preview pane) — this tag is
+ * folded into the topic cell, whose floor is 16 columns, so every character it
+ * takes is one the actual prompt loses.
+ */
 function teamTag(session: SessionMeta): string {
   const origin = session.teamOrigin;
   if (!origin) return '';
-  const parts = [origin.handle, origin.mode].filter(Boolean).join(' · ');
-  return parts ? `[${parts}] ` : '[team] ';
+  const handle = safeTeamText(origin.handle);
+  const team = safeTeamText(origin.team);
+  if (team) return `[${team}${handle ? `/${handle}` : ''}] `;
+  return handle ? `[${handle}] ` : '[team] ';
+}
+
+/**
+ * Whether a session belongs to `team`, from either end: it spawned the team, or
+ * it is one of the team's teammates. Case-insensitive, matching the SQL
+ * predicate behind `querySessions({ spawnedTeam })`.
+ */
+export function matchesTeam(session: SessionMeta, team: string): boolean {
+  // The needle is peer-derived in the browser: `f.team` comes off the team cycle,
+  // which is built from rows another machine sent. Guard it the same way as the
+  // fields it is compared against, so a non-string can't throw out of a filter
+  // that runs over every row.
+  const want = safeTeamText(team)?.trim().toLowerCase();
+  if (!want) return true;
+  return (
+    safeTeamText(session.spawnedTeam)?.toLowerCase() === want ||
+    safeTeamText(session.teamOrigin?.team)?.toLowerCase() === want
+  );
+}
+
+/** Longest team name rendered in the `team:` row badge before truncation. */
+const TEAM_BADGE_MAX = 10;
+
+/**
+ * The `team:<name>` badge for a session that SPAWNED a team — the orchestrator
+ * end of the lineage, from the scan-derived `spawnedTeam`. Returned as a plain
+ * (uncolored) string plus its display width so callers can reserve the width
+ * from the topic budget and color it as their own segment: folding it into the
+ * topic string would lose the color, since renderTopicCell strips ANSI and
+ * re-whitens every slice.
+ */
+export function teamBadge(session: SessionMeta): { plain: string; width: number } {
+  const team = safeTeamText(session.spawnedTeam);
+  if (!team) return { plain: '', width: 0 };
+  const plain = `team:${truncate(team, TEAM_BADGE_MAX)} `;
+  return { plain, width: stringWidth(plain) };
 }
 
 function originTag(session: SessionMeta): string {
@@ -1634,6 +1759,8 @@ export function flatSessionRow(session: SessionMeta, live?: ActiveSession, showT
   const topicBase = tag ? `${tag}${session.topic ?? ''}` : session.topic;
   const doing = [restingTodo, preview || topicBase].filter(Boolean).join(' · ') || undefined;
   const wt = session.worktreeSlug ? chalk.magenta(`wt:${session.worktreeSlug}`) : '';
+  const team = teamBadge(session);
+  const teamSeg = team.plain ? chalk.green(team.plain) : '';
 
   // The machine column only earns its width when the listing spans more than one
   // box (i.e. the cross-machine fan-out folded remotes in) — same rule and
@@ -1656,7 +1783,7 @@ export function flatSessionRow(session: SessionMeta, live?: ActiveSession, showT
   const wtW = wt ? stringWidth(wt) + 1 : 0;
   const width = terminalWidth();
   const requestedModelW = cols.showModel ? (cols.modelWidth ?? PICKER_MODEL_MAX) : 0;
-  const fixedW = (10 + 9 + 8 + 16) + glyphW + statusW + machineW + ticketW + wtW + stringWidth(when) + 1;
+  const fixedW = (10 + 9 + 8 + 16) + glyphW + statusW + machineW + ticketW + wtW + team.width + stringWidth(when) + 1;
   const modelSlack = width - fixedW - 16;
   const modelW = requestedModelW <= modelSlack
     ? requestedModelW
@@ -1672,6 +1799,7 @@ export function flatSessionRow(session: SessionMeta, live?: ActiveSession, showT
     chalk.cyan(linkCwdCell(session, padToWidth(truncateToWidth(project, 14), 16))) +
     (glyph ? glyph + ' ' : '') +
     statusCell +
+    teamSeg +
     renderTopicCell(label, doing, '', topicW, topicW) +
     ticketCell +
     (wt ? wt + ' ' : '') +
@@ -1693,10 +1821,12 @@ function treeSessionRow(session: SessionMeta, live?: ActiveSession): string {
   const topic = [restingTodo, topicBase].filter(Boolean).join(' · ') || '-';
   const badges = signalBadges(metaSignals(session));
   const badgeW = badges ? stringWidth(badges) + 1 : 0;
+  const team = teamBadge(session);
+  const teamSeg = team.plain ? chalk.green(team.plain) : '';
   const head = label ? `${label} · ${topic}` : topic;
   const { cell: statusCell, width: statusW } = liveStatusCell(live);
   const glyphW = glyph ? 2 : 0;
-  const topicW = Math.max(12, terminalWidth() - (2 + 9 + 8) - glyphW - statusW - badgeW - stringWidth(when) - 1);
+  const topicW = Math.max(12, terminalWidth() - (2 + 9 + 8) - glyphW - statusW - badgeW - team.width - stringWidth(when) - 1);
 
   return (
     '  ' +
@@ -1705,6 +1835,7 @@ function treeSessionRow(session: SessionMeta, live?: ActiveSession): string {
     (badges ? badges + ' ' : '') +
     (glyph ? glyph + ' ' : '') +
     statusCell +
+    teamSeg +
     padToWidth(chalk.white(truncateToWidth(head, topicW)), topicW) +
     ' ' + chalk.gray(when)
   );
@@ -2177,6 +2308,10 @@ export function formatPickerLabel(
   const sshPlain = ssh ? (ssh.device ? `ssh←${ssh.device} ` : 'ssh ') : '';
   const sshSeg = sshPlain ? chalk.red(sshPlain) : '';
   const sshW = sshPlain ? stringWidth(sshPlain) : 0;
+  // Orchestrator badge — same own-segment treatment as `ssh` above, for the same
+  // reason: renderTopicCell would strip its colour if it rode inside the topic.
+  const team = teamBadge(s);
+  const teamSeg = team.plain ? chalk.green(team.plain) : '';
   const tag = originTag(s) || teamTag(s);
   const label = (s as any).label;
   const topic = tag ? `${tag}${s.topic ?? ''}` : s.topic;
@@ -2209,7 +2344,7 @@ export function formatPickerLabel(
   const wtW = wt ? stringWidth(wt) + 1 : 0;
   const topicW = Math.max(
     16,
-    terminalWidth() - gutter - (10 + 9 + 8 + 16) - machineColW - hostW - ticketW - wtW - sshW - stringWidth(when) - 1,
+    terminalWidth() - gutter - (10 + 9 + 8 + 16) - machineColW - hostW - ticketW - wtW - sshW - team.width - stringWidth(when) - 1,
   );
 
   return (
@@ -2223,6 +2358,7 @@ export function formatPickerLabel(
     hostCell +
     chalk.cyan(padRight(truncate(project, 14), 16)) +
     sshSeg +
+    teamSeg +
     renderTopicCell(label, topic, query, topicW, topicW) +
     ticketCell +
     (wt ? wt + ' ' : '') +
@@ -3149,11 +3285,12 @@ export function registerSessionsCommands(program: Command): void {
     .option('--all', 'Widen every non-status filter to "all": every directory (not just this project) and all time (no window cap). Status filters like --active still compose; -a/--device/--since still narrow their axis.')
     .option('--unmanaged', "Also show sessions from your own ~/.<agent> installs (hidden once agents-cli manages that agent)")
     .option('--teams', 'Include team-spawned sessions (hidden by default)')
+    .option('--in-team <name>', "Only this team: the session that spawned it plus (with --teams) its teammates. Spans every directory and all time, since a team's worktrees and history sit outside the default window.")
     .option('--routine', 'Show only sessions archived from routine runs')
     .option('-p, --project <name>', 'Filter by project name (searches across all directories)')
     .option('--since <time>', 'Only sessions newer than this (e.g., 2h, 7d, 4w, or ISO date)')
     .option('--until <time>', 'Only sessions older than this (ISO timestamp)')
-    .option('-n, --limit <n>', 'Maximum number of sessions to return', '50')
+    .option('-n, --limit <n>', 'Maximum number of sessions to return', DEFAULT_LIMIT)
     .option('--sort <field>', 'Sort the list by: recent (default), cost, or duration')
     .option('--markdown', 'Render the session as markdown (user, assistant, thinking, tool calls)')
     .option('--no-redact', 'Disable default secret redaction in rendered session output (--markdown and --json)')
@@ -3200,6 +3337,10 @@ export function registerSessionsCommands(program: Command): void {
       # Search across every directory, not just this project
       agents sessions "topic" --all
 
+      # Who spawned which team: an orchestrator row carries team:<name>, and a
+      # teammate row [<team>/<handle>]. --in-team narrows to one team's lineage.
+      agents sessions --in-team redesign --teams
+
       # Show routine-run sessions and open one by routine run id
       agents sessions --routine --all
       agents sessions 2026-07-21T10-30-00-000Z
@@ -3216,6 +3357,7 @@ export function registerSessionsCommands(program: Command): void {
     notes: `
       - The interactive listing folds in your other online machines automatically (live over SSH, no sync) — each row is labelled by host, this machine first. Use --local to skip the fan-out; --json and single-id lookups stay local.
       - --host runs the query on the remote's own index over SSH (host alias or user@host); repeat or pass several to fan out. SSH access is the only auth.
+      - --in-team matches both ends of the lineage: the session that ran 'agents teams create/add', and (with --teams) that team's teammates. In the interactive list, 't' cycles the same filter over the teams in view.
       - --include and --exclude are mutually exclusive.
       - --first and --last are mutually exclusive.
       - A filter flag (--include/--exclude/--first/--last) without --markdown/--json defaults to --markdown output.
@@ -3225,13 +3367,13 @@ export function registerSessionsCommands(program: Command): void {
     `,
   });
 
-  sessionsCmd.action(async (query: string | undefined, options: SessionsOptions) => {
+  sessionsCmd.action(async (query: string | undefined, options: SessionsOptions, command: Command) => {
     if ((options as { browser?: boolean }).browser) {
       // Alias for `agents browser sessions`: a profile positional narrows to one profile.
       runBrowserSessions({ profile: query, json: options.json });
       return;
     }
-    await sessionsAction(query, options);
+    await sessionsAction(query, options, command.getOptionValueSource('limit'));
   });
 
   registerSessionsTailCommand(sessionsCmd);

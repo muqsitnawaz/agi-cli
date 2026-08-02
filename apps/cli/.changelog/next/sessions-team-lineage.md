@@ -1,0 +1,73 @@
+- **`agents sessions` now shows which session spawned which team.** The link
+  already existed on disk and was discarded twice. `SessionMeta.spawnedTeam` — the
+  team name read off the `agents teams create/add` command at scan time — had no
+  column in `sessions.db`, so the writer dropped it and no consumer had ever seen
+  a non-`undefined` value; a new `spawned_team` column (schema **v21**, which
+  forces one full rescan) persists it, and orchestrator rows now carry a green
+  `team:<name>` badge. Separately, `classifyTeamSession` was already opening each
+  teammate's `meta.json` and throwing away its `task_name` and
+  `parent_session_id`, so a teammate row could not name its team or point back at
+  its orchestrator; teammate rows now read `[<team>/<handle>]` and the preview
+  pane carries a `Team:` line from either end of the lineage. New `--in-team
+  <name>` (and a `t` hotkey in the browser) filters to one team's orchestrator
+  plus its teammates, `agents teams status --parent-session <id>` lists the
+  teammates a given session spawned, and `agents teams list` gains a `by <id>`
+  column. Source: `apps/cli/src/lib/session/db.ts`,
+  `apps/cli/src/lib/session/team-filter.ts`, `apps/cli/src/commands/sessions.ts`,
+  `apps/cli/src/commands/sessions-browser.ts`, `apps/cli/src/commands/teams.ts`.
+
+- **`agents sessions --device <box>` no longer opens an empty browser.** The
+  interactive one-host listing kept the browser's default this-repo scope, but
+  every row it fetches is the peer's and no peer cwd is under the local
+  `process.cwd()` — so the filter dropped all of them. A host scope now implies
+  all-directories (and the `p` hotkey is a no-op under one). Three more
+  scope bugs on the same path: `--device <this machine>` fanned out to the whole
+  tailnet, because `gatherRemoteList` reads the resulting empty peer list as "no
+  hosts given" and sweeps; `--local --device <box>` rendered a silent empty list
+  instead of reporting that the two flags ask for opposite things; and
+  `--device <box> --cloud` fell through to the cloud listing, which has no host
+  scope and silently ignored the device. An unreachable peer now says so in the
+  browser header — the fan-out's stderr note is repainted away by the full-screen
+  picker, so "that box is asleep" used to read as "no sessions match". Source:
+  `apps/cli/src/commands/sessions.ts`, `apps/cli/src/commands/sessions-browser.ts`,
+  `apps/cli/src/lib/session/remote-list.ts`.
+
+- **Teammate records are found by the session id they actually produced.** A
+  teammate's directory under `teams/agents/` is named for its *agent* id, but the
+  harness mints its own session id and the spawn records it separately as
+  `remote_session_id`. `classifyTeamSession` looked only under the directory
+  name, so most teammates were unreachable — on a live box, 14 of 16 records
+  resolved only via `remote_session_id` — and their rows could not name their
+  team however complete the record was. Both keys are now registered in one
+  index built per process, which also replaces the `existsSync` + `readFileSync`
+  the old path paid for every row in the pool. Source:
+  `apps/cli/src/lib/session/team-filter.ts`.
+
+- **`detectSpawnedTeam` no longer indexes prose or flag values as team names.**
+  Rendering the value exposed that it had been wrong for most of the rows that
+  had one: on a live index of 4627 sessions, 11 carried a team and 6 of those
+  read `2` or `t`. It matched documentation and echoed output rather than only
+  executed commands; its flag-skip used `\s` and so ran across a newline to
+  capture a word from the next line; and a value-taking flag did not swallow its
+  value, so `--device auto` left `auto` looking like the team name — which was
+  corrupting real detections, not just adding false ones. After the fix the same
+  index resolves ten teams, every one of them a real team name. Source:
+  `apps/cli/src/lib/session/state.ts`.
+
+- **`--in-team` returns a team's whole lineage, not the slice inside the default
+  window.** It filtered in memory after the query, so a team older than the
+  default top-50 / 30-day / current-directory scope came back empty with no
+  message — and a team's teammates run in their own worktrees, which the
+  directory scope hid. The flag now widens its own scope the way `--all` does. It
+  is also refused with `--active`, whose live rows carry no lineage to match on,
+  rather than being silently ignored. Source: `apps/cli/src/commands/sessions.ts`.
+
+- **The session preview pane sanitizes peer-supplied `plan` and directory
+  text.** A remote row's metadata is JSON the peer sent and `parseRemoteList`
+  hands over verbatim; `sanitizeMeta` covered `topic`/`label`/`cwd`/`todos` but
+  not these, so a terminal escape in another machine's plan text reached the TTY.
+  The remote preview also renders more of what already rides across the hop: the
+  checklist items, the directories the scan recorded, and a one-line plan summary
+  (never the full markdown blob). `directoriesTouched` now reads the real
+  `recentDirectoriesTouched` field instead of a `dirsTouched` that nothing in the
+  repo ever wrote. Source: `apps/cli/src/commands/sessions-picker.ts`.
