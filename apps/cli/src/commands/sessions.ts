@@ -452,6 +452,30 @@ export function liveGlyphAndPreview(a: ActiveSession | undefined): { glyph: stri
 }
 
 /**
+ * The one-word live status for a listing row — `working` / `waiting` / `idle`,
+ * the same three states the `--active` column shows, so the default list is no
+ * longer just a glyph. `waiting` is the actionable "needs you" case (a question /
+ * permission / plan-review), kept distinct from `idle` (stopped) and `working`.
+ * Empty for a not-live row, and for the rare dead-and-vanished `unknown`. Pure +
+ * exported for the row tests.
+ */
+export function liveStatusWord(a: ActiveSession | undefined): string {
+  if (!a) return '';
+  if (a.status === 'input_required' || a.activity === 'waiting_input') return 'waiting';
+  if (a.status === 'running' || a.activity === 'working') return 'working';
+  if (a.status === 'idle' || a.activity === 'idle') return 'idle';
+  if (a.status === 'queued') return 'queued';
+  return '';
+}
+
+/** The colored, space-padded status cell for a listing row (empty when not live). */
+function liveStatusCell(live: ActiveSession | undefined): { cell: string; width: number } {
+  const word = liveStatusWord(live);
+  if (!word || !live) return { cell: '', width: 0 };
+  return { cell: statusColor(live.status)(padToWidth(word, 8)), width: 8 };
+}
+
+/**
  * The tracker/PR ref for a session's dedicated column: the ticket id when known,
  * else `PR#<n>`, else empty. Pulled out of the trailing badge blob so refs align
  * into a scannable column instead of jamming against a truncated topic.
@@ -1082,6 +1106,20 @@ async function renderSessionPreview(
     else console.log(chalk.gray(`No session matches "${query}".`));
     return;
   }
+  // Lead with the live status when the session is still running, so the preview
+  // says working / waiting / idle up front — not just the historical transcript.
+  let live: ActiveSession | undefined;
+  try {
+    live = indexActiveBySessionId(await getActiveSessions()).get(session.id);
+  } catch { /* plain preview on any probe failure */ }
+  if (live) {
+    const { glyph } = liveGlyphAndPreview(live);
+    const word = liveStatusWord(live) || live.status;
+    const needsYou = live.status === 'input_required' || live.activity === 'waiting_input';
+    const reason = live.awaitingReason ? ` (${live.awaitingReason.replace('_', ' ')})` : '';
+    const suffix = needsYou ? chalk.yellow(`  ← needs you${reason}`) : '';
+    console.log(`${glyph} ${statusColor(live.status)(word)}${suffix}`);
+  }
   console.log(buildPreview(session));
 }
 
@@ -1512,11 +1550,14 @@ function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket =
   const ticketCell = showTicket
     ? chalk.blue(padToWidth(truncateToWidth(ticketLabel(session) || '-', TICKET_W), TICKET_W + 1))
     : '';
+  // Live status word (working / waiting / idle) next to the glyph — the default
+  // list is no longer a bare glyph. Empty (zero width) for resting rows.
+  const { cell: statusCell, width: statusW } = liveStatusCell(live);
   const glyphW = glyph ? 2 : 0;
   const machineW = cols.showMachine ? machineColW : 0;
   const ticketW = showTicket ? TICKET_W + 1 : 0;
   const wtW = wt ? stringWidth(wt) + 1 : 0;
-  const topicW = Math.max(16, terminalWidth() - (10 + 9 + 8 + 16) - glyphW - machineW - ticketW - wtW - stringWidth(when) - 1);
+  const topicW = Math.max(16, terminalWidth() - (10 + 9 + 8 + 16) - glyphW - statusW - machineW - ticketW - wtW - stringWidth(when) - 1);
 
   return (
     chalk.white(padToWidth(truncateToWidth(session.shortId, 9), 10)) +
@@ -1525,6 +1566,7 @@ function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket =
     machineCell +
     chalk.cyan(padToWidth(truncateToWidth(project, 14), 16)) +
     (glyph ? glyph + ' ' : '') +
+    statusCell +
     renderTopicCell(label, doing, '', topicW, topicW) +
     ticketCell +
     (wt ? wt + ' ' : '') +
@@ -1547,8 +1589,9 @@ function treeSessionRow(session: SessionMeta, live?: ActiveSession): string {
   const badges = signalBadges(metaSignals(session));
   const badgeW = badges ? stringWidth(badges) + 1 : 0;
   const head = label ? `${label} · ${topic}` : topic;
+  const { cell: statusCell, width: statusW } = liveStatusCell(live);
   const glyphW = glyph ? 2 : 0;
-  const topicW = Math.max(12, terminalWidth() - (2 + 9 + 8) - glyphW - badgeW - stringWidth(when) - 1);
+  const topicW = Math.max(12, terminalWidth() - (2 + 9 + 8) - glyphW - statusW - badgeW - stringWidth(when) - 1);
 
   return (
     '  ' +
@@ -1556,6 +1599,7 @@ function treeSessionRow(session: SessionMeta, live?: ActiveSession): string {
     agentColor(padToWidth(truncateToWidth(session.agent, 7), 8)) +
     (badges ? badges + ' ' : '') +
     (glyph ? glyph + ' ' : '') +
+    statusCell +
     padToWidth(chalk.white(truncateToWidth(head, topicW)), topicW) +
     ' ' + chalk.gray(when)
   );
