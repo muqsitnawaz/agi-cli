@@ -29,7 +29,7 @@ import { buildRemoteAgentsInvocation } from '../lib/hosts/remote-cmd.js';
 import { loadDevices, isControlDevice } from '../lib/devices/registry.js';
 import { fanOutDevices, planFleetTargets, remoteFleetTargets, type FanOutDeviceTarget } from '../lib/devices/fleet.js';
 import { fleetDialTarget } from '../lib/devices/connect.js';
-import { compareFleetInventories, type FleetInventory, type FleetDivergenceReport, type FleetVersionSignIn } from '../lib/devices/fleet-divergence.js';
+import { compareFleetInventories, type FleetInventory, type FleetVersionSignIn } from '../lib/devices/fleet-divergence.js';
 import { collectLocalFleetInventory } from '../lib/devices/fleet-inventory.js';
 import {
   buildLocalFindings,
@@ -70,7 +70,8 @@ import { unifiedDiff, colorizeUnifiedDiff } from '../lib/diff-text.js';
 import { listCliStatus } from '../lib/cli-resources.js';
 import { setHelpSections } from '../lib/help.js';
 import { heal, healChangedAnything, type HealResult } from '../lib/heal.js';
-import { blocksLocalScripts } from '../lib/platform/winpath.js';
+import { getEffectiveExecutionPolicy } from '../lib/platform/winpath.js';
+import { scanUserRcFiles } from '../lib/secrets/rc-hygiene.js';
 import { terminalWidth, truncateToWidth, stringWidth, padToWidth } from '../lib/session/width.js';
 import { readRepoBehindMarkers, type FetchStatusMarker } from '../lib/auto-pull.js';
 import * as fs from 'fs';
@@ -130,28 +131,6 @@ export function wrapLine(prefix: string, text: string, width = terminalWidth()):
 function printWrappedLine(prefix: string, text: string): void {
   for (const line of wrapLine(prefix, text)) console.log(chalk.gray(line));
 }
-
-// ─── windows execution-policy advisory ─────────────────────────────────────────
-
-/**
- * Windows-only advisory lines. When the effective PowerShell execution policy
- * blocks unsigned local `.ps1` scripts (`Restricted`/`AllSigned`), the generated
- * `agents.ps1` launcher fails in PowerShell even when it is on PATH. Surface the
- * remediation; the `.cmd` companion still works, so this is a warning, not an
- * error, and doctor never auto-changes the policy. Pure — returns `[]` on
- * non-Windows or a permissive policy, so it is testable without invoking
- * PowerShell.
- */
-export function execPolicyWarningLines(platform: NodeJS.Platform, policy: string | null): string[] {
-  if (platform !== 'win32') return [];
-  if (!blocksLocalScripts(policy)) return [];
-  return [
-    `PowerShell execution policy is ${policy} — it blocks the generated agents.ps1 launcher.`,
-    'Fix: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned',
-    'The agents.cmd shim still works regardless of the policy.',
-  ];
-}
-
 
 // ─── repo-behind advisory ─────────────────────────────────────────────────────
 
@@ -369,6 +348,13 @@ async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
         reports: localReports,
         signIn: r.inventory?.signIn ?? {},
         cliMissing: localCliMissing,
+        rcSecrets: scanUserRcFiles(),
+        execPolicy: process.platform === 'win32'
+          ? { platform: process.platform, policy: getEffectiveExecutionPolicy() }
+          : undefined,
+        isolatedVersions: localReports
+          .filter((rep) => isVersionIsolated(rep.agent, rep.version))
+          .map((rep) => `${rep.agent}@${rep.version}`),
       }));
       accounts[localName] = r.inventory?.signIn ?? {};
       continue;
@@ -409,45 +395,6 @@ async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
   for (const line of renderFindings(findings, accounts, { fleet: true, baseline: localName, header })) {
     console.log(line);
   }
-}
-
-/**
- * Render the cross-device divergence section for `agents doctor --devices`
- * (RUSH-2027): a clean all-clear when the fleet agrees, otherwise the specific
- * gaps — a resource/version present here but missing on a box, or a diverged
- * config repo — grouped by device, each a plain-language line. Devices that
- * couldn't be compared (offline / older CLI) are named so the readout is honest.
- */
-export function renderFleetDivergence(report: FleetDivergenceReport): string[] {
-  const lines: string[] = [chalk.bold('Cross-device divergence')];
-  const skippedNote = report.skippedDevices.length > 0
-    ? chalk.gray(`  (not compared: ${report.skippedDevices.join(', ')} — offline or no inventory)`)
-    : null;
-
-  if (!report.hasDivergence) {
-    lines.push(chalk.green(`  Fleet is consistent — every compared device matches ${report.baseline}.`));
-    if (skippedNote) lines.push(skippedNote);
-    return lines;
-  }
-
-  // Group findings by the LAGGING device so a box with several gaps reads as one
-  // block AND the remediation points at the right box. For a `*-missing-local`
-  // finding the resource is absent on the local baseline (present on `d.device`),
-  // so the box that's behind is the baseline — not the remote that has it.
-  const byDevice = new Map<string, typeof report.divergences>();
-  for (const d of report.divergences) {
-    const lagging = d.kind.endsWith('-missing-local') ? report.baseline : d.device;
-    (byDevice.get(lagging) ?? byDevice.set(lagging, []).get(lagging)!).push(d);
-  }
-  for (const device of Array.from(byDevice.keys()).sort()) {
-    lines.push(`  ${chalk.yellow('⚠')} ${chalk.bold(device)}`);
-    for (const d of byDevice.get(device)!) {
-      lines.push(chalk.gray(`      ${d.message}`));
-    }
-  }
-  if (skippedNote) lines.push(skippedNote);
-  lines.push(chalk.gray('  Read-only — run `agents apply` or `agents repo pull` on a lagging box to reconcile.'));
-  return lines;
 }
 
 // ─── target mode ──────────────────────────────────────────────────────────────
@@ -1489,6 +1436,12 @@ export function registerDoctorCommand(program: Command): void {
           (a) => listInstalledVersions(a).length > 0 && clis[a] && !clis[a].installed,
         );
 
+        // An isolated copy is skipped by the agent-wide `--fix` sweep, so its
+        // findings must never fold into a collapsed cross-version row.
+        const isolatedVersions = reports
+          .filter((r) => isVersionIsolated(r.agent, r.version))
+          .map((r) => `${r.agent}@${r.version}`);
+
         const findings = buildLocalFindings({
           device: localName,
           syncRows,
@@ -1497,6 +1450,13 @@ export function registerDoctorCommand(program: Command): void {
           reports,
           signIn: inventory.signIn ?? {},
           cliMissing,
+          rcSecrets: scanUserRcFiles(),
+          // getEffectiveExecutionPolicy spawns powershell — a doomed process on
+          // POSIX, where the advisory never applies. Probe only on Windows.
+          execPolicy: process.platform === 'win32'
+            ? { platform: process.platform, policy: getEffectiveExecutionPolicy() }
+            : undefined,
+          isolatedVersions,
         });
 
         if (opts.json) {

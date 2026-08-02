@@ -90,10 +90,13 @@ describe('severity rubric', () => {
     }));
     const crits = findings.filter((f) => f.severity === 'critical');
     expect(crits).toHaveLength(1);
+    expect(crits[0].kind).toBe('never-synced');
     expect(crits[0].message).toContain('never synced');
     expect(crits[0].message).toContain('20 hook');
-    // No duplicate never-synced WARNING when the critical already covered it.
-    expect(findings.some((f) => f.kind === 'never-synced')).toBe(false);
+    // A never-synced version's fix is the sync, not a resource-level --fix.
+    expect(crits[0].remediation).toBe('agents sync opencode@1.16.0 --yes');
+    // Exactly one row for the root cause — no duplicate never-synced WARNING.
+    expect(findings.filter((f) => f.kind === 'never-synced')).toHaveLength(1);
   });
 
   it('a stale version is a WARNING', () => {
@@ -110,6 +113,140 @@ describe('severity rubric', () => {
     }));
     expect(findings.find((f) => f.kind === 'repo-behind')?.severity).toBe('warning');
     expect(findings.find((f) => f.kind === 'orphan')?.severity).toBe('warning');
+  });
+});
+
+describe('de-noise — one root cause is one line', () => {
+  it('many missing hooks on one version collapse to a count + two examples', () => {
+    const hooks = Array.from({ length: 32 }, (_, i) => ({ kind: 'hooks' as const, name: `h${i}`, status: 'missing' as const }));
+    const findings = buildLocalFindings(localInput({ reports: [report('grok', '0.2.82', { hooks })] }));
+    const crits = findings.filter((f) => f.kind === 'missing-hook');
+    expect(crits).toHaveLength(1);
+    expect(crits[0].message).toBe("32 hooks missing (incl. 'h0', 'h1')");
+  });
+
+  it('a single missing hook is still named in full', () => {
+    const findings = buildLocalFindings(localInput({
+      reports: [report('grok', '0.2.82', { hooks: [{ kind: 'hooks', name: 'git-guard', status: 'missing' }] })],
+    }));
+    expect(findings.find((f) => f.kind === 'missing-hook')?.message).toBe("hook 'git-guard' missing");
+  });
+
+  it('the same problem on 5 versions of one agent reads as `claude (5 versions)` with an agent-wide fix', () => {
+    const versions = ['2.1.170', '2.1.181', '2.1.186', '2.1.207', '2.1.219'];
+    const findings = buildLocalFindings(localInput({
+      reports: versions.map((v) => report('claude', v, {
+        plugins: [{ kind: 'plugins', name: 'code', status: 'missing' }],
+      })),
+    }));
+    const crits = findings.filter((f) => f.kind === 'missing-plugin');
+    expect(crits).toHaveLength(1);
+    expect(crits[0].versions).toEqual(versions);
+    expect(crits[0].version).toBeUndefined();
+    // The agent-wide sweep heals every (non-isolated) version in one command.
+    expect(crits[0].remediation).toBe('agents doctor claude --fix');
+  });
+
+  it('an ISOLATED copy never folds into a collapsed row — the sweep skips it', () => {
+    const findings = buildLocalFindings(localInput({
+      reports: ['2.1.170', '2.1.181'].map((v) => report('claude', v, {
+        plugins: [{ kind: 'plugins', name: 'code', status: 'missing' }],
+      })),
+      isolatedVersions: ['claude@2.1.181'],
+    }));
+    const crits = findings.filter((f) => f.kind === 'missing-plugin');
+    expect(crits).toHaveLength(2);
+    expect(crits.map((f) => f.remediation).sort()).toEqual([
+      'agents doctor claude@2.1.170 --fix',
+      'agents doctor claude@2.1.181 --fix',
+    ]);
+  });
+
+  it('every orphan row on a device folds into ONE cleanup-only warning', () => {
+    const findings = buildLocalFindings(localInput({
+      orphanRows: [
+        { agent: 'claude', version: '2.1.170', commands: 0, skills: 28, hooks: 16 },
+        { agent: 'claude', version: '2.1.181', commands: 0, skills: 28, hooks: 16 },
+        { agent: 'grok', version: '0.2.82', commands: 3, skills: 36, hooks: 0 },
+      ],
+    }));
+    const orphans = findings.filter((f) => f.kind === 'orphan');
+    expect(orphans).toHaveLength(1);
+    expect(orphans[0].message).toBe('127 orphaned resources on 3 versions (cleanup only)');
+    expect(orphans[0].remediation).toBe('agents prune cleanup');
+  });
+
+  it('a version that already named its drifted resources gets no vaguer `stale` row on top', () => {
+    const findings = buildLocalFindings(localInput({
+      reports: [report('codex', '0.146.0', { commands: [{ kind: 'commands', name: 'audit', status: 'diff' }] })],
+      syncRows: [{ agent: 'codex', version: '0.146.0', status: 'stale', isDefault: true }],
+    }));
+    expect(findings.some((f) => f.kind === 'content-drift')).toBe(true);
+    expect(findings.some((f) => f.kind === 'stale')).toBe(false);
+  });
+
+  it('a stale version with no itemized drift still reports `stale`', () => {
+    const findings = buildLocalFindings(localInput({
+      reports: [report('codex', '0.146.0')],
+      syncRows: [{ agent: 'codex', version: '0.146.0', status: 'stale', isDefault: true }],
+    }));
+    expect(findings.find((f) => f.kind === 'stale')?.message).toBe('sources changed since last sync');
+  });
+});
+
+describe('rc-hygiene + exec-policy findings (restored from the pre-RUSH-2069 advisories)', () => {
+  it('credential-shaped rc exports become ONE warning naming the count and two examples', () => {
+    const findings = buildLocalFindings(localInput({
+      rcSecrets: [
+        { file: '.zshrc', line: 12, name: 'OPENAI_API_KEY', isMasterPassphrase: false },
+        { file: '.zshrc', line: 13, name: 'STRIPE_SECRET', isMasterPassphrase: false },
+        { file: '.bashrc', line: 4, name: 'GH_TOKEN', isMasterPassphrase: false },
+      ],
+    }));
+    const rc = findings.filter((f) => f.kind === 'rc-secret-export');
+    expect(rc).toHaveLength(1);
+    expect(rc[0].severity).toBe('warning');
+    expect(rc[0].message).toContain('3 credential-shaped exports in shell rc files');
+    expect(rc[0].message).toContain('.zshrc:12 OPENAI_API_KEY');
+    expect(rc[0].remediation).toBe('agents secrets add');
+  });
+
+  it('the file-store master key gets its own row — a different fix from the rest', () => {
+    const findings = buildLocalFindings(localInput({
+      rcSecrets: [
+        { file: '.zshrc', line: 2, name: 'AGENTS_SECRETS_PASSPHRASE', isMasterPassphrase: true },
+        { file: '.zshrc', line: 12, name: 'OPENAI_API_KEY', isMasterPassphrase: false },
+      ],
+    }));
+    const rc = findings.filter((f) => f.kind === 'rc-secret-export');
+    expect(rc).toHaveLength(2);
+    expect(rc[0].remediation).toContain('~/.agents/.secrets-key/passphrase');
+    expect(rc[1].remediation).toBe('agents secrets add');
+  });
+
+  it('no rc exports → no finding', () => {
+    expect(buildLocalFindings(localInput({ rcSecrets: [] })).some((f) => f.kind === 'rc-secret-export')).toBe(false);
+  });
+
+  it.each(['Restricted', 'AllSigned'] as const)(
+    'a Windows %s execution policy warns that agents.ps1 is blocked',
+    (policy) => {
+      const findings = buildLocalFindings(localInput({ execPolicy: { platform: 'win32', policy } }));
+      const f = findings.find((x) => x.kind === 'exec-policy');
+      expect(f?.severity).toBe('warning');
+      expect(f?.message).toContain(`execution policy is ${policy}`);
+      expect(f?.remediation).toBe('Set-ExecutionPolicy -Scope CurrentUser RemoteSigned');
+    },
+  );
+
+  it('a permissive policy, an unknown policy, and non-Windows yield nothing', () => {
+    const has = (over: Partial<LocalFindingInputs>) =>
+      buildLocalFindings(localInput(over)).some((f) => f.kind === 'exec-policy');
+    expect(has({ execPolicy: { platform: 'win32', policy: 'RemoteSigned' } })).toBe(false);
+    expect(has({ execPolicy: { platform: 'win32', policy: null } })).toBe(false);
+    expect(has({ execPolicy: { platform: 'linux', policy: 'Restricted' } })).toBe(false);
+    expect(has({ execPolicy: { platform: 'darwin', policy: 'AllSigned' } })).toBe(false);
+    expect(has({})).toBe(false);
   });
 });
 
@@ -140,14 +277,30 @@ describe('signInToFindings — provable vs unprovable logout', () => {
     expect(findings).toHaveLength(0);
   });
 
-  it('an agent with NO inspectable identity (cursor/antigravity) never yields a logout finding', () => {
-    // antigravity is not in ACCOUNT_INSPECTION set? It IS inspectable, but cursor
-    // is NOT — a cursor logged-out row must produce nothing.
-    const findings = signInToFindings('boxA', {
-      cursor: [{ version: '1.0.0', signedIn: false, account: null, provable: true }],
-    });
-    expect(findings).toHaveLength(0);
-  });
+  it.each(['cursor', 'openclaw', 'copilot', 'amp', 'kiro', 'goose', 'hermes'] as const)(
+    '%s has no inspectable identity → no logout finding at all, not even the hedge',
+    (agent) => {
+      // agents-cli knows no credential path for these, so "logged out" is
+      // unknowable — silence beats a false claim.
+      expect(signInToFindings('boxA', {
+        [agent]: [{ version: '1.0.0', signedIn: false, account: null, provable: true }],
+      })).toHaveLength(0);
+    },
+  );
+
+  it.each(['claude', 'codex', 'gemini', 'opencode', 'antigravity', 'grok', 'kimi', 'droid'] as const)(
+    '%s IS inspectable → a provable logout is reported as critical',
+    (agent) => {
+      // antigravity included deliberately: it has a real credential path
+      // (~/.gemini/antigravity-cli/antigravity-oauth-token), so it is inspectable
+      // and DOES yield a logout finding — the docs used to claim otherwise.
+      const findings = signInToFindings('boxA', {
+        [agent]: [{ version: '1.0.0', signedIn: false, account: null, provable: true }],
+      });
+      expect(findings).toHaveLength(1);
+      expect(findings[0]).toMatchObject({ severity: 'critical', kind: 'logged-out', agent });
+    },
+  );
 });
 
 describe('remediationFor', () => {
@@ -287,6 +440,20 @@ describe('renderFindings — exact layout', () => {
     expect(out.indexOf('▸ zion')).toBeLessThan(out.indexOf('▸ yos-s1'));
     // The version-skew warning lands under yos-s1.
     expect(out).toMatch(/grok @1\.4\s+not installed/);
+  });
+
+  it('a collapsed row renders `<agent> (N versions)`, and the two ~/.agents repos name their alias', () => {
+    const findings: DoctorFinding[] = [
+      { severity: 'critical', kind: 'missing-plugin', device: 'zion', agent: 'claude', versions: ['2.1.170', '2.1.181', '2.1.186', '2.1.207', '2.1.219'], message: "plugin 'code' missing", remediation: 'agents doctor claude --fix' },
+      { severity: 'warning', kind: 'repo-behind', device: 'zion', version: 'system', message: '14 behind origin/main', remediation: 'agents repo pull system' },
+      { severity: 'warning', kind: 'repo-behind', device: 'zion', version: 'user', message: '4 behind origin/main', remediation: 'agents repo pull user' },
+      { severity: 'warning', kind: 'orphan', device: 'zion', message: '397 orphaned resources on 12 versions (cleanup only)', remediation: 'agents prune cleanup' },
+    ];
+    const out = stripAnsi(renderFindings(findings, accounts, { fleet: false, baseline: 'zion', header: 'agents doctor · zion' }).join('\n'));
+    expect(out).toContain('claude (5 versions)');
+    expect(out).toContain('~/.agents (system)');
+    expect(out).toContain('~/.agents (user)');
+    expect(out).toMatch(/orphans\s+397 orphaned resources/);
   });
 
   it('all-clear: no criticals, no warnings → ✓ lines only', () => {

@@ -312,30 +312,51 @@ section, then one `▸ <machine>` block:
 ```
 agents doctor · zion                                        1.20.81
 
-✗ CRITICAL — needs you now  (1)
-  codex @0.1  logged out — no account signed in       → codex login
+✗ CRITICAL — needs you now  (2)
+  codex @0.1            logged out — no account signed in                    → codex login
+  grok @0.2.82          32 hooks missing (incl. 'git-guard', 'rm-guard')      → agents doctor grok@0.2.82 --fix
 
-▸ zion · this machine  ✗ 1 critical (above)
-    ⚠ ~/.agents      6 behind origin/main → stales 7 versions  → agents repo pull user
-    ⚠ claude @2.1.170  skill 'plan-render' changed upstream — re-sync  → agents doctor claude@2.1.170 --fix
+▸ zion · this machine  ✗ 2 critical (above)
+    ⚠ claude (5 versions)  plugin 'code' — mirror missing → agents doctor claude --fix
+    ⚠ ~/.agents (user)     6 behind origin/main → stales 7 versions → agents repo pull user
+    ⚠ orphans              397 orphaned resources on 12 versions (cleanup only) → agents prune cleanup
     claude 2.1.170 ✓me@x.com (Max) 2.1.999 ✓team (Team) · codex ✗ · grok ✓ · kimi ✓
 ```
 
 **Severity rubric** (agent-agnostic):
 
 - **CRITICAL** (`✗`) — a **provable** logged-out version, a **missing hook or
-  plugin** from a version, a missing/broken CLI binary.
-- **WARNING** (`⚠`) — content drift, never-synced, version-skew, repo-behind,
-  repo-drift, orphans, a missing command/skill/rule/mcp/permission/subagent, and an
-  **unprovable** logout (hedged "could not verify sign-in").
+  plugin** from a version, a never-synced version whose declared resources are
+  therefore absent, a missing/broken CLI binary.
+- **WARNING** (`⚠`) — content drift, version-skew, repo-behind, repo-drift,
+  orphans, a missing command/skill/rule/mcp/permission/subagent, a credential-shaped
+  export in a shell rc file, a Windows execution policy that blocks `agents.ps1`,
+  and an **unprovable** logout (hedged "could not verify sign-in").
+
+**One root cause is one line.** The readout is de-duplicated before it is
+rendered, so a real machine shows ~16 rows rather than ~57:
+
+| Repetition | What you see instead |
+|---|---|
+| One row per missing resource | `32 hooks missing (incl. 'a', 'b')` — a lone one is still named in full |
+| The same problem on 5 installed claudes | `claude (5 versions) …`, fixed by the agent-wide `agents doctor claude --fix` |
+| One orphan row per version | one `orphans` line per machine — `agents prune cleanup` clears them all |
+| `sources changed since last sync` on a version that already listed its drift | nothing — the specific row already said it |
+| One critical per absent resource on a never-synced version | one critical → `agents sync <agent>@<version> --yes` |
+
+An **isolated** version never folds into a collapsed row: the agent-wide `--fix`
+sweep deliberately skips isolated copies, so it keeps its own
+`agents doctor <agent>@<version> --fix` line.
 
 **Per-version sign-in.** Sign-in is probed per **installed version**, not
 account-global: each version's own home is read, and a logged-out state is only
 claimed as CRITICAL when it is **provable** — the credential is absent from BOTH the
 version home AND the active/global HOME (`credentialPresence` in
 `src/lib/agents.ts`). A version that merely shares the global login is signed in,
-not out. Agents with no inspectable identity (antigravity, cursor —
-`!supportsAccountInspection`) never yield a logged-out finding. The login
+not out. Agents with no inspectable identity (cursor, openclaw, copilot, amp,
+kiro, goose, hermes — `!supportsAccountInspection`) never yield a logged-out
+finding; the eight with a known credential path (claude, codex, gemini, opencode,
+antigravity, grok, kimi, droid) do. The login
 remediation is version-targeted: for the per-version-isolated set
 (claude/codex/grok/kimi/opencode/copilot) it is `agents run <agent>@<version>` then
 the harness-native login (`codex login`, `claude → /login`, `opencode auth login`);

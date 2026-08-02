@@ -148,32 +148,3 @@ export function scanUserRcFiles(homeDir: string = os.homedir()): RcSecretFinding
   }
   return out;
 }
-
-/**
- * Build the advisory lines for `agents doctor` from a set of findings. Returns
- * `[]` when there is nothing to report. The first line is the headline; the
- * rest are indented detail. Names only — never values.
- */
-export function rcSecretWarningLines(findings: RcSecretFinding[]): string[] {
-  if (findings.length === 0) return [];
-  const lines: string[] = [];
-  const master = findings.filter((f) => f.isMasterPassphrase);
-  const others = findings.filter((f) => !f.isMasterPassphrase);
-
-  const total = findings.length;
-  lines.push(
-    `${total} credential-shaped export${total === 1 ? '' : 's'} found in shell rc files — ` +
-    `readable from /proc/<pid>/environ by any same-user process.`,
-  );
-  for (const f of master) {
-    lines.push(
-      `${f.file}:${f.line} ${f.name} — the file-store master key. Move it off-env to ` +
-      `~/.agents/.secrets-key/passphrase (chmod 600) and delete the export.`,
-    );
-  }
-  for (const f of others) {
-    lines.push(`${f.file}:${f.line} ${f.name} — move to \`agents secrets\` and inject via \`agents secrets exec\`.`);
-  }
-  lines.push('Rule: no credentials in env vars or shell config. Use the keychain-backed store.');
-  return lines;
-}

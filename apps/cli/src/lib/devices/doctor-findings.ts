@@ -29,8 +29,10 @@
  */
 import chalk from 'chalk';
 import { AGENTS, ALL_AGENT_IDS, supportsAccountInspection } from '../agents.js';
+import { blocksLocalScripts } from '../platform/winpath.js';
 import { loginHint } from '../signin-badge.js';
 import type { AgentId } from '../types.js';
+import type { RcSecretFinding } from '../secrets/rc-hygiene.js';
 import type { SyncStatusRow, OrphanRow } from '../drift.js';
 import type { FetchStatusMarker } from '../auto-pull.js';
 import type { VersionResourceReport } from '../doctor-diff.js';
@@ -63,12 +65,15 @@ export type FindingKind =
   | 'cli-missing'         // a managed agent whose binary won't resolve (CRITICAL)
   | 'missing-resource'    // a missing command/skill/rule/mcp/permission/subagent (WARNING)
   | 'content-drift'       // a resource diverged from source (WARNING)
-  | 'never-synced'        // installed but never synced (WARNING)
+  | 'never-synced'        // installed but never synced — CRITICAL when its declared
+                          // resources are therefore absent, WARNING when it declares none
   | 'stale'               // sources changed since last sync (WARNING)
   | 'repo-behind'         // a config repo behind origin (WARNING)
   | 'repo-drift'          // a config repo diverged from the fleet baseline (WARNING)
   | 'version-skew'        // an agent version present elsewhere, absent here (WARNING)
   | 'orphan'              // orphan resources in a version home (WARNING)
+  | 'rc-secret-export'    // credential-shaped export in a shell rc file (WARNING)
+  | 'exec-policy'         // Windows execution policy blocks agents.ps1 (WARNING)
   | 'stale-cli';          // an older CLI that can't report per-version sign-in (WARNING)
 
 /** One prioritized finding, attributed to a device (and, when relevant, an agent
@@ -80,8 +85,13 @@ export interface DoctorFinding {
   device: string;
   /** Agent id, when the finding is about a specific agent (else undefined). */
   agent?: AgentId;
-  /** Version id, when about a specific installed version. */
+  /** Version id, when about a specific installed version. Absent on a finding
+   *  collapsed across versions — read {@link DoctorFinding.versions} instead. */
   version?: string;
+  /** Set only on a finding collapsed across several versions of one agent (the
+   *  same problem on each). The row renders `<agent> (N versions)` and the
+   *  remediation widens to the agent-wide sweep. */
+  versions?: string[];
   /** Human account label (email/org/opaque id), when known. */
   account?: string | null;
   /** One-line plain-English description of the problem. */
@@ -137,6 +147,10 @@ export function remediationFor(finding: DoctorFinding): string {
       return 'agents repo pull user';
     case 'version-skew':
       return idLabel ? `agents add ${idLabel}` : 'agents add <agent>@<version>';
+    case 'rc-secret-export':
+      return 'agents secrets add';
+    case 'exec-policy':
+      return 'Set-ExecutionPolicy -Scope CurrentUser RemoteSigned';
     case 'stale-cli':
       return 'upgrade';
   }
@@ -146,44 +160,39 @@ function finding(f: Omit<DoctorFinding, 'remediation'>): DoctorFinding {
   return { ...f, remediation: remediationFor({ ...f, remediation: '' }) };
 }
 
+/** One affected resource inside a group: `short` is the bare subject used in a
+ *  collapsed count line (`'git-guard'`, `command 'audit'`), `full` is the whole
+ *  sentence used when the group holds exactly one item. */
+interface ResourceItem {
+  short: string;
+  full: string;
+}
+
 /**
- * Emit findings for a list of same-kind resource names on ONE version: name the
- * first two individually (so a small gap is precise), then collapse the tail into
- * a single `+N more <noun>s <verb>` line so a version missing dozens doesn't flood
- * the section. `noun` is the collapse-line noun (hook / plugin / resource).
- * `preNamed` items already carry their full descriptor in the string (e.g.
- * `command 'audit' missing`, `skill 'x' changed upstream — re-sync`), so they pass
- * through unwrapped; otherwise `n` is a bare name and is wrapped as
- * `<noun> '<n>' missing`.
+ * Emit at most ONE finding for a list of same-kind resources on one version.
+ * A single affected resource is named in full (`hook 'git-guard' missing`); two
+ * or more collapse into a count plus the first two subjects
+ * (`32 hooks missing (incl. 'git-guard', 'rm-guard')`). Naming every item — the
+ * pre-RUSH-2069-review behavior — flooded the section with dozens of near-identical
+ * rows for one root cause; the count carries the same signal and `--fix` is the
+ * same command either way.
  */
-function emitCollapsed(
+function emitGroup(
   out: DoctorFinding[],
-  names: string[],
+  items: ResourceItem[],
   severity: FindingSeverity,
   kind: FindingKind,
   device: string,
   agent: AgentId,
   version: string,
   noun: string,
-  preNamed = false,
+  verb: 'missing' | 'drifted',
 ): void {
-  if (names.length === 0) return;
-  const NAMED = 2;
-  const named = names.slice(0, NAMED);
-  const rest = names.length - named.length;
-  for (const n of named) {
-    // For missing items `n` is the bare name → wrap it; for content-drift the
-    // caller already built the full descriptor, so pass it through.
-    const message = preNamed ? n : `${noun} '${n}' missing`;
-    out.push(finding({ severity, kind, device, agent, version, message }));
-  }
-  if (rest > 0) {
-    const verb = kind === 'content-drift' ? 'drifted' : 'missing';
-    out.push(finding({
-      severity, kind, device, agent, version,
-      message: `+${rest} more ${noun}${rest === 1 ? '' : 's'} ${verb}`,
-    }));
-  }
+  if (items.length === 0) return;
+  const message = items.length === 1
+    ? items[0].full
+    : `${items.length} ${noun}s ${verb} (incl. ${items.slice(0, 2).map((i) => i.short).join(', ')})`;
+  out.push(finding({ severity, kind, device, agent, version, message }));
 }
 
 // ─── local (this-machine) findings ──────────────────────────────────────────
@@ -201,6 +210,16 @@ export interface LocalFindingInputs {
   signIn: Record<string, FleetVersionSignIn[]>;
   /** Managed agents (installed versions) whose binary won't resolve. */
   cliMissing?: AgentId[];
+  /** Credential-shaped exports found in the user's shell rc files (RUSH-1968). */
+  rcSecrets?: RcSecretFinding[];
+  /** The effective PowerShell execution policy and the platform it was read on.
+   *  Only `win32` yields a finding — the `agents.ps1` launcher is Windows-only. */
+  execPolicy?: { platform: NodeJS.Platform; policy: string | null };
+  /** `<agent>@<version>` keys whose home is an isolated copy. Their findings are
+   *  never collapsed across versions: the agent-wide `agents doctor <agent> --fix`
+   *  sweep deliberately skips isolated copies, so a collapsed row would print a
+   *  remediation that does not fix them. */
+  isolatedVersions?: string[];
 }
 
 /**
@@ -212,6 +231,10 @@ export interface LocalFindingInputs {
 export function buildLocalFindings(input: LocalFindingInputs): DoctorFinding[] {
   const out: DoctorFinding[] = [];
   const device = input.device;
+  /** `<agent>@<version>` keys that already named their specific drift/missing
+   *  resources below — a `stale` row for those would repeat the same fact in
+   *  vaguer words, so it is suppressed. */
+  const detailedVersions = new Set<string>();
 
   // cli-missing (managed agent, binary broken) — critical.
   for (const agent of input.cliMissing ?? []) {
@@ -255,51 +278,62 @@ export function buildLocalFindings(input: LocalFindingInputs): DoctorFinding[] {
       (s) => s.agent === agent && s.version === version && s.status === 'never-synced',
     );
 
-    const missingHooks: string[] = [];
-    const missingPlugins: string[] = [];
-    const missingOther: string[] = [];
-    const drifted: string[] = [];
+    const missingHooks: ResourceItem[] = [];
+    const missingPlugins: ResourceItem[] = [];
+    const missingOther: ResourceItem[] = [];
+    const drifted: ResourceItem[] = [];
     for (const kind of ['commands', 'skills', 'hooks', 'rules', 'mcp', 'permissions', 'subagents', 'plugins', 'promptcuts'] as const) {
+      const singular = kind.replace(/s$/, '');
       for (const r of report.kinds[kind] ?? []) {
         if (r.status === 'missing') {
-          if (kind === 'hooks') missingHooks.push(r.name);
-          else if (kind === 'plugins') missingPlugins.push(r.name);
-          else missingOther.push(`${kind.replace(/s$/, '')} '${r.name}' missing`);
+          if (kind === 'hooks') missingHooks.push({ short: `'${r.name}'`, full: `hook '${r.name}' missing` });
+          else if (kind === 'plugins') missingPlugins.push({ short: `'${r.name}'`, full: `plugin '${r.name}' missing` });
+          else missingOther.push({ short: `${singular} '${r.name}'`, full: `${singular} '${r.name}' missing` });
         } else if (r.status === 'diff') {
-          drifted.push(
-            r.detail
-              ? `${kind.replace(/s$/, '')} '${r.name}' — ${r.detail}`
-              : `${kind.replace(/s$/, '')} '${r.name}' changed upstream — re-sync`,
-          );
+          drifted.push({
+            short: `${singular} '${r.name}'`,
+            full: r.detail
+              ? `${singular} '${r.name}' — ${r.detail}`
+              : `${singular} '${r.name}' changed upstream — re-sync`,
+          });
         }
       }
     }
 
     if (neverSynced) {
-      // Everything is "missing" because it was never synced — one line.
+      // Everything is "missing" because it was never synced — one line, and a
+      // CRITICAL one: nothing this version declares is actually installed.
       const total = missingHooks.length + missingPlugins.length + missingOther.length;
       if (total > 0) {
+        const breakdown = [
+          missingHooks.length ? `${missingHooks.length} hook${missingHooks.length === 1 ? '' : 's'}` : '',
+          missingPlugins.length ? `${missingPlugins.length} plugin${missingPlugins.length === 1 ? '' : 's'}` : '',
+        ].filter(Boolean).join(', ');
         out.push(finding({
-          severity: 'critical', kind: 'unwired-hook', device, agent, version,
-          message: `never synced — ${total} resource${total === 1 ? '' : 's'} (incl. ${missingHooks.length} hook${missingHooks.length === 1 ? '' : 's'}, ${missingPlugins.length} plugin${missingPlugins.length === 1 ? '' : 's'}) not installed`,
+          severity: 'critical', kind: 'never-synced', device, agent, version,
+          message: `never synced — ${total} resource${total === 1 ? '' : 's'}${breakdown ? ` (incl. ${breakdown})` : ''} not installed`,
         }));
       }
     } else {
-      // Synced-but-drifted: name a few missing hooks/plugins, collapse the rest.
-      emitCollapsed(out, missingHooks, 'critical', 'missing-hook', device, agent, version, 'hook');
-      emitCollapsed(out, missingPlugins, 'critical', 'missing-plugin', device, agent, version, 'plugin');
-      emitCollapsed(out, missingOther, 'warning', 'missing-resource', device, agent, version, 'resource', true);
-      emitCollapsed(out, drifted, 'warning', 'content-drift', device, agent, version, 'resource', true);
+      // Synced-but-drifted: one line per kind of gap on this version.
+      emitGroup(out, missingHooks, 'critical', 'missing-hook', device, agent, version, 'hook', 'missing');
+      emitGroup(out, missingPlugins, 'critical', 'missing-plugin', device, agent, version, 'plugin', 'missing');
+      emitGroup(out, missingOther, 'warning', 'missing-resource', device, agent, version, 'resource', 'missing');
+      emitGroup(out, drifted, 'warning', 'content-drift', device, agent, version, 'resource', 'drifted');
+      if (missingHooks.length + missingPlugins.length + missingOther.length + drifted.length > 0) {
+        detailedVersions.add(`${agent}@${version}`);
+      }
     }
   }
 
   // Sync status → stale (warning). A NEVER-SYNCED version already surfaced a
   // single collapsed critical above (its resources aren't installed at all), so
   // we don't ALSO emit a never-synced warning — that would double-report the same
-  // root cause. A stale version whose drift is only content (files present but
-  // changed) is a genuine standalone warning.
+  // root cause. Likewise a version that just listed its drifted/missing resources
+  // by name gets no vaguer `sources changed since last sync` row on top.
   for (const row of input.syncRows) {
     if (row.status === 'stale') {
+      if (detailedVersions.has(`${row.agent}@${row.version}`)) continue;
       out.push(finding({
         severity: 'warning', kind: 'stale', device, agent: row.agent, version: row.version,
         message: 'sources changed since last sync',
@@ -333,32 +367,150 @@ export function buildLocalFindings(input: LocalFindingInputs): DoctorFinding[] {
     }));
   }
 
-  // Orphans (warning).
-  for (const row of input.orphanRows) {
-    const parts: string[] = [];
-    if (row.commands) parts.push(`${row.commands} command${row.commands === 1 ? '' : 's'}`);
-    if (row.skills) parts.push(`${row.skills} skill${row.skills === 1 ? '' : 's'}`);
-    if (row.hooks) parts.push(`${row.hooks} hook${row.hooks === 1 ? '' : 's'}`);
-    out.push(finding({
-      severity: 'warning', kind: 'orphan', device, agent: row.agent, version: row.version,
-      message: `${parts.join(', ')} orphaned (cleanup only)`,
-    }));
-  }
+  // Orphans (warning) — ONE line for the whole device. Orphans are cleanup-only
+  // and `agents prune cleanup` fixes every version at once, so a row per version
+  // was the single largest block of noise in the readout for zero added action.
+  out.push(...orphanFinding(device, input.orphanRows));
+
+  // Credential-shaped exports in shell rc files (RUSH-1968) — a warning per class
+  // of fix: the file-store master key moves to its own file, everything else goes
+  // into `agents secrets`.
+  for (const f of rcSecretFindings(device, input.rcSecrets ?? [])) out.push(f);
+
+  // Windows execution policy blocking the generated agents.ps1 launcher.
+  const policyFinding = execPolicyFinding(device, input.execPolicy);
+  if (policyFinding) out.push(policyFinding);
 
   // Per-version sign-in → logged-out (critical, provable) / logout-unprovable
   // (warning). Signed-in versions produce no finding — the accounts line shows
   // them. Agents that can't be inspected never yield a logout finding.
   out.push(...signInToFindings(device, input.signIn));
 
+  return collapseAcrossVersions(out, new Set(input.isolatedVersions ?? []));
+}
+
+/**
+ * Fold every orphan row on a device into one warning. Returns `[]` when nothing
+ * is orphaned. Pure.
+ */
+function orphanFinding(device: string, rows: OrphanRow[]): DoctorFinding[] {
+  const affected = rows.filter((r) => r.commands + r.skills + r.hooks > 0);
+  if (affected.length === 0) return [];
+  const total = affected.reduce((n, r) => n + r.commands + r.skills + r.hooks, 0);
+  const where = affected.length === 1
+    ? `${affected[0].agent}@${affected[0].version}`
+    : `${affected.length} versions`;
+  return [finding({
+    severity: 'warning', kind: 'orphan', device,
+    message: `${total} orphaned resource${total === 1 ? '' : 's'} on ${where} (cleanup only)`,
+  })];
+}
+
+/**
+ * Warnings for credential-shaped exports in the user's shell rc files. The
+ * file-store master passphrase and ordinary credentials have different fixes, so
+ * they get one row each (never one per export — the count plus two examples
+ * carries the same signal). Pure.
+ */
+function rcSecretFindings(device: string, rc: RcSecretFinding[]): DoctorFinding[] {
+  if (rc.length === 0) return [];
+  const out: DoctorFinding[] = [];
+  const groups: Array<{ rows: RcSecretFinding[]; remediation: string }> = [
+    {
+      rows: rc.filter((f) => f.isMasterPassphrase),
+      remediation: 'move it to ~/.agents/.secrets-key/passphrase (chmod 600)',
+    },
+    { rows: rc.filter((f) => !f.isMasterPassphrase), remediation: 'agents secrets add' },
+  ];
+  for (const g of groups) {
+    if (g.rows.length === 0) continue;
+    const n = g.rows.length;
+    const examples = g.rows.slice(0, 2).map((f) => `${f.file}:${f.line} ${f.name}`).join(', ');
+    const what = g.rows[0].isMasterPassphrase
+      ? `file-store master key exported from a shell rc file`
+      : `${n} credential-shaped export${n === 1 ? '' : 's'} in shell rc files`;
+    out.push({
+      severity: 'warning', kind: 'rc-secret-export', device,
+      message: `${what} (${examples}) — readable by any same-user process; delete the export`,
+      remediation: g.remediation,
+    });
+  }
+  return out;
+}
+
+/**
+ * The Windows-only advisory: when the effective PowerShell execution policy
+ * blocks unsigned local scripts (`Restricted`/`AllSigned`), the generated
+ * `agents.ps1` launcher fails even though it is on PATH. The `agents.cmd`
+ * companion still works, so this is a warning and doctor never changes the
+ * policy itself. Returns null off Windows or on a permissive policy — pure, so
+ * both branches are testable without invoking PowerShell.
+ */
+function execPolicyFinding(
+  device: string,
+  execPolicy: LocalFindingInputs['execPolicy'],
+): DoctorFinding | null {
+  if (!execPolicy || execPolicy.platform !== 'win32') return null;
+  if (!blocksLocalScripts(execPolicy.policy)) return null;
+  return finding({
+    severity: 'warning', kind: 'exec-policy', device,
+    message: `PowerShell execution policy is ${execPolicy.policy} — it blocks the generated agents.ps1 launcher (agents.cmd still works)`,
+  });
+}
+
+/**
+ * Fold findings that say the SAME thing about several versions of one agent into
+ * a single row carrying `versions`, and widen its remediation to the agent-wide
+ * sweep (`agents doctor claude --fix` heals every non-isolated version in one
+ * go). Five identical `plugin 'code' — mirror missing` rows, one per installed
+ * claude, is the same fact five times.
+ *
+ * Isolated copies never merge: the agent-wide sweep deliberately skips them
+ * (`runFix`), so folding one in would print a command that leaves it broken.
+ * Findings with no agent (repo-behind, rc-secret-export, …) never merge either —
+ * their `version` field is an alias, not a version. Pure; input order is kept.
+ */
+export function collapseAcrossVersions(
+  findings: DoctorFinding[],
+  isolated: Set<string>,
+): DoctorFinding[] {
+  const groups = new Map<string, DoctorFinding[]>();
+  const order: string[] = [];
+  for (const f of findings) {
+    const mergeable = f.agent && f.version && !isolated.has(`${f.agent}@${f.version}`);
+    // A non-mergeable finding gets a unique key so it passes through untouched.
+    const key = mergeable
+      ? `${f.device} ${f.agent} ${f.kind} ${f.severity} ${f.message}`
+      : `${order.length}`;
+    if (!groups.has(key)) { groups.set(key, []); order.push(key); }
+    groups.get(key)!.push(f);
+  }
+  const out: DoctorFinding[] = [];
+  for (const key of order) {
+    const group = groups.get(key)!;
+    if (group.length === 1) { out.push(group[0]); continue; }
+    const versions = group.map((f) => f.version!);
+    const merged: DoctorFinding = {
+      ...group[0], version: undefined, versions, remediation: '',
+    };
+    merged.remediation = remediationFor(merged);
+    out.push(merged);
+  }
   return out;
 }
 
 /**
  * Map a device's per-version sign-in into logout findings: a PROVABLE logout is
  * CRITICAL, an unprovable one is a hedged WARNING ("could not verify sign-in"),
- * and a signed-in version yields nothing. An agent with no inspectable identity
- * never appears (its rows are never provable and we skip the hedge too — a
- * cursor/antigravity "logout" is meaningless). Pure.
+ * and a signed-in version yields nothing.
+ *
+ * An agent with no inspectable identity never appears at all — not even as the
+ * hedged warning. That is the `!supportsAccountInspection` set (cursor, openclaw,
+ * copilot, amp, kiro, goose, hermes): agents-cli knows no credential file for
+ * them, so "logged out" is unknowable, and silence beats a false claim. The eight
+ * inspectable harnesses (claude, codex, gemini, opencode, antigravity, grok,
+ * kimi, droid) each have a credential path in `CREDENTIAL_FILE_SEGMENTS` and DO
+ * yield a logout finding when it is genuinely absent. Pure.
  */
 export function signInToFindings(
   device: string,
@@ -439,12 +591,17 @@ function deviceSeverityRank(findings: DoctorFinding[]): number {
   return crit * 1000 + warn;
 }
 
+/** `claude @2.1.170` for one version, `claude (5 versions)` for a collapsed row,
+ *  the bare agent id when neither applies. */
+function subjectLabel(f: DoctorFinding): string {
+  if (!f.agent) return '';
+  if (f.versions && f.versions.length > 1) return `${f.agent} (${f.versions.length} versions)`;
+  return f.version ? `${f.agent} @${f.version}` : f.agent;
+}
+
 function critLabel(f: DoctorFinding): { left: string; account: string; message: string } {
-  const idLabel = f.agent && f.version
-    ? `${f.agent} @${f.version}`
-    : f.agent ?? '';
   return {
-    left: idLabel,
+    left: subjectLabel(f),
     account: f.account ?? '',
     message: f.message,
   };
@@ -571,12 +728,18 @@ export function renderFindings(
 /** The left-hand subject label for a warning row (agent@version, repo alias, or
  *  a short category). */
 function warningSubject(f: DoctorFinding): string {
-  if (f.kind === 'repo-behind') return '~/.agents';
+  // Both the user and system repos live under ~/.agents — name which one, or the
+  // two rows read as duplicates of each other.
+  if (f.kind === 'repo-behind') return f.version ? `~/.agents (${f.version})` : '~/.agents';
   if (f.kind === 'repo-drift') return 'config repo';
-  if (f.kind === 'stale-cli') return 'this device';
+  // Never "this device" — the row already sits under its own `▸ <device>` block,
+  // so a self-referential subject reads as the local machine in fleet mode.
+  if (f.kind === 'stale-cli') return 'agents-cli';
+  if (f.kind === 'orphan') return 'orphans';
+  if (f.kind === 'rc-secret-export') return 'shell rc';
+  if (f.kind === 'exec-policy') return 'PowerShell';
   if (f.kind === 'missing-resource' && !f.agent) return 'fleet gap';
-  if (f.agent && f.version) return `${f.agent} @${f.version}`;
-  if (f.agent) return f.agent;
+  if (f.agent) return subjectLabel(f);
   return f.kind;
 }
 

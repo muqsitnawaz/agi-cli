@@ -108,13 +108,44 @@ other-missing-kinds / **unprovable-logout** are **warnings**. The findings model
 builders, `remediationFor`, and the pure `renderFindings` live in
 [`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts).
 
+**One root cause is one line.** A readout the user cannot scan is as useless as no
+readout, so the builders de-duplicate before rendering — on a real machine this
+takes ~57 rows down to ~16, and the rules are unit-pinned in
+`doctor-findings.test.ts`:
+
+- **Per version, per kind, one row.** `emitGroup` names a lone resource in full
+  (`hook 'git-guard' missing`) and otherwise emits a count plus two examples
+  (`32 hooks missing (incl. 'a', 'b')`). Never one row per resource.
+- **Per agent, one row across versions.** `collapseAcrossVersions` folds findings
+  with the same `(device, agent, kind, severity, message)` into a single row
+  carrying `versions`, rendered `claude (5 versions)`, and widens the remediation
+  to the agent-wide sweep. **Isolated copies are excluded** — `runFix` skips them,
+  so folding one in would print a command that leaves it broken; the caller passes
+  `isolatedVersions` from `isVersionIsolated`.
+- **Orphans are one line per machine.** They are cleanup-only and
+  `agents prune cleanup` fixes every version at once.
+- **No vaguer restatement.** A version that just listed its drifted/missing
+  resources gets no `sources changed since last sync` row on top, and a
+  never-synced version reports one critical (`agents sync <agent>@<version>
+  --yes`) instead of one per absent resource.
+
+**The two pre-RUSH-2069 advisories are findings, not separate blocks.**
+Credential-shaped exports in shell rc files (`scanUserRcFiles`, RUSH-1968) and the
+Windows execution policy that blocks `agents.ps1` (`blocksLocalScripts`) enter
+through `buildLocalFindings` as `rc-secret-export` / `exec-policy` warnings. They
+are inputs (`rcSecrets`, `execPolicy`), not probes, so the module stays pure and
+both branches are testable without a shell or PowerShell.
+
 **Sign-in is per installed VERSION, and a logged-out claim must be provable.**
 [`credentialPresence(agent, versionHome)`](src/lib/agents.ts) splits a credential's
 existence into the per-version home and the active/global HOME; a logged-out
 critical is emitted only when BOTH are absent (`provable = !perVersion && !active`).
 A version sharing the global login is signed in, not out; an agent with no
-inspectable identity (`!supportsAccountInspection` — antigravity, cursor) never
-yields a logout finding. Login remediation is version-targeted via
+inspectable identity (`!supportsAccountInspection` — cursor, openclaw, copilot,
+amp, kiro, goose, hermes) never yields a logout finding, not even the hedged
+warning. The eight harnesses that DO have a credential path in
+`CREDENTIAL_FILE_SEGMENTS` (claude, codex, gemini, opencode, antigravity, grok,
+kimi, droid) are inspectable and can report logged-out. Login remediation is version-targeted via
 `agents run <agent>@<version>` + the harness-native login (`loginHint`) — but ONLY
 for the per-version-isolated set (claude/codex/grok/kimi/opencode/copilot);
 gemini/antigravity/droid/cursor share their login, so the fix says so instead of
