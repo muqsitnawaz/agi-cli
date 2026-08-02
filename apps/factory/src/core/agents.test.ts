@@ -361,7 +361,7 @@ describe('buildAgentLaunchCommand', () => {
 
   test('remote host launch forwards the workspace cwd for CLI portability rewriting', () => {
     const cmd = buildAgentLaunchCommand(
-      'codex', null, undefined, undefined, undefined, undefined, undefined, 'mac-mini', '/Users/muqsit/src/agents-cli',
+      'codex', null, undefined, undefined, undefined, undefined, undefined, 'mac-mini', false, '/Users/muqsit/src/agents-cli',
     );
     expect(cmd).toContain("--host 'mac-mini'");
     expect(cmd).toContain("--cwd '/Users/muqsit/src/agents-cli'");
@@ -369,7 +369,7 @@ describe('buildAgentLaunchCommand', () => {
 
   test('local launch does not emit an explicit cwd', () => {
     const cmd = buildAgentLaunchCommand(
-      'codex', null, undefined, undefined, undefined, undefined, undefined, undefined, '/Users/muqsit/src/agents-cli',
+      'codex', null, undefined, undefined, undefined, undefined, undefined, undefined, false, '/Users/muqsit/src/agents-cli',
     );
     expect(cmd).not.toContain('--cwd');
   });
@@ -388,6 +388,12 @@ describe('buildAgentLaunchCommand', () => {
     );
     expect(cmd).toContain("--host 'yosemite-s0'");
     expect(cmd).toContain('--strategy balanced');
+  });
+
+  test('explicit local launch suppresses automatic device selection', () => {
+    expect(buildAgentLaunchCommand(
+      'codex', null, undefined, undefined, undefined, 'balanced', undefined, undefined, true,
+    )).toBe('agents run codex --interactive --strategy balanced --mode auto');
   });
 
   test('a pinned version on a host launch suppresses --strategy (pin overrides balance)', () => {

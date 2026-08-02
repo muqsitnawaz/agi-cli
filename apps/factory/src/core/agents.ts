@@ -170,6 +170,7 @@ export function buildAgentLaunchCommand(
   strategy?: RunStrategy,
   mode?: AgentLaunchMode,
   host?: string,
+  local = false,
   cwd?: string,
 ): string {
   const agentSpec = pinnedVersion ? `${agentKey}@${pinnedVersion}` : agentKey;
@@ -183,7 +184,7 @@ export function buildAgentLaunchCommand(
   }
   // Unpinned, no explicit host: affinity-pick device via --device auto.
   // Explicit Pick Host / @version pin skip this.
-  if (!host && !pinnedVersion) {
+  if (!host && !pinnedVersion && !local) {
     command += ' --device auto';
   }
   if (sessionId && agentKey === 'claude') {
