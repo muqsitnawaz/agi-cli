@@ -1,4 +1,8 @@
 import { hostScore } from './launchHost';
+import { AutoLaunchPreference, isAutoLaunchEnabled, isAutoLaunchPreferred } from './deviceAutoLaunch';
+
+export type { AutoLaunchPreference };
+export { isAutoLaunchEnabled, isAutoLaunchPreferred };
 
 export interface LaunchHistoryEntry {
   launches: number;
@@ -77,25 +81,35 @@ function historyPreference(entry: LaunchHistoryEntry | undefined, now: number): 
 }
 
 /**
- * Rank a warm cache without I/O. Unreachable, offline, stale, or agent-unusable
- * devices are excluded before history and load are considered.
+ * Rank a warm cache without I/O. Unreachable, offline, stale, agent-unusable,
+ * or disabled devices are excluded before history and load are considered.
+ * Preferred devices receive a ranking bonus.
  */
 export function pickCachedLaunchHost(
   agentKey: string,
   cache: LaunchHealthCache | undefined,
   history: LaunchHistory,
+  preferences: Record<string, AutoLaunchPreference> = {},
   now = Date.now(),
 ): string | null {
   if (!cache || now - cache.refreshedAt > LAUNCH_HEALTH_MAX_AGE_MS) return null;
   const eligible = cache.devices.filter(
-    (device) => device.online && device.sshReachable && device.usableAgents[agentKey] === true,
+    (device) =>
+      device.online &&
+      device.sshReachable &&
+      device.usableAgents[agentKey] === true &&
+      isAutoLaunchEnabled(preferences, device.name),
   );
   if (eligible.length === 0) return null;
 
+  const preferenceBonus = (device: CachedLaunchDevice): number => {
+    return isAutoLaunchPreferred(preferences, device.name) ? 20 : 0;
+  };
+
   let best = eligible[0];
-  let bestRank = hostScore(best) - historyPreference(history[normalized(best.name)], now);
+  let bestRank = hostScore(best) - historyPreference(history[normalized(best.name)], now) - preferenceBonus(best);
   for (const device of eligible.slice(1)) {
-    const rank = hostScore(device) - historyPreference(history[normalized(device.name)], now);
+    const rank = hostScore(device) - historyPreference(history[normalized(device.name)], now) - preferenceBonus(device);
     if (rank < bestRank) {
       best = device;
       bestRank = rank;
