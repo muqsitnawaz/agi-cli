@@ -384,6 +384,17 @@ git -C "\$REPO_ROOT" worktree add --quiet --detach "\$WT" "v$1" \\
   || { echo "could not create home-base publish worktree at \$WT" >&2; exit 1; }
 [ -z "\$(git -C "\$WT" status --short | grep '^ D')" ] \\
   || { echo "home-base publish worktree \$WT is incomplete -- refusing to build" >&2; exit 1; }
+# The keychain helper needs bin/embedded.provisionprofile, which is gitignored
+# (.gitignore /apps/cli/bin/) and so is NOT in the tag's tree -- a fresh detached
+# worktree lacks it. Copy it from the home base's own checkout so the signed
+# helper build finds it; without it build-keychain-helper.sh dies with
+# "Missing ... embedded.provisionprofile. Generate at developer.apple.com ...".
+mkdir -p "\$WT/apps/cli/bin"
+if [ -f "\$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" ]; then
+  cp "\$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" "\$WT/apps/cli/bin/embedded.provisionprofile"
+else
+  echo "warn: no bin/embedded.provisionprofile in the home-base checkout -- keychain helper sign may fail" >&2
+fi
 cd "\$WT/apps/cli"
 scripts/release.sh $1 --home-base-phase
 SNIPPET
