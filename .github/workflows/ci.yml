@@ -79,9 +79,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then
-            for shard in 1 2 3; do
-              node ./node_modules/vitest/vitest.mjs run --shard=$shard/3 --maxWorkers=1 --no-file-parallelism
-            done
+            echo "Windows release leg stops after install + native deps + build; full Vitest remains on Linux and path-filtered Windows gates."
           else
             bun run test
           fi

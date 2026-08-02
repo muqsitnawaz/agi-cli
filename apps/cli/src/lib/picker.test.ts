@@ -1,6 +1,7 @@
 import { stripVTControlCharacters } from 'node:util';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { spawn } from '@homebridge/node-pty-prebuilt-multiarch';
 import { describe, expect, it } from 'vitest';
 import { limitPreviewHeight } from './picker.js';
 
@@ -37,11 +38,7 @@ describe('limitPreviewHeight', () => {
 });
 
 describe('multiItemPicker', () => {
-  const itWithPty =
-    process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true' ? it.skip : it;
-
-  itWithPty('renders a supplied preview in its initial terminal frame', async () => {
-    const { spawn } = await import('@homebridge/node-pty-prebuilt-multiarch');
+  it('renders a supplied preview in its initial terminal frame', async () => {
     const pickerUrl = pathToFileURL(path.resolve('src/lib/picker.ts')).href;
     const program = `
       import { multiItemPicker } from ${JSON.stringify(pickerUrl)};
