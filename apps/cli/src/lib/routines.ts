@@ -250,6 +250,13 @@ export interface JobConfig {
    * RUSH-2020.
    */
   actor?: string;
+  /**
+   * Extra environment variables injected into the spawned process. In a
+   * sandboxed run these are applied on top of the overlay HOME, so they can
+   * point tools at the real user home (e.g. `HOME=/home/muqsit` so the `linear`
+   * CLI finds `~/.linear-cli/config.json`).
+   */
+  env?: Record<string, string>;
 }
 
 /** Metadata for a single job execution, persisted as JSON in the run directory. */

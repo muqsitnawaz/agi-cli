@@ -687,8 +687,8 @@ export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<Ru
 
   const baseEnv = injectRoutineActor(
     useSandbox
-      ? buildSpawnEnv(overlayHome!)
-      : { ...process.env } as Record<string, string>,
+      ? buildSpawnEnv(overlayHome!, config.env)
+      : { ...process.env, ...(config.env || {}) } as Record<string, string>,
     config,
   );
 
@@ -1242,8 +1242,8 @@ export async function executeJobDetached(config: JobConfig, hooks?: RoutineHooks
 
   const baseEnv = injectRoutineActor(
     useSandbox
-      ? buildSpawnEnv(overlayHome!)
-      : { ...process.env } as Record<string, string>,
+      ? buildSpawnEnv(overlayHome!, config.env)
+      : { ...process.env, ...(config.env || {}) } as Record<string, string>,
     config,
   );
   const spawnEnv = dispatchesViaAgentsRun(config)

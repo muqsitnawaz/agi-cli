@@ -37,6 +37,8 @@ export interface WebhookHandler {
     workflow?: string;
     command?: string;
     prompt?: string;
+    /** Extra environment variables for agent/workflow/command actions. */
+    env?: Record<string, string>;
   };
   routine?: string;
 }
@@ -356,6 +358,7 @@ async function executeHandlerAction(
       prompt: substitutedPrompt,
       ...(handler.run.agent ? { agent: handler.run.agent } : { workflow: handler.run.workflow! }),
       ...(handler.devices ? { devices: handler.devices } : {}),
+      ...(handler.run.env ? { env: handler.run.env } : {}),
     };
     const dispatch = handler.run.agent
       ? (opts.dispatchAgent ?? dispatchDefault)
