@@ -44,6 +44,26 @@ describe('pickCachedLaunchHost', () => {
     stale.refreshedAt = NOW - LAUNCH_HEALTH_MAX_AGE_MS - 1;
     expect(pickCachedLaunchHost('gemini', stale, {}, NOW)).toBeNull();
   });
+
+  test('excludes devices disabled for auto-launch', () => {
+    const health = cache([
+      { name: 'disabled', online: true, sshReachable: true, running: 0, loadAvg1: 1, memPercent: 20, usableAgents: { claude: true }, fetchedAt: NOW },
+      { name: 'enabled', online: true, sshReachable: true, running: 3, loadAvg1: 1, memPercent: 20, usableAgents: { claude: true }, fetchedAt: NOW },
+    ]);
+    const preferences = { disabled: { enabled: false } };
+
+    expect(pickCachedLaunchHost('claude', health, {}, preferences, NOW)).toBe('enabled');
+  });
+
+  test('boosts preferred devices in ranking', () => {
+    const health = cache([
+      { name: 'busy', online: true, sshReachable: true, running: 10, loadAvg1: 1, memPercent: 20, usableAgents: { claude: true }, fetchedAt: NOW },
+      { name: 'preferred', online: true, sshReachable: true, running: 10, loadAvg1: 1, memPercent: 20, usableAgents: { claude: true }, fetchedAt: NOW },
+    ]);
+    const preferences = { preferred: { preferred: true } };
+
+    expect(pickCachedLaunchHost('claude', health, {}, preferences, NOW)).toBe('preferred');
+  });
 });
 
 test('recordLaunch preserves per-device frequency, recency, and success', () => {
