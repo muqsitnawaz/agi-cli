@@ -889,6 +889,7 @@ Typical workflow:
     .description('Allow a registered device to be auto-picked by Factory agent launches.')
     .action(async (name: string) => {
       try {
+        await mustGetDevice(name);
         await setAutoLaunchEnabled(name, true);
         console.log(chalk.green(`Enabled '${name}'`) + chalk.gray(' for Factory auto-launch.'));
       } catch (err: any) {
@@ -902,6 +903,7 @@ Typical workflow:
     .description('Exclude a registered device from Factory auto-launch. It can still be picked manually via (Pick Host).')
     .action(async (name: string) => {
       try {
+        await mustGetDevice(name);
         await setAutoLaunchEnabled(name, false);
         console.log(chalk.green(`Disabled '${name}'`) + chalk.gray(' for Factory auto-launch.'));
       } catch (err: any) {
@@ -915,6 +917,7 @@ Typical workflow:
     .description('Boost a registered device in Factory auto-launch ranking.')
     .action(async (name: string) => {
       try {
+        await mustGetDevice(name);
         await setAutoLaunchPreferred(name, true);
         console.log(chalk.green(`Preferred '${name}'`) + chalk.gray(' for Factory auto-launch.'));
       } catch (err: any) {
@@ -928,6 +931,7 @@ Typical workflow:
     .description('Remove the auto-launch preference boost from a device.')
     .action(async (name: string) => {
       try {
+        await mustGetDevice(name);
         await setAutoLaunchPreferred(name, false);
         console.log(chalk.green(`No longer preferring '${name}'`) + chalk.gray(' for Factory auto-launch.'));
       } catch (err: any) {

@@ -102,17 +102,19 @@ export function pickCachedLaunchHost(
   );
   if (eligible.length === 0) return null;
 
-  const preferenceBonus = (device: CachedLaunchDevice): number => {
-    return isAutoLaunchPreferred(preferences, device.name) ? 20 : 0;
-  };
+  // The preference bonus lives inside hostScore (launchHost.ts) so the balanced
+  // pool pick applies it identically — pass the flag, don't re-implement it.
+  const rank = (device: CachedLaunchDevice): number =>
+    hostScore({ ...device, preferred: isAutoLaunchPreferred(preferences, device.name) }) -
+    historyPreference(history[normalized(device.name)], now);
 
   let best = eligible[0];
-  let bestRank = hostScore(best) - historyPreference(history[normalized(best.name)], now) - preferenceBonus(best);
+  let bestRank = rank(best);
   for (const device of eligible.slice(1)) {
-    const rank = hostScore(device) - historyPreference(history[normalized(device.name)], now) - preferenceBonus(device);
-    if (rank < bestRank) {
+    const deviceRank = rank(device);
+    if (deviceRank < bestRank) {
       best = device;
-      bestRank = rank;
+      bestRank = deviceRank;
     }
   }
   return best.name;
