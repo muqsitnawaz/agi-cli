@@ -427,12 +427,20 @@
         }
       },
       {
+        "command": "agents.newClaudeAuto",
+        "title": "Agents: New Claude (Auto)"
+      },
+      {
         "command": "agents.newCodexPickHost",
         "title": "Agents: New Codex (Pick Host)",
         "icon": {
           "light": "assets/chatgpt.png",
           "dark": "assets/chatgpt.png"
         }
+      },
+      {
+        "command": "agents.newCodexAuto",
+        "title": "Agents: New Codex (Auto)"
       },
       {
         "command": "agents.newGeminiPickHost",
@@ -443,12 +451,20 @@
         }
       },
       {
+        "command": "agents.newGeminiAuto",
+        "title": "Agents: New Gemini (Auto)"
+      },
+      {
         "command": "agents.newOpenCodePickHost",
         "title": "Agents: New OpenCode (Pick Host)",
         "icon": {
           "light": "assets/opencode.png",
           "dark": "assets/opencode.png"
         }
+      },
+      {
+        "command": "agents.newOpenCodeAuto",
+        "title": "Agents: New OpenCode (Auto)"
       },
       {
         "command": "agents.newCursorPickHost",
@@ -459,12 +475,20 @@
         }
       },
       {
+        "command": "agents.newCursorAuto",
+        "title": "Agents: New Cursor (Auto)"
+      },
+      {
         "command": "agents.newAntigravityPickHost",
         "title": "Agents: New Antigravity (Pick Host)",
         "icon": {
           "light": "assets/antigravity.png",
           "dark": "assets/antigravity.png"
         }
+      },
+      {
+        "command": "agents.newAntigravityAuto",
+        "title": "Agents: New Antigravity (Auto)"
       },
       {
         "command": "agents.newGrokPickHost",
@@ -475,6 +499,10 @@
         }
       },
       {
+        "command": "agents.newGrokAuto",
+        "title": "Agents: New Grok (Auto)"
+      },
+      {
         "command": "agents.newKimiPickHost",
         "title": "Agents: New Kimi (Pick Host)",
         "icon": {
@@ -483,12 +511,20 @@
         }
       },
       {
+        "command": "agents.newKimiAuto",
+        "title": "Agents: New Kimi (Auto)"
+      },
+      {
         "command": "agents.newDroidPickHost",
         "title": "Agents: New Droid (Pick Host)",
         "icon": {
           "light": "assets/droid.png",
           "dark": "assets/droid.png"
         }
+      },
+      {
+        "command": "agents.newDroidAuto",
+        "title": "Agents: New Droid (Auto)"
       },
       {
         "command": "agents.newAgentPickHost",

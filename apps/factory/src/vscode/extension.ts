@@ -14,6 +14,14 @@ import { AgentSettings, hasLoginEnabled, PromptEntry, QUICK_LAUNCH_SLOT_KEYS, ge
 import { listRegisteredDevices, countRunningAgents, fetchDeviceStats, resolveSecret } from './deviceHealth.vscode';
 import { normalizeHost } from '../core/remoteSessions';
 import { pickBestHost, deviceHasUsableVersion, resolveBalancePool, DeviceLoad } from '../core/launchHost';
+import {
+  LAUNCH_HEALTH_KEY,
+  LAUNCH_HISTORY_KEY,
+  LaunchHealthCache,
+  LaunchHistory,
+  pickCachedLaunchHost,
+  recordLaunch,
+} from '../core/launchHistory';
 import * as settings from './settings.vscode';
 import * as swarm from './swarm.vscode';
 import {
@@ -322,6 +330,63 @@ function buildClaudeLaunchCommand(
 // --- Fleet-aware launch: host targeting -----------------------------------
 // Sentinel a QuickPick/slot uses to mean "auto-pick the least-busy device".
 const BALANCED_HOST = 'balanced';
+const AUTO_HOST_AGENT_KEYS = new Set(
+  BUILT_IN_AGENTS.filter((agent) => agent.key !== 'shell' && agent.key !== 'droid').map((agent) => agent.key),
+);
+
+async function refreshLaunchHealthCache(context: vscode.ExtensionContext): Promise<void> {
+  const devices = await listRegisteredDevices();
+  const localName = normalizeHost(os.hostname());
+  const health = await Promise.all(devices
+    .filter((device) => normalizeHost(device.name) !== localName)
+    .map(async (device) => {
+      if (!device.online) {
+        return {
+          name: device.name,
+          online: false,
+          sshReachable: false,
+          running: 0,
+          usableAgents: {},
+          fetchedAt: Date.now(),
+        };
+      }
+      const creds = device.secretRef ? await resolveSecret(device.secretRef) : {};
+      const [stats, running, usable] = await Promise.all([
+        fetchDeviceStats(device.host, { isLocal: false, identityFile: creds.identityFile, user: creds.user || device.user }),
+        countRunningAgents(device.name, { isLocal: false }),
+        Promise.all([...AUTO_HOST_AGENT_KEYS].map(async (agentKey) => [agentKey, await hostHasUsableVersion(device.name, agentKey)] as const)),
+      ]);
+      return {
+        name: device.name,
+        online: true,
+        sshReachable: stats.reachable,
+        running,
+        loadAvg1: stats.loadAvg1,
+        memPercent: stats.memPercent,
+        usableAgents: Object.fromEntries(usable),
+        fetchedAt: stats.fetchedAt,
+      };
+    }));
+  await context.globalState.update(LAUNCH_HEALTH_KEY, { devices: health, refreshedAt: Date.now() } satisfies LaunchHealthCache);
+}
+
+function refreshLaunchHealthCacheInBackground(context: vscode.ExtensionContext): void {
+  void refreshLaunchHealthCache(context).catch((err) => console.error('[launchAgent] health-cache refresh failed:', err));
+}
+
+function resolveCachedAutoHost(context: vscode.ExtensionContext, agentKey: string): string | undefined {
+  const startedAt = performance.now();
+  const cache = context.globalState.get<LaunchHealthCache>(LAUNCH_HEALTH_KEY);
+  const history = context.globalState.get<LaunchHistory>(LAUNCH_HISTORY_KEY, {});
+  const host = pickCachedLaunchHost(agentKey, cache, history) ?? undefined;
+  console.log(`[launchAgent] cached ${agentKey} host pick took ${(performance.now() - startedAt).toFixed(1)}ms`);
+  return host;
+}
+
+async function saveLaunchHistory(context: vscode.ExtensionContext, device: string, success: boolean): Promise<void> {
+  const history = context.globalState.get<LaunchHistory>(LAUNCH_HISTORY_KEY, {});
+  await context.globalState.update(LAUNCH_HISTORY_KEY, recordLaunch(history, device, success));
+}
 
 // Resolve the best online device for a balanced launch. `pool` restricts the
 // candidate set (undefined/empty = every online device except this machine).
@@ -491,6 +556,8 @@ interface LaunchAgentOpts {
   pickHost?: boolean;
   // Keep the launch local (this Mac) instead of auto-picking a fleet host.
   local?: boolean;
+  // Use only persisted launch history + cached fleet health to choose instantly.
+  autoHost?: boolean;
 }
 
 // Pick the harness automatically. When a host is chosen we only consider harnesses
@@ -546,9 +613,24 @@ async function launchAgent(context: vscode.ExtensionContext, opts: LaunchAgentOp
     return;
   }
 
+  if (opts.autoHost && !AUTO_HOST_AGENT_KEYS.has(agentKey)) {
+    vscode.window.showInformationMessage(`${getBuiltInByKey(agentKey)?.title ?? agentKey} does not expose account health; pick a host instead.`);
+    const picked = await pickLaunchHost(`New ${getBuiltInByKey(agentKey)?.title ?? agentKey} — run on…`, agentKey);
+    if (picked.cancelled) return;
+    host = picked.host;
+  }
+
+  if (opts.autoHost && AUTO_HOST_AGENT_KEYS.has(agentKey)) {
+    host = resolveCachedAutoHost(context, agentKey);
+    if (!host) {
+      vscode.window.showWarningMessage(`No cached SSH-reachable device has a signed-in, non-throttled ${agentKey} version — running locally.`);
+      refreshLaunchHealthCacheInBackground(context);
+    }
+  }
+
   // 3. Auto host (agent-aware least-busy) only when the caller neither pinned a
   //    host nor asked to pick one nor forced local.
-  if (host === undefined && !opts.pickHost && !opts.local) {
+  if (host === undefined && !opts.pickHost && !opts.local && !opts.autoHost) {
     host = await resolveBalancedHost(undefined, agentKey);
   }
 
@@ -563,7 +645,13 @@ async function launchAgent(context: vscode.ExtensionContext, opts: LaunchAgentOp
   const strategy: RunStrategy | undefined =
     (STRATEGY_LAUNCH_AGENTS as readonly string[]).includes(agentKey) ? 'balanced' : undefined;
 
-  await openSingleAgent(context, agentConfig, undefined, undefined, strategy, host);
+  let launched = false;
+  try {
+    await openSingleAgent(context, agentConfig, undefined, undefined, strategy, host);
+    launched = true;
+  } finally {
+    await saveLaunchHistory(context, host ?? 'local', launched);
+  }
 
   const hostLabel = host ? ` on ${host}` : '';
   const stratLabel = strategy === 'balanced' ? ' (balanced)' : '';
@@ -1281,6 +1369,12 @@ export async function activate(context: vscode.ExtensionContext) {
   // Run lightweight first-setup if needed
   await maybeRunFirstSetup(context);
 
+  // Warm the persisted auto-launch cache away from the command path. Refreshes
+  // are deliberately fire-and-forget: opening Factory must not wait on SSH.
+  refreshLaunchHealthCacheInBackground(context);
+  const launchHealthTimer = setInterval(() => refreshLaunchHealthCacheInBackground(context), 60_000);
+  context.subscriptions.push(new vscode.Disposable(() => clearInterval(launchHealthTimer)));
+
   // Open Dashboard on startup if enabled (welcome screen)
   const agentSettings = settings.getSettings(context);
   if (agentSettings.showWelcomeScreen) {
@@ -1603,6 +1697,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // For each non-shell agent:
   //   New <Harness>              -> balanced version, this Mac
   //   New <Harness> (Pick Host)  -> pick a device first, then balanced version
+  //   New <Harness> (Auto)       -> instant cached device pick, balanced version
   // There is no version picker, no pinned/latest variant, no per-strategy trio:
   // the version/account is ALWAYS chosen by balanced rotation (token-usage-aware).
   for (const def of BUILT_IN_AGENTS) {
@@ -1621,6 +1716,9 @@ export async function activate(context: vscode.ExtensionContext) {
     );
     context.subscriptions.push(
       vscode.commands.registerCommand(`${def.commandId}PickHost`, () => launchAgent(context, { agentKey: def.key, pickHost: true }))
+    );
+    context.subscriptions.push(
+      vscode.commands.registerCommand(`${def.commandId}Auto`, () => launchAgent(context, { agentKey: def.key, autoHost: true }))
     );
   }
 

@@ -6,6 +6,8 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
+- **Every built-in harness now has a fast `New <Harness> (Auto)` launch command.** Auto launch ranks a persisted warm cache by successful recent device history plus cached load, memory, and running-agent count; it excludes offline, SSH-unreachable, signed-out, and throttled devices without performing SSH on the command path. Every launch updates per-device history, a cold/no-match cache warns and launches locally, and Droid explains that account health is unavailable before opening the host picker. Auto-supported harnesses launch with balanced account rotation. Source: `apps/factory/src/core/launchHistory.ts`, `apps/factory/src/vscode/extension.ts`, `apps/factory/package.json`.
+
 ## [0.9.301] - 2026-08-02
 
 - **`scripts/release.sh` now finds the machine that can publish instead of failing on the one you happen to be on.** The marketplace PATs live in the `vs-marketplace` secrets bundle on a single box, and tokens are never copied between hosts, so a release invoked from anywhere else died at `Error: vsce not installed` (or later, at the token check) with no path forward. The script now probes for that bundle — this box first, then `zion`, then `mac-mini` — and when it is elsewhere, re-invokes itself there over `agents ssh` against a **clean clone of the same commit**, so no host's working tree is touched and the vsix can't pick up local edits. `vsce`/`ovsx` are treated as tools rather than blockers and installed on demand. New flags: `--host <name>` pins the publish box, `--here` refuses to route (fails loudly instead). Source: `apps/factory/scripts/release.sh`.
