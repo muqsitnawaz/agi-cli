@@ -43,6 +43,22 @@ function homeRemainder(p: string): string | null {
 }
 
 /**
+ * Derive the remote directory to mirror from the local cwd, for a host run the
+ * caller gave no `--cwd`/`--remote-cwd`.
+ *
+ * Without this a `--host` run lands in the remote `$HOME`, so an agent launched
+ * from a repo starts with no project context and the user has to `cd` by hand.
+ * Only a cwd under the LOCAL home is mirrored — that is the part with a
+ * meaningful remote analogue (`~/src/x` re-roots onto the remote home). A path
+ * outside home returns undefined: `/opt/thing` on this box says nothing about
+ * the target's filesystem, so the run keeps the remote home.
+ */
+export function deriveMirroredCwd(localCwd: string): string | undefined {
+  const portable = toRemotePortable(localCwd);
+  return homeRemainder(portable) === null ? undefined : portable;
+}
+
+/**
  * Build a `cd <dir> && ` prefix that resolves on the REMOTE host.
  *
  * A `~`/`$HOME`-anchored path must resolve against the REMOTE user's home, not
@@ -59,22 +75,6 @@ function homeRemainder(p: string): string | null {
  * run. An explicit `--cwd`/`--remote-cwd` is never mirrored: the user named that
  * directory, so a missing one must surface as a `cd` error.
  */
-/**
- * Derive the remote directory to mirror from the local cwd, for a host run the
- * caller gave no `--cwd`/`--remote-cwd`.
- *
- * Without this a `--host` run lands in the remote `$HOME`, so an agent launched
- * from a repo starts with no project context and the user has to `cd` by hand.
- * Only a cwd under the LOCAL home is mirrored — that is the part with a
- * meaningful remote analogue (`~/src/x` re-roots onto the remote home). A path
- * outside home returns undefined: `/opt/thing` on this box says nothing about
- * the target's filesystem, so the run keeps the remote home.
- */
-export function deriveMirroredCwd(localCwd: string): string | undefined {
-  const portable = toRemotePortable(localCwd);
-  return homeRemainder(portable) === null ? undefined : portable;
-}
-
 export function remoteCdPrefix(remoteCwd?: string, opts: { mirror?: boolean } = {}): string {
   if (!remoteCwd) return '';
   const rest = homeRemainder(remoteCwd);
