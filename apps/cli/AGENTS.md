@@ -108,11 +108,11 @@ gives each device its warnings plus a compact accounts/versions line (every
 installed version + its account, provable ✓ / ✗). Single-machine `agents doctor`
 collapses to the CRITICAL section plus one `▸ <machine>` block. Severity:
 provable-logged-out / missing-hook / missing-plugin / broken-CLI /
-duplicate-hook-**drift** are **critical**; drift / never-synced / version-skew /
-repo-behind / repo-drift / orphan / other-missing-kinds / identical duplicate
-hooks / a declared-but-missing host CLI / a fleet resource gap / rc-secret
-exports / a blocking Windows exec policy / **unprovable-logout** are
-**warnings**. The findings model,
+duplicate-hook-**drift** / a **never-synced** version whose declared resources are
+therefore absent are **critical**; drift / version-skew / repo-behind / repo-drift
+/ orphan / other-missing-kinds / identical duplicate hooks / a
+declared-but-missing host CLI / a fleet resource gap / rc-secret exports / a
+blocking Windows exec policy / **unprovable-logout** are **warnings**. The findings model,
 builders, `remediationFor`, and the pure `renderFindings` live in
 [`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts).
 

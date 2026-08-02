@@ -16,10 +16,15 @@
  *
  * Severity rubric (agent-agnostic):
  *   CRITICAL — provable logged-out · missing hook or plugin from a version ·
- *              cli-missing / binary-broken.
- *   WARNING  — content-drift · never-synced · version-skew · repo-behind ·
- *              repo-drift · orphan · missing command/skill/rule/mcp/permission/
- *              subagent · UNPROVABLE logout (hedged wording).
+ *              a never-synced version whose declared resources are therefore
+ *              absent · duplicate hook copies that DIFFER · cli-missing /
+ *              binary-broken.
+ *   WARNING  — content-drift · version-skew · repo-behind · repo-drift · orphan ·
+ *              missing command/skill/rule/mcp/permission/subagent · identical
+ *              duplicate hook copies · a declared host CLI that is not installed ·
+ *              an unreadable host-CLI manifest · a fleet resource gap ·
+ *              rc-secret exports · a blocking Windows exec policy ·
+ *              UNPROVABLE logout (hedged wording).
  *
  * This module is pure: it maps already-collected signals (drift rows, orphan
  * rows, repo-behind markers, per-version resource diffs, cross-device divergence,
