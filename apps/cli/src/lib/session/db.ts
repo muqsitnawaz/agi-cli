@@ -17,7 +17,7 @@ const SESSIONS_DIR = getSessionsDir();
 const DB_PATH = getSessionsDbPath();
 
 /** Current schema version; bumped when migrations are added. */
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 17;
 
 /**
  * Canonicalize a file path for use as a scan_ledger key. The same physical
@@ -62,10 +62,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   label TEXT,
   message_count INTEGER,
   token_count INTEGER,
-  output_tokens INTEGER,
-  cost_usd REAL,
-  duration_ms INTEGER,
-  file_path TEXT NOT NULL,
+	  output_tokens INTEGER,
+	  cost_usd REAL,
+	  duration_ms INTEGER,
+	  model TEXT,
+	  file_path TEXT NOT NULL,
   file_mtime_ms INTEGER,
   file_size INTEGER,
   scanned_at INTEGER,
@@ -151,6 +152,7 @@ export interface SessionRow {
   output_tokens: number | null;
   cost_usd: number | null;
   duration_ms: number | null;
+  model: string | null;
   file_path: string;
   file_mtime_ms: number | null;
   file_size: number | null;
@@ -384,6 +386,12 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
     // in place — `substr(id, 1, 8)` is non-empty because `id` is the non-empty
     // primary key — so every corrupt row becomes addressable. No rescan needed.
     db.exec(`UPDATE sessions SET short_id = substr(id, 1, 8) WHERE short_id IS NULL OR short_id = ''`);
+  }
+
+  if (fromVersion < 17) {
+    const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'model')) db.exec(`ALTER TABLE sessions ADD COLUMN model TEXT`);
+    db.exec(`DELETE FROM scan_ledger;`);
   }
 }
 
@@ -767,14 +775,14 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     id, short_id, agent, origin, routine_name, routine_run_id,
     version, account, timestamp, last_activity,
     project, cwd, git_branch, topic, label, message_count, token_count,
-    output_tokens, cost_usd, duration_ms,
+    output_tokens, cost_usd, duration_ms, model,
     file_path, file_mtime_ms, file_size, scanned_at, is_team_origin,
     pr_url, pr_number, worktree_slug, ticket_id, plan
   ) VALUES (
     @id, @short_id, @agent, @origin, @routine_name, @routine_run_id,
     @version, @account, @timestamp, @last_activity,
     @project, @cwd, @git_branch, @topic, @label, @message_count, @token_count,
-    @output_tokens, @cost_usd, @duration_ms,
+    @output_tokens, @cost_usd, @duration_ms, @model,
     @file_path, @file_mtime_ms, @file_size, @scanned_at, @is_team_origin,
     @pr_url, @pr_number, @worktree_slug, @ticket_id, @plan
   )
@@ -806,6 +814,7 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     output_tokens = excluded.output_tokens,
     cost_usd = excluded.cost_usd,
     duration_ms = excluded.duration_ms,
+    model = excluded.model,
     file_path = excluded.file_path,
     file_mtime_ms = excluded.file_mtime_ms,
     file_size = excluded.file_size,
@@ -886,6 +895,7 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
     output_tokens: meta.outputTokens ?? null,
     cost_usd: meta.costUsd ?? null,
     duration_ms: meta.durationMs ?? null,
+    model: meta.model ?? null,
     file_path: meta.filePath,
     file_mtime_ms: scan?.fileMtimeMs ?? null,
     file_size: scan?.fileSize ?? null,
@@ -1001,6 +1011,7 @@ export function upsertSessionsBatch(
         output_tokens: meta.outputTokens ?? null,
         cost_usd: meta.costUsd ?? null,
         duration_ms: meta.durationMs ?? null,
+        model: meta.model ?? null,
         file_path: meta.filePath,
         file_mtime_ms: scan?.fileMtimeMs ?? null,
         file_size: scan?.fileSize ?? null,
@@ -1198,6 +1209,7 @@ function rowToMeta(row: SessionRow): SessionMeta {
     outputTokens: row.output_tokens ?? undefined,
     costUsd: row.cost_usd ?? undefined,
     durationMs: row.duration_ms ?? undefined,
+    model: row.model ?? undefined,
     version: row.version ?? undefined,
     account: row.account ?? undefined,
     topic: row.topic ?? undefined,

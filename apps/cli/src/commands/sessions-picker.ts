@@ -11,7 +11,7 @@ import { truncate, humanDuration } from '../lib/format.js';
 import type { SessionEvent, SessionMeta } from '../lib/session/types.js';
 import { parseSession, sanitizeForTerminal } from '../lib/session/parse.js';
 import { cleanSessionPrompt, extractSessionTopic } from '../lib/session/prompt.js';
-import { linkPath, linkUrl, relativeToCwd } from '../lib/session/render.js';
+import { linkPath, linkUrl, relativeToCwd, shortenModel } from '../lib/session/render.js';
 import { linearIssueUrl } from '../lib/session/linear.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { itemPicker } from '../lib/picker.js';
@@ -123,7 +123,7 @@ function displayAgent(agent: string): string {
 const DOT = chalk.gray(' · ');
 
 function formatHeader(session: SessionMeta, events: SessionEvent[]): string {
-  const model = extractModel(events);
+  const model = extractModel(events) || session.model;
   const { startedAgo, duration } = extractTiming(events);
   const totalMessages = session.messageCount ?? countMessages(events);
   const totalTokens = session.tokenCount;
@@ -131,7 +131,7 @@ function formatHeader(session: SessionMeta, events: SessionEvent[]): string {
   // Line 1: Agent v version · model · account
   const line1: string[] = [];
   line1.push(chalk.gray(`${displayAgent(session.agent)}${session.version ? ` v${session.version}` : ''}`));
-  if (model) line1.push(chalk.bold.white(model));
+  if (model) line1.push(chalk.bold.white(shortenModel(model)));
   if (session.account) line1.push(chalk.gray(session.account));
 
   // Line 2: cwd · branch · started X ago · lasted Y
@@ -152,7 +152,8 @@ function formatHeader(session: SessionMeta, events: SessionEvent[]): string {
   if (totalTokens !== undefined) {
     line3.push(chalk.bold.white(formatTokens(totalTokens)) + chalk.gray(' tokens'));
   }
-  if (session.label) line3.push(chalk.white(session.label));
+  if (session.label) line3.push(chalk.white(`Label: ${session.label}`));
+  if (session.topic && session.label && session.topic !== session.label) line3.push(chalk.gray(`Topic: ${session.topic}`));
   line3.push(chalk.gray(linkPath(session.filePath, session.id)));
 
   // Line 4: ticket + PR — clickable when a URL is resolvable (OSC 8 hyperlink),
@@ -249,6 +250,8 @@ function formatCompactPreview(events: ReturnType<typeof parseSession>, session: 
   let toolCalls = 0;
   let planFile = '';
   let latestTodos: TodoItem[] | null = null;
+  let subAgentCount = 0;
+  const toolTags = new Set<string>();
 
   for (const event of events) {
     if (event.type === 'message') {
@@ -262,6 +265,9 @@ function formatCompactPreview(events: ReturnType<typeof parseSession>, session: 
       }
     } else if (event.type === 'tool_use' && !event._local) {
       const tool = event.tool || '';
+      const command = event.command || '';
+      for (const tag of classifyToolTags(tool, command)) toolTags.add(tag);
+      if (isSubAgentTool(tool, command)) subAgentCount++;
       const p = event.path || event.args?.file_path || event.args?.path || '';
       if (['Read', 'read_file', 'view_file', 'cat_file', 'get_file'].includes(tool) && p) {
         filesRead.add(p);
@@ -307,6 +313,14 @@ function formatCompactPreview(events: ReturnType<typeof parseSession>, session: 
     lines.push(chalk.cyan('Changes:  ') + activity.join(chalk.gray(' · ')));
   }
 
+  const metadata = [
+    ...toolTags,
+    subAgentCount ? `${subAgentCount} sub-agent${subAgentCount === 1 ? '' : 's'}` : '',
+  ].filter(Boolean);
+  if (metadata.length) {
+    lines.push(chalk.cyan('Meta:     ') + chalk.gray(metadata.join(' · ')));
+  }
+
   // Tool mix (top 4) — what kind of work this was.
   const hist = toolHistogram(toolCounts, 4);
   if (hist.length) {
@@ -350,6 +364,20 @@ function formatCompactPreview(events: ReturnType<typeof parseSession>, session: 
   }
 
   return lines.map(l => '  ' + l).join('\n');
+}
+
+function classifyToolTags(tool: string, command: string): string[] {
+  const haystack = `${tool} ${command}`.toLowerCase();
+  const tags: string[] = [];
+  if (/\b(browser|webfetch|websearch|openclaw browser|agents browser)\b/.test(haystack)) tags.push('browser');
+  if (/\b(computer|screenshot|click|type-text|agents computer)\b/.test(haystack)) tags.push('computer');
+  if (/\b(bash|shell|exec_command|terminal|agents pty)\b/.test(haystack)) tags.push('shell');
+  return tags;
+}
+
+function isSubAgentTool(tool: string, command: string): boolean {
+  if (/^(Agent|Task)$/i.test(tool)) return true;
+  return /\bagents\s+(?:run|teams\s+add|cloud\s+run)\b/.test(command);
 }
 
 function renderLastResponse(content: string, maxLines: number = LAST_RESPONSE_MAX_LINES): string[] {

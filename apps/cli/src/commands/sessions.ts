@@ -36,7 +36,8 @@ import { filterTeamSessions } from '../lib/session/team-filter.js';
 import { parseSession } from '../lib/session/parse.js';
 import { runRemoteSessions, buildForwardedArgs, ensureWholeIndex } from '../lib/session/remote.js';
 import { formatRelativeTime } from '../lib/session/relative-time.js';
-import { renderConversationMarkdown, renderSummary, renderSummaryHeader, computeSummaryStats, renderJson, filterEvents, parseRoleList, type FilterOptions } from '../lib/session/render.js';
+import { renderConversationMarkdown, renderSummary, renderSummaryHeader, computeSummaryStats, renderJson, filterEvents, parseRoleList, linkPath, linkUrl, shortenModel, type FilterOptions } from '../lib/session/render.js';
+import { linearIssueUrl } from '../lib/session/linear.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { AGENTS, colorAgent, resolveAgentName } from '../lib/agents.js';
 import { getShimsDir } from '../lib/state.js';
@@ -404,6 +405,35 @@ export function ticketLabel(s: Pick<SessionMeta, 'ticketId' | 'prNumber'>): stri
   return s.ticketId ?? (s.prNumber ? `PR#${s.prNumber}` : '');
 }
 
+function ticketUrl(s: Pick<SessionMeta, 'ticketId' | 'prNumber' | 'prUrl'>): string | undefined {
+  if (s.ticketId) {
+    return linearIssueUrl(s.ticketId);
+  }
+  return s.prNumber ? s.prUrl : undefined;
+}
+
+function linkTicketCell(s: Pick<SessionMeta, 'ticketId' | 'prNumber' | 'prUrl'>, paddedLabel: string): string {
+  const url = ticketUrl(s);
+  return url && paddedLabel.trim() !== '-' ? linkUrl(url, paddedLabel) : paddedLabel;
+}
+
+function cwdDisplayLabel(session: Pick<SessionMeta, 'cwd' | 'project'>): string {
+  return session.project || (session.cwd ? shortCwd(session.cwd) : '-');
+}
+
+function linkCwdCell(session: Pick<SessionMeta, 'cwd' | '_remote'>, paddedLabel: string): string {
+  return session.cwd && !session._remote ? linkPath(session.cwd, paddedLabel) : paddedLabel;
+}
+
+function linkedActiveCwdLabel(cwd: string, isLocal: boolean): string {
+  const label = shortCwd(cwd);
+  return isLocal ? linkPath(cwd, label) : label;
+}
+
+function modelLabel(model?: string): string {
+  return model ? shortenModel(model) : '-';
+}
+
 /**
  * The row shape `agents sessions --active --json` emits. RUSH-1981: a watcher
  * joins active sessions on ticketId + project, but the raw ActiveSession nests
@@ -744,7 +774,7 @@ function groupTally(sessions: ActiveSession[]): string {
 }
 
 /** Print one machine's workspace tree, indented under its machine header. */
-function renderWorkspaceLayout(layout: ActiveSessionsLayout, base: string, machineKey?: string): void {
+function renderWorkspaceLayout(layout: ActiveSessionsLayout, base: string, machineKey?: string, localMachine = false): void {
   let first = true;
   for (const ws of layout.workspaces) {
     if (!first) console.log();
@@ -760,7 +790,7 @@ function renderWorkspaceLayout(layout: ActiveSessionsLayout, base: string, machi
         ? chalk.magenta.bold('cloud')
         : ws.key === '__unknown__'
           ? chalk.gray.bold('unknown')
-          : chalk.cyan.bold(shortCwd(ws.key));
+          : chalk.cyan.bold(linkedActiveCwdLabel(ws.key, localMachine));
       const wsSessions = [...ws.windows.flatMap(w => w.sessions), ...ws.flat];
       const tally = groupTally(wsSessions);
       console.log(`${base}${header} ${chalk.gray(`(${ws.total})`)}${tally ? chalk.gray(`  ${tally}`) : ''}`);
@@ -923,7 +953,7 @@ async function renderActiveSessions(
     if (!firstMachine) console.log();
     firstMachine = false;
     printMachineHeader(mg);
-    renderWorkspaceLayout(mg.layout, '  ', mg.machine);
+    renderWorkspaceLayout(mg.layout, '  ', mg.machine, mg.isLocal);
   }
 
   const parts = groupTally(sessions).split(' · ').filter(Boolean);
@@ -1388,7 +1418,7 @@ function metaSignals(s: SessionMeta): Parameters<typeof signalBadges>[0] {
 }
 
 /** One flat table row:
- *   shortId · agent · version · project · [glyph] label·doing · [ticket] · [wt] · time
+ *   shortId · agent · version · model · project/cwd · [glyph] label·doing · [ticket] · [wt] · time
  * `doing` is the live preview when running, else the topic. The `ticket` column
  * (tracker/PR ref, pulled out of the badge blob so refs align) is only rendered
  * when `showTicket` — otherwise a listing with no refs would waste a column of
@@ -1396,7 +1426,6 @@ function metaSignals(s: SessionMeta): Parameters<typeof signalBadges>[0] {
 function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket = false, cols: PickerColumns = {}): string {
   const agentColor = colorAgent(session.agent);
   const when = formatRelativeTime(session.lastActivity ?? session.timestamp);
-  const project = session.project || '-';
   const tag = originTag(session) || teamTag(session);
   const label = (session as any).label;
   const { glyph, preview } = liveGlyphAndPreview(live);
@@ -1415,20 +1444,22 @@ function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket =
 
   const TICKET_W = 10;
   const ticketCell = showTicket
-    ? chalk.blue(padToWidth(truncateToWidth(ticketLabel(session) || '-', TICKET_W), TICKET_W + 1))
+    ? chalk.blue(linkTicketCell(session, padToWidth(truncateToWidth(ticketLabel(session) || '-', TICKET_W), TICKET_W + 1)))
     : '';
   const glyphW = glyph ? 2 : 0;
   const machineW = cols.showMachine ? machineColW : 0;
   const ticketW = showTicket ? TICKET_W + 1 : 0;
   const wtW = wt ? stringWidth(wt) + 1 : 0;
-  const topicW = Math.max(16, terminalWidth() - (10 + 9 + 8 + 16) - glyphW - machineW - ticketW - wtW - stringWidth(when) - 1);
+  const modelW = 13;
+  const topicW = Math.max(16, terminalWidth() - (10 + 9 + 8 + modelW + 16) - glyphW - machineW - ticketW - wtW - stringWidth(when) - 1);
 
   return (
     chalk.white(padToWidth(truncateToWidth(session.shortId, 9), 10)) +
     agentColor(padToWidth(truncateToWidth(session.agent, 8), 9)) +
     chalk.yellow(padToWidth(truncateToWidth(session.version || '-', 7), 8)) +
+    chalk.yellow(padToWidth(truncateToWidth(modelLabel(session.model), modelW - 1), modelW)) +
     machineCell +
-    chalk.cyan(padToWidth(truncateToWidth(project, 14), 16)) +
+    chalk.cyan(linkCwdCell(session, padToWidth(truncateToWidth(cwdDisplayLabel(session), 14), 16))) +
     (glyph ? glyph + ' ' : '') +
     renderTopicCell(label, doing, '', topicW, topicW) +
     ticketCell +
@@ -1449,12 +1480,14 @@ function treeSessionRow(session: SessionMeta, live?: ActiveSession): string {
   const badgeW = badges ? stringWidth(badges) + 1 : 0;
   const head = label ? `${label} · ${topic}` : topic;
   const glyphW = glyph ? 2 : 0;
-  const topicW = Math.max(12, terminalWidth() - (2 + 9 + 8) - glyphW - badgeW - stringWidth(when) - 1);
+  const model = chalk.yellow(padToWidth(truncateToWidth(modelLabel(session.model), 12), 13));
+  const topicW = Math.max(12, terminalWidth() - (2 + 9 + 8 + 13) - glyphW - badgeW - stringWidth(when) - 1);
 
   return (
     '  ' +
     chalk.dim(padToWidth(session.shortId, 9)) +
     agentColor(padToWidth(truncateToWidth(session.agent, 7), 8)) +
+    model +
     (badges ? badges + ' ' : '') +
     (glyph ? glyph + ' ' : '') +
     padToWidth(chalk.white(truncateToWidth(head, topicW)), topicW) +
@@ -1587,7 +1620,8 @@ function printSessionTable(sessions: SessionMeta[], hiddenCount = 0, tree = fals
       if (!first) console.log();
       first = false;
       const group = byDir.get(key)!;
-      console.log(`${chalk.cyan.bold(shortCwd(key))} ${chalk.gray(`(${group.length})`)}`);
+      const header = group.some((s) => !s._remote) ? linkPath(key, shortCwd(key)) : shortCwd(key);
+      console.log(`${chalk.cyan.bold(header)} ${chalk.gray(`(${group.length})`)}`);
       for (const s of group) console.log(treeSessionRow(s, liveIndex?.get(s.id)));
     }
     const dirWord = keys.length === 1 ? 'directory' : 'directories';
@@ -1866,7 +1900,6 @@ export function pickerColumnsFor(sessions: SessionMeta[]): PickerColumns {
 export function formatPickerLabel(s: SessionMeta, query: string, cols: PickerColumns = {}): string {
   const agentColor = colorAgent(s.agent);
   const when = formatRelativeTime(s.lastActivity ?? s.timestamp);
-  const project = s.project || '-';
   const tag = originTag(s) || teamTag(s);
   const label = (s as any).label;
   const topic = tag ? `${tag}${s.topic ?? ''}` : s.topic;
@@ -1880,7 +1913,7 @@ export function formatPickerLabel(s: SessionMeta, query: string, cols: PickerCol
 
   const TICKET_W = 10;
   const ticketCell = cols.showTicket
-    ? chalk.blue(padRight(truncate(ticketLabel(s) || '-', TICKET_W), TICKET_W + 1))
+    ? chalk.blue(linkTicketCell(s, padRight(truncate(ticketLabel(s) || '-', TICKET_W), TICKET_W + 1)))
     : '';
 
   // The picker prepends a gutter (cursor, plus a checkbox in multi-select mode);
@@ -1890,17 +1923,19 @@ export function formatPickerLabel(s: SessionMeta, query: string, cols: PickerCol
   const machineColW = cols.showMachine ? machineW : 0;
   const ticketW = cols.showTicket ? TICKET_W + 1 : 0;
   const wtW = wt ? stringWidth(wt) + 1 : 0;
+  const modelW = 13;
   const topicW = Math.max(
     16,
-    terminalWidth() - gutter - (10 + 9 + 8 + 16) - machineColW - ticketW - wtW - stringWidth(when) - 1,
+    terminalWidth() - gutter - (10 + 9 + 8 + modelW + 16) - machineColW - ticketW - wtW - stringWidth(when) - 1,
   );
 
   return (
     chalk.white(padRight(s.shortId, 10)) +
     agentColor(padRight(truncate(s.agent, 8), 9)) +
     chalk.yellow(padRight(truncate(versionStr, 7), 8)) +
+    chalk.yellow(padRight(truncate(modelLabel(s.model), modelW - 1), modelW)) +
     machineCell +
-    chalk.cyan(padRight(truncate(project, 14), 16)) +
+    chalk.cyan(linkCwdCell(s, padRight(truncate(cwdDisplayLabel(s), 14), 16))) +
     renderTopicCell(label, topic, query, topicW, topicW) +
     ticketCell +
     (wt ? wt + ' ' : '') +

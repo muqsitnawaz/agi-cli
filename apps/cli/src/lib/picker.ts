@@ -34,6 +34,8 @@ import {
 import chalk from 'chalk';
 import { stripVTControlCharacters } from 'node:util';
 
+let itemPickerPreviewOpenDefault = true;
+
 /** Configuration for the interactive picker prompt. */
 export interface PickerConfig<T> {
   message: string;
@@ -170,7 +172,7 @@ export function itemPicker<T>(config: PickerConfig<T>): Promise<PickedItem<T> | 
     const theme = makeTheme({});
     const [status, setStatus] = useState<'idle' | 'done'>('idle');
     const [searchTerm, setSearchTerm] = useState(cfg.initialSearch ?? '');
-    const [previewOpen, setPreviewOpen] = useState(Boolean(cfg.buildPreview));
+    const [previewOpen, setPreviewOpen] = useState(Boolean(cfg.buildPreview) && itemPickerPreviewOpenDefault);
     const prefix = usePrefix({ status, theme });
 
     const results = useMemo(() => {
@@ -198,8 +200,9 @@ export function itemPicker<T>(config: PickerConfig<T>): Promise<PickedItem<T> | 
         return;
       }
 
-      if (isSpaceKey(key) && searchTerm === '' && cfg.buildPreview) {
+      if ((isSpaceKey(key) || key.name === 'p' || key.name === 'h') && searchTerm === '' && cfg.buildPreview) {
         rl.clearLine(0);
+        itemPickerPreviewOpenDefault = !previewOpen;
         setPreviewOpen(!previewOpen);
         return;
       }
@@ -233,7 +236,7 @@ export function itemPicker<T>(config: PickerConfig<T>): Promise<PickedItem<T> | 
 
     const hasPreview = Boolean(cfg.buildPreview);
     const placeholder = hasPreview
-      ? '(type to filter, space to hide preview)'
+      ? '(type to filter, p/h/space to hide preview)'
       : '(type to filter)';
     const searchStr = searchTerm ? chalk.cyan(searchTerm) : chalk.gray(placeholder);
     const header = [prefix, message, searchStr].filter(Boolean).join(' ');
@@ -253,9 +256,9 @@ export function itemPicker<T>(config: PickerConfig<T>): Promise<PickedItem<T> | 
 
     const enter = cfg.enterHint ?? 'select';
     const help = previewOpen
-      ? chalk.gray(`↑↓ navigate · space: close preview · ⏎ ${enter} · esc: cancel`)
+      ? chalk.gray(`↑↓ navigate · p/h/space: close preview · ⏎ ${enter} · esc: cancel`)
       : chalk.gray(
-          `↑↓ navigate${hasPreview ? ' · space: preview' : ''} · ⏎ ${enter} · esc: cancel`
+          `↑↓ navigate${hasPreview ? ' · p/h/space: preview' : ''} · ⏎ ${enter} · esc: cancel`
         );
 
     const parts: string[] = [header];

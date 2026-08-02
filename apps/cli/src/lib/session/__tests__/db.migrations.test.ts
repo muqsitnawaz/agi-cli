@@ -42,3 +42,15 @@ describe('empty-shortId repair migration (v16)', () => {
     expect(healed?.shortId).not.toBe('');
   });
 });
+
+describe('model column migration (v17)', () => {
+  it('adds the model column to existing session indexes', () => {
+    const db = getDB();
+    db.prepare(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '16')`).run();
+    closeDB();
+
+    const reopened = getDB();
+    const cols = (reopened.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>).map(c => c.name);
+    expect(cols).toContain('model');
+  });
+});

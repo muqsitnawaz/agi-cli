@@ -5,6 +5,9 @@
  * the labels appear rather than the OSC 8 escape, which is TTY-gated.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { buildPreview } from './sessions-picker.js';
 import { _resetLinearWorkspaceCache } from '../lib/session/linear.js';
@@ -60,5 +63,36 @@ describe('buildPreview — ticket + PR links line', () => {
     const preview = stripVTControlCharacters(buildPreview(mk({})));
     expect(preview).not.toContain('PR#');
     expect(preview).not.toContain('issue/');
+  });
+});
+
+describe('buildPreview — rich metadata', () => {
+  it('shows compact model, tool tags, and sub-agent count from the transcript', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-preview-'));
+    try {
+      const filePath = path.join(dir, 'session.jsonl');
+      fs.writeFileSync(filePath, [
+        JSON.stringify({ type: 'user', timestamp: '2024-05-01T14:00:00.000Z', cwd: dir, sessionId: 'rich-meta-session', version: '2.1.112', message: { role: 'user', content: 'Build auth' } }),
+        JSON.stringify({ type: 'assistant', timestamp: '2024-05-01T14:00:10.000Z', message: { role: 'assistant', model: 'claude-sonnet-4-20250514', usage: { input_tokens: 1, output_tokens: 1 }, content: [{ type: 'tool_use', id: 'a1', name: 'Agent', input: { prompt: 'Explore' } }] } }),
+        JSON.stringify({ type: 'assistant', timestamp: '2024-05-01T14:00:12.000Z', message: { role: 'assistant', model: 'claude-sonnet-4-20250514', usage: { input_tokens: 1, output_tokens: 1 }, content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: 'agents browser list' } }] } }),
+      ].join('\n') + '\n');
+
+      const preview = stripVTControlCharacters(buildPreview(mk({
+        id: 'rich-meta-session',
+        shortId: 'richmeta',
+        filePath,
+        cwd: dir,
+        topic: 'Auto title',
+        label: 'User label',
+      })));
+      expect(preview).toContain('sonnet-4');
+      expect(preview).toContain('Label: User label');
+      expect(preview).toContain('Topic: Auto title');
+      expect(preview).toContain('browser');
+      expect(preview).toContain('shell');
+      expect(preview).toContain('1 sub-agent');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

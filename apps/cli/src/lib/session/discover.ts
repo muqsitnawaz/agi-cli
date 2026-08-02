@@ -150,6 +150,7 @@ interface ClaudeSessionScan {
   costUsd?: number;
   /** Wall-clock duration in ms between the first and last timestamped event. */
   durationMs?: number;
+  model?: string;
   /** ISO time of the last timestamped event — the session's last activity. */
   lastActivity?: string;
   /**
@@ -186,6 +187,7 @@ interface CodexSessionScan {
   outputTokens?: number;
   costUsd?: number;
   durationMs?: number;
+  model?: string;
   lastActivity?: string;
   contentText?: string;
   prUrl?: string;
@@ -1215,9 +1217,10 @@ async function readClaudeMeta(
       project: cwd ? path.basename(cwd) : undefined,
       cwd,
       filePath,
-      gitBranch: scan.gitBranch,
-      version: scan.version,
-      account,
+	      gitBranch: scan.gitBranch,
+	      version: scan.version,
+	      model: scan.model,
+	      account,
       topic: scan.topic,
       label,
       messageCount: scan.messageCount,
@@ -1243,8 +1246,9 @@ async function readClaudeMeta(
       timestamp: stat ? stat.mtime.toISOString() : new Date().toISOString(),
       lastActivity: scan.lastActivity,
       filePath,
-      account,
-      label,
+	      account,
+	      model: scan.model,
+	      label,
       messageCount: scan.messageCount,
       tokenCount: scan.tokenCount,
       outputTokens: scan.outputTokens,
@@ -1561,8 +1565,9 @@ export async function readCodexMeta(
     cwd,
     filePath,
     gitBranch: scan.gitBranch,
-    version: resolveSessionVersion('codex', filePath, scan.version, currentVersion),
-    topic: scan.topic,
+	    version: resolveSessionVersion('codex', filePath, scan.version, currentVersion),
+	    model: scan.model,
+	    topic: scan.topic,
     messageCount: scan.messageCount,
     tokenCount: scan.tokenCount,
     outputTokens: scan.outputTokens,
@@ -1791,8 +1796,9 @@ function readGeminiMeta(
     project,
     cwd,
     filePath,
-    version: resolveSessionVersion('gemini', filePath, embeddedVersion, currentVersion),
-    topic,
+	    version: resolveSessionVersion('gemini', filePath, embeddedVersion, currentVersion),
+	    model: sessionModel,
+	    topic,
     messageCount,
     tokenCount: sawTokenCount ? tokenCount : undefined,
     outputTokens: sawTokenCount ? outputTokens : undefined,
@@ -2468,8 +2474,9 @@ function readHermesMeta(filePath: string): { meta: SessionMeta; content: string 
     timestamp,
     project: platform,
     filePath,
-    version: model,
-    topic,
+	    version: model,
+	    model,
+	    topic,
     messageCount: messageCount || (typeof session.message_count === 'number' ? session.message_count : undefined),
   };
 
@@ -2589,8 +2596,9 @@ async function readDroidMeta(
     project: cwd ? path.basename(cwd) : undefined,
     cwd,
     filePath,
-    version: resolveSessionVersion('droid', filePath, undefined, currentVersion),
-    topic: scan.topic,
+	    version: resolveSessionVersion('droid', filePath, undefined, currentVersion),
+	    model,
+	    topic: scan.topic,
     messageCount: scan.messageCount,
     tokenCount,
     outputTokens: settings.usage?.outputTokens,
@@ -2743,6 +2751,7 @@ export interface ClaudeParseState {
   cwd?: string;
   gitBranch?: string;
   version?: string;
+  model?: string;
   topic?: string;
   // Explicit session titles: `/rename` writes a `custom-title` event; Claude
   // auto-generates an `ai-title`. Both can repeat across the file — last wins.
@@ -2782,9 +2791,10 @@ export function initClaudeParseState(): ClaudeParseState {
   return {
     timestamp: undefined,
     cwd: undefined,
-    gitBranch: undefined,
-    version: undefined,
-    topic: undefined,
+	    gitBranch: undefined,
+	    version: undefined,
+	    model: undefined,
+	    topic: undefined,
     customTitle: undefined,
     aiTitle: undefined,
     entrypoint: undefined,
@@ -2935,10 +2945,11 @@ export function applyClaudeLine(state: ClaudeParseState, parsed: any): void {
     state.sawTokenCount = true;
   }
   if (typeof usageObj?.output_tokens === 'number') state.outputTokens += usageObj.output_tokens;
-  // Per-assistant-message cost: each event carries its own model, so we
-  // multiply that event's raw token directions by that model's price.
-  const model = parsed.message?.model;
-  if (model && usageObj && typeof usageObj === 'object') {
+	  // Per-assistant-message cost: each event carries its own model, so we
+	  // multiply that event's raw token directions by that model's price.
+	  const model = parsed.message?.model;
+	  if (typeof model === 'string' && model) state.model = model;
+	  if (model && usageObj && typeof usageObj === 'object') {
     const eventCost = costOfUsage({
       model,
       inputTokens: usageObj.input_tokens,
@@ -2972,9 +2983,10 @@ export function finalizeClaudeScan(state: ClaudeParseState): ClaudeSessionScan {
   return {
     timestamp: state.timestamp,
     cwd: state.cwd,
-    gitBranch: state.gitBranch,
-    version: state.version,
-    topic: resolvedTopic,
+	    gitBranch: state.gitBranch,
+	    version: state.version,
+	    model: state.model,
+	    topic: resolvedTopic,
     entrypoint: state.entrypoint,
     messageCount: state.messageCount,
     tokenCount: state.sawTokenCount ? state.tokenCount : undefined,
@@ -3039,6 +3051,7 @@ export interface ClaudeParserState {
   cwd?: string;
   gitBranch?: string;
   version?: string;
+  model?: string;
   entrypoint?: string;
   firstTsMs?: number;
   topic?: string;
@@ -3083,9 +3096,10 @@ export function serializeClaudeParserState(state: ClaudeParseState, offset: numb
     offset,
     timestamp: state.timestamp,
     cwd: state.cwd,
-    gitBranch: state.gitBranch,
-    version: state.version,
-    entrypoint: state.entrypoint,
+	    gitBranch: state.gitBranch,
+	    version: state.version,
+	    model: state.model,
+	    entrypoint: state.entrypoint,
     firstTsMs: state.firstTsMs,
     topic: state.topic,
     customTitle: state.customTitle,
@@ -3142,9 +3156,10 @@ export function hydrateClaudeParseState(prior: ClaudeParserState): ClaudeParseSt
   return {
     timestamp: prior.timestamp,
     cwd: prior.cwd,
-    gitBranch: prior.gitBranch,
-    version: prior.version,
-    topic: prior.topic,
+	    gitBranch: prior.gitBranch,
+	    version: prior.version,
+	    model: prior.model,
+	    topic: prior.topic,
     customTitle: prior.customTitle,
     aiTitle: prior.aiTitle,
     entrypoint: prior.entrypoint,
@@ -3536,10 +3551,11 @@ export function finalizeCodexScan(state: CodexParseState): CodexSessionScan {
   return {
     sessionId: state.sessionId,
     timestamp: state.timestamp,
-    cwd: state.cwd,
-    gitBranch: state.gitBranch,
-    version: state.version,
-    topic: state.topic,
+	    cwd: state.cwd,
+	    gitBranch: state.gitBranch,
+	    version: state.version,
+	    model: state.model,
+	    topic: state.topic,
     messageCount: state.messageCount,
     tokenCount: state.tokenCount,
     outputTokens: state.lastTotalTokenUsage

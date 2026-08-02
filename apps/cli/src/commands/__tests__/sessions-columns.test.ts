@@ -68,9 +68,15 @@ describe('machineLabeler', () => {
 
 describe('formatPickerLabel', () => {
   it('shows the PR ref and worktree badge when enabled', () => {
-    const row = strip(formatPickerLabel(meta({ prNumber: 569, worktreeSlug: 'responsive-list' }), '', { showTicket: true }));
+    const row = strip(formatPickerLabel(meta({ prUrl: 'https://github.com/o/r/pull/569', prNumber: 569, worktreeSlug: 'responsive-list' }), '', { showTicket: true }));
     expect(row).toContain('PR#569');
     expect(row).toContain('wt:responsive-list');
+  });
+
+  it('shows a compact model column and linked refs degrade to their labels', () => {
+    const row = strip(formatPickerLabel(meta({ model: 'claude-sonnet-4-20250514', ticketId: 'RUSH-1991' }), '', { showTicket: true }));
+    expect(row).toContain('sonnet-4');
+    expect(row).toContain('RUSH-1991');
   });
 
   it('omits the ticket column when no row carries a ref', () => {
