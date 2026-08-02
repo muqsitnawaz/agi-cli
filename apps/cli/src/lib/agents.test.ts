@@ -35,6 +35,7 @@ describe('account inspection support', () => {
       'claude',
       'codex',
       'gemini',
+      'cursor',
       'grok',
       'antigravity',
       'kimi',

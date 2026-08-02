@@ -1,5 +1,173 @@
 # Changelog
 
+## 1.20.87
+
+- **`agents devices enable|disable|prefer|unprefer <name>` control which machines
+  Factory auto-launches onto.** A *disabled* device is skipped by
+  `New <Agent>` and the balanced launch, but stays available through
+  `New <Agent> (Pick Host)`. A *preferred* device wins ties against otherwise
+  equivalent machines — worth about two running agents in the ranking, so a
+  preference never sends work to a box that is genuinely swamped. Every device
+  is enabled and unpreferred by default, and an unregistered name is now
+  rejected instead of writing a preference that matches nothing. Preferences
+  live in `~/.agents/.history/devices/auto-launch.json`, written by the CLI and
+  read by the extension. Source: `apps/cli/src/lib/devices/registry.ts`,
+  `apps/cli/src/commands/ssh.ts`, `apps/factory/src/core/deviceAutoLaunch.ts`,
+  `apps/factory/src/core/launchHost.ts`.
+
+- **Point-of-use friction events for `agents teams` failures.** The CLI's `die()`
+  chokepoints in `teams` now emit a structured `friction` event (`surface`,
+  `failureId`, `error`) before exiting, so the nightly factory-metrics routine can
+  rank recurring failures without re-parsing transcripts. A hidden
+  `agents _internal friction` recorder lets shell guard hooks (git-guard, rm-guard,
+  large-file-add-guard) self-report blocks into the same stream. Source:
+  `apps/cli/src/lib/events.ts`, `apps/cli/src/lib/format.ts`,
+  `apps/cli/src/commands/teams.ts`, `apps/cli/src/index.ts`.
+
+- **`agents view` no longer reports a working Claude install as "logged out".**
+  Claude's `signedIn` is `!!email` read from a version home's `.claude.json`
+  (`lib/agents.ts`), so a version that authenticates from an ambient
+  `CLAUDE_CODE_OAUTH_TOKEN` — no account ever written to that home — rendered
+  "(logged out — log in with: claude, then /login)" while every run against it
+  succeeded. On one fleet box five of seven versions read as locked out and all
+  of them answered a live prompt. Those now render "(no per-version login —
+  using ambient CLAUDE_CODE_OAUTH_TOKEN)", which is both accurate and the more
+  useful warning: an ambient token is ONE account, so balanced rotation across
+  those versions rotates nothing. Source: `apps/cli/src/lib/signin-badge.ts`,
+  `apps/cli/src/commands/view.ts`.
+
+- **Claude per-account run tokens.** `agents run` now injects the Claude setup token keyed to the selected version home's own account email, so balanced Claude rotation no longer inherits one ambient shared token across accounts. Source: `src/lib/exec.ts`.
+
+- **`agents sessions` now shows which session spawned which team.** The link
+  already existed on disk and was discarded twice. `SessionMeta.spawnedTeam` — the
+  team name read off the `agents teams create/add` command at scan time — had no
+  column in `sessions.db`, so the writer dropped it and no consumer had ever seen
+  a non-`undefined` value; a new `spawned_team` column (schema **v21**, which
+  forces one full rescan) persists it, and orchestrator rows now carry a green
+  `team:<name>` badge. Separately, `classifyTeamSession` was already opening each
+  teammate's `meta.json` and throwing away its `task_name` and
+  `parent_session_id`, so a teammate row could not name its team or point back at
+  its orchestrator; teammate rows now read `[<team>/<handle>]` and the preview
+  pane carries a `Team:` line from either end of the lineage. New `--in-team
+  <name>` (and a `t` hotkey in the browser) filters to one team's orchestrator
+  plus its teammates, `agents teams status --parent-session <id>` lists the
+  teammates a given session spawned, and `agents teams list` gains a `by <id>`
+  column. Source: `apps/cli/src/lib/session/db.ts`,
+  `apps/cli/src/lib/session/team-filter.ts`, `apps/cli/src/commands/sessions.ts`,
+  `apps/cli/src/commands/sessions-browser.ts`, `apps/cli/src/commands/teams.ts`.
+
+- **`agents sessions --device <box>` no longer opens an empty browser.** The
+  interactive one-host listing kept the browser's default this-repo scope, but
+  every row it fetches is the peer's and no peer cwd is under the local
+  `process.cwd()` — so the filter dropped all of them. A host scope now implies
+  all-directories (and the `p` hotkey is a no-op under one). Three more
+  scope bugs on the same path: `--device <this machine>` fanned out to the whole
+  tailnet, because `gatherRemoteList` reads the resulting empty peer list as "no
+  hosts given" and sweeps; `--local --device <box>` rendered a silent empty list
+  instead of reporting that the two flags ask for opposite things; and
+  `--device <box> --cloud` fell through to the cloud listing, which has no host
+  scope and silently ignored the device. An unreachable peer now says so in the
+  browser header — the fan-out's stderr note is repainted away by the full-screen
+  picker, so "that box is asleep" used to read as "no sessions match". Source:
+  `apps/cli/src/commands/sessions.ts`, `apps/cli/src/commands/sessions-browser.ts`,
+  `apps/cli/src/lib/session/remote-list.ts`.
+
+- **Teammate records are found by the session id they actually produced.** A
+  teammate's directory under `teams/agents/` is named for its *agent* id, but the
+  harness mints its own session id and the spawn records it separately as
+  `remote_session_id`. `classifyTeamSession` looked only under the directory
+  name, so most teammates were unreachable — on a live box, 14 of 16 records
+  resolved only via `remote_session_id` — and their rows could not name their
+  team however complete the record was. Both keys are now registered in one
+  index built per process, which also replaces the `existsSync` + `readFileSync`
+  the old path paid for every row in the pool. Source:
+  `apps/cli/src/lib/session/team-filter.ts`.
+
+- **`detectSpawnedTeam` no longer indexes prose or flag values as team names.**
+  Rendering the value exposed that it had been wrong for most of the rows that
+  had one: on a live index of 4627 sessions, 11 carried a team and 6 of those
+  read `2` or `t`. It matched documentation and echoed output rather than only
+  executed commands; its flag-skip used `\s` and so ran across a newline to
+  capture a word from the next line; and a value-taking flag did not swallow its
+  value, so `--device auto` left `auto` looking like the team name — which was
+  corrupting real detections, not just adding false ones. After the fix the same
+  index resolves ten teams, every one of them a real team name. Source:
+  `apps/cli/src/lib/session/state.ts`.
+
+- **`--in-team` returns a team's whole lineage, not the slice inside the default
+  window.** It filtered in memory after the query, so a team older than the
+  default top-50 / 30-day / current-directory scope came back empty with no
+  message — and a team's teammates run in their own worktrees, which the
+  directory scope hid. The flag now widens its own scope the way `--all` does. It
+  is also refused with `--active`, whose live rows carry no lineage to match on,
+  rather than being silently ignored. Source: `apps/cli/src/commands/sessions.ts`.
+
+- **The session preview pane sanitizes peer-supplied `plan` and directory
+  text.** A remote row's metadata is JSON the peer sent and `parseRemoteList`
+  hands over verbatim; `sanitizeMeta` covered `topic`/`label`/`cwd`/`todos` but
+  not these, so a terminal escape in another machine's plan text reached the TTY.
+  The remote preview also renders more of what already rides across the hop: the
+  checklist items, the directories the scan recorded, and a one-line plan summary
+  (never the full markdown blob). `directoriesTouched` now reads the real
+  `recentDirectoriesTouched` field instead of a `dirsTouched` that nothing in the
+  repo ever wrote. Source: `apps/cli/src/commands/sessions-picker.ts`.
+
+## 1.20.86
+
+- **`agents sessions` now shows a Kimi session's todo list and its file-touching
+  tool calls.** Kimi writes its checklist with `TodoList` (items shaped
+  `{title, status}`, where finished is `done`) rather than Claude's `TodoWrite`
+  (`{content, status: "completed"}`), so the checklist registry matched nothing
+  and every Kimi session rendered with no todos — in the picker preview, the
+  session detail, and the `--active` fan-out that carries progress off remote
+  devices. Kimi also names the file argument `path` where Claude names it
+  `file_path`, so `Read`/`Write`/`Edit` calls summarized as a bare `Read ` with
+  no file. Both spellings are now handled, and the snapshot-checklist tool names
+  live in one exported registry (`SNAPSHOT_TODO_TOOLS`) that the picker and the
+  state engine share instead of each hardcoding its own pair. Source:
+  `apps/cli/src/lib/session/parse.ts`, `apps/cli/src/lib/session/state.ts`,
+  `apps/cli/src/commands/sessions-picker.ts`.
+
+- **`agents view` now shows Grok's default model (e.g. `grok-4.5`).** Claude,
+  Codex, Antigravity, and Kimi already filled the model column via their
+  catalogs; Grok was missing from `locateModelSource`, so
+  `resolveConfiguredModel` returned null and the column stayed blank. Grok has
+  no `settings.json` `model` field (its config is `config.toml` +
+  `models_cache.json`); the authoritative default is `grok models` →
+  `Default model: <id>`. The catalog extractor now spawns that command against
+  the version-home binary (skipping failed-download stubs) and flags the
+  default, so `agents view`, `agents view --json` (`configuredModel`), and the
+  other identity-cluster surfaces show it. Source: `apps/cli/src/lib/models.ts`,
+  `apps/cli/src/commands/models.ts`.
+
+- **`agents events --limit 0` now reads the whole stream, and a capped read says
+  so.** `--limit` parsed as `Math.max(1, parseInt(raw) || 50)`, so `--limit 0`
+  collapsed back to `50` (`0 || 50`) and there was no way to read past the default
+  cap at all. The cap is applied after filtering and before the caller sees
+  anything, so every aggregation over `--json` silently ranked the newest 50
+  records instead of the matching set — measured against a real 7-day corpus of
+  2,135 CLI failures in 9 classes, 8 of 9 ranks came out wrong with counts off by
+  roughly 100x, and nothing warned. `--limit 0` now means no cap (29,649 records
+  on a 30-day stream here, against 50 before), a truncated read prints
+  `Showing the newest 50 — more events matched. Pass --limit 0 for all.` (on
+  stderr under `--json`, so a `| jq` pipeline still receives clean JSON), and a
+  non-numeric, negative, or empty `--limit` exits 2 rather than quietly becoming
+  50 — an empty one (`--limit "$LIMIT"` with the variable unset) would otherwise
+  have read as "no cap" and returned the whole stream unannounced.
+  Source: `apps/cli/src/commands/events.ts`, `apps/cli/tests/events-limit.test.ts`,
+  `apps/cli/docs/06-observability.md`.
+
+- **Desktop notifications now show the current agents-cli mark, not the old
+  logo.** The menu-bar helper's app icon — the icon macOS puts on the left of
+  every notification banner it posts (the menu bar helper's own notices and every
+  `agents run --notify` finish notice) — was generated from the retired gradient
+  "A" logo, so notifications carried stale branding while the menu-bar status
+  item already used the new lowercase `a`. The shared master logo
+  (`assets/logo.png`) is now the current `a` mark, so the menu-bar helper, the
+  `agents computer` helper, and the keychain helper all regenerate their
+  `AppIcon.icns` from it on the next build. Source: `assets/logo.png`,
+  `apps/cli/menubar/scripts/build.sh`.
+
 ## 1.20.85
 
 - **`agents feed post` can now be mirrored to the systems you actually watch.**

@@ -6,8 +6,9 @@
  *   - codex:  parsed from latest session log's rate_limits event
  *   - kimi:   live Kimi Code /usages API call (cached for 2 minutes)
  *   - droid:  live Factory billing/limits API call (cached for 2 minutes)
- *   - others: marked as "not exposed by CLI" (Gemini, OpenCode, Cursor, etc.
- *     don't publish per-account usage today)
+ *   - grok:   parsed from the latest local usage event
+ *   - cursor: live Cursor usage API call (cached for 2 minutes)
+ *   - others: marked as "not exposed by CLI"
  */
 import type { Command } from 'commander';
 import { addHostOption } from '../lib/hosts/option.js';
@@ -23,15 +24,7 @@ import {
 } from '../lib/agents.js';
 import type { AgentId } from '../lib/types.js';
 import { listInstalledVersions, getGlobalDefault, getVersionHomePath } from '../lib/versions.js';
-import { formatUsageSection, getUsageInfoForIdentity } from '../lib/usage.js';
-
-/**
- * Agents whose CLI surfaces usage data we can read today. Kept in sync with the
- * live/last-seen sources `getUsageInfo` dispatches on in `../lib/usage.js`
- * (claude, codex, kimi, droid) — an agent with a usage source but missing here
- * would wrongly print "does not publish usage data" for a signed-in account.
- */
-const USAGE_SUPPORTED: ReadonlySet<AgentId> = new Set<AgentId>(['claude', 'codex', 'kimi', 'droid']);
+import { agentReportsUsage, formatUsageSection, getUsageInfoForIdentity } from '../lib/usage.js';
 
 /** One agent's usage snapshot — the unit the text and --json renderers share. */
 export interface AgentUsageRecord {
@@ -96,7 +89,7 @@ async function collectAgentUsage(agentId: AgentId): Promise<AgentUsageRecord> {
   // `--json` never emits ANSI escapes in `label` (e.g. under FORCE_COLOR=1).
   const label = AGENTS[agentId].name;
 
-  if (!USAGE_SUPPORTED.has(agentId)) {
+  if (!agentReportsUsage(agentId)) {
     return { agent: agentId, label, status: 'unsupported' };
   }
 

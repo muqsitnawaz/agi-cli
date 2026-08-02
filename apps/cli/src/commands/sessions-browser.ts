@@ -18,6 +18,7 @@ import { isSessionTrackedAgent, type SessionMeta } from '../lib/session/types.js
 import type { ActiveSession } from '../lib/session/active.js';
 import { discoverSessions } from '../lib/session/discover.js';
 import { gatherRemoteList } from '../lib/session/remote-list.js';
+import { enrichTeamOrigins, safeTeamText } from '../lib/session/team-filter.js';
 import { machineId, normalizeHost } from '../lib/session/sync/config.js';
 import { buildPreview } from './sessions-picker.js';
 import {
@@ -33,6 +34,7 @@ import {
   handlePickedSession,
   shouldIncludeLocal,
   remoteHostsToDial,
+  matchesTeam,
   type PickerColumns,
 } from './sessions.js';
 
@@ -49,11 +51,52 @@ export interface BrowserFilter {
   agent?: string;
   /** filter to one machine, or all — the `D` key / `--device`. */
   device?: string;
+  /** filter to one team's lineage, or all — the `T` key / `--in-team`. */
+  team?: string;
   /** this-repo subtree vs every directory — the `P` key / `--all`. */
   projectScope: 'repo' | 'all';
   /** time window (undefined = all time) — the `W` key / `--since`. */
   window?: string;
 }
+
+/**
+ * Complete a seed into the filter the picker actually runs on.
+ *
+ * Every optional field of {@link BrowserFilter} has to be named here, because the
+ * seed is copied field-by-field and an omission is silent: the field is optional,
+ * so the compiler says nothing and the browser just opens without that filter.
+ * `team` was dropped exactly this way, which made `--in-team` a no-op on the
+ * interactive path while the scope half of the same seed still applied — so the
+ * view opened wide and all-time and looked like the flag had worked.
+ *
+ * Exported so a test can assert the FILTER, not just the seed; testing the seed
+ * alone cannot see this class of bug.
+ */
+export function buildInitialFilter(initial: Partial<BrowserFilter>): BrowserFilter {
+  return {
+    running: initial.running ?? false,
+    teams: initial.teams ?? false,
+    agent: initial.agent,
+    device: initial.device,
+    team: initial.team,
+    projectScope: initial.projectScope ?? 'repo',
+    window: 'window' in initial ? initial.window : '30d',
+  };
+}
+
+/** Cache key for the transcript pool: every filter that changes what is FETCHED
+ *  (window, team-origin inclusion, and the team filter's deeper limit) — not the
+ *  ones applied in memory afterwards. */
+function poolCacheKey(f: BrowserFilter): string {
+  // The team filter contributes only whether it is SET, not which team: any team
+  // fetches the same deep pool and is then narrowed in memory. Keying on the name
+  // would make `t` the one hotkey that re-fans-out the fleet on every step of the
+  // cycle, at up to REMOTE_TIMEOUT_MS per unreachable peer.
+  return `${f.window ?? 'all'}|${f.teams}|${f.team ? 'team' : ''}`;
+}
+
+/** Pool size when a team filter is active; one team's rows can sit anywhere. */
+const WHOLE_TEAM_POOL_LIMIT = 5000;
 
 /** Ordered window cycle for the `W` key. `undefined` = all time. */
 const WINDOW_CYCLE: (string | undefined)[] = [undefined, '1d', '7d', '30d'];
@@ -110,6 +153,7 @@ export function browserFilterToArgv(f: BrowserFilter, query = ''): string[] {
   if (f.teams) a.push('--teams');
   if (f.agent) a.push('-a', f.agent);
   if (f.device) a.push('--device', f.device);
+  if (f.team) a.push('--in-team', f.team);
   if (f.projectScope === 'all') a.push('--all');
   if (f.window) a.push('--since', f.window);
   const q = query.trim();
@@ -162,13 +206,31 @@ export function bareBrowserSeed(opts: {
   agent?: string;
   all?: boolean;
   since?: string;
+  host?: string[];
+  inTeam?: string;
 }): Partial<BrowserFilter> {
+  // An explicit --device scopes the pool to a peer, whose cwds live under that
+  // machine's home — none of them can be under OUR process.cwd(), so the default
+  // 'repo' scope would filter every fetched row away and render an empty list.
+  // A host scope therefore implies all-directories, exactly as --all does.
+  const scoped = (opts.host?.length ?? 0) > 0;
+  // --in-team asks for ONE team's lineage, and a team's teammates run in their own
+  // `.agents/worktrees/<slug>/` — a different cwd from ours — while the team itself
+  // may be older than the default window. Both defaults would hide exactly the rows
+  // the flag exists to surface, so it widens the scope the way --all does. The flag
+  // path does this too (sessions.ts `wantsWholeTeam`); the browser is the one a
+  // human actually reaches, so it must not be the one that stays narrow.
+  const wholeTeam = !!opts.inTeam;
   return {
     teams: !!opts.teams,
     agent: opts.agent,
+    // The filter carries one device; seed it only when the scope names exactly
+    // one, so a two-device scope isn't narrowed to the first of them.
+    device: opts.host?.length === 1 ? normalizeDeviceSeed(opts.host[0]) : undefined,
+    team: opts.inTeam,
     // --all maxes every non-status filter: all dirs AND all-time. --since wins.
-    projectScope: opts.all ? 'all' : 'repo',
-    window: opts.since ?? (opts.all ? undefined : '30d'),
+    projectScope: opts.all || scoped || wholeTeam ? 'all' : 'repo',
+    window: opts.since ?? (opts.all || wholeTeam ? undefined : '30d'),
   };
 }
 
@@ -205,8 +267,9 @@ async function fetchRawPool(
   self: string,
   local: boolean,
   hosts: string[] | undefined,
-): Promise<{ key: string; rows: SessionMeta[] }> {
+): Promise<{ key: string; rows: SessionMeta[]; unreachable: string[] }> {
   const since = f.window;
+  let unreachable: string[] = [];
   // Local pool: wide (every directory) — device/agent/project are applied in
   // memory so a hotkey toggle is instant and doesn't re-hit the disk. Skipped
   // when an explicit host scope excludes this machine.
@@ -216,7 +279,10 @@ async function fetchRawPool(
         cwd: process.cwd(),
         since,
         excludeTeamOrigin: !f.teams,
-        limit: 500,
+        // A team filter reaches back past the usual browse window, so the pool it
+        // draws from has to as well — otherwise the newest 500 rows decide which
+        // teams exist.
+        limit: f.team ? WHOLE_TEAM_POOL_LIMIT : 500,
         sortBy: 'timestamp',
       })
     : [];
@@ -225,19 +291,37 @@ async function fetchRawPool(
   // Skipped under --local. An explicit --host/--device scopes exactly which peers
   // are dialed (undefined = sweep every online device). Best-effort — a fan-out
   // failure leaves the local list intact.
-  if (!local) {
+  const remoteHosts = remoteHostsToDial(hosts, self);
+  // An explicit scope naming only this machine leaves nothing remote to dial.
+  // gatherRemoteList reads `[]` as "no hosts given" and falls through to the
+  // whole-fleet sweep, so `--device <self>` would dial every online box — the
+  // exact opposite of the flag's scope-not-add contract. Skip the fan-out here,
+  // the same way gatherActiveSessions does for --active.
+  const dialPeers = !local && (!hosts?.length || (remoteHosts && remoteHosts.length > 0));
+  if (dialPeers) {
     try {
-      const forwarded = ['sessions', '--all', '--json', '--limit', '500'];
+      // The peer's cap has to match the local one, or a team filter widens only
+      // this machine's half of the pool and a peer's older rows stay invisible —
+      // the same bug one hop out. A numeric --limit is forwarded rather than
+      // --in-team itself, which a peer on an older build would reject as an
+      // unknown option and fail the whole fan-out.
+      const forwarded = ['sessions', '--all', '--json', '--limit', String(f.team ? WHOLE_TEAM_POOL_LIMIT : 500)];
       if (since) forwarded.push('--since', since);
       if (f.teams) forwarded.push('--teams');
-      const { sessions: remote } = await gatherRemoteList(forwarded, remoteHostsToDial(hosts, self));
-      if (remote.length > 0) rows = mergeLocalFirst([...rows, ...remote], self);
+      const remoteResult = await gatherRemoteList(forwarded, remoteHosts);
+      unreachable = remoteResult.unreachable;
+      if (remoteResult.sessions.length > 0) rows = mergeLocalFirst([...rows, ...remoteResult.sessions], self);
     } catch {
       // enrichment, never a hard dependency
     }
   }
 
-  return { key: `${since ?? 'all'}|${f.teams}`, rows };
+  // Team rows are anonymous without their meta.json (team name, handle, the
+  // orchestrator that spawned them). Only pay for that read when team rows are
+  // actually in the pool — with `c` off they were excluded at the query.
+  if (f.teams) rows = enrichTeamOrigins(rows);
+
+  return { key: poolCacheKey(f), rows, unreachable };
 }
 
 /**
@@ -352,6 +436,7 @@ function applyFilters(
   let out = rows;
   if (f.agent) out = out.filter((r) => r.agent === f.agent);
   if (f.device) out = out.filter((r) => (r.machine ?? self) === f.device);
+  if (f.team) out = out.filter((r) => matchesTeam(r, f.team!));
   if (f.projectScope === 'repo') {
     const cwd = process.cwd();
     out = out.filter((r) => !!r.cwd && (r.cwd === cwd || r.cwd.startsWith(cwd + '/')));
@@ -374,6 +459,7 @@ function headerFor(f: BrowserFilter): string {
   const bits = [
     `device:${f.device ?? 'all'}`,
     `agent:${f.agent ?? 'all'}`,
+    `team:${f.team ?? 'all'}`,
     f.projectScope === 'repo' ? 'this repo' : 'all dirs',
     `window:${f.window ?? 'all'}`,
   ];
@@ -386,7 +472,7 @@ function helpFor(_f: BrowserFilter, mode: 'nav' | 'search'): string {
   if (mode === 'search') {
     return 'type to filter · ↑↓ navigate · esc exit search · ⏎ resume';
   }
-  return 's search · r running · c teams · a agent · d device · p project · w window · tab preview · y copy-cmd · ⏎ resume · esc quit';
+  return 's search · r running · c teams · t team · a agent · d device · p project · w window · tab preview · y copy-cmd · ⏎ resume · esc quit';
 }
 
 /**
@@ -405,10 +491,17 @@ export async function runSessionBrowser(
   // Updated after each load so the A/D cycles range over what's actually present.
   let agentsInPool: string[] = [];
   let devicesInPool: string[] = [];
+  let teamsInPool: string[] = [];
   let cols: PickerColumns = {};
-  // Cache the transcript fetch, keyed by (window, teams); agent/device/project/
-  // running are applied in memory so their hotkeys don't re-fan-out the fleet.
-  let rawCache: { key: string; rows: SessionMeta[] } | null = null;
+  // Cache the transcript fetch, keyed by poolCacheKey (everything that changes
+  // what is FETCHED); agent/device/project/running are applied in memory so their
+  // hotkeys don't re-fan-out the fleet.
+  let rawCache: { key: string; rows: SessionMeta[]; unreachable: string[] } | null = null;
+  // Peers that didn't answer the last fan-out. The fan-out's own note goes to
+  // stderr, which the full-screen picker repaints over — so it is surfaced in
+  // the header instead, where "that box is asleep" stays distinguishable from
+  // "that box has nothing matching".
+  let unreachable: string[] = [];
   // The live index is slow (a full ps/tmux scan) and only the running filter
   // needs it — fetch it once, lazily, the first time running is toggled on.
   let liveCache: Map<string, ActiveSession> | null = null;
@@ -419,18 +512,14 @@ export async function runSessionBrowser(
   // it. We compute into locals and only write the shared state as the latest load.
   let loadGen = 0;
 
-  const initialFilter: BrowserFilter = {
-    running: initial.running ?? false,
-    teams: initial.teams ?? false,
-    agent: initial.agent,
-    device: initial.device,
-    projectScope: initial.projectScope ?? 'repo',
-    window: 'window' in initial ? initial.window : '30d',
-  };
+  const initialFilter = buildInitialFilter(initial);
 
   const load = async (f: BrowserFilter): Promise<SessionMeta[]> => {
     const myGen = ++loadGen;
-    const key = `${f.window ?? 'all'}|${f.teams}`;
+    // f.team decides the fetch limit, so it belongs in the key — otherwise arriving
+    // via `t` reuses a 500-row pool while --in-team fetched 5000, and the cycle can
+    // only offer the teams that happened to be in whichever pool was built first.
+    const key = poolCacheKey(f);
     let pool = rawCache && rawCache.key === key ? rawCache : null;
     if (!pool) {
       const fetched = await fetchRawPool(f, self, local, hosts);
@@ -453,12 +542,24 @@ export async function runSessionBrowser(
     // Latest load — commit shared state atomically (no await past this point, so
     // no newer load can interleave between these writes).
     rawCache = pool;
+    unreachable = pool.unreachable;
     if (live) liveCache = live;
     // Live sessions the transcript pool lacks become rows of their own, so the
     // running view lists every active session, not just the ones already indexed.
     const rows = f.running && live ? mergeLiveIntoPool(pool.rows, live, self) : pool.rows;
     agentsInPool = distinct(rows.map((r) => r.agent));
     devicesInPool = distinct(rows.map((r) => r.machine ?? self));
+    // Both ends of the lineage seed the cycle: teams a row spawned, and teams a
+    // row belongs to. Teammate rows only carry `teamOrigin` when `c` is on, so
+    // with teams hidden this ranges over spawned teams alone — which is exactly
+    // the set whose rows are visible.
+    // Through safeTeamText: the cycle's values become `f.team`, which headerFor
+    // interpolates into the header and browserFilterToArgv copies into a command,
+    // and on a peer's row these strings are that machine's to choose.
+    teamsInPool = distinct([
+      ...rows.map((r) => safeTeamText(r.spawnedTeam)),
+      ...rows.map((r) => safeTeamText(r.teamOrigin?.team)),
+    ]);
     const filtered = applyFilters(rows, live ?? new Map(), f, self);
     cols = pickerColumnsFor(filtered);
     cols.showHost = shouldShowHostColumn(f, live, filtered);
@@ -474,7 +575,10 @@ export async function runSessionBrowser(
       formatPickerLabel(s, q, cols, sshOriginTagFor(liveCache, s.id), liveHostLabel(liveCache?.get(s.id))),
     matches: sessionMatchesQuery,
     buildPreview,
-    headerFor,
+    headerFor: (f) =>
+      unreachable.length > 0
+        ? `${headerFor(f)} · ${chalk.yellow(`${unreachable.join(', ')}: unreachable`)}`
+        : headerFor(f),
     helpFor,
     enterHint: 'resume',
     emptyMessage: 'No sessions match this filter.',
@@ -484,7 +588,11 @@ export async function runSessionBrowser(
       c: (f) => ({ ...f, teams: !f.teams }),
       a: (f) => ({ ...f, agent: cycle(f.agent, agentsInPool) }),
       d: (f) => ({ ...f, device: cycle(f.device, devicesInPool) }),
-      p: (f) => ({ ...f, projectScope: f.projectScope === 'repo' ? 'all' : 'repo' }),
+      t: (f) => ({ ...f, team: cycle(f.team, teamsInPool) }),
+      // Under an explicit --device scope every row is a peer's, and no peer cwd
+      // is under our process.cwd() — so narrowing to "this repo" could only ever
+      // empty the list. Returning the same reference makes the key a no-op.
+      p: (f) => (hosts ? f : { ...f, projectScope: f.projectScope === 'repo' ? 'all' : 'repo' }),
       w: (f) => ({ ...f, window: cycleWindow(f.window) }),
     },
     onKey: (name, f, _active, query) => {
