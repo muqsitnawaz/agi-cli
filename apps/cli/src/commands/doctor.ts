@@ -295,7 +295,17 @@ function asFleetInventory(value: unknown): FleetInventory | null {
   const v = value as Record<string, unknown>;
   if (!isMap(v.resources) || !Object.values(v.resources).every(isStringArray)) return null;
   if (!isMap(v.agentVersions) || !Object.values(v.agentVersions).every(isStringArray)) return null;
-  if (!isMap(v.repos)) return null;
+  // `repos.agents` / `repos.system` must each be a RepoState or null. Checking
+  // only that `repos` is a record let `{agents: [], system: []}` through: `[]` is
+  // truthy, so `describeRepoDrift` read `.head`/`.branch`/`.dirty` off an array,
+  // got undefined for each, and could emit a bogus repo-drift row.
+  const isRepoState = (x: unknown): boolean =>
+    x === null
+    || (isMap(x)
+      && (x.branch === null || typeof x.branch === 'string')
+      && (x.head === null || typeof x.head === 'string')
+      && typeof x.dirty === 'boolean');
+  if (!isMap(v.repos) || !Object.values(v.repos).every(isRepoState)) return null;
   // `signIn` is optional (older remotes omit it) but must be well-formed if sent.
   if (v.signIn !== undefined) {
     if (!isMap(v.signIn)) return null;
