@@ -175,3 +175,40 @@ describe('renderLeasedBoxesSection — F4 devices "Leased boxes" (RUSH-1923)', (
     expect(flat).toContain('agents lease stop <slug>');
   });
 });
+
+describe('devices auto-launch preferences', () => {
+  function autoLaunchPath(): string {
+    return path.join(testHome, '.agents', '.history', 'devices', 'auto-launch.json');
+  }
+
+  it('disable and enable persist through the CLI', () => {
+    guardedHome();
+
+    expect(run(['devices', 'disable', 'zion']).status).toBe(0);
+    const disabled = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
+    expect(disabled.devices.zion).toEqual({ enabled: false });
+
+    expect(run(['devices', 'enable', 'zion']).status).toBe(0);
+    const enabled = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
+    expect(enabled.devices.zion).toBeUndefined();
+  });
+
+  it('prefer and unprefer persist through the CLI', () => {
+    guardedHome();
+
+    expect(run(['devices', 'prefer', 'mac-mini']).status).toBe(0);
+    const preferred = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
+    expect(preferred.devices['mac-mini']).toEqual({ preferred: true });
+
+    expect(run(['devices', 'unprefer', 'mac-mini']).status).toBe(0);
+    const unpreferred = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
+    expect(unpreferred.devices['mac-mini']).toBeUndefined();
+  });
+
+  it('rejects an invalid device name', () => {
+    guardedHome();
+    const r = run(['devices', 'disable', 'bad;name']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/Invalid device name/);
+  });
+});
