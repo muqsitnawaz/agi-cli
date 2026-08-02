@@ -14,10 +14,19 @@ import {
   collapseActivity,
   ensureActivityLogHook,
   formatActivityLine,
+  formatProgressUpdate,
   readRecentActivity,
   styleForEvent,
   tierForEvent,
+  type ActivityEvent,
 } from '../lib/activity.js';
+
+/** Progress posts render rich (full identity); hook milestones stay compact. */
+function renderActivityEntry(ev: ActivityEvent): string {
+  return ev.event === 'status.posted'
+    ? formatProgressUpdate(ev)
+    : formatActivityLine(ev, { showHost: true });
+}
 
 /** Wire the activity-log hooks into each hooks-capable version's settings. */
 async function installActivityHooks(): Promise<string[]> {
@@ -73,7 +82,7 @@ export function registerActivityCommand(program: Command): void {
 
       process.stdout.write(chalk.bold('\n  recent activity\n'));
       const shown = opts.all ? events : milestones;
-      for (const ev of shown) process.stdout.write(`${formatActivityLine(ev, { showHost: true })}\n`);
+      for (const ev of shown) process.stdout.write(`${renderActivityEntry(ev)}\n`);
 
       if (!opts.all) {
         const parts = Object.entries(counts)

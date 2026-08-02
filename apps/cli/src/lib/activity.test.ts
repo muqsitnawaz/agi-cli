@@ -6,11 +6,16 @@ import { spawnSync } from 'child_process';
 import {
   ACTIVITY_LOG_HOOK_SCRIPT,
   appendActivityEvent,
+  attachmentName,
   collapseActivity,
   ensureActivityLogHook,
+  formatProgressUpdate,
   readRecentActivity,
   readSessionActivity,
+  sanitizeAttachments,
+  shortSessionId,
   tierForEvent,
+  type ActivityEvent,
 } from './activity.js';
 
 const hasPython = spawnSync('python3', ['--version']).status === 0;
@@ -272,5 +277,94 @@ describe('real activity-log hook (Python)', () => {
       tool_input: { plan: 'nope' },
     });
     expect(readSessionActivity('sess-7', activityDirFor(home))).toHaveLength(0);
+  });
+});
+
+const stripAnsi = (s: string) => s.replace(/\[[0-9;]*m/g, '');
+
+describe('attachments schema (RUSH-2013)', () => {
+  it('sanitizeAttachments drops entries without an href and clamps meta', () => {
+    const out = sanitizeAttachments([
+      { kind: 'image', href: ' cover.png ', name: 'Cover', bytes: 42, meta: { width: 800, junk: {} } },
+      { kind: 'link' }, // no href -> dropped
+      { href: 'https://x/y' }, // kind defaults to link
+      'nope', // not an object -> dropped
+    ]);
+    expect(out).toEqual([
+      { kind: 'image', href: 'cover.png', name: 'Cover', bytes: 42, meta: { width: 800 } },
+      { kind: 'link', href: 'https://x/y' },
+    ]);
+  });
+
+  it('sanitizeAttachments returns undefined for non-arrays / empty', () => {
+    expect(sanitizeAttachments(undefined)).toBeUndefined();
+    expect(sanitizeAttachments([])).toBeUndefined();
+    expect(sanitizeAttachments('x')).toBeUndefined();
+  });
+
+  it('appended attachments + project survive a read round-trip', () => {
+    const dir = tmpActivityDir();
+    appendActivityEvent({
+      ts: '2026-07-31T10:00:00.000Z', event: 'status.posted', sessionId: 's1', mailboxId: 's1',
+      host: 'zion', runtime: 'headless', project: 'agents-cli', detail: 'shipped',
+      attachments: [{ kind: 'audio', href: '/a/draft.wav', name: 'draft.wav', bytes: 10 }],
+    }, dir);
+    const [ev] = readSessionActivity('s1', dir);
+    expect(ev.project).toBe('agents-cli');
+    expect(ev.attachments).toEqual([{ kind: 'audio', href: '/a/draft.wav', name: 'draft.wav', bytes: 10 }]);
+  });
+});
+
+describe('formatProgressUpdate (RUSH-2014)', () => {
+  const base: ActivityEvent = {
+    v: 1, tier: 'milestone', ts: new Date().toISOString(), event: 'status.posted',
+    sessionId: '0108441e-2d15-4d2f-a58b-974a886c9b47', mailboxId: 'm', host: 'yosemite-s1',
+    runtime: 'teams', agent: 'grok', project: 'agents', detail: 'CHANGELOG pushed; watching CI',
+  };
+
+  it('shows session short id, host, agent, project chips + message', () => {
+    const out = stripAnsi(formatProgressUpdate(base));
+    expect(out).toContain('▸ update');
+    expect(out).toContain('grok · 0108441e · yosemite-s1 · agents');
+    expect(out).toContain('"CHANGELOG pushed; watching CI"');
+    expect(out).toContain('ag focus 0108441e');
+  });
+
+  it('lists attachments by name when present', () => {
+    const out = stripAnsi(formatProgressUpdate({
+      ...base,
+      attachments: [
+        { kind: 'audio', href: '/x/draft.wav', name: 'draft.wav' },
+        { kind: 'image', href: '/x/cover.png' },
+      ],
+    }));
+    expect(out).toContain('draft.wav');
+    expect(out).toContain('cover.png'); // basename fallback when name absent
+  });
+
+  it('omits chips that are unknown', () => {
+    const out = stripAnsi(formatProgressUpdate({
+      ...base, agent: undefined, host: 'unknown', project: undefined,
+    }));
+    expect(out).not.toContain('unknown');
+    expect(out).toContain('0108441e');
+  });
+
+  it('joins ticket / label at display time when provided', () => {
+    const out = stripAnsi(formatProgressUpdate(base, { joined: { ticketId: 'RUSH-2014', label: 'render' } }));
+    expect(out).toContain('RUSH-2014');
+    expect(out).toContain('render');
+  });
+});
+
+describe('shortSessionId / attachmentName', () => {
+  it('strips known prefixes and takes 8 chars', () => {
+    expect(shortSessionId('0108441e-2d15')).toBe('0108441e');
+    expect(shortSessionId('session_abcdef01-x')).toBe('abcdef01');
+    expect(shortSessionId('ses_01HZXABCDEF')).toBe('01HZXABC');
+  });
+  it('falls back to href basename when name absent', () => {
+    expect(attachmentName({ kind: 'image', href: '/a/b/cover.png' })).toBe('cover.png');
+    expect(attachmentName({ kind: 'link', href: 'https://x/y/z', name: '  ' })).toBe('z');
   });
 });

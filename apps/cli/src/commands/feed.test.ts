@@ -10,11 +10,24 @@ import {
   parseRemoteFeed,
   prepareLocalFeedBlocks,
   remoteFeedHostsToDial,
+  resolveFeedFilter,
   sessionHintsFromActive,
   shouldIncludeLocalFeed,
 } from './feed.js';
 import { groupBlocksByOutcome } from '../lib/feed-outcome.js';
 import { GLYPH } from '../lib/comms-render.js';
+
+describe('resolveFeedFilter', () => {
+  it('defaults to needs and normalizes aliases', () => {
+    expect(resolveFeedFilter(undefined)).toBe('needs');
+    expect(resolveFeedFilter('')).toBe('needs');
+    expect(resolveFeedFilter('bogus')).toBe('needs');
+    expect(resolveFeedFilter('needs')).toBe('needs');
+    expect(resolveFeedFilter('Updates')).toBe('updates');
+    expect(resolveFeedFilter('update')).toBe('updates');
+    expect(resolveFeedFilter('ALL')).toBe('all');
+  });
+});
 
 const children: ChildProcess[] = [];
 
