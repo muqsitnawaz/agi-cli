@@ -1,5 +1,104 @@
 # Changelog
 
+## 1.20.81
+
+- **Releases publish the CI-tested tree, not a drifted merge.** On a busy default
+  branch, unrelated PRs merging during a release PR's CI window made the
+  squash-merge tree diverge from what CI actually tested, so `release.sh` refused
+  to publish (`merged tree != built tree`) and the release stalled — every attempt
+  merged a version bump it could never tag. The publish now tags the exact release
+  commit the full matrix went green on (the PR head), letting the intervening
+  commits ride the next release; the merge commit is still tagged when its tree
+  matches (no drift). The `wait_for_ci_green` gate is unchanged, so the published
+  tarball is always a tree the full matrix validated. The tree-comparison decision
+  is extracted into `scripts/select-publish-commit.sh` and unit-tested against a
+  real git repo. Source: `apps/cli/scripts/release.sh`,
+  `apps/cli/scripts/select-publish-commit.sh`.
+
+- **Consolidate the observability + inspection commands into one role each; remove
+  `check` and `resources` (RUSH-1234).** Two overlapping command clusters had grown
+  ambiguous. `agents check` (the CI drift gate) is folded into `agents doctor --check`
+  — same drift engine, now with a scriptable exit code. `--check --quiet`,
+  `--check --json` (backward-compatible payload: every field the old `check --json`
+  emitted, plus additive `unwiredHookVersions`/`sourceBehind`), and `--check --devices`
+  all carry over; the standalone `check` command is removed. `agents resources` (the merged first-wins cross-layer
+  resource table) is folded into `agents view --merged`; the standalone `resources`
+  command is removed. The observability surfaces (`events`, `feed`, `activity`,
+  `output`, `sessions`) now have a documented one-role-each taxonomy — `events` is the
+  raw unified audit stream, `feed` the cross-agent decisions/status inbox, `activity`
+  the human milestone timeline, `output` productivity accounting, `sessions` the live
+  roster + transcripts. Running the removed `agents check` / `agents resources` now
+  reports `error: unknown command`. Source:
+  `apps/cli/src/commands/doctor.ts`, `apps/cli/src/commands/view.ts`,
+  `apps/cli/src/lib/merged-resources.ts`, `apps/cli/src/lib/startup/command-registry.ts`,
+  `apps/cli/docs/06-observability.md`.
+
+- **`agents sessions --active` shows who launched each run (RUSH-2018).** New
+  **owner** column on the active-sessions table (and an `owner` field in
+  `--active --json`), sourced from the resolved actor stamped at spawn into the
+  per-pid registry and onto each teammate record. Displays the actor's short id
+  (an email's local-part) and stays honest — an unresolved local run shows `-`,
+  never a guessed box owner. The session index (`sessions.db`) also gains
+  write-once `actor` / `initiated_by` columns, kept out of the upsert
+  `ON CONFLICT` set so a content rescan never clobbers the original owner.
+  Source: `apps/cli/src/lib/session/pid-registry.ts`,
+  `apps/cli/src/lib/session/active.ts`, `apps/cli/src/commands/sessions.ts`
+  (`ownerLabel`), `apps/cli/src/lib/session/db.ts`, `apps/cli/src/lib/exec.ts`.
+
+- **`agents sessions` attributes historical sessions to a person, and teams carry
+  spawn lineage (RUSH-2019).** Each run now writes a durable `sessionId -> actor`
+  sidecar at spawn (`~/.agents/.history/by-session/`, unlike the pruned pid
+  registry), and the session scanner joins it while indexing — so the write-once
+  `actor` / `initiated_by` columns added in RUSH-2018 populate automatically and the
+  durable `agents sessions` listing (not just `--active`) shows who launched each
+  session. Teammate spawns inherit the orchestrator's frozen actor and now record a
+  `parent_session_id` (the orchestrator's own `AGENTS_SESSION_ID`), so a team traces
+  back to the one human who started it and the spawn chain is walkable. Source:
+  `apps/cli/src/lib/session/actor-sidecar.ts`, `apps/cli/src/lib/exec.ts`,
+  `apps/cli/src/lib/session/db.ts`, `apps/cli/src/lib/teams/agents.ts`.
+
+- **Actor provenance reaches events, routines, and browser tasks (RUSH-2020).**
+  Completes the actor layer's coverage beyond sessions: every emitted **event** now
+  records `actor` + `kind` through the audit origin (so `agents events` stats carry
+  a `byActor` breakdown in `agents logs stats`); a **routine** stamps its creator's
+  actor id at creation and seeds it into each fired run's env (`AGENTS_ACTOR`), so an
+  unattended cron's session and events attribute to the person who scheduled it
+  instead of `UNRESOLVED@<host>` — its run records gain `actor` (creator) and
+  `triggeredBy` (who kicked off that run); a **browser task** records the `owner` who
+  launched it, on the live task and in history. Source:
+  `apps/cli/src/lib/events.ts`, `apps/cli/src/lib/runner.ts`,
+  `apps/cli/src/lib/routines.ts`, `apps/cli/src/lib/browser/{types,service}.ts`.
+
+- **`agents sessions` now shows an accurate working / waiting / idle status for
+  every harness, and shows it as text in the default list — not just a glyph.** Two
+  gaps are closed. (1) A live non-Claude/Codex agent (grok, droid, gemini, rush,
+  kimi, hermes, opencode, antigravity) used to fall through to a blanket `unknown`
+  because `findSessionFileForKind` / `computeLiveSignals` only resolved and parsed
+  Claude and Codex transcripts — a running Codex or grok session displayed
+  `unknown`. Every tracked harness whose transcript is locatable + parseable is now
+  wired into the same state engine: `findSessionFileForKind` resolves each kind's
+  transcript through the session index (`latestSessionFileForCwd`), and
+  `computeLiveSignals` parses it with that harness's own parser and runs it through
+  the same `inferSessionState`, so it gets a real `working` / `waiting_input` /
+  `idle` the principled way Claude/Codex do. For a genuinely opaque kind (cursor) or
+  an unreadable transcript, `resolveFallbackStatus` now reports `running` for any
+  live process — **a running agent never displays `unknown`** (that state is reserved
+  for the sole un-answerable case: a dead process whose transcript vanished
+  mid-read), and a live process is never downgraded to a fabricated `idle`. (2) The
+  default `agents sessions` list (flat, tree, and the project overview) showed only a
+  colored glyph for live rows; it now also prints the status **word** —
+  `working` / `waiting` / `idle` — next to the glyph, the same three states the
+  `--active` column shows, with `waiting` the unmistakable "needs you" case. The
+  single-session preview (`agents sessions <id> --preview`) leads with the same live
+  status line, flagging `← needs you` when the agent is waiting on a question,
+  permission, or plan review. Source: `apps/cli/src/lib/session/active.ts`
+  (`findSessionFileForKind`, `computeLiveSignals`, `resolveFallbackStatus`),
+  `apps/cli/src/commands/sessions.ts` (`liveStatusWord`, `flatSessionRow`,
+  `treeSessionRow`, `renderSessionPreview`).
+
+- **`agents sessions inject` now addresses VSCodium / Cursor / VS Code and iTerm sessions, not just tmux.** It resolves targets through the same canonical resolver the watchdog uses (`resolveInjectTargetForSession`), so the manual unblock path and the watchdog agree on which sessions are reachable — and a failed resolve now surfaces the precise reason (host/rail) instead of a misleading "not running under tmux". Source: `apps/cli/src/commands/sessions-inject.ts`.
+- **Watchdog brain focuses on driving idle agents to completion, with context-aware, tool-pointing nudges.** The decider prompt now reads the stalled agent's goal first, restates the conclusion it already reached, names the concrete next step (including a tool it forgot it has — `agents computer` / `agents browser` / `agents ssh <mac> "agents computer …"`), splits do-it-yourself from ask-the-human, and treats `idle` as its territory while leaving `waiting` prompts to the user's feed. Design + normative spec: `apps/cli/docs/watchdog.md`, `apps/cli/docs/specifications.md#watchdog`. Source: `apps/cli/src/lib/watchdog/watchdog.ts`.
+
 ## 1.20.80
 
 - **`agents activity` goes fleet-wide, grouped, and session-enriched.** The activity
