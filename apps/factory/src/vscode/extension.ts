@@ -26,7 +26,7 @@ import { startWatchdogBridge } from '../mcp/watchdog-bridge';
 import { ensureWatchdogMcpInstalled } from '../mcp/watchdogInstall';
 import * as notifications from './notifications.vscode';
 import * as terminals from './terminals.vscode';
-import { fetchLocalSessions, fetchRemoteSessionLabelSource } from './remoteSessions.vscode';
+import { fetchLocalSessions, fetchRemoteSessionLabelSource, fetchRecapSessions, LOCAL_LABEL } from './remoteSessions.vscode';
 import * as sessionTracker from './sessionTracker';
 import { runRecapHeadless, isRecapSupported } from './recap.vscode';
 import { buildAgentTerminalEnv } from '../core/terminals';
@@ -93,7 +93,7 @@ import { normalizeTerminalMode, resolveTerminalMode } from '../core/terminalMode
 import { DEFAULT_DISPLAY_PREFERENCES } from '../core/settings';
 import * as readiness from './terminalReadiness';
 import { resolveAlias, isAgentInstalled, checkInstalledAgentsViaCli } from '../core/agentModels';
-import { pickAgentByUsage } from '../core/agentUsage';
+import { pickAgentByUsage, rankHostsByUsage, HostUsageScore } from '../core/agentUsage';
 import type { RemoteSession } from '../core/remoteSessions';
 // readAgentRunStrategy no longer needed: agents-cli reads strategy from
 // agents.yaml itself when invoked via `agents run`.
@@ -396,19 +396,70 @@ async function resolveSlotHost(slot: QuickLaunchSlot): Promise<string | undefine
   return dev.name;
 }
 
+// How long a host-usage ranking stays good enough to reuse. The picker opens
+// often and the underlying sweep is a fleet-wide SSH fan-out; a minute-old
+// ordering is indistinguishable from a fresh one.
+const HOST_USAGE_TTL_MS = 60_000;
+let hostUsageCache: { scores: Map<string, HostUsageScore>; fetchedAt: number } | null = null;
+
+/**
+ * Recency-weighted session count per machine, keyed by normalized host name
+ * (the local box under LOCAL_LABEL). Drives the host picker's order.
+ *
+ * Best-effort by design: the fan-out can be slow or partly unreachable, and a
+ * picker that hangs behind it would be worse than one in registry order — so a
+ * failure yields an empty map and the caller falls back to sorting by name.
+ */
+async function fetchHostUsageScores(): Promise<Map<string, HostUsageScore>> {
+  const now = Date.now();
+  if (hostUsageCache && now - hostUsageCache.fetchedAt < HOST_USAGE_TTL_MS) return hostUsageCache.scores;
+  try {
+    const sessions = await fetchRecapSessions(HOST_USAGE_SESSION_LIMIT, []);
+    const scores = new Map(rankHostsByUsage(sessions, now).map((s) => [s.host, s]));
+    hostUsageCache = { scores, fetchedAt: now };
+    return scores;
+  } catch {
+    return new Map();
+  }
+}
+
+// Recent sessions pulled per host for the usage ranking. Enough to separate the
+// boxes you live on from the ones you touched once; small enough that the sweep
+// stays cheap.
+const HOST_USAGE_SESSION_LIMIT = 50;
+
+/** The QuickPick sub-label for one host: reachability first, then how much you use it. */
+function describeLaunchHost(online: boolean, score: HostUsageScore | undefined, onlineWord = 'online'): string {
+  const state = online ? onlineWord : 'offline';
+  if (!score || score.sessions === 0) return state;
+  return `${state} · ${score.sessions} recent session${score.sessions === 1 ? '' : 's'}`;
+}
+
 // Interactive host picker (This Mac / a device / Balanced) for the per-agent
 // "(Pick Host)" commands and the ⌘⌥⇧n override. Returns { cancelled } if the
 // user dismissed it; host === undefined means "this Mac".
 async function pickLaunchHost(title = 'Run on…', agentKey?: string): Promise<{ host?: string; cancelled: boolean }> {
   const devices = await listRegisteredDevices();
-  const sorted = [...devices].sort((a, b) => Number(b.online) - Number(a.online));
-  const BALANCE_ID = ' balanced';
+  // Order by how much you actually use each box, not by registry order — with a
+  // dozen devices the two you work on daily otherwise land in an arbitrary spot.
+  // Online still outranks usage: an offline box cannot take the launch however
+  // familiar it is. History is best-effort; when the sweep returns nothing every
+  // score is 0 and the order falls back to the device name.
+  const usage = await fetchHostUsageScores();
+  const scoreOf = (name: string) => usage.get(normalizeHost(name))?.score ?? 0;
+  const sorted = [...devices].sort(
+    (a, b) =>
+      Number(b.online) - Number(a.online) ||
+      scoreOf(b.name) - scoreOf(a.name) ||
+      a.name.localeCompare(b.name),
+  );
+  const BALANCE_ID = ' balanced';
   const items: (vscode.QuickPickItem & { hostId?: string })[] = [
-    { label: '$(vm) This Mac', description: 'Run locally', hostId: undefined },
+    { label: '$(vm) This Mac', description: describeLaunchHost(true, usage.get(LOCAL_LABEL), 'Run locally'), hostId: undefined },
     { label: '$(sync) Balanced (least-busy)', description: 'Auto-pick the least-busy online device', hostId: BALANCE_ID },
     ...sorted.map(d => ({
       label: `${d.online ? '$(radio-tower)' : '$(circle-slash)'} ${d.name}`,
-      description: d.online ? 'online' : 'offline',
+      description: describeLaunchHost(!!d.online, usage.get(normalizeHost(d.name))),
       hostId: d.name,
     })),
   ];
@@ -467,7 +518,6 @@ async function resolveAutoAgentKey(
   // Recap ledger uses. A failed/empty sweep just yields the default fallback.
   let sessions: RemoteSession[] = [];
   try {
-    const { fetchRecapSessions } = await import('./remoteSessions.vscode');
     sessions = await fetchRecapSessions(20, settings.getSettings(context).projectRules ?? []);
   } catch (err) {
     console.error('[launchAgent] recap sweep failed:', err);

@@ -32,8 +32,45 @@ const OLDER_WEIGHT = 1;
 
 /** The activity clock for a session: its last observed write, or its start when no
  *  activity was recorded (a status-only remote row). 0 when neither is known. */
-function activityMsOf(s: UsageSession): number {
+function activityMsOf(s: { lastActivityMs: number; startedAtMs: number }): number {
   return s.lastActivityMs > 0 ? s.lastActivityMs : s.startedAtMs > 0 ? s.startedAtMs : 0;
+}
+
+/** One scored bucket: the recency-weighted total for a single key. */
+interface UsageBucket {
+  score: number;
+  lastActivityMs: number;
+  sessions: number;
+}
+
+/**
+ * The shared scorer behind every usage ranking. Buckets sessions by whatever key
+ * the caller extracts (agent type, host, …) and applies the recency weighting
+ * above, so agent ranking and host ranking can never drift apart.
+ *
+ * A session whose key is empty, or that `accept` rejects, is skipped entirely —
+ * that is how callers exclude an uninstalled agent or an unregistered device.
+ */
+function scoreByKey<T extends { lastActivityMs: number; startedAtMs: number }>(
+  sessions: readonly T[],
+  now: number,
+  keyOf: (s: T) => string,
+  accept: (key: string) => boolean,
+): Map<string, UsageBucket> {
+  const buckets = new Map<string, UsageBucket>();
+  for (const s of sessions) {
+    const key = keyOf(s);
+    if (!key || !accept(key)) continue;
+    const activityMs = activityMsOf(s);
+    const weight = activityMs > 0 && now - activityMs <= DAY_MS ? RECENT_WEIGHT : OLDER_WEIGHT;
+
+    const cur = buckets.get(key) ?? { score: 0, lastActivityMs: 0, sessions: 0 };
+    cur.score += weight;
+    cur.sessions += 1;
+    if (activityMs > cur.lastActivityMs) cur.lastActivityMs = activityMs;
+    buckets.set(key, cur);
+  }
+  return buckets;
 }
 
 export interface AgentUsageScore {
@@ -62,25 +99,60 @@ export function rankAgentsByUsage(
   now: number,
 ): AgentUsageScore[] {
   const usable = new Set(installed.map((k) => k.toLowerCase()));
-  const byAgent = new Map<string, AgentUsageScore>();
-
-  for (const s of sessions) {
-    const agentType = (s.agentType || '').toLowerCase();
-    if (!agentType || !usable.has(agentType)) continue;
-    const activityMs = activityMsOf(s);
-    const recent = activityMs > 0 && now - activityMs <= DAY_MS;
-    const weight = recent ? RECENT_WEIGHT : OLDER_WEIGHT;
-
-    const cur = byAgent.get(agentType) ?? { agentType, score: 0, lastActivityMs: 0, sessions: 0 };
-    cur.score += weight;
-    cur.sessions += 1;
-    if (activityMs > cur.lastActivityMs) cur.lastActivityMs = activityMs;
-    byAgent.set(agentType, cur);
-  }
-
-  return [...byAgent.values()].sort(
-    (a, b) => b.score - a.score || b.lastActivityMs - a.lastActivityMs,
+  const buckets = scoreByKey(
+    sessions,
+    now,
+    (s) => (s.agentType || '').toLowerCase(),
+    (key) => usable.has(key),
   );
+  return [...buckets.entries()]
+    .map(([agentType, b]) => ({ agentType, ...b }))
+    .sort((a, b) => b.score - a.score || b.lastActivityMs - a.lastActivityMs);
+}
+
+/** Minimal view of a session record the HOST ranking reads. `RemoteSession` is a
+ *  structural superset, so callers pass those directly. */
+export interface HostUsageSession {
+  /** Normalized machine the session ran on ('this-mac' for the local box). */
+  host: string;
+  lastActivityMs: number;
+  startedAtMs: number;
+}
+
+export interface HostUsageScore {
+  host: string;
+  /** Recency-weighted preference score (higher = used more). */
+  score: number;
+  /** Newest activity epoch ms seen on this host — the tie-breaker. */
+  lastActivityMs: number;
+  /** Raw session count on this host (shown in the picker). */
+  sessions: number;
+}
+
+/**
+ * Aggregate session history per MACHINE, ranked most-used first — so the host
+ * picker can lead with the boxes you actually work on instead of an arbitrary
+ * registry order. Same recency weighting as the agent ranking (shared scorer).
+ *
+ * Host strings are compared case-insensitively after trimming, which is how the
+ * session rows ('this-mac', device names) and the registry names line up.
+ *
+ * @param sessions Historical sessions across the fleet (any order).
+ * @param now      Reference clock (epoch ms) — injected so tests are deterministic.
+ */
+export function rankHostsByUsage(
+  sessions: readonly HostUsageSession[],
+  now: number,
+): HostUsageScore[] {
+  const buckets = scoreByKey(
+    sessions,
+    now,
+    (s) => (s.host || '').trim().toLowerCase(),
+    () => true,
+  );
+  return [...buckets.entries()]
+    .map(([host, b]) => ({ host, ...b }))
+    .sort((a, b) => b.score - a.score || b.lastActivityMs - a.lastActivityMs);
 }
 
 /**

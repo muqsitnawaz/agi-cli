@@ -1,5 +1,11 @@
 import { describe, test, expect } from 'bun:test';
-import { rankAgentsByUsage, pickAgentByUsage, type UsageSession } from './agentUsage';
+import {
+  rankAgentsByUsage,
+  pickAgentByUsage,
+  rankHostsByUsage,
+  type UsageSession,
+  type HostUsageSession,
+} from './agentUsage';
 
 const NOW = Date.parse('2026-08-01T12:00:00Z');
 const HOUR = 60 * 60 * 1000;
@@ -118,5 +124,74 @@ describe('pickAgentByUsage', () => {
     const chosen = pickAgentByUsage(sessions, ALL, 'claude', NOW);
     expect(chosen).not.toBeNull();
     expect(ALL).toContain(chosen);
+  });
+});
+
+// Build a host session with activity at `now - agoMs`.
+function hostSess(host: string, agoMs: number): HostUsageSession {
+  return { host, lastActivityMs: NOW - agoMs, startedAtMs: NOW - agoMs };
+}
+
+describe('rankHostsByUsage', () => {
+  test('puts the box you work on most at the top of the picker', () => {
+    const ranked = rankHostsByUsage(
+      [
+        hostSess('yosemite-s1', 2 * HOUR),
+        hostSess('yosemite-s1', 3 * HOUR),
+        hostSess('yosemite-s1', 5 * HOUR),
+        hostSess('mac-mini', 4 * HOUR),
+      ],
+      NOW,
+    );
+    expect(ranked[0].host).toBe('yosemite-s1');
+    expect(ranked[0].sessions).toBe(3);
+  });
+
+  test('shares the agent ranking recency weighting: today beats a stale pile', () => {
+    // s0: one session 2h ago (recent, 5). s1: three sessions 3-5 days ago (old, 1 each).
+    const ranked = rankHostsByUsage(
+      [
+        hostSess('yosemite-s0', 2 * HOUR),
+        hostSess('yosemite-s1', 3 * DAY),
+        hostSess('yosemite-s1', 4 * DAY),
+        hostSess('yosemite-s1', 5 * DAY),
+      ],
+      NOW,
+    );
+    expect(ranked[0].host).toBe('yosemite-s0');
+    expect(ranked[0].score).toBe(5);
+    expect(ranked[1].score).toBe(3);
+  });
+
+  test('normalizes host case and whitespace so one machine is one row', () => {
+    const ranked = rankHostsByUsage(
+      [hostSess('Yosemite-S1', 1 * HOUR), hostSess('  yosemite-s1  ', 2 * HOUR)],
+      NOW,
+    );
+    expect(ranked).toHaveLength(1);
+    expect(ranked[0].host).toBe('yosemite-s1');
+    expect(ranked[0].sessions).toBe(2);
+  });
+
+  test('counts the local box under its own key so "This Mac" can be scored too', () => {
+    const ranked = rankHostsByUsage([hostSess('this-mac', 1 * HOUR)], NOW);
+    expect(ranked[0].host).toBe('this-mac');
+  });
+
+  test('skips rows with no host rather than bucketing them together', () => {
+    expect(rankHostsByUsage([hostSess('', 1 * HOUR), hostSess('   ', 2 * HOUR)], NOW)).toEqual([]);
+  });
+
+  test('breaks a score tie toward the more recently active host', () => {
+    const ranked = rankHostsByUsage(
+      [hostSess('yosemite-s0', 10 * DAY), hostSess('yosemite-s1', 2 * DAY)],
+      NOW,
+    );
+    expect(ranked[0].score).toBe(ranked[1].score);
+    expect(ranked[0].host).toBe('yosemite-s1');
+  });
+
+  test('no history is an empty ranking, so the picker falls back to its own order', () => {
+    expect(rankHostsByUsage([], NOW)).toEqual([]);
   });
 });
