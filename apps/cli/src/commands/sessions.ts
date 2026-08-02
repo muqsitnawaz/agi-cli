@@ -458,10 +458,10 @@ export function liveGlyphAndPreview(a: ActiveSession | undefined): { glyph: stri
   // stopped session shows, so a gone session never masquerades as a resting one.
   const unknown = a.status === 'unknown';
   const shape =
-    waiting ? '◐'
-      : running ? '●'
-        : a.status === 'abandoned' ? '⊘'
-          : a.status === 'closed' ? '×'
+    a.status === 'abandoned' ? '⊘'
+      : a.status === 'closed' ? '×'
+        : waiting ? '◐'
+          : running ? '●'
             : unknown ? '◌'
               : '○';
   return { glyph: statusColor(a.status)(shape), preview: buildSessionDescription(a) };
