@@ -316,7 +316,9 @@ describe('rc-hygiene + exec-policy findings (restored from the pre-RUSH-2069 adv
     expect(rc[0].severity).toBe('warning');
     expect(rc[0].message).toContain('3 credential-shaped exports in shell rc files');
     expect(rc[0].message).toContain('.zshrc:12 OPENAI_API_KEY');
-    expect(rc[0].remediation).toBe('agents secrets add');
+    // `agents secrets add` stores ONE variable and never edits the rc file, so an
+    // aggregated row must say the command repeats and the deletion is manual.
+    expect(rc[0].remediation).toBe('agents secrets add once per export (3), then delete each rc line');
   });
 
   it('the file-store master key gets its own row — a different fix from the rest', () => {
@@ -329,7 +331,7 @@ describe('rc-hygiene + exec-policy findings (restored from the pre-RUSH-2069 adv
     const rc = findings.filter((f) => f.kind === 'rc-secret-export');
     expect(rc).toHaveLength(2);
     expect(rc[0].remediation).toContain('~/.agents/.secrets-key/passphrase');
-    expect(rc[1].remediation).toBe('agents secrets add');
+    expect(rc[1].remediation).toBe('agents secrets add, then delete the rc line');
   });
 
   it('no rc exports → no finding', () => {

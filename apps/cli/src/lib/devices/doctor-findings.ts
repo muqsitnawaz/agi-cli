@@ -568,19 +568,29 @@ function rcSecretFindings(device: string, rc: RcSecretFinding[]): DoctorFinding[
       rows: rc.filter((f) => f.isMasterPassphrase),
       remediation: 'move it to ~/.agents/.secrets-key/passphrase (chmod 600)',
     },
-    { rows: rc.filter((f) => !f.isMasterPassphrase), remediation: 'agents secrets add' },
+    // `agents secrets add [bundle] [key]` stores exactly ONE variable
+    // (`commands/secrets.ts:1349`), and nothing edits the rc file — so an
+    // aggregated row has to say both that the command repeats and that the
+    // deletion is manual, or following it once leaves most of the leak in place.
+    { rows: rc.filter((f) => !f.isMasterPassphrase), remediation: '' },
   ];
   for (const g of groups) {
     if (g.rows.length === 0) continue;
     const n = g.rows.length;
     const examples = g.rows.slice(0, 2).map((f) => `${f.file}:${f.line} ${f.name}`).join(', ');
-    const what = g.rows[0].isMasterPassphrase
+    const master = g.rows[0].isMasterPassphrase;
+    const what = master
       ? `file-store master key exported from a shell rc file`
       : `${n} credential-shaped export${n === 1 ? '' : 's'} in shell rc files`;
+    const remediation = master
+      ? g.remediation
+      : n === 1
+        ? 'agents secrets add, then delete the rc line'
+        : `agents secrets add once per export (${n}), then delete each rc line`;
     out.push({
       severity: 'warning', kind: 'rc-secret-export', device,
-      message: `${what} (${examples}) — readable by any same-user process; delete the export`,
-      remediation: g.remediation,
+      message: `${what} (${examples}) — readable by any same-user process`,
+      remediation,
     });
   }
   return out;
