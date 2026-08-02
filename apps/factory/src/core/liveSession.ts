@@ -66,7 +66,7 @@ async function readState(pid: number): Promise<SessionStateRecord | null> {
 /**
  * Find the live session UUID for a running agent process under the given shell.
  * Reads state files written by the SessionStart hook
- * (~/.agents/.cache/terminals/sessions/<agent-pid>.json), keyed by agent process id.
+ * (~/.agents/.cache/state/sessions/<agent-pid>.json), keyed by agent process id.
  *
  * Returns null when no agent process is currently running under the shell — caller
  * decides whether to fall back to a spawn-time env var or report "no session".
@@ -85,37 +85,4 @@ export async function liveSessionIdForShell(shellPid: number | undefined): Promi
     if (rec && (!best || rec.ts > best.ts)) best = rec;
   }
   return best?.session_id ?? null;
-}
-
-/**
- * Delete state files whose PID is no longer alive. Run on extension activation
- * to bound the size of ~/.agents/.cache/terminals/sessions/. Cheap (~50 stat+kill
- * calls per accumulation cycle).
- */
-export async function pruneStaleSessionState(): Promise<number> {
-  let files: string[];
-  try {
-    files = await fs.readdir(STATE_DIR);
-  } catch {
-    return 0;
-  }
-  let removed = 0;
-  for (const name of files) {
-    if (!name.endsWith('.json')) continue;
-    const pid = Number(name.slice(0, -5));
-    if (!Number.isFinite(pid) || pid <= 0) continue;
-    try {
-      process.kill(pid, 0);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ESRCH') {
-        try {
-          await fs.unlink(path.join(STATE_DIR, name));
-          removed++;
-        } catch {
-          // best-effort
-        }
-      }
-    }
-  }
-  return removed;
 }

@@ -133,7 +133,7 @@ async function ensureAgentsCliInstalled(): Promise<void> {
 }
 import { supportsPrewarming, buildVersionedResumeCommand, PREWARM_CONFIGS, PrewarmAgentType } from '../core/prewarm';
 import { generateClaudeSessionId, listOpencodeSessions } from '../core/prewarm.simple';
-import { liveSessionIdForShell, pruneStaleSessionState } from '../core/liveSession';
+import { liveSessionIdForShell } from '../core/liveSession';
 import { getSessionPathBySessionId, getSessionPreviewInfo, getOpenCodeSessionPreviewInfo, getCursorSessionPreviewInfo } from './sessions.vscode';
 import * as tasksImport from './tasks.vscode';
 import { SOURCE_BADGES } from '../core/tasks';
@@ -1064,11 +1064,6 @@ export async function activate(context: vscode.ExtensionContext) {
   // resolveAgentsBin runs in the background; if it throws AgentsBinNotFoundError
   // we surface a notification with a one-click installer.
   void ensureAgentsCliInstalled();
-
-  // Drop session-state files left behind by agents that have exited. The
-  // SessionStart hook keys files by pid; without a SessionEnd cleanup hook,
-  // those files would otherwise accumulate forever.
-  void pruneStaleSessionState();
 
   // Initialize terminal readiness event tracking (shell integration + close cleanup)
   readiness.initReadiness(context);
@@ -3934,7 +3929,11 @@ async function tryHydrateSessionIdentity(
   prefix: string,
   sessionId: string,
 ): Promise<void> {
-  if (entry.version && entry.account) return;
+  // The cached version/account belong to a specific session. Skip only when they
+  // are already resolved for THIS session id — a rerun or /clear in the same
+  // terminal produces a new id (often a different balanced version/account), and
+  // the stale cache must be replaced, not kept.
+  if (entry.identitySessionId === sessionId && entry.version && entry.account) return;
 
   const inflightKey = `${sessionId}@${entry.host ?? 'local'}`;
   if (statusIdentityInFlight.has(inflightKey)) return;
@@ -3943,8 +3942,12 @@ async function tryHydrateSessionIdentity(
   try {
     const identity = await fetchSessionIdentity(sessionId, entry.host);
     if (!identity) return;
-    if (identity.version && !entry.version) terminals.setVersion(terminal, identity.version);
-    if (identity.account && !entry.account) terminals.setAccount(terminal, identity.account);
+    // The terminal may have moved on to another session while this was queued;
+    // never stamp a stale session's identity over the current one.
+    if (entry.sessionId && entry.sessionId !== sessionId) return;
+    if (identity.version) terminals.setVersion(terminal, identity.version);
+    if (identity.account) terminals.setAccount(terminal, identity.account);
+    entry.identitySessionId = sessionId;
 
     if (!agentStatusBarItem || vscode.window.activeTerminal !== terminal) return;
     const rawLabel = entry.label;
@@ -3983,9 +3986,11 @@ async function tryHydrateLiveSessionId(
       terminals.setSessionId(terminal, liveId);
     }
 
-    // Now that the real session id is known, resolve its actual version/account
-    // from the session feed (the id is the join key the identity lookup needs).
-    if (!entry.version || !entry.account) {
+    // Now that the real (live) session id is known, resolve its actual
+    // version/account from the session feed. Drive it off the LIVE id, not the
+    // stale entry.sessionId, and re-fetch whenever the cached identity belongs to
+    // a different session (rerun / /clear in the same terminal).
+    if (entry.identitySessionId !== liveId) {
       void tryHydrateSessionIdentity(terminal, entry, prefix, liveId);
     }
 
@@ -4031,11 +4036,13 @@ function updateStatusBarForTerminal(terminal: vscode.Terminal, extensionPath: st
       entry?.agentType === 'codex',
     );
 
-    // When we already know the session id, resolve its real version/account from
-    // the session feed (host-aware). We deliberately do NOT fall back to
-    // `agents view` machine defaults when there is no id — that showed a version
+    // When we already know the session id (e.g. an offloaded --host tab, where the
+    // live-id lookup below can't reach the remote box), resolve its real
+    // version/account from the session feed (host-aware), re-fetching when the
+    // cached identity is for a different session. We deliberately do NOT fall back
+    // to `agents view` machine defaults when there is no id — that showed a version
     // and account unrelated to the running session (the reported bug).
-    if (entry && sessionId && (!version || !account)) {
+    if (entry && sessionId && entry.identitySessionId !== sessionId) {
       void tryHydrateSessionIdentity(terminal, entry, info.prefix, sessionId);
     }
     // Async-resolve the live session id from the SessionStart hook's state file,
