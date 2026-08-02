@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.20.85
+
+- **`agents feed post` can now be mirrored to the systems you actually watch.**
+  A post was durable but local: an operator away from every terminal never saw
+  it, and the tracker that owns the work heard nothing. Declare sinks under
+  `feed.broadcast` in `agents.yaml` — argv templates, not built-in integrations —
+  and each post is fanned out to them. `--level important` marks a post worth
+  interrupting someone over, so a sink with `minLevel: important` never fires on
+  a routine "CI green"; a template referencing `{ticket}` is skipped when no
+  ticket is known, and the ticket is joined from the session index rather than
+  asked for as a flag. `{message}` composes the human line a messaging sink wants
+  — `<project> · <text>` plus the first attached URL — so an out-of-band ping
+  leads with the project and carries a clickable link. Delivery is best-effort
+  and reported per sink; a mirror that fails never costs you the post. Source:
+  `apps/cli/src/lib/feed-broadcast.ts`, `apps/cli/src/commands/feed.ts`,
+  `apps/cli/docs/06-observability.md`.
+
+- **`agents feed --filter updates` now shows the progress posts agents actually
+  wrote, across the fleet.** The view read the most recent N activity events and
+  *then* kept `status.posted`, so routine `file.edited` churn filled the whole
+  slice — a box with six real posts rendered "0 posts" (and `--json` returned one
+  of six). `readRecentActivity` gained `events` / `tier` filters that apply before
+  the limit, so the limit counts posts; the same fix restores the milestone lane
+  under `agents feed`. The updates view also fans out over SSH like the block view
+  (`-H/--host`, `--device`, `--local` to opt out), because an agent posts on
+  whichever box ran it. Source: `apps/cli/src/lib/activity.ts`,
+  `apps/cli/src/commands/feed.ts`.
+
+- **`agents run --notify` posts a desktop notification when a headless run
+  finishes, and menu-bar quick dispatch now uses it.** The dispatch panel used to
+  post its "finished"/"failed" notice from the MenubarHelper's own
+  process-termination callback, so a helper that restarted mid-run — an upgrade
+  replacing the bundle, a crash — took the callback with it while the run carried
+  on reparented to launchd, and the dispatch could never report back. The run
+  process owns the notice now: armed on its own `exit`, so it covers local,
+  `--host` and `--lease` dispatch alike and survives anything that happens to the
+  launcher. The helper's click actions also accept `url:<https…>` so a completion
+  notification can open the PR or ticket the run produced. Source:
+  `apps/cli/src/lib/run-notify.ts`, `apps/cli/src/commands/exec.ts`,
+  `apps/cli/menubar/Sources/MenubarHelper/AgentsCLI.swift`,
+  `apps/cli/menubar/Sources/MenubarHelper/PromptPanel.swift`.
+
 ## 1.20.84
 
 - **Agent onboarding cheat sheet and docs drift guard.** Added
