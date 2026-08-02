@@ -247,10 +247,10 @@ unreadable/empty transcript has no rich state, and then one canonical function,
 
 | Situation | Status | Why |
 |---|---|---|
-| Process **alive** (any kind, no rich state) | `running` | alive is itself a positive signal — the honest floor; never `unknown`, never a fabricated `idle` |
+| Transcript not written for `ABANDONED_STALE_MS` | `abandoned` | days-stale/dangling work needs attention and outranks both live and dead PID signals |
+| Process **alive** (any kind, no rich state, transcript not abandoned) | `running` | alive is itself a positive signal — the honest floor; never `unknown`, never a fabricated `idle` |
 | Not alive, transcript still on disk | `closed` | the process exited; do not report it as live-idle |
 | Not alive, no transcript | `closed` | death is a definitive observable signal even when the file is absent |
-| Transcript not written for `ABANDONED_STALE_MS` | `abandoned` | days-stale/dangling work needs attention and outranks bare closed |
 | No PID signal and no file signal | `unknown` | genuinely nothing left to measure |
 
 The headline guarantee: **a running agent is never `unknown`.** The old blanket

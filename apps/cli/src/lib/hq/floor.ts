@@ -4,7 +4,7 @@ import type { OpenBlock } from '../feed.js';
 import type { AgentStatusDetail, TaskInfo } from '../teams/api.js';
 
 export type HqRoomKind = 'team' | 'machine' | 'lobby';
-export type HqAgentMood = 'working' | 'waiting' | 'blocked' | 'celebrating' | 'idle';
+export type HqAgentMood = 'working' | 'waiting' | 'blocked' | 'celebrating' | 'done' | 'idle';
 export type HqAmbientKind = 'needs_input' | 'error' | 'pr' | 'team_active' | 'idle_scene';
 
 export interface HqAction {
@@ -127,6 +127,8 @@ function teammateName(session: ActiveSession, teammatesById: Map<string, AgentSt
 }
 
 function moodForSession(session: ActiveSession, hasOpenBlock: boolean): HqAgentMood {
+  if (session.status === 'abandoned') return 'blocked';
+  if (session.status === 'closed') return 'done';
   if (session.status === 'input_required' || session.activity === 'waiting_input' || hasOpenBlock) return 'waiting';
   if (session.rateLimited) return 'blocked';
   if (session.pr) return 'celebrating';
@@ -307,6 +309,7 @@ export function buildHqFloor(input: BuildHqFloorInput): HqFloorSnapshot {
     }
   }
   for (const room of rooms.values()) {
+    const roomAgents = agents.filter((agent) => agent.roomId === room.id);
     if (room.kind === 'team' && room.counts.running > 0) {
       ambientEvents.push({
         id: `team-active:${room.id}`,
@@ -316,7 +319,7 @@ export function buildHqFloor(input: BuildHqFloorInput): HqFloorSnapshot {
         intensity: 'low',
       });
     }
-    if (room.counts.agents > 0 && room.counts.running === 0 && room.counts.needsInput === 0) {
+    if (roomAgents.length > 0 && roomAgents.every((agent) => agent.mood === 'idle')) {
       ambientEvents.push({
         id: `idle:${room.id}`,
         kind: 'idle_scene',

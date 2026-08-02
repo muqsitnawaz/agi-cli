@@ -113,4 +113,42 @@ describe('buildHqFloor', () => {
     ]);
     expect(snapshot.ambientEvents.some((event) => event.kind === 'needs_input' && event.agentId === 'agent-123456')).toBe(true);
   });
+
+  it('does not render closed or abandoned sessions as idle on the floor', () => {
+    const sessions: ActiveSession[] = [
+      {
+        context: 'direct',
+        kind: 'codex',
+        status: 'closed',
+        activity: 'working',
+        sessionId: 'closed-session',
+        machine: 'yosemite-s0',
+      },
+      {
+        context: 'direct',
+        kind: 'claude',
+        status: 'abandoned',
+        activity: 'idle',
+        sessionId: 'abandoned-session',
+        machine: 'yosemite-s0',
+      },
+    ];
+
+    const snapshot = buildHqFloor({
+      generatedAt: new Date('2026-07-21T17:03:00.000Z'),
+      sessions,
+      teams: [],
+      teammatesByTeam: new Map(),
+      blocks: [],
+    });
+
+    expect(snapshot.agents.map((agent) => [agent.id, agent.mood])).toEqual([
+      ['closed-session', 'done'],
+      ['abandoned-session', 'blocked'],
+    ]);
+    expect(snapshot.rooms[0].counts).toEqual({ agents: 2, needsInput: 0, running: 0, failed: 1 });
+    expect(snapshot.counters.failed).toBe(1);
+    expect(snapshot.ambientEvents.some((event) => event.kind === 'error' && event.agentId === 'abandoned-session')).toBe(true);
+    expect(snapshot.ambientEvents.some((event) => event.kind === 'idle_scene')).toBe(false);
+  });
 });
