@@ -148,11 +148,13 @@ function finding(f: Omit<DoctorFinding, 'remediation'>): DoctorFinding {
 
 /**
  * Emit findings for a list of same-kind resource names on ONE version: name the
- * first two individually (so a small gap is precise), then collapse the tail
- * into a single `+N more <label>s` line so a version missing dozens doesn't
- * flood the section. `pluralNoun` gives the collapse-line noun (already the
- * message for `preNamed` items). `preNamed` items already carry their own
- * kind/detail in the string, so we don't re-wrap them.
+ * first two individually (so a small gap is precise), then collapse the tail into
+ * a single `+N more <noun>s <verb>` line so a version missing dozens doesn't flood
+ * the section. `noun` is the collapse-line noun (hook / plugin / resource).
+ * `preNamed` items already carry their full descriptor in the string (e.g.
+ * `command 'audit' missing`, `skill 'x' changed upstream — re-sync`), so they pass
+ * through unwrapped; otherwise `n` is a bare name and is wrapped as
+ * `<noun> '<n>' missing`.
  */
 function emitCollapsed(
   out: DoctorFinding[],
