@@ -22,7 +22,7 @@ describe('capableAgents("commands")', () => {
   });
 
   it('includes all other agents that support file-based commands', () => {
-    const expected = ['claude', 'codex', 'cursor', 'opencode'];
+    const expected = ['claude', 'codex', 'opencode'];
     const agents = capableAgents('commands');
     for (const agent of expected) {
       expect(agents).toContain(agent);

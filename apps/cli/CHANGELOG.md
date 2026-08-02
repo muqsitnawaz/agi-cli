@@ -2,8 +2,6 @@
 
 ## 1.20.86
 
-- **Cursor command sync now uses Agent Skills instead of the IDE-only `.cursor/commands/` directory (RUSH-2083).** The registry no longer claims native command support for cursor-agent, so the existing commands-as-skills writer emits `~/.cursor/skills/<name>/SKILL.md` and removes stale managed command files from the unused CLI path. Source: `apps/cli/src/lib/agents.ts`.
-
 - **`agents sessions` now shows a Kimi session's todo list and its file-touching
   tool calls.** Kimi writes its checklist with `TodoList` (items shaped
   `{title, status}`, where finished is `done`) rather than Claude's `TodoWrite`
