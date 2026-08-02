@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFileSync } from 'child_process';
 
-import { registerHooksToSettings, selectHookManifest, unmanagedHookNames, computeCodexHookTrustHash, toPortableCommand, pruneVersionHomeHookEntriesFromSettings } from '../hooks.js';
+import { deduplicateVersionHookCommands, registerHooksToSettings, selectHookManifest, unmanagedHookNames, computeCodexHookTrustHash, toPortableCommand, pruneVersionHomeHookEntriesFromSettings } from '../hooks.js';
 import * as TOML from 'smol-toml';
 import * as yaml from 'yaml';
 import { CODEX_HOOKS_MIN_VERSION } from '../agents.js';
@@ -2033,6 +2033,21 @@ describe('per-version hook entry pruning (settings accumulation regression)', ()
     }
     return out;
   }
+
+  it('deduplicates by hook resource name and prefers the active version path', () => {
+    const activeHome = '/home/u/.agents/.history/versions/claude/2.1.207/home';
+    const commands = [
+      '/home/u/.agents/.history/versions/claude/2.1.181/home/.claude/hooks/00-agent-verify-work-complete.sh',
+      '/home/u/.agents/.history/versions/claude/2.1.207/home/.claude/hooks/00-agent-verify-work-complete.sh',
+      '/home/u/.agents/.history/versions/claude/2.1.186/home/.claude/hooks/00-agent-verify-work-complete.sh',
+      '/home/u/custom/stop-hook.sh',
+    ];
+
+    expect(deduplicateVersionHookCommands(commands, activeHome)).toEqual([
+      '/home/u/custom/stop-hook.sh',
+      '/home/u/.agents/.history/versions/claude/2.1.207/home/.claude/hooks/00-agent-verify-work-complete.sh',
+    ]);
+  });
 
   describe('sync (registerHooksToSettings)', () => {
     beforeEach(() => {
