@@ -44,7 +44,164 @@
   `apps/cli/src/lib/session/active.ts`, `apps/cli/src/commands/sessions.ts`,
   `apps/factory/src/core/remoteSessions.ts`.
 
+- **`agents view` now surfaces the Cursor account and its usage.** Cursor was
+  absent from the account view; it now shows the signed-in account (email/authId
+  from `~/.cursor/cli-config.json`, token from `~/.config/cursor/auth.json`) and,
+  for request-capped (free/legacy) plans, a monthly request bar (`M`) from
+  `cursor.com/api/usage`. Usage-based plans have no request cap, so they render the
+  account row without a bar. Source: `apps/cli/src/lib/usage.ts`,
+  `apps/cli/src/lib/agents.ts`.
+
+- **The routines daemon now anchors its working directory to `$HOME` on startup,
+  so a deleted launch directory no longer crashes every scheduled routine.** The
+  daemon is long-lived and inherited whatever cwd it was launched from — commonly a
+  git worktree under `.agents/worktrees/`. When that directory was later removed
+  (`git worktree remove`, `rm -rf`), the daemon kept the deleted inode as its cwd
+  (a process cannot chdir out of a deleted directory on its own), and every job it
+  spawned inherited the dead cwd — `spawnJobAttempt` and command runs pass no
+  explicit `cwd`. Bun then failed `getcwd()` at startup and *every* routine died at
+  0 seconds with `ENOENT: Bun could not find a file` (or `The current working
+  directory was deleted`) before the agent ran — a fleet-wide routine outage from a
+  single removed worktree. `runDaemon` now re-anchors to the home directory once at
+  startup (`anchorDaemonCwd`), making the scheduler immune regardless of how it was
+  launched. Source: `apps/cli/src/lib/daemon.ts` (`anchorDaemonCwd`, `runDaemon`).
+
+- **`agents repo refresh` is deprecated in favor of `agents sync`.** The command is
+  now hidden from help and prints a deprecation notice on use, pointing at the
+  replacement: `agents sync --local` (reconcile all installed agents, no git) or
+  `agents sync <agent>` (one agent). It still runs for now so existing scripts and
+  muscle memory don't break — `refresh` was a partial variant of `sync` (it only
+  ever materialized the single global-default version, and silently no-op'd for an
+  agent with installed versions but no global default), whereas `sync` covers
+  every installed version. Internal callers (crabbox bootstrap, the `agents pull`
+  redirect, `agents setup` help) now use `agents sync --local`. The underlying
+  `refresh()` function stays — it is the reconcile stage behind `agents sync`.
+  Source: `apps/cli/src/commands/repo.ts`, `apps/cli/src/lib/crabbox/`.
+
+- **`agents view` now shows Grok usage limits.** Grok's network usage endpoints
+  404, so usage is parsed from the local `~/.grok/logs/unified.jsonl` log instead —
+  the latest billing-period config and subscription tier render as a `W` window,
+  matching the other agents' live-usage display. Source: `apps/cli/src/lib/usage.ts`.
+
+- **`agents run --host` now starts in the same project you launched it from, not the remote `$HOME`.** A host run with neither `--cwd` nor `--remote-cwd` sent no `cd` at all, so the remote agent opened in the home directory with no project context — every launch from a repo (including every Factory "Pick Host" tab) began with a manual `cd`. The dispatch now derives a working directory from the local cwd when the caller named none: a cwd under the local home is re-rooted onto the *remote* home (`~/src/x` → the host's `$HOME/src/x`), which is the normal fleet layout where the same checkout sits at the same home-relative path on every box. Because a derived directory is a best-effort mirror rather than something the user asked for, a host that lacks that checkout falls back to its home instead of failing the run; an explicit `--cwd`/`--remote-cwd` is never mirrored, so a directory you named that does not exist still fails loudly. A cwd outside the local home is not mirrored — a path like `/opt/thing` says nothing about the target's filesystem. Source: `apps/cli/src/lib/hosts/dispatch.ts` (`deriveMirroredCwd`, `remoteCdPrefix`), `apps/cli/src/commands/exec.ts`.
+
+- **The Cmd+Shift+O quick-dispatch bar is now Plan / Run, and never runs an agent
+  in your home directory.** The two spotlight modes were renamed from File
+  Ticket / Fix to **Plan** (investigate → file a Linear ticket) and **Run**
+  (headless `agents run`). A new repo dropdown is populated from your recent
+  session working directories with `$HOME` dropped, and the pick is passed as
+  `--cwd` to both modes, so an agent is always scoped to a real repo instead of
+  the too-broad home dir; the last-picked repo is remembered. Run now always uses
+  `--strategy balanced` (auto load-balance across signed-in versions with
+  headroom, skipping rate-limited), and `--name` is seeded from a slug of your
+  task text instead of an opaque `quick-<timestamp>`. Source:
+  `apps/cli/menubar/Sources/MenubarHelper/PromptPanel.swift`,
+  `apps/cli/menubar/Sources/MenubarHelper/AgentsCLI.swift`.
+
+- **The keychain Touch ID prompt now names the session that triggered the read
+  (RUSH-1971).** When a bundle read pops Touch ID, the operation prompt already
+  named the requesting agent, bundle, and reason; it now also carries the
+  triggering session's 8-char short-id — e.g. *"Claude is requesting to unlock the
+  'prod' bundle (session e0a1b2c3) for 7 days …"* — so an unexpected prompt is
+  attributable when an interactive agent, headless workers, and `secrets exec`
+  deploys all run at once. The short-id is derived from the `AGENT_SESSION_ID` the
+  exec env already exports; no keychain-helper re-sign is required (the enriched
+  string flows through the existing `AGENTS_KEYCHAIN_PROMPT` env). Source:
+  `apps/cli/src/lib/secrets/index.ts`, `apps/cli/src/lib/secrets/bundles.ts`.
+
+- **`agents teams list` renders from cached team metadata instead of full status
+  probes (RUSH-1996).** The list and picker rows now read the team registry plus
+  teammate `meta.json` snapshots, so listing teams no longer blocks on remote log
+  pulls or unreachable hosts. Full teammate status is still loaded when a user picks
+  a team or runs `agents teams status <team>`. Source:
+  `apps/cli/src/commands/teams.ts`, `apps/cli/src/commands/teams.test.ts`,
+  `apps/cli/docs/teams.md`.
+
+- **`agents setup secrets` now guides first-run secrets onboarding (RUSH-1999).**
+  The setup command registers a new `secrets` capability wizard that chooses a
+  default storage backend (`keychain`, encrypted `file`, or synced `vault`), sets
+  the existing default prompt policy (`daily`/`always`, with `never` gated for
+  explicit automation use), persists `secrets.backend` so future `agents
+  secrets create/import` commands use the selected backend when no backend flag is
+  passed, optionally delegates imports to `agents secrets import`, and writes
+  setup preferences under `~/.agents/.history/setup`. Source:
+  `apps/cli/src/commands/setup-secrets.ts`, `apps/cli/src/commands/secrets.ts`,
+  `apps/cli/src/commands/setup.ts`.
+
+- **`agents setup fleet` now guides Tailscale device onboarding (RUSH-2000).**
+  The setup command registers a new `fleet` capability wizard that verifies
+  Tailscale, syncs discovered devices through the existing `agents devices sync`
+  path, applies SSH auth with `agents devices set`, optionally writes the
+  managed SSH config include, tests connectivity with `agents ssh <device>
+  uname`, and can run `agents fleet update` after registration. Source:
+  `apps/cli/src/commands/setup-fleet.ts`, `apps/cli/src/commands/setup.ts`.
+
+- **`agents feed post` carries artifacts and a project chip, and progress posts
+  render rich (RUSH-2013 / RUSH-2014).** `feed post` gains `--attach <path-or-url…>`
+  (repeatable): a local file is copied under
+  `~/.agents/.history/attachments/<session>/<update>/` so the link survives a
+  worktree delete, and a URL is kept as a link — each classified to an
+  image/audio/video/file/link kind by extension. Every post is now stamped with its
+  project (basename of cwd, worktree-aware) on the activity event itself, so the
+  chip shows without a live-session join. A `status.posted` event renders as a
+  multi-line update — `agent · session · host · project` chips, the message, an
+  attachment row with per-kind glyphs, and a `↳ ag focus/sessions` hint — wherever
+  it appears (`feed post` echo, the feed activity lane, `agents feed --filter
+  updates`, and `agents activity`).
+- **`agents feed --filter needs|updates|all` (RUSH-2015).** `needs` (default) is the
+  open-blocks inbox as before; `updates` shows only deliberate progress posts over
+  the local activity timeline (no block pipeline, no remote fan-out); `all` renders
+  the blocks then appends the updates view. `--json` under `--filter updates` emits
+  the raw `status.posted` events. Source:
+  `apps/cli/src/lib/activity.ts`, `apps/cli/src/lib/feed-post.ts`,
+  `apps/cli/src/commands/feed.ts`, `apps/cli/src/commands/activity.ts`.
+
+- **Fix: actor attribution now actually reaches `agents sessions` and `--active`
+  for real runs (RUSH-2018/2019).** Two bugs, found by driving a real `agents run`
+  end-to-end: (1) the session index's `actor`/`initiated_by` were kept out of the
+  upsert `ON CONFLICT` entirely, so any row indexed *before* its actor sidecar
+  landed (an older scanner, or a scan racing the spawn-time write) was locked to
+  `NULL` forever — now `COALESCE(existing, incoming)` backfills a null while still
+  never clobbering a stored owner; (2) the live `--active` **owner** read only the
+  per-pid registry entry, which the SessionStart hook rewrites without an actor, so
+  real runs showed no owner — `--active` now falls back to the durable per-session
+  actor sidecar. Verified with a real `agents run`: the actor reaches `sessions.db`
+  and the `--active` owner resolves. Source: `apps/cli/src/lib/session/db.ts`,
+  `apps/cli/src/lib/session/active.ts` (`resolveOwner`).
+
+- **Session lists expose the model and richer navigation metadata (RUSH-1981,
+  RUSH-1991, RUSH-1992, RUSH-1994).** Static flat rows add a compact model column
+  only when the result set has model data, with width sized to that set so an
+  80-column terminal does not wrap. Local CWD and ticket/PR cells are clickable
+  in supporting terminals, previews identify browser/computer use and sub-agent
+  counts, and `agents sessions --active --json` adds an always-present `prLink`
+  key. Existing session indexes migrate to schema v20 and rescan transcripts to
+  backfill model data.
+
 ## 1.20.81
+
+- **Generic `--device all` / `--host all` fleet fan-out for every fleet-aware
+  command (RUSH-1969).** The passthrough now treats `all` as a sentinel value on
+  `--host`, `--device`, `--hosts`, and `--devices`. For any routable command
+  (`view`, `output`, `sync`, `doctor`, `list`, …) it runs `agents <cmd> --json`
+  on every registered device concurrently, then renders an OS-grouped roster
+  (`●` installed, `○` offline/skipped, `▸ … ← this machine`). Offline and
+  no-address devices render as rows instead of hanging the whole run. Add
+  `--json` to get a device-keyed object. Commands that already own `--all-hosts`
+  (`output`) keep their existing behavior. Source:
+  `apps/cli/src/lib/hosts/passthrough.ts`, `apps/cli/src/lib/hosts/option.ts`.
+
+- **`agents apply` no longer propagates single-use rotating refresh tokens
+  (RUSH-1958).** Droid (WorkOS) credentials use a refresh token that rotates
+  server-side on every exchange; copying one credential file across N boxes
+  caused the first refresh on any box to invalidate every other holder, collapsing
+  the fleet to a single working login. `agents apply` now excludes droid — and any
+  future harness added to the shared `SINGLE_USE_ROTATING_REFRESH_AGENTS` set in
+  `src/lib/fleet/auth-sync.ts` — from credential propagation. The plan surfaces
+  these as `manual login needed (single-use rotating refresh token)` with the
+  device name, routing the user to log in on the target box itself. Source:
+  `src/lib/fleet/auth-sync.ts`, `src/lib/fleet/apply.ts`,
+  `src/commands/apply.ts`.
 
 - **Non-Claude remote/tmux agent sessions now surface with their real id
   (RUSH-2007).** `agents sessions --active` and the `agents sessions focus` picker

@@ -1,5 +1,8 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, afterAll } from 'vitest';
 import * as os from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
+import { spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { shellQuote, sshExec } from '../ssh-exec.js';
 import {
@@ -8,6 +11,7 @@ import {
   buildInteractiveRunForwardedArgs,
   buildStopRemoteCommand,
   remoteCdPrefix,
+  deriveMirroredCwd,
   terminateDispatchedTask,
   withActorEnv,
 } from './dispatch.js';
@@ -254,6 +258,86 @@ describe('remoteCdPrefix', () => {
 
   it('shell-quotes a home remainder containing spaces', () => {
     expect(remoteCdPrefix('~/my projects/repo')).toBe(`cd "$HOME"/'my projects/repo' && `);
+  });
+
+  it('falls back to the remote home for a MIRRORED dir the host may not have', () => {
+    // A derived cwd is a best-effort mirror of the local checkout, so a host
+    // without that directory must still start the agent (in $HOME) rather than
+    // die on `cd`.
+    expect(remoteCdPrefix('~/src/x', { mirror: true })).toBe(
+      '{ cd "$HOME"/src/x || cd "$HOME"; } && ',
+    );
+  });
+
+  it('does NOT add the fallback for an explicit cwd — a missing one must fail loudly', () => {
+    expect(remoteCdPrefix('~/src/x', { mirror: false })).toBe('cd "$HOME"/src/x && ');
+    expect(remoteCdPrefix('~/src/x')).toBe('cd "$HOME"/src/x && ');
+  });
+});
+
+describe('deriveMirroredCwd', () => {
+  it('maps a cwd under the local home to its home-relative remote analogue', () => {
+    expect(deriveMirroredCwd(`${LOCAL_HOME}/src/github.com/muqsitnawaz/agents-cli`)).toBe(
+      '~/src/github.com/muqsitnawaz/agents-cli',
+    );
+  });
+
+  it('mirrors the home itself', () => {
+    expect(deriveMirroredCwd(LOCAL_HOME)).toBe('~');
+  });
+
+  it('declines a path outside the home — it says nothing about the remote filesystem', () => {
+    expect(deriveMirroredCwd('/opt/work')).toBeUndefined();
+    expect(deriveMirroredCwd('/var/tmp/scratch')).toBeUndefined();
+  });
+
+  it('round-trips into a cd prefix that resolves against the REMOTE home', () => {
+    const derived = deriveMirroredCwd(`${LOCAL_HOME}/src/x`);
+    expect(remoteCdPrefix(derived, { mirror: true })).toBe(
+      '{ cd "$HOME"/src/x || cd "$HOME"; } && ',
+    );
+    // The local home must never appear in what we send over the wire.
+    expect(remoteCdPrefix(derived, { mirror: true })).not.toContain(LOCAL_HOME);
+  });
+});
+
+// The prefix is only ever consumed by a remote POSIX shell, so run it through a
+// real one against a real directory tree — that is what proves the mirror lands
+// in the project and the fallback lands in the home.
+describe('remoteCdPrefix executed by a real shell', () => {
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-cwd-'));
+  const present = 'src/github.com/acme/repo';
+  fs.mkdirSync(path.join(tmpHome, present), { recursive: true });
+
+  const pwdUnder = (prefix: string): { stdout: string; status: number | null } => {
+    const r = spawnSync('bash', ['-c', `${prefix}pwd`], {
+      env: { ...process.env, HOME: tmpHome },
+      cwd: os.tmpdir(),
+      encoding: 'utf8',
+    });
+    return { stdout: r.stdout.trim(), status: r.status };
+  };
+
+  afterAll(() => fs.rmSync(tmpHome, { recursive: true, force: true }));
+
+  it('lands in the mirrored project when the host has that checkout', () => {
+    const prefix = remoteCdPrefix(deriveMirroredCwd(`/somewhere/else/${present}`) ?? `~/${present}`, { mirror: true });
+    const { stdout, status } = pwdUnder(`cd "$HOME" && ${prefix}`);
+    expect(status).toBe(0);
+    expect(fs.realpathSync(stdout)).toBe(fs.realpathSync(path.join(tmpHome, present)));
+  });
+
+  it('falls back to the remote home when the host lacks that checkout', () => {
+    const { stdout, status } = pwdUnder(remoteCdPrefix('~/src/not/here', { mirror: true }));
+    expect(status).toBe(0);
+    expect(fs.realpathSync(stdout)).toBe(fs.realpathSync(tmpHome));
+  });
+
+  it('fails the command outright when an EXPLICIT cwd is missing', () => {
+    // No mirror flag: the user named this directory, so a typo must not be
+    // silently swallowed into $HOME.
+    const { status } = pwdUnder(remoteCdPrefix('~/src/not/here'));
+    expect(status).not.toBe(0);
   });
 });
 

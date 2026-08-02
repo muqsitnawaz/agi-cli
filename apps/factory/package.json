@@ -3,7 +3,7 @@
   "displayName": "Agents",
   "publisher": "swarmify",
   "description": "Run Claude, Codex, Gemini, Cursor, and other coding agents from one IDE workspace.",
-  "version": "0.9.299",
+  "version": "0.9.301",
   "license": "MIT",
   "author": "Muqsit Nawaz <dev@muqsitnawaz.com>",
   "icon": "assets/agents.png",
@@ -419,12 +419,20 @@
         "title": "Agents: Spawn with Context"
       },
       {
+        "command": "agents.forkCurrentSession",
+        "title": "Agents: Fork Current Session"
+      },
+      {
         "command": "agents.newClaudePickHost",
         "title": "Agents: New Claude (Pick Host)",
         "icon": {
           "light": "assets/claude.png",
           "dark": "assets/claude.png"
         }
+      },
+      {
+        "command": "agents.newClaudeAuto",
+        "title": "Agents: New Claude (Auto)"
       },
       {
         "command": "agents.newCodexPickHost",
@@ -435,12 +443,20 @@
         }
       },
       {
+        "command": "agents.newCodexAuto",
+        "title": "Agents: New Codex (Auto)"
+      },
+      {
         "command": "agents.newGeminiPickHost",
         "title": "Agents: New Gemini (Pick Host)",
         "icon": {
           "light": "assets/gemini.png",
           "dark": "assets/gemini.png"
         }
+      },
+      {
+        "command": "agents.newGeminiAuto",
+        "title": "Agents: New Gemini (Auto)"
       },
       {
         "command": "agents.newOpenCodePickHost",
@@ -451,12 +467,20 @@
         }
       },
       {
+        "command": "agents.newOpenCodeAuto",
+        "title": "Agents: New OpenCode (Auto)"
+      },
+      {
         "command": "agents.newCursorPickHost",
         "title": "Agents: New Cursor (Pick Host)",
         "icon": {
           "light": "assets/cursor.png",
           "dark": "assets/cursor.png"
         }
+      },
+      {
+        "command": "agents.newCursorAuto",
+        "title": "Agents: New Cursor (Auto)"
       },
       {
         "command": "agents.newAntigravityPickHost",
@@ -467,12 +491,20 @@
         }
       },
       {
+        "command": "agents.newAntigravityAuto",
+        "title": "Agents: New Antigravity (Auto)"
+      },
+      {
         "command": "agents.newGrokPickHost",
         "title": "Agents: New Grok (Pick Host)",
         "icon": {
           "light": "assets/grok.png",
           "dark": "assets/grok.png"
         }
+      },
+      {
+        "command": "agents.newGrokAuto",
+        "title": "Agents: New Grok (Auto)"
       },
       {
         "command": "agents.newKimiPickHost",
@@ -483,12 +515,20 @@
         }
       },
       {
+        "command": "agents.newKimiAuto",
+        "title": "Agents: New Kimi (Auto)"
+      },
+      {
         "command": "agents.newDroidPickHost",
         "title": "Agents: New Droid (Pick Host)",
         "icon": {
           "light": "assets/droid.png",
           "dark": "assets/droid.png"
         }
+      },
+      {
+        "command": "agents.newDroidAuto",
+        "title": "Agents: New Droid (Auto)"
       },
       {
         "command": "agents.newAgentPickHost",

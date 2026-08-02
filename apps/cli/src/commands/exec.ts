@@ -1221,8 +1221,19 @@ export function registerRunCommand(program: Command): void {
           // Working directory on the host: an explicit --remote-cwd is used
           // verbatim; --cwd/--project are made portable (a local-home absolute
           // becomes `~/…` so the remote shell re-roots it at ITS home).
+          //
+          // With neither flag, mirror the LOCAL cwd's home-relative path onto
+          // the host (deriveMirroredCwd). Otherwise every host run starts in the
+          // remote `$HOME` — launch an agent from a repo and it opens with no
+          // project, and you `cd` by hand every time. The same checkout at the
+          // same home-relative path on both boxes is the normal fleet layout, so
+          // the mirror usually hits; when the host lacks that directory the run
+          // falls back to the remote home rather than failing.
           const { toRemotePortable } = await import('../lib/project-root.js');
-          const hostCwd = options.remoteCwd ?? (options.cwd ? toRemotePortable(options.cwd) : undefined);
+          const { deriveMirroredCwd } = await import('../lib/hosts/dispatch.js');
+          const explicitHostCwd = options.remoteCwd ?? (options.cwd ? toRemotePortable(options.cwd) : undefined);
+          const hostCwd = explicitHostCwd ?? deriveMirroredCwd(process.cwd());
+          const mirrorHostCwd = explicitHostCwd === undefined;
           const hostAddDirs = options.addDir.length > 0 ? options.addDir.map(toRemotePortable) : undefined;
           // `--resume [id]`: commander yields the string id, or `true` when the
           // flag is passed bare. A bare resume needs the interactive picker,
@@ -1378,6 +1389,7 @@ export function registerRunCommand(program: Command): void {
               yes: options.yes,
               acp: options.acp,
               remoteCwd: hostCwd,
+              mirrorCwd: mirrorHostCwd,
               sessionId: hostSessionId,
               name: options.name,
               resume: resumeId,
@@ -1466,6 +1478,7 @@ export function registerRunCommand(program: Command): void {
             acp: options.acp,
             autoSecrets: options.autoSecrets,
             remoteCwd: hostCwd,
+            mirrorCwd: mirrorHostCwd,
             name: options.name,
             resume: resumeId,
             sessionId: options.sessionId,

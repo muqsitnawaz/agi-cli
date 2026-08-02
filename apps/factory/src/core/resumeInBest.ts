@@ -66,6 +66,33 @@ export function buildLaunchCommand(
 }
 
 /**
+ * The same launch, but on the DEVICE the exhausted terminal was running on.
+ *
+ * Rotating an offloaded agent has to stay on its machine: the raw
+ * `<binary>@<version>` form above would quietly move the work onto the laptop,
+ * which is the opposite of what the rotate is for — the user offloaded it
+ * deliberately, and the account that still has headroom is the one installed
+ * over there.
+ */
+export function buildHostLaunchCommand(
+  agentKey: string,
+  version: string,
+  host: string,
+  newSessionId: string | null
+): string {
+  let cmd = `agents run ${agentKey}@${version} --interactive --host ${shellQuoteHost(host)}`;
+  if (agentKey === 'claude' && newSessionId) {
+    cmd += ` --session-id ${newSessionId}`;
+  }
+  return cmd;
+}
+
+/** Single-quote a device name so it can never break out of the built command. */
+function shellQuoteHost(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
  * Build the text the resume flow types into the agent's TUI prompt to make
  * it load the OLD session's transcript. Prefers the `/continue` slash
  * command when it's synced to the target version's home; falls back to the
@@ -107,6 +134,33 @@ export function isVersionStillUsable(
   if (v.usageStatus === 'out_of_credits') return false;
   if (sessionUsedPercent(v) >= 100) return false;
   return true;
+}
+
+/** The subset of a tracked terminal the rotate gate reads. */
+export interface RotatableTerminal {
+  agentType?: string;
+  /** Version pinned at launch, when the caller pinned one. */
+  version?: string;
+  /** Version observed running, resolved from agents-cli metadata after spawn. */
+  statusVersion?: string;
+}
+
+/**
+ * The version an auto-rotate should judge for exhaustion, or undefined when this
+ * terminal cannot rotate at all.
+ *
+ * Reading the PIN alone is what silently killed auto-rotate: launches stopped
+ * pinning versions (balanced rotation picks the account), so `version` is now
+ * usually empty and the gate skipped every terminal — an agent that hit its
+ * limit just sat there. The version actually running is the one whose quota
+ * matters, so the observed `statusVersion` counts too.
+ *
+ * Claude-only: it is the only harness whose accounts the rotate can swap
+ * between (`--session-id` + `/continue`).
+ */
+export function rotatableVersionOf(entry: RotatableTerminal): string | undefined {
+  if (entry.agentType !== 'claude') return undefined;
+  return entry.version || entry.statusVersion || undefined;
 }
 
 /**

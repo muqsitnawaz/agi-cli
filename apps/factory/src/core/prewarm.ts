@@ -182,18 +182,33 @@ export function buildResumeCommand(session: PrewarmedSession): string {
  * Build a resume command pinned to a specific installed agent version when one
  * is known. This is required for multi-profile setups where a session only
  * exists inside one version's home directory.
+ *
+ * `host` is the device the session was offloaded to. Its transcript lives on
+ * THAT machine, so the raw `claude -r <id>` form would start a brand-new local
+ * agent against an id this box has never seen; route through
+ * `agents run --host … --resume` so the resume happens where the session is.
  */
 export function buildVersionedResumeCommand(
   agentType: PrewarmAgentType,
   sessionId: string,
   version?: string,
+  host?: string,
 ): string {
+  if (host) {
+    const spec = version ? `${agentType}@${version}` : agentType;
+    return `agents run ${spec} --interactive --host ${shellQuoteArg(host)} --resume ${sessionId}`;
+  }
   const config = PREWARM_CONFIGS[agentType];
   const baseCmd = config.resumeCommand(sessionId);
   if (!version) return baseCmd;
   const cmdName = config.command;
   const prefix = new RegExp(`^${cmdName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
   return baseCmd.replace(prefix, `${cmdName}@${version}`);
+}
+
+/** Single-quote a device name so it can never break out of the built command. */
+function shellQuoteArg(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /**

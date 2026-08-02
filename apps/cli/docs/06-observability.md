@@ -118,14 +118,18 @@ each run, not just *what* is running:
   account. `--active --json` carries the raw `owner` field for a consumer to join on.
 - **The session index** (`sessions.db`) carries `actor` and `initiated_by`
   (`human`/`agent`) columns, so the durable `agents sessions` listing attributes
-  historical sessions to a person, not just the live `--active` view. They are
-  **write-once at session creation** — a later content rescan carries no actor and
-  is deliberately kept out of the upsert's `ON CONFLICT` update set, so the original
-  owner is never clobbered by re-indexing.
+  historical sessions to a person, not just the live `--active` view. The upsert
+  fills them with `COALESCE(existing, incoming)`: a stored owner is never clobbered
+  (a content rescan carries no actor, so the stored value wins), yet a row that was
+  indexed **before** its actor sidecar existed — an older scanner, or any scan that
+  raced ahead of the spawn-time sidecar write — still gets **backfilled** once the
+  join finally provides one. (Plain exclusion locked those rows to `NULL` forever.)
 - **How the index gets the actor** — the transcript on disk records no actor, so at
   spawn each run also writes a small **durable `sessionId -> actor` sidecar** under
   `~/.agents/.history/by-session/` (unlike the pid-registry, this survives the
-  process). The scanner joins it as it indexes, filling the columns above. Teammates
+  process). The scanner joins it as it indexes, filling the columns above; the same
+  sidecar is the fallback for the live `--active` **owner** when the per-pid entry
+  (rewritten by the SessionStart hook without an actor) has none. Teammates
   inherit the orchestrator's frozen actor, so a whole team traces back to the one
   human who started it; their records also carry a `parent_session_id` (the
   orchestrator's session) so the spawn chain is walkable.
@@ -407,11 +411,11 @@ contains `path`, `name`, `mediaType`, and `sizeBytes` so consumers such as Facto
 can render thumbnails and open the original attachment without re-reading the raw
 agent transcript.
 
-Every row also carries flat top-level `ticketId` and `project` keys — always
-present, `null` when unknown — so a watcher can join active sessions on ticket and
-project without reaching into the nested `ticket` object. `project` is the
-basename of the session's cwd, the same derivation the historical `--json`
-listing uses, so the active and recent views join identically.
+Every row also carries flat top-level `ticketId`, `project`, and `prLink` keys —
+always present, `null` when unknown — so a watcher can join active sessions on
+ticket and project or open the linked pull request without reaching into nested
+objects. `project` is the basename of the session's cwd, the same derivation the
+historical `--json` listing uses, so the active and recent views join identically.
 
 Some sessions appear in multiple sources:
 
@@ -523,6 +527,17 @@ cost-of-delay rank, not chronology: idle minutes × downstream blast radius ×
 hourly burn × ask irreducibility. Suppressed stalls and FYIs get zero
 irreducibility, so a fresh cheap ask does not outrank an old critical-path block.
 
+`--filter <view>` selects what the surface shows:
+
+```bash
+agents feed                     # needs (default): open blocks — decisions agents wait on
+agents feed --filter updates    # only deliberate progress posts (see Status posts below)
+agents feed --filter all        # blocks first, then the updates view appended
+```
+
+`--filter updates` reads the local activity timeline only (no block pipeline, no
+remote fan-out); its `--json` emits the raw `status.posted` events.
+
 ### What publishes a block
 
 Blocks are written by the `feed-publish` hook (`~/.agents/hooks/10-feed-publish.py`,
@@ -565,6 +580,7 @@ registry (`lib/session/pid-registry.ts`).
 ```bash
 # Inside an agents-cli run (AGENT_SESSION_ID / AGENTS_MAILBOX_DIR already set):
 agents feed post "CHANGELOG pushed; watching CI and mac-mini E2E"
+agents feed post "cover render ready" --attach ./out/cover.png   # attach an artifact
 agents feed post "ready for review" --json
 
 # Escape hatch when not in a managed run:
@@ -576,6 +592,20 @@ Each post appends a `status.posted` **milestone** to
 `agents activity` and the feed’s recent-activity lane already read. It does
 **not** create a feed block. Domain facts (tickets, PRs) are not CLI flags;
 join them from the session index / live session enrichment at read time.
+
+- **`--attach <path-or-url…>` (repeatable).** Attach an artifact to the post. A
+  **local file** is copied under
+  `~/.agents/.history/attachments/<sessionId>/<updateId>/` so the reference survives
+  a worktree delete; a **URL** is kept as-is. Each is classified to an
+  image/audio/video/file/link kind by extension for its render glyph.
+- **Project chip.** The post is stamped with its project (basename of cwd,
+  worktree-aware) on the event itself, so the chip shows even without a live-session
+  join.
+- **Rich render.** A `status.posted` event renders multi-line — `agent · session ·
+  host · project` chips, the message, an attachment row with per-kind glyphs, and a
+  `↳ ag focus/sessions` hint — in the `feed post` echo, the feed activity lane,
+  `agents feed --filter updates`, and `agents activity`. Other milestones keep the
+  compact one-line form.
 
 Identity resolution order: `--session` → `AGENT_SESSION_ID` /
 `AGENTS_SESSION_ID` / mailbox basename → `AGENT_LAUNCH_ID` match in the pid
@@ -719,9 +749,11 @@ contains — this is a data-availability limit, not a policy choice:
 |---|---|---|---|
 | Claude | email + plan | live (`api.anthropic.com`) | email/plan/quota from the local OAuth credential + usage API |
 | Codex | email + plan | last-seen (session logs) | email/plan from the auth JWT; quota parsed from the newest session's rate-limit event |
-| Gemini, Grok | email | — | email read from the local auth file |
+| Gemini | email | — | email read from the local auth file |
+| Grok | email + tier | last-seen (`~/.grok/logs/unified.jsonl`) | email from the local auth file; weekly window (`W`) + subscription tier parsed from the newest `billing: fetched credits config` log line, since Grok's network usage endpoints 404 |
 | Droid | email | live (`api.factory.ai`) | `~/.factory/auth.v2.file` is AES-256-GCM (key on disk at `auth.v2.key`); decrypt locally, read the email from the WorkOS access-token JWT. That same token authorizes `GET /api/billing/limits` for the three rolling rate-limit windows (5-hour → `S`, weekly → `W`, monthly, detailed-view only). |
 | Kimi | `id:<user_id>` + tier | live (`api.kimi.com/coding/v1/usages`) | JWT carries no email — only an opaque `user_id`. Quota + membership tier come from the `/usages` endpoint. |
+| Cursor | email | live (`cursor.com/api/usage`) | email/authId from `~/.cursor/cli-config.json`; access token from `~/.config/cursor/auth.json`. The endpoint is authed with a `WorkosCursorSessionToken=<authId>::<token>` cookie and returns a monthly request bar (`M`) for request-capped (free/legacy) plans. Usage-based plans report no request cap, so they render the account row without a bar. |
 | Antigravity | `signed in` | — | OAuth grant with no id_token — presence only. File `~/.gemini/antigravity-cli/antigravity-oauth-token`, else macOS keychain / Linux libsecret (`service gemini` + user `antigravity`) |
 | others | `not signed in` unless a credential exists | — | `default` case: no detector |
 

@@ -72,6 +72,8 @@ export interface HostPromptRun {
   sessionId?: string;
   /** Working directory on the host, already made remote-portable by the caller. */
   remoteCwd?: string;
+  /** `remoteCwd` was derived from the local cwd — mirror it, don't fail on it. */
+  mirrorCwd?: boolean;
   /** Stream progress and block until completion (default true). */
   follow?: boolean;
   timeoutMs?: number;
@@ -133,6 +135,7 @@ export async function dispatchPromptToHost(host: Host, opts: HostPromptRun): Pro
     mode: opts.mode,
     model: opts.model,
     remoteCwd: opts.remoteCwd,
+    mirrorCwd: opts.mirrorCwd,
     sessionId: forcedSessionId,
     emitSessionId,
     name: opts.name,
