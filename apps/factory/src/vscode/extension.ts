@@ -2011,7 +2011,7 @@ async function openSingleAgent(
 
   // All built-in agents launch via `agents run <agent> --interactive` so the
   // agents-cli picks up the configured strategy (pinned/available/balanced)
-  // from ~/.agents-system/agents.yaml automatically — or an explicit override
+  // from ~/.agents/agents.yaml automatically — or an explicit override
   // (pinnedVersion / strategy) from the per-strategy launch commands. Only
   // Claude's session is generated up-front for the resume flow; other agents
   // detect their session post-spawn.
