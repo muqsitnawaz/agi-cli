@@ -90,6 +90,14 @@ describe('mapStatusToPhase', () => {
     expect(mapStatusToPhase(undefined)).toBe('idle');
     expect(mapStatusToPhase('nonsense')).toBe('idle');
   });
+
+  test('the computed lifecycle statuses (RUSH-2066): closed -> done, abandoned -> failed', () => {
+    // A dead process has exited cleanly; a days-stale/dangling one needs attention.
+    // Without these cases both would silently fall through to `idle` on the Floor.
+    expect(mapStatusToPhase('closed')).toBe('done');
+    expect(mapStatusToPhase('exited')).toBe('done');
+    expect(mapStatusToPhase('abandoned')).toBe('failed');
+  });
 });
 
 describe('projectFromCwd', () => {

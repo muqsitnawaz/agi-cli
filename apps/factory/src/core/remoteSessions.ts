@@ -482,7 +482,9 @@ function normalizeAttachment(raw: unknown): RemoteAttachment | null {
  *   input_required     -> waiting   (the cheap Tier-1 "needs you" signal)
  *   queued             -> running   (dispatched, work in the pipeline)
  *   failed / error     -> failed
+ *   abandoned          -> failed    (dangling: dead/stuck for days — needs attention)
  *   completed / done   -> done
+ *   closed / exited    -> done      (the process has exited cleanly)
  *   idle / stopped / _ -> idle
  */
 export function mapStatusToPhase(status: string | undefined): RemotePhase {
@@ -497,10 +499,13 @@ export function mapStatusToPhase(status: string | undefined): RemotePhase {
       return 'waiting';
     case 'failed':
     case 'error':
+    case 'abandoned':
       return 'failed';
     case 'completed':
     case 'done':
     case 'success':
+    case 'closed':
+    case 'exited':
       return 'done';
     case 'idle':
     case 'stopped':

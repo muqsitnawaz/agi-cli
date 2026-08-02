@@ -65,17 +65,27 @@ const PS_SNAPSHOT_TIMEOUT_MS = 10_000;
 export type ActiveContext = 'terminal' | 'teams' | 'cloud' | 'headless';
 
 /**
- * `unknown` is now reserved for the ONE genuinely un-answerable case: a DEAD
- * process whose transcript also vanished mid-read, so there is nothing left to
- * measure. A LIVE process is never `unknown` — "the process is alive" is itself a
+ * Every status here is COMPUTED by the framework from observable signals — PID
+ * liveness and transcript last-write (mtime) — never self-reported by the agent.
+ *
+ *   - `running` / `idle` / `input_required` — a live process's working / stopped
+ *     / waiting-on-you activity, from its transcript (see {@link computeLiveSignals}).
+ *   - `queued` — dispatched, work in the pipeline (cloud/headless launch).
+ *   - `closed` — the PID is dead. The process has exited; report that, don't
+ *     fabricate `idle` ("done, waiting for you") for a process that is simply gone.
+ *   - `abandoned` — no transcript write in {@link ABANDONED_STALE_MS} (days): the
+ *     session is dangling, whether its PID is dead (long gone) or still alive but
+ *     stuck making no progress. A soft signal — it clears the moment it writes again.
+ *   - `unknown` — the residual: genuinely NO signal (no PID info AND no file).
+ *
+ * A LIVE, fresh process is never `unknown` — "the process is alive" is itself a
  * positive signal, so an opaque/unparseable live harness resolves to `running`
  * (its honest floor), and every tracked harness with a locatable, parseable
  * transcript (claude, codex, grok, droid, rush, gemini, kimi, hermes, opencode,
  * antigravity) gets a real working/waiting/idle from its own parser — see
- * {@link computeLiveSignals} and {@link resolveFallbackStatus}. `unknown` is thus
- * rare by construction and never shown for a running agent.
+ * {@link computeLiveSignals}, {@link lifecycleStatus} and {@link resolveFallbackStatus}.
  */
-export type ActiveStatus = 'running' | 'idle' | 'queued' | 'input_required' | 'unknown';
+export type ActiveStatus = 'running' | 'idle' | 'queued' | 'input_required' | 'closed' | 'abandoned' | 'unknown';
 
 export interface ActiveSession {
   context: ActiveContext;
@@ -246,6 +256,17 @@ const ACTIVE_MTIME_WINDOW_MS = 2 * 60_000;
  * transcript just because a GUI app service with the same basename is alive.
  */
 export const ACTIVE_SESSION_STALE_MS = 24 * 60 * 60_000;
+
+/**
+ * A session whose transcript hasn't been written in this long is ABANDONED /
+ * dangling — the framework can no longer treat it as live work, whether its PID
+ * is dead (long gone) or still alive but making no progress (a hung agent).
+ * Two days: past a normal work gap, well short of a session legitimately kept
+ * open across a long weekend. Deliberately far wider than
+ * {@link ACTIVE_SESSION_STALE_MS} (which bounds transcript-borrowing, a different
+ * concern) — this is the lifecycle threshold, not the freshness window.
+ */
+export const ABANDONED_STALE_MS = 2 * 24 * 60 * 60_000;
 
 /** Executables we recognize as agent CLIs when scanning the process table. */
 const AGENT_CLI_NAMES: Record<string, string> = {
@@ -485,31 +506,53 @@ export function sessionFileTimes(sessionFile: string | undefined): { birthtimeMs
 }
 
 /**
+ * The lifecycle status computed purely from the two hard signals the framework
+ * always has — PID liveness and transcript last-write (mtime) — independent of
+ * anything the agent self-reports or what its last transcript turn happened to
+ * look like. Returns the definitive lifecycle label when one applies, or
+ * `undefined` when the process is live and fresh (so the caller uses the richer
+ * activity-derived status instead).
+ *
+ *   - No write in {@link ABANDONED_STALE_MS} ⇒ `abandoned` (dangling): a
+ *     days-stale session is not live work, whether its PID is dead (long gone)
+ *     or still alive but stuck. Checked first — it outranks a bare `closed`.
+ *   - Otherwise, PID dead ⇒ `closed`: the process has exited. This is the fix
+ *     for the old "dead PID reports idle" lie — `idle` reads as "done, waiting
+ *     for you", but a dead process is done, period.
+ *   - Otherwise (alive + fresh) ⇒ `undefined`: defer to the activity engine.
+ */
+export function lifecycleStatus(
+  pidAlive: boolean,
+  mtimeMs: number | undefined,
+  nowMs: number = Date.now(),
+): ActiveStatus | undefined {
+  if (mtimeMs !== undefined && nowMs - mtimeMs >= ABANDONED_STALE_MS) return 'abandoned';
+  if (!pidAlive) return 'closed';
+  return undefined;
+}
+
+/**
  * The ONE place a fallback status is decided when no rich transcript state is
  * available — an opaque kind we cannot parse (cursor, openclaw), or a transcript
- * whose parse/tail was empty or unreadable. Honest by construction, and — the
- * headline guarantee — a LIVE process never resolves to `unknown` or a fabricated
- * `idle`.
+ * whose parse/tail was empty or unreadable. Honest by construction: computed from
+ * PID + mtime, never a fabricated `idle`.
  *
- *   - `pidAlive` → `running`. A live process is, at minimum, running: we may not
- *     be able to see WHAT an opaque harness (or an empty tail) is doing, but the
- *     process being alive is itself a positive signal. It must never degrade to a
- *     blank `unknown` (the old blanket bug for every non-claude/codex live agent),
- *     nor be downgraded to a fabricated `idle` (which the UI reads as "done").
- *   - Not alive, transcript present on disk → nothing is running ⇒ `idle`.
- *   - Not alive, no transcript → nothing to report ⇒ `idle`.
- *   - Not alive AND the named transcript vanished mid-read → genuinely nothing
- *     left to measure ⇒ `unknown` (the sole surviving `unknown` case).
+ *   - Dead PID, or a days-stale transcript ⇒ {@link lifecycleStatus} (`closed` /
+ *     `abandoned`). A dead process is `closed`, not the old fabricated `idle`
+ *     (which the UI reads as "done, waiting for you"); a dead process whose file
+ *     also vanished is still `closed` (death is a definitive answer, not `unknown`).
+ *   - Live + fresh ⇒ `running`. A live process is, at minimum, running: we may
+ *     not see WHAT an opaque harness (or an empty tail) is doing, but the process
+ *     being alive is a positive signal — never a blank `unknown` (the old blanket
+ *     bug for every non-claude/codex live agent) nor a downgraded `idle`.
  */
-export function resolveFallbackStatus(sessionFile: string | undefined, pidAlive: boolean): ActiveStatus {
-  if (pidAlive) return 'running';
-  if (!sessionFile) return 'idle';
-  try {
-    fs.statSync(sessionFile);
-    return 'idle';
-  } catch {
-    return 'unknown';
-  }
+export function resolveFallbackStatus(
+  sessionFile: string | undefined,
+  pidAlive: boolean,
+  nowMs: number = Date.now(),
+): ActiveStatus {
+  const { mtimeMs } = sessionFileTimes(sessionFile);
+  return lifecycleStatus(pidAlive, mtimeMs, nowMs) ?? 'running';
 }
 
 /**
@@ -618,9 +661,15 @@ function statusFromActivity(activity: SessionActivity): ActiveStatus {
  */
 function applyState(base: Omit<ActiveSession, 'status'>, state: SessionState | undefined, fallbackFile: string | undefined, pidAlive: boolean): ActiveSession {
   if (!state) return { ...base, status: resolveFallbackStatus(fallbackFile, pidAlive) };
+  // Lifecycle (closed/abandoned) is computed from PID + mtime and OVERRIDES the
+  // activity-derived status: a dead or days-stale process is closed/abandoned no
+  // matter what its last parsed transcript turn looked like (a dead session whose
+  // tail ended mid-tool-call must not read as `running`). `base.lastActivityMs` is
+  // the transcript mtime the row already resolved — reuse it, no extra stat.
+  const life = lifecycleStatus(pidAlive, base.lastActivityMs ?? sessionFileTimes(fallbackFile).mtimeMs);
   return {
     ...base,
-    status: statusFromActivity(state.activity),
+    status: life ?? statusFromActivity(state.activity),
     activity: state.activity,
     awaitingReason: state.awaitingReason,
     question: state.question,
@@ -1201,7 +1250,7 @@ export async function listUnattributedActive(attributed: Set<number>): Promise<A
     const context: ActiveContext = host && UI_HOSTS.has(host) ? 'terminal' : 'headless';
     // pidAlive is true by construction: this pid was just enumerated from the
     // live process table, so an opaque (non-parseable) kind resolves to
-    // `unknown`, not a fake `idle`.
+    // `running`, not a fake `idle` or blanket `unknown`.
     const { state, tokPerSec } = computeLiveSignals(kind, sessionFile, cwd, true);
     const { birthtimeMs, mtimeMs } = sessionFileTimes(sessionFile);
     // Durable run name from `agents run --name`, resolved by the run's session id
