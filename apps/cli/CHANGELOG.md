@@ -2,8 +2,6 @@
 
 ## 1.20.86
 
-- **Routines configured with `agent: cursor` now run through `cursor-agent` and write their report instead of failing as unsupported.**
-
 - **`agents sessions` now shows a Kimi session's todo list and its file-touching
   tool calls.** Kimi writes its checklist with `TodoList` (items shaped
   `{title, status}`, where finished is `done`) rather than Claude's `TodoWrite`

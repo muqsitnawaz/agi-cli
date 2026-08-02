@@ -1,0 +1,1 @@
+- **Routines configured with `agent: cursor` now run through `cursor-agent` and write their report instead of failing as unsupported.**
