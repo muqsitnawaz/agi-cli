@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { resolveCwds, LSOF_CONCURRENCY, agentKindFromComm, activeStatusFromCloudStatus, resolveFallbackStatus, resolvePaneIdentity, matchOriginDevice } from './active.js';
+import { resolveCwds, LSOF_CONCURRENCY, agentKindFromComm, activeStatusFromCloudStatus, resolveFallbackStatus, lifecycleStatus, ABANDONED_STALE_MS, resolvePaneIdentity, matchOriginDevice } from './active.js';
 import type { HookSessionIndex } from './hook-sessions.js';
 import type { DeviceProfile, DeviceRegistry } from '../devices/registry.js';
 
@@ -95,20 +95,63 @@ describe('resolveFallbackStatus (a LIVE process never resolves to unknown)', () 
     expect(resolveFallbackStatus(gonePath(), true)).toBe('running');
   });
 
-  it('no transcript + a process not known alive ⇒ idle (nothing to report)', () => {
-    expect(resolveFallbackStatus(undefined, false)).toBe('idle');
+  it('a DEAD process with a fresh transcript ⇒ closed (not the old fabricated idle)', () => {
+    // RUSH-2066: a dead pid used to report `idle` ("done, waiting for you"), a lie.
+    // The process has exited — say so.
+    expect(resolveFallbackStatus(mkfile(5 * 60_000), false)).toBe('closed');
   });
 
-  it('a DEAD process with a transcript still on disk ⇒ idle (nothing running)', () => {
-    expect(resolveFallbackStatus(mkfile(5 * 60_000), false)).toBe('idle');
+  it('a DEAD process with no transcript ⇒ closed (death is a definitive answer)', () => {
+    expect(resolveFallbackStatus(undefined, false)).toBe('closed');
   });
 
-  it('a DEAD process whose transcript vanished ⇒ unknown (the sole surviving unknown)', () => {
-    expect(resolveFallbackStatus(gonePath(), false)).toBe('unknown');
+  it('a DEAD process whose transcript vanished ⇒ closed (still definitively dead)', () => {
+    // Previously `unknown`; the process being dead is knowable even when the file
+    // is gone, so `closed` is the honest answer, not `unknown`.
+    expect(resolveFallbackStatus(gonePath(), false)).toBe('closed');
+  });
+
+  it('a DEAD process whose transcript is days-stale ⇒ abandoned (outranks closed)', () => {
+    expect(resolveFallbackStatus(mkfile(3 * 24 * 60 * 60_000), false)).toBe('abandoned');
+  });
+
+  it('a LIVE process whose transcript is days-stale ⇒ abandoned (hung / dangling)', () => {
+    // The user's case: a session alive but making no progress for days. Even though
+    // the pid is alive, no writes for ABANDONED_STALE_MS means it is dangling.
+    expect(resolveFallbackStatus(mkfile(3 * 24 * 60 * 60_000), true)).toBe('abandoned');
   });
 
   afterAll(() => {
     for (const p of tmp) { try { fs.rmSync(path.dirname(p), { recursive: true, force: true }); } catch { /* best-effort */ } }
+  });
+});
+
+describe('lifecycleStatus (framework-computed from PID + mtime, never self-reported)', () => {
+  const now = 1_700_000_000_000;
+  const DAY = 24 * 60 * 60_000;
+
+  it('alive + fresh ⇒ undefined (defer to the activity engine)', () => {
+    expect(lifecycleStatus(true, now - 30_000, now)).toBeUndefined();
+    expect(lifecycleStatus(true, undefined, now)).toBeUndefined();
+  });
+
+  it('dead + fresh ⇒ closed', () => {
+    expect(lifecycleStatus(false, now - 5 * 60_000, now)).toBe('closed');
+  });
+
+  it('dead + no mtime ⇒ closed', () => {
+    expect(lifecycleStatus(false, undefined, now)).toBe('closed');
+  });
+
+  it('days-stale ⇒ abandoned, whether alive or dead (abandoned outranks closed)', () => {
+    expect(lifecycleStatus(false, now - 3 * DAY, now)).toBe('abandoned');
+    expect(lifecycleStatus(true, now - 3 * DAY, now)).toBe('abandoned');
+  });
+
+  it('exactly at the abandoned threshold ⇒ abandoned (>= boundary is inclusive)', () => {
+    expect(lifecycleStatus(true, now - ABANDONED_STALE_MS, now)).toBe('abandoned');
+    // one ms under the threshold: not yet abandoned (alive ⇒ defer)
+    expect(lifecycleStatus(true, now - ABANDONED_STALE_MS + 1, now)).toBeUndefined();
   });
 });
 

@@ -215,8 +215,11 @@ SSH access (§7); rendering sessions that no harness produced.
   `lib/session/active.ts`); an opaque/untracked kind or an unreadable transcript
   MUST fall back to `resolveFallbackStatus`, which reports `running` for any live
   process (never a blanket `unknown`, never a fabricated `idle`)
-  (`lib/session/active.ts`). `unknown` is reserved for the sole un-answerable case:
-  a dead process whose transcript vanished mid-read. A structural
+  (`lib/session/active.ts`). A dead process MUST report `closed`; a transcript not
+  written for `ABANDONED_STALE_MS` MUST report `abandoned`, whether its PID is dead
+  or still alive. `unknown` is reserved for the sole un-answerable case: no PID
+  signal and no file signal; modern local scanners pass a definite PID-liveness
+  boolean, but `unknown` remains valid input from older remote peers. A structural
   `AskUserQuestion` / `ExitPlanMode` as last event MUST report `waiting_input` and
   MUST NOT decay with the freshness window (`lib/session/state.ts`; test
   `state.test.ts`).

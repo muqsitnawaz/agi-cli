@@ -247,17 +247,19 @@ unreadable/empty transcript has no rich state, and then one canonical function,
 
 | Situation | Status | Why |
 |---|---|---|
-| Process **alive** (any kind, no rich state) | `running` | alive is itself a positive signal — the honest floor; never `unknown`, never a fabricated `idle` |
-| Not alive, transcript still on disk | `idle` | nothing is running |
-| Not alive, no transcript | `idle` | nothing to report |
-| Not alive, named transcript vanished mid-read | `unknown` | genuinely nothing left to measure |
+| Transcript not written for `ABANDONED_STALE_MS` | `abandoned` | days-stale/dangling work needs attention and outranks both live and dead PID signals |
+| Process **alive** (any kind, no rich state, transcript not abandoned) | `running` | alive is itself a positive signal — the honest floor; never `unknown`, never a fabricated `idle` |
+| Not alive, transcript still on disk | `closed` | the process exited; do not report it as live-idle |
+| Not alive, no transcript | `closed` | death is a definitive observable signal even when the file is absent |
+| No PID signal and no file signal | `unknown` | genuinely nothing left to measure |
 
 The headline guarantee: **a running agent is never `unknown`.** The old blanket
 `unknown` for every live non-Claude/Codex agent is gone — a live process resolves to
 `running` at worst, and to a real `working`/`waiting_input`/`idle` whenever its
-transcript is locatable + parseable. `unknown` survives only for the one
-un-answerable case (a dead process whose transcript also vanished) and renders as
-`◌` (magenta), distinct from the `○` idle. This is why status is trustworthy
+transcript is locatable + parseable. Dead processes resolve to `closed`; days-stale
+transcripts resolve to `abandoned`. `unknown` survives only when the framework has
+neither a PID signal nor a file signal, and renders as `◌` (magenta), distinct from
+the `○` idle. This is why status is trustworthy
 uniformly across harnesses.
 
 This is deliberately simple and correct; the "compute once, subscribe" direction (a

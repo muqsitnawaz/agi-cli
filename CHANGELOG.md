@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Session lifecycle status is explicit (RUSH-2066).** `agents sessions --active`
+  now reports dead processes as `closed` and days-stale/dangling sessions as
+  `abandoned`, and `agents hq floor` no longer renders those rows as idle. See
+  `apps/cli/CHANGELOG.md`.
+
 - **Project routines opt-in + host placement strategy (RUSH-2035).** `agents routines enable-project` / `sync` / `--placement local|host|fleet|cloud`. See `apps/cli/CHANGELOG.md`.
 
 - Secrets: name the requesting harness, bundle, reason, and duration in macOS

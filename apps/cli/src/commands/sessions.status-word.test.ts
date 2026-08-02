@@ -28,4 +28,11 @@ describe('liveStatusWord (status text for the default list, not just a glyph)', 
     expect(liveStatusWord(row({ status: 'queued' }))).toBe('queued');
     expect(liveStatusWord(undefined)).toBe('');
   });
+
+  it('lifecycle status (closed/abandoned) wins over any residual parsed activity', () => {
+    // RUSH-2066: a dead session whose stale tail still parses as `idle` (or even
+    // mid-`working`) must read as its lifecycle status, not the parsed activity.
+    expect(liveStatusWord(row({ status: 'closed', activity: 'idle' }))).toBe('closed');
+    expect(liveStatusWord(row({ status: 'abandoned', activity: 'working' }))).toBe('abandoned');
+  });
 });

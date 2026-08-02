@@ -71,6 +71,11 @@ describe('liveGlyphAndPreview', () => {
     expect(glyph).not.toContain('○');
   });
 
+  it('lifecycle status wins over stale parsed activity in the glyph', () => {
+    expect(liveGlyphAndPreview(mk({ status: 'closed', activity: 'working' })).glyph).toContain('×');
+    expect(liveGlyphAndPreview(mk({ status: 'abandoned', activity: 'waiting_input' })).glyph).toContain('⊘');
+  });
+
   it('preview falls back to label then topic when there is no live preview', () => {
     expect(liveGlyphAndPreview(mk({ status: 'running', label: 'my-task' })).preview).toBe('my-task');
     expect(liveGlyphAndPreview(mk({ status: 'running', topic: 'first prompt' })).preview).toBe('first prompt');
