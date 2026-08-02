@@ -6,6 +6,7 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
+- **`Agents: Fork Current Session` starts a sibling agent with the active session's context (RUSH-2058).** The command keeps the source terminal running, reuses its harness and persisted launch device, asks agents-cli to balance the target account when that harness supports rotation, and queues `/continue <session-id>` into the new terminal. Non-rotating harnesses keep their normal account strategy. Source: `apps/factory/src/core/forkSession.ts`, `apps/factory/src/vscode/extension.ts`, `apps/factory/package.json`.
 ## [0.9.301] - 2026-08-02
 
 - **`scripts/release.sh` now finds the machine that can publish instead of failing on the one you happen to be on.** The marketplace PATs live in the `vs-marketplace` secrets bundle on a single box, and tokens are never copied between hosts, so a release invoked from anywhere else died at `Error: vsce not installed` (or later, at the token check) with no path forward. The script now probes for that bundle — this box first, then `zion`, then `mac-mini` — and when it is elsewhere, re-invokes itself there over `agents ssh` against a **clean clone of the same commit**, so no host's working tree is touched and the vsix can't pick up local edits. `vsce`/`ovsx` are treated as tools rather than blockers and installed on demand. New flags: `--host <name>` pins the publish box, `--here` refuses to route (fails loudly instead). Source: `apps/factory/scripts/release.sh`.

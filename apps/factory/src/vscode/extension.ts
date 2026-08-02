@@ -95,6 +95,7 @@ import { DEFAULT_DISPLAY_PREFERENCES } from '../core/settings';
 import * as readiness from './terminalReadiness';
 import { resolveAlias, isAgentInstalled, checkInstalledAgentsViaCli } from '../core/agentModels';
 import { pickAgentByUsage, rankHostsByUsage, HostUsageScore } from '../core/agentUsage';
+import { buildForkSessionRequest } from '../core/forkSession';
 import type { RemoteSession } from '../core/remoteSessions';
 // readAgentRunStrategy no longer needed: agents-cli reads strategy from
 // agents.yaml itself when invoked via `agents run`.
@@ -1522,6 +1523,10 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('agents.spawnWithContext', async () => {
       await spawnWithContext(context);
     })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('agents.forkCurrentSession', () => forkCurrentSession(context))
   );
 
   context.subscriptions.push(
@@ -3287,7 +3292,7 @@ export async function openSingleAgentWithQueue(
   context: vscode.ExtensionContext,
   agentConfig: Omit<AgentConfig, 'count'>,
   messages: string[],
-  opts?: { cwd?: string; mode?: AgentLaunchMode; sessionId?: string }
+  opts?: { cwd?: string; mode?: AgentLaunchMode; sessionId?: string; strategy?: RunStrategy; host?: string; local?: boolean }
 ): Promise<{ terminalId: string; sessionId: string | null }> {
   const editorLocation: vscode.TerminalEditorLocationOptions = {
     viewColumn: vscode.ViewColumn.Active,
@@ -3321,16 +3326,17 @@ export async function openSingleAgentWithQueue(
   // gets a pre-generated session id for the resume flow; other agents discover
   // their session post-spawn. opts?.mode defaults to 'auto' (writable-but-gated)
   // inside buildAgentLaunchCommand when the caller does not supply an explicit mode.
+  const targetHost = opts?.host && opts.host !== 'local' ? opts.host : undefined;
   const LAUNCHABLE_SET: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini', 'opencode', 'cursor', 'antigravity']);
-  if (agentKey && LAUNCHABLE_SET.has(agentKey)) {
+  if (agentKey && (LAUNCHABLE_SET.has(agentKey) || targetHost)) {
     if (agentKey === 'claude') {
       // Claude: generate session ID at open time; others are discovered post-spawn.
       // A caller (dispatch) may pre-supply the id so it can watch that exact
       // session file for a plan / completion afterwards.
       sessionId = opts?.sessionId ?? generateClaudeSessionId();
-      command = buildClaudeLaunchCommand(context, sessionId, defaultModel, undefined, opts?.mode);
+      command = buildAgentLaunchCommand(agentKey, sessionId, defaultModel, undefined, undefined, opts?.strategy, opts?.mode, targetHost, opts?.local);
     } else {
-      command = buildAgentLaunchCommand(agentKey, null, defaultModel, undefined, undefined, undefined, opts?.mode);
+      command = buildAgentLaunchCommand(agentKey, null, defaultModel, undefined, undefined, opts?.strategy, opts?.mode, targetHost, opts?.local);
     }
   }
 
@@ -3346,6 +3352,7 @@ export async function openSingleAgentWithQueue(
 
   const pid = await terminal.processId;
   terminals.register(terminal, terminalId, agentConfig, pid, context);
+  if (targetHost) terminals.setHost(terminal, targetHost);
   readiness.registerTerminal(terminal);
 
   // Track session ID and agent type
@@ -4380,6 +4387,45 @@ async function spawnWithContext(context: vscode.ExtensionContext): Promise<void>
   }
 
   await openSingleAgentWithQueue(context, entry.agentConfig, [`/continue ${entry.sessionId}`]);
+}
+
+async function forkCurrentSession(context: vscode.ExtensionContext): Promise<void> {
+  const activeTerminal = vscode.window.activeTerminal;
+  if (!activeTerminal) {
+    vscode.window.showErrorMessage('No active terminal to fork.');
+    return;
+  }
+
+  const entryBefore = terminals.getByTerminal(activeTerminal);
+  if (entryBefore?.agentConfig?.prefix) {
+    await tryHydrateLiveSessionId(activeTerminal, entryBefore.agentConfig.prefix);
+  }
+
+  const entry = terminals.getByTerminal(activeTerminal);
+  if (!entry?.agentConfig) {
+    vscode.window.showErrorMessage('Active terminal is not an agent terminal.');
+    return;
+  }
+
+  const request = buildForkSessionRequest({
+    sessionId: entry.sessionId,
+    agentKey: entry.agentType ?? prefixToAgentType(entry.agentConfig.prefix) ?? undefined,
+    host: entry.host,
+  });
+  if (!request.ok) {
+    vscode.window.showErrorMessage(
+      request.reason === 'no_session'
+        ? 'No session ID found for the active terminal.'
+        : 'No agent harness found for the active terminal.',
+    );
+    return;
+  }
+
+  await openSingleAgentWithQueue(context, entry.agentConfig, [request.prompt], {
+    strategy: request.strategy,
+    host: request.host,
+    local: !request.host,
+  });
 }
 
 // Store context reference for deactivate
