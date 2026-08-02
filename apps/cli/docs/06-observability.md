@@ -379,10 +379,11 @@ account-global: each version's own home is read, and a logged-out state is only
 claimed as CRITICAL when it is **provable** — the credential is absent from BOTH the
 version home AND the active/global HOME (`credentialPresence` in
 `src/lib/agents.ts`). A version that merely shares the global login is signed in,
-not out. Agents with no inspectable identity (cursor, openclaw, copilot, amp,
-kiro, goose, hermes — `!supportsAccountInspection`) never yield a logged-out
-finding; the eight with a known credential path (claude, codex, gemini, opencode,
-antigravity, grok, kimi, droid) do. The login
+not out. Agents with no inspectable identity (`!supportsAccountInspection`) never
+yield a logged-out finding; the ones with a known credential path in
+`CREDENTIAL_FILE_SEGMENTS` do. The membership of those two sets lives in
+`src/lib/agents.ts` and changes as harnesses gain inspectable credentials, so it is
+deliberately not enumerated here. The login
 remediation is version-targeted, and it has to run INSIDE that version's home — a
 bare `codex login` afterwards resolves through the shim to the project/default
 version, so it would log into the wrong one. For the per-version-isolated set it is

@@ -107,12 +107,15 @@ critical across the whole fleet worst-first; a `─── by computer ───`
 gives each device its warnings plus a compact accounts/versions line (every
 installed version + its account, provable ✓ / ✗). Single-machine `agents doctor`
 collapses to the CRITICAL section plus one `▸ <machine>` block. Severity:
-provable-logged-out / missing-hook / missing-plugin / broken-CLI /
-duplicate-hook-**drift** / a **never-synced** version whose declared resources are
-therefore absent are **critical**; drift / version-skew / repo-behind / repo-drift
-/ orphan / other-missing-kinds / identical duplicate hooks / a
-declared-but-missing host CLI / a fleet resource gap / rc-secret exports / a
-blocking Windows exec policy / **unprovable-logout** are **warnings**. The findings model,
+**critical** is `logged-out` (provable), `missing-hook`, `missing-plugin`,
+`unwired-hook`, `never-synced` *when the version's declared resources are
+therefore absent*, `duplicate-hook-drift`, and `cli-missing`; **warning** is
+`logout-unprovable`, `missing-resource`, `content-drift`, `stale`, `never-synced`
+when the version declares nothing to miss, `repo-behind`, `repo-drift`,
+`version-skew`, `fleet-resource-gap`, `orphan`, `duplicate-hook`,
+`host-cli-missing`, `host-cli-invalid`, `rc-secret-export`, `exec-policy` and
+`stale-cli`. The same list is in the `doctor-findings.ts` module docblock — keep
+both exhaustive, since a kind missing from either is a doc that lies. The findings model,
 builders, `remediationFor`, and the pure `renderFindings` live in
 [`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts).
 
@@ -188,11 +191,13 @@ one.
 existence into the per-version home and the active/global HOME; a logged-out
 critical is emitted only when BOTH are absent (`provable = !perVersion && !active`).
 A version sharing the global login is signed in, not out; an agent with no
-inspectable identity (`!supportsAccountInspection` — cursor, openclaw, copilot,
-amp, kiro, goose, hermes) never yields a logout finding, not even the hedged
-warning. The eight harnesses that DO have a credential path in
-`CREDENTIAL_FILE_SEGMENTS` (claude, codex, gemini, opencode, antigravity, grok,
-kimi, droid) are inspectable and can report logged-out. Login remediation is version-targeted via
+inspectable identity (`!supportsAccountInspection`) never yields a logout finding,
+not even the hedged warning. **Do not enumerate that set here or in tests** —
+`ACCOUNT_INSPECTION_AGENT_IDS` and `CREDENTIAL_FILE_SEGMENTS`
+([`src/lib/agents.ts`](src/lib/agents.ts)) are the source of truth and agents move
+between them (antigravity and cursor both did, mid-review, each time turning a
+hardcoded list into a false doc claim or a red test). Derive it:
+`ALL_AGENT_IDS.filter(supportsAccountInspection)`. Login remediation is version-targeted via
 `agents run <agent>@<version>` + the harness-native login (`loginHint`) — but ONLY
 for the per-version-isolated set (claude/codex/grok/kimi/opencode/copilot);
 gemini/antigravity/droid/cursor share their login, so the fix says so instead of

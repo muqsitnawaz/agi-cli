@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ALL_FINDING_KINDS,
   buildLocalFindings,
   collapseAcrossVersions,
   fleetDivergenceToFindings,
@@ -10,6 +11,9 @@ import {
   type DoctorFinding,
   type LocalFindingInputs,
 } from './doctor-findings.js';
+import * as fs from 'fs';
+import * as path from 'path';
+import { ALL_AGENT_IDS, supportsAccountInspection } from '../agents.js';
 import type { VersionResourceReport } from '../doctor-diff.js';
 import type { FleetVersionSignIn, FleetDivergence } from './fleet-divergence.js';
 import { stringWidth } from '../session/width.js';
@@ -404,30 +408,61 @@ describe('signInToFindings — provable vs unprovable logout', () => {
     expect(findings).toHaveLength(0);
   });
 
-  it.each(['cursor', 'openclaw', 'copilot', 'amp', 'kiro', 'goose', 'hermes'] as const)(
-    '%s has no inspectable identity → no logout finding at all, not even the hedge',
-    (agent) => {
-      // agents-cli knows no credential path for these, so "logged out" is
-      // unknowable — silence beats a false claim.
+  // The two sets are DERIVED from the registry, never hardcoded: `main` has moved
+  // agents between them mid-review (antigravity, then cursor), and a hardcoded
+  // list turns that into a red CI shard instead of a passing test.
+  const inspectable = ALL_AGENT_IDS.filter(supportsAccountInspection);
+  const opaque = ALL_AGENT_IDS.filter((a) => !supportsAccountInspection(a));
+
+  it('every agent is in exactly one of the two sets, and neither is empty', () => {
+    expect(inspectable.length).toBeGreaterThan(0);
+    expect(opaque.length).toBeGreaterThan(0);
+    expect(inspectable.length + opaque.length).toBe(ALL_AGENT_IDS.length);
+  });
+
+  it('an agent with NO inspectable identity yields nothing — not even the hedge', () => {
+    // agents-cli knows no credential path for these, so "logged out" is
+    // unknowable and silence beats a false claim.
+    for (const agent of opaque) {
       expect(signInToFindings('boxA', {
         [agent]: [{ version: '1.0.0', signedIn: false, account: null, provable: true }],
       })).toHaveLength(0);
-    },
-  );
+    }
+  });
 
-  it.each(['claude', 'codex', 'gemini', 'opencode', 'antigravity', 'grok', 'kimi', 'droid'] as const)(
-    '%s IS inspectable → a provable logout is reported as critical',
-    (agent) => {
-      // antigravity included deliberately: it has a real credential path
-      // (~/.gemini/antigravity-cli/antigravity-oauth-token), so it is inspectable
-      // and DOES yield a logout finding — the docs used to claim otherwise.
+  it('an inspectable agent reports a provable logout as critical', () => {
+    for (const agent of inspectable) {
       const findings = signInToFindings('boxA', {
         [agent]: [{ version: '1.0.0', signedIn: false, account: null, provable: true }],
       });
       expect(findings).toHaveLength(1);
       expect(findings[0]).toMatchObject({ severity: 'critical', kind: 'logged-out', agent });
-    },
-  );
+    }
+  });
+});
+
+describe('the severity rubric is exhaustive (docs cannot silently drift from the kinds)', () => {
+  // Five separate review rounds landed a new FindingKind; three of them left one
+  // of the two prose rubrics behind, each time producing a doc that lied. Pin it:
+  // every kind must be named in BOTH the module docblock and apps/cli/AGENTS.md.
+  const read = (rel: string) =>
+    fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+  it('every FindingKind appears in the module docblock rubric', () => {
+    const src = read('./doctor-findings.ts');
+    const rubric = src.slice(src.indexOf(' * Severity rubric'), src.indexOf(' */'));
+    const missing = ALL_FINDING_KINDS.filter((k) => !rubric.includes(k));
+    expect(missing).toEqual([]);
+  });
+
+  it('every FindingKind appears in the AGENTS.md severity rubric', () => {
+    const doc = read('../../../AGENTS.md');
+    const start = doc.indexOf('**critical** is `logged-out`');
+    expect(start).toBeGreaterThan(-1);
+    const rubric = doc.slice(start, start + 1400);
+    const missing = ALL_FINDING_KINDS.filter((k) => !rubric.includes(k));
+    expect(missing).toEqual([]);
+  });
 });
 
 describe('determinism', () => {

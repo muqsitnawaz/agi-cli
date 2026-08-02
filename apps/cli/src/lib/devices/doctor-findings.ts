@@ -14,17 +14,17 @@
  * A single-machine `agents doctor` (no `--devices`) collapses to the CRITICAL
  * section, then one `▸ <machine>` block.
  *
- * Severity rubric (agent-agnostic):
- *   CRITICAL — provable logged-out · missing hook or plugin from a version ·
- *              a never-synced version whose declared resources are therefore
- *              absent · duplicate hook copies that DIFFER · cli-missing /
- *              binary-broken.
- *   WARNING  — content-drift · version-skew · repo-behind · repo-drift · orphan ·
- *              missing command/skill/rule/mcp/permission/subagent · identical
- *              duplicate hook copies · a declared host CLI that is not installed ·
- *              an unreadable host-CLI manifest · a fleet resource gap ·
- *              rc-secret exports · a blocking Windows exec policy ·
- *              UNPROVABLE logout (hedged wording).
+ * Severity rubric — every kind the builders emit, by the severity they emit it
+ * with. Keep this list exhaustive; a kind missing from it is a doc that lies.
+ *   CRITICAL — logged-out (provable) · missing-hook · missing-plugin ·
+ *              unwired-hook (a hook on disk that settings.json never fires) ·
+ *              never-synced WHEN the version's declared resources are absent ·
+ *              duplicate-hook-drift (copies that DIFFER) · cli-missing.
+ *   WARNING  — logout-unprovable (hedged) · missing-resource · content-drift ·
+ *              stale · never-synced when the version declares nothing to miss ·
+ *              repo-behind · repo-drift · version-skew · fleet-resource-gap ·
+ *              orphan · duplicate-hook (identical copies) · host-cli-missing ·
+ *              host-cli-invalid · rc-secret-export · exec-policy · stale-cli.
  *
  * This module is pure: it maps already-collected signals (drift rows, orphan
  * rows, repo-behind markers, per-version resource diffs, cross-device divergence,
@@ -86,30 +86,35 @@ export type FindingSeverity = 'critical' | 'warning';
 
 /** A machine-stable class for a finding — drives {@link remediationFor} and lets
  *  the JSON consumer group by kind. */
-export type FindingKind =
-  | 'logged-out'          // provable per-version logout (CRITICAL)
-  | 'logout-unprovable'   // credential absent but not provable (WARNING)
-  | 'missing-hook'        // a declared hook absent from a version home (CRITICAL)
-  | 'missing-plugin'      // a declared plugin absent from a version home (CRITICAL)
-  | 'unwired-hook'        // hook present on disk but not wired into settings.json (CRITICAL)
-  | 'cli-missing'         // a managed agent whose binary won't resolve (CRITICAL)
-  | 'missing-resource'    // a missing command/skill/rule/mcp/permission/subagent (WARNING)
-  | 'content-drift'       // a resource diverged from source (WARNING)
-  | 'never-synced'        // installed but never synced — CRITICAL when its declared
+export const ALL_FINDING_KINDS = [
+  'logged-out',          // provable per-version logout (CRITICAL)
+  'logout-unprovable',   // credential absent but not provable (WARNING)
+  'missing-hook',        // a declared hook absent from a version home (CRITICAL)
+  'missing-plugin',      // a declared plugin absent from a version home (CRITICAL)
+  'unwired-hook',        // hook present on disk but not wired into settings.json (CRITICAL)
+  'cli-missing',         // a managed agent whose binary won't resolve (CRITICAL)
+  'missing-resource',    // a missing command/skill/rule/mcp/permission/subagent (WARNING)
+  'content-drift',       // a resource diverged from source (WARNING)
+  'never-synced',        // installed but never synced — CRITICAL when its declared
                           // resources are therefore absent, WARNING when it declares none
-  | 'stale'               // sources changed since last sync (WARNING)
-  | 'repo-behind'         // a config repo behind origin (WARNING)
-  | 'repo-drift'          // a config repo diverged from the fleet baseline (WARNING)
-  | 'fleet-resource-gap'  // a resource in another box's central repos, absent here (WARNING)
-  | 'host-cli-missing'    // a declared host CLI not installed on this box (WARNING)
-  | 'host-cli-invalid'    // a host-CLI manifest that failed to parse (WARNING)
-  | 'version-skew'        // an agent version present elsewhere, absent here (WARNING)
-  | 'orphan'              // orphan resources in a version home (WARNING)
-  | 'duplicate-hook'      // one hook materialized in several version homes, byte-identical (WARNING)
-  | 'duplicate-hook-drift'// …with differing content, so a stale copy can disagree (CRITICAL)
-  | 'rc-secret-export'    // credential-shaped export in a shell rc file (WARNING)
-  | 'exec-policy'         // Windows execution policy blocks agents.ps1 (WARNING)
-  | 'stale-cli';          // an older CLI that can't report per-version sign-in (WARNING)
+  'stale',               // sources changed since last sync (WARNING)
+  'repo-behind',         // a config repo behind origin (WARNING)
+  'repo-drift',          // a config repo diverged from the fleet baseline (WARNING)
+  'fleet-resource-gap',  // a resource in another box's central repos, absent here (WARNING)
+  'host-cli-missing',    // a declared host CLI not installed on this box (WARNING)
+  'host-cli-invalid',    // a host-CLI manifest that failed to parse (WARNING)
+  'version-skew',        // an agent version present elsewhere, absent here (WARNING)
+  'orphan',              // orphan resources in a version home (WARNING)
+  'duplicate-hook',      // one hook materialized in several version homes, byte-identical (WARNING)
+  'duplicate-hook-drift',// …with differing content, so a stale copy can disagree (CRITICAL)
+  'rc-secret-export',    // credential-shaped export in a shell rc file (WARNING)
+  'exec-policy',         // Windows execution policy blocks agents.ps1 (WARNING)
+  'stale-cli',
+] as const;
+
+/** A machine-stable class for a finding. Derived from the runtime list above so
+ *  the rubric test can enumerate every kind. */
+export type FindingKind = typeof ALL_FINDING_KINDS[number];          // an older CLI that can't report per-version sign-in (WARNING)
 
 /** One prioritized finding, attributed to a device (and, when relevant, an agent
  *  version + account). `remediation` is the exact command/hint to fix it. */
