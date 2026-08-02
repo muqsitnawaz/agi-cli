@@ -27,6 +27,8 @@ import {
   filterStaleSessions,
   reconcileHosts,
   groupByHost,
+  parseSessionLabelSource,
+  SessionLabelSource,
 } from '../core/remoteSessions';
 import type { ProjectRule } from '../core/settings';
 import { deriveHostLoad, parseRemoteCpuRatio } from '../core/dispatchRanking';
@@ -314,6 +316,36 @@ export async function fetchRecentForHost(
     // non-JSON banner, so JSON.parse throws -> no recent shown. Graceful: the RECENT
     // section simply stays empty until the engine change is released.
     return [];
+  }
+}
+
+/**
+ * Label inputs for ONE session that lives on another machine.
+ *
+ * A tab spawned with `agents run --host` has its transcript on the host, so the
+ * local by-session-id lookups the label poller normally uses (the Claude
+ * sessions/*.json scan, the jsonl preview read) find nothing and the tab keeps
+ * the bare agent prefix forever. `agents sessions <id> --host <name> --json`
+ * resolves both fields on the machine that owns the session.
+ *
+ * Returns null when the host is unreachable or the session is not indexed there
+ * yet — a fresh session has no first message for a second or two, and the poller
+ * simply retries on its next tick.
+ */
+export async function fetchRemoteSessionLabelSource(
+  sessionId: string,
+  host: string,
+): Promise<SessionLabelSource | null> {
+  const agentsBin = await findAgentsCli();
+  try {
+    const { stdout } = await execFileAsync(
+      agentsBin,
+      ['sessions', sessionId, '--host', host, '--json'],
+      { timeout: DETAIL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: pathAugmentedEnv() },
+    );
+    return parseSessionLabelSource(stdout);
+  } catch {
+    return null;
   }
 }
 

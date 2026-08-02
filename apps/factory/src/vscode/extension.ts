@@ -26,7 +26,7 @@ import { startWatchdogBridge } from '../mcp/watchdog-bridge';
 import { ensureWatchdogMcpInstalled } from '../mcp/watchdogInstall';
 import * as notifications from './notifications.vscode';
 import * as terminals from './terminals.vscode';
-import { fetchLocalSessions } from './remoteSessions.vscode';
+import { fetchLocalSessions, fetchRemoteSessionLabelSource } from './remoteSessions.vscode';
 import * as sessionTracker from './sessionTracker';
 import { runRecapHeadless, isRecapSupported } from './recap.vscode';
 import { buildAgentTerminalEnv } from '../core/terminals';
@@ -1754,6 +1754,7 @@ export async function activate(context: vscode.ExtensionContext) {
             terminalId: entry.id,
             prefix: entry.agentConfig.prefix,
             sessionId: entry.sessionId,
+            host: entry.host,
             label: entry.label,
             agentType: entry.agentType,
             version: entry.version,
@@ -1966,11 +1967,18 @@ async function openSingleAgent(
   // raw command. Remote (targetHost): ALL agents route through `agents run
   // --host` so every agent can be offloaded onto a device.
   if (agentKey && (LAUNCHABLE.has(agentKey) || targetHost)) {
-    // Claude's up-front session id is for the LOCAL resume flow; a remote run
-    // manages its own session on the target host, so skip it when offloading.
-    if (agentKey === 'claude' && !targetHost) {
+    // Mint Claude's session id up front for LOCAL and REMOTE alike. The id is
+    // what every downstream surface keys off: the status bar, the auto-label
+    // poller that fills in the tab title, and Session Resume / Trace / Fork.
+    // A host run used to skip it and let the remote coin its own id, which left
+    // remote tabs stuck on the bare agent prefix with an empty status bar and no
+    // way to resume them by id. `agents run --host` accepts a caller-supplied
+    // `--session-id` and pins the remote session to it (hosts/run-target.ts
+    // resolveHostSessionId), so the id we generate here is the id the remote
+    // session actually uses.
+    if (agentKey === 'claude') {
       sessionId = generateClaudeSessionId();
-      console.log(`[SESSION] Claude using on-demand session ID: ${sessionId}`);
+      console.log(`[SESSION] Claude using on-demand session ID: ${sessionId}${targetHost ? ` (host ${targetHost})` : ''}`);
     }
     command = buildAgentLaunchCommand(agentKey, sessionId, defaultModel, additionalFlags, pinnedVersion, strategy, undefined, targetHost);
   }
@@ -2001,6 +2009,11 @@ async function openSingleAgent(
 
     if (agentKey && supportsPrewarming(agentKey)) {
       terminals.setAgentType(terminal, agentKey);
+    }
+    // Stamp the host BEFORE the label poller starts: the poller reads the entry
+    // to decide whether to look the session up locally or over `--host`.
+    if (targetHost) {
+      terminals.setHost(terminal, targetHost);
     }
     if (sessionId) {
       terminals.setSessionId(terminal, sessionId);
@@ -2046,6 +2059,11 @@ async function openSingleAgent(
 
   if (agentKey && supportsPrewarming(agentKey)) {
     terminals.setAgentType(terminal, agentKey);
+  }
+  // Stamp the host BEFORE the label poller starts: the poller reads the entry
+  // to decide whether to look the session up locally or over `--host`.
+  if (targetHost) {
+    terminals.setHost(terminal, targetHost);
   }
   if (sessionId) {
     terminals.setSessionId(terminal, sessionId);
@@ -3419,6 +3437,38 @@ interface FetchAutoLabelOpts {
   useFullConversation?: boolean;
 }
 
+/**
+ * Auto-label for a tab whose agent runs on another machine.
+ *
+ * Same two-step shape as the local path — reuse a real persisted name, else
+ * summarize the first user message — but both inputs come from the host over
+ * `agents sessions <id> --host`. A ticket id in the first message is prefixed
+ * exactly as locally, so a remote tab reads the same as a local one.
+ */
+async function fetchRemoteAutoLabel(
+  terminal: vscode.Terminal,
+  entry: terminals.EditorTerminal,
+  host: string
+): Promise<string | undefined> {
+  if (!entry.sessionId) return undefined;
+  const source = await fetchRemoteSessionLabelSource(entry.sessionId, host);
+  if (!source) return undefined;
+
+  const ticket = source.topic ? extractLinearTicketId(source.topic) : null;
+  if (source.label) {
+    const label = ticket ? `${ticket} ${source.label}` : source.label;
+    terminals.setAutoLabel(terminal, label);
+    return label;
+  }
+  if (!source.topic) return undefined;
+
+  const llmTitle = await generateLabelWithLLM(source.topic);
+  const base = llmTitle ?? extractFirstNWords(source.topic, 5);
+  const autoLabel = ticket && base ? `${ticket} ${base}` : (ticket ?? base);
+  if (autoLabel) terminals.setAutoLabel(terminal, autoLabel);
+  return autoLabel ?? undefined;
+}
+
 async function fetchAndSetAutoLabel(
   terminal: vscode.Terminal,
   entry: terminals.EditorTerminal,
@@ -3426,6 +3476,13 @@ async function fetchAndSetAutoLabel(
 ): Promise<string | undefined> {
   if (!entry.sessionId) return entry.autoLabel;
   if (!opts.force && entry.autoLabel) return entry.autoLabel;
+
+  // Offloaded tab: the transcript is on the host, so the local session-file scan
+  // and jsonl preview below have nothing to read. Ask the host for the same two
+  // inputs instead — its persisted name, else its first message to summarize.
+  if (entry.host) {
+    return await fetchRemoteAutoLabel(terminal, entry, entry.host);
+  }
 
   try {
     const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -4040,7 +4097,7 @@ async function reloadActiveTerminal(context: vscode.ExtensionContext) {
 
     const config = PREWARM_CONFIGS[agentType];
     const exitSequence = config.exitSequence;
-    const resumeCommand = buildVersionedResumeCommand(agentType, sessionId, entry.version);
+    const resumeCommand = buildVersionedResumeCommand(agentType, sessionId, entry.version, entry.host);
 
     terminal.show();
     for (const seq of exitSequence) {
@@ -4342,6 +4399,11 @@ async function restoreAgentTerminals(context: vscode.ExtensionContext): Promise<
     if (session.sessionId && session.agentType) {
       terminals.setSessionId(terminal, session.sessionId);
       terminals.setAgentType(terminal, session.agentType as SessionAgentType);
+      // Stamp the host before the poller starts so a restored offloaded tab
+      // keeps resolving its label (and its resume) on the machine that owns it.
+      if (session.host) {
+        terminals.setHost(terminal, session.host);
+      }
       startAutoLabelPollerForTerminal(terminal, context);
 
       // Actually resume the session by sending the resume command
@@ -4349,7 +4411,8 @@ async function restoreAgentTerminals(context: vscode.ExtensionContext): Promise<
         const resumeCmd = buildVersionedResumeCommand(
           session.agentType,
           session.sessionId,
-          session.version
+          session.version,
+          session.host
         );
         try {
           await readiness.waitFor(terminal, 'promptReady');
@@ -4527,13 +4590,19 @@ async function reopenLastClosedSession(context: vscode.ExtensionContext): Promis
     if (closed.account) {
       terminals.setAccount(terminal, closed.account);
     }
+    // Stamp the host before the poller starts so a reopened offloaded tab keeps
+    // resolving its label (and its resume) on the machine that owns it.
+    if (closed.host) {
+      terminals.setHost(terminal, closed.host);
+    }
     startAutoLabelPollerForTerminal(terminal, context);
 
     if (supportsPrewarming(closed.agentType)) {
       const resumeCmd = buildVersionedResumeCommand(
         closed.agentType,
         closed.sessionId,
-        closed.version
+        closed.version,
+        closed.host
       );
       try {
         await readiness.waitFor(terminal, 'promptReady');
