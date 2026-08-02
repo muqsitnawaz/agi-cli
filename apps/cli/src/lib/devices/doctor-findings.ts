@@ -53,6 +53,23 @@ const AGENT_NAMES: Record<string, string> = Object.fromEntries(
  *  only for the isolated set (claude/codex/grok/kimi/opencode/copilot). */
 const NO_PER_VERSION_LOGIN = new Set<AgentId>(['gemini', 'antigravity', 'droid', 'cursor']);
 
+/** How an agent's login is actually reached — the three shapes `loginHint`
+ *  encodes (`lib/signin-badge.ts:23-36`), split apart because a per-version fix
+ *  has to build a different command for each:
+ *    `subcommand` — `<cli> login` / `<cli> auth login`, runnable via `--`
+ *    `in-tui`     — claude only: a `/login` slash command inside its own TUI
+ *    `on-launch`  — the device/oauth flow starts when the agent launches */
+const LOGIN_SUBCOMMAND: Partial<Record<AgentId, string>> = {
+  codex: 'login',
+  grok: 'login',
+  opencode: 'auth login',
+};
+
+function loginShape(agent: AgentId): 'subcommand' | 'in-tui' | 'on-launch' {
+  if (LOGIN_SUBCOMMAND[agent]) return 'subcommand';
+  return agent === 'claude' ? 'in-tui' : 'on-launch';
+}
+
 export type FindingSeverity = 'critical' | 'warning';
 
 /** A machine-stable class for a finding — drives {@link remediationFor} and lets
@@ -131,8 +148,22 @@ export function remediationFor(finding: DoctorFinding): string {
           ? `${native} (shared across all ${agentName(agent)} versions)`
           : native;
       }
-      // Isolated per-version home: point native login at THIS version.
-      return `agents run ${idLabel}, then ${native}`;
+      // Isolated per-version home: the login must RUN INSIDE that home. A bare
+      // `<cli> login` afterwards would NOT — the native shim resolves to the
+      // project/default version (`lib/shims.ts:471-474`), so it would log into
+      // whichever version is default, not the one that is logged out.
+      switch (loginShape(agent)) {
+        case 'subcommand':
+          // `-- <args>` is forwarded verbatim to the binary in that version home
+          // (`commands/exec.ts:723`, `lib/exec.ts:1004`) — one correct invocation.
+          return `agents run ${idLabel} -- ${LOGIN_SUBCOMMAND[agent]}`;
+        case 'in-tui':
+          // Claude has no login subcommand; it logs in from inside its own TUI.
+          return `agents run ${idLabel}, then /login`;
+        case 'on-launch':
+          // The device/oauth flow starts when the agent launches — nothing to add.
+          return `agents run ${idLabel}`;
+      }
     }
     case 'missing-hook':
     case 'missing-plugin':
@@ -150,7 +181,10 @@ export function remediationFor(finding: DoctorFinding): string {
     case 'cli-missing':
       return agent ? `agents add ${agent}` : 'agents add <agent>';
     case 'orphan':
-      return 'agents prune cleanup';
+      // Without `--all`, cleanup sweeps only each agent's DEFAULT version
+      // (`commands/prune.ts:351`, `collectOrphans(..., options.all === true)`) —
+      // and this row aggregates every version on the machine.
+      return 'agents prune cleanup --all';
     case 'repo-behind':
       return `agents repo pull ${finding.version ?? 'user'}`;
     case 'repo-drift':

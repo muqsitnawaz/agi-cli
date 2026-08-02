@@ -131,7 +131,9 @@ takes ~57 rows down to ~16, and the rules are unit-pinned in
   so folding one in would print a command that leaves it broken; the caller passes
   `isolatedVersions` from `isVersionIsolated`.
 - **Orphans are one line per machine.** They are cleanup-only and
-  `agents prune cleanup` fixes every version at once.
+  `agents prune cleanup --all` fixes every version at once — **`--all` is load
+  bearing**: without it cleanup sweeps only each agent's default version
+  (`commands/prune.ts:351`).
 - **Duplicate version-home hooks are one line per (agent, severity).**
   `agents sync <agent>@all --yes` reconciles every copy at once, and a
   machine with five installed claudes otherwise emits two dozen identical rows.
@@ -157,7 +159,16 @@ testable without a shell, PowerShell, or an installed CLI):
 
 **Before deleting any renderer here, enumerate what it called.**
 
-**A remediation must fix EVERY version in its row.** `agents sync <agent>` targets
+**A remediation must fix EVERY version in its row, and must be a command that
+exists.** Three separate rounds of review here found remediations naming a command
+form that does not do what the row claims — `agents sync <agent>` (default version
+only), `agents repo pull` (skips the system repo), `agents prune cleanup` (default
+versions only), `agents cli install <a> <b>` (takes one name), and
+`agents run <agent>@<v>, then <cli> login` (the second command resolves through the
+shim to the *default* version, not the one that is logged out — use
+`agents run <agent>@<v> -- login`, since `--` forwards verbatim into that version
+home). **Open the command definition and check arity, flags, and scope before
+writing a remediation string.** `agents sync <agent>` targets
 only the default/sole installed version (`commands/sync.ts:8`), so a row collapsed
 across versions uses the `@all` selector — `agents sync <agent>@all --yes`. A fleet
 resource gap is absent from that box's *central repos*, so the central-to-home

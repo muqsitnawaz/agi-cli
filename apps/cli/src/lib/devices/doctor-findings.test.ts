@@ -173,7 +173,7 @@ describe('de-noise — one root cause is one line', () => {
     const orphans = findings.filter((f) => f.kind === 'orphan');
     expect(orphans).toHaveLength(1);
     expect(orphans[0].message).toBe('127 orphaned resources on 3 versions (cleanup only)');
-    expect(orphans[0].remediation).toBe('agents prune cleanup');
+    expect(orphans[0].remediation).toBe('agents prune cleanup --all');
   });
 
   it('a version that already named its drifted resources gets no vaguer `stale` row on top', () => {
@@ -414,14 +414,25 @@ describe('signInToFindings — provable vs unprovable logout', () => {
 describe('remediationFor', () => {
   const base = { severity: 'critical' as const, device: 'd', message: 'm', remediation: '' };
 
-  it('an isolated agent gets a per-version login (agents run <agent>@<version>, then native)', () => {
+  it('a subcommand login runs INSIDE the version home via `--`, not as a second global command', () => {
+    // A bare `codex login` afterwards resolves through the native shim to the
+    // project/default version, so it would log into the wrong one.
     const r = remediationFor({ ...base, kind: 'logged-out', agent: 'codex', version: '1.2.3' });
-    expect(r).toBe('agents run codex@1.2.3, then codex login');
+    expect(r).toBe('agents run codex@1.2.3 -- login');
+    expect(remediationFor({ ...base, kind: 'logged-out', agent: 'grok', version: '0.2.82' }))
+      .toBe('agents run grok@0.2.82 -- login');
   });
 
-  it('claude uses its TUI /login for a per-version fix', () => {
+  it('claude launches ONCE and logs in from its own TUI', () => {
     const r = remediationFor({ ...base, kind: 'logged-out', agent: 'claude', version: '2.1.0' });
-    expect(r).toBe('agents run claude@2.1.0, then claude, then /login');
+    expect(r).toBe('agents run claude@2.1.0, then /login');
+    // The old string launched claude twice ("agents run claude@X, then claude, …").
+    expect(r).not.toMatch(/then claude,/);
+  });
+
+  it('an agent whose flow starts on launch just gets the run command', () => {
+    expect(remediationFor({ ...base, kind: 'logged-out', agent: 'kimi', version: '0.19.2' }))
+      .toBe('agents run kimi@0.19.2');
   });
 
   it.each(['gemini', 'antigravity', 'droid', 'cursor'] as const)(
@@ -433,9 +444,9 @@ describe('remediationFor', () => {
     },
   );
 
-  it('opencode uses `auth login`', () => {
+  it('opencode uses `auth login`, forwarded into the version home', () => {
     const r = remediationFor({ ...base, kind: 'logged-out', agent: 'opencode', version: '1.0.0' });
-    expect(r).toBe('agents run opencode@1.0.0, then opencode auth login');
+    expect(r).toBe('agents run opencode@1.0.0 -- auth login');
   });
 
   it('a missing hook → agents doctor <agent>@<version> --fix', () => {
@@ -446,8 +457,9 @@ describe('remediationFor', () => {
   it('never-synced → agents sync; orphan → prune cleanup; repo-behind → repo pull', () => {
     expect(remediationFor({ ...base, kind: 'never-synced', agent: 'claude', version: '2.1.0' }))
       .toBe('agents sync claude@2.1.0 --yes');
+    // Without --all, cleanup sweeps only each agent's DEFAULT version.
     expect(remediationFor({ ...base, kind: 'orphan', agent: 'claude', version: '2.1.0' }))
-      .toBe('agents prune cleanup');
+      .toBe('agents prune cleanup --all');
     expect(remediationFor({ ...base, kind: 'repo-behind', version: 'user' }))
       .toBe('agents repo pull user');
   });

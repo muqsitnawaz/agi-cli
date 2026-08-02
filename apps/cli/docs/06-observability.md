@@ -323,7 +323,7 @@ agents doctor · zion                                        1.20.81
 ▸ zion · this machine  ✗ 2 critical (above)
     ⚠ claude (5 versions)  plugin 'code' — mirror missing → agents doctor claude --fix
     ⚠ ~/.agents (user)     6 behind origin/main → stales 7 versions → agents repo pull user
-    ⚠ orphans              397 orphaned resources on 12 versions (cleanup only) → agents prune cleanup
+    ⚠ orphans              397 orphaned resources on 12 versions (cleanup only) → agents prune cleanup --all
     claude 2.1.170 ✓me@x.com (Max) 2.1.999 ✓team (Team) · codex ✗ · grok ✓ · kimi ✓
 ```
 
@@ -348,7 +348,7 @@ rendered, so a real machine shows ~16 rows rather than ~57:
 |---|---|
 | One row per missing resource | `32 hooks missing (incl. 'a', 'b')` — a lone one is still named in full |
 | The same problem on 5 installed claudes | `claude (5 versions) …`, fixed by the agent-wide `agents doctor claude --fix` |
-| One orphan row per version | one `orphans` line per machine — `agents prune cleanup` clears them all |
+| One orphan row per version | one `orphans` line per machine — `agents prune cleanup --all` clears them all |
 | One row per hook duplicated across version homes | one row per (agent, severity) — `agents sync <agent>@all --yes` reconciles them all |
 | `sources changed since last sync` on a version that already listed its drift | nothing — the specific row already said it |
 | One critical per absent resource on a never-synced version | one critical → `agents sync <agent>@<version> --yes` |
