@@ -347,7 +347,7 @@ interface FleetTarget {
   os?: string;
 }
 
-const AGENT_ORDER = ['claude', 'codex', 'kimi', 'grok', 'antigravity', 'opencode', 'cursor', 'gemini', 'droid'];
+const AGENT_ORDER = ['claude', 'codex', 'kimi', 'grok', 'antigravity', 'opencode', 'cursor', 'droid'];
 
 function shortAgentHeader(name: string): string {
   return name.slice(0, 4).padEnd(4);
@@ -1034,7 +1034,7 @@ export function registerDoctorCommand(program: Command): void {
       agents doctor claude@default
 
       # All installed versions of one agent
-      agents doctor gemini
+      agents doctor antigravity
 
       # Pin to a specific installed version
       agents doctor codex@0.117.0
