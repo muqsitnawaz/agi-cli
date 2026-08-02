@@ -2,6 +2,14 @@
 
 ## 1.20.86
 
+- **Webhook handlers can now inject environment variables via `run.env`.**
+  One-off handler runs are sandboxed with an overlay `HOME`, which hides tools
+  like the `linear` CLI that resolve credentials from the real user home. A
+  handler can now declare `run.env.HOME: /home/muqsit` (or any other variable)
+  and it is applied on top of the sandbox env. Source:
+  `apps/cli/src/lib/triggers/handlers.ts`, `apps/cli/src/lib/routines.ts`,
+  `apps/cli/src/lib/runner.ts`.
+
 - **`agents sessions` now shows a Kimi session's todo list and its file-touching
   tool calls.** Kimi writes its checklist with `TodoList` (items shaped
   `{title, status}`, where finished is `done`) rather than Claude's `TodoWrite`

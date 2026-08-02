@@ -261,7 +261,7 @@ run:
 | `source` | `github` or `linear`. |
 | `event` | Source event name (e.g. `Issue`, `pull_request`). |
 | `action` | Webhook action (e.g. `update`, `opened`, `labeled`). |
-| `run` | One-of `agent`, `workflow`, or `command`, plus an optional `prompt`. |
+| `run` | One-of `agent`, `workflow`, or `command`, plus optional `prompt` and `env`. |
 | `routine` | Name of a routine to delegate to instead of `run`. |
 
 #### Filters
@@ -283,6 +283,11 @@ Handlers support the same filters as routine triggers:
   variable-substituted).
 - `routine` — load the named routine, substitute its prompt, and run it
   detached. The handler's `devices` pin overrides the routine's for this fire.
+
+`run.env` is an optional map of environment variables injected into the spawned
+process. Use it to point tools at the real user home without breaking sandbox
+isolation, for example `HOME: /home/muqsit` so a child `linear` CLI finds
+`~/.linear-cli/config.json`.
 
 #### Prompt variables
 
