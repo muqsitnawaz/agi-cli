@@ -149,9 +149,58 @@ describe('buildJobCommand', () => {
     });
   });
 
+  describe('cursor', () => {
+    it('builds the exact edit mode command without a mode flag', () => {
+      expect(buildJobCommand(makeConfig({ agent: 'cursor', mode: 'edit' }), 'hello')).toEqual([
+        'cursor-agent',
+        '-p',
+        'hello',
+        '--output-format',
+        'stream-json',
+      ]);
+    });
+
+    it('builds the exact skip mode command with force approval', () => {
+      expect(buildJobCommand(makeConfig({ agent: 'cursor', mode: 'skip' }), 'hello')).toEqual([
+        'cursor-agent',
+        '-p',
+        'hello',
+        '--output-format',
+        'stream-json',
+        '-f',
+      ]);
+    });
+
+    it('degrades plan mode to edit without inventing a read-only flag', () => {
+      expect(buildJobCommand(makeConfig({ agent: 'cursor', mode: 'plan' }), 'hello')).toEqual([
+        'cursor-agent',
+        '-p',
+        'hello',
+        '--output-format',
+        'stream-json',
+      ]);
+    });
+
+    it('adds --model when config.model is set', () => {
+      expect(buildJobCommand(makeConfig({
+        agent: 'cursor',
+        mode: 'edit',
+        config: { model: 'sonnet-4-thinking' },
+      }), 'hello')).toEqual([
+        'cursor-agent',
+        '-p',
+        'hello',
+        '--output-format',
+        'stream-json',
+        '--model',
+        'sonnet-4-thinking',
+      ]);
+    });
+  });
+
   it('throws for unsupported agent', () => {
-    expect(() => buildJobCommand(makeConfig({ agent: 'cursor' }), 'hello')).toThrow(
-      'Unsupported agent for daemon jobs: cursor'
+    expect(() => buildJobCommand(makeConfig({ agent: 'antigravity' }), 'hello')).toThrow(
+      'Unsupported agent for daemon jobs: antigravity'
     );
   });
 });
@@ -202,6 +251,23 @@ describe('extractReport', () => {
     writeFileSync(logPath, lines.join('\n'), 'utf-8');
 
     expect(extractReport(logPath, 'gemini')).toBe('Gemini final report');
+  });
+
+  it('extracts the last assistant text from cursor stream-json', () => {
+    const lines = [
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'First' }] },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Cursor final report' }] },
+      }),
+    ];
+    const logPath = join(TEST_DIR, 'cursor.log');
+    writeFileSync(logPath, lines.join('\n'), 'utf-8');
+
+    expect(extractReport(logPath, 'cursor')).toBe('Cursor final report');
   });
 
   it('returns null for nonexistent file', () => {

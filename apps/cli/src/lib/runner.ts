@@ -74,6 +74,7 @@ const AGENT_COMMANDS: Record<string, string[]> = {
   claude: ['claude', '-p', '--verbose', '{prompt}', '--output-format', 'stream-json', '--permission-mode', 'plan'],
   codex: ['codex', 'exec', '--sandbox', 'workspace-write', '{prompt}', '--json'],
   gemini: ['gemini', '{prompt}', '--output-format', 'stream-json'],
+  cursor: ['cursor-agent', '-p', '{prompt}', '--output-format', 'stream-json'],
   kimi: ['kimi', '--prompt', '{prompt}', '--output-format', 'stream-json'],
   droid: ['droid', 'exec', '{prompt}', '-o', 'stream-json'],
 };
@@ -81,6 +82,7 @@ const AGENT_COMMANDS: Record<string, string[]> = {
 const ROUTINE_TRANSCRIPT_SPECS: Partial<Record<AgentId, Array<{ root: string[]; ext: string }>>> = {
   claude: [{ root: ['.claude', 'projects'], ext: '.jsonl' }],
   codex: [{ root: ['.codex', 'sessions'], ext: '.jsonl' }],
+  cursor: [{ root: ['.cursor', 'projects'], ext: '.jsonl' }],
 };
 
 /** Build the full CLI argv for executing a job, applying mode, model, and permission flags. */
@@ -170,6 +172,17 @@ export function buildJobCommand(config: JobConfig, resolvedPrompt: string): stri
       cmd.push('--approval-mode', 'auto_edit');
     } else if (mode === 'skip') {
       cmd.push('--yolo');
+    }
+
+    appendModelAndReasoning(cmd, config);
+  }
+
+  if (config.agent === 'cursor') {
+    // cursor-agent has no headless read-only flag in the declared capability
+    // table: plan degrades to edit, while skip opts into force approval.
+    const cursorMode = resolveHeadlessMode('cursor', mode, false);
+    if (cursorMode === 'skip') {
+      cmd.push('-f');
     }
 
     appendModelAndReasoning(cmd, config);
@@ -1458,7 +1471,7 @@ export function extractReport(stdoutPath: string, agentType: AgentId): string | 
       try {
         const parsed = JSON.parse(line);
 
-        if (agentType === 'claude') {
+        if (agentType === 'claude' || agentType === 'cursor') {
           if (parsed.type === 'assistant' && parsed.message?.content) {
             for (const block of parsed.message.content) {
               if (block.type === 'text' && block.text) {
