@@ -871,3 +871,74 @@ export function groupByHost(
   }
   return groups;
 }
+
+/** The two label-bearing fields of one `agents sessions <id> --json` record. */
+export interface SessionLabelSource {
+  /** The session's persisted name, when it has a real one. */
+  label: string | null;
+  /** The session's first user message — the summarizer's input. */
+  topic: string | null;
+}
+
+/**
+ * Pull the label inputs out of `agents sessions <id> --json`.
+ *
+ * A tab whose agent runs on another machine has no local transcript to read, so
+ * this is the only way it can ever show anything but the bare agent prefix. The
+ * CLI already resolves both fields on whichever host owns the session.
+ *
+ * **The payload has two shapes, and the remote one is the shape that matters
+ * here.** Locally, `agents sessions <id> --json` renders the detail view and
+ * emits `{ session, events }`. With `--host` the lookup is routed to the peer
+ * and comes back as the FLAT array of `SessionMeta` records instead (the same
+ * shape `fetchRecentForHost` consumes). Reading only `.session` therefore found
+ * nothing for exactly the offloaded tabs this exists to label. Both are handled;
+ * `sessionId` disambiguates when an array carries more than one record.
+ *
+ * `label` is dropped when it is Claude's derived `<dirname>-<n>` placeholder —
+ * that names the repo, not the work, and surfacing it would also stop the caller
+ * from falling through to the summarizer (same rule as readClaudeSessionName).
+ */
+export function parseSessionLabelSource(rawJson: string, sessionId?: string): SessionLabelSource | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(rawJson);
+  } catch {
+    return null;
+  }
+  const record = pickSessionRecord(data, sessionId);
+  if (!record) return null;
+  const label = typeof record.label === 'string' && record.label.trim() ? record.label.trim() : null;
+  const topic = typeof record.topic === 'string' && record.topic.trim() ? record.topic.trim() : null;
+  const cwd = typeof record.cwd === 'string' ? record.cwd : '';
+  return { label: label && isDerivedSessionName(label, cwd) ? null : label, topic };
+}
+
+/** The one session record out of either payload shape, or null when absent. */
+function pickSessionRecord(data: unknown, sessionId?: string): Record<string, unknown> | null {
+  if (Array.isArray(data)) {
+    const records = data.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object');
+    if (records.length === 0) return null;
+    // A by-id lookup normally returns exactly one row; match explicitly anyway so
+    // a wider payload can never label a tab from someone else's session.
+    if (sessionId) return records.find((r) => r.id === sessionId) ?? null;
+    return records.length === 1 ? records[0] : null;
+  }
+  if (!data || typeof data !== 'object') return null;
+  const session = (data as Record<string, unknown>).session;
+  return session && typeof session === 'object' ? (session as Record<string, unknown>) : null;
+}
+
+/**
+ * True for Claude's auto-derived `<dirname>-<n>` session name (e.g. a session in
+ * `~/src/agents-cli` named "agents-cli-55").
+ *
+ * Anchored on the session's own cwd rather than a shape like `<word>-<digits>`,
+ * which would also swallow a real ticket-style title ("RUSH-2058") and silently
+ * replace it with a summarized one.
+ */
+export function isDerivedSessionName(name: string, cwd: string): boolean {
+  const dir = cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop();
+  if (!dir) return false;
+  return new RegExp(`^${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d+$`).test(name);
+}

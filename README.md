@@ -306,7 +306,7 @@ agents sessions detach a1b2c3d4     # go headless in the background, keep workin
 agents sessions attach a1b2c3d4     # resume it interactively, right here
 ```
 
-Both are agent-agnostic -- they route through the same `agents run --resume` path (native resume for Claude/Codex, `/continue` replay for the rest). `agents sessions --active` marks each session's `presence` -- `attached` (you're watching it), `background` (running headless), or `parked` (its background run finished) -- so the menu bar and Factory show where every agent is. In the Factory extension, **Agents: Detach** (`Cmd/Ctrl+K B`) and **Agents: Attach** (`Cmd/Ctrl+K A`) do the same over the focused terminal.
+Both are agent-agnostic -- they route through the same `agents run --resume` path (native resume for Claude/Codex, `/continue` replay for the rest). `agents sessions --active` shows each session's **owner** (the human who launched it, resolved from the tailnet identity, or `-` for an unresolved local run) and its `presence` -- `attached` (you're watching it), `background` (running headless), or `parked` (its background run finished) -- so the menu bar and Factory show who is running what, and where. In the Factory extension, **Agents: Detach** (`Cmd/Ctrl+K B`) and **Agents: Attach** (`Cmd/Ctrl+K A`) do the same over the focused terminal.
 
 ---
 
@@ -445,6 +445,9 @@ agents run claude --host gpu-box                         # no prompt → interac
 agents run claude --host gpu-box --copy-creds "fix auth" # copy local runtime creds + Claude token, shred after
 agents run claude --device auto "…"                      # affinity-pick host from 14d usage (harness stays claude)
 agents run claude --host auto "…"                        # same — auto is a host value, not a harness name
+agents view kimi --device all                            # fan out across every registered device (grouped-by-OS roster)
+agents output --device all                               # per-device burn vs shipped output across the fleet
+agents view --device all --json                          # machine-readable fleet inventory
 agents hosts ps                         # list dispatched runs + terminal status
 agents hosts stop <id>                  # terminate a hung/detached run (alias: kill)
 agents logs --host gpu-box              # pick a dispatched run — concise summary by default

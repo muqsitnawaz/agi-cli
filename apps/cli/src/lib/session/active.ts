@@ -26,7 +26,8 @@ import type { CloudTaskStatus } from '../cloud/types.js';
 import { AgentManager } from '../teams/agents.js';
 import { getTerminalsDir } from '../state.js';
 import { readPidSessionEntry, listPidSessionEntries, prunePidSessionRegistry, type PidSessionEntry } from './pid-registry.js';
-import { loadHookSessionIndex, resolveHookSessionRecord, type HookSessionIndex, type HookSessionRecord } from './hook-sessions.js';
+import { readSessionActorRecord } from './actor-sidecar.js';
+import { loadHookSessionIndex, resolveHookSessionRecord, readStateSessionRecord, type HookSessionIndex, type HookSessionRecord } from './hook-sessions.js';
 import { buildClaudeLabelMap, getAgentSessionDirs } from './discover.js';
 import { buildRunNameMap } from './run-names.js';
 import { latestSessionFileForCwd } from './db.js';
@@ -42,6 +43,18 @@ import { presenceFromStore, type Presence } from './detached.js';
 import { mapBounded } from '../concurrency.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * The owner (actor id) to show for a session in `--active`. Prefers the actor
+ * recorded on the live-attribution source (the pid registry / teammate record),
+ * but falls back to the durable per-session actor sidecar — written at spawn and,
+ * unlike the pid entry, NOT overwritten by the SessionStart hook's own by-pid
+ * write. Without this fallback a real `agents run` shows no owner whenever the
+ * hook's actor-less entry wins the by-pid file (RUSH-2018 fix).
+ */
+export function resolveOwner(pidActor: string | null | undefined, sessionId: string | undefined): string | undefined {
+  return pidActor ?? (sessionId ? readSessionActorRecord(sessionId)?.actor : undefined) ?? undefined;
+}
 
 /**
  * Per-PID `lsof` probes run bounded and staggered rather than as one parallel
@@ -189,6 +202,26 @@ export interface ActiveSession {
    */
   machine?: string;
   teamName?: string;
+  /**
+   * For a teams teammate: the session id of the ORCHESTRATOR that spawned the
+   * team (the agent that ran `agents teams add`, captured from AGENTS_SESSION_ID
+   * at spawn). Lets the listing answer "which session spun up this team" and
+   * group teammates under their orchestrator. Distinct from `sessionId`, which is
+   * the teammate's OWN transcript.
+   */
+  orchestratorSessionId?: string;
+  /** Display label for the orchestrator (its topic/label), resolved when the
+   * orchestrator is itself present in the active set. Display-only. */
+  orchestratorLabel?: string;
+  /**
+   * For a teams teammate: a one-line summary of the mission it was spawned with
+   * (the `prompt` stored on the teammate record — the team's task/target), so the
+   * listing answers "what is this team working on", not just its name. Survives
+   * before the teammate has produced any transcript (a pending/staged teammate
+   * still shows its target). Distinct from `topic`, which is derived from the
+   * teammate's own transcript once it starts.
+   */
+  assignedTask?: string;
   agentId?: string;
   cloudProvider?: string;
   cloudTaskId?: string;
@@ -769,21 +802,43 @@ function quickExtractTopic(sessionFile: string): string | undefined {
   return undefined;
 }
 
+/**
+ * One-line summary of a teammate's spawn prompt — the team's task/target. Takes
+ * the first non-empty line, strips a leading `MISSION:`/`CONTEXT:`/`TASK:` label,
+ * and truncates. Exported for tests.
+ */
+export function summarizeMission(prompt: string | null | undefined): string | undefined {
+  if (!prompt) return undefined;
+  const firstLine = prompt.split('\n').map((l) => l.trim()).find(Boolean);
+  if (!firstLine) return undefined;
+  const cleaned = firstLine.replace(/^(MISSION|CONTEXT|TASK|GOAL|OBJECTIVE)\s*[:\-—]\s*/i, '').trim();
+  if (!cleaned) return undefined;
+  return cleaned.length > 80 ? `${cleaned.slice(0, 79)}…` : cleaned;
+}
+
 /** Live teams teammates. Reuses AgentManager which already polls PIDs via `kill -0`. */
 export async function listTeamsActive(): Promise<ActiveSession[]> {
   const mgr = new AgentManager();
   const running = await mgr.listRunning();
   return running.map((a): ActiveSession => {
-    const sessionId = a.parentSessionId ?? a.remoteSessionId ?? undefined;
-    const sessionFile = findSessionFileForKind(a.agentType, a.cwd ?? undefined, sessionId ?? undefined);
+    // The teammate's OWN transcript is `remoteSessionId` (captured from its first
+    // stream event). `parentSessionId` is the ORCHESTRATOR that spawned the team
+    // (AGENTS_SESSION_ID at spawn) — a link, not this teammate's id. Keying the
+    // row off the orchestrator conflated the two (a teammate showed the
+    // orchestrator's id/topic and lineage was invisible); resolve the teammate's
+    // own session for the row and expose the orchestrator separately.
+    const ownSessionId = a.remoteSessionId ?? undefined;
+    const sessionFile = findSessionFileForKind(a.agentType, a.cwd ?? undefined, ownSessionId);
     const topic = sessionFile ? quickExtractTopic(sessionFile) : undefined;
     const pidAlive = a.pid ? isPidAlive(a.pid) : true;
     const { state, tokPerSec } = computeLiveSignals(a.agentType, sessionFile, a.cwd ?? undefined, pidAlive);
+    const resolvedId = ownSessionId ?? sessionIdFromFile(sessionFile);
     return applyState({
       context: 'teams',
       kind: a.agentType,
       pid: a.pid ?? undefined,
-      sessionId: sessionId ?? sessionIdFromFile(sessionFile),
+      sessionId: resolvedId,
+      orchestratorSessionId: a.parentSessionId ?? undefined,
       cwd: a.cwd ?? undefined,
       label: a.name ?? undefined,
       topic,
@@ -792,10 +847,12 @@ export async function listTeamsActive(): Promise<ActiveSession[]> {
       startedAtMs: a.startedAt.getTime(),
       lastActivityMs: sessionFileTimes(sessionFile).mtimeMs,
       teamName: a.taskName,
+      assignedTask: summarizeMission(a.prompt),
       agentId: a.agentId,
       // The frozen actor stamped on the teammate record (RUSH-2028) — who ran
-      // this teammate, surfaced as the owner in --active (RUSH-2018).
-      owner: a.actor ?? undefined,
+      // this teammate, surfaced as the owner in --active (RUSH-2018); sidecar
+      // fallback for a teammate record predating the actor field.
+      owner: resolveOwner(a.actor, resolvedId),
     }, state, sessionFile, pidAlive);
   });
 }
@@ -853,7 +910,7 @@ export async function listTerminalsActive(): Promise<ActiveSession[]> {
       startedAtMs: t.startedAtMs,
       lastActivityMs: sessionFileTimes(sessionFile).mtimeMs,
       windowId: t.windowId,
-      owner: pidEntry?.actor ?? undefined,
+      owner: resolveOwner(pidEntry?.actor, resolvedId),
     }, state, sessionFile, pidAlive);
   });
 }
@@ -1292,7 +1349,7 @@ export async function listUnattributedActive(attributed: Set<number>): Promise<A
       startedAtMs: hookRec?.ts ?? birthtimeMs,
       lastActivityMs: mtimeMs,
       pidCount: 1 + (foldedByRoot.get(pid) ?? 0),
-      owner: entry?.actor ?? undefined,
+      owner: resolveOwner(entry?.actor, resolvedId),
     }, state, sessionFile, true));
   }
   // Housekeeping: drop registry files for pids that have since died.
@@ -1405,8 +1462,23 @@ export async function listTmuxAgentSessions(): Promise<ActiveSession[]> {
     if (!pane || !sessName) continue;
     const meta = readSessionMeta(sessName);
     const liveEntry = liveByPane.get(pane);
-    const id = resolvePaneIdentity(pane, meta, liveEntry, getHookIndex);
+    let id = resolvePaneIdentity(pane, meta, liveEntry, getHookIndex);
     if (!id) continue;
+    // RUSH-2007 Layer A: a non-Claude tmux session whose id resolved via neither the
+    // launch registry (no id minted at spawn) nor the session-tracker index (not
+    // deployed on the fleet — its dir is empty) — backfill it from the DEPLOYED
+    // hook's own per-pid record at state/sessions/<pid>.json. Targeted single-file
+    // reads on the pane leaf pid, then the registry launch pid; freshness-guarded by
+    // the launch's known start so a reused-pid graveyard file can't cross sessions.
+    // Without this the session surfaces id-less (keyed on the bare pane) and is
+    // invisible to `agents sessions focus` — the remaining RUSH-2007 discovery gap.
+    if (!id.sessionId) {
+      const panePid = parseInt(pidRaw, 10) || undefined;
+      const backfilled =
+        (panePid ? readStateSessionRecord(panePid, liveEntry?.startedAtMs)?.session_id : undefined)
+        ?? (liveEntry ? readStateSessionRecord(liveEntry.pid, liveEntry.startedAtMs)?.session_id : undefined);
+      if (backfilled) id = { ...id, sessionId: backfilled };
+    }
     // Dedupe by resolved session id; an as-yet-unresolved id (a hookless/lagging
     // split) keys on the unique pane so it still surfaces as its own row.
     const dedupKey = id.sessionId ?? pane;
@@ -1449,7 +1521,7 @@ export async function listTmuxAgentSessions(): Promise<ActiveSession[]> {
       startedAtMs: birthtimeMs,
       lastActivityMs: mtimeMs,
       provenance,
-      owner: liveEntry?.actor ?? undefined,
+      owner: resolveOwner(liveEntry?.actor, id.sessionId ?? sessionIdFromFile(sessionFile)),
     }, state, sessionFile, pidAlive));
   }
   return out;
@@ -1481,7 +1553,24 @@ export async function getActiveSessions(opts: ActiveQueryOptions = {}): Promise<
   await enrichProvenance(merged);
   await resolveOrigins(merged);
   foldPresence(merged);
+  annotateOrchestratorLabels(merged);
   return merged;
+}
+
+/**
+ * Resolve each teams row's `orchestratorLabel` from the orchestrator's own row,
+ * when that orchestrator session is itself in the active set (it usually is — the
+ * agent that ran `agents teams add` is running). Falls back to nothing, so the
+ * renderer shows the short id. Pure over the array; exported for tests.
+ */
+export function annotateOrchestratorLabels(sessions: ActiveSession[]): void {
+  const byId = new Map<string, ActiveSession>();
+  for (const s of sessions) if (s.sessionId) byId.set(s.sessionId, s);
+  for (const s of sessions) {
+    if (!s.orchestratorSessionId) continue;
+    const orch = byId.get(s.orchestratorSessionId);
+    if (orch) s.orchestratorLabel = orch.label || orch.topic || undefined;
+  }
 }
 
 /**

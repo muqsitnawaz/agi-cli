@@ -4,6 +4,11 @@
 versions, config, sessions, and cloud dispatch (Claude, Codex, Cursor,
 OpenCode, OpenClaw, Grok, Droid, …).
 
+> **New agent? Read [`docs/AGENT-CHEATSHEET.md`](docs/AGENT-CHEATSHEET.md) first.**
+> It covers the dozen concepts agents repeatedly need (DotAgents repos, version
+> homes, the two "session" meanings, capability gating, the execution path) in
+> one scannable page. Come back to this file for the full architecture map.
+
 This is the **internal architecture** map. The user-facing feature tour is
 [README.md](README.md) (pin versions, run, sessions, hosts, teams, workflows,
 plugins, browser, secrets, routines, pty). This file covers the design choices,
@@ -102,9 +107,11 @@ critical across the whole fleet worst-first; a `─── by computer ───`
 gives each device its warnings plus a compact accounts/versions line (every
 installed version + its account, provable ✓ / ✗). Single-machine `agents doctor`
 collapses to the CRITICAL section plus one `▸ <machine>` block. Severity:
-provable-logged-out / missing-hook / missing-plugin / broken-CLI are **critical**;
-drift / never-synced / version-skew / repo-behind / repo-drift / orphan /
-other-missing-kinds / **unprovable-logout** are **warnings**. The findings model,
+provable-logged-out / missing-hook / missing-plugin / broken-CLI /
+duplicate-hook-**drift** are **critical**; drift / never-synced / version-skew /
+repo-behind / repo-drift / orphan / other-missing-kinds / identical duplicate
+hooks / rc-secret exports / a blocking Windows exec policy /
+**unprovable-logout** are **warnings**. The findings model,
 builders, `remediationFor`, and the pure `renderFindings` live in
 [`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts).
 
@@ -124,6 +131,9 @@ takes ~57 rows down to ~16, and the rules are unit-pinned in
   `isolatedVersions` from `isVersionIsolated`.
 - **Orphans are one line per machine.** They are cleanup-only and
   `agents prune cleanup` fixes every version at once.
+- **Duplicate version-home hooks are one line per (agent, severity).**
+  `agents sync <agent>@<authoritative> --yes` reconciles every copy at once, and a
+  machine with five installed claudes otherwise emits two dozen identical rows.
 - **No vaguer restatement.** A version that just listed its drifted/missing
   resources gets no `sources changed since last sync` row on top, and a
   never-synced version reports one critical (`agents sync <agent>@<version>
@@ -357,6 +367,17 @@ phase builds signed artifacts directly on the home base. The script remains only
 for the narrow case of building + pulling back JUST the signed macOS artifacts from
 another Mac (no publish); it too is zero-config, targeting the same hardcoded
 `RELEASE_HOME_BASE` with no env knobs or fleet discovery.
+
+**Provisioning the `apple.com` bundle on a headless sign host.** A Linux-driven
+release offloads macOS signing to a sign host over SSH, which needs the `apple.com`
+secrets bundle *on that host*. Push it with the **file backend** —
+`agents secrets export apple.com --host <signer> --remote-backend file` (needs
+`AGENTS_SECRETS_PASSPHRASE` set locally) — **not** the default keychain backend: a
+macOS login keychain is locked under headless SSH, so a keychain-backed push lands
+the bundle metadata but no readable secret items (`secrets export --host` now
+read-back-verifies a keychain push and fails loudly if it didn't persist, pointing
+at this fix). `--device` is accepted as an alias for `--host` on the secrets remote
+commands. See [`docs/secrets.md`](docs/secrets.md) → *Pushing to a headless sign host*.
 
 **Why not CI?** The tarball bundles `dist/lib/secrets/Agents CLI.app` — a native
 keychain helper compiled with `swiftc`, codesigned (Developer ID), and notarized

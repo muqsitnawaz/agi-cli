@@ -194,6 +194,72 @@ describe('de-noise — one root cause is one line', () => {
   });
 });
 
+describe('duplicate version-home hooks', () => {
+  const copy = (version: string, active = false) => ({
+    agent: 'claude' as const, version, name: 'git-guard',
+    path: `/h/claude/${version}/hooks/git-guard.sh`, hash: version, active,
+  });
+
+  it('differing content across versions is CRITICAL and names the authoritative version', () => {
+    const findings = buildLocalFindings(localInput({
+      duplicateHooks: [{
+        agent: 'claude', name: 'git-guard', kind: 'drift',
+        authoritative: copy('2.1.219'), copies: [copy('2.1.170'), copy('2.1.219')],
+      }],
+    }));
+    const f = findings.find((x) => x.kind === 'duplicate-hook-drift');
+    expect(f?.severity).toBe('critical');
+    expect(f?.message).toBe("hook 'git-guard' differs across 2.1.170, 2.1.219 — 2.1.219 is authoritative");
+    expect(f?.remediation).toBe('agents sync claude@2.1.219 --yes');
+    expect(f?.remediation).toBe('agents sync claude@2.1.219 --yes');
+    // The row spans versions, so it renders `claude (2 versions)`, not one of them.
+    expect(f?.versions).toEqual(['2.1.170', '2.1.219']);
+    expect(f?.version).toBeUndefined();
+  });
+
+  it('byte-identical copies are a WARNING, not a critical', () => {
+    const findings = buildLocalFindings(localInput({
+      duplicateHooks: [{
+        agent: 'claude', name: 'git-guard', kind: 'duplicate',
+        authoritative: copy('2.1.219'), copies: [copy('2.1.170'), copy('2.1.219')],
+      }],
+    }));
+    const f = findings.find((x) => x.kind === 'duplicate-hook');
+    expect(f?.severity).toBe('warning');
+    expect(f?.message).toContain('(identical)');
+  });
+
+  it('many duplicated hooks on one agent collapse to ONE row — the fix is one command', () => {
+    const dups = Array.from({ length: 24 }, (_, i) => ({
+      agent: 'claude' as const, name: `hook-${i}`, kind: 'duplicate' as const,
+      authoritative: copy('2.1.219', true),
+      copies: ['2.1.170', '2.1.181', '2.1.186', '2.1.207', '2.1.219'].map((v) => copy(v)),
+    }));
+    const findings = buildLocalFindings(localInput({ duplicateHooks: dups }));
+    const rows = findings.filter((f) => f.kind === 'duplicate-hook');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].message).toBe(
+      "24 hooks duplicated (identical) across 5 versions (incl. 'hook-0', 'hook-1') — 2.1.219 is authoritative",
+    );
+    expect(rows[0].remediation).toBe('agents sync claude@2.1.219 --yes');
+  });
+
+  it('drifted and identical copies stay separate rows — different severities', () => {
+    const findings = buildLocalFindings(localInput({
+      duplicateHooks: [
+        { agent: 'claude', name: 'a', kind: 'drift', authoritative: copy('2.1.219', true), copies: [copy('2.1.170'), copy('2.1.219')] },
+        { agent: 'claude', name: 'b', kind: 'duplicate', authoritative: copy('2.1.219', true), copies: [copy('2.1.170'), copy('2.1.219')] },
+      ],
+    }));
+    expect(findings.filter((f) => f.kind === 'duplicate-hook-drift')).toHaveLength(1);
+    expect(findings.filter((f) => f.kind === 'duplicate-hook')).toHaveLength(1);
+  });
+
+  it('no duplicates → no finding', () => {
+    expect(buildLocalFindings(localInput({ duplicateHooks: [] }))).toHaveLength(0);
+  });
+});
+
 describe('rc-hygiene + exec-policy findings (restored from the pre-RUSH-2069 advisories)', () => {
   it('credential-shaped rc exports become ONE warning naming the count and two examples', () => {
     const findings = buildLocalFindings(localInput({

@@ -138,6 +138,7 @@ Fields:
 | `topic` | First user prompt (truncated) | Best headline for a session |
 | `label` | The session name — one field, several sources | Priority: agent-generated title / Claude `/rename`, else the launch handle seeded by `agents run --name <slug>` (interactive, headless, `--host`, or a teams teammate), else `null` (listing falls back to `topic`). `agents sessions <ref>` resolves against it. |
 | `tokenCount` | Parsed from usage events | `null` for agents that don't log it |
+| `model` | Parsed from transcript metadata or assistant events | `null` for harnesses that don't record it; shortened in the static flat list |
 | `costUsd` | Σ tokens × per-model price, at scan time | `null` when the model is unknown/unpriced; see `agents cost` |
 | `durationMs` | `lastTs − firstTs` over timestamped events | `null` for single-event sessions |
 | `isTeamOrigin` | Set when spawned by `agents teams` | JSONL `entrypoint: 'sdk-cli'` |
@@ -260,6 +261,21 @@ On a TTY it opens the interactive browser seeded to running-only; `--json`,
 `--waiting`, and `--no-interactive` print the static grouped view instead. Both read
 the same gather, so they always agree on what is live.
 
+**Team lineage.** A teams teammate row carries the id of the **orchestrator** that
+spawned it — the session that ran `agents teams add`, captured from
+`AGENTS_SESSION_ID` at spawn and stored as the teammate's `parentSessionId`
+(`src/lib/teams/agents.ts`). `listTeamsActive` surfaces it as `orchestratorSessionId`
+(the teammate's own transcript stays `sessionId`), and `getActiveSessions` resolves an
+`orchestratorLabel` from the orchestrator's own row when it is present in the set.
+
+Each row also carries the team's **target** — a one-line summary of the mission the
+teammate was spawned with (`summarizeMission` over the stored `prompt`), exposed as
+`assignedTask` and shown even before the teammate has produced a transcript. The row
+reads `<team> · <teammate> · by <orchestrator> · <live turn | mission>`, so one
+orchestrator running several teams stays legible (distinct `teamName`s) and each team
+says what it is *for*, not just its slug. `--active --json` carries
+`orchestratorSessionId`, `orchestratorLabel`, and `assignedTask` for programmatic use.
+
 Two properties of the running view are worth stating, because a session missing from
 it is indistinguishable from a session that isn't running:
 
@@ -304,12 +320,21 @@ Discovery is local-only — every path is rooted at `os.homedir()`, so a machine
 sees only its own transcripts. `--host` runs the query on another machine instead:
 
 ```
+# Browse another machine's sessions in the interactive picker (previews + resume)
+agents sessions --host yosemite-s1        # or --device yosemite-s1
+
 # Search another machine's sessions live (no sync, always current)
 agents sessions "auth bug" --last 3 --host yosemite-s1
 
 # Fan the same query across several machines
 agents sessions --all "deploy script" --host box-a --host box-b
 ```
+
+A **bare** `--host`/`--device <box>` listing on a TTY folds that box into the same
+interactive fleet browser as the local view — preview-rich and selectable — rather
+than the legacy per-host raw stream. The stream is still used for a `--host` *query*
+(`agents sessions "term" --host <box>`), a render/filter flag, `--json`, or a
+non-interactive caller (piped/`--no-interactive`).
 
 It works by invoking the **remote's own** `agents sessions` against its already-built
 index over SSH and streaming stdout back — `ssh -o BatchMode=yes <host> bash -lc

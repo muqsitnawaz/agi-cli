@@ -54,6 +54,8 @@ interface ExecCommandActionOptions {
   sessionId?: string;
   /** --name <slug>: durable launch handle, resolvable via `agents sessions <name>`. */
   name?: string;
+  /** --notify: post a desktop notification when a headless run finishes. */
+  notify?: boolean;
   verbose?: boolean;
   raw?: boolean;
   /** `--no-tmux` → commander sets this false (default true) to bypass the tmux wrapper. */
@@ -544,6 +546,7 @@ export function registerRunCommand(program: Command): void {
     .option('--resume [id]', 'Resume a previous conversation. Accepts a full or partial session id (prefix-matched against the index); omit the id to pick from recent sessions interactively. Resumes under the version that started the session. claude/codex resume natively; other agents replay via a /continue first message. Pair with a prompt to continue headlessly.')
     .option('--session-id <id>', 'Force a NEW conversation to use this exact session UUID (Claude only). This CREATES a session — to resume an existing one, use --resume.')
     .option('--name <slug>', 'Name the run — seeds the session label so it shows up as `<name>` in `agents sessions` and resolves by it (and `agents hosts logs <name>` for --host runs) instead of an opaque id. An agent-generated title later refines the label; your name shows until then. Optional.')
+    .option('--notify', 'Post a desktop notification when a headless run finishes. Fired by this process on exit, so it survives whatever launched the run (the menu bar dispatching it, a terminal you closed).')
     .option('--verbose', 'Show detailed execution logs')
     .option('--raw', 'Interactive runs on macOS/Linux launch inside a shared tmux session (for %pane addressing + re-attach). Pass --raw to spawn the agent directly instead. Also disabled by AGENTS_NO_TMUX=1.')
     .option('--no-tmux', 'Spawn the agent directly instead of wrapping it in the shared tmux session. Same effect as --raw / AGENTS_NO_TMUX=1. Use this to see the agent\'s full startup output when a launch is failing.')
@@ -729,6 +732,21 @@ export function registerRunCommand(program: Command): void {
         // The token commander assigned to [prompt] came from behind `--` — it is
         // a native flag, not a prompt. Run interactively.
         prompt = undefined;
+      }
+
+      // --notify: post a desktop notification when this run finishes. Armed on
+      // process exit so it covers EVERY dispatch path below (local, --host,
+      // --lease, the error path) instead of one branch. Only for headless runs
+      // — an interactive run ends in front of the person who started it.
+      if (options.notify && prompt !== undefined) {
+        const { armRunFinishNotification } = await import('../lib/run-notify.js');
+        armRunFinishNotification({
+          agent: agentSpec,
+          name: options.name,
+          prompt,
+          cwd: options.cwd ?? process.cwd(),
+          host: options.host,
+        });
       }
 
       // A trailing @ is an explicit request to choose one installed account.
@@ -1221,8 +1239,19 @@ export function registerRunCommand(program: Command): void {
           // Working directory on the host: an explicit --remote-cwd is used
           // verbatim; --cwd/--project are made portable (a local-home absolute
           // becomes `~/…` so the remote shell re-roots it at ITS home).
+          //
+          // With neither flag, mirror the LOCAL cwd's home-relative path onto
+          // the host (deriveMirroredCwd). Otherwise every host run starts in the
+          // remote `$HOME` — launch an agent from a repo and it opens with no
+          // project, and you `cd` by hand every time. The same checkout at the
+          // same home-relative path on both boxes is the normal fleet layout, so
+          // the mirror usually hits; when the host lacks that directory the run
+          // falls back to the remote home rather than failing.
           const { toRemotePortable } = await import('../lib/project-root.js');
-          const hostCwd = options.remoteCwd ?? (options.cwd ? toRemotePortable(options.cwd) : undefined);
+          const { deriveMirroredCwd } = await import('../lib/hosts/dispatch.js');
+          const explicitHostCwd = options.remoteCwd ?? (options.cwd ? toRemotePortable(options.cwd) : undefined);
+          const hostCwd = explicitHostCwd ?? deriveMirroredCwd(process.cwd());
+          const mirrorHostCwd = explicitHostCwd === undefined;
           const hostAddDirs = options.addDir.length > 0 ? options.addDir.map(toRemotePortable) : undefined;
           // `--resume [id]`: commander yields the string id, or `true` when the
           // flag is passed bare. A bare resume needs the interactive picker,
@@ -1378,6 +1407,7 @@ export function registerRunCommand(program: Command): void {
               yes: options.yes,
               acp: options.acp,
               remoteCwd: hostCwd,
+              mirrorCwd: mirrorHostCwd,
               sessionId: hostSessionId,
               name: options.name,
               resume: resumeId,
@@ -1466,6 +1496,7 @@ export function registerRunCommand(program: Command): void {
             acp: options.acp,
             autoSecrets: options.autoSecrets,
             remoteCwd: hostCwd,
+            mirrorCwd: mirrorHostCwd,
             name: options.name,
             resume: resumeId,
             sessionId: options.sessionId,

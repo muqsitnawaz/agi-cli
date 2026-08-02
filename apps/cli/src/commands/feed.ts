@@ -18,8 +18,26 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import { ensureFeedPublishHook, listAskStats, listBlocks, recordNotified, type OpenBlock } from '../lib/feed.js';
-import { ensureActivityLogHook, readRecentActivity, formatActivityLine } from '../lib/activity.js';
+import {
+  ensureActivityLogHook,
+  readRecentActivity,
+  formatActivityLine,
+  formatProgressUpdate,
+  mergeActivityEvents,
+  parseActivityPayload,
+  type ActivityEvent,
+  type EnrichedActivityEvent,
+} from '../lib/activity.js';
 import { postFeedStatus } from '../lib/feed-post.js';
+import {
+  parseFeedPostLevel,
+  planFeedBroadcast,
+  runFeedBroadcast,
+  type FeedPostLevel,
+  type SinkOutcome,
+} from '../lib/feed-broadcast.js';
+import { getSessionById } from '../lib/session/db.js';
+import { readMeta } from '../lib/state.js';
 import {
   enrichBlocksFromSessions,
   groupBlocksByOutcome,
@@ -285,6 +303,7 @@ export function registerFeedCommand(program: Command): void {
     .command('feed')
     .description('Open blocks (needs you) + agent status posts (feed post)')
     .option('--json', 'Output as JSON (each block stamped with its outcome + ask class)')
+    .option('--filter <view>', 'What to show: needs (default) · updates · all', 'needs')
     .option('--flat', 'List one block per agent instead of grouping by outcome')
     .option('--all', 'Include stalls/FYIs that policy would suppress (default: hide them)')
     .option('--local', 'Only this machine -- skip the cross-machine SSH fan-out')
@@ -299,41 +318,58 @@ export function registerFeedCommand(program: Command): void {
     .description('Post a status update to the fleet activity stream (for agents)')
     .argument('<text...>', 'What just happened — one short human line')
     .option('--session <id>', 'Session id escape hatch (default: auto from env / pid registry)')
+    .option('--attach <path-or-url...>', 'Attach an artifact (local file or URL); repeatable')
+    .option('--level <level>', 'How loudly to broadcast: milestone (default) or important. Configured sinks with minLevel: important only fire on the latter.', 'milestone')
     .option('--json', 'Emit the written event as JSON')
     .addHelpText('after', `
 Examples:
   # Inside an agents-cli run (session identity is already in the env):
   agents feed post "CHANGELOG pushed; watching CI and mac-mini E2E"
+  agents feed post "cover render ready" --attach ./out/cover.png
   agents feed post "ready for review" --json
+
+  # Worth interrupting someone over — reaches sinks gated on minLevel: important:
+  agents feed post "release blocked: npm token expired" --level important
 
   # Outside a run, pass the session explicitly:
   agents feed post "manual note" --session 00998b0e-2d15-4d2f-a58b-974a886c9b47
 
 Identity (session, agent, host, runtime, pid, launchId) is stamped automatically.
-Domain facts (tickets, PRs) are not CLI flags — join them on the session at read time.
+Domain facts (tickets, PRs) are not CLI flags — the ticket is joined from the
+session index at post time, so a broadcast sink can comment on it without the
+agent having to remember it.
+
+Configure where a post is mirrored under feed.broadcast in agents.yaml — see
+docs/06-observability.md.
 `)
     .action((
       textParts: string[],
-      opts: { session?: string; json?: boolean },
-      cmd?: { opts: () => { session?: string; json?: boolean }; parent?: { opts: () => { json?: boolean } } },
+      opts: { session?: string; attach?: string[]; level?: string; json?: boolean },
+      cmd?: { opts: () => { session?: string; attach?: string[]; level?: string; json?: boolean }; parent?: { opts: () => { json?: boolean } } },
     ) => {
       // Parent `feed` also declares `--json` (for the list view). Commander
       // binds the flag on the parent, so a `feed post … --json` lands on
       // parent.opts().json — not the child. Read both.
       const flags = {
         session: opts?.session ?? cmd?.opts?.()?.session,
+        attach: opts?.attach ?? cmd?.opts?.()?.attach,
+        level: opts?.level ?? cmd?.opts?.()?.level,
         json: Boolean(opts?.json ?? cmd?.opts?.()?.json ?? cmd?.parent?.opts?.()?.json),
       };
       try {
+        const level = parseFeedPostLevel(flags.level);
         const { event } = postFeedStatus({
           text: Array.isArray(textParts) ? textParts.join(' ') : String(textParts ?? ''),
           sessionId: flags.session,
+          attach: flags.attach,
         });
+        const outcomes = broadcastPostedEvent(event, level);
         if (flags.json) {
-          console.log(JSON.stringify(event, null, 2));
+          console.log(JSON.stringify(outcomes.length ? { ...event, broadcast: outcomes } : event, null, 2));
           return;
         }
-        console.log(formatActivityLine(event, { showHost: true }).trimStart());
+        console.log(formatProgressUpdate(event));
+        reportBroadcast(outcomes);
       } catch (err) {
         console.error(chalk.red((err as Error).message));
         process.exitCode = 1;
@@ -342,6 +378,7 @@ Domain facts (tickets, PRs) are not CLI flags — join them on the session at re
 
   feed.action(async (opts: {
       json?: boolean;
+      filter?: string;
       flat?: boolean;
       all?: boolean;
       local?: boolean;
@@ -353,6 +390,7 @@ Domain facts (tickets, PRs) are not CLI flags — join them on the session at re
     }) => {
       if (opts.device?.length) opts.host = [...(opts.host ?? []), ...opts.device];
       const self = machineId();
+      const filter = resolveFeedFilter(opts.filter);
       const includeLocal = shouldIncludeLocalFeed(opts.host, self);
       const setupWarnings: string[] = [];
       if (includeLocal) {
@@ -376,6 +414,42 @@ Domain facts (tickets, PRs) are not CLI flags — join them on the session at re
             }
           }
         }
+      }
+
+      // Trailing lane under the block views: `--filter all` appends the same
+      // fleet-wide updates section, anything else the compact local lane.
+      const renderTrailingActivity = async (): Promise<void> => {
+        if (filter === 'all') {
+          console.log();
+          renderUpdatesView(await gatherStatusPosts({
+            limit: UPDATES_VIEW_LIMIT, hosts: opts.host, local: opts.local, includeLocal, self,
+          }));
+          return;
+        }
+        if (includeLocal) renderActivityLane();
+      };
+
+      // Updates view: deliberate progress posts only (blocks are decisions, not
+      // announcements). Short-circuits the block pipeline — no dispatch policy —
+      // but fans out like the block view, because a post lands on whichever box
+      // ran the agent.
+      if (filter === 'updates') {
+        for (const warning of setupWarnings) {
+          console.error(chalk.yellow(`Feed hook setup warning: ${warning}`));
+        }
+        const updates = await gatherStatusPosts({
+          limit: opts.json ? UPDATES_JSON_LIMIT : UPDATES_VIEW_LIMIT,
+          hosts: opts.host,
+          local: opts.local,
+          includeLocal,
+          self,
+        });
+        if (opts.json) {
+          console.log(JSON.stringify(updates, null, 2));
+          return;
+        }
+        renderUpdatesView(updates);
+        return;
       }
 
       // Active sessions feed both the GC sweep and outcome enrichment (ticket/PR).
@@ -496,7 +570,7 @@ Domain facts (tickets, PRs) are not CLI flags — join them on the session at re
 
       if (blocks.length === 0) {
         console.log(chalk.gray(digest ? 'No open blocks after stall suppression.' : 'No open blocks.'));
-        if (includeLocal) renderActivityLane();
+        await renderTrailingActivity();
         return;
       }
 
@@ -522,20 +596,156 @@ Domain facts (tickets, PRs) are not CLI flags — join them on the session at re
         return br - ar;
       });
       for (const g of groups) renderOutcomeGroup(g, self);
-      if (includeLocal) renderActivityLane();
+      await renderTrailingActivity();
     });
 }
 
 /**
- * Print a compact "recent activity" lane under the feed: the last few milestone
- * events (plans, PRs, worktrees, sub-agents) from the append-only activity logs.
- * Read-only tail of the logs -- no transcript re-parsing. Silent when empty.
+ * Mirror a written post to the configured sinks (`feed.broadcast` in
+ * agents.yaml). The ticket is JOINED from the session index rather than asked
+ * for as a flag — it is a domain fact about the session, and an agent that has
+ * to remember a `--ticket` argument is an agent that will forget it. Returns the
+ * per-sink outcomes; an empty array means nothing is configured, which is the
+ * default and is not a failure.
  */
-function renderActivityLane(): void {
-  const events = readRecentActivity({ sinceMs: Date.now() - 24 * 60 * 60 * 1000, limit: 6 })
-    .filter((e) => e.tier === 'milestone');
+function broadcastPostedEvent(event: ActivityEvent, level: FeedPostLevel): SinkOutcome[] {
+  const config = readMeta().feed?.broadcast;
+  if (!config || Object.keys(config).length === 0) return [];
+  const ticket = getSessionById(event.sessionId)?.ticketId;
+  const planned = planFeedBroadcast(config, {
+    text: event.detail ?? '',
+    level,
+    ticket,
+    project: event.project,
+    agent: event.agent,
+    host: event.host,
+    session: event.sessionId,
+    links: (event.attachments ?? [])
+      .map((a) => a.href)
+      .filter((href) => /^https?:\/\//i.test(href)),
+  });
+  return runFeedBroadcast(planned);
+}
+
+/** One line per sink that ran. Silent when nothing is configured. */
+function reportBroadcast(outcomes: SinkOutcome[]): void {
+  for (const o of outcomes) {
+    if (o.ok) console.log(chalk.gray(`  → ${o.name}`));
+    else console.error(chalk.yellow(`  → ${o.name} failed: ${o.error}`));
+  }
+}
+
+/** Feed view selector (RUSH-2015): decisions, progress, or both. */
+export type FeedFilter = 'needs' | 'updates' | 'all';
+
+/** Normalize a raw --filter value; unknown/empty falls back to the default. */
+export function resolveFeedFilter(raw: string | undefined): FeedFilter {
+  const v = (raw ?? '').trim().toLowerCase();
+  if (v === 'updates' || v === 'update') return 'updates';
+  if (v === 'all') return 'all';
+  return 'needs';
+}
+
+/**
+ * Render one activity event in the lane: deliberate progress posts
+ * (`status.posted`) use the rich multi-line {@link formatProgressUpdate}; hook
+ * milestones (PR, commit, …) keep the compact {@link formatActivityLine}.
+ */
+function renderActivityEntry(ev: ActivityEvent): void {
+  if (ev.event === 'status.posted') {
+    console.log(formatProgressUpdate(ev));
+  } else {
+    console.log(formatActivityLine(ev, { showHost: true }));
+  }
+}
+
+/** How far back the updates view looks for deliberate progress posts. */
+const UPDATES_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/** Posts kept per machine in the rendered view / the `--json` payload. */
+const UPDATES_VIEW_LIMIT = 30;
+const UPDATES_JSON_LIMIT = 100;
+
+/**
+ * The most recent `limit` deliberate progress posts on THIS machine, newest
+ * first. The event filter is pushed into the reader so `limit` counts posts —
+ * slicing first and filtering after returned an empty view on a busy box, where
+ * routine `file.edited` hook events fill the whole slice.
+ */
+function readStatusPosts(limit: number): ActivityEvent[] {
+  return readRecentActivity({
+    sinceMs: Date.now() - UPDATES_WINDOW_MS,
+    limit,
+    events: ['status.posted'],
+  });
+}
+
+/**
+ * Progress posts across the fleet, newest first. An agent posts on whichever
+ * box it runs on, so a local-only read shows the operator a fraction of what
+ * the fleet reported. Peers are dialed with the same SSH fan-out the block view
+ * uses; `--local` (or the no-fanout env guard on a peer) keeps it to this box.
+ */
+async function gatherStatusPosts(opts: {
+  limit: number;
+  hosts?: string[];
+  local?: boolean;
+  includeLocal: boolean;
+  self: string;
+}): Promise<EnrichedActivityEvent[]> {
+  const local: EnrichedActivityEvent[] = opts.includeLocal ? readStatusPosts(opts.limit) : [];
+  const forceLocal = opts.local === true || process.env[FEED_NO_FANOUT_ENV] === '1';
+  if (forceLocal) return local;
+  const remoteHosts = opts.hosts?.length ? remoteFeedHostsToDial(opts.hosts, opts.self) : undefined;
+  if (opts.hosts?.length && (!remoteHosts || remoteHosts.length === 0)) return local;
+  const remote = await gatherRemoteAgentsJson({
+    args: ['feed', '--filter', 'updates', '--json'],
+    noFanoutEnv: FEED_NO_FANOUT_ENV,
+    hosts: remoteHosts,
+    parse: parseActivityPayload,
+  });
+  return mergeActivityEvents(local, remote.items).slice(0, opts.limit);
+}
+
+/**
+ * Render the **Updates** view: deliberate progress posts only (`status.posted`),
+ * recency-ordered, with rich identity chips. Pure `file.edited` / git-hook noise
+ * is excluded so operators see announcements, not tool churn.
+ */
+function renderUpdatesView(updates: ActivityEvent[]): void {
+  const hosts = new Set(updates.map((e) => e.host).filter(Boolean));
+  console.log(
+    masthead({
+      title: 'updates',
+      accent: 'cyan',
+      host: hosts.size > 1 ? `${hosts.size} machines` : (updates[0]?.host ?? machineId()),
+      right: `${updates.length} post${updates.length === 1 ? '' : 's'}`,
+    }),
+  );
+  console.log();
+  if (updates.length === 0) {
+    console.log(chalk.gray('  No progress updates yet. Agents post them with `agents feed post "…"`.'));
+    return;
+  }
+  for (const ev of updates) {
+    console.log(formatProgressUpdate(ev));
+    console.log();
+  }
+}
+
+/**
+ * Print a compact "recent activity" lane under the feed: the last few milestone
+ * events (plans, PRs, worktrees, sub-agents, progress posts) from the append-only
+ * activity logs. Read-only tail of the logs -- no transcript re-parsing. Silent
+ * when empty.
+ */
+function renderActivityLane(limit = 6): void {
+  const events = readRecentActivity({
+    sinceMs: Date.now() - 24 * 60 * 60 * 1000,
+    limit,
+    tier: 'milestone',
+  });
   if (events.length === 0) return;
   console.log(chalk.bold('\n  recent activity'));
-  for (const ev of events) console.log(formatActivityLine(ev, { showHost: true }));
+  for (const ev of events) renderActivityEntry(ev);
   console.log(chalk.gray('  → agents activity  for the full stream'));
 }

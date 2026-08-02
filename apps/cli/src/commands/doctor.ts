@@ -62,7 +62,7 @@ import {
   type ResourceDiff,
   type VersionResourceReport,
 } from '../lib/doctor-diff.js';
-import { checkVersionHookWiring, registerHooksToSettings, type HookWiringReport } from '../lib/hooks.js';
+import { checkVersionHookWiring, inspectDuplicateVersionHooks, registerHooksToSettings, type DuplicateVersionHook, type HookWiringReport } from '../lib/hooks.js';
 import { isVersionIsolated } from '../lib/versions.js';
 import { computeDrift, checkSyncStatus, countOrphans, computeSourceBehind, type SyncStatusRow, type OrphanRow } from '../lib/drift.js';
 import { readAuthHealthCache, summarizeHostAuth } from '../lib/auth-health.js';
@@ -348,6 +348,7 @@ async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
         reports: localReports,
         signIn: r.inventory?.signIn ?? {},
         cliMissing: localCliMissing,
+        duplicateHooks: inspectDuplicateVersionHooks(cwd),
         rcSecrets: scanUserRcFiles(),
         execPolicy: process.platform === 'win32'
           ? { platform: process.platform, policy: getEffectiveExecutionPolicy() }
@@ -784,9 +785,28 @@ export function computeOverviewHealth(
   syncRows: SyncStatusRow[],
   orphanRows: OrphanRow[],
   repoBehindMarkers: FetchStatusMarker[],
+  duplicateHooks: DuplicateVersionHook[] = [],
 ): DoctorVerdict {
   const issues: VerdictIssue[] = [];
   const pretty = (agent: string, version: string) => `${AGENT_NAMES[agent] || agent}@${version}`;
+
+  // critical/warning: same hook resource materialized in several version homes.
+  // Different content is more severe because a stale copy can disagree with
+  // the active gate; byte-identical copies are noise and duplicate runtime cost.
+  for (const finding of duplicateHooks) {
+    const versions = finding.copies.map((copy) => copy.version).join(', ');
+    const active = finding.authoritative.version;
+    const drift = finding.kind === 'drift';
+    issues.push({
+      severity: drift ? 'critical' : 'warning',
+      category: drift ? 'duplicate-hook-drift' : 'duplicate-hook',
+      subject: `${finding.agent}/${finding.name}`,
+      impact: `${drift ? 'different content' : 'identical content'} across versions ${versions}; ${active} is authoritative`,
+      fix: `agents sync ${finding.agent}@${active} --yes`,
+      text: `${finding.name} ${drift ? 'drift' : 'duplicated'} across ${versions}`,
+      color: drift ? 'red' : 'yellow',
+    });
+  }
 
   // critical: unwired hooks / broken settings.json per version
   for (const row of syncRows) {
@@ -1405,6 +1425,7 @@ export function registerDoctorCommand(program: Command): void {
         // criticals. Collected once (async: it parses each version's account).
         const inventory = await collectLocalFleetInventory(cwd);
         const localName = machineId();
+        const duplicateHooks = inspectDuplicateVersionHooks(cwd);
 
         // Legacy account-global sign-in map, kept for `--json` back-compat
         // (ssh.ts RemoteDoctorJson / menubar read `signIn`). File-based, no home.
@@ -1450,6 +1471,7 @@ export function registerDoctorCommand(program: Command): void {
           reports,
           signIn: inventory.signIn ?? {},
           cliMissing,
+          duplicateHooks,
           rcSecrets: scanUserRcFiles(),
           // getEffectiveExecutionPolicy spawns powershell — a doomed process on
           // POSIX, where the advisory never applies. Probe only on Windows.
@@ -1472,7 +1494,8 @@ export function registerDoctorCommand(program: Command): void {
             // Triaged overview health — severity/category/subject/impact/fix per
             // finding, aggregated across versions. Additive; existing consumers
             // reading `sync`/`orphans`/`repos` are unaffected.
-            health: computeOverviewHealth(syncRows, orphanRows, repoBehindMarkers),
+            health: computeOverviewHealth(syncRows, orphanRows, repoBehindMarkers, duplicateHooks),
+            duplicateHooks,
             // Prioritized RUSH-2069 findings (critical/warning, per-version, with
             // remediation). Additive alongside the legacy fields above.
             findings,
@@ -1510,6 +1533,12 @@ export function registerDoctorCommand(program: Command): void {
         const header = `${chalk.gray('agents doctor ·')} ${chalk.hex('#a3e635')(localName)}${chalk.gray(`  ${getCliVersion()}`)}`;
         for (const line of renderFindings(findings, accounts, { fleet: false, baseline: localName, header })) {
           console.log(line);
+        }
+        // Point at the interactive reconcile when anything is out of sync — each
+        // finding carries its own fix, but `agents status` is the one place that
+        // reviews and applies them together (opt-in, never auto-fires here).
+        if (syncRows.some((r) => r.status !== 'fresh' || (r.unwiredHooks ?? 0) > 0) || repoBehindMarkers.some((m) => m.behind > 0)) {
+          console.log(chalk.gray('\nRun `agents status` to review and sync what has drifted.'));
         }
         return;
       }

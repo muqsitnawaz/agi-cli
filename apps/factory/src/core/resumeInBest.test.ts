@@ -6,6 +6,8 @@ import {
   sessionUsedPercent,
   inlineContinueInstructions,
   buildLaunchCommand,
+  buildHostLaunchCommand,
+  rotatableVersionOf,
   buildResumeInput,
   isVersionStillUsable,
   AgentsViewJsonAgent,
@@ -294,5 +296,62 @@ describe('sessionUsedPercent', () => {
     expect(sessionUsedPercent(makeVersion({
       windows: [{ key: 'week', usedPercent: 5, resetsAt: null }]
     }))).toBe(100);
+  });
+});
+
+describe('rotatableVersionOf', () => {
+  test('uses the pinned version when the launch pinned one', () => {
+    expect(rotatableVersionOf({ agentType: 'claude', version: '2.1.113' })).toBe('2.1.113');
+  });
+
+  test('falls back to the version observed running — the reason the gate went dead', () => {
+    // Launches stopped pinning (balanced rotation picks the account), so a gate
+    // that read only `version` skipped every terminal and an exhausted agent
+    // just sat there. The running version is the one whose quota matters.
+    expect(rotatableVersionOf({ agentType: 'claude', statusVersion: '2.1.187' })).toBe('2.1.187');
+  });
+
+  test('prefers the pin over the observed version when both are known', () => {
+    expect(
+      rotatableVersionOf({ agentType: 'claude', version: '2.1.113', statusVersion: '2.1.187' }),
+    ).toBe('2.1.113');
+  });
+
+  test('declines a terminal whose version is unknown either way', () => {
+    expect(rotatableVersionOf({ agentType: 'claude' })).toBeUndefined();
+    expect(rotatableVersionOf({ agentType: 'claude', version: '', statusVersion: '' })).toBeUndefined();
+  });
+
+  test('declines every non-Claude harness — only Claude can swap accounts mid-session', () => {
+    expect(rotatableVersionOf({ agentType: 'codex', version: '0.124.0' })).toBeUndefined();
+    expect(rotatableVersionOf({ agentType: 'gemini', statusVersion: '1.2.3' })).toBeUndefined();
+    expect(rotatableVersionOf({})).toBeUndefined();
+  });
+});
+
+describe('buildHostLaunchCommand', () => {
+  test('relaunches on the device instead of quietly moving the work to this box', () => {
+    expect(buildHostLaunchCommand('claude', '2.1.187', 'yosemite-s0', 'new-session-id')).toBe(
+      "agents run claude@2.1.187 --interactive --host 'yosemite-s0' --session-id new-session-id",
+    );
+  });
+
+  test('omits --session-id for a harness that coins its own id', () => {
+    expect(buildHostLaunchCommand('codex', '0.124.0', 'zion', 'ignored')).toBe(
+      "agents run codex@0.124.0 --interactive --host 'zion'",
+    );
+  });
+
+  test('omits --session-id when there is none to pin', () => {
+    expect(buildHostLaunchCommand('claude', '2.1.187', 'zion', null)).toBe(
+      "agents run claude@2.1.187 --interactive --host 'zion'",
+    );
+  });
+
+  test('quotes a device name so it cannot break out of the command', () => {
+    const hostile = "a'; echo pwned; #";
+    expect(buildHostLaunchCommand('claude', '2.1.187', hostile, null)).toBe(
+      `agents run claude@2.1.187 --interactive --host 'a'\\''; echo pwned; #'`,
+    );
   });
 });

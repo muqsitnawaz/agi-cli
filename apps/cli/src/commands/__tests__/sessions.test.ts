@@ -6,7 +6,7 @@ import * as crypto from 'crypto';
 import { spawnSync } from 'child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { buildResumeCommand, resumeSpawnInvocation, resolveSessionQuery } from '../sessions.js';
+import { buildResumeCommand, resumeSpawnInvocation, resolveSessionQuery, buildSessionDescription } from '../sessions.js';
 import { needsWindowsShell, composeWin32CommandLine } from '../../lib/platform/index.js';
 import type { SessionMeta } from '../../lib/session/types.js';
 
@@ -958,7 +958,11 @@ describe('resolveSessionQuery id-vs-search resolution', () => {
   // another machine); the pool holds an unrelated session whose topic merely
   // quotes that id — the exact shape that made `sessions <uuid>` render the wrong
   // transcript and advise "Pass a longer ID" for an already-complete id.
-  const wanted = 'd3470b57-2af6-4c11-b1de-3fab94f43603';
+  // Synthetic id that cannot exist in any real session DB: a complete id absent
+  // from the pool now also consults the on-disk index (findSessionsById), so a
+  // REAL id here would resolve from the developer's own history and make these
+  // tests machine-specific (they'd fail wherever that session exists).
+  const wanted = '00000000-0000-4000-8000-000000000042';
   const decoy = meta({
     id: 'ffa1f432-1a9e-4a81-8e93-e70aa8df1c95',
     topic: `Resume previous work: ${wanted}`,
@@ -980,7 +984,7 @@ describe('resolveSessionQuery id-vs-search resolution', () => {
 
   it('keeps short-id prefix lookup working', () => {
     const real = meta({ id: wanted, topic: 'Improve session display' });
-    const r = resolveSessionQuery([real], 'd3470b57');
+    const r = resolveSessionQuery([real], '00000000');
     expect(r.matches.map(s => s.id)).toEqual([wanted]);
     expect(r.byId).toBe(true);
     expect(r.completeId).toBe(false);
@@ -1022,5 +1026,60 @@ describe('resolveSessionQuery id-vs-search resolution', () => {
     const r = resolveSessionQuery([mentions], ses);
     expect(r.completeId).toBe(true);
     expect(r.matches.map(s => s.id)).not.toContain(mentions.id);
+  });
+});
+
+describe('buildSessionDescription — team lineage', () => {
+  it('shows "by <orchestrator label>" for a teammate with a resolved orchestrator', () => {
+    const desc = buildSessionDescription({
+      context: 'teams', kind: 'claude', status: 'working',
+      teamName: 'my-feature', orchestratorLabel: 'refactor auth', label: 'auth',
+    } as any);
+    expect(desc).toContain('my-feature');
+    expect(desc).toContain('by refactor auth');
+  });
+
+  it('falls back to the orchestrator short id when no label resolved', () => {
+    const desc = buildSessionDescription({
+      context: 'teams', kind: 'claude', status: 'working',
+      teamName: 't', orchestratorSessionId: 'abcd1234efgh',
+    } as any);
+    expect(desc).toContain('by abcd1234'); // first 8 chars
+  });
+
+  it('omits the "by" clause when there is no orchestrator link', () => {
+    const desc = buildSessionDescription({
+      context: 'teams', kind: 'claude', status: 'working', teamName: 't', label: 'x',
+    } as any);
+    expect(desc).not.toContain('by ');
+  });
+});
+
+describe('buildSessionDescription — team target + teammate', () => {
+  it('shows team, teammate, orchestrator, and the assigned mission', () => {
+    const desc = buildSessionDescription({
+      context: 'teams', kind: 'claude', status: 'working',
+      teamName: 'session-ship', label: 'cli-ids', orchestratorLabel: 'ship the CLI',
+      assignedTask: 'Make short + full session ids resolve everywhere',
+    } as any);
+    expect(desc).toContain('session-ship');
+    expect(desc).toContain('cli-ids');
+    expect(desc).toContain('by ship the CLI');
+    expect(desc).toContain('Make short + full session ids resolve everywhere');
+  });
+  it('prefers the live preview over the assigned mission once working', () => {
+    const desc = buildSessionDescription({
+      context: 'teams', kind: 'claude', status: 'working',
+      teamName: 't', assignedTask: 'the mission', preview: 'editing usage.ts',
+    } as any);
+    expect(desc).toContain('editing usage.ts');
+    expect(desc).not.toContain('the mission');
+  });
+  it('shows the assigned mission for a teammate with no transcript yet (pending)', () => {
+    const desc = buildSessionDescription({
+      context: 'teams', kind: 'claude', status: 'pending',
+      teamName: 't', assignedTask: 'wire up the auth flow',
+    } as any);
+    expect(desc).toContain('wire up the auth flow');
   });
 });

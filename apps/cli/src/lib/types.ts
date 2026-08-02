@@ -7,6 +7,7 @@
  */
 
 import type { CloudProviderId } from './cloud/types.js';
+import type { FeedBroadcastConfig } from './feed-broadcast.js';
 
 /** Unique identifier for a current or legacy AI coding agent. */
 export type AgentId = 'claude' | 'codex' | 'gemini' | 'cursor' | 'opencode' | 'openclaw' | 'copilot' | 'amp' | 'kiro' | 'goose' | 'antigravity' | 'grok' | 'kimi' | 'droid' | 'hermes';
@@ -812,6 +813,9 @@ export interface Meta {
    * passing `--durable` per unlock; off means the secure split default (survive
    * upgrade/restart, re-lock on sleep). */
   secrets?: {
+    /** Default storage backend used when `agents secrets create/import` create a
+     * new bundle without `--backend` or `--synced`. */
+    backend?: 'keychain' | 'file' | 'vault';
     /** Default prompt policy. `hold` (the default) holds a bundle for
      * `agent.holdMs`; `daily`/`session` are accepted aliases kept so an existing
      * agents.yaml keeps working. See SecretsPolicy in lib/secrets/bundles.ts. */
@@ -824,6 +828,15 @@ export interface Meta {
   };
   /** Spend guardrails (issue #346). User-global caps; project agents.yaml overrides. */
   budget?: BudgetConfig;
+  /**
+   * `agents feed post` fan-out. `broadcast` maps a sink name to the argv template
+   * run for each post, so mirroring to a tracker or a messaging CLI is the
+   * operator's config rather than an integration compiled into this CLI. See
+   * lib/feed-broadcast.ts and docs/06-observability.md.
+   */
+  feed?: {
+    broadcast?: FeedBroadcastConfig;
+  };
   beta?: {
     enabled?: BetaFeatureName[];
   };
@@ -998,7 +1011,7 @@ export interface BrowserProfileConfig {
   logHost?: string;
 }
 
-/** Options controlling which agents and resources are synced during `agents repo refresh` / `agents use`. */
+/** Options controlling which agents and resources are synced during `agents sync` / `agents use`. */
 export interface SyncOptions {
   agents?: AgentId[];
   yes?: boolean;

@@ -18,6 +18,8 @@ import {
   isStaleSession,
   filterStaleSessions,
   sessionLastActivityMs,
+  parseSessionLabelSource,
+  isDerivedSessionName,
   STALE_SESSION_THRESHOLD_MS,
   type RemoteSession,
   type RawActiveSession,
@@ -819,5 +821,112 @@ describe('buildRemoteFocusCommand — attach a remote session over SSH', () => {
     expect(cmd).not.toContain("a'; echo");
     // ...and the escaped-quote sequence ('\'') is what appears instead.
     expect(cmd).toContain(`'\\''`);
+  });
+});
+
+describe('parseSessionLabelSource', () => {
+  // A tab whose agent runs on another machine has no local transcript; this is
+  // the parse of `agents sessions <id> --host <name> --json` that lets it be
+  // labelled at all.
+  const record = (session: Record<string, unknown>) => JSON.stringify({ session, events: [] });
+
+  test('pulls the persisted name and the first message off the record', () => {
+    const parsed = parseSessionLabelSource(record({
+      id: 'abc', cwd: '/home/muqsit/src/agents-cli', label: 'Fix Fleet Login', topic: 'fix the fleet login',
+    }));
+    expect(parsed).toEqual({ label: 'Fix Fleet Login', topic: 'fix the fleet login' });
+  });
+
+  test('drops Claude derived <dirname>-<n> name so the caller summarizes instead', () => {
+    const parsed = parseSessionLabelSource(record({
+      cwd: '/home/muqsit/src/agents-cli', label: 'agents-cli-55', topic: 'add a host picker',
+    }));
+    expect(parsed).toEqual({ label: null, topic: 'add a host picker' });
+  });
+
+  test('keeps a ticket-style title that only LOOKS derived', () => {
+    // "RUSH-2058" matches <word>-<digits>, but it is not this session's dirname,
+    // so it is a real title and must survive.
+    const parsed = parseSessionLabelSource(record({
+      cwd: '/home/muqsit/src/agents-cli', label: 'RUSH-2058', topic: 'fork the session',
+    }));
+    expect(parsed?.label).toBe('RUSH-2058');
+  });
+
+  test('reports missing fields as null rather than empty strings', () => {
+    expect(parseSessionLabelSource(record({ cwd: '/x' }))).toEqual({ label: null, topic: null });
+    expect(parseSessionLabelSource(record({ cwd: '/x', label: '   ', topic: '' }))).toEqual({ label: null, topic: null });
+  });
+
+  test('returns null for output that is not a session record', () => {
+    expect(parseSessionLabelSource('not json')).toBeNull();
+    expect(parseSessionLabelSource('{}')).toBeNull();
+    expect(parseSessionLabelSource('[]')).toBeNull();
+  });
+});
+
+describe('isDerivedSessionName', () => {
+  test('matches only <cwd basename>-<digits>', () => {
+    expect(isDerivedSessionName('agents-cli-55', '/home/muqsit/src/agents-cli')).toBe(true);
+    expect(isDerivedSessionName('agents-cli-55', '/home/muqsit/src/agents-cli/')).toBe(true);
+    expect(isDerivedSessionName('agents-cli', '/home/muqsit/src/agents-cli')).toBe(false);
+    expect(isDerivedSessionName('other-55', '/home/muqsit/src/agents-cli')).toBe(false);
+  });
+
+  test('is false when the cwd is unknown', () => {
+    expect(isDerivedSessionName('agents-cli-55', '')).toBe(false);
+  });
+});
+
+describe('parseSessionLabelSource — the REMOTE payload shape', () => {
+  // Captured from a real `agents sessions <id> --host yosemite-s0 --json` run,
+  // not hand-written. The first cut of this parser only understood the LOCAL
+  // `{ session, events }` shape and returned null for every offloaded tab — the
+  // exact case it exists to serve — because the fixtures were written from the
+  // local shape instead of from the wire.
+  const remoteRaw = fs.readFileSync(
+    path.join(__dirname, 'testdata', 'sessions-by-id-remote.json'),
+    'utf-8',
+  );
+
+  test('is a flat ARRAY on the wire, not a { session } envelope', () => {
+    const parsed = JSON.parse(remoteRaw);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed[0].session).toBeUndefined();
+    expect(typeof parsed[0].id).toBe('string');
+  });
+
+  test('reads the label inputs straight off the real remote payload', () => {
+    const parsed = parseSessionLabelSource(remoteRaw, 'e2f20244-fbb7-413a-8333-aa1b692851bc');
+    expect(parsed).not.toBeNull();
+    expect(parsed!.topic).toBe('Reply with exactly: OK');
+  });
+
+  test('still reads the LOCAL { session } envelope', () => {
+    const local = JSON.stringify({
+      session: { id: 'abc', cwd: '/home/muqsit/src/x', label: 'Fix Fleet Login', topic: 'fix login' },
+      events: [],
+    });
+    expect(parseSessionLabelSource(local, 'abc')).toEqual({ label: 'Fix Fleet Login', topic: 'fix login' });
+  });
+
+  test('never labels a tab from a different session in a multi-record payload', () => {
+    const many = JSON.stringify([
+      { id: 'other', cwd: '/x', topic: 'someone elses work' },
+      { id: 'mine', cwd: '/x', topic: 'my work' },
+    ]);
+    expect(parseSessionLabelSource(many, 'mine')!.topic).toBe('my work');
+    expect(parseSessionLabelSource(many, 'absent')).toBeNull();
+    // Ambiguous with no id to disambiguate: refuse rather than guess.
+    expect(parseSessionLabelSource(many)).toBeNull();
+  });
+
+  test('a single-record array needs no id', () => {
+    const one = JSON.stringify([{ id: 'solo', cwd: '/x', topic: 'solo work' }]);
+    expect(parseSessionLabelSource(one)!.topic).toBe('solo work');
+  });
+
+  test('an empty array is no session, not a crash', () => {
+    expect(parseSessionLabelSource('[]', 'anything')).toBeNull();
   });
 });

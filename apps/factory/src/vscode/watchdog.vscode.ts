@@ -7,6 +7,7 @@ import {
   AgentsViewJsonAgent,
   isVersionStillUsable,
   sessionUsedPercent,
+  rotatableVersionOf,
 } from '../core/resumeInBest';
 import { getAllTerminals, EditorTerminal } from './terminals.vscode';
 import { formatEvent, trimToLast, WatchdogEvent, WATCHDOG_LOG_PATH } from '../core/watchdogLog';
@@ -141,17 +142,29 @@ function readConfig(): WatchdogConfig {
   };
 }
 
-async function fetchAgentsViewJsonForWatchdog(agentKey: string): Promise<AgentsViewJsonAgent | null> {
+/** Single-quote a device name so it cannot break out of the `agents view` command. */
+function shellQuoteHost(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function fetchAgentsViewJsonForWatchdog(
+  agentKey: string,
+  host?: string,
+): Promise<AgentsViewJsonAgent | null> {
   try {
     const { runAgents } = await import('../core/agentsBin');
-    const { stdout } = await runAgents(`view ${agentKey} --json`, {
+    // A remote probe is an SSH round trip, so it gets a real timeout — the tick
+    // must not wedge behind one unreachable device.
+    const target = host ? ` --host ${shellQuoteHost(host)} --no-tty` : '';
+    const { stdout } = await runAgents(`view ${agentKey}${target} --json`, {
       maxBuffer: 5 * 1024 * 1024,
+      timeout: host ? 30_000 : undefined,
     });
     const parsed = JSON.parse(stdout) as AgentsViewJsonAgent;
     if (!parsed || !Array.isArray(parsed.versions)) return null;
     return parsed;
   } catch (err) {
-    console.warn(`[WATCHDOG] agents view ${agentKey} --json failed:`, err);
+    console.warn(`[WATCHDOG] agents view ${agentKey}${host ? ` --host ${host}` : ''} --json failed:`, err);
     return null;
   }
 }
@@ -221,25 +234,30 @@ async function tick(
     const useMonitor = monitorConnected();
 
     const agentViewCache = new Map<string, AgentsViewJsonAgent | null>();
-    const getAgentView = async (agentKey: string): Promise<AgentsViewJsonAgent | null> => {
-      if (agentViewCache.has(agentKey)) return agentViewCache.get(agentKey) ?? null;
+    const getAgentView = async (agentKey: string, host?: string): Promise<AgentsViewJsonAgent | null> => {
+      // Account headroom is per machine: an offloaded terminal must be judged
+      // against ITS device, so the cache and the broadcast lane are keyed by
+      // host. The broadcast only ever carries this machine's poll, so a remote
+      // terminal always goes out to its own device.
+      const key = host ? `${agentKey}@${host}` : agentKey;
+      if (agentViewCache.has(key)) return agentViewCache.get(key) ?? null;
       // Prefer the leader's broadcast poll; fall back to a local spawn only
       // while disconnected so we never each fork `agents view` per window.
-      const cached = useMonitor ? broadcastViews.get(agentKey) ?? null : null;
-      const data = cached ?? await fetchAgentsViewJsonForWatchdog(agentKey);
-      agentViewCache.set(agentKey, data);
+      const cached = !host && useMonitor ? broadcastViews.get(agentKey) ?? null : null;
+      const data = cached ?? await fetchAgentsViewJsonForWatchdog(agentKey, host);
+      agentViewCache.set(key, data);
       return data;
     };
 
     // Arm the monitor with the agents this window needs `agents view` polled
     // for. Replaces this window's whole slice each tick, so closed terminals
-    // drop out automatically. Only Claude terminals with a pinned version can
-    // rotate, so only those are armed.
+    // drop out automatically. Only Claude terminals whose running version we
+    // know can rotate, so only those are armed.
     if (useMonitor && monitorArmWatches) {
       const watches: WatchdogWatch[] = [];
       for (const entry of tracked) {
         if (!entry.sessionId || !entry.agentType) continue;
-        if (entry.agentType !== 'claude' || !entry.version) continue;
+        if (!rotatableVersionOf(entry)) continue;
         watches.push({ sessionId: entry.sessionId, rotateAgentKey: entry.agentType });
       }
       monitorArmWatches(watches);
@@ -248,20 +266,21 @@ async function tick(
     for (const entry of tracked) {
       if (!entry.sessionId || !entry.agentType) continue;
       const agentType = entry.agentType;
-      // Auto-rotate is Claude-only: it swaps a version-pinned terminal that has
-      // exhausted its quad to the best available signed-in version.
-      if (agentType !== 'claude' || !entry.version) continue;
+      // Auto-rotate is Claude-only: it swaps a terminal whose account has run
+      // out to the best available signed-in one.
+      const runningVersion = rotatableVersionOf(entry);
+      if (!runningVersion) continue;
 
       const lastRotate = lastRotateMs.get(entry.id) ?? 0;
       if (now - lastRotate < cfg.rotateCooldownMs) continue;
 
-      const view = await getAgentView(agentType);
+      const view = await getAgentView(agentType, entry.host);
       if (!view) continue;
-      const current = view.versions.find((v) => v.version === entry.version);
+      const current = view.versions.find((v) => v.version === runningVersion);
       if (!current || isVersionStillUsable(current)) continue;
 
       console.log(
-        `[WATCHDOG] auto-rotate triggered for ${entry.id} — ${agentType}@${entry.version} status=${current.usageStatus} session=${sessionUsedPercent(current)}%`
+        `[WATCHDOG] auto-rotate triggered for ${entry.id}${entry.host ? ` on ${entry.host}` : ''} — ${agentType}@${runningVersion} status=${current.usageStatus} session=${sessionUsedPercent(current)}%`
       );
       lastRotateMs.set(entry.id, now);
       try {

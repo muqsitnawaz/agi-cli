@@ -74,6 +74,17 @@ export function registerMenubarCommands(program: Command): void {
       console.log(`  current version    ${chalk.gray(s.currentVersion)}`);
       console.log(`  bundle source      ${s.source ? chalk.gray(s.source) : chalk.red('missing (cannot enable)')}`);
       console.log(`  disabled by user   ${yn(s.disabledByUser)}`);
+      if (s.foreignInstances.length > 0) {
+        // RegisterEventHotKey is first-come, so the helper that registered the
+        // chord first owns Cmd-Shift-V/O. A process list cannot say which that
+        // was — only that a rival exists — so report the conflict, not a
+        // winner. The loser
+        // has no other symptom: its chords simply never fire.
+        const n = s.foreignInstances.length;
+        console.log(chalk.yellow(`\n  ${n} other helper process${n === 1 ? '' : 'es'} running — ${n === 1 ? 'it' : 'they'} may hold Cmd-Shift-V/O instead of the installed one:`));
+        for (const p of s.foreignInstances) console.log(chalk.gray(`    ${p.pid}  ${p.executable}`));
+        console.log(chalk.gray('  End it, then `agents menubar enable` to restart the installed helper.'));
+      }
       if (s.stale) {
         console.log(chalk.yellow('\n  Installed helper is stale — runs on next `agents` startup, or `agents menubar enable` now.'));
       } else if (!s.serviceInstalled && !s.disabledByUser) {

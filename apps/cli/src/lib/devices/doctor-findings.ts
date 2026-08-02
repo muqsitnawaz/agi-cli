@@ -32,6 +32,7 @@ import { AGENTS, ALL_AGENT_IDS, supportsAccountInspection } from '../agents.js';
 import { blocksLocalScripts } from '../platform/winpath.js';
 import { loginHint } from '../signin-badge.js';
 import type { AgentId } from '../types.js';
+import type { DuplicateVersionHook } from '../hooks.js';
 import type { RcSecretFinding } from '../secrets/rc-hygiene.js';
 import type { SyncStatusRow, OrphanRow } from '../drift.js';
 import type { FetchStatusMarker } from '../auto-pull.js';
@@ -72,6 +73,8 @@ export type FindingKind =
   | 'repo-drift'          // a config repo diverged from the fleet baseline (WARNING)
   | 'version-skew'        // an agent version present elsewhere, absent here (WARNING)
   | 'orphan'              // orphan resources in a version home (WARNING)
+  | 'duplicate-hook'      // one hook materialized in several version homes, byte-identical (WARNING)
+  | 'duplicate-hook-drift'// …with differing content, so a stale copy can disagree (CRITICAL)
   | 'rc-secret-export'    // credential-shaped export in a shell rc file (WARNING)
   | 'exec-policy'         // Windows execution policy blocks agents.ps1 (WARNING)
   | 'stale-cli';          // an older CLI that can't report per-version sign-in (WARNING)
@@ -147,6 +150,12 @@ export function remediationFor(finding: DoctorFinding): string {
       return 'agents repo pull user';
     case 'version-skew':
       return idLabel ? `agents add ${idLabel}` : 'agents add <agent>@<version>';
+    case 'duplicate-hook':
+    case 'duplicate-hook-drift':
+      // Re-syncing the authoritative version is what reconciles the copies; the
+      // builder supplies the concrete version, so this is only the agent-wide
+      // fallback when it did not.
+      return agent ? `agents sync ${idLabel} --yes` : 'agents sync';
     case 'rc-secret-export':
       return 'agents secrets add';
     case 'exec-policy':
@@ -210,6 +219,9 @@ export interface LocalFindingInputs {
   signIn: Record<string, FleetVersionSignIn[]>;
   /** Managed agents (installed versions) whose binary won't resolve. */
   cliMissing?: AgentId[];
+  /** Hooks materialized into several version homes at once — identical copies are
+   *  installation noise, differing ones are drift a stale gate can act on. */
+  duplicateHooks?: DuplicateVersionHook[];
   /** Credential-shaped exports found in the user's shell rc files (RUSH-1968). */
   rcSecrets?: RcSecretFinding[];
   /** The effective PowerShell execution policy and the platform it was read on.
@@ -372,6 +384,8 @@ export function buildLocalFindings(input: LocalFindingInputs): DoctorFinding[] {
   // was the single largest block of noise in the readout for zero added action.
   out.push(...orphanFinding(device, input.orphanRows));
 
+  out.push(...duplicateHookFindings(device, input.duplicateHooks ?? []));
+
   // Credential-shaped exports in shell rc files (RUSH-1968) — a warning per class
   // of fix: the file-store master key moves to its own file, everything else goes
   // into `agents secrets`.
@@ -404,6 +418,46 @@ function orphanFinding(device: string, rows: OrphanRow[]): DoctorFinding[] {
     severity: 'warning', kind: 'orphan', device,
     message: `${total} orphaned resource${total === 1 ? '' : 's'} on ${where} (cleanup only)`,
   })];
+}
+
+/**
+ * Findings for hooks materialized into several version homes at once. Differing
+ * content is CRITICAL — a stale copy can gate differently from the active one;
+ * byte-identical copies are a WARNING (noise plus duplicated runtime cost).
+ *
+ * One row per (agent, severity), not per hook: `agents sync <agent>@<active>
+ * --yes` reconciles every copy in one command, and a machine with five installed
+ * claudes otherwise emits two dozen identical rows. Pure.
+ */
+function duplicateHookFindings(device: string, dups: DuplicateVersionHook[]): DoctorFinding[] {
+  const out: DoctorFinding[] = [];
+  const byAgentKind = new Map<string, DuplicateVersionHook[]>();
+  for (const d of dups) {
+    const key = `${d.agent} ${d.kind}`;
+    if (!byAgentKind.has(key)) byAgentKind.set(key, []);
+    byAgentKind.get(key)!.push(d);
+  }
+  for (const group of byAgentKind.values()) {
+    const drift = group[0].kind === 'drift';
+    const agent = group[0].agent;
+    const active = group[0].authoritative.version;
+    const versions = Array.from(new Set(group.flatMap((d) => d.copies.map((c) => c.version))));
+    const authority = `${active} is authoritative`;
+    const message = group.length === 1
+      ? drift
+        ? `hook '${group[0].name}' differs across ${versions.join(', ')} — ${authority}`
+        : `hook '${group[0].name}' duplicated (identical) across ${versions.join(', ')} — ${authority}`
+      : `${group.length} hooks ${drift ? 'differ' : 'duplicated (identical)'} across ` +
+        `${versions.length} version${versions.length === 1 ? '' : 's'} ` +
+        `(incl. ${group.slice(0, 2).map((d) => `'${d.name}'`).join(', ')}) — ${authority}`;
+    out.push({
+      severity: drift ? 'critical' : 'warning',
+      kind: drift ? 'duplicate-hook-drift' : 'duplicate-hook',
+      device, agent, versions, message,
+      remediation: `agents sync ${agent}@${active} --yes`,
+    });
+  }
+  return out;
 }
 
 /**

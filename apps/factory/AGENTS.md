@@ -1,6 +1,6 @@
 # Agents Extension
 
-VS Code extension for multi-agent coding. Spawns AI terminals (Claude, Codex, Gemini, Cursor, OpenCode) as editor tabs with keyboard shortcuts, and dispatches work to Rush Cloud.
+VS Code extension for multi-agent coding. Spawns AI terminals (Claude, Codex, Antigravity, Cursor, OpenCode) as editor tabs with keyboard shortcuts, and dispatches work to Rush Cloud.
 
 This file is a **map**, not the territory. Keep it a short paragraph per area plus pointers. Read the actual code for current details.
 
@@ -41,6 +41,37 @@ bun test          # Full test suite, no mocks
 bash scripts/install.sh <version>   # Package .vsix and install to Cursor + Code + Codium
 ```
 
+## Releasing to the Marketplace
+
+Use `scripts/release.sh` from any fleet box. It routes itself to the machine that holds the `vs-marketplace` secrets bundle (currently `zion`) and publishes from a clean clone of the commit.
+
+```bash
+cd apps/factory
+bash scripts/release.sh 0.9.xxx --confirm
+```
+
+Before running, the `vs-marketplace` bundle must be unlocked on the publish host. If it is locked, the script fails with:
+
+> Secrets bundle 'vs-marketplace' is not unlocked in the secrets agent. Run 'agents secrets unlock vs-marketplace' in a terminal first — an agent launch never raises a Touch ID sheet on its own.
+
+To unlock:
+
+```bash
+agents ssh zion
+agents secrets unlock vs-marketplace
+# Touch ID / password prompt appears on zion
+```
+
+Then re-run the release command.
+
+Known gotchas:
+- The release clone's test environment on `zion` currently misses some dev dependencies (`@happy-dom/global-registrator`, `gray-matter`) and cannot find `agents` on PATH for live-agent tests, so the local test run may fail even when GitHub CI is green. If CI passed and the change is release-ready, use `--skip-tests` as a hotfix path:
+  ```bash
+  bash scripts/release.sh 0.9.xxx --confirm --skip-tests
+  ```
+- The script builds and publishes to both VS Code Marketplace and Open VSX. Marketplace propagation can lag a few minutes; Open VSX is usually live immediately.
+- The script installs the new `.vsix` into local VS Code / Codium windows automatically.
+
 ## Areas (and where to look)
 
 | Area | Start here |
@@ -48,6 +79,7 @@ bash scripts/install.sh <version>   # Package .vsix and install to Cursor + Code
 | Agent spawn flow + editor-tab terminals | `src/vscode/extension.ts` (`openSingleAgent`, `openSingleAgentWithQueue`) |
 | The ONE launch engine (every "New agent" command) | `launchAgent(context, {agentKey?, host?, pickHost?, local?})` in `src/vscode/extension.ts` is the single route. It resolves: **host** (explicit / device-first `pickLaunchHost` / auto `resolveBalancedHost`), **harness** (explicit, or `resolveAutoAgentKey` — usable-on-the-chosen-host via `hostHasUsableVersion`, ranked by `pickAgentByUsage`), and **version/account** (ALWAYS balanced via `--strategy balanced`; no pinned/latest/version-picker path exists). Commands are thin: `agents.newAgent` = `launchAgent({})` (auto everything), `agents.newAgentPickHost` = `{pickHost:true}` (device-first, auto harness), `agents.new<Harness>` = `{agentKey, local:true}`, `agents.new<Harness>PickHost` = `{agentKey, pickHost:true}`. Pure ranking: `src/core/launchHost.ts` (`pickBestHost`, `deviceHasUsableVersion`, `resolveBalancePool`) + `src/core/agentUsage.ts` (`pickAgentByUsage`). Health probe: `src/vscode/deviceHealth.vscode.ts` (`fetchDeviceStats`). |
 | Terminal registry + session IDs | `src/vscode/terminals.vscode.ts` |
+| Offloaded (`--host`) tabs — session id, title, resume | A remote tab is registered exactly like a local one: `openSingleAgent` mints the Claude session id for local AND remote (`agents run --host` adopts it via the CLI's `resolveHostSessionId`), and stamps the device on `EditorTerminal.host` (persisted in `src/core/sessions.persist.ts`, restored on reload and on Reopen Last Session). Anything that reads the session then has to follow that host: the label poller routes to `fetchRemoteSessionLabelSource` (`src/vscode/remoteSessions.vscode.ts` → `agents sessions <id> --host <device> --json`, parsed by `parseSessionLabelSource` in `src/core/remoteSessions.ts`) because the transcript is not on this machine, and resume goes through `buildVersionedResumeCommand(..., host)` (`src/core/prewarm.ts`) which emits `agents run --host … --resume` instead of a local `claude -r <id>`. |
 | Terminal readiness events (tabReady, shellReady, promptReady, agentReady) | `src/core/terminalReadiness.ts`, `src/vscode/terminalReadiness.ts` (design doc: `swarmify/docs/01-terminal-lifecycle.md`) |
 | Reconnect resilience (survive SSH drops; re-attach detached tmux agents) | `src/vscode/reconnect.ts` (scan/backoff/pass), `src/vscode/tmux.ts` (`cleanupTmuxTerminal` returns the detach-vs-exit classification, `queryTmuxSessionState` — `probeFailed` when no tmux binary is reachable so `shouldKillOnClose` fails safe and never kills an unconfirmable session, `reattachTmuxTerminal`), `src/vscode/extension.ts` (`registerReconnect` wiring, `reattachSession`; ONE `onDidCloseTerminal` handler owns both the tmux kill and the un-track/persist decision — on a live detach it calls `terminals.markDetached` to keep the entry + mapping for the pass instead of unregistering it; `restoreAgentTerminals` SKIPS tmux-backed sessions on reload — they belong to the reconnect pass, not the resume-from-session-file path — and preserves their mapping via `terminals.saveOnlyTmuxPersistedSessions`). Durable map: `src/core/sessions.persist.ts` (tmux fields); detached entries keep their coords in `EditorTerminal.tmuxCoords`. Grid unfreeze: `settings.resumeFloorPolling()` |
 | Shell adoption (SH tab running an agent CLI → re-registered as that agent) | `src/vscode/terminalReadiness.ts` (`armShellAdoption`), `src/vscode/terminals.vscode.ts` (`adoptShellAsAgent`), `src/vscode/extension.ts` (`armShellAdoptionForTerminal`). Pure args parser: `src/core/terminalReadiness.ts` (`detectAgentKeyFromArgs`, `extractSessionIdFromArgs`). Diag log: `~/.cache/swarmify/shell-adoption.log` |
@@ -62,7 +94,7 @@ bash scripts/install.sh <version>   # Package .vsix and install to Cursor + Code
 | Custom .md editor (TipTap) | `src/vscode/customEditor.ts`, `/ui/editor/extensions/` |
 | Teams integration | `src/vscode/swarm.vscode.ts`, `src/core/swarm.detect.ts` |
 | Watchdog MCP bridge (`send_nudge`, `send_to_agent`) | `src/mcp/watchdog-server.ts`, `src/mcp/watchdog-bridge.ts`, `src/mcp/watchdogInstall.ts`. Unix socket `~/.agents/.tmp/watchdog.sock`. Logs `~/.agents/.cache/logs/watchdog.log`, `~/.agents/peer-messages.log`. On-demand peer-nudge path (a peer explicitly messages another), NOT an autonomous nudger. |
-| Watchdog version auto-rotate + read-only status card | `src/vscode/watchdog.vscode.ts` (`startWatchdog` — polls agent terminals on `agents.watchdog.tickSeconds` and, on version exhaustion, rotates a version-pinned Claude terminal to the best signed-in version via `rotateTerminalToBestVersion` in `extension.ts`, recording a `rotate` event). **The extension no longer runs its own stall-detection/nudge injector** — the agents-cli daemon watchdog is the sole injector and writes the same `~/.agents/.cache/logs/watchdog.log` JSONL (shape: `src/core/watchdogLog.ts`) that the Factory Floor status card renders read-only (`src/vscode/settings.vscode.ts`, `case 'getWatchdogLog'`). Machine-wide `agents view --json` broadcast lane (feeds auto-rotate): `src/monitor/watchdogDetector.ts`. |
+| Watchdog version auto-rotate + read-only status card | `src/vscode/watchdog.vscode.ts` (`startWatchdog` — polls agent terminals on `agents.watchdog.tickSeconds` and, when the account a Claude terminal is running on is exhausted, rotates it to the best signed-in one via `rotateTerminalToBestVersion` in `extension.ts`, recording a `rotate` event). Two things the gate depends on: it reads `rotatableVersionOf` (`src/core/resumeInBest.ts`) — the pin when there is one, else the version observed running — because launches no longer pin, so a gate reading only the pin skipped every terminal and left this dead; and it is scoped to the terminal's device, since account headroom is per machine — `agents view --host <device>` for the check (view cache keyed `agent@host`), `buildHostLaunchCommand` for the replacement, so a rotate never quietly moves an offloaded agent onto this box. **The extension no longer runs its own stall-detection/nudge injector** — the agents-cli daemon watchdog is the sole injector and writes the same `~/.agents/.cache/logs/watchdog.log` JSONL (shape: `src/core/watchdogLog.ts`) that the Factory Floor status card renders read-only (`src/vscode/settings.vscode.ts`, `case 'getWatchdogLog'`). Machine-wide `agents view --json` broadcast lane (feeds LOCAL auto-rotate only): `src/monitor/watchdogDetector.ts`. |
 | Factory Floor (dashboard, dispatch) | `ui/settings/components/mission-control/` |
 | Cloud dispatch resolver (label parsing, repo/owner) | `ui/settings/components/mission-control/dispatch.ts` + `src/vscode/settings.vscode.ts` (`case 'dispatchTask'`) |
 | Foreman voice orb (OpenAI Realtime, mic + speaker pipeline) | `src/vscode/foreman.audio.ts` (audio I/O via ffmpeg/ffplay, mic-gated during TTS to prevent echo loop), `src/vscode/foreman.vscode.ts` (session + tools), `ui/settings/components/foreman/ForemanOrb.tsx` (UI) |

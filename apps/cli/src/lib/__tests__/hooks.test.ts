@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFileSync } from 'child_process';
 
-import { registerHooksToSettings, selectHookManifest, unmanagedHookNames, computeCodexHookTrustHash, toPortableCommand, pruneVersionHomeHookEntriesFromSettings } from '../hooks.js';
+import { deduplicateVersionHookCommands, registerHooksToSettings, selectHookManifest, unmanagedHookNames, computeCodexHookTrustHash, toPortableCommand, pruneVersionHomeHookEntriesFromSettings } from '../hooks.js';
 import * as TOML from 'smol-toml';
 import * as yaml from 'yaml';
 import { CODEX_HOOKS_MIN_VERSION } from '../agents.js';
@@ -201,6 +201,27 @@ describe('registerHooksToSettings - Codex', () => {
     expect(content).not.toContain('codex_hooks');
   });
 
+  it('caps Codex SessionEnd hook timeout at 3 seconds', () => {
+    const versionHome = makeVersionHome();
+    makeScript('on-session-end.sh');
+
+    const manifest: Record<string, ManifestHook> = {
+      'on-session-end': {
+        script: 'on-session-end.sh',
+        events: ['SessionEnd'],
+        timeout: 5,
+      },
+    };
+
+    const result = registerHooksToSettings('codex', versionHome, manifest, agentsDir);
+    expect(result.errors).toHaveLength(0);
+
+    const hooksJson = JSON.parse(
+      fs.readFileSync(path.join(versionHome, '.codex', 'hooks.json'), 'utf-8')
+    );
+    expect(hooksJson.hooks.SessionEnd[0].hooks[0].timeout).toBe(3);
+  });
+
   it('does not duplicate managed hook entries on repeated calls', () => {
     const versionHome = makeVersionHome();
     makeScript('on-prompt.sh');
@@ -241,6 +262,77 @@ describe('registerHooksToSettings - Codex', () => {
     // User hook and managed hook share the no-matcher group; user entry is untouched
     expect(group.hooks).toHaveLength(2);
     expect(group.hooks[0]).toEqual(userHook);
+  });
+
+  it('drops stale sibling-version hook entries from hooks.json', () => {
+    const versionHome = path.join(
+      tmpDir,
+      '.agents',
+      '.history',
+      'versions',
+      'codex',
+      '0.146.0',
+      'home'
+    );
+    const hooksPath = path.join(versionHome, '.codex', 'hooks.json');
+    fs.mkdirSync(path.dirname(hooksPath), { recursive: true });
+
+    const oldVersionHook = {
+      type: 'command',
+      command: path.join(
+        tmpDir,
+        '.agents',
+        '.history',
+        'versions',
+        'codex',
+        '0.142.0',
+        'home',
+        '.codex',
+        'hooks',
+        'git-guard.sh'
+      ),
+      timeout: 5,
+    };
+    const currentVersionHook = {
+      type: 'command',
+      command: path.join(versionHome, '.codex', 'hooks', 'git-guard.sh'),
+      timeout: 5,
+    };
+    const customHook = {
+      type: 'command',
+      command: '/usr/local/bin/my-hook.sh',
+      timeout: 10,
+    };
+    fs.writeFileSync(hooksPath, JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [oldVersionHook, currentVersionHook, customHook],
+          },
+        ],
+      },
+    }, null, 2));
+
+    const scriptPath = makeScript('git-guard.sh');
+    const manifest: Record<string, ManifestHook> = {
+      'git-guard': {
+        script: 'git-guard.sh',
+        events: ['PreToolUse'],
+        matcher: 'Bash',
+        timeout: 5,
+      },
+    };
+
+    const result = registerHooksToSettings('codex', versionHome, manifest, agentsDir);
+    expect(result.errors).toHaveLength(0);
+
+    const hooksJson = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
+    const commands = hooksJson.hooks.PreToolUse[0].hooks.map((h: { command: string }) => h.command);
+    expect(commands).not.toContain(oldVersionHook.command);
+    expect(commands).toContain(currentVersionHook.command);
+    expect(commands).toContain(customHook.command);
+    expect(commands.map((c: string) => resolvedCommand(c))).toContain(toPosix(scriptPath));
   });
 
   it('ignores the deprecated agents: field — capability table decides registration', () => {
@@ -1942,6 +2034,21 @@ describe('per-version hook entry pruning (settings accumulation regression)', ()
     return out;
   }
 
+  it('deduplicates by hook resource name and prefers the active version path', () => {
+    const activeHome = '/home/u/.agents/.history/versions/claude/2.1.207/home';
+    const commands = [
+      '/home/u/.agents/.history/versions/claude/2.1.181/home/.claude/hooks/00-agent-verify-work-complete.sh',
+      '/home/u/.agents/.history/versions/claude/2.1.207/home/.claude/hooks/00-agent-verify-work-complete.sh',
+      '/home/u/.agents/.history/versions/claude/2.1.186/home/.claude/hooks/00-agent-verify-work-complete.sh',
+      '/home/u/custom/stop-hook.sh',
+    ];
+
+    expect(deduplicateVersionHookCommands(commands, activeHome)).toEqual([
+      '/home/u/custom/stop-hook.sh',
+      '/home/u/.agents/.history/versions/claude/2.1.207/home/.claude/hooks/00-agent-verify-work-complete.sh',
+    ]);
+  });
+
   describe('sync (registerHooksToSettings)', () => {
     beforeEach(() => {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-prune-test-'));
@@ -1991,6 +2098,41 @@ describe('per-version hook entry pruning (settings accumulation regression)', ()
       expect(versionHomeCmds).toEqual([guardCmd('2.1.201')]);
       // System + custom hooks untouched.
       expect(commands).toContain(SYSTEM_HOOK);
+      expect(commands).toContain(CUSTOM_HOOK);
+    });
+
+    it('collapses an exact-duplicate entry of the CURRENT version to a single hook', () => {
+      // The sibling-version prune (isStaleSiblingVersionCommand) only removes a
+      // DIFFERENT version's path; it can't collapse two identical current-version
+      // entries. Seeding the same current-version command twice is what a
+      // membership-Set wiring let both survive — Claude Code then fires the hook
+      // twice. Deduplication must leave exactly one.
+      const versionHome = path.join(
+        tmpDir, '.agents', '.history', 'versions', 'claude', '2.1.201', 'home'
+      );
+      const settingsPath = path.join(versionHome, '.claude', 'settings.json');
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+
+      fs.writeFileSync(settingsPath, JSON.stringify({
+        hooks: preToolUseGroup([
+          guardCmd('2.1.201'),   // current version
+          guardCmd('2.1.201'),   // EXACT duplicate of the current version -> collapse
+          CUSTOM_HOOK,           // user's own hook -> keep untouched
+        ]),
+      }, null, 2));
+
+      makeScript('git-guard.sh');
+      const manifest: Record<string, ManifestHook> = {
+        'git-guard': { script: 'git-guard.sh', events: ['PreToolUse'], matcher: 'Bash' },
+      };
+
+      const result = registerHooksToSettings('claude', versionHome, manifest, agentsDir);
+      expect(result.errors).toHaveLength(0);
+
+      const commands = collectCommands(JSON.parse(fs.readFileSync(settingsPath, 'utf-8')));
+      // Exactly one current-version guard entry — the duplicate is gone.
+      expect(commands.filter((c) => c === guardCmd('2.1.201'))).toEqual([guardCmd('2.1.201')]);
+      // The user's own hook is left exactly as-is.
       expect(commands).toContain(CUSTOM_HOOK);
     });
   });

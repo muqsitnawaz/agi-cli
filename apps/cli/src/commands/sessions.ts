@@ -36,7 +36,7 @@ import { filterTeamSessions } from '../lib/session/team-filter.js';
 import { parseSession } from '../lib/session/parse.js';
 import { runRemoteSessions, buildForwardedArgs, ensureWholeIndex } from '../lib/session/remote.js';
 import { formatRelativeTime } from '../lib/session/relative-time.js';
-import { renderConversationMarkdown, renderSummary, renderSummaryHeader, computeSummaryStats, renderJson, filterEvents, parseRoleList, linkUrl, type FilterOptions } from '../lib/session/render.js';
+import { renderConversationMarkdown, renderSummary, renderSummaryHeader, computeSummaryStats, renderJson, filterEvents, parseRoleList, linkPath, linkUrl, shortenModel, type FilterOptions } from '../lib/session/render.js';
 import { linearIssueUrl } from '../lib/session/linear.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { AGENTS, colorAgent, resolveAgentName } from '../lib/agents.js';
@@ -357,18 +357,29 @@ export function cleanPreview(text: string): string {
  * Covers every ActiveSession context: terminal (interactive), headless, teams,
  * cloud, and sub-agent rows that share the same ActiveSession.todos field.
  */
-function buildSessionDescription(s: ActiveSession): string {
+export function buildSessionDescription(s: ActiveSession): string {
   const todo = formatTodoCompact(s.todos);
   if (s.context === 'cloud') {
     const base = s.preview || `${s.cloudProvider ?? ''}${s.cloudTaskId ? ` · ${s.cloudTaskId.slice(0, 12)}` : ''}`;
     return cleanPreview([todo, base].filter(Boolean).join(' · '));
   }
   if (s.context === 'teams') {
+    // A teams row identifies its TEAM, then the teammate within it, then who
+    // spun it up, then what it's working on — so several teams from one
+    // orchestrator stay distinct and each shows its target, not just its slug.
     const parts = [s.teamName];
+    // Teammate name (distinct from the team slug) — which member this row is.
+    if (s.label && s.label !== s.teamName) parts.push(s.label);
+    // Lineage: which orchestrator spun up this team. Prefer the resolved label,
+    // else the short session id, so "by whom" is answerable at a glance.
+    const orch = s.orchestratorLabel || (s.orchestratorSessionId ? s.orchestratorSessionId.slice(0, 8) : '');
+    if (orch) parts.push(`by ${orch}`);
     if (todo) parts.push(todo);
-    if (s.preview) parts.push(s.preview);
-    else if (s.label) parts.push(s.label);
-    else if (s.topic) parts.push(s.topic);
+    // Target: the live latest turn if working, else the assigned mission (the
+    // team's task/target, shown even before the teammate has a transcript), else
+    // the transcript topic.
+    const target = s.preview || s.assignedTask || s.topic;
+    if (target) parts.push(target);
     return cleanPreview(parts.filter(Boolean).join(' · '));
   }
   // Terminal, headless, or sub-agent: todos + live preview, then label, then topic.
@@ -503,6 +514,24 @@ export function ticketLabel(s: Pick<SessionMeta, 'ticketId' | 'prNumber'>): stri
   return s.ticketId ?? (s.prNumber ? `PR#${s.prNumber}` : '');
 }
 
+function ticketUrl(s: Pick<SessionMeta, 'ticketId' | 'prNumber' | 'prUrl'>): string | undefined {
+  if (s.ticketId) return linearIssueUrl(s.ticketId);
+  return s.prNumber ? s.prUrl : undefined;
+}
+
+export function linkTicketCell(s: Pick<SessionMeta, 'ticketId' | 'prNumber' | 'prUrl'>, label: string): string {
+  const url = ticketUrl(s);
+  return url && label.trim() !== '-' ? linkUrl(url, label) : label;
+}
+
+export function linkCwdCell(s: Pick<SessionMeta, 'cwd' | '_remote'>, label: string): string {
+  return s.cwd && !s._remote ? linkPath(s.cwd, label) : label;
+}
+
+function modelLabel(model?: string): string {
+  return model ? shortenModel(model) : '-';
+}
+
 /**
  * The row shape `agents sessions --active --json` emits. RUSH-1981: a watcher
  * joins active sessions on ticketId + project, but the raw ActiveSession nests
@@ -514,11 +543,12 @@ export function ticketLabel(s: Pick<SessionMeta, 'ticketId' | 'prNumber'>): stri
  */
 export function serializeActiveSessionsForJson(
   sessions: ActiveSession[],
-): Array<ActiveSession & { ticketId: string | null; project: string | null }> {
+): Array<ActiveSession & { ticketId: string | null; project: string | null; prLink: string | null }> {
   return sessions.map((s) => ({
     ...s,
     ticketId: s.ticket?.id ?? null,
     project: s.cwd ? path.basename(s.cwd) : null,
+    prLink: s.pr?.url ?? null,
   }));
 }
 
@@ -1107,6 +1137,40 @@ function useInteractiveBrowser(options: SessionsOptions): boolean {
   return options.interactive !== false && !options.json && isInteractiveTerminal();
 }
 
+/**
+ * A bare interactive fleet listing — no query, no render/filter flag — that the
+ * `runSessionBrowser` picker can represent. The single predicate shared by the
+ * bare-browser branch and the `--host` early-return guard so they can't drift:
+ * when this holds, an explicit `--host`/`--device` scope is folded into the
+ * browser (preview-rich, selectable) instead of the legacy per-host raw stream.
+ */
+export function isBareBrowserListing(options: SessionsOptions, query: string | undefined): boolean {
+  return useInteractiveBrowser(options) && hasNoBrowserDisqualifyingFlags(options, query);
+}
+
+/**
+ * Pure flag-gate half of {@link isBareBrowserListing} (TTY-independent, so it is
+ * unit-testable): true when no query, render, or filter flag is present that the
+ * `runSessionBrowser` picker cannot represent.
+ */
+export function hasNoBrowserDisqualifyingFlags(
+  options: SessionsOptions,
+  query: string | undefined
+): boolean {
+  return (
+    !query &&
+    !options.routine &&
+    !options.flat &&
+    !options.tree &&
+    !options.markdown &&
+    !options.until &&
+    !options.project &&
+    !options.sort &&
+    !options.artifacts &&
+    options.artifact === undefined
+  );
+}
+
 /** The canonical `ag sessions …` command for a set of flags — the twin of the
  * browser's `y` hotkey (see --print-cmd). Normalizes to the stable flag form. */
 function canonicalSessionsCommand(query: string | undefined, options: SessionsOptions): string {
@@ -1203,13 +1267,20 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
       await runRemoteSessionsJson(options.host);
       return;
     }
-    try {
-      runRemoteSessions(options.host);
-    } catch (err: any) {
-      console.error(chalk.red(err.message));
-      process.exit(1);
+    // A bare interactive `--host`/`--device <box>` listing falls through to the
+    // fleet browser below, which folds the named host(s) into the same merged,
+    // preview-rich, selectable view as the local listing (via gatherRemoteList).
+    // A query, a render/filter flag, or a non-interactive caller keeps the legacy
+    // per-host raw stream under a `── host ──` banner.
+    if (!isBareBrowserListing(options, query)) {
+      try {
+        runRemoteSessions(options.host);
+      } catch (err: any) {
+        console.error(chalk.red(err.message));
+        process.exit(1);
+      }
+      return;
     }
-    return;
   }
 
   // --preview <id/query>: resolve one session and print its compact preview, then
@@ -1272,19 +1343,7 @@ async function sessionsAction(query: string | undefined, options: SessionsOption
   // filter the browser can't represent), or --no-interactive keep the existing
   // printed/render paths (agents and scripts unaffected). An explicit --since seeds
   // the browser's window so the flag is honored, not swallowed.
-  if (
-    useInteractiveBrowser(options) &&
-    !query &&
-    !options.routine &&
-    !options.flat &&
-    !options.tree &&
-    !options.markdown &&
-    !options.until &&
-    !options.project &&
-    !options.sort &&
-    !options.artifacts &&
-    options.artifact === undefined
-  ) {
+  if (isBareBrowserListing(options, query)) {
     const { runSessionBrowser, bareBrowserSeed } = await import('./sessions-browser.js');
     await runSessionBrowser(
       bareBrowserSeed({
@@ -1556,12 +1615,12 @@ function metaSignals(s: SessionMeta): Parameters<typeof signalBadges>[0] {
 }
 
 /** One flat table row:
- *   shortId · agent · version · project · [glyph] label·doing · [ticket] · [wt] · time
+ *   shortId · agent · version · model · project · [glyph] label·doing · [ticket] · [wt] · time
  * `doing` is the live preview when running, else the topic. The `ticket` column
  * (tracker/PR ref, pulled out of the badge blob so refs align) is only rendered
  * when `showTicket` — otherwise a listing with no refs would waste a column of
  * dashes and needlessly truncate the topic. Worktree stays a trailing badge. */
-function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket = false, cols: PickerColumns = {}): string {
+export function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket = false, cols: PickerColumns = {}): string {
   const agentColor = colorAgent(session.agent);
   const when = formatRelativeTime(session.lastActivity ?? session.timestamp);
   const project = session.project || '-';
@@ -1586,7 +1645,7 @@ function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket =
 
   const TICKET_W = 10;
   const ticketCell = showTicket
-    ? chalk.blue(padToWidth(truncateToWidth(ticketLabel(session) || '-', TICKET_W), TICKET_W + 1))
+    ? chalk.blue(linkTicketCell(session, padToWidth(truncateToWidth(ticketLabel(session) || '-', TICKET_W), TICKET_W + 1)))
     : '';
   // Live status word (working / waiting / idle) next to the glyph — the default
   // list is no longer a bare glyph. Empty (zero width) for resting rows.
@@ -1595,14 +1654,22 @@ function flatSessionRow(session: SessionMeta, live?: ActiveSession, showTicket =
   const machineW = cols.showMachine ? machineColW : 0;
   const ticketW = showTicket ? TICKET_W + 1 : 0;
   const wtW = wt ? stringWidth(wt) + 1 : 0;
-  const topicW = Math.max(16, terminalWidth() - (10 + 9 + 8 + 16) - glyphW - statusW - machineW - ticketW - wtW - stringWidth(when) - 1);
+  const width = terminalWidth();
+  const requestedModelW = cols.showModel ? (cols.modelWidth ?? PICKER_MODEL_MAX) : 0;
+  const fixedW = (10 + 9 + 8 + 16) + glyphW + statusW + machineW + ticketW + wtW + stringWidth(when) + 1;
+  const modelSlack = width - fixedW - 16;
+  const modelW = requestedModelW <= modelSlack
+    ? requestedModelW
+    : modelSlack >= PICKER_MODEL_MIN ? modelSlack : 0;
+  const topicW = Math.max(16, width - fixedW - modelW);
 
   return (
     chalk.white(padToWidth(truncateToWidth(session.shortId, 9), 10)) +
     agentColor(padToWidth(truncateToWidth(session.agent, 8), 9)) +
     chalk.yellow(padToWidth(truncateToWidth(session.version || '-', 7), 8)) +
+    (modelW ? chalk.yellow(padToWidth(truncateToWidth(modelLabel(session.model), modelW - 1), modelW)) : '') +
     machineCell +
-    chalk.cyan(padToWidth(truncateToWidth(project, 14), 16)) +
+    chalk.cyan(linkCwdCell(session, padToWidth(truncateToWidth(project, 14), 16))) +
     (glyph ? glyph + ' ' : '') +
     statusCell +
     renderTopicCell(label, doing, '', topicW, topicW) +
@@ -1768,7 +1835,9 @@ function printSessionTable(sessions: SessionMeta[], hiddenCount = 0, tree = fals
       if (!first) console.log();
       first = false;
       const group = byDir.get(key)!;
-      console.log(`${chalk.cyan.bold(shortCwd(key))} ${chalk.gray(`(${group.length})`)}`);
+      const cwd = group.find((s) => s.cwd && !s._remote)?.cwd;
+      const header = cwd ? linkPath(cwd, shortCwd(key)) : shortCwd(key);
+      console.log(`${chalk.cyan.bold(header)} ${chalk.gray(`(${group.length})`)}`);
       for (const s of group) console.log(treeSessionRow(s, liveIndex?.get(s.id)));
     }
     const dirWord = keys.length === 1 ? 'directory' : 'directories';
@@ -1989,6 +2058,10 @@ export interface PickerColumns {
   /** Total width of the machine column, sized to the widest compacted hostname
    * in the pool (capped). Falls back to PICKER_MACHINE_W when absent. */
   machineWidth?: number;
+  /** Render the model column only when at least one row carries a model. */
+  showModel?: boolean;
+  /** Pool-sized model column width, including one trailing separator cell. */
+  modelWidth?: number;
   /** Render the ticket/PR column (only when at least one row carries a ref). */
   showTicket?: boolean;
   /**
@@ -2013,12 +2086,21 @@ export interface PickerColumns {
 const PICKER_MACHINE_W = 11;
 const PICKER_MACHINE_MIN = 8;
 const PICKER_MACHINE_MAX = 18;
+const PICKER_MODEL_MIN = 6;
+const PICKER_MODEL_MAX = 13;
 
 /** Column width that shows every compacted hostname in `machines` whole (one
  * trailing space for separation), bounded by MIN/MAX. */
 function machineColumnWidth(machines: string[], label: (m: string) => string): number {
   const widest = machines.reduce((w, m) => Math.max(w, stringWidth(label(m))), 0);
   return Math.min(PICKER_MACHINE_MAX, Math.max(PICKER_MACHINE_MIN, widest + 1));
+}
+
+function modelColumnWidth(sessions: SessionMeta[]): number {
+  const widest = sessions.reduce((width, session) => (
+    Math.max(width, session.model ? stringWidth(modelLabel(session.model)) : 0)
+  ), 0);
+  return Math.min(PICKER_MODEL_MAX, Math.max(PICKER_MODEL_MIN, widest + 1));
 }
 
 /**
@@ -2054,6 +2136,8 @@ export function pickerColumnsFor(sessions: SessionMeta[]): PickerColumns {
     showMachine: distinct.length > 1,
     machineLabel,
     machineWidth: machineColumnWidth(distinct, machineLabel),
+    showModel: sessions.some((s) => !!s.model),
+    modelWidth: modelColumnWidth(sessions),
     showTicket: sessions.some((s) => ticketLabel(s) !== ''),
   };
 }

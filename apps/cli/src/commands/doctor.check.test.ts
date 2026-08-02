@@ -82,11 +82,57 @@ function runCheck(...args: string[]): { status: number | null; stdout: string; s
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
+function runDoctorJson(): any {
+  const r = spawnSync('bun', [INDEX, 'doctor', '--json', '--cwd', projectDir], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, HOME: testHome, AGENTS_NO_AUTOPULL: '1', AGENTS_DEVICES_DIR: path.join(testHome, '.agents', '.history', 'devices') },
+    encoding: 'utf-8',
+  });
+  expect(r.status).toBe(0);
+  return JSON.parse(r.stdout);
+}
+
+function seedVersionHook(version: string, content: string): void {
+  const versionRoot = path.join(testHome, '.agents', '.history', 'versions', 'claude', version);
+  const binDir = path.join(versionRoot, 'node_modules', '.bin');
+  const hooksDir = path.join(versionRoot, 'home', '.claude', 'hooks');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.mkdirSync(hooksDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.writeFileSync(path.join(hooksDir, 'stop-gate.sh'), content, { mode: 0o755 });
+}
+
 function git(dir: string, ...args: string[]): void {
   execFileSync('git', ['-C', dir, ...args], { stdio: 'ignore' });
 }
 
 describe('agents doctor --check — CI drift gate exit code', () => {
+  it('reports identical same-name hooks across version homes and names the active authority', () => {
+    seedHome();
+    seedVersionHook('2.0.0', '#!/bin/sh\necho gate\n');
+    seedVersionHook('2.1.0', '#!/bin/sh\necho gate\n');
+
+    const report = runDoctorJson();
+    const finding = report.duplicateHooks.find((item: any) => item.name === 'stop-gate');
+    expect(finding.kind).toBe('duplicate');
+    expect(finding.copies.map((copy: any) => copy.version)).toEqual(['2.0.0', '2.1.0']);
+    expect(finding.authoritative.version).toBe('2.0.0');
+    expect(report.health.issues.find((item: any) => item.category === 'duplicate-hook').severity).toBe('warning');
+  });
+
+  it('reports same-name hook content drift at higher severity', () => {
+    seedHome();
+    seedVersionHook('2.0.0', '#!/bin/sh\necho current\n');
+    seedVersionHook('2.1.0', '#!/bin/sh\necho stale\n');
+
+    const report = runDoctorJson();
+    const finding = report.duplicateHooks.find((item: any) => item.name === 'stop-gate');
+    expect(finding.kind).toBe('drift');
+    expect(new Set(finding.copies.map((copy: any) => copy.hash)).size).toBe(2);
+    expect(finding.authoritative.version).toBe('2.0.0');
+    expect(report.health.issues.find((item: any) => item.category === 'duplicate-hook-drift').severity).toBe('critical');
+  });
+
   it('exits 0 when the install is clean (synced, sources unchanged)', () => {
     seedHome();
     syncSnapshot();

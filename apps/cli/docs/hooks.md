@@ -195,6 +195,26 @@ Only hooks with `cache:` are instrumented today — that's deliberate. Opting in
 
 Event name mapping across agents is handled in `src/lib/hooks.ts`: `GEMINI_EVENT_MAP`, `ANTIGRAVITY_EVENT_MAP`, Grok's `eventMap`, `COPILOT_EVENT_MAP`, `KIRO_EVENT_MAP`, `GOOSE_EVENT_MAP`, `CURSOR_EVENT_MAP`, and `HERMES_EVENT_MAP`.
 
+## Version-home deduplication
+
+Each installed harness version has its own synced hook scripts. Every native
+registrar emits one entry per logical manifest resource and event. For the
+Claude-shaped and Codex read-modify-write formats, existing registrations are
+also deduplicated by logical hook resource name, not absolute path, so the same
+hook copied under several version homes is registered once and the active
+version's command is authoritative. Other harnesses rewrite their one managed
+hook file from the manifest on each sync and therefore cannot accumulate sibling
+version paths there.
+
+Run `agents doctor` to inspect the copies. Identical same-name scripts across
+versions are warnings because they add runtime noise and cost if registered
+together. Same-name scripts with different SHA-256 hashes are critical drift:
+an older version can otherwise enforce stale rules while the active copy passes.
+The inspection covers every hooks-capable harness. The text report and `agents
+doctor --json` both name every affected version and the authoritative active
+version; JSON consumers such as the menu-bar health view receive the same
+findings under `health.issues` and `duplicateHooks`.
+
 Hermes (Nous Research, ≥ 0.11.0) declares hooks under a `hooks:` block in `~/.hermes/config.yaml` (shared with `mcp_servers`); the registrar read-modify-writes that YAML doc so sibling keys survive. Each entry is `{ command, timeout, matcher? }` (timeout defaults to 60s, capped at 300s).
 
 ## Predicate Matchers

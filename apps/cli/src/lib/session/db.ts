@@ -21,7 +21,7 @@ const SESSIONS_DIR = getSessionsDir();
 const DB_PATH = getSessionsDbPath();
 
 /** Current schema version; bumped when migrations are added. */
-const SCHEMA_VERSION = 19;
+const SCHEMA_VERSION = 20;
 
 /**
  * Canonicalize a file path for use as a scan_ledger key. The same physical
@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   output_tokens INTEGER,
   cost_usd REAL,
   duration_ms INTEGER,
+  model TEXT,
   file_path TEXT NOT NULL,
   file_mtime_ms INTEGER,
   file_size INTEGER,
@@ -164,6 +165,7 @@ export interface SessionRow {
   output_tokens: number | null;
   cost_usd: number | null;
   duration_ms: number | null;
+  model: string | null;
   file_path: string;
   file_mtime_ms: number | null;
   file_size: number | null;
@@ -447,6 +449,13 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
     const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
     if (!cols.some(c => c.name === 'actor')) db.exec(`ALTER TABLE sessions ADD COLUMN actor TEXT`);
     if (!cols.some(c => c.name === 'initiated_by')) db.exec(`ALTER TABLE sessions ADD COLUMN initiated_by TEXT`);
+  }
+
+  if (fromVersion < 20) {
+    // v19 → v20: persist the transcript's model for the static session list.
+    const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'model')) db.exec(`ALTER TABLE sessions ADD COLUMN model TEXT`);
+    db.exec(`DELETE FROM scan_ledger; DELETE FROM dir_ledger;`);
   }
 }
 
@@ -851,7 +860,7 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     id, short_id, agent, origin, routine_name, routine_run_id,
     version, account, timestamp, last_activity,
     project, cwd, git_branch, topic, label, message_count, token_count,
-    output_tokens, cost_usd, duration_ms,
+    output_tokens, cost_usd, duration_ms, model,
     file_path, file_mtime_ms, file_size, scanned_at, is_team_origin,
     pr_url, pr_number, worktree_slug, ticket_id, plan, todos,
     recent_directories_touched, linear_project, linear_project_url, machine,
@@ -860,7 +869,7 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     @id, @short_id, @agent, @origin, @routine_name, @routine_run_id,
     @version, @account, @timestamp, @last_activity,
     @project, @cwd, @git_branch, @topic, @label, @message_count, @token_count,
-    @output_tokens, @cost_usd, @duration_ms,
+    @output_tokens, @cost_usd, @duration_ms, @model,
     @file_path, @file_mtime_ms, @file_size, @scanned_at, @is_team_origin,
     @pr_url, @pr_number, @worktree_slug, @ticket_id, @plan, @todos,
     @recent_directories_touched, @linear_project, @linear_project_url, @machine,
@@ -894,6 +903,7 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     output_tokens = excluded.output_tokens,
     cost_usd = excluded.cost_usd,
     duration_ms = excluded.duration_ms,
+    model = excluded.model,
     file_path = excluded.file_path,
     file_mtime_ms = excluded.file_mtime_ms,
     file_size = excluded.file_size,
@@ -914,11 +924,15 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
       WHEN excluded.ticket_id IS NOT sessions.ticket_id THEN excluded.linear_project_url
       ELSE COALESCE(excluded.linear_project_url, sessions.linear_project_url)
     END,
-    machine = excluded.machine
-    -- actor / initiated_by are deliberately NOT in this update set (RUSH-2018):
-    -- they record who launched the session, write-once at creation. A later
-    -- content rescan carries no actor, so updating here would clobber the real
-    -- owner with NULL. Omitting them preserves the original on every rescan.
+    machine = excluded.machine,
+    -- actor / initiated_by record who launched the session. COALESCE(existing,
+    -- incoming) keeps a stored owner (a rescan carries no actor -> excluded.actor
+    -- is NULL -> the stored value wins, never clobbered) BUT backfills a row that
+    -- was inserted NULL-first — e.g. an older scanner, or any scan that ran before
+    -- the actor sidecar landed — once the sidecar-join finally provides one. Plain
+    -- exclusion locked those rows to NULL forever (RUSH-2018/2019 fix).
+    actor = COALESCE(sessions.actor, excluded.actor),
+    initiated_by = COALESCE(sessions.initiated_by, excluded.initiated_by)
 `);
 
 function enrichCachedSessionMeta(meta: SessionMeta): SessionMeta {
@@ -990,8 +1004,9 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
   meta = enrichCachedSessionMeta(meta);
   // Join the durable sessionId -> actor sidecar (RUSH-2019) when the caller
   // didn't already carry an actor, so a scanned transcript still attributes to a
-  // person. ON CONFLICT excludes actor/initiated_by, so this only ever fills a
-  // fresh row — a rescan never overwrites the stored owner.
+  // person. The ON CONFLICT COALESCEs actor/initiated_by, so this fills a fresh
+  // row AND backfills one indexed null-first (before its sidecar existed), while a
+  // rescan carrying no actor still keeps the stored owner.
   const actorRec = meta.actor ? undefined : readSessionActorRecord(meta.id);
   const db = getDB();
   const { upsert, delText, insText, readLabel } = stmts(db);
@@ -1016,6 +1031,7 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
     output_tokens: meta.outputTokens ?? null,
     cost_usd: meta.costUsd ?? null,
     duration_ms: meta.durationMs ?? null,
+    model: meta.model ?? null,
     file_path: meta.filePath,
     file_mtime_ms: scan?.fileMtimeMs ?? null,
     file_size: scan?.fileSize ?? null,
@@ -1061,8 +1077,9 @@ export function upsertSessionsBatch(
   const now = Date.now();
   // One directory read for the whole batch: join the durable sessionId -> actor
   // sidecar (RUSH-2019) so scanned transcripts attribute to a person. Only used
-  // for entries whose meta carries no actor; ON CONFLICT excludes the column, so
-  // this fills fresh rows without ever clobbering a stored owner on rescan.
+  // for entries whose meta carries no actor; the ON CONFLICT COALESCEs the column,
+  // so this fills fresh rows AND backfills null-first ones, never clobbering a
+  // stored owner on rescan.
   const actorIndex = loadSessionActorIndex();
   // Persist the Claude resumable-parse continuation (parser_state + content_text)
   // alongside the stamp. On a full/incremental Claude parse the caller passes the
@@ -1148,6 +1165,7 @@ export function upsertSessionsBatch(
         output_tokens: meta.outputTokens ?? null,
         cost_usd: meta.costUsd ?? null,
         duration_ms: meta.durationMs ?? null,
+        model: meta.model ?? null,
         file_path: meta.filePath,
         file_mtime_ms: scan?.fileMtimeMs ?? null,
         file_size: scan?.fileSize ?? null,
@@ -1352,6 +1370,7 @@ function rowToMeta(row: SessionRow): SessionMeta {
     outputTokens: row.output_tokens ?? undefined,
     costUsd: row.cost_usd ?? undefined,
     durationMs: row.duration_ms ?? undefined,
+    model: row.model ?? undefined,
     version: row.version ?? undefined,
     account: row.account ?? undefined,
     topic: row.topic ?? undefined,
