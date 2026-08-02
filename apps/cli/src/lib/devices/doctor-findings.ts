@@ -71,6 +71,8 @@ export type FindingKind =
   | 'stale'               // sources changed since last sync (WARNING)
   | 'repo-behind'         // a config repo behind origin (WARNING)
   | 'repo-drift'          // a config repo diverged from the fleet baseline (WARNING)
+  | 'fleet-resource-gap'  // a resource in another box's central repos, absent here (WARNING)
+  | 'host-cli-missing'    // a declared host CLI not installed on this box (WARNING)
   | 'version-skew'        // an agent version present elsewhere, absent here (WARNING)
   | 'orphan'              // orphan resources in a version home (WARNING)
   | 'duplicate-hook'      // one hook materialized in several version homes, byte-identical (WARNING)
@@ -139,7 +141,11 @@ export function remediationFor(finding: DoctorFinding): string {
     case 'stale':
       return idLabel ? `agents doctor ${idLabel} --fix` : 'agents doctor --fix';
     case 'never-synced':
-      return idLabel ? `agents sync ${idLabel} --yes` : 'agents sync';
+      // A bare `agents sync <agent>` targets only the default/sole installed
+      // version (`commands/sync.ts:8`), so a row collapsed across versions must
+      // ask for the `@all` selector or it silently fixes just one of them.
+      if (!agent) return 'agents sync';
+      return version ? `agents sync ${agent}@${version} --yes` : `agents sync ${agent}@all --yes`;
     case 'cli-missing':
       return agent ? `agents add ${agent}` : 'agents add <agent>';
     case 'orphan':
@@ -147,15 +153,25 @@ export function remediationFor(finding: DoctorFinding): string {
     case 'repo-behind':
       return `agents repo pull ${finding.version ?? 'user'}`;
     case 'repo-drift':
-      return 'agents repo pull user';
+      // `version` carries the repo alias (`user` for ~/.agents, `system` for
+      // ~/.agents/.system) — hardcoding `user` would send a `.system` drift at
+      // the wrong repo.
+      return `agents repo pull ${version ?? 'user'}`;
+    case 'fleet-resource-gap':
+      // The resource is absent from this box's CENTRAL repos, not from a version
+      // home, so `agents doctor --fix` (which reconciles central -> homes) has
+      // nothing to copy. Pulling every config repo here is what closes the gap.
+      return 'agents repo pull';
     case 'version-skew':
       return idLabel ? `agents add ${idLabel}` : 'agents add <agent>@<version>';
     case 'duplicate-hook':
     case 'duplicate-hook-drift':
-      // Re-syncing the authoritative version is what reconciles the copies; the
-      // builder supplies the concrete version, so this is only the agent-wide
-      // fallback when it did not.
-      return agent ? `agents sync ${idLabel} --yes` : 'agents sync';
+      // The copies live in SEVERAL version homes, so the reconcile has to reach
+      // every one — `agents sync <agent>@<one-version>` would leave the others
+      // holding their stale copy.
+      return agent ? `agents sync ${agent}@all --yes` : 'agents sync';
+    case 'host-cli-missing':
+      return 'agents cli install';
     case 'rc-secret-export':
       return 'agents secrets add';
     case 'exec-policy':
@@ -219,6 +235,10 @@ export interface LocalFindingInputs {
   signIn: Record<string, FleetVersionSignIn[]>;
   /** Managed agents (installed versions) whose binary won't resolve. */
   cliMissing?: AgentId[];
+  /** Host CLIs declared in a DotAgents repo's `cli/` and their install state on
+   *  this box. Host-global (installed to PATH, never synced into a version home),
+   *  so they are a machine-level finding, not a per-version one. */
+  hostClis?: Array<{ name: string; installed: boolean }>;
   /** Hooks materialized into several version homes at once — identical copies are
    *  installation noise, differing ones are drift a stale gate can act on. */
   duplicateHooks?: DuplicateVersionHook[];
@@ -384,6 +404,20 @@ export function buildLocalFindings(input: LocalFindingInputs): DoctorFinding[] {
   // was the single largest block of noise in the readout for zero added action.
   out.push(...orphanFinding(device, input.orphanRows));
 
+  // Host CLIs declared but not on PATH. One row for the machine, naming the
+  // count and two examples — `agents cli install <name>` is per-CLI, so the
+  // names have to survive into the message.
+  const missingClis = (input.hostClis ?? []).filter((c) => !c.installed).map((c) => c.name);
+  if (missingClis.length > 0) {
+    out.push({
+      severity: 'warning', kind: 'host-cli-missing', device,
+      message: missingClis.length === 1
+        ? `host CLI '${missingClis[0]}' declared but not installed`
+        : `${missingClis.length} declared host CLIs not installed (${missingClis.slice(0, 2).join(', ')}${missingClis.length > 2 ? ', …' : ''})`,
+      remediation: `agents cli install ${missingClis[0]}${missingClis.length > 1 ? ' …' : ''}`,
+    });
+  }
+
   out.push(...duplicateHookFindings(device, input.duplicateHooks ?? []));
 
   // Credential-shaped exports in shell rc files (RUSH-1968) — a warning per class
@@ -454,7 +488,7 @@ function duplicateHookFindings(device: string, dups: DuplicateVersionHook[]): Do
       severity: drift ? 'critical' : 'warning',
       kind: drift ? 'duplicate-hook-drift' : 'duplicate-hook',
       device, agent, versions, message,
-      remediation: `agents sync ${agent}@${active} --yes`,
+      remediation: `agents sync ${agent}@all --yes`,
     });
   }
   return out;
@@ -621,13 +655,16 @@ export function fleetDivergenceToFindings(
       case 'repo-drift':
         out.push(finding({
           severity: 'warning', kind: 'repo-drift', device: laggingDevice,
+          // `category` is the repo ('agents' | 'system'); carry it as the alias
+          // `agents repo pull` expects — ~/.agents is the `user` repo.
+          version: d.category === 'system' ? 'system' : 'user',
           message: d.message,
         }));
         break;
       case 'resource-missing-remote':
       case 'resource-missing-local':
         out.push(finding({
-          severity: 'warning', kind: 'missing-resource', device: laggingDevice,
+          severity: 'warning', kind: 'fleet-resource-gap', device: laggingDevice,
           message: `${d.category.replace(/s$/, '')} '${d.name}' missing (present elsewhere)`,
         }));
         break;
@@ -792,6 +829,8 @@ function warningSubject(f: DoctorFinding): string {
   if (f.kind === 'orphan') return 'orphans';
   if (f.kind === 'rc-secret-export') return 'shell rc';
   if (f.kind === 'exec-policy') return 'PowerShell';
+  if (f.kind === 'fleet-resource-gap') return 'fleet gap';
+  if (f.kind === 'host-cli-missing') return 'host CLIs';
   if (f.kind === 'missing-resource' && !f.agent) return 'fleet gap';
   if (f.agent) return subjectLabel(f);
   return f.kind;

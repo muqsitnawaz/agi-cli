@@ -349,6 +349,7 @@ async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
         signIn: r.inventory?.signIn ?? {},
         cliMissing: localCliMissing,
         duplicateHooks: inspectDuplicateVersionHooks(cwd),
+        hostClis: listCliStatus(cwd).statuses.map((c) => ({ name: c.manifest.name, installed: c.installed })),
         rcSecrets: scanUserRcFiles(),
         execPolicy: process.platform === 'win32'
           ? { platform: process.platform, policy: getEffectiveExecutionPolicy() }
@@ -1472,6 +1473,7 @@ export function registerDoctorCommand(program: Command): void {
           signIn: inventory.signIn ?? {},
           cliMissing,
           duplicateHooks,
+          hostClis: hostClis.statuses.map((c) => ({ name: c.manifest.name, installed: c.installed })),
           rcSecrets: scanUserRcFiles(),
           // getEffectiveExecutionPolicy spawns powershell — a doomed process on
           // POSIX, where the advisory never applies. Probe only on Windows.

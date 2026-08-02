@@ -110,8 +110,9 @@ collapses to the CRITICAL section plus one `▸ <machine>` block. Severity:
 provable-logged-out / missing-hook / missing-plugin / broken-CLI /
 duplicate-hook-**drift** are **critical**; drift / never-synced / version-skew /
 repo-behind / repo-drift / orphan / other-missing-kinds / identical duplicate
-hooks / rc-secret exports / a blocking Windows exec policy /
-**unprovable-logout** are **warnings**. The findings model,
+hooks / a declared-but-missing host CLI / a fleet resource gap / rc-secret
+exports / a blocking Windows exec policy / **unprovable-logout** are
+**warnings**. The findings model,
 builders, `remediationFor`, and the pure `renderFindings` live in
 [`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts).
 
@@ -139,12 +140,28 @@ takes ~57 rows down to ~16, and the rules are unit-pinned in
   never-synced version reports one critical (`agents sync <agent>@<version>
   --yes`) instead of one per absent resource.
 
-**The two pre-RUSH-2069 advisories are findings, not separate blocks.**
-Credential-shaped exports in shell rc files (`scanUserRcFiles`, RUSH-1968) and the
-Windows execution policy that blocks `agents.ps1` (`blocksLocalScripts`) enter
-through `buildLocalFindings` as `rc-secret-export` / `exec-policy` warnings. They
-are inputs (`rcSecrets`, `execPolicy`), not probes, so the module stays pure and
-both branches are testable without a shell or PowerShell.
+**Every check the old overview printed is a finding now.** `renderOverviewText`
+was the ONLY text renderer for several independent checks, so deleting it dropped
+each of them from the command — the top defect this redesign had to answer for, and
+it recurred three times during review. They all enter `buildLocalFindings` as
+plain **inputs** (never probes, so the module stays pure and every branch is
+testable without a shell, PowerShell, or an installed CLI):
+
+| Check | Input | Finding kind |
+|---|---|---|
+| Credential-shaped shell-rc exports (RUSH-1968) | `rcSecrets` | `rc-secret-export` |
+| Windows exec policy blocking `agents.ps1` | `execPolicy` | `exec-policy` |
+| Hooks duplicated across version homes | `duplicateHooks` | `duplicate-hook{,-drift}` |
+| Declared host CLIs not on PATH | `hostClis` | `host-cli-missing` |
+
+**Before deleting any renderer here, enumerate what it called.**
+
+**A remediation must fix EVERY version in its row.** `agents sync <agent>` targets
+only the default/sole installed version (`commands/sync.ts:8`), so a row collapsed
+across versions uses the `@all` selector — `agents sync <agent>@all --yes`. A fleet
+resource gap is absent from that box's *central repos*, so it takes
+`agents repo pull`, not the central-to-home `agents doctor --fix`; and a `repo-drift`
+row carries the repo alias (`user` / `system`) rather than hardcoding one.
 
 **Sign-in is per installed VERSION, and a logged-out claim must be provable.**
 [`credentialPresence(agent, versionHome)`](src/lib/agents.ts) splits a credential's

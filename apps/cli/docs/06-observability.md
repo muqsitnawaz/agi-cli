@@ -336,7 +336,8 @@ agents doctor · zion                                        1.20.81
   the active one).
 - **WARNING** (`⚠`) — content drift, version-skew, repo-behind, repo-drift,
   orphans, byte-identical duplicate copies of a hook across version homes,
-  a missing command/skill/rule/mcp/permission/subagent, a credential-shaped
+  a declared host CLI that is not installed, a resource another box has but this
+  one does not, a missing command/skill/rule/mcp/permission/subagent, a credential-shaped
   export in a shell rc file, a Windows execution policy that blocks `agents.ps1`,
   and an **unprovable** logout (hedged "could not verify sign-in").
 

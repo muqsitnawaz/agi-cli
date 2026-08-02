@@ -210,8 +210,7 @@ describe('duplicate version-home hooks', () => {
     const f = findings.find((x) => x.kind === 'duplicate-hook-drift');
     expect(f?.severity).toBe('critical');
     expect(f?.message).toBe("hook 'git-guard' differs across 2.1.170, 2.1.219 — 2.1.219 is authoritative");
-    expect(f?.remediation).toBe('agents sync claude@2.1.219 --yes');
-    expect(f?.remediation).toBe('agents sync claude@2.1.219 --yes');
+    expect(f?.remediation).toBe('agents sync claude@all --yes');
     // The row spans versions, so it renders `claude (2 versions)`, not one of them.
     expect(f?.versions).toEqual(['2.1.170', '2.1.219']);
     expect(f?.version).toBeUndefined();
@@ -241,7 +240,9 @@ describe('duplicate version-home hooks', () => {
     expect(rows[0].message).toBe(
       "24 hooks duplicated (identical) across 5 versions (incl. 'hook-0', 'hook-1') — 2.1.219 is authoritative",
     );
-    expect(rows[0].remediation).toBe('agents sync claude@2.1.219 --yes');
+    // The copies live in FIVE homes, so the reconcile must reach all of them —
+    // `agents sync claude@2.1.219` would leave the other four holding their copy.
+    expect(rows[0].remediation).toBe('agents sync claude@all --yes');
   });
 
   it('drifted and identical copies stay separate rows — different severities', () => {
@@ -257,6 +258,29 @@ describe('duplicate version-home hooks', () => {
 
   it('no duplicates → no finding', () => {
     expect(buildLocalFindings(localInput({ duplicateHooks: [] }))).toHaveLength(0);
+  });
+});
+
+describe('host CLIs (restored — `renderOverviewText` was its only text renderer)', () => {
+  it('declared-but-missing host CLIs become ONE warning naming the install command', () => {
+    const findings = buildLocalFindings(localInput({
+      hostClis: [{ name: 'mq', installed: false }, { name: 'rush', installed: true }, { name: 'fd', installed: false }],
+    }));
+    const f = findings.find((x) => x.kind === 'host-cli-missing');
+    expect(f?.severity).toBe('warning');
+    expect(f?.message).toBe('2 declared host CLIs not installed (mq, fd)');
+    expect(f?.remediation).toBe('agents cli install mq …');
+  });
+
+  it('a single missing host CLI is named in full with its exact install command', () => {
+    const findings = buildLocalFindings(localInput({ hostClis: [{ name: 'mq', installed: false }] }));
+    const f = findings.find((x) => x.kind === 'host-cli-missing');
+    expect(f?.message).toBe("host CLI 'mq' declared but not installed");
+    expect(f?.remediation).toBe('agents cli install mq');
+  });
+
+  it('all host CLIs installed → no finding', () => {
+    expect(buildLocalFindings(localInput({ hostClis: [{ name: 'mq', installed: true }] }))).toHaveLength(0);
   });
 });
 
@@ -435,12 +459,32 @@ describe('fleetDivergenceToFindings', () => {
     expect(findings[0].device).toBe('boxA');
   });
 
-  it('maps repo drift to a repo-drift warning', () => {
+  it('a .agents repo drift pulls the USER repo; a .system drift pulls the SYSTEM repo', () => {
+    // `category` is the repo — dropping it and hardcoding `user` sends a
+    // `.system` drift at the wrong repo.
+    const drift = (category: string, name: string): FleetDivergence => ({
+      kind: 'repo-drift', device: 'boxB', category, name,
+      message: `boxB ${name} repo diverged: HEAD abc != local def`,
+    });
+    expect(fleetDivergenceToFindings([drift('agents', '.agents')], 'boxA')[0]).toMatchObject({
+      kind: 'repo-drift', device: 'boxB', remediation: 'agents repo pull user',
+    });
+    expect(fleetDivergenceToFindings([drift('system', '.system')], 'boxA')[0]).toMatchObject({
+      kind: 'repo-drift', device: 'boxB', remediation: 'agents repo pull system',
+    });
+  });
+
+  it('a fleet resource gap pulls the config repos — NOT `agents doctor --fix`', () => {
+    // The resource is absent from the lagging box's CENTRAL repos, so the
+    // central -> version-home reconcile has nothing to copy.
     const d: FleetDivergence = {
-      kind: 'repo-drift', device: 'boxB', category: 'agents', name: '.agents',
-      message: 'boxB .agents repo diverged: HEAD abc != local def',
+      kind: 'resource-missing-remote', device: 'boxB', category: 'skills', name: 'cgraph',
+      message: "boxB is missing skill 'cgraph'",
     };
-    expect(fleetDivergenceToFindings([d], 'boxA')[0]).toMatchObject({ kind: 'repo-drift', device: 'boxB' });
+    const f = fleetDivergenceToFindings([d], 'boxA')[0];
+    expect(f).toMatchObject({ kind: 'fleet-resource-gap', device: 'boxB' });
+    expect(f.remediation).toBe('agents repo pull');
+    expect(f.remediation).not.toContain('doctor');
   });
 });
 
