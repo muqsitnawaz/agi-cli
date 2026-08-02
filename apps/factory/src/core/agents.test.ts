@@ -14,8 +14,21 @@ import {
 } from './agents';
 import { CLAUDE_TITLE, CODEX_TITLE, GEMINI_TITLE, OPENCODE_TITLE, CURSOR_TITLE, SHELL_TITLE } from './utils';
 import { CLI_AGENT_META, CliAgentId, isCliAgentId } from './agents.cli';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 describe('BUILT_IN_AGENTS', () => {
+  test('every non-shell built-in contributes and registers an Auto command', () => {
+    const packageJson = JSON.parse(readFileSync(resolve(import.meta.dir, '../../package.json'), 'utf8'));
+    const contributed = new Set(packageJson.contributes.commands.map((entry: { command: string }) => entry.command));
+    const extensionSource = readFileSync(resolve(import.meta.dir, '../vscode/extension.ts'), 'utf8');
+    expect(extensionSource).toContain('`${def.commandId}Auto`');
+    for (const agent of BUILT_IN_AGENTS) {
+      if (agent.key === 'shell') continue;
+      expect(contributed.has(`${agent.commandId}Auto`)).toBe(true);
+    }
+  });
+
   test('every non-shell agent is a CLI agent and launches its CLI binary', () => {
     for (const agent of BUILT_IN_AGENTS) {
       if (agent.key === 'shell') continue;
@@ -283,8 +296,10 @@ describe('planTextToSteps', () => {
 });
 
 describe('STRATEGY_LAUNCH_AGENTS', () => {
-  test('covers the five version/account-managed agents incl. antigravity', () => {
-    expect([...STRATEGY_LAUNCH_AGENTS]).toEqual(['claude', 'codex', 'gemini', 'cursor', 'antigravity']);
+  test('covers every auto-host harness with account/version health', () => {
+    expect([...STRATEGY_LAUNCH_AGENTS]).toEqual([
+      'claude', 'codex', 'gemini', 'opencode', 'cursor', 'antigravity', 'grok', 'kimi',
+    ]);
   });
 
   test('every strategy-launch agent is a known built-in', () => {
@@ -342,6 +357,21 @@ describe('buildAgentLaunchCommand', () => {
   test('host flag is shell-quoted and included', () => {
     const cmd = buildAgentLaunchCommand('codex', null, undefined, undefined, undefined, undefined, undefined, 'mac-mini');
     expect(cmd).toContain("--host 'mac-mini'");
+  });
+
+  test('remote host launch forwards the workspace cwd for CLI portability rewriting', () => {
+    const cmd = buildAgentLaunchCommand(
+      'codex', null, undefined, undefined, undefined, undefined, undefined, 'mac-mini', false, '/Users/muqsit/src/agents-cli',
+    );
+    expect(cmd).toContain("--host 'mac-mini'");
+    expect(cmd).toContain("--cwd '/Users/muqsit/src/agents-cli'");
+  });
+
+  test('local launch does not emit an explicit cwd', () => {
+    const cmd = buildAgentLaunchCommand(
+      'codex', null, undefined, undefined, undefined, undefined, undefined, undefined, false, '/Users/muqsit/src/agents-cli',
+    );
+    expect(cmd).not.toContain('--cwd');
   });
 
   test('default model is included when provided', () => {

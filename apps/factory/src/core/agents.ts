@@ -171,6 +171,7 @@ export function buildAgentLaunchCommand(
   mode?: AgentLaunchMode,
   host?: string,
   local = false,
+  cwd?: string,
 ): string {
   const agentSpec = pinnedVersion ? `${agentKey}@${pinnedVersion}` : agentKey;
   let command = `agents run ${agentSpec} --interactive`;
@@ -179,6 +180,7 @@ export function buildAgentLaunchCommand(
   // grok/kimi/droid (which launch as raw binaries locally) get host parity.
   if (host) {
     command += ` --host ${shquote(host)}`;
+    if (cwd) command += ` --cwd ${shquote(cwd)}`;
   }
   // Unpinned, no explicit host: affinity-pick device via --device auto.
   // Explicit Pick Host / @version pin skip this.
@@ -226,10 +228,10 @@ export function wrapNativeAgentCommand(command: string, isShell: boolean): strin
   return `exec ${command}`;
 }
 
-// Agents that expose the per-strategy launch trio (Latest / Balanced / Pinned).
-// These are the version- and account-managed agents that route through
-// `agents run <agent>` so the agents-cli can apply a version pin or strategy.
-export const STRATEGY_LAUNCH_AGENTS = ['claude', 'codex', 'gemini', 'cursor', 'antigravity'] as const;
+// Version- and account-managed agents that route through `agents run <agent>`
+// so the CLI can apply balanced selection on local, picked-host, and auto-host
+// launches. Droid has no account enumeration and Shell is not an agent runner.
+export const STRATEGY_LAUNCH_AGENTS = ['claude', 'codex', 'gemini', 'opencode', 'cursor', 'antigravity', 'grok', 'kimi'] as const;
 
 // Compare two dotted version strings (e.g. "2.1.170" vs "2.1.42") numerically.
 // Returns >0 when a is newer, <0 when b is newer, 0 when equal. Non-numeric
