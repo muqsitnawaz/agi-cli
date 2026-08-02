@@ -3947,7 +3947,10 @@ async function tryHydrateSessionIdentity(
     if (entry.sessionId && entry.sessionId !== sessionId) return;
     if (identity.version) terminals.setVersion(terminal, identity.version);
     if (identity.account) terminals.setAccount(terminal, identity.account);
-    entry.identitySessionId = sessionId;
+    // Only mark this session's identity resolved once BOTH fields came back, so a
+    // transient partial result (e.g. account not yet indexed) is retried on the
+    // next tick instead of leaving the missing field frozen for the session.
+    if (identity.version && identity.account) entry.identitySessionId = sessionId;
 
     if (!agentStatusBarItem || vscode.window.activeTerminal !== terminal) return;
     const rawLabel = entry.label;
