@@ -450,20 +450,21 @@ export function indexActiveBySessionId(active: ActiveSession[]): Map<string, Act
  */
 export function liveGlyphAndPreview(a: ActiveSession | undefined): { glyph: string; preview: string } {
   if (!a) return { glyph: '', preview: '' };
-  const waiting = a.status === 'input_required' || a.activity === 'waiting_input';
-  const running = a.status === 'running' || a.activity === 'working';
   // `◌` (dotted) = alive but un-introspectable — visually distinct from `○` idle
   // so an opaque harness is never mistaken for a finished one. `⊘` = abandoned /
   // dangling; `×` = closed (dead pid) — both distinct from the `○` idle a live,
   // stopped session shows, so a gone session never masquerades as a resting one.
+  if (a.status === 'abandoned') return { glyph: statusColor(a.status)('⊘'), preview: buildSessionDescription(a) };
+  if (a.status === 'closed') return { glyph: statusColor(a.status)('×'), preview: buildSessionDescription(a) };
+
+  const waiting = a.status === 'input_required' || a.activity === 'waiting_input';
+  const running = a.status === 'running' || a.activity === 'working';
   const unknown = a.status === 'unknown';
   const shape =
-    a.status === 'abandoned' ? '⊘'
-      : a.status === 'closed' ? '×'
-        : waiting ? '◐'
-          : running ? '●'
-            : unknown ? '◌'
-              : '○';
+    waiting ? '◐'
+      : running ? '●'
+        : unknown ? '◌'
+          : '○';
   return { glyph: statusColor(a.status)(shape), preview: buildSessionDescription(a) };
 }
 
