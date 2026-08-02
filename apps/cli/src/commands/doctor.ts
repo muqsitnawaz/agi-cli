@@ -263,11 +263,31 @@ async function probeFleetInventory(target: FleetTarget): Promise<FleetInventory 
   const res = await sshExecAsync(target.sshTarget, remoteCmd, { timeoutMs: 30000, multiplex: true });
   if (res.code !== 0) return null;
   try {
-    const parsed = JSON.parse(res.stdout) as { fleet?: FleetInventory };
-    return parsed.fleet ?? null;
+    const parsed = JSON.parse(res.stdout) as { fleet?: unknown };
+    return asFleetInventory(parsed.fleet);
   } catch {
     return null;
   }
+}
+
+/**
+ * Narrow a remote `doctor --json` `.fleet` payload to a usable inventory, or null.
+ *
+ * The remote runs ITS OWN agents-cli, whose version we do not control, so the
+ * payload is untrusted input rather than a typed value — a cast alone let a
+ * partial object (`{"fleet":{}}` from a skewed or truncated remote) reach
+ * `compareFleetInventories`, which indexes `inv.resources[kind]` and
+ * `Object.keys(inv.agentVersions)` unconditionally and throws. Returning null
+ * routes that device into the existing "older agents-cli / no inventory" path,
+ * which is honest and already rendered, instead of aborting the whole fan-out.
+ */
+function asFleetInventory(value: unknown): FleetInventory | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Partial<FleetInventory>;
+  if (!v.resources || typeof v.resources !== 'object') return null;
+  if (!v.agentVersions || typeof v.agentVersions !== 'object') return null;
+  if (!v.repos || typeof v.repos !== 'object') return null;
+  return v as FleetInventory;
 }
 
 async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {

@@ -603,6 +603,18 @@ describe('renderAccountsLine', () => {
     expect(line).toContain(' · ');
   });
 
+  it('an UNPROVABLE logout shows gray ? — never a red ✗ the warning contradicts', () => {
+    // The finding for this row is the hedged "could not verify sign-in"; a red ✗
+    // here would have one report say both "unverifiable" and "logged out".
+    const line = stripAnsi(renderAccountsLine({
+      cursor: [{ version: '1.0', signedIn: false, account: null, provable: false }],
+      codex: [{ version: '0.1', signedIn: false, account: null, provable: true }],
+    }));
+    expect(line).toContain('cursor ?');
+    expect(line).toContain('codex ✗');
+    expect(line).not.toContain('cursor ✗');
+  });
+
   it('collapses a single-version agent to `<agent> <badge>`', () => {
     const line = stripAnsi(renderAccountsLine({ grok: [{ version: '0.2', signedIn: true, account: null, provable: false }] }));
     expect(line).toBe('grok ✓');

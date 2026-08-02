@@ -979,7 +979,8 @@ function warningSubject(f: DoctorFinding): string {
 
 /**
  * The compact accounts/versions line for one device: every installed version and
- * its account, grouped by agent, provable ✓ / ✗. e.g.
+ * its account, grouped by agent — green ✓ signed in, red ✗ provably logged out,
+ * gray ? unknown (see {@link badge}). e.g.
  *   `claude 2.1.170 ✓muqsit@gmail(Max) 2.1.999 ✓team(Team) · codex ✗ · grok ✓`
  */
 export function renderAccountsLine(signIn: Record<string, FleetVersionSignIn[]>): string {
@@ -1005,12 +1006,20 @@ export function renderAccountsLine(signIn: Record<string, FleetVersionSignIn[]>)
   return parts.join(chalk.gray(' · '));
 }
 
-/** The per-version ✓account / ✗ badge. Signed-in → green ✓ + cyan account (when
- *  known); logged-out → red ✗. */
+/**
+ * The per-version sign-in badge: green `✓` + cyan account when signed in, red `✗`
+ * only for a PROVABLE logout, gray `?` when the state is unknown.
+ *
+ * The third case is load-bearing. A probe that threw, or an agent whose
+ * credential location we do not know, yields `signedIn: false` with
+ * `provable: false` — and the finding for that row is deliberately the hedged
+ * "could not verify sign-in". Painting it red here would have the same report say
+ * "unverifiable" in the warning and "logged out" in the accounts line.
+ */
 function badge(agent: AgentId, row: FleetVersionSignIn): string {
   if (row.signedIn) {
     const who = row.account ?? '';
     return who ? `${chalk.green('✓')}${chalk.cyan(who)}` : chalk.green('✓');
   }
-  return chalk.red('✗');
+  return row.provable ? chalk.red('✗') : chalk.gray('?');
 }
