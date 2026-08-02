@@ -12,6 +12,7 @@ import {
   __resetAntigravityKeychainCacheForTest,
   accountOrgBadge,
   antigravityOsKeyringProbe,
+  credentialPresence,
   deprecationNotice,
   formatClaudeOrgLabel,
   getAccountInfo,
@@ -52,6 +53,70 @@ function makeTempDir(): string {
   tempDirs.push(dir);
   return dir;
 }
+
+describe('credentialPresence (RUSH-2069 provable-logout signal)', () => {
+  // credentialPresence splits a credential file's existence into the per-version
+  // home and the active/global HOME. A provable logout is only when BOTH are
+  // absent. Pin AGENTS_REAL_HOME to a fresh empty dir so the "active" side never
+  // leaks the developer's real ~/.codex login.
+  let prevRealHome: string | undefined;
+  let activeHome: string;
+  beforeEach(() => {
+    prevRealHome = process.env.AGENTS_REAL_HOME;
+    activeHome = makeTempDir();
+    process.env.AGENTS_REAL_HOME = activeHome;
+  });
+  afterEach(() => {
+    if (prevRealHome === undefined) delete process.env.AGENTS_REAL_HOME;
+    else process.env.AGENTS_REAL_HOME = prevRealHome;
+  });
+
+  function writeCodexAuth(home: string): void {
+    const dir = path.join(home, '.codex');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'auth.json'), '{}', 'utf-8');
+  }
+
+  it('reports perVersion=true when the version home holds the credential', () => {
+    const versionHome = makeTempDir();
+    writeCodexAuth(versionHome);
+    const p = credentialPresence('codex', versionHome);
+    expect(p.perVersion).toBe(true);
+    // Not provable: perVersion present means signed in for that version.
+    expect(p.active).toBe(false);
+  });
+
+  it('reports active=true (not provable) when only the global HOME holds it', () => {
+    writeCodexAuth(activeHome);
+    const p = credentialPresence('codex', makeTempDir());
+    expect(p.perVersion).toBe(false);
+    expect(p.active).toBe(true);
+    // Shared global login → NOT provable logout even though the version lacks it.
+    expect(p.perVersion && p.active).toBe(false);
+    expect(!p.perVersion && !p.active).toBe(false);
+  });
+
+  it('reports neither present (provable logout) when the credential is absent everywhere', () => {
+    const p = credentialPresence('codex', makeTempDir());
+    expect(p.perVersion).toBe(false);
+    expect(p.active).toBe(false);
+    // Provable: absent per-version AND globally.
+    expect(!p.perVersion && !p.active).toBe(true);
+  });
+
+  it('honors the claude alternative credential paths (.claude/.claude.json OR .claude.json)', () => {
+    const versionHome = makeTempDir();
+    fs.writeFileSync(path.join(versionHome, '.claude.json'), '{}', 'utf-8');
+    expect(credentialPresence('claude', versionHome).perVersion).toBe(true);
+  });
+
+  it('returns both-absent for an agent with no inspectable credential format', () => {
+    // amp has no CREDENTIAL_FILE_SEGMENTS entry → never a present credential, so
+    // the caller (gated on supportsAccountInspection) never claims a logout.
+    const p = credentialPresence('amp' as any, makeTempDir());
+    expect(p).toEqual({ perVersion: false, active: false });
+  });
+});
 
 function shSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;

@@ -66,6 +66,24 @@ export interface RepoState {
 }
 
 /**
+ * Per-version sign-in state a device self-reports, so the fleet doctor can show
+ * every installed version's account (and a provable logged-out) without a second
+ * SSH round-trip. `provable` is true only when the credential is absent from BOTH
+ * the version home and the active/global HOME (see `credentialPresence`); an
+ * unprovable absence (opaque/keychain agent) is a warning, not a critical.
+ */
+export interface FleetVersionSignIn {
+  version: string;
+  /** A usable local credential was found for this version (or shared globally). */
+  signedIn: boolean;
+  /** Human account label (email, org badge, or opaque id), when derivable. */
+  account: string | null;
+  /** True only when a logged-out state is PROVABLE (credential absent per-version
+   *  AND globally) — the caller gates a critical on this. */
+  provable: boolean;
+}
+
+/**
  * The self-reported harness inventory a single device emits in `doctor --json`.
  * Comparable device-to-device with no further probing.
  */
@@ -80,6 +98,11 @@ export interface FleetInventory {
     agents: RepoState | null;
     system: RepoState | null;
   };
+  /** Per-version sign-in state per agent id, for the fleet doctor's accounts
+   *  line and cross-fleet logged-out criticals. Optional — an older CLI that
+   *  predates this field omits it, and the caller degrades to a warning
+   *  ("older agents-cli — can't report per-version sign-in"). */
+  signIn?: Record<string, FleetVersionSignIn[]>;
 }
 
 /** A device's inventory paired with its name (and reachability). A device that

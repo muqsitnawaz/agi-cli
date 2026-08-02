@@ -9,11 +9,23 @@
  * into their doctor payload; the comparator then diffs those payloads.
  */
 
-import { getAvailableResources, listInstalledVersions } from '../versions.js';
+import { getAvailableResources, getVersionHomePath, listInstalledVersions } from '../versions.js';
 import { getUserAgentsDir, getSystemAgentsDir } from '../state.js';
 import { readRepoState } from '../git.js';
-import { ALL_AGENT_IDS } from '../agents.js';
-import { FLEET_RESOURCE_KINDS, type FleetInventory, type RepoState } from './fleet-divergence.js';
+import {
+  ALL_AGENT_IDS,
+  accountDisplayLabel,
+  credentialPresence,
+  getAccountInfo,
+  supportsAccountInspection,
+} from '../agents.js';
+import type { AgentId } from '../types.js';
+import {
+  FLEET_RESOURCE_KINDS,
+  type FleetInventory,
+  type FleetVersionSignIn,
+  type RepoState,
+} from './fleet-divergence.js';
 
 function toRepoState(snap: ReturnType<typeof readRepoState>): RepoState | null {
   if (!snap) return null;
@@ -21,13 +33,59 @@ function toRepoState(snap: ReturnType<typeof readRepoState>): RepoState | null {
 }
 
 /**
- * Collect this machine's harness inventory: installed resources per kind,
- * installed version ids per agent, and `.agents`/`.system` repo state. Pure
- * reads — never mutates the install. `promptcuts` (a single present/absent bit
- * in {@link getAvailableResources}) is surfaced as a one-element list so it
- * compares like any other named resource.
+ * Probe every installed version's sign-in state, per agent. For each version we
+ * read its own home's account (via the shim-set config dir) and, when logged
+ * out, decide whether that is PROVABLE: an agent that can't be inspected
+ * (`!supportsAccountInspection`) never claims logged out, and a version that
+ * merely lacks its own credential but shares the global login (`active`) is
+ * signed in, not out. Pure reads (file-presence + cheap account parse), no
+ * network, no keychain prompt. Only agents with at least one installed version
+ * appear, so the map lines up with {@link FleetInventory.agentVersions}.
  */
-export function collectLocalFleetInventory(cwd: string = process.cwd()): FleetInventory {
+export async function collectLocalFleetSignIn(): Promise<Record<string, FleetVersionSignIn[]>> {
+  const out: Record<string, FleetVersionSignIn[]> = {};
+  await Promise.all(
+    ALL_AGENT_IDS.map(async (agent: AgentId) => {
+      const versions = listInstalledVersions(agent);
+      if (versions.length === 0) return;
+      const rows = await Promise.all(
+        versions.map(async (version): Promise<FleetVersionSignIn> => {
+          const home = getVersionHomePath(agent, version);
+          let signedIn = false;
+          let account: string | null = null;
+          try {
+            const info = await getAccountInfo(agent, home);
+            signedIn = info.signedIn;
+            account = accountDisplayLabel(info) || null;
+          } catch {
+            /* advisory only — treat as logged out, provability decided below */
+          }
+          // Provable logout: the agent is inspectable AND the credential is absent
+          // from BOTH the version home and the active/global HOME. An opaque or
+          // keychain-only agent, or one sharing the global login, is never a
+          // provable logout.
+          let provable = false;
+          if (!signedIn && supportsAccountInspection(agent)) {
+            const presence = credentialPresence(agent, home);
+            provable = !presence.perVersion && !presence.active;
+          }
+          return { version, signedIn, account, provable };
+        }),
+      );
+      out[agent] = rows;
+    }),
+  );
+  return out;
+}
+
+/**
+ * Collect this machine's harness inventory: installed resources per kind,
+ * installed version ids per agent, `.agents`/`.system` repo state, and
+ * per-version sign-in. Pure reads — never mutates the install. `promptcuts` (a
+ * single present/absent bit in {@link getAvailableResources}) is surfaced as a
+ * one-element list so it compares like any other named resource.
+ */
+export async function collectLocalFleetInventory(cwd: string = process.cwd()): Promise<FleetInventory> {
   const available = getAvailableResources(cwd);
   const resources = {} as Record<(typeof FLEET_RESOURCE_KINDS)[number], string[]>;
   for (const kind of FLEET_RESOURCE_KINDS) {
@@ -54,5 +112,6 @@ export function collectLocalFleetInventory(cwd: string = process.cwd()): FleetIn
       agents: toRepoState(readRepoState(getUserAgentsDir())),
       system: toRepoState(readRepoState(getSystemAgentsDir())),
     },
+    signIn: await collectLocalFleetSignIn(),
   };
 }

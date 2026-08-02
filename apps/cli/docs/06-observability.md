@@ -291,12 +291,71 @@ agents doctor --check --devices  # gate every registered device
 > the merged table is now [`agents view --merged`](00-concepts.md). One command per
 > responsibility, no overlap.
 
-### Triaged health block (local modes)
+### Prioritized findings (bare `agents doctor`, RUSH-2069)
 
-Both the bare `agents doctor` overview and the target report
-`agents doctor <agent>[@version]` lead with a **triaged health block** — the
-verdict, ranked by severity, so the reader sees what is unhealthy, why it matters,
-and the exact fix without decoding status text. A clean install collapses to one
+The bare `agents doctor` (no target) is a **prioritized, comprehensive-by-default**
+readout — there is no `--verbose`. It is a two-part hybrid:
+
+1. **`✗ CRITICAL — needs you now (N)`** — every critical finding across the whole
+   fleet, worst-first. Each line reads
+   `device · harness@version · account · message → remediation`, so a healthy
+   machine can never bury a critical.
+2. **`─── by computer ───`** — one block per device (worst device first): that
+   machine's WARNINGS, plus a compact **accounts/versions line** listing every
+   installed version and its account, provable ✓ / ✗. A device that has criticals
+   carries a `✗ N critical (above)` marker (the criticals themselves stay at the
+   top).
+
+A single-machine `agents doctor` (no `--devices`) collapses to the CRITICAL
+section, then one `▸ <machine>` block:
+
+```
+agents doctor · zion                                        1.20.81
+
+✗ CRITICAL — needs you now  (1)
+  codex @0.1  logged out — no account signed in       → codex login
+
+▸ zion · this machine  ✗ 1 critical (above)
+    ⚠ ~/.agents      6 behind origin/main → stales 7 versions  → agents repo pull user
+    ⚠ claude @2.1.170  skill 'plan-render' changed upstream — re-sync  → agents doctor claude@2.1.170 --fix
+    claude 2.1.170 ✓me@x.com (Max) 2.1.999 ✓team (Team) · codex ✗ · grok ✓ · kimi ✓
+```
+
+**Severity rubric** (agent-agnostic):
+
+- **CRITICAL** (`✗`) — a **provable** logged-out version, a **missing hook or
+  plugin** from a version, a missing/broken CLI binary.
+- **WARNING** (`⚠`) — content drift, never-synced, version-skew, repo-behind,
+  repo-drift, orphans, a missing command/skill/rule/mcp/permission/subagent, and an
+  **unprovable** logout (hedged "could not verify sign-in").
+
+**Per-version sign-in.** Sign-in is probed per **installed version**, not
+account-global: each version's own home is read, and a logged-out state is only
+claimed as CRITICAL when it is **provable** — the credential is absent from BOTH the
+version home AND the active/global HOME (`credentialPresence` in
+`src/lib/agents.ts`). A version that merely shares the global login is signed in,
+not out. Agents with no inspectable identity (antigravity, cursor —
+`!supportsAccountInspection`) never yield a logged-out finding. The login
+remediation is version-targeted: for the per-version-isolated set
+(claude/codex/grok/kimi/opencode/copilot) it is `agents run <agent>@<version>` then
+the harness-native login (`codex login`, `claude → /login`, `opencode auth login`);
+gemini/antigravity/droid/cursor have no per-version isolation, so the fix says the
+login is shared rather than faking a per-version repair.
+
+`--json` carries a `findings` array (severity/kind/device/agent/version/account/
+message/remediation) plus a per-version `fleet.signIn` map; the existing
+`clis`/`sync`/`orphans`/`health`/`fleet`/`signIn`/`repos` fields are unchanged, so
+menubar and `ssh.ts`'s `RemoteDoctorJson` consumers keep working. Source:
+`src/lib/devices/doctor-findings.ts` (findings model, builders, `remediationFor`,
+`renderFindings`), `src/lib/devices/fleet-inventory.ts`
+(`collectLocalFleetInventory` / `collectLocalFleetSignIn`),
+`src/lib/agents.ts` (`credentialPresence`), `src/commands/doctor.ts`.
+
+### Triaged health block (target report)
+
+The target report `agents doctor <agent>[@version]` still leads with a **triaged
+health block** — the verdict, ranked by severity, so the reader sees what is
+unhealthy, why it matters, and the exact fix. A clean install collapses to one
 green line:
 
 ```
@@ -304,73 +363,45 @@ Claude@2.1.220
   ✓ healthy — 34 resources reconciled · hooks wired · sources current
 ```
 
-Otherwise a severity-counted header is followed by one row per finding — icon ·
-severity · subject — impact, then the exact fix — and a heal footer when anything
-is `--fix`-able:
-
-```
-Claude@2.1.220
-  ✗ unhealthy — 3 issues (1 critical · 2 warnings)
-
-  ✗ critical  ask-user-question-guard — on disk but not wired into settings.json; the hook never fires
-              → agents sync claude@2.1.220 --yes
-  ⚠ warning   ~/.agents — 16 commits behind origin/main; you're running stale config
-              → agents repo pull user
-  ⚠ warning   11-activity-log — differs from source
-              → agents doctor claude@2.1.220 --fix
-
-  heal what's auto-fixable:  agents doctor claude@2.1.220 --fix
-```
-
-Every finding carries an agent-agnostic **severity** (glyphs `✓` `✗` `⚠` and a
-subtle info dot, colored via `chalk`):
-
-- **critical** (`✗`, silent breakage) — an unwired hook, a missing/unparseable
-  `settings.json`, a MISSING resource.
-- **warning** (`⚠`, stale / drift) — a source layer behind origin, a DIVERGENT
-  resource, a stale / never-synced version.
-- **info** (`·`, orphan) — an EXTRA resource → `agents prune cleanup`. Capped with
-  a `+N more orphans` rollup so the block stays scannable.
-
-The bare overview opens with a `Health` banner aggregated across every installed
-version; the target report renders the block below its per-resource detail rows
-(kept — the health block layers on top as the verdict). `--json` carries the same
-triage: a `verdict` field in target mode and a `health` field in the overview,
-each with `severity`/`category`/`subject`/`impact`/`fix` per issue. Source:
-`src/commands/doctor.ts` (`computeVerdict`, `computeOverviewHealth`,
-`healthBlockLines`).
+Otherwise a severity-counted header is followed by one row per finding (icon ·
+severity · subject — impact, then the exact fix) and a heal footer when anything is
+`--fix`-able. `--json` carries a `verdict` field with
+`severity`/`category`/`subject`/`impact`/`fix` per issue. Source:
+`src/commands/doctor.ts` (`computeVerdict`, `healthBlockLines`).
 
 ### `agents doctor --devices`
 
-Compares every registered device's installed harness inventory against the local
-machine (the baseline) and flags anything present on one box but missing on
-another:
+The fleet view renders the same RUSH-2069 hybrid across every registered device: a
+top CRITICAL section spanning all boxes, then a `─── by computer ───` block per
+device (worst-first) with its warnings, a `✗ N critical (above)` marker, and its
+accounts/versions line. Findings come from:
 
-- **Resource presence** — commands, skills, hooks, rules, mcp, permissions,
-  subagents, plugins, promptcuts, workflows. A plugin like `swarm` installed on
-  `zion` but absent on `yosemite-s0` reads as
-  `yosemite-s0 is missing plugin 'swarm' (present on zion)` — instead of only
-  surfacing at runtime as `Unknown command: /swarm:run`.
-- **Agent version parity** — a version installed on one box but not another
-  (`yosemite-s0 is missing claude@2.1.220`).
-- **`.agents` / `.system` repo drift** — a device whose config-repo HEAD, branch,
-  or dirty state diverges from the local baseline.
+- **Local** — the per-version resource reports + sync/orphan/repo-behind + sign-in.
+- **Remote** — each box's self-reported inventory (per-version sign-in) folded to
+  logged-out findings, plus **cross-device divergence**: an agent version present
+  elsewhere but absent here (version-skew), a diverged `.agents`/`.system` config
+  repo (repo-drift), or a resource present elsewhere but missing here. A remote on
+  an **older CLI** that can't report per-version sign-in emits an
+  "older agents-cli — can't report per-version sign-in → upgrade" warning so the
+  readout stays honest; an unreachable box surfaces as a warning, never a silent
+  drop.
 
-It is **read-only**: it never installs or syncs. The remediation hint points at
-`agents apply` / `agents repo pull` on the lagging box.
+It is **read-only**: it never installs or syncs.
 
 ```bash
-agents doctor --devices          # human table + a Cross-device divergence section
+agents doctor --devices          # the hybrid critical-at-top + per-computer view
 agents doctor --devices --json   # { devices: [...], fleet: { divergences: [...] } }
 ```
 
 Each device's top-level `agents doctor --json` emits a `fleet` inventory field
-(installed resources per kind, installed versions per agent, repo state), so the
-comparison needs no extra probe. `agents fleet status` reuses the same comparator
-to add a per-device divergence line to its rollup. Source:
-`src/lib/devices/fleet-divergence.ts` (pure comparator),
+(installed resources per kind, installed versions per agent, repo state, and
+per-version sign-in), so the comparison needs no extra probe. `agents fleet status`
+reuses the same comparator to add a per-device divergence line to its rollup.
+Source: `src/lib/devices/fleet-divergence.ts` (pure comparator),
 `src/lib/devices/fleet-inventory.ts` (`collectLocalFleetInventory`),
-`src/commands/doctor.ts` (`runDevicesDoctor`).
+`src/lib/devices/doctor-findings.ts` (`fleetDivergenceToFindings`,
+`signInToFindings`, `renderFindings`), `src/commands/doctor.ts`
+(`runDevicesDoctor`).
 
 ## Three Sources, One Fleet
 

@@ -1164,6 +1164,67 @@ function resolveAccountCredentialPath(base: string, ...segments: string[]): stri
   return null;
 }
 
+/**
+ * The on-disk credential file(s) each account-inspectable agent authenticates
+ * from, expressed as path segments under a home. Mirrors the exact files
+ * {@link getAccountInfo} reads, so a presence check here matches what a real
+ * launch would find. Each entry is a list of alternatives — the FIRST that
+ * exists counts as present (claude writes either `.claude/.claude.json` under
+ * the shimmed config dir or a home-level `.claude.json`). Agents whose login is
+ * stored only in the OS keychain on some platforms (antigravity, and claude's
+ * token) still expose a credential FILE — the presence of that file is the
+ * signal we key off; its absence on BOTH the per-version home and the active
+ * home is what makes a logged-out claim provable.
+ */
+const CREDENTIAL_FILE_SEGMENTS: Partial<Record<AgentId, string[][]>> = {
+  claude: [['.claude', '.claude.json'], ['.claude.json']],
+  codex: [['.codex', 'auth.json']],
+  gemini: [['.gemini', 'google_accounts.json']],
+  grok: [['.grok', 'auth.json']],
+  kimi: [['.kimi-code', 'credentials', 'kimi-code.json']],
+  droid: [['.factory', 'auth.v2.file']],
+  antigravity: [['.gemini', 'antigravity-cli', 'antigravity-oauth-token']],
+  opencode: [['.local', 'share', 'opencode', 'auth.json']],
+};
+
+/** Whether an agent's credential file exists under a given home. */
+function credentialFileExistsUnder(agentId: AgentId, home: string): boolean {
+  const alternatives = CREDENTIAL_FILE_SEGMENTS[agentId];
+  if (!alternatives) return false;
+  for (const segments of alternatives) {
+    const p = path.join(home, ...segments);
+    try { if (fs.existsSync(p)) return true; } catch { /* unreadable */ }
+  }
+  return false;
+}
+
+/** Where an agent's credential file lives, split into the per-version copy and
+ *  the active/global copy under the real HOME. */
+export interface CredentialPresence {
+  /** The credential file exists inside the passed version home. */
+  perVersion: boolean;
+  /** The credential file exists under the active/global HOME (the one the login
+   *  symlink actually targets), independent of the version home. */
+  active: boolean;
+}
+
+/**
+ * File-presence probe for an agent's credential, split by location: whether it
+ * exists in a SPECIFIC version home (`perVersion`) and whether it exists under
+ * the active/global HOME (`active`). A logged-out claim is only *provable* when
+ * BOTH are absent — a version that merely lacks its own copy but shares the
+ * global login is signed in, not logged out. Pure file existence; no decrypt,
+ * no network, no keychain prompt. Agents with no inspectable identity return
+ * `{ perVersion: false, active: false }` and must NEVER yield a provable-logout
+ * claim (the caller gates on {@link supportsAccountInspection}).
+ */
+export function credentialPresence(agentId: AgentId, versionHome: string): CredentialPresence {
+  const realHome = process.env.AGENTS_REAL_HOME || os.homedir();
+  const perVersion = credentialFileExistsUnder(agentId, versionHome);
+  const active = credentialFileExistsUnder(agentId, realHome);
+  return { perVersion, active };
+}
+
 /** Decrypted contents of Droid's auth.v2.file (subset we consume). */
 export interface DroidAuthPayload {
   access_token?: string;

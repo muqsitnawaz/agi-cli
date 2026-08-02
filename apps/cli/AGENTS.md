@@ -94,7 +94,34 @@ question, and a new health check goes in the one whose scope it matches.
 |---|---|---|
 | `agents fleet status` | Coarse **device** health across the fleet | Are devices online, do they have the agent CLIs installed, are they signed in, what is the agents-cli **version skew**. NOT fine-grained resource divergence. |
 | `agents inspect <agent>[@version]` | Deep **single-harness** diagnosis | Per-resource diff between one version home and its resolved sources; manifest staleness; orphans. One harness, one machine. |
-| `agents doctor` | **Umbrella** — overall fleet + harness health | Local diagnostics (CLI presence, sign-in, per-version sync, orphans) **and** cross-device divergence. The single command a user runs to discover problems before runtime. |
+| `agents doctor` | **Umbrella** — overall fleet + harness health | Local diagnostics (CLI presence, per-version sign-in, per-version sync, orphans) **and** cross-device divergence, rendered as the prioritized critical-at-top + per-computer hybrid below. The single command a user runs to discover problems before runtime. |
+
+**`agents doctor` is a prioritized, comprehensive-by-default hybrid (RUSH-2069).**
+There is no `--verbose`. A top `✗ CRITICAL — needs you now (N)` section lists every
+critical across the whole fleet worst-first; a `─── by computer ───` section then
+gives each device its warnings plus a compact accounts/versions line (every
+installed version + its account, provable ✓ / ✗). Single-machine `agents doctor`
+collapses to the CRITICAL section plus one `▸ <machine>` block. Severity:
+provable-logged-out / missing-hook / missing-plugin / broken-CLI are **critical**;
+drift / never-synced / version-skew / repo-behind / repo-drift / orphan /
+other-missing-kinds / **unprovable-logout** are **warnings**. The findings model,
+builders, `remediationFor`, and the pure `renderFindings` live in
+[`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts).
+
+**Sign-in is per installed VERSION, and a logged-out claim must be provable.**
+[`credentialPresence(agent, versionHome)`](src/lib/agents.ts) splits a credential's
+existence into the per-version home and the active/global HOME; a logged-out
+critical is emitted only when BOTH are absent (`provable = !perVersion && !active`).
+A version sharing the global login is signed in, not out; an agent with no
+inspectable identity (`!supportsAccountInspection` — antigravity, cursor) never
+yields a logout finding. Login remediation is version-targeted via
+`agents run <agent>@<version>` + the harness-native login (`loginHint`) — but ONLY
+for the per-version-isolated set (claude/codex/grok/kimi/opencode/copilot);
+gemini/antigravity/droid/cursor share their login, so the fix says so instead of
+faking a per-version repair. Per-version sign-in rides the device inventory
+(`FleetInventory.signIn`, populated by `collectLocalFleetSignIn` in
+[`src/lib/devices/fleet-inventory.ts`](src/lib/devices/fleet-inventory.ts)); an
+older remote CLI that omits it degrades to an "older agents-cli — upgrade" warning.
 
 **Cross-device divergence lives in `agents doctor --devices`.** It compares each
 device's self-reported harness inventory against the local baseline and flags a
@@ -109,7 +136,10 @@ resource / agent-version / config-repo present on one box but missing on another
 - `runDevicesDoctor` ([`src/commands/doctor.ts`](src/commands/doctor.ts)) fans that
   payload out per device and runs the **pure comparator**
   [`compareFleetInventories`](src/lib/devices/fleet-divergence.ts) — SSH-free, so
-  it's unit-tested against fixtures with no live fleet.
+  it's unit-tested against fixtures with no live fleet — then maps the divergences
+  and each box's per-version sign-in into the hybrid via `fleetDivergenceToFindings`
+  / `signInToFindings` / `renderFindings`
+  ([`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts)).
 - `agents fleet status` reuses the same comparator inside `buildFleetHealthReport`
   ([`src/lib/devices/health-report.ts`](src/lib/devices/health-report.ts)) to add a
   per-device `divergence` warning to its rollup.

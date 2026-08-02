@@ -29,8 +29,16 @@ import { buildRemoteAgentsInvocation } from '../lib/hosts/remote-cmd.js';
 import { loadDevices, isControlDevice } from '../lib/devices/registry.js';
 import { fanOutDevices, planFleetTargets, remoteFleetTargets, type FanOutDeviceTarget } from '../lib/devices/fleet.js';
 import { fleetDialTarget } from '../lib/devices/connect.js';
-import { compareFleetInventories, type FleetInventory, type FleetDivergenceReport } from '../lib/devices/fleet-divergence.js';
+import { compareFleetInventories, type FleetInventory, type FleetDivergenceReport, type FleetVersionSignIn } from '../lib/devices/fleet-divergence.js';
 import { collectLocalFleetInventory } from '../lib/devices/fleet-inventory.js';
+import {
+  buildLocalFindings,
+  fleetDivergenceToFindings,
+  signInToFindings,
+  renderFindings,
+  type DoctorFinding,
+} from '../lib/devices/doctor-findings.js';
+import { getCliVersion } from '../lib/version.js';
 import { resolveHost } from '../lib/hosts/registry.js';
 import { sshExecAsync } from '../lib/ssh-exec.js';
 import { sshTargetFor } from '../lib/hosts/types.js';
@@ -38,7 +46,6 @@ import { machineId } from '../lib/session/sync/config.js';
 import chalk from 'chalk';
 import { checkAllClis, collectTeamsDoctorData, type TeamsDoctorEntry } from '../lib/teams/agents.js';
 import { AGENTS, ALL_AGENT_IDS, resolveAgentName, formatAgentError, getAccountInfo, type AccountInfo } from '../lib/agents.js';
-import { formatSignInBadge } from '../lib/signin-badge.js';
 import type { AgentId } from '../lib/types.js';
 import {
   getGlobalDefault,
@@ -63,8 +70,7 @@ import { unifiedDiff, colorizeUnifiedDiff } from '../lib/diff-text.js';
 import { listCliStatus } from '../lib/cli-resources.js';
 import { setHelpSections } from '../lib/help.js';
 import { heal, healChangedAnything, type HealResult } from '../lib/heal.js';
-import { blocksLocalScripts, getEffectiveExecutionPolicy } from '../lib/platform/winpath.js';
-import { scanUserRcFiles, rcSecretWarningLines } from '../lib/secrets/rc-hygiene.js';
+import { blocksLocalScripts } from '../lib/platform/winpath.js';
 import { terminalWidth, truncateToWidth, stringWidth, padToWidth } from '../lib/session/width.js';
 import { readRepoBehindMarkers, type FetchStatusMarker } from '../lib/auto-pull.js';
 import * as fs from 'fs';
@@ -125,154 +131,6 @@ function printWrappedLine(prefix: string, text: string): void {
   for (const line of wrapLine(prefix, text)) console.log(chalk.gray(line));
 }
 
-function renderOverviewText(
-  clis: ReturnType<typeof checkAllClis>,
-  syncRows: SyncStatusRow[],
-  orphanRows: OrphanRow[],
-  hostClis: ReturnType<typeof listCliStatus>,
-  signIn: Record<string, Pick<AccountInfo, 'signedIn' | 'email' | 'accountId'>>,
-  repoBehindMarkers: FetchStatusMarker[],
-): void {
-  // Triaged health banner FIRST, so a user running bare `agents doctor` sees what
-  // is unhealthy, why it matters, and the exact fix before scrolling the detail
-  // sections below. Same triage model as target mode, aggregated across versions.
-  const overviewHealth = computeOverviewHealth(syncRows, orphanRows, repoBehindMarkers);
-  console.log(chalk.bold('Health'));
-  renderHealthBlock(overviewHealth, {
-    healthySummary: syncRows.length
-      ? `${syncRows.length} version${syncRows.length === 1 ? '' : 's'} reconciled · hooks wired · sources current`
-      : 'no installed versions to check',
-    healFix: verdictIsAutoFixable(overviewHealth) ? 'agents doctor --fix' : undefined,
-  });
-  console.log();
-
-  console.log(chalk.bold('Agent CLIs'));
-  // Show the fleet you actually run — agents that are ready in PATH, plus any
-  // you MANAGE (have installed versions) whose binary isn't resolving (a real
-  // problem). The other supported-but-unadopted agents collapse to one hint line
-  // instead of a column of red "not installed" nags for tools you never wanted.
-  const managed = new Set<string>(ALL_AGENT_IDS.filter((a) => listInstalledVersions(a).length > 0));
-  const entries = Object.entries(clis);
-  const shown = entries.filter(([name, e]) => e.installed || managed.has(name));
-  const hidden = entries.filter(([name, e]) => !e.installed && !managed.has(name)).map(([name]) => name);
-  if (shown.length === 0) {
-    console.log(chalk.gray('  (none installed — `agents add <name>` to start)'));
-  } else {
-    for (const [name, entry] of shown) {
-      const pretty = (AGENT_NAMES[name] || name).padEnd(11);
-      if (entry.installed) {
-        const badge = formatSignInBadge(signIn[name]);
-        const pathHint = entry.path ? chalk.gray(`  ${entry.path}`) : '';
-        console.log(`  ${chalk.green('ready')}  ${pretty} ${badge}${pathHint}`);
-      } else {
-        console.log(`  ${chalk.red('no   ')}  ${pretty} ${chalk.gray(entry.error || 'not installed')}`);
-      }
-    }
-  }
-  if (hidden.length > 0) {
-    printWrappedLine('  ', `+${hidden.length} more supported (${hidden.join(', ')}) — \`agents add <name>\` to manage`);
-  }
-  console.log();
-
-  console.log(chalk.bold('Sync status (installed versions)'));
-  if (syncRows.length === 0) {
-    console.log(chalk.gray('  (no versions installed; add one with `agents add <agent>@<version>`)'));
-  } else {
-    let anyOutOfSync = false;
-    for (const row of syncRows) {
-      const tag = row.isDefault ? chalk.gray(' (default)') : '';
-      const label = `${AGENT_NAMES[row.agent] || row.agent}@${row.version}${tag}`;
-      const unwired = (row.unwiredHooks ?? 0) > 0;
-      if (row.status === 'fresh' && !unwired) {
-        console.log(`  ${chalk.green('fresh')}  ${label}`);
-        continue;
-      }
-      anyOutOfSync = true;
-      if (row.status === 'stale') {
-        console.log(`  ${chalk.yellow('stale')}  ${label}  ${chalk.gray('— sources changed since last sync')}`);
-      } else if (row.status === 'never-synced') {
-        console.log(`  ${chalk.gray('cold ')}  ${label}  ${chalk.gray('— never synced')}`);
-      } else {
-        // Manifest-fresh but a declared hook is present-on-disk yet not wired into
-        // settings.json — it never fires (the yosemite-s1 blind spot).
-        console.log(`  ${chalk.red('unwired')} ${label}  ${chalk.gray('— hooks present but not wired into settings.json')}`);
-      }
-      for (const line of row.divergence ?? []) {
-        console.log(chalk.gray(`           ${line}`));
-      }
-    }
-    // Launching does NOT reconcile a version home — the shim hot path only
-    // resolves a version and compiles project-scoped resources (shims.ts v15/v16).
-    // Version homes are reconciled only by management commands, so point at one
-    // rather than promising an auto-sync that never happens.
-    if (anyOutOfSync) {
-      printWrappedLine('  ', 'Reconcile with `agents doctor <agent>@<version> --fix` or `agents sync <agent>@<version>` (not applied on launch).');
-    }
-  }
-  console.log();
-
-  console.log(chalk.bold('Orphans (installed versions)'));
-  if (orphanRows.length === 0) {
-    console.log(chalk.gray('  (none — version homes match central sources)'));
-  } else {
-    for (const row of orphanRows) {
-      const parts: string[] = [];
-      if (row.commands > 0) parts.push(`${row.commands} command${row.commands === 1 ? '' : 's'}`);
-      if (row.skills > 0) parts.push(`${row.skills} skill${row.skills === 1 ? '' : 's'}`);
-      if (row.hooks > 0) parts.push(`${row.hooks} hook${row.hooks === 1 ? '' : 's'}`);
-      const label = `${AGENT_NAMES[row.agent] || row.agent}@${row.version}`;
-      console.log(`  ${chalk.yellow('warn ')}  ${label}  ${chalk.gray(parts.join(', '))}`);
-    }
-    console.log(chalk.gray('  Run `agents prune cleanup` to remove.'));
-  }
-  console.log();
-
-  // Host CLIs are host-global (declared in any DotAgents repo's cli/, installed
-  // to PATH — not synced into version homes), so they live in the overview, not
-  // the per-version resource diff. Source tag shows which repo layer declared
-  // each, including user-level and extra repos.
-  console.log(chalk.bold('Host CLIs'));
-  if (hostClis.statuses.length === 0) {
-    console.log(chalk.gray('  (none declared — add one with `agents cli add <name>`)'));
-  } else {
-    const nameWidth = Math.max(...hostClis.statuses.map((s) => s.manifest.name.length));
-    for (const { manifest, installed } of hostClis.statuses) {
-      const label = manifest.name.padEnd(nameWidth);
-      const src = chalk.gray(`[${manifest.source}]`);
-      if (installed) {
-        const prefix = `  ${chalk.green('ready')}  ${label}  ${src}`;
-        const desc = manifest.description
-          ? `  ${truncateToWidth(collapseWhitespace(manifest.description), Math.max(1, terminalWidth() - stringWidth(prefix) - 2))}`
-          : '';
-        console.log(prefix + chalk.gray(desc));
-      } else {
-        const prefix = `  ${chalk.red('miss ')}  ${label}  ${src}`;
-        const msg = `not installed — run \`agents cli install ${manifest.name}\``;
-        const budget = Math.max(1, terminalWidth() - stringWidth(prefix) - 2);
-        console.log(prefix + chalk.gray(`  ${truncateToWidth(msg, budget)}`));
-      }
-    }
-  }
-  for (const err of hostClis.errors) {
-    console.log(`  ${chalk.red('err  ')}  ${chalk.gray(err.file)}: ${chalk.gray(err.reason)}`);
-  }
-
-  // On Windows a Restricted/AllSigned execution policy silently breaks the
-  // generated `agents.ps1` launcher — postinstall diagnoses it interactively,
-  // but a non-interactive install never sees that. Surface it here too.
-  renderExecPolicyAdvisory();
-
-  // Credentials exported from a shell rc file leak into every process's
-  // environment (readable via /proc/<pid>/environ) — the RUSH-1968 class. Flag
-  // them here so the master passphrase never silently lives in `~/.zshenv` again.
-  renderRcHygieneAdvisory();
-
-  // Repos that are behind upstream — surfaced here instead of on stderr during
-  // every command. Markers are written by the background fetch worker and persist
-  // until the user runs `agents repo pull <alias>`.
-  renderRepoBehindAdvisory(repoBehindMarkers);
-}
-
 // ─── windows execution-policy advisory ─────────────────────────────────────────
 
 /**
@@ -294,18 +152,6 @@ export function execPolicyWarningLines(platform: NodeJS.Platform, policy: string
   ];
 }
 
-function renderRcHygieneAdvisory(): void {
-  const findings = scanUserRcFiles();
-  const lines = rcSecretWarningLines(findings);
-  if (lines.length === 0) return;
-  console.log();
-  console.log(chalk.bold('Secrets in shell config'));
-  const [headline, ...rest] = lines;
-  console.log(`  ${chalk.yellow('warn ')}  ${headline}`);
-  for (const line of rest) {
-    console.log(chalk.gray(`           ${line}`));
-  }
-}
 
 // ─── repo-behind advisory ─────────────────────────────────────────────────────
 
@@ -314,34 +160,6 @@ function renderRcHygieneAdvisory(): void {
  * section in `agents doctor`. Reads without consuming the markers so repeated
  * invocations keep showing the notice until the user runs `agents repo pull`.
  */
-function renderRepoBehindAdvisory(markers: FetchStatusMarker[]): void {
-  const behind = markers.filter((m) => m.behind > 0);
-  if (behind.length === 0) return;
-  console.log();
-  console.log(chalk.bold('Repo updates'));
-  for (const m of behind) {
-    const label = m.alias === 'user' ? '~/.agents/' : m.alias;
-    const commits = `${m.behind} commit${m.behind === 1 ? '' : 's'}`;
-    console.log(`  ${chalk.yellow('warn ')}  ${label} is ${commits} behind ${m.branch}`);
-    console.log(chalk.gray(`           run \`agents repo pull ${m.alias}\` to update`));
-  }
-}
-
-function renderExecPolicyAdvisory(): void {
-  // Only probe the policy on Windows — getEffectiveExecutionPolicy() spawns
-  // powershell, which is a wasted (doomed) process on POSIX where the advisory
-  // never applies.
-  if (process.platform !== 'win32') return;
-  const lines = execPolicyWarningLines(process.platform, getEffectiveExecutionPolicy());
-  if (lines.length === 0) return;
-  console.log();
-  console.log(chalk.bold('Execution policy (Windows)'));
-  const [headline, ...rest] = lines;
-  console.log(`  ${chalk.yellow('warn ')}  ${headline}`);
-  for (const line of rest) {
-    console.log(chalk.gray(`           ${line}`));
-  }
-}
 
 // ─── devices / fleet mode ─────────────────────────────────────────────────────
 
@@ -361,22 +179,6 @@ interface FleetTarget {
   name: string;
   sshTarget: string;
   os?: string;
-}
-
-const AGENT_ORDER = ['claude', 'codex', 'kimi', 'grok', 'antigravity', 'opencode', 'cursor', 'droid'];
-
-function shortAgentHeader(name: string): string {
-  return name.slice(0, 4).padEnd(4);
-}
-
-function agentCell(entry: TeamsDoctorEntry | undefined): string {
-  if (!entry) return chalk.gray('-   ');
-  if (entry.installed) {
-    const signedInHint = entry.signedIn ? '*' : ' ';
-    return chalk.green(`rdy${signedInHint}`.padEnd(4));
-  }
-  if (entry.error) return chalk.red('err '.padEnd(4));
-  return chalk.gray('no  '.padEnd(4));
 }
 
 async function resolveFleetTargets(opts: DoctorOptions): Promise<FleetTarget[]> {
@@ -489,7 +291,7 @@ async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
       name: localName,
       online: true,
       agents: await collectTeamsDoctorData(),
-      inventory: collectLocalFleetInventory(opts.cwd ?? process.cwd()),
+      inventory: await collectLocalFleetInventory(opts.cwd ?? process.cwd()),
     });
   }
 
@@ -535,31 +337,77 @@ async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
     return;
   }
 
-  const agentsToShow = AGENT_ORDER.filter((a) =>
-    results.some((r) => r.agents[a] !== undefined),
-  );
+  // ── Hybrid fleet view (RUSH-2069): CRITICAL section across all boxes, then a
+  // per-computer block for each. Findings come from:
+  //   - LOCAL: per-version resource reports + sync/orphan/repo-behind + sign-in.
+  //   - REMOTE: the box's self-reported inventory (per-version sign-in) folded to
+  //     logged-out findings, plus cross-device divergence (version-skew, repo
+  //     drift, missing resources). A remote on an older CLI with no `signIn` in
+  //     its inventory emits the "older agents-cli — can't report per-version
+  //     sign-in → upgrade" warning so the readout stays honest.
+  const cwd = opts.cwd ?? process.cwd();
+  const findings: DoctorFinding[] = [];
+  const accounts: Record<string, Record<string, FleetVersionSignIn[]>> = {};
 
-  console.log(chalk.bold('Agent readiness by device'));
-  if (agentsToShow.length === 0) {
-    console.log(chalk.gray('  (no agent data collected)'));
-    return;
+  for (const r of results) {
+    if (r.name === localName) {
+      // Local findings from the real reports (not just the inventory summary).
+      const localReports: VersionResourceReport[] = [];
+      for (const agent of ALL_AGENT_IDS) {
+        for (const version of listInstalledVersions(agent)) {
+          localReports.push(diffVersionResources(agent, version, { cwd, excludeProject: true }));
+        }
+      }
+      const localCliMissing = ALL_AGENT_IDS.filter(
+        (a) => listInstalledVersions(a).length > 0 && !checkAllClis()[a]?.installed,
+      );
+      findings.push(...buildLocalFindings({
+        device: localName,
+        syncRows: checkSyncStatus(cwd),
+        orphanRows: countOrphans(),
+        repoBehind: readRepoBehindMarkers(),
+        reports: localReports,
+        signIn: r.inventory?.signIn ?? {},
+        cliMissing: localCliMissing,
+      }));
+      accounts[localName] = r.inventory?.signIn ?? {};
+      continue;
+    }
+
+    // Remote device.
+    if (!r.online) {
+      // An offline / unreachable box: surface it as a warning so it isn't
+      // silently dropped from the per-computer section.
+      findings.push({
+        severity: 'warning', kind: 'stale-cli', device: r.name,
+        message: r.error ? `unreachable — ${r.error}` : 'unreachable',
+        remediation: 'check the device',
+      });
+      continue;
+    }
+    if (r.inventory?.signIn) {
+      findings.push(...signInToFindings(r.name, r.inventory.signIn));
+      accounts[r.name] = r.inventory.signIn;
+    } else {
+      // Reachable, but an older CLI that can't report per-version sign-in.
+      findings.push({
+        severity: 'warning', kind: 'stale-cli', device: r.name,
+        message: "older agents-cli — can't report per-version sign-in",
+        remediation: 'upgrade',
+      });
+      accounts[r.name] = {};
+    }
   }
 
-  const nameWidth = Math.max(...results.map((r) => r.name.length));
-  const header = `  ${'Device'.padEnd(nameWidth)}  ${agentsToShow.map(shortAgentHeader).join('  ')}`;
-  console.log(chalk.gray(header));
-  for (const row of results) {
-    const status = row.online ? chalk.green('online ') : chalk.red('offline');
-    const errorSuffix = row.error ? `  ${chalk.gray(row.error)}` : '';
-    const cells = agentsToShow.map((a) => agentCell(row.agents[a])).join('  ');
-    console.log(`  ${row.name.padEnd(nameWidth)}  ${status}  ${cells}${errorSuffix}`);
-  }
-  console.log();
-  console.log(chalk.gray('  rdy* = installed and signed in · rdy = installed · no = not installed · err = probe failed · - = offline'));
-
+  // Cross-device divergence → version-skew / repo-drift / missing-resource
+  // warnings, attributed to the lagging box.
   if (divergence) {
-    console.log();
-    for (const line of renderFleetDivergence(divergence)) console.log(line);
+    findings.push(...fleetDivergenceToFindings(divergence.divergences, divergence.baseline));
+  }
+
+  const header = `${chalk.gray('agents doctor ·')} ${chalk.hex('#a3e635')(String(results.length))} ${chalk.gray('devices · baseline')} ${chalk.hex('#a3e635')(localName)}`;
+  for (const line of renderFindings(findings, accounts, { fleet: true, baseline: localName, header })) {
+    console.log(line);
   }
 }
 
@@ -1605,9 +1453,14 @@ export function registerDoctorCommand(program: Command): void {
         const orphanRows = countOrphans();
         const hostClis = listCliStatus(cwd);
         const repoBehindMarkers = readRepoBehindMarkers();
-        // Advisory login state per installed agent (file-based getAccountInfo,
-        // no home → the account-global/active credential). Best-effort: a probe
-        // failure just leaves that agent's badge as "logged out".
+        // The local inventory now carries per-version sign-in (RUSH-2069), so it
+        // is the single source for both the accounts line and the logged-out
+        // criticals. Collected once (async: it parses each version's account).
+        const inventory = await collectLocalFleetInventory(cwd);
+        const localName = machineId();
+
+        // Legacy account-global sign-in map, kept for `--json` back-compat
+        // (ssh.ts RemoteDoctorJson / menubar read `signIn`). File-based, no home.
         const signIn: Record<string, Pick<AccountInfo, 'signedIn' | 'email' | 'accountId'>> = {};
         await Promise.all(
           Object.entries(clis)
@@ -1620,6 +1473,32 @@ export function registerDoctorCommand(program: Command): void {
               }
             }),
         );
+
+        // Per-version resource reports drive the missing-hook / missing-plugin /
+        // unwired / content-drift findings. Non-project layers only (the global
+        // home is never reconciled against per-cwd project resources).
+        const reports: VersionResourceReport[] = [];
+        for (const agent of ALL_AGENT_IDS) {
+          for (const version of listInstalledVersions(agent)) {
+            reports.push(diffVersionResources(agent, version, { cwd, excludeProject: true }));
+          }
+        }
+        // A MANAGED agent (installed versions) whose binary won't resolve is a
+        // real critical — an unmanaged-and-absent agent is not.
+        const cliMissing = ALL_AGENT_IDS.filter(
+          (a) => listInstalledVersions(a).length > 0 && clis[a] && !clis[a].installed,
+        );
+
+        const findings = buildLocalFindings({
+          device: localName,
+          syncRows,
+          orphanRows,
+          repoBehind: repoBehindMarkers,
+          reports,
+          signIn: inventory.signIn ?? {},
+          cliMissing,
+        });
+
         if (opts.json) {
           console.log(JSON.stringify({
             clis,
@@ -1634,12 +1513,14 @@ export function registerDoctorCommand(program: Command): void {
             // finding, aggregated across versions. Additive; existing consumers
             // reading `sync`/`orphans`/`repos` are unaffected.
             health: computeOverviewHealth(syncRows, orphanRows, repoBehindMarkers),
+            // Prioritized RUSH-2069 findings (critical/warning, per-version, with
+            // remediation). Additive alongside the legacy fields above.
+            findings,
             // This host's harness inventory — installed resources per kind,
-            // installed version ids per agent, and `.agents`/`.system` repo
-            // state — so `agents doctor --devices` can compare presence across
-            // the fleet and flag a resource/version present here but missing
-            // elsewhere (RUSH-2027). Read-only; no network.
-            fleet: collectLocalFleetInventory(cwd),
+            // installed version ids per agent, `.agents`/`.system` repo state, and
+            // per-version sign-in — so `agents doctor --devices` can compare
+            // presence and sign-in across the fleet (RUSH-2027/2069). Read-only.
+            fleet: inventory,
             hostClis: {
               statuses: hostClis.statuses.map((s) => ({
                 name: s.manifest.name,
@@ -1661,13 +1542,14 @@ export function registerDoctorCommand(program: Command): void {
           }, null, 2));
           return;
         }
-        renderOverviewText(clis, syncRows, orphanRows, hostClis, signIn, repoBehindMarkers);
-        // Point at the interactive reconcile when anything is out of sync — the
-        // report shouldn't be a dead end. `agents status` runs the unified
-        // home-reading engine and offers to sync (opt-in, never auto-fires here).
-        // Unwired hooks and a behind-origin repo count as out-of-sync too.
-        if (syncRows.some((r) => r.status !== 'fresh' || (r.unwiredHooks ?? 0) > 0) || repoBehindMarkers.some((m) => m.behind > 0)) {
-          console.log(chalk.gray('\nRun `agents status` to review and sync what has drifted.'));
+
+        // Single-machine hybrid: CRITICAL section + one `▸ <machine>` block.
+        const accounts: Record<string, Record<string, FleetVersionSignIn[]>> = {
+          [localName]: inventory.signIn ?? {},
+        };
+        const header = `${chalk.gray('agents doctor ·')} ${chalk.hex('#a3e635')(localName)}${chalk.gray(`  ${getCliVersion()}`)}`;
+        for (const line of renderFindings(findings, accounts, { fleet: false, baseline: localName, header })) {
+          console.log(line);
         }
         return;
       }

@@ -419,7 +419,7 @@ interface FleetStatusTarget extends FanOutDeviceTarget {
   dialTarget: string;
 }
 
-function localHealthRow(self: string, stats?: DeviceStats): FleetHealthRow {
+async function localHealthRow(self: string, stats?: DeviceStats): Promise<FleetHealthRow> {
   return {
     name: self,
     platform: process.platform === 'darwin' ? 'macos' : process.platform,
@@ -430,7 +430,7 @@ function localHealthRow(self: string, stats?: DeviceStats): FleetHealthRow {
     orphans: countOrphans(),
     // Local baseline inventory for cross-device divergence (RUSH-2027) — the
     // yardstick every remote box is compared against.
-    inventory: collectLocalFleetInventory(process.cwd()),
+    inventory: await collectLocalFleetInventory(process.cwd()),
   };
 }
 
@@ -480,7 +480,7 @@ async function runFleetStatus(opts: { json?: boolean; strict?: boolean; stats?: 
   // Best-effort: a registry write must never break the status render.
   await writeReachability(collectReachabilityWriteBacks(reg, statsMap)).catch(() => {});
 
-  const rows: FleetHealthRow[] = [localHealthRow(self, statsMap.get(self))];
+  const rows: FleetHealthRow[] = [await localHealthRow(self, statsMap.get(self))];
   const remoteTargets: FleetStatusTarget[] = remoteFleetTargets(planned, self)
     .map((t) => ({
       name: t.device.name,
