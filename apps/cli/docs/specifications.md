@@ -207,12 +207,18 @@ SSH access (§7); rendering sessions that no harness produced.
   reuse by comparing recorded start-time within a 60s tolerance; Windows falls
   back to bare existence (`lib/session/active.ts:287,327-338`; test
   `active.liveness.test.ts:35-37`).
-- **SES-18 (MUST).** Session status MUST be derived honestly: `unknown` is a
-  first-class state, never fabricated as idle/running
-  (`lib/session/active.ts:462-470,65-73`). A structural `AskUserQuestion` /
-  `ExitPlanMode` as last event MUST report `waiting_input` and MUST NOT decay
-  with the freshness window (`lib/session/state.ts:462-478`; test
-  `state.test.ts:97-109`).
+- **SES-18 (MUST).** Session status MUST be derived honestly, and a LIVE process
+  MUST NEVER resolve to `unknown`. Every tracked harness (not only Claude/Codex)
+  MUST be parsed into a real `working`/`waiting_input`/`idle` when its transcript
+  is locatable + parseable (`computeLiveSignals` / `findSessionFileForKind`,
+  `lib/session/active.ts`); an opaque/untracked kind or an unreadable transcript
+  MUST fall back to `resolveFallbackStatus`, which reports `running` for any live
+  process (never a blanket `unknown`, never a fabricated `idle`)
+  (`lib/session/active.ts`). `unknown` is reserved for the sole un-answerable case:
+  a dead process whose transcript vanished mid-read. A structural
+  `AskUserQuestion` / `ExitPlanMode` as last event MUST report `waiting_input` and
+  MUST NOT decay with the freshness window (`lib/session/state.ts`; test
+  `state.test.ts`).
 - **SES-19 (MUST).** Detach/attach presence MUST be **derived, never asserted**:
   the record only says "this session was detached"; `background` vs `parked` is
   decided live from the recorded pid + start-time fingerprint

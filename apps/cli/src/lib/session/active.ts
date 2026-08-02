@@ -32,9 +32,10 @@ import { buildRunNameMap } from './run-names.js';
 import { latestSessionFileForCwd } from './db.js';
 import { extractSessionTopic } from './prompt.js';
 import { readSessionTailWithRaw } from './tail.js';
+import { parseSession } from './parse.js';
 import { computeTokPerSec } from './throughput.js';
 import { inferSessionState, type SessionState, type SessionActivity, type AwaitingReason, type StructuredQuestion, type TodoProgress, type DetectedPr, type DetectedWorktree, type DetectedTicket } from './state.js';
-import type { SessionAttachment } from './types.js';
+import { isSessionTrackedAgent, type SessionAgentId, type SessionAttachment, type SessionEvent } from './types.js';
 import { detectProvenance, type SessionProvenance } from './provenance.js';
 import { loadDevices, type DeviceRegistry } from '../devices/registry.js';
 import { presenceFromStore, type Presence } from './detached.js';
@@ -64,12 +65,15 @@ const PS_SNAPSHOT_TIMEOUT_MS = 10_000;
 export type ActiveContext = 'terminal' | 'teams' | 'cloud' | 'headless';
 
 /**
- * `unknown` = the process is alive but we cannot introspect what it is doing —
- * a live harness whose transcript format we do not parse (everything but
- * claude/codex), or a resolvable transcript whose `stat` momentarily failed. It
- * is NOT a synonym for idle: idle is a positive "not mid-turn, not waiting on
- * you" conclusion drawn from a readable transcript; unknown is the honest "we
- * can't tell", which we refuse to fake as idle.
+ * `unknown` is now reserved for the ONE genuinely un-answerable case: a DEAD
+ * process whose transcript also vanished mid-read, so there is nothing left to
+ * measure. A LIVE process is never `unknown` — "the process is alive" is itself a
+ * positive signal, so an opaque/unparseable live harness resolves to `running`
+ * (its honest floor), and every tracked harness with a locatable, parseable
+ * transcript (claude, codex, grok, droid, rush, gemini, kimi, hermes, opencode,
+ * antigravity) gets a real working/waiting/idle from its own parser — see
+ * {@link computeLiveSignals} and {@link resolveFallbackStatus}. `unknown` is thus
+ * rare by construction and never shown for a running agent.
  */
 export type ActiveStatus = 'running' | 'idle' | 'queued' | 'input_required' | 'unknown';
 
@@ -482,40 +486,50 @@ export function sessionFileTimes(sessionFile: string | undefined): { birthtimeMs
 
 /**
  * The ONE place a fallback status is decided when no rich transcript state is
- * available — a non-Claude/Codex kind we cannot parse, or a Claude/Codex tail
- * that was empty or unreadable. Honest by construction: it never asserts a status
- * it cannot justify from a measured signal.
+ * available — an opaque kind we cannot parse (cursor, openclaw), or a transcript
+ * whose parse/tail was empty or unreadable. Honest by construction, and — the
+ * headline guarantee — a LIVE process never resolves to `unknown` or a fabricated
+ * `idle`.
  *
- *   - Resolvable transcript, readable mtime → the MEASURED freshness signal:
- *     written within ACTIVE_MTIME_WINDOW_MS ⇒ `running`, else `idle`.
- *   - Resolvable transcript whose `stat` throws (file vanished / permission) → we
- *     genuinely cannot tell ⇒ `unknown`. (This branch previously returned
- *     `running`, which contradicted the `idle` default one branch up.)
- *   - No resolvable transcript but the process is alive → alive-but-opaque ⇒
- *     `unknown`. This is the truthful answer for a live gemini / droid / cursor /
- *     opencode whose format we don't parse — NOT a fabricated `idle` (which the
- *     UI reads as "done and waiting"), and it never lies as `running` either.
- *   - No transcript and the process is not known alive → nothing to report ⇒ `idle`.
+ *   - `pidAlive` → `running`. A live process is, at minimum, running: we may not
+ *     be able to see WHAT an opaque harness (or an empty tail) is doing, but the
+ *     process being alive is itself a positive signal. It must never degrade to a
+ *     blank `unknown` (the old blanket bug for every non-claude/codex live agent),
+ *     nor be downgraded to a fabricated `idle` (which the UI reads as "done").
+ *   - Not alive, transcript present on disk → nothing is running ⇒ `idle`.
+ *   - Not alive, no transcript → nothing to report ⇒ `idle`.
+ *   - Not alive AND the named transcript vanished mid-read → genuinely nothing
+ *     left to measure ⇒ `unknown` (the sole surviving `unknown` case).
  */
 export function resolveFallbackStatus(sessionFile: string | undefined, pidAlive: boolean): ActiveStatus {
-  if (!sessionFile) return pidAlive ? 'unknown' : 'idle';
+  if (pidAlive) return 'running';
+  if (!sessionFile) return 'idle';
   try {
-    const mtimeMs = fs.statSync(sessionFile).mtimeMs;
-    return Date.now() - mtimeMs < ACTIVE_MTIME_WINDOW_MS ? 'running' : 'idle';
+    fs.statSync(sessionFile);
+    return 'idle';
   } catch {
     return 'unknown';
   }
 }
 
 /**
- * Locate the live transcript for an agent process. Claude files are keyed by
- * cwd (+ optional session uuid); Codex files are date-partitioned, so we resolve
- * the newest indexed Codex session for the cwd instead.
+ * Locate the live transcript for an agent process. Claude files are keyed by cwd
+ * (+ optional session uuid), so they resolve straight off disk. Every OTHER
+ * tracked harness — Codex (date-partitioned), plus grok / droid / rush / gemini /
+ * kimi / hermes / opencode / antigravity (per-session dirs, SQLite, single-JSON)
+ * — is resolved through the session index by cwd: the newest indexed transcript
+ * for that cwd, bounded by ACTIVE_SESSION_STALE_MS so a live pid never borrows a
+ * weeks-old transcript. This is what lets a live NON-claude/codex agent get a real
+ * status instead of falling through to `unknown` (the file feeds
+ * {@link computeLiveSignals}). An opaque kind we don't track (cursor) still yields
+ * undefined here and degrades honestly to a live `running`.
  */
 export function findSessionFileForKind(kind: string, cwd?: string, sessionId?: string): string | undefined {
   if (!cwd) return undefined;
   if (kind === 'claude') return findClaudeSessionFile(cwd, sessionId);
-  if (kind === 'codex') return latestSessionFileForCwd('codex', cwd, { maxAgeMs: ACTIVE_SESSION_STALE_MS });
+  if (isSessionTrackedAgent(kind)) {
+    return latestSessionFileForCwd(kind, cwd, { maxAgeMs: ACTIVE_SESSION_STALE_MS });
+  }
   return undefined;
 }
 
@@ -534,23 +548,60 @@ interface LiveSignals {
   tokPerSec?: number;
 }
 
+/** Cap the events fed to state inference for a non-tailable harness — the last
+ * turns are all `inferActivity` needs, and a bound keeps a huge transcript cheap. */
+const LIVE_STATE_MAX_EVENTS = 80;
+
 /**
- * Read a session file's tail ONCE and derive both the inferred state and the
- * output-token throughput from it. State needs the normalized event model;
- * throughput needs the raw lines the event model drops (Codex `token_count`), so
- * both come off the same {@link readSessionTailWithRaw} read. Only Claude/Codex
- * carry live state; other kinds yield an empty signal set.
+ * Parse a NON-claude/codex transcript with that harness's own parser and return
+ * its last events for state inference. These formats vary too much for the
+ * single-file byte-tail fast path (per-session dirs for grok/kimi, SQLite for
+ * opencode/antigravity, single-JSON for gemini/hermes), so parse the whole
+ * (size-guarded, via safeReadSessionFile) transcript and keep the tail. A parse
+ * failure yields no events, degrading honestly to the live fallback.
  */
-function computeLiveSignals(kind: string, sessionFile: string | undefined, cwd: string | undefined, pidAlive: boolean): LiveSignals {
+function parseTailEventsForKind(agent: SessionAgentId, sessionFile: string): SessionEvent[] {
+  let events: SessionEvent[];
+  try {
+    events = parseSession(sessionFile, agent);
+  } catch {
+    return [];
+  }
+  return events.length > LIVE_STATE_MAX_EVENTS ? events.slice(-LIVE_STATE_MAX_EVENTS) : events;
+}
+
+/**
+ * Derive the inferred state (working / waiting / idle + preview/badges) and, for
+ * the two harnesses whose raw lines carry it, the output-token throughput.
+ *
+ * Claude/Codex take the fast bounded byte-tail ({@link readSessionTailWithRaw}) —
+ * the hot path, and the only two that also yield throughput (their raw lines
+ * carry usage the event model drops). EVERY OTHER tracked harness (grok, droid,
+ * rush, gemini, kimi, hermes, opencode, antigravity) is parsed with its own
+ * parser and run through the SAME {@link inferSessionState}, so a live
+ * non-claude/codex agent gets a real working/waiting/idle instead of the blanket
+ * `unknown` it used to fall through to. An opaque/untracked kind (cursor) or an
+ * unreadable/empty transcript yields an empty signal set, and the caller's
+ * {@link resolveFallbackStatus} reports the honest live floor (`running`).
+ */
+export function computeLiveSignals(kind: string, sessionFile: string | undefined, cwd: string | undefined, pidAlive: boolean): LiveSignals {
   if (!sessionFile) return {};
-  const agent = kind === 'codex' ? 'codex' : 'claude';
-  const { events, content } = readSessionTailWithRaw(sessionFile, agent);
-  if (events.length === 0) return {};
   let mtimeMs: number | undefined;
   try { mtimeMs = fs.statSync(sessionFile).mtimeMs; } catch { /* vanished between calls */ }
-  const state = inferSessionState(events, { cwd, pidAlive, mtimeMs, activeWindowMs: ACTIVE_MTIME_WINDOW_MS });
-  const tokPerSec = computeTokPerSec(content, agent);
-  return { state, tokPerSec: tokPerSec > 0 ? tokPerSec : undefined };
+  const ctx = { cwd, pidAlive, mtimeMs, activeWindowMs: ACTIVE_MTIME_WINDOW_MS };
+
+  if (kind === 'claude' || kind === 'codex') {
+    const { events, content } = readSessionTailWithRaw(sessionFile, kind);
+    if (events.length === 0) return {};
+    const state = inferSessionState(events, ctx);
+    const tokPerSec = computeTokPerSec(content, kind);
+    return { state, tokPerSec: tokPerSec > 0 ? tokPerSec : undefined };
+  }
+
+  if (!isSessionTrackedAgent(kind)) return {};
+  const events = parseTailEventsForKind(kind, sessionFile);
+  if (events.length === 0) return {};
+  return { state: inferSessionState(events, ctx) };
 }
 
 /** Map inferred activity onto the coarse ActiveStatus used by the renderer and counts. */
@@ -560,10 +611,10 @@ function statusFromActivity(activity: SessionActivity): ActiveStatus {
 
 /**
  * Fold a computed SessionState onto an active-session row: rich status +
- * preview + PR/worktree/ticket badges. With no state (unreadable/non-Claude/
- * Codex file) it degrades to {@link resolveFallbackStatus}, which needs
- * `pidAlive` to tell an alive-but-opaque process (`unknown`) from a dead one
- * (`idle`).
+ * preview + PR/worktree/ticket badges. With no state (an opaque/untracked kind,
+ * or an unreadable/empty transcript) it degrades to
+ * {@link resolveFallbackStatus}, which reports the honest live floor (`running`
+ * for an alive process) rather than the old blanket `unknown`.
  */
 function applyState(base: Omit<ActiveSession, 'status'>, state: SessionState | undefined, fallbackFile: string | undefined, pidAlive: boolean): ActiveSession {
   if (!state) return { ...base, status: resolveFallbackStatus(fallbackFile, pidAlive) };

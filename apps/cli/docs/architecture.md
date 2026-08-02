@@ -234,26 +234,31 @@ Other machines are reached by running the same command over SSH per peer.
 ### Coarse status is honest, not guessed
 
 The rich `SessionActivity` maps to a coarse `ActiveStatus` the renderer and counts
-use: `working → running`, `waiting_input → input_required`, `idle → idle`. A rich
-tail is only parsed for **Claude and Codex** (`readSessionTailWithRaw` early-returns
-for every other kind, and `findSessionFileForKind` resolves a transcript only for
-those two). Every other case — a live gemini / droid / cursor / opencode, or a
-Claude/Codex tail that was empty or unreadable — has no rich state, so one canonical
-function, `resolveFallbackStatus(sessionFile, pidAlive)`, decides the status:
+use: `working → running`, `waiting_input → input_required`, `idle → idle`. Rich
+state is derived for **every tracked harness**: Claude/Codex take the fast bounded
+byte-tail (`readSessionTailWithRaw`, which also yields tokens/sec), and every other
+tracked kind (grok, droid, rush, gemini, kimi, hermes, opencode, antigravity) is
+parsed by its own parser and run through the same `inferSessionState`
+(`computeLiveSignals` → `parseSession`). `findSessionFileForKind` locates the
+transcript for all of them — Claude off disk by cwd, the rest via the session index
+(`latestSessionFileForCwd`). Only an **opaque/untracked** kind (cursor) or an
+unreadable/empty transcript has no rich state, and then one canonical function,
+`resolveFallbackStatus(sessionFile, pidAlive)`, decides the status:
 
 | Situation | Status | Why |
 |---|---|---|
-| Transcript resolvable, mtime within 2 min | `running` | measured freshness — the file is being written |
-| Transcript resolvable, mtime older | `idle` | positive "not mid-turn" from a real signal |
-| Transcript `stat` throws (vanished / permission) | `unknown` | we genuinely cannot tell — never an optimistic `running` |
-| **No** parseable transcript, process **alive** | `unknown` | alive but opaque (a harness we don't parse) — NOT a fabricated `idle` |
-| No transcript, process not known alive | `idle` | nothing to report |
+| Process **alive** (any kind, no rich state) | `running` | alive is itself a positive signal — the honest floor; never `unknown`, never a fabricated `idle` |
+| Not alive, transcript still on disk | `idle` | nothing is running |
+| Not alive, no transcript | `idle` | nothing to report |
+| Not alive, named transcript vanished mid-read | `unknown` | genuinely nothing left to measure |
 
-`unknown` is the explicit "we can't introspect this live process" state — it renders
-as `◌` (magenta), distinct from the `○` idle it used to be silently faked as, so a
-busy non-Claude/Codex agent is never mistaken for a finished one. This is why the
-status is trustworthy uniformly across harnesses: where the truth is unknowable, the
-CLI reports `unknown` rather than inferring a wrong `idle`/`running`.
+The headline guarantee: **a running agent is never `unknown`.** The old blanket
+`unknown` for every live non-Claude/Codex agent is gone — a live process resolves to
+`running` at worst, and to a real `working`/`waiting_input`/`idle` whenever its
+transcript is locatable + parseable. `unknown` survives only for the one
+un-answerable case (a dead process whose transcript also vanished) and renders as
+`◌` (magenta), distinct from the `○` idle. This is why status is trustworthy
+uniformly across harnesses.
 
 This is deliberately simple and correct; the "compute once, subscribe" direction (a
 resident process that parses each file once and emits only what changed) is the

@@ -65,7 +65,7 @@ describe('resolvePaneIdentity (per-pane attribution for the authoritative tmux s
   });
 });
 
-describe('resolveFallbackStatus (honest status when no rich transcript state)', () => {
+describe('resolveFallbackStatus (a LIVE process never resolves to unknown)', () => {
   const tmp: string[] = [];
   const mkfile = (ageMs: number): string => {
     const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'agents-fallback-')), 'sess.jsonl');
@@ -75,31 +75,36 @@ describe('resolveFallbackStatus (honest status when no rich transcript state)', 
     tmp.push(p);
     return p;
   };
+  const gonePath = (): string => {
+    const p = path.join(os.tmpdir(), `agents-fallback-missing-${process.pid}-${tmp.length}.jsonl`);
+    try { fs.unlinkSync(p); } catch { /* already absent */ }
+    return p;
+  };
 
-  it('no transcript + a LIVE process ⇒ unknown, NOT a fabricated idle', () => {
-    // The truthful answer for a live gemini/droid/cursor/opencode whose format we
-    // do not parse: alive, but we cannot see what it is doing.
-    expect(resolveFallbackStatus(undefined, true)).toBe('unknown');
+  it('no transcript + a LIVE process ⇒ running (the honest live floor, never unknown)', () => {
+    // The blanket `unknown` for a live gemini/droid/cursor/opencode is gone: the
+    // process being alive is itself a positive signal — report `running`.
+    expect(resolveFallbackStatus(undefined, true)).toBe('running');
+  });
+
+  it('a LIVE process is running regardless of transcript freshness — fresh, stale, or vanished', () => {
+    // Never a fabricated `idle` for a live process, even when its (opaque) file is
+    // stale or has vanished mid-read.
+    expect(resolveFallbackStatus(mkfile(10_000), true)).toBe('running');
+    expect(resolveFallbackStatus(mkfile(5 * 60_000), true)).toBe('running');
+    expect(resolveFallbackStatus(gonePath(), true)).toBe('running');
   });
 
   it('no transcript + a process not known alive ⇒ idle (nothing to report)', () => {
     expect(resolveFallbackStatus(undefined, false)).toBe('idle');
   });
 
-  it('a transcript written within the active window ⇒ running (measured freshness)', () => {
-    expect(resolveFallbackStatus(mkfile(10_000), true)).toBe('running');
+  it('a DEAD process with a transcript still on disk ⇒ idle (nothing running)', () => {
+    expect(resolveFallbackStatus(mkfile(5 * 60_000), false)).toBe('idle');
   });
 
-  it('a transcript stale past the active window ⇒ idle', () => {
-    // 5 min old — beyond ACTIVE_MTIME_WINDOW_MS (2 min).
-    expect(resolveFallbackStatus(mkfile(5 * 60_000), true)).toBe('idle');
-  });
-
-  it('a named transcript whose stat throws (vanished) ⇒ unknown, never an optimistic running', () => {
-    // This branch previously returned running, contradicting the idle default.
-    const gone = path.join(os.tmpdir(), `agents-fallback-missing-${process.pid}.jsonl`);
-    try { fs.unlinkSync(gone); } catch { /* already absent */ }
-    expect(resolveFallbackStatus(gone, true)).toBe('unknown');
+  it('a DEAD process whose transcript vanished ⇒ unknown (the sole surviving unknown)', () => {
+    expect(resolveFallbackStatus(gonePath(), false)).toBe('unknown');
   });
 
   afterAll(() => {
