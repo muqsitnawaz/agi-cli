@@ -21,6 +21,7 @@ import { saveTask, updateTask, terminalPatch, type HostTask } from './tasks.js';
 import { followHostTask } from './progress.js';
 import { wrapHostCommandWithCredentials, type HostCredentials } from './credentials.js';
 import { hostKeyCheckingOpts } from '../devices/known-hosts.js';
+import { toRemotePortable } from '../project-root.js';
 
 // Use $HOME (not ~) so the path is correct whether or not it's quoted and
 // regardless of the run's cwd. Task ids are 8 hex chars, so these paths are
@@ -48,12 +49,40 @@ function homeRemainder(p: string): string | null {
  * the local one (`/home/<me>` vs `/Users/<me>`). We emit an unquoted `"$HOME"`
  * for that segment — the remote login shell expands it — and shell-quote the
  * remainder. Any other path (absolute or relative) is quoted verbatim.
+ *
+ * `mirror` marks a directory the caller DERIVED from the local cwd rather than
+ * one the user asked for (see `deriveMirroredCwd`). The same repo checked out at
+ * the same home-relative path on both boxes is the common fleet layout, so
+ * mirroring lands the remote agent in the project instead of `$HOME`. It is a
+ * best-effort mirror by definition — the host may simply not have that checkout
+ * — so a missing directory falls back to the remote home instead of failing the
+ * run. An explicit `--cwd`/`--remote-cwd` is never mirrored: the user named that
+ * directory, so a missing one must surface as a `cd` error.
  */
-export function remoteCdPrefix(remoteCwd?: string): string {
+/**
+ * Derive the remote directory to mirror from the local cwd, for a host run the
+ * caller gave no `--cwd`/`--remote-cwd`.
+ *
+ * Without this a `--host` run lands in the remote `$HOME`, so an agent launched
+ * from a repo starts with no project context and the user has to `cd` by hand.
+ * Only a cwd under the LOCAL home is mirrored — that is the part with a
+ * meaningful remote analogue (`~/src/x` re-roots onto the remote home). A path
+ * outside home returns undefined: `/opt/thing` on this box says nothing about
+ * the target's filesystem, so the run keeps the remote home.
+ */
+export function deriveMirroredCwd(localCwd: string): string | undefined {
+  const portable = toRemotePortable(localCwd);
+  return homeRemainder(portable) === null ? undefined : portable;
+}
+
+export function remoteCdPrefix(remoteCwd?: string, opts: { mirror?: boolean } = {}): string {
   if (!remoteCwd) return '';
   const rest = homeRemainder(remoteCwd);
   if (rest === '') return 'cd "$HOME" && ';
-  if (rest !== null) return `cd "$HOME"/${shellQuote(rest)} && `;
+  if (rest !== null) {
+    const dir = `"$HOME"/${shellQuote(rest)}`;
+    return opts.mirror ? `{ cd ${dir} || cd "$HOME"; } && ` : `cd ${dir} && `;
+  }
   return `cd ${shellQuote(remoteCwd)} && `;
 }
 
@@ -185,6 +214,8 @@ interface LaunchOptions {
   /** `agents …` args (command name first), each already un-quoted (we quote them). */
   forwardedArgs: string[];
   remoteCwd?: string;
+  /** `remoteCwd` was derived from the local cwd — mirror it, don't fail on it. */
+  mirrorCwd?: boolean;
   /** Stream progress and block until completion (default true). */
   follow?: boolean;
   timeoutMs?: number;
@@ -229,7 +260,7 @@ async function launchDetached(host: Host, target: string, opts: LaunchOptions): 
   // resolved actor provenance first so the detached remote run inherits it
   // instead of re-resolving from this box's SSH_CONNECTION (RUSH-2028).
   const invocation = ['agents', ...opts.forwardedArgs].map(shellQuote).join(' ');
-  const cwd = remoteCdPrefix(opts.remoteCwd);
+  const cwd = remoteCdPrefix(opts.remoteCwd, { mirror: opts.mirrorCwd });
   const actorExports = posixEnvExports(withActorEnv());
   const prelude = actorExports ? `${actorExports}; ` : '';
   let inner = `${prelude}${cwd}${invocation} > ${remoteLog} 2>&1; echo $? > ${remoteExit}`;
@@ -339,6 +370,8 @@ export interface DispatchOptions {
   /** Native-CLI passthrough (everything after `--`), appended last. */
   passthroughArgs?: string[];
   remoteCwd?: string;
+  /** `remoteCwd` was derived from the local cwd — mirror it, don't fail on it. */
+  mirrorCwd?: boolean;
   /**
    * Force the remote run's NEW session to use this exact id (Claude only, via
    * `agents run --session-id`). Captured on the task record so the run is
@@ -432,6 +465,8 @@ export interface InteractiveDispatchOptions {
   /** Route through the Agent Client Protocol. */
   acp?: boolean;
   remoteCwd?: string;
+  /** `remoteCwd` was derived from the local cwd — mirror it, don't fail on it. */
+  mirrorCwd?: boolean;
   sessionId?: string;
   name?: string;
   resume?: string;
@@ -494,7 +529,7 @@ export async function runInteractiveOnHost(host: Host, opts: InteractiveDispatch
   for (const w of warnings) process.stderr.write(`[hosts] warning: ${w}\n`);
 
   const invocation = ['agents', ...buildInteractiveRunForwardedArgs(opts)].map(shellQuote).join(' ');
-  const cwd = remoteCdPrefix(opts.remoteCwd);
+  const cwd = remoteCdPrefix(opts.remoteCwd, { mirror: opts.mirrorCwd });
   // Forward actor provenance so the interactive remote run inherits it rather
   // than re-resolving from this box's SSH_CONNECTION (RUSH-2028).
   const actorExports = posixEnvExports(withActorEnv());
@@ -523,6 +558,7 @@ export async function dispatchToHost(host: Host, opts: DispatchOptions): Promise
   return launchDetached(host, target, {
     forwardedArgs: buildRunForwardedArgs(opts),
     remoteCwd: opts.remoteCwd,
+    mirrorCwd: opts.mirrorCwd,
     follow: opts.follow,
     timeoutMs: opts.timeoutMs,
     agentLabel: opts.agent,
