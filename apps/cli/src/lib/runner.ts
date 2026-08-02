@@ -62,6 +62,7 @@ import {
 } from './rotate.js';
 import { readAuthHealth, isDeadVerdict } from './auth-health.js';
 import { machineId } from './machine-id.js';
+import { expandLocalHome, getProjectRoot } from './project-root.js';
 
 /** Result of a completed job execution, including metadata and optional report. */
 export interface RunResult {
@@ -82,6 +83,20 @@ const ROUTINE_TRANSCRIPT_SPECS: Partial<Record<AgentId, Array<{ root: string[]; 
   claude: [{ root: ['.claude', 'projects'], ext: '.jsonl' }],
   codex: [{ root: ['.codex', 'sessions'], ext: '.jsonl' }],
 };
+
+/** Stable working directory for routine children, independent of the daemon's launch cwd. */
+export function routineSpawnCwd(
+  config: Pick<JobConfig, 'repo'>,
+  configuredRoot: string | undefined = getProjectRoot(),
+): string {
+  if (!config.repo) return os.homedir();
+  const [owner, repo] = config.repo.split('/');
+  if (configuredRoot) {
+    const root = path.resolve(expandLocalHome(configuredRoot));
+    if (path.basename(root) === owner) return path.join(root, repo);
+  }
+  return path.join(os.homedir(), 'src', 'github.com', owner, repo);
+}
 
 /** Build the full CLI argv for executing a job, applying mode, model, and permission flags. */
 export function buildJobCommand(config: JobConfig, resolvedPrompt: string): string[] {
@@ -526,6 +541,7 @@ function spawnJobAttempt(
   attemptLogPath: string,
   timeoutMs: number,
   combinedLogPath?: string,
+  cwd: string = os.homedir(),
 ): Promise<SpawnAttemptResult> {
   // Isolate this attempt's output so detectRateLimit never sees prior attempts.
   fs.writeFileSync(attemptLogPath, '', { mode: 0o600 });
@@ -533,7 +549,7 @@ function spawnJobAttempt(
   return new Promise((resolve) => {
     const child = spawn(cmd[0], cmd.slice(1), {
       stdio: ['ignore', stdoutFd, stdoutFd],
-      ...backgroundSpawnOptions({ fdStdio: true }),
+      ...backgroundSpawnOptions({ cwd, fdStdio: true }),
       env,
     });
 
@@ -815,7 +831,7 @@ export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<Ru
     const remaining = Math.max(1_000, timeoutMs - (Number.isFinite(elapsed) ? elapsed : 0));
 
     const attemptLogPath = path.join(runDir, `stdout.attempt-${i}.log`);
-    const attempt = await spawnJobAttempt(cmd, spawnEnv, attemptLogPath, remaining, stdoutPath);
+    const attempt = await spawnJobAttempt(cmd, spawnEnv, attemptLogPath, remaining, stdoutPath, routineSpawnCwd(config));
     meta.pid = attempt.pid;
     writeRunMeta(meta);
 
@@ -1103,7 +1119,7 @@ async function executeCommandJobForeground(config: JobConfig): Promise<RunResult
   const result = await new Promise<{ exitCode: number | null; status: 'completed' | 'failed' | 'timeout'; error?: string }>((resolve) => {
     const child = spawn(cmd[0], cmd.slice(1), {
       stdio: ['ignore', stdoutFd, stdoutFd],
-      ...backgroundSpawnOptions({ fdStdio: true }),
+      ...backgroundSpawnOptions({ cwd: routineSpawnCwd(config), fdStdio: true }),
       env,
     });
 
@@ -1295,7 +1311,7 @@ export async function executeJobDetached(config: JobConfig, hooks?: RoutineHooks
 
   const child = spawn(cmd[0], cmd.slice(1), {
     stdio: ['ignore', stdoutFd, stdoutFd],
-    ...backgroundSpawnOptions({ fdStdio: true }),
+    ...backgroundSpawnOptions({ cwd: routineSpawnCwd(config), fdStdio: true }),
     env: spawnEnv,
   });
 
@@ -1392,7 +1408,7 @@ function executeCommandJobDetached(config: JobConfig, hooks?: RoutineHooks): Run
 
   const child = spawn(cmd[0], cmd.slice(1), {
     stdio: ['ignore', stdoutFd, stdoutFd],
-    ...backgroundSpawnOptions({ fdStdio: true }),
+    ...backgroundSpawnOptions({ cwd: routineSpawnCwd(config), fdStdio: true }),
     env,
   });
 
