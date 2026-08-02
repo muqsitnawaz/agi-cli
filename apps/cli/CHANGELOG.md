@@ -58,6 +58,21 @@
 
 ## 1.20.85
 
+- **Webhook handler layer for one-off agent/workflow/command/routine triggers.**
+  Routines still fire from signed webhooks, but a new `~/.agents/webhooks/*.yml`
+  layer can also run one-off actions: `run.agent`, `run.workflow`, `run.command`,
+  or delegate to an existing `routine`. Handlers support the same source/event/
+  action/label/repo/branch filters as routine triggers, plus Linear
+  `stateTo`/`stateFrom` state-change filters. Prompts and commands can use
+  `{{issue.identifier}}`, `{{updatedFrom.state.name}}`, etc. The receiver emits
+  `webhook.received`, `webhook.authorized`, `webhook.rejected`, `webhook.matched`,
+  `webhook.fired`, `webhook.handler.start`, and `webhook.handler.end` events.
+  Source: `apps/cli/src/lib/triggers/handlers.ts`,
+  `apps/cli/src/lib/triggers/webhook.ts`, `apps/cli/src/lib/routines.ts`,
+  `apps/cli/src/commands/routines.ts`, `apps/cli/docs/03-routines.md`.
+
+- **`agents routines add` gains `--state-to` and `--state-from` filters for Linear triggers`.**
+
 - **`agents feed post` can now be mirrored to the systems you actually watch.**
   A post was durable but local: an operator away from every terminal never saw
   it, and the tracker that owns the work heard nothing. Declare sinks under
