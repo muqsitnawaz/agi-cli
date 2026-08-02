@@ -11,6 +11,7 @@ import {
 } from './doctor-findings.js';
 import type { VersionResourceReport } from '../doctor-diff.js';
 import type { FleetVersionSignIn, FleetDivergence } from './fleet-divergence.js';
+import { stringWidth } from '../session/width.js';
 
 const stripAnsi = (s: string): string => s.replace(/\[[0-9;]*m/g, '');
 
@@ -599,6 +600,21 @@ describe('renderFindings — exact layout', () => {
     expect(out).toContain('~/.agents (system)');
     expect(out).toContain('~/.agents (user)');
     expect(out).toMatch(/orphans\s+397 orphaned resources/);
+  });
+
+  it('columns align on DISPLAY width — a wide-glyph account must not skew the row', () => {
+    // `.length` counts UTF-16 code units; a CJK glyph is 1 unit but 2 columns, so
+    // padding on `.length` shifts every later column on that row.
+    const findings: DoctorFinding[] = [
+      { severity: 'critical', kind: 'logged-out', device: 'zion', agent: 'codex', version: '0.1', account: '张三@example.com', message: 'logged out — no account signed in', remediation: 'agents run codex@0.1 -- login' },
+      { severity: 'critical', kind: 'logged-out', device: 'zion', agent: 'claude', version: '2.1.0', account: 'me@x.com', message: 'logged out — no account signed in', remediation: 'agents run claude@2.1.0, then /login' },
+    ];
+    const out = stripAnsi(renderFindings(findings, accounts, { fleet: false, baseline: 'zion', header: 'h' }).join('\n'));
+    const rows = out.split('\n').filter((l) => l.includes('logged out'));
+    expect(rows).toHaveLength(2);
+    // Both rows put the arrow at the same terminal column.
+    const arrowCols = rows.map((l) => stringWidth(l.slice(0, l.indexOf('→'))));
+    expect(arrowCols[0]).toBe(arrowCols[1]);
   });
 
   it('all-clear: no criticals, no warnings → ✓ lines only', () => {

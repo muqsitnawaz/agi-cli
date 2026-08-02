@@ -31,6 +31,7 @@ import chalk from 'chalk';
 import { AGENTS, ALL_AGENT_IDS, supportsAccountInspection } from '../agents.js';
 import { blocksLocalScripts } from '../platform/winpath.js';
 import { loginHint } from '../signin-badge.js';
+import { padToWidth, stringWidth } from '../session/width.js';
 import type { AgentId } from '../types.js';
 import type { DuplicateVersionHook } from '../hooks.js';
 import type { RcSecretFinding } from '../secrets/rc-hygiene.js';
@@ -768,10 +769,19 @@ function critLabel(f: DoctorFinding): { left: string; account: string; message: 
   };
 }
 
-/** Pad a plain string to a width, ignoring that the caller may color it later
- *  (we pad BEFORE coloring so alignment is on visible text). */
+/** Pad a plain string to a DISPLAY width, ignoring that the caller may color it
+ *  later (we pad before coloring so alignment is on visible text). Uses the
+ *  repo's width helpers, not `.length`: a CJK character or a compound emoji is
+ *  one-to-several UTF-16 code units but a different number of terminal columns,
+ *  so `.length` skews every column in the row — and account labels, device
+ *  names, and org badges are all user-supplied. */
 function pad(s: string, width: number): string {
-  return s.length >= width ? s : s + ' '.repeat(width - s.length);
+  return padToWidth(s, width);
+}
+
+/** Display width of the widest entry, floored at `min`. */
+function widestOf(values: string[], min: number): number {
+  return Math.max(...values.map(stringWidth), min);
 }
 
 export interface RenderOptions {
@@ -811,10 +821,10 @@ export function renderFindings(
     // Column widths computed on visible text.
     const rows = criticals.map((f) => ({ f, ...critLabel(f) }));
     const showDevice = opts.fleet;
-    const devW = showDevice ? Math.max(...rows.map((r) => r.f.device.length), 6) : 0;
-    const leftW = Math.max(...rows.map((r) => r.left.length), 4);
-    const acctW = Math.max(...rows.map((r) => r.account.length), 0);
-    const msgW = Math.max(...rows.map((r) => r.message.length), 4);
+    const devW = showDevice ? widestOf(rows.map((r) => r.f.device), 6) : 0;
+    const leftW = widestOf(rows.map((r) => r.left), 4);
+    const acctW = widestOf(rows.map((r) => r.account), 0);
+    const msgW = widestOf(rows.map((r) => r.message), 4);
     for (const r of rows) {
       const dev = showDevice ? `${pad(r.f.device, devW)}  ` : '';
       const left = pad(r.left, leftW);
@@ -869,7 +879,7 @@ export function renderFindings(
     if (warnings.length === 0) {
       lines.push(`    ${chalk.green('✓')} ${chalk.gray('no warnings')}`);
     } else {
-      const subjW = Math.max(...warnings.map((w) => warningSubject(w).length), 4);
+      const subjW = widestOf(warnings.map(warningSubject), 4);
       for (const w of warnings) {
         const subj = pad(warningSubject(w), subjW);
         lines.push(
