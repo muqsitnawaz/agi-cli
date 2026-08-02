@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import {
   LAUNCH_HEALTH_MAX_AGE_MS,
   LaunchHealthCache,
+  LaunchHistory,
+  LaunchHistoryRecorder,
   pickCachedLaunchHost,
   recordLaunch,
 } from './launchHistory';
@@ -48,4 +50,22 @@ test('recordLaunch preserves per-device frequency, recency, and success', () => 
   const first = recordLaunch({}, 'Yosemite-S0', true, NOW - 10);
   const second = recordLaunch(first, 'yosemite-s0', false, NOW);
   expect(second['yosemite-s0']).toEqual({ launches: 2, successes: 1, lastLaunchAt: NOW });
+});
+
+test('LaunchHistoryRecorder serializes concurrent read-modify-write updates', async () => {
+  let stored: LaunchHistory = {};
+  const recorder = new LaunchHistoryRecorder(
+    () => stored,
+    async (history) => {
+      await Bun.sleep(5);
+      stored = history;
+    },
+  );
+
+  await Promise.all([
+    recorder.record('yosemite-s0', true, NOW - 1),
+    recorder.record('yosemite-s0', true, NOW),
+  ]);
+
+  expect(stored['yosemite-s0']).toEqual({ launches: 2, successes: 2, lastLaunchAt: NOW });
 });

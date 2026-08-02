@@ -170,6 +170,7 @@ export function buildAgentLaunchCommand(
   strategy?: RunStrategy,
   mode?: AgentLaunchMode,
   host?: string,
+  cwd?: string,
 ): string {
   const agentSpec = pinnedVersion ? `${agentKey}@${pinnedVersion}` : agentKey;
   let command = `agents run ${agentSpec} --interactive`;
@@ -178,6 +179,7 @@ export function buildAgentLaunchCommand(
   // grok/kimi/droid (which launch as raw binaries locally) get host parity.
   if (host) {
     command += ` --host ${shquote(host)}`;
+    if (cwd) command += ` --cwd ${shquote(cwd)}`;
   }
   // Unpinned, no explicit host: affinity-pick device via --device auto.
   // Explicit Pick Host / @version pin skip this.

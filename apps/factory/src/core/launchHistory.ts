@@ -28,6 +28,22 @@ export const LAUNCH_HISTORY_KEY = 'agents.launchHistory.v1';
 export const LAUNCH_HEALTH_KEY = 'agents.launchHealth.v1';
 export const LAUNCH_HEALTH_MAX_AGE_MS = 5 * 60_000;
 
+export class LaunchHistoryRecorder {
+  private pending: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly load: () => LaunchHistory,
+    private readonly save: (history: LaunchHistory) => PromiseLike<void>,
+  ) {}
+
+  record(device: string, success: boolean, launchedAt = Date.now()): Promise<void> {
+    this.pending = this.pending.then(async () => {
+      await this.save(recordLaunch(this.load(), device, success, launchedAt));
+    });
+    return this.pending;
+  }
+}
+
 function normalized(name: string): string {
   return name.trim().toLowerCase();
 }

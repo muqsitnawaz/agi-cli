@@ -19,8 +19,8 @@ import {
   LAUNCH_HISTORY_KEY,
   LaunchHealthCache,
   LaunchHistory,
+  LaunchHistoryRecorder,
   pickCachedLaunchHost,
-  recordLaunch,
 } from '../core/launchHistory';
 import * as settings from './settings.vscode';
 import * as swarm from './swarm.vscode';
@@ -383,9 +383,18 @@ function resolveCachedAutoHost(context: vscode.ExtensionContext, agentKey: strin
   return host;
 }
 
+const launchHistoryRecorders = new WeakMap<vscode.ExtensionContext, LaunchHistoryRecorder>();
+
 async function saveLaunchHistory(context: vscode.ExtensionContext, device: string, success: boolean): Promise<void> {
-  const history = context.globalState.get<LaunchHistory>(LAUNCH_HISTORY_KEY, {});
-  await context.globalState.update(LAUNCH_HISTORY_KEY, recordLaunch(history, device, success));
+  let recorder = launchHistoryRecorders.get(context);
+  if (!recorder) {
+    recorder = new LaunchHistoryRecorder(
+      () => context.globalState.get<LaunchHistory>(LAUNCH_HISTORY_KEY, {}),
+      (history) => context.globalState.update(LAUNCH_HISTORY_KEY, history),
+    );
+    launchHistoryRecorders.set(context, recorder);
+  }
+  await recorder.record(device, success);
 }
 
 // Resolve the best online device for a balanced launch. `pool` restricts the
@@ -2131,7 +2140,17 @@ async function openSingleAgent(
       sessionId = generateClaudeSessionId();
       console.log(`[SESSION] Claude using on-demand session ID: ${sessionId}${targetHost ? ` (host ${targetHost})` : ''}`);
     }
-    command = buildAgentLaunchCommand(agentKey, sessionId, defaultModel, additionalFlags, pinnedVersion, strategy, undefined, targetHost);
+    command = buildAgentLaunchCommand(
+      agentKey,
+      sessionId,
+      defaultModel,
+      additionalFlags,
+      pinnedVersion,
+      strategy,
+      undefined,
+      targetHost,
+      targetHost ? cwd : undefined,
+    );
   }
 
   if (tmuxOk) {

@@ -359,6 +359,21 @@ describe('buildAgentLaunchCommand', () => {
     expect(cmd).toContain("--host 'mac-mini'");
   });
 
+  test('remote host launch forwards the workspace cwd for CLI portability rewriting', () => {
+    const cmd = buildAgentLaunchCommand(
+      'codex', null, undefined, undefined, undefined, undefined, undefined, 'mac-mini', '/Users/muqsit/src/agents-cli',
+    );
+    expect(cmd).toContain("--host 'mac-mini'");
+    expect(cmd).toContain("--cwd '/Users/muqsit/src/agents-cli'");
+  });
+
+  test('local launch does not emit an explicit cwd', () => {
+    const cmd = buildAgentLaunchCommand(
+      'codex', null, undefined, undefined, undefined, undefined, undefined, undefined, '/Users/muqsit/src/agents-cli',
+    );
+    expect(cmd).not.toContain('--cwd');
+  });
+
   test('default model is included when provided', () => {
     const cmd = buildAgentLaunchCommand('claude', null, 'claude-haiku-4-5');
     expect(cmd).toContain('--model claude-haiku-4-5');
