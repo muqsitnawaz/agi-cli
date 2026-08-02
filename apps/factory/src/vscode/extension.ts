@@ -34,7 +34,7 @@ import { startWatchdogBridge } from '../mcp/watchdog-bridge';
 import { ensureWatchdogMcpInstalled } from '../mcp/watchdogInstall';
 import * as notifications from './notifications.vscode';
 import * as terminals from './terminals.vscode';
-import { fetchLocalSessions, fetchRemoteSessionLabelSource, fetchRecapSessions, LOCAL_LABEL } from './remoteSessions.vscode';
+import { fetchLocalSessions, fetchRemoteSessionLabelSource, fetchSessionIdentity, fetchRecapSessions, LOCAL_LABEL } from './remoteSessions.vscode';
 import * as sessionTracker from './sessionTracker';
 import { runRecapHeadless, isRecapSupported } from './recap.vscode';
 import { buildAgentTerminalEnv } from '../core/terminals';
@@ -151,7 +151,7 @@ const STATUS_BAR_AGENTS_VIEW_TTL_MS = 30_000;
 // Keyed by agent, or `agent@host` for an offloaded terminal — account usage is
 // per machine, so a device's view must never be served from this box's entry.
 const agentsViewCache = new Map<string, { fetchedAtMs: number; data: AgentsViewJsonAgent | null }>();
-const statusBarMetaInFlight = new Set<string>();
+const statusIdentityInFlight = new Set<string>();
 
 // BUILT_IN_AGENTS is now imported from ./agents
 
@@ -2858,7 +2858,7 @@ async function copySessionId() {
   // The session id stored on terminalEntry is the spawn-time value. It goes
   // stale when the user exits and reruns the agent in the same terminal, or
   // after /clear. Prefer the live id captured by the SessionStart hook
-  // (~/.agents/.cache/terminals/sessions/<agent-pid>.json).
+  // (~/.agents/.cache/state/sessions/<agent-pid>.json).
   const shellPid = await activeTerminal.processId;
   const liveId = await liveSessionIdForShell(shellPid);
   const sessionId = liveId || terminalEntry.sessionId;
@@ -3921,68 +3921,44 @@ function formatAgentStatusBarText(
   return text;
 }
 
-function resolveStatusFromAgentsView(
-  view: AgentsViewJsonAgent,
-  pinnedVersion?: string
-): { version?: string; account?: string } {
-  const versions = Array.isArray(view.versions) ? view.versions : [];
-  if (versions.length === 0) return {};
-
-  if (pinnedVersion) {
-    const matched = versions.find(v => v.version === pinnedVersion);
-    return {
-      version: pinnedVersion,
-      account: normalizeStatusEmail(matched?.email),
-    };
-  }
-
-  const selected = versions.find(v => v.isDefault) ?? versions[0];
-  if (!selected) return {};
-  return {
-    version: selected.version,
-    account: normalizeStatusEmail(selected.email),
-  };
-}
-
-async function tryHydrateStatusBarAgentMeta(
+// Resolve the running session's REAL version + account from the CLI session feed
+// (`agents sessions <id> --json`, host-aware) and stamp them on the entry. This is
+// the only source that knows which version/account a `--strategy balanced` launch
+// actually selected for this session — `agents view` reports only the box-wide
+// default install, which is unrelated to a specific terminal and was the cause of
+// the status bar showing a wrong version/account (esp. under Remote-SSH, where the
+// remote box's default differs from what the session actually ran).
+async function tryHydrateSessionIdentity(
   terminal: vscode.Terminal,
   entry: terminals.EditorTerminal,
-  prefix: string
+  prefix: string,
+  sessionId: string,
 ): Promise<void> {
-  const agentKey = (entry.agentType || prefixToAgentType(prefix)) as PrewarmAgentType | null;
-  if (!agentKey) return;
+  if (entry.version && entry.account) return;
 
-  const inflightKey = entry.id || `${agentKey}:${entry.sessionId || terminal.name}`;
-  if (statusBarMetaInFlight.has(inflightKey)) return;
-  statusBarMetaInFlight.add(inflightKey);
+  const inflightKey = `${sessionId}@${entry.host ?? 'local'}`;
+  if (statusIdentityInFlight.has(inflightKey)) return;
+  statusIdentityInFlight.add(inflightKey);
 
   try {
-    const view = await fetchAgentsViewJson(agentKey, { quiet: true, useCache: true });
-    if (!view) return;
-
-    const resolved = resolveStatusFromAgentsView(view, entry.version);
-    if (!entry.statusVersion && resolved.version) {
-      entry.statusVersion = resolved.version;
-    }
-    if (entry.version && resolved.account && !entry.account) {
-      terminals.setAccount(terminal, resolved.account);
-    } else if (!entry.statusAccount && resolved.account) {
-      entry.statusAccount = resolved.account;
-    }
+    const identity = await fetchSessionIdentity(sessionId, entry.host);
+    if (!identity) return;
+    if (identity.version && !entry.version) terminals.setVersion(terminal, identity.version);
+    if (identity.account && !entry.account) terminals.setAccount(terminal, identity.account);
 
     if (!agentStatusBarItem || vscode.window.activeTerminal !== terminal) return;
     const rawLabel = entry.label;
     const displayLabel = rawLabel ? rawLabel.replace(/<[^>]*>/g, '').trim() : null;
     agentStatusBarItem.text = formatAgentStatusBarText(
       getExpandedAgentName(prefix),
-      entry.version || entry.statusVersion,
-      normalizeStatusEmail(entry.account || entry.statusAccount),
+      entry.version,
+      normalizeStatusEmail(entry.account),
       displayLabel,
       entry.sessionId,
       entry.agentType === 'codex',
     );
   } finally {
-    statusBarMetaInFlight.delete(inflightKey);
+    statusIdentityInFlight.delete(inflightKey);
   }
 }
 
@@ -4007,13 +3983,19 @@ async function tryHydrateLiveSessionId(
       terminals.setSessionId(terminal, liveId);
     }
 
+    // Now that the real session id is known, resolve its actual version/account
+    // from the session feed (the id is the join key the identity lookup needs).
+    if (!entry.version || !entry.account) {
+      void tryHydrateSessionIdentity(terminal, entry, prefix, liveId);
+    }
+
     if (!agentStatusBarItem || vscode.window.activeTerminal !== terminal) return;
     const rawLabel = entry.label;
     const displayLabel = rawLabel ? rawLabel.replace(/<[^>]*>/g, '').trim() : null;
     agentStatusBarItem.text = formatAgentStatusBarText(
       getExpandedAgentName(prefix),
-      entry.version || entry.statusVersion,
-      normalizeStatusEmail(entry.account || entry.statusAccount),
+      entry.version,
+      normalizeStatusEmail(entry.account),
       displayLabel,
       liveId,
       entry.agentType === 'codex',
@@ -4049,13 +4031,17 @@ function updateStatusBarForTerminal(terminal: vscode.Terminal, extensionPath: st
       entry?.agentType === 'codex',
     );
 
-    if (entry && (!version || !account)) {
-      void tryHydrateStatusBarAgentMeta(terminal, entry, info.prefix);
+    // When we already know the session id, resolve its real version/account from
+    // the session feed (host-aware). We deliberately do NOT fall back to
+    // `agents view` machine defaults when there is no id — that showed a version
+    // and account unrelated to the running session (the reported bug).
+    if (entry && sessionId && (!version || !account)) {
+      void tryHydrateSessionIdentity(terminal, entry, info.prefix, sessionId);
     }
-    // Async-resolve the live session id from the SessionStart hook's state file
-    // and re-render. Catches the case where the user exited and reran the
-    // agent in the same terminal, or fired /clear — entry.sessionId is the
-    // spawn-time value and goes stale; the hook's per-pid file has the truth.
+    // Async-resolve the live session id from the SessionStart hook's state file,
+    // then hydrate its identity. Catches the case where the user exited and reran
+    // the agent in the same terminal, fired /clear, or ran the agent by hand so
+    // entry.sessionId was never stamped — the hook's per-pid file has the truth.
     void tryHydrateLiveSessionId(terminal, info.prefix);
 
     return;

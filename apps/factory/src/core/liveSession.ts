@@ -6,8 +6,12 @@ import * as path from 'path';
 
 const execAsync = promisify(exec);
 
-// Written by the SessionStart hook in @agents/session-tracker.
-const STATE_DIR = path.join(os.homedir(), '.agents', '.cache', 'terminals', 'sessions');
+// Written by the fleet's ACTUALLY-DEPLOYED SessionStart hook (agents-cli), which
+// writes ~/.agents/.cache/state/sessions/<pid>.json ({session_id,cwd,pid,ts}).
+// NOT the @agents/session-tracker package's ~/.agents/.cache/terminals/sessions/
+// path — that package is not deployed on the fleet and its dir stays empty, so a
+// read there always missed and this lookup could never resolve a live id.
+const STATE_DIR = path.join(os.homedir(), '.agents', '.cache', 'state', 'sessions');
 
 export interface SessionStateRecord {
   session_id: string;
