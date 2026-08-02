@@ -117,7 +117,7 @@ describe('buildHqFloor', () => {
   it('does not render closed or abandoned sessions as idle on the floor', () => {
     const sessions: ActiveSession[] = [
       {
-        context: 'direct',
+        context: 'terminal',
         kind: 'codex',
         status: 'closed',
         activity: 'working',
@@ -125,7 +125,7 @@ describe('buildHqFloor', () => {
         machine: 'yosemite-s0',
       },
       {
-        context: 'direct',
+        context: 'terminal',
         kind: 'claude',
         status: 'abandoned',
         activity: 'idle',
