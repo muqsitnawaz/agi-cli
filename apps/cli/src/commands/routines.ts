@@ -23,6 +23,7 @@ import {
   readDaemonLog,
   getDaemonStatus,
 } from '../lib/daemon.js';
+import { resolveAgentName, isAgentHardDeprecated, hardDeprecationError } from '../lib/agents.js';
 import { humanizeCron, humanizeNextRun, formatRepoLink, REPO_DISPLAY_MAX } from '../lib/routines-format.js';
 import {
   listJobs as listAllJobs,
@@ -334,7 +335,7 @@ export function registerRoutinesCommands(program: Command): void {
     `,
     notes: `
       A routine is a YAML file that schedules an agent invocation. It specifies:
-        - which agent to run (claude, codex, gemini, ...)
+        - which agent to run (claude, codex, antigravity, ...)
         - when to run (cron schedule or one-shot time)
         - what task to give the agent (the prompt)
         - execution constraints (mode, effort, timeout)
@@ -533,7 +534,7 @@ export function registerRoutinesCommands(program: Command): void {
     .command('add [nameOrPath]')
     .description('Create a new routine from a YAML file or inline flags. Starts the scheduler automatically if it is not already running.')
     .option('-s, --schedule <cron>', 'Cron schedule in standard format (5 fields: minute hour day month weekday)')
-    .option('-a, --agent <agent>', 'Which agent runs this routine: claude, codex, gemini, cursor, or opencode')
+    .option('-a, --agent <agent>', 'Which agent runs this routine: claude, codex, antigravity, cursor, or opencode')
     .option('--workflow <name>', 'Run an installed workflow (~/.agents/workflows/<name>) via `agents run`. Mutually exclusive with --agent.')
     .option('--command <sh>', 'Run a plain shell command directly (no agent, no auth, no sandbox) — for deterministic housekeeping routines. Mutually exclusive with --agent and --workflow; --prompt is not used.')
     .option('-p, --prompt <prompt>', 'Task instruction for the agent')
@@ -604,6 +605,16 @@ export function registerRoutinesCommands(program: Command): void {
         if (!options.agent && !options.workflow && !options.command) {
           console.error(chalk.red('An agent, workflow, or command is required (use --agent, --workflow, or --command)'));
           process.exit(1);
+        }
+
+        // Hard-deprecated harnesses cannot be scheduled — refuse at create time so
+        // no new recurring job silently fails against a retired backend.
+        if (options.agent) {
+          const routineAgentId = resolveAgentName(options.agent);
+          if (routineAgentId && isAgentHardDeprecated(routineAgentId)) {
+            console.error(chalk.red(hardDeprecationError(routineAgentId)));
+            process.exit(1);
+          }
         }
 
         // Command routines run a plain shell and take no prompt; agent/workflow routines require one.

@@ -149,6 +149,7 @@ import {
   loadRun,
   loadFork,
   loadDefaults,
+  loadSet,
   loadModels,
   loadPrune,
   loadTrash,
@@ -331,7 +332,7 @@ program.helpInformation = function () {
     return brandRootHelp(`Usage: agents [command] [options]
 
 Install, configure, run, and dispatch AI coding agents from one place.
-Works with Claude, Codex, Gemini, Cursor, OpenCode, OpenClaw, and Droid.
+Works with Claude, Codex, Antigravity, Cursor, OpenCode, OpenClaw, and Droid.
 
 Quick start:
   agents setup                    First-time setup (interactive)
@@ -940,6 +941,7 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadRun);
   await reg(loadFork);
   await reg(loadDefaults);
+  await reg(loadSet);
   await reg(loadModels);
   await reg(loadPrune);
   await reg(loadTrash);

@@ -472,7 +472,7 @@ export function liveGlyphAndPreview(a: ActiveSession | undefined): { glyph: stri
  * the same three states the `--active` column shows, so the default list is no
  * longer just a glyph. `waiting` is the actionable "needs you" case (a question /
  * permission / plan-review), kept distinct from `idle` (stopped) and `working`.
- * Empty for a not-live row, and for the rare dead-and-vanished `unknown`. Pure +
+ * Empty for a not-live row, and for the rare no-signal `unknown`. Pure +
  * exported for the row tests.
  */
 export function liveStatusWord(a: ActiveSession | undefined): string {
