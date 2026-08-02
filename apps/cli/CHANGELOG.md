@@ -2,6 +2,13 @@
 
 ## 1.20.75
 
+- **`agents setup secrets` guides backend, prompt-policy, and import onboarding (RUSH-1999).**
+  The setup command group now includes a secrets wizard that saves setup preferences
+  for the selected storage backend, applies the existing global `secrets.policy`
+  default for `daily`/`always`, and delegates optional `.env`, 1Password, or
+  legacy iCloud imports to `agents secrets import`. Source:
+  `apps/cli/src/commands/setup-secrets.ts`, `apps/cli/src/commands/setup.ts`.
+
 - **Wire native file-based slash commands for Grok (RUSH-1851).** Grok >= 0.2.111
 discovers commands from the cross-agent `~/.agents/commands/` dir (plus the
 legacy `~/.claude/commands/` symlink). `agents sync grok` now writes native
