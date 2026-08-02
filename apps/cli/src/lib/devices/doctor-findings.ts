@@ -73,6 +73,7 @@ export type FindingKind =
   | 'repo-drift'          // a config repo diverged from the fleet baseline (WARNING)
   | 'fleet-resource-gap'  // a resource in another box's central repos, absent here (WARNING)
   | 'host-cli-missing'    // a declared host CLI not installed on this box (WARNING)
+  | 'host-cli-invalid'    // a host-CLI manifest that failed to parse (WARNING)
   | 'version-skew'        // an agent version present elsewhere, absent here (WARNING)
   | 'orphan'              // orphan resources in a version home (WARNING)
   | 'duplicate-hook'      // one hook materialized in several version homes, byte-identical (WARNING)
@@ -160,8 +161,12 @@ export function remediationFor(finding: DoctorFinding): string {
     case 'fleet-resource-gap':
       // The resource is absent from this box's CENTRAL repos, not from a version
       // home, so `agents doctor --fix` (which reconciles central -> homes) has
-      // nothing to copy. Pulling every config repo here is what closes the gap.
-      return 'agents repo pull';
+      // nothing to copy. The divergence row cannot say WHICH repo declares it,
+      // and neither `agents repo pull` nor the sync umbrella touches the system
+      // repo (`commands/repo.ts:1186`, `lib/sync-umbrella.ts:104`) — that one is
+      // npm-shipped and moves with the CLI. So name both paths rather than a
+      // single command that silently covers half the cases.
+      return 'agents repo pull user (or upgrade agents-cli if it ships in .system)';
     case 'version-skew':
       return idLabel ? `agents add ${idLabel}` : 'agents add <agent>@<version>';
     case 'duplicate-hook':
@@ -172,6 +177,10 @@ export function remediationFor(finding: DoctorFinding): string {
       return agent ? `agents sync ${agent}@all --yes` : 'agents sync';
     case 'host-cli-missing':
       return 'agents cli install';
+    case 'host-cli-invalid':
+      // Nothing installs a manifest the loader cannot parse — the file has to be
+      // fixed where it is declared.
+      return 'fix the manifest';
     case 'rc-secret-export':
       return 'agents secrets add';
     case 'exec-policy':
@@ -235,10 +244,14 @@ export interface LocalFindingInputs {
   signIn: Record<string, FleetVersionSignIn[]>;
   /** Managed agents (installed versions) whose binary won't resolve. */
   cliMissing?: AgentId[];
-  /** Host CLIs declared in a DotAgents repo's `cli/` and their install state on
-   *  this box. Host-global (installed to PATH, never synced into a version home),
-   *  so they are a machine-level finding, not a per-version one. */
-  hostClis?: Array<{ name: string; installed: boolean }>;
+  /** Host CLIs declared in a DotAgents repo's `cli/`: their install state on this
+   *  box, plus any manifest the loader could not parse. Host-global (installed to
+   *  PATH, never synced into a version home), so they are a machine-level
+   *  finding, not a per-version one. */
+  hostClis?: {
+    statuses: Array<{ name: string; installed: boolean }>;
+    errors: Array<{ file: string; reason: string }>;
+  };
   /** Hooks materialized into several version homes at once — identical copies are
    *  installation noise, differing ones are drift a stale gate can act on. */
   duplicateHooks?: DuplicateVersionHook[];
@@ -407,7 +420,7 @@ export function buildLocalFindings(input: LocalFindingInputs): DoctorFinding[] {
   // Host CLIs declared but not on PATH. One row for the machine, naming the
   // count and two examples — `agents cli install <name>` is per-CLI, so the
   // names have to survive into the message.
-  const missingClis = (input.hostClis ?? []).filter((c) => !c.installed).map((c) => c.name);
+  const missingClis = (input.hostClis?.statuses ?? []).filter((c) => !c.installed).map((c) => c.name);
   if (missingClis.length > 0) {
     out.push({
       severity: 'warning', kind: 'host-cli-missing', device,
@@ -416,6 +429,14 @@ export function buildLocalFindings(input: LocalFindingInputs): DoctorFinding[] {
         : `${missingClis.length} declared host CLIs not installed (${missingClis.slice(0, 2).join(', ')}${missingClis.length > 2 ? ', …' : ''})`,
       remediation: `agents cli install ${missingClis[0]}${missingClis.length > 1 ? ' …' : ''}`,
     });
+  }
+  // A manifest the loader rejected declares a CLI that can never install — one
+  // row per bad file, since each needs its own edit.
+  for (const e of input.hostClis?.errors ?? []) {
+    out.push(finding({
+      severity: 'warning', kind: 'host-cli-invalid', device,
+      message: `host-CLI manifest ${e.file} could not be read: ${e.reason}`,
+    }));
   }
 
   out.push(...duplicateHookFindings(device, input.duplicateHooks ?? []));

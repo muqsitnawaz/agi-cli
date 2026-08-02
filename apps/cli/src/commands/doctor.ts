@@ -37,6 +37,7 @@ import {
   signInToFindings,
   renderFindings,
   type DoctorFinding,
+  type LocalFindingInputs,
 } from '../lib/devices/doctor-findings.js';
 import { getCliVersion } from '../lib/version.js';
 import { resolveHost } from '../lib/hosts/registry.js';
@@ -126,6 +127,18 @@ export function wrapLine(prefix: string, text: string, width = terminalWidth()):
   }
   lines.push(line);
   return lines;
+}
+
+/** Reshape  into the pure finding-builder's input: install state
+ *  per declared CLI, plus the manifests the loader rejected (a bad manifest
+ *  declares a CLI that can never install, so it is a finding, not silence). */
+function toHostCliInput(
+  status: ReturnType<typeof listCliStatus>,
+): NonNullable<LocalFindingInputs['hostClis']> {
+  return {
+    statuses: status.statuses.map((c) => ({ name: c.manifest.name, installed: c.installed })),
+    errors: status.errors.map((e) => ({ file: e.file, reason: e.reason })),
+  };
 }
 
 function printWrappedLine(prefix: string, text: string): void {
@@ -349,7 +362,7 @@ async function runDevicesDoctor(opts: DoctorOptions): Promise<void> {
         signIn: r.inventory?.signIn ?? {},
         cliMissing: localCliMissing,
         duplicateHooks: inspectDuplicateVersionHooks(cwd),
-        hostClis: listCliStatus(cwd).statuses.map((c) => ({ name: c.manifest.name, installed: c.installed })),
+        hostClis: toHostCliInput(listCliStatus(cwd)),
         rcSecrets: scanUserRcFiles(),
         execPolicy: process.platform === 'win32'
           ? { platform: process.platform, policy: getEffectiveExecutionPolicy() }
@@ -1473,7 +1486,7 @@ export function registerDoctorCommand(program: Command): void {
           signIn: inventory.signIn ?? {},
           cliMissing,
           duplicateHooks,
-          hostClis: hostClis.statuses.map((c) => ({ name: c.manifest.name, installed: c.installed })),
+          hostClis: toHostCliInput(hostClis),
           rcSecrets: scanUserRcFiles(),
           // getEffectiveExecutionPolicy spawns powershell — a doomed process on
           // POSIX, where the advisory never applies. Probe only on Windows.

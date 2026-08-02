@@ -264,7 +264,7 @@ describe('duplicate version-home hooks', () => {
 describe('host CLIs (restored — `renderOverviewText` was its only text renderer)', () => {
   it('declared-but-missing host CLIs become ONE warning naming the install command', () => {
     const findings = buildLocalFindings(localInput({
-      hostClis: [{ name: 'mq', installed: false }, { name: 'rush', installed: true }, { name: 'fd', installed: false }],
+      hostClis: { statuses: [{ name: 'mq', installed: false }, { name: 'rush', installed: true }, { name: 'fd', installed: false }], errors: [] },
     }));
     const f = findings.find((x) => x.kind === 'host-cli-missing');
     expect(f?.severity).toBe('warning');
@@ -273,14 +273,30 @@ describe('host CLIs (restored — `renderOverviewText` was its only text rendere
   });
 
   it('a single missing host CLI is named in full with its exact install command', () => {
-    const findings = buildLocalFindings(localInput({ hostClis: [{ name: 'mq', installed: false }] }));
+    const findings = buildLocalFindings(localInput({ hostClis: { statuses: [{ name: 'mq', installed: false }], errors: [] } }));
     const f = findings.find((x) => x.kind === 'host-cli-missing');
     expect(f?.message).toBe("host CLI 'mq' declared but not installed");
     expect(f?.remediation).toBe('agents cli install mq');
   });
 
-  it('all host CLIs installed → no finding', () => {
-    expect(buildLocalFindings(localInput({ hostClis: [{ name: 'mq', installed: true }] }))).toHaveLength(0);
+  it('all host CLIs installed and no bad manifests → no finding', () => {
+    expect(buildLocalFindings(localInput({
+      hostClis: { statuses: [{ name: 'mq', installed: true }], errors: [] },
+    }))).toHaveLength(0);
+  });
+
+  it('a manifest the loader rejected is its own warning — it can never install', () => {
+    // These were printed by the deleted `renderOverviewText` and would otherwise
+    // survive only in `--json`.
+    const findings = buildLocalFindings(localInput({
+      hostClis: {
+        statuses: [],
+        errors: [{ file: 'cli/broken.yaml', reason: 'missing `name`' }],
+      },
+    }));
+    const f = findings.find((x) => x.kind === 'host-cli-invalid');
+    expect(f?.severity).toBe('warning');
+    expect(f?.message).toBe('host-CLI manifest cli/broken.yaml could not be read: missing `name`');
   });
 });
 
@@ -483,8 +499,11 @@ describe('fleetDivergenceToFindings', () => {
     };
     const f = fleetDivergenceToFindings([d], 'boxA')[0];
     expect(f).toMatchObject({ kind: 'fleet-resource-gap', device: 'boxB' });
-    expect(f.remediation).toBe('agents repo pull');
+    // Neither a bare `agents repo pull` nor the sync umbrella touches the system
+    // repo, so the hint must not promise a single command that covers both.
+    expect(f.remediation).toBe('agents repo pull user (or upgrade agents-cli if it ships in .system)');
     expect(f.remediation).not.toContain('doctor');
+    expect(f.remediation).not.toBe('agents repo pull');
   });
 });
 

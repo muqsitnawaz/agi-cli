@@ -152,16 +152,21 @@ testable without a shell, PowerShell, or an installed CLI):
 | Credential-shaped shell-rc exports (RUSH-1968) | `rcSecrets` | `rc-secret-export` |
 | Windows exec policy blocking `agents.ps1` | `execPolicy` | `exec-policy` |
 | Hooks duplicated across version homes | `duplicateHooks` | `duplicate-hook{,-drift}` |
-| Declared host CLIs not on PATH | `hostClis` | `host-cli-missing` |
+| Declared host CLIs not on PATH | `hostClis.statuses` | `host-cli-missing` |
+| Host-CLI manifests the loader rejected | `hostClis.errors` | `host-cli-invalid` |
 
 **Before deleting any renderer here, enumerate what it called.**
 
 **A remediation must fix EVERY version in its row.** `agents sync <agent>` targets
 only the default/sole installed version (`commands/sync.ts:8`), so a row collapsed
 across versions uses the `@all` selector — `agents sync <agent>@all --yes`. A fleet
-resource gap is absent from that box's *central repos*, so it takes
-`agents repo pull`, not the central-to-home `agents doctor --fix`; and a `repo-drift`
-row carries the repo alias (`user` / `system`) rather than hardcoding one.
+resource gap is absent from that box's *central repos*, so the central-to-home
+`agents doctor --fix` cannot close it — and neither `agents repo pull` nor the sync
+umbrella touches the **system** repo (`commands/repo.ts:1186`,
+`lib/sync-umbrella.ts:104`), which moves with the npm package instead, so that row
+names both paths rather than one command that quietly covers half the cases. A
+`repo-drift` row carries the repo alias (`user` / `system`) rather than hardcoding
+one.
 
 **Sign-in is per installed VERSION, and a logged-out claim must be provable.**
 [`credentialPresence(agent, versionHome)`](src/lib/agents.ts) splits a credential's
