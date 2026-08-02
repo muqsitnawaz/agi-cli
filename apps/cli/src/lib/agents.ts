@@ -324,7 +324,10 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     // + warns for pre-2.4 installs); the direct `subagents add --agents cursor` path
     // writes unconditionally, same as the other since-gated agents.
     // See transformSubagentForCursor / https://cursor.com/docs/subagents.
-    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '2026.1.22' }, rules: { file: '.cursorrules' }, workflows: false, memory: false, modes: ['edit', 'skip'] }, // allowlist: ~/.cursor/cli-config.json
+    // Cursor's commands directory belongs to the IDE; cursor-agent does not read
+    // it. Keep commandsSubdir so sync can remove stale managed IDE-era files,
+    // while commands: false routes shared commands through Cursor Agent Skills.
+    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: false, plugins: true, subagents: { since: '2026.1.22' }, rules: { file: '.cursorrules' }, workflows: false, memory: false, modes: ['edit', 'skip'] }, // allowlist: ~/.cursor/cli-config.json
   },
   opencode: {
     id: 'opencode',

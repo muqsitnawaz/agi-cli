@@ -206,7 +206,7 @@ Slash commands in `commands/*.md` can narrow sync with optional YAML frontmatter
 ```yaml
 ---
 description: Required one-line summary
-agents: [claude, cursor, codex]   # omit = all command-capable agents
+agents: [claude, cursor, codex]   # omit = all compatible agents; Cursor receives a skill
 since: "0.116.0"                  # minimum agent CLI version (inclusive)
 until: "0.117.0"                  # exclusive upper bound
 ---
@@ -214,4 +214,4 @@ until: "0.117.0"                  # exclusive upper bound
 
 `commandAppliesTo()` in `src/lib/commands.ts` evaluates these fields after the agent-level `commands` / commands-as-skills gate. The check runs on central sync (`~/.agents/commands/` user/system → version home) and on `agents commands install`; project `.agents/commands/` files are discovered in place and are not filtered by `agents:`.
 
-Example: `.agents/commands/version.md` targets Claude, Codex, Cursor, OpenCode, Copilot, and Grok; Antigravity is excluded until harness support is verified.
+Example: `.agents/commands/version.md` targets Claude, Codex, Cursor, OpenCode, Copilot, and Grok. Cursor receives the command as an Agent Skill because cursor-agent does not support the IDE's `.cursor/commands/` files; Antigravity is excluded until harness support is verified.

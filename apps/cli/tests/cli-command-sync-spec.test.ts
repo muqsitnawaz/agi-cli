@@ -272,4 +272,10 @@ describe('CLI command sync: sync-pipeline invariants', () => {
   it('grok uses native command files (per docs: ~/.agents/commands/)', () => {
     expect(shouldInstallCommandAsSkill('grok', '0.2.111')).toBe(false);
   });
+
+  it('cursor installs commands as skills because its commands directory is IDE-only', () => {
+    expect(supports('cursor', 'commands', '2026.07.23-e383d2b').ok).toBe(false);
+    expect(supports('cursor', 'skills', '2026.07.23-e383d2b').ok).toBe(true);
+    expect(shouldInstallCommandAsSkill('cursor', '2026.07.23-e383d2b')).toBe(true);
+  });
 });

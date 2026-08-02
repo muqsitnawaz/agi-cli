@@ -6,12 +6,12 @@
  *  - command-as-skill — fires when `shouldInstallCommandAsSkill(agent, version)`
  *    is true. Used for Codex >= 0.117.0 (commands capability ends, skills
  *    capability remains) and agents with skills but no native command-file dir
- *    such as kimi. Writes `{agentDir}/skills/<name>/SKILL.md` with the
+ *    such as Cursor and Kimi. Writes `{agentDir}/skills/<name>/SKILL.md` with the
  *    `agents_command` marker; the agent picks it up as a slash-command equivalent.
  *
  *  - native command file — `{agentDir}/<commandsSubdir>/<name>.md` (or .toml
  *    when the agent's format is toml). Standard path for Claude, Codex
- *    < 0.117.0, Cursor, OpenCode, Copilot, Amp, Kiro, Roo, Antigravity.
+ *    < 0.117.0, OpenCode, Copilot, Amp, Kiro, Roo, Antigravity.
  *
  * Source resolution is `resolveCommandSource` (user → system → extras —
  * project layer intentionally excluded).
