@@ -21,6 +21,7 @@ import { getShimsDir, getHistoryDir } from './state.js';
 import { resolveCodexHome } from './codex-home.js';
 import { readCodexConfiguredModel } from './shims.js';
 import { writePidSessionEntry, extractSessionIdArg } from './session/pid-registry.js';
+import { writeSessionActorRecord } from './session/actor-sidecar.js';
 import { loadHookSessionIndex, resolveHookSessionId } from './session/hook-sessions.js';
 import { sessionIdMarkerLine } from './hosts/session-marker.js';
 import { recordRunName } from './session/run-names.js';
@@ -1061,15 +1062,28 @@ export async function execShimPassthrough(
     // wrapper, not the agent binary — the active scan resolves that by
     // walking the candidate's ancestors (readAncestorSessionEntry).
     if (child.pid) {
+      const passthroughSessionId = extractSessionIdArg(rawArgs);
       writePidSessionEntry({
         pid: child.pid,
         agent,
-        sessionId: extractSessionIdArg(rawArgs),
+        sessionId: passthroughSessionId,
         cwd,
+        actor: resolveActor().id,
+        initiatedBy: resolveActor().kind,
         launchId,
         terminalId: process.env.AGENT_TERMINAL_ID,
         startedAtMs: Date.now(),
       });
+      // Durable sessionId -> actor record (RUSH-2019) so the scanner can attribute
+      // this session to a person after the pid dies. Best-effort; no-ops without id.
+      if (passthroughSessionId) {
+        writeSessionActorRecord({
+          sessionId: passthroughSessionId,
+          actor: resolveActor().id,
+          initiatedBy: resolveActor().kind,
+          startedAtMs: Date.now(),
+        });
+      }
     }
     child.on('exit', (code, signal) => resolve(code ?? (signal ? 1 : 0)));
     child.on('error', (err) => {
@@ -1250,6 +1264,8 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
       agent: options.agent,
       sessionId: options.sessionId,
       cwd,
+      actor: resolveActor().id,
+      initiatedBy: resolveActor().kind,
       // spawnAgent injected AGENT_LAUNCH_ID into options.env before delegating
       // here; record the same id so the hook (running under the pane-leaf agent
       // pid) reconciles by launchId. This pane's pid usually IS the agent pid,
@@ -1259,6 +1275,14 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
       tmuxPane: pane,
       startedAtMs: Date.now(),
     });
+    if (options.sessionId) {
+      writeSessionActorRecord({
+        sessionId: options.sessionId,
+        actor: resolveActor().id,
+        initiatedBy: resolveActor().kind,
+        startedAtMs: Date.now(),
+      });
+    }
   }
 
   // Recap a dead pane's tail into THIS shell's stderr. The pane-died hook
@@ -1479,11 +1503,21 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
       agent: options.agent,
       sessionId: options.sessionId,
       cwd: options.cwd || process.cwd(),
+      actor: resolveActor().id,
+      initiatedBy: resolveActor().kind,
       launchId,
       terminalId: process.env.AGENT_TERMINAL_ID,
       tmuxPane: process.env.TMUX_PANE,
       startedAtMs: Date.now(),
     });
+    if (options.sessionId) {
+      writeSessionActorRecord({
+        sessionId: options.sessionId,
+        actor: resolveActor().id,
+        initiatedBy: resolveActor().kind,
+        startedAtMs: Date.now(),
+      });
+    }
 
     // Mark startup time (time from function call to process spawn)
     timer.mark('startup');

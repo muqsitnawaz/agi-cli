@@ -4,6 +4,30 @@ Using agents-cli as a programmatic observability layer for agent fleets.
 
 `agents feed` and `agents mailboxes` share one fleet-comms visual language (masthead + glyphs from `comms-render`) so the two operator surfaces read as one product.
 
+## Command roles at a glance
+
+Five surfaces read the fleet's activity; each has one job. Reach for the one whose
+*consumer* and *axis* match your question, not whichever you remember first.
+
+| Command | Role (one line) | Source | Consumer |
+|---|---|---|---|
+| **`events`** | **Raw unified event stream = the audit log.** Everything: secrets access, command invocations, version/skill/mcp/team ops, browser events, plus agent milestones. `--follow` to tail, `--audit` for ops-only. | `events.jsonl` + per-session `activity/*.jsonl`, merged by `readUnifiedEvents` | Audit, debugging, monitoring (human + machine) |
+| **`feed`** | **Consolidated cross-agent surface.** Open blocks (decisions agents are waiting on) + `feed post` status updates — "what needs you / what are agents saying." | `.history/feed/*` + active sessions | Humans (operator inbox) + agents (progress) |
+| **`activity`** | **Human milestone timeline.** Recent plans / PRs / worktrees / sub-agents, newest-first — a friendly lens on the milestone tier of the event stream. | `activity/*.jsonl` | Human at the terminal |
+| **`output`** | **Productivity accounting.** Token burn vs shipped output (PRs, commits) across agents — the "was it worth it" axis. (`agents cost` is the pure $-and-duration sibling.) | `sessions.db` + git/gh | Human + `--json` |
+| **`sessions`** | **Live agent roster + transcripts.** Which agents are running right now and their state; browse/read past conversation transcripts. A live process probe + transcript index, not an event log. | live pid/transcript probe + `sessions.db` | Human + `--json` |
+
+The two write-stores behind these: `~/.agents/events.jsonl` (operational audit) and
+per-session `~/.agents/.history/activity/<id>.jsonl` (agent milestones). They are
+distinct on disk and merged only at read time by
+`event-stream.ts::readUnifiedEvents` — so `events` is the union, while `activity`
+is the milestone tier on its own.
+
+For the inspection/health cluster, `agents doctor` is the canonical detector of
+which resources are configured, synced, or drifted; `agents doctor --check` is its
+scriptable CI gate (exit non-zero on drift). See
+[§Fleet health & cross-device divergence](#fleet-health--cross-device-divergence-agents-doctor).
+
 ## Audit Event Log (`agents events`)
 
 Separate from the fleet-state sources below (which answer "what's running *now*"),
@@ -81,6 +105,41 @@ actors:
     email: bisma@company.com    # pin a preferred git email
     github: bisma
 ```
+
+#### Surfacing the owner
+
+The resolved actor is stamped at spawn and read back so you can see *who* launched
+each run, not just *what* is running:
+
+- **`agents sessions --active`** shows an **owner** column — the actor's short id
+  (an email's local-part, or `-` when the run is unresolved-local). It is stamped
+  into the per-pid registry (`writePidSessionEntry`) at launch and onto each
+  teammate record, so a co-located fleet no longer collapses to one anonymous
+  account. `--active --json` carries the raw `owner` field for a consumer to join on.
+- **The session index** (`sessions.db`) carries `actor` and `initiated_by`
+  (`human`/`agent`) columns, so the durable `agents sessions` listing attributes
+  historical sessions to a person, not just the live `--active` view. They are
+  **write-once at session creation** — a later content rescan carries no actor and
+  is deliberately kept out of the upsert's `ON CONFLICT` update set, so the original
+  owner is never clobbered by re-indexing.
+- **How the index gets the actor** — the transcript on disk records no actor, so at
+  spawn each run also writes a small **durable `sessionId -> actor` sidecar** under
+  `~/.agents/.history/by-session/` (unlike the pid-registry, this survives the
+  process). The scanner joins it as it indexes, filling the columns above. Teammates
+  inherit the orchestrator's frozen actor, so a whole team traces back to the one
+  human who started it; their records also carry a `parent_session_id` (the
+  orchestrator's session) so the spawn chain is walkable.
+- **Beyond sessions — events, routines, and browser tasks carry the actor too.**
+  Every emitted **event** records `actor` + `kind` (via the audit origin), so
+  `agents events` and its stats group by who did it (a `byActor` breakdown). A
+  **routine** stamps its creator's actor id at creation and seeds it into each fired
+  run's env (`AGENTS_ACTOR`), so an unattended cron's session and events attribute to
+  the person who scheduled it (not the `UNRESOLVED@<host>` a live resolve would give)
+  rather than the local box; its run records carry `actor` (the creator) and
+  `triggeredBy` (who kicked off that specific run). Only the actor *id* rides along —
+  the creator's git name/email are not stored, so git-author credit is out of scope
+  for scheduled runs. A **browser task** records the `owner` who launched it, on the
+  live task and in history.
 
 ```bash
 agents events                          # recent activity across everything
@@ -213,6 +272,24 @@ Three diagnostics with distinct scopes (RUSH-2027):
   version home and its resolved sources (staleness, orphans).
 - `agents doctor` — the **umbrella**: local diagnostics (CLI presence, sign-in,
   per-version sync, orphans) **and**, with `--devices`, cross-device divergence.
+
+`agents doctor` is the human report; `agents doctor --check` is the machine gate —
+same drift engine (`computeDrift`), different output. `--check` exits non-zero when
+any installed version is stale or never-synced (orphans are informational, never a
+failure), zero when clean; add `--json` for a scriptable payload, `--quiet` for just
+the verdict line, and `--devices` to gate the whole fleet:
+
+```bash
+agents doctor --check            # exit 1 on drift, 0 if clean
+agents doctor --check --quiet    # just the one-line verdict
+agents doctor --check --json     # machine-readable, for CI
+agents doctor --check --devices  # gate every registered device
+```
+
+> The former standalone `agents check` (the CI gate) and `agents resources` (the
+> merged cross-layer resource table) are gone: `check` is now `doctor --check`, and
+> the merged table is now [`agents view --merged`](00-concepts.md). One command per
+> responsibility, no overlap.
 
 ### Triaged health block (local modes)
 
