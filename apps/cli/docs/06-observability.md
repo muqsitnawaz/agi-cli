@@ -317,7 +317,7 @@ section, then one `▸ <machine>` block:
 agents doctor · zion                                        1.20.81
 
 ✗ CRITICAL — needs you now  (2)
-  codex @0.1            logged out — no account signed in                    → codex login
+  codex @0.1            logged out — no account signed in                    → agents run codex@0.1 -- login
   grok @0.2.82          32 hooks missing (incl. 'git-guard', 'rm-guard')      → agents doctor grok@0.2.82 --fix
 
 ▸ zion · this machine  ✗ 2 critical (above)
@@ -366,11 +366,16 @@ not out. Agents with no inspectable identity (cursor, openclaw, copilot, amp,
 kiro, goose, hermes — `!supportsAccountInspection`) never yield a logged-out
 finding; the eight with a known credential path (claude, codex, gemini, opencode,
 antigravity, grok, kimi, droid) do. The login
-remediation is version-targeted: for the per-version-isolated set
-(claude/codex/grok/kimi/opencode/copilot) it is `agents run <agent>@<version>` then
-the harness-native login (`codex login`, `claude → /login`, `opencode auth login`);
+remediation is version-targeted, and it has to run INSIDE that version's home — a
+bare `codex login` afterwards resolves through the shim to the project/default
+version, so it would log into the wrong one. For the per-version-isolated set it is
+therefore `agents run <agent>@<version> -- <login subcommand>` (`-- login` for
+codex/grok, `-- auth login` for opencode), `agents run claude@<version>, then
+/login` for claude (its login lives in the TUI), and a bare
+`agents run <agent>@<version>` where the device flow starts on launch.
 gemini/antigravity/droid/cursor have no per-version isolation, so the fix says the
-login is shared rather than faking a per-version repair.
+login is shared rather than faking a per-version repair. A logout row is never
+collapsed across versions — there is no `@all` for a login.
 
 `--json` carries a `findings` array (severity/kind/device/agent/version/account/
 message/remediation) plus a per-version `fleet.signIn` map; the existing

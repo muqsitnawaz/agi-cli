@@ -430,6 +430,20 @@ describe('signInToFindings — provable vs unprovable logout', () => {
   );
 });
 
+describe('determinism', () => {
+  it('logout rows follow the registry agent order, not the probe-completion order', () => {
+    // `collectLocalFleetSignIn` fills its map inside a Promise.all, so key order
+    // is whichever account probe finished first. Two runs on identical state must
+    // still print identical output.
+    const rows = (v: string) => [{ version: v, signedIn: false, account: null, provable: true }];
+    const a = signInToFindings('boxA', { droid: rows('1'), codex: rows('2'), claude: rows('3') });
+    const b = signInToFindings('boxA', { claude: rows('3'), droid: rows('1'), codex: rows('2') });
+    expect(a.map((f) => f.agent)).toEqual(b.map((f) => f.agent));
+    // And that shared order is the registry's, not either input's.
+    expect(a.map((f) => f.agent)).toEqual(['claude', 'codex', 'droid']);
+  });
+});
+
 describe('remediationFor', () => {
   const base = { severity: 'critical' as const, device: 'd', message: 'm', remediation: '' };
 

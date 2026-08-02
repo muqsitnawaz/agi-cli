@@ -134,6 +134,16 @@ function agentName(agent: AgentId): string {
   return AGENT_NAMES[agent] || agent;
 }
 
+/** Agent ids in the registry's display order — the one stable ordering, used
+ *  wherever output would otherwise inherit a map's insertion order. */
+function sortedAgentIds(ids: string[]): string[] {
+  const rank = (a: string) => {
+    const i = ALL_AGENT_IDS.indexOf(a as AgentId);
+    return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+  };
+  return [...ids].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+}
+
 /**
  * The exact remediation for a finding. Login fixes are harness-native
  * (`loginHint`); a per-version login is offered ONLY for agents that isolate the
@@ -696,7 +706,13 @@ export function signInToFindings(
   signIn: Record<string, FleetVersionSignIn[]>,
 ): DoctorFinding[] {
   const out: DoctorFinding[] = [];
-  for (const [agentId, rows] of Object.entries(signIn)) {
+  // Iterate in the registry's agent order, NOT the map's insertion order:
+  // `collectLocalFleetSignIn` fills its map inside a `Promise.all`, so key order
+  // is whatever order the account probes happened to finish in. The renderer
+  // preserves input order within a device, so consuming the map order directly
+  // would make two runs on identical state print their logout rows differently.
+  for (const agentId of sortedAgentIds(Object.keys(signIn))) {
+    const rows = signIn[agentId];
     const agent = agentId as AgentId;
     if (!supportsAccountInspection(agent)) continue;
     for (const row of rows) {
@@ -952,11 +968,7 @@ function warningSubject(f: DoctorFinding): string {
 export function renderAccountsLine(signIn: Record<string, FleetVersionSignIn[]>): string {
   const parts: string[] = [];
   // Stable agent order matches AGENT display order.
-  const agents = Object.keys(signIn).sort((a, b) => {
-    const ia = ALL_AGENT_IDS.indexOf(a as AgentId);
-    const ib = ALL_AGENT_IDS.indexOf(b as AgentId);
-    return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
-  });
+  const agents = sortedAgentIds(Object.keys(signIn));
   for (const agentId of agents) {
     const rows = signIn[agentId];
     if (!rows || rows.length === 0) continue;
