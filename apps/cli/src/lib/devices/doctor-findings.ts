@@ -36,6 +36,7 @@ import chalk from 'chalk';
 import { AGENTS, ALL_AGENT_IDS, supportsAccountInspection } from '../agents.js';
 import { blocksLocalScripts } from '../platform/winpath.js';
 import { loginHint } from '../signin-badge.js';
+import { CONFIG_ENV_ISOLATED_AGENTS } from '../shims.js';
 import { padToWidth, stringWidth } from '../session/width.js';
 import type { AgentId } from '../types.js';
 import type { DuplicateVersionHook } from '../hooks.js';
@@ -53,11 +54,15 @@ const AGENT_NAMES: Record<string, string> = Object.fromEntries(
 );
 
 /** Agents with NO per-version credential isolation: their login is shared across
- *  every installed version (no per-version isolation env var to point native
- *  login at one home), so a "log into THIS version" remediation would be a lie —
- *  the login is global. `agents run <agent>@<version>` targets a specific home
- *  only for the isolated set (claude/codex/grok/kimi/opencode/copilot). */
-const NO_PER_VERSION_LOGIN = new Set<AgentId>(['gemini', 'antigravity', 'droid', 'cursor']);
+ *  every installed version, so a "log into THIS version" remediation would be a
+ *  lie. Derived from `CONFIG_ENV_ISOLATED_AGENTS` in `lib/shims.ts` — the shim
+ *  generator is what actually exports the per-version isolation env var, so it is
+ *  the source of truth. Do not hand-maintain a second copy: an agent gaining
+ *  isolation there must not leave a stale "login is shared" hint here. */
+const ISOLATED_LOGIN = new Set<AgentId>(CONFIG_ENV_ISOLATED_AGENTS);
+const NO_PER_VERSION_LOGIN = new Set<AgentId>(
+  ALL_AGENT_IDS.filter((a) => !ISOLATED_LOGIN.has(a)),
+);
 
 /** How an agent's login is actually reached — the three shapes `loginHint`
  *  encodes (`lib/signin-badge.ts:23-36`), split apart because a per-version fix
@@ -704,12 +709,14 @@ export function collapseAcrossVersions(
  * and a signed-in version yields nothing.
  *
  * An agent with no inspectable identity never appears at all — not even as the
- * hedged warning. That is the `!supportsAccountInspection` set (cursor, openclaw,
- * copilot, amp, kiro, goose, hermes): agents-cli knows no credential file for
- * them, so "logged out" is unknowable, and silence beats a false claim. The eight
- * inspectable harnesses (claude, codex, gemini, opencode, antigravity, grok,
- * kimi, droid) each have a credential path in `CREDENTIAL_FILE_SEGMENTS` and DO
- * yield a logout finding when it is genuinely absent. Pure.
+ * hedged warning: agents-cli knows no credential file for it, so "logged out" is
+ * unknowable and silence beats a false claim. Membership is
+ * `supportsAccountInspection` (`lib/agents.ts`) and is deliberately NOT listed
+ * here — agents move between the sets, and a copy of the list in prose becomes a
+ * lie the next time one does. Note the caller also requires
+ * `CredentialPresence.knownLocation`: the inspection set and the credential-path
+ * map move independently, so being inspectable is not on its own enough to call a
+ * logout provable. Pure.
  */
 export function signInToFindings(
   device: string,

@@ -1207,6 +1207,16 @@ export interface CredentialPresence {
   /** The credential file exists under the active/global HOME (the one the login
    *  symlink actually targets), independent of the version home. */
   active: boolean;
+  /** Whether agents-cli knows WHERE this agent's credential lives at all — i.e.
+   *  the agent has an entry in {@link CREDENTIAL_FILE_SEGMENTS}. When false both
+   *  probes are trivially false because there is nothing to look for, so absence
+   *  is NOT evidence of a logout and no caller may treat it as provable.
+   *
+   *  This is deliberately separate from `supportsAccountInspection`: the two
+   *  registries move independently, and an agent has already been added to the
+   *  inspection set without a credential path (cursor), which without this flag
+   *  produced a false "logged out" critical for every installed version. */
+  knownLocation: boolean;
 }
 
 /**
@@ -1223,7 +1233,8 @@ export function credentialPresence(agentId: AgentId, versionHome: string): Crede
   const realHome = process.env.AGENTS_REAL_HOME || os.homedir();
   const perVersion = credentialFileExistsUnder(agentId, versionHome);
   const active = credentialFileExistsUnder(agentId, realHome);
-  return { perVersion, active };
+  const knownLocation = (CREDENTIAL_FILE_SEGMENTS[agentId]?.length ?? 0) > 0;
+  return { perVersion, active, knownLocation };
 }
 
 /** Decrypted contents of Droid's auth.v2.file (subset we consume). */

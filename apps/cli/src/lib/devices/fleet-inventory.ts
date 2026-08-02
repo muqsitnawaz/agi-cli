@@ -67,7 +67,11 @@ export async function collectLocalFleetSignIn(): Promise<Record<string, FleetVer
           let provable = false;
           if (!signedIn && supportsAccountInspection(agent)) {
             const presence = credentialPresence(agent, home);
-            provable = !presence.perVersion && !presence.active;
+            // `knownLocation` is load-bearing: an agent can sit in the inspection
+            // set with no credential path (cursor does), and then both probes are
+            // false only because there is nothing to look for. Treating that as a
+            // provable logout prints a CRITICAL for a version that is signed in.
+            provable = presence.knownLocation && !presence.perVersion && !presence.active;
           }
           return { version, signedIn, account, provable };
         }),

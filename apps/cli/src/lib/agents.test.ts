@@ -111,11 +111,26 @@ describe('credentialPresence (RUSH-2069 provable-logout signal)', () => {
     expect(credentialPresence('claude', versionHome).perVersion).toBe(true);
   });
 
-  it('returns both-absent for an agent with no inspectable credential format', () => {
-    // amp has no CREDENTIAL_FILE_SEGMENTS entry → never a present credential, so
-    // the caller (gated on supportsAccountInspection) never claims a logout.
+  it('reports knownLocation=false for an agent with no credential path', () => {
+    // amp has no CREDENTIAL_FILE_SEGMENTS entry, so both probes are trivially
+    // false — absence of a file we never knew how to find. `knownLocation` is what
+    // stops a caller reading that as evidence of a logout.
     const p = credentialPresence('amp' as any, makeTempDir());
-    expect(p).toEqual({ perVersion: false, active: false });
+    expect(p).toEqual({ perVersion: false, active: false, knownLocation: false });
+  });
+
+  it('every inspectable agent WITHOUT a credential path is unprovable, never a false critical', () => {
+    // The two registries move independently: cursor was added to
+    // ACCOUNT_INSPECTION_AGENT_IDS with no credential path, which without the
+    // knownLocation gate printed `logged out` for versions that were signed in.
+    const dir = makeTempDir();
+    for (const agent of ALL_AGENT_IDS.filter(supportsAccountInspection)) {
+      const p = credentialPresence(agent, dir);
+      if (!p.knownLocation) {
+        // Mirrors the caller's rule in fleet-inventory.ts.
+        expect(p.knownLocation && !p.perVersion && !p.active).toBe(false);
+      }
+    }
   });
 });
 
