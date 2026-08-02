@@ -13,7 +13,10 @@ export interface AutoLaunchPreferences {
 }
 
 function autoLaunchPath(): string {
-  return path.join(os.homedir(), '.agents', '.history', 'devices', 'auto-launch.json');
+  const dir =
+    process.env.AGENTS_DEVICES_DIR ??
+    path.join(os.homedir(), '.agents', '.history', 'devices');
+  return path.join(dir, 'auto-launch.json');
 }
 
 /**
