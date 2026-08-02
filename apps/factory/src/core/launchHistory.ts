@@ -1,9 +1,6 @@
 import { hostScore } from './launchHost';
 import { AutoLaunchPreference, isAutoLaunchEnabled, isAutoLaunchPreferred } from './deviceAutoLaunch';
 
-export type { AutoLaunchPreference };
-export { isAutoLaunchEnabled, isAutoLaunchPreferred };
-
 export interface LaunchHistoryEntry {
   launches: number;
   successes: number;
