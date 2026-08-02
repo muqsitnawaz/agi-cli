@@ -78,8 +78,8 @@ jobs:
       - name: Test
         shell: bash
         run: |
-          if [ "${{ runner.os }}" = "Windows" ] && [ "${{ matrix.node-version }}" = "24" ]; then
-            node ./node_modules/vitest/vitest.mjs run --maxWorkers=1 --no-file-parallelism
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            node ./node_modules/vitest/vitest.mjs run --pool=threads --maxWorkers=1 --no-file-parallelism
           else
             bun run test
           fi
