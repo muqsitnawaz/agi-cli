@@ -114,9 +114,14 @@ export type EventType =
   | 'browser.close'
   | 'browser.navigate'
   | 'browser.screenshot'
-  // Secrets (no values logged)
+  // Secrets (no values logged) — the value-free lifecycle vocabulary funnelled
+  // through emitSecretAudit (lib/secrets/audit.ts).
   | 'secrets.get'
   | 'secrets.unlocked'
+  | 'secrets.create'
+  | 'secrets.import'
+  | 'secrets.export'
+  | 'secrets.view'
   | 'secrets.set'
   | 'secrets.delete'
   | 'secrets.rename'
@@ -203,7 +208,7 @@ const EVENT_TYPE_TABLE: Record<EventType, true> = {
   'version.install': true, 'version.switch': true, 'version.remove': true,
   'skill.install': true, 'skill.remove': true,
   'browser.launch': true, 'browser.close': true, 'browser.navigate': true, 'browser.screenshot': true,
-  'secrets.get': true, 'secrets.unlocked': true, 'secrets.set': true, 'secrets.delete': true, 'secrets.rename': true,
+  'secrets.get': true, 'secrets.unlocked': true, 'secrets.create': true, 'secrets.import': true, 'secrets.export': true, 'secrets.view': true, 'secrets.set': true, 'secrets.delete': true, 'secrets.rename': true,
   'cloud.dispatch': true, 'cloud.complete': true, 'cloud.cancel': true, 'cloud.message': true,
   'teams.create': true, 'teams.add': true, 'teams.start': true, 'teams.complete': true, 'teams.disband': true,
   'hook.fire': true, 'hook.complete': true, 'hook.error': true,
@@ -235,7 +240,8 @@ export function isEventType(value: string): value is EventType {
 
 const AUDIT_EVENTS: ReadonlySet<string> = new Set([
   'command.start', 'command.end',
-  'secrets.get', 'secrets.unlocked', 'secrets.set', 'secrets.delete', 'secrets.rename',
+  'secrets.get', 'secrets.unlocked', 'secrets.create', 'secrets.import', 'secrets.export', 'secrets.view',
+  'secrets.set', 'secrets.delete', 'secrets.rename',
   'teams.create', 'teams.add', 'teams.start', 'teams.complete', 'teams.disband',
   'cloud.dispatch', 'cloud.complete', 'cloud.cancel', 'cloud.message',
   'version.install', 'version.switch', 'version.remove',
