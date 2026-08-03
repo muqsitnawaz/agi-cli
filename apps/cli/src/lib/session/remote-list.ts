@@ -126,7 +126,13 @@ export function remoteListCaptureResult(
 function sshCapture(target: string, remoteCmd: string, timeoutMs: number): Promise<{ code: number | null; stdout: string }> {
   assertValidSshTarget(target);
   return new Promise((resolve) => {
-    const args = [...SSH_OPTS, ...controlOpts(), target, remoteCmd];
+    // Real-protocol integration fixtures bind an ephemeral localhost port; the
+    // fleet path otherwise keeps SSH's standard port and persistent control socket.
+    const port = process.env.AGENTS_SSH_PORT;
+    if (port !== undefined && (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65_535)) {
+      throw new Error(`Invalid AGENTS_SSH_PORT ${JSON.stringify(port)}.`);
+    }
+    const args = [...SSH_OPTS, ...(port ? ['-p', port] : controlOpts()), target, remoteCmd];
     const child = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'ignore'] });
     let stdout = '';
     let settled = false;

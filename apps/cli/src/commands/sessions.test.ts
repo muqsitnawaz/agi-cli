@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { spawnSync } from 'child_process';
+import { fork, spawnSync, type ChildProcess } from 'child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import {
@@ -289,6 +289,53 @@ function runAgents(args: string[], cwd: string, home: string, envOverrides: Reco
   });
 }
 
+const sshPeerFixture = path.join(repoRoot, 'src', 'commands', 'testdata', 'session-resolver-ssh-peer.mjs');
+const historicalAgentsVersion = '1.20.88';
+
+async function startSshPeer(config: Record<string, unknown>): Promise<{ child: ChildProcess; port: number }> {
+  const child = fork(sshPeerFixture, [JSON.stringify(config)], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+  const port = await new Promise<number>((resolve, reject) => {
+    child.once('message', message => {
+      if (message && typeof message === 'object' && 'port' in message && typeof message.port === 'number') {
+        resolve(message.port);
+      } else {
+        reject(new Error(`SSH fixture sent an invalid ready message: ${JSON.stringify(message)}`));
+      }
+    });
+    child.once('exit', code => reject(new Error(`SSH fixture exited before ready (${code})`)));
+    child.once('error', reject);
+  });
+  return { child, port };
+}
+
+async function stopSshPeer(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null) return;
+  await new Promise<void>(resolve => {
+    child.once('exit', () => resolve());
+    child.kill('SIGTERM');
+  });
+}
+
+function createSshHostKey(tempDir: string): string {
+  const keyPath = path.join(tempDir, 'ssh-host-ed25519');
+  const generated = spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', keyPath], { encoding: 'utf8' });
+  expect(generated.status, generated.stderr).toBe(0);
+  return keyPath;
+}
+
+function installHistoricalAgents(tempDir: string): string {
+  const prefix = path.join(tempDir, 'old-peer-prefix');
+  const installed = spawnSync('npm', [
+    'install', '--prefix', prefix, '--ignore-scripts', '--no-audit', '--no-fund',
+    '--cache', path.join(tempDir, 'npm-cache'), `@phnx-labs/agents-cli@${historicalAgentsVersion}`,
+  ], { encoding: 'utf8' });
+  expect(installed.status, installed.stderr).toBe(0);
+  const packageDir = path.join(prefix, 'node_modules', '@phnx-labs', 'agents-cli');
+  const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8')) as { version: string };
+  expect(manifest.version).toBe(historicalAgentsVersion);
+  return path.join(packageDir, 'dist', 'index.js');
+}
+
 describe('resolveSessionQuery indexed metadata coverage', () => {
   it('resolves complete and partial ids from the real index without using text matches', () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-resolve-index-'));
@@ -442,55 +489,92 @@ describe('agents sessions --resolve local-peer critical path', () => {
     }
   });
 
-  it('returns a partial fleet result when an old peer rejects the safe resolver protocol', () => {
-    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-sessions-resolve-old-peer-'));
+  it('returns a partial fleet result when a published old peer rejects the safe resolver protocol over SSH', async () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asr-old-'));
+    let fixture: Awaited<ReturnType<typeof startSshPeer>> | undefined;
     try {
       writeUpdateCache(tempHome);
       const repoDir = path.join(tempHome, 'work');
-      const sshBin = path.join(tempHome, 'bin', 'ssh');
       fs.mkdirSync(repoDir, { recursive: true });
-      fs.mkdirSync(path.dirname(sshBin), { recursive: true });
-      fs.writeFileSync(sshBin, '#!/bin/sh\ncase "$*" in *--resolve-safe-v1*) exit 1;; esac\nprintf \'[{"id":"unsafe","filePath":"/private/transcript.jsonl"}]\'\n');
-      fs.chmodSync(sshBin, 0o755);
+      const peerHome = path.join(tempHome, 'peer-home');
+      writeUpdateCache(peerHome);
+      const auditPath = path.join(tempHome, 'old-peer-audit.json');
+      const peerArgs = metadataResolveForwardedArgs('abcd7777', {});
+      fixture = await startSshPeer({
+        peer: 'old', peerArgs, peerHome, cwd: repoDir, auditPath,
+        tracePath: path.join(tempHome, 'ssh-trace.log'),
+        hostKeyPath: createSshHostKey(tempHome),
+        oldCliEntry: installHistoricalAgents(tempHome),
+      });
 
       const result = runAgents(
-        ['sessions', '--resolve', 'abcd7777', '--json', '--host', 'test@old-peer.example'],
+        ['sessions', '--resolve', 'abcd7777', '--json', '--host', 'fixture@127.0.0.1'],
         repoDir,
         tempHome,
+        { AGENTS_SSH_PORT: String(fixture.port) },
       );
       expect(result.status).toBe(2);
       expect(result.stdout).toBe('');
-      expect(result.stderr).toContain('test@old-peer.example');
+      expect(result.stderr).toContain('fixture@127.0.0.1');
       expect(result.stderr).toContain('No unique/no-match decision was made.');
+      const tracePath = path.join(tempHome, 'ssh-trace.log');
+      expect(fs.readFileSync(tracePath, 'utf8')).toContain('authentication:none\nready\nsession\nexec:');
+      const audit = JSON.parse(fs.readFileSync(auditPath, 'utf8')) as {
+        command: string; invocation: { args: string[] }; status: number; stderr: string;
+      };
+      expect(audit.command).toContain('AGENTS_SESSIONS_LOCAL=1');
+      expect(audit.command).toContain('--resolve-safe-v1');
+      expect(audit.invocation.args.slice(1)).toEqual(peerArgs);
+      expect(audit.status).not.toBe(0);
+      expect(audit.stderr).toContain('resolve-safe-v1');
     } finally {
+      if (fixture) await stopSshPeer(fixture.child);
       fs.rmSync(tempHome, { recursive: true, force: true });
     }
-  });
+  }, 120_000);
 
-  it('returns a partial fleet result when an exit-zero peer emits malformed safe output', () => {
-    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-sessions-resolve-malformed-peer-'));
+  it('returns a partial fleet result when SSH corrupts a successful current peer response', async () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'asr-bad-'));
+    let fixture: Awaited<ReturnType<typeof startSshPeer>> | undefined;
     try {
       writeUpdateCache(tempHome);
       const repoDir = path.join(tempHome, 'work');
-      const sshBin = path.join(tempHome, 'bin', 'ssh');
       fs.mkdirSync(repoDir, { recursive: true });
-      fs.mkdirSync(path.dirname(sshBin), { recursive: true });
-      fs.writeFileSync(sshBin, '#!/bin/sh\nprintf \'{not-json\'\nexit 0\n');
-      fs.chmodSync(sshBin, 0o755);
+      const peerHome = path.join(tempHome, 'peer-home');
+      writeUpdateCache(peerHome);
+      const auditPath = path.join(tempHome, 'malformed-peer-audit.json');
+      const peerArgs = metadataResolveForwardedArgs('abcd7777', {});
+      fixture = await startSshPeer({
+        peer: 'malformed', peerArgs, peerHome, cwd: repoDir, auditPath,
+        tracePath: path.join(tempHome, 'ssh-trace.log'),
+        hostKeyPath: createSshHostKey(tempHome), currentCliEntry: cliEntry, tsxLoaderUrl,
+      });
 
       const result = runAgents(
-        ['sessions', '--resolve', 'abcd7777', '--json', '--host', 'test@bad-peer.example'],
+        ['sessions', '--resolve', 'abcd7777', '--json', '--host', 'fixture@127.0.0.1'],
         repoDir,
         tempHome,
+        { AGENTS_SSH_PORT: String(fixture.port) },
       );
       expect(result.status).toBe(2);
       expect(result.stdout).toBe('');
-      expect(result.stderr).toContain('test@bad-peer.example');
+      expect(result.stderr).toContain('fixture@127.0.0.1');
       expect(result.stderr).toContain('No unique/no-match decision was made.');
+      const tracePath = path.join(tempHome, 'ssh-trace.log');
+      expect(fs.readFileSync(tracePath, 'utf8')).toContain('authentication:none\nready\nsession\nexec:');
+      const audit = JSON.parse(fs.readFileSync(auditPath, 'utf8')) as {
+        command: string; invocation: { args: string[] }; status: number; stdout: string; stderr: string;
+      };
+      expect(audit.command).toContain('AGENTS_SESSIONS_LOCAL=1');
+      expect(audit.command).toContain('--resolve-safe-v1');
+      expect(audit.invocation.args.slice(3)).toEqual(peerArgs);
+      expect(audit.status, audit.stderr).toBe(0);
+      expect(audit.stdout).toBe('[]\n');
     } finally {
+      if (fixture) await stopSshPeer(fixture.child);
       fs.rmSync(tempHome, { recursive: true, force: true });
     }
-  });
+  }, 60_000);
 
   it('exits 2 when the real parent cannot read the device registry', () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-sessions-resolve-registry-'));
