@@ -11,7 +11,7 @@ export interface ForkSessionSource {
 
 /**
  * Where the user asked the fork to RUN, when they picked a device explicitly
- * (`Agents: Fork (Pick Device)`). `host: undefined` is a deliberate "run here";
+ * (`Agents: Fork (Pick Host)`). `host: undefined` is a deliberate "run here";
  * passing no target at all leaves the fork on the source session's machine.
  */
 export interface ForkSessionTarget {
