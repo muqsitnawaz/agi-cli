@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { BUILT_IN_AGENTS, getBuiltInByKey, getBuiltInDefByTitle, getBuiltInByPrefix, STRATEGY_LAUNCH_AGENTS, usesManagedAgentLaunch, modeFlagForAgent, AgentLaunchMode, RunStrategy, buildAgentLaunchCommand, wrapNativeAgentCommand, shquote } from '../core/agents';
-import { loadAutoLaunchPreferences, isAutoLaunchEnabled, isAutoLaunchPreferred } from '../core/deviceAutoLaunch';
+import { loadAutoLaunchPreferences, isAutoLaunchEnabled, isAutoLaunchPreferred, readDeviceMaxConcurrent } from '../core/deviceAutoLaunch';
 import { parseSpawnRequest, resolveSpawnSurface, SpawnRequest } from '../core/spawn';
 import {
   AgentConfig,
@@ -14,7 +14,7 @@ import * as git from './git.vscode';
 import { AgentSettings, hasLoginEnabled, PromptEntry, QUICK_LAUNCH_SLOT_KEYS, getQuickLaunchSlot, QuickLaunchSlot, QuickLaunchSlotKey } from '../core/settings';
 import { listRegisteredDevices, countRunningAgents, fetchDeviceStats, resolveSecret } from './deviceHealth.vscode';
 import { normalizeHost } from '../core/remoteSessions';
-import { pickBestHost, deviceHasUsableVersion, resolveBalancePool, DeviceLoad } from '../core/launchHost';
+import { pickBestHost, cappedOutDevices, deviceHasUsableVersion, resolveBalancePool, DeviceLoad } from '../core/launchHost';
 import {
   LAUNCH_HEALTH_KEY,
   LAUNCH_HISTORY_KEY,
@@ -464,6 +464,9 @@ async function resolveBalancedHost(pool?: string[], agentKey?: string): Promise<
       online: !!d.online,
       running: 0,
       preferred: isAutoLaunchPreferred(preferences, d.name),
+      // Operator cap from the synced device doc (agents devices configure
+      // <name> --max-agents N) — local read, no SSH.
+      maxConcurrent: readDeviceMaxConcurrent(d.name),
     }));
   const eligible = resolveBalancePool(fleet, { localName, pool }).filter(c => c.online);
   if (eligible.length === 0) {
@@ -505,7 +508,20 @@ async function resolveBalancedHost(pool?: string[], agentKey?: string): Promise<
     );
     return undefined;
   }
-  return best ?? undefined;
+  if (!best) {
+    // State WHY the pool produced nothing: an all-capped pool is an operator
+    // boundary to raise, not a silent fall-through to local.
+    const capped = cappedOutDevices(loaded);
+    if (capped.length > 0) {
+      const detail = capped.map(c => `${c.name} (${c.running}/${c.maxConcurrent})`).join(', ');
+      vscode.window.showWarningMessage(
+        `Balanced launch: every online device is at its agents.max-concurrent cap: ${detail} — running locally. ` +
+        `Raise with: agents devices configure <name> --max-agents N`,
+      );
+    }
+    return undefined;
+  }
+  return best;
 }
 
 // Resolve a Quick Launch slot's Run-on target to a device name (undefined =
