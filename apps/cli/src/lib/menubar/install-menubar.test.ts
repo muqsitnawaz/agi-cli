@@ -7,6 +7,7 @@ import {
   classifyMenubarProcesses,
   codesignVerifies,
   gatekeeperAssesses,
+  generateServicePlist,
   isMenubarStale,
   menubarPlistNeedsRepoint,
   processesToEnd,
@@ -238,5 +239,48 @@ darwinOnly('menubar launch guard requires notarization (real codesign/spctl)', (
     // of the two is therefore false, so the helper is refused, not launched.
     expect(gatekeeperAssesses(app)).toBe(false);
     fs.rmSync(path.dirname(app), { recursive: true, force: true });
+  });
+});
+
+// Regression guard for the ORPHAN-STORM incident. The helper can crash at
+// startup on a loaded machine — `NSApplication.shared` segfaults inside
+// `SLSNewConnection` when WindowServer is too starved to hand out a connection.
+// With `KeepAlive` and no `ThrottleInterval`, launchd relaunched on its ~10s
+// default and every attempt spawned another `agents doctor --json` before dying,
+// so a starved box got hit harder the worse it got: 38 orphaned doctors, ~13 of
+// 18 cores, load average 490. The throttle paces the respawn; ChildProcess.swift
+// bounds and reaps the children.
+describe('generateServicePlist — launchd crash-loop throttle', () => {
+  const plist = generateServicePlist('/Users/x/Library/Application Support/agents-cli/MenubarHelper.app/Contents/MacOS/MenubarHelper');
+
+  it('sets a ThrottleInterval so a startup crash-loop cannot respawn every 10s', () => {
+    expect(plist).toContain('<key>ThrottleInterval</key>');
+    const seconds = Number(/<key>ThrottleInterval<\/key>\s*<integer>(\d+)<\/integer>/.exec(plist)?.[1]);
+    expect(seconds).toBeGreaterThanOrEqual(30);
+  });
+
+  it('still keeps the helper alive and starts it at load', () => {
+    expect(plist).toContain('<key>KeepAlive</key>');
+    expect(plist).toContain('<key>RunAtLoad</key>');
+  });
+
+  // `plutil` is macOS-only and the CI test shards run on Linux, where spawnSync
+  // returns status null (ENOENT) rather than a non-zero exit — so gate on the
+  // tool actually being present instead of asserting against a missing binary.
+  const hasPlutil = spawnSync('plutil', ['-help'], { encoding: 'utf8' }).error === undefined;
+
+  it.skipIf(!hasPlutil)('emits a plist that plutil accepts', () => {
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'menubar-plist-')), 'x.plist');
+    fs.writeFileSync(file, plist);
+    expect(spawnSync('plutil', ['-lint', file], { encoding: 'utf8' }).status).toBe(0);
+  });
+
+  // Runs everywhere, so the structural contract is still pinned on Linux CI:
+  // a plist launchd will reject is a helper that never starts.
+  it('is well-formed XML with a single top-level dict', () => {
+    expect(plist.startsWith('<?xml version="1.0" encoding="UTF-8"?>')).toBe(true);
+    expect(plist).toContain('<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"');
+    expect(plist.match(/<dict>/g)?.length).toBe(plist.match(/<\/dict>/g)?.length);
+    expect(plist.trimEnd().endsWith('</plist>')).toBe(true);
   });
 });

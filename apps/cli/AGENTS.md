@@ -512,6 +512,56 @@ healthy `running: yes`. `agents menubar setup` is the recovery path — it ends
 every live helper and re-kickstarts the service so the survivor is always
 launchd's.
 
+**Every CLI child the helper spawns is bounded, group-killable, and reapable.**
+The helper shells `agents` on a timer, and an unbounded `Process` there is not a
+slow menu — it is a machine-killer. `doctor --json` measures **136s on an idle
+box**, the poll asked for it every 60s, and a helper that dies mid-call leaves the
+child reparented to launchd with nothing to reap it (plus the `node -e` probes
+that child forked). The deaths are not preventable from inside the app:
+`NSApplication.shared` segfaults in `SLSNewConnection` when WindowServer is too
+starved to hand out a connection, and `KeepAlive` restarts into another doctor.
+Observed: 38 orphaned doctors + 92 orphaned probes, ~13 of 18 cores, load 490.
+**The property that made this fatal is accumulation, so the rule is scoped to
+what accumulates: every TIMER-DRIVEN, repeating CLI call MUST go through
+[`ChildProcess`](menubar/Sources/MenubarHelper/ChildProcess.swift)** — that is the
+`capture()` path behind the cached refreshers (`routines`, `recentSessions`,
+`activeSessions`, `doctorOverview`, `watchdog`). A poller is the only thing that
+can stack 38 copies of itself.
+
+**User-initiated one-shots deliberately do NOT** — `runDetached`,
+`runMonitored`, and `runMonitoredWithInput` keep a bare `Process` on purpose,
+because every one of their callers is a menu click (`routines run/pause`,
+`devices register`, `open <url>`, and the ticket-agent / quick-fix dispatches).
+Two reasons, and both would be violated by "bound everything": a deadline there
+would **kill the user's headless `agents run` mid-work**, and a fire-and-forget
+`open`/dispatch is *supposed* to outlive the helper. One click cannot stack, so
+there is nothing to accumulate. Do not "fix" these by routing them through
+`ChildProcess` — if a future caller makes one of them repeating, that caller is
+the bug.
+
+`ChildProcess` holds three invariants:
+
+- **Bounded.** Every spawn carries a deadline (30s; `ChildProcess.doctorTimeout`
+  180s for `doctor --json`, above its real measured cost — a ceiling set *below*
+  the true cost just makes every poll fail while still paying full CPU).
+- **Killed as a group.** The child is spawned as its own process-group leader
+  (`POSIX_SPAWN_SETPGROUP`) so a timeout `kill(-pgid)`s the subtree. Signalling
+  the pid alone is what left 92 probes running. Foundation's `Process` cannot set
+  a process group — that is why this is `posix_spawn` and not `Process`.
+- **Reaped by the NEXT launch.** Live children are recorded in
+  `~/.agents/.cache/state/menubar-children`; `reapOrphansFromPreviousLaunch()`
+  runs in `main.swift` **before** the first AppKit call, since the crash being
+  recovered from happens *inside* that call. Do NOT move it after, and do NOT
+  replace it with an exit handler — SIGSEGV runs none. Pid reuse is guarded by
+  re-checking the executable path (`proc_pidpath`) before killing.
+
+Poll intervals must stay well above the call's real cost:
+`StatusItemController.doctorRefreshInterval` is 15 min against a 136s command
+(it was 60s — a >100% duty cycle). `MENUBAR_CHILD_TEST=1 MenubarHelper` exercises
+all of it against real processes, including reaping a real surviving orphan.
+Separately, **`doctor --json` taking 136s on an idle machine is its own defect**
+— the helper is now safe against it, not a reason to consider it acceptable.
+
 **Standalone `agents` binary (#315).** Every release also builds `dist/bin/agents`
 (`bun build --compile`, arm64 Mach-O), signs it (Developer ID + hardened runtime +
 the JIT entitlement in `scripts/bun-jit-entitlements.plist` — bun's JavaScriptCore
