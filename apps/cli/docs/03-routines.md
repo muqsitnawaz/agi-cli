@@ -280,7 +280,14 @@ Handlers support the same filters as routine triggers:
 - `run.agent` — run the agent headlessly with the substituted prompt.
 - `run.workflow` — run `agents run <workflow>` with the prompt.
 - `run.command` — run a shell command directly (the command string is also
-  variable-substituted).
+  variable-substituted). Substituted values are **shell-quoted**: the webhook
+  payload is external input, so `{{issue.title}}` and friends arrive as one inert
+  argument and cannot inject extra commands. Your own template is not quoted, so
+  pipes, redirects, and `&&` still work — write `grep {{issue.title}} log.txt`,
+  not `grep '{{issue.title}}' log.txt` (the quotes are added for you). On Windows
+  this path runs through `cmd.exe`, which these quoting rules do not cover, so a
+  `run.command` containing `{{…}}` is refused with an error; use `run.prompt` or
+  a command without placeholders there.
 - `routine` — load the named routine, substitute its prompt, and run it
   detached. The handler's `devices` pin overrides the routine's for this fire.
 

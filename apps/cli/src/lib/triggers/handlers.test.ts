@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as yaml from 'yaml';
 import type { JobConfig, RunMeta } from '../routines.js';
-import { substituteWebhookPrompt } from '../routines.js';
+import { assertShellSubstitutionSupported, substituteWebhookPrompt } from '../routines.js';
 import type { IncomingWebhook } from './webhook.js';
 
 describe('handler config layer', () => {
@@ -295,12 +295,52 @@ describe('handler config layer', () => {
       };
       const result = await handlerMod.executeHandler(handler, linearWebhook(), {
         execCommand: async (command) => {
-          expect(command).toBe('echo RUSH-1459');
+          // Substituted values are shell-quoted; the operator's template is not.
+          expect(command).toBe("echo 'RUSH-1459'");
           return { exitCode: 0, output: 'RUSH-1459\n' };
         },
       });
       expect(result.exitCode).toBe(0);
       expect(result.output).toBe('RUSH-1459\n');
+    });
+
+    it('neutralizes shell metacharacters coming from the webhook payload', async () => {
+      // `title` is free text an outside contributor controls on a public tracker.
+      const hostile = "x'; touch /tmp/pwned; echo '";
+      const handler: import('./handlers.js').WebhookHandler = {
+        name: 'cmd-handler',
+        source: 'linear',
+        run: { command: 'echo {{issue.title}}' },
+      };
+      let seen = '';
+      await handlerMod.executeHandler(
+        handler,
+        linearWebhook({ data: { identifier: 'RUSH-1', title: hostile, state: { name: 'Plan' } } }),
+        {
+          execCommand: async (command) => {
+            seen = command;
+            return { exitCode: 0, output: '' };
+          },
+        },
+      );
+      // The payload stays one inert argument: no unquoted ; that sh would run.
+      expect(seen).toBe(`echo 'x'\\''; touch /tmp/pwned; echo '\\'''`);
+      expect(seen.startsWith('echo ')).toBe(true);
+      // Everything after the template is inside quotes — verified by actually
+      // running it through the real shell and checking the side effect never fired.
+      const { execFileSync } = await import('child_process');
+      const printed = execFileSync('/bin/sh', ['-c', seen], { encoding: 'utf-8' });
+      expect(printed.trim()).toBe(hostile);
+      expect(fs.existsSync('/tmp/pwned')).toBe(false);
+    });
+
+    it('refuses placeholder substitution into a command on Windows', () => {
+      expect(() => assertShellSubstitutionSupported('echo {{issue.title}}', 'win32')).toThrow(
+        /not supported on Windows/,
+      );
+      // No placeholders means nothing untrusted is interpolated — allowed.
+      expect(() => assertShellSubstitutionSupported('echo hello', 'win32')).not.toThrow();
+      expect(() => assertShellSubstitutionSupported('echo {{issue.title}}', 'darwin')).not.toThrow();
     });
 
     it('delegates to a routine and substitutes its prompt', async () => {

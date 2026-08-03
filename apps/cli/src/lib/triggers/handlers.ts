@@ -14,7 +14,12 @@ import { emit } from '../events.js';
 import { machineId, normalizeHost } from '../machine-id.js';
 import { safeJoin } from '../paths.js';
 import type { JobConfig, RunMeta, WebhookContext } from '../routines.js';
-import { readJob, substituteWebhookPrompt } from '../routines.js';
+import {
+  assertShellSubstitutionSupported,
+  readJob,
+  substituteWebhookCommand,
+  substituteWebhookPrompt,
+} from '../routines.js';
 import { ensureAgentsDir, getProjectWebhooksDir, getSystemWebhooksDir, getWebhooksDir } from '../state.js';
 import type { AgentId } from '../types.js';
 import type { IncomingWebhook, WebhookSource } from './webhook.js';
@@ -365,7 +370,8 @@ async function executeHandlerAction(
   }
 
   if (handler.run?.command) {
-    const command = substituteWebhookPrompt(handler.run.command, context);
+    assertShellSubstitutionSupported(handler.run.command);
+    const command = substituteWebhookCommand(handler.run.command, context);
     const exec = opts.execCommand ?? defaultExecCommand;
     const { exitCode, output } = await exec(command);
     return { exitCode, output };

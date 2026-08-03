@@ -1028,6 +1028,53 @@ export function substituteWebhookPrompt(prompt: string, context: WebhookContext)
   });
 }
 
+/**
+ * Substitute `{{dotted.path}}` placeholders in a string destined for a SHELL,
+ * quoting every substituted value so payload content cannot break out of it.
+ *
+ * `run.command` is executed through a shell, and its context is built from an
+ * external webhook payload — `issue.title`, `issue.description`, and the GitHub
+ * `pull_request` fields are free text any outside contributor can set. Pasting
+ * those in raw (as {@link substituteWebhookPrompt} does, correctly, for prompts)
+ * turns an operator's `echo {{issue.title}}` into a command-injection sink.
+ *
+ * The template itself is operator-authored and stays unquoted, so pipes,
+ * redirects, and `&&` in the configured command keep working. Only the
+ * interpolated values are quoted.
+ *
+ * POSIX `sh` quoting: wrap in single quotes and close/escape/reopen for any
+ * embedded single quote. `exec` uses `cmd.exe` on Windows, which does not
+ * honour these rules — see `assertShellSubstitutionSupported`.
+ */
+export function substituteWebhookCommand(command: string, context: WebhookContext): string {
+  return command.replace(/\{\{([^{}]+)\}\}/g, (_, rawPath: string) => {
+    const value = getPath(context, rawPath.trim());
+    if (value === undefined || value === null) return "''";
+    return `'${String(value).replace(/'/g, `'\\''`)}'`;
+  });
+}
+
+/**
+ * Refuse a `run.command` carrying placeholders on a platform whose shell we
+ * cannot safely quote for. `child_process.exec` runs through `cmd.exe` on
+ * Windows, where POSIX single-quoting is not a quoting mechanism at all, so
+ * {@link substituteWebhookCommand} would not contain a hostile value.
+ *
+ * Fail loud rather than execute something we cannot prove is safe.
+ */
+export function assertShellSubstitutionSupported(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === 'win32' && /\{\{[^{}]+\}\}/.test(command)) {
+    throw new Error(
+      'run.command with {{…}} placeholders is not supported on Windows: the values come from an ' +
+        'untrusted webhook payload and cmd.exe cannot be quoted safely. Use run.prompt, or a ' +
+        'command with no placeholders.',
+    );
+  }
+}
+
 /** Expand built-in and user-defined template variables in a job's prompt string. */
 export function resolveJobPrompt(config: JobConfig, context?: WebhookContext): string {
   const now = new Date();
