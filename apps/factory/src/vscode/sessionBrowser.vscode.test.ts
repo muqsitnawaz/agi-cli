@@ -186,7 +186,7 @@ describe('session browser extension-host seam', () => {
       commands.push(args);
       const remote = args.includes("--host 'yosemite-s0'");
       return { stdout: JSON.stringify(remote ? [{
-        id: 'remote-session', shortId: 'remote-s', agent: 'claude', machine: 'yosemite-s0',
+        id: 'remote-session', shortId: 'remote-s', agent: 'claude',
         cwd: '/srv/exact repo', timestamp: '2026-08-03T00:00:00Z', topic: 'Fix picker',
       }] : []), stderr: '' };
     };
@@ -211,7 +211,7 @@ describe('session browser extension-host seam', () => {
           chooseDevice: async () => ({ device: 'yosemite-s0', cancelled: false }),
           loadItems: async device => {
             const sessions = await loadBrowsableSessions(run, { device, localMachine: 'zion', limit: 60, quote });
-            return buildSessionBrowserRows(sessions, { localMachine: 'zion' })
+            return buildSessionBrowserRows(sessions, { localMachine: 'zion', browsedMachine: device })
               .filter((row): row is SessionBrowserSessionRow => row.kind === 'session')
               .map(row => ({ label: row.label, row }));
           },

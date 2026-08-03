@@ -190,7 +190,7 @@ export async function runPickedSessionFork(opts: {
   const request = buildForkSessionRequest({
     sessionId: opts.row.session.id,
     agentKey: opts.row.session.agent,
-    host: forkHostForSession(opts.row.session, opts.localMachine),
+    host: forkHostForSession(opts.row.session, opts.localMachine, opts.row.machine),
   });
   if (!request.ok) {
     opts.showError(request.reason === 'no_session'

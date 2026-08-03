@@ -4780,8 +4780,8 @@ async function forkCurrentSession(context: vscode.ExtensionContext): Promise<voi
 // a session that lives on `yosemite-s0` starts the sibling agent THERE (over
 // `agents run --host`), where its transcript actually is.
 
-/** Rows per machine in the browser. Enough to reach yesterday's work without
- *  turning the picker into a scroll marathon; the filter box covers the rest. */
+/** Rows requested from the one device currently shown in the browser. Enough to
+ *  reach yesterday's work without turning the picker into a scroll marathon. */
 const SESSION_BROWSER_LIMIT = 60;
 
 /**
@@ -4881,8 +4881,8 @@ async function pickSessionToFork(
         const sessions = await listBrowsableSessions(device, currentSessionId, currentSessionDevice);
         const rows = buildSessionBrowserRows(sessions, {
           localMachine: LOCAL_MACHINE_ID,
+          browsedMachine: device,
           currentSessionId,
-          limitPerMachine: SESSION_BROWSER_LIMIT,
         });
         return toBrowserItems(rows);
       },
