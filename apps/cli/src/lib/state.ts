@@ -167,9 +167,16 @@ const USER_WORKFLOWS_DIR = path.join(USER_AGENTS_DIR, 'workflows');
 const USER_SECRETS_DIR = path.join(USER_AGENTS_DIR, 'secrets');
 const USER_PROMPTCUTS_FILE = path.join(USER_AGENTS_DIR, 'hooks', 'promptcuts.yaml');
 
-const META_HEADER = `# agents-cli metadata
+/**
+ * Header prepended to every agents.yaml the CLI writes (central and per-device
+ * docs). Carries the yaml-language-server schema hint so editors validate the
+ * file against `schema/agents-yaml.schema.json`. Exported so
+ * `lib/device-config.ts` writes a sibling device's doc with the same header.
+ */
+export const META_HEADER = `# agents-cli metadata
 # Auto-generated - do not edit manually
 # https://github.com/phnx-labs/agents-cli
+# yaml-language-server: $schema=https://raw.githubusercontent.com/phnx-labs/agents-cli/main/apps/cli/schema/agents-yaml.schema.json
 
 `;
 
@@ -820,8 +827,9 @@ function writeIfChanged(filePath: string, content: string): void {
 /**
  * Partition the in-memory Meta across three files by sync-domain:
  *   - central  `~/.agents/agents.yaml`             — portable, everything else
+ *              (including the user-scope `config:` block)
  *   - device   `~/.agents/devices/<machine>/agents.yaml` — `agents:` pins +
- *              `defaultBrowserProfile:` (both per-device)
+ *              `defaultBrowserProfile:` + device-scope `config:` (all per-device)
  *   - history  `~/.agents/.history/version-resources.json` — `versions:` (machine-local)
  * All callers funnel through writeMeta → here, so nothing else changes. Empty
  * `agents:` / `versions:` are not written (no empty committed files).
@@ -882,7 +890,7 @@ function serializeCentral(central: Record<string, unknown>): string {
 }
 
 function writeMetaUnlocked(meta: Meta): void {
-  const { agents, isolatedAgents, versions, defaultBrowserProfile, ...central } = meta;
+  const { agents, isolatedAgents, versions, defaultBrowserProfile, deviceConfig, ...central } = meta;
 
   // Write the machine-local files FIRST, then strip central — so a crash mid-write
   // never removes pins/versions from central before they're persisted elsewhere.
@@ -894,13 +902,18 @@ function writeMetaUnlocked(meta: Meta): void {
   // it does not have.
   const hasIsolatedAgents = !!isolatedAgents && Object.keys(isolatedAgents).length > 0;
   const hasDefaultBrowser = !!defaultBrowserProfile;
-  if (hasAgents || hasIsolatedAgents || hasDefaultBrowser) {
-    // Device-local doc carries `agents:` pins and `defaultBrowserProfile:` — both
-    // are per-machine and must never land in central agents.yaml (which syncs).
+  // Device-scope config (`maxAgents`, `schedulerEnabled`, …) is per-machine, so it
+  // rides the device doc under `config:` — never the central doc that syncs.
+  const hasDeviceConfig = !!deviceConfig && Object.keys(deviceConfig).length > 0;
+  if (hasAgents || hasIsolatedAgents || hasDefaultBrowser || hasDeviceConfig) {
+    // Device-local doc carries `agents:` pins, `defaultBrowserProfile:`, and the
+    // device-scope `config:` — all per-machine and must never land in central
+    // agents.yaml (which syncs).
     const deviceDoc: Partial<Meta> = {};
     if (hasAgents) deviceDoc.agents = agents;
     if (hasIsolatedAgents) deviceDoc.isolatedAgents = isolatedAgents;
     if (hasDefaultBrowser) deviceDoc.defaultBrowserProfile = defaultBrowserProfile;
+    if (hasDeviceConfig) deviceDoc.config = deviceConfig;
     fs.mkdirSync(path.dirname(devicePath), { recursive: true });
     writeIfChanged(devicePath, META_HEADER + yaml.stringify(deviceDoc));
   } else if (fs.existsSync(devicePath)) {
@@ -928,6 +941,10 @@ function writeMetaUnlocked(meta: Meta): void {
  *     still has pins)
  *   - `defaultBrowserProfile:` from the device file (device is the sole source;
  *     the field is stripped from central on write, so nothing to merge against)
+ *   - `config:` from the device file into `deviceConfig` (device is the sole
+ *     source for device-scope config, same routing as `defaultBrowserProfile`;
+ *     the in-memory field is named `deviceConfig` so it can never collide with
+ *     the user-scope `config:` central carries)
  *   - `versions:` from the history JSON (wholesale replace; falls back to
  *     whatever central carried when the history file doesn't exist yet)
  */
@@ -939,6 +956,7 @@ function overlayMachineLocal(meta: Meta): Meta {
       if (dm?.agents) meta.agents = { ...meta.agents, ...dm.agents };
       if (dm?.isolatedAgents) meta.isolatedAgents = { ...meta.isolatedAgents, ...dm.isolatedAgents };
       if (dm?.defaultBrowserProfile) meta.defaultBrowserProfile = dm.defaultBrowserProfile;
+      if (dm?.config) meta.deviceConfig = dm.config;
     } catch { /* ignore malformed device file */ }
   }
   const vrPath = getVersionResourcesPath();
