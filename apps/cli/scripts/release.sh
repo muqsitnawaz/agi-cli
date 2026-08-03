@@ -461,6 +461,65 @@ fi
 
 green "Bump: $BUMP ($PHNX_LATEST -> $TARGET)"
 
+# ----- Finish a stuck release before starting a new one -----
+# A release that dies after the tag but before the publish leaves a pushed v* tag
+# the registry never saw. The next run then validates its bump against npm (which
+# is behind), cuts the NEXT version, and the gap widens by one every time: on
+# 2026-08-02 that turned a one-version gap into npm 1.20.78 / main 1.20.81 with
+# v1.20.80 and v1.20.81 tagged and unpublished. Refuse to widen it -- the
+# unpublished tag is a release to finish, and re-running with that version is the
+# documented recovery (it rebuilds from the merged PR's CI-tested tree).
+# Fail CLOSED. A `|| true` here would mean a transient network blip silently
+# disables the guard and the release bumps straight past a stuck version -- the
+# exact widening this check exists to stop. If we cannot read the tags, we do not
+# know whether it is safe to proceed, so we stop.
+#
+# The result is consumed via a command substitution below and fed to the loop as
+# a here-string -- NOT `done < <(remote_version_tags)`. That distinction is the
+# whole guard: a process substitution runs in a subshell, so `die` there exits
+# only the subshell, the loop reads an empty list, and release.sh sails on with
+# "no stuck tag found" -- fail-OPEN, the precise bug this function exists to
+# prevent. A command substitution's non-zero status propagates to the assignment
+# under `set -e`, so the script actually stops.
+remote_version_tags() {
+  local out
+  out="$(git ls-remote --tags origin 'refs/tags/v*' 2>&1)" \
+    || die "could not read remote tags from origin -- refusing to release without checking for a stuck version: $out"
+  printf '%s\n' "$out" | grep -v '\^{}$' || true
+}
+
+# The decision arithmetic lives in scripts/stuck-release.sh so it can be tested
+# directly (scripts/stuck-release.test.ts); this block only gathers the facts it
+# needs -- the pushed tags, and whether the registry has each one.
+TAG_FACTS=""
+REMOTE_TAG_LINES="$(remote_version_tags)"
+while read -r _sha _ref; do
+  v="${_ref#refs/tags/v}"
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+  # Only versions ahead of the registry can be stuck, so only those are worth an
+  # `npm view` round trip.
+  [[ "$v" != "$PHNX_LATEST" ]] || continue
+  [[ "$(printf '%s\n%s\n' "$PHNX_LATEST" "$v" | sort -V | tail -1)" == "$v" ]] || continue
+  if npm view "$PHNX_PKG@$v" version >/dev/null 2>&1; then
+    TAG_FACTS+="$v yes"$'\n'
+  else
+    TAG_FACTS+="$v no"$'\n'
+  fi
+done <<< "$REMOTE_TAG_LINES"
+
+UNPUBLISHED_TAG="$(printf '%s' "$TAG_FACTS" | scripts/stuck-release.sh "$PHNX_LATEST" || true)"
+
+if [[ -n "$UNPUBLISHED_TAG" && "$UNPUBLISHED_TAG" != "$TARGET" ]]; then
+  red "v$UNPUBLISHED_TAG is tagged but was never published -- finish that release first."
+  gray "  registry latest   $PHNX_LATEST"
+  gray "  stuck tag         v$UNPUBLISHED_TAG"
+  gray "  you asked for     $TARGET"
+  echo
+  yellow "  Re-run with the stuck version; it rebuilds from that release PR's CI-tested tree:"
+  yellow "    scripts/release.sh $UNPUBLISHED_TAG --apply"
+  die "refusing to bump past an unpublished release"
+fi
+
 # ----- Source of truth: npm registry says whether $TARGET is already published -----
 # Run these checks NOW (before tests) so a re-run that's already partly published
 # can short-circuit cleanly and the user can see what will actually happen.
@@ -641,6 +700,19 @@ cleanup_all() {
   rm -rf "${SHIM_TMP:-}"
   rm -f "${NPMRC_TMP:-}"
   remove_historical_worktree
+  # Stop renewing before dropping, so the renewer cannot re-push a lease we are
+  # about to delete and leave the ref orphaned until its TTL.
+  if [[ -n "${LEASE_RENEWER_PID:-}" ]]; then
+    kill "$LEASE_RENEWER_PID" >/dev/null 2>&1 || true
+    wait "$LEASE_RENEWER_PID" 2>/dev/null || true
+  fi
+  # Drop the release lease on every exit path. A run that dies without reaching
+  # this (SIGKILL, severed ssh, rebooted box) leaves the lease behind on purpose:
+  # release-lease.sh reclaims it after its TTL and logs whose it was, rather than
+  # letting a half-dead release look finished.
+  if [[ "${LEASE_HELD:-false}" == "true" ]]; then
+    scripts/release-lease.sh release || true
+  fi
 }
 trap cleanup_all EXIT
 
@@ -707,6 +779,40 @@ if ! $YES; then
   [[ "$yn" =~ ^[Yy]$ ]] || die "aborted"
 fi
 
+# ----- Claim the release lease (the mutex) -----
+# Agents release from whichever box they are on, so exclusivity has to live on
+# origin, not on a local flock. Claim BEFORE the first mutation: everything past
+# this point (changelog fold, branch push, PR, merge, tag, publish) is what two
+# concurrent runs clobber. On 2026-08-02 two agents entered here at once and only
+# found out at the publish gate -- by then one had already merged and tagged, and
+# the version was left merged but unshipped.
+#
+# Released by cleanup_all's trap on EVERY exit path, success or failure.
+LEASE_HELD=false
+if ! scripts/release-lease.sh claim "$TARGET"; then
+  die "another release is in flight -- watch it instead of racing it (scripts/release-lease.sh status)"
+fi
+LEASE_HELD=true
+
+# Keep the lease fresh for as long as this release runs. The TTL is "how long
+# since the holder last proved it was alive", NOT "how long a release takes" --
+# a healthy release routinely outlives any sane TTL (the CI matrix alone has run
+# 57 minutes; release 1.20.77 took 186 minutes wall clock). Without this
+# renewer a long-but-healthy release would go stale mid-flight and a second
+# releaser would reclaim its lease, recreating the exact collision the lease
+# exists to prevent. Killed by cleanup_all.
+LEASE_RENEWER_PID=""
+( while sleep 600; do scripts/release-lease.sh renew >/dev/null 2>&1 || exit 0; done ) &
+LEASE_RENEWER_PID=$!
+
+# Called before every irreversible step. Fails CLOSED: if we cannot prove the
+# lease is still ours, we stop rather than merge/tag/publish alongside whoever
+# holds it now.
+require_lease() { # $1 = what we are about to do
+  scripts/release-lease.sh verify \
+    || phase_fail "lost the release lease before $1 -- refusing to continue; another releaser owns this pipeline now"
+}
+
 # Auto-revert of the package.json bump is no longer wanted here — the bump is
 # carried into the release branch commit (and the cleanup trap reverts the
 # working tree to HEAD on any abort, keeping re-runs clean).
@@ -736,6 +842,11 @@ if $PHNX_TARGET_PUBLISHED; then
     fi
     [[ "$(git show "$TAG_TARGET:apps/cli/package.json" | jq -r .version)" == "$TARGET" ]] \
       || die "refusing to create v$TARGET: $TAG_TARGET does not contain package version $TARGET"
+    # This is the second place a tag gets pushed (the already-published recovery
+    # path), and it is just as irreversible as the primary one -- gate it too, or
+    # a lease lost during the npm-view round trip lets two releasers both push a
+    # tag for the same version.
+    require_lease "pushing the missing tag v$TARGET"
     git tag -f "v$TARGET" "$(git rev-parse "$TAG_TARGET^{commit}")" >/dev/null
     git push origin "v$TARGET" && green "Pushed missing tag v$TARGET"
   else
@@ -928,6 +1039,9 @@ if ! $MAIN_AT_TARGET; then
 
   # Squash-merge. Never --admin: branch protection must hold, and the ruleset has
   # no PR-review rule, so green test+gitleaks is a sufficient, non-bypass merge.
+  # The CI wait above is the longest gap in the release (the matrix has run 57
+  # minutes). Re-prove the lease before the first irreversible act.
+  require_lease "merging PR #$PR_NUMBER"
   bold "Merging PR #$PR_NUMBER (squash)..."
   gh pr merge "$PR_NUMBER" --squash --delete-branch || die "merge failed for PR #$PR_NUMBER (left open)"
   green "Merged PR #$PR_NUMBER"
@@ -993,6 +1107,13 @@ fi
 # The tag is created + pushed here, before the privileged phase, so the home base
 # resolves the exact release commit from origin. @swarmify/agents-cli legacy shim
 # is no longer published as of v1.20.0.
+#
+# The lease gate belongs HERE, not on the `git tag` above: a local tag is local
+# and reversible, the PUSH is the irreversible, shared act. Gating only the tag
+# creation left this push ungated whenever the local tag already existed (a
+# re-run, or a prior attempt), because that path skips the else branch entirely
+# and falls straight through to here.
+require_lease "pushing tag v$TARGET"
 git push origin "v$TARGET"
 phase_ok "CI-tested tree verified; tag v$TARGET at ${PUBLISH_SHA:0:9} pushed"
 
@@ -1008,6 +1129,7 @@ restore_release_tree
 # resumes at the publish (the already-published short-circuit + tag idempotency
 # make it safe).
 phase "Build + sign + notarize + npm publish + computer-helper" "$RELEASE_HOME_BASE"
+require_lease "publishing $PHNX_PKG@$TARGET"
 route_home_base_phase \
   || phase_fail "privileged phase failed on the home base ($RELEASE_HOME_BASE) -- PR merged + tag v$TARGET pushed; rerun to retry: $0 $TARGET --apply"
 phase_ok "published $PHNX_PKG@$TARGET from $RELEASE_HOME_BASE (token resolved there; no Touch ID)"
