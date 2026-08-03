@@ -25,6 +25,7 @@ import { BrowserService } from './browser/service.js';
 import { BrowserIPCServer } from './browser/ipc.js';
 import { redactSecrets } from './redact.js';
 import { getAgentsBinPath, getCliLaunch, BUN_VIRTUAL_ROOT } from './cli-entry.js';
+import { isSchedulerEnabled, assertSchedulerEnabled } from './device-config.js';
 
 const PID_FILE = 'daemon.pid';
 const LOCK_FILE = 'daemon.lock';
@@ -416,7 +417,20 @@ export async function runDaemon(): Promise<void> {
     log('WARN', `Secrets broker host skipped: ${(err as Error).message}`);
   }
 
-  const scheduler = new JobScheduler(async (config) => {
+  // scheduler.enabled=false in this machine's device doc means NO routines fire
+  // here — the scheduler and its catchup recovery simply never start, while the
+  // daemon keeps its other duties (secrets broker, browser IPC, session sync).
+  // The refusal message is the same one the start surfaces
+  // (`routines add` auto-start, manual `routines start`) raise.
+  let schedulerDisabledReason: string | null = null;
+  try {
+    assertSchedulerEnabled();
+  } catch (err) {
+    schedulerDisabledReason = (err as Error).message;
+    log('WARN', schedulerDisabledReason);
+  }
+
+  const scheduler = schedulerDisabledReason ? null : new JobScheduler(async (config) => {
     const jobLabel = config.command
       ? 'command'
       : config.workflow
@@ -457,11 +471,13 @@ export async function runDaemon(): Promise<void> {
     log('WARN', `Project routines sync failed: ${(err as Error).message}`);
   }
 
-  scheduler.loadAll();
-  const scheduled = scheduler.listScheduled();
-  log('INFO', `Loaded ${scheduled.length} jobs`);
-  for (const job of scheduled) {
-    log('INFO', `  ${job.name} -> next: ${job.nextRun?.toISOString() || 'unknown'}`);
+  if (scheduler) {
+    scheduler.loadAll();
+    const scheduled = scheduler.listScheduled();
+    log('INFO', `Loaded ${scheduled.length} jobs`);
+    for (const job of scheduled) {
+      log('INFO', `  ${job.name} -> next: ${job.nextRun?.toISOString() || 'unknown'}`);
+    }
   }
 
   // Monitor engine: event-triggered watchers, beside the cron scheduler. Same
@@ -538,8 +554,10 @@ export async function runDaemon(): Promise<void> {
       catchingUp = false;
     }
   };
-  await catchupPass();
-  const catchupInterval = setInterval(() => { void catchupPass(); }, CATCHUP_TICK_MS);
+  if (scheduler) await catchupPass();
+  const catchupInterval = scheduler
+    ? setInterval(() => { void catchupPass(); }, CATCHUP_TICK_MS)
+    : undefined;
 
   // Before the BrowserService comes up, reap browser + tunnel processes
   // spawned by previous daemons that are no longer alive. Without this,
@@ -839,9 +857,11 @@ export async function runDaemon(): Promise<void> {
     } catch (err) {
       log('WARN', `Project routines sync failed: ${(err as Error).message}`);
     }
-    scheduler.reloadAll();
-    const reloaded = scheduler.listScheduled();
-    log('INFO', `Reloaded ${reloaded.length} jobs`);
+    if (scheduler) {
+      scheduler.reloadAll();
+      const reloaded = scheduler.listScheduled();
+      log('INFO', `Reloaded ${reloaded.length} jobs`);
+    }
     try {
       monitorEngine.reload();
     } catch (err) {
@@ -854,7 +874,7 @@ export async function runDaemon(): Promise<void> {
 
   const handleShutdown = async () => {
     log('INFO', 'Daemon shutting down');
-    scheduler.stopAll();
+    scheduler?.stopAll();
     monitorEngine.stop();
     await browserIPC.stop();
     clearInterval(monitorInterval);

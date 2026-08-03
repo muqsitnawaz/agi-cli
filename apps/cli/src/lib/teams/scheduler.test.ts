@@ -7,7 +7,7 @@
  * short-circuit never fires, keeping assertions host-independent.
  */
 import { describe, it, expect } from 'vitest';
-import { resolvePlacement, pickLeastLoaded, type RosterEntry } from './scheduler.js';
+import { resolvePlacement, pickLeastLoaded, cappedDevices, type RosterEntry } from './scheduler.js';
 
 const running = (hostName: string | null): RosterEntry => ({ hostName, status: 'running' });
 const done = (hostName: string | null): RosterEntry => ({ hostName, status: 'completed' });
@@ -62,5 +62,59 @@ describe('pickLeastLoaded', () => {
 
   it('throws on an empty pool (caller must guard)', () => {
     expect(() => pickLeastLoaded([], [])).toThrow(/empty device pool/);
+  });
+});
+
+describe('agents.max-concurrent caps (auto-pick only)', () => {
+  it('excludes a device at its cap from the least-loaded pick', () => {
+    // box-a is at its cap (2/2 running) → box-b wins despite ties-by-order.
+    const roster = [running('box-a'), running('box-a')];
+    expect(pickLeastLoaded(['box-a', 'box-b'], roster, { 'box-a': 2 })).toBe('box-b');
+  });
+
+  it('keeps a device under its cap eligible', () => {
+    const roster = [running('box-a')];
+    expect(pickLeastLoaded(['box-a', 'box-b'], roster, { 'box-a': 2 })).toBe('box-b');
+    // box-a 1/2 is NOT capped, but box-b at 0 is still less loaded — prove the
+    // cap didn't exclude box-a by making box-b busier:
+    const busier = [running('box-a'), running('box-b'), running('box-b')];
+    expect(pickLeastLoaded(['box-a', 'box-b'], busier, { 'box-a': 2 })).toBe('box-a');
+  });
+
+  it('throws naming each cap and the fix when every device is capped', () => {
+    const roster = [running('box-a'), running('box-a'), running('box-b')];
+    expect(() => pickLeastLoaded(['box-a', 'box-b'], roster, { 'box-a': 2, 'box-b': 1 }))
+      .toThrow(/agents\.max-concurrent cap: box-a \(2\/2\), box-b \(1\/1\)/);
+    expect(() => pickLeastLoaded(['box-a', 'box-b'], roster, { 'box-a': 2, 'box-b': 1 }))
+      .toThrow(/agents devices configure <name> --max-agents N/);
+  });
+
+  it('cappedDevices reports the exclusion reason with live counts', () => {
+    const roster = [running('box-a'), running('box-a'), done('box-b')];
+    // box-b's COMPLETED teammate is not load — a 1-cap box-b is not capped.
+    expect(cappedDevices(['box-a', 'box-b'], roster, { 'box-a': 2, 'box-b': 1 })).toEqual([
+      { device: 'box-a', running: 2, cap: 2 },
+    ]);
+  });
+
+  it('resolvePlacement passes caps through the least-loaded step', () => {
+    const roster = [running('box-a')];
+    expect(
+      resolvePlacement({ devices: ['box-a', 'box-b'] }, null, roster, { maxConcurrent: { 'box-a': 1 } }),
+    ).toEqual({ device: 'box-b' });
+  });
+
+  it('never second-guesses an explicit pin, even onto a capped device', () => {
+    const roster = [running('box-a')];
+    expect(
+      resolvePlacement({ devices: ['box-a', 'box-b'] }, 'box-a', roster, { maxConcurrent: { 'box-a': 1 } }),
+    ).toEqual({ device: 'box-a' });
+  });
+
+  it('never second-guesses a pool of one, even when capped', () => {
+    const roster = [running('box-a')];
+    expect(
+      resolvePlacement({ devices: ['box-a'] }, null, roster, { maxConcurrent: { 'box-a': 1 } }),
+    ).toEqual({ device: 'box-a' });
   });
 });
