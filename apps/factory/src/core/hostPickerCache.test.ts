@@ -22,10 +22,16 @@ describe('parseHostPickerCache', () => {
     devices: [{ name: 'zion', host: 'zion', online: true }],
     usage: { zion: score('zion', 5) },
     fetchedAt: NOW,
+    usageFetchedAt: NOW,
   };
 
   test('round-trips a well-formed cache', () => {
     expect(parseHostPickerCache(JSON.parse(JSON.stringify(good)))).toEqual(good);
+  });
+
+  test('legacy cache (no usageFetchedAt) defaults it to the single fetchedAt', () => {
+    const legacy = { devices: [{ name: 'zion', host: 'zion', online: true }], usage: {}, fetchedAt: NOW };
+    expect(parseHostPickerCache(legacy)?.usageFetchedAt).toBe(NOW);
   });
 
   test('rejects garbage and shape drift', () => {
@@ -39,12 +45,19 @@ describe('parseHostPickerCache', () => {
 });
 
 describe('isHostPickerStale', () => {
-  test('missing cache is stale; fresh cache is not; old cache is', () => {
+  test('missing cache is stale; fresh usage is not; old usage is', () => {
     expect(isHostPickerStale(null, NOW)).toBe(true);
     expect(isHostPickerStale(undefined, NOW)).toBe(true);
-    const cache = { devices: [], usage: {}, fetchedAt: NOW - HOST_PICKER_STALE_MS + 1 };
+    const cache = { devices: [], usage: {}, fetchedAt: NOW, usageFetchedAt: NOW - HOST_PICKER_STALE_MS + 1 };
     expect(isHostPickerStale(cache, NOW)).toBe(false);
-    expect(isHostPickerStale({ ...cache, fetchedAt: NOW - HOST_PICKER_STALE_MS }, NOW)).toBe(true);
+    expect(isHostPickerStale({ ...cache, usageFetchedAt: NOW - HOST_PICKER_STALE_MS }, NOW)).toBe(true);
+  });
+
+  test('fresh device rows do NOT make a usage-stale cache look fresh (the two-phase trap)', () => {
+    // Device snapshot just refreshed (fetchedAt = now) but usage is an hour old:
+    // the picker MUST still run the sweep, or it shows stale ordering as current.
+    const cache = { devices: [], usage: {}, fetchedAt: NOW, usageFetchedAt: NOW - 60 * 60_000 };
+    expect(isHostPickerStale(cache, NOW)).toBe(true);
   });
 });
 
@@ -89,30 +102,49 @@ describe('mergeHostPickerSnapshot', () => {
     devices: [{ name: 'zion', host: 'zion', online: true }],
     usage: { zion: score('zion', 5) },
     fetchedAt: NOW - 3_600_000,
+    usageFetchedAt: NOW - 3_600_000,
   };
 
-  test('a fresh non-empty fetch replaces the snapshot', () => {
-    const merged = mergeHostPickerSnapshot(prev, [{ name: 'mac-mini', host: 'mac-mini' }], { 'mac-mini': score('mac-mini', 9) }, NOW);
-    expect(merged).toEqual({ devices: [{ name: 'mac-mini', host: 'mac-mini' }], usage: { 'mac-mini': score('mac-mini', 9) }, fetchedAt: NOW });
+  test('a fresh non-empty fetch replaces the snapshot with both timestamps', () => {
+    const merged = mergeHostPickerSnapshot(prev, [{ name: 'mac-mini', host: 'mac-mini' }], { 'mac-mini': score('mac-mini', 9) }, NOW, NOW);
+    expect(merged).toEqual({ devices: [{ name: 'mac-mini', host: 'mac-mini' }], usage: { 'mac-mini': score('mac-mini', 9) }, fetchedAt: NOW, usageFetchedAt: NOW });
   });
 
-  test('an empty fetch keeps the previous rows — it is a failed read, not an empty fleet', () => {
-    const merged = mergeHostPickerSnapshot(prev, [], {}, NOW);
+  test('an empty fetch keeps the previous rows AND both true ages — a failed read, not an empty fleet', () => {
+    const merged = mergeHostPickerSnapshot(prev, [], {}, NOW, NOW);
     expect(merged?.devices).toEqual(prev.devices);
     expect(merged?.usage).toEqual(prev.usage); // empty fresh usage must not wipe scores either
-    // ...and it keeps the rows' TRUE age: a failed refresh must not stamp the
+    // ...and it keeps the rows' TRUE ages: a failed refresh must not stamp the
     // snapshot fresh, or the age label lies and the staleness gate stops retrying.
     expect(merged?.fetchedAt).toBe(prev.fetchedAt);
+    expect(merged?.usageFetchedAt).toBe(prev.usageFetchedAt);
   });
 
   test('an empty fetch with fresh usage keeps rows but takes the new scores', () => {
-    const merged = mergeHostPickerSnapshot(prev, [], { zion: score('zion', 8) }, NOW);
+    const merged = mergeHostPickerSnapshot(prev, [], { zion: score('zion', 8) }, NOW, NOW);
     expect(merged?.devices).toEqual(prev.devices);
     expect(merged?.usage).toEqual({ zion: score('zion', 8) });
   });
 
   test('an empty fetch with no previous snapshot yields nothing to persist', () => {
-    expect(mergeHostPickerSnapshot(null, [], {}, NOW)).toBeNull();
+    expect(mergeHostPickerSnapshot(null, [], {}, NOW, NOW)).toBeNull();
+  });
+
+  // The two-phase device refresh (refreshHostPickerDevices): fresh device rows
+  // carrying the PRIOR usage + its old sweep time. The device rows are fresh but
+  // the cache must still read as usage-stale so the picker runs the sweep.
+  test('a device-only refresh keeps usageFetchedAt old so the cache stays usage-stale (the two-phase trap)', () => {
+    const next = mergeHostPickerSnapshot(prev, [{ name: 'zion', host: 'zion', online: true }], prev.usage, NOW, prev.usageFetchedAt);
+    expect(next?.fetchedAt).toBe(NOW);                       // device rows are fresh
+    expect(next?.usageFetchedAt).toBe(prev.usageFetchedAt);  // usage age untouched
+    expect(isHostPickerStale(next, NOW)).toBe(true);         // ...so the picker still sweeps
+  });
+
+  test('a first-ever device refresh (no prior cache, usageFetchedAt 0) is maximally usage-stale', () => {
+    const next = mergeHostPickerSnapshot(null, [{ name: 'zion', host: 'zion', online: true }], {}, NOW, 0);
+    expect(next?.usage).toEqual({});
+    expect(next?.usageFetchedAt).toBe(0);
+    expect(isHostPickerStale(next, NOW)).toBe(true);
   });
 });
 
