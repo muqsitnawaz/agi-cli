@@ -340,6 +340,43 @@ describe('rotatePassphrase (RUSH-1975)', () => {
     expect(fs.readdirSync(keyDir).sort()).toEqual(['passphrase']);
   });
 
+  it('--dry-run does not heal an interrupted rotation — it writes nothing and reports the pending recovery', () => {
+    seed('prod', 'A', 'value-a');
+
+    // Leave the store in the same Window A crash state as the test above.
+    expect(() => rotatePassphrase({
+      newPassphrase: 'winA-key',
+      onStoreSwappedBeforeKeySwap: () => { throw new Error('crash in Window A'); },
+    })).toThrow(/Window A/);
+
+    const artifactsBefore = fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-')).sort();
+    const keyDirBefore = fs.readdirSync(keyDir).sort();
+    const storeBefore = fs.readdirSync(storeDir).sort();
+    const keyBytesBefore = fs.readFileSync(keyFile, 'utf8');
+    expect(artifactsBefore.length).toBeGreaterThan(0);
+
+    // A dry run is report-only. Recovery renames and removes files, so running it
+    // here would write to disk — the exact thing --dry-run promises not to do.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    const rep = rotatePassphrase({ dryRun: true, newPassphrase: 'unused' });
+
+    expect(rep.dryRun).toBe(true);
+    expect(rep.committed).toBe(false);
+    expect(rep.recoveryPending).toBe(true);
+
+    // Nothing on disk moved: same artifacts, same key bytes, same store contents.
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-')).sort()).toEqual(artifactsBefore);
+    expect(fs.readdirSync(keyDir).sort()).toEqual(keyDirBefore);
+    expect(fs.readdirSync(storeDir).sort()).toEqual(storeBefore);
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe(keyBytesBefore);
+
+    // And the pending recovery still happens on the next real run.
+    _resetFileStoreForTest({ fileDir: storeDir, passphraseDir: keyDir });
+    expect(rotatePassphrase({ newPassphrase: 'winA-final' }).committed).toBe(true);
+    expect(fileStore.get('agents-cli.secrets.prod.A')).toBe('value-a');
+    expect(fs.readdirSync(tmpRoot).filter((e) => e.includes('.rotate-'))).toEqual([]);
+  });
+
   it('Window B: crash after the old key is moved aside, before the new key lands — next run recovers forward, not onto the wrong key', () => {
     seed('prod', 'A', 'value-a');
     seed('prod', 'B', 'value-b');

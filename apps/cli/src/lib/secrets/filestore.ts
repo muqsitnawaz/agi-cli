@@ -486,6 +486,12 @@ export interface RotatePassphraseReport {
   roundTripOk: boolean;
   /** The machine-local passphrase file that was (or would be) rewritten in place. */
   keyFilePath: string;
+  /**
+   * A previous rotation left artifacts on disk. On a real run they were healed
+   * before this rotation proceeded; under `--dry-run` nothing was written, so the
+   * healing is still pending and will happen on the next real run.
+   */
+  recoveryPending: boolean;
 }
 
 /** Flush a file's data to disk (durability before the atomic swap). */
@@ -641,6 +647,22 @@ function readKeyFile(fp: string): string | null {
  * this guarantee. Idempotent; a no-op when no rotation artifacts are present.
  * Callers run this under the store lock (see `withStoreLock`).
  */
+/**
+ * Whether a previous rotation left artifacts on disk — i.e. whether
+ * {@link recoverInterruptedRotation} would do any work. Read-only, so `--dry-run`
+ * can report a pending recovery without performing (and thus writing) one.
+ */
+export function hasInterruptedRotationArtifacts(keyPath: string): boolean {
+  const dir = fileDir();
+  const parent = path.dirname(dir);
+  const base = path.basename(dir);
+  let entries: string[];
+  try { entries = fs.readdirSync(parent); } catch { return false; }
+  return entries.some((e) => e.startsWith(`${base}.rotate-`))
+    || fs.existsSync(`${keyPath}.rotate-new`)
+    || fs.existsSync(`${keyPath}.rotate-oldkey`);
+}
+
 function recoverInterruptedRotation(keyPath: string): void {
   const dir = fileDir();
   const parent = path.dirname(dir);
@@ -648,16 +670,11 @@ function recoverInterruptedRotation(keyPath: string): void {
   let entries: string[];
   try { entries = fs.readdirSync(parent); } catch { return; }
 
-  const keyNew = `${keyPath}.rotate-new`;
-  const keyOld = `${keyPath}.rotate-oldkey`;
   const bakName = entries.find((e) => e.startsWith(`${base}.rotate-old-`));
   let bakDir = bakName ? path.join(parent, bakName) : null;
 
   // Nothing rotation-related on disk -> no interrupted rotation to recover.
-  const hasArtifacts = bakDir != null
-    || fs.existsSync(keyNew) || fs.existsSync(keyOld)
-    || entries.some((e) => e.startsWith(`${base}.rotate-`));
-  if (!hasArtifacts) return;
+  if (!hasInterruptedRotationArtifacts(keyPath)) return;
 
   // If the live store dir vanished mid-swap (crash between the two store renames,
   // before the new store landed), restore the old store from its backup — the key
@@ -832,7 +849,10 @@ function rotatePassphraseLocked(opts: RotatePassphraseOpts, heartbeat: () => voi
       'file store\'s auto-provisioned key; none is provisioned on this machine.',
     );
   }
-  recoverInterruptedRotation(keyPath);
+  // `--dry-run` must not write, and recovery heals by renaming/removing files —
+  // so only detect it here and surface it in the report. A real run heals first.
+  const recoveryPending = hasInterruptedRotationArtifacts(keyPath);
+  if (!dryRun) recoverInterruptedRotation(keyPath);
 
   const oldPass = fs.readFileSync(keyPath, 'utf8').trim();
   if (!oldPass) throw new Error(`Machine-local passphrase file ${keyPath} is empty.`);
@@ -885,6 +905,7 @@ function rotatePassphraseLocked(opts: RotatePassphraseOpts, heartbeat: () => voi
     skipped,
     roundTripOk: true,
     keyFilePath: keyPath,
+    recoveryPending,
   };
   if (dryRun) return report;
 

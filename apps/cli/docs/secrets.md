@@ -603,6 +603,11 @@ agents secrets rotate-passphrase            # dry-run: report the item count + r
 agents secrets rotate-passphrase --commit   # re-encrypt the store under a fresh key
 ```
 
+The dry run writes nothing at all. If a previous rotation was interrupted, it
+reports that a recovery is pending instead of performing one — healing renames and
+removes files, which a dry run must not do. The next `--commit` run heals the
+store first, then rotates.
+
 This decrypts every item under the current key, re-encrypts it under a newly
 generated one, and swaps both the ciphertext and the 0600 key file atomically —
 staged in a temp dir, verified (every item must round-trip under the new key),

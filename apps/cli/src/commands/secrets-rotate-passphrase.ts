@@ -88,6 +88,12 @@ Examples:
         }
 
         if (report.dryRun) {
+          if (report.recoveryPending) {
+            console.log(chalk.yellow(
+              'A previous rotation left artifacts on disk. Dry-run does not heal them; ' +
+              'the next --commit run will recover the store before rotating.',
+            ));
+          }
           console.log(chalk.gray(`Dry-run: nothing written. Pass --commit to re-encrypt the store and swap the key file (${report.keyFilePath}).`));
           return;
         }

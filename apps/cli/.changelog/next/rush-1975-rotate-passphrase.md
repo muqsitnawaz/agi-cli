@@ -23,7 +23,10 @@
   ever written to disk, argv, or a log. Items
   that don't decrypt under the current key (orphan caches, stale test artifacts)
   are carried through verbatim, never re-keyed. Dry-run by default (`--commit` to
-  apply); refuses while the secrets-agent holds live unlocks or while
+  apply) and a dry run truly writes nothing — if a previous rotation was
+  interrupted, it reports the pending recovery rather than performing it, since
+  healing renames and removes files; the next `--commit` run heals first, then
+  rotates. Refuses while the secrets-agent holds live unlocks or while
   `AGENTS_SECRETS_PASSPHRASE` is exported in the environment, unless `--force`.
   Headless-safe and Linux-first. Source: `apps/cli/src/lib/secrets/filestore.ts`,
   `apps/cli/src/commands/secrets-rotate-passphrase.ts`.
