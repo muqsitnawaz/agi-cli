@@ -13,10 +13,10 @@ import {
   buildSessionDescription,
   fleetCandidatesByQuery,
   metadataResolveForwardedArgs,
-} from '../sessions.js';
-import { parseRemoteList, remoteListCaptureResult } from '../../lib/session/remote-list.js';
-import { needsWindowsShell, composeWin32CommandLine } from '../../lib/platform/index.js';
-import type { SessionMeta } from '../../lib/session/types.js';
+} from './sessions.js';
+import { parseRemoteList } from '../lib/session/remote-list.js';
+import { needsWindowsShell, composeWin32CommandLine } from '../lib/platform/index.js';
+import type { SessionMeta } from '../lib/session/types.js';
 
 const repoRoot = process.cwd();
 const cliEntry = path.join(repoRoot, 'src', 'index.ts');
@@ -289,7 +289,107 @@ function runAgents(args: string[], cwd: string, home: string, envOverrides: Reco
   });
 }
 
+describe('resolveSessionQuery indexed metadata coverage', () => {
+  it('resolves complete and partial ids from the real index without using text matches', () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-resolve-index-'));
+    try {
+      const runner = [
+        "import fs from 'node:fs';",
+        "import path from 'node:path';",
+        "const { upsertSession, closeDB } = await import('./src/lib/session/db.ts');",
+        "const { resolveSessionQuery } = await import('./src/commands/sessions.ts');",
+        "const home = process.env.HOME;",
+        "const add = (id, topic, content = '') => { const filePath = path.join(home, id + '.jsonl'); fs.writeFileSync(filePath, ''); upsertSession({ id, shortId: id.slice(0, 8), agent: 'claude', timestamp: new Date().toISOString(), filePath, topic }, content); };",
+        "const indexed = 'a7c1d88d-b543-48c1-993d-dd5cd8e210c9'; add(indexed, 'old but present');",
+        "const rush = 'session_001fa16e-9f97-453d-b0f0-5c35317bcd04'; add(rush, 'competitive watch');",
+        "const mentioner = 'aaaa1111-1111-2222-3333-444455556666'; add(mentioner, 'resume previous work: bbbb2222', 'resume previous work bbbb2222 earlier');",
+        "const prefix = 'cccc3333-1111-2222-3333-444455556666'; add(prefix, 'the real one');",
+        "const localOnly = 'dddd4444-1111-2222-3333-444455556666'; add(localOnly, 'local only');",
+        "const pick = (selector, options) => { const r = resolveSessionQuery([], selector, options); return { ids: r.matches.map(s => s.id), byId: r.byId, completeId: r.completeId }; };",
+        "const out = { indexed: pick(indexed), rush: pick(rush), absent: pick('2feeb449-5c73-4f1c-9163-8459e7aafeea'), phrase: pick('old but present'), mention: pick('bbbb2222'), prefix: pick('cccc3333'), noFallback: pick('dddd4444', { indexFallback: false }) };",
+        "closeDB(); process.stdout.write(JSON.stringify(out));",
+      ].join(' ');
+      const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', runner], {
+        cwd: repoRoot,
+        env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+        encoding: 'utf8',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        indexed: { ids: ['a7c1d88d-b543-48c1-993d-dd5cd8e210c9'], byId: true, completeId: true },
+        rush: { ids: ['session_001fa16e-9f97-453d-b0f0-5c35317bcd04'], byId: true, completeId: true },
+        absent: { ids: [], byId: true, completeId: true },
+        phrase: { ids: [], byId: false, completeId: false },
+        mention: { ids: [], byId: true, completeId: false },
+        prefix: { ids: ['cccc3333-1111-2222-3333-444455556666'], byId: true, completeId: false },
+        noFallback: { ids: [], byId: true, completeId: false },
+      });
+    } finally {
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('agents sessions --resolve local-peer critical path', () => {
+  it('resolves a full id, unique prefix, and keywords through the metadata-only CLI contract', () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-sessions-resolve-local-'));
+    try {
+      writeUpdateCache(tempHome);
+      const repoDir = path.join(tempHome, 'work', 'agents-cli');
+      const sessionId = 'face7777-1111-4222-8333-444455556666';
+      writeClaudeSession(tempHome, 'resolve-local', sessionId, repoDir, 'needle metadata contract', '2026-08-03T09:00:00.000Z');
+      const indexed = runAgents(['sessions', '--all', '--json', '--local'], repoDir, tempHome);
+      expect(indexed.status, indexed.stderr).toBe(0);
+
+      for (const selector of [sessionId, 'face7777', 'needle metadata contract']) {
+        const result = runAgents(['sessions', '--resolve', selector, '--json', '--local'], repoDir, tempHome);
+        expect(result.status, result.stderr).toBe(0);
+        const rows = JSON.parse(result.stdout) as SessionMeta[];
+        expect(rows.map(row => row.id)).toEqual([sessionId]);
+        expect(rows[0]).not.toHaveProperty('filePath');
+        expect(rows[0]).not.toHaveProperty('plan');
+        expect(rows[0].origin).toBe('cli');
+        expect(rows[0]).not.toHaveProperty('account');
+        expect(rows[0]).not.toHaveProperty('cwd');
+        expect(rows[0]).not.toHaveProperty('recentDirectoriesTouched');
+      }
+    } finally {
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('fails ambiguity with every full-id candidate and keeps misses explicit', () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-sessions-resolve-errors-'));
+    try {
+      writeUpdateCache(tempHome);
+      const repoDir = path.join(tempHome, 'work', 'agents-cli');
+      const first = 'cafe8888-1111-4222-8333-444455556666';
+      const second = 'cafe8888-aaaa-4bbb-8ccc-ddddeeeeffff';
+      writeClaudeSession(tempHome, 'resolve-errors', first, repoDir, 'first ambiguity candidate', '2026-08-03T09:00:00.000Z');
+      writeClaudeSession(tempHome, 'resolve-errors', second, repoDir, 'second ambiguity candidate', '2026-08-03T09:01:00.000Z');
+      const indexed = runAgents(['sessions', '--all', '--json', '--local'], repoDir, tempHome);
+      expect(indexed.status, indexed.stderr).toBe(0);
+
+      const ambiguous = runAgents(['sessions', '--resolve', 'cafe8888', '--json', '--local'], repoDir, tempHome);
+      expect(ambiguous.status).toBe(1);
+      expect(ambiguous.stdout).toBe('');
+      expect(ambiguous.stderr).toContain(first);
+      expect(ambiguous.stderr).toContain(second);
+
+      const missing = runAgents(['sessions', '--resolve', 'bade9999', '--json', '--local'], repoDir, tempHome);
+      expect(missing.status).toBe(1);
+      expect(missing.stdout).toBe('');
+      expect(missing.stderr).toContain('No session found matching: bade9999');
+
+      const empty = runAgents(['sessions', '--resolve', '   ', '--json', '--local'], repoDir, tempHome);
+      expect(empty.status).toBe(1);
+      expect(empty.stdout).toBe('');
+      expect(empty.stderr).toContain('--resolve requires a non-empty selector');
+    } finally {
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
+
   it('keeps a peer-owned content-only FTS hit, projects safe metadata, and dedupes synced copies', () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-sessions-resolve-peer-'));
     try {
@@ -342,32 +442,54 @@ describe('agents sessions --resolve local-peer critical path', () => {
     }
   });
 
-  it('fails closed when an older peer rejects the resolver flag', () => {
+  it('returns a partial fleet result when an old peer rejects the safe resolver protocol', () => {
     const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-sessions-resolve-old-peer-'));
     try {
       writeUpdateCache(tempHome);
       const repoDir = path.join(tempHome, 'work');
+      const sshBin = path.join(tempHome, 'bin', 'ssh');
       fs.mkdirSync(repoDir, { recursive: true });
-      const oldPeer = spawnSync(process.execPath, ['--eval', [
-        "const args = process.argv.slice(1);",
-        "if (args.includes('--resolve-safe-v1')) process.exit(1);",
-        "process.stdout.write(JSON.stringify([{id:'unsafe',filePath:'/private/transcript.jsonl'}]));",
-      ].join(' '), '--resolve-safe-v1', 'abcd7777'], { encoding: 'utf8' });
-      expect(oldPeer.status).not.toBe(0);
-      const captured = remoteListCaptureResult(oldPeer.status, oldPeer.stdout, 'old-peer', 'old-peer', true);
-      expect(captured).toEqual({ sessions: [], unreachable: 'old-peer' });
+      fs.mkdirSync(path.dirname(sshBin), { recursive: true });
+      fs.writeFileSync(sshBin, '#!/bin/sh\ncase "$*" in *--resolve-safe-v1*) exit 1;; esac\nprintf \'[{"id":"unsafe","filePath":"/private/transcript.jsonl"}]\'\n');
+      fs.chmodSync(sshBin, 0o755);
+
+      const result = runAgents(
+        ['sessions', '--resolve', 'abcd7777', '--json', '--host', 'test@old-peer.example'],
+        repoDir,
+        tempHome,
+      );
+      expect(result.status).toBe(2);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toContain('test@old-peer.example');
+      expect(result.stderr).toContain('No unique/no-match decision was made.');
     } finally {
       fs.rmSync(tempHome, { recursive: true, force: true });
     }
   });
 
-  it('marks successful malformed peer output incomplete at the production capture boundary', () => {
-    const malformedPeer = spawnSync(process.execPath, ['--eval', "process.stdout.write('{not-json')"], { encoding: 'utf8' });
-    expect(malformedPeer.status).toBe(0);
-    expect(remoteListCaptureResult(malformedPeer.status, malformedPeer.stdout, 'bad-peer', 'bad-peer', true)).toEqual({
-      sessions: [],
-      unreachable: 'bad-peer',
-    });
+  it('returns a partial fleet result when an exit-zero peer emits malformed safe output', () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-sessions-resolve-malformed-peer-'));
+    try {
+      writeUpdateCache(tempHome);
+      const repoDir = path.join(tempHome, 'work');
+      const sshBin = path.join(tempHome, 'bin', 'ssh');
+      fs.mkdirSync(repoDir, { recursive: true });
+      fs.mkdirSync(path.dirname(sshBin), { recursive: true });
+      fs.writeFileSync(sshBin, '#!/bin/sh\nprintf \'{not-json\'\nexit 0\n');
+      fs.chmodSync(sshBin, 0o755);
+
+      const result = runAgents(
+        ['sessions', '--resolve', 'abcd7777', '--json', '--host', 'test@bad-peer.example'],
+        repoDir,
+        tempHome,
+      );
+      expect(result.status).toBe(2);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toContain('test@bad-peer.example');
+      expect(result.stderr).toContain('No unique/no-match decision was made.');
+    } finally {
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
   });
 
   it('exits 2 when the real parent cannot read the device registry', () => {
