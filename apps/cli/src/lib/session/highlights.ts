@@ -63,6 +63,32 @@ export function extractSkills(events: SessionEvent[]): SkillUse[] {
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
 
+// ── Slash commands ────────────────────────────────────────────────────────────
+
+export interface SlashCommandUse {
+  /** WITH the leading slash, e.g. `/recap`, `/code:commit` — matches SessionEvent.slashCommand's shape. */
+  name: string;
+  count: number;
+}
+
+/**
+ * Slash commands invoked during the session — either the user typing one
+ * (Claude's `<command-name>` wrapper) or the model invoking one via the
+ * `SlashCommand` tool (`SessionEvent.slashCommand`, populated by
+ * `parseClaudeContent` for both sources — see session/prompt.ts). Sorted by
+ * count desc, then name.
+ */
+export function extractSlashCommands(events: SessionEvent[]): SlashCommandUse[] {
+  const counts = new Map<string, number>();
+  for (const e of events) {
+    if (!e.slashCommand) continue;
+    counts.set(e.slashCommand, (counts.get(e.slashCommand) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+
 // ── Hooks ─────────────────────────────────────────────────────────────────────
 
 export interface HookUse {

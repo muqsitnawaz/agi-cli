@@ -172,6 +172,124 @@ describe('usedBrowser/usedComputer — a scoped events-log read, not a transcrip
   });
 });
 
+describe('session_resource_usage — skill/slash-command usage joined against real provenance (#12)', () => {
+  const RES_DIR = path.join(TEST_HOME, 'resource-usage-files');
+  fs.mkdirSync(RES_DIR, { recursive: true });
+
+  function rowsFor(sessionId: string): Array<Record<string, unknown>> {
+    return getDB()
+      .prepare(`SELECT kind, name, plugin, source, repo_root, snapshot_sha, count FROM session_resource_usage WHERE session_id = ? ORDER BY kind, name`)
+      .all(sessionId) as Array<Record<string, unknown>>;
+  }
+
+  function skillEvent(skill: string): { type: 'tool_use'; agent: 'claude'; timestamp: string; tool: string; args: Record<string, unknown> } {
+    return { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', tool: 'Skill', args: { skill } };
+  }
+
+  it('resolves a real user-repo skill: source + repoRoot populated from resolveResource', () => {
+    const userAgentsDir = path.join(TEST_HOME, '.agents');
+    fs.mkdirSync(path.join(userAgentsDir, 'skills', 'teams'), { recursive: true });
+    fs.writeFileSync(path.join(userAgentsDir, 'skills', 'teams', 'SKILL.md'), '---\nname: teams\n---\n');
+
+    const filePath = path.join(RES_DIR, 'skill-user.jsonl');
+    fs.writeFileSync(filePath, [
+      JSON.stringify({ type: 'assistant', timestamp: '2026-08-01T00:00:00Z', message: { content: [
+        { type: 'tool_use', id: '1', name: 'Skill', input: { skill: 'teams' } },
+      ] } }),
+    ].join('\n'));
+    const meta: SessionMeta = { id: 'res-skill-user', shortId: 'res-sk-u', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath, cwd: RES_DIR };
+    upsertSession(meta, '', { fileMtimeMs: 1, fileSize: fs.statSync(filePath).size });
+
+    expect(rowsFor('res-skill-user')).toEqual([
+      { kind: 'skill', name: 'teams', plugin: null, source: 'user', repo_root: userAgentsDir, snapshot_sha: null, count: 1 },
+    ]);
+  });
+
+  it('resolves a namespaced plugin skill (rush:design) against the discovered plugin, not resolveResource', () => {
+    const pluginRoot = path.join(TEST_HOME, '.agents', 'plugins', 'rush');
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'rush', version: '1.0.0', description: 'x' }));
+    fs.mkdirSync(path.join(pluginRoot, 'skills', 'design'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'skills', 'design', 'SKILL.md'), '---\nname: design\n---\n');
+
+    const filePath = path.join(RES_DIR, 'skill-plugin.jsonl');
+    fs.writeFileSync(filePath, [
+      JSON.stringify({ type: 'assistant', timestamp: '2026-08-01T00:00:00Z', message: { content: [
+        { type: 'tool_use', id: '1', name: 'Skill', input: { skill: 'rush:design' } },
+      ] } }),
+    ].join('\n'));
+    const meta: SessionMeta = { id: 'res-skill-plugin', shortId: 'res-sk-p', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath, cwd: RES_DIR };
+    upsertSession(meta, '', { fileMtimeMs: 1, fileSize: fs.statSync(filePath).size });
+
+    const rows = rowsFor('res-skill-plugin');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'skill', name: 'rush:design', plugin: 'rush', repo_root: path.join(TEST_HOME, '.agents') });
+  });
+
+  it('resolves a real slash command and strips the leading slash for the stored name', () => {
+    const userAgentsDir = path.join(TEST_HOME, '.agents');
+    fs.mkdirSync(path.join(userAgentsDir, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(userAgentsDir, 'commands', 'recap.md'), '# recap');
+
+    const filePath = path.join(RES_DIR, 'command-user.jsonl');
+    fs.writeFileSync(filePath, [
+      JSON.stringify({ type: 'user', timestamp: '2026-08-01T00:00:00Z', message: { role: 'user', content: '<command-message>recap</command-message>\n<command-name>/recap</command-name>' } }),
+    ].join('\n'));
+    const meta: SessionMeta = { id: 'res-command-user', shortId: 'res-cmd', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath, cwd: RES_DIR };
+    upsertSession(meta, '', { fileMtimeMs: 1, fileSize: fs.statSync(filePath).size });
+
+    expect(rowsFor('res-command-user')).toEqual([
+      { kind: 'command', name: 'recap', plugin: null, source: 'user', repo_root: userAgentsDir, snapshot_sha: null, count: 1 },
+    ]);
+  });
+
+  it('a skill/command no longer installed still gets a row, with provenance left NULL (not a stale guess)', () => {
+    const filePath = path.join(RES_DIR, 'skill-gone.jsonl');
+    fs.writeFileSync(filePath, [
+      JSON.stringify({ type: 'assistant', timestamp: '2026-08-01T00:00:00Z', message: { content: [
+        { type: 'tool_use', id: '1', name: 'Skill', input: { skill: 'renamed-or-removed' } },
+      ] } }),
+    ].join('\n'));
+    const meta: SessionMeta = { id: 'res-skill-gone', shortId: 'res-gone', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath, cwd: RES_DIR };
+    upsertSession(meta, '', { fileMtimeMs: 1, fileSize: fs.statSync(filePath).size });
+
+    expect(rowsFor('res-skill-gone')).toEqual([
+      { kind: 'skill', name: 'renamed-or-removed', plugin: null, source: null, repo_root: null, snapshot_sha: null, count: 1 },
+    ]);
+  });
+
+  it('counts repeated invocations and a rescan REPLACES rather than accumulates', () => {
+    // A name distinct from the other cases in this describe block ('teams' is
+    // deliberately installed for an earlier test and would resolve here too).
+    const filePath = path.join(RES_DIR, 'skill-rescan.jsonl');
+    fs.writeFileSync(filePath, [
+      JSON.stringify({ type: 'assistant', timestamp: '2026-08-01T00:00:00Z', message: { content: [
+        { type: 'tool_use', id: '1', name: 'Skill', input: { skill: 'rescan-only-skill' } },
+        { type: 'tool_use', id: '2', name: 'Skill', input: { skill: 'rescan-only-skill' } },
+      ] } }),
+    ].join('\n'));
+    const meta: SessionMeta = { id: 'res-rescan', shortId: 'res-rescn', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath, cwd: RES_DIR };
+    upsertSession(meta, '', { fileMtimeMs: 1, fileSize: fs.statSync(filePath).size });
+    expect(rowsFor('res-rescan')).toEqual([{ kind: 'skill', name: 'rescan-only-skill', plugin: null, source: null, repo_root: null, snapshot_sha: null, count: 2 }]);
+
+    // Rescan with the SAME file (simulating a bare re-index) must not double the count.
+    upsertSession(meta, '', { fileMtimeMs: 2, fileSize: fs.statSync(filePath).size });
+    expect(rowsFor('res-rescan')).toEqual([{ kind: 'skill', name: 'rescan-only-skill', plugin: null, source: null, repo_root: null, snapshot_sha: null, count: 2 }]);
+  });
+
+  it('a session with no skill/slash-command activity writes zero rows', () => {
+    const filePath = path.join(RES_DIR, 'no-usage.jsonl');
+    fs.writeFileSync(filePath, [
+      JSON.stringify({ type: 'assistant', timestamp: '2026-08-01T00:00:00Z', message: { content: [
+        { type: 'tool_use', id: '1', name: 'Read', input: { file_path: '/repo/a.ts' } },
+      ] } }),
+    ].join('\n'));
+    const meta: SessionMeta = { id: 'res-none', shortId: 'res-none', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath, cwd: RES_DIR };
+    upsertSession(meta, '', { fileMtimeMs: 1, fileSize: fs.statSync(filePath).size });
+    expect(rowsFor('res-none')).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Cost + duration (issue #323) — real SQLite, migration v6 columns, sort,
 // rollup grouping for a multi-model session.

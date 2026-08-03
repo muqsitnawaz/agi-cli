@@ -10,13 +10,17 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import Database from '../sqlite.js';
-import type { SessionAgentId, SessionMeta } from './types.js';
+import type { SessionAgentId, SessionEvent, SessionMeta } from './types.js';
 import { parseSession } from './parse.js';
 import { extractRecentDirectoriesTouched, extractTodoProgressFromEvents } from './state.js';
 import { getSessionsDir, getSessionsDbPath } from '../state.js';
 import { query as queryEvents } from '../events.js';
 import { machineForSessionFile } from './origin-machine.js';
 import { loadSessionActorIndex, readSessionActorRecord } from './actor-sidecar.js';
+import { extractSkills, extractSlashCommands } from './highlights.js';
+import { resolveResource } from '../resources.js';
+import { discoverPlugins } from '../plugins.js';
+import type { DiscoveredPlugin } from '../types.js';
 
 const SESSIONS_DIR = getSessionsDir();
 const DB_PATH = getSessionsDbPath();
@@ -24,7 +28,7 @@ const DB_PATH = getSessionsDbPath();
 /** Current schema version; bumped when migrations are added. Exported so tests
  * assert against the constant instead of hardcoding a number that every bump
  * then has to chase (docs/05-sessions.md calls the constant the source of truth). */
-export const SCHEMA_VERSION = 22;
+export const SCHEMA_VERSION = 23;
 
 /**
  * Canonicalize a file path for use as a scan_ledger key. The same physical
@@ -147,6 +151,29 @@ CREATE TABLE IF NOT EXISTS dir_ledger (
   entry_count INTEGER NOT NULL,
   scanned_at INTEGER NOT NULL
 );
+
+-- Skill/slash-command usage per session (#12), computed from a session's
+-- parsed transcript (extractSkills / extractSlashCommands, session/highlights.ts)
+-- and joined at write time against the currently-installed resource/plugin
+-- (resolveResource / discoverPlugins) for provenance — repo_root + snapshot_sha
+-- answer "which repo, which commit installed this skill/command", plugin/source
+-- answer "which plugin, which DotAgents layer". A resource renamed or uninstalled
+-- since the session ran leaves plugin/source/repo_root/snapshot_sha NULL rather
+-- than a stale guess. One row per (session, kind, name); count is how many
+-- times that skill/command fired in the session.
+CREATE TABLE IF NOT EXISTS session_resource_usage (
+  session_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  plugin TEXT,
+  source TEXT,
+  repo_root TEXT,
+  snapshot_sha TEXT,
+  count INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (session_id, kind, name)
+);
+CREATE INDEX IF NOT EXISTS idx_session_resource_usage_kind_name ON session_resource_usage(kind, name);
+CREATE INDEX IF NOT EXISTS idx_session_resource_usage_plugin ON session_resource_usage(plugin);
 `;
 
 /** Raw row shape returned from the sessions table. */
@@ -497,6 +524,32 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
     const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
     if (!cols.some(c => c.name === 'used_browser')) db.exec(`ALTER TABLE sessions ADD COLUMN used_browser INTEGER`);
     if (!cols.some(c => c.name === 'used_computer')) db.exec(`ALTER TABLE sessions ADD COLUMN used_computer INTEGER`);
+  }
+
+  if (fromVersion < 23) {
+    // v22 → v23: session_resource_usage (#12) — skill/slash-command usage per
+    // session, joined against the currently-installed resource/plugin for
+    // provenance (repo_root/snapshot_sha/plugin/source). A brand-new table
+    // needs only CREATE TABLE IF NOT EXISTS, already present in SCHEMA for a
+    // fresh DB — this repeats it for an existing DB whose SCHEMA exec ran
+    // before the table definition was added. No ledger wipe: this table is
+    // populated by writeResourceUsage() at upsert time, independent of the
+    // scan ledgers.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS session_resource_usage (
+        session_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        name TEXT NOT NULL,
+        plugin TEXT,
+        source TEXT,
+        repo_root TEXT,
+        snapshot_sha TEXT,
+        count INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (session_id, kind, name)
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_resource_usage_kind_name ON session_resource_usage(kind, name);
+      CREATE INDEX IF NOT EXISTS idx_session_resource_usage_plugin ON session_resource_usage(plugin);
+    `);
   }
 }
 
@@ -998,10 +1051,101 @@ function detectToolUsage(sessionId: string): { usedBrowser: boolean; usedCompute
   return { usedBrowser, usedComputer };
 }
 
+const deleteResourceUsageStmt = (db: Database.Database) =>
+  db.prepare(`DELETE FROM session_resource_usage WHERE session_id = ?`);
+const insertResourceUsageStmt = (db: Database.Database) => db.prepare(`
+  INSERT INTO session_resource_usage (session_id, kind, name, plugin, source, repo_root, snapshot_sha, count)
+  VALUES (@session_id, @kind, @name, @plugin, @source, @repo_root, @snapshot_sha, @count)
+`);
+
+/**
+ * Resolve a skill/slash-command's provenance for `session_resource_usage`
+ * (#12). A flat (non-namespaced) resource resolves via resolveResource()'s
+ * project/user/system/extra-repo scan. A namespaced one (`plugin:name`, e.g.
+ * `rush:design` — the shape both a plugin skill's `args.skill` and a plugin
+ * command's SessionEvent.slashCommand carry) is plugin-owned and lives under
+ * the plugin's own directory, invisible to resolveResource()'s flat scan —
+ * resolved instead against the already-discovered plugin list. Neither found
+ * (renamed or uninstalled since the session ran) returns all-undefined
+ * rather than a stale guess.
+ */
+function resolveResourceProvenance(
+  kind: 'skills' | 'commands',
+  name: string,
+  cwd: string | undefined,
+  plugins: DiscoveredPlugin[],
+): { plugin?: string; source?: string; repoRoot?: string; snapshotSha?: string } {
+  const listOf = (p: DiscoveredPlugin) => (kind === 'skills' ? p.skills : p.commands);
+  const colonIdx = name.indexOf(':');
+  if (colonIdx > 0) {
+    const pluginName = name.slice(0, colonIdx);
+    const shortName = name.slice(colonIdx + 1);
+    const plugin = plugins.find((p) => p.name === pluginName && listOf(p).includes(shortName));
+    if (!plugin) return {};
+    return { plugin: plugin.name, source: plugin.marketplace, repoRoot: plugin.repoRoot, snapshotSha: plugin.snapshotSha };
+  }
+  const resolved = resolveResource(kind, name, cwd);
+  if (resolved) return { source: resolved.source, repoRoot: resolved.repoRoot, snapshotSha: resolved.snapshotSha };
+  const plugin = plugins.find((p) => listOf(p).includes(name));
+  if (!plugin) return {};
+  return { plugin: plugin.name, source: plugin.marketplace, repoRoot: plugin.repoRoot, snapshotSha: plugin.snapshotSha };
+}
+
+/**
+ * Persist skill/slash-command usage for a session (#12) into
+ * `session_resource_usage`, replacing any prior rows for it (a rescan's
+ * usage supersedes the old — same replace-on-upsert shape as the FTS text
+ * below). `discoverPlugins()` (real I/O: manifest + directory reads) only
+ * runs when there is actually a skill/command to resolve, so a session with
+ * neither pays nothing beyond the DELETE.
+ *
+ * KNOWN GAP: only called from {@link enrichCachedSessionMeta}, which the
+ * batch path (`upsertSessionsBatch`) SKIPS for claude/codex to preserve
+ * their resumable-parse optimization (re-parsing the whole transcript here
+ * would reintroduce the exact re-parse cost that optimization removes). A
+ * claude/codex session discovered through the routine local batch scan does
+ * NOT get resource-usage rows; one upserted through `upsertSession()`
+ * directly (cross-machine fan-in, forks) does, since that path always
+ * enriches. Closing this gap needs threading skill/slash-command tallies
+ * through the incremental accumulator (ClaudeParseState et al.) the same
+ * way `checklistEvents` already is — tracked as follow-up, not done here.
+ */
+function writeResourceUsage(sessionId: string, events: SessionEvent[], cwd: string | undefined): void {
+  const skills = extractSkills(events);
+  const commands = extractSlashCommands(events);
+  const db = getDB();
+  const del = deleteResourceUsageStmt(db);
+  const ins = insertResourceUsageStmt(db);
+  const txn = db.transaction(() => {
+    del.run(sessionId);
+    if (skills.length === 0 && commands.length === 0) return;
+    const plugins = discoverPlugins({ cwd });
+    for (const { name, count } of skills) {
+      const prov = resolveResourceProvenance('skills', name, cwd, plugins);
+      ins.run({
+        session_id: sessionId, kind: 'skill', name, count,
+        plugin: prov.plugin ?? null, source: prov.source ?? null,
+        repo_root: prov.repoRoot ?? null, snapshot_sha: prov.snapshotSha ?? null,
+      });
+    }
+    for (const { name, count } of commands) {
+      const bare = name.replace(/^\//, '');
+      const prov = resolveResourceProvenance('commands', bare, cwd, plugins);
+      ins.run({
+        session_id: sessionId, kind: 'command', name: bare, count,
+        plugin: prov.plugin ?? null, source: prov.source ?? null,
+        repo_root: prov.repoRoot ?? null, snapshot_sha: prov.snapshotSha ?? null,
+      });
+    }
+  });
+  txn();
+}
+
 function enrichCachedSessionMeta(meta: SessionMeta): SessionMeta {
   if (!meta.filePath) return meta;
   try {
     const events = parseSession(meta.filePath, meta.agent);
+    writeResourceUsage(meta.id, events, meta.cwd);
     return {
       ...meta,
       todos: extractTodoProgressFromEvents(events),
