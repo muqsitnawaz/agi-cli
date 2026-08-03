@@ -2186,9 +2186,7 @@ async function openSingleAgent(
       pinnedVersion,
       strategy,
       undefined,
-      targetHost,
-      false,
-      targetHost ? cwd : undefined,
+      { host: targetHost, cwd: targetHost ? cwd : undefined },
     );
   }
 
@@ -3625,9 +3623,9 @@ export async function openSingleAgentWithQueue(
   context: vscode.ExtensionContext,
   agentConfig: Omit<AgentConfig, 'count'>,
   messages: string[],
-  // `cwd` is where the TERMINAL starts on this machine; `remoteCwd` is the
-  // directory the agent starts in on `host` (emitted as `agents run --remote-cwd`), for
-  // a launch that has to land in a specific repo over there.
+  // `cwd` starts the local terminal and, for an ordinary `host` launch, is sent
+  // as portable `--cwd` for agents-cli to re-root. `remoteCwd` is already exact
+  // on `host` and is reserved for a picked historical session.
   opts?: { cwd?: string; remoteCwd?: string; mode?: AgentLaunchMode; sessionId?: string; strategy?: RunStrategy; host?: string; local?: boolean }
 ): Promise<{ terminalId: string; sessionId: string | null }> {
   const editorLocation: vscode.TerminalEditorLocationOptions = {
@@ -3670,9 +3668,19 @@ export async function openSingleAgentWithQueue(
       // A caller (dispatch) may pre-supply the id so it can watch that exact
       // session file for a plan / completion afterwards.
       sessionId = opts?.sessionId ?? generateClaudeSessionId();
-      command = buildAgentLaunchCommand(agentKey, sessionId, defaultModel, undefined, undefined, opts?.strategy, opts?.mode, targetHost, opts?.local, opts?.remoteCwd);
+      command = buildAgentLaunchCommand(agentKey, sessionId, defaultModel, undefined, undefined, opts?.strategy, opts?.mode, {
+        host: targetHost,
+        local: opts?.local,
+        cwd: targetHost && !opts?.remoteCwd ? cwd : undefined,
+        remoteCwd: opts?.remoteCwd,
+      });
     } else {
-      command = buildAgentLaunchCommand(agentKey, null, defaultModel, undefined, undefined, opts?.strategy, opts?.mode, targetHost, opts?.local, opts?.remoteCwd);
+      command = buildAgentLaunchCommand(agentKey, null, defaultModel, undefined, undefined, opts?.strategy, opts?.mode, {
+        host: targetHost,
+        local: opts?.local,
+        cwd: targetHost && !opts?.remoteCwd ? cwd : undefined,
+        remoteCwd: opts?.remoteCwd,
+      });
     }
   }
 

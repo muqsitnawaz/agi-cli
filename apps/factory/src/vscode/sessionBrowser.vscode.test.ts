@@ -222,7 +222,11 @@ describe('session browser extension-host seam', () => {
         launchQueued: async (_config, request) => {
           queued = `${buildAgentLaunchCommand(
             request.agentKey, 'new-session', undefined, undefined, undefined,
-            request.strategy, undefined, request.host, request.local, request.remoteCwd,
+            request.strategy, undefined, {
+              host: request.host,
+              local: request.local,
+              remoteCwd: request.remoteCwd,
+            },
           )} && queue ${request.prompt}`;
         },
         showError: message => { throw new Error(message); },
