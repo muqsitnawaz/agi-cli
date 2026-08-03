@@ -4,7 +4,7 @@ All notable changes to the Factory extension are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); `scripts/release.sh` requires a
 `## [<version>]` section for the version being published.
 
-## [Unreleased]
+## [0.9.307] - 2026-08-03
 
 - **`Agents: Fork (Pick Host)` forks the session you are in onto a device you choose.**
   Same fork as `Agents: Fork` — same harness, same `--strategy balanced` account
