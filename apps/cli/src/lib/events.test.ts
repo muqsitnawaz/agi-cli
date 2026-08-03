@@ -516,6 +516,18 @@ describe('event-kind table (the drift guard for out-of-process producers)', () =
     expect(EVENT_TYPES).toContain('status.posted');
   });
 
+  it('registers browser.navigate, browser.screenshot, and computer.action as real, non-audit kinds (#11)', () => {
+    // browser.navigate/browser.screenshot were declared in the EventType union
+    // but never emitted anywhere — this pins them (and the new computer.action
+    // kind) as accepted, info-level events now that BrowserService and the
+    // computer-actions CLI actually call emit() with them.
+    for (const kind of ['browser.navigate', 'browser.screenshot', 'computer.action']) {
+      expect(EVENT_TYPES).toContain(kind);
+      expect(isEventType(kind)).toBe(true);
+      expect(levelFor(kind as never)).toBe('info');
+    }
+  });
+
   it('rejects a near-miss kind rather than accepting a typo', () => {
     expect(isEventType('factory.clik')).toBe(false);
     expect(isEventType('')).toBe(false);

@@ -585,6 +585,7 @@ export class BrowserService {
       const sessionId = await this.getSessionId(conn, cdpTargetId);
       await conn.cdp.send('Page.navigate', { url }, sessionId);
       await this.saveTaskState(task.profile, conn.tasks);
+      emit('browser.navigate', { profile: task.profile, task: task.name, url, tabId: currentShortId, created: false });
       return { tabId: currentShortId, url, created: false };
     }
 
@@ -600,6 +601,7 @@ export class BrowserService {
       task.tabs[shortId] = cdpTargetId;
       task.currentTabId = shortId;
       await this.saveTaskState(task.profile, conn.tasks);
+      emit('browser.navigate', { profile: task.profile, task: task.name, url, tabId: shortId, created: true });
       return { tabId: shortId, url, created: true };
     }
 
@@ -614,6 +616,7 @@ export class BrowserService {
     this.invalidateTargetCache(conn);
     await this.saveTaskState(task.profile, conn.tasks);
 
+    emit('browser.navigate', { profile: task.profile, task: task.name, url, tabId: shortId, created: true });
     return { tabId: shortId, url, created: true };
   }
 
@@ -878,6 +881,16 @@ export class BrowserService {
     const dims =
       (extension === 'png' ? readPngDimensions(buffer) : readJpegDimensions(buffer)) ??
       { width: 0, height: 0 };
+    emit('browser.screenshot', {
+      profile: profileName,
+      task: task.name,
+      tabId: shortId,
+      path: finalPath,
+      bytes: buffer.length,
+      width: dims.width,
+      height: dims.height,
+      quality,
+    });
     return { path: finalPath, bytes: buffer.length, width: dims.width, height: dims.height };
   }
 
