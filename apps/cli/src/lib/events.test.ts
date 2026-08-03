@@ -326,6 +326,20 @@ describe('events', () => {
       expect(results[0].module).toBe('secrets');
     });
 
+    it('filters by sessionId — the scoped read enrichCachedSessionMeta uses instead of a transcript re-scan', () => {
+      setupLogsDir();
+      emit('browser.navigate', { sessionId: 'sess-a', url: 'https://x' });
+      emit('browser.navigate', { sessionId: 'sess-b', url: 'https://y' });
+      emit('computer.action', { sessionId: 'sess-a', command: 'click' });
+
+      const forA = query({ sessionId: 'sess-a' });
+      expect(forA).toHaveLength(2);
+      expect(forA.every((r) => r.sessionId === 'sess-a')).toBe(true);
+
+      expect(query({ sessionId: 'sess-b' })).toHaveLength(1);
+      expect(query({ sessionId: 'sess-does-not-exist' })).toHaveLength(0);
+    });
+
     it('filters by environment-derived caller identity', () => {
       setupLogsDir();
       emit('info', { module: 'test' });

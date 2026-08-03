@@ -201,6 +201,19 @@ export interface SessionMeta {
   todos?: TodoProgress;
   /** Most-recent unique directories changed or used as a shell working directory. */
   recentDirectoriesTouched?: string[];
+  /**
+   * Whether this session emitted at least one `browser.navigate` /
+   * `browser.screenshot` event, computed at scan time from a sessionId-scoped
+   * read of the events log (events.ts `query({ sessionId })`) rather than a
+   * transcript re-scan — see `detectToolUsage` in session/db.ts. `undefined`
+   * means a legacy row this scanner hasn't computed the field for yet (never
+   * collapsed to `false`, so a consumer — e.g. sessions-picker.ts's
+   * `classifySessionTool` — knows to fall back to a transcript-derived guess
+   * instead of trusting a false negative).
+   */
+  usedBrowser?: boolean;
+  /** Sibling of {@link usedBrowser} for `computer.action` events. */
+  usedComputer?: boolean;
   /** Linear project containing ticketId, resolved lazily and cached in SQLite. */
   linearProject?: string;
   /** Browser URL for linearProject. */

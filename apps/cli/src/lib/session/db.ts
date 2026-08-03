@@ -14,6 +14,7 @@ import type { SessionAgentId, SessionMeta } from './types.js';
 import { parseSession } from './parse.js';
 import { extractRecentDirectoriesTouched, extractTodoProgressFromEvents } from './state.js';
 import { getSessionsDir, getSessionsDbPath } from '../state.js';
+import { query as queryEvents } from '../events.js';
 import { machineForSessionFile } from './origin-machine.js';
 import { loadSessionActorIndex, readSessionActorRecord } from './actor-sidecar.js';
 
@@ -23,7 +24,7 @@ const DB_PATH = getSessionsDbPath();
 /** Current schema version; bumped when migrations are added. Exported so tests
  * assert against the constant instead of hardcoding a number that every bump
  * then has to chase (docs/05-sessions.md calls the constant the source of truth). */
-export const SCHEMA_VERSION = 21;
+export const SCHEMA_VERSION = 22;
 
 /**
  * Canonicalize a file path for use as a scan_ledger key. The same physical
@@ -89,7 +90,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   linear_project TEXT,
   linear_project_url TEXT,
   actor TEXT,
-  initiated_by TEXT
+  initiated_by TEXT,
+  used_browser INTEGER,
+  used_computer INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_timestamp ON sessions(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_cwd ON sessions(cwd);
@@ -187,6 +190,9 @@ export interface SessionRow {
   linear_project_url: string | null;
   actor: string | null;
   initiated_by: string | null;
+  /** NULL means "not yet computed" (a row scanned before this field existed) — see rowToMeta. */
+  used_browser: number | null;
+  used_computer: number | null;
 }
 
 /** File stat snapshot used to detect changes between scan runs. */
@@ -473,6 +479,24 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
     const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
     if (!cols.some(c => c.name === 'spawned_team')) db.exec(`ALTER TABLE sessions ADD COLUMN spawned_team TEXT`);
     db.exec(`DELETE FROM scan_ledger; DELETE FROM dir_ledger;`);
+  }
+
+  if (fromVersion < 22) {
+    // v21 → v22: persist usedBrowser/usedComputer (#11) so the sessions picker
+    // preview can trust a positive detection instead of re-deriving it from a
+    // transcript regex on every render. Computed from a sessionId-scoped read
+    // of the events log (see detectToolUsage), not from the parsed transcript,
+    // so no ledger wipe is needed here — a rescan re-derives them regardless.
+    //
+    // Deliberately NO DEFAULT (NULL on ALTER, for every pre-existing row):
+    // NULL means "not yet computed by this scanner" (a legacy row), distinct
+    // from a real, computed 0/false. Collapsing that into a DEFAULT 0 would
+    // make every un-rescanned row look like a definite "never used
+    // browser/computer" and permanently blind the picker's fallback path for
+    // any row that isn't rescanned before it's next viewed.
+    const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'used_browser')) db.exec(`ALTER TABLE sessions ADD COLUMN used_browser INTEGER`);
+    if (!cols.some(c => c.name === 'used_computer')) db.exec(`ALTER TABLE sessions ADD COLUMN used_computer INTEGER`);
   }
 }
 
@@ -881,7 +905,7 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     file_path, file_mtime_ms, file_size, scanned_at, is_team_origin,
     pr_url, pr_number, worktree_slug, ticket_id, spawned_team, plan, todos,
     recent_directories_touched, linear_project, linear_project_url, machine,
-    actor, initiated_by
+    actor, initiated_by, used_browser, used_computer
   ) VALUES (
     @id, @short_id, @agent, @origin, @routine_name, @routine_run_id,
     @version, @account, @timestamp, @last_activity,
@@ -890,7 +914,7 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     @file_path, @file_mtime_ms, @file_size, @scanned_at, @is_team_origin,
     @pr_url, @pr_number, @worktree_slug, @ticket_id, @spawned_team, @plan, @todos,
     @recent_directories_touched, @linear_project, @linear_project_url, @machine,
-    @actor, @initiated_by
+    @actor, @initiated_by, @used_browser, @used_computer
   )
   ON CONFLICT(id) DO UPDATE SET
     short_id = excluded.short_id,
@@ -934,6 +958,8 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     plan = excluded.plan,
     todos = excluded.todos,
     recent_directories_touched = excluded.recent_directories_touched,
+    used_browser = excluded.used_browser,
+    used_computer = excluded.used_computer,
     linear_project = CASE
       WHEN excluded.ticket_id IS NOT sessions.ticket_id THEN excluded.linear_project
       ELSE COALESCE(excluded.linear_project, sessions.linear_project)
@@ -952,6 +978,25 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     actor = COALESCE(sessions.actor, excluded.actor),
     initiated_by = COALESCE(sessions.initiated_by, excluded.initiated_by)
 `);
+
+/**
+ * Did this session emit at least one browser/computer-automation event?
+ * A scoped, sessionId-filtered read of the events log — NOT a re-scan of the
+ * (potentially huge) transcript — since browser.navigate / browser.screenshot
+ * / computer.action are recorded there via events.ts's emit(), keyed by the
+ * same session id that is this row's `meta.id` (the provenance floor stamps
+ * AGENT_SESSION_ID/AGENTS_SESSION_ID on every such event at emit time).
+ *
+ * Called independently of {@link enrichCachedSessionMeta} (which SKIPS
+ * claude/codex entries in the batch path because their caller already parsed
+ * the transcript for todos/recentDirectoriesTouched) — this never touches the
+ * transcript, so it must run for every agent, every time.
+ */
+function detectToolUsage(sessionId: string): { usedBrowser: boolean; usedComputer: boolean } {
+  const usedBrowser = queryEvents({ sessionId, eventTypes: ['browser.navigate', 'browser.screenshot'], limit: 1 }).length > 0;
+  const usedComputer = queryEvents({ sessionId, eventTypes: ['computer.action'], limit: 1 }).length > 0;
+  return { usedBrowser, usedComputer };
+}
 
 function enrichCachedSessionMeta(meta: SessionMeta): SessionMeta {
   if (!meta.filePath) return meta;
@@ -1026,6 +1071,7 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
   // row AND backfills one indexed null-first (before its sidecar existed), while a
   // rescan carrying no actor still keeps the stored owner.
   const actorRec = meta.actor ? undefined : readSessionActorRecord(meta.id);
+  const toolUsage = detectToolUsage(meta.id);
   const db = getDB();
   const { upsert, delText, insText, readLabel } = stmts(db);
   const row: SessionRow = {
@@ -1068,6 +1114,8 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
     machine: resolveMachine(meta),
     actor: meta.actor ?? actorRec?.actor ?? null,
     initiated_by: meta.initiatedBy ?? actorRec?.initiatedBy ?? null,
+    used_browser: toolUsage.usedBrowser ? 1 : 0,
+    used_computer: toolUsage.usedComputer ? 1 : 0,
   };
 
   const txn = db.transaction(() => {
@@ -1162,6 +1210,7 @@ export function upsertSessionsBatch(
       // back when the error escapes `fn`, so catching + skipping here leaves the txn valid
       // and committable. We deliberately do NOT stamp the ledger for a skipped row, so the
       // next scan re-tries it (self-healing once the underlying parser is fixed).
+      const toolUsage = detectToolUsage(meta.id);
       try {
       upsert.run({
         id: meta.id,
@@ -1203,6 +1252,8 @@ export function upsertSessionsBatch(
     machine: resolveMachine(meta),
         actor: meta.actor ?? actorIndex.get(meta.id)?.actor ?? null,
         initiated_by: meta.initiatedBy ?? actorIndex.get(meta.id)?.initiatedBy ?? null,
+        used_browser: toolUsage.usedBrowser ? 1 : 0,
+        used_computer: toolUsage.usedComputer ? 1 : 0,
       });
       delText.run(meta.id);
       insText.run(
@@ -1411,6 +1462,11 @@ function rowToMeta(row: SessionRow): SessionMeta {
     // Narrow the free-text column to the known kinds; an unexpected value maps
     // to undefined rather than being asserted as a valid kind.
     initiatedBy: row.initiated_by === 'human' || row.initiated_by === 'agent' ? row.initiated_by : undefined,
+    // NULL = never computed by this scanner (legacy row) — leave undefined so
+    // the sessions picker knows to fall back to the transcript-regex detection
+    // instead of trusting a false "never used browser/computer".
+    usedBrowser: row.used_browser === null ? undefined : row.used_browser === 1,
+    usedComputer: row.used_computer === null ? undefined : row.used_computer === 1,
   };
 }
 

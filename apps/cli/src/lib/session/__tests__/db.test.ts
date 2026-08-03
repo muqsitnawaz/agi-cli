@@ -25,6 +25,7 @@ const {
   SCHEMA_VERSION,
 } = await import('../db.js');
 const { costOfUsage } = await import('../../pricing/index.js');
+const { emit } = await import('../../events.js');
 type SessionMeta = import('../types.js').SessionMeta;
 
 // JSONL files live under TEST_HOME so they're isolated and torn down with it.
@@ -113,6 +114,61 @@ describe('cached checklist metadata', () => {
       todos: { done: 1, total: 2, activeForm: 'Building' },
       recentDirectoriesTouched: ['/repo/src'],
     });
+  });
+});
+
+describe('usedBrowser/usedComputer — a scoped events-log read, not a transcript re-scan (#11)', () => {
+  function emptyFile(id: string): string {
+    const filePath = path.join(SEED_FILES_DIR, `${id}.jsonl`);
+    fs.writeFileSync(filePath, '');
+    return filePath;
+  }
+
+  it('upsertSession sets usedBrowser=true from a real browser.navigate event stamped with the session id', () => {
+    emit('browser.navigate', { sessionId: 'tool-browser', profile: 'default', url: 'https://example.com' });
+    const filePath = emptyFile('tool-browser');
+    const meta: SessionMeta = { id: 'tool-browser', shortId: 'tool-bro', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath };
+    upsertSession(meta, '', { fileMtimeMs: 1, fileSize: fs.statSync(filePath).size });
+
+    const row = findSessionsById('tool-browser')[0];
+    expect(row.usedBrowser).toBe(true);
+    expect(row.usedComputer).toBe(false);
+  });
+
+  it('upsertSessionsBatch sets usedComputer=true — and runs for claude/codex too (the todos/dirs skip does not apply here)', () => {
+    emit('computer.action', { sessionId: 'tool-computer', command: 'click', targetPid: 100 });
+    const filePath = emptyFile('tool-computer');
+    const meta: SessionMeta = { id: 'tool-computer', shortId: 'tool-com', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath };
+    upsertSessionsBatch([{ meta, content: '' }]);
+
+    const row = findSessionsById('tool-computer')[0];
+    expect(row.usedComputer).toBe(true);
+    expect(row.usedBrowser).toBe(false);
+  });
+
+  it('a session with no browser/computer events reads back false for both', () => {
+    const filePath = emptyFile('tool-none');
+    const meta: SessionMeta = { id: 'tool-none', shortId: 'tool-non', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath };
+    upsertSession(meta, '', { fileMtimeMs: 1, fileSize: fs.statSync(filePath).size });
+
+    const row = findSessionsById('tool-none')[0];
+    expect(row.usedBrowser).toBe(false);
+    expect(row.usedComputer).toBe(false);
+  });
+
+  it('a legacy row (used_browser/used_computer still NULL) reads back undefined, not false', () => {
+    // Simulates a row from before this migration that hasn't been rescanned —
+    // NULL, not 0, is what the ALTER TABLE leaves on every pre-existing row.
+    const filePath = emptyFile('tool-legacy');
+    const db = getDB();
+    db.prepare(`
+      INSERT INTO sessions (id, short_id, agent, timestamp, project, cwd, file_path, is_team_origin)
+      VALUES ('tool-legacy', 'tool-leg', 'claude', '2026-08-01T00:00:00Z', 'agents-cli', ?, ?, 0)
+    `).run(SEED_FILES_DIR, filePath);
+
+    const row = findSessionsById('tool-legacy')[0];
+    expect(row.usedBrowser).toBeUndefined();
+    expect(row.usedComputer).toBeUndefined();
   });
 });
 
