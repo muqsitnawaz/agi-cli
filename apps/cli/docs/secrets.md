@@ -252,6 +252,48 @@ Source: `src/lib/secrets/remote.ts` (transport + resolve), wired into `list` /
 The Windows push bridge is `buildWindowsStdinImportCommand` in
 `src/lib/hosts/remote-cmd.ts`.
 
+## Naming bundles
+
+Name a bundle after the thing it holds credentials for, so an agent can guess it
+without listing every bundle first:
+
+- **Website** → the domain *with its real suffix*: `stripe.com`, `openai.ai`,
+  `github.com`, `x.com`.
+- **Desktop app** → the app's *binary suffix*: `slack.app`, `photoshop.exe`,
+  `figma.app`.
+- Groupings that are neither a site nor an app keep a plain name: `prod`,
+  `staging`, `ci`.
+
+Always pass `--description` — it's what `list` / `view` show so an agent knows what
+a bundle is for without opening it. An undescribed bundle prints a `No description
+found` nudge at `create` time and in `view`; fix it with
+`agents secrets describe <name> "…"`.
+
+## Usage tracking
+
+A small local database at `~/.agents/secrets/secrets.db` records a **value-free**
+row every time a bundle is **accessed** (read/queried), **imported**, **exported**,
+or **unlocked** — never a secret value, only which bundle was touched, when, by
+which agent/host, and how many keys. It is the queryable, per-bundle counterpart to
+the append-only `~/.agents/events.jsonl` audit log: the same access chokepoint
+(`emitSecretAudit`) feeds both, but this store answers "how often / how recently was
+*this* bundle used?" without scanning the whole event stream.
+
+- `agents secrets view <bundle>` shows the recorded usage ("accessed 42× (last 2h
+  ago) · exported 3× (last 1d ago)") and — for a keychain bundle on macOS — whether
+  the bundle is currently **unlocked** (held by the secrets-agent, so reads are
+  prompt-free) or **locked** (Touch ID required on the next read).
+- `agents secrets list --sort used|uses` orders bundles by how **recently** or how
+  **frequently** they're accessed (`--sort created|updated` and `--reverse` are also
+  accepted; `name` is the default).
+- The `--json` payloads carry `heldExpiresAt`, per-bundle `usage`, and a `uses`
+  count for machine callers.
+
+Recording is best-effort — a failure (missing runtime SQLite, a locked db) is
+swallowed so telemetry can never break secret resolution — and honors
+`AGENTS_NO_USAGE_TRACK=1`. Source: `src/lib/secrets/usage-db.ts`,
+`src/lib/secrets/audit.ts`.
+
 ## Command Reference
 
 ### Bundle commands
@@ -259,10 +301,12 @@ The Windows push bridge is `buildWindowsStdinImportCommand` in
 | Command | Description | Example |
 |---------|-------------|---------|
 | `secrets list` / `ls` | List bundles with key count, expiry warnings, timestamps | `agents secrets list` |
-| `secrets view [name]` | Show keys in a bundle (values masked by default) | `agents secrets view prod` |
+| `secrets list --sort <field>` | Order by `name` (default), `used` (most recently used), `uses` (most frequently accessed), `created`, or `updated` | `agents secrets list --sort uses` |
+| `secrets list --reverse` | Reverse the `--sort` order | `agents secrets list --sort used --reverse` |
+| `secrets view [name]` | Show keys in a bundle (values masked), plus its unlock/held state and a usage summary (accessed/imported/exported/unlocked counts + recency) | `agents secrets view prod` |
 | `secrets view [name] --reveal` | Print keychain values in the clear (TTY only) | `agents secrets view prod --reveal` |
 | `secrets view [name] --reveal --plaintext` | Allow `--reveal` in non-interactive shells | `agents secrets view prod --reveal --plaintext` |
-| `secrets create [name]` | Create an empty bundle | `agents secrets create prod` |
+| `secrets create [name]` | Create an empty bundle — name a website by domain (`stripe.com`), a desktop app by its binary suffix (`slack.app`, `photoshop.exe`) | `agents secrets create stripe.com` |
 | `secrets create [name] --description <text>` | Create with a description | `agents secrets create prod --description "Live API keys"` |
 | `secrets create [name] --allow-exec` | Enable exec: refs in this bundle | `agents secrets create tools --allow-exec` |
 | `secrets create [name] --backend <keychain\|file>` | Storage backend; `file` is passphrase-encrypted and headless-readable (see [File-backed bundles](#file-backed-bundles-headless--remote)) | `agents secrets create rush.releases --backend file` |

@@ -44,6 +44,21 @@ Vault providers (1Password, AWS Secrets Manager, HashiCorp Vault) are planned fo
 
 **agents secrets**: Scoped bundles (agent only sees what you pass), OS keychain-backed (encrypted at rest), and agent-friendly (agents can read *and* write programmatically).
 
+## Naming a bundle
+
+Name a bundle after the thing it holds credentials for, so an agent can guess it without listing every bundle first:
+
+- **Website** → the domain **with its real suffix**: `stripe.com`, `openai.ai`, `github.com`, `x.com`.
+- **Desktop app** → the app's **binary suffix**: `slack.app`, `photoshop.exe`, `figma.app`.
+- Environment/service groupings that aren't a site or app keep a plain name: `prod`, `staging`, `ci`.
+
+Always pass `--description` — it's what `list` and `view` show so an agent knows what a bundle is for without opening it. An undescribed bundle prints a `No description found` nudge in `view`:
+
+```bash
+agents secrets create stripe.com --description "Stripe live + test API keys"
+agents secrets create slack.app  --description "Slack desktop app OAuth tokens"
+```
+
 ## "I need to give an agent access to my API keys"
 
 Create a bundle, add your keys, then pass the bundle when running agents:
@@ -177,6 +192,18 @@ agents secrets tier prod session            # or: secrets create prod --tier ses
 ```
 
 A `biometry`-tier bundle (the default) is never auto-held — keep high-value bundles there so every read is confirmed. While a bundle is unlocked, any process running as you can read it from the socket without a prompt; that's the trade-off, so keep TTLs short and `lock` when you step away.
+
+## "Which bundles do I actually use?"
+
+`view` and `list` report usage. `agents secrets view <bundle>` shows whether the bundle is currently unlocked (held by the agent, so reads are prompt-free) and how often / how recently it's been accessed, imported, and exported. Sort the list by activity:
+
+```bash
+agents secrets list --sort used     # most recently used first
+agents secrets list --sort uses     # most frequently accessed first
+agents secrets list --sort used --reverse
+```
+
+Usage metadata is value-free and lives in a small local database at `~/.agents/secrets/secrets.db` — never a secret value, only which bundle was touched, when, and by whom.
 
 ## "What else can I do?"
 
