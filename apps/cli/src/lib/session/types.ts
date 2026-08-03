@@ -63,6 +63,15 @@ export interface SessionEvent {
   hookName?: string;
   /** Lifecycle event the hook fired on (SessionStart, PreToolUse, …). */
   hookEvent?: string;
+  /**
+   * Slash-command invocation name (e.g. `/recap`, `/code:commit`), captured
+   * two ways in a Claude transcript: a `role=user` message whose content is
+   * the `<command-name>` wrapper Claude injects for a typed slash command
+   * (`parseClaudeContent`, see `prompt.ts`'s `extractSlashCommandName`), or a
+   * `tool_use` event for the `SlashCommand` tool (a command the MODEL invoked
+   * programmatically, not the user). Undefined for every other event.
+   */
+  slashCommand?: string;
 }
 
 /** A displayable file attachment discovered in a session transcript. */
