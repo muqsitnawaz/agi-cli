@@ -21,9 +21,14 @@ import {
   registerSecretsCommands,
   renderHoldSummary,
   renderPolicyCol,
+  sortSecretsBundles,
+  formatUsageLine,
+  renderViewStatusLine,
+  SECRETS_SORT_FIELDS,
   NO_BUNDLES_HELD_LINE,
 } from './secrets.js';
 import { parseDotenv, type SecretsBundle } from '../lib/secrets/bundles.js';
+import type { BundleUsageSummary } from '../lib/secrets/usage-db.js';
 
 // On macOS, `secrets create --backend file` still stores bundle METADATA in the
 // Keychain, which requires the signed `Agents CLI.app` helper. GitHub macOS CI
@@ -653,4 +658,201 @@ describe('exportBundleToFile / importBundleFromFile file round-trip', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+});
+
+// Build a minimal usage summary for the sort/format helpers, with per-event
+// counts and last timestamps supplied inline.
+function usage(
+  bundle: string,
+  events: Partial<Record<'access' | 'unlock' | 'import' | 'export', { count: number; last: string | null }>>,
+): BundleUsageSummary {
+  const base = {
+    access: { count: 0, last: null as string | null },
+    unlock: { count: 0, last: null as string | null },
+    import: { count: 0, last: null as string | null },
+    export: { count: 0, last: null as string | null },
+  };
+  const merged = { ...base, ...events } as BundleUsageSummary['events'];
+  const lasts = Object.values(merged).map((e) => e.last).filter(Boolean) as string[];
+  const total = Object.values(merged).reduce((n, e) => n + e.count, 0);
+  return {
+    bundle,
+    total,
+    events: merged,
+    lastUsedAt: lasts.length ? lasts.sort().at(-1)! : null,
+    firstUsedAt: lasts.length ? lasts.sort()[0] : null,
+  };
+}
+
+const bundleFor = (name: string, extra: Partial<SecretsBundle> = {}): SecretsBundle =>
+  ({ name, vars: {}, ...extra } as SecretsBundle);
+
+describe('sortSecretsBundles', () => {
+  const a = bundleFor('a.com', { created_at: '2026-01-01T00:00:00Z', updated_at: '2026-02-01T00:00:00Z', last_used: '2026-03-01T00:00:00Z' });
+  const b = bundleFor('b.app', { created_at: '2026-01-03T00:00:00Z', updated_at: '2026-01-04T00:00:00Z', last_used: '2026-05-01T00:00:00Z' });
+  const c = bundleFor('c.dev', { created_at: '2026-01-02T00:00:00Z', updated_at: '2026-03-15T00:00:00Z' }); // never used
+  const bundles = [a, b, c];
+
+  it("defaults to alphabetical by name", () => {
+    const out = sortSecretsBundles(bundles, 'name', false, new Map());
+    expect(out.map((x) => x.name)).toEqual(['a.com', 'b.app', 'c.dev']);
+  });
+
+  it("'used' orders most-recently-used first, never-used last", () => {
+    const out = sortSecretsBundles(bundles, 'used', false, new Map());
+    expect(out.map((x) => x.name)).toEqual(['b.app', 'a.com', 'c.dev']);
+  });
+
+  it("'used' folds in the usage DB's lastUsedAt when the bundle stamp is older/absent", () => {
+    // c.dev has no last_used stamp, but the DB recorded an access newer than
+    // everyone else's — it should now sort first.
+    const map = new Map([['c.dev', usage('c.dev', { access: { count: 1, last: '2026-06-01T00:00:00Z' } })]]);
+    const out = sortSecretsBundles(bundles, 'used', false, map);
+    expect(out[0].name).toBe('c.dev');
+  });
+
+  it("'uses' orders by recorded access frequency, most first", () => {
+    const map = new Map([
+      ['a.com', usage('a.com', { access: { count: 2, last: '2026-03-01T00:00:00Z' } })],
+      ['b.app', usage('b.app', { access: { count: 9, last: '2026-05-01T00:00:00Z' } })],
+    ]);
+    const out = sortSecretsBundles(bundles, 'uses', false, map);
+    expect(out.map((x) => x.name)).toEqual(['b.app', 'a.com', 'c.dev']);
+  });
+
+  it("'created' / 'updated' order newest first", () => {
+    expect(sortSecretsBundles(bundles, 'created', false, new Map()).map((x) => x.name)).toEqual(['b.app', 'c.dev', 'a.com']);
+    expect(sortSecretsBundles(bundles, 'updated', false, new Map()).map((x) => x.name)).toEqual(['c.dev', 'a.com', 'b.app']);
+  });
+
+  it('--reverse flips the order', () => {
+    const out = sortSecretsBundles(bundles, 'name', true, new Map());
+    expect(out.map((x) => x.name)).toEqual(['c.dev', 'b.app', 'a.com']);
+  });
+
+  it('does not mutate the input array', () => {
+    const input = [...bundles];
+    sortSecretsBundles(input, 'used', false, new Map());
+    expect(input.map((x) => x.name)).toEqual(['a.com', 'b.app', 'c.dev']);
+  });
+
+  it('exposes exactly the documented sort fields', () => {
+    expect([...SECRETS_SORT_FIELDS]).toEqual(['name', 'used', 'uses', 'created', 'updated']);
+  });
+});
+
+describe('formatUsageLine', () => {
+  it('returns empty string when there is no recorded usage', () => {
+    expect(formatUsageLine(undefined)).toBe('');
+    expect(formatUsageLine(usage('x', {}))).toBe('');
+  });
+
+  it('lists each non-zero event with its count, in access/unlock/import/export order', () => {
+    const line = formatUsageLine(usage('stripe.com', {
+      export: { count: 2, last: '2026-05-01T00:00:00Z' },
+      access: { count: 5, last: '2026-05-02T00:00:00Z' },
+    }));
+    // access is listed before export regardless of insertion order.
+    expect(line.indexOf('accessed')).toBeLessThan(line.indexOf('exported'));
+    expect(line).toContain('accessed 5×');
+    expect(line).toContain('exported 2×');
+    // zero-count kinds are omitted.
+    expect(line).not.toContain('imported');
+    expect(line).not.toContain('unlocked');
+  });
+});
+
+describe('renderViewStatusLine', () => {
+  it('is empty for non-keychain backends (no broker to hold)', () => {
+    expect(renderViewStatusLine(bundleFor('f', { backend: 'file' }), Date.now() + 60_000)).toBe('');
+    expect(renderViewStatusLine(bundleFor('v', { backend: 'vault' }), Date.now() + 60_000)).toBe('');
+  });
+
+  it("is empty for a 'never'-policy bundle (always readable, no hold state)", () => {
+    expect(renderViewStatusLine(bundleFor('n', { policy: 'never' }), Date.now() + 60_000)).toBe('');
+  });
+});
+
+// End-to-end proof that a real read is recorded in ~/.agents/secrets/secrets.db
+// and surfaced by `view` / `list`. Unlike the discovery suite above, this one
+// leaves usage tracking ON and points AGENTS_SECRETS_DB at a temp file.
+describe('secrets usage tracking (secrets.db) end-to-end', () => {
+  function runTracked(home: string, dbPath: string, args: string[]): ReturnType<typeof spawnSync> {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      AGENTS_SECRETS_PASSPHRASE: 'usage-e2e-test',
+      AGENTS_SECRETS_DB: dbPath,
+    };
+    // tests/setup.ts sets AGENTS_NO_USAGE_TRACK=1 for the parent process; this
+    // suite deliberately wants recording ON, so drop it from the child env.
+    delete env.AGENTS_NO_USAGE_TRACK;
+    return spawnSync('node', ['--import', 'tsx', 'src/index.ts', 'secrets', ...args], {
+      cwd: path.resolve(__dirname, '../..'),
+      encoding: 'utf-8',
+      env,
+    });
+  }
+
+  // Each assertion spawns a fresh `tsx` CLI (re-transforms on every run), so this
+  // multi-step end-to-end flow needs a generous timeout past the 30s default.
+  it.skipIf(!keychainHelperAvailable)('records an access on `get` and surfaces it in view/list', ({ skip }) => {
+    if (!keychainHelperAvailable) { skip(); return; }
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-secrets-e2e-'));
+    const dbPath = path.join(home, 'secrets.db');
+    try {
+      fs.mkdirSync(path.join(home, '.agents/.system'), { recursive: true });
+      spawnSync('git', ['init', '--quiet'], { cwd: path.join(home, '.agents/.system'), encoding: 'utf-8' });
+      expect(runTracked(home, dbPath, ['create', 'stripe.com', '--backend', 'file', '--description', 'live keys']).status).toBe(0);
+      expect(runTracked(home, dbPath, ['add', 'stripe.com', 'API_TOKEN', '--value', 'sk-live-xyz']).status).toBe(0);
+
+      // A real read through the canonical path → one recorded `access`.
+      const got = runTracked(home, dbPath, ['get', 'stripe.com', 'API_TOKEN']);
+      expect(got.status, got.stderr).toBe(0);
+      expect(got.stdout.trim()).toBe('sk-live-xyz');
+      expect(fs.existsSync(dbPath)).toBe(true);
+
+      const view = runTracked(home, dbPath, ['view', 'stripe.com', '--json']);
+      expect(view.status, view.stderr).toBe(0);
+      const obj = JSON.parse(view.stdout);
+      expect(obj.usage).toBeTruthy();
+      expect(obj.usage.events.access.count).toBeGreaterThanOrEqual(1);
+      // file backend has no broker to hold → not unlocked.
+      expect(obj.heldExpiresAt).toBeNull();
+
+      const list = runTracked(home, dbPath, ['list', '--json']);
+      expect(list.status, list.stderr).toBe(0);
+      const gh = JSON.parse(list.stdout).find((b: { name: string }) => b.name === 'stripe.com');
+      expect(gh.uses).toBeGreaterThanOrEqual(1);
+
+      // The sort flag is accepted and doesn't error.
+      expect(runTracked(home, dbPath, ['list', '--sort', 'uses', '--reverse']).status).toBe(0);
+      // An invalid sort field is rejected.
+      const bad = runTracked(home, dbPath, ['list', '--sort', 'bogus']);
+      expect(bad.status).toBe(1);
+      expect(bad.stderr).toMatch(/Invalid --sort/);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it.skipIf(!keychainHelperAvailable)('nudges when a bundle has no description', ({ skip }) => {
+    if (!keychainHelperAvailable) { skip(); return; }
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-secrets-nodesc-'));
+    const dbPath = path.join(home, 'secrets.db');
+    try {
+      fs.mkdirSync(path.join(home, '.agents/.system'), { recursive: true });
+      spawnSync('git', ['init', '--quiet'], { cwd: path.join(home, '.agents/.system'), encoding: 'utf-8' });
+      const created = runTracked(home, dbPath, ['create', 'undescribed', '--backend', 'file']);
+      expect(created.status, created.stderr).toBe(0);
+      expect(created.stdout).toMatch(/No description found/);
+
+      const view = runTracked(home, dbPath, ['view', 'undescribed']);
+      expect(view.status, view.stderr).toBe(0);
+      expect(view.stdout).toMatch(/No description found/);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
