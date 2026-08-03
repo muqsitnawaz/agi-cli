@@ -94,6 +94,12 @@ import { readMeta } from '../lib/state.js';
 import { parseDuration } from '../lib/hooks/cache.js';
 import { emit, query } from '../lib/events.js';
 import { emitSecretAudit } from '../lib/secrets/audit.js';
+import {
+  recordSecretActivity,
+  listBundleUsage,
+  getBundleUsage,
+  getRecentBundleEvents,
+} from '../lib/secrets/activity.js';
 import { frequentlyPromptedBundles } from '../lib/secrets/unlock-hints.js';
 import { registerCommandGroups, setHelpSections } from '../lib/help.js';
 import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
@@ -594,8 +600,35 @@ export function formatHoldWindow(ms: number): string {
 /** Below this width the fixed date columns no longer fit; `list` uses cards. */
 const SECRETS_WIDE = 96;
 
+/** Sort keys accepted by `agents secrets list --sort`. */
+export type SecretsListSort = 'name' | 'used' | 'freq';
+
+/**
+ * Sort bundles for `secrets list`. `name` is the default alphabetical order
+ * (what listBundles already returns). `used` puts the most recently used first
+ * (never-used last, alphabetical within ties); `freq` puts the highest
+ * recorded use count first (unrecorded bundles count as 0). Pure — unit-tested.
+ */
+export function sortBundles(
+  bundles: SecretsBundle[],
+  sort: SecretsListSort,
+  usage: Map<string, { useCount: number; lastUsedAt: string | null }>,
+): SecretsBundle[] {
+  if (sort === 'name') return [...bundles].sort((a, b) => a.name.localeCompare(b.name));
+  const usedMs = (b: SecretsBundle): number => {
+    const iso = b.last_used ?? usage.get(b.name)?.lastUsedAt ?? null;
+    const t = iso ? Date.parse(iso) : NaN;
+    return Number.isFinite(t) ? t : -1;
+  };
+  if (sort === 'used') {
+    return [...bundles].sort((a, b) => usedMs(b) - usedMs(a) || a.name.localeCompare(b.name));
+  }
+  const freq = (b: SecretsBundle): number => usage.get(b.name)?.useCount ?? 0;
+  return [...bundles].sort((a, b) => freq(b) - freq(a) || a.name.localeCompare(b.name));
+}
+
 /** Format a single bundle as a table row for the `secrets list` output. */
-function renderBundleRow(b: SecretsBundle, held?: Map<string, number>, cols = terminalWidth()): string {
+function renderBundleRow(b: SecretsBundle, held?: Map<string, number>, cols = terminalWidth(), useCount = 0): string {
   const entries = describeBundle(b);
   const keys = entries.length;
   const expiringCount = countExpiringSoon(b.meta);
@@ -618,7 +651,8 @@ function renderBundleRow(b: SecretsBundle, held?: Map<string, number>, cols = te
     `${padVisible(expiring, 9)} ` +
     `${padVisible(created, 9)} ` +
     `${padVisible(updated, 9)} ` +
-    `${padVisible(used, 7)}`;
+    `${padVisible(used, 7)} ` +
+    `${String(useCount).padEnd(5)}`;
   // Mark non-keychain bundles so `list` distinguishes storage at a glance.
   const tag = b.backend === 'file'
     ? chalk.magenta('[file] ')
@@ -626,17 +660,21 @@ function renderBundleRow(b: SecretsBundle, held?: Map<string, number>, cols = te
       ? chalk.blue('[synced] ')
       : '';
   // Cap the free-form description to whatever space is left on the line so a long
-  // description can't push the row to 200+ chars and wrap into a smear.
+  // description can't push the row to 200+ chars and wrap into a smear. A bundle
+  // without a description gets a loud marker instead — context is what makes a
+  // bundle usable by an agent that didn't create it.
   const budget = cols - stringWidth(head) - 1 - stringWidth(tag);
   const desc = b.description && budget > 3
     ? chalk.gray(truncateToWidth(safePrint(b.description), budget))
-    : '';
+    : !b.description
+      ? chalk.yellow('no description')
+      : '';
   const trailer = `${tag}${desc}`.trimEnd();
   return trailer ? `${head} ${trailer}` : head.trimEnd();
 }
 
 /** Narrow-terminal card: name + compact meta on one line, description below. */
-function renderBundleCard(b: SecretsBundle, held: Map<string, number> | undefined, cols: number): string {
+function renderBundleCard(b: SecretsBundle, held: Map<string, number> | undefined, cols: number, useCount = 0): string {
   const keys = describeBundle(b).length;
   const used = b.last_used ? relativeAge(b.last_used) : (b.created_at ? 'never' : '?');
   const tag = b.backend === 'file'
@@ -644,9 +682,12 @@ function renderBundleCard(b: SecretsBundle, held: Map<string, number> | undefine
     : b.backend === 'vault'
       ? chalk.blue(' [synced]')
       : '';
-  const meta = chalk.gray(`${keys} key${keys === 1 ? '' : 's'} · `) + renderPolicyCol(b, held) + chalk.gray(` · used ${used}`);
+  const uses = useCount > 0 ? chalk.gray(` · ${useCount} use${useCount === 1 ? '' : 's'}`) : '';
+  const meta = chalk.gray(`${keys} key${keys === 1 ? '' : 's'} · `) + renderPolicyCol(b, held) + chalk.gray(` · used ${used}`) + uses;
   const line1 = `${chalk.cyan(b.name)}  ${meta}${tag}`;
-  if (!b.description) return line1;
+  if (!b.description) {
+    return `${line1}\n    ${chalk.yellow(`No description found — add one: agents secrets describe ${b.name} "what these keys are for"`)}`;
+  }
   return `${line1}\n    ${chalk.gray(truncateToWidth(safePrint(b.description), cols - 4))}`;
 }
 
@@ -828,37 +869,47 @@ export function registerSecretsCommands(program: Command): void {
 
   setHelpSections(cmd, {
     examples: `
-      # Create a bundle
-      agents secrets create prod --description "Production keys for the api stack"
+      # Create a bundle, named after where the credentials belong
+      agents secrets create anthropic.com --description "Anthropic/Claude credentials"
 
       # Add a keychain-backed secret (prompts for the value)
-      agents secrets add prod STRIPE_API_KEY
+      agents secrets add anthropic.com ANTHROPIC_API_KEY
 
       # Add a non-sensitive literal
-      agents secrets add prod LOG_LEVEL --value info
+      agents secrets add anthropic.com LOG_LEVEL --value info
 
       # Inject the bundle into an agent run
-      agents run claude "deploy the worker" --secrets prod
+      agents run claude "deploy the worker" --secrets anthropic.com
 
-      # See what's in the bundle (values masked); shows its prompt policy
-      agents secrets view prod
+      # See what's in the bundle (values masked); shows lock state + activity
+      agents secrets view anthropic.com
+
+      # List bundles by how often / how recently they're used
+      agents secrets list --sort freq
 
       # Stop a noisy automation bundle from prompting every run: ask once a week
-      agents secrets policy prod hold
+      agents secrets policy anthropic.com hold
 
       # Eval the bundle into your current shell
-      eval "$(agents secrets export prod --plaintext)"
+      eval "$(agents secrets export anthropic.com --plaintext)"
 
       # Push the bundle to remote machine(s) over SSH (lands as a native bundle there)
-      agents secrets export prod --host yosemite-s0 --host yosemite-s1 --force
+      agents secrets export anthropic.com --host yosemite-s0 --host yosemite-s1 --force
 
       # Run a one-off command with secrets injected
-      agents secrets exec prod -- ./deploy.sh
+      agents secrets exec anthropic.com -- ./deploy.sh
     `,
     notes: `
       Bundles are containers; secrets are the variables inside them. Keychain values
       never touch disk in plaintext. Every item is device-local and gated by Touch ID
       or device passcode; cross-machine sync is handled by 'agents secrets push/pull'.
+
+      Naming: prefer a name that says WHERE the credentials belong, suffix included —
+      a domain for websites ('anthropic.com', 'claude.ai', 'github.com') and the
+      binary suffix for desktop apps ('photoshop.app', 'slack.exe'). An agent
+      reading 'agents secrets list' should know the target from the name alone.
+      Always add a description ('create --description' or 'agents secrets describe
+      <name> ...'); bundles without one are flagged in list/view.
 
       Touch ID noise: macOS pops a prompt per bundle per process. Each bundle has
       a prompt policy, shown in the POLICY column of 'agents secrets list':
@@ -902,18 +953,21 @@ export function registerSecretsCommands(program: Command): void {
     .command('list')
     .alias('ls')
     .description('List configured secrets bundles (use --host/--hosts to list bundles on other machines over SSH)')
+    .addOption(new Option('--sort <key>', 'Sort order: name (default), used (most recently used first), or freq (most used first — from the local activity DB)').choices(['name', 'used', 'freq']))
     .option('--host <target>', 'List bundles on a remote host over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)')
     .option('--hosts <list>', 'Comma-separated hosts to list in one shot, e.g. yosemite-s0,yosemite-s1')
     .option('--device <target>', 'Alias for --host')
     .option('--devices <list>', 'Alias for --hosts')
     .option('--json', 'Emit machine-readable JSON (bundle metadata only — never secret values) instead of the table')
-    .action(async (opts: { host?: string; hosts?: string; device?: string; devices?: string; json?: boolean }) => {
+    .action(async (opts: { sort?: SecretsListSort; host?: string; hosts?: string; device?: string; devices?: string; json?: boolean }) => {
       const targets = parseHostsOption(opts);
       if (targets.length > 0) {
-        await browseRemote(targets, opts.json ? ['list', '--json'] : ['list'], false);
+        const remoteArgs = ['list', ...(opts.sort ? ['--sort', opts.sort] : [])];
+        await browseRemote(targets, opts.json ? [...remoteArgs, '--json'] : remoteArgs, false);
         return;
       }
-      const bundles = listBundles();
+      const usage = listBundleUsage();
+      const bundles = sortBundles(listBundles(), opts.sort ?? 'name', usage);
       // Cross-reference the secrets-agent so `hold` bundles that are currently
       // held can show "· held Nh". Soft-fails to no hint if the broker is down.
       const held = new Map<string, number>();
@@ -939,6 +993,7 @@ export function registerSecretsCommands(program: Command): void {
           createdAt: b.created_at ?? null,
           updatedAt: b.updated_at ?? null,
           lastUsed: b.last_used ?? null,
+          useCount: usage.get(b.name)?.useCount ?? 0,
           heldExpiresAt: held.get(b.name) ?? null,
         }));
         process.stdout.write(JSON.stringify(payload) + '\n');
@@ -952,15 +1007,24 @@ export function registerSecretsCommands(program: Command): void {
       const cols = terminalWidth();
       if (cols >= SECRETS_WIDE) {
         console.log(chalk.bold(
-          `${'NAME'.padEnd(20)} ${'KEYS'.padEnd(5)} ${'POLICY'.padEnd(18)} ${'EXPIRING'.padEnd(9)} ${'CREATED'.padEnd(9)} ${'UPDATED'.padEnd(9)} ${'USED'.padEnd(7)} DESCRIPTION`,
+          `${'NAME'.padEnd(20)} ${'KEYS'.padEnd(5)} ${'POLICY'.padEnd(18)} ${'EXPIRING'.padEnd(9)} ${'CREATED'.padEnd(9)} ${'UPDATED'.padEnd(9)} ${'USED'.padEnd(7)} ${'USES'.padEnd(5)} DESCRIPTION`,
         ));
         for (const b of bundles) {
-          console.log(renderBundleRow(b, held, cols));
+          console.log(renderBundleRow(b, held, cols, usage.get(b.name)?.useCount ?? 0));
         }
       } else {
         for (const b of bundles) {
-          console.log(renderBundleCard(b, held, cols));
+          console.log(renderBundleCard(b, held, cols, usage.get(b.name)?.useCount ?? 0));
         }
+      }
+      // Undescribed bundles are context-free to any agent that didn't create
+      // them — say so once, with the fix, instead of leaving blank cells.
+      const undescribed = bundles.filter((b) => !b.description);
+      if (undescribed.length > 0) {
+        console.log(chalk.yellow(
+          `⚠ ${undescribed.length} bundle${undescribed.length === 1 ? '' : 's'} missing a description (${undescribed.slice(0, 3).map((b) => b.name).join(', ')}${undescribed.length > 3 ? ', …' : ''}). ` +
+          `Add one: agents secrets describe <name> "what these keys are for"`,
+        ));
       }
     });
 
@@ -1004,6 +1068,18 @@ export function registerSecretsCommands(program: Command): void {
           process.exit(1);
         }
         const entries = describeBundle(bundle);
+        recordSecretActivity({ bundle: bundle.name, kind: 'view', source: 'view' });
+        // Lock state is whole-bundle (the broker holds resolved envs, never
+        // single keys) — surface it so `view` answers "is this unlocked right
+        // now?" instead of leaving the user to cross-reference `secrets status`.
+        let heldExpiresAt: number | null = null;
+        if (process.platform === 'darwin') {
+          try {
+            heldExpiresAt = (await agentStatus()).find((e) => e.name === bundle.name)?.expiresAt ?? null;
+          } catch {
+            /* broker not running — nothing is held */
+          }
+        }
         if (opts.json) {
           // Machine-readable discovery for agents. Values are null unless --reveal
           // (which still routes through the same non-TTY/plaintext gate + audit
@@ -1066,6 +1142,10 @@ export function registerSecretsCommands(program: Command): void {
               createdAt: bundle.created_at ?? null,
               updatedAt: bundle.updated_at ?? null,
               lastUsed: bundle.last_used ?? null,
+              locked: heldExpiresAt === null,
+              heldExpiresAt,
+              useCount: getBundleUsage(bundle.name)?.useCount ?? 0,
+              recentActivity: getRecentBundleEvents(bundle.name, 5),
               revealed: reveal,
               keys,
             }) + '\n',
@@ -1073,7 +1153,11 @@ export function registerSecretsCommands(program: Command): void {
           return;
         }
         console.log(chalk.bold(bundle.name));
-        if (bundle.description) console.log(chalk.gray(safePrint(bundle.description)));
+        if (bundle.description) {
+          console.log(chalk.gray(safePrint(bundle.description)));
+        } else {
+          console.log(chalk.yellow(`No description found — add one: agents secrets describe ${bundle.name} "what these keys are for"`));
+        }
         if (bundle.allow_exec) console.log(chalk.yellow('allow_exec: true'));
         if (bundle.backend === 'file') console.log(chalk.gray('backend: file (passphrase-encrypted; reads need AGENTS_SECRETS_PASSPHRASE, no Touch ID)'));
         if (bundle.backend === 'vault') console.log(chalk.gray('storage: synced (age-encrypted ~/.agents/vault.age; needs agents login)'));
@@ -1085,10 +1169,26 @@ export function registerSecretsCommands(program: Command): void {
               ? chalk.gray('policy: hold (ask once, then held for the hold window — 7d by default — until sleep / logout; screen-lock does not drop it)')
               : chalk.gray('policy: always (asks for Touch ID every time — never auto-held)'),
           );
+          console.log(
+            heldExpiresAt
+              ? chalk.green(`lock: unlocked — held by the secrets agent (expires in ${compactRemaining(heldExpiresAt)})`)
+              : chalk.gray('lock: locked — the next read will prompt per policy'),
+          );
         }
         if (bundle.created_at) console.log(chalk.gray(`created_at: ${bundle.created_at} (${humanAge(bundle.created_at)})`));
         if (bundle.updated_at) console.log(chalk.gray(`updated_at: ${bundle.updated_at} (${humanAge(bundle.updated_at)})`));
         if (bundle.last_used) console.log(chalk.gray(`last_used:  ${bundle.last_used} (${humanAge(bundle.last_used)})`));
+        // Usage history from the local activity DB (~/.agents/secrets/secrets.db)
+        // — the import/export/access trail an operator needs to answer "when did
+        // this credential last move?".
+        const usageStats = getBundleUsage(bundle.name);
+        const recentEvents = getRecentBundleEvents(bundle.name, 5);
+        if ((usageStats?.useCount ?? 0) > 0 || recentEvents.length > 0) {
+          console.log(chalk.gray(`activity:   ${usageStats?.useCount ?? 0} use${(usageStats?.useCount ?? 0) === 1 ? '' : 's'} recorded`));
+          for (const ev of recentEvents) {
+            console.log(chalk.gray(`  ${humanAge(ev.ts)}  ${ev.kind}${ev.detail ? `  ${ev.detail}` : ''}`));
+          }
+        }
         console.log();
         if (entries.length === 0) {
           console.log(chalk.gray('(no keys)'));
@@ -1256,6 +1356,16 @@ export function registerSecretsCommands(program: Command): void {
     .option('--backend <backend>', 'storage backend: keychain or file (defaults to agents.yaml secrets.backend)')
     .option('--synced', 'Store this bundle in the age-encrypted synced secrets file for user-managed cross-machine file sync')
     .option('--force', 'Overwrite an existing bundle')
+    .addHelpText('after', `
+Naming: prefer a name that says WHERE the credentials belong, suffix included —
+a domain for websites, the binary suffix for desktop apps:
+  agents secrets create anthropic.com --description "Anthropic/Claude credentials"
+  agents secrets create github.com    --description "GitHub PAT + username"
+  agents secrets create photoshop.app --description "Adobe Photoshop license key"
+  agents secrets create slack.exe     --description "Slack desktop token (Windows)"
+Always pass --description (or run 'agents secrets describe <name> ...' after);
+bundles without one are flagged in 'agents secrets list' and 'view'.
+`)
     .action(async (name: string | undefined, opts: { description?: string; allowExec?: boolean; policy?: string; tier?: string; iUnderstand?: boolean; backend?: string; synced?: boolean; force?: boolean }) => {
       try {
         const resolvedName = name ?? (await promptBundleName());
@@ -1285,6 +1395,7 @@ export function registerSecretsCommands(program: Command): void {
           vars: {},
         };
         writeBundle(bundle);
+        recordSecretActivity({ bundle: resolvedName, kind: 'create', source: 'create' });
         const policyTag = bundlePolicy(bundle) === 'hold'
           ? 'policy: hold'
           : bundlePolicy(bundle) === 'always'
@@ -1296,6 +1407,9 @@ export function registerSecretsCommands(program: Command): void {
           backend === 'vault' ? 'synced' : null,
         ].filter(Boolean);
         console.log(chalk.green(`Bundle '${resolvedName}' created (${tags.join(', ')}).`));
+        if (!opts.description) {
+          console.log(chalk.yellow(`No description found — add one: agents secrets describe ${resolvedName} "what these keys are for"`));
+        }
         if (bundlePolicy(bundle) === 'never') {
           console.log(chalk.red('Stored without biometry protection — reads are silent. Automation-only; rotate anything sensitive out of it.'));
         }
@@ -1718,6 +1832,7 @@ Examples:
           const resolvedBundleName = bundleName ?? (await pickBundleName('import into'));
           const bundle = resolveImportBundle(resolvedBundleName, opts.backend, opts.synced);
           const { added, skipped } = applyEnvToBundle(bundle, env, opts);
+          recordSecretActivity({ bundle: resolvedBundleName, kind: 'import', detail: `--from-file ${opts.fromFile}`, source: 'import' });
           console.log(chalk.green(`Imported ${added} key(s) from file${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
           return;
         }
@@ -1732,6 +1847,7 @@ Examples:
           const env = await remoteResolveEnv(target, resolvedBundleName, { osLookupName: opts.host });
           const bundle = resolveImportBundle(resolvedBundleName, opts.backend, opts.synced);
           const { added, skipped } = applyEnvToBundle(bundle, env, opts);
+          recordSecretActivity({ bundle: resolvedBundleName, kind: 'import', detail: `--from-ssh ${opts.host}`, source: 'import' });
           console.log(chalk.green(`Imported ${added} key(s) from ${opts.host}${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
           return;
         }
@@ -1773,11 +1889,13 @@ Examples:
           if (opSkipped.length) {
             console.log(chalk.yellow(`Skipped ${opSkipped.length} item(s) with no importable fields.`));
           }
+          recordSecretActivity({ bundle: resolvedBundleName, kind: 'import', detail: `--from 1password:${vault}`, source: 'import' });
           console.log(chalk.green(`Imported ${added} key(s) from 1Password vault '${vault}'${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
         } else {
           const raw = readImportDotenv(source.path);
           const pairs = parseDotenv(raw);
           const { added, skipped } = applyEnvToBundle(bundle, pairs, opts);
+          recordSecretActivity({ bundle: resolvedBundleName, kind: 'import', detail: `--from ${source.path}`, source: 'import' });
           console.log(chalk.green(`Imported ${added} key(s)${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
         }
       } catch (err) {
@@ -1828,6 +1946,7 @@ Examples:
           }
           const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: 'export --to-file', keyMode: 'storage', agentOnly: isHeadlessSecretsContext() });
           exportBundleToFile(env, opts.toFile, passphrase);
+          recordSecretActivity({ bundle: resolvedBundleName, kind: 'export', detail: `--to-file ${opts.toFile}`, source: 'export' });
           console.log(chalk.green(`Exported ${Object.keys(env).length} key(s) to ${opts.toFile}`));
           return;
         }
@@ -1939,6 +2058,7 @@ Examples:
             console.log(chalk.green(`${host} -> '${resolvedBundleName}': ${remoteMsg || `${keyCount} key(s) exported`}`));
           }
           if (failures > 0) process.exit(1);
+          recordSecretActivity({ bundle: resolvedBundleName, kind: 'export', detail: `--host ${hosts.join(',')}`, source: 'export' });
           return;
         }
 
@@ -1968,6 +2088,7 @@ Examples:
           if (created) parts.push(`${created} created`);
           if (overwritten) parts.push(`${overwritten} overwritten`);
           if (skipped) parts.push(`${skipped} skipped (already exist, pass --force)`);
+          recordSecretActivity({ bundle: resolvedBundleName, kind: 'export', detail: `--to-1password ${vault}`, source: 'export' });
           console.log(chalk.green(`Exported to 1Password vault '${vault}': ${parts.join(', ')}.`));
           return;
         }
@@ -1990,6 +2111,7 @@ Examples:
           keyMode: 'process',
           agentOnly: isHeadlessSecretsContext(),
         });
+        recordSecretActivity({ bundle: resolvedBundleName, kind: 'export', detail: `--plaintext${opts.format === 'json' ? ' --format json' : ''}`, source: 'export' });
         if (opts.format === 'json') {
           // Machine-readable form consumed by `remoteResolveEnv` over SSH.
           // Single object of injected env KEY -> value; values verbatim.

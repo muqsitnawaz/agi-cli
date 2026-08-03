@@ -2,6 +2,26 @@
 
 ## 1.20.90
 
+- **`agents secrets` now tracks bundle activity in a local DB, sorts by usage, shows
+  lock state, and flags undescribed bundles.** A small SQLite database at
+  `~/.agents/secrets/secrets.db` records metadata-only lifecycle events per bundle —
+  `create`, `import`, `export`, `view`, and `access` (every env resolution) — with
+  per-bundle `use_count` / `last_used_at` aggregates and 90-day event pruning
+  (secret values are never stored; `AGENTS_NO_USAGE_TRACK=1` disables it).
+  `agents secrets list` gains `--sort name|used|freq` (most-recently-used or
+  most-used first), a USES column, and a `useCount` field in `--json`.
+  `agents secrets view <name>` now shows the bundle's current lock state
+  (`lock: unlocked — held by the secrets agent (expires in Nh)` vs `locked`) and an
+  `activity:` section with the recent import/export/access trail, plus `locked`,
+  `heldExpiresAt`, `useCount`, and `recentActivity` in `--json`. Bundles without a
+  description are flagged with a "No description found" pointer to
+  `agents secrets describe` in `list`, `view`, and right after `create`. The
+  `secrets` help and skill now steer bundle naming toward where the credentials
+  belong — a domain for websites (`anthropic.com`, `claude.ai`), the binary suffix
+  for desktop apps (`photoshop.app`, `slack.exe`). Source:
+  `apps/cli/src/lib/secrets/activity.ts`, `apps/cli/src/commands/secrets.ts`,
+  `apps/cli/src/lib/secrets/bundles.ts`, `skills/secrets/SKILL.md`.
+
 - **`agents sessions --active` now shows one row per agent, not one per directory.**
   A live tmux agent pane whose durable identity records were missing (the common case
   once meta/pid-registry entries age out) was dropped, then re-surfaced by the ps-scan

@@ -49,14 +49,16 @@ Vault providers (1Password, AWS Secrets Manager, HashiCorp Vault) are planned fo
 Create a bundle, add your keys, then pass the bundle when running agents:
 
 ```bash
-agents secrets create prod
-agents secrets add prod STRIPE_API_KEY      # prompts for value
-agents secrets add prod DATABASE_URL
+agents secrets create stripe.com --description "Stripe live keys for the billing stack"
+agents secrets add stripe.com STRIPE_API_KEY      # prompts for value
+agents secrets add stripe.com DATABASE_URL
 
-agents run claude "deploy the api" --secrets prod
+agents run claude "deploy the api" --secrets stripe.com
 ```
 
 The secrets inject as environment variables at runtime.
+
+**Naming:** prefer a name that says *where* the credentials belong, suffix included — a domain for websites (`stripe.com`, `claude.ai`, `github.com`), the binary suffix for desktop apps (`photoshop.app`, `slack.exe`). An agent reading `agents secrets list` should know the target from the name alone. Always set a description (`create --description` or `agents secrets describe <name> ...`) — bundles without one are flagged in `list` and `view`.
 
 ## "I just generated a new API key in the browser — how do I save it?"
 
@@ -94,7 +96,7 @@ The `list` command shows secrets expiring in the next 30 days. Expired secrets s
 
 ## "I have multiple accounts on one website"
 
-For browser logins, name the bundle after the domain — `x.com`, `linkedin.com`, `reddit.com` — and group keys by account handle. One bundle per site, any number of accounts inside. Every account carries a `--note` saying when to use it:
+For browser logins, name the bundle after the domain — `x.com`, `linkedin.com`, `reddit.com` — and group keys by account handle. One bundle per site, any number of accounts inside. (Same convention for desktop apps, with the binary suffix: `photoshop.app`, `slack.exe`.) Every account carries a `--note` saying when to use it:
 
 ```bash
 agents secrets create x.com --description "X/Twitter accounts. Read key notes to pick the right one."
@@ -180,4 +182,4 @@ A `biometry`-tier bundle (the default) is never auto-held — keep high-value bu
 
 ## "What else can I do?"
 
-Run `agents secrets --help` — there's more: viewing/revealing values, rotating secrets with preserved metadata, exporting to shell, organizing by environment or service.
+Run `agents secrets --help` — there's more: viewing/revealing values (the view shows the bundle's lock state and its recent create/import/export/access activity, tracked in `~/.agents/secrets/secrets.db`), sorting `list` by `--sort used|freq`, rotating secrets with preserved metadata, exporting to shell, organizing by environment or service.

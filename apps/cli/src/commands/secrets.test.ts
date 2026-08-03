@@ -24,6 +24,54 @@ import {
   NO_BUNDLES_HELD_LINE,
 } from './secrets.js';
 import { parseDotenv, type SecretsBundle } from '../lib/secrets/bundles.js';
+import { sortBundles } from './secrets.js';
+
+describe('sortBundles', () => {
+  const bundle = (name: string, last_used?: string): SecretsBundle => ({
+    name,
+    vars: {},
+    created_at: '2026-01-01T00:00:00.000Z',
+    last_used,
+  });
+  const usage = (entries: Record<string, { useCount: number; lastUsedAt: string | null }>) =>
+    new Map(Object.entries(entries));
+
+  it('name is alphabetical (the default)', () => {
+    const sorted = sortBundles([bundle('b.com'), bundle('a.com')], 'name', new Map());
+    expect(sorted.map((b) => b.name)).toEqual(['a.com', 'b.com']);
+  });
+
+  it('used puts the most recently used first, never-used last (alphabetical within)', () => {
+    const sorted = sortBundles(
+      [bundle('z-no-use'), bundle('old.com', '2026-01-01T00:00:00.000Z'), bundle('recent.com', '2026-08-01T00:00:00.000Z'), bundle('a-no-use')],
+      'used',
+      new Map(),
+    );
+    expect(sorted.map((b) => b.name)).toEqual(['recent.com', 'old.com', 'a-no-use', 'z-no-use']);
+  });
+
+  it('used falls back to the activity DB last_used when the bundle stamp is absent', () => {
+    const sorted = sortBundles(
+      [bundle('stale.com'), bundle('fresh.com')],
+      'used',
+      usage({ 'fresh.com': { useCount: 1, lastUsedAt: '2026-08-01T00:00:00.000Z' } }),
+    );
+    expect(sorted.map((b) => b.name)).toEqual(['fresh.com', 'stale.com']);
+  });
+
+  it('freq puts the highest recorded use count first, unrecorded bundles as 0', () => {
+    const sorted = sortBundles(
+      [bundle('rare.com'), bundle('often.com'), bundle('never.com')],
+      'freq',
+      usage({
+        'often.com': { useCount: 42, lastUsedAt: null },
+        'rare.com': { useCount: 2, lastUsedAt: null },
+      }),
+    );
+    expect(sorted.map((b) => b.name)).toEqual(['often.com', 'rare.com', 'never.com']);
+  });
+});
+
 
 // On macOS, `secrets create --backend file` still stores bundle METADATA in the
 // Keychain, which requires the signed `Agents CLI.app` helper. GitHub macOS CI

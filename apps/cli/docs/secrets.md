@@ -258,8 +258,8 @@ The Windows push bridge is `buildWindowsStdinImportCommand` in
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `secrets list` / `ls` | List bundles with key count, expiry warnings, timestamps | `agents secrets list` |
-| `secrets view [name]` | Show keys in a bundle (values masked by default) | `agents secrets view prod` |
+| `secrets list` / `ls` | List bundles with key count, expiry warnings, timestamps, and recorded use count. `--sort name\|used\|freq` orders by name (default), most-recently-used, or most-used (from the local activity DB). Bundles without a description are flagged | `agents secrets list --sort freq` |
+| `secrets view [name]` | Show keys in a bundle (values masked by default), plus its prompt policy, current lock state (unlocked/held vs locked), and recent create/import/export/access activity | `agents secrets view prod` |
 | `secrets view [name] --reveal` | Print keychain values in the clear (TTY only) | `agents secrets view prod --reveal` |
 | `secrets view [name] --reveal --plaintext` | Allow `--reveal` in non-interactive shells | `agents secrets view prod --reveal --plaintext` |
 | `secrets create [name]` | Create an empty bundle | `agents secrets create prod` |
@@ -378,7 +378,28 @@ allow_exec: false                   # boolean, optional (default false)
 created_at: "2026-01-15T10:00:00Z"  # ISO 8601 UTC — set once on first write
 updated_at: "2026-05-20T14:32:00Z"  # ISO 8601 UTC — refreshed on every write
 last_used: "2026-06-01T08:00:00Z"   # ISO 8601 UTC — stamped on env resolution (throttled)
+```
 
+Bundle names should say *where* the credentials belong, suffix included — a
+domain for websites (`anthropic.com`, `claude.ai`, `github.com`) and the binary
+suffix for desktop apps (`photoshop.app`, `slack.exe`), so an agent reading
+`agents secrets list` knows the target from the name alone. Always set a
+`description` (`create --description` or `agents secrets describe <name> ...`);
+bundles without one are flagged in `list` and `view`.
+
+### Activity tracking (`~/.agents/secrets/secrets.db`)
+
+Beyond the per-bundle timestamps, the CLI keeps a small local SQLite database at
+`~/.agents/secrets/secrets.db` recording metadata-only lifecycle events per
+bundle — `create`, `import`, `export`, `view`, and `access` (every env
+resolution, i.e. a real use). Access events maintain per-bundle aggregates
+(`use_count`, `last_used_at`); events are pruned after 90 days. Secret values
+are never stored. This powers `agents secrets list --sort used|freq` (and the
+USES column / `--json` `useCount`) and the `activity:` section of
+`agents secrets view`. Set `AGENTS_NO_USAGE_TRACK=1` to disable recording.
+Source: `src/lib/secrets/activity.ts`.
+
+```yaml
 vars:
   STRIPE_API_KEY: "keychain:STRIPE_API_KEY"   # keychain-backed (default for `add`)
   GITHUB_USERNAME.personal: { value: "muqsit" } # account-suffixed variant; injects as GITHUB_USERNAME when selected

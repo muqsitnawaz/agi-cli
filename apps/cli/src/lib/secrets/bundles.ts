@@ -55,6 +55,7 @@ import {
 } from './vault.js';
 import { emit } from '../events.js';
 import { emitSecretAudit } from './audit.js';
+import { recordSecretActivity } from './activity.js';
 import { readMeta, getHelpersDir } from '../state.js';
 import { assertNameActiveInResourceProfile, filterNamesForActiveResourceProfile } from '../resource-profiles.js';
 import { agentGetSync, agentAutoLoadSync, agentGetMetaSync, agentAutoLoadMetaSync, agentEvictSync, secretsAgentAutoEnabled, secretsHoldMs } from './agent.js';
@@ -913,6 +914,9 @@ export function describeBundle(bundle: SecretsBundle): BundleEntryInfo[] {
 // Set AGENTS_NO_USAGE_TRACK=1 to disable the stamp entirely (used by tests).
 function stampLastUsed(bundle: SecretsBundle): void {
   if (process.env.AGENTS_NO_USAGE_TRACK) return;
+  // Every resolution is an access event — recorded in the activity DB even when
+  // the keychain timestamp below is throttled, so use_count stays exact.
+  recordSecretActivity({ bundle: bundle.name, kind: 'access' });
   const nowMs = Date.now();
   if (bundle.last_used) {
     const prev = Date.parse(bundle.last_used);
