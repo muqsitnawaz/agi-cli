@@ -3,8 +3,8 @@ import { buildAgentLaunchCommand } from '../core/agents';
 import { buildSessionBrowserRows, type SessionBrowserSessionRow } from '../core/sessionBrowser';
 import {
   LatestSessionBrowserRequest,
+  handleForkPickedSession,
   loadBrowsableSessions,
-  runPickedSessionFork,
   registerForkPickSessionCommand,
   runSessionBrowserPicker,
   type SessionBrowserQuickPick,
@@ -200,33 +200,33 @@ describe('session browser extension-host seam', () => {
       registered = callback;
       return {};
     }, async () => {
-      const picked = await runSessionBrowserPicker({
-        quickPick,
-        switchButton: 'switch',
-        reloadButton: 'reload',
+      await handleForkPickedSession({
+        currentSession: () => ({ sessionId: 'current-session' }),
         localMachine: 'zion',
-        chooseDevice: async () => ({ device: 'yosemite-s0', cancelled: false }),
-        loadItems: async device => {
-          const sessions = await loadBrowsableSessions(run, { device, localMachine: 'zion', limit: 60, quote });
-          return buildSessionBrowserRows(sessions, { localMachine: 'zion' })
-            .filter((row): row is SessionBrowserSessionRow => row.kind === 'session')
-            .map(row => ({ label: row.label, row }));
-        },
-        emptyItem: () => ({ label: 'empty' }),
-        errorItem: message => ({ label: message }),
-      });
-      if (!picked) throw new Error('expected a picked session');
-      await runPickedSessionFork({
-        row: picked,
-        localMachine: 'zion',
-        showError: message => { throw new Error(message); },
-        launch: async request => {
+        pickSession: () => runSessionBrowserPicker({
+          quickPick,
+          switchButton: 'switch',
+          reloadButton: 'reload',
+          localMachine: 'zion',
+          chooseDevice: async () => ({ device: 'yosemite-s0', cancelled: false }),
+          loadItems: async device => {
+            const sessions = await loadBrowsableSessions(run, { device, localMachine: 'zion', limit: 60, quote });
+            return buildSessionBrowserRows(sessions, { localMachine: 'zion' })
+              .filter((row): row is SessionBrowserSessionRow => row.kind === 'session')
+              .map(row => ({ label: row.label, row }));
+          },
+          emptyItem: () => ({ label: 'empty' }),
+          errorItem: message => ({ label: message }),
+        }),
+        resolveAgentConfig: agentKey => ({ agentKey }),
+        launchQueued: async (_config, request) => {
           queued = `${buildAgentLaunchCommand(
             request.agentKey, 'new-session', undefined, undefined, undefined,
             request.strategy, undefined, request.host, request.local, request.remoteCwd,
           )} && queue ${request.prompt}`;
-          return true;
         },
+        showError: message => { throw new Error(message); },
+        showStatus: () => {},
       });
     });
     expect(registeredId).toBe('agents.forkPickSession');

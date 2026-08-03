@@ -112,7 +112,7 @@ import {
   type BrowsableSession,
   type SessionBrowserSessionRow,
 } from '../core/sessionBrowser';
-import { loadBrowsableSessions, registerForkPickSessionCommand, runPickedSessionFork, runSessionBrowserPicker } from './sessionBrowser.vscode';
+import { handleForkPickedSession, loadBrowsableSessions, registerForkPickSessionCommand, runSessionBrowserPicker } from './sessionBrowser.vscode';
 import type { RemoteSession, RawActiveSession } from '../core/remoteSessions';
 import {
   buildResumeCandidates,
@@ -3626,7 +3626,7 @@ export async function openSingleAgentWithQueue(
   agentConfig: Omit<AgentConfig, 'count'>,
   messages: string[],
   // `cwd` is where the TERMINAL starts on this machine; `remoteCwd` is the
-  // directory the agent starts in on `host` (emitted as `agents run --cwd`), for
+  // directory the agent starts in on `host` (emitted as `agents run --remote-cwd`), for
   // a launch that has to land in a specific repo over there.
   opts?: { cwd?: string; remoteCwd?: string; mode?: AgentLaunchMode; sessionId?: string; strategy?: RunStrategy; host?: string; local?: boolean }
 ): Promise<{ terminalId: string; sessionId: string | null }> {
@@ -4879,11 +4879,11 @@ async function pickSessionToFork(
       localMachine: LOCAL_MACHINE_ID,
       loadItems: async device => {
         const sessions = await listBrowsableSessions(device, currentSessionId, currentSessionDevice);
-      const rows = buildSessionBrowserRows(sessions, {
-        localMachine: LOCAL_MACHINE_ID,
-        currentSessionId,
-        limitPerMachine: SESSION_BROWSER_LIMIT,
-      });
+        const rows = buildSessionBrowserRows(sessions, {
+          localMachine: LOCAL_MACHINE_ID,
+          currentSessionId,
+          limitPerMachine: SESSION_BROWSER_LIMIT,
+        });
         return toBrowserItems(rows);
       },
       chooseDevice: pickBrowseDevice,
@@ -4897,39 +4897,30 @@ async function pickSessionToFork(
 
 /** `Agents: Fork (Pick Session)` — browse sessions, fork the chosen one where it lives. */
 async function forkPickedSession(context: vscode.ExtensionContext): Promise<void> {
-  const activeTerminal = vscode.window.activeTerminal;
-  const entry = activeTerminal ? terminals.getByTerminal(activeTerminal) : null;
-
-  const row = await pickSessionToFork(entry?.sessionId ?? null, entry?.host);
-  if (!row) return;
-
-  const launched = await runPickedSessionFork({
-    row,
+  await handleForkPickedSession({
     localMachine: LOCAL_MACHINE_ID,
+    currentSession: () => {
+      const activeTerminal = vscode.window.activeTerminal;
+      const entry = activeTerminal ? terminals.getByTerminal(activeTerminal) : null;
+      return { sessionId: entry?.sessionId ?? null, device: entry?.host };
+    },
+    pickSession: pickSessionToFork,
     showError: message => { void vscode.window.showErrorMessage(message); },
-    launch: async request => {
-      const builtIn = BUILT_IN_AGENTS.find(a => a.key === request.agentKey);
-      if (!builtIn) {
-        vscode.window.showErrorMessage(`Cannot fork a ${row.session.agent} session — no built-in agent config for it.`);
-        return false;
-      }
-      const agentConfig = createAgentConfig(
+    resolveAgentConfig: agentKey => {
+      const builtIn = BUILT_IN_AGENTS.find(a => a.key === agentKey);
+      return builtIn ? createAgentConfig(
         context.extensionPath,
         builtIn.title,
         builtIn.command,
         builtIn.icon,
         builtIn.prefix,
-      );
-      await openSingleAgentWithQueue(context, agentConfig, [request.prompt], request);
-      return true;
+      ) : undefined;
     },
+    launchQueued: async (agentConfig, request) => {
+      await openSingleAgentWithQueue(context, agentConfig, [request.prompt], request);
+    },
+    showStatus: message => { void vscode.window.setStatusBarMessage(message, 3000); },
   });
-  if (!launched) return;
-
-  vscode.window.setStatusBarMessage(
-    `Forking ${row.session.shortId}${row.remote ? ` on ${row.machine}` : ''}`,
-    3000,
-  );
 }
 
 // Store context reference for deactivate

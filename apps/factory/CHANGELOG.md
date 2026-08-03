@@ -15,7 +15,7 @@ All notable changes to the Factory extension are documented here. Format follows
   the listing to any registered device (`agents sessions --all --json --host <device>`),
   so sessions on a fleet box are browsable from here. Picking one forks it **where it
   lives**: a row on this machine launches locally, a row on a device launches over
-  `agents run --host <device> --cwd <session cwd>`, so the sibling agent starts on the
+  `agents run --host <device> --remote-cwd <session cwd>`, so the sibling agent starts on the
   box that actually holds the transcript, in the same repo. Source:
   `apps/factory/src/core/sessionBrowser.ts`, `apps/factory/src/vscode/extension.ts`
   (`pickSessionToFork`, `forkPickedSession`, `openSingleAgentWithQueue`'s new

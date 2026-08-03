@@ -205,3 +205,43 @@ export async function runPickedSessionFork(opts: {
     remoteCwd: request.local ? undefined : opts.row.session.cwd,
   });
 }
+
+export async function handleForkPickedSession<AgentConfig>(opts: {
+  currentSession: () => { sessionId: string | null; device?: string };
+  pickSession: (sessionId: string | null, device?: string) => Promise<SessionBrowserSessionRow | null>;
+  localMachine: string;
+  resolveAgentConfig: (agentKey: string) => AgentConfig | undefined;
+  launchQueued: (config: AgentConfig, request: {
+    agentKey: string;
+    prompt: string;
+    strategy?: RunStrategy;
+    host?: string;
+    local: boolean;
+    cwd?: string;
+    remoteCwd?: string;
+  }) => Promise<void>;
+  showError: (message: string) => void;
+  showStatus: (message: string) => void;
+}): Promise<void> {
+  const current = opts.currentSession();
+  const row = await opts.pickSession(current.sessionId, current.device);
+  if (!row) return;
+
+  const launched = await runPickedSessionFork({
+    row,
+    localMachine: opts.localMachine,
+    showError: opts.showError,
+    launch: async request => {
+      const config = opts.resolveAgentConfig(request.agentKey);
+      if (!config) {
+        opts.showError(`Cannot fork a ${row.session.agent} session — no built-in agent config for it.`);
+        return false;
+      }
+      await opts.launchQueued(config, request);
+      return true;
+    },
+  });
+  if (launched) {
+    opts.showStatus(`Forking ${row.session.shortId}${row.remote ? ` on ${row.machine}` : ''}`);
+  }
+}
