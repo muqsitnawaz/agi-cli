@@ -61,3 +61,38 @@ describe('forkEdgesBySessionId', () => {
     expect(index.get('fork-1')?.forkHost).toBe('mac-mini');
   });
 });
+
+/**
+ * The store is written by the extension host and read by the webview bundle —
+ * two builds that never import each other and agree only by field name, across
+ * a JSON postMessage. Pin the round trip against the real ledger join.
+ */
+describe('an edge survives the extension -> webview hop', () => {
+  test('what recordForkEdge writes is what buildRecap pairs on', async () => {
+    const { buildRecap } = await import('../../ui/settings/components/mission-control/recapModel');
+    const written = recordForkEdge([], edge({ sourceSessionId: 'p', forkSessionId: 'f' }));
+    // JSON is what actually crosses postMessage.
+    const overTheWire = JSON.parse(JSON.stringify(written));
+
+    const now = Date.now();
+    const session = (sessionId: string, host: string) => ({
+      host, sessionId, agentType: 'claude', cwd: '/repo', project: 'agents-cli', phase: 'idle',
+      activity: '', tokPerSec: 0, waitingForInput: false, lastResponse: '', prUrl: null,
+      ticket: null, branch: 'main', sinceMs: 0, startedAtMs: now - 1_000,
+      lastActivityMs: now - 500, topic: 'fork wire', context: 'recent', cloudTaskId: '',
+      cloudProvider: '', teamName: '', pid: 0, transport: '', replyRail: '',
+      replyMuxTarget: '', replyMuxSocket: '', tmuxPane: '', durationMs: 1, costUsd: 0,
+      tokenCount: 0,
+    });
+
+    const days = buildRecap(
+      [session('f', 'yosemite-m0'), session('p', 'zion')] as never,
+      new Set<string>(),
+      now,
+      overTheWire,
+    );
+    expect(days[0]!.entries.map((e) => e.id)).toEqual(['f']);
+    expect(days[0]!.entries[0]!.forkedFrom?.id).toBe('p');
+    expect(days[0]!.entries[0]!.fork).toEqual({ sourceId: 'p', sourceHost: 'zion', forkHost: 'yosemite-m0' });
+  });
+});
