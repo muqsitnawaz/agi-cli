@@ -595,7 +595,7 @@ function auditOrigin(): AuditOrigin {
  * (e.g. cloud.dispatch's own `agent`) still wins. Read fresh per emit: the reads
  * are trivial and this stays correct when a test mutates env between calls.
  */
-interface ProvenanceFloor {
+export interface ProvenanceFloor {
   sessionId?: string;
   agent?: string;
   launchId?: string;
@@ -607,7 +607,13 @@ function cachedMachineId(): string {
   return (_machineId ??= machineId());
 }
 
-function resolveProvenance(env: NodeJS.ProcessEnv = process.env): ProvenanceFloor {
+/**
+ * Exported so write paths that bypass {@link emit} (e.g. the perf spool,
+ * which writes NDJSON directly and never goes through the audit log) can
+ * still stamp the same session/agent/launch/parent-session floor instead of
+ * re-deriving the env-var lookup ad hoc.
+ */
+export function resolveProvenance(env: NodeJS.ProcessEnv = process.env): ProvenanceFloor {
   const p: ProvenanceFloor = {};
   const sessionId = env.AGENT_SESSION_ID || env.AGENTS_SESSION_ID;
   if (sessionId) p.sessionId = sessionId;

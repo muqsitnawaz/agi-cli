@@ -207,7 +207,7 @@ import { renderWhatsNew } from './lib/whats-new.js';
 import type { AgentId } from './lib/types.js';
 import { IS_WINDOWS } from './lib/platform/index.js';
 import { getCliLaunch } from './lib/cli-entry.js';
-import { emit, emitFriction, redactArgs } from './lib/events.js';
+import { emit, emitFriction, redactArgs, resolveProvenance } from './lib/events.js';
 
 // Transparent shim delegate: the generated Windows `.cmd` shims invoke
 // `agents __shim <agent>[@version] <raw args>`. Intercept here, before commander
@@ -313,12 +313,19 @@ program.hook('postAction', (_thisCommand, actionCommand) => {
     });
     // Disposable perf warehouse — fail-soft spool append (no SQLite on this path).
     if (durationMs !== undefined && parts[0] !== 'perf') {
+      // sessionId/agent are resolvable here the same way emit() resolves them
+      // for command.start/command.end above (the provenance floor) — without
+      // this, every command.end perf sample was anonymous, unlike the audit
+      // log record right next to it.
+      const { sessionId, agent } = resolveProvenance();
       void import('./lib/perf/spool.js').then(({ recordSample }) => {
         recordSample({
           kind: 'command.end',
           label: command,
           durationMs,
           cwd: process.cwd(),
+          sessionId,
+          agent,
         });
       }).catch(() => { /* fail soft */ });
     }
