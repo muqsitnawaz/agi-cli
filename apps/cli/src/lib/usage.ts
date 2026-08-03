@@ -28,7 +28,6 @@ import {
 } from './secrets/index.js';
 import { resolveClaudeSetupToken } from './claude-account-token.js';
 import {
-  clearUsageRateLimit,
   formatBackoffRemaining,
   noteUsageRateLimited,
   usageRateLimitedUntil,
@@ -745,11 +744,6 @@ async function getClaudeUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
       }
       return { snapshot: null, error: usageRejectedError('Claude', response.status) };
     }
-
-    // A 2xx means any recorded penalty is over — drop it so the state file
-    // stays self-cleaning rather than accumulating expired entries.
-    clearUsageRateLimit('claude');
-
     const data = await response.json() as ClaudeUsageResponse;
     const windows = normalizeClaudeWindows(data);
     if (windows.length === 0) {
@@ -861,11 +855,6 @@ async function getKimiUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
       }
       return { snapshot: null, error: usageRejectedError('Kimi', response.status) };
     }
-
-    // A 2xx means any recorded penalty is over — drop it so the state file
-    // stays self-cleaning rather than accumulating expired entries.
-    clearUsageRateLimit('kimi');
-
     const data = await response.json() as KimiUsagesResponse;
     const windows = normalizeKimiWindows(data);
     if (windows.length === 0) {
@@ -1039,11 +1028,6 @@ async function getDroidUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
       }
       return { snapshot: null, error: usageRejectedError('Droid', response.status) };
     }
-
-    // A 2xx means any recorded penalty is over — drop it so the state file
-    // stays self-cleaning rather than accumulating expired entries.
-    clearUsageRateLimit('droid');
-
     const data = await response.json() as DroidBillingLimitsResponse;
     const windows = normalizeDroidWindows(data);
     if (windows.length === 0) {
@@ -2212,10 +2196,6 @@ async function getCursorUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
     }
 
     const data = (await response.json()) as CursorUsageResponse;
-    // A 2xx means any recorded penalty is over — drop it so the state file
-    // stays self-cleaning rather than accumulating expired entries.
-    clearUsageRateLimit('cursor');
-
     return {
       snapshot: {
         source: 'live',
