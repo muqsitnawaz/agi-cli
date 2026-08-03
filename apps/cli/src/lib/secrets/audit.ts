@@ -21,6 +21,7 @@
  *                         prompt-free for the grant TTL.
  */
 import { emit } from '../events.js';
+import { recordSecretUsage } from './usage-db.js';
 
 export type SecretAuditEvent = 'secrets.get' | 'secrets.unlocked';
 
@@ -91,4 +92,20 @@ export function emitSecretAudit(p: SecretAuditParams): void {
     ...(p.ttlMs !== undefined ? { ttlMs: p.ttlMs } : {}),
     ...(p.error !== undefined ? { error: p.error } : {}),
   });
+
+  // Mirror the read/unlock into the per-bundle usage DB so `secrets view` /
+  // `list` can report access frequency and recency without scanning the whole
+  // event stream. Per-bundle only — a raw `secrets get <item>` has no bundle,
+  // so it stays in the events.jsonl audit but is not counted as bundle usage.
+  if (p.bundle) {
+    recordSecretUsage({
+      bundle: p.bundle,
+      event: p.event === 'secrets.unlocked' ? 'unlock' : 'access',
+      agent,
+      host: p.host,
+      source: p.source,
+      status: p.status,
+      keyCount: p.keyCount,
+    });
+  }
 }
