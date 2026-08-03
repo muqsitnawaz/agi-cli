@@ -19,6 +19,59 @@ export interface ForkPickHostRecord {
   terminalId: string;
 }
 
+export function sessionIdForTerminal(activeJson: string, terminalId: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(activeJson);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const match = parsed.find((row): row is { terminalId: string; sessionId: string } =>
+    !!row && typeof row === 'object' &&
+    (row as { terminalId?: unknown }).terminalId === terminalId &&
+    typeof (row as { sessionId?: unknown }).sessionId === 'string');
+  return match?.sessionId.trim() || null;
+}
+
+export async function remoteForkSessionId(
+  run: (args: string, options: { maxBuffer: number; timeout: number }) => Promise<{ stdout: string }>,
+  host: string,
+  terminalId: string,
+  quote: (value: string) => string,
+): Promise<string | null> {
+  const { stdout } = await run(`sessions --active --json --host ${quote(host)}`, {
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 45_000,
+  });
+  return sessionIdForTerminal(stdout, terminalId);
+}
+
+/** Wait for a just-launched sibling to publish its session id. Local forks use
+ * the extension terminal registry; offloaded forks use that host's active feed,
+ * joined by the AGENT_TERMINAL_ID assigned before launch. */
+export async function resolveForkSessionId(opts: {
+  initialSessionId: string | null;
+  terminalId: string;
+  forkHost: string;
+  localHost: string;
+  attempts: number;
+  wait: () => Promise<void>;
+  readLocal: (terminalId: string) => string | null;
+  readRemote: (host: string, terminalId: string) => Promise<string | null>;
+}): Promise<string | null> {
+  if (opts.initialSessionId) return opts.initialSessionId;
+  const remote = opts.forkHost.trim().toLowerCase() !== opts.localHost.trim().toLowerCase();
+  for (let attempt = 0; attempt < opts.attempts; attempt++) {
+    await opts.wait();
+    const sessionId = remote
+      ? await opts.readRemote(opts.forkHost, opts.terminalId)
+      : opts.readLocal(opts.terminalId);
+    if (sessionId) return sessionId;
+  }
+  return null;
+}
+
 /** Keep the VS Code command id coupled to its executable handler. */
 export function registerForkPickHostCommand<Disposable>(
   register: (command: string, callback: () => Promise<void>) => Disposable,

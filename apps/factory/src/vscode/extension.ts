@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { BUILT_IN_AGENTS, getBuiltInByKey, getBuiltInDefByTitle, getBuiltInByPrefix, STRATEGY_LAUNCH_AGENTS, modeFlagForAgent, AgentLaunchMode, RunStrategy, buildAgentLaunchCommand, wrapNativeAgentCommand, shquote } from '../core/agents';
+import { BUILT_IN_AGENTS, getBuiltInByKey, getBuiltInDefByTitle, getBuiltInByPrefix, STRATEGY_LAUNCH_AGENTS, usesManagedAgentLaunch, modeFlagForAgent, AgentLaunchMode, RunStrategy, buildAgentLaunchCommand, wrapNativeAgentCommand, shquote } from '../core/agents';
 import { loadAutoLaunchPreferences, isAutoLaunchEnabled, isAutoLaunchPreferred } from '../core/deviceAutoLaunch';
 import { parseSpawnRequest, resolveSpawnSurface, SpawnRequest } from '../core/spawn';
 import {
@@ -105,7 +105,7 @@ import * as readiness from './terminalReadiness';
 import { resolveAlias, isAgentInstalled, checkInstalledAgentsViaCli } from '../core/agentModels';
 import { pickAgentByUsage, rankHostsByUsage, HostUsageScore } from '../core/agentUsage';
 import { buildForkSessionRequest } from '../core/forkSession';
-import { handleForkPickHost, registerForkPickHostCommand } from './forkCommands.vscode';
+import { handleForkPickHost, registerForkPickHostCommand, remoteForkSessionId, resolveForkSessionId } from './forkCommands.vscode';
 import { FORK_LINEAGE_KEY, recordForkEdge, type ForkEdge } from '../core/forkLineage';
 import {
   buildSessionBrowserRows,
@@ -3670,8 +3670,7 @@ export async function openSingleAgentWithQueue(
   // their session post-spawn. opts?.mode defaults to 'auto' (writable-but-gated)
   // inside buildAgentLaunchCommand when the caller does not supply an explicit mode.
   const targetHost = opts?.host && opts.host !== 'local' ? opts.host : undefined;
-  const LAUNCHABLE_SET: ReadonlySet<string> = new Set(['claude', 'codex', 'gemini', 'opencode', 'cursor', 'antigravity']);
-  if (agentKey && (LAUNCHABLE_SET.has(agentKey) || targetHost)) {
+  if (agentKey && usesManagedAgentLaunch(agentKey, targetHost)) {
     if (agentKey === 'claude') {
       // Claude: generate session ID at open time; others are discovered post-spawn.
       // A caller (dispatch) may pre-supply the id so it can watch that exact
@@ -4879,21 +4878,24 @@ async function recordFork(
     await context.globalState.update(FORK_LINEAGE_KEY, recordForkEdge(edges, { ...base, forkSessionId }));
   };
 
-  if (base.forkSessionId) {
-    await save(base.forkSessionId);
-    return;
-  }
-
-  for (let waited = 0; waited < FORK_ID_WAIT_MS; waited += FORK_ID_POLL_MS) {
-    await new Promise(resolve => setTimeout(resolve, FORK_ID_POLL_MS));
-    const live = terminals.getById(terminalId);
-    if (!live) break; // tab closed — record what we know and stop
-    if (live.sessionId) {
-      await save(live.sessionId);
-      return;
-    }
-  }
-  await save(null);
+  const forkSessionId = await resolveForkSessionId({
+    initialSessionId: base.forkSessionId,
+    terminalId,
+    forkHost: base.forkHost,
+    localHost: LOCAL_MACHINE_ID,
+    attempts: FORK_ID_WAIT_MS / FORK_ID_POLL_MS,
+    wait: () => new Promise(resolve => setTimeout(resolve, FORK_ID_POLL_MS)),
+    readLocal: id => terminals.getById(id)?.sessionId ?? null,
+    readRemote: async (host, id) => {
+      try {
+        const { runAgents } = await import('../core/agentsBin');
+        return remoteForkSessionId(runAgents, host, id, shquote);
+      } catch {
+        return null;
+      }
+    },
+  });
+  await save(forkSessionId);
 }
 
 // A harness that discovers its session id post-spawn writes the first transcript
