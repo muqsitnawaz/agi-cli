@@ -26,4 +26,23 @@ describe('fork command contributions', () => {
     expect(contributed('agents.forkPickSession')?.title).toBe('Agents: Fork (Pick Session)');
     expect(extensionSource).toContain("registerCommand('agents.forkPickSession'");
   });
+
+  test('Agents: Fork (Pick Host) is both contributed and registered', () => {
+    expect(contributed('agents.forkPickHost')?.title).toBe('Agents: Fork (Pick Host)');
+    expect(extensionSource).toContain("registerCommand('agents.forkPickHost'");
+  });
+
+  test('the host pick routes into the same fork, only with a device step', () => {
+    // The whole promise of the command is "same fork, different machine". Two
+    // entry points into two implementations would drift apart silently.
+    expect(extensionSource).toContain("registerCommand('agents.forkPickHost', () => forkCurrentSession(context, { pickHost: true }))");
+  });
+
+  test('a forked tab opens beside its parent, not on top of it', () => {
+    const fork = extensionSource.slice(
+      extensionSource.indexOf('async function forkCurrentSession('),
+      extensionSource.indexOf('function showForkRejection('),
+    );
+    expect(fork).toContain('viewColumn: vscode.ViewColumn.Beside');
+  });
 });
