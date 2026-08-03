@@ -134,11 +134,16 @@ export async function maybePickBrowserProfile(): Promise<boolean> {
 /**
  * The bare-`agents setup` preferences step: interactive host, then browser.
  * Runs AFTER the capability hub so it never delays the bootstrap. Never
- * throws — a cancel or a failed pick just ends the step (hub semantics).
+ * throws — a prompt cancel or a failed pick ends the step quietly and lets
+ * setup complete (the same semantics as the capability hub).
  */
 export async function runPreferencesStep(): Promise<void> {
   if (!isInteractiveTerminal()) return;
-  const pickedHost = await maybePickInteractiveHost();
-  const pickedBrowser = await maybePickBrowserProfile();
-  if (pickedHost || pickedBrowser) console.log();
+  try {
+    const pickedHost = await maybePickInteractiveHost();
+    const pickedBrowser = await maybePickBrowserProfile();
+    if (pickedHost || pickedBrowser) console.log();
+  } catch {
+    // Cancel (ctrl-c) or a picker failure — the step is optional; end it.
+  }
 }

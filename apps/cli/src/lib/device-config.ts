@@ -99,7 +99,9 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     yamlKey: 'maxAgents',
     scope: 'device',
     type: 'int',
-    description: 'Max agents allowed to run concurrently on this device.',
+    description:
+      'Cap on concurrent agents on this device. What counts toward it depends on the consumer: ' +
+      'Factory auto-launch counts device-wide running agents; teams placement counts the team’s own roster on the device.',
     validate: (v) => ((v as number) >= 1 ? null : 'agents.max-concurrent must be >= 1.'),
   },
   {
@@ -108,13 +110,6 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     scope: 'device',
     type: 'bool',
     description: 'Whether the routines scheduler (daemon) may fire on this device.',
-  },
-  {
-    name: 'hooks.enabled',
-    yamlKey: 'hooksEnabled',
-    scope: 'device',
-    type: 'bool',
-    description: 'Whether hooks fire on this device.',
   },
   {
     name: 'notes',
@@ -175,6 +170,8 @@ function deviceDocPath(device: string): string {
  * Read a device doc directly. Returns null when the file does not exist. A
  * malformed file is a hard error — silently returning null would let the next
  * write wipe the device's pins/default (same contract as the device registry).
+ * A valid-but-non-map document (a bare string, a list) is the same kind of
+ * corruption: reject it here instead of failing later with a TypeError.
  */
 function readDeviceDoc(device: string): Meta | null {
   const p = deviceDocPath(device);
@@ -185,11 +182,19 @@ function readDeviceDoc(device: string): Meta | null {
     if (err && err.code === 'ENOENT') return null;
     throw err;
   }
+  const corrupted = (detail: string) =>
+    new Error(`Device config corrupted at ${p}: ${detail}. Inspect and restore from backup.`);
+  let parsed: unknown;
   try {
-    return (yaml.parse(raw) as Meta) ?? {};
+    parsed = yaml.parse(raw);
   } catch (err: any) {
-    throw new Error(`Device config corrupted at ${p}: ${err?.message ?? err}. Inspect and restore from backup.`);
+    throw corrupted(err?.message ?? String(err));
   }
+  if (parsed === null || parsed === undefined) return {};
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw corrupted(`expected a YAML map, got ${Array.isArray(parsed) ? 'a list' : JSON.stringify(parsed)}`);
+  }
+  return parsed as Meta;
 }
 
 /** Write a device doc in place (atomic). Only ever holds device-local fields. */
@@ -215,10 +220,17 @@ function entryFromMeta(spec: ConfigKeySpec, meta: Meta): ConfigEntry {
   return { spec, value, layer: value !== undefined ? 'device' : undefined };
 }
 
+/** True when `device` names this machine (case-insensitive, mirroring
+ * `isLocalDevice` in teams/scheduler.ts) — `configure ZION` on host zion must
+ * take the self path (readMeta/updateMeta funnel), not the peer-doc path. */
+function isSelfDevice(device: string): boolean {
+  return device.toLowerCase() === machineId();
+}
+
 /** Get one config key's value and the layer that set it. */
 export function getConfigValue(name: string, opts?: ConfigTarget): ConfigEntry {
   const spec = configKeySpec(name);
-  if (spec.scope === 'device' && opts?.device && opts.device !== machineId()) {
+  if (spec.scope === 'device' && opts?.device && !isSelfDevice(opts.device)) {
     const doc = readDeviceDoc(opts.device) ?? {};
     return entryFromMeta(spec, { deviceConfig: doc.config, defaultBrowserProfile: doc.defaultBrowserProfile });
   }
@@ -288,7 +300,7 @@ function unsetInDeviceDoc(device: string, spec: ConfigKeySpec): void {
 export function setConfigValue(name: string, value: unknown, opts?: ConfigTarget): void {
   const spec = configKeySpec(name);
   assertValidValue(spec, value);
-  if (spec.scope === 'device' && opts?.device && opts.device !== machineId()) {
+  if (spec.scope === 'device' && opts?.device && !isSelfDevice(opts.device)) {
     setInDeviceDoc(opts.device, spec, value);
     return;
   }
@@ -298,7 +310,7 @@ export function setConfigValue(name: string, value: unknown, opts?: ConfigTarget
 /** Unset a config key — restores default behavior. No-op when already unset. */
 export function unsetConfigValue(name: string, opts?: ConfigTarget): void {
   const spec = configKeySpec(name);
-  if (spec.scope === 'device' && opts?.device && opts.device !== machineId()) {
+  if (spec.scope === 'device' && opts?.device && !isSelfDevice(opts.device)) {
     unsetInDeviceDoc(opts.device, spec);
     return;
   }

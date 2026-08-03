@@ -1660,7 +1660,11 @@ export function registerRoutinesCommands(program: Command): void {
       }
       const result = startDaemon();
       if (result.method === 'already-running') {
-        console.log(chalk.yellow(`Scheduler already running (PID: ${result.pid})`));
+        // Signal a reload even here: if the daemon booted while this device had
+        // scheduler.enabled=false, the reload re-evaluates the gate and boots
+        // the scheduler — a manual start heals a scheduler-less daemon.
+        signalDaemonReload();
+        console.log(chalk.yellow(`Scheduler already running (PID: ${result.pid}) — reloaded`));
       } else if (result.pid) {
         console.log(chalk.green(`Scheduler started (PID: ${result.pid})`));
       } else {

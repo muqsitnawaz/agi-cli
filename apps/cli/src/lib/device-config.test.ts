@@ -135,11 +135,11 @@ describe('device-scope keys', () => {
     fs.mkdirSync(path.dirname(devicePath('mac-mini')), { recursive: true });
     fs.writeFileSync(devicePath('mac-mini'), 'agents:\n  claude: 2.1.0\n');
 
-    setConfigValue('hooks.enabled', false, { device: 'mac-mini' });
+    setConfigValue('scheduler.enabled', false, { device: 'mac-mini' });
 
     const peer = fs.readFileSync(devicePath('mac-mini'), 'utf-8');
     expect(peer).toContain('claude: 2.1.0');
-    expect(peer).toContain('hooksEnabled: false');
+    expect(peer).toContain('schedulerEnabled: false');
   });
 });
 
@@ -199,7 +199,6 @@ describe('listConfig', () => {
     expect(Object.keys(byName).sort()).toEqual([
       'agents.max-concurrent',
       'browser.profile',
-      'hooks.enabled',
       'interactive.host',
       'notes',
       'scheduler.enabled',
@@ -257,5 +256,46 @@ describe('readMaxConcurrentCaps', () => {
   it('returns {} when no device has a cap', async () => {
     const { readMaxConcurrentCaps } = await freshModules();
     expect(readMaxConcurrentCaps(['testbox', 'ghost'])).toEqual({});
+  });
+});
+
+describe('device doc corruption contract', () => {
+  it('rejects valid-but-non-map YAML with the corruption error, not a later TypeError', async () => {
+    const { getConfigValue, setConfigValue } = await freshModules();
+    fs.mkdirSync(path.dirname(devicePath('mac-mini')), { recursive: true });
+    fs.writeFileSync(devicePath('mac-mini'), 'just a string\n');
+    expect(() => getConfigValue('agents.max-concurrent', { device: 'mac-mini' }))
+      .toThrow(/Device config corrupted.*expected a YAML map/);
+    expect(() => setConfigValue('agents.max-concurrent', 2, { device: 'mac-mini' }))
+      .toThrow(/Device config corrupted/);
+
+    fs.writeFileSync(devicePath('mac-mini'), '- a\n- b\n');
+    expect(() => getConfigValue('agents.max-concurrent', { device: 'mac-mini' }))
+      .toThrow(/Device config corrupted.*got a list/);
+  });
+
+  it('still parses a header-only (empty) doc as empty', async () => {
+    const { getConfigValue } = await freshModules();
+    fs.mkdirSync(path.dirname(devicePath('mac-mini')), { recursive: true });
+    fs.writeFileSync(devicePath('mac-mini'), '# agents-cli metadata\n');
+    expect(getConfigValue('agents.max-concurrent', { device: 'mac-mini' }).value).toBeUndefined();
+  });
+});
+
+describe('self vs peer routing is case-insensitive', () => {
+  it('targeting TESTBOX on host testbox takes the self path (no peer doc created)', async () => {
+    const { setConfigValue, getConfigValue, unsetConfigValue } = await freshModules();
+
+    setConfigValue('agents.max-concurrent', 3, { device: 'TESTBOX' });
+    // Written through the SELF path: the value is visible to a plain self read
+    // (readMeta + overlay of devices/testbox/agents.yaml). (No peer-path
+    // assertion — macOS fileystems are case-insensitive, so devices/TESTBOX and
+    // devices/testbox are the same file there.)
+    expect(getConfigValue('agents.max-concurrent').value).toBe(3);
+    expect(fs.readFileSync(devicePath('testbox'), 'utf-8')).toContain('maxAgents: 3');
+
+    expect(getConfigValue('agents.max-concurrent', { device: 'TestBox' }).value).toBe(3);
+    unsetConfigValue('agents.max-concurrent', { device: 'TESTBOX' });
+    expect(getConfigValue('agents.max-concurrent').value).toBeUndefined();
   });
 });

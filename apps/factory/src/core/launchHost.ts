@@ -99,6 +99,26 @@ export function cappedOutDevices(candidates: DeviceLoad[]): DeviceLoad[] {
   return candidates.filter((c) => c.online && isCappedOut(c));
 }
 
+// Why a pick produced no host, for the fallback warning. Caps are checked
+// FIRST: an all-capped pool is an operator boundary to raise, and reporting
+// "go sign in" (the usable-version reason) when the devices were really capped
+// sends the user down the wrong fix. Returns null when there is nothing to say
+// (the pool itself was empty — the caller already said "no online device").
+export function noHostReason(loaded: DeviceLoad[], agentKey?: string): string | null {
+  const capped = cappedOutDevices(loaded);
+  if (capped.length > 0) {
+    const detail = capped.map((c) => `${c.name} (${c.running}/${c.maxConcurrent})`).join(', ');
+    return (
+      `every online device is at its agents.max-concurrent cap: ${detail} — ` +
+      `raise with: agents devices configure <name> --max-agents N`
+    );
+  }
+  if (agentKey && loaded.length > 0) {
+    return `no fleet device has a usable ${agentKey} version (signed in and not rate-limited)`;
+  }
+  return null;
+}
+
 // Pick the best online host for a launch: drop devices with no usable version of
 // the target agent (when that signal was probed) and devices at their
 // agents.max-concurrent cap, then rank the rest by the composite hostScore

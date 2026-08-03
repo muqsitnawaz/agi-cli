@@ -22,7 +22,7 @@
     },
     "config": {
       "type": "object",
-      "description": "Typed config keys (registry: apps/cli/src/lib/device-config.ts). In the central file this holds user-scope keys (interactiveHost); in a device doc it holds device-scope keys (maxAgents, schedulerEnabled, hooksEnabled, notes). Unset keys keep default behavior.",
+      "description": "Typed config keys (registry: apps/cli/src/lib/device-config.ts). In the central file this holds user-scope keys (interactiveHost); in a device doc it holds device-scope keys (maxAgents, schedulerEnabled, notes). Unset keys keep default behavior.",
       "additionalProperties": true,
       "properties": {
         "interactiveHost": {
@@ -32,15 +32,11 @@
         "maxAgents": {
           "type": "integer",
           "minimum": 1,
-          "description": "Device scope. Max agents allowed to run concurrently (agents.max-concurrent)."
+          "description": "Device scope. Cap on concurrent agents (agents.max-concurrent). Factory auto-launch counts device-wide running agents; teams placement counts the team's roster on the device."
         },
         "schedulerEnabled": {
           "type": "boolean",
           "description": "Device scope. Whether the routines scheduler may fire here (scheduler.enabled)."
-        },
-        "hooksEnabled": {
-          "type": "boolean",
-          "description": "Device scope. Whether hooks fire here (hooks.enabled)."
         },
         "notes": {
           "type": "array",

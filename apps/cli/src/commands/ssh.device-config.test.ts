@@ -93,14 +93,13 @@ describe('devices configure', () => {
     guardedHome();
     expect(run(['devices', 'add', 'mac-mini', 'muqsit@192.0.2.2']).status).toBe(0);
 
-    const set = run(['devices', 'configure', 'mac-mini', '--max-agents', '4', '--scheduler', 'off', '--hooks', 'off']);
+    const set = run(['devices', 'configure', 'mac-mini', '--max-agents', '4', '--scheduler', 'off']);
     expect(set.status, set.stderr).toBe(0);
     expect(set.stdout).toContain('agents.max-concurrent = 4');
 
     const doc = deviceDoc('mac-mini');
     expect(doc).toContain('maxAgents: 4');
     expect(doc).toContain('schedulerEnabled: false');
-    expect(doc).toContain('hooksEnabled: false');
     // Device scope never lands in central.
     expect(centralDoc()).not.toContain('maxAgents');
 
@@ -111,7 +110,6 @@ describe('devices configure', () => {
     expect(parsed.config).toMatchObject({
       'agents.max-concurrent': 4,
       'scheduler.enabled': false,
-      'hooks.enabled': false,
     });
 
     // No flags → print current config.

@@ -3,6 +3,7 @@ import {
   pickLeastBusyDevice,
   pickBestHost,
   cappedOutDevices,
+  noHostReason,
   deviceHasUsableVersion,
   hostScore,
   PREFERENCE_BONUS,
@@ -267,4 +268,29 @@ test('pickBestHost: an all-capped pool returns null, and cappedOutDevices states
   expect(
     cappedOutDevices([...pool, { name: 'ghost', online: false, running: 9, maxConcurrent: 1 }]),
   ).toHaveLength(2);
+});
+
+test('noHostReason: an all-capped pool names the caps first, even with an agentKey', () => {
+  // Regression: caps were checked AFTER the usable-version branch, so a capped
+  // pool with no signed-in version reported "go sign in" — the wrong fix.
+  const pool: DeviceLoad[] = [
+    { name: 'mac-mini', online: true, running: 4, maxConcurrent: 4, usableVersion: false },
+  ];
+  const reason = noHostReason(pool, 'claude');
+  expect(reason).toContain('agents.max-concurrent cap: mac-mini (4/4)');
+  expect(reason).toContain('agents devices configure <name> --max-agents N');
+  expect(reason).not.toContain('usable claude version');
+});
+
+test('noHostReason: no caps + agentKey → usable-version reason', () => {
+  const pool: DeviceLoad[] = [{ name: 's0', online: true, running: 0, usableVersion: false }];
+  expect(noHostReason(pool, 'claude')).toBe(
+    'no fleet device has a usable claude version (signed in and not rate-limited)',
+  );
+});
+
+test('noHostReason: nothing to say → null', () => {
+  expect(noHostReason([], 'claude')).toBeNull();
+  // No agentKey (agent-unaware caller) keeps the legacy silent fallback.
+  expect(noHostReason([{ name: 's0', online: true, running: 0 }])).toBeNull();
 });

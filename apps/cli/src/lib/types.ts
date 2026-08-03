@@ -925,8 +925,7 @@ export interface Meta {
    * routes it to `~/.agents/devices/<machine>/agents.yaml` under the `config:`
    * key (mirroring how `defaultBrowserProfile` is routed), and
    * `overlayMachineLocal` reads it back. Holds the device-scope keys from the
-   * device-config registry (`maxAgents`, `schedulerEnabled`, `hooksEnabled`,
-   * `notes`). Per-machine by design — unset = today's behavior.
+   * device-config registry (`maxAgents`, `schedulerEnabled`, `notes`). Per-machine by design — unset = today's behavior.
    */
   deviceConfig?: Record<string, unknown>;
   /**

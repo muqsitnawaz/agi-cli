@@ -30,9 +30,12 @@ export interface PlacementTeam {
 /**
  * Optional placement inputs beyond the team + roster. `maxConcurrent` maps a
  * device name to its `agents.max-concurrent` cap (from the device doc — read
- * locally via `readMaxConcurrentCaps`, never probed over SSH). Only the
- * least-loaded AUTO-PICK (cascade step 3) honors caps: an explicit pin or a
- * pool of one is the user's own choice and is never second-guessed.
+ * locally via `readMaxConcurrentCaps`, never probed over SSH). Teams counts
+ * the team's OWN roster against the cap (device-global counting would need an
+ * SSH probe per candidate — out of the hot path; Factory auto-launch is the
+ * device-wide counter). Only the least-loaded AUTO-PICK (cascade step 3)
+ * honors caps: an explicit pin or a pool of one is the user's own choice and
+ * is never second-guessed.
  */
 export interface PlacementOptions {
   maxConcurrent?: Record<string, number>;
@@ -53,14 +56,17 @@ function isLocalDevice(device: string): boolean {
   return device.toLowerCase() === machineId();
 }
 
-/** Count RUNNING teammates per pool device. Pure. */
+/** Count RUNNING teammates per pool device. Pure. A null/empty hostName is a
+ * LOCAL teammate — it counts against the pool member that is this machine,
+ * otherwise a cap on the local device could never engage. */
 function loadByDevice(devices: string[], roster: RosterEntry[]): Map<string, number> {
   const load = new Map<string, number>();
   for (const d of devices) load.set(d, 0);
   for (const r of roster) {
-    if (!r.hostName) continue;
     if (r.status !== 'running') continue;
-    if (load.has(r.hostName)) load.set(r.hostName, (load.get(r.hostName) ?? 0) + 1);
+    const host = r.hostName ? r.hostName : devices.find((d) => isLocalDevice(d));
+    if (!host) continue; // local teammate but this machine is not in the pool
+    if (load.has(host)) load.set(host, (load.get(host) ?? 0) + 1);
   }
   return load;
 }

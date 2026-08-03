@@ -14,7 +14,7 @@ import * as git from './git.vscode';
 import { AgentSettings, hasLoginEnabled, PromptEntry, QUICK_LAUNCH_SLOT_KEYS, getQuickLaunchSlot, QuickLaunchSlot, QuickLaunchSlotKey } from '../core/settings';
 import { listRegisteredDevices, countRunningAgents, fetchDeviceStats, resolveSecret } from './deviceHealth.vscode';
 import { normalizeHost } from '../core/remoteSessions';
-import { pickBestHost, cappedOutDevices, deviceHasUsableVersion, resolveBalancePool, DeviceLoad } from '../core/launchHost';
+import { pickBestHost, cappedOutDevices, noHostReason, deviceHasUsableVersion, resolveBalancePool, DeviceLoad } from '../core/launchHost';
 import {
   LAUNCH_HEALTH_KEY,
   LAUNCH_HISTORY_KEY,
@@ -500,28 +500,14 @@ async function resolveBalancedHost(pool?: string[], agentKey?: string): Promise<
     })),
   );
   const best = pickBestHost(loaded);
-  if (!best && agentKey && loaded.length > 0) {
-    // Every online device lacks a signed-in, non-throttled version of this
-    // agent — fall back to local rather than launch into a broken agent.
-    vscode.window.showWarningMessage(
-      `No fleet device has a usable ${agentKey} version (signed in and not rate-limited) — running locally.`,
-    );
-    return undefined;
+  if (best) return best;
+  // State WHY the pool produced nothing — caps first (an operator boundary to
+  // raise), then agent usability. See noHostReason.
+  const reason = noHostReason(loaded, agentKey);
+  if (reason) {
+    vscode.window.showWarningMessage(`Balanced launch: ${reason} — running locally.`);
   }
-  if (!best) {
-    // State WHY the pool produced nothing: an all-capped pool is an operator
-    // boundary to raise, not a silent fall-through to local.
-    const capped = cappedOutDevices(loaded);
-    if (capped.length > 0) {
-      const detail = capped.map(c => `${c.name} (${c.running}/${c.maxConcurrent})`).join(', ');
-      vscode.window.showWarningMessage(
-        `Balanced launch: every online device is at its agents.max-concurrent cap: ${detail} — running locally. ` +
-        `Raise with: agents devices configure <name> --max-agents N`,
-      );
-    }
-    return undefined;
-  }
-  return best;
+  return undefined;
 }
 
 // Resolve a Quick Launch slot's Run-on target to a device name (undefined =

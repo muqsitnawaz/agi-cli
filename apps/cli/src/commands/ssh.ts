@@ -999,12 +999,11 @@ Typical workflow:
 
   const configureCmd = devicesCmd
     .command('configure <name>')
-    .description('Get or set per-device config: --max-agents, --scheduler, --hooks. Written to ~/.agents/devices/<name>/agents.yaml (works for any device — the devices/ tree syncs). Unset = default behavior.')
-    .option('--max-agents <n>', 'max agents allowed to run concurrently on this device')
-    .option('--scheduler <on|off>', 'allow the routines scheduler (daemon) to fire on this device')
-    .option('--hooks <on|off>', 'allow hooks to fire on this device')
+    .description('Get or set per-device config: --max-agents, --scheduler. Written to ~/.agents/devices/<name>/agents.yaml (works for any device — the devices/ tree syncs). Unset = default behavior.')
+    .option('--max-agents <n>', 'cap concurrent agents (Factory auto-launch counts device-wide; teams placement counts the team’s roster on the device)')
+    .option('--scheduler <on|off>', 'allow the routines scheduler (daemon) to fire on this device (takes effect on daemon reload/restart)')
     .option('--json', 'output machine-readable JSON')
-    .action(async (name: string, opts: { maxAgents?: string; scheduler?: string; hooks?: string; json?: boolean }) => {
+    .action(async (name: string, opts: { maxAgents?: string; scheduler?: string; json?: boolean }) => {
       try {
         await mustGetDevice(name);
         const parseOnOff = (flag: string, raw: string): boolean => {
@@ -1019,7 +1018,6 @@ Typical workflow:
           writes.push(['agents.max-concurrent', n]);
         }
         if (opts.scheduler !== undefined) writes.push(['scheduler.enabled', parseOnOff('scheduler', opts.scheduler)]);
-        if (opts.hooks !== undefined) writes.push(['hooks.enabled', parseOnOff('hooks', opts.hooks)]);
 
         if (writes.length > 0) {
           for (const [key, value] of writes) setConfigValue(key, value, { device: name });
@@ -1053,16 +1051,17 @@ Typical workflow:
     examples: `
       agents devices configure mac-mini --max-agents 4      # cap concurrent agents
       agents devices configure mac-mini --scheduler off     # no routines firing there
-      agents devices configure win-mini --hooks off         # no hooks on that box
       agents devices configure mac-mini                     # print its current config
       agents devices configure mac-mini --json              # machine-readable
     `,
     notes: `
       Run it on any machine for any device: the value lands in
       ~/.agents/devices/<name>/agents.yaml locally and reaches the device on the
-      next 'agents repo push/pull'. Unset keys keep today's behavior. For the
-      default browser profile use 'agents browser profiles set-default <name>';
-      for free-form text use 'agents devices note'.
+      next 'agents repo push/pull'. Unset keys keep today's behavior.
+      --scheduler takes effect when the daemon reloads or restarts on that
+      device ('agents routines start' / the reload a 'routines add' sends).
+      For the default browser profile use 'agents browser profiles set-default
+      <name>'; for free-form text use 'agents devices note'.
     `,
   });
 
@@ -1133,7 +1132,7 @@ Typical workflow:
     if (opts.json) {
       // Registry + local device docs, always fast — the Factory extension polls
       // this path. Each row carries its device-scope `config` (maxAgents,
-      // schedulerEnabled, hooksEnabled, notes, defaultBrowserProfile — set keys
+      // schedulerEnabled, notes, defaultBrowserProfile — set keys
       // only) and an `interactive` flag for the configured interactive host.
       process.stdout.write(
         JSON.stringify(

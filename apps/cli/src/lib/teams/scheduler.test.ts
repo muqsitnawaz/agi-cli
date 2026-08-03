@@ -8,6 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { resolvePlacement, pickLeastLoaded, cappedDevices, type RosterEntry } from './scheduler.js';
+import { machineId } from '../machine-id.js';
 
 const running = (hostName: string | null): RosterEntry => ({ hostName, status: 'running' });
 const done = (hostName: string | null): RosterEntry => ({ hostName, status: 'completed' });
@@ -116,5 +117,35 @@ describe('agents.max-concurrent caps (auto-pick only)', () => {
     expect(
       resolvePlacement({ devices: ['box-a'] }, null, roster, { maxConcurrent: { 'box-a': 1 } }),
     ).toEqual({ device: 'box-a' });
+  });
+});
+
+describe('local teammates count against the local pool member', () => {
+  it('a cap on the local device engages once local teammates reach it', () => {
+    const self = machineId();
+    const roster = [running(null), running(null)];
+    expect(pickLeastLoaded([self, 'box-b'], roster, { [self]: 2 })).toBe('box-b');
+  });
+
+  it('mixed local + remote pool counts both sides', () => {
+    const self = machineId();
+    // self: 1 local running, box-b: 2 remote running → self is least-loaded.
+    const roster = [running(null), running('box-b'), running('box-b')];
+    expect(pickLeastLoaded([self, 'box-b'], roster)).toBe(self);
+    expect(cappedDevices([self, 'box-b'], roster, { [self]: 1 })).toEqual([
+      { device: self, running: 1, cap: 1 },
+    ]);
+  });
+
+  it('an empty-string hostName is local too', () => {
+    const self = machineId();
+    const roster: RosterEntry[] = [{ hostName: '', status: 'running' }];
+    expect(pickLeastLoaded([self, 'box-b'], roster, { [self]: 1 })).toBe('box-b');
+  });
+
+  it('ignores a local teammate when this machine is not in the pool', () => {
+    // Today’s behavior preserved: roster entries outside the pool never skew it.
+    const roster = [running(null), running('box-b')];
+    expect(pickLeastLoaded(['box-a', 'box-b'], roster)).toBe('box-a');
   });
 });
