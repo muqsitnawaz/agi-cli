@@ -77,3 +77,35 @@ export function freshnessSuffix(fetchedAt: number, now = Date.now()): string {
   if (hours < 24) return `updated ${hours}h ago`;
   return `updated ${Math.floor(hours / 24)}d ago`;
 }
+
+/**
+ * Fold a fresh fetch into the previous snapshot. An EMPTY device list is a
+ * failed registry read (CLI timeout on a loaded box, a hiccup mid-upgrade),
+ * never a real empty fleet — so it must never overwrite rows the user saw a
+ * minute ago. Returns null when there is no confident data at all, in which
+ * case the caller persists nothing and the picker stays in cold-start mode.
+ *
+ * Keeping the previous rows also keeps their TRUE age (`previous.fetchedAt`):
+ * a failed refresh must not stamp the snapshot fresh, or the rows' age label
+ * would read "updated just now" while showing hour-old data and the staleness
+ * gate would stop retrying. (Known edge: a registry emptied down to zero
+ * devices can never clear the picker — "empty" is treated as never real.)
+ */
+export function mergeHostPickerSnapshot(
+  previous: HostPickerCache | null,
+  devices: HostPickerDevice[],
+  usage: Record<string, HostUsageScore>,
+  fetchedAt: number,
+): HostPickerCache | null {
+  if (devices.length === 0) {
+    if (previous && previous.devices.length > 0) {
+      return {
+        devices: previous.devices,
+        usage: Object.keys(usage).length > 0 ? usage : previous.usage,
+        fetchedAt: previous.fetchedAt,
+      };
+    }
+    return null;
+  }
+  return { devices, usage, fetchedAt };
+}
