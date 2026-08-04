@@ -14,6 +14,15 @@ All notable changes to the Factory extension are documented here. Format follows
   back to a generic Ctrl+C-twice exit sequence for agents without a `PREWARM_CONFIGS` entry, and the
   `openSingleAgent` launch path now tracks + polls those harnesses too so there is a persisted session to
   come back to.
+- **Removed the `Agents: Enable Tmux` / `Agents: Disable Tmux` palette commands.**
+  They were back-compat aliases that just flipped the `agents.terminalMode`
+  setting, and the extension no longer needs its own tmux "mode" toggle — the
+  `agents` CLI wraps interactive launches in tmux itself. The `agents.terminalMode`
+  setting stays (set it to `native` in settings.json if you want VS Code editor
+  terminals instead of tmux), and tmux-backed reconnect resilience is unchanged.
+  Removes the two commands, their command-palette menu entries, and the now-unused
+  `agents.tmuxEnabled` context key. Source: `src/vscode/extension.ts`,
+  `package.json`.
 
 ## [0.9.309] - 2026-08-03
 
