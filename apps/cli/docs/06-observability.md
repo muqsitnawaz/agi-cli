@@ -13,6 +13,7 @@ whose *consumer* and *axis* match your question, not whichever you remember firs
 |---|---|---|---|
 | **`events`** | **Raw unified event stream = the audit log.** Everything: secrets access, command invocations, version/skill/mcp/team ops, browser events, plus agent milestones. `--follow` to tail, `--audit` for ops-only. | `events.jsonl` + per-session `activity/*.jsonl`, merged by `readUnifiedEvents` | Audit, debugging, monitoring (human + machine) |
 | **`perf`** | **Latency rollups.** p50/p99 for hooks, CLI commands, and `agent.run` timings. Indexed SQLite — not a full scan of the audit log. | `~/.agents/.cache/perf/perf.db` (disposable) | Humans optimizing boot/run cost + `--json` |
+| **`trends`** | **Usage analytics.** Harness/model mix, tools per session, token ratios, hottest secrets/browser profiles — baked recipes over sessions + a durable resource warehouse. Distinct from quota (`agents usage`) and latency (`agents perf`). | `sessions.db` + `~/.agents/.history/analytics/usage.db` | Humans + `--json` |
 | **`feed`** | **Consolidated cross-agent surface.** Open blocks (decisions agents are waiting on) + `feed post` status updates — "what needs you / what are agents saying." | `.history/feed/*` + active sessions | Humans (operator inbox) + agents (progress) |
 | **`activity`** | **Human milestone timeline.** Recent plans / PRs / worktrees / sub-agents, plus Bash-driven deliverables (video renders, image upscales, metadata edits), newest-first — a friendly lens on the milestone tier of the event stream. Every Bash call also emits a structured `bash.executed` activity record carrying its tool category. | `activity/*.jsonl` | Human at the terminal |
 | **`output`** | **Productivity accounting.** Token burn vs shipped output (PRs, commits) across agents — the "was it worth it" axis. (`agents cost` is the pure $-and-duration sibling.) | `sessions.db` + git/gh | Human + `--json` |
@@ -35,8 +36,8 @@ agents send --channel desktop --to local --text "deploy finished" --url https://
 agents send --to owner --text "need a decision"
 agents notify --text "same as send --to owner"
 
-# Record (not deliver by itself)
-agents feed post "CHANGELOG pushed; watching CI"
+# Record (not deliver by itself) — title (subject) + body required
+agents feed post --title "CHANGELOG pushed" "Watching CI and mac-mini E2E"
 ```
 
 The write-stores: `~/.agents/events.jsonl` (operational audit), per-session
@@ -100,6 +101,32 @@ agents perf run --json          # agent.run / perf.timing labels
 **Disable:** `AGENTS_DISABLE_PERF=1`. **Redirect (tests):** `AGENTS_PERF_DB`,
 `AGENTS_PERF_SPOOL`. Retention: samples older than 30 days are pruned
 opportunistically on open. Wipe anytime: `rm -rf ~/.agents/.cache/perf`.
+
+## Usage analytics (`agents trends`)
+
+Resource and session frequency — **not** model quota (`agents usage`) and **not**
+latency (`agents perf`). Implementation: `apps/cli/src/lib/analytics/`, CLI:
+`apps/cli/src/commands/trends.ts`.
+
+```
+agents trends                     # auto recipe board (skips empty sections)
+agents trends --days 30           # window
+agents trends harness-mix --json  # one baked recipe
+agents trends query --kind secret # raw warehouse rows
+agents trends recipes             # list recipe ids
+```
+
+| Store | Path | Holds |
+|---|---|---|
+| Session index | `sessions.db` | Harness/model mix, token ratios, `tool_call_count` (Claude scan rollup) |
+| Usage warehouse | `~/.agents/.history/analytics/usage.db` | Value-free `kind`/`name`/`event` rows (secret, agent, browser, …) |
+
+Secrets usage previously lived only in `~/.agents/secrets/secrets.db`; the warehouse
+migrates those rows once (`kind=secret`) and the secrets UI keeps reading through a
+thin adapter. New emitters: secret access paths, `agents run`, browser launch/close.
+
+**Disable:** `AGENTS_NO_USAGE_TRACK=1`. **Redirect (tests):** `AGENTS_USAGE_DB`,
+`AGENTS_SESSIONS_DB`. Retention: usage events older than 90 days are pruned on open.
 
 ## Audit Event Log (`agents events`)
 
@@ -760,19 +787,23 @@ agents feed --kill <id>    # SIGTERM a local process; cloud tasks are cancelled
 
 ### Status posts (`agents feed post`) — agent progress, not “needs you”
 
-Agents can deliberately announce progress without opening a feed block. The
-command is free-text and domain-agnostic; session/agent/host/runtime/pid
-identity is stamped automatically from the process env and the per-pid launch
-registry (`lib/session/pid-registry.ts`).
+Agents can deliberately announce progress without opening a feed block. Every
+post has a **title** (short subject, ~4–5 words — the phone first line) and a
+**body** (what happened / the ask). Session/agent/host/runtime/pid identity is
+stamped automatically from the process env and the per-pid launch registry
+(`lib/session/pid-registry.ts`), and rides the outbound `{message}` footer.
+
+Em/en dashes in title or body are scrubbed to ASCII ` - ` on the way out (phone
+and plain-text clients render them poorly).
 
 ```bash
 # Inside an agents-cli run (AGENT_SESSION_ID / AGENTS_MAILBOX_DIR already set):
-agents feed post "CHANGELOG pushed; watching CI and mac-mini E2E"
-agents feed post "cover render ready" --attach ./out/cover.png   # attach an artifact
-agents feed post "ready for review" --json
+agents feed post --title "CHANGELOG pushed" "Watching CI and mac-mini E2E"
+agents feed post --title "Cover ready" "render at ./out/cover.png" --attach ./out/cover.png
+agents feed post --title "Ready for review" "PR opened, waiting on prix-cloud" --json
 
 # Escape hatch when not in a managed run:
-agents feed post "note" --session <session-id>
+agents feed post --title "Manual note" "context for the next agent" --session <session-id>
 ```
 
 Each post appends a `status.posted` **milestone** to
@@ -788,9 +819,9 @@ A plain post is history the moment it lands. `--blocked` says the agent
 scroll away:
 
 ```bash
-agents feed post "force-push denied by git-guard on PR #1749" --blocked
-agents feed post "publish or wait for review?" --blocked --option publish --option wait
-agents feed post "delete the stale preview env?" --blocked --default "leave it"
+agents feed post --title "Force-push denied" "git-guard blocked PR #1749" --blocked
+agents feed post --title "Publish or wait?" "npm now or after review" --blocked --option publish --option wait
+agents feed post --title "Delete preview env?" "stale preview still running" --blocked --default "leave it"
 ```
 
 It is a flag on the existing verb rather than a separate command: the feed is
@@ -869,12 +900,25 @@ Two rules decide whether a sink runs, both read off the post itself:
   known — the template declares what it needs, and a sink can never fire with a
   hole in its argv (`linear update  --comment …` commenting on nothing).
 
-Available placeholders: `{text}` (the post verbatim), `{ticket}`, `{project}`,
-`{agent}`, `{host}`, `{session}`, `{level}`, `{links}` (attached URLs, space
-separated), and `{message}` — a composed human line, `<project> · <text>` with the
-first attached URL on a second line. Prefer `{message}` for a messaging sink: it
-leads with the project the reader cares about and carries a clickable link,
-rather than opening with an agent name that tells them nothing.
+Available placeholders: `{title}` (short subject), `{text}` (body verbatim),
+`{ticket}`, `{project}`, `{agent}`, `{host}`, `{session}`, `{level}`, `{links}`
+(attached URLs, space separated), and `{message}` — a composed multi-line body
+for messaging sinks:
+
+```
+Title in a few words
+
+Body of what happened or the ask.
+
+Sent from <agent>/<session-chunk> on <host>
+[agents focus <id>  — blocked posts only]
+[first attached URL]
+```
+
+Prefer `{message}` for a phone/Slack/iMessage sink. Title first for a scan,
+blank line, then body, then a footer like "Sent from my iPhone" so a fleet of
+agents is attributable without crowding the ask (`agent/session` on `host`).
+`{text}` is still the bare body when a sink wants only that.
 
 **Blocked posts add four more:** `{focus}` (the literal `agents focus <id>` command
 that unblocks the session), `{class}` (`approval` | `decision`), `{cost}` (the

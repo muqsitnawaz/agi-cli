@@ -163,6 +163,7 @@ interface ClaudeSessionScan {
   durationMs?: number;
   /** ISO time of the last timestamped event — the session's last activity. */
   lastActivity?: string;
+  toolCallCount?: number;
   /**
    * Value of the JSONL `entrypoint` field on the first event that carries it.
    * 'cli' for real interactive sessions, 'sdk-cli' for team-spawned ones.
@@ -1299,6 +1300,7 @@ async function readClaudeMeta(
       topic: scan.topic,
       label,
       messageCount: scan.messageCount,
+      toolCallCount: scan.toolCallCount,
       tokenCount: scan.tokenCount,
       outputTokens: scan.outputTokens,
       costUsd: scan.costUsd,
@@ -1329,6 +1331,7 @@ async function readClaudeMeta(
       model: scan.model,
       label,
       messageCount: scan.messageCount,
+      toolCallCount: scan.toolCallCount,
       tokenCount: scan.tokenCount,
       outputTokens: scan.outputTokens,
       costUsd: scan.costUsd,
@@ -2844,6 +2847,7 @@ export interface ClaudeParseState {
   aiTitle?: string;
   entrypoint?: string;
   messageCount: number;
+  toolCallCount: number;
   tokenCount: number;
   outputTokens: number;
   sawTokenCount: boolean;
@@ -2891,6 +2895,7 @@ export function initClaudeParseState(): ClaudeParseState {
     aiTitle: undefined,
     entrypoint: undefined,
     messageCount: 0,
+    toolCallCount: 0,
     tokenCount: 0,
     outputTokens: 0,
     sawTokenCount: false,
@@ -2966,6 +2971,7 @@ export function applyClaudeLine(state: ClaudeParseState, parsed: any): void {
   if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
     for (const b of parsed.message.content) {
       if (b?.type !== 'tool_use') continue;
+      state.toolCallCount++;
       if (!state.spawnedTeam && typeof b?.input?.command === 'string') {
         const team = detectSpawnedTeam(b.input.command);
         if (team) state.spawnedTeam = team;
@@ -3130,6 +3136,7 @@ export function finalizeClaudeScan(state: ClaudeParseState): ClaudeSessionScan {
     topic: resolvedTopic,
     entrypoint: state.entrypoint,
     messageCount: state.messageCount,
+    toolCallCount: state.toolCallCount,
     tokenCount: state.sawTokenCount ? state.tokenCount : undefined,
     outputTokens: state.sawTokenCount ? state.outputTokens : undefined,
     costUsd: state.sawCost ? state.costUsd : undefined,
@@ -3205,6 +3212,7 @@ export interface ClaudeParserState {
   plan?: string;
   lastTsMs?: number;
   messageCount: number;
+  toolCallCount: number;
   tokenCount: number;
   outputTokens: number;
   sawTokenCount: boolean;
@@ -3257,6 +3265,7 @@ export function serializeClaudeParserState(state: ClaudeParseState, offset: numb
     plan: state.plan,
     lastTsMs: state.lastTsMs,
     messageCount: state.messageCount,
+    toolCallCount: state.toolCallCount,
     tokenCount: state.tokenCount,
     outputTokens: state.outputTokens,
     sawTokenCount: state.sawTokenCount,
@@ -3318,6 +3327,7 @@ export function hydrateClaudeParseState(prior: ClaudeParserState): ClaudeParseSt
     aiTitle: prior.aiTitle,
     entrypoint: prior.entrypoint,
     messageCount: prior.messageCount,
+    toolCallCount: prior.toolCallCount ?? 0,
     tokenCount: prior.tokenCount,
     outputTokens: prior.outputTokens,
     sawTokenCount: prior.sawTokenCount,

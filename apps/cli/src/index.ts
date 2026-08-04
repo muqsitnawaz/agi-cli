@@ -168,11 +168,11 @@ import {
   loadSync,
   loadLock,
   loadRefreshRules,
-  loadDrive,
   loadFactory,
   loadUsage,
   loadCost,
   loadPerf,
+  loadTrends,
   loadOutput,
   loadBudget,
   loadAlias,
@@ -312,6 +312,18 @@ program.hook('postAction', (_thisCommand, actionCommand) => {
       command,
       ...(durationMs !== undefined ? { durationMs } : {}),
     });
+    if (parts[0] === 'run') {
+      const agentName = actionCommand.args?.[0] ? String(actionCommand.args[0]).split('@')[0] : 'run';
+      void import('./lib/analytics/usage-db.js').then(({ recordUsage }) => {
+        recordUsage({
+          kind: 'agent',
+          name: agentName || 'run',
+          event: 'invoke',
+          source: 'cli',
+          meta: durationMs !== undefined ? { durationMs } : undefined,
+        });
+      }).catch(() => { /* fail soft */ });
+    }
     // Disposable perf warehouse — fail-soft spool append (no SQLite on this path).
     if (durationMs !== undefined && parts[0] !== 'perf') {
       // sessionId/agent are resolvable here the same way emit() resolves them
@@ -424,14 +436,13 @@ Diagnostics:
   perf                            Latency rollups (hooks, commands, runs) from the disposable perf warehouse
 
 Config sync:
-  drive                           Sync session history across machines via rsync
   pull                            Clone or pull the system repo at ~/.agents/.system/
   repo init --path <dir>          Scaffold your own editable repo from a template
   repo add <path|gh:user/repo>    Merge an extra repo after the system repo
   lock [--frozen]                 Write/verify agents.lock (SHA-256 of resolved resources); --frozen fails on drift
 
 Beta features:
-  beta                            Enable preview features (factory, drive, and more)
+  beta                            Enable preview features (factory and more)
 
 Automation tips:
   Pass explicit names/IDs         Avoid pickers: agents sessions <id> --markdown
@@ -1093,11 +1104,11 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadSync);
   await reg(loadLock);
   await reg(loadRefreshRules);
-  await reg(loadDrive);
   await reg(loadFactory);
   await reg(loadUsage);
   await reg(loadCost);
   await reg(loadPerf);
+  await reg(loadTrends);
   await reg(loadOutput);
   await reg(loadBudget);
   await reg(loadAlias);
