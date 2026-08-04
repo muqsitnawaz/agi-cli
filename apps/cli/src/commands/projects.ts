@@ -54,6 +54,8 @@ import {
 import { fetchLinearProjectCounts, type LinearMilestone, type LinearProjectCounts } from '../lib/linear-project-counts.js';
 import { listLinearProjects, pickLinearProject, type LinearPick, type LinearProjectLite } from '../lib/linear-projects.js';
 import { checkRepoSlug } from '../lib/project-doctor.js';
+import { readFocusAreas, type FocusArea } from '../lib/project-focus.js';
+import { formatVerdict, scheduleVerdict } from '../lib/project-schedule.js';
 import {
   buildFactoryImportCandidates,
   buildLinearImportCandidates,
@@ -317,6 +319,8 @@ function renderCard(
   nowMs: number = Date.now(),
   /** How many milestones to print. `status` shows the next one; `view` shows all. */
   milestoneLimit: number = 1,
+  /** Directories the window's work landed in, from local git. */
+  focus: FocusArea[] = [],
 ): void {
   // The headline counts LIVE agents. It used to be every matched session, which
   // read `39 agents` on a project where 19 had crashed. `planPct` used to sit
@@ -346,6 +350,14 @@ function renderCard(
   }
   for (const line of formatMilestoneLines(linear?.milestones ?? [], linear?.nextMilestone, nowMs, milestoneLimit)) {
     console.log(line);
+  }
+  // What the dates prove — never an invented "on track". See project-schedule.ts.
+  const verdict = linear?.milestones?.length ? formatVerdict(scheduleVerdict(linear.milestones, nowMs)) : undefined;
+  if (verdict) {
+    console.log(`  ${chalk.dim('schedule')} ${verdict.warn ? chalk.yellow(verdict.text) : verdict.text}`);
+  }
+  if (focus.length) {
+    console.log(`  ${chalk.dim('focus')}    ${focus.map((f) => `${f.path} ${chalk.dim(String(f.touches))}`).join(chalk.dim('  ·  '))}`);
   }
   if (r && r.tickets.length) {
     console.log(`  ${chalk.dim('tickets')}  ${r.tickets.slice(0, 8).join(' · ')}${r.tickets.length > 8 ? ' …' : ''}`);
@@ -634,6 +646,8 @@ export function registerProjectsCommands(program: Command): void {
       // log but skips the gh calls + Linear counts (both are network).
       const remote = new Map<string, ProjectRemoteSignals>();
       const linear = new Map<string, LinearProjectCounts>();
+      // Local git, no API, no rate limit — measured 0.23s over a 897-commit week.
+      const focus = new Map<string, FocusArea[]>();
       await Promise.all(
         defs.map(async (d) => {
           const skipRemote = opts.remote === false;
@@ -645,6 +659,7 @@ export function registerProjectsCommands(program: Command): void {
           ]);
           remote.set(d.name, sig);
           if (counts) linear.set(d.name, counts);
+          if (d.root) focus.set(d.name, await readFocusAreas(expandLocalHome(d.root), windowDays));
         }),
       );
 
@@ -667,6 +682,10 @@ export function registerProjectsCommands(program: Command): void {
                 byStatus: r?.byStatus ?? {},
                 members: r?.members ?? [],
                 plan: r?.plan ?? { done: 0, total: 0 },
+                schedule: linear.get(d.name)?.milestones?.length
+                  ? scheduleVerdict(linear.get(d.name)!.milestones!, nowMs)
+                  : null,
+                focus: focus.get(d.name) ?? [],
                 live: r ? liveDeadSplit(r.byStatus).live : 0,
                 dead: r ? liveDeadSplit(r.byStatus).dead : 0,
                 openPrs: r?.openPrs ?? [],
@@ -689,7 +708,7 @@ export function registerProjectsCommands(program: Command): void {
         return;
       }
       for (const d of defs) {
-        renderCard(d, roll.get(d.name), remote.get(d.name), opts.fleet ? fleetFor(d) : undefined, linear.get(d.name), nowMs);
+        renderCard(d, roll.get(d.name), remote.get(d.name), opts.fleet ? fleetFor(d) : undefined, linear.get(d.name), nowMs, 1, focus.get(d.name) ?? []);
       }
       if (fleetSkipped.length > 0) process.stdout.write(formatFleetSkippedNote(fleetSkipped));
     });
