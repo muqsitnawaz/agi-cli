@@ -354,3 +354,54 @@ printing a column of silent `0%`s:
     !          no issues are assigned to any milestone — progress against them
                cannot be measured
 ```
+
+## `focus` — what was actually worked on
+
+The card could say how many agents ran and how many PRs merged, but not *what was worked on*.
+That answer is already in the checkout: every commit names the files it touched. `focus` ranks
+the directories the window's commits landed in, three levels deep so a monorepo reads as
+`apps/cli/src` rather than `apps`:
+
+```
+focus    apps/cli/src 2138  ·  apps/cli/docs 278  ·  apps/factory/src 208  ·  apps/cli/menubar 81
+```
+
+Local `git log --name-only`, no GitHub API, no credential, no rate-limit budget — measured at
+**0.23s** over a 897-commit week, which is why it runs unconditionally rather than behind a flag.
+It reads the local ref and never fetches: a status command must not mutate the repo it describes,
+so the answer is as fresh as your last fetch.
+
+**Changelog fragments and lockfiles are excluded from the ranking, not just the display.** This
+repo files one fragment per PR, so `.changelog` otherwise ranks second by raw file-touches —
+presenting PR count as an engineering focus area.
+
+## `schedule` — only what the dates prove
+
+```
+schedule 3 milestones, no issues filed against any — progress is not measurable
+schedule Beta cut overdue by 6 days
+schedule GA due in 9 days
+```
+
+| Verdict | Fires when |
+| --- | --- |
+| `declared` | a human posted a Linear project health update — relayed and attributed (`per Linear: atRisk`) |
+| `overdue` | a milestone's `targetDate` has passed and it is unfinished |
+| `untracked` | milestones exist but no issue is filed against any of them |
+| `due-soon` | the next dated milestone lands within 14 days |
+| `scheduled` | dated milestones ahead, none due soon, work is filed |
+| `no-dates` | milestones exist, none carries a date |
+| `none` | the project declares no milestones — the line is omitted entirely |
+
+**There is deliberately no `on-track` or `at-risk`.** Producing one requires either project
+start+target dates to interpolate an expected-progress line, or a scope-history series to
+extrapolate a finish date. Probed against a live workspace, every one of those inputs is empty:
+
+```
+health: null       startDate: null        targetDate: null
+scopeHistory: []   completedScopeHistory: []   inProgressScopeHistory: []
+```
+
+So the chip would be invented. A blank is bad; a confident wrong answer that gets trusted is
+worse, and it is unfalsifiable from the card. The union has no such member, so it cannot be
+produced by accident later either.
