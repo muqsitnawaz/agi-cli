@@ -154,6 +154,7 @@ Fields:
 | `spawnedTeam` | The team this session CREATED, read off its `agents teams create/add` command at scan time | `null` for the ~everything that never ran one; the inverse of `isTeamOrigin` |
 | `teamOrigin` | For a teammate: its `{team, handle, mode, parentSessionId}`, read from the teammate's `meta.json` | `null` for a non-teammate; `team`/`parentSessionId` absent on records predating their capture, or once the 7-day teams cleanup removes the dir |
 | `plan` | Last `ExitPlanMode` plan markdown (Claude sessions only) | `null` when the session never entered plan-review |
+| `usedBrowser` / `usedComputer` | A sessionId-scoped read of `~/.agents/events.jsonl` for `browser.navigate`/`browser.screenshot` / `computer.action` (never a transcript re-scan) | `undefined` on a legacy row this scanner hasn't computed the field for yet — distinct from a real, computed `false` |
 
 ### Two time fields per row
 
@@ -296,6 +297,12 @@ agents sessions 2026-07-21T10-30-00-000Z
 # Sort the list by cost or duration (default: recent)
 agents sessions --sort cost --limit 10
 agents sessions --sort duration --all
+
+# Only sessions that invoked a skill, or that used anything owned by a plugin —
+# a subquery join against session_resource_usage (see below). --skill matches a
+# bare name or a namespaced plugin skill's short name (design finds rush:design).
+agents sessions --skill design --all
+agents sessions --plugin rush --all
 
 # Replay one session as markdown
 agents sessions c07ec355 --markdown
@@ -911,6 +918,43 @@ Resolution is memoized once per process, so the ~90s daemon loop never re-prompt
 biometry-gated keychain. `agents sessions sync --setup` provisions the bundle end to end,
 generating the encryption key if absent.
 
+## Skill/plugin/slash-command usage (`session_resource_usage`)
+
+A separate table, `session_resource_usage(session_id, kind, name, plugin,
+source, repo_root, snapshot_sha, count)`, records every skill and
+slash-command a session invoked. `kind` is `'skill'` (from that harness's
+skill-invocation tool call — Claude and Kimi both name it `Skill`; see
+`SKILL_TOOL_NAME_BY_AGENT` in [`src/lib/session/highlights.ts`](../src/lib/session/highlights.ts))
+or `'command'` (a slash command — either the user typing one, captured from
+Claude's `<command-name>` wrapper, or the model invoking one via the
+`SlashCommand` tool; see `SessionEvent.slashCommand`). `name` is the bare
+name without a leading slash, `plugin:name` for a plugin-owned skill/command
+(e.g. `rush:design`).
+
+`plugin`/`source`/`repo_root`/`snapshot_sha` are resolved at write time
+against the *currently installed* resource — `resolveResource()` for a flat
+(non-namespaced) resource, or the discovered plugin list for a namespaced
+one (a plugin's own `skills/`/`commands/` dirs aren't visible to
+`resolveResource()`'s flat scan). A skill/command renamed or uninstalled
+since the session ran leaves these NULL rather than a stale guess; the row
+(name + count) is written regardless. `repo_root`/`snapshot_sha` are the
+same provenance fields `ResolvedResource`/`DiscoveredPlugin` carry —
+"which DotAgents repo, which git commit" (see
+[`src/lib/resources.ts`](../src/lib/resources.ts)/[`src/lib/plugins.ts`](../src/lib/plugins.ts)).
+
+`agents sessions --skill <name>` / `--plugin <name>` query this table (see
+[Query Flags](#query-flags)); `--skill` matches a bare name or a namespaced
+plugin skill's short name.
+
+**Known gap:** claude/codex sessions found through the routine local batch
+scan (`upsertSessionsBatch`) get their tallies from an incremental
+accumulator threaded through the resumable-parse continuation
+(`ClaudeParseState.skillEvents`/`slashCommandEvents`) rather than a
+transcript re-scan, to avoid undoing that optimization's whole point. Every
+other harness, and any claude/codex session upserted outside the batch path
+(cross-machine fan-in, forks), derives the tallies directly from the parsed
+transcript.
+
 ## Schema Version
 
 Schema version is tracked by the `SCHEMA_VERSION` constant in
@@ -919,7 +963,10 @@ of truth — don't hardcode the number here). Migrations run on connection
 open; old DBs get upgraded in place. The `meta` table tracks `schema_version`.
 Later migrations added, among others, `cost_usd` / `duration_ms` (pricing), the
 work-signal columns `pr_url` / `pr_number` / `worktree_slug` / `ticket_id`, the
-`plan` markdown, `output_tokens`, `is_team_origin`, and `spawned_team`. A migration that changes how
+`plan` markdown, `output_tokens`, `is_team_origin`, `spawned_team`, the
+`used_browser`/`used_computer` columns (NULL for a legacy row this scanner
+hasn't computed the field for yet, never a `false` default), and the
+`session_resource_usage` table. A migration that changes how
 a column is derived forces a full rescan so every existing session is re-derived
 (as the pricing columns once did).
 
