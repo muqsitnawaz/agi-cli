@@ -123,7 +123,20 @@ const CLAUDE_SCOPES = [
   'user:file_upload',
 ];
 const CLAUDE_KEYCHAIN_SERVICE = 'Claude Code-credentials';
-const getClaudeUsageCachePath = () => path.join(getCacheDir(), 'claude-usage.json');
+
+/**
+ * Test seam for the usage cache path, mirroring `setUsageBackoffDirForTest`.
+ * `getCacheDir()` resolves from a module-level constant captured at import, so
+ * overriding `HOME` in a test does NOT redirect this cache — it would write into
+ * the developer's real `~/.agents/.cache/`. Point it at a tmpdir instead.
+ */
+let claudeUsageCachePathOverride: string | null = null;
+export function setClaudeUsageCachePathForTest(cachePath: string | null): string | null {
+  const prev = claudeUsageCachePathOverride;
+  claudeUsageCachePathOverride = cachePath;
+  return prev;
+}
+const getClaudeUsageCachePath = () => claudeUsageCachePathOverride ?? path.join(getCacheDir(), 'claude-usage.json');
 const CACHED_CLAUDE_USAGE_SOURCE_LABEL = 'last seen live account data';
 
 const KIMI_USAGES_URL = 'https://api.kimi.com/coding/v1/usages';
@@ -349,6 +362,16 @@ export function agentReportsUsage(agentId: AgentId): boolean {
 }
 
 /**
+ * Whether an agent's usage source makes a live NETWORK call (Claude/Kimi/Droid/
+ * Cursor/Antigravity) versus reading local session logs (Codex/Grok). Only the
+ * networked ones go through the on-disk cache, and only they need the daemon's
+ * background refresher to keep that cache warm for the routing hot path.
+ */
+export function agentUsesNetworkUsage(agentId: AgentId): boolean {
+  return getUsageSource(agentId)?.network === true;
+}
+
+/**
  * Concurrent live usage fetches for a single `agents view` / rotation pass.
  * High enough to finish a multi-account refresh in one round-trip window; low
  * enough that a cold cache of 10+ accounts cannot open 10+ HTTP calls at once
@@ -382,7 +405,7 @@ const USAGE_CACHE_SWR_MS = 24 * 60 * 60 * 1000; // 24 hours — beyond this, blo
  */
 export async function getUsageInfoByIdentity(
   inputs: UsageIdentityInput[],
-  opts?: { forceRefresh?: boolean; maxAgeMs?: number }
+  opts?: { forceRefresh?: boolean; maxAgeMs?: number; readOnly?: boolean }
 ): Promise<{
   canonicalByUsageKey: Map<string, AccountInfo>;
   usageByKey: Map<string, UsageInfo>;
@@ -449,10 +472,11 @@ let bgRefreshActive = 0;
  */
 export async function getUsageInfoForIdentity(
   input: UsageIdentityInput,
-  opts?: { forceRefresh?: boolean; maxAgeMs?: number }
+  opts?: { forceRefresh?: boolean; maxAgeMs?: number; readOnly?: boolean }
 ): Promise<UsageInfo> {
   const usageKey = getUsageLookupKey(input.info);
   const forceRefresh = opts?.forceRefresh === true;
+  const readOnly = opts?.readOnly === true;
 
   // Agents whose registered usage source makes a live network call go
   // through the stale-while-revalidate cache below so `agents run`/`agents view`
@@ -472,6 +496,22 @@ export async function getUsageInfoForIdentity(
 
   const cached = readClaudeUsageCache(usageKey);
   const ageMs = cached?.capturedAt ? Date.now() - cached.capturedAt.getTime() : Infinity;
+
+  // `readOnly` (the `agents run` routing hot path): serve the cache and NEVER
+  // touch the network — not even a background refresh. `collectRunCandidates`
+  // used to pass a 5-minute `maxAgeMs`, which made a snapshot older than that
+  // fall through to the blocking live fetch below (getUsageInfo → provider HTTP),
+  // adding one round trip per account to `agents run` cold-start on a box whose
+  // cache had gone stale. The daemon now owns keeping this cache fresh
+  // (`runUsageRefresh`, adaptive + rate-capped), so the router only ever reads
+  // it. A stale-or-absent snapshot is handled downstream by the router's own
+  // freshness guard (`isUsageVerified` in rotate.ts), which routes around a
+  // number it can't confirm rather than trusting an old one — so returning a
+  // stale snapshot here is safe, and an absent one reports `'stale'`.
+  if (readOnly) {
+    if (cached) return { snapshot: cached, error: null };
+    return { snapshot: null, error: 'stale' };
+  }
 
   // `--refresh` (forceRefresh) skips both cache short-circuits and blocks on a
   // live fetch below, so `agents view --refresh` repopulates every account we can
@@ -719,6 +759,65 @@ export function deriveUsageStatusFromSnapshot(
   const windows = blocking.length > 0 ? blocking : snapshot.windows;
   const maxUsed = Math.max(...windows.map((window) => window.usedPercent));
   return maxUsed >= 100 ? 'rate_limited' : 'available';
+}
+
+/** A prior sample of one window's utilization, for burn-rate projection. */
+export interface UsagePriorSample {
+  /** Epoch ms the prior snapshot was captured. */
+  capturedAt: number;
+  /** The session window's `usedPercent` in that prior snapshot. */
+  usedPercent: number;
+}
+
+/**
+ * An account's throttle state PLUS how long until it caps, projected from the
+ * burn rate on its 5-hour `session` window — the window that throttles the next
+ * request soonest. `deriveUsageStatusFromSnapshot` answers only "maxed right
+ * now (100%)?"; this answers "and how close is it getting?", so routing can
+ * deprioritize an account burning toward its cap before it actually hits it,
+ * instead of treating 85%-and-climbing the same as 85%-and-idle.
+ *
+ * `minutesToLimit`:
+ *   - `0`      — already rate-limited (a blocking window at 100%).
+ *   - `n > 0`  — projected minutes until the session window reaches 100%, from
+ *                `(100 - used) / burnRatePerMinute`, where the burn rate is
+ *                measured between `prev` and this snapshot.
+ *   - `null`   — unknown: no snapshot, no session window, no prior sample, or
+ *                usage flat/falling since `prev` (a reset or an idle account is
+ *                not "projected to cap", so it is NOT deprioritized).
+ *
+ * Pure: the daemon's refresher supplies `prev` from the last snapshot it stored
+ * (`usage-refresh.ts`); the routing hot path reads the daemon-computed result
+ * from the headroom cache rather than recomputing (it has no `prev`).
+ */
+export interface UsageHeadroom {
+  status: 'available' | 'rate_limited' | null;
+  minutesToLimit: number | null;
+}
+
+export function deriveUsageHeadroom(
+  snapshot: UsageSnapshot | null | undefined,
+  prev?: UsagePriorSample | null,
+): UsageHeadroom {
+  const status = deriveUsageStatusFromSnapshot(snapshot);
+  if (!snapshot || status === null) return { status, minutesToLimit: null };
+  if (status === 'rate_limited') return { status, minutesToLimit: 0 };
+
+  const session = snapshot.windows.find((window) => window.key === 'session');
+  const capturedAt = snapshot.capturedAt?.getTime();
+  if (!session || capturedAt === undefined || !prev) {
+    return { status, minutesToLimit: null };
+  }
+
+  const deltaPercent = session.usedPercent - prev.usedPercent;
+  const deltaMinutes = (capturedAt - prev.capturedAt) / 60_000;
+  // Flat, falling (a window reset), or a zero/negative time delta: no live burn
+  // to project from, so this account is not "projected to cap".
+  if (deltaPercent <= 0 || deltaMinutes <= 0) return { status, minutesToLimit: null };
+
+  const burnPerMinute = deltaPercent / deltaMinutes;
+  const remaining = Math.max(0, 100 - session.usedPercent);
+  return { status, minutesToLimit: remaining / burnPerMinute };
 }
 
 /**
