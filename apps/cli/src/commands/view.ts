@@ -1199,6 +1199,18 @@ async function showAgentResources(
 export interface ViewJsonVersion {
   version: string;
   isDefault: boolean;
+  /**
+   * Installed with `--isolated`. The human view has shown this since the isolated
+   * tag landed, but JSON carried no signal at all, so tooling could not tell a
+   * sandboxed copy from one that owns the user's launcher and real config.
+   */
+  isolated: boolean;
+  /**
+   * The isolated copy a bare `agents run <agent>` resolves to. Separate from
+   * `isDefault`, which is the GLOBAL default an isolated version can never be —
+   * reporting only `isDefault: false` hid the fact that this one is selected.
+   */
+  isIsolatedDefault: boolean;
   signedIn: boolean;
   email: string | null;
   // Opaque account identifier when the credential exposes one but no email
@@ -1478,6 +1490,8 @@ async function collectAgentsJson(filterAgentId?: AgentId, resourceSections?: Set
     const entry: ViewJsonVersion = {
       version,
       isDefault: version === globalDefault,
+      isolated: isVersionIsolated(agentId, version),
+      isIsolatedDefault: getIsolatedDefault(agentId) === version,
       signedIn: info.signedIn,
       email: info.email,
       accountId: info.accountId,
