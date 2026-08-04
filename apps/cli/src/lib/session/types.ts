@@ -211,6 +211,20 @@ export interface SessionMeta {
   /** Most-recent unique directories changed or used as a shell working directory. */
   recentDirectoriesTouched?: string[];
   /**
+   * Skills invoked during the session (structurally identical to
+   * session/highlights.ts's SkillUse — declared inline here rather than
+   * imported, to avoid a circular import: highlights.ts imports SessionEvent
+   * from this file). Populated by discover.ts's incremental Claude
+   * accumulator (ClaudeParseState.skillEvents, run through extractSkills at
+   * finalize) so session/db.ts's upsertSessionsBatch can write
+   * session_resource_usage rows WITHOUT re-parsing the whole transcript —
+   * the same reason meta.todos/recentDirectoriesTouched are pre-computed by
+   * the caller for claude/codex instead of left to db.ts's re-parse path.
+   */
+  skillsUsed?: Array<{ name: string; count: number }>;
+  /** Sibling of {@link skillsUsed} for slash-command invocations (SessionEvent.slashCommand). */
+  slashCommandsUsed?: Array<{ name: string; count: number }>;
+  /**
    * Whether this session emitted at least one `browser.navigate` /
    * `browser.screenshot` event, computed at scan time from a sessionId-scoped
    * read of the events log (events.ts `query({ sessionId })`) rather than a

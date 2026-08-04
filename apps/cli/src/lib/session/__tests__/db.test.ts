@@ -288,6 +288,30 @@ describe('session_resource_usage — skill/slash-command usage joined against re
     upsertSession(meta, '', { fileMtimeMs: 1, fileSize: fs.statSync(filePath).size });
     expect(rowsFor('res-none')).toEqual([]);
   });
+
+  it('querySessions({ skill }) matches a bare name and a namespaced plugin skill by its short name (#12)', () => {
+    // Reuses the sessions seeded by the earlier tests in this block:
+    // res-skill-user used 'teams', res-skill-plugin used 'rush:design'.
+    const byTeams = querySessions({ skill: 'teams' });
+    expect(byTeams.map((s) => s.id)).toContain('res-skill-user');
+    expect(byTeams.map((s) => s.id)).not.toContain('res-skill-plugin');
+
+    // '--skill design' finds the namespaced 'rush:design' via the short-name fallback.
+    const byDesign = querySessions({ skill: 'design' });
+    expect(byDesign.map((s) => s.id)).toContain('res-skill-plugin');
+    expect(byDesign.map((s) => s.id)).not.toContain('res-skill-user');
+
+    expect(querySessions({ skill: 'no-such-skill-anywhere' })).toEqual([]);
+  });
+
+  it('querySessions({ plugin }) matches sessions that used ANY resource owned by that plugin (#12)', () => {
+    const byPlugin = querySessions({ plugin: 'rush' });
+    expect(byPlugin.map((s) => s.id)).toContain('res-skill-plugin');
+    // res-command-user used a plain (non-plugin) command — must not match.
+    expect(byPlugin.map((s) => s.id)).not.toContain('res-command-user');
+
+    expect(querySessions({ plugin: 'no-such-plugin' })).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------

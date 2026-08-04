@@ -27,7 +27,8 @@ import { walkForFilesWithStat } from '../fs-walk.js';
 import { getConfigSymlinkVersion } from '../shims.js';
 import { SESSION_AGENTS } from './types.js';
 import { deriveShortId } from './short-id.js';
-import { extractSessionTopic } from './prompt.js';
+import { extractSessionTopic, extractSlashCommandName, extractSlashCommandFromToolInput } from './prompt.js';
+import { isSkillInvocation, extractSkills, extractSlashCommands } from './highlights.js';
 import { parseAntigravity, parseCursor } from './parse.js';
 import { extractPrUrl, detectWorktree, detectTicket, isPrCreateCommand, detectSpawnedTeam, isTicketCreateTool, extractCreatedTicket, extractRecentDirectoriesTouched, extractTodoProgressFromEvents } from './state.js';
 import { costOfUsage } from '../pricing/index.js';
@@ -131,6 +132,10 @@ export interface DiscoverOptions {
   sortBy?: 'timestamp' | 'cost' | 'duration';
   /** Called as each agent makes parsing progress. Totals count only files that need re-parsing (cache misses). */
   onProgress?: (progress: ScanProgress) => void;
+  /** Only sessions that invoked this skill (#12) — see QueryOptions.skill in session/db.ts. */
+  skill?: string;
+  /** Only sessions that used a skill/command owned by this plugin (#12) — see QueryOptions.plugin. */
+  plugin?: string;
 }
 
 /** Progress report emitted during incremental scanning. */
@@ -178,6 +183,10 @@ interface ClaudeSessionScan {
   plan?: string;
   todos?: TodoProgress;
   recentDirectoriesTouched?: string[];
+  /** Skills invoked (#12) — see SessionMeta.skillsUsed. */
+  skillsUsed?: Array<{ name: string; count: number }>;
+  /** Slash commands invoked (#12) — see SessionMeta.slashCommandsUsed. */
+  slashCommandsUsed?: Array<{ name: string; count: number }>;
 }
 
 /** Lightweight metadata extracted from a Codex JSONL file during incremental scan. */
@@ -483,6 +492,8 @@ function buildQueryOptions(
     onlyTeamOrigin: options?.onlyTeamOrigin,
     origin: options?.origin,
     sortBy: options?.sortBy,
+    skill: options?.skill,
+    plugin: options?.plugin,
   };
 }
 
@@ -1302,6 +1313,8 @@ async function readClaudeMeta(
       plan: scan.plan,
       todos: scan.todos,
       recentDirectoriesTouched: scan.recentDirectoriesTouched,
+      skillsUsed: scan.skillsUsed,
+      slashCommandsUsed: scan.slashCommandsUsed,
     };
   } else {
     const stat = safeStatSync(filePath);
@@ -1331,6 +1344,8 @@ async function readClaudeMeta(
       plan: scan.plan,
       todos: scan.todos,
       recentDirectoriesTouched: scan.recentDirectoriesTouched,
+      skillsUsed: scan.skillsUsed,
+      slashCommandsUsed: scan.slashCommandsUsed,
     };
   }
 
@@ -2856,6 +2871,11 @@ export interface ClaudeParseState {
   plan?: string;
   checklistEvents: SessionEvent[];
   recentDirectoriesTouched: string[];
+  /** Skill-invocation tool_use events, held for extractSkills() at finalize (#12). */
+  skillEvents: SessionEvent[];
+  /** Slash-command events (user-typed <command-name> wrapper OR a SlashCommand
+   *  tool_use), held for extractSlashCommands() at finalize (#12). */
+  slashCommandEvents: SessionEvent[];
 }
 
 /** Zero-value accumulator for a fresh (from-byte-0) Claude parse. */
@@ -2889,6 +2909,8 @@ export function initClaudeParseState(): ClaudeParseState {
     plan: undefined,
     checklistEvents: [],
     recentDirectoriesTouched: [],
+    skillEvents: [],
+    slashCommandEvents: [],
   };
 }
 
@@ -2896,10 +2918,24 @@ const CHECKLIST_TOOLS = new Set(['TodoWrite', 'todo_write', 'update_plan', 'Task
 const DIRECTORY_TOOLS = new Set(['Edit', 'Write', 'edit_file', 'write_file', 'create_file', 'edit', 'write', 'Bash', 'exec_command', 'run_shell_command', 'shell', 'Execute']);
 
 function foldDerivedToolState(
-  state: { checklistEvents: SessionEvent[]; recentDirectoriesTouched: string[]; cwd?: string },
+  state: {
+    checklistEvents: SessionEvent[];
+    recentDirectoriesTouched: string[];
+    skillEvents: SessionEvent[];
+    slashCommandEvents: SessionEvent[];
+    cwd?: string;
+  },
   event: SessionEvent,
 ): void {
   if (CHECKLIST_TOOLS.has(event.tool ?? '')) state.checklistEvents.push(event);
+  // #12: skill/slash-command usage, held here instead of re-parsed later — the
+  // same reason checklistEvents is folded incrementally rather than recomputed
+  // from a full re-parse (see session/db.ts's writeResourceUsage doc comment).
+  if (isSkillInvocation(event)) state.skillEvents.push(event);
+  if (event.tool === 'SlashCommand') {
+    const slashCommand = extractSlashCommandFromToolInput(event.args);
+    if (slashCommand) state.slashCommandEvents.push({ ...event, slashCommand });
+  }
   if (!DIRECTORY_TOOLS.has(event.tool ?? '')) return;
   const next = extractRecentDirectoriesTouched([event], state.cwd);
   for (const dir of next ?? []) {
@@ -3017,6 +3053,15 @@ export function applyClaudeLine(state: ClaudeParseState, parsed: any): void {
       state.messageCount++;
       state.userTexts.push(text);
       if (!state.topic) state.topic = extractSessionTopic(text);
+      // #12: the USER typing a slash command — Claude injects a <command-name>
+      // wrapper as the message content (extractClaudeUserText returns it
+      // un-stripped; isLocalCommandMessage only filters bash-echo wrappers).
+      const slashCommand = extractSlashCommandName(text);
+      if (slashCommand) {
+        state.slashCommandEvents.push({
+          type: 'message', agent: 'claude', timestamp: parsed.timestamp || '', role: 'user', content: text, slashCommand,
+        });
+      }
     }
     return;
   }
@@ -3100,6 +3145,8 @@ export function finalizeClaudeScan(state: ClaudeParseState): ClaudeSessionScan {
     plan: state.plan,
     todos: extractTodoProgressFromEvents(state.checklistEvents),
     recentDirectoriesTouched: state.recentDirectoriesTouched.length ? state.recentDirectoriesTouched : undefined,
+    skillsUsed: state.skillEvents.length ? extractSkills(state.skillEvents) : undefined,
+    slashCommandsUsed: state.slashCommandEvents.length ? extractSlashCommands(state.slashCommandEvents) : undefined,
   };
 }
 
@@ -3175,6 +3222,9 @@ export interface ClaudeParserState {
   contentText?: string;
   checklistEvents: SessionEvent[];
   recentDirectoriesTouched: string[];
+  /** #12: see ClaudeParseState.skillEvents/slashCommandEvents. */
+  skillEvents: SessionEvent[];
+  slashCommandEvents: SessionEvent[];
 }
 
 /** Cap on the FIFO window of recent assistant ids persisted in the continuation. */
@@ -3228,6 +3278,8 @@ export function serializeClaudeParserState(state: ClaudeParseState, offset: numb
     contentText: state.userTexts.length > 0 ? state.userTexts.join('\n') : undefined,
     checklistEvents: state.checklistEvents,
     recentDirectoriesTouched: state.recentDirectoriesTouched,
+    skillEvents: state.skillEvents,
+    slashCommandEvents: state.slashCommandEvents,
   };
 }
 
@@ -3284,6 +3336,8 @@ export function hydrateClaudeParseState(prior: ClaudeParserState): ClaudeParseSt
     plan: prior.plan,
     checklistEvents: prior.checklistEvents ?? [],
     recentDirectoriesTouched: prior.recentDirectoriesTouched ?? [],
+    skillEvents: prior.skillEvents ?? [],
+    slashCommandEvents: prior.slashCommandEvents ?? [],
   };
 }
 
@@ -3516,6 +3570,12 @@ export interface CodexParseState {
   spawnedTeam?: string;
   checklistEvents: SessionEvent[];
   recentDirectoriesTouched: string[];
+  /** #12: see ClaudeParseState.skillEvents. Empty in practice today — no
+   *  verified Codex skill-invocation tool name — but wired for parity so a
+   *  future confirmed tool name (or a literal 'SlashCommand' function_call)
+   *  is picked up with no further plumbing. */
+  skillEvents: SessionEvent[];
+  slashCommandEvents: SessionEvent[];
 }
 
 /** Zero-value accumulator for a fresh (from-byte-0) Codex parse. */
@@ -3542,6 +3602,8 @@ export function initCodexParseState(): CodexParseState {
     spawnedTeam: undefined,
     checklistEvents: [],
     recentDirectoriesTouched: [],
+    skillEvents: [],
+    slashCommandEvents: [],
   };
 }
 
@@ -3827,6 +3889,11 @@ export function hydrateCodexParseState(prior: CodexParserState): CodexParseState
     spawnedTeam: prior.spawnedTeam,
     checklistEvents: prior.checklistEvents ?? [],
     recentDirectoriesTouched: prior.recentDirectoriesTouched ?? [],
+    // Not persisted in CodexParserState (always empty for Codex today — see
+    // CodexParseState.skillEvents) — a resume starts fresh rather than
+    // round-tripping an always-empty array through the continuation blob.
+    skillEvents: [],
+    slashCommandEvents: [],
   };
 }
 

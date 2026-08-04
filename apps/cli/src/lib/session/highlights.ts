@@ -43,6 +43,19 @@ const SKILL_TOOL_NAME_BY_AGENT: Partial<Record<SessionAgentId, string>> = {
 };
 
 /**
+ * True for a tool_use event that is that harness's skill-invocation call (see
+ * {@link SKILL_TOOL_NAME_BY_AGENT}). Exported so an INCREMENTAL parser
+ * (discover.ts's ClaudeParseState/foldDerivedToolState) can select matching
+ * events into a small held array as it streams, then run {@link extractSkills}
+ * over just that subset at finalize — without re-parsing the whole transcript.
+ */
+export function isSkillInvocation(e: SessionEvent): boolean {
+  if (e.type !== 'tool_use' || e._local) return false;
+  const skillTool = SKILL_TOOL_NAME_BY_AGENT[e.agent];
+  return !!skillTool && e.tool === skillTool;
+}
+
+/**
  * Skills invoked during the session, from that harness's skill-invocation
  * tool calls (see {@link SKILL_TOOL_NAME_BY_AGENT}). Carries the skill id in
  * `args.skill` (or `args.name`). Sorted by count desc, then name.
@@ -50,9 +63,7 @@ const SKILL_TOOL_NAME_BY_AGENT: Partial<Record<SessionAgentId, string>> = {
 export function extractSkills(events: SessionEvent[]): SkillUse[] {
   const counts = new Map<string, number>();
   for (const e of events) {
-    if (e.type !== 'tool_use' || e._local) continue;
-    const skillTool = SKILL_TOOL_NAME_BY_AGENT[e.agent];
-    if (!skillTool || e.tool !== skillTool) continue;
+    if (!isSkillInvocation(e)) continue;
     const name = e.args?.skill ?? e.args?.name;
     if (typeof name !== 'string' || !name.trim()) continue;
     const key = name.trim();

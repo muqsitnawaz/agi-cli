@@ -256,6 +256,18 @@ export interface QueryOptions {
    * with NULLs sorted last so unpriced rows never crowd out real data.
    */
   sortBy?: 'timestamp' | 'cost' | 'duration';
+  /**
+   * Only sessions that invoked this skill (#12), joined against
+   * session_resource_usage.kind='skill'. Matches either the full stored name
+   * (bare, or `plugin:name` for a plugin skill) or just the short name after
+   * the colon — `--skill design` finds a session that used `rush:design`.
+   */
+  skill?: string;
+  /**
+   * Only sessions that used a skill or slash-command owned by this plugin
+   * (#12), joined against session_resource_usage.plugin.
+   */
+  plugin?: string;
 }
 
 let dbInstance: Database.Database | null = null;
@@ -1092,53 +1104,68 @@ function resolveResourceProvenance(
 }
 
 /**
- * Persist skill/slash-command usage for a session (#12) into
- * `session_resource_usage`, replacing any prior rows for it (a rescan's
+ * Persist already-computed skill/slash-command tallies for a session (#12)
+ * into `session_resource_usage`, replacing any prior rows for it (a rescan's
  * usage supersedes the old — same replace-on-upsert shape as the FTS text
  * below). `discoverPlugins()` (real I/O: manifest + directory reads) only
  * runs when there is actually a skill/command to resolve, so a session with
  * neither pays nothing beyond the DELETE.
  *
- * KNOWN GAP: only called from {@link enrichCachedSessionMeta}, which the
- * batch path (`upsertSessionsBatch`) SKIPS for claude/codex to preserve
- * their resumable-parse optimization (re-parsing the whole transcript here
- * would reintroduce the exact re-parse cost that optimization removes). A
- * claude/codex session discovered through the routine local batch scan does
- * NOT get resource-usage rows; one upserted through `upsertSession()`
- * directly (cross-machine fan-in, forks) does, since that path always
- * enriches. Closing this gap needs threading skill/slash-command tallies
- * through the incremental accumulator (ClaudeParseState et al.) the same
- * way `checklistEvents` already is — tracked as follow-up, not done here.
+ * Split from {@link writeResourceUsage} so a caller that already has the
+ * tallies (claude/codex's incremental accumulator — see
+ * ClaudeParseState.skillEvents/slashCommandEvents, threaded onto
+ * SessionMeta.skillsUsed/slashCommandsUsed) can write without re-parsing the
+ * transcript to re-derive them.
+ *
+ * Deliberately NOT wrapped in its own `db.transaction()`: better-sqlite3
+ * (this repo's wrapper included) does not support nested transactions, and
+ * `upsertSessionsBatch` calls this from INSIDE its own outer transaction. A
+ * standalone caller (enrichCachedSessionMeta, outside any transaction) still
+ * gets each statement committed individually — a crash between the DELETE
+ * and an INSERT self-heals on the next rescan, the same risk profile as any
+ * other un-batched write in this file.
  */
-function writeResourceUsage(sessionId: string, events: SessionEvent[], cwd: string | undefined): void {
-  const skills = extractSkills(events);
-  const commands = extractSlashCommands(events);
+function writeResourceUsageFromTallies(
+  sessionId: string,
+  skills: Array<{ name: string; count: number }>,
+  commands: Array<{ name: string; count: number }>,
+  cwd: string | undefined,
+): void {
   const db = getDB();
   const del = deleteResourceUsageStmt(db);
   const ins = insertResourceUsageStmt(db);
-  const txn = db.transaction(() => {
-    del.run(sessionId);
-    if (skills.length === 0 && commands.length === 0) return;
-    const plugins = discoverPlugins({ cwd });
-    for (const { name, count } of skills) {
-      const prov = resolveResourceProvenance('skills', name, cwd, plugins);
-      ins.run({
-        session_id: sessionId, kind: 'skill', name, count,
-        plugin: prov.plugin ?? null, source: prov.source ?? null,
-        repo_root: prov.repoRoot ?? null, snapshot_sha: prov.snapshotSha ?? null,
-      });
-    }
-    for (const { name, count } of commands) {
-      const bare = name.replace(/^\//, '');
-      const prov = resolveResourceProvenance('commands', bare, cwd, plugins);
-      ins.run({
-        session_id: sessionId, kind: 'command', name: bare, count,
-        plugin: prov.plugin ?? null, source: prov.source ?? null,
-        repo_root: prov.repoRoot ?? null, snapshot_sha: prov.snapshotSha ?? null,
-      });
-    }
-  });
-  txn();
+  del.run(sessionId);
+  if (skills.length === 0 && commands.length === 0) return;
+  const plugins = discoverPlugins({ cwd });
+  for (const { name, count } of skills) {
+    const prov = resolveResourceProvenance('skills', name, cwd, plugins);
+    ins.run({
+      session_id: sessionId, kind: 'skill', name, count,
+      plugin: prov.plugin ?? null, source: prov.source ?? null,
+      repo_root: prov.repoRoot ?? null, snapshot_sha: prov.snapshotSha ?? null,
+    });
+  }
+  for (const { name, count } of commands) {
+    const bare = name.replace(/^\//, '');
+    const prov = resolveResourceProvenance('commands', bare, cwd, plugins);
+    ins.run({
+      session_id: sessionId, kind: 'command', name: bare, count,
+      plugin: prov.plugin ?? null, source: prov.source ?? null,
+      repo_root: prov.repoRoot ?? null, snapshot_sha: prov.snapshotSha ?? null,
+    });
+  }
+}
+
+/**
+ * Persist skill/slash-command usage for a session (#12) by deriving the
+ * tallies from a full parsed transcript. Used by {@link enrichCachedSessionMeta}
+ * (every `upsertSession()` call, and `upsertSessionsBatch` for every harness
+ * EXCEPT claude/codex, which pre-compute skillsUsed/slashCommandsUsed via
+ * their incremental accumulator instead — see writeResourceUsageFromTallies
+ * and the call site in upsertSessionsBatch).
+ */
+function writeResourceUsage(sessionId: string, events: SessionEvent[], cwd: string | undefined): void {
+  writeResourceUsageFromTallies(sessionId, extractSkills(events), extractSlashCommands(events), cwd);
 }
 
 function enrichCachedSessionMeta(meta: SessionMeta): SessionMeta {
@@ -1355,6 +1382,14 @@ export function upsertSessionsBatch(
       // and committable. We deliberately do NOT stamp the ledger for a skipped row, so the
       // next scan re-tries it (self-healing once the underlying parser is fixed).
       const toolUsage = detectToolUsage(meta.id);
+      // claude/codex skip enrichCachedSessionMeta above (preserving their
+      // resumable-parse optimization) — write their pre-computed
+      // skillsUsed/slashCommandsUsed (folded incrementally by discover.ts's
+      // accumulator) here instead. Every other harness already got this
+      // write from enrichCachedSessionMeta() in the .map() above.
+      if (meta.agent === 'claude' || meta.agent === 'codex') {
+        writeResourceUsageFromTallies(meta.id, meta.skillsUsed ?? [], meta.slashCommandsUsed ?? [], meta.cwd);
+      }
       try {
       upsert.run({
         id: meta.id,
@@ -1747,6 +1782,22 @@ function buildSessionWhere(options: QueryOptions): { clause: string; params: any
   }
   if (options.onlyTeamOrigin) {
     where.push('IFNULL(is_team_origin, 0) = 1');
+  }
+
+  // #12: join against session_resource_usage. A subquery IN, not a real JOIN
+  // on the base SELECT, keeps `SELECT * FROM sessions` untouched for every
+  // other caller of buildSessionWhere() (countSessions, the usage rollup, …)
+  // that never wants a skill/plugin filter.
+  if (options.skill) {
+    where.push(`id IN (
+      SELECT session_id FROM session_resource_usage
+      WHERE kind = 'skill' AND (name = ? COLLATE NOCASE OR name LIKE ? COLLATE NOCASE)
+    )`);
+    params.push(options.skill, `%:${options.skill}`);
+  }
+  if (options.plugin) {
+    where.push(`id IN (SELECT session_id FROM session_resource_usage WHERE plugin = ? COLLATE NOCASE)`);
+    params.push(options.plugin);
   }
 
   const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
