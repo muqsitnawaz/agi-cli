@@ -255,11 +255,26 @@ agents sessions a1b2c3d4 --markdown
 
 # Just the last 3 turns, user messages only
 agents sessions a1b2c3d4 --last 3 --include user
+
+# Calls in recent Codex sessions on one device
+agents sessions --include tools --agent codex --device mac-mini --since 7d
+
+# One session where two different calls match; query every online device
+agents sessions --include tools \
+  --query 'program:git input:merge' \
+  --query 'program:gh output:CONFLICT' \
+  --fleet --json
+
+# Count pre-indexed static git sites, containing calls, and sessions
+agents sessions --include tools --query 'program:git' --count --fleet --json
+
+# Populate historical tool rows once on each device
+agents sessions backfill tools --fleet
 ```
 
 Interactive picker when you're in a terminal. Structured output (`--json`, `--markdown`, filtered by role or turn count) when piped.
 
-Backed by a SQLite + FTS5 index at `~/.agents/.history/sessions/sessions.db` with incremental scanning -- warm reads in ~100ms. External tools can consume `--json` output as a programmatic observability layer; see [docs/05-sessions.md](apps/cli/docs/05-sessions.md) for the schema and [docs/06-observability.md](apps/cli/docs/06-observability.md) for the consumption patterns.
+Backed by a SQLite + FTS5 index at `~/.agents/.history/sessions/sessions.db` with incremental scanning -- warm reads in ~100ms. Tool-call evidence is redacted and bounded before it is cached; repeated `--query` clauses must match distinct calls in one session. Tool queries read SQLite only: `agents sessions backfill tools` performs the one-time historical parse, while normal incremental scans index new and changed sessions. The index stores ordered static Bash program sites, so `--count` reports occurrences, containing tool calls, and distinct sessions without reparsing. `--fleet` executes one origin partition per device, so synced mirrors cannot duplicate compact evidence or counts returned over SSH; transcript bodies stay on their origin machine. This uses relational SQLite rows and literal FTS5 only, with no embeddings, vector database, or model calls. External tools can consume `--json` output as a programmatic observability layer; see [docs/05-sessions.md](apps/cli/docs/05-sessions.md) for the schemas and [docs/06-observability.md](apps/cli/docs/06-observability.md) for the consumption patterns.
 
 ### Live state, and catching up fast
 
@@ -1106,9 +1121,12 @@ Conversations with Claude, Codex, legacy Gemini, and other agents scatter across
 ```bash
 agents sessions "auth middleware"     # Full-text search across all agents
 agents sessions --agent claude --since 7d
+agents sessions --include tools --query 'program:git' --fleet --json
+agents sessions --include tools --query 'program:git' --count --fleet --json
+agents sessions backfill tools --fleet
 ```
 
-The index lives at `~/.agents/.history/sessions/sessions.db` (SQLite + FTS5). Nothing leaves your machine. See [Sessions](#sessions-across-agents) for full usage.
+The index lives at `~/.agents/.history/sessions/sessions.db` (SQLite + FTS5). A local query stays on the machine; an explicit `--fleet` tool query sends only redacted, bounded match evidence or aggregate counts over SSH. Historical tool parsing is explicit via `sessions backfill tools`; queries never parse transcripts. See [Sessions](#sessions-across-agents) for full usage.
 
 ### Secrets
 

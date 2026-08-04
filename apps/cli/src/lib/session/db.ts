@@ -17,6 +17,8 @@ import { getSessionsDir, getSessionsDbPath } from '../state.js';
 import { query as queryEvents } from '../events.js';
 import { machineForSessionFile } from './origin-machine.js';
 import { loadSessionActorIndex, readSessionActorRecord } from './actor-sidecar.js';
+import { toolCallsFromEvents, type IndexedToolCall } from './tool-calls.js';
+import { persistToolCalls, purgeToolCalls, toolEvidenceSourcePath } from './tool-store.js';
 import { extractSkills, extractSlashCommands } from './highlights.js';
 import { resolveResource } from '../resources.js';
 import { discoverPlugins } from '../plugins.js';
@@ -28,7 +30,7 @@ const DB_PATH = getSessionsDbPath();
 /** Current schema version; bumped when migrations are added. Exported so tests
  * assert against the constant instead of hardcoding a number that every bump
  * then has to chase (docs/05-sessions.md calls the constant the source of truth). */
-export const SCHEMA_VERSION = 24;
+export const SCHEMA_VERSION = 29;
 
 /**
  * Canonicalize a file path for use as a scan_ledger key. The same physical
@@ -153,6 +155,73 @@ CREATE TABLE IF NOT EXISTS dir_ledger (
   scanned_at INTEGER NOT NULL
 );
 
+-- One redacted evidence row per tool call. The ordinal is assigned in
+-- transcript order and is stable across incremental appends.
+CREATE TABLE IF NOT EXISTS tool_calls (
+  call_key TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  source_call_id TEXT,
+  timestamp TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  input TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  exit_code INTEGER,
+  status_code INTEGER,
+  error_code TEXT,
+  output TEXT,
+  error TEXT,
+  parse_error TEXT,
+  evidence_bytes INTEGER NOT NULL,
+  UNIQUE(session_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_outcome ON tool_calls(outcome);
+
+CREATE TABLE IF NOT EXISTS tool_call_programs (
+  call_key TEXT NOT NULL,
+  program TEXT NOT NULL COLLATE NOCASE,
+  PRIMARY KEY(call_key, program)
+);
+CREATE INDEX IF NOT EXISTS idx_tool_call_programs_program ON tool_call_programs(program, call_key);
+
+-- Ordered static program sites retain repeated commands within one Bash call.
+-- The complete redacted command stays on tool_calls.input; these rows contain
+-- only the normalized program and whether it is a wrapper or effective target.
+CREATE TABLE IF NOT EXISTS tool_program_occurrences (
+  call_key TEXT NOT NULL,
+  occurrence_ordinal INTEGER NOT NULL,
+  program TEXT NOT NULL COLLATE NOCASE,
+  role TEXT NOT NULL CHECK(role IN ('wrapper', 'effective')),
+  PRIMARY KEY(call_key, occurrence_ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_tool_program_occurrences_program
+  ON tool_program_occurrences(program, call_key);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS tool_call_text USING fts5(
+  call_key UNINDEXED,
+  tool,
+  input,
+  output,
+  error,
+  tokenize = 'trigram'
+);
+
+-- Independent of scan_ledger: schema migration never forces the normal
+-- session index to reread history. Existing transcripts are backfilled only
+-- by the explicit, bounded agents sessions backfill tools command.
+CREATE TABLE IF NOT EXISTS tool_scan_ledger (
+  session_id TEXT PRIMARY KEY,
+  file_path TEXT NOT NULL UNIQUE,
+  file_mtime_ms INTEGER NOT NULL,
+  file_size INTEGER NOT NULL,
+  extractor_version INTEGER NOT NULL,
+  indexed_at INTEGER NOT NULL,
+  call_count INTEGER NOT NULL,
+  evidence_bytes INTEGER NOT NULL
+);
+
 -- Skill/slash-command usage per session (#12), computed from a session's
 -- parsed transcript (extractSkills / extractSlashCommands, session/highlights.ts)
 -- and joined at write time against the currently-installed resource/plugin
@@ -258,6 +327,8 @@ export interface QueryOptions {
    * with NULLs sorted last so unpriced rows never crowd out real data.
    */
   sortBy?: 'timestamp' | 'cost' | 'duration';
+  /** Internal warm-cache path; callers must validate the small final result set. */
+  skipExistenceCheck?: boolean;
   /**
    * Only sessions that invoked this skill (#12), joined against
    * session_resource_usage.kind='skill'. Matches either the full stored name
@@ -523,7 +594,7 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
   }
 
   if (fromVersion < 22) {
-    // v21 → v22 (main): persist the transcript's tool-call count.
+    // v21 → v22: persist the transcript's aggregate tool-call count.
     const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
     if (!cols.some(c => c.name === 'tool_call_count')) db.exec(`ALTER TABLE sessions ADD COLUMN tool_call_count INTEGER`);
     db.exec(`DELETE FROM scan_ledger; DELETE FROM dir_ledger;`);
@@ -538,10 +609,7 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
     //
     // Deliberately NO DEFAULT (NULL on ALTER, for every pre-existing row):
     // NULL means "not yet computed by this scanner" (a legacy row), distinct
-    // from a real, computed 0/false. Collapsing that into a DEFAULT 0 would
-    // make every un-rescanned row look like a definite "never used
-    // browser/computer" and permanently blind the picker's fallback path for
-    // any row that isn't rescanned before it's next viewed.
+    // from a real, computed 0/false.
     const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
     if (!cols.some(c => c.name === 'used_browser')) db.exec(`ALTER TABLE sessions ADD COLUMN used_browser INTEGER`);
     if (!cols.some(c => c.name === 'used_computer')) db.exec(`ALTER TABLE sessions ADD COLUMN used_computer INTEGER`);
@@ -550,12 +618,7 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
   if (fromVersion < 24) {
     // v23 → v24: session_resource_usage (#12) — skill/slash-command usage per
     // session, joined against the currently-installed resource/plugin for
-    // provenance (repo_root/snapshot_sha/plugin/source). A brand-new table
-    // needs only CREATE TABLE IF NOT EXISTS, already present in SCHEMA for a
-    // fresh DB — this repeats it for an existing DB whose SCHEMA exec ran
-    // before the table definition was added. No ledger wipe: this table is
-    // populated by writeResourceUsage() at upsert time, independent of the
-    // scan ledgers.
+    // provenance. No ledger wipe: writeResourceUsage() owns this table.
     db.exec(`
       CREATE TABLE IF NOT EXISTS session_resource_usage (
         session_id TEXT NOT NULL,
@@ -572,6 +635,139 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
       CREATE INDEX IF NOT EXISTS idx_session_resource_usage_plugin ON session_resource_usage(plugin);
     `);
   }
+
+  if (fromVersion < 25) {
+    // v24 → v25: tool-call evidence uses an independent ledger. Do not clear
+    // scan_ledger or dir_ledger: normal session listing stays warm, while tool
+    // history is filled once on demand.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS tool_calls (
+        call_key TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        source_call_id TEXT,
+        timestamp TEXT NOT NULL,
+        tool TEXT NOT NULL,
+        input TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        exit_code INTEGER,
+        status_code INTEGER,
+        error_code TEXT,
+        output TEXT,
+        error TEXT,
+        parse_error TEXT,
+        evidence_bytes INTEGER NOT NULL,
+        UNIQUE(session_id, ordinal)
+      );
+      CREATE INDEX IF NOT EXISTS idx_tool_calls_session ON tool_calls(session_id, ordinal);
+      CREATE INDEX IF NOT EXISTS idx_tool_calls_tool ON tool_calls(tool COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS idx_tool_calls_outcome ON tool_calls(outcome);
+      CREATE TABLE IF NOT EXISTS tool_call_programs (
+        call_key TEXT NOT NULL,
+        program TEXT NOT NULL COLLATE NOCASE,
+        PRIMARY KEY(call_key, program)
+      );
+      CREATE INDEX IF NOT EXISTS idx_tool_call_programs_program ON tool_call_programs(program, call_key);
+      CREATE VIRTUAL TABLE IF NOT EXISTS tool_call_text USING fts5(
+        call_key UNINDEXED,
+        tool,
+        input,
+        output,
+        error,
+        tokenize = 'unicode61 remove_diacritics 2'
+      );
+      CREATE TABLE IF NOT EXISTS tool_scan_ledger (
+        file_path TEXT PRIMARY KEY,
+        file_mtime_ms INTEGER NOT NULL,
+        file_size INTEGER NOT NULL,
+        extractor_version INTEGER NOT NULL,
+        indexed_at INTEGER NOT NULL,
+        call_count INTEGER NOT NULL,
+        evidence_bytes INTEGER NOT NULL
+      );
+    `);
+  }
+
+  if (fromVersion < 26) {
+    // v25 → v26: make append accounting O(changed calls), including empty
+    // deltas, instead of reading every historical evidence row per append.
+    const callCols = db.prepare(`PRAGMA table_info(tool_calls)`).all() as Array<{ name: string }>;
+    if (!callCols.some((column) => column.name === 'evidence_bytes')) {
+      db.exec(`ALTER TABLE tool_calls ADD COLUMN evidence_bytes INTEGER NOT NULL DEFAULT 0`);
+    }
+    const ledgerCols = db.prepare(`PRAGMA table_info(tool_scan_ledger)`).all() as Array<{ name: string }>;
+    if (!ledgerCols.some((column) => column.name === 'evidence_bytes')) {
+      db.exec(`ALTER TABLE tool_scan_ledger ADD COLUMN evidence_bytes INTEGER NOT NULL DEFAULT 0`);
+    }
+    // The first tool schema existed only in prerelease development builds. Force its tool
+    // evidence through one bounded rebuild rather than trusting zeroed totals.
+    db.exec(`DELETE FROM tool_scan_ledger`);
+  }
+
+  if (fromVersion < 27) {
+    // v26 → v27: the original unicode word tokenizer could not prefilter the
+    // substring semantics promised by input/output/error queries. Rebuild only
+    // the derived FTS table from already-redacted call rows; transcripts and
+    // both scan ledgers remain warm.
+    db.exec(`
+      DROP TABLE IF EXISTS tool_call_text;
+      CREATE VIRTUAL TABLE tool_call_text USING fts5(
+        call_key UNINDEXED,
+        tool,
+        input,
+        output,
+        error,
+        tokenize = 'trigram'
+      );
+      INSERT INTO tool_call_text (call_key, tool, input, output, error)
+      SELECT call_key, tool, input, coalesce(output, ''), coalesce(error, '')
+      FROM tool_calls;
+    `);
+  }
+
+  if (fromVersion < 28) {
+    // v27 → v28: retain every static program occurrence instead of only the
+    // distinct program set. The source transcript is rebuilt only by the
+    // explicit tools backfill; normal session and directory ledgers stay warm.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS tool_program_occurrences (
+        call_key TEXT NOT NULL,
+        occurrence_ordinal INTEGER NOT NULL,
+        program TEXT NOT NULL COLLATE NOCASE,
+        role TEXT NOT NULL CHECK(role IN ('wrapper', 'effective')),
+        PRIMARY KEY(call_key, occurrence_ordinal)
+      );
+      CREATE INDEX IF NOT EXISTS idx_tool_program_occurrences_program
+        ON tool_program_occurrences(program, call_key);
+      DELETE FROM tool_scan_ledger;
+    `);
+  }
+
+  if (fromVersion < 29) {
+    // v28 → v29: coverage and query planning address the independent tool
+    // ledger by session id. Rebuild only this derived ledger so a tool query
+    // never has to resolve or stat transcript paths.
+    db.exec(`
+      DROP TABLE tool_scan_ledger;
+      CREATE TABLE tool_scan_ledger (
+        session_id TEXT PRIMARY KEY,
+        file_path TEXT NOT NULL UNIQUE,
+        file_mtime_ms INTEGER NOT NULL,
+        file_size INTEGER NOT NULL,
+        extractor_version INTEGER NOT NULL,
+        indexed_at INTEGER NOT NULL,
+        call_count INTEGER NOT NULL,
+        evidence_bytes INTEGER NOT NULL
+      );
+    `);
+    // Tool-index prerelease builds temporarily used schema versions now owned
+    // by main's v23/v24 migrations. Repair those columns when upgrading such a
+    // development DB; released v24 databases already have them.
+    const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'used_browser')) db.exec(`ALTER TABLE sessions ADD COLUMN used_browser INTEGER`);
+    if (!cols.some(c => c.name === 'used_computer')) db.exec(`ALTER TABLE sessions ADD COLUMN used_computer INTEGER`);
+  }
+
 }
 
 /** Open (or return the cached) sessions database, applying migrations as needed. */
@@ -1318,7 +1514,16 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
 
 /** Batch-upsert sessions with their FTS5 content and scan stamps in a single transaction. */
 export function upsertSessionsBatch(
-  entries: Array<{ meta: SessionMeta; content: string; scan?: ScanStamp; parserState?: string; contentText?: string }>,
+  entries: Array<{
+    meta: SessionMeta;
+    content: string;
+    scan?: ScanStamp;
+    parserState?: string;
+    contentText?: string;
+    toolCalls?: IndexedToolCall[];
+    toolScan?: ScanStamp;
+    toolIndexMode?: 'replace' | 'append';
+  }>,
 ): void {
   if (entries.length === 0) return;
   const db = getDB();
@@ -1357,11 +1562,36 @@ export function upsertSessionsBatch(
       .filter(e => e.scan && e.meta.filePath)
       .map(e => [canonicalLedgerKey(e.meta.filePath), e]),
   );
-  const enrichedEntries = entries.map(entry =>
-    entry.meta.agent === 'claude' || entry.meta.agent === 'codex'
-      ? entry
-      : { ...entry, meta: enrichCachedSessionMeta(entry.meta) },
-  );
+  const enrichedEntries = entries.map(entry => {
+    if (entry.meta.agent === 'claude' || entry.meta.agent === 'codex' || !entry.meta.filePath) return entry;
+    try {
+      const toolSourcePath = toolEvidenceSourcePath(entry.meta.filePath, entry.meta.agent);
+      const toolScan = toolSourcePath === entry.meta.filePath
+        ? entry.scan
+        : (() => {
+            const stat = fs.statSync(toolSourcePath);
+            return { fileMtimeMs: stat.mtimeMs, fileSize: stat.size };
+          })();
+      // Non-resumable harnesses already parse here for todos/recent dirs. Derive
+      // the tool index from those same in-memory events: no second file read.
+      const events = parseSession(entry.meta.filePath, entry.meta.agent);
+      writeResourceUsage(entry.meta.id, events, entry.meta.cwd);
+      return {
+        ...entry,
+        meta: {
+          ...entry.meta,
+          todos: extractTodoProgressFromEvents(events),
+          recentDirectoriesTouched: extractRecentDirectoriesTouched(events, entry.meta.cwd),
+        },
+        toolCalls: toolCallsFromEvents(events),
+        toolScan,
+        toolIndexMode: 'replace' as const,
+      };
+    } catch {
+      return entry;
+    }
+  });
+  const writtenEntries: typeof enrichedEntries = [];
 
   const txn = db.transaction((items: typeof entries) => {
     // Re-read the ledger now that we hold the write lock. Any file committed
@@ -1383,7 +1613,8 @@ export function upsertSessionsBatch(
       }
     }
 
-    for (const { meta, content, scan, parserState, contentText } of items) {
+    for (const entry of items) {
+      const { meta, content, scan, parserState, contentText } = entry;
       if (alreadyIndexed.has(meta.id)) continue;
       // Per-row guard: one malformed session (e.g. a required field that resolves to
       // NULL) must not abort the whole batch and take down the entire `agents sessions`
@@ -1466,6 +1697,7 @@ export function upsertSessionsBatch(
           contentText ?? null,
         );
       }
+      writtenEntries.push(entry);
       } catch (err) {
         if (process.stderr.isTTY) {
           console.error(`Warning: skipped unindexable session ${meta.id}: ${(err as Error).message}`);
@@ -1474,6 +1706,18 @@ export function upsertSessionsBatch(
     }
   });
   txn(enrichedEntries);
+  // Tool evidence shares the transcript parse above but owns an independent
+  // transaction/ledger. If this write fails, the normal session row remains
+  // valid and ensureToolIndex retries from the missing tool ledger later.
+  for (const entry of writtenEntries) {
+    const toolScan = entry.toolScan ?? entry.scan;
+    if (!toolScan || !entry.toolCalls) continue;
+    try {
+      persistToolCalls(db, entry.meta, entry.toolCalls, toolScan, entry.toolIndexMode ?? 'replace');
+    } catch {
+      // Boundary is intentionally retryable via tool_scan_ledger.
+    }
+  }
 }
 
 /**
@@ -1837,13 +2081,25 @@ export function querySessions(options: QueryOptions = {}): SessionMeta[] {
         : 'ORDER BY IFNULL(last_activity, timestamp) DESC, timestamp DESC';
   const sql = `SELECT * FROM sessions ${clause} ${orderClause} ${limitClause}`;
   const rows = db.prepare(sql).all(...params) as SessionRow[];
+  if (options.skipExistenceCheck) {
+    const trimmed = options.limit ? rows.slice(0, options.limit) : rows;
+    return trimmed.map(rowToMeta);
+  }
   // Belt-and-suspenders: drop rows whose JSONL no longer exists on disk. The
   // authoritative fix is to keep file_path in sync (see updateSessionFilePaths
   // callers), but skipping vanished rows here prevents phantom sessions from
   // surfacing in the Factory UI if any code path forgets to rewrite (#136).
   // Synthetic rows (OpenClaw channels/cron — see scanOpenClawIncremental) carry
   // an empty file_path and are exempt; they're keyed by CLI output, not files.
-  const live = rows.filter(r => !r.file_path || fs.existsSync(r.file_path));
+  const missing = rows.filter(r => r.file_path && !fs.existsSync(r.file_path));
+  if (missing.length > 0) {
+    const purge = db.transaction(() => {
+      for (const row of missing) purgeToolCalls(db, row.id);
+    });
+    purge();
+  }
+  const missingIds = new Set(missing.map((row) => row.id));
+  const live = rows.filter(r => !r.file_path || !missingIds.has(r.id));
   const trimmed = options.limit ? live.slice(0, options.limit) : live;
   return trimmed.map(rowToMeta);
 }

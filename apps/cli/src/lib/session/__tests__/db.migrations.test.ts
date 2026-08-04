@@ -89,6 +89,130 @@ describe('spawned_team column migration (v21)', () => {
   });
 });
 
+describe('tool-call index migration (v25)', () => {
+  it('adds the independent schema without invalidating warm session ledgers', () => {
+    const db = getDB();
+    db.prepare(
+      `INSERT OR REPLACE INTO scan_ledger(file_path, file_mtime_ms, file_size, scanned_at) VALUES (?, ?, ?, ?)`
+    ).run('/tmp/warm/session.jsonl', 1, 1, 1);
+    db.prepare(
+      `INSERT OR REPLACE INTO dir_ledger(dir_path, dir_mtime_ms, entry_count, scanned_at) VALUES (?, ?, ?, ?)`
+    ).run('/tmp/warm', 1, 1, 1);
+    db.exec(`
+      DROP TABLE tool_call_text;
+      DROP TABLE tool_call_programs;
+      DROP TABLE tool_calls;
+      DROP TABLE tool_scan_ledger;
+    `);
+    db.prepare(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '24')`).run();
+    closeDB();
+
+    const reopened = getDB();
+    const tables = (reopened.prepare(`SELECT name FROM sqlite_master WHERE type IN ('table', 'view')`).all() as Array<{ name: string }>).map((row) => row.name);
+    expect(tables).toContain('tool_calls');
+    expect(tables).toContain('tool_call_programs');
+    expect(tables).toContain('tool_scan_ledger');
+    expect((reopened.prepare(`PRAGMA table_info(tool_calls)`).all() as Array<{ name: string }>).map((column) => column.name))
+      .toContain('evidence_bytes');
+    expect((reopened.prepare(`PRAGMA table_info(tool_scan_ledger)`).all() as Array<{ name: string }>).map((column) => column.name))
+      .toContain('evidence_bytes');
+    expect((reopened.prepare(`SELECT count(*) AS n FROM scan_ledger`).get() as { n: number }).n).toBeGreaterThan(0);
+    expect((reopened.prepare(`SELECT count(*) AS n FROM dir_ledger`).get() as { n: number }).n).toBeGreaterThan(0);
+  });
+});
+
+describe('tool-call trigram migration (v27)', () => {
+  it('rebuilds FTS from redacted rows while the later occurrence migration keeps the normal ledger warm', () => {
+    const db = getDB();
+    db.prepare(
+      `INSERT OR REPLACE INTO scan_ledger(file_path, file_mtime_ms, file_size, scanned_at) VALUES (?, ?, ?, ?)`
+    ).run('/tmp/trigram/session.jsonl', 1, 1, 1);
+    db.prepare(`
+      INSERT OR REPLACE INTO tool_calls (
+        call_key, session_id, ordinal, timestamp, tool, input, outcome, evidence_bytes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('trigram-call', 'trigram-session', 0, '2026-08-03T00:00:00Z', 'Bash', 'git merge topic', 'unknown', 15);
+    db.prepare(`
+      INSERT OR REPLACE INTO tool_scan_ledger (
+        session_id, file_path, file_mtime_ms, file_size, extractor_version, indexed_at, call_count, evidence_bytes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('trigram-session', '/tmp/trigram/session.jsonl', 1, 1, 1, 1, 1, 15);
+    db.exec(`
+      DROP TABLE tool_call_text;
+      CREATE VIRTUAL TABLE tool_call_text USING fts5(
+        call_key UNINDEXED, tool, input, output, error,
+        tokenize = 'unicode61 remove_diacritics 2'
+      );
+      INSERT INTO tool_call_text VALUES ('trigram-call', 'Bash', 'git merge topic', '', '');
+    `);
+    db.prepare(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '26')`).run();
+    closeDB();
+
+    const reopened = getDB();
+    expect(reopened.prepare(`SELECT call_key FROM tool_call_text WHERE tool_call_text MATCH ?`).all('input:erge'))
+      .toEqual([{ call_key: 'trigram-call' }]);
+    expect(reopened.prepare(`SELECT count(*) AS n FROM scan_ledger WHERE file_path = ?`).get('/tmp/trigram/session.jsonl'))
+      .toEqual({ n: 1 });
+    expect(reopened.prepare(`SELECT count(*) AS n FROM tool_scan_ledger WHERE file_path = ?`).get('/tmp/trigram/session.jsonl'))
+      .toEqual({ n: 0 });
+  });
+});
+
+describe('tool program occurrence migration (v28)', () => {
+  it('adds ordered occurrences and invalidates only the derived tool ledger', () => {
+    const db = getDB();
+    db.prepare(
+      `INSERT OR REPLACE INTO scan_ledger(file_path, file_mtime_ms, file_size, scanned_at) VALUES (?, ?, ?, ?)`
+    ).run('/tmp/occurrences/session.jsonl', 1, 1, 1);
+    db.prepare(`
+      INSERT OR REPLACE INTO tool_scan_ledger (
+        session_id, file_path, file_mtime_ms, file_size, extractor_version, indexed_at, call_count, evidence_bytes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('occurrence-session', '/tmp/occurrences/session.jsonl', 1, 1, 4, 1, 1, 15);
+    db.exec(`DROP TABLE tool_program_occurrences`);
+    db.prepare(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '27')`).run();
+    closeDB();
+
+    const reopened = getDB();
+    expect((reopened.prepare(`PRAGMA table_info(tool_program_occurrences)`).all() as Array<{ name: string }>).map((column) => column.name))
+      .toEqual(['call_key', 'occurrence_ordinal', 'program', 'role']);
+    expect(reopened.prepare(`SELECT count(*) AS n FROM tool_scan_ledger`).get()).toEqual({ n: 0 });
+    expect(reopened.prepare(`SELECT count(*) AS n FROM scan_ledger WHERE file_path = ?`).get('/tmp/occurrences/session.jsonl'))
+      .toEqual({ n: 1 });
+  });
+});
+
+describe('tool ledger session identity migration (v29)', () => {
+  it('moves coverage lookups to session ids without invalidating normal session ledgers', () => {
+    const db = getDB();
+    db.prepare(
+      `INSERT OR REPLACE INTO scan_ledger(file_path, file_mtime_ms, file_size, scanned_at) VALUES (?, ?, ?, ?)`
+    ).run('/tmp/session-ledger/session.jsonl', 1, 1, 1);
+    db.exec(`
+      DROP TABLE tool_scan_ledger;
+      CREATE TABLE tool_scan_ledger (
+        file_path TEXT PRIMARY KEY,
+        file_mtime_ms INTEGER NOT NULL,
+        file_size INTEGER NOT NULL,
+        extractor_version INTEGER NOT NULL,
+        indexed_at INTEGER NOT NULL,
+        call_count INTEGER NOT NULL,
+        evidence_bytes INTEGER NOT NULL
+      );
+      INSERT INTO tool_scan_ledger VALUES ('/tmp/session-ledger/session.jsonl', 1, 1, 5, 1, 1, 15);
+    `);
+    db.prepare(`INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '28')`).run();
+    closeDB();
+
+    const reopened = getDB();
+    expect((reopened.prepare(`PRAGMA table_info(tool_scan_ledger)`).all() as Array<{ name: string }>).map((column) => column.name))
+      .toEqual(['session_id', 'file_path', 'file_mtime_ms', 'file_size', 'extractor_version', 'indexed_at', 'call_count', 'evidence_bytes']);
+    expect(reopened.prepare(`SELECT count(*) AS n FROM tool_scan_ledger`).get()).toEqual({ n: 0 });
+    expect(reopened.prepare(`SELECT count(*) AS n FROM scan_ledger WHERE file_path = ?`).get('/tmp/session-ledger/session.jsonl'))
+      .toEqual({ n: 1 });
+  });
+});
+
 describe('spawned_team round-trip', () => {
   it('persists the team a session spawned and reads it back', () => {
     // Before this column existed the value was derived at scan time, set on the
