@@ -146,6 +146,21 @@ describe('usedBrowser/usedComputer — a scoped events-log read, not a transcrip
     expect(row.usedBrowser).toBe(false);
   });
 
+  it('a computer-screenshot-only session sets usedComputer=true (agents computer screenshot / run, not just the explicit verbs)', () => {
+    // Mirrors what computer.ts's screenshot command and dispatch.ts's run-loop
+    // dispatcher now emit — previously neither path emitted computer.action at
+    // all, so a session that only ran `computer screenshot`/`run` read back
+    // usedComputer=false (reviewer-flagged regression on #1864).
+    emit('computer.action', { sessionId: 'tool-computer-screenshot', command: 'screenshot', targetPid: 200 });
+    const filePath = emptyFile('tool-computer-screenshot');
+    const meta: SessionMeta = { id: 'tool-computer-screenshot', shortId: 'tool-scr', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath };
+    upsertSession(meta, '', { fileMtimeMs: 1, fileSize: fs.statSync(filePath).size });
+
+    const row = findSessionsById('tool-computer-screenshot')[0];
+    expect(row.usedComputer).toBe(true);
+    expect(row.usedBrowser).toBe(false);
+  });
+
   it('a session with no browser/computer events reads back false for both', () => {
     const filePath = emptyFile('tool-none');
     const meta: SessionMeta = { id: 'tool-none', shortId: 'tool-non', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', filePath };

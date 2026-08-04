@@ -170,7 +170,7 @@ e.g. team lifecycle events are emitted at the registry source with the team name
 so they fire for every path (`teams create` and the auto-create in `teams add`).
 `browser.navigate`/`browser.screenshot` (every `agents browser` navigate/
 screenshot) and `computer.action` (every `agents computer` verb — click, type,
-key, drag, scroll, launch, …) are two more: `query()`/`readUnifiedEvents()`
+key, drag, scroll, launch, screenshot, …) are two more: `query()`/`readUnifiedEvents()`
 accept a `sessionId` filter so a consumer can ask "did session X touch the
 browser/computer" as a scoped read instead of grepping the whole log — this is
 what the sessions index's `usedBrowser`/`usedComputer` columns are built on
