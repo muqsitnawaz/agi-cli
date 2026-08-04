@@ -64,7 +64,7 @@ import {
 } from './rotate.js';
 import { readAuthHealth, isDeadVerdict } from './auth-health.js';
 import { machineId } from './machine-id.js';
-import { isSelfUpdatingAgent } from './agents.js';
+import { isSelfUpdatingAgent, ROUTINE_AGENT_COMMANDS as AGENT_COMMANDS, ROUTINE_AGENT_IDS } from './agents.js';
 import { expandLocalHome, getProjectRoot } from './project-root.js';
 
 /** Result of a completed job execution, including metadata and optional report. */
@@ -72,20 +72,6 @@ export interface RunResult {
   meta: RunMeta;
   reportPath: string | null;
 }
-
-/** CLI command templates per agent, with {prompt} as a placeholder. */
-const AGENT_COMMANDS: Record<string, string[]> = {
-  claude: ['claude', '-p', '--verbose', '{prompt}', '--output-format', 'stream-json', '--permission-mode', 'plan'],
-  codex: ['codex', 'exec', '--sandbox', 'workspace-write', '{prompt}', '--json'],
-  gemini: ['gemini', '{prompt}', '--output-format', 'stream-json'],
-  cursor: ['cursor-agent', '-p', '{prompt}', '--output-format', 'stream-json'],
-  kimi: ['kimi', '--prompt', '{prompt}', '--output-format', 'stream-json'],
-  droid: ['droid', 'exec', '{prompt}', '-o', 'stream-json'],
-};
-
-/** Agents the daemon can actually run, derived from the command table above
- * so the `--agent` help and any validation can never drift from it. */
-export const ROUTINE_AGENT_IDS = Object.freeze(Object.keys(AGENT_COMMANDS));
 
 /**
  * Where each agent's transcript files live under an overlay HOME, mirroring
