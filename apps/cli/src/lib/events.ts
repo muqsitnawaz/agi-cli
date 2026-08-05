@@ -446,30 +446,33 @@ export function migrateLegacyEventLogs(userDir: string = userAgentsDir()): numbe
           .map((match) => Number(match[1]));
         return (numbers.length ? Math.max(...numbers) : 0) + 1;
       };
+      const withDestinationLock = <T>(dayDir: string, fn: () => T): T => {
+        const destinationActive = path.join(dayDir, 'events.jsonl');
+        fs.mkdirSync(dayDir, { recursive: true, mode: DIR_MODE });
+        ensureLockTarget(destinationActive, '', DIR_MODE);
+        return withFileLock(destinationActive, fn);
+      };
 
       const activeBytes = fs.existsSync(legacyActive) ? fs.statSync(legacyActive).size : 0;
       if (activeBytes > 0) {
         const activeStat = fs.statSync(legacyActive);
         const dayDir = path.join(destinationRoot, localDateKey(activeStat.mtime));
-        const destinationActive = path.join(dayDir, 'events.jsonl');
-        fs.mkdirSync(dayDir, { recursive: true, mode: DIR_MODE });
-        if (!fs.existsSync(destinationActive)) {
-          fs.renameSync(legacyActive, destinationActive);
-          fs.chmodSync(destinationActive, FILE_MODE);
-        } else {
+        withDestinationLock(dayDir, () => {
           const archivePath = path.join(dayDir, `events.${nextArchiveNumber(dayDir)}.jsonl.gz`);
           fs.writeFileSync(archivePath, gzipSync(fs.readFileSync(legacyActive)), { mode: FILE_MODE });
+          fs.utimesSync(archivePath, activeStat.atime, activeStat.mtime);
           fs.truncateSync(legacyActive, 0);
-        }
+        });
         moved++;
       }
 
       for (const archive of currentLegacyArchives) {
         const source = path.join(userDir, archive.file);
         const dayDir = path.join(destinationRoot, localDateKey(fs.statSync(source).mtime));
-        fs.mkdirSync(dayDir, { recursive: true, mode: DIR_MODE });
-        const destination = path.join(dayDir, `events.${nextArchiveNumber(dayDir)}.jsonl.gz`);
-        fs.renameSync(source, destination);
+        withDestinationLock(dayDir, () => {
+          const destination = path.join(dayDir, `events.${nextArchiveNumber(dayDir)}.jsonl.gz`);
+          fs.renameSync(source, destination);
+        });
         moved++;
       }
 
@@ -1077,31 +1080,35 @@ interface EventLogFile {
 function listEventLogFiles(): EventLogFile[] {
   const current = eventsPath();
   const files: EventLogFile[] = [];
+  const addFile = (filePath: string, gzip: boolean) => {
+    try {
+      const stat = fs.statSync(filePath);
+      files.push({
+        path: filePath,
+        gzip,
+        currentActive: filePath === current,
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+      });
+    } catch { /* file may rotate while an unlocked reader enumerates */ }
+  };
   const addDirectory = (dir: string) => {
     let names: string[] = [];
     try { names = fs.readdirSync(dir); } catch { return; }
     for (const name of names) {
       if (name !== 'events.jsonl' && !/^events\.\d+\.jsonl\.gz$/.test(name)) continue;
-      const filePath = path.join(dir, name);
-      try {
-        const stat = fs.statSync(filePath);
-        files.push({
-          path: filePath,
-          gzip: name.endsWith('.gz'),
-          currentActive: filePath === current,
-          mtimeMs: stat.mtimeMs,
-          size: stat.size,
-        });
-      } catch { /* file may rotate while an unlocked reader enumerates */ }
+      addFile(path.join(dir, name), name.endsWith('.gz'));
     }
   };
 
   if (_eventsPathOverride) {
     if (path.basename(current) !== 'events.jsonl') {
-      try {
-        const stat = fs.statSync(current);
-        files.push({ path: current, gzip: false, currentActive: true, mtimeMs: stat.mtimeMs, size: stat.size });
-      } catch { /* an empty override has no records yet */ }
+      addFile(current, false);
+      let names: string[] = [];
+      try { names = fs.readdirSync(eventsDir()); } catch { return files; }
+      for (const name of names) {
+        if (/^events\.\d+\.jsonl\.gz$/.test(name)) addFile(path.join(eventsDir(), name), true);
+      }
       return files;
     }
     addDirectory(eventsDir());
@@ -1138,7 +1145,9 @@ function finalizePastDayLogs(): void {
         .map((match) => Number(match[1]));
       const next = (numbers.length ? Math.max(...numbers) : 0) + 1;
       const target = path.join(dir, `events.${next}.jsonl.gz`);
+      const sourceStat = fs.statSync(file.path);
       fs.writeFileSync(target, gzipSync(fs.readFileSync(file.path)), { mode: FILE_MODE });
+      fs.utimesSync(target, sourceStat.atime, sourceStat.mtime);
       fs.unlinkSync(file.path);
     } catch { /* retry on the next prune */ }
   }

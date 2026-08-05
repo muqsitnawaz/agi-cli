@@ -486,6 +486,38 @@ describe('events', () => {
       expect(result.bytesReclaimed).toBe(2048);
       expect(remainingBytes).toBeLessThanOrEqual(1500);
     });
+
+    it('keeps the source mtime when finalizing a past day so age pruning removes it', () => {
+      const userDir = makeTempDir();
+      _resetForTest(undefined, userDir);
+      const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const day = [
+        old.getFullYear(),
+        String(old.getMonth() + 1).padStart(2, '0'),
+        String(old.getDate()).padStart(2, '0'),
+      ].join('-');
+      const dayDir = path.join(userDir, '.history', 'events', day);
+      fs.mkdirSync(dayDir, { recursive: true });
+      const raw = path.join(dayDir, 'events.jsonl');
+      fs.writeFileSync(raw, '{"event":"info"}\n');
+      fs.utimesSync(raw, old, old);
+
+      const result = rotate(7);
+
+      expect(result.removedByAge).toBe(1);
+      expect(fs.existsSync(dayDir)).toBe(false);
+    });
+
+    it('queries rotated archives when AGENTS_EVENTS_PATH has a custom filename', () => {
+      const logsDir = makeTempDir();
+      _resetForTest(path.join(logsDir, 'custom-events.jsonl'));
+      fs.writeFileSync(getLogsPath(), `${' '.repeat(10 * 1024 * 1024)}\n`);
+
+      emit('info', { module: 'custom-override-trigger' });
+
+      expect(query({ module: 'custom-override-trigger' })).toHaveLength(1);
+      expect(fs.existsSync(path.join(logsDir, 'events.1.jsonl.gz'))).toBe(true);
+    });
   });
 
   describe('stats', () => {
