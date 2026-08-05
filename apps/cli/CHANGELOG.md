@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Routine activation is device-owned metadata instead of mutable definition state.** Enabled routine names now live at `~/.agents/devices/<hostname>/agents.yaml` under top-level `routines:`; membership means enabled. Pause/resume, `routines devices`, and the new `agents setup watchdog` phase mutate the target host only, while YAML definitions remain stable and execution history stays under `.history/runs/`. Legacy `enabled:`/`devices:` state materializes idempotently on upgrade. The Watchdog is now a built-in system routine enabled with `agents watchdog on|off`; its hard-coded routine factory was removed. Source: `apps/cli/src/lib/routine-activation.ts`, `apps/cli/src/lib/routines.ts`, `apps/cli/src/commands/{routines,watchdog,setup-watchdog}.ts`.
+
 ## 1.22.12
 
 - Store operational events in daily history directories, retain 7 days and at most 50 MiB automatically, and make `agents logs audit` use the `agents events --audit` reader.
