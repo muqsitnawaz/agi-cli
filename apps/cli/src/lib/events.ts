@@ -1138,17 +1138,19 @@ function finalizePastDayLogs(): void {
     if (path.basename(file.path) !== 'events.jsonl') continue;
     if (path.basename(path.dirname(file.path)) === currentDay) continue;
     try {
-      const dir = path.dirname(file.path);
-      const numbers = fs.readdirSync(dir)
-        .map((name) => name.match(/^events\.(\d+)\.jsonl\.gz$/))
-        .filter((match): match is RegExpMatchArray => match !== null)
-        .map((match) => Number(match[1]));
-      const next = (numbers.length ? Math.max(...numbers) : 0) + 1;
-      const target = path.join(dir, `events.${next}.jsonl.gz`);
-      const sourceStat = fs.statSync(file.path);
-      fs.writeFileSync(target, gzipSync(fs.readFileSync(file.path)), { mode: FILE_MODE });
-      fs.utimesSync(target, sourceStat.atime, sourceStat.mtime);
-      fs.unlinkSync(file.path);
+      withFileLock(file.path, () => {
+        const dir = path.dirname(file.path);
+        const numbers = fs.readdirSync(dir)
+          .map((name) => name.match(/^events\.(\d+)\.jsonl\.gz$/))
+          .filter((match): match is RegExpMatchArray => match !== null)
+          .map((match) => Number(match[1]));
+        const next = (numbers.length ? Math.max(...numbers) : 0) + 1;
+        const target = path.join(dir, `events.${next}.jsonl.gz`);
+        const sourceStat = fs.statSync(file.path);
+        fs.writeFileSync(target, gzipSync(fs.readFileSync(file.path)), { mode: FILE_MODE });
+        fs.utimesSync(target, sourceStat.atime, sourceStat.mtime);
+        fs.unlinkSync(file.path);
+      });
     } catch { /* retry on the next prune */ }
   }
 }

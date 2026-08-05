@@ -1,7 +1,9 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { spawn } from 'node:child_process';
 import { gunzipSync, gzipSync } from 'node:zlib';
+import lockfile from 'proper-lockfile';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   emit, emitStart, emitCommand, emitFriction, query, rotate, stats,
@@ -506,6 +508,37 @@ describe('events', () => {
 
       expect(result.removedByAge).toBe(1);
       expect(fs.existsSync(dayDir)).toBe(false);
+    });
+
+    it('serializes past-day finalization with migration archive allocation', async () => {
+      const home = makeTempDir();
+      const dayDir = path.join(home, '.agents', '.history', 'events', '2026-07-01');
+      fs.mkdirSync(dayDir, { recursive: true });
+      const raw = path.join(dayDir, 'events.jsonl');
+      fs.writeFileSync(raw, '{"event":"info"}\n');
+      const release = await lockfile.lock(raw);
+      const modulePath = path.resolve('src/lib/events.ts');
+      const child = spawn(
+        'node',
+        ['--import', 'tsx', '-e', `console.log('READY'); const { rotate } = await import(${JSON.stringify(modulePath)}); rotate(365);`],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, HOME: home, AGENTS_EVENTS_PATH: '' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      await new Promise<void>((resolve, reject) => {
+        child.once('error', reject);
+        child.stdout.once('data', () => resolve());
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(fs.existsSync(path.join(dayDir, 'events.1.jsonl.gz'))).toBe(false);
+
+      await release();
+      const exitCode = await new Promise<number | null>((resolve) => child.once('close', resolve));
+
+      expect(exitCode).toBe(0);
+      expect(fs.existsSync(path.join(dayDir, 'events.1.jsonl.gz'))).toBe(true);
     });
 
     it('queries rotated archives when AGENTS_EVENTS_PATH has a custom filename', () => {
