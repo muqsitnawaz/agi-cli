@@ -702,10 +702,8 @@ describe.skipIf(process.platform === 'win32')('non-interactive CLI usage', () =>
     // No separate "Profiles" section header — a harness gets a name header of
     // its own, exactly like Claude/Codex above it.
     expect(combined).not.toMatch(/^Profiles\s*$/m);
-    // The block header is derived from the profile name (title-cased,
-    // split on '-'/'_'), not the raw filename.
-    expect(combined).toMatch(/^ {2}Test Proxy \(custom\)$/m);
-    expect(combined).toMatch(/^ {2}Ollama \(custom\)$/m);
+    expect(combined).toMatch(/^ {2}test-proxy \(custom\)$/m);
+    expect(combined).toMatch(/^ {2}ollama \(custom\)$/m);
     // The model + the host that executes it sit on the harness's own row.
     expect(combined).toMatch(/truefoundry\/qwen3-coder\s.*via claude/);
     expect(combined).toMatch(/qwen3-coder:30b\s.*via codex/);
