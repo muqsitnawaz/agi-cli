@@ -920,7 +920,6 @@ function migrateRuntimeToHistory(): void {
   moveDirOnce(path.join(USER_DIR, '.backups'), path.join(HISTORY_DIR, 'backups'));
   moveDirOnce(path.join(USER_DIR, 'routines', 'runs'), path.join(HISTORY_DIR, 'runs'));
   moveDirOnce(path.join(USER_DIR, 'teams', 'agents'), path.join(HISTORY_DIR, 'teams', 'agents'));
-  migrateEventLogsToHistory();
 
   // Drop any empty leftover skeletons created mid-rename (e.g. `versions/<agent>/<v>/home/`
   // recreated by a concurrent process). The real data is already under .history/.
@@ -933,62 +932,6 @@ function migrateRuntimeToHistory(): void {
     try {
       if (fs.statSync(oldSessionsDb).size === 0) fs.unlinkSync(oldSessionsDb);
     } catch { /* best-effort */ }
-  }
-}
-
-/** Move the operational event stream out of the git-backed user-repo root. */
-function migrateEventLogsToHistory(): void {
-  const destination = path.join(HISTORY_DIR, 'events');
-  let files: string[] = [];
-  try {
-    files = fs.readdirSync(USER_DIR).filter((file) =>
-      file === 'events.jsonl' || /^events\.\d+\.jsonl\.gz$/.test(file)
-    );
-  } catch {
-    return;
-  }
-  try { fs.mkdirSync(destination, { recursive: true, mode: 0o700 }); } catch { return; }
-
-  const active = files.find((file) => file === 'events.jsonl');
-  if (active) {
-    const src = path.join(USER_DIR, active);
-    const dest = path.join(destination, active);
-    if (!fs.existsSync(dest)) {
-      moveFileOnce(src, dest);
-    } else {
-      try {
-        const lines = [fs.readFileSync(src, 'utf-8'), fs.readFileSync(dest, 'utf-8')]
-          .flatMap((content) => content.split('\n').filter(Boolean))
-          .map((line, index) => {
-            try {
-              const timestamp = Date.parse((JSON.parse(line) as { ts?: string }).ts ?? '');
-              return { line, index, timestamp: Number.isNaN(timestamp) ? Number.MAX_SAFE_INTEGER : timestamp };
-            } catch {
-              return { line, index, timestamp: Number.MAX_SAFE_INTEGER };
-            }
-          })
-          .sort((a, b) => a.timestamp - b.timestamp || a.index - b.index)
-          .map(({ line }) => line);
-        atomicWriteFileSync(dest, `${lines.join('\n')}\n`, { mode: 0o600 });
-        fs.unlinkSync(src);
-      } catch { /* preserve the source for a later retry */ }
-    }
-  }
-
-  const archives = files
-    .map((file) => ({ file, match: file.match(/^events\.(\d+)\.jsonl\.gz$/) }))
-    .filter((entry): entry is { file: string; match: RegExpMatchArray } => entry.match !== null)
-    .sort((a, b) => Number(a.match[1]) - Number(b.match[1]));
-  let nextArchive = fs.readdirSync(destination).reduce((max, file) => {
-    const match = file.match(/^events\.(\d+)\.jsonl\.gz$/);
-    return match ? Math.max(max, Number(match[1])) : max;
-  }, 0) + 1;
-  for (const archive of archives) {
-    const preferred = path.join(destination, archive.file);
-    const dest = fs.existsSync(preferred)
-      ? path.join(destination, `events.${nextArchive++}.jsonl.gz`)
-      : preferred;
-    moveFileOnce(path.join(USER_DIR, archive.file), dest);
   }
 }
 
@@ -1548,7 +1491,7 @@ function containsOnlyDsStore(dir: string): boolean {
 function warnSystemOrphans(): void {
   const SHIPPED_ALLOWLIST = new Set<string>([
     // resource directories shipped by the npm package
-    'commands', 'hooks', 'skills', 'rules', 'mcp', 'cli', 'permissions', 'subagents', 'profiles', 'agents', 'routines',
+    'commands', 'hooks', 'skills', 'rules', 'mcp', 'clis', 'permissions', 'subagents', 'profiles', 'agents', 'routines',
     // top-level metadata files
     'agents.yaml', 'hooks.yaml', 'README.md', 'CHANGELOG.md',
     // git + repo metadata
@@ -1924,10 +1867,36 @@ export function migrateWatchdogSentinelToRoutine(
   console.error('Migrated watchdog: legacy enable sentinel → watchdog routine (kept enabled)');
 }
 
+/**
+ * Rename cli/ → clis/ in each of the given `.agents/` directories.
+ *
+ * One-way, idempotent: no-op when src is absent. Throws when both
+ * `<dir>/cli` and `<dir>/clis` exist — the user must resolve the conflict
+ * manually before proceeding. Exported for unit-testing with temp dirs.
+ */
+export function migrateCliDirToClis(agentsDirs: string[]): void {
+  for (const agentsDir of agentsDirs) {
+    const src = path.join(agentsDir, 'cli');
+    const dest = path.join(agentsDir, 'clis');
+    if (!fs.existsSync(src)) continue;
+    if (fs.existsSync(dest)) {
+      throw new Error(
+        `Migration conflict: both ${src} and ${dest} exist. ` +
+        `Remove or merge the old cli/ directory into clis/ manually.`,
+      );
+    }
+    fs.renameSync(src, dest);
+  }
+}
+
 /** Run all idempotent migrations. Safe to call multiple times. */
 export async function runMigration(): Promise<void> {
   // MUST run first: every other migrator reads SYSTEM_DIR (the new path).
   foldLegacySystemRepo();
+  const cliMigrateDirs = [USER_DIR, SYSTEM_DIR];
+  const projectDotAgents = path.join(process.cwd(), '.agents');
+  if (fs.existsSync(projectDotAgents)) cliMigrateDirs.push(projectDotAgents);
+  migrateCliDirToClis(cliMigrateDirs);
   migrateAgentsYaml();
   deleteSystemPromptsJson();
   migrateSystemConfigJson();

@@ -6,6 +6,32 @@
 
 - **`agents projects import --from-factory` removed.** Factory no longer maintains its own `~/.agents/factory/projects.json` registry. The Factory Floor now reads canonical `~/.agents/projects/<name>.yaml` definitions via `agents projects list --json` and writes project changes back to those YAMLs directly. On first launch after this update, Factory auto-migrates any rows in the old `projects.json` to canonical YAMLs, preserving dispatch metadata. The `--min-confidence` and `--all` flags (which were only meaningful with `--from-factory`) are removed. Source: `apps/factory/src/core/managedProjects.ts`, `apps/cli/src/lib/project-import.ts`, `apps/cli/src/commands/projects.ts`.
 
+## 1.22.11
+
+- **`--blocked` iMessage notifications are now phone-actionable.** The forwarded message dropped the block's `--option`s, `--default`, and timeout and instead showed `agents focus <id>` — a CLI command that is useless on a phone. It now shows the choices (`Options: publish / wait`) and the safe-default fallback (`Default in 15 min: wait`) and omits the `agents focus` line, so a `--blocked` post that carries a `--default` self-resolves when the owner can't reply. Source: `apps/cli/src/lib/feed-broadcast.ts`.
+
+- Move operational event logs from the git-backed `~/.agents/` root into `~/.agents/.history/events/`, including existing numbered gzip archives.
+
+- **`agents projects` is out of beta — no `agents beta enable projects` needed.**
+  The command tree (list / add / import / status / link / …) is always registered
+  now; `projects` is dropped from the beta registry (`ALL_BETA_FEATURES`,
+  `BetaFeatureName`) and the `preAction` beta gate is removed. Any lingering
+  `beta.enabled: [projects]` entry is harmlessly ignored, and `agents beta
+  enable/disable projects` prints a friendly "graduated out of beta" note and
+  no-ops instead of erroring (so old scripts survive). Source:
+  `apps/cli/src/lib/beta.ts`, `apps/cli/src/lib/types.ts`,
+  `apps/cli/src/commands/beta.ts`, `apps/cli/src/commands/projects.ts`.
+
+- **`agents projects status` shows every project across the whole fleet by default;
+  scope it with `--device`/`--devices`.** The old `--fleet` flag is gone — status
+  now dials every registered device's workspace (presence, branch, drift) in one
+  parallel SSH round without being asked. `--device <name...>` (repeatable) or
+  `--devices a,b,c` narrows the fan-out to a subset; with no filter the whole fleet
+  is dialled. Reuses the shared `--host`/`--device` target resolution. Source:
+  `apps/cli/src/commands/projects.ts`.
+
+- **`scripts/release.sh` home-base hop: pass a single remote argv to `agents ssh`.** Multi-arg forms (`bash -lc '…'`) are joined without re-quoting by `wrapRemoteCommand`, so the remote `cd` never ran and publish failed with `fatal: not a git repository`. One shell string keeps the command intact. Source: `apps/cli/scripts/release.sh`.
+
 ## 1.22.10
 
 - **Plugins package workflows (Phase 5 packaging slice).** A plugin’s `workflows/<name>/WORKFLOW.md` is discovered and resolved by `agents run <name>` with precedence project > user > plugin > extra > system — no separate install into `~/.agents/workflows/` required. Plugin inventory / resource groups list `workflows`. Source: `apps/cli/src/lib/workflows.ts`, `apps/cli/src/lib/plugins.ts`, `apps/cli/src/lib/resources/workflows.ts`.
