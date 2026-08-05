@@ -1902,9 +1902,19 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         break;
       }
       // ---- managed projects (curated sidebar/dispatch list) ----
+      // All reads/saves/deletes shell through `agents projects` (managedProjects.ts).
+      // Errors stay explicit on the outbound message for inline UI display.
       case 'fetchManagedProjects': {
-        const projects = await readManagedProjects();
-        settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+        try {
+          const projects = await readManagedProjects();
+          settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+        } catch (err) {
+          settingsPanel?.webview.postMessage({
+            type: 'managedProjectsData',
+            projects: [],
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         break;
       }
       case 'fetchLinearProjects': {
@@ -1915,16 +1925,32 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
       case 'saveManagedProject': {
         const p = message?.project as ManagedProject | undefined;
         if (p && typeof p.id === 'string' && typeof p.name === 'string' && typeof p.path === 'string') {
-          const projects = await upsertManagedProject(p);
-          settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+          try {
+            const projects = await upsertManagedProject(p);
+            settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+          } catch (err) {
+            settingsPanel?.webview.postMessage({
+              type: 'managedProjectsData',
+              projects: [],
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
         break;
       }
       case 'deleteManagedProject': {
         const id = message?.id;
         if (typeof id === 'string') {
-          const projects = await deleteManagedProject(id);
-          settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+          try {
+            const projects = await deleteManagedProject(id);
+            settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+          } catch (err) {
+            settingsPanel?.webview.postMessage({
+              type: 'managedProjectsData',
+              projects: [],
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
         break;
       }
