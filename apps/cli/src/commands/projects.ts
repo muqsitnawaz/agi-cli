@@ -23,7 +23,6 @@ import { machineId } from '../lib/machine-id.js';
 import { getActiveSessions } from '../lib/session/active.js';
 import { gatherRemoteActive } from '../lib/session/remote-active.js';
 import { gatherRemoteAgentsJson } from '../lib/remote-agents-json.js';
-import { factoryProjectsPath } from '../lib/auto-dispatch.js';
 import {
   formatFleetWorkspaces,
   parseRemoteProbe,
@@ -61,7 +60,6 @@ import { checkRepoSlug } from '../lib/project-doctor.js';
 import { formatFocusAreas, readFocusAreas, type FocusArea } from '../lib/project-focus.js';
 import { formatVerdict, scheduleVerdict } from '../lib/project-schedule.js';
 import {
-  buildFactoryImportCandidates,
   buildLinearImportCandidates,
   validateImportOpts,
   type ImportOptions,
@@ -113,11 +111,8 @@ function parseGoalFlag(raw: string): ProjectGoal {
  *
  * `stderr: 'ignore'` is load-bearing, not tidiness. A checkout with no origin
  * makes git print `error: No such remote 'origin'` on ITS stderr, which is the
- * terminal's — the catch below never sees it. That was invisible while this was
- * called once from `add` inside a real repo, and became noise the moment
- * `import --from-factory` started calling it per row: importing 12 registry
- * rows printed two raw git errors between the progress lines. Absence of a
- * remote is an expected answer here (`undefined`), not something to report.
+ * terminal's — the catch below never sees it. Absence of a remote is an
+ * expected answer here (`undefined`), not something to report.
  */
 export function originSlug(cwd: string): string | undefined {
   try {
@@ -130,37 +125,6 @@ export function originSlug(cwd: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-/**
- * Read the Factory registry off disk and plan its import. Every read failure is
- * fatal and named — an unreadable or malformed registry must not read as "0
- * projects to import".
- */
-function runFactoryImport(existing: Map<string, ProjectDef>, opts: ImportOptions): ImportPlan {
-  const src = factoryProjectsPath();
-  let rawText: string;
-  try {
-    rawText = fs.readFileSync(src, 'utf8');
-  } catch {
-    console.error(chalk.red(`No Factory registry at ${src}`));
-    process.exit(1);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawText);
-  } catch {
-    console.error(chalk.red(`Factory registry at ${src} is not valid JSON`));
-    process.exit(1);
-  }
-  const rows = Array.isArray(parsed)
-    ? parsed
-    : Array.isArray((parsed as { projects?: unknown[] })?.projects)
-      ? (parsed as { projects: unknown[] }).projects
-      : [];
-  // The checkout's real `origin` overrides the registry's path-derived slug —
-  // see buildFactoryImportCandidates for why the path guess is not trustworthy.
-  return buildFactoryImportCandidates(rows, existing, opts, (root) => originSlug(expandLocalHome(root)));
 }
 
 /**
@@ -521,11 +485,6 @@ export function registerProjectsCommands(program: Command): void {
     notes: `
       Definitions are hand-editable YAML in ~/.agents/projects/ and sync across
       machines with 'agents push/pull'.
-
-      'import --from-factory' reads Factory's auto-detected registry, which
-      guesses from checkouts on disk — it imports only 'high' confidence rows by
-      default. Widen with --min-confidence medium or --all, and drop a bad guess
-      with 'agents projects rm <name>'.
     `,
   });
 
@@ -851,11 +810,8 @@ export function registerProjectsCommands(program: Command): void {
   // ---- import ----
   projects
     .command('import')
-    .description('Import project definitions from Linear (preferred) or the Factory auto-detection registry.')
-    .option('--from-linear', 'Import the workspace\'s Linear projects (via the `linear` CLI)')
-    .option('--from-factory', 'Import the Factory registry (~/.agents/factory/projects.json)')
-    .option('--min-confidence <level>', '--from-factory only: lowest detection confidence to import — low|medium|high (default: high)')
-    .option('--all', '--from-factory only: import every row regardless of confidence')
+    .description('Import project definitions from Linear (via the `linear` CLI).')
+    .option('--from-linear', 'Import the workspace\'s Linear projects')
     .option('--force', 'Overwrite existing definitions')
     .action((raw: RawImportFlags) => {
       let opts: ImportOptions;
@@ -866,15 +822,12 @@ export function registerProjectsCommands(program: Command): void {
         process.exit(1);
       }
       const existing = new Map(listProjectDefs().map((d) => [d.name, d]));
-      const result = opts.source === 'linear' ? runLinearImport(existing, opts) : runFactoryImport(existing, opts);
+      const result = runLinearImport(existing, opts);
       for (const def of result.defs) writeProjectDef(def);
       const n = result.defs.length;
       const s = result.skipped.length;
       console.log(chalk.green(`Imported ${n} project${n === 1 ? '' : 's'}${s ? chalk.gray(` (${s} skipped)`) : ''}`));
       for (const skip of result.skipped) console.log(chalk.gray(`  skip ${skip.name}: ${skip.reason}`));
-      if (opts.source === 'factory' && s > 0 && opts.minConfidence === 'high') {
-        console.log(chalk.gray('  (widen with --min-confidence medium or --all)'));
-      }
     });
 
   // ---- set ----
