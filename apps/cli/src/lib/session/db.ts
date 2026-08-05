@@ -19,6 +19,7 @@ import { machineForSessionFile } from './origin-machine.js';
 import { loadSessionActorIndex, readSessionActorRecord } from './actor-sidecar.js';
 import { toolCallsFromEvents, type IndexedToolCall } from './tool-calls.js';
 import { persistToolCalls, purgeToolCalls, toolEvidenceSourcePath } from './tool-store.js';
+import { buildClaudeAccountIndex, resolveClaudeAccount } from './claude-accounts.js';
 import { extractSkills, extractSlashCommands } from './highlights.js';
 import { resolveResource } from '../resources.js';
 import { discoverPlugins } from '../plugins.js';
@@ -30,7 +31,7 @@ const DB_PATH = getSessionsDbPath();
 /** Current schema version; bumped when migrations are added. Exported so tests
  * assert against the constant instead of hardcoding a number that every bump
  * then has to chase (docs/05-sessions.md calls the constant the source of truth). */
-export const SCHEMA_VERSION = 32;
+export const SCHEMA_VERSION = 33;
 
 /**
  * Bump to force `agents sessions backfill resources` to re-derive every
@@ -74,6 +75,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   routine_run_id TEXT,
   version TEXT,
   account TEXT,
+  account_key TEXT,
+  account_org TEXT,
   mode TEXT,
   timestamp TEXT NOT NULL,
   last_activity TEXT,
@@ -284,6 +287,8 @@ export interface SessionRow {
   routine_run_id: string | null;
   version: string | null;
   account: string | null;
+  account_key: string | null;
+  account_org: string | null;
   mode: string | null;
   timestamp: string;
   last_activity: string | null;
@@ -838,6 +843,65 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
     if (!cols.has('mode')) db.exec(`ALTER TABLE sessions ADD COLUMN mode TEXT`);
   }
 
+  if (fromVersion < 33) {
+    // v32 → v33: attribute each Claude session to the account that produced it.
+    // Until now `account` held ONE email resolved process-globally and stamped on
+    // every row of a scan, so a machine with several signed-in accounts reported all
+    // of its history under whichever resolved first.
+    //
+    // Do NOT wipe scan_ledger. Attribution is a pure function of (file_path,
+    // version) — both already stored — so existing rows are repaired in place with
+    // no transcript re-parsed. Adding `DELETE FROM scan_ledger` here to match the
+    // other migrations would force a full re-parse of every indexed transcript to
+    // recompute something derivable from two columns. The v31 migration sets the
+    // same precedent.
+    const cols = new Set(
+      (db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>).map((column) => column.name),
+    );
+    if (!cols.has('account_key')) db.exec(`ALTER TABLE sessions ADD COLUMN account_key TEXT`);
+    if (!cols.has('account_org')) db.exec(`ALTER TABLE sessions ADD COLUMN account_org TEXT`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_account_key ON sessions(account_key)`);
+    backfillClaudeAccounts(db);
+  }
+
+}
+
+/**
+ * Stamp `account_key` / `account_org` / `account` on every Claude row from its
+ * `file_path` and recorded `version`. Used by the v33 migration; idempotent, so it is
+ * safe to re-run.
+ */
+function backfillClaudeAccounts(
+  db: Database.Database,
+  scope: 'all' | 'unresolved' = 'all',
+): void {
+  // 'unresolved' exists so the getDB repair touches ONLY rows that are actually
+  // broken. Re-resolving every Claude row on an unrelated trigger would silently
+  // downgrade a correct row whose version home has since been uninstalled and its
+  // trash snapshot pruned — the row would go from attributed to dark for no reason
+  // the user caused. The migration wants 'all'; the repair does not.
+  const where = scope === 'all'
+    ? `agent = 'claude'`
+    : `agent = 'claude' AND (account_key IS NULL
+         OR (account_key LIKE 'unattributed:%' AND account IS NOT NULL))`;
+  const index = buildClaudeAccountIndex();
+  const rows = db.prepare(
+    `SELECT id, file_path, version FROM sessions WHERE ${where}`,
+  ).all() as Array<{ id: string; file_path: string; version: string | null }>;
+  if (rows.length === 0) return;
+
+  // `account` is overwritten, not COALESCEd. Every pre-v33 row carries the wrong
+  // globally-resolved email; keeping it on a row we could not attribute would leave a
+  // known-false address on display (commands/sessions.ts prints it, and its fuzzy
+  // matcher scores on it) and would disagree with the scan path, which writes
+  // `account = excluded.account` unconditionally. A dark row reads NULL.
+  const update = db.prepare(
+    `UPDATE sessions SET account_key = ?, account_org = ?, account = ? WHERE id = ?`,
+  );
+  for (const row of rows) {
+    const bucket = resolveClaudeAccount(index, row.file_path ?? '', row.version);
+    update.run(bucket.key, bucket.orgName, bucket.email, row.id);
+  }
 }
 
 /** Open (or return the cached) sessions database, applying migrations as needed. */
@@ -885,6 +949,31 @@ export function getDB(): Database.Database {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity DESC)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_origin ON sessions(origin)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sessions_routine_run_id ON sessions(routine_run_id)`);
+  // Account attribution repair. Two ways a Claude row ends up wrong even at v33:
+  // an older CLI (whose INSERT does not name the column) writes NULL, and a DB
+  // migrated by a build that predates the "clear the stale email on a dark row" fix
+  // keeps a known-wrong address. The v33 migration cannot fix either — it never runs
+  // again. Cheap guard first so the common case is one indexed lookup, then repair.
+  // Same shape as the `machine` repair below, for the same reason.
+  {
+    // Column guard FIRST, like the `machine` repair below. schema_version can be
+    // stamped at SCHEMA_VERSION without the column existing — getDB writes the marker
+    // for any DB whose meta has no row (a hand-built or partially-created index), and
+    // migrateSchema never runs in that path. Querying account_key unguarded would
+    // then throw "no such column" and take down every command that opens the index.
+    const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === 'account_key') && cols.some((c) => c.name === 'account_org')) {
+      const needsRepair = db.prepare(`
+        SELECT 1 FROM sessions
+        WHERE agent = 'claude'
+          AND (account_key IS NULL
+               OR (account_key LIKE 'unattributed:%' AND account IS NOT NULL))
+        LIMIT 1
+      `).get();
+      if (needsRepair) db.transaction(() => backfillClaudeAccounts(db, 'unresolved'))();
+    }
+  }
+
   // machine column + indexes: only after the column is guaranteed present.
   // Fresh SCHEMA (v17) includes the column; older DBs get it from migrate v17.
   // If a partial upgrade left schema_version ahead of the column, repair here.
@@ -1283,7 +1372,7 @@ export function recordDirScans(
 const upsertSessionStmt = (db: Database.Database) => db.prepare(`
   INSERT INTO sessions (
     id, short_id, agent, origin, routine_name, routine_run_id,
-    version, account, mode, timestamp, last_activity,
+    version, account, account_key, account_org, mode, timestamp, last_activity,
     project, cwd, git_branch, topic, label, message_count, token_count,
     output_tokens, cost_usd, duration_ms, model, tool_call_count,
     file_path, file_mtime_ms, file_size, scanned_at, is_team_origin,
@@ -1292,7 +1381,7 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     actor, initiated_by, used_browser, used_computer
   ) VALUES (
     @id, @short_id, @agent, @origin, @routine_name, @routine_run_id,
-    @version, @account, @mode, @timestamp, @last_activity,
+    @version, @account, @account_key, @account_org, @mode, @timestamp, @last_activity,
     @project, @cwd, @git_branch, @topic, @label, @message_count, @token_count,
     @output_tokens, @cost_usd, @duration_ms, @model, @tool_call_count,
     @file_path, @file_mtime_ms, @file_size, @scanned_at, @is_team_origin,
@@ -1308,6 +1397,8 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     routine_run_id = excluded.routine_run_id,
     version = excluded.version,
     account = excluded.account,
+    account_key = excluded.account_key,
+    account_org = excluded.account_org,
     mode = COALESCE(excluded.mode, sessions.mode),
     timestamp = excluded.timestamp,
     last_activity = excluded.last_activity,
@@ -1386,6 +1477,23 @@ function detectToolUsage(sessionId: string): { usedBrowser: boolean; usedCompute
 
 const deleteResourceUsageStmt = (db: Database.Database) =>
   db.prepare(`DELETE FROM session_resource_usage WHERE session_id = ?`);
+/**
+ * Named-bind shape for {@link insertResourceUsageStmt}. Declared so the two call sites
+ * are type-checked: bun binds named parameters in strict mode where a MISSING key
+ * throws (node binds NULL), and both call sites sit outside any per-row guard, so a
+ * dropped key would abort the whole batch on the runtime the shipped binary embeds.
+ */
+interface ResourceUsageBind {
+  session_id: string;
+  kind: 'skill' | 'command';
+  name: string;
+  count: number;
+  plugin: string | null;
+  source: string | null;
+  repo_root: string | null;
+  snapshot_sha: string | null;
+}
+
 const insertResourceUsageStmt = (db: Database.Database) => db.prepare(`
   INSERT INTO session_resource_usage (session_id, kind, name, plugin, source, repo_root, snapshot_sha, count)
   VALUES (@session_id, @kind, @name, @plugin, @source, @repo_root, @snapshot_sha, @count)
@@ -1460,20 +1568,22 @@ function writeResourceUsageFromTallies(
   const plugins = discoverPlugins({ cwd });
   for (const { name, count } of skills) {
     const prov = resolveResourceProvenance('skills', name, cwd, plugins);
-    ins.run({
+    const bind: ResourceUsageBind = {
       session_id: sessionId, kind: 'skill', name, count,
       plugin: prov.plugin ?? null, source: prov.source ?? null,
       repo_root: prov.repoRoot ?? null, snapshot_sha: prov.snapshotSha ?? null,
-    });
+    };
+    ins.run(bind);
   }
   for (const { name, count } of commands) {
     const bare = name.replace(/^\//, '');
     const prov = resolveResourceProvenance('commands', bare, cwd, plugins);
-    ins.run({
+    const bind: ResourceUsageBind = {
       session_id: sessionId, kind: 'command', name: bare, count,
       plugin: prov.plugin ?? null, source: prov.source ?? null,
       repo_root: prov.repoRoot ?? null, snapshot_sha: prov.snapshotSha ?? null,
-    });
+    };
+    ins.run(bind);
   }
 }
 
@@ -1575,6 +1685,8 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
     routine_run_id: meta.routineRunId ?? null,
     version: meta.version ?? null,
     account: meta.account ?? null,
+    account_key: meta.accountKey ?? null,
+    account_org: meta.accountOrg ?? null,
     mode: meta.mode ?? actorRec?.mode ?? null,
     timestamp: meta.timestamp,
     last_activity: resolveLastActivity(meta, scan),
@@ -1749,7 +1861,12 @@ export function upsertSessionsBatch(
         writeResourceUsageFromTallies(meta.id, meta.skillsUsed ?? [], meta.slashCommandsUsed ?? [], meta.cwd);
       }
       try {
-      upsert.run({
+      // Typed, not a bare literal: bun binds named parameters in strict mode, where a
+      // MISSING key throws (node binds NULL instead). A silently dropped key therefore
+      // breaks only the shipped binary's runtime, and the per-row catch below swallows
+      // it — the exact shape of the bug that shipped account_key unbound. Annotating
+      // against SessionRow makes tsc reject the next omission.
+      const row: SessionRow = {
         id: meta.id,
         short_id: meta.shortId,
         agent: meta.agent,
@@ -1758,6 +1875,8 @@ export function upsertSessionsBatch(
         routine_run_id: meta.routineRunId ?? null,
         version: meta.version ?? null,
         account: meta.account ?? null,
+        account_key: meta.accountKey ?? null,
+        account_org: meta.accountOrg ?? null,
         mode: meta.mode ?? actorIndex.get(meta.id)?.mode ?? null,
         timestamp: meta.timestamp,
         last_activity: resolveLastActivity(meta, scan),
@@ -1793,7 +1912,8 @@ export function upsertSessionsBatch(
         initiated_by: meta.initiatedBy ?? actorIndex.get(meta.id)?.initiatedBy ?? null,
         used_browser: toolUsage.usedBrowser ? 1 : 0,
         used_computer: toolUsage.usedComputer ? 1 : 0,
-      });
+      };
+      upsert.run(row);
       delText.run(meta.id);
       insText.run(
         meta.id,
@@ -1997,6 +2117,8 @@ function rowToMeta(row: SessionRow): SessionMeta {
     toolCallCount: row.tool_call_count ?? undefined,
     version: row.version ?? undefined,
     account: row.account ?? undefined,
+    accountKey: row.account_key ?? undefined,
+    accountOrg: row.account_org ?? undefined,
     mode: isSessionRunMode(row.mode) ? row.mode : undefined,
     topic: row.topic ?? undefined,
     label: row.label ?? undefined,
@@ -2242,8 +2364,16 @@ export function countSessions(options: QueryOptions = {}): number {
 
 /** One grouped row in a cost/duration rollup. */
 export interface UsageRollupRow {
-  /** Grouping key value: the agent id, project name, or ISO date (YYYY-MM-DD). */
+  /**
+   * Grouping key value: the agent id, project name, ISO date (YYYY-MM-DD), or
+   * account identity (`claude:org=<uuid>` / `unattributed:<reason>`).
+   */
   key: string;
+  /**
+   * Human label for the key when it is not itself readable — an org uuid is an
+   * identity, not something to show a user. Absent when `key` reads fine on its own.
+   */
+  label?: string;
   costUsd: number;
   durationMs: number;
   sessionCount: number;
@@ -2253,7 +2383,7 @@ export interface UsageRollupRow {
 }
 
 /** What to group a usage rollup by. */
-export type UsageRollupGroup = 'agent' | 'project' | 'day';
+export type UsageRollupGroup = 'agent' | 'project' | 'day' | 'account';
 
 /**
  * Smart-launch affinity priors: group sessions by origin machine, harness, or
@@ -2362,13 +2492,24 @@ export function queryUsageRollup(
       ? 'agent'
       : options.groupBy === 'project'
         ? `IFNULL(NULLIF(project, ''), '(no project)')`
-        // ISO timestamps are lexicographically date-sortable; the date is the
-        // first 10 chars (YYYY-MM-DD).
-        : `substr(timestamp, 1, 10)`;
+        : options.groupBy === 'account'
+          // A NULL account_key means this harness has no account attribution yet —
+          // the mechanism is Claude-only today (see lib/session/claude-accounts.ts).
+          // Bucket per agent so the rows are named honestly instead of being called
+          // "not indexed", which they are not, and instead of joining a real account.
+          ? `IFNULL(NULLIF(account_key, ''), 'unattributed:' || agent)`
+          // ISO timestamps are lexicographically date-sortable; the date is the
+          // first 10 chars (YYYY-MM-DD).
+          : `substr(timestamp, 1, 10)`;
 
   const sql = `
     SELECT
       ${keyExpr} AS key,
+      ${options.groupBy === 'account'
+        // One label per account_key by construction, so MAX just picks it out.
+        ? `MAX(CASE WHEN account_org IS NOT NULL AND account IS NOT NULL
+                    THEN account_org || ' <' || account || '>' END) AS label,`
+        : ''}
       IFNULL(SUM(cost_usd), 0) AS costUsd,
       IFNULL(SUM(duration_ms), 0) AS durationMs,
       COUNT(*) AS sessionCount,

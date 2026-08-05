@@ -47,6 +47,8 @@ interface OutputOptions {
 
 interface RollupRow {
   key: string;
+  /** Human label when the key is an identity rather than display text (--by account). */
+  label?: string;
   costUsd: number;
   durationMs: number;
   sessionCount: number;
@@ -92,7 +94,7 @@ export function registerOutputCommand(program: Command): void {
     .description('Productivity rollup — token burn vs shipped output (PRs, commits) across agents')
     .option('--json', 'Output the rollup as JSON')
     .option('--since <time>', 'Only sessions/commits newer than this: 1h, 24h, 7d, 4w, 1mo, 1y, or ISO date (default 7d)')
-    .option('--by <dimension>', 'Group the burn/output breakdown by: agent (default), project, or day')
+    .option('--by <dimension>', 'Group the burn/output breakdown by: agent (default), project, day, or account (the Claude org that produced each session)')
     .option('--repos-dir <dir>', 'Root scanned for git repos (default ~/src)')
     .option('--author <email...>', 'Count commits by these author emails (default: your git identities)')
     .option('--login <login...>', 'Count PRs for these GitHub logins (default: current gh user)')
@@ -116,8 +118,8 @@ Output tokens are the real generated tokens — NOT the cache-inflated total tok
 
 function resolveGroup(by: string | undefined): UsageRollupGroup {
   if (by === undefined) return 'agent';
-  if (by === 'agent' || by === 'project' || by === 'day') return by;
-  console.error(chalk.red('error: --by must be one of: agent, project, day'));
+  if (by === 'agent' || by === 'project' || by === 'day' || by === 'account') return by;
+  console.error(chalk.red('error: --by must be one of: agent, project, day, account'));
   process.exit(1);
 }
 
@@ -267,7 +269,10 @@ function mergeMachines(machines: OutputPayload[], options: OutputOptions): Outpu
     for (const s of m.output.commitShas) allShas.add(s);
     for (const a of m.uncostedAgents) uncosted.add(a);
     for (const r of m.breakdown.rows) {
-      const cur = byKey.get(r.key) ?? { key: r.key, costUsd: 0, durationMs: 0, sessionCount: 0, tokenCount: 0, outputTokens: 0 };
+      const cur = byKey.get(r.key) ?? { key: r.key, label: r.label, costUsd: 0, durationMs: 0, sessionCount: 0, tokenCount: 0, outputTokens: 0 };
+      // Peers resolve their own labels; keep the first non-empty one so a machine that
+      // has not indexed an account yet does not blank a label another machine supplied.
+      cur.label ??= r.label;
       cur.costUsd += r.costUsd;
       cur.durationMs += r.durationMs;
       cur.sessionCount += r.sessionCount;
@@ -335,12 +340,13 @@ function renderBreakdown(rows: RollupRow[], groupBy: string): string[] {
   const outW = Math.max(...rows.map(r => formatCompact(r.outputTokens).length), 6);
   const sessW = Math.max(...rows.map(r => String(r.sessionCount).length), 3);
   const fixedW = 2 + 2 + burnW + 2 + outW + 2 + sessW + 8;
-  const keyW = Math.max(8, Math.min(Math.max(...rows.map(r => r.key.length), groupBy.length), cols - fixedW));
+  const display = (r: RollupRow): string => r.label ?? r.key;
+  const keyW = Math.max(8, Math.min(Math.max(...rows.map(r => display(r).length), groupBy.length), cols - fixedW));
   out.push('  ' + chalk.gray(padToWidth('', keyW)) + '  ' + chalk.gray(padToWidth('burn', burnW)) + '  ' + chalk.gray(padToWidth('output', outW)) + '  ' + chalk.gray('sessions'));
   for (const r of rows) {
     out.push(
       '  ' +
-        padToWidth(truncateToWidth(r.key, keyW), keyW) +
+        padToWidth(truncateToWidth(display(r), keyW), keyW) +
         '  ' +
         chalk.green(padToWidth(formatUsd(r.costUsd), burnW)) +
         '  ' +
