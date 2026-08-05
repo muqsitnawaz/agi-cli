@@ -384,7 +384,13 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     // only (`tools.approval` record: allow|prompt|deny) with no command/path/domain
     // patterns, so agents-cli's granular permission format has nothing to map to.
     // plugins are npm packages / TS modules, not the Claude marketplace manifest.
-    capabilities: { hooks: false, mcp: true, mcpHttp: true, mcpHeaders: true, allowlist: false, skills: true, commands: true, plugins: false, subagents: true, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit', 'skip'] },
+    // interactiveRepl: true — omp is a terminal-first, session-based coding agent
+    // (package: "Coding agent CLI with … session management"); bare `omp` opens a
+    // persistent interactive REPL, like every other terminal-first harness
+    // (claude/codex/opencode/droid). Added here because the `pi` harness (#1953)
+    // and the `interactiveRepl` capability (RUSH-2185, #1954) merged concurrently,
+    // so pi shipped without it and failed the capability-completeness test.
+    capabilities: { hooks: false, mcp: true, mcpHttp: true, mcpHeaders: true, allowlist: false, skills: true, commands: true, plugins: false, subagents: true, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit', 'skip'], interactiveRepl: true },
   },
   openclaw: {
     id: 'openclaw',
