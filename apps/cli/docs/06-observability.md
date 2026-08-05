@@ -14,8 +14,8 @@ whose *consumer* and *axis* match your question, not whichever you remember firs
 | **`events`** | **Raw unified event stream = the audit log.** Everything: secrets access, command invocations, version/skill/mcp/team ops, browser events, plus agent milestones. `--follow` to tail, `--audit` for ops-only. | `events.jsonl` + per-session `activity/*.jsonl`, merged by `readUnifiedEvents` | Audit, debugging, monitoring (human + machine) |
 | **`perf`** | **Latency rollups.** p50/p99 for hooks, CLI commands, and `agent.run` timings. Indexed SQLite — not a full scan of the audit log. | `~/.agents/.cache/perf/perf.db` (disposable) | Humans optimizing boot/run cost + `--json` |
 | **`trends`** | **Usage analytics.** Harness/model mix, tools per session, token ratios, hottest secrets/browser profiles — baked recipes over sessions + a durable resource warehouse. Distinct from quota (`agents usage`) and latency (`agents perf`). | `sessions.db` + `~/.agents/.history/analytics/usage.db` | Humans + `--json` |
-| **`feed`** | **Consolidated cross-agent surface.** Open blocks (decisions agents are waiting on) + `feed post` status updates — "what needs you / what are agents saying." | `.history/feed/*` + active sessions | Humans (operator inbox) + agents (progress) |
-| **`activity`** | **Human milestone timeline.** Recent plans / PRs / worktrees / sub-agents, plus Bash-driven deliverables (video renders, image upscales, metadata edits), newest-first — a friendly lens on the milestone tier of the event stream. Every Bash call also emits a structured `bash.executed` activity record carrying its tool category. | `activity/*.jsonl` | Human at the terminal |
+| **`feed`** | **Consolidated cross-agent surface.** Open blocks (decisions agents are waiting on) + `feed post` status updates — "what needs you / what are agents saying." Scope to one project with `--project`. | `.history/feed/*` + active sessions | Humans (operator inbox) + agents (progress) |
+| **`activity`** | **Deprecated.** Use `agents feed --filter all` (blocks + progress posts) or `agents feed --filter updates` (progress posts only). The standalone milestone timeline remains readable for now but receives no new features. | `activity/*.jsonl` | Human at the terminal |
 | **`output`** | **Productivity accounting.** Token burn vs shipped output (PRs, commits) across agents — the "was it worth it" axis. (`agents cost` is the pure $-and-duration sibling.) | `sessions.db` + git/gh | Human + `--json` |
 | **`sessions`** | **Live agent roster + transcripts.** Which agents are running right now and their state; browse/read past conversation transcripts. A live process probe + transcript index, not an event log. | live pid/transcript probe + `sessions.db` | Human + `--json` |
 
@@ -27,7 +27,7 @@ Outbound names that look interchangeable are three different planes:
 |---|---|---|
 | **Deliver** | `agents send` / `agents notify` | Put a message in front of a recipient (`--to`, `--text`, `--channel`, `--attach`, `--url`). `notify` ≡ `send --to owner` (`notify.owner` in agents.yaml). |
 | **Record** | `agents feed post` | Append a status/milestone (and optional OpenBlock). May **forward** via `feed.broadcast` sinks that call `send`/`notify`. |
-| **Observe** | `agents activity` | **Read** the activity stream — not a send path. |
+| **Observe** | `agents feed --filter updates` / `agents feed --filter all` | **Read** the activity stream — not a send path. `agents activity` is deprecated. |
 | **Control** | `agents message` / `agents sessions inject` | Act on a running agent (mailbox answer vs terminal keystroke). Stay separate from `send`. |
 
 ```bash
@@ -770,9 +770,11 @@ irreducibility, so a fresh cheap ask does not outrank an old critical-path block
 `--filter <view>` selects what the surface shows:
 
 ```bash
-agents feed                     # needs (default): open blocks — decisions agents wait on
-agents feed --filter updates    # only deliberate progress posts (see Status posts below)
-agents feed --filter all        # blocks first, then the updates view appended
+agents feed                              # needs (default): open blocks — decisions agents wait on
+agents feed --filter updates             # only deliberate progress posts (see Status posts below)
+agents feed --filter all                 # blocks first, then the updates view appended
+agents feed --project agents-cli         # scope blocks + updates to one repo/project
+agents feed --filter updates --project agents-cli  # project's progress posts only
 ```
 
 `--filter updates` skips the block pipeline (no stall suppression, no dispatch
@@ -781,6 +783,14 @@ whichever box ran it, so the fleet's posts merge into one recency-ordered list.
 `-H/--host` (alias `--device`) scopes it to named machines; `--local` (or
 `AGENTS_FEED_LOCAL=1`) keeps it to this box. Its `--json` emits the raw
 `status.posted` events.
+
+`--project <name>` scopes every part of the feed — open blocks, the updates view,
+and the trailing activity lane — to one repo/project. It matches the worktree-aware
+project key (`lib/project-key.ts`), so a worktree under `<repo>/.agents/worktrees/`
+folds back into `<repo>`. Filtering is done locally after the fleet fan-out, so
+older peers that do not recognize the flag still contribute their full payload and
+the requesting box narrows it. The masthead reads `<project> needs you` / `<project>
+updates` when a project is set.
 
 The `limit` on this view counts **posts**, not raw events: the event filter is
 pushed into `readRecentActivity` (`events` / `tier` options) rather than applied
@@ -1012,7 +1022,13 @@ with the fallback available — the fallback follows the same `minLevel` contrac
 every sink already does — and writing an actual `feed.broadcast` block always
 wins outright over the fallback.
 
-### Activity lane (`agents activity`) — progress at a glance, fleet-wide
+### Activity lane (`agents activity`) — deprecated
+
+> **Deprecated:** `agents activity` is being folded into `agents feed`. Use
+> `agents feed --filter all` for open blocks plus progress posts, or
+> `agents feed --filter updates` for progress posts only. `--project <name>` on
+> `agents feed` replaces `activity --project`. The standalone command still works
+> but prints a deprecation warning and will not receive new features.
 
 `agents activity` reads the same append-only activity stream (never re-parsing
 transcripts), across the whole fleet, bucketed by project:

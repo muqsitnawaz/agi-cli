@@ -24,10 +24,15 @@ describe('activity command option/alias wiring', () => {
     const longs = activityCmd().options.map((o) => o.long);
     for (const flag of [
       '--local', '--host', '--device', '--devices-all', '--hosts-all',
-      '--group-by', '--flat', '--filter', '--milestones', '--all', '--json', '--since', '--limit',
+      '--group-by', '--flat', '--filter', '--milestones', '--all', '--json', '--since', '--limit', '--project',
     ]) {
       expect(longs).toContain(flag);
     }
+  });
+
+  it('describes itself as deprecated, pointing to agents feed', () => {
+    expect(activityCmd().description()).toMatch(/Deprecated/i);
+    expect(activityCmd().description()).toMatch(/agents feed/);
   });
 
   it('parses --devices-all --group-by --filter --local without an unknown-option error', () => {

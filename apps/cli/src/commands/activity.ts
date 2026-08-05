@@ -297,7 +297,7 @@ export function resolveActivityScope(
 export function registerActivityCommand(program: Command): void {
   program
     .command('activity')
-    .description('Recent agent activity across the fleet -- plans, PRs, worktrees, sub-agents, by project')
+    .description('Deprecated: use `agents feed --filter all` for open blocks + progress posts; or `agents feed --filter updates` for updates only')
     .option('--json', 'Emit the (enriched) event list as JSON')
     .option('--all', 'Include routine activity (file edits) inline, not collapsed')
     .option('--milestones', 'Only milestone events (plans, PRs, worktrees, sub-agents)')
@@ -331,6 +331,14 @@ multi-repo project is one bucket; anything else folds to its repository. Each
 project header names the machines its work ran on.
 `)
     .action(async (opts: ActivityOpts) => {
+      // DEPRECATED (RUSH-2025 follow-up): `agents activity` is being folded into
+      // `agents feed`. The standalone timeline view remains functional for now,
+      // but new workflows should use `agents feed --filter all` (blocks + updates)
+      // or `agents feed --filter updates` (progress posts only). `--project`
+      // maps directly to `agents feed --project <name>`.
+      if (!opts.json) {
+        process.stderr.write(chalk.yellow('Warning: `agents activity` is deprecated; use `agents feed --filter all` instead.\n\n'));
+      }
       if (opts.device?.length) opts.host = [...(opts.host ?? []), ...opts.device];
       let groupBy: ActivityGroupBy | undefined;
       try {
