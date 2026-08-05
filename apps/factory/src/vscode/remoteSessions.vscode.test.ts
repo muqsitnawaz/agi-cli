@@ -5,6 +5,7 @@ import {
   getLastGoodFloorSnapshot,
   __resetRemoteSessionsCachesForTests,
   fetchHostSessions,
+  fetchLocalSessions,
   __remoteSessionsTestCounters,
 } from './remoteSessions.vscode';
 import {
@@ -110,5 +111,37 @@ test('retainLastGoodOnFailure keeps remote rows when a refresh fails', () => {
   expect(kept?.fromCache).toBe(true);
   expect(kept?.sessions.map((s) => s.sessionId)).toContain('remote-1');
   expect(kept?.fetchedAt).toBe(1000);
+});
+
+test('hydrate from store seeds localCache so non-force local reads need no CLI', async () => {
+  const snap = sampleSnap();
+  setFloorSnapshotStore({
+    read: () => snap,
+    write: () => {},
+  });
+  __remoteSessionsTestCounters.reset();
+  // After hydrate, non-force local reads must return last-good this-mac rows
+  // without a local CLI call (backstop clock stamped "now" at hydrate).
+  const before = __remoteSessionsTestCounters.localActiveCalls;
+  const local = await fetchLocalSessions(Date.now(), { force: false });
+  expect(local.fromCache).toBe(true);
+  expect(local.sessions.map((s) => s.sessionId)).toEqual(['local-1']);
+  expect(__remoteSessionsTestCounters.localActiveCalls).toBe(before);
+});
+
+test('hydrate retains full last-good including remote rows; fail path cannot empty them', () => {
+  const snap = sampleSnap();
+  setFloorSnapshotStore({
+    read: () => snap,
+    write: () => {},
+  });
+  expect(getLastGoodFloorSnapshot()?.sessions.map((s) => s.sessionId).sort()).toEqual([
+    'local-1',
+    'remote-1',
+  ]);
+  // Pure fail retain (what fetchHostSessions / empty local fail path use).
+  const kept = retainLastGoodOnFailure(getLastGoodFloorSnapshot());
+  expect(kept?.sessions.map((s) => s.sessionId).sort()).toEqual(['local-1', 'remote-1']);
+  expect(kept?.fromCache).toBe(true);
 });
 

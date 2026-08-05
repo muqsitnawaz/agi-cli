@@ -67,8 +67,49 @@ export function setFloorSnapshotStore(store: FloorSnapshotStore | null): void {
         rulesKey: '',
         result: toHostSessionsResult(parsed),
       };
+      // Hydrate the local cache too so a failed activation seed cannot wipe
+      // last-good local rows (local fail path used to check only localCache).
+      // Stamp "now" for the backstop clock so a restart does not immediately
+      // re-CLI just because the persisted fetchedAt is minutes old — the UI
+      // still shows true age via hostFreshness on the snapshot itself.
+      const localResult = localResultFromFloor(parsed);
+      if (localResult) {
+        const now = Date.now();
+        localCache = { at: now, rulesKey: '', result: localResult };
+        lastLocalCliAt = now;
+      }
     }
   }
+}
+
+/** Slice this-mac rows out of a full floor snapshot into a HostSessionsResult. */
+function localResultFromFloor(snap: FloorHostSessionsSnapshot): HostSessionsResult | null {
+  const localSessions = snap.sessions.filter((s) => s.host === LOCAL_LABEL);
+  const localHost = snap.hosts.find((h) => h.name === LOCAL_LABEL);
+  if (!localHost && localSessions.length === 0) return null;
+  const host: HostInfo = localHost ?? {
+    name: LOCAL_LABEL,
+    online: true,
+    agents: localSessions.length,
+    load: 'idle',
+    uses: localSessions.length,
+  };
+  const freshness = snap.hostFreshness[LOCAL_LABEL] ?? snap.fetchedAt;
+  return {
+    hosts: [host],
+    sessions: localSessions,
+    groups: snap.groups.filter((g) => g.host === LOCAL_LABEL),
+    fetchedAt: freshness,
+    hostFreshness: { [LOCAL_LABEL]: freshness },
+    fromCache: true,
+  };
+}
+
+/** On a failed local CLI call, keep last-good local rows (memory or floor snap). */
+function retainLocalLastGood(): HostSessionsResult | null {
+  if (localCache) return { ...localCache.result, fromCache: true };
+  if (lastGoodFloor) return localResultFromFloor(lastGoodFloor);
+  return null;
 }
 
 function persistFloor(snap: FloorHostSessionsSnapshot): void {
@@ -677,10 +718,18 @@ export async function fetchLocalSessions(
       ACTIVE_TIMEOUT_LOCAL_MS + 2000,
       { host: LOCAL_LABEL, online: false, sessions: [], cpuRatio: null },
     );
-    if (!r.online && r.sessions.length === 0 && localCache) {
-      return { ...localCache.result, fromCache: true };
+    // Failed / empty local CLI: never wipe hydrated last-good (localCache OR floor).
+    if (!r.online && r.sessions.length === 0) {
+      const kept = retainLocalLastGood();
+      if (kept) return kept;
     }
     const sessions = filterStaleSessions(r.sessions, fetchedAt);
+    // An empty success after we already had last-good is treated as retain, not wipe
+    // — a flaky CLI that returns [] must not clear the Floor on seed.
+    if (sessions.length === 0) {
+      const kept = retainLocalLastGood();
+      if (kept) return kept;
+    }
     const agents = sessions.length;
     const host: HostInfo = {
       name: LOCAL_LABEL,
