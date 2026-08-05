@@ -803,6 +803,29 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     },
     modelFlag: '--model',
   },
+  // Meta Muse Code (`muse exec` headless, `muse` TUI). Flags from
+  // `muse --help` / `muse exec --help` (v0.1.0): prompt is positional;
+  // --model selects muse-spark-*; --reasoning-effort is the effort dial;
+  // --disable-write approximates plan (no non-shell writes); --disable-approval
+  // keeps the sandbox (auto); --yolo drops approval+sandbox and trusts the
+  // workspace (skip). --json emits JSONL on stdout. Interactive resume is
+  // `muse resume <id>`; headless resume is `muse exec --session-id <id>` —
+  // see the muse resume branch in buildExecCommand.
+  muse: {
+    base: ['muse', 'exec'],
+    promptFlag: 'positional',
+    modeFlags: {
+      plan: ['--disable-write'],
+      edit: [],
+      auto: ['--disable-approval'],
+      skip: ['--yolo'],
+    },
+    jsonFlags: ['--json'],
+    modelFlag: '--model',
+    // Flag form covers headless (`--session-id`). Interactive uses the
+    // `resume` subcommand — special-cased in buildExecCommand.
+    resume: { flag: '--session-id' },
+  },
 };
 
 /**
@@ -833,12 +856,15 @@ export function buildExecCommand(options: ExecOptions): string[] {
   const cmd: string[] = [...template.base];
   const interactive = resolveInteractive(options);
 
-  // For Codex and Droid, 'exec' is the headless subcommand; for OpenCode, 'run'
-  // is. Drop it for interactive mode so we launch the TUI (`codex` / `droid` /
-  // `opencode`, each agent's default command) instead of the one-shot headless
-  // subcommand ('codex exec' / 'droid exec' / 'opencode run').
+  // For Codex, Droid, and Muse, 'exec' is the headless subcommand; for OpenCode,
+  // 'run' is. Drop it for interactive mode so we launch the TUI (`codex` /
+  // `droid` / `muse` / `opencode`) instead of the one-shot headless subcommand
+  // ('codex exec' / 'droid exec' / 'muse exec' / 'opencode run').
   if (interactive) {
-    if ((options.agent === 'codex' || options.agent === 'droid') && cmd[1] === 'exec') {
+    if (
+      (options.agent === 'codex' || options.agent === 'droid' || options.agent === 'muse') &&
+      cmd[1] === 'exec'
+    ) {
       cmd.splice(1, 1);
     } else if (options.agent === 'opencode' && cmd[1] === 'run') {
       cmd.splice(1, 1);
@@ -850,8 +876,17 @@ export function buildExecCommand(options: ExecOptions): string[] {
   // interactive drop above, `codex` -> `codex resume` (TUI). The session id is
   // pushed later as the first positional (before any prompt). `{ flag }` agents
   // (claude) need no base change — the flag is appended with the id below.
+  //
+  // Muse interactive resume is also a subcommand (`muse resume <id>`), but the
+  // session id MUST sit immediately after the verb — mode/model flags come
+  // after. So for interactive muse we push both `resume` and the id here, and
+  // skip the later generic resume flag path.
   const resumeSpec = options.resume ? template.resume : undefined;
-  if (resumeSpec && 'subcommand' in resumeSpec) {
+  let museInteractiveResumeDone = false;
+  if (options.agent === 'muse' && options.resume && interactive && options.sessionId) {
+    cmd.push('resume', options.sessionId);
+    museInteractiveResumeDone = true;
+  } else if (resumeSpec && 'subcommand' in resumeSpec) {
     cmd.push(resumeSpec.subcommand);
   }
 
@@ -1011,7 +1046,7 @@ export function buildExecCommand(options: ExecOptions): string[] {
   // agents (codex) already pushed the verb above, so the id is the first
   // positional here — placed before the prompt positional appended later. Without
   // `resume`, the legacy claude-only `--session-id` CREATES a session with that id.
-  if (options.resume && options.sessionId && resumeSpec) {
+  if (options.resume && options.sessionId && resumeSpec && !museInteractiveResumeDone) {
     if ('flag' in resumeSpec) {
       const flag = interactive
         ? (resumeSpec.interactiveFlag ?? resumeSpec.flag)

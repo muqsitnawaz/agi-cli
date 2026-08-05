@@ -774,6 +774,66 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
       interactiveRepl: true,
     },
   },
+  // Meta Muse Code (`muse`) — first-class harness for Meta's coding agent (terminal/CI), built on
+  // Muse Spark. Native binary via curl installer (self-updating; no npm package).
+  // Config: `~/.config/muse/settings.json` (requires `"schema_version": 1`).
+  // Sessions: `~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl`.
+  // Skills: `~/.config/muse/skills` + `~/.agents/skills` + project `.agents/skills`.
+  // MCP: `mcp_servers` in settings.json (stdio / streamable_http transports).
+  // Headless: `muse exec "<prompt>"` with --model, --reasoning-effort, --json,
+  // --yolo / --disable-approval / --disable-sandbox. Auth: META_API_KEY or
+  // browser OAuth stored at `~/.config/muse/auth.json`. Default model:
+  // muse-spark-1.2. Docs: https://dev.meta.ai/docs/muse-code
+  muse: {
+    id: 'muse',
+    name: 'Muse',
+    color: 'blueBright',
+    cliCommand: 'muse',
+    npmPackage: '',
+    installScript: 'curl -fsSL https://dev.meta.ai/install.sh | sh',
+    configDir: path.join(HOME, '.config', 'muse'),
+    authFiles: ['auth.json'],
+    commandsDir: '',
+    commandsSubdir: '',
+    skillsDir: path.join(HOME, '.config', 'muse', 'skills'),
+    hooksDir: 'hooks',
+    instructionsFile: 'AGENTS.md',
+    format: 'markdown',
+    variableSyntax: '$ARGUMENTS',
+    // Muse hooks use the Claude-shaped settings.json hooks block (matcher +
+    // command groups) under ~/.config/muse/settings.json, plus project
+    // `.muse/hooks.json`. registerHooksForClaude is reused with Muse's config
+    // dir and schema_version: 1.
+    supportsHooks: true,
+    // Claude-compatible marketplace layout + native `.muse-plugin/` manifest.
+    pluginManifestDir: '.muse-plugin',
+    capabilities: {
+      // Hooks: Claude-compatible event→matcher→command groups in settings.json.
+      hooks: true,
+      mcp: true,
+      mcpHttp: true,
+      mcpHeaders: true,
+      // Muse's safety model is approval-mode + OS sandbox (CLI flags), not a
+      // Claude-style tool-name allow/deny list. No settings.permissions writer.
+      allowlist: false,
+      skills: true,
+      // No slash-command file dir; skills double as reusable workflows.
+      commands: false,
+      // Plugins: Claude marketplace + .muse-plugin (syncPluginToVersion).
+      plugins: true,
+      // Runtime multi-agent / subagents exist, but there is no installable
+      // subagent-definition directory for agents-cli to sync into (capability
+      // table must stay truthful — see subagents-registry completeness).
+      subagents: false,
+      rules: { file: 'AGENTS.md' },
+      workflows: false,
+      // Portable memory at <repo>/.agents/memory/ + personal scopes.
+      memory: true,
+      modes: ['plan', 'edit', 'auto', 'skip'],
+      rulesImports: false,
+      interactiveRepl: true,
+    },
+  },
 };
 
 /** All current and legacy agent IDs derived from the AGENTS registry. */
@@ -1013,6 +1073,7 @@ export const UNMANAGED_DETECTION_CANDIDATES: AgentId[] = [
   'grok',
   'copilot',
   'droid',
+  'muse',
 ];
 
 /**
@@ -1154,6 +1215,7 @@ export const ACCOUNT_INSPECTION_AGENT_IDS = [
   'kimi',
   'droid',
   'opencode',
+  'muse',
 ] as const satisfies readonly AgentId[];
 
 const ACCOUNT_INSPECTION_AGENTS = new Set<AgentId>(ACCOUNT_INSPECTION_AGENT_IDS);
@@ -1237,6 +1299,9 @@ const CREDENTIAL_FILE_SEGMENTS: Partial<Record<AgentId, string[][]>> = {
   droid: [['.factory', 'auth.v2.file']],
   antigravity: [['.gemini', 'antigravity-cli', 'antigravity-oauth-token']],
   opencode: [['.local', 'share', 'opencode', 'auth.json']],
+  // Muse Code stores OAuth / API credentials at ~/.config/muse/auth.json
+  // (or META_API_KEY in the environment, which is not a file).
+  muse: [['.config', 'muse', 'auth.json']],
 };
 
 /** Whether an agent's credential file exists under a given home. */
@@ -1555,6 +1620,26 @@ function isValidOpenCodeCredential(value: unknown): boolean {
     case 'wellknown': return nonEmpty(cred.key) && nonEmpty(cred.token);
     default: return false;
   }
+}
+
+/**
+ * Whether a Muse Code `~/.config/muse/auth.json` document holds any usable
+ * access token. The launcher stores per-provider slots (e.g. `meta`) each with
+ * an `access_token` string; a top-level `access_token` is also accepted.
+ * Never returns the secret itself — presence only.
+ */
+function museAuthHasToken(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const root = value as Record<string, unknown>;
+  if (typeof root.access_token === 'string' && root.access_token.length > 0) return true;
+  if (typeof root.api_key === 'string' && root.api_key.length > 0) return true;
+  for (const slot of Object.values(root)) {
+    if (!slot || typeof slot !== 'object' || Array.isArray(slot)) continue;
+    const entry = slot as Record<string, unknown>;
+    if (typeof entry.access_token === 'string' && entry.access_token.length > 0) return true;
+    if (typeof entry.api_key === 'string' && entry.api_key.length > 0) return true;
+  }
+  return false;
 }
 
 /**
@@ -1987,6 +2072,27 @@ export async function getAccountInfo(
         const accountKey = buildIdentityKey(agentId, [['providers', accountId]]);
         return { ...empty, signedIn: true, accountId, accountKey, lastActive };
       }
+      case 'muse': {
+        // Muse Code authenticates with META_API_KEY (env, highest priority) or
+        // a stored OAuth/API credential at ~/.config/muse/auth.json. The auth
+        // file is launcher-managed JSON with per-provider slots holding
+        // access_token; there is no email claim, so we report signed-in + a
+        // stable identity key (env-key vs provider slots) like kimi/opencode.
+        if (process.env.META_API_KEY?.trim() || process.env.MODEL_API_KEY?.trim()) {
+          const accountKey = buildIdentityKey(agentId, [['auth', 'env']]);
+          return { ...empty, signedIn: true, accountId: 'env', accountKey, lastActive };
+        }
+        const authPath = resolveAccountCredentialPath(base, '.config', 'muse', 'auth.json');
+        if (!authPath) return { ...empty, lastActive };
+        const data = JSON.parse(await fs.promises.readFile(authPath, 'utf-8'));
+        if (!data || typeof data !== 'object') return { ...empty, lastActive };
+        // auth.json shape: { meta?: { access_token }, … } or similar slots.
+        // Any object with a nested access_token (or a top-level one) counts.
+        const hasToken = museAuthHasToken(data);
+        if (!hasToken) return { ...empty, lastActive };
+        const accountKey = buildIdentityKey(agentId, [['auth', 'file']]);
+        return { ...empty, signedIn: true, accountId: 'file', accountKey, lastActive };
+      }
       default:
         return { ...empty, lastActive };
     }
@@ -2103,6 +2209,10 @@ function getSessionDir(agentId: AgentId, base: string): string | null {
       return path.join(base, '.copilot', 'session-state');
     case 'droid':
       return path.join(base, '.factory', 'sessions');
+    case 'muse':
+      // Muse sessions live under XDG data, not the config dir:
+      // ~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl
+      return path.join(base, '.local', 'share', 'muse', 'sessions');
     default:
       return null;
   }
@@ -2115,6 +2225,7 @@ function getSessionExtension(agentId: AgentId): string | null {
     case 'codex':
     case 'copilot':
     case 'droid':
+    case 'muse':
       return '.jsonl';
     case 'gemini':
       return '.json';
@@ -2699,6 +2810,9 @@ export function getUserMcpConfigPath(agentId: AgentId): string {
     case 'pi':
       // omp reads user-scope MCP from ~/.omp/agent/.mcp.json (Claude schema).
       return path.join(agent.configDir, '.mcp.json');
+    case 'muse':
+      // Muse Code: MCP lives in ~/.config/muse/settings.json under mcp_servers.
+      return path.join(agent.configDir, 'settings.json');
     default:
       // Gemini and others use settings.json
       return path.join(agent.configDir, 'settings.json');
@@ -2738,6 +2852,8 @@ export function getMcpConfigPathForHome(agentId: AgentId, home: string): string 
       return path.join(home, '.hermes', 'config.yaml');
     case 'pi':
       return path.join(home, '.omp', 'agent', '.mcp.json');
+    case 'muse':
+      return path.join(home, '.config', 'muse', 'settings.json');
     default:
       return path.join(home, agentConfigDirName(agentId), 'settings.json');
   }
@@ -2781,6 +2897,10 @@ export function getProjectMcpConfigPath(agentId: AgentId, cwd: string = process.
     case 'pi':
       // omp reads project MCP from <root>/.mcp.json (Claude-compatible).
       return path.join(cwd, '.mcp.json');
+    case 'muse':
+      // Muse project MCP rides the same settings schema under .muse/settings.json
+      // when present; otherwise fall back to the user settings path.
+      return path.join(cwd, '.muse', 'settings.json');
     default:
       return path.join(cwd, `.${agentId}`, 'settings.json');
   }
@@ -2943,6 +3063,10 @@ export const AGENT_NAME_ALIASES: Record<string, AgentId> = {
   droid: 'droid',
   hermes: 'hermes',
   'hermes-agent': 'hermes',
+  muse: 'muse',
+  'muse-code': 'muse',
+  'muse-spark': 'muse',
+  'meta-muse': 'muse',
 };
 
 /**

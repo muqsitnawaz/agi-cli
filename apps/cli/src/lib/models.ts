@@ -317,6 +317,16 @@ export function locateModelSource(
     return null;
   }
 
+  if (agent === 'muse') {
+    // Muse Code is a self-updating native binary on PATH. It has no catalog
+    // CLI; the published model IDs are fixed by Meta Model API docs. Point at
+    // the binary so the cache key moves with upgrades, and extract a static
+    // catalog in getModelCatalog.
+    const pathBin = findOnPath('muse');
+    if (pathBin) return { path: pathBin, kind: 'cli' };
+    return null;
+  }
+
   return null;
 }
 
@@ -1049,6 +1059,37 @@ function extractPiCatalog(binaryPath: string): { models: ModelInfo[]; aliases: R
  * Cache is keyed on source-file mtime (binary or js module), so re-extracts
  * automatically when the user upgrades or reinstalls a version.
  */
+/**
+ * Static Muse Spark catalog. Meta Model API publishes these IDs; Muse Code
+ * has no `muse models` command. Default is muse-spark-1.2 (docs + first-run).
+ * Source: https://dev.meta.ai/docs/pricing-rate-limits and muse-code overview.
+ */
+function extractMuseCatalog(): { models: ModelInfo[]; aliases: Record<string, string> } {
+  const models: ModelInfo[] = [
+    {
+      id: 'muse-spark-1.2',
+      displayName: 'Muse Spark 1.2',
+      isDefault: true,
+    },
+    {
+      id: 'muse-spark-1.1',
+      displayName: 'Muse Spark 1.1',
+    },
+    {
+      id: 'muse-spark-1.2-contributor',
+      displayName: 'Muse Spark 1.2 Contributor',
+    },
+  ];
+  const aliases: Record<string, string> = {
+    spark: 'muse-spark-1.2',
+    'spark-1.2': 'muse-spark-1.2',
+    'spark-1.1': 'muse-spark-1.1',
+    contributor: 'muse-spark-1.2-contributor',
+    default: 'muse-spark-1.2',
+  };
+  return { models, aliases };
+}
+
 export function getModelCatalog(agent: AgentId, version: string): ModelCatalog | null {
   const src = locateModelSource(agent, version);
   if (!src) return null;
@@ -1094,6 +1135,7 @@ export function getModelCatalog(agent: AgentId, version: string): ModelCatalog |
     else if (agent === 'kimi') ({ models, aliases } = extractKimiCatalog(src.path));
     else if (agent === 'grok') ({ models, aliases } = extractGrokCatalog(src.path));
     else if (agent === 'pi') ({ models, aliases } = extractPiCatalog(src.path));
+    else if (agent === 'muse') ({ models, aliases } = extractMuseCatalog());
   }
 
   // Attach per-token pricing where the offline table knows the model, so the
@@ -1341,6 +1383,12 @@ export function buildReasoningFlags(agent: AgentId, level: string): string[] {
     // catalog exposes a single model.
     const grokLevel = (normalized === 'xhigh' || normalized === 'max') ? 'high' : normalized;
     return ['--reasoning-effort', grokLevel];
+  }
+  if (agent === 'muse') {
+    // Muse Code: `--reasoning-effort none|minimal|low|medium|high|xhigh|ultra`.
+    // Map our unified `max` to Muse's `ultra` (client-side multi-agent aggression).
+    const museLevel = normalized === 'max' ? 'ultra' : normalized;
+    return ['--reasoning-effort', museLevel];
   }
   return [];
 }

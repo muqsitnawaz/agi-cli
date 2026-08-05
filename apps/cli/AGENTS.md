@@ -84,7 +84,7 @@ write only the target host's device file; they MUST NOT rewrite a definition wit
 
 ### 8. Self-updating agents are ONE binary, not fictional version-homes
 
-Some harnesses (droid, grok, antigravity, cursor, hermes, kiro, goose) install
+Some harnesses (droid, grok, antigravity, cursor, hermes, muse, kiro, goose) install
 via an official `curl … | sh` / `brew install` script that carries no version token —
 the installer only ever fetches the *current* release and the binary self-updates in
 place. `isSelfUpdatingAgent()` ([`src/lib/agents.ts`](src/lib/agents.ts)) is the single
@@ -271,6 +271,7 @@ Antigravity CLI, Grok CLI, OpenCode — features target these six first.
 | Goose | `goose` | ≥1.34 | ✓ | ✓ | ≥1.25 | — | ✓ | — | ✓ |
 | Droid | `droid` | ✓ | ✓ | ≥0.57.5 | ≥0.26 | ✓ | ✓ | ✓ | — |
 | Hermes | `hermes` | ≥0.11 | ✓ | — | ✓ | — | — | — | — |
+| Muse Code | `muse` | ✓ | ✓ | — | ✓ | — | ✓ | — | — |
 | Pi (Oh My Pi) | `pi` | — | ✓ | — | ✓ | ✓ | — | ✓ | — |
 
 ✓ = supported · — = not · version cell = only within that range (out-of-range =

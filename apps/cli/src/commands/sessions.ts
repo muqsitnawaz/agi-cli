@@ -3330,6 +3330,8 @@ function resumeArgv(agent: SessionMeta['agent'], id: string, launcher: string): 
     case 'claude': return [launcher, '--resume', id];
     case 'codex': return [launcher, 'resume', id];
     case 'opencode': return [launcher, '--session', id];
+    // Muse interactive resume is a subcommand: `muse resume <uuid>`.
+    case 'muse': return [launcher, 'resume', id];
     default: return null;
   }
 }
@@ -3359,7 +3361,8 @@ export function buildResumeCommand(session: SessionMeta): string[] | null {
       return resumeArgv('opencode', session.id, 'opencode');
 
     case 'claude':
-    case 'codex': {
+    case 'codex':
+    case 'muse': {
       const cli = AGENTS[session.agent as AgentId]?.cliCommand ?? session.agent;
       if (session.version) {
         const alias = versionedAliasIfPresent(session.agent, session.version);

@@ -6,7 +6,10 @@
  * - Override on name conflict: Higher layer wins (project > user > system)
  */
 
-export type AgentId = 'claude' | 'codex' | 'gemini' | 'cursor' | 'opencode' | 'openclaw' | 'copilot' | 'kiro' | 'goose' | 'antigravity' | 'grok' | 'kimi' | 'droid' | 'hermes' | 'pi';
+// Import + re-export the canonical AgentId so resource handlers never drift
+// from the main registry (lib/types.ts). A local copy previously omitted amp + muse.
+import type { AgentId } from '../types.js';
+export type { AgentId };
 /** Resource origin. Precedence (highest first): project > user > plugin > system. */
 export type Layer = 'system' | 'user' | 'project' | 'plugin';
 export type ResourceKind = 'command' | 'hook' | 'skill' | 'rule' | 'mcp' | 'permission' | 'subagent' | 'workflow' | 'memory';

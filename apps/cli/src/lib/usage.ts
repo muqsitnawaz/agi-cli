@@ -303,6 +303,7 @@ const USAGE_SOURCES = {
   grok: { fetch: getGrokUsageInfo, network: false },
   cursor: { fetch: getCursorUsageInfo, network: true },
   antigravity: { fetch: getAntigravityUsageInfo, network: true },
+  muse: { fetch: getMuseUsageInfo, network: true },
 } as const satisfies Partial<Record<AgentId, UsageSource>>;
 
 export const USAGE_SOURCE_AGENT_IDS = Object.keys(USAGE_SOURCES) as (keyof typeof USAGE_SOURCES)[];
@@ -2338,6 +2339,203 @@ async function getGrokUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
   } catch {
     return { snapshot: null, error: null };
   }
+}
+
+/**
+ * Muse Code usage.
+ *
+ * Prefer live Meta Model API rate-limit headers when a key is available
+ * (META_API_KEY / MODEL_API_KEY / ~/.config/muse/auth.json). Fall back to
+ * aggregating `model_completed.usage` from local session.jsonl logs under
+ * ~/.local/share/muse/sessions for a last-7-days token window.
+ */
+async function getMuseUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
+  try {
+    const base = options?.home || os.homedir();
+    const live = await probeMuseRateLimits(base);
+    if (live) return { snapshot: live, error: null };
+
+    const local = await readMuseLocalSessionUsage(base);
+    if (!local) return { snapshot: null, error: null };
+    return { snapshot: local, error: null };
+  } catch {
+    return { snapshot: null, error: null };
+  }
+}
+
+/** Resolve a Muse API key from env or auth.json without logging the value. */
+function resolveMuseApiKey(base: string): string | null {
+  const envKey = process.env.META_API_KEY?.trim() || process.env.MODEL_API_KEY?.trim();
+  if (envKey) return envKey;
+  const authPath = path.join(base, '.config', 'muse', 'auth.json');
+  try {
+    if (!fs.existsSync(authPath)) return null;
+    const data = JSON.parse(fs.readFileSync(authPath, 'utf-8')) as Record<string, unknown>;
+    if (typeof data.access_token === 'string' && data.access_token) return data.access_token;
+    if (typeof data.api_key === 'string' && data.api_key) return data.api_key;
+    for (const slot of Object.values(data)) {
+      if (!slot || typeof slot !== 'object' || Array.isArray(slot)) continue;
+      const entry = slot as Record<string, unknown>;
+      if (typeof entry.access_token === 'string' && entry.access_token) return entry.access_token;
+      if (typeof entry.api_key === 'string' && entry.api_key) return entry.api_key;
+    }
+  } catch {
+    /* unreadable auth */
+  }
+  return null;
+}
+
+/**
+ * Probe Meta Model API for rate-limit headers. Uses GET /v1/models (no token
+ * spend). Returns null when unauthenticated or the headers are absent.
+ */
+async function probeMuseRateLimits(base: string): Promise<UsageSnapshot | null> {
+  if (usageRateLimitedUntil('muse')) return null;
+  const key = resolveMuseApiKey(base);
+  if (!key) return null;
+  try {
+    const response = await fetch('https://api.meta.ai/v1/models', {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (response.status === 429) {
+      noteUsageRateLimited('muse', response.headers.get('retry-after'));
+      return null;
+    }
+    if (!response.ok) return null;
+
+    const limitTokens = headerNumber(response.headers, 'x-ratelimit-limit-tokens');
+    const remainingTokens = headerNumber(response.headers, 'x-ratelimit-remaining-tokens');
+    const limitRequests = headerNumber(response.headers, 'x-ratelimit-limit-requests');
+    const remainingRequests = headerNumber(response.headers, 'x-ratelimit-remaining-requests');
+
+    const windows: UsageWindow[] = [];
+    if (limitTokens !== null && remainingTokens !== null && limitTokens > 0) {
+      const used = Math.max(0, Math.min(100, ((limitTokens - remainingTokens) / limitTokens) * 100));
+      windows.push({
+        key: 'session',
+        label: 'Tokens (current window)',
+        shortLabel: 'Tok',
+        usedPercent: used,
+        resetsAt: null,
+        windowMinutes: 1,
+      });
+    }
+    if (limitRequests !== null && remainingRequests !== null && limitRequests > 0) {
+      const used = Math.max(0, Math.min(100, ((limitRequests - remainingRequests) / limitRequests) * 100));
+      windows.push({
+        key: 'session',
+        label: 'Requests (current window)',
+        shortLabel: 'Req',
+        usedPercent: used,
+        resetsAt: null,
+        windowMinutes: 1,
+      });
+    }
+    if (windows.length === 0) return null;
+    return {
+      source: 'live',
+      sourceLabel: 'Meta Model API rate limits',
+      capturedAt: new Date(),
+      windows,
+      plan: 'Meta Model API',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function headerNumber(headers: Headers, name: string): number | null {
+  const raw = headers.get(name);
+  if (raw === null || raw === '') return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Aggregate Muse session token usage from local session.jsonl files for the
+ * last 7 days. Scales the bar against 10M tokens (soft visibility scale — Meta
+ * is pay-as-you-go with no hard local cap).
+ */
+async function readMuseLocalSessionUsage(base: string): Promise<UsageSnapshot | null> {
+  const root = path.join(base, '.local', 'share', 'muse', 'sessions');
+  if (!fs.existsSync(root)) return null;
+
+  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedTokens = 0;
+  let latestAt: Date | null = null;
+  let files = 0;
+
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (ent.name !== 'session.jsonl') continue;
+      try {
+        const st = fs.statSync(full);
+        if (st.mtimeMs < cutoff) continue;
+        files++;
+        if (!latestAt || st.mtime > latestAt) latestAt = st.mtime;
+        const content = fs.readFileSync(full, 'utf-8');
+        for (const line of content.split('\n')) {
+          if (!line.trim()) continue;
+          let raw: any;
+          try {
+            raw = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          const event = raw?.payload?.event ?? raw?.payload;
+          if (!event || event.kind !== 'model_completed') continue;
+          const usage = event.usage;
+          if (!usage || typeof usage !== 'object') continue;
+          if (typeof usage.input_tokens === 'number') inputTokens += usage.input_tokens;
+          if (typeof usage.output_tokens === 'number') outputTokens += usage.output_tokens;
+          if (typeof usage.cached_tokens === 'number') cachedTokens += usage.cached_tokens;
+        }
+      } catch {
+        /* skip unreadable session */
+      }
+    }
+  };
+  walk(root);
+
+  const total = inputTokens + outputTokens + cachedTokens;
+  if (total === 0 && files === 0) return null;
+
+  // Soft 10M-token scale for the bar (pay-as-you-go has no hard local cap).
+  const softCap = 10_000_000;
+  const usedPercent = Math.max(0, Math.min(100, (total / softCap) * 100));
+  const formatK = (n: number): string =>
+    n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+
+  return {
+    source: 'last_seen',
+    sourceLabel: `local Muse sessions · ${formatK(total)} tokens (7d)`,
+    capturedAt: latestAt,
+    windows: [
+      {
+        key: 'week',
+        label: 'Local tokens (7d)',
+        shortLabel: '7d',
+        usedPercent,
+        resetsAt: null,
+        windowMinutes: 7 * 24 * 60,
+      },
+    ],
+    plan: 'Meta Model API',
+  };
 }
 
 interface GrokBillingMatch {
