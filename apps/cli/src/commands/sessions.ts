@@ -2464,7 +2464,7 @@ export async function maybeLiveIndex(options: SessionsOptions): Promise<Map<stri
 
 /**
  * Group key for the overview: resolve the cwd through the same canonical
- * resolver the `agents activity` timeline groups by — a defined project's name
+ * resolver the `agents feed` timeline groups by — a defined project's name
  * when `defs` contains the cwd (multi-repo projects read as one group), else
  * the repo-level key, so a monorepo subdir (`<repo>/apps/cli`) reads as
  * `<repo>` in both views. Falls back to the indexed project name (stamped at
