@@ -266,28 +266,46 @@ export function getAvailableResources(cwd: string = process.cwd()): AvailableRes
   }
   result.skills = filterNamesForActiveResourceProfile('skills', Array.from(skillNames), sourceMapFromResources('skills', cwd));
 
-  // Hooks. A hook is either a directory bundle or an actual script file: known
-  // script extension, OR executable bit on a file with a non-data extension.
-  // Auxiliary content like `README.md` (docs) or `promptcuts.yaml` (data read
-  // directly by the expand-promptcuts script) lives in hooks/ but is not a
-  // hook. Older sync runs chmod 0o755'd everything they copied, so an exec bit
-  // alone can no longer be trusted as the signal.
+  // Hooks. A hook is a script file at the hooks/ root OR one level under a
+  // group dir (hooks/session-starts/*.sh). Group dirs themselves are layout
+  // only — not hook resources. Known script extension, OR executable bit on a
+  // file with a non-data extension. Auxiliary content like `README.md` (docs)
+  // or `promptcuts.yaml` (data read by expand-promptcuts) is not a hook. Older
+  // sync runs chmod 0o755'd everything they copied, so an exec bit alone can
+  // no longer be trusted as the signal. Install name = file basename (flat).
   const NON_SCRIPT_EXTS = new Set(['.md', '.markdown', '.rst', '.txt', '.yaml', '.yml', '.json', '.toml', '.ini', '.conf']);
   const SCRIPT_EXTS     = new Set(['.sh', '.bash', '.zsh', '.py', '.js', '.ts', '.mjs', '.cjs', '.rb', '.pl', '.ps1']);
+  const HOOK_GROUP_SKIP = new Set(['tests', 'test', 'node_modules', '.git', '.cache']);
   const hookNames = new Set<string>();
+  const considerHookFile = (fileName: string, mode: number) => {
+    const ext = path.extname(fileName).toLowerCase();
+    if (SCRIPT_EXTS.has(ext)) { hookNames.add(fileName); return; }
+    if ((mode & 0o111) !== 0 && !NON_SCRIPT_EXTS.has(ext)) hookNames.add(fileName);
+  };
   for (const { base } of resourceBases) {
     const hooksDir = path.join(base, 'hooks');
     if (!fs.existsSync(hooksDir)) continue;
     for (const name of fs.readdirSync(hooksDir)) {
       if (name.startsWith('.')) continue;
       try {
-        const stat = fs.lstatSync(path.join(hooksDir, name));
+        const full = path.join(hooksDir, name);
+        const stat = fs.lstatSync(full);
         if (stat.isSymbolicLink()) continue;
-        if (stat.isDirectory()) { hookNames.add(name); continue; }
-        if (!stat.isFile()) continue;
-        const ext = path.extname(name).toLowerCase();
-        if (SCRIPT_EXTS.has(ext)) { hookNames.add(name); continue; }
-        if ((stat.mode & 0o111) !== 0 && !NON_SCRIPT_EXTS.has(ext)) hookNames.add(name);
+        if (stat.isFile()) {
+          considerHookFile(name, stat.mode);
+          continue;
+        }
+        if (!stat.isDirectory() || HOOK_GROUP_SKIP.has(name)) continue;
+        // One-level group layout: enumerate scripts inside, not the dir itself.
+        for (const nested of fs.readdirSync(full)) {
+          if (nested.startsWith('.')) continue;
+          try {
+            const nfull = path.join(full, nested);
+            const nstat = fs.lstatSync(nfull);
+            if (nstat.isSymbolicLink() || !nstat.isFile()) continue;
+            considerHookFile(nested, nstat.mode);
+          } catch { /* ignore unreadable nested */ }
+        }
       } catch { /* ignore unreadable */ }
     }
   }
