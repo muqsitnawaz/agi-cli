@@ -22,6 +22,25 @@ All notable changes to the Factory extension are documented here. Format follows
   `apps/factory/src/vscode/settings.vscode.ts`,
   `apps/factory/src/monitor/snapshotDetector.ts`.
 
+- **Resume / restore always routes through `agents run --resume`.** Removed the
+  per-harness raw binary fallback (`claude -r`, `codex resume`, `cursor-agent
+  --resume=`, etc.) from `buildVersionedResumeCommand`. Every resumed session now
+  emits `agents run <agent> --interactive --resume <id>`; offloaded sessions get
+  `--host '<device>'`. `agents run --resume` resolves the originating version, so
+  Factory no longer pins an explicit `@version` on resume. Source:
+  `apps/factory/src/core/prewarm.ts`, `apps/factory/src/core/prewarm.test.ts`.
+
+- **Remote session host survives a VS Code: window restart.** `scanExisting`
+  rehydrates `EditorTerminal.host` from the persisted session when VS Code:
+  restores a terminal before the extension activates. Without this, the restore
+  path built a local raw resume for a session whose transcript lives on another
+  device. Source: `apps/factory/src/vscode/terminals.vscode.ts`.
+
+- **Resume payload is never typed when the agent fails to start.** The
+  `launchResumeTerminal` "send anyway" rejection handler that typed `Continue.`
+  into a dead shell prompt now surfaces a `showErrorMessage` and leaves the
+  terminal alone. Source: `apps/factory/src/vscode/extension.ts`.
+
 - **Resume picker: selection no longer clears, and rows say what differs.** The
   batch picker announced "N detached sessions pre-selected" while showing `0 Selected`
   and empty checkboxes. Two causes: the refresh swap filtered defaults by "was rendered

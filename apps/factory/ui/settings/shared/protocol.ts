@@ -78,7 +78,7 @@ export type FloorOutbound =
   | { type: 'dispatchData'; agents: unknown[]; hosts: unknown[]; targets: unknown[] }
   | { type: 'updateRunningCounts'; counts: unknown }
   // Managed projects (curated sidebar list + Projects pane).
-  | { type: 'managedProjectsData'; projects: ManagedProject[] }
+  | { type: 'managedProjectsData'; projects: ManagedProject[]; error?: string }
   | { type: 'linearProjectsData'; projects: LinearProjectLite[] }
   | { type: 'projectFolderPicked'; path: string; repoSlug?: string; name: string; suggestedLinear?: LinearProjectLite }
 
