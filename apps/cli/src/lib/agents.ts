@@ -774,7 +774,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
       interactiveRepl: true,
     },
   },
-  // Meta Muse Code (`muse`) — Meta's coding agent for terminal and CI, built on
+  // Meta Muse Code (`muse`) — first-class harness for Meta's coding agent (terminal/CI), built on
   // Muse Spark. Native binary via curl installer (self-updating; no npm package).
   // Config: `~/.config/muse/settings.json` (requires `"schema_version": 1`).
   // Sessions: `~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl`.
