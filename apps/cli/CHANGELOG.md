@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **`ProjectDef` YAML gains `dispatch` block and `linear.name`.** `~/.agents/projects/<name>.yaml` now accepts a `dispatch:` block (`enabled`, `maxAgents`, `provider`, `host`) that opts a project into auto-dispatch and is read directly by `agents __auto-dispatch` — previously these fields lived only in Factory's own `~/.agents/factory/projects.json`. `linear.name` stores the Linear project display name alongside the existing `projectId` and `url`. Both fields are optional; existing YAMLs are unchanged. Source: `apps/cli/src/lib/projects.ts`, `apps/cli/src/lib/auto-dispatch.ts`.
+
+- **`agents projects import --from-factory` removed.** Factory no longer maintains its own `~/.agents/factory/projects.json` registry. The Factory Floor now reads canonical `~/.agents/projects/<name>.yaml` definitions via `agents projects list --json` and writes project changes back to those YAMLs directly. On first launch after this update, Factory auto-migrates any rows in the old `projects.json` to canonical YAMLs, preserving dispatch metadata. The `--min-confidence` and `--all` flags (which were only meaningful with `--from-factory`) are removed. Source: `apps/factory/src/core/managedProjects.ts`, `apps/cli/src/lib/project-import.ts`, `apps/cli/src/commands/projects.ts`.
+
 ## 1.22.10
 
 - **Plugins package workflows (Phase 5 packaging slice).** A plugin’s `workflows/<name>/WORKFLOW.md` is discovered and resolved by `agents run <name>` with precedence project > user > plugin > extra > system — no separate install into `~/.agents/workflows/` required. Plugin inventory / resource groups list `workflows`. Source: `apps/cli/src/lib/workflows.ts`, `apps/cli/src/lib/plugins.ts`, `apps/cli/src/lib/resources/workflows.ts`.
