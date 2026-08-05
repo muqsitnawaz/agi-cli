@@ -1,1 +1,0 @@
-- **`agents projects status` and `view`/`show` share one body.** Named form is the full card (every milestone + definition); unnamed is the multi-project rollup. No second implementation to drift. Source: `apps/cli/src/commands/projects.ts`.
