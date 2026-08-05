@@ -14,7 +14,7 @@ vi.mock('./routine-activation.js', async (importOriginal) => {
     routineEnabledOnThisDevice: () => null,
   };
 });
-import { routineOwnerDevice, hasAmbiguousDevicePin, validateJob, validateTrigger, normalizeTriggerEvent, writeJob, readJob, deleteJob, listJobs, jobRunsOnThisDevice, checkJobDeviceEligibility, getJobRunsDir, getRunDir, finalizeRunMeta, writeRunMeta, resolveJobPrompt, getLatestCompletedRun, routineStats, type JobConfig, type RunMeta } from './routines.js';
+import { routineOwnerDevice, hasAmbiguousDevicePin, validateJob, validateTrigger, normalizeTriggerEvent, writeJob, readJob, deleteJob, listJobs, jobRunsOnThisDevice, checkJobDeviceEligibility, getJobRunsDir, getRunDir, finalizeRunMeta, writeRunMeta, resolveJobPrompt, getLatestCompletedRun, routineStats, computeProjectGroup, computeProjectGroupKind, projectGroupKey, projectGroupTitle, normalizeProjects, type JobConfig, type RunMeta } from './routines.js';
 import { getRoutinesDir, getSystemRoutinesDir, getRunsDir, ensureAgentsDir } from './state.js';
 
 /** Minimal valid schedule-based job. */
@@ -848,5 +848,229 @@ describe('routineStats', () => {
     expect(stats.avgMs).toBe(100);
     expect(stats.p50).toBe(100);
     expect(stats.p95).toBe(100);
+  });
+});
+
+describe('validateJob — projects field', () => {
+  it('accepts a job with no projects (default: absent)', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *' }))).toEqual([]);
+  });
+
+  it('accepts a job with a single valid project name', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *', projects: ['my-project'] }))).toEqual([]);
+  });
+
+  it('accepts a job with multiple valid project names', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *', projects: ['project-a', 'project-b'] }))).toEqual([]);
+  });
+
+  it('accepts ["*"] as the all-projects sentinel', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *', projects: ['*'] }))).toEqual([]);
+  });
+
+  it('rejects projects that is not an array', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', projects: 'my-project' as never }));
+    expect(errors.some((e) => /projects must be an array/.test(e))).toBe(true);
+  });
+
+  it('rejects "*" mixed with other names', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', projects: ['*', 'my-project'] }));
+    expect(errors.some((e) => /"\*".*must be the sole entry/.test(e))).toBe(true);
+  });
+
+  it('rejects an empty-string project name', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', projects: [''] }));
+    expect(errors.some((e) => /each entry in projects must be a non-empty project name/.test(e))).toBe(true);
+  });
+
+  it('rejects a project name with illegal characters', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', projects: ['../../evil'] }));
+    expect(errors.some((e) => /invalid project name/.test(e))).toBe(true);
+  });
+});
+
+describe('validateJob — projects round-trip via writeJob/readJob', () => {
+  it('persists and reads back a projects array', () => {
+    ensureAgentsDir();
+    const name = '__test-projects-field-roundtrip__';
+    try {
+      writeJob({
+        name,
+        schedule: '0 3 * * *',
+        agent: 'claude',
+        prompt: 'test',
+        mode: 'auto',
+        effort: 'auto',
+        timeout: '10m',
+        enabled: true,
+        projects: ['project-a', 'project-b'],
+      } as JobConfig);
+      const read = readJob(name);
+      expect(read).not.toBeNull();
+      expect(read!.projects).toEqual(['project-a', 'project-b']);
+    } finally {
+      deleteJob(name);
+    }
+  });
+
+  it('persists ["*"] as-is', () => {
+    ensureAgentsDir();
+    const name = '__test-projects-all-roundtrip__';
+    try {
+      writeJob({
+        name,
+        schedule: '0 3 * * *',
+        agent: 'claude',
+        prompt: 'test',
+        mode: 'auto',
+        effort: 'auto',
+        timeout: '10m',
+        enabled: true,
+        projects: ['*'],
+      } as JobConfig);
+      const read = readJob(name);
+      expect(read!.projects).toEqual(['*']);
+    } finally {
+      deleteJob(name);
+    }
+  });
+
+  it('omits projects from YAML when empty array', () => {
+    ensureAgentsDir();
+    const name = '__test-projects-empty-omit__';
+    const filePath = path.join(getRoutinesDir(), `${name}.yml`);
+    try {
+      writeJob({
+        name,
+        schedule: '0 3 * * *',
+        agent: 'claude',
+        prompt: 'test',
+        mode: 'auto',
+        effort: 'auto',
+        timeout: '10m',
+        enabled: true,
+        projects: [],
+      } as JobConfig);
+      expect(fs.readFileSync(filePath, 'utf-8')).not.toMatch(/^projects:/m);
+    } finally {
+      deleteJob(name);
+    }
+  });
+});
+
+describe('computeProjectGroup', () => {
+  const known = new Set(['project-a', 'project-b', 'project-c']);
+
+  it('returns "Operations" for undefined projects', () => {
+    expect(computeProjectGroup(undefined, known)).toBe('Operations');
+  });
+
+  it('returns "Operations" for an empty projects array', () => {
+    expect(computeProjectGroup([], known)).toBe('Operations');
+  });
+
+  it('returns "All projects" for ["*"]', () => {
+    expect(computeProjectGroup(['*'], known)).toBe('All projects');
+  });
+
+  it('returns the project name for a single known project', () => {
+    expect(computeProjectGroup(['project-a'], known)).toBe('project-a');
+  });
+
+  it('returns "Cross-project" for multiple known projects', () => {
+    expect(computeProjectGroup(['project-a', 'project-b'], known)).toBe('Cross-project');
+  });
+
+  it('returns "Unknown projects" when any project name is not in the known set', () => {
+    expect(computeProjectGroup(['stale-project'], known)).toBe('Unknown projects');
+    expect(computeProjectGroup(['project-a', 'stale-project'], known)).toBe('Unknown projects');
+  });
+});
+
+describe('computeProjectGroupKind — discriminated buckets never collide with special labels', () => {
+  it('classifies a project literally named "Operations" as a named group, distinct from the no-project special', () => {
+    const known = new Set(['Operations', 'other']);
+    const named = computeProjectGroupKind(['Operations'], known);
+    const special = computeProjectGroupKind(undefined, known);
+    expect(named).toEqual({ kind: 'named', name: 'Operations' });
+    expect(special).toEqual({ kind: 'operations' });
+    // Same human title, but different discriminated keys — so they never merge.
+    expect(projectGroupTitle(named)).toBe('Operations');
+    expect(projectGroupTitle(special)).toBe('Operations');
+    expect(projectGroupKey(named)).toBe('named:Operations');
+    expect(projectGroupKey(special)).toBe('special:operations');
+    expect(projectGroupKey(named)).not.toBe(projectGroupKey(special));
+  });
+
+  it('classifies a project literally named "Cross-project" as a named group, distinct from the multi-project span special', () => {
+    const known = new Set(['Cross-project', 'a', 'b']);
+    const named = computeProjectGroupKind(['Cross-project'], known);
+    const special = computeProjectGroupKind(['a', 'b'], known);
+    expect(named).toEqual({ kind: 'named', name: 'Cross-project' });
+    expect(special).toEqual({ kind: 'cross' });
+    expect(projectGroupTitle(named)).toBe('Cross-project');
+    expect(projectGroupTitle(special)).toBe('Cross-project');
+    expect(projectGroupKey(named)).toBe('named:Cross-project');
+    expect(projectGroupKey(special)).toBe('special:cross');
+    expect(projectGroupKey(named)).not.toBe(projectGroupKey(special));
+  });
+
+  it('collapses duplicate names before classifying, so [myapp, myapp] is a single named project, not Cross-project', () => {
+    const known = new Set(['myapp']);
+    expect(computeProjectGroupKind(['myapp', 'myapp'], known)).toEqual({ kind: 'named', name: 'myapp' });
+    expect(computeProjectGroup(['myapp', 'myapp'], known)).toBe('myapp');
+  });
+});
+
+describe('normalizeProjects — canonical dedup', () => {
+  it('deduplicates while preserving first-seen order', () => {
+    expect(normalizeProjects(['myapp', 'myapp'])).toEqual(['myapp']);
+    expect(normalizeProjects(['b', 'a', 'b', 'a'])).toEqual(['b', 'a']);
+  });
+
+  it('drops empty/whitespace-only and non-string entries', () => {
+    expect(normalizeProjects(['a', '', 'a'])).toEqual(['a']);
+    expect(normalizeProjects([undefined as unknown as string, 'x'])).toEqual(['x']);
+  });
+
+  it('returns undefined when nothing survives', () => {
+    expect(normalizeProjects(undefined)).toBeUndefined();
+    expect(normalizeProjects([])).toBeUndefined();
+    expect(normalizeProjects(['', ''])).toBeUndefined();
+  });
+
+  it('keeps the ["*"] all-projects sentinel and collapses a duplicated sentinel', () => {
+    expect(normalizeProjects(['*'])).toEqual(['*']);
+    expect(normalizeProjects(['*', '*'])).toEqual(['*']);
+  });
+});
+
+describe('duplicate project names in a file-created YAML routine', () => {
+  it('reads as a single named project and rewrites canonically (persistence is deduped)', () => {
+    const name = 'dup-project-yaml-' + Math.random().toString(36).slice(2, 8);
+    const file = path.join(getRoutinesDir(), name + '.yml');
+    try {
+      ensureAgentsDir();
+      // Hand-authored YAML that never went through the add command: duplicate names.
+      fs.writeFileSync(
+        file,
+        `name: ${name}\nschedule: '0 3 * * *'\nagent: claude\nprompt: do it\nprojects:\n  - myapp\n  - myapp\n`,
+        'utf-8',
+      );
+
+      const known = new Set(['myapp']);
+      const read = readJob(name);
+      expect(read).not.toBeNull();
+      // Grouping treats the duplicated file as one named project, not Cross-project.
+      expect(computeProjectGroupKind(read!.projects, known)).toEqual({ kind: 'named', name: 'myapp' });
+      expect(computeProjectGroup(read!.projects, known)).toBe('myapp');
+
+      // Rewriting through the schema boundary canonicalizes persistence.
+      writeJob(read!);
+      const persisted = yaml.parse(fs.readFileSync(file, 'utf-8'));
+      expect(persisted.projects).toEqual(['myapp']);
+    } finally {
+      deleteJob(name);
+    }
   });
 });

@@ -13,6 +13,7 @@ import * as yaml from 'yaml';
 import { Cron } from 'croner';
 import { getRoutinesDir, getSystemRoutinesDir, getRunsDir, ensureAgentsDir, getProjectRoutinesDir } from './state.js';
 import { safeJoin, isSafeSegmentName } from './paths.js';
+import { isSafeProjectName } from './projects.js';
 import { atomicWriteFileSync } from './fs-atomic.js';
 import type { AgentId } from './types.js';
 import { ALL_AGENT_IDS } from './agents.js';
@@ -285,6 +286,125 @@ export interface JobConfig {
    * RUSH-2020.
    */
   actor?: string;
+  /**
+   * Named projects this routine belongs to. Metadata-only: organises the
+   * routine under a project group in `agents routines list` and the menu bar;
+   * has no effect on scheduling or execution.
+   *
+   * Special values:
+   * - `["*"]` — routine applies to all defined projects (the "All projects" group).
+   * - A single name — routine belongs to that specific project.
+   * - Multiple names — routine spans several projects ("Cross-project" group).
+   * - Absent/empty — routine belongs to no project ("Operations" group).
+   */
+  projects?: string[];
+}
+
+/**
+ * Canonical form of a routine's `projects` field: drop non-string and empty
+ * entries and deduplicate while preserving first-seen order. This is the single
+ * source of truth for project-name normalization, applied at the schema
+ * boundary (`writeJob` before persistence) and at grouping (`computeProjectGroupKind`)
+ * so a hand-authored YAML with duplicates (`projects: [myapp, myapp]`) is
+ * treated identically to the canonical single-entry form everywhere.
+ *
+ * Returns `undefined` when nothing survives, so callers can omit the field.
+ */
+export function normalizeProjects(projects: string[] | undefined): string[] | undefined {
+  if (!Array.isArray(projects) || projects.length === 0) return undefined;
+  const out = [...new Set(projects.filter((p): p is string => typeof p === 'string' && p !== ''))];
+  return out.length === 0 ? undefined : out;
+}
+
+/**
+ * A routine's project bucket, discriminated by `kind` so buckets are never keyed
+ * on their human display label. A named project called literally "Operations" or
+ * "Cross-project" is `{ kind: 'named', name }` and can never collide with the
+ * `operations` / `cross` special buckets that happen to share those titles.
+ */
+export type ProjectGroup =
+  | { kind: 'named'; name: string }
+  | { kind: 'all' }
+  | { kind: 'cross' }
+  | { kind: 'operations' }
+  | { kind: 'unknown' };
+
+/**
+ * Classify a routine's `projects` field into a discriminated {@link ProjectGroup}.
+ * Duplicates are collapsed first ({@link normalizeProjects}), so `[myapp, myapp]`
+ * is a single named project, not a "Cross-project" span.
+ *
+ * @param projects - The routine's projects array (may be undefined).
+ * @param knownProjectNames - The set of currently defined project names (from `listProjectDefs`).
+ */
+export function computeProjectGroupKind(
+  projects: string[] | undefined,
+  knownProjectNames: Set<string>,
+): ProjectGroup {
+  const norm = normalizeProjects(projects);
+  if (!norm) return { kind: 'operations' };
+  if (norm.length === 1 && norm[0] === '*') return { kind: 'all' };
+  const hasUnknown = norm.some((p) => p !== '*' && !knownProjectNames.has(p));
+  if (hasUnknown) return { kind: 'unknown' };
+  if (norm.length === 1) return { kind: 'named', name: norm[0] };
+  return { kind: 'cross' };
+}
+
+/** Human display title for a {@link ProjectGroup}. */
+export function projectGroupTitle(group: ProjectGroup): string {
+  switch (group.kind) {
+    case 'named': return group.name;
+    case 'all': return 'All projects';
+    case 'cross': return 'Cross-project';
+    case 'operations': return 'Operations';
+    case 'unknown': return 'Unknown projects';
+  }
+}
+
+/**
+ * Stable bucket key for a {@link ProjectGroup}. Named projects key on their name
+ * under a `named:` prefix; specials key on their `kind` under a `special:` prefix.
+ * The two namespaces can never collide, so a project named "Operations" gets its
+ * own bucket separate from the no-project "Operations" special.
+ */
+export function projectGroupKey(group: ProjectGroup): string {
+  return group.kind === 'named' ? `named:${group.name}` : `special:${group.kind}`;
+}
+
+/** Sort rank for a {@link ProjectGroup}: named projects first, then specials in a fixed order. */
+export function projectGroupOrder(group: ProjectGroup): number {
+  switch (group.kind) {
+    case 'named': return 0;
+    case 'all': return 1;
+    case 'cross': return 2;
+    case 'operations': return 3;
+    case 'unknown': return 4;
+  }
+}
+
+/**
+ * Compute the display group label for a routine's `projects` field.
+ *
+ * Kept as the label-returning form for the JSON `projectGroup` field and any
+ * text consumer; grouping and ordering use the discriminated
+ * {@link computeProjectGroupKind}/{@link projectGroupKey} instead so buckets are
+ * never keyed on the label.
+ *
+ * @param projects - The routine's projects array (may be undefined).
+ * @param knownProjectNames - The set of currently defined project names (from `listProjectDefs`).
+ *
+ * Returns one of:
+ * - A specific project name — when `projects` has exactly one known name.
+ * - `"All projects"` — when `projects` is `["*"]`.
+ * - `"Cross-project"` — when `projects` has multiple distinct known entries.
+ * - `"Operations"` — when `projects` is absent or empty.
+ * - `"Unknown projects"` — when any entry is no longer a defined project (stale).
+ */
+export function computeProjectGroup(
+  projects: string[] | undefined,
+  knownProjectNames: Set<string>,
+): string {
+  return projectGroupTitle(computeProjectGroupKind(projects, knownProjectNames));
 }
 
 /** Metadata for a single job execution, persisted as JSON in the run directory. */
@@ -696,6 +816,13 @@ export function writeJob(config: JobConfig): void {
   if (output.runOnce === false || output.runOnce === undefined) delete output.runOnce;
   if (output.catchup === true || output.catchup === undefined) delete output.catchup;
   delete output.devices;
+  // Persist projects in canonical form: deduplicated, first-seen order, field
+  // omitted when nothing survives. This is the schema boundary, so a routine
+  // written from any path (add, edit, enable/disable re-write) lands canonical
+  // regardless of how the caller assembled the array.
+  const normProjects = normalizeProjects(output.projects as string[] | undefined);
+  if (normProjects) output.projects = normProjects;
+  else delete output.projects;
 
   let existingText: string | null = null;
   if (ymlExists || yamlExists) {
@@ -939,6 +1066,26 @@ export function validateJob(config: Partial<JobConfig>): string[] {
   }
   if (config.catchup !== undefined && typeof config.catchup !== 'boolean') {
     errors.push('catchup must be a boolean (false to skip running a missed fire late)');
+  }
+  if (config.projects !== undefined) {
+    if (!Array.isArray(config.projects)) {
+      errors.push('projects must be an array of project names (or ["*"] for all projects)');
+    } else if (config.projects.length === 1 && config.projects[0] === '*') {
+      // ["*"] is valid: "all projects" sentinel
+    } else if (config.projects.includes('*')) {
+      errors.push('projects: "*" (all projects) must be the sole entry');
+    } else {
+      for (const p of config.projects) {
+        if (typeof p !== 'string' || p.trim() === '') {
+          errors.push('each entry in projects must be a non-empty project name');
+          break;
+        }
+        if (!isSafeProjectName(p)) {
+          errors.push(`invalid project name "${p}": must start with a letter or digit, contain only letters, digits, dots, hyphens, or underscores`);
+          break;
+        }
+      }
+    }
   }
   return errors;
 }
