@@ -240,15 +240,16 @@ A local workspace probe always feeds this footer (cheap, no SSH). The full per-h
 
 | Command | Does |
 | --- | --- |
-| `agents projects list [--json]` | All projects: root, repo, live agent count. |
+| `agents projects list [--json] [--with-agents]` | All defined projects (root, repo, …). Definitions only by default — zero session scan / SSH. `--with-agents` is an explicit opt-in for **local** active counts only. |
 | `agents projects add <name>` | Scaffold `<name>.yaml`; infers `root` + origin slug from the current repo. Flags: `--root`, `--path`, `--repo`, `--context path:purpose`, `--goal objective:measure`, `--linear`. |
+| `agents projects save --json` | Create or update one project from a complete `ProjectDef` JSON object on stdin; validates against the canonical schema, writes atomically under `~/.agents/projects/`, prints the saved definition as JSON. Used by Factory (and any other machine client). |
 | `agents projects view <name>` / `show` | Alias of `status <name>`: full card, every milestone, stored definition. |
 | `agents projects edit <name>` | Open the YAML in `$EDITOR`. |
 | `agents projects status [name] [--json] [--window N] [--no-remote] [--device name...] [--devices a,b,c]` (aliases `view`, `show`) | Progress card for every project across the whole fleet (per-device workspace drift over SSH), or one named project. Named form also prints every milestone and the stored definition. `--device`/`--devices` scopes the fan-out to a subset. |
 | `agents projects link <name> --linear [query]` | Bind a Linear project into the def (`linear.projectId` + url). No query → auto-suggests from the def name + repo slug; ambiguous/none lists candidates and exits 1. Powers the `linear` card line. |
-| `agents projects import --from-linear` | Import the workspace's Linear projects (via the `linear` CLI) as definitions. See [Importing](#importing--from-linear). |
+| `agents projects import --from-linear` | Import the workspace's Linear projects (via the `linear` CLI) as definitions. See [Importing](#importing--from-linear). There is no Factory import path — `~/.agents/factory/projects.json` is never read. |
 | `agents projects set <name> [--repo\|--root\|--path\|--description\|--goal objective:measure]` | Change one field, preserving every other. `--goal` (repeatable) replaces the goals list. Use this rather than `add --force`, which rebuilds the definition from flags alone. |
-| `agents projects rm <name>` | Delete the definition (never touches the repo). |
+| `agents projects rm <name> [--json]` | Delete the definition (never touches the repo). `--json` prints `{ ok, name, removed }` (or `{ ok: false, name, error }` on failure). |
 
 `agents run --project <name>` is unchanged in spelling — it just resolves richer
 definitions now.
