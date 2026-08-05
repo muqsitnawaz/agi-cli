@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **`ProjectDef` YAML gains `dispatch` block and `linear.name`.** `~/.agents/projects/<name>.yaml` now accepts a `dispatch:` block (`enabled`, `maxAgents`, `provider`, `host`) that opts a project into auto-dispatch and is read directly by `agents __auto-dispatch` — previously these fields lived only in Factory's own registry. `linear.name` stores the Linear project display name alongside the existing `projectId` and `url`. Both fields are optional; existing YAMLs are unchanged. Source: `apps/cli/src/lib/projects.ts`, `apps/cli/src/lib/auto-dispatch.ts`.
+
+- **Projects canonicalization contract.** `agents projects import --from-factory` / `--min-confidence` / `--all` are gone; import is `--from-linear` only, and `~/.agents/factory/projects.json` is never read or migrated. `agents projects list --json` returns definitions only (zero session scan / SSH); `--with-agents` is an explicit opt-in for local active counts. New `agents projects save --json` reads one complete `ProjectDef` from stdin, validates, writes atomically under `~/.agents/projects/`, and prints the saved def. `agents projects rm <name> --json` returns machine-readable success/error. Factory's `managedProjects.ts` shells only through `agents projects list|save|rm` — never reads or writes project YAML/JSON directly, never seeds or migrates legacy Factory state; errors stay explicit for inline UI display. Source: `apps/cli/src/commands/projects.ts`, `apps/cli/src/lib/projects.ts`, `apps/factory/src/core/managedProjects.ts`, `apps/cli/docs/11-projects.md`.
+
 ## 1.22.13
 
 - **`agents sessions` accepts direct live-state flags and remains fleet-wide by default.** `--working`, `--idle`, `--waiting`, `--orphan`/`--orphaned`, `--crashed`, `--closed`, `--abandoned`, `--queued`, and `--unknown` each imply the live scan; multiple flags form a union. `--working` is narrower than `--active`: it excludes idle, waiting, and lifecycle-failure rows. Cross-device collection was already the default and stays that way; `--local` opts out, while `--all` continues to widen historical directory and time scope. Source: `apps/cli/src/commands/sessions.ts`, `apps/cli/src/commands/sessions.test.ts`.
@@ -43,6 +49,7 @@
   `apps/cli/src/lib/watchdog/runner.ts` (`NudgeDecision.needsHuman`,
   `WatchdogTickOptions.publishBlockFn`, the needs-human skip branch),
   `apps/cli/src/lib/watchdog/runner.test.ts`.
+
 
 ## 1.22.11
 
