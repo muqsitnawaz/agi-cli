@@ -1,25 +1,5 @@
 # Changelog
 
-## 1.22.6
-
-- **`agents feed --project <name>` scopes the whole feed to one project.** Open
-  blocks, the updates view (`--filter updates`), and the trailing activity lane
-  are all filtered to the requested repo/project using the same worktree-aware
-  project key as `agents perf` (`lib/project-key.ts`). The masthead becomes
-  `<project> needs you` / `<project> updates`. Filtering is applied locally after
-  the fleet fan-out, so older peers that do not recognize `--project` still
-  contribute correctly.
-
-- **Feed blocks are now stamped with their project.** The `feed-publish` hook
-  derives project from the session cwd, and `agents feed post --blocked` stamps it
-  on the declared block. Live-session enrichment backfills `project` onto older
-  blocks that lack it.
-
-- **`agents activity` is removed.** The standalone milestone timeline is gone;
-  its stream is now read through `agents feed --filter all` (blocks + updates) or
-  `agents feed --filter updates` (updates only). `activity --project <name>` is
-  replaced by `feed --project <name>`.
-
 ## 1.22.5
 
 - **`agents events` can now filter by `--session <id>` and `--bundle <name>` — trace which agent/session triggered a secret access.** Every event already carries the provenance `sessionId`, and secrets events carry the `bundle` in their payload, but neither was queryable: you could see *that* the `share` bundle was read, not *which session* read it. `--session` (wired to the engine's existing `sessionId` filter) and `--bundle` (a new payload filter across both the operational log and the activity stream) close that gap. `agents events --module secrets --bundle share --session <id>` answers "which agent read the share bundle" — the attribution the Touch ID storm investigation needed, since the macOS biometric sheet itself emits no event. Source: `apps/cli/src/lib/event-stream.ts`, `apps/cli/src/commands/events.ts`, `apps/cli/docs/06-observability.md`.
@@ -455,6 +435,7 @@
   HTTP responses cannot stack. Spinner stays up through account+usage load.
   Source: `apps/cli/src/commands/view.ts`, `apps/cli/src/lib/usage.ts`,
   `apps/cli/src/lib/agents.ts`.
+
 ## 1.21.1
 
 - **Feed posts require a title + body; phone `{message}` ends with a Sent-from footer.** `agents feed post --title "Short subject" "body text"` — title is the phone first line (~4–5 words), body follows after a blank line, then `Sent from <agent>/<session-chunk> on <host>` (like "Sent from my iPhone"). Em/en dashes in title/body are scrubbed to ASCII ` - `. Source: `apps/cli/src/lib/feed-broadcast.ts`, `feed-post.ts`, `commands/feed.ts`.
