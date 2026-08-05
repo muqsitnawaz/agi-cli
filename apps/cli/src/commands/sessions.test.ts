@@ -63,6 +63,57 @@ describe('live session status flags', () => {
       expect(matchesLiveStatus(row({ status }), status)).toBe(true);
     }
   });
+
+  it('routes aliases, unions, and the waiting exit gate through the real CLI', () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-flags-'));
+    const cwd = path.join(tempHome, 'work', 'status-fixture');
+    const liveSessionId = 'abcd1111-1111-4111-8111-111111111111';
+    const crashedSessionId = 'abcd2222-2222-4222-8222-222222222222';
+    const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
+    try {
+      writeUpdateCache(tempHome);
+      const projectKey = cwd.replace(/[/.]/g, '-');
+      writeClaudeSession(
+        tempHome,
+        projectKey,
+        liveSessionId,
+        cwd,
+        'Waiting for the user to choose',
+        new Date(Date.now() - 15 * 60_000).toISOString(),
+      );
+      const registry = path.join(tempHome, '.agents', '.cache', 'terminals', 'live-terminals.json');
+      fs.mkdirSync(path.dirname(registry), { recursive: true });
+      fs.writeFileSync(registry, JSON.stringify({
+        'stale-window': {
+          at: new Date(Date.now() - 11 * 60_000).toISOString(),
+          entries: [
+            { sessionId: liveSessionId, pid: sleeper.pid, kind: 'claude', cwd },
+            { sessionId: crashedSessionId, pid: 2_000_000_003, kind: 'claude', cwd },
+          ],
+        },
+      }));
+
+      const orphan = runAgents(['sessions', '--orphan', '--json', '--local'], cwd, tempHome);
+      const orphaned = runAgents(['sessions', '--orphaned', '--json', '--local'], cwd, tempHome);
+      expect(orphan.status, orphan.stderr).toBe(0);
+      expect(orphaned.status, orphaned.stderr).toBe(0);
+      expect(JSON.parse(orphan.stdout).map((row: ActiveSession) => row.sessionId)).toContain(liveSessionId);
+      expect(JSON.parse(orphaned.stdout)).toEqual(JSON.parse(orphan.stdout));
+
+      const union = runAgents(['sessions', '--orphan', '--crashed', '--json', '--local'], cwd, tempHome);
+      expect(union.status, union.stderr).toBe(0);
+      const unionIds = JSON.parse(union.stdout).map((row: ActiveSession) => row.sessionId);
+      expect(unionIds).toContain(liveSessionId);
+      expect(unionIds).toContain(crashedSessionId);
+
+      const waitingUnion = runAgents(['sessions', '--waiting', '--orphan', '--json', '--local'], cwd, tempHome);
+      expect(waitingUnion.status).toBe(1);
+      expect(JSON.parse(waitingUnion.stdout).map((row: ActiveSession) => row.sessionId)).toContain(liveSessionId);
+    } finally {
+      sleeper.kill('SIGTERM');
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('toolSearchForwardedArgs', () => {
