@@ -13,7 +13,7 @@
  * `agents feed post`: agent-callable free-text progress into the activity
  * stream (milestone `status.posted`). Session/agent/host/runtime/pid identity
  * is auto-stamped from env + the pid registry — no domain-specific flags.
- * Humans watch via the feed activity lane / `agents activity`.
+ * Humans watch via the feed activity lane.
  */
 import type { Command } from 'commander';
 import chalk from 'chalk';
