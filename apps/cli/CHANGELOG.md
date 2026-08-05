@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.22.16
+
+- **Resume exact sessions locally or across the fleet with `agents resume <id>` and `agents run <agent|auto> --resume <id>`.** Full IDs use the local SQLite index before any SSH fan-out; remote owners route to the recorded device and version home. Session metadata now records launch mode alongside harness, version, account, cwd, and machine so strict resume reconstructs the original run. Claude, Codex, Grok, Kimi, Droid, and Cursor use their verified version-specific native resume syntax; `run auto --resume` can select another healthy harness/account and continue through `/continue` when native resume is unavailable. Source: `apps/cli/src/commands/{exec,resume,sessions}.ts`, `apps/cli/src/lib/{exec,session/db}.ts`, `packages/session-tracker/src/hook.sh`.
+
+- **Hooks: one-level event dirs (`hooks/<event-name>/<script>`) are first-class.**
+  System hooks organize by harness event (`session-start/`, `pre-tool-use/`, …).
+  Install names stay the file basename. Dirs with top-level scripts expand into
+  individual hooks; fixture-only dirs remain directory bundles. Manifest `script:`
+  may be a relative path under `hooks/`. Source: `apps/cli/src/lib/hooks.ts`,
+  `apps/cli/src/lib/staleness/writers/sources.ts`, `apps/cli/src/lib/versions.ts`,
+  `apps/cli/src/lib/__tests__/hooks-nested-groups.test.ts`.
+
+- **`agents humans show owner [--json]`** — new command to display the owner config from `~/.agents/humans.yaml`. The file is written automatically on first run when `notify.owner` exists in `agents.yaml`. Source: `apps/cli/src/lib/humans.ts`, `apps/cli/src/commands/humans.ts`.
+
+- **`humans.yaml` — typed, versioned owner config.** `~/.agents/humans.yaml` (`version: 1`) now stores owner identity (name, timezone, quiet hours, severity), notification channels, and escalation policy. `notify.owner` in `agents.yaml` is migrated into it on first run and the `notify.owner` key is removed from `agents.yaml`; unrelated keys are preserved. `agents send --to owner` / `agents notify` prefer `humans.yaml` with a fallback to `agents.yaml` during the migration window. Source: `apps/cli/src/lib/humans.ts`, `apps/cli/src/commands/humans.ts`, `apps/cli/src/lib/migrate.ts`.
+
+- **`agents memory` ignores `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and `MEMORY.md`.** These rule/index files lived in `~/.agents/memory/` but were incorrectly surfaced as memory facts. `isFactFile()` now excludes them by name (case-insensitive). Source: `apps/cli/src/lib/memory.ts`.
+
+- **Permissions write path fixed — `groups/` subdirectory.** `installPermissionSet`, `removePermissionSet`, and `savePermissionSet` now all write to the `groups/` subdirectory (matching `discoverPermissionGroups()` which already reads from `groups/`). Source: `apps/cli/src/lib/permissions.ts`.
+
+- **Stop eagerly creating webhooks directories.** `ensureAgentsDir()` no longer creates `~/.agents/webhooks/` or `~/.agents/.system/webhooks/` on startup — both dirs are created on first actual use. Source: `apps/cli/src/lib/state.ts`.
+
+- **Terminals canonically under `.cache/`.** The stale migration comment that blocked `terminals/` from moving to `~/.agents/.cache/terminals/` is replaced by the actual move. Factory already writes to `.cache/terminals/` (`foreman.registry.ts:9`), so no app-level change is needed. Source: `apps/cli/src/lib/migrate.ts`.
+
+- **Menu bar warns when a device is under high load (local or remote).** The
+  agents-cli menu bar now shows a `⚠ <device> — high load N%` row in NEEDS YOU when
+  a machine's load or memory crosses the `headroom()` "loaded" threshold (≥75%), and
+  a red `✕` when critical. The local machine is probed natively via `getloadavg`
+  (zero subprocess); fleet peers come from the daemon-warmed `.fleet-stats.json`
+  cache with a freshness guard — never the slow `agents doctor` path. Action-required
+  rows are now emphasized so items that need you stand out. Source:
+  `apps/cli/menubar/Sources/MenubarHelper/LocalState.swift`,
+  `apps/cli/menubar/Sources/MenubarHelper/StatusItemController.swift`.
+
+- **Projects canonicalization contract.** `agents projects import --from-factory` / `--min-confidence` / `--all` are gone; import is `--from-linear` only, and `~/.agents/factory/projects.json` is never read or migrated. `agents projects list --json` returns definitions only (zero session scan / SSH); `--with-agents` is an explicit opt-in for local active counts. New `agents projects save --json` reads one complete `ProjectDef` from stdin, validates, writes atomically under `~/.agents/projects/`, and prints the saved def. `agents projects rm <name> --json` returns machine-readable success/error. Factory's `managedProjects.ts` shells only through `agents projects list|save|rm` — never reads or writes project YAML/JSON directly, never seeds or migrates legacy Factory state; errors stay explicit for inline UI display. Source: `apps/cli/src/commands/projects.ts`, `apps/cli/src/lib/projects.ts`, `apps/factory/src/core/managedProjects.ts`, `apps/cli/docs/11-projects.md`.
+
+- **`ProjectDef` YAML gains `dispatch` block and `linear.name`.** `~/.agents/projects/<name>.yaml` now accepts a `dispatch:` block (`enabled`, `maxAgents`, `provider`, `host`) that opts a project into auto-dispatch and is read directly by `agents __auto-dispatch` — previously these fields lived only in Factory's own registry. `linear.name` stores the Linear project display name alongside the existing `projectId` and `url`. Both fields are optional; existing YAMLs are unchanged. Source: `apps/cli/src/lib/projects.ts`, `apps/cli/src/lib/auto-dispatch.ts`.
+
+- **`agents secrets` no longer pops a generic "Agents CLI needs to authenticate" Touch ID sheet on every agent launch.** `listBundles` — which runs on essentially every secrets touch (session-title generation, `agents devices list`, every `agents run`, every remote launch that resolves secrets on the host) — could not ask the keychain for just the bundle *metadata* items: with hashed service names (#316) those names are opaque, so it fell back to a **broad `agents-cli.` keychain scan** that also matched the ACL'd secret *value* items. On machines where a bundle carries a biometric ACL (e.g. a `hold`-tier bundle holding an SSN or a password), macOS evaluated that value ACL during the attributes-only scan and raised a **generic, context-less** Touch ID prompt — on every launch, so a busy fleet felt like a machine-wide bombardment. Neither `kSecUseAuthenticationUIFail` nor `LAContext.interactionNotAllowed` can list the no-ACL items while skipping the ACL'd ones (both return nothing), so the fix is to stop doing the broad scan: a per-machine **no-ACL metadata-name index** (opaque hashes only, in the regenerable helpers dir — it leaks nothing #316 didn't) is read as a silent file instead. The write paths keep it current; an absent/stale index self-heals by rebuilding from the one-time scan, and a missing entry only makes `secrets list` cosmetically incomplete — it never affects a resolve-by-name. Your sensitive bundles keep their biometric gate on real value reads; only the bundle *listing* goes silent. Source: `apps/cli/src/lib/secrets/bundles.ts`.
+
 ## 1.22.15
 
 - **Separate routine definitions from device activation (#2023).** Enable a routine by listing its name in `~/.agents/devices/<hostname>/agents.yaml`; built-in Watchdog setup and `watchdog on|off` now update that host-owned manifest without rewriting the routine definition. Source: `apps/cli/src/lib/routine-activation.ts`, `apps/cli/src/commands/setup-watchdog.ts`.
