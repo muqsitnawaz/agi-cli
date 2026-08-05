@@ -7,6 +7,7 @@
  * healthy results from the rest of the fleet.
  */
 import { spawn } from 'child_process';
+import { setMaxListeners } from 'node:events';
 import chalk from 'chalk';
 import { SSH_OPTS, controlOpts, assertValidSshTarget, shellQuote } from './ssh-exec.js';
 import { sshTargetFor } from './devices/connect.js';
@@ -31,6 +32,34 @@ export interface RemoteAgentsJsonOptions<T> {
   quiet?: boolean;
   /** Per-peer deadline. Long-running maintenance commands override 12 seconds. */
   timeoutMs?: number;
+  /**
+   * Opt-in early-exit for a globally-unique lookup (a full session UUID). When a
+   * peer returns an item that satisfies {@link isDefinitive}, the fan-out
+   * resolves immediately and SIGTERMs every still-outstanding peer instead of
+   * waiting for the slowest one to hit {@link REMOTE_TIMEOUT_MS}.
+   *
+   * OMITTED BY DEFAULT — tool-search, program-count, and the default session
+   * listing keep the all-settle behavior (ambiguity, or a label/prefix conflict,
+   * is only known once every peer has answered). Only the full-UUID resolve path
+   * opts in, since only a UUID guarantees the first hit is the only hit.
+   */
+  earlyExit?: {
+    isDefinitive: (item: T, machine: string) => boolean;
+  };
+}
+
+/**
+ * The SSH boundary as a swappable dependency so the fan-out logic is testable
+ * without a live tailnet. Production wires this to the real {@link sshCapture}.
+ */
+export type SshCaptureFn = (
+  target: string,
+  remoteCmd: string,
+  opts: { timeoutMs: number; signal?: AbortSignal },
+) => Promise<{ code: number | null; stdout: string }>;
+
+export interface GatherRemoteAgentsJsonDeps {
+  capture?: SshCaptureFn;
 }
 
 export interface RemoteAgentsJsonParseResult<T> {
@@ -75,9 +104,13 @@ export function remoteAgentsJsonCommand(args: string[], noFanoutEnv: string, os?
   return `bash -lc ${shellQuote(inner)}`;
 }
 
-function sshCapture(target: string, remoteCmd: string, timeoutMs: number): Promise<{ code: number | null; stdout: string }> {
+const sshCapture: SshCaptureFn = (target, remoteCmd, { timeoutMs, signal }) => {
   assertValidSshTarget(target);
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve({ code: null, stdout: '' });
+      return;
+    }
     const args = [...SSH_OPTS, ...controlOpts(), target, remoteCmd];
     const child = spawn('ssh', args, { stdio: ['ignore', 'pipe', 'ignore'] });
     let stdout = '';
@@ -86,22 +119,29 @@ function sshCapture(target: string, remoteCmd: string, timeoutMs: number): Promi
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       resolve({ code, stdout });
     };
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       done(null);
     }, timeoutMs);
+    // A definitive hit on a fast peer cancels the rest: SIGTERM the child so an
+    // unreachable peer is not left running to its full timeout.
+    const onAbort = () => { child.kill('SIGTERM'); done(null); };
+    signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (data) => { stdout += data.toString(); });
     child.on('error', () => done(null));
     child.on('close', (code) => done(code));
   });
-}
+};
 
 /** Query explicit hosts, or every registered online peer when hosts is omitted. */
 export async function gatherRemoteAgentsJson<T>(
   options: RemoteAgentsJsonOptions<T>,
+  deps: GatherRemoteAgentsJsonDeps = {},
 ): Promise<RemoteAgentsJsonResult<T>> {
+  const capture = deps.capture ?? sshCapture;
   const self = machineId();
   const targets: Array<{ target: string; machine: string; name: string; os?: string }> = [];
 
@@ -140,23 +180,50 @@ export async function gatherRemoteAgentsJson<T>(
 
   const skipped: string[] = [];
   const parseFailed: string[] = [];
+
+  // The controller exists ONLY for early-exit: the first definitive hit aborts
+  // every still-outstanding peer. When earlyExit is not requested there is no
+  // controller and no per-peer abort listener, so the default path is a plain
+  // all-settle Promise.all, byte-identical to before (tool-search, program-count).
+  const controller = options.earlyExit ? new AbortController() : undefined;
+  // A fleet can hold more peers than Node's default 10-listener cap; each peer's
+  // capture adds one abort listener, so lift the cap to avoid a spurious warning.
+  if (controller) setMaxListeners(targets.length + 1, controller.signal);
+  let earlyResolved = false;
+
   const results = await Promise.all(targets.map(async (target) => {
     const command = remoteAgentsJsonCommand(options.args, options.noFanoutEnv, target.os);
-    const result = await sshCapture(target.target, command, options.timeoutMs ?? REMOTE_TIMEOUT_MS);
+    const result = await capture(target.target, command, {
+      timeoutMs: options.timeoutMs ?? REMOTE_TIMEOUT_MS,
+      signal: controller?.signal,
+    });
+    // A peer we deliberately cancelled is neither a hit nor a failure — it never
+    // got to answer, so it must not pollute skipped/parseFailed (which drive the
+    // "unreachable" listing and the fail-closed partial-resolution gate).
+    const cancelled = controller?.signal.aborted ?? false;
     if (result.code !== 0) {
-      skipped.push(target.name);
-      if (!options.quiet) {
-        process.stderr.write(chalk.gray(`  ${target.name}: unreachable or no agents CLI — skipped\n`));
+      if (!cancelled) {
+        skipped.push(target.name);
+        if (!options.quiet) {
+          process.stderr.write(chalk.gray(`  ${target.name}: unreachable or no agents CLI — skipped\n`));
+        }
       }
       return [] as T[];
     }
     const parsed = parseRemoteAgentsJsonPayload(result.stdout, target.machine, options.parse);
     if (parsed.parseFailed) {
-      parseFailed.push(target.name);
-      if (!options.quiet) {
-        process.stderr.write(chalk.gray(`  ${target.name}: unreachable or no agents CLI — skipped\n`));
+      if (!cancelled) {
+        parseFailed.push(target.name);
+        if (!options.quiet) {
+          process.stderr.write(chalk.gray(`  ${target.name}: unreachable or no agents CLI — skipped\n`));
+        }
       }
       return [] as T[];
+    }
+    if (controller && options.earlyExit && !earlyResolved
+      && parsed.items.some((item) => options.earlyExit!.isDefinitive(item, target.machine))) {
+      earlyResolved = true;
+      controller.abort(); // SIGTERM the remaining peers; they settle fast below.
     }
     return parsed.items;
   }));

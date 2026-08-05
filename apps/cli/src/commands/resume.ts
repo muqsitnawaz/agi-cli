@@ -32,8 +32,8 @@ export function buildResumeRunArgs(
 
 export function registerResumeCommand(program: Command): void {
   const cmd = program
-    .command('resume <session-id> [prompt]')
-    .description('Resume a session with its original harness, version, device, account, cwd, and mode')
+    .command('resume <session> [prompt]')
+    .description('Resume a session by full id, unique id prefix, or exact label with its original harness, version, device, account, cwd, and mode. Searches the fleet automatically; a local full-id hit resumes with zero SSH.')
     .option('-m, --mode <mode>', 'Override the recorded launch mode')
     .option('-i, --interactive', 'Resume interactively even when a prompt is provided')
     .option('--headless', 'Resume headlessly (a prompt is required)')
@@ -83,10 +83,13 @@ export function registerResumeCommand(program: Command): void {
       # Resume and continue headlessly
       agents resume 019fd0c8-b3e9-77a2-a1a4-444698c4d897 "finish the tests"
 
+      # Resume by exact label (auto-resumes the one match)
+      agents resume "fix the flaky ssh test"
+
       # Deliberately change permissions
       agents resume 019fd0c8-b3e9-77a2-a1a4-444698c4d897 --mode edit`,
     notes: `
-      Full IDs resolve from the local session database first; an SSH fleet lookup runs only after a local miss.
+      A full ID resolves from the local session database first (zero SSH) and, on a local miss, fans out with the first peer holding it cancelling the rest. An exact label always consults the fleet (labels are not globally unique) and auto-resumes the one match; a cross-machine label collision surfaces as an ambiguity.
       Use agents run auto --resume <id> when the original account is unavailable and another harness may continue.`,
   });
 }

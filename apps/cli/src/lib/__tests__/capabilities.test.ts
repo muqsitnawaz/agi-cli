@@ -172,12 +172,13 @@ describe('mcpHttp / mcpHeaders capability gates', () => {
       'claude',
       'codex',
       'hermes',
+      'muse',
       'pi',
     ]);
   });
 
-  it('capableAgents(mcpHeaders) is claude and pi (the header-honoring writers)', () => {
-    expect(capableAgents('mcpHeaders').sort()).toEqual(['claude', 'pi']);
+  it('capableAgents(mcpHeaders) is claude, muse, and pi (the header-honoring writers)', () => {
+    expect(capableAgents('mcpHeaders').sort()).toEqual(['claude', 'muse', 'pi']);
   });
 });
 
@@ -234,6 +235,11 @@ describe('capableAgents()', () => {
   it('includes hermes for hooks (Hermes Agent config.yaml hooks since 0.11.0)', () => {
     const agents = capableAgents('hooks');
     expect(agents).toContain('hermes');
+  });
+
+  it('includes muse for hooks (Claude-shaped settings.json under ~/.config/muse)', () => {
+    const agents = capableAgents('hooks');
+    expect(agents).toContain('muse');
   });
 
   it('includes OpenCode hooks through its plugin API and excludes amp', () => {

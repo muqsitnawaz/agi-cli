@@ -191,6 +191,7 @@ export function parseSession(
     case 'kimi': events = parseKimi(filePath); break;
     case 'droid': events = parseDroid(filePath); break;
     case 'cursor': events = parseCursor(filePath); break;
+    case 'muse': events = parseMuse(filePath); break;
   }
 
   // Chokepoint: every string field that originated in an untrusted session
@@ -229,6 +230,15 @@ export function detectAgent(filePath: string): SessionAgentId | null {
   if (filePath.includes('/.kimi-code/') || filePath.includes('\\.kimi-code\\')) return 'kimi';
   if (filePath.includes('/.factory/') || filePath.includes('\\.factory\\')) return 'droid';
   if (filePath.includes('/.cursor/') || filePath.includes('\\.cursor\\')) return 'cursor';
+  // Muse sessions: ~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl
+  if (
+    filePath.includes('/muse/sessions/') ||
+    filePath.includes('\\muse\\sessions\\') ||
+    filePath.includes('/.local/share/muse/') ||
+    filePath.includes('\\.local\\share\\muse\\')
+  ) {
+    return 'muse';
+  }
   // Cloud convention: cloud-sessions/<id>/session.<format>.jsonl
   const cloudMatch = filePath.match(/session\.(claude|codex|rush)\.jsonl(?:$|[?#])/);
   if (cloudMatch) return cloudMatch[1] as SessionAgentId;
@@ -1563,6 +1573,102 @@ export function parseRush(filePath: string): SessionEvent[] {
 //     system_prompt, message_count, messages: [{role, content}, ...] }
 // Content may be a string or an array of text parts.
 // ---------------------------------------------------------------------------
+
+/**
+ * Muse Code session.jsonl → normalized events.
+ *
+ * Muse records an append-only event log. We map:
+ *   - runtime.command_intake.received / turn_submit → user message
+ *   - assistant_message_committed → assistant message
+ *   - model_completed.usage → usage
+ *   - tool-related events when present
+ */
+export function parseMuse(filePath: string): SessionEvent[] {
+  const content = safeReadSessionFile(filePath);
+  const lines = content.split('\n').filter((l) => l.trim());
+  const events: SessionEvent[] = [];
+
+  const museTs = (raw: any): string => {
+    if (typeof raw?.recorded_at === 'number') {
+      const v = raw.recorded_at as number;
+      const ms = v > 1e14 ? Math.floor(v / 1000) : v;
+      return new Date(ms).toISOString();
+    }
+    return new Date().toISOString();
+  };
+
+  for (const line of lines) {
+    let raw: any;
+    try {
+      raw = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const timestamp = museTs(raw);
+    const payloadType = raw.payload_type as string | undefined;
+    const payload = raw.payload;
+    const event = payload?.event ?? payload;
+
+    if (payloadType === 'runtime.command_intake.received') {
+      const cmd = payload?.record?.command;
+      if (cmd?.kind === 'turn_submit' && typeof cmd.prompt === 'string' && cmd.prompt.trim()) {
+        events.push({
+          type: 'message',
+          agent: 'muse',
+          timestamp,
+          role: 'user',
+          content: cmd.prompt.trim(),
+        });
+      }
+      continue;
+    }
+
+    if (event?.kind === 'assistant_message_committed' && typeof event.text === 'string') {
+      events.push({
+        type: 'message',
+        agent: 'muse',
+        timestamp,
+        role: 'assistant',
+        content: event.text,
+      });
+      continue;
+    }
+
+    if (event?.kind === 'model_completed' && event.usage && typeof event.usage === 'object') {
+      const u = event.usage;
+      events.push({
+        type: 'usage',
+        agent: 'muse',
+        timestamp,
+        content: JSON.stringify({
+          input_tokens: u.input_tokens ?? 0,
+          output_tokens: u.output_tokens ?? 0,
+          cached_tokens: u.cached_tokens ?? 0,
+          reasoning_tokens: u.reasoning_tokens ?? 0,
+        }),
+      });
+      continue;
+    }
+
+    // Tool call / result shapes when Muse records them under task events
+    if (event?.kind === 'tool_call' || event?.kind === 'tool.called') {
+      const tool = event.tool || event.name || event.tool_name;
+      if (typeof tool === 'string') {
+        events.push({
+          type: 'tool_use',
+          agent: 'muse',
+          timestamp,
+          tool,
+          args: typeof event.args === 'object' ? event.args : undefined,
+          callId: typeof event.call_id === 'string' ? event.call_id : undefined,
+        });
+      }
+    }
+  }
+
+  return events;
+}
 
 /** Parse a Hermes session JSON file into normalized events. */
 export function parseHermes(filePath: string): SessionEvent[] {

@@ -252,12 +252,27 @@ export function isAutomaticSessionPeer(d: DeviceProfile, self: string): boolean 
  * address. `forwardedArgs` are the caller's own sessions args (query + filters,
  * already `--json`) so every peer returns the same slice this machine asked for.
  */
-export async function gatherRemoteList(forwardedArgs: string[], hosts?: string[]): Promise<RemoteListResult> {
+export interface GatherRemoteListOptions {
+  /**
+   * Opt-in early-exit for a globally-unique id lookup (a full UUID): the first
+   * peer to return the matching row resolves the fan-out and cancels the rest.
+   * Omitted for browse/label/prefix sweeps, which must wait for every peer to
+   * know whether the match is unique or conflicting.
+   */
+  isDefinitive?: (session: SessionMeta, machine: string) => boolean;
+}
+
+export async function gatherRemoteList(
+  forwardedArgs: string[],
+  hosts?: string[],
+  opts?: GatherRemoteListOptions,
+): Promise<RemoteListResult> {
   const safeResolver = forwardedArgs.includes('--resolve-safe-v1');
   const result = await gatherRemoteAgentsJson<SessionMeta>({
     args: forwardedArgs,
     noFanoutEnv: NO_FANOUT_ENV,
     hosts,
+    earlyExit: opts?.isDefinitive ? { isDefinitive: opts.isDefinitive } : undefined,
     parse: (stdout, machine): RemoteAgentsJsonParseResult<SessionMeta> =>
       parseRemoteListPayload(stdout, machine, safeResolver),
   });

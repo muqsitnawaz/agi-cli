@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { AGENTS, ALL_AGENT_IDS, MANAGED_AGENT_IDS, getAccountEmail, getMcpConfigPathForHome, parseMcpConfig } from '../src/lib/agents.js';
+import { AGENTS, ALL_AGENT_IDS, MANAGED_AGENT_IDS, getAccountEmail, getMcpConfigPathForHome, parseMcpConfig, resolveAgentName } from '../src/lib/agents.js';
+import { writeMcpConfig } from '../src/lib/mcp.js';
 import { convertToOpenCodeFormat, convertToCursorFormat, applyPermissionsToVersion } from '../src/lib/permissions.js';
 import { capableAgents, supports } from '../src/lib/capabilities.js';
 import {
@@ -173,6 +174,62 @@ describe('pi (Oh My Pi)', () => {
       fs.rmSync(home, { recursive: true, force: true });
       fs.rmSync(subDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('Muse Code install targets', () => {
+  it('registers Muse with hooks, plugins, MCP, skills, AGENTS.md rules; no tool allowlist', () => {
+    expect(ALL_AGENT_IDS).toContain('muse');
+    expect(capableAgents('mcp')).toContain('muse');
+    expect(capableAgents('skills')).toContain('muse');
+    expect(capableAgents('memory')).toContain('muse');
+    expect(capableAgents('hooks')).toContain('muse');
+    expect(capableAgents('plugins')).toContain('muse');
+    // Muse uses approval-mode + sandbox, not Claude-style tool allowlists.
+    expect(capableAgents('allowlist')).not.toContain('muse');
+    expect(capableAgents('commands')).not.toContain('muse');
+    // Runtime multi-agent exists, but agents-cli has no installable subagent target.
+    expect(capableAgents('subagents')).not.toContain('muse');
+    expect(AGENTS.muse.cliCommand).toBe('muse');
+    expect(AGENTS.muse.supportsHooks).toBe(true);
+    expect(AGENTS.muse.pluginManifestDir).toBe('.muse-plugin');
+    expect(AGENTS.muse.instructionsFile).toBe('AGENTS.md');
+    expect(AGENTS.muse.capabilities.rules).toEqual({ file: 'AGENTS.md' });
+    expect(AGENTS.muse.capabilities.modes).toEqual(['plan', 'edit', 'auto', 'skip']);
+    expect(AGENTS.muse.installScript).toContain('dev.meta.ai/install.sh');
+  });
+
+  it('resolves Muse MCP config to ~/.config/muse/settings.json with mcp_servers + schema_version', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-muse-mcp-'));
+    try {
+      const configPath = getMcpConfigPathForHome('muse', home);
+      expect(configPath).toBe(path.join(home, '.config', 'muse', 'settings.json'));
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      writeMcpConfig(
+        'muse',
+        configPath,
+        [{ name: 'ctx', transport: 'stdio', command: 'ctx-server', args: ['--stdio'] }],
+        'overwrite',
+      );
+
+      const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(written.schema_version).toBe(1);
+      expect(written.mcp_servers.ctx.transport).toBe('stdio');
+      expect(written.mcp_servers.ctx.command).toBe('ctx-server');
+      expect(written.mcp_servers.ctx.args).toEqual(['--stdio']);
+
+      const parsed = parseMcpConfig('muse', configPath);
+      expect(parsed.ctx.command).toBe('ctx-server');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves muse aliases', () => {
+    expect(resolveAgentName('muse')).toBe('muse');
+    expect(resolveAgentName('muse-code')).toBe('muse');
+    expect(resolveAgentName('meta-muse')).toBe('muse');
   });
 });
 

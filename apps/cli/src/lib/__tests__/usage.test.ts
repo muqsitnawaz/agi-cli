@@ -209,7 +209,7 @@ describe('usage formatting', () => {
   });
 
   it('pins the complete usage source registry and derives support from it', () => {
-    expect(USAGE_SOURCE_AGENT_IDS).toEqual(['claude', 'codex', 'kimi', 'droid', 'grok', 'cursor', 'antigravity']);
+    expect(USAGE_SOURCE_AGENT_IDS).toEqual(['claude', 'codex', 'kimi', 'droid', 'grok', 'cursor', 'antigravity', 'muse']);
     for (const agentId of ALL_AGENT_IDS) {
       expect(agentReportsUsage(agentId)).toBe(USAGE_SOURCE_AGENT_IDS.includes(agentId as never));
     }

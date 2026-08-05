@@ -143,6 +143,7 @@ const AGENT_COMMANDS: Record<string, string[]> = {
   cursor: ['cursor-agent', '-p', '{prompt}', '--output-format', 'stream-json'],
   kimi: ['kimi', '--prompt', '{prompt}', '--output-format', 'stream-json'],
   droid: ['droid', 'exec', '{prompt}', '-o', 'stream-json'],
+  muse: ['muse', 'exec', '{prompt}', '--json'],
 };
 
 /** Agents the daemon can actually run, derived from the command table above
@@ -178,6 +179,8 @@ const ROUTINE_TRANSCRIPT_SPECS: Partial<Record<AgentId, Array<{ root: string[]; 
     { root: ['.kimi-code', 'sessions'], ext: '.jsonl' },
   ],
   grok: [{ root: ['.grok', 'sessions'], ext: '.json' }],
+  // Muse: ~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl
+  muse: [{ root: ['.local', 'share', 'muse', 'sessions'], ext: '.jsonl' }],
 };
 
 /** Stable working directory for routine children, independent of the daemon's launch cwd. */
@@ -323,6 +326,21 @@ export function buildJobCommand(config: JobConfig, resolvedPrompt: string): stri
     } else if (mode === 'skip') {
       cmd.push('--skip-permissions-unsafe');
     }
+
+    appendModelAndReasoning(cmd, config);
+  }
+
+  if (config.agent === 'muse') {
+    // muse exec: plan ≈ no non-shell writes; auto skips approval prompts but
+    // keeps the OS sandbox; skip is --yolo (no approval, no sandbox, trust).
+    if (mode === 'plan') {
+      cmd.push('--disable-write');
+    } else if (mode === 'auto') {
+      cmd.push('--disable-approval');
+    } else if (mode === 'skip') {
+      cmd.push('--yolo');
+    }
+    // edit: default on-request approval + sandbox
 
     appendModelAndReasoning(cmd, config);
   }

@@ -1965,6 +1965,91 @@ describe('registerHooksToSettings - Droid', () => {
   });
 });
 
+describe('registerHooksToSettings - Muse Code', () => {
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-test-'));
+    agentsDir = path.join(tmpDir, '.agents');
+    fs.mkdirSync(path.join(agentsDir, 'hooks'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeMuseVersionHome(): string {
+    const home = path.join(tmpDir, 'muse-home');
+    fs.mkdirSync(path.join(home, '.config', 'muse'), { recursive: true });
+    return home;
+  }
+
+  function readMuseSettings(home: string): Record<string, any> {
+    return JSON.parse(
+      fs.readFileSync(path.join(home, '.config', 'muse', 'settings.json'), 'utf-8')
+    );
+  }
+
+  it('writes Claude-shaped hooks into ~/.config/muse/settings.json with schema_version: 1', () => {
+    const versionHome = makeMuseVersionHome();
+    makeScript('pre-tool.sh');
+
+    const manifest: Record<string, ManifestHook> = {
+      'pre-tool': { script: 'pre-tool.sh', events: ['PreToolUse'], matcher: 'Bash', timeout: 45 },
+    };
+
+    const result = registerHooksToSettings('muse', versionHome, manifest, agentsDir);
+    expect(result.errors).toHaveLength(0);
+    expect(result.registered).toContain('pre-tool -> PreToolUse');
+
+    const settings = readMuseSettings(versionHome);
+    expect(settings.schema_version).toBe(1);
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.PreToolUse[0].matcher).toBe('Bash');
+    expect(settings.hooks.PreToolUse[0].hooks[0].type).toBe('command');
+    expect(settings.hooks.PreToolUse[0].hooks[0].timeout).toBe(45);
+  });
+
+  it('registers Muse native lifecycle events (SessionStart, PreToolUse, Stop)', () => {
+    const versionHome = makeMuseVersionHome();
+    makeScript('start.sh');
+    makeScript('pre.sh');
+    makeScript('stop.sh');
+
+    const manifest: Record<string, ManifestHook> = {
+      start: { script: 'start.sh', events: ['SessionStart'] },
+      pre: { script: 'pre.sh', events: ['PreToolUse'] },
+      stop: { script: 'stop.sh', events: ['Stop'] },
+    };
+
+    const result = registerHooksToSettings('muse', versionHome, manifest, agentsDir);
+    expect(result.errors).toHaveLength(0);
+
+    const settings = readMuseSettings(versionHome);
+    expect(settings.schema_version).toBe(1);
+    expect(settings.hooks.SessionStart).toHaveLength(1);
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+    expect(settings.hooks.Stop).toHaveLength(1);
+  });
+
+  it('preserves existing settings keys and backfills schema_version', () => {
+    const versionHome = makeMuseVersionHome();
+    const settingsPath = path.join(versionHome, '.config', 'muse', 'settings.json');
+    fs.writeFileSync(settingsPath, JSON.stringify({ tui: { voice_enabled: true } }, null, 2));
+
+    makeScript('pre-tool.sh');
+    const manifest: Record<string, ManifestHook> = {
+      'pre-tool': { script: 'pre-tool.sh', events: ['PreToolUse'] },
+    };
+
+    const result = registerHooksToSettings('muse', versionHome, manifest, agentsDir);
+    expect(result.errors).toHaveLength(0);
+
+    const settings = readMuseSettings(versionHome);
+    expect(settings.schema_version).toBe(1);
+    expect(settings.tui?.voice_enabled).toBe(true);
+    expect(settings.hooks.PreToolUse).toHaveLength(1);
+  });
+});
+
 // Regression for the Windows hook-path bug: hook commands stored as absolute
 // Windows paths with backslashes ("C:\\Users\\...\\06-attention-sentinel.sh")
 // break at exec time because Claude runs hooks via bash, which strips the

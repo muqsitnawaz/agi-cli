@@ -41,6 +41,7 @@ describe('account inspection support', () => {
       'kimi',
       'droid',
       'opencode',
+      'muse',
     ]);
     for (const agent of ACCOUNT_INSPECTION_AGENT_IDS) {
       expect(supportsAccountInspection(agent)).toBe(true);
