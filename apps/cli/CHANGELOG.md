@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`agents cli` renamed to `agents clis`; resource directory `cli/` renamed to `clis/`.** The CLI resource kind and its subdirectory are now plural throughout: `ResourceKind` changes from `'cli'` to `'clis'`, manifests live at `clis/<name>.yaml`, `agents clis` is the only command surface (no `agents cli` alias), and `agents view --clis` replaces `--cli`. A startup migration renames any existing `cli/` directory to `clis/` in the user, system, and project `.agents/` layers; if both `cli/` and `clis/` are present the migration fails with a clear error rather than silently merging. Source: `apps/cli/src/lib/resources.ts`, `apps/cli/src/lib/cli-resources.ts`, `apps/cli/src/commands/cli.ts`, `apps/cli/src/lib/startup/command-registry.ts`, `apps/cli/src/commands/repo.ts`, `apps/cli/src/commands/view.ts`, `apps/cli/src/lib/migrate.ts`.
+
 ## 1.22.10
 
 - **Plugins package workflows (Phase 5 packaging slice).** A plugin’s `workflows/<name>/WORKFLOW.md` is discovered and resolved by `agents run <name>` with precedence project > user > plugin > extra > system — no separate install into `~/.agents/workflows/` required. Plugin inventory / resource groups list `workflows`. Source: `apps/cli/src/lib/workflows.ts`, `apps/cli/src/lib/plugins.ts`, `apps/cli/src/lib/resources/workflows.ts`.
