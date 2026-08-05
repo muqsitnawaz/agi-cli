@@ -138,8 +138,15 @@ export function selectFallback(attachOnly: boolean | undefined): UnreachableFall
 export async function focusAction(id: string | undefined, opts: FocusOptions): Promise<void> {
   const hosts = mergeFocusHosts(opts);
   const statuses = requestedLiveStatuses(opts);
-  // A device scope needs the cross-host sweep; --local only wins when no host is named.
-  const local = !!opts.local && hosts.length === 0;
+  // A device scope needs the cross-host sweep, so --local and --device/--host are
+  // mutually exclusive — reject rather than silently drop the device scope.
+  if (opts.local && hosts.length > 0) {
+    console.error(chalk.red('--local and --device/--host are mutually exclusive.'));
+    console.error(chalk.gray('Drop --local to scope to a device, or drop --device to stay on this machine.'));
+    process.exitCode = 1;
+    return;
+  }
+  const local = !!opts.local;
   const { self, activeById } = await gatherLiveTargets(local, { hosts, statuses });
   const fallback = selectFallback(opts.attachOnly);
 

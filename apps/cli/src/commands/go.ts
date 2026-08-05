@@ -161,7 +161,13 @@ export async function pickLiveTargets(
     throw err;
   }
   if (!chosen) return [];
-  return chosen.map((m) => activeById.get(m.id)).filter((s): s is ActiveSession => !!s);
+  const resolved = chosen.map((m) => activeById.get(m.id));
+  const live = resolved.filter((s): s is ActiveSession => !!s);
+  const dropped = resolved.length - live.length;
+  if (dropped > 0) {
+    console.log(chalk.yellow(`  ${dropped} selected session${dropped === 1 ? '' : 's'} no longer live — focusing the remaining ${live.length}.`));
+  }
+  return live;
 }
 
 /**
