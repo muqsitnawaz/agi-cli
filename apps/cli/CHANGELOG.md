@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`agents view` custom-harness rows now lead with the version tag and show BYOK budget bars.** The host-version column changed from `via claude 2.1.219` to `2.1.219 (forked from claude)` so the version string reads first — matching how native rows display it. When the harness tracks the host's global default (no pinned version), the tag reads `2.1.219 (forked from claude, tracks default)` in green. Chained-fork headers also surface one extra hop: a harness forked from `deepseek-flash` (which was itself forked from `claude`) now shows `custom · forked from deepseek-flash -> claude` instead of stopping at the immediate parent. For OpenRouter-backed harnesses with a stored API key, a credit-bar column (`$: ████░ 25% ($7.50 left of $10.00)`) appears on the detail row — same bar style as the native usage display. Source: `apps/cli/src/commands/view.ts`, `apps/cli/src/lib/byok-usage.ts`, `apps/cli/src/lib/usage.ts`.
+
 ## 1.22.5
 
 - **`agents events` can now filter by `--session <id>` and `--bundle <name>` — trace which agent/session triggered a secret access.** Every event already carries the provenance `sessionId`, and secrets events carry the `bundle` in their payload, but neither was queryable: you could see *that* the `share` bundle was read, not *which session* read it. `--session` (wired to the engine's existing `sessionId` filter) and `--bundle` (a new payload filter across both the operational log and the activity stream) close that gap. `agents events --module secrets --bundle share --session <id>` answers "which agent read the share bundle" — the attribution the Touch ID storm investigation needed, since the macOS biometric sheet itself emits no event. Source: `apps/cli/src/lib/event-stream.ts`, `apps/cli/src/commands/events.ts`, `apps/cli/docs/06-observability.md`.
