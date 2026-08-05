@@ -1,1 +1,1 @@
-- Move operational event logs from the git-backed `~/.agents/` root into `~/.agents/.history/events/`, including existing numbered gzip archives.
+- Move operational event logs from the git-backed `~/.agents/` root into daily `~/.agents/.history/events/YYYY-MM-DD/` directories, retain 7 days and at most 50 MiB automatically, and make `agents logs audit` use the `agents events --audit` reader.

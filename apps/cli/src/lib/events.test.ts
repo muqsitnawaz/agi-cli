@@ -8,7 +8,7 @@ import {
   redactPrompt, redactArgs, truncate,
   detectCaller,
   levelFor, isEventType, EVENT_TYPES,
-  _resetForTest,
+  getLogsPath, _resetForTest,
 } from './events.js';
 import { resetActorCache } from './actor.js';
 
@@ -412,9 +412,79 @@ describe('events', () => {
       const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       fs.utimesSync(gzFile, old, old);
 
-      const removed = rotate(7);
-      expect(removed).toBe(1);
+      const result = rotate(7);
+      expect(result.removedByAge).toBe(1);
+      expect(result.removedBySize).toBe(0);
       expect(fs.existsSync(gzFile)).toBe(false);
+    });
+
+    it('runs retention from the central emit path', () => {
+      const logsDir = setupLogsDir();
+      const gzFile = path.join(logsDir, 'events.1.jsonl.gz');
+      fs.writeFileSync(gzFile, gzipSync(Buffer.from('{"event":"info"}\n')));
+      const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      fs.utimesSync(gzFile, old, old);
+
+      emit('info', { module: 'prune-trigger' });
+
+      expect(fs.existsSync(gzFile)).toBe(false);
+      expect(query({ module: 'prune-trigger' })).toHaveLength(1);
+    });
+
+    it('writes into a local-date directory under .history/events', () => {
+      const userDir = makeTempDir();
+      _resetForTest(undefined, userDir);
+
+      emit('info', { module: 'dated-layout' });
+
+      const expectedDay = [
+        new Date().getFullYear(),
+        String(new Date().getMonth() + 1).padStart(2, '0'),
+        String(new Date().getDate()).padStart(2, '0'),
+      ].join('-');
+      const expected = path.join(userDir, '.history', 'events', expectedDay, 'events.jsonl');
+      expect(getLogsPath()).toBe(expected);
+      expect(fs.existsSync(expected)).toBe(true);
+    });
+
+    it('migrates root event files without losing queryable records', () => {
+      const userDir = makeTempDir();
+      const legacyActive = path.join(userDir, 'events.jsonl');
+      const legacyArchive = path.join(userDir, 'events.1.jsonl.gz');
+      const record = (module: string) => JSON.stringify({
+        ts: new Date().toISOString(), event: 'info', level: 'info', module,
+      }) + '\n';
+      fs.writeFileSync(legacyActive, record('legacy-active'));
+      fs.writeFileSync(legacyArchive, gzipSync(Buffer.from(record('legacy-archive'))));
+      _resetForTest(undefined, userDir);
+
+      emit('info', { module: 'new-write' });
+
+      expect(fs.existsSync(legacyActive)).toBe(false);
+      expect(fs.existsSync(legacyArchive)).toBe(false);
+      expect(query({}).map((entry) => entry.module)).toEqual(
+        expect.arrayContaining(['legacy-active', 'legacy-archive', 'new-write']),
+      );
+    });
+
+    it('removes the oldest files until the total storage ceiling is met', () => {
+      const logsDir = setupLogsDir();
+      const active = path.join(logsDir, 'events.jsonl');
+      fs.writeFileSync(active, '{"event":"info"}\n');
+      for (let i = 1; i <= 3; i++) {
+        const archive = path.join(logsDir, `events.${i}.jsonl.gz`);
+        fs.writeFileSync(archive, Buffer.alloc(1024, i));
+        const stamp = new Date(Date.now() - (4 - i) * 60_000);
+        fs.utimesSync(archive, stamp, stamp);
+      }
+
+      const result = rotate(365, 1500);
+      const remainingBytes = fs.readdirSync(logsDir)
+        .filter((name) => name === 'events.jsonl' || name.endsWith('.jsonl.gz'))
+        .reduce((sum, name) => sum + fs.statSync(path.join(logsDir, name)).size, 0);
+      expect(result.removedBySize).toBe(2);
+      expect(result.bytesReclaimed).toBe(2048);
+      expect(remainingBytes).toBeLessThanOrEqual(1500);
     });
   });
 
