@@ -39,7 +39,7 @@ import { setHelpSections } from '../lib/help.js';
 import { confirm } from '@inquirer/prompts';
 
 /** Opening more than this many live sessions at once asks for confirmation first. */
-const CONFIRM_THRESHOLD = 5;
+export const CONFIRM_THRESHOLD = 5;
 
 interface ResumeOptions {
   agent?: string;
@@ -235,7 +235,7 @@ export function resolveResumePacking(options: Pick<ResumeOptions, 'splits'>): Pa
  * (resume in the current process — no GUI/tmux available), or `'cancel'` (the
  * user dismissed the chooser).
  */
-async function resolveBackend(
+export async function resolveBackend(
   options: ResumeOptions,
   ctx: EngineContext,
   count: number,

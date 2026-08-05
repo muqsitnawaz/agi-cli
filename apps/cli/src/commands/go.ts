@@ -24,7 +24,19 @@ import { gatherRemoteActive } from '../lib/session/remote-active.js';
 import { discoverSessions } from '../lib/session/discover.js';
 import { deriveShortId } from '../lib/session/short-id.js';
 import type { SessionMeta, SessionAgentId } from '../lib/session/types.js';
-import { dedupeByMachineSession, mergeLocalFirst, pickSessionInteractive } from './sessions.js';
+import {
+  dedupeByMachineSession,
+  mergeLocalFirst,
+  pickSessionInteractive,
+  matchesLiveStatus,
+  filterSessionsByQuery,
+  formatPickerLabel,
+  pickerColumnsFor,
+  type LiveStatusFilter,
+} from './sessions.js';
+import { buildPreview } from './sessions-picker.js';
+import { multiItemPicker } from '../lib/picker.js';
+import { isPromptCancelled } from './utils.js';
 import { focusAction } from './focus.js';
 import { machineId } from '../lib/session/sync/config.js';
 import { attachTmux, runTmux } from '../lib/tmux/binary.js';
@@ -47,14 +59,40 @@ export function registerGoCommand(program: Command): void {
 }
 
 /**
+ * Scope a live-session pool by device and live status. Pure so the `focus`
+ * device/status filters are unit-testable without touching the sweep. `hosts`
+ * keeps only sessions whose `machine` is in the set (local rows carry `self`,
+ * remote rows carry their peer tag); `statuses` reuses `--active`'s exact
+ * `matchesLiveStatus` derivation rather than a parallel status table.
+ */
+export function filterLivePool(
+  sessions: ActiveSession[],
+  opts: { hosts?: string[]; statuses?: LiveStatusFilter[] } = {},
+): ActiveSession[] {
+  let out = sessions;
+  if (opts.hosts?.length) {
+    const set = new Set(opts.hosts);
+    out = out.filter((s) => !!s.machine && set.has(s.machine));
+  }
+  if (opts.statuses?.length) {
+    out = out.filter((s) => opts.statuses!.some((status) => matchesLiveStatus(s, status)));
+  }
+  return out;
+}
+
+/**
  * Live jump targets (local + remote), keyed by session id. Cloud is excluded by
  * default (it has no local pid to attach), but `detach` opts in with
  * `includeCloud` so it can resolve a cloud id and refuse it with a clear message
  * instead of a bare "no live session".
+ *
+ * `hosts` scopes the sweep to named devices — the fan-out only dials them, and the
+ * pool is then filtered to `s.machine ∈ hosts` so a stray local row can't leak in.
+ * `statuses` narrows to the live-state words `--active` uses (orphan/crashed/…).
  */
 export async function gatherLiveTargets(
   local: boolean,
-  opts: { includeCloud?: boolean } = {},
+  opts: { includeCloud?: boolean; hosts?: string[]; statuses?: LiveStatusFilter[] } = {},
 ): Promise<{ self: string; activeById: Map<string, ActiveSession> }> {
   const self = machineId();
   const localActive = await getActiveSessions();
@@ -62,10 +100,11 @@ export async function gatherLiveTargets(
   let active = localActive;
   if (!local) {
     try {
-      const remote = await gatherRemoteActive();
+      const remote = await gatherRemoteActive(opts.hosts);
       active = dedupeByMachineSession([...localActive, ...remote.sessions]);
     } catch { /* remote sweep is best-effort */ }
   }
+  active = filterLivePool(active, { hosts: opts.hosts, statuses: opts.statuses });
   const activeById = new Map<string, ActiveSession>();
   for (const s of active) {
     if (!s.sessionId) continue;
@@ -87,6 +126,42 @@ export async function pickLiveTarget(
   const picked = await pickSessionInteractive(pool, message, undefined, 0, enterHint);
   if (!picked) return null;
   return activeById.get(picked.session.id) ?? null;
+}
+
+/**
+ * Multi-select over the live sessions' rich SessionMeta (same rows as
+ * `pickLiveTarget`, but a checkbox picker) — the plural sibling that lets `focus`
+ * open several sessions at once. Mirrors `sessions resume`'s `multiItemPicker`
+ * wiring; returns the chosen live sessions in pick order, or `[]` on cancel.
+ */
+export async function pickLiveTargets(
+  activeById: Map<string, ActiveSession>,
+  self: string,
+  message: string,
+): Promise<ActiveSession[]> {
+  const pool = await buildLivePool(activeById, self);
+  if (pool.length === 0) return [];
+  // gutter: 6 = the multi-select cursor + checkbox ('> [x] ') multiItemPicker prepends.
+  const cols = { ...pickerColumnsFor(pool), gutter: 6 };
+  let chosen: SessionMeta[] | null;
+  try {
+    chosen = await multiItemPicker<SessionMeta>({
+      message,
+      items: pool,
+      filter: (q: string) => (q.trim() ? filterSessionsByQuery(pool, q) : pool),
+      labelFor: (s, q) => formatPickerLabel(s, q, cols),
+      keyFor: (s) => s.id,
+      buildPreview,
+      pageSize: 15,
+      emptyMessage: 'No live sessions match.',
+      enterHint: 'focus',
+    });
+  } catch (err) {
+    if (isPromptCancelled(err)) return [];
+    throw err;
+  }
+  if (!chosen) return [];
+  return chosen.map((m) => activeById.get(m.id)).filter((s): s is ActiveSession => !!s);
 }
 
 /**
