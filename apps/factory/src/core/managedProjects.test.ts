@@ -1,5 +1,11 @@
 import { test, describe, expect } from 'bun:test';
-import { defToManaged, projectNameFromPath, upsertManagedProject, deleteManagedProject } from './managedProjects';
+import {
+  defToManaged,
+  managedToProjectDef,
+  projectNameFromPath,
+  upsertManagedProject,
+  deleteManagedProject,
+} from './managedProjects';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -84,13 +90,58 @@ describe('defToManaged', () => {
   });
 });
 
+describe('managedToProjectDef', () => {
+  test('maps ManagedProject fields onto a ProjectDef shape', () => {
+    const def = managedToProjectDef({
+      id: 'rush',
+      name: 'rush',
+      path: path.join(HOME, 'src/rush'),
+      repoSlug: 'phnx-labs/rush',
+      linearProjectId: 'lin_1',
+      linearProjectName: 'Rush',
+      autoDispatch: true,
+      maxAgents: 3,
+      confidence: 'high',
+      source: 'manual',
+    });
+    expect(def.name).toBe('rush');
+    expect(def.root).toBe('~/src/rush');
+    expect(def.repo).toBe('phnx-labs/rush');
+    expect(def.linear).toEqual({ projectId: 'lin_1', name: 'Rush' });
+    expect(def.dispatch).toEqual({ enabled: true, maxAgents: 3 });
+  });
+
+  test('preserves unmanaged prior fields (goals, contexts) and drops agents stamp', () => {
+    const def = managedToProjectDef(
+      {
+        id: 'rush',
+        name: 'rush',
+        path: path.join(HOME, 'src/rush'),
+        confidence: 'high',
+        source: 'manual',
+      },
+      {
+        name: 'rush',
+        root: '~/old',
+        goals: [{ objective: 'Ship 2.0' }],
+        contexts: [{ path: 'apps/cli', purpose: 'CLI' }],
+        agents: 4,
+      },
+    );
+    expect(def.goals).toEqual([{ objective: 'Ship 2.0' }]);
+    expect(def.contexts).toEqual([{ path: 'apps/cli', purpose: 'CLI' }]);
+    expect(def.root).toBe('~/src/rush');
+    expect(def.agents).toBeUndefined();
+  });
+});
+
 describe('upsertManagedProject / deleteManagedProject — id safety', () => {
-  test('upsert rejects a path-traversal id', async () => {
+  test('upsert rejects a path-traversal id before shelling out', async () => {
     const bad = { id: '../secret', name: 'x', path: '/tmp/x', confidence: 'high', source: 'manual' } as Parameters<typeof upsertManagedProject>[0];
     await expect(upsertManagedProject(bad)).rejects.toThrow(/Unsafe project id/);
   });
 
-  test('delete rejects a path-traversal id', async () => {
+  test('delete rejects a path-traversal id before shelling out', async () => {
     await expect(deleteManagedProject('../secret')).rejects.toThrow(/Unsafe project id/);
   });
 

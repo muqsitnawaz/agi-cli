@@ -1,31 +1,18 @@
-// Curated project store — backed by canonical ~/.agents/projects/<name>.yaml
-// definitions (the same files the `agents projects` CLI commands manage).
+// Curated project store — Factory is a thin shell over `agents projects`.
 //
-// Reads shell out to `agents projects list --json` so Factory and the CLI share
-// one source of truth. Writes go directly to the YAML files (using the `yaml`
-// package already in Factory's deps) so any CLI or UI tool sees changes immediately.
+// Reads, saves, and deletes go ONLY through the CLI:
+//   agents projects list --json
+//   agents projects save --json   (one complete ProjectDef on stdin)
+//   agents projects rm <name> --json
 //
-// On first run when the old ~/.agents/factory/projects.json exists but no YAML
-// files do, readManagedProjects() auto-migrates, preserving dispatch metadata
-// (autoDispatch/maxAgents) that the `import --from-factory` CLI command did not carry.
+// Never read or write ~/.agents/projects/*.yaml directly. Never read or migrate
+// ~/.agents/factory/projects.json — that legacy registry stays unread and
+// untouched. Errors propagate so the VS Code host can show them inline.
 
-import * as fs from 'fs';
-import * as path from 'path';
 import { homedir } from 'os';
-import YAML from 'yaml';
-import { runAgents, AgentsBinNotFoundError } from './agentsBin';
-
-/** Mirror of cli/src/lib/projects.ts isSafeProjectName — no path separators or dot-escapes. */
-function isSafeId(id: string): boolean {
-  return (
-    typeof id === 'string' &&
-    id.length > 0 &&
-    id.length <= 64 &&
-    /^[a-z0-9][a-z0-9._-]*$/i.test(id) &&
-    id !== '.' &&
-    id !== '..'
-  );
-}
+import * as path from 'path';
+import { spawn } from 'child_process';
+import { resolveAgentsBin, bootstrapPath, runAgents, AgentsBinNotFoundError } from './agentsBin';
 
 /**
  * A curated project. The webview mirrors this shape field-for-field in
@@ -44,14 +31,16 @@ export interface ManagedProject {
   source: 'detected' | 'manual';
 }
 
-/** Canonical directory for project YAML definitions — mirrors CLI's getProjectsDir(). */
-function projectsDir(): string {
-  return process.env.AGENTS_PROJECTS_DIR ?? path.join(homedir(), '.agents', 'projects');
-}
-
-/** Path to the old Factory-owned projects registry (pre-migration). */
-function oldFactoryProjectsPath(): string {
-  return path.join(homedir(), '.agents', 'factory', 'projects.json');
+/** Mirror of cli/src/lib/projects.ts isSafeProjectName — no path separators or dot-escapes. */
+function isSafeId(id: string): boolean {
+  return (
+    typeof id === 'string' &&
+    id.length > 0 &&
+    id.length <= 64 &&
+    /^[a-z0-9][a-z0-9._-]*$/i.test(id) &&
+    id !== '.' &&
+    id !== '..'
+  );
 }
 
 /** Basename of a path, with any trailing slash ignored. Used by settings.vscode.ts. */
@@ -98,178 +87,159 @@ export function defToManaged(def: Record<string, unknown>): ManagedProject {
 }
 
 /**
- * Build the YAML object for a project. Merges Factory-managed fields onto any
- * existing YAML content, preserving unmanaged fields (goals, contexts, etc.).
+ * Build a complete ProjectDef JSON object for `agents projects save --json`.
+ * Merges Factory-managed fields onto any prior definition so unmanaged fields
+ * (goals, contexts, integrations, docs, …) survive an edit from the Floor.
  */
-async function buildProjectYaml(project: ManagedProject): Promise<Record<string, unknown>> {
-  const filePath = path.join(projectsDir(), `${project.id}.yaml`);
-  let existing: Record<string, unknown> = {};
-  try {
-    const raw = await fs.promises.readFile(filePath, 'utf-8');
-    const parsed: unknown = YAML.parse(raw);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      existing = parsed as Record<string, unknown>;
-    }
-  } catch {
-    /* new project — start empty */
-  }
+export function managedToProjectDef(
+  project: ManagedProject,
+  prior?: Record<string, unknown>,
+): Record<string, unknown> {
+  const def: Record<string, unknown> = prior ? { ...prior } : {};
+  def.name = project.id;
 
-  existing.name = project.id;
-
-  // Convert absolute path back to home-relative for portable YAML.
   const h = homedir();
   const homeRelPath =
     project.path && project.path.startsWith(h + '/')
       ? `~/${project.path.slice(h.length + 1)}`
       : project.path;
-  if (homeRelPath) existing.root = homeRelPath;
-  else delete existing.root;
+  if (homeRelPath) def.root = homeRelPath;
+  else delete def.root;
 
-  if (project.repoSlug) existing.repo = project.repoSlug;
-  else delete existing.repo;
+  if (project.repoSlug) def.repo = project.repoSlug;
+  else delete def.repo;
 
-  // linear block — preserve any existing url field
   const prevLinear =
-    existing.linear && typeof existing.linear === 'object' && !Array.isArray(existing.linear)
-      ? { ...(existing.linear as Record<string, unknown>) }
+    def.linear && typeof def.linear === 'object' && !Array.isArray(def.linear)
+      ? { ...(def.linear as Record<string, unknown>) }
       : {};
   if (project.linearProjectId) prevLinear.projectId = project.linearProjectId;
   else delete prevLinear.projectId;
   if (project.linearProjectName) prevLinear.name = project.linearProjectName;
   else delete prevLinear.name;
-  if (Object.keys(prevLinear).length > 0) existing.linear = prevLinear;
-  else delete existing.linear;
+  if (Object.keys(prevLinear).length > 0) def.linear = prevLinear;
+  else delete def.linear;
 
-  // dispatch block
   const prevDispatch =
-    existing.dispatch && typeof existing.dispatch === 'object' && !Array.isArray(existing.dispatch)
-      ? { ...(existing.dispatch as Record<string, unknown>) }
+    def.dispatch && typeof def.dispatch === 'object' && !Array.isArray(def.dispatch)
+      ? { ...(def.dispatch as Record<string, unknown>) }
       : {};
   if (project.autoDispatch === true) prevDispatch.enabled = true;
   else delete prevDispatch.enabled;
   if (project.maxAgents !== undefined) prevDispatch.maxAgents = project.maxAgents;
   else delete prevDispatch.maxAgents;
-  if (Object.keys(prevDispatch).length > 0) existing.dispatch = prevDispatch;
-  else delete existing.dispatch;
+  if (Object.keys(prevDispatch).length > 0) def.dispatch = prevDispatch;
+  else delete def.dispatch;
 
-  return existing;
+  // list --json may stamp a local `agents` count; never write it back into the def.
+  delete def.agents;
+
+  return def;
 }
 
-/** Validate a project name — mirrors CLI's isSafeProjectName(). */
-function isSafeName(name: string): boolean {
-  return (
-    name.length > 0 &&
-    name.length <= 64 &&
-    /^[a-z0-9][a-z0-9._-]*$/i.test(name) &&
-    name !== '.' &&
-    name !== '..'
-  );
-}
-
-/**
- * One-time migration: copy rows from the old ~/.agents/factory/projects.json
- * to individual YAML files under ~/.agents/projects/. Preserves autoDispatch
- * and maxAgents fields that the `import --from-factory` CLI command did not carry.
- * Skips rows that already have a corresponding YAML file.
- */
-async function migrateFromFactoryJson(): Promise<ManagedProject[]> {
-  let rawText: string;
-  try {
-    rawText = await fs.promises.readFile(oldFactoryProjectsPath(), 'utf-8');
-  } catch {
-    return [];
-  }
-  let rows: unknown[];
-  try {
-    const parsed: unknown = JSON.parse(rawText);
-    rows = Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-  const dir = projectsDir();
-  await fs.promises.mkdir(dir, { recursive: true });
-  const migrated: ManagedProject[] = [];
-  for (const raw of rows) {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-    const o = raw as Record<string, unknown>;
-    const name = typeof o.name === 'string' ? o.name : undefined;
-    if (!name || !isSafeName(name)) continue;
-    const yamlPath = path.join(dir, `${name}.yaml`);
-    try {
-      await fs.promises.access(yamlPath);
-      continue; // already migrated
-    } catch {
-      /* file doesn't exist yet — create it */
+/** Run `agents <argv…>` with optional stdin. Surfaces CLI stderr on non-zero exit. */
+async function runAgentsArgv(
+  argv: string[],
+  input?: string,
+): Promise<{ stdout: string; stderr: string }> {
+  const bin = await resolveAgentsBin();
+  const augmented = bootstrapPath(bin);
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, argv, {
+      env: { ...process.env, PATH: `${augmented}:${process.env.PATH ?? ''}` },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (d: string) => {
+      stdout += d;
+    });
+    child.stderr.on('data', (d: string) => {
+      stderr += d;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      const detail = (stderr || stdout || `exit ${code}`).trim();
+      reject(new Error(detail || `agents ${argv.join(' ')} failed`));
+    });
+    if (input !== undefined) {
+      child.stdin.write(input);
     }
-    const project: ManagedProject = {
-      id: name,
-      name,
-      path: typeof o.path === 'string' ? o.path : '',
-      repoSlug: typeof o.repoSlug === 'string' ? o.repoSlug : undefined,
-      linearProjectId: typeof o.linearProjectId === 'string' ? o.linearProjectId : undefined,
-      linearProjectName: typeof o.linearProjectName === 'string' ? o.linearProjectName : undefined,
-      autoDispatch: o.autoDispatch === true,
-      maxAgents: typeof o.maxAgents === 'number' ? o.maxAgents : undefined,
-      confidence: 'high',
-      source: 'manual',
-    };
-    const yaml = await buildProjectYaml(project);
-    try {
-      await fs.promises.writeFile(yamlPath, YAML.stringify(yaml));
-      migrated.push(project);
-    } catch {
-      /* skip rows that can't be written */
-    }
-  }
-  return migrated;
+    child.stdin.end();
+  });
 }
 
 /**
  * Read the project list by shelling out to `agents projects list --json`.
- * On first run (no YAML projects yet, old factory JSON present) auto-migrates.
- * Returns [] when the CLI is unavailable or no projects are defined.
+ * Throws when the CLI is unavailable or returns unparseable output — callers
+ * surface the message for inline UI display. Never reads YAML or the legacy
+ * factory projects.json.
  */
 export async function readManagedProjects(): Promise<ManagedProject[]> {
+  const { stdout } = await runAgents('projects list --json');
+  let parsed: unknown;
   try {
-    const { stdout } = await runAgents('projects list --json');
-    const parsed: unknown = JSON.parse(stdout);
-    if (!Array.isArray(parsed)) return [];
-    const managed = parsed
-      .filter((d) => d && typeof d === 'object' && typeof (d as Record<string, unknown>).name === 'string')
-      .map((d) => defToManaged(d as Record<string, unknown>));
-    // One-time migration: when no YAML projects exist yet but the legacy factory
-    // JSON does, migrate it so the user's curated list isn't lost on upgrade.
-    if (managed.length === 0) {
-      const migrated = await migrateFromFactoryJson();
-      if (migrated.length > 0) return readManagedProjects();
-    }
-    return managed;
-  } catch (err) {
-    if (err instanceof AgentsBinNotFoundError) {
-      // CLI not found — fall back to migration so the first launch still works.
-      return migrateFromFactoryJson();
-    }
-    return [];
+    parsed = JSON.parse(stdout);
+  } catch (e) {
+    throw new Error(
+      `agents projects list --json returned invalid JSON: ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
+  if (!Array.isArray(parsed)) {
+    throw new Error('agents projects list --json: expected a JSON array of ProjectDef objects');
+  }
+  return parsed
+    .filter((d) => d && typeof d === 'object' && typeof (d as Record<string, unknown>).name === 'string')
+    .map((d) => defToManaged(d as Record<string, unknown>));
 }
 
-/** Add a new project or update an existing one (matched by id). Returns the new list. */
+/** Load raw ProjectDef objects from `agents projects list --json` (for merge-on-save). */
+async function listRawDefs(): Promise<Record<string, unknown>[]> {
+  const { stdout } = await runAgents('projects list --json');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (e) {
+    throw new Error(
+      `agents projects list --json returned invalid JSON: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('agents projects list --json: expected a JSON array of ProjectDef objects');
+  }
+  return parsed.filter(
+    (d): d is Record<string, unknown> =>
+      !!d && typeof d === 'object' && !Array.isArray(d) && typeof (d as Record<string, unknown>).name === 'string',
+  );
+}
+
+/**
+ * Add a new project or update an existing one (matched by id) via
+ * `agents projects save --json`. Returns the refreshed list.
+ */
 export async function upsertManagedProject(project: ManagedProject): Promise<ManagedProject[]> {
   if (!isSafeId(project.id)) throw new Error(`Unsafe project id: ${JSON.stringify(project.id)}`);
-  const dir = projectsDir();
-  await fs.promises.mkdir(dir, { recursive: true });
-  const yaml = await buildProjectYaml(project);
-  await fs.promises.writeFile(path.join(dir, `${project.id}.yaml`), YAML.stringify(yaml));
+  const existing = await listRawDefs();
+  const prior = existing.find((d) => d.name === project.id);
+  const def = managedToProjectDef(project, prior);
+  await runAgentsArgv(['projects', 'save', '--json'], JSON.stringify(def));
   return readManagedProjects();
 }
 
-/** Remove a project by id (deletes its YAML file). Returns the new list. */
+/**
+ * Remove a project by id via `agents projects rm <id> --json`. Returns the
+ * refreshed list. Throws when the CLI reports failure.
+ */
 export async function deleteManagedProject(id: string): Promise<ManagedProject[]> {
   if (!isSafeId(id)) throw new Error(`Unsafe project id: ${JSON.stringify(id)}`);
-  try {
-    await fs.promises.unlink(path.join(projectsDir(), `${id}.yaml`));
-  } catch {
-    /* already gone */
-  }
+  await runAgentsArgv(['projects', 'rm', id, '--json']);
   return readManagedProjects();
 }
+
+export { AgentsBinNotFoundError };
