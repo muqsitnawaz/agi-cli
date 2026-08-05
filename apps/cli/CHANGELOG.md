@@ -6,6 +6,51 @@
 
 - **Projects canonicalization contract.** `agents projects import --from-factory` / `--min-confidence` / `--all` are gone; import is `--from-linear` only, and `~/.agents/factory/projects.json` is never read or migrated. `agents projects list --json` returns definitions only (zero session scan / SSH); `--with-agents` is an explicit opt-in for local active counts. New `agents projects save --json` reads one complete `ProjectDef` from stdin, validates, writes atomically under `~/.agents/projects/`, and prints the saved def. `agents projects rm <name> --json` returns machine-readable success/error. Factory's `managedProjects.ts` shells only through `agents projects list|save|rm` — never reads or writes project YAML/JSON directly, never seeds or migrates legacy Factory state; errors stay explicit for inline UI display. Source: `apps/cli/src/commands/projects.ts`, `apps/cli/src/lib/projects.ts`, `apps/factory/src/core/managedProjects.ts`, `apps/cli/docs/11-projects.md`.
 
+## 1.22.13
+
+- **`agents sessions` accepts direct live-state flags and remains fleet-wide by default.** `--working`, `--idle`, `--waiting`, `--orphan`/`--orphaned`, `--crashed`, `--closed`, `--abandoned`, `--queued`, and `--unknown` each imply the live scan; multiple flags form a union. `--working` is narrower than `--active`: it excludes idle, waiting, and lifecycle-failure rows. Cross-device collection was already the default and stays that way; `--local` opts out, while `--all` continues to widen historical directory and time scope. Source: `apps/cli/src/commands/sessions.ts`, `apps/cli/src/commands/sessions.test.ts`.
+
+- **Workflows: `name@source` disambiguation (Phase 5 packaging).** When two plugins (or a plugin and an extra repo) ship the same workflow name, pin the source: `agents run deploy@ship-tools` or `agents run workflow:deploy@social`. Bare names keep layered precedence (project > user > plugin > extra > system); a missing source returns no match instead of silently falling back. Source: `apps/cli/src/lib/workflows.ts`, `apps/cli/src/lib/resources/workflows.ts`.
+
+## 1.22.12
+
+- Store operational events in daily history directories, retain 7 days and at most 50 MiB automatically, and make `agents logs audit` use the `agents events --audit` reader.
+
+- **`agents cli` renamed to `agents clis`; resource directory `cli/` renamed to `clis/`.** The CLI resource kind and its subdirectory are now plural throughout: `ResourceKind` changes from `'cli'` to `'clis'`, manifests live at `clis/<name>.yaml`, `agents clis` is the only command surface (no `agents cli` alias), and `agents view --clis` replaces `--cli`. A startup migration renames any existing `cli/` directory to `clis/` in the user, system, and project `.agents/` layers; if both `cli/` and `clis/` are present the migration fails with a clear error rather than silently merging. Source: `apps/cli/src/lib/resources.ts`, `apps/cli/src/lib/cli-resources.ts`, `apps/cli/src/commands/cli.ts`, `apps/cli/src/lib/startup/command-registry.ts`, `apps/cli/src/commands/repo.ts`, `apps/cli/src/commands/view.ts`, `apps/cli/src/lib/migrate.ts`.
+
+- **`agents.yaml` no longer silently loses top-level keys across a version-skewed
+  fleet.** `serializeCentral` (`lib/state.ts`) rewrote the synced `agents.yaml`
+  with a delete-any-key-not-in-the-in-memory-object pass. An **older CLI version
+  whose `Meta` type predated a key** (`beta:`, `notify.owner`, `feed:`, imported
+  `projects`) would parse the file, never surface that key, delete it on the next
+  write, and sync the deletion to every machine — the recurring "my config
+  vanished" data-loss (see the restore in commit `04295e3`). The delete pass now
+  consults a `Record<keyof Meta, 'central' | 'device'>` scope map (compile-time
+  exhaustive — a new `Meta` field that isn't classified fails the build) and
+  deletes **only keys this version knows** (a cleared central key, or a device
+  key that is legacy cruft in the synced file); a key it doesn't know is
+  preserved verbatim. Once a machine runs a CLI carrying this fix, it can never
+  drop a newer version's key again. Source: `apps/cli/src/lib/state.ts`,
+  `apps/cli/src/lib/__tests__/state.test.ts`.
+
+- **Watchdog files a feed block only when a session genuinely needs the human.**
+  When the smart brain concludes a stalled session must be left for the human
+  (`needsHuman`), the watchdog now surfaces that on the owner's feed instead of
+  dropping it in a menubar-only flag. Two cases: if the session is addressable it
+  injects a self-file reminder into the agent ("You appear stuck. File it: `agents
+  feed post … --blocked`") so the agent declares its own block; if it is
+  un-addressable — the case where the watchdog can't even reach the terminal to
+  remind it — the watchdog files a declared block on the agent's behalf so the owner
+  is still paged. Paging fires **only** on this confirmed-needs-human path: a plain
+  nudge-worthy drive-forward poke (un-addressable or under a hands-off policy) is
+  flagged for the tray but never texts the owner. Both paths are gated by the
+  existing cooldown ledger (at most once per `WATCHDOG_COOLDOWN_MS` window) and are
+  no-ops when a block for the session already exists, so no double-paging. Source:
+  `apps/cli/src/lib/watchdog/runner.ts` (`NudgeDecision.needsHuman`,
+  `WatchdogTickOptions.publishBlockFn`, the needs-human skip branch),
+  `apps/cli/src/lib/watchdog/runner.test.ts`.
+
+
 ## 1.22.11
 
 - **`--blocked` iMessage notifications are now phone-actionable.** The forwarded message dropped the block's `--option`s, `--default`, and timeout and instead showed `agents focus <id>` — a CLI command that is useless on a phone. It now shows the choices (`Options: publish / wait`) and the safe-default fallback (`Default in 15 min: wait`) and omits the `agents focus` line, so a `--blocked` post that carries a `--default` self-resolves when the owner can't reply. Source: `apps/cli/src/lib/feed-broadcast.ts`.
