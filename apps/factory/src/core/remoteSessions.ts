@@ -150,6 +150,12 @@ export interface RemoteTodoItem {
 export interface RemoteSession {
   host: string;
   sessionId: string;
+  /**
+   * `AGENT_TERMINAL_ID` from the CLI active payload when present — how a Factory
+   * tab re-identifies its own session on a remote device without inventing ids.
+   * '' when the launch did not inherit a terminal id.
+   */
+  terminalId?: string;
   agentType: string;
   cwd: string;
   project: string;
@@ -218,6 +224,10 @@ export interface RemoteSession {
   /** The CLI record's `context` ('terminal' | 'cloud' | 'teams' | ...). Lets the
    *  webview treat cloud rows differently from terminal-backed agents. */
   context: string;
+  /** Foreground/background presence from the CLI (`attached` | `background` |
+   *  `parked`), absent when the session isn't on that axis (cloud/team/ad-hoc
+   *  headless). Drives the detach/attach affordances. */
+  presence?: string;
   /** Cloud task id (`agents cloud message <id> <text>` is the reply channel for
    *  cloud rows). Empty for non-cloud sessions. */
   cloudTaskId: string;
@@ -288,12 +298,16 @@ export interface HostInfo {
  */
 export interface RawActiveSession {
   context?: string;
+  presence?: string;
   kind?: string;
   pid?: number;
   sessionId?: string;
   cwd?: string;
   label?: string;
   topic?: string;
+  /** Compatibility task fields emitted by older/alternate session producers. */
+  prompt?: string;
+  firstUserMessage?: string;
   sessionFile?: string;
   startedAtMs?: number;
   /** Transcript last-write epoch (ms) stamped by the CLI — the real activity signal. */
@@ -354,6 +368,11 @@ export interface RawActiveSession {
    *  `sessions --active --json` — the load-bearing signal for which physical
    *  machine a session runs on. Absent for cloud rows (attributed to the querier). */
   machine?: string;
+  /**
+   * Factory / editor tab id (`AGENT_TERMINAL_ID`) when the launch inherited it.
+   * Join key for "which session is MY tab running?" across `--host`/`--device`.
+   */
+  terminalId?: string;
   /** How the CLI says a reply reaches this session. `reply` is null for raw TTYs
    *  (e.g. bare Ghostty) with no programmatic input channel; a tmux-backed session
    *  carries the socket + pane to drive via `tmux send-keys` (over ssh when remote).
@@ -474,7 +493,9 @@ function normalizeAttachment(raw: unknown): RemoteAttachment | null {
  *   input_required     -> waiting   (the cheap Tier-1 "needs you" signal)
  *   queued             -> running   (dispatched, work in the pipeline)
  *   failed / error     -> failed
+ *   abandoned          -> failed    (dangling: dead/stuck for days — needs attention)
  *   completed / done   -> done
+ *   closed / exited    -> done      (the process has exited cleanly)
  *   idle / stopped / _ -> idle
  */
 export function mapStatusToPhase(status: string | undefined): RemotePhase {
@@ -489,10 +510,13 @@ export function mapStatusToPhase(status: string | undefined): RemotePhase {
       return 'waiting';
     case 'failed':
     case 'error':
+    case 'abandoned':
       return 'failed';
     case 'completed':
     case 'done':
     case 'success':
+    case 'closed':
+    case 'exited':
       return 'done';
     case 'idle':
     case 'stopped':
@@ -514,11 +538,12 @@ export function projectFromCwd(cwd: string): string {
   return resolveProject(cwd);
 }
 
-/** Pull the session UUID out of a session-file path (basename minus extension). */
+/** Pull the session UUID out of a session-file path (Codex rollout stem → UUID). */
 function sessionIdFromFile(sessionFile: string | undefined): string {
   if (!sessionFile) return '';
-  const base = sessionFile.split('/').pop() || '';
-  return base.replace(/\.[^.]+$/, '');
+  const base = (sessionFile.split('/').pop() || '').replace(/\.[^.]+$/, '');
+  const m = base.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  return m?.[0] || base;
 }
 
 /**
@@ -533,12 +558,19 @@ export function normalizeActiveSession(
 ): RemoteSession {
   const status = raw.status;
   const phase = mapStatusToPhase(status);
-  const sessionId =
+  let sessionId =
     raw.sessionId ||
     sessionIdFromFile(raw.sessionFile) ||
     raw.agentId ||
     raw.cloudTaskId ||
     '';
+  // Prefer UUID when the payload still carries a Codex rollout stem.
+  if (/^rollout-/i.test(sessionId)) {
+    const uuid = sessionId.match(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+    );
+    if (uuid) sessionId = uuid[0];
+  }
   const cwd = raw.cwd || '';
   const startedAtMs = typeof raw.startedAtMs === 'number' ? raw.startedAtMs : 0;
   // Ticket can arrive as a structured object ({ id }) OR a bare string; read the id
@@ -552,10 +584,12 @@ export function normalizeActiveSession(
   const preview = asStr(raw.preview);
   const worktreeSlug = asStr(raw.worktree?.slug) || worktreeSlugOf(cwd);
   const todos = normalizeTodos(raw.todos);
+  const terminalId = asStr(raw.terminalId);
 
   return {
     host,
     sessionId,
+    terminalId,
     agentType: (raw.kind || '').toLowerCase(),
     cwd,
     project: resolveProject(cwd, projectRules),
@@ -593,10 +627,11 @@ export function normalizeActiveSession(
     // hosts too. The local fan-out still re-stats as a fallback. Deliberately NOT
     // startedAtMs — start time is not activity.
     lastActivityMs: typeof raw.lastActivityMs === 'number' ? raw.lastActivityMs : 0,
-    topic: asStr(raw.topic) || asStr(raw.label),
+    topic: asStr(raw.topic) || asStr(raw.prompt) || asStr(raw.firstUserMessage) || asStr(raw.label),
     label: asStr(raw.label),
     sessionFile: asStr(raw.sessionFile),
     context: asStr(raw.context),
+    presence: asStr(raw.presence),
     cloudTaskId: raw.cloudTaskId || '',
     cloudProvider: raw.cloudProvider || '',
     teamName: raw.teamName || '',
@@ -856,4 +891,112 @@ export function groupByHost(
     groups.push({ host, online: true, fetchedAt, sessions: list });
   }
   return groups;
+}
+
+/** The two label-bearing fields of one `agents sessions <id> --json` record. */
+export interface SessionLabelSource {
+  /** The session's persisted name, when it has a real one. */
+  label: string | null;
+  /** The session's first user message — the summarizer's input. */
+  topic: string | null;
+}
+
+/**
+ * Pull the label inputs out of `agents sessions <id> --json`.
+ *
+ * A tab whose agent runs on another machine has no local transcript to read, so
+ * this is the only way it can ever show anything but the bare agent prefix. The
+ * CLI already resolves both fields on whichever host owns the session.
+ *
+ * **The payload has two shapes, and the remote one is the shape that matters
+ * here.** Locally, `agents sessions <id> --json` renders the detail view and
+ * emits `{ session, events }`. With `--host` the lookup is routed to the peer
+ * and comes back as the FLAT array of `SessionMeta` records instead (the same
+ * shape `fetchRecentForHost` consumes). Reading only `.session` therefore found
+ * nothing for exactly the offloaded tabs this exists to label. Both are handled;
+ * `sessionId` disambiguates when an array carries more than one record.
+ *
+ * `label` is dropped when it is Claude's derived `<dirname>-<n>` placeholder —
+ * that names the repo, not the work, and surfacing it would also stop the caller
+ * from falling through to the summarizer (same rule as readClaudeSessionName).
+ */
+export function parseSessionLabelSource(rawJson: string, sessionId?: string): SessionLabelSource | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(rawJson);
+  } catch {
+    return null;
+  }
+  const record = pickSessionRecord(data, sessionId);
+  if (!record) return null;
+  const label = typeof record.label === 'string' && record.label.trim() ? record.label.trim() : null;
+  const topic = typeof record.topic === 'string' && record.topic.trim() ? record.topic.trim() : null;
+  const cwd = typeof record.cwd === 'string' ? record.cwd : '';
+  return { label: label && isDerivedSessionName(label, cwd) ? null : label, topic };
+}
+
+export interface SessionIdentity {
+  /** The agent version this session actually launched under (e.g. "2.1.207"). */
+  version: string | null;
+  /** The account/email this session is authenticated as. */
+  account: string | null;
+  /** The harness that owns this session (e.g. "claude") — the pick an
+   * `agents run auto` launch made, unknown to the spawner until indexed. */
+  agent: string | null;
+}
+
+/**
+ * Pull the running session's real `version` + `account` out of
+ * `agents sessions <id> --json` — the only source that knows which version and
+ * account a `--strategy balanced` launch actually selected for THIS session.
+ *
+ * `agents view --json` is the wrong source: it reports the machine's installed
+ * versions and their signed-in accounts (the box-wide default), which is
+ * unrelated to a specific running session. Handles the same two payload shapes
+ * as {@link parseSessionLabelSource} (local `{ session, events }` and the flat
+ * `SessionMeta[]` array returned with `--host`); `sessionId` disambiguates.
+ */
+export function parseSessionIdentity(rawJson: string, sessionId?: string): SessionIdentity | null {
+  let data: unknown;
+  try {
+    data = JSON.parse(rawJson);
+  } catch {
+    return null;
+  }
+  const record = pickSessionRecord(data, sessionId);
+  if (!record) return null;
+  const version = typeof record.version === 'string' && record.version.trim() ? record.version.trim() : null;
+  const account = typeof record.account === 'string' && record.account.trim() ? record.account.trim() : null;
+  const agent = typeof record.agent === 'string' && record.agent.trim() ? record.agent.trim() : null;
+  if (!version && !account && !agent) return null;
+  return { version, account, agent };
+}
+
+/** The one session record out of either payload shape, or null when absent. */
+function pickSessionRecord(data: unknown, sessionId?: string): Record<string, unknown> | null {
+  if (Array.isArray(data)) {
+    const records = data.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object');
+    if (records.length === 0) return null;
+    // A by-id lookup normally returns exactly one row; match explicitly anyway so
+    // a wider payload can never label a tab from someone else's session.
+    if (sessionId) return records.find((r) => r.id === sessionId) ?? null;
+    return records.length === 1 ? records[0] : null;
+  }
+  if (!data || typeof data !== 'object') return null;
+  const session = (data as Record<string, unknown>).session;
+  return session && typeof session === 'object' ? (session as Record<string, unknown>) : null;
+}
+
+/**
+ * True for Claude's auto-derived `<dirname>-<n>` session name (e.g. a session in
+ * `~/src/agents-cli` named "agents-cli-55").
+ *
+ * Anchored on the session's own cwd rather than a shape like `<word>-<digits>`,
+ * which would also swallow a real ticket-style title ("RUSH-2058") and silently
+ * replace it with a summarized one.
+ */
+export function isDerivedSessionName(name: string, cwd: string): boolean {
+  const dir = cwd.replace(/[/\\]+$/, '').split(/[/\\]/).pop();
+  if (!dir) return false;
+  return new RegExp(`^${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d+$`).test(name);
 }

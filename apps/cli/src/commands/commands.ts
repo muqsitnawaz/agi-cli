@@ -4,7 +4,7 @@
  * Implements `agents commands` -- list, add, remove, sync, prune, and view
  * markdown files that agents invoke mid-session as slash commands. Central
  * storage lives in ~/.agents/commands/ and commands are synced to individual
- * version homes (with TOML conversion for Gemini).
+ * version homes.
  */
 import type { Command } from 'commander';
 import chalk from 'chalk';
@@ -16,12 +16,12 @@ import { checkbox, confirm } from '@inquirer/prompts';
 
 import {
   AGENTS,
-  ALL_AGENT_IDS,
   getAllCliStates,
   resolveAgentName,
   formatAgentError,
   agentLabel,
 } from '../lib/agents.js';
+import { capableAgents } from '../lib/capabilities.js';
 import type { AgentId } from '../lib/types.js';
 import { cloneRepo } from '../lib/git.js';
 import {
@@ -89,7 +89,7 @@ Examples:
   agents commands add
 
   # Install specific commands by name
-  agents commands add --names README,debug --agents codex@0.116.0
+  agents commands add --names plan,debug --agents codex@0.116.0
 
 When to use:
   - Project setup: 'agents commands add gh:team/commands' to sync everyone's workflow
@@ -142,7 +142,7 @@ When to use:
   commandsCmd
     .command('add [source]')
     .description('Install commands from a source (GitHub, local) or pick from central storage')
-    .option('-a, --agents <list>', 'Targets: claude, codex@0.116.0, or gemini@default')
+    .option('-a, --agents <list>', 'Targets: claude, codex@0.116.0, or cursor@default')
     .option('--names <list>', 'Command names from ~/.agents/commands/ (comma-separated)')
     .option('-y, --yes', 'Skip all prompts')
     .addHelpText('after', `
@@ -151,10 +151,10 @@ Examples:
   agents commands add
 
   # Install specific commands to a single version
-  agents commands add --names README,debug --agents codex@0.116.0
+  agents commands add --names plan,debug --agents codex@0.116.0
 
   # Pull commands from GitHub and sync to all installed agents
-  agents commands add gh:user/repo --agents claude,codex,gemini
+  agents commands add gh:user/repo --agents claude,codex,cursor
 
   # Add a local command directory
   agents commands add ~/my-commands --agents claude@default
@@ -188,7 +188,7 @@ Examples:
           } else {
             if (!isInteractiveTerminal()) {
               requireInteractiveSelection('Selecting commands from ~/.agents/commands/', [
-                'agents commands add --names README,debug --agents codex',
+                'agents commands add --names plan,debug --agents codex',
                 'agents commands add gh:user/repo --agents codex',
               ]);
             }
@@ -293,7 +293,7 @@ Examples:
         let versionSelections: Map<AgentId, string[]>;
 
         if (options.agents) {
-          const result = await resolveAgentTargetsAutoInstalling(options.agents, ALL_AGENT_IDS, { yes: options.yes });
+          const result = await resolveAgentTargetsAutoInstalling(options.agents, capableAgents('commands'), { yes: options.yes });
           if (!result) {
             console.log(chalk.gray('Cancelled.'));
             return;
@@ -301,7 +301,7 @@ Examples:
           selectedAgents = result.selectedAgents;
           versionSelections = result.versionSelections;
         } else {
-          const result = await promptAgentVersionSelection(ALL_AGENT_IDS, {
+          const result = await promptAgentVersionSelection(capableAgents('commands'), {
             skipPrompts: options.yes,
           });
           selectedAgents = result.selectedAgents;
@@ -351,7 +351,7 @@ Examples:
     .addHelpText('after', `
 Examples:
   # Remove a command by name
-  agents commands remove README
+  agents commands remove plan
 
   # Interactive: pick commands to remove
   agents commands remove
@@ -387,7 +387,7 @@ Examples:
 
         if (!isInteractiveTerminal()) {
           requireInteractiveSelection('Selecting commands to remove', [
-            'agents commands remove README',
+            'agents commands remove plan',
           ]);
         }
 
@@ -433,7 +433,7 @@ Examples:
         // agent@x.y.z, agent@all, literal all) works here too.
         let availableTargets = cmdInfo.targets;
         if (options?.agents) {
-          const requestedTargets = resolveInstalledAgentTargets(options.agents, ALL_AGENT_IDS);
+          const requestedTargets = resolveInstalledAgentTargets(options.agents, capableAgents('commands'));
           const requested = new Set<string>();
           for (const aid of requestedTargets.directAgents) {
             for (const ver of listInstalledVersions(aid)) {
@@ -516,7 +516,7 @@ Examples:
     .addHelpText('after', `
 Examples:
   # View a specific command
-  agents commands view README
+  agents commands view plan
 
   # Interactive picker
   agents commands view
@@ -532,7 +532,7 @@ Examples:
 
         if (!isInteractiveTerminal()) {
           requireInteractiveSelection('Selecting a command to view', [
-            'agents commands view README',
+            'agents commands view plan',
           ]);
         }
 

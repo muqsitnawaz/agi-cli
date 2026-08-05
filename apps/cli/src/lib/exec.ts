@@ -12,14 +12,17 @@ import type { AgentId, Mode } from './types.js';
 import { ALL_MODES } from './types.js';
 import { AGENTS } from './agents.js';
 import { parseTimeout } from './routines.js';
-import { getBinaryPath, getVersionHomePath, isVersionInstalled, resolveVersion } from './versions.js';
+import { compareVersions, getBinaryPath, getVersionHomePath, isVersionInstalled, resolveVersion } from './versions.js';
 import { resolveModel, buildReasoningFlags } from './models.js';
-import { emitStart, maybeRotate, createTimer, redactPrompt, redactArgs } from './events.js';
+import { isTierToken, resolveTier } from './model-tiers.js';
+import { emitStart, createTimer, redactPrompt, redactArgs } from './events.js';
 import { sanitizeProcessEnv } from './secrets/bundles.js';
-import { getShimsDir, getHistoryDir } from './state.js';
+import { resolveActor, actorEnv } from './actor.js';
+import { getShimsDir, getHistoryDir, getUserAgentsDir } from './state.js';
 import { resolveCodexHome } from './codex-home.js';
 import { readCodexConfiguredModel } from './shims.js';
 import { writePidSessionEntry, extractSessionIdArg } from './session/pid-registry.js';
+import { writeSessionActorRecord } from './session/actor-sidecar.js';
 import { loadHookSessionIndex, resolveHookSessionId } from './session/hook-sessions.js';
 import { sessionIdMarkerLine } from './hosts/session-marker.js';
 import { recordRunName } from './session/run-names.js';
@@ -27,6 +30,7 @@ import { mailboxDir, isValidMailboxId } from './mailbox.js';
 import { composeWin32CommandLine } from './platform/index.js';
 import { isTmuxInstalled } from './tmux/binary.js';
 import { shellQuote } from './ssh-exec.js';
+import { resolveClaudeSetupToken } from './claude-account-token.js';
 
 /**
  * Agent execution modes. Canonical name `skip` (dangerously skip permissions);
@@ -135,13 +139,51 @@ export function resolveMode(agent: AgentId, requested: Mode): Mode {
  * downgraded. This is the single source of truth shared by buildExecCommand
  * (agents run / teams) and the routine runner.
  */
-export function resolveHeadlessMode(agent: AgentId, requested: Mode, interactive: boolean): Mode {
+export function resolveHeadlessMode(
+  agent: AgentId,
+  requested: Mode,
+  interactive: boolean,
+  warningContext?: string,
+  warningState?: ModeWarningState,
+): Mode {
   const mode = resolveMode(agent, requested);
+  const warn = (message: string): void => {
+    if (warningState?.quiet) return;
+    if (warningState) {
+      warningState.emitted ??= new Set();
+      if (warningState.emitted.has(agent)) return;
+      warningState.emitted.add(agent);
+    }
+    process.stderr.write(message);
+  };
+  if (mode !== requested) {
+    const subject = warningContext ? `${warningContext}: ` : '';
+    if (requested === 'plan') {
+      const limitation = agent === 'cursor'
+        ? "cursor's read-only plan mode is not enabled in this build"
+        : `${agent} has no read-only 'plan' mode`;
+      warn(
+        `[agents] ${subject}${limitation}; ` +
+        `running '${mode}' (writable) instead${agent === 'cursor' ? ' (RUSH-2101)' : ''}. ` +
+        `Pass --mode ${mode} to silence this.\n`,
+      );
+    } else {
+      warn(`[agents] ${subject}${agent} has no '${requested}' mode; using '${mode}'.\n`);
+    }
+  }
   if (!interactive && mode === 'plan' && AGENTS[agent].capabilities.headlessPlan === false) {
-    process.stderr.write(`warning: ${agent} has no headless plan mode; running --mode auto instead\n`);
+    warn(`warning: ${agent} has no headless plan mode; running --mode auto instead\n`);
     return resolveMode(agent, 'auto');
   }
   return mode;
+}
+
+export interface ModeWarningState {
+  /** Agents already warned about, so one run warns once per agent. A fallback
+   *  chain degrades each agent independently and the agent that actually ran is
+   *  usually not the first, so this cannot be a single boolean. */
+  emitted?: Set<AgentId>;
+  quiet?: boolean;
 }
 
 /**
@@ -175,6 +217,10 @@ export interface ExecOptions {
   cwd?: string;
   /** Force headless mode even when no prompt is provided (e.g. piping via stdin). */
   headless?: boolean;
+  /** Prefix for mode-degradation warnings emitted by shared headless paths. */
+  modeWarningContext?: string;
+  /** Shared across command previews/spawns/loop iterations so degradation warns once. */
+  modeWarningState?: ModeWarningState;
   json?: boolean;
   model?: string;
   addDirs?: string[];
@@ -328,6 +374,26 @@ export function parseExecEnv(entries: string[]): Record<string, string> | undefi
 }
 
 /**
+ * Resolve the launch id a run exports as `AGENT_LAUNCH_ID`.
+ *
+ * The launch id is the stable correlation key the SessionStart hook records
+ * alongside the agent's real session id (terminals/sessions/<pid>.json), so it
+ * is what maps a launch to its exact session even when the hook runs under a
+ * different pid (tmux pane leaf / cmd.exe wrapper) — and, across an SSH hop, what
+ * lets a `--host` launcher resolve the remote-coined id for agents that never
+ * accept a forced `--session-id`.
+ *
+ * ADOPT a caller-supplied `AGENT_LAUNCH_ID` (a `--host` launcher forwards one via
+ * `--env` so it controls the key end-to-end); MINT a fresh one otherwise (every
+ * local run, which passes none). A malformed inbound value is ignored in favour
+ * of a fresh mint — the key must be a real correlation id, never an empty string.
+ */
+export function resolveLaunchId(envLaunchId: string | undefined): string {
+  const inbound = envLaunchId?.trim();
+  return inbound ? inbound : randomUUID();
+}
+
+/**
  * Build the process environment for an agent invocation.
  * Pins CLAUDE_CONFIG_DIR for Claude, CODEX_HOME for Codex, and COPILOT_HOME
  * for GitHub Copilot; strips the other agents' env vars so they don't leak
@@ -349,7 +415,15 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
       ? resolvedVersion
       : (resolvedVersion && isVersionInstalled('claude', resolvedVersion) ? resolvedVersion : null);
     if (version) {
-      result.CLAUDE_CONFIG_DIR = path.join(getVersionHomePath('claude', version), '.claude');
+      const versionHome = getVersionHomePath('claude', version);
+      result.CLAUDE_CONFIG_DIR = path.join(versionHome, '.claude');
+      const setupToken = resolveClaudeSetupToken(versionHome);
+      if (setupToken) {
+        // A token keyed to this version home's own account replaces any ambient
+        // shared value inherited from the launcher. options.env still wins below
+        // for explicit caller overrides.
+        result.CLAUDE_CODE_OAUTH_TOKEN = setupToken;
+      }
       // A managed pin lives in a per-version dir; Claude Code's own background
       // auto-updater would rewrite that pinned binary in place (and has left it
       // half-swapped and broken). Disable it so a pin stays a pin. Honor an
@@ -422,8 +496,40 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
   // iterations share one inbox.
   if (options.sessionId && isValidMailboxId(options.sessionId)) {
     result.AGENTS_MAILBOX_DIR = mailboxDir(options.sessionId);
+    // Full session id for agent-callable tools (`agents feed post`, etc.).
+    result.AGENT_SESSION_ID = options.sessionId;
+    result.AGENTS_SESSION_ID = options.sessionId;
+  }
+  // Lineage edge: the child's parent is THIS process's session (the spawner), so a
+  // sub-agent's events carry a walkable edge back to who spawned it. The event floor
+  // (events.ts::resolveProvenance) reads AGENTS_PARENT_SESSION_ID and stamps it on
+  // every event the child emits. `options.sessionId` is the CHILD's id, so read the
+  // spawner from the live env; guard a same-session resume from naming itself parent.
+  // Local-spawn scope here; forwarding it across the `--host` SSH hop is Phase 4.
+  const spawnerSessionId = process.env.AGENTS_SESSION_ID || process.env.AGENT_SESSION_ID;
+  if (spawnerSessionId && spawnerSessionId !== options.sessionId) {
+    result.AGENTS_PARENT_SESSION_ID = spawnerSessionId;
   }
   result.AGENTS_RUNTIME = resolveInteractive(options) ? 'terminal' : 'headless';
+  // Durable SessionStart metadata. The hook joins these launch facts to the
+  // harness-provided real session id and writes them under the shared history
+  // directory, so a later resume can restore the permission boundary without
+  // re-parsing harness-specific transcripts.
+  result.AGENTS_RUN_MODE = resolveHeadlessMode(
+    options.agent,
+    normalizeMode(options.mode),
+    resolveInteractive(options),
+    options.modeWarningContext,
+    options.modeWarningState,
+  );
+  result.AGENTS_HISTORY_DIR = getHistoryDir();
+  // So activity / feed posts stamp the right harness without re-detecting.
+  if (options.agent) {
+    result.AGENTS_AGENT_NAME = options.agent;
+  }
+  if (options.cwd) {
+    result.AGENTS_CWD = options.cwd;
+  }
 
   // Export the run's durable name (companion to AGENT_SESSION_ID) so a
   // SessionStart hook / the agent can associate its transcript with the handle
@@ -431,6 +537,12 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
   if (options.name) {
     result.AGENT_SESSION_NAME = options.name;
   }
+
+  // Actor provenance -- who initiated this run. Rides the env so the whole spawn
+  // tree shares one actor, and (for a resolved human) so the agent's own git
+  // commits are credited to the person instead of the shared account. options.env
+  // (spread last) overrides any of these keys a caller sets explicitly.
+  Object.assign(result, actorEnv(resolveActor()));
 
   return {
     ...result,
@@ -462,7 +574,10 @@ export interface AgentCommandTemplate {
    *   { subcommand } — replace the headless base subcommand with `<subcommand> <id>`
    *                    (codex: `codex exec` -> `codex exec resume <id>`)
    */
-  resume?: { flag: string } | { subcommand: string };
+  resume?: (
+    { flag: string; interactiveFlag?: string; headlessFlag?: string } |
+    { subcommand: string }
+  ) & { since?: string };
 }
 
 /**
@@ -518,12 +633,12 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     base: ['cursor-agent'],
     promptFlag: '-p',
     modeFlags: {
-      // cursor-agent has no read-only flag; we only expose edit + skip.
       edit: [],
       skip: ['-f'],
     },
     jsonFlags: ['--output-format', 'stream-json'],
     modelFlag: '--model',
+    resume: { flag: '--resume', since: '2026.7.23' },
   },
   opencode: {
     base: ['opencode', 'run'],
@@ -537,6 +652,25 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     },
     jsonFlags: ['--format', 'json'],
     modelFlag: '--model',
+  },
+  // Oh My Pi (`omp`). Headless is the positional MESSAGES arg + `-p/--print`.
+  // Approval modes map to omp's `--approval-mode`: always-ask (read-only tools
+  // auto-approved, writes gated -> our `plan`), write (read + workspace writes
+  // auto-approved -> `edit`), yolo (all tiers auto-approved -> `skip`). JSON is
+  // omp's `--mode json` event stream. `--model` fuzzy-matches a provider/model
+  // selector. Native resume is `-r/--resume <id-prefix>`.
+  pi: {
+    base: ['omp'],
+    promptFlag: 'positional',
+    modeFlags: {
+      plan: ['--approval-mode', 'always-ask'],
+      edit: ['--approval-mode', 'write'],
+      skip: ['--approval-mode', 'yolo'],
+    },
+    jsonFlags: ['--mode', 'json'],
+    modelFlag: '--model',
+    printFlags: ['-p'],
+    resume: { flag: '--resume' },
   },
   openclaw: {
     base: ['openclaw'],
@@ -628,6 +762,7 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     },
     jsonFlags: ['--output-format', 'streaming-json'],
     modelFlag: '--model',
+    resume: { flag: '--resume', since: '0.2.91' },
   },
   kimi: {
     base: ['kimi'],
@@ -640,6 +775,7 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     },
     jsonFlags: ['--output-format', 'stream-json'],
     modelFlag: '--model',
+    resume: { flag: '--session', since: '0.19.2' },
   },
   // Factory AI Droid (`droid exec` for headless, `droid` for TUI). Flags from
   // docs.factory.ai CLI reference: prompt is positional; --auto low|medium|high
@@ -657,6 +793,7 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     },
     jsonFlags: ['-o', 'stream-json'],
     modelFlag: '-m',
+    resume: { flag: '--resume', headlessFlag: '--session-id', since: '0.186.0' },
   },
   hermes: {
     base: ['hermes', 'chat'],
@@ -666,13 +803,6 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     },
     modelFlag: '--model',
   },
-  forge: {
-    base: ['forge'],
-    promptFlag: 'positional',
-    modeFlags: {
-      edit: [],
-    },
-  },
 };
 
 /**
@@ -680,8 +810,21 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
  * command template's `resume` field — the single source of truth. Agents that
  * return false resume via the universal Tier-2 `/continue` replay instead.
  */
-export function nativeResume(agent: AgentId): boolean {
-  return AGENT_COMMANDS[agent]?.resume !== undefined;
+export function nativeResume(agent: AgentId, version?: string): boolean {
+  const resume = AGENT_COMMANDS[agent]?.resume;
+  if (!resume) return false;
+  if (!resume.since) return true;
+  return !!version && compareVersions(version, resume.since) >= 0;
+}
+
+/**
+ * Build the `-c` value that adds `dir` to codex's workspace-write writable
+ * roots. Codex parses the value as TOML, so it's a single-element TOML array of
+ * one quoted string. Used on codex resume forms, which reject `--add-dir` and
+ * only accept `-c` config overrides.
+ */
+export function codexWritableRootsConfig(dir: string): string {
+  return `sandbox_workspace_write.writable_roots=[${JSON.stringify(dir)}]`;
 }
 
 /** Assemble the full CLI argument array for an agent invocation. */
@@ -741,10 +884,25 @@ export function buildExecCommand(options: ExecOptions): string[] {
     }
   }
 
+  // Resolve the model up front so the reasoning-flag block can honor a cost tier
+  // that maps to reasoning effort on a single-model harness (e.g. Grok, where the
+  // tier IS the effort dial). `modelVersion` is null when no version resolves;
+  // `tierModel` is the concrete model a tier resolved to (null => drop the flag).
+  const effectiveModel = options.model
+    ?? (options.agent === 'codex' ? readCodexConfiguredModel() : undefined);
+  const modelVersion = effectiveModel && template.modelFlag
+    ? (options.version || resolveVersion(options.agent, options.cwd || process.cwd()))
+    : null;
+  const tierResolved = effectiveModel && modelVersion && isTierToken(effectiveModel)
+    ? resolveTier(options.agent, modelVersion, effectiveModel)
+    : null;
+  // An explicit --effort wins; otherwise a single-model tier's effort applies.
+  const effortLevel = options.effort !== 'auto' ? options.effort : (tierResolved?.effort ?? options.effort);
+
   // Add reasoning effort flags (before mode flags for codex -c positioning)
   // For codex, -c must come before 'exec' subcommand, so we insert at position 1
-  if (options.effort !== 'auto') {
-    const reasoningFlags = buildReasoningFlags(options.agent, options.effort);
+  if (effortLevel !== 'auto') {
+    const reasoningFlags = buildReasoningFlags(options.agent, effortLevel);
     if (reasoningFlags.length > 0) {
       if (options.agent === 'codex') {
         // Insert after 'codex' (or 'codex@version') but before 'exec'
@@ -763,7 +921,13 @@ export function buildExecCommand(options: ExecOptions): string[] {
   //   degrades to `auto` with a stderr warning (see resolveHeadlessMode)
   // - `skip` on an unsupported agent → throws a clear error
   // After resolution, the chosen mode is guaranteed to be in template.modeFlags.
-  const resolvedMode = resolveHeadlessMode(options.agent, normalizeMode(options.mode), interactive);
+  const resolvedMode = resolveHeadlessMode(
+    options.agent,
+    normalizeMode(options.mode),
+    interactive,
+    options.modeWarningContext,
+    options.modeWarningState,
+  );
   const modeFlags = template.modeFlags[resolvedMode];
   if (!modeFlags) {
     // Defense in depth: would only fire if AGENTS.capabilities.modes and
@@ -772,6 +936,23 @@ export function buildExecCommand(options: ExecOptions): string[] {
       `Internal error: ${options.agent} declares '${resolvedMode}' in capabilities.modes but has no entry in AGENT_COMMANDS.modeFlags.${resolvedMode}.`,
     );
   }
+  if (options.agent === 'cursor' && resolvedMode === 'edit' && !interactive) {
+    // A configured headless run is the workspace trust decision. Keep this
+    // narrower than --yolo/-f, which also bypasses permission checks.
+    cmd.push('--trust');
+  }
+  // Codex's workspace-write sandbox blocks $HOME (verified against the live CLI
+  // and OpenAI's sandbox docs: writable roots extend scope "without removing the
+  // sandbox entirely"). But the model routinely shells out to `agents ...`, whose
+  // runtime state lives under ~/.agents — the SSH askpass shim
+  // (~/.agents/.cache/devices/askpass.sh), the device/stats cache, secrets,
+  // session writes, config tunings. Without ~/.agents as a writable root those
+  // inner writes fail with EROFS (e.g. `agents ssh` dies before connecting),
+  // which is why a remote `agents run codex` couldn't reach the fleet. Grant it
+  // implicitly whenever codex runs workspace-write — far narrower than --mode skip
+  // (danger-full-access). Fresh runs take --add-dir (below); resume forms reject
+  // --add-dir, so they take the same root via -c writable_roots here.
+  const codexWorkspaceWrite = options.agent === 'codex' && resolvedMode === 'edit';
   if (resumeSpec && 'subcommand' in resumeSpec) {
     if (resolvedMode === 'skip') {
       // skip = yolo on resume too; both `codex resume` (TUI) and
@@ -780,6 +961,7 @@ export function buildExecCommand(options: ExecOptions): string[] {
     } else if (interactive) {
       // `codex resume` (TUI) accepts the same -s/--sandbox flags as a fresh run.
       cmd.push(...modeFlags);
+      if (codexWorkspaceWrite) cmd.push('-c', codexWritableRootsConfig(getUserAgentsDir()));
     } else {
       // `codex exec resume` rejects `--sandbox <mode>` (verified against
       // `codex exec resume --help` on 0.142.5), but takes -c config overrides —
@@ -788,6 +970,7 @@ export function buildExecCommand(options: ExecOptions): string[] {
       cmd.push('-c', `sandbox_mode=${resolvedMode === 'plan' ? 'read-only' : 'workspace-write'}`);
       if (resolvedMode !== 'plan') {
         cmd.push('-c', 'sandbox_workspace_write.network_access=true');
+        cmd.push('-c', codexWritableRootsConfig(getUserAgentsDir()));
       }
     }
   } else if (options.agent === 'kimi' && !interactive) {
@@ -830,7 +1013,10 @@ export function buildExecCommand(options: ExecOptions): string[] {
   // `resume`, the legacy claude-only `--session-id` CREATES a session with that id.
   if (options.resume && options.sessionId && resumeSpec) {
     if ('flag' in resumeSpec) {
-      cmd.push(resumeSpec.flag, options.sessionId);
+      const flag = interactive
+        ? (resumeSpec.interactiveFlag ?? resumeSpec.flag)
+        : (resumeSpec.headlessFlag ?? resumeSpec.flag);
+      cmd.push(flag, options.sessionId);
     } else {
       cmd.push(options.sessionId);
     }
@@ -844,18 +1030,30 @@ export function buildExecCommand(options: ExecOptions): string[] {
   // carry that setting, so without this it silently defaults to gpt-5.3-codex,
   // which a ChatGPT-tier account can't use (HTTP 400). Forwarding keeps the
   // user's default model setup for both `agents run` and `agents teams`.
-  const effectiveModel = options.model
-    ?? (options.agent === 'codex' ? readCodexConfiguredModel() : undefined);
   if (effectiveModel && template.modelFlag) {
-    const effectiveVersion = options.version || resolveVersion(options.agent, options.cwd || process.cwd());
-    if (effectiveVersion) {
-      const resolved = resolveModel(options.agent, effectiveVersion, effectiveModel);
+    if (tierResolved) {
+      // Cost tier (cheap|default|best|ultra) -> a concrete model this harness+
+      // version actually ships. Covers `agents run` and `agents teams` (both
+      // funnel here). A null model means nothing resolved -> drop the flag and
+      // let the harness pick its default.
+      if (tierResolved.model) {
+        cmd.push(template.modelFlag, tierResolved.model);
+        if (tierResolved.note) process.stderr.write(`[agents] --model ${effectiveModel} -> ${tierResolved.model} (${tierResolved.note})\n`);
+      } else {
+        process.stderr.write(`[agents] no model for tier "${effectiveModel}" on ${options.agent}@${modelVersion}; using harness default\n`);
+      }
+    } else if (modelVersion) {
+      const resolved = resolveModel(options.agent, modelVersion, effectiveModel);
       if (resolved.warning) {
         process.stderr.write(`[agents] ${resolved.warning}\n`);
       }
       cmd.push(template.modelFlag, resolved.forwarded);
-    } else {
+    } else if (!isTierToken(effectiveModel)) {
       cmd.push(template.modelFlag, effectiveModel);
+    } else {
+      // Tier token but no version resolved -> forwarding the literal "best"/etc.
+      // would be rejected by the CLI, so drop the flag (harness default).
+      process.stderr.write(`[agents] cannot resolve tier "${effectiveModel}" without a version; using harness default\n`);
     }
   }
 
@@ -893,11 +1091,19 @@ export function buildExecCommand(options: ExecOptions): string[] {
   // claude-only, silently dropped for codex and masked by edit mode carrying
   // the approval/sandbox bypass. Codex's resume forms reject --add-dir, so
   // skip it there (claude's flag-based resume accepts it).
+  //
+  // On top of any user-supplied dirs, a fresh codex workspace-write run
+  // implicitly gets ~/.agents (deduped) so the CLI's own tooling — askpass,
+  // secrets, sessions, tunings — can write from inside the sandbox. Resume forms
+  // get the same root via -c writable_roots above (see codexWorkspaceWrite).
+  const codexImplicitDirs =
+    codexWorkspaceWrite && !options.resume ? [getUserAgentsDir()] : [];
+  const addDirs = [...new Set([...(options.addDirs ?? []), ...codexImplicitDirs])];
   if (
-    options.addDirs &&
+    addDirs.length > 0 &&
     (options.agent === 'claude' || (options.agent === 'codex' && !options.resume))
   ) {
-    for (const dir of options.addDirs) {
+    for (const dir of addDirs) {
       cmd.push('--add-dir', dir);
     }
   }
@@ -1031,15 +1237,28 @@ export async function execShimPassthrough(
     // wrapper, not the agent binary — the active scan resolves that by
     // walking the candidate's ancestors (readAncestorSessionEntry).
     if (child.pid) {
+      const passthroughSessionId = extractSessionIdArg(rawArgs);
       writePidSessionEntry({
         pid: child.pid,
         agent,
-        sessionId: extractSessionIdArg(rawArgs),
+        sessionId: passthroughSessionId,
         cwd,
+        actor: resolveActor().id,
+        initiatedBy: resolveActor().kind,
         launchId,
         terminalId: process.env.AGENT_TERMINAL_ID,
         startedAtMs: Date.now(),
       });
+      // Durable sessionId -> actor record (RUSH-2019) so the scanner can attribute
+      // this session to a person after the pid dies. Best-effort; no-ops without id.
+      if (passthroughSessionId) {
+        writeSessionActorRecord({
+          sessionId: passthroughSessionId,
+          actor: resolveActor().id,
+          initiatedBy: resolveActor().kind,
+          startedAtMs: Date.now(),
+        });
+      }
     }
     child.on('exit', (code, signal) => resolve(code ?? (signal ? 1 : 0)));
     child.on('error', (err) => {
@@ -1060,6 +1279,32 @@ interface SpawnResult {
    * Claude prints to stdout rather than stderr.
    */
   stdout: string;
+}
+
+/**
+ * Whether a dead pane's failure should be recapped to stderr (RUSH-2185 / EXEC-23a).
+ *
+ * For headless runs only a nonzero exit is a failure worth surfacing — a
+ * clean 0 means the agent finished the task before we could attach.
+ * For interactive runs ANY exit (including 0) is a failure: an instant clean
+ * exit means the harness has no bare REPL and the user would see only a mute
+ * `[detached]` with no explanation.
+ */
+export function shouldRecapDeadPane(status: number | undefined, interactive: boolean): boolean {
+  return (status ?? 0) !== 0 || interactive;
+}
+
+/**
+ * True only when a `display-message #{pane_dead}` tmux query explicitly returned
+ * "0" (pane alive). Used to distinguish "pane alive" from "query failed" in
+ * situations where `paneExitStatus` conservatively returns `{dead: false}` for
+ * both (RUSH-2185 / EXEC-23a / F3).
+ *
+ * @param code   The exit code of the `tmux display-message` command.
+ * @param stdout Its stdout (expected to be "0" when the pane is alive).
+ */
+export function isPaneKnownAliveFromQueryResult(code: number, stdout: string): boolean {
+  return code === 0 && stdout.trim() === '0';
 }
 
 /** Inputs that decide whether an interactive spawn is wrapped in a shared-socket tmux session. */
@@ -1220,6 +1465,8 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
       agent: options.agent,
       sessionId: options.sessionId,
       cwd,
+      actor: resolveActor().id,
+      initiatedBy: resolveActor().kind,
       // spawnAgent injected AGENT_LAUNCH_ID into options.env before delegating
       // here; record the same id so the hook (running under the pane-leaf agent
       // pid) reconciles by launchId. This pane's pid usually IS the agent pid,
@@ -1229,6 +1476,14 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
       tmuxPane: pane,
       startedAtMs: Date.now(),
     });
+    if (options.sessionId) {
+      writeSessionActorRecord({
+        sessionId: options.sessionId,
+        actor: resolveActor().id,
+        initiatedBy: resolveActor().kind,
+        startedAtMs: Date.now(),
+      });
+    }
   }
 
   // Recap a dead pane's tail into THIS shell's stderr. The pane-died hook
@@ -1258,10 +1513,11 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
   // already-dead pane — surface its output + status directly and tear down.
   const before = pane ? await paneExitStatus(pane, socket) : { dead: false };
   if (before.dead) {
-    // Only recap a FAILURE. A clean (0) exit before we attached is a successful
-    // quick run, not a crash — a red banner there would be spurious (mirrors the
-    // post-attach guard below).
-    if ((before.status ?? 0) !== 0) {
+    // F2 (RUSH-2185 / EXEC-23a): for interactive runs, ALWAYS recap — a clean
+    // exit-0 before attach means the harness has no interactive REPL and the
+    // user would see only a bare `[detached]` with no clue why. For headless
+    // runs the old quiet behaviour stands: exit-0 is a successful quick run.
+    if (shouldRecapDeadPane(before.status, resolveInteractive(options))) {
       await surfacePaneFailure(before.status, `${options.agent} exited before it could start`);
     }
     await killSession(name, socket).catch(() => {});
@@ -1270,19 +1526,38 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
 
   await attachTmux({ socket, args: ['attach-session', '-t', name] });
 
+  // F3 (RUSH-2185 / EXEC-23a): paneExitStatus returns {dead:false} for BOTH
+  // "pane is alive" and "tmux query failed (race / pane already gone)". Require
+  // POSITIVE proof before taking the keep-session path — a separate direct query
+  // that only returns true when tmux explicitly confirms pane_dead=0.
+  const checkPaneKnownAlive = async (p: string): Promise<boolean> => {
+    try {
+      const r = await runTmux({ socket, args: ['display-message', '-pt', p, '-p', '#{pane_dead}'], throwOnError: false });
+      return isPaneKnownAliveFromQueryResult(r.code, r.stdout);
+    } catch { return false; }
+  };
+
   const after = pane ? await paneExitStatus(pane, socket) : { dead: false };
   if (after.dead) {
     // Nonzero exit after attach → the agent crashed rather than the user
     // detaching cleanly (a clean detach leaves the pane ALIVE, handled below).
-    // The pane-died hook may have yanked the view before the error was readable,
-    // so recap it into the shell. A clean (0) exit stays quiet — nothing to say.
-    if ((after.status ?? 0) !== 0) {
+    // F2: for interactive runs, also recap a clean exit-0 — the harness exited
+    // without error but without starting a REPL, which is still a failure.
+    if (shouldRecapDeadPane(after.status, resolveInteractive(options))) {
       await surfacePaneFailure(after.status, `${options.agent} exited`);
     }
     await killSession(name, socket).catch(() => {});
     return { exitCode: after.status ?? 0, stderr: '', stdout: '' };
   }
-  // Pane still alive → the user detached; keep the session for `agents focus`.
+  // after.dead===false, but that could be a stale/unreadable-pane result.
+  // Require positive proof before keeping the session as "user detached".
+  if (pane && await checkPaneKnownAlive(pane)) {
+    // Confirmed alive: the user pressed Ctrl-b d; keep the session for `agents focus`.
+    return { exitCode: 0, stderr: '', stdout: '' };
+  }
+  // Ambiguous or unreadable pane (race between pane-died hook and our query) —
+  // tear down rather than leave an orphan session.
+  await killSession(name, socket).catch(() => {});
   return { exitCode: 0, stderr: '', stdout: '' };
 }
 
@@ -1355,25 +1630,31 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
   // timeout. Spend is recorded to the shared ledger in the close handler. The
   // watcher is dormant (and zero-cost) when no caps are configured.
   const cwd = options.cwd || process.cwd();
-  // Mint the launch id once. It doubles as the budget watcher's run id AND is
+  // Resolve the launch id once. It doubles as the budget watcher's run id AND is
   // exported to the child as AGENT_LAUNCH_ID, so the agent's SessionStart hook
   // records the SAME id in its own state file (terminals/sessions/<pid>.json).
   // That id is the join key that reconciles this launch's pid-registry entry
   // with the hook's authoritative session id even when the hook runs under a
   // different pid (tmux pane leaf / cmd.exe wrapper) — see pid-registry.ts and
-  // session/hook-sessions.ts. Injected into options.env so every downstream env
-  // build (the bare spawn below AND the tmux env prefix in runInTmux) carries it.
-  const launchId = randomUUID();
+  // session/hook-sessions.ts. ADOPT a launch id a `--host` launcher already
+  // forwarded (via `--env AGENT_LAUNCH_ID=…`) so ONE correlation key spans the
+  // SSH hop and the launcher can resolve this run's real session id for every
+  // agent, not just Claude (RUSH-2034); mint a fresh one for every local run.
+  // Injected into options.env so every downstream env build (the bare spawn
+  // below AND the tmux env prefix in runInTmux) carries it.
+  const launchId = resolveLaunchId(options.env?.AGENT_LAUNCH_ID);
   const runId = launchId;
   options = { ...options, env: { ...options.env, AGENT_LAUNCH_ID: launchId } };
   const watcherState = await setupBudgetWatcher(options, cwd, runId);
 
-  maybeRotate();
   const timer = createTimer('agent.run', {
     agent: options.agent,
     version: options.version,
     cwd: options.cwd || process.cwd(),
-    mode: options.mode,
+    // The mode that ran, not the one requested — `agents run` passes the
+    // requested mode so the resolver can warn, but telemetry must agree with
+    // the audit log. See RUSH-2106 for removing that ambiguity at the source.
+    mode: resolveMode(options.agent, normalizeMode(options.mode)),
     model: options.model,
     interactive,
     sessionId: options.sessionId,
@@ -1445,11 +1726,21 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
       agent: options.agent,
       sessionId: options.sessionId,
       cwd: options.cwd || process.cwd(),
+      actor: resolveActor().id,
+      initiatedBy: resolveActor().kind,
       launchId,
       terminalId: process.env.AGENT_TERMINAL_ID,
       tmuxPane: process.env.TMUX_PANE,
       startedAtMs: Date.now(),
     });
+    if (options.sessionId) {
+      writeSessionActorRecord({
+        sessionId: options.sessionId,
+        actor: resolveActor().id,
+        initiatedBy: resolveActor().kind,
+        startedAtMs: Date.now(),
+      });
+    }
 
     // Mark startup time (time from function call to process spawn)
     timer.mark('startup');
@@ -1657,6 +1948,7 @@ export function detectRateLimit(text: string): boolean {
 export const AUTH_FAILURE_PATTERNS: RegExp[] = [
   /OAuth (?:access token has been revoked|session expired)/i,
   /(?:Please run|run) \/login/i,
+  /Please run 'agent login' first/i,
   /\bNot logged in\b/i,
   /Invalid authentication credentials/i,
   /Failed to authenticate/i,
@@ -1683,11 +1975,11 @@ export function detectAuthFailure(text: string): boolean {
  * reason logic can never catch it — the `error:"authentication_failed"` marker
  * and the `result`+`is_error` text are the reliable signals.
  *
- * Gated on the Claude stream-json shape; other agents don't emit these fields,
- * so callers pass their agent and this returns false for non-claude.
+ * Gated on the Claude-compatible stream-json shape emitted by Claude and Cursor;
+ * callers pass their agent so unrelated stream formats cannot match by accident.
  */
 export function detectAuthFailureEvent(logText: string, agent: AgentId): boolean {
-  if (agent !== 'claude') return false;
+  if (agent !== 'claude' && agent !== 'cursor') return false;
   const lines = logText.split('\n');
   for (const line of lines) {
     const trimmed = line.trim();

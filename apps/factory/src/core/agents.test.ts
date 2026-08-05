@@ -5,15 +5,44 @@ import {
   getBuiltInByPrefix,
   getBuiltInDefByTitle,
   pickLatestVersion,
-  STRATEGY_LAUNCH_AGENTS,
+  isAgentRunner,
+  usesManagedAgentLaunch,
   modeFlagForAgent,
+  buildAgentLaunchCommand,
+  wrapNativeAgentCommand,
   extractPlanFromSessionJson,
   planTextToSteps
 } from './agents';
 import { CLAUDE_TITLE, CODEX_TITLE, GEMINI_TITLE, OPENCODE_TITLE, CURSOR_TITLE, SHELL_TITLE } from './utils';
 import { CLI_AGENT_META, CliAgentId, isCliAgentId } from './agents.cli';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 describe('BUILT_IN_AGENTS', () => {
+  test('every non-shell built-in contributes and registers an Auto command', () => {
+    const packageJson = JSON.parse(readFileSync(resolve(import.meta.dir, '../../package.json'), 'utf8'));
+    const contributed = new Set(packageJson.contributes.commands.map((entry: { command: string }) => entry.command));
+    const extensionSource = readFileSync(resolve(import.meta.dir, '../vscode/extension.ts'), 'utf8');
+    expect(extensionSource).toContain('`${def.commandId}Auto`');
+    for (const agent of BUILT_IN_AGENTS) {
+      if (agent.key === 'shell') continue;
+      // Gemini is deprecated and no longer gets launch commands in the palette.
+      if (agent.key === 'gemini') continue;
+      expect(contributed.has(`${agent.commandId}Auto`)).toBe(true);
+    }
+  });
+
+  test('deprecated Gemini launch and setup commands are not contributed', () => {
+    const packageJson = JSON.parse(readFileSync(resolve(import.meta.dir, '../../package.json'), 'utf8'));
+    const contributed = new Set(packageJson.contributes.commands.map((entry: { command: string }) => entry.command));
+    const extensionSource = readFileSync(resolve(import.meta.dir, '../vscode/extension.ts'), 'utf8');
+    expect(contributed.has('agents.newGemini')).toBe(false);
+    expect(contributed.has('agents.newGeminiPickHost')).toBe(false);
+    expect(contributed.has('agents.newGeminiAuto')).toBe(false);
+    expect(contributed.has('agents.setupGemini')).toBe(false);
+    expect(extensionSource).not.toContain("agents.setupGemini");
+  });
+
   test('every non-shell agent is a CLI agent and launches its CLI binary', () => {
     for (const agent of BUILT_IN_AGENTS) {
       if (agent.key === 'shell') continue;
@@ -280,14 +309,207 @@ describe('planTextToSteps', () => {
   });
 });
 
-describe('STRATEGY_LAUNCH_AGENTS', () => {
-  test('covers the five version/account-managed agents incl. antigravity', () => {
-    expect([...STRATEGY_LAUNCH_AGENTS]).toEqual(['claude', 'codex', 'gemini', 'cursor', 'antigravity']);
+// The launch contract (apps/factory/AGENTS.md § "Launch contract"): every agent
+// runner launches through `agents run <agent> --interactive --strategy balanced
+// --mode auto`, on local / auto-host / picked-host alike. Shell is the sole
+// non-runner. These tests pin that invariant — there is no per-harness allowlist.
+describe('launch contract — every runner is balanced', () => {
+  // Every built-in that is an agent runner (i.e. not the Shell terminal).
+  const RUNNERS = BUILT_IN_AGENTS.map(a => a.key).filter(k => k !== 'shell');
+
+  test('isAgentRunner is true for every runner and false only for shell', () => {
+    for (const key of RUNNERS) expect(isAgentRunner(key)).toBe(true);
+    expect(isAgentRunner('shell')).toBe(false);
+    // Includes the harnesses that used to launch as raw binaries locally.
+    expect(isAgentRunner('grok')).toBe(true);
+    expect(isAgentRunner('kimi')).toBe(true);
+    expect(isAgentRunner('droid')).toBe(true);
   });
 
-  test('every strategy-launch agent is a known built-in', () => {
-    for (const key of STRATEGY_LAUNCH_AGENTS) {
-      expect(getBuiltInByKey(key)).toBeDefined();
+  test('usesManagedAgentLaunch routes every runner through agents run, never shell', () => {
+    for (const key of RUNNERS) expect(usesManagedAgentLaunch(key)).toBe(true);
+    expect(usesManagedAgentLaunch('shell')).toBe(false);
+    // A host target does not make shell an `agents run` agent (it has none).
+    expect(usesManagedAgentLaunch('shell', 'yosemite-s1')).toBe(false);
+  });
+
+  test('every runner × {local, auto, pick-host} emits --strategy balanced --mode auto', () => {
+    for (const key of RUNNERS) {
+      // New X — local
+      expect(buildAgentLaunchCommand(
+        key, null, undefined, undefined, undefined, 'balanced', undefined, { local: true },
+      )).toBe(`agents run ${key} --interactive --strategy balanced --mode auto`);
+      // Unpinned, no host, not local (QuickLaunch balanced) — CLI affinity-picks
+      // the device via --device auto. (New X (Auto) resolves a concrete --host
+      // itself instead; see launchAgent + apps/factory/AGENTS.md launch contract.)
+      expect(buildAgentLaunchCommand(
+        key, null, undefined, undefined, undefined, 'balanced', undefined, {},
+      )).toBe(`agents run ${key} --interactive --device auto --strategy balanced --mode auto`);
+      // New X (Pick Host) — explicit device
+      expect(buildAgentLaunchCommand(
+        key, null, undefined, undefined, undefined, 'balanced', undefined, { host: 'yosemite-s1' },
+      )).toBe(`agents run ${key} --interactive --host 'yosemite-s1' --strategy balanced --mode auto`);
+    }
+  });
+
+  test('a pinned @version is the one launch that omits --strategy (CLI ignores it against a pin)', () => {
+    expect(buildAgentLaunchCommand(
+      'claude', null, undefined, undefined, '1.2.3', 'balanced', undefined, { local: true },
+    )).toBe('agents run claude@1.2.3 --interactive --mode auto');
+  });
+});
+
+describe('buildAgentLaunchCommand', () => {
+  // RUSH-2038: interactive Factory launches must default to --mode auto so the
+  // agent starts in a writable posture instead of stalling in read-only plan mode.
+
+  test('no mode supplied -> defaults to --mode auto', () => {
+    const cmd = buildAgentLaunchCommand('codex', null);
+    expect(cmd).toContain('--mode auto');
+    expect(cmd).not.toContain('--mode plan');
+  });
+
+  test('no mode supplied for claude -> --mode auto', () => {
+    const cmd = buildAgentLaunchCommand('claude', 'session-abc');
+    expect(cmd).toContain('--mode auto');
+    expect(cmd).toContain('--session-id session-abc');
+  });
+
+  test('explicit mode plan is preserved when the caller requests it', () => {
+    const cmd = buildAgentLaunchCommand('codex', null, undefined, undefined, undefined, undefined, 'plan');
+    expect(cmd).toContain('--mode plan');
+    expect(cmd).not.toContain('--mode auto');
+  });
+
+  test('explicit mode edit is preserved', () => {
+    const cmd = buildAgentLaunchCommand('gemini', null, undefined, undefined, undefined, undefined, 'edit');
+    expect(cmd).toContain('--mode edit');
+  });
+
+  test('additionalFlags already containing --mode suppresses the default', () => {
+    // Caller has injected --mode plan via additionalFlags; the function must not
+    // double-emit another --mode flag.
+    const cmd = buildAgentLaunchCommand('codex', null, undefined, '--mode plan');
+    expect(cmd.match(/--mode/g)?.length).toBe(1);
+    expect(cmd).toContain('--mode plan');
+  });
+
+  test('includes --interactive and the agent key in the base command', () => {
+    const cmd = buildAgentLaunchCommand('codex', null);
+    expect(cmd).toMatch(/^agents run codex --interactive/);
+  });
+
+  test('pinned version is appended as agent@version', () => {
+    const cmd = buildAgentLaunchCommand('claude', null, undefined, undefined, '2.1.170');
+    expect(cmd).toContain('claude@2.1.170');
+  });
+
+  test('host flag is shell-quoted and included', () => {
+    const cmd = buildAgentLaunchCommand('codex', null, undefined, undefined, undefined, undefined, undefined, { host: 'mac-mini' });
+    expect(cmd).toContain("--host 'mac-mini'");
+  });
+
+  test('ordinary remote launch sends a local Mac workspace as portable --cwd', () => {
+    const cmd = buildAgentLaunchCommand(
+      'codex', null, undefined, undefined, undefined, undefined, undefined,
+      { host: 'linux-box', cwd: '/Users/muqsit/src/agents-cli' },
+    );
+    expect(cmd).toContain("--host 'linux-box'");
+    expect(cmd).toContain("--cwd '/Users/muqsit/src/agents-cli'");
+    expect(cmd).not.toContain('--remote-cwd');
+  });
+
+  test('picked remote session uses exact --remote-cwd and never portable --cwd', () => {
+    const cmd = buildAgentLaunchCommand(
+      'codex', null, undefined, undefined, undefined, undefined, undefined,
+      { host: 'linux-box', remoteCwd: '/srv/exact repo' },
+    );
+    expect(cmd).toContain("--remote-cwd '/srv/exact repo'");
+    expect(cmd).not.toContain(" --cwd ");
+  });
+
+  test('rejects an ambiguous remote target with both cwd forms', () => {
+    expect(() => buildAgentLaunchCommand(
+      'codex', null, undefined, undefined, undefined, undefined, undefined,
+      { host: 'linux-box', cwd: '/Users/muqsit/src', remoteCwd: '/srv/exact' },
+    )).toThrow('cannot combine portable cwd with exact remoteCwd');
+  });
+
+  test('default model is included when provided', () => {
+    const cmd = buildAgentLaunchCommand('claude', null, 'claude-haiku-4-5');
+    expect(cmd).toContain('--model claude-haiku-4-5');
+  });
+
+  // RUSH-2025: Pick Host / Auto Host / New Claude (Auto) launch with BOTH a host
+  // and --strategy balanced so the CLI's account rotation routes around a
+  // signed-out / throttled version on the chosen device.
+  test('balanced strategy + host emit --host and --strategy balanced together', () => {
+    const cmd = buildAgentLaunchCommand(
+      'claude', 'sess-1', undefined, undefined, undefined, 'balanced', undefined, { host: 'yosemite-s0' },
+    );
+    expect(cmd).toContain("--host 'yosemite-s0'");
+    expect(cmd).toContain('--strategy balanced');
+  });
+
+  test('explicit local launch suppresses automatic device selection', () => {
+    expect(buildAgentLaunchCommand(
+      'codex', null, undefined, undefined, undefined, 'balanced', undefined, { local: true },
+    )).toBe('agents run codex --interactive --strategy balanced --mode auto');
+  });
+
+  test('a pinned version on a host launch suppresses --strategy (pin overrides balance)', () => {
+    // Pick Version & Host: the exact pin wins, so no --strategy is emitted even
+    // if a strategy is passed.
+    const cmd = buildAgentLaunchCommand(
+      'claude', 'sess-2', undefined, undefined, '2.1.170', 'balanced', undefined, { host: 'yosemite-s1' },
+    );
+    expect(cmd).toContain('claude@2.1.170');
+    expect(cmd).toContain("--host 'yosemite-s1'");
+    expect(cmd).not.toContain('--strategy');
+  });
+});
+
+describe('wrapNativeAgentCommand (RUSH-2026)', () => {
+  // The exec prefix makes the shell replace itself with the agent runner so VS
+  // Code closes the tab automatically when the agent exits — mirroring tmux
+  // pane-died behaviour.
+
+  test('agent terminal: command is exec-prefixed', () => {
+    const cmd = buildAgentLaunchCommand('claude', null);
+    expect(wrapNativeAgentCommand(cmd, false)).toBe(`exec ${cmd}`);
+  });
+
+  test('agent terminal with --host: exec prefix is preserved', () => {
+    const cmd = buildAgentLaunchCommand('claude', null, undefined, undefined, undefined, undefined, undefined, { host: 'yosemite-s0' });
+    const wrapped = wrapNativeAgentCommand(cmd, false);
+    expect(wrapped).toMatch(/^exec agents run claude --interactive/);
+    expect(wrapped).toContain("--host 'yosemite-s0'");
+  });
+
+  test('shell terminal: command is NOT exec-prefixed', () => {
+    const shellCmd = 'zsh';
+    expect(wrapNativeAgentCommand(shellCmd, true)).toBe(shellCmd);
+    expect(wrapNativeAgentCommand(shellCmd, true)).not.toMatch(/^exec /);
+  });
+
+  test('empty command returns empty string unchanged', () => {
+    expect(wrapNativeAgentCommand('', false)).toBe('');
+    expect(wrapNativeAgentCommand('', true)).toBe('');
+  });
+});
+
+describe('extension tmux removal — spawn command contract', () => {
+  test('a new spawn sends only agents run, with no tmux wrapper', () => {
+    for (const key of ['claude', 'codex', 'gemini', 'cursor', 'opencode', 'antigravity', 'grok', 'kimi', 'droid'] as const) {
+      const cmd = wrapNativeAgentCommand(
+        buildAgentLaunchCommand(key, null, undefined, undefined, undefined, 'balanced', undefined, { local: true }),
+        false,
+      );
+      expect(cmd).toMatch(/^exec agents run /);
+      expect(cmd).toContain('--interactive');
+      expect(cmd).not.toContain('tmux');
+      expect(cmd).not.toContain('agents tmux');
+      expect(cmd).not.toContain('\n');
     }
   });
 });

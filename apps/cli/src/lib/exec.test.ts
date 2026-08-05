@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { shouldTapStdout, resolveInteractive, inferredInteractiveWithoutTty, buildExecCommand, nativeResume, resolveShimSpawn, buildExecEnv, shouldWrapInTmux, buildTmuxAgentCommand, formatPaneTail, detectRateLimit, detectAuthFailure, detectAuthFailureEvent, authFailureReason, isAuthFailureFromLog, type TmuxWrapContext } from './exec.js';
+import { shouldTapStdout, resolveInteractive, inferredInteractiveWithoutTty, buildExecCommand, nativeResume, resolveShimSpawn, buildExecEnv, shouldWrapInTmux, buildTmuxAgentCommand, formatPaneTail, detectRateLimit, detectAuthFailure, detectAuthFailureEvent, authFailureReason, isAuthFailureFromLog, resolveLaunchId, shouldRecapDeadPane, isPaneKnownAliveFromQueryResult, type TmuxWrapContext } from './exec.js';
 import type { ExecOptions } from './exec.js';
 import { mailboxDir } from './mailbox.js';
 
@@ -22,6 +22,12 @@ const RATE_LIMITED_CLAUDE_LOG = [
   '{"type":"result","subtype":"error","is_error":true,"result":"You have hit your 5-hour limit. Try again later.","num_turns":1}',
 ].join('\n');
 
+// Entire stdout from a real logged-out Cursor 2026.07.23 routine run. Cursor
+// exits before stream-json initialization, so raw-text classification is the
+// only available signal.
+const LOGGED_OUT_CURSOR_LOG =
+  "Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.";
+
 // A COMPLETED run whose report text merely mentions the phrase "Not logged in"
 // (e.g. a routine summarizing an auth doc). Must NOT be classified as an auth
 // failure — the structural signal is is_error:false.
@@ -38,6 +44,7 @@ describe('detectAuthFailure — user-visible auth strings', () => {
       'API Error: 401 Invalid authentication credentials',
       'OAuth session expired and could not be refreshed',
       "Your organization has disabled Claude subscription access",
+      LOGGED_OUT_CURSOR_LOG,
     ]) {
       expect(detectAuthFailure(s)).toBe(true);
     }
@@ -53,9 +60,13 @@ describe('detectAuthFailure — user-visible auth strings', () => {
   });
 });
 
-describe('detectAuthFailureEvent — Claude stream-json structural signal', () => {
+describe('detectAuthFailureEvent — Claude-compatible stream-json structural signal', () => {
   it('is true for a real logged-out Claude log', () => {
     expect(detectAuthFailureEvent(LOGGED_OUT_CLAUDE_LOG, 'claude')).toBe(true);
+  });
+
+  it('does not invent a structural event for Cursor plain-text auth output', () => {
+    expect(detectAuthFailureEvent(LOGGED_OUT_CURSOR_LOG, 'cursor')).toBe(false);
   });
 
   it('is false for a completed run that merely mentions the phrase', () => {
@@ -66,7 +77,7 @@ describe('detectAuthFailureEvent — Claude stream-json structural signal', () =
     expect(detectAuthFailureEvent(RATE_LIMITED_CLAUDE_LOG, 'claude')).toBe(false);
   });
 
-  it('is false for non-claude agents (they do not emit these markers)', () => {
+  it('is false for agents that do not emit these markers', () => {
     expect(detectAuthFailureEvent(LOGGED_OUT_CLAUDE_LOG, 'codex')).toBe(false);
     expect(detectAuthFailureEvent(LOGGED_OUT_CLAUDE_LOG, 'gemini')).toBe(false);
   });
@@ -86,6 +97,9 @@ describe('rate-limit vs auth precedence', () => {
 });
 
 describe('isAuthFailureFromLog — the shared foreground/detached decision', () => {
+  it('classifies a real Cursor plain-text auth failure after a failed process', () => {
+    expect(isAuthFailureFromLog(LOGGED_OUT_CURSOR_LOG, 'cursor', { processFailed: true })).toBe(true);
+  });
   it('classifies a real logged-out log regardless of process exit code', () => {
     // Structural marker is authoritative even on a clean (exit 0) process.
     expect(isAuthFailureFromLog(LOGGED_OUT_CLAUDE_LOG, 'claude', { processFailed: false })).toBe(true);
@@ -136,11 +150,16 @@ describe('buildExecEnv — AGENTS_MAILBOX_DIR wiring (mailbox loop-closer)', () 
     const sid = '96aa7271-0c8f-4ed7-8811-1ad1d305e46e';
     const env = buildExecEnv(execOpts({ agent: 'claude', sessionId: sid }));
     expect(env.AGENTS_MAILBOX_DIR).toBe(mailboxDir(sid));
+    // Session id is exported so agent tools (`agents feed post`) auto-attribute.
+    expect(env.AGENT_SESSION_ID).toBe(sid);
+    expect(env.AGENTS_SESSION_ID).toBe(sid);
+    expect(env.AGENTS_AGENT_NAME).toBe('claude');
   });
 
   it('sets nothing when there is no session id (nothing to key a box on)', () => {
     const env = buildExecEnv(execOpts({ agent: 'claude' }));
     expect(env.AGENTS_MAILBOX_DIR).toBeUndefined();
+    expect(env.AGENT_SESSION_ID).toBeUndefined();
   });
 
   it('lets a caller override the box via options.env (how the loop pins the run-level box)', () => {
@@ -211,6 +230,14 @@ describe('nativeResume (Tier-1 capability derives from the command template)', (
   it('opencode and gemini do not (they fall back to /continue replay)', () => {
     expect(nativeResume('opencode')).toBe(false);
     expect(nativeResume('gemini')).toBe(false);
+  });
+  it('gates newly verified harnesses by the exact installed-version threshold', () => {
+    expect(nativeResume('grok', '0.2.90')).toBe(false);
+    expect(nativeResume('grok', '0.2.91')).toBe(true);
+    expect(nativeResume('kimi', '0.19.2')).toBe(true);
+    expect(nativeResume('droid', '0.186.0')).toBe(true);
+    expect(nativeResume('cursor', '2026.7.23')).toBe(true);
+    expect(nativeResume('cursor')).toBe(false);
   });
 });
 
@@ -311,6 +338,29 @@ describe('buildExecCommand — native resume wiring', () => {
     const cmd = buildExecCommand(execOpts({ agent: 'codex', mode: 'plan', resume: true, sessionId: 'xyz-9', headless: true, prompt: 'go' }));
     expect(cmd).not.toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(cmd).toContain('sandbox_mode=read-only');
+  });
+
+  it.each([
+    ['grok', '0.2.91', true, '--resume'],
+    ['grok', '0.2.91', false, '--resume'],
+    ['kimi', '0.19.2', true, '--session'],
+    ['kimi', '0.19.2', false, '--session'],
+    ['cursor', '2026.7.23', true, '--resume'],
+    ['cursor', '2026.7.23', false, '--resume'],
+    ['droid', '0.186.0', true, '--resume'],
+    ['droid', '0.186.0', false, '--session-id'],
+  ] as const)('%s %s %s uses %s for native resume', (agent, version, interactive, flag) => {
+    const cmd = buildExecCommand(execOpts({
+      agent,
+      version,
+      mode: 'edit',
+      resume: true,
+      sessionId: 'session-1',
+      interactive,
+      headless: !interactive,
+      prompt: interactive ? undefined : 'continue',
+    }));
+    expect(cmd[idx(cmd, flag) + 1]).toBe('session-1');
   });
 
   it('non-native agent ignores resume in the arg builder (Tier-2 handles it via the prompt)', () => {
@@ -527,5 +577,95 @@ describe('buildTmuxAgentCommand (env-preserving pane command)', () => {
     // …but no real value leaks into the (persisted) string.
     expect(cmd).not.toContain('sk-ant-supersecret');
     expect(cmd).not.toContain('/usr/bin:/bin');
+  });
+});
+
+// resolveLaunchId is the one place that decides AGENT_LAUNCH_ID for a run. A
+// `--host` launcher forwards an id it controls so ONE correlation key spans the
+// SSH hop (RUSH-2034); every local run passes none and gets a fresh mint. The
+// adopt-vs-mint decision is what lets the launcher resolve a non-Claude agent's
+// real remote session id from the hook record afterwards.
+describe('resolveLaunchId', () => {
+  it('adopts a launcher-forwarded id verbatim (the cross-hop correlation key)', () => {
+    expect(resolveLaunchId('LID-from-host-42')).toBe('LID-from-host-42');
+  });
+
+  it('mints a fresh uuid when no id was forwarded (every local run)', () => {
+    expect(resolveLaunchId(undefined)).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('mints rather than adopt an empty/whitespace id — the key must be real', () => {
+    expect(resolveLaunchId('')).toMatch(/^[0-9a-f-]{36}$/);
+    expect(resolveLaunchId('   ')).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('trims a forwarded id so a stray newline never desyncs the join', () => {
+    expect(resolveLaunchId('  LID-x  \n')).toBe('LID-x');
+  });
+
+  it('mints a DISTINCT id each call when none is forwarded', () => {
+    expect(resolveLaunchId(undefined)).not.toBe(resolveLaunchId(undefined));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// runInTmux exit-classification (RUSH-2185 / EXEC-23a)
+//
+// Three scenarios that must produce the right action.  The functions
+// shouldRecapDeadPane and isPaneKnownAliveFromQueryResult are pure extractions
+// of the decision logic inside runInTmux — testable without a real tmux process.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('shouldRecapDeadPane', () => {
+  // (a) Interactive exit-0 fast-fail — the harness exited cleanly without ever
+  // opening a REPL.  The user sees only a bare `[detached]`; we must surface a
+  // failure banner even though the exit code is 0.
+  it('(a) interactive exit-0 → true (harness never opened a REPL, surface a failure)', () => {
+    expect(shouldRecapDeadPane(0, true)).toBe(true);
+  });
+
+  it('(a) interactive exit-undefined (treated as 0) → true', () => {
+    expect(shouldRecapDeadPane(undefined, true)).toBe(true);
+  });
+
+  // (b) Nonzero exit (headless or interactive) — always recap, same as before.
+  it('(b) nonzero exit, headless → true (crash, must surface)', () => {
+    expect(shouldRecapDeadPane(1, false)).toBe(true);
+  });
+
+  it('(b) nonzero exit, interactive → true', () => {
+    expect(shouldRecapDeadPane(2, true)).toBe(true);
+  });
+
+  // Clean exit in a headless run — not a failure; stay quiet.
+  it('exit-0, headless → false (completed successfully before attach)', () => {
+    expect(shouldRecapDeadPane(0, false)).toBe(false);
+  });
+
+  it('exit-undefined, headless → false', () => {
+    expect(shouldRecapDeadPane(undefined, false)).toBe(false);
+  });
+});
+
+describe('isPaneKnownAliveFromQueryResult', () => {
+  // (c) Positive proof the pane is alive — tmux returned exactly "0".
+  it('(c) code=0 stdout="0" → true (pane is definitively alive)', () => {
+    expect(isPaneKnownAliveFromQueryResult(0, '0')).toBe(true);
+  });
+
+  it('(c) code=0 stdout="0\\n" → true (trailing newline is trimmed)', () => {
+    expect(isPaneKnownAliveFromQueryResult(0, '0\n')).toBe(true);
+  });
+
+  // Query failed (race with pane-died hook) — must NOT be treated as alive.
+  it('(c) code=1 → false (query failed, treat as unreadable/dead — no orphan)', () => {
+    expect(isPaneKnownAliveFromQueryResult(1, '')).toBe(false);
+  });
+
+  it('(c) code=0 stdout="1" → false (pane_dead=1, pane is dead)', () => {
+    expect(isPaneKnownAliveFromQueryResult(0, '1')).toBe(false);
+  });
+
+  it('(c) code=0 stdout="" → false (empty output, inconclusive)', () => {
+    expect(isPaneKnownAliveFromQueryResult(0, '')).toBe(false);
   });
 });

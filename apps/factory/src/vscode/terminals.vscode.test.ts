@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, mock } from 'bun:test';
+import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test';
 import type * as vscode from 'vscode';
 
 // Minimal vscode mock
@@ -19,13 +19,7 @@ mock.module('./agents.vscode', () => ({
   getBuiltInByKey: () => undefined,
 }));
 
-mock.module('./sessions.vscode', () => ({
-  getSessionPathBySessionId: () => undefined,
-  getSessionPreviewInfo: () => Promise.resolve(null),
-  getOpenCodeSessionPreviewInfo: () => Promise.resolve(null),
-  getCursorSessionPreviewInfo: () => Promise.resolve(null),
-  readTailLines: () => Promise.resolve(''),
-}));
+
 
 mock.module('../core/sessions.persist', () => ({
   buildPersistedSessions: () => [],
@@ -36,16 +30,6 @@ mock.module('../core/sessions.persist', () => ({
   persistWorkspaceSessions: () => {},
   updatePersistedSession: () => {},
   PersistedSession: {},
-}));
-
-mock.module('../core/session.activity', () => ({
-  extractCurrentActivity: () => null,
-  formatActivity: () => '',
-  detectWaitingForInput: () => false,
-}));
-
-mock.module('../core/session.summary', () => ({
-  extractSessionQuickDetails: () => Promise.resolve(null),
 }));
 
 const t = await import('./terminals.vscode');
@@ -66,6 +50,12 @@ function fakeAgentConfig() {
 
 beforeEach(() => {
   t.clear();
+});
+
+afterEach(() => {
+  // Terminals tests mock vscode and sibling modules globally; restore so later
+  // test files (htmlReader, session-read, etc.) load the real modules.
+  mock.restore();
 });
 
 // ─── Bug proofs ───────────────────────────────────────────────────────────────
@@ -173,5 +163,34 @@ describe('BUG I: setLabel immediately stops autoLabelPoller', () => {
     expect(entry?.autoLabelPollerId).toBeUndefined();
 
     t.stopAutoLabelPoller(term);
+  });
+});
+
+// Half of the status-bar identity fix (Defect 2): a harness the CLI records no
+// version for (Kimi) must not keep a version left over from a prior binding in the
+// same terminal. setVersion(null) has to CLEAR, not be ignored.
+describe('setVersion clears the cached version on null/empty', () => {
+  test('a null version wipes both version and statusVersion', () => {
+    const term = fakeTerm('CC-setver');
+    t.register(term, 'CC-ver-1', fakeAgentConfig(), undefined);
+
+    t.setVersion(term, '2.1.218');
+    const set = t.getByTerminal(term);
+    expect(set?.version).toBe('2.1.218');
+    expect(set?.statusVersion).toBe('2.1.218');
+
+    // Re-hydration for a session the CLI has no version for must clear it.
+    t.setVersion(term, null);
+    const cleared = t.getByTerminal(term);
+    expect(cleared?.version).toBeUndefined();
+    expect(cleared?.statusVersion).toBeUndefined();
+  });
+
+  test('an empty/whitespace version is treated as clear, not a literal value', () => {
+    const term = fakeTerm('CC-setver2');
+    t.register(term, 'CC-ver-2', fakeAgentConfig(), undefined);
+    t.setVersion(term, '2.1.218');
+    t.setVersion(term, '   ');
+    expect(t.getByTerminal(term)?.version).toBeUndefined();
   });
 });

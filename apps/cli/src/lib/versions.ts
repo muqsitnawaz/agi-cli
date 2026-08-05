@@ -32,7 +32,7 @@ import { activeRulesPreset, filterNamesForActiveResourceProfile } from './resour
 // (single source of truth). Re-exported below so existing importers of
 // `compareVersions` from './versions.js' keep working.
 import { VERSION_RE, compareVersions } from './agent-spec/primitives.js';
-import { AGENTS, agentConfigDirName, getAccountEmail, getMcpConfigPathForHome, parseMcpConfig, resolveAgentName, formatAgentError, findInPath, isSelfUpdatingAgent } from './agents.js';
+import { AGENTS, agentConfigDirName, getAccountEmail, getMcpConfigPathForHome, parseMcpConfig, resolveAgentName, formatAgentError, findInPath, isSelfUpdatingAgent, isAgentHardDeprecated, hardDeprecationError } from './agents.js';
 import { getDefaultPermissionSet, applyPermissionsToVersion as applyPermsToVersion, discoverPermissionGroups, getTotalPermissionRuleCount, buildPermissionsFromGroups, CODEX_RULES_FILENAME, getActivePermissionPresetName, readPermissionPresetRecipe, PERMISSION_PRESET_ENV_VAR } from './permissions.js';
 import { installMcpServers, parseMcpServerConfig, isProjectMcpTrusted } from './mcp.js';
 import { markdownToToml } from './convert.js';
@@ -55,7 +55,13 @@ import { composeRulesFromState } from './rules/compose.js';
 import { loadManifest, saveManifest, buildManifest as buildSyncManifest, isStale } from './staleness/index.js';
 import { emit } from './events.js';
 import { safeJoin } from './paths.js';
-import { installCommandSkillToVersion, listCommandSkillsInVersion, readSkillSourceCommandMarker, shouldInstallCommandAsSkill } from './command-skills.js';
+import {
+  installCommandSkillToVersion,
+  listCommandSkillsInVersion,
+  readSkillSourceCommandMarker,
+  shouldAlsoInstallCommandAsSkill,
+  shouldInstallCommandAsSkill,
+} from './command-skills.js';
 import { getWriter, getDetector } from './staleness/registry.js';
 import { syncMemoryToVersionHome } from './memory.js';
 import { listPluginSkillNames, resolveCommandSource, resolveSkillSource } from './staleness/writers/sources.js';
@@ -260,28 +266,60 @@ export function getAvailableResources(cwd: string = process.cwd()): AvailableRes
   }
   result.skills = filterNamesForActiveResourceProfile('skills', Array.from(skillNames), sourceMapFromResources('skills', cwd));
 
-  // Hooks. A hook is either a directory bundle or an actual script file: known
-  // script extension, OR executable bit on a file with a non-data extension.
-  // Auxiliary content like `README.md` (docs) or `promptcuts.yaml` (data read
-  // directly by the expand-promptcuts script) lives in hooks/ but is not a
-  // hook. Older sync runs chmod 0o755'd everything they copied, so an exec bit
-  // alone can no longer be trusted as the signal.
+  // Hooks:
+  //   - top-level script files
+  //   - one-level *group* dirs that contain top-level scripts (session-starts/*.sh)
+  //     → each script is its own hook resource (install name = basename)
+  //   - other directories (e.g. tests/ with fixtures only) → directory bundles,
+  //     copied wholesale as one resource (pre-existing layout)
+  // Auxiliary content like README.md / promptcuts.yaml is not a hook. Older sync
+  // runs chmod 0o755'd everything, so an exec bit alone is not the signal.
   const NON_SCRIPT_EXTS = new Set(['.md', '.markdown', '.rst', '.txt', '.yaml', '.yml', '.json', '.toml', '.ini', '.conf']);
   const SCRIPT_EXTS     = new Set(['.sh', '.bash', '.zsh', '.py', '.js', '.ts', '.mjs', '.cjs', '.rb', '.pl', '.ps1']);
+  const HOOK_GROUP_SKIP = new Set(['node_modules', '.git', '.cache']);
   const hookNames = new Set<string>();
+  const isHookScriptName = (fileName: string, mode: number): boolean => {
+    const ext = path.extname(fileName).toLowerCase();
+    if (SCRIPT_EXTS.has(ext)) return true;
+    return (mode & 0o111) !== 0 && !NON_SCRIPT_EXTS.has(ext);
+  };
   for (const { base } of resourceBases) {
     const hooksDir = path.join(base, 'hooks');
     if (!fs.existsSync(hooksDir)) continue;
     for (const name of fs.readdirSync(hooksDir)) {
       if (name.startsWith('.')) continue;
       try {
-        const stat = fs.lstatSync(path.join(hooksDir, name));
+        const full = path.join(hooksDir, name);
+        const stat = fs.lstatSync(full);
         if (stat.isSymbolicLink()) continue;
-        if (stat.isDirectory()) { hookNames.add(name); continue; }
-        if (!stat.isFile()) continue;
-        const ext = path.extname(name).toLowerCase();
-        if (SCRIPT_EXTS.has(ext)) { hookNames.add(name); continue; }
-        if ((stat.mode & 0o111) !== 0 && !NON_SCRIPT_EXTS.has(ext)) hookNames.add(name);
+        if (stat.isFile()) {
+          if (isHookScriptName(name, stat.mode)) hookNames.add(name);
+          continue;
+        }
+        if (!stat.isDirectory() || HOOK_GROUP_SKIP.has(name)) continue;
+        // Group vs bundle: if the dir has any top-level script files, expand
+        // them; otherwise treat the whole dir as one hook resource.
+        let nestedNames: string[];
+        try {
+          nestedNames = fs.readdirSync(full);
+        } catch {
+          continue;
+        }
+        const scripts: string[] = [];
+        for (const nested of nestedNames) {
+          if (nested.startsWith('.')) continue;
+          try {
+            const nfull = path.join(full, nested);
+            const nstat = fs.lstatSync(nfull);
+            if (nstat.isSymbolicLink() || !nstat.isFile()) continue;
+            if (isHookScriptName(nested, nstat.mode)) scripts.push(nested);
+          } catch { /* ignore */ }
+        }
+        if (scripts.length > 0) {
+          for (const s of scripts) hookNames.add(s);
+        } else {
+          hookNames.add(name);
+        }
       } catch { /* ignore unreadable */ }
     }
   }
@@ -1376,45 +1414,30 @@ export function isVersionIsolated(agent: AgentId, version: string): boolean {
 }
 
 /**
- * Grok's official installer writes into ~/.grok/downloads, which (because we
- * symlink ~/.grok to the active version home) resolves to the PREVIOUS default
- * home during `agents add grok@<new>`. Move the freshly-downloaded binary and
- * its generic platform copy into the target version's isolated home so
- * `listInstalledVersions` and the shim resolve the right binary.
+ * Move any `grok-<installedVersion>-...` binary (and its generic platform
+ * copy) found directly under `sourceDownloads` into `targetDownloads`.
+ * Returns true if the versioned binary was moved.
  */
-function relocateGrokBinaryToVersionHome(installedVersion: string): void {
-  const hostGrokLink = path.join(getHomeDir(), agentConfigDirName('grok'));
-  let sourceDownloads: string;
-  try {
-    sourceDownloads = path.join(fs.readlinkSync(hostGrokLink), 'downloads');
-  } catch {
-    sourceDownloads = path.join(hostGrokLink, 'downloads');
-  }
-  const targetDownloads = path.join(
-    getVersionHomePath('grok', installedVersion),
-    agentConfigDirName('grok'),
-    'downloads'
-  );
-
-  if (!fs.existsSync(sourceDownloads)) return;
-  if (path.resolve(sourceDownloads) === path.resolve(targetDownloads)) return;
+function tryMoveGrokDownloads(sourceDownloads: string, targetDownloads: string, installedVersion: string): boolean {
+  if (!fs.existsSync(sourceDownloads)) return false;
+  if (path.resolve(sourceDownloads) === path.resolve(targetDownloads)) return false;
 
   const entries = fs.readdirSync(sourceDownloads).filter((e) => e.startsWith('grok-'));
-  if (entries.length === 0) return;
-
-  fs.mkdirSync(targetDownloads, { recursive: true });
+  if (entries.length === 0) return false;
 
   const escapedVersion = installedVersion.replace(/\./g, '\\.');
   const versionedPattern = new RegExp(`^grok-${escapedVersion}-`);
   const movedPaths: string[] = [];
 
-  // Move the versioned binary first.
+  // Move the versioned binary first — only create the target dir once we
+  // know there is something to move into it.
   for (const entry of entries) {
     if (!versionedPattern.test(entry)) continue;
     const src = path.join(sourceDownloads, entry);
     const dst = path.join(targetDownloads, entry);
     if (fs.existsSync(dst)) continue;
     try {
+      fs.mkdirSync(targetDownloads, { recursive: true });
       fs.renameSync(src, dst);
       movedPaths.push(dst);
     } catch {
@@ -1422,7 +1445,7 @@ function relocateGrokBinaryToVersionHome(installedVersion: string): void {
     }
   }
 
-  if (movedPaths.length === 0) return;
+  if (movedPaths.length === 0) return false;
 
   // The installer also creates a generic platform binary (e.g. grok-macos-aarch64)
   // that is a copy of the versioned binary. Move it too if its size matches.
@@ -1440,6 +1463,80 @@ function relocateGrokBinaryToVersionHome(installedVersion: string): void {
       /* ignore per-file failures */
     }
   }
+
+  return true;
+}
+
+/**
+ * Grok's official installer writes into ~/.grok/downloads, which (because we
+ * symlink ~/.grok to the active version home) resolves to the PREVIOUS default
+ * home during `agents add grok@<new>`. Move the freshly-downloaded binary and
+ * its generic platform copy into the target version's isolated home so
+ * `listInstalledVersions` and the shim resolve the right binary.
+ *
+ * Self-healing: if `~/.grok`'s current target has nothing matching (e.g. a
+ * PAST install mislabeled `installedVersion` as the literal string 'latest',
+ * whose regex never matched the real filename, stranding the binary in
+ * whatever version was default at the time), sweep every other installed
+ * grok version home for the missing file before giving up.
+ */
+function relocateGrokBinaryToVersionHome(installedVersion: string): void {
+  const hostGrokLink = path.join(getHomeDir(), agentConfigDirName('grok'));
+  let sourceDownloads: string;
+  try {
+    sourceDownloads = path.join(fs.readlinkSync(hostGrokLink), 'downloads');
+  } catch {
+    sourceDownloads = path.join(hostGrokLink, 'downloads');
+  }
+  const targetDownloads = path.join(
+    getVersionHomePath('grok', installedVersion),
+    agentConfigDirName('grok'),
+    'downloads'
+  );
+
+  if (tryMoveGrokDownloads(sourceDownloads, targetDownloads, installedVersion)) return;
+
+  for (const version of listInstalledVersions('grok')) {
+    if (version === installedVersion) continue;
+    const candidate = path.join(getVersionHomePath('grok', version), agentConfigDirName('grok'), 'downloads');
+    if (path.resolve(candidate) === path.resolve(sourceDownloads)) continue; // already tried
+    if (tryMoveGrokDownloads(candidate, targetDownloads, installedVersion)) return;
+  }
+}
+
+/**
+ * Grok's version directory is keyed by release number alone, not by account —
+ * so two DIFFERENT accounts that both self-update to the identical upstream
+ * release ("latest") target the SAME on-disk `versions/grok/<version>/` home.
+ * When that happens, the second account's `agents add grok@latest` writes
+ * into an already-signed-in directory: grok's own auth flow treats
+ * `~/.grok/auth.json` as authoritative for whichever process invoked it, so
+ * the second account's credential record lands in a file that still names it
+ * as the first account's install everywhere else in agents-cli's bookkeeping.
+ *
+ * Refuse before that happens: if the target version's home already has a
+ * signed-in account whose identity differs from the account currently
+ * driving this update (the previous global default), fail loud instead of
+ * letting the second account silently displace the first's install.
+ */
+async function checkGrokAccountCollision(installedVersion: string): Promise<void> {
+  const targetHome = getVersionHomePath('grok', installedVersion);
+  if (!fs.existsSync(targetHome)) return; // fresh directory, nothing to collide with
+
+  const sourceVersion = getGlobalDefault('grok');
+  if (!sourceVersion || sourceVersion === installedVersion) return; // same install, not a collision
+
+  const [targetEmail, sourceEmail] = await Promise.all([
+    getAccountEmail('grok', targetHome),
+    getAccountEmail('grok', getVersionHomePath('grok', sourceVersion)),
+  ]);
+  if (!targetEmail || !sourceEmail || targetEmail === sourceEmail) return;
+
+  throw new Error(
+    `grok@${installedVersion} is already installed for ${targetEmail}, but this update is running as ${sourceEmail}. ` +
+    `Grok's self-updater can't distinguish two accounts that land on the same release — sign in to ${targetEmail}'s ` +
+    `install (agents use grok@${installedVersion}) before updating it, or wait until the releases diverge.`
+  );
 }
 
 /**
@@ -1452,6 +1549,10 @@ export async function installVersion(
   opts?: { clean?: boolean }
 ): Promise<{ success: boolean; installedVersion: string; error?: string }> {
   const agentConfig = AGENTS[agent];
+
+  if (isAgentHardDeprecated(agent)) {
+    return { success: false, installedVersion: version, error: hardDeprecationError(agent) };
+  }
 
   // Validate before deriving filesystem paths or npm package specs. The CLI
   // parser already enforces this for user input; this guard protects direct
@@ -1492,10 +1593,35 @@ export async function installVersion(
       }
 
       if (version === 'latest') {
-        installedVersion = await getCliVersionFromPath(agent) || version;
+        // A freshly-installed self-updating binary (grok, …) can take a
+        // moment to become resolvable on PATH right after the installer
+        // exits — retry briefly rather than silently falling back to the
+        // literal string 'latest'. That fallback used to corrupt version
+        // bookkeeping downstream: it creates a bogus `versions/<agent>/latest/`
+        // dir, and for grok specifically defeats relocateGrokBinaryToVersionHome
+        // (its exact-filename regex can never match `grok-latest-...`), which
+        // permanently strands the real downloaded binary in the PREVIOUS
+        // default's downloads dir.
+        let probed = await getCliVersionFromPath(agent);
+        for (let attempt = 0; !probed && attempt < 2; attempt++) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          probed = await getCliVersionFromPath(agent);
+        }
+        if (!probed) {
+          return {
+            success: false,
+            installedVersion: version,
+            error: `${agentConfig.name} installed but its version could not be determined after several attempts.`,
+          };
+        }
+        installedVersion = probed;
         // Fold any stale literal `latest` dir from an earlier probe-failed
         // install into the real version so it stops shadowing `agents view`.
         await reconcileStaleLatestDir(agent, installedVersion);
+      }
+
+      if (agent === 'grok') {
+        await checkGrokAccountCollision(installedVersion);
       }
 
       onProgress?.(`${agentConfig.name} installed. Setting up agents-cli version home for isolation...`);
@@ -2481,6 +2607,12 @@ export interface SyncResult {
   subagents: string[];
   plugins: string[];
   workflows: string[];
+  /**
+   * Project files the sync left alone because the workspace already has them
+   * (repo-relative). Reported once, grouped, by the command that rendered the
+   * sync — never one line per file from down here.
+   */
+  projectSkipped: string[];
 }
 
 /**
@@ -2618,6 +2750,10 @@ export function mergeRepoScopedSelections(repos: string[], cwd: string = process
  * For Gemini: commands are converted from markdown to TOML.
  */
 export function syncResourcesToVersion(agent: AgentId, version: string, selection?: ResourceSelection, options: { projectDir?: string; cwd?: string; force?: boolean } = {}): SyncResult {
+  if (isAgentHardDeprecated(agent)) {
+    return { commands: false, skills: false, hooks: false, memory: [], permissions: false, mcp: [], subagents: [], plugins: [], workflows: [], projectSkipped: [] };
+  }
+
   const agentConfig = AGENTS[agent];
   const versionHome = getVersionHomePath(agent, version);
   const agentDir = path.join(versionHome, agentConfigDirName(agent));
@@ -2628,7 +2764,7 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   // "full sync; persist the staleness manifest after."
   const userPassedSelection = selection !== undefined;
 
-  const result: SyncResult = { commands: false, skills: false, hooks: false, memory: [], permissions: false, mcp: [], subagents: [], plugins: [], workflows: [] };
+  const result: SyncResult = { commands: false, skills: false, hooks: false, memory: [], permissions: false, mcp: [], subagents: [], plugins: [], workflows: [], projectSkipped: [] };
   const cwd = options.cwd || process.cwd();
   const projectAgentsDir = options.projectDir || getProjectAgentsDir(cwd);
   const userAgentsDir = getUserAgentsDir();
@@ -2702,7 +2838,7 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   }
 
   if (projectAgentsDir) {
-    syncProjectResourcesToAgent(agent, version, projectAgentsDir);
+    result.projectSkipped = syncProjectResourcesToAgent(agent, version, projectAgentsDir).skipped;
   }
 
   // Fast guard: skip the entire sync when the caller requested a full sync and
@@ -2712,7 +2848,9 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   if (!userPassedSelection && !options.force) {
     const manifest = loadManifest(agent, version);
     if (manifest && !isStale(manifest, agent, version, cwd)) {
-      return { commands: false, skills: false, hooks: false, memory: [], permissions: false, mcp: [], subagents: [], plugins: [], workflows: [] };
+      // Nothing synced, but the project sync above already ran — carry its
+      // skipped files out so the caller can still report them.
+      return { ...result };
     }
   }
 
@@ -2758,22 +2896,32 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   const trustedCommandNames = (names: string[]): string[] => names.filter((name) => resolveCommandSource(name) !== null);
 
   // Sync commands — dispatch through WRITERS.commands. The writer dispatches
-  // between native (file copy / TOML conversion) and commands-as-skills
-  // (grok, Codex >= 0.117.0) based on `shouldInstallCommandAsSkill`. The
-  // previous COMMANDS_CAPABLE_AGENTS gate excluded grok even though it
-  // takes the commands-as-skills path — silently dropping every command.
+  // between native (file copy / TOML conversion), commands-as-skills, and the
+  // registry-driven dual-write path based on the command-skill predicates. The
+  // previous COMMANDS_CAPABLE_AGENTS gate excluded skills-only targets such as
+  // Kimi, silently dropping every converted command.
   const commandsWriter = getWriter('commands', agent);
   const commandsToSync = selection
     ? trustedCommandNames(resolveSelection(selection.commands, available.commands))
     : trustedCommandNames(available.commands); // No selection = sync all trusted commands, excluding project-only commands
   const commandsAsSkills = shouldInstallCommandAsSkill(agent, version);
+  const commandsAlsoAsSkills = shouldAlsoInstallCommandAsSkill(agent, version);
+  const commandsInstallAsSkills = commandsAsSkills || commandsAlsoAsSkills;
+  let writtenCommands: string[] = [];
 
   if (commandsToSync.length > 0 && commandsWriter) {
-    const commandsTarget = path.join(agentDir, agentConfig.commandsSubdir);
+    // Agents that replace native command files with skills (codex >= 0.117.0,
+    // kimi) must have their legacy command dir removed, or files written by an
+    // older version linger forever: the orphan sweep below is gated off for
+    // them, and `agents prune` only sees their skills. Gated on
+    // `commandsAsSkills`, never `commandsAlsoAsSkills` -- a dual-write agent's
+    // native dir is a live product surface (Cursor IDE) and must not be wiped.
     if (commandsAsSkills && agentConfig.commandsSubdir) {
-      removePath(commandsTarget);
+      removePath(path.join(agentDir, agentConfig.commandsSubdir));
     }
+
     const r = commandsWriter.write({ version, versionHome, selection: commandsToSync, cwd });
+    writtenCommands = r.synced;
     result.commands = r.synced.length > 0;
   }
 
@@ -2789,11 +2937,17 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
     if (fs.existsSync(commandsTargetSweep)) {
       const ext = agentConfig.format === 'toml' ? '.toml' : '.md';
       const trustedCommands = new Set(commandsToSync);
+      // A dual-write target's native directory also belongs to another product
+      // surface (Cursor IDE). Delete only names the command writer recorded as
+      // successfully emitted during the preceding full sync.
+      const previouslyManagedCommands = commandsAlsoAsSkills
+        ? new Set(loadManifest(agent, version)?.writtenCommands ?? [])
+        : null;
       for (const entry of fs.readdirSync(commandsTargetSweep, { withFileTypes: true })) {
         if (!entry.isFile() || entry.name.startsWith('.')) continue;
         if (!entry.name.endsWith(ext)) continue;
         const name = entry.name.slice(0, -ext.length);
-        if (!trustedCommands.has(name)) {
+        if (!trustedCommands.has(name) && (!previouslyManagedCommands || previouslyManagedCommands.has(name))) {
           removePath(safeJoin(commandsTargetSweep, entry.name));
         }
       }
@@ -2817,7 +2971,7 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   let skillsToSync = userPassedSelection
     ? selectedSkillsToSync
     : Array.from(new Set([...selectedSkillsToSync, ...pluginSkillsToSync]));
-  if (commandsAsSkills && commandsToSync.length > 0 && skillsToSync.length > 0) {
+  if (commandsInstallAsSkills && commandsToSync.length > 0 && skillsToSync.length > 0) {
     const commandNames = new Set(commandsToSync);
     const skillRoots = [
       path.join(getUserAgentsDir(), 'skills'),
@@ -2844,13 +2998,13 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
     // dot-dirs to keep plugin-managed subtrees (.plugins/, .promptcuts) intact.
     const skillsTargetSweep = path.join(agentDir, 'skills');
     if (!userPassedSelection && fs.existsSync(skillsTargetSweep) && !fs.lstatSync(skillsTargetSweep).isSymbolicLink()) {
-      // Trust real skills AND command-skills: when commandsAsSkills, the
+      // Trust real skills AND command-skills: when commandsInstallAsSkills, the
       // commands writer (above) materialized each command as a skill dir under
       // skills/. Those names are not in skillsToSync, so without this they'd be
       // swept as orphans — silently deleting every converted command (e.g.
-      // /recap on kimi/grok).
+      // /recap on Kimi or newer Codex releases).
       const trustedSkills = new Set(skillsToSync);
-      if (commandsAsSkills) for (const cmd of commandsToSync) trustedSkills.add(cmd);
+      if (commandsInstallAsSkills) for (const cmd of commandsToSync) trustedSkills.add(cmd);
       for (const entry of fs.readdirSync(skillsTargetSweep, { withFileTypes: true })) {
         if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
         if (!trustedSkills.has(entry.name)) {
@@ -3080,7 +3234,9 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
   // one-off override, so the resulting state matches what the manifest
   // records as the synced set.
   if (!userPassedSelection) {
-    saveManifest(agent, version, buildSyncManifest(agent, version, cwd));
+    const manifest = buildSyncManifest(agent, version, cwd);
+    manifest.writtenCommands = writtenCommands;
+    saveManifest(agent, version, manifest);
   }
 
   return result;

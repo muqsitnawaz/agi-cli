@@ -9,7 +9,9 @@
 import { Option, type Command } from 'commander';
 import chalk from 'chalk';
 import type { ExecOptions, ExecMode, ExecEffort, FallbackEntry } from '../lib/exec.js';
+import { isTierToken } from '../lib/model-tiers.js';
 import type { AgentId } from '../lib/types.js';
+import { RUN_AUTO_KEYWORD } from '../lib/types.js';
 import type { DetectedRuntime } from '../lib/crabbox/runtimes.js';
 import type { ResolvedRunDefaults } from '../lib/run-defaults.js';
 import { setHelpSections } from '../lib/help.js';
@@ -18,7 +20,7 @@ import { getUserAgentsDir } from '../lib/state.js';
 import type { CrabboxBox } from '../lib/crabbox/cli.js';
 import { parseLoopInterval } from '../lib/loop.js';
 import type { RotateResult } from '../lib/rotate.js';
-import { AGENTS } from '../lib/agents.js';
+import { AGENTS, resolveAgentName, isAgentHardDeprecated, hardDeprecationError } from '../lib/agents.js';
 import { recordDispatchedRun } from '../lib/audit/log.js';
 import { maybeShowStarNudge } from '../lib/star-nudge.js';
 import { warnUnpushedWork, shouldWarnUnpushed } from '../lib/warn-unpushed.js';
@@ -27,8 +29,10 @@ import { sshResolve, type SshGResult } from '../lib/hosts/ssh-config.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
+import { randomUUID } from 'crypto';
+import { isSessionTrackedAgent } from '../lib/session/types.js';
+import { applyActiveRulesPresetAtRun } from '../lib/rules/run-sync.js';
 
 interface ExecCommandActionOptions {
   mode: ExecMode;
@@ -53,6 +57,10 @@ interface ExecCommandActionOptions {
   sessionId?: string;
   /** --name <slug>: durable launch handle, resolvable via `agents sessions <name>`. */
   name?: string;
+  /** --notify: post a desktop notification when a headless run finishes. */
+  notify?: boolean;
+  /** --terminal [backend]: open this run in a terminal tab; `true` = auto-detect. */
+  terminal?: string | boolean;
   verbose?: boolean;
   raw?: boolean;
   /** `--no-tmux` → commander sets this false (default true) to bypass the tmux wrapper. */
@@ -63,6 +71,11 @@ interface ExecCommandActionOptions {
   fallback?: string;
   balanced?: boolean;
   strategy?: string;
+  /**
+   * @deprecated Hidden alias for `--device auto`. Resolved before host dispatch.
+   * Remove after one release.
+   */
+  smart?: boolean;
   acp?: boolean;
   yes?: boolean;
   loop?: boolean;
@@ -73,6 +86,9 @@ interface ExecCommandActionOptions {
   interval?: string;
   // Host dispatch: run on a registered agent host instead of locally.
   // `--host` is canonical; `--on`/`--computer` are hidden aliases.
+  // `--where` is the unified placement alias (lib/placement.ts) — expands into
+  // host/lease before dispatch; do not combine with those flags.
+  where?: string;
   host?: string;
   device?: string;
   on?: string;
@@ -84,9 +100,18 @@ interface ExecCommandActionOptions {
   lease?: string | boolean; // --lease [backend]: true when bare, backend string when given
   box?: string; // --box <slug>: reuse an existing warm crabbox box
   keepBox?: boolean; // --keep-box: don't tear down the leased box after the run
+  fresh?: boolean; // --fresh: with --lease, skip the warm profile-pool reuse and always provision a new box
   reuse?: boolean; // --reuse: reuse the most-recently-used warm box if one exists
   bare?: boolean; // --bare: skip copying the local ~/.agents setup onto the box
   tailscale?: boolean; // --tailscale / --no-tailscale: tri-state net-mode override
+  // Cloud placement: dispatch to the agent's native vendor cloud via the
+  // cloud provider registry (commands/run-cloud.ts). Mutually exclusive with
+  // the machine-placement flags above (one placement door).
+  cloud?: boolean; // --cloud: vendor cloud placement
+  provider?: string; // --provider <id>: override the agent's native cloud provider
+  repo?: string[]; // --repo <owner/repo> (repeatable): GitHub repo(s) for the cloud task
+  branch?: string; // --branch <name>: target git branch for the cloud task
+  cloudEnv?: string; // --cloud-env <id>: Codex Cloud environment id (--env is taken by KEY=VAL passthrough)
   secretsKeys?: string; // --secrets-keys: comma-separated key subset for --secrets bundles
   allowExpired?: boolean; // --allow-expired: skip expiry pre-run abort for secrets
   emitSessionId?: boolean; // internal: forwarded by --host dispatch so the remote run prints its session id (hosts/session-marker.ts)
@@ -110,6 +135,25 @@ export function parseRunAccountPickerRequest(agentSpec: string): RunAccountPicke
 }
 
 /** Return every option whose routing semantics conflict with a local account choice. */
+/**
+ * The `--host` alias family — the flags that mean "dispatch this run to another
+ * machine over SSH". `--host` is canonical; `--device`/`--on`/`--computer` are
+ * aliases. Returns the values actually given (so callers can both test presence
+ * and read the target). Kept in ONE place because a guard that listed only a
+ * subset silently let `--terminal --device` open a local tab and drop the remote
+ * target — the drift this predicate exists to prevent.
+ */
+export function hostTargetGiven(options: {
+  host?: string;
+  device?: string;
+  on?: string;
+  computer?: string;
+}): string[] {
+  return [options.host, options.device, options.on, options.computer].filter(
+    (v): v is string => !!v,
+  );
+}
+
 export function runAccountPickerConflicts(options: {
   resume?: string | boolean;
   strategy?: string;
@@ -127,7 +171,7 @@ export function runAccountPickerConflicts(options: {
   if (options.balanced) conflicts.push('--balanced');
   if (options.lease) conflicts.push('--lease');
   if (options.box) conflicts.push('--box');
-  if (options.host || options.device || options.on || options.computer) conflicts.push('--host/--device');
+  if (hostTargetGiven(options).length) conflicts.push('--host/--device');
   return conflicts;
 }
 
@@ -136,12 +180,58 @@ function isValidAgent(agent: string): agent is AgentId {
   return agent in AGENTS;
 }
 
+// Reserved `<agent>` keyword for `agents run auto` — canonical definition in
+// lib/types.ts (shared with the host dispatch layer); re-exported here.
+export { RUN_AUTO_KEYWORD };
+
+/**
+ * Whether `run auto` should default its host layer to the affinity pick (the
+ * same machinery as `--device auto`). False when the caller pinned any host
+ * flag, and false when this process was itself dispatched by a host run — the
+ * dispatcher exports AGENTS_RUN_AUTO_HOST_RESOLVED=1 into the remote SHELL
+ * (hosts/dispatch.ts remoteRunShellPrelude) because it already resolved the
+ * host layer, and re-picking here would chain-hop the run across the fleet.
+ * Pure so the pinning matrix is unit-testable.
+ */
+export function runAutoDefaultsToAffinity(
+  options: { host?: string; device?: string; on?: string; computer?: string },
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (hostTargetGiven(options).length > 0) return false;
+  return env.AGENTS_RUN_AUTO_HOST_RESOLVED !== '1';
+}
+
+/**
+ * Whether an interactive host dispatch must mint a correlation launch id and
+ * resolve the remote session via the launch-id join (RUSH-2034), rather than
+ * trusting a pre-known session id. `run auto` ALWAYS joins: the harness is
+ * picked on the remote, so an explicit --session-id is only adopted when the
+ * pick lands on claude — pre-registering it would strand a stale session-index
+ * entry naming an id a non-claude pick never used (RUSH-2132). Pure so the
+ * decision matrix is unit-testable.
+ */
+export function hostInteractiveNeedsCorrelationId(
+  runAgent: string,
+  hostSessionId: string | undefined,
+  resumeId: string | undefined,
+): boolean {
+  if (resumeId) return false;
+  if (runAgent === RUN_AUTO_KEYWORD) return true;
+  return !hostSessionId && isSessionTrackedAgent(runAgent);
+}
+
 /** Build a one-line banner describing which version the strategy picked. */
 function formatRotationBanner(result: RotateResult, verb: string = 'balanced'): string {
   const { picked, healthy, excluded } = result;
   const label = picked.email ? `${picked.email} · ${picked.agent}@${picked.version}` : `${picked.agent}@${picked.version}`;
   const ratio = `${healthy.length} of ${healthy.length + excluded.length} healthy`;
-  return `[agents] ${verb} picked ${label} (${ratio})`;
+  // Say it when the pick was a guess. A machine whose usage refresh is failing
+  // reports old percentages with total confidence, so a silent banner reads
+  // identical whether the router knew the account had headroom or merely hoped
+  // so — and the operator only finds out when the agent answers "you've hit
+  // your weekly limit".
+  const caveat = result.usageUnverified ? ', usage unverified — no account could be refreshed' : '';
+  return `[agents] ${verb} picked ${label} (${ratio}${caveat})`;
 }
 
 /** The host descriptor fields the `--copy-creds` security gate reads. */
@@ -490,6 +580,137 @@ export async function runWorkflowForEach(
   return 1;
 }
 
+/**
+ * The run's working directory from `--cwd` / `--project`. `--project <slug>` owns
+ * the directory and is mutually exclusive with `--cwd`/`--remote-cwd`; both the
+ * main dispatch and the `--terminal` handoff need the same answer, so the rule
+ * and its error live here once instead of in two places that can drift.
+ */
+async function resolveRunCwd(
+  options: Pick<ExecCommandActionOptions, 'cwd' | 'project' | 'remoteCwd'>,
+  opts: { forRemote: boolean },
+): Promise<string | undefined> {
+  if (!options.project) return options.cwd;
+  if (options.cwd || options.remoteCwd) {
+    console.error(chalk.red('Pass --project alone — not with --cwd or --remote-cwd.'));
+    process.exit(1);
+  }
+  const { resolveProjectRef } = await import('../lib/project-root.js');
+  try {
+    return await resolveProjectRef(options.project, { forRemote: opts.forRemote });
+  } catch (err) {
+    console.error(chalk.red((err as Error).message));
+    process.exit(1);
+  }
+}
+
+/**
+ * `--terminal`: hand this run to a real terminal tab and exit.
+ *
+ * The terminal is detected from the user's live sessions, so a run started from
+ * a surface that cannot host a TUI (the menu bar's "New Session", a script) lands
+ * in the terminal they actually work in instead of a hardcoded Terminal.app.
+ * Exits non-zero when no terminal could be opened — the caller must not believe
+ * a session started when none did.
+ */
+async function handleTerminalHandoff(
+  agentSpec: string,
+  options: ExecCommandActionOptions,
+  prompt: string | undefined,
+): Promise<void> {
+  const { parseTerminalFlag, openRunInTerminal, toHostSamples } = await import('../lib/terminal/run-surface.js');
+  const { currentContext } = await import('../lib/terminal/index.js');
+
+  const parsed = parseTerminalFlag(options.terminal);
+  if (parsed.error) {
+    console.error(chalk.red(parsed.error));
+    process.exit(1);
+  }
+
+  // Reject an unrunnable target HERE, where the person can read it. The tab would
+  // otherwise open, print the same error, and close — the failure lands in a
+  // window that is gone before it can be read, which reads as "nothing happened".
+  //
+  // `agents run <thing>` takes an agent id, a PROFILE, or a WORKFLOW (see the
+  // isValidAgent / profileExists / resolveWorkflowRef chain below), so this must
+  // accept all three. Gating on the agent table alone rejected every profile —
+  // the whole Kimi/DeepSeek/Qwen/GLM path — for `--terminal` runs only.
+  const rawTarget = parseRunAccountPickerRequest(agentSpec).normalizedAgentSpec.split('@')[0];
+  const knownAgent = resolveAgentName(rawTarget);
+  if (knownAgent && isAgentHardDeprecated(knownAgent)) {
+    console.error(chalk.red(hardDeprecationError(knownAgent)));
+    process.exit(1);
+  }
+  if (!knownAgent) {
+    const [{ profileExists }, { resolveWorkflowRef }] = await Promise.all([
+      import('../lib/profiles.js'),
+      import('../lib/workflows.js'),
+    ]);
+    const probeCwd = options.cwd ?? process.cwd();
+    if (!profileExists(rawTarget) && !resolveWorkflowRef(rawTarget, probeCwd)) {
+      console.error(chalk.red(
+        `Unknown agent, profile, or workflow: ${rawTarget}. See \`agents list\` for the installed harnesses.`,
+      ));
+      process.exit(1);
+    }
+  }
+  // --host and its aliases (--device/--on/--computer) all mean "dispatch this
+  // run to another machine over SSH", which is incompatible with opening a
+  // terminal tab on THIS machine — so reject the whole alias family, not just
+  // the canonical flag. The rule and its wording live once, in the --host
+  // forwarding table, so the classification a reviewer reads and the error a
+  // user sees can't drift.
+  if (hostTargetGiven(options).length) {
+    const { RUN_OPTION_REJECT_MESSAGES } = await import('../lib/hosts/remote-cmd.js');
+    console.error(chalk.red(RUN_OPTION_REJECT_MESSAGES.terminal));
+    process.exit(1);
+  }
+  // Machine-readable output would land in the tab, where the caller that asked
+  // for it can never read it. Same class of failure as --host: refuse, don't
+  // hand back a stream that goes nowhere.
+  const streamFlag = options.json ? '--json' : options.emitSessionId ? '--emit-session-id' : undefined;
+  if (streamFlag) {
+    console.error(chalk.red(
+      `${streamFlag} streams to stdout, but --terminal moves the run into a tab where you cannot read it. Drop one.`,
+    ));
+    process.exit(1);
+  }
+
+  // `--project` owns the working directory, but the main action resolves it far
+  // below this handoff — so without this the tab would open in THIS process's
+  // cwd (launchd's `/` for a menu-bar click) while the run inside it moved to
+  // the project. `forRemote: false` because --terminal is always local (--host
+  // is rejected above).
+  const cwd = await resolveRunCwd(options, { forRemote: false });
+
+  const { getActiveSessions } = await import('../lib/session/active.js');
+  let sessions: Awaited<ReturnType<typeof toHostSamples>> = [];
+  try {
+    sessions = await toHostSamples(await getActiveSessions());
+  } catch {
+    // Detection is best-effort — an unreadable session index must not block the
+    // launch; resolution falls through to the available-backend floor.
+  }
+
+  const result = await openRunInTerminal({
+    argv: process.argv.slice(2),
+    forced: parsed.backend,
+    consumedValue: typeof options.terminal === 'string' ? options.terminal : undefined,
+    cwd: cwd ?? process.cwd(),
+    sessions,
+    ctx: currentContext(),
+  });
+
+  if (!result.ok) {
+    console.error(chalk.red(`Could not open a terminal: ${result.error ?? 'unknown error'}`));
+    process.exit(1);
+  }
+  if (!options.quiet) {
+    const what = prompt === undefined ? 'session' : 'run';
+    console.log(chalk.gray(`Opened the ${what} in ${result.description}.`));
+  }
+}
+
 /** Register the `agents run <agent> [prompt]` command. */
 export function registerRunCommand(program: Command): void {
   const runCmd = program
@@ -497,7 +718,7 @@ export function registerRunCommand(program: Command): void {
     .description('Execute an agent. Pass a prompt for headless runs; omit it to launch the agent interactively.')
     .option('-m, --mode <mode>', 'How much the agent can do: plan (read-only), edit (can write files), auto (smart classifier auto-approves safe ops, prompts for risky), skip (bypass all permission prompts). \'full\' accepted as alias for skip.', 'plan')
     .option('-e, --effort <effort>', 'Reasoning effort: low | medium | high | xhigh | max | auto (claude and codex only)', 'auto')
-    .option('--model <model>', 'Override the model directly (e.g., claude-opus-4-6)')
+    .option('--model <model>', 'Cost tier (cheap|default|best|ultra) or a concrete model id; tiers resolve per harness+version to a supported model')
     .option(
       '--env <key=value>',
       'Pass environment variable to the agent (repeatable, e.g., --env DEBUG=1 --env API_KEY=xyz)',
@@ -535,9 +756,14 @@ export function registerRunCommand(program: Command): void {
     .option('--headless', 'Force headless mode. Auto-enabled when a prompt is provided; pass explicitly to stay headless with no prompt (reads the prompt from stdin).', false)
     .option('--no-auth-check', 'Skip the pre-launch "looks logged out" warning on an interactive run (advisory; never blocks anyway). Also silenced by AGENTS_NO_AUTH_CHECK=1.')
     .option('-i, --interactive', 'Force interactive mode even when a prompt is provided. Mutually exclusive with --headless.')
-    .option('--resume [id]', 'Resume a previous conversation. Accepts a full or partial session id (prefix-matched against the index); omit the id to pick from recent sessions interactively. Resumes under the version that started the session. claude/codex resume natively; other agents replay via a /continue first message. Pair with a prompt to continue headlessly.')
+    .option('--resume [id]', 'Resume a previous conversation. Full IDs resolve locally first, then fleet-wide. Claude, Codex, Grok, Kimi, Droid, and Cursor use version-gated native resume; other agents replay via /continue. Pair with a prompt to continue headlessly.')
     .option('--session-id <id>', 'Force a NEW conversation to use this exact session UUID (Claude only). This CREATES a session — to resume an existing one, use --resume.')
     .option('--name <slug>', 'Name the run — seeds the session label so it shows up as `<name>` in `agents sessions` and resolves by it (and `agents hosts logs <name>` for --host runs) instead of an opaque id. An agent-generated title later refines the label; your name shows until then. Optional.')
+    .option('--notify', 'Post a desktop notification when a headless run finishes. Fired by this process on exit, so it survives whatever launched the run (the menu bar dispatching it, a terminal you closed).')
+    .option(
+      '--terminal [backend]',
+      "Open this run in a real terminal tab instead of here. Without a value the terminal is detected from your live sessions (`agents sessions --active` host), so it lands where you already work — Ghostty for a Ghostty user, iTerm for an iTerm user. Name one to force it: iterm | ghostty | terminal | tmux | vscodium-agent. This is how the menu bar's New Session opens.",
+    )
     .option('--verbose', 'Show detailed execution logs')
     .option('--raw', 'Interactive runs on macOS/Linux launch inside a shared tmux session (for %pane addressing + re-attach). Pass --raw to spawn the agent directly instead. Also disabled by AGENTS_NO_TMUX=1.')
     .option('--no-tmux', 'Spawn the agent directly instead of wrapping it in the shared tmux session. Same effect as --raw / AGENTS_NO_TMUX=1. Use this to see the agent\'s full startup output when a launch is failing.')
@@ -545,7 +771,7 @@ export function registerRunCommand(program: Command): void {
     .option('--timeout <duration>', 'Kill the agent after this duration (e.g., 30m, 1h, 2h30m)')
     .option(
       '--fallback <agents>',
-      'Comma-separated agents to try on rate-limit failure. Each entry accepts an optional @version pin (e.g., codex@0.116.0,gemini). The primary runs first; if it exits with a rate-limit error, the next agent picks up via /continue handoff.',
+      'Comma-separated agents to try on rate-limit failure. Each entry accepts an optional @version pin (e.g., codex@0.116.0,antigravity). The primary runs first; if it exits with a rate-limit error, the next agent picks up via /continue handoff.',
     )
     .option(
       '-b, --balanced',
@@ -557,7 +783,7 @@ export function registerRunCommand(program: Command): void {
     )
     .option(
       '--acp',
-      'Route through the Agent Client Protocol instead of direct exec. Supported for gemini, claude (via @zed-industries/claude-code-acp adapter). Unified event stream; emits ndjson when --json.',
+      'Route through the Agent Client Protocol instead of direct exec. Supported for claude via @zed-industries/claude-code-acp adapter. Unified event stream; emits ndjson when --json.',
     )
     .option(
       '-y, --yes',
@@ -589,12 +815,16 @@ export function registerRunCommand(program: Command): void {
       'Loop delay between iterations ("0" back-to-back, "30m" paces). Loop only.',
     )
     .option(
+      '--where <spec>',
+      'Where this run\'s body executes (one placement door): local | device:<name> | auto | lease[:backend] | cloud[:provider]. Expands to --host/--lease/--cloud. Do not combine with those flags. See docs/00-concepts.md#placement.',
+    )
+    .option(
       '--host <name>',
-      'Offload this run onto another machine over SSH instead of running locally — a device, a registered agent host, or user@host. See `agents devices` / `agents hosts`.',
+      'Offload this run onto another machine over SSH — a device name, registered host, or user@host. Pass "auto" to pick from 14d usage affinity (most-used online device has highest probability). Same as --where device:<name>. See `agents devices`.',
     )
     .option(
       '--device <name>',
-      'Alias of --host: offload this run onto a registered device (from `agents devices`).',
+      'Alias of --host. Pass "auto" for affinity-based device pick (same as --where auto).',
     )
     .option('--remote-cwd <dir>', "Explicit host working directory for --host runs, used VERBATIM (overrides --cwd; usually --cwd suffices — it re-roots a local-home path onto the remote home). Pass a single-quoted '$HOME/…' or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you).")
     .option('--no-follow', 'With --host, dispatch detached and return immediately (track via `agents hosts ps/logs`).')
@@ -605,7 +835,7 @@ export function registerRunCommand(program: Command): void {
     )
     .option(
       '--lease [backend]',
-      'Invent a disposable cloud box for this run and tear it down after (via crabbox). Optional backend selects the cloud (hetzner/aws/do). Unlike --host, no machine is registered.',
+      "Run on a cloud box (via crabbox) and tear it down after — reuses a warm box from the repo's profile pool when one is ready (--fresh forces a new box). Optional backend selects the cloud (hetzner/aws/do). Same as --where lease[:backend]. Unlike --host, no machine is registered.",
     )
     .option(
       '--box <slug>',
@@ -613,16 +843,37 @@ export function registerRunCommand(program: Command): void {
     )
     .option('--keep-box', 'With --lease, keep the box after the run instead of stopping it.')
     .option(
+      '--fresh',
+      "With --lease, always provision a brand-new box (skip the warm profile-pool reuse) and tear it down after the run.",
+    )
+    .option(
       '--reuse',
       'With --lease, reuse the most-recently-used warm box if one exists (else provision fresh). The scriptable form of the interactive reuse picker.',
     )
     .option('--bare', 'With --lease, skip copying your local ~/.agents setup (skills/hooks/commands/MCP) onto the box.')
     .option('--tailscale', 'Lease the box onto your tailnet (reachable only over Tailscale) rather than a public IP.')
-    .option('--no-tailscale', 'Force a public-IP lease even when a reuse context would default to Tailscale.');
+    .option('--no-tailscale', 'Force a public-IP lease even when a reuse context would default to Tailscale.')
+    .option(
+      '--cloud',
+      'Vendor cloud placement: dispatch to the agent\'s native cloud (claude→rush, codex→codex, droid→factory, antigravity→antigravity) and stream the result. Same dispatch as `agents cloud run --agent <agent>`; tracked by `agents cloud list/status/logs`. Same as --where cloud. Mutually exclusive with --host/--lease and local-run flags.',
+    )
+    .option('--provider <id>', 'With --cloud: override the agent\'s native cloud provider (rush | codex | factory | antigravity | host).')
+    .option(
+      '--repo <owner/repo>',
+      'With --cloud: GitHub repository. Repeatable for multi-repo dispatch (Rush Cloud only).',
+      (val: string, prev: string[]) => [...prev, val],
+      [],
+    )
+    .option('--branch <name>', 'With --cloud: target git branch.')
+    .option('--cloud-env <id>', 'With --cloud: Codex Cloud environment ID (run\'s --env is the KEY=VAL passthrough, so the cloud env id gets its own flag).');
 
   // `--on` and `--computer` are hidden aliases of `--host` — same behavior.
   runCmd.addOption(new Option('--on <name>', 'Alias of --host.').hideHelp());
   runCmd.addOption(new Option('--computer <name>', 'Alias of --host.').hideHelp());
+  // Deprecated one-release alias: `agents run … --smart` → treat as `--device auto`.
+  runCmd.addOption(
+    new Option('--smart', 'Deprecated: use --device auto (affinity host pick).').hideHelp(),
+  );
 
   // Internal: the `--host` dispatch forwards this so the REMOTE run prints its
   // resolved session id as a one-line stdout sentinel (hosts/session-marker.ts),
@@ -651,6 +902,28 @@ export function registerRunCommand(program: Command): void {
       # Pick a signed-in account/version for only this run
       agents run claude@
 
+      # Full-auto: affinity-pick the host, then the harness with the most
+      # account headroom, then a balanced account on it
+      agents run auto "fix the flaky test" --mode edit
+      agents run auto --host yosemite-s0 "fix the flaky test"   # pin the host
+
+      # Placement (one door — where the body runs). Old flags still work.
+      agents run claude "…" --where device:yosemite-s0   # = --host yosemite-s0
+      agents run claude "…" --where auto                 # = --device auto
+      agents run claude "fix CI" --where lease --mode edit
+
+      # Vendor cloud placement — the agent's own cloud runs the task and
+      # agents cloud list/status/logs tracks it. Fire-and-forget: --no-follow
+      agents run claude "fix the flaky e2e" --cloud --repo acme/example
+      agents run codex "add parser tests" --cloud --cloud-env env_a1b2c3
+      agents run droid "QA the onboarding flow" --cloud --no-follow
+      agents run claude "…" --where cloud          # same as --cloud
+
+      # Open the session in a terminal tab — detected from where your sessions
+      # already run (Ghostty / iTerm / Terminal.app); force one with a value
+      agents run claude --terminal
+      agents run claude --terminal ghostty
+
       # Pipe JSON events to a parser (--quiet drops the preamble)
       agents run claude "..." --json --quiet | jq
 
@@ -659,6 +932,14 @@ export function registerRunCommand(program: Command): void {
 
       # Inject a keychain-backed secrets bundle
       agents run claude "deploy the worker" --secrets prod --mode edit
+
+      # Run on a cloud box — reuses a warm box from the repo's profile pool when
+      # one is ready (kept after the run), else leases a fresh box, torn down after
+      agents run claude "fix the failing tests" --lease
+
+      # Force a brand-new box (destroyed after), or target a warm box by slug
+      agents run claude "fix the failing tests" --lease --fresh
+      agents run claude "fix the failing tests" --box warm-one
 
       # Pass arbitrary native flags to the underlying CLI via -- separator
       agents run kimi -- --plan --some-kimi-option value
@@ -684,14 +965,30 @@ export function registerRunCommand(program: Command): void {
         balanced   distribute load across healthy accounts by remaining capacity (default)
         A version/account is skipped when it is rate-limited right now — any usage window (incl. the 5-hour session window) at 100%, matching the 'agents view' badge.
         --balanced is shorthand for --strategy balanced. Ignored when @version is pinned, when a profile is used, or with --fallback.
+        Zero healthy accounts under balanced/available exits nonzero naming each
+        excluded account and the earliest window reset — use --strategy pinned to force.
+
+      'auto' harness (agents run auto): picks the host (14d usage affinity,
+      unless --host is given), the harness (installed CLIs weighted by
+      best-account headroom), and the account (the strategy above). Zero
+      healthy accounts on any harness exits nonzero with the earliest reset.
 
       Account picker: append @ with no version (agents run claude@) to choose one
         installed account for this run. Rows show identity, login state, plan,
         and available limits; unsafe accounts stay visible but disabled.
 
-      Fallback: --fallback codex,gemini retries on rate-limit failure via /continue handoff. Each entry accepts @version.
+      Fallback: --fallback codex,antigravity retries on rate-limit failure via /continue handoff. Each entry accepts @version.
 
-      Resume: --resume <id> continues a prior conversation (full or partial id; omit to pick interactively). claude/codex resume natively; others replay via a /continue first message. Add a prompt to continue headlessly.
+      Cloud placement: --cloud sends the run to the agent's native vendor cloud
+        (claude→rush, codex→codex, droid→factory, antigravity→antigravity) — the
+        same dispatch as agents cloud run --agent <agent>, tracked by agents
+        cloud list/status/logs/cancel/message. --provider overrides the routing;
+        --repo/--branch/--cloud-env refine the task. Agents without a native
+        cloud (kimi, grok, cursor, opencode, …) fail loud unless --provider is
+        given. --cloud is mutually exclusive with --host/--lease and with
+        local-run flags (--loop, --resume, --secrets, --terminal, …).
+
+      Resume: --resume <id> resolves full IDs locally first, then fleet-wide, and restores the source version/device/mode. Claude, Codex, Grok, Kimi, Droid, and Cursor use version-gated native resume; others replay via /continue. agents resume <id> infers the harness too.
 
       Passthrough: everything after -- is forwarded verbatim to the underlying agent CLI.
         agents run kimi -- --plan --some-native-flag value
@@ -721,16 +1018,113 @@ export function registerRunCommand(program: Command): void {
         prompt = undefined;
       }
 
+      // --cloud: vendor cloud placement. Validate BEFORE the terminal handoff
+      // and every local dispatch path — flags like --terminal/--loop/--resume
+      // belong to the local runner and must error, never ride along silently.
+      if (options.cloud || (typeof options.where === 'string' && /^cloud(:|$)/i.test(options.where.trim()))) {
+        const { runCloudConflicts } = await import('./run-cloud.js');
+        const conflicts = runCloudConflicts(options as unknown as Record<string, unknown>);
+        if (conflicts.length > 0) {
+          console.error(chalk.red(
+            `--cloud is a vendor cloud placement; these only apply to local/machine runs: ${conflicts.join(', ')}. Drop them, or drop --cloud.`,
+          ));
+          process.exit(1);
+        }
+      }
+
+      // --terminal: this process can't host the TUI (a menu-bar click, a script),
+      // so hand the run to a real terminal and exit. Resolved from the user's own
+      // live sessions, so it opens where they already work. Done before every
+      // other dispatch path because the tab re-runs this same argv without the
+      // flag — arming --notify or picking a version here would happen twice.
+      if (options.terminal) {
+        await handleTerminalHandoff(agentSpec, options, prompt);
+        return;
+      }
+
+      // Placement: --where expands into --host / --lease / --cloud before any
+      // dispatch. One door for "where does the body run?" — old flags remain
+      // aliases. See lib/placement.ts and docs/00-concepts.md#placement.
+      {
+        const { placementFromRunFlags, expandPlacementToRunFlags, PlacementError } =
+          await import('../lib/placement.js');
+        try {
+          const placement = placementFromRunFlags(options);
+          if (options.where) {
+            const expanded = expandPlacementToRunFlags(placement);
+            if (expanded.host !== undefined) options.host = expanded.host;
+            if (expanded.device !== undefined) options.device = expanded.device;
+            if (expanded.lease !== undefined) options.lease = expanded.lease;
+            if (expanded.box !== undefined) options.box = expanded.box;
+            if (expanded.cloud !== undefined) options.cloud = expanded.cloud;
+            if (expanded.provider !== undefined) options.provider = expanded.provider;
+            // Clear the where flag so remote re-entry (host dispatch) does not
+            // re-expand and conflict with the concrete host we just set.
+            options.where = undefined;
+          }
+        } catch (err) {
+          if (err instanceof PlacementError) {
+            console.error(chalk.red(err.message));
+            process.exit(1);
+          }
+          throw err;
+        }
+      }
+
+      // Cloud refinement flags without the placement are a typo, not a no-op.
+      if (!options.cloud) {
+        const { cloudFlagsWithoutCloud } = await import('./run-cloud.js');
+        const stray = cloudFlagsWithoutCloud(options as unknown as Record<string, unknown>);
+        if (stray.length > 0) {
+          console.error(chalk.red(`${stray.join(', ')} ${stray.length > 1 ? 'require' : 'requires'} --cloud (vendor cloud placement).`));
+          process.exit(1);
+        }
+      }
+
+      // --cloud: dispatch through the cloud provider registry and return — the
+      // run never touches the local/host/lease paths below.
+      if (options.cloud) {
+        const { handleRunCloud } = await import('./run-cloud.js');
+        await handleRunCloud(agentSpec, prompt, options as unknown as Record<string, unknown>, command);
+        return;
+      }
+
+      // --notify: post a desktop notification when this run finishes. Armed on
+      // process exit so it covers EVERY dispatch path below (local, --host,
+      // --lease, the error path) instead of one branch. Only for headless runs
+      // — an interactive run ends in front of the person who started it.
+      if (options.notify && prompt !== undefined) {
+        const { armRunFinishNotification } = await import('../lib/run-notify.js');
+        armRunFinishNotification({
+          agent: agentSpec,
+          name: options.name,
+          prompt,
+          cwd: options.cwd ?? process.cwd(),
+          host: options.host,
+        });
+      }
+
       // A trailing @ is an explicit request to choose one installed account.
       // Strip only that terminal marker; concrete agent@version pins retain
       // their existing meaning in every dispatch path below.
       const accountPicker = parseRunAccountPickerRequest(agentSpec);
       const accountPickerRequested = accountPicker.requested;
-      const normalizedAgentSpec = accountPicker.normalizedAgentSpec;
+      let normalizedAgentSpec = accountPicker.normalizedAgentSpec;
       if (!accountPicker.valid) {
         console.error(chalk.red(`Invalid account picker target: ${agentSpec}. Use agents run <agent>@.`));
         process.exit(1);
       }
+
+      // Hard-deprecated harnesses cannot be run — point the user at the successor.
+      const runBaseAgentId = resolveAgentName(normalizedAgentSpec.split('@')[0]);
+      if (runBaseAgentId && isAgentHardDeprecated(runBaseAgentId)) {
+        console.error(chalk.red(hardDeprecationError(runBaseAgentId)));
+        process.exit(1);
+      }
+
+      // Account-picker conflict check runs BEFORE device=auto may set balanced,
+      // so an implicit balanced preference never surfaces as a fake
+      // "cannot be combined with --balanced" when the user only typed trailing @.
       if (accountPickerRequested) {
         const conflicts = runAccountPickerConflicts(options);
         if (conflicts.length > 0) {
@@ -739,6 +1133,162 @@ export function registerRunCommand(program: Command): void {
             'Pick the account locally, or use an explicit agent@version target.',
           ));
           process.exit(1);
+        }
+      }
+
+      // `agents run auto`: the reserved harness keyword — full-auto dispatch
+      // (host affinity → cross-harness balance → account balance, RUSH-2132).
+      if (normalizedAgentSpec.split('@')[0] === RUN_AUTO_KEYWORD && normalizedAgentSpec !== RUN_AUTO_KEYWORD) {
+        console.error(chalk.red(
+          `agents run auto picks the harness itself — a @version pin does not apply. ` +
+          `Pin a concrete harness instead: agents run <harness>@<version>.`,
+        ));
+        process.exit(1);
+      }
+      let autoHarnessRequested = normalizedAgentSpec === RUN_AUTO_KEYWORD;
+      let resolvedResumeSource: import('../lib/session/types.js').SessionMeta | undefined;
+
+      // Concrete resume ids resolve BEFORE placement. Full UUIDs take the local
+      // SQLite fast path; only a local miss fans out to the fleet. This lets a
+      // command entered on zion discover that the owning version-home is on a
+      // worker, while a command entered on that worker never pays for SSH.
+      if (typeof options.resume === 'string' && options.resume.trim()) {
+        const selector = options.resume.trim();
+        const injectedSource = (() => {
+          try {
+            const parsed = JSON.parse(process.env.AGENTS_RESUME_SOURCE_JSON ?? 'null');
+            return parsed?.id === selector ? parsed as import('../lib/session/types.js').SessionMeta : undefined;
+          } catch {
+            return undefined;
+          }
+        })();
+        delete process.env.AGENTS_RESUME_SOURCE_JSON;
+        const outcome = injectedSource
+          ? { kind: 'resolved' as const, session: injectedSource }
+          : await (await import('./sessions.js')).resolveSessionMetadataValue(selector);
+        if (outcome.kind === 'partial') {
+          console.error(chalk.red(`Could not resolve session while these devices were unavailable: ${outcome.failedPeers.join(', ')}`));
+          process.exit(2);
+        }
+        if (outcome.kind === 'not-found') {
+          console.error(chalk.red(`No session matching "${selector}".`));
+          process.exit(1);
+        }
+        if (outcome.kind === 'ambiguous') {
+          console.error(chalk.red(`"${selector}" matches ${outcome.candidates.length} sessions. Pass the full session id.`));
+          process.exit(1);
+        }
+        resolvedResumeSource = outcome.session;
+
+        const [requestedAgent, requestedVersion] = normalizedAgentSpec.split('@');
+        if (!autoHarnessRequested && requestedAgent !== resolvedResumeSource.agent) {
+          console.error(chalk.red(
+            `Session ${resolvedResumeSource.shortId} belongs to ${resolvedResumeSource.agent}, not ${requestedAgent}. ` +
+            `Use: agents resume ${resolvedResumeSource.id}`,
+          ));
+          process.exit(1);
+        }
+        if (!autoHarnessRequested && requestedVersion && requestedVersion !== resolvedResumeSource.version) {
+          console.error(chalk.red(
+            `Session ${resolvedResumeSource.shortId} started with ${resolvedResumeSource.agent}@${resolvedResumeSource.version ?? 'unknown'}, ` +
+            `not @${requestedVersion}.`,
+          ));
+          process.exit(1);
+        }
+
+        // Omitted --mode inherits the effective source mode. Commander keeps
+        // the normal new-run default as a real value, so consult its provenance
+        // rather than mistaking the default for an explicit override.
+        if (command.getOptionValueSource('mode') === 'default') {
+          if (resolvedResumeSource.mode) options.mode = resolvedResumeSource.mode;
+          else if (!options.quiet) process.stderr.write(chalk.yellow(
+            `[agents] session ${resolvedResumeSource.shortId} predates stored launch modes; using --mode ${options.mode}\n`,
+          ));
+        }
+
+        const { machineId } = await import('../lib/machine-id.js');
+        const sourceMachine = resolvedResumeSource.machine;
+        const explicitPlacement = hostTargetGiven(options).length > 0;
+        if (sourceMachine && sourceMachine !== machineId() && !explicitPlacement) {
+          options.host = sourceMachine;
+        } else if (!autoHarnessRequested && sourceMachine && sourceMachine !== machineId() && explicitPlacement && !hostTargetGiven(options).includes(sourceMachine)) {
+          console.error(chalk.red(
+            `Strict resume must run on ${sourceMachine}, where session ${resolvedResumeSource.shortId} is owned. ` +
+            `Use agents run auto --resume ${resolvedResumeSource.id} to hand off elsewhere.`,
+          ));
+          process.exit(1);
+        }
+
+        // On the owning machine, `auto` first asks the existing account router
+        // whether the exact source version is healthy. If it is, native resume
+        // wins. If not, keep `auto` so the normal harness/account router selects
+        // a healthy local target and the later resume block performs /continue.
+        if (autoHarnessRequested && (!sourceMachine || sourceMachine === machineId())) {
+          const sourceAgent = resolvedResumeSource.agent as AgentId;
+          if (sourceAgent in AGENTS && resolvedResumeSource.version) {
+            const { resolveRunVersion } = await import('../lib/rotate.js');
+            const health = await resolveRunVersion(sourceAgent, 'available', resolvedResumeSource.cwd ?? process.cwd());
+            if (!health.exhausted && health.version === resolvedResumeSource.version) {
+              normalizedAgentSpec = `${sourceAgent}@${resolvedResumeSource.version}`;
+              autoHarnessRequested = false;
+              if (!options.quiet) process.stderr.write(chalk.gray(
+                `[agents] auto resume → native ${normalizedAgentSpec} on ${sourceMachine ?? machineId()}\n`,
+              ));
+            }
+          }
+        }
+      }
+      if (autoHarnessRequested) {
+        // `auto` is reserved. If a future harness registers that id, the
+        // keyword collides — fail loud rather than silently shadow the harness.
+        if (RUN_AUTO_KEYWORD in AGENTS) {
+          console.error(chalk.red(
+            `'${RUN_AUTO_KEYWORD}' is now a registered harness and collides with the reserved 'run auto' keyword. ` +
+            `Run the harness by name instead.`,
+          ));
+          process.exit(1);
+        }
+        if (accountPickerRequested) {
+          console.error(chalk.red(
+            `agents run auto picks the harness and account itself — the trailing-@ account picker needs a concrete harness (agents run <harness>@).`,
+          ));
+          process.exit(1);
+        }
+        // Host layer: with no explicit --host/--device, default to the
+        // affinity pick. Skipped on a host-dispatched run — its dispatcher
+        // already resolved this layer (see runAutoDefaultsToAffinity).
+        if (!resolvedResumeSource && runAutoDefaultsToAffinity(options)) options.device = 'auto';
+      }
+
+      // --device auto / --host auto (and deprecated --smart): affinity-pick host.
+      // Harness is always the agent the user typed — never auto-picked.
+      // Affinity failure degrades to local (does not kill the run).
+      {
+        const { applyDeviceAutoToOptions } = await import('../lib/smart-launch.js');
+        const result = applyDeviceAutoToOptions(options, {
+          accountPickerRequested,
+        });
+        if (!options.quiet && result.deprecationSmart) {
+          process.stderr.write(
+            chalk.yellow('[agents] --smart is deprecated; use --device auto\n'),
+          );
+        }
+        if (!options.quiet && result.skipped) {
+          process.stderr.write(
+            chalk.yellow(
+              `[agents] device=auto skipped: ${result.skipped} (running local)\n`,
+            ),
+          );
+        }
+        if (!options.quiet && result.banner) {
+          const { hostLabel, deviceHint, acctNote } = result.banner;
+          process.stderr.write(
+            chalk.gray(
+              `[agents] device=auto → ${hostLabel}` +
+                (deviceHint ? ` (affinity ${deviceHint})` : '') +
+                ` · ${acctNote}\n`,
+            ),
+          );
         }
       }
 
@@ -752,6 +1302,14 @@ export function registerRunCommand(program: Command): void {
         }
         if (options.lease && options.box) {
           console.error(chalk.red('Pass either --lease to provision a disposable box, or --box <slug> to reuse a warm box — not both.'));
+          process.exit(1);
+        }
+        if (options.fresh && options.box) {
+          console.error(chalk.red('--fresh forces a brand-new box; it cannot be combined with --box <slug> (which reuses one).'));
+          process.exit(1);
+        }
+        if (options.fresh && options.reuse) {
+          console.error(chalk.red('--fresh forces a brand-new box; it cannot be combined with --reuse.'));
           process.exit(1);
         }
         const backend = typeof options.lease === 'string' ? options.lease : undefined;
@@ -785,23 +1343,32 @@ export function registerRunCommand(program: Command): void {
         // ── F3 reuse (RUSH-1922) + F5 net-mode (RUSH-1924) ───────────────────
         // Resolve which box this run targets and how it is networked BEFORE any
         // provisioning. `--box` is an explicit reuse; otherwise, on an
-        // interactive tty, offer the warm boxes as a reuse picker (headless /
-        // --json never blocks — it provisions fresh unless --reuse/--box).
+        // interactive tty, offer the warm boxes as a reuse picker. Headless runs
+        // never block: leaseAndRun itself is reuse-first against the profile
+        // pool (a ready pool box is reused; none ready → warm a fresh one).
+        // `--fresh` opts out of every reuse path.
         const leaseSecretsBundle = process.env.AGENTS_LEASE_SECRETS_BUNDLE;
         const nowSecs = Math.floor(Date.now() / 1000);
         let reuseSlug: string | undefined = options.box;
 
-        if (options.lease && !reuseSlug) {
+        // The profile this run's pool/box carries: the repo's .crabbox.yaml
+        // `profile:` when declared (what crabbox warmup would label a fresh box
+        // with), else crabbox's default. Passing it to leaseAndRun makes the
+        // pool-reuse match interchangeable with a fresh warmup.
+        const repoRoot = gitToplevel(leaseCwd);
+        const { readCrabboxRepoProfile } = await import('../lib/crabbox/config.js');
+        const poolProfile = repoRoot ? readCrabboxRepoProfile(repoRoot) : undefined;
+
+        if (options.lease && !reuseSlug && !options.fresh) {
           const { crabboxList } = await import('../lib/crabbox/cli.js');
           const { reusableBoxes, formatBoxRow } = await import('./lease.js');
           let warm: CrabboxBox[] = [];
           try {
             warm = reusableBoxes(crabboxList({ secretsBundle: leaseSecretsBundle }), nowSecs);
           } catch {
-            warm = []; // crabbox unavailable / no creds → just provision fresh
+            warm = []; // crabbox unavailable / no creds → the pool check in leaseAndRun decides
           }
 
-          const repoRoot = gitToplevel(leaseCwd);
           const alwaysFresh = repoRoot ? isAlwaysFreshRepo(readAlwaysFreshRepos(), repoRoot) : false;
 
           if (warm.length > 0 && !alwaysFresh) {
@@ -831,7 +1398,8 @@ export function registerRunCommand(program: Command): void {
                 console.error(chalk.yellow('Selection cancelled — provisioning a fresh box.'));
               }
             }
-            // Headless with no --reuse falls through here → provision fresh.
+            // Headless with no --reuse falls through here → leaseAndRun's
+            // profile-pool check decides (reuse a ready pool box, else warm fresh).
           } else if (options.reuse && warm.length > 0) {
             // --reuse still honors a warm box even when the picker is suppressed.
             reuseSlug = warm[0].slug;
@@ -950,12 +1518,16 @@ export function registerRunCommand(program: Command): void {
               : `${runtime} credentials`;
         const boxLifecycle = reuseSlug
           ? `Reusing crabbox box ${reuseSlug}`
-          : `Leasing a ${backend ?? 'hetzner'} box${netMode === 'tailscale' ? ' on your tailnet' : ''}`;
+          : options.fresh
+            ? `Leasing a fresh ${backend ?? 'hetzner'} box${netMode === 'tailscale' ? ' on your tailnet' : ''}`
+            : `Leasing a ${backend ?? 'hetzner'} box${netMode === 'tailscale' ? ' on your tailnet' : ''} (a ready box from the '${poolProfile ?? 'default'}' pool is reused when one exists)`;
         const boxAfterRun = reuseSlug
           ? 'the box is kept after the run'
           : options.keepBox
             ? 'the box is kept after the run'
-            : 'the box is destroyed after the run';
+            : options.fresh
+              ? 'the box is destroyed after the run'
+              : 'a fresh box is destroyed after the run; a reused pool box is kept';
         console.error(
           chalk.gray(
             `${boxLifecycle} · shipping ${whatShips}${credentialRuntimes.length > 0 && leaseEmail ? ` (${leaseEmail})` : ''}; ${boxAfterRun}.`,
@@ -1036,6 +1608,8 @@ export function registerRunCommand(program: Command): void {
             secretsBundle: leaseSecretsBundle,
             keep: options.keepBox,
             reuseBox: reuseSlug,
+            fresh: options.fresh,
+            profile: poolProfile,
             copySetup,
             netMode,
             onData: (chunk) => router.push(chunk),
@@ -1085,24 +1659,14 @@ export function registerRunCommand(program: Command): void {
 
       // --host/--on/--computer: offload this run onto a registered agent host
       // over SSH instead of running locally. The three flags are aliases.
-      const hostGiven = [options.host, options.device, options.on, options.computer].filter((v): v is string => !!v);
+      const hostGiven = hostTargetGiven(options);
 
       // --project <slug>[@worktree]: resolve the projects-root shorthand into a
       // cwd. On a host run it resolves home-relative (`~/…`, so the host expands
       // it); locally it becomes an absolute path. It owns the working directory,
       // so it is mutually exclusive with both --cwd and --remote-cwd.
       if (options.project) {
-        if (options.cwd || options.remoteCwd) {
-          console.error(chalk.red('Pass --project alone — not with --cwd or --remote-cwd.'));
-          process.exit(1);
-        }
-        const { resolveProjectRef } = await import('../lib/project-root.js');
-        try {
-          options.cwd = await resolveProjectRef(options.project, { forRemote: hostGiven.length > 0 });
-        } catch (err) {
-          console.error(chalk.red((err as Error).message));
-          process.exit(1);
-        }
+        options.cwd = await resolveRunCwd(options, { forRemote: hostGiven.length > 0 });
       }
 
       if (hostGiven.length > 0) {
@@ -1111,7 +1675,11 @@ export function registerRunCommand(program: Command): void {
           process.exit(1);
         }
         const hostName = hostGiven[0];
-        const { resolveHostRunTarget, dispatchPromptToHost, HostResolutionError } = await import('../lib/hosts/run-target.js');
+        // Note: a `run auto` dispatch needs no marker forwarded from here — the
+        // dispatch layer (hosts/dispatch.ts remoteRunShellPrelude) exports the
+        // chain-hop guard into the remote shell for BOTH interactive and
+        // headless paths, keyed off the agent name being `auto`.
+        const { resolveHostRunTarget, resolveHostSessionId, dispatchPromptToHost, HostResolutionError } = await import('../lib/hosts/run-target.js');
         const { runInteractiveOnHost } = await import('../lib/hosts/dispatch.js');
         const { registerInteractiveHostSession } = await import('../lib/hosts/session-index.js');
         const { RUN_OPTION_REJECT_MESSAGES } = await import('../lib/hosts/remote-cmd.js');
@@ -1168,8 +1736,19 @@ export function registerRunCommand(program: Command): void {
           // Working directory on the host: an explicit --remote-cwd is used
           // verbatim; --cwd/--project are made portable (a local-home absolute
           // becomes `~/…` so the remote shell re-roots it at ITS home).
+          //
+          // With neither flag, mirror the LOCAL cwd's home-relative path onto
+          // the host (deriveMirroredCwd). Otherwise every host run starts in the
+          // remote `$HOME` — launch an agent from a repo and it opens with no
+          // project, and you `cd` by hand every time. The same checkout at the
+          // same home-relative path on both boxes is the normal fleet layout, so
+          // the mirror usually hits; when the host lacks that directory the run
+          // falls back to the remote home rather than failing.
           const { toRemotePortable } = await import('../lib/project-root.js');
-          const hostCwd = options.remoteCwd ?? (options.cwd ? toRemotePortable(options.cwd) : undefined);
+          const { deriveMirroredCwd } = await import('../lib/hosts/dispatch.js');
+          const explicitHostCwd = options.remoteCwd ?? (options.cwd ? toRemotePortable(options.cwd) : undefined);
+          const hostCwd = explicitHostCwd ?? deriveMirroredCwd(process.cwd());
+          const mirrorHostCwd = explicitHostCwd === undefined;
           const hostAddDirs = options.addDir.length > 0 ? options.addDir.map(toRemotePortable) : undefined;
           // `--resume [id]`: commander yields the string id, or `true` when the
           // flag is passed bare. A bare resume needs the interactive picker,
@@ -1282,11 +1861,28 @@ export function registerRunCommand(program: Command): void {
               process.exit(1);
             }
             // Mirror the local path (lib/exec.ts): only Claude accepts a forced
-            // `--session-id`. Generating it here lets us register the run in the
-            // local index and makes it resumable by id. On resume the remote
-            // session keeps its existing id — don't mint a new one.
-            const hostSessionId = runAgent === 'claude' && !resumeId ? randomUUID() : undefined;
-            if (hostSessionId) {
+            // `--session-id`. Adopt the caller's id when present; otherwise mint
+            // one here. Registering that same id keeps the local index aligned
+            // with the remote agent. On resume, don't mint a new one.
+            const hostSessionId = resolveHostSessionId(runAgent, resumeId, options.sessionId);
+            // For every OTHER agent the remote coins its own id, which we can't
+            // know up front. Forward a launch id we control as AGENT_LAUNCH_ID:
+            // the remote `agents run` adopts it (exec.ts resolveLaunchId) and its
+            // SessionStart hook records the real id under that exact key, so after
+            // the stream we resolve the id by one ssh read of the remote hook
+            // record — the same launch-id join used locally (RUSH-2034). Not
+            // needed for Claude (id forced) or resume (id already known).
+            // `run auto` ALWAYS joins: the remote picks the harness, so an
+            // explicit --session-id is only adopted by a claude pick.
+            const correlationLaunchId =
+              hostInteractiveNeedsCorrelationId(runAgent, hostSessionId, resumeId) ? randomUUID() : undefined;
+            const hostEnv = correlationLaunchId
+              ? [...options.env, `AGENT_LAUNCH_ID=${correlationLaunchId}`]
+              : options.env;
+            // `run auto` never pre-registers: the explicit id is only real when
+            // the remote pick lands on claude. The launch-id join below records
+            // the id the remote ACTUALLY used, whatever the pick.
+            if (hostSessionId && runAgent !== RUN_AUTO_KEYWORD) {
               registerInteractiveHostSession({
                 cwd: process.cwd(),
                 host: host.name,
@@ -1295,6 +1891,7 @@ export function registerRunCommand(program: Command): void {
                 name: options.name,
               });
             }
+            const isRaw = options.raw || options.tmux === false || options.disableTmux === true;
             const exitCode = await runInteractiveOnHost(host, {
               agent: runAgent,
               version: resumeId ? undefined : runVersion,
@@ -1304,7 +1901,7 @@ export function registerRunCommand(program: Command): void {
               mode: options.mode,
               model: options.model,
               effort: options.effort,
-              env: options.env,
+              env: hostEnv,
               addDir: hostAddDirs,
               json: options.json,
               verbose: options.verbose,
@@ -1312,14 +1909,65 @@ export function registerRunCommand(program: Command): void {
               yes: options.yes,
               acp: options.acp,
               remoteCwd: hostCwd,
+              mirrorCwd: mirrorHostCwd,
               sessionId: hostSessionId,
               name: options.name,
               resume: resumeId,
               passthroughArgs,
-              raw: options.raw || options.tmux === false || options.disableTmux === true,
+              raw: isRaw,
               forceInteractive: options.interactive,
               copyCreds: hostCopyCreds,
             });
+            // Resolve a non-Claude agent's REAL remote session id now the run has
+            // booted (its hook has fired on the peer): one ssh read of the remote
+            // hook record, keyed by the launch id we forwarded. Register it so the
+            // run shows in `agents sessions` and can be reconnected/focused —
+            // closing the non-Claude gap RUSH-2033 left. Best-effort: an
+            // unreachable host or a not-yet-landed record leaves the run un-mapped
+            // rather than mis-mapped.
+            let resolvedRemoteId: string | undefined;
+            if (correlationLaunchId) {
+              const { resolveRemoteSessionId } = await import('../lib/hosts/remote-session-id.js');
+              const { sshTargetFor } = await import('../lib/hosts/types.js');
+              try {
+                resolvedRemoteId = resolveRemoteSessionId(sshTargetFor(host), correlationLaunchId);
+              } catch {
+                /* ssh read is best-effort — keep the run un-mapped, never guess */
+              }
+              if (resolvedRemoteId) {
+                registerInteractiveHostSession({
+                  cwd: process.cwd(),
+                  host: host.name,
+                  agent: runAgent,
+                  sessionId: resolvedRemoteId,
+                  name: options.name,
+                });
+              }
+            }
+            // A network drop kills the local ssh client (exit 255) but the remote
+            // agent survives in its detached tmux session. With a known session id
+            // (Claude's forced id, a resumed run, or a non-Claude id we just
+            // resolved from the remote hook record) and a tmux-hosted run,
+            // re-attach the live pane automatically instead of exiting — the user
+            // never has to notice the drop and `agents sessions focus` by hand.
+            // `raw` runs aren't tmux wrapped, so there is nothing to reconnect to.
+            // For `run auto` prefer the join-resolved id (the harness the remote
+            // ACTUALLY picked) over the explicit --session-id only claude adopts.
+            const reconnectId = (runAgent === RUN_AUTO_KEYWORD
+              ? resolvedRemoteId ?? hostSessionId
+              : hostSessionId ?? resolvedRemoteId) ?? resumeId;
+            if (reconnectId && !isRaw) {
+              const { reconnectInteractiveSession, SSH_CONN_FAILURE } = await import('../lib/hosts/reconnect.js');
+              if (exitCode === SSH_CONN_FAILURE) {
+                process.exit(
+                  await reconnectInteractiveSession({
+                    host,
+                    sessionId: reconnectId,
+                    initialExit: exitCode,
+                  }),
+                );
+              }
+            }
             process.exit(exitCode);
           }
 
@@ -1354,8 +2002,10 @@ export function registerRunCommand(program: Command): void {
             acp: options.acp,
             autoSecrets: options.autoSecrets,
             remoteCwd: hostCwd,
+            mirrorCwd: mirrorHostCwd,
             name: options.name,
             resume: resumeId,
+            sessionId: options.sessionId,
             follow: options.follow !== false,
             passthroughArgs,
             copyCreds: hostCopyCreds,
@@ -1478,15 +2128,15 @@ export function registerRunCommand(program: Command): void {
         { buildExecCommand, parseExecEnv, execAgent, runWithFallback, normalizeMode, resolveMode, headlessPlanStallCommand, nativeResume, resolveInteractive, inferredInteractiveWithoutTty },
         { ALL_AGENT_IDS, ACCOUNT_INSPECTION_AGENT_IDS, agentLabel, supportsAccountInspection },
         { profileExists, resolveProfileForRun },
-        { readAndResolveBundleEnv, describeBundle, assertRemoteBundleFlagsUnsupported, isHeadlessSecretsContext },
+        { readAndResolveBundleEnv, describeBundle, assertRemoteBundleFlagsUnsupported },
         { splitBundleRef, resolveHostSshTarget, remoteResolveEnv },
-        { getConfiguredRunStrategy, normalizeRunStrategy, resolveRunVersion, rotationFailoverChain, shouldArmRotationFailover, RUN_STRATEGIES },
+        { getConfiguredRunStrategy, normalizeRunStrategy, resolveRunVersion, rotationFailoverChain, shouldArmRotationFailover, RUN_STRATEGIES, collectHarnessCandidates, pickHarnessWeighted, classifyHarnessCandidates, formatHarnessPickBanner, formatNoHealthyHarnessError, formatNoHealthyAccountError },
         { getGlobalDefault, getVersionHomePath, resolveVersion, resolveVersionAlias, ensureAgentRunnable },
         { buildDiscoveredPlugin, loadPluginManifest, syncPluginToVersion },
         { parseWorkflowFrontmatter, resolveWorkflowRef, resolveAllowedSubagents, pruneStaleWorkflowSubagents, ensureSubagentDispatchTool },
         { resolveRunDefaults },
         { getMcpServersByName, buildWorkflowMcpConfig },
-        { supports },
+        { supports, capableAgents },
         { shareRuntimeEnv },
       ] = await Promise.all([
         import('../lib/exec.js'),
@@ -1538,7 +2188,7 @@ export function registerRunCommand(program: Command): void {
       if (accountPickerRequested && !isValidAgent(rawAgent)) {
         if (profileExists(rawAgent)) {
           console.error(chalk.red(
-            `Account selection is not available for profile '${rawAgent}'. Run its concrete host agent with @ instead.`,
+            `Account selection is not available for custom harness '${rawAgent}'. Run its concrete host agent with @ instead.`,
           ));
           process.exit(1);
         }
@@ -1550,7 +2200,43 @@ export function registerRunCommand(program: Command): void {
         }
       }
 
-      if (isValidAgent(rawAgent)) {
+      if (autoHarnessRequested) {
+        // Harness layer (RUSH-2132): weighted pick across installed harnesses
+        // by best-account headroom. Zero healthy accounts anywhere fails loud
+        // — launching a default "because it's there" is how a rotate loop
+        // hammers an exhausted account.
+        const byHarness = await collectHarnessCandidates();
+        // F1 (RUSH-2185 / EXEC-23a): a prompt-less run is interactive; only
+        // harnesses that can open a REPL with no argv are valid candidates.
+        // cursor-agent and similar exit immediately without a prompt, which
+        // leaves a silent [detached] pane and an orphan session.
+        const interactive = prompt === undefined && options.headless !== true;
+        const replCapable = interactive ? new Set(capableAgents('interactiveRepl')) : null;
+        const candidateHarness = replCapable
+          ? new Map([...byHarness].filter(([id]) => replCapable.has(id)))
+          : byHarness;
+        const harnessPick = pickHarnessWeighted(candidateHarness);
+        if (!harnessPick) {
+          if (replCapable && byHarness.size > 0 && candidateHarness.size === 0) {
+            const installed = [...byHarness.keys()].join(', ');
+            console.error(chalk.red(
+              `No installed harness supports a prompt-less interactive REPL (installed: ${installed}). Pass a prompt (-p) or install claude, codex, or another REPL-capable harness.`,
+            ));
+          } else {
+            console.error(chalk.red(formatNoHealthyHarnessError(classifyHarnessCandidates(candidateHarness))));
+          }
+          process.exit(1);
+        }
+        agent = harnessPick.picked.agent;
+        if (!options.quiet) {
+          process.stderr.write(chalk.gray(formatHarnessPickBanner(harnessPick) + '\n'));
+        }
+        // --session-id keeps its claude-only semantics: honored when auto
+        // picks claude, ignored (loudly) otherwise.
+        if (options.sessionId && agent !== 'claude' && !options.quiet) {
+          process.stderr.write(chalk.yellow(`[agents] --session-id ignored: auto picked ${agent} (only claude accepts a forced session id)\n`));
+        }
+      } else if (isValidAgent(rawAgent)) {
         agent = rawAgent;
       } else if (profileExists(rawAgent)) {
         // Not a known agent id, but a profile by this name exists. Profiles
@@ -1558,13 +2244,29 @@ export function registerRunCommand(program: Command): void {
         // so Chinese models (Kimi, DeepSeek, Qwen, GLM) can run inside
         // Claude Code without a local proxy.
         try {
-          const resolved = resolveProfileForRun(rawAgent);
+          const resolved = resolveProfileForRun(rawAgent, options.model);
           agent = resolved.agent;
           if (!version) version = resolved.version;
           profileEnv = resolved.env;
           profileFallbackModel = resolved.fallbackModel;
           fromProfile = true;
-          process.stderr.write(chalk.gray(`Resolved profile '${resolved.profileName}' -> ${agent}${version ? `@${version}` : ''}\n`));
+          process.stderr.write(chalk.gray(`Resolved custom harness '${resolved.profileName}' -> ${agent}${version ? `@${version}` : ''}\n`));
+          if (resolved.tierNote) {
+            process.stderr.write(chalk.gray(`[agents] ${resolved.tierNote}\n`));
+          }
+          // A tier token (cheap/default/best/ultra) already resolved against
+          // this PROFILE's own `models:` map above, when the profile opts in.
+          // Replace the raw --model value here so the tier never reaches the
+          // native, HOST-catalog tier block below. When the profile has no
+          // `models:` opt-in at all, resolvedModel stays undefined and
+          // options.model is left as the raw tier token on purpose — the
+          // "cost tiers don't apply to custom harness ..." discard guard further
+          // down this function is the canonical fallback for that case, and
+          // this block must not race it with a second, differently-worded
+          // message.
+          if (resolved.resolvedModel !== undefined) {
+            options.model = resolved.resolvedModel;
+          }
         } catch (err) {
           console.error(chalk.red((err as Error).message));
           process.exit(1);
@@ -1775,7 +2477,7 @@ export function registerRunCommand(program: Command): void {
         } else {
           console.error(chalk.red(`Unknown agent: ${rawAgent}`));
           console.error(chalk.gray(`Available agents: ${ALL_AGENT_IDS.join(', ')}`));
-          console.error(chalk.gray(`Or add a profile: agents profiles add <name>`));
+          console.error(chalk.gray(`Or add a custom harness: agents harness add <name>`));
           process.exit(1);
         }
       }
@@ -1832,10 +2534,10 @@ export function registerRunCommand(program: Command): void {
         const { buildContinuePrompt } = await import('../lib/loop.js');
 
         // Freshen the index for this agent before any lookup (incremental, cached).
-        // AgentId is wider than SessionAgentId (cursor/amp/… keep no transcripts);
+        // AgentId is wider than SessionAgentId (amp/kiro/goose/copilot keep no transcripts);
         // those simply yield no matches and fall through to the not-found error.
         const sessionAgent = agent as import('../lib/session/types.js').SessionAgentId;
-        await discoverSessions({ agent: sessionAgent, version });
+        if (!resolvedResumeSource) await discoverSessions({ agent: sessionAgent, version });
 
         // Resume is interactive unless a follow-on prompt makes it headless.
         const wantsInteractive = resolveInteractive({ interactive: options.interactive, headless: options.headless, prompt });
@@ -1843,9 +2545,9 @@ export function registerRunCommand(program: Command): void {
         let scopeCwd: string | undefined;
         try { scopeCwd = fs.realpathSync(cwd); } catch { scopeCwd = cwd; }
 
-        let session: import('../lib/session/types.js').SessionMeta | undefined;
+        let session: import('../lib/session/types.js').SessionMeta | undefined = resolvedResumeSource;
         if (idArg) {
-          let matches = findSessionsById(idArg, { agent: sessionAgent, version, cwd: scopeCwd });
+          let matches = session ? [session] : findSessionsById(idArg, { agent: sessionAgent, version, cwd: scopeCwd });
           if (matches.length === 0) {
             const wide = findSessionsById(idArg, { agent: sessionAgent, version });
             if (wide.length > 0) {
@@ -1889,10 +2591,12 @@ export function registerRunCommand(program: Command): void {
           forceInteractive = true; // bare resume always lands in the agent's TUI
         }
 
-        // Pin to the chosen session's own version (the isolated HOME the transcript
-        // lives in) and route by tier.
-        version = session.version;
-        if (nativeResume(agent)) {
+        // Native resume is valid only for the source harness + exact isolated
+        // version. `auto` may have selected another healthy harness/account; in
+        // that case keep the target version and hand off through /continue.
+        const canResumeNatively = session.agent === agent && nativeResume(agent, session.version);
+        if (canResumeNatively) {
+          version = session.version;
           resumeNative = true;
           resumeSessionId = session.id;
           // Native `--resume` (claude/codex) resolves the transcript relative to the
@@ -1939,10 +2643,19 @@ export function registerRunCommand(program: Command): void {
         if (version) {
           process.stderr.write(chalk.yellow(`[agents] strategy ${strategy} ignored: version ${version} is pinned\n`));
         } else if (fromProfile) {
-          process.stderr.write(chalk.yellow(`[agents] strategy ${strategy} ignored: profile pins its own version/auth\n`));
+          process.stderr.write(chalk.yellow(`[agents] strategy ${strategy} ignored: custom harness pins its own version/auth\n`));
         } else {
           try {
             const resolved = await resolveRunVersion(agent, strategy, cwd);
+            if (resolved.exhausted) {
+              // Fail loud (RUSH-2132): the old behavior warned "found no
+              // usable version; falling back to defaults" and launched the
+              // pinned default anyway — the exact move that loops a rotate
+              // into an exhausted account. The message text is a contract
+              // the Factory watchdog tail-detects; do not reword it.
+              console.error(chalk.red(formatNoHealthyAccountError(agent, strategy, resolved.exhausted)));
+              process.exit(1);
+            }
             if (resolved.version) {
               version = resolved.version;
               rotationResult = resolved.rotation;
@@ -1951,6 +2664,8 @@ export function registerRunCommand(program: Command): void {
                 process.stderr.write(chalk.gray(banner + '\n'));
               }
             } else if (!options.quiet) {
+              // No installed version at all (not "accounts exhausted" — that
+              // fails loud above): keep the pre-existing default resolution.
               process.stderr.write(chalk.yellow(`[agents] strategy ${strategy} found no usable ${agent} version; falling back to defaults\n`));
             }
           } catch (err) {
@@ -1997,6 +2712,19 @@ export function registerRunCommand(program: Command): void {
       }
 
       const defaultVersion = version ?? resolveVersion(agent, cwd);
+
+      // Re-apply the active rules preset before every launch (issue: preset
+      // changes via `setActiveRulesPreset` only took effect after an explicit
+      // `agents rules switch` / `agents sync`). Version-scoped, skip-fast when
+      // nothing changed — see lib/rules/run-sync.ts. Placed here (immediately
+      // after the resolved version is known, before ACP/loop/fallback branch
+      // off) so every downstream dispatch path for this agent+version sees a
+      // fresh rules file, not just the plain execAgent path. `defaultVersion`
+      // is null when nothing is installed yet — execAgent handles that error
+      // path itself; there's no version home to sync into.
+      if (defaultVersion) {
+        applyActiveRulesPresetAtRun(agent, defaultVersion, getVersionHomePath(agent, defaultVersion));
+      }
 
       // Login preflight (advisory, warn + continue). On a local INTERACTIVE
       // launch, probe whether this agent's account has a credential and print a
@@ -2059,8 +2787,8 @@ export function registerRunCommand(program: Command): void {
       // safest native mode (modes[0], typically edit). That covers both the
       // implicit default and an explicit `--mode plan`, so multi-agent
       // scripts can pass a uniform plan flag without per-agent branching.
-      // Elevation is never silent: we warn on stderr (yellow when the user
-      // explicitly asked for plan; gray for the implicit default / auto).
+      // Mode degradation is never silent: buildExecCommand emits one stderr
+      // warning for the requested-to-resolved transition unless --quiet is set.
       // `skip` still hard-fails when unsupported — pretending we bypassed
       // permissions would be unsafe.
       const modeIsDefault = modeSource === 'default';
@@ -2072,24 +2800,7 @@ export function registerRunCommand(program: Command): void {
         console.error(chalk.red((err as Error).message));
         process.exit(1);
       }
-      if (resolvedMode !== requestedMode) {
-        mode = resolvedMode as ExecMode;
-        if (!options.quiet) {
-          if (requestedMode === 'plan' && !modeIsDefault) {
-            process.stderr.write(
-              chalk.yellow(
-                `[agents] ${agent} has no read-only 'plan' mode; using '${mode}' (writable) instead. Pass --mode ${mode} to silence this.\n`,
-              ),
-            );
-          } else {
-            process.stderr.write(
-              chalk.gray(`[agents] ${agent} has no '${requestedMode}' mode; using '${mode}'\n`),
-            );
-          }
-        }
-      } else {
-        mode = resolvedMode as ExecMode;
-      }
+      mode = resolvedMode as ExecMode;
 
       // Fail fast on the headless-plan stall footgun: a slash command run
       // headless under the implicit default 'plan' mode hangs forever at
@@ -2099,7 +2810,7 @@ export function registerRunCommand(program: Command): void {
       const stallCmd = headlessPlanStallCommand({
         prompt,
         interactive: options.interactive,
-        mode,
+        mode: resolvedMode as ExecMode,
         modeIsDefault,
       });
       if (stallCmd) {
@@ -2159,12 +2870,16 @@ export function registerRunCommand(program: Command): void {
           } else {
             const { bundle, env: bundleEnv } = readAndResolveBundleEnv(bundleName, {
               caller: `agent ${agent}`,
+              agent,
               keys: secretsKeysSubset,
               allowExpired: options.allowExpired,
-              // A headless/background run (routine, teammate, detached) must not
-              // pop a Touch ID sheet nobody can answer — resolve broker-only and
-              // fail fast with an actionable error. Interactive runs still prompt.
-              agentOnly: isHeadlessSecretsContext(),
+              // The harness identity scopes any cached grant. An agent launch
+              // resolves broker-only and fails fast naming
+              // `agents secrets unlock <bundle>` (bundles.ts:interactiveUnlock) — it
+              // MUST NOT raise a Touch ID sheet regardless of tty (SEC-13). Gating on
+              // isHeadlessSecretsContext() left `--interactive` launches (the watchdog's
+              // `agents run auto --interactive`) able to prompt, piling up helper sheets.
+              agentOnly: true,
             });
             const entries = describeBundle(bundle);
             const counts: Record<string, number> = {};
@@ -2182,7 +2897,7 @@ export function registerRunCommand(program: Command): void {
       }
 
       const autoShareEnv = options.autoSecrets !== false
-        ? shareRuntimeEnv({ agentOnly: isHeadlessSecretsContext() })
+        ? shareRuntimeEnv()
         : undefined;
 
       // Merge order (later wins): profile env < auto share token < secrets bundles < --env K=V.
@@ -2196,17 +2911,29 @@ export function registerRunCommand(program: Command): void {
         : undefined;
 
       const modelSource = runCmd.getOptionValueSource('model');
-      const model = options.model
+      let model = options.model
         ?? (!fromProfile && modelSource === undefined
           ? (workflowModel ?? (options.fallback ? undefined : runDefaults.model))
           : undefined);
+
+      // Cost tiers (cheap|default|best|ultra) resolve against a harness's own model
+      // catalog. A custom harness's model comes from its endpoint, not the host
+      // harness, so a tier here would forward an incompatible host-harness model to a
+      // different API. Discard it loudly and let the custom harness's own model stand.
+      if (fromProfile && model && isTierToken(model)) {
+        process.stderr.write(chalk.yellow(
+          `[agents] --model ${model}: cost tiers don't apply to custom harness '${rawAgent}' ` +
+          `(its model comes from the endpoint) — ignoring the tier, using the custom harness's configured model\n`,
+        ));
+        model = undefined;
+      }
 
       const execOptions: ExecOptions = {
         agent,
         version,
         prompt,
         interactive: options.interactive || forceInteractive,
-        mode,
+        mode: requestedMode,
         effort,
         cwd: options.cwd,
         model,
@@ -2217,6 +2944,7 @@ export function registerRunCommand(program: Command): void {
         name: options.name,
         resume: resumeNative,
         verbose: options.verbose,
+        modeWarningState: { quiet: options.quiet },
         // --raw, --no-tmux (commander negation → options.tmux === false), and
         // --disable-tmux all bypass the interactive tmux wrapper. AGENTS_NO_TMUX=1
         // does the same via the env check in exec.ts.

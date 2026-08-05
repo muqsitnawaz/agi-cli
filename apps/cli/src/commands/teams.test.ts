@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { buildTeamRowsFromSnapshots, type TeamListAgentSnapshot } from './teams.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const INDEX = path.join(REPO_ROOT, 'src', 'index.ts');
@@ -26,19 +27,92 @@ function guardedHome(): string {
   return home;
 }
 
-function run(args: string[]): { stdout: string; status: number | null } {
+function seedTeam(home: string, teamName: string, agents: TeamListAgentSnapshot[]): void {
+  const history = path.join(home, '.agents', '.history', 'teams');
+  fs.mkdirSync(path.join(history, 'agents'), { recursive: true });
+  fs.writeFileSync(
+    path.join(history, 'registry.json'),
+    JSON.stringify({ [teamName]: { created_at: '2026-08-01T12:00:00.000Z' } }, null, 2),
+  );
+  for (const agent of agents) {
+    const agentDir = path.join(history, 'agents', agent.agent_id);
+    fs.mkdirSync(agentDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(agentDir, 'meta.json'),
+      JSON.stringify({
+        agent_id: agent.agent_id,
+        task_name: agent.task_name,
+        agent_type: agent.agent_type,
+        status: agent.status,
+        prompt: agent.prompt,
+        started_at: agent.started_at,
+        completed_at: agent.completed_at,
+        workspace_dir: agent.workspace_dir,
+        version: agent.version,
+        remote_session_id: agent.remote_session_id,
+        name: agent.name,
+        after: agent.after,
+        task_type: agent.task_type,
+        host_name: agent.host,
+        mode: agent.mode,
+        cloud_session_id: agent.cloud_session_id,
+        cloud_provider: agent.cloud_provider,
+        pr_url: agent.pr_url,
+        remote_pid: 424242,
+        remote_log: '$HOME/.agents/.cache/hosts/offline.log',
+        remote_exit: '$HOME/.agents/.cache/hosts/offline.exit',
+        host_target: '203.0.113.1',
+      }, null, 2),
+    );
+  }
+}
+
+function remoteSnapshot(overrides: Partial<TeamListAgentSnapshot> = {}): TeamListAgentSnapshot {
+  return {
+    agent_id: 'agent-remote-1',
+    task_name: 'remote-lag',
+    agent_type: 'codex',
+    status: 'running',
+    prompt: 'Investigate the remote failure',
+    started_at: '2026-08-01T12:01:00.000Z',
+    completed_at: null,
+    workspace_dir: '/work/remote-lag',
+    version: '0.146.0',
+    remote_session_id: 'session-remote-1',
+    name: 'remote',
+    after: [],
+    task_type: 'bugfix',
+    host: 'offline-box',
+    mode: 'edit',
+    cloud_session_id: null,
+    cloud_provider: null,
+    pr_url: null,
+    ...overrides,
+  };
+}
+
+function run(
+  args: string[],
+  setup?: (home: string) => void,
+  timeout = 10_000,
+): { stdout: string; stderr: string; status: number | null; error?: Error; home: string } {
   const home = guardedHome();
+  setup?.(home);
   const r = spawnSync('bun', [INDEX, ...args], {
     encoding: 'utf-8',
+    timeout,
     env: {
       ...process.env,
       HOME: home,
       AGENTS_NO_UPDATE_CHECK: '1',
       AGENTS_NO_USAGE_TRACK: '1',
       AGENTS_SKIP_MIGRATION: '1',
+      // Vitest's global setup redirects the real log; point the spawned CLI at
+      // this test home's log so assertions read the right file.
+      AGENTS_EVENTS_PATH: path.join(home, '.agents', 'events.jsonl'),
     },
   });
-  return { stdout: r.stdout ?? '', status: r.status };
+  return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', status: r.status, error: r.error, home };
 }
 
 describe('teams list output modes', () => {
@@ -53,5 +127,57 @@ describe('teams list output modes', () => {
     const { stdout, status } = run(['teams', 'list', '--json']);
     expect(status).toBe(0);
     expect(JSON.parse(stdout)).toEqual({ teams: [] });
+  });
+
+  it('builds list rows from cached teammate metadata', () => {
+    const result = buildTeamRowsFromSnapshots(
+      { 'remote-lag': { created_at: '2026-08-01T12:00:00.000Z', description: 'remote work' } },
+      [remoteSnapshot()],
+    );
+
+    expect(result.teams).toHaveLength(1);
+    expect(result.teams[0]).toMatchObject({
+      task_name: 'remote-lag',
+      agent_count: 1,
+      running: 1,
+      workspace_dir: '/work/remote-lag',
+    });
+    expect(result.rows[0].agents[0]).toMatchObject({
+      agent_id: 'agent-remote-1',
+      agent_type: 'codex',
+      host: 'offline-box',
+      tool_count: 0,
+      files_modified: [],
+    });
+  });
+
+  it('does not probe unreachable remote teammates for JSON list output', () => {
+    const { stdout, status, error } = run(
+      ['teams', 'list', '--json'],
+      (home) => seedTeam(home, 'remote-lag', [remoteSnapshot()]),
+      2_500,
+    );
+
+    expect(error).toBeUndefined();
+    expect(status).toBe(0);
+    expect(JSON.parse(stdout).teams[0]).toMatchObject({
+      task_name: 'remote-lag',
+      agent_count: 1,
+      running: 1,
+    });
+  });
+
+  it('emits a friction event when teams add --remote-cwd is rejected', () => {
+    const { status, home } = run(['teams', 'add', 't1', 'claude', 'task', '--remote-cwd', '/tmp/x']);
+
+    expect(status).toBe(1);
+    const eventsPath = path.join(home, '.agents', 'events.jsonl');
+    expect(fs.existsSync(eventsPath)).toBe(true);
+    const lines = fs.readFileSync(eventsPath, 'utf-8').trim().split('\n');
+    const friction = lines.map((l) => JSON.parse(l)).find((r) => r.event === 'friction');
+    expect(friction).toBeDefined();
+    expect(friction.surface).toBe('teams');
+    expect(friction.failureId).toBe('remote-cwd-on-add');
+    expect(friction.error).toContain('--remote-cwd');
   });
 });

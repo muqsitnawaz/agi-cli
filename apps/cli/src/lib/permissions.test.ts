@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as TOML from 'smol-toml';
 import * as yaml from 'yaml';
 import {
@@ -11,13 +11,19 @@ import {
   containsBroadGrants,
   convertDenyToCodexRules,
   convertToKimiFormat,
+  convertToCodexFormat,
+  codexDefaultWritableRoots,
   convertToDroidFormat,
-  convertToForgeFormat,
   convertToHermesFormat,
   convertToOpenClawFormat,
   convertToGooseFormat,
   convertToKiroFormat,
   formatComputerPermissionGrantHint,
+  listInstalledPermissions,
+  installPermissionSet,
+  getDefaultPermissionSet,
+  saveDefaultPermissionSet,
+  removePermissionSet,
 } from './permissions.js';
 
 const tempDirs: string[] = [];
@@ -129,51 +135,6 @@ describe('OpenClaw permissions', () => {
     const written = JSON.parse(fs.readFileSync(path.join(configDir, 'openclaw.json'), 'utf-8'));
     expect(written.tools.allow).toEqual(['read']);
     expect(written.tools.alsoAllow).toEqual(['exec']);
-  });
-});
-
-describe('Forge permissions', () => {
-  it('maps canonical rules to operation-family policies', () => {
-    expect(convertToForgeFormat({
-      name: 'forge',
-      allow: ['Bash(git:*)', 'Read(**)', 'Write(src/**)', 'WebFetch(domain:api.github.com)'],
-      deny: ['Bash(rm -rf:*)', 'Edit(secrets/**)', 'MCP(mcp__server__tool)'],
-    })).toEqual({
-      policies: [
-        { permission: 'allow', rule: { command: 'git *' } },
-        { permission: 'allow', rule: { read: '**/*' } },
-        { permission: 'allow', rule: { write: 'src/**' } },
-        { permission: 'allow', rule: { url: 'api.github.com*' } },
-        { permission: 'deny', rule: { command: 'rm -rf *' } },
-        { permission: 'deny', rule: { write: 'secrets/**' } },
-      ],
-    });
-  });
-
-  it('writes and merges permissions.yaml without replacing user policies', () => {
-    const home = makeTempHome();
-    const configDir = path.join(home, '.forge');
-    fs.mkdirSync(configDir, { recursive: true });
-    fs.writeFileSync(path.join(configDir, 'permissions.yaml'), yaml.stringify({
-      policies: [
-        { permission: 'confirm', rule: { write: '**/*' } },
-      ],
-    }));
-
-    expect(applyPermissionsToVersion('forge', {
-      name: 'set',
-      allow: ['Bash(git:*)'],
-      deny: ['Write(secrets/**)'],
-    }, home, true)).toEqual({ success: true });
-
-    const written = yaml.parse(fs.readFileSync(path.join(configDir, 'permissions.yaml'), 'utf-8'));
-    expect(written).toEqual({
-      policies: [
-        { permission: 'confirm', rule: { write: '**/*' } },
-        { permission: 'allow', rule: { command: 'git *' } },
-        { permission: 'deny', rule: { write: 'secrets/**' } },
-      ],
-    });
   });
 });
 
@@ -387,6 +348,69 @@ describe('computer permission hints', () => {
   });
 });
 
+describe('codex writable roots (build/test/install caches)', () => {
+  const HOME = '/home/u';
+
+  it('includes shared toolchain caches on every platform', () => {
+    for (const plat of ['darwin', 'linux'] as NodeJS.Platform[]) {
+      const roots = codexDefaultWritableRoots(HOME, plat);
+      for (const d of ['.cargo', '.rustup', '.npm', '.bun', 'go', '.deno', '.gradle', '.m2', '.gem']) {
+        expect(roots).toContain(path.join(HOME, d));
+      }
+    }
+  });
+
+  it('resolves the OS cache root per platform (Library/Caches on macOS, .cache on Linux)', () => {
+    const mac = codexDefaultWritableRoots(HOME, 'darwin');
+    expect(mac).toContain(path.join(HOME, 'Library', 'Caches'));
+    expect(mac).not.toContain(path.join(HOME, '.cache'));
+
+    const linux = codexDefaultWritableRoots(HOME, 'linux');
+    expect(linux).toContain(path.join(HOME, '.cache'));
+    expect(linux).toContain(path.join(HOME, '.local', 'share'));
+    expect(linux).not.toContain(path.join(HOME, 'Library', 'Caches'));
+  });
+
+  it('never grants credential dirs (keeps the sandbox meaningful, not YOLO)', () => {
+    for (const plat of ['darwin', 'linux'] as NodeJS.Platform[]) {
+      const roots = codexDefaultWritableRoots(HOME, plat);
+      for (const d of ['.ssh', '.aws', '.gnupg', '.config', '.netrc']) {
+        expect(roots).not.toContain(path.join(HOME, d));
+      }
+    }
+  });
+
+  it('convertToCodexFormat always emits the baseline writable_roots (even with no perms)', () => {
+    const codex = convertToCodexFormat({ name: 'empty', allow: [], deny: [] });
+    expect(codex.sandbox_workspace_write?.writable_roots).toEqual(codexDefaultWritableRoots());
+  });
+
+  it('keeps network_access alongside writable_roots when web perms are present', () => {
+    const codex = convertToCodexFormat({ name: 'net', allow: ['WebFetch(*)'], deny: [] });
+    expect(codex.sandbox_workspace_write?.network_access).toBe(true);
+    expect(codex.sandbox_workspace_write?.writable_roots).toContain(path.join(os.homedir(), '.cargo'));
+  });
+
+  it('unions the baseline with a writable_root the user configured directly (never clobbers)', () => {
+    const versionHome = makeTempHome();
+    const codexDir = path.join(versionHome, '.codex');
+    fs.mkdirSync(codexDir, { recursive: true });
+    // Pre-existing user config with a custom writable root.
+    fs.writeFileSync(
+      path.join(codexDir, 'config.toml'),
+      TOML.stringify({ sandbox_workspace_write: { writable_roots: ['/opt/custom'] } } as any),
+      'utf-8',
+    );
+    const res = applyPermissionsToVersion('codex', { name: 'x', allow: ['WebFetch'], deny: [] }, versionHome);
+    expect(res.success).toBe(true);
+    const written = TOML.parse(fs.readFileSync(path.join(codexDir, 'config.toml'), 'utf-8')) as any;
+    const roots: string[] = written.sandbox_workspace_write.writable_roots;
+    expect(roots).toContain('/opt/custom'); // user's root preserved
+    expect(roots).toContain(path.join(os.homedir(), '.cargo')); // baseline added
+    expect(new Set(roots).size).toBe(roots.length); // deduped
+  });
+});
+
 describe('convertToKimiFormat', () => {
   it('translates Claude `:*` bash patterns into Kimi globs, with a slash-crossing variant', () => {
     // The core bug: copying `Bash(git status:*)` verbatim never matches in
@@ -515,5 +539,133 @@ describe('Kiro permissions', () => {
       { capability: 'fs_write', effect: 'allow', match: ['src/**'] },
       { capability: 'fs_read', effect: 'deny', match: ['**/.env'] },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Permission-set storage: groups/ contract
+// Regression for the bug where writes go to groups/ but reads scanned root.
+// ---------------------------------------------------------------------------
+describe('permission-set storage (groups/ contract)', () => {
+  let userPermsDir: string;
+  let sysPermsDir: string;
+  let sourceFile: string;
+
+  beforeEach(() => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-perms-storage-'));
+    tempDirs.push(base);
+    userPermsDir = path.join(base, 'user', 'permissions');
+    sysPermsDir = path.join(base, 'sys', 'permissions');
+    fs.mkdirSync(path.join(userPermsDir, 'groups'), { recursive: true });
+    fs.mkdirSync(path.join(sysPermsDir, 'groups'), { recursive: true });
+
+    process.env.AGENTS_USER_PERMISSIONS_DIR = userPermsDir;
+    process.env.AGENTS_SYSTEM_PERMISSIONS_DIR = sysPermsDir;
+
+    // A valid permission-set YAML to install
+    sourceFile = path.join(base, 'my-set.yml');
+    fs.writeFileSync(sourceFile, yaml.stringify({
+      name: 'my-set',
+      description: 'test set',
+      allow: ['Bash(git:*)'],
+      deny: [],
+    }));
+  });
+
+  afterEach(() => {
+    delete process.env.AGENTS_USER_PERMISSIONS_DIR;
+    delete process.env.AGENTS_SYSTEM_PERMISSIONS_DIR;
+  });
+
+  it('installPermissionSet writes to groups/ and listInstalledPermissions finds it', () => {
+    const result = installPermissionSet(sourceFile, 'my-set');
+    expect(result.success).toBe(true);
+
+    // Confirm file landed in groups/, not root
+    expect(fs.existsSync(path.join(userPermsDir, 'groups', 'my-set.yml'))).toBe(true);
+    expect(fs.existsSync(path.join(userPermsDir, 'my-set.yml'))).toBe(false);
+
+    const sets = listInstalledPermissions();
+    expect(sets.map((s) => s.name)).toContain('my-set');
+  });
+
+  it('listInstalledPermissions ignores root YAML and only reads from groups/', () => {
+    // Plant a YAML at root (the old, wrong location) — must NOT be surfaced
+    fs.writeFileSync(path.join(userPermsDir, 'root-only.yml'), yaml.stringify({
+      name: 'root-only',
+      description: 'should be invisible',
+      allow: ['Read(**)'],
+      deny: [],
+    }));
+
+    const sets = listInstalledPermissions();
+    expect(sets.map((s) => s.name)).not.toContain('root-only');
+  });
+
+  it('saveDefaultPermissionSet writes to groups/ and getDefaultPermissionSet reads it back', () => {
+    const saved = saveDefaultPermissionSet({
+      name: 'default',
+      description: 'my defaults',
+      allow: ['Bash(npm:*)'],
+      deny: [],
+    });
+    expect(saved.success).toBe(true);
+
+    // Confirm file is in groups/
+    expect(fs.existsSync(path.join(userPermsDir, 'groups', 'default.yml'))).toBe(true);
+
+    const retrieved = getDefaultPermissionSet();
+    expect(retrieved.allow).toContain('Bash(npm:*)');
+    expect(retrieved.description).toBe('my defaults');
+  });
+
+  it('getDefaultPermissionSet ignores root YAML and reads from groups/', () => {
+    // Plant a root default.yml with different content — must NOT be used
+    fs.writeFileSync(path.join(userPermsDir, 'default.yml'), yaml.stringify({
+      name: 'default',
+      description: 'wrong location',
+      allow: ['Read(**)'],
+      deny: [],
+    }));
+
+    // No groups/default.yml → should return the empty shell, not the root file
+    const result = getDefaultPermissionSet();
+    expect(result.allow).toHaveLength(0);
+    expect(result.description).toBe('Default permission set');
+  });
+
+  it('user groups/ takes precedence over system groups/', () => {
+    // Write to system groups/
+    fs.writeFileSync(path.join(sysPermsDir, 'groups', 'shared.yml'), yaml.stringify({
+      name: 'shared',
+      description: 'system version',
+      allow: ['Read(**)'],
+      deny: [],
+    }));
+
+    // Write to user groups/ with different content
+    fs.writeFileSync(path.join(userPermsDir, 'groups', 'shared.yml'), yaml.stringify({
+      name: 'shared',
+      description: 'user version',
+      allow: ['Bash(git:*)'],
+      deny: [],
+    }));
+
+    const sets = listInstalledPermissions();
+    const shared = sets.find((s) => s.name === 'shared');
+    expect(shared).toBeDefined();
+    expect(shared!.set.description).toBe('user version');
+    // Only one entry (deduped)
+    expect(sets.filter((s) => s.name === 'shared')).toHaveLength(1);
+  });
+
+  it('removePermissionSet deletes from groups/ and listInstalledPermissions no longer sees it', () => {
+    installPermissionSet(sourceFile, 'my-set');
+    expect(listInstalledPermissions().map((s) => s.name)).toContain('my-set');
+
+    const result = removePermissionSet('my-set');
+    expect(result.success).toBe(true);
+
+    expect(listInstalledPermissions().map((s) => s.name)).not.toContain('my-set');
   });
 });

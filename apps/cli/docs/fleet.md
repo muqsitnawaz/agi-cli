@@ -88,7 +88,11 @@ For each targeted, reachable device `apply` probes state, then plans the minimal
 set of actions across four dimensions:
 
 - **agents-cli** — `install-cli` if absent, `upgrade-cli` on a version mismatch.
-- **agents** — `add-agent` for any profile agent not installed.
+- **agents** — `add-agent` for any profile agent not installed. A bare/`@latest`
+  spec diffs at agent granularity (install once, latest wins); a **version-pinned**
+  spec (`claude@2.1.207`) diffs per version — it installs when that exact version
+  is absent, even if some other claude is already there. Version-pinned specs
+  trigger a per-device `agents view --json` probe to read the installed version set.
 - **config** — `sync-config` for the declared `sync:` scopes.
 - **login** — `push-login` where a portable credential can be propagated;
   `needs-login` where the login is desired but genuinely can't be (see below).
@@ -125,13 +129,21 @@ path traversal. Agents with a portable credential:
 
 > `claude`, `codex`, `gemini`, `grok`, `kimi`, `opencode`, `droid`, `antigravity`
 
-**Honest boundary — never faked.** macOS keychain-bound tokens (`claude`,
-`antigravity`) can't be read from the ACL-locked keychain on a **macOS target**,
-and a token that is keychain-bound on the **source** can't be extracted to push.
-Those cases surface as a one-time **manual login** in the plan, not a fake
-success. Agents with no portable credential (e.g. `cursor`), and a source that
-simply isn't signed into an agent, produce no login action at all — the same on
-every OS.
+**Honest boundary — never faked, never fatal.** macOS keychain-bound tokens
+(`claude`, `antigravity`) can't be read from the ACL-locked keychain on a **macOS
+target**, and a token that is keychain-bound on the **source** can't be extracted
+to push. Single-use rotating refresh tokens — droid (WorkOS) is the known
+offender — are also never propagated: copying one credential file across N boxes
+would let the first refresh on any box invalidate every other holder. Those cases
+surface as a one-time **manual login** in the plan, not a fake success. Agents
+with no portable credential (e.g. `cursor`), and a source that simply isn't signed
+into an agent, produce no login action at all — the same on every OS.
+
+The "is this credential safe to copy?" decision is centralized in
+`src/lib/fleet/auth-sync.ts` (`isCredentialSafeToPropagate` and
+`SINGLE_USE_ROTATING_REFRESH_AGENTS`). Add any newly-discovered single-use-
+rotation harness there rather than scattering per-agent conditionals through the
+propagation path.
 
 ## Flags
 
@@ -141,8 +153,31 @@ every OS.
 | `--plan`, `--dry-run` | Show the reconcile plan and exit; change nothing. |
 | `-y, --yes` | Skip the confirmation prompt. |
 | `--device <name>` | Scope the apply to a single device. |
+| `--agent <specs...>` | Override the roster for the targeted device(s) — install exactly these specs instead of the manifest's. Pairs with `--device` to seed one box. See [§Replicating this machine's version set](#replicating-this-machines-version-set). |
 | `--only <dims>` | Limit to a comma list of `agents,config,login`. |
 | `--no-login` | Do not propagate logins (equivalent to `login: skip` everywhere). |
+
+## Replicating this machine's version set
+
+The manifest roster is agent-granular — a fresh box gets one `claude@latest`. When
+you keep **several claude versions** installed (e.g. one per Max account, to spread
+rate-limit quota), clone that exact set onto another device with `--agent`:
+
+```
+# Install every claude version on THIS machine onto yosemite-s0
+agents apply --agent claude@all --device yosemite-s0 -y
+
+# A specific pinned version
+agents apply --agent claude@2.1.207 --device yosemite-s0
+```
+
+`claude@all` expands **source-side** to one pinned spec per version installed here
+(`claude@2.1.170`, `claude@2.1.207`, …); `apply` then installs each missing version
+on the target and skips ones already present. `--agent` overrides the roster only
+for the run — it doesn't rewrite `agents.yaml`. Config sync and login propagation
+still run per the manifest (login is shared across a harness's versions, so it
+propagates once per agent, not once per version). Without `--device`, the override
+applies to every targeted device.
 
 ## Security
 

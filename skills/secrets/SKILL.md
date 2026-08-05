@@ -156,13 +156,28 @@ agents secrets add prod LOG_LEVEL --env LOG_LEVEL
 macOS prompts Touch ID **per bundle, per process**, so running several agents at once (`agents teams`, parallel `agents run --secrets`) re-prompts once each. There's no OS setting to quiet it — but the **secrets-agent** does (macOS only):
 
 ```bash
-agents secrets unlock prod        # one Touch ID; held for 24h
+agents secrets unlock prod        # one Touch ID; held ~7 days (default)
 agents teams start my-feature     # every teammate reads prod silently
 agents secrets status             # what's held, and when it locks
 agents secrets lock               # wipe it; next read re-prompts
 ```
 
-`unlock` reads the bundle once and keeps the resolved values in a local broker behind a user-only socket; later runs read from memory with no prompt. The hold ends on its TTL (default 24h, `--ttl 30m`), when you `lock`, or when the screen locks / the machine sleeps. Nothing is written to disk.
+`unlock` reads the bundle once and keeps the resolved values in a local broker behind a user-only socket; later runs read from memory with no prompt. The hold ends on its TTL (**default 7 days**, `--ttl 30m` to shorten), when you `lock`, or when the machine **sleeps / you log out**. A bare **screen-lock does NOT drop the hold** (it's already gated by the login session). Nothing is written to disk.
+
+### When does Touch ID actually appear?
+
+On a **locked** keychain bundle:
+
+| You run | Touch ID? |
+|---|---|
+| `secrets list`, `secrets view` (no `--reveal`) | never — metadata / masked values only |
+| `secrets view --reveal`, `secrets exec` **at your terminal** | one sheet, then reveals / runs (a deliberate human reveal/run) |
+| `secrets get`, `secrets export` (any variant) | **never** — automation primitives for `$(…)` / `eval`; they fail fast to `agents secrets unlock` instead |
+| `secrets unlock` | one sheet — the deliberate unlock |
+| anything an **agent** launches (`AGENTS_RUNTIME`) or any no-TTY context | never — resolves broker-only, fails fast if not held |
+| anything on an **already-unlocked** bundle | never — served from the broker |
+
+So a sheet only ever appears for a deliberate human action (`unlock`, or a `view --reveal` / `exec` you type) on a *locked* bundle. `get`/`export` stay silent so they never block a script mid-pipeline.
 
 For a machine running lots of agents, run `agents secrets start` once — it installs the broker as a persistent background service (launchd) that stays up across the session, so a cold-started broker can't get starved under load. It self-heals onto new code after `npm i -g` upgrades. `agents secrets status` shows whether it's installed.
 
@@ -177,6 +192,34 @@ agents secrets tier prod session            # or: secrets create prod --tier ses
 ```
 
 A `biometry`-tier bundle (the default) is never auto-held — keep high-value bundles there so every read is confirmed. While a bundle is unlocked, any process running as you can read it from the socket without a prompt; that's the trade-off, so keep TTLs short and `lock` when you step away.
+
+## "Which bundles do I actually use, and when was one last touched?"
+
+Every create / import / export / view / access / unlock is recorded value-free (bundle
+name, event kind, count, agent — never a value) through one chokepoint, and surfaced
+three ways:
+
+```bash
+agents secrets view stripe.com          # usage summary + held state + per-agent
+agents secrets list --sort uses         # most-accessed bundles first
+agents secrets list --sort used         # most-recently-used first
+agents secrets activity stripe.com      # recent event timeline (last 90 days)
+```
+
+`agents secrets view` prints e.g. `usage: accessed 42× (last 2h ago) · exported 3× (last
+1d ago)`. The full audit trail is `agents events --module secrets`. Disable recording
+with `AGENTS_NO_USAGE_TRACK=1`.
+
+## "How should I name a bundle?"
+
+Name it after what it holds, so an agent can guess it without listing — a website by its
+domain with the real suffix (`stripe.com`, `openai.ai`, `github.com`), a desktop app by
+its binary suffix (`slack.app`, `photoshop.exe`). Always pass `--description`; an
+undescribed bundle prints a "No description found" nudge in `list` / `view` / `create`.
+
+```bash
+agents secrets create stripe.com --description "Stripe live + test API keys"
+```
 
 ## "What else can I do?"
 

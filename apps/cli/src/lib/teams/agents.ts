@@ -3,7 +3,7 @@
  *
  * Defines the AgentProcess and AgentManager classes that handle spawning,
  * monitoring, stopping, and persisting teammate processes across all supported
- * agent CLIs (Claude, Codex, Gemini, Cursor, OpenCode). Supports DAG-based
+ * agent CLIs (Claude, Codex, Cursor, OpenCode). Supports DAG-based
  * dependency scheduling via --after, per-teammate model/effort overrides, and
  * multiple permission modes (plan, edit, full).
  */
@@ -15,15 +15,15 @@ import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
 import { resolveAgentsDir } from './persistence.js';
-import { findExecutable } from '../platform/index.js';
+import { findExecutable, captureProcessStartTime } from '../platform/index.js';
 import { normalizeEvents, AgentType } from './parsers.js';
 import { debug } from './debug.js';
-import { setGeminiAutoUpdateDisabled, updateGeminiSettings } from '../gemini-settings.js';
 import type { AgentId } from '../types.js';
 import { getAgentsDir as getSystemAgentsDir, getShimsDir } from '../state.js';
 import { AGENTS, getAccountInfo } from '../agents.js';
 import { resolveVersion, isVersionInstalled, verifyInstalledBinaryLaunches } from '../versions.js';
 import { sanitizeProcessEnv } from '../secrets/bundles.js';
+import { resolveActor, actorEnv } from '../actor.js';
 import { recordRunName } from '../session/run-names.js';
 import { sshExec, shellQuote } from '../ssh-exec.js';
 import { resolveHost } from '../hosts/registry.js';
@@ -35,7 +35,9 @@ import { resolveRemoteOsSync } from '../hosts/remote-os.js';
 import { pullRemoteLogDelta, REMOTE_MIRROR_MAX_BYTES } from '../hosts/progress.js';
 import { createRemoteWorktree, ensureRemoteRepo } from './remoteWorktree.js';
 import { getTeam } from './registry.js';
-import { resolvePlacement } from './scheduler.js';
+import { resolvePlacement, cappedDevices } from './scheduler.js';
+import { readMaxConcurrentCaps } from '../device-config.js';
+import chalk from 'chalk';
 
 let lastMemoryWarnAt = 0;
 
@@ -182,42 +184,37 @@ export function buildSentinelCommand(cmd: string[], exitCodePath: string): strin
 }
 
 /**
- * Capture a stable identifier for a process at the moment it was started.
- * Used to defeat PID reuse: a kill(pid, ...) is only safe when the process
- * still occupies the PID we observed at spawn time. A bare kill(pid, 0)
- * probe cannot tell whether the OS has recycled the slot to an unrelated
- * process — combined with detached spawns and unref(), that's exactly how
- * `agents teams stop` ends up SIGKILLing random process groups.
- *
- * Linux:  field 22 of /proc/<pid>/stat (starttime in clock ticks since boot).
- * macOS:  output of `ps -o lstart= -p <pid>` (start time in human format).
- * Returns null on any error so callers can skip the guard rather than crash.
+ * Env for a locally-spawned teammate. Freezes ONE actor for the whole spawn
+ * tree: actorEnv(resolveActor()) stamps AGENTS_ACTOR* onto the child env, so the
+ * teammate's inner `agents run` reads it via inheritedActor and short-circuits
+ * computeActor instead of re-resolving — every teammate under one orchestrator
+ * shares the orchestrator's single frozen actor (see actor.ts). Precedence:
+ * process env < actor < the teammate's --env overrides, so an explicit override
+ * still wins. Single source of truth shared by launchProcess() and its test.
  */
-export function captureProcessStartTime(pid: number): string | null {
-  if (!pid || pid <= 0) return null;
-  try {
-    if (process.platform === 'linux') {
-      const stat = fsSync.readFileSync(`/proc/${pid}/stat`, 'utf-8');
-      const lastParen = stat.lastIndexOf(')');
-      if (lastParen < 0) return null;
-      const tail = stat.slice(lastParen + 2);
-      const fields = tail.split(' ');
-      // After comm we are at field 3; starttime is field 22, so index 19 here.
-      return fields[19] || null;
-    }
-    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    const trimmed = out.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  } catch {
-    return null;
-  }
+export function buildTeammateSpawnEnv(
+  envOverrides: Record<string, string> | null,
+): NodeJS.ProcessEnv {
+  return {
+    ...sanitizeProcessEnv(process.env),
+    ...actorEnv(resolveActor()),
+    ...(envOverrides ?? {}),
+  };
 }
 
+/**
+ * Re-exported from `platform/process.ts`, which owns the one implementation.
+ *
+ * This module used to carry its own near-identical copy, and that copy had no
+ * Windows branch — it fell through to `ps`, which does not exist there, so
+ * `captureProcessStartTime` always returned null and the pid-reuse guard at
+ * `stop()` was silently inert on Windows. That is exactly how `agents teams stop`
+ * ends up SIGKILLing an unrelated process group once the OS recycles a pid.
+ */
+export { captureProcessStartTime };
+
 /** Agent types the team runner supports. */
-const TEAM_AGENT_TYPES: AgentType[] = ['codex', 'cursor', 'gemini', 'claude', 'opencode', 'grok', 'antigravity', 'kimi', 'droid'];
+const TEAM_AGENT_TYPES: AgentType[] = ['codex', 'cursor', 'claude', 'opencode', 'grok', 'antigravity', 'kimi', 'droid'];
 
 /**
  * Reasoning-intensity knob. Passed through to `agents run --effort`, which
@@ -334,30 +331,6 @@ export function resolveMode(
   }
 
   return normalizedDefault;
-}
-
-/** Ensure Gemini's settings.json has experimental.plan enabled for headless plan mode. */
-export async function ensureGeminiPlanMode(): Promise<void> {
-  const settingsPath = path.join(os.homedir(), '.gemini', 'settings.json');
-  try {
-    let changed = false;
-    const settings = updateGeminiSettings(settingsPath, (nextSettings) => {
-      setGeminiAutoUpdateDisabled(nextSettings);
-      const experimental = typeof nextSettings.experimental === 'object' && nextSettings.experimental !== null
-        ? nextSettings.experimental as Record<string, unknown>
-        : {};
-      if (experimental.plan === true) {
-        return;
-      }
-      nextSettings.experimental = { ...experimental, plan: true };
-      changed = true;
-    });
-    if (changed && settings.experimental && typeof settings.experimental === 'object' && (settings.experimental as Record<string, unknown>).plan === true) {
-      console.error('[Swarm] Enabled Gemini experimental.plan in', settingsPath);
-    }
-  } catch (err) {
-    console.warn('[Swarm] Could not enable Gemini plan mode:', err);
-  }
 }
 
 /**
@@ -541,6 +514,12 @@ export class AgentProcess {
   startedAt: Date = new Date();
   completedAt: Date | null = null;
   parentSessionId: string | null = null;
+  // Frozen actor (resolveActor().id) this teammate runs under. Stamped onto the
+  // local spawn env via actorEnv (buildTeammateSpawnEnv) so the teammate's inner
+  // `agents run` inherits one actor for the whole tree instead of re-resolving,
+  // and persisted so the record shows who ran it. Set from the resolved actor at
+  // construction; loadFromDisk restores the persisted value.
+  actor: string | null = null;
   cloudSessionId: string | null = null;
   cloudProvider: string | null = null;
   prUrl: string | null = null;
@@ -657,6 +636,7 @@ export class AgentProcess {
     this.completedAt = completedAt;
     this.baseDir = baseDir;
     this.parentSessionId = parentSessionId;
+    this.actor = resolveActor().id;
     this.cloudSessionId = cloudSessionId;
     this.cloudProvider = cloudProvider;
     this.prUrl = prUrl;
@@ -744,6 +724,7 @@ export class AgentProcess {
       duration: this.duration(),
       mode: this.mode,
       parent_session_id: this.parentSessionId,
+      actor: this.actor,
       workspace_dir: this.workspaceDir,
       cloud_session_id: this.cloudSessionId,
       cloud_provider: this.cloudProvider,
@@ -815,9 +796,19 @@ export class AgentProcess {
    * Uses a per-wave batched snapshot (remotePollSnapshot) when the supervisor's
    * one-ssh-per-host pre-pass populated it; otherwise falls back to its own
    * round-trips so a bare `teams status`/`teams logs` is still correct.
+   *
+   * Only polls a teammate that is plausibly still RUNNING (RUSH-2118). Once a
+   * remote teammate reaches a terminal status, the poll that resolved it already
+   * mirrored the final log bytes and read the `.exit` sentinel in this SAME
+   * function (delta pulled before the exit check below) — the underlying process
+   * is gone and can never write more, so there is nothing left to fetch. Without
+   * this guard every finished remote teammate still cost one ssh round-trip on
+   * EVERY `--active`/`listAll` poll forever, which is what made `agents sessions
+   * --active --local` take ~4.3s on a box with 30 completed teammates.
    */
   private async syncRemoteMirror(): Promise<void> {
     if (!this.hostName || !this.hostTarget || !this.remoteLog) return;
+    if (this.status !== AgentStatus.RUNNING) return;
 
     // Pull the new remote bytes and append them to the local mirror the parser
     // reads. One offset-tail round-trip; nothing to write when the log is quiet.
@@ -876,7 +867,14 @@ export class AgentProcess {
     this.lastReadPos = position;
   }
 
-  async readNewEvents(): Promise<void> {
+  /**
+   * @param opts.skipRemote A `--local` caller (RUSH-2118): never dial a
+   *   remote-host teammate, not even a still-RUNNING one — report its
+   *   last-persisted meta.json state as-is. A local-only query is by definition
+   *   this-machine-only, so it must not issue an ssh round-trip at all.
+   */
+  async readNewEvents(opts: { skipRemote?: boolean } = {}): Promise<void> {
+    if (this.hostName && opts.skipRemote) return;
     // Distributed teammate: mirror the host's new log bytes locally first, then
     // fall through to the identical local read+parse below.
     if (this.hostName) {
@@ -1008,6 +1006,7 @@ export class AgentProcess {
       started_at: this.startedAt.toISOString(),
       completed_at: this.completedAt?.toISOString() || null,
       parent_session_id: this.parentSessionId,
+      actor: this.actor,
       cloud_session_id: this.cloudSessionId,
       cloud_provider: this.cloudProvider,
       pr_url: this.prUrl,
@@ -1107,6 +1106,10 @@ export class AgentProcess {
         meta.profile_name || null,
       );
       agent.startTime = typeof meta.start_time === 'string' ? meta.start_time : null;
+      // The persisted actor is the truth for a reload; the constructor set it to
+      // THIS process's resolved actor, which is wrong for a teammate someone else
+      // ran. Legacy teammates predating the field carry no actor -> null.
+      agent.actor = meta.actor ?? null;
       // Distributed-team fields: set post-construction (like startTime) so the
       // constructor signature stays fixed. Null on every pre-existing teammate.
       agent.hostName = meta.host_name || null;
@@ -1163,7 +1166,12 @@ export class AgentProcess {
     return true;
   }
 
-  async updateStatusFromProcess(): Promise<void> {
+  /**
+   * @param opts.skipRemote A `--local` caller (RUSH-2118): a distributed
+   *   teammate is never dialed — its in-memory state (already loaded from
+   *   meta.json) stands as-is, no ssh, no re-save.
+   */
+  async updateStatusFromProcess(opts: { skipRemote?: boolean } = {}): Promise<void> {
     if (!this.pid) {
       // Distributed (remote-host) teammates have no local PID by design; their
       // lifecycle lives on the host. readNewEvents() mirrors the remote log and
@@ -1171,6 +1179,7 @@ export class AgentProcess {
       // syncRemoteMirror), so we just persist and return — never the local
       // "RUNNING without a PID is impossible" fail path below.
       if (this.hostName) {
+        if (opts.skipRemote) return;
         await this.readNewEvents();
         if (this.status !== AgentStatus.RUNNING && !this.completedAt) {
           this.completedAt = this.getLatestEventTime() || this.startedAt || new Date();
@@ -1369,6 +1378,14 @@ export class AgentManager {
   private defaultMode: Mode;
   private initPromise: Promise<void> | null = null;
   private cloudDispatcher: CloudDispatchFn | null = null;
+  /**
+   * A `--local` caller (RUSH-2118): every poll this manager issues skips the
+   * ssh round-trip for a distributed (remote-host) teammate, reporting its
+   * last-persisted meta.json state instead. Set once at construction so the
+   * INITIAL load in doInitialize()/loadExistingAgents() — which polls every
+   * teammate before listRunning()/listAll() ever run — honors it too.
+   */
+  private localOnly: boolean;
 
   private constructorAgentsDir: string | null = null;
 
@@ -1378,11 +1395,13 @@ export class AgentManager {
     defaultMode: Mode | null = null,
     filterByCwd: string | null = null,
     cleanupAgeDays: number = 7,
+    localOnly: boolean = false,
   ) {
     this.maxAgents = maxAgents;
     this.constructorAgentsDir = agentsDir;
     this.filterByCwd = filterByCwd;
     this.cleanupAgeDays = cleanupAgeDays;
+    this.localOnly = localOnly;
     const resolvedDefaultMode = defaultMode ? normalizeModeValue(defaultMode) : defaultModeFromEnv();
     if (!resolvedDefaultMode) {
       throw new Error(`Invalid default_mode '${defaultMode}'. Use plan, edit, auto, or skip.`);
@@ -1495,7 +1514,7 @@ export class AgentManager {
         }
       }
 
-      await agent.updateStatusFromProcess();
+      await agent.updateStatusFromProcess({ skipRemote: this.localOnly });
       this.agents.set(agentId, agent);
       loadedCount++;
     }
@@ -1537,6 +1556,15 @@ export class AgentManager {
   ): Promise<AgentProcess> {
     await this.initialize();
     const resolvedMode = resolveMode(mode, this.defaultMode);
+
+    // Lineage (RUSH-2019): when the caller didn't name a parent, inherit the
+    // orchestrator's own session id from its env (exec.ts stamps AGENTS_SESSION_ID
+    // onto every agent process). A team spawned from inside a running agent then
+    // records which session created it, so the spawn chain traces back to a parent
+    // session; a team started outside any agent simply carries none.
+    if (!parentSessionId) {
+      parentSessionId = process.env.AGENTS_SESSION_ID ?? null;
+    }
 
     // Enforce: teammate names are unique within a team.
     const siblings = await this.listByTask(taskName);
@@ -1857,9 +1885,7 @@ export class AgentManager {
         stdio: ['ignore', stdoutFd, stdoutFd],
         cwd: agent.cwd || undefined,
         detached: true,
-        env: agent.envOverrides
-          ? { ...sanitizeProcessEnv(process.env), ...agent.envOverrides }
-          : sanitizeProcessEnv(process.env),
+        env: buildTeammateSpawnEnv(agent.envOverrides),
       });
 
       await new Promise<void>((resolve, reject) => {
@@ -2058,7 +2084,16 @@ export class AgentManager {
     const teamMeta = await getTeam(taskName);
     if (!teamMeta) return;
     const roster = await this.listByTask(taskName);
-    const { device } = resolvePlacement(teamMeta, null, roster);
+    const pool = teamMeta.devices ?? [];
+    const maxConcurrent = pool.length > 1 ? readMaxConcurrentCaps(pool) : undefined;
+    if (maxConcurrent) {
+      for (const c of cappedDevices(pool, roster, maxConcurrent)) {
+        console.error(chalk.dim(
+          `[placement] '${c.device}' excluded from auto-pick — at its agents.max-concurrent cap (${c.running}/${c.cap} running)`,
+        ));
+      }
+    }
+    const { device } = resolvePlacement(teamMeta, null, roster, { maxConcurrent });
     if (device) await this.resolveScheduledPlacement(agent, device, taskName);
   }
 
@@ -2364,8 +2399,8 @@ export class AgentManager {
     await this.initialize();
     const agents = Array.from(this.agents.values());
     for (const agent of agents) {
-      await agent.readNewEvents();
-      await agent.updateStatusFromProcess();
+      await agent.readNewEvents({ skipRemote: this.localOnly });
+      await agent.updateStatusFromProcess({ skipRemote: this.localOnly });
     }
     return agents;
   }

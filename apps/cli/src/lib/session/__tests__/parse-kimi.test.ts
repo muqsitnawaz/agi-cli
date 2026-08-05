@@ -7,8 +7,10 @@ import { describe, expect, test } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { parseKimi, detectAgent, parseSession } from '../parse.js';
+import { parseKimi, detectAgent, parseSession, summarizeToolUse } from '../parse.js';
 import { readKimiMeta } from '../discover.js';
+import { extractTodoProgressFromEvents } from '../state.js';
+import { toolCallsFromEvents } from '../tool-calls.js';
 
 /** A Kimi session dir whose state.json omits BOTH createdAt and updatedAt. */
 function makeKimiStateNoTimestamps(): string {
@@ -41,7 +43,12 @@ function makeKimiSession(wireContent: string): string {
     title: 'Test session',
     createdAt: '2026-06-24T00:00:00.000Z',
   }));
-  fs.writeFileSync(path.join(agentsDir, 'wire.jsonl'), wireContent);
+  // Real Kimi wire.jsonl is newline-terminated (see testdata/kimi-tool-args.jsonl,
+  // which ends in 0x0a). Terminate the fixture too so the incremental parse's
+  // trailing-line discipline (a complete-but-unterminated tail is DEFERRED, not
+  // applied — the double-count guard) sees the final record as committed.
+  const terminated = wireContent.endsWith('\n') || wireContent === '' ? wireContent : wireContent + '\n';
+  fs.writeFileSync(path.join(agentsDir, 'wire.jsonl'), terminated);
   return path.join(sessionDir, 'state.json');
 }
 
@@ -109,6 +116,7 @@ describe('parseKimi', () => {
     }));
 
     const events = parseKimi(statePath);
+    expect(extractTodoProgressFromEvents(events)).toBeUndefined();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       type: 'message',
@@ -197,6 +205,7 @@ describe('parseKimi', () => {
       type: 'tool_use',
       agent: 'kimi',
       tool: 'Bash',
+      callId: 'tool_1',
       command: 'ls -la',
       args: { command: 'ls -la' },
     });
@@ -259,7 +268,9 @@ describe('parseKimi', () => {
       type: 'tool_result',
       agent: 'kimi',
       tool: 'Bash',
-      success: true,
+      callId: 'tool_3',
+      success: undefined,
+      outcome: 'unknown',
       output: 'hi',
     });
   });
@@ -298,6 +309,45 @@ describe('parseKimi', () => {
       tool: 'Bash',
       success: false,
     });
+  });
+
+  test('keeps a free-text Error prefix unknown without a structured error flag', () => {
+    const jsonl = [
+      {
+        type: 'context.append_loop_event',
+        event: { type: 'tool.call', toolCallId: 'tool_text_error', name: 'Bash', args: { command: 'printf ok' } },
+        time: 1750723200000,
+      },
+      {
+        type: 'context.append_loop_event',
+        event: { type: 'tool.result', toolCallId: 'tool_text_error', result: { output: 'Error: merely prose' } },
+        time: 1750723200001,
+      },
+    ].map(o => JSON.stringify(o)).join('\n');
+
+    const events = parseKimi(makeKimiSession(jsonl));
+    expect(events[1]).toMatchObject({ type: 'error', success: undefined, outcome: 'unknown' });
+    expect(toolCallsFromEvents(events)).toEqual([
+      expect.objectContaining({ outcome: 'unknown', output: 'Error: merely prose' }),
+    ]);
+  });
+
+  test('ignores non-string native call ids instead of aborting evidence extraction', () => {
+    const jsonl = [
+      {
+        type: 'context.append_loop_event',
+        event: { type: 'tool.call', toolCallId: { malformed: true }, name: 'Bash', args: { command: 'pwd' } },
+        time: 1750723200000,
+      },
+      {
+        type: 'context.append_loop_event',
+        event: { type: 'tool.result', toolCallId: 42, result: { output: '/tmp', isError: false } },
+        time: 1750723200001,
+      },
+    ].map(o => JSON.stringify(o)).join('\n');
+    const events = parseKimi(makeKimiSession(jsonl));
+    expect(events.map((event) => event.callId)).toEqual([undefined, undefined]);
+    expect(() => toolCallsFromEvents(events)).not.toThrow();
   });
 
   // Tests for the event.args shape (real Kimi wire format as of 2026-06)
@@ -399,6 +449,112 @@ describe('parseKimi', () => {
 
     const events = parseKimi(path.join(sessionDir, 'state.json'));
     expect(events).toEqual([]);
+  });
+});
+
+/**
+ * Kimi's checklist tool is `TodoList`, not Claude's `TodoWrite`, and its items
+ * are `{title, status}` where finished is `"done"` — not `{content, status:
+ * "completed"}`. Both spellings were unhandled, so a Kimi session with a live
+ * checklist showed no todos in `agents sessions` at all. The wire records below
+ * are verbatim shapes from a real ~/.kimi-code wire.jsonl.
+ */
+describe('kimi TodoList checklist', () => {
+  function todoListCall(todos: Array<{ title: string; status: string }>) {
+    return JSON.stringify({
+      type: 'context.append_loop_event',
+      event: {
+        type: 'tool.call',
+        uuid: 'tool_ckYuWLIhOfHpi6AbrlHEKCCE',
+        toolCallId: 'tool_ckYuWLIhOfHpi6AbrlHEKCCE',
+        name: 'TodoList',
+        args: { todos },
+        description: 'Updating todo list',
+      },
+      time: 1783981312658,
+    });
+  }
+
+  test('folds TodoList into checklist progress, mapping title/done to content/completed', () => {
+    const statePath = makeKimiSession(todoListCall([
+      { title: 'Create isolated git worktree off origin/main', status: 'done' },
+      { title: 'Redesign POLICY column labels in secrets list', status: 'done' },
+      { title: 'Run tests and verify real output', status: 'in_progress' },
+      { title: 'Roll out to fleet devices', status: 'pending' },
+    ]));
+
+    const progress = extractTodoProgressFromEvents(parseKimi(statePath));
+    expect(progress).toBeDefined();
+    expect(progress!.total).toBe(4);
+    expect(progress!.done).toBe(2);
+    expect(progress!.activeForm).toBe('Run tests and verify real output');
+    expect(progress!.items.map(i => i.status)).toEqual([
+      'completed', 'completed', 'in_progress', 'pending',
+    ]);
+    expect(progress!.items[0].content).toBe('Create isolated git worktree off origin/main');
+  });
+
+  test('the last TodoList write wins — it is a full-list snapshot', () => {
+    const statePath = makeKimiSession([
+      todoListCall([
+        { title: 'Ship the fix', status: 'pending' },
+        { title: 'Open the PR', status: 'pending' },
+      ]),
+      todoListCall([
+        { title: 'Ship the fix', status: 'done' },
+        { title: 'Open the PR', status: 'in_progress' },
+      ]),
+    ].join('\n'));
+
+    const progress = extractTodoProgressFromEvents(parseKimi(statePath));
+    expect(progress!.done).toBe(1);
+    expect(progress!.total).toBe(2);
+    expect(progress!.activeForm).toBe('Open the PR');
+  });
+
+  test('summarizes a TodoList call as plan progress, not a bare tool name', () => {
+    expect(summarizeToolUse('TodoList', {
+      todos: [
+        { title: 'Ship the fix', status: 'done' },
+        { title: 'Open the PR', status: 'in_progress' },
+      ],
+    })).toBe('Plan 1/2: Open the PR');
+  });
+});
+
+/**
+ * Kimi names the file argument `path` where Claude names it `file_path`, so
+ * Read/Write/Edit summaries rendered as a bare "Read " with no file at all.
+ */
+describe('kimi tool-call summaries carry the file path', () => {
+  test('Read/Write/Edit read the `path` arg', () => {
+    expect(summarizeToolUse('Read', { path: '/tmp/secrets.ts' })).toBe('Read /tmp/secrets.ts');
+    expect(summarizeToolUse('Write', { path: '/tmp/new.ts' })).toBe('Write /tmp/new.ts');
+    expect(summarizeToolUse('Edit', { path: '/tmp/secrets.ts', old_string: 'a', new_string: 'b' }))
+      .toBe('Edit /tmp/secrets.ts');
+  });
+
+  test('Claude `file_path` still wins where both spellings are present', () => {
+    expect(summarizeToolUse('Read', { file_path: '/tmp/claude.ts', path: '/tmp/kimi.ts' }))
+      .toBe('Read /tmp/claude.ts');
+  });
+
+  test('a parsed Kimi Read event summarizes with its path', () => {
+    const statePath = makeKimiSession(JSON.stringify({
+      type: 'context.append_loop_event',
+      event: {
+        type: 'tool.call',
+        uuid: 'tool_read1',
+        toolCallId: 'tool_read1',
+        name: 'Read',
+        args: { path: '/tmp/agents-cli/secrets.ts' },
+      },
+      time: 1783981312658,
+    }));
+
+    const events = parseKimi(statePath);
+    expect(events).toHaveLength(1);
+    expect(summarizeToolUse(events[0].tool!, events[0].args)).toBe('Read /tmp/agents-cli/secrets.ts');
   });
 });
 

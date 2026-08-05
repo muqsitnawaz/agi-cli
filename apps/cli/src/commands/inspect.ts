@@ -33,7 +33,10 @@ import {
   getProjectAgentsDir,
   getEnabledExtraRepos,
 } from '../lib/state.js';
-import { getVersionHomePath } from '../lib/versions.js';
+import { getVersionHomePath,
+  isVersionIsolated,
+  getIsolatedDefault,
+} from '../lib/versions.js';
 import { getShimsDir, getVersionedAliasPath } from '../lib/shims.js';
 import {
   getAgentResources,
@@ -46,7 +49,7 @@ import { listMcpServerConfigs, discoverMcpConfigsFromRepo, type McpYamlConfig } 
 import { discoverPlugins, discoverPluginsInDir, pluginResourceGroups, type PluginResourceGroup } from '../lib/plugins.js';
 import { PLUGIN_GROUP_COLORS } from './plugins.js';
 import { countSessionsInScope } from '../lib/session/discover.js';
-import type { SessionAgentId } from '../lib/session/types.js';
+import { isSessionTrackedAgent } from '../lib/session/types.js';
 import { damerauLevenshtein } from '../lib/fuzzy.js';
 import { terminalWidth, truncateToWidth, stringWidth, stripAnsi } from '../lib/session/width.js';
 
@@ -640,8 +643,19 @@ async function renderSummary(agent: AgentId, version: string, versionHome: strin
   const configSymlink = path.join(os.homedir(), `.${agent}`);
   const configTarget = readSymlinkSafe(configSymlink);
 
-  const shimPath = path.join(getShimsDir(), AGENTS[agent].cliCommand);
+  // Report the bare shim only when it is actually there. An isolated install
+  // deliberately has none — that is the promise — so printing the path
+  // unconditionally told the user this copy sits on their PATH when it does not.
+  // Same failure mode as `agents view` claiming an isolated copy was `(global)`.
+  const shimPathIfPresent = fs.existsSync(path.join(getShimsDir(), AGENTS[agent].cliCommand))
+    ? path.join(getShimsDir(), AGENTS[agent].cliCommand)
+    : null;
   const aliasPath = getVersionedAliasPath(agent, version);
+  const isolated = isVersionIsolated(agent, version);
+  // `default` means the GLOBAL default, which an isolated copy can never be. Report
+  // the isolated pointer separately rather than leaving it invisible: it is what a
+  // bare `agents run <agent>` resolves to, so "default: false" alone is misleading.
+  const isIsolatedDefault = isolated && getIsolatedDefault(agent) === version;
 
   const capabilities = collectCapabilities(agent, version);
 
@@ -658,9 +672,11 @@ async function renderSummary(agent: AgentId, version: string, versionHome: strin
       agent,
       version,
       default: isDefault,
+      isolated,
+      isolatedDefault: isIsolatedDefault,
       home: versionHome,
       configSymlink: configTarget ? { from: configSymlink, to: configTarget } : null,
-      shim: shimPath,
+      shim: shimPathIfPresent,
       alias: aliasPath,
       strategy,
       installedShim: cliState?.installed === true ? cliState.path : null,
@@ -675,13 +691,13 @@ async function renderSummary(agent: AgentId, version: string, versionHome: strin
   // Plain text — model sits right beside the version, same priority (no label).
   const configuredModel = resolveConfiguredModel(agent, version)?.model;
   const modelPart = configuredModel ? '  ' + chalk.yellow(configuredModel) : '';
-  const head = `${chalk.bold(agent)} ${chalk.gray('@')} ${chalk.cyan(version)}${modelPart}${isDefault ? '  ' + chalk.green('[default]') : ''}`;
+  const head = `${chalk.bold(agent)} ${chalk.gray('@')} ${chalk.cyan(version)}${modelPart}${isDefault ? '  ' + chalk.green('[default]') : ''}${isolated ? '  ' + chalk.gray(isIsolatedDefault ? '[isolated default]' : '[isolated]') : ''}`;
   console.log('\n' + head + '\n');
 
   const rows: Array<[string, string]> = [
     ['install', versionHome],
     ['config', configTarget ? `${configSymlink}  ${chalk.gray('→')}  ${configTarget}` : chalk.gray('(no symlink)')],
-    ['shim', shimPath],
+    ['shim', shimPathIfPresent ?? chalk.gray(isolated ? '(none — isolated installs stay off PATH)' : '(none)')],
     ['alias', aliasPath],
     ['strategy', strategy],
   ];
@@ -1353,12 +1369,7 @@ function safeStat(p: string): fs.Stats | null {
   try { return fs.statSync(p); } catch { return null; }
 }
 
-const SESSION_AGENTS: ReadonlySet<string> = new Set([
-  'claude', 'codex', 'gemini', 'opencode', 'openclaw', 'rush', 'hermes', 'grok', 'kimi', 'droid',
-]);
-
 function safeCountSessions(agent: AgentId): number {
-  if (!SESSION_AGENTS.has(agent)) return 0;
-  try { return countSessionsInScope({ agent: agent as SessionAgentId }); } catch { return 0; }
+  if (!isSessionTrackedAgent(agent)) return 0;
+  try { return countSessionsInScope({ agent }); } catch { return 0; }
 }
-

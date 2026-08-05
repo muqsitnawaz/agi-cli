@@ -10,6 +10,50 @@ export interface DeviceLoad {
   name: string;
   online: boolean;
   running: number; // running agent count on the device; higher = busier
+  // Agent-health signal for the TARGET agent (RUSH-2025): true when the device
+  // has at least one signed-in, non-throttled version. undefined means "not
+  // probed" (agent-unaware caller) — such a device is treated as usable so the
+  // legacy least-busy behavior is unchanged.
+  usableVersion?: boolean;
+  // Hardware-health signals from fetchDeviceStats(): 1-minute load average and
+  // memory-used percent. undefined means "not probed" and contributes 0 to the
+  // score.
+  loadAvg1?: number;
+  memPercent?: number;
+  // User preference from `agents devices prefer <name>` (auto-launch.json). A
+  // preferred device gets PREFERENCE_BONUS shaved off its score so it wins
+  // against otherwise-equivalent machines. Lives here rather than in each
+  // caller so EVERY ranking path — the warm-cache pick and the balanced pool
+  // pick both route through hostScore — honors the preference identically.
+  preferred?: boolean;
+  // Operator cap from `agents devices configure <name> --max-agents N` (read
+  // from the synced device doc). A device at its cap is EXCLUDED from the
+  // auto-pick entirely — it never reaches hostScore. undefined = uncapped
+  // (the default).
+  maxConcurrent?: number;
+}
+
+// How much a `prefer`red device is favored, in hostScore points. Two running
+// agents' worth (each ≈ 10), so a preference outranks a small load difference
+// but never sends work to a machine that is genuinely swamped.
+export const PREFERENCE_BONUS = 20;
+
+// One installed version's login/usage health, matching the fields of the CLI's
+// `agents view <agent> --json` output (ViewJsonVersion). Kept minimal so this
+// module stays free of any CLI/VS Code dependency.
+export interface VersionHealth {
+  signedIn: boolean;
+  usageStatus?: 'available' | 'rate_limited' | 'out_of_credits' | null;
+}
+
+// A device has a USABLE version of the target agent when at least one installed
+// version is signed in AND not rate-limited / out of credits. A signed-out or
+// throttled version drops the user into a login/limit wall (the RUSH-2025 bug),
+// so it does not count.
+export function deviceHasUsableVersion(versions: VersionHealth[]): boolean {
+  return versions.some(
+    (v) => v.signedIn && v.usageStatus !== 'rate_limited' && v.usageStatus !== 'out_of_credits',
+  );
 }
 
 // Pick the least-busy online device — fewest running agents, ties broken by
@@ -21,6 +65,80 @@ export function pickLeastBusyDevice(candidates: DeviceLoad[]): string | null {
   let best = online[0];
   for (const c of online) {
     if (c.running < best.running) best = c;
+  }
+  return best.name;
+}
+
+// Composite host score (lower is better) combining fleet-level and hardware-level
+// load (RUSH-2025 acceptance: "rank candidates by running agents, agent
+// login/usage health, and hardware load/memory"). Running-agent count dominates
+// (each agent ≈ 10 points) so a device stays the primary balancer axis; load and
+// memory pressure are tie-breakers that deprioritize a machine that is crashing
+// or thrashing (the reported 20-30h local crashes). Unprobed hardware fields
+// contribute 0, so an agent-unaware or stats-less caller degrades to pure
+// least-busy ranking.
+export function hostScore(d: DeviceLoad): number {
+  const running = d.running * 10;
+  const load = d.loadAvg1 !== undefined ? Math.min(d.loadAvg1, 16) : 0;
+  const mem = d.memPercent !== undefined ? d.memPercent / 20 : 0; // 100% -> 5 pts
+  const preference = d.preferred ? PREFERENCE_BONUS : 0;
+  return running + load + mem - preference;
+}
+
+// A device is capped out when it carries an agents.max-concurrent cap and its
+// running-agent count has reached it. Capped devices are excluded from
+// auto-pick (never scored) — an operator cap is a hard boundary, not a tie-break.
+export function isCappedOut(d: DeviceLoad): boolean {
+  return d.maxConcurrent !== undefined && d.running >= d.maxConcurrent;
+}
+
+// Online candidates excluded from the auto-pick by their agents.max-concurrent
+// cap, so callers can STATE the reason (a device silently never winning reads
+// as a ranking bug). Only meaningful alongside a pick call on the same pool.
+export function cappedOutDevices(candidates: DeviceLoad[]): DeviceLoad[] {
+  return candidates.filter((c) => c.online && isCappedOut(c));
+}
+
+// Why a pick produced no host, for the fallback warning. Caps are checked
+// FIRST: an all-capped pool is an operator boundary to raise, and reporting
+// "go sign in" (the usable-version reason) when the devices were really capped
+// sends the user down the wrong fix. Returns null when there is nothing to say
+// (the pool itself was empty — the caller already said "no online device").
+export function noHostReason(loaded: DeviceLoad[], agentKey?: string): string | null {
+  const capped = cappedOutDevices(loaded);
+  if (capped.length > 0) {
+    const detail = capped.map((c) => `${c.name} (${c.running}/${c.maxConcurrent})`).join(', ');
+    return (
+      `every online device is at its agents.max-concurrent cap: ${detail} — ` +
+      `raise with: agents devices configure <name> --max-agents N`
+    );
+  }
+  if (agentKey && loaded.length > 0) {
+    return `no fleet device has a usable ${agentKey} version (signed in and not rate-limited)`;
+  }
+  return null;
+}
+
+// Pick the best online host for a launch: drop devices with no usable version of
+// the target agent (when that signal was probed) and devices at their
+// agents.max-concurrent cap, then rank the rest by the composite hostScore
+// (running agents + hardware load/memory). Ties break by input order (first
+// declared wins). Returns null when no candidate survives, so the caller falls
+// back to the local machine with a warning.
+export function pickBestHost(candidates: DeviceLoad[]): string | null {
+  // usableVersion === false is an explicit "no signed-in version here" — filter
+  // it out. undefined (unprobed) stays eligible so agent-unaware callers keep
+  // the old behavior.
+  const eligible = candidates.filter((c) => c.online && c.usableVersion !== false && !isCappedOut(c));
+  if (eligible.length === 0) return null;
+  let best = eligible[0];
+  let bestScore = hostScore(best);
+  for (const c of eligible) {
+    const s = hostScore(c);
+    if (s < bestScore) {
+      best = c;
+      bestScore = s;
+    }
   }
   return best.name;
 }

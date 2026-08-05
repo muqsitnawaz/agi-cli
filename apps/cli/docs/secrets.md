@@ -1,5 +1,81 @@
 # Secrets
 
+> This is the **reference / how-to**. For the normative contract — what
+> `agents secrets` guarantees (storage & materialization boundaries, the no-noise
+> rules, cross-platform parity), as testable MUST/SHOULD requirements with
+> Given/When/Then scenarios — see [`specifications.md` §Secrets](specifications.md#secrets).
+
+## Agent-scoped unlocks
+
+On macOS, **an agent launch never raises a Touch ID sheet.** A terminal, a
+routine, a teammate, or the daemon that needs a locked bundle fails fast and names
+`agents secrets unlock <bundle>` — opening an agent is not a request to
+authenticate, and because each keychain read runs in its own helper process the
+biometric assertion never reuses, so one launch used to mean one sheet per bundle.
+
+The sheet is raised only by a deliberate human request on a **locked** bundle:
+`agents secrets unlock`, or an `agents secrets view --reveal` / `agents secrets
+exec` you run **at a real interactive terminal** (a TTY, outside any agent
+runtime) — one sheet, then the value is revealed / the command runs. `agents
+secrets get` and every `agents secrets export` variant **never raise the sheet at
+all**, in any shell: they are automation primitives (`$(agents secrets get …)`,
+`eval "$(agents secrets export … --plaintext)"`), so a locked bundle fails fast
+toward `agents secrets unlock <bundle>` instead of blocking a pipeline on Keychain
+UI. Beneath an agent (`AGENTS_RUNTIME` set) or with no TTY, **all** of these
+resolve broker-only — there the agent is the caller, not you. See the
+[Touch-ID contract](#touch-id-contract) below for the full per-command matrix. The
+unlock names the requesting harness, bundle, reason, and duration; approved
+bundles are cached for seven days by default.
+
+### Touch-ID contract
+
+Which `agents secrets` commands can raise a biometric sheet, and when:
+
+| Command | On a locked keychain bundle |
+|---|---|
+| `list`, `view` (no `--reveal`) | never prompts — metadata / masked values only |
+| `view --reveal`, `exec` | **at an interactive terminal:** one Touch ID, then reveals / runs. Under an agent (`AGENTS_RUNTIME`) or no TTY: broker-only, fail-closed, no sheet |
+| `get`, `export` (`--plaintext` / `--to-file` / `--host` / `--to-1password`) | **never prompts, in any shell** — automation primitives; fail-closed to `agents secrets unlock` |
+| `unlock` | the one deliberate biometric entry point |
+| any command on an already-unlocked bundle | never prompts — the broker fast-path returns before Keychain is touched |
+
+The rule: a **deliberate human reveal/run** (`view --reveal`, `exec`) at a terminal
+gets one sheet; **automation primitives** (`get`, `export`) never do, because
+prompting would either dump plaintext onto a visible screen (`export`) or block a
+`$(…)` capture mid-pipeline (`get`). Everything an **agent** launches stays
+broker-only.
+
+**The same rule covers raw keychain item reads.** A profile's provider token, the
+Claude OAuth item behind `agents view`, and every other `getKeychainToken` caller
+go through one guard: a non-interactive process (an agent runtime, or no TTY — a
+VS Code extension host, a daemon, cron) gets an actionable error naming the item
+instead of a sheet nobody is watching. Items that are provably prompt-free stay
+silent — their callers attest the no-ACL write (bundle metadata, `never`-policy
+bundles, the unlock session store, the OAuth token cache). And when a context
+that *may* prompt has its read cancelled or fail, the item goes into a 5-minute
+read back-off (`~/.agents/.cache/keychain-read-backoff/`, regenerable) so a
+polling caller can't re-raise the sheet every few seconds; any successful read
+or write of the item clears the back-off. Source: `src/lib/secrets/index.ts`
+(`assertRawKeychainReadAllowed`), `src/lib/secrets/headless.ts`,
+`src/lib/secrets/read-backoff.ts`.
+
+**An unlock is global unless you narrow it.** `agents secrets unlock prod` grants
+every harness and a plain shell access for the whole TTL — one Touch ID covers all
+of them. `--for claude` narrows the grant to that harness alone, and other
+harnesses then need their own approval. A reader resolves its own harness scope
+first and falls back to the global grant, so a narrow grant always wins where it
+applies. `--ttl` changes the duration; `--durable` keeps the grant across sleep and
+reboot.
+
+Grants are keyed by scope (`*` for global, the harness id for a `--for` grant) in
+both the broker's memory and the durable session store, and both resolve through
+the same chain — so an unlock behaves identically before and after a daemon
+restart. Before this was unified, an unlock typed in a terminal was stored under
+the ambient `AGENTS_AGENT_NAME` (falling back to a literal `cli`) while a read from
+inside an agent looked under *its* ambient name: the two never met, and a valid
+grant read as "not unlocked" for its entire TTL. Grants written under the old `cli`
+scope migrate to global automatically on the next broker start.
+
 Named bundles of environment variables backed by macOS Keychain — device-local, biometry-gated, injected into agent runs at spawn time.
 
 ## Overview
@@ -10,7 +86,10 @@ A bundle is a named container (`prod`, `staging`, `npm-tokens`) that maps env va
 
 Cross-machine sync has two paths: explicit encrypted push/pull (`agents secrets push/pull`) backed by api.prix.dev, or user-managed file sync with `agents login` plus synced bundles. Push/pull values are sealed with AES-256-GCM before upload. Synced bundles live inside `~/.agents/vault.age`, an age-encrypted file that you copy with iCloud Drive, Dropbox, Syncthing, git, scp, or any other transport.
 
-> **Platform:** macOS Keychain or Linux libsecret. Windows is not supported.
+> **Platform:** cross-platform — macOS Keychain, Linux libsecret, or Windows
+> Credential Manager, each with an AES-256-GCM encrypted-file fallback. The
+> biometry/broker layer is macOS-only; see the [cross-platform parity
+> matrix](specifications.md#secrets) for where guarantees differ per OS.
 
 ## Synced bundles
 
@@ -71,15 +150,46 @@ Source: `src/lib/secrets/index.ts:43` (`REF_PATTERN`), `src/lib/secrets/bundles.
 
 Bundle metadata (names, descriptions, variable names + references, and any non-sensitive `--value` literals) is stored WITHOUT the biometry ACL — it is non-sensitive by contract, since real secret values live in the separate `agents-cli.secrets.*` items that keep the bundle's policy ACL. So enumerating bundles is fully silent: `agents secrets list` — and every internal metadata scan, including crabbox's `agents devices list` at session start — reads with no Touch ID prompt. Only reading a bundle's actual values (injection, `view --reveal`) pops the prompt. Source: `src/lib/secrets/bundles.ts` (`writeBundle` / `writeBundleWithItems`).
 
+## Usage tracking (value-free)
+
+Every secret lifecycle/access event — create, import, export, view, access (a
+value read for injection), unlock — funnels through one chokepoint,
+`emitSecretAudit` (`src/lib/secrets/audit.ts`). That single call writes to **both**
+sinks: the append-only `~/.agents/.history/events/YYYY-MM-DD/events.jsonl` audit log (surfaced by
+`agents events --module secrets`) and a **derived per-bundle read-model** at
+`~/.agents/secrets/secrets.db` (`src/lib/secrets/usage-db.ts`). There is no second
+write path — the read-model is an index fed off the real access flow, the way
+`sessions.db` indexes session metadata. Both sinks are **value-free**: bundle name,
+event kind, key count, resolving agent/host, and a status only — never a secret
+value.
+
+The read-model answers "how often / how recently / by whom was this bundle used?"
+without scanning the whole event stream, and powers:
+
+- `agents secrets view <bundle>` — a usage summary (`accessed 42× (last 2h ago) ·
+  exported 3× (last 1d ago)`), per-agent attribution, and held/unlock state.
+- `agents secrets list --sort used` / `--sort uses` — order bundles by recency /
+  access frequency; the `--json` payload carries `uses`, `usage`, and `heldExpiresAt`.
+- `agents secrets activity [bundle]` — the recent event timeline (bounded to the
+  last 90 days; the full trail is `agents events --module secrets`).
+
+Recording is best-effort — a failure never breaks secret resolution — and
+`AGENTS_NO_USAGE_TRACK=1` disables it entirely (used by tests). Name a bundle after
+what it holds so an agent can guess it: a website by its domain (`stripe.com`,
+`openai.ai`), a desktop app by its binary suffix (`slack.app`, `photoshop.exe`), and
+always pass `--description`; an undescribed bundle prints a "No description found"
+nudge in `list` / `view` / `create`.
+
 ## File-backed bundles (headless / remote)
 
 The keychain backend is biometry-gated, so it can't be read on a headless Mac
 over SSH — there's no GUI session to satisfy Touch ID / the device passcode.
 A **file-backed** bundle stores the same items in an AES-256-GCM encrypted-file
-store (`~/.agents/.cache/secrets/<item>.enc`, scrypt-derived key) keyed by
-`AGENTS_SECRETS_PASSPHRASE` instead — no biometry, fully headless. Source:
-`src/lib/secrets/filestore.ts`, routed per-bundle in `src/lib/secrets/bundles.ts`
-(`bundleBackend`, `bundleItemStore`).
+store (`~/.agents/.cache/secrets/<item>.enc`, scrypt-derived key) — no biometry,
+fully headless. The encryption key comes from `AGENTS_SECRETS_PASSPHRASE` when
+set, otherwise a machine-local key the store auto-provisions on first use (see
+below). Source: `src/lib/secrets/filestore.ts`, routed per-bundle in
+`src/lib/secrets/bundles.ts` (`bundleBackend`, `bundleItemStore`).
 
 ```
 ~/.agents/.cache/secrets/
@@ -89,13 +199,20 @@ store (`~/.agents/.cache/secrets/<item>.enc`, scrypt-derived key) keyed by
 
 - **Opt-in.** Create with `--backend file` (or `import --backend file`). Keychain
   stays the default; existing bundles are untouched.
-- **macOS requires an explicit passphrase.** On a Mac the file store never
-  auto-provisions a machine-local key — reads/writes need `AGENTS_SECRETS_PASSPHRASE`
-  in the environment (or an interactive prompt). This keeps the box holding only
-  ciphertext: the passphrase is supplied per run, not stored next to the data.
-  (Linux keeps the existing locked-keyring auto-provision fallback.)
-- **The passphrase is the one key.** Hold it in a biometry-gated keychain bundle
-  on a trusted machine and forward it per run; never commit it.
+- **Works headless out of the box, every platform.** With no
+  `AGENTS_SECRETS_PASSPHRASE` set, the file store silently provisions a stable
+  machine-local key (a 0600 file under `~/.agents/.secrets-key/`, kept outside the
+  encrypted store so a scan never co-locates key + ciphertext) on first use — macOS
+  included, no prompt, no Touch ID, nothing to remember. This is encryption-at-rest
+  with an on-disk key, the same posture as an SSH private key. Set
+  `AGENTS_SECRETS_PASSPHRASE` to opt into a key held off disk (it always takes
+  precedence and provisions no machine-local file).
+- **`AGENTS_SECRETS_PASSPHRASE` is the off-disk-key opt-in — not a requirement.**
+  Set it when you want the key held in the environment rather than in the 0600
+  machine-local file (e.g. a shared bundle whose ciphertext you sync between boxes,
+  so each box needs the same key): hold it in a biometry-gated keychain bundle on a
+  trusted machine and forward it per run; never commit it. Leave it unset and the
+  box uses its own auto-provisioned machine-local key.
 - **Migrating off a stale keyring.** On Linux/Windows, secrets written earlier
   into the OS keyring / Credential Manager (e.g. while a desktop keyring was
   unlocked) can be shadowed once the file store is in use. Reads transparently
@@ -126,17 +243,47 @@ agents run claude "ship it" --secrets r2.backups@yosemite-s1   # bundle@host suf
 ```
 
 - **`--host <target>`** (single) and **`--hosts <a,b,c>`** (comma list) compose on
-  `list` / `view`; **`bundle@host`** is the reference form for `run --secrets` and
-  the target for `exec --host`.
+  `list` / `view` / `export`; **`--device` / `--devices`** are accepted as aliases
+  everywhere `--host` / `--hosts` are (fleet-vocabulary parity with `agents run
+  --device` and `agents feed --host`), and resolve identically. **`bundle@host`** is the
+  reference form for `run --secrets` and the target for `exec --host`.
 - **Ephemeral.** Remote values cross over ssh stdout (encrypted in transit), are
   parsed in memory, and injected into the run/command env — never written to this
   machine's keychain or disk.
 - **The remote unlocks with its own credentials.** A file-backed remote bundle
-  reads headlessly via the remote's own `AGENTS_SECRETS_PASSPHRASE`; a keychain
+  reads headlessly with the remote's own key — its auto-provisioned machine-local
+  key, or the remote's own `AGENTS_SECRETS_PASSPHRASE` if it sets one; a keychain
   bundle on a macOS remote will block on Touch ID under non-interactive SSH — use
   a remote `file` bundle, an already-unlocked remote secrets-agent, or run
   `view --reveal` from an interactive terminal (it forces an SSH TTY so the prompt
   can surface). This machine's passphrase is never forwarded.
+
+### Pushing to a headless sign host — use `--remote-backend file`
+
+`secrets export --host` defaults to `--remote-backend keychain`. On a **macOS**
+target reached over headless SSH (e.g. the sign host a Linux-driven release offloads
+notarization to), the remote login keychain is **locked** in the non-interactive SSH
+context: the keychain *write* is accepted but the biometry-gated items are not
+readable, so the push lands the bundle **metadata** with no readable secret values,
+and the remote `import` still reports success. A later headless read then fails with
+the confusing `Bundle '<b>' key '<k>': stored item '…' not found`.
+
+The push now **verifies** a keychain-backed write by reading the bundle back the way
+a release will (headlessly, so no Touch ID) and **fails loudly** if the keys didn't
+materialize — naming the locked-login-keychain cause and steering to the fix. For a
+headless sign host, push with the headless-readable file backend instead:
+
+```bash
+export AGENTS_SECRETS_PASSPHRASE="…"                 # one biometry-gated read on the laptop
+agents secrets export apple.com --host mac-mini --remote-backend file
+```
+
+A file-backed bundle is encrypted at rest with `AGENTS_SECRETS_PASSPHRASE` (forwarded
+over ssh stdin, never argv) and reads with no biometry — the right choice whenever the
+remote can't satisfy a Touch ID prompt. Alternatively, unlock the remote login
+keychain first (an interactive login / `agents secrets unlock` on the target) and
+retry the keychain push. See [File-backed bundles](#file-backed-bundles-headless--remote)
+and [Recipe 8](#8-headless-release-on-a-remote-mac).
 
 ### Push to a Windows host
 
@@ -181,10 +328,21 @@ The Windows push bridge is `buildWindowsStdinImportCommand` in
 | Command | Description | Example |
 |---------|-------------|---------|
 | `secrets list` / `ls` | List bundles with key count, expiry warnings, timestamps | `agents secrets list` |
-| `secrets view [name]` | Show keys in a bundle (values masked by default) | `agents secrets view prod` |
+| `secrets list [query]` | Filter by name or description substring | `agents secrets list github` |
+| `secrets list --policy <list>` | Only these prompt policies — `--policy never` is the no-Touch-ID audit | `agents secrets list --policy never` |
+| `secrets list --backend <list>` | Only these backends (`keychain`, `file`, `vault`) | `agents secrets list --backend file` |
+| `secrets list --type <list>` | Only bundles carrying a key of these types | `agents secrets list --type ssh-key,certificate` |
+| `secrets list --kind <list>` | Only these ref kinds — finds raw inline values, or bundles that shell out | `agents secrets list --kind literal` |
+| `secrets list --held` / `--not-held` | Split by live broker state; macOS only (see [the secrets-agent](#the-secrets-agent-macos)) | `agents secrets list --not-held` |
+| `secrets list --expired` | Only bundles with a key whose expiry has already passed | `agents secrets list --expired` |
+| `secrets list --expiring [days]` | Only bundles with a key due within N days (default 30) | `agents secrets list --expiring 7` |
+| `secrets list --unused <duration>` | Not read since this far back; never-used bundles always match | `agents secrets list --unused 3mo` |
+| `secrets list --sort <field>` · `-n` | Sort by `name`/`used`/`uses`/`created`/`updated`/`expiry`, and cap the count. `used` = most recently used, `uses` = most frequently accessed (both from the usage read-model) | `agents secrets list --sort uses -n 10` |
+| `secrets view [name]` | Show keys in a bundle (values masked); also shows held state + a value-free usage summary | `agents secrets view prod` |
 | `secrets view [name] --reveal` | Print keychain values in the clear (TTY only) | `agents secrets view prod --reveal` |
 | `secrets view [name] --reveal --plaintext` | Allow `--reveal` in non-interactive shells | `agents secrets view prod --reveal --plaintext` |
-| `secrets create [name]` | Create an empty bundle | `agents secrets create prod` |
+| `secrets activity [name]` · `-n` · `--json` | Recent value-free usage timeline (create/import/export/view/access/unlock), one bundle or all | `agents secrets activity prod --limit 20` |
+| `secrets create [name]` | Create an empty bundle (name it after what it holds; pass `--description`) | `agents secrets create stripe.com` |
 | `secrets create [name] --description <text>` | Create with a description | `agents secrets create prod --description "Live API keys"` |
 | `secrets create [name] --allow-exec` | Enable exec: refs in this bundle | `agents secrets create tools --allow-exec` |
 | `secrets create [name] --backend <keychain\|file>` | Storage backend; `file` is passphrase-encrypted and headless-readable (see [File-backed bundles](#file-backed-bundles-headless--remote)) | `agents secrets create rush.releases --backend file` |
@@ -229,6 +387,8 @@ The Windows push bridge is `buildWindowsStdinImportCommand` in
 | `secrets export [bundle] --to-1password --vault <name>` | Push bundle to a 1Password vault | `agents secrets export prod --to-1password --vault Team` |
 | `secrets export ... --force` | Overwrite existing 1Password items | `agents secrets export prod --to-1password --vault Team --force` |
 | `secrets export [bundle] --to-file <path>` | Write the bundle as an AES-256-GCM encrypted offline file (needs `AGENTS_SECRETS_PASSPHRASE`; symmetric counterpart of `import --from-file`) | `agents secrets export prod --to-file prod.enc` |
+| `secrets export [bundle] --host <target>` | Push the bundle over SSH to a remote (repeatable; `--device` is an alias). Keychain-backed by default; the push read-back-verifies the write and fails loudly if it didn't persist | `agents secrets export apple.com --host mac-mini` |
+| `secrets export ... --remote-backend file` | Push as a headless-readable file bundle (needs `AGENTS_SECRETS_PASSPHRASE`) — required for a **headless sign host** whose login keychain is locked over SSH | `agents secrets export apple.com --host mac-mini --remote-backend file` |
 
 ### Agent commands (macOS)
 
@@ -241,8 +401,8 @@ The Windows push bridge is `buildWindowsStdinImportCommand` in
 | `secrets unlock <name> --ttl <dur>` | Hold for a custom lifetime (default 7d) | `agents secrets unlock prod --ttl 30m` |
 | `secrets unlock <name> --durable` | Also survive sleep + reboot (default: survives upgrade/restart, re-locks on sleep) | `agents secrets unlock prod --durable` |
 | `secrets lock [names...]` | Wipe held bundles from the agent (default: all) — next read re-prompts | `agents secrets lock` |
-| `secrets status` | Show which bundles the agent holds and when they lock | `agents secrets status` |
-| `secrets policy <bundle> [policy]` | Show or set a bundle's prompt policy: `daily` (default), `always`, or `never` (silent, no biometry ACL — needs `--i-understand`) | `agents secrets policy signing always` |
+| `secrets status` | Show which bundles the agent holds and when they lock, and suggest unlocking any you keep getting prompted for | `agents secrets status` |
+| `secrets policy <bundle> [policy]` | Show or set a bundle's prompt policy: `hold` (default), `always`, or `never` (silent, no biometry ACL — needs `--i-understand`) | `agents secrets policy signing always` |
 | `secrets create <name> --policy always` | Create a bundle that prompts on every read | `agents secrets create signing --policy always` |
 | `secrets create <name> --policy never --i-understand` | Create a silent, unprotected (no biometry ACL) automation-only bundle | `agents secrets create ci-cache --policy never --i-understand` |
 
@@ -270,6 +430,7 @@ See [The secrets-agent](#the-secrets-agent-macos) below for the model and the se
 | `secrets migrate` | Interactively migrate legacy YAML bundles into Keychain | `agents secrets migrate` |
 | `secrets migrate-acl` | Upgrade legacy keychain items to the biometry ACL (macOS) | `agents secrets migrate-acl` |
 | `secrets import-keyring` | Migrate secrets out of the OS keyring / Credential Manager into the encrypted file store (Linux/Windows). Dry-run by default; `--commit` to write | `agents secrets import-keyring --commit` |
+| `secrets rotate-passphrase` | Re-key the whole encrypted file store under a new machine-local passphrase, atomically (see [File store](#linux-headless-servers-and-the-encrypted-file-fallback)). Dry-run by default; `--commit` to write | `agents secrets rotate-passphrase --commit` |
 | `secrets openclaw-keychain migrate [config]` | Move supported OpenClaw plaintext credentials into macOS Keychain and rewrite them as exec SecretRefs | `agents secrets openclaw-keychain migrate ~/.openclaw/openclaw.json` |
 
 `secrets openclaw-keychain migrate` targets OpenClaw surfaces that accept
@@ -394,7 +555,7 @@ agents secrets rotate prod STRIPE_API_KEY \
 agents secrets rotate prod STRIPE_API_KEY --clear-meta
 ```
 
-The `list` command flags secrets with `--expires` dates in the next 30 days in the EXPIRING column. Source: `src/commands/secrets.ts:331-340`.
+The `list` command's EXPIRING column counts keys needing attention — those already past their `--expires` date **and** those falling due in the next 30 days — and colours by the worse of the two: red once anything has lapsed, yellow while everything is merely upcoming. Filter on either with `agents secrets list --expired` or `--expiring [days]`. Source: `renderExpiringCol`, `src/commands/secrets.ts`.
 
 ### 5. Share a bundle with a teammate
 
@@ -522,6 +683,8 @@ The secrets-agent is the ssh-agent answer:
 
 It is **opt-in by construction**: if you never run `unlock`, resolution is byte-for-byte today's keychain path. Audit events tag broker-served reads with `"source":"agent"` so you can tell them apart from real keychain reads.
 
+Because those audit events record every read, `agents secrets status` closes the loop: it reads the `secrets.get` events and, at the end of its output, lists any keychain-backed bundle you were prompted for (a read that fell through to biometry, not served by the broker/session) **3+ times in the last 7 days** and is not currently held — each with a ready `agents secrets unlock <name>`. It runs even when nothing is held (the case where you re-prompt most), and skips `never`/no-ACL and file/vault bundles, which never raise a Touch ID prompt.
+
 ### Persistent service
 
 `agents secrets start` installs the broker as a **launchd user service** (`RunAtLoad` + `KeepAlive`, `ProcessType: Interactive`). Without it, the broker is cold-started on demand — and on a heavily loaded machine a freshly spawned process can't get scheduled to finish booting and bind its socket, so reads silently fall back to the keychain and prompt. The service starts **once** and stays up for the whole login session, so every read just connects. `agents secrets stop` removes it; `agents secrets status` shows whether it's installed. `unlock` and auto-cache install/kickstart it automatically, so first use sets it up.
@@ -535,26 +698,32 @@ A long-running daemon or broker keeps running the code it started with; an in-pl
 
 ### Prompt policy and auto-cache
 
-Each bundle has a **prompt policy** that controls how often macOS asks for Touch ID, shown in the `POLICY` column of `agents secrets list` and set with `agents secrets policy <bundle> [daily|always]` (also `--policy` on `create`):
+Each bundle has a **prompt policy** that controls how often macOS asks for Touch ID, shown in the `POLICY` column of `agents secrets list` and set with `agents secrets policy <bundle> [hold|always|never]` (also `--policy` on `create`):
 
-- **`daily`** (default): ask once, then hold it silently. The **first real keychain read auto-loads it** into the broker (in the background, no added latency), so the next concurrent run reads it silently without you running `unlock` at all — one Touch ID per ~7 days. Held from that unlock (not refreshed on use) — re-asks sooner after sleep, logout, or `lock`. A bare screen-lock does **not** drop it. Despite the name, it is **not** tied to one calendar day or one login session; it's the rolling ~7-day (1 week) hold — the name is historical, from when the window was ~24h.
+- **`hold`** (default): ask once, then serve it silently for the **hold window** — `secrets.agent.holdMs`, 7 days by default. The **first real keychain read auto-loads it** into the broker (in the background, no added latency), so the next concurrent run reads it silently without you running `unlock` at all. Held from that unlock (not refreshed on use) — re-asks sooner after sleep, logout, or `lock`. A bare screen-lock does **not** drop it.
+
+  This tier was called **`daily`**, which was simply wrong: it is not one calendar day, not one login session, and not any fixed period — it is whatever `secrets.agent.holdMs` says. `daily` and the wire token `session` are still accepted everywhere, so existing configs, scripts, and bundles already written to a keychain keep working unchanged.
+
+  Because the tier *is* a duration, the `POLICY` column states it rather than printing the bare word: `hold 7d`, or `hold 7d · held 6d` while the broker is actually caching the bundle. The window follows `secrets.agent.holdMs`, so a 24-hour hold reads `hold 1d`. `always` and `never` have no window and show none. `secrets list --json` and `secrets view --json` carry the same figure as `holdMs` (null on `always`/`never`).
+
+  **The hold is not a property of the stored item.** The item itself always carries the biometry ACL; the silence comes entirely from the broker holding the value in RAM plus the no-ACL durable session backing it. If either is unavailable, every read falls through to the ACL'd item and prompts — so a broker that is down or unreachable silently degrades `hold` to prompt-every-read. Only `never` is prompt-free independently of the broker.
 - **`always`**: ask every time. Only an explicit `unlock` ever puts it in the agent; every other read pops Touch ID. Opt high-value bundles (signing keys, etc.) into this when you want to confirm every single read.
 - **`never`**: stored **without** the biometry access control — reads are fully silent (no Touch ID, no broker, no user-presence check). This is the least-safe tier and is [documented in the security model](#security-model) as an on-disk-plaintext-equivalent downgrade: any code running as your user reads it with zero interaction. It is marked loudly (`never · NO ACL`, in red) in `agents secrets list` and `view`, and creating or switching to it requires an explicit confirmation — an interactive "are you sure" prompt, or `--i-understand` in a headless shell. Reserve it for low-sensitivity, automation-only credentials. Writing a `never` item needs a signed helper that carries the `set-no-acl` path; an older pinned helper rejects the write loudly rather than silently storing an `always`-style ACL'd item.
 
 Change the **default** for all bundles globally in `agents.yaml` (`secrets.policy: always` to flip it back), or override per bundle with `agents secrets policy <bundle> always`. `never` is never a *default* — it can only be set explicitly per bundle, behind the confirmation gate.
 
-> Wire-format note: the policy persists under the legacy `tier` key (`session` == `daily`, `biometry` == explicit `always`, `none` == `never`, absent == inherit the default) so bundles stay readable across mixed CLI versions on synced machines. `--tier`/`agents secrets tier` and the old `biometry`/`session`/`none` values still work as aliases. An older CLI that doesn't know `none` reads it as absent and falls back to its own default — safe, since it also lacks the no-ACL write path.
+> Wire-format note: the policy persists under the legacy `tier` key (`session` == `hold`, `biometry` == explicit `always`, `none` == `never`, absent == inherit the default) so bundles stay readable across mixed CLI versions on synced machines. `--tier`/`agents secrets tier` and the old `biometry`/`session`/`none` values still work as aliases. An older CLI that doesn't know `none` reads it as absent and falls back to its own default — safe, since it also lacks the no-ACL write path.
 
 ```yaml
 # ~/.agents/agents.yaml
 secrets:
-  policy: daily   # default prompt policy for bundles without an explicit one (this IS the default)
+  policy: hold    # default prompt policy for bundles without an explicit one (this IS the default; `daily` still accepted)
   agent:
-    auto: false     # opt OUT of daily-policy self-caching (on by default)
+    auto: false     # opt OUT of hold-policy self-caching (on by default)
     durable: true   # make every unlock survive sleep + reboot too (default: survives upgrade/restart, re-locks on sleep)
 ```
 
-Auto-cache is **on by default** and only ever applies to `daily`-policy bundles — an `always` bundle is never auto-held, and a `never` bundle needs no agent at all (it is already silent). The `never` policy (items stored without the biometry ACL for fully silent reads with no broker) is the global downgrade the agent is otherwise designed to avoid, so it stays gated behind an explicit confirmation and a signed helper with the `set-no-acl` write path; see the [security model](#security-model). Tracked in [issue #421](https://github.com/phnx-labs/agents-cli/issues/421).
+Auto-cache is **on by default** and only ever applies to `hold`-policy bundles — an `always` bundle is never auto-held, and a `never` bundle needs no agent at all (it is already silent). The `never` policy (items stored without the biometry ACL for fully silent reads with no broker) is the global downgrade the agent is otherwise designed to avoid, so it stays gated behind an explicit confirmation and a signed helper with the `set-no-acl` write path; see the [security model](#security-model). Tracked in [issue #421](https://github.com/phnx-labs/agents-cli/issues/421).
 
 **The trade-off (read this):** while a bundle is unlocked, a same-user process that can reach the socket reads it **silently** — today it would at least have to pop a visible "Unlock agents-cli secrets" prompt you might notice. That is the same trust boundary the keychain already concedes above ("any same-user process can pop the prompt and read"), minus the prompt. Bound it by unlocking only the bundles you need, keeping a short TTL, locking when you step away, and never unlocking high-value bundles you'd rather always confirm.
 
@@ -592,11 +761,57 @@ private key, and identical to the common `export AGENTS_SECRETS_PASSPHRASE=… `
 exposure (backups, accidental commits, `.env` leaks), not against another
 process running as the same user. For a key held **off disk**, set
 `AGENTS_SECRETS_PASSPHRASE` (it always takes precedence) or unlock the keyring
-(e.g. configure `pam_gnome_keyring` for SSH login). To rotate, set a new
-`AGENTS_SECRETS_PASSPHRASE`, re-add the secrets, and delete `.passphrase`.
+(e.g. configure `pam_gnome_keyring` for SSH login).
+
+**Rotating the passphrase.** When the machine-local key is compromised (e.g. it
+was exported into the process environment and captured), rotate it with:
+
+```bash
+agents secrets rotate-passphrase            # dry-run: report the item count + round-trip
+agents secrets rotate-passphrase --commit   # re-encrypt the store under a fresh key
+```
+
+The dry run never re-keys — the new passphrase it generates is used only to prove
+every item round-trips, and never reaches the store or the key file.
+
+It is not, however, a pure no-op: if a previous rotation was interrupted, the dry
+run **heals** it (restoring the store and sweeping the `.rotate-*` artifacts) and
+reports that. Recovery is deliberately not gated on `--commit`, because healing is
+how a crashed store becomes readable again *without* re-keying it — gating it would
+leave such a store recoverable only by a full rotation. That recovery is the one
+thing a dry run writes.
+
+This decrypts every item under the current key, re-encrypts it under a newly
+generated one, and swaps both the ciphertext and the 0600 key file atomically —
+staged in a temp dir, verified (every item must round-trip under the new key),
+then swapped by directory rename. A crash at any point self-heals on the next
+`rotate-passphrase` run to a single readable store (ordinary `secrets get` stays
+broken until that recovery runs — recovery only fires on the next rotate): it
+probes which key actually decrypts the live store rather than guessing from which
+files are present, classifies the whole store, and either completes the rotation
+forward or rolls back **only when one key opens every item** — so a crash in the
+gap between the store swap and the key swap can never strand the store under a
+mismatched key. If a `secrets set` slipped in between a crashed rotation and the
+recovery and left a **mixed** store — items under two keys at once, or a store dir
+an interstitial write recreated after the crash left it absent, so its backup holds
+items the live dir does not — recovery refuses with an actionable error and
+preserves every recovery artifact rather than deleting the only copy of a key or
+of the backed-up ciphertext — so nothing is ever lost silently; you merge or
+re-seal each item under whichever key opens it and re-run. Rotation
+and every store write take one cross-process lock, so a `secrets set` or a second
+rotation can never interleave with a swap to begin with. No plaintext secret value
+or passphrase is ever written to
+disk, argv, or a log. Items that don't decrypt under the current key (orphan
+caches, stale artifacts) are carried through untouched and reported. It refuses
+to run while the secrets-agent holds live unlocks, or while
+`AGENTS_SECRETS_PASSPHRASE` is exported in the environment (that stale export
+would shadow the new key), unless you pass `--force`. Any process still holding
+the old passphrase in its environment must be restarted afterward.
 
 ## See Also
 
+- [`specifications.md` §Secrets](specifications.md#secrets) — **the normative contract** (requirements + Given/When/Then + parity matrix); read it for the guarantees this how-to implements
+- [`../../../docs/design/secrets-trust-boundaries.md`](../../../docs/design/secrets-trust-boundaries.md) — the plaintext data-flow: which commands inject vs materialize
 - `docs/00-concepts.md` — DotAgents repos and resource model
 - `docs/profiles.md` — provider API keys for non-default models
 - `docs/03-routines.md` — scheduled jobs with sandboxed permissions (secrets are dropped from the sandbox env by default)

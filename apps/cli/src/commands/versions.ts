@@ -16,12 +16,14 @@ import { select, confirm, checkbox } from '@inquirer/prompts';
 
 import {
   AGENTS,
-  ALL_AGENT_IDS,
+  MANAGED_AGENT_IDS,
   accountOrgBadge,
   getAccountEmail,
   getAccountInfo,
   agentLabel,
   warnAgentDeprecated,
+  isAgentHardDeprecated,
+  hardDeprecationError,
   isSelfUpdatingAgent,
 } from '../lib/agents.js';
 import type { AccountInfo } from '../lib/agents.js';
@@ -101,7 +103,7 @@ function fixSessionFilePaths(agent: AgentId, version: string, oldVersionDir: str
   updateSessionFilePaths(oldVersionDir, trashPath);
 }
 
-function formatAccountHint(info: AccountInfo, usage: UsageSnapshot | null): string {
+function formatAccountHint(info: AccountInfo, usage: UsageSnapshot | null, unverified = false): string {
   const parts: string[] = [];
   if (info.email) {
     // Same-email accounts can live in different orgs (personal Max vs a Team
@@ -109,7 +111,7 @@ function formatAccountHint(info: AccountInfo, usage: UsageSnapshot | null): stri
     const badge = accountOrgBadge(info);
     parts.push(badge ? `${info.email} (${badge})` : info.email);
   }
-  const usageSummary = formatUsageSummary(info.plan, usage);
+  const usageSummary = formatUsageSummary(info.plan, usage, 3, { unverified });
   if (usageSummary) parts.push(usageSummary);
   if (parts.length === 0) return '';
   return chalk.gray(` [${parts.join(', ')}]`);
@@ -207,7 +209,7 @@ async function versionPruneAction(
     const parsed = parseAgentSpec(spec);
     if (!parsed) {
       console.log(chalk.red(`Invalid agent: ${spec}`));
-      console.log(chalk.gray(`Format: <agent>[@version]. Available: ${ALL_AGENT_IDS.join(', ')}`));
+      console.log(chalk.gray(`Format: <agent>[@version]. Available: ${MANAGED_AGENT_IDS.join(', ')}`));
       continue;
     }
 
@@ -430,12 +432,18 @@ export function registerVersionsCommands(program: Command): void {
         const parsed = parseAgentSpec(spec);
         if (!parsed) {
           console.log(chalk.red(`Invalid agent: ${spec}`));
-          console.log(chalk.gray(`Format: <agent>[@version]. Available: ${ALL_AGENT_IDS.join(', ')}`));
+          console.log(chalk.gray(`Format: <agent>[@version]. Available: ${MANAGED_AGENT_IDS.join(', ')}`));
           continue;
         }
 
         const { agent, version } = parsed;
         const agentConfig = AGENTS[agent];
+
+        if (isAgentHardDeprecated(agent)) {
+          console.error(chalk.red(hardDeprecationError(agent)));
+          process.exitCode = 1;
+          continue;
+        }
 
         warnAgentDeprecated(agent);
 
@@ -544,8 +552,10 @@ export function registerVersionsCommands(program: Command): void {
             }
 
             // Seed the fresh version home with user settings from the current
-            // default version (settings.json, keybindings, codex config/auth).
-            // Gap-filling only — never overwrites what the new home has.
+            // default version (settings.json, keybindings, codex config).
+            // Credentials are deliberately excluded so each version keeps its own
+            // login (see SETTINGS_MANIFEST). Gap-filling only — never overwrites
+            // what the new home has.
             const carrySource = getGlobalDefault(agent);
             if (carrySource && carrySource !== installedVersion) {
               const carried = carryForwardSettings(
@@ -638,7 +648,10 @@ export function registerVersionsCommands(program: Command): void {
                     cliVersion: installedVersion,
                     info,
                   });
-                  const accountHint = formatAccountHint(info, usage.snapshot);
+                  // This hint sits in a "switch your default to this version?"
+                  // confirm — the one place a stale reading directly steers a
+                  // choice, so it must not present an unconfirmed bar as fact.
+                  const accountHint = formatAccountHint(info, usage.snapshot, !!usage.snapshot && !!usage.error);
 
                   const message = `Switch default from ${agentLabel(agentConfig.id)}@${currentDefault} to ${agentLabel(agentConfig.id)}@${installedVersion}${accountHint}?`;
 
@@ -753,7 +766,7 @@ export function registerVersionsCommands(program: Command): void {
           const parsed = parseAgentSpec(agentArg);
           if (!parsed) {
             console.log(chalk.red(`Invalid agent: ${agentArg}`));
-            console.log(chalk.gray(`Format: <agent>[@version]. Available: ${ALL_AGENT_IDS.join(', ')}`));
+            console.log(chalk.gray(`Format: <agent>[@version]. Available: ${MANAGED_AGENT_IDS.join(', ')}`));
             return;
           }
           agent = parsed.agent;
@@ -762,7 +775,7 @@ export function registerVersionsCommands(program: Command): void {
           const agentLower = agentArg.toLowerCase();
           if (!AGENTS[agentLower as AgentId]) {
             console.log(chalk.red(`Invalid agent: ${agentArg}`));
-            console.log(chalk.gray(`Available: ${ALL_AGENT_IDS.join(', ')}`));
+            console.log(chalk.gray(`Available: ${MANAGED_AGENT_IDS.join(', ')}`));
             return;
           }
           agent = agentLower;
@@ -829,7 +842,12 @@ export function registerVersionsCommands(program: Command): void {
               const accountInfo = pickerAccountMap.get(v);
               const email = accountInfo?.email || '';
               const usageKey = getUsageLookupKey(accountInfo);
-              const usageSummary = usageKey ? formatUsageSummary(null, usageByKey.get(usageKey)?.snapshot || null) : '';
+              const versionUsage = usageKey ? usageByKey.get(usageKey) : undefined;
+              const usageSummary = usageKey
+                ? formatUsageSummary(null, versionUsage?.snapshot || null, 3, {
+                    unverified: !!versionUsage?.snapshot && !!versionUsage.error,
+                  })
+                : '';
 
               if (maxEmailLen > 0) {
                 label += '  ';

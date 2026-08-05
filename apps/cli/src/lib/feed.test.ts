@@ -2,10 +2,13 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as yaml from 'yaml';
 import { spawnSync } from 'child_process';
 import {
   FEED_PUBLISH_HOOK_SCRIPT,
   ensureFeedPublishHook,
+  buildDeclaredBlock,
+  type DeclaringAgent,
   publishBlock,
   listBlocks,
   readBlock,
@@ -19,6 +22,8 @@ import {
   listAskStats,
   type OpenBlock,
 } from './feed.js';
+import { classifyBlock, filterBlocksForFeed } from './ask-classifier.js';
+import { isPhoneUrgent, DEFAULT_POLICY } from './feed-policy.js';
 import { loadOperators } from './operator.js';
 
 const hasPython = spawnSync('python3', ['--version']).status === 0;
@@ -163,6 +168,26 @@ describe('feed store', () => {
     expect(blocks[0].questions[1].multiSelect).toBe(true);
   });
 
+  it('buildDeclaredBlock stamps project from cwd, worktree-aware', () => {
+    const plain = buildDeclaredBlock(
+      { sessionId: 's1', mailboxId: 'm1', host: 'zion', runtime: 'claude', cwd: '/home/muqsit/src/foo' },
+      { text: 'Stuck?' },
+    );
+    expect(plain.project).toBe('foo');
+
+    const worktree = buildDeclaredBlock(
+      { sessionId: 's2', mailboxId: 'm2', host: 'zion', runtime: 'claude', cwd: '/home/muqsit/src/agents-cli/.agents/worktrees/feature-x' },
+      { text: 'Stuck?' },
+    );
+    expect(worktree.project).toBe('agents-cli');
+
+    const noCwd = buildDeclaredBlock(
+      { sessionId: 's3', mailboxId: 'm3', host: 'zion', runtime: 'claude' },
+      { text: 'Stuck?' },
+    );
+    expect(noCwd.project).toBeUndefined();
+  });
+
   it.runIf(hasPython)('real hook publishes every question and runtime into the shared feed', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-feed-hook-'));
     const mailbox = path.join(home, '.agents', '.history', 'mailbox', 'session-123');
@@ -207,6 +232,23 @@ describe('feed store', () => {
       totalAskCount: 2,
     });
     expect(stats[0].recentAskTimestamps).toHaveLength(2);
+  });
+
+  it.runIf(hasPython)('real hook stamps project from cwd, folding worktrees to repo name', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-feed-hook-project-'));
+    const result = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({
+        session_id: 'session-project',
+        tool_input: { questions: [{ question: 'Which approach?' }] },
+        cwd: '/home/muqsit/src/agents-cli/.agents/worktrees/feature-x',
+      }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(result.status).toBe(0);
+    const blocks = listBlocks(path.join(home, '.agents', '.history', 'feed'));
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].project).toBe('agents-cli');
   });
 
   it.runIf(hasPython)('real hook publishes waiting notifications with routing identity', () => {
@@ -356,6 +398,73 @@ describe('feed store', () => {
     expect(listBlocks(feedDir)).toEqual([]);
   });
 
+  it.runIf(hasPython)('real hook does NOT clear a declared (--blocked) block on Stop/SessionEnd/PostToolUse', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-feed-declared-persist-'));
+    const feedDir = path.join(home, '.agents', '.history', 'feed');
+    fs.mkdirSync(feedDir, { recursive: true });
+    // `agents feed post --blocked` writes a declared block here (CLI side).
+    const agent: DeclaringAgent = {
+      sessionId: 'session-declared',
+      mailboxId: 'session-declared',
+      host: 'testbox',
+      runtime: 'headless',
+    };
+    publishBlock(buildDeclaredBlock(agent, { text: 'npm token expired, cannot publish' }), feedDir);
+    expect(listBlocks(feedDir)).toHaveLength(1);
+    expect(listBlocks(feedDir)[0].kind).toBe('declared');
+
+    // The agent parks the block and its turn ends: Stop fires, then SessionEnd,
+    // and any PostToolUse in between. None may drop it -- the owner still has to
+    // answer it, and it must stay in `agents feed` until they do.
+    for (const hook_event_name of ['Stop', 'SessionEnd', 'PostToolUse'] as const) {
+      const clear = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+        input: JSON.stringify({ session_id: 'session-declared', hook_event_name }),
+        env: { ...process.env, HOME: home },
+        encoding: 'utf-8',
+      });
+      expect(clear.status).toBe(0);
+    }
+    expect(listBlocks(feedDir).filter(b => b.kind === 'declared')).toHaveLength(1);
+
+    // Contrast: a notification block (harness idle prompt) STILL clears on Stop --
+    // the fix is scoped to declared blocks, not a blanket "never clear on Stop".
+    spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({
+        session_id: 'session-notif',
+        hook_event_name: 'Notification',
+        notification_type: 'idle_prompt',
+        message: 'Claude is waiting for your next prompt',
+      }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(listBlocks(feedDir).some(b => b.sessionId === 'session-notif')).toBe(true);
+    const clearNotif = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({ session_id: 'session-notif', hook_event_name: 'Stop' }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(clearNotif.status).toBe(0);
+    expect(listBlocks(feedDir).some(b => b.sessionId === 'session-notif')).toBe(false);
+    // The declared block for the other session is still present.
+    expect(listBlocks(feedDir).filter(b => b.kind === 'declared')).toHaveLength(1);
+
+    // Once the declared block is ANSWERED, a lifecycle clear DOES remove it AND its
+    // answered marker -- so a later --blocked in the same session is not falsely
+    // locked as already-answered (recordAnswer creates the marker with O_EXCL).
+    const declaredBlockId = blockIdForSession('session-declared');
+    recordAnswer(declaredBlockId, { answeredFrom: 'terminal' }, feedDir);
+    expect(isBlockAnswered(declaredBlockId, feedDir)).toBe(true);
+    const clearAnswered = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({ session_id: 'session-declared', hook_event_name: 'Stop' }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(clearAnswered.status).toBe(0);
+    expect(listBlocks(feedDir).some(b => b.sessionId === 'session-declared')).toBe(false);
+    expect(isBlockAnswered(declaredBlockId, feedDir)).toBe(false);
+  });
+
   it.runIf(hasPython)('real hook captures multi-operator control metadata', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-feed-controls-'));
     const result = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
@@ -414,9 +523,87 @@ describe('feed store', () => {
     expect(updated).toContain('# keep this comment');
     expect(updated).toContain('feed-publish:');
     expect(updated).toContain('feed-publish-notification:');
+    expect(updated).toContain('feed-publish-permission:');
     expect(updated).toContain('feed-clear-answered:');
+    expect(updated).toContain('feed-clear-permission:');
     expect(updated).toContain('feed-clear-lifecycle:');
     expect(fs.readFileSync(path.join(userDir, 'hooks', '10-feed-publish.py'), 'utf-8')).toBe(FEED_PUBLISH_HOOK_SCRIPT);
+  });
+
+  it('installs feed hooks for codex as well as claude (RUSH-2039)', () => {
+    const userDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-feed-codex-install-'));
+    expect(ensureFeedPublishHook(userDir)).toEqual({ installed: true });
+    const yamlText = fs.readFileSync(path.join(userDir, 'agents.yaml'), 'utf-8');
+    // The Codex-only approval hook subscribes to PermissionRequest.
+    expect(yamlText).toContain('feed-publish-permission:');
+    expect(yamlText).toContain('PermissionRequest');
+    // Every feed hook lists codex so its harness parity is documented.
+    const doc = yaml.parse(yamlText) as { hooks: Record<string, { agents?: string[] }> };
+    for (const name of ['feed-publish', 'feed-publish-notification', 'feed-publish-permission', 'feed-clear-answered', 'feed-clear-permission', 'feed-clear-lifecycle']) {
+      expect(doc.hooks[name].agents).toContain('codex');
+    }
+  });
+
+  it('scopes the matcher-less PostToolUse clear to codex only, leaving Claude unchanged (RUSH-2039)', () => {
+    const userDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-feed-clear-scope-'));
+    expect(ensureFeedPublishHook(userDir)).toEqual({ installed: true });
+    const doc = yaml.parse(fs.readFileSync(path.join(userDir, 'agents.yaml'), 'utf-8')) as {
+      hooks: Record<string, { agents?: string[]; events?: string[]; matcher?: string }>;
+    };
+    // feed-clear-permission fires on EVERY PostToolUse (it has no matcher), so
+    // registering it for Claude would add per-tool overhead AND delete Claude's
+    // notification-kind blocks the moment any later tool runs. Codex-only keeps
+    // Claude's card lifetime (persist to Stop/SessionEnd) exactly as before.
+    expect(doc.hooks['feed-clear-permission'].agents).toEqual(['codex']);
+    expect(doc.hooks['feed-clear-permission'].agents).not.toContain('claude');
+    expect(doc.hooks['feed-clear-permission'].matcher).toBeUndefined();
+    // The ONLY PostToolUse feed hook Claude still registers is the answered
+    // clear, and it is matcher-scoped to AskUserQuestion -- so an unrelated
+    // Claude tool completion never touches a notification-kind block.
+    expect(doc.hooks['feed-clear-answered'].agents).toContain('claude');
+    expect(doc.hooks['feed-clear-answered'].events).toEqual(['PostToolUse']);
+    expect(doc.hooks['feed-clear-answered'].matcher).toBe('AskUserQuestion');
+    expect(doc.hooks['feed-clear-permission'].events).toEqual(['PostToolUse']);
+  });
+
+  it.runIf(hasPython)('a plain PostToolUse clears a notification block at the script level -- which is why Claude must NOT register the matcher-less clear', () => {
+    // The script is agent-blind: it clears on hook_event_name alone. So if a
+    // matcher-less PostToolUse (any tool completion) were delivered for Claude,
+    // it WOULD delete Claude's notification-kind card -- that is the exact
+    // regression. This test pins that causal fact at the script level; the
+    // manifest test above pins the fix (Claude does not register the hook, so
+    // its plain tool completions never reach the script and the card persists
+    // to Stop/SessionEnd as it did before RUSH-2039).
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-feed-notif-clear-'));
+    const feedDir = path.join(home, '.agents', '.history', 'feed');
+    const publish = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({
+        session_id: 'notif-clear-sess',
+        hook_event_name: 'Notification',
+        notification_type: 'permission_prompt',
+        title: 'Permission needed',
+        message: 'Claude needs permission to use Bash',
+      }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(publish.status).toBe(0);
+    expect(listBlocks(feedDir)).toMatchObject([{ kind: 'notification', notificationType: 'permission_prompt' }]);
+
+    // A plain (non-AskUserQuestion) PostToolUse -- what feed-clear-permission
+    // delivered for EVERY Claude tool before the fix -- clears the card. The
+    // question-guard at feed.ts:546-553 preserves only kind == 'question'.
+    const plainPostToolUse = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({
+        session_id: 'notif-clear-sess',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+      }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(plainPostToolUse.status).toBe(0);
+    expect(listBlocks(feedDir)).toEqual([]);
   });
 
   it('recordAnswer claims the first answer and rejects later ones', () => {
@@ -597,5 +784,130 @@ describe('feed store', () => {
     expect(republish.status).toBe(0);
     expect(isBlockAnswered(blockId, feedDir)).toBe(false);
     expect(listBlocks(feedDir)).toMatchObject([{ questions: [{ text: 'Second?' }] }]);
+  });
+
+  // --- RUSH-2039: Codex approval prompts publish urgent feed blocks ---------
+
+  it.runIf(hasPython)('real hook publishes a Codex PermissionRequest as an urgent approval block', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-feed-codex-perm-'));
+    const feedDir = path.join(home, '.agents', '.history', 'feed');
+    const result = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({
+        session_id: 'codex-sess-1',
+        hook_event_name: 'PermissionRequest',
+        permission_mode: 'default',
+        tool_name: 'Bash',
+        tool_input: { command: 'rm -rf build' },
+      }),
+      env: { ...process.env, HOME: home, AGENTS_RUNTIME: 'headless' },
+      encoding: 'utf-8',
+    });
+    expect(result.status).toBe(0);
+    const blocks = listBlocks(feedDir);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({
+      kind: 'notification',
+      notificationType: 'permission_prompt',
+      blockClass: 'approval',
+      costOfDelay: 'high',
+      safeDefault: 'deny',
+    });
+    // The block names the tool and its command so the operator can judge it.
+    expect(blocks[0].questions[0].text).toContain('Bash');
+    expect(blocks[0].questions[0].text).toContain('rm -rf build');
+    expect(blocks[0].questions[0].header).toBe('Approval needed');
+  });
+
+  it.runIf(hasPython)('real hook clears a Codex approval block once the approved tool runs', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-feed-codex-clear-'));
+    const feedDir = path.join(home, '.agents', '.history', 'feed');
+    const publish = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({
+        session_id: 'codex-sess-2',
+        hook_event_name: 'PermissionRequest',
+        tool_name: 'Bash',
+        tool_input: { command: 'ls' },
+      }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(publish.status).toBe(0);
+    expect(listBlocks(feedDir)).toHaveLength(1);
+
+    // Codex runs the approved tool -> matcher-less PostToolUse clears the card.
+    const clear = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({
+        session_id: 'codex-sess-2',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+      }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(clear.status).toBe(0);
+    expect(listBlocks(feedDir)).toEqual([]);
+  });
+
+  it.runIf(hasPython)('matcher-less PostToolUse does not wipe an open AskUserQuestion mid-turn', () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-feed-question-guard-'));
+    const feedDir = path.join(home, '.agents', '.history', 'feed');
+    const publish = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({
+        session_id: 'sess-q-guard',
+        hook_event_name: 'PreToolUse',
+        tool_input: { questions: [{ question: 'Which approach?' }] },
+      }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(publish.status).toBe(0);
+    expect(listBlocks(feedDir)).toHaveLength(1);
+
+    // An unrelated tool completing must NOT clear the open question.
+    const unrelated = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({
+        session_id: 'sess-q-guard',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+      }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(unrelated.status).toBe(0);
+    expect(listBlocks(feedDir)).toMatchObject([{ kind: 'question', questions: [{ text: 'Which approach?' }] }]);
+
+    // The AskUserQuestion PostToolUse still clears it.
+    const answer = spawnSync('python3', ['-c', FEED_PUBLISH_HOOK_SCRIPT], {
+      input: JSON.stringify({
+        session_id: 'sess-q-guard',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'AskUserQuestion',
+      }),
+      env: { ...process.env, HOME: home },
+      encoding: 'utf-8',
+    });
+    expect(answer.status).toBe(0);
+    expect(listBlocks(feedDir)).toEqual([]);
+  });
+
+  it('feed --dispatch classifies a Codex approval block as urgent and surfaces it', () => {
+    // Mirror the block the hook publishes for a Codex PermissionRequest.
+    const block = makeBlock('codex-dispatch', 'Codex needs approval to run Bash: rm -rf build', {
+      runtime: 'headless',
+      kind: 'notification',
+      notificationType: 'permission_prompt',
+      blockClass: 'approval',
+      costOfDelay: 'high',
+      safeDefault: 'deny',
+      questions: [{ text: 'Codex needs approval to run Bash: rm -rf build', header: 'Approval needed' }],
+    });
+
+    // Not suppressed as a stall, and classified as an approval.
+    const filtered = filterBlocksForFeed([block]);
+    expect(filtered.surfaced).toHaveLength(1);
+    expect(classifyBlock(block).class).toBe('approval');
+
+    // Urgent under the default policy (costOfDelay high >= threshold medium).
+    expect(isPhoneUrgent(block, DEFAULT_POLICY)).toBe(true);
   });
 });

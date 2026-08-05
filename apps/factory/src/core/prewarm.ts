@@ -10,7 +10,6 @@ export interface PrewarmConfig {
   statusCommand: string;        // Command to get session info (e.g., '/status', '/stats')
   sessionIdPattern: RegExp;     // Pattern to extract session ID from output
   exitSequence: string[];       // Key sequences to cleanly exit
-  resumeCommand: (sessionId: string) => string;
 }
 
 /** A pre-warmed session ready for hand-off */
@@ -45,7 +44,6 @@ export const PREWARM_CONFIGS: Record<PrewarmAgentType, PrewarmConfig> = {
     // Matches: "Session ID: 01J9..."/"Session: 01J9..."
     sessionIdPattern: /Session(?:\s+ID)?:\s*([a-zA-Z0-9_-]+)/i,
     exitSequence: ['\x1b', '\x03', '\x03'],  // Esc, Ctrl+C, Ctrl+C (need Esc first for Claude)
-    resumeCommand: (id) => `claude -r ${id}`
   },
   codex: {
     agentType: 'codex',
@@ -54,7 +52,6 @@ export const PREWARM_CONFIGS: Record<PrewarmAgentType, PrewarmConfig> = {
     // Matches: "Session: 01J9..." or "Session ID: 01J9..."
     sessionIdPattern: /Session(?:\s+ID)?:\s*([a-zA-Z0-9_-]+)/i,
     exitSequence: ['\x03', '\x03'],  // Ctrl+C twice
-    resumeCommand: (id) => `codex resume ${id}`
   },
   gemini: {
     agentType: 'gemini',
@@ -63,7 +60,6 @@ export const PREWARM_CONFIGS: Record<PrewarmAgentType, PrewarmConfig> = {
     // Matches session ID pattern
     sessionIdPattern: /Session(?:\s+ID)?:\s*([a-zA-Z0-9_-]+)/i,
     exitSequence: ['\x03', '\x03'],  // Ctrl+C twice
-    resumeCommand: (id) => `gemini --resume ${id}`
   },
   cursor: {
     agentType: 'cursor',
@@ -72,7 +68,6 @@ export const PREWARM_CONFIGS: Record<PrewarmAgentType, PrewarmConfig> = {
     // Matches session ID pattern
     sessionIdPattern: /Session(?:\s+ID)?:\s*([a-zA-Z0-9_-]+)/i,
     exitSequence: ['\x03', '\x03'],  // Ctrl+C twice
-    resumeCommand: (id) => `cursor-agent --resume=${id}`
   },
   opencode: {
     agentType: 'opencode',
@@ -81,7 +76,6 @@ export const PREWARM_CONFIGS: Record<PrewarmAgentType, PrewarmConfig> = {
     // Matches OpenCode session ID format: ses_xxx
     sessionIdPattern: /ses_[a-zA-Z0-9]+/i,
     exitSequence: ['\x03', '\x03'],  // Ctrl+C twice
-    resumeCommand: (id) => `opencode -s ${id}`
   }
 };
 
@@ -171,29 +165,50 @@ export function selectBestSession(
 }
 
 /**
- * Build resume command for a pre-warmed session
+ * Build resume command for a pre-warmed session.
+ *
+ * Every resume goes through `agents run <agent> --interactive --resume <id>`;
+ * the CLI resolves the version that started the session and handles remote
+ * hosts via `--host`. No per-harness raw binary resume is ever emitted.
  */
 export function buildResumeCommand(session: PrewarmedSession): string {
-  const config = PREWARM_CONFIGS[session.agentType];
-  return config.resumeCommand(session.sessionId);
+  return buildVersionedResumeCommand(session.agentType, session.sessionId);
 }
 
 /**
- * Build a resume command pinned to a specific installed agent version when one
- * is known. This is required for multi-profile setups where a session only
- * exists inside one version's home directory.
+ * Build the unified resume command for any harness.
+ *
+ * `agents run --resume` resumes under the version that started the session
+ * (verified in the CLI: `apps/cli/src/commands/exec.ts` forwards `version:
+ * undefined` when `resume` is set, and the remote/local CLI resolves the
+ * originating version from its session index). Therefore we never pin an
+ * explicit `@version` here.
+ *
+ * `host` is the device the session was offloaded to. Its transcript lives on
+ * THAT machine, so a local raw resume would start a brand-new agent against an
+ * id this box has never seen; route through `agents run --host … --resume` so
+ * the resume happens where the session is.
+ *
+ * `agentType` widens past {@link PrewarmAgentType} because resume is not a
+ * prewarm-only capability: the CLI records transcripts for every harness it can
+ * run (grok, kimi, droid, antigravity, …) and `agents run --resume` resumes any
+ * of them under the version that started the session.
  */
 export function buildVersionedResumeCommand(
-  agentType: PrewarmAgentType,
+  agentType: PrewarmAgentType | string,
   sessionId: string,
-  version?: string,
+  _version?: string,
+  host?: string,
 ): string {
-  const config = PREWARM_CONFIGS[agentType];
-  const baseCmd = config.resumeCommand(sessionId);
-  if (!version) return baseCmd;
-  const cmdName = config.command;
-  const prefix = new RegExp(`^${cmdName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
-  return baseCmd.replace(prefix, `${cmdName}@${version}`);
+  if (host) {
+    return `agents run ${agentType} --interactive --host ${shellQuoteArg(host)} --resume ${sessionId}`;
+  }
+  return `agents run ${agentType} --interactive --resume ${sessionId}`;
+}
+
+/** Single-quote a device name so it can never break out of the built command. */
+function shellQuoteArg(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -208,6 +223,26 @@ export function getSupportedAgentTypes(): PrewarmAgentType[] {
  */
 export function supportsPrewarming(agentType: string): agentType is PrewarmAgentType {
   return agentType === 'claude' || agentType === 'codex' || agentType === 'gemini' || agentType === 'cursor' || agentType === 'opencode';
+}
+
+/**
+ * Ctrl+C twice — the exit sequence for any agent without a {@link PREWARM_CONFIGS}
+ * entry. Four of the five prewarm agents already use exactly this; the fifth
+ * (Claude) needs a leading Esc. A resumable non-prewarm agent (grok/kimi/droid/
+ * antigravity) is a Ctrl+C-to-quit CLI, so this is the safe default.
+ */
+export const DEFAULT_EXIT_SEQUENCE: readonly string[] = ['\x03', '\x03'];
+
+/**
+ * Keystrokes that cleanly exit a running agent before a reload/resume. Prewarm
+ * agents use their tuned sequence; every other resumable harness falls back to
+ * {@link DEFAULT_EXIT_SEQUENCE}. Keeping this beside {@link PREWARM_CONFIGS} means
+ * reload never has to know which agents are prewarm-capable.
+ */
+export function exitSequenceFor(agentType: string): readonly string[] {
+  return agentType in PREWARM_CONFIGS
+    ? PREWARM_CONFIGS[agentType as PrewarmAgentType].exitSequence
+    : DEFAULT_EXIT_SEQUENCE;
 }
 
 // === Blocking Prompt Detection ===

@@ -35,3 +35,25 @@ export function parseSpawnRequest(query: string): SpawnRequest | null {
     obj?.split === 'right' || obj?.split === 'down' ? obj.split : undefined;
   return { command, cwd, split };
 }
+
+// Which surface a spawn request lands on.
+//   native-split — split the parent VS Code terminal
+//   native-tab   — new editor tab backed by a plain VS Code terminal
+export type SpawnSurface = 'native-split' | 'native-tab';
+
+export interface SpawnSurfaceInput {
+  // The request asked to split beside the previously spawned pane.
+  wantsSplit: boolean;
+  // A previously spawned pane is still alive to split from.
+  hasParent: boolean;
+}
+
+// Pick the surface for a spawn request. Pure so the matrix is testable without
+// the VS Code API; the glue in spawnCommandTerminal just executes the choice.
+//
+// Factory no longer spawns tmux-backed terminals at the extension level, so a
+// split always means a native VS Code terminal split.
+export function resolveSpawnSurface(input: SpawnSurfaceInput): SpawnSurface {
+  const splitting = input.wantsSplit && input.hasParent;
+  return splitting ? 'native-split' : 'native-tab';
+}

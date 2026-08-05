@@ -32,6 +32,72 @@ The model is written to the host's model env var — `OPENCODE_MODEL` for openco
 
 A harness *is* a profile — same `~/.agents/profiles/<name>.yml`, same `agents run` resolution, same device sync via `agents repo push user`. The difference from `agents profiles add`: `harness add` takes the host+model one-shot (no preset needed) and owns its own `--host` flag, whereas `agents profiles --host <device>` is reserved for running the profiles command on a remote device.
 
+### Forking a harness (`agents harness fork`)
+
+`fork` is the one verb for both starting points — a native harness, or a custom one you already tuned:
+
+```sh
+# fork the native OpenCode harness onto a DeepSeek model, keyed by OpenRouter
+agents harness fork opencode deepseek --model deepseek/deepseek-v4-flash-0731 --auth-provider openrouter
+
+# fork Claude Code onto a private gateway
+agents harness fork claude corp --model gpt-x --base-url https://gw.corp/v1 --auth-provider corp
+
+# copy an existing harness and swap only the model
+agents harness fork deepseek deepseek-chat --model deepseek/deepseek-chat-v3
+```
+
+Forking a **native** harness requires `--model` — there is no model to inherit. Forking a **custom** harness copies everything (env, endpoint, auth binding, `fallback_model`, host version pin) and applies only the flags you pass; the two diverge from that point, so removing the source never affects the fork. `--force` overwrites an existing harness of the same name. The name `agents view` prints is derived from the harness `name` — `deepseek-flash` renders as `DeepSeek Flash` — so there is no flag to set it. The fork records its parent as `forkedFrom:` in the YAML — display-only lineage.
+
+### Editing and renaming a harness (`agents harness edit` / `rename`)
+
+`edit` applies overrides onto an existing harness **in place** — same name, same lineage — instead of copying it under a new one:
+
+```sh
+# swap the pinned model
+agents harness edit deepseek --model deepseek/deepseek-v3.2
+
+# repoint auth at a different provider and re-enter the key
+agents harness edit corp --auth-provider corp2
+
+# unpin the host CLI version
+agents harness edit spark --version ""
+
+# add (or clear, with an empty string) a same-host fallback model for rate-limit retries
+agents harness edit deepseek --fallback-model deepseek/deepseek-chat-v3
+```
+
+`edit` takes the same override flags as `fork` (`--model`, `--base-url`, `--auth-provider`, `--version`, `--description`, `--from-secrets`) plus one edit-only flag, `--fallback-model`, for `Profile.fallback_model` (see [`03-routines.md`](03-routines.md) and the fallback cascade in `runWithFallback`). Unlike `fork`, `edit` never rewrites `forkedFrom` to point at itself. Giving zero flags is a no-op error naming the available ones.
+
+`agents harness rename <old-name> <new-name>` renames the underlying YAML file and updates the `name:` field inside it; every other harness whose `forkedFrom:` pointed at the old name is rewritten to the new one. Renaming onto an existing name is a hard error — there is no overwrite path (use `remove` first if that's really the intent).
+
+### Copying a key out of an existing secrets bundle (`--from-secrets`)
+
+`add`, `fork`, and `edit` all accept `--from-secrets <bundle>` or `--from-secrets <bundle>:<key>` (the key is optional only when the bundle has exactly one). This is a **one-time copy**, not a live link: it reads the value out of the named `agents secrets` bundle (Touch ID on macOS, once) and writes it into the harness's own keychain item (`agents-cli.<provider>.token`), which is never gated behind biometry-required prefixes, so every later `agents run <harness>` reads it silently.
+
+```sh
+agents harness add corp --host claude --model gpt-x --auth-provider corp --from-secrets prod:OPENROUTER_KEY
+agents harness edit corp --from-secrets prod:OPENROUTER_KEY   # rotate later without retyping
+```
+
+### Interactive wizard (`agents harness add` / `fork` with no args)
+
+Run `add` or `fork` in a terminal without enough flags to build a harness (e.g. bare `agents harness add`, or `agents harness fork claude` with no `--model`) and a picker walks you through it instead of throwing: fork from (every native host plus your existing harnesses) → a built-in preset or "build custom" (host + model + provider) → the harness's name (pre-filled with the preset's own name, e.g. `deepseek`, not a model detail) → how to get the key (type it, or pick a bundle+key via `--from-secrets`). Flags remain fully supported for scripts — the wizard only engages when required info is missing **and** stdout is a TTY; a non-interactive shell still gets the original error.
+
+### Custom harnesses are their own agent type
+
+`agents view` lists each custom harness as its own block, beside Claude and Codex rather than indented under whichever host CLI executes it — because `agents run <name>` already launches it the same way a native agent id is launched:
+
+```
+  deepseek-flash (custom)
+    deepseek/deepseek-v4-flash-0731  openrouter stored  via claude
+
+  deepseek-chat (custom · forked from deepseek-flash)
+    deepseek/deepseek-chat-v3        openrouter stored  via claude
+```
+
+The row carries the pinned model, the account/auth state, and `via <host>` — the native harness that actually runs it, with its version when the harness pins one. A harness whose host CLI has no install is flagged `(host <id> not installed)` rather than listed as runnable. `agents view <name>` describes one harness (host, model, provider, auth, lineage, YAML path), and `agents view <name> --json` emits its summary. In `agents view <agent> --json`, the harnesses hosted by that agent are under the `harnesses` key.
+
 ## Top-level resource profiles
 
 `agents profile use <name>` activates a resource profile from `agents.yaml`.
@@ -174,9 +240,20 @@ preset: kimi                   # string, optional — preset this profile was cr
 
 provider: openrouter           # string, optional — provider name for display
                                # Set automatically by `profiles add`; informational only.
+
+models:                        # Partial<Record<ModelTier, string>>, optional
+  cheap: deepseek/deepseek-chat-v3        # per-tier model ids for THIS harness's
+  default: deepseek/deepseek-v4-flash-0731 # own catalog — resolves `agents run
+  best: deepseek/deepseek-r1               # <profile> --model cheap|default|best|ultra`
+                               # against the harness's own models instead of the host
+                               # agent's (claude/codex/...) native catalog. An unset
+                               # tier clamps to the next CHEAPER tier that IS set
+                               # (ultra -> best -> default -> cheap). Omit entirely to
+                               # keep today's behavior: a requested tier falls back to
+                               # the single pinned model in `env`, unchanged.
 ```
 
-Fields sourced from `Profile` interface at `src/lib/profiles.ts:18-32`.
+Fields sourced from `Profile` interface at `src/lib/profiles.ts:19-73`.
 
 ## Recipes
 
@@ -275,6 +352,12 @@ profile auth only; the base runtime's local OAuth credential is copied only when
 the profile has no auth env of its own. `--box <slug>` targets an existing warm
 crabbox box instead of provisioning a disposable lease, so the same box can serve
 profile runs from different repositories and remains running after the command.
+
+`--lease` itself is reuse-first against the repo's profile pool: before leasing a
+new box it looks for a warm box carrying the same `profile` label (from the
+repo's `.crabbox.yaml`) and network mode that `crabbox status` reports
+SSH-ready, and reuses it (kept after the run) instead of paying for a fresh
+lease. `--fresh` opts out — always a brand-new box, torn down after the run.
 
 ## Demo
 

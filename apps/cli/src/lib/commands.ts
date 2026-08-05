@@ -12,6 +12,7 @@ import * as path from 'path';
 import * as yaml from 'yaml';
 import { AGENTS, ensureCommandsDir, agentConfigDirName, resolveAgentName } from './agents.js';
 import { capableAgents, isCapable, supports } from './capabilities.js';
+import { isDirectoryDoc } from './resources.js';
 import { markdownToToml } from './convert.js';
 import { getCommandsDir, getUserCommandsDir, getEnabledExtraRepos, getProjectAgentsDir, getSkillsDir, getTrashCommandsDir } from './state.js';
 import { getEffectiveHome, getVersionHomePath, listInstalledVersions, resolveVersion } from './versions.js';
@@ -22,6 +23,7 @@ import {
   installCommandSkillToVersion,
   listCommandSkillsInVersion,
   removeCommandSkillFromVersion,
+  shouldAlsoInstallCommandAsSkill,
   shouldInstallCommandAsSkill,
 } from './command-skills.js';
 import {
@@ -234,6 +236,7 @@ export function discoverCommands(repoPath: string): DiscoveredCommand[] {
     for (const file of fs.readdirSync(commandsDir)) {
       if (file.endsWith('.md')) {
         const name = file.replace('.md', '');
+        if (isDirectoryDoc('commands', name)) continue;
         const sourcePath = path.join(commandsDir, file);
         const metadata = parseCommandMetadata(sourcePath);
         const validation = validateCommandMetadata(metadata, name);
@@ -312,6 +315,20 @@ export function installCommand(
   ensureCommandsDir(agentId);
 
   const home = getEffectiveHome(agentId);
+  const installVersion = pinnedVersion ?? listInstalledVersions(agentId)[0] ?? '';
+  const alsoInstallAsSkill = shouldAlsoInstallCommandAsSkill(agentId, installVersion);
+
+  if (alsoInstallAsSkill) {
+    const installed = installCommandSkillToVersion(
+      path.join(home, agentConfigDirName(agentId)),
+      commandName,
+      sourcePath,
+      [getSkillsDir(), ...getEnabledExtraRepos().map((repo) => path.join(repo.dir, 'skills'))],
+    );
+    if (!installed.success) {
+      return { path: '', method: 'copy', error: installed.error, warnings: validation.warnings };
+    }
+  }
 
   // Goose: a slash command is a recipe YAML registered in config.yaml, not a
   // native command file under commandsSubdir.
@@ -541,6 +558,16 @@ export function installCommandToVersion(
     );
   }
 
+  if (shouldAlsoInstallCommandAsSkill(agent, version)) {
+    const installed = installCommandSkillToVersion(
+      agentDir,
+      commandName,
+      sourcePath,
+      [getSkillsDir(), ...getEnabledExtraRepos().map((repo) => path.join(repo.dir, 'skills'))],
+    );
+    if (!installed.success) return installed;
+  }
+
   // Goose: a slash command is a recipe YAML registered in config.yaml, not a
   // native command file. Write the recipe + slash_commands entry.
   if (agent === 'goose') {
@@ -586,6 +613,10 @@ export function removeCommandFromVersion(
   const agentDir = path.join(versionHome, agentConfigDirName(agent));
   if (shouldInstallCommandAsSkill(agent, version)) {
     return removeCommandSkillFromVersion(agentDir, commandName);
+  }
+  if (shouldAlsoInstallCommandAsSkill(agent, version)) {
+    const removed = removeCommandSkillFromVersion(agentDir, commandName);
+    if (!removed.success) return removed;
   }
   if (agent === 'goose') {
     const trashDir = path.join(getTrashCommandsDir(), agent, version, commandName);
@@ -857,7 +888,11 @@ export function listCentralCommands(): string[] {
   for (const dir of [getUserCommandsDir(), getCommandsDir()]) {
     if (!fs.existsSync(dir)) continue;
     for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.md'))) {
-      seen.add(f.replace('.md', ''));
+      const name = f.replace('.md', '');
+      // A directory's README/AGENTS/CLAUDE/GEMINI documents the dir, it is not a
+      // command. Without this the picker offers a name resolveResource refuses.
+      if (isDirectoryDoc('commands', name)) continue;
+      seen.add(name);
     }
   }
   return Array.from(seen);

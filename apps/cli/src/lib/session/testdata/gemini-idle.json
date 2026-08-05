@@ -1,0 +1,8 @@
+{
+  "sessionId": "g-idle-1",
+  "startTime": "2026-08-01T00:00:00Z",
+  "messages": [
+    { "type": "user", "content": "Fix the flaky test", "timestamp": "2026-08-01T00:00:00Z" },
+    { "type": "gemini", "content": "Fixed the flaky test and re-ran the suite; everything is green.", "timestamp": "2026-08-01T00:00:05Z" }
+  ]
+}

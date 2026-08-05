@@ -22,6 +22,8 @@ import {
   remoteSecretsRaw,
   remoteSecretsStream,
   resolveHostSshTarget,
+  verifyRemoteKeychainPush,
+  keychainWriteFailureMessage,
 } from '../lib/secrets/remote.js';
 import { remoteShellFor, buildWindowsStdinImportCommand } from '../lib/hosts/remote-cmd.js';
 import { resolveRemoteOsSync } from '../lib/hosts/remote-os.js';
@@ -35,11 +37,14 @@ import {
   keychainItemsForBundle,
   keychainRef,
   listBundles,
+  healKeychainBundleMetadataAclOnce,
+  isHeadlessSecretsContext,
   migrateLegacyBundles,
   parseDotenv,
   readAndResolveBundleEnv,
-  isHeadlessSecretsContext,
   readBundle,
+  readBundleIfDecryptable,
+  reAclBundleItems,
   renameBundle,
   rotateBundleSecret,
   sanitizeProcessEnv,
@@ -53,14 +58,30 @@ import {
   type SecretsBundle,
   type SecretsPolicy,
   type VarMeta,
+  SECRET_TYPES,
 } from '../lib/secrets/bundles.js';
+import {
+  parseListFilters,
+  bundleMatchesFilter,
+  bundleExpiry,
+  filterIsActive,
+  describeFilter,
+  parseSortField,
+  sortBundles,
+  SORT_FIELDS,
+  REF_KINDS,
+  DEFAULT_EXPIRING_DAYS,
+  type SecretsListFilterOpts,
+  type SecretsListFilter,
+  type SortField,
+} from '../lib/secrets/list-filter.js';
 import { encryptForFallback, decryptForFallback, type EncFile } from '../lib/secrets/filestore.js';
 import {
   getKeychainToken,
-  getKeychainTokens,
   hasKeychainToken,
   secretsKeychainItem,
   setKeychainToken,
+  maybeAutoRekey,
 } from '../lib/secrets/index.js';
 import {
   assertOpAvailable,
@@ -72,6 +93,7 @@ import {
   listVaults,
   type OpVault,
 } from '../lib/onepassword.js';
+import { GLOBAL_HARNESS } from '../lib/secrets/scope.js';
 import {
   secretsHoldMs,
   secretsAgentDurable,
@@ -84,11 +106,21 @@ import {
   runSecretsAgent,
   uninstallSecretsAgentService,
 } from '../lib/secrets/agent.js';
-import { saveSession, deleteSession, deleteAllSessions } from '../lib/secrets/session-store.js';
+import { saveSession, deleteBundleSessions, deleteAllSessions } from '../lib/secrets/session-store.js';
 import { getCliVersionFresh } from '../lib/version.js';
 import { readMeta } from '../lib/state.js';
 import { parseDuration } from '../lib/hooks/cache.js';
-import { emit } from '../lib/events.js';
+import { emit, query } from '../lib/events.js';
+import { emitSecretAudit } from '../lib/secrets/audit.js';
+import {
+  getBundleUsage,
+  getAllBundleUsage,
+  getUsageHistory,
+  SECRET_USAGE_EVENTS,
+  type BundleUsageSummary,
+  type SecretUsageEvent,
+} from '../lib/secrets/usage-db.js';
+import { frequentlyPromptedBundles } from '../lib/secrets/unlock-hints.js';
 import { registerCommandGroups, setHelpSections } from '../lib/help.js';
 import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
 import {
@@ -100,6 +132,7 @@ import { getVaultSession, vaultExists } from '../lib/secrets/vault.js';
 import { registerSecretsSyncCommands } from './secrets-sync.js';
 import { registerSecretsMigrateAclCommand } from './secrets-migrate.js';
 import { registerSecretsImportKeyringCommand } from './secrets-import.js';
+import { registerSecretsRotatePassphraseCommand } from './secrets-rotate-passphrase.js';
 
 /** Prompt the user for a secret value with masked input. Requires an interactive TTY. */
 async function promptForSecret(message: string): Promise<string> {
@@ -307,20 +340,31 @@ async function importFromICloud(
 }
 
 /**
- * Printed under a "bundle not found" failure: if the name matches a bundle
- * stranded in the iCloud Keychain (pre-device-local-cutover era), point at the
- * recovery command instead of leaving a dead end.
+ * Printed under a read failure: if the name matches a bundle stranded in the
+ * iCloud Keychain (pre-device-local-cutover era), point at the recovery command
+ * instead of leaving a dead end.
+ *
+ * `stillPresent` distinguishes the two failures, because they need different
+ * commands. A MISSING bundle imports straight from iCloud. A bundle that is on
+ * disk but undecryptable does not: `import` reads the existing bundle before
+ * writing into it, so it fails the same way the read just did. That one has to
+ * be deleted first — which is why naming the wrong command here bricked the
+ * name entirely.
  */
-function maybePrintSyncedHint(name: string): void {
+function maybePrintSyncedHint(name: string, stillPresent: boolean): void {
   if (process.platform !== 'darwin') return;
   try {
-    if (discoverSyncedBundles().some((c) => c.name === name)) {
-      console.error(
-        chalk.yellow(
-          `A legacy iCloud Keychain copy of '${name}' exists. Recover it with: agents secrets import ${name} --from icloud`,
-        ),
-      );
-    }
+    if (!discoverSyncedBundles().some((c) => c.name === name)) return;
+    console.error(
+      chalk.yellow(
+        stillPresent
+          ? `A legacy iCloud Keychain copy of '${name}' exists, but the local copy is unreadable and ` +
+            `import writes into it. Delete the local copy first, then recover:\n` +
+            `  agents secrets delete ${name}\n` +
+            `  agents secrets import ${name} --from icloud`
+          : `A legacy iCloud Keychain copy of '${name}' exists. Recover it with: agents secrets import ${name} --from icloud`,
+      ),
+    );
   } catch {
     // Hint only — never mask the original error.
   }
@@ -341,6 +385,39 @@ export function buildRemoteUnlockArgs(names: string[], opts: { all?: boolean; tt
     // Forward --durable so a remote unlock honors it too; without this the remote
     // silently falls back to its own secrets.agent.durable default (off).
     ...(opts.durable ? ['--durable'] : []),
+  ];
+}
+
+/**
+ * Build the remote `agents secrets list` argv for `list --host`. Every filter
+ * must be forwarded: `browseRemote` sends this argv verbatim, so a flag left out
+ * here is not an error — the remote just lists everything, and
+ * `secrets list --host zion --expired` reports every bundle on zion as expired.
+ * Silent and wrong beats loud and wrong only for the person who wrote the bug.
+ *
+ * Values pass through unparsed so the REMOTE validates them under its own rules,
+ * matching how `--ttl` is forwarded by buildRemoteUnlockArgs.
+ */
+export function buildRemoteListArgs(
+  opts: SecretsListFilterOpts & { json?: boolean; sort?: string; limit?: string },
+  query?: string,
+): string[] {
+  return [
+    'list',
+    ...(query ? [query] : []),
+    ...(opts.json ? ['--json'] : []),
+    ...(opts.policy ? ['--policy', opts.policy] : []),
+    ...(opts.backend ? ['--backend', opts.backend] : []),
+    ...(opts.type ? ['--type', opts.type] : []),
+    ...(opts.kind ? ['--kind', opts.kind] : []),
+    ...(opts.held ? ['--held'] : []),
+    ...(opts.notHeld ? ['--not-held'] : []),
+    ...(opts.expired ? ['--expired'] : []),
+    // `--expiring` is optional-value: `true` means the bare flag was passed.
+    ...(opts.expiring === true ? ['--expiring'] : opts.expiring ? ['--expiring', String(opts.expiring)] : []),
+    ...(opts.unused ? ['--unused', opts.unused] : []),
+    ...(opts.sort ? ['--sort', opts.sort] : []),
+    ...(opts.limit ? ['--limit', opts.limit] : []),
   ];
 }
 
@@ -520,10 +597,11 @@ function humanAge(iso: string): string {
   return `${age} ago`;
 }
 
-/** Compact remaining-time for the list POLICY column: "19h" / "45m" / "2d". */
-function compactRemaining(expiresAt: number): string {
-  const ms = expiresAt - Date.now();
-  if (ms <= 0) return 'expired';
+/** Compact span for a fixed duration: "45m" / "19h" / "2d". Shared by
+ * `compactRemaining` (a countdown) and the POLICY column's hold-window
+ * annotation (a fixed length) so the two can never round onto different unit
+ * thresholds and disagree about the same number of milliseconds. */
+export function compactDurationMs(ms: number): string {
   const mins = Math.round(ms / 60000);
   if (mins < 60) return `${mins}m`;
   const hours = Math.round(mins / 60);
@@ -531,17 +609,47 @@ function compactRemaining(expiresAt: number): string {
   return `${Math.round(hours / 24)}d`;
 }
 
-/** The POLICY column for `secrets list`: the prompt policy, plus a concise
- * state hint. `daily` shows `held Nh` when the secrets-agent is currently
- * caching the bundle; `always` and `never` show whether they prompt. `held`
+/** Compact remaining-time for the list POLICY column: "19h" / "45m" / "2d". */
+function compactRemaining(expiresAt: number): string {
+  const ms = expiresAt - Date.now();
+  if (ms <= 0) return 'expired';
+  return compactDurationMs(ms);
+}
+
+/** The POLICY column for `secrets list`. `hold` is a duration, not a mode — it
+ * means "prompt once, then stay silent for this long" — so the column states
+ * the window (`hold 7d`) rather than the bare tier name, and appends `· held Nd`
+ * while the secrets-agent is actually caching the bundle. `always` and `never`
+ * carry no window and gain nothing here. `holdMs` is the configured global hold
+ * (`secretsHoldMs()`), passed in rather than read so this stays pure; `held`
  * maps bundle name → expiry epoch-ms (from agentStatus()). */
-export function renderPolicyCol(b: SecretsBundle, held?: Map<string, number>): string {
+export function renderPolicyCol(b: SecretsBundle, holdMs: number, held?: Map<string, number>): string {
   // `never` is loud on purpose — it's the only tier with no user-presence gate.
   if (bundlePolicy(b) === 'never') return chalk.red.bold('never · no prompt');
   if (bundlePolicy(b) === 'always') return chalk.yellow('always · prompt');
-  const exp = held?.get(b.name);
-  return exp ? chalk.green(`daily · held ${compactRemaining(exp)}`) : chalk.gray('daily');
+  const window = compactDurationMs(holdMs);
+  // A lapsed entry is not held. Without this guard a stale broker row renders
+  // the countdown's `expired` sentinel as if it were a live hold.
+  const exp = liveHold(held?.get(b.name));
+  return exp !== null
+    ? chalk.green(`hold ${window} · held ${compactRemaining(exp)}`)
+    : chalk.gray(`hold ${window}`);
 }
+
+/** The hold-window line at the top of `secrets status`. Names the `hold` policy
+ * the window belongs to — the rename in #1604 left this surface still saying
+ * "daily", the one name the CLI no longer accepts in its own help. Pure so the
+ * vocabulary is pinned by a test rather than re-drifting on the next rename. */
+export function renderHoldSummary(holdStr: string, configured: boolean): string {
+  const source = configured ? ' (secrets.agent.holdMs)' : ' (default)';
+  return `hold: ${holdStr}${source} — a bundle on the hold policy prompts once, then stays silent for this long or until sleep/logout.`;
+}
+
+/** The empty-broker line under the hold summary. Named here, beside
+ * `renderHoldSummary`, for the same reason: it is the second line the rename
+ * left saying `daily`, and a test pins both. */
+export const NO_BUNDLES_HELD_LINE =
+  'No bundles held. The next read of each hold-policy bundle will prompt once, then hold.';
 
 /** Human-readable hold window for `secrets status`. Sub-hour values render in
  * minutes (so a near-floor `holdMs` never shows a confusing "0 hours"), whole
@@ -561,12 +669,23 @@ export function formatHoldWindow(ms: number): string {
 /** Below this width the fixed date columns no longer fit; `list` uses cards. */
 const SECRETS_WIDE = 96;
 
+/** A broker hold expiry, or null once it has lapsed. One definition of "held",
+ * shared by the POLICY column, the `--held` filter, and the JSON payload, so the
+ * three can never disagree about the same bundle. */
+export function liveHold(expiresAt: number | undefined, now: number = Date.now()): number | null {
+  return expiresAt !== undefined && expiresAt > now ? expiresAt : null;
+}
+
+/** Width of the POLICY column. The widest cell is `hold 30d · held 30d` (19
+ * visible chars) — `clampHoldMs` caps the window at 30d and `renderPolicyCol`
+ * drops lapsed holds, so nothing longer can be produced. */
+const POLICY_COL_WIDTH = 20;
+
 /** Format a single bundle as a table row for the `secrets list` output. */
-function renderBundleRow(b: SecretsBundle, held?: Map<string, number>, cols = terminalWidth()): string {
+function renderBundleRow(b: SecretsBundle, holdMs: number, held?: Map<string, number>, cols = terminalWidth()): string {
   const entries = describeBundle(b);
   const keys = entries.length;
-  const expiringCount = countExpiringSoon(b.meta);
-  const expiring = expiringCount > 0 ? chalk.yellow(String(expiringCount)) : chalk.gray('-');
+  const expiring = renderExpiringCol(b);
   // Timestamp distinction:
   //   "?"     -> legacy bundle, never written under the timestamping code.
   //   "never" -> bundle has been written but the action never happened
@@ -581,7 +700,7 @@ function renderBundleRow(b: SecretsBundle, held?: Map<string, number>, cols = te
   const head =
     `${chalk.cyan(b.name.padEnd(20))} ` +
     `${String(keys).padEnd(5)} ` +
-    `${padVisible(renderPolicyCol(b, held), 18)} ` +
+    `${padVisible(renderPolicyCol(b, holdMs, held), POLICY_COL_WIDTH)} ` +
     `${padVisible(expiring, 9)} ` +
     `${padVisible(created, 9)} ` +
     `${padVisible(updated, 9)} ` +
@@ -603,7 +722,7 @@ function renderBundleRow(b: SecretsBundle, held?: Map<string, number>, cols = te
 }
 
 /** Narrow-terminal card: name + compact meta on one line, description below. */
-function renderBundleCard(b: SecretsBundle, held: Map<string, number> | undefined, cols: number): string {
+function renderBundleCard(b: SecretsBundle, holdMs: number, held: Map<string, number> | undefined, cols: number): string {
   const keys = describeBundle(b).length;
   const used = b.last_used ? relativeAge(b.last_used) : (b.created_at ? 'never' : '?');
   const tag = b.backend === 'file'
@@ -611,7 +730,7 @@ function renderBundleCard(b: SecretsBundle, held: Map<string, number> | undefine
     : b.backend === 'vault'
       ? chalk.blue(' [synced]')
       : '';
-  const meta = chalk.gray(`${keys} key${keys === 1 ? '' : 's'} · `) + renderPolicyCol(b, held) + chalk.gray(` · used ${used}`);
+  const meta = chalk.gray(`${keys} key${keys === 1 ? '' : 's'} · `) + renderPolicyCol(b, holdMs, held) + chalk.gray(` · used ${used}`);
   const line1 = `${chalk.cyan(b.name)}  ${meta}${tag}`;
   if (!b.description) return line1;
   return `${line1}\n    ${chalk.gray(truncateToWidth(safePrint(b.description), cols - 4))}`;
@@ -722,7 +841,10 @@ function renderMetaLine(meta: VarMeta | undefined, reveal: boolean): string {
   return `    ${parts.join('  ')}`;
 }
 
-/** Count entries in `meta` whose `expires` falls in the next 30 days. */
+/** Count entries in `meta` whose `expires` falls in the next 30 days. Excludes
+ * keys that have ALREADY expired — those are counted by `bundleExpiry().expired`
+ * and rendered separately, since a lapsed key is a different problem from one
+ * coming due. */
 function countExpiringSoon(meta: Record<string, VarMeta> | undefined): number {
   if (!meta) return 0;
   let n = 0;
@@ -734,6 +856,69 @@ function countExpiringSoon(meta: Record<string, VarMeta> | undefined): number {
   return n;
 }
 
+/** Human labels for the usage events, in the order `view` prints them. */
+const USAGE_EVENT_LABELS: Record<SecretUsageEvent, string> = {
+  access: 'accessed',
+  unlock: 'unlocked',
+  import: 'imported',
+  export: 'exported',
+  create: 'created',
+  view: 'viewed',
+};
+
+/**
+ * Compact one-line usage summary for `secrets view` — each recorded event with
+ * its count and how long ago it last happened ("accessed 42× (last 2h ago) ·
+ * exported 3× (last 1d ago)"). Empty string when nothing has been recorded yet.
+ * Pure — unit-tested.
+ */
+export function formatUsageLine(summary: BundleUsageSummary | undefined): string {
+  if (!summary || summary.total === 0) return '';
+  const parts: string[] = [];
+  for (const ev of SECRET_USAGE_EVENTS) {
+    const stat = summary.events[ev];
+    if (stat.count === 0) continue;
+    const age = stat.last ? relativeAge(stat.last) : null;
+    parts.push(`${USAGE_EVENT_LABELS[ev]} ${stat.count}×${age ? ` (last ${age})` : ''}`);
+  }
+  return parts.join(' · ');
+}
+
+/**
+ * The held-state line for `secrets view`: whether the secrets-agent currently
+ * holds this bundle (so reads are prompt-free) and for how long, or that Touch
+ * ID is required on the next read. Only meaningful for keychain bundles on macOS
+ * — file/vault backends have no broker to hold, and a `never`-policy bundle is
+ * always readable — so both return an empty line and the caller skips it.
+ * `heldExpiresAt` is the max expiry across every held scope.
+ */
+export function renderViewStatusLine(b: SecretsBundle, heldExpiresAt: number | null): string {
+  if (process.platform !== 'darwin') return '';
+  if ((b.backend ?? 'keychain') !== 'keychain') return '';
+  if (bundlePolicy(b) === 'never') return '';
+  if (heldExpiresAt && heldExpiresAt > Date.now()) {
+    return chalk.green(`status:     unlocked (held ${compactRemaining(heldExpiresAt)}; reads are prompt-free until it locks)`);
+  }
+  return chalk.gray('status:     locked (Touch ID required on the next read; `agents secrets unlock` holds it)');
+}
+
+/**
+ * The EXPIRING cell. Counts keys needing attention — already expired plus due
+ * within 30 days — and colours by the worst of the two: red once anything has
+ * lapsed, yellow while everything is merely upcoming.
+ *
+ * Expired keys used to be invisible here. `countExpiringSoon` requires
+ * `d >= 0`, so a bundle whose token died last month rendered `-`, identical to
+ * one with no expiry at all; the only places it surfaced were `secrets view`
+ * and a hard abort at inject time, i.e. after it had already broken something.
+ */
+export function renderExpiringCol(b: SecretsBundle, now: number = Date.now()): string {
+  const { expired, soon } = bundleExpiry(b, now);
+  const total = expired + soon;
+  if (total === 0) return chalk.gray('-');
+  return expired > 0 ? chalk.red(String(total)) : chalk.yellow(String(total));
+}
+
 /**
  * Resolve an existing import target bundle (inheriting its backend) or create a
  * new one with the requested backend. Refuses to silently downgrade a
@@ -741,7 +926,7 @@ function countExpiringSoon(meta: Record<string, VarMeta> | undefined): number {
  * guard can't drift between them.
  */
 function resolveImportBundle(name: string, backendOpt: string | undefined, synced = false): SecretsBundle {
-  const requestedBackend = synced ? 'vault' : parseBackendOpt(backendOpt);
+  const requestedBackend = synced ? 'vault' : resolveBackendOpt(backendOpt);
   if (bundleExists(name)) {
     const bundle = readBundle(name);
     if (requestedBackend !== 'keychain' && bundle.backend !== requestedBackend) {
@@ -807,11 +992,15 @@ export function registerSecretsCommands(program: Command): void {
       # Inject the bundle into an agent run
       agents run claude "deploy the worker" --secrets prod
 
-      # See what's in the bundle (values masked); shows its prompt policy
+      # See what's in the bundle (values masked); shows its policy, held state, and usage
       agents secrets view prod
 
+      # Order the list by how recently / how often each bundle is used
+      agents secrets list --sort used
+      agents secrets list --sort uses
+
       # Stop a noisy automation bundle from prompting every run: ask once a week
-      agents secrets policy prod daily
+      agents secrets policy prod hold
 
       # Eval the bundle into your current shell
       eval "$(agents secrets export prod --plaintext)"
@@ -827,19 +1016,34 @@ export function registerSecretsCommands(program: Command): void {
       never touch disk in plaintext. Every item is device-local and gated by Touch ID
       or device passcode; cross-machine sync is handled by 'agents secrets push/pull'.
 
+      Naming: name a bundle after the thing it holds credentials for, so an agent can
+      guess it without listing. For a website, use its domain WITH the real suffix —
+      'stripe.com', 'openai.ai', 'github.com'. For a desktop app, use the app's binary
+      suffix — 'slack.app' (macOS) or 'photoshop.exe' (Windows). Always pass
+      '--description' so 'list' / 'view' explain the bundle without opening it; an
+      undescribed bundle prints a "No description found" nudge. 'view' also shows
+      whether the bundle is currently unlocked (held by the agent) and how often / how
+      recently it has been created, imported, exported, viewed, and accessed;
+      'list --sort used|uses' orders by recency / frequency, and
+      'agents secrets activity [bundle]' prints the recent value-free event timeline.
+
       Touch ID noise: macOS pops a prompt per bundle per process. Each bundle has
       a prompt policy, shown in the POLICY column of 'agents secrets list':
-        daily (default)   ask once, then hold it silently in the local agent up
-                          to ~7 days, until sleep / logout or 'lock' (a bare
-                          screen-lock does NOT drop it). Name is historical.
+        hold (default)    ask once, then serve it silently from the local agent
+                          for the hold window ('secrets.agent.holdMs', 7d by
+                          default), until sleep / logout or 'lock' (a bare
+                          screen-lock does NOT drop it). Accepts the older names
+                          'daily' and 'session'.
         always            ask for Touch ID every time — never auto-held.
-      The default is 'daily' (one Touch ID per ~7 days); change it globally with
+        never             no biometry ACL at all — reads are silent forever, even
+                          if the agent is down. Automation credentials only.
+      The default is 'hold' (one Touch ID per hold window); change it globally with
       'secrets.policy' in agents.yaml, or per bundle with 'agents secrets policy
       <bundle> always'. 'agents secrets unlock <bundle>' holds any bundle after one
       prompt regardless of policy. Nothing on disk.
 
       See also:
-        agents secrets policy <bundle> daily           ask once a week, not every run
+        agents secrets policy <bundle> hold            ask once per hold window (7d by default), not every run
         agents secrets unlock <bundle>                 hold a bundle after one Touch ID
         agents secrets lock                            wipe held bundles (re-prompt next read)
         agents secrets status                          show held bundles + when they lock
@@ -853,7 +1057,7 @@ export function registerSecretsCommands(program: Command): void {
   });
 
   registerCommandGroups(cmd, [
-    { title: 'Bundle commands', names: ['list', 'view', 'create', 'rename', 'describe', 'delete'] },
+    { title: 'Bundle commands', names: ['list', 'view', 'activity', 'create', 'rename', 'describe', 'delete'] },
     { title: 'Secret commands', names: ['add', 'rotate', 'remove', 'import', 'export'] },
     { title: 'Agent commands', names: ['start', 'stop', 'unlock', 'lock', 'status', 'policy'] },
     { title: 'Raw item commands', names: ['get', 'set'] },
@@ -861,21 +1065,64 @@ export function registerSecretsCommands(program: Command): void {
     { title: 'Utilities', names: ['exec', 'mcp', 'generate', 'migrate-acl'] },
   ]);
 
-  cmd
-    .command('list')
+  const listCmd = cmd
+    .command('list [query]')
     .alias('ls')
-    .description('List configured secrets bundles (use --host/--hosts to list bundles on other machines over SSH)')
+    .description('List configured secrets bundles, optionally filtered (use --host/--hosts for other machines over SSH)')
     .option('--host <target>', 'List bundles on a remote host over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)')
     .option('--hosts <list>', 'Comma-separated hosts to list in one shot, e.g. yosemite-s0,yosemite-s1')
+    .option('--device <target>', 'Alias for --host')
+    .option('--devices <list>', 'Alias for --hosts')
     .option('--json', 'Emit machine-readable JSON (bundle metadata only — never secret values) instead of the table')
-    .action(async (opts: { host?: string; hosts?: string; json?: boolean }) => {
+    .option('--policy <list>', "Only these prompt policies (comma-separated): hold, always, never. '--policy never' is the audit for bundles that read with no Touch ID at all")
+    .option('--backend <list>', 'Only these backends (comma-separated): keychain, file, vault')
+    .option('--type <list>', `Only bundles carrying a key of these types (comma-separated): ${SECRET_TYPES.join(', ')}`)
+    .option('--kind <list>', `Only bundles carrying a value of these ref kinds (comma-separated): ${REF_KINDS.join(', ')}. '--kind literal' finds raw values stored inline; '--kind exec' finds bundles that shell out`)
+    .option('--held', 'Only bundles the secrets-agent is holding right now (read silently, no Touch ID). macOS only')
+    .option('--not-held', 'Only bundles the agent is NOT holding — the next read of each will prompt. macOS only')
+    .option('--expired', 'Only bundles with at least one key whose expiry has already passed')
+    .option('--expiring [days]', `Only bundles with a key falling due within N days (default ${DEFAULT_EXPIRING_DAYS})`)
+    .option('--unused <duration>', 'Only bundles not read since this far back (e.g. 30d, 4w, 3mo). Never-used bundles always match')
+    .addOption(new Option('--sort <field>', 'Sort by: name (default), used (most recently used), uses (most frequently accessed), created, updated, expiry').choices([...SORT_FIELDS]))
+    .option('-n, --limit <n>', 'Show at most this many bundles (after filtering and sorting)')
+    .action(async (query: string | undefined, opts: SecretsListFilterOpts & {
+      host?: string; hosts?: string; device?: string; devices?: string;
+      json?: boolean; sort?: string; limit?: string;
+    }) => {
       const targets = parseHostsOption(opts);
       if (targets.length > 0) {
-        await browseRemote(targets, opts.json ? ['list', '--json'] : ['list'], false);
+        // Forward the filters — browseRemote sends this argv verbatim, so a
+        // dropped flag would make the remote silently list everything.
+        await browseRemote(targets, buildRemoteListArgs(opts, query), false);
         return;
       }
-      const bundles = listBundles();
-      // Cross-reference the secrets-agent so `daily` bundles that are currently
+      // Parse before touching the keychain so a typo'd flag fails instantly,
+      // and render the message rather than a stack trace (the `policy` pattern).
+      let filter: SecretsListFilter;
+      let sortField: SortField;
+      let limit: number | undefined;
+      try {
+        filter = parseListFilters(opts, query);
+        sortField = parseSortField(opts.sort);
+        limit = opts.limit === undefined ? undefined : Number(opts.limit);
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+          throw new Error(`Invalid --limit '${opts.limit}'. Use a whole number of bundles, e.g. --limit 10.`);
+        }
+        // The broker is macOS-only, so off darwin `held` is always empty and a
+        // hold-state filter would answer from no data — every bundle would look
+        // not-held. Refuse rather than return a confidently wrong list.
+        if (filter.held !== undefined && process.platform !== 'darwin') {
+          throw new Error('--held/--not-held need the secrets-agent, which is macOS-only. Run it on a Mac, or with --host <mac>.');
+        }
+      } catch (err) {
+        console.error(chalk.red((err as Error).message));
+        process.exit(1);
+      }
+      const all = listBundles();
+      // The configured hold window, read once for the whole listing — it is
+      // global, so every `hold` bundle renders the same span.
+      const holdMs = secretsHoldMs();
+      // Cross-reference the secrets-agent so `hold` bundles that are currently
       // held can show "· held Nh". Soft-fails to no hint if the broker is down.
       const held = new Map<string, number>();
       if (process.platform === 'darwin') {
@@ -885,6 +1132,20 @@ export function registerSecretsCommands(program: Command): void {
           /* broker not running — render policy without the countdown */
         }
       }
+      // Value-free usage read-model backs `--sort used|uses` and the --json
+      // `uses`/`usage` fields. Open the DB only when a caller actually needs it
+      // (a machine payload, or a usage-ranked sort) so a plain human `list`
+      // stays a pure keychain read.
+      const needUsage = Boolean(opts.json) || sortField === 'used' || sortField === 'uses';
+      const usage = needUsage ? getAllBundleUsage() : new Map<string, BundleUsageSummary>();
+      const usageHints = new Map<string, { lastUsedAt: string | null; uses: number }>();
+      for (const [name, s] of usage) usageHints.set(name, { lastUsedAt: s.lastUsedAt, uses: s.events.access.count });
+      // Filter, sort, then cap — before the --json branch, so the machine
+      // payload is the exact twin of the table (the sessions ordering rule).
+      const now = Date.now();
+      const matched = all.filter((b) => bundleMatchesFilter(b, filter, { held, now }));
+      const sorted = sortBundles(matched, sortField, usageHints);
+      const bundles = limit === undefined ? sorted : sorted.slice(0, limit);
       if (opts.json) {
         // Discovery payload for agents: metadata only, no secret values. Gated on
         // the explicit --json flag (not stdout.isTTY) so piping the human table to
@@ -893,37 +1154,152 @@ export function registerSecretsCommands(program: Command): void {
           name: b.name,
           keys: describeBundle(b).length,
           policy: bundlePolicy(b),
+          // The window `policy: "hold"` is shorthand for. Null on always/never,
+          // which have no window at all.
+          holdMs: bundlePolicy(b) === 'hold' ? holdMs : null,
           backend: b.backend === 'file' ? 'file' : 'keychain',
           allowExec: Boolean(b.allow_exec),
           expiringSoon: countExpiringSoon(b.meta),
+          // Already-lapsed keys, which `expiringSoon` deliberately excludes. A
+          // machine caller polling for rotation needs both numbers.
+          expired: bundleExpiry(b, now).expired,
           description: b.description ?? null,
           createdAt: b.created_at ?? null,
           updatedAt: b.updated_at ?? null,
           lastUsed: b.last_used ?? null,
-          heldExpiresAt: held.get(b.name) ?? null,
+          // Same liveness rule the POLICY column and --held use: a broker entry
+          // past its expiry is not held. Without the check this field reported a
+          // stale past timestamp as if the bundle were still warm, disagreeing
+          // with the table and the filter about the very same bundle.
+          heldExpiresAt: liveHold(held.get(b.name), now),
+          // Value-free usage from the read-model: `uses` is the recorded access
+          // (read/inject) count; `usage` is the full per-kind rollup. Null when
+          // nothing has been recorded yet.
+          uses: usage.get(b.name)?.events.access.count ?? 0,
+          usage: usage.get(b.name) ?? null,
         }));
         process.stdout.write(JSON.stringify(payload) + '\n');
         return;
       }
       if (bundles.length === 0) {
-        console.log(chalk.gray('No secrets bundles configured.'));
-        console.log(chalk.gray('Try: agents secrets create <name>'));
+        // Distinguish "you have none" from "your filter excluded all of them",
+        // and name the axes that did it — otherwise the only way to find out
+        // which flag emptied the list is to remove them one at a time.
+        if (filterIsActive(filter)) {
+          console.log(chalk.gray(`No bundles ${describeFilter(filter)}. ${all.length} bundle${all.length === 1 ? '' : 's'} total.`));
+          console.log(chalk.gray('Try: agents secrets list  (no filters)'));
+        } else {
+          console.log(chalk.gray('No secrets bundles configured.'));
+          console.log(chalk.gray('Try: agents secrets create <name>'));
+        }
         return;
       }
       const cols = terminalWidth();
       if (cols >= SECRETS_WIDE) {
         console.log(chalk.bold(
-          `${'NAME'.padEnd(20)} ${'KEYS'.padEnd(5)} ${'POLICY'.padEnd(18)} ${'EXPIRING'.padEnd(9)} ${'CREATED'.padEnd(9)} ${'UPDATED'.padEnd(9)} ${'USED'.padEnd(7)} DESCRIPTION`,
+          `${'NAME'.padEnd(20)} ${'KEYS'.padEnd(5)} ${'POLICY'.padEnd(POLICY_COL_WIDTH)} ${'EXPIRING'.padEnd(9)} ${'CREATED'.padEnd(9)} ${'UPDATED'.padEnd(9)} ${'USED'.padEnd(7)} DESCRIPTION`,
         ));
         for (const b of bundles) {
-          console.log(renderBundleRow(b, held, cols));
+          console.log(renderBundleRow(b, holdMs, held, cols));
         }
       } else {
         for (const b of bundles) {
-          console.log(renderBundleCard(b, held, cols));
+          console.log(renderBundleCard(b, holdMs, held, cols));
         }
       }
     });
+
+  setHelpSections(listCmd, {
+    examples: `
+      # Everything, newest-used first
+      agents secrets list --sort used
+
+      # Order by how often each bundle is read (most-accessed first)
+      agents secrets list --sort uses
+
+      # Find one by name or description
+      agents secrets list github
+
+      # The security audit: which bundles read with NO Touch ID at all?
+      agents secrets list --policy never
+
+      # Which still store a raw value inline, or can shell out?
+      agents secrets list --kind literal
+      agents secrets list --kind exec
+
+      # What has already lapsed, and what is about to
+      agents secrets list --expired
+      agents secrets list --expiring 7 --sort expiry
+
+      # What can I delete? Untouched in three months
+      agents secrets list --unused 3mo --sort used
+
+      # Which bundles will prompt me on the next read (macOS)
+      agents secrets list --not-held
+
+      # Combine axes — every filter narrows further
+      agents secrets list --policy hold --backend file --expiring
+
+      # Same filters, on another machine, machine-readable
+      agents secrets list --expired --host mac-mini --json
+    `,
+    notes: `
+      - Filters compose: every flag you add narrows the list further.
+      - An unknown value is an error, not an empty list — '--policy hodl' names the valid set.
+      - --held/--not-held read live broker state, so they need macOS. Use --host <mac> from elsewhere.
+      - --expired and --expiring are different questions: already lapsed vs coming due. The EXPIRING column counts both and turns red once anything has lapsed.
+      - --unused matches bundles never read at all, not just old ones.
+      - Filters apply before --json, so the JSON is the exact twin of the table.
+      - Filters are forwarded over --host, so a remote list narrows the same way.
+      - --sort used|uses read the value-free usage read-model (~/.agents/secrets/secrets.db); see 'agents secrets activity'.
+    `,
+  });
+
+  const activityCmd = cmd
+    .command('activity [name]')
+    .description('Show the recent value-free usage timeline (created / imported / exported / viewed / accessed / unlocked) for one bundle, or across all bundles')
+    .option('-n, --limit <n>', 'Show at most this many events (default 20)')
+    .option('--json', 'Emit machine-readable JSON (metadata only — never secret values)')
+    .action((name: string | undefined, opts: { limit?: string; json?: boolean }) => {
+      let limit = opts.limit === undefined ? 20 : Number(opts.limit);
+      if (!Number.isInteger(limit) || limit < 1) {
+        console.error(chalk.red(`Invalid --limit '${opts.limit}'. Use a whole number of events, e.g. --limit 50.`));
+        process.exit(1);
+      }
+      const events = getUsageHistory(name, limit);
+      if (opts.json) {
+        process.stdout.write(JSON.stringify(events) + '\n');
+        return;
+      }
+      if (events.length === 0) {
+        console.log(chalk.gray(name ? `No recorded activity for '${name}'.` : 'No recorded secrets activity yet.'));
+        return;
+      }
+      for (const e of events) {
+        const who = e.agent ? chalk.gray(` by ${e.agent}`) : '';
+        const where = e.source ? chalk.gray(` (${e.source}${e.host ? ` ${e.host}` : ''})`) : '';
+        const bundleTag = name ? '' : chalk.cyan(` ${e.bundle}`);
+        console.log(`${chalk.gray(relativeAge(e.ts).padEnd(10))} ${chalk.bold(e.event.padEnd(8))}${bundleTag}${who}${where}`);
+      }
+    });
+
+  setHelpSections(activityCmd, {
+    examples: `
+      # The recent value-free event timeline across every bundle
+      agents secrets activity
+
+      # Just one bundle, more history
+      agents secrets activity anthropic.com --limit 50
+
+      # Machine-readable
+      agents secrets activity anthropic.com --json
+    `,
+    notes: `
+      - Reads the value-free usage read-model (~/.agents/secrets/secrets.db), fed off the
+        same emitSecretAudit chokepoint as 'agents events'. Never a secret value.
+      - History is bounded to the last 90 days; the full audit trail is 'agents events --module secrets'.
+    `,
+  });
 
   cmd
     .command('view [name]')
@@ -934,7 +1310,9 @@ export function registerSecretsCommands(program: Command): void {
     .option('--json', 'Emit machine-readable JSON (values masked unless --reveal) instead of the human view')
     .option('--host <target>', 'Show a bundle on a remote host over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)')
     .option('--hosts <list>', 'Comma-separated hosts to show in one shot, e.g. yosemite-s0,yosemite-s1')
-    .action(async (name: string | undefined, opts: { reveal?: boolean; plaintext?: boolean; json?: boolean; host?: string; hosts?: string }) => {
+    .option('--device <target>', 'Alias for --host')
+    .option('--devices <list>', 'Alias for --hosts')
+    .action(async (name: string | undefined, opts: { reveal?: boolean; plaintext?: boolean; json?: boolean; host?: string; hosts?: string; device?: string; devices?: string }) => {
       try {
         const targets = parseHostsOption(opts);
         if (targets.length > 0) {
@@ -959,10 +1337,32 @@ export function registerSecretsCommands(program: Command): void {
           bundle = readBundle(resolvedName);
         } catch (err) {
           console.error(chalk.red((err as Error).message));
-          maybePrintSyncedHint(resolvedName);
+          maybePrintSyncedHint(resolvedName, bundleExists(resolvedName));
           process.exit(1);
         }
         const entries = describeBundle(bundle);
+        // Value-free usage read-model (per-kind counts + recency + per-agent) for
+        // both the human and --json views. Read before recording this view so the
+        // just-happened view isn't counted in its own summary.
+        const usage = getBundleUsage(bundle.name);
+        // Is the secrets-agent currently holding this bundle? A held bundle reads
+        // prompt-free. macOS keychain only; take the max expiry across every scope
+        // it's held under. Soft-fails to "not held" if the broker is down.
+        let heldExpiresAt: number | null = null;
+        if (process.platform === 'darwin' && (bundle.backend ?? 'keychain') === 'keychain') {
+          try {
+            for (const e of await agentStatus()) {
+              if (e.name === bundle.name && (heldExpiresAt === null || e.expiresAt > heldExpiresAt)) {
+                heldExpiresAt = e.expiresAt;
+              }
+            }
+          } catch {
+            /* broker not running — render as not held */
+          }
+        }
+        // Record the inspection through the ONE chokepoint (events.jsonl + the
+        // usage read-model). Value-free; a masked `view` is metadata only.
+        emitSecretAudit({ event: 'secrets.view', bundle: bundle.name, operation: opts.json ? 'view --json' : 'view', source: 'view', status: 'success' });
         if (opts.json) {
           // Machine-readable discovery for agents. Values are null unless --reveal
           // (which still routes through the same non-TTY/plaintext gate + audit
@@ -975,18 +1375,23 @@ export function registerSecretsCommands(program: Command): void {
           }
           const revealed = new Map<string, string>();
           if (reveal) {
-            const items = entries
-              .filter((e) => e.kind === 'keychain')
-              .map((e) => secretsKeychainItem(bundle.name, e.detail));
-            try {
-              for (const [item, value] of getKeychainTokens(items)) revealed.set(item, value);
-            } catch {
-              /* cancelled / batch failure — fall through to masked (null) values */
+            const { env } = readAndResolveBundleEnv(bundle.name, {
+              caller: 'view --reveal --json',
+              keyMode: 'storage',
+              // An explicit human `--reveal` at a terminal is a deliberate value
+              // access → resolve interactively (one Touch ID). Under an agent
+              // (AGENTS_RUNTIME) or headless (no TTY) it stays broker-only.
+              agentOnly: isHeadlessSecretsContext() || !isInteractiveTerminal(),
+            });
+            for (const entry of entries) {
+              if (entry.kind === 'keychain' && env[entry.key] !== undefined) {
+                revealed.set(secretsKeychainItem(bundle.name, entry.detail), env[entry.key]);
+              }
             }
             const exposed = revealed.size + entries.filter((e) => e.kind === 'literal').length;
             if (exposed > 0) {
-              emit('secrets.get', {
-                module: 'secrets',
+              emitSecretAudit({
+                event: 'secrets.get',
                 bundle: bundle.name,
                 operation: 'view --reveal --json',
                 source: 'reveal',
@@ -1020,11 +1425,19 @@ export function registerSecretsCommands(program: Command): void {
               name: bundle.name,
               description: bundle.description ?? null,
               policy: bundlePolicy(bundle),
+              // The window `policy: "hold"` is shorthand for. Null on
+              // always/never, which have no window at all.
+              holdMs: bundlePolicy(bundle) === 'hold' ? secretsHoldMs() : null,
               backend: bundle.backend === 'file' ? 'file' : 'keychain',
               allowExec: Boolean(bundle.allow_exec),
               createdAt: bundle.created_at ?? null,
               updatedAt: bundle.updated_at ?? null,
               lastUsed: bundle.last_used ?? null,
+              // Held state + value-free usage rollup, same data the human view
+              // shows. `heldExpiresAt` is null when the bundle is not held.
+              heldExpiresAt,
+              usage: usage ?? null,
+              uses: usage?.events.access.count ?? 0,
               revealed: reveal,
               keys,
             }) + '\n',
@@ -1032,7 +1445,13 @@ export function registerSecretsCommands(program: Command): void {
           return;
         }
         console.log(chalk.bold(bundle.name));
-        if (bundle.description) console.log(chalk.gray(safePrint(bundle.description)));
+        if (bundle.description) {
+          console.log(chalk.gray(safePrint(bundle.description)));
+        } else {
+          // A described bundle is self-documenting for the next agent/human that
+          // reads it. Nudge — never block — toward adding one.
+          console.log(chalk.yellow(`No description found. Add one: agents secrets describe ${bundle.name} "what this bundle is for"`));
+        }
         if (bundle.allow_exec) console.log(chalk.yellow('allow_exec: true'));
         if (bundle.backend === 'file') console.log(chalk.gray('backend: file (passphrase-encrypted; reads need AGENTS_SECRETS_PASSPHRASE, no Touch ID)'));
         if (bundle.backend === 'vault') console.log(chalk.gray('storage: synced (age-encrypted ~/.agents/vault.age; needs agents login)'));
@@ -1040,14 +1459,25 @@ export function registerSecretsCommands(program: Command): void {
           console.log(chalk.red.bold('policy: never — NO biometry ACL; reads are silent (no Touch ID, no user-presence check). Automation-only.'));
         } else {
           console.log(
-            bundlePolicy(bundle) === 'daily'
-              ? chalk.gray('policy: daily (ask once, then held ~7 days until sleep / logout — screen-lock does not drop it)')
+            bundlePolicy(bundle) === 'hold'
+              // The window comes from secretsHoldMs(), never a literal — this
+              // line used to hardcode "7d by default" and so misstated the
+              // window for anyone who had configured secrets.agent.holdMs.
+              ? chalk.gray(`policy: hold (ask once, then held for ${formatHoldWindow(secretsHoldMs())} — until sleep / logout; screen-lock does not drop it)`)
               : chalk.gray('policy: always (asks for Touch ID every time — never auto-held)'),
           );
         }
+        const statusLine = renderViewStatusLine(bundle, heldExpiresAt);
+        if (statusLine) console.log(statusLine);
         if (bundle.created_at) console.log(chalk.gray(`created_at: ${bundle.created_at} (${humanAge(bundle.created_at)})`));
         if (bundle.updated_at) console.log(chalk.gray(`updated_at: ${bundle.updated_at} (${humanAge(bundle.updated_at)})`));
         if (bundle.last_used) console.log(chalk.gray(`last_used:  ${bundle.last_used} (${humanAge(bundle.last_used)})`));
+        const usageLine = formatUsageLine(usage);
+        if (usageLine) console.log(chalk.gray(`usage:      ${usageLine}`));
+        if (usage && usage.byAgent.length > 0) {
+          const top = usage.byAgent.slice(0, 3).map((a) => `${a.agent} ${a.count}×`).join(', ');
+          console.log(chalk.gray(`by:         ${top}`));
+        }
         console.log();
         if (entries.length === 0) {
           console.log(chalk.gray('(no keys)'));
@@ -1058,21 +1488,21 @@ export function registerSecretsCommands(program: Command): void {
           console.error(chalk.red('--reveal in a non-TTY requires --plaintext.'));
           process.exit(1);
         }
-        // Batch every backend read into one helper call where supported, so
-        // keychain --reveal pops Touch ID once and synced/file bundles use
-        // their declared storage.
+        // An explicit human `view --reveal` at a terminal is a deliberate value
+        // access: resolve interactively (one Touch ID) so a locked bundle shows
+        // its values. Under an agent (AGENTS_RUNTIME) or headless (no TTY) it
+        // stays broker-only and errors with the unlock hint — never a sheet.
         const revealedValues = new Map<string, string>();
         if (reveal) {
-          const items = entries
-            .filter((e) => e.kind === 'keychain')
-            .map((e) => secretsKeychainItem(bundle.name, e.detail));
-          try {
-            const fetched = bundle.backend
-              ? new Map(items.map((item) => [item, bundleItemStore(bundle.backend).get(item)]))
-              : getKeychainTokens(items);
-            for (const [item, value] of fetched) revealedValues.set(item, value);
-          } catch {
-            // Fall through to masked output on cancellation / batch failure.
+          const { env } = readAndResolveBundleEnv(bundle.name, {
+            caller: 'view --reveal',
+            keyMode: 'storage',
+            agentOnly: isHeadlessSecretsContext() || !isInteractiveTerminal(),
+          });
+          for (const entry of entries) {
+            if (entry.kind === 'keychain' && env[entry.key] !== undefined) {
+              revealedValues.set(secretsKeychainItem(bundle.name, entry.detail), env[entry.key]);
+            }
           }
           // Revealing plaintext bypasses readAndResolveBundleEnv (the usual
           // audit chokepoint), so emit here — a `--reveal` exposes real values
@@ -1085,8 +1515,8 @@ export function registerSecretsCommands(program: Command): void {
           const literalCount = entries.filter((e) => e.kind === 'literal').length;
           const exposedCount = revealedValues.size + literalCount;
           if (exposedCount > 0) {
-            emit('secrets.get', {
-              module: 'secrets',
+            emitSecretAudit({
+              event: 'secrets.get',
               bundle: bundle.name,
               operation: 'view --reveal',
               source: 'reveal',
@@ -1140,7 +1570,7 @@ export function registerSecretsCommands(program: Command): void {
           const value = getKeychainToken(item);
           // Raw item reads bypass readAndResolveBundleEnv, so audit here too.
           // `item` is the keychain service name, never the value.
-          emit('secrets.get', { module: 'secrets', item, source: 'raw-item', status: 'success' });
+          emitSecretAudit({ event: 'secrets.get', item, source: 'raw-item', status: 'success' });
           process.stdout.write(value.endsWith('\n') ? value : `${value}\n`);
         } catch {
           // Missing item is a normal, quiet outcome for a hook probe: exit 1,
@@ -1158,9 +1588,9 @@ export function registerSecretsCommands(program: Command): void {
           process.exit(1);
         }
         // `secrets get` is the scriptable automation primitive ($(agents secrets
-        // get bundle KEY)); when embedded in a headless routine/CI script it must
-        // not pop an unwatched Touch ID prompt. Interactive use still prompts.
-        const { env } = readAndResolveBundleEnv(item, { caller: 'secrets get', keys: [key], keyMode: 'storage', agentOnly: isHeadlessSecretsContext() });
+        // get bundle KEY)). Every read is broker-only; a locked bundle points at
+        // the explicit unlock command instead of raising Touch ID.
+        const { env } = readAndResolveBundleEnv(item, { caller: 'secrets get', keys: [key], keyMode: 'storage', agentOnly: true });
         if (!(key in env)) {
           console.error(chalk.red(`Key '${key}' not in bundle '${item}'.`));
           process.exit(1);
@@ -1205,13 +1635,13 @@ export function registerSecretsCommands(program: Command): void {
 
   cmd
     .command('create [name]')
-    .description('Create an empty bundle')
-    .option('--description <text>', 'Free-form description')
+    .description('Create an empty bundle. Name it after what it holds — a website by domain (stripe.com, openai.ai), a desktop app by its binary suffix (slack.app, photoshop.exe) — and pass --description.')
+    .option('--description <text>', 'Free-form description (recommended — an undescribed bundle prints a "No description found" nudge)')
     .option('--allow-exec', 'Allow exec: refs in this bundle (off by default)')
-    .option('--policy <policy>', 'prompt policy: daily (default, ask once a week), always (ask every time), or never (silent, NO biometry ACL — needs --i-understand)')
+    .option('--policy <policy>', "prompt policy: hold (default, ask once per hold window — secrets.agent.holdMs, 7d by default), always (ask every time), or never (silent, NO biometry ACL — needs --i-understand). 'daily'/'session' are accepted aliases for 'hold'.")
     .addOption(new Option('--tier <policy>', 'deprecated alias for --policy').hideHelp())
     .option('--i-understand', 'Confirm creating a "never"-policy bundle (no biometry ACL) without an interactive prompt')
-    .option('--backend <backend>', 'storage backend: keychain (default) or file (passphrase-encrypted)', 'keychain')
+    .option('--backend <backend>', 'storage backend: keychain or file (defaults to agents.yaml secrets.backend)')
     .option('--synced', 'Store this bundle in the age-encrypted synced secrets file for user-managed cross-machine file sync')
     .option('--force', 'Overwrite an existing bundle')
     .action(async (name: string | undefined, opts: { description?: string; allowExec?: boolean; policy?: string; tier?: string; iUnderstand?: boolean; backend?: string; synced?: boolean; force?: boolean }) => {
@@ -1219,10 +1649,10 @@ export function registerSecretsCommands(program: Command): void {
         const resolvedName = name ?? (await promptBundleName());
         validateBundleName(resolvedName);
         // Leave policy unset unless the user explicitly chose one, so the bundle
-        // inherits the configured default (`daily`) instead of being pinned.
+        // inherits the configured default (`hold`) instead of being pinned.
         const policyOpt = opts.policy ?? opts.tier;
         const policy = policyOpt ? parsePolicyOpt(policyOpt) : undefined;
-        const backend = opts.synced ? 'vault' : parseBackendOpt(opts.backend);
+        const backend = opts.synced ? 'vault' : resolveBackendOpt(opts.backend);
         if (bundleExists(resolvedName) && !opts.force) {
           console.error(chalk.red(`Bundle '${resolvedName}' already exists. Use --force to overwrite.`));
           process.exit(1);
@@ -1243,8 +1673,11 @@ export function registerSecretsCommands(program: Command): void {
           vars: {},
         };
         writeBundle(bundle);
-        const policyTag = bundlePolicy(bundle) === 'daily'
-          ? 'policy: daily'
+        // Record the create through the ONE chokepoint (events.jsonl + the usage
+        // read-model). Value-free — bundle name only.
+        emitSecretAudit({ event: 'secrets.create', bundle: resolvedName, operation: 'create', source: 'create', status: 'success' });
+        const policyTag = bundlePolicy(bundle) === 'hold'
+          ? 'policy: hold'
           : bundlePolicy(bundle) === 'always'
             ? 'policy: always ask'
             : 'policy: never (NO biometry ACL)';
@@ -1254,6 +1687,11 @@ export function registerSecretsCommands(program: Command): void {
           backend === 'vault' ? 'synced' : null,
         ].filter(Boolean);
         console.log(chalk.green(`Bundle '${resolvedName}' created (${tags.join(', ')}).`));
+        if (!bundle.description) {
+          // A described bundle is self-documenting for the next agent that reads
+          // `list` / `view`. Nudge toward one at create time — never blocking.
+          console.log(chalk.yellow(`No description found. Add one: agents secrets describe ${resolvedName} "what this bundle is for"`));
+        }
         if (bundlePolicy(bundle) === 'never') {
           console.log(chalk.red('Stored without biometry protection — reads are silent. Automation-only; rotate anything sensitive out of it.'));
         }
@@ -1543,16 +1981,26 @@ Examples:
     .action(async (name: string | undefined, opts: { keepSecrets?: boolean; yes?: boolean }) => {
       try {
         const resolvedName = name ?? (await pickBundleName('delete'));
-        const bundle = readBundle(resolvedName);
+        // An undecryptable bundle (lost/rotated passphrase) must still be
+        // deletable: deletion is the ONLY way out of that state, and every other
+        // verb — view, add, import — refuses to touch the name until it's gone.
+        // Its key refs are unreadable, so its keychain items cannot be
+        // enumerated for purging; say so rather than claiming a clean purge.
+        const bundle = readBundleIfDecryptable(resolvedName);
         if (!opts.yes) {
           if (!isInteractiveTerminal()) {
             console.error(chalk.red(`Refusing to delete '${resolvedName}' without --yes in a non-interactive shell.`));
             process.exit(1);
           }
-          const keychainCount = describeBundle(bundle).filter((e) => e.kind === 'keychain').length;
-          const suffix = keychainCount && !opts.keepSecrets
-            ? ` and purge ${keychainCount} keychain item${keychainCount === 1 ? '' : 's'}`
-            : '';
+          let suffix: string;
+          if (!bundle) {
+            suffix = ' (unreadable — its keychain items cannot be enumerated and will be left in place)';
+          } else {
+            const keychainCount = describeBundle(bundle).filter((e) => e.kind === 'keychain').length;
+            suffix = keychainCount && !opts.keepSecrets
+              ? ` and purge ${keychainCount} keychain item${keychainCount === 1 ? '' : 's'}`
+              : '';
+          }
           const { confirm } = await import('@inquirer/prompts');
           const proceed = await confirm({
             message: `Delete bundle '${resolvedName}'${suffix}?`,
@@ -1563,7 +2011,7 @@ Examples:
             return;
           }
         }
-        if (!opts.keepSecrets) {
+        if (bundle && !opts.keepSecrets) {
           const store = bundleItemStore(bundle.backend);
           for (const { item } of keychainItemsForBundle(bundle)) {
             store.delete(item);
@@ -1622,7 +2070,7 @@ Examples:
     .addOption(new Option('--from-1password', 'deprecated alias for --from 1password:<vault>').hideHelp())
     .addOption(new Option('--vault <name>', 'deprecated: name the vault in --from 1password:<vault>').hideHelp())
     .option('--all-plaintext', 'Store every imported value as a literal in the bundle metadata (skip keychain item creation)')
-    .option('--backend <backend>', 'When creating the bundle: keychain (default) or file (passphrase-encrypted)', 'keychain')
+    .option('--backend <backend>', 'When creating the bundle: keychain or file (defaults to agents.yaml secrets.backend)')
     .option('--synced', 'When creating the bundle, store it in the age-encrypted synced secrets file')
     .option('--force', 'Overwrite an existing key in the bundle')
     .option('--purge', 'With --from icloud: delete the iCloud copies after a successful import (iCloud propagates the deletion to your other devices)')
@@ -1666,6 +2114,7 @@ Examples:
           const resolvedBundleName = bundleName ?? (await pickBundleName('import into'));
           const bundle = resolveImportBundle(resolvedBundleName, opts.backend, opts.synced);
           const { added, skipped } = applyEnvToBundle(bundle, env, opts);
+          emitSecretAudit({ event: 'secrets.import', bundle: bundle.name, operation: 'import --from-file', source: 'file', status: 'success', keyCount: added });
           console.log(chalk.green(`Imported ${added} key(s) from file${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
           return;
         }
@@ -1680,6 +2129,7 @@ Examples:
           const env = await remoteResolveEnv(target, resolvedBundleName, { osLookupName: opts.host });
           const bundle = resolveImportBundle(resolvedBundleName, opts.backend, opts.synced);
           const { added, skipped } = applyEnvToBundle(bundle, env, opts);
+          emitSecretAudit({ event: 'secrets.import', bundle: bundle.name, operation: 'import --from-ssh', source: 'ssh', host: opts.host, status: 'success', keyCount: added });
           console.log(chalk.green(`Imported ${added} key(s) from ${opts.host}${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
           return;
         }
@@ -1691,7 +2141,7 @@ Examples:
         if (opts.from1password) {
           console.log(chalk.yellow('--from-1password is deprecated; use --from 1password:<vault>.'));
         }
-        const requestedBackend = opts.synced ? 'vault' : parseBackendOpt(opts.backend);
+        const requestedBackend = opts.synced ? 'vault' : resolveBackendOpt(opts.backend);
 
         if (source.kind === 'icloud') {
           await importFromICloud(bundleName, {
@@ -1718,6 +2168,7 @@ Examples:
           const env: Record<string, string> = {};
           for (const { envKey, value } of secrets) env[envKey] = value;
           const { added, skipped } = applyEnvToBundle(bundle, env, opts);
+          emitSecretAudit({ event: 'secrets.import', bundle: bundle.name, operation: `import --from 1password:${vault}`, source: '1password', status: 'success', keyCount: added });
           if (opSkipped.length) {
             console.log(chalk.yellow(`Skipped ${opSkipped.length} item(s) with no importable fields.`));
           }
@@ -1726,6 +2177,7 @@ Examples:
           const raw = readImportDotenv(source.path);
           const pairs = parseDotenv(raw);
           const { added, skipped } = applyEnvToBundle(bundle, pairs, opts);
+          emitSecretAudit({ event: 'secrets.import', bundle: bundle.name, operation: 'import --from env-file', source: 'env-file', status: 'success', keyCount: added });
           console.log(chalk.green(`Imported ${added} key(s)${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
         }
       } catch (err) {
@@ -1742,6 +2194,7 @@ Examples:
     .option('--to-1password', 'Push every key in the bundle as a PASSWORD item in a 1Password vault')
     .option('--vault <name>', '1Password vault name (used with --to-1password)')
     .option('--host <target...>', 'Push the bundle over SSH to this target (host alias or user@host); repeatable for multiple machines')
+    .option('--device <target...>', 'Alias for --host; repeatable')
     .option('--remote-backend <backend>', 'Backend for the bundle on the remote (with --host): keychain (default) or file (passphrase-encrypted, headless-readable). file forwards AGENTS_SECRETS_PASSPHRASE over stdin.', 'keychain')
     .option('--force', 'Overwrite existing keys/items on the target (used with --to-1password and --host)')
     .option('--format <shell|json>', 'Output for --plaintext export: shell (default) or json (lossless, machine-readable; used by remote resolve)', 'shell')
@@ -1751,12 +2204,17 @@ Examples:
       to1password?: boolean;
       vault?: string;
       host?: string[];
+      device?: string[];
       remoteBackend?: string;
       force?: boolean;
       format?: string;
       toFile?: string;
     }) => {
       try {
+        // `--device` is an alias for `--host` (fleet vocabulary parity with
+        // `agents run --device`); fold it into the host list up front so
+        // every downstream branch sees one resolved target list.
+        if (opts.device?.length) opts.host = [...(opts.host ?? []), ...opts.device];
         const { readAndResolveBundleEnv, bundleToEnvPrefix, isReservedEnvName } = await import('../lib/secrets/bundles.js');
         const resolvedBundleName = bundleName ?? (await pickBundleName('export'));
 
@@ -1768,8 +2226,9 @@ Examples:
               'Set it for this command, then supply the same value when importing.'
             );
           }
-          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: 'export --to-file', keyMode: 'storage', agentOnly: isHeadlessSecretsContext() });
+          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: 'export --to-file', keyMode: 'storage', agentOnly: true });
           exportBundleToFile(env, opts.toFile, passphrase);
+          emitSecretAudit({ event: 'secrets.export', bundle: resolvedBundleName, operation: 'export --to-file', source: 'file', status: 'success', keyCount: Object.keys(env).length });
           console.log(chalk.green(`Exported ${Object.keys(env).length} key(s) to ${opts.toFile}`));
           return;
         }
@@ -1797,7 +2256,7 @@ Examples:
               );
             }
           }
-          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `ssh export`, keyMode: 'storage', agentOnly: isHeadlessSecretsContext() });
+          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `ssh export`, keyMode: 'storage', agentOnly: true });
           const dotenv = bundleEnvToDotenv(env);
           const keyCount = Object.keys(env).length;
           // Drive the remote's own `agents secrets import --from -` so the values
@@ -1855,9 +2314,32 @@ Examples:
               console.error(chalk.red(`${host}: remote import failed (exit ${res.code})${msg ? `: ${msg}` : ''}`));
               continue;
             }
+            // A keychain-backed push to a macOS remote over headless SSH can land
+            // the bundle metadata but no READABLE value items: the remote login
+            // keychain is locked in the non-interactive SSH context, so Security
+            // accepts the write but the biometry-ACL'd item is unreadable, and the
+            // remote `import` still exits 0. Read the bundle back the same way a
+            // release will (drops the plaintext, keeps only key presence; the
+            // remote's headless `agentOnly` guard fails fast, so no Touch ID) and
+            // FAIL LOUDLY if the keys didn't materialize — rather than leave a
+            // metadata-only bundle that breaks later with "stored item not found".
+            // The file backend is headless-readable by construction, so skip it.
+            if (remoteBackend === 'keychain') {
+              const verdict = verifyRemoteKeychainPush(host, resolvedBundleName, Object.keys(env), { osLookupName: host });
+              if (!verdict.ok) {
+                failures++;
+                if (verdict.kind === 'locked-keychain') {
+                  console.error(chalk.red(keychainWriteFailureMessage(host, resolvedBundleName, verdict.reason)));
+                } else {
+                  console.error(chalk.red(`${host}: pushed '${resolvedBundleName}' but could not verify it on the remote: ${verdict.reason}`));
+                }
+                continue;
+              }
+            }
             const remoteMsg = (res.stdout || '').trim().split('\n').map((l) => l.trim()).filter(Boolean).pop();
             console.log(chalk.green(`${host} -> '${resolvedBundleName}': ${remoteMsg || `${keyCount} key(s) exported`}`));
           }
+          emitSecretAudit({ event: 'secrets.export', bundle: resolvedBundleName, operation: `export --host ${hosts.join(',')}`, source: 'ssh', host: hosts.join(','), status: failures > 0 ? 'error' : 'success', keyCount });
           if (failures > 0) process.exit(1);
           return;
         }
@@ -1865,7 +2347,7 @@ Examples:
         if (opts.to1password) {
           assertOpAvailable();
           const vault = await resolveVault(opts.vault);
-          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `1Password vault ${vault}`, keyMode: 'storage', agentOnly: isHeadlessSecretsContext() });
+          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `1Password vault ${vault}`, keyMode: 'storage', agentOnly: true });
           let created = 0;
           let overwritten = 0;
           let skipped = 0;
@@ -1888,6 +2370,7 @@ Examples:
           if (created) parts.push(`${created} created`);
           if (overwritten) parts.push(`${overwritten} overwritten`);
           if (skipped) parts.push(`${skipped} skipped (already exist, pass --force)`);
+          emitSecretAudit({ event: 'secrets.export', bundle: resolvedBundleName, operation: `export --to-1password ${vault}`, source: '1password', status: 'success', keyCount: created + overwritten });
           console.log(chalk.green(`Exported to 1Password vault '${vault}': ${parts.join(', ')}.`));
           return;
         }
@@ -1901,14 +2384,12 @@ Examples:
           process.exit(1);
         }
         // `agents secrets export --plaintext` is what release/CI scripts eval.
-        // When it runs detached (both stdio non-TTY) or under a headless agent,
-        // resolve broker-only so it can never pop a Touch ID sheet on the
-        // interactive user's screen. An interactive `eval "$(...)"` keeps its
-        // terminal stdin, so it is not headless and still prompts.
+        // Every caller is broker-only, including a plain shell, so export never
+        // raises Touch ID on the interactive user's screen.
         const { env } = readAndResolveBundleEnv(resolvedBundleName, {
           caller: `export to shell`,
           keyMode: 'process',
-          agentOnly: isHeadlessSecretsContext(),
+          agentOnly: true,
         });
         if (opts.format === 'json') {
           // Machine-readable form consumed by `remoteResolveEnv` over SSH.
@@ -1923,6 +2404,12 @@ Examples:
           const output = needsQuotes ? `'${v.replace(/'/g, `'\\''`)}'` : v;
           process.stdout.write(`export ${exportKey}=${output}\n`);
         }
+        // Record the shell export (the `eval "$(...)"` path). The `--format json`
+        // branch above is the machine-to-machine remote-resolve transport (already
+        // counted as an access on this machine by the resolve above), so it is
+        // deliberately not counted here as an export — that would tally every peer
+        // pull as an export.
+        emitSecretAudit({ event: 'secrets.export', bundle: resolvedBundleName, operation: 'export --plaintext', source: 'shell', status: 'success', keyCount: Object.keys(env).length });
       } catch (err) {
         if (isPromptCancelled(err)) return;
         console.error(chalk.red((err as Error).message));
@@ -1967,7 +2454,13 @@ Examples:
             caller: `command ${cmd}`,
             keys: keysSubset,
             allowExpired: execOpts.allowExpired,
-            agentOnly: isHeadlessSecretsContext(),
+            // An explicit `secrets exec` at a real terminal is a deliberate use of
+            // the values: an unlocked bundle runs silently, a locked one resolves
+            // with one Touch ID sheet, then the command runs with the secrets
+            // injected. Under an agent (AGENTS_RUNTIME) or headless (no TTY) it
+            // stays broker-only and points at the explicit unlock command instead
+            // of raising a sheet — so release/CI scripts never prompt.
+            agentOnly: isHeadlessSecretsContext() || !isInteractiveTerminal(),
           }).env;
         }
         const { spawn } = await import('child_process');
@@ -2152,9 +2645,10 @@ Examples:
     .description('Hold a bundle in the secrets-agent after one Touch ID, so concurrent runs read it without re-prompting (macOS). With --host, unlock FILE-backed bundle(s) on a remote (the passphrase prompt surfaces over the SSH TTY); keychain/biometry bundles are GUI-only and can\'t be remote-unlocked.')
     .option('--ttl <duration>', 'How long to hold it (e.g. 30m, 8h, 3d). Default 7d.')
     .option('--durable', 'Keep the unlock across sleep + reboot too (default: survives upgrade/restart but re-locks on sleep). Set secrets.agent.durable in agents.yaml to make this the default.')
+    .option('--for <agent>', 'Narrow the unlock to ONE harness type (for example claude, codex, or kimi). Default: the grant is global — every harness and a plain shell can read it, so one Touch ID covers them all.')
     .option('--all', 'Unlock every configured bundle')
     .option('--host <target>', 'Unlock the bundle(s) on this remote machine over SSH instead of locally (file-backed bundles only — the remote\'s passphrase prompt surfaces on your terminal over a -tt session). Single-valued (NOT variadic) so it never swallows the bundle name: `unlock <name> --host <machine>`.')
-    .action(async (names: string[], opts: { ttl?: string; durable?: boolean; all?: boolean; host?: string }) => {
+    .action(async (names: string[], opts: { ttl?: string; durable?: boolean; all?: boolean; host?: string; for?: string }) => {
       // Single-valued (not variadic): a variadic --host greedily consumes the
       // positional bundle name (`unlock --host mac wztest` -> host=[mac,wztest],
       // names=[]). Unlock targets one remote at a time anyway.
@@ -2222,20 +2716,54 @@ Examples:
       // (single-instance start lock, #414) and best-effort — never blocks unlock.
       ensureDaemonStarted();
       let loaded = 0;
+      // An unlock is a deliberate act, so it grants GLOBALLY unless `--for`
+      // narrows it to one harness. It must NOT inherit the ambient
+      // AGENTS_AGENT_NAME: that silently scoped a terminal unlock to whichever
+      // agent happened to launch the shell, leaving the grant unreadable to
+      // every other reader for its whole TTL.
+      const harness = opts.for || GLOBAL_HARNESS;
       for (const name of targets) {
         try {
           // noAgent: read the real keychain (one Touch ID) rather than the
           // agent we're about to populate.
-          const { bundle, env } = readAndResolveBundleEnv(name, { noAgent: true, caller: 'unlock', keyMode: 'storage' });
-          if (await agentLoad(name, bundle, env, ttlMs)) {
+          const { bundle, env } = readAndResolveBundleEnv(name, {
+            noAgent: true,
+            caller: 'unlock secrets',
+            agent: harness,
+            duration: humanRemaining(Date.now() + ttlMs),
+            keyMode: 'storage',
+          });
+          // Migrations are authorized only by this explicit unlock. The bundle
+          // metadata was included in the successful authenticated batch, so the
+          // ACL heal can rewrite that already-read value without another read.
+          maybeAutoRekey();
+          healKeychainBundleMetadataAclOnce(new Map([[bundle.name, JSON.stringify(bundle)]]));
+          if (await agentLoad(name, bundle, env, ttlMs, harness)) {
             loaded++;
             // Persist a durable session snapshot so the unlock survives a daemon
             // restart / upgrade (and sleep too, with --durable). session-store.ts.
+            const durable = opts.durable ?? secretsAgentDurable();
             saveSession(name, {
               bundle,
               env,
               expiresAt: Date.now() + ttlMs,
-              sleepPersist: opts.durable ?? secretsAgentDurable(),
+              sleepPersist: durable,
+              harness,
+            });
+            // Audit the GRANT itself — the broker + durable session now serve this
+            // bundle prompt-free for the whole TTL, to every reader in `harness`
+            // scope. The pre-read above emits `secrets.get`; this records the
+            // longer-lived unlock a `secrets.get` does not capture. Key NAMES only.
+            emitSecretAudit({
+              event: 'secrets.unlocked',
+              bundle: name,
+              operation: 'unlock',
+              source: durable ? 'broker+durable' : 'broker',
+              status: 'success',
+              keyCount: Object.keys(env).length,
+              keys: Object.keys(env).sort(),
+              agent: harness,
+              ttlMs,
             });
             console.log(`${chalk.green('unlocked')} ${chalk.cyan(name)} ${chalk.gray(`(${Object.keys(env).length} keys, ${humanRemaining(Date.now() + ttlMs)})`)}`);
           } else {
@@ -2262,7 +2790,7 @@ Examples:
         let total = 0;
         for (const name of names) {
           total += await agentLock(name);
-          deleteSession(name); // also drop the durable snapshot, or a restart re-warms it
+          deleteBundleSessions(name); // drop every harness scope
         }
         console.log(total > 0 ? chalk.green(`Locked ${total} bundle(s).`) : chalk.gray('Nothing to lock.'));
       } else {
@@ -2288,7 +2816,7 @@ Examples:
           ? chalk.green('running') + chalk.gray(isDaemonRunning() ? ' (hosted by the daemon)' : ' (standalone)')
           : chalk.yellow('not running — starts on demand, or run `agents secrets start` to bring the daemon up now')),
       );
-      // Diagnostic: version skew is the top reason a `daily` bundle keeps
+      // Diagnostic: version skew is the top reason a `hold` bundle keeps
       // re-prompting — a broker on an older build gets torn down when the CLI
       // version changes (e.g. `agents-cli-update`), wiping every held bundle.
       const onDisk = getCliVersionFresh();
@@ -2304,24 +2832,58 @@ Examples:
       // an invalid value (0/NaN/negative) falls back to the default via
       // clampHoldMs, so it must read "(default)", not misattribute to config.
       const configured = (() => { try { const v = readMeta().secrets?.agent?.holdMs; return typeof v === 'number' && Number.isFinite(v) && v > 0; } catch { return false; } })();
-      console.log(chalk.gray(`hold: ${holdStr}${configured ? ' (secrets.agent.holdMs)' : ' (default)'} — a daily bundle prompts once, then stays silent for this long or until sleep/logout.`));
+      console.log(chalk.gray(renderHoldSummary(holdStr, configured)));
       const entries = await agentStatus();
+      const held = new Set(entries.map((e) => e.name));
       if (entries.length === 0) {
-        console.log(chalk.gray('No bundles held. The next read of each daily bundle will prompt once, then hold.'));
+        console.log(chalk.gray(NO_BUNDLES_HELD_LINE));
         console.log(chalk.gray('Pre-warm now with: agents secrets unlock <bundle>  (or --all)'));
-        return;
+      } else {
+        console.log(chalk.bold(`${'BUNDLE'.padEnd(24)} ${'KEYS'.padEnd(5)} LOCKS IN`));
+        for (const e of entries) {
+          console.log(`${chalk.cyan(e.name.padEnd(24))} ${String(e.keyCount).padEnd(5)} ${humanRemaining(e.expiresAt)}`);
+        }
+        console.log(chalk.gray('Reads of held bundles are silent; any bundle not listed prompts once on its next read.'));
       }
-      console.log(chalk.bold(`${'BUNDLE'.padEnd(24)} ${'KEYS'.padEnd(5)} LOCKS IN`));
-      for (const e of entries) {
-        console.log(`${chalk.cyan(e.name.padEnd(24))} ${String(e.keyCount).padEnd(5)} ${humanRemaining(e.expiresAt)}`);
+
+      // Usage hint: bundles you keep getting a Touch ID prompt for — a keychain
+      // read that fell through to biometry (not served by the broker/session)
+      // >= a few times in the last week, and not currently held. Unlocking each
+      // once silences it for the hold window. This runs even when NO bundle is
+      // held — that user re-prompts on every read and most needs the nudge.
+      // Excludes `never`/no-ACL bundles (never prompt) and file/vault bundles
+      // (resolve by passphrase, not the keychain broker — `unlock` is a no-op).
+      try {
+        const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const reads = query({ eventTypes: ['secrets.get'], startDate: weekAgo }) as Array<{
+          bundle?: string;
+          source?: string;
+        }>;
+        const hot = frequentlyPromptedBundles(reads, held, { minReads: 3 }).filter((h) => {
+          try {
+            return bundleBackend(h.name) === 'keychain' && bundlePolicy(readBundle(h.name)) !== 'never';
+          } catch {
+            return false; // bundle gone / unreadable metadata — nothing to suggest
+          }
+        });
+        if (hot.length > 0) {
+          console.log();
+          console.log(chalk.bold('Prompted often — unlock once to silence:'));
+          for (const h of hot) {
+            console.log(
+              `${chalk.cyan(h.name.padEnd(24))} ${chalk.gray(`${h.count}× in the last 7d`)}  →  ${chalk.green(`agents secrets unlock ${h.name}`)}`,
+            );
+          }
+        }
+      } catch {
+        // Best-effort hint — never let usage analysis break `secrets status`.
       }
-      console.log(chalk.gray('Reads of held bundles are silent; any bundle not listed prompts once on its next read.'));
     });
 
   cmd
     .command('policy <bundle> [policy]')
     .alias('tier')
-    .description("Show or set a bundle's prompt policy: daily (default, ask once a week), always (ask every time), or never (silent, NO biometry ACL).")
+    .description("Show or set a bundle's prompt policy: hold (default, ask once per hold window — secrets.agent.holdMs, 7d by default), always (ask every time), or never (silent, NO biometry ACL). 'daily'/'session' are accepted aliases for 'hold'.")
     .option('--i-understand', 'Confirm switching to the "never" policy (no biometry ACL) without an interactive prompt')
     .action(async (bundleName: string, policyArg: string | undefined, opts: { iUnderstand?: boolean }) => {
       try {
@@ -2338,12 +2900,16 @@ Examples:
           return;
         }
         bundle.policy = next;
-        // writeBundle evicts any broker-held copy, so tightening daily ->
-        // always/never takes effect NOW: the next read re-prompts (`always`)
-        // or reads its no-ACL item directly (`never`).
-        writeBundle(bundle);
+        // Re-store the VALUE items so their keychain ACL matches the new tier —
+        // NOT just the metadata. macOS gates each read on the item's own ACL
+        // (SEC-19); a metadata-only write would leave a hold/always bundle's
+        // biometry ACL in place and keep popping Touch ID forever after a switch
+        // to `never`. reAclBundleItems reads once (the last prompt this bundle
+        // raises when tightening to `never`), rewrites no-ACL, and evicts any
+        // broker-held copy so the change takes effect on the very next read.
+        reAclBundleItems(bundle);
         console.log(chalk.green(`${bundle.name} policy set to ${next}.`));
-        if (next === 'daily') {
+        if (next === 'hold') {
           console.log(chalk.gray('Held by the secrets-agent for ~7 days after one unlock (auto-cache is on by default; disable with `secrets.agent.auto: false` in agents.yaml).'));
         } else if (next === 'always') {
           console.log(chalk.gray('Asks for Touch ID every time — never auto-held.'));
@@ -2408,6 +2974,7 @@ Examples:
   registerSecretsSyncCommands(cmd);
   registerSecretsMigrateAclCommand(cmd);
   registerSecretsImportKeyringCommand(cmd);
+  registerSecretsRotatePassphraseCommand(cmd);
 }
 
 /** Validate a prompt-policy value, throwing a clear message on a bad one (the
@@ -2418,9 +2985,9 @@ Examples:
 export function parsePolicyOpt(raw: string | undefined): SecretsPolicy {
   const v = (raw ?? 'always').toLowerCase();
   if (v === 'always' || v === 'biometry') return 'always';
-  if (v === 'daily' || v === 'session') return 'daily';
+  if (v === 'hold' || v === 'daily' || v === 'session') return 'hold';
   if (v === 'never' || v === 'none') return 'never';
-  throw new Error(`Invalid policy '${raw}'. Use 'always', 'daily', or 'never'.`);
+  throw new Error(`Invalid policy '${raw}'. Use 'always', 'hold', or 'never'.`);
 }
 
 /**
@@ -2461,11 +3028,24 @@ async function confirmNeverPolicyInteractive(bundleName: string): Promise<boolea
 }
 
 /** Validate a --backend value, exiting with a clear message on a bad one. */
-function parseBackendOpt(raw: string | undefined): SecretsBackend {
-  const v = (raw ?? 'keychain').toLowerCase();
+export function secretsDefaultBackend(): SecretsBackend {
+  const raw = readMeta().secrets?.backend;
+  if (raw === undefined) return 'keychain';
+  if (raw === 'keychain' || raw === 'file' || raw === 'vault') return raw;
+  console.error(chalk.red(`Invalid secrets.backend '${raw}'. Use 'keychain', 'file', or 'vault'.`));
+  process.exit(1);
+}
+
+function parseBackendOpt(raw: string | undefined, defaultBackend: SecretsBackend = 'keychain'): SecretsBackend {
+  const v = (raw ?? defaultBackend).toLowerCase();
+  if (!raw && v === 'vault') return 'vault';
   if (v === 'keychain' || v === 'file') return v;
   console.error(chalk.red(`Invalid --backend '${raw}'. Use 'keychain' or 'file'. For cross-machine file sync, pass --synced.`));
   process.exit(1);
+}
+
+function resolveBackendOpt(raw: string | undefined): SecretsBackend {
+  return parseBackendOpt(raw, raw === undefined ? secretsDefaultBackend() : 'keychain');
 }
 
 /** Human-readable "locks in 3 hours" / "locks in 5 minutes" from an epoch-ms expiry. */

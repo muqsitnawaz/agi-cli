@@ -10,24 +10,33 @@
  * preview, resume dispatch) is reused from the existing sessions plumbing.
  */
 
+import path from 'path';
 import { spawnSync } from 'child_process';
 import chalk from 'chalk';
 import { dynamicPicker } from '../lib/picker.js';
-import type { SessionMeta } from '../lib/session/types.js';
-import { getActiveSessions, type ActiveSession } from '../lib/session/active.js';
+import { isSessionTrackedAgent, type SessionMeta } from '../lib/session/types.js';
+import type { ActiveSession } from '../lib/session/active.js';
 import { discoverSessions } from '../lib/session/discover.js';
 import { gatherRemoteList } from '../lib/session/remote-list.js';
+import { enrichTeamOrigins, safeTeamText } from '../lib/session/team-filter.js';
+import { listFavorites, toggleFavorite } from '../lib/session/favorites.js';
 import { machineId, normalizeHost } from '../lib/session/sync/config.js';
 import { buildPreview } from './sessions-picker.js';
 import {
   formatPickerLabel,
   pickerColumnsFor,
+  type SshOriginTag,
   ticketLabel,
   mergeLocalFirst,
-  indexActiveBySessionId,
+  gatherActiveSessions,
+  liveHostLabel,
+  LIVE_ROW_PREFIX,
+  cleanPreview,
   handlePickedSession,
   shouldIncludeLocal,
   remoteHostsToDial,
+  matchesTeam,
+  formatLiveStatusHeadline,
   type PickerColumns,
 } from './sessions.js';
 
@@ -44,11 +53,55 @@ export interface BrowserFilter {
   agent?: string;
   /** filter to one machine, or all — the `D` key / `--device`. */
   device?: string;
+  /** filter to one team's lineage, or all — the `T` key / `--in-team`. */
+  team?: string;
+  /** favorited-only — the `f` key / `--favorites`. */
+  favorites: boolean;
   /** this-repo subtree vs every directory — the `P` key / `--all`. */
   projectScope: 'repo' | 'all';
   /** time window (undefined = all time) — the `W` key / `--since`. */
   window?: string;
 }
+
+/**
+ * Complete a seed into the filter the picker actually runs on.
+ *
+ * Every optional field of {@link BrowserFilter} has to be named here, because the
+ * seed is copied field-by-field and an omission is silent: the field is optional,
+ * so the compiler says nothing and the browser just opens without that filter.
+ * `team` was dropped exactly this way, which made `--in-team` a no-op on the
+ * interactive path while the scope half of the same seed still applied — so the
+ * view opened wide and all-time and looked like the flag had worked.
+ *
+ * Exported so a test can assert the FILTER, not just the seed; testing the seed
+ * alone cannot see this class of bug.
+ */
+export function buildInitialFilter(initial: Partial<BrowserFilter>): BrowserFilter {
+  return {
+    running: initial.running ?? false,
+    teams: initial.teams ?? false,
+    favorites: initial.favorites ?? false,
+    agent: initial.agent,
+    device: initial.device,
+    team: initial.team,
+    projectScope: initial.projectScope ?? 'repo',
+    window: 'window' in initial ? initial.window : '30d',
+  };
+}
+
+/** Cache key for the transcript pool: every filter that changes what is FETCHED
+ *  (window, team-origin inclusion, and the team filter's deeper limit) — not the
+ *  ones applied in memory afterwards. */
+function poolCacheKey(f: BrowserFilter): string {
+  // The team filter contributes only whether it is SET, not which team: any team
+  // fetches the same deep pool and is then narrowed in memory. Keying on the name
+  // would make `t` the one hotkey that re-fans-out the fleet on every step of the
+  // cycle, at up to REMOTE_TIMEOUT_MS per unreachable peer.
+  return `${f.window ?? 'all'}|${f.teams}|${f.team ? 'team' : ''}`;
+}
+
+/** Pool size when a team filter is active; one team's rows can sit anywhere. */
+const WHOLE_TEAM_POOL_LIMIT = 5000;
 
 /** Ordered window cycle for the `W` key. `undefined` = all time. */
 const WINDOW_CYCLE: (string | undefined)[] = [undefined, '1d', '7d', '30d'];
@@ -103,8 +156,10 @@ export function browserFilterToArgv(f: BrowserFilter, query = ''): string[] {
   const a = ['sessions'];
   if (f.running) a.push('--active');
   if (f.teams) a.push('--teams');
+  if (f.favorites) a.push('--favorites');
   if (f.agent) a.push('-a', f.agent);
   if (f.device) a.push('--device', f.device);
+  if (f.team) a.push('--in-team', f.team);
   if (f.projectScope === 'all') a.push('--all');
   if (f.window) a.push('--since', f.window);
   const q = query.trim();
@@ -131,33 +186,61 @@ export function activeBrowserSeed(opts: {
   agent?: string;
   host?: string[];
   since?: string;
+  all?: boolean;
+  favorites?: boolean;
 }): Partial<BrowserFilter> {
   return {
     running: true,
     teams: !!opts.teams,
+    favorites: !!opts.favorites,
     agent: opts.agent,
     projectScope: 'all',
     device: normalizeDeviceSeed(opts.host?.[0]),
-    window: opts.since ?? '30d',
+    // --all widens the window to all-time (project is already 'all' here);
+    // --since still overrides.
+    window: opts.since ?? (opts.all ? undefined : '30d'),
   };
 }
 
 /**
  * The initial filter for the bare interactive listing: current-repo subtree by
- * default (matches the static overview's cwd scoping), `--all` widens to every
- * directory, `--since` seeds the window.
+ * default (matches the static overview's cwd scoping). `--all` sets every
+ * non-status filter to its "all" value — every directory (project) AND all-time
+ * (window) — so one flag maxes the view; `--since` still overrides the window and
+ * `-a`/`--device` still narrow their axis.
  */
 export function bareBrowserSeed(opts: {
   teams?: boolean;
   agent?: string;
   all?: boolean;
   since?: string;
+  host?: string[];
+  inTeam?: string;
+  favorites?: boolean;
 }): Partial<BrowserFilter> {
+  // An explicit --device scopes the pool to a peer, whose cwds live under that
+  // machine's home — none of them can be under OUR process.cwd(), so the default
+  // 'repo' scope would filter every fetched row away and render an empty list.
+  // A host scope therefore implies all-directories, exactly as --all does.
+  const scoped = (opts.host?.length ?? 0) > 0;
+  // --in-team asks for ONE team's lineage, and a team's teammates run in their own
+  // `.agents/worktrees/<slug>/` — a different cwd from ours — while the team itself
+  // may be older than the default window. Both defaults would hide exactly the rows
+  // the flag exists to surface, so it widens the scope the way --all does. The flag
+  // path does this too (sessions.ts `wantsWholeTeam`); the browser is the one a
+  // human actually reaches, so it must not be the one that stays narrow.
+  const wholeTeam = !!opts.inTeam;
   return {
     teams: !!opts.teams,
+    favorites: !!opts.favorites,
     agent: opts.agent,
-    projectScope: opts.all ? 'all' : 'repo',
-    window: opts.since ?? '30d',
+    // The filter carries one device; seed it only when the scope names exactly
+    // one, so a two-device scope isn't narrowed to the first of them.
+    device: opts.host?.length === 1 ? normalizeDeviceSeed(opts.host[0]) : undefined,
+    team: opts.inTeam,
+    // --all maxes every non-status filter: all dirs AND all-time. --since wins.
+    projectScope: opts.all || scoped || wholeTeam ? 'all' : 'repo',
+    window: opts.since ?? (opts.all || wholeTeam ? undefined : '30d'),
   };
 }
 
@@ -194,8 +277,9 @@ async function fetchRawPool(
   self: string,
   local: boolean,
   hosts: string[] | undefined,
-): Promise<{ key: string; rows: SessionMeta[] }> {
+): Promise<{ key: string; rows: SessionMeta[]; unreachable: string[] }> {
   const since = f.window;
+  let unreachable: string[] = [];
   // Local pool: wide (every directory) — device/agent/project are applied in
   // memory so a hotkey toggle is instant and doesn't re-hit the disk. Skipped
   // when an explicit host scope excludes this machine.
@@ -205,7 +289,10 @@ async function fetchRawPool(
         cwd: process.cwd(),
         since,
         excludeTeamOrigin: !f.teams,
-        limit: 500,
+        // A team filter reaches back past the usual browse window, so the pool it
+        // draws from has to as well — otherwise the newest 500 rows decide which
+        // teams exist.
+        limit: f.team ? WHOLE_TEAM_POOL_LIMIT : 500,
         sortBy: 'timestamp',
       })
     : [];
@@ -214,31 +301,157 @@ async function fetchRawPool(
   // Skipped under --local. An explicit --host/--device scopes exactly which peers
   // are dialed (undefined = sweep every online device). Best-effort — a fan-out
   // failure leaves the local list intact.
-  if (!local) {
+  const remoteHosts = remoteHostsToDial(hosts, self);
+  // An explicit scope naming only this machine leaves nothing remote to dial.
+  // gatherRemoteList reads `[]` as "no hosts given" and falls through to the
+  // whole-fleet sweep, so `--device <self>` would dial every online box — the
+  // exact opposite of the flag's scope-not-add contract. Skip the fan-out here,
+  // the same way gatherActiveSessions does for --active.
+  const dialPeers = !local && (!hosts?.length || (remoteHosts && remoteHosts.length > 0));
+  if (dialPeers) {
     try {
-      const forwarded = ['sessions', '--all', '--json', '--limit', '500'];
+      // The peer's cap has to match the local one, or a team filter widens only
+      // this machine's half of the pool and a peer's older rows stay invisible —
+      // the same bug one hop out. A numeric --limit is forwarded rather than
+      // --in-team itself, which a peer on an older build would reject as an
+      // unknown option and fail the whole fan-out.
+      const forwarded = ['sessions', '--all', '--json', '--limit', String(f.team ? WHOLE_TEAM_POOL_LIMIT : 500)];
       if (since) forwarded.push('--since', since);
       if (f.teams) forwarded.push('--teams');
-      const { sessions: remote } = await gatherRemoteList(forwarded, remoteHostsToDial(hosts, self));
-      if (remote.length > 0) rows = mergeLocalFirst([...rows, ...remote], self);
+      const remoteResult = await gatherRemoteList(forwarded, remoteHosts);
+      unreachable = remoteResult.unreachable;
+      if (remoteResult.sessions.length > 0) rows = mergeLocalFirst([...rows, ...remoteResult.sessions], self);
     } catch {
       // enrichment, never a hard dependency
     }
   }
 
-  return { key: `${since ?? 'all'}|${f.teams}`, rows };
+  // Team rows are anonymous without their meta.json (team name, handle, the
+  // orchestrator that spawned them). Only pay for that read when team rows are
+  // actually in the pool — with `c` off they were excluded at the query.
+  if (f.teams) rows = enrichTeamOrigins(rows);
+
+  return { key: poolCacheKey(f), rows, unreachable };
 }
 
-/** Apply the cheap in-memory filters (agent / device / project / running). */
+/**
+ * A live session's stable row key: its session id when the agent reported one,
+ * else a per-machine handle so an id-less live session (a just-booted harness, a
+ * cloud task) still gets exactly one row instead of being dropped. Cloud rows key
+ * on the task id because they have no pid — keying them all on the machine alone
+ * would collapse two cloud tasks into one row, the same silent-drop this whole
+ * change exists to remove.
+ */
+export function liveRowKey(a: ActiveSession, self: string): string {
+  if (a.sessionId) return a.sessionId;
+  const handle = a.cloudTaskId ?? (a.pid != null ? String(a.pid) : 'unknown');
+  return `${LIVE_ROW_PREFIX}${a.machine ?? self}:${handle}`;
+}
+
+/** Index live sessions by {@link liveRowKey} — the join key between the live scan
+ *  and the transcript pool. Id-carrying rows key on the session id, so a live row
+ *  and its transcript row collapse to one. */
+export function indexLiveRows(rows: ActiveSession[], self: string): Map<string, ActiveSession> {
+  const byKey = new Map<string, ActiveSession>();
+  for (const a of rows) byKey.set(liveRowKey(a, self), a);
+  return byKey;
+}
+
+/**
+ * Project a live session onto the picker's row shape, for a session the transcript
+ * pool doesn't carry — a peer's session, a transcript outside the current window,
+ * or an agent that has not written one yet. `filePath` is the live transcript path
+ * when the scan resolved one and empty otherwise, which is what
+ * {@link handlePickedSession} keys "there is nothing to open yet" off.
+ */
+export function liveSessionToMeta(a: ActiveSession, self: string): SessionMeta {
+  const machine = a.machine ?? self;
+  const started = a.startedAtMs ?? a.lastActivityMs;
+  const topic = a.topic ?? a.preview;
+  return {
+    id: liveRowKey(a, self),
+    // No session id to short — name the row by what it IS (a cloud task, a pid),
+    // so the id column still identifies the process you'd go looking for.
+    shortId: a.sessionId
+      ? a.sessionId.slice(0, 8)
+      : a.cloudTaskId
+        ? a.cloudTaskId.slice(0, 8)
+        : `p:${a.pid ?? '?'}`,
+    agent: isSessionTrackedAgent(a.kind) ? a.kind : 'claude',
+    timestamp: new Date(started ?? Date.now()).toISOString(),
+    lastActivity: a.lastActivityMs ? new Date(a.lastActivityMs).toISOString() : undefined,
+    project: a.cwd ? path.basename(a.cwd) : undefined,
+    cwd: a.cwd,
+    filePath: a.sessionFile ?? '',
+    // A live topic is raw transcript text: a newline in it would break the row
+    // into two and misalign every column after it. Indexed rows are already
+    // cleaned at scan time, so this puts projected rows on the same footing.
+    topic: topic ? cleanPreview(topic) : undefined,
+    label: a.label ? cleanPreview(a.label) : undefined,
+    machine,
+    // Reading/resuming a peer's session hops back over SSH — same contract the
+    // cross-machine listing sets, so handlePickedSession routes it correctly.
+    _remote: machine !== self,
+    prUrl: a.pr?.url,
+    prNumber: a.pr?.number,
+    ticketId: a.ticket?.id,
+    worktreeSlug: a.worktree?.slug,
+  };
+}
+
+/**
+ * Fold the live scan INTO the transcript pool. The running filter used to be a
+ * pure intersection (`pool ∩ live`), which meant a session had to already be in
+ * the pool to be shown as running — so every session on another machine, and
+ * every local one outside the pool's window, was invisible in the browser while
+ * `--active --json` listed it. Live sessions the pool lacks are appended as their
+ * own rows, then the whole set is grouped local-machine-first.
+ */
+export function mergeLiveIntoPool(
+  rows: SessionMeta[],
+  live: Map<string, ActiveSession>,
+  self: string,
+): SessionMeta[] {
+  const known = new Set(rows.map((r) => r.id));
+  const extra: SessionMeta[] = [];
+  for (const [key, a] of live) {
+    if (!known.has(key)) extra.push(liveSessionToMeta(a, self));
+  }
+  return extra.length === 0 ? rows : mergeLocalFirst([...rows, ...extra], self);
+}
+
+/**
+ * Whether to render the host-program column. It belongs to the running view
+ * only, so this gates on the FILTER — not on the live index being populated.
+ * `liveCache` outlives a toggle of the `r` hotkey, so testing `live` alone would
+ * keep the column after running is turned back off, widening a plain transcript
+ * listing that has no live rows to explain it.
+ */
+export function shouldShowHostColumn(
+  f: BrowserFilter,
+  live: Map<string, ActiveSession> | null,
+  rows: SessionMeta[],
+): boolean {
+  if (!f.running || !live) return false;
+  return rows.some((r) => liveHostLabel(live.get(r.id)) !== '');
+}
+
+/** Apply the cheap in-memory filters (agent / device / project / running / favorites). */
 function applyFilters(
   rows: SessionMeta[],
   live: Map<string, ActiveSession>,
   f: BrowserFilter,
   self: string,
+  favorites: Set<string>,
 ): SessionMeta[] {
   let out = rows;
+  // A projected live row is keyed by pid/task when it has no session id, and a
+  // favorite is always keyed by a real session id — so an id-less row can never
+  // be favorited and correctly drops out here.
+  if (f.favorites) out = out.filter((r) => favorites.has(r.id));
   if (f.agent) out = out.filter((r) => r.agent === f.agent);
   if (f.device) out = out.filter((r) => (r.machine ?? self) === f.device);
+  if (f.team) out = out.filter((r) => matchesTeam(r, f.team!));
   if (f.projectScope === 'repo') {
     const cwd = process.cwd();
     out = out.filter((r) => !!r.cwd && (r.cwd === cwd || r.cwd.startsWith(cwd + '/')));
@@ -247,15 +460,27 @@ function applyFilters(
   return out;
 }
 
+/** Derive the SSH-launch origin tag for a picker row from the live index. Set
+ * only when the live session's provenance is ssh transport; `device` is the
+ * resolved origin device (absent → the row shows a bare `ssh`). Rows without a
+ * live entry (the running filter off) get no tag — provenance is live-only. */
+function sshOriginTagFor(live: Map<string, ActiveSession> | null, id: string): SshOriginTag | undefined {
+  const p = live?.get(id)?.provenance;
+  if (p?.transport !== 'ssh') return undefined;
+  return p.origin?.device ? { device: p.origin.device } : {};
+}
+
 function headerFor(f: BrowserFilter): string {
   const bits = [
     `device:${f.device ?? 'all'}`,
     `agent:${f.agent ?? 'all'}`,
+    `team:${f.team ?? 'all'}`,
     f.projectScope === 'repo' ? 'this repo' : 'all dirs',
     `window:${f.window ?? 'all'}`,
   ];
   if (f.running) bits.push('running');
   if (f.teams) bits.push('teams');
+  if (f.favorites) bits.push('favorites');
   return bits.join(' · ');
 }
 
@@ -263,7 +488,7 @@ function helpFor(_f: BrowserFilter, mode: 'nav' | 'search'): string {
   if (mode === 'search') {
     return 'type to filter · ↑↓ navigate · esc exit search · ⏎ resume';
   }
-  return 's search · r running · c teams · a agent · d device · p project · w window · tab preview · y copy-cmd · ⏎ resume · esc quit';
+  return 's search · r running · f favorites · * star · c teams · t team · a agent · d device · p project · w window · tab preview · y copy-cmd · ⏎ resume · esc quit';
 }
 
 /**
@@ -282,13 +507,24 @@ export async function runSessionBrowser(
   // Updated after each load so the A/D cycles range over what's actually present.
   let agentsInPool: string[] = [];
   let devicesInPool: string[] = [];
+  let teamsInPool: string[] = [];
   let cols: PickerColumns = {};
-  // Cache the transcript fetch, keyed by (window, teams); agent/device/project/
-  // running are applied in memory so their hotkeys don't re-fan-out the fleet.
-  let rawCache: { key: string; rows: SessionMeta[] } | null = null;
+  // Cache the transcript fetch, keyed by poolCacheKey (everything that changes
+  // what is FETCHED); agent/device/project/running are applied in memory so their
+  // hotkeys don't re-fan-out the fleet.
+  let rawCache: { key: string; rows: SessionMeta[]; unreachable: string[] } | null = null;
+  // Peers that didn't answer the last fan-out. The fan-out's own note goes to
+  // stderr, which the full-screen picker repaints over — so it is surfaced in
+  // the header instead, where "that box is asleep" stays distinguishable from
+  // "that box has nothing matching".
+  let unreachable: string[] = [];
   // The live index is slow (a full ps/tmux scan) and only the running filter
   // needs it — fetch it once, lazily, the first time running is toggled on.
   let liveCache: Map<string, ActiveSession> | null = null;
+  // Re-read every load (it's an mtime-memoized parse of one small file), so the
+  // `*` key's reload picks up the star it just wrote — and so does a favorite
+  // starred by another session on this machine.
+  let favorites = new Set<string>();
   // Generation guard: two quick keypresses can start overlapping loads whose
   // SSH fan-outs settle out of order. dynamicPicker's own gen ref guards which
   // rows become `items`, but the shared closure state below (cols / cycle pools /
@@ -296,29 +532,28 @@ export async function runSessionBrowser(
   // it. We compute into locals and only write the shared state as the latest load.
   let loadGen = 0;
 
-  const initialFilter: BrowserFilter = {
-    running: initial.running ?? false,
-    teams: initial.teams ?? false,
-    agent: initial.agent,
-    device: initial.device,
-    projectScope: initial.projectScope ?? 'repo',
-    window: 'window' in initial ? initial.window : '30d',
-  };
+  const initialFilter = buildInitialFilter(initial);
 
   const load = async (f: BrowserFilter): Promise<SessionMeta[]> => {
     const myGen = ++loadGen;
-    const key = `${f.window ?? 'all'}|${f.teams}`;
+    // f.team decides the fetch limit, so it belongs in the key — otherwise arriving
+    // via `t` reuses a 500-row pool while --in-team fetched 5000, and the cycle can
+    // only offer the teams that happened to be in whichever pool was built first.
+    const key = poolCacheKey(f);
     let pool = rawCache && rawCache.key === key ? rawCache : null;
     if (!pool) {
       const fetched = await fetchRawPool(f, self, local, hosts);
       if (myGen !== loadGen) return []; // superseded — don't touch shared state
       pool = fetched;
     }
-    // Only pay for the live scan when the running filter needs it.
+    // Only pay for the live scan when the running filter needs it. Same fleet
+    // sweep the static `--active` view uses, so the two never disagree about
+    // what is running.
     let live = liveCache;
     if (f.running && !live) {
       try {
-        live = indexActiveBySessionId(await getActiveSessions());
+        const { sessions } = await gatherActiveSessions({ local, hosts });
+        live = indexLiveRows(sessions, self);
       } catch {
         live = new Map();
       }
@@ -327,11 +562,32 @@ export async function runSessionBrowser(
     // Latest load — commit shared state atomically (no await past this point, so
     // no newer load can interleave between these writes).
     rawCache = pool;
+    unreachable = pool.unreachable;
     if (live) liveCache = live;
-    agentsInPool = distinct(pool.rows.map((r) => r.agent));
-    devicesInPool = distinct(pool.rows.map((r) => r.machine ?? self));
-    const filtered = applyFilters(pool.rows, live ?? new Map(), f, self);
+    // Live sessions the transcript pool lacks become rows of their own, so the
+    // running view lists every active session, not just the ones already indexed.
+    const rows = f.running && live ? mergeLiveIntoPool(pool.rows, live, self) : pool.rows;
+    agentsInPool = distinct(rows.map((r) => r.agent));
+    devicesInPool = distinct(rows.map((r) => r.machine ?? self));
+    // Both ends of the lineage seed the cycle: teams a row spawned, and teams a
+    // row belongs to. Teammate rows only carry `teamOrigin` when `c` is on, so
+    // with teams hidden this ranges over spawned teams alone — which is exactly
+    // the set whose rows are visible.
+    // Through safeTeamText: the cycle's values become `f.team`, which headerFor
+    // interpolates into the header and browserFilterToArgv copies into a command,
+    // and on a peer's row these strings are that machine's to choose.
+    teamsInPool = distinct([
+      ...rows.map((r) => safeTeamText(r.spawnedTeam)),
+      ...rows.map((r) => safeTeamText(r.teamOrigin?.team)),
+    ]);
+    favorites = listFavorites();
+    const filtered = applyFilters(rows, live ?? new Map(), f, self, favorites);
     cols = pickerColumnsFor(filtered);
+    cols.showHost = shouldShowHostColumn(f, live, filtered);
+    // Status rides the same gate as the host column: both come from the live
+    // scan, so both belong to the running view and neither should widen a plain
+    // transcript listing that has no live rows to fill them.
+    cols.showStatus = !!f.running && !!live;
     return filtered;
   };
 
@@ -340,24 +596,59 @@ export async function runSessionBrowser(
     initialFilter,
     load,
     keyFor: (s) => s.id,
-    labelFor: (s, q) => formatPickerLabel(s, q, cols),
+    labelFor: (s, q) =>
+      formatPickerLabel(
+        s,
+        q,
+        cols,
+        sshOriginTagFor(liveCache, s.id),
+        liveHostLabel(liveCache?.get(s.id)),
+        favorites.has(s.id),
+        liveCache?.get(s.id),
+      ),
     matches: sessionMatchesQuery,
-    buildPreview,
-    headerFor,
+    // Lead the preview with the live status banner — the one place a `crashed` /
+    // `orphaned` session gets a sentence instead of a glyph. `buildPreview` is
+    // memoized per session, so the volatile live half is prepended here rather
+    // than baked into the cached body.
+    buildPreview: (s) => {
+      const headline = formatLiveStatusHeadline(liveCache?.get(s.id), favorites.has(s.id));
+      const body = buildPreview(s);
+      return headline ? `${headline}\n${body}` : body;
+    },
+    headerFor: (f) =>
+      unreachable.length > 0
+        ? `${headerFor(f)} · ${chalk.yellow(`${unreachable.join(', ')}: unreachable`)}`
+        : headerFor(f),
     helpFor,
     enterHint: 'resume',
     emptyMessage: 'No sessions match this filter.',
     loadingMessage: local ? 'Loading…' : 'Loading (reaching other machines)…',
     keyBindings: {
       r: (f) => ({ ...f, running: !f.running }),
+      f: (f) => ({ ...f, favorites: !f.favorites }),
       c: (f) => ({ ...f, teams: !f.teams }),
       a: (f) => ({ ...f, agent: cycle(f.agent, agentsInPool) }),
       d: (f) => ({ ...f, device: cycle(f.device, devicesInPool) }),
-      p: (f) => ({ ...f, projectScope: f.projectScope === 'repo' ? 'all' : 'repo' }),
+      t: (f) => ({ ...f, team: cycle(f.team, teamsInPool) }),
+      // Under an explicit --device scope every row is a peer's, and no peer cwd
+      // is under our process.cwd() — so narrowing to "this repo" could only ever
+      // empty the list. Returning the same reference makes the key a no-op.
+      p: (f) => (hosts ? f : { ...f, projectScope: f.projectScope === 'repo' ? 'all' : 'repo' }),
       w: (f) => ({ ...f, window: cycleWindow(f.window) }),
     },
-    onKey: (name, f, _active, query) => {
-      if (name === 'y') {
+    onKey: (name, f, active, query) => {
+      if (name === '*') {
+        // Only a row with a real session id can be starred: a projected live row
+        // with no id is keyed by pid, which is gone the moment the process is.
+        if (!active || active.id.startsWith(LIVE_ROW_PREFIX)) return 'nothing to star on this row';
+        const on = toggleFavorite(active.id);
+        // reload so the row's star is repainted — labels are memoized per row.
+        return { flash: on ? `★ favorited ${active.shortId}` : `☆ unfavorited ${active.shortId}`, reload: true };
+      }
+      // Both cases: `hotkeyToken` hands `onKey` the literal character, and this
+      // key worked with caps lock on before it existed.
+      if (name === 'y' || name === 'Y') {
         // Thread the live search query so the copied command reproduces the
         // exact view — the human→agent bridge must include the search term.
         const cmd = 'ag ' + browserFilterToArgv(f, query).join(' ');

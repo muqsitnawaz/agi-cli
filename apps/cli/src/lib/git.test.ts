@@ -19,15 +19,17 @@ import {
   assertValidBranchName,
   canonicalGitRemote,
   commitAndPush,
-  commitOwnDeviceMeta,
+  commitsBehindUpstream,
   displayHomePath,
   parseSource,
   pullRepo,
   pushOrigin,
   resolveGitHubUsername,
   resolveGitHubUsernameSync,
+  resolveSnapshotSha,
   sameGitRemote,
   syncRepoGit,
+  _resetSnapshotShaCacheForTest,
 } from './git.js';
 
 describe('assertValidBranchName', () => {
@@ -226,56 +228,6 @@ describe('displayHomePath', () => {
   });
 });
 
-describe('commitOwnDeviceMeta (unwedge the pull from per-machine pin drift)', () => {
-  const tmpDirs: string[] = [];
-  afterEach(() => {
-    for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
-    tmpDirs.length = 0;
-  });
-
-  async function initRepo(): Promise<string> {
-    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'own-meta-'));
-    tmpDirs.push(repo);
-    const g = simpleGit(repo);
-    await g.init(['-b', 'main']);
-    await g.addConfig('user.email', 'test@example.com');
-    await g.addConfig('user.name', 'Test');
-    await g.addConfig('commit.gpgsign', 'false');
-    fs.mkdirSync(path.join(repo, 'devices', 'zion'), { recursive: true });
-    fs.writeFileSync(path.join(repo, 'devices', 'zion', 'agents.yaml'), 'agents:\n  claude: 1.0.0\n');
-    await g.add('-A');
-    await g.commit('init');
-    return repo;
-  }
-
-  it('commits ONLY the dirty device-meta, leaving a real user edit uncommitted (still blocks the pull)', async () => {
-    const repo = await initRepo();
-    const meta = path.join(repo, 'devices', 'zion', 'agents.yaml');
-    fs.writeFileSync(meta, 'agents:\n  claude: 2.0.0\n'); // pin drift
-    fs.writeFileSync(path.join(repo, 'hooks.yaml'), 'a real user edit\n'); // genuine work
-
-    const committed = await commitOwnDeviceMeta(repo, meta);
-    expect(committed).toBe('devices/zion/agents.yaml');
-
-    const st = await simpleGit(repo).status();
-    // device-meta is now clean (committed); the user edit is still dirty.
-    expect(st.files.map((f) => f.path)).toContain('hooks.yaml');
-    expect(st.files.map((f) => f.path)).not.toContain('devices/zion/agents.yaml');
-  });
-
-  it('is a no-op when the device-meta is clean', async () => {
-    const repo = await initRepo();
-    const meta = path.join(repo, 'devices', 'zion', 'agents.yaml');
-    expect(await commitOwnDeviceMeta(repo, meta)).toBeNull();
-  });
-
-  it('is a no-op when the device-meta lives outside the repo (system/extra repos)', async () => {
-    const repo = await initRepo();
-    const outside = path.join(os.tmpdir(), 'somewhere-else', 'devices', 'x', 'agents.yaml');
-    expect(await commitOwnDeviceMeta(repo, outside)).toBeNull();
-  });
-});
-
 describe('pullRepo dirty-tree hint', () => {
   const tmpDirs: string[] = [];
 
@@ -399,9 +351,52 @@ describe('commitAndPush (clean-but-ahead + dirty)', () => {
     await simpleGit().clone(remote, verify);
     expect(fs.readFileSync(path.join(verify, 'safe-push.txt'), 'utf8')).toBe('ok\n');
   });
+
+  // #1061: `agents publish --branch dev` must land the index on `dev`, not on
+  // the checked-out `main`. commitAndPush(local, msg, 'dev') pushes to origin/dev
+  // and reports branch: 'dev' so the printed raw URL references where it landed.
+  it('pushes to a named target branch, not the checked-out one', async () => {
+    fs.writeFileSync(path.join(local, 'skills-index.json'), '{"skills":[]}\n');
+    const res = await commitAndPush(local, 'publish index', 'dev');
+    expect(res.success).toBe(true);
+    expect(res.pushed).toBe(true);
+    expect(res.branch).toBe('dev');
+
+    // origin/dev carries the index...
+    const onDev = path.join(root, 'verify-dev');
+    await simpleGit().clone(remote, onDev, ['--branch', 'dev']);
+    expect(fs.existsSync(path.join(onDev, 'skills-index.json'))).toBe(true);
+
+    // ...and origin/main does NOT (the bug: index landed on main regardless).
+    const onMain = path.join(root, 'verify-main');
+    await simpleGit().clone(remote, onMain, ['--branch', 'main']);
+    expect(fs.existsSync(path.join(onMain, 'skills-index.json'))).toBe(false);
+  });
+
+  // #1061: a target-branch push must run even from a clean, not-ahead tree —
+  // the `pushedBranch === branch` guard narrows the "already up to date"
+  // short-circuit so it never swallows a push to a new branch. No dirty file
+  // here, so `committed` is false and `ahead` is 0; the push must still land.
+  it('pushes to a new target branch from a clean, not-ahead tree', async () => {
+    const pre = await simpleGit(local).status();
+    expect(pre.isClean()).toBe(true);
+    expect(pre.ahead).toBe(0);
+
+    const res = await commitAndPush(local, 'noop', 'dev');
+    expect(res.success).toBe(true);
+    expect(res.committed).toBe(false);
+    expect(res.pushed).toBe(true);
+    expect(res.branch).toBe('dev');
+    expect(res.detail).not.toBe('already up to date');
+
+    // origin/dev now exists and carries the same tree as main (README.md).
+    const onDev = path.join(root, 'verify-clean-dev');
+    await simpleGit().clone(remote, onDev, ['--branch', 'dev']);
+    expect(fs.existsSync(path.join(onDev, 'README.md'))).toBe(true);
+  });
 });
 
-describe('pullRepo fast-forward only', () => {
+describe('pullRepo reconciliation', () => {
   let root: string;
   let remote: string;
   let local: string;
@@ -468,20 +463,26 @@ describe('pullRepo fast-forward only', () => {
     expect(after).toBe(before);
   });
 
-  it('refuses to fast-forward when local commits diverge from origin', async () => {
-    // Upstream and local each add a different file → diverged histories.
+  // REVERSED deliberately (RUSH-2056). This asserted that divergence alone
+  // refuses the pull. That is what broke fleet distribution: --ff-only rejects
+  // ANY divergence, conflict or not, so a single local commit wedged the pull
+  // permanently with nothing actually in conflict. pullRepo now
+  // rebases, which is what its own doc has always claimed it does.
+  it('rebases a diverged branch instead of refusing when nothing conflicts', async () => {
+    // Upstream and local each add a DIFFERENT file → diverged, no conflict.
     await commitFile(author, 'up.txt', 'from-author\n', 'author commit');
     await simpleGit(author).push('origin', 'main');
     await commitFile(local, 'down.txt', 'from-local\n', 'local commit');
 
-    const before = await simpleGit(local).revparse(['HEAD']);
     const res = await pullRepo(local);
-    const after = await simpleGit(local).revparse(['HEAD']);
 
-    expect(res.success).toBe(false);
-    expect(res.error).toContain('Blocked by local commits');
-    expect(after).toBe(before);
-    expect(fs.existsSync(path.join(local, 'up.txt'))).toBe(false);
+    expect(res.success).toBe(true);
+    // Upstream content arrived...
+    expect(fs.existsSync(path.join(local, 'up.txt'))).toBe(true);
+    // ...and the local commit was replayed on top, not discarded.
+    expect(fs.existsSync(path.join(local, 'down.txt'))).toBe(true);
+    const log = await simpleGit(local).log({ maxCount: 1 });
+    expect(log.latest?.message).toContain('local commit');
   });
 });
 
@@ -588,5 +589,284 @@ describe('resolveGitHubUsername', () => {
 
   it('returns null when no source can resolve the username', () => {
     expect(resolveGitHubUsernameSync()).toBeNull();
+  });
+});
+
+describe('pullRepo reconciles a diverged branch by rebasing', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  async function identity(dir: string): Promise<void> {
+    const g = simpleGit(dir);
+    await g.addConfig('user.email', 'test@example.com');
+    await g.addConfig('user.name', 'Test');
+    await g.addConfig('commit.gpgsign', 'false');
+    await g.addConfig('core.autocrlf', 'false');
+  }
+
+  // Builds: bare remote + an `author` clone that pushes upstream, and a `local`
+  // clone that has its own unpushed commit. That is exactly the fleet shape — a
+  // local commit lands, upstream moves on, and the two diverge with NOTHING in
+  // conflict (different files).
+  async function divergedPair(): Promise<{ local: string; author: string }> {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pullrebase-'));
+    tmpDirs.push(root);
+    const remote = path.join(root, 'remote.git');
+    const author = path.join(root, 'author');
+    const local = path.join(root, 'local');
+    await simpleGit().raw(['init', '--bare', '-b', 'main', remote]);
+    await simpleGit().clone(remote, author);
+    await identity(author);
+    // Commit `* -text` BEFORE anything clones this branch, exactly as the outer
+    // fixture does. identity() sets core.autocrlf=false, but on Windows the
+    // checkout inside `git clone` has already run by then — so `local` came out
+    // CRLF while the index held LF, status.isClean() saw a phantom modification
+    // of every file, and pullRepo correctly refused with "Blocked by local
+    // changes". A committed .gitattributes wins over autocrlf at checkout time,
+    // so the clone is byte-identical on every OS.
+    fs.writeFileSync(path.join(author, '.gitattributes'), '* -text\n');
+    fs.writeFileSync(path.join(author, 'seed.txt'), 'seed\n');
+    await simpleGit(author).add('-A');
+    await simpleGit(author).commit('seed');
+    await simpleGit(author).push('origin', 'main');
+    await simpleGit().clone(remote, local);
+    await identity(local);
+    return { local, author };
+  }
+
+  it('replays a local-only commit on top of upstream instead of refusing', async () => {
+    const { local, author } = await divergedPair();
+
+    // local: its own commit, never pushed (the devices/<host> pin case)
+    fs.mkdirSync(path.join(local, 'devices', 'boxA'), { recursive: true });
+    fs.writeFileSync(path.join(local, 'devices', 'boxA', 'agents.yaml'), 'agents:\n  claude: 1.0.0\n');
+    await simpleGit(local).add('-A');
+    await simpleGit(local).commit('chore(devices): snapshot boxA agent pins');
+
+    // upstream: an unrelated commit, so the branches diverge
+    fs.writeFileSync(path.join(author, 'rule.md'), '# a rule\n');
+    await simpleGit(author).add('-A');
+    await simpleGit(author).commit('add a rule');
+    await simpleGit(author).push('origin', 'main');
+
+    const res = await pullRepo(local);
+
+    // --ff-only fails here: divergence alone is enough, no conflict needed.
+    expect(res.success).toBe(true);
+    // upstream content arrived...
+    expect(fs.existsSync(path.join(local, 'rule.md'))).toBe(true);
+    // ...and the local commit survived, replayed on top.
+    expect(fs.existsSync(path.join(local, 'devices', 'boxA', 'agents.yaml'))).toBe(true);
+    const log = await simpleGit(local).log({ maxCount: 1 });
+    expect(log.latest?.message).toContain('snapshot boxA agent pins');
+  });
+
+  it('rolls the tree back when a conflict aborts the rebase, leaving the repo usable', async () => {
+    const { local, author } = await divergedPair();
+
+    fs.writeFileSync(path.join(local, 'seed.txt'), 'local version\n');
+    await simpleGit(local).add('-A');
+    await simpleGit(local).commit('local edit');
+
+    fs.writeFileSync(path.join(author, 'seed.txt'), 'upstream version\n');
+    await simpleGit(author).add('-A');
+    await simpleGit(author).commit('upstream edit');
+    await simpleGit(author).push('origin', 'main');
+
+    const before = await simpleGit(local).revparse(['HEAD']);
+    const res = await pullRepo(local);
+    const after = await simpleGit(local).revparse(['HEAD']);
+
+    expect(res.success).toBe(false);
+
+    // The invariant --ff-only used to give for free, and the reason this suite
+    // exists: a failed pull must leave the checkout exactly as it found it.
+    // Without `rebase --abort` the repo is left detached, mid-rebase, with
+    // conflict markers written into live config files.
+    expect(after).toBe(before);
+    expect(fs.existsSync(path.join(local, '.git', 'rebase-merge'))).toBe(false);
+    expect(fs.existsSync(path.join(local, '.git', 'rebase-apply'))).toBe(false);
+    expect(fs.readFileSync(path.join(local, 'seed.txt'), 'utf-8')).not.toContain('<<<<<<<');
+    const status = await simpleGit(local).status();
+    expect(status.current).toBe('main'); // not detached HEAD
+    expect(status.conflicted).toEqual([]);
+  });
+
+  it('reports an in-progress rebase as itself, not as a dirty tree', async () => {
+    const { local } = await divergedPair();
+
+    // Wedge the repo the way a pre-abort conflict used to. Resolve the state
+    // dir through git rather than assuming <dir>/.git is a directory.
+    const gp = (await simpleGit(local).raw(['rev-parse', '--git-path', 'rebase-merge'])).trim();
+    fs.mkdirSync(path.isAbsolute(gp) ? gp : path.join(local, gp), { recursive: true });
+
+    const res = await pullRepo(local);
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/rebase is still in progress/i);
+    expect(res.error).not.toMatch(/Blocked by local changes/);
+  });
+
+  // A branch may track a remote that is not named 'origin'. Hardcoding origin
+  // for the pull while comparing against `tracking` made pullRepo report SUCCESS
+  // having moved nothing — the exact "reported ok, pulled nothing" failure this
+  // change exists to remove, just narrower.
+  // A branch may track a remote that is not named 'origin'. Hardcoding origin
+  // for the pull while comparing against `tracking` made pullRepo report SUCCESS
+  // having moved nothing — the exact "reported ok, pulled nothing" failure this
+  // change exists to remove, just narrower. origin must be STALE here, or
+  // pulling it would incidentally fetch the same content and hide the bug.
+  it('pulls the remote the branch actually tracks, not a hardcoded origin', async () => {
+    const { local } = await divergedPair();
+
+    // A SECOND bare repo, seeded from local, that will receive the new commit.
+    // origin keeps pointing at the first one and never moves again.
+    const root = path.dirname(local);
+    const upstreamBare = path.join(root, 'upstream.git');
+    await simpleGit().raw(['init', '--bare', '-b', 'main', upstreamBare]);
+    await simpleGit(local).raw(['remote', 'add', 'upstream', upstreamBare]);
+    await simpleGit(local).raw(['push', 'upstream', 'main']);
+
+    const mover = path.join(root, 'mover');
+    await simpleGit().clone(upstreamBare, mover);
+    await simpleGit(mover).addConfig('user.email', 'test@example.com');
+    await simpleGit(mover).addConfig('user.name', 'Test');
+    await simpleGit(mover).addConfig('commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(mover, 'from-upstream.txt'), 'x\n');
+    await simpleGit(mover).add('-A');
+    await simpleGit(mover).commit('upstream moved');
+    await simpleGit(mover).push('origin', 'main');
+
+    await simpleGit(local).raw(['fetch', 'upstream']);
+    await simpleGit(local).raw(['branch', '--set-upstream-to=upstream/main', 'main']);
+
+    const res = await pullRepo(local);
+
+    expect(res.success).toBe(true);
+    // The real assertion: content actually arrived. Reporting success without
+    // moving anything is the bug. Pulling 'origin' here is a no-op.
+    expect(fs.existsSync(path.join(local, 'from-upstream.txt'))).toBe(true);
+  });
+
+  // A git WORKTREE has `.git` as a FILE (`gitdir: <path>`), so a hardcoded
+  // <dir>/.git/rebase-merge probe can never fire there. pullRepo runs on real
+  // clones today, but the probe must not silently depend on that.
+  it('detects an in-progress rebase in a worktree, where .git is a file', async () => {
+    const { local } = await divergedPair();
+    const wt = path.join(path.dirname(local), 'wt');
+    await simpleGit(local).raw(['worktree', 'add', '--detach', wt]);
+
+    expect(fs.statSync(path.join(wt, '.git')).isFile()).toBe(true);
+
+    const gp = (await simpleGit(wt).raw(['rev-parse', '--git-path', 'rebase-merge'])).trim();
+    fs.mkdirSync(path.isAbsolute(gp) ? gp : path.join(wt, gp), { recursive: true });
+
+    const res = await pullRepo(wt);
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/rebase is still in progress/i);
+  });
+});
+
+describe('commitsBehindUpstream', () => {
+  let root: string, remote: string, author: string, local: string;
+
+  async function configIdentity(dir: string): Promise<void> {
+    const g = simpleGit(dir);
+    await g.addConfig('user.email', 'test@example.com');
+    await g.addConfig('user.name', 'Test');
+    await g.addConfig('commit.gpgsign', 'false');
+  }
+
+  beforeEach(async () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'behind-'));
+    remote = path.join(root, 'remote.git');
+    author = path.join(root, 'author');
+    local = path.join(root, 'local');
+    await simpleGit().raw(['init', '--bare', '-b', 'main', remote]);
+    await simpleGit().clone(remote, author);
+    await configIdentity(author);
+    fs.writeFileSync(path.join(author, 'README.md'), 'v1\n');
+    await simpleGit(author).add('-A');
+    await simpleGit(author).commit('init');
+    await simpleGit(author).push('origin', 'main');
+    await simpleGit().clone(remote, local);
+    await configIdentity(local);
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('counts how many commits the checkout trails its upstream', async () => {
+    // Two new commits land on the remote; the local clone fetches but does not
+    // pull — it is now 2 behind origin/main.
+    await simpleGit(author).raw(['commit', '--allow-empty', '-m', 'up1']);
+    await simpleGit(author).raw(['commit', '--allow-empty', '-m', 'up2']);
+    await simpleGit(author).push('origin', 'main');
+    await simpleGit(local).fetch('origin');
+
+    const res = commitsBehindUpstream(local);
+    expect(res).not.toBeNull();
+    expect(res!.behind).toBe(2);
+    expect(res!.branch).toBe('origin/main');
+  });
+
+  it('reports zero behind when the checkout matches its upstream', () => {
+    const res = commitsBehindUpstream(local);
+    expect(res).toMatchObject({ behind: 0, branch: 'origin/main' });
+  });
+
+  it('returns null for a non-git directory', () => {
+    expect(commitsBehindUpstream(root)).toBeNull();
+  });
+});
+
+describe('resolveSnapshotSha (#12 — resource/plugin provenance)', () => {
+  let repoDir: string;
+
+  beforeEach(async () => {
+    repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-git-snapshotsha-'));
+    _resetSnapshotShaCacheForTest();
+    const g = simpleGit(repoDir);
+    await g.init();
+    await g.addConfig('user.email', 'test@example.com');
+    await g.addConfig('user.name', 'Test');
+    await g.addConfig('commit.gpgsign', 'false');
+    await g.raw(['commit', '--allow-empty', '-m', 'init']);
+  });
+
+  afterEach(() => {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    _resetSnapshotShaCacheForTest();
+  });
+
+  it('returns the real short HEAD sha for a git repo', () => {
+    const expected = execFileSync('git', ['-C', repoDir, 'rev-parse', '--short', 'HEAD']).toString().trim();
+    expect(resolveSnapshotSha(repoDir)).toBe(expected);
+  });
+
+  it('returns undefined (never throws) for a non-git directory', () => {
+    const plainDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-not-a-repo-'));
+    try {
+      expect(resolveSnapshotSha(plainDir)).toBeUndefined();
+    } finally {
+      fs.rmSync(plainDir, { recursive: true, force: true });
+    }
+  });
+
+  it('memoizes per repoRoot — a second commit after the first call is NOT reflected until the cache is cleared', async () => {
+    const first = resolveSnapshotSha(repoDir);
+    expect(first).toBeTruthy();
+    await simpleGit(repoDir).raw(['commit', '--allow-empty', '-m', 'second']);
+    // Still cached — this is the whole point: a caller resolving many resources
+    // from the same repoRoot pays for exactly one git shell-out, not one per resource.
+    expect(resolveSnapshotSha(repoDir)).toBe(first);
+
+    _resetSnapshotShaCacheForTest();
+    const expected = execFileSync('git', ['-C', repoDir, 'rev-parse', '--short', 'HEAD']).toString().trim();
+    expect(resolveSnapshotSha(repoDir)).toBe(expected);
+    expect(resolveSnapshotSha(repoDir)).not.toBe(first);
   });
 });

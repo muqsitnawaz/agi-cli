@@ -63,6 +63,14 @@ The **transcript** side is a SQLite index (`~/.agents/.history/sessions/sessions
 `scan_ledger` that re-reads a file only when its `mtime`/`size` changed, a
 `dir_ledger` that skips the per-file `stat` of a leaf transcript directory whose
 `(mtime, entry_count)` is unchanged, plus a `session_text` FTS5 table for search.
+For **Claude**, **Codex**, and **Kimi**, a changed file that merely grew is parsed
+**incrementally**: the `scan_ledger` also stores a resumable continuation
+(`parser_state`, plus `content_text` for Claude/Codex) so the next scan resumes
+from the saved byte offset and folds in only the appended lines — falling back to
+a full reparse on a truncation / rewrite or a clock rewind. (Kimi's continuation
+tracks its `agents/main/wire.jsonl` offset + the additive counters.) Grok is not
+incremental — it reads a whole `summary.json`, not an append-only JSONL.
+Both paths share one reducer per scanner, so the incremental row is identical to a full reparse.
 Listing is a DB read; only opening one session fully re-parses its transcript.
 Detail in [05-sessions.md](05-sessions.md).
 
@@ -145,7 +153,29 @@ Two formats trip people up (both handled in [`src/lib/session/discover.ts`](../s
 the **session-discoverable** set is `SESSION_AGENTS`
 ([`src/lib/session/types.ts`](../src/lib/session/types.ts)): `claude`, `codex`,
 `gemini`, `antigravity`, `opencode`, `openclaw`, `rush`, `hermes`, `grok`, `kimi`,
-`droid`. `cursor` and `copilot` are runnable but not session-discoverable.
+`droid`, `cursor`. `copilot` is runnable but not session-discoverable.
+`isSessionTrackedAgent()` in the same file is the single predicate every session-index
+writer gates on.
+
+### Across the SSH hop: `AGENT_LAUNCH_ID` is the one correlation key
+
+`agents run --host` runs `agents run` on a remote box, so the "who names the session"
+split above still holds — Claude forwards a `--session-id` the launcher controls, every
+other agent coins its own id on the peer. The launcher recovers that remote-coined id
+through **one stable correlation key it controls end-to-end**: `AGENT_LAUNCH_ID`.
+
+- The launcher forwards a launch id (`--env AGENT_LAUNCH_ID=<id>`); the remote
+  `agents run` **adopts** it rather than minting a fresh one (`resolveLaunchId` in
+  [`src/lib/exec.ts`](../src/lib/exec.ts)), so the remote SessionStart hook records the
+  agent's real `session_id` under that exact key in `terminals/sessions/<pid>.json`.
+- **Headless** host runs read the id back from the followed log — the remote prints it
+  as a `--emit-session-id` marker ([`src/lib/hosts/session-marker.ts`](../src/lib/hosts/session-marker.ts)).
+- **Interactive** host runs have no followed log (the TTY is wired straight through
+  `sshStream`), so after the stream returns the launcher does one ssh read of the remote
+  hook dir and resolves the id by launch id — `resolveRemoteSessionId` /
+  `pickRemoteSessionId` in [`src/lib/hosts/remote-session-id.ts`](../src/lib/hosts/remote-session-id.ts).
+  It then registers the real id in the local session index and reconnects against it on a
+  dropped link — for Codex/Kimi/Grok/Gemini, not only Claude.
 
 ---
 
@@ -160,12 +190,13 @@ long it must live and how it's read back:
 | Transcripts | `~/.claude/projects/…`, `~/.codex/sessions/…`, … | agent-native files (read-only) | the raw truth; parsed on demand |
 | CLI pid-registry | `~/.agents/.cache/terminals/by-pid/<pid>.json` | ephemeral file | `ag run`/shim write; CLI reads (§3) |
 | Live-session state | `~/.agents/.cache/terminals/sessions/<pid>.json` | ephemeral file | hook writes; extension reads (§3) |
-| Audit log | `~/.agents/events.jsonl` | locked shared log | `emit()` in [`src/lib/events.ts`](../src/lib/events.ts); `agents events` reads |
+| Audit log | `~/.agents/.history/events/YYYY-MM-DD/events.jsonl` | dated, locked shared log | `emit()` in [`src/lib/events.ts`](../src/lib/events.ts); `agents events` reads; `agents logs audit` aliases it |
 | Teams sentinels | `…/agents/<uuid>/exit_code`, `hosts/<id>.log` + `.exit` | ephemeral files | teammate writes exit code; supervisor reads (§6) |
 | Mailbox spool | `~/.agents/.history/mailbox/<id>/…` | append-only dirs | `agents message` / feed; `agents mailboxes` reads |
 
-There is **one** audit log (`events.jsonl`), shared and file-locked because many
-processes append to it. It is the single choke point for "who did what" — see
+There is **one** audit event implementation, split into local-date files and
+file-locked because many processes append concurrently. It is the single choke
+point for "who did what" — see
 [06-observability.md](06-observability.md).
 
 ---
@@ -204,26 +235,33 @@ Other machines are reached by running the same command over SSH per peer.
 ### Coarse status is honest, not guessed
 
 The rich `SessionActivity` maps to a coarse `ActiveStatus` the renderer and counts
-use: `working → running`, `waiting_input → input_required`, `idle → idle`. A rich
-tail is only parsed for **Claude and Codex** (`readSessionTailWithRaw` early-returns
-for every other kind, and `findSessionFileForKind` resolves a transcript only for
-those two). Every other case — a live gemini / droid / cursor / opencode, or a
-Claude/Codex tail that was empty or unreadable — has no rich state, so one canonical
-function, `resolveFallbackStatus(sessionFile, pidAlive)`, decides the status:
+use: `working → running`, `waiting_input → input_required`, `idle → idle`. Rich
+state is derived for **every tracked harness**: Claude/Codex take the fast bounded
+byte-tail (`readSessionTailWithRaw`, which also yields tokens/sec), and every other
+tracked kind (grok, droid, rush, gemini, kimi, hermes, opencode, antigravity, cursor) is
+parsed by its own parser and run through the same `inferSessionState`
+(`computeLiveSignals` → `parseSession`). `findSessionFileForKind` locates the
+transcript for all of them — Claude off disk by cwd, the rest via the session index
+(`latestSessionFileForCwd`). Only an **opaque/untracked** kind or an
+unreadable/empty transcript has no rich state, and then one canonical function,
+`resolveFallbackStatus(sessionFile, pidAlive)`, decides the status:
 
 | Situation | Status | Why |
 |---|---|---|
-| Transcript resolvable, mtime within 2 min | `running` | measured freshness — the file is being written |
-| Transcript resolvable, mtime older | `idle` | positive "not mid-turn" from a real signal |
-| Transcript `stat` throws (vanished / permission) | `unknown` | we genuinely cannot tell — never an optimistic `running` |
-| **No** parseable transcript, process **alive** | `unknown` | alive but opaque (a harness we don't parse) — NOT a fabricated `idle` |
-| No transcript, process not known alive | `idle` | nothing to report |
+| Transcript not written for `ABANDONED_STALE_MS` | `abandoned` | days-stale/dangling work needs attention and outranks both live and dead PID signals |
+| Process **alive** (any kind, no rich state, transcript not abandoned) | `running` | alive is itself a positive signal — the honest floor; never `unknown`, never a fabricated `idle` |
+| Not alive, transcript still on disk | `closed` | the process exited; do not report it as live-idle |
+| Not alive, no transcript | `closed` | death is a definitive observable signal even when the file is absent |
+| No PID signal and no file signal | `unknown` | genuinely nothing left to measure |
 
-`unknown` is the explicit "we can't introspect this live process" state — it renders
-as `◌` (magenta), distinct from the `○` idle it used to be silently faked as, so a
-busy non-Claude/Codex agent is never mistaken for a finished one. This is why the
-status is trustworthy uniformly across harnesses: where the truth is unknowable, the
-CLI reports `unknown` rather than inferring a wrong `idle`/`running`.
+The headline guarantee: **a running agent is never `unknown`.** The old blanket
+`unknown` for every live non-Claude/Codex agent is gone — a live process resolves to
+`running` at worst, and to a real `working`/`waiting_input`/`idle` whenever its
+transcript is locatable + parseable. Dead processes resolve to `closed`; days-stale
+transcripts resolve to `abandoned`. `unknown` survives only when the framework has
+neither a PID signal nor a file signal, and renders as `◌` (magenta), distinct from
+the `○` idle. This is why status is trustworthy
+uniformly across harnesses.
 
 This is deliberately simple and correct; the "compute once, subscribe" direction (a
 resident process that parses each file once and emits only what changed) is the

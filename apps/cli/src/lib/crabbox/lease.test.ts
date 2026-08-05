@@ -1,8 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as bundles from '../secrets/bundles.js';
+import * as stateModule from '../state.js';
 import { buildBootstrapScript, leaseAndRun } from './lease.js';
+import { resetCrabboxSecretsMemosForTest } from './cli.js';
 import { LEASE_AGENT_MARKER, leasePhaseSentinel } from './progress.js';
 import type { DetectedRuntime } from './runtimes.js';
 
@@ -191,18 +194,18 @@ describe('buildBootstrapScript', () => {
     expect(script).toContain(`echo '${leasePhaseSentinel('creds')}'`);
   });
 
-  it('materializes the pushed config with `agents repo refresh` at the copy-setup step (F1 wiring)', () => {
+  it('materializes the pushed config with `agents sync --local` at the copy-setup step (F1 wiring)', () => {
     // The host rsyncs ~/.agents before the box run (leaseAndRun); the box then
-    // refreshes it into the runtime home — but only after the install step has
+    // reconciles it into the runtime home — but only after the install step has
     // put agents-cli on PATH, and only when copySetup is on.
     const on = buildBootstrapScript({ agent: 'claude', prompt: 'hi', runtimes: ['claude'], detected });
-    expect(on).toContain('agents repo refresh');
-    // Refresh runs after the runtime install (agents-cli present) and before the agent marker.
-    expect(on.indexOf('agents repo refresh')).toBeGreaterThan(on.indexOf(`echo '${leasePhaseSentinel('install')}'`));
-    expect(on.indexOf('agents repo refresh')).toBeLessThan(on.indexOf(LEASE_AGENT_MARKER));
-    // --bare drops the refresh with the sentinel.
+    expect(on).toContain('agents sync --local');
+    // Sync runs after the runtime install (agents-cli present) and before the agent marker.
+    expect(on.indexOf('agents sync --local')).toBeGreaterThan(on.indexOf(`echo '${leasePhaseSentinel('install')}'`));
+    expect(on.indexOf('agents sync --local')).toBeLessThan(on.indexOf(LEASE_AGENT_MARKER));
+    // --bare drops the sync with the sentinel.
     const bare = buildBootstrapScript({ agent: 'claude', prompt: 'hi', runtimes: ['claude'], detected, copySetup: false });
-    expect(bare).not.toContain('agents repo refresh');
+    expect(bare).not.toContain('agents sync --local');
   });
 
   it('emits the joined-tailnet sentinel only for a tailscale lease', () => {
@@ -231,6 +234,21 @@ describe('buildBootstrapScript', () => {
 // POSIX-only: stands up a `#!/bin/sh` fake crabbox on PATH, which Windows can
 // neither resolve nor execute (see crabbox/cli.test.ts for the same pattern).
 describe.skipIf(process.platform === 'win32')('leaseAndRun reused crabbox boxes', () => {
+  // Hermetic lease-bundle resolution: leaseAndRun → crabboxFind → crabboxEnv would
+  // otherwise auto-detect the DEVELOPER's real provider-token bundle (e.g. a locked
+  // `hetzner.com`), whose agentOnly read throws "not unlocked" (SEC-13) — a
+  // dev-machine-only failure unrelated to the reuse/bootstrap flow under test. Pin
+  // readMeta → {} and listBundles → [] so no lease bundle is found.
+  beforeEach(() => {
+    resetCrabboxSecretsMemosForTest();
+    vi.spyOn(stateModule, 'readMeta').mockReturnValue({} as ReturnType<typeof stateModule.readMeta>);
+    vi.spyOn(bundles, 'listBundles').mockReturnValue([]);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetCrabboxSecretsMemosForTest();
+  });
+
   const detected: DetectedRuntime[] = [
     { id: 'claude', label: 'Claude Code', email: 'a@b.com', signedIn: true, credPath: null },
   ];
@@ -334,5 +352,194 @@ describe.skipIf(process.platform === 'win32')('leaseAndRun reused crabbox boxes'
       }
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+// POSIX-only fake crabbox, same seam as the reuse suite above.
+describe.skipIf(process.platform === 'win32')('leaseAndRun warm profile-pool reuse (reuse-first --lease)', () => {
+  const detected: DetectedRuntime[] = [
+    { id: 'claude', label: 'Claude Code', email: 'a@b.com', signedIn: true, credPath: null },
+  ];
+
+  /** A `crabbox list --json` entry. `profile` undefined → no profile label. */
+  function poolBoxJson(slug: string, over: { profile?: string; tailscale?: boolean; state?: string } = {}) {
+    return {
+      name: `crabbox-${slug}`,
+      status: 'running',
+      labels: {
+        slug,
+        lease: `cbx_${slug.replace(/-/g, '')}`,
+        state: over.state ?? 'ready',
+        keep: 'true',
+        profile: over.profile,
+        created_at: '1800000000',
+        expires_at: '1800003600',
+        last_touched_at: '1800000100',
+        idle_timeout_secs: '1800',
+        ...(over.tailscale ? { tailscale_ipv4: '100.64.0.9' } : {}),
+      },
+      public_net: { ipv4: { ip: '203.0.113.10' } },
+    };
+  }
+
+  /**
+   * A fake crabbox with a pool: `list` serves `boxes` until a `warmup` flips the
+   * warmed marker, then serves `boxes + warmedBoxes`; `status --id <slug>`
+   * reports ready=true only for `readySlugs`. Every invocation is logged.
+   */
+  function setupPoolFake(opts: { boxes: unknown[]; readySlugs: string[]; warmedBoxes?: unknown[] }) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lease-pool-'));
+    const log = path.join(dir, 'crabbox.log');
+    const script = path.join(dir, 'remote.sh');
+    fs.writeFileSync(path.join(dir, 'before.json'), JSON.stringify(opts.boxes), 'utf-8');
+    fs.writeFileSync(
+      path.join(dir, 'after.json'),
+      JSON.stringify([...opts.boxes, ...(opts.warmedBoxes ?? [poolBoxJson('fresh-one')])]),
+      'utf-8',
+    );
+    for (const slug of opts.readySlugs) fs.writeFileSync(path.join(dir, `ready-${slug}`), '', 'utf-8');
+    fs.writeFileSync(
+      path.join(dir, 'crabbox'),
+      [
+        '#!/bin/sh',
+        'printf "%s\\n" "$*" >> "$CRABBOX_LOG"',
+        'case "$1" in',
+        '  --help) exit 0 ;;',
+        '  list) if [ -f "$CRABBOX_DIR/warmed" ]; then cat "$CRABBOX_DIR/after.json"; else cat "$CRABBOX_DIR/before.json"; fi; exit 0 ;;',
+        '  status) if [ -f "$CRABBOX_DIR/ready-$3" ]; then printf "lease x\\nready=true\\n"; else printf "ready=false\\n"; fi; exit 0 ;;',
+        '  warmup) touch "$CRABBOX_DIR/warmed"; echo "leased cbx_freshone"; exit 0 ;;',
+        '  run) cat > "$CRABBOX_SCRIPT"; printf "%s\\nagent ok\\n" "' + LEASE_AGENT_MARKER + '"; exit 7 ;;',
+        '  stop) exit 0 ;;',
+        '  *) echo "unexpected command: $*" >&2; exit 1 ;;',
+        'esac',
+      ].join('\n'),
+      'utf-8',
+    );
+    fs.chmodSync(path.join(dir, 'crabbox'), 0o755);
+    return { dir, log, script };
+  }
+
+  async function runWithPool(
+    fake: { dir: string; log: string; script: string },
+    runOpts: Partial<Parameters<typeof leaseAndRun>[0]> = {},
+  ) {
+    const oldEnv = {
+      PATH: process.env.PATH,
+      CRABBOX_LOG: process.env.CRABBOX_LOG,
+      CRABBOX_SCRIPT: process.env.CRABBOX_SCRIPT,
+      CRABBOX_DIR: process.env.CRABBOX_DIR,
+    };
+    process.env.PATH = `${fake.dir}${path.delimiter}${oldEnv.PATH ?? ''}`;
+    process.env.CRABBOX_LOG = fake.log;
+    process.env.CRABBOX_SCRIPT = fake.script;
+    process.env.CRABBOX_DIR = fake.dir;
+    const phases: string[] = [];
+    try {
+      const result = await leaseAndRun({
+        agent: 'claude',
+        prompt: 'pool run',
+        runtimes: ['claude'],
+        detected,
+        profile: 'agents-cli',
+        // copy-setup is covered elsewhere; keep it off so no real rsync/ssh spawns.
+        copySetup: false,
+        onPhase: (phase) => { phases.push(phase.kind); },
+        ...runOpts,
+      });
+      const calls = fs.existsSync(fake.log) ? fs.readFileSync(fake.log, 'utf-8').trim().split('\n') : [];
+      return { result, phases, calls };
+    } finally {
+      for (const [key, value] of Object.entries(oldEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      fs.rmSync(fake.dir, { recursive: true, force: true });
+    }
+  }
+
+  it('reuses a ready pool box matching the run profile — and never warms or stops it', async () => {
+    const fake = setupPoolFake({ boxes: [poolBoxJson('warm-one', { profile: 'agents-cli' })], readySlugs: ['warm-one'] });
+    const { result, phases, calls } = await runWithPool(fake);
+
+    expect(result.box.slug).toBe('warm-one');
+    expect(result.exitCode).toBe(7);
+    // Teardown is skipped for a pool-reused box (same semantics as --box).
+    expect(result.toreDown).toBe(false);
+    expect(phases).toEqual(['reuse', 'ready']);
+    expect(calls).toContain('list --json');
+    expect(calls).toContain('status --id warm-one');
+    expect(calls).toContain('run --id warm-one --reclaim --script-stdin');
+    expect(calls.some((l) => l.startsWith('warmup'))).toBe(false);
+    expect(calls.some((l) => l.startsWith('stop'))).toBe(false);
+  });
+
+  it('skips a pool box that is not SSH-ready, then warms + tears down a fresh box', async () => {
+    // status=running but `crabbox status` says ready=false (bootstrap dud) —
+    // the sandbox.sh box_ready gate. The dud is left alone, never stopped.
+    const fake = setupPoolFake({ boxes: [poolBoxJson('dud-one', { profile: 'agents-cli' })], readySlugs: [] });
+    const { result, phases, calls } = await runWithPool(fake);
+
+    expect(result.box.slug).toBe('fresh-one');
+    expect(result.toreDown).toBe(true);
+    expect(phases).toEqual(['warmup', 'ready', 'teardown']);
+    expect(calls).toContain('status --id dud-one');
+    expect(calls.some((l) => l.startsWith('warmup'))).toBe(true);
+    expect(calls).toContain('stop fresh-one');
+    expect(calls.some((l) => l.startsWith('stop dud-one'))).toBe(false);
+  });
+
+  it('skips a profile-mismatched box and warms fresh', async () => {
+    const fake = setupPoolFake({ boxes: [poolBoxJson('other-one', { profile: 'other-repo' })], readySlugs: ['other-one'] });
+    const { result, calls } = await runWithPool(fake);
+
+    expect(result.box.slug).toBe('fresh-one');
+    expect(calls).not.toContain('status --id other-one'); // filtered before the status gate
+    expect(calls.some((l) => l.startsWith('warmup'))).toBe(true);
+  });
+
+  it('never hands a tailnet box to a public run (netMode partition)', async () => {
+    const fake = setupPoolFake({
+      boxes: [poolBoxJson('tailnet-one', { profile: 'agents-cli', tailscale: true })],
+      readySlugs: ['tailnet-one'],
+    });
+    const { result, calls } = await runWithPool(fake); // netMode defaults to public
+
+    expect(result.box.slug).toBe('fresh-one');
+    expect(calls).not.toContain('status --id tailnet-one');
+    expect(calls.some((l) => l.startsWith('warmup'))).toBe(true);
+  });
+
+  it('reuses a tailnet pool box for a tailnet run', async () => {
+    const fake = setupPoolFake({
+      boxes: [poolBoxJson('tailnet-one', { profile: 'agents-cli', tailscale: true })],
+      readySlugs: ['tailnet-one'],
+    });
+    const { result, phases, calls } = await runWithPool(fake, { netMode: 'tailscale' });
+
+    expect(result.box.slug).toBe('tailnet-one');
+    expect(result.toreDown).toBe(false);
+    expect(phases).toEqual(['reuse', 'ready']);
+    expect(calls.some((l) => l.startsWith('warmup'))).toBe(false);
+  });
+
+  it('warms fresh when the pool is empty', async () => {
+    const fake = setupPoolFake({ boxes: [], readySlugs: [] });
+    const { result, phases, calls } = await runWithPool(fake);
+
+    expect(result.box.slug).toBe('fresh-one');
+    expect(result.toreDown).toBe(true);
+    expect(phases).toEqual(['warmup', 'ready', 'teardown']);
+    expect(calls.some((l) => l.startsWith('status'))).toBe(false);
+  });
+
+  it('--fresh forces a brand-new box (torn down after) even when a ready pool box exists', async () => {
+    const fake = setupPoolFake({ boxes: [poolBoxJson('warm-one', { profile: 'agents-cli' })], readySlugs: ['warm-one'] });
+    const { result, phases, calls } = await runWithPool(fake, { fresh: true });
+
+    expect(result.box.slug).toBe('fresh-one');
+    expect(result.toreDown).toBe(true);
+    expect(phases).toEqual(['warmup', 'ready', 'teardown']);
+    expect(calls.some((l) => l.startsWith('status'))).toBe(false); // pool never consulted
+    expect(calls).toContain('stop fresh-one');
   });
 });

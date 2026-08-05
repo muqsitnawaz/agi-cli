@@ -12,9 +12,12 @@ import {
   __resetAntigravityKeychainCacheForTest,
   accountOrgBadge,
   antigravityOsKeyringProbe,
+  credentialPresence,
   deprecationNotice,
   formatClaudeOrgLabel,
   getAccountInfo,
+  hardDeprecationError,
+  hardDeprecationNotice,
   isClaudeCredentialFileBlank,
   resolveAgentName,
   resolveLastActive,
@@ -32,6 +35,7 @@ describe('account inspection support', () => {
       'claude',
       'codex',
       'gemini',
+      'cursor',
       'grok',
       'antigravity',
       'kimi',
@@ -50,6 +54,85 @@ function makeTempDir(): string {
   tempDirs.push(dir);
   return dir;
 }
+
+describe('credentialPresence (RUSH-2069 provable-logout signal)', () => {
+  // credentialPresence splits a credential file's existence into the per-version
+  // home and the active/global HOME. A provable logout is only when BOTH are
+  // absent. Pin AGENTS_REAL_HOME to a fresh empty dir so the "active" side never
+  // leaks the developer's real ~/.codex login.
+  let prevRealHome: string | undefined;
+  let activeHome: string;
+  beforeEach(() => {
+    prevRealHome = process.env.AGENTS_REAL_HOME;
+    activeHome = makeTempDir();
+    process.env.AGENTS_REAL_HOME = activeHome;
+  });
+  afterEach(() => {
+    if (prevRealHome === undefined) delete process.env.AGENTS_REAL_HOME;
+    else process.env.AGENTS_REAL_HOME = prevRealHome;
+  });
+
+  function writeCodexAuth(home: string): void {
+    const dir = path.join(home, '.codex');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'auth.json'), '{}', 'utf-8');
+  }
+
+  it('reports perVersion=true when the version home holds the credential', () => {
+    const versionHome = makeTempDir();
+    writeCodexAuth(versionHome);
+    const p = credentialPresence('codex', versionHome);
+    expect(p.perVersion).toBe(true);
+    // Not provable: perVersion present means signed in for that version.
+    expect(p.active).toBe(false);
+  });
+
+  it('reports active=true (not provable) when only the global HOME holds it', () => {
+    writeCodexAuth(activeHome);
+    const p = credentialPresence('codex', makeTempDir());
+    expect(p.perVersion).toBe(false);
+    expect(p.active).toBe(true);
+    // Shared global login → NOT provable logout even though the version lacks it.
+    expect(p.perVersion && p.active).toBe(false);
+    expect(!p.perVersion && !p.active).toBe(false);
+  });
+
+  it('reports neither present (provable logout) when the credential is absent everywhere', () => {
+    const p = credentialPresence('codex', makeTempDir());
+    expect(p.perVersion).toBe(false);
+    expect(p.active).toBe(false);
+    // Provable: absent per-version AND globally.
+    expect(!p.perVersion && !p.active).toBe(true);
+  });
+
+  it('honors the claude alternative credential paths (.claude/.claude.json OR .claude.json)', () => {
+    const versionHome = makeTempDir();
+    fs.writeFileSync(path.join(versionHome, '.claude.json'), '{}', 'utf-8');
+    expect(credentialPresence('claude', versionHome).perVersion).toBe(true);
+  });
+
+  it('reports knownLocation=false for an agent with no credential path', () => {
+    // amp has no CREDENTIAL_FILE_SEGMENTS entry, so both probes are trivially
+    // false — absence of a file we never knew how to find. `knownLocation` is what
+    // stops a caller reading that as evidence of a logout.
+    const p = credentialPresence('amp' as any, makeTempDir());
+    expect(p).toEqual({ perVersion: false, active: false, knownLocation: false });
+  });
+
+  it('every inspectable agent WITHOUT a credential path is unprovable, never a false critical', () => {
+    // The two registries move independently: cursor was added to
+    // ACCOUNT_INSPECTION_AGENT_IDS with no credential path, which without the
+    // knownLocation gate printed `logged out` for versions that were signed in.
+    const dir = makeTempDir();
+    for (const agent of ALL_AGENT_IDS.filter(supportsAccountInspection)) {
+      const p = credentialPresence(agent, dir);
+      if (!p.knownLocation) {
+        // Mirrors the caller's rule in fleet-inventory.ts.
+        expect(p.knownLocation && !p.perVersion && !p.active).toBe(false);
+      }
+    }
+  });
+});
 
 function shSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -196,19 +279,17 @@ describe.skipIf(IS_WINDOWS)('MCP CLI execution', () => {
     expect(log).not.toContain('ARG:--\n');
   });
 
-  it('registers Gemini HTTP MCP servers with native transport args', async () => {
+  it('blocks MCP registration for hard-deprecated gemini', async () => {
     const dir = makeTempDir();
     const { binary, logPath } = writeArgLogger(dir);
 
     const result = runAgentsModule(
       `registerMcp('gemini', 'docs', 'https://developers.openai.com/mcp', 'project', 'http', { binary: ${JSON.stringify(binary)}, home: ${JSON.stringify(dir)} })`
-    ) as { success: boolean };
+    ) as { success: boolean; error?: string };
 
-    const log = fs.readFileSync(logPath, 'utf-8');
-    expect(result.success).toBe(true);
-    expect(log).toContain('ARG:--transport\nARG:http\nARG:--scope\nARG:project');
-    expect(log).toContain('ARG:docs\nARG:https://developers.openai.com/mcp');
-    expect(log).not.toContain('ARG:--\n');
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('Agent does not support MCP');
+    expect(fs.existsSync(logPath)).toBe(false);
   });
 
   it('skips HTTP MCP registration for agents without native HTTP support', async () => {
@@ -235,7 +316,7 @@ describe.skipIf(IS_WINDOWS)('MCP CLI execution', () => {
     expect(result.error).toBe('skipped: HTTP MCP headers are only supported for Claude registration');
   });
 
-  it('skips HTTP MCP headers for agents that accept HTTP but not headers (gemini)', async () => {
+  it('blocks HTTP MCP headers for hard-deprecated gemini before registration', async () => {
     const dir = makeTempDir();
     const { binary } = writeArgLogger(dir);
 
@@ -244,7 +325,7 @@ describe.skipIf(IS_WINDOWS)('MCP CLI execution', () => {
     ) as { success: boolean; error?: string };
 
     expect(result.success).toBe(false);
-    expect(result.error).toBe('skipped: HTTP MCP headers are only supported for Claude registration');
+    expect(result.error).toBe('Agent does not support MCP');
   });
 });
 
@@ -262,6 +343,7 @@ describe('AGENTS capability matrix', () => {
       'subagents',
       'rules',
       'workflows',
+      'interactiveRepl',
     ];
 
     for (const [agentId, config] of Object.entries(AGENTS)) {
@@ -316,8 +398,9 @@ describe('resolveLastActive', () => {
     const within = new Date(t0.getTime() + 60_000);
     expect(resolveLastActive('claude', home, undefined, cachePath, within)?.getTime()).toBe(5_000_000);
 
-    // Past the fresh window the walk runs again and picks up the newer file.
-    const beyond = new Date(t0.getTime() + 3 * 60_000);
+    // Past the fresh window (5 min, matching USAGE_CACHE_FRESH_MS) the walk
+    // runs again and picks up the newer file.
+    const beyond = new Date(t0.getTime() + 6 * 60_000);
     expect(resolveLastActive('claude', home, undefined, cachePath, beyond)?.getTime()).toBe(9_000_000);
   });
 
@@ -473,6 +556,13 @@ describe('getAccountInfo — token-only agents (no local email)', () => {
     expect(info.signedIn).toBe(true);
     // Consumer Google OAuth exposes no email/identity claim locally.
     expect(info.email).toBeNull();
+    // A stable usage identity is derived from the refresh token so `agents
+    // view` can dedupe + cache the per-model quota bars for this login. The
+    // raw (non-JWT) refresh token is a live credential, so the key carries
+    // only its SHA-256 fingerprint — never the token itself.
+    expect(info.accountKey).toMatch(/^antigravity:sub=[0-9a-f]{16}$/);
+    expect(info.accountKey).not.toContain('1//refresh');
+    expect(info.usageKey).toBe(info.accountKey);
   });
 
   it('treats Antigravity as signed out when the token file is missing', async () => {
@@ -860,12 +950,13 @@ describe('getAccountInfo — claude credential floor (blanked .credentials.json)
 });
 
 describe('agent deprecation warnings', () => {
-  it('marks gemini deprecated by Google with a dated notice and antigravity successor', () => {
+  it('marks gemini hard-deprecated by Google with a dated notice and antigravity successor', () => {
     const dep = AGENTS.gemini.deprecated;
     expect(dep).toBeDefined();
     expect(dep?.by).toBe('Google');
     expect(dep?.date).toBe('June 18, 2026');
     expect(dep?.replacement).toBe('antigravity');
+    expect(dep?.hard).toBe(true);
   });
 
   it('builds a notice whose header names the agent, vendor, and date and points at the successor', () => {
@@ -901,6 +992,13 @@ describe('agent deprecation warnings', () => {
     expect(printed.length).toBeGreaterThan(0);
     // chalk wraps in ANSI codes; assert the visible substring survives.
     expect(printed.join('\n')).toContain('was deprecated by Google');
+  });
+
+  it('builds a hard-deprecation error that tells users to install antigravity', () => {
+    const lines = hardDeprecationNotice('gemini');
+    expect(lines).not.toBeNull();
+    expect(lines![0]).toBe('Gemini is no longer supported by agents-cli because Google retired it (June 18, 2026).');
+    expect(hardDeprecationError('gemini')).toContain('Use Antigravity instead:  agents add antigravity');
   });
 });
 
@@ -948,6 +1046,38 @@ describe('getAccountInfo — grok (nested auth.json)', () => {
 
   it('treats grok as signed out when auth.json is absent', async () => {
     const info = await getAccountInfo('grok', makeTempDir());
+    expect(info.signedIn).toBe(false);
+  });
+});
+
+describe('getAccountInfo — cursor (cli-config authInfo + separate auth.json)', () => {
+  let prevRealHome: string | undefined;
+  beforeEach(() => { prevRealHome = process.env.AGENTS_REAL_HOME; process.env.AGENTS_REAL_HOME = makeTempDir(); });
+  afterEach(() => {
+    if (prevRealHome === undefined) delete process.env.AGENTS_REAL_HOME;
+    else process.env.AGENTS_REAL_HOME = prevRealHome;
+  });
+
+  it('reads email/authId from cli-config and treats a present access token as signed in', async () => {
+    const home = makeTempDir();
+    fs.mkdirSync(path.join(home, '.cursor'), { recursive: true });
+    fs.mkdirSync(path.join(home, '.config', 'cursor'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.cursor', 'cli-config.json'), JSON.stringify({
+      authInfo: { email: 'muqsitnawaz@gmail.com', userId: 27457401, authId: 'google-oauth2|106748008124572295566' },
+    }));
+    fs.writeFileSync(path.join(home, '.config', 'cursor', 'auth.json'), JSON.stringify({
+      accessToken: 'eyJ.abc.def', refreshToken: 'eyJ.ghi.jkl',
+    }));
+
+    const info = await getAccountInfo('cursor', home);
+    expect(info.signedIn).toBe(true);
+    expect(info.email).toBe('muqsitnawaz@gmail.com');
+    expect(info.accountId).toBe('google-oauth2|106748008124572295566');
+    expect(info.accountKey).toBeTruthy();
+  });
+
+  it('treats cursor as signed out when cli-config is absent', async () => {
+    const info = await getAccountInfo('cursor', makeTempDir());
     expect(info.signedIn).toBe(false);
   });
 });

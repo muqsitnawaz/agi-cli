@@ -17,14 +17,78 @@
 `agents hosts` lets you run any agent (`claude`, `codex`, `droid`, …) on any of
 *your* machines — a Mac mini, a Windows mini, a couple of DGX Sparks — addressed
 by name from a small local registry, over plain SSH, with no central service to
-run or pay for:
+run or pay for.
+
+**Placement** (where the body runs) is one model shared with lease, cloud, and
+routines — see [00-concepts.md § Placement](00-concepts.md#placement). On
+`agents run`, prefer `--where`; the older flags remain aliases:
 
 ```
-agents run claude "fix the auth bug"   --host mac-mini   # headless: prompt given
-agents run codex  "port this to rust"  --host spark-0    # headless: prompt given
-agents run droid  "triage the inbox"   --host win-mini    # headless: prompt given
-agents run claude                      --host mac-mini   # interactive: TTY forwarded
+agents run claude "fix the auth bug"   --where device:mac-mini   # = --host mac-mini
+agents run claude "…"                  --where auto              # = --device auto
+agents run claude "fix CI"            --where lease --mode edit # = --lease
+agents run claude "fix the auth bug"   --host mac-mini           # still works
+agents run codex  "port this to rust"  --host spark-0
+agents run droid  "triage the inbox"   --host win-mini
+agents run claude                      --host mac-mini            # interactive: TTY forwarded
+agents run claude "…"                  --device auto
+agents run claude "…"                  --host auto                # same (host value auto)
 ```
+
+Pass `auto` as the `--host` / `--device` value to pick a host from 14-day session
+affinity (weighted by launch counts on `sessions.db` `machine`; most-used online
+device has highest probability). Harness stays the agent you typed — never
+auto-picked. Affinity failure degrades to local rather than aborting the run.
+
+### `agents run auto` — all three routing layers
+
+`auto` as the AGENT name (`agents run auto "…"`, distinct from `--host auto`)
+composes the full dispatch stack:
+
+1. **Host** — with no `--host`/`--device` flag, the affinity pick above runs
+   (launches^1.3 weighted sample among online devices). A remote pick dispatches
+   `agents run auto …` to that host over the same SSH path, and the harness +
+   account layers resolve THERE (usage is per-machine); the dispatcher marks the
+   host layer resolved (`AGENTS_RUN_AUTO_HOST_RESOLVED=1`) so the remote never
+   re-runs affinity and chain-hops. `--host <name>` pins this layer.
+2. **Harness** — `pickHarnessWeighted` (lib/rotate.ts): installed harnesses with
+   ≥1 healthy account, weighted by best-account headroom
+   (`100 − min routingUsed%`), sampled with the same `weightedRandomByCapacity`
+   the account layer uses. A harness whose accounts are all rate-limited,
+   signed out, or server-revoked (the live auth-health probe saw a 401/403) is
+   excluded outright. Naming a concrete harness (`run claude`) pins this layer.
+3. **Account** — `pickBalancedCandidate` within the chosen harness (or the
+   `--strategy` you passed). Eligibility excludes an account that is
+   rate-limited, out of credits, signed out, or `revoked` (a token the daemon's
+   live auth-health probe saw rejected — so rotation never routes into a login
+   that would fail at spawn). Fail-open: a missing probe or any non-revoked
+   verdict never blocks; a cached `revoked` keeps gating (the conservative choice
+   for a security signal) until the daemon's next probe clears it.
+
+Every layer fails loud when it finds nothing: zero healthy accounts on any
+harness exits nonzero naming each harness's exclusion reason and the earliest
+window reset; zero healthy accounts within the picked harness exits nonzero
+with `agents: no healthy <agent> account under strategy '<strategy>' — excluded:
+…; earliest window resets <iso-time>. Use --strategy pinned to force the
+default.` (the Factory watchdog tail-detects this text for rotate cooldowns).
+`--session-id` keeps its claude-only semantics — honored when auto picks
+claude, ignored with a stderr note otherwise.
+
+
+Pass `all` as the `--host` / `--device` value to fan any fleet-aware command out
+across every registered device. The passthrough runs `agents <cmd> --json` on each
+box concurrently, then renders a grouped-by-OS roster with one row per device
+(`○ offline` rows for unreachable devices, `●` rows for successful ones). Add
+`--json` to get the raw device-keyed object instead.
+
+```
+agents view kimi --device all          # every box's kimi version + account
+agents output --device all             # per-device burn vs shipped output
+agents view --device all --json        # machine-readable fleet inventory
+```
+
+`--devices all` and `--hosts all` are synonyms. Commands that already register
+`--all-hosts` (e.g. `agents output --all-hosts`) keep their existing behavior.
 
 It sits next to the vendor clouds (`agents cloud run --provider rush|codex|…`),
 not replacing them: those dispatch to *someone else's* cloud; `hosts` dispatches
@@ -215,7 +279,8 @@ agents run <agent> ["<task>"] --host <host>
   └─ no prompt?                interactive TTY-forwarded path
         ssh -tt <node> 'agents run <agent>'   (only when local stdin is a TTY)
         remote agents-cli launches its normal interactive UI (tmux on the host)
-        local CLI exits when the SSH session ends
+        network drop (ssh exit 255) → auto-reattach the live remote pane;
+        clean detach / agent exit → local CLI exits with that code
 ```
 
 > Shipped surface: dispatch is `agents run <agent> ["<task>"] --host <name>`.
@@ -226,6 +291,27 @@ agents run <agent> ["<task>"] --host <host>
 > tmux wrapper.
 > Host runs are tracked in a **local** task store, not `agents cloud` (a separate
 > subsystem for Rush/Codex/Factory backends).
+>
+> **Surviving a network drop.** Because the remote agent runs in a *detached* tmux
+> session on the host, an SSH blink kills only the local client — the agent keeps
+> working. When an interactive host run with a known session id (Claude, or a
+> `--resume`d run) drops (ssh reports its connection-layer code, 255), the local CLI
+> **re-attaches the live remote pane automatically** — it drives the host's own
+> `agents sessions focus <id> --local --attach-only` over SSH (a live join, not a
+> resumed copy), with bounded exponential backoff (2s→30s, up to 6 attempts; the
+> budget refills after a genuinely live reconnection). A clean detach (`Ctrl-b d`,
+> exit 0) or a real agent exit (any non-255 code) is left alone, and `--raw`/no-tmux
+> runs are not retried (they don't survive a drop). If every attempt fails the CLI
+> prints the manual `agents sessions focus <id>` to reconnect once the link is back.
+>
+> The remote `agents sessions focus --local --attach-only` invocation the reattach
+> drives is wrapped so that whatever exit code it decides on, a 255 is remapped to
+> 254 before this process sees it — so a remote-side path that happened to exit
+> 255 for its own reasons would never be mistaken for the link dropping again.
+> This closes a channel-level flaw (any future remote-side 255 producer would
+> have been indistinguishable from a real drop) rather than a confirmed live
+> bug; a genuinely recurring *local* ssh failure can still refill the retry
+> budget on every attempt by design (that part is unchanged).
 >
 > Pass `--name <slug>` at dispatch to give the run a durable handle instead of an
 > opaque id: `agents hosts ps` shows it under a **NAME** column, and
@@ -327,11 +413,17 @@ merges three directories **per-field**, it does not let one shadow another:
   bare name, so ssh applies the stanza).
 
 One grammar for every caller: `name`, `user@name` (login user overridden, same
-box), a tailnet FQDN, an ssh_config alias, and an ad-hoc `user@host` all resolve
-identically. `dispatchable` follows the device's auth method, so a password-auth
-device can't be made dispatchable by shadowing it with an inline entry. A bare
-unknown name resolves to nothing, which keeps capability-tag routing
-(`--host gpu`) and the `agents ssh` "Unknown device" verdict reachable.
+box), a tailnet FQDN, an ssh_config alias, an ad-hoc `user@host`, and the `auto`
+affinity sentinel (RUSH-2185: `matchHost` resolves it via the same
+`resolveDeviceAffinity` engine `agents run --device auto` uses, so `agents ssh
+auto` and `agents teams add --device auto` pick a device the same way `run`
+does) all resolve identically. `dispatchable` follows the device's auth method,
+so a password-auth device can't be made dispatchable by shadowing it with an
+inline entry. A bare unknown name resolves to nothing, which keeps
+capability-tag routing (`--host gpu`) and the `agents ssh` "Unknown device"
+verdict reachable. `agents ssh` additionally refuses an `auto` pick that lands
+on the machine you're already on — dialing yourself isn't the useful outcome
+`agents ssh auto` exists for — with a clear message instead of self-SSHing.
 
 ### 2. Transport — plain SSH (reuse, don't reinvent)
 
@@ -393,6 +485,15 @@ guarantee (see Context, below).
 - `--remote-cwd <dir>` is the explicit escape hatch — a literal remote path used
   verbatim (never re-rooted). Precedence: `--remote-cwd` > `--project`/`--cwd`;
   `--project` is mutually exclusive with `--cwd`/`--remote-cwd`.
+- **With none of them, the run mirrors your local cwd** (`deriveMirroredCwd`): a
+  cwd under the local home is re-rooted onto the remote home, so launching from
+  `~/src/x` lands the agent in the host's `~/src/x` rather than its bare `$HOME`.
+  This is the fleet layout where every box holds the same checkout at the same
+  home-relative path. A mirror is best-effort — a host without that directory
+  falls back to its home rather than failing the run — whereas an explicit
+  `--cwd`/`--remote-cwd` you named is never softened: a missing one fails the
+  `cd`. A cwd outside the local home is not mirrored at all, since a path like
+  `/opt/thing` says nothing about the target's filesystem.
 
 Workspace (where the run executes) is a deliberate scoping choice — see Open
 Questions. Phase 1 default: a caller-specified `--remote-cwd` (or the repo's
@@ -490,8 +591,11 @@ agents hosts sessions <box> --search "<topic>"   # runs `agents sessions` ON the
 The agent on box A searches box B's history without ever copying it — the same
 "expose a capability over the daemon" shape this design uses for dispatch. For the
 narrow case where a transcript must actually be *present* on the target (resume /
-handoff, Phase 2), the existing CRDT G-Set / R2 substrate (`src/lib/session/sync/`)
-replicates **that one session** selectively — never the whole tree.
+handoff), `agents sessions migrate` (shipped since this doc was written) ships
+**that one session** selectively over the direct SSH transport
+(`resolveExplicitTargets` + `ssh-exec`) — never the whole tree, and no R2/CRDT
+substrate (that background-sync mechanism this doc originally cited has since
+been removed; see [05-sessions.md](05-sessions.md#migration-relocate-a-live-session)).
 
 ## Phase 2 — session handoff (the differentiator)
 
@@ -500,9 +604,10 @@ uncommitted work*, to another box and continue:
 
 1. **Code**: push/sync the git branch; **`rsync` the working tree** (uncommitted
    included) over SSH — the thing the cloud tools can't do.
-2. **Conversation**: sync the transcript. The CRDT session-sync substrate already
-   exists (`src/lib/session/sync/`, the `sessions-sync` work — G-Set union over
-   R2); for a direct SSH hop we can also rsync the JSONL directly.
+2. **Conversation**: ship the transcript. `agents sessions migrate` already does
+   this over a direct SSH hop (`resolveExplicitTargets` + `ssh-exec`) — the R2/CRDT
+   background-sync substrate this section originally proposed reusing has since
+   been removed; the direct-transport path is the one that shipped.
 3. **Resume**: `agents run <agent> --resume <session-id>` on the target.
 4. **Relay/attach mode**: attach to a still-running remote session by tailing its
    transcript (Phase 1 §4) and sending follow-ups over SSH — the "remote-control"
@@ -630,13 +735,13 @@ just relocates the storm):
 | Transcript parse → events | `src/lib/session/parse.ts` (`parseClaude`/`parseCodex`/…) |
 | Incremental offset read | `src/lib/session/active.ts:200-248` |
 | Per-agent transcript dirs | `src/lib/session/discover.ts:getAgentSessionDirs` |
-| Cross-machine transcript sync | `src/lib/session/sync/` (CRDT G-Set / R2) |
+| Cross-machine transcript transport | `src/commands/sessions-migrate.ts` (direct SSH, shipped) — the CRDT G-Set / R2 background-sync substrate this row originally named has been removed |
 | Scheduling | `src/lib/daemon.ts` (routines scheduler) |
 | Task tracking store | `src/lib/cloud/store.ts` (free-text `provider`, reserved `provider_data`) |
 | Config schema | `src/lib/types.ts` (`Meta`) + `src/lib/state.ts` (`readMeta`) |
 | Config bootstrap on host | `agents pull` (git-backed) + `scripts/sandbox.sh:218-239` |
 | Secret injection (on demand) | `src/commands/secrets.ts:1089-1097` (`--to-ssh`, env over ssh stdin) + `SSH_TARGET_RE`/`assertValidSshTarget` (`secrets.ts:189-195`) |
-| Selective transcript replication | `src/lib/session/sync/` (per-session, not whole tree) |
+| Selective transcript replication | `src/lib/session/sync/agents.ts` (per-agent mirror layout, per-session not whole tree) |
 
 ## Prior art studied
 

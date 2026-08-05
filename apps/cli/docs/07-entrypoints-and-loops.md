@@ -49,7 +49,7 @@ my-plugin/
   skills/        resources
   commands/      entrypoints
   agents/        entrypoints (subagents)
-  workflows/     entrypoints (proposed)
+  workflows/     entrypoints (discovered + resolved by name; Phase 5)
   .mcp.json      resources (exec surface)
 ```
 
@@ -153,7 +153,8 @@ Resume reuses the checkpoint's loop config but lets the resume command **raise**
 | Capability | Today | Proposed |
 |------------|-------|----------|
 | Plugin packages skills / commands / subagents / mcp / hooks | yes | — |
-| Plugin packages workflows | no — workflows resolve from project/user/system/extra-repos only | yes — `workflows/` discovered and registered into the resolver |
+| Plugin packages workflows | **partial** — `workflows/` under a plugin is discovered and resolved by `agents run <name>` (project > user > plugin > extra > system); `name@plugin` / `name@extra-alias` (optional `workflow:` prefix) pins the source; inspect/resource groups list them | full — install path no longer requires a separate central copy; unified `run:` for all entrypoint kinds |
+| Unified install umbrella | **partial** — `agents install plugin:<spec>` is the same path as `agents plugins install <spec>` (exec-surface gate, sync to default versions); `mcp:` / `skill:` / `gh:` already share `agents install` | complete — one verb for every package kind; specialized verbs remain as aliases |
 | `agents run <workflow>` | yes | — |
 | `agents run <subagent>` / `<command>` as the top-level target | no — only agent / profile / workflow | yes — unified entrypoint dispatch |
 | Routine target | `agent` or `workflow` | any entrypoint via `run:` |

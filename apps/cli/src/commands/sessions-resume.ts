@@ -4,9 +4,9 @@
  *
  * Unlike the single-select picker behind bare `agents sessions` (which resumes
  * one session in place), this opens a checkbox picker, then asks where the
- * chosen sessions should resume. By default they pack two-per-tab (session 1 in
- * a new tab, session 2 split beside it, session 3 a new tab, …) in the terminal
- * you're in — iTerm / Ghostty / tmux, locally or on a remote host via --host.
+ * chosen sessions should resume. By default each session opens in its own tab in
+ * the terminal you're in — iTerm / Ghostty / tmux, locally or on a remote host
+ * via --host. `--splits` opts into packing two sessions side by side per tab.
  */
 import * as fs from 'fs';
 import chalk from 'chalk';
@@ -52,7 +52,9 @@ interface ResumeOptions {
   ghostty?: boolean;
   tmux?: boolean;
   vscodium?: boolean;
-  tabs?: boolean;
+  /** --terminal-app: force macOS Terminal.app. Named to avoid reading as `run --terminal`. */
+  terminalApp?: boolean;
+  splits?: boolean;
 }
 
 export function registerSessionsResumeCommand(sessionsCmd: Command): void {
@@ -70,26 +72,26 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
     .option('--ghostty', 'Force the Ghostty backend')
     .option('--tmux', 'Force the tmux backend')
     .option('--vscodium', 'Force the VSCodium agent-terminal backend (swarm-ext)')
-    .option('--tabs', 'One tab per session (default: pack two panes per tab)');
+    .option('--terminal-app', 'Force macOS Terminal.app (no split support — panes become tabs)')
+    .option('--splits', 'Pack two sessions side by side per tab (default: one tab per session)');
 
   setHelpSections(cmd, {
     examples: `
-      # Pick several sessions; they pack two-per-tab in your current terminal
+      # Pick several sessions; each opens in its own tab
       agents sessions resume
 
       # Pre-filter the pool before selecting (space in the filter → use [query])
       agents sessions resume "auth middleware"
 
-      # Force a backend / one tab each / a remote host
+      # Force a backend / side-by-side splits / a remote host
       agents sessions resume --ghostty
       agents sessions resume --vscodium
-      agents sessions resume --tabs
+      agents sessions resume --splits
       agents sessions resume --host zion --tmux
     `,
     notes: `
       - space toggles a session, enter confirms; tab toggles the preview pane.
-      - Layout: two-per-tab by default (session 1 → new tab, session 2 → split beside it, …). --tabs disables splitting.
-      - VSCodium defaults to one editor tab per session (matches swarm-ext's native agent-terminal UX); the others default to two-per-tab.
+      - Layout: one tab per session by default. --splits packs session pairs side by side in each tab.
       - Backend: auto-detected from the terminal you're in (iTerm / Ghostty / tmux); override with --iterm/--ghostty/--tmux/--vscodium.
       - --vscodium opens each session as an agent terminal tab in VSCodium via the swarm-ext extension (works with --host too).
       - --host <alias> resumes on a remote machine over the same SSH transport as 'sessions --host' (defaults to tmux).
@@ -193,12 +195,16 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
     return;
   }
 
-  // 5b. Fan out through the engine. Split-packing (two-per-tab) suits the
-  // terminal apps; the VSCodium backend defaults to one editor tab per session,
-  // matching swarm-ext's native agent-terminal UX. --tabs forces tabs anywhere.
-  const packing: Packing =
-    options.tabs || backend === 'vscodium-agent' ? 'tabs' : 'two-per-tab';
+  // 5b. Fan out through the engine. Full-width tabs are the default for batch
+  // recovery; callers can explicitly opt into pairs of side-by-side panes.
+  const packing = resolveResumePacking(options);
   const where = options.host ? `${backend} on ${options.host}` : backend;
+  // Terminal.app has no scriptable split, so its buildSplit opens a tab. Say so
+  // when the user actually asked for panes — the layout silently not happening
+  // is worse than one line of warning.
+  if (backend === 'terminal' && packing === 'two-per-tab') {
+    console.log(chalk.yellow('Terminal.app cannot split panes — opening one tab per session instead.'));
+  }
   console.log(chalk.gray(`Opening ${items.length} session${items.length === 1 ? '' : 's'} in ${where} (${packing})…`));
 
   const results = await openSurfaces(
@@ -220,6 +226,10 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
   console.log(chalk.gray(`\nOpened ${opened}/${items.length} in ${where}.`));
 }
 
+export function resolveResumePacking(options: Pick<ResumeOptions, 'splits'>): Packing {
+  return options.splits ? 'two-per-tab' : 'tabs';
+}
+
 /**
  * Decide which backend to launch into. Returns a concrete backend, `'inplace'`
  * (resume in the current process — no GUI/tmux available), or `'cancel'` (the
@@ -235,6 +245,7 @@ async function resolveBackend(
       : options.ghostty ? 'ghostty'
       : options.tmux ? 'tmux'
       : options.vscodium ? 'vscodium-agent'
+      : options.terminalApp ? 'terminal'
       : undefined;
   if (forced) return forced;
   // Remote defaults to tmux (headless, no GUI session assumptions); override with a backend flag.

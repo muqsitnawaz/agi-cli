@@ -26,6 +26,7 @@ import * as path from 'path';
 import * as yaml from 'yaml';
 import { getFeedDir, getUserAgentsDir } from './state.js';
 import { isAdmin, isHighConsequenceAllowed, isKnownOperator } from './operator.js';
+import { projectKeyFromCwd } from './project-key.js';
 
 export interface BlockOption {
   label: string;
@@ -43,7 +44,7 @@ export interface MessageReceipt {
   /** The message id this receipt describes. */
   msgId: string;
   /** Delivery lifecycle state. */
-  status: 'queued' | 'consumed' | 'continued';
+  status: 'queued' | 'consumed' | 'continued' | 'dropped' | 'expired';
   /** ISO-8601 timestamp of the state transition. */
   at: string;
   /** Optional sender label for the message. */
@@ -69,9 +70,24 @@ export interface OpenBlock {
   mailboxId: string;
   host: string;
   runtime: string;
+  /** Project/repo name this block belongs to (derived from cwd, worktree-aware). */
+  project?: string;
   ts: string;
   questions: BlockQuestion[];
-  kind?: 'question' | 'notification' | 'control';
+  /**
+   * How this block came to exist.
+   *   question     — an AskUserQuestion the harness surfaced
+   *   notification — a permission/idle prompt the harness raised
+   *   control      — a synthetic card the feed itself computed (runaway, needy)
+   *   declared     — the AGENT decided it is stuck and said so (`feed post --blocked`)
+   *
+   * `declared` is the only kind that does not depend on the harness noticing
+   * anything. Every other kind is inferred from a harness event, and hook events
+   * are not portable across harnesses (only Claude fires Notification, only Codex
+   * fires PermissionRequest), so a declared block is the one signal every agent
+   * can raise — it is just a shell command.
+   */
+  kind?: 'question' | 'notification' | 'control' | 'declared';
   notificationType?: string;
   ticket?: string;
   pr?: string;
@@ -283,6 +299,8 @@ const RECEIPT_STATUS_RANK: Record<MessageReceipt['status'], number> = {
   queued: 0,
   consumed: 1,
   continued: 2,
+  dropped: 3,
+  expired: 3,
 };
 
 /**
@@ -370,6 +388,69 @@ export function clearBlockLifecycle(blockId: string, root?: string): void {
       // ignore missing
     }
   }
+}
+
+/** Identity of the agent declaring a block — the subset of `PostIdentity` it needs. */
+export interface DeclaringAgent {
+  sessionId: string;
+  mailboxId: string;
+  host: string;
+  runtime: string;
+  cwd?: string;
+}
+
+export interface DeclareBlockInput {
+  /** What the agent needs from the user, front-loaded. */
+  text: string;
+  /** Answerable choices, if the ask is a pick-one. */
+  options?: string[];
+  /** A safe default makes this an approval; without one it is a decision. */
+  safeDefault?: string;
+  /** Minutes before the default-on-no-answer policy may fire. */
+  timeoutMinutes?: number;
+  ts?: string;
+}
+
+/**
+ * Build the block record for `agents feed post --blocked` — pure, so the shape is testable
+ * without touching the store or the broadcast layer.
+ *
+ * Class is derived, not asked for: a `--default` means the user could be absent
+ * and policy could still resolve it (approval); no default means only a human can
+ * choose (decision). `feed-policy.ts` reads exactly that distinction, so deriving
+ * it here keeps one rule in one place instead of letting a caller set a class that
+ * contradicts its own safeDefault.
+ *
+ * `costOfDelay: high` because a declared block is, by definition, an agent that
+ * has already stopped making progress — that is what makes it worth interrupting
+ * someone over, and what `feed --dispatch`'s urgency filter keys off.
+ */
+export function buildDeclaredBlock(agent: DeclaringAgent, input: DeclareBlockInput): OpenBlock {
+  const text = input.text.trim().replace(/\s+/g, ' ');
+  if (!text) {
+    throw new Error('Block text is empty. Usage: agents feed post --title "Short subject" "what you need from the user" --blocked');
+  }
+  const options = (input.options ?? [])
+    .map((label) => label.trim())
+    .filter(Boolean)
+    .map((label) => ({ label }));
+
+  const project = projectKeyFromCwd(agent.cwd);
+  return {
+    blockId: blockIdForSession(agent.sessionId),
+    sessionId: agent.sessionId,
+    mailboxId: agent.mailboxId,
+    host: agent.host,
+    runtime: agent.runtime,
+    ts: input.ts ?? new Date().toISOString(),
+    kind: 'declared',
+    questions: [{ text, header: 'Needs you', ...(options.length ? { options } : {}) }],
+    blockClass: input.safeDefault ? 'approval' : 'decision',
+    costOfDelay: 'high',
+    ...(project ? { project } : {}),
+    ...(input.safeDefault ? { safeDefault: input.safeDefault } : {}),
+    ...(input.timeoutMinutes !== undefined ? { timeoutMinutes: input.timeoutMinutes } : {}),
+  };
 }
 
 /** Atomic write a block record to the feed store. Clears stale lifecycle state. */
@@ -484,6 +565,10 @@ CLEAR_EVENTS = {
     "Stop",
     "SessionEnd",
 }
+# Codex emits a PermissionRequest event (not Claude's Notification) when it
+# blocks on an approval prompt. Claude never fires PermissionRequest, so the
+# same script handles both: PermissionRequest maps to an approval-class block
+# with a high cost-of-delay so 'agents feed --dispatch' pages it as urgent.
 
 
 def read_json(path):
@@ -507,6 +592,24 @@ def write_json(path, value):
             os.unlink(tmp)
         except Exception:
             pass
+
+
+def project_from_cwd(cwd):
+    """Basename of cwd, with worktree paths resolved to their repo name."""
+    if not cwd:
+        return None
+    norm = cwd.replace("\\\\", "/").rstrip("/")
+    if not norm:
+        return None
+    marker = "/.agents/worktrees/"
+    idx = norm.find(marker)
+    if idx > 0:
+        repo_path = norm[:idx]
+        base = repo_path[repo_path.rfind("/") + 1:]
+        if base:
+            return base
+    base = norm[norm.rfind("/") + 1:]
+    return base or None
 
 
 def main():
@@ -534,6 +637,38 @@ def main():
     hook_event = payload.get("hook_event_name", "PreToolUse")
 
     if hook_event in CLEAR_EVENTS:
+        # A declared block (\`agents feed post --blocked\`) is the agent explicitly
+        # saying it is stuck. Unlike a question/notification/approval block -- which
+        # tracks an in-flight harness prompt that a lifecycle event resolves -- a
+        # declared block stays open until it is actually ANSWERED. So while it is
+        # still UNANSWERED, Stop/SessionEnd/PostToolUse must never silently drop it:
+        # otherwise the needs-you record vanishes the moment the agent parks the block
+        # and its turn ends -- exactly when the owner still needs to see and answer it.
+        # Once it IS answered (an answered marker exists), it clears like any other
+        # block by falling through below -- which frees that marker too, so a later
+        # \`--blocked\` in the same session is not falsely locked as already-answered
+        # (recordAnswer creates the marker with O_EXCL).
+        try:
+            with open(target) as existing_file:
+                existing = json.load(existing_file)
+            answered = os.path.exists(os.path.join(answered_dir, f"{block_id}.json"))
+            if existing.get("kind") == "declared" and not answered:
+                return
+        except Exception:
+            pass
+        # A matcher-less PostToolUse clear (registered for Codex so an approved
+        # tool clears its approval card) must NOT wipe an open AskUserQuestion
+        # while an unrelated tool runs mid-question -- those are cleared only by
+        # the AskUserQuestion-matched PostToolUse. So on PostToolUse, keep a
+        # 'question' block; approval/notification blocks clear once the tool runs.
+        if hook_event == "PostToolUse":
+            try:
+                with open(target) as existing_file:
+                    existing = json.load(existing_file)
+                if existing.get("kind") == "question" and payload.get("tool_name") != "AskUserQuestion":
+                    return
+            except Exception:
+                pass
         try:
             os.unlink(target)
         except FileNotFoundError:
@@ -578,6 +713,7 @@ def main():
         return
 
     notification_type = None
+    codex_approval = False
     if hook_event == "Notification":
         notification_type = payload.get("notification_type", "")
         if notification_type not in WAITING_NOTIFICATION_TYPES:
@@ -602,6 +738,34 @@ def main():
             "multiSelect": False,
         }]
         kind = "notification"
+    elif hook_event == "PermissionRequest":
+        # Codex approval prompt. The payload mirrors PreToolUse (tool_name,
+        # tool_input) but carries no questions -- Codex is asking to run a tool,
+        # not asking the operator a multiple-choice question. Publish it as a
+        # notification-kind approval block naming the tool so the feed and the
+        # phone notifier can surface it, and so the Factory extension can bridge
+        # it to a VS Code notification.
+        tool_name = payload.get("tool_name") or "a tool"
+        tool_input = payload.get("tool_input", {})
+        command = ""
+        if isinstance(tool_input, dict):
+            command = (
+                tool_input.get("command")
+                or tool_input.get("cmd")
+                or tool_input.get("path")
+                or ""
+            )
+            if isinstance(command, list):
+                command = " ".join(str(c) for c in command)
+        detail = f": {command}" if command else ""
+        normalized_questions = [{
+            "text": f"Codex needs approval to run {tool_name}{detail}",
+            "header": "Approval needed",
+            "multiSelect": False,
+        }]
+        kind = "notification"
+        notification_type = "permission_prompt"
+        codex_approval = True
     else:
         tool_input = payload.get("tool_input", {})
         questions = tool_input.get("questions", [])
@@ -657,6 +821,8 @@ def main():
     host = re.sub(r"[^a-z0-9_-]", "-", host) or "unknown"
 
     runtime = os.environ.get("AGENTS_RUNTIME", "headless")
+    cwd = payload.get("cwd") or os.environ.get("AGENTS_CWD")
+    project = project_from_cwd(cwd)
 
     block = {
         "blockId": block_id,
@@ -668,12 +834,26 @@ def main():
         "questions": normalized_questions,
         "kind": kind,
     }
+    if project:
+        block["project"] = project
     if notification_type:
         block["notificationType"] = notification_type
 
+    # A Codex PermissionRequest is a real approval gate: mark it approval-class
+    # with a high cost-of-delay so 'agents feed --dispatch' classifies it urgent
+    # (isPhoneUrgent gates on costOfDelay >= phoneNotifyThreshold, default
+    # 'medium') and pages the phone. A plain 'deny' is the safe default.
+    if codex_approval:
+        block["blockClass"] = "approval"
+        block["costOfDelay"] = "high"
+        block["safeDefault"] = "deny"
+
     # Optional multi-operator control metadata passed by the agent in the
-    # AskUserQuestion tool_input. Defaults keep the existing behavior.
-    controls = payload.get("tool_input", {}) if hook_event != "Notification" else {}
+    # AskUserQuestion tool_input. Defaults keep the existing behavior. A Codex
+    # PermissionRequest carries tool ARGS in tool_input (command/path), not
+    # operator controls, so it is excluded here -- its class/cost is stamped
+    # above from codex_approval.
+    controls = payload.get("tool_input", {}) if hook_event not in ("Notification", "PermissionRequest") else {}
     block_class = controls.get("blockClass") if isinstance(controls, dict) else None
     if block_class in ("approval", "decision"):
         block["blockClass"] = block_class
@@ -743,6 +923,16 @@ export const FEED_NOTIFICATION_HOOK_MANIFEST = {
   timeout: 5,
 };
 
+// Codex fires PermissionRequest (not Claude's Notification) when it blocks on an
+// approval prompt. The same script handles it, publishing a high-cost approval
+// block so the feed dispatch pages the phone. PermissionRequest has no matcher.
+export const FEED_PERMISSION_HOOK_MANIFEST = {
+  name: 'feed-publish-permission',
+  events: ['PermissionRequest'],
+  script: '10-feed-publish.py',
+  timeout: 5,
+};
+
 export const FEED_ANSWERED_HOOK_MANIFEST = {
   name: 'feed-clear-answered',
   events: ['PostToolUse'],
@@ -787,28 +977,51 @@ export function ensureFeedPublishHook(userAgentsDir: string = getUserAgentsDir()
     }
     const desiredHooks: Record<string, Record<string, unknown>> = {
       'feed-publish': {
-        agents: ['claude'],
+        agents: ['claude', 'codex'],
         events: ['PreToolUse'],
         matcher: 'AskUserQuestion',
         script: '10-feed-publish.py',
         timeout: 5,
       },
       'feed-publish-notification': {
-        agents: ['claude'],
+        agents: ['claude', 'codex'],
         events: ['Notification'],
         matcher: 'permission_prompt|idle_prompt|elicitation_dialog',
         script: '10-feed-publish.py',
         timeout: 5,
       },
+      // Codex-specific approval gate: Codex emits PermissionRequest (Claude does
+      // not), so this hook is where a blocked Codex agent surfaces to the feed.
+      'feed-publish-permission': {
+        agents: ['claude', 'codex'],
+        events: ['PermissionRequest'],
+        script: '10-feed-publish.py',
+        timeout: 5,
+      },
       'feed-clear-answered': {
-        agents: ['claude'],
+        agents: ['claude', 'codex'],
         events: ['PostToolUse'],
         matcher: 'AskUserQuestion',
         script: '10-feed-publish.py',
         timeout: 5,
       },
+      // Matcher-less PostToolUse clear: after Codex runs an approved tool, the
+      // approval card is stale, so clear it. Codex-only on purpose -- Claude
+      // never fires PermissionRequest, so it has no approval card to clear here,
+      // and a matcher-less PostToolUse for Claude would (1) re-run the script on
+      // every tool completion and (2) wipe Claude's notification-kind blocks
+      // (permission_prompt/idle_prompt/elicitation_dialog) the moment any later
+      // tool runs, instead of letting them persist to Stop/SessionEnd like they
+      // did before RUSH-2039. Registering it for codex alone keeps Claude's
+      // card lifetime exactly as it was.
+      'feed-clear-permission': {
+        agents: ['codex'],
+        events: ['PostToolUse'],
+        script: '10-feed-publish.py',
+        timeout: 5,
+      },
       'feed-clear-lifecycle': {
-        agents: ['claude'],
+        agents: ['claude', 'codex'],
         events: ['Stop', 'UserPromptSubmit', 'SessionEnd'],
         script: '10-feed-publish.py',
         timeout: 5,

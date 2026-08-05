@@ -14,6 +14,7 @@ import { tmpdir } from 'os';
 import type { JobConfig } from '../src/lib/routines.js';
 import type { ExecOptions } from '../src/lib/exec.js';
 import type { LoopDeps, IterationResult } from '../src/lib/loop.js';
+import * as activation from '../src/lib/routine-activation.js';
 
 // Hoist state the same way jobs.test.ts does (works with both vitest's hoist and Bun).
 // The string literal is used inside vi.mock to avoid TDZ issues with const references.
@@ -76,9 +77,11 @@ function makeLoopDeps(calls: ExecOptions[]): LoopDeps {
 beforeEach(() => {
   hoistedState.TEST_DIR = mkdtempSync(join(tmpdir(), 'agents-runner-loop-'));
   mkdirSync(join(hoistedState.TEST_DIR, 'runs'), { recursive: true });
+  vi.spyOn(activation, 'routineEnabledOnThisDevice').mockReturnValue(null);
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   rmSync(hoistedState.TEST_DIR, { recursive: true, force: true });
 });
 
@@ -112,10 +115,10 @@ describe('executeJob — loop driver (issue #400)', () => {
     const deps = makeLoopDeps(calls);
 
     // No loop field — should go to the single-shot spawn path.
-    // Use agent 'cursor' which buildJobCommand rejects immediately (unsupported),
+    // Use a sentinel agent which buildJobCommand rejects immediately (unsupported),
     // so executeJob throws without ever reaching a real spawn or the loop driver.
     await expect(
-      executeJob(makeConfig({ agent: 'cursor' as any }), deps),
+      executeJob(makeConfig({ agent: 'no-such-agent' as any }), deps),
     ).rejects.toThrow('Unsupported agent for daemon jobs');
 
     // Loop driver must not have been invoked.

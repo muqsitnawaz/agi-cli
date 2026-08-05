@@ -4,6 +4,7 @@ import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AccountInfo } from '../agents.js';
+import { ALL_AGENT_IDS } from '../agents.js';
 import * as state from '../state.js';
 import {
   agentReportsUsage,
@@ -11,6 +12,7 @@ import {
   deriveUsageStatusFromSnapshot,
   formatUsageSummary,
   formatUsageStatusBadge,
+  getUsageInfo,
   getClaudeKeychainService,
   loadClaudeOauth,
   getUsageInfoForIdentity,
@@ -20,6 +22,17 @@ import {
   normalizeKimiWindows,
   formatKimiPlan,
   normalizeDroidWindows,
+  normalizeCursorUsage,
+  normalizeCursorPeriodUsage,
+  normalizeCursorUsageSummary,
+  antigravityModelShortLabel,
+  antigravityTokenNeedsRefresh,
+  normalizeAntigravityWindows,
+  parseAntigravityOauthPayload,
+  pickCompactUsageWindows,
+  USAGE_SOURCE_AGENT_IDS,
+  USAGE_CACHE_FRESH_MS,
+  USAGE_FETCH_CONCURRENCY,
   type DroidBillingLimitsResponse,
   type KimiUsagesResponse,
   type UsageSnapshot,
@@ -136,12 +149,298 @@ describe('usage formatting', () => {
       .not.toContain('usage unavailable');
   });
 
-  it('agentReportsUsage flags only the agents that expose usage data', () => {
-    for (const a of ['claude', 'codex', 'kimi', 'droid'] as const) {
-      expect(agentReportsUsage(a)).toBe(true);
+  it('caps overview meters so multi-window agents cannot blow out column width', () => {
+    // Claude-style: session + week preferred even when a later window is hotter.
+    const snapshot: UsageSnapshot = {
+      source: 'live',
+      sourceLabel: 'live',
+      capturedAt: new Date(),
+      windows: [
+        { key: 'session', label: 'S', shortLabel: 'S', usedPercent: 10, resetsAt: null, windowMinutes: null },
+        { key: 'week', label: 'W', shortLabel: 'W', usedPercent: 20, resetsAt: null, windowMinutes: null },
+        { key: 'month', label: 'M', shortLabel: 'M', usedPercent: 90, resetsAt: null, windowMinutes: null },
+        { key: 'sonnet_week', label: 'So', shortLabel: 'So', usedPercent: 50, resetsAt: null, windowMinutes: null },
+      ],
+    };
+    const picked = pickCompactUsageWindows(snapshot.windows, 2);
+    expect(picked.map((w) => w.shortLabel)).toEqual(['S', 'W']);
+
+    const summary = stripAnsi(formatUsageSummary(null, snapshot, 3, { maxWindows: 2 }));
+    expect(summary).toContain('S:');
+    expect(summary).toContain('W:');
+    expect(summary).toContain('+1'); // month only; sonnet_week already filtered
+    expect(summary).not.toContain('M:');
+    expect(summary).not.toContain('So:');
+  });
+
+  it('still fills maxWindows when every window shares key: session (Antigravity)', () => {
+    // Antigravity maps each model quota to key:'session'. Picking by key-set
+    // would keep only the first; identity-based fill keeps the hottest rest.
+    const windows: UsageWindow[] = [
+      { key: 'session', label: '2.5F', shortLabel: '2.5F', usedPercent: 10, resetsAt: null, windowMinutes: null },
+      { key: 'session', label: '2.5FL', shortLabel: '2.5FL', usedPercent: 20, resetsAt: null, windowMinutes: null },
+      { key: 'session', label: '2.5P', shortLabel: '2.5P', usedPercent: 90, resetsAt: null, windowMinutes: null },
+      { key: 'session', label: '3.1FL', shortLabel: '3.1FL', usedPercent: 5, resetsAt: null, windowMinutes: null },
+    ];
+    const picked = pickCompactUsageWindows(windows, 2);
+    expect(picked.map((w) => w.shortLabel)).toEqual(['2.5F', '2.5P']);
+    const summary = stripAnsi(formatUsageSummary(null, {
+      source: 'live', sourceLabel: 'live', capturedAt: new Date(), windows,
+    }, 3, { maxWindows: 2 }));
+    expect(summary).toContain('+2');
+  });
+
+  it('prefers highest utilization when session/week are absent', () => {
+    const windows: UsageWindow[] = [
+      { key: 'month', label: 'A', shortLabel: 'A', usedPercent: 10, resetsAt: null, windowMinutes: null },
+      { key: 'month', label: 'B', shortLabel: 'B', usedPercent: 95, resetsAt: null, windowMinutes: null },
+      { key: 'month', label: 'C', shortLabel: 'C', usedPercent: 40, resetsAt: null, windowMinutes: null },
+    ];
+    const picked = pickCompactUsageWindows(windows, 2);
+    expect(picked.map((w) => w.shortLabel)).toEqual(['B', 'C']);
+  });
+
+  it('pins the 5-minute fresh window and bounded fetch concurrency', () => {
+    // Correctness: these are the load-bearing knobs for the pile-up fix. If
+    // someone reverts the fresh window to 2 minutes or unbounded Promise.all,
+    // this fails loudly.
+    expect(USAGE_CACHE_FRESH_MS).toBe(5 * 60 * 1000);
+    expect(USAGE_FETCH_CONCURRENCY).toBe(3);
+  });
+
+  it('pins the complete usage source registry and derives support from it', () => {
+    expect(USAGE_SOURCE_AGENT_IDS).toEqual(['claude', 'codex', 'kimi', 'droid', 'grok', 'cursor', 'antigravity']);
+    for (const agentId of ALL_AGENT_IDS) {
+      expect(agentReportsUsage(agentId)).toBe(USAGE_SOURCE_AGENT_IDS.includes(agentId as never));
     }
-    for (const a of ['antigravity', 'grok', 'opencode', 'gemini'] as const) {
-      expect(agentReportsUsage(a)).toBe(false);
+  });
+
+  it('normalizeCursorUsage builds a monthly request bar for request-capped plans', () => {
+    // Free / legacy plans carry a maxRequestUsage on the premium bucket.
+    const windows = normalizeCursorUsage({
+      'gpt-4': { numRequests: 120, maxRequestUsage: 500 },
+      startOfMonth: '2026-07-22T11:35:59.000Z',
+    });
+    expect(windows).toHaveLength(1);
+    expect(windows[0]?.key).toBe('month');
+    expect(windows[0]?.shortLabel).toBe('M');
+    expect(windows[0]?.usedPercent).toBe(24); // 120 / 500
+    // Resets one calendar month after startOfMonth.
+    expect(windows[0]?.resetsAt?.toISOString()).toBe(new Date('2026-08-22T11:35:59.000Z').toISOString());
+  });
+
+  it('normalizeCursorUsage clamps a month-end reset instead of overflowing into the next month', () => {
+    // A Jan-31 period start: +1 month must land in February, not spill into March
+    // (naive setMonth(m+1) yields Feb 31 -> Mar 3).
+    const [w] = normalizeCursorUsage({
+      'gpt-4': { numRequests: 10, maxRequestUsage: 100 },
+      startOfMonth: '2026-01-31T12:00:00.000Z',
+    });
+    expect(w?.resetsAt?.getMonth()).toBe(1); // February (1), not March (2)
+    expect(w?.resetsAt?.getDate()).toBeGreaterThanOrEqual(28);
+  });
+
+  it('normalizeCursorUsage returns no window for usage-based plans (no request cap)', () => {
+    // Real usage-based Pro shape: maxRequestUsage is null, so there is no bar to draw.
+    expect(
+      normalizeCursorUsage({
+        'gpt-4': { numRequests: 0, numRequestsTotal: 0, maxRequestUsage: null } as never,
+        startOfMonth: '2026-07-22T11:35:59.000Z',
+      })
+    ).toEqual([]);
+    // Missing premium bucket entirely -> no window, no throw.
+    expect(normalizeCursorUsage({ startOfMonth: '2026-07-22T11:35:59.000Z' })).toEqual([]);
+    expect(normalizeCursorUsage({})).toEqual([]);
+  });
+
+  it('normalizeCursorPeriodUsage maps the primary Auto/API/Total breakdown to three windows', () => {
+    const windows = normalizeCursorPeriodUsage({
+      billingCycleEnd: '2026-08-22T11:35:59.000Z',
+      planUsage: { autoPercentUsed: 13.21, apiPercentUsed: 3.16, totalPercentUsed: 10.19 },
+    });
+    expect(windows).toHaveLength(3);
+    expect(windows[0]).toMatchObject({ key: 'session', shortLabel: 'A', label: 'Auto + Composer', usedPercent: 13.21 });
+    expect(windows[1]).toMatchObject({ key: 'week', shortLabel: 'API', label: 'API', usedPercent: 3.16 });
+    expect(windows[2]).toMatchObject({ key: 'month', shortLabel: 'T', label: 'Total', usedPercent: 10.19 });
+    for (const window of windows) {
+      expect(window.resetsAt?.toISOString()).toBe(new Date('2026-08-22T11:35:59.000Z').toISOString());
+    }
+  });
+
+  it('normalizeCursorPeriodUsage accepts a unix-ms string billingCycleEnd and drops non-finite percents', () => {
+    const windows = normalizeCursorPeriodUsage({
+      billingCycleEnd: '1771077734000',
+      planUsage: { autoPercentUsed: 0, apiPercentUsed: null, totalPercentUsed: 15.48 },
+    });
+    // apiPercentUsed is missing -> only the two finite windows render, no empty gauge for API.
+    expect(windows).toHaveLength(2);
+    expect(windows.map((w) => w.key)).toEqual(['session', 'month']);
+    expect(windows[0]?.resetsAt?.toISOString()).toBe(new Date(1771077734000).toISOString());
+  });
+
+  it('normalizeCursorPeriodUsage returns no windows for a missing/empty planUsage', () => {
+    expect(normalizeCursorPeriodUsage({ billingCycleEnd: '2026-08-22T11:35:59.000Z' })).toEqual([]);
+    expect(normalizeCursorPeriodUsage({})).toEqual([]);
+  });
+
+  it('normalizeCursorUsageSummary maps the fallback individualUsage.plan breakdown', () => {
+    const windows = normalizeCursorUsageSummary({
+      isUnlimited: false,
+      billingCycleEnd: '2026-05-02T14:11:55.000Z',
+      individualUsage: { plan: { autoPercentUsed: 0, apiPercentUsed: 100, totalPercentUsed: 100 } },
+    });
+    expect(windows).toHaveLength(3);
+    expect(windows[0]).toMatchObject({ key: 'session', shortLabel: 'A', usedPercent: 0 });
+    expect(windows[1]).toMatchObject({ key: 'week', shortLabel: 'API', usedPercent: 100 });
+    expect(windows[2]).toMatchObject({ key: 'month', shortLabel: 'T', usedPercent: 100 });
+    expect(windows[0]?.resetsAt?.toISOString()).toBe(new Date('2026-05-02T14:11:55.000Z').toISOString());
+  });
+
+  it('normalizeCursorUsageSummary returns no windows for an unlimited plan with no usable percents', () => {
+    // Non-tiered unlimited plans omit the percent fields entirely (Cursor's admin
+    // API forum confirms this: undocumented percent fields only populate for
+    // tiered self-serve accounts).
+    expect(
+      normalizeCursorUsageSummary({
+        isUnlimited: true,
+        billingCycleEnd: '2026-05-02T14:11:55.000Z',
+        individualUsage: { plan: {} },
+      })
+    ).toEqual([]);
+    expect(normalizeCursorUsageSummary({ isUnlimited: true })).toEqual([]);
+    expect(normalizeCursorUsageSummary({})).toEqual([]);
+  });
+
+  it('parseAntigravityOauthPayload reads the raw JSON and the go-keyring-base64 wrapper', () => {
+    // Linux file-fallback shape: raw { token: {…} } JSON.
+    const raw = JSON.stringify({
+      token: { access_token: 'ya29.x', refresh_token: 'rt', expiry: '2026-08-01T21:06:25Z' },
+      auth_method: 'consumer',
+    });
+    expect(parseAntigravityOauthPayload(raw)).toEqual({
+      access_token: 'ya29.x',
+      refresh_token: 'rt',
+      expiry: '2026-08-01T21:06:25Z',
+    });
+
+    // macOS Keychain shape: go-keyring prefixes the same JSON with base64.
+    const wrapped = `go-keyring-base64:${Buffer.from(raw, 'utf-8').toString('base64')}`;
+    expect(parseAntigravityOauthPayload(wrapped)?.refresh_token).toBe('rt');
+
+    // Malformed / empty / token-less payloads => null, never a throw.
+    expect(parseAntigravityOauthPayload('not json')).toBeNull();
+    expect(parseAntigravityOauthPayload('{}')).toBeNull();
+    expect(parseAntigravityOauthPayload(JSON.stringify({ token: {} }))).toBeNull();
+  });
+
+  it('antigravityTokenNeedsRefresh gates on the RFC3339 expiry with a leeway', () => {
+    const now = Date.parse('2026-08-03T06:00:00Z');
+    expect(antigravityTokenNeedsRefresh('2026-08-03T07:00:00Z', now)).toBe(false); // 1h out
+    expect(antigravityTokenNeedsRefresh('2026-08-03T06:00:30Z', now)).toBe(true); // inside leeway
+    expect(antigravityTokenNeedsRefresh('2026-08-01T21:06:25Z', now)).toBe(true); // expired
+    // Missing/unparseable expiry reads as still-fresh (the quota call is the truth).
+    expect(antigravityTokenNeedsRefresh(null, now)).toBe(false);
+    expect(antigravityTokenNeedsRefresh('not-a-date', now)).toBe(false);
+  });
+
+  it('antigravityModelShortLabel compacts gemini model ids', () => {
+    expect(antigravityModelShortLabel('gemini-2.5-flash-lite')).toBe('2.5FL');
+    expect(antigravityModelShortLabel('gemini-2.5-pro')).toBe('2.5P');
+    expect(antigravityModelShortLabel('gemini-3.1-flash-lite')).toBe('3.1FL');
+    // Unknown ids pass through untouched rather than rendering a blank tag.
+    expect(antigravityModelShortLabel('custom-model')).toBe('customM');
+  });
+
+  it('normalizeAntigravityWindows builds one bar per model, most-used first', () => {
+    // Real :retrieveUserQuota shape (plus a duplicated model and a junk bucket).
+    const windows = normalizeAntigravityWindows([
+      { modelId: 'gemini-2.5-flash', tokenType: 'REQUESTS', remainingFraction: 1, resetTime: '2026-08-04T07:07:52Z' },
+      { modelId: 'gemini-3.1-pro', tokenType: 'REQUESTS', remainingFraction: 0.42, resetTime: '2026-08-04T07:07:52Z' },
+      { modelId: 'gemini-3.1-pro', tokenType: 'REQUESTS', remainingFraction: 0.5, resetTime: '2026-08-04T07:07:52Z' },
+      { modelId: 'gemini-2.5-pro', remainingFraction: 0 },
+      { modelId: null, remainingFraction: 0.5 }, // no model id -> dropped
+      { modelId: 'gemini-2.5-flash-lite' }, // no fraction -> dropped
+    ]);
+
+    expect(windows.map((w) => w.label)).toEqual(['gemini-2.5-pro', 'gemini-3.1-pro', 'gemini-2.5-flash']);
+    const pro = windows.find((w) => w.label === 'gemini-3.1-pro');
+    // Duplicate buckets keep the LOWEST remaining fraction.
+    expect(pro?.usedPercent).toBeCloseTo(58, 5);
+    expect(pro?.shortLabel).toBe('3.1P');
+    expect(pro?.key).toBe('session');
+    expect(pro?.resetsAt?.toISOString()).toBe('2026-08-04T07:07:52.000Z');
+    // Unknown window length stays null (never an inferred 5h session).
+    expect(pro?.windowMinutes).toBeNull();
+    // A fully drained bucket reads as 100% used.
+    expect(windows[0]?.usedPercent).toBe(100);
+  });
+
+  it('getUsageInfo(antigravity) renders nothing when no credential exists', async () => {
+    // No credential file in the temp home, keyring probe disabled -> null, no throw.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-agy-usage-'));
+    const prev = process.env.AGENTS_NO_KEYCHAIN_PROBE;
+    process.env.AGENTS_NO_KEYCHAIN_PROBE = '1';
+    try {
+      const info = await getUsageInfo('antigravity', { home });
+      expect(info).toEqual({ snapshot: null, error: null });
+    } finally {
+      if (prev === undefined) delete process.env.AGENTS_NO_KEYCHAIN_PROBE;
+      else process.env.AGENTS_NO_KEYCHAIN_PROBE = prev;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('parses Grok usage from the local unified.jsonl (real log shape)', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-grok-usage-'));
+    try {
+      const logDir = path.join(home, '.grok', 'logs');
+      fs.mkdirSync(logDir, { recursive: true });
+      // Two billing lines; the parser keeps the LAST one seen.
+      const lines = [
+        JSON.stringify({
+          ts: '2026-08-01T00:00:00.000Z',
+          msg: 'billing: fetched credits config',
+          ctx: { config: { creditUsagePercent: 10, currentPeriod: { end: '2026-08-01T18:27:00Z' } }, subscriptionTier: 'X Premium' },
+        }),
+        // Real-world shape captured from ~/.grok/logs/unified.jsonl.
+        JSON.stringify({
+          ts: '2026-08-02T04:00:49.628Z',
+          src: 'shell',
+          lvl: 'info',
+          msg: 'billing: fetched credits config',
+          ctx: {
+            config: {
+              creditUsagePercent: 100.0,
+              currentPeriod: { type: 'USAGE_PERIOD_TYPE_WEEKLY', end: '2026-08-02T18:27:00.269749+00:00' },
+              isUnifiedBillingUser: true,
+            },
+            subscriptionTier: 'X Premium+',
+          },
+        }),
+      ];
+      fs.writeFileSync(path.join(logDir, 'unified.jsonl'), `${lines.join('\n')}\n`);
+
+      const { snapshot, error } = await getUsageInfo('grok', { home });
+      expect(error).toBeNull();
+      expect(snapshot?.plan).toBe('X Premium+');
+      const week = snapshot?.windows.find((w) => w.key === 'week');
+      expect(week?.shortLabel).toBe('W');
+      // Real credit consumption is surfaced, not a hardcoded 0%.
+      expect(week?.usedPercent).toBe(100);
+      expect(week?.resetsAt?.toISOString()).toBe(new Date('2026-08-02T18:27:00.269749+00:00').toISOString());
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('returns an empty Grok snapshot when the log is absent', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-grok-nolog-'));
+    try {
+      const { snapshot, error } = await getUsageInfo('grok', { home });
+      expect(error).toBeNull();
+      expect(snapshot).toBeNull();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 

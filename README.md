@@ -31,6 +31,8 @@
   <a href="https://x.ai" title="Grok Build (xAI)"><strong>Grok</strong></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://factory.ai" title="Factory AI Droid"><strong>Droid</strong></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://omp.sh" title="Oh My Pi"><strong>Pi</strong></a>
 </p>
 
 https://agents-cli.sh/demo.mp4
@@ -94,7 +96,7 @@ agents:
   codex: "0.116.0"
 ```
 
-Think `requirements.txt` for CLI coding agents, on steroids. A shim reads `agents.yaml` from the project root and routes `claude` / `codex` / `gemini` / `grok` (and others) to the right version automatically. Each version gets its own isolated home -- switching backs up config and re-syncs resources.
+Think `requirements.txt` for CLI coding agents, on steroids. A shim reads `agents.yaml` from the project root and routes `claude` / `codex` / `antigravity` / `grok` (and others) to the right version automatically. Each version gets its own isolated home -- switching backs up config and re-syncs resources.
 
 ```bash
 agents add claude@2.0.65     # Install a specific version
@@ -111,7 +113,7 @@ agents view                   # See everything installed
 # Set up the Notion MCP server once.
 agents install mcp:com.notion/mcp
 
-# It's now registered with Claude Code, Codex, Gemini CLI, and Cursor.
+# It's now registered with Claude Code, Codex, Antigravity, and Cursor.
 agents mcp list
 ```
 
@@ -120,25 +122,25 @@ Skills, slash commands, rules, hooks, and permissions work the same way -- insta
 ```bash
 agents skills add gh:yourteam/python-expert     # Knowledge pack -> all agents
 agents commands add gh:yourteam/commands         # Slash commands -> all agents
-agents rules add gh:team/rules                   # AGENTS.md -> CLAUDE.md, GEMINI.md, .cursorrules
+agents rules add gh:team/rules                   # AGENTS.md -> per-agent instruction files
 agents permissions add ./perms                   # Permissions -> auto-converted per agent
 ```
 
-Write one `AGENTS.md`. It becomes `CLAUDE.md` for Claude Code, `GEMINI.md` for Gemini CLI, `.cursorrules` for Cursor.
+Write one `AGENTS.md`. It becomes `CLAUDE.md` for Claude Code, `AGENTS.md` for Antigravity, and `.cursorrules` for Cursor.
 
 ---
 
 ## Run any agent
 
 <p align="center">
-  <img src="assets/run-agent.svg" alt="agents run: one command runs any harness (claude/codex/gemini) against the project-pinned version, with an automatic rate-limit fallback chain." width="100%" />
+  <img src="assets/run-agent.svg" alt="agents run: one command runs any harness (claude/codex/antigravity) against the project-pinned version, with an automatic rate-limit fallback chain." width="100%" />
 </p>
 
 
 ```bash
 agents run claude "Find all auth vulnerabilities in src/"
 agents run codex "Fix the issues Claude found"
-agents run gemini "Write tests for the fixed code"
+agents run antigravity "Write tests for the fixed code"
 ```
 
 Each resolves to the project-pinned version with skills, MCP servers, and permissions already synced. Single-typo names auto-correct across every command — `agents view cladue` resolves to `claude`, `agents add codx@latest` to `codex`.
@@ -147,7 +149,7 @@ Each resolves to the project-pinned version with skills, MCP servers, and permis
 
 ```bash
 # Claude Code hits a rate limit -> Codex picks up automatically. Same project, same config.
-agents run claude "refactor auth module" --mode edit --fallback codex,gemini
+agents run claude "refactor auth module" --mode edit --fallback codex,antigravity
 ```
 
 ### Multiple accounts? Spread the load.
@@ -161,11 +163,22 @@ agents run claude@
 agents run codex@ "review this branch"
 ```
 
-`--strategy balanced` spreads work across available versions of the same agent -- useful when you have multiple accounts and want to avoid burning through one.
+`--strategy balanced` spreads work across available versions of the same agent -- useful when you have multiple accounts and want to avoid burning through one. When every account is rate-limited, the run exits nonzero naming each excluded account and the earliest window reset (use `--strategy pinned` to force the default) -- it never launches into an exhausted account.
+
+### Don't care which harness? `agents run auto`
+
+```bash
+# Picks the host (14d usage affinity), the harness (installed CLIs weighted by
+# best-account headroom), and the account (balanced) -- all three layers.
+agents run auto "summarize recent commits"
+agents run auto --host yosemite-s0 "fix the flaky test"   # pin the host layer
+```
+
+`run auto` excludes any harness whose accounts are all rate-limited or signed out, and exits nonzero with the earliest reset time when nothing anywhere is healthy.
 
 A trailing `@` opens an account picker before either an interactive or prompt-based run. Each installed version shows its account identity, exact version, login state, plan, and every available session, weekly, or monthly limit. Logged-out, rate-limited, and out-of-credit accounts remain visible with the reason they cannot be selected; signed-in accounts whose provider does not expose quota data stay selectable and say `limits unavailable`. The choice pins only that run and does not change your default version.
 
-Account selection is available for Claude, Codex, Gemini, Grok, Antigravity, Kimi, Droid, and OpenCode. It requires a terminal and cannot be combined with `--resume`, `--strategy`/`--balanced`, `--lease`, or `--host`/`--device`; profiles and workflows must use their concrete host agent instead.
+Account selection is available for Claude, Codex, Gemini, Cursor, Antigravity, Grok, Kimi, Droid, and OpenCode. It requires a terminal and cannot be combined with `--resume`, `--strategy`/`--balanced`, `--lease`, or `--host`/`--device`; profiles and workflows must use their concrete host agent instead.
 
 ### Chain agents
 
@@ -218,21 +231,21 @@ agents run claude "review this diff" --acp --json
 
 `--acp` routes through the [Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol) so you get a unified event stream -- `agent_message_chunk`, `tool_call`, `plan_update`, `stop_reason` -- instead of writing a parser per CLI. File writes and shell commands flow through agents-cli, which means `--mode plan` becomes a real sandbox: the write RPC is denied, not just unused.
 
-ACP adapters are documented for claude, codex, gemini, cursor, opencode, openclaw, and grok. Other harnesses keep running on the direct-exec path.
+ACP adapters are documented for claude, codex, cursor, opencode, openclaw, and grok. Other harnesses keep running on the direct-exec path.
 
 ---
 
 ## Sessions across agents
 
 <p align="center">
-  <img src="assets/sessions.svg" alt="agents sessions: search transcripts across Claude, Codex, Gemini, and OpenCode at once, plus a live --active panel showing each running session's state (working / waiting / idle)." width="100%" />
+  <img src="assets/sessions.svg" alt="agents sessions: search transcripts across Claude, Codex, legacy Gemini, and OpenCode at once, plus a live --active panel showing each running session's state (working / waiting / idle)." width="100%" />
 </p>
 
 
 When you run multiple agents, conversations scatter across tools. Session search brings them together.
 
 ```bash
-# Where was that auth conversation? Search Claude Code, Codex, Gemini CLI, OpenCode at once.
+# Where was that auth conversation? Search Claude Code, Codex, legacy Gemini, OpenCode at once.
 agents sessions "auth middleware"
 
 # Filter by agent, project, or time window
@@ -242,13 +255,36 @@ agents sessions --project my-app
 # Read a full conversation
 agents sessions a1b2c3d4 --markdown
 
+# Render a shareable, redacted Markdown transcript with the session preview on top
+agents sessions render a1b2c3d4 -o session.md
+
 # Just the last 3 turns, user messages only
 agents sessions a1b2c3d4 --last 3 --include user
+
+# Calls in recent Codex sessions on one device
+agents sessions --include tools --agent codex --device mac-mini --since 7d
+
+# One session where two different calls match; query every online device
+agents sessions --include tools \
+  --query 'program:git input:merge' \
+  --query 'program:gh output:CONFLICT' \
+  --fleet --json
+
+# Count pre-indexed static git sites, containing calls, and sessions
+agents sessions --include tools --query 'program:git' --count --fleet --json
+
+# Populate historical tool rows once on each device
+agents sessions backfill tools --fleet
+
+# Which skills/commands you actually invoke -- and which installed ones are dead weight
+agents sessions stats
+agents sessions stats --zero            # only the never-invoked (dead weight)
+agents sessions backfill resources      # fold historical sessions into the usage index
 ```
 
 Interactive picker when you're in a terminal. Structured output (`--json`, `--markdown`, filtered by role or turn count) when piped.
 
-Backed by a SQLite + FTS5 index at `~/.agents/.history/sessions/sessions.db` with incremental scanning -- warm reads in ~100ms. External tools can consume `--json` output as a programmatic observability layer; see [docs/05-sessions.md](apps/cli/docs/05-sessions.md) for the schema and [docs/06-observability.md](apps/cli/docs/06-observability.md) for the consumption patterns.
+Backed by a SQLite + FTS5 index at `~/.agents/.history/sessions/sessions.db` with incremental scanning -- warm reads in ~100ms. Tool-call evidence is redacted and bounded before it is cached; repeated `--query` clauses must match distinct calls in one session. Tool queries read SQLite only: `agents sessions backfill tools` performs the one-time historical parse, while normal incremental scans index new and changed sessions. The index stores ordered static Bash program sites, so `--count` reports occurrences, containing tool calls, and distinct sessions without reparsing. `--fleet` executes one origin partition per device, so synced mirrors cannot duplicate compact evidence or counts returned over SSH; transcript bodies stay on their origin machine. This uses relational SQLite rows and literal FTS5 only, with no embeddings, vector database, or model calls. External tools can consume `--json` output as a programmatic observability layer; see [docs/05-sessions.md](apps/cli/docs/05-sessions.md) for the schemas and [docs/06-observability.md](apps/cli/docs/06-observability.md) for the consumption patterns.
 
 ### Live state, and catching up fast
 
@@ -256,6 +292,10 @@ Search is the past tense. `--active` is the present -- it infers what each runni
 
 ```bash
 agents sessions --active            # every live run across the fleet, with state
+agents sessions --working           # actively producing work (fleet-wide)
+agents sessions --idle              # stopped between turns (fleet-wide)
+agents sessions --orphan            # agent outlived its terminal client
+agents sessions --crashed           # terminal and agent disappeared uncleanly
 agents sessions focus a1b2c3d4      # jump back into one — attach in place, or resume
 ```
 
@@ -265,6 +305,8 @@ On a terminal, `agents sessions --active` (and a bare `agents sessions`) open th
 |---|---|---|
 | `s` | search text | `--query` / positional |
 | `r` | running only | `--active` |
+| `f` | favorites only | `--favorites` |
+| `*` | star / unstar the highlighted session | `agents sessions favorite <id>` |
 | `c` | team sessions | `--teams` |
 | `a` | agent (cycles) | `-a` |
 | `d` | device (cycles) | `--device` |
@@ -274,15 +316,21 @@ On a terminal, `agents sessions --active` (and a bare `agents sessions`) open th
 | `⏎` | resume / attach | `resume` / `focus` |
 | `y` | copy the equivalent command | `--print-cmd` |
 
+**Star the sessions you keep coming back to.** `*` marks the highlighted row (a `★` shows in the listing), `f` narrows to the starred ones, and `agents sessions favorite <id>` / `--favorites` do the same outside a TTY. Stars live in `~/.agents/.history/favorites.json` keyed by session id, so they survive a reindex of the session cache. They're per-machine — session sync carries transcripts, not this file.
+
+**A session that lost its host says so.** When an editor window or an SSH connection goes down hard, the agent it owned used to simply disappear from `--active`; when an agent outlived its window in tmux, it reported a plain `idle`. Both now carry their own status: `✗ crashed` (the host went down and took the agent with it) and `◍ orphan` (still alive, but no client is attached — nothing is showing it). Read from tmux's attached-client count and the editor window's registry heartbeat, so a deliberate `agents sessions detach` is never mistaken for one, and a session that is still *working* headlessly is left alone.
+
 Filters **stack** (they AND together), the active set shows in the header, and the highlighted row **previews below by default** (`tab` hides it) — prompt, activity, last response, plus a links line where the worked-on ticket and the PR the session opened are **clickable** (OSC 8 hyperlinks: the ticket jumps to Linear, the `PR#` to GitHub, in terminals that support them). The Linear workspace is resolved from `LINEAR_WORKSPACE` or the linear-cli config, so tickets stay plain text when it's unknown. Because every hotkey has a flag, the view you build by hand is a real command: press `y` (or run `--print-cmd`) to get the exact `ag sessions …` line — explore interactively, hand the line to an agent. Piped output, `--json`, or `--no-interactive` keep the plain listing for scripts. Peek without opening the pager with `agents sessions <id> --preview`.
 
 | before — preview hidden | after — preview open + clickable links |
 | --- | --- |
 | ![sessions browser, preview hidden](assets/demos/sessions-preview-before.png) | ![sessions browser, preview open with a links line](assets/demos/sessions-preview-after.png) |
 
-Each live session resolves to `working`, `waiting_input` (with why -- a question, a plan review, or a permission prompt), or `idle`, alongside badges for the PR it opened, the worktree it sits in, and the ticket it's working. `agents sessions focus [id]` attaches the live pane in place -- the tmux split locally or over SSH, or its Ghostty tab -- and falls back to a fresh tab + resume when the terminal is gone.
+Each live session resolves to `working`, `waiting_input` (with why -- a question, a plan review, or a permission prompt), `idle`, or a lifecycle state such as `orphaned`, `crashed`, `closed`, `abandoned`, `queued`, or `unknown`. Pass the matching flag (`--working`, `--idle`, `--waiting`, `--orphan`, `--crashed`, `--closed`, `--abandoned`, `--queued`, `--unknown`) directly; each implies `--active`, and several flags form a union. The fleet fan-out is already the default; `--local` opts out. `--all` instead widens historical directory and time scope. Rows also carry badges for the PR, worktree, and ticket. `agents sessions focus [id]` attaches the live pane in place -- the tmux split locally or over SSH, or its Ghostty tab -- and falls back to a fresh tab + resume when the terminal is gone.
 
-Landing on a session cold? `agents sessions <id>` prints a catch-up digest: an inferred title, files changed grouped by directory (created / modified / deleted), a histogram of which tools did the work, and the last test verdict -- the signals to reload a task in seconds.
+Landing on a session cold? `agents sessions <id>` prints a catch-up digest: an inferred title, files changed grouped by directory (created / modified / deleted), a histogram of which tools did the work (including parsed Bash commands -- `git`, `npm`, `ffmpeg`, `ssh`, and so on), and the last test verdict -- the signals to reload a task in seconds.
+
+Sharing a session uses `agents sessions render <id> -o session.md`, not the raw harness JSONL. The document starts with that same preview, then presents user and assistant turns, fenced commands, structured tool arguments, and bounded tool output. Credential-shaped values and local home paths are redacted by default; `--no-redact` is for local-only inspection.
 
 ### Resume anywhere — and stay resumed
 
@@ -293,9 +341,22 @@ agents sessions resume                     # multi-select; packs two sessions pe
 agents sessions resume "auth middleware"   # pre-filter the pool, then choose
 agents sessions resume --tmux              # into persistent tmux — survives editor restarts
 agents sessions resume --host zion --tmux  # resume on another machine over SSH
+agents resume 019fd0c8-b3e9-77a2-a1a4-444698c4d897  # original harness/version/device/mode
+agents run auto --resume 019fd0c8-b3e9-77a2-a1a4-444698c4d897  # adapt if its account is unavailable
 ```
 
-`agents sessions resume` reopens sessions in whatever terminal you're in -- auto-detected across iTerm, Ghostty, tmux, and the VSCodium agent-terminal, or forced with `--iterm` / `--ghostty` / `--tmux` / `--vscodium`. Back them with **tmux** and the runs turn durable: detach, close your editor, reboot the GUI -- the session is still alive to `agents tmux attach`. The whole `agents tmux` subsystem (persistent multiplexer sessions that survive editor restarts and can be shared with other tools) sits underneath.
+`agents sessions resume` reopens several sessions in whatever terminal you're in -- auto-detected across iTerm, Ghostty, tmux, and the VSCodium agent-terminal, or forced with `--iterm` / `--ghostty` / `--tmux` / `--vscodium`. `agents resume <id>` resumes one session without requiring you to name its harness: exact IDs take a local SQLite fast path, then resolve fleet-wide and restore the source harness, version, device, cwd, and recorded launch mode. Back them with **tmux** and the runs turn durable: detach, close your editor, reboot the GUI -- the session is still alive to `agents tmux attach`. The whole `agents tmux` subsystem (persistent multiplexer sessions that survive editor restarts and can be shared with other tools) sits underneath.
+
+### Send an agent to the background — and bring it back
+
+Running 30 agents and drowning in terminal tabs? `agents sessions detach <id>` stops a session's interactive process and keeps it working **headless** in the background -- it drives its task to done unattended, no tab, lower cost. `agents sessions attach <id>` brings it back: version-pinned resume into a live TUI, the same session and full history (including whatever it did while backgrounded).
+
+```
+agents sessions detach a1b2c3d4     # go headless in the background, keep working
+agents sessions attach a1b2c3d4     # resume it interactively, right here
+```
+
+Both are agent-agnostic -- they route through the same `agents run --resume` path (native resume for Claude/Codex, `/continue` replay for the rest). `agents sessions --active` shows each session's **owner** (the human who launched it, resolved from the tailnet identity, or `-` for an unresolved local run) and its `presence` -- `attached` (you're watching it), `background` (running headless), or `parked` (its background run finished) -- so the menu bar and Factory show who is running what, and where. In the Factory extension, **Agents: Detach** (`Cmd/Ctrl+K B`) and **Agents: Attach** (`Cmd/Ctrl+K A`) do the same over the focused terminal.
 
 ---
 
@@ -324,6 +385,7 @@ agents feed --flat                  # one row per agent (legacy)
 agents feed --host mac-mini         # scope the view to one or more hosts
 agents feed --local                 # skip the SSH fan-out
 agents feed --json                  # blocks stamped with their outcome key
+agents feed post --title "Halfway done" "CI green, watching merge"  # title + body
 ```
 
 Top-level questions and waiting notifications publish one atomic open-block record per session, including the mailbox id, host, runtime, and every answer option. The default view collapses agents under the **outcome** they serve (Linear ticket, PR, worktree slug, or Unassigned) so a 1,100-agent fleet reads as dozens of deliverables. Answered, resumed, and stopped blocks clear automatically; Task subagents are excluded. The rendered reply command uses the same mailbox id with `agents message`, so the decision routes back to the agent that asked it.
@@ -336,7 +398,9 @@ agents watchdog --nudge    # actually inject "Continue." into the stalled split
 agents watchdog --watch    # daemon loop: a tick every --interval
 ```
 
-`agents watchdog` detects a stalled session, resolves the *exact* terminal split it lives in (tmux, iTerm, VSCodium, or a raw pty), and injects a nudge -- `Continue.` by default, or set `--text`. It's dry by default; `--nudge` acts on a single tick, and `agents watchdog enable` flips global auto-nudge on so `--watch` injects on its own. Steer a single run with `agents watchdog policy <id> off | keep | handsoff`.
+`agents watchdog` detects a stalled session, resolves the *exact* terminal split it lives in (tmux, iTerm, VSCodium, or a raw pty), and injects a nudge -- `Continue.` by default, or set `--text`. It's dry by default; `--nudge` acts on a single tick, and `agents watchdog on|off` enables or disables the built-in routine on this device. `agents setup watchdog` chooses devices. Steer a single run with `agents watchdog policy <id> off | keep | handsoff`.
+
+A stalled session whose tail shows a hard account limit ("You've hit your weekly limit · resets …") is **rotated in place** instead of nudged: the watchdog gates on the same healthy-account selection `agents run auto` makes (zero healthy → one skip event per cooldown window, terminal untouched), injects the harness's exit sequence, relaunches `agents run auto --interactive --session-id <uuid>` in the *same* tab, then replays the old session's resume once the new TUI is live. Default on; `agents watchdog rotate off` disables it (nudging stays on).
 
 ---
 
@@ -354,7 +418,7 @@ One machine is set up the way you like it. Make every other machine match -- sam
 fleet:
   devices: all              # every online registered device (minus this one)
   defaults:
-    agents: [claude@latest, codex@latest, gemini@latest]
+    agents: [claude@latest, codex@latest, antigravity@latest]
     sync: [user]            # config scopes to reconcile
     login: sync             # propagate logins where the token is portable
 ```
@@ -367,7 +431,7 @@ agents apply --only agents,config   # limit dimensions (agents, config, login)
 agents apply --no-login             # skip login propagation
 ```
 
-`agents apply` (`ag apply`) probes every target over the existing SSH transport, then reconciles it to the profile: installs missing agents, upgrades `agents-cli`, syncs the named config scopes, and **propagates logins** so a host signed in once seeds the fleet -- turning "6 hosts x 8 harnesses = 48 OAuth flows" into one. Portable credential files (claude, codex, gemini, grok, kimi, opencode, droid, antigravity) stream to each target over encrypted SSH stdin, never shell-interpolated, and land at `0600`. **Honest boundary:** macOS keychain-bound tokens (claude, antigravity on a Mac target) can't be extracted -- those surface as a one-time manual login, never faked. `--plan` / `--dry-run` shows the full matrix without touching anything.
+`agents apply` (`ag apply`) probes every target over the existing SSH transport, then reconciles it to the profile: installs missing agents, upgrades `agents-cli`, syncs the named config scopes, and **propagates logins** so a host signed in once seeds the fleet -- turning "6 hosts x 8 harnesses = 48 OAuth flows" into one. Portable credential files (claude, codex, grok, kimi, opencode, droid, antigravity) stream to each target over encrypted SSH stdin, never shell-interpolated, and land at `0600`. **Honest boundary:** macOS keychain-bound tokens (claude, antigravity on a Mac target) can't be extracted -- those surface as a one-time manual login, never faked. `--plan` / `--dry-run` shows the full matrix without touching anything.
 
 See [docs/fleet.md](apps/cli/docs/fleet.md) for the manifest schema and reconcile semantics.
 
@@ -431,6 +495,11 @@ agents hosts check gpu-box              # reachable? which agents-cli version?
 agents run claude --host gpu-box "profile this build"   # headless: follows live by default
 agents run claude --host gpu-box                         # no prompt → interactive TTY over SSH (tmux-backed)
 agents run claude --host gpu-box --copy-creds "fix auth" # copy local runtime creds + Claude token, shred after
+agents run claude --device auto "…"                      # affinity-pick host from 14d usage (harness stays claude)
+agents run claude --host auto "…"                        # same — auto is a host value, not a harness name
+agents view kimi --device all                            # fan out across every registered device (grouped-by-OS roster)
+agents output --device all                               # per-device burn vs shipped output across the fleet
+agents view --device all --json                          # machine-readable fleet inventory
 agents hosts ps                         # list dispatched runs + terminal status
 agents hosts stop <id>                  # terminate a hung/detached run (alias: kill)
 agents logs --host gpu-box              # pick a dispatched run — concise summary by default
@@ -438,6 +507,13 @@ agents logs <id> --full                 # the full raw transcript / stdout (toke
 agents logs <id> -f                     # re-attach to a running one and follow
 agents view claude --host gpu-box       # inspect the remote install
 agents sync --host gpu-box              # make the remote machine current
+agents doctor claude                    # diagnose every installed claude version
+agents doctor claude@latest             # diagnose only the newest installed version
+agents doctor claude@oldest             # diagnose only the oldest installed version
+agents doctor claude@pinned             # diagnose the global-default (pinned) version
+agents doctor claude@all                # diagnose all versions, including isolated copies
+agents doctor claude@latest --fix       # auto-fix the newest installed version
+agents doctor claude@latest --device mac-mini  # diagnose newest claude on mac-mini
 agents doctor --devices                 # readiness matrix for every registered device
 agents doctor --devices --json          # machine-readable fleet readiness
 agents doctor --device mac-mini         # same matrix, scoped to one device
@@ -445,7 +521,7 @@ agents fleet status                     # online/offline rollup + NEEDS ATTENTIO
 agents fleet status --verbose           # full per-device auth/CLI/sync/version grid
 agents fleet status --live              # force a live resource probe (alias of --refresh)
 agents fleet status --json --strict     # scriptable fleet health gate
-agents check --devices                  # CI drift gate across every registered device
+agents doctor --check --devices         # CI drift gate across every registered device
 
 # Your Tailscale fleet, auto-discovered
 agents devices sync                     # ingest `tailscale status`
@@ -453,6 +529,9 @@ agents devices list                     # fleet + headroom: load, mem, idle/busy
 agents devices list --live              # force a live probe of every device (alias of --refresh)
 agents devices list --full              # add per-device cores and free/total RAM
 agents devices list --no-stats          # instant: names/addresses only, skip the probe
+agents devices set-interactive zion     # the device agents show YOU artifacts on (★ in the list)
+agents devices configure mac-mini --max-agents 4 --scheduler off   # per-device config (syncs via devices/<name>/agents.yaml)
+agents devices note mac-mini "runs the releases — don't reboot"    # operator notes, repeat to append
 agents ssh mac-mini                     # hardened SSH: fails fast if offline,
                                         # PowerShell on Windows, password-from-Keychain,
                                         # auto-syncs your terminfo (Ghostty/kitty/…) so
@@ -550,6 +629,8 @@ Four managed backends behind one interface (`agents cloud providers`):
 | `antigravity` | Gemini managed agents | Antigravity harness in a remote sandbox. |
 
 Auto-routes each `--agent` to its native cloud, or pin the backend with `--provider`. Instead of dispatching now, register a run as an **event trigger** with `--on pull_request` (also `push`, `issue_comment`, `workflow_run`) -- it persists as a trigger-bound routine that fires on the event. `--json` on every subcommand for scripting.
+
+The same dispatch is a placement on `agents run`: `agents run claude "fix the flaky e2e" --cloud --repo acme/api` routes through the identical provider registry and tracks in `agents cloud list/status/logs` alike. `--cloud` sits alongside `--host`/`--device`/`--lease` as one of three placements (local, machine, cloud) and is mutually exclusive with them; `--where cloud[:provider]` is the one-door spelling. Agents without a native cloud fail loud unless `--provider` is given.
 
 ---
 
@@ -849,12 +930,13 @@ agents routines add daily-digest \
 agents routines list                   # All jobs + next run times
 agents routines run daily-digest       # Test it now, ignore the schedule
 agents routines logs daily-digest      # Last execution — status + report (add --full for raw stdout)
+agents routines stats                  # Run count, failed, missed, avg/p50/p95 duration — per job or all
 
-# Routines sync to every device; restrict to an allowlist with --devices
+# Definitions sync to every device; activation is stored per hostname
 agents routines add nightly-drain --schedule "0 3 * * *" --agent claude \
-  --devices yosemite-s0,mac-mini --prompt "Drain the local work queue"
+  --prompt "Drain the local work queue"
 
-agents routines devices nightly-drain --set yosemite-s0,mac-mini  # update allowlist
+agents routines devices nightly-drain --set yosemite-s0,mac-mini  # enable on both hosts
 agents routines list --host yosemite-s0                            # query another device
 
 # Signed webhook trigger: Linear issue labeled "agent" fires a routine
@@ -972,7 +1054,7 @@ Two repos with the same shape, different roles:
 
 **Version pinning:** `agents.yaml` at project root pins which agent version to use (like `.nvmrc` for Node).
 
-**Resource resolution:** When syncing resources (commands, skills, rules, hooks, MCP, permissions), the order is **project > user > system**. A `.agents/` directory at project root wins, then `~/.agents/`, then `~/.agents-system/`. Same-named resources higher in the chain override lower ones; everything else unions in. Run `agents resources --merged` to see the effective skills, commands, MCP servers, hooks, rules, plugins, workflows, and subagents, with each row tagged by its winning layer.
+**Resource resolution:** When syncing resources (commands, skills, rules, hooks, MCP, permissions), the order is **project > user > system**. A `.agents/` directory at project root wins, then `~/.agents/`, then `~/.agents-system/`. Same-named resources higher in the chain override lower ones; everything else unions in. Run `agents view --merged` to see the effective skills, commands, MCP servers, hooks, rules, plugins, workflows, and subagents, with each row tagged by its winning layer.
 
 See [docs/00-concepts.md](apps/cli/docs/00-concepts.md) for the full mental model: DotAgents repos, resource kinds, and how resolution works end-to-end.
 
@@ -985,15 +1067,23 @@ Other useful commands: `agents doctor` checks CLI availability and resource sync
 On macOS, `agents-cli` puts a status item in your menu bar -- a live glance at what your agents are doing, plus a Spotlight-style bar for filing work without breaking focus.
 
 ```bash
-agents menubar enable      # install + launch at login
+agents menubar setup       # configure end-to-end: one instance, started at login
 agents menubar status      # is it installed and running?
 ```
+
+There is only ever **one** agents mark: the helper takes a lock at launch, so a
+second copy surfaces the running one's menu and exits instead of adding a
+duplicate icon. `agents menubar setup` is the recovery command when a machine is
+already wrong -- it ends any duplicate, installs the bundle, wires the login
+item, and verifies exactly one helper came back up.
 
 The dropdown surfaces a **NEEDS YOU** queue (agents waiting on a question, a plan review, or a permission prompt), the running roster, and a routines summary -- the same live state as `agents sessions --active`, one click away.
 
 ### Quick-issue bar (⌘⇧O)
 
-Press `Cmd-Shift-O` anywhere for a thin capture surface: type a one-line note, `Cmd-V` to paste, and attach one or more recent screenshots (double-click a thumbnail to preview it in full). Submit, and a headless agent picks the right project from your recent sessions, investigates, and files the Linear ticket itself -- you never leave what you were doing.
+Press `Cmd-Shift-O` anywhere for a thin capture surface: the prepared text field appears immediately while repo, thumbnail, and ticket rows hydrate in the background. Type a one-line note, `Cmd-V` to paste, and attach one or more recent screenshots (double-click a thumbnail to preview it in full). Submit, and a headless agent picks the right project from your recent sessions, investigates, and files the Linear ticket itself -- you never leave what you were doing.
+
+The bar also lists the **open Linear tickets of the repo you picked**, urgent first. Switching the repo switches the Linear project; typing filters the list, so an existing ticket shows up before you file a duplicate; and clicking a row (or `⌘1`-`⌘5`) dispatches that ticket to the selected agents -- **Run** implements it, **Plan** posts a plan as a ticket comment.
 
 <p align="center">
   <img src="assets/menubar-quickissue.svg" alt="The Cmd-Shift-O quick-issue bar: a one-line note with attached screenshot thumbnails that a headless agent turns into a filed Linear ticket" width="100%" />
@@ -1055,14 +1145,17 @@ Every agent run, version install, browser launch, and secrets access is logged t
 
 ### Session search
 
-Conversations with Claude, Codex, Gemini, and other agents scatter across their native storage. Session search indexes them locally so you can find any conversation:
+Conversations with Claude, Codex, legacy Gemini, and other agents scatter across their native storage. Session search indexes them locally so you can find any conversation:
 
 ```bash
 agents sessions "auth middleware"     # Full-text search across all agents
 agents sessions --agent claude --since 7d
+agents sessions --include tools --query 'program:git' --fleet --json
+agents sessions --include tools --query 'program:git' --count --fleet --json
+agents sessions backfill tools --fleet
 ```
 
-The index lives at `~/.agents/.history/sessions/sessions.db` (SQLite + FTS5). Nothing leaves your machine. See [Sessions](#sessions-across-agents) for full usage.
+The index lives at `~/.agents/.history/sessions/sessions.db` (SQLite + FTS5). A local query stays on the machine; an explicit `--fleet` tool query sends only redacted, bounded match evidence or aggregate counts over SSH. Historical tool parsing is explicit via `sessions backfill tools`; queries never parse transcripts. See [Sessions](#sessions-across-agents) for full usage.
 
 ### Secrets
 
@@ -1090,17 +1183,16 @@ By default, secrets sync via iCloud Keychain to your other Macs. With `--no-iclo
 
 Which DotAgents resources each agent CLI can load. Source of truth: [src/lib/agents.ts](apps/cli/src/lib/agents.ts) (`capabilities`); gates use `supports(agent, cap, version)` from [src/lib/capabilities.ts](apps/cli/src/lib/capabilities.ts). Full matrix also in [docs/00-concepts.md](apps/cli/docs/00-concepts.md).
 
-> **† Gemini CLI is deprecated.** Google retired it for free, Pro, and Ultra tiers on **June 18, 2026** (announced at Google I/O 2026); the `gemini` command no longer serves requests on those tiers. agents-cli still manages existing installs, but warns on `agents add gemini` and `agents teams add … gemini`. New setups should use **Antigravity CLI** (`antigravity`), Google's official successor — see [the transition notice](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/).
+> **Gemini CLI is hard-deprecated.** Google retired it for free, Pro, and Ultra tiers on **June 18, 2026** (announced at Google I/O 2026); the `gemini` command no longer serves requests on those tiers. agents-cli keeps the legacy `gemini` id only so old sessions/config can still be read. `agents add gemini`, `agents import gemini`, and `agents sync gemini` fail and point to **Antigravity CLI** (`antigravity`), Google's official successor — see [the transition notice](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/).
 
 | Agent | Versions | Hooks | MCP | Permissions | Skills | Commands | Plugins | Subagents | Rules | Workflows |
 |-------|----------|-------|-----|-------------|--------|----------|---------|-----------|-------|-----------|
 | Claude Code | yes | yes | yes | yes | yes | yes | yes | yes | `CLAUDE.md` | yes |
 | Codex CLI | yes | >= 0.116.0 | yes | no | yes | < 0.117.0 · skills ($name, >= 0.117) | >= 0.128.0 | no | `AGENTS.md` | no |
-| Gemini CLI † | yes | >= 0.26.0 | yes | no | yes | yes (.toml) | no | no | `GEMINI.md` | no |
 | Antigravity | yes | yes | yes | yes | yes | yes | yes | no | `AGENTS.md` | no |
 | Grok Build | yes | yes | yes | yes | yes | skills ($name) | yes | no | `AGENTS.md` | no |
 | OpenClaw | yes | yes | yes | no | yes | gateway | yes | yes | `workspace/AGENTS.md` | no |
-| Cursor | yes | no | yes | no | yes | yes | no | no | `.cursorrules` | no |
+| Cursor | yes | yes | yes | yes | yes | IDE + skills ($name) | yes | >= 2026.1.22 | `.cursorrules` | no |
 | OpenCode | yes | no | yes | >= 1.1.1 | yes | yes | no | no | `AGENTS.md` | no |
 | Copilot | yes | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
 | Amp | yes | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
@@ -1109,7 +1201,7 @@ Which DotAgents resources each agent CLI can load. Source of truth: [src/lib/age
 | Roo Code | yes | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
 | Droid | yes | yes | yes | >= 0.57.5 | >= 0.26.0 | yes | yes | yes | `AGENTS.md` | no |
 
-**Legend:** `yes` / `no` = synced or skipped at install time. `skills ($name)` = no file-based slash-command dir; behavior ships as a generated skill invoked with `$command`. `gateway` = OpenClaw resolves slash commands at runtime, not from synced files. Version suffixes are enforced at sync time — out-of-range versions are skipped with a clear message.
+**Legend:** `yes` / `no` = synced or skipped at install time. `skills ($name)` = no file-based slash-command dir; behavior ships as a generated skill invoked with `$command`. `IDE + skills ($name)` = an IDE command file plus a generated skill for the CLI. `gateway` = OpenClaw resolves slash commands at runtime, not from synced files. Version suffixes are enforced at sync time — out-of-range versions are skipped with a clear message.
 
 **Host CLIs** (`agents cli`) are separate: YAML manifests under `~/.agents/cli/` install binaries onto your PATH (`gh`, `higgsfield`, etc.). They are not copied into per-agent version homes.
 
@@ -1119,7 +1211,6 @@ Which DotAgents resources each agent CLI can load. Source of truth: [src/lib/age
 |-------|----------|-------|---------------|
 | Claude Code | yes | yes | yes |
 | Codex CLI | yes | yes | yes |
-| Gemini CLI † | yes | yes | yes |
 | Cursor | -- | yes | -- |
 | OpenCode | -- | yes | -- |
 | Grok Build | -- | yes | yes |
@@ -1136,20 +1227,19 @@ Which DotAgents resources each agent CLI can load. Source of truth: [src/lib/age
 | Subagents | Kiro | >= 1.23.0 |
 | Skills | Droid | >= 0.26.0 |
 | Permissions | Droid | >= 0.57.5 |
-| Hooks | Gemini | >= 0.26.0 |
 | Permissions | Kiro | >= 2.8.0 |
 | File-based commands | Codex | < 0.117.0 (0.117+ uses command-as-skill) |
 | Plugins | Codex | >= 0.128.0 |
 
 Codex `0.117.0+` no longer reads `.codex/prompts/`; agents-cli converts slash commands into skills so they stay invocable as `$name`. OpenCode's plugin-based hook system is on the roadmap; hooks stay `no` until a writer ships.
 
-Slash commands can declare per-agent/version targeting in frontmatter (`agents:`, `since:`, `until:`). Gating applies when syncing from `~/.agents/commands/` (user/system) into version homes — project `.agents/commands/` files are read in place and are not filtered by `agents:`. This repo ships `.agents/commands/version.md` as `/version` for Claude, Codex, Gemini, Cursor, OpenCode, Copilot, and Grok; Antigravity excluded until verified.
+Slash commands can declare per-agent/version targeting in frontmatter (`agents:`, `since:`, `until:`). Gating applies when syncing from `~/.agents/commands/` (user/system) into version homes — project `.agents/commands/` files are read in place and are not filtered by `agents:`. This repo ships `.agents/commands/version.md` as `/version` for Claude, Codex, Cursor, OpenCode, Copilot, and Grok; Antigravity excluded until verified.
 
 ## FAQ
 
-### Why use `agents` instead of `claude` / `codex` / `gemini` directly?
+### Why use `agents` instead of `claude` / `codex` / `antigravity` directly?
 
-Claude Code, Codex CLI, Gemini CLI, Grok Build, and others each have their own config format, MCP setup, version management, and skill system. If you use more than one, you maintain N copies of everything. `agents` gives you one interface, one config source, and one place to pin versions -- plus features the individual CLIs don't ship: cross-agent pipelines, shared teams, unified session search, and project-pinned versions like `.nvmrc`.
+Claude Code, Codex CLI, Antigravity, Grok Build, and others each have their own config format, MCP setup, version management, and skill system. If you use more than one, you maintain N copies of everything. `agents` gives you one interface, one config source, and one place to pin versions -- plus features the individual CLIs don't ship: cross-agent pipelines, shared teams, unified session search, and project-pinned versions like `.nvmrc`.
 
 ### Is it free?
 
@@ -1167,9 +1257,9 @@ Same approach as nvm, pyenv, and rbenv — battle-tested by millions of develope
 
 Add a `.agents/` directory at your project root with your skills, hooks, rules, and commands. Resources merge automatically: project > user (`~/.agents/`) > system (`~/.agents-system/`). Commit it with your repo and teammates get the same agent environment.
 
-### Do I need to write separate rules for each agent (CLAUDE.md, GEMINI.md, etc.)?
+### Do I need to write separate rules for each agent (CLAUDE.md, .cursorrules, etc.)?
 
-No. Write one `AGENTS.md` — it's the canonical source. We automatically sync it to each agent's expected location (`CLAUDE.md` for Claude Code, `GEMINI.md` for Gemini CLI, `.cursorrules` for Cursor). Same content, zero duplication.
+No. Write one `AGENTS.md` — it's the canonical source. We automatically sync it to each agent's expected location (`CLAUDE.md` for Claude Code, `AGENTS.md` for Antigravity, `.cursorrules` for Cursor). Same content, zero duplication.
 
 ### Do agents use API keys or subscriptions?
 

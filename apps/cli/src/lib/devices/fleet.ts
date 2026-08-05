@@ -10,6 +10,7 @@
 
 import { spawnSync } from 'child_process';
 import { isControlDevice, type DeviceProfile, type DeviceRegistry } from './registry.js';
+import { isSelfHost } from './self-host.js';
 import { buildSshInvocation, sshTargetFor, writeAskpassShim } from './connect.js';
 import type { DeviceStats } from './health.js';
 
@@ -78,7 +79,7 @@ export function planFleetTargets(reg: DeviceRegistry): FleetTarget[] {
 
 /**
  * Remote fan-out targets for the fleet health/drift gates (`fleet status`,
- * `check --devices`): every planned device except this machine and control-only
+ * `doctor --check --devices`): every planned device except this machine and control-only
  * cockpits. A control device never runs agents (mirrors doctor's fan-out, which
  * drops it via `isControlDevice`), so counting it as unreachable/drift would make
  * the CI gate fail on every run for a fleet that merely has a cockpit registered.
@@ -86,7 +87,11 @@ export function planFleetTargets(reg: DeviceRegistry): FleetTarget[] {
  * surface — so their `skip` reason still flows through as an `unreachable` row.
  */
 export function remoteFleetTargets(planned: FleetTarget[], self: string): FleetTarget[] {
-  return planned.filter((t) => t.device.name !== self && t.skip !== 'control');
+  // Exclude self by name AND by full identity (tailscale dnsName, loopback): a
+  // device referenced by its dnsName slipped past the bare name check and got a
+  // remote version+doctor dial back to THIS box, which orphaned on timeout and
+  // piled up (RUSH-2114). `isSelfHost` matches every alias the box answers to.
+  return planned.filter((t) => t.device.name !== self && !isSelfHost(t.device.name) && t.skip !== 'control');
 }
 
 /**
@@ -254,7 +259,7 @@ export function runFleet(
       continue;
     }
     try {
-      const isSelf = opts.self !== undefined && t.device.name === opts.self;
+      const isSelf = (opts.self !== undefined && t.device.name === opts.self) || isSelfHost(t.device.name);
       const res = isSelf ? localRunner(cmd) : runner(t.device, cmd);
       const ok = res.code === 0;
       const detail = (res.stderr || res.stdout).trim().slice(0, 200);
@@ -276,10 +281,27 @@ export function runFleet(
   return results;
 }
 
+export interface FanOutDeviceOptions {
+  /**
+   * Per-device deadline in milliseconds. When set, any probe that does not
+   * settle within this window is abandoned via `Promise.race` against a
+   * rejection timer and recorded as a `failed` result with the message
+   * `'timed out'`. There is no AbortController — the underlying probe
+   * continues running in the background; cancellation of the in-flight work
+   * is the caller's responsibility. In practice `probeRemoteAuth` relies on
+   * `sshExecAsync`'s own 15 s timer to kill the ssh child independently.
+   * The per-device ssh timeout passed directly to {@link sshExecAsync} is
+   * the first line of defence; this acts as a hard backstop so one slow
+   * device can never stall the entire fan-out past its budget.
+   */
+  perDeviceTimeoutMs?: number;
+}
+
 /** Run one async probe per device in parallel, preserving input order. */
 export async function fanOutDevices<T, Target extends FanOutDeviceTarget = FanOutDeviceTarget>(
   targets: Target[],
   probe: (target: Target) => Promise<T>,
+  opts: FanOutDeviceOptions = {},
 ): Promise<FanOutDeviceResult<T>[]> {
   return Promise.all(targets.map(async (target) => {
     if (target.skip) {
@@ -290,10 +312,20 @@ export async function fanOutDevices<T, Target extends FanOutDeviceTarget = FanOu
       };
     }
     try {
+      let probePromise = probe(target);
+      if (opts.perDeviceTimeoutMs) {
+        const timeoutMs = opts.perDeviceTimeoutMs;
+        probePromise = Promise.race([
+          probePromise,
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('timed out')), timeoutMs),
+          ),
+        ]);
+      }
       return {
         name: target.name,
         status: 'ok' as const,
-        value: await probe(target),
+        value: await probePromise,
       };
     } catch (err) {
       return {

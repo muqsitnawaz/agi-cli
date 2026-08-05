@@ -5,7 +5,7 @@ Coordinate multiple AI agents working in parallel on a shared task, with DAG-bas
 ## Overview
 
 `agents teams` groups agent processes into a named team. Each teammate runs
-in the background — Claude, Codex, Gemini, Cursor, OpenCode, Grok, or
+in the background — Claude, Codex, Cursor, OpenCode, Grok, or
 Antigravity — against the same working directory or a dedicated git worktree.
 Teammates can declare `--after` dependencies, forming a directed acyclic graph
 (DAG) that the supervisor drains wave by wave. The state machine lives on disk
@@ -71,6 +71,10 @@ PENDING ──deps resolved──▶ spawned ──▶ RUNNING ──exit 0─�
 
 ### `teams list` options
 
+`agents teams list` renders from the cached team registry and teammate `meta.json`
+records. It does not poll remote hosts or read teammate logs while listing; choosing
+a team or running `agents teams status <team>` performs the full status read.
+
 | Flag | Description |
 |---|---|
 | `-a, --agent <agent>` | Filter to teams containing this agent (e.g. `claude` or `claude@2.1.112`) |
@@ -126,11 +130,11 @@ remote home for you.
 | `-n, --name <name>` | Friendly name (required when using `--after`) |
 | `-m, --mode <mode>` | `plan` (read-only) \| `edit` (write files) \| `full` (write + skip prompts). Default: `edit` |
 | `-e, --effort <effort>` | `low` \| `medium` \| `high` \| `xhigh` \| `max` \| `auto`. Default: `medium` |
-| `--model <model>` | Override effort tier with a specific model (e.g. `claude-opus-4-6`) |
+| `--model <model>` | Cost tier (`cheap`\|`default`\|`best`\|`ultra`) or a concrete id (e.g. `claude-opus-4-8`); tiers resolve per harness+version to a supported model. See [Model tiers](model-tiers.md). |
 | `--env <key=value>` | Set an env var for this teammate (repeatable) |
 | `--cwd <dir>` | Working directory (default: current directory) |
 | `--worktree <name>` | Run in a dedicated git worktree (requires `--enable-worktrees` on the team) |
-| `--device <host>` | Distributed teams: run THIS teammate on `<host>` (alias `--host`). Works with or without a team pool. See [Distributed teams](#distributed-teams). |
+| `--device <host>` | Distributed teams: run THIS teammate on `<host>` (alias `--host`). Works with or without a team pool. `<host>` may also be `auto` (RUSH-2185) to affinity-pick a device the same way `agents run --device auto` does — a pick that lands on this machine just runs the teammate locally, same as omitting `--device`. See [Distributed teams](#distributed-teams). |
 | `--after <names>` | Comma-separated teammate names to wait for before starting |
 | `--task-type <type>` | Factory label: `plan` \| `implement` \| `test` \| `review` \| `bugfix` \| `docs` |
 | `--cloud <provider>` | Dispatch to cloud backend: `rush` \| `codex` \| `factory` |
@@ -262,8 +266,8 @@ which case the worktree is kept and reported.
 
 | Teammate | Base of the new worktree branch |
 |---|---|
-| **local** (no `--device`) | your **current local `HEAD`** — no fetch is run first (`createWorktree`). Sync the checkout (`git fetch && git merge --ff-only origin/<default>`) **before** `add`, or every teammate forks off stale code. |
-| **remote** (`--device host`) | the host's **freshly-fetched `origin/<default>`** (`createRemoteWorktree` fetches first) — no manual sync needed. |
+| **local** (no `--device`) | the **freshly-fetched `origin/<default>`** (`createWorktree` runs `git fetch origin` then bases the branch on `origin/<default>` — never local `HEAD`). |
+| **remote** (`--device host`) | the host's **freshly-fetched `origin/<default>`** (`createRemoteWorktree` fetches first) — same base policy as local. |
 
 So the pre-flight for a **local** worktree team is: fast-forward your checkout to
 the default branch first. A remote team handles this itself.

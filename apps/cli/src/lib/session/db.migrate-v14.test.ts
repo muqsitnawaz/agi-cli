@@ -80,7 +80,7 @@ const Database = (await import('../sqlite.js')).default;
   seed.close();
 }
 
-const { getDB, getSessionById } = await import('./db.js');
+const { getDB, getSessionById, SCHEMA_VERSION } = await import('./db.js');
 
 describe('schema migration v13 -> current (dir_ledger + resumable parser)', () => {
   it('creates the dir_ledger table with the expected columns (v14)', () => {
@@ -105,7 +105,7 @@ describe('schema migration v13 -> current (dir_ledger + resumable parser)', () =
   it('bumps the recorded schema version to the current version', () => {
     const db = getDB();
     const v = (db.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as { value: string }).value;
-    expect(v).toBe('15');
+    expect(v).toBe(String(SCHEMA_VERSION));
   });
 
   it('preserves existing session rows through the migration', () => {

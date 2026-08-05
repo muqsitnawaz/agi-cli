@@ -75,8 +75,9 @@ if (
 ) {
   const { runAgentGetSync, runAgentPingSync, runAgentLockSync } = await import('./lib/secrets/agent.js');
   const name = process.argv[3] ?? '';
+  const harness = process.argv[4] ?? 'cli';
   const code =
-    process.argv[2] === SYNC_GET_CMD ? await runAgentGetSync(name)
+    process.argv[2] === SYNC_GET_CMD ? await runAgentGetSync(name, harness)
     : process.argv[2] === SYNC_PING_CMD ? await runAgentPingSync()
     : await runAgentLockSync(name);
   process.exit(code);
@@ -125,7 +126,6 @@ import {
   LAZY_COMMAND_NAMES,
   loadView,
   loadInspect,
-  loadResources,
   loadFeedback,
   loadCommands,
   loadHooks,
@@ -145,17 +145,19 @@ import {
   loadPackages,
   loadRoutines,
   loadMonitors,
+  loadProjects,
   loadRun,
   loadFork,
   loadDefaults,
+  loadSet,
   loadModels,
   loadPrune,
   loadTrash,
   loadRestore,
   loadDoctor,
   loadApply,
-  loadCheck,
   loadStatus,
+  loadSnapshot,
   loadProfiles,
   loadHarness,
   loadSecrets,
@@ -167,10 +169,12 @@ import {
   loadSync,
   loadLock,
   loadRefreshRules,
-  loadDrive,
   loadFactory,
   loadUsage,
   loadCost,
+  loadInsights,
+  loadPerf,
+  loadTrends,
   loadOutput,
   loadBudget,
   loadAlias,
@@ -186,6 +190,7 @@ import {
   loadAudit,
   loadWebhook,
   loadFunnel,
+  loadHumans,
   loadSsh,
   loadPull,
   loadPush,
@@ -194,9 +199,7 @@ import {
   loadUninstall,
   loadShare,
   loadSend,
-  loadHq,
   loadFeed,
-  loadActivity,
   loadMailboxes,
   type ModuleLoader,
 } from './lib/startup/command-registry.js';
@@ -205,7 +208,9 @@ import { renderWhatsNew } from './lib/whats-new.js';
 import type { AgentId } from './lib/types.js';
 import { IS_WINDOWS } from './lib/platform/index.js';
 import { getCliLaunch } from './lib/cli-entry.js';
-import { emit, redactArgs } from './lib/events.js';
+import { emit, emitFriction, redactArgs } from './lib/events.js';
+import { stampProvenance } from './lib/event-provenance.js';
+import { die } from './lib/format.js';
 
 // Transparent shim delegate: the generated Windows `.cmd` shims invoke
 // `agents __shim <agent>[@version] <raw args>`. Intercept here, before commander
@@ -263,10 +268,24 @@ function auditCommandPath(cmd: Command): string[] {
 
 const auditStarts = new WeakMap<Command, number>();
 
+/**
+ * Commands that WRITE the event stream, so recording their own invocation would
+ * add records to the log they are writing into. `events emit` is batched — one
+ * flush every few seconds per open editor window — so auditing it would bury the
+ * real events under two `command.*` records per flush. `_internal friction`
+ * exists for the same reason (shell guards fire before any `agents` process
+ * exists, so they cannot emit in-process) and had the same self-logging bug.
+ */
+const AUDIT_EXEMPT_COMMANDS: ReadonlySet<string> = new Set([
+  'events emit',
+  '_internal friction',
+]);
+
 program.hook('preAction', (_thisCommand, actionCommand) => {
   try {
     const parts = auditCommandPath(actionCommand);
     if (parts.length === 0) return;
+    if (AUDIT_EXEMPT_COMMANDS.has(parts.join(' '))) return;
     auditStarts.set(actionCommand, Date.now());
     emit('command.start', {
       module: parts[0],
@@ -286,12 +305,45 @@ program.hook('postAction', (_thisCommand, actionCommand) => {
   try {
     const parts = auditCommandPath(actionCommand);
     if (parts.length === 0) return;
+    if (AUDIT_EXEMPT_COMMANDS.has(parts.join(' '))) return;
     const started = auditStarts.get(actionCommand);
+    const durationMs = started !== undefined ? Date.now() - started : undefined;
+    const command = parts.join(' ');
     emit('command.end', {
       module: parts[0],
-      command: parts.join(' '),
-      ...(started !== undefined ? { durationMs: Date.now() - started } : {}),
+      command,
+      ...(durationMs !== undefined ? { durationMs } : {}),
     });
+    if (parts[0] === 'run') {
+      const agentName = actionCommand.args?.[0] ? String(actionCommand.args[0]).split('@')[0] : 'run';
+      void import('./lib/analytics/usage-db.js').then(({ recordUsage }) => {
+        recordUsage({
+          kind: 'agent',
+          name: agentName || 'run',
+          event: 'invoke',
+          source: 'cli',
+          meta: durationMs !== undefined ? { durationMs } : undefined,
+        });
+      }).catch(() => { /* fail soft */ });
+    }
+    // Disposable perf warehouse — fail-soft spool append (no SQLite on this path).
+    if (durationMs !== undefined && parts[0] !== 'perf') {
+      // sessionId/agent are resolvable here the same way emit() resolves them
+      // for command.start/command.end above (the shared provenance floor,
+      // event-provenance.ts) — without this, every command.end perf sample
+      // was anonymous, unlike the audit log record right next to it.
+      const { sessionId, agent } = stampProvenance();
+      void import('./lib/perf/spool.js').then(({ recordSample }) => {
+        recordSample({
+          kind: 'command.end',
+          label: command,
+          durationMs,
+          cwd: process.cwd(),
+          sessionId,
+          agent,
+        });
+      }).catch(() => { /* fail soft */ });
+    }
   } catch {
     // Best-effort completion record; the start line is the durable audit fact.
   }
@@ -330,7 +382,7 @@ program.helpInformation = function () {
     return brandRootHelp(`Usage: agents [command] [options]
 
 Install, configure, run, and dispatch AI coding agents from one place.
-Works with Claude, Codex, Gemini, Cursor, OpenCode, OpenClaw, and Droid.
+Works with Claude, Codex, Antigravity, Cursor, OpenCode, OpenClaw, and Droid.
 
 Quick start:
   agents setup                    First-time setup (interactive)
@@ -346,9 +398,8 @@ Agent versions:
   use <agent>@<version>           Set the default version
   prune cleanup [target]          Remove orphan resources and older duplicate version installs
   trash                           Inspect and restore soft-deleted version directories
-  view [agent[@version]]          List versions, or inspect one in detail
+  view [agent[@version]]          List versions, inspect one in detail, or --merged for the cross-layer resource surface
   inspect <target>                Deep details for one agent+version, or a DotAgents repo (user|system|project|alias|path)
-  resources                       Show merged DotAgents resources with their winning layer
 
 Agent configuration (synced across versions):
   rules                           Instructions given to agents (CLAUDE.md, etc.)
@@ -368,7 +419,6 @@ Run and dispatch:
   run <agent|profile> [prompt]    Run an agent. Omit prompt for interactive mode.
   defaults                        Configure run defaults by agent/version selector
   teams                           Coordinate multiple agents on shared work
-  hq                              JSON bridge for the interactive Agents HQ floor
   routines                        Run agents on a cron schedule (scheduler auto-starts)
   webhook                         Receive signed GitHub/Linear webhooks for trigger routines
   funnel                          Expose a webhook receiver through Tailscale Funnel
@@ -377,25 +427,35 @@ Run and dispatch:
   browser                         Automate a browser — navigate, click, screenshot, console, network
   pty                             Drive interactive terminal programs (REPLs, TUIs) via a persistent PTY session
 
+Observe (read the fleet — no store merge; aliases point at the real readers):
+  feed / inbox                    Needs-you inbox (open blocks waiting on you)
+  timeline                        Agent progress stream (= feed --filter updates)
+  roster                          Live agents (= sessions --active)
+  events                          Unified ops + activity event trail
+  audit                           Tamper-evident run-dispatch log (not events)
+  snapshot                        One-process inventory + active sessions poll
+  status                          Sync/drift only (not the live fleet snapshot)
+
 Credentials and profiles:
   profile                         Activate resource profiles across skills, MCP, permissions, and secrets
   profiles                        Bundles of (host CLI, endpoint, model, auth)
   secrets                         Keychain-backed env bundles; use 'secrets exec <bundle> -- <cmd>' to inject into a subprocess
 
 Diagnostics:
-  doctor [agent[@version]]        Diagnose CLI availability, sync status, and resource divergence
-  check                           CI drift gate: exit non-zero when resources are out of sync
+  doctor [agent[@version]]        Diagnose CLI availability, sync status, and resource divergence; --check for the CI drift gate
   usage [agent]                   Show rate-limit and quota usage per agent
+  insights                        How you work — tools, friction, rhythm, split by Claude account
+  perf                            Latency rollups (hooks, commands, runs) from the disposable perf warehouse
 
 Config sync:
-  drive                           Sync session history across machines via rsync
-  pull                            Clone or pull the system repo at ~/.agents/.system/
+  repo pull [alias]               Git pull a repo (system | user | <extra>)
+  sync [agent]                    Re-materialize installed version homes; --local to skip fetching
   repo init --path <dir>          Scaffold your own editable repo from a template
   repo add <path|gh:user/repo>    Merge an extra repo after the system repo
   lock [--frozen]                 Write/verify agents.lock (SHA-256 of resolved resources); --frozen fails on drift
 
 Beta features:
-  beta                            Enable preview features (factory, drive, and more)
+  beta                            Enable preview features (factory and more)
 
 Automation tips:
   Pass explicit names/IDs         Avoid pickers: agents sessions <id> --markdown
@@ -804,6 +864,86 @@ function registerJobsCronAliasCommand(p: Command, alias: string): void {
     });
 }
 
+/**
+ * Removed `check` command (RUSH-1234) — re-parses as `doctor --check`, forwarding
+ * any remaining flags so `check --quiet` / `check --json` / `check --devices` keep
+ * working and the drift-gate exit code survives the rename. The notice goes to
+ * stderr so `--json` stdout stays clean for CI parsers.
+ */
+function registerCheckTombstoneCommand(p: Command): void {
+  p.command('check', { hidden: true })
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .action(async () => {
+      console.error(chalk.yellow('Deprecated: "agents check" is now "agents doctor --check". Running that for you.\n'));
+      const args = process.argv.slice(2);
+      args[0] = 'doctor';
+      args.splice(1, 0, '--check');
+      await program.parseAsync(['node', 'agents', ...args]);
+    });
+}
+
+/**
+ * Removed `resources` command (RUSH-1234) — re-parses as `view --merged` (the
+ * cross-layer, first-wins resource table now lives there; `agents inspect <target>`
+ * covers per-agent / per-repo detail). Forwards remaining flags like `--json`.
+ */
+function registerResourcesTombstoneCommand(p: Command): void {
+  p.command('resources', { hidden: true })
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .action(async () => {
+      console.error(chalk.yellow('Deprecated: "agents resources" is now "agents view --merged" (use "agents inspect <target>" for per-agent/per-repo detail). Running that for you.\n'));
+      const args = process.argv.slice(2);
+      args[0] = 'view';
+      args.splice(1, 0, '--merged');
+      await program.parseAsync(['node', 'agents', ...args]);
+    });
+}
+
+/**
+ * Removed `hq` command — the JSON bridge for the interactive Agents HQ floor
+ * (`agents hq floor --json`). No UI ever consumed it (apps/factory has zero
+ * references) and it had no external users, so it is gone with no replacement.
+ * Kept as a hidden tombstone so a stale invocation gets a clear message and a
+ * non-zero exit instead of commander's raw "unknown command".
+ */
+function registerHqTombstoneCommand(p: Command): void {
+  p.command('hq', { hidden: true })
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .action(() => {
+      die('"agents hq" was removed (internal Agents HQ floor bridge, no longer used).');
+    });
+}
+
+/**
+ * Hidden `agents _internal <sub>` namespace for machine-to-machine calls that
+ * are not user-facing. The first subcommand is `friction`, used by shell guard
+ * hooks (git-guard, rm-guard, …) to self-report a block into the event log
+ * before they exit 2 — they run before any `agents` process exists, so they
+ * cannot emit in-process.
+ */
+function registerInternalCommand(p: Command): void {
+  const internal = p.command('_internal', { hidden: true });
+  internal
+    .command('friction')
+    .option('--surface <surface>', 'Subsystem that hit the failure (e.g. guard, teams)')
+    .option('--id <failureId>', 'Stable failure slug (e.g. git.reset-hard)')
+    .option('--error <message>', 'Human-readable failure reason')
+    .option('--command <command>', 'The command that was blocked')
+    .action((opts: { surface?: string; id?: string; error?: string; command?: string }) => {
+      if (!opts.surface || !opts.id) {
+        process.exit(0); // fail-open: never break the caller
+      }
+      emitFriction(opts.surface, opts.id, {
+        ...(opts.error ? { error: opts.error } : {}),
+        ...(opts.command ? { command: opts.command } : {}),
+      });
+      process.exit(0);
+    });
+}
+
 /** Self-upgrade command (`agents upgrade [version]`). */
 function registerUpgradeCommand(p: Command): void {
   p.command('upgrade')
@@ -892,6 +1032,22 @@ async function registerEagerForRequest(name: string): Promise<boolean> {
       registerJobsCronAliasCommand(program, name);
       await reg(loadRoutines);
       return true;
+    case 'check':
+      // The action re-parses as `doctor --check`, so doctor must exist too.
+      registerCheckTombstoneCommand(program);
+      await reg(loadDoctor);
+      return true;
+    case 'resources':
+      // The action re-parses as `view --merged`, so view must exist too.
+      registerResourcesTombstoneCommand(program);
+      await reg(loadView);
+      return true;
+    case 'hq':
+      registerHqTombstoneCommand(program);
+      return true;
+    case '_internal':
+      registerInternalCommand(program);
+      return true;
     case 'upgrade':
       registerUpgradeCommand(program);
       return true;
@@ -912,10 +1068,10 @@ async function registerEagerForRequest(name: string): Promise<boolean> {
  */
 async function registerAllEagerCommands(): Promise<void> {
   await reg(loadView);
+  registerResourcesTombstoneCommand(program);
   await reg(loadShare);
   await reg(loadSend);
   await reg(loadInspect);
-  await reg(loadResources);
   await reg(loadFeedback);
   await reg(loadCommands);
   await reg(loadHooks);
@@ -936,17 +1092,20 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadPackages);
   await reg(loadRoutines);
   await reg(loadMonitors);
+  await reg(loadProjects);
   await reg(loadRun);
   await reg(loadFork);
   await reg(loadDefaults);
+  await reg(loadSet);
   await reg(loadModels);
   await reg(loadPrune);
   await reg(loadTrash);
   await reg(loadRestore);
   await reg(loadDoctor);
+  registerCheckTombstoneCommand(program);
   await reg(loadApply);
-  await reg(loadCheck);
   await reg(loadStatus);
+  await reg(loadSnapshot);
   registerExecAliasCommand(program);
   await reg(loadProfiles);
   await reg(loadHarness);
@@ -959,10 +1118,12 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadSync);
   await reg(loadLock);
   await reg(loadRefreshRules);
-  await reg(loadDrive);
   await reg(loadFactory);
   await reg(loadUsage);
   await reg(loadCost);
+  await reg(loadInsights);
+  await reg(loadPerf);
+  await reg(loadTrends);
   await reg(loadOutput);
   await reg(loadBudget);
   await reg(loadAlias);
@@ -978,13 +1139,14 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadAudit);
   await reg(loadWebhook);
   await reg(loadFunnel);
-  await reg(loadHq);
+  await reg(loadHumans);
+  registerHqTombstoneCommand(program);
   await reg(loadFeed);
-  await reg(loadActivity);
   await reg(loadMailboxes);
   await reg(loadSsh);
   registerJobsCronAliasCommand(program, 'jobs');
   registerJobsCronAliasCommand(program, 'cron');
+  registerInternalCommand(program);
   registerUpgradeCommand(program);
   await reg(loadPull);
   await reg(loadPush);
@@ -1123,12 +1285,10 @@ if (!helpOrVersionRequested) {
   // Run update check before parsing so the upgrade notice/prompt precedes output.
   await checkForUpdates();
 
-  // Surface any "behind upstream" notices from the previous detached sync, then
-  // fire-and-forget the next background sync. System repo gets a real fast-forward
+  // Fire-and-forget the background sync. System repo gets a real fast-forward
   // pull (read-only locally, safe). User repo and extras get fetch-only + a
-  // status marker that we'll print on the *next* invocation.
-  const { spawnDetachedSync, printPendingUpdateNotices } = await import('./lib/auto-pull.js');
-  printPendingUpdateNotices();
+  // status marker that `agents doctor` surfaces as a repo-behind warning.
+  const { spawnDetachedSync } = await import('./lib/auto-pull.js');
   spawnDetachedSync();
 }
 
@@ -1196,7 +1356,7 @@ if (process.env.AGENTS_SKIP_MIGRATION !== '1') {
     // Bumping the suffix re-runs migrations for every user; binary releases that
     // don't change the schema must NOT re-run (they would destroy user content
     // when migration steps overlap with user-authored paths). See issue #20.
-    const sentinelValue = 'v13';
+    const sentinelValue = 'v15';
     let needRun = true;
     try {
       if (fs.existsSync(sentinel) && fs.readFileSync(sentinel, 'utf-8').trim() === sentinelValue) {

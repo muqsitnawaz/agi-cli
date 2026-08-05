@@ -1,11 +1,68 @@
 import AppKit
 
+/// A project header that handles its click inside the menu's tracking session.
+/// An actionable NSMenuItem ends tracking before its action runs, which made the
+/// status menu disappear on every expand/collapse. A custom item view receives
+/// the click without selecting the NSMenuItem, so rows can change in place.
+private final class ProjectAccordionRowView: NSView {
+    private let button = NSButton()
+    private let summary: String
+    private var expanded: Bool
+    var onToggle: ((Bool) -> Void)?
+
+    init(summary: String, repo: String, sessionCount: Int, expanded: Bool) {
+        self.summary = summary
+        self.expanded = expanded
+        let font = NSFont.menuFont(ofSize: 0)
+        let textWidth = (summary as NSString).size(withAttributes: [.font: font]).width
+        super.init(frame: NSRect(x: 0, y: 0, width: max(320, textWidth + 48), height: 22))
+        autoresizingMask = [.width]
+
+        button.isBordered = false
+        button.font = font
+        button.alignment = .left
+        button.focusRingType = .none
+        button.target = self
+        button.action = #selector(toggle)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(button)
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            button.topAnchor.constraint(equalTo: topAnchor),
+            button.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        button.setAccessibilityLabel("\(repo) project")
+        button.setAccessibilityHelp("Expand or collapse \(sessionCount) session\(sessionCount == 1 ? "" : "s")")
+        updateLabel()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    @objc private func toggle() {
+        expanded.toggle()
+        updateLabel()
+        onToggle?(expanded)
+    }
+
+    private func updateLabel() {
+        button.title = "  \(expanded ? "▼" : "▶")  \(summary)"
+        button.toolTip = expanded ? "Collapse project" : "Expand project"
+        button.setAccessibilityValue(expanded ? "expanded" : "collapsed")
+    }
+}
+
 // Owns the NSStatusItem. The dropdown is actionable-first: what needs the user
 // now (attention sessions, a stopped scheduler, failing routines) leads; live
 // work follows; setup/health noise collapses into one row. Every health fact
 // has exactly one home — no section restates another.
 final class StatusItemController: NSObject, NSMenuDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    // The quick-dispatch bar (Cmd-Shift-O). Owned here so the menu's "New Task"
+    // row and the global chord summon the SAME panel — one panel means an
+    // interrupted capture is restored whichever way you come back to it.
+    let promptController = PromptPanelController()
     // Factory Floor status palette (design-system.css). Brand green is accent /
     // selection only — never a status. running/idle/waiting/failed are the four
     // status colors, shared with the full dashboard so this reads as its quick view.
@@ -20,6 +77,30 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var badgeSessions: [Session] = []
     // New tailnet devices awaiting Register/Ignore (cheap sentinel-dir read).
     private var badgePending: [PendingDevice] = []
+    // Devices under high load — this Mac (native getloadavg) + fresh fleet peers.
+    private var badgeLoaded: [LoadedDevice] = []
+
+    // Daemon-down watchdog. The only other proactive "routines won't run"
+    // signal is `notifyOverdue` (src/lib/overdue.ts), fired from INSIDE
+    // `runDaemon()` on startup — so it can never fire while the daemon itself
+    // is down, the exact circularity this closes. This helper is a SEPARATE
+    // launchd KeepAlive service that stays alive when the daemon dies, so it
+    // is the one thing that can notice and say so. Polled every `tick()`
+    // (independent of menu-open) via the cheap, synchronous `daemonPid()`
+    // (a pid-file read + `kill(pid, 0)` — no CLI spawn), and delivered through
+    // this process's own `Notifier`, not a spawned `--notify` child, so the
+    // alert cannot depend on anything the dead daemon would have provided.
+    private var daemonDeadTicks = 0
+    private var daemonDownNotified = false
+    /// True once `daemonDeadTicks` has crossed the threshold; drives the
+    /// always-visible badge (see `refreshBadge`), independent of whether the
+    /// dropdown is ever opened.
+    private var schedulerDown = false
+    /// Consecutive dead ticks (~10s apart) required before alerting. A daemon
+    /// restart — a version upgrade, `agents doctor` self-heal, a crash the
+    /// launchd-equivalent auto-relaunches — is down for a few seconds; this
+    /// debounce absorbs that blip instead of paging the user for a non-event.
+    private static let daemonDownTickThreshold = 3
 
     // These three reads shell the CLI or touch the sessions DB. They are kept
     // off the click path and rendered from warm caches when the menu opens.
@@ -69,6 +150,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
+    // ACTIVE project accordion — projects collapsed by default. In-memory only
+    // (resets on helper restart). Toggling rebuilds from the warm active-session
+    // cache with NO extra CLI calls. Session *detail* lives in a side submenu (›),
+    // not a second accordion level.
+    private var expandedProjects = Set<String>()
+    private var projectSessionItems: [String: [NSMenuItem]] = [:]
+    /// Same form as CLI `machineId()` so engine-tagged sessions compare as local.
+    private lazy var thisMachine: String = ActiveDisplay.thisMachineId()
+
     private var densitySetting: Density {
         get {
             // Env override so dump mode can probe a fixed density.
@@ -113,17 +203,51 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Open this helper's menu. Called when a duplicate launch surrenders
+    /// (SingleInstance) — re-launching a menu-bar app means "show me the one
+    /// that is already running", so the incumbent answers by dropping its menu.
+    ///
+    /// @objc + NSObject because the observer must be registered with the
+    /// selector-based DistributedNotificationCenter API: only that overload
+    /// takes a suspensionBehavior, and this app is `.accessory` — never the
+    /// active app — so the default behavior queues the notification instead of
+    /// delivering it and the menu never opens.
+    @objc func surface(_ note: Notification) {
+        guard let button = statusItem.button else { return }
+        let info = note.userInfo as? [String: String] ?? [:]
+        // An agent/automation relaunched the helper (e.g. a coding agent running
+        // `agents menubar enable`). The human did not ask to see the menu, so
+        // re-home silently — popping the dropdown here steals the user's keyboard
+        // focus mid-task, the interruption this attribution was added to stop.
+        if info["automated"] == "1" {
+            let who = [info["agent"].map { "agent=\($0)" }, info["sessionId"].map { "session=\($0)" }]
+                .compactMap { $0 }.joined(separator: " ")
+            FileHandle.standardError.write(Data(
+                "MenubarHelper: automated relaunch (\(who.isEmpty ? "unknown" : who)) — re-homed silently, did not surface\n".utf8
+            ))
+            return
+        }
+        // Logged: this is the one moment where a second launch changed what the
+        // user sees, and the launchd plist routes stderr to menubar.log.
+        FileHandle.standardError.write(Data("MenubarHelper: surfacing menu for a user relaunch\n".utf8))
+        NSApp.activate(ignoringOtherApps: true)
+        button.performClick(nil)
+    }
+
     private func tick() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let s = LocalState.sessions(includeTeams: false)
             let pending = LocalState.pendingDevices()
+            let loaded = LocalState.loadedDevices()
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.badgeSessions = self.merged(s)
                 self.badgePending = pending
+                self.badgeLoaded = loaded
                 self.refreshBadge()
             }
         }
+        checkDaemonLiveness()
         refreshRoutines()
         refreshRecentSessions()
         refreshActiveSessions()
@@ -131,14 +255,51 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         refreshWatchdog()
     }
 
+    /// Poll the scheduler's liveness on every tick — the one check that must
+    /// NOT depend on the menu ever being opened. `daemonPid()` is a plain
+    /// pid-file read + signal-0 probe (no subprocess), so it is safe to call
+    /// on the main thread here just like `menuWillOpen` already does.
+    ///
+    /// Fires once per outage, only after `daemonDownTickThreshold` consecutive
+    /// dead ticks — covers both a daemon that dies mid-session (an
+    /// alive→dead transition) and one that is already down when the helper
+    /// itself (re)launches (a reboot, a crash before the helper started).
+    /// Resets the moment the daemon comes back, so the next real outage
+    /// alerts again.
+    private func checkDaemonLiveness() {
+        let alive = AgentsCLI.daemonPid() != nil
+        if alive {
+            daemonDeadTicks = 0
+            daemonDownNotified = false
+            if schedulerDown {
+                schedulerDown = false
+                refreshBadge()
+            }
+            return
+        }
+        daemonDeadTicks += 1
+        if daemonDeadTicks >= Self.daemonDownTickThreshold && !schedulerDown {
+            schedulerDown = true
+            refreshBadge()
+        }
+        guard daemonDeadTicks == Self.daemonDownTickThreshold, !daemonDownNotified else { return }
+        daemonDownNotified = true
+        Notifier.post(
+            title: "Scheduler stopped — routines won't run",
+            body: "Restart it from the menu bar, or run: agents routines start",
+            url: URL(fileURLWithPath: "\(NSHomeDirectory())/.agents/.history/runs").absoluteString
+        )
+    }
+
     private func loadDumpCaches() {
         cachedRoutines = AgentsCLI.routines()
         routinesLoaded = true
         routinesFetchedAt = Date()
 
-        cachedRecentSessions = AgentsCLI.recentSessions(limit: 6)
+        cachedRecentSessions = AgentsCLI.recentSessions(limit: 40)
         recentSessionsLoaded = true
         recentSessionsFetchedAt = Date()
+        promptController.updateRecentSessions(cachedRecentSessions)
 
         cachedActiveSessions = AgentsCLI.activeSessions()
         activeSessionsLoaded = true
@@ -171,13 +332,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if let t = recentSessionsFetchedAt, Date().timeIntervalSince(t) < 45 { return }
         recentSessionsInFlight = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let s = AgentsCLI.recentSessions(limit: 6)
+            let s = AgentsCLI.recentSessions(limit: 40)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.cachedRecentSessions = s
                 self.recentSessionsLoaded = true
                 self.recentSessionsFetchedAt = Date()
                 self.recentSessionsInFlight = false
+                self.promptController.updateRecentSessions(s)
             }
         }
     }
@@ -198,9 +360,24 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// How often the System row's `doctor --json` may be refreshed.
+    ///
+    /// This was 60s against a command measured at **136s** on an idle machine —
+    /// i.e. the poll asked for a refresh more than twice as often as one could
+    /// possibly complete, so the helper ran a doctor essentially continuously.
+    /// (The in-flight guard kept it to one *per process*, which is why the
+    /// unbounded child and the crash-restart loop were needed to turn this into
+    /// the 38-orphan runaway — but a ~100% duty cycle was always the floor.)
+    ///
+    /// 15 minutes is matched to what the data actually is: installed CLIs,
+    /// per-version sign-in, and resource sync drift change on the timescale of a
+    /// person running `agents sync` or logging in, not second to second. That
+    /// takes the duty cycle from ~100% of one core to ~15%.
+    private static let doctorRefreshInterval: TimeInterval = 15 * 60
+
     private func refreshDoctorOverview() {
         if doctorInFlight { return }
-        if let t = doctorFetchedAt, Date().timeIntervalSince(t) < 60 { return }
+        if let t = doctorFetchedAt, Date().timeIntervalSince(t) < Self.doctorRefreshInterval { return }
         doctorInFlight = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let d = AgentsCLI.doctorOverview()
@@ -243,8 +420,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let attention = badgeSessions.filter { $0.status == .attention }.count
         let running = badgeSessions.filter { $0.status == .running }.count
         let pending = badgePending.count
-        if attention > 0 {
-            button.attributedTitle = badge("⚠", wait)
+        if attention > 0 || !badgeLoaded.isEmpty {
+            // A blocked session or a device under high load — both are "needs you".
+            // A critical-load device tips the glyph red; otherwise the amber warn.
+            let critical = badgeLoaded.contains { $0.severity == .critical }
+            button.attributedTitle = badge("⚠", critical ? fail : wait)
+        } else if schedulerDown {
+            // A dead scheduler means every routine silently stops firing — that
+            // outranks a device-registration nudge or a running-session count,
+            // so it is glanceable without opening the dropdown at all.
+            button.attributedTitle = badge(" ⏻", fail)
         } else if pending > 0 {
             // New devices to review — a blue count (◆) distinct from run/attention.
             button.attributedTitle = badge(" ◆\(pending)", info)
@@ -263,6 +448,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     // MARK: - Menu
+
     func menuWillOpen(_ menu: NSMenu) {
         // Critical path is all cheap disk reads. CLI-backed sections come from
         // warm caches; opening the menu only schedules refreshes for next time.
@@ -270,11 +456,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let browserTasks = LocalState.browserTasks(limit: 3)
         let daemonPid = AgentsCLI.daemonPid()
         let pending = LocalState.pendingDevices()
+        let loaded = LocalState.loadedDevices()
         badgeSessions = merged(sessions)
         badgePending = pending
+        badgeLoaded = loaded
         rebuild(menu, sessions: sessions, browserTasks: browserTasks,
                 recentSessions: cachedRecentSessions, routines: cachedRoutines,
-                doctor: cachedDoctorOverview, daemonPid: daemonPid, pending: pending)
+                doctor: cachedDoctorOverview, daemonPid: daemonPid, pending: pending, loaded: loaded)
         refreshBadge()
         refreshRoutines()
         refreshRecentSessions()
@@ -289,8 +477,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // glanceable sections; setup + watchdog noise collapses into one System row.
     private func rebuild(_ menu: NSMenu, sessions: [Session], browserTasks: [BrowserTask],
                          recentSessions: [RecentSession], routines: [Routine],
-                         doctor: DoctorOverview?, daemonPid: Int?, pending: [PendingDevice]) {
+                         doctor: DoctorOverview?, daemonPid: Int?, pending: [PendingDevice],
+                         loaded: [LoadedDevice]) {
         menu.removeAllItems()
+        projectSessionItems.removeAll()
 
         // Prefer the engine's active list once the warm cache has it — full
         // coverage (tmux/IDE/headless), correct running/idle. The cheap
@@ -302,17 +492,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // whenever the triage strip has anything to say, not only when a session
         // is blocked.
         let attention = sessions.filter { $0.status == .attention }.count
-        let routinesFailing = routines.contains { $0.lastStatus == "failed" || $0.lastStatus == "timeout" || $0.overdue }
+        let routinesFailing = routines.contains { routineNeedsAttention($0) }
         let schedulerStopped = daemonPid == nil && !routines.isEmpty
-        let needsYou = attention + (routinesFailing ? 1 : 0) + (schedulerStopped ? 1 : 0)
+        let needsYou = attention + loaded.count + (routinesFailing ? 1 : 0) + (schedulerStopped ? 1 : 0)
         let rich = isRich(attention: needsYou)
 
-        addHeader(menu, sessions: sessions)
+        addHeader(menu, sessions: sessions, plusNeeds: loaded.count)
         menu.addItem(.separator())
 
         // What needs me now — rendered only when there's something actionable.
         if addNeedsAttention(menu, sessions: sessions, routines: routines,
-                             daemonPid: daemonPid, rich: rich) {
+                             daemonPid: daemonPid, loaded: loaded, rich: rich) {
             menu.addItem(.separator())
         }
 
@@ -363,8 +553,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     // MARK: Sections
-    private func addHeader(_ menu: NSMenu, sessions: [Session]) {
-        let attn = sessions.filter { $0.status == .attention }.count
+    private func addHeader(_ menu: NSMenu, sessions: [Session], plusNeeds: Int = 0) {
+        let attn = sessions.filter { $0.status == .attention }.count + plusNeeds
         let running = sessions.filter { $0.status == .running }.count
         let status: String
         let color: NSColor
@@ -407,7 +597,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // empty (the ⚠ glyph + section header already convey it). Failing routines
     // follow.
     private func addNeedsAttention(_ menu: NSMenu, sessions: [Session],
-                                   routines: [Routine], daemonPid: Int?, rich: Bool) -> Bool {
+                                   routines: [Routine], daemonPid: Int?,
+                                   loaded: [LoadedDevice], rich: Bool) -> Bool {
         var rows: [(String, NSColor, String, NSMenu?)] = []   // glyph, color, text, submenu
 
         let blocked = sessions.filter { $0.status == .attention }
@@ -430,7 +621,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     text += " — \(trim(first.question, rich ? 48 : 34))"
                 }
                 if let since = first.attentionSinceMs { text += "  ·  \(elapsedShort(since))" }
-                rows.append(("⚠", wait, text, first.cwd.map { revealSubmenu($0) }))
+                rows.append(("⚠", wait, text, blockedSubmenu(sessionId: first.sessionId, cwd: first.cwd)))
             } else {
                 // Collapsed: N waiting · oldest elapsed. Submenu lists each session.
                 var text = "\(agentLabel) · \(repo) · \(group.count) waiting"
@@ -439,6 +630,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 }
                 rows.append(("⚠", wait, text, groupedWaitersSubmenu(group)))
             }
+        }
+
+        // Devices under high load — this Mac (native getloadavg) first, then fresh
+        // fleet peers. Warn at headroom() 'loaded' (>=75%); X red when critical.
+        for d in loaded {
+            let glyph = d.severity == .critical ? "✕" : "⚠"
+            let color = d.severity == .critical ? fail : wait
+            let scope = d.isLocal ? "\(d.name) (this Mac)" : d.name
+            rows.append((glyph, color, "\(scope) — high load \(Int(d.loadPercent.rounded()))%", loadedSubmenu(d)))
         }
 
         if daemonPid == nil && !routines.isEmpty {
@@ -452,7 +652,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             rows.append(("⚠", wait, "Scheduler stopped — routines won’t run", sub))
         }
 
-        let bad = routines.filter { $0.lastStatus == "failed" || $0.lastStatus == "timeout" || $0.overdue }
+        let bad = routines.filter { routineNeedsAttention($0) }
         if bad.count == 1, let r = bad.first {
             let why = r.overdue ? "overdue" : (r.lastStatus ?? "failed")
             rows.append(("✕", fail, "Routine \(r.name) \(why)", allRoutinesSubmenu(bad)))
@@ -469,11 +669,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // rows from the header count when grouping is in play.
         addSectionTitle(menu, "⚠ NEEDS YOU (\(rows.count))", color: wait)
         for (glyph, color, text, sub) in rows {
-            let it = statusRow(glyph, color, text)
+            // Action-required rows are emphasized so they stand out from the
+            // informational sections below.
+            let it = statusRow(glyph, color, text, emphasize: true)
             it.submenu = sub
             menu.addItem(it)
         }
         return true
+    }
+
+    // Small breakdown submenu for a high-load device row: load% (+ mem% when known).
+    private func loadedSubmenu(_ d: LoadedDevice) -> NSMenu {
+        let sub = NSMenu()
+        var line = "load \(Int(d.loadPercent.rounded()))%"
+        if let mem = d.memPercent { line += " · mem \(Int(mem.rounded()))%" }
+        sub.addItem(disabled(line))
+        return sub
     }
 
     // Submenu listing every blocked session in a grouped (agent, repo) waiter.
@@ -487,7 +698,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             if !s.question.isEmpty { text += " — \(trim(s.question, 34))" }
             if let since = s.attentionSinceMs { text += "  ·  \(elapsedShort(since))" }
             let it = statusRow("⚠", wait, text)
-            if let cwd = s.cwd { it.submenu = revealSubmenu(cwd) }
+            it.submenu = blockedSubmenu(sessionId: s.sessionId, cwd: s.cwd)
             sub.addItem(it)
         }
         return sub
@@ -517,7 +728,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         return true
     }
 
+    // Two ways to start work, most-direct first:
+    //   New Task    — the quick-dispatch bar: type it, agents pick it up headless.
+    //   New Session — an interactive TUI in the terminal the user works in.
     private func addNewSession(_ menu: NSMenu) {
+        let task = NSMenuItem(title: "New Task…", action: #selector(onNewTask(_:)), keyEquivalent: "t")
+        task.target = self
+        task.toolTip = "Describe a task and dispatch it to agents (Cmd-Shift-O)"
+        menu.addItem(task)
+
         let newItem = NSMenuItem(title: "New Session", action: nil, keyEquivalent: "n")
         let newSub = NSMenu()
         for agent in LocalState.desiredAgents {
@@ -530,75 +749,65 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(newItem)
     }
 
-    // Live work grouped by repo: one `ACTIVE · <repo>` header per project, the
-    // repo's sessions clustered under it. Rich rows carry the session's own
-    // title inline (the repo lives in the header, so rows don't repeat it).
+    // Live work: PROJECT accordion + SESSION side-submenu.
     //
-    // Two rendering rules keep the section from walling the menu:
-    //   • The "other" bucket (sessions with no repo) collapses to a single
-    //     clickable section header + submenu when it's idle-only. That's a
-    //     dumping-ground group whose individual rows don't repay their space.
-    //   • Idle rows cap at 3 per repo, but the 4th+ never disappears silently:
-    //     an explicit "+ N more idle" row shows the count with a submenu of
-    //     the rest, so the header count always matches what's on screen.
-    private let idlePerRepoCap = 3
-
+    //   ▶ agents-cli  ●8 ◐1  zion          ← project collapsed (default)
+    //   ▼ agents-cli  ●8 ◐1  zion          ← click folds open inline
+    //       ● Claude · zion · 3m — work… ›  ← agent row; › opens detail submenu
+    //
+    // Project expand is an accordion (▶/▼). Session detail is a native side
+    // submenu so linkable actions and multi-line context don't wall the main menu.
+    // Expand rebuilds from the warm cache only — no CLI, no re-index.
     private func addActive(_ menu: NSMenu, live: [Session], browserTasks: [BrowserTask], rich: Bool) {
+        let totalRun = live.filter { $0.status == .running }.count
+        let totalIdle = live.count - totalRun
+        let projectCount = Set(live.map { $0.repo.isEmpty ? "other" : $0.repo }).count
+        var head = "ACTIVE"
+        var bits: [String] = []
+        if totalRun > 0 { bits.append("\(totalRun) run") }
+        if totalIdle > 0 { bits.append("\(totalIdle) idle") }
+        if projectCount > 0 { bits.append("\(projectCount) project\(projectCount == 1 ? "" : "s")") }
+        if !bits.isEmpty { head += " · " + bits.joined(separator: " · ") }
+        addSectionTitle(menu, head, color: .secondaryLabelColor)
+
         let groups = Dictionary(grouping: live) { $0.repo.isEmpty ? "other" : $0.repo }
-        for (repo, group) in groups.sorted(by: { $0.key.lowercased() < $1.key.lowercased() }) {
+        // Running projects first, then name — scannable triage order.
+        let orderedKeys = groups.keys.sorted { a, b in
+            let ra = groups[a]!.filter { $0.status == .running }.count
+            let rb = groups[b]!.filter { $0.status == .running }.count
+            if ra != rb { return ra > rb }
+            return a.lowercased() < b.lowercased()
+        }
+
+        for repo in orderedKeys {
+            guard let group = groups[repo] else { continue }
             let running = group.filter { $0.status == .running }.count
             let idle = group.count - running
+            let machines = group.compactMap(\.machine)
+            let open = expandedProjects.contains(repo)
+            let summary = ActiveDisplay.projectSummary(repo: repo, running: running,
+                                                       idle: idle, machines: machines)
+            let header = NSMenuItem(title: summary, action: nil, keyEquivalent: "")
+            let headerView = ProjectAccordionRowView(summary: summary, repo: repo,
+                                                     sessionCount: group.count, expanded: open)
+            headerView.onToggle = { [weak self, weak menu, weak header] shouldExpand in
+                guard let self, let menu, let header else { return }
+                self.setProject(repo, expanded: shouldExpand, sessions: group,
+                                rich: rich, in: menu, after: header)
+            }
+            header.view = headerView
+            menu.addItem(header)
 
-            // Collapsed "other" bucket: idle-only groups render as one
-            // interactive section header. No fake ◐ session row — the header
-            // itself carries the count and opens the submenu.
-            if repo == "other" && running == 0 && idle > 0 {
-                let title = "ACTIVE · other  ·  \(idle) idle"
-                let item = statusRow("", .secondaryLabelColor, title)
-                item.submenu = collapsedIdleSubmenu(group, rich: rich)
-                menu.addItem(item)
-                continue
-            }
+            guard open else { continue }
 
-            var title = "ACTIVE · \(repo)"
-            var counts: [String] = []
-            if running > 0 { counts.append("\(running) running") }
-            if idle > 0 { counts.append("\(idle) idle") }
-            if !counts.isEmpty { title += "  ·  " + counts.joined(separator: " · ") }
-            addSectionTitle(menu, title, color: .secondaryLabelColor)
-
-            // Running rows always render; idle rows cap at idlePerRepoCap. If
-            // the cap hides any, an explicit "+ N more idle" row exposes the
-            // hidden count and opens the rest in a submenu.
-            let ordered = group.sorted { a, b in
-                (a.status == .running ? 0 : 1) < (b.status == .running ? 0 : 1)
-            }
-            var idleShown = 0
-            var hiddenIdle: [Session] = []
-            for s in ordered {
-                if s.status != .running {
-                    if idleShown >= idlePerRepoCap {
-                        hiddenIdle.append(s)
-                        continue
-                    }
-                    idleShown += 1
-                }
-                let glyph = s.status == .running ? "●" : "◐"
-                let color = s.status == .running ? run : idleC
-                let detail = (rich && !s.title.isEmpty) ? " — \(trim(s.title, 36))" : ""
-                let row = statusRow(glyph, color, "\(LocalState.agentLabel(s.agent))\(detail)")
-                if let cwd = s.cwd { row.submenu = revealSubmenu(cwd) }
-                menu.addItem(row)
-            }
-            if !hiddenIdle.isEmpty {
-                let moreLabel = "+ \(hiddenIdle.count) more idle"
-                let more = statusRow("", info, moreLabel)
-                more.submenu = collapsedIdleSubmenu(hiddenIdle, rich: rich)
-                menu.addItem(more)
-            }
+            let sessions = orderedProjectSessions(group)
+            let rows = sessions.map { makeSessionRow(session: $0, rich: rich) }
+            projectSessionItems[repo] = rows
+            for row in rows { menu.addItem(row) }
         }
+
         if !browserTasks.isEmpty {
-            addSectionTitle(menu, "ACTIVE · Browser", color: .secondaryLabelColor)
+            addSectionTitle(menu, "  Browser", color: .secondaryLabelColor)
             for task in browserTasks {
                 let tabs = task.tabCount == 1 ? "1 tab" : "\(task.tabCount) tabs"
                 let row = statusRow("◦", idleC, "\(trim(task.name, 24)) · \(shortProfile(task.profile)) · \(tabs)")
@@ -608,17 +817,231 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    // Submenu for the "+N more idle" row and the collapsed "other" section
-    // header — every hidden session gets a row with agent · title.
-    private func collapsedIdleSubmenu(_ sessions: [Session], rich: Bool) -> NSMenu {
-        let sub = NSMenu()
-        for s in sessions {
-            let detail = (rich && !s.title.isEmpty) ? " — \(trim(s.title, 36))" : ""
-            let row = statusRow("◐", idleC, "\(LocalState.agentLabel(s.agent))\(detail)")
-            if let cwd = s.cwd { row.submenu = revealSubmenu(cwd) }
-            sub.addItem(row)
+    /// Agent summary under an expanded project. Detail lives in the › submenu
+    /// (linkable ticket/PR/cwd, locality, duration) — not a second accordion.
+    private func makeSessionRow(session s: Session, rich: Bool) -> NSMenuItem {
+        let glyph = s.status == .running ? "●" : (s.status == .attention ? "⚠" : "◐")
+        let color = s.status == .running ? run : (s.status == .attention ? wait : idleC)
+        let agent = LocalState.agentLabel(s.agent)
+        let host = s.machine ?? thisMachine
+        let age = ActiveDisplay.ageLabel(fromMs: s.lastActivityMs ?? s.startedAtMs)
+        let work = s.workTitle
+
+        // Compact chips on the main row so you see signal without opening ›.
+        var chips: [String] = []
+        if let t = s.ticketId, !t.isEmpty { chips.append("🎫\(t)") }
+        if let pr = ActiveDisplay.prNumber(from: s.prLink) { chips.append("PR#\(pr)") }
+        else if let link = s.prLink, !link.isEmpty { chips.append("PR") }
+
+        var line = "\(glyph) \(agent) · \(host)"
+        if let surface = s.surface, !surface.isEmpty { line += " · \(surface)" }
+        if !age.isEmpty { line += " · \(age)" }
+        if !chips.isEmpty { line += "  " + chips.joined(separator: " ") }
+        if rich && !work.isEmpty { line += " — \(trim(work, 32))" }
+
+        let row = statusRow("", color, line)
+        row.title = "    \(line)"
+        row.attributedTitle = sessionRowTitle(glyph: glyph, glyphColor: color, rest: line)
+        row.submenu = sessionDetailSubmenu(s)
+        row.toolTip = work.isEmpty ? "Session detail" : work
+        return row
+    }
+
+    /// Mutate only the rows under the clicked project. The enclosing status menu
+    /// remains in the same tracking session and no cache refresh or CLI call runs.
+    private func setProject(_ repo: String, expanded: Bool, sessions: [Session],
+                            rich: Bool, in menu: NSMenu, after header: NSMenuItem) {
+        if expanded {
+            expandedProjects.insert(repo)
+            let ordered = orderedProjectSessions(sessions)
+            let rows = ordered.map { makeSessionRow(session: $0, rich: rich) }
+            projectSessionItems[repo] = rows
+            let headerIndex = menu.index(of: header)
+            guard headerIndex >= 0 else { return }
+            for (offset, row) in rows.enumerated() {
+                menu.insertItem(row, at: headerIndex + offset + 1)
+            }
+        } else {
+            expandedProjects.remove(repo)
+            for row in projectSessionItems.removeValue(forKey: repo) ?? [] {
+                menu.removeItem(row)
+            }
         }
+        menu.update()
+    }
+
+    private func orderedProjectSessions(_ sessions: [Session]) -> [Session] {
+        sessions.sorted { a, b in
+            let ra = a.status == .running ? 0 : 1
+            let rb = b.status == .running ? 0 : 1
+            if ra != rb { return ra < rb }
+            return (a.lastActivityMs ?? 0) > (b.lastActivityMs ?? 0)
+        }
+    }
+
+    /// Status-colored glyph + label for the agent row.
+    private func sessionRowTitle(glyph: String, glyphColor: NSColor, rest: String) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let font = NSFont.menuFont(ofSize: 0)
+        out.append(NSAttributedString(string: "    \(glyph) ", attributes: [
+            .foregroundColor: glyphColor, .font: font,
+        ]))
+        // rest already starts with glyph when built above — strip the leading glyph
+        // if present so we don't double it.
+        var body = rest
+        for prefix in ["● ", "◐ ", "⚠ "] {
+            if body.hasPrefix(prefix) { body = String(body.dropFirst(prefix.count)); break }
+        }
+        out.append(NSAttributedString(string: body, attributes: [
+            .foregroundColor: NSColor.labelColor, .font: font,
+        ]))
+        return out
+    }
+
+    /// Side submenu: graphical sections + linkable actions for one session.
+    /// All fields from the warm active payload — no CLI on open.
+    private func sessionDetailSubmenu(_ s: Session) -> NSMenu {
+        let sub = NSMenu()
+        let work = s.workTitle
+
+        // ── What ──────────────────────────────────────────────────────────
+        if !work.isEmpty {
+            let head = NSMenuItem(title: "◎  \(trim(work, 72))", action: nil, keyEquivalent: "")
+            head.isEnabled = false
+            head.toolTip = work
+            sub.addItem(head)
+            // If the work title looks like a URL, make it one-click openable.
+            if let url = firstURL(in: work) {
+                let openWork = NSMenuItem(title: "   Open link in work title",
+                                          action: #selector(onOpenURL(_:)), keyEquivalent: "")
+                openWork.target = self
+                openWork.representedObject = url.absoluteString
+                sub.addItem(openWork)
+            }
+            sub.addItem(.separator())
+        }
+
+        // ── Where ─────────────────────────────────────────────────────────
+        let locality = ActiveDisplay.locality(machine: s.machine, thisMachine: thisMachine)
+        let locIcon = locality.hasPrefix("remote") ? "☁" : "💻"
+        var whereLine = "\(locIcon)  \(locality)"
+        if let surface = s.surface, !surface.isEmpty { whereLine += " · \(surface)" }
+        sub.addItem(disabled(whereLine))
+
+        if !s.repo.isEmpty {
+            sub.addItem(disabled("📁  \(s.repo)"))
+        }
+        if let cwd = s.cwd {
+            let reveal = NSMenuItem(title: "📂  \(shortHome(cwd))",
+                                    action: #selector(onRevealPath(_:)), keyEquivalent: "")
+            reveal.target = self
+            reveal.representedObject = cwd
+            reveal.toolTip = "Reveal in Finder"
+            sub.addItem(reveal)
+        }
+
+        // ── Links (ticket / PR) — primary actions, not just labels ────────
+        let hasTicket = !(s.ticketId ?? "").isEmpty
+        let hasPR = !(s.prLink ?? "").isEmpty
+        if hasTicket || hasPR {
+            sub.addItem(.separator())
+            if let ticket = s.ticketId, !ticket.isEmpty {
+                let t = NSMenuItem(title: "🎫  \(ticket)  — open in Linear",
+                                   action: #selector(onOpenTicket(_:)), keyEquivalent: "")
+                t.target = self
+                t.representedObject = ticket
+                sub.addItem(t)
+            }
+            if let pr = s.prLink, !pr.isEmpty {
+                let label: String
+                if let n = ActiveDisplay.prNumber(from: pr) {
+                    label = "🔗  PR#\(n)  — open on GitHub"
+                } else {
+                    label = "🔗  Pull request  — open on GitHub"
+                }
+                let p = NSMenuItem(title: label, action: #selector(onOpenURL(_:)), keyEquivalent: "")
+                p.target = self
+                p.representedObject = pr
+                sub.addItem(p)
+            }
+        }
+
+        // ── Timing / status ───────────────────────────────────────────────
+        sub.addItem(.separator())
+        let started = ActiveDisplay.ageLabel(fromMs: s.startedAtMs)
+        let active = ActiveDisplay.ageLabel(fromMs: s.lastActivityMs)
+        let statusWord: String = {
+            switch s.status {
+            case .running: return "● running"
+            case .idle: return "◐ idle"
+            case .attention: return "⚠ needs you"
+            case .queued: return "queued"
+            }
+        }()
+        var timeLine = statusWord
+        if !started.isEmpty { timeLine += " · started \(started) ago" }
+        if !active.isEmpty { timeLine += " · active \(active) ago" }
+        sub.addItem(disabled("⏱  \(timeLine)"))
+
+        if let owner = s.owner, !owner.isEmpty, !owner.hasPrefix("UNRESOLVED") {
+            sub.addItem(disabled("👤  \(owner)"))
+        }
+        if let sid = s.sessionId, !sid.isEmpty {
+            let copy = NSMenuItem(title: "⧉  Copy session id  (\(String(sid.prefix(8)))…)",
+                                  action: #selector(onCopySessionId(_:)), keyEquivalent: "")
+            copy.target = self
+            copy.representedObject = sid
+            sub.addItem(copy)
+        }
+
+        // Latest preview snippet (trimmed) — optional context, not a wall.
+        if let preview = s.preview?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !preview.isEmpty, preview != work {
+            sub.addItem(.separator())
+            let snip = disabled("💬  \(trim(preview, 80))")
+            snip.toolTip = preview
+            sub.addItem(snip)
+        }
+
         return sub
+    }
+
+    private func firstURL(in text: String) -> URL? {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+        else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return detector.firstMatch(in: text, options: [], range: range)?.url
+    }
+
+    private func shortHome(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
+    }
+
+    @objc private func onRevealPath(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        AgentsCLI.openPath(path)
+    }
+
+    @objc private func onCopySessionId(_ sender: NSMenuItem) {
+        guard let sid = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(sid, forType: .string)
+    }
+
+    @objc private func onOpenURL(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let url = URL(string: raw) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func onOpenTicket(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        if let url = URL(string: "https://linear.app/getrush/issue/\(id)") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func addRecent(_ menu: NSMenu, recentSessions: [RecentSession], rich: Bool) {
@@ -678,6 +1101,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // Routines stay a dedicated, glanceable section. Compact: one summary row
     // (submenu = all). Rich: a section with the next few upcoming + any failing
     // routine inline, then "All routines…" for the rest.
+    // When any routine carries a `projectGroup`, both the inline rows and the
+    // "All routines…" submenu are grouped by that label (ungrouped routines last).
     private func addRoutines(_ menu: NSMenu, routines: [Routine], rich: Bool) {
         let summary: String
         if routines.isEmpty {
@@ -698,25 +1123,49 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
 
         addSectionTitle(menu, "ROUTINES · \(summary)", color: .secondaryLabelColor)
-        let failing = routines.filter { $0.lastStatus == "failed" || $0.lastStatus == "timeout" || $0.overdue }
+        let failing = routines.filter { routineNeedsAttention($0) }
         let upcoming = routines
             .filter { r in r.enabled && !failing.contains(where: { $0.name == r.name }) && r.nextRun != nil }
             .sorted { ($0.nextRun ?? "") < ($1.nextRun ?? "") }
             .prefix(3)
-        for r in upcoming {
-            let row = statusRow("◔", idleC, "\(r.name)  \(r.nextRunHuman ?? r.schedule)")
-            row.submenu = routineSubmenu(r)
-            menu.addItem(row)
-        }
-        for r in failing {
-            let why = routineFailureSummary(r, max: 48)
-            let row = statusRow("✕", fail, "\(r.name)  \(why)")
-            row.submenu = routineSubmenu(r)
-            menu.addItem(row)
+
+        let hasGroups = routines.contains { $0.projectGroup != nil }
+        if hasGroups {
+            let (grouped, ungrouped) = groupedRoutines(Array(upcoming) + failing)
+            for (label, group) in grouped {
+                menu.addItem(disabled("  \(label)"))
+                for r in group { menu.addItem(inlineRoutineRow(r)) }
+            }
+            for r in ungrouped { menu.addItem(inlineRoutineRow(r)) }
+        } else {
+            for r in upcoming {
+                let row = statusRow("◔", idleC, "\(r.name)  \(r.nextRunHuman ?? r.schedule)")
+                row.submenu = routineSubmenu(r)
+                menu.addItem(row)
+            }
+            for r in failing {
+                let why = routineFailureSummary(r, max: 48)
+                let row = statusRow(routineIsMiss(r) ? "⃠" : "✕", routineIsMiss(r) ? wait : fail, "\(r.name)  \(why)")
+                row.submenu = routineSubmenu(r)
+                menu.addItem(row)
+            }
         }
         let all = NSMenuItem(title: "  All routines…", action: nil, keyEquivalent: "")
         all.submenu = allRoutinesSubmenu(routines)
         menu.addItem(all)
+    }
+
+    // One colored inline row for the ROUTINES section (upcoming or failing).
+    private func inlineRoutineRow(_ r: Routine) -> NSMenuItem {
+        let row: NSMenuItem
+        if routineNeedsAttention(r) {
+            let why = routineFailureSummary(r, max: 48)
+            row = statusRow(routineIsMiss(r) ? "⃠" : "✕", routineIsMiss(r) ? wait : fail, "\(r.name)  \(why)")
+        } else {
+            row = statusRow("◔", idleC, "\(r.name)  \(r.nextRunHuman ?? r.schedule)")
+        }
+        row.submenu = routineSubmenu(r)
+        return row
     }
 
     // Setup + watchdog collapsed into one System row — the health noise lives in
@@ -806,14 +1255,31 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         return sub
     }
 
-    private func revealSubmenu(_ cwd: String) -> NSMenu {
+    /// Submenu for a blocked row. "Focus session" comes FIRST and is the point:
+    /// a NEEDS-YOU row exists because an agent is waiting on the operator, so the
+    /// action that resolves it — land in that session — must be the first thing
+    /// under the cursor. Revealing the working dir does not unblock anything.
+    ///
+    /// `sessionId` is nil for a row the engine could not identify (a cloud task,
+    /// a stale sentinel); the item is simply omitted rather than shown disabled,
+    /// so the menu never offers an action that would do nothing.
+    private func blockedSubmenu(sessionId: String?, cwd: String?) -> NSMenu? {
         let sub = NSMenu()
-        let reveal = NSMenuItem(title: "Reveal working dir", action: #selector(onOpenPath(_:)), keyEquivalent: "")
-        reveal.target = self
-        reveal.representedObject = cwd
-        sub.addItem(reveal)
-        return sub
+        if let id = sessionId, !id.isEmpty {
+            let focus = NSMenuItem(title: "Focus session", action: #selector(onFocusSession(_:)), keyEquivalent: "")
+            focus.target = self
+            focus.representedObject = id
+            sub.addItem(focus)
+        }
+        if let dir = cwd, !dir.isEmpty {
+            let reveal = NSMenuItem(title: "Reveal working dir", action: #selector(onOpenPath(_:)), keyEquivalent: "")
+            reveal.target = self
+            reveal.representedObject = dir
+            sub.addItem(reveal)
+        }
+        return sub.items.isEmpty ? nil : sub
     }
+
 
     private func routineSubmenu(_ r: Routine) -> NSMenu {
         let sub = NSMenu()
@@ -843,15 +1309,33 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     private func allRoutinesSubmenu(_ routines: [Routine]) -> NSMenu {
         let sub = NSMenu()
-        for r in routines {
-            let mark = r.lastStatus == "failed" || r.lastStatus == "timeout" || r.overdue ? "! "
-                : (r.enabled ? "  " : "· ")
-            let when = routineFailureDetail(r, max: 52) ?? (r.enabled ? (r.nextRunHuman ?? r.schedule) : "paused")
-            let item = NSMenuItem(title: "\(mark)\(r.name)  \(when)", action: nil, keyEquivalent: "")
-            item.submenu = routineSubmenu(r)
-            sub.addItem(item)
+        let hasGroups = routines.contains { $0.projectGroup != nil }
+        if hasGroups {
+            let (grouped, ungrouped) = groupedRoutines(routines)
+            for i in grouped.indices {
+                if i > 0 { sub.addItem(.separator()) }
+                let (label, group) = grouped[i]
+                sub.addItem(disabled("  \(label)"))
+                for r in group { sub.addItem(routineListRow(r)) }
+            }
+            if !ungrouped.isEmpty {
+                if !grouped.isEmpty { sub.addItem(.separator()) }
+                for r in ungrouped { sub.addItem(routineListRow(r)) }
+            }
+        } else {
+            for r in routines { sub.addItem(routineListRow(r)) }
         }
         return sub
+    }
+
+    // One flat row for the "All routines…" submenu.
+    private func routineListRow(_ r: Routine) -> NSMenuItem {
+        let mark = routineNeedsAttention(r) ? "! "
+            : (r.enabled ? "  " : "· ")
+        let when = routineFailureDetail(r, max: 52) ?? (r.enabled ? (r.nextRunHuman ?? r.schedule) : "paused")
+        let item = NSMenuItem(title: "\(mark)\(r.name)  \(when)", action: nil, keyEquivalent: "")
+        item.submenu = routineSubmenu(r)
+        return item
     }
 
     private func setupSummary(_ doctor: DoctorOverview?) -> String {
@@ -928,6 +1412,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func onNewSession(_ s: NSMenuItem) {
         if let a = s.representedObject as? String { AgentsCLI.newSession(agent: a) }
     }
+    // "New Task…" — the same quick-dispatch bar the Cmd-Shift-O chord summons.
+    // Dispatched async because the menu owns the run loop while it is open: the
+    // panel can only take key focus once the menu has finished dismissing.
+    @objc private func onNewTask(_ s: NSMenuItem) {
+        DispatchQueue.main.async { [weak self] in self?.promptController.summon() }
+    }
     // RUSH-1415: flip global auto-nudge. Optimistically update local state so the
     // checkmark reflects immediately; the next tick re-reads the sentinel as truth.
     @objc private func onToggleWatchdog() {
@@ -946,6 +1436,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func onRoutineLogs(_ s: NSMenuItem) { withName(s, AgentsCLI.routineLogs) }
     @objc private func onOpenPath(_ s: NSMenuItem) {
         if let p = s.representedObject as? String { AgentsCLI.openPath(p) }
+    }
+    @objc private func onFocusSession(_ s: NSMenuItem) {
+        if let id = s.representedObject as? String { AgentsCLI.focusSession(id) }
     }
     @objc private func onOpenAgentsHome() { AgentsCLI.openPath("\(AgentsCLI.home)/.agents") }
     @objc private func onStartScheduler() { AgentsCLI.startScheduler() }
@@ -990,11 +1483,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     // A row whose leading status glyph is tinted with the Factory palette while
     // the label stays default — mirrors the dashboard's color-coded status dots.
-    private func statusRow(_ glyph: String, _ glyphColor: NSColor, _ rest: String) -> NSMenuItem {
+    private func statusRow(_ glyph: String, _ glyphColor: NSColor, _ rest: String,
+                           emphasize: Bool = false) -> NSMenuItem {
         let title = "  \(glyph) \(rest)"
         let it = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let base = NSFont.menuFont(ofSize: 0)
+        let font = emphasize ? NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask) : base
         let attr = NSMutableAttributedString(string: title, attributes: [
-            .font: NSFont.menuFont(ofSize: 0),
+            .font: font,
             .foregroundColor: NSColor.labelColor,
         ])
         let r = (title as NSString).range(of: glyph)
@@ -1062,13 +1558,27 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 }
 
+/// A routine the operator should look at: it failed, timed out, never ran when
+/// it was due (`missed`), or is overdue. One predicate rather than the same
+/// disjunction repeated at each call site, so a new status cannot be added to
+/// four of five checks.
+func routineNeedsAttention(_ r: Routine) -> Bool {
+    r.lastStatus == "failed" || r.lastStatus == "timeout" || r.lastStatus == "missed" || r.overdue
+}
+
+/// `missed` means the run never started — infrastructure, not a task failure —
+/// so it reads as a warning rather than a red error.
+func routineIsMiss(_ r: Routine) -> Bool {
+    r.lastStatus == "missed" || (r.overdue && r.lastStatus != "failed" && r.lastStatus != "timeout")
+}
+
 func routineFailureSummary(_ r: Routine, max: Int) -> String {
     if let detail = routineFailureDetail(r, max: max) { return detail }
     return r.overdue ? "overdue" : (r.lastStatus ?? "failed")
 }
 
 func routineFailureDetail(_ r: Routine, max: Int) -> String? {
-    let lastRunFailed = r.lastStatus == "failed" || r.lastStatus == "timeout"
+    let lastRunFailed = r.lastStatus == "failed" || r.lastStatus == "timeout" || r.lastStatus == "missed"
     guard lastRunFailed || r.overdue else { return nil }
     if let reason = r.failureReason?.trimmingCharacters(in: .whitespacesAndNewlines), !reason.isEmpty {
         return trimText(reason.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression), max)
@@ -1082,4 +1592,22 @@ func routineFailureDetail(_ r: Routine, max: Int) -> String? {
 private func trimText(_ value: String, _ max: Int) -> String {
     if value.count <= max { return value }
     return String(value.prefix(max - 1)) + "…"
+}
+
+/// Partitions routines by `projectGroup`, preserving the order of first occurrence.
+/// Returns ordered (label, routines) pairs and an ungrouped tail for routines whose
+/// `projectGroup` is nil (cross-project / not associated with a single project).
+func groupedRoutines(_ routines: [Routine]) -> (grouped: [(String, [Routine])], ungrouped: [Routine]) {
+    var order: [String] = []
+    var byGroup: [String: [Routine]] = [:]
+    var ungrouped: [Routine] = []
+    for r in routines {
+        if let g = r.projectGroup {
+            if byGroup[g] == nil { order.append(g) }
+            byGroup[g, default: []].append(r)
+        } else {
+            ungrouped.append(r)
+        }
+    }
+    return (order.map { ($0, byGroup[$0]!) }, ungrouped)
 }

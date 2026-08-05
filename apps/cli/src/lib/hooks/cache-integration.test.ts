@@ -28,6 +28,7 @@ describe('generated shim — bash execution', () => {
       shimsDir: path.join(tmpHome, 'shims'),
       cacheDir: path.join(tmpHome, 'cache'),
       logsDir: path.join(tmpHome, 'logs'),
+      perfDir: path.join(tmpHome, 'perf'),
     };
 
     // A real bash script the shim will invoke. It increments a counter file
@@ -125,6 +126,30 @@ echo "call=$count"
     expect(typeof lines[0].ms).toBe('number');
   });
 
+  it('appends matching rows to the perf spool for the disposable warehouse', () => {
+    const shim = generateHookShim({
+      name: 'perf-spooled-hook',
+      scriptPath,
+      cache: { ttl: 300, key: 'global', prefetch: 'none' },
+      paths,
+    });
+
+    runShim(shim, '{}');
+    runShim(shim, '{}');
+
+    const spool = path.join(paths.perfDir!, 'spool.jsonl');
+    expect(fs.existsSync(spool)).toBe(true);
+    const lines = fs.readFileSync(spool, 'utf-8')
+      .split('\n').filter(Boolean).map(l => JSON.parse(l));
+    expect(lines.length).toBe(2);
+    expect(lines[0].kind).toBe('hook.fire');
+    expect(lines[0].label).toBe('perf-spooled-hook');
+    expect(lines[0].cache).toBe('miss');
+    expect(lines[1].cache).toBe('hit');
+    expect(typeof lines[0].duration_ms).toBe('number');
+    expect(typeof lines[0].ts_ms).toBe('number');
+  });
+
   it('per-cwd key produces distinct cache files keyed on stdin cwd', () => {
     const shim = generateHookShim({
       name: 'per-cwd-hook',
@@ -143,5 +168,57 @@ echo "call=$count"
     const a2 = runShim(shim, JSON.stringify({ cwd: '/some/repo/a' }));
     expect(a2.stdout.trim()).toBe('call=1');
     expect(fs.readFileSync(callCounterFile, 'utf-8').trim()).toBe('2');
+  });
+
+  it('carries cwd and session_id from the hook stdin JSON into the perf-spool line', () => {
+    const shim = generateHookShim({
+      name: 'attributed-hook',
+      scriptPath,
+      cache: { ttl: 300, key: 'global', prefetch: 'none' },
+      paths,
+    });
+
+    runShim(shim, JSON.stringify({ cwd: '/some/repo/attributed', session_id: 'sess-123' }));
+
+    const spool = path.join(paths.perfDir!, 'spool.jsonl');
+    const [line] = fs.readFileSync(spool, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    expect(line.cwd).toBe('/some/repo/attributed');
+    expect(line.session_id).toBe('sess-123');
+  });
+
+  it('carries cwd/session_id through the pass-through (no-cache, matcher-only) tail too', () => {
+    // No `cache:` — mirrors a matcher-only hook like git-guard, which gets the
+    // gate-only PASSTHROUGH_TAIL, not the CACHE_TAIL exercised above.
+    const shim = generateHookShim({
+      name: 'guard-like-hook',
+      scriptPath,
+      cache: null,
+      matches: { tool_name: 'Bash' },
+      paths,
+    });
+
+    runShim(shim, JSON.stringify({ cwd: '/some/repo/guard', session_id: 'sess-guard', tool_name: 'Bash' }));
+
+    const spool = path.join(paths.perfDir!, 'spool.jsonl');
+    const [line] = fs.readFileSync(spool, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    expect(line.cache).toBe('none');
+    expect(line.cwd).toBe('/some/repo/guard');
+    expect(line.session_id).toBe('sess-guard');
+  });
+
+  it('omits cwd/session_id from the perf-spool line when stdin carries neither', () => {
+    const shim = generateHookShim({
+      name: 'unattributed-hook',
+      scriptPath,
+      cache: { ttl: 300, key: 'global', prefetch: 'none' },
+      paths,
+    });
+
+    runShim(shim, '{}');
+
+    const spool = path.join(paths.perfDir!, 'spool.jsonl');
+    const [line] = fs.readFileSync(spool, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    expect(line.cwd).toBeUndefined();
+    expect(line.session_id).toBeUndefined();
   });
 });

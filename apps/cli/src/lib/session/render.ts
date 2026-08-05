@@ -9,12 +9,15 @@
 
 import chalk from 'chalk';
 import { truncate } from '../format.js';
-import type { SessionEvent, SessionMeta } from './types.js';
+import type { SessionEvent, SessionMeta, TodoItem } from './types.js';
 import { summarizeToolUse } from './parse.js';
 import { cleanSessionPrompt, extractSessionTopic } from './prompt.js';
 import { renderMarkdown } from '../markdown.js';
 import { redactSecrets } from '../redact.js';
 import { classifyFileChanges, changeCounts, toolHistogram, detectTestResult, type FileChange, type FileOp } from './digest.js';
+import { classifyBashCommand, unwrapCommand, bucketKey, type BashCategory } from './bash-command.js';
+import { extractArtifacts, extractHooks, extractLinks, extractSkills } from './highlights.js';
+import { extractTodoProgressFromEvents } from './state.js';
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -31,6 +34,31 @@ export function relativeToCwd(absPath: string, cwd?: string): string {
     return '~' + absPath.slice(home.length);
   }
   return absPath;
+}
+
+/**
+ * Display form for a touched path: cwd-relative first; then collapse any
+ * `.agents/worktrees/<slug>` segment (in-cwd OR outside) to `⧉ <slug>/…` so
+ * group labels stay on one line instead of `~/src/…/.agents/worktrees/<slug>/…`;
+ * else home-collapse.
+ */
+export function displayPath(absPath: string, cwd?: string): string {
+  const rel = relativeToCwd(absPath, cwd);
+  const norm = rel.replace(/\\/g, '/');
+  const wt = norm.match(/(^|\/)\.agents\/worktrees\/([^/]+)/);
+  if (wt) {
+    const after = norm.slice(norm.indexOf(wt[0]) + wt[0].length).replace(/^\//, '');
+    return after ? `⧉ ${wt[2]}/${after}` : `⧉ ${wt[2]}`;
+  }
+  return rel;
+}
+
+/** One checklist line with a status marker: `[x] done` / `[>] doing` / `[ ] todo`. */
+function renderTodoMarker(item: TodoItem): string {
+  const text = item.content;
+  if (item.status === 'completed') return chalk.green('[x]') + ' ' + chalk.gray(text);
+  if (item.status === 'in_progress') return chalk.yellow('[>]') + ' ' + chalk.white(text);
+  return chalk.gray('[ ]') + ' ' + chalk.white(text);
 }
 
 /** Best-effort feature-detect for OSC 8 hyperlink support in the current TTY. */
@@ -68,24 +96,6 @@ export function linkUrl(url: string, label: string): string {
 // ── Command grouping ──────────────────────────────────────────────────────────
 
 /**
- * Unwrap wrapper prefixes to find the actual executable.
- */
-export function unwrapCommand(cmd: string): string {
-  const ssh = cmd.match(/^ssh\s+\S+\s+"(.+)"\s*(?:\|.*)?$/);
-  if (ssh) return unwrapCommand(ssh[1]);
-  const lead = cmd.match(/^(?:sudo|env\s+\S+=\S+|time)\s+(.+)/);
-  if (lead) return unwrapCommand(lead[1]);
-  // Strip shell-style leading env assignments: `PATH=/x CMD ...`, `FOO=bar BAR=baz CMD ...`
-  const shellEnv = cmd.match(/^(?:[A-Z_][A-Z0-9_]*=\S+\s+)+(\S.*)$/);
-  if (shellEnv) return unwrapCommand(shellEnv[1]);
-  const cd = cmd.match(/^cd\s+\S+\s*&&\s*(.+)/);
-  if (cd) return unwrapCommand(cd[1]);
-  const npx = cmd.match(/^npx\s+(.+)/);
-  if (npx) return unwrapCommand(npx[1]);
-  return cmd;
-}
-
-/**
  * Normalize a command so trivial flag/pipe variations collapse to the same key.
  */
 export function normalizeForDedup(cmd: string): string {
@@ -102,52 +112,36 @@ export function normalizeForDedup(cmd: string): string {
   return s.trim();
 }
 
-/** Command classification categories with signal levels for summary rendering. */
-const CATEGORIES: Array<{
-  name: string;
-  match: (first: string) => boolean;
-  signal: 'high' | 'mid' | 'low';
-}> = [
-  { name: 'Probes',     match: t => ['ls','cat','head','tail','wc','stat','file','which','tree','pwd'].includes(t),                          signal: 'low'  },
-  { name: 'Search',     match: t => ['grep','rg','ag','fd','find'].includes(t),                                                               signal: 'low'  },
-  { name: 'Build/test', match: t => ['make','cargo','pytest','go','bun','npm','pnpm','yarn','tsc','vitest','tsx','node','python','python3','jest'].includes(t), signal: 'high' },
-  { name: 'Install',    match: t => ['brew','pip','apt','apk'].includes(t),                                                                    signal: 'high' },
-  { name: 'VCS',        match: t => ['git','gh'].includes(t),                                                                                  signal: 'mid'  },
-  { name: 'HTTP',       match: t => ['curl','wget','rush','http'].includes(t),                                                                 signal: 'mid'  },
-  { name: 'Remote',     match: t => ['ssh','scp','rsync'].includes(t),                                                                         signal: 'mid'  },
-  { name: 'Shell',      match: t => ['rm','mv','cp','mkdir','touch','echo','printf','chmod','ln','awk','sed','tee','xargs','for'].includes(t), signal: 'low'  },
-  { name: 'Wait',       match: t => ['sleep','wait'].includes(t),                                                                              signal: 'low'  },
-];
+// Re-export the shared classifier/bucketing for callers in this module's surface.
+// `bucketKey` is the single source of truth in bash-command.ts (correct subcommand
+// scan + `ssh\u2192` remote prefix); render must not keep a divergent copy.
+export { unwrapCommand, bucketKey };
 
-/** CLI tools whose subcommand (second token) is included in the bucket key. */
-const TWO_LEVEL_TOKENS = new Set([
-  'git','gh','bun','npm','cargo','docker','kubectl','rush','openclaw','pnpm','yarn',
-]);
-
-/**
- * Return the bucket key for a command (used for grouping within a category).
- */
-export function bucketKey(cmd: string): string {
-  const unwrapped = unwrapCommand(cmd);
-  const tokens = unwrapped.trim().split(/\s+/);
-  const first = tokens[0] ?? 'other';
-  const isRemote = cmd.trim().startsWith('ssh ') || cmd.trim().startsWith('scp ');
-  if (TWO_LEVEL_TOKENS.has(first) && tokens[1]) {
-    const key = `${first} ${tokens[1]}`;
-    return isRemote ? `ssh\u2192${key}` : key;
-  }
-  return isRemote ? `ssh\u2192${first}` : first;
-}
+const CATEGORY_NAMES: Record<BashCategory, string> = {
+  vcs: 'VCS',
+  'build-test': 'Build/test',
+  install: 'Install',
+  remote: 'Remote',
+  http: 'HTTP',
+  media: 'Media',
+  upscaling: 'Upscaling',
+  metadata: 'Metadata',
+  probe: 'Probes',
+  search: 'Search',
+  shell: 'Shell',
+  wait: 'Wait',
+  other: 'Other',
+};
 
 function categoryOf(cmd: string): { name: string; signal: 'high' | 'mid' | 'low' } | null {
   const rawFirst = cmd.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
   // Remote wrappers: classify as Remote regardless of inner command.
   if (['ssh', 'scp', 'rsync'].includes(rawFirst)) {
-    return CATEGORIES.find(c => c.name === 'Remote') ?? null;
+    return { name: 'Remote', signal: 'mid' };
   }
-  const unwrapped = unwrapCommand(cmd);
-  const first = unwrapped.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
-  return CATEGORIES.find(c => c.match(first)) ?? null;
+  const info = classifyBashCommand(cmd);
+  if (info.category === 'other') return null;
+  return { name: CATEGORY_NAMES[info.category], signal: info.signal };
 }
 
 interface CmdRun {
@@ -254,7 +248,7 @@ export function computeSummaryStats(events: SessionEvent[]): SessionStats {
 }
 
 /** Strip the 'claude-' prefix and date suffix from a model identifier. */
-function shortenModel(model: string): string {
+export function shortenModel(model: string): string {
   return model.replace(/^claude-/, '').replace(/-\d{8}$/, '');
 }
 
@@ -444,11 +438,12 @@ function pickDistinct(samples: string[], max: number): string[] {
 
 // ── File grouping ─────────────────────────────────────────────────────────────
 
-/** Group file paths by their parent directory, relative to cwd. */
+/** Group file paths by their parent directory, in display form (cwd-relative,
+ * worktree-collapsed, home-collapsed). */
 function groupByParentDir(paths: Iterable<string>, cwd?: string): Map<string, string[]> {
   const groups = new Map<string, string[]>();
   for (const p of paths) {
-    const rel = relativeToCwd(p, cwd);
+    const rel = displayPath(p, cwd);
     const slashIdx = rel.lastIndexOf('/');
     const dir = slashIdx >= 0 ? rel.slice(0, slashIdx) : '.';
     const base = slashIdx >= 0 ? rel.slice(slashIdx + 1) : rel;
@@ -520,15 +515,15 @@ const OP_MARK: Record<FileOp, string> = { created: '+', modified: '~', deleted: 
  * create/modify/delete lifecycle, plus a `+N ~N −N` summary. Replaces the old
  * flat "Modified" list. Returns true if anything was rendered.
  */
-function renderChangesSection(lines: string[], events: SessionEvent[], cwd?: string): boolean {
+function renderChangesSection(lines: string[], allChanges: FileChange[], cwd?: string): boolean {
   // In-project changes only; edits outside cwd (e.g. /tmp) keep their own
   // "External edits" section so they don't clutter the project's changeset.
   const inCwd = (p: string): boolean => !cwd || !p.startsWith('/') || p.startsWith(cwd + '/');
-  const changes = classifyFileChanges(events).filter(ch => inCwd(ch.path));
+  const changes = allChanges.filter(ch => inCwd(ch.path));
   if (changes.length === 0) return false;
   const c = changeCounts(changes);
   const opByRel = new Map<string, FileOp>();
-  for (const ch of changes) opByRel.set(relativeToCwd(ch.path, cwd), ch.op);
+  for (const ch of changes) opByRel.set(displayPath(ch.path, cwd), ch.op);
 
   const summary = [
     c.created ? chalk.green(`+${c.created}`) : '',
@@ -597,8 +592,8 @@ export function renderSummary(events: SessionEvent[], cwd?: string): string {
   // Commands with timestamps
   const cmdList: Array<{ cmd: string; ts: number }> = [];
 
-  // Plan items
-  const todoItems: string[] = [];
+  // Plan items (checklist entries keep their status for [x]/[>]/[ ] markers)
+  const todoItems = extractTodoProgressFromEvents(events)?.items ?? [];
   let exitPlanContent: string | null = null;
   let planFilePath: string | null = null;
 
@@ -637,7 +632,7 @@ export function renderSummary(events: SessionEvent[], cwd?: string): string {
             planFilePath = p;
           } else {
             (isInsideCwd(p) || !cwd ? filesModifiedAbs : filesModifiedExternal).add(p);
-            recentActivity.push({ kind: 'edit', label: relativeToCwd(p, cwd), ts, absPath: p });
+            recentActivity.push({ kind: 'edit', label: displayPath(p, cwd), ts, absPath: p });
           }
         }
       }
@@ -650,17 +645,6 @@ export function renderSummary(events: SessionEvent[], cwd?: string): string {
         }
       }
 
-      // Plan items: TodoWrite items + TaskCreate descriptions (project's task tracker)
-      if (tool === 'TodoWrite' && Array.isArray(args.todos)) {
-        for (const item of args.todos) {
-          const text = item.content || item.text || String(item);
-          if (text && !todoItems.includes(text)) todoItems.push(text);
-        }
-      }
-      if (tool === 'TaskCreate' && (args.description || args.prompt)) {
-        const text = String(args.description || args.prompt || '').slice(0, 140);
-        if (text && !todoItems.includes(text)) todoItems.push(text);
-      }
       if (tool === 'ExitPlanMode') {
         exitPlanContent = args.result || args.plan || args.content || null;
       }
@@ -713,11 +697,11 @@ export function renderSummary(events: SessionEvent[], cwd?: string): string {
   for (const p of filesModifiedAbs) filesReadAbs.delete(p);
   for (const p of filesModifiedExternal) filesReadAbs.delete(p);
 
-  // Build abs→rel mapping for linkPath
+  // Build abs→display mapping for linkPath
   const buildAbsMap = (absSet: Set<string>): Map<string, string> => {
     const m = new Map<string, string>();
     for (const abs of absSet) {
-      const rel = relativeToCwd(abs, cwd);
+      const rel = displayPath(abs, cwd);
       m.set(rel, abs);
     }
     return m;
@@ -764,20 +748,26 @@ export function renderSummary(events: SessionEvent[], cwd?: string): string {
     lines.push('');
   }
 
-  // 3. Plan
+  // 3. Plan — the plan document (ExitPlanMode text / plan file) AND the live
+  // checklist. Both render: the checklist used to be hidden whenever plan text
+  // existed, which read as "this session had no todos".
   if (todoItems.length > 0 || exitPlanContent || planFilePath) {
     lines.push(chalk.bold('Plan'));
     if (planFilePath) {
       const home = process.env.HOME ?? '';
-      const displayPath = home && planFilePath.startsWith(home) ? planFilePath.replace(home, '~') : planFilePath;
-      lines.push('  ' + chalk.cyan(displayPath));
+      const planPathDisplay = home && planFilePath.startsWith(home) ? planFilePath.replace(home, '~') : planFilePath;
+      lines.push('  ' + chalk.cyan(planPathDisplay));
     }
     if (exitPlanContent) {
       const planLines = exitPlanContent.split('\n').slice(0, 10);
       for (const l of planLines) lines.push('  ' + l);
-    } else if (todoItems.length > 0) {
+    }
+    if (todoItems.length > 0) {
       for (const item of todoItems.slice(0, 20)) {
-        lines.push('  · ' + item);
+        lines.push('  ' + renderTodoMarker(item));
+      }
+      if (todoItems.length > 20) {
+        lines.push('  ' + chalk.gray(`… (${todoItems.length - 20} more)`));
       }
     }
     lines.push('');
@@ -791,6 +781,32 @@ export function renderSummary(events: SessionEvent[], cwd?: string): string {
       const typeSuffix = s.subagentType ? chalk.gray(` (${s.subagentType})`) : '';
       lines.push('  Task: ' + s.description + typeSuffix);
     }
+    lines.push('');
+  }
+
+  // 4b. Highlights — what the session USED (skills, hooks) and the references
+  // it mentioned (links). Shared extraction with the picker preview so the two
+  // renders never disagree.
+  const skills = extractSkills(events);
+  if (skills.length > 0) {
+    const shown = skills.map(s => chalk.white(s.name) + (s.count > 1 ? chalk.gray(` ×${s.count}`) : ''));
+    lines.push(chalk.bold('Skills') + chalk.gray(` (${skills.length})`) + '  ' + shown.join(chalk.gray(' · ')));
+    lines.push('');
+  }
+  const hooks = extractHooks(events);
+  if (hooks.length > 0) {
+    const shown = hooks.map(h =>
+      chalk.white(h.name) + (h.count > 1 ? chalk.gray(` ×${h.count}`) : '') + (h.failed ? chalk.red(` (${h.failed} failed)`) : ''));
+    lines.push(chalk.bold('Hooks') + chalk.gray(` (${hooks.length})`) + '  ' + shown.join(chalk.gray(' · ')));
+    lines.push('');
+  }
+  const links = extractLinks(events);
+  if (links.length > 0) {
+    // Width-capped like the picker's Dirs line: a link-heavy session must not
+    // wrap the summary pane.
+    const shown = links.slice(0, 6).map(l => chalk.blue(linkUrl(l.url, l.label)));
+    const more = links.length > 6 ? chalk.gray(` · +${links.length - 6} more`) : '';
+    lines.push(chalk.bold('Links') + chalk.gray(` (${links.length})`) + '  ' + shown.join(chalk.gray(' · ')) + more);
     lines.push('');
   }
 
@@ -812,8 +828,23 @@ export function renderSummary(events: SessionEvent[], cwd?: string): string {
   }
 
   // 6. Changes — files grouped by directory with create/modify/delete lifecycle
-  // (replaces the old flat "Modified" + "External edits" lists).
-  renderChangesSection(lines, events, cwd);
+  // (replaces the old flat "Modified" + "External edits" lists). Classified
+  // once here and shared with the Artifacts section below.
+  const allChanges = classifyFileChanges(events);
+  renderChangesSection(lines, allChanges, cwd);
+
+  // 6a. Artifacts — documents the session PRODUCED (`.agents/artifacts|plans|
+  // reports`, other *.md/*.html creations), named and clickable. These drown in
+  // the Changeset's source churn, so they get their own section.
+  const artifacts = extractArtifacts(allChanges);
+  if (artifacts.length > 0) {
+    lines.push(chalk.bold('Artifacts') + chalk.gray(` (${artifacts.length})`));
+    for (const a of artifacts) {
+      const tag = a.bucket === 'docs' ? '' : chalk.gray(` (${a.bucket})`);
+      lines.push('  ' + chalk.green('+') + ' ' + chalk.cyan(linkPath(a.path, a.basename)) + tag);
+    }
+    lines.push('');
+  }
 
   // 6b. Catch-up signals: last test/build verdict, then the tool histogram.
   renderTestsLine(lines, events);
@@ -902,6 +933,9 @@ export function parseRoleList(raw: string, flag: string): RoleFilter[] {
 }
 
 function roleOfEvent(e: SessionEvent): RoleFilter | null {
+  // Synthetic scaffolding still maps to 'user' here so `--exclude user` drops it
+  // like any other user-role event (pre-flag behavior). `--include user`'s
+  // "genuine intent only" carve-out lives in applyRoleFilter, not here.
   if (e.type === 'message' && e.role === 'user') return 'user';
   if (e.type === 'message' && e.role === 'assistant') return 'assistant';
   if (e.type === 'thinking') return 'thinking';
@@ -920,7 +954,12 @@ function applyRoleFilter(events: SessionEvent[], opts: FilterOptions): SessionEv
     const set = new Set(opts.include);
     return events.filter(e => {
       const role = roleOfEvent(e);
-      return role !== null && set.has(role);
+      if (role === null) return false;
+      // `--include user` means genuine user intent, so drop harness-injected
+      // `_synthetic` scaffolding (bash-input, system-reminder) even though it
+      // carries role=user. `--exclude user` still drops it via roleOfEvent.
+      if (role === 'user' && e._synthetic) return false;
+      return set.has(role);
     });
   }
   if (opts.exclude && opts.exclude.length > 0) {
@@ -949,8 +988,12 @@ function applyTurnSlice(events: SessionEvent[], opts: FilterOptions): SessionEve
     throw new Error(`Turn count must be a positive integer, got ${n}`);
   }
 
+  // A turn starts at a GENUINE user message — harness-injected `_synthetic`
+  // scaffolding (`<bash-input>`/`<bash-stdout>`, etc.) does not start a turn,
+  // so `--first N` / `--last N` count real asks, not the jump command that
+  // opened the session and its shell output.
   const isTurnStart = (e: SessionEvent): boolean =>
-    e.type === 'message' && e.role === 'user';
+    e.type === 'message' && e.role === 'user' && !e._synthetic;
   const turnStartIdx: number[] = [];
   for (let i = 0; i < events.length; i++) if (isTurnStart(events[i])) turnStartIdx.push(i);
 
@@ -995,6 +1038,19 @@ export function filterEvents(events: SessionEvent[], opts: FilterOptions): Sessi
  */
 export interface RenderConversationMarkdownOptions {
   redact?: boolean;
+  knownSecrets?: readonly string[];
+  reasoning?: 'omit' | 'fold' | 'include';
+  maxToolOutputChars?: number;
+}
+
+function markdownFence(content: string, language = ''): string {
+  const fence = content.includes('```') ? '````' : '```';
+  return `${fence}${language}\n${content}\n${fence}`;
+}
+
+function truncateToolOutput(content: string, maxChars: number): string {
+  if (content.length <= maxChars) return content;
+  return `${content.slice(0, maxChars)}\n\n[Output truncated: ${content.length - maxChars} characters omitted.]`;
 }
 
 export function renderConversationMarkdown(
@@ -1003,7 +1059,11 @@ export function renderConversationMarkdown(
 ): string {
   const parts: string[] = [];
   const shouldRedact = opts.redact !== false;
-  const sanitize = (text: string): string => shouldRedact ? redactSecrets(text) : text;
+  const sanitize = (text: string): string => shouldRedact ? redactSecrets(text, opts.knownSecrets) : text;
+  // Preserve the long-standing `sessions <id> --markdown` full-fidelity default.
+  // The shareable `sessions render` surface passes `omit` explicitly.
+  const reasoning = opts.reasoning ?? 'include';
+  const maxToolOutputChars = opts.maxToolOutputChars ?? 4000;
 
   for (const event of events) {
     if (event.type === 'message') {
@@ -1013,22 +1073,31 @@ export function renderConversationMarkdown(
         parts.push(`## Assistant\n\n${sanitize(event.content ?? '')}`);
       }
     } else if (event.type === 'thinking') {
-      if (event.content) parts.push(`### Thinking\n\n${sanitize(event.content)}`);
+      if (event.content && reasoning === 'include') {
+        parts.push(`### Reasoning\n\n${sanitize(event.content)}`);
+      } else if (event.content && reasoning === 'fold') {
+        parts.push(`<details>\n<summary>Reasoning</summary>\n\n${sanitize(event.content)}\n\n</details>`);
+      }
     } else if (event.type === 'tool_use') {
       const tool = event.tool || 'unknown';
       if (event.command) {
-        parts.push(`### Tool: ${tool}\n\n\`\`\`bash\n${sanitize(event.command)}\n\`\`\``);
+        const args = event.args && Object.keys(event.args).length > 0
+          ? `\n\nArguments:\n\n${markdownFence(sanitize(JSON.stringify(event.args, null, 2)), 'json')}`
+          : '';
+        parts.push(`### Tool: ${tool}\n\n${markdownFence(sanitize(event.command), 'bash')}${args}`);
+      } else if (event.args && Object.keys(event.args).length > 0) {
+        parts.push(`### Tool: ${tool}\n\nArguments:\n\n${markdownFence(sanitize(JSON.stringify(event.args, null, 2)), 'json')}`);
       } else if (event.path) {
-        parts.push(`### Tool: ${tool}\n\n\`${shortenPathTrace(event.path)}\``);
+        parts.push(`### Tool: ${tool}\n\n\`${sanitize(shortenPathTrace(event.path))}\``);
       } else {
         const summary = summarizeToolUse(tool, event.args);
-        parts.push(`### Tool: ${tool}\n\n${summary}`);
+        parts.push(`### Tool: ${tool}\n\n${sanitize(summary)}`);
       }
     } else if (event.type === 'tool_result') {
-      if (event.content) {
-        const truncated = event.content.length > 2000 ? event.content.slice(0, 2000) + '\n…' : event.content;
-        const body = sanitize(truncated);
-        parts.push(`### Tool Result\n\n\`\`\`\n${body}\n\`\`\``);
+      const output = event.content || event.output;
+      if (output) {
+        const body = sanitize(truncateToolOutput(output, maxToolOutputChars));
+        parts.push(`### Tool Result${event.tool ? `: ${event.tool}` : ''}\n\n${markdownFence(body)}`);
       }
     } else if (event.type === 'error') {
       parts.push(`### Error\n\n${event.content ? sanitize(event.content) : (event.tool || 'Unknown error')}`);

@@ -30,10 +30,18 @@ import * as os from 'os';
 import * as path from 'path';
 import { linuxBackend, usesFileFallback as linuxUsesFileFallback, importNativeSecretToolItems } from './linux.js';
 import { windowsBackend, usesFileFallback as windowsUsesFileFallback, importNativeCredManItems } from './windows.js';
+import { isHeadlessSecretsContext } from './headless.js';
+import {
+  KEYCHAIN_READ_BACKOFF_TTL_MS,
+  clearKeychainReadBackoff,
+  isKeychainReadBackedOff,
+  noteKeychainReadFailure,
+} from './read-backoff.js';
 import type { NativeImportReport } from './fallback.js';
 
 export type { NativeImportReport, NativeImportResult, NativeImportStatus } from './fallback.js';
 import { getKeychainHelperPath } from './install-helper.js';
+import { deriveShortId } from '../session/short-id.js';
 
 const SERVICE_PREFIX = 'agents-cli';
 export const SECRETS_ITEM_PREFIX = `${SERVICE_PREFIX}.secrets.`;
@@ -228,6 +236,11 @@ interface HmacKeyRecord {
   /** Old cleartext services whose hashed copies are verified but whose
    * originals are not yet deleted (crash-resume list; deletes are silent). */
   pendingDeletes?: string[];
+  /** True once this record has been re-stored no-ACL to heal a hmackey item that
+   * an OLD helper (pre the metadata/hmackey no-ACL migration fix) re-stamped with
+   * a biometry ACL. Set on the first read that heals it, so the heal runs exactly
+   * once per machine and never churns the keychain afterward. */
+  healedNoAcl?: boolean;
 }
 
 interface HashState {
@@ -308,13 +321,14 @@ function parseHmacKeyRecord(raw: string): HmacKeyRecord | null {
   return null;
 }
 
-function readHmacKeyRecord(): HmacKeyRecord | null {
+export function readHmacKeyRecord(): HmacKeyRecord | null {
   // HMAC_KEY_ITEM is exempt from the transform, so this routes to the helper
   // (or the test backend) under its literal name. The item is no-ACL, so the
-  // read is silent.
+  // read is silent — attest that to the storm guard so a headless hashed-name
+  // resolution never trips the fail-fast.
   let raw: string;
   try {
-    raw = getKeychainToken(HMAC_KEY_ITEM);
+    raw = getKeychainToken(HMAC_KEY_ITEM, { silentNoAcl: true });
   } catch {
     return null;
   }
@@ -328,6 +342,25 @@ function writeHmacKeyRecord(rec: HmacKeyRecord): void {
   // which is exactly the "old helper never half-runs the re-key" gate.
   setKeychainToken(HMAC_KEY_ITEM, JSON.stringify(rec), { noAcl: true });
   hashStateCache = null;
+}
+
+/**
+ * Heal a `hmackey` item that an OLD helper (pre the metadata/hmackey no-ACL
+ * migration fix) re-stamped with a biometry ACL. Such an item makes EVERY hashed
+ * keychain lookup pop the generic "Agents CLI needs to authenticate" sheet,
+ * because the HMAC key is read before every hashed name resolves. The migration
+ * fix stopped the re-stamping but never un-stamped an already-damaged item, and
+ * nothing else re-stores it once hashing is already active — so it prompts forever.
+ *
+ * This re-stores the record no-ACL exactly once per machine (guarded by
+ * `healedNoAcl`), turning every future read silent. The read that produced `rec`
+ * has already happened (and already prompted if it was ACL'd); this only writes.
+ * Returns true if it healed. Exported for tests. No-op when already healed.
+ */
+export function healHmacKeyNoAclOnce(rec: HmacKeyRecord): boolean {
+  if (rec.healedNoAcl) return false;
+  writeHmacKeyRecord({ ...rec, healedNoAcl: true });
+  return true;
 }
 
 function resolveHashState(): HashState {
@@ -356,11 +389,10 @@ export function keychainServiceAlias(item: string): string {
   return prepareServiceName(item);
 }
 
-function prepareServiceName(item: string, opts?: { autoRekey?: boolean }): string {
+function prepareServiceName(item: string): string {
   if (rawScopeDepth > 0) return item;
   if (!isOurItem(item)) return item;
   if (item === HMAC_KEY_ITEM || item.startsWith(HASHED_SERVICE_PREFIX)) return item;
-  if (opts?.autoRekey) maybeAutoRekey();
   const st = resolveHashState();
   if (!st.active || !st.key) return item;
   return hashedServiceName(item, st.key);
@@ -383,7 +415,6 @@ function prepareListPrefix(prefix: string): MappedListPrefix {
   if (rawScopeDepth > 0) return { prefix };
   if (!prefix.startsWith(`${SERVICE_PREFIX}.`)) return { prefix };
   if (prefix.startsWith(HASHED_SERVICE_PREFIX)) return { prefix };
-  maybeAutoRekey();
   const st = resolveHashState();
   if (!st.active || !st.key) return { prefix };
   if (prefix === BUNDLES_ITEM_PREFIX) {
@@ -464,7 +495,7 @@ function finishPendingDeletes(rec: HmacKeyRecord): void {
  * Never throws — a failed attempt leaves the process on cleartext names
  * (exact pre-#316 behavior) and the next process retries.
  */
-function maybeAutoRekey(): void {
+export function maybeAutoRekey(): void {
   if (autoRekeyAttempted || rekeyRunning || rawScopeDepth > 0) return;
   autoRekeyAttempted = true;
   if (forcedTestKey || backend) return;
@@ -475,6 +506,13 @@ function maybeAutoRekey(): void {
   if (process.env.AGENTS_SECRETS_HASH_NAMES === '0') return;
   const st = resolveHashState();
   if (st.active) {
+    if (st.record && !st.record.healedNoAcl) {
+      try {
+        healHmacKeyNoAclOnce(st.record);
+      } catch {
+        /* the next explicit unlock retries */
+      }
+    }
     if (st.record?.pendingDeletes?.length) {
       try {
         finishPendingDeletes(st.record);
@@ -774,7 +812,20 @@ export function rekeyStatus(): {
   };
 }
 
-/** Check if a keychain/keyring item exists. Never prompts for biometry. */
+/**
+ * Check if a keychain/keyring item exists. Never prompts for biometry.
+ *
+ * Throws when the item cannot be reached — on macOS, when the signed helper is
+ * unavailable. That is deliberate: this primitive gates destructive writes as
+ * well as reads. Through `bundleExists()` it guards the `--force` overwrite
+ * checks in `agents secrets create` (`../../commands/secrets.ts`) and the
+ * bundle-rename purge (`./bundles.ts`), and the pull-rollback bookkeeping
+ * (`./sync.ts`). A false "absent" silently disarms every one of them, so an
+ * unreachable keychain must fail loudly rather than answer "no".
+ *
+ * Tests needing this path without a helper install a backend via
+ * `setKeychainBackendForTest()`, which short-circuits on the next line.
+ */
 export function hasKeychainToken(item: string): boolean {
   item = prepareServiceName(item);
   if (backend) return backend.has(item);
@@ -799,12 +850,99 @@ export function hasKeychainToken(item: string): boolean {
  * call in the same process). For bundles, prefer getKeychainTokens() so a
  * single biometric prompt covers every key in the batch.
  */
-export function getKeychainToken(item: string): string {
+export interface KeychainReadContext {
+  agent?: string;
+  bundle?: string;
+  sessionId?: string;
+  reason?: string;
+  duration?: string;
+  defaultPolicy?: 'hold' | 'always' | 'never';
+  forceDuration?: boolean;
+  /**
+   * The caller attests the item(s) carry NO biometry ACL (it wrote them with
+   * `setKeychainToken(..., { noAcl: true })`, or they are bundle metadata /
+   * `never`-policy bundle items, which are no-ACL by contract) — so the read
+   * is silent even when no one is at the screen. Skips the headless fail-fast
+   * and the back-off memo. Never pass this for an ACL-protected item: that
+   * re-opens the background Touch ID storm the guard exists to stop.
+   */
+  silentNoAcl?: boolean;
+}
+
+/**
+ * The detector the raw-read storm guard consults, overridable so tests on any
+ * platform exercise the fail-fast path — the real detector self-gates to
+ * darwin (the only platform with a Touch ID sheet to suppress), which would
+ * make the throw unreachable from a Linux CI run. Same parameterization
+ * argument as the injected env/platform/tty on isHeadlessSecretsContext.
+ */
+let rawReadHeadlessDetector: () => boolean = () => isHeadlessSecretsContext();
+
+export function setKeychainHeadlessDetectorForTest(detector: (() => boolean) | null): void {
+  rawReadHeadlessDetector = detector ?? (() => isHeadlessSecretsContext());
+}
+
+/**
+ * The raw-read storm guard, consulted by every getKeychainToken /
+ * getKeychainTokens read that could reach a prompting keychain query. Two
+ * fail-fast gates, both skipped for `silentNoAcl` (provably prompt-free)
+ * reads:
+ *
+ *  1. Headless fail-fast. A non-interactive process (AGENTS_RUNTIME set, or
+ *     no TTY — see isHeadlessSecretsContext) must NEVER raise a Touch ID sheet
+ *     on the interactive user's screen: the sheet has no one to answer it, a
+ *     polling caller re-raises it every few seconds, and a cancel just feeds
+ *     the next poll. Throw an actionable error naming the item instead.
+ *  2. Back-off. A read whose prompt recently failed or was cancelled is
+ *     suppressed for KEYCHAIN_READ_BACKOFF_TTL_MS so an interactive-context
+ *     poller (TTY but unwatched — a tmux pane, a VS Code task terminal) can't
+ *     storm sheets either. A successful read or write clears the memo.
+ *
+ * Placement note: this runs BEFORE the platform branches so the back-off memo
+ * is honored identically everywhere, and the headless gate is a no-op off
+ * darwin (the detector returns false there) — Linux/Windows reads never
+ * prompt, so there is nothing to guard.
+ */
+function assertRawKeychainReadAllowed(key: string, context: KeychainReadContext, label?: string): void {
+  if (context.silentNoAcl) return;
+  const what = label ?? `Keychain item '${key}'`;
+  if (rawReadHeadlessDetector()) {
+    const hint = context.bundle
+      ? `Run 'agents secrets unlock ${context.bundle}' in a terminal first`
+      : `Provision a prompt-free credential for headless use (a file-based setup token, or an item stored without the biometry ACL), ` +
+        `or read it once from an interactive terminal`;
+    throw new Error(
+      `${what} requires Touch ID, but this process is non-interactive — ` +
+      `a prompt would appear on screen with no one to answer it. ${hint}.`
+    );
+  }
+  if (isKeychainReadBackedOff(key)) {
+    throw new Error(
+      `${what} is in read back-off: a Touch ID prompt for it failed or was cancelled within the last ` +
+      `${Math.round(KEYCHAIN_READ_BACKOFF_TTL_MS / 60000)} minutes, and retrying is suppressed so a polling caller can't storm prompts. ` +
+      `Read it once interactively or wait out the back-off.`
+    );
+  }
+}
+
+export function keychainOperationPrompt(context: KeychainReadContext = {}): string {
+  const agent = context.agent || 'Agents CLI';
+  const bundle = context.bundle ? ` the '${context.bundle}' bundle` : ' secrets';
+  // Which session triggered the read — the short-id disambiguates an unexpected
+  // prompt when several agents run at once (interactive + headless + exec).
+  const session = context.sessionId ? ` (session ${deriveShortId(context.sessionId)})` : '';
+  const duration = context.duration ? ` for ${context.duration}` : '';
+  const reason = context.reason ? ` ${context.reason}` : '';
+  return `${agent} is requesting to unlock${bundle}${session}${duration}${reason}.`;
+}
+
+export function getKeychainToken(item: string, context: KeychainReadContext = {}): string {
   // Errors keep the requested (human-readable) name; the storage name may be
   // an opaque hash.
   const requested = item;
-  item = prepareServiceName(item, { autoRekey: true });
+  item = prepareServiceName(item);
   if (backend) return backend.get(item);
+  assertRawKeychainReadAllowed(requested, context);
   assertSupportedPlatform();
   if (isLinux()) return linuxBackend.get(item);
   if (isWindows()) return windowsBackend.get(item);
@@ -814,22 +952,37 @@ export function getKeychainToken(item: string): string {
     });
     if (sec.status === 0) {
       const token = sec.stdout?.toString().trim();
-      if (token) return token;
+      if (token) {
+        clearKeychainReadBackoff(requested);
+        return token;
+      }
     }
     throw new Error(`Keychain item '${requested}' not found.`);
   }
   const bin = getKeychainHelperPath();
   const result = spawnSync(bin, ['get', item, os.userInfo().username], {
+    env: {
+      ...process.env,
+      AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context),
+      AGENTS_KEYCHAIN_PROMPT_BASE: keychainOperationPrompt({ ...context, duration: undefined }),
+      AGENTS_KEYCHAIN_SKIP_AUTH_UI: context.silentNoAcl ? '1' : '0',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  // Exit 1 is a plain miss — no prompt was raised, so it opens no back-off.
   if (result.status === 1) throw new Error(`Keychain item '${requested}' not found.`);
-  if (result.status === 4) throw new Error(`Touch ID cancelled while reading '${requested}'.`);
   if (result.status !== 0) {
+    // A cancel (4) or helper failure after a prompted read: open the back-off
+    // window BEFORE throwing, so the next poll of the same item fails fast
+    // instead of re-raising the sheet.
+    if (!context.silentNoAcl) noteKeychainReadFailure(requested);
+    if (result.status === 4) throw new Error(`Touch ID cancelled while reading '${requested}'.`);
     const msg = result.stderr?.toString().trim();
     throw new Error(msg || `Failed to read keychain item '${requested}'.`);
   }
   const token = result.stdout?.toString();
   if (!token) throw new Error(`Keychain item '${requested}' exists but is empty.`);
+  clearKeychainReadBackoff(requested);
   return token;
 }
 
@@ -843,7 +996,7 @@ export function getKeychainToken(item: string): string {
  * On Linux or when a test backend is installed, falls back to individual
  * lookups — no biometric prompt path on those platforms.
  */
-export function getKeychainTokens(items: string[]): Map<string, string> {
+export function getKeychainTokens(items: string[], context: KeychainReadContext = {}): Map<string, string> {
   const result = new Map<string, string>();
   if (items.length === 0) return result;
   // Resolve storage names up front, remembering which requested name each one
@@ -851,7 +1004,7 @@ export function getKeychainTokens(items: string[]): Map<string, string> {
   // whether those were cleartext (hashed here) or already-hashed (enumerated).
   const requestedByStorage = new Map<string, string>();
   const storageItems = items.map((item) => {
-    const storage = prepareServiceName(item, { autoRekey: true });
+    const storage = prepareServiceName(item);
     if (!requestedByStorage.has(storage)) requestedByStorage.set(storage, item);
     return storage;
   });
@@ -864,6 +1017,13 @@ export function getKeychainTokens(items: string[]): Map<string, string> {
     }
     return result;
   }
+  // One back-off memo covers the whole batch: the batch raises at most one
+  // prompt, so a cancel/failure suppresses retrying the same batch, keyed by
+  // the requested names (never the storage hashes) for a stable identity. The
+  // guard runs before the platform branches so the headless fail-fast is
+  // exercisable on any platform (the real detector self-gates to darwin).
+  const backoffKey = `batch:${items.join('\n')}`;
+  assertRawKeychainReadAllowed(backoffKey, context, `Batch read of ${items.length} keychain item(s)`);
   assertSupportedPlatform();
   if (isLinux()) {
     for (const storage of storageItems) {
@@ -879,8 +1039,19 @@ export function getKeychainTokens(items: string[]): Map<string, string> {
   }
   const bin = getKeychainHelperPath();
   const child = spawnSync(bin, ['get-batch', os.userInfo().username, ...storageItems], {
+    env: {
+      ...process.env,
+      AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context),
+      AGENTS_KEYCHAIN_PROMPT_BASE: keychainOperationPrompt({ ...context, duration: undefined }),
+      AGENTS_KEYCHAIN_SKIP_AUTH_UI: context.silentNoAcl ? '1' : '0',
+      // The signed helper's own vocabulary is unchanged (it predates the rename
+      // and ships as a separately-versioned binary), so map to its legacy token.
+      AGENTS_KEYCHAIN_DEFAULT_POLICY: (context.defaultPolicy ?? 'hold') === 'hold' ? 'daily' : (context.defaultPolicy as string),
+      AGENTS_KEYCHAIN_FORCE_DURATION: context.forceDuration ? '1' : '0',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  if (child.status !== 0 && !context.silentNoAcl) noteKeychainReadFailure(backoffKey);
   if (child.status === 4) {
     throw new Error(`Touch ID cancelled while reading ${items.length} keychain item(s).`);
   }
@@ -888,6 +1059,7 @@ export function getKeychainTokens(items: string[]): Map<string, string> {
     const msg = child.stderr?.toString().trim();
     throw new Error(msg || `Failed to batch-read ${items.length} keychain items.`);
   }
+  clearKeychainReadBackoff(backoffKey);
   const out = child.stdout?.toString() ?? '';
   parseBatchRecords(out, record);
   return result;
@@ -969,7 +1141,8 @@ export function setKeychainToken(item: string, value: string, opts?: { noAcl?: b
   // Validate the CLEARTEXT name (a hashed storage name is always clean), then
   // resolve the storage name.
   if (/[\x00=\r\n]/.test(item)) throw new Error('Secret item name contains invalid characters.');
-  item = prepareServiceName(item, { autoRekey: true });
+  const requested = item;
+  item = prepareServiceName(item);
   if (backend) { backend.set(item, value, opts); return; }
   assertSupportedPlatform();
   assertValueStorable(value);
@@ -1017,6 +1190,7 @@ export function setKeychainToken(item: string, value: string, opts?: { noAcl?: b
       const msg = sec.stderr?.toString().trim();
       throw new Error(msg || `Failed to write keychain item '${item}'.`);
     }
+    clearKeychainReadBackoff(requested);
     return;
   }
 
@@ -1041,19 +1215,27 @@ export function setKeychainToken(item: string, value: string, opts?: { noAcl?: b
     }
     throw new Error(msg || `Failed to write keychain item '${item}'.`);
   }
+  // A successful write supersedes any open back-off: the item is known-good
+  // now, so the next read must not be suppressed by a stale failure memo.
+  clearKeychainReadBackoff(requested);
 }
 
 /** Delete a keychain/keyring item. Returns true if it existed. Never prompts for biometry. */
 export function deleteKeychainToken(item: string): boolean {
+  const requested = item;
   item = prepareServiceName(item);
   if (backend) return backend.delete(item);
   assertSupportedPlatform();
   if (isLinux()) return linuxBackend.delete(item);
   if (isWindows()) return windowsBackend.delete(item);
   const bin = getKeychainHelperPath();
-  return spawnSync(bin, ['delete', item, os.userInfo().username], {
+  const deleted = spawnSync(bin, ['delete', item, os.userInfo().username], {
     stdio: ['ignore', 'pipe', 'pipe'],
   }).status === 0;
+  // A deleted item must fail its next read as plain "not found", not with a
+  // stale back-off error left over from a pre-delete cancel.
+  if (deleted) clearKeychainReadBackoff(requested);
+  return deleted;
 }
 
 /**

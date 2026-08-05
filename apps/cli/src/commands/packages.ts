@@ -16,7 +16,6 @@ import { getAgentsDir, getEnabledExtraRepos } from '../lib/state.js';
 
 import {
   AGENTS,
-  ALL_AGENT_IDS,
   getAllCliStates,
   agentLabel,
 } from '../lib/agents.js';
@@ -35,7 +34,7 @@ import {
   verifySkillIntegrity,
   parseOwnerRepoFromRemote,
 } from '../lib/registry.js';
-import { cloneRepo, commitAndPush, getRemoteUrl, isGitRepo } from '../lib/git.js';
+import { cloneRepo, commitAndPush, getCurrentBranch, getRemoteUrl, isGitRepo } from '../lib/git.js';
 import {
   discoverCommands,
   resolveCommandSource,
@@ -71,6 +70,7 @@ import {
   syncResourcesToVersion,
 } from '../lib/versions.js';
 import {
+  formatPath,
   isInteractiveTerminal,
   isPromptCancelled,
   parseCommaSeparatedList,
@@ -436,7 +436,7 @@ When to use:
     .description('Generate a skills-index.json for a git repo and push it, making its skills discoverable via agents search/install')
     .option('--repo <alias>', 'Publish an extra repo added via `agents repo add` (default: your ~/.agents repo)')
     .option('--name <name>', 'Registry name to suggest in the output (default: the repo name)')
-    .option('--branch <branch>', 'Branch the raw URL should reference', 'main')
+    .option('--branch <branch>', 'Branch to push the index to and reference in the raw URL (default: the repo\'s current branch)')
     .option('--dry-run', 'Write the index and print the URL without committing or pushing')
     .addHelpText('after', `
 Publish walks a repo's skills/ directory, records a sha256 of every SKILL.md,
@@ -458,7 +458,7 @@ After publishing, share the printed 'agents registry add skill ...' command so
 others can search and install your skills. Installs verify each SKILL.md against
 the sha256 in the index and abort on mismatch.
 `)
-    .action(async (options: { repo?: string; name?: string; branch: string; dryRun?: boolean }) => {
+    .action(async (options: { repo?: string; name?: string; branch?: string; dryRun?: boolean }) => {
       // Resolve the target repo: an extra repo by alias, else the primary ~/.agents repo.
       let repoDir: string;
       if (options.repo) {
@@ -505,20 +505,29 @@ the sha256 in the index and abort on mismatch.
         console.log(`  ${chalk.cyan(s.name)} ${chalk.gray(`sha256:${s.sha256?.slice(0, 12)}…`)}`);
       }
 
+      // The branch the URL references must be the branch the index actually
+      // lands on. In a real push that's whatever commitAndPush reports back
+      // (the requested --branch, else the checked-out branch); in a dry run we
+      // resolve it the same way without pushing.
+      let urlBranch: string;
       if (options.dryRun) {
+        urlBranch = options.branch || (await getCurrentBranch(repoDir));
         console.log(chalk.gray(`\nDry run — wrote ${indexPath} but did not commit or push.`));
       } else {
         const pushSpinner = ora('Committing and pushing skills-index.json...').start();
-        const result = await commitAndPush(repoDir, 'chore: update skills-index.json (agents publish)');
+        const result = await commitAndPush(repoDir, 'chore: update skills-index.json (agents publish)', options.branch);
         if (!result.success) {
           pushSpinner.fail(`Push failed: ${result.error}`);
           console.log(chalk.gray('The index was written locally — commit and push it manually to publish.'));
           process.exit(1);
         }
-        pushSpinner.succeed('Pushed skills-index.json');
+        // commitAndPush always reports the pushed branch on success; the `??`
+        // only satisfies the optional return type, it is not a behavior path.
+        urlBranch = result.branch ?? (await getCurrentBranch(repoDir));
+        pushSpinner.succeed(`Pushed skills-index.json to ${urlBranch}`);
       }
 
-      const rawUrl = `https://raw.githubusercontent.com/${repoSlug}/${options.branch}/skills-index.json`;
+      const rawUrl = `https://raw.githubusercontent.com/${repoSlug}/${urlBranch}/skills-index.json`;
       const registryName = options.name || repoSlug.split('/')[1] || 'my-skills';
 
       console.log(chalk.bold('\nPublished. Share these with anyone who wants your skills:\n'));
@@ -527,7 +536,7 @@ the sha256 in the index and abort on mismatch.
       console.log(chalk.gray('\n  Register + search + install:'));
       console.log(`    ${chalk.green(`agents registry add skill ${registryName} ${rawUrl}`)}`);
       console.log(`    ${chalk.green(`agents search ${index.skills[0].name} --type skill`)}`);
-      console.log(`    ${chalk.green(`agents install skill:${index.skills[0].name} --agents claude,codex,gemini`)}`);
+      console.log(`    ${chalk.green(`agents install skill:${index.skills[0].name} --agents claude,codex,cursor`)}`);
     });
 
   // ==========================================================================
@@ -536,8 +545,8 @@ the sha256 in the index and abort on mismatch.
 
   program
     .command('install <identifier>')
-    .description('Install a package by registry name (mcp:notion), GitHub URL (gh:user/repo), or skill identifier')
-    .option('-a, --agents <list>', 'Targets: claude, codex@0.116.0, or gemini@default')
+    .description('Install a package: mcp:, skill:, plugin:, or GitHub (gh:user/repo) — one install path (Phase 5)')
+    .option('-a, --agents <list>', 'Targets: claude, codex@0.116.0, or cursor@default')
     .option(
       '--types <list>',
       'When source is a repo: comma-separated resource types to install (skills,workflows,commands,hooks,permissions,subagents,mcp)'
@@ -547,32 +556,25 @@ the sha256 in the index and abort on mismatch.
       'When source is a repo: comma-separated resource names within the selected types'
     )
     .option('-y, --yes', 'Auto-install any missing agent versions without prompting')
+    .option('--allow-exec-surfaces', 'With plugin: allow plugins that ship hooks/mcp/bin (same as agents plugins install)')
     .addHelpText('after', `
-Install resolves the package type (MCP server, skill, command, hook) and installs to the specified agents. Packages can come from registries (mcp:, skill:), GitHub (gh:user/repo), or direct URLs.
+Install is the unified add path (Phase 5 packaging). Prefix the identifier:
+
+  mcp:<name>       MCP server from a registry
+  skill:<name>     skill from a registry (or gh: fallback)
+  plugin:<spec>    plugin — same grammar as agents plugins install (name@url or path)
+  gh:user/repo     clone a DotAgents / multi-resource repo and install selected types
 
 Examples:
-  # Install an MCP server from a registry
   agents install mcp:notion --agents claude
-
-  # Install skills and commands from GitHub
+  agents install skill:animator --agents claude,codex
+  agents install plugin:my-plugin@https://github.com/user/my-plugin.git
+  agents install plugin:~/Projects/rush-toolkit
   agents install gh:anthropics/skills --agents codex,claude
-
-  # Install using GitHub shorthand
-  agents install gh:user/repo --agents claude@2.1.112
-
-  # Install only specific resource types from a multi-resource repo
   agents install gh:phnx-labs/.agents-system --types skills,workflows --agents claude@all
 
-  # Install specific resources by name
-  agents install gh:phnx-labs/.agents-system --types skills --names animator,composer --agents claude@all
-
-  # Install to all installed agents (uses defaults or prompts)
-  agents install mcp:postgres
-
-When to use:
-  - After search: 'agents search notion' then 'agents install mcp:notion'
-  - Team setup: 'agents install gh:team/resources' to sync everyone's tooling
-  - Quick MCP add: 'agents install mcp:<name>' when you know the package name
+Specialized verbs still work (agents plugins install, agents skills add) and
+delegate to the same underlying installers.
 `)
     .action(async (identifier: string, options) => {
       const spinner = ora('Resolving package...').start();
@@ -582,11 +584,105 @@ When to use:
 
         if (!resolved) {
           spinner.fail('Package not found');
-          console.log(chalk.gray('\nTip: Use explicit prefix (mcp:, skill:, gh:) or check the identifier.'));
+          console.log(chalk.gray('\nTip: Use explicit prefix (mcp:, skill:, plugin:, gh:) or check the identifier.'));
           process.exit(1);
         }
 
         spinner.succeed(`Found ${resolved.type} package`);
+
+        if (resolved.type === 'plugin') {
+          spinner.stop();
+          const spec = resolved.pluginSpec ?? resolved.source;
+          console.log(chalk.gray(`Installing plugin from: ${spec}`));
+          const {
+            installPlugin,
+            getPlugin,
+            inspectPluginCapabilities,
+            pluginCapabilityLabels,
+            parseInstallSpec,
+            checkPluginDependencies,
+            hasPluginExecSurfaces,
+            pluginSupportsAgent,
+            syncPluginToVersion,
+            pluginResourceGroups,
+          } = await import('../lib/plugins.js');
+          const { listInstalledVersions, getGlobalDefault, getVersionHomePath, syncResourcesToVersion } =
+            await import('../lib/versions.js');
+          const { agentLabel } = await import('../lib/agents.js');
+
+          let name: string;
+          let root: string;
+          try {
+            const result = await installPlugin(spec);
+            name = result.name;
+            root = result.root;
+          } catch (err) {
+            console.log(chalk.red(`Install failed: ${(err as Error).message}`));
+            process.exit(1);
+          }
+
+          const plugin = getPlugin(name);
+          if (!plugin) {
+            console.log(chalk.red(`Installed but could not load plugin '${name}'`));
+            process.exit(1);
+          }
+          const capabilities = inspectPluginCapabilities(root);
+          const allowExec = options.allowExecSurfaces === true;
+          if (hasPluginExecSurfaces(capabilities) && !allowExec) {
+            const source = parseInstallSpec(spec).source;
+            console.error(chalk.red('Install refused: plugin ships executable surfaces:'));
+            for (const label of pluginCapabilityLabels(capabilities)) {
+              console.error(`  ${label}`);
+            }
+            console.error(
+              `Re-run with --allow-exec-surfaces if you trust the source: ${source}@HEAD`,
+            );
+            fs.rmSync(root, { recursive: true, force: true });
+            process.exit(1);
+          }
+
+          const missingDeps = checkPluginDependencies(plugin.manifest);
+          if (missingDeps.length > 0) {
+            console.log(chalk.yellow(`Warning: missing dependencies: ${missingDeps.join(', ')}`));
+            console.log(chalk.gray('Install them with: agents install plugin:<name>@<source>'));
+          }
+
+          // Same sync loop as `agents plugins install` (default version per harness).
+          console.log();
+          let synced = 0;
+          for (const agentId of capableAgents('plugins')) {
+            if (!pluginSupportsAgent(plugin, agentId)) continue;
+            const versions = listInstalledVersions(agentId);
+            if (versions.length === 0) continue;
+            const defaultVer = getGlobalDefault(agentId);
+            const targetVersions = defaultVer ? [defaultVer] : [versions[versions.length - 1]];
+            for (const version of targetVersions) {
+              const didSync = allowExec
+                ? syncPluginToVersion(plugin, agentId, getVersionHomePath(agentId, version), {
+                    allowExecSurfaces: true,
+                  }).success
+                : syncResourcesToVersion(agentId, version, { plugins: [name] }).plugins.length > 0;
+              if (didSync) {
+                console.log(chalk.green(`  Synced to ${agentLabel(agentId)}@${version}`));
+                synced++;
+              }
+            }
+          }
+          if (synced === 0) {
+            console.log(
+              chalk.gray('  No supported agent versions installed — run "agents use <agent>@<version>" to sync.'),
+            );
+          }
+
+          console.log(chalk.bold(`\nInstalled ${plugin.name} v${plugin.manifest.version} to ${formatPath(root)}`));
+          const groups = pluginResourceGroups(plugin);
+          if (groups.length > 0) {
+            for (const g of groups) {
+              console.log(chalk.gray(`  ${g.label}: ${g.items.slice(0, 8).join(', ')}${g.items.length > 8 ? '…' : ''}`));
+            }
+          }
+          return;
+        }
 
         if (resolved.type === 'mcp') {
           // Install MCP server
@@ -761,19 +857,19 @@ When to use:
           }
 
           const gitCliStates = await getAllCliStates();
-          const installedAgents = ALL_AGENT_IDS.filter(
+          const installedAgents = capableAgents('commands').filter(
             (id) => gitCliStates[id]?.installed || listInstalledVersions(id).length > 0
           );
           let targets;
           if (options.agents) {
-            const resolved = await resolveInstalledAgentTargetsAutoInstalling(options.agents, ALL_AGENT_IDS, { yes: options.yes });
+            const resolved = await resolveInstalledAgentTargetsAutoInstalling(options.agents, capableAgents('commands'), { yes: options.yes });
             if (!resolved) {
               console.log(chalk.gray('Cancelled.'));
               return;
             }
             targets = resolved;
           } else {
-            targets = resolveConfiguredAgentTargets(installedAgents, undefined, ALL_AGENT_IDS);
+            targets = resolveConfiguredAgentTargets(installedAgents, undefined, capableAgents('commands'));
           }
 
           if (targets.selectedAgents.length === 0) {

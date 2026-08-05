@@ -7,13 +7,16 @@ struct Routine: Decodable {
     let agent: String?
     let workflow: String?
     let repo: String?
+    // project membership decoded from CLI JSON; absent keys decode as nil for both fields.
+    let projects: [String]?    // repos this routine belongs to
+    let projectGroup: String?  // menu display grouping label; nil = cross-project / ungrouped
     let schedule: String
     let scheduleHuman: String?
     let enabled: Bool
     let overdue: Bool
     let nextRun: String?
     let nextRunHuman: String?
-    let lastStatus: String?            // completed | failed | timeout | running | null
+    let lastStatus: String?            // completed | failed | timeout | running | missed | null
     let exitCode: Int?
     let failureReason: String?
     let lastRunStartedAt: String?
@@ -23,6 +26,41 @@ struct Routine: Decodable {
 struct MenuAgent {
     let id: String
     let label: String
+}
+
+// One entry of `linear projects --json` (the linear skill CLI). Only the fields
+// the quick-dispatch panel needs to name and scope a project are decoded.
+struct LinearProject: Codable, Equatable {
+    let id: String
+    let name: String
+}
+
+// Shape of `linear tasks --json`: a scope envelope around the issue list.
+struct LinearTasksResponse: Decodable {
+    let count: Int
+    let issues: [LinearTicket]
+}
+
+// One open Linear issue as the quick-dispatch panel shows it. `priority` is
+// Linear's own scale — 1 urgent, 2 high, 3 medium, 4 low, 0 none (0 sorts last,
+// see LinearTickets.rank). Cached to disk, so Codable both ways.
+struct LinearTicket: Codable, Equatable {
+    let identifier: String
+    let title: String
+    let priority: Int
+    let state: LinearTicketState?
+    let url: String?
+    let dueDate: String?
+    let createdAt: String?
+
+    // "started" is Linear's state type for in-progress workflow states.
+    var isStarted: Bool { state?.type == "started" }
+    var stateName: String { state?.name ?? "" }
+}
+
+struct LinearTicketState: Codable, Equatable {
+    let name: String
+    let type: String
 }
 
 struct RecentSession: Decodable {
@@ -97,11 +135,27 @@ struct DoctorOrphan: Decodable {
 // authoritative live view (terminals, tmux, IDE, headless). Richer coverage than
 // the cheap live-terminals.json file, which only carries extension-registered
 // terminals; used to feed the ACTIVE section from a warm cache.
+//
+// Field names match the engine JSON (camelCase). Optional fields are omitted by
+// some kinds of session (cloud vs tmux); decode must not require them.
 struct ActiveSession: Decodable {
-    let kind: String
+    let kind: String?
     let sessionId: String?
     let cwd: String?
     let status: String       // running | idle | queued | …
     let context: String?
+    /// Host that owns the process (e.g. zion, yosemite-m0).
     let machine: String?
+    /// Surface on that machine: tmux, codium, terminal, …
+    let host: String?
+    /// First-prompt / assigned task — best "what is it doing" signal.
+    let topic: String?
+    /// Latest-turn snippet (can be long; UI trims).
+    let preview: String?
+    let ticketId: String?
+    let prLink: String?
+    let startedAtMs: Double?
+    let lastActivityMs: Double?
+    let owner: String?
+    let label: String?
 }

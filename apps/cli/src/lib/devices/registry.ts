@@ -18,7 +18,7 @@ import * as fsSync from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import lockfile from 'proper-lockfile';
-import { getDevicesRegistryPath, getDevicesIgnoredPath } from '../state.js';
+import { getDevicesRegistryPath, getDevicesIgnoredPath, getDevicesAutoLaunchPath } from '../state.js';
 
 /** Operating-system family of a device, used to pick the remote shell. */
 export type DevicePlatform = 'windows' | 'linux' | 'macos' | 'unknown';
@@ -116,6 +116,51 @@ export function deviceRole(d: DeviceProfile): DeviceRole {
 export function isControlDevice(d: DeviceProfile): boolean {
   return deviceRole(d) === 'control';
 }
+
+/**
+ * Whether a fan-out should dial this device, honouring the preference stated on
+ * {@link DeviceProfile.reachability}: the live SSH probe wins over the cached
+ * {@link DeviceTailscale.online} snapshot.
+ *
+ * Reading only `tailscale.online` is wrong in both directions, and both were
+ * live on a real fleet. A `via:"manual"` device never gets a tailscale peer
+ * entry at all, so its `online` is permanently `undefined` and a strict
+ * `=== true` test skipped it forever — every session on that box was invisible
+ * to the cross-fleet sweep. Conversely a box that has since gone to sleep keeps
+ * a stale `online:true` and gets dialed, burning a full ConnectTimeout and
+ * reporting a false "unreachable" that callers treat as doubt.
+ */
+export function isDialableDevice(d: DeviceProfile): boolean {
+  // Union, deliberately: either signal saying "go" is enough. A probe may only
+  // ADD a peer to the sweep, never remove one.
+  //
+  // The probe is not trustworthy enough to exclude on. It runs with a short SSH
+  // budget, so on a congested tailnet it returns false negatives — observed
+  // marking the LOCAL machine unreachable, and flipping a live worker box from
+  // reachable to unreachable nine minutes apart. Letting that shrink the sweep
+  // would hide sessions on healthy boxes, a worse failure than the one below.
+  //
+  // The snapshot alone is not enough either: a device registered with
+  // `address.via: "manual"` never gets a tailscale peer entry, so `online`
+  // stays undefined and a strict `=== true` test skipped it forever, making
+  // every session on that box unresolvable from any other machine.
+  //
+  // So: no tailscale block at all is unknown-not-offline (the rule `ssh.ts`
+  // renderDeviceTable and Factory's `isDeviceOnline` already use, so the picker
+  // and the sweep agree on who exists), and a positive probe rescues a device
+  // whose snapshot says offline. The cost of dialing a box that is actually
+  // asleep is one ConnectTimeout — the pre-existing behaviour, not a regression.
+  if (d.reachability?.reachable) return true;
+  return !d.tailscale || d.tailscale.online === true;
+}
+// Two more fan-outs still gate on the bare `tailscale.online === true` and so
+// still skip manual devices: `commands/apply.ts` (`devices: all` config-sync
+// targeting) and `commands/output.ts` (`--all-hosts`). They are left alone here
+// deliberately — neither is a session surface, and changing what `agents apply`
+// targets is a config-sync behaviour change that deserves its own PR rather
+// than riding along on a sessions fix. `devices/fleet.ts` planFleetTargets and
+// `smart-launch.ts` listOnlineDeviceNames already treat a missing tailscale
+// block as a candidate, so they need no change.
 
 /** Map of device name to profile. */
 export type DeviceRegistry = Record<string, DeviceProfile>;
@@ -415,5 +460,102 @@ export async function removeIgnored(name: string): Promise<boolean> {
     if (!set.delete(name)) return false;
     await atomicWriteJson(p, { ignored: [...set].sort(), updatedAt: new Date().toISOString() });
     return true;
+  });
+}
+
+/**
+ * Auto-launch preferences: which registered devices are eligible for Factory's
+ * auto-host selection, and which are preferred. Stored as a sibling to the
+ * registry and ignore-list under ~/.agents/.history/devices/.
+ */
+export interface AutoLaunchPreference {
+  enabled?: boolean;
+  preferred?: boolean;
+}
+
+export interface AutoLaunchPreferences {
+  devices: Record<string, AutoLaunchPreference>;
+  updatedAt: string;
+}
+
+function autoLaunchPath(): string {
+  return getDevicesAutoLaunchPath();
+}
+
+/** Load auto-launch preferences. Missing or malformed file => empty map. */
+export async function loadAutoLaunchPreferences(): Promise<Record<string, AutoLaunchPreference>> {
+  const p = autoLaunchPath();
+  let raw: string;
+  try {
+    raw = await fs.readFile(p, 'utf-8');
+  } catch (err: any) {
+    if (err && err.code === 'ENOENT') return {};
+    throw err;
+  }
+  try {
+    const parsed = JSON.parse(raw) as AutoLaunchPreferences;
+    return parsed.devices && typeof parsed.devices === 'object' ? parsed.devices : {};
+  } catch (err: any) {
+    throw new Error(
+      `Device auto-launch preferences corrupted at ${p}: ${err?.message ?? err}. Inspect and restore from backup.`,
+    );
+  }
+}
+
+/** True if the device is enabled for auto-launch. Missing entry defaults to true. */
+export async function isAutoLaunchEnabled(name: string): Promise<boolean> {
+  assertValidDeviceName(name);
+  const prefs = await loadAutoLaunchPreferences();
+  return prefs[name]?.enabled !== false;
+}
+
+/** Set whether a device is enabled for auto-launch. Setting to the default
+ * (enabled) removes the entry to keep the file minimal. */
+export async function setAutoLaunchEnabled(name: string, enabled: boolean): Promise<void> {
+  assertValidDeviceName(name);
+  const p = autoLaunchPath();
+  await withRegistryLock(p, async () => {
+    const prefs = await loadAutoLaunchPreferences();
+    if (enabled) {
+      if (prefs[name]) {
+        const { enabled: _, ...rest } = prefs[name];
+        if (Object.keys(rest).length === 0) {
+          delete prefs[name];
+        } else {
+          prefs[name] = rest;
+        }
+      }
+    } else {
+      prefs[name] = { ...prefs[name], enabled: false };
+    }
+    await atomicWriteJson(p, { devices: prefs, updatedAt: new Date().toISOString() });
+  });
+}
+
+/** True if the device is preferred for auto-launch ranking. */
+export async function isAutoLaunchPreferred(name: string): Promise<boolean> {
+  assertValidDeviceName(name);
+  const prefs = await loadAutoLaunchPreferences();
+  return prefs[name]?.preferred === true;
+}
+
+/** Set whether a device is preferred for auto-launch. Setting to the default
+ * (not preferred) removes the flag to keep the file minimal. */
+export async function setAutoLaunchPreferred(name: string, preferred: boolean): Promise<void> {
+  assertValidDeviceName(name);
+  const p = autoLaunchPath();
+  await withRegistryLock(p, async () => {
+    const prefs = await loadAutoLaunchPreferences();
+    if (preferred) {
+      prefs[name] = { ...prefs[name], preferred: true };
+    } else if (prefs[name]) {
+      const { preferred: _, ...rest } = prefs[name];
+      if (Object.keys(rest).length === 0) {
+        delete prefs[name];
+      } else {
+        prefs[name] = rest;
+      }
+    }
+    await atomicWriteJson(p, { devices: prefs, updatedAt: new Date().toISOString() });
   });
 }

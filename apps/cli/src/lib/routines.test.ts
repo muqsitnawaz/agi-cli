@@ -1,9 +1,20 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as yaml from 'yaml';
-import { validateJob, validateTrigger, normalizeTriggerEvent, writeJob, readJob, deleteJob, listJobs, jobRunsOnThisDevice, checkJobDeviceEligibility, getJobRunsDir, getRunDir, finalizeRunMeta, writeRunMeta, resolveJobPrompt, getLatestCompletedRun, type JobConfig, type RunMeta } from './routines.js';
+
+// Keep this legacy-definition suite independent of the developer machine's
+// device manifest. Device activation itself has a dedicated adjacent suite.
+vi.mock('./routine-activation.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./routine-activation.js')>();
+  return {
+    ...actual,
+    enabledRoutineNames: () => null,
+    routineEnabledOnThisDevice: () => null,
+  };
+});
+import { routineOwnerDevice, hasAmbiguousDevicePin, validateJob, validateTrigger, normalizeTriggerEvent, writeJob, readJob, deleteJob, listJobs, jobRunsOnThisDevice, checkJobDeviceEligibility, getJobRunsDir, getRunDir, finalizeRunMeta, writeRunMeta, resolveJobPrompt, getLatestCompletedRun, routineStats, computeProjectGroup, computeProjectGroupKind, projectGroupKey, projectGroupTitle, normalizeProjects, type JobConfig, type RunMeta } from './routines.js';
 import { getRoutinesDir, getSystemRoutinesDir, getRunsDir, ensureAgentsDir } from './state.js';
 
 /** Minimal valid schedule-based job. */
@@ -127,6 +138,21 @@ describe('validateTrigger', () => {
     expect(validateTrigger({ type: 'linear_event', event: 'Issue', action: 'update', teamKey: 'RUSH', label: 'agent' })).toEqual([]);
   });
 
+  it('accepts stateTo and stateFrom on linear_event triggers', () => {
+    expect(validateTrigger({
+      type: 'linear_event',
+      event: 'Issue',
+      action: 'update',
+      stateTo: 'Plan',
+      stateFrom: 'Triage',
+    })).toEqual([]);
+  });
+
+  it('rejects non-string stateTo/stateFrom on linear_event triggers', () => {
+    expect(validateTrigger({ type: 'linear_event', event: 'Issue', stateTo: 123 as never })).toContain('trigger.stateTo must be a string');
+    expect(validateTrigger({ type: 'linear_event', event: 'Issue', stateFrom: 123 as never })).toContain('trigger.stateFrom must be a string');
+  });
+
   it('rejects a bad type', () => {
     expect(validateTrigger({ type: 'gitlab', event: 'pull_request' })).toContain("trigger.type must be 'github_event' or 'linear_event'");
   });
@@ -196,7 +222,7 @@ describe('system-layer routines (built-ins from ~/.agents/.system/routines/)', (
       // A built-in shipped via the system repo — enabled, on a schedule.
       fs.writeFileSync(
         sysFile,
-        `name: ${name}\nschedule: '0 9 * * 1'\nagent: claude\nprompt: check for updates\n`,
+        `name: ${name}\nschedule: '0 9 * * 1'\nenabled: true\nagent: claude\nprompt: check for updates\n`,
         'utf-8'
       );
 
@@ -220,7 +246,8 @@ describe('system-layer routines (built-ins from ~/.agents/.system/routines/)', (
 
       found = listJobs().find((j) => j.name === name);
       expect(found).toBeDefined();
-      expect(found!.enabled).toBe(false);          // user copy wins
+      expect(found!.enabled).toBe(false);          // a new definition is inactive until device activation
+      expect(fs.readFileSync(path.join(getRoutinesDir(), `${name}.yml`), 'utf-8')).not.toContain('enabled:');
       expect(found!.prompt).toBe('overridden');
       // Only one entry for the name — user shadows system, no duplicate.
       expect(listJobs().filter((j) => j.name === name).length).toBe(1);
@@ -262,6 +289,30 @@ describe('writeJob atomic persistence', () => {
       deleteJob(name);
     }
   });
+
+  it('stamps the creator actor at creation and preserves it across an edit (RUSH-2020)', () => {
+    ensureAgentsDir();
+    const name = '__test-actor-stamp-routine__';
+    const name2 = '__test-actor-pinned-routine__';
+    try {
+      writeJob({ name, schedule: '0 3 * * *', agent: 'claude', prompt: 'p' } as JobConfig);
+      const created = readJob(name);
+      // A fresh routine gets the current resolver stamped (non-empty id).
+      expect(created?.actor).toBeTruthy();
+      // An edit re-writes the loaded config (which already carries actor) — the
+      // original creator is preserved, not overwritten with the editor.
+      writeJob({ ...created!, prompt: 'edited' } as JobConfig);
+      const after = readJob(name);
+      expect(after?.prompt).toBe('edited');
+      expect(after?.actor).toBe(created?.actor);
+      // An explicit actor on a new config is kept as-is.
+      writeJob({ name: name2, schedule: '0 3 * * *', agent: 'claude', prompt: 'p', actor: 'pinned@example.com' } as JobConfig);
+      expect(readJob(name2)?.actor).toBe('pinned@example.com');
+    } finally {
+      deleteJob(name);
+      deleteJob(name2);
+    }
+  });
 });
 
 describe('normalizeTriggerEvent', () => {
@@ -284,8 +335,16 @@ describe('validateJob — devices', () => {
     expect(validateJob(baseJob({ schedule: '0 3 * * *', devices: ['yosemite-s0'] }))).toEqual([]);
   });
 
-  it('accepts a job with multiple devices', () => {
-    expect(validateJob(baseJob({ schedule: '0 3 * * *', devices: ['yosemite-s0', 'mac-mini'] }))).toEqual([]);
+  // Was 'accepts a job with multiple devices'. A multi-device pin fired the
+  // routine once per listed device — duplicate agent runs on every schedule —
+  // so it is now a validation error, not an accepted config.
+  it('rejects a job with multiple devices', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', devices: ['yosemite-s0', 'mac-mini'] }));
+    expect(errors.some((e) => e.includes('runs on exactly one'))).toBe(true);
+  });
+
+  it('accepts a job pinned to a single device', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *', devices: ['yosemite-s0'] }))).toEqual([]);
   });
 
   it('rejects a non-array devices', () => {
@@ -302,6 +361,71 @@ describe('validateJob — devices', () => {
     const config = { ...baseJob({ schedule: '0 3 * * *' }), device: 'yosemite-s0' } as Record<string, unknown>;
     const errors = validateJob(config as Partial<JobConfig>);
     expect(errors.some((e) => /singular "device" key is no longer supported/.test(e) && /devices:/.test(e))).toBe(true);
+  });
+});
+
+// A routine pinned to several devices used to fire once PER device: on the live
+// fleet `security-sweep` ran at 15:30:02 on one box and 15:30:03 on the other,
+// two full agent sessions doing identical work. Ownership is now singular and
+// derived from config alone, so every daemon agrees without coordination.
+describe('routineOwnerDevice / single-device ownership', () => {
+  it('picks one owner deterministically, whatever the list order', () => {
+    expect(routineOwnerDevice({ devices: ['yosemite-s1', 'yosemite-s0'] })).toBe('yosemite-s0');
+    expect(routineOwnerDevice({ devices: ['yosemite-s0', 'yosemite-s1'] })).toBe('yosemite-s0');
+    expect(routineOwnerDevice({ devices: ['Yosemite-S1', 'yosemite-s0.tailnet.ts.net'] })).toBe('yosemite-s0');
+  });
+
+  it('returns null for an unrestricted routine, which still fires fleet-wide', () => {
+    expect(routineOwnerDevice({})).toBeNull();
+    expect(routineOwnerDevice({ devices: [] })).toBeNull();
+  });
+
+  it('fires on exactly one of a multi-device pin — never both', () => {
+    const pinned = { devices: ['yosemite-s0', 'yosemite-s1'] };
+    process.env.AGENTS_SYNC_MACHINE_ID = 'yosemite-s0';
+    expect(jobRunsOnThisDevice(pinned)).toBe(true);
+    process.env.AGENTS_SYNC_MACHINE_ID = 'yosemite-s1';
+    expect(jobRunsOnThisDevice(pinned)).toBe(false);
+  });
+
+  it('flags a multi-device pin, ignoring case and domain duplicates', () => {
+    expect(hasAmbiguousDevicePin({ devices: ['yosemite-s0', 'yosemite-s1'] })).toBe(true);
+    expect(hasAmbiguousDevicePin({ devices: ['yosemite-s0'] })).toBe(false);
+    expect(hasAmbiguousDevicePin({ devices: [] })).toBe(false);
+    // Same machine spelled two ways is one device, not an ambiguous pin.
+    expect(hasAmbiguousDevicePin({ devices: ['Yosemite-S0', 'yosemite-s0.tailnet.ts.net'] })).toBe(false);
+  });
+
+  // The daemon's load path never calls validateJob, and ownership treats a
+  // non-array `devices` as "no pin" — so without a guard a YAML typo
+  // (`devices: yosemite-s0`, a scalar) would silently promote the routine to
+  // fleet-wide and fire it on EVERY box. Inert-and-loud beats unrestricted.
+  it('refuses to load a routine whose devices is not a list', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-devices-malformed-'));
+    const prevHome = process.env.HOME;
+    try {
+      process.env.HOME = dir;
+      process.env.AGENTS_ROUTINES_DIR = path.join(dir, 'routines');
+      fs.mkdirSync(path.join(dir, 'routines'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, 'routines', 'typo.yml'),
+        'name: typo\nschedule: "0 3 * * *"\nagent: claude\nprompt: noop\ndevices: yosemite-s0\n',
+      );
+      expect(readJob('typo')).toBeNull();
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+      delete process.env.AGENTS_ROUTINES_DIR;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to create a new multi-device routine', () => {
+    const errors = validateJob({
+      name: 'two-boxes', schedule: '0 3 * * *', agent: 'claude',
+      mode: 'auto', effort: 'auto', timeout: '10m', enabled: true, prompt: 'noop',
+      devices: ['yosemite-s0', 'yosemite-s1'],
+    });
+    expect(errors.some((e) => e.includes('runs on exactly one'))).toBe(true);
   });
 });
 
@@ -322,7 +446,10 @@ describe('jobRunsOnThisDevice', () => {
   it('matches when the allowlist includes this machine', () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'yosemite-s0';
     expect(jobRunsOnThisDevice({ devices: ['yosemite-s0'] })).toBe(true);
-    expect(jobRunsOnThisDevice({ devices: ['mac-mini', 'yosemite-s0'] })).toBe(true);
+    // A multi-device pin no longer matches every listed device — only its owner
+    // (lowest normalized name) fires, so the routine runs once, not once per box.
+    expect(jobRunsOnThisDevice({ devices: ['mac-mini', 'yosemite-s0'] })).toBe(false);
+    expect(jobRunsOnThisDevice({ devices: ['yosemite-s0', 'zion'] })).toBe(true);
   });
 
   it('normalizes case and domain suffix', () => {
@@ -362,8 +489,11 @@ describe('checkJobDeviceEligibility', () => {
     expect(result).not.toBeNull();
     expect(result!.message).toBe("Job 'backup' can only run on: yosemite-s0, mac-mini");
     expect(result!.allowedLabel).toBe('yosemite-s0, mac-mini');
-    expect(result!.firstHost).toBe('yosemite-s0');
-    expect(result!.suggestion).toBe("agents routines run backup --host yosemite-s0");
+    // The suggested host is the OWNER (lowest normalized name), not the first
+    // entry as written. Suggesting yosemite-s0 here would send the operator to
+    // a box that refuses the run for exactly the same reason.
+    expect(result!.firstHost).toBe('mac-mini');
+    expect(result!.suggestion).toBe("agents routines run backup --host mac-mini");
   });
 });
 
@@ -453,30 +583,35 @@ describe('writeJob extension handling', () => {
 });
 
 describe('validateJob — host placement', () => {
-  it('accepts a plain host-placed agent job', () => {
-    expect(validateJob(baseJob({ schedule: '0 3 * * *', host: 'gpu-box' }))).toEqual([]);
+  it('accepts a plain host-placed agent job with a devices pin', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *', host: 'gpu-box', devices: ['zion'] }))).toEqual([]);
+  });
+
+  it('accepts host placement without definition-level device state', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', host: 'gpu-box' }));
+    expect(errors).toEqual([]);
   });
 
   it('rejects an empty host', () => {
-    expect(validateJob(baseJob({ host: '  ' }))).toContainEqual(expect.stringContaining('host must be a non-empty machine name'));
+    expect(validateJob(baseJob({ host: '  ', devices: ['zion'] }))).toContainEqual(expect.stringContaining('host must be a non-empty machine name'));
   });
 
   it('rejects host + workflow (bundle lives on the firing machine)', () => {
-    const errors = validateJob(baseJob({ host: 'gpu-box', workflow: 'autodev', agent: undefined }));
-    expect(errors).toContainEqual(expect.stringContaining("host: can't be combined with workflow:"));
+    const errors = validateJob(baseJob({ host: 'gpu-box', devices: ['zion'], workflow: 'autodev', agent: undefined }));
+    expect(errors.some((e) => e.includes('host placement') && e.includes('workflow'))).toBe(true);
   });
 
   it('rejects host + loop (driver + signal files live on the firing machine)', () => {
-    const errors = validateJob(baseJob({ host: 'gpu-box', loop: { maxIterations: 2 } as JobConfig['loop'] }));
-    expect(errors).toContainEqual(expect.stringContaining("host: can't be combined with loop:"));
+    const errors = validateJob(baseJob({ host: 'gpu-box', devices: ['zion'], loop: { maxIterations: 2 } as JobConfig['loop'] }));
+    expect(errors.some((e) => e.includes('host placement') && e.includes('loop'))).toBe(true);
   });
 
   it('rejects host + command (shell command has no agent to place remotely)', () => {
-    const errors = validateJob({ name: 'cmd-on-host', schedule: '0 3 * * *', command: 'echo hi', host: 'gpu-box', mode: 'auto', effort: 'auto', timeout: '10m', enabled: true, prompt: '' } as JobConfig);
-    expect(errors).toContainEqual(expect.stringContaining("host: can't be combined with command:"));
+    const errors = validateJob({ name: 'cmd-on-host', schedule: '0 3 * * *', command: 'echo hi', host: 'gpu-box', devices: ['zion'], mode: 'auto', effort: 'auto', timeout: '10m', enabled: true, prompt: '' } as JobConfig);
+    expect(errors.some((e) => e.includes('host placement') && e.includes('command'))).toBe(true);
   });
 
-  it('rejects remoteCwd without host', () => {
+  it('rejects remoteCwd without host/fleet placement', () => {
     expect(validateJob(baseJob({ remoteCwd: '~/proj' }))).toContainEqual(expect.stringContaining('remoteCwd only applies'));
   });
 });
@@ -632,5 +767,310 @@ describe('getLatestCompletedRun / {last_report} poison-stop', () => {
     expect(resolved).toContain('GOOD REPORT');
     expect(resolved).not.toContain('Not logged in');
     expect(resolved).not.toContain('/login');
+  });
+
+  it('substitutes {{...}} webhook context placeholders when context is passed', () => {
+    const config = {
+      name: jobName,
+      agent: 'claude',
+      schedule: '0 3 * * *',
+      prompt: 'Issue {{issue.identifier}}: {{issue.title}} (from {{updatedFrom.state.name}})',
+      mode: 'auto',
+      effort: 'auto',
+      timeout: '10m',
+      enabled: true,
+    } as JobConfig;
+
+    const resolved = resolveJobPrompt(config, {
+      source: 'linear',
+      event: 'Issue',
+      action: 'update',
+      issue: { identifier: 'RUSH-42', title: 'Fix it', state: { name: 'Plan' } },
+      updatedFrom: { state: { name: 'Triage' } },
+    });
+    expect(resolved).toBe('Issue RUSH-42: Fix it (from Triage)');
+  });
+});
+
+describe('routineStats', () => {
+  const jobName = `__stats_test_${process.pid}`;
+
+  function seedRun(runId: string, status: RunMeta['status'], duration?: number): void {
+    const meta: RunMeta = {
+      jobName,
+      runId,
+      agent: 'claude',
+      pid: null,
+      status,
+      startedAt: new Date().toISOString(),
+      completedAt: status === 'missed' ? null : new Date().toISOString(),
+      exitCode: status === 'completed' ? 0 : status === 'missed' ? null : 1,
+      ...(duration !== undefined ? { duration } : {}),
+    };
+    writeRunMeta(meta);
+  }
+
+  afterEach(() => {
+    fs.rmSync(getJobRunsDir(jobName), { recursive: true, force: true });
+  });
+
+  it('returns all-zero stats for a job with no runs', () => {
+    expect(routineStats(jobName)).toEqual({ count: 0, failed: 0, missed: 0, avgMs: 0, p50: 0, p95: 0 });
+  });
+
+  it('counts failed and missed runs separately from count, and folds duration into avg/p50/p95', () => {
+    seedRun('r1', 'completed', 10);
+    seedRun('r2', 'completed', 20);
+    seedRun('r3', 'completed', 30);
+    seedRun('r4', 'failed', 40);
+    seedRun('r5', 'timeout', 50);
+    seedRun('r6', 'missed'); // no duration — a fire that never ran
+
+    const stats = routineStats(jobName);
+    expect(stats.count).toBe(6);
+    expect(stats.failed).toBe(2); // failed + timeout
+    expect(stats.missed).toBe(1);
+    // avg of the 5 durations that have one (10+20+30+40+50)/5 = 30
+    expect(stats.avgMs).toBe(30);
+    expect(stats.p50).toBeGreaterThan(0);
+    expect(stats.p95).toBeGreaterThanOrEqual(stats.p50);
+  });
+
+  it('excludes the missed run (no duration) from the percentile set entirely', () => {
+    seedRun('r1', 'completed', 100);
+    seedRun('r2', 'missed');
+
+    const stats = routineStats(jobName);
+    expect(stats.count).toBe(2);
+    expect(stats.missed).toBe(1);
+    // Only one real duration sample (100ms) — p50/p95 both collapse to it,
+    // not diluted by the missed run's absent duration.
+    expect(stats.avgMs).toBe(100);
+    expect(stats.p50).toBe(100);
+    expect(stats.p95).toBe(100);
+  });
+});
+
+describe('validateJob — projects field', () => {
+  it('accepts a job with no projects (default: absent)', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *' }))).toEqual([]);
+  });
+
+  it('accepts a job with a single valid project name', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *', projects: ['my-project'] }))).toEqual([]);
+  });
+
+  it('accepts a job with multiple valid project names', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *', projects: ['project-a', 'project-b'] }))).toEqual([]);
+  });
+
+  it('accepts ["*"] as the all-projects sentinel', () => {
+    expect(validateJob(baseJob({ schedule: '0 3 * * *', projects: ['*'] }))).toEqual([]);
+  });
+
+  it('rejects projects that is not an array', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', projects: 'my-project' as never }));
+    expect(errors.some((e) => /projects must be an array/.test(e))).toBe(true);
+  });
+
+  it('rejects "*" mixed with other names', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', projects: ['*', 'my-project'] }));
+    expect(errors.some((e) => /"\*".*must be the sole entry/.test(e))).toBe(true);
+  });
+
+  it('rejects an empty-string project name', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', projects: [''] }));
+    expect(errors.some((e) => /each entry in projects must be a non-empty project name/.test(e))).toBe(true);
+  });
+
+  it('rejects a project name with illegal characters', () => {
+    const errors = validateJob(baseJob({ schedule: '0 3 * * *', projects: ['../../evil'] }));
+    expect(errors.some((e) => /invalid project name/.test(e))).toBe(true);
+  });
+});
+
+describe('validateJob — projects round-trip via writeJob/readJob', () => {
+  it('persists and reads back a projects array', () => {
+    ensureAgentsDir();
+    const name = '__test-projects-field-roundtrip__';
+    try {
+      writeJob({
+        name,
+        schedule: '0 3 * * *',
+        agent: 'claude',
+        prompt: 'test',
+        mode: 'auto',
+        effort: 'auto',
+        timeout: '10m',
+        enabled: true,
+        projects: ['project-a', 'project-b'],
+      } as JobConfig);
+      const read = readJob(name);
+      expect(read).not.toBeNull();
+      expect(read!.projects).toEqual(['project-a', 'project-b']);
+    } finally {
+      deleteJob(name);
+    }
+  });
+
+  it('persists ["*"] as-is', () => {
+    ensureAgentsDir();
+    const name = '__test-projects-all-roundtrip__';
+    try {
+      writeJob({
+        name,
+        schedule: '0 3 * * *',
+        agent: 'claude',
+        prompt: 'test',
+        mode: 'auto',
+        effort: 'auto',
+        timeout: '10m',
+        enabled: true,
+        projects: ['*'],
+      } as JobConfig);
+      const read = readJob(name);
+      expect(read!.projects).toEqual(['*']);
+    } finally {
+      deleteJob(name);
+    }
+  });
+
+  it('omits projects from YAML when empty array', () => {
+    ensureAgentsDir();
+    const name = '__test-projects-empty-omit__';
+    const filePath = path.join(getRoutinesDir(), `${name}.yml`);
+    try {
+      writeJob({
+        name,
+        schedule: '0 3 * * *',
+        agent: 'claude',
+        prompt: 'test',
+        mode: 'auto',
+        effort: 'auto',
+        timeout: '10m',
+        enabled: true,
+        projects: [],
+      } as JobConfig);
+      expect(fs.readFileSync(filePath, 'utf-8')).not.toMatch(/^projects:/m);
+    } finally {
+      deleteJob(name);
+    }
+  });
+});
+
+describe('computeProjectGroup', () => {
+  const known = new Set(['project-a', 'project-b', 'project-c']);
+
+  it('returns "Operations" for undefined projects', () => {
+    expect(computeProjectGroup(undefined, known)).toBe('Operations');
+  });
+
+  it('returns "Operations" for an empty projects array', () => {
+    expect(computeProjectGroup([], known)).toBe('Operations');
+  });
+
+  it('returns "All projects" for ["*"]', () => {
+    expect(computeProjectGroup(['*'], known)).toBe('All projects');
+  });
+
+  it('returns the project name for a single known project', () => {
+    expect(computeProjectGroup(['project-a'], known)).toBe('project-a');
+  });
+
+  it('returns "Cross-project" for multiple known projects', () => {
+    expect(computeProjectGroup(['project-a', 'project-b'], known)).toBe('Cross-project');
+  });
+
+  it('returns "Unknown projects" when any project name is not in the known set', () => {
+    expect(computeProjectGroup(['stale-project'], known)).toBe('Unknown projects');
+    expect(computeProjectGroup(['project-a', 'stale-project'], known)).toBe('Unknown projects');
+  });
+});
+
+describe('computeProjectGroupKind — discriminated buckets never collide with special labels', () => {
+  it('classifies a project literally named "Operations" as a named group, distinct from the no-project special', () => {
+    const known = new Set(['Operations', 'other']);
+    const named = computeProjectGroupKind(['Operations'], known);
+    const special = computeProjectGroupKind(undefined, known);
+    expect(named).toEqual({ kind: 'named', name: 'Operations' });
+    expect(special).toEqual({ kind: 'operations' });
+    // Same human title, but different discriminated keys — so they never merge.
+    expect(projectGroupTitle(named)).toBe('Operations');
+    expect(projectGroupTitle(special)).toBe('Operations');
+    expect(projectGroupKey(named)).toBe('named:Operations');
+    expect(projectGroupKey(special)).toBe('special:operations');
+    expect(projectGroupKey(named)).not.toBe(projectGroupKey(special));
+  });
+
+  it('classifies a project literally named "Cross-project" as a named group, distinct from the multi-project span special', () => {
+    const known = new Set(['Cross-project', 'a', 'b']);
+    const named = computeProjectGroupKind(['Cross-project'], known);
+    const special = computeProjectGroupKind(['a', 'b'], known);
+    expect(named).toEqual({ kind: 'named', name: 'Cross-project' });
+    expect(special).toEqual({ kind: 'cross' });
+    expect(projectGroupTitle(named)).toBe('Cross-project');
+    expect(projectGroupTitle(special)).toBe('Cross-project');
+    expect(projectGroupKey(named)).toBe('named:Cross-project');
+    expect(projectGroupKey(special)).toBe('special:cross');
+    expect(projectGroupKey(named)).not.toBe(projectGroupKey(special));
+  });
+
+  it('collapses duplicate names before classifying, so [myapp, myapp] is a single named project, not Cross-project', () => {
+    const known = new Set(['myapp']);
+    expect(computeProjectGroupKind(['myapp', 'myapp'], known)).toEqual({ kind: 'named', name: 'myapp' });
+    expect(computeProjectGroup(['myapp', 'myapp'], known)).toBe('myapp');
+  });
+});
+
+describe('normalizeProjects — canonical dedup', () => {
+  it('deduplicates while preserving first-seen order', () => {
+    expect(normalizeProjects(['myapp', 'myapp'])).toEqual(['myapp']);
+    expect(normalizeProjects(['b', 'a', 'b', 'a'])).toEqual(['b', 'a']);
+  });
+
+  it('drops empty/whitespace-only and non-string entries', () => {
+    expect(normalizeProjects(['a', '', 'a'])).toEqual(['a']);
+    expect(normalizeProjects([undefined as unknown as string, 'x'])).toEqual(['x']);
+  });
+
+  it('returns undefined when nothing survives', () => {
+    expect(normalizeProjects(undefined)).toBeUndefined();
+    expect(normalizeProjects([])).toBeUndefined();
+    expect(normalizeProjects(['', ''])).toBeUndefined();
+  });
+
+  it('keeps the ["*"] all-projects sentinel and collapses a duplicated sentinel', () => {
+    expect(normalizeProjects(['*'])).toEqual(['*']);
+    expect(normalizeProjects(['*', '*'])).toEqual(['*']);
+  });
+});
+
+describe('duplicate project names in a file-created YAML routine', () => {
+  it('reads as a single named project and rewrites canonically (persistence is deduped)', () => {
+    const name = 'dup-project-yaml-' + Math.random().toString(36).slice(2, 8);
+    const file = path.join(getRoutinesDir(), name + '.yml');
+    try {
+      ensureAgentsDir();
+      // Hand-authored YAML that never went through the add command: duplicate names.
+      fs.writeFileSync(
+        file,
+        `name: ${name}\nschedule: '0 3 * * *'\nagent: claude\nprompt: do it\nprojects:\n  - myapp\n  - myapp\n`,
+        'utf-8',
+      );
+
+      const known = new Set(['myapp']);
+      const read = readJob(name);
+      expect(read).not.toBeNull();
+      // Grouping treats the duplicated file as one named project, not Cross-project.
+      expect(computeProjectGroupKind(read!.projects, known)).toEqual({ kind: 'named', name: 'myapp' });
+      expect(computeProjectGroup(read!.projects, known)).toBe('myapp');
+
+      // Rewriting through the schema boundary canonicalizes persistence.
+      writeJob(read!);
+      const persisted = yaml.parse(fs.readFileSync(file, 'utf-8'));
+      expect(persisted.projects).toEqual(['myapp']);
+    } finally {
+      deleteJob(name);
+    }
   });
 });

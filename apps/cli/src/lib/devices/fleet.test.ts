@@ -81,7 +81,7 @@ describe('remoteFleetTargets (fleet health/drift gate targeting)', () => {
     const targets = remoteFleetTargets(planFleetTargets(reg), 'zion');
     const byName = Object.fromEntries(targets.map((t) => [t.device.name, t]));
     // A registered cockpit must NOT reach the fan-out — otherwise the CI gate
-    // (check --devices / fleet status --strict) fails on every run for its skip.
+    // (doctor --check --devices / fleet status --strict) fails on every run for its skip.
     expect(byName.cockpit).toBeUndefined();
     expect(byName.zion).toBeUndefined(); // self is probed in-process, not fanned out
     expect(byName.worker.skip).toBeUndefined(); // a real probe target
@@ -229,6 +229,55 @@ describe('fanOutDevices', () => {
       { name: 'b', status: 'skipped', reason: 'offline' },
       { name: 'c', status: 'failed', error: 'timed out' },
     ]);
+  });
+
+  it('per-device timeout: a probe slower than perDeviceTimeoutMs is recorded as failed', async () => {
+    // Simulate a device whose ssh probe hangs for longer than the per-device budget.
+    // The probe uses a 200 ms artificial delay; the timeout is 50 ms — so it fires.
+    const results = await fanOutDevices(
+      [{ name: 'fast' }, { name: 'slow' }],
+      async (target) => {
+        if (target.name === 'slow') {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        return `${target.name}-ok`;
+      },
+      { perDeviceTimeoutMs: 50 },
+    );
+
+    expect(results.map((r) => [r.name, r.status])).toEqual([
+      ['fast', 'ok'],
+      ['slow', 'failed'],
+    ]);
+    expect(results[1].error).toBe('timed out');
+  }, 2000);
+
+  it('per-device timeout: a probe that finishes within the budget is not affected', async () => {
+    // 200 ms timeout, 10 ms probe — must succeed.
+    const results = await fanOutDevices(
+      [{ name: 'quick' }],
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return 'done';
+      },
+      { perDeviceTimeoutMs: 200 },
+    );
+
+    expect(results).toEqual([{ name: 'quick', status: 'ok', value: 'done' }]);
+  }, 2000);
+
+  it('per-device timeout: skipped devices are not subject to the probe timeout', async () => {
+    // A skipped device should still be returned as 'skipped' — not 'failed'.
+    const results = await fanOutDevices(
+      [{ name: 'gone', skip: 'offline' }],
+      async () => {
+        // This probe must never be called for a skipped device.
+        throw new Error('probe was called for a skipped device');
+      },
+      { perDeviceTimeoutMs: 10 },
+    );
+
+    expect(results).toEqual([{ name: 'gone', status: 'skipped', reason: 'offline' }]);
   });
 });
 

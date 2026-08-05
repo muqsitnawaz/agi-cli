@@ -14,12 +14,15 @@ import type { CloudTask } from './types.js';
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-cloudstore-'));
 process.env.HOME = TEST_HOME;
 
-const { insertTask, updateTaskStatus, getTaskById } = await import('./store.js');
+const { insertTask, updateTaskStatus, getTaskById, closeStore } = await import('./store.js');
 const { registerCloudSession } = await import('./session-index.js');
 const { findSessionsById, closeDB } = await import('../session/db.js');
 
 afterAll(() => {
+  // Two databases live under TEST_HOME: sessions.db and cloud/tasks.db. Both
+  // must be closed or Windows refuses to unlink the still-open one.
   closeDB();
+  closeStore();
   fs.rmSync(TEST_HOME, { recursive: true, force: true });
 });
 

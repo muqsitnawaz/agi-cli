@@ -1,16 +1,21 @@
 # agents-cli (the CLI)
 
 `@phnx-labs/agents-cli` — the `agents` / `ag` CLI for managing AI coding-agent
-versions, config, sessions, and cloud dispatch (Claude, Codex, Gemini, Cursor,
+versions, config, sessions, and cloud dispatch (Claude, Codex, Cursor,
 OpenCode, OpenClaw, Grok, Droid, …).
+
+> **New agent? Read [`docs/AGENT-CHEATSHEET.md`](docs/AGENT-CHEATSHEET.md) first.**
+> It covers the dozen concepts agents repeatedly need (DotAgents repos, version
+> homes, the two "session" meanings, capability gating, the execution path) in
+> one scannable page. Come back to this file for the full architecture map.
 
 This is the **internal architecture** map. The user-facing feature tour is
 [README.md](README.md) (pin versions, run, sessions, hosts, teams, workflows,
 plugins, browser, secrets, routines, pty). This file covers the design choices,
 module map, build, and release mechanics the README does not.
 
-> Phoenix Labs OSS (Apache-2.0). **NOT part of the Rush brand** — brand rules are
-> repo-wide, see the root [AGENTS.md](../../AGENTS.md) §Brand identity.
+> Phoenix Labs OSS · Apache-2.0. Repo-wide policy (conventions, code review, security)
+> lives in the root [AGENTS.md](../../AGENTS.md).
 
 ## Core design choices (read this first)
 
@@ -32,9 +37,9 @@ and participate after the user repo.
 
 ### 2. `AGENTS.md` is the canonical memory file
 
-`CLAUDE.md`, `GEMINI.md` are symlinks. **Edit `AGENTS.md` only** — editing a symlink
-target directly gets stomped on the next sync. The sync writes the right file name
-per agent (`OPENCODE.md`, `.cursorrules`, etc.).
+`CLAUDE.md` and legacy `GEMINI.md` are symlinks. **Edit `AGENTS.md` only** —
+editing a symlink target directly gets stomped on the next sync. The sync writes
+the right file name per supported agent (`OPENCODE.md`, `.cursorrules`, etc.).
 
 ### 3. Capability table gates per-agent writes
 
@@ -68,9 +73,18 @@ DAG-style, boundary contracts, `--watch` supervisor, `--worktree` isolation, opt
 `--cloud` dispatch. The old `mcp__Swarm__*` surface was folded into teams
 (`migrateLegacySwarmToTeams()` in `src/lib/migrate.ts`). Don't reach for Swarm — gone.
 
-### 7. Self-updating agents are ONE binary, not fictional version-homes
+### 7. Routine definitions and device activation are separate
 
-Some harnesses (droid, grok, antigravity, cursor, hermes, forge, kiro, goose) install
+Routine YAML under project, user, or system `routines/` describes what runs and
+when. Whether it runs on one host is membership in that host's top-level
+`devices/<hostname>/agents.yaml` `routines:` list. Pause/resume and setup MUST
+write only the target host's device file; they MUST NOT rewrite a definition with
+`enabled`, `devices`, or runtime metadata. Run history belongs in
+`.history/runs/<routine>/<run>/`.
+
+### 8. Self-updating agents are ONE binary, not fictional version-homes
+
+Some harnesses (droid, grok, antigravity, cursor, hermes, kiro, goose) install
 via an official `curl … | sh` / `brew install` script that carries no version token —
 the installer only ever fetches the *current* release and the binary self-updates in
 place. `isSelfUpdatingAgent()` ([`src/lib/agents.ts`](src/lib/agents.ts)) is the single
@@ -84,6 +98,153 @@ stale dirs into the survivor, `agents view` shows the live `--version`, and
 `agents add droid@1.2.3` gracefully installs the current release instead of erroring.
 grok is self-updating but stores a real per-version binary under each version-home, so
 it is NOT a global-binary agent and is left uncollapsed. (RUSH-1321)
+
+### 9. Diagnostic command taxonomy — `doctor` is the umbrella (RUSH-2027)
+
+Three diagnostics, distinct scopes. Don't blur them — each answers a different
+question, and a new health check goes in the one whose scope it matches.
+
+| Command | Scope | Answers |
+|---|---|---|
+| `agents fleet status` | Coarse **device** health across the fleet | Are devices online, do they have the agent CLIs installed, are they signed in, what is the agents-cli **version skew**, how many agents are running on each box. NOT fine-grained resource divergence. Publish-own/read-union: each daemon publishes only its own row (no N² ssh probe, RUSH-2061); the reader unions peers on demand (`--local --json` is the per-host publish endpoint). |
+| `agents inspect <agent>[@version]` | Deep **single-harness** diagnosis | Per-resource diff between one version home and its resolved sources; manifest staleness; orphans. One harness, one machine. |
+| `agents doctor` | **Umbrella** — overall fleet + harness health | Local diagnostics (CLI presence, per-version sign-in, per-version sync, orphans) **and** cross-device divergence, rendered as the prioritized critical-at-top + per-computer hybrid below. The single command a user runs to discover problems before runtime. |
+
+**`agents doctor <agent>[@qualifier]` accepts symbolic qualifiers** — `@latest`, `@oldest`, `@default`/`@pinned`, `@all`, or an exact version — resolved through the shared agent-spec engine (`lib/agent-spec/index.ts`, `resolveAgentTargets`). Bare `agents doctor <agent>` (no qualifier) sweeps every installed version without setting `versionExplicit`; `--fix` then excludes isolated copies. Any explicit qualifier sets `versionExplicit: true`, scoping `--fix` to the resolved version set (including isolated copies for `@all`). `AgentSpecError` from the engine is surfaced as a user-facing error. Routing flags (`--host`/`--device`/`--remote-cwd`) are stripped via `stripRoutingFlags` before target parsing, so `agents doctor claude@latest --device remotebox` resolves correctly on the remote. (issue #2058, `src/commands/doctor.ts:parseTargetArg`)
+
+**`agents doctor` is a prioritized, comprehensive-by-default hybrid (RUSH-2069).**
+There is no `--verbose`. A top `✗ CRITICAL — needs you now (N)` section lists every
+critical across the whole fleet worst-first; a `─── by computer ───` section then
+gives each device its warnings plus a compact accounts/versions line (every
+installed version + its account, provable ✓ / ✗). Single-machine `agents doctor`
+collapses to the CRITICAL section plus one `▸ <machine>` block. Severity:
+**critical** is `logged-out` (provable), `missing-hook`, `missing-plugin`,
+`unwired-hook` and `cli-missing`; **warning** is `logout-unprovable`,
+`missing-resource`, `content-drift`, `never-synced`, `stale`, `repo-behind`,
+`repo-drift`, `version-skew`, `fleet-resource-gap`, `orphan`, `duplicate-hook`,
+`duplicate-hook-drift`, `host-cli-missing`, `host-cli-invalid`,
+`rc-secret-export`, `exec-policy` and `stale-cli`. (RUSH-2162 moved
+`never-synced` and `duplicate-hook-drift` to warning — both are stale-sync states
+one `agents sync` resolves.)
+
+`FINDING_SEVERITY` in
+[`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts) is the
+single source of truth: the builders read their severity from it, and a test
+asserts this list and the module docblock assign every kind to the **same bucket**
+it does. Change a severity there and the test names the docs to move with it. The findings model,
+builders, `remediationFor`, and the pure `renderFindings` live in
+[`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts).
+
+**One root cause is one line.** A readout the user cannot scan is as useless as no
+readout, so the builders de-duplicate before rendering — on a real machine this
+takes ~57 rows down to ~16, and the rules are unit-pinned in
+`doctor-findings.test.ts`:
+
+- **Per version, per kind, one row.** `emitGroup` names a lone resource in full
+  (`hook 'git-guard' missing`) and otherwise emits a count plus two examples
+  (`32 hooks missing (incl. 'a', 'b')`). Never one row per resource.
+- **Per agent, one row across versions.** `collapseAcrossVersions` folds findings
+  with the same `(device, agent, kind, severity, account, message)` into a single
+  row carrying `versions`, rendered `claude (5 versions)`, and widens the
+  remediation to the agent-wide sweep. Three exclusions, each because the widened
+  remediation would be wrong: **isolated copies** (`runFix` skips them, so the
+  sweep would leave one broken — the caller passes `isolatedVersions` from
+  `isVersionIsolated`); **findings with no agent** (their `version` is a repo
+  alias); and **logouts** (`NEVER_COLLAPSED`) — a login is inherently per-version,
+  there is no `@all` for it, and dropping the version falls back to the bare
+  native hint, which the shim points at the *default* version.
+- **Orphans are one line per machine.** They are cleanup-only and
+  `agents prune cleanup --all` fixes every version at once — **`--all` is load
+  bearing**: without it cleanup sweeps only each agent's default version
+  (`commands/prune.ts:351`).
+- **Duplicate version-home hooks are one line per (agent, severity).**
+  `agents sync <agent>@all --yes` reconciles every copy at once, and a
+  machine with five installed claudes otherwise emits two dozen identical rows.
+- **No vaguer restatement.** A version that just listed its drifted/missing
+  resources gets no `sources changed since last sync` row on top, and a
+  never-synced version reports one warning (`agents sync <agent>@<version>
+  --yes`) instead of one row per absent resource.
+
+**Every check the old overview printed is a finding now.** `renderOverviewText`
+was the ONLY text renderer for several independent checks, so deleting it dropped
+each of them from the command — the top defect this redesign had to answer for, and
+it recurred three times during review. They all enter `buildLocalFindings` as
+plain **inputs** (never probes, so the module stays pure and every branch is
+testable without a shell, PowerShell, or an installed CLI):
+
+| Check | Input | Finding kind |
+|---|---|---|
+| Credential-shaped shell-rc exports (RUSH-1968) | `rcSecrets` | `rc-secret-export` |
+| Windows exec policy blocking `agents.ps1` | `execPolicy` | `exec-policy` |
+| Hooks duplicated across version homes | `duplicateHooks` | `duplicate-hook{,-drift}` |
+| Declared host CLIs not on PATH | `hostClis.statuses` | `host-cli-missing` |
+| Host-CLI manifests the loader rejected | `hostClis.errors` | `host-cli-invalid` |
+
+**Before deleting any renderer here, enumerate what it called.**
+
+**A remediation must fix EVERY version in its row, and must be a command that
+exists.** Three separate rounds of review here found remediations naming a command
+form that does not do what the row claims — `agents sync <agent>` (default version
+only), `agents repo pull` (skips the system repo), `agents prune cleanup` (default
+versions only), `agents clis install <a> <b>` (takes one name), and
+`agents run <agent>@<v>, then <cli> login` (the second command resolves through the
+shim to the *default* version, not the one that is logged out — use
+`agents run <agent>@<v> -- login`, since `--` forwards verbatim into that version
+home). **Open the command definition and check arity, flags, and scope before
+writing a remediation string.** `agents sync <agent>` targets
+only the default/sole installed version (`commands/sync.ts:8`), so a row collapsed
+across versions uses the `@all` selector — `agents sync <agent>@all --yes`. A fleet
+resource gap is absent from that box's *central repos*, so the central-to-home
+`agents doctor --fix` cannot close it — and neither `agents repo pull` nor the sync
+umbrella touches the **system** repo (`commands/repo.ts:1186`,
+`lib/sync-umbrella.ts:104`), which moves with the npm package instead, so that row
+names both paths rather than one command that quietly covers half the cases. A
+`repo-drift` row carries the repo alias (`user` / `system`) rather than hardcoding
+one.
+
+**Sign-in is per installed VERSION, and a logged-out claim must be provable.**
+[`credentialPresence(agent, versionHome)`](src/lib/agents.ts) splits a credential's
+existence into the per-version home and the active/global HOME; a logged-out
+critical is emitted only when BOTH are absent (`provable = !perVersion && !active`).
+A version sharing the global login is signed in, not out; an agent with no
+inspectable identity (`!supportsAccountInspection`) never yields a logout finding,
+not even the hedged warning. **Do not enumerate that set here or in tests** —
+`ACCOUNT_INSPECTION_AGENT_IDS` and `CREDENTIAL_FILE_SEGMENTS`
+([`src/lib/agents.ts`](src/lib/agents.ts)) are the source of truth and agents move
+between them (antigravity and cursor both did, mid-review, each time turning a
+hardcoded list into a false doc claim or a red test). Derive it:
+`ALL_AGENT_IDS.filter(supportsAccountInspection)`. Login remediation is version-targeted via
+`agents run <agent>@<version>` + the harness-native login (`loginHint`) — but ONLY
+for the per-version-isolated set (claude/codex/grok/kimi/opencode/copilot);
+gemini/antigravity/droid/cursor share their login, so the fix says so instead of
+faking a per-version repair. Per-version sign-in rides the device inventory
+(`FleetInventory.signIn`, populated by `collectLocalFleetSignIn` in
+[`src/lib/devices/fleet-inventory.ts`](src/lib/devices/fleet-inventory.ts)); an
+older remote CLI that omits it degrades to an "older agents-cli — upgrade" warning.
+
+**Cross-device divergence lives in `agents doctor --devices`.** It compares each
+device's self-reported harness inventory against the local baseline and flags a
+resource / agent-version / config-repo present on one box but missing on another
+(e.g. the `swarm` plugin on `zion` but not `yosemite-s0`). The data path:
+
+- Every device's **top-level `agents doctor --json`** emits a `fleet` inventory
+  field ([`src/lib/devices/fleet-inventory.ts`](src/lib/devices/fleet-inventory.ts) →
+  `collectLocalFleetInventory`): installed resource names per kind, installed
+  version ids per agent, and `.agents`/`.system` repo state (`readRepoState` in
+  [`src/lib/git.ts`](src/lib/git.ts)).
+- `runDevicesDoctor` ([`src/commands/doctor.ts`](src/commands/doctor.ts)) fans that
+  payload out per device and runs the **pure comparator**
+  [`compareFleetInventories`](src/lib/devices/fleet-divergence.ts) — SSH-free, so
+  it's unit-tested against fixtures with no live fleet — then maps the divergences
+  and each box's per-version sign-in into the hybrid via `fleetDivergenceToFindings`
+  / `signInToFindings` / `renderFindings`
+  ([`src/lib/devices/doctor-findings.ts`](src/lib/devices/doctor-findings.ts)).
+- `agents fleet status` reuses the same comparator inside `buildFleetHealthReport`
+  ([`src/lib/devices/health-report.ts`](src/lib/devices/health-report.ts)) to add a
+  per-device `divergence` warning to its rollup.
+
+Read-only by default — divergence detection never installs or syncs. `--json`
+carries a stable `fleet` divergence block for the VS Code extension / Agency.
 
 ## Supported harnesses
 
@@ -102,7 +263,6 @@ Antigravity CLI, Grok CLI, OpenCode — features target these six first.
 | ★ Antigravity CLI | `antigravity` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ≥1.0.16 | ≥1.0.6 |
 | ★ Grok CLI | `grok` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ≥0.2.111 |
 | ★ OpenCode | `opencode` | ≥0.3.130 | ✓ | ≥1.1.1 | ✓ | ✓ | ✓ | — | — |
-| Gemini † | `gemini` | ≥0.26 | ✓ | ✓ | ✓ | ✓ | ≥0.8 | ≥0.36 | — |
 | Cursor | `cursor` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ≥2026.1.22 | — |
 | OpenClaw | `openclaw` | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
 | Copilot | `copilot` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ≥0.0.353 | — |
@@ -111,15 +271,17 @@ Antigravity CLI, Grok CLI, OpenCode — features target these six first.
 | Goose | `goose` | ≥1.34 | ✓ | ✓ | ≥1.25 | — | ✓ | — | ✓ |
 | Droid | `droid` | ✓ | ✓ | ≥0.57.5 | ≥0.26 | ✓ | ✓ | ✓ | — |
 | Hermes | `hermes` | ≥0.11 | ✓ | — | ✓ | — | — | — | — |
+| Pi (Oh My Pi) | `pi` | — | ✓ | — | ✓ | ✓ | — | ✓ | — |
 
 ✓ = supported · — = not · version cell = only within that range (out-of-range =
 skipped silently). [`src/lib/agents.ts`](src/lib/agents.ts) is canonical — keep this
 snapshot in sync. `workflows` is `claude`/`kimi`/`goose`/`antigravity` (≥1.0.6, written to the
 shared HOME-global `~/.gemini/config/global_workflows/`, not a per-version home), `openclaw` (Lobster `.lobster` files under `.openclaw/workflows/`), and `grok` (≥0.2.111, native Rhai under `.grok/workflows/`); `mcp` is universal; `allowlist` is
-`claude`/`gemini`/`cursor`/`opencode`/`antigravity`/`grok`/`kimi`/`kiro`/`droid`/`goose`/`openclaw`/`copilot` (Copilot writes per-location approvals to `~/.copilot/permissions-config.json`; OpenClaw is tool-level only —
-blanket rules map to `~/.openclaw/openclaw.json` `tools.alsoAllow`/`tools.deny`, sub-command patterns skipped); `subagents` is `claude`/`codex`/`kiro`/`kimi`/`grok`/`openclaw`/`droid`/`copilot`/`antigravity`/`gemini`/`cursor` (≥2026.1.22).
-**† Gemini is deprecated by Google** (retired June 18 2026); Antigravity is the
-successor — the CLI warns on `agents add gemini` (`warnAgentDeprecated`).
+`claude`/`cursor`/`opencode`/`antigravity`/`grok`/`kimi`/`kiro`/`droid`/`goose`/`openclaw`/`copilot` (Copilot writes per-location approvals to `~/.copilot/permissions-config.json`; OpenClaw is tool-level only —
+blanket rules map to `~/.openclaw/openclaw.json` `tools.alsoAllow`/`tools.deny`, sub-command patterns skipped); `subagents` is `claude`/`codex`/`kiro`/`kimi`/`grok`/`openclaw`/`droid`/`copilot`/`antigravity`/`cursor` (≥2026.1.22)/`pi`. **Pi (Oh My Pi, `omp`)** is Claude-compatible: it natively reads `.claude/commands`, `.mcp.json`, and Claude-shaped subagents, and keeps its own native resources under `~/.omp/agent/` (skills, commands, subagents `agents/`, `AGENTS.md` context, `.mcp.json`). `mcp` covers stdio + http + headers. `hooks`/`allowlist`/`plugins` are OFF: omp hooks are per-tool JS/TS extension modules (not event->shell-command registrations), approval is per-TOOL only (`tools.approval`, no command/path patterns), and plugins are npm/TS modules (not the Claude marketplace manifest). Its cross-provider model catalog (OpenRouter/OpenAI/Anthropic/xAI/DeepSeek/…) surfaces in `agents view` / `agents models pi` via `omp models --json`.
+**Gemini is hard-deprecated.** Keep the legacy `gemini` id only for parsing old
+sessions/config; `agents add gemini`, `agents import gemini`, and
+`agents sync gemini` fail and point users to Antigravity.
 
 ## Source layout
 
@@ -138,9 +300,11 @@ src/
     hooks.ts           # hooks.yaml parser + per-agent registrar
     hooks/match.ts     # `matches:` predicate evaluator
     monitors/          # `agents monitors` — event-triggered watchers (source→condition→action); native state-diff store; MonitorEngine runs in the daemon beside the cron scheduler. See docs/10-monitors.md
+    projects.ts        # `agents projects` — named multi-repo project defs (~/.agents/projects/*.yaml) layered above the --project convention (resolveProjectRef in project-root.ts); project-status.ts rolls live sessions + merged PRs + artifacts into the progress card. Beta-gated. See docs/11-projects.md
     migrate.ts         # One-shot idempotent migrations
-    session/           # `agents sessions` READER — discovery/parse/render of agent transcripts; also `migrate-targets.ts` (the `sessions migrate` target scorer)
-    terminal/          # Terminal launch engine — tab/split in iTerm/Ghostty/tmux, local or --host
+    session/           # `agents sessions` READER — discovery/parse/render of agent transcripts; also `migrate-targets.ts` (the `sessions migrate` target scorer); `db.ts` `queryResourceUsageStats`/`backfillResourceUsage` back `agents sessions stats` + `sessions backfill resources` (skill/command usage rollup, session_resource_usage + resource_scan_ledger); `claude-accounts.ts` attributes each Claude transcript to the account that produced it (account_key) and `insights.ts` extracts the behavioural facets behind `agents insights` (session_insights cache)
+    terminal/          # Terminal launch engine — tab/split in iTerm/Ghostty/tmux/Terminal.app, local or --host;
+                       #   preferred.ts resolves WHICH terminal for a GUI caller (from live sessions' host app)
     cloud/             # Provider registry (Rush / Codex / Factory / Antigravity)
     teams/             # `agents teams` orchestration
     computer-rpc.ts    # `agents computer` client → native/computer-mac (Unix socket)
@@ -153,6 +317,28 @@ Note: `src/lib/session/` here is the transcript **reader**. The live-session
 **writer** is a separate package, [`packages/session-tracker`](../../packages/session-tracker)
 — different data, different consumer; see its AGENTS.md.
 
+### `agents sessions` preview architecture (map before you touch it)
+
+The interactive UI is three picker variants in `src/lib/picker.ts`: `itemPicker`
+(single-select, `space` toggles preview), `dynamicPicker` (async data source, used
+by the session browser, `tab` toggles preview), and a multi-select variant. All
+render a right/bottom **preview pane** built by `buildPreview(session)` in
+`src/commands/sessions-picker.ts` — a header (agent/model/cwd/tokens/ticket/PR) plus
+`formatCompactPreview` (prompt, files/changes, hooks, errors, tests, last response).
+
+Routing lives in `src/commands/sessions.ts`: `isBareBrowserListing`
+(+`hasNoBrowserDisqualifyingFlags`) gates the bare fleet-wide listing to the rich
+`runSessionBrowser` ([`src/commands/sessions-browser.ts`](src/commands/sessions-browser.ts));
+a query/filter falls through to `pickSessionInteractive` → `sessionPicker`.
+`--flat`/`--tree`/`--json`/`--no-interactive` print non-interactive views with no
+preview. `PICKER_RECENT_COUNT = 15` caps the picker's list rows.
+
+Gotcha: the preview pane has **no guaranteed height** — `availablePreviewRows =
+terminalRows() - fixedRows` (`picker.ts`), and `limitPreviewHeight` returns `''` when
+that collapses, so the preview can silently vanish on a full/short terminal (the
+RUSH-2198 bug). See the [§Contracts §Sessions spec](docs/specifications.md#sessions)
+for the non-empty-preview invariant (SES-8).
+
 ## Bundled native helpers (where the tarball's `.app`s come from)
 
 Two native helpers plus the standalone signed CLI binary ship **inside** this
@@ -161,7 +347,7 @@ package's npm tarball; two more helpers are dev-only and live at repo-root `nati
 | Helper | Source | Ships in tarball? | Resolver |
 |---|---|---|---|
 | Keychain broker | `src/lib/secrets/keychain-helper.swift` → `bin/Agents CLI.app` | **Yes** (signed + notarized) | `src/lib/secrets/` |
-| Menu-bar helper | [`menubar/`](menubar) (SwiftPM) → `bin/MenubarHelper.app` | **Yes** (signed, no notarization) | `src/lib/menubar/install-menubar.ts` |
+| Menu-bar helper | [`menubar/`](menubar) (SwiftPM) → `bin/MenubarHelper.app` | **Yes** (signed + notarized) | `src/lib/menubar/install-menubar.ts` |
 | Standalone CLI binary | `src/` → `bun build --compile` → `bin/agents-macos` | **Yes** (signed + notarized, arm64 Mach-O at `dist/bin/agents`) | `scripts/postinstall.js` |
 | computer-mac | [`../../native/computer-mac`](../../native/computer-mac) | No — signed + notarized GitHub **release asset**, downloaded on demand | `src/lib/computer-rpc.ts`, `src/lib/computer/download.ts` |
 | computer-win | [`../../native/computer-win`](../../native/computer-win) | No (staged at release) | `src/lib/ssh-tunnel.ts` |
@@ -204,43 +390,127 @@ Nothing from `apps/`, `native/`, or sibling `packages/` can leak into the tarbal
 
 ## Releasing
 
-**Releases can be cut locally on macOS, or driven from Linux by offloading the
-Mac-only signing to a remote sign host.** Run from a clean, in-sync `main`:
+**Self-routing, zero-config.** Run it from ANY fleet box with an empty
+environment — no variables to set, no Touch ID, no hand-moved credentials. Run
+from a clean, in-sync `main`:
 
 ```bash
-scripts/release.sh <version>          # dry-run: bump, type-check, build, test, tarball preview
-scripts/release.sh <version> --apply  # commits chore(release), tags v<version>, npm publish, pushes
+scripts/release.sh <version>          # dry-run: bump, type-check, tarball preview, detected state
+scripts/release.sh <version> --apply  # tests on a crabbox -> PR + CI -> merge + tag -> build/sign/publish on the home base
 ```
 
-`release.sh` reads the npm token from the `npmjs.com` secrets bundle (`agents
-secrets`) — no 2FA prompt, no token on disk. The script's git-scope reads use
-`<ref>:apps/cli/package.json` (not root) since the package moved under `apps/cli`.
-If npm rejects a publish after the release PR merges, rerun the same command.
-The script revalidates that PR's full CI matrix and rebuilds from its exact merged
-tree in a temporary worktree. It verifies the staged keychain helper against the
-historical SHA pin, rebuilds the unpinned menu-bar helper from historical source,
-and requires any remote tag to name the verified release commit, so later commits
-on `main` cannot leak into the already-versioned package or strand the retry.
+The release has **three self-selected homes** and prints a `[n/6]` phase tracker,
+each phase labeled with the box it runs on and a ✓/✗ result:
 
-**Linux-driven release (`SIGN_HOST`).** The signed macOS artifacts (below) are
-the only reason publishing was macOS-pinned. `release.sh` now offloads producing
-them: on every **non-macOS** release (the standalone CLI binary embeds the release
-version, so it must be rebuilt each time; `FORCE_REMOTE_SIGN=1` forces it on any
-host), it invokes [`scripts/remote-sign-mac.sh`](scripts/remote-sign-mac.sh), which
-rsyncs the build inputs (the full `src/` tree + `package.json`/`bun.lock`,
-keychain-helper.swift, entitlements, the build/sign scripts, the `menubar/` Swift
-package, and — if present — `bin/embedded.provisionprofile`)
-to `${SIGN_HOST:-mac-mini}`, runs the Mac build scripts there under the appliance's
-headless signing creds (unlock `rush-signing.keychain-db`; Apple notary creds via
-the `apple.com` secrets bundle), then pulls the signed `bin/*.app` +
-`bin/agents-macos` back and re-verifies both sha pins locally. `bun run build` copies the helpers into
-`dist/` on a **presence** gate now (`[ -d bin/… ]`), not `[ "$(uname)" = Darwin ]`,
-so a Linux box that has pulled the pre-signed bundles packages them; `prepack`'s
-sha gate is sha-tool-portable (`shasum` or `sha256sum`). The sign host needs a
-Developer ID identity in `rush-signing.keychain-db`, the `kcpass` + `secrets.pass`
-files under `~/Library/Application Support/rush/`, the `apple.com` secrets bundle,
-and `bin/embedded.provisionprofile` (for the notarized keychain helper). Override
-the checkout with `SIGN_HOST_REPO` (`$HOME` resolves on the remote side).
+| Work | Runs on | How it's chosen |
+|---|---|---|
+| Orchestrate: bump, changelog, PR, tag | the box you invoked it on | it's already there (git + gh only) |
+| CI / tests (Linux) | a **crabbox** (Hetzner Linux VM) | [`scripts/sandbox.sh`](scripts/sandbox.sh) selects an available box for this repo's `.crabbox.yaml` profile or warms a fresh one — **dynamic, never a hardcoded instance** |
+| Build, sign+notarize, npm publish, computer-helper | the **home base** | one hardcoded constant `RELEASE_HOME_BASE="mac-mini"` in `release.sh`; the script detects if it's already there (`scutil --get LocalHostName` / `hostname -s`), else reaches it over `ssh` |
+
+`mac-mini` is the only hardcoded machine name (it holds the Developer ID cert +
+npm publish rights). The crabbox is **not** hardcoded.
+
+**One releaser at a time — the lease.** Because the script runs from any box, two
+agents on two machines could enter it at once; they then clobber the same release
+branch, tag, and publish, and the collision only surfaces at the publish gate
+(`merged tree != built tree`) once one of them has already merged and tagged.
+[`scripts/release-lease.sh`](scripts/release-lease.sh) holds exclusivity on
+`origin` — the only thing every box can agree on — by pushing an **orphan commit**
+to `refs/release-lock/held`. A second claimant's push can never be a fast-forward
+of the first's, so git's rejection *is* the failed lock acquisition: no polling, no
+second service.
+
+```bash
+scripts/release-lease.sh status     # unheld | held version=… holder=… age=…min
+scripts/release-lease.sh claim <v>  # 0 = acquired, 1 = someone else is releasing
+scripts/release-lease.sh renew      # prove this run is still alive
+scripts/release-lease.sh verify     # 0 = still ours; fails CLOSED on any doubt
+scripts/release-lease.sh release    # drop the lease this checkout claimed
+```
+
+`release.sh` claims it right after the confirmation (before the first mutation)
+and drops it from `cleanup_all`'s trap on every exit path. Ownership is the lease
+**commit sha**, recorded in `.git/release-lease.token` — not the pid, so a release
+resumed by a second invocation can still drop its own lease, and a third agent can
+never drop one it did not claim.
+
+**The TTL is not "how long a release takes".** It is "how long since the holder
+last proved it was alive" — a distinction that matters because a healthy release
+routinely outlives any sane TTL: the CI matrix alone has run **57 minutes**, and
+release 1.20.77 took **186 minutes** wall clock. So two things hold the invariant
+together:
+
+- **Renewal.** `release.sh` runs a background renewer for the whole release
+  (`renew` every 10 minutes), so a live run's lease is never older than 10 minutes
+  and cannot be reclaimed out from under it. The renewer is killed before the
+  lease is dropped, so it can never re-push a lease that is being deleted.
+- **`verify` before every irreversible step.** `require_lease` gates the
+  squash-merge, the tag, and the publish routing. It fails **closed** — no token,
+  no ref, unreachable origin all mean "we cannot prove this is ours", so the
+  release stops rather than merging alongside whoever holds it now.
+
+A lease abandoned by a killed run stops being renewed, so it becomes reclaimable
+after `RELEASE_LEASE_TTL` minutes (default 30); reclaiming names the dead holder
+rather than silently overwriting it.
+
+**Finish a stuck release before cutting a new one.** `release.sh` refuses to start
+when an older `v*` tag exists that npm never received, and prints the re-run that
+finishes it. Without this, a release that died between tag and publish left the
+next run validating its bump against a registry that was behind, so it cut the
+*next* version and the gap widened by one every time — that is how npm sat at
+1.20.78 while `main` carried 1.20.81.
+
+**The privileged phase runs on the home base, always — from the TAGGED script.**
+After the invoking box merges + tags (git + gh, which need that box's auth),
+`release.sh` routes build + sign + notarize + `npm publish` + computer-helper to
+`mac-mini`. Whether inline (you invoked it there) or over ssh, it first checks out
+`v<version>` into a throwaway worktree under `.agents/worktrees/`, then runs **that
+worktree's** `apps/cli/scripts/release.sh <version> --home-base-phase` — so the
+script that publishes is the one carried by the release tag (with
+`--home-base-phase` + `headless-sign-context.sh`), never the home base's possibly-
+stale on-disk checkout. The worktree is removed on exit whether the phase succeeds
+or fails. `--home-base-phase` runs inside that worktree: it verifies the checked-
+out version == `<version>`, enters the headless context
+([`scripts/headless-sign-context.sh`](scripts/headless-sign-context.sh) — unlocks
+`rush-signing.keychain-db` + exports `AGENTS_SECRETS_PASSPHRASE` from the on-disk
+pass files, so codesign/notarytool and every `agents secrets exec` run with **no
+Touch ID**), builds + signs the artifacts, resolves the **npm token on the home
+base** (never borrowed to the trigger box), publishes, and pushes the computer-
+helper release asset. `bun run build` copies the signed helpers into `dist/` on a
+presence gate (`[ -d bin/… ]`); `prepack`'s sha gate is sha-tool-portable.
+
+**Tests: crabbox for Linux, GH Actions for the rest.** The `--apply` flow runs the
+full suite on a crabbox before opening the PR; a failure prints the failing tests +
+the captured log path and **halts before any PR/publish**. That covers the Linux
+suite; the GH Actions CI matrix on the release PR still gates the cross-platform
+(macOS/Windows) legs (`wait_for_ci_green` blocks on them, fail-closed). `--skip-tests`
+skips only the crabbox lease.
+
+**Idempotent re-runs.** The script's git-scope reads use `<ref>:apps/cli/package.json`
+(not root) since the package moved under `apps/cli`. If a publish fails after the PR
+merges, rerun the same command: registry-truth short-circuits skip an
+already-published version, tag creation is idempotent against the verified release
+commit, and the catch-up guards (CI-tested-head match + merged-tree match + version
+match) refuse an unverified publish so later commits on `main` cannot leak into the
+already-versioned package.
+
+**`scripts/remote-sign-mac.sh` is no longer on the release path.** The privileged
+phase builds signed artifacts directly on the home base. The script remains only
+for the narrow case of building + pulling back JUST the signed macOS artifacts from
+another Mac (no publish); it too is zero-config, targeting the same hardcoded
+`RELEASE_HOME_BASE` with no env knobs or fleet discovery.
+
+**Provisioning the `apple.com` bundle on a headless sign host.** A Linux-driven
+release offloads macOS signing to a sign host over SSH, which needs the `apple.com`
+secrets bundle *on that host*. Push it with the **file backend** —
+`agents secrets export apple.com --host <signer> --remote-backend file` (needs
+`AGENTS_SECRETS_PASSPHRASE` set locally) — **not** the default keychain backend: a
+macOS login keychain is locked under headless SSH, so a keychain-backed push lands
+the bundle metadata but no readable secret items (`secrets export --host` now
+read-back-verifies a keychain push and fails loudly if it didn't persist, pointing
+at this fix). `--device` is accepted as an alias for `--host` on the secrets remote
+commands. See [`docs/secrets.md`](docs/secrets.md) → *Pushing to a headless sign host*.
 
 **Why not CI?** The tarball bundles `dist/lib/secrets/Agents CLI.app` — a native
 keychain helper compiled with `swiftc`, codesigned (Developer ID), and notarized
@@ -252,10 +522,114 @@ the helper only when `src/lib/secrets/keychain-helper.swift` changes.
 **Menu-bar helper** ([`menubar/`](menubar) → `bin/MenubarHelper.app`) ships the same
 way — built into `bin/`, copied to `dist/lib/menubar/` by `build`, gated in `prepack`
 by [`scripts/verify-menubar-helper.sh`](scripts/verify-menubar-helper.sh) (presence +
-`codesign --verify`). No notarization (a status item has no Keychain ACL / TCC
-grant). Keep it a **separate bundle** from the keychain app — a menu-bar crash must
-never take down the secret broker. Stage a freshly-built `bin/MenubarHelper.app`
-before any release or the menu bar ships code-only (the 1.20.22 bug the gate prevents).
+`codesign --verify` + a **stapled notarization ticket**). It is Developer-ID signed
+**and notarized + stapled** ([`menubar/scripts/build.sh`](menubar/scripts/build.sh),
+run inside the release's `agents secrets exec apple.com` context): Gatekeeper on
+macOS 26+ rejects an un-notarized `.app` as "damaged" (crashing AppKit at launch),
+and the stapled ticket rides inside the bundle so it survives npm's tarball
+round-trip — so the installed helper launches with **no per-machine re-signing**
+(the old `install-menubar.ts` ad-hoc re-sign band-aid is gone; the launch guards now
+verify Gatekeeper acceptance and fail loud instead — RUSH-2134). Notarization is
+mandatory for any real (Developer-ID) build; an ad-hoc dev build can't be notarized
+and the prepack gate refuses to pack it. Keep it a **separate bundle** from the
+keychain app — a menu-bar crash must never take down the secret broker. Stage a
+freshly-built `bin/MenubarHelper.app` before any release or the menu bar ships
+code-only (the 1.20.22 bug the gate prevents).
+
+**Exactly one status item is an invariant, enforced in the helper.** The bundle
+can be started from more than one place — launchd's `KeepAlive` service, a
+LaunchServices/`open` launch, a second `agents menubar enable` — so the helper
+takes an `flock` on `~/.agents/.cache/state/menubar.lock` at launch
+([`SingleInstance.swift`](menubar/Sources/MenubarHelper/SingleInstance.swift)) and
+holds the descriptor for its lifetime; a loser surfaces the incumbent's menu and
+exits 0. Do NOT re-derive liveness from a pid file or a `ps` scan — the kernel
+releases an `flock` however the holder dies, which a pid cannot express, and a
+process list cannot say which copy launchd will keep alive. On the CLI side,
+`classifyMenubarProcesses` returns live copies of the installed bundle as a LIST
+(`own`), never a boolean: collapsing them is what let a duplicate icon read as a
+healthy `running: yes`. `agents menubar setup` is the recovery path — it ends
+every live helper and re-kickstarts the service so the survivor is always
+launchd's.
+
+**The lock fd is `O_CLOEXEC`, and `acquire` self-heals a stale lock.** The lock is
+opened `O_RDWR | O_CREAT | O_CLOEXEC` so no spawned child can inherit the
+descriptor — a pre-fix `doctor` child that inherited it and orphaned at PPID 1 held
+the flock forever, and every relaunch then read "already running" and exited, so
+the menu bar stayed dead until reboot. `O_CLOEXEC` is the fd-level guarantee across
+*every* spawn path: `ChildProcess.spawn` sets only `POSIX_SPAWN_SETPGROUP` (no
+close-on-exec default), and the bare-`Process` one-shots (`runDetached` /
+`runMonitored`) are meant to *outlive* the helper — so the flag on the fd, not the
+spawn site, is what keeps the lock out of every child. The helper never execs
+itself, so it keeps the fd for life. And when the flock is
+held but **no LIVE `MenubarHelper` owns it** — the lock-file pid is dead, or belongs
+to some other program by reuse (`liveHelperOwnsLock` checks liveness + `proc_pidpath`
+basename) — `acquire` reaps the leaked orphan and retries the lock once, instead of
+surfacing into the deadlock. Only a genuine live incumbent is ever surfaced, so a
+duplicate launch never reaps a live helper's in-flight children (the reap is reached
+only when the holder is provably not a live helper).
+
+**Every CLI child the helper spawns is bounded, group-killable, and reapable.**
+The helper shells `agents` on a timer, and an unbounded `Process` there is not a
+slow menu — it is a machine-killer. `doctor --json` measures **136s on an idle
+box**, the poll asked for it every 60s, and a helper that dies mid-call leaves the
+child reparented to launchd with nothing to reap it (plus the `node -e` probes
+that child forked). The deaths are not preventable from inside the app:
+`NSApplication.shared` segfaults in `SLSNewConnection` when WindowServer is too
+starved to hand out a connection, and `KeepAlive` restarts into another doctor.
+Observed: 38 orphaned doctors + 92 orphaned probes, ~13 of 18 cores, load 490.
+**The property that made this fatal is accumulation, so the rule is scoped to
+what accumulates: every TIMER-DRIVEN, repeating CLI call MUST go through
+[`ChildProcess`](menubar/Sources/MenubarHelper/ChildProcess.swift)** — that is the
+`capture()` path behind the cached refreshers (`routines`, `recentSessions`,
+`activeSessions`, `doctorOverview`, `watchdog`). A poller is the only thing that
+can stack 38 copies of itself.
+
+**User-initiated one-shots deliberately do NOT** — `runDetached`,
+`runMonitored`, and `runMonitoredWithInput` keep a bare `Process` on purpose,
+because every one of their callers is a menu click (`routines run/pause`,
+`devices register`, `open <url>`, and the ticket-agent / quick-fix dispatches).
+Two reasons, and both would be violated by "bound everything": a deadline there
+would **kill the user's headless `agents run` mid-work**, and a fire-and-forget
+`open`/dispatch is *supposed* to outlive the helper. One click cannot stack, so
+there is nothing to accumulate. Do not "fix" these by routing them through
+`ChildProcess` — if a future caller makes one of them repeating, that caller is
+the bug.
+
+`ChildProcess` holds three invariants:
+
+- **Bounded.** Every spawn carries a deadline (30s; `ChildProcess.doctorTimeout`
+  180s for `doctor --json`, above its real measured cost — a ceiling set *below*
+  the true cost just makes every poll fail while still paying full CPU).
+- **Killed as a group.** The child is spawned as its own process-group leader
+  (`POSIX_SPAWN_SETPGROUP`) so a timeout `kill(-pgid)`s the subtree. Signalling
+  the pid alone is what left 92 probes running. Foundation's `Process` cannot set
+  a process group — that is why this is `posix_spawn` and not `Process`.
+- **Reaped by the NEXT launch.** Live children are recorded in
+  `~/.agents/.cache/state/menubar-children`; `reapOrphansFromPreviousLaunch()`
+  runs in `main.swift` **before** the first AppKit call, since the crash being
+  recovered from happens *inside* that call. Do NOT move it after, and do NOT
+  replace it with an exit handler — SIGSEGV runs none. Pid reuse is guarded by
+  re-checking the executable path (`proc_pidpath`) before killing.
+
+Poll intervals must stay well above the call's real cost:
+`StatusItemController.doctorRefreshInterval` is 15 min against a 136s command
+(it was 60s — a >100% duty cycle). `MENUBAR_CHILD_TEST=1 MenubarHelper` exercises
+all of it against real processes, including reaping a real surviving orphan and
+proving a spawned child never inherits the single-instance flock fd.
+Separately, **`doctor --json` taking 136s on an idle machine is its own defect**
+— the helper is now safe against it, not a reason to consider it acceptable.
+
+**These self-tests are a build gate now, not just manual modes.** The helper's
+env-gated self-tests (`MENUBAR_SINGLE_TEST`, `MENUBAR_CHILD_TEST`,
+`MENUBAR_GUARD_TEST`, `MENUBAR_ISSUE_TEST`) are headless — they exit before the
+AppKit path (`Guards.enforceForInteractiveLaunch`) so they need no GUI or signing.
+[`menubar/scripts/test-menubar.sh`](menubar/scripts/test-menubar.sh) runs all four against
+the just-built binary and [`build.sh`](menubar/scripts/build.sh) invokes it before
+signing, so no helper artifact ships whose invariants regressed. Nothing ran these
+before — PR CI is Linux (can't build Swift) and prepack only checks the shipped
+bundle's signature — which is how the flock fd-inheritance deadlock escaped. Do NOT
+add `MENUBAR_DUMP` / `MENUBAR_PROMPT_PREVIEW` to the gate: those reach AppKit and
+need a GUI session.
 
 **Standalone `agents` binary (#315).** Every release also builds `dist/bin/agents`
 (`bun build --compile`, arm64 Mach-O), signs it (Developer ID + hardened runtime +
@@ -265,9 +639,9 @@ needs MAP_JIT or the binary dies on startup), and notarizes it via
 points the alias shims and the `~/.local/bin/agents`/`ag` links at it, with a
 run-probe fallback to the JS entrypoint (mitigation 1 of #315 — the unsigned
 node-shebang shim is what EDR flags). Unlike the `.app` helpers it embeds the
-release version, so it is rebuilt **every** release: locally on macOS (`release.sh`
-injects Apple creds via the `apple.com` bundle) or on the sign host for
-Linux-driven releases. `prepack` gates it with
+release version, so it is rebuilt **every** release on the home base (`release.sh`
+injects Apple creds via the `apple.com` bundle in the headless context). `prepack`
+gates it with
 [`scripts/verify-cli-binary.sh`](scripts/verify-cli-binary.sh): sha pin at
 `scripts/agents-cli-bin.sha256` (gitignored — a per-release artifact paired to the
 sign run, unlike the helper's committed pin), an embedded-version check so a stale
@@ -285,9 +659,66 @@ Bumping it would un-deprecate a retired package.
   `npm update -g @phnx-labs/agents-cli`.
 - No sensitive data in any DotAgents repo — use `agents secrets` (Keychain-backed).
 
+## Contracts (source-of-truth spec — read before touching sessions/secrets)
+
+The major subsystems carry a **normative contract** in
+[`docs/specifications.md`](docs/specifications.md) — what a human, an agent, or a
+downstream tool may rely on, written because features have regressed by quietly
+deviating from an unwritten contract. When code and the spec disagree, one is a
+bug; fix the drift. It uses RFC-2119 MUST/SHOULD language, cites the implementing
+`file:line`, and carries Given/When/Then scenarios that map to tests. Sections:
+
+- **[`docs/specifications.md` §Sessions](docs/specifications.md#sessions)** — the `agents sessions`
+  contract. Load-bearing invariants: discovery MUST parse **every** harness in
+  `SESSION_AGENTS` (all 12) and a malformed line MUST be skipped, never thrown
+  (SES-1, SES-3); every list row MUST show a **non-empty preview** — live turn →
+  `label` → first-prompt `topic` → `'-'` (SES-8; `--flat` and the interactive
+  picker share the one unguarded renderer, SES-GAP-1); "where a session started"
+  spans three fields (`cwd` + `provenance` + `context`), not one `origin`
+  (SES-13); the `--json` shapes and `SessionEvent` union are a stability contract
+  (SES-IF-1, SES-IF-4); tool-call evidence is always redacted/bounded, repeated
+  clauses match distinct calls, tool queries never parse transcripts, and exact
+  static program counts retain repeated sites with wrapper/effective roles;
+  versioned tool envelopes do not replace the list/detail JSON contracts
+  (SES-31..SES-37, SES-IF-4a); `agents sessions stats` emits its own versioned
+  `sessions-stats` rollup of skill/command usage and never the list/detail shape
+  (SES-IF-4b); `agents sessions
+  export --encrypt` seals every transcript
+  body client-side with AES-256-GCM under the shared `r2.backups` bundle key, or
+  an ephemeral one when unconfigured (SES-24, SES-25).
+- **[`docs/specifications.md` §Secrets](docs/specifications.md#secrets)** — the `agents secrets`
+  contract. Load-bearing invariants: **inject into the child, never materialize
+  to the agent** — every command is on one side of the boundary by construction
+  (SEC-6, SEC-7); the master passphrase MUST be stripped from the child env
+  (SEC-8); the "no-noise" rules — silent value-free `list`, batched single-prompt
+  reads, silent broker miss, no `console.*` in the lib layer, no shell-rc
+  pollution (SEC-11..SEC-17); all three desktop platforms are supported and the
+  parity matrix names where guarantees are weaker (SEC-CROSS-1, SEC-CROSS-3).
+
+Requirement ids are section-namespaced — `SES-*` / `SEC-*` / `EXEC-*`, with the
+`-IF-` (interface), `-CROSS-` (platform parity), `-COMPAT-` (stability) and
+`-GAP-` (known gap) families — and a requirement the code does not yet fully meet
+carries a trailing `Status: [Intended]` or `[Drift]` line naming its `-GAP-`.
+
+Beyond the two above, the document also specifies **§Agent execution**,
+**§Scheduling & execution singularity**, and **§Watchdog**. It does **not** cover
+every command group — `hosts`, `teams`, and `cloud` have design docs but zero
+RFC-2119 requirements, and surfaces like `wallet`, `worktree`, and `sync`/`apply`
+have neither. The
+[coverage inventory](docs/specifications.md#coverage-inventory) says which row a
+surface sits in; check it before treating a behavior as guaranteed.
+
+Every section enumerates **known gaps** (implemented-vs-intended drift) — a new
+feature MUST NOT widen them and SHOULD close the one it touches. A gap that has
+been closed stays as a `(resolved)` entry so references never dangle.
+
 ## Detailed design
 
 [`docs/`](docs/README.md) is the source-grounded reference. Start with
 [`architecture.md`](docs/architecture.md) for the CLI/extension layering and the
 session mechanisms, then [`00-concepts.md`](docs/00-concepts.md) for the resource
-model.
+model. The normative contract
+([`specifications.md`](docs/specifications.md)) sits
+alongside the reference docs ([05-sessions.md](docs/05-sessions.md),
+[secrets.md](docs/secrets.md)) — read the spec for the guarantee, the reference
+for the how-to.

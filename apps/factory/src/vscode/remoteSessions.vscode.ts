@@ -27,13 +27,112 @@ import {
   filterStaleSessions,
   reconcileHosts,
   groupByHost,
+  parseSessionLabelSource,
+  SessionLabelSource,
+  parseSessionIdentity,
+  SessionIdentity,
 } from '../core/remoteSessions';
 import type { ProjectRule } from '../core/settings';
 import { deriveHostLoad, parseRemoteCpuRatio } from '../core/dispatchRanking';
-import { listRegisteredDevices } from './deviceHealth.vscode';
+import {
+  acceptSuccessfulFloorFetch,
+  isLocalSessionsStale,
+  mergeHostRosterIntoSnapshot,
+  mergeLocalSessionsIntoSnapshot,
+  retainLastGoodOnFailure,
+  type FloorHostSessionsSnapshot,
+} from '../core/floorSnapshot';
+import {
+  getRegisteredDevicesCache,
+  listRegisteredDevices,
+  type Device,
+  type DeviceRef,
+} from './deviceHealth.vscode';
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
+
+/** Optional persistence hooks so the Floor last-good snapshot survives restarts. */
+export interface FloorSnapshotStore {
+  read: () => FloorHostSessionsSnapshot | null;
+  write: (snap: FloorHostSessionsSnapshot) => void | Promise<void>;
+}
+
+let floorStore: FloorSnapshotStore | null = null;
+
+/** Wire VS Code globalState (or a test double) as the Floor last-good store. */
+export function setFloorSnapshotStore(store: FloorSnapshotStore | null): void {
+  floorStore = store;
+  if (store) {
+    const parsed = store.read();
+    if (parsed) {
+      lastGoodFloor = parsed;
+      activeCache = {
+        at: parsed.fetchedAt,
+        hasCpu: false,
+        rulesKey: '',
+        result: toHostSessionsResult(parsed),
+      };
+      // Hydrate the local cache too so a failed activation seed cannot wipe
+      // last-good local rows (local fail path used to check only localCache).
+      // Stamp "now" for the backstop clock so a restart does not immediately
+      // re-CLI just because the persisted fetchedAt is minutes old — the UI
+      // still shows true age via hostFreshness on the snapshot itself.
+      const localResult = localResultFromFloor(parsed);
+      if (localResult) {
+        const now = Date.now();
+        localCache = { at: now, rulesKey: '', result: localResult };
+        lastLocalCliAt = now;
+      }
+    }
+  }
+}
+
+/** Slice this-mac rows out of a full floor snapshot into a HostSessionsResult. */
+function localResultFromFloor(snap: FloorHostSessionsSnapshot): HostSessionsResult | null {
+  const localSessions = snap.sessions.filter((s) => s.host === LOCAL_LABEL);
+  const localHost = snap.hosts.find((h) => h.name === LOCAL_LABEL);
+  if (!localHost && localSessions.length === 0) return null;
+  const host: HostInfo = localHost ?? {
+    name: LOCAL_LABEL,
+    online: true,
+    agents: localSessions.length,
+    load: 'idle',
+    uses: localSessions.length,
+  };
+  const freshness = snap.hostFreshness[LOCAL_LABEL] ?? snap.fetchedAt;
+  return {
+    hosts: [host],
+    sessions: localSessions,
+    groups: snap.groups.filter((g) => g.host === LOCAL_LABEL),
+    fetchedAt: freshness,
+    hostFreshness: { [LOCAL_LABEL]: freshness },
+    fromCache: true,
+  };
+}
+
+/** On a failed local CLI call, keep last-good local rows (memory or floor snap). */
+function retainLocalLastGood(): HostSessionsResult | null {
+  if (localCache) return { ...localCache.result, fromCache: true };
+  if (lastGoodFloor) return localResultFromFloor(lastGoodFloor);
+  return null;
+}
+
+function persistFloor(snap: FloorHostSessionsSnapshot): void {
+  lastGoodFloor = snap;
+  void floorStore?.write(snap);
+}
+
+function toHostSessionsResult(snap: FloorHostSessionsSnapshot): HostSessionsResult {
+  return {
+    hosts: snap.hosts,
+    sessions: snap.sessions,
+    groups: snap.groups,
+    fetchedAt: snap.fetchedAt,
+    hostFreshness: snap.hostFreshness,
+    fromCache: snap.fromCache === true,
+  };
+}
 
 /** This machine's name — its local sessions are queried directly (no SSH). */
 export const LOCAL_HOST = os.hostname();
@@ -51,9 +150,13 @@ const ACTIVE_TIMEOUT_REMOTE_MS = 10000;
 // ~12s, run in parallel), so it needs a wider ceiling than a single local read.
 const FANOUT_TIMEOUT_MS = 15000;
 const DETAIL_TIMEOUT_MS = 15000;
+// Remote fleet refresh is user-triggered only — short TTL no longer revalidates
+// the bare SSH sweep on every poll. Last-good is retained indefinitely until
+// an explicit manual refresh.
 const CACHE_TTL_MS = 4000;
-// The local-only fast path polls ~3s; a sub-poll TTL keeps two near-simultaneous
-// local ticks from double-spawning the local `agents` subprocess.
+// Local polls used to re-spawn every 1.5s; the Floor performance track uses a
+// 60s local-only backstop instead (see isLocalSessionsStale). Concurrent callers
+// still coalesce via localInFlight.
 const LOCAL_CACHE_TTL_MS = 1500;
 const LOAD_PROBE_TIMEOUT_MS = 4000;
 // SSH multiplexing for the ONE ssh we invoke directly — the CPU-load probe. The
@@ -151,16 +254,41 @@ async function findAgentsCli(): Promise<string> {
  * dispatch panel); reconcileHosts folds a registry entry that is the local machine
  * into the always-online local host so each machine appears exactly once under its
  * canonical name. The pure scoping/folding lives in core (reconcileHosts) so it is
- * unit-tested; this wrapper only does the I/O.
+ * unit-tested; this wrapper only does the I/O. Pass an already-fetched device
+ * list to skip the registry read (the host picker's refresh path fetches once
+ * and threads the same list through).
  */
-export async function discoverHosts(): Promise<ReconciledHost[]> {
-  const devices = await listRegisteredDevices();
-  const inputs: RegisteredDeviceInput[] = devices.map((d) => ({
+export async function discoverHosts(devices?: readonly DeviceRef[]): Promise<ReconciledHost[]> {
+  const registered = devices ?? getRegisteredDevicesCache() ?? await listRegisteredDevices();
+  const inputs: RegisteredDeviceInput[] = registered.map((d) => ({
     name: d.name,
     address: d.host,
     online: d.online === true,
   }));
   return reconcileHosts(inputs, LOCAL_HOST);
+}
+
+/** Render the activation registry roster into last-good Floor state without SSH. */
+export function seedFloorHostsFromDevices(devices: readonly DeviceRef[]): FloorHostSessionsSnapshot {
+  const inputs: RegisteredDeviceInput[] = devices.map((device) => ({
+    name: device.name,
+    address: device.host,
+    online: device.online === true,
+  }));
+  const roster = reconcileHosts(inputs, LOCAL_HOST).map((host): HostInfo => {
+    const name = host.isLocal ? LOCAL_LABEL : normalizeHost(host.name);
+    const online = host.isLocal || host.online;
+    return {
+      name,
+      online,
+      agents: 0,
+      load: online ? 'idle' : 'off',
+      uses: 0,
+    };
+  });
+  const merged = mergeHostRosterIntoSnapshot(lastGoodFloor, roster);
+  persistFloor(merged);
+  return merged;
 }
 
 // --- Tier-1: active fetch ---------------------------------------------------
@@ -318,6 +446,66 @@ export async function fetchRecentForHost(
 }
 
 /**
+ * Label inputs for ONE session that lives on another machine.
+ *
+ * A tab spawned with `agents run --host` has its transcript on the host, so the
+ * local by-session-id lookups the label poller normally uses (the Claude
+ * sessions/*.json scan, the jsonl preview read) find nothing and the tab keeps
+ * the bare agent prefix forever. `agents sessions <id> --host <name> --json`
+ * resolves both fields on the machine that owns the session.
+ *
+ * Returns null when the host is unreachable or the session is not indexed there
+ * yet — a fresh session has no first message for a second or two, and the poller
+ * simply retries on its next tick.
+ */
+export async function fetchRemoteSessionLabelSource(
+  sessionId: string,
+  host: string,
+): Promise<SessionLabelSource | null> {
+  const agentsBin = await findAgentsCli();
+  try {
+    const { stdout } = await execFileAsync(
+      agentsBin,
+      ['sessions', sessionId, '--host', host, '--json'],
+      { timeout: DETAIL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: pathAugmentedEnv() },
+    );
+    return parseSessionLabelSource(stdout, sessionId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve a running session's real `version` + `account` via
+ * `agents sessions <id> [--host <device>] --json`. `host` is passed for an
+ * offloaded (`--host`) tab whose session lives on another machine; omitted for a
+ * local session. This is the authoritative source for the status bar's
+ * version/account — `agents view` reports only machine-default install metadata.
+ *
+ * Returns null when the host is unreachable or the session is not indexed yet;
+ * the status-bar hydration simply retries on its next tick.
+ */
+export async function fetchSessionIdentity(
+  sessionId: string,
+  host?: string,
+): Promise<SessionIdentity | null> {
+  const agentsBin = await findAgentsCli();
+  const args = host
+    ? ['sessions', sessionId, '--host', host, '--json']
+    : ['sessions', sessionId, '--json'];
+  try {
+    const { stdout } = await execFileAsync(
+      agentsBin,
+      args,
+      { timeout: DETAIL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, env: pathAugmentedEnv() },
+    );
+    return parseSessionIdentity(stdout, sessionId);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Recap fan-out: recent (historical) sessions across the WHOLE fleet — the local
  * machine plus every online registered device — flattened and sorted by last
  * activity, newest first. Feeds the Floor's Recap ledger ("what happened while I
@@ -328,8 +516,9 @@ export async function fetchRecentForHost(
 export async function fetchRecapSessions(
   limitPerHost: number,
   projectRules: ProjectRule[],
+  devices?: readonly DeviceRef[],
 ): Promise<RemoteSession[]> {
-  const hosts = await discoverHosts();
+  const hosts = await discoverHosts(devices);
   const targets = hosts.filter((h) => h.isLocal || h.online);
   const results = await Promise.allSettled(
     targets.map((h) => fetchRecentForHost(h.isLocal ? LOCAL_LABEL : h.address, h.isLocal, h.name, limitPerHost, projectRules)),
@@ -343,29 +532,66 @@ export interface HostSessionsResult {
   sessions: RemoteSession[];
   groups: HostGroup[];
   fetchedAt: number;
+  /** Per-host last successful fetch epoch ms. */
+  hostFreshness?: Record<string, number>;
+  /** True when served from last-good without a fresh fleet CLI call. */
+  fromCache?: boolean;
 }
 
-// Short-TTL cache + in-flight guard so the webview polling this does not launch
-// overlapping SSH fan-outs (mirrors the throughputCache intent in
-// settings.vscode.ts).
-// `hasCpu` records whether this cached result carries live CPU load. A CPU-less feed
-// result must NOT satisfy a Dispatch call that needs load for ranking, so a probeCpu
-// caller treats a CPU-less cache as a miss.
-// `rulesKey` records the project-rule set baked into the cached projects; a change
-// to the user's rules invalidates the cache so grouping updates on the next poll.
+// Last-good floor snapshot (memory). Survives failed refreshes; optionally
+// mirrored to globalState via setFloorSnapshotStore.
+let lastGoodFloor: FloorHostSessionsSnapshot | null = null;
+// In-flight guard so concurrent force refreshes share ONE bare CLI call.
 let activeCache: { at: number; hasCpu: boolean; rulesKey: string; result: HostSessionsResult } | null = null;
 let activeInFlight: Promise<HostSessionsResult> | null = null;
 let localCache: { at: number; rulesKey: string; result: HostSessionsResult } | null = null;
 let localInFlight: Promise<HostSessionsResult> | null = null;
+/** When the last successful local CLI seed/backstop completed. */
+let lastLocalCliAt: number | null = null;
+/** Subprocess invocation counters for tests (not a production API). */
+export const __remoteSessionsTestCounters = {
+  bareActiveCalls: 0,
+  localActiveCalls: 0,
+  reset() {
+    this.bareActiveCalls = 0;
+    this.localActiveCalls = 0;
+  },
+};
 
 export interface FetchHostSessionsOptions {
-  /** Kept for the Dispatch panel's load-ranking call. Since the feed now sources
-   *  every host from one bare fan-out (no per-host SSH), remote CPU is no longer
-   *  probed; this only affects local CPU freshness + the `hasCpu` cache key so a
-   *  Dispatch call after a feed poll can force one fresh sweep. */
+  /**
+   * When true, run one bare `agents sessions --active --json` fleet call.
+   * When false/omitted, return last-good immediately (no CLI) once a snapshot
+   * exists. Cold start (no last-good) still runs one seed fetch.
+   */
+  force?: boolean;
+  /** @deprecated Dispatch must not trigger CPU/SSH fan-out. Ignored. */
   probeCpu?: boolean;
   /** Ordered cwd->project mappings applied when normalizing each session's project. */
   projectRules?: ProjectRule[];
+}
+
+export interface FetchLocalSessionsOptions {
+  /** Force a local CLI re-read even inside the 60s backstop window. */
+  force?: boolean;
+  projectRules?: ProjectRule[];
+}
+
+/** Read the in-memory last-good Floor snapshot (tests / dispatch seed). */
+export function getLastGoodFloorSnapshot(): FloorHostSessionsSnapshot | null {
+  return lastGoodFloor;
+}
+
+/** Test-only: clear in-memory caches (does not touch globalState). */
+export function __resetRemoteSessionsCachesForTests(): void {
+  lastGoodFloor = null;
+  activeCache = null;
+  activeInFlight = null;
+  localCache = null;
+  localInFlight = null;
+  lastLocalCliAt = null;
+  __remoteSessionsTestCounters.reset();
+  floorStore = null;
 }
 
 function projectRulesKey(rules: ProjectRule[]): string {
@@ -381,72 +607,108 @@ function offlineHostInfo(name: string): HostInfo {
 }
 
 /**
- * Tier-1: fetch active sessions across the whole fleet via ONE bare fan-out (the
- * CLI's own cross-machine sweep), then reconcile against the device registry so
- * every registered host — online or idle — appears under its canonical name with
- * an accurate count. Cached for CACHE_TTL_MS; concurrent callers share the
- * in-flight promise.
+ * Tier-1 fleet sessions.
+ *
+ * - force=false → return last-good or an empty local snapshot immediately (no CLI).
+ * - force=true → ONE bare `agents sessions --active --json`.
+ * - Failure → retain last-good rows (never wipe the Floor).
+ * - Concurrent callers share the in-flight promise (coalescing).
+ *
+ * Dispatch and automatic UI polls must pass force=false. Only an explicit
+ * user refresh should pass force=true (protocol: fetchHostSessions.force).
  */
 export async function fetchHostSessions(
   fetchedAt: number = Date.now(),
   opts: FetchHostSessionsOptions = {},
 ): Promise<HostSessionsResult> {
-  const probeCpu = opts.probeCpu === true;
+  const force = opts.force === true;
   const projectRules = opts.projectRules ?? [];
   const rulesKey = projectRulesKey(projectRules);
-  if (
-    activeCache &&
-    fetchedAt - activeCache.at < CACHE_TTL_MS &&
-    (activeCache.hasCpu || !probeCpu) &&
-    activeCache.rulesKey === rulesKey
-  ) {
-    return activeCache.result;
+
+  // Every non-forced read is cache-only, including a true cold start before the
+  // activation seed has populated globalState. This prevents panel mount and
+  // Dispatch from racing activation into a fleet SSH sweep.
+  if (!force) {
+    if (lastGoodFloor) {
+      return toHostSessionsResult({ ...lastGoodFloor, fromCache: true });
+    }
+    if (activeCache && fetchedAt - activeCache.at < CACHE_TTL_MS && activeCache.rulesKey === rulesKey) {
+      return { ...activeCache.result, fromCache: true };
+    }
+    const local: HostInfo = {
+      name: LOCAL_LABEL,
+      online: true,
+      agents: 0,
+      load: 'idle',
+      uses: 0,
+    };
+    return {
+      hosts: [local],
+      sessions: [],
+      groups: [{ host: LOCAL_LABEL, online: true, fetchedAt: 0, sessions: [] }],
+      fetchedAt: 0,
+      hostFreshness: { [LOCAL_LABEL]: 0 },
+      fromCache: true,
+    };
   }
   if (activeInFlight) return activeInFlight;
 
   activeInFlight = (async () => {
-    const hosts = await discoverHosts();
-    // ONE bare fan-out: the CLI runs its own cross-machine SSH sweep and returns
-    // every reachable machine's sessions, each self-identifying via `machine`.
-    // This replaces the extension's per-host `--host` sweep, which is unreliable
-    // (ssh-in-ssh that reports "unreachable — skipped") and slow (~12s/host) — the
-    // exact reason remote hosts were showing 0 while the fleet's work ran on them.
-    const fan = await withHardTimeout(
-      fetchActiveForHost(LOCAL_LABEL, true, LOCAL_LABEL, fetchedAt, probeCpu, projectRules, true),
-      FANOUT_TIMEOUT_MS + 2000,
-      { host: LOCAL_LABEL, online: false, sessions: [], cpuRatio: null },
-    );
-    // Dedupe (many pids -> one session) + drop stale, so counts, the feed, and
-    // needs-you all reconcile against the same reconciled set.
-    const sessions = filterStaleSessions(dedupeSessions(fan.sessions), fetchedAt);
-    // Per-host live counts from the reconciled set (keyed by the machine bucket
-    // resolveSessionHost assigned), so a host's count matches its rendered cards.
-    const countByHost = new Map<string, number>();
-    for (const s of sessions) countByHost.set(s.host, (countByHost.get(s.host) ?? 0) + 1);
-    // Roster = the registered device fleet + this machine. A host is online if the
-    // registry says so OR it returned live sessions; offline registered devices stay
-    // visible with 0. Local CPU is free (os.loadavg); remote load derives from count.
-    const resolvedHosts: HostInfo[] = [];
-    const seen = new Set<string>();
-    for (const h of hosts) {
-      const key = h.isLocal ? LOCAL_LABEL : normalizeHost(h.name);
-      seen.add(key);
-      const agents = countByHost.get(key) ?? 0;
-      const isOnline = h.isLocal ? fan.online : (h.online || agents > 0);
-      if (!isOnline) { resolvedHosts.push(offlineHostInfo(key)); continue; }
-      const load = deriveHostLoad(agents, h.isLocal ? fan.cpuRatio : null);
-      resolvedHosts.push({ name: key, online: true, agents, load, uses: agents });
+    try {
+      // Reuse the activation registry cache. Even a manual refresh must run only
+      // the one bare active-session command, never a second devices-list command.
+      const hosts = await discoverHosts(getRegisteredDevicesCache() ?? []);
+      // ONE bare fan-out: the CLI runs its own cross-machine SSH sweep.
+      __remoteSessionsTestCounters.bareActiveCalls++;
+      const fan = await withHardTimeout(
+        fetchActiveForHost(LOCAL_LABEL, true, LOCAL_LABEL, fetchedAt, false, projectRules, true),
+        FANOUT_TIMEOUT_MS + 2000,
+        { host: LOCAL_LABEL, online: false, sessions: [], cpuRatio: null },
+      );
+      // Treat a fully-failed fan (offline + empty) as failure when we have last-good.
+      if (!fan.online && fan.sessions.length === 0 && lastGoodFloor) {
+        const kept = retainLastGoodOnFailure(lastGoodFloor);
+        if (kept) {
+          const result = toHostSessionsResult(kept);
+          activeCache = { at: fetchedAt, hasCpu: false, rulesKey, result };
+          return result;
+        }
+      }
+      const sessions = filterStaleSessions(dedupeSessions(fan.sessions), fetchedAt);
+      const countByHost = new Map<string, number>();
+      for (const s of sessions) countByHost.set(s.host, (countByHost.get(s.host) ?? 0) + 1);
+      const resolvedHosts: HostInfo[] = [];
+      const seen = new Set<string>();
+      for (const h of hosts) {
+        const key = h.isLocal ? LOCAL_LABEL : normalizeHost(h.name);
+        seen.add(key);
+        const agents = countByHost.get(key) ?? 0;
+        const isOnline = h.isLocal ? fan.online : (h.online || agents > 0);
+        if (!isOnline) { resolvedHosts.push(offlineHostInfo(key)); continue; }
+        const load = deriveHostLoad(agents, h.isLocal ? fan.cpuRatio : null);
+        resolvedHosts.push({ name: key, online: true, agents, load, uses: agents });
+      }
+      for (const [key, agents] of countByHost) {
+        if (seen.has(key)) continue;
+        resolvedHosts.push({ name: key, online: true, agents, load: deriveHostLoad(agents, null), uses: agents });
+      }
+      const groups = groupByHost(sessions, resolvedHosts, fetchedAt);
+      const accepted = acceptSuccessfulFloorFetch(lastGoodFloor, {
+        hosts: resolvedHosts,
+        sessions,
+        groups,
+        fetchedAt,
+      });
+      persistFloor(accepted);
+      lastLocalCliAt = fetchedAt; // bare fan-out also refreshed local rows
+      const result = toHostSessionsResult(accepted);
+      activeCache = { at: fetchedAt, hasCpu: false, rulesKey, result };
+      return result;
+    } catch {
+      const kept = retainLastGoodOnFailure(lastGoodFloor);
+      if (kept) return toHostSessionsResult(kept);
+      return { hosts: [], sessions: [], groups: [], fetchedAt, hostFreshness: {}, fromCache: true };
     }
-    // Defensive: a machine that returned sessions but isn't in the device registry
-    // still gets a roster row so its cards aren't orphaned from the sidebar.
-    for (const [key, agents] of countByHost) {
-      if (seen.has(key)) continue;
-      resolvedHosts.push({ name: key, online: true, agents, load: deriveHostLoad(agents, null), uses: agents });
-    }
-    const groups = groupByHost(sessions, resolvedHosts, fetchedAt);
-    const result: HostSessionsResult = { hosts: resolvedHosts, sessions, groups, fetchedAt };
-    activeCache = { at: fetchedAt, hasCpu: probeCpu, rulesKey, result };
-    return result;
   })();
 
   try {
@@ -457,29 +719,65 @@ export async function fetchHostSessions(
 }
 
 /**
- * Local-only fast path: fetch just THIS machine's sessions (no SSH, no host
- * discovery). Feeds the 3s local poll so the feed feels live without paying the
- * remote fan-out cost. Returns a single-host ('this-mac') HostSessionsResult.
+ * Local-only sessions (`agents sessions --active --local --json`).
+ *
+ * Activation / first call seeds once. Subsequent calls return last-good until
+ * the 60s local-only backstop elapses (or force=true). Never SSH.
  */
 export async function fetchLocalSessions(
   fetchedAt: number = Date.now(),
-  projectRules: ProjectRule[] = [],
+  projectRulesOrOpts: ProjectRule[] | FetchLocalSessionsOptions = [],
 ): Promise<HostSessionsResult> {
+  // Back-compat: older callers passed ProjectRule[] as the second arg.
+  const opts: FetchLocalSessionsOptions = Array.isArray(projectRulesOrOpts)
+    ? { projectRules: projectRulesOrOpts }
+    : projectRulesOrOpts;
+  const projectRules = opts.projectRules ?? [];
+  const force = opts.force === true;
   const rulesKey = projectRulesKey(projectRules);
-  if (localCache && fetchedAt - localCache.at < LOCAL_CACHE_TTL_MS && localCache.rulesKey === rulesKey) {
-    return localCache.result;
+
+  if (!force && localCache && fetchedAt - localCache.at < LOCAL_CACHE_TTL_MS && localCache.rulesKey === rulesKey) {
+    return { ...localCache.result, fromCache: true };
+  }
+  // Inside the 60s backstop with a prior success: serve last-good local rows.
+  if (!force && !isLocalSessionsStale(lastLocalCliAt, fetchedAt) && localCache) {
+    return { ...localCache.result, fromCache: true };
+  }
+  if (!force && !isLocalSessionsStale(lastLocalCliAt, fetchedAt) && lastGoodFloor) {
+    const localSessions = lastGoodFloor.sessions.filter((s) => s.host === LOCAL_LABEL);
+    const localHost = lastGoodFloor.hosts.find((h) => h.name === LOCAL_LABEL) ?? {
+      name: LOCAL_LABEL, online: true, agents: localSessions.length, load: 'idle' as const, uses: localSessions.length,
+    };
+    return {
+      hosts: [localHost],
+      sessions: localSessions,
+      groups: lastGoodFloor.groups.filter((g) => g.host === LOCAL_LABEL),
+      fetchedAt: lastGoodFloor.hostFreshness[LOCAL_LABEL] ?? lastGoodFloor.fetchedAt,
+      hostFreshness: { [LOCAL_LABEL]: lastGoodFloor.hostFreshness[LOCAL_LABEL] ?? lastGoodFloor.fetchedAt },
+      fromCache: true,
+    };
   }
   if (localInFlight) return localInFlight;
 
   localInFlight = (async () => {
+    __remoteSessionsTestCounters.localActiveCalls++;
     const r = await withHardTimeout(
       fetchActiveForHost(LOCAL_LABEL, true, LOCAL_LABEL, fetchedAt, false, projectRules),
       ACTIVE_TIMEOUT_LOCAL_MS + 2000,
       { host: LOCAL_LABEL, online: false, sessions: [], cpuRatio: null },
     );
-    // Drop stale (long-dead) sessions here too so the fast local poll never
-    // resurrects an abandoned agent the full sweep would have aged out.
+    // Failed / empty local CLI: never wipe hydrated last-good (localCache OR floor).
+    if (!r.online && r.sessions.length === 0) {
+      const kept = retainLocalLastGood();
+      if (kept) return kept;
+    }
     const sessions = filterStaleSessions(r.sessions, fetchedAt);
+    // An empty success after we already had last-good is treated as retain, not wipe
+    // — a flaky CLI that returns [] must not clear the Floor on seed.
+    if (sessions.length === 0) {
+      const kept = retainLocalLastGood();
+      if (kept) return kept;
+    }
     const agents = sessions.length;
     const host: HostInfo = {
       name: LOCAL_LABEL,
@@ -489,8 +787,19 @@ export async function fetchLocalSessions(
       uses: agents,
     };
     const groups = groupByHost(sessions, [host], fetchedAt);
-    const result: HostSessionsResult = { hosts: [host], sessions, groups, fetchedAt };
+    const result: HostSessionsResult = {
+      hosts: [host],
+      sessions,
+      groups,
+      fetchedAt,
+      hostFreshness: { [LOCAL_LABEL]: fetchedAt },
+      fromCache: false,
+    };
     localCache = { at: fetchedAt, rulesKey, result };
+    lastLocalCliAt = fetchedAt;
+    // Merge into the full floor last-good so remote rows stay when local refreshes.
+    const merged = mergeLocalSessionsIntoSnapshot(lastGoodFloor, sessions, host, fetchedAt);
+    persistFloor(merged);
     return result;
   })();
 
@@ -499,6 +808,20 @@ export async function fetchLocalSessions(
   } finally {
     localInFlight = null;
   }
+}
+
+/**
+ * Activation seed: at most one `devices list --json` (via discoverHosts) is NOT
+ * done here — the registry seed is listRegisteredDevices at the settings layer.
+ * This seeds local sessions once: `agents sessions --active --local --json`.
+ */
+export async function seedLocalSessionsOnce(
+  projectRules: ProjectRule[] = [],
+): Promise<HostSessionsResult> {
+  if (lastLocalCliAt != null && localCache) {
+    return { ...localCache.result, fromCache: true };
+  }
+  return fetchLocalSessions(Date.now(), { force: true, projectRules });
 }
 
 // --- Tier-2: rich detail ----------------------------------------------------

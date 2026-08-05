@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, afterAll } from 'vitest';
 import * as os from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
+import { spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { shellQuote, sshExec } from '../ssh-exec.js';
 import {
@@ -8,8 +11,13 @@ import {
   buildInteractiveRunForwardedArgs,
   buildStopRemoteCommand,
   remoteCdPrefix,
+  deriveMirroredCwd,
   terminateDispatchedTask,
+  withActorEnv,
+  remoteRunShellPrelude,
 } from './dispatch.js';
+import { buildRemoteAgentsInvocation, posixEnvExports } from './remote-cmd.js';
+import { resetActorCache } from '../actor.js';
 import type { HostTask } from './tasks.js';
 
 const LOCAL_HOME = process.env.HOME ?? os.homedir();
@@ -252,6 +260,95 @@ describe('remoteCdPrefix', () => {
   it('shell-quotes a home remainder containing spaces', () => {
     expect(remoteCdPrefix('~/my projects/repo')).toBe(`cd "$HOME"/'my projects/repo' && `);
   });
+
+  it('falls back to the remote home for a MIRRORED dir the host may not have', () => {
+    // A derived cwd is a best-effort mirror of the local checkout, so a host
+    // without that directory must still start the agent (in $HOME) rather than
+    // die on `cd`.
+    expect(remoteCdPrefix('~/src/x', { mirror: true })).toBe(
+      '{ cd "$HOME"/src/x || cd "$HOME"; } && ',
+    );
+  });
+
+  it('does NOT add the fallback for an explicit cwd — a missing one must fail loudly', () => {
+    expect(remoteCdPrefix('~/src/x', { mirror: false })).toBe('cd "$HOME"/src/x && ');
+    expect(remoteCdPrefix('~/src/x')).toBe('cd "$HOME"/src/x && ');
+  });
+});
+
+describe('deriveMirroredCwd', () => {
+  it('maps a cwd under the local home to its home-relative remote analogue', () => {
+    expect(deriveMirroredCwd(`${LOCAL_HOME}/src/github.com/muqsitnawaz/agents-cli`)).toBe(
+      '~/src/github.com/muqsitnawaz/agents-cli',
+    );
+  });
+
+  it('mirrors the home itself', () => {
+    expect(deriveMirroredCwd(LOCAL_HOME)).toBe('~');
+  });
+
+  it('declines a path outside the home — it says nothing about the remote filesystem', () => {
+    expect(deriveMirroredCwd('/opt/work')).toBeUndefined();
+    expect(deriveMirroredCwd('/var/tmp/scratch')).toBeUndefined();
+  });
+
+  it('round-trips into a cd prefix that resolves against the REMOTE home', () => {
+    const derived = deriveMirroredCwd(`${LOCAL_HOME}/src/x`);
+    expect(remoteCdPrefix(derived, { mirror: true })).toBe(
+      '{ cd "$HOME"/src/x || cd "$HOME"; } && ',
+    );
+    // The local home must never appear in what we send over the wire.
+    expect(remoteCdPrefix(derived, { mirror: true })).not.toContain(LOCAL_HOME);
+  });
+});
+
+// The prefix is only ever consumed by a remote POSIX shell, so run it through a
+// real one against a real directory tree — that is what proves the mirror lands
+// in the project and the fallback lands in the home.
+//
+// The shell it runs through here is the LOCAL one, which is only a valid stand-in
+// for the remote where the local shell is POSIX. On Windows there is no bash to
+// spawn, so `spawnSync` returns a null status and the `pwd` output is empty —
+// the two positive cases fail on the harness rather than on the behavior, and the
+// negative case ("must exit non-zero") passes for the wrong reason. The prefix
+// itself is correct on a Windows client: it targets a remote POSIX shell either
+// way. Assert it there via the pure string expectations above, and run the
+// real-shell block only where a real POSIX shell exists.
+describe.skipIf(process.platform === 'win32')('remoteCdPrefix executed by a real shell', () => {
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mirror-cwd-'));
+  const present = 'src/github.com/acme/repo';
+  fs.mkdirSync(path.join(tmpHome, present), { recursive: true });
+
+  const pwdUnder = (prefix: string): { stdout: string; status: number | null } => {
+    const r = spawnSync('bash', ['-c', `${prefix}pwd`], {
+      env: { ...process.env, HOME: tmpHome },
+      cwd: os.tmpdir(),
+      encoding: 'utf8',
+    });
+    return { stdout: r.stdout.trim(), status: r.status };
+  };
+
+  afterAll(() => fs.rmSync(tmpHome, { recursive: true, force: true }));
+
+  it('lands in the mirrored project when the host has that checkout', () => {
+    const prefix = remoteCdPrefix(deriveMirroredCwd(`/somewhere/else/${present}`) ?? `~/${present}`, { mirror: true });
+    const { stdout, status } = pwdUnder(`cd "$HOME" && ${prefix}`);
+    expect(status).toBe(0);
+    expect(fs.realpathSync(stdout)).toBe(fs.realpathSync(path.join(tmpHome, present)));
+  });
+
+  it('falls back to the remote home when the host lacks that checkout', () => {
+    const { stdout, status } = pwdUnder(remoteCdPrefix('~/src/not/here', { mirror: true }));
+    expect(status).toBe(0);
+    expect(fs.realpathSync(stdout)).toBe(fs.realpathSync(tmpHome));
+  });
+
+  it('fails the command outright when an EXPLICIT cwd is missing', () => {
+    // No mirror flag: the user named this directory, so a typo must not be
+    // silently swallowed into $HOME.
+    const { status } = pwdUnder(remoteCdPrefix('~/src/not/here'));
+    expect(status).not.toBe(0);
+  });
 });
 
 const remoteTarget = process.env.AGENTS_TEST_REMOTE_TARGET;
@@ -326,6 +423,158 @@ describe.skipIf(!remoteTarget)('terminateDispatchedTask — real remote process'
           `rm -f ${remoteLog} ${remoteExit} ${childPidPath}`,
         { timeoutMs: 10000, multiplex: true },
       );
+    }
+  });
+});
+
+describe('withActorEnv — forward actor provenance across the SSH hop (RUSH-2028)', () => {
+  const SAVE = { ...process.env };
+  const ACTOR_KEYS = [
+    'AGENTS_ACTOR', 'AGENTS_ACTOR_KIND', 'AGENTS_ACTOR_NAME',
+    'AGENTS_ACTOR_EMAIL', 'AGENTS_ACTOR_GITHUB', 'SSH_CONNECTION',
+  ];
+  // Force an INHERITED actor so resolveActor() is deterministic (computeActor
+  // reads AGENTS_ACTOR straight from the env — no tailscale shell-out).
+  function setActor(env: Record<string, string>): void {
+    for (const k of ACTOR_KEYS) delete process.env[k];
+    Object.assign(process.env, env);
+    resetActorCache();
+  }
+  afterEach(() => {
+    for (const k of Object.keys(process.env)) if (!(k in SAVE)) delete process.env[k];
+    Object.assign(process.env, SAVE);
+    resetActorCache();
+  });
+
+  it('carries AGENTS_ACTOR + GIT_AUTHOR_*/GIT_COMMITTER_* into the remote command when a human resolves', () => {
+    setActor({
+      AGENTS_ACTOR: 'muqsit@example.com',
+      AGENTS_ACTOR_KIND: 'human',
+      AGENTS_ACTOR_NAME: 'Muqsit',
+      AGENTS_ACTOR_EMAIL: 'muqsit@example.com',
+    });
+    const env = withActorEnv();
+    expect(env.AGENTS_ACTOR).toBe('muqsit@example.com');
+    expect(env.GIT_AUTHOR_NAME).toBe('Muqsit');
+    expect(env.GIT_AUTHOR_EMAIL).toBe('muqsit@example.com');
+    expect(env.GIT_COMMITTER_NAME).toBe('Muqsit');
+    expect(env.GIT_COMMITTER_EMAIL).toBe('muqsit@example.com');
+
+    // ...and they land in the actual remote command string maybeRunOnHost ships.
+    const cmd = buildRemoteAgentsInvocation(['view', 'claude'], undefined, undefined, env);
+    // Values are rendered as shell literals (unquoted when safe), NOT an
+    // expanding double-quote context — see the posixEnvExports injection tests in
+    // remote-cmd.test.ts for why (untrusted actor names must not run as shell).
+    expect(cmd).toContain('export AGENTS_ACTOR=muqsit@example.com');
+    expect(cmd).toContain('export GIT_AUTHOR_EMAIL=muqsit@example.com');
+    expect(cmd).toContain('export GIT_COMMITTER_NAME=Muqsit');
+    // The detached (run/teams) + interactive dispatch builders export via the
+    // same helper, so this prefix is exactly what they prepend too.
+    expect(posixEnvExports(env)).toContain('export AGENTS_ACTOR=muqsit@example.com');
+  });
+
+  it('forwards the launching tab AGENT_TERMINAL_ID so the remote registry can be joined back to it', () => {
+    setActor({ AGENTS_ACTOR: 'muqsit@example.com', AGENTS_ACTOR_KIND: 'human' });
+    process.env.AGENT_TERMINAL_ID = 'cl-1785738033788-17';
+    const env = withActorEnv();
+    expect(env.AGENT_TERMINAL_ID).toBe('cl-1785738033788-17');
+    // It has to survive into the command the dispatch builders actually ship —
+    // an env that stops at the local process leaves the device's session feed
+    // with no way to say which session belongs to this tab.
+    const cmd = buildRemoteAgentsInvocation(['run', 'claude', '--interactive'], undefined, undefined, env);
+    expect(cmd).toContain('export AGENT_TERMINAL_ID=cl-1785738033788-17');
+  });
+
+  it('omits AGENT_TERMINAL_ID entirely when the launch came from no tracked terminal', () => {
+    setActor({ AGENTS_ACTOR: 'muqsit@example.com', AGENTS_ACTOR_KIND: 'human' });
+    delete process.env.AGENT_TERMINAL_ID;
+    expect('AGENT_TERMINAL_ID' in withActorEnv()).toBe(false);
+    // A whitespace-only value is not a terminal id either — forwarding it would
+    // put an empty join key in the remote registry.
+    process.env.AGENT_TERMINAL_ID = '   ';
+    expect('AGENT_TERMINAL_ID' in withActorEnv()).toBe(false);
+  });
+
+  it('merges the actor UNDER a caller env — the caller value wins, the doctor PATH coexists', () => {
+    setActor({ AGENTS_ACTOR: 'muqsit@example.com', AGENTS_ACTOR_KIND: 'human' });
+    const env = withActorEnv({
+      PATH: '$HOME/.agents/.cache/shims:$PATH',
+      AGENTS_ACTOR: 'override@example.com',
+    });
+    expect(env.AGENTS_ACTOR).toBe('override@example.com'); // caller wins (mirrors exec.ts precedence)
+    expect(env.PATH).toBe('$HOME/.agents/.cache/shims:$PATH');
+  });
+
+  it('two DIFFERENT origin actors forward two DIFFERENT identities (RUSH-2017 acceptance gap)', () => {
+    setActor({
+      AGENTS_ACTOR: 'alice@example.com', AGENTS_ACTOR_KIND: 'human',
+      AGENTS_ACTOR_NAME: 'Alice', AGENTS_ACTOR_EMAIL: 'alice@example.com',
+    });
+    const a = buildRemoteAgentsInvocation(['run', 'claude', 'hi', '--quiet'], undefined, undefined, withActorEnv());
+
+    setActor({
+      AGENTS_ACTOR: 'bob@example.com', AGENTS_ACTOR_KIND: 'human',
+      AGENTS_ACTOR_NAME: 'Bob', AGENTS_ACTOR_EMAIL: 'bob@example.com',
+    });
+    const b = buildRemoteAgentsInvocation(['run', 'claude', 'hi', '--quiet'], undefined, undefined, withActorEnv());
+
+    expect(a).toContain('export AGENTS_ACTOR=alice@example.com');
+    expect(a).toContain('export GIT_AUTHOR_NAME=Alice');
+    expect(b).toContain('export AGENTS_ACTOR=bob@example.com');
+    expect(b).toContain('export GIT_AUTHOR_NAME=Bob');
+    expect(a).not.toBe(b);
+    expect(a).not.toContain('bob@example.com');
+    expect(b).not.toContain('alice@example.com');
+  });
+
+  it('an UNRESOLVED origin stamps its own id — never leaves the remote to re-resolve from SSH_CONNECTION', () => {
+    setActor({}); // no inherited actor, no SSH_CONNECTION -> UNRESOLVED@<host>
+    const env = withActorEnv();
+    expect(env.AGENTS_ACTOR).toMatch(/^UNRESOLVED@/);
+    expect(env.GIT_AUTHOR_NAME).toBeUndefined();
+    const cmd = buildRemoteAgentsInvocation(['view'], undefined, undefined, env);
+    expect(cmd).toContain('export AGENTS_ACTOR=UNRESOLVED@');
+  });
+});
+
+describe('remoteRunShellPrelude — the run-auto chain-hop guard crosses the SSH boundary (RUSH-2132)', () => {
+  it('exports the guard into the remote SHELL env for a `run auto` dispatch — and the remote shell really sees it', () => {
+    // Both dispatch paths (runInteractiveOnHost + launchDetached) build their
+    // remote command with this prelude, so asserting on it exercises the real
+    // boundary. The guard MUST land in the remote CLI's own process.env (read
+    // by runAutoDefaultsToAffinity): a forwarded `--env` flag only reaches the
+    // spawned agent, which was the review finding this guards.
+    const prelude = remoteRunShellPrelude('auto');
+    expect(prelude).toContain('export AGENTS_RUN_AUTO_HOST_RESOLVED=1');
+    const out = spawnSync('bash', ['-lc', `${prelude}printf %s "$AGENTS_RUN_AUTO_HOST_RESOLVED"`], { encoding: 'utf-8' });
+    expect(out.stdout).toBe('1');
+  });
+
+  it('does not arm the guard for a named-harness dispatch (its remote never affinity-picks)', () => {
+    expect(remoteRunShellPrelude('claude')).not.toContain('AGENTS_RUN_AUTO_HOST_RESOLVED');
+    const out = spawnSync('bash', ['-lc', `${remoteRunShellPrelude('claude')}printf %s "$AGENTS_RUN_AUTO_HOST_RESOLVED"`], { encoding: 'utf-8' });
+    expect(out.stdout).toBe('');
+  });
+
+  it('the guard is NOT forwarded as an --env flag by either argv builder (that channel only reaches the spawned agent)', () => {
+    expect(buildRunForwardedArgs({ agent: 'auto', prompt: 'x' }).join(' ')).not.toContain('AGENTS_RUN_AUTO_HOST_RESOLVED');
+    expect(buildInteractiveRunForwardedArgs({ agent: 'auto' }).join(' ')).not.toContain('AGENTS_RUN_AUTO_HOST_RESOLVED');
+  });
+
+  it('keeps the actor provenance exports alongside the guard', () => {
+    const savedActor = process.env.AGENTS_ACTOR;
+    const savedKind = process.env.AGENTS_ACTOR_KIND;
+    process.env.AGENTS_ACTOR = 'muqsit@example.com';
+    process.env.AGENTS_ACTOR_KIND = 'human';
+    resetActorCache();
+    try {
+      const prelude = remoteRunShellPrelude('auto');
+      expect(prelude).toContain('export AGENTS_ACTOR=muqsit@example.com');
+      expect(prelude).toContain('export AGENTS_RUN_AUTO_HOST_RESOLVED=1');
+    } finally {
+      if (savedActor === undefined) delete process.env.AGENTS_ACTOR; else process.env.AGENTS_ACTOR = savedActor;
+      if (savedKind === undefined) delete process.env.AGENTS_ACTOR_KIND; else process.env.AGENTS_ACTOR_KIND = savedKind;
+      resetActorCache();
     }
   });
 });

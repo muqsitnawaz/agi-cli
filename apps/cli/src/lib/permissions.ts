@@ -24,6 +24,7 @@ import type {
 import { getPermissionsDir, getUserPermissionsDir, ensureAgentsDir } from './state.js';
 import { safeJoin } from './paths.js';
 import { AGENTS, agentConfigDirName } from './agents.js';
+import { supports } from './capabilities.js';
 import { updateGeminiSettings } from './gemini-settings.js';
 
 const HOME = os.homedir();
@@ -143,9 +144,9 @@ export function convertDenyToCodexRules(deny: string[]): string | null {
  * Ensure central permissions directory exists.
  */
 function ensurePermissionsDir(): void {
-  const dir = getUserPermissionsDir();
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  const groupsDir = path.join(getUserPermissionsDir(), 'groups');
+  if (!fs.existsSync(groupsDir)) {
+    fs.mkdirSync(groupsDir, { recursive: true });
   }
 }
 
@@ -397,7 +398,8 @@ export function listInstalledPermissions(): InstalledPermission[] {
   const seen = new Set<string>();
   const results: InstalledPermission[] = [];
 
-  for (const dir of [getUserPermissionsDir(), getPermissionsDir()]) {
+  for (const baseDir of [getUserPermissionsDir(), getPermissionsDir()]) {
+    const dir = path.join(baseDir, 'groups');
     if (!fs.existsSync(dir)) continue;
     try {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -421,10 +423,11 @@ export function listInstalledPermissions(): InstalledPermission[] {
 }
 
 /**
- * Get a specific permission set by name. Searches user dir first, then system.
+ * Get a specific permission set by name. Searches user groups/ dir first, then system groups/.
  */
 function getPermissionSet(name: string): InstalledPermission | null {
-  for (const dir of [getUserPermissionsDir(), getPermissionsDir()]) {
+  for (const baseDir of [getUserPermissionsDir(), getPermissionsDir()]) {
+    const dir = path.join(baseDir, 'groups');
     for (const ext of ['.yml', '.yaml']) {
       const filePath = safeJoin(dir, name + ext);
       if (fs.existsSync(filePath)) {
@@ -453,7 +456,7 @@ export function installPermissionSet(
     return { success: false, error: 'Invalid permission file' };
   }
 
-  const targetPath = safeJoin(getUserPermissionsDir(), name + '.yml');
+  const targetPath = safeJoin(path.join(getUserPermissionsDir(), 'groups'), name + '.yml');
 
   try {
     fs.copyFileSync(sourcePath, targetPath);
@@ -468,10 +471,10 @@ export function installPermissionSet(
  * sets are intentionally not deletable from user commands.
  */
 export function removePermissionSet(name: string): { success: boolean; error?: string } {
-  const dir = getUserPermissionsDir();
+  const groupsDir = path.join(getUserPermissionsDir(), 'groups');
 
   for (const ext of ['.yml', '.yaml']) {
-    const filePath = safeJoin(dir, name + ext);
+    const filePath = safeJoin(groupsDir, name + ext);
     if (fs.existsSync(filePath)) {
       try {
         fs.unlinkSync(filePath);
@@ -576,43 +579,6 @@ function parseCanonicalPattern(permission: string): { tool: string; pattern: str
 
 /** Blanket-Bash canonical forms that mean "allow any bash command". */
 const BLANKET_BASH_FORMS = new Set(['Bash', 'Bash(*)', 'Bash(**)']);
-
-/**
- * Convert canonical permission set to Gemini format.
- * Gemini reads tool allow/deny lists from settings.json under
- * `tools.core` / `tools.exclude`. Bash permissions map to ShellTool(pattern).
- * Blanket Bash grants map to bare "ShellTool" (no command filter).
- * Non-Bash tool patterns are skipped; Gemini uses different tool names.
- */
-export function convertToGeminiFormat(set: PermissionSet): { tools: { core: string[]; exclude?: string[] } } {
-  const serialize = (permissions: string[]): string[] => {
-    const tools = new Set<string>();
-    for (const perm of permissions) {
-      if (BLANKET_BASH_FORMS.has(perm)) {
-        tools.add('ShellTool');
-        continue;
-      }
-      const parsed = parseCanonicalPattern(perm);
-      if (!parsed || parsed.tool !== 'bash') continue;
-      const command = normalizeBashPattern(parsed.pattern);
-      if (command === '*') {
-        tools.add('ShellTool');
-      } else {
-        tools.add(`ShellTool(${command})`);
-      }
-    }
-    return Array.from(tools);
-  };
-
-  const core = serialize(set.allow);
-  const exclude = serialize(set.deny ?? []);
-  return {
-    tools: {
-      core,
-      ...(exclude.length ? { exclude } : {}),
-    },
-  };
-}
 
 /**
  * Strip Claude's `:*` subcommand-wildcard suffix and return a space-glob form.
@@ -779,65 +745,6 @@ export function convertToOpenClawFormat(set: PermissionSet): { alsoAllow: string
     alsoAllow: map(set.allow),
     deny: map(set.deny ?? []),
   };
-}
-
-export type ForgePermission = 'allow' | 'deny' | 'confirm';
-export type ForgeOperation = 'read' | 'write' | 'command' | 'url';
-export type ForgePolicy = { permission: ForgePermission; rule: Partial<Record<ForgeOperation, string>> };
-
-const FORGE_OPERATION_BY_CANONICAL: Record<string, ForgeOperation | undefined> = {
-  bash: 'command',
-  read: 'read',
-  grep: 'read',
-  glob: 'read',
-  write: 'write',
-  edit: 'write',
-  notebookedit: 'write',
-  webfetch: 'url',
-  websearch: 'url',
-};
-
-function canonicalToForgePolicy(perm: string, permission: ForgePermission): ForgePolicy | null {
-  if (BLANKET_BASH_FORMS.has(perm)) {
-    return { permission, rule: { command: '*' } };
-  }
-  const parsed = parseCanonicalPattern(perm);
-  if (!parsed) return null;
-  const operation = FORGE_OPERATION_BY_CANONICAL[parsed.tool];
-  if (!operation) return null;
-  const pattern = parsed.tool === 'bash'
-    ? normalizeBashPattern(parsed.pattern)
-    : (parsed.tool === 'webfetch' || parsed.tool === 'websearch') && parsed.pattern.startsWith('domain:')
-      ? `${parsed.pattern.slice('domain:'.length)}*`
-      : parsed.pattern === '**'
-        ? '**/*'
-        : parsed.pattern;
-  return { permission, rule: { [operation]: pattern } };
-}
-
-/**
- * Convert canonical permissions to ForgeCode's permissions.yaml policy list.
- *
- * ForgeCode gates built-in tools by operation family (`read`, `write`,
- * `command`, `url`) plus glob patterns, optionally scoped by `dir`. The policy
- * file is ignored unless `.forge.toml` has `restricted = true`, and MCP tools
- * bypass permissions.yaml entirely; agents-cli therefore maps only canonical
- * built-in allow/deny rules and does not try to express per-named-MCP-tool
- * grants.
- */
-export function convertToForgeFormat(set: PermissionSet): { policies: ForgePolicy[] } {
-  const policies: ForgePolicy[] = [];
-  const seen = new Set<string>();
-  const add = (policy: ForgePolicy | null): void => {
-    if (!policy) return;
-    const key = `${policy.permission}|${JSON.stringify(policy.rule)}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    policies.push(policy);
-  };
-  for (const perm of set.allow) add(canonicalToForgePolicy(perm, 'allow'));
-  for (const perm of set.deny ?? []) add(canonicalToForgePolicy(perm, 'deny'));
-  return { policies };
 }
 
 export function convertToHermesFormat(set: PermissionSet): { command_allowlist: string[]; approvals: { deny: string[] } } {
@@ -1201,6 +1108,55 @@ export function convertToOpenCodeFormat(set: PermissionSet): OpenCodePermissions
 }
 
 /**
+ * Default extra writable roots for Codex's `workspace-write` sandbox: the
+ * regenerable package/toolchain caches that build/test/install write OUTSIDE the
+ * workspace (cargo registry, npm/bun/pnpm caches, GOPATH/GOCACHE, the OS cache
+ * root, …). Without these, a sandboxed `cargo build` / `go build` / `npm install`
+ * fails on its cache write, which is what pushes users to `--mode full` (YOLO).
+ *
+ * Credential dirs (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config`, `~/.netrc`) are
+ * deliberately EXCLUDED so the sandbox stays meaningful — this is far from
+ * danger-full-access. Resolved per platform + home; each box regenerates its own
+ * Codex config on sync, so the paths always match the box Codex runs on.
+ */
+export function codexDefaultWritableRoots(
+  home: string = HOME,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  const shared = ['.cargo', '.rustup', '.npm', '.bun', 'go', '.deno', '.gradle', '.m2', '.gem'];
+  const roots = shared.map((d) => path.join(home, d));
+  if (platform === 'darwin') {
+    roots.push(path.join(home, 'Library', 'Caches'), path.join(home, 'Library', 'pnpm'));
+  } else {
+    // Linux/XDG: ~/.cache covers pip, uv, go-build, ms-playwright, etc.
+    roots.push(path.join(home, '.cache'), path.join(home, '.local', 'share'), path.join(home, '.local', 'state'));
+  }
+  return roots;
+}
+
+/**
+ * Merge Codex `[sandbox_workspace_write]` config, UNIONing `writable_roots` so a
+ * baseline cache root never clobbers a root the user configured directly (a
+ * plain object spread would overwrite the whole array), while merging scalar
+ * keys (`network_access`) normally. Shared by the user- and version-scoped Codex
+ * config writers so the two can't drift.
+ */
+export function mergeCodexSandboxWrite(
+  existing: Record<string, unknown> | undefined,
+  incoming: NonNullable<CodexPermissions['sandbox_workspace_write']>,
+): Record<string, unknown> {
+  const existingRoots = Array.isArray(existing?.writable_roots)
+    ? (existing!.writable_roots as string[])
+    : [];
+  const unionRoots = [...new Set([...existingRoots, ...(incoming.writable_roots ?? [])])];
+  return {
+    ...existing,
+    ...incoming,
+    ...(unionRoots.length > 0 ? { writable_roots: unionRoots } : {}),
+  };
+}
+
+/**
  * Convert canonical permission set to Codex format.
  * Codex uses coarse-grained modes, so we infer the best fit.
  */
@@ -1237,6 +1193,16 @@ export function convertToCodexFormat(set: PermissionSet, cwd?: string): CodexPer
       network_access: true,
     };
   }
+
+  // Baseline (unconditional): always grant the regenerable build/test/install
+  // caches as writable roots so `agents run codex` in workspace-write can build,
+  // test, and install without escalating to danger-full-access. Merged with
+  // network_access above when set; applyCodexPermissions unions these with any
+  // writable_roots the user configured directly.
+  result.sandbox_workspace_write = {
+    ...result.sandbox_workspace_write,
+    writable_roots: codexDefaultWritableRoots(),
+  };
 
   return result;
 }
@@ -1593,8 +1559,10 @@ function applyCodexPermissions(
     }
     if (newPermissions.sandbox_workspace_write) {
       const existing = config.sandbox_workspace_write as Record<string, unknown> | undefined;
+      // merge=false is a deliberate full replace (drops any user-custom roots);
+      // production sync always passes merge=true, taking the union path.
       config.sandbox_workspace_write = merge
-        ? { ...existing, ...newPermissions.sandbox_workspace_write }
+        ? mergeCodexSandboxWrite(existing, newPermissions.sandbox_workspace_write)
         : newPermissions.sandbox_workspace_write;
     }
 
@@ -1649,6 +1617,10 @@ export function applyPermissionsToVersion(
   merge: boolean = true,
   cwd?: string
 ): { success: boolean; error?: string } {
+  if (!supports(agentId, 'allowlist').ok) {
+    return { success: false, error: `Agent '${agentId}' does not support permissions` };
+  }
+
   const configDir = path.join(versionHome, agentConfigDirName(agentId));
 
   try {
@@ -1733,8 +1705,10 @@ export function applyPermissionsToVersion(
       }
       if (newPermissions.sandbox_workspace_write) {
         const existing = config.sandbox_workspace_write as Record<string, unknown> | undefined;
+        // merge=false is a deliberate full replace (drops any user-custom roots);
+        // production sync always passes merge=true, taking the union path.
         config.sandbox_workspace_write = merge
-          ? { ...existing, ...newPermissions.sandbox_workspace_write }
+          ? mergeCodexSandboxWrite(existing, newPermissions.sandbox_workspace_write)
           : newPermissions.sandbox_workspace_write;
       }
 
@@ -1750,34 +1724,6 @@ export function applyPermissionsToVersion(
         }
       }
 
-      return { success: true };
-    }
-
-    if (agentId === 'gemini') {
-      const geminiPerms = convertToGeminiFormat(set);
-      const settingsPath = path.join(versionHome, '.gemini', 'settings.json');
-      updateGeminiSettings(settingsPath, (settings) => {
-        // Remove stale keys written by earlier serializer versions:
-        // top-level `permissions`, and Gemini's pre-core/exclude `tools.allowed`.
-        delete (settings as Record<string, unknown>).permissions;
-        const tools = (typeof settings.tools === 'object' && settings.tools !== null && !Array.isArray(settings.tools))
-          ? settings.tools as Record<string, unknown>
-          : {};
-        delete tools.allowed;
-        if (merge) {
-          const existingCore = Array.isArray(tools.core) ? (tools.core as string[]) : [];
-          const existingExclude = Array.isArray(tools.exclude) ? (tools.exclude as string[]) : [];
-          tools.core = Array.from(new Set([...existingCore, ...geminiPerms.tools.core]));
-          const mergedExclude = Array.from(new Set([...existingExclude, ...(geminiPerms.tools.exclude ?? [])]));
-          if (mergedExclude.length) tools.exclude = mergedExclude;
-          else delete tools.exclude;
-        } else {
-          tools.core = geminiPerms.tools.core;
-          if (geminiPerms.tools.exclude?.length) tools.exclude = geminiPerms.tools.exclude;
-          else delete tools.exclude;
-        }
-        settings.tools = tools;
-      });
       return { success: true };
     }
 
@@ -2073,36 +2019,6 @@ export function applyPermissionsToVersion(
       return { success: true };
     }
 
-    if (agentId === 'forge') {
-      const permissionsPath = path.join(versionHome, '.forge', 'permissions.yaml');
-      let config: { policies?: unknown[] } = {};
-      if (fs.existsSync(permissionsPath)) {
-        const parsed = yaml.parse(fs.readFileSync(permissionsPath, 'utf-8'));
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          config = parsed as { policies?: unknown[] };
-        }
-      }
-
-      const newPolicies = convertToForgeFormat(set).policies;
-      if (merge) {
-        const existingPolicies = Array.isArray(config.policies) ? config.policies : [];
-        const seen = new Set<string>();
-        config.policies = [...existingPolicies, ...newPolicies].filter((policy) => {
-          if (!policy || typeof policy !== 'object' || Array.isArray(policy)) return false;
-          const key = JSON.stringify(policy);
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-      } else {
-        config.policies = newPolicies;
-      }
-
-      fs.mkdirSync(path.dirname(permissionsPath), { recursive: true });
-      fs.writeFileSync(permissionsPath, yaml.stringify(config), 'utf-8');
-      return { success: true };
-    }
-
     if (agentId === 'hermes') {
       const configPath = path.join(versionHome, '.hermes', 'config.yaml');
       let config: Record<string, unknown> = {};
@@ -2323,7 +2239,7 @@ export function exportPermissionsFromPath(filePath: string): PermissionSet | nul
  */
 function savePermissionSet(set: PermissionSet): { success: boolean; error?: string } {
   ensurePermissionsDir();
-  const filePath = safeJoin(getUserPermissionsDir(), set.name + '.yml');
+  const filePath = safeJoin(path.join(getUserPermissionsDir(), 'groups'), set.name + '.yml');
 
   try {
     const content = yaml.stringify({

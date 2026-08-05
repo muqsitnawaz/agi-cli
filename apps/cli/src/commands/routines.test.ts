@@ -13,7 +13,8 @@ import * as path from 'path';
 import * as yaml from 'yaml';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { createRequire } from 'module';
-import { buildRunsJson } from './routines.js';
+import { buildRunsJson, groupRoutineJobsByProject } from './routines.js';
+import type { JobConfig } from '../lib/routines.js';
 import type { RunMeta } from '../lib/routines.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -30,6 +31,7 @@ function makeHome(opts: {
   jobs?: Record<string, unknown>[];
   projectJobs?: Record<string, unknown>[];
   registry?: Record<string, unknown>;
+  deviceRoutines?: Record<string, string[]>;
 } = {}): string {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-routines-test-'));
   const agentsDir = path.join(home, '.agents');
@@ -62,6 +64,10 @@ function makeHome(opts: {
     fs.writeFileSync(path.join(devicesDir, 'registry.json'), JSON.stringify(opts.registry));
   }
 
+  for (const [device, routines] of Object.entries(opts.deviceRoutines ?? {})) {
+    writeDeviceRoutines(home, device, routines);
+  }
+
   return home;
 }
 
@@ -78,6 +84,10 @@ function run(
       ...process.env,
       HOME: home,
       USERPROFILE: home,
+      // Point the device registry at this test's home (RUSH-2042): getDevicesDir()
+      // reads AGENTS_DEVICES_DIR, and the parent vitest fork exports its own via
+      // setup.ts — override it so the child reads the registry makeHome() wrote.
+      AGENTS_DEVICES_DIR: path.join(home, '.agents', '.history', 'devices'),
       AGENTS_SKIP_MIGRATION: '1',
       ...extraEnv,
     },
@@ -91,6 +101,24 @@ function readRoutineYaml(home: string, name: string): Record<string, unknown> | 
   if (!fs.existsSync(p)) return null;
   return yaml.parse(fs.readFileSync(p, 'utf-8'));
 }
+
+describe('routines add help', () => {
+  it('lists exactly the agents backed by the daemon command table', () => {
+    const home = makeHome();
+    try {
+      const result = run(home, ['add', '--help']);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(
+        /Which agent runs this routine: claude, codex, gemini,\s+cursor, kimi, droid/,
+      );
+      const agentLine = result.stdout.split('\n').find((line) => line.includes('--agent')) ?? '';
+      expect(agentLine).not.toContain('antigravity');
+      expect(agentLine).not.toContain('opencode');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
 
 function writeRunMeta(home: string, jobName: string, runId: string, meta: Record<string, unknown>): void {
   const runDir = path.join(home, '.agents', '.history', 'runs', jobName, runId);
@@ -190,6 +218,9 @@ const baseJob = {
   schedule: '0 3 * * *',
   agent: 'claude',
   prompt: 'noop',
+  // Legacy fixture state: tests that specifically cover the new manifest model
+  // materialize a device document below.
+  enabled: true,
 };
 
 const registry = {
@@ -198,16 +229,29 @@ const registry = {
   'zion': { name: 'zion', platform: 'macos' },
 };
 
+function readDeviceRoutines(home: string, device: string): string[] {
+  const file = path.join(home, '.agents', 'devices', device, 'agents.yaml');
+  if (!fs.existsSync(file)) return [];
+  return yaml.parse(fs.readFileSync(file, 'utf-8')).routines ?? [];
+}
+
+function writeDeviceRoutines(home: string, device: string, routines: string[]): void {
+  const dir = path.join(home, '.agents', 'devices', device);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'agents.yaml'), yaml.stringify({ routines }));
+}
+
 describe('routines devices --set persists', () => {
-  it('writes a devices allowlist to the routine YAML', () => {
-    const home = makeHome({ jobs: [baseJob], registry });
+  it('writes activation to the target device manifest without changing definition metadata', () => {
+    const home = makeHome({ jobs: [baseJob], registry: { 'yosemite-s0': registry['yosemite-s0'] } });
     try {
-      const res = run(home, ['devices', 'test-job', '--set', 'yosemite-s0,mac-mini']);
-      expect(res.status).toBe(0);
+      const res = run(home, ['devices', 'test-job', '--set', 'yosemite-s0'], { AGENTS_SYNC_MACHINE_ID: 'yosemite-s0' });
+      expect(res.status, res.stderr + res.stdout).toBe(0);
 
       const doc = readRoutineYaml(home, 'test-job');
       expect(doc).not.toBeNull();
-      expect(doc!.devices).toEqual(['yosemite-s0', 'mac-mini']);
+      expect(doc!.devices).toBeUndefined();
+      expect(readDeviceRoutines(home, 'yosemite-s0')).toContain('test-job');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -215,8 +259,8 @@ describe('routines devices --set persists', () => {
 });
 
 describe('routines devices --set on .yaml-only routine', () => {
-  it('updates the .yaml file, creates no .yml sibling, and list --json reports devices+runsHere', () => {
-    const home = makeHome({ registry });
+  it('leaves the .yaml definition untouched and list --json reports enabled devices+runsHere', () => {
+    const home = makeHome({ registry: { 'yosemite-s0': registry['yosemite-s0'] } });
     try {
       const yamlPath = path.join(home, '.agents', 'routines', 'yaml-only.yaml');
       fs.writeFileSync(
@@ -229,7 +273,7 @@ describe('routines devices --set on .yaml-only routine', () => {
 
       expect(fs.existsSync(path.join(home, '.agents', 'routines', 'yaml-only.yml'))).toBe(false);
       const doc = yaml.parse(fs.readFileSync(yamlPath, 'utf-8'));
-      expect(doc.devices).toEqual(['yosemite-s0']);
+      expect(doc.devices).toBeUndefined();
 
       const listRes = run(home, ['list', '--json'], { AGENTS_SYNC_MACHINE_ID: 'yosemite-s0' });
       expect(listRes.status).toBe(0);
@@ -247,30 +291,34 @@ describe('routines devices --set on .yaml-only routine', () => {
 describe('routines devices --set normalizes mixed case and FQDN duplicates', () => {
   it('persists one normalized entry per device', () => {
     const job = { ...baseJob, devices: ['yosemite-s0'] };
-    const home = makeHome({ jobs: [job], registry });
+    const home = makeHome({ jobs: [job], registry: { 'yosemite-s0': registry['yosemite-s0'] } });
     try {
-      const res = run(home, ['devices', 'test-job', '--set', 'Yosemite-S0,yosemite-s0.tailnet.ts.net,MAC-MINI']);
+      const res = run(home, ['devices', 'test-job', '--set', 'Yosemite-S0,yosemite-s0.tailnet.ts.net'], { AGENTS_SYNC_MACHINE_ID: 'yosemite-s0' });
       expect(res.status).toBe(0);
 
       const doc = readRoutineYaml(home, 'test-job');
       expect(doc).not.toBeNull();
-      expect(doc!.devices).toEqual(['yosemite-s0', 'mac-mini']);
+      expect(doc!.devices).toEqual(['yosemite-s0']);
+      expect(readDeviceRoutines(home, 'yosemite-s0')).toEqual(['test-job']);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
 });
 
-describe('routines devices --clear removes allowlist', () => {
-  it('removes the devices field from the routine YAML', () => {
+describe('routines devices --clear removes activation', () => {
+  it('removes the routine from this device manifest without rewriting YAML', () => {
     const job = { ...baseJob, devices: ['yosemite-s0'] };
-    const home = makeHome({ jobs: [job], registry });
+    const home = makeHome({ jobs: [job], registry: { 'yosemite-s0': registry['yosemite-s0'] } });
     try {
-      const res = run(home, ['devices', 'test-job', '--clear']);
+      writeDeviceRoutines(home, 'yosemite-s0', ['test-job']);
+      const before = fs.readFileSync(path.join(home, '.agents', 'routines', 'test-job.yml'), 'utf-8');
+      const res = run(home, ['devices', 'test-job', '--clear'], { AGENTS_SYNC_MACHINE_ID: 'yosemite-s0' });
       expect(res.status).toBe(0);
 
       const raw = fs.readFileSync(path.join(home, '.agents', 'routines', 'test-job.yml'), 'utf-8');
-      expect(raw).not.toMatch(/^devices:/m);
+      expect(raw).toBe(before);
+      expect(readDeviceRoutines(home, 'yosemite-s0')).toEqual([]);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -280,7 +328,7 @@ describe('routines devices --clear removes allowlist', () => {
 describe('routines devices --set unknown is nonzero/no mutation', () => {
   it('rejects unknown device names and does not mutate the YAML', () => {
     const job = { ...baseJob, devices: ['yosemite-s0'] };
-    const home = makeHome({ jobs: [job], registry });
+    const home = makeHome({ jobs: [job], registry, deviceRoutines: { 'yosemite-s0': ['test-job'] } });
     try {
       const before = fs.readFileSync(path.join(home, '.agents', 'routines', 'test-job.yml'), 'utf-8');
 
@@ -297,7 +345,7 @@ describe('routines devices --set unknown is nonzero/no mutation', () => {
 
 describe('routines add --devices unknown is nonzero/no write', () => {
   it('rejects unknown devices and does not create the routine file', () => {
-    const home = makeHome({ registry });
+    const home = makeHome({ registry: { 'yosemite-s0': registry['yosemite-s0'] } });
     try {
       const res = run(home, [
         'add', 'new-job',
@@ -393,10 +441,49 @@ describe('routines add --json', () => {
   });
 });
 
+describe('routines add one-shot-looking --schedule', () => {
+  it('warns, persists runOnce, and keeps JSON stdout parseable', async () => {
+    const home = makeHome({ registry });
+    let daemon: ReturnType<typeof startIsolatedDaemon> | undefined;
+    let pid: number | null = null;
+    try {
+      daemon = startIsolatedDaemon(home);
+      pid = await daemon.pidPromise;
+      expect(pid).not.toBeNull();
+
+      const res = run(home, [
+        'add', 'date-cron',
+        '--schedule', '0 14 31 12 *',
+        '--agent', 'claude',
+        '--prompt', 'hi',
+        '--json',
+      ]);
+      expect(res.status).toBe(0);
+      expect(JSON.parse(res.stdout.trim())).toMatchObject({
+        jobId: 'date-cron',
+        schedule: '0 14 31 12 *',
+      });
+      expect(res.stderr).toContain('treating it as one-shot');
+
+      const doc = readRoutineYaml(home, 'date-cron');
+      expect(doc).not.toBeNull();
+      expect(doc!.runOnce).toBe(true);
+    } finally {
+      if (daemon) await stopIsolatedDaemon(daemon.child);
+      if (typeof pid === 'number') expect(isProcessAlive(pid)).toBe(false);
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('routines list --json has devices+runsHere, no device', () => {
   it('includes devices array and runsHere, excludes singular device key', () => {
-    const job = { ...baseJob, devices: ['yosemite-s0', 'mac-mini'] };
-    const home = makeHome({ jobs: [job], registry });
+    const job = { ...baseJob, devices: ['yosemite-s0'] };
+    const home = makeHome({
+      jobs: [job],
+      registry,
+      deviceRoutines: { 'yosemite-s0': ['test-job'] },
+    });
     try {
       const res = run(home, ['list', '--json'], { AGENTS_SYNC_MACHINE_ID: 'yosemite-s0' });
       expect(res.status).toBe(0);
@@ -404,7 +491,7 @@ describe('routines list --json has devices+runsHere, no device', () => {
       const parsed = JSON.parse(res.stdout.trim());
       const entry = parsed.find((j: Record<string, unknown>) => j.name === 'test-job');
       expect(entry).toBeDefined();
-      expect(entry.devices).toEqual(['yosemite-s0', 'mac-mini']);
+      expect(entry.devices).toEqual(['yosemite-s0']);
       expect(typeof entry.runsHere).toBe('boolean');
       expect(entry.runsHere).toBe(true);
       expect('device' in entry).toBe(false);
@@ -425,7 +512,12 @@ describe('routines list --json has devices+runsHere, no device', () => {
       repo: 'phnx-labs/agents-cli',
       prompt: 'project noop',
     };
-    const home = makeHome({ jobs: [userJob], projectJobs: [projectJob], registry });
+    const home = makeHome({
+      jobs: [userJob],
+      projectJobs: [projectJob],
+      registry,
+      deviceRoutines: { zion: ['test-job'], 'yosemite-s0': [] },
+    });
     const projectDir = path.join(home, 'project');
     try {
       const remoteRes = run(home, ['list', '--json'], { AGENTS_SYNC_MACHINE_ID: 'yosemite-s0' }, projectDir);
@@ -449,7 +541,9 @@ describe('routines list --json has devices+runsHere, no device', () => {
 
       const viewRes = run(home, ['view', 'test-job'], { AGENTS_SYNC_MACHINE_ID: 'zion' }, projectDir);
       expect(viewRes.status).toBe(0);
-      const viewDoc = yaml.parse(viewRes.stdout.replace(/^Job: test-job\s*/m, ''));
+      // Strip ANSI (FORCE_COLOR / chalk.bold on the Job: header) before YAML parse.
+      const viewPlain = viewRes.stdout.replace(/\x1b\[[0-9;]*m/g, '');
+      const viewDoc = yaml.parse(viewPlain.replace(/^Job: test-job\s*/m, ''));
       expect(viewDoc.prompt).toBe('project noop');
       expect(viewDoc.devices).toEqual(['zion']);
     } finally {
@@ -503,7 +597,9 @@ describe('routines list --json has devices+runsHere, no device', () => {
 
   it('can report overdue independently of a completed zero-exit latest run', () => {
     const home = makeHome({
-      jobs: [{ ...baseJob, schedule: '* * * * *' }],
+      // createdAt predates the run below, so the routine is old enough for a
+      // missed occurrence to count (overdue is floored at routine creation).
+      jobs: [{ ...baseJob, schedule: '* * * * *', createdAt: '2026-07-01T00:00:00.000Z' }],
       registry,
     });
     try {
@@ -528,6 +624,55 @@ describe('routines list --json has devices+runsHere, no device', () => {
       expect(entry.lastStatus).toBe('completed');
       expect(entry.exitCode).toBe(0);
       expect(entry.failureReason).toBeNull();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // A routine re-pinned to other devices leaves its old run records behind on
+  // the machine that used to fire it. Reporting those as the routine's status
+  // painted a peer's healthy routine red in `list` and in the menu bar (which
+  // reads this JSON) — the record describes this device, not the owner.
+  it('reports no status for a routine pinned away from this device', () => {
+    const home = makeHome({
+      jobs: [
+        { ...baseJob, name: 'pinned-elsewhere', devices: ['yosemite-s0'] },
+        { ...baseJob, name: 'pinned-here', devices: ['zion'] },
+      ],
+      registry,
+    });
+    try {
+      for (const name of ['pinned-elsewhere', 'pinned-here']) {
+        writeRunMeta(home, name, '2026-07-25T10-00-00-000Z', {
+          jobName: name,
+          runId: '2026-07-25T10-00-00-000Z',
+          agent: 'claude',
+          pid: null,
+          status: 'failed',
+          startedAt: '2026-07-25T10:00:00.000Z',
+          completedAt: '2026-07-25T10:00:05.000Z',
+          exitCode: 1,
+          errorMessage: 'command exited with code 1',
+        });
+      }
+
+      const res = run(home, ['list', '--json'], { AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(res.status).toBe(0);
+      const parsed = JSON.parse(res.stdout.trim());
+
+      const elsewhere = parsed.find((j: Record<string, unknown>) => j.name === 'pinned-elsewhere');
+      expect(elsewhere.runsHere).toBe(false);
+      expect(elsewhere.lastStatus).toBeNull();
+      expect(elsewhere.exitCode).toBeNull();
+      expect(elsewhere.failureReason).toBeNull();
+      expect(elsewhere.lastRunStartedAt).toBeNull();
+      expect(elsewhere.lastRunCompletedAt).toBeNull();
+
+      // The same record on a routine this device does fire is still reported.
+      const here = parsed.find((j: Record<string, unknown>) => j.name === 'pinned-here');
+      expect(here.runsHere).toBe(true);
+      expect(here.lastStatus).toBe('failed');
+      expect(here.exitCode).toBe(1);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -589,7 +734,7 @@ describe('routines list table has Devices column with bounded ellipsis', () => {
   it('table header includes Devices', () => {
     const home = makeHome({ jobs: [baseJob], registry });
     try {
-      const res = run(home, ['list']);
+      const res = run(home, ['list', '--flat']);
       expect(res.status).toBe(0);
       expect(res.stdout).toContain('Devices');
     } finally {
@@ -599,9 +744,18 @@ describe('routines list table has Devices column with bounded ellipsis', () => {
 
   it('long device lists are ellipsized in the table', () => {
     const job = { ...baseJob, devices: ['yosemite-s0', 'yosemite-s1', 'mac-mini', 'zion'] };
-    const home = makeHome({ jobs: [job], registry });
+    const home = makeHome({
+      jobs: [job],
+      registry,
+      deviceRoutines: {
+        'yosemite-s0': ['test-job'],
+        'yosemite-s1': ['test-job'],
+        'mac-mini': ['test-job'],
+        zion: ['test-job'],
+      },
+    });
     try {
-      const res = run(home, ['list']);
+      const res = run(home, ['list', '--flat']);
       expect(res.status).toBe(0);
       const stripped = res.stdout.replace(/\x1b\[[0-9;]*m/g, '');
       const lines = stripped.split('\n').filter((l) => l.includes('test-job'));
@@ -615,7 +769,7 @@ describe('routines list table has Devices column with bounded ellipsis', () => {
   it('renders unrestricted routines with Devices set to "all"', () => {
     const home = makeHome({ jobs: [baseJob], registry });
     try {
-      const res = run(home, ['list']);
+      const res = run(home, ['list', '--flat']);
       expect(res.status).toBe(0);
       const stripped = res.stdout.replace(/\x1b\[[0-9;]*m/g, '');
       const lines = stripped.split('\n');
@@ -629,6 +783,161 @@ describe('routines list table has Devices column with bounded ellipsis', () => {
       expect(scheduleStart).toBeGreaterThan(deviceStart);
       const deviceField = line!.slice(deviceStart, scheduleStart).trim();
       expect(deviceField).toBe('all');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('marks one-shot routines in the schedule column', () => {
+    const job = { ...baseJob, schedule: '0 14 31 12 *', runOnce: true };
+    const home = makeHome({ jobs: [job], registry });
+    try {
+      const res = run(home, ['list', '--flat']);
+      expect(res.status).toBe(0);
+      expect(res.stdout.replace(/\x1b\[[0-9;]*m/g, '')).toContain('one-shot');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('routines list grouped by device', () => {
+  it('groups by fleet, current device, pinned devices, hosts, cloud, and offline registry state', () => {
+    const jobs = [
+      { ...baseJob, name: 'all-local' },
+      { ...baseJob, name: 'zion-local', devices: ['zion'] },
+      { ...baseJob, name: 's0-local', devices: ['yosemite-s0'] },
+      { ...baseJob, name: 'fleet-placed', hostStrategy: 'fleet', devices: ['zion'] },
+      { ...baseJob, name: 'cloud-placed', hostStrategy: 'cloud', devices: ['zion'] },
+      { ...baseJob, name: 'host-placed', hostStrategy: 'host', host: 'mac-mini', devices: ['zion'] },
+      { ...baseJob, name: 'offline-local', devices: ['offline-box'] },
+    ];
+    const groupedRegistry = {
+      ...registry,
+      'mac-mini': { ...registry['mac-mini'], tailscale: { online: false, direct: false } },
+      'offline-box': { name: 'offline-box', platform: 'linux', tailscale: { online: false, direct: false } },
+    };
+    const home = makeHome({
+      jobs,
+      registry: groupedRegistry,
+      deviceRoutines: {
+        zion: ['zion-local', 'fleet-placed', 'cloud-placed', 'host-placed'],
+        'yosemite-s0': ['s0-local'],
+        'offline-box': ['offline-local'],
+      },
+    });
+    try {
+      const res = run(home, ['list', '--group-by', 'device'], { AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(res.status).toBe(0);
+      const stripped = res.stdout.replace(/\x1b\[[0-9;]*m/g, '');
+      expect(stripped).toContain('This machine (zion)');
+      expect(stripped).toContain('Fleet-wide');
+      expect(stripped).toContain('Cloud');
+      expect(stripped).toContain('Device: yosemite-s0');
+      expect(stripped).toContain('Device: offline-box (offline)');
+      expect(stripped).toContain('Host: mac-mini (offline)');
+      for (const job of jobs) expect(stripped).toContain(job.name);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // One routine pinned to two devices renders a row under each. Only the row
+  // under THIS machine may carry Last Status — the peer's row previously
+  // repeated our local record, which is how a green routine showed up red.
+  it('shows Last Status only under this machine, not under a peer device', () => {
+    const home = makeHome({
+      // Deliberately a two-device pin: the point here is that the listing still
+      // renders a row under EACH device group, and only the This-machine row
+      // carries a status. (Ownership means only zion fires it; the peer row
+      // existing is what this test is about.)
+      // zion must be the OWNER (lowest normalized name) so its row carries a
+      // status, while a second device still renders a peer group — that peer
+      // row having no status is what this test asserts.
+      jobs: [{ ...baseJob, name: 'two-device-job' }],
+      registry: { ...registry, 'zulu-box': { name: 'zulu-box', platform: 'linux' } },
+      deviceRoutines: { zion: ['two-device-job'], 'zulu-box': ['two-device-job'] },
+    });
+    try {
+      writeRunMeta(home, 'two-device-job', '2026-07-25T10-00-00-000Z', {
+        jobName: 'two-device-job',
+        runId: '2026-07-25T10-00-00-000Z',
+        agent: 'claude',
+        pid: null,
+        status: 'failed',
+        startedAt: '2026-07-25T10:00:00.000Z',
+        completedAt: '2026-07-25T10:00:05.000Z',
+        exitCode: 1,
+      });
+
+      const res = run(home, ['list', '--group-by', 'device'], { AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(res.status).toBe(0);
+      const stripped = res.stdout.replace(/\x1b\[[0-9;]*m/g, '');
+
+      const lines = stripped.split('\n');
+      const mineIdx = lines.findIndex((l) => l.includes('This machine (zion)'));
+      const peerIdx = lines.findIndex((l) => l.includes('Device: zulu-box'));
+      expect(mineIdx).toBeGreaterThanOrEqual(0);
+      expect(peerIdx).toBeGreaterThanOrEqual(0);
+
+      const rowAfter = (start: number): string =>
+        lines.slice(start).find((l) => l.includes('two-device-job')) ?? '';
+      expect(rowAfter(mineIdx)).toContain('failed');
+      expect(rowAfter(peerIdx)).not.toContain('failed');
+      expect(stripped).toContain('Last Status is per-device');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('defaults to project grouping; --group-by device restores device view; --flat disables grouping', () => {
+    const home = makeHome({ jobs: [baseJob], registry, deviceRoutines: { zion: ['test-job'] } });
+    try {
+      const byProject = run(home, ['list'], { AGENTS_SYNC_MACHINE_ID: 'zion' });
+      const byDevice = run(home, ['list', '--group-by', 'device'], { AGENTS_SYNC_MACHINE_ID: 'zion' });
+      const flat = run(home, ['list', '--flat'], { AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(byProject.status).toBe(0);
+      expect(byDevice.status).toBe(0);
+      expect(flat.status).toBe(0);
+      // Default (project): job has no projects, lands in Operations section
+      expect(byProject.stdout.replace(/\x1b\[[0-9;]*m/g, '')).toContain('Operations');
+      expect(byProject.stdout.replace(/\x1b\[[0-9;]*m/g, '')).not.toContain('This machine (zion)');
+      // Explicit device grouping: shows device sections
+      expect(byDevice.stdout.replace(/\x1b\[[0-9;]*m/g, '')).toContain('This machine (zion)');
+      // Flat: no section headers
+      expect(flat.stdout.replace(/\x1b\[[0-9;]*m/g, '')).not.toContain('This machine (zion)');
+      expect(flat.stdout.replace(/\x1b\[[0-9;]*m/g, '')).not.toContain('Operations');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('routines cleanup', () => {
+  it('removes completed expired one-shot-looking routines', () => {
+    const year = new Date().getFullYear();
+    const job = { ...baseJob, name: 'stale-followup', schedule: '0 0 1 1 *' };
+    const home = makeHome({ jobs: [job], registry });
+    writeRunMeta(home, 'stale-followup', `${year}-01-02T00-00-00-000Z`, {
+      jobName: 'stale-followup',
+      runId: `${year}-01-02T00-00-00-000Z`,
+      agent: 'claude',
+      pid: null,
+      status: 'completed',
+      startedAt: `${year}-01-02T00:00:00.000Z`,
+      completedAt: `${year}-01-02T00:00:01.000Z`,
+      exitCode: 0,
+    });
+    try {
+      const dryRun = run(home, ['cleanup', '--dry-run']);
+      expect(dryRun.status).toBe(0);
+      expect(dryRun.stdout).toContain('stale-followup');
+      expect(readRoutineYaml(home, 'stale-followup')).not.toBeNull();
+
+      const res = run(home, ['cleanup']);
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain('Removed stale-followup');
+      expect(readRoutineYaml(home, 'stale-followup')).toBeNull();
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -698,7 +1007,7 @@ describe('routines devices --set and --clear are mutually exclusive', () => {
 
 describe('routines add --devices empty/whitespace fails closed', () => {
   it('rejects --devices "" and does not create the routine file', () => {
-    const home = makeHome({ registry });
+    const home = makeHome({ registry: { 'yosemite-s0': registry['yosemite-s0'] } });
     try {
       const res = run(home, [
         'add', 'new-job',
@@ -736,7 +1045,7 @@ describe('routines add --devices empty/whitespace fails closed', () => {
   });
 
   it('successfully persists --devices with valid names against a running daemon', async () => {
-    const home = makeHome({ registry });
+    const home = makeHome({ registry: { 'yosemite-s0': registry['yosemite-s0'] } });
     let daemon: ReturnType<typeof startIsolatedDaemon> | undefined;
     let pid: number | null = null;
     try {
@@ -749,12 +1058,13 @@ describe('routines add --devices empty/whitespace fails closed', () => {
         '--schedule', '0 3 * * *',
         '--agent', 'claude',
         '--prompt', 'hi',
-        '--devices', 'yosemite-s0,mac-mini',
-      ]);
+        '--devices', 'yosemite-s0',
+      ], { AGENTS_SYNC_MACHINE_ID: 'yosemite-s0' });
       expect(res.status).toBe(0);
       const doc = readRoutineYaml(home, 'placed-job');
       expect(doc).not.toBeNull();
-      expect(doc!.devices).toEqual(['yosemite-s0', 'mac-mini']);
+      expect(doc!.devices).toBeUndefined();
+      expect(readDeviceRoutines(home, 'yosemite-s0')).toContain('placed-job');
     } finally {
       if (daemon) await stopIsolatedDaemon(daemon.child);
       if (typeof pid === 'number') expect(isProcessAlive(pid)).toBe(false);
@@ -806,7 +1116,10 @@ describe('routines run wrong-host exact output', () => {
       expect(res.status).not.toBe(0);
       const output = res.stdout + res.stderr;
       expect(output).toContain("Job 'test-job' can only run on: yosemite-s0, mac-mini");
-      expect(output).toContain('  agents routines run test-job --host yosemite-s0');
+      // The suggested host is the OWNER (lowest normalized name), not the first
+      // entry as written — the old suggestion pointed at a box that would refuse
+      // the run for exactly the same reason.
+      expect(output).toContain('  agents routines run test-job --host mac-mini');
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -959,6 +1272,7 @@ describe('buildRunsJson', () => {
         completedAt: null,
         exitCode: null,
         errorMessage: null,
+        duration: null,
       },
       {
         jobId: 'test-job',
@@ -969,11 +1283,273 @@ describe('buildRunsJson', () => {
         completedAt: null,
         exitCode: null,
         errorMessage: null,
+        duration: null,
       },
     ]);
   });
 
   it('returns an empty array for no runs', () => {
     expect(buildRunsJson([])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Project-tagging tests (--project / --all-projects / list --json projectGroup)
+// ---------------------------------------------------------------------------
+
+/** Write a minimal project YAML so listProjectDefs() sees it. */
+function writeProject(home: string, name: string): void {
+  const dir = path.join(home, '.agents', 'projects');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${name}.yaml`), yaml.stringify({ name }));
+}
+
+/** Env that points the projects dir at the isolated home. */
+function projectsEnv(home: string): Record<string, string> {
+  return { AGENTS_PROJECTS_DIR: path.join(home, '.agents', 'projects') };
+}
+
+describe('routines add --project persists to YAML', () => {
+  it('writes a single project name into the projects field', () => {
+    const home = makeHome({ registry });
+    writeProject(home, 'myapp');
+    try {
+      const res = run(home, [
+        'add', 'proj-job',
+        '--schedule', '0 9 * * *',
+        '--agent', 'claude',
+        '--prompt', 'run tests',
+        '--project', 'myapp',
+      ], { ...projectsEnv(home), AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(res.status, res.stderr).toBe(0);
+      const doc = readRoutineYaml(home, 'proj-job');
+      expect(doc).not.toBeNull();
+      expect(doc!.projects).toEqual(['myapp']);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('writes multiple --project values as an array', () => {
+    const home = makeHome({ registry });
+    writeProject(home, 'myapp');
+    writeProject(home, 'billing');
+    try {
+      const res = run(home, [
+        'add', 'multi-proj-job',
+        '--schedule', '0 9 * * *',
+        '--agent', 'claude',
+        '--prompt', 'run tests',
+        '--project', 'myapp',
+        '--project', 'billing',
+      ], { ...projectsEnv(home), AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(res.status, res.stderr).toBe(0);
+      const doc = readRoutineYaml(home, 'multi-proj-job');
+      expect(doc).not.toBeNull();
+      expect(doc!.projects).toEqual(['myapp', 'billing']);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('deduplicates repeated project names, preserving first-seen order', () => {
+    const home = makeHome({ registry });
+    writeProject(home, 'myapp');
+    try {
+      const res = run(home, [
+        'add', 'dedup-job',
+        '--schedule', '0 9 * * *',
+        '--agent', 'claude',
+        '--prompt', 'run tests',
+        '--project', 'myapp',
+        '--project', 'myapp',
+      ], { ...projectsEnv(home), AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(res.status, res.stderr).toBe(0);
+      const doc = readRoutineYaml(home, 'dedup-job');
+      expect(doc).not.toBeNull();
+      expect(doc!.projects).toEqual(['myapp']);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('routines add --all-projects', () => {
+  it('writes projects: ["*"] to YAML', () => {
+    const home = makeHome({ registry });
+    writeProject(home, 'myapp');
+    try {
+      const res = run(home, [
+        'add', 'all-proj-job',
+        '--schedule', '0 9 * * *',
+        '--agent', 'claude',
+        '--prompt', 'fleet check',
+        '--all-projects',
+      ], { ...projectsEnv(home), AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(res.status, res.stderr).toBe(0);
+      const doc = readRoutineYaml(home, 'all-proj-job');
+      expect(doc).not.toBeNull();
+      expect(doc!.projects).toEqual(['*']);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects --all-projects combined with --project', () => {
+    const home = makeHome({ registry });
+    writeProject(home, 'myapp');
+    try {
+      const res = run(home, [
+        'add', 'conflict-job',
+        '--schedule', '0 9 * * *',
+        '--agent', 'claude',
+        '--prompt', 'check',
+        '--all-projects',
+        '--project', 'myapp',
+      ], { ...projectsEnv(home), AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(res.status).not.toBe(0);
+      const output = res.stdout + res.stderr;
+      expect(output).toMatch(/mutually exclusive/);
+      expect(readRoutineYaml(home, 'conflict-job')).toBeNull();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('routines add --project unknown project rejection', () => {
+  it('rejects an unknown project name and does not create the routine file', () => {
+    const home = makeHome({ registry });
+    // No projects written — "ghost" does not exist.
+    try {
+      const res = run(home, [
+        'add', 'ghost-job',
+        '--schedule', '0 9 * * *',
+        '--agent', 'claude',
+        '--prompt', 'check',
+        '--project', 'ghost',
+      ], { ...projectsEnv(home), AGENTS_SYNC_MACHINE_ID: 'zion' });
+      expect(res.status).not.toBe(0);
+      const output = res.stdout + res.stderr;
+      expect(output).toMatch(/Unknown project/i);
+      expect(readRoutineYaml(home, 'ghost-job')).toBeNull();
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('groupRoutineJobsByProject — named projects never collide with special buckets', () => {
+  const mk = (name: string, projects?: string[]): JobConfig =>
+    ({ ...baseJob, name, ...(projects ? { projects } : {}) }) as unknown as JobConfig;
+
+  it('keeps a project named "Operations" separate from the no-project Operations special', () => {
+    const known = new Set(['Operations']);
+    const jobs = [
+      mk('in-operations-project', ['Operations']), // named project literally "Operations"
+      mk('no-project'),                             // untagged -> special Operations bucket
+    ];
+    const groups = groupRoutineJobsByProject(jobs, known);
+    const named = groups.find((g) => g.key === 'named:Operations');
+    const special = groups.find((g) => g.key === 'special:operations');
+    // Two distinct buckets, both titled "Operations", never merged.
+    expect(named).toBeDefined();
+    expect(special).toBeDefined();
+    expect(named!.jobs.map((j) => j.name)).toEqual(['in-operations-project']);
+    expect(special!.jobs.map((j) => j.name)).toEqual(['no-project']);
+    // The named project sorts before the special that shares its title.
+    expect(groups.indexOf(named!)).toBeLessThan(groups.indexOf(special!));
+  });
+
+  it('keeps a project named "Cross-project" separate from the multi-project span special', () => {
+    const known = new Set(['Cross-project', 'a', 'b']);
+    const jobs = [
+      mk('in-crossproject-project', ['Cross-project']), // named project literally "Cross-project"
+      mk('spans-two', ['a', 'b']),                       // multiple names -> special Cross-project bucket
+    ];
+    const groups = groupRoutineJobsByProject(jobs, known);
+    const named = groups.find((g) => g.key === 'named:Cross-project');
+    const special = groups.find((g) => g.key === 'special:cross');
+    expect(named).toBeDefined();
+    expect(special).toBeDefined();
+    expect(named!.jobs.map((j) => j.name)).toEqual(['in-crossproject-project']);
+    expect(special!.jobs.map((j) => j.name)).toEqual(['spans-two']);
+    expect(groups.indexOf(named!)).toBeLessThan(groups.indexOf(special!));
+  });
+
+  it('orders named projects (alphabetically) before All projects, Cross-project, Operations, Unknown projects', () => {
+    const known = new Set(['zeta', 'alpha', 'a', 'b']);
+    const jobs = [
+      mk('op'),                       // Operations special
+      mk('unknown', ['ghost']),       // Unknown projects special
+      mk('all', ['*']),               // All projects special
+      mk('cross', ['a', 'b']),        // Cross-project special
+      mk('named-z', ['zeta']),        // named
+      mk('named-a', ['alpha']),       // named
+    ];
+    const titles = groupRoutineJobsByProject(jobs, known).map((g) => g.title);
+    expect(titles).toEqual(['alpha', 'zeta', 'All projects', 'Cross-project', 'Operations', 'Unknown projects']);
+  });
+
+  it('groups a file-style duplicate-name routine (projects: [myapp, myapp]) as the single named project', () => {
+    const known = new Set(['myapp']);
+    const groups = groupRoutineJobsByProject([mk('dup', ['myapp', 'myapp'])], known);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe('named:myapp');
+    expect(groups[0].title).toBe('myapp');
+  });
+});
+
+describe('routines list --json projects and projectGroup fields', () => {
+  it('includes projects and projectGroup in the JSON payload', () => {
+    const jobWithProject = { ...baseJob, name: 'tagged-job', projects: ['myapp'] };
+    const jobNoProject = { ...baseJob, name: 'untagged-job' };
+    const home = makeHome({
+      jobs: [jobWithProject, jobNoProject],
+      registry,
+      deviceRoutines: { zion: ['tagged-job', 'untagged-job'] },
+    });
+    writeProject(home, 'myapp');
+    try {
+      const res = run(home, ['list', '--json'], {
+        ...projectsEnv(home),
+        AGENTS_SYNC_MACHINE_ID: 'zion',
+      });
+      expect(res.status, res.stderr).toBe(0);
+      const payload = JSON.parse(res.stdout) as Array<Record<string, unknown>>;
+      const tagged = payload.find((j) => j.name === 'tagged-job');
+      const untagged = payload.find((j) => j.name === 'untagged-job');
+      expect(tagged).toBeDefined();
+      expect(tagged!.projects).toEqual(['myapp']);
+      expect(tagged!.projectGroup).toBe('myapp');
+      expect(untagged).toBeDefined();
+      expect(untagged!.projects).toEqual([]);
+      expect(untagged!.projectGroup).toBe('Operations');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('reports projectGroup as "All projects" for projects: ["*"]', () => {
+    const jobAllProjects = { ...baseJob, name: 'all-proj-job', projects: ['*'] };
+    const home = makeHome({
+      jobs: [jobAllProjects],
+      registry,
+      deviceRoutines: { zion: ['all-proj-job'] },
+    });
+    try {
+      const res = run(home, ['list', '--json'], {
+        ...projectsEnv(home),
+        AGENTS_SYNC_MACHINE_ID: 'zion',
+      });
+      expect(res.status, res.stderr).toBe(0);
+      const payload = JSON.parse(res.stdout) as Array<Record<string, unknown>>;
+      const entry = payload.find((j) => j.name === 'all-proj-job');
+      expect(entry).toBeDefined();
+      expect(entry!.projects).toEqual(['*']);
+      expect(entry!.projectGroup).toBe('All projects');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

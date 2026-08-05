@@ -19,7 +19,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { HookCache, HookCacheConfig, HookCacheKey, HookCachePrefetch, HookMatches } from '../types.js';
-import { getHookCacheDir, getHookShimsDir, getLogsDir } from '../state.js';
+import { getHookCacheDir, getHookShimsDir, getLogsDir, getPerfDir } from '../state.js';
 
 /**
  * Parse a `cache:` value from hooks.yaml into the canonical config form.
@@ -112,6 +112,8 @@ export interface HookShimPaths {
   shimsDir?: string;
   cacheDir?: string;
   logsDir?: string;
+  /** Directory for the disposable perf warehouse + spool (default ~/.agents/.cache/perf). */
+  perfDir?: string;
 }
 
 /**
@@ -134,8 +136,9 @@ export function generateHookShim(args: {
   const shimsDir = args.paths?.shimsDir ?? getHookShimsDir();
   const cacheDir = args.paths?.cacheDir ?? getHookCacheDir();
   const logsDir = args.paths?.logsDir ?? getLogsDir();
+  const perfDir = args.paths?.perfDir ?? getPerfDir();
   const shimPath = resolveContainedHookShimPath(shimsDir, args.name);
-  const content = renderShim(args.name, args.scriptPath, args.cache ?? null, args.matches, { cacheDir, logsDir });
+  const content = renderShim(args.name, args.scriptPath, args.cache ?? null, args.matches, { cacheDir, logsDir, perfDir });
   fs.mkdirSync(shimsDir, { recursive: true });
 
   let existing: string | null = null;
@@ -317,6 +320,12 @@ TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 LOG_FILE="$LOGS_DIR/events-$(date -u +%Y-%m-%d).jsonl"
 printf '{"ts":"%s","event":"hook.fire","hook":"%s","ms":%d,"cache":"%s","exit":%d}\\n' \\
   "$TS" "$HOOK_NAME" "$MS" "none" "$EXIT" >>"$LOG_FILE" 2>/dev/null || true
+# Disposable perf spool → drained into ~/.agents/.cache/perf/perf.db on next agents perf/open.
+mkdir -p "$PERF_DIR" 2>/dev/null || true
+TS_MS=$("$PY" -c 'import time; print(int(time.time()*1000))' 2>/dev/null || echo 0)
+HOST=$(hostname 2>/dev/null || echo unknown)
+printf '{"ts_ms":%s,"kind":"hook.fire","label":"%s","duration_ms":%d,"cache":"%s","exit_code":%d,"hostname":"%s"%s}\\n' \\
+  "$TS_MS" "$HOOK_NAME" "$MS" "none" "$EXIT" "$HOST" "$HOOK_EXTRA_JSON" >>"$PERF_SPOOL" 2>/dev/null || true
 
 exit "$EXIT"`;
 
@@ -338,12 +347,13 @@ function renderShim(
   scriptPath: string,
   cache: HookCacheConfig | null,
   matches: HookMatches | undefined,
-  paths: { cacheDir: string; logsDir: string }
+  paths: { cacheDir: string; logsDir: string; perfDir: string }
 ): string {
   const ttl = cache ? (typeof cache.ttl === 'number' ? cache.ttl : (parseDuration(cache.ttl) ?? 0)) : 0;
   const key: HookCacheKey = cache?.key ?? 'global';
   const prefetch: HookCachePrefetch = cache?.prefetch ?? 'none';
-  const { cacheDir, logsDir } = paths;
+  const { cacheDir, logsDir, perfDir } = paths;
+  const perfSpool = path.join(perfDir, 'spool.jsonl');
 
   const hasMatches = matches != null && Object.keys(matches).length > 0;
   const matchesJson = hasMatches ? JSON.stringify(matches) : '';
@@ -367,12 +377,14 @@ HOOK_NAME=${q(name)}
 SOURCE=${q(scriptPath)}
 CACHE_DIR=${q(cacheDir)}
 LOGS_DIR=${q(logsDir)}
+PERF_DIR=${q(perfDir)}
+PERF_SPOOL=${q(perfSpool)}
 TTL=${ttl}
 PREFETCH=${q(prefetch)}
 KEY_MODE=${q(key)}
 MATCHES_JSON=${q(matchesJson)}
 
-mkdir -p "$CACHE_DIR" "$LOGS_DIR"
+mkdir -p "$CACHE_DIR" "$LOGS_DIR" "$PERF_DIR"
 
 # Resolve a real Python. On Windows, bare python3 is often a Microsoft Store
 # app-execution alias stub that prints to stderr and exits non-zero (0 bytes on
@@ -390,6 +402,28 @@ done
 # Read stdin once (Claude/Codex/Gemini pass JSON on stdin to every hook).
 STDIN_PAYLOAD="$(cat || true)"
 
+# cwd + session_id from the hook's own stdin JSON, pre-escaped as a ready-to-
+# splice JSON fragment (e.g. ,"cwd":"/repo","session_id":"abc") so every
+# hook.fire perf-spool line below can carry them without re-parsing stdin per
+# site. This is what lets \`agents perf --project\` (project-key.ts resolves
+# cwd -> project) and session-scoped rollups work for hook.fire samples.
+# Fail-safe: any parse error yields an empty fragment, never breaks the write.
+HOOK_EXTRA_JSON="$(printf '%s' "$STDIN_PAYLOAD" | "$PY" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+out = {}
+cwd = d.get("cwd")
+if isinstance(cwd, str) and cwd:
+    out["cwd"] = cwd
+sid = d.get("session_id") or d.get("sessionId")
+if isinstance(sid, str) and sid:
+    out["session_id"] = sid
+print("".join("," + json.dumps(k) + ":" + json.dumps(v) for k, v in out.items()))
+' 2>/dev/null || true)"
+
 # --- matches: gate (issue #744 / RUSH-1506) -------------------------------
 # Enforce the hook's declared \`matches:\` predicates at fire time. Mirrors
 # shouldFire() in src/lib/hooks/match.ts: all declared predicates AND together;
@@ -405,6 +439,11 @@ if [ -n "$MATCHES_JSON" ]; then
     _LOG_FILE="$LOGS_DIR/events-$(date -u +%Y-%m-%d).jsonl"
     printf '{"ts":"%s","event":"hook.fire","hook":"%s","ms":0,"cache":"skip","exit":0}\\n' \\
       "$_TS" "$HOOK_NAME" >>"$_LOG_FILE" 2>/dev/null || true
+    mkdir -p "$PERF_DIR" 2>/dev/null || true
+    _TS_MS=$("$PY" -c 'import time; print(int(time.time()*1000))' 2>/dev/null || echo 0)
+    _HOST=$(hostname 2>/dev/null || echo unknown)
+    printf '{"ts_ms":%s,"kind":"hook.fire","label":"%s","duration_ms":0,"cache":"skip","exit_code":0,"hostname":"%s"%s}\\n' \\
+      "$_TS_MS" "$HOOK_NAME" "$_HOST" "$HOOK_EXTRA_JSON" >>"$PERF_SPOOL" 2>/dev/null || true
     exit 0
   fi
 fi
@@ -503,6 +542,11 @@ TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 LOG_FILE="$LOGS_DIR/events-$(date -u +%Y-%m-%d).jsonl"
 printf '{"ts":"%s","event":"hook.fire","hook":"%s","ms":%d,"cache":"%s","exit":%d}\\n' \\
   "$TS" "$HOOK_NAME" "$MS" "$CACHE_STATUS" "$EXIT" >>"$LOG_FILE" 2>/dev/null || true
+# Disposable perf spool → drained into perf.db (see lib/perf/db.ts). Soft keys only.
+TS_MS=$("$PY" -c 'import time; print(int(time.time()*1000))' 2>/dev/null || echo 0)
+HOST=$(hostname 2>/dev/null || echo unknown)
+printf '{"ts_ms":%s,"kind":"hook.fire","label":"%s","duration_ms":%d,"cache":"%s","exit_code":%d,"hostname":"%s"%s}\\n' \\
+  "$TS_MS" "$HOOK_NAME" "$MS" "$CACHE_STATUS" "$EXIT" "$HOST" "$HOOK_EXTRA_JSON" >>"$PERF_SPOOL" 2>/dev/null || true
 
 exit "$EXIT"
 `;

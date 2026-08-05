@@ -2,8 +2,8 @@
   "name": "swarm-ext",
   "displayName": "Agents",
   "publisher": "swarmify",
-  "description": "Run Claude, Codex, Gemini, Cursor, and other coding agents from one IDE workspace.",
-  "version": "0.9.295",
+  "description": "Run Claude, Codex, Antigravity, Cursor, and other coding agents from one IDE workspace.",
+  "version": "0.9.303",
   "license": "MIT",
   "author": "Muqsit Nawaz <dev@muqsitnawaz.com>",
   "icon": "assets/agents.png",
@@ -47,7 +47,8 @@
     "onStartupFinished",
     "onUri",
     "onLanguage:markdown",
-    "onCustomEditor:agents.markdownEditor"
+    "onCustomEditor:agents.markdownEditor",
+    "onCustomEditor:agents.htmlReader"
   ],
   "main": "./out/vscode/extension.js",
   "contributes": {
@@ -61,10 +62,23 @@
     "customEditors": [
       {
         "viewType": "agents.markdownEditor",
-        "displayName": "Agents Markdown Editor",
+        "displayName": "Agents Reader (Markdown)",
         "selector": [
           {
             "filenamePattern": "*.md"
+          }
+        ],
+        "priority": "option"
+      },
+      {
+        "viewType": "agents.htmlReader",
+        "displayName": "Agents Reader (HTML)",
+        "selector": [
+          {
+            "filenamePattern": "*.html"
+          },
+          {
+            "filenamePattern": "*.htm"
           }
         ],
         "priority": "option"
@@ -124,7 +138,7 @@
       },
       {
         "command": "agents.newAgent",
-        "title": "Agents: New Mix of Agents"
+        "title": "Agents: New Agent"
       },
       {
         "command": "agents.newSecondaryAgent",
@@ -132,7 +146,7 @@
       },
       {
         "command": "agents.newClaude",
-        "title": "Agents: New Claude (CC)",
+        "title": "Agents: New Claude",
         "icon": {
           "light": "assets/claude.png",
           "dark": "assets/claude.png"
@@ -140,23 +154,15 @@
       },
       {
         "command": "agents.newCodex",
-        "title": "Agents: New Codex (CX)",
+        "title": "Agents: New Codex",
         "icon": {
           "light": "assets/chatgpt-light.png",
           "dark": "assets/chatgpt.png"
         }
       },
       {
-        "command": "agents.newGemini",
-        "title": "Agents: New Gemini (GX)",
-        "icon": {
-          "light": "assets/gemini.png",
-          "dark": "assets/gemini.png"
-        }
-      },
-      {
         "command": "agents.newAntigravity",
-        "title": "Agents: New Antigravity (AG)",
+        "title": "Agents: New Antigravity",
         "icon": {
           "light": "assets/antigravity.png",
           "dark": "assets/antigravity.png"
@@ -164,7 +170,7 @@
       },
       {
         "command": "agents.newGrok",
-        "title": "Agents: New Grok (GK)",
+        "title": "Agents: New Grok",
         "icon": {
           "light": "assets/grok-light.png",
           "dark": "assets/grok.png"
@@ -172,7 +178,7 @@
       },
       {
         "command": "agents.newKimi",
-        "title": "Agents: New Kimi (KM)",
+        "title": "Agents: New Kimi",
         "icon": {
           "light": "assets/kimi.png",
           "dark": "assets/kimi.png"
@@ -180,7 +186,7 @@
       },
       {
         "command": "agents.newDroid",
-        "title": "Agents: New Droid (DR)",
+        "title": "Agents: New Droid",
         "icon": {
           "light": "assets/droid.png",
           "dark": "assets/droid.png"
@@ -188,7 +194,7 @@
       },
       {
         "command": "agents.newOpenCode",
-        "title": "Agents: New OpenCode (OC)",
+        "title": "Agents: New OpenCode",
         "icon": {
           "light": "assets/opencode.png",
           "dark": "assets/opencode.png"
@@ -196,7 +202,7 @@
       },
       {
         "command": "agents.newCursor",
-        "title": "Agents: New Cursor (CR)",
+        "title": "Agents: New Cursor",
         "icon": {
           "light": "assets/cursor-light.png",
           "dark": "assets/cursor.png"
@@ -205,142 +211,6 @@
       {
         "command": "agents.newAlias",
         "title": "Agents: New Alias"
-      },
-      {
-        "command": "agents.newAgentPickVersion",
-        "title": "Agents: New Agent (Pinned)",
-        "icon": {
-          "light": "assets/agents.png",
-          "dark": "assets/agents.png"
-        }
-      },
-      {
-        "command": "agents.newClaudePickVersion",
-        "title": "Agents: New Claude (Pinned)",
-        "icon": {
-          "light": "assets/claude.png",
-          "dark": "assets/claude.png"
-        }
-      },
-      {
-        "command": "agents.newClaudeLatest",
-        "title": "Agents: New Claude (Latest)",
-        "icon": {
-          "light": "assets/claude.png",
-          "dark": "assets/claude.png"
-        }
-      },
-      {
-        "command": "agents.newClaudeBalanced",
-        "title": "Agents: New Claude (Balanced)",
-        "icon": {
-          "light": "assets/claude.png",
-          "dark": "assets/claude.png"
-        }
-      },
-      {
-        "command": "agents.newCodexPickVersion",
-        "title": "Agents: New Codex (Pinned)",
-        "icon": {
-          "light": "assets/chatgpt-light.png",
-          "dark": "assets/chatgpt.png"
-        }
-      },
-      {
-        "command": "agents.newCodexLatest",
-        "title": "Agents: New Codex (Latest)",
-        "icon": {
-          "light": "assets/chatgpt-light.png",
-          "dark": "assets/chatgpt.png"
-        }
-      },
-      {
-        "command": "agents.newCodexBalanced",
-        "title": "Agents: New Codex (Balanced)",
-        "icon": {
-          "light": "assets/chatgpt-light.png",
-          "dark": "assets/chatgpt.png"
-        }
-      },
-      {
-        "command": "agents.newGeminiPickVersion",
-        "title": "Agents: New Gemini (Pinned)",
-        "icon": {
-          "light": "assets/gemini.png",
-          "dark": "assets/gemini.png"
-        }
-      },
-      {
-        "command": "agents.newGeminiLatest",
-        "title": "Agents: New Gemini (Latest)",
-        "icon": {
-          "light": "assets/gemini.png",
-          "dark": "assets/gemini.png"
-        }
-      },
-      {
-        "command": "agents.newGeminiBalanced",
-        "title": "Agents: New Gemini (Balanced)",
-        "icon": {
-          "light": "assets/gemini.png",
-          "dark": "assets/gemini.png"
-        }
-      },
-      {
-        "command": "agents.newAntigravityPickVersion",
-        "title": "Agents: New Antigravity (Pinned)",
-        "icon": {
-          "light": "assets/antigravity.png",
-          "dark": "assets/antigravity.png"
-        }
-      },
-      {
-        "command": "agents.newAntigravityLatest",
-        "title": "Agents: New Antigravity (Latest)",
-        "icon": {
-          "light": "assets/antigravity.png",
-          "dark": "assets/antigravity.png"
-        }
-      },
-      {
-        "command": "agents.newAntigravityBalanced",
-        "title": "Agents: New Antigravity (Balanced)",
-        "icon": {
-          "light": "assets/antigravity.png",
-          "dark": "assets/antigravity.png"
-        }
-      },
-      {
-        "command": "agents.newGrokPickVersion",
-        "title": "Agents: New Grok (Pick Version)",
-        "icon": {
-          "light": "assets/grok.png",
-          "dark": "assets/grok.png"
-        }
-      },
-      {
-        "command": "agents.newCursorPickVersion",
-        "title": "Agents: New Cursor (Pinned)",
-        "icon": {
-          "light": "assets/cursor-light.png",
-          "dark": "assets/cursor.png"
-        }
-      },
-      {
-        "command": "agents.newCursorLatest",
-        "title": "Agents: New Cursor (Latest)",
-        "icon": {
-          "light": "assets/cursor-light.png",
-          "dark": "assets/cursor.png"
-        }
-      },
-      {
-        "command": "agents.newCursorBalanced",
-        "title": "Agents: New Cursor (Balanced)",
-        "icon": {
-          "light": "assets/cursor-light.png",
-          "dark": "assets/cursor.png"
-        }
       },
       {
         "command": "agents.quickLaunch0",
@@ -415,20 +285,8 @@
         "title": "Agents: Setup Codex"
       },
       {
-        "command": "agents.setupGemini",
-        "title": "Agents: Setup Gemini"
-      },
-      {
         "command": "agents.enableNotifications",
         "title": "Agents: Enable Notifications"
-      },
-      {
-        "command": "agents.enableTmux",
-        "title": "Agents: Enable Tmux"
-      },
-      {
-        "command": "agents.disableTmux",
-        "title": "Agents: Disable Tmux"
       },
       {
         "command": "agents.newTask",
@@ -448,7 +306,7 @@
       },
       {
         "command": "agents.newShell",
-        "title": "Agents: New Shell (SH)",
+        "title": "Agents: New Shell",
         "icon": {
           "light": "assets/agents.png",
           "dark": "assets/agents.png"
@@ -467,18 +325,6 @@
         "title": "Agents: Cycle Previous Terminal"
       },
       {
-        "command": "agents.enableView",
-        "title": "Agents: Enable View"
-      },
-      {
-        "command": "agents.disableView",
-        "title": "Agents: Disable View"
-      },
-      {
-        "command": "agents.runSetup",
-        "title": "Agents: Run Setup"
-      },
-      {
         "command": "agents.newAgentHSplit",
         "title": "Agents: New Split (Below)"
       },
@@ -491,20 +337,12 @@
         "title": "Agents: Prompts"
       },
       {
-        "command": "agents.enableWarming",
-        "title": "Agents: Enable Warming"
-      },
-      {
-        "command": "agents.disableWarming",
-        "title": "Agents: Disable Warming"
-      },
-      {
         "command": "agents.enableReader",
-        "title": "Agents: Enable Reader"
+        "title": "Agents: Reader (Enable)"
       },
       {
         "command": "agents.disableReader",
-        "title": "Agents: Disable Reader"
+        "title": "Agents: Reader (Disable)"
       },
       {
         "command": "agents.init",
@@ -519,6 +357,22 @@
         "title": "Agents: Reopen Last Session"
       },
       {
+        "command": "agents.detach",
+        "title": "Agents: Detach (Send to Background)"
+      },
+      {
+        "command": "agents.watchdogEnable",
+        "title": "Agents: Watchdog (Enable)"
+      },
+      {
+        "command": "agents.watchdogDisable",
+        "title": "Agents: Watchdog (Disable)"
+      },
+      {
+        "command": "agents.attach",
+        "title": "Agents: Attach (Bring to Foreground)"
+      },
+      {
         "command": "agents.continueInNew",
         "title": "Agents: Continue in New Session"
       },
@@ -531,16 +385,28 @@
         "title": "Agents: Session ID"
       },
       {
+        "command": "agents.resume",
+        "title": "Agents: Resume"
+      },
+      {
+        "command": "agents.resumePickSession",
+        "title": "Agents: Resume (Pick Session)"
+      },
+      {
+        "command": "agents.resumePickHost",
+        "title": "Agents: Resume (Pick Host)"
+      },
+      {
+        "command": "agents.resumePickHarness",
+        "title": "Agents: Resume (Pick Harness)"
+      },
+      {
         "command": "agents.sessionResume",
         "title": "Agents: Session Resume"
       },
       {
         "command": "agents.resumeCurrentInBestProfile",
-        "title": "Agents: Resume Current Session in Best Profile"
-      },
-      {
-        "command": "agents.watchdog.toggleTerminal",
-        "title": "Agents: Toggle Watchdog for Active Terminal"
+        "title": "Agents: Resume (Best Profile)"
       },
       {
         "command": "agents.spawnWithPrompt",
@@ -551,6 +417,22 @@
         "title": "Agents: Spawn with Context"
       },
       {
+        "command": "agents.forkCurrentSession",
+        "title": "Agents: Fork"
+      },
+      {
+        "command": "agents.forkPickHost",
+        "title": "Agents: Fork (Pick Host)"
+      },
+      {
+        "command": "agents.forkPickSession",
+        "title": "Agents: Fork (Pick Session)"
+      },
+      {
+        "command": "agents.forkRecap",
+        "title": "Agents: Fork (Recap)"
+      },
+      {
         "command": "agents.newClaudePickHost",
         "title": "Agents: New Claude (Pick Host)",
         "icon": {
@@ -559,20 +441,8 @@
         }
       },
       {
-        "command": "agents.newClaudePickVersionHost",
-        "title": "Agents: New Claude (Pick Version & Host)",
-        "icon": {
-          "light": "assets/claude.png",
-          "dark": "assets/claude.png"
-        }
-      },
-      {
-        "command": "agents.newClaudeAutoHost",
-        "title": "Agents: New Claude (Auto Host)",
-        "icon": {
-          "light": "assets/claude.png",
-          "dark": "assets/claude.png"
-        }
+        "command": "agents.newClaudeAuto",
+        "title": "Agents: New Claude (Auto)"
       },
       {
         "command": "agents.newCodexPickHost",
@@ -583,44 +453,8 @@
         }
       },
       {
-        "command": "agents.newCodexPickVersionHost",
-        "title": "Agents: New Codex (Pick Version & Host)",
-        "icon": {
-          "light": "assets/chatgpt.png",
-          "dark": "assets/chatgpt.png"
-        }
-      },
-      {
-        "command": "agents.newCodexAutoHost",
-        "title": "Agents: New Codex (Auto Host)",
-        "icon": {
-          "light": "assets/chatgpt.png",
-          "dark": "assets/chatgpt.png"
-        }
-      },
-      {
-        "command": "agents.newGeminiPickHost",
-        "title": "Agents: New Gemini (Pick Host)",
-        "icon": {
-          "light": "assets/gemini.png",
-          "dark": "assets/gemini.png"
-        }
-      },
-      {
-        "command": "agents.newGeminiPickVersionHost",
-        "title": "Agents: New Gemini (Pick Version & Host)",
-        "icon": {
-          "light": "assets/gemini.png",
-          "dark": "assets/gemini.png"
-        }
-      },
-      {
-        "command": "agents.newGeminiAutoHost",
-        "title": "Agents: New Gemini (Auto Host)",
-        "icon": {
-          "light": "assets/gemini.png",
-          "dark": "assets/gemini.png"
-        }
+        "command": "agents.newCodexAuto",
+        "title": "Agents: New Codex (Auto)"
       },
       {
         "command": "agents.newOpenCodePickHost",
@@ -631,20 +465,8 @@
         }
       },
       {
-        "command": "agents.newOpenCodePickVersionHost",
-        "title": "Agents: New OpenCode (Pick Version & Host)",
-        "icon": {
-          "light": "assets/opencode.png",
-          "dark": "assets/opencode.png"
-        }
-      },
-      {
-        "command": "agents.newOpenCodeAutoHost",
-        "title": "Agents: New OpenCode (Auto Host)",
-        "icon": {
-          "light": "assets/opencode.png",
-          "dark": "assets/opencode.png"
-        }
+        "command": "agents.newOpenCodeAuto",
+        "title": "Agents: New OpenCode (Auto)"
       },
       {
         "command": "agents.newCursorPickHost",
@@ -655,20 +477,8 @@
         }
       },
       {
-        "command": "agents.newCursorPickVersionHost",
-        "title": "Agents: New Cursor (Pick Version & Host)",
-        "icon": {
-          "light": "assets/cursor.png",
-          "dark": "assets/cursor.png"
-        }
-      },
-      {
-        "command": "agents.newCursorAutoHost",
-        "title": "Agents: New Cursor (Auto Host)",
-        "icon": {
-          "light": "assets/cursor.png",
-          "dark": "assets/cursor.png"
-        }
+        "command": "agents.newCursorAuto",
+        "title": "Agents: New Cursor (Auto)"
       },
       {
         "command": "agents.newAntigravityPickHost",
@@ -679,20 +489,8 @@
         }
       },
       {
-        "command": "agents.newAntigravityPickVersionHost",
-        "title": "Agents: New Antigravity (Pick Version & Host)",
-        "icon": {
-          "light": "assets/antigravity.png",
-          "dark": "assets/antigravity.png"
-        }
-      },
-      {
-        "command": "agents.newAntigravityAutoHost",
-        "title": "Agents: New Antigravity (Auto Host)",
-        "icon": {
-          "light": "assets/antigravity.png",
-          "dark": "assets/antigravity.png"
-        }
+        "command": "agents.newAntigravityAuto",
+        "title": "Agents: New Antigravity (Auto)"
       },
       {
         "command": "agents.newGrokPickHost",
@@ -703,20 +501,8 @@
         }
       },
       {
-        "command": "agents.newGrokPickVersionHost",
-        "title": "Agents: New Grok (Pick Version & Host)",
-        "icon": {
-          "light": "assets/grok.png",
-          "dark": "assets/grok.png"
-        }
-      },
-      {
-        "command": "agents.newGrokAutoHost",
-        "title": "Agents: New Grok (Auto Host)",
-        "icon": {
-          "light": "assets/grok.png",
-          "dark": "assets/grok.png"
-        }
+        "command": "agents.newGrokAuto",
+        "title": "Agents: New Grok (Auto)"
       },
       {
         "command": "agents.newKimiPickHost",
@@ -727,20 +513,8 @@
         }
       },
       {
-        "command": "agents.newKimiPickVersionHost",
-        "title": "Agents: New Kimi (Pick Version & Host)",
-        "icon": {
-          "light": "assets/kimi.png",
-          "dark": "assets/kimi.png"
-        }
-      },
-      {
-        "command": "agents.newKimiAutoHost",
-        "title": "Agents: New Kimi (Auto Host)",
-        "icon": {
-          "light": "assets/kimi.png",
-          "dark": "assets/kimi.png"
-        }
+        "command": "agents.newKimiAuto",
+        "title": "Agents: New Kimi (Auto)"
       },
       {
         "command": "agents.newDroidPickHost",
@@ -751,28 +525,12 @@
         }
       },
       {
-        "command": "agents.newDroidPickVersionHost",
-        "title": "Agents: New Droid (Pick Version & Host)",
-        "icon": {
-          "light": "assets/droid.png",
-          "dark": "assets/droid.png"
-        }
-      },
-      {
-        "command": "agents.newDroidAutoHost",
-        "title": "Agents: New Droid (Auto Host)",
-        "icon": {
-          "light": "assets/droid.png",
-          "dark": "assets/droid.png"
-        }
+        "command": "agents.newDroidAuto",
+        "title": "Agents: New Droid (Auto)"
       },
       {
         "command": "agents.newAgentPickHost",
         "title": "Agents: New Agent (Pick Host)"
-      },
-      {
-        "command": "agents.newAgentPickVersionHost",
-        "title": "Agents: New Agent (Pick Version & Host)"
       },
       {
         "command": "agents.quickLaunch0PickHost",
@@ -847,21 +605,6 @@
           "default": ".assets",
           "description": "Folder for storing images and attachments from the markdown editor"
         },
-        "agents.terminalMode": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "tmux",
-            "native"
-          ],
-          "enumDescriptions": [
-            "Use tmux when available (macOS/Linux with tmux on PATH), otherwise a native VS Code terminal.",
-            "Always run agents inside tmux; warn and fall back to native when tmux is unavailable.",
-            "Never use tmux; always use a native VS Code editor terminal."
-          ],
-          "default": "auto",
-          "description": "How agent terminals are launched. 'auto' (default) runs agents inside a tmux session on macOS/Linux for uniform addressing, resume, and tracking — falling back to a native terminal on Windows or when tmux is missing. Cmd+Shift+H/V create tmux panes instead of VS Code editor splits when tmux is active."
-        },
         "agents.worktreePerTerminal": {
           "type": "boolean",
           "default": false,
@@ -880,52 +623,12 @@
         "agents.openaiApiKey": {
           "type": "string",
           "default": "",
-          "description": "OpenAI API key. Used by the Foreman voice coordinator (gpt-realtime-2). Autogit no longer uses this — commit messages are generated via `agents run claude --model haiku`."
+          "description": "OpenAI API key. Used by the Foreman voice coordinator (gpt-realtime-2). Autogit no longer uses this \u2014 commit messages are generated via `agents run claude --model haiku`."
         },
         "agents.commitGenTimeoutMs": {
           "type": "number",
           "default": 60000,
           "description": "Timeout (ms) for the `agents run claude --model haiku` call that generates commit messages. Increase if commits are slow to generate."
-        },
-        "agents.watchdog.enabled": {
-          "type": "boolean",
-          "default": true,
-          "description": "Master switch for the agent watchdog. When on, it polls active agent terminals on an interval to auto-rotate exhausted versions and (optionally) nudge stalled ones."
-        },
-        "agents.watchdog.autoRotate": {
-          "type": "boolean",
-          "default": true,
-          "description": "When an agent terminal's pinned version hits its limit (out_of_credits, rate_limited, or >=100% session), automatically spawn a fresh terminal on the best available signed-in version and replay /continue. The old terminal is closed."
-        },
-        "agents.watchdog.rotateCooldownSeconds": {
-          "type": "number",
-          "default": 120,
-          "description": "Minimum seconds between auto-rotate attempts for the same terminal."
-        },
-        "agents.watchdog.stallNudge": {
-          "type": "boolean",
-          "default": true,
-          "description": "When an agent appears truly blocked, call a Claude Haiku headless instance to decide whether to inject a nudge."
-        },
-        "agents.watchdog.stallSeconds": {
-          "type": "number",
-          "default": 300,
-          "description": "Seconds of inactivity before an agent is considered stalled enough for blocked checks."
-        },
-        "agents.watchdog.cooldownSeconds": {
-          "type": "number",
-          "default": 1200,
-          "description": "Minimum seconds between nudges to the same terminal."
-        },
-        "agents.watchdog.tickSeconds": {
-          "type": "number",
-          "default": 120,
-          "description": "How often the watchdog evaluates terminals."
-        },
-        "agents.watchdog.useSmartAgent": {
-          "type": "boolean",
-          "default": false,
-          "description": "Use context-aware watchdog agent with access to mq, linear, and full session history. When enabled, the watchdog can read project conventions and make smarter nudge decisions."
         }
       }
     },
@@ -948,14 +651,13 @@
         {
           "command": "agents.askAnotherAgent",
           "group": "agents@1"
+        },
+        {
+          "command": "agents.detach",
+          "group": "agents@2"
         }
       ],
       "commandPalette": [
-        {
-          "command": "agents.newGemini",
-          "when": "true",
-          "group": "navigation@2"
-        },
         {
           "command": "agents.newAntigravity",
           "when": "true",
@@ -977,36 +679,6 @@
           "group": "navigation@2"
         },
         {
-          "command": "agents.enableTmux",
-          "when": "!agents.tmuxEnabled",
-          "group": "navigation@3"
-        },
-        {
-          "command": "agents.disableTmux",
-          "when": "agents.tmuxEnabled",
-          "group": "navigation@3"
-        },
-        {
-          "command": "agents.enableView",
-          "when": "!agents.viewEnabled",
-          "group": "navigation@4"
-        },
-        {
-          "command": "agents.disableView",
-          "when": "agents.viewEnabled",
-          "group": "navigation@4"
-        },
-        {
-          "command": "agents.enableWarming",
-          "when": "!agents.warmingEnabled",
-          "group": "navigation@5"
-        },
-        {
-          "command": "agents.disableWarming",
-          "when": "agents.warmingEnabled",
-          "group": "navigation@5"
-        },
-        {
           "command": "agents.enableReader",
           "when": "!agents.readerEnabled",
           "group": "navigation@6"
@@ -1023,6 +695,17 @@
         "command": "agents.autogit",
         "key": "ctrl+shift+g",
         "mac": "cmd+shift+g"
+      },
+      {
+        "command": "agents.detach",
+        "key": "ctrl+k ctrl+b",
+        "mac": "cmd+k cmd+b",
+        "when": "terminalFocus"
+      },
+      {
+        "command": "agents.attach",
+        "key": "ctrl+k ctrl+a",
+        "mac": "cmd+k cmd+a"
       },
       {
         "command": "agents.newAgent",
@@ -1088,11 +771,6 @@
         "command": "agents.prompts",
         "key": "ctrl+shift+'",
         "mac": "cmd+shift+'"
-      },
-      {
-        "command": "agents.newGemini",
-        "key": "ctrl+shift+m",
-        "mac": "cmd+shift+m"
       },
       {
         "command": "agents.newCursor",
@@ -1182,8 +860,8 @@
       },
       {
         "command": "agents.resumeCurrentInBestProfile",
-        "key": "ctrl+shift+j",
-        "mac": "cmd+shift+j"
+        "key": "ctrl+shift+alt+j",
+        "mac": "cmd+shift+alt+j"
       },
       {
         "command": "agents.closeWithRecap",
@@ -1260,7 +938,8 @@
     "watch": "tsc -watch -p ./",
     "package": "bun run compile && vsce package",
     "rebuild": "electron-rebuild -f -w node-pty",
-    "test": "bun test --timeout 30000"
+    "test": "bun test --timeout 30000",
+    "test:agent-integration": "FACTORY_AGENT_INTEGRATION=1 bun test --timeout 95000 src/core/draftPrompt.test.ts src/core/labelgen.test.ts src/core/commitgen.test.ts"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.1",

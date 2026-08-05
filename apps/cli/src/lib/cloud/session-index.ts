@@ -19,7 +19,8 @@
 
 import { upsertSession } from '../session/db.js';
 import type { SessionAgentId } from '../session/types.js';
-import { SESSION_AGENTS } from '../session/types.js';
+import { isSessionTrackedAgent } from '../session/types.js';
+import { deriveShortId } from '../session/short-id.js';
 import type { CloudTask } from './types.js';
 
 /** The execution-id charset the session index will accept as a row id. */
@@ -39,13 +40,13 @@ export interface CloudSessionContext {
  * failed index write must never break the dispatch/poll it rides on.
  */
 export function registerCloudSession(task: CloudTask, ctx: CloudSessionContext = {}): void {
-  if (!SESSION_AGENTS.includes(task.agent as SessionAgentId)) return;
+  if (!task.agent || !isSessionTrackedAgent(task.agent)) return;
   if (!task.id || !EXECUTION_ID_RE.test(task.id)) return;
   try {
     upsertSession(
       {
         id: task.id,
-        shortId: task.id.slice(0, 8),
+        shortId: deriveShortId(task.id),
         agent: task.agent as SessionAgentId,
         timestamp: task.createdAt,
         lastActivity: task.updatedAt,

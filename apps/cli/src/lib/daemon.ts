@@ -12,17 +12,20 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { getDaemonDir as getDaemonDirRoot } from './state.js';
-import { isAlive, killTree, backgroundSpawnOptions } from './platform/index.js';
-import { listJobs as listAllJobs } from './routines.js';
+import { isAlive, killTree, backgroundSpawnOptions, waitForExit } from './platform/index.js';
+import { listJobs as listAllJobs, type JobConfig } from './routines.js';
+import { syncAllProjectRoutines } from './routines-project.js';
 import { JobScheduler } from './scheduler.js';
 import { MonitorEngine } from './monitors/engine.js';
 import { executeJobDetached, monitorRunningJobs } from './runner.js';
-import { detectOverdueJobs, notifyOverdue, notifyDesktop } from './overdue.js';
+import { detectOverdueJobs, notifyOverdue } from './overdue.js';
+import { runCatchup } from './catchup.js';
+import { notifyRoutineStart, notifyRoutineFinish, notifyRoutineStartFailed } from './routine-notify.js';
 import { BrowserService } from './browser/service.js';
 import { BrowserIPCServer } from './browser/ipc.js';
-import { readAndResolveBundleEnv } from './secrets/bundles.js';
 import { redactSecrets } from './redact.js';
 import { getAgentsBinPath, getCliLaunch, BUN_VIRTUAL_ROOT } from './cli-entry.js';
+import { isSchedulerEnabled, assertSchedulerEnabled } from './device-config.js';
 
 const PID_FILE = 'daemon.pid';
 const LOCK_FILE = 'daemon.lock';
@@ -33,14 +36,15 @@ const LOG_ROTATE_COUNT = 3;
 const PLIST_NAME = 'com.phnx-labs.agents-daemon';
 const SYSTEMD_UNIT = 'agents-daemon.service';
 const MONITOR_TICK_MS = 60_000;
+/**
+ * How often to re-scan for missed fires. Deliberately slower than the monitor
+ * tick: detection walks a week of cron occurrences per routine
+ * (`previousExpectedFire`), and a fire that was already missed is not urgent to
+ * the second — five minutes bounds the cost while still recovering from a
+ * wedge or an OS suspend the process survived.
+ */
+const CATCHUP_TICK_MS = 5 * 60_000;
 const WEDGE_THRESHOLD_TICKS = 3;
-
-// A long-lived `claude setup-token` value stored in this secrets bundle/key is
-// baked into the daemon's service-manager environment so headless routine runs
-// authenticate without depending on the short-lived interactive Keychain OAuth
-// session (which expires between runs and produces intermittent 401s).
-const DAEMON_OAUTH_BUNDLE = 'claude';
-const DAEMON_OAUTH_KEY = 'CLAUDE_CODE_OAUTH_TOKEN';
 
 /**
  * RUSH-1817: decide whether the daemon should (re)take over hosting the secrets
@@ -52,6 +56,24 @@ const DAEMON_OAUTH_KEY = 'CLAUDE_CODE_OAUTH_TOKEN';
  */
 export function shouldTakeOverBroker(isHosting: boolean, brokerReachable: boolean): boolean {
   return !isHosting && !brokerReachable;
+}
+
+/**
+ * What a gate re-evaluation must do with the routines scheduler. The daemon
+ * re-evaluates `scheduler.enabled` on every SIGHUP reload so flipping the key
+ * takes effect without a daemon restart (and `routines add`'s reload signal on
+ * a re-enabled box boots the scheduler — the reload is truthful, not a no-op).
+ *
+ *   running + enabled   → reload (the normal SIGHUP path)
+ *   running + !enabled  → stop  (gate flipped off since boot)
+ *   !running + enabled  → boot  (gate flipped on since boot)
+ *   !running + !enabled → none  (stay dark)
+ */
+export type SchedulerGateTransition = 'reload' | 'stop' | 'boot' | 'none';
+
+export function schedulerGateTransition(running: boolean, enabled: boolean): SchedulerGateTransition {
+  if (running) return enabled ? 'reload' : 'stop';
+  return enabled ? 'boot' : 'none';
 }
 
 function getDaemonDir(): string {
@@ -172,6 +194,17 @@ export function removeHeartbeat(): void {
   try { fs.unlinkSync(getHeartbeatPath()); } catch { /* already removed */ }
 }
 
+/**
+ * A heartbeat is "fresh" when its last tick falls inside the wedge window — the
+ * same threshold isDaemonWedged() uses to decide a still-present daemon has gone
+ * unresponsive. A fresh heartbeat whose pid is alive is proof of a live, ticking
+ * daemon even when the pid file has been lost.
+ */
+function isHeartbeatFresh(hb: DaemonHeartbeat): boolean {
+  const elapsed = Date.now() - Date.parse(hb.lastTick);
+  return elapsed <= WEDGE_THRESHOLD_TICKS * MONITOR_TICK_MS;
+}
+
 export function isDaemonWedged(): boolean {
   const pid = readDaemonPid();
   if (!pid) return false;
@@ -179,17 +212,49 @@ export function isDaemonWedged(): boolean {
   const hb = readHeartbeat();
   if (!hb) return false;
   if (hb.pid !== pid) return false;
-  const elapsed = Date.now() - Date.parse(hb.lastTick);
-  return elapsed > WEDGE_THRESHOLD_TICKS * MONITOR_TICK_MS;
+  return !isHeartbeatFresh(hb);
 }
 
-/** Check if the daemon process is alive by sending signal 0 to the stored PID. */
-export function isDaemonRunning(): boolean {
+/** How long stopDaemon waits for a SIGTERMed daemon to exit before escalating. */
+const STOP_GRACE_MS = 5000;
+/** How long it waits after the hard tree-kill before giving up. */
+const STOP_KILL_GRACE_MS = 2000;
+
+/**
+ * Resolve the PID of the live daemon, tolerant of a pid-file/heartbeat desync.
+ *
+ * The daemon writes the pid file once (on claim/start) but rewrites the
+ * heartbeat every tick. If the pid file is lost while the daemon keeps ticking
+ * — e.g. an earlier isDaemonRunning() found a stale/reused/dead pid and cleared
+ * the file, or it was removed out from under a live daemon — the pid file reads
+ * empty even though a daemon is genuinely alive and firing jobs. Reading only
+ * the pid file then reports "stopped" for a running scheduler, and (worse) lets
+ * claimDaemonInstance() start a SECOND daemon that double-fires every routine.
+ *
+ * So: trust the pid file when its pid is alive; otherwise trust a FRESH
+ * heartbeat whose pid is alive, and re-adopt the pid file so the desync heals.
+ * Returns null only when neither points at a live process (clearing a stale pid
+ * file on the way out).
+ */
+function resolveLiveDaemonPid(): number | null {
   const pid = readDaemonPid();
-  if (!pid) return false;
-  if (isAlive(pid)) return true;
-  removeDaemonPid();
-  return false;
+  if (pid !== null && isAlive(pid)) return pid;
+  const hb = readHeartbeat();
+  if (hb && isAlive(hb.pid) && isHeartbeatFresh(hb)) {
+    if (pid !== hb.pid) writeDaemonPid(hb.pid); // heal the pid-file/heartbeat desync
+    return hb.pid;
+  }
+  if (pid !== null) removeDaemonPid();
+  return null;
+}
+
+/**
+ * Check whether a daemon is alive — via the pid file, or a fresh heartbeat when
+ * the pid file has been lost (see resolveLiveDaemonPid). Heals the pid file as a
+ * side effect so a subsequent read is consistent.
+ */
+export function isDaemonRunning(): boolean {
+  return resolveLiveDaemonPid() !== null;
 }
 
 /**
@@ -209,15 +274,26 @@ export function isDaemonRunning(): boolean {
  */
 export function claimDaemonInstance(): boolean {
   const release = acquireStartLock();
+  // acquireStartLock() returns null only when another __daemon-run currently
+  // holds the O_EXCL lock — a dead holder's lock is reclaimed and retried inside
+  // acquireStartLock, so null means a *live* claimer is mid-claim. Bail rather
+  // than run the read-decide-write unlocked: otherwise two first-start processes
+  // could each see no pid file (before either writes one) and both claim,
+  // running the concurrent JobScheduler this guard exists to prevent.
+  if (!release) return false;
   try {
-    const existing = readDaemonPid();
-    if (existing !== null && existing !== process.pid && isAlive(existing)) {
-      return false; // another live daemon already owns the pid file
+    // resolveLiveDaemonPid() also consults a fresh heartbeat, so a live daemon
+    // whose pid file was lost still blocks a second claim — otherwise a missing
+    // pid file would let this instance start a concurrent JobScheduler and
+    // double-fire every routine.
+    const existing = resolveLiveDaemonPid();
+    if (existing !== null && existing !== process.pid) {
+      return false; // another live daemon already owns the instance
     }
     writeDaemonPid(process.pid);
     return true;
   } finally {
-    release?.();
+    release();
   }
 }
 
@@ -291,6 +367,67 @@ export function log(level: string, message: string): void {
 }
 
 /** Main daemon loop: load jobs, schedule crons, monitor runs, and handle signals. */
+/**
+ * Anchor the daemon's working directory to a stable, always-present path.
+ *
+ * The daemon is long-lived and inherits whatever cwd it was launched from — often
+ * a git worktree (e.g. a `.agents/worktrees/<slug>/` a session happened to be in).
+ * When that directory is later removed (`git worktree remove`, `rm -rf`), the
+ * daemon keeps the deleted inode as its cwd — a process cannot chdir out of a
+ * deleted directory on its own — and every job it spawns inherits the dead cwd
+ * (`spawnJobAttempt` and command runs pass no explicit `cwd`, so the child uses
+ * the parent's). Bun then fails `getcwd()` during startup and every routine crashes
+ * at 0 seconds with `ENOENT: Bun could not find a file` before the agent even runs.
+ *
+ * Re-anchoring to the home directory once, at daemon startup, makes the daemon
+ * immune regardless of how it was launched (systemd unit, launchd, or a manual
+ * `agents __daemon-run` from any directory). Returns the resolved cwd, or null if
+ * anchoring failed (logged, non-fatal).
+ */
+export function anchorDaemonCwd(): string | null {
+  const home = os.homedir();
+  try {
+    process.chdir(home);
+    return home;
+  } catch (err) {
+    log('WARN', `Could not anchor daemon cwd to ${home}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * Surface, at the daemon's OWN startup, that it was launched from an ephemeral
+ * root that will wedge it if the directory is removed. This is the runtime
+ * companion to the launch-time check in validateDaemonBinary (which only runs
+ * when the daemon is *spawned* via getDaemonLaunch): a direct
+ * `agents __daemon-run` from a temp or worktree build — e.g. a review/verify
+ * checkout under /tmp — never passes through that path, so without this the
+ * wedge risk stays invisible until jobs start ENOENT-ing on their dynamic
+ * imports. Best-effort and non-fatal; the cwd is already handled by
+ * anchorDaemonCwd, but a deleted module root can only be flagged, not repaired.
+ *
+ * `resolveBin` is injectable (defaults to getAgentsBinPath) so the wiring — the
+ * predicate call, the WARN, and the non-fatal guard around a throwing resolver —
+ * is testable. Returns the warning message it logged, or null when the launch
+ * root is stable (or could not be resolved).
+ */
+export function warnEphemeralDaemonRoot(resolveBin: () => string = getAgentsBinPath): string | null {
+  try {
+    const bin = resolveBin();
+    const ephemeralRoot = describeEphemeralDaemonRoot(bin);
+    if (!ephemeralRoot) return null;
+    const message =
+      `Daemon launched from ${ephemeralRoot} (${bin}); if that directory is removed, ` +
+      `every routine will fail with ENOENT on its module imports. Run the daemon from the ` +
+      `globally installed binary instead (npm i -g @phnx-labs/agents-cli), then restart it.`;
+    log('WARN', message);
+    return message;
+  } catch (err) {
+    log('WARN', `Could not check daemon launch root: ${(err as Error).message}`);
+    return null;
+  }
+}
+
 export async function runDaemon(): Promise<void> {
   // Single-instance guard: a direct `agents __daemon-run` (manual, or a
   // service-manager restart racing a live predecessor) must not clobber a
@@ -304,35 +441,16 @@ export async function runDaemon(): Promise<void> {
   }
   log('INFO', `Daemon started (PID: ${process.pid})`);
 
-  // RUSH-1759: the launchd plist / systemd unit no longer bake the Claude OAuth
-  // token onto disk. Obtain it here from the secure `claude` secrets bundle and
-  // inject into this process's env so every routine run this daemon spawns still
-  // receives it (via the sandbox allowlist), without the token ever being
-  // persisted in the service manifest. A read from a file-backed store (Linux)
-  // needs no prompt; on macOS it resolves broker-only from an unlocked
-  // secrets-agent and is otherwise absent (leaving the daemon on its existing
-  // interactive OAuth session), matching the detached-start path. Never blocks.
-  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN) {
-    const oauthToken = readDaemonClaudeOAuthToken();
-    if (oauthToken) {
-      process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
-      log('INFO', 'Loaded Claude OAuth token from secrets bundle for routine runs');
-    } else {
-      // No token available (e.g. a headless macOS daemon whose keychain was
-      // locked at start resolves broker-only and gets nothing). Historically
-      // this was silent, so every Claude routine the daemon spawned failed auth
-      // with no signal. Make it loud: WARN in the log and fire a desktop alert.
-      log(
-        'WARN',
-        'No Claude OAuth token available — Claude routine runs will fail auth on this host. ' +
-          'Restart the daemon with the keychain unlocked, or unlock the `claude` secrets bundle.',
-      );
-      notifyDesktop(
-        'agents daemon: no Claude credential',
-        'Claude routines will fail auth on this host. Restart the daemon with the keychain unlocked.',
-      );
-    }
-  }
+  anchorDaemonCwd();
+  warnEphemeralDaemonRoot();
+
+  // The daemon holds NO Claude credential of its own. Routine runs authenticate
+  // exactly like an interactive `agents run`: through the per-account
+  // CLAUDE_CONFIG_DIR login on this device (its own auto-refreshing
+  // .credentials.json). Claude Code's interactive access token is short-lived but
+  // refreshes itself per-device; a routine whose account login has gone dead is
+  // skipped up front by the auth-health preflight (runner.ts) with a re-login
+  // hint, rather than papered over by an injected fallback token.
 
   // Reap any stray duplicate daemon of this install that slipped past the start
   // lock or was orphaned by a hard-crash — before it can double-fire jobs.
@@ -347,7 +465,7 @@ export async function runDaemon(): Promise<void> {
   }
 
   // #416: host the secrets broker socket-first — before the scheduler and the
-  // heavy browser/session-sync services — so `agents secrets` resolves within
+  // heavy browser services — so `agents secrets` resolves within
   // ms of daemon start. Only host when no broker is already reachable, so we
   // never orphan a live standalone broker's clients (that broker stays the
   // server until it idle-exits or the daemon restarts). Best-effort: a failure
@@ -366,27 +484,96 @@ export async function runDaemon(): Promise<void> {
     log('WARN', `Secrets broker host skipped: ${(err as Error).message}`);
   }
 
-  const scheduler = new JobScheduler(async (config) => {
+  // scheduler.enabled=false in this machine's device doc means NO routines fire
+  // here — the scheduler and its catchup recovery simply never start, while the
+  // daemon keeps its other duties (secrets broker, browser IPC, session sync).
+  // The refusal message is the same one the start surfaces
+  // (`routines add` auto-start, manual `routines start`) raise. The gate is
+  // re-evaluated on every SIGHUP reload (handleReload below) via
+  // schedulerGateTransition, so flipping the key never needs a daemon restart.
+  const schedulerEnabledAtBoot = isSchedulerEnabled();
+  if (!schedulerEnabledAtBoot) {
+    try {
+      assertSchedulerEnabled();
+    } catch (err) {
+      log('WARN', (err as Error).message);
+    }
+  }
+
+  const triggerJob = async (config: JobConfig) => {
     const jobLabel = config.command
       ? 'command'
       : config.workflow
         ? `workflow: ${config.workflow}`
         : `agent: ${config.agent}`;
     log('INFO', `Triggering job '${config.name}' (${jobLabel})`);
+    // RUSH-2030: branded desktop notification on start (agent/workflow routines;
+    // suppressed for command housekeeping). Finish/output is fired from the
+    // onFinish hook below — executeJobDetached finalizes the run in-process, so
+    // the monitor tick never sees the live transition. Never let a notification
+    // failure break the trigger.
+    try { notifyRoutineStart(config); } catch { /* best-effort */ }
     try {
-      const meta = await executeJobDetached(config);
+      const meta = await executeJobDetached(config, {
+        onFinish: (final) => {
+          try { notifyRoutineFinish(final); } catch { /* best-effort */ }
+        },
+      });
       log('INFO', `Job '${config.name}' spawned (run: ${meta.runId}, PID: ${meta.pid})`);
     } catch (err) {
-      log('ERROR', `Job '${config.name}' failed to spawn: ${(err as Error).message}`);
+      const message = (err as Error).message;
+      log('ERROR', `Job '${config.name}' failed to spawn: ${message}`);
+      // RUSH-2030: the START ping already fired unconditionally above. A pre-spawn
+      // failure produces no run record and thus no onFinish, so send a synthetic
+      // "failed to start" finish here — otherwise the user is left with an orphaned
+      // "Routine started" and never told it failed.
+      try { notifyRoutineStartFailed(config, message); } catch { /* best-effort */ }
     }
-  });
+  };
 
-  scheduler.loadAll();
-  const scheduled = scheduler.listScheduled();
-  log('INFO', `Loaded ${scheduled.length} jobs`);
-  for (const job of scheduled) {
-    log('INFO', `  ${job.name} -> next: ${job.nextRun?.toISOString() || 'unknown'}`);
+  let scheduler: JobScheduler | null = null;
+  let catchupInterval: NodeJS.Timeout | undefined;
+  // Catchup overlap guard. Declared up here (not beside catchupPass) because
+  // bootScheduler() runs before catchupPass's textual position — a `let` down
+  // there would still be in its TDZ at the first call and crash the daemon.
+  let catchingUp = false;
+
+  // Boot the scheduler + catchup recovery. Called at daemon start when the gate
+  // allows, and again from handleReload when the gate flips on (function
+  // declarations hoist — catchupPass below is in scope).
+  function bootScheduler(): void {
+    scheduler = new JobScheduler(triggerJob);
+    scheduler.loadAll();
+    const scheduled = scheduler.listScheduled();
+    log('INFO', `Loaded ${scheduled.length} jobs`);
+    for (const job of scheduled) {
+      log('INFO', `  ${job.name} -> next: ${job.nextRun?.toISOString() || 'unknown'}`);
+    }
+    void catchupPass();
+    catchupInterval = setInterval(() => { void catchupPass(); }, CATCHUP_TICK_MS);
   }
+
+  // Stop the scheduler + catchup recovery (gate flipped off on reload).
+  function stopScheduler(): void {
+    scheduler?.stopAll();
+    scheduler = null;
+    if (catchupInterval !== undefined) {
+      clearInterval(catchupInterval);
+      catchupInterval = undefined;
+    }
+  }
+
+  // Materialise opted-in project routines into the user layer on every start
+  // so a fresh daemon picks up project YAML without a separate sync step.
+  try {
+    const result = syncAllProjectRoutines();
+    const n = result.projects.reduce((acc, p) => acc + p.synced.length, 0);
+    if (n > 0) log('INFO', `Project routines sync: ${n} job(s) from ${result.projects.length} project(s)`);
+  } catch (err) {
+    log('WARN', `Project routines sync failed: ${(err as Error).message}`);
+  }
+
+  if (schedulerEnabledAtBoot) bootScheduler();
 
   // Monitor engine: event-triggered watchers, beside the cron scheduler. Same
   // daemon, same dispatch seam — a monitor is a routine whose trigger is a
@@ -398,23 +585,70 @@ export async function runDaemon(): Promise<void> {
     log('ERROR', `Monitor engine failed to start: ${(err as Error).message}`);
   }
 
-  // Backlog detection: any enabled recurring job whose most-recent expected
-  // fire is older than its most-recent recorded run is overdue. Happens when
-  // the laptop was off or the daemon crashed through a scheduled fire.
-  // We log it and pop a native notification — the user can review with
-  // `agents routines list` and run them with `agents routines catchup`.
-  try {
-    const overdue = detectOverdueJobs();
-    if (overdue.length > 0) {
-      log('WARN', `${overdue.length} routine(s) overdue:`);
+  // Backlog recovery: any enabled recurring job whose most-recent expected fire
+  // is older than its most-recent recorded run was missed — the laptop slept,
+  // the machine was off, or the daemon crashed through the fire. croner only
+  // schedules forward from "now", so nothing replays it on its own.
+  //
+  // Every miss is RECORDED as a `missed` run and, unless the routine sets
+  // `catchup: false`, RUN late. Runs on a timer as well as at startup: a startup
+  // pass alone misses a fire lost while the daemon stayed up but its event loop
+  // was wedged, or one lost across an OS suspend that the process survived.
+  // Overlap guard, same shape as runHealCheck below. A pass
+  // awaits executeJobDetached per job and an off-box (host/cloud) dispatch can
+  // block for a while, so a slow pass could still be working when the next tick
+  // fires. Both passes would then see a job the first has not yet reached as
+  // overdue — the miss is recorded before the await, but only for jobs already
+  // processed — and spawn it twice. The idempotency of the `missed` record
+  // guards across passes, not within one that is mid-flight.
+  // Function declaration (hoisted) so bootScheduler() can schedule it. Its
+  // guard (`catchingUp`) is declared beside `scheduler` above for TDZ safety.
+  async function catchupPass(): Promise<void> {
+    if (catchingUp) return;
+    catchingUp = true;
+    try {
+      const overdue = detectOverdueJobs();
+      if (overdue.length === 0) return;
+      log('WARN', `${overdue.length} routine(s) missed their fire:`);
       for (const job of overdue) {
         const last = job.lastRanAt ? job.lastRanAt.toISOString() : 'never';
         log('WARN', `  ${job.name} -- expected ${job.expectedAt.toISOString()}, last ran ${last}`);
       }
       notifyOverdue(overdue);
+      const outcomes = await runCatchup({ overdue });
+      for (const o of outcomes) {
+        // Every variant handled explicitly: a catch-all else would log the
+        // benign 'claimed-elsewhere' (another process legitimately won the
+        // claim) as an ERROR with an undefined reason.
+        switch (o.result) {
+          case 'ran':
+            log('INFO', `Caught up '${o.name}' (run: ${o.runId})`);
+            break;
+          case 'recorded':
+            log('INFO', `Recorded missed fire for '${o.name}' (catchup disabled)`);
+            break;
+          case 'claimed-elsewhere':
+            log('INFO', `Missed fire for '${o.name}' already claimed by another catchup`);
+            break;
+          case 'error':
+            log('ERROR', `Catchup for '${o.name}' failed: ${o.error}`);
+            break;
+          default: {
+            // Compile-time exhaustiveness: a new CatchupOutcome variant fails
+            // typecheck here rather than silently landing in the wrong log level,
+            // which is exactly how 'claimed-elsewhere' was first missed.
+            const unhandled: never = o.result;
+            log('ERROR', `Catchup for '${o.name}' returned an unhandled result: ${String(unhandled)}`);
+          }
+        }
+      }
+    } catch (err) {
+      log('ERROR', `Catchup pass failed: ${(err as Error).message}`);
+    } finally {
+      // finally, not a tail assignment: the no-overdue path returns early, and a
+      // throw must not leave the guard latched shut for the daemon's lifetime.
+      catchingUp = false;
     }
-  } catch (err) {
-    log('ERROR', `Overdue detection failed: ${(err as Error).message}`);
   }
 
   // Before the BrowserService comes up, reap browser + tunnel processes
@@ -448,37 +682,6 @@ export async function runDaemon(): Promise<void> {
     writeHeartbeat();
     monitorRunningJobs();
   }, MONITOR_TICK_MS);
-
-  // Cross-machine session sync: push this machine's transcripts to R2 and pull
-  // every other machine's, ~every 90s. Skipped silently when the r2.backups
-  // bundle is absent. An overlap guard prevents a slow cycle from stacking.
-  let syncing = false;
-  const runSessionSync = async () => {
-    if (syncing) return;
-    syncing = true;
-    try {
-      const { isBetaEnabled } = await import('./beta.js');
-      // Off by default: session sync is an opt-in beta feature. Check the beta
-      // flag FIRST so a machine that hasn't opted in skips the keychain read
-      // (isSyncConfigured) entirely, not just the network cycle.
-      if (!isBetaEnabled('session-sync')) return;
-      const { isSyncConfigured } = await import('./session/sync/config.js');
-      if (!isSyncConfigured()) return;
-      const { syncSessions } = await import('./session/sync/sync.js');
-      const r = await syncSessions();
-      if (r.pushed || r.pulled || r.errors.length) {
-        log('INFO', `sessions sync: pushed ${r.pushed}, pulled ${r.pulled}, merged ${r.merged}` +
-          (r.errors.length ? `, ${r.errors.length} error(s): ${r.errors[0]}` : ''));
-      }
-      if (r.warnings.length) log('WARN', `sessions sync: ${r.warnings[0]}`);
-    } catch (err) {
-      log('ERROR', `sessions sync failed: ${(err as Error).message}`);
-    } finally {
-      syncing = false;
-    }
-  };
-  const syncInterval = setInterval(() => { void runSessionSync(); }, 90_000);
-  void runSessionSync(); // kick once at startup
 
   // Resource safety check: heal gaps between what DotAgents repos define and
   // what's actually installed in each agent home — the slow rot that nothing
@@ -638,13 +841,17 @@ export async function runDaemon(): Promise<void> {
   const launchHealthInterval = setInterval(() => { void runLaunchHealthCheck(); }, 6 * 60 * 60_000);
   const launchHealthKickoff = setTimeout(() => { void runLaunchHealthCheck(); }, 90_000);
 
-  // Fleet cache warm: keep the caches that `agents devices list`, `fleet status`,
-  // and `agents view` read cache-first actually fresh, so a default read never
-  // has to ssh out. Two cheap refreshes: (1) this host's auth-health verdicts
-  // (also feeds the `doctor --json` Auth rollup other hosts read), and (2) the
-  // fleet resource-stats cache (one bounded parallel probe of the tailnet). Both
-  // best-effort + overlap-guarded like the probes above. ~every 3 min, plus once
-  // ~60s after startup (staggered off launch).
+  // Fleet cache warm: publish THIS host's row for the caches `agents fleet
+  // status` / `agents devices list` read. PUBLISH-OWN / READ-UNION (RUSH-2061):
+  // each daemon probes only ITSELF and never SSHes another box, so the fleet no
+  // longer pays N² SSH resource probes every 3 minutes (N daemons × N devices) —
+  // the source of the fan-out storm AND the orphaned-probe pile-up. Two cheap
+  // self-only refreshes: (1) this host's auth-health verdicts (also feeds the
+  // `doctor --json` Auth rollup other hosts read), and (2) its fleet-status row
+  // (local resource probe + live-agent workload). Cross-host rows are unioned on
+  // demand by the reader (`agents fleet status`), not pushed by every daemon.
+  // Best-effort + overlap-guarded like the probes above; ~every 3 min, once ~60s
+  // after startup.
   let warmingFleetCache = false;
   const runFleetCacheWarm = async () => {
     if (warmingFleetCache) return;
@@ -657,13 +864,9 @@ export async function runDaemon(): Promise<void> {
       const authRows = await probeLocalFleetAuth({ cliVersion: getCliVersion() });
       writeFleetAuthRows(self, authRows);
 
-      const { loadDevices } = await import('./devices/registry.js');
-      const { planFleetTargets } = await import('./devices/fleet.js');
-      const { loadFleetStats } = await import('./devices/stats-cache.js');
-      const reg = await loadDevices();
-      const probeable = planFleetTargets(reg).filter((t) => !t.skip).map((t) => t.device);
-      const res = await loadFleetStats(probeable, { forceRefresh: true, selfName: self });
-      log('INFO', `fleet cache warm: ${authRows.length} auth row(s), ${res.stats.size} device stat(s)`);
+      const { publishLocalFleetStatus } = await import('./fleet-status.js');
+      const row = await publishLocalFleetStatus(self);
+      log('INFO', `fleet cache warm: ${authRows.length} auth row(s), ${row.agents.running} running agent(s) on ${self}`);
     } catch (err) {
       log('ERROR', `fleet cache warm failed: ${(err as Error).message}`);
     } finally {
@@ -672,6 +875,43 @@ export async function runDaemon(): Promise<void> {
   };
   const fleetCacheInterval = setInterval(() => { void runFleetCacheWarm(); }, 3 * 60_000);
   const fleetCacheKickoff = setTimeout(() => { void runFleetCacheWarm(); }, 60_000);
+
+  // Usage refresh: keep the usage cache the `agents run` router reads
+  // (RUSH-2061, readOnly hot path) fresh, WITHOUT the hot path ever fetching.
+  // This host is the sole writer for its own local accounts. The tick wakes
+  // every 60s (USAGE_REFRESH_TICK_MS) to consider due accounts; each account
+  // is scheduled at a fixed 5-minute cadence (REFRESH_INTERVAL_MS), capped at
+  // ~12 provider calls/account/hour, skipped under 429 backoff, and fetched
+  // with fileOnly credentials so a background tick never pops macOS Touch ID.
+  // Overlap-guarded: a slow pass cannot stack concurrent refresh loops.
+  let refreshingUsage = false;
+  const runUsageRefreshTick = async () => {
+    if (refreshingUsage) return;
+    refreshingUsage = true;
+    try {
+      const { runUsageRefresh, buildLocalUsageAccounts } = await import('./usage-refresh.js');
+      const { writeClaudeUsageCache } = await import('./usage.js');
+      const { usageRateLimitedUntil } = await import('./usage-backoff.js');
+      const r = await runUsageRefresh({
+        listAccounts: buildLocalUsageAccounts,
+        writeUsageCache: writeClaudeUsageCache,
+        backoffUntil: usageRateLimitedUntil,
+      });
+      // Always log a compact summary so "is refresh working?" is greppable even
+      // when every account was not-due (proves the tick ran).
+      log(
+        'INFO',
+        `usage refresh: ${r.refreshed} refreshed, ${r.failed} failed, ${r.skippedNotDue} not-due, ${r.skippedBackoff} backed-off, ${r.skippedCap} capped`,
+      );
+    } catch (err) {
+      log('ERROR', `usage refresh failed: ${(err as Error).message}`);
+    } finally {
+      refreshingUsage = false;
+    }
+  };
+  // 60s wake matches USAGE_REFRESH_TICK_MS in usage-refresh.ts (keep in sync).
+  const usageRefreshInterval = setInterval(() => { void runUsageRefreshTick(); }, 60_000);
+  const usageRefreshKickoff = setTimeout(() => { void runUsageRefreshTick(); }, 30_000);
 
   // RUSH-1817: the startup host decision above is one-shot. If a standalone
   // broker answered agentPing() at daemon start, the daemon declined to host —
@@ -703,26 +943,47 @@ export async function runDaemon(): Promise<void> {
 
   const handleReload = () => {
     log('INFO', 'Reloading jobs (SIGHUP)');
-    scheduler.reloadAll();
-    const reloaded = scheduler.listScheduled();
-    log('INFO', `Reloaded ${reloaded.length} jobs`);
+    // Refresh user-layer copies of opted-in project routines BEFORE the
+    // scheduler reloads, so YAML edits under `<project>/.agents/routines/`
+    // take effect on the next fire without a manual `routines sync`.
+    try {
+      const result = syncAllProjectRoutines();
+      const n = result.projects.reduce((acc, p) => acc + p.synced.length, 0);
+      if (n > 0 || result.missing.length > 0) {
+        log('INFO', `Project routines sync: ${n} updated, ${result.missing.length} missing roots`);
+      }
+    } catch (err) {
+      log('WARN', `Project routines sync failed: ${(err as Error).message}`);
+    }
+    // Re-evaluate the scheduler.enabled gate: flipping the key takes effect on
+    // this reload, no daemon restart needed. A `routines add` on a re-enabled
+    // box signals exactly this reload, which boots the scheduler — the
+    // "Scheduler reloaded" it prints is then truthful, not a dead-end.
+    const transition = schedulerGateTransition(scheduler !== null, isSchedulerEnabled());
+    if (transition === 'boot') {
+      log('INFO', 'scheduler.enabled is now on — booting the scheduler');
+      bootScheduler();
+    } else if (transition === 'stop') {
+      log('WARN', 'scheduler.enabled is now off — stopping the scheduler; no routines will fire on this device');
+      stopScheduler();
+    } else if (transition === 'reload') {
+      scheduler!.reloadAll();
+      const reloaded = scheduler!.listScheduled();
+      log('INFO', `Reloaded ${reloaded.length} jobs`);
+    }
     try {
       monitorEngine.reload();
     } catch (err) {
       log('ERROR', `Monitor engine reload failed: ${(err as Error).message}`);
     }
-    // Drop the memoized R2 config so rotated/added sync credentials are re-read
-    // on the next cycle instead of waiting for a restart.
-    void import('./session/sync/config.js').then(m => m.clearR2ConfigCache());
   };
 
   const handleShutdown = async () => {
     log('INFO', 'Daemon shutting down');
-    scheduler.stopAll();
+    stopScheduler();
     monitorEngine.stop();
     await browserIPC.stop();
     clearInterval(monitorInterval);
-    clearInterval(syncInterval);
     clearInterval(healInterval);
     clearTimeout(healKickoff);
     clearInterval(autoDispatchInterval);
@@ -735,6 +996,8 @@ export async function runDaemon(): Promise<void> {
     clearTimeout(launchHealthKickoff);
     clearInterval(fleetCacheInterval);
     clearTimeout(fleetCacheKickoff);
+    clearInterval(usageRefreshInterval);
+    clearTimeout(usageRefreshKickoff);
     clearInterval(brokerSelfHealInterval);
     hostedBroker?.close();
     removeDaemonPid();
@@ -747,31 +1010,6 @@ export async function runDaemon(): Promise<void> {
   process.on('SIGINT', () => handleShutdown());
 
   await new Promise(() => {});
-}
-
-/**
- * Read the long-lived Claude OAuth token (from `claude setup-token`) that the
- * user stored under the `claude` secrets bundle. Resolves the bundle the same
- * way `agents run --secrets` does. Interactive starts may prompt Keychain;
- * headless auto-starts are broker-only and return null unless the user already
- * unlocked the bundle in the secrets agent. That keeps a background browser
- * command from hanging on an unseen biometric prompt. Never throws: an absent
- * token leaves the daemon on its existing interactive OAuth session.
- */
-export function readDaemonClaudeOAuthToken(
-  opts: { allowPrompt?: boolean } = {},
-): string | null {
-  try {
-    const allowPrompt = opts.allowPrompt ?? Boolean(process.stdin.isTTY);
-    const { env } = readAndResolveBundleEnv(DAEMON_OAUTH_BUNDLE, {
-      caller: 'daemon',
-      agentOnly: !allowPrompt,
-    });
-    const token = (env[DAEMON_OAUTH_KEY] ?? '').trim();
-    return token.length > 0 ? token : null;
-  } catch {
-    return null;
-  }
 }
 
 /** Escape a string for safe inclusion in an XML <string> node. */
@@ -803,11 +1041,10 @@ export function writeOwnerOnlyServiceManifest(filePath: string, content: string)
 /**
  * Generate a macOS launchd plist for auto-starting the daemon.
  *
- * The plist never embeds the Claude OAuth token (RUSH-1759): a persisted service
- * manifest is a plaintext credential on disk even at 0600. The daemon instead
- * obtains the token at startup from the `claude` secrets bundle
- * (readDaemonClaudeOAuthToken, injected in runDaemon), so it stays in the
- * Keychain-backed secure store and never touches the unit file.
+ * The plist never embeds a Claude OAuth token: the daemon holds no Claude
+ * credential at all. Routine runs authenticate through the per-account
+ * CLAUDE_CONFIG_DIR login on this device, exactly like an interactive
+ * `agents run`, so no credential ever touches the service manifest.
  */
 export function generateLaunchdPlist(
   agentsBin: string = getAgentsBinPath(),
@@ -836,7 +1073,7 @@ ${[launch.command, ...launch.args].map((arg) => `    <string>${xmlEscape(arg)}</
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>${daemonNodeBinDir()}:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:${os.homedir()}/.bun/bin</string>
+    <string>${daemonPathValue(agentsBin, ['/usr/local/bin', '/usr/bin', '/bin', '/opt/homebrew/bin', `${os.homedir()}/.bun/bin`])}</string>
   </dict>
 </dict>
 </plist>`;
@@ -850,11 +1087,10 @@ function systemdExecArg(value: string): string {
 /**
  * Generate a Linux systemd user unit for auto-starting the daemon.
  *
- * The unit never embeds the Claude OAuth token (RUSH-1759): a persisted service
- * manifest is a plaintext credential on disk even at 0600. The daemon instead
- * obtains the token at startup from the `claude` secrets bundle
- * (readDaemonClaudeOAuthToken, injected in runDaemon), so it stays in the secure
- * store and never touches the unit file.
+ * The unit never embeds a Claude OAuth token: the daemon holds no Claude
+ * credential at all. Routine runs authenticate through the per-account
+ * CLAUDE_CONFIG_DIR login on this device, exactly like an interactive
+ * `agents run`, so no credential ever touches the unit file.
  */
 export function generateSystemdUnit(
   agentsBin: string = getAgentsBinPath(),
@@ -871,7 +1107,7 @@ Type=simple
 ExecStart=${execStart}
 Restart=always
 RestartSec=10
-Environment=PATH=${daemonNodeBinDir()}:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=${daemonPathValue(agentsBin, ['/usr/local/bin', '/usr/bin', '/bin'])}
 
 [Install]
 WantedBy=default.target`;
@@ -1010,25 +1246,6 @@ function startDaemonLocked(agentsBin: string): { pid: number | null; method: str
 }
 
 /**
- * Environment for the detached daemon fallback. The launchd/systemd paths
- * deliver the long-lived OAuth token via the service manifest's environment;
- * the detached path has no manifest, so inject it here. Read happens during an
- * interactive `routines start`, so a Keychain Touch ID prompt can be satisfied;
- * the daemon then passes it to every routine run it spawns. An already-set
- * value (e.g. inherited from launchd) is left untouched.
- */
-export function buildDetachedDaemonEnv(
-  baseEnv: NodeJS.ProcessEnv = process.env,
-  oauthToken: string | null = readDaemonClaudeOAuthToken(),
-): NodeJS.ProcessEnv {
-  const env = { ...baseEnv };
-  if (!env.CLAUDE_CODE_OAUTH_TOKEN) {
-    if (oauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
-  }
-  return env;
-}
-
-/**
  * Resolve how to launch the daemon: `node <entry> __daemon-run`, matching the
  * exact form that works under a direct `__daemon-run`.
  *
@@ -1065,6 +1282,22 @@ function daemonNodeBinDir(): string {
 }
 
 /**
+ * The full PATH value the daemon service manifest pins, in order: the Node runtime
+ * dir (so the shim's shebang and any child resolve the exact installing Node — see
+ * {@link daemonNodeBinDir}), then the directory of the `agents` shim itself, then
+ * the platform's system dirs. The shim's own dir matters because a scheduled
+ * `command` routine shells out to the bare name `agents`
+ * (`/bin/sh -c 'agents watchdog --nudge'`): when the shim lives outside the Node
+ * bin dir — a `~/.local/bin` global install, a separate npm prefix — a PATH
+ * carrying only the Node dir resolves `agents` to nothing and every routine dies
+ * with `exit 127`. Deduped across the whole list, so a Node/shim dir that already
+ * appears among the system dirs (e.g. a `/usr/local/bin` install) never doubles.
+ */
+function daemonPathValue(agentsBin: string, systemDirs: readonly string[]): string {
+  return [...new Set([daemonNodeBinDir(), path.dirname(agentsBin), ...systemDirs])].join(':');
+}
+
+/**
  * Build the argv to relaunch the `agents` CLI with the given subcommand args.
  *
  * Resolves the real on-disk binary via getAgentsBinPath(), then dispatches: a
@@ -1085,6 +1318,25 @@ export function getAgentsInvocation(
   return getCliLaunch(subArgs, agentsBin);
 }
 
+/**
+ * A daemon binary living under an ephemeral path — a git worktree, or a temp
+ * directory (`/tmp`, `/var/folders`, `/dev/shm`) — is a latent wedge. The daemon
+ * is long-lived but resolves its own job modules by dynamic `import()` rooted at
+ * this entry (getAgentsBinPath → process.argv[1]). If that directory is later
+ * removed (`git worktree remove`, a `/tmp` cleanup, a review/verify checkout
+ * teardown) the running daemon keeps ENOENT-ing on every job it loads —
+ * `anchorDaemonCwd` rescues the cwd, but nothing can re-root a deleted module
+ * tree. Returns a human phrase naming the ephemeral kind, or null for a stable
+ * install path (version home, a global npm prefix, a normal source checkout).
+ */
+export function describeEphemeralDaemonRoot(binPath: string): string | null {
+  if (/[/\\]\.agents[/\\]worktrees[/\\]/.test(binPath)) return 'a git worktree';
+  if (/^(?:\/private)?\/tmp[/\\]|^(?:\/private)?\/var\/folders[/\\]|^\/dev\/shm[/\\]/.test(binPath)) {
+    return 'a temporary directory';
+  }
+  return null;
+}
+
 export function validateDaemonBinary(binPath: string): { warnings: string[] } {
   const warnings: string[] = [];
   if (BUN_VIRTUAL_ROOT.test(binPath)) {
@@ -1093,10 +1345,11 @@ export function validateDaemonBinary(binPath: string): { warnings: string[] } {
       `Install agents globally (npm i -g @phnx-labs/agents-cli) and restart.`,
     );
   }
-  if (/[/\\]\.agents[/\\]worktrees[/\\]/.test(binPath)) {
+  const ephemeralRoot = describeEphemeralDaemonRoot(binPath);
+  if (ephemeralRoot) {
     warnings.push(
-      `Warning: daemon binary is inside a git worktree (${binPath}). ` +
-      `A worktree deletion will wedge the daemon. Use the globally installed binary instead.`,
+      `Warning: daemon binary is inside ${ephemeralRoot} (${binPath}). ` +
+      `Deleting it will wedge the daemon. Use the globally installed binary instead.`,
     );
   }
   if (!fs.existsSync(binPath) && !/\.(c|m)?js$/.test(binPath)) {
@@ -1110,7 +1363,7 @@ interface StartDetachedOptions {
   agentsBin?: string;
   /** Log file the daemon's stdio is redirected to (defaults to the daemon log). */
   logPath?: string;
-  /** Environment for the child (defaults to the OAuth-augmented detached env). */
+  /** Environment for the child (defaults to the daemon's current process env). */
   env?: NodeJS.ProcessEnv;
 }
 
@@ -1126,8 +1379,8 @@ export function startDetached(opts: StartDetachedOptions = {}): { pid: number | 
   // and a console-close event tears it down when the launcher exits (#556).
   const child = spawn(command, args, {
     stdio: ['ignore', logFd, logFd],
-    ...backgroundSpawnOptions({ fdStdio: true }),
-    env: opts.env ?? buildDetachedDaemonEnv(),
+    ...backgroundSpawnOptions({ cwd: os.homedir(), fdStdio: true }),
+    env: opts.env ?? process.env,
   });
 
   // A failed spawn (ENOENT/EACCES) emits 'error' asynchronously; without a
@@ -1204,10 +1457,19 @@ export function stopDaemon(): boolean {
         process.kill(pid, 'SIGTERM');
       } catch { /* process already exited */ }
 
-      // Escalate to a hard tree-kill if it ignored SIGTERM after the grace period.
-      setTimeout(() => {
-        if (isAlive(pid)) killTree(pid);
-      }, 5000);
+      // Wait for it to actually go. This used to be a setTimeout escalation plus
+      // an immediate removeDaemonPid(), which had two failure modes: in a
+      // short-lived process (the npm postinstall) the timer never fired at all,
+      // and clearing the pid file while the old daemon still ran made
+      // isDaemonRunning() report false, so startDaemon() launched a SECOND
+      // daemon. Its hosted broker then unlinked the live socket and rebound,
+      // orphaning the first broker with every unlocked bundle still in its RAM
+      // and unreachable — two brokers on one socket path, seen on a real machine
+      // after an install into a second prefix.
+      if (!waitForExit(pid, STOP_GRACE_MS)) {
+        killTree(pid);
+        waitForExit(pid, STOP_KILL_GRACE_MS);
+      }
     }
   }
 

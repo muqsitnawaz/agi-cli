@@ -19,10 +19,13 @@ import {
   getKeychainTokens,
   hasKeychainToken,
   hashedServiceName,
+  healHmacKeyNoAclOnce,
   HMAC_KEY_ITEM,
   keychainServiceAlias,
+  keychainOperationPrompt,
   listKeychainItems,
   parseOrphanMigrationOutput,
+  readHmacKeyRecord,
   rekeyServiceNames,
   setKeychainBackendForTest,
   setKeychainServiceHashingForTest,
@@ -30,6 +33,35 @@ import {
   withRawKeychainServiceNames,
   type KeychainBackend,
 } from './index.js';
+
+describe('keychainOperationPrompt', () => {
+  it('names the harness, bundle, reason, and duration', () => {
+    expect(keychainOperationPrompt({
+      agent: 'Claude',
+      bundle: 'prod',
+      reason: 'to deploy the API',
+      duration: '7 days',
+    })).toBe("Claude is requesting to unlock the 'prod' bundle for 7 days to deploy the API.");
+  });
+
+  it('names the session (short-id) that triggered the read (RUSH-1971)', () => {
+    expect(keychainOperationPrompt({
+      agent: 'Claude',
+      bundle: 'prod',
+      sessionId: 'e0a1b2c3-4d5e-6f70-8192-a3b4c5d6e7f8',
+      reason: 'to deploy the API',
+      duration: '7 days',
+    })).toBe(
+      "Claude is requesting to unlock the 'prod' bundle (session e0a1b2c3) for 7 days to deploy the API.",
+    );
+  });
+
+  it('omits the session clause when no sessionId is supplied', () => {
+    expect(keychainOperationPrompt({ agent: 'Claude', bundle: 'prod' })).toBe(
+      "Claude is requesting to unlock the 'prod' bundle.",
+    );
+  });
+});
 
 describe('buildAddGenericPasswordArgs (RUSH-1764: value never in argv)', () => {
   it('omits the secret value from argv — it travels over stdin instead', () => {
@@ -249,6 +281,47 @@ describe('service-name hashing through the primitives', () => {
     setKeychainToken(HMAC_KEY_ITEM, '{"v":1}');
     expect(mem.store.has('linear-api-key')).toBe(true);
     expect(mem.store.has(HMAC_KEY_ITEM)).toBe(true);
+  });
+
+  it('healHmacKeyNoAclOnce re-stores an ACL-stamped hmackey no-ACL, once, preserving the key', () => {
+    const rec = { v: 1, k: 'ab'.repeat(32), migrated: true };
+    // Simulate a hmackey an old helper re-stamped with a biometry ACL: present in
+    // the store, but NOT written through the no-ACL path (so its read would prompt).
+    mem.set(HMAC_KEY_ITEM, JSON.stringify(rec));
+    expect(mem.noAclWrites.has(HMAC_KEY_ITEM)).toBe(false);
+
+    // First heal: re-stores it no-ACL, flags it, preserves the key value.
+    expect(healHmacKeyNoAclOnce(rec)).toBe(true);
+    expect(mem.noAclWrites.has(HMAC_KEY_ITEM)).toBe(true);
+    const stored = JSON.parse(mem.store.get(HMAC_KEY_ITEM) as string);
+    expect(stored.healedNoAcl).toBe(true);
+    expect(stored.k).toBe(rec.k);
+
+    // Idempotent: an already-healed record is a no-op (no per-process churn).
+    expect(healHmacKeyNoAclOnce(stored)).toBe(false);
+  });
+
+  it('readHmacKeyRecord never mutates a stale ACL-stamped hmackey on the read path', () => {
+    const rec = { v: 1, k: 'cd'.repeat(32), migrated: true };
+    // A hmackey an old helper left biometry-ACL'd: present in the store, but NOT
+    // written through the no-ACL path — so a real read pops the generic Touch ID
+    // sheet on every hashed lookup. This is the state that made zion prompt forever.
+    mem.set(HMAC_KEY_ITEM, JSON.stringify(rec));
+    expect(mem.noAclWrites.has(HMAC_KEY_ITEM)).toBe(false);
+
+    // Ordinary hashed lookups only read; they do not run the migration.
+    const read = readHmacKeyRecord();
+    expect(read?.k).toBe(rec.k);
+    expect(read?.healedNoAcl).toBeUndefined();
+    expect(mem.noAclWrites.has(HMAC_KEY_ITEM)).toBe(false);
+    const stored = JSON.parse(mem.store.get(HMAC_KEY_ITEM) as string);
+    expect(stored.healedNoAcl).toBeUndefined();
+    expect(stored.k).toBe(rec.k);
+
+    // A subsequent read remains non-mutating too.
+    mem.noAclWrites.delete(HMAC_KEY_ITEM);
+    expect(readHmacKeyRecord()?.healedNoAcl).toBeUndefined();
+    expect(mem.noAclWrites.has(HMAC_KEY_ITEM)).toBe(false);
   });
 
   it('withRawKeychainServiceNames suspends the transform for migration flows', () => {

@@ -8,7 +8,18 @@
 
 import { Cron } from 'croner';
 import type { JobConfig } from './routines.js';
-import { listJobs, deleteJob, isPastEndAt, setJobEnabled, jobRunsOnThisDevice } from './routines.js';
+import {
+  listJobs,
+  deleteJob,
+  isPastEndAt,
+  isPastOneShotRoutine,
+  isOneShotRoutine,
+  setJobEnabled,
+  shouldPurgeCompletedOneShotRoutine,
+  jobRunsOnThisDevice,
+  hasAmbiguousDevicePin,
+  routineOwnerDevice,
+} from './routines.js';
 
 /** A job config paired with its active cron instance. */
 interface ScheduledJob {
@@ -31,9 +42,24 @@ export class JobScheduler {
       // Trigger-only jobs (no cron schedule) fire via the webhook receiver,
       // not the cron loop — skip them here. Jobs pinned to another device
       // (routines are fleet-synced) never enter this machine's cron loop.
-      if (config.enabled && config.schedule && jobRunsOnThisDevice(config)) {
-        this.schedule(config);
+      if (!config.enabled || !config.schedule) continue;
+      // A multi-device pin is a misconfiguration: it used to fire the routine
+      // once per listed device. It now fires only on the owner, but say so —
+      // silently reinterpreting someone's config is how this went unnoticed.
+      if (hasAmbiguousDevicePin(config)) {
+        const owner = routineOwnerDevice(config);
+        console.warn(
+          `Job '${config.name}' pins ${config.devices!.length} devices; a routine runs on exactly one. ` +
+          `Firing only on '${owner}'. Fix with: agents routines devices ${config.name} --set ${owner}`,
+        );
       }
+      if (!jobRunsOnThisDevice(config)) continue;
+      if (shouldPurgeCompletedOneShotRoutine(config)) {
+        deleteJob(config.name);
+        continue;
+      }
+      if (isPastOneShotRoutine(config)) continue;
+      this.schedule(config);
     }
   }
 
@@ -41,6 +67,11 @@ export class JobScheduler {
     // A schedule-less (trigger-only) job has nothing to hand to croner.
     if (!config.schedule) return;
     this.unschedule(config.name);
+    if (shouldPurgeCompletedOneShotRoutine(config)) {
+      deleteJob(config.name);
+      return;
+    }
+    if (isPastOneShotRoutine(config)) return;
 
     // catch: true — a throw from one job's callback should not kill the
     // whole cron loop. Each invocation of onTrigger is already wrapped in
@@ -71,7 +102,7 @@ export class JobScheduler {
       }
 
       // One-shot jobs: remove after first execution
-      if (config.runOnce) {
+      if (isOneShotRoutine(config)) {
         this.unschedule(config.name);
         deleteJob(config.name);
       }

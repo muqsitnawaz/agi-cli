@@ -8,7 +8,6 @@ import { pathToFileURL } from 'url';
 import {
   getBackupsDir,
   getCommandsDir,
-  getDriveDir,
   getHooksDir,
   getPackagesDir,
   getPluginsDir,
@@ -47,7 +46,6 @@ describe('state paths', () => {
 
     expect(getPackagesDir()).toBe(path.join(cache, 'packages'));
     expect(getShimsDir()).toBe(path.join(cache, 'shims'));
-    expect(getDriveDir()).toBe(path.join(cache, 'drive'));
   });
 
   it('keeps definitions/configs at the top of ~/.agents', () => {
@@ -182,6 +180,32 @@ describe('readMeta merges agents.yaml from both repos', () => {
     const agents = meta.agents as Record<string, string>;
 
     expect(agents.claude).toBe('2.0.0');
+  });
+
+  it('preserves an unknown top-level key on write, but still deletes a cleared known key', () => {
+    // On disk: an unknown key (as if a newer CLI version wrote it) + a known
+    // central key.
+    fs.writeFileSync(
+      path.join(userDir, 'agents.yaml'),
+      'futureUnknownKey: keep-me\nprojectRoot: ~/old\n',
+    );
+
+    // Simulate a CLI whose Meta predates `futureUnknownKey`: its write path never
+    // surfaces that key, and it clears projectRoot. The old delete loop dropped
+    // BOTH (and synced the deletion fleet-wide); the fix must keep the unmodeled
+    // key and only delete the known one.
+    runStateScript(testDir, `
+      const { updateMeta } = await import(${JSON.stringify(modulePath)});
+      updateMeta((meta) => {
+        const { futureUnknownKey, projectRoot, ...rest } = meta;
+        return { ...rest, source: 'set-by-write' };
+      });
+    `);
+
+    const out = fs.readFileSync(path.join(userDir, 'agents.yaml'), 'utf8');
+    expect(out).toContain('futureUnknownKey: keep-me'); // unmodeled key survives
+    expect(out).not.toContain('projectRoot'); // cleared KNOWN central key removed
+    expect(out).toContain('source: set-by-write'); // the write that triggered it landed
   });
 
   it('does not lose concurrent updateMeta callback writes', async () => {
@@ -442,6 +466,59 @@ describe('agents.yaml device-local split (routing + read overlay)', () => {
     expect(meta.agents).toEqual({ claude: '2.1.0', codex: '0.1.0' });
     expect(meta.versions).toEqual({ claude: { '2.1.0': { rulesPreset: 'x' } } });
     expect(meta.hosts).toBeDefined();
+  });
+
+  it('preserves comments + hosts in central agents.yaml; a device-only write does not touch it (no churn)', () => {
+    const out = run(`
+      import * as fs from 'fs';
+      import { writeMeta, readMeta } from ${JSON.stringify(moduleUrl)};
+      const p = process.env.HOME + '/.agents/agents.yaml';
+      fs.writeFileSync(p, [
+        '# hand-written note: do not clobber me',
+        'defaultAgent: claude',
+        'hosts:',
+        '  box:',
+        '    source: inline',
+        '    address: 10.0.0.1  # tailnet IP',
+        ''
+      ].join('\\n'));
+      const before = fs.readFileSync(p, 'utf8');
+      // Unrelated write: a device pin (agents:) routes to the device file, not central.
+      writeMeta({ ...readMeta(), agents: { claude: '2.1.0' } });
+      const after = fs.readFileSync(p, 'utf8');
+      console.log(JSON.stringify({
+        commentSurvived: after.includes('do not clobber me'),
+        inlineCommentSurvived: after.includes('# tailnet IP'),
+        hostsSurvived: after.includes('address: 10.0.0.1'),
+        byteIdentical: before === after,
+      }));
+    `);
+    const r = JSON.parse(out);
+    expect(r.commentSurvived).toBe(true);
+    expect(r.inlineCommentSurvived).toBe(true);
+    expect(r.hostsSurvived).toBe(true);
+    // The churn fix: a write that changes no central field leaves agents.yaml byte-identical.
+    expect(r.byteIdentical).toBe(true);
+  });
+
+  it('updates a changed central field while keeping surrounding comments', () => {
+    const out = run(`
+      import * as fs from 'fs';
+      import { writeMeta, readMeta } from ${JSON.stringify(moduleUrl)};
+      const p = process.env.HOME + '/.agents/agents.yaml';
+      fs.writeFileSync(p, ['# keep this comment', 'projectRoot: /old/path', ''].join('\\n'));
+      writeMeta({ ...readMeta(), projectRoot: '/new/path' });
+      const after = fs.readFileSync(p, 'utf8');
+      console.log(JSON.stringify({
+        commentSurvived: after.includes('keep this comment'),
+        valueUpdated: after.includes('/new/path'),
+        oldGone: !after.includes('/old/path'),
+      }));
+    `);
+    const r = JSON.parse(out);
+    expect(r.commentSurvived).toBe(true);
+    expect(r.valueUpdated).toBe(true);
+    expect(r.oldGone).toBe(true);
   });
 
   it('does not create a device file when there are no pins', () => {

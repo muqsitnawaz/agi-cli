@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { redactSecrets, knownSecretValuesFromEnv } from './redact.js';
+import { redactSecrets, knownSecretValuesFromEnv, sanitizeForTerminal } from './redact.js';
 
 // Token fixtures are ASSEMBLED FROM FRAGMENTS at runtime (via `j`) so no
 // contiguous token literal ever appears in this source file — GitHub push
@@ -36,6 +36,15 @@ const TOKENS: Array<[string, string, string]> = [
 ];
 
 describe('redactSecrets', () => {
+  it('masks Unix and Windows home-directory identities while preserving suffixes', () => {
+    expect(redactSecrets('/Users/alice/src/private')).toBe('[HOME]/src/private');
+    expect(redactSecrets('/home/alice/src/private')).toBe('[HOME]/src/private');
+    expect(redactSecrets('C:\\Users\\alice\\src\\private')).toBe('[HOME]\\src\\private');
+    expect(redactSecrets('/home/alice/.agents/versions/codex/home/.codex/sessions'))
+      .toBe('[HOME]/.agents/versions/codex/home/.codex/sessions');
+    expect(redactSecrets('path=/Users/alice/a,/Users/bob/b'))
+      .toBe('path=[HOME]/a,[HOME]/b');
+  });
   const cases: Array<[string, string, string]> = [
     ...TOKENS.map(([label, secret, marker]): [string, string, string] => [label, `pre ${secret} post`, marker]),
     ['JWT', 'jwt eyJhbGci.eyJzdWIiOiIx.SflKxwRJ tail', '[REDACTED_JWT]'],
@@ -76,6 +85,27 @@ describe('redactSecrets', () => {
   it('leaves non-secret text untouched', () => {
     const plain = 'daemon started; reaped stray pid 4242; next run in 30 seconds';
     expect(redactSecrets(plain)).toBe(plain);
+  });
+
+  it('redacts cookie headers, raw JSON secret fields, CLI flags, and URL credentials', () => {
+    const credential = 'opaque-session-credential-123456';
+    const samples = [
+      `curl -H "Cookie: sid=${credential}; theme=dark" https://example.test`,
+      JSON.stringify({ password: credential }),
+      `deploy --password ${credential}`,
+      `curl --user user:${credential} https://example.test`,
+      `curl -u user:${credential} https://example.test`,
+      `curl --proxy-user=user:${credential} https://example.test`,
+      `curl -U user:${credential} https://example.test`,
+      `https://user:${credential}@example.test/path`,
+    ];
+    for (const sample of samples) expect(redactSecrets(sample)).not.toContain(credential);
+  });
+});
+
+describe('sanitizeForTerminal', () => {
+  it('removes OSC, CSI, and C1 controls while retaining ordinary text', () => {
+    expect(sanitizeForTerminal(`a\x1b]52;c;payload\x07b\x1b[2Jc\x9b1;31md`)).toBe('abcd');
   });
 });
 

@@ -110,6 +110,7 @@ export const RUN_OPTION_FORWARDING: Record<string, RunOptionForwarding> = {
   emitSessionId: 'forward', // remote prints its session id as a stdout sentinel the launcher captures (session-marker.ts)
 
   // rejected — cannot cross the SSH boundary; fail loud, never degrade
+  terminal: 'reject', // opens a tab on THIS machine's desktop; a remote tab is a different request
   secrets: 'reject',
   secretsKeys: 'reject',
   allowExpired: 'reject',
@@ -127,6 +128,7 @@ export const RUN_OPTION_FORWARDING: Record<string, RunOptionForwarding> = {
   disableTmux: 'local-only',
   host: 'local-only',
   device: 'local-only',
+  where: 'local-only', // expands into host/lease before dispatch; never re-forwarded
   on: 'local-only',
   computer: 'local-only',
   any: 'local-only',
@@ -134,15 +136,35 @@ export const RUN_OPTION_FORWARDING: Record<string, RunOptionForwarding> = {
   lease: 'local-only',
   box: 'local-only',
   keepBox: 'local-only',
+  fresh: 'local-only', // skips the warm-pool reuse for --lease; the lease path is always local
   reuse: 'local-only', // reuse-picker choice for --lease; the lease path is always local
   bare: 'local-only', // skips the local setup-copy push; lease-only concern
   tailscale: 'local-only', // --tailscale/--no-tailscale gate the lease net mode; never forwarded
   copyCreds: 'local-only', // copies creds TO the host before dispatch — local concern only
+  // Cloud placement: chosen and dispatched from THIS machine via the provider
+  // registry; mutually exclusive with --host (placement conflict dies before
+  // dispatch), so these never have a remote argv to ride.
+  cloud: 'local-only',
+  provider: 'local-only',
+  repo: 'local-only',
+  branch: 'local-only',
+  cloudEnv: 'local-only',
   authCheck: 'local-only', // --no-auth-check gates the local interactive login preflight; --host runs skip that preflight entirely
+  // The notification must land on the box the PERSON is at — the one that
+  // dispatched — not on a headless worker with no desktop to post to. The local
+  // process follows the remote run to completion, so its exit handler fires at
+  // the right moment anyway.
+  notify: 'local-only',
+  // Deprecated alias for --device auto; resolved on the launching box before SSH.
+  smart: 'local-only',
 };
 
 /** Actionable messages for value-aware rejections, keyed by attribute name. */
 export const RUN_OPTION_REJECT_MESSAGES: Record<string, string> = {
+  terminal:
+    '--terminal opens a tab on THIS machine; it cannot be combined with --host. ' +
+    'Drop --terminal to dispatch to the host, or drop --host to open the tab here. ' +
+    'To watch a remote run in a terminal, dispatch it and follow with `agents sessions focus <id>`.',
   secrets:
     '--secrets cannot cross the SSH boundary — Keychain values are never sent to a host implicitly. ' +
     'Provision the bundle on the host first (agents secrets export --host <name>), then run without --secrets; ' +
@@ -175,17 +197,43 @@ export function buildRemoteAgentsInvocation(
   }
   const inner = ['agents', ...forwardedArgs].map(shellQuote).join(' ');
   const withCwd = remoteCwd ? `cd ${shellQuote(remoteCwd)} && ${inner}` : inner;
-  if (!env || Object.keys(env).length === 0) {
-    return `bash -lc ${shellQuote(withCwd)}`;
-  }
   // Prepend env exports so the remote command sees the shims dir even when the
   // login shell hasn't sourced the interactive rc files that usually add it.
-  // Values are double-quoted (not single-quoted) so remote variables like
-  // $HOME and $PATH are expanded by the login shell.
-  const exports = Object.entries(env)
-    .map(([k, v]) => `export ${shellQuote(k)}="${v.replace(/[\\"]/g, '\\$&')}"`)
-    .join('; ');
+  const exports = posixEnvExports(env);
+  if (!exports) {
+    return `bash -lc ${shellQuote(withCwd)}`;
+  }
   return `bash -lc ${shellQuote(`${exports}; ${withCwd}`)}`;
+}
+
+/**
+ * Keys whose values are trusted-static and legitimately need remote shell
+ * expansion — `PATH` references the remote `$HOME`/`$PATH`. Every other key is
+ * rendered as a shell literal, so an attacker-influenceable value (notably actor
+ * provenance, whose name/email can come from a tailnet peer's whois or an
+ * unvalidated `AGENTS_ACTOR_*` env var) can never inject shell into a dispatch.
+ */
+const EXPAND_KEYS = new Set(['PATH']);
+
+/**
+ * Build a POSIX `export K=V; …` prefix from an env map — empty string when the
+ * map is missing or empty. Values are rendered as shell LITERALS by default
+ * (single-quoted via {@link shellQuote}), so a `$(...)` or backtick in a value
+ * can never execute on the SSH target. Only {@link EXPAND_KEYS} (`PATH`) keep the
+ * expanding double-quote form (`\` and `"` escaped) so the remote `$HOME`/`$PATH`
+ * still resolve. Shared by {@link buildRemoteAgentsInvocation} and the
+ * detached/interactive dispatch builders (dispatch.ts) so every remote path
+ * exports env identically.
+ */
+export function posixEnvExports(env?: Record<string, string>): string {
+  if (!env || Object.keys(env).length === 0) return '';
+  return Object.entries(env)
+    .map(([k, v]) =>
+      EXPAND_KEYS.has(k)
+        ? `export ${shellQuote(k)}="${v.replace(/[\\"]/g, '\\$&')}"`
+        : `export ${shellQuote(k)}=${shellQuote(v)}`,
+    )
+    .join('; ');
 }
 
 /** The two remote shell dialects we build commands for. */

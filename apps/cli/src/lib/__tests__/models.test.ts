@@ -1,11 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import {
   locateModelSource,
   getModelCatalog,
   resolveModel,
   buildReasoningFlags,
+  parseGrokModelsStdout,
+  resolveConfiguredModel,
 } from '../models.js';
 import { getVersionDir, listInstalledVersions } from '../versions.js';
 
@@ -27,7 +30,7 @@ const claudeBinaryVer = listInstalledVersions('claude').find((v) =>
 // Prefer a version whose model source actually resolves on this host — partial
 // installs (e.g. ones missing the vendored binary) would otherwise short-circuit
 // the catalog tests with null catalogs.
-const firstLocatable = (agent: 'codex' | 'gemini' | 'opencode' | 'openclaw' | 'antigravity' | 'kimi'): string | null =>
+const firstLocatable = (agent: 'codex' | 'gemini' | 'opencode' | 'openclaw' | 'antigravity' | 'kimi' | 'grok'): string | null =>
   listInstalledVersions(agent).find((v) => locateModelSource(agent, v) !== null) ?? null;
 
 const codexVer = firstLocatable('codex');
@@ -36,6 +39,7 @@ const opencodeVer = firstLocatable('opencode');
 const openclawVer = firstLocatable('openclaw');
 const antigravityVer = firstLocatable('antigravity');
 const kimiVer = firstLocatable('kimi');
+const grokVer = firstLocatable('grok');
 
 describe('locateModelSource', () => {
   it('finds the JS bundle for Claude versions that ship one', () => {
@@ -292,6 +296,59 @@ describe('getModelCatalog (kimi)', () => {
   });
 });
 
+describe('parseGrokModelsStdout', () => {
+  it('reads Default model: and * id (default) rows', () => {
+    const stdout = [
+      'You are logged in with grok.com.',
+      '',
+      'Default model: grok-4.5',
+      '',
+      'Available models:',
+      '  * grok-4.5 (default)',
+      '  grok-code-fast-1',
+      '',
+    ].join('\n');
+    const { models } = parseGrokModelsStdout(stdout);
+    expect(models.map((m) => m.id)).toEqual(['grok-4.5', 'grok-code-fast-1']);
+    expect(models.filter((m) => m.isDefault).map((m) => m.id)).toEqual(['grok-4.5']);
+  });
+
+  it('surfaces Default model: when it is missing from the row list', () => {
+    const { models } = parseGrokModelsStdout('Default model: grok-4.5\n\nAvailable models:\n');
+    expect(models).toEqual([{ id: 'grok-4.5', isDefault: true }]);
+  });
+
+  it('ignores banner lines that are not model ids', () => {
+    const { models } = parseGrokModelsStdout('You are logged in with grok.com.\nAvailable models:\n');
+    expect(models).toEqual([]);
+  });
+});
+
+describe('getModelCatalog (grok)', () => {
+  it('locates the version-home downloads binary and marks the default model', () => {
+    if (!grokVer) return;
+    const src = locateModelSource('grok', grokVer);
+    expect(src).not.toBeNull();
+    expect(src!.kind).toBe('cli');
+    expect(src!.path).toMatch(/[/\\]\.grok[/\\]downloads[/\\]grok-/);
+
+    const catalog = getModelCatalog('grok', grokVer);
+    // `grok models` may fail when offline / not signed in; skip rather than fail.
+    if (!catalog || catalog.models.length === 0) return;
+    for (const m of catalog.models) {
+      expect(m.id).toMatch(/^grok[-_]/i);
+    }
+    const defaults = catalog.models.filter((m) => m.isDefault);
+    expect(defaults.length).toBe(1);
+
+    // agents view / resolveConfiguredModel should surface that default.
+    const configured = resolveConfiguredModel('grok', grokVer);
+    expect(configured).not.toBeNull();
+    expect(configured!.model).toBe(defaults[0].id);
+    expect(configured!.source).toBe('cli-default');
+  });
+});
+
 describe('buildReasoningFlags', () => {
   it('maps Claude levels to --effort', () => {
     expect(buildReasoningFlags('claude', 'high')).toEqual(['--effort', 'high']);
@@ -312,5 +369,144 @@ describe('buildReasoningFlags', () => {
 
   it('returns empty for agents with no known mapping', () => {
     expect(buildReasoningFlags('gemini', 'high')).toEqual([]);
+  });
+});
+
+// Reproduces the RUSH bug: extractClaudeCatalog's regexes miss on claude
+// >=2.1.207 bundles, so getModelCatalog extracted 0 models and (before this
+// fix) never cached that result -- forcing a full extractStrings() scan of
+// the whole binary (~1.85s per installed version) on every `agents view`.
+//
+// Unlike the rest of this file (which reads real installed agent versions),
+// these tests point HOME at a throwaway temp dir and re-import models.ts
+// fresh so the on-disk cache file and version dirs are isolated -- same
+// pattern as state.test.ts. Each test uses fake timers to control Date.now()
+// exactly and reads `attemptedAt` back off the on-disk cache file: a
+// re-extraction is the only thing that stamps a fresh attemptedAt (the
+// cache-hit read path returns the stored catalog untouched), so an
+// unchanged attemptedAt across calls is direct, unambiguous proof that
+// extraction did NOT re-run.
+describe('getModelCatalog caches a 0-model extraction, bounded by a retry TTL', () => {
+  let TMP = '';
+
+  function claudeBundlePath(version: string): string {
+    return path.join(
+      TMP,
+      '.agents',
+      '.history',
+      'versions',
+      'claude',
+      version,
+      'node_modules',
+      '@anthropic-ai',
+      'claude-code',
+      'cli.js'
+    );
+  }
+
+  function writeFakeBundle(version: string, contents: string) {
+    const p = claudeBundlePath(version);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, contents);
+  }
+
+  function cachePath(): string {
+    return path.join(TMP, '.agents', '.cache', '.models-cache.json');
+  }
+
+  function attemptedAtOnDisk(key: string): number {
+    const raw = JSON.parse(fs.readFileSync(cachePath(), 'utf-8'));
+    return raw.entries[key].attemptedAt;
+  }
+
+  async function freshModels() {
+    vi.resetModules();
+    return import('../models.js');
+  }
+
+  beforeEach(() => {
+    TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-models-test-'));
+    process.env.HOME = TMP;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    try {
+      fs.rmSync(TMP, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  });
+
+  it('persists a 0-model catalog with attemptedAt and does not re-extract on the next call', async () => {
+    // No text here matches any of extractClaudeCatalog's regexes -> 0 models.
+    writeFakeBundle('2.1.207', 'this bundle has no recognizable model constants in it');
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const { getModelCatalog: getCatalog } = await freshModels();
+    const key = 'claude@2.1.207';
+
+    const first = getCatalog('claude', '2.1.207');
+    expect(first?.models).toHaveLength(0);
+    expect(attemptedAtOnDisk(key)).toBe(new Date('2026-01-01T00:00:00Z').getTime());
+
+    // A little later, well inside the retry TTL, with the bundle untouched.
+    vi.setSystemTime(new Date('2026-01-01T00:00:01Z'));
+    const second = getCatalog('claude', '2.1.207');
+
+    expect(second?.models).toHaveLength(0);
+    expect(second).toEqual(first);
+    // attemptedAt on disk is unchanged -- proof the second call served the
+    // cached entry rather than re-running extractStrings + saveCache.
+    expect(attemptedAtOnDisk(key)).toBe(new Date('2026-01-01T00:00:00Z').getTime());
+  });
+
+  it('re-extracts a stale 0-model entry once the retry TTL elapses, even with mtime unchanged', async () => {
+    writeFakeBundle('2.1.208', 'no model constants here either');
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const { getModelCatalog: getCatalog } = await freshModels();
+    const key = 'claude@2.1.208';
+
+    const first = getCatalog('claude', '2.1.208');
+    expect(first?.models).toHaveLength(0);
+    const attemptedAtT0 = attemptedAtOnDisk(key);
+
+    // Just under the 24h TTL, bundle (and its mtime) untouched: the cached
+    // empty catalog is served, so attemptedAt on disk does not move.
+    vi.setSystemTime(new Date('2026-01-01T23:59:00Z'));
+    const stillCached = getCatalog('claude', '2.1.208');
+    expect(stillCached?.models).toHaveLength(0);
+    expect(attemptedAtOnDisk(key)).toBe(attemptedAtT0);
+
+    // Past the TTL: retries extraction (even though mtime never changed) and
+    // stamps a fresh attemptedAt.
+    vi.setSystemTime(new Date('2026-01-02T00:00:01Z'));
+    const reExtracted = getCatalog('claude', '2.1.208');
+    expect(reExtracted?.models).toHaveLength(0);
+    expect(attemptedAtOnDisk(key)).toBe(new Date('2026-01-02T00:00:01Z').getTime());
+    expect(attemptedAtOnDisk(key)).toBeGreaterThan(attemptedAtT0);
+  });
+
+  it('re-extracts immediately when the source mtime changes, regardless of TTL', async () => {
+    writeFakeBundle('2.1.209', 'no model constants here');
+
+    const { getModelCatalog: getCatalog } = await freshModels();
+    const first = getCatalog('claude', '2.1.209');
+    expect(first?.models).toHaveLength(0);
+
+    // An upgrade/reinstall: new content AND a new mtime (the normal write
+    // path). The existing mtime-keyed cache check already handles this;
+    // confirm the new empty-catalog caching doesn't regress it.
+    writeFakeBundle(
+      '2.1.209',
+      '{OPUS_ID:"claude-opus-5",OPUS_NAME:"Opus",SONNET_ID:"claude-sonnet-5",SONNET_NAME:"Sonnet",HAIKU_ID:"claude-haiku-5",HAIKU_NAME:"Haiku"'
+    );
+
+    const second = getCatalog('claude', '2.1.209');
+    expect(second?.models.length).toBeGreaterThan(0);
   });
 });

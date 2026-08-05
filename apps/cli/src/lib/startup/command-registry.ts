@@ -31,7 +31,6 @@ export type ModuleLoader = () => Promise<Registrar>;
 // them into the exact main-branch registration order for the slow path.
 export const loadView: ModuleLoader = async () => (await import('../../commands/view.js')).registerViewCommand;
 export const loadInspect: ModuleLoader = async () => (await import('../../commands/inspect.js')).registerInspectCommand;
-export const loadResources: ModuleLoader = async () => (await import('../../commands/resources.js')).registerResourcesCommand;
 export const loadFeedback: ModuleLoader = async () => (await import('../../commands/feedback.js')).registerFeedbackCommand;
 export const loadCommands: ModuleLoader = async () => (await import('../../commands/commands.js')).registerCommandsCommands;
 export const loadHooks: ModuleLoader = async () => (await import('../../commands/hooks.js')).registerHooksCommands;
@@ -51,17 +50,20 @@ export const loadExport: ModuleLoader = async () => (await import('../../command
 export const loadPackages: ModuleLoader = async () => (await import('../../commands/packages.js')).registerPackagesCommands;
 export const loadRoutines: ModuleLoader = async () => (await import('../../commands/routines.js')).registerRoutinesCommands;
 export const loadMonitors: ModuleLoader = async () => (await import('../../commands/monitors.js')).registerMonitorsCommands;
+export const loadProjects: ModuleLoader = async () => (await import('../../commands/projects.js')).registerProjectsCommands;
 export const loadRun: ModuleLoader = async () => (await import('../../commands/exec.js')).registerRunCommand;
+export const loadResume: ModuleLoader = async () => (await import('../../commands/resume.js')).registerResumeCommand;
 export const loadFork: ModuleLoader = async () => (await import('../../commands/fork.js')).registerForkCommand;
 export const loadDefaults: ModuleLoader = async () => (await import('../../commands/defaults.js')).registerDefaultsCommands;
+export const loadSet: ModuleLoader = async () => (await import('../../commands/set.js')).registerSetCommand;
 export const loadModels: ModuleLoader = async () => (await import('../../commands/models.js')).registerModelsCommand;
 export const loadPrune: ModuleLoader = async () => (await import('../../commands/prune.js')).registerPruneCommand;
 export const loadTrash: ModuleLoader = async () => (await import('../../commands/trash.js')).registerTrashCommands;
 export const loadRestore: ModuleLoader = async () => (await import('../../commands/trash.js')).registerRestoreCommand;
 export const loadDoctor: ModuleLoader = async () => (await import('../../commands/doctor.js')).registerDoctorCommand;
 export const loadApply: ModuleLoader = async () => (await import('../../commands/apply.js')).registerApplyCommand;
-export const loadCheck: ModuleLoader = async () => (await import('../../commands/check.js')).registerCheckCommand;
 export const loadStatus: ModuleLoader = async () => (await import('../../commands/status.js')).registerStatusCommand;
+export const loadSnapshot: ModuleLoader = async () => (await import('../../commands/snapshot.js')).registerSnapshotCommand;
 export const loadProfiles: ModuleLoader = async () => (await import('../../commands/profiles.js')).registerProfilesCommands;
 export const loadHarness: ModuleLoader = async () => (await import('../../commands/harness.js')).registerHarnessCommands;
 export const loadSecrets: ModuleLoader = async () => (await import('../../commands/secrets.js')).registerSecretsCommands;
@@ -73,10 +75,12 @@ export const loadBeta: ModuleLoader = async () => (await import('../../commands/
 export const loadSync: ModuleLoader = async () => (await import('../../commands/sync.js')).registerSyncCommand;
 export const loadLock: ModuleLoader = async () => (await import('../../commands/lock.js')).registerLockCommand;
 export const loadRefreshRules: ModuleLoader = async () => (await import('../../commands/refresh-rules.js')).registerRefreshRulesCommand;
-export const loadDrive: ModuleLoader = async () => (await import('../../commands/drive.js')).registerDriveCommands;
 export const loadFactory: ModuleLoader = async () => (await import('../../commands/factory.js')).registerFactoryCommands;
 export const loadUsage: ModuleLoader = async () => (await import('../../commands/usage.js')).registerUsageCommand;
 export const loadCost: ModuleLoader = async () => (await import('../../commands/cost.js')).registerCostCommand;
+export const loadInsights: ModuleLoader = async () => (await import('../../commands/insights.js')).registerInsightsCommand;
+export const loadPerf: ModuleLoader = async () => (await import('../../commands/perf.js')).registerPerfCommand;
+export const loadTrends: ModuleLoader = async () => (await import('../../commands/trends.js')).registerTrendsCommand;
 export const loadOutput: ModuleLoader = async () => (await import('../../commands/output.js')).registerOutputCommand;
 export const loadBudget: ModuleLoader = async () => (await import('../../commands/budget.js')).registerBudgetCommand;
 export const loadAlias: ModuleLoader = async () => (await import('../../commands/alias.js')).registerAliasCommand;
@@ -101,15 +105,14 @@ export const loadTeams: ModuleLoader = async () => (await import('../../commands
 export const loadCloud: ModuleLoader = async () => (await import('../../commands/cloud.js')).registerCloudCommands;
 export const loadMessage: ModuleLoader = async () => (await import('../../commands/message.js')).registerMessageCommand;
 export const loadSend: ModuleLoader = async () => (await import('../../commands/send.js')).registerSendCommand;
-export const loadHq: ModuleLoader = async () => (await import('../../commands/hq.js')).registerHqCommand;
 export const loadFeed: ModuleLoader = async () => (await import('../../commands/feed.js')).registerFeedCommand;
-export const loadActivity: ModuleLoader = async () => (await import('../../commands/activity.js')).registerActivityCommand;
 export const loadMailboxes: ModuleLoader = async () => (await import('../../commands/mailboxes.js')).registerMailboxesCommand;
 export const loadServe: ModuleLoader = async () => (await import('../../commands/serve.js')).registerServeCommand;
 export const loadShare: ModuleLoader = async () => (await import('../../commands/share.js')).registerShareCommands;
 export const loadAudit: ModuleLoader = async () => (await import('../../commands/audit.js')).registerAuditCommands;
 export const loadWebhook: ModuleLoader = async () => (await import('../../commands/webhook.js')).registerWebhookCommand;
 export const loadFunnel: ModuleLoader = async () => (await import('../../commands/funnel.js')).registerFunnelCommand;
+export const loadHumans: ModuleLoader = async () => (await import('../../commands/humans.js')).registerHumansCommands;
 
 /**
  * Commands whose modules pull in the SQLite-backed session/cloud stack. They are
@@ -118,7 +121,17 @@ export const loadFunnel: ModuleLoader = async () => (await import('../../command
  * inherit the root's custom help formatter rather than getting the per-command
  * recursive pass. Keeping that ordering preserves their `--help` output exactly.
  */
-export const LAZY_COMMAND_NAMES: ReadonlySet<string> = new Set(['sessions', 'teams', 'cloud', 'message', 'hq', 'serve']);
+// `roster` is an observe-umbrella alias of `sessions --active` — same module,
+// same SQLite stack, same post-help registration order as sessions.
+export const LAZY_COMMAND_NAMES: ReadonlySet<string> = new Set([
+  'sessions',
+  'resume',
+  'roster',
+  'teams',
+  'cloud',
+  'message',
+  'serve',
+]);
 
 /**
  * User-typed top-level command name -> ordered list of module loaders to run.
@@ -137,7 +150,6 @@ export const LAZY_COMMAND_NAMES: ReadonlySet<string> = new Set(['sessions', 'tea
 export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   view: [loadView],
   inspect: [loadInspect],
-  resources: [loadResources],
   feedback: [loadFeedback],
   commands: [loadCommands],
   hooks: [loadHooks],
@@ -146,7 +158,7 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   memory: [loadMemory],
   permissions: [loadPermissions],
   mcp: [loadMcp],
-  cli: [loadCli],
+  clis: [loadCli],
   subagents: [loadSubagents],
   plugins: [loadPlugins],
   workflows: [loadWorkflows],
@@ -165,16 +177,19 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   install: [loadPackages],
   routines: [loadRoutines],
   monitors: [loadMonitors],
+  projects: [loadProjects],
   run: [loadRun],
+  resume: [loadResume],
   fork: [loadFork],
   defaults: [loadDefaults],
+  set: [loadSet],
   models: [loadModels],
   trash: [loadTrash],
   restore: [loadRestore],
   doctor: [loadDoctor],
   apply: [loadApply],
-  check: [loadCheck],
   status: [loadStatus],
+  snapshot: [loadSnapshot],
   profile: [loadProfiles],
   profiles: [loadProfiles],
   harness: [loadHarness],
@@ -190,10 +205,12 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   sync: [loadSync],
   lock: [loadLock],
   'refresh-rules': [loadRefreshRules],
-  drive: [loadDrive],
   factory: [loadFactory],
   usage: [loadUsage],
   cost: [loadCost],
+  insights: [loadInsights],
+  perf: [loadPerf],
+  trends: [loadTrends],
   output: [loadOutput],
   budget: [loadBudget],
   alias: [loadAlias],
@@ -222,14 +239,17 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   setup: [loadSetup],
   uninstall: [loadUninstall],
   sessions: [loadSessions],
+  // Observe-umbrella alias of sessions --active (same lazy module).
+  roster: [loadSessions],
   teams: [loadTeams],
   cloud: [loadCloud],
   message: [loadMessage],
   send: [loadSend],
   notify: [loadSend],
-  hq: [loadHq],
   feed: [loadFeed],
-  activity: [loadActivity],
+  // Observe-umbrella aliases of feed / feed --filter updates.
+  inbox: [loadFeed],
+  timeline: [loadFeed],
   mailboxes: [loadMailboxes],
   mailbox: [loadMailboxes],
   serve: [loadServe],
@@ -237,4 +257,5 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   audit: [loadAudit],
   webhook: [loadWebhook],
   funnel: [loadFunnel],
+  humans: [loadHumans],
 };

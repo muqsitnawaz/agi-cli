@@ -13,8 +13,9 @@
  */
 
 import { spawn, spawnSync } from 'child_process';
-import { readAndResolveBundleEnv, isHeadlessSecretsContext, listBundles, bundleExists, type SecretsBundle } from '../secrets/bundles.js';
+import { readAndResolveBundleEnv, listBundles, bundleExists, type SecretsBundle } from '../secrets/bundles.js';
 import { readMeta, writeMeta } from '../state.js';
+import { DEFAULT_CRABBOX_PROFILE } from './config.js';
 
 /** A crabbox machine as reported by `crabbox list --json`. */
 export interface CrabboxBox {
@@ -125,6 +126,48 @@ function resolveTailscaleBundleMemo(): { name: string; key: string } | undefined
   return tailscaleBundleMemo.value;
 }
 
+/**
+ * Process-lifetime memo for the RESOLVED tailscale key value, next to the pick
+ * memo above. `crabboxEnv` runs several times per lease (list/wait/spawn/stop),
+ * and the single-key subset read (`keys: [ts.key]`) is rejected by
+ * `canCacheResolvedEnv` for broker auto-cache — so without this memo a
+ * non-broker-held tailscale bundle re-read the keychain on EVERY call (and,
+ * pre-guard, could pop a Touch ID sheet each time). The read is always
+ * `agentOnly: true` (broker-only, SEC-13): tailscale is opt-in plumbing, a
+ * `--lease` run is headless by contract, and even an interactive `--lease`
+ * invocation must never pop an unwatched Touch ID sheet for this best-effort
+ * read — a locked bundle degrades silently to a public-network lease via the
+ * catch below. One read per process, success or failure (a failed read
+ * memoizes as undefined: the catch below already degrades to a public-network
+ * lease, retrying mid-process only repeats the same failure).
+ */
+let tailscaleValueMemo: { value: string | undefined } | undefined;
+function resolveTailscaleKeyValueMemo(ts: { name: string; key: string }): string | undefined {
+  if (!tailscaleValueMemo) {
+    let value: string | undefined;
+    try {
+      const { env } = readAndResolveBundleEnv(ts.name, {
+        caller: 'agents run --lease (crabbox tailscale)',
+        keys: [ts.key],
+        agentOnly: true,
+      });
+      value = env[ts.key];
+    } catch {
+      /* best-effort — tailscale is opt-in plumbing, never blocks a public lease */
+    }
+    tailscaleValueMemo = { value };
+  }
+  return tailscaleValueMemo.value;
+}
+
+/** Test seam: drop every crabboxEnv secrets memo so each test resolves fresh. */
+export function resetCrabboxSecretsMemosForTest(): void {
+  tailscaleBundleMemo = undefined;
+  tailscaleValueMemo = undefined;
+  leaseBundleMemo = undefined;
+  leaseEnvMemo = undefined;
+}
+
 /** A resolved lease bundle: its name, plus (auto-detect only) the exact keys to inject. */
 export interface ResolvedLeaseBundle {
   name: string;
@@ -176,6 +219,59 @@ function resolveLeaseBundleMemo(): ResolvedLeaseBundle | undefined {
   return leaseBundleMemo.value;
 }
 
+/**
+ * Process-lifetime memo for the RESOLVED provider-token env, resolved ONCE up
+ * front. `crabboxEnv` is called on every `crabboxWaitReady` poll iteration
+ * (crabboxWaitReady → crabboxFind → crabboxList → crabboxEnv), so without this
+ * memo the lease-token keychain read re-ran every ~5s of the ready wait — the
+ * per-poll storm this fix exists to kill. The read is now `agentOnly: true`
+ * (SEC-13: a `--lease` run is headless by contract and must never pop an
+ * unwatched Touch ID sheet). A locked `hold`/`always` bundle makes that read
+ * THROW the actionable "unlock <name>" message; we memoize the thrown error too
+ * and re-raise it on every subsequent call, so the failure surfaces loud ONCE
+ * up front (crabboxWarmup / the first crabboxList, before any poll loop) and the
+ * loop never re-issues the read. A `never`/no-ACL or broker-held bundle resolves
+ * silently. `undefined` when no lease bundle is configured (crabbox uses its own
+ * `crabbox login`). The memo (success OR failure) is cleared per test by
+ * resetCrabboxSecretsMemosForTest.
+ */
+let leaseEnvMemo: { env?: NodeJS.ProcessEnv; error?: Error } | undefined;
+function resolveLeaseEnvMemo(explicitBundle?: string): NodeJS.ProcessEnv | undefined {
+  if (!leaseEnvMemo) {
+    const resolved: ResolvedLeaseBundle | undefined = explicitBundle
+      ? { name: explicitBundle }
+      : resolveLeaseBundleMemo();
+    if (!resolved) {
+      leaseEnvMemo = {};
+    } else {
+      try {
+        // Auto-detected bundle → inject ONLY the provider token key(s) (least
+        // privilege; an unrelated bundle can't leak its other secrets into crabbox).
+        // An explicitly-named bundle (env/config or `opts.secretsBundle`) injects
+        // whole — the user chose it. Same resolver `agents secrets exec` uses.
+        const { env } = readAndResolveBundleEnv(resolved.name, {
+          caller: 'agents run --lease (crabbox)',
+          keys: resolved.keys,
+          // --lease is headless by contract and a locked bundle must fail loud with
+          // an unlock hint, NEVER pop a Touch ID sheet — the read cannot be answered
+          // in a background lease (SEC-13).
+          agentOnly: true,
+        });
+        leaseEnvMemo = { env };
+      } catch (e) {
+        leaseEnvMemo = {
+          error: new Error(
+            `Could not load secrets bundle "${resolved.name}" for crabbox: ${(e as Error).message}. ` +
+              `Fix the bundle (agents secrets view ${resolved.name}) or unset lease.secretsBundle to use crabbox's own login.`,
+          ),
+        };
+      }
+    }
+  }
+  if (leaseEnvMemo.error) throw leaseEnvMemo.error;
+  return leaseEnvMemo.env;
+}
+
 /** Persist `lease.secretsBundle` in agents config so `--lease` needs no env var. */
 export function setLeaseSecretsBundle(name: string): void {
   const meta = readMeta();
@@ -187,51 +283,26 @@ export function setLeaseSecretsBundle(name: string): void {
 export function crabboxEnv(opts: CrabboxOptions): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...process.env };
 
-  const resolved: ResolvedLeaseBundle | undefined = opts.secretsBundle
-    ? { name: opts.secretsBundle }
-    : resolveLeaseBundleMemo();
-  if (resolved) {
-    try {
-      // Auto-detected bundle → inject ONLY the provider token key(s) (least
-      // privilege; an unrelated bundle can't leak its other secrets into crabbox).
-      // An explicitly-named bundle (env/config or `opts.secretsBundle`) injects
-      // whole — the user chose it. Same resolver `agents secrets exec` uses.
-      const { env } = readAndResolveBundleEnv(resolved.name, {
-        caller: 'agents run --lease (crabbox)',
-        keys: resolved.keys,
-        // --lease is headless by contract and crabboxEnv is called several times
-        // per run (list/wait/spawn/stop) — resolve broker-only so a keychain bundle
-        // can't pop repeated unwatched Touch ID sheets mid-lease.
-        agentOnly: isHeadlessSecretsContext(),
-      });
-      Object.assign(out, env);
-    } catch (e) {
-      throw new Error(
-        `Could not load secrets bundle "${resolved.name}" for crabbox: ${(e as Error).message}. ` +
-          `Fix the bundle (agents secrets view ${resolved.name}) or unset lease.secretsBundle to use crabbox's own login.`,
-      );
-    }
-  }
+  // The lease provider-token read is resolved ONCE up front and memoized (env or
+  // thrown error) for the process — crabboxEnv runs on every crabboxWaitReady
+  // poll, so re-reading here was the per-poll storm. A locked bundle re-raises
+  // the memoized "unlock <name>" error every call, so the failure surfaces loud
+  // on the first crabboxEnv (before any poll loop) and never re-issues the read.
+  const leaseEnv = resolveLeaseEnvMemo(opts.secretsBundle);
+  if (leaseEnv) Object.assign(out, leaseEnv);
 
   // Tailscale plumbing (F5): inject CRABBOX_TAILSCALE_AUTH_KEY from a bundle that
   // declares a tailscale auth key, when the ambient env doesn't already set one.
   // Best-effort and opt-in — a missing/unreadable tailscale bundle never fails a
   // public-network lease; `crabboxWarmup({ netMode: 'tailscale' })` is what decides
-  // whether the key is actually used.
+  // whether the key is actually used. The resolved value is memoized per process
+  // (see resolveTailscaleKeyValueMemo) so repeated crabboxEnv calls read the
+  // keychain at most once.
   if (!out.CRABBOX_TAILSCALE_AUTH_KEY) {
     const ts = resolveTailscaleBundleMemo();
     if (ts) {
-      try {
-        const { env } = readAndResolveBundleEnv(ts.name, {
-          caller: 'agents run --lease (crabbox tailscale)',
-          keys: [ts.key],
-          agentOnly: isHeadlessSecretsContext(),
-        });
-        const value = env[ts.key];
-        if (value) out.CRABBOX_TAILSCALE_AUTH_KEY = value;
-      } catch {
-        /* best-effort — tailscale is opt-in plumbing, never blocks a public lease */
-      }
+      const value = resolveTailscaleKeyValueMemo(ts);
+      if (value) out.CRABBOX_TAILSCALE_AUTH_KEY = value;
     }
   }
 
@@ -294,6 +365,66 @@ export function crabboxList(opts: CrabboxOptions = {}): CrabboxBox[] {
 /** Find one box by slug, or null. */
 export function crabboxFind(slug: string, opts: CrabboxOptions = {}): CrabboxBox | null {
   return crabboxList(opts).find((b) => b.slug === slug) ?? null;
+}
+
+/**
+ * Whether `crabbox status` reports the box SSH-ready (`ready=true`). A box whose
+ * cloud-init bootstrap failed still LISTS as `running` but never becomes ready —
+ * selecting it burns the full SSH wait before hard-failing. `crabbox status`
+ * flips ready=true only once sshd answers, so warm-pool reuse gates on it
+ * (mirrors scripts/sandbox.sh's `box_ready`).
+ */
+export function crabboxStatusReady(slug: string, opts: CrabboxOptions = {}): boolean {
+  findCrabbox();
+  const r = spawnSync('crabbox', ['status', '--id', slug], {
+    encoding: 'utf-8',
+    env: crabboxEnv(opts),
+    timeout: opts.timeoutMs ?? 15000,
+  });
+  if (r.status !== 0 || !r.stdout) return false;
+  return /(^|\s)ready=true(\s|$)/m.test(r.stdout);
+}
+
+export interface PoolMatchOptions {
+  /**
+   * Profile label this run would warm a box with (from the repo's
+   * `.crabbox.yaml`; see config.ts). Both sides normalize an unset profile to
+   * DEFAULT_CRABBOX_PROFILE, so profile-less runs match unlabeled boxes.
+   */
+  profile?: string;
+  /**
+   * Network mode of the run (default 'public'). A tailnet-joined box is never
+   * handed to a public run, nor a public box to a tailnet run — reachability and
+   * exposure differ, so the pool is partitioned by it.
+   */
+  netMode?: 'public' | 'tailscale';
+  /** Injectable clock (unix seconds) for the expiry check. */
+  nowSecs?: number;
+}
+
+/**
+ * Warm boxes in the profile pool this run could reuse: `running`, same profile
+ * label, same network mode, lease unexpired — most-recently-touched first.
+ *
+ * Readiness is NOT required here (deliberately mirrors sandbox.sh's
+ * `running_slugs_for_profile`, which filters on `status` only): the list `state`
+ * label can lag, so the caller gates each candidate on `crabboxStatusReady`
+ * before committing. A not-ready box is skipped, never stopped — a concurrent
+ * run may be mid-boot on it, and crabbox's idle timeout reaps genuine duds.
+ */
+export function poolReusableBoxes(boxes: CrabboxBox[], opts: PoolMatchOptions = {}): CrabboxBox[] {
+  const profile = opts.profile ?? DEFAULT_CRABBOX_PROFILE;
+  const netMode = opts.netMode ?? 'public';
+  const nowSecs = opts.nowSecs ?? Math.floor(Date.now() / 1000);
+  return boxes
+    .filter((b) => {
+      if (b.status !== 'running') return false;
+      if ((b.profile ?? DEFAULT_CRABBOX_PROFILE) !== profile) return false;
+      const boxNet = b.tailscaleIPv4 || b.tailscaleFQDN ? 'tailscale' : 'public';
+      if (boxNet !== netMode) return false;
+      return b.expiresAt === null || b.expiresAt > nowSecs;
+    })
+    .sort((a, b) => (b.lastTouchedAt ?? 0) - (a.lastTouchedAt ?? 0));
 }
 
 export interface WarmupOptions extends CrabboxOptions {

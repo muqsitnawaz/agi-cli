@@ -47,12 +47,6 @@ const ENV_ALLOWLIST = [
   'VISUAL',
   'NO_COLOR',
   'FORCE_COLOR',
-  // Headless Claude auth: the routines daemon injects CLAUDE_CODE_OAUTH_TOKEN
-  // from the `claude` secrets bundle (see daemon.ts). Without this allowlist
-  // entry, sandboxed routine spawns drop the token and look "unconfigured".
-  // Intentionally NOT ANTHROPIC_API_KEY / other provider secrets — those stay
-  // stripped (see tests/sandbox.test.ts "does not include sensitive env vars").
-  'CLAUDE_CODE_OAUTH_TOKEN',
 ];
 
 /** Tools safe to grant as wildcards (no filesystem access). */
@@ -117,6 +111,8 @@ export function prepareJobHome(config: JobConfig): string {
     generateCodexConfig(overlayHome, config);
   } else if (config.agent === 'gemini') {
     generateGeminiConfig(overlayHome, config);
+  } else if (config.agent === 'cursor') {
+    generateCursorConfig(overlayHome);
   }
 
   if (config.allow?.dirs) {
@@ -124,6 +120,38 @@ export function prepareJobHome(config: JobConfig): string {
   }
 
   return overlayHome;
+}
+
+/** Link this host's Cursor login and CLI config into the disposable overlay. */
+export function generateCursorConfig(overlayHome: string): void {
+  const realConfigHome = process.env.XDG_CONFIG_HOME || path.join(resolveRealHome(), '.config');
+  const realAuth = path.join(realConfigHome, 'cursor', 'auth.json');
+  if (!fs.existsSync(realAuth)) return;
+
+  const overlayCursorDir = path.join(overlayHome, '.config', 'cursor');
+  fs.mkdirSync(overlayCursorDir, { recursive: true });
+  const overlayAuth = path.join(overlayCursorDir, 'auth.json');
+  if (process.platform === 'win32') {
+    // File symlinks need Developer Mode on Windows. A same-volume hard link
+    // shares the credential inode without copying its contents to another host.
+    try {
+      fs.linkSync(realAuth, overlayAuth);
+    } catch { /* cross-volume or link creation refused: Cursor will fail auth loudly */ }
+  } else {
+    fs.symlinkSync(realAuth, overlayAuth);
+  }
+
+  // Setting XDG_CONFIG_HOME makes Cursor look for cli-config.json beside auth.json.
+  // This file carries account identity (authId, displayName, email, userId) as
+  // well as preferences, so it must remain linked rather than copied.
+  const realCliConfig = path.join(resolveRealHome(), '.cursor', 'cli-config.json');
+  if (fs.existsSync(realCliConfig)) {
+    const overlayCliConfig = path.join(overlayCursorDir, 'cli-config.json');
+    try {
+      if (process.platform === 'win32') fs.linkSync(realCliConfig, overlayCliConfig);
+      else fs.symlinkSync(realCliConfig, overlayCliConfig);
+    } catch { /* cross-volume or link creation refused: Cursor will fail auth loudly */ }
+  }
 }
 
 /** Remove a job's overlay HOME directory entirely. */

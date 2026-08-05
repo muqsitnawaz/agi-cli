@@ -1,10 +1,11 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
   buildJobCommand,
   buildRoutineSpawnEnv,
   dispatchesViaAgentsRun,
+  executeJob,
   executeJobDetached,
   pinJobBinary,
   resolveRoutineLaunch,
@@ -15,6 +16,16 @@ import type { JobConfig } from '../routines.js';
 import { getBinaryPath, getVersionDir } from '../versions.js';
 import { rotationFailoverChain, type RotateCandidate, type RotateResult } from '../rotate.js';
 import { detectRateLimit } from '../exec.js';
+import { buildExecCommand } from '../exec.js';
+import * as activation from '../routine-activation.js';
+
+beforeEach(() => {
+  vi.spyOn(activation, 'routineEnabledOnThisDevice').mockReturnValue(null);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function baseJob(overrides: Partial<JobConfig> = {}): JobConfig {
   return {
@@ -31,6 +42,13 @@ function baseJob(overrides: Partial<JobConfig> = {}): JobConfig {
 }
 
 describe('buildJobCommand', () => {
+  it('cursor default/write mode trusts the configured workspace without using --yolo', () => {
+    const argv = buildJobCommand(baseJob({ agent: 'cursor', mode: 'auto' }), 'Do the task.');
+    expect(argv).toContain('--trust');
+    expect(argv).not.toContain('--yolo');
+    expect(argv).not.toContain('-f');
+  });
+
   it('bare-agent claude plan mode includes --permission-mode plan', () => {
     const argv = buildJobCommand(baseJob({ agent: 'claude', mode: 'plan' }), 'Do the task.');
     expect(argv).toContain('--permission-mode');
@@ -97,6 +115,36 @@ describe('buildJobCommand', () => {
     expect(argv).toContain('--prompt');
     expect(argv).not.toContain('--plan');
     expect(argv).not.toContain('--auto');
+  });
+});
+
+describe('cursor loop routine mode warning', () => {
+  it('warns from the shared command builder before a plan-mode loop iteration runs', async () => {
+    const config = baseJob({
+      name: 'cursor-loop-warning-test',
+      agent: 'cursor',
+      version: '0.0.0-test',
+      mode: 'plan',
+      sandbox: false,
+      loop: { maxIterations: 1 },
+    });
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await executeJob(config, {
+        runIteration: async (options) => {
+          expect(options.version).toBeUndefined();
+          const argv = buildExecCommand(options);
+          expect(argv).toContain('--trust');
+          return { exitCode: 0, tokens: 0 };
+        },
+      });
+      expect(write).toHaveBeenCalledWith(
+        expect.stringContaining("[agents] routine cursor-loop-warning-test: cursor's read-only plan mode is not enabled in this build"),
+      );
+    } finally {
+      write.mockRestore();
+      fs.rmSync(path.join(getRunsDir(), config.name), { recursive: true, force: true });
+    }
   });
 });
 
@@ -243,6 +291,24 @@ describe('resolveRoutineLaunch (RUSH-1016 — pin + failover chain)', () => {
 });
 
 describe('buildRoutineSpawnEnv', () => {
+  it('pins Cursor XDG_CONFIG_HOME to the sandbox overlay', () => {
+    const env = buildRoutineSpawnEnv(
+      { HOME: '/tmp/cursor-overlay', PATH: '/usr/bin', XDG_CONFIG_HOME: '/real/config' },
+      'cursor',
+      undefined,
+      undefined,
+      '/tmp/cursor-overlay',
+    );
+    expect(env.XDG_CONFIG_HOME).toBe(path.join('/tmp/cursor-overlay', '.config'));
+  });
+  it('preserves Cursor XDG_CONFIG_HOME when no sandbox overlay exists', () => {
+    const env = buildRoutineSpawnEnv(
+      { HOME: '/home/real-user', PATH: '/usr/bin', XDG_CONFIG_HOME: '/opt/custom-cfg' },
+      'cursor',
+      undefined,
+    );
+    expect(env.XDG_CONFIG_HOME).toBe('/opt/custom-cfg');
+  });
   it('pins CLAUDE_CONFIG_DIR for a versioned claude launch and preserves TZ', () => {
     const env = buildRoutineSpawnEnv(
       { HOME: '/tmp/overlay', PATH: '/usr/bin' },
@@ -254,6 +320,39 @@ describe('buildRoutineSpawnEnv', () => {
     expect(env.CLAUDE_CONFIG_DIR).toContain(path.join('claude', '2.1.0'));
     expect(env.CLAUDE_CONFIG_DIR).toContain('.claude');
     expect(env.HOME).toBe('/tmp/overlay');
+  });
+
+  // The daemon holds no Claude token, so buildRoutineSpawnEnv does no claude-token
+  // manipulation at all — it neither injects a per-account/ambient token nor drops
+  // one. A routine authenticates through the pinned account's own CLAUDE_CONFIG_DIR
+  // login, identical to interactive `agents run`.
+  it('adds no CLAUDE_CODE_OAUTH_TOKEN — routines use the per-account CLAUDE_CONFIG_DIR login', () => {
+    const env = buildRoutineSpawnEnv(
+      { HOME: '/tmp/overlay', PATH: '/usr/bin' },
+      'claude',
+      '2.1.0',
+    );
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(env.CLAUDE_CONFIG_DIR).toContain(path.join('claude', '2.1.0'));
+  });
+
+  // The above passed everywhere a token was absent — which is every CI runner,
+  // and why this shipped. On a provisioned box the daemon's own environment
+  // carries CLAUDE_CODE_OAUTH_TOKEN, buildExecEnv spreads ambient process.env,
+  // and every routine silently ran on that one shared rotating token instead of
+  // the host's login. Set it for real so the assertion means something.
+  it('drops an AMBIENT CLAUDE_CODE_OAUTH_TOKEN — the host login wins, not a shared token', () => {
+    const prev = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'sk-ant-oat01-ambient-must-not-leak';
+    try {
+      const env = buildRoutineSpawnEnv({ HOME: '/tmp/overlay', PATH: '/usr/bin' }, 'claude', '2.1.0');
+      expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+      // and the routine still authenticates — via this box's own version home
+      expect(env.CLAUDE_CONFIG_DIR).toContain(path.join('claude', '2.1.0'));
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      else process.env.CLAUDE_CODE_OAUTH_TOKEN = prev;
+    }
   });
 });
 

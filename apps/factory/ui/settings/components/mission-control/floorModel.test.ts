@@ -23,6 +23,8 @@ import {
   projectRollups,
   resolveProject,
   sessionTaskLine,
+  partitionFloorAgents,
+  visibleFloorAgents,
   todosWithFallback,
   linearIssueLabel,
   linearIssueUrl,
@@ -757,6 +759,19 @@ describe('computeHostRows', () => {
     const rows = computeHostRows([], [], [], ['zion'])
     expect(rows).toEqual([{ name: 'zion', count: 0, offline: false, pinned: true }])
   })
+
+  test('running counts come only from the agents session collection (ignore device agents)', () => {
+    // deviceHealth.runningAgents used to double as a second count source and drift
+    // from the feed. Host rows must count floor agents only.
+    const rows = computeHostRows(
+      [makeAgent({ id: 'a', host: 'zion', hostLabel: 'zion' })],
+      [{ name: 'zion', online: true, agents: 99 }],
+      [],
+      [],
+      'zion',
+    )
+    expect(rows.find((r) => r.name === 'zion')!.count).toBe(1)
+  })
 })
 
 describe('latestTodos -- the checklist from the newest TodoWrite', () => {
@@ -896,8 +911,31 @@ describe('sessionTaskLine — prompt anchors the card ahead of the drifting last
     expect(sessionTaskLine(makeAgent({ prompt: '   ', summary: 'real work' }))).toBe('real work')
   })
 
-  test('returns empty string when the agent carries no task signal at all', () => {
-    expect(sessionTaskLine(makeAgent({ prompt: undefined, summary: '', resp: '', worktreeSlug: '', branch: '' }))).toBe('')
+  test('returns a clear placeholder when the agent carries no task signal at all', () => {
+    expect(sessionTaskLine(makeAgent({ prompt: undefined, summary: '', resp: '', worktreeSlug: '', branch: '' }))).toBe('No topic')
+  })
+})
+
+describe('floor visibility and section counts', () => {
+  test('background agents are hidden by default and available through the toggle', () => {
+    const foreground = makeAgent({ id: 'foreground', context: 'terminal' })
+    const background = makeAgent({ id: 'background', context: 'headless' })
+    expect(visibleFloorAgents([foreground, background], false).map((a) => a.id)).toEqual(['foreground'])
+    expect(visibleFloorAgents([foreground, background], true).map((a) => a.id)).toEqual(['foreground', 'background'])
+  })
+
+  test('every rendered card belongs to exactly one counted section', () => {
+    const agents = [
+      makeAgent({ id: 'needs', needs: true, phase: 'waiting' }),
+      makeAgent({ id: 'running', phase: 'running' }),
+      makeAgent({ id: 'idle', phase: 'idle' }),
+      makeAgent({ id: 'done', phase: 'done' }),
+    ]
+    const sections = partitionFloorAgents(agents)
+    expect(sections.needs.map((a) => a.id)).toEqual(['needs'])
+    expect(sections.active.map((a) => a.id)).toEqual(['running', 'idle'])
+    expect(sections.done.map((a) => a.id)).toEqual(['done'])
+    expect(sections.needs.length + sections.active.length + sections.done.length).toBe(agents.length)
   })
 })
 

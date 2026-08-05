@@ -1,9 +1,10 @@
 /**
  * Core agent configuration and detection module.
  *
- * Defines the canonical registry of all supported AI coding agents (Claude, Codex,
- * Gemini, Cursor, OpenCode, OpenClaw, Copilot, Amp, Kiro, Goose, Grok) with their
- * CLI commands, config paths, capability flags, and MCP integration points.
+ * Defines the canonical registry of current and legacy AI coding agents (Claude,
+ * Codex, Gemini, Cursor, OpenCode, OpenClaw, Copilot, Amp, Kiro, Goose, Grok)
+ * with their CLI commands, config paths, capability flags, and MCP integration
+ * points.
  *
  * Provides functions for detecting installed CLIs, resolving version-managed binaries,
  * reading account/auth info, and managing MCP server registrations across agents.
@@ -233,10 +234,12 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     format: 'markdown',
     variableSyntax: '$ARGUMENTS',
     supportsHooks: true,
-    // Claude Code has no headless Anthropic-hosted dispatch CLI (only
-    // --remote-control, which bridges a *local* session). Its cloud is Rush.
+    // Claude Code grew a native `claude --cloud "<prompt>"` (Anthropic-managed
+    // infra, claude.ai/code; requires claude.ai subscription auth). Routing
+    // still goes to Rush Cloud deliberately — it keeps cloud tasks in one
+    // tracked fleet (agents cloud list/status/logs) regardless of harness.
     cloudProvider: 'rush',
-    capabilities: { hooks: true, mcp: true, mcpHttp: true, mcpHeaders: true, allowlist: true, skills: true, commands: true, plugins: true, subagents: true, rules: { file: 'CLAUDE.md' }, workflows: true, memory: true, modes: ['plan', 'edit', 'auto', 'skip'], rulesImports: true },
+    capabilities: { hooks: true, mcp: true, mcpHttp: true, mcpHeaders: true, allowlist: true, skills: true, commands: true, plugins: true, subagents: true, rules: { file: 'CLAUDE.md' }, workflows: true, memory: true, modes: ['plan', 'edit', 'auto', 'skip'], rulesImports: true, interactiveRepl: true },
   },
   // codex hooks: gated to >= 0.116.0 (introduced [features] codex_hooks flag).
   codex: {
@@ -258,7 +261,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     cloudProvider: 'codex',
     // Subagents: multi-agent plumbing since 0.117.0; custom agents as
     // ~/.codex/agents/*.toml (name, description, developer_instructions).
-    capabilities: { hooks: { since: '0.116.0' }, mcp: true, mcpHttp: true, mcpHeaders: false, allowlist: { since: '0.138.0' }, skills: true, commands: { until: '0.117.0' }, plugins: { since: '0.128.0' }, subagents: { since: '0.117.0' }, rules: { file: 'AGENTS.md' }, workflows: false, memory: true, modes: ['plan', 'edit', 'skip'] },
+    capabilities: { hooks: { since: '0.116.0' }, mcp: true, mcpHttp: true, mcpHeaders: false, allowlist: { since: '0.138.0' }, skills: true, commands: { until: '0.117.0' }, plugins: { since: '0.128.0' }, subagents: { since: '0.117.0' }, rules: { file: 'AGENTS.md' }, workflows: false, memory: true, modes: ['plan', 'edit', 'skip'], interactiveRepl: true },
   },
   gemini: {
     id: 'gemini',
@@ -278,17 +281,19 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     nativeAgentsSkillsDir: true,
     // Google retired the Gemini CLI (announced at Google I/O 2026, May 19); the `gemini`
     // command stopped serving free/Pro/Ultra requests on June 18, 2026. Antigravity CLI
-    // (`agy`) is the official successor. See warnAgentDeprecated() for the surfaced warning.
+    // (`agy`) is the official successor. Hard deprecation keeps legacy Gemini
+    // sessions/config parseable while blocking install/import/sync.
     deprecated: {
       by: 'Google',
       date: 'June 18, 2026',
       reason: 'The Gemini CLI was retired for free, Pro, and Ultra tiers and no longer serves requests (announced at Google I/O 2026 on May 19).',
       replacement: 'antigravity',
       url: 'https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/',
+      hard: true,
     },
     // gemini hooks: shipped in v0.26.0 (Jan 2026); older binaries silently ignore the `hooks` key.
     // extensions: gemini-extension.json bundles shipped in v0.8.0; custom subagents in v0.36.0.
-    capabilities: { hooks: { since: '0.26.0' }, mcp: true, mcpHttp: true, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: { since: '0.8.0' }, subagents: { since: '0.36.0' }, rules: { file: 'GEMINI.md' }, workflows: false, memory: false, modes: ['plan', 'edit', 'skip'], rulesImports: true },
+    capabilities: { hooks: { since: '0.26.0' }, mcp: true, mcpHttp: true, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: { since: '0.8.0' }, subagents: { since: '0.36.0' }, rules: { file: 'GEMINI.md' }, workflows: false, memory: false, modes: ['plan', 'edit', 'skip'], rulesImports: true, interactiveRepl: false },
   },
   cursor: {
     id: 'cursor',
@@ -321,7 +326,9 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     // + warns for pre-2.4 installs); the direct `subagents add --agents cursor` path
     // writes unconditionally, same as the other since-gated agents.
     // See transformSubagentForCursor / https://cursor.com/docs/subagents.
-    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '2026.1.22' }, rules: { file: '.cursorrules' }, workflows: false, memory: false, modes: ['edit', 'skip'] }, // allowlist: ~/.cursor/cli-config.json
+    // interactiveRepl: false — cursor-agent exits immediately with no argv. It requires a
+    // prompt to do anything useful; a bare invocation is not a REPL (RUSH-2185, EXEC-23a).
+    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '2026.1.22' }, rules: { file: '.cursorrules' }, workflows: false, memory: false, modes: ['edit', 'skip'], interactiveRepl: false }, // allowlist: ~/.cursor/cli-config.json
   },
   opencode: {
     id: 'opencode',
@@ -343,7 +350,45 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     format: 'markdown',
     variableSyntax: '$ARGUMENTS',
     supportsHooks: true,
-    capabilities: { hooks: { since: '0.3.130' }, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: { since: '1.1.1' }, skills: true, commands: true, plugins: true, subagents: true, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit'] },
+    capabilities: { hooks: { since: '0.3.130' }, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: { since: '1.1.1' }, skills: true, commands: true, plugins: true, subagents: true, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit'], interactiveRepl: true },
+  },
+  // Oh My Pi (`omp`, omp.sh) — a Bun-based, terminal-first coding agent that runs
+  // against many model providers (OpenRouter, OpenAI, Anthropic, xAI, DeepSeek,
+  // Ollama, LM Studio, …). It is Claude-compatible: it natively discovers
+  // `.claude/commands`, `.mcp.json`, and Claude-shaped subagents, and keeps its
+  // own native resources under `~/.omp/agent/` (config dir reported by
+  // `omp config path`). configDir points AT the agent dir (not `~/.omp`) so the
+  // rules file lands at `~/.omp/agent/AGENTS.md`, the user context file omp reads.
+  pi: {
+    id: 'pi',
+    name: 'Pi',
+    color: 'magenta',
+    cliCommand: 'omp',
+    npmPackage: '@oh-my-pi/pi-coding-agent',
+    configDir: path.join(HOME, '.omp', 'agent'),
+    commandsDir: path.join(HOME, '.omp', 'agent', 'commands'),
+    commandsSubdir: 'commands',
+    skillsDir: path.join(HOME, '.omp', 'agent', 'skills'),
+    hooksDir: 'hooks',
+    instructionsFile: 'AGENTS.md',
+    format: 'markdown',
+    variableSyntax: '$ARGUMENTS',
+    // omp hooks are per-tool JS/TS extension modules discovered from
+    // `~/.omp/agent/hooks/{pre,post}/<tool>.<ext>` (loaded as HookFactory code),
+    // NOT the event->shell-command registrations agents-cli's hook sync writes.
+    // The two models don't map, so hooks stay off (capabilities.hooks:false).
+    supportsHooks: false,
+    // MCP: omp reads `.mcp.json` with the Claude `{ "mcpServers": {...} }` schema
+    // at user scope (`~/.omp/agent/.mcp.json`) and project scope (`<root>/.mcp.json`),
+    // stdio + http + sse with headers. skills (`~/.omp/agent/skills/<name>/SKILL.md`),
+    // commands (`~/.omp/agent/commands/*.md`), and subagents (`~/.omp/agent/agents/*.md`,
+    // Claude-shaped) are all native. allowlist is OFF: omp gates approval per-TOOL
+    // only (`tools.approval` record: allow|prompt|deny) with no command/path/domain
+    // patterns, so agents-cli's granular permission format has nothing to map to.
+    // plugins are npm packages / TS modules, not the Claude marketplace manifest.
+    // interactiveRepl: true — bare `omp` runs the TUI; `omp -p` is the one-shot
+    // form that answers a prompt and exits (upstream README, "Four entry points").
+    capabilities: { hooks: false, mcp: true, mcpHttp: true, mcpHeaders: true, allowlist: false, skills: true, commands: true, plugins: false, subagents: true, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit', 'skip'], interactiveRepl: true },
   },
   openclaw: {
     id: 'openclaw',
@@ -368,7 +413,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     // OpenClaw is self-updating (no pinned since), so `true` is correct.
     // Workflows sync as Lobster `.lobster` files under `.openclaw/workflows/`;
     // the Lobster tool runs them by receiving the file path as `pipeline`.
-    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: false, plugins: true, subagents: true, rules: { file: 'workspace/AGENTS.md' }, workflows: true, memory: true, modes: ['plan', 'edit', 'skip'] },
+    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: false, plugins: true, subagents: true, rules: { file: 'workspace/AGENTS.md' }, workflows: true, memory: true, modes: ['plan', 'edit', 'skip'], interactiveRepl: true },
   },
   copilot: {
     id: 'copilot',
@@ -393,7 +438,9 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     format: 'markdown',
     variableSyntax: '$ARGUMENTS',
     supportsHooks: true,
-    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '0.0.353' }, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit', 'auto', 'skip'] },
+    // interactiveRepl: false — copilot requires a prompt for meaningful work; bare invocation
+    // opens a welcome screen but not a persistent coding REPL suitable for agents focus.
+    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '0.0.353' }, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit', 'auto', 'skip'], interactiveRepl: false },
   },
   amp: {
     id: 'amp',
@@ -410,7 +457,8 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     format: 'markdown',
     variableSyntax: '$ARGUMENTS',
     supportsHooks: false,
-    capabilities: { hooks: false, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: false, skills: true, commands: true, plugins: false, subagents: false, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit'] },
+    // interactiveRepl: false — amp requires a prompt; bare invocation exits immediately.
+    capabilities: { hooks: false, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: false, skills: true, commands: true, plugins: false, subagents: false, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['plan', 'edit'], interactiveRepl: false },
   },
   kiro: {
     id: 'kiro',
@@ -433,7 +481,9 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     format: 'markdown',
     variableSyntax: '$ARGUMENTS',
     supportsHooks: true,
-    capabilities: { hooks: { since: '0.10.0' }, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: { since: '2.8.0' }, skills: true, commands: true, plugins: false, subagents: { since: '1.23.0' }, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['edit'] },
+    // interactiveRepl: false — kiro-cli requires a prompt for coding sessions; bare
+    // invocation does not open a persistent REPL.
+    capabilities: { hooks: { since: '0.10.0' }, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: { since: '2.8.0' }, skills: true, commands: true, plugins: false, subagents: { since: '1.23.0' }, rules: { file: 'AGENTS.md' }, workflows: false, memory: false, modes: ['edit'], interactiveRepl: false },
   },
   goose: {
     id: 'goose',
@@ -465,7 +515,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     // under `slash_commands: [{ command, recipe_path }]` (see goose-commands.ts).
     // Subagents: recipe YAML named agents under ~/.config/goose/agents/<name>.yaml
     // (goose auto-discovers and delegates to them by name in autonomous mode).
-    capabilities: { hooks: { since: '1.34.0' }, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: { since: '1.25.0' }, commands: true, plugins: true, subagents: true, rules: { file: 'AGENTS.md' }, workflows: true, memory: false, modes: ['edit'] },
+    capabilities: { hooks: { since: '1.34.0' }, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: { since: '1.25.0' }, commands: true, plugins: true, subagents: true, rules: { file: 'AGENTS.md' }, workflows: true, memory: false, modes: ['edit'], interactiveRepl: true },
   },
   // Google Antigravity CLI (`agy`) — official replacement for Gemini CLI as of IO 2026.
   // configDir nests inside `~/.gemini/` since agy shares the parent dir with the Gemini
@@ -494,7 +544,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     variableSyntax: '{{args}}',
     supportsHooks: true,
     cloudProvider: 'antigravity',
-    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '1.0.16' }, rules: { file: 'AGENTS.md' }, workflows: { since: '1.0.6' }, memory: false, modes: ['edit', 'skip'], rulesImports: false }, // workflows: markdown files in the shared, HOME-global ~/.gemini/config/global_workflows/ (agy scans it at startup; not version-isolated — see workflows.ts), invoked as /<name> slash commands
+    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '1.0.16' }, rules: { file: 'AGENTS.md' }, workflows: { since: '1.0.6' }, memory: false, modes: ['edit', 'skip'], rulesImports: false, interactiveRepl: true }, // workflows: markdown files in the shared, HOME-global ~/.gemini/config/global_workflows/ (agy scans it at startup; not version-isolated — see workflows.ts), invoked as /<name> slash commands
   },
   // xAI Grok Build CLI (`grok`) — early beta, SuperGrok Heavy. Auth via OAuth on
   // first launch, or XAI_API_KEY env var for headless. MCP servers configured inline
@@ -545,6 +595,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
       // to auto (→ edit via resolveMode). Interactive plan is unaffected.
       headlessPlan: false,
       rulesImports: true,
+      interactiveRepl: true,
     },
   },
   // Kimi Code CLI (`kimi`) — Moonshot AI coding agent.
@@ -588,6 +639,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
       // auto-runs). Interactive plan is unaffected.
       headlessPlan: false,
       rulesImports: false,
+      interactiveRepl: true,
     },
   },
   // Factory AI Droid CLI (`droid`) — agentic coding CLI from factory.ai.
@@ -669,6 +721,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
       memory: false,
       modes: ['plan', 'edit', 'auto', 'skip'],
       rulesImports: false,
+      interactiveRepl: true,
     },
   },
   // Nous Hermes Agent. Config lives under ~/.hermes/config.yaml; MCP servers
@@ -718,62 +771,25 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
       memory: true,
       modes: ['edit'],
       rulesImports: false,
-    },
-  },
-  // ForgeCode (`forge`) from Tailcall. It reads AGENTS.md project rules,
-  // SKILL.md directories, and MCP servers from `.mcp.json` files.
-  forge: {
-    id: 'forge',
-    name: 'ForgeCode',
-    color: 'greenBright',
-    cliCommand: 'forge',
-    npmPackage: '',
-    installScript: 'curl -fsSL https://forgecode.dev/cli | sh',
-    configDir: path.join(HOME, '.forge'),
-    commandsDir: path.join(HOME, '.forge', 'commands'),
-    commandsSubdir: 'commands',
-    skillsDir: path.join(HOME, '.forge', 'skills'),
-    hooksDir: 'hooks',
-    instructionsFile: 'AGENTS.md',
-    format: 'markdown',
-    variableSyntax: '$ARGUMENTS',
-    supportsHooks: false,
-    // Commands: ForgeCode reads Markdown slash commands from `~/.forge/commands/<name>.md`
-    // (also the shared `~/.agents/commands/`); the filename is the command name.
-    // Subagents: named `.md` agent definitions with YAML frontmatter under
-    // `~/.forge/agents/<name>.md` — same Markdown+frontmatter shape as Droid/Copilot
-    // (no `color` field), so transformSubagentForForge aliases transformSubagentForDroid.
-    // See https://forgecode.dev/docs/commands/ and /docs/agent-definition-guide/.
-    capabilities: {
-      hooks: false,
-      mcp: true,
-      mcpHttp: true,
-      mcpHeaders: false,
-      // Permissions: ~/.forge/permissions.yaml (or $FORGE_CONFIG/permissions.yaml)
-      // carries ordered operation-family glob policies. It is active only when
-      // `.forge.toml` sets `restricted = true`; MCP tools bypass this file.
-      allowlist: true,
-      skills: true,
-      commands: true,
-      plugins: false,
-      subagents: true,
-      rules: { file: 'AGENTS.md' },
-      workflows: false,
-      memory: false,
-      modes: ['edit'],
-      rulesImports: false,
+      interactiveRepl: true,
     },
   },
 };
 
-/** All registered agent IDs derived from the AGENTS registry. */
+/** All current and legacy agent IDs derived from the AGENTS registry. */
 export const ALL_AGENT_IDS: AgentId[] = Object.keys(AGENTS) as AgentId[];
+
+/** Agents retained only for legacy reads, not install/import/sync targets. */
+export const HARD_DEPRECATED_AGENT_IDS: AgentId[] = ALL_AGENT_IDS.filter((id) => AGENTS[id].deprecated?.hard);
+
+/** Agents that can receive managed installs, imports, and resource sync writes. */
+export const MANAGED_AGENT_IDS: AgentId[] = ALL_AGENT_IDS.filter((id) => !AGENTS[id].deprecated?.hard);
 
 /**
  * A self-updating agent is a single global binary installed by an official
  * `curl … | sh` / `brew install` script that carries NO version token — the
  * installer can only ever fetch the *current* release, and the binary then keeps
- * itself up to date in place (droid, grok, antigravity, cursor, hermes, forge,
+ * itself up to date in place (droid, grok, antigravity, cursor, hermes,
  * kiro, goose). There is no semver to pin, so agents-cli must not model these as
  * having multiple installable version-homes the way it does for npm-packaged
  * agents (claude, codex, kimi, …).
@@ -792,6 +808,10 @@ export const ALL_AGENT_IDS: AgentId[] = Object.keys(AGENTS) as AgentId[];
 export function isSelfUpdatingAgent(agent: AgentId): boolean {
   const cfg = AGENTS[agent];
   return !cfg.npmPackage && !!cfg.installScript && !cfg.installScript.includes('VERSION');
+}
+
+export function isAgentHardDeprecated(agent: AgentId): boolean {
+  return AGENTS[agent].deprecated?.hard === true;
 }
 
 // Capability-filtered agent lists used to live here as `*_CAPABLE_AGENTS`
@@ -1128,6 +1148,7 @@ export const ACCOUNT_INSPECTION_AGENT_IDS = [
   'claude',
   'codex',
   'gemini',
+  'cursor',
   'grok',
   'antigravity',
   'kimi',
@@ -1195,6 +1216,78 @@ function resolveAccountCredentialPath(base: string, ...segments: string[]): stri
   return null;
 }
 
+/**
+ * The on-disk credential file(s) each account-inspectable agent authenticates
+ * from, expressed as path segments under a home. Mirrors the exact files
+ * {@link getAccountInfo} reads, so a presence check here matches what a real
+ * launch would find. Each entry is a list of alternatives — the FIRST that
+ * exists counts as present (claude writes either `.claude/.claude.json` under
+ * the shimmed config dir or a home-level `.claude.json`). Agents whose login is
+ * stored only in the OS keychain on some platforms (antigravity, and claude's
+ * token) still expose a credential FILE — the presence of that file is the
+ * signal we key off; its absence on BOTH the per-version home and the active
+ * home is what makes a logged-out claim provable.
+ */
+const CREDENTIAL_FILE_SEGMENTS: Partial<Record<AgentId, string[][]>> = {
+  claude: [['.claude', '.claude.json'], ['.claude.json']],
+  codex: [['.codex', 'auth.json']],
+  gemini: [['.gemini', 'google_accounts.json']],
+  grok: [['.grok', 'auth.json']],
+  kimi: [['.kimi-code', 'credentials', 'kimi-code.json']],
+  droid: [['.factory', 'auth.v2.file']],
+  antigravity: [['.gemini', 'antigravity-cli', 'antigravity-oauth-token']],
+  opencode: [['.local', 'share', 'opencode', 'auth.json']],
+};
+
+/** Whether an agent's credential file exists under a given home. */
+function credentialFileExistsUnder(agentId: AgentId, home: string): boolean {
+  const alternatives = CREDENTIAL_FILE_SEGMENTS[agentId];
+  if (!alternatives) return false;
+  for (const segments of alternatives) {
+    const p = path.join(home, ...segments);
+    try { if (fs.existsSync(p)) return true; } catch { /* unreadable */ }
+  }
+  return false;
+}
+
+/** Where an agent's credential file lives, split into the per-version copy and
+ *  the active/global copy under the real HOME. */
+export interface CredentialPresence {
+  /** The credential file exists inside the passed version home. */
+  perVersion: boolean;
+  /** The credential file exists under the active/global HOME (the one the login
+   *  symlink actually targets), independent of the version home. */
+  active: boolean;
+  /** Whether agents-cli knows WHERE this agent's credential lives at all — i.e.
+   *  the agent has an entry in {@link CREDENTIAL_FILE_SEGMENTS}. When false both
+   *  probes are trivially false because there is nothing to look for, so absence
+   *  is NOT evidence of a logout and no caller may treat it as provable.
+   *
+   *  This is deliberately separate from `supportsAccountInspection`: the two
+   *  registries move independently, and an agent has already been added to the
+   *  inspection set without a credential path (cursor), which without this flag
+   *  produced a false "logged out" critical for every installed version. */
+  knownLocation: boolean;
+}
+
+/**
+ * File-presence probe for an agent's credential, split by location: whether it
+ * exists in a SPECIFIC version home (`perVersion`) and whether it exists under
+ * the active/global HOME (`active`). A logged-out claim is only *provable* when
+ * BOTH are absent — a version that merely lacks its own copy but shares the
+ * global login is signed in, not logged out. Pure file existence; no decrypt,
+ * no network, no keychain prompt. Agents with no inspectable identity return
+ * `{ perVersion: false, active: false }` and must NEVER yield a provable-logout
+ * claim (the caller gates on {@link supportsAccountInspection}).
+ */
+export function credentialPresence(agentId: AgentId, versionHome: string): CredentialPresence {
+  const realHome = process.env.AGENTS_REAL_HOME || os.homedir();
+  const perVersion = credentialFileExistsUnder(agentId, versionHome);
+  const active = credentialFileExistsUnder(agentId, realHome);
+  const knownLocation = (CREDENTIAL_FILE_SEGMENTS[agentId]?.length ?? 0) > 0;
+  return { perVersion, active, knownLocation };
+}
+
 /** Decrypted contents of Droid's auth.v2.file (subset we consume). */
 export interface DroidAuthPayload {
   access_token?: string;
@@ -1257,8 +1350,10 @@ export function decryptDroidAuthFile(filePath: string, keyPath: string): DroidAu
  *     -> email / org_id / sub.
  *   - kimi: credentials/kimi-code.json -> access-token JWT -> user_id / sub.
  *   - antigravity: antigravity-oauth-token -> token.refresh_token -> JWT sub
- *     when the token is a JWT, else the raw refresh-token value (opaque Google
- *     consumer tokens are stable per login).
+ *     when the token is a JWT, else a SHA-256 hash of the raw refresh-token
+ *     value (opaque Google consumer tokens are stable per login — hashed so
+ *     the identity key, which is persisted as a usage-cache key, never carries
+ *     a live credential).
  * Two directories for the SAME account compare equal; two DIFFERENT accounts
  * compare distinct. Used by carryForwardAuthFiles to refuse overwriting one
  * account's login with a credential that belongs to a DIFFERENT account
@@ -1299,7 +1394,11 @@ export function readAuthAccountIdentity(agent: AgentId, configDir: string): stri
         if (typeof refreshToken !== 'string' || !refreshToken) return null;
         const claims = decodeJwtPayload(refreshToken);
         const sub = normalizeIdentityPart(claims?.sub ?? claims?.user_id);
-        return buildIdentityKey(agent, [['sub', sub ?? refreshToken]]);
+        // An opaque (non-JWT) Google refresh token IS the credential — hash it
+        // so the identity key stays stable per login without embedding a live
+        // secret (the key is persisted as a usage-cache filename key).
+        const fallback = crypto.createHash('sha256').update(refreshToken).digest('hex').slice(0, 16);
+        return buildIdentityKey(agent, [['sub', sub ?? fallback]]);
       }
       default:
         return null;
@@ -1503,6 +1602,88 @@ export function isClaudeCredentialFileBlank(
   }
 }
 
+/**
+ * Identity of the Claude account a version home is (or was) logged into, read
+ * straight from `.claude.json`'s `oauthAccount`.
+ *
+ * Deliberately independent of whether the credential still works. `getAccountInfo`
+ * applies a credential floor so `agents view` and rotation route around an install
+ * that would die at spawn; attribution of *history* must not. A transcript written
+ * under an org is still that org's work after the token is revoked or the home is
+ * trashed, and on Linux/Windows the floor would otherwise erase the identity of
+ * every retired home (`isClaudeCredentialFileBlank` short-circuits only on darwin).
+ */
+export interface ClaudeHomeIdentity {
+  email: string | null;
+  accountId: string | null;
+  organizationId: string | null;
+  organizationName: string | null;
+  organizationType: string | null;
+  /**
+   * Org-scoped identity — the rate-limit bucket, and the correct key to group by.
+   * Two orgs under one email (a Team seat and a personal Max plan) are separate
+   * buckets and MUST stay distinct; see `candidateIdentity` in lib/rotate.ts.
+   */
+  usageKey: string | null;
+  /** Account+org identity, narrower than `usageKey`. */
+  accountKey: string | null;
+}
+
+/** A version home's `.claude.json` plus the identity derived from it. */
+export interface ClaudeHomeConfig {
+  /** The config file actually read. */
+  path: string;
+  config: Record<string, any>;
+  identity: ClaudeHomeIdentity;
+}
+
+/**
+ * Read a Claude home's config and account identity. Returns null when the home has
+ * no readable `.claude.json`, or has one with no `oauthAccount` (never signed in).
+ *
+ * Sync because the session scanner calls it once per home on a hot path, and the
+ * file is a few KB of local JSON. No Keychain access — see `getAccountInfo`.
+ */
+export function readClaudeHomeConfig(base: string): ClaudeHomeConfig | null {
+  // Claude reads/writes config at $CLAUDE_CONFIG_DIR/.claude.json when set, falling
+  // back to $HOME/.claude.json. Our shim sets CLAUDE_CONFIG_DIR to the per-version
+  // .claude dir, so prefer that file; fall back to home-level for versions ever
+  // launched without the shim (IDE extension, direct binary).
+  const configDirFile = path.join(base, '.claude', '.claude.json');
+  const homeLevelFile = path.join(base, '.claude.json');
+  const activeFile = fs.existsSync(configDirFile) ? configDirFile : homeLevelFile;
+
+  let config: Record<string, any>;
+  try {
+    config = JSON.parse(fs.readFileSync(activeFile, 'utf-8'));
+  } catch {
+    return null;
+  }
+
+  const oa = config.oauthAccount;
+  if (!oa) return null;
+
+  const accountId = normalizeIdentityPart(oa.accountUuid);
+  const organizationId = normalizeIdentityPart(oa.organizationUuid);
+
+  return {
+    path: activeFile,
+    config,
+    identity: {
+      email: oa.emailAddress || null,
+      accountId,
+      organizationId,
+      organizationName: oa.organizationName ?? null,
+      organizationType: oa.organizationType ?? null,
+      usageKey: buildIdentityKey('claude', [['org', organizationId]]),
+      accountKey: buildIdentityKey('claude', [
+        ['account', accountId],
+        ['org', organizationId],
+      ]),
+    },
+  };
+}
+
 export async function getAccountInfo(
   agentId: AgentId,
   home?: string
@@ -1532,18 +1713,15 @@ export async function getAccountInfo(
   try {
     switch (agentId) {
       case 'claude': {
-        // Claude reads/writes config at $CLAUDE_CONFIG_DIR/.claude.json when set,
-        // falling back to $HOME/.claude.json. Our shim sets CLAUDE_CONFIG_DIR to
-        // the per-version .claude dir, so prefer that file; fall back to home-level
-        // for versions ever launched without the shim (IDE extension, direct binary).
-        const configDirFile = path.join(base, '.claude', '.claude.json');
-        const homeLevelFile = path.join(base, '.claude.json');
-        const activeFile = fs.existsSync(configDirFile) ? configDirFile : homeLevelFile;
-        const data = JSON.parse(await fs.promises.readFile(activeFile, 'utf-8'));
+        // Identity extraction is shared with the session scanner's account
+        // attribution — see readClaudeHomeConfig. A home with no readable config or
+        // no oauthAccount is signed out, which is what the pre-refactor code
+        // produced when JSON.parse threw or oauthAccount was absent.
+        const claudeHome = readClaudeHomeConfig(base);
+        if (!claudeHome) return { ...empty, lastActive };
+        const { config: data, identity } = claudeHome;
         const oa = data.oauthAccount;
-        const accountId = normalizeIdentityPart(oa?.accountUuid);
-        const organizationId = normalizeIdentityPart(oa?.organizationUuid);
-        const email = oa?.emailAddress || null;
+        const { accountId, organizationId, email, accountKey, usageKey } = identity;
 
         // Credential floor: a blanked credential file means this home cannot
         // authenticate, whatever `.claude.json` still says. Report it signed out
@@ -1552,12 +1730,6 @@ export async function getAccountInfo(
         if (email && isClaudeCredentialFileBlank(base)) {
           return { ...empty, lastActive };
         }
-
-        const accountKey = buildIdentityKey(agentId, [
-          ['account', accountId],
-          ['org', organizationId],
-        ]);
-        const usageKey = buildIdentityKey(agentId, [['org', organizationId]]);
 
         // Plan tier is derived from .claude.json's organizationType, which carries
         // the TRUE tier (claude_max → "Max", claude_pro → "Pro", claude_team →
@@ -1662,6 +1834,34 @@ export async function getAccountInfo(
         const email = data.active || null;
         return { ...empty, email, signedIn: !!email, lastActive };
       }
+      case 'cursor': {
+        // Cursor CLI keeps account metadata in ~/.cursor/cli-config.json
+        // (authInfo: { email, userId, authId }) and its OAuth tokens SEPARATELY
+        // in ~/.config/cursor/auth.json ({ accessToken, refreshToken }). Presence
+        // of an access token is the signed-in signal; email/ids come from
+        // cli-config. authId is the OAuth subject (e.g. "google-oauth2|<n>") — the
+        // same value the usage endpoint keys on (see getCursorUsageInfo).
+        const cfgPath = resolveAccountCredentialPath(base, '.cursor', 'cli-config.json');
+        if (!cfgPath) return { ...empty, lastActive };
+        try {
+          const cfg = JSON.parse(await fs.promises.readFile(cfgPath, 'utf-8'));
+          const authInfo = cfg?.authInfo;
+          const email = typeof authInfo?.email === 'string' ? authInfo.email : null;
+          const accountId = normalizeIdentityPart(authInfo?.authId ?? authInfo?.userId);
+          if (!email && !accountId) return { ...empty, lastActive };
+          const authPath = resolveAccountCredentialPath(base, '.config', 'cursor', 'auth.json');
+          let hasToken = false;
+          if (authPath) {
+            try {
+              const tok = JSON.parse(fs.readFileSync(authPath, 'utf-8'));
+              hasToken = typeof tok?.accessToken === 'string' && tok.accessToken.length > 0;
+            } catch { /* unreadable token file */ }
+          }
+          const accountKey = buildIdentityKey(agentId, [['user', accountId]]);
+          return { ...empty, email, accountId, accountKey, signedIn: hasToken || !!email, lastActive };
+        } catch {}
+        return { ...empty, lastActive };
+      }
       case 'grok': {
         // Grok stores auth in ~/.grok/auth.json as a map keyed by
         // "<oidc_issuer>::<client_id>" -> { email, user_id, refresh_token,
@@ -1703,10 +1903,20 @@ export async function getAccountInfo(
         if (tokenPath) {
           const data = JSON.parse(await fs.promises.readFile(tokenPath, 'utf-8'));
           if (typeof data?.token?.refresh_token === 'string' && data.token.refresh_token) {
-            return { ...empty, signedIn: true, lastActive };
+            // A stable account/usage key (derived from the refresh token — see
+            // readAuthAccountIdentity) lets `agents view` dedupe and cache the
+            // per-model quota bars for this login.
+            const identity = readAuthAccountIdentity('antigravity', path.dirname(tokenPath));
+            return { ...empty, signedIn: true, lastActive, accountKey: identity, usageKey: identity };
           }
         }
-        if (await antigravityKeychainSignedIn()) return { ...empty, signedIn: true, lastActive };
+        if (await antigravityKeychainSignedIn()) {
+          // Keyring-only login (the macOS case): the OS keyring holds exactly
+          // ONE antigravity credential, so a stable singleton key identifies it
+          // for usage-cache dedup without reading the secret value here.
+          const identity = buildIdentityKey('antigravity', [['sub', 'keychain']]);
+          return { ...empty, signedIn: true, lastActive, accountKey: identity, usageKey: identity };
+        }
         return { ...empty, lastActive };
       }
       case 'kimi': {
@@ -1787,8 +1997,8 @@ export async function getAccountInfo(
 }
 
 // Fresh window for the cached session walk. Matches USAGE_CACHE_FRESH_MS in
-// usage.ts so a launch storm reuses both probes for the same period.
-const LAST_ACTIVE_CACHE_FRESH_MS = 2 * 60 * 1000;
+// usage.ts (5 minutes) so a launch storm reuses both probes for the same period.
+const LAST_ACTIVE_CACHE_FRESH_MS = 5 * 60 * 1000;
 
 const getLastActiveCachePath = () => path.join(getCacheDir(), 'last-active.json');
 
@@ -1991,7 +2201,7 @@ export async function registerMcp(
   options?: { home?: string; binary?: string; headers?: Record<string, string> }
 ): Promise<{ success: boolean; error?: string }> {
   const agent = AGENTS[agentId];
-  if (!agent.capabilities.mcp) {
+  if (!supports(agentId, 'mcp').ok) {
     return { success: false, error: 'Agent does not support MCP' };
   }
   if (transport === 'http' && !supports(agentId, 'mcpHttp').ok) {
@@ -2000,7 +2210,7 @@ export async function registerMcp(
   if (transport === 'http' && options?.headers && Object.keys(options.headers).length > 0 && !supports(agentId, 'mcpHeaders').ok) {
     return { success: false, error: 'skipped: HTTP MCP headers are only supported for Claude registration' };
   }
-  if (agentId === 'hermes' || agentId === 'forge') {
+  if (agentId === 'hermes') {
     try {
       writeMcpToConfig(agentId, name, command, scope, transport, options?.home);
       return { success: true };
@@ -2052,10 +2262,10 @@ export async function unregisterMcp(
   options?: { home?: string; binary?: string }
 ): Promise<{ success: boolean; error?: string }> {
   const agent = AGENTS[agentId];
-  if (!agent.capabilities.mcp) {
+  if (!supports(agentId, 'mcp').ok) {
     return { success: false, error: 'Agent does not support MCP' };
   }
-  if (agentId === 'hermes' || agentId === 'forge') {
+  if (agentId === 'hermes') {
     try {
       removeMcpFromConfig(agentId, name, options?.home);
       return { success: true };
@@ -2486,7 +2696,8 @@ export function getUserMcpConfigPath(agentId: AgentId): string {
       return path.join(agent.configDir, 'mcp.json');
     case 'hermes':
       return path.join(agent.configDir, 'config.yaml');
-    case 'forge':
+    case 'pi':
+      // omp reads user-scope MCP from ~/.omp/agent/.mcp.json (Claude schema).
       return path.join(agent.configDir, '.mcp.json');
     default:
       // Gemini and others use settings.json
@@ -2525,8 +2736,8 @@ export function getMcpConfigPathForHome(agentId: AgentId, home: string): string 
       return path.join(home, '.factory', 'mcp.json');
     case 'hermes':
       return path.join(home, '.hermes', 'config.yaml');
-    case 'forge':
-      return path.join(home, '.forge', '.mcp.json');
+    case 'pi':
+      return path.join(home, '.omp', 'agent', '.mcp.json');
     default:
       return path.join(home, agentConfigDirName(agentId), 'settings.json');
   }
@@ -2567,7 +2778,8 @@ export function getProjectMcpConfigPath(agentId: AgentId, cwd: string = process.
       return path.join(cwd, '.factory', 'mcp.json');
     case 'hermes':
       return path.join(cwd, '.hermes', 'config.yaml');
-    case 'forge':
+    case 'pi':
+      // omp reads project MCP from <root>/.mcp.json (Claude-compatible).
       return path.join(cwd, '.mcp.json');
     default:
       return path.join(cwd, `.${agentId}`, 'settings.json');
@@ -2731,9 +2943,6 @@ export const AGENT_NAME_ALIASES: Record<string, AgentId> = {
   droid: 'droid',
   hermes: 'hermes',
   'hermes-agent': 'hermes',
-  forge: 'forge',
-  forgecode: 'forge',
-  'forge-code': 'forge',
 };
 
 /**
@@ -2782,6 +2991,26 @@ export function deprecationNotice(agent: AgentId): string[] | null {
   }
   if (dep.url) lines.push(`  ${dep.url}`);
   return lines;
+}
+
+export function hardDeprecationNotice(agent: AgentId): string[] | null {
+  const dep = AGENTS[agent].deprecated;
+  if (!dep?.hard) return null;
+  const name = AGENTS[agent].name;
+  const lines = [
+    `${name} is no longer supported by agents-cli because ${dep.by} retired it (${dep.date}).`,
+    `  ${dep.reason}`,
+  ];
+  if (dep.replacement) {
+    const rep = AGENTS[dep.replacement];
+    lines.push(`  Use ${rep.name} instead:  agents add ${rep.id}`);
+  }
+  if (dep.url) lines.push(`  ${dep.url}`);
+  return lines;
+}
+
+export function hardDeprecationError(agent: AgentId): string {
+  return hardDeprecationNotice(agent)?.join('\n') ?? `${AGENTS[agent].name} is no longer supported.`;
 }
 
 /**

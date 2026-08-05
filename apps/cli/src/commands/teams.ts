@@ -7,7 +7,7 @@
  */
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { die, relTime, truncate, isJsonMode, padRight } from '../lib/format.js';
+import { die, dieFriction, relTime, truncate, isJsonMode, padRight } from '../lib/format.js';
 import * as fs from 'fs/promises';
 import { addHostOption } from '../lib/hosts/option.js';
 import * as path from 'path';
@@ -63,6 +63,7 @@ import {
   removeWorktree,
 } from '../lib/teams/worktree.js';
 import { resolveHost } from '../lib/hosts/registry.js';
+import { isDeviceAuto, resolveDeviceAffinity } from '../lib/smart-launch.js';
 import { sshTargetFor } from '../lib/hosts/types.js';
 import { ensureHostReady } from '../lib/hosts/ready.js';
 import { remoteShellFor } from '../lib/hosts/remote-cmd.js';
@@ -80,6 +81,7 @@ import { buildPreview as buildSessionPreview } from './sessions-picker.js';
 import { parseExecEnv } from '../lib/exec.js';
 import { checkRunAccountReadiness, type AccountReadiness } from '../lib/rotate.js';
 import { teamPicker, printTeamTable, type TeamRow } from './teams-picker.js';
+import { teamSpawners, type TeamSpawner } from '../lib/session/db.js';
 import { itemPicker } from '../lib/picker.js';
 import type { AgentProcess } from '../lib/teams/agents.js';
 import { profileExists, readProfile } from '../lib/profiles.js';
@@ -102,7 +104,7 @@ const AGENT_NAMES: Record<AgentType, string> = {
   droid: 'Droid',
 };
 
-const VALID_AGENTS = Object.keys(AGENT_NAMES) as AgentType[];
+const VALID_AGENTS: AgentType[] = ['claude', 'codex', 'cursor', 'opencode', 'grok', 'antigravity', 'kimi', 'droid'];
 // 'full' kept as historical alias for 'skip'; normalized to 'skip' downstream.
 const VALID_MODES = ['plan', 'edit', 'auto', 'skip', 'full'] as const;
 const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'] as const;
@@ -110,6 +112,28 @@ const VALID_CLOUD_PROVIDERS = ['rush', 'codex', 'factory'] as const satisfies re
 
 type Mode = (typeof VALID_MODES)[number];
 type Effort = (typeof VALID_EFFORTS)[number];
+type TeamRegistry = Record<string, { created_at: string; description?: string }>;
+
+export interface TeamListAgentSnapshot {
+  agent_id: string;
+  task_name: string;
+  agent_type: string;
+  status: string;
+  prompt: string;
+  started_at: string;
+  completed_at: string | null;
+  workspace_dir: string | null;
+  version: string | null;
+  remote_session_id: string | null;
+  name: string | null;
+  after: string[];
+  task_type: TaskType | null;
+  host: string | null;
+  mode: string | null;
+  cloud_session_id: string | null;
+  cloud_provider: string | null;
+  pr_url: string | null;
+}
 
 function statusColor(status: string): (s: string) => string {
   switch (status) {
@@ -136,6 +160,74 @@ function formatTimestamp(iso: string | null | undefined): string | null {
     hour: 'numeric',
     minute: '2-digit',
   });
+}
+
+function normalizeTeamListStatus(status: unknown): AgentStatus {
+  if (Object.values(AgentStatus).includes(status as AgentStatus)) {
+    return status as AgentStatus;
+  }
+  return AgentStatus.RUNNING;
+}
+
+function parseTimestamp(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function durationFromSnapshot(agent: TeamListAgentSnapshot): string | null {
+  const startedAt = parseTimestamp(agent.started_at);
+  if (!startedAt) return null;
+  const completedAt = parseTimestamp(agent.completed_at);
+  let seconds: number;
+  if (completedAt) {
+    seconds = (completedAt.getTime() - startedAt.getTime()) / 1000;
+  } else if (normalizeTeamListStatus(agent.status) === AgentStatus.RUNNING) {
+    seconds = (Date.now() - startedAt.getTime()) / 1000;
+  } else {
+    return null;
+  }
+  if (seconds < 60) return `${Math.max(0, Math.floor(seconds))} seconds`;
+  return `${Math.max(0, seconds / 60).toFixed(1)} minutes`;
+}
+
+function snapshotActivityTime(agent: TeamListAgentSnapshot): Date {
+  const status = normalizeTeamListStatus(agent.status);
+  if (status === AgentStatus.RUNNING) return new Date();
+  return parseTimestamp(agent.completed_at) || parseTimestamp(agent.started_at) || new Date(0);
+}
+
+function snapshotToStatusDetail(agent: TeamListAgentSnapshot): AgentStatusDetail {
+  return {
+    agent_id: agent.agent_id,
+    agent_type: agent.agent_type,
+    status: normalizeTeamListStatus(agent.status),
+    prompt: agent.prompt,
+    started_at: parseTimestamp(agent.started_at)?.toISOString() || new Date(0).toISOString(),
+    completed_at: parseTimestamp(agent.completed_at)?.toISOString() || null,
+    duration: durationFromSnapshot(agent),
+    files_created: [],
+    files_modified: [],
+    files_read: [],
+    files_deleted: [],
+    bash_commands: [],
+    recent_tool_calls: [],
+    last_messages: [],
+    tool_count: 0,
+    has_errors: false,
+    cursor: snapshotActivityTime(agent).toISOString(),
+    mode: agent.mode ?? undefined,
+    cloud_session_id: agent.cloud_session_id,
+    cloud_provider: agent.cloud_provider,
+    pr_url: agent.pr_url,
+    version: agent.version,
+    remote_session_id: agent.remote_session_id,
+    session_label: null,
+    name: agent.name,
+    after: agent.after,
+    task_type: agent.task_type,
+    host: agent.host,
+  };
 }
 
 
@@ -186,11 +278,13 @@ function parseTeammate(spec: string): {
         profileName: profile.name,
       };
     } catch (err) {
-      die(`Profile '${name}' is malformed: ${(err as Error).message}`);
+      dieFriction('teams', 'profile-malformed', `Profile '${name}' is malformed: ${(err as Error).message}`);
     }
   }
 
-  die(
+  dieFriction(
+    'teams',
+    'unknown-teammate',
     `Unknown teammate '${spec}'. Available agents: ${VALID_AGENTS.join(', ')}.\n` +
       `  Use 'claude', 'kimi@latest', 'kimi@0.19.2' (a version from 'agents view'), or a profile name.`
   );
@@ -296,6 +390,7 @@ function throttleWarningLine(
   const reason =
     r.reason === 'out_of_credits' ? 'is out of credits'
     : r.reason === 'signed_out' ? 'is not signed in'
+    : r.reason === 'revoked' ? 'needs re-login (its token was revoked)'
     : 'is rate-limited right now';
   return (
     chalk.yellow(`⚠ ${who}${acct} ${reason}.`) +
@@ -855,7 +950,7 @@ function classifyTeamStatus(t: TaskInfo): 'empty' | 'waiting' | 'working' | 'don
 // Merge persistent team registry with tasks derived from live agents so empty
 // teams (created but no teammates yet) still show up.
 function mergeTeams(
-  registry: Record<string, { created_at: string; description?: string }>,
+  registry: TeamRegistry,
   tasks: TaskInfo[]
 ): TaskInfo[] {
   const byName = new Map<string, TaskInfo>();
@@ -881,26 +976,153 @@ function mergeTeams(
   );
 }
 
-// Build the same enriched rows the `list` picker uses. Shared between `list`
-// (interactive default) and the picker fallback for `status` / `start`.
-async function loadTeamRows(
-  mgr: AgentManager
-): Promise<{ rows: TeamRow[]; names: string[] }> {
-  const [tasks, registry] = await Promise.all([handleTasks(mgr, 1000), loadTeams()]);
-  const merged = mergeTeams(registry, tasks.tasks);
-  const rows: TeamRow[] = await Promise.all(
-    merged.map(async (team) => {
-      let agents: AgentStatusDetail[] = [];
-      try {
-        const res = await handleStatus(mgr, team.task_name, 'all');
-        agents = res.agents;
-      } catch {
-        // Empty teams (no live agents) throw in some code paths.
+function buildTasksFromSnapshots(agents: TeamListAgentSnapshot[]): TaskInfo[] {
+  const byTeam = new Map<string, TeamListAgentSnapshot[]>();
+  for (const agent of agents) {
+    const teamAgents = byTeam.get(agent.task_name) || [];
+    teamAgents.push(agent);
+    byTeam.set(agent.task_name, teamAgents);
+  }
+
+  const tasks: TaskInfo[] = [];
+  for (const [taskName, teamAgents] of byTeam) {
+    let pending = 0;
+    let running = 0;
+    let completed = 0;
+    let failed = 0;
+    let stopped = 0;
+    let earliestStart: Date | null = null;
+    let latestActivity: Date | null = null;
+    let workspaceDir: string | null = null;
+
+    for (const agent of teamAgents) {
+      const status = normalizeTeamListStatus(agent.status);
+      if (status === AgentStatus.PENDING) pending++;
+      else if (status === AgentStatus.RUNNING) running++;
+      else if (status === AgentStatus.COMPLETED) completed++;
+      else if (status === AgentStatus.FAILED) failed++;
+      else if (status === AgentStatus.STOPPED) stopped++;
+
+      const startedAt = parseTimestamp(agent.started_at);
+      if (startedAt && (!earliestStart || startedAt < earliestStart)) {
+        earliestStart = startedAt;
       }
-      return { team, agents, description: registry[team.task_name]?.description };
-    })
-  );
-  return { rows, names: merged.map((t) => t.task_name) };
+
+      const activity = snapshotActivityTime(agent);
+      if (!latestActivity || activity > latestActivity) {
+        latestActivity = activity;
+      }
+
+      if (!workspaceDir && agent.workspace_dir) {
+        workspaceDir = agent.workspace_dir;
+      }
+    }
+
+    const fallback = new Date(0);
+    tasks.push({
+      task_name: taskName,
+      agent_count: teamAgents.length,
+      pending,
+      running,
+      completed,
+      failed,
+      stopped,
+      workspace_dir: workspaceDir,
+      created_at: (earliestStart || fallback).toISOString(),
+      modified_at: (latestActivity || earliestStart || fallback).toISOString(),
+    });
+  }
+
+  return tasks.sort((a, b) => new Date(b.modified_at).getTime() - new Date(a.modified_at).getTime());
+}
+
+export function buildTeamRowsFromSnapshots(
+  registry: TeamRegistry,
+  agents: TeamListAgentSnapshot[],
+  /** team name -> the session that spawned it (see teamSpawners). */
+  spawners?: Map<string, TeamSpawner>
+): { rows: TeamRow[]; teams: TaskInfo[]; names: string[] } {
+  const byTeam = new Map<string, AgentStatusDetail[]>();
+  for (const agent of agents) {
+    const details = byTeam.get(agent.task_name) || [];
+    details.push(snapshotToStatusDetail(agent));
+    byTeam.set(agent.task_name, details);
+  }
+
+  const teams = mergeTeams(registry, buildTasksFromSnapshots(agents));
+  return {
+    teams,
+    rows: teams.map((team) => ({
+      team,
+      agents: byTeam.get(team.task_name) || [],
+      description: registry[team.task_name]?.description,
+      spawnedBy: spawners?.get(team.task_name)?.shortId,
+    })),
+    names: teams.map((team) => team.task_name),
+  };
+}
+
+function snapshotFromMeta(meta: any): TeamListAgentSnapshot | null {
+  if (!meta || typeof meta !== 'object') return null;
+  const agentId = typeof meta.agent_id === 'string' ? meta.agent_id : '';
+  const taskName = typeof meta.task_name === 'string' ? meta.task_name : '';
+  const agentType = typeof meta.agent_type === 'string' ? meta.agent_type : '';
+  if (!agentId || !taskName || !agentType) return null;
+  return {
+    agent_id: agentId,
+    task_name: taskName,
+    agent_type: agentType,
+    status: normalizeTeamListStatus(meta.status),
+    prompt: typeof meta.prompt === 'string' ? meta.prompt : '',
+    started_at: parseTimestamp(meta.started_at)?.toISOString() || new Date(0).toISOString(),
+    completed_at: parseTimestamp(meta.completed_at)?.toISOString() || null,
+    workspace_dir: typeof meta.workspace_dir === 'string' ? meta.workspace_dir : null,
+    version: typeof meta.version === 'string' ? meta.version : null,
+    remote_session_id: typeof meta.remote_session_id === 'string' ? meta.remote_session_id : null,
+    name: typeof meta.name === 'string' ? meta.name : null,
+    after: Array.isArray(meta.after) ? meta.after.filter((name: unknown): name is string => typeof name === 'string') : [],
+    task_type: typeof meta.task_type === 'string' && (VALID_TASK_TYPES as readonly string[]).includes(meta.task_type)
+      ? meta.task_type as TaskType
+      : null,
+    host: typeof meta.host_name === 'string' ? meta.host_name : null,
+    mode: typeof meta.mode === 'string' ? meta.mode : null,
+    cloud_session_id: typeof meta.cloud_session_id === 'string' ? meta.cloud_session_id : null,
+    cloud_provider: typeof meta.cloud_provider === 'string' ? meta.cloud_provider : null,
+    pr_url: typeof meta.pr_url === 'string' ? meta.pr_url : null,
+  };
+}
+
+async function loadTeamAgentSnapshots(): Promise<TeamListAgentSnapshot[]> {
+  const agentsDir = await getAgentsDir();
+  const entries = await fs.readdir(agentsDir).catch(() => []);
+  const snapshots = await Promise.all(entries.map(async (entry) => {
+    const metaPath = path.join(agentsDir, entry, 'meta.json');
+    try {
+      const raw = await fs.readFile(metaPath, 'utf-8');
+      return snapshotFromMeta(JSON.parse(raw));
+    } catch {
+      return null;
+    }
+  }));
+  return snapshots.filter((snapshot): snapshot is TeamListAgentSnapshot => snapshot !== null);
+}
+
+// Build cached rows for the `list` picker. Shared between `list` and picker
+// fallbacks for `status` / `start`; full status stays lazy until a team is picked.
+async function loadTeamRows(
+  _mgr: AgentManager
+): Promise<{ rows: TeamRow[]; names: string[] }> {
+  const [registry, agents] = await Promise.all([loadTeams(), loadTeamAgentSnapshots()]);
+  // Lineage is read off the session index, not the team registry: the registry is
+  // per-machine runtime state, while the transcript that ran `teams create` is
+  // indexed, survives the teammate cleanup, and covers teams created before this.
+  let spawners: Map<string, TeamSpawner> | undefined;
+  try {
+    spawners = teamSpawners();
+  } catch {
+    // The index is an enrichment here — a missing/locked DB just drops the column.
+  }
+  return buildTeamRowsFromSnapshots(registry, agents, spawners);
 }
 
 // Picker fallback for `teams logs` when the teammate ref is omitted. Shows a
@@ -1081,28 +1303,34 @@ export function registerTeamsCommands(program: Command): void {
       agent?: string; status?: string; since?: string; until?: string;
       limit: string; json?: boolean;
     }) => {
-      const mgr = mkManager();
       const limit = Math.max(1, parseInt(opts.limit, 10) || 20);
-      const [tasks, registry, everyAgent] = await Promise.all([
-        handleTasks(mgr, 1000),
+      const [registry, everyAgent] = await Promise.all([
         loadTeams(),
-        mgr.listAll(),
+        loadTeamAgentSnapshots(),
       ]);
 
       // Group agents by team so we can filter on agent-type / version.
-      const byTeam = new Map<string, { agent_type: string; version: string | null }[]>();
+      const byTeam = new Map<string, TeamListAgentSnapshot[]>();
       for (const a of everyAgent) {
-        const arr = byTeam.get(a.taskName) || [];
-        arr.push({ agent_type: a.agentType, version: a.version });
-        byTeam.set(a.taskName, arr);
+        const arr = byTeam.get(a.task_name) || [];
+        arr.push(a);
+        byTeam.set(a.task_name, arr);
       }
 
-      let merged = mergeTeams(registry, tasks.tasks);
+      // Same lineage enrichment as loadTeamRows — without it this listing is the
+      // one `teams list` surface that silently drops the "spawned by" column.
+      let spawners: Map<string, TeamSpawner> | undefined;
+      try {
+        spawners = teamSpawners();
+      } catch {
+        // The session index is an enrichment here; a missing one drops the column.
+      }
+      let rows = buildTeamRowsFromSnapshots(registry, everyAgent, spawners).rows;
 
       // --- query: substring match on team name ---
       if (query) {
         const q = query.toLowerCase();
-        merged = merged.filter((t) => t.task_name.toLowerCase().includes(q));
+        rows = rows.filter((row) => row.team.task_name.toLowerCase().includes(q));
       }
 
       // --- --agent: filter teams containing a matching teammate ---
@@ -1111,8 +1339,8 @@ export function registerTeamsCommands(program: Command): void {
         const wantVersion = VALID_AGENTS.includes(wantType as AgentType)
           ? resolveVersionAliasLoose(wantType as AgentId, rawVersion)
           : rawVersion;
-        merged = merged.filter((t) => {
-          const teammates = byTeam.get(t.task_name) || [];
+        rows = rows.filter((row) => {
+          const teammates = byTeam.get(row.team.task_name) || [];
           return teammates.some(
             (m) => m.agent_type === wantType && (!wantVersion || m.version === wantVersion)
           );
@@ -1124,31 +1352,31 @@ export function registerTeamsCommands(program: Command): void {
         const want = opts.status.toLowerCase();
         const validStatuses = ['working', 'done', 'failed', 'empty'];
         if (!validStatuses.includes(want)) {
-          die(`Invalid --status '${opts.status}'. Use one of: ${validStatuses.join(', ')}`);
+          dieFriction('teams', 'invalid-status-filter', `Invalid --status '${opts.status}'. Use one of: ${validStatuses.join(', ')}`);
         }
-        merged = merged.filter((t) => classifyTeamStatus(t) === want);
+        rows = rows.filter((row) => classifyTeamStatus(row.team) === want);
       }
 
       // --- --since / --until: filter by activity window ---
       if (opts.since) {
         const cutoff = parseTimeFilter(opts.since);
-        if (!cutoff) die(`Could not parse --since '${opts.since}'`);
-        merged = merged.filter((t) => new Date(t.modified_at).getTime() >= cutoff);
+        if (!cutoff) dieFriction('teams', 'invalid-since-filter', `Could not parse --since '${opts.since}'`);
+        rows = rows.filter((row) => new Date(row.team.modified_at).getTime() >= cutoff);
       }
       if (opts.until) {
         const cutoff = parseTimeFilter(opts.until);
-        if (!cutoff) die(`Could not parse --until '${opts.until}'`);
-        merged = merged.filter((t) => new Date(t.modified_at).getTime() <= cutoff);
+        if (!cutoff) dieFriction('teams', 'invalid-until-filter', `Could not parse --until '${opts.until}'`);
+        rows = rows.filter((row) => new Date(row.team.modified_at).getTime() <= cutoff);
       }
 
-      merged = merged.slice(0, limit);
+      rows = rows.slice(0, limit);
 
       if (isJsonMode(opts)) {
-        console.log(JSON.stringify({ teams: merged }, null, 2));
+        console.log(JSON.stringify({ teams: rows.map((row) => row.team) }, null, 2));
         return;
       }
 
-      if (merged.length === 0) {
+      if (rows.length === 0) {
         if (query || opts.agent || opts.status || opts.since || opts.until) {
           console.log(chalk.gray('No teams match those filters.'));
         } else {
@@ -1158,26 +1386,12 @@ export function registerTeamsCommands(program: Command): void {
         return;
       }
 
-      // Enrich teams with teammate details for the picker's preview pane.
-      const rows: TeamRow[] = await Promise.all(
-        merged.map(async (team) => {
-          let agents: AgentStatusDetail[] = [];
-          try {
-            const res = await handleStatus(mgr, team.task_name, 'all');
-            agents = res.agents;
-          } catch {
-            // Empty teams (no live agents) throw in some code paths — preview
-            // will just show "no teammates yet".
-          }
-          return { team, agents, description: registry[team.task_name]?.description };
-        })
-      );
-
       if (isInteractiveTerminal()) {
         try {
           const picked = await teamPicker(rows, query);
           if (picked) {
             // Fall through to the status subcommand's action for the picked team.
+            const mgr = mkManager();
             const result = await handleStatus(mgr, picked.team, 'all');
             await printTeamStatus(picked.team, result);
           }
@@ -1221,13 +1435,17 @@ export function registerTeamsCommands(program: Command): void {
           if (name.toLowerCase() === machineId()) continue;
           const host = await resolveHost(name);
           if (!host) {
-            die(
+            dieFriction(
+              'teams',
+              'pool-device-not-resolvable',
               `Couldn't resolve pool device "${name}". Register it with \`agents devices\`, ` +
                 `enroll it with \`agents hosts add ${name}\`, or pass user@host.`,
             );
           }
           if (remoteShellFor(host.os ?? resolveRemoteOsSync(host.name)) === 'powershell') {
-            die(
+            dieFriction(
+              'teams',
+              'pool-device-windows-unsupported',
               `Distributed teams on Windows device "${host.name}" are not supported yet — ` +
                 `the teams remote monitor is POSIX-only. Use a Linux/macOS device.`,
             );
@@ -1271,7 +1489,7 @@ export function registerTeamsCommands(program: Command): void {
           console.log(chalk.gray(`  agents teams add ${team} claude "your task here"`));
         }
       } catch (err) {
-        die((err as Error).message);
+        dieFriction('teams', 'create-failed', (err as Error).message);
       }
     });
 
@@ -1282,7 +1500,7 @@ export function registerTeamsCommands(program: Command): void {
     .option('-n, --name <name>', 'Friendly name for this teammate (e.g. alice). Required if using --after. Unique within team.')
     .option('-m, --mode <mode>', `Permissions: plan (read-only) | edit (can write files) | auto (smart classifier auto-approves safe ops) | skip (bypass all permission prompts). 'full' accepted as alias for skip. Teammates run headless: plan works headless on claude/codex/droid/opencode; kimi/grok/cursor/antigravity have no headless plan mode and auto-downgrade a plan request to auto.`, 'edit')
     .option('-e, --effort <effort>', `Reasoning intensity: ${VALID_EFFORTS.join('|')}`, 'medium')
-    .option('--model <model>', 'Override the effort tier and use this specific model (e.g. claude-opus-4-6)')
+    .option('--model <model>', 'Cost tier (cheap|default|best|ultra) or a concrete id (e.g. claude-opus-4-8); tiers resolve per harness+version to a supported model')
     .option(
       '--env <key=value>',
       'Set an environment variable for this teammate (repeatable for multiple vars)',
@@ -1309,19 +1527,19 @@ export function registerTeamsCommands(program: Command): void {
       // silently ignoring it — see remoteCwdOnAddError. `!== undefined` so even an
       // explicit empty value (`--remote-cwd ""`) is rejected, not silently dropped.
       if (opts.remoteCwd !== undefined) {
-        die(remoteCwdOnAddError(team));
+        dieFriction('teams', 'remote-cwd-on-add', remoteCwdOnAddError(team));
       }
       if (!(VALID_MODES as readonly string[]).includes(opts.mode)) {
-        die(`Invalid mode '${opts.mode}'. Use one of: ${VALID_MODES.join(', ')}`);
+        dieFriction('teams', 'invalid-mode', `Invalid mode '${opts.mode}'. Use one of: ${VALID_MODES.join(', ')}`);
       }
       if (!(VALID_EFFORTS as readonly string[]).includes(opts.effort)) {
-        die(`Invalid effort '${opts.effort}'. Use one of: ${VALID_EFFORTS.join(', ')}`);
+        dieFriction('teams', 'invalid-effort', `Invalid effort '${opts.effort}'. Use one of: ${VALID_EFFORTS.join(', ')}`);
       }
 
       let taskType: TaskType | null = null;
       if (opts.taskType) {
         if (!(VALID_TASK_TYPES as readonly string[]).includes(opts.taskType)) {
-          die(`Invalid task-type '${opts.taskType}'. Use one of: ${VALID_TASK_TYPES.join(', ')}`);
+          dieFriction('teams', 'invalid-task-type', `Invalid task-type '${opts.taskType}'. Use one of: ${VALID_TASK_TYPES.join(', ')}`);
         }
         taskType = opts.taskType as TaskType;
       }
@@ -1329,11 +1547,11 @@ export function registerTeamsCommands(program: Command): void {
       let cloudProviderId: CloudProviderId | null = null;
       if (opts.cloud) {
         if (!(VALID_CLOUD_PROVIDERS as readonly string[]).includes(opts.cloud)) {
-          die(`Invalid cloud provider '${opts.cloud}'. Use one of: ${VALID_CLOUD_PROVIDERS.join(', ')}`);
+          dieFriction('teams', 'invalid-cloud-provider', `Invalid cloud provider '${opts.cloud}'. Use one of: ${VALID_CLOUD_PROVIDERS.join(', ')}`);
         }
         cloudProviderId = opts.cloud as CloudProviderId;
         if (cloudProviderId === 'rush' && !opts.repo) {
-          die(`--cloud rush requires --repo <owner/repo>`);
+          dieFriction('teams', 'cloud-rush-needs-repo', `--cloud rush requires --repo <owner/repo>`);
         }
       }
 
@@ -1346,14 +1564,25 @@ export function registerTeamsCommands(program: Command): void {
       // `--device`/`--host` are aliases (addHostOption registers both). For `teams
       // add` the passthrough special-cases them as PLACEMENT, not routing, so the
       // local action reads them here. Reject a conflicting pair.
-      const explicitDevice = (() => {
+      let explicitDevice = (() => {
         const h = opts.host;
         const d = opts.device;
         if (h && d && h !== d) {
-          die('Conflicting --host/--device values — pass just one.');
+          dieFriction('teams', 'conflicting-host-device', 'Conflicting --host/--device values — pass just one.');
         }
         return h ?? d ?? null;
       })();
+
+      // `auto` is the same affinity sentinel `agents run --device auto` resolves
+      // (RUSH-2185) — pick the concrete device name up front so the local-machine
+      // check right below (and every dieFriction message further down) sees the
+      // real target instead of the literal string "auto".
+      if (explicitDevice && isDeviceAuto(explicitDevice)) {
+        const plan = resolveDeviceAffinity({});
+        const picked = plan.host ?? machineId();
+        process.stderr.write(chalk.gray(`[teams] device=auto → ${picked === machineId() ? 'local' : picked}\n`));
+        explicitDevice = picked;
+      }
 
       // Distributed teams: --device <name> PINS this teammate to a machine over
       // SSH. Resolve + validate the placement here so a bad target fails at `add`
@@ -1365,11 +1594,13 @@ export function registerTeamsCommands(program: Command): void {
       let hostRepoPath: string | null = null;
       if (explicitDevice && explicitDevice.toLowerCase() !== machineId()) {
         if (cloudProviderId) {
-          die(`--device and --cloud are mutually exclusive (two different remote backends). Pick one.`);
+          dieFriction('teams', 'device-cloud-mutually-exclusive', `--device and --cloud are mutually exclusive (two different remote backends). Pick one.`);
         }
         const host = await resolveHost(explicitDevice);
         if (!host) {
-          die(
+          dieFriction(
+            'teams',
+            'device-not-resolvable',
             `Couldn't resolve --device "${explicitDevice}". Register it with \`agents devices\`, ` +
               `enroll it with \`agents hosts add ${explicitDevice}\`, or pass user@host.`,
           );
@@ -1378,7 +1609,9 @@ export function registerTeamsCommands(program: Command): void {
         // with tail/cat/kill, which don't exist under PowerShell. Refuse Windows
         // up front, mirroring dispatch.ts launchDetached.
         if (remoteShellFor(host.os ?? resolveRemoteOsSync(host.name)) === 'powershell') {
-          die(
+          dieFriction(
+            'teams',
+            'device-windows-unsupported',
             `Distributed teammates on Windows host "${host.name}" are not supported yet — ` +
               `the teams remote monitor is POSIX-only (offset-tails the remote log with tail/cat/kill). ` +
               `Use a Linux/macOS host, or run this teammate locally.`,
@@ -1387,7 +1620,7 @@ export function registerTeamsCommands(program: Command): void {
         try {
           hostTarget = sshTargetFor(host);
         } catch (err) {
-          die(`Can't resolve an ssh target for "${host.name}": ${(err as Error).message}`);
+          dieFriction('teams', 'ssh-target-unresolvable', `Can't resolve an ssh target for "${host.name}": ${(err as Error).message}`);
         }
         // Ensure agents-cli is present + version-matched on the host; surface
         // (not fail on) an agent-not-installed warning, like the run --host path.
@@ -1395,7 +1628,7 @@ export function registerTeamsCommands(program: Command): void {
           const { warnings } = ensureHostReady(host, { agent: parseTeammate(teammate).agent });
           for (const w of warnings) process.stderr.write(chalk.yellow(`[teams] warning: ${w}\n`));
         } catch (err) {
-          die(`Host "${host.name}" is not ready: ${(err as Error).message}`);
+          dieFriction('teams', 'host-not-ready', `Host "${host.name}" is not ready: ${(err as Error).message}`);
         }
         // Provision the repo on the host from the team's --repo (clone into
         // ~/.agents/repos/<team> or reuse an existing checkout), resolving to the
@@ -1411,7 +1644,9 @@ export function registerTeamsCommands(program: Command): void {
         try {
           hostRepoPath = ensureRemoteRepo(hostTarget!, effectiveRepo, team);
         } catch (err) {
-          die(
+          dieFriction(
+            'teams',
+            'repo-provision-failed',
             `Couldn't provision the repo on "${host.name}": ${(err as Error).message}\n` +
               `  Set how each device gets the code with: agents teams create ${team} --repo <url|path>`,
           );
@@ -1424,7 +1659,9 @@ export function registerTeamsCommands(program: Command): void {
       // Version-installed check is about the LOCAL machine — a distributed (--on)
       // teammate's agent/version lives on the host, verified by ensureHostReady.
       if (version && !hostName && !isVersionInstalled(agent, version)) {
-        die(
+        dieFriction(
+          'teams',
+          'agent-version-not-installed',
           `${AGENT_NAMES[agent]} ${version} isn't installed.\n` +
             `  Install it:  agents add ${agent}@${version}\n` +
             `  Or see what's installed (incl. @latest):  agents view ${agent}`
@@ -1454,13 +1691,13 @@ export function registerTeamsCommands(program: Command): void {
 
       if (opts.name !== undefined) {
         if (!opts.name || !/^[A-Za-z0-9_-]+$/.test(opts.name)) {
-          die(`Invalid teammate name '${opts.name}'. Use letters, numbers, '-', or '_'.`);
+          dieFriction('teams', 'invalid-teammate-name', `Invalid teammate name '${opts.name}'. Use letters, numbers, '-', or '_'.`);
         }
       }
 
       if (opts.worktree !== undefined) {
         if (!opts.worktree || !/^[A-Za-z0-9_-]+$/.test(opts.worktree)) {
-          die(`Invalid worktree name '${opts.worktree}'. Use letters, numbers, '-', or '_'.`);
+          dieFriction('teams', 'invalid-worktree-name', `Invalid worktree name '${opts.worktree}'. Use letters, numbers, '-', or '_'.`);
         }
       }
 
@@ -1468,14 +1705,14 @@ export function registerTeamsCommands(program: Command): void {
         ? opts.after.split(',').map((s) => s.trim()).filter(Boolean)
         : [];
       if (after.length > 0 && !opts.name) {
-        die("--after requires --name (dependencies reference teammates by name).");
+        dieFriction('teams', 'after-requires-name', "--after requires --name (dependencies reference teammates by name).");
       }
 
       let envOverrides: Record<string, string> | undefined;
       try {
         envOverrides = parseExecEnv(opts.env);
       } catch (err) {
-        die((err as Error).message);
+        dieFriction('teams', 'invalid-env', (err as Error).message);
       }
 
       // Team already ensured + loaded above (teamMeta) for the --repo provisioning.
@@ -1490,18 +1727,18 @@ export function registerTeamsCommands(program: Command): void {
         // remote teammate; a per-teammate worktree is created ON THE HOST at launch
         // (createRemoteWorktree in launchRemoteProcess) — we just capture its name.
         if (sharedWorktree) {
-          die(`Team '${team}' uses a shared local --use-worktree, which can't apply to a --device (remote) teammate.`);
+          dieFriction('teams', 'shared-worktree-remote-conflict', `Team '${team}' uses a shared local --use-worktree, which can't apply to a --device (remote) teammate.`);
         }
         if (worktreesEnabled) {
           if (!opts.worktree) {
-            die(`Team '${team}' has worktrees enabled. Use --worktree <name> for the remote teammate (created on ${hostName}).`);
+            dieFriction('teams', 'worktree-required-remote', `Team '${team}' has worktrees enabled. Use --worktree <name> for the remote teammate (created on ${hostName}).`);
           }
           if (!opts.name) {
-            die(`Team '${team}' has worktrees enabled. Use --name <name> to identify this teammate.`);
+            dieFriction('teams', 'name-required-remote', `Team '${team}' has worktrees enabled. Use --name <name> to identify this teammate.`);
           }
           worktreeName = opts.worktree;
         } else if (opts.worktree) {
-          die(`--worktree requires --enable-worktrees on the team. Recreate the team with: agents teams create ${team} --enable-worktrees`);
+          dieFriction('teams', 'worktree-requires-enable-worktrees', `--worktree requires --enable-worktrees on the team. Recreate the team with: agents teams create ${team} --enable-worktrees`);
         }
         // Local cwd stays null — the remote cwd is repoPath / the remote worktree.
       } else if (sharedWorktree) {
@@ -1510,34 +1747,34 @@ export function registerTeamsCommands(program: Command): void {
         try {
           const stat = await fsp.stat(sharedWorktree);
           if (!stat.isDirectory()) {
-            die(`Shared worktree path is not a directory: ${sharedWorktree}`);
+            dieFriction('teams', 'shared-worktree-not-dir', `Shared worktree path is not a directory: ${sharedWorktree}`);
           }
         } catch {
-          die(`Shared worktree path does not exist: ${sharedWorktree}`);
+          dieFriction('teams', 'shared-worktree-missing', `Shared worktree path does not exist: ${sharedWorktree}`);
         }
         worktreePath = sharedWorktree;
         if (opts.worktree) {
-          die(`Team '${team}' uses --use-worktree (shared). Don't pass --worktree on add.`);
+          dieFriction('teams', 'worktree-on-shared-team', `Team '${team}' uses --use-worktree (shared). Don't pass --worktree on add.`);
         }
       } else if (worktreesEnabled) {
         if (!opts.worktree) {
-          die(`Team '${team}' has worktrees enabled. Use --worktree <name> to specify a worktree name.`);
+          dieFriction('teams', 'worktree-required', `Team '${team}' has worktrees enabled. Use --worktree <name> to specify a worktree name.`);
         }
         if (!opts.name) {
-          die(`Team '${team}' has worktrees enabled. Use --name <name> to identify this teammate.`);
+          dieFriction('teams', 'name-required', `Team '${team}' has worktrees enabled. Use --name <name> to identify this teammate.`);
         }
         const baseCwd = opts.cwd ?? process.cwd();
         if (!(await isGitRepo(baseCwd))) {
-          die(`Worktrees require a git repository. ${baseCwd} is not inside a git repo.`);
+          dieFriction('teams', 'worktree-needs-repo', `Worktrees require a git repository. ${baseCwd} is not inside a git repo.`);
         }
         try {
           worktreeName = opts.worktree;
           worktreePath = await createWorktree(baseCwd, worktreeName);
         } catch (err) {
-          die(`Failed to create worktree '${opts.worktree}': ${(err as Error).message}`);
+          dieFriction('teams', 'worktree-create-failed', `Failed to create worktree '${opts.worktree}': ${(err as Error).message}`);
         }
       } else if (opts.worktree) {
-        die(`--worktree requires --enable-worktrees on the team. Recreate the team with: agents teams create ${team} --enable-worktrees`);
+        dieFriction('teams', 'worktree-requires-enable-worktrees', `--worktree requires --enable-worktrees on the team. Recreate the team with: agents teams create ${team} --enable-worktrees`);
       }
 
       // Distributed teammates have no LOCAL cwd — their working dir lives on the
@@ -1567,7 +1804,7 @@ export function registerTeamsCommands(program: Command): void {
             repo: opts.repo,
             branch: opts.branch,
             model: a.model ?? undefined,
-            env: shareRuntimeEnv({ agentOnly: true }),
+            env: shareRuntimeEnv(),
           };
           const cloudTask = await prov.dispatch(dispatchOpts);
           return { cloudSessionId: cloudTask.id };
@@ -1586,13 +1823,13 @@ export function registerTeamsCommands(program: Command): void {
           repo: opts.repo,
           branch: opts.branch,
           model: opts.model,
-          env: shareRuntimeEnv({ agentOnly: true }),
+          env: shareRuntimeEnv(),
         };
         try {
           const cloudTask = await prov.dispatch(dispatchOpts);
           cloudSessionId = cloudTask.id;
         } catch (err) {
-          die(`Cloud dispatch failed: ${(err as Error).message}`);
+          dieFriction('teams', 'cloud-dispatch-failed', `Cloud dispatch failed: ${(err as Error).message}`);
         }
       }
 
@@ -1677,7 +1914,7 @@ export function registerTeamsCommands(program: Command): void {
           console.log(chalk.gray(`Check in later:  agents teams status ${team}`));
         }
       } catch (err) {
-        die(`Could not add ${fullName(agent, version)} to ${team}: ${(err as Error).message}`);
+        dieFriction('teams', 'add-failed', `Could not add ${fullName(agent, version)} to ${team}: ${(err as Error).message}`);
       }
     });
 
@@ -1688,23 +1925,25 @@ export function registerTeamsCommands(program: Command): void {
     .option('-f, --filter <state>', 'Show only teammates in this state: running, completed, failed, stopped, or all (default: all)', 'all')
     .option('-s, --since <iso>', 'Cursor from a previous status call; only show updates after this timestamp (enables efficient polling)')
     .option('--agent-id <id>', 'Show only this one teammate (by UUID or UUID prefix)')
+    .option('--parent-session <id>', 'Show the teammates spawned BY this session, across teams. Resolves only teammates whose record survives the teams cleanup window.')
     .option('-v, --verbose', 'Emit the full per-teammate detail (prompt, all file paths, all messages). Default is a compact summary.')
     .option('--json', 'Output machine-readable JSON')
     .action(async (team: string | undefined, opts: {
-      filter: string; since?: string; agentId?: string; json?: boolean; verbose?: boolean;
+      filter: string; since?: string; agentId?: string; parentSession?: string; json?: boolean; verbose?: boolean;
     }) => {
       const filter = opts.filter;
       const mgr = mkManager();
 
       // No team given → drop into the picker (TTY) or fail clearly (script).
-      if (!team) {
+      // --parent-session is its own lookup key, so it needs no team at all.
+      if (!team && !opts.parentSession) {
         const picked = await pickTeamOr(mgr, 'agents teams status');
         if (!picked) return;
         team = picked;
       }
 
       try {
-        const result = await handleStatus(mgr, team, filter, opts.since);
+        const result = await handleStatus(mgr, team, filter, opts.since, opts.parentSession);
         const agents = opts.agentId
           ? result.agents.filter((a) => a.agent_id.startsWith(opts.agentId!))
           : result.agents;
@@ -1721,19 +1960,33 @@ export function registerTeamsCommands(program: Command): void {
           return;
         }
 
-        const exists = await teamExists(team);
-        if (!exists && result.agents.length === 0) {
-          console.log(chalk.yellow(`No team called '${team}'. Create it with: agents teams create ${team}`));
+        // A --parent-session lookup spans teams, so there is no single team to
+        // check for existence — its label is the session that spawned them.
+        const label = team ?? `session ${opts.parentSession!.slice(0, 8)}`;
+        if (team) {
+          const exists = await teamExists(team);
+          if (!exists && result.agents.length === 0) {
+            console.log(chalk.yellow(`No team called '${team}'. Create it with: agents teams create ${team}`));
+            return;
+          }
+        } else if (result.agents.length === 0) {
+          console.log(chalk.yellow(`No teammates recorded for ${label}.`));
+          console.log(chalk.gray('Teammate records are cleaned up after 7 days; an older team may have aged out.'));
           return;
         }
 
         if (opts.verbose) {
-          await printTeamStatus(team, filtered);
+          await printTeamStatus(label, filtered);
         } else {
-          printTeamSummary(team, toTaskStatusSummary(filtered));
+          printTeamSummary(label, toTaskStatusSummary(filtered));
         }
       } catch (err) {
-        die(`Could not check on team ${team}: ${(err as Error).message}`);
+        // `team` is undefined for a --parent-session lookup, which spans teams.
+        dieFriction(
+          'teams',
+          'status-failed',
+          `Could not check on ${team ? `team ${team}` : 'the requested session'}: ${(err as Error).message}`
+        );
       }
     });
 
@@ -2025,11 +2278,11 @@ export function registerTeamsCommands(program: Command): void {
 
       const lookup = await mgr.resolveAgentIdInTask(team, ref);
       if (lookup.kind === 'none') {
-        die(`No teammate matching '${ref}' in team ${team}`, 2);
+        dieFriction('teams', 'teammate-not-found', `No teammate matching '${ref}' in team ${team}`, 2);
       }
       if (lookup.kind === 'ambiguous') {
         const shorts = lookup.matches.map(shortId).join(', ');
-        die(`'${ref}' matches multiple teammates: ${shorts}. Use more characters or a name.`, 2);
+        dieFriction('teams', 'teammate-ambiguous', `'${ref}' matches multiple teammates: ${shorts}. Use more characters or a name.`, 2);
       }
       const agentId = lookup.agentId;
 
@@ -2037,7 +2290,7 @@ export function registerTeamsCommands(program: Command): void {
       const display = agent?.name || shortId(agentId);
 
       const stopRes = await handleStop(mgr, team, agentId);
-      if ('error' in stopRes) die(stopRes.error);
+      if ('error' in stopRes) dieFriction('teams', 'stop-failed', stopRes.error);
 
       // Clean up worktree if this teammate had one
       let worktreeKept = false;
@@ -2099,10 +2352,10 @@ export function registerTeamsCommands(program: Command): void {
     const mgr = mkManager();
 
     const lookup = await mgr.resolveAgentIdInTask(team, ref);
-    if (lookup.kind === 'none') die(`No teammate matching '${ref}' in team ${team}`, 2);
+    if (lookup.kind === 'none') dieFriction('teams', 'teammate-not-found', `No teammate matching '${ref}' in team ${team}`, 2);
     if (lookup.kind === 'ambiguous') {
       const shorts = lookup.matches.map(shortId).join(', ');
-      die(`'${ref}' matches multiple teammates: ${shorts}. Use more characters or a name.`, 2);
+      dieFriction('teams', 'teammate-ambiguous', `'${ref}' matches multiple teammates: ${shorts}. Use more characters or a name.`, 2);
     }
     const agentId = (lookup as { kind: 'ok'; agentId: string }).agentId;
 
@@ -2110,7 +2363,7 @@ export function registerTeamsCommands(program: Command): void {
     // .exit sentinel / exit-code reap) before we branch — so running-vs-stopped
     // is a fact, not a guess.
     const agent = await mgr.get(agentId);
-    if (!agent) die(`Teammate ${shortId(agentId)} vanished from team ${team}.`);
+    if (!agent) dieFriction('teams', 'teammate-vanished', `Teammate ${shortId(agentId)} vanished from team ${team}.`);
     const display = agent!.name || shortId(agentId);
     const status = agent!.status;
     const hasMessage = message != null && message.trim().length > 0;
@@ -2118,13 +2371,13 @@ export function registerTeamsCommands(program: Command): void {
     const route = decideTeamMessageRoute(status, hasMessage);
     switch (route.kind) {
       case 'not-started':
-        die(`Teammate '${display}' hasn't started yet (waiting on --after deps). Run \`agents teams start ${team}\` to launch it.`);
+        dieFriction('teams', 'teammate-not-started', `Teammate '${display}' hasn't started yet (waiting on --after deps). Run \`agents teams start ${team}\` to launch it.`);
         return;
       case 'need-message':
         if (status === AgentStatus.RUNNING) {
-          die(`Teammate '${display}' is running — pass a message to steer it.`);
+          dieFriction('teams', 'steer-needs-message', `Teammate '${display}' is running — pass a message to steer it.`);
         }
-        die(`Teammate '${display}' is ${status} — pass a message to resume it: \`agents teams resume ${team} ${display} "<message>"\`.`);
+        dieFriction('teams', 'resume-needs-message', `Teammate '${display}' is ${status} — pass a message to resume it: \`agents teams resume ${team} ${display} "<message>"\`.`);
         return;
       case 'steer': {
         // Running -> steer via mailbox; never re-launch (that forks a 2nd session).
@@ -2144,7 +2397,7 @@ export function registerTeamsCommands(program: Command): void {
         try {
           await mgr.resumeTeammate(agentId, message!);
         } catch (err) {
-          die((err as Error).message);
+          dieFriction('teams', 'resume-failed', (err as Error).message);
         }
         if (isJsonMode(opts)) {
           console.log(JSON.stringify({ team, agent_id: agentId, name: agent!.name ?? null, action: 'resume', prior_status: status }, null, 2));
@@ -2210,11 +2463,11 @@ export function registerTeamsCommands(program: Command): void {
 
       const lookup = await mgr.resolveAgentIdInTask(team, ref);
       if (lookup.kind === 'none') {
-        die(`No teammate matching '${ref}' in team ${team}`, 2);
+        dieFriction('teams', 'teammate-not-found', `No teammate matching '${ref}' in team ${team}`, 2);
       }
       if (lookup.kind === 'ambiguous') {
         const shorts = lookup.matches.map(shortId).join(', ');
-        die(`'${ref}' matches multiple teammates: ${shorts}. Use more characters or a name.`, 2);
+        dieFriction('teams', 'teammate-ambiguous', `'${ref}' matches multiple teammates: ${shorts}. Use more characters or a name.`, 2);
       }
       const agentId = lookup.agentId;
 
@@ -2223,7 +2476,7 @@ export function registerTeamsCommands(program: Command): void {
 
       // Require agent to be stopped first
       if (agent?.status === 'running' || agent?.status === 'pending') {
-        die(`Teammate '${display}' is still ${agent.status}. Run 'agents teams stop ${team} ${display}' first.`);
+        dieFriction('teams', 'remove-still-running', `Teammate '${display}' is still ${agent.status}. Run 'agents teams stop ${team} ${display}' first.`);
       }
 
       if (!opts.keepLogs) {
@@ -2265,7 +2518,7 @@ export function registerTeamsCommands(program: Command): void {
       }
 
       const stopRes = await handleStop(mgr, team);
-      if ('error' in stopRes) die(stopRes.error);
+      if ('error' in stopRes) dieFriction('teams', 'stop-failed', stopRes.error);
 
       const status = await handleStatus(mgr, team, 'all');
 
@@ -2313,7 +2566,7 @@ export function registerTeamsCommands(program: Command): void {
         return;
       }
       if (!existed && stopRes.stopped.length === 0 && status.agents.length === 0) {
-        die(`No team called '${team}'`, 2);
+        dieFriction('teams', 'team-not-found', `No team called '${team}'`, 2);
       }
       console.log(chalk.green(`Team ${chalk.cyan(team)} disbanded.`));
       if (stopRes.stopped.length) console.log(chalk.gray(`  Stopped ${stopRes.stopped.length} working teammate(s).`));
@@ -2350,11 +2603,13 @@ export function registerTeamsCommands(program: Command): void {
       } else {
         const resolved = await resolveTeammateAcrossTeams(base, teammateRef, opts.team);
         if (resolved.kind === 'none') {
-          die(`No notes on record for teammate '${teammateRef}'`, 2);
+          dieFriction('teams', 'teammate-notes-not-found', `No notes on record for teammate '${teammateRef}'`, 2);
         }
         if (resolved.kind === 'ambiguous') {
           const hints = resolved.candidates.map((c) => `${c.team}/${c.display}`).join(', ');
-          die(
+          dieFriction(
+            'teams',
+            'teammate-notes-ambiguous',
             `'${teammateRef}' matches multiple teammates: ${hints}.\n` +
               `  Narrow it with --team <team>, or pass a UUID prefix.`,
             2
@@ -2389,7 +2644,7 @@ export function registerTeamsCommands(program: Command): void {
         const lines = content.split('\n');
         process.stdout.write(lines.slice(-n).join('\n'));
       } catch {
-        die(`No notes on record for teammate '${teammateRef ?? agentId}' (looked in ${logPath})`, 2);
+        dieFriction('teams', 'teammate-notes-not-found', `No notes on record for teammate '${teammateRef ?? agentId}' (looked in ${logPath})`, 2);
       }
     });
 

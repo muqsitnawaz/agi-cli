@@ -8,9 +8,12 @@
 
 import * as fs from 'fs';
 import { truncate } from '../format.js';
+import { sanitizeForTerminal } from '../redact.js';
 import * as path from 'path';
 import Database from '../sqlite.js';
+import { isSyntheticUserMessage, extractSlashCommandName, extractSlashCommandFromToolInput } from './prompt.js';
 import type { SessionAgentId, SessionEvent } from './types.js';
+import { structuredToolResult } from './tool-calls.js';
 
 /**
  * Largest session file we will load into memory. Above this we throw a clean
@@ -26,12 +29,7 @@ export const SESSION_FILE_MAX_BYTES = 200_000_000;
  * carriage return (0x0d). Everything else in the C0/C1 range and every CSI/OSC
  * escape is dropped.
  */
-const TERMINAL_ESCAPE_REGEX = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
-
-export function sanitizeForTerminal(s: string): string {
-  if (typeof s !== 'string' || !s) return s;
-  return s.replace(TERMINAL_ESCAPE_REGEX, '');
-}
+export { sanitizeForTerminal } from '../redact.js';
 
 /** Recursively sanitize every string value within a tool-args object. */
 function sanitizeArgsDeep(value: any): any {
@@ -60,6 +58,8 @@ function sanitizeEvent(e: SessionEvent): void {
   if (e.tool) e.tool = sanitizeForTerminal(e.tool);
   if (e.model) e.model = sanitizeForTerminal(e.model);
   if (e.mediaType) e.mediaType = sanitizeForTerminal(e.mediaType);
+  if (e.hookName) e.hookName = sanitizeForTerminal(e.hookName);
+  if (e.hookEvent) e.hookEvent = sanitizeForTerminal(e.hookEvent);
   if (e.args) e.args = sanitizeArgsDeep(e.args);
 }
 
@@ -140,7 +140,38 @@ export function safeReadSessionFile(filePath: string, maxBytes: number = SESSION
 /**
  * Auto-detect agent type from file path and parse the session.
  */
-export function parseSession(filePath: string, agent?: SessionAgentId): SessionEvent[] {
+export interface ParseSessionOptions {
+  /** Keep normalized tool results compact by default; renderers can request full output. */
+  maxToolOutputChars?: number;
+  /**
+   * Emit an `interrupt` event where the transcript records `[Request interrupted`.
+   *
+   * OFF by default, deliberately. That marker is not a user message, and the default
+   * event array is a versioned consumer contract: `agents sessions <id> --json`
+   * serializes it verbatim (see render.ts, issue #743), `computeSummaryStats` folds
+   * every event's timestamp into the session duration, and the live-state reader and
+   * tail renderer inspect fixed-size windows of the last N events. Emitting it
+   * unconditionally changed all four — a measured 12x duration swing on one real
+   * transcript, a new object in a published payload, and an eviction from the
+   * 12-event rate-limit window whose trigger shape (a trailing interrupt) is exactly
+   * a session the user just cancelled.
+   *
+   * `agents insights` opts in: an interruption is a real friction signal, and dropping
+   * it outright is what made it unrecoverable.
+   */
+  includeInterrupts?: boolean;
+}
+
+function truncateNormalizedToolOutput(output: string, maxChars: number): string {
+  if (!Number.isFinite(maxChars) || output.length <= maxChars) return output;
+  return `${output.slice(0, maxChars)}\n\n[Output truncated: ${output.length - maxChars} characters omitted.]`;
+}
+
+export function parseSession(
+  filePath: string,
+  agent?: SessionAgentId,
+  opts: ParseSessionOptions = {},
+): SessionEvent[] {
   const detected = agent || detectAgent(filePath);
   if (!detected) {
     throw new Error(`Cannot detect agent type from path: ${filePath}`);
@@ -148,7 +179,7 @@ export function parseSession(filePath: string, agent?: SessionAgentId): SessionE
 
   let events: SessionEvent[];
   switch (detected) {
-    case 'claude': events = parseClaude(filePath); break;
+    case 'claude': events = parseClaude(filePath, opts); break;
     case 'codex': events = parseCodex(filePath); break;
     case 'gemini': events = parseGemini(filePath); break;
     case 'antigravity': events = parseAntigravity(filePath); break;
@@ -159,12 +190,26 @@ export function parseSession(filePath: string, agent?: SessionAgentId): SessionE
     case 'hermes': events = parseHermes(filePath); break;
     case 'kimi': events = parseKimi(filePath); break;
     case 'droid': events = parseDroid(filePath); break;
+    case 'cursor': events = parseCursor(filePath); break;
   }
 
   // Chokepoint: every string field that originated in an untrusted session
   // file gets stripped of terminal escapes here, so renderers downstream can
-  // safely splat values into chalk/console output.
-  for (const e of events) sanitizeEvent(e);
+  // safely splat values into chalk/console output. Same pass flags
+  // harness-injected `role=user` scaffolding (Claude `<bash-input>`/`<bash-stdout>`
+  // from `!`-prefix runs, `<system-reminder>`, etc.) as `_synthetic` so turn
+  // slicing and `--include user` count only genuine user intent — one place,
+  // every harness, instead of per-consumer regex.
+  const maxToolOutputChars = opts.maxToolOutputChars ?? 500;
+  for (const e of events) {
+    if (e.type === 'tool_result' && e.output) {
+      e.output = truncateNormalizedToolOutput(e.output, maxToolOutputChars);
+    }
+    sanitizeEvent(e);
+    if (e.type === 'message' && e.role === 'user' && isSyntheticUserMessage(e.content)) {
+      e._synthetic = true;
+    }
+  }
   return events;
 }
 
@@ -183,6 +228,7 @@ export function detectAgent(filePath: string): SessionAgentId | null {
   if (filePath.includes('/.hermes/') || filePath.includes('\\.hermes\\')) return 'hermes';
   if (filePath.includes('/.kimi-code/') || filePath.includes('\\.kimi-code\\')) return 'kimi';
   if (filePath.includes('/.factory/') || filePath.includes('\\.factory\\')) return 'droid';
+  if (filePath.includes('/.cursor/') || filePath.includes('\\.cursor\\')) return 'cursor';
   // Cloud convention: cloud-sessions/<id>/session.<format>.jsonl
   const cloudMatch = filePath.match(/session\.(claude|codex|rush)\.jsonl(?:$|[?#])/);
   if (cloudMatch) return cloudMatch[1] as SessionAgentId;
@@ -194,6 +240,21 @@ export function detectAgent(filePath: string): SessionAgentId | null {
 }
 
 /**
+ * Checklist-snapshot tool names across harnesses — each sends the WHOLE list on
+ * every write, so the last call is the current checklist. Claude `TodoWrite`,
+ * Kimi `TodoList`, Droid/OpenCode `todo_write`, Codex `update_plan`.
+ */
+export const SNAPSHOT_TODO_TOOLS = new Set(['TodoWrite', 'TodoList', 'todo_write', 'update_plan']);
+
+/**
+ * Whether a harness's checklist status means "finished". Claude/Codex write
+ * `completed`; Kimi writes `done`.
+ */
+export function isCompletedTodoStatus(status: unknown): boolean {
+  return status === 'completed' || status === 'done';
+}
+
+/**
  * Summarize a tool_use into a one-liner string.
  */
 export function summarizeToolUse(tool: string, args?: Record<string, any>): string {
@@ -202,12 +263,13 @@ export function summarizeToolUse(tool: string, args?: Record<string, any>): stri
   switch (tool) {
     case 'Bash':
       return `Bash: ${truncate(String(args.command || '').replace(/\n/g, ' ').trim(), 120)}`;
+    // `path` is the Kimi spelling of Claude's `file_path` for the same tools.
     case 'Read':
-      return `Read ${shortenPath(args.file_path || '')}`;
+      return `Read ${shortenPath(args.file_path || args.path || '')}`;
     case 'Write':
-      return `Write ${shortenPath(args.file_path || '')}`;
+      return `Write ${shortenPath(args.file_path || args.path || '')}`;
     case 'Edit':
-      return `Edit ${shortenPath(args.file_path || '')}`;
+      return `Edit ${shortenPath(args.file_path || args.path || '')}`;
     case 'Glob':
       return `Glob ${args.pattern || ''}`;
     case 'Grep':
@@ -222,13 +284,16 @@ export function summarizeToolUse(tool: string, args?: Record<string, any>): stri
       const steps = Array.isArray(args.plan) ? args.plan.length : 0;
       return `Plan: ${steps} step${steps === 1 ? '' : 's'}`;
     }
-    // Claude's live checklist: show progress + the current step, not a bare "TodoWrite".
-    case 'TodoWrite': {
+    // Live checklist: show progress + the current step, not a bare "TodoWrite".
+    // Claude writes `TodoWrite`, Kimi writes `TodoList`; both carry the whole list
+    // under `todos`, with Kimi spelling the item text `title` and "done" `done`.
+    case 'TodoWrite':
+    case 'TodoList': {
       const todos = Array.isArray(args.todos) ? args.todos : [];
       if (todos.length === 0) return 'Plan: 0 steps';
-      const done = todos.filter((t: any) => t?.status === 'completed').length;
+      const done = todos.filter((t: any) => isCompletedTodoStatus(t?.status)).length;
       const active = todos.find((t: any) => t?.status === 'in_progress');
-      const step = active?.activeForm || active?.content;
+      const step = active?.activeForm || active?.content || active?.title;
       return step
         ? `Plan ${done}/${todos.length}: ${truncate(String(step), 80)}`
         : `Plan: ${done}/${todos.length} done`;
@@ -271,8 +336,8 @@ function shortenPath(p: string): string {
 // ---------------------------------------------------------------------------
 
 /** Parse a Claude JSONL session file into normalized events. */
-export function parseClaude(filePath: string): SessionEvent[] {
-  return parseClaudeContent(safeReadSessionFile(filePath));
+export function parseClaude(filePath: string, opts: ParseSessionOptions = {}): SessionEvent[] {
+  return parseClaudeContent(safeReadSessionFile(filePath), opts);
 }
 
 /**
@@ -281,7 +346,10 @@ export function parseClaude(filePath: string): SessionEvent[] {
  * chunk of a file without re-reading the whole thing. Malformed leading lines
  * (a tail that starts mid-line) are skipped by the per-line try/catch below.
  */
-export function parseClaudeContent(content: string): SessionEvent[] {
+export function parseClaudeContent(
+  content: string,
+  opts: ParseSessionOptions = {},
+): SessionEvent[] {
   const lines = content.split('\n').filter(l => l.trim());
   const events: SessionEvent[] = [];
 
@@ -340,11 +408,19 @@ export function parseClaudeContent(content: string): SessionEvent[] {
             agent: 'claude' as const,
             timestamp,
             tool: toolName,
+            callId: toolId,
             args: toolInput,
             path: toolInput.file_path || undefined,
             command: toolName === 'Bash' ? toolInput.command : undefined,
           };
           if (isLocal) event._local = true;
+          // SlashCommand: the MODEL invoking a slash command programmatically
+          // (distinct from the <command-name> wrapper below, which is the
+          // USER typing one) — see prompt.ts's extractSlashCommandFromToolInput.
+          if (toolName === 'SlashCommand') {
+            const slashCommand = extractSlashCommandFromToolInput(toolInput);
+            if (slashCommand) event.slashCommand = slashCommand;
+          }
           events.push(event);
         }
       }
@@ -369,19 +445,33 @@ export function parseClaudeContent(content: string): SessionEvent[] {
         // Simple user text
         const text = contentBlocks.trim();
         if (text) {
-          events.push({
+          const event: any = {
             type: 'message',
             agent: 'claude',
             timestamp,
             role: 'user',
             content: text,
-          });
+          };
+          // The USER typing a slash command — Claude injects a <command-name>
+          // wrapper as the message content (see prompt.ts's
+          // extractSlashCommandName; distinct from the SlashCommand tool-use
+          // above, which is the model invoking one programmatically).
+          const slashCommand = extractSlashCommandName(text);
+          if (slashCommand) event.slashCommand = slashCommand;
+          events.push(event);
         }
       } else if (Array.isArray(contentBlocks)) {
         for (const block of contentBlocks) {
           if (block.type === 'text') {
             const text = (block.text || '').trim();
-            if (text && !text.startsWith('[Request interrupted')) {
+            if (text.startsWith('[Request interrupted')) {
+              // The harness's marker for a turn the user cut short, not a user
+              // message. Surfaced only on request — see includeInterrupts for why
+              // the default stream must stay byte-identical.
+              if (opts.includeInterrupts) {
+                events.push({ type: 'interrupt', agent: 'claude', timestamp, content: text });
+              }
+            } else if (text) {
               events.push({
                 type: 'message',
                 agent: 'claude',
@@ -405,6 +495,7 @@ export function parseClaudeContent(content: string): SessionEvent[] {
             const toolId = block.tool_use_id;
             const toolInfo = toolId ? toolUseMap.get(toolId) : undefined;
             const isError = block.is_error === true;
+            const structured = structuredToolResult(block);
 
             // Extract output text from tool result
             let output = '';
@@ -423,6 +514,11 @@ export function parseClaudeContent(content: string): SessionEvent[] {
                 agent: 'claude',
                 timestamp,
                 tool: toolInfo?.tool,
+                callId: toolId,
+                outcome: 'error',
+                exitCode: structured.exitCode,
+                statusCode: structured.statusCode,
+                errorCode: structured.errorCode,
                 content: output || 'Tool execution failed',
               });
             } else {
@@ -431,8 +527,17 @@ export function parseClaudeContent(content: string): SessionEvent[] {
                 agent: 'claude',
                 timestamp,
                 tool: toolInfo?.tool,
+                callId: toolId,
                 success: true,
-                output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+                outcome: 'ok',
+                exitCode: structured.exitCode,
+                statusCode: structured.statusCode,
+                errorCode: structured.errorCode,
+                // Not truncated here: `parseSession` caps every event's `output`
+                // centrally via `maxToolOutputChars` (default 500, the same
+                // bound this site used to hardcode), so the render path can ask
+                // for the full text with `Infinity`.
+                output,
               });
             }
 
@@ -447,8 +552,25 @@ export function parseClaudeContent(content: string): SessionEvent[] {
         timestamp,
         content: raw.subtype || 'success',
       });
+    } else if (type === 'attachment') {
+      // Hook firings are recorded as attachments: `hook_success` / `hook_error` /
+      // `hook_blocked` per firing, plus a derivative `hook_additional_context`
+      // record for the SAME firing (shared toolUseID) — skip the derivative or
+      // every firing counts twice.
+      const att = raw.attachment;
+      const attType = att?.type;
+      if (typeof attType === 'string' && attType.startsWith('hook_') && attType !== 'hook_additional_context') {
+        events.push({
+          type: 'hook',
+          agent: 'claude',
+          timestamp,
+          hookName: typeof att.hookName === 'string' ? att.hookName : undefined,
+          hookEvent: typeof att.hookEvent === 'string' ? att.hookEvent : undefined,
+          success: attType === 'hook_success',
+        });
+      }
     }
-    // Skip: permission-mode, attachment, and other line types
+    // Skip: permission-mode, non-hook attachments, and other line types
   }
 
   return events;
@@ -593,6 +715,7 @@ export function parseCodexContent(content: string): SessionEvent[] {
           agent: 'codex',
           timestamp,
           tool: name,
+          callId,
           args,
           command: name === 'exec_command' ? (args.command || args.cmd) : undefined,
           path: args.file_path || args.path || undefined,
@@ -600,15 +723,20 @@ export function parseCodexContent(content: string): SessionEvent[] {
       } else if (ptype === 'function_call_output') {
         const callId = payload.call_id || payload.id;
         const callInfo = callId ? callMap.get(callId) : undefined;
-        const output = String(payload.output || '');
+        const result = structuredToolResult(payload.output);
 
         events.push({
           type: 'tool_result',
           agent: 'codex',
           timestamp,
           tool: callInfo?.name,
-          success: true,
-          output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+          callId,
+          success: result.outcome === 'error' ? false : true,
+          outcome: result.outcome,
+          exitCode: result.exitCode,
+          statusCode: result.statusCode,
+          errorCode: result.errorCode,
+          output: result.text,
         });
 
         if (callId) callMap.delete(callId);
@@ -633,6 +761,7 @@ export function parseCodexContent(content: string): SessionEvent[] {
             agent: 'codex',
             timestamp,
             tool,
+            callId,
             args,
             path: patchPath,
           });
@@ -646,15 +775,20 @@ export function parseCodexContent(content: string): SessionEvent[] {
       } else if (ptype === 'custom_tool_call_output') {
         const callId = payload.call_id || payload.id;
         const callInfo = callId ? callMap.get(callId) : undefined;
-        const output = String(payload.output || '');
+        const result = structuredToolResult(payload.output);
 
         events.push({
           type: 'tool_result',
           agent: 'codex',
           timestamp,
           tool: callInfo?.name,
-          success: true,
-          output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+          callId,
+          success: result.outcome === 'error' ? false : true,
+          outcome: result.outcome,
+          exitCode: result.exitCode,
+          statusCode: result.statusCode,
+          errorCode: result.errorCode,
+          output: result.text,
         });
 
         if (callId) callMap.delete(callId);
@@ -754,12 +888,13 @@ export function parseGemini(filePath: string): SessionEvent[] {
           const toolName = tc.name || 'unknown';
           const args = tc.args || {};
 
-          events.push({
-            type: 'tool_use',
-            agent: 'gemini',
-            timestamp: tc.timestamp || timestamp,
-            tool: toolName,
-            args,
+        events.push({
+          type: 'tool_use',
+          agent: 'gemini',
+          timestamp: tc.timestamp || timestamp,
+          tool: toolName,
+          callId: typeof tc.id === 'string' ? tc.id : undefined,
+          args,
             command: ['run_shell_command', 'shell', 'bash'].includes(toolName) ? args.command : undefined,
             path: args.file_path || args.path || undefined,
           });
@@ -783,8 +918,9 @@ export function parseGemini(filePath: string): SessionEvent[] {
               agent: 'gemini',
               timestamp: tc.timestamp || timestamp,
               tool: toolName,
+              callId: typeof tc.id === 'string' ? tc.id : undefined,
               success: tc.status === 'success',
-              output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+              output,
             });
           }
         }
@@ -1025,6 +1161,7 @@ export function parseAntigravity(dbPath: string): SessionEvent[] {
       agent: 'antigravity',
       timestamp,
       tool: norm,
+      callId: call.id,
       args: a,
       command: norm === 'Bash' ? a.CommandLine : undefined,
       // Antigravity uses PascalCase arg keys; probe the known path-bearing ones.
@@ -1142,6 +1279,7 @@ export function parseGrok(filePath: string): SessionEvent[] {
           agent: 'grok',
           timestamp,
           tool: toolName,
+          callId: typeof call?.id === 'string' ? call.id : undefined,
           args,
           path: args.path || args.file_path || undefined,
           command: typeof args.command === 'string' ? args.command : undefined,
@@ -1154,14 +1292,18 @@ export function parseGrok(filePath: string): SessionEvent[] {
       const callId = typeof msg.tool_call_id === 'string' ? msg.tool_call_id : undefined;
       const toolName = (callId && toolCallMap.get(callId)) || 'unknown';
       const output = typeof msg.content === 'string' ? msg.content : extractText(msg.content);
-      const isError = typeof output === 'string' && output.startsWith('Error:');
+      const structuredError = msg.is_error === true;
+      const structuredSuccess = msg.is_error === false;
+      const displayAsError = structuredError || (typeof output === 'string' && output.startsWith('Error:'));
       events.push({
-        type: isError ? 'error' : 'tool_result',
+        type: displayAsError ? 'error' : 'tool_result',
         agent: 'grok',
         timestamp,
         tool: toolName,
-        success: !isError,
-        output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+        callId,
+        success: structuredError ? false : structuredSuccess ? true : undefined,
+        outcome: structuredError ? 'error' : structuredSuccess ? 'ok' : 'unknown',
+        output: output,
       });
       if (callId) toolCallMap.delete(callId);
     }
@@ -1267,12 +1409,14 @@ export function parseOpenCode(filePath: string): SessionEvent[] {
           const state = partData.state || {};
           const input = state.input || {};
           const output = state.output || '';
+          const callId = typeof partData.callID === 'string' ? partData.callID : undefined;
 
           events.push({
             type: 'tool_use',
             agent: 'opencode',
             timestamp,
             tool: toolName,
+            callId,
             args: input,
             command: toolName === 'shell' ? input.command : undefined,
             path: input.filePath || input.path || undefined,
@@ -1285,8 +1429,9 @@ export function parseOpenCode(filePath: string): SessionEvent[] {
               agent: 'opencode',
               timestamp,
               tool: toolName,
+              callId,
               success: state.status === 'completed',
-              output: outputStr.length > 500 ? outputStr.slice(0, 497) + '...' : outputStr,
+              output: outputStr,
             });
           }
           break;
@@ -1332,8 +1477,10 @@ export function parseRush(filePath: string): SessionEvent[] {
     }
 
     const type = raw.type;
-    const timestamp = raw.created_at || new Date().toISOString();
-    const content = raw.content || {};
+    const timestamp = typeof raw.created_at === 'string' ? raw.created_at : new Date().toISOString();
+    const content = raw.content && typeof raw.content === 'object' && !Array.isArray(raw.content)
+      ? raw.content
+      : {};
 
     if (type === 'message') {
       const text = typeof content.text === 'string' ? content.text.trim() : '';
@@ -1357,9 +1504,11 @@ export function parseRush(filePath: string): SessionEvent[] {
         content: cleaned,
       });
     } else if (type === 'tool_call') {
-      const toolName = raw.name || 'unknown';
-      const args = content.input || {};
-      const callId = raw.tool_call_id;
+      const toolName = typeof raw.name === 'string' && raw.name.length > 0 ? raw.name : 'unknown';
+      const args = content.input && typeof content.input === 'object' && !Array.isArray(content.input)
+        ? content.input
+        : {};
+      const callId = typeof raw.tool_call_id === 'string' ? raw.tool_call_id : undefined;
       if (callId) toolCallMap.set(callId, { tool: toolName, args });
 
       events.push({
@@ -1367,12 +1516,13 @@ export function parseRush(filePath: string): SessionEvent[] {
         agent: 'rush',
         timestamp,
         tool: toolName,
+        callId,
         args,
         path: args.file_path || args.path || undefined,
         command: (toolName === 'Bash' || toolName === 'shell') ? args.command : undefined,
       });
     } else if (type === 'tool_result') {
-      const callId = raw.tool_call_id;
+      const callId = typeof raw.tool_call_id === 'string' ? raw.tool_call_id : undefined;
       const info = callId ? toolCallMap.get(callId) : undefined;
       const output = content.output;
 
@@ -1392,9 +1542,10 @@ export function parseRush(filePath: string): SessionEvent[] {
         type: success ? 'tool_result' : 'error',
         agent: 'rush',
         timestamp,
-        tool: info?.tool ?? raw.name,
+        tool: info?.tool ?? (typeof raw.name === 'string' ? raw.name : 'unknown'),
+        callId,
         success,
-        output: outputStr.length > 500 ? outputStr.slice(0, 497) + '...' : outputStr,
+        output: outputStr,
       });
 
       if (callId) toolCallMap.delete(callId);
@@ -1560,9 +1711,11 @@ export function parseKimi(filePath: string): SessionEvent[] {
         }
       } else if (eventType === 'tool.call') {
         const fn = event.function || {};
-        const toolName = typeof event.name === 'string' ? event.name : (fn.name || 'unknown');
+        const toolName = typeof event.name === 'string'
+          ? event.name
+          : typeof fn.name === 'string' ? fn.name : 'unknown';
         let args: Record<string, any> = {};
-        if (event.args && typeof event.args === 'object') {
+        if (event.args && typeof event.args === 'object' && !Array.isArray(event.args)) {
           args = event.args;
         } else if (typeof fn.arguments === 'string') {
           try {
@@ -1570,11 +1723,12 @@ export function parseKimi(filePath: string): SessionEvent[] {
           } catch {
             args = { _raw: fn.arguments };
           }
-        } else if (fn.arguments && typeof fn.arguments === 'object') {
+        } else if (fn.arguments && typeof fn.arguments === 'object' && !Array.isArray(fn.arguments)) {
           args = fn.arguments;
         }
 
-        const callId = event.toolCallId || event.uuid;
+        const rawCallId = event.toolCallId || event.uuid;
+        const callId = typeof rawCallId === 'string' ? rawCallId : undefined;
         if (callId) {
           toolCallMap.set(callId, toolName);
         }
@@ -1584,24 +1738,30 @@ export function parseKimi(filePath: string): SessionEvent[] {
           agent: 'kimi',
           timestamp,
           tool: toolName,
+          callId,
           args,
           path: args.path || args.file_path || undefined,
           command: toolName === 'Bash' ? args.command : undefined,
         });
       } else if (eventType === 'tool.result') {
-        const callId = event.toolCallId || event.parentUuid;
+        const rawCallId = event.toolCallId || event.parentUuid;
+        const callId = typeof rawCallId === 'string' ? rawCallId : undefined;
         const toolName = (callId && toolCallMap.get(callId)) || 'unknown';
         const result = event.result || {};
         const output = typeof result.output === 'string' ? result.output : '';
-        const isError = result.isError === true || (output && output.startsWith('Error:'));
+        const structuredError = result.isError === true;
+        const structuredSuccess = result.isError === false;
+        const displayAsError = structuredError || (output && output.startsWith('Error:'));
 
         events.push({
-          type: isError ? 'error' : 'tool_result',
+          type: displayAsError ? 'error' : 'tool_result',
           agent: 'kimi',
           timestamp,
           tool: toolName,
-          success: !isError,
-          output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+          callId,
+          success: structuredError ? false : structuredSuccess ? true : undefined,
+          outcome: structuredError ? 'error' : structuredSuccess ? 'ok' : 'unknown',
+          output: output,
         });
 
         if (callId) {
@@ -1632,22 +1792,46 @@ export function parseKimi(filePath: string): SessionEvent[] {
 }
 
 // ---------------------------------------------------------------------------
-// Droid (Factory) parser
+// Cursor and Droid (Factory) parsers
 // ---------------------------------------------------------------------------
 
+/** Parse Cursor's Anthropic-shaped message JSONL transcript. */
+export function parseCursor(filePath: string): SessionEvent[] {
+  return parseAnthropicMessageJsonl(filePath, 'cursor');
+}
+
 /**
- * Parse a Droid (Factory) JSONL session file into normalized events. Droid
- * wraps each turn in a `{type:'message', message:{role, content, modelId}}`
- * envelope; the content blocks are Anthropic-shaped (text/thinking/tool_use/
- * tool_result), so block handling mirrors the Claude parser.
+ * Cursor stamps the first user turn as
+ * `<timestamp>Sunday, Aug 2, 2026, 3:51 AM (UTC-7)</timestamp>` followed by the
+ * real question in `<user_query>`. `Date.parse` silently DISCARDS the `(UTC-7)`
+ * parenthetical and reads the rest as local time, so the offset has to be applied
+ * by hand — otherwise the recovered instant is wrong on every machine whose zone
+ * differs from the one that wrote the transcript.
  */
-export function parseDroid(filePath: string): SessionEvent[] {
+function parseCursorUserText(text: string): { text: string; timestamp?: string } {
+  const query = text.match(/<user_query>\s*([\s\S]*?)\s*<\/user_query>/);
+  const stamp = text.match(/<timestamp>\s*([\s\S]*?)\s*<\/timestamp>/)?.[1]?.trim();
+  return { text: (query?.[1] ?? text).trim(), timestamp: parseCursorTimestamp(stamp) };
+}
+
+function parseCursorTimestamp(stamp: string | undefined): string | undefined {
+  if (!stamp) return undefined;
+  const offset = stamp.match(/\(UTC([+-])(\d{1,2})(?::(\d{2}))?\)/);
+  // Without a declared offset there is no instant to recover -- guessing the
+  // local zone would be worse than falling back to the file mtime.
+  if (!offset) return undefined;
+  const wall = Date.parse(`${stamp.replace(/\s*\(UTC[^)]*\)\s*/, " ").trim()} UTC`);
+  if (Number.isNaN(wall)) return undefined;
+  const offsetMs = (Number(offset[2]) * 60 + Number(offset[3] ?? 0)) * 60_000;
+  return new Date(offset[1] === "-" ? wall + offsetMs : wall - offsetMs).toISOString();
+}
+
+function parseAnthropicMessageJsonl(filePath: string, agent: 'cursor' | 'droid'): SessionEvent[] {
   const content = safeReadSessionFile(filePath);
   const lines = content.split('\n').filter(l => l.trim());
   const events: SessionEvent[] = [];
-
-  // Map tool_use id -> {tool, args} for correlating with tool_result.
   const toolUseMap = new Map<string, { tool: string; args: Record<string, any> }>();
+  const fallbackTimestamp = fs.statSync(filePath).mtime.toISOString();
 
   for (const line of lines) {
     let raw: any;
@@ -1657,79 +1841,92 @@ export function parseDroid(filePath: string): SessionEvent[] {
       continue;
     }
 
-    if (raw.type !== 'message') continue;
+    if (raw.type === 'turn_ended' || (agent === 'droid' && raw.type !== 'message')) continue;
+    const message = raw.message;
+    const wireRole = agent === 'cursor' ? raw.role : message?.role;
+    if (!message || (agent === 'cursor' && !['user', 'assistant'].includes(wireRole))) continue;
 
-    const message = raw.message || {};
-    const role = message.role === 'user' ? 'user' : 'assistant';
-    const timestamp = raw.timestamp || new Date().toISOString();
+    const role = wireRole === 'user' ? 'user' : 'assistant';
+    let timestamp = raw.timestamp || fallbackTimestamp;
     const blocks = message.content;
 
-    // Plain-string content (rare) renders as a single message.
     if (typeof blocks === 'string') {
-      const text = blocks.trim();
-      if (text) events.push({ type: 'message', agent: 'droid', timestamp, role, content: text });
+      const parsed = agent === 'cursor' && role === 'user'
+        ? parseCursorUserText(blocks)
+        : { text: blocks.trim(), timestamp: undefined };
+      const text = parsed.text;
+      timestamp = parsed.timestamp || timestamp;
+      if (text) events.push({ type: 'message', agent, timestamp, role, content: text });
       continue;
     }
     if (!Array.isArray(blocks)) continue;
 
     for (const block of blocks) {
       if (block.type === 'text') {
-        const text = (block.text || '').trim();
-        // Skip injected context blocks (date, skills list) on the first user turn.
+        const parsed = agent === 'cursor' && role === 'user'
+          ? parseCursorUserText(block.text || '')
+          : { text: (block.text || '').trim(), timestamp: undefined };
+        const text = parsed.text;
+        timestamp = parsed.timestamp || timestamp;
         if (text && !(role === 'user' && text.startsWith('<system-reminder>'))) {
-          events.push({ type: 'message', agent: 'droid', timestamp, role, content: text });
+          events.push({ type: 'message', agent, timestamp, role, content: text });
         }
       } else if (block.type === 'thinking') {
         const thinkingText = (block.thinking || '').trim();
-        if (thinkingText) events.push({ type: 'thinking', agent: 'droid', timestamp, content: thinkingText });
+        if (thinkingText) events.push({ type: 'thinking', agent, timestamp, content: thinkingText });
       } else if (block.type === 'tool_use') {
         const toolName = block.name || 'unknown';
         const toolInput = block.input || {};
         if (block.id) toolUseMap.set(block.id, { tool: toolName, args: toolInput });
         events.push({
           type: 'tool_use',
-          agent: 'droid',
+          agent,
           timestamp,
           tool: toolName,
+          callId: typeof block.id === 'string' ? block.id : undefined,
           args: toolInput,
           path: toolInput.file_path || toolInput.path || undefined,
-          command: (toolName === 'Bash' || toolName === 'Execute') ? toolInput.command : undefined,
+          command: (toolName === 'Bash' || toolName === 'Execute' || toolName === 'Shell') ? toolInput.command : undefined,
         });
       } else if (block.type === 'tool_result') {
         const toolId = block.tool_use_id;
         const toolInfo = toolId ? toolUseMap.get(toolId) : undefined;
         const isError = block.is_error === true;
-
-        let output = '';
-        if (typeof block.content === 'string') {
-          output = block.content;
-        } else if (Array.isArray(block.content)) {
-          output = block.content
-            .filter((c: any) => c.type === 'text')
-            .map((c: any) => c.text || '')
-            .join('\n');
-        }
+        const output = typeof block.content === 'string'
+          ? block.content
+          : Array.isArray(block.content)
+            ? block.content.filter((c: any) => c.type === 'text').map((c: any) => c.text || '').join('\n')
+            : '';
 
         if (isError) {
-          events.push({ type: 'error', agent: 'droid', timestamp, tool: toolInfo?.tool, content: output || 'Tool execution failed' });
+          events.push({
+            type: 'error', agent, timestamp, tool: toolInfo?.tool,
+            callId: toolId, outcome: 'error', content: output || 'Tool execution failed',
+          });
         } else {
           events.push({
-            type: 'tool_result',
-            agent: 'droid',
-            timestamp,
-            tool: toolInfo?.tool,
-            success: true,
-            output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+            type: 'tool_result', agent, timestamp, tool: toolInfo?.tool, callId: toolId, success: true,
+            output: output,
           });
         }
         if (toolId) toolUseMap.delete(toolId);
       } else if (block.type === 'image') {
         const source = block.source || {};
         const sizeBytes = source.type === 'base64' ? Math.ceil(((source.data as string)?.length || 0) * 0.75) : 0;
-        events.push(normalizedAttachmentEvent('droid', timestamp, block, source, 'image/png', sizeBytes));
+        events.push(normalizedAttachmentEvent(agent, timestamp, block, source, 'image/png', sizeBytes));
       }
     }
   }
 
   return events;
+}
+
+/**
+ * Parse a Droid (Factory) JSONL session file into normalized events. Droid
+ * wraps each turn in a `{type:'message', message:{role, content, modelId}}`
+ * envelope; the content blocks are Anthropic-shaped (text/thinking/tool_use/
+ * tool_result), so block handling mirrors the Claude parser.
+ */
+export function parseDroid(filePath: string): SessionEvent[] {
+  return parseAnthropicMessageJsonl(filePath, 'droid');
 }

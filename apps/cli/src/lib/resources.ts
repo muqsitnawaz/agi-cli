@@ -22,6 +22,7 @@ import {
   getEnabledExtraRepos,
 } from './state.js';
 import { isNameActiveInResourceProfile, type ProfiledResourceKind } from './resource-profiles.js';
+import { resolveSnapshotSha } from './git.js';
 
 // ─── Resource resolver ────────────────────────────────────────────────────────
 
@@ -32,7 +33,7 @@ export type ResourceKind =
   | 'hooks'
   | 'rules'
   | 'mcp'
-  | 'cli'
+  | 'clis'
   | 'permissions'
   | 'subagents'
   | 'workflows'
@@ -49,6 +50,32 @@ export interface ResolvedResource {
    * or the alias name (e.g. 'rush') for extra repos registered in agents.yaml.
    */
   source: string;
+  /**
+   * Absolute path to the DotAgents repo root this resource resolved from (the
+   * project/user/system/extra-repo dir — one level above the `kind`
+   * subdirectory). DotAgents repos are git-tracked (plugins.ts), so this pairs
+   * with {@link snapshotSha} to answer "which commit of which repo".
+   */
+  repoRoot: string;
+  /**
+   * Short HEAD sha of `repoRoot`'s git checkout, lazily resolved (a getter,
+   * not computed at construction) and memoized per repoRoot
+   * (`git.ts` `resolveSnapshotSha`) — a caller that never inspects provenance
+   * never pays for the git shell-out, and resolving many resources from the
+   * same repo pays for exactly one. `undefined` when `repoRoot` isn't a git
+   * repo (or has no commits).
+   */
+  readonly snapshotSha: string | undefined;
+}
+
+/** Build a ResolvedResource with a lazy, memoized `snapshotSha` getter. */
+function withProvenance(base: { name: string; path: string; source: string; repoRoot: string }): ResolvedResource {
+  return {
+    ...base,
+    get snapshotSha() {
+      return resolveSnapshotSha(base.repoRoot);
+    },
+  };
 }
 
 function profiledKind(kind: ResourceKind): ProfiledResourceKind | null {
@@ -74,6 +101,31 @@ function resourceIsActive(kind: ResourceKind, name: string, source: string): boo
 }
 
 /**
+ * Documentation filenames that live *beside* resources, describing the directory
+ * rather than being a resource in it. A DotAgents repo keeps a `README.md` (for
+ * humans) and an `AGENTS.md` (for agents) in each resource dir, with
+ * `CLAUDE.md`/`GEMINI.md` symlinked to the latter. Without this filter every one
+ * of them materializes as a resource — `commands/README.md` installs a bogus
+ * `/README` slash command into every agent home.
+ *
+ * `rules` is exempt: there `AGENTS.md` IS the resource (the composed ruleset that
+ * syncs as each agent's memory file), not documentation about the directory.
+ */
+const DOC_BASENAMES = new Set(['readme', 'agents', 'claude', 'gemini']);
+
+/**
+ * True when `rawName` (a filename with its extension already stripped) names a
+ * directory doc rather than a resource of `kind`. Exported so every enumerator
+ * shares one definition — `listCentralCommands` and `discoverCommands` in
+ * `commands.ts` do their own `readdirSync` scans, and without this they would
+ * list a `README` that `resolveResource` then refuses to open.
+ */
+export function isDirectoryDoc(kind: ResourceKind, rawName: string): boolean {
+  if (kind === 'rules') return false;
+  return DOC_BASENAMES.has(rawName.toLowerCase());
+}
+
+/**
  * Resolve a single resource by kind + name using project > user > system precedence.
  * For file-based resources the path ends in `.md`, `.yaml`, or `.yml` as appropriate.
  * Returns null when the resource does not exist in any scope.
@@ -88,31 +140,33 @@ export function resolveResource(
   const projectDir = getProjectAgentsDir(cwd);
   const extraRepos = getEnabledExtraRepos();
 
-  const candidates: Array<[string, string]> = [
-    ...(projectDir ? [[path.join(projectDir, kind), 'project'] as [string, string]] : []),
-    [path.join(getUserAgentsDir(), kind), 'user'],
-    [path.join(getSystemAgentsDir(), kind), 'system'],
-    ...extraRepos.map((e): [string, string] => [path.join(e.dir, kind), e.alias]),
+  const candidates: Array<[string, string, string]> = [
+    ...(projectDir ? [[path.join(projectDir, kind), 'project', projectDir] as [string, string, string]] : []),
+    [path.join(getUserAgentsDir(), kind), 'user', getUserAgentsDir()],
+    [path.join(getSystemAgentsDir(), kind), 'system', getSystemAgentsDir()],
+    ...extraRepos.map((e): [string, string, string] => [path.join(e.dir, kind), e.alias, e.dir]),
   ];
 
-  for (const [dir, source] of candidates) {
+  for (const [dir, source, repoRoot] of candidates) {
     if (!fs.existsSync(dir)) continue;
 
     // Try exact name (for directories like skills/subagents)
     const exactPath = path.join(dir, name);
     if (fs.existsSync(exactPath)) {
       if (resourceIsActive(kind, name, source)) {
-        return { name, path: exactPath, source };
+        return withProvenance({ name, path: exactPath, source, repoRoot });
       }
       continue;
     }
 
-    // Try with common file extensions
+    // Try with common file extensions. A directory doc (README/AGENTS/CLAUDE/
+    // GEMINI) describes the directory and is never itself a resource.
+    if (isDirectoryDoc(kind, name)) continue;
     for (const ext of ['.md', '.yaml', '.yml']) {
       const withExt = exactPath + ext;
       if (fs.existsSync(withExt)) {
         if (resourceIsActive(kind, name, source)) {
-          return { name, path: withExt, source };
+          return withProvenance({ name, path: withExt, source, repoRoot });
         }
         continue;
       }
@@ -136,14 +190,118 @@ export function listResources(
   const projectDir = getProjectAgentsDir(cwd);
   const extraRepos = getEnabledExtraRepos();
 
-  const roots: Array<[string, string]> = [
-    ...(projectDir ? [[path.join(projectDir, kind), 'project'] as [string, string]] : []),
-    [path.join(getUserAgentsDir(), kind), 'user'],
-    [path.join(getSystemAgentsDir(), kind), 'system'],
-    ...extraRepos.map((e): [string, string] => [path.join(e.dir, kind), e.alias]),
+  const roots: Array<[string, string, string]> = [
+    ...(projectDir ? [[path.join(projectDir, kind), 'project', projectDir] as [string, string, string]] : []),
+    [path.join(getUserAgentsDir(), kind), 'user', getUserAgentsDir()],
+    [path.join(getSystemAgentsDir(), kind), 'system', getSystemAgentsDir()],
+    ...extraRepos.map((e): [string, string, string] => [path.join(e.dir, kind), e.alias, e.dir]),
   ];
 
-  for (const [dir, source] of roots) {
+  // Hooks use a one-level event-group layout (hooks/pre-tool-use/git-guard.sh).
+  // A flat readdir treats `pre-tool-use` as the resource name, so `system:*`
+  // pattern expansion never includes nested scripts — and `agents sync --force`
+  // leaves stale flat copies in version homes forever. Mirror getAvailableResources:
+  // expand group dirs that hold scripts (install name = basename with extension),
+  // keep fixture-only dirs as bundles, and keep top-level scripts as resources.
+  // Keep this logic self-contained (no hooks.ts import) so vi.mock of hooks.js
+  // in versions tests does not break listResources.
+  if (kind === 'hooks') {
+    const HOOK_SCRIPT_EXTS = new Set([
+      '.sh', '.bash', '.zsh', '.py', '.js', '.ts', '.mjs', '.cjs', '.rb', '.pl', '.ps1', '.cmd', '.bat',
+    ]);
+    const HOOK_NON_SCRIPT_EXTS = new Set([
+      '.md', '.markdown', '.rst', '.txt', '.yaml', '.yml', '.json', '.toml', '.ini', '.conf',
+    ]);
+    const HOOK_GROUP_SKIP = new Set(['node_modules', '.git', '.cache']);
+    const isHookScriptName = (fileName: string, mode: number): boolean => {
+      const ext = path.extname(fileName).toLowerCase();
+      if (HOOK_SCRIPT_EXTS.has(ext)) return true;
+      return (mode & 0o111) !== 0 && !HOOK_NON_SCRIPT_EXTS.has(ext);
+    };
+    for (const [dir, source, repoRoot] of roots) {
+      if (!fs.existsSync(dir)) continue;
+      let top: string[];
+      try {
+        top = fs.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const name of top) {
+        if (name.startsWith('.')) continue;
+        const full = path.join(dir, name);
+        let stat: fs.Stats;
+        try {
+          stat = fs.lstatSync(full);
+        } catch {
+          continue;
+        }
+        if (stat.isSymbolicLink()) continue;
+        if (stat.isFile()) {
+          if (!isHookScriptName(name, stat.mode)) continue;
+          // Docs that live beside hooks (README/AGENTS) are not resources.
+          const raw = name.replace(/\.(md|yaml|yml)$/, '');
+          if (isDirectoryDoc(kind, raw)) continue;
+          if (seen.has(name)) continue;
+          if (!resourceIsActive(kind, name, source)) continue;
+          seen.add(name);
+          results.push(withProvenance({
+            name,
+            path: full,
+            source,
+            repoRoot,
+          }));
+          continue;
+        }
+        if (!stat.isDirectory() || HOOK_GROUP_SKIP.has(name)) continue;
+        let nested: string[];
+        try {
+          nested = fs.readdirSync(full);
+        } catch {
+          continue;
+        }
+        const scripts: string[] = [];
+        for (const nestedName of nested) {
+          if (nestedName.startsWith('.')) continue;
+          const nfull = path.join(full, nestedName);
+          let nstat: fs.Stats;
+          try {
+            nstat = fs.lstatSync(nfull);
+          } catch {
+            continue;
+          }
+          if (nstat.isSymbolicLink() || !nstat.isFile()) continue;
+          if (isHookScriptName(nestedName, nstat.mode)) scripts.push(nestedName);
+        }
+        if (scripts.length > 0) {
+          for (const script of scripts) {
+            if (seen.has(script)) continue;
+            if (!resourceIsActive(kind, script, source)) continue;
+            seen.add(script);
+            results.push(withProvenance({
+              name: script,
+              path: path.join(full, script),
+              source,
+              repoRoot,
+            }));
+          }
+        } else {
+          // Fixture-only directory bundle (hooks/tests/fixtures/…).
+          if (seen.has(name)) continue;
+          if (!resourceIsActive(kind, name, source)) continue;
+          seen.add(name);
+          results.push(withProvenance({
+            name,
+            path: full,
+            source,
+            repoRoot,
+          }));
+        }
+      }
+    }
+    return results;
+  }
+
+  for (const [dir, source, repoRoot] of roots) {
     if (!fs.existsSync(dir)) continue;
     let entries: fs.Dirent[];
     try {
@@ -153,14 +311,20 @@ export function listResources(
     for (const entry of entries) {
       if (entry.name.startsWith('.')) continue;
       const rawName = entry.name.replace(/\.(md|yaml|yml)$/, '');
+      // Not isFile(): a Dirent for a symlink reports isFile() === false, and
+      // CLAUDE.md/GEMINI.md are symlinks to AGENTS.md by convention. Anything
+      // that is not a directory is a candidate doc; a resource directory that
+      // happens to be named `agents/` is still a real resource.
+      if (!entry.isDirectory() && isDirectoryDoc(kind, rawName)) continue;
       if (seen.has(rawName)) continue;
       if (!resourceIsActive(kind, rawName, source)) continue;
       seen.add(rawName);
-      results.push({
+      results.push(withProvenance({
         name: rawName,
         path: path.join(dir, entry.name),
         source,
-      });
+        repoRoot,
+      }));
     }
   }
 

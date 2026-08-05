@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 // Self-test for the quick-issue capture logic (Cmd-Shift-O). Follows the repo's
@@ -13,6 +14,7 @@ enum IssueSelfTest {
     static func run() -> Never {
         print("menubar issue-capture self-test")
         testImageFilePick()
+        testRecentRepoDirs()
         testTicketIDParse()
         testPromptContract()
         testTicketCreateArgsAndParsing()
@@ -21,6 +23,15 @@ enum IssueSelfTest {
         testRecentTicketsMerge()
         testDraftPreservation()
         testRoutineFailureReason()
+        testRoutineGrouping()
+        testLinearProjectResolution()
+        testLinearTicketRanking()
+        testLinearTicketFilter()
+        testLinearTicketQuickFilterAndSort()
+        testLinearCache()
+        testTicketDispatchContract()
+        testActiveDisplay()
+        testAgentAvatar()
         if failures == 0 {
             print("\nALL PASS")
             exit(0)
@@ -56,6 +67,24 @@ enum IssueSelfTest {
               detail: got.map { ($0 as NSString).lastPathComponent }.joined(separator: ","))
         check("limit is honored", AgentsCLI.imageFiles(inDirs: [dirA, dirB], limit: 1).count == 1)
         check("no dirs yields empty", AgentsCLI.imageFiles(inDirs: [], limit: 6).isEmpty)
+    }
+
+    // Repo choices must be derived from an already-fetched session snapshot. If
+    // this helper ever shells `agents sessions` itself again, Cmd-Shift-O regains
+    // the measured one-second blocking call that this regression test prevents.
+    private static func testRecentRepoDirs() {
+        func session(_ cwd: String?) -> RecentSession {
+            RecentSession(id: nil, shortId: nil, agent: "codex", timestamp: nil,
+                          project: nil, cwd: cwd, filePath: nil, gitBranch: nil,
+                          topic: nil, version: nil)
+        }
+        let home = NSHomeDirectory()
+        let got = AgentsCLI.recentRepoDirs(from: [
+            session("/work/first"), session(home), session("/work/first"),
+            session(nil), session("/work/second"), session("/work/third"),
+        ], limit: 2)
+        check("recent repo dirs use warm session order", got == ["/work/first", "/work/second"],
+              detail: got.joined(separator: ","))
     }
 
     // parseCreatedTicketID pulls the identifier from the linear CLI success line,
@@ -182,13 +211,21 @@ enum IssueSelfTest {
         check("quick-fix prompt requires repo discovery", prompt.contains("agents sessions --all --limit 20"))
         check("quick-fix prompt requires verification", prompt.contains("Verify with the focused tests"))
 
-        let name = AgentsCLI.quickDispatchName(agent: "Codex_Cli", date: Date(timeIntervalSince1970: 1234))
-        check("quick-dispatch names are durable and normalized", name == "quick-codex-cli-1234", detail: name)
+        let name = AgentsCLI.quickDispatchName(note: "Fix the broken login button", date: Date(timeIntervalSince1970: 1234))
+        check("dispatch name is a slug of the user's task", name == "fix-the-broken-login-button", detail: name)
+        let emptyName = AgentsCLI.quickDispatchName(note: "   ", date: Date(timeIntervalSince1970: 1234))
+        check("empty note falls back to a timestamped task name", emptyName == "task-1234", detail: emptyName)
 
-        let args = AgentsCLI.quickFixRunArgs(agent: "codex", prompt: "<prompt>", name: "quick-codex-1234")
-        check("quick-fix runs in autonomous mode",
-              args == ["run", "codex", "<prompt>", "--mode", "auto", "--name", "quick-codex-1234"],
+        let args = AgentsCLI.quickFixRunArgs(agent: "codex", prompt: "<prompt>", name: "my-task")
+        check("run is balanced + autonomous + self-notifying",
+              args == ["run", "codex", "<prompt>", "--mode", "auto", "--balanced", "--notify", "--name", "my-task"],
               detail: args.joined(separator: " "))
+        check("dispatch carries --notify so completion survives a helper restart",
+              args.contains("--notify"))
+        let scoped = AgentsCLI.quickFixRunArgs(agent: "codex", prompt: "<p>", name: "n", cwd: "/repo", device: "zion")
+        check("run scopes to cwd + device when given",
+              scoped == ["run", "codex", "<p>", "--mode", "auto", "--balanced", "--notify", "--name", "n", "--cwd", "/repo", "--device", "zion"],
+              detail: scoped.joined(separator: " "))
     }
 
     // The picker roster is configurable but remains pinned to supported agents.
@@ -238,16 +275,16 @@ enum IssueSelfTest {
         //     dismisses clean so the next summon starts fresh.
         check("empty note clears the draft",
               PromptDraft.forDismissal(note: "", selectedPaths: [],
-                                       selectedAgents: [], action: .fileTicket) == nil)
+                                       selectedAgents: [], action: .plan) == nil)
         check("whitespace/newline-only note clears the draft",
               PromptDraft.forDismissal(note: "  \n\t ", selectedPaths: ["/tmp/a.png"],
-                                       selectedAgents: ["codex"], action: .fix) == nil)
+                                       selectedAgents: ["codex"], action: .run) == nil)
 
         // (b) A real note round-trips every field verbatim through save→restore.
         let saved = PromptDraft.forDismissal(note: "  cards show raw uuids  ",
                                              selectedPaths: ["/tmp/a.png", "/tmp/b.png"],
                                              selectedAgents: ["codex", "claude"],
-                                             action: .fix)
+                                             action: .run)
         check("non-empty note preserves a draft", saved != nil,
               detail: saved.map { $0.note } ?? "nil")
         check("draft preserves the raw (untrimmed) note",
@@ -258,19 +295,19 @@ enum IssueSelfTest {
         check("draft preserves selectedAgents",
               saved?.selectedAgents == ["codex", "claude"],
               detail: (saved?.selectedAgents ?? []).sorted().joined(separator: ","))
-        check("draft preserves the dispatch action", saved?.action == .fix)
+        check("draft preserves the dispatch action", saved?.action == .run)
 
         // The restore side (summon's `draft?.field ?? default`): a saved draft
         // rehydrates its fields; a nil draft — what submit and Escape leave behind
         // via clearDraft — restores to a clean slate.
         check("restore rehydrates note+action from a saved draft",
               (saved?.note ?? "") == "  cards show raw uuids  " &&
-              (saved?.action ?? .fileTicket) == .fix)
+              (saved?.action ?? .plan) == .run)
         let cleared: PromptDraft? = nil   // what submit/Escape (clearDraft) leave
         check("submit/Escape leave no draft → restore yields empty note",
               (cleared?.note ?? "") == "")
         check("submit/Escape leave no draft → restore yields default action + no selection",
-              (cleared?.action ?? .fileTicket) == .fileTicket &&
+              (cleared?.action ?? .plan) == .plan &&
               (cleared?.selectedPaths ?? []).isEmpty &&
               (cleared?.selectedAgents ?? []).isEmpty)
     }
@@ -306,13 +343,382 @@ enum IssueSelfTest {
               detail: routineFailureDetail(failed, max: 72) ?? "nil")
     }
 
+    // groupedRoutines preserves first-occurrence order, groups correctly, and puts
+    // nil-projectGroup routines into the ungrouped tail.
+    private static func testRoutineGrouping() {
+        let cli1  = routine(name: "nightly-cli", projectGroup: "agents-cli")
+        let web   = routine(name: "standup",     projectGroup: "rush-app")
+        let cli2  = routine(name: "ci-check", lastStatus: "failed", exitCode: 1, overdue: false,
+                            projectGroup: "agents-cli")
+        let cross = routine(name: "healthcheck", projectGroup: nil)
+
+        let (grouped, ungrouped) = groupedRoutines([cli1, web, cli2, cross])
+        check("two project groups present", grouped.count == 2,
+              detail: grouped.map { $0.0 }.joined(separator: ","))
+        check("first group is agents-cli (first occurrence)",
+              grouped.first.map { $0.0 } == "agents-cli",
+              detail: grouped.first.map { $0.0 } ?? "nil")
+        check("agents-cli group has both routines", grouped[0].1.count == 2,
+              detail: "\(grouped[0].1.count)")
+        check("rush-app group has one routine", grouped[1].1.count == 1)
+        check("nil projectGroup lands in ungrouped",
+              ungrouped.count == 1 && ungrouped[0].name == "healthcheck",
+              detail: ungrouped.map { $0.name }.joined(separator: ","))
+
+        // Within a group, insertion order (upcoming-first) is preserved.
+        check("first agents-cli entry is the one that appeared first",
+              grouped[0].1[0].name == "nightly-cli")
+
+        // All-ungrouped: no groups, everything in the tail.
+        let (g2, u2) = groupedRoutines([cross])
+        check("no projectGroup means all ungrouped", g2.isEmpty && u2.count == 1)
+
+        // Empty input.
+        let (g3, u3) = groupedRoutines([])
+        check("empty input yields empty output", g3.isEmpty && u3.isEmpty)
+    }
+
+    // The repo picker drives the ticket scope, so `agents-cli` has to land on the
+    // "Agents CLI" project without any configured mapping — and a repo that matches
+    // nothing must resolve to nil rather than to someone else's project.
+    private static func testLinearProjectResolution() {
+        let projects = [
+            LinearProject(id: "p1", name: "Agents CLI"),
+            LinearProject(id: "p2", name: "Rush App"),
+            LinearProject(id: "p3", name: "Rush CLI"),
+        ]
+        check("repo name matches a project across case + punctuation",
+              LinearTickets.resolveProject(repoName: "agents-cli", projects: projects)?.id == "p1")
+        check("an ambiguous repo name matches nothing",
+              LinearTickets.resolveProject(repoName: "rush", projects: projects) == nil)
+        check("an explicit per-repo project wins over the derived match",
+              LinearTickets.resolveProject(repoName: "agents-cli", projects: projects,
+                                           override: "Rush CLI")?.id == "p3")
+        check("an override naming no live project falls through to the derived match",
+              LinearTickets.resolveProject(repoName: "agents-cli", projects: projects,
+                                           override: "Deleted Project")?.id == "p1")
+        check("no repo means no scope",
+              LinearTickets.resolveProject(repoName: nil, projects: projects) == nil)
+        check("no projects means no scope",
+              LinearTickets.resolveProject(repoName: "agents-cli", projects: []) == nil)
+    }
+
+    // The ranking IS the suggestion: urgent leads, "no priority" sinks below low,
+    // and within one priority overdue beats in-progress beats newest.
+    private static func testLinearTicketRanking() {
+        let now = date("2026-08-02T00:00:00Z")
+        let urgent = ticket("A-1", priority: 1, createdAt: "2026-07-01T00:00:00.000Z")
+        let none = ticket("A-2", priority: 0, createdAt: "2026-08-01T00:00:00.000Z")
+        let low = ticket("A-3", priority: 4, createdAt: "2026-08-01T00:00:00.000Z")
+        let highOld = ticket("A-4", priority: 2, createdAt: "2026-07-01T00:00:00.000Z")
+        let highNew = ticket("A-5", priority: 2, createdAt: "2026-08-01T00:00:00.000Z")
+        let highStarted = ticket("A-6", priority: 2, createdAt: "2026-06-01T00:00:00.000Z",
+                                 stateType: "started")
+        let highOverdue = ticket("A-7", priority: 2, createdAt: "2026-06-01T00:00:00.000Z",
+                                 dueDate: "2026-07-30")
+
+        let ranked = LinearTickets.rank([none, low, highNew, urgent, highOverdue, highStarted, highOld],
+                                        now: now).map(\.identifier)
+        check("urgent leads the list", ranked.first == "A-1", detail: ranked.joined(separator: ","))
+        check("no-priority sinks below low", ranked.last == "A-2", detail: ranked.joined(separator: ","))
+        check("inside one priority: overdue, then started, then newest",
+              Array(ranked.dropFirst().prefix(4)) == ["A-7", "A-6", "A-5", "A-4"],
+              detail: ranked.joined(separator: ","))
+        check("an overdue ticket is only overdue against today",
+              LinearTickets.isOverdue(highOverdue, now: now)
+                  && !LinearTickets.isOverdue(highOverdue, now: date("2026-07-01T00:00:00Z")))
+        check("priority labels read as Linear's scale",
+              LinearTickets.priorityLabel(1) == "P1" && LinearTickets.priorityLabel(0) == "--")
+    }
+
+    // Typing narrows the list so an existing ticket surfaces before Return files a
+    // duplicate.
+    private static func testLinearTicketFilter() {
+        let tickets = [
+            ticket("RUSH-2078", title: "prix/code-reviewer is down"),
+            ticket("RUSH-1968", title: "Passphrase exported in plaintext from .zshenv"),
+        ]
+        check("every term must match, in any order",
+              LinearTickets.filter(tickets, query: "plaintext passphrase").map(\.identifier)
+                  == ["RUSH-1968"])
+        check("the identifier is searchable too",
+              LinearTickets.filter(tickets, query: "rush-2078").map(\.identifier) == ["RUSH-2078"])
+        check("an unmatched term yields nothing",
+              LinearTickets.filter(tickets, query: "kubernetes").isEmpty)
+        check("an empty query keeps the whole ranked list",
+              LinearTickets.filter(tickets, query: "   ").count == 2)
+    }
+
+    // Quick filter + sort are single dropdowns (not chip blocks). list() is the
+    // one path the panel uses: filter → text search → sort → cap. Flat list only.
+    private static func testLinearTicketQuickFilterAndSort() {
+        let now = date("2026-08-02T00:00:00Z")
+        let todoP1 = ticket("T-1", title: "todo urgent", priority: 1,
+                            createdAt: "2026-07-01T00:00:00.000Z", stateType: "unstarted")
+        let doingP2 = ticket("T-2", title: "doing mid", priority: 2,
+                             createdAt: "2026-08-01T00:00:00.000Z", stateType: "started")
+        let backlog = ticket("T-3", title: "backlog item", priority: 3,
+                             createdAt: "2026-06-01T00:00:00.000Z",
+                             stateType: "unstarted", stateName: "Backlog")
+        let overdue = ticket("T-4", title: "overdue low", priority: 4,
+                             createdAt: "2026-05-01T00:00:00.000Z",
+                             dueDate: "2026-07-01", stateType: "unstarted")
+        let pool = [todoP1, doingP2, backlog, overdue]
+
+        check("filter Doing keeps only started",
+              LinearTickets.list(pool, filter: .doing, sort: .urgentFirst, now: now)
+                  .map(\.identifier) == ["T-2"])
+        check("filter P1 keeps only priority 1",
+              LinearTickets.list(pool, filter: .p1, sort: .urgentFirst, now: now)
+                  .map(\.identifier) == ["T-1"])
+        check("filter Overdue keeps past due dates",
+              LinearTickets.list(pool, filter: .overdue, sort: .urgentFirst, now: now)
+                  .map(\.identifier) == ["T-4"])
+        check("filter Backlog matches state name",
+              LinearTickets.list(pool, filter: .backlog, sort: .urgentFirst, now: now)
+                  .map(\.identifier) == ["T-3"])
+        check("sort Newest leads with latest createdAt",
+              LinearTickets.list(pool, filter: .all, sort: .newest, now: now)
+                  .map(\.identifier).first == "T-2")
+        check("sort Oldest leads with earliest createdAt",
+              LinearTickets.list(pool, filter: .all, sort: .oldest, now: now)
+                  .map(\.identifier).first == "T-4")
+        check("sort Due puts dated tickets first",
+              LinearTickets.list(pool, filter: .all, sort: .due, now: now)
+                  .map(\.identifier).first == "T-4")
+        check("text query ANDs with the filter",
+              LinearTickets.list(pool, filter: .all, sort: .newest, query: "urgent", now: now)
+                  .map(\.identifier) == ["T-1"])
+        check("list cap truncates a long result",
+              LinearTickets.list(Array(repeating: todoP1, count: 60),
+                                 filter: .all, sort: .newest, now: now,
+                                 cap: 10).count == 10)
+        check("QuickFilter titles are human, not raw keys",
+              LinearTickets.QuickFilter.p1.title == "P1 only"
+                  && LinearTickets.QuickSort.urgentFirst.title == "Urgent first")
+    }
+
+    // The cache is what makes the panel appear instantly; a write for one project
+    // must not disturb another, and staleness has to be honest.
+    private static func testLinearCache() {
+        let now = Date()
+        var cache = LinearTickets.Cache()
+        cache = LinearTickets.merged(cache, projects: [LinearProject(id: "p1", name: "Agents CLI")],
+                                     at: now)
+        cache = LinearTickets.merged(cache, project: "Agents CLI",
+                                     tickets: [ticket("A-1")], at: now)
+        cache = LinearTickets.merged(cache, project: "Rush App",
+                                     tickets: [ticket("B-1"), ticket("B-2")], at: now)
+        check("each project keeps its own tickets",
+              cache.scopes["Agents CLI"]?.tickets.count == 1 && cache.scopes["Rush App"]?.tickets.count == 2)
+        check("the project list survives a ticket write", cache.projects.count == 1)
+        check("a just-fetched scope is fresh",
+              LinearTickets.isFresh(cache, project: "Agents CLI", now: now))
+        check("a scope older than the TTL is stale",
+              !LinearTickets.isFresh(cache, project: "Agents CLI",
+                                     now: now.addingTimeInterval(LinearTickets.cacheTTL + 1)))
+        check("an unfetched scope is never fresh",
+              !LinearTickets.isFresh(cache, project: "Prix", now: now))
+
+        // The cache round-trips through JSON — it is read back on the next launch.
+        guard let encoded = try? JSONEncoder().encode(cache),
+              let decoded = try? JSONDecoder().decode(LinearTickets.Cache.self, from: encoded) else {
+            check("cache round-trips through JSON", false)
+            return
+        }
+        check("cache round-trips through JSON",
+              decoded.scopes["Rush App"]?.tickets == cache.scopes["Rush App"]?.tickets)
+    }
+
+    // Dispatching an existing ticket must produce a real, scoped, self-reporting
+    // run — and the Plan variant must not tell an agent to change code.
+    private static func testTicketDispatchContract() {
+        let t = ticket("RUSH-2098", title: "Surface the repo's open tickets", priority: 2)
+        let args = AgentsCLI.ticketWorkRunArgs(
+            agent: "claude",
+            prompt: AgentsCLI.ticketWorkPrompt(ticket: t, action: .run),
+            ticket: t, action: .run, cwd: "/Users/me/src/agents-cli")
+        for flag in ["--mode", "auto", "--balanced", "--notify"] {
+            check("ticket run argv carries \(flag)", args.contains(flag))
+        }
+        check("ticket run is scoped to the picked repo",
+              args.contains("--cwd") && args.contains("/Users/me/src/agents-cli"))
+        check("the session is named after the ticket",
+              args.contains("rush-2098"), detail: args.joined(separator: " "))
+        let planArgs = AgentsCLI.ticketWorkRunArgs(
+            agent: "claude", prompt: "p", ticket: t, action: .plan, cwd: nil)
+        check("a plan dispatch is named apart from the implementation run",
+              planArgs.contains("rush-2098-plan"), detail: planArgs.joined(separator: " "))
+        check("no --cwd when there is no repo to scope to", !planArgs.contains("--cwd"))
+
+        let runPrompt = AgentsCLI.ticketWorkPrompt(ticket: t, action: .run)
+        check("the run brief names the ticket and how to read it",
+              runPrompt.contains("RUSH-2098") && runPrompt.contains("linear tasks RUSH-2098"))
+        // The brief must make the agent DISCOVER the in-progress state: state names
+        // are per-workspace ("Doing" here, not "In Progress"), `--pickup` hardcodes
+        // "In Progress", and `--status progress` is a `tasks` filter value, not a
+        // state — both fail on a workspace that names it anything else.
+        check("the run brief claims the ticket by discovering the started state",
+              runPrompt.contains("linear states") && runPrompt.contains("--status")
+                  && !runPrompt.contains("--pickup"))
+        check("the run brief reports back on the ticket", runPrompt.contains("--comment"))
+        let planPrompt = AgentsCLI.ticketWorkPrompt(ticket: t, action: .plan)
+        check("the plan brief forbids code changes and a PR",
+              planPrompt.contains("Do NOT change code") && planPrompt.contains("do NOT open a PR"))
+        check("the plan brief posts the plan on the ticket",
+              planPrompt.contains("linear update RUSH-2098 --comment"))
+
+        // The click seam: a plain click on a row dispatches THAT ticket, and
+        // Cmd-click opens it in Linear instead of spending an agent run on it.
+        let row = TicketRowView(ticket: t, index: 0)
+        var dispatched: LinearTicket?
+        var opened: LinearTicket?
+        row.onDispatch = { dispatched = $0 }
+        row.onOpen = { opened = $0 }
+        row.mouseDown(with: mouseEvent(modifiers: []))
+        check("a click on a row dispatches that ticket",
+              dispatched?.identifier == t.identifier && opened == nil)
+        dispatched = nil
+        row.mouseDown(with: mouseEvent(modifiers: [.command]))
+        check("cmd-click opens the ticket instead of dispatching",
+              opened?.identifier == t.identifier && dispatched == nil)
+
+        let scopeArgs = AgentsCLI.linearTicketArgs(project: "Agents CLI")
+        check("the ticket query asks for every open ticket of the project",
+              scopeArgs.contains("--all") && scopeArgs.contains("--status")
+                  && scopeArgs.contains("open") && scopeArgs.contains("--cycle")
+                  && scopeArgs.contains("all") && scopeArgs.contains("Agents CLI"),
+              detail: scopeArgs.joined(separator: " "))
+    }
+
+    // ACTIVE accordion display helpers — title preference, age, locality, summary.
+    private static func testActiveDisplay() {
+        check("topic wins over terminal label and preview",
+              ActiveDisplay.workTitle(topic: "Fix auth", label: "tab", preview: "long dump",
+                                      terminalTitle: "term") == "Fix auth")
+        check("label wins when topic is empty",
+              ActiveDisplay.workTitle(topic: "  ", label: "My tab", preview: "x",
+                                      terminalTitle: nil) == "My tab")
+        check("preview falls back to first line only",
+              ActiveDisplay.workTitle(topic: nil, label: nil,
+                                      preview: "line one\nline two",
+                                      terminalTitle: nil) == "line one")
+        check("empty inputs yield empty work title",
+              ActiveDisplay.workTitle(topic: nil, label: nil, preview: nil,
+                                      terminalTitle: nil).isEmpty)
+
+        let now: Double = 100_000_000
+        check("age seconds", ActiveDisplay.ageLabel(fromMs: now - 15_000, nowMs: now) == "15s")
+        check("age minutes", ActiveDisplay.ageLabel(fromMs: now - 180_000, nowMs: now) == "3m")
+        check("age hours", ActiveDisplay.ageLabel(fromMs: now - 7_200_000, nowMs: now) == "2h")
+        check("missing timestamp is empty", ActiveDisplay.ageLabel(fromMs: nil).isEmpty)
+
+        check("same machine is local",
+              ActiveDisplay.locality(machine: "zion", thisMachine: "zion") == "local")
+        check("other machine is remote",
+              ActiveDisplay.locality(machine: "yosemite-m0", thisMachine: "zion")
+                  == "remote · yosemite-m0")
+        check("nil machine is local (local-only listing)",
+              ActiveDisplay.locality(machine: nil, thisMachine: "zion") == "local")
+        // Parity with CLI machineId()/normalizeHost — engine tags rows as the
+        // short lowercased hostname, never the Sharing computer name.
+        check("normalizeHost strips domain and lowercases",
+              ActiveDisplay.normalizeHost("Zion.local") == "zion")
+        check("normalizeHost collapses non-alphanumerics",
+              ActiveDisplay.normalizeHost("Muqsit's MacBook Pro") == "muqsit-s-macbook-pro")
+        check("thisMachineId honors AGENTS_SYNC_MACHINE_ID",
+              ActiveDisplay.thisMachineId(env: ["AGENTS_SYNC_MACHINE_ID": "ZION.tail"],
+                                          hostname: "other.local") == "zion")
+        check("locality matches after normalize (engine zion vs Host.local)",
+              ActiveDisplay.locality(machine: "zion",
+                                     thisMachine: ActiveDisplay.normalizeHost("Zion.local"))
+                  == "local")
+
+        let summary = ActiveDisplay.projectSummary(repo: "agents-cli", running: 8, idle: 1,
+                                                   machines: ["zion", "zion"])
+        check("project summary carries counts and single host",
+              summary.contains("agents-cli") && summary.contains("●8")
+                  && summary.contains("◐1") && summary.contains("zion"),
+              detail: summary)
+        let multi = ActiveDisplay.projectSummary(repo: "x", running: 2, idle: 0,
+                                                 machines: ["a", "b"])
+        check("multi-host summary says N hosts",
+              multi.contains("2 hosts"), detail: multi)
+
+        check("PR number from pull URL",
+              ActiveDisplay.prNumber(from: "https://github.com/org/repo/pull/1753") == "1753")
+        check("PR number nil for non-PR URL",
+              ActiveDisplay.prNumber(from: "https://github.com/org/repo") == nil)
+    }
+
     // MARK: helpers
+
+    private static func ticket(_ identifier: String, title: String = "t", priority: Int = 2,
+                               createdAt: String? = "2026-07-01T00:00:00.000Z",
+                               dueDate: String? = nil,
+                               stateType: String = "unstarted",
+                               stateName: String? = nil) -> LinearTicket {
+        let name = stateName
+            ?? (stateType == "started" ? "Doing" : "Todo")
+        return LinearTicket(identifier: identifier, title: title, priority: priority,
+                            state: LinearTicketState(name: name, type: stateType),
+                            url: "https://linear.app/getrush/issue/\(identifier)",
+                            dueDate: dueDate, createdAt: createdAt)
+    }
+
+    private static func mouseEvent(modifiers: NSEvent.ModifierFlags) -> NSEvent {
+        NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: modifiers,
+                           timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0,
+                           clickCount: 1, pressure: 1)!
+    }
+
+    private static func date(_ iso: String) -> Date {
+        let f = ISO8601DateFormatter()
+        return f.date(from: iso) ?? Date(timeIntervalSince1970: 0)
+    }
 
     private static func write(_ dir: URL, _ name: String, modified offset: TimeInterval) {
         let url = dir.appendingPathComponent(name)
         try? Data("x".utf8).write(to: url)
         try? FileManager.default.setAttributes(
             [.modificationDate: Date().addingTimeInterval(offset)], ofItemAtPath: url.path)
+    }
+
+    // The notification's RIGHT-hand image. macOS draws the sending bundle's icon
+    // on the left and `contentImage` on the right; AgentAvatar owns the right one,
+    // so a banner reads "agents-cli, about <agent>". Pins the decisions that can
+    // silently produce an unreadable or misleading badge.
+    private static func testAgentAvatar() {
+        // No agent yields NO image, not a blank tile and not a repeat of the left
+        // icon — a heal notice or a multi-agent fan-out has nobody to depict.
+        check("no agent renders no right-hand image", AgentAvatar.image(for: nil) == nil)
+        check("blank agent renders no right-hand image", AgentAvatar.image(for: "   ") == nil)
+        check("a known agent renders an image", AgentAvatar.image(for: "claude") != nil)
+
+        // Marks must be unique, or two harnesses become the same badge. Four ids
+        // start with `c` and two with `g`, which is why the mark is not an initial.
+        let marks = AgentAvatar.brands.values.map(\.mark)
+        check("every brand mark is unique", Set(marks).count == marks.count,
+              detail: marks.sorted().joined(separator: ","))
+        check("claude and codex are told apart",
+              AgentAvatar.brand(for: "claude")?.mark != AgentAvatar.brand(for: "codex")?.mark)
+        check("grok and goose are told apart",
+              AgentAvatar.brand(for: "grok")?.mark != AgentAvatar.brand(for: "goose")?.mark)
+
+        check("agent id is case/whitespace insensitive",
+              AgentAvatar.brand(for: " Claude ")?.mark == AgentAvatar.brand(for: "claude")?.mark)
+
+        // An unregistered id must still render — its initial on the fallback lime,
+        // not a crash — so a harness added to the registry works before it is branded.
+        check("unknown agent falls back to its initial",
+              AgentAvatar.brand(for: "newharness")?.mark == "N")
+        check("unknown agent still renders", AgentAvatar.image(for: "newharness") != nil)
+
+        // Contrast: a dark brand takes white ink, a light one takes black.
+        check("dark tile takes white ink",
+              AgentAvatar.glyphColor(on: AgentAvatar.brand(for: "grok")!.color) == .white)
+        check("light tile takes black ink",
+              AgentAvatar.glyphColor(on: AgentAvatar.brand(for: "hermes")!.color) == .black)
     }
 
     private static func check(_ name: String, _ ok: Bool, detail: String? = nil) {
@@ -334,16 +740,21 @@ enum IssueSelfTest {
     }
 
     private static func routine(
-        lastStatus: String?,
-        exitCode: Int?,
-        failureReason: String?,
-        overdue: Bool
+        name: String = "nightly",
+        lastStatus: String? = nil,
+        exitCode: Int? = nil,
+        failureReason: String? = nil,
+        overdue: Bool = false,
+        projects: [String]? = nil,
+        projectGroup: String? = nil
     ) -> Routine {
         Routine(
-            name: "nightly",
+            name: name,
             agent: "claude",
             workflow: nil,
             repo: nil,
+            projects: projects,
+            projectGroup: projectGroup,
             schedule: "0 3 * * *",
             scheduleHuman: nil,
             enabled: true,

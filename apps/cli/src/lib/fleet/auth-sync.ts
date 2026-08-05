@@ -32,7 +32,6 @@ interface AuthFileSpec {
 export const FLEET_AUTH_FILES: Record<string, AuthFileSpec[]> = {
   claude: [{ rel: '.claude/.credentials.json', mode: 0o600 }],
   codex: [{ rel: '.codex/auth.json', mode: 0o600 }],
-  gemini: [{ rel: '.gemini/oauth_creds.json', mode: 0o600 }],
   grok: [{ rel: '.grok/auth.json', mode: 0o600 }],
   kimi: [{ rel: '.kimi-code/credentials/kimi-code.json', mode: 0o600 }],
   opencode: [{ rel: '.local/share/opencode/auth.json', mode: 0o600 }],
@@ -46,9 +45,33 @@ export const FLEET_AUTH_FILES: Record<string, AuthFileSpec[]> = {
 /** Agents whose macOS credentials live in the ACL-bound login keychain. */
 export const KEYCHAIN_BOUND_ON_MAC: ReadonlySet<string> = new Set(['claude', 'antigravity']);
 
+/**
+ * Agents whose OAuth credentials rely on single-use refresh tokens that rotate
+ * server-side on every exchange. Copying these credential files across machines
+ * is fatal: the first refresh on any box invalidates every other holder's token,
+ * collapsing the fleet to a single working login (droid/WorkOS collapsed 10 boxes
+ * to 1 overnight — RUSH-1958). Add any newly-discovered single-use-rotation
+ * harness here; the predicate below is the one place the propagation decision is
+ * made. See also `remote-login.ts` and `usage.ts` for the per-machine-login policy.
+ */
+export const SINGLE_USE_ROTATING_REFRESH_AGENTS: ReadonlySet<string> = new Set(['droid']);
+
+/** True when `agent`'s portable credential file(s) are safe to copy between
+ *  machines. Single-use rotating refresh tokens are never safe; keychain-bound
+ *  tokens are handled separately by the caller via {@link KEYCHAIN_BOUND_ON_MAC}. */
+export function isCredentialSafeToPropagate(agent: string): boolean {
+  return !SINGLE_USE_ROTATING_REFRESH_AGENTS.has(agent);
+}
+
+/** True when the agent stores credentials in portable files we can read. This
+ *  does NOT mean it is safe to propagate — check {@link isCredentialSafeToPropagate}. */
+export function hasPortableAuthFiles(agent: string): boolean {
+  return agent in FLEET_AUTH_FILES;
+}
+
 /** Which agents `apply` can propagate auth for at all. */
 export function isPropagatableAgent(agent: string): boolean {
-  return agent in FLEET_AUTH_FILES;
+  return hasPortableAuthFiles(agent) && isCredentialSafeToPropagate(agent);
 }
 
 /**
@@ -71,7 +94,7 @@ export interface LoginFlow {
   /**
    * The exact command that starts the login flow on the remote box, run as
    * `ssh -tt <box> <loginCommand>`. Bare `<cli>` for agents whose device flow
-   * starts on launch (droid, kimi, gemini, antigravity), `<cli> login` for
+   * starts on launch (droid, kimi, antigravity), `<cli> login` for
    * codex/grok, `<cli> auth login` for opencode.
    */
   loginCommand: string;
@@ -164,14 +187,6 @@ export const FLEET_LOGIN_FLOWS: Record<string, LoginFlow> = {
     flowType: 'loopback',
     successFile: successFileFor('antigravity'),
   },
-  // gemini: bare `gemini`, Google login on launch. Not characterized as a
-  // device-code flow (typically loopback) and no captured pattern — mark unknown
-  // so it is flagged non-remotable rather than mis-driven.
-  gemini: {
-    loginCommand: 'gemini',
-    flowType: 'unknown',
-    successFile: successFileFor('gemini'),
-  },
   // opencode: `opencode auth login`. No captured pattern — unknown/non-remotable.
   opencode: {
     loginCommand: 'opencode auth login',
@@ -209,7 +224,8 @@ export function snapshotAuth(agents: string[], opts: SnapshotOptions): AuthSnaps
 
   for (const agent of agents) {
     const specs = FLEET_AUTH_FILES[agent];
-    if (!specs) continue; // not propagatable — caller surfaces separately if desired
+    if (!specs) continue; // no portable file — caller surfaces separately if desired
+    if (!isCredentialSafeToPropagate(agent)) continue; // single-use rotating refresh tokens are never copied
     if (opts.platform === 'darwin' && KEYCHAIN_BOUND_ON_MAC.has(agent)) {
       bound.push(agent);
       continue;

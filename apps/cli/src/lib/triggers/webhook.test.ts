@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
-import type { JobConfig, RunMeta } from '../routines.js';
+import * as yaml from 'yaml';
+import type { JobConfig, RunMeta, WebhookContext } from '../routines.js';
 import {
   matchJobsToWebhook,
   jobMatchesWebhook,
@@ -17,6 +18,15 @@ import {
   createFileDeliveryStore,
   type IncomingWebhook,
 } from './webhook.js';
+import * as activation from '../routine-activation.js';
+
+beforeEach(() => {
+  vi.spyOn(activation, 'routineEnabledOnThisDevice').mockReturnValue(null);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 /** Build a JobConfig with sensible defaults for tests. */
 function job(partial: Partial<JobConfig> & Pick<JobConfig, 'name'>): JobConfig {
@@ -80,9 +90,13 @@ function linearIssueWebhook(labels: string[] = ['agent']): IncomingWebhook {
       webhookTimestamp: Date.now(),
       data: {
         identifier: 'RUSH-1459',
+        state: { name: 'Plan' },
         // Real Linear webhook shape: `data.labels` is a flat array of label
         // objects, NOT the `{ nodes: [...] }` GraphQL connection.
         labels: labels.map((name) => ({ id: `lbl-${name}`, name })),
+      },
+      updatedFrom: {
+        state: { name: 'Triage' },
       },
     },
   };
@@ -170,6 +184,22 @@ describe('matchJobsToWebhook', () => {
     expect(jobMatchesWebhook(linear, linearIssueWebhook(['triage']))).toBe(false);
   });
 
+  it('matches Linear stateTo and stateFrom filters', () => {
+    const linear = job({
+      name: 'linear-state',
+      trigger: { type: 'linear_event', event: 'Issue', action: 'update', stateTo: 'Plan', stateFrom: 'Triage' },
+    });
+    expect(jobMatchesWebhook(linear, linearIssueWebhook(['agent']))).toBe(true);
+
+    const wrongTo = linearIssueWebhook(['agent']);
+    (wrongTo.payload.data as Record<string, unknown>).state = { name: 'Done' };
+    expect(jobMatchesWebhook(linear, wrongTo)).toBe(false);
+
+    const wrongFrom = linearIssueWebhook(['agent']);
+    wrongFrom.payload.updatedFrom = { state: { name: 'Backlog' } };
+    expect(jobMatchesWebhook(linear, wrongFrom)).toBe(false);
+  });
+
   it('reads labels from the flat webhook array, not a {nodes} connection', () => {
     // Regression: Linear webhook bodies send `data.labels` as a flat array.
     // Reading `.nodes` (the GraphQL connection shape) made every --label filter
@@ -209,7 +239,10 @@ describe('matchJobsToWebhook', () => {
         devices: ['mac-mini', 'zion'],
         trigger: { type: 'github_event', event: 'pull_request', repo: 'x/y' },
       });
-      expect(matchJobsToWebhook([foreign, local, multi], pullRequestWebhook('x/y')).map((j) => j.name)).toEqual(['local', 'multi']);
+      // 'multi' pins [mac-mini, zion]; mac-mini owns it (lowest normalized
+      // name), so a webhook on zion no longer fires it. A routine fires on
+      // exactly one device, on the trigger path as on the cron path.
+      expect(matchJobsToWebhook([foreign, local, multi], pullRequestWebhook('x/y')).map((j) => j.name)).toEqual(['local']);
     } finally {
       if (saved === undefined) delete process.env.AGENTS_SYNC_MACHINE_ID;
       else process.env.AGENTS_SYNC_MACHINE_ID = saved;
@@ -258,6 +291,41 @@ describe('fireWebhookJobs', () => {
 
     expect(dispatched).toEqual(['pr-job']);
     expect(fired).toEqual([{ jobName: 'pr-job', runId: 'run-pr-job' }]);
+  });
+
+  it('substitutes {{...}} placeholders when a webhook context is provided', async () => {
+    const linearJob = job({
+      name: 'linear-plan',
+      trigger: { type: 'linear_event', event: 'Issue', action: 'update' },
+      prompt: 'Issue {{issue.identifier}} moved to {{issue.state.name}}.',
+    });
+    const dispatched: JobConfig[] = [];
+    const dispatch = async (config: JobConfig): Promise<RunMeta> => {
+      dispatched.push(config);
+      return {
+        jobName: config.name,
+        runId: 'run-1',
+        agent: config.agent,
+        pid: 1,
+        status: 'running',
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        exitCode: null,
+      };
+    };
+    const webhook = linearIssueWebhook(['agent']);
+    await fireWebhookJobs(webhook, {
+      jobs: [linearJob],
+      dispatch,
+      context: {
+        source: 'linear',
+        event: 'Issue',
+        action: 'update',
+        issue: webhook.payload.data,
+        updatedFrom: webhook.payload.updatedFrom,
+      },
+    });
+    expect(dispatched[0].prompt).toBe('Issue RUSH-1459 moved to Plan.');
   });
 });
 
@@ -601,6 +669,73 @@ describe('startWebhookServer', () => {
       expect(status).toBe(413);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('fires matching handlers alongside routines', async () => {
+    const secret = 'linear-secret';
+    const webhookDir = fs.mkdtempSync(path.join(os.tmpdir(), 'webhook-handlers-'));
+    process.env.AGENTS_WEBHOOKS_DIR = webhookDir;
+    try {
+      fs.mkdirSync(path.join(webhookDir), { recursive: true });
+      fs.writeFileSync(
+        path.join(webhookDir, 'linear-agent.yml'),
+        yaml.stringify({
+          name: 'linear-agent',
+          source: 'linear',
+          event: 'Issue',
+          action: 'update',
+          run: { command: 'echo {{issue.identifier}}' },
+        }),
+        'utf-8',
+      );
+
+      const server = startWebhookServer({
+        secrets: { linear: secret },
+        fire: { jobs: [], dispatch: async (): Promise<RunMeta> => { throw new Error('should not dispatch routine'); } },
+      });
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const address = server.address();
+      if (!address || typeof address !== 'object') throw new Error('server did not bind');
+      try {
+        const payload = Buffer.from(JSON.stringify(linearIssueWebhook(['agent']).payload));
+        const sig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+        const body = await new Promise<{ status: number; parsed: Record<string, unknown> }>((resolve, reject) => {
+          const req = http.request({
+            host: '127.0.0.1',
+            port: address.port,
+            path: '/hooks/linear',
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'content-length': String(payload.length),
+              'linear-signature': sig,
+              'linear-delivery': 'delivery-handler-1',
+            },
+          }, (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (c) => chunks.push(c as Buffer));
+            res.on('end', () => resolve({
+              status: res.statusCode ?? 0,
+              parsed: JSON.parse(Buffer.concat(chunks).toString('utf-8')),
+            }));
+          });
+          req.on('error', reject);
+          req.end(payload);
+        });
+
+        expect(body.status).toBe(200);
+        const handlers = body.parsed.handlers as Array<{ handlerName: string; exitCode?: number; output?: string }>;
+        expect(handlers).toHaveLength(1);
+        expect(handlers[0].handlerName).toBe('linear-agent');
+        expect(handlers[0].exitCode).toBe(0);
+        expect(handlers[0].output).toContain('RUSH-1459');
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    } finally {
+      delete process.env.AGENTS_WEBHOOKS_DIR;
+      fs.rmSync(webhookDir, { recursive: true, force: true });
     }
   });
 });

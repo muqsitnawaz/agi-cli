@@ -41,6 +41,7 @@ import {
   type BundleValue,
   type SecretRef,
 } from './index.js';
+import { isHeadlessSecretsContext } from './headless.js';
 import { fileStore } from './filestore.js';
 import {
   getVaultSession,
@@ -54,10 +55,12 @@ import {
   vaultSetItem,
 } from './vault.js';
 import { emit } from '../events.js';
+import { emitSecretAudit } from './audit.js';
 import { readMeta, getHelpersDir } from '../state.js';
 import { assertNameActiveInResourceProfile, filterNamesForActiveResourceProfile } from '../resource-profiles.js';
 import { agentGetSync, agentAutoLoadSync, agentGetMetaSync, agentAutoLoadMetaSync, agentEvictSync, secretsAgentAutoEnabled, secretsHoldMs } from './agent.js';
-import { loadSession, deleteSession } from './session-store.js';
+import { GLOBAL_HARNESS } from './scope.js';
+import { resolveSession, deleteSession } from './session-store.js';
 import { createHash } from 'node:crypto';
 
 /** Which store carries a bundle's items. */
@@ -92,21 +95,19 @@ const keychainStore: ItemStore = {
   list: listKeychainItems,
 };
 
-// The file store auto-provisions a machine-local passphrase on Linux (the
-// existing headless-libsecret fallback) but NEVER on macOS: a file-backed
-// bundle on a Mac must be unlocked with an explicit AGENTS_SECRETS_PASSPHRASE
-// supplied per run, so the box holds ciphertext only. assertFileBackendUsable()
-// enforces that the passphrase is present before we touch the store.
-const FILE_ALLOW_AUTO_PROVISION = process.platform !== 'darwin';
-
+// The file store auto-provisions a stable machine-local passphrase on EVERY
+// platform (macOS included) — a 0600 key file, encryption-at-rest with the same
+// posture as an SSH key — so `agents secrets` "just works" with no passphrase to
+// set, type, or remember, and no Touch ID. Set AGENTS_SECRETS_PASSPHRASE to opt
+// into an off-disk key.
 const fileItemStore: ItemStore = {
   has: (item) => fileStore.has(item),
-  get: (item) => fileStore.get(item, { allowAutoProvision: FILE_ALLOW_AUTO_PROVISION }),
+  get: (item) => fileStore.get(item),
   getBatch: (items) => {
     const out = new Map<string, string>();
     for (const item of items) {
       try {
-        out.set(item, fileStore.get(item, { allowAutoProvision: FILE_ALLOW_AUTO_PROVISION }));
+        out.set(item, fileStore.get(item));
       } catch {
         // Missing/undecryptable item — absent from the map, mirroring
         // getKeychainTokens (caller decides whether that's an error).
@@ -114,10 +115,10 @@ const fileItemStore: ItemStore = {
     }
     return out;
   },
-  set: (item, value) => fileStore.set(item, value, { allowAutoProvision: FILE_ALLOW_AUTO_PROVISION }),
+  set: (item, value) => fileStore.set(item, value),
   setBatch: (items) => {
     for (const [item, value] of items) {
-      fileStore.set(item, value, { allowAutoProvision: FILE_ALLOW_AUTO_PROVISION });
+      fileStore.set(item, value);
     }
   },
   delete: (item) => fileStore.delete(item),
@@ -133,6 +134,13 @@ const vaultStore: ItemStore = {
   delete: vaultDeleteItem,
   list: vaultListItems,
 };
+
+let keychainAgentOnlyBypassForTest = false;
+
+/** Disable the broker-only guard for in-memory keychain tests. */
+export function setKeychainAgentOnlyBypassForTest(bypass: boolean): void {
+  keychainAgentOnlyBypassForTest = bypass;
+}
 
 function itemStore(backend: SecretsBackend): ItemStore {
   if (backend === 'file') return fileItemStore;
@@ -158,24 +166,6 @@ export function bundleBackend(name: string): SecretsBackend {
     }
   }
   return 'keychain';
-}
-
-/**
- * Guard a file-backed bundle operation. On macOS the file store must be
- * unlocked with an explicit passphrase (env or interactive prompt) — we refuse
- * to silently auto-provision a machine-local key there, so a remote/headless
- * Mac cannot decrypt on its own. Linux keeps the existing auto-provision
- * behavior, so this is a no-op there.
- */
-function assertFileBackendUsable(name: string): void {
-  if (process.platform !== 'darwin') return;
-  if (process.env.AGENTS_SECRETS_PASSPHRASE && process.env.AGENTS_SECRETS_PASSPHRASE.length > 0) return;
-  if (process.stdin.isTTY) return;
-  throw new Error(
-    `File-backed bundle '${name}' needs AGENTS_SECRETS_PASSPHRASE to be set on macOS ` +
-    `(no biometry prompt is available headlessly). Set it for this run, e.g.\n` +
-    `  AGENTS_SECRETS_PASSPHRASE=… agents secrets exec ${name} -- <command>`
-  );
 }
 
 function assertVaultBackendUsable(name: string): void {
@@ -208,7 +198,9 @@ export interface VarMeta {
 
 /**
  * A bundle's prompt policy — how often macOS asks for Touch ID to read it:
- * - `daily` (default): ask once, then hold it silently for up to ~7 days.
+ * - `hold` (default): ask once, then serve it silently for the configured hold
+ *   duration (`secrets.agent.holdMs`, 7d by default). Named for what it does —
+ *   it was called `daily`, which stated a period it never had.
  *   (Historical name — the window is now a rolling ~1 week, not one calendar day.)
  *   Eligible for the secrets-agent — the first real keychain read auto-loads it
  *   (auto-cache is on by default) so concurrent runs read it silently, or `unlock`
@@ -226,12 +218,12 @@ export interface VarMeta {
  *   it loudly rather than silently downgrading to `always`.
  *
  * The default is configurable via `secrets.policy` in agents.yaml. Stored on disk
- * under the legacy `tier` key (`session` == `daily`, `biometry` == explicit
+ * under the legacy `tier` key (`session` == `hold`, `biometry` == explicit
  * `always`, `none` == `never`, absent == inherit the default) so bundles stay
  * readable across mixed CLI versions on synced machines. The user-facing
- * vocabulary is `policy`/`always`/`daily`/`never`.
+ * vocabulary is `policy`/`always`/`hold`/`never`.
  */
-export type SecretsPolicy = 'always' | 'daily' | 'never';
+export type SecretsPolicy = 'always' | 'hold' | 'never';
 
 /** A named set of environment variable definitions backed by various secret providers. */
 export interface SecretsBundle {
@@ -240,7 +232,7 @@ export interface SecretsBundle {
   allow_exec?: boolean;
   /** Which store carries this bundle's items. Absent ⇒ `keychain` (the default). */
   backend?: SecretsBackend;
-  /** Prompt policy. Absent ⇒ the configured default (`daily`). Serialized under
+  /** Prompt policy. Absent ⇒ the configured default (`hold`). Serialized under
    * the legacy `tier` key — see SecretsPolicy. */
   policy?: SecretsPolicy;
   /** ISO 8601 UTC timestamp. Set once on the first writeBundle() for a bundle. */
@@ -365,19 +357,63 @@ export function bundleExists(name: string): boolean {
   return itemStore(bundleBackend(name)).has(bundleMetaItem(name));
 }
 
+/**
+ * Thrown by `readBundle` for the one state `readBundleIfDecryptable` may treat
+ * as "present but permanently unreadable": file-store ciphertext on disk that
+ * will not decrypt with the passphrase in effect (lost/rotated key or a tampered
+ * store). It is deliberately narrow — a bundle that is merely *locked for this
+ * run* (headless macOS without `AGENTS_SECRETS_PASSPHRASE`, or a vault that is
+ * not logged in) is recoverable and must not be collapsed into this.
+ */
+export class BundleUndecryptableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BundleUndecryptableError';
+  }
+}
+
+/**
+ * Read a bundle, or return null when its metadata is present but genuinely
+ * cannot be decrypted — a lost or rotated file-store passphrase, or a tampered
+ * file store (signalled by `BundleUndecryptableError`).
+ *
+ * Deleting such a bundle is the only way out of that state, and deletion needs
+ * no plaintext, so it must not be gated behind a successful decrypt. Every other
+ * failure rethrows: a genuinely missing bundle ("not found"), and — critically —
+ * a bundle that is only *temporarily locked* for this run (headless macOS with no
+ * `AGENTS_SECRETS_PASSPHRASE`, or a not-logged-in vault). Collapsing that
+ * recoverable "set the env / log in" state into "unreadable, safe to delete"
+ * would let `secrets delete <name> --yes` silently destroy a perfectly healthy
+ * bundle from a cron/launchd run that merely forgot to export the passphrase.
+ */
+export function readBundleIfDecryptable(name: string): SecretsBundle | null {
+  try {
+    return readBundle(name);
+  } catch (err) {
+    if (err instanceof BundleUndecryptableError) return null;
+    throw err;
+  }
+}
+
 export function readBundle(name: string): SecretsBundle {
   validateBundleName(name);
   const backend = bundleBackend(name);
-  if (backend === 'file') assertFileBackendUsable(name);
   if (backend === 'vault') assertVaultBackendUsable(name);
   let json: string;
   try {
-    json = itemStore(backend).get(bundleMetaItem(name));
+    // Bundle metadata carries no biometry ACL (SEC-4), so this read is silent
+    // even in a headless context — attest that to the raw-read storm guard so
+    // a headless `readBundle` never trips the fail-fast. (A legacy
+    // pre-metadata-heal ACL'd metadata item can still prompt once; it heals on
+    // the next interactive read.)
+    json = backend === 'keychain'
+      ? getKeychainToken(bundleMetaItem(name), { silentNoAcl: true })
+      : itemStore(backend).get(bundleMetaItem(name));
   } catch (err) {
     // A file-backed bundle whose metadata is on disk but fails to decrypt is a
     // wrong-passphrase error, not a missing bundle — surface that clearly.
     if (backend === 'file' && fileStore.has(bundleMetaItem(name))) {
-      throw new Error(
+      throw new BundleUndecryptableError(
         `Bundle '${name}': failed to decrypt — wrong AGENTS_SECRETS_PASSPHRASE or tampered file store. (${(err as Error).message})`,
       );
     }
@@ -405,7 +441,7 @@ export function readBundle(name: string): SecretsBundle {
     // Absent ⇒ keychain; only set when non-keychain so a keychain bundle
     // round-trips byte-for-byte.
     backend: backend === 'keychain' ? undefined : backend,
-    // Legacy wire key: the policy is persisted under `tier` (`session` == `daily`).
+    // Legacy wire key: the policy is persisted under `tier` (`session` == `hold`).
     policy: parsePolicy((parsed as { tier?: unknown }).tier),
     vars: parsed.vars && typeof parsed.vars === 'object' ? parsed.vars : {},
   };
@@ -422,27 +458,28 @@ export function readBundle(name: string): SecretsBundle {
 }
 
 /** Normalize the persisted prompt policy. The on-disk `tier` key uses legacy
- * tokens for cross-version compatibility: `session` ⇒ `daily`, `biometry` ⇒ an
+ * tokens for cross-version compatibility: `session` ⇒ `hold`, `biometry` ⇒ an
  * explicit `always`. An absent token ⇒ undefined, which resolves to the
- * configured default policy (`daily`). Persisting an explicit `always` as the
- * legacy `biometry` token keeps older CLIs correct — they don't know `daily`,
+ * configured default policy (`hold`). Persisting an explicit `always` as the
+ * legacy `biometry` token keeps older CLIs correct — they don't know `hold`,
  * read `biometry` as undefined, and fall back to their own always default. */
 function parsePolicy(raw: unknown): SecretsPolicy | undefined {
-  if (raw === 'daily' || raw === 'session') return 'daily';
+  if (raw === 'hold' || raw === 'daily' || raw === 'session') return 'hold';
   if (raw === 'always' || raw === 'biometry') return 'always';
   if (raw === 'never' || raw === 'none') return 'never';
   return undefined;
 }
 
 /** The default prompt policy applied to bundles without an explicit per-bundle
- * policy. Configurable via `secrets.policy` in agents.yaml; `daily` (one Touch
- * ID per ~7d) unless the user explicitly opts back into prompt-every-time with
- * `always`. Best-effort: an unreadable config falls back to the `daily` default. */
+ * policy. Configurable via `secrets.policy` in agents.yaml; `hold` (one Touch ID
+ * per hold window — `secrets.agent.holdMs`, 7d by default) unless the user
+ * explicitly opts back into prompt-every-time with `always`. Best-effort: an
+ * unreadable config falls back to the `hold` default. */
 export function secretsDefaultPolicy(): SecretsPolicy {
   try {
-    return readMeta().secrets?.policy === 'always' ? 'always' : 'daily';
+    return readMeta().secrets?.policy === 'always' ? 'always' : 'hold';
   } catch {
-    return 'daily';
+    return 'hold';
   }
 }
 
@@ -493,7 +530,6 @@ interface PreparedBundleWrite {
 function prepareBundleWrite(bundle: SecretsBundle): PreparedBundleWrite {
   validateBundleName(bundle.name);
   const backend: SecretsBackend = bundle.backend ?? 'keychain';
-  if (backend === 'file') assertFileBackendUsable(bundle.name);
   if (backend === 'vault') assertVaultBackendUsable(bundle.name);
   for (const key of Object.keys(bundle.vars)) {
     validateEnvKey(key);
@@ -527,12 +563,12 @@ function prepareBundleWrite(bundle: SecretsBundle): PreparedBundleWrite {
     allow_exec: bundle.allow_exec ? true : undefined,
     backend: backend === 'keychain' ? undefined : backend,
     // Wire format: persist the policy under the legacy `tier` token so older CLI
-    // versions on other synced machines keep reading it — `daily`⇒`session`,
+    // versions on other synced machines keep reading it — `hold`⇒`session`,
     // explicit `always`⇒`biometry`, `never`⇒`none`. An absent policy omits the
-    // token entirely and resolves to the configured default (`daily`) on read.
+    // token entirely and resolves to the configured default (`hold`) on read.
     // An older CLI that doesn't know `none` reads it as undefined and falls back
     // to its own default — safe, since it also lacks the no-ACL write path.
-    tier: bundle.policy === 'daily' ? 'session'
+    tier: bundle.policy === 'hold' ? 'session'
       : bundle.policy === 'always' ? 'biometry'
       : bundle.policy === 'never' ? 'none'
       : undefined,
@@ -572,6 +608,7 @@ export function writeBundle(bundle: SecretsBundle, opts: WriteBundleOptions = {}
   // un-updated pinned helper this write fails loudly (the no-ACL command is
   // missing) rather than silently landing an ACL'd item.
   itemStore(prepared.backend).set(prepared.metadataItem, prepared.metadataJson, { noAcl: true });
+  if (prepared.backend === 'keychain') addBundleToMetaIndex(bundle.name);
   finishBundleWrite(bundle, opts);
 }
 
@@ -594,6 +631,7 @@ export function writeBundleWithItems(
       store.setBatch(new Map(items), { noAcl: bundle.policy === 'never' });
     }
     store.set(prepared.metadataItem, prepared.metadataJson, { noAcl: true });
+    addBundleToMetaIndex(bundle.name);
   } else {
     // file / vault: no ACL concept (noAcl is ignored), so one batched write is
     // both correct and cheaper — e.g. a single age re-encrypt for the vault.
@@ -606,8 +644,10 @@ export function writeBundleWithItems(
 
 export function deleteBundle(name: string): boolean {
   validateBundleName(name);
-  const deleted = itemStore(bundleBackend(name)).delete(bundleMetaItem(name));
+  const backend = bundleBackend(name);
+  const deleted = itemStore(backend).delete(bundleMetaItem(name));
   if (deleted) {
+    if (backend === 'keychain') removeBundleFromMetaIndex(name);
     emit('secrets.delete', { module: 'secrets', bundle: name });
     if (shouldEvictAfterBundleWrite(false, process.env.AGENTS_SECRETS_NO_AGENT, isKeychainBackendOverridden())) {
       agentEvictSync(name);
@@ -644,7 +684,7 @@ function parseBundleMeta(nameHint: string | undefined, json: string, backend: Se
     description: parsed.description,
     allow_exec: Boolean(parsed.allow_exec),
     backend: backend === 'keychain' ? undefined : backend,
-    // Legacy wire key: the policy is persisted under `tier` (`session` == `daily`).
+    // Legacy wire key: the policy is persisted under `tier` (`session` == `hold`).
     policy: parsePolicy((parsed as { tier?: unknown }).tier),
     vars: parsed.vars && typeof parsed.vars === 'object' ? parsed.vars : {},
   };
@@ -686,6 +726,103 @@ function markBundleMetadataAclHealed(): void {
   }
 }
 
+// ── No-ACL bundle-metadata name index (kills the enumeration Touch ID storm) ──
+// listBundles cannot ask the keychain for "just the metadata items": with hashed
+// service names (#316) the metadata names are opaque (`agents-cli.h.<ns>.m`), so
+// listKeychainItems(BUNDLE_META_PREFIX) falls back to a BROAD `agents-cli.` scan
+// that also MATCHES the ACL'd secret VALUE items. On some machines macOS
+// evaluates those value ACLs during that attributes-only scan and pops a generic
+// "Agents CLI needs to authenticate" sheet — on EVERY launch (session-title
+// generation, `agents devices list`, every agent run), because listBundles runs
+// on essentially every secrets touch. Neither UIFail nor LAContext can list the
+// no-ACL items while skipping the ACL'd ones (both return nothing), so the fix is
+// to NOT do the broad scan: keep a per-machine index of the metadata items'
+// STORAGE names in the regenerable helpers dir and read THAT (a silent file read)
+// instead. The index holds opaque hashes only — no cleartext bundle names, so it
+// leaks nothing #316 didn't already. It self-heals: absent/unbuilt → listBundles
+// rebuilds it from the one-time broad scan; a stale entry only makes `secrets
+// list` cosmetically incomplete and never affects a resolve-by-name (which
+// computes the hashed name directly, never through this index).
+function bundleMetaIndexPath(): string {
+  // Test-only override (mirrors AGENTS_DAEMON_DIR): redirect to a fork-private
+  // temp so unit tests never touch the real helpers dir. Never set in prod.
+  return (
+    process.env.AGENTS_SECRETS_META_INDEX_FILE ||
+    path.join(getHelpersDir(), 'secrets-agent', 'bundle-meta-index.json')
+  );
+}
+
+// Changes iff the service-name hashing key changes (the #316 re-key, or a
+// cleartext<->hashed transition). Stamped into the index so an index built under
+// an OLD key reads as absent and is rebuilt — otherwise a re-key would leave
+// stale hashed names that resolve to nothing and make every bundle "vanish".
+function metaIndexFingerprint(): string {
+  return keychainServiceAlias(`${BUNDLE_META_PREFIX}meta-index-fingerprint`);
+}
+
+function readBundleMetaIndex(): string[] | null {
+  // A test-installed in-memory keychain is NOT the real store this index mirrors;
+  // reading (and later writing) the real ~/.agents index from a mock-backend test
+  // would leak fixture bundle names into a developer's live cache. Same guard the
+  // sibling healKeychainBundleMetadataAclOnce uses — treat the index as absent so
+  // listBundles falls back to the (mock) scan.
+  if (isKeychainBackendOverridden()) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(bundleMetaIndexPath(), 'utf-8'));
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.services)) return null;
+    if (parsed.fp !== metaIndexFingerprint()) return null; // built under a different hashing key
+    return parsed.services.every((s: unknown) => typeof s === 'string') ? (parsed.services as string[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeBundleMetaIndex(services: string[]): void {
+  if (isKeychainBackendOverridden()) return; // never write the real index from a mock-backend test
+  try {
+    const file = bundleMetaIndexPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const payload = { fp: metaIndexFingerprint(), services: [...new Set(services)].sort() };
+    // Atomic write (unique temp + rename) so a concurrent reader/writer never
+    // sees a half-written file. The read-modify-write in add/remove can still
+    // race two concurrent BUNDLE mutations and drop an entry, but that only makes
+    // a `secrets list` cosmetically incomplete (never a resolve-by-name) and
+    // self-heals on the next rebuild — an acceptable trade for rare bundle edits.
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(payload), 'utf8');
+    fs.renameSync(tmp, file);
+  } catch {
+    // Best effort — a missing index just means listBundles rebuilds it from the
+    // one-time broad scan on the next enumeration.
+  }
+}
+
+// Append a metadata item's STORAGE name to an ALREADY-BUILT index. No-op when the
+// index has not been built yet (null): never create a one-entry index that would
+// hide every OTHER bundle — listBundles builds the complete index on its first
+// scan, and this newly-written bundle is included in that scan.
+function addBundleToMetaIndex(name: string): void {
+  const cur = readBundleMetaIndex();
+  if (cur === null) return;
+  const svc = keychainServiceAlias(bundleMetaItem(name));
+  if (!cur.includes(svc)) writeBundleMetaIndex([...cur, svc]);
+}
+
+function removeBundleFromMetaIndex(name: string): void {
+  const cur = readBundleMetaIndex();
+  if (cur === null) return;
+  const svc = keychainServiceAlias(bundleMetaItem(name));
+  if (cur.includes(svc)) writeBundleMetaIndex(cur.filter((s) => s !== svc));
+}
+
+/** Test-only accessors for the metadata-name index. Never called in production. */
+export const __metaIndexForTest = {
+  read: readBundleMetaIndex,
+  write: writeBundleMetaIndex,
+  add: addBundleToMetaIndex,
+  remove: removeBundleFromMetaIndex,
+};
+
 /**
  * Re-write already-read keychain bundle metadata items WITHOUT the biometry ACL.
  * `metaJsonByName` maps bundle name → the exact metadata JSON listBundles just
@@ -716,7 +853,7 @@ export function healKeychainBundleMetadata(metaJsonByName: Map<string, string>):
  * backend has no real keychain — and gated by a sentinel so it runs at most
  * once. Best-effort: a heal failure never breaks bundle listing.
  */
-function healKeychainBundleMetadataAclOnce(metaJsonByName: Map<string, string>): void {
+export function healKeychainBundleMetadataAclOnce(metaJsonByName: Map<string, string>): void {
   if (metaJsonByName.size === 0) return;
   if (process.platform !== 'darwin') return;
   if (isKeychainBackendOverridden()) return;
@@ -744,10 +881,22 @@ export function listBundles(): SecretsBundle[] {
   // file store is the single source of truth, so the block below covers all.
   if (!keychainUsesFileFallback()) {
     let keychainServices: string[] = [];
-    try {
-      keychainServices = listKeychainItems(BUNDLE_META_PREFIX);
-    } catch {
-      keychainServices = [];
+    // Prefer the no-ACL metadata-name index (a silent file read) over the broad
+    // `agents-cli.` keychain scan — that scan also matches ACL'd secret VALUE
+    // items and pops Touch ID on every launch (see the index helpers above).
+    // Absent index (first list after upgrade / a cache wipe) → do the one broad
+    // scan and build the index from it, so that scan is the LAST one this machine
+    // performs.
+    const indexedServices = readBundleMetaIndex();
+    if (indexedServices !== null) {
+      keychainServices = indexedServices;
+    } else {
+      try {
+        keychainServices = listKeychainItems(BUNDLE_META_PREFIX);
+        writeBundleMetaIndex(keychainServices);
+      } catch {
+        keychainServices = [];
+      }
     }
     // With hashed service names (macOS, #316) the enumerated services are
     // opaque (`agents-cli.h.<ns>.m`) — the display name is recovered from the
@@ -780,9 +929,14 @@ export function listBundles(): SecretsBundle[] {
       if (cached) {
         for (const bundle of cached) out.push(bundle);
       } else {
-        const fetched = getKeychainTokens(keychainServices);
+        // Metadata enumeration must stay silent in ANY context (SEC-11):
+        // bundle metadata items are no-ACL by contract (SEC-4), so attest that
+        // to the raw-read storm guard — a headless `listBundles` (session
+        // start, crabbox env, devices fan-out) must never fail fast on the
+        // guard nor pop a sheet. (A legacy pre-heal ACL'd metadata item can
+        // still prompt once; it heals on the next interactive scan.)
+        const fetched = getKeychainTokens(keychainServices, { silentNoAcl: true });
         const keychainBundles: SecretsBundle[] = [];
-        const metaJsonByName = new Map<string, string>();
         for (const service of keychainServices) {
           const json = fetched.get(service);
           if (json === undefined) continue;
@@ -792,7 +946,6 @@ export function listBundles(): SecretsBundle[] {
           const bundle = parseBundleMeta(nameHint, json, 'keychain');
           if (bundle) {
             keychainBundles.push(bundle);
-            metaJsonByName.set(bundle.name, json);
           }
         }
         for (const bundle of keychainBundles) out.push(bundle);
@@ -803,13 +956,6 @@ export function listBundles(): SecretsBundle[] {
         if (useAgent && keychainBundles.length > 0) {
           agentAutoLoadMetaSync(nameSetHash, keychainBundles, secretsHoldMs());
         }
-        // One-time RUSH-1759 heal: bundles written before the metadata-no-ACL
-        // change carry an ACL'd metadata item, so this fresh read (a broker miss)
-        // popped Touch ID just to enumerate them. Re-home each metadata item
-        // no-ACL now — reusing the JSON we just read, so the heal adds no extra
-        // prompt — and every later enumeration is silent. Runs at most once (a
-        // sentinel under the regenerable helpers dir).
-        healKeychainBundleMetadataAclOnce(metaJsonByName);
       }
     }
   }
@@ -917,6 +1063,12 @@ export interface ResolveBundleOptions {
    * about to read the bundle.
    */
   caller?: string;
+  /** Harness type whose unlock may be reused (claude, codex, kimi, ...). */
+  agent?: string;
+  /** Human duration rendered in the Touch ID prompt. */
+  duration?: string;
+  /** Explicitly permit this agent request to raise interactive authentication. */
+  interactiveUnlock?: boolean;
   /**
    * Skip the secrets-agent fast-path and read straight from the keychain
    * (popping Touch ID). Set by callers that must NOT serve a cached snapshot —
@@ -1143,8 +1295,14 @@ export function resolveBundleEnv(bundle: SecretsBundle, _opts: ResolveBundleOpti
   }
 
   const store = itemStore(bundle.backend ?? 'keychain');
+  // keychainStore.getBatch IS getKeychainTokens — call it directly so a
+  // `never`-policy bundle (no biometry ACL on its items) attests `silentNoAcl`
+  // and stays readable in a headless context, while an ACL'd policy hits the
+  // raw-read storm guard and fails fast there.
   const fetched = keychainItemsToFetch.length > 0
-    ? store.getBatch(keychainItemsToFetch)
+    ? (bundle.backend ?? 'keychain') === 'keychain'
+      ? getKeychainTokens(keychainItemsToFetch, { silentNoAcl: bundlePolicy(bundle) === 'never' })
+      : store.getBatch(keychainItemsToFetch)
     : new Map<string, string>();
 
   const env: Record<string, string> = {};
@@ -1185,41 +1343,12 @@ export function resolveBundleEnv(bundle: SecretsBundle, _opts: ResolveBundleOpti
 
 /**
  * True when the current process is a background / non-interactive context that
- * must NEVER raise a Keychain biometry prompt on the interactive user's screen —
- * a prompt nobody is watching. Two signals, either sufficient:
- *   - `AGENTS_RUNTIME` is `headless` or `teams` (set on the child env by
- *     `agents run --headless`, scheduled routines, and teammates — see
- *     exec.ts:resolveInteractive, runner.ts, teams/agents.ts).
- *   - neither stdin nor stdout is a TTY (a detached/backgrounded task whose
- *     stdio is redirected to a log — e.g. a release script run in the
- *     background as `( ... ) >log 2>&1 </dev/null`).
- * `AGENTS_SECRETS_NO_PROMPT=1` forces headless-safe; `=0` force-allows a prompt
- * even in a non-TTY context. An interactive `eval "$(agents secrets export X)"`
- * keeps its terminal stdin, so it is NOT classified headless and still prompts.
- *
- * Only **macOS keychain** reads pop an interactive Touch ID sheet — the secrets
- * broker itself is a no-op off darwin (see agent.ts), and libsecret (Linux) /
- * the Windows credential store resolve without any prompt. So off-darwin this
- * ALWAYS returns false: forcing broker-only there would break every headless
- * Linux/Windows read (CI, `agents run --headless`, routines, the Linux-driven
- * release flow) for no benefit — there is no prompt to suppress.
- *
- * A read in a macOS headless context resolves broker-only (agentOnly) and fails
- * fast with an actionable error instead of hijacking Touch ID. This generalizes
- * the per-caller pattern already used by the daemon (daemon.ts:readDaemonClaudeOAuthToken).
+ * must NEVER raise a Keychain biometry prompt on the interactive user's screen.
+ * Re-exported from ./headless.js — the detector lives there so the raw-read
+ * path in index.ts can share it without a bundles↔index import cycle. See that
+ * module for the full contract.
  */
-export function isHeadlessSecretsContext(
-  env: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform,
-): boolean {
-  if (platform !== 'darwin') return false; // no biometry prompt to suppress off-darwin
-  const override = env.AGENTS_SECRETS_NO_PROMPT;
-  if (override === '1') return true;
-  if (override === '0') return false;
-  const runtime = env.AGENTS_RUNTIME;
-  if (runtime === 'headless' || runtime === 'teams') return true;
-  return !process.stdin.isTTY && !process.stdout.isTTY;
-}
+export { isHeadlessSecretsContext } from './headless.js';
 
 /**
  * Read a bundle's metadata AND resolve its env in a single Touch ID prompt.
@@ -1250,7 +1379,12 @@ export function readAndResolveBundleEnv(
   // file-backed bundle has none to dedup. The never-unlocked path is a single
   // stat (agentSocketExists) so it costs nothing when the agent isn't running.
   if (backend === 'keychain' && !opts.noAgent && process.env.AGENTS_SECRETS_NO_AGENT !== '1') {
-    const hit = agentGetSync(name);
+    // The scope this reader asks under. Falls back to the GLOBAL scope, not to a
+    // literal `'cli'` harness — the broker and the durable store both resolve
+    // own-harness → global (bundleScopeChain), so an unscoped unlock is visible
+    // here whether this process was launched by an agent or typed in a terminal.
+    const harness = opts.agent || process.env.AGENTS_AGENT_NAME || GLOBAL_HARNESS;
+    const hit = agentGetSync(name, harness);
     if (hit) {
       // The agent stores the FULL bundle env. Apply the same subset filter and
       // expiry gate as the slow path — without this, `--secrets-keys X` would
@@ -1258,13 +1392,14 @@ export function readAndResolveBundleEnv(
       // the first cache-populating run.
       const filtered = filterAgentHitBySubsetAndExpiry(hit, opts);
       stampLastUsed(filtered.bundle);
-      emit('secrets.get', {
-        module: 'secrets',
+      emitSecretAudit({
+        event: 'secrets.get',
         bundle: name,
         operation: opts.caller,
         status: 'success',
         source: 'agent',
         keyCount: Object.keys(filtered.env).length,
+        agent: harness,
       });
       return filtered;
     }
@@ -1275,39 +1410,47 @@ export function readAndResolveBundleEnv(
     // Touch ID. Serve from it and re-warm the broker, so a warm bundle stays warm
     // across restart — this fixes BOTH the interactive re-prompt and the headless
     // throw below (which now fires only when there is genuinely no session).
-    const session = loadSession(name);
-    if (session) {
+    const resolved = resolveSession(name, Date.now(), harness);
+    if (resolved) {
+      const session = resolved.entry;
       const filtered = filterAgentHitBySubsetAndExpiry({ bundle: session.bundle, env: session.env }, opts);
       stampLastUsed(filtered.bundle);
       // Re-warm the broker with the remaining TTL so later reads hit RAM and
-      // `agents secrets status` is honest. Best-effort; no-ops off darwin.
-      agentAutoLoadSync(name, session.bundle, session.env, Math.max(1, session.expiresAt - Date.now()));
-      emit('secrets.get', {
-        module: 'secrets',
+      // `agents secrets status` is honest. Re-warm under the scope the grant was
+      // MADE in (resolved.harness), never the asking scope — re-warming a global
+      // grant as `claude` would silently narrow it for every other harness.
+      agentAutoLoadSync(name, session.bundle, session.env, Math.max(1, session.expiresAt - Date.now()), resolved.harness);
+      emitSecretAudit({
+        event: 'secrets.get',
         bundle: name,
         operation: opts.caller,
         status: 'success',
         source: 'session',
         keyCount: Object.keys(filtered.env).length,
+        agent: harness,
       });
       return filtered;
     }
   }
 
-  // Only keychain-backed bundles can pop a Touch ID prompt and are the only ones
-  // the broker ever holds. A file-backed bundle resolves via passphrase with no
-  // prompt, so agentOnly must never block it — the broker never holds file
-  // bundles, so the throw would fire unconditionally and break a legitimate read.
-  if (opts.agentOnly && backend === 'keychain') {
-    throw new Error(
-      `Secrets bundle '${name}' is not unlocked in the secrets agent, and this is a ` +
-      `headless/background process that must not raise a Touch ID prompt on the ` +
-      `interactive user's screen. Run 'agents secrets unlock ${name}' in a terminal ` +
-      `first, or set AGENTS_SECRETS_NO_PROMPT=0 to force an interactive prompt.`
-    );
+  // Never/no-ACL bundles remain prompt-free regardless. Every ordinary caller
+  // sets agentOnly; only the unlock handler opts into interactive authentication.
+  const interactiveUnlock = opts.interactiveUnlock ?? false;
+  // A `never`-policy bundle's items carry no biometry ACL, so once the policy
+  // check below proves that, the batch read is silent even in a headless
+  // context — attest it to the raw-read storm guard via `silentNoAcl`.
+  let verifiedNoAclBundle = false;
+  if (opts.agentOnly && backend === 'keychain' && !interactiveUnlock && !keychainAgentOnlyBypassForTest) {
+    try { verifiedNoAclBundle = bundlePolicy(readBundle(name)) === 'never'; } catch { /* fail closed */ }
+    if (!verifiedNoAclBundle) {
+      throw new Error(
+        `Secrets bundle '${name}' is not unlocked in the secrets agent. ` +
+        `Run 'agents secrets unlock ${name}' in a terminal first — an agent launch ` +
+        `never raises a Touch ID sheet on its own.`
+      );
+    }
   }
 
-  if (backend === 'file') assertFileBackendUsable(name);
   if (backend === 'vault') assertVaultBackendUsable(name);
   const store = itemStore(backend);
 
@@ -1324,12 +1467,24 @@ export function readAndResolveBundleEnv(
     ? `read ${name} secrets (for ${opts.caller})`
     : `read ${name} secrets`;
 
-  void reason;
   // secretItems are storage names as enumerated (opaque hashed names on macOS
   // with #316 hashing active, cleartext elsewhere); metaItem is cleartext and
   // hashed inside getBatch. Deduped because the hashed enumeration spans the
   // bundle's whole namespace.
-  const fetched = store.getBatch([...new Set([metaItem, ...secretItems])]);
+  const fetched = backend === 'keychain'
+    ? getKeychainTokens([...new Set([metaItem, ...secretItems])], {
+        agent: opts.agent || process.env.AGENTS_AGENT_NAME || 'Agents CLI',
+        bundle: name,
+        // The session that triggered the read, so a Touch ID prompt is
+        // attributable when several agents run at once. Exported by exec.ts.
+        sessionId: process.env.AGENT_SESSION_ID || process.env.AGENTS_SESSION_ID,
+        reason: opts.caller ? `to ${opts.caller}` : reason,
+        duration: opts.duration || humanUnlockDuration(secretsHoldMs()),
+        defaultPolicy: secretsDefaultPolicy(),
+        forceDuration: Boolean(opts.duration),
+        silentNoAcl: verifiedNoAclBundle,
+      })
+    : store.getBatch([...new Set([metaItem, ...secretItems])]);
 
   const json = fetched.get(metaItem);
   if (json === undefined) {
@@ -1361,7 +1516,7 @@ export function readAndResolveBundleEnv(
     description: parsed.description,
     allow_exec: Boolean(parsed.allow_exec),
     backend: backend === 'keychain' ? undefined : backend,
-    // Legacy wire key: the policy is persisted under `tier` (`session` == `daily`).
+    // Legacy wire key: the policy is persisted under `tier` (`session` == `hold`).
     policy: parsePolicy((parsed as { tier?: unknown }).tier),
     vars: parsed.vars && typeof parsed.vars === 'object' ? parsed.vars : {},
   };
@@ -1397,8 +1552,8 @@ export function readAndResolveBundleEnv(
   keychainKeys.sort();
 
   const emitReadAudit = (status: 'success' | 'error', err?: unknown) => {
-    emit('secrets.get', {
-      module: 'secrets',
+    emitSecretAudit({
+      event: 'secrets.get',
       bundle: bundle.name,
       operation: opts.caller,
       status,
@@ -1406,6 +1561,7 @@ export function readAndResolveBundleEnv(
       keys,
       keychainKeys,
       kindCounts,
+      agent: opts.agent,
       error: err instanceof Error ? err.message : (err ? String(err) : undefined),
     });
   };
@@ -1458,17 +1614,26 @@ export function readAndResolveBundleEnv(
       backend === 'keychain' &&
       !opts.noAgent &&
       process.env.AGENTS_SECRETS_NO_AGENT !== '1' &&
-      bundlePolicy(bundle) === 'daily' &&
+      bundlePolicy(bundle) === 'hold' &&
       secretsAgentAutoEnabled() &&
       canCacheResolvedEnv(bundle, selectedKeys, opts.keyMode)
     ) {
-      agentAutoLoadSync(name, bundle, env, secretsHoldMs());
+      agentAutoLoadSync(name, bundle, env, secretsHoldMs(), opts.agent || process.env.AGENTS_AGENT_NAME || GLOBAL_HARNESS);
     }
     return { bundle, env };
   } catch (err) {
     emitReadAudit('error', err);
     throw err;
   }
+}
+
+export function humanUnlockDuration(ms: number): string {
+  const days = Math.round(ms / (24 * 60 * 60 * 1000));
+  if (days >= 1) return `${days} day${days === 1 ? '' : 's'}`;
+  const hours = Math.round(ms / (60 * 60 * 1000));
+  if (hours >= 1) return `${hours} hour${hours === 1 ? '' : 's'}`;
+  const minutes = Math.max(1, Math.round(ms / (60 * 1000)));
+  return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
 // Build a keychain ref expression from a bundle+key pair, for storage in the bundle metadata.
@@ -1519,6 +1684,59 @@ export function rotateBundleSecret(bundle: SecretsBundle, key: string, opts: Rot
     bundle.meta[key] = patched;
   }
   writeBundle(bundle);
+}
+
+/**
+ * Reconcile a bundle's keychain-backed VALUE items to its CURRENT policy, then
+ * write the (always no-ACL) metadata.
+ *
+ * `writeBundle` only rewrites the metadata item, so a policy change alone leaves
+ * every value item carrying the ACL it was created with — and macOS gates each
+ * read on the ITEM's ACL, not the bundle's declared tier (spec SEC-19). Without
+ * this reconcile, `agents secrets policy <b> never` reports "silent" while the
+ * still-ACL'd value keeps popping Touch ID on every read, forever.
+ *
+ *   hold/always -> never  strips the biometry ACL (helper `set-no-acl`: delete+add)
+ *   never -> hold/always  re-attaches it (helper `set`)
+ *
+ * The current values are read in ONE batch, so the reconcile costs at most a
+ * single Touch ID — the last prompt a hold->never bundle will ever raise (a
+ * never->* flip reads silently, since the items are already no-ACL). No-op on the
+ * ACL to write for non-keychain backends (file/vault have no biometry concept),
+ * and a metadata-only write when the bundle has no keychain-backed values.
+ */
+export function reAclBundleItems(bundle: SecretsBundle): void {
+  if ((bundle.backend ?? 'keychain') !== 'keychain') {
+    // No biometry ACL off the keychain backend — only metadata needs persisting.
+    writeBundle(bundle);
+    return;
+  }
+  const store = itemStore('keychain');
+  // keychainItemsForBundle already returns ONLY keychain-backed value items
+  // (via parseBundleValue), so no extra ref-shape filtering here.
+  const entries = keychainItemsForBundle(bundle);
+  if (entries.length === 0) {
+    // Literal/ref-only bundle: nothing to re-ACL, just refresh metadata.
+    writeBundle(bundle);
+    return;
+  }
+  // One batched read = at most one Touch ID for the whole reconcile.
+  const values = store.getBatch(entries.map((e) => e.item));
+  const rewrite = new Map<string, string>();
+  for (const { item } of entries) {
+    const value = values.get(item);
+    // A key present in metadata but with no readable value item is real
+    // corruption, not something to silently skip (no fallbacks — fail loud).
+    if (value === undefined) {
+      throw new Error(
+        `Cannot change policy for '${bundle.name}': a keychain value is missing or unreadable. Rotate that key, then retry.`,
+      );
+    }
+    rewrite.set(item, value);
+  }
+  // writeBundleWithItems re-stores each value with { noAcl: policy === 'never' }
+  // and the metadata no-ACL (metadata-last), and evicts any broker-held copy.
+  writeBundleWithItems(bundle, rewrite);
 }
 
 /** Options for renameBundle. */

@@ -48,6 +48,12 @@ export interface PickerConfig<T> {
   initialSearch?: string;
   emptyMessage?: string;
   enterHint?: string;
+  /**
+   * Lines the caller already printed above the Inquirer prompt (e.g. the
+   * hidden-session footer). Subtracted from the row budget so the list page is
+   * capped to keep the preview — and those notices — on screen together.
+   */
+  linesAbovePrompt?: number;
 }
 
 /** The result returned when the user selects an item. */
@@ -68,6 +74,8 @@ export interface MultiPickerConfig<T> {
   initialSearch?: string;
   emptyMessage?: string;
   enterHint?: string;
+  /** See {@link PickerConfig.linesAbovePrompt}. */
+  linesAbovePrompt?: number;
 }
 
 interface Choice<T> {
@@ -78,12 +86,58 @@ interface Choice<T> {
 const DEFAULT_TERMINAL_ROWS = 24;
 const DEFAULT_TERMINAL_WIDTH = 80;
 
+/**
+ * Rows the detail preview is guaranteed when it is open and a row is selected.
+ * The list page is capped so this floor always fits the viewport — without it a
+ * long list (PICKER_RECENT_COUNT = 15) consumes the whole default 24-row
+ * terminal, `availablePreviewRows` goes <= 0, and the preview silently collapses
+ * to empty (RUSH-2198).
+ */
+export const PREVIEW_MIN_ROWS = 6;
+
+/** Floor for the visible list page, so a short terminal still shows a few rows. */
+export const PICKER_MIN_LIST_ROWS = 3;
+
 function terminalWidth(): number {
   return Math.max(1, process.stdout.columns || DEFAULT_TERMINAL_WIDTH);
 }
 
 function terminalRows(): number {
   return Math.max(1, process.stdout.rows || DEFAULT_TERMINAL_ROWS);
+}
+
+/**
+ * Cap the visible list page so an open preview keeps a guaranteed floor of rows.
+ *
+ * The picker renders header + list page + separator + preview + help. When the
+ * requested page size (e.g. 15) is large enough to fill the terminal on its own,
+ * the preview has no room left and collapses. This reserves
+ * {@link PREVIEW_MIN_ROWS} (plus its separator) for the preview and hands the
+ * list whatever remains, never below {@link PICKER_MIN_LIST_ROWS}.
+ *
+ * `chromeRows` counts the fixed non-list, non-preview lines (header, subtitle,
+ * help, any flash). `linesAbovePrompt` counts lines the caller printed above the
+ * Inquirer prompt that have scrolled the viewport but the picker cannot measure —
+ * today the session picker passes the hidden-session footer; subtracting it keeps
+ * that notice on screen alongside the preview. (The fleet browser folds its
+ * unreachable-peer warning into the header instead, so it needs no reserve here.)
+ */
+export function pickerPageSize(opts: {
+  requestedPageSize: number;
+  terminalRows: number;
+  chromeRows: number;
+  previewOpen: boolean;
+  linesAbovePrompt?: number;
+  previewMinRows?: number;
+  minListRows?: number;
+}): number {
+  const previewMinRows = opts.previewMinRows ?? PREVIEW_MIN_ROWS;
+  const minListRows = opts.minListRows ?? PICKER_MIN_LIST_ROWS;
+  const linesAbove = Math.max(0, opts.linesAbovePrompt ?? 0);
+  // The separator line rides with the preview only when it is open.
+  const previewReserve = opts.previewOpen ? previewMinRows + 1 : 0;
+  const budget = opts.terminalRows - linesAbove - opts.chromeRows - previewReserve;
+  return Math.max(minListRows, Math.min(opts.requestedPageSize, budget));
 }
 
 function renderedRows(text: string, width: number): number {
@@ -238,6 +292,18 @@ export function itemPicker<T>(config: PickerConfig<T>): Promise<PickedItem<T> | 
     const searchStr = searchTerm ? chalk.cyan(searchTerm) : chalk.gray(placeholder);
     const header = [prefix, message, searchStr].filter(Boolean).join(' ');
 
+    // Cap the list page so an open preview keeps a guaranteed floor of rows.
+    // chrome = header + optional subtitle + help; the preview separator is
+    // reserved inside pickerPageSize.
+    const chromeRows = 1 + (cfg.subtitle ? 1 : 0) + 1;
+    const effectivePageSize = pickerPageSize({
+      requestedPageSize: cfg.pageSize ?? 10,
+      terminalRows: terminalRows(),
+      chromeRows,
+      previewOpen: previewOpen && Boolean(cfg.buildPreview),
+      linesAbovePrompt: cfg.linesAbovePrompt,
+    });
+
     const page = usePagination({
       items: results as any,
       active,
@@ -247,7 +313,7 @@ export function itemPicker<T>(config: PickerConfig<T>): Promise<PickedItem<T> | 
         const row = isActive ? chalk.bold(item.label) : item.label;
         return `${cursor} ${row}`;
       },
-      pageSize: cfg.pageSize ?? 10,
+      pageSize: effectivePageSize,
       loop: false,
     });
 
@@ -273,7 +339,7 @@ export function itemPicker<T>(config: PickerConfig<T>): Promise<PickedItem<T> | 
         renderedRows(parts.slice(1).join('\n'), width) +
         renderedRows(separator, width) +
         renderedRows(help, width);
-      const availablePreviewRows = terminalRows() - fixedRows;
+      const availablePreviewRows = terminalRows() - Math.max(0, cfg.linesAbovePrompt ?? 0) - fixedRows;
       const preview = limitPreviewHeight(cfg.buildPreview(selected.value), availablePreviewRows, width);
       if (preview) {
         parts.push(separator);
@@ -302,7 +368,7 @@ export function multiItemPicker<T>(config: MultiPickerConfig<T>): Promise<T[] | 
     const theme = makeTheme({});
     const [status, setStatus] = useState<'idle' | 'done'>('idle');
     const [searchTerm, setSearchTerm] = useState(cfg.initialSearch ?? '');
-    const [previewOpen, setPreviewOpen] = useState(false);
+    const [previewOpen, setPreviewOpen] = useState(Boolean(cfg.buildPreview));
     const [selectedKeys, setSelectedKeys] = useState<ReadonlySet<string>>(new Set());
     const [active, setActive] = useState(0);
     const prefix = usePrefix({ status, theme });
@@ -379,6 +445,18 @@ export function multiItemPicker<T>(config: MultiPickerConfig<T>): Promise<T[] | 
     const searchStr = searchTerm ? chalk.cyan(searchTerm) : chalk.gray(placeholder);
     const header = [prefix, message, searchStr].filter(Boolean).join(' ');
 
+    // Cap the list page so an open preview keeps a guaranteed floor of rows.
+    // chrome = header + help; the preview separator is reserved inside
+    // pickerPageSize.
+    const chromeRows = 2;
+    const effectivePageSize = pickerPageSize({
+      requestedPageSize: cfg.pageSize ?? 10,
+      terminalRows: terminalRows(),
+      chromeRows,
+      previewOpen: previewOpen && Boolean(cfg.buildPreview),
+      linesAbovePrompt: cfg.linesAbovePrompt,
+    });
+
     const page = usePagination({
       items: results as any,
       active,
@@ -390,7 +468,7 @@ export function multiItemPicker<T>(config: MultiPickerConfig<T>): Promise<T[] | 
         const row = isActive ? chalk.bold(item.label) : item.label;
         return `${cursor} ${box} ${row}`;
       },
-      pageSize: cfg.pageSize ?? 10,
+      pageSize: effectivePageSize,
       loop: false,
     });
 
@@ -415,7 +493,7 @@ export function multiItemPicker<T>(config: MultiPickerConfig<T>): Promise<T[] | 
         renderedRows(parts.slice(1).join('\n'), width) +
         renderedRows(separator, width) +
         renderedRows(help, width);
-      const availablePreviewRows = terminalRows() - fixedRows;
+      const availablePreviewRows = terminalRows() - Math.max(0, cfg.linesAbovePrompt ?? 0) - fixedRows;
       const preview = limitPreviewHeight(cfg.buildPreview(selected.value), availablePreviewRows, width);
       if (preview) {
         parts.push(separator);
@@ -455,9 +533,16 @@ export interface DynamicPickerConfig<T, F> {
   /**
    * Side-effecting keys that don't change the filter (e.g. `y` copies a command).
    * Receives the live search `query` so the effect can be search-aware. Return a
-   * short string to flash under the list.
+   * short string to flash under the list, or `{ flash, reload }` when the effect
+   * changed something the rows RENDER (a star, a mark) and the list has to be
+   * rebuilt — the row labels are memoized, so a flash alone leaves them stale.
    */
-  onKey?: (name: string, filter: F, active: T | undefined, query: string) => string | void;
+  onKey?: (
+    name: string,
+    filter: F,
+    active: T | undefined,
+    query: string,
+  ) => string | void | { flash?: string; reload?: boolean };
   /** Key that enters search mode (default `s`). */
   searchKey?: string;
   /** Key that toggles the preview pane (default `tab`). */
@@ -466,6 +551,30 @@ export interface DynamicPickerConfig<T, F> {
   emptyMessage?: string;
   loadingMessage?: string;
   enterHint?: string;
+  /** See {@link PickerConfig.linesAbovePrompt}. */
+  linesAbovePrompt?: number;
+}
+
+/**
+ * The lookup token for a hotkey: the literal character the key produced, else
+ * readline's key name (`tab`, `escape`, arrows).
+ *
+ * readline reports both `f` and `F` as name `f` — only `sequence` tells them
+ * apart — and gives a punctuation key like `*` no name at all. Keying on the
+ * character makes shifted letters and punctuation bindable, and is a no-op for
+ * every existing binding: for a plain lowercase letter, sequence === name.
+ *
+ * Callers receiving this in `onKey` see the literal character, so a handler that
+ * wants to accept both cases of a letter must say so (`'y'` and `'Y'`); the
+ * keyBindings lookup falls back to the key NAME, which keeps the shifted form of
+ * an existing single-letter binding working without each caller restating it.
+ */
+export function hotkeyToken(key: { name?: string; sequence?: string; ctrl?: boolean; meta?: boolean }): string {
+  const seq = key.sequence;
+  // Printable single characters only — a control code's sequence (`\t`, `\r`,
+  // `\x7f`) must keep resolving to its name.
+  if (!key.ctrl && !key.meta && seq && seq.length === 1 && seq > ' ' && seq !== '\x7f') return seq;
+  return key.name ?? '';
 }
 
 /** The result returned when the user selects a row: the item plus the live filter. */
@@ -499,26 +608,48 @@ export function dynamicPicker<T, F>(config: DynamicPickerConfig<T, F>): Promise<
     const [previewOpen, setPreviewOpen] = useState(Boolean(cfg.buildPreview));
     const [active, setActive] = useState(0);
     const [flash, setFlash] = useState('');
+    // Bumped by an `onKey` that asks for a reload; a dep of the load effect, so a
+    // side effect that changed the rows can rebuild them without a filter change.
+    const [reloadNonce, setReloadNonce] = useState(0);
+    // The counter lives in a ref, not in the state read back from the keypress
+    // closure: that closure can hold a STALE `reloadNonce`, so a second reload
+    // would recompute the same value, the state would not change, and the
+    // repaint would silently never happen (the first star appeared, the second
+    // did not). A ref is always current.
+    const reloadCount = useRef(0);
+    // Bumped when a load RESOLVES. `load` is async, so the render that follows
+    // `setReloadNonce` still sees the pre-load data — memoizing the row labels on
+    // the nonce alone rendered each press's result one press late. Keying them on
+    // load COMPLETION is what actually makes them current.
+    const [loadedSeq, setLoadedSeq] = useState(0);
+    const loadedCount = useRef(0);
     const prefix = usePrefix({ status, theme });
     // Guards against a slow load resolving after a newer filter superseded it.
     const gen = useRef(0);
+    // The filter the last load ran on, so a nonce-only reload (a row's own state
+    // changed) can keep the cursor where the user left it. Snapping back to the
+    // top every time you star a row would make the key unusable for a second one.
+    const loadedFilter = useRef<F | undefined>(undefined);
 
     useEffect(() => {
       const my = ++gen.current;
+      const filterChanged = loadedFilter.current !== filter;
+      loadedFilter.current = filter;
       setLoading(true);
       Promise.resolve(cfg.load(filter))
         .then((rows) => {
           if (my !== gen.current) return;
           setItems(rows);
           setLoading(false);
-          setActive(0);
+          setLoadedSeq((loadedCount.current += 1));
+          if (filterChanged) setActive(0);
         })
         .catch(() => {
           if (my !== gen.current) return;
           setItems([]);
           setLoading(false);
         });
-    }, [filter]);
+    }, [filter, reloadNonce]);
 
     const results = useMemo(() => {
       const q = query.trim();
@@ -527,7 +658,12 @@ export function dynamicPicker<T, F>(config: DynamicPickerConfig<T, F>): Promise<
         value: item,
         label: cfg.labelFor(item, q),
       }));
-    }, [items, query]);
+      // `loadedSeq` is a dep because a reload can legitimately return the SAME
+      // array — `load` hands back its cached pool unchanged when no filter is
+      // active — while what a row RENDERS has changed underneath it. Without this
+      // the labels stay memoized on the old state and the side effect looks like
+      // it silently did nothing (starring a row left the star invisible).
+    }, [items, query, loadedSeq]);
 
     useEffect(() => {
       if (active >= results.length) setActive(0);
@@ -611,15 +747,27 @@ export function dynamicPicker<T, F>(config: DynamicPickerConfig<T, F>): Promise<
         setPreviewOpen(!previewOpen);
         return;
       }
-      const binding = cfg.keyBindings?.[key.name ?? ''];
+      const token = hotkeyToken(key);
+      // Exact character first (so `*` and a shifted `F` are addressable), then
+      // the readline name. The fallback is what preserves the shifted form of an
+      // existing single-letter hotkey: `R`/`C`/`A` used to reach their bindings
+      // via `key.name`, and keying on the character alone would silently retire
+      // them for anyone with caps lock on.
+      const binding = cfg.keyBindings?.[token] ?? cfg.keyBindings?.[key.name ?? ''];
       if (binding) {
         const next = binding(filter);
         if (!Object.is(next, filter)) setFilter(next);
         return;
       }
       if (cfg.onKey) {
-        const msg = cfg.onKey(key.name ?? '', filter, selected?.value, query);
-        if (msg) setFlash(msg);
+        const res = cfg.onKey(token, filter, selected?.value, query);
+        if (typeof res === 'string') setFlash(res);
+        else if (res) {
+          if (res.flash) setFlash(res.flash);
+          // The rows themselves changed — force the load effect to re-run so the
+          // memoized labels are rebuilt.
+          if (res.reload) setReloadNonce((reloadCount.current += 1));
+        }
       }
     });
 
@@ -638,6 +786,19 @@ export function dynamicPicker<T, F>(config: DynamicPickerConfig<T, F>): Promise<
     }
     const header = headerBits.filter(Boolean).join(' ');
 
+    // Cap the list page so an open preview keeps a guaranteed floor of rows.
+    // chrome = header + help + optional flash line; the preview separator is
+    // reserved inside pickerPageSize. Only the loaded list steals viewport, so
+    // skip the cap while the loading placeholder is showing.
+    const chromeRows = 2 + (flash ? renderedRows(flash, terminalWidth()) : 0);
+    const effectivePageSize = pickerPageSize({
+      requestedPageSize: cfg.pageSize ?? 12,
+      terminalRows: terminalRows(),
+      chromeRows,
+      previewOpen: previewOpen && Boolean(cfg.buildPreview) && !loading,
+      linesAbovePrompt: cfg.linesAbovePrompt,
+    });
+
     const page = usePagination({
       items: results as any,
       active,
@@ -647,7 +808,7 @@ export function dynamicPicker<T, F>(config: DynamicPickerConfig<T, F>): Promise<
         const row = isActive ? chalk.bold(item.label) : item.label;
         return `${cursor} ${row}`;
       },
-      pageSize: cfg.pageSize ?? 12,
+      pageSize: effectivePageSize,
       loop: false,
     });
 
@@ -679,7 +840,7 @@ export function dynamicPicker<T, F>(config: DynamicPickerConfig<T, F>): Promise<
         renderedRows(separator, width) +
         renderedRows(help, width) +
         flashRows;
-      const availablePreviewRows = terminalRows() - fixedRows;
+      const availablePreviewRows = terminalRows() - Math.max(0, cfg.linesAbovePrompt ?? 0) - fixedRows;
       const preview = limitPreviewHeight(cfg.buildPreview(selected.value), availablePreviewRows, width);
       if (preview) {
         parts.push(separator);

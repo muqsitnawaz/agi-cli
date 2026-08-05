@@ -15,8 +15,9 @@
  * shape + mtime — same function, driven off the normalized events.
  */
 
+import * as path from 'path';
 import type { SessionAttachment, SessionEvent, TodoItem, TodoProgress } from './types.js';
-import { summarizeToolUse } from './parse.js';
+import { isCompletedTodoStatus, SNAPSHOT_TODO_TOOLS, summarizeToolUse } from './parse.js';
 
 // TodoItem / TodoProgress moved to ./types.ts so SessionMeta can carry `todos`
 // without a state↔types import cycle; re-exported here for existing importers.
@@ -161,22 +162,23 @@ const PROSE_QUESTION_FRESH_MS = 30 * 60_000;
 const PLAN_TOOL = 'ExitPlanMode';
 const ASK_TOOL = 'AskUserQuestion';
 
-/** The live plan/checklist tools: Claude's `TodoWrite` and Codex's `update_plan`. */
-const TODO_TOOL = 'TodoWrite';
-const CODEX_PLAN_TOOL = 'update_plan';
+const TASK_CREATE_TOOL = 'TaskCreate';
+const TASK_UPDATE_TOOL = 'TaskUpdate';
 
 /**
- * Derive live plan progress from a checklist tool call's args. Accepts both
- * Claude's `TodoWrite` (`todos: [{content,status,activeForm}]`) and Codex's
- * `update_plan` (`plan: [{step,status}]`) shapes, so the CLI is the single source
- * of checklist state for every agent. Returns undefined when there is no usable
- * list, so a session with no plan carries no `todos` field.
+ * Derive live plan progress from a checklist tool call's args. Accepts Claude's
+ * `TodoWrite` (`todos: [{content,status,activeForm}]`), Kimi's `TodoList`
+ * (`todos: [{title,status}]`, where finished is `done` rather than `completed`)
+ * and Codex's `update_plan` (`plan: [{step,status}]`) shapes, so the CLI is the
+ * single source of checklist state for every agent. Returns undefined when there
+ * is no usable list, so a session with no plan carries no `todos` field.
  */
 export function extractTodoProgress(args?: Record<string, any>): TodoProgress | undefined {
-  const raw = Array.isArray(args?.todos)
-    ? args!.todos
-    : Array.isArray(args?.plan)
-      ? args!.plan
+  const input = args?.input && typeof args.input === 'object' ? args.input : args;
+  const raw = Array.isArray(input?.todos)
+    ? input.todos
+    : Array.isArray(input?.plan)
+      ? input.plan
       : undefined;
   if (!Array.isArray(raw) || raw.length === 0) return undefined;
   const items: TodoItem[] = [];
@@ -189,11 +191,17 @@ export function extractTodoProgress(args?: Record<string, any>): TodoProgress | 
           ? t.text
           : typeof t?.step === 'string' && t.step
             ? t.step
-            : activeForm ?? '';
+            : typeof t?.title === 'string' && t.title
+              ? t.title
+              : activeForm ?? '';
     if (!content) continue;
-    const status: TodoItem['status'] =
-      t?.status === 'completed' || t?.status === 'in_progress' ? t.status : 'pending';
-    items.push(activeForm ? { content, status, activeForm } : { content, status });
+    const status: TodoItem['status'] = isCompletedTodoStatus(t?.status)
+      ? 'completed'
+      : t?.status === 'in_progress'
+        ? 'in_progress'
+        : 'pending';
+    const description = typeof t?.description === 'string' && t.description ? t.description : undefined;
+    items.push({ content, status, ...(description ? { description } : {}), ...(activeForm ? { activeForm } : {}) });
   }
   if (items.length === 0) return undefined;
   const done = items.filter(i => i.status === 'completed').length;
@@ -204,6 +212,81 @@ export function extractTodoProgress(args?: Record<string, any>): TodoProgress | 
     total: items.length,
     activeForm: inProgress ? inProgress.activeForm ?? inProgress.content : undefined,
   };
+}
+
+/** Fold snapshot checklist tools and Claude TaskCreate/TaskUpdate event logs. */
+export function extractTodoProgressFromEvents(events: SessionEvent[]): TodoProgress | undefined {
+  let items: Array<Record<string, any>> = [];
+  let nextTaskId = 1;
+  let sawChecklist = false;
+  for (const event of events) {
+    if (event.type !== 'tool_use') continue;
+    const args = event.args ?? {};
+    if (SNAPSHOT_TODO_TOOLS.has(event.tool ?? '')) {
+      const input = args.input && typeof args.input === 'object' ? args.input : args;
+      const raw = Array.isArray(input.todos) ? input.todos : Array.isArray(input.plan) ? input.plan : undefined;
+      if (raw) {
+        items = raw.map((item: any) => ({ ...item }));
+        sawChecklist = true;
+      }
+      continue;
+    }
+    if (event.tool === TASK_CREATE_TOOL) {
+      const content = args.subject || args.description;
+      if (typeof content !== 'string' || !content.trim()) continue;
+      items.push({
+        taskId: String(nextTaskId++),
+        content: content.trim(),
+        description: typeof args.description === 'string' ? args.description : undefined,
+        activeForm: typeof args.activeForm === 'string' ? args.activeForm : undefined,
+        status: 'pending',
+      });
+      sawChecklist = true;
+      continue;
+    }
+    if (event.tool === TASK_UPDATE_TOOL) {
+      const taskId = String(args.taskId ?? args.task_id ?? '');
+      const index = items.findIndex(item => String(item.taskId ?? '') === taskId);
+      if (index < 0) continue;
+      if (args.status === 'deleted') {
+        items.splice(index, 1);
+        continue;
+      }
+      const prior = items[index];
+      items[index] = {
+        ...prior,
+        ...(typeof args.subject === 'string' ? { content: args.subject } : {}),
+        ...(typeof args.description === 'string' ? { description: args.description } : {}),
+        ...(typeof args.activeForm === 'string' ? { activeForm: args.activeForm } : {}),
+        ...(typeof args.status === 'string' ? { status: args.status } : {}),
+      };
+    }
+  }
+  return sawChecklist ? extractTodoProgress({ todos: items }) : undefined;
+}
+
+/** Derive a recency-ordered, de-duplicated list of directories touched by tools. */
+export function extractRecentDirectoriesTouched(events: SessionEvent[], cwd?: string): string[] | undefined {
+  const dirs: string[] = [];
+  const add = (value: unknown, file = false) => {
+    if (typeof value !== 'string' || !value.trim()) return;
+    const resolved = path.isAbsolute(value) ? value : path.resolve(cwd || process.cwd(), value);
+    const dir = file ? path.dirname(resolved) : resolved;
+    const old = dirs.indexOf(dir);
+    if (old >= 0) dirs.splice(old, 1);
+    dirs.push(dir);
+  };
+  for (const event of events) {
+    if (event.type !== 'tool_use') continue;
+    const tool = event.tool ?? '';
+    const args = event.args ?? {};
+    if (['Edit', 'Write', 'edit_file', 'write_file', 'create_file', 'edit', 'write'].includes(tool)) {
+      add(args.file_path ?? args.filePath ?? args.path ?? event.path, true);
+    } else if (['Bash', 'exec_command', 'run_shell_command', 'shell', 'Execute'].includes(tool)) {
+      add(args.cwd ?? args.Cwd ?? args.workdir ?? args.working_directory ?? cwd);
+    }
+  }
+  return dirs.length ? dirs.slice(-10) : undefined;
 }
 
 /** Trailing '?' or a leading interrogative — a question aimed at the user. */
@@ -223,7 +306,7 @@ const TICKET_BRANCH_RE = /(?:^|[/_-])([a-z]{2,6})-(\d{2,6})(?=[/_-]|$)/;
 const TICKET_DENYLIST = new Set(['UTF', 'SHA', 'ISO', 'RFC', 'IPV', 'X86', 'ARM', 'MP', 'H']);
 
 const PR_URL_RE = /https:\/\/github\.com\/[^\s"'()<>]+\/pull\/(\d+)/;
-const WORKTREE_RE = /\/\.agents\/worktrees\/([^/]+)/;
+export const WORKTREE_RE = /\/\.agents\/worktrees\/([^/]+)/;
 /** gh invocations that create/open a PR. */
 const GH_PR_CREATE_RE = /\bgh\s+pr\s+(?:create|new)\b/;
 /** gh invocation that opens an issue — the created number is read from its result. */
@@ -231,11 +314,69 @@ const GH_ISSUE_CREATE_RE = /\bgh\s+issue\s+create\b/;
 /** A created GitHub issue URL (…/issues/123) in tool-result output. */
 const GH_ISSUE_URL_RE = /https:\/\/github\.com\/[^\s"'()<>]+\/issues\/(\d+)/;
 /**
+ * Flags of `teams create` / `teams add` that take a value, so the value is not
+ * mistaken for the positional team name. Mirrors their value-taking flags in
+ * `commands/teams.ts` — most are `.option('… <x>')` registrations, but
+ * `--device`/`--host` come from `addHostOption`, so auditing this list against
+ * `.option(` alone would wrongly drop them. A flag missing here degrades to "no
+ * team detected", never to a wrong one.
+ */
+const TEAM_VALUE_FLAGS = [
+  '-d', '--description', '--use-worktree', '--devices', '--hosts', '--repo',
+  '-n', '--name', '-m', '--mode', '-e', '--effort', '--model', '--env',
+  '--cwd', '--worktree', '--after', '--task-type', '--cloud', '--branch',
+  '--device', '--host',
+];
+
+/**
+ * One flag value: a quoted string or a bare token. `-d "sessions lineage"` is the
+ * common shape — `--description` is usually a phrase — and a value pattern of
+ * `\S+` alone stops at the first space, leaving the rest of the phrase to be read
+ * as the positional team name (`… -d "sessions lineage" my-team` detected
+ * `lineage`). Quotes are matched as a unit so the whole value is consumed.
+ *
+ * A value containing an ESCAPED quote (`-d "say \"hi\" now"`) stops the quoted
+ * branch early and the match then fails outright — which is the intended failure
+ * direction: no team detected rather than a wrong one.
+ */
+const FLAG_VALUE = String.raw`(?:"[^"\n]*"|'[^'\n]*'|\S+)`;
+
+/**
  * `agents teams create <name>` / `agents teams add <team> …` (also the `ag` alias).
  * The team NAME is the first bareword after the sub-verb, skipping any flags. This
  * is the structural signal that a session SPAWNED a team (vs. was spawned by one).
+ *
+ * The separators are spaces/tabs, never `\s`: a command string routinely embeds
+ * documentation and quoted output, and `\s` let the flag-skip run across newlines
+ * to capture a word from a completely different line (a real scan produced
+ * `team:installed` from a heredoc). For the same reason the flag-skip is bounded
+ * rather than unlimited — a real invocation carries a handful of flags before the
+ * name, not dozens.
  */
-const TEAMS_SPAWN_RE = /\bag(?:ents)?\s+teams?\s+(?:create|add)\s+(?:--?[a-z][\w-]*(?:[= ]\S+)?\s+)*([A-Za-z0-9][\w-]*)/;
+const TEAMS_SPAWN_RE = new RegExp(
+  // Start of an actually-executed command: string start, a newline, or a shell
+  // separator. Without this, a backticked mention inside prose or tool output
+  // ("… and `agents teams add --device auto`") reads as a spawn.
+  String.raw`(?:^|[\n;&|(]|&&|\|\|)[ \t]*` +
+    String.raw`ag(?:ents)?[ \t]+teams?[ \t]+(?:create|add)[ \t]+` +
+    // Flags before the positional name. A value-taking flag must swallow its
+    // value, or `--device auto` leaves `auto` looking like the team name — and
+    // the generic branch must exclude those flags, or it swallows the flag alone
+    // and hands the value back as the name.
+    String.raw`(?:(?:${TEAM_VALUE_FLAGS.join('|')})[= \t]${FLAG_VALUE}[ \t]+` +
+    String.raw`|(?!(?:${TEAM_VALUE_FLAGS.join('|')})[= \t])--?[a-z][\w-]*(?:=\S+)?[ \t]+){0,6}` +
+    // A team name may start with a digit — `createTeam` validates nothing, and
+    // `2fa-migration` is a legal name — so the class stays [A-Za-z0-9]. The
+    // all-digits case is rejected in the guard below instead.
+    String.raw`([A-Za-z0-9][\w-]*)`
+);
+
+/**
+ * Sub-verbs that can follow `teams create|add` in prose ("teams add a teammate")
+ * but are never a team name. Guards the common case where the match came from a
+ * sentence rather than an executed command.
+ */
+const NON_TEAM_WORDS = new Set(['a', 'an', 'the', 'to', 'for', 'with', 'and', 'this', 'your', 'my', 'it']);
 
 /** Collapse to a single trimmed line for a one-row preview cell. */
 function oneLine(s: string): string {
@@ -287,7 +428,18 @@ export function isPrCreateCommand(command?: string): boolean {
 export function detectSpawnedTeam(command?: string): string | undefined {
   if (!command) return undefined;
   const m = command.match(TEAMS_SPAWN_RE);
-  return m ? m[1] : undefined;
+  if (!m) return undefined;
+  const name = m[1];
+  // A single character is a doc placeholder (`agents teams create t --host <box>`)
+  // far more often than a real team, and an English article is prose. Both used to
+  // land in the index as a team name, and now that the name is rendered on the row
+  // a wrong one is worse than none.
+  // A single character is a doc placeholder (`agents teams create t --host <name>`)
+  // far more often than a real team; an all-digits token is a flag value or a list
+  // index that leaked through, never a name someone typed. Both had reached the
+  // index, and now that the name is rendered a wrong one is worse than none.
+  if (name.length < 2 || /^\d+$/.test(name) || NON_TEAM_WORDS.has(name.toLowerCase())) return undefined;
+  return name;
 }
 
 /**
@@ -441,11 +593,10 @@ export function inferActivity(events: SessionEvent[], ctx: StateContext = {}): S
     .map(e => oneLine(e.content ?? ''))
     .filter(Boolean);
 
-  // Live plan progress: the most recent TodoWrite's checklist (RUSH-1380). Attached
+  // Live plan progress: snapshot checklist tools or the folded Task* event log. Attached
   // to `base` so every return path below carries it — a working, waiting, or idle
   // session all keep showing how far the plan got.
-  const lastTodo = lastOf(meaningful, e => e.type === 'tool_use' && (e.tool === TODO_TOOL || e.tool === CODEX_PLAN_TOOL));
-  const todos = lastTodo ? extractTodoProgress(lastTodo.args) : undefined;
+  const todos = extractTodoProgressFromEvents(meaningful);
 
   const base: SessionState = {
     activity: 'idle',

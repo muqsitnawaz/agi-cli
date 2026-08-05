@@ -1,6 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
-import { claudeAccessTokenNeedsRefresh, claudeUsageAccessTokenNoRefresh } from './usage.js';
+import { claudeAccessTokenNeedsRefresh, claudeUsageAccessTokenNoRefresh, loadClaudeOauth, saveClaudeOauth, getClaudeKeychainService, swrWindowMsFor, getUsageInfo, getUsageInfoForIdentity, writeClaudeUsageCache, setClaudeUsageCachePathForTest, deriveUsageHeadroom, formatUsageSummary, usageNoCredentialError, usageExpiredCredentialError, usageRejectedError, probeClaudeStatus, probeKimiStatus, type UsageSnapshot } from './usage.js';
+import type { AccountInfo } from './agents.js';
+import { noteUsageRateLimited, setUsageBackoffDirForTest } from './usage-backoff.js';
+import { setKeychainToken, setKeychainBackendForTest, secretsKeychainItem, type KeychainBackend } from './secrets/index.js';
+import { writeBundle, keychainRef, bundleItemStore } from './secrets/bundles.js';
+import { _resetFileStoreForTest } from './secrets/filestore.js';
 
 const LEEWAY_MS = 5 * 60 * 1000;
 const NOW = 1_800_000_000_000; // fixed epoch ms so the tests are deterministic
@@ -59,5 +67,788 @@ describe('claudeUsageAccessTokenNoRefresh', () => {
   it('returns null for a missing/empty access token', () => {
     expect(claudeUsageAccessTokenNoRefresh({ accessToken: '', expiresAt: now + 60 * 60 * 1000 })).toBeNull();
     expect(claudeUsageAccessTokenNoRefresh({ accessToken: '   ', expiresAt: now + 60 * 60 * 1000 })).toBeNull();
+  });
+});
+
+/**
+ * The Touch ID storm fix: `loadClaudeOauth` reads Claude's ACL-bound keychain item
+ * (one prompt per read on macOS). We cache the access token in a no-ACL item so the
+ * source read happens at most once per token lifetime, shared across processes.
+ * Here the in-memory keychain backend (the sanctioned test seam) counts source reads
+ * by payload shape — the source item wraps `claudeAiOauth`, the cache item does not.
+ */
+describe('loadClaudeOauth no-ACL access-token cache', () => {
+  /** Counting backend: tracks reads of the source (ACL) item and no-ACL cache writes,
+   *  identified by value shape so the test is agnostic to keychain name hashing. */
+  class CountingBackend implements KeychainBackend {
+    store = new Map<string, string>();
+    sourceReads = 0;
+    noAclCacheWrites = 0;
+    has(item: string) { return this.store.has(item); }
+    get(item: string) {
+      const v = this.store.get(item);
+      if (v === undefined) throw new Error(`missing ${item}`);
+      if (v.includes('"claudeAiOauth"')) this.sourceReads += 1;
+      return v;
+    }
+    set(item: string, value: string, opts?: { noAcl?: boolean }) {
+      if (opts?.noAcl && value.includes('"cacheExpiresAt"')) this.noAclCacheWrites += 1;
+      this.store.set(item, value);
+    }
+    delete(item: string) { return this.store.delete(item); }
+    list(prefix: string) { return [...this.store.keys()].filter((k) => k.startsWith(prefix)); }
+  }
+
+  const HOME = '/tmp/agents-cli-usage-cache-test';
+  const service = getClaudeKeychainService(HOME);
+  const seedSource = (expiresAt: number) =>
+    setKeychainToken(
+      service,
+      JSON.stringify({
+        organizationUuid: 'org-1',
+        claudeAiOauth: { accessToken: 'tok-live', refreshToken: 'refresh-secret', expiresAt, scopes: ['user:inference'] },
+      })
+    );
+
+  it('reads the ACL source once, then serves the no-ACL cache (no repeat prompt)', async () => {
+    const mem = new CountingBackend();
+    const prev = setKeychainBackendForTest(mem);
+    try {
+      seedSource(Date.now() + 60 * 60 * 1000); // fresh: 1h out
+
+      const first = await loadClaudeOauth(HOME, { accessTokenCache: true });
+      const second = await loadClaudeOauth(HOME, { accessTokenCache: true });
+
+      expect(first?.accessToken).toBe('tok-live');
+      expect(second?.accessToken).toBe('tok-live');
+      // The source (prompting) item is read exactly once across both loads.
+      expect(mem.sourceReads).toBe(1);
+      // The cache was populated via the no-ACL write path.
+      expect(mem.noAclCacheWrites).toBe(1);
+      // The cache deliberately omits the refresh token (minimal no-ACL exposure);
+      // the first read comes straight from source and still carries it.
+      expect(first?.refreshToken).toBe('refresh-secret');
+      expect(second?.refreshToken).toBeNull();
+    } finally {
+      setKeychainBackendForTest(prev);
+    }
+  });
+
+  it('re-reads the source when the cached token has expired (never serves a stale token)', async () => {
+    const mem = new CountingBackend();
+    const prev = setKeychainBackendForTest(mem);
+    try {
+      seedSource(Date.now() - 60 * 1000); // already expired
+
+      await loadClaudeOauth(HOME, { accessTokenCache: true });
+      await loadClaudeOauth(HOME, { accessTokenCache: true });
+
+      // Every load evicts the expired cache entry and reads the source again.
+      expect(mem.sourceReads).toBe(2);
+    } finally {
+      setKeychainBackendForTest(prev);
+    }
+  });
+
+  it('without the opt-in, returns the full credential and never caches (cloud-export contract)', async () => {
+    // readClaudeCredentialsBlob / isClaudeAuthValid call loadClaudeOauth WITHOUT
+    // the cache flag: they must always get the ACL-read credential WITH the refresh
+    // token. Regression guard for the Rush Cloud token-export path.
+    const mem = new CountingBackend();
+    const prev = setKeychainBackendForTest(mem);
+    try {
+      seedSource(Date.now() + 60 * 60 * 1000);
+
+      const first = await loadClaudeOauth(HOME); // default: no cache
+      const second = await loadClaudeOauth(HOME);
+
+      // Full refresh token every time — never dropped.
+      expect(first?.refreshToken).toBe('refresh-secret');
+      expect(second?.refreshToken).toBe('refresh-secret');
+      // No no-ACL cache is ever written on the default path.
+      expect(mem.noAclCacheWrites).toBe(0);
+      // Every default read goes to the ACL source (no cache short-circuit).
+      expect(mem.sourceReads).toBe(2);
+    } finally {
+      setKeychainBackendForTest(prev);
+    }
+  });
+
+  it('evicts the no-ACL cache when the source credential is rotated', async () => {
+    // A refresh (getClaudeAccessToken -> saveClaudeOauth) writes a new source token.
+    // The cache must be invalidated so the next cached caller sees the rotated token,
+    // not the stale cached access token.
+    const mem = new CountingBackend();
+    const prev = setKeychainBackendForTest(mem);
+    try {
+      seedSource(Date.now() + 60 * 60 * 1000);
+
+      const first = await loadClaudeOauth(HOME, { accessTokenCache: true });
+      expect(first?.accessToken).toBe('tok-live');
+
+      await saveClaudeOauth(HOME, {
+        accessToken: 'tok-rotated',
+        refreshToken: 'refresh-secret',
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        scopes: ['user:inference'],
+      });
+
+      const second = await loadClaudeOauth(HOME, { accessTokenCache: true });
+      expect(second?.accessToken).toBe('tok-rotated');
+    } finally {
+      setKeychainBackendForTest(prev);
+    }
+  });
+});
+
+describe('loadClaudeOauth — file-based `auth` setup-token (Touch-ID-free usage read)', () => {
+  const EMAIL = 'muqsit@trp.so';
+  const SETUP_TOKEN = 'sk-ant-oat01-setup-tok-xyz';
+  const PASS = 'usage-setup-token-pass';
+  // email -> claudeAccountTokenKey(email): upper, @->_AT_, .->_DOT_.
+  const KEY = 'CLAUDE_CODE_OAUTH_TOKEN_MUQSIT_AT_TRP_DOT_SO';
+  let restore: KeychainBackend | null = null;
+  let home: string;
+  let fileDir: string;
+  let prevNoAgent: string | undefined;
+
+  // A keychain backend that THROWS on read — proves the usage path never falls
+  // through to a keychain read once the file-based setup-token resolves.
+  function makeThrowingKeychain(): KeychainBackend {
+    return {
+      has: () => false,
+      get: (item) => { throw new Error(`keychain read of '${item}' — usage must not touch the keychain`); },
+      set: () => { /* no-op */ },
+      delete: () => false,
+      list: () => [],
+    };
+  }
+
+  beforeEach(() => {
+    restore = setKeychainBackendForTest(makeThrowingKeychain());
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-home-'));
+    fileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-fstore-'));
+    prevNoAgent = process.env.AGENTS_SECRETS_NO_AGENT;
+    process.env.AGENTS_SECRETS_NO_AGENT = '1';
+    process.env.AGENTS_SECRETS_PASSPHRASE = PASS;
+    _resetFileStoreForTest({ fileDir, passphrase: PASS });
+    // Reserved FILE-BASED `auth` bundle carrying the per-account setup-token.
+    bundleItemStore('file').set(secretsKeychainItem('auth', KEY), SETUP_TOKEN);
+    writeBundle({ name: 'auth', backend: 'file', vars: { [KEY]: keychainRef(KEY) } });
+    // The account's .claude.json so the resolver maps home -> email -> KEY.
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.claude', '.claude.json'),
+      JSON.stringify({ oauthAccount: { emailAddress: EMAIL } }),
+    );
+  });
+
+  afterEach(() => {
+    setKeychainBackendForTest(restore);
+    _resetFileStoreForTest({});
+    delete process.env.AGENTS_SECRETS_PASSPHRASE;
+    if (prevNoAgent === undefined) delete process.env.AGENTS_SECRETS_NO_AGENT;
+    else process.env.AGENTS_SECRETS_NO_AGENT = prevNoAgent;
+    try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* best effort */ }
+    try { fs.rmSync(fileDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  it('serves the file-based setup-token to accessTokenCache callers, no keychain read', async () => {
+    const oauth = await loadClaudeOauth(home, { accessTokenCache: true });
+    expect(oauth?.accessToken).toBe(SETUP_TOKEN);
+    // Non-rotating: no expiry => reads as fresh, probe never reports expired.
+    expect(oauth?.expiresAt ?? null).toBeNull();
+  });
+
+  it('ignores the setup-token for full-credential callers (accessTokenCache off)', async () => {
+    // Run/export callers need the real keychain credential (with refresh token),
+    // never the access-token-only setup-token — so this path does NOT short out.
+    // With no keychain item and no .credentials.json, that resolves to null.
+    const oauth = await loadClaudeOauth(home);
+    expect(oauth).toBeNull();
+  });
+
+  it('fileOnly never opens the ACL keychain even without a setup-token', async () => {
+    // Strip the email so resolveClaudeSetupToken cannot map home -> setup-token KEY.
+    fs.writeFileSync(path.join(home, '.claude', '.claude.json'), JSON.stringify({}));
+    fs.writeFileSync(
+      path.join(home, '.claude', '.credentials.json'),
+      JSON.stringify({ claudeAiOauth: { accessToken: 'file-only-token', expiresAt: Date.now() + 3_600_000 } }),
+    );
+    // makeThrowingKeychain is installed — if fileOnly fell through to ACL keychain, this throws.
+    const oauth = await loadClaudeOauth(home, { accessTokenCache: true, fileOnly: true });
+    expect(oauth?.accessToken).toBe('file-only-token');
+  });
+});
+
+describe('swrWindowMsFor — a routing decision does not get day-old data', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it('defaults to the full stale-while-revalidate window for display callers', () => {
+    // `agents view` rendering a slightly old bar costs nothing, so it stays off
+    // the network exactly as before.
+    expect(swrWindowMsFor(undefined)).toBe(DAY);
+  });
+
+  it('shortens the window for a caller that is about to route on the number', () => {
+    // The measured failure: a 26h-old snapshot read as "48% used" while the
+    // account was at its weekly cap. Five minutes is inside the window; a day
+    // is not, so the read blocks on a live fetch instead of serving the cache.
+    expect(swrWindowMsFor(5 * 60 * 1000)).toBe(5 * 60 * 1000);
+    expect(swrWindowMsFor(5 * 60 * 1000)).toBeLessThan(26 * 60 * 60 * 1000);
+  });
+
+  it('never lets a caller opt into MORE staleness than the cache policy allows', () => {
+    expect(swrWindowMsFor(7 * DAY)).toBe(DAY);
+  });
+
+  it('treats an unusable age as no opinion — the caller simply did not ask', () => {
+    expect(swrWindowMsFor(Number.NaN)).toBe(DAY);
+    expect(swrWindowMsFor(Number.POSITIVE_INFINITY)).toBe(DAY);
+  });
+
+  it('clamps a negative age to zero — that IS an opinion: never serve the cache', () => {
+    expect(swrWindowMsFor(-1)).toBe(0);
+  });
+});
+
+describe('deriveUsageHeadroom — projects minutes-to-cap from the session burn rate', () => {
+  const sessionSnap = (usedPercent: number, capturedAtMs: number): UsageSnapshot => ({
+    source: 'live',
+    sourceLabel: 'live',
+    capturedAt: new Date(capturedAtMs),
+    windows: [
+      { key: 'session', label: '5h', shortLabel: 'S', usedPercent, resetsAt: null, windowMinutes: 300 },
+      { key: 'week', label: 'Week', shortLabel: 'W', usedPercent: 40, resetsAt: null, windowMinutes: 10080 },
+    ],
+  });
+
+  it('projects minutes to the cap from the burn between two samples', () => {
+    // 50% -> 70% over 10 minutes = 2%/min; 30% headroom remains => 15 minutes.
+    const curr = sessionSnap(70, NOW);
+    const headroom = deriveUsageHeadroom(curr, { capturedAt: NOW - 10 * 60_000, usedPercent: 50 });
+    expect(headroom.status).toBe('available');
+    expect(headroom.minutesToLimit).toBeCloseTo(15, 5);
+  });
+
+  it('reports 0 minutes when a blocking window is already maxed', () => {
+    const maxed = sessionSnap(100, NOW);
+    expect(deriveUsageHeadroom(maxed, { capturedAt: NOW - 60_000, usedPercent: 90 })).toEqual({
+      status: 'rate_limited',
+      minutesToLimit: 0,
+    });
+  });
+
+  it('does not project a cap when usage is flat or falling (a reset / idle)', () => {
+    const curr = sessionSnap(50, NOW);
+    // Flat since prev: no burn to project from.
+    expect(deriveUsageHeadroom(curr, { capturedAt: NOW - 10 * 60_000, usedPercent: 50 }).minutesToLimit).toBeNull();
+    // Fell (window reset): also not "projected to cap".
+    expect(deriveUsageHeadroom(curr, { capturedAt: NOW - 10 * 60_000, usedPercent: 80 }).minutesToLimit).toBeNull();
+  });
+
+  it('has no projection without a prior sample or a session window', () => {
+    expect(deriveUsageHeadroom(sessionSnap(60, NOW), null).minutesToLimit).toBeNull();
+    const noSession: UsageSnapshot = {
+      source: 'live', sourceLabel: 'live', capturedAt: new Date(NOW),
+      windows: [{ key: 'week', label: 'Week', shortLabel: 'W', usedPercent: 60, resetsAt: null, windowMinutes: 10080 }],
+    };
+    expect(deriveUsageHeadroom(noSession, { capturedAt: NOW - 60_000, usedPercent: 10 }).minutesToLimit).toBeNull();
+  });
+
+  it('returns a null status for an empty/absent snapshot', () => {
+    expect(deriveUsageHeadroom(null)).toEqual({ status: null, minutesToLimit: null });
+  });
+});
+
+describe('readOnly — the `agents run` routing hot path never blocks on the network', () => {
+  // The measured cold-start stall: collectRunCandidates passed maxAgeMs=5min, so
+  // a snapshot older than that fell through to a blocking live provider fetch —
+  // one HTTP round trip per account added to `agents run` startup. readOnly
+  // serves the cache and NEVER fetches. Deterministic + no network: the seam
+  // points the cache at a tmpdir and no live call is made on any assertion.
+  let cacheDir: string;
+  let prevPath: string | null;
+  const usageKey = 'claude:org=readonly-test';
+
+  const staleButUnexpired = (): UsageSnapshot => ({
+    // Captured 30 minutes ago: far past USAGE_DECISION_MAX_AGE_MS (5min) so the
+    // router will treat it as unverified — but the week window has not expired,
+    // so deserialization keeps the number rather than zeroing it.
+    source: 'live',
+    sourceLabel: 'live',
+    capturedAt: new Date(Date.now() - 30 * 60 * 1000),
+    windows: [
+      {
+        key: 'week',
+        label: 'Current week',
+        shortLabel: 'W',
+        usedPercent: 91,
+        resetsAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000),
+        windowMinutes: 10080,
+      },
+    ],
+  });
+
+  const claudeInput = () => ({
+    agentId: 'claude' as const,
+    // A network provider (claude) with a usage key but no reachable token here —
+    // so if readOnly wrongly fell through to getUsageInfo it would hit the
+    // keychain, fail, and stamp an error; error===null proves the short-circuit.
+    info: { usageKey } as unknown as AccountInfo,
+  });
+
+  beforeEach(() => {
+    cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-usage-ro-'));
+    prevPath = setClaudeUsageCachePathForTest(path.join(cacheDir, 'claude-usage.json'));
+  });
+
+  afterEach(() => {
+    setClaudeUsageCachePathForTest(prevPath);
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  });
+
+  it('serves a STALE cached snapshot without a live fetch', async () => {
+    writeClaudeUsageCache(usageKey, staleButUnexpired());
+
+    const usage = await getUsageInfoForIdentity(claudeInput(), { readOnly: true });
+
+    // The cache is returned verbatim (no network refetch, no error), even though
+    // it is well past the routing freshness bar — routing around it is
+    // isUsageVerified's job, not a blocking refresh's.
+    expect(usage.snapshot?.windows[0]?.usedPercent).toBe(91);
+    expect(usage.error).toBeNull();
+  });
+
+  it('reports "stale" for an absent snapshot instead of dialing the provider', async () => {
+    const usage = await getUsageInfoForIdentity(claudeInput(), { readOnly: true });
+
+    expect(usage.snapshot).toBeNull();
+    expect(usage.error).toBe('stale');
+  });
+});
+
+describe('a Claude usage read reports WHY it produced no snapshot', () => {
+  // Both of these returned `error: null` before, which is what let an account
+  // nobody could read render exactly like a healthy one: the caller fell back to
+  // the SWR cache and drew its bars as fact. On yosemite-s1 that hid five
+  // accounts whose stored token had expired — one of them eleven days earlier —
+  // behind a cache frozen for 26h, and balanced routing launched into an account
+  // that was already at its weekly cap.
+  //
+  // Neither path reaches the network: both return before the fetch, so these
+  // exercise the real code path with no live call.
+
+  /** Keychain backend holding exactly what the test seeds — nothing else. */
+  class MemBackend implements KeychainBackend {
+    store = new Map<string, string>();
+    has(item: string) { return this.store.has(item); }
+    get(item: string) {
+      const v = this.store.get(item);
+      if (v === undefined) throw new Error(`missing ${item}`);
+      return v;
+    }
+    set(item: string, value: string) { this.store.set(item, value); }
+    delete(item: string) { return this.store.delete(item); }
+    list(prefix: string) { return [...this.store.keys()].filter((k) => k.startsWith(prefix)); }
+  }
+
+  let home: string;
+  let prevBackend: KeychainBackend | null;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-usage-err-'));
+    prevBackend = setKeychainBackendForTest(new MemBackend());
+  });
+
+  afterEach(() => {
+    setKeychainBackendForTest(prevBackend);
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('names a missing credential instead of returning a silent null', async () => {
+    const usage = await getUsageInfo('claude', { home });
+
+    expect(usage.snapshot).toBeNull();
+    expect(usage.error).toBe(usageNoCredentialError('Claude'));
+  });
+
+  it('names an expired credential — the state a usage read can never heal', async () => {
+    // A usage read never refreshes (RUSH-1822), so this account stays unreadable
+    // until a real claude run rotates the token. Saying so is the whole point.
+    setKeychainToken(
+      getClaudeKeychainService(home),
+      JSON.stringify({
+        claudeAiOauth: { accessToken: 'tok-stale', refreshToken: 'r', expiresAt: Date.now() - 60_000 },
+      })
+    );
+
+    const usage = await getUsageInfo('claude', { home });
+
+    expect(usage.snapshot).toBeNull();
+    expect(usage.error).toBe(usageExpiredCredentialError('Claude'));
+  });
+});
+
+describe('formatUsageSummary marks bars the live read could not confirm', () => {
+  const snapshot = {
+    source: 'cache' as const,
+    sourceLabel: 'cached',
+    capturedAt: new Date(NOW),
+    windows: [
+      { key: 'week' as const, label: 'Current week', shortLabel: 'W', usedPercent: 48, resetsAt: null, windowMinutes: 10080 },
+    ],
+  };
+
+  it('draws the bars AND says they are unverified', () => {
+    // The incident in one assertion: a cached "48%" must never render the same
+    // as a confirmed one. The number still shows — it is the last thing we saw,
+    // and hiding it would be worse — but it no longer reads as current.
+    const out = formatUsageSummary(null, snapshot, 3, { unverified: true });
+
+    expect(out).toContain('48%');
+    expect(out).toContain('unverified');
+  });
+
+  it('stays clean when the reading was confirmed', () => {
+    const out = formatUsageSummary(null, snapshot, 3);
+
+    expect(out).toContain('48%');
+    expect(out).not.toContain('unverified');
+  });
+});
+
+describe('every networked provider names the same three failures', () => {
+  // The review that caught this: wiring only Claude would leave `agents view
+  // --refresh` reporting Claude accounts while silently presenting stale Kimi,
+  // Droid, and Cursor readings as confirmed — all four share one cache fallback
+  // in getUsageInfoForIdentity, so a silent null in any of them reproduces the
+  // exact bug this change exists to close.
+  const NETWORKED = ['Claude', 'Kimi', 'Droid', 'Cursor'];
+
+  it('says which agent could not be read, so a fleet row is actionable', () => {
+    for (const agent of NETWORKED) {
+      expect(usageNoCredentialError(agent)).toContain(agent);
+      expect(usageExpiredCredentialError(agent)).toContain(agent);
+      expect(usageRejectedError(agent, 401)).toContain(agent);
+    }
+  });
+
+  it('distinguishes a rejected read from a throttled one', () => {
+    // 429 is the machine being rate-limited on the usage endpoint, not a dead
+    // credential — re-authing would not fix it, so the two must not read alike.
+    expect(usageRejectedError('Claude', 429)).toContain('429');
+    expect(usageRejectedError('Claude', 429)).toContain('rate-limiting');
+    expect(usageRejectedError('Claude', 401)).toContain('401');
+    expect(usageRejectedError('Claude', 401)).not.toContain('rate-limiting');
+  });
+
+  it('says an expired credential will not heal on its own', () => {
+    // The yosemite-s1 state: a usage read never refreshes, so the account stays
+    // unreadable until the agent itself runs. The message has to say so, or the
+    // obvious next action (re-auth) is not obvious.
+    expect(usageExpiredCredentialError('Droid')).toContain('never refreshes');
+  });
+});
+
+describe('a usage read that THROWS is still a failed read', () => {
+  // The re-review caught this: every provider swallowed a thrown request into
+  // `error: null`, so a timeout, a TLS failure, or a payload that will not parse
+  // handed the caller a stale snapshot to render as confirmed — the same silence
+  // as an expired token, through a different door.
+  //
+  // Driven through a real provider fetch (Kimi) with a credential file that
+  // cannot be parsed: JSON.parse throws inside the try, so the catch is the code
+  // under test and no network call is made.
+  let home: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-usage-throw-'));
+    const dir = path.join(home, '.kimi-code', 'credentials');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'kimi-code.json'), '{ not json');
+  });
+
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('names the agent and carries the cause, instead of returning null', async () => {
+    const usage = await getUsageInfo('kimi', { home });
+
+    expect(usage.snapshot).toBeNull();
+    expect(usage.error).toBeTruthy();
+    expect(usage.error).toContain('Kimi');
+  });
+});
+
+describe('a recorded Retry-After actually suppresses the read', () => {
+  /** Keychain backend holding exactly what the test seeds — nothing else. */
+  class MemBackend implements KeychainBackend {
+    store = new Map<string, string>();
+    has(item: string) { return this.store.has(item); }
+    get(item: string) {
+      const v = this.store.get(item);
+      if (v === undefined) throw new Error(`missing ${item}`);
+      return v;
+    }
+    set(item: string, value: string) { this.store.set(item, value); }
+    delete(item: string) { return this.store.delete(item); }
+    list(prefix: string) { return [...this.store.keys()].filter((k) => k.startsWith(prefix)); }
+  }
+
+  // End-to-end through the real getUsageInfo path: with a penalty recorded, the
+  // read must return the throttled error WITHOUT making a request. That is the
+  // whole fix — the old code fired again 3 minutes into a 45-minute window and
+  // re-armed the penalty, so the box never recovered and its cache froze.
+  let home: string;
+  let dir: string;
+  let prevPath: string | null;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-throttle-'));
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-throttle-cache-'));
+    prevPath = setUsageBackoffDirForTest(dir);
+  });
+
+  afterEach(() => {
+    setUsageBackoffDirForTest(prevPath);
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('short-circuits the usage read while the window is open', async () => {
+    // A HEALTHY, unexpired credential — this is the case that matters. The
+    // credential checks ahead of the guard make no request, so they run first
+    // and correctly win for a home that has none; the guard exists to stop the
+    // request that a good credential would otherwise make into a live penalty.
+    const mem = new MemBackend();
+    const prevBackend = setKeychainBackendForTest(mem);
+    try {
+      setKeychainToken(
+        getClaudeKeychainService(home),
+        JSON.stringify({
+          claudeAiOauth: { accessToken: 'tok-fresh', refreshToken: 'r', expiresAt: Date.now() + 60 * 60 * 1000 },
+        })
+      );
+      // The exact header the endpoint sent on yosemite-s1.
+      noteUsageRateLimited('claude', '2678');
+
+      const usage = await getUsageInfo('claude', { home });
+
+      expect(usage.snapshot).toBeNull();
+      expect(usage.error).toContain('rate-limited this machine');
+      expect(usage.error).toContain('not retrying');
+    } finally {
+      setKeychainBackendForTest(prevBackend);
+    }
+  });
+
+  it('lets the read through once the window has passed', async () => {
+    noteUsageRateLimited('claude', '1', { now: Date.now() - 60_000 });
+
+    const usage = await getUsageInfo('claude', { home });
+
+    // Falls through to the ordinary credential check for this empty home.
+    expect(usage.error).toBe(usageNoCredentialError('Claude'));
+  });
+});
+
+describe('the throttle guard is exercised beyond Claude', () => {
+  // The review that forced this: with only Claude tested, two real bugs got
+  // through — Cursor's error `return` was left unconditional by a braceless
+  // `if` (so every 200 would have failed), and Kimi's probe guard sat AHEAD of
+  // its missing/expired credential checks, misreporting a broken credential as
+  // merely throttled.
+  //
+  // What this actually covers is Claude and Kimi end-to-end, not all four. Droid
+  // and Cursor are guarded and recorded identically (see the four
+  // usageRateLimitedUntil / noteUsageRateLimited pairs in usage.ts) but are not
+  // driven here: Droid's credential is AES-GCM encrypted with an on-disk key, so
+  // there is no cheap way to seed one without mocking, which this repo does not
+  // do. Naming that is better than a describe() title implying coverage that is
+  // not present.
+  let home: string;
+  let dir: string;
+  let prevPath: string | null;
+  let prevRealHome: string | undefined;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-throttle-all-'));
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-throttle-all-cache-'));
+    prevPath = setUsageBackoffDirForTest(dir);
+    // resolveKimiCredentialPath falls back to the ACTIVE home when the
+    // per-version one is absent (sign-in is account-global), so without this the
+    // "missing credential" case finds the developer's real Kimi login and the
+    // test passes for the wrong reason. AGENTS_REAL_HOME is the seam the code
+    // itself reads.
+    prevRealHome = process.env.AGENTS_REAL_HOME;
+    process.env.AGENTS_REAL_HOME = home;
+  });
+
+  afterEach(() => {
+    setUsageBackoffDirForTest(prevPath);
+    if (prevRealHome === undefined) delete process.env.AGENTS_REAL_HOME;
+    else process.env.AGENTS_REAL_HOME = prevRealHome;
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A real, unexpired Kimi credential at the path the resolver looks for. */
+  const seedKimi = () => {
+    const credDir = path.join(home, '.kimi-code', 'credentials');
+    fs.mkdirSync(credDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(credDir, 'kimi-code.json'),
+      JSON.stringify({ access_token: 'tok-fresh', expires_at: Math.floor(Date.now() / 1000) + 3600 }),
+    );
+  };
+
+  it('suppresses the Kimi usage read while its window is open', async () => {
+    seedKimi();
+    noteUsageRateLimited('kimi', '2678');
+
+    const usage = await getUsageInfo('kimi', { home });
+
+    expect(usage.snapshot).toBeNull();
+    expect(usage.error).toContain('Kimi rate-limited this machine');
+  });
+
+  it('does not let a throttle mask a missing Kimi credential in the probe', async () => {
+    // The misplacement the reviewer caught: with the guard ahead of the local
+    // checks, this returned 429/present and the account read as merely
+    // throttled rather than unconfigured.
+    noteUsageRateLimited('kimi', '2678');
+
+    const probe = await probeKimiStatus(home);
+
+    expect(probe.token).toBe('missing');
+    expect(probe.status).toBeNull();
+  });
+
+  it('reports the throttle from the Kimi probe when the credential IS good', async () => {
+    seedKimi();
+    noteUsageRateLimited('kimi', '2678');
+
+    const probe = await probeKimiStatus(home);
+
+    // 429 without a request: the recorded window is the answer.
+    expect(probe.status).toBe(429);
+    expect(probe.token).toBe('present');
+  });
+
+  it('does not let a throttle mask a missing Claude credential in the probe', async () => {
+    noteUsageRateLimited('claude', '2678');
+
+    const probe = await probeClaudeStatus(home);
+
+    expect(probe.token).toBe('missing');
+  });
+
+  it("keeps one provider's penalty out of another's read", async () => {
+    seedKimi();
+    noteUsageRateLimited('claude', '2678');
+
+    const usage = await getUsageInfo('kimi', { home });
+
+    // Kimi is free; it fails on its own terms (a live call it cannot complete
+    // in the test environment), never with Claude's throttle message.
+    expect(usage.error ?? '').not.toContain('rate-limited this machine');
+  });
+});
+
+describe('getUsageInfo(codex) — usage is scoped to the current login', () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-usage-'));
+  });
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  // Write auth.json whose id_token carries `auth_time` = the login time. The
+  // usage floor comes from that claim, NOT the file mtime — a token refresh
+  // rewrites auth.json but leaves auth_time at the real login. `fileMtimeMs`
+  // lets a test simulate a refresh (file rewritten later than the login).
+  function writeAuth(loginMs: number, fileMtimeMs?: number): void {
+    const p = path.join(home, '.codex', 'auth.json');
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const payload = Buffer.from(
+      JSON.stringify({ auth_time: Math.floor(loginMs / 1000) })
+    ).toString('base64url');
+    fs.writeFileSync(p, JSON.stringify({ tokens: { id_token: `h.${payload}.s` } }));
+    const t = (fileMtimeMs ?? loginMs) / 1000;
+    fs.utimesSync(p, t, t);
+  }
+
+  function writeSession(mtimeMs: number, usedPercent: number): void {
+    const dir = path.join(home, '.codex', 'sessions', '2026', '08', '05');
+    fs.mkdirSync(dir, { recursive: true });
+    const p = path.join(dir, `rollout-${mtimeMs}.jsonl`);
+    fs.writeFileSync(
+      p,
+      JSON.stringify({
+        timestamp: new Date(mtimeMs).toISOString(),
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          rate_limits: { primary: { used_percent: usedPercent, window_minutes: 300 } },
+        },
+      }) + '\n'
+    );
+    fs.utimesSync(p, mtimeMs / 1000, mtimeMs / 1000);
+  }
+
+  const HOUR = 60 * 60 * 1000;
+
+  it('ignores a session written before the current login (prior account is stale)', async () => {
+    // Reproduces the bug: log out, log into a different account. The only
+    // session on disk predates the new login, so its usage is the OLD account's.
+    writeAuth(NOW);
+    writeSession(NOW - HOUR, 99);
+
+    const info = await getUsageInfo('codex', { home });
+    expect(info.snapshot).toBeNull();
+  });
+
+  it('reports a session written after the current login', async () => {
+    writeAuth(NOW);
+    writeSession(NOW + HOUR, 42);
+
+    const info = await getUsageInfo('codex', { home });
+    const session = info.snapshot?.windows.find((w) => w.key === 'session');
+    expect(session?.usedPercent).toBe(42);
+  });
+
+  it('prefers the current account session over a stale pre-login one', async () => {
+    // Old account left a 99% session; the new account then ran a 5% session.
+    writeAuth(NOW);
+    writeSession(NOW - HOUR, 99);
+    writeSession(NOW + HOUR, 5);
+
+    const info = await getUsageInfo('codex', { home });
+    const session = info.snapshot?.windows.find((w) => w.key === 'session');
+    expect(session?.usedPercent).toBe(5);
+  });
+
+  it('reports no usage when no account is signed in (no auth.json)', async () => {
+    writeSession(NOW, 99);
+
+    const info = await getUsageInfo('codex', { home });
+    expect(info.snapshot).toBeNull();
+  });
+
+  it('keeps usage after a token refresh rewrites auth.json (floor is auth_time, not mtime)', async () => {
+    // Regression guard: login at NOW, run a session at NOW+1h (42%), then a
+    // background token refresh rewrites auth.json with a NOW+2h file mtime. The
+    // floor is auth_time (NOW), so the NOW+1h session is still counted — a
+    // mtime-based floor (NOW+2h) would wrongly blank the current account.
+    writeAuth(NOW, NOW + 2 * HOUR);
+    writeSession(NOW + HOUR, 42);
+
+    const info = await getUsageInfo('codex', { home });
+    const session = info.snapshot?.windows.find((w) => w.key === 'session');
+    expect(session?.usedPercent).toBe(42);
   });
 });

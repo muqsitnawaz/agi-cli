@@ -4,17 +4,23 @@
 // (workspaceRoot, cwd, agentType) tuples its visible panel/floor needs; the
 // detector runs the SAME global per-tick work every window's 4s panel poll ran
 // today — `git branch --show-current` + `git diff --numstat HEAD` per workspace,
-// `git worktree list --porcelain`, `agents view <type> --json` usage per agent,
-// and `agents teams list` per cwd — but ONCE machine-wide instead of once per
-// (window, panel). It broadcasts a single merged `panel-snapshot` fact the host
-// pushes to followers, which render from it instead of forking the subprocesses.
+// `git worktree list --porcelain`, and `agents teams list` per cwd — but ONCE
+// machine-wide instead of once per (window, panel). It broadcasts a single
+// merged `panel-snapshot` fact the host pushes to followers, which render from
+// it instead of forking the subprocesses.
+//
+// Agent inventory (`agents view --json`) is intentionally NOT on this tick.
+// That CLI is 4–6s and only panel/dispatch consumers need it — they share a
+// 60s stale-while-revalidate cache (see settings.vscode getCachedAgentInventories
+// + core/floorSnapshot INVENTORY_CACHE_TTL_MS). The tick emits an empty
+// `usageByAgent` unless a test injects fetchAllUsage / fetchUsage.
 //
 // An IN-FLIGHT GUARD (`tickInFlight`) drops a tick that starts while the prior
-// one is still computing, so a slow `agents view` (self-documented 4-6s) can
-// never stack overlapping ticks — the bug the per-window poll had no guard for.
+// one is still computing, so a slow git/teams pass can never stack overlapping
+// ticks — the bug the per-window poll had no guard for.
 //
-// vscode-free: git/worktree/usage default fetchers are pure child_process; the
-// teams fetcher is injected (it is vscode-coupled) so this module + host.ts stay
+// vscode-free: git/worktree default fetchers are pure child_process; the teams
+// fetcher is injected (it is vscode-coupled) so this module + host.ts stay
 // vscode-free and testable against real git repos and subprocesses.
 
 import { execFile } from 'child_process';
@@ -95,6 +101,10 @@ export async function fetchWorktrees(
  * `agents view <agentType> --json`, parsed. Mirrors agentPanel.readUsageStatus's
  * fetch but returns the full view so the consumer applies the same version-match
  * selection locally. Returns null when the binary/JSON is unavailable.
+ *
+ * Prefer {@link fetchAllUsage} when a tick needs more than one agent — one
+ * process instead of N (Phase 4 poll-tax follow-up; same shape as
+ * `agents snapshot` inventory without paying for sessions).
  */
 export async function fetchUsage(agentType: string): Promise<AgentsViewJsonAgent | null> {
   const out = await run('agents', ['view', agentType, '--json'], { maxBuffer: 4 * 1024 * 1024 });
@@ -108,6 +118,30 @@ export async function fetchUsage(agentType: string): Promise<AgentsViewJsonAgent
   }
 }
 
+/**
+ * One `agents view --json` for every installed harness.
+ *
+ * Not used by the default SnapshotDetector tick (inventory lives on the 60s
+ * panel/dispatch SWR cache). Kept for tests and any caller that still needs a
+ * one-shot inventory read with an explicit inject.
+ */
+export async function fetchAllUsage(): Promise<Record<string, AgentsViewJsonAgent>> {
+  const out = await run('agents', ['view', '--json'], { maxBuffer: 10 * 1024 * 1024 });
+  if (out === null) return {};
+  try {
+    const parsed = JSON.parse(out) as AgentsViewJsonAgent[];
+    if (!Array.isArray(parsed)) return {};
+    const map: Record<string, AgentsViewJsonAgent> = {};
+    for (const entry of parsed) {
+      if (!entry || typeof entry.agent !== 'string' || !Array.isArray(entry.versions)) continue;
+      map[entry.agent] = entry;
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
 export interface SnapshotDetectorOptions {
   emit: (fact: PanelSnapshotPayload) => void;
   /** Recompute cadence (tests). */
@@ -116,8 +150,17 @@ export interface SnapshotDetectorOptions {
   fetchGit?: (workspaceRoot: string) => Promise<GitNumstat>;
   /** Inject the worktree fetcher (tests); defaults to the real `git` CLI. */
   fetchWorktrees?: (workspaceRoot: string, activeCwd?: string) => Promise<WorktreeRef[]>;
-  /** Inject the usage fetcher (tests); defaults to the real `agents` CLI. */
+  /**
+   * Inject the per-agent usage fetcher (tests / single-agent callers).
+   * The tick prefers {@link fetchAllUsage} when this is the default.
+   */
   fetchUsage?: (agentType: string) => Promise<AgentsViewJsonAgent | null>;
+  /**
+   * Inject a one-shot all-agents inventory. Production leaves this unset so the
+   * 4s tick never forks `agents view --json`. Tests may inject it (or
+   * `fetchUsage`) when they need to exercise the usage map path.
+   */
+  fetchAllUsage?: () => Promise<Record<string, AgentsViewJsonAgent>>;
   /** Inject the teams fetcher (vscode-coupled — supplied by the wiring layer). */
   fetchTeams?: (cwd: string) => Promise<unknown[]>;
   /** Inject the clock (tests). */
@@ -130,8 +173,12 @@ export class SnapshotDetector {
   private readonly fetchGit: (workspaceRoot: string) => Promise<GitNumstat>;
   private readonly fetchWorktrees: (workspaceRoot: string, activeCwd?: string) => Promise<WorktreeRef[]>;
   private readonly fetchUsage: (agentType: string) => Promise<AgentsViewJsonAgent | null>;
+  /** When set, one inventory call per tick; production leaves this unset. */
+  private readonly fetchAllUsage?: () => Promise<Record<string, AgentsViewJsonAgent>>;
   private readonly fetchTeams?: (cwd: string) => Promise<unknown[]>;
   private readonly now: () => number;
+  /** True when the constructor injected any usage fetcher (tests only). */
+  private readonly usageEnabled: boolean;
 
   // windowId -> that window's last-reported watch slice. Merged across windows so
   // the same (workspaceRoot, cwd, agentType) tuple is computed only once per tick.
@@ -146,6 +193,12 @@ export class SnapshotDetector {
     this.fetchGit = options.fetchGit ?? fetchGitInfo;
     this.fetchWorktrees = options.fetchWorktrees ?? fetchWorktrees;
     this.fetchUsage = options.fetchUsage ?? fetchUsage;
+    // Production: no inventory on the 4s tick. Tests inject fetchAllUsage and/or
+    // fetchUsage to exercise the optional usage map path.
+    this.usageEnabled = options.fetchAllUsage !== undefined || options.fetchUsage !== undefined;
+    if (options.fetchAllUsage) {
+      this.fetchAllUsage = options.fetchAllUsage;
+    }
     this.fetchTeams = options.fetchTeams;
     this.now = options.now ?? Date.now;
   }
@@ -218,10 +271,24 @@ export class SnapshotDetector {
           if (!this.fetchTeams) return;
           teamsByCwd[c] = await this.fetchTeams(c).catch(() => []);
         }),
-        ...[...agents].map(async (a) => {
-          const view = await this.fetchUsage(a).catch(() => null);
-          if (view) usageByAgent[a] = view;
-        }),
+        (async () => {
+          // Production tick: never fork `agents view`. Inventory is SWR'd by
+          // panel/dispatch only (60s). Tests opt in via injected fetchers.
+          if (!this.usageEnabled || agents.size === 0) return;
+          if (this.fetchAllUsage) {
+            const all = await this.fetchAllUsage().catch(() => ({} as Record<string, AgentsViewJsonAgent>));
+            for (const a of agents) {
+              if (all[a]) usageByAgent[a] = all[a];
+            }
+            return;
+          }
+          await Promise.all(
+            [...agents].map(async (a) => {
+              const view = await this.fetchUsage(a).catch(() => null);
+              if (view) usageByAgent[a] = view;
+            }),
+          );
+        })(),
       ]);
 
       if (this.stopped) return;

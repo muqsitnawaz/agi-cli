@@ -20,8 +20,15 @@ import * as path from 'path';
 
 // Set HOME before state.ts loads so its module-level root picks up the override
 // (both the devices registry and the hosts providers resolve paths from it).
+// USERPROFILE too: os.homedir() ignores HOME on Windows, and ssh-config.ts
+// builds ~/.ssh from os.homedir() — with only HOME set, the stanza written
+// below is invisible there and every lookup falls through.
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-host-resolve-test-'));
 process.env.HOME = TEST_HOME;
+// Redirect the device registry dir too (RUSH-2042): getDevicesDir() reads this at
+// call time, so it survives the module-cache race a plain HOME override loses.
+process.env.AGENTS_DEVICES_DIR = path.join(TEST_HOME, '.agents', '.history', 'devices');
+process.env.USERPROFILE = TEST_HOME;
 
 const { resolveHost, listAllHosts, DeviceOffloadUnsupportedError } = await import('./registry.js');
 const { sshTargetFor } = await import('./types.js');
@@ -195,6 +202,58 @@ describe('resolveHost — ssh_config grammar', () => {
     });
     const host = await resolveHost('root@mac-mini');
     expect(sshTargetFor(host!)).toBe('root@mac-mini.tail1a85a1.ts.net');
+  });
+});
+
+describe('resolveHost — `auto` affinity sentinel (RUSH-2185)', () => {
+  it('resolves `auto` to the affinity-picked device, same engine as `run --device auto`', async () => {
+    await upsertDevice('mac-mini', {
+      platform: 'macos',
+      user: 'muqsit',
+      address: { via: 'tailscale', dnsName: 'mac-mini.tail1a85a1.ts.net' },
+      auth: { method: 'key' },
+    });
+
+    const { matchHost } = await import('./registry.js');
+    const host = await matchHost('auto', {
+      resolveAuto: () => ({ host: 'mac-mini', deviceCandidates: [], pickedDeviceKey: 'mac-mini' }),
+    });
+    expect(host).not.toBeNull();
+    expect(host!.name).toBe('mac-mini');
+    expect(sshTargetFor(host!)).toBe('muqsit@mac-mini.tail1a85a1.ts.net');
+  });
+
+  it('is case-insensitive, matching `agents run --device Auto`', async () => {
+    await upsertDevice('mac-mini', {
+      platform: 'macos',
+      user: 'muqsit',
+      address: { via: 'tailscale', dnsName: 'mac-mini.tail1a85a1.ts.net' },
+      auth: { method: 'key' },
+    });
+
+    const { matchHost } = await import('./registry.js');
+    const host = await matchHost('AUTO', {
+      resolveAuto: () => ({ host: 'mac-mini', deviceCandidates: [], pickedDeviceKey: 'mac-mini' }),
+    });
+    expect(host?.name).toBe('mac-mini');
+  });
+
+  it('resolves the local-machine pick (plan.host === null) to this box\'s own device entry, not a miss', async () => {
+    const { machineId } = await import('../machine-id.js');
+    const self = machineId();
+    await upsertDevice(self, {
+      platform: 'linux',
+      user: 'muqsit',
+      address: { via: 'tailscale', dnsName: `${self}.tail1a85a1.ts.net` },
+      auth: { method: 'key' },
+    });
+
+    const { matchHost } = await import('./registry.js');
+    const host = await matchHost('auto', {
+      resolveAuto: () => ({ host: null, deviceCandidates: [], pickedDeviceKey: null }),
+    });
+    expect(host).not.toBeNull();
+    expect(host!.name).toBe(self);
   });
 });
 

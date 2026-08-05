@@ -1,8 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { AGENTS, agentConfigDirName } from './agents.js';
+import { AGENTS, agentConfigDirName, isAgentHardDeprecated } from './agents.js';
 import { supports } from './capabilities.js';
-import { buildCommandSkillContent, commandSkillName, readSkillSourceCommandMarker, shouldInstallCommandAsSkill } from './command-skills.js';
+import { buildCommandSkillContent, commandSkillName, readSkillSourceCommandMarker, shouldAlsoInstallCommandAsSkill, shouldInstallCommandAsSkill } from './command-skills.js';
 import { commandAppliesTo, parseCommandMetadata } from './commands.js';
 import { markdownToToml } from './convert.js';
 import { safeJoin } from './paths.js';
@@ -36,6 +36,10 @@ export function syncProjectResourcesToAgent(
   version: string,
   projectAgentsDir: string,
 ): ProjectResourceSyncResult {
+  if (isAgentHardDeprecated(agent)) {
+    return { synced: [], skipped: [] };
+  }
+
   const projectRoot = path.dirname(projectAgentsDir);
   const agentRoot = projectAgentRoot(projectRoot, agent);
   const manifest = loadProjectManifest(agentRoot);
@@ -149,9 +153,38 @@ function record(
 }
 
 function skip(dest: string, projectRoot: string, result: ProjectResourceSyncResult): void {
-  const rel = path.relative(projectRoot, dest);
-  result.skipped.push(rel);
-  console.warn(`Skipping project resource target ${rel}: already exists and is user-owned`);
+  result.skipped.push(path.relative(projectRoot, dest));
+}
+
+/**
+ * One human line for the files a project sync left alone because you already
+ * wrote them. This is the normal steady state — every sync of a project whose
+ * `.claude/commands/` you hand-authored hits it — so it is a single grouped
+ * line, not one wrapped warning per file, and it says "yours" rather than the
+ * internal "user-owned". Returns null when nothing was skipped.
+ */
+export function formatKeptProjectResources(skipped: string[]): string | null {
+  if (skipped.length === 0) return null;
+  const rels = [...skipped].sort((a, b) => a.localeCompare(b)).map(toPosixRel);
+  if (rels.length === 1) return `Kept your existing ${rels[0]}`;
+
+  const byDir = new Map<string, string[]>();
+  for (const rel of rels) {
+    const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '.';
+    const names = byDir.get(dir) ?? [];
+    names.push(rel.slice(rel.lastIndexOf('/') + 1));
+    byDir.set(dir, names);
+  }
+
+  if (byDir.size === 1) {
+    const [dir, names] = [...byDir.entries()][0];
+    const PREVIEW = 3;
+    const preview = names.slice(0, PREVIEW).join(', ');
+    const more = names.length > PREVIEW ? `, +${names.length - PREVIEW} more` : '';
+    return `Kept ${rels.length} of your own files in ${dir}: ${preview}${more}`;
+  }
+  const dirs = [...byDir.entries()].map(([dir, names]) => `${dir} (${names.length})`).join(', ');
+  return `Kept ${rels.length} of your own files in ${dirs}`;
 }
 
 function syncProjectCommands(
@@ -164,6 +197,7 @@ function syncProjectCommands(
 ): void {
   const cfg = AGENTS[agent];
   const commandsAsSkills = shouldInstallCommandAsSkill(agent, version);
+  const commandsAlsoAsSkills = shouldAlsoInstallCommandAsSkill(agent, version);
   const supportsCommands = supports(agent, 'commands', version).ok;
   if (!commandsAsSkills && !supportsCommands) return;
 
@@ -175,20 +209,27 @@ function syncProjectCommands(
     const metadata = parseCommandMetadata(srcFile);
     if (!commandAppliesTo(agent, version, metadata).ok) continue;
 
-    if (commandsAsSkills) {
+    const written: string[] = [];
+    if (commandsAsSkills || commandsAlsoAsSkills) {
       const sourceMarker = readSkillSourceCommandMarker(name, [path.join(projectAgentsDir, 'skills')]);
-      if (pathExists(path.join(projectAgentsDir, 'skills', name)) && sourceMarker !== name) continue;
-      const skillName = commandSkillName(name);
-      const rel = path.join('skills', skillName);
-      const destDir = path.join(agentRoot, rel);
-      if (pathExists(destDir)) {
-        skip(destDir, projectRoot, result);
+      if (pathExists(path.join(projectAgentsDir, 'skills', name)) && sourceMarker !== name) {
+        if (commandsAsSkills) continue;
+      } else {
+        const skillName = commandSkillName(name);
+        const rel = path.join('skills', skillName);
+        const destDir = path.join(agentRoot, rel);
+        if (pathExists(destDir)) {
+          skip(destDir, projectRoot, result);
+        } else {
+          fs.mkdirSync(destDir, { recursive: true });
+          fs.writeFileSync(path.join(destDir, 'SKILL.md'), buildCommandSkillContent(name, srcFile), 'utf-8');
+          written.push(rel);
+        }
+      }
+      if (commandsAsSkills) {
+        if (written.length > 0) record('commands', name, written, result, manifestPaths);
         continue;
       }
-      fs.mkdirSync(destDir, { recursive: true });
-      fs.writeFileSync(path.join(destDir, 'SKILL.md'), buildCommandSkillContent(name, srcFile), 'utf-8');
-      record('commands', name, [rel], result, manifestPaths);
-      continue;
     }
 
     const ext = cfg.format === 'toml' ? '.toml' : '.md';
@@ -196,15 +237,16 @@ function syncProjectCommands(
     const destFile = path.join(agentRoot, rel);
     if (pathExists(destFile)) {
       skip(destFile, projectRoot, result);
-      continue;
-    }
-    fs.mkdirSync(path.dirname(destFile), { recursive: true });
-    if (cfg.format === 'toml') {
-      fs.writeFileSync(destFile, markdownToToml(name, fs.readFileSync(srcFile, 'utf-8')), 'utf-8');
     } else {
-      fs.copyFileSync(srcFile, destFile);
+      fs.mkdirSync(path.dirname(destFile), { recursive: true });
+      if (cfg.format === 'toml') {
+        fs.writeFileSync(destFile, markdownToToml(name, fs.readFileSync(srcFile, 'utf-8')), 'utf-8');
+      } else {
+        fs.copyFileSync(srcFile, destFile);
+      }
+      written.push(rel);
     }
-    record('commands', name, [rel], result, manifestPaths);
+    if (written.length > 0) record('commands', name, written, result, manifestPaths);
   }
 }
 

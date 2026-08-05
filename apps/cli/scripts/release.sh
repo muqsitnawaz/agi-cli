@@ -1,30 +1,44 @@
 #!/usr/bin/env bash
 #
-# Release script for agents-cli.
+# Release script for agents-cli. Self-routing, zero-config.
 #
 # Publishes @phnx-labs/agents-cli (the canonical package) to npm. The legacy
 # @swarmify/agents-cli shim is built + previewed for reference but NOT published
 # (frozen at 1.19.x since v1.20.0).
 #
-# Flow (--apply): open the release as a chore(release) PR on a release/v<version>
-# branch -- which fires the full cross-platform CI matrix (.github/workflows/
-# ci.yml) plus the test + gitleaks checks -- wait for that CI to go green,
-# squash-merge the PR, verify the merged tree matches what we built, then tag
-# v<version> at the merge commit and npm-publish locally (publishing must stay on
-# macOS because the tarball bundles the signed + notarized keychain helper).
-# If a publish fails after the PR merge, a retry rebuilds from that merged PR's
-# exact CI-tested tree even when newer commits have since landed on main.
+# Three self-selected homes, no environment variables to set:
+#   - Orchestrate (bump, changelog, PR, tag): the box you invoke it on (git + gh).
+#   - CI / tests: a crabbox (dynamic Hetzner Linux VM) via scripts/sandbox.sh --
+#     never a hardcoded instance. Covers the Linux suite; the GH Actions matrix
+#     still covers the cross-platform (macOS/Windows) legs on the release PR.
+#   - Build + sign + notarize + npm publish + computer-helper: the mac-mini home
+#     base (the one hardcoded name -- it holds the Developer ID cert + npm publish
+#     rights). If you invoke from mac-mini it runs locally; otherwise the script
+#     ssh's to mac-mini, checks out the merged tag, and runs the privileged phase
+#     there in mac-mini's headless secrets context (no Touch ID, no token borrow).
+#
+# Flow (--apply): run the Linux suite on a crabbox; open the release as a
+# chore(release) PR on a release/v<version> branch -- which fires the full
+# cross-platform CI matrix (.github/workflows/ci.yml) plus the test + gitleaks
+# checks -- wait for that CI to go green, squash-merge the PR, verify the merged
+# tree matches what we built, then tag v<version> at the merge commit and route
+# the build+sign+publish phase to the home base. If a publish fails after the PR
+# merge, a retry rebuilds from that merged PR's exact CI-tested tree even when
+# newer commits have since landed on main.
 #
 # Usage: scripts/release.sh <version> [--apply]
 #
 # Default mode is DRY-RUN: every local check runs (type-check, build, tarball
 # preview) and the detected release state is reported, but nothing is pushed,
 # opened, merged, tagged, or published. Add --apply to actually release. Tests
-# run in CI on the release PR, not locally.
+# run on a crabbox (Linux) + in the GH Actions matrix on the release PR.
 #
 # Validates that <version> is a single-step bump from the current published
 # @phnx-labs latest -- patch+1, or minor+1 with patch=0, or major+1 with
-# minor=patch=0. No skips.
+# minor=patch=0. No skips. Two exceptions cover main running ahead of the
+# registry: the version main already carries (phnx-catchup), and the next patch
+# after it (patch-from-main) for when main's own version can no longer be
+# published because its merged release PR no longer matches the tree CI tested.
 
 set -euo pipefail
 
@@ -42,16 +56,61 @@ bold()   { printf '\033[1m%s\033[0m\n'  "$*"; }
 
 die() { red "error: $*"; exit 1; }
 
+# ----- Home base: the one hardcoded machine name (owner-endorsed) -----
+# The build/sign/notarize/publish/computer-helper phase MUST run here: it is the
+# only box that holds the Developer ID cert + npm publish rights + the headless
+# signing/secrets context. This is a constant, NOT an env var -- nobody sets
+# anything to release. Everything else self-selects (crabbox for tests; the
+# invoking box for git+gh orchestration).
+readonly RELEASE_HOME_BASE="mac-mini"
+
+# Detect the short hostname of the box we are on, portably (macOS + Linux), and
+# compute whether we are already on the home base. `scutil --get LocalHostName`
+# is the macOS name that matches the ssh/Tailscale name; `hostname -s` is the
+# Linux short name.
+if [[ "$(uname)" == "Darwin" ]]; then
+  THIS_HOST="$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
+else
+  THIS_HOST="$(hostname -s 2>/dev/null || hostname)"
+fi
+ON_HOME_BASE=false
+[[ "$THIS_HOST" == "$RELEASE_HOME_BASE" ]] && ON_HOME_BASE=true
+
+# ----- Phase tracker -----
+# A running [n/N] progress line the operator can follow: each phase names the box
+# it runs on, and closes with a ✓ (pass) or ✗ (fail + one-line cause). Reuses the
+# bold/green/red helpers above. TOTAL_PHASES is the count for the current mode.
+PHASE_NUM=0
+TOTAL_PHASES=6
+phase() {
+  PHASE_NUM=$((PHASE_NUM + 1))
+  bold "[$PHASE_NUM/$TOTAL_PHASES] $1  (on: $2)"
+}
+phase_ok()   { green "  ✓ $1"; }
+# phase_fail prints the ✗ + cause + (optional) log location, then aborts. This is
+# the single failure surface: never a bare "CI red" or a silent hang.
+phase_fail() {
+  red "  ✗ $1"
+  [[ -n "${2:-}" ]] && red "    log: $2"
+  exit 1
+}
+
 # ----- Parse args -----
 APPLY=false
 SKIP_TESTS=false
 YES=false
+# --home-base-phase is an INTERNAL entrypoint, not a user knob: the trigger box
+# ssh's release.sh onto the home base with this flag to run ONLY the privileged
+# publish phase (build + sign + notarize + npm publish + computer-helper) against
+# an already-merged+tagged release. It is never something an operator passes.
+HOME_BASE_PHASE=false
 TARGET=""
 for arg in "$@"; do
   case "$arg" in
     --apply) APPLY=true ;;
     --skip-tests) SKIP_TESTS=true ;;
     --yes|-y) YES=true ;;
+    --home-base-phase) HOME_BASE_PHASE=true ;;
     -h|--help) printf '%s\n' "usage: scripts/release.sh <version> [--apply] [--skip-tests] [--yes]"; exit 0 ;;
     --*) die "unknown flag: $arg" ;;
     *)
@@ -68,7 +127,158 @@ if $APPLY; then
 else
   yellow "Mode: DRY-RUN (no branch, PR, merge, tag, publish, or push -- pass --apply to actually release)"
 fi
+gray "  this box:   $THIS_HOST$($ON_HOME_BASE && echo '  (home base)' || echo '')"
+gray "  home base:  $RELEASE_HOME_BASE  (build + sign + notarize + npm publish + computer-helper)"
+gray "  tests:      a crabbox (dynamic Hetzner Linux VM, selected at run time)"
 echo
+
+# ----- Privileged phase on the home base (internal --home-base-phase entrypoint) -----
+# This runs the TAGGED release.sh (route_home_base_phase checks out the tag into a
+# worktree and invokes THAT worktree's script with --home-base-phase), so the
+# script executing here is guaranteed to carry --home-base-phase and
+# headless-sign-context.sh. It therefore assumes it is ALREADY inside the tagged
+# worktree ($ROOT = <tag-worktree>/apps/cli, cwd set by the caller): it verifies
+# the checked-out version == $TARGET, then builds the signed macOS artifacts
+# fresh (the home base is the sign host), publishes to npm with the token resolved
+# HERE, and pushes the computer-helper asset. It does NOT create its own worktree.
+run_home_base_phase() {
+  [[ "$(uname)" == "Darwin" ]] \
+    || die "the home base ($RELEASE_HOME_BASE) must be macOS to build + sign + notarize + publish"
+  command -v npm >/dev/null  || die "npm not found on $RELEASE_HOME_BASE"
+  command -v node >/dev/null || die "node not found on $RELEASE_HOME_BASE"
+  command -v git >/dev/null  || die "git not found on $RELEASE_HOME_BASE"
+  command -v jq >/dev/null   || die "jq not found on $RELEASE_HOME_BASE (brew install jq)"
+  command -v gh >/dev/null   || die "gh not found on $RELEASE_HOME_BASE (needed for the computer-helper release asset)"
+
+  cd "$ROOT"
+
+  # Registry is the source of truth. If already published, nothing to do -- the
+  # privileged phase is idempotent (the trigger box already handled the tag).
+  if npm view "$PHNX_PKG@$TARGET" version >/dev/null 2>&1; then
+    green "$PHNX_PKG@$TARGET already on the registry -- nothing to publish"
+    return 0
+  fi
+
+  # We are inside the tagged worktree already; verify the checked-out tree is
+  # actually $TARGET before signing/publishing.
+  local checked_out_ver
+  checked_out_ver="$(jq -r .version package.json)"
+  [[ "$checked_out_ver" == "$TARGET" ]] \
+    || die "checked-out tree is at $checked_out_ver, not $TARGET -- refusing to build/publish on $RELEASE_HOME_BASE"
+
+  # Enter the headless signing + secrets context (shared with remote-sign-mac.sh):
+  # unlocks rush-signing.keychain-db + exports AGENTS_SECRETS_PASSPHRASE so
+  # codesign, notarytool, AND `agents secrets` (npmjs.com token + apple.com creds)
+  # all resolve with NO Touch ID and NO per-secret prompt. This must run BEFORE
+  # resolve_npm_auth, which reads the npmjs.com bundle.
+  command -v agents >/dev/null 2>&1 \
+    || die "'agents' CLI not on PATH on $RELEASE_HOME_BASE -- needed to inject apple.com/npmjs.com creds"
+  # shellcheck source=scripts/headless-sign-context.sh
+  . scripts/headless-sign-context.sh
+
+  # npm auth resolves HERE, on the home base, in its headless secrets context --
+  # the token never crosses to the box that invoked the release.
+  resolve_npm_auth
+
+  bun install --frozen-lockfile >/dev/null \
+    || die "dependency install failed in the tagged worktree on $RELEASE_HOME_BASE"
+
+  # Sign + notarize the standalone binary, build the signed helpers, then publish.
+  # These reuse the same scripts the macOS-local release path uses. The apple.com
+  # bundle resolves headlessly (the context above set AGENTS_SECRETS_PASSPHRASE).
+  bold "Signing + notarizing the standalone agents binary + helpers on $RELEASE_HOME_BASE..."
+  agents secrets exec apple.com -- scripts/sign-cli-binary.sh \
+    || die "CLI binary sign/notarize failed on $RELEASE_HOME_BASE"
+  # The keychain + menu-bar helpers are the other signed .apps the tarball bundles.
+  # Build them directly here so bin/ is populated before `bun run build`.
+  agents secrets exec apple.com -- bash -c '
+    set -euo pipefail
+    menubar/scripts/build.sh release
+    rm -rf bin/MenubarHelper.app
+    cp -R menubar/dist/MenubarHelper.app bin/MenubarHelper.app
+    codesign --verify --deep --strict "bin/MenubarHelper.app"
+    # build.sh notarizes + staples (apple.com creds are in scope here); fail fast
+    # if the staged bundle is not stapled, before the prepack gate catches it.
+    xcrun stapler validate "bin/MenubarHelper.app"
+    scripts/build-keychain-helper.sh
+    shasum -a 256 "bin/Agents CLI.app/Contents/MacOS/Agents CLI" > "scripts/Agents CLI.app.sha256"
+  ' || die "signed helper build failed on $RELEASE_HOME_BASE"
+
+  bold "Building (bun run build) on $RELEASE_HOME_BASE..."
+  rm -rf dist
+  bun run build >/dev/null || die "build failed on $RELEASE_HOME_BASE"
+
+  bold "Publishing $PHNX_PKG@$TARGET from $RELEASE_HOME_BASE..."
+  npm publish --access=public --provenance=false \
+    || die "npm publish failed on $RELEASE_HOME_BASE (tag exists; rerun to retry)"
+  green "Published $PHNX_PKG@$TARGET"
+
+  # Publish the signed + notarized macOS computer helper as the release asset.
+  # Best-effort: npm is already published, so a failure here is a warning.
+  bold "Publishing the macOS computer helper asset for v$TARGET..."
+  agents secrets exec apple.com -- scripts/publish-computer-helper-mac.sh "$TARGET" \
+    || yellow "computer-helper publish failed -- retry on $RELEASE_HOME_BASE: agents secrets exec apple.com -- apps/cli/scripts/publish-computer-helper-mac.sh $TARGET"
+}
+
+# Resolve the npm publish token from the local `npmjs.com` secrets bundle and
+# write a temp .npmrc. Called ONLY on the home base (by run_home_base_phase),
+# inside the headless secrets context, so the token never crosses to the trigger
+# box. Defined here (before the --home-base-phase dispatch) so that entrypoint,
+# which exits before the trigger-box preflight, can reach it.
+resolve_npm_auth() {
+  local bundle_out token_line
+  # Read the npmjs.com bundle via the globally-installed `agents` (homebrew). We
+  # resolve the token BEFORE the build, so the worktree's own dist/ does not exist
+  # yet -- there is no local build to prefer, and the headless context sourced
+  # above has already set AGENTS_SECRETS_PASSPHRASE so this resolves silently.
+  command -v agents >/dev/null || die "'agents' CLI not on PATH (needed to read npmjs.com secrets bundle on $RELEASE_HOME_BASE)"
+  bundle_out="$(agents secrets export npmjs.com --plaintext 2>/dev/null || true)"
+  [[ -n "$bundle_out" ]] \
+    || die "no 'npmjs.com' secrets bundle on $RELEASE_HOME_BASE -- the home base must hold the publish token (agents secrets create npmjs.com && agents secrets add npmjs.com NPM_TOKEN)"
+  token_line="$(printf '%s\n' "$bundle_out" | grep -E '^export NPM_TOKEN=' | head -1)"
+  [[ -n "$token_line" ]] || die "secrets bundle 'npmjs.com' is missing key NPM_TOKEN"
+  NPM_TOKEN="${token_line#export NPM_TOKEN=}"
+  NPM_TOKEN="${NPM_TOKEN%\"}"; NPM_TOKEN="${NPM_TOKEN#\"}"
+  NPM_TOKEN="${NPM_TOKEN%\'}"; NPM_TOKEN="${NPM_TOKEN#\'}"
+  [[ -n "$NPM_TOKEN" ]] || die "NPM_TOKEN resolved to empty string on $RELEASE_HOME_BASE"
+
+  NPMRC_TMP="$(mktemp "${TMPDIR:-/tmp}/agents-cli-npmrc.XXXXXX")"
+  chmod 600 "$NPMRC_TMP"
+  # Use ${NPM_TOKEN} env var reference - npm expands it at runtime. Writing the
+  # token directly causes 404 errors for scoped packages.
+  # shellcheck disable=SC2016
+  printf '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\nalways-auth=true\n' > "$NPMRC_TMP"
+  export NPM_TOKEN
+  export NPM_CONFIG_USERCONFIG="$NPMRC_TMP"
+
+  local npm_user
+  npm_user="$(npm whoami 2>/dev/null || true)"
+  [[ -n "$npm_user" ]] || die "npm whoami failed with the resolved NPM_TOKEN on $RELEASE_HOME_BASE -- token may be expired or lack publish scope"
+  green "npm authenticated as $npm_user (via npmjs.com bundle on $RELEASE_HOME_BASE)"
+}
+
+# Echo the commit a remote tag points at (peeled first, then direct). Defined here
+# so both the --home-base-phase entrypoint and the trigger-box flow can use it.
+remote_tag_commit() {
+  local tag="$1" refs peeled direct
+  refs="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+  peeled="$(awk '$2 ~ /\^\{\}$/ { print $1; exit }' <<<"$refs")"
+  direct="$(awk '$2 !~ /\^\{\}$/ { print $1; exit }' <<<"$refs")"
+  printf '%s' "${peeled:-$direct}"
+}
+
+# The internal --home-base-phase entrypoint short-circuits everything else.
+if $HOME_BASE_PHASE; then
+  [[ -n "$TARGET" ]] || die "--home-base-phase needs a <version>"
+  bold "[home-base phase] build + sign + notarize + npm publish + computer-helper on $THIS_HOST"
+  # NPMRC_TMP is cleaned up on exit; declare the trap here since the trigger-box
+  # traps below are not reached on this path.
+  NPMRC_TMP=""
+  trap 'rm -f "${NPMRC_TMP:-}"' EXIT
+  run_home_base_phase
+  green "Released $TARGET (home-base phase)"
+  exit 0
+fi
 
 # ----- Pre-flight -----
 command -v npm >/dev/null    || die "npm not found"
@@ -95,55 +305,135 @@ BASE_SHA="$(git rev-parse HEAD)"
 REMOTE="$(git rev-parse "origin/$DEFAULT_BRANCH")"
 [[ "$BASE_SHA" == "$REMOTE" ]] || die "$DEFAULT_BRANCH is not in sync with origin/$DEFAULT_BRANCH (run 'git push' first)"
 
-# ----- npm auth via token (skips 2FA OTP prompts) -----
-# Resolve NPM_TOKEN. Honor an env-supplied token first (lets CI and machines
-# whose keychain helper is broken publish without the bundle); otherwise read
-# from the keychain-backed `npmjs.com` secrets bundle. The token must have
-# publish access to both @phnx-labs and @companion; create automation tokens
-# at https://www.npmjs.com/settings/<user>/tokens with the "Automation" type
-# so 2FA is bypassed for publishes.
-if [[ -z "${NPM_TOKEN:-}" ]]; then
-  # Use local build if available (has latest keychain fixes), fallback to global
-  if [[ -f "$ROOT/dist/index.js" ]]; then
-    AGENTS_CMD="node $ROOT/dist/index.js"
+# ----- npm auth: resolved ON the home base, never borrowed to the trigger box -----
+# The npm publish token lives only on the home base (mac-mini) and is resolved
+# there (resolve_npm_auth, defined above), in its headless secrets context, at
+# publish time -- it never crosses to the box that invoked the release. Anonymous
+# `npm view` reads below (latest version, is-target-published) need no token, so
+# version validation + the already-published short-circuit run fine on any box.
+
+# ----- Tests on a crabbox (dynamic Hetzner Linux VM) -----
+# scripts/sandbox.sh already selects an available crabbox for THIS repo's profile
+# (or warms a fresh one) and runs an arbitrary command on it -- never a hardcoded
+# box. We run the full suite there, capture its output to a log, and on failure
+# print which tests failed + the log location and HALT before any PR/publish.
+# This covers the LINUX suite; the GH Actions CI matrix on the release PR still
+# covers the cross-platform (macOS/Windows) legs (see wait_for_ci_green below).
+run_crabbox_tests() {
+  local log rc
+  # X placeholders MUST be the trailing characters: BSD mktemp (macOS) treats
+  # any suffix after them as part of a literal filename, so this template created
+  # a real file called "…crabbox-tests.XXXXXX.log" and every later release on the
+  # same box then died with "mkstemp failed: File exists". Matches the other
+  # mktemp templates in this script.
+  log="$(mktemp "${TMPDIR:-/tmp}/agents-cli-crabbox-tests.XXXXXX")"
+  bold "Running the Linux test suite on a crabbox (dynamic Hetzner VM)..."
+  gray "  (streaming; full log captured at $log)"
+  # sandbox.sh with no --pr flag = test mode: rsync this tree to the box, run the
+  # command. tee both streams so the operator watches live AND we keep the log.
+  # Pass ONE string (sandbox does cmd="$*" and embeds it into a remote bash -c
+  # script). Nested `bash -c '…'` loses quotes and becomes `bash -c cd …`.
+  # Crabbox syncs the monorepo root; CLI tests live under apps/cli.
+  if scripts/sandbox.sh -- 'cd apps/cli && bun install && bun run test' 2>&1 | tee "$log"; then
+    rc=0
   else
-    command -v agents >/dev/null || die "'agents' CLI not on PATH (needed to read npmjs.com secrets bundle)"
-    AGENTS_CMD="agents"
+    rc="${PIPESTATUS[0]}"
   fi
-  NPM_BUNDLE_OUT="$($AGENTS_CMD secrets export npmjs.com --plaintext 2>/dev/null || true)"
-  [[ -n "$NPM_BUNDLE_OUT" ]] || die "could not read 'npmjs.com' secrets bundle -- create it with: agents secrets create npmjs.com && agents secrets add npmjs.com NPM_TOKEN  (or export NPM_TOKEN=<token> before running this script)"
-  NPM_TOKEN_LINE="$(printf '%s\n' "$NPM_BUNDLE_OUT" | grep -E '^export NPM_TOKEN=' | head -1)"
-  [[ -n "$NPM_TOKEN_LINE" ]] || die "secrets bundle 'npmjs.com' is missing key NPM_TOKEN"
-  # Strip 'export NPM_TOKEN=' prefix and surrounding quotes if any.
-  NPM_TOKEN="${NPM_TOKEN_LINE#export NPM_TOKEN=}"
-  NPM_TOKEN="${NPM_TOKEN%\"}"
-  NPM_TOKEN="${NPM_TOKEN#\"}"
-  NPM_TOKEN="${NPM_TOKEN%\'}"
-  NPM_TOKEN="${NPM_TOKEN#\'}"
+  if [[ "$rc" != "0" ]]; then
+    red "  ✗ crabbox tests FAILED (exit $rc)"
+    # Surface the actual failing test names + assertion output, not a bare "red".
+    local fails
+    fails="$(grep -E '^\s*(FAIL|×|✗|not ok|AssertionError|Error:|Expected|Received)' "$log" | head -40 || true)"
+    if [[ -n "$fails" ]]; then
+      red "  failing tests / errors:"
+      printf '%s\n' "$fails" | while IFS= read -r line; do red "    $line"; done
+    fi
+    phase_fail "Linux tests failed on the crabbox -- release halted before opening a PR" "$log"
+  fi
+  phase_ok "crabbox tests passed (full log: $log)"
+}
+
+# ----- Route the privileged phase to the home base -----
+# After the trigger box has merged + tagged the release (git + gh, which need the
+# invoking box's auth), the build+sign+notarize+publish+computer-helper phase runs
+# on the home base -- always from the TAGGED release.sh, checked out into a
+# throwaway worktree at v$TARGET, so the home base's own on-disk checkout (which,
+# on the first release after this PR merges, predates --home-base-phase) is never
+# executed. If we ARE the home base, do the checkout + run locally; otherwise the
+# same steps run over ssh on $RELEASE_HOME_BASE. The npm token is resolved on the
+# home base -- it never crosses to the trigger box.
+#
+# HOME_BASE_WT_SNIPPET is the shared shell that both paths run (locally via bash,
+# or remotely via ssh): fetch origin + the tag, verify the tag's version, create a
+# detached worktree at v$TARGET, and run THAT worktree's
+# apps/cli/scripts/release.sh $TARGET --home-base-phase. The worktree is removed on
+# exit whether the phase succeeds or fails (BLOCKER 3), via a scoped EXIT trap.
+home_base_wt_snippet() {
+  # $1 = version. Emits a self-contained bash program (no outer-shell expansion of
+  # runtime values beyond the version, which is validated MAJOR.MINOR.PATCH).
+  cat <<SNIPPET
+set -euo pipefail
+REPO_ROOT="\$(git rev-parse --show-toplevel)"
+git -C "\$REPO_ROOT" fetch --quiet origin
+git -C "\$REPO_ROOT" fetch --quiet origin "refs/tags/v$1:refs/tags/v$1" 2>/dev/null || true
+git -C "\$REPO_ROOT" rev-parse --verify --quiet "refs/tags/v$1^{commit}" >/dev/null \\
+  || { echo "tag v$1 not found on the home base after fetch" >&2; exit 1; }
+TAG_VER="\$(git -C "\$REPO_ROOT" show "v$1:apps/cli/package.json" | jq -r .version)"
+[ "\$TAG_VER" = "$1" ] \\
+  || { echo "tag v$1 tree is at \$TAG_VER, not $1 -- refusing home-base phase" >&2; exit 1; }
+WT="\$REPO_ROOT/.agents/worktrees/homebase-publish-v$1-\$\$"
+trap 'git -C "\$REPO_ROOT" worktree remove --force "\$WT" >/dev/null 2>&1 || true' EXIT
+git -C "\$REPO_ROOT" worktree add --quiet --detach "\$WT" "v$1" \\
+  || { echo "could not create home-base publish worktree at \$WT" >&2; exit 1; }
+[ -z "\$(git -C "\$WT" status --short | grep '^ D')" ] \\
+  || { echo "home-base publish worktree \$WT is incomplete -- refusing to build" >&2; exit 1; }
+# The signed keychain + menu-bar helpers need bin/embedded.provisionprofile — an
+# Apple provisioning profile that is gitignored (never committed, /apps/cli/bin/
+# is ignored wholesale), so the tag worktree has no bin/ at all. Seed it from the
+# home base's own checkout (REPO_ROOT has it) before the helper build reads it;
+# without this the home-base phase dies "Missing .../bin/embedded.provisionprofile"
+# on every release, regardless of which box triggered it.
+mkdir -p "\$WT/apps/cli/bin"
+if [ -f "\$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" ]; then
+  cp "\$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" "\$WT/apps/cli/bin/embedded.provisionprofile"
+else
+  echo "warning: \$REPO_ROOT/apps/cli/bin/embedded.provisionprofile absent on the home base; the signed helper build will fail" >&2
 fi
-[[ -n "$NPM_TOKEN" ]] || die "NPM_TOKEN resolved to empty string"
-
-NPMRC_TMP="$(mktemp "${TMPDIR:-/tmp}/agents-cli-npmrc.XXXXXX")"
-chmod 600 "$NPMRC_TMP"
-# Use ${NPM_TOKEN} env var reference - npm expands it at runtime.
-# Writing the token directly causes 404 errors for scoped packages.
-# npm, not this shell, expands the literal reference.
-# shellcheck disable=SC2016
-printf '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\nalways-auth=true\n' > "$NPMRC_TMP"
-export NPM_TOKEN
-export NPM_CONFIG_USERCONFIG="$NPMRC_TMP"
-
-# Verify the token works.
-NPM_USER="$(npm whoami 2>/dev/null || true)"
-[[ -n "$NPM_USER" ]] || die "npm whoami failed with the resolved NPM_TOKEN -- token may be expired or lack publish scope"
-green "npm authenticated as $NPM_USER (via npmjs.com bundle)"
-
-remote_tag_commit() {
-  local tag="$1" refs peeled direct
-  refs="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
-  peeled="$(awk '$2 ~ /\^\{\}$/ { print $1; exit }' <<<"$refs")"
-  direct="$(awk '$2 !~ /\^\{\}$/ { print $1; exit }' <<<"$refs")"
-  printf '%s' "${peeled:-$direct}"
+cd "\$WT/apps/cli"
+scripts/release.sh $1 --home-base-phase
+SNIPPET
+}
+route_home_base_phase() {
+  local snippet
+  snippet="$(home_base_wt_snippet "$TARGET")"
+  if $ON_HOME_BASE; then
+    bold "Building + signing + publishing on the home base ($RELEASE_HOME_BASE, this box) from the tagged tree..."
+    # cwd is this repo's apps/cli (ROOT), so the snippet's `git rev-parse
+    # --show-toplevel` resolves the checkout we are in.
+    bash -c "$snippet" || return 1
+    return 0
+  fi
+  bold "Routing build + sign + publish to the home base ($RELEASE_HOME_BASE) via agents ssh (from the tagged tree)..."
+  # Prefer `agents ssh` over plain `ssh`: it uses the devices registry + brokered
+  # credentials and survives host-key / PATH quirks that plain ssh hits on
+  # headless Linux workers (Host key verification failed).
+  #
+  # CRITICAL: pass the remote command as ONE argv element. `agents ssh` joins
+  # cmd[] with spaces via wrapRemoteCommand (lib/devices/connect.ts) before
+  # handing OpenSSH a single remote string — multi-arg forms like
+  #   agents ssh host -- bash -lc 'cd … && bash -s'
+  # become `bash -lc cd … && bash -s` (quotes stripped), so `cd` runs with no
+  # argument and the snippet's `git rev-parse` fails: "not a git repository".
+  # A single quoted string preserves the remote shell syntax. Snippet on stdin
+  # (`bash -s`); $HOME expands on the REMOTE side.
+  if command -v agents >/dev/null 2>&1; then
+    agents ssh "$RELEASE_HOME_BASE" -- 'cd $HOME/src/github.com/muqsitnawaz/agents-cli && bash -s' <<<"$snippet" \
+      || return 1
+  else
+    # Fallback when agents is not on PATH on the trigger box (rare).
+    ssh "$RELEASE_HOME_BASE" 'cd $HOME/src/github.com/muqsitnawaz/agents-cli && bash -s' <<<"$snippet" \
+      || return 1
+  fi
 }
 
 # ----- Validate version bump -----
@@ -164,47 +454,15 @@ parse_v() { echo "$1" | tr '.' ' '; }
 read -r CMAJ CMIN CPAT <<< "$(parse_v "$PHNX_LATEST")"
 read -r TMAJ TMIN TPAT <<< "$(parse_v "$TARGET")"
 
-# Strict single-step bump from $PHNX_LATEST, OR equal to $PHNX_LATEST when the
-# shim is still behind (shim catch-up rerun after a partial publish), OR equal
-# to package.json on main when several patch commits accumulated without ever
-# being published (phnx catch-up — main is ahead of registry).
-is_valid_bump=false
-read -r SMAJ SMIN SPAT <<< "$(parse_v "$SWARMIFY_LATEST")"
+# Which kind of bump is this? The arithmetic lives in scripts/validate-bump.sh
+# so it can be tested directly (scripts/validate-bump.test.ts) — reaching it
+# here requires a clean main, npm auth and gh auth first. It prints the bump
+# kind, or the accepted versions to stderr and exits 1.
 PKG_JSON_VERSION="$(jq -r .version package.json)"
-if [[ $TMAJ -eq $CMAJ && $TMIN -eq $CMIN && $TPAT -eq $((CPAT + 1)) ]]; then
-  BUMP="patch"
-  is_valid_bump=true
-elif [[ $TMAJ -eq $CMAJ && $TMIN -eq $((CMIN + 1)) && $TPAT -eq 0 ]]; then
-  BUMP="minor"
-  is_valid_bump=true
-elif [[ $TMAJ -eq $((CMAJ + 1)) && $TMIN -eq 0 && $TPAT -eq 0 ]]; then
-  BUMP="major"
-  is_valid_bump=true
-elif [[ "$TARGET" == "$PHNX_LATEST" ]] && \
-     { [[ $TMAJ -gt $SMAJ ]] || \
-       { [[ $TMAJ -eq $SMAJ ]] && [[ $TMIN -gt $SMIN ]]; } || \
-       { [[ $TMAJ -eq $SMAJ ]] && [[ $TMIN -eq $SMIN ]] && [[ $TPAT -gt $SPAT ]]; }; }; then
-  BUMP="shim-catchup"
-  is_valid_bump=true
-elif [[ "$TARGET" == "$PKG_JSON_VERSION" ]] && \
-     { [[ $TMAJ -gt $CMAJ ]] || \
-       { [[ $TMAJ -eq $CMAJ ]] && [[ $TMIN -gt $CMIN ]]; } || \
-       { [[ $TMAJ -eq $CMAJ ]] && [[ $TMIN -eq $CMIN ]] && [[ $TPAT -gt $CPAT ]]; }; }; then
-  # Catch-up: main has accumulated unpublished patch commits (chore(release):
-  # N bumps that never reached the registry). Publish what main says.
-  BUMP="phnx-catchup"
-  is_valid_bump=true
-fi
-
-if ! $is_valid_bump; then
-  red "invalid bump: $PHNX_LATEST -> $TARGET"
-  red "expected one of:"
-  red "  $((CMAJ)).$((CMIN)).$((CPAT + 1))   (patch)"
-  red "  $((CMAJ)).$((CMIN + 1)).0   (minor)"
-  red "  $((CMAJ + 1)).0.0   (major)"
-  red "  $PKG_JSON_VERSION              (phnx-catchup: package.json is ahead of registry)"
+if ! BUMP="$(scripts/validate-bump.sh "$PHNX_LATEST" "$PKG_JSON_VERSION" "$SWARMIFY_LATEST" "$TARGET")"; then
   exit 1
 fi
+read -r SMAJ SMIN SPAT <<< "$(parse_v "$SWARMIFY_LATEST")"
 
 # Target must also be strictly newer than @companion latest (rare edge case),
 # unless this is a shim-catchup where target == phnx_latest and shim is behind.
@@ -218,6 +476,65 @@ if [[ "$BUMP" != "shim-catchup" ]]; then
 fi
 
 green "Bump: $BUMP ($PHNX_LATEST -> $TARGET)"
+
+# ----- Finish a stuck release before starting a new one -----
+# A release that dies after the tag but before the publish leaves a pushed v* tag
+# the registry never saw. The next run then validates its bump against npm (which
+# is behind), cuts the NEXT version, and the gap widens by one every time: on
+# 2026-08-02 that turned a one-version gap into npm 1.20.78 / main 1.20.81 with
+# v1.20.80 and v1.20.81 tagged and unpublished. Refuse to widen it -- the
+# unpublished tag is a release to finish, and re-running with that version is the
+# documented recovery (it rebuilds from the merged PR's CI-tested tree).
+# Fail CLOSED. A `|| true` here would mean a transient network blip silently
+# disables the guard and the release bumps straight past a stuck version -- the
+# exact widening this check exists to stop. If we cannot read the tags, we do not
+# know whether it is safe to proceed, so we stop.
+#
+# The result is consumed via a command substitution below and fed to the loop as
+# a here-string -- NOT `done < <(remote_version_tags)`. That distinction is the
+# whole guard: a process substitution runs in a subshell, so `die` there exits
+# only the subshell, the loop reads an empty list, and release.sh sails on with
+# "no stuck tag found" -- fail-OPEN, the precise bug this function exists to
+# prevent. A command substitution's non-zero status propagates to the assignment
+# under `set -e`, so the script actually stops.
+remote_version_tags() {
+  local out
+  out="$(git ls-remote --tags origin 'refs/tags/v*' 2>&1)" \
+    || die "could not read remote tags from origin -- refusing to release without checking for a stuck version: $out"
+  printf '%s\n' "$out" | grep -v '\^{}$' || true
+}
+
+# The decision arithmetic lives in scripts/stuck-release.sh so it can be tested
+# directly (scripts/stuck-release.test.ts); this block only gathers the facts it
+# needs -- the pushed tags, and whether the registry has each one.
+TAG_FACTS=""
+REMOTE_TAG_LINES="$(remote_version_tags)"
+while read -r _sha _ref; do
+  v="${_ref#refs/tags/v}"
+  [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+  # Only versions ahead of the registry can be stuck, so only those are worth an
+  # `npm view` round trip.
+  [[ "$v" != "$PHNX_LATEST" ]] || continue
+  [[ "$(printf '%s\n%s\n' "$PHNX_LATEST" "$v" | sort -V | tail -1)" == "$v" ]] || continue
+  if npm view "$PHNX_PKG@$v" version >/dev/null 2>&1; then
+    TAG_FACTS+="$v yes"$'\n'
+  else
+    TAG_FACTS+="$v no"$'\n'
+  fi
+done <<< "$REMOTE_TAG_LINES"
+
+UNPUBLISHED_TAG="$(printf '%s' "$TAG_FACTS" | scripts/stuck-release.sh "$PHNX_LATEST" || true)"
+
+if [[ -n "$UNPUBLISHED_TAG" && "$UNPUBLISHED_TAG" != "$TARGET" ]]; then
+  red "v$UNPUBLISHED_TAG is tagged but was never published -- finish that release first."
+  gray "  registry latest   $PHNX_LATEST"
+  gray "  stuck tag         v$UNPUBLISHED_TAG"
+  gray "  you asked for     $TARGET"
+  echo
+  yellow "  Re-run with the stuck version; it rebuilds from that release PR's CI-tested tree:"
+  yellow "    scripts/release.sh $UNPUBLISHED_TAG --apply"
+  die "refusing to bump past an unpublished release"
+fi
 
 # ----- Source of truth: npm registry says whether $TARGET is already published -----
 # Run these checks NOW (before tests) so a re-run that's already partly published
@@ -237,6 +554,16 @@ RELEASE_BRANCH="release/v$TARGET"
 MAIN_AT_TARGET=false
 if [[ "$(git show "origin/$DEFAULT_BRANCH:apps/cli/package.json" 2>/dev/null | jq -r .version 2>/dev/null || echo '')" == "$TARGET" ]]; then
   MAIN_AT_TARGET=true
+fi
+
+# Phase count for the [n/N] tracker, computed for the actual path taken so it
+# never shows gaps or a wrong denominator. Normal release runs 6 phases:
+# preflight, crabbox tests, PR+CI+merge, tag, publish, verify. A catch-up publish
+# (main already at $TARGET) skips the tests + PR+CI+merge phases -> 4 phases.
+if $MAIN_AT_TARGET; then
+  TOTAL_PHASES=4
+else
+  TOTAL_PHASES=6
 fi
 EXISTING_PR="$(gh pr list --head "$RELEASE_BRANCH" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)"
 MERGED_RELEASE_JSON="$(gh pr list --head "$RELEASE_BRANCH" --base "$DEFAULT_BRANCH" --state merged --limit 1 --json number,mergeCommit,headRefOid 2>/dev/null || echo '[]')"
@@ -270,38 +597,20 @@ if $MAIN_AT_TARGET && ! $PHNX_TARGET_PUBLISHED && [[ -n "$MERGED_RELEASE_SHA" ]]
   CI_TESTED_HEAD="$(git rev-parse FETCH_HEAD)"
   [[ "$CI_TESTED_HEAD" == "$MERGED_RELEASE_HEAD" ]] \
     || die "fetched PR head ${CI_TESTED_HEAD:0:9} != recorded release head ${MERGED_RELEASE_HEAD:0:9} -- refusing catch-up publish"
-  [[ "$(git rev-parse "$CI_TESTED_HEAD^{tree}")" == "$(git rev-parse "$MERGED_RELEASE_SHA^{tree}")" ]] \
-    || die "merged release PR #$MERGED_RELEASE_PR tree differs from its CI-tested head -- refusing catch-up publish"
+  if [[ "$(git rev-parse "$CI_TESTED_HEAD^{tree}")" != "$(git rev-parse "$MERGED_RELEASE_SHA^{tree}")" ]]; then
+    yellow "$DEFAULT_BRANCH drifted since release PR #$MERGED_RELEASE_PR merged (concurrent merges); will tag + publish the CI-tested head ${CI_TESTED_HEAD:0:9}, not the drifted merge."
+  fi
   [[ "$(git show "$MERGED_RELEASE_SHA:apps/cli/package.json" | jq -r .version)" == "$TARGET" ]] \
     || die "merged release PR #$MERGED_RELEASE_PR is not version $TARGET"
 
-  if [[ "$(uname)" == "Darwin" ]]; then
-    [[ -d "$INVOKING_ROOT/bin/Agents CLI.app" ]] \
-      || die "historical publish retry needs the staged SHA-pinned helper: $INVOKING_ROOT/bin/Agents CLI.app"
-  fi
-
+  # The catch-up guards above (CI-tested head match + tree match + version match)
+  # are preserved intact -- they gate an unverified retry publish. What is NOT
+  # done here anymore: building the signed macOS artifacts on the trigger box.
+  # The whole privileged phase (build + sign + notarize + publish + computer-
+  # helper) now runs on the home base against the tagged tree, so no staged
+  # helper / historical worktree build is needed on the invoking box.
   HISTORICAL_CATCHUP=true
-  HISTORICAL_WT="$REPO_ROOT/.agents/worktrees/retry-release-v$TARGET-$$"
-  git worktree add --quiet --detach "$HISTORICAL_WT" "$MERGED_RELEASE_SHA" \
-    || die "could not create historical release worktree at $HISTORICAL_WT"
-  cd "$HISTORICAL_WT/apps/cli"
-  ROOT="$(pwd)"
-  bold "Retrying from merged release PR #$MERGED_RELEASE_PR at ${MERGED_RELEASE_SHA:0:9} (current main: ${BASE_SHA:0:9})..."
-  bun install --frozen-lockfile >/dev/null \
-    || die "dependency install failed in historical release worktree"
-  if [[ "$(uname)" == "Darwin" ]]; then
-    mkdir -p bin
-    cp -R "$INVOKING_ROOT/bin/Agents CLI.app" bin/
-    scripts/verify-keychain-helper.sh \
-      || die "staged keychain helper does not match the historical release pin"
-    bold "Building the menu-bar helper from the historical release tree..."
-    menubar/scripts/build.sh release \
-      || die "historical menu-bar helper build failed"
-    rm -rf bin/MenubarHelper.app
-    cp -R menubar/dist/MenubarHelper.app bin/MenubarHelper.app
-    codesign --verify --deep --strict bin/MenubarHelper.app \
-      || die "historical menu-bar helper signature verification failed"
-  fi
+  bold "Catch-up: main already at $TARGET (merged PR #$MERGED_RELEASE_PR at ${MERGED_RELEASE_SHA:0:9}); routing publish to the home base."
 fi
 
 # ----- Sync package.json with target -----
@@ -349,86 +658,31 @@ fi
 rm -f "$TSC_LOG"
 green "Type check clean."
 
-# ----- Offload the macOS helper build + sign to a remote sign host (opt-in) -----
-# The tarball bundles two signed macOS .app helpers (bin/Agents CLI.app +
-# bin/MenubarHelper.app) that a Linux box can't produce. When releasing off a
-# non-macOS host (or when FORCE_REMOTE_SIGN=1), offload the Swift build + codesign
-# + notarize to ${SIGN_HOST:-mac-mini} over ssh and pull the signed bundles back,
-# so `bun run build` (now presence-gated, not uname-gated) can package them.
-# On macOS the signed helpers are expected to be staged locally already, so this
-# is skipped unless FORCE_REMOTE_SIGN=1.
-NEED_REMOTE_SIGN=false
-if [[ "${FORCE_REMOTE_SIGN:-}" == "1" ]]; then
-  NEED_REMOTE_SIGN=true
-elif [[ "$(uname)" != "Darwin" ]]; then
-  # Always remote-sign off macOS: unlike the .app helpers (stable across
-  # releases once staged), the standalone CLI binary embeds the release
-  # version, so every release needs a freshly built + signed + notarized
-  # bin/agents-macos (see scripts/sign-cli-binary.sh).
-  NEED_REMOTE_SIGN=true
-fi
-if $NEED_REMOTE_SIGN; then
-  bold "Offloading macOS helper build + sign to ${SIGN_HOST:-mac-mini}..."
-  scripts/remote-sign-mac.sh || die "remote sign failed -- cannot package signed helpers"
-  green "Signed helpers pulled back into bin/."
-fi
+# The build + sign + notarize of the signed macOS artifacts no longer happens on
+# the trigger box: it runs on the home base ($RELEASE_HOME_BASE) in the privileged
+# phase (run_home_base_phase / --home-base-phase). That box is the only one with
+# the Developer ID cert + headless signing context, and every release rebuilds the
+# version-stamped standalone binary there. The trigger box's job is the fast local
+# fail-fast (tsc, above) + orchestration (tests on a crabbox, PR, merge, tag).
 
-# ----- Sign + notarize the standalone macOS `agents` binary (issue #315) -----
-# Runs on every macOS release (dry-run included: `npm pack --dry-run` below
-# fires prepack, whose verify-cli-binary.sh gate needs the fresh artifact).
-# Off macOS, the remote-sign step above already produced bin/agents-macos on
-# the sign host and pulled it back.
-if [[ "$(uname)" == "Darwin" ]]; then
-  bold "Signing + notarizing the standalone agents binary..."
-  if [[ -n "${APPLE_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
-    scripts/sign-cli-binary.sh || die "CLI binary sign/notarize failed"
-  elif command -v agents >/dev/null 2>&1; then
-    agents secrets exec apple.com -- scripts/sign-cli-binary.sh || die "CLI binary sign/notarize failed"
-  else
-    die "cannot sign dist/bin/agents: export APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID, or install agents-cli so 'agents secrets exec apple.com -- scripts/sign-cli-binary.sh' can inject them"
-  fi
-  green "Standalone binary signed + notarized."
-fi
+# ----- Tests -----
+# The Linux suite runs on a dynamic crabbox in the --apply flow, before the PR is
+# opened (see run_crabbox_tests / the "[2/6] Linux tests" phase below); the GH
+# Actions CI matrix on the release PR then covers the macOS/Windows legs. Local
+# 'tsc --noEmit' above is the fast pre-flight fail-fast. --skip-tests skips the
+# crabbox lease only (CI still gates the PR).
 
-# ----- Build (real artifacts) -----
-bold "Building (bun run build)..."
-rm -rf dist
-BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/agents-cli-build.XXXXXX")"
-if ! bun run build > "$BUILD_LOG" 2>&1; then
-  red "Build failed:"
-  cat "$BUILD_LOG" >&2
-  rm -f "$BUILD_LOG"
-  die "build failed"
+# ----- Tarball preview (home base only) -----
+# `npm pack --dry-run` fires prepack, whose verify-keychain-helper.sh /
+# verify-menubar-helper.sh / verify-cli-binary.sh gates need the signed macOS
+# artifacts. Those are built only on the home base, so the preview runs there.
+# On the trigger box we skip it and note where the real tarball is produced.
+if $ON_HOME_BASE && [[ -d dist && -d "bin/Agents CLI.app" ]]; then
+  bold "Tarball preview ($PHNX_PKG@$TARGET)"
+  npm pack --dry-run 2>&1 | tail -10
+else
+  gray "Tarball preview skipped on $THIS_HOST -- the signed tarball is built + packed on the home base ($RELEASE_HOME_BASE)."
 fi
-# Same paranoid scan over build output (the keychain copy step shouldn't
-# print anything; if it does, we want to know).
-if grep -iE '\berror\b|\bwarning\b' "$BUILD_LOG" >/dev/null 2>&1; then
-  red "build emitted warnings/errors:"
-  grep -iE '\berror\b|\bwarning\b' "$BUILD_LOG" >&2
-  rm -f "$BUILD_LOG"
-  die "fix the build output above before releasing"
-fi
-rm -f "$BUILD_LOG"
-green "Build clean."
-
-# ----- Tests: run in CI on the release PR, not here -----
-# The suite is no longer run locally / on crabbox at release time. The apply
-# phase opens the release as a PR on a release/v<version> branch, which triggers
-# the full cross-platform CI matrix (.github/workflows/ci.yml) plus the 'test'
-# and 'gitleaks' checks; the script blocks on that CI being green before it
-# merges and publishes (see "Wait for CI" below). Running the suite here too
-# would double-run it (a crabbox lease + minutes) and create a second source of
-# truth. Local 'tsc --noEmit' + 'bun run build' above stay as the fast pre-PR
-# fail-fast (and the build is needed for the tarball preview + publish anyway).
-# --skip-tests is accepted for backward compatibility but is now a no-op.
-if $SKIP_TESTS; then
-  gray "(--skip-tests: tests run in CI on the release PR now; flag is a no-op)"
-fi
-echo
-
-# ----- Tarball preview (always) -----
-bold "Tarball preview ($PHNX_PKG@$TARGET)"
-npm pack --dry-run 2>&1 | tail -10
 echo
 
 # ----- Build the shim package on disk so we can preview/publish it -----
@@ -462,6 +716,19 @@ cleanup_all() {
   rm -rf "${SHIM_TMP:-}"
   rm -f "${NPMRC_TMP:-}"
   remove_historical_worktree
+  # Stop renewing before dropping, so the renewer cannot re-push a lease we are
+  # about to delete and leave the ref orphaned until its TTL.
+  if [[ -n "${LEASE_RENEWER_PID:-}" ]]; then
+    kill "$LEASE_RENEWER_PID" >/dev/null 2>&1 || true
+    wait "$LEASE_RENEWER_PID" 2>/dev/null || true
+  fi
+  # Drop the release lease on every exit path. A run that dies without reaching
+  # this (SIGKILL, severed ssh, rebooted box) leaves the lease behind on purpose:
+  # release-lease.sh reclaims it after its TTL and logs whose it was, rather than
+  # letting a half-dead release look finished.
+  if [[ "${LEASE_HELD:-false}" == "true" ]]; then
+    scripts/release-lease.sh release || true
+  fi
 }
 trap cleanup_all EXIT
 
@@ -511,14 +778,13 @@ if ! $APPLY; then
   gray "  open release PR           ${EXISTING_PR:-none} ($RELEASE_BRANCH)"
   gray "  merged release PR         ${MERGED_RELEASE_PR:-none} ($RELEASE_BRANCH)"
   echo
-  yellow "Will run on --apply (NPM_TOKEN from npmjs.com bundle, no 2FA prompts):"
-  yellow "  1. fold .changelog/next/* -> .changelog/$TARGET.md + regenerate CHANGELOG.md"
-  yellow "  2. push branch $RELEASE_BRANCH (chore(release): $TARGET) -> fires the full CI matrix"
-  yellow "  3. open a PR into $DEFAULT_BRANCH"
-  yellow "  4. wait for CI green (matrix + test + gitleaks), fail-closed"
-  yellow "  5. squash-merge the PR"
-  yellow "  6. verify merged tree == built tree, tag v$TARGET at the merge commit"
-  yellow "  7. npm publish $PHNX_PKG@$TARGET, push the tag"
+  yellow "Will run on --apply (self-routing, zero-config -- no env vars, no 2FA prompt):"
+  yellow "  1. [this box: $THIS_HOST] fold .changelog/next/* -> .changelog/$TARGET.md + regenerate CHANGELOG.md"
+  yellow "  2. [crabbox]  run the Linux test suite on a dynamic Hetzner VM; halt on failure"
+  yellow "  3. [this box] push branch $RELEASE_BRANCH (chore(release): $TARGET) -> fires the CI matrix; open a PR"
+  yellow "  4. [this box] wait for CI green (matrix + test + gitleaks), fail-closed"
+  yellow "  5. [this box] squash-merge the PR; verify merged tree == expected; tag v$TARGET"
+  yellow "  6. [$RELEASE_HOME_BASE] build + sign + notarize + npm publish + push tag + computer-helper (token resolved there)"
   gray   "  (steps already done in a prior run are skipped: published / merged / PR-open / tag-exists)"
   exit 0
 fi
@@ -529,28 +795,89 @@ if ! $YES; then
   [[ "$yn" =~ ^[Yy]$ ]] || die "aborted"
 fi
 
+# ----- Claim the release lease (the mutex) -----
+# Agents release from whichever box they are on, so exclusivity has to live on
+# origin, not on a local flock. Claim BEFORE the first mutation: everything past
+# this point (changelog fold, branch push, PR, merge, tag, publish) is what two
+# concurrent runs clobber. On 2026-08-02 two agents entered here at once and only
+# found out at the publish gate -- by then one had already merged and tagged, and
+# the version was left merged but unshipped.
+#
+# Released by cleanup_all's trap on EVERY exit path, success or failure.
+LEASE_HELD=false
+if ! scripts/release-lease.sh claim "$TARGET"; then
+  die "another release is in flight -- watch it instead of racing it (scripts/release-lease.sh status)"
+fi
+LEASE_HELD=true
+
+# Keep the lease fresh for as long as this release runs. The TTL is "how long
+# since the holder last proved it was alive", NOT "how long a release takes" --
+# a healthy release routinely outlives any sane TTL (the CI matrix alone has run
+# 57 minutes; release 1.20.77 took 186 minutes wall clock). Without this
+# renewer a long-but-healthy release would go stale mid-flight and a second
+# releaser would reclaim its lease, recreating the exact collision the lease
+# exists to prevent. Killed by cleanup_all.
+LEASE_RENEWER_PID=""
+( while sleep 600; do scripts/release-lease.sh renew >/dev/null 2>&1 || exit 0; done ) &
+LEASE_RENEWER_PID=$!
+
+# Called before every irreversible step. Fails CLOSED: if we cannot prove the
+# lease is still ours, we stop rather than merge/tag/publish alongside whoever
+# holds it now.
+require_lease() { # $1 = what we are about to do
+  scripts/release-lease.sh verify \
+    || phase_fail "lost the release lease before $1 -- refusing to continue; another releaser owns this pipeline now"
+}
+
 # Auto-revert of the package.json bump is no longer wanted here — the bump is
 # carried into the release branch commit (and the cleanup trap reverts the
 # working tree to HEAD on any abort, keeping re-runs clean).
 PKG_BUMPED=false
+
+phase "Preflight + version validation complete" "$THIS_HOST"
+phase_ok "clean $DEFAULT_BRANCH, bump $BUMP ($PHNX_LATEST -> $TARGET), type check + tarball preview done"
 
 # ----- Short-circuit: already published -----
 # Registry is the source of truth. If the version is live, the release happened;
 # just make sure the tag exists on the merged commit and is pushed.
 if $PHNX_TARGET_PUBLISHED; then
   green "$PHNX_PKG@$TARGET is already on the registry."
-  TAG_TARGET="${MERGED_RELEASE_SHA:-origin/$DEFAULT_BRANCH}"
-  [[ "$(git show "$TAG_TARGET:apps/cli/package.json" | jq -r .version)" == "$TARGET" ]] \
-    || die "refusing to create v$TARGET: $TAG_TARGET does not contain package version $TARGET"
-  VERIFIED_TAG_SHA="$(git rev-parse "$TAG_TARGET^{commit}")"
   REMOTE_TAG_SHA="$(remote_tag_commit "v$TARGET")"
   if [[ -z "$REMOTE_TAG_SHA" ]]; then
-    git tag -f "v$TARGET" "$VERIFIED_TAG_SHA" >/dev/null
+    # Published but no tag yet: tag the exact commit that was shipped. When a
+    # merged release PR is known, apply the same drift rule as the primary flow --
+    # the CI-tested PR head over the drifted merge -- by re-fetching the PR head
+    # here (CI_TESTED_HEAD is only populated on the not-yet-published paths, so it
+    # is never set on this branch). Otherwise fall back to the default branch.
+    if [[ -n "$MERGED_RELEASE_PR" && -n "$MERGED_RELEASE_SHA" ]]; then
+      git fetch --quiet origin "pull/$MERGED_RELEASE_PR/head" \
+        || die "could not fetch the CI-tested head for merged release PR #$MERGED_RELEASE_PR"
+      TAG_TARGET="$(scripts/select-publish-commit.sh "$MERGED_RELEASE_SHA" "$(git rev-parse FETCH_HEAD)")"
+    else
+      TAG_TARGET="origin/$DEFAULT_BRANCH"
+    fi
+    [[ "$(git show "$TAG_TARGET:apps/cli/package.json" | jq -r .version)" == "$TARGET" ]] \
+      || die "refusing to create v$TARGET: $TAG_TARGET does not contain package version $TARGET"
+    # This is the second place a tag gets pushed (the already-published recovery
+    # path), and it is just as irreversible as the primary one -- gate it too, or
+    # a lease lost during the npm-view round trip lets two releasers both push a
+    # tag for the same version.
+    require_lease "pushing the missing tag v$TARGET"
+    git tag -f "v$TARGET" "$(git rev-parse "$TAG_TARGET^{commit}")" >/dev/null
     git push origin "v$TARGET" && green "Pushed missing tag v$TARGET"
   else
-    [[ "$REMOTE_TAG_SHA" == "$VERIFIED_TAG_SHA" ]] \
-      || die "remote tag v$TARGET points at $REMOTE_TAG_SHA, not verified release commit $VERIFIED_TAG_SHA"
-    gray "Tag v$TARGET already points at the verified release commit."
+    # Already published + tagged: accept any tag that references version TARGET. A
+    # drift-fallback release tags the CI-tested PR head rather than the merge
+    # commit, so verify the tag's own tree carries TARGET instead of requiring it
+    # to equal the merge commit. Fetch --force so a stale local v$TARGET (from a
+    # prior tagging attempt) is overwritten rather than leaving the fetch rejected
+    # ("would clobber existing tag") and reading the stale ref; never swallow the
+    # fetch's exit code.
+    git fetch --quiet --force origin "refs/tags/v$TARGET:refs/tags/v$TARGET" \
+      || die "could not fetch remote tag v$TARGET to verify its version"
+    [[ "$(git show "v$TARGET:apps/cli/package.json" | jq -r .version)" == "$TARGET" ]] \
+      || die "remote tag v$TARGET points at $REMOTE_TAG_SHA, which is not version $TARGET"
+    gray "Tag v$TARGET already present for the published release."
   fi
   exit 0
 fi
@@ -561,14 +888,11 @@ fi
 # `test` job hanging -- would hang the release forever) and it can
 # exit 0 on a partial set. This loop waits until every expected context is
 # present AND terminal (capped at 60m), then re-asserts each is a pass and dies
-# otherwise. NOTE: these names are the job/matrix labels of ci.yml (the build
-# matrix), tests.yml (test-shard 1..3 + typecheck + compiled-smoke), and
-# secret-scan.yml (gitleaks) -- a rename/reshard there must be mirrored here, or
-# the release times out (fail-closed, never publishes). tests.yml was resharded
-# from a single `test` job into `test-shard (N)` + `typecheck` + `compiled-smoke`;
-# the stale `test` name here hung every release for the full 60m before failing
-# (found + fixed 2026-07-29 cutting 1.20.73).
-EXPECTED_CHECKS=("test-shard (1)" "test-shard (2)" "test-shard (3)" typecheck compiled-smoke gitleaks \
+# otherwise. tests.yml's final `test` job gates every component selected by the
+# scope classifier, so the release waiter follows that stable aggregate instead
+# of duplicating internal job names that change when CI is regrouped or resharded.
+# The build matrix and secret scan remain direct release gates.
+EXPECTED_CHECKS=(test gitleaks \
   "build (ubuntu-latest, 22)"  "build (ubuntu-latest, 24)" \
   "build (macos-latest, 22)"   "build (macos-latest, 24)")
 # The Windows build jobs gate the release by default. Set RELEASE_REQUIRE_WINDOWS=0 to
@@ -582,11 +906,18 @@ if [[ "${RELEASE_REQUIRE_WINDOWS:-1}" == "1" ]]; then
 fi
 check_bucket() { jq -r --arg n "$1" 'map(select(.name==$n)) | (.[0].bucket // "missing")' <<<"$2"; }
 wait_for_ci_green() {
-  local pr="$1" ctx b results problem=0
-  bold "Waiting for CI on PR #$pr (full matrix + test + gitleaks; up to 60m)..."
+  local pr="$1" head_sha="${2:-}" ctx b results problem=0
+  # The caller passes the exact commit it pushed or fetched. GitHub's PR API can
+  # briefly return the PREVIOUS head after a force-update; resolving headRefOid
+  # here made release.sh inspect that stale commit's failed checks and abort even
+  # while the new commit's matrix was running (1.22.0). Per-sha check-runs pinned
+  # to the caller's known commit cannot serve that stale state.
+  [[ -n "$head_sha" ]] || die "missing CI-tested head sha for PR #$pr"
+  bold "Waiting for CI on PR #$pr @ ${head_sha:0:9} (full matrix + test + gitleaks; up to 60m)..."
   local deadline=$(( $(date +%s) + 3600 ))
   while :; do
-    results="$(gh pr checks "$pr" --json name,bucket 2>/dev/null || echo '[]')"
+    results="$(gh api "repos/{owner}/{repo}/commits/$head_sha/check-runs?per_page=100" \
+      --jq '[.check_runs[] | {name, bucket: (if .status != "completed" then "pending" elif (.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral") then "pass" else "fail" end)}]' 2>/dev/null || echo '[]')"
     local waiting=0
     for ctx in "${EXPECTED_CHECKS[@]}"; do
       b="$(check_bucket "$ctx" "$results")"
@@ -596,7 +927,8 @@ wait_for_ci_green() {
     (( $(date +%s) > deadline )) && { red "Timed out after 60m waiting for CI on PR #$pr."; break; }
     sleep 20
   done
-  results="$(gh pr checks "$pr" --json name,bucket 2>/dev/null || echo '[]')"
+  results="$(gh api "repos/{owner}/{repo}/commits/$head_sha/check-runs?per_page=100" \
+    --jq '[.check_runs[] | {name, bucket: (if .status != "completed" then "pending" elif (.conclusion == "success" or .conclusion == "skipped" or .conclusion == "neutral") then "pass" else "fail" end)}]' 2>/dev/null || echo '[]')"
   for ctx in "${EXPECTED_CHECKS[@]}"; do
     b="$(check_bucket "$ctx" "$results")"
     [[ "$b" == "pass" ]] || { red "  $ctx: $b"; problem=1; }
@@ -620,14 +952,54 @@ if $MAIN_AT_TARGET && ! $PHNX_TARGET_PUBLISHED; then
   fi
   [[ "$CI_TESTED_HEAD" == "$MERGED_RELEASE_HEAD" ]] \
     || die "fetched PR head ${CI_TESTED_HEAD:0:9} != recorded release head ${MERGED_RELEASE_HEAD:0:9} -- refusing catch-up publish"
-  [[ "$(git rev-parse "$CI_TESTED_HEAD^{tree}")" == "$(git rev-parse "$MERGED_RELEASE_SHA^{tree}")" ]] \
-    || die "merged release PR #$MERGED_RELEASE_PR tree differs from its CI-tested head -- refusing catch-up publish"
+  if [[ "$(git rev-parse "$CI_TESTED_HEAD^{tree}")" != "$(git rev-parse "$MERGED_RELEASE_SHA^{tree}")" ]]; then
+    yellow "$DEFAULT_BRANCH drifted since release PR #$MERGED_RELEASE_PR merged (concurrent merges); will tag + publish the CI-tested head ${CI_TESTED_HEAD:0:9}, not the drifted merge."
+  fi
+  # This IS a catch-up: the release PR is merged and only the tag + publish remain,
+  # so phase 4 must resolve the release commit from the merged PR (MERGED_RELEASE_SHA
+  # + CI_TESTED_HEAD, both resolved above) rather than from RELEASE_COMMIT, which only
+  # the branch-creating path defines. The earlier detection at the top of the script
+  # sets this too, but only when main has moved PAST the release merge; when main sits
+  # exactly AT the merge commit -- the normal state after a merge -- only this block
+  # runs, and leaving the flag false made phase 4 dereference an unset RELEASE_COMMIT
+  # and abort under `set -u`. That aborted every retry of an unpublished release.
+  HISTORICAL_CATCHUP=true
   bold "Re-validating CI from merged release PR #$MERGED_RELEASE_PR before catch-up publish..."
-  wait_for_ci_green "$MERGED_RELEASE_PR"
+  wait_for_ci_green "$MERGED_RELEASE_PR" "$CI_TESTED_HEAD"
+fi
+
+# ----- Tests on a crabbox (before opening the PR) -----
+# Only for a genuinely new release (a catch-up publish already went through CI on
+# its merged PR). On failure this halts before any PR/publish with the failing
+# tests + log location. --skip-tests skips the crabbox lease (CI still gates the
+# PR below). Covers Linux; the GH Actions matrix on the PR covers macOS/Windows.
+#
+# Test the CLEAN, pre-bump tree: the only working-tree mutation so far is the
+# package.json version bump, and the suite is version-independent, so we revert to
+# $ORIGINAL_PKG_VERSION for the rsync (sandbox.sh copies the working tree) and
+# re-apply the bump afterward. This avoids testing a half-mutated tree (bumped
+# version but not-yet-folded changelog) that never actually ships.
+if ! $MAIN_AT_TARGET; then
+  phase "Linux tests" "a crabbox"
+  if $SKIP_TESTS; then
+    gray "(--skip-tests: skipping the crabbox Linux suite; the GH Actions CI matrix still gates the PR)"
+    phase_ok "skipped (--skip-tests); GH Actions CI still gates the PR"
+  else
+    if $PKG_BUMPED; then
+      _rb_tmp="$(mktemp)"
+      jq --arg v "$ORIGINAL_PKG_VERSION" '.version = $v' package.json > "$_rb_tmp" && mv "$_rb_tmp" package.json
+    fi
+    run_crabbox_tests
+    if $PKG_BUMPED; then
+      _rb_tmp="$(mktemp)"
+      jq --arg v "$TARGET" '.version = $v' package.json > "$_rb_tmp" && mv "$_rb_tmp" package.json
+    fi
+  fi
 fi
 
 # ----- Open (or reuse) the release PR + merge, unless already merged -----
 if ! $MAIN_AT_TARGET; then
+  phase "Open release PR, wait for the CI matrix (macOS/Windows/Linux), merge" "$THIS_HOST + GH Actions"
   # Collapse the release queue: fold every .changelog/next/<slug>.md fragment into
   # .changelog/$TARGET.md, then regenerate the released-only aggregate CHANGELOG.md.
   # Fails closed if the queue is empty (a release must document itself). The folded
@@ -652,13 +1024,16 @@ if ! $MAIN_AT_TARGET; then
   RELEASE_COMMIT="$(git commit-tree "$BRANCH_TREE" -p "$BASE_SHA" -m "chore(release): $TARGET")"
 
   PR_NUMBER=""
+  RELEASE_CI_HEAD=""
   if [[ -n "$EXISTING_PR" ]]; then
     PR_NUMBER="$EXISTING_PR"
     EXISTING_HEAD="$(gh pr view "$EXISTING_PR" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
     if [[ -n "$EXISTING_HEAD" && "$(git rev-parse "$EXISTING_HEAD^{tree}" 2>/dev/null || true)" == "$BRANCH_TREE" ]]; then
+      RELEASE_CI_HEAD="$EXISTING_HEAD"
       gray "Reusing open PR #$PR_NUMBER ($RELEASE_BRANCH); branch tree already matches."
     else
       git push --force-with-lease origin "$RELEASE_COMMIT:refs/heads/$RELEASE_BRANCH"
+      RELEASE_CI_HEAD="$RELEASE_COMMIT"
       gray "Updated PR #$PR_NUMBER branch to the freshly built release commit."
     fi
   else
@@ -668,6 +1043,7 @@ if ! $MAIN_AT_TARGET; then
     # push would be rejected non-fast-forward and brick the re-run. The lease is
     # safe -- preflight fetched origin, so we only overwrite a ref we have seen.
     git push --force-with-lease origin "$RELEASE_COMMIT:refs/heads/$RELEASE_BRANCH"
+    RELEASE_CI_HEAD="$RELEASE_COMMIT"
     green "Pushed $RELEASE_BRANCH"
   fi
 
@@ -684,90 +1060,114 @@ if ! $MAIN_AT_TARGET; then
     green "Opened release PR #$PR_NUMBER"
   fi
 
-  wait_for_ci_green "$PR_NUMBER"
+  [[ -n "$RELEASE_CI_HEAD" ]] || die "could not resolve CI-tested head for PR #$PR_NUMBER"
+  wait_for_ci_green "$PR_NUMBER" "$RELEASE_CI_HEAD"
 
   # Squash-merge. Never --admin: branch protection must hold, and the ruleset has
   # no PR-review rule, so green test+gitleaks is a sufficient, non-bypass merge.
+  # The CI wait above is the longest gap in the release (the matrix has run 57
+  # minutes). Re-prove the lease before the first irreversible act.
+  require_lease "merging PR #$PR_NUMBER"
   bold "Merging PR #$PR_NUMBER (squash)..."
   gh pr merge "$PR_NUMBER" --squash --delete-branch || die "merge failed for PR #$PR_NUMBER (left open)"
   green "Merged PR #$PR_NUMBER"
+  phase_ok "PR #$PR_NUMBER: CI matrix all-green, squash-merged"
 fi
 
-# ----- Resolve the merged commit + integrity guards (before any publish) -----
+# Phase 4 (both paths): resolve the CI-tested release commit + create/push the tag.
+phase "Verify CI-tested tree + tag v$TARGET" "$THIS_HOST"
+
+# ----- Resolve the merge commit + the CI-tested release commit -----
+# The published tarball MUST be a tree the full CI matrix went green on. Normally
+# that is the commit that landed on the default branch. But the default branch is
+# busy: if unrelated PRs merge during this release PR's CI window, the squash-merge
+# lands on a newer base and its tree diverges from what CI actually tested. In that
+# case we do NOT publish the drifted, never-tested-as-a-unit merge tree -- we tag +
+# publish the exact release commit the matrix validated (the PR head), and the
+# commits that merged during the window ride the next release.
 git fetch --quiet origin "$DEFAULT_BRANCH"
 if $HISTORICAL_CATCHUP; then
   MERGED_SHA="$MERGED_RELEASE_SHA"
+  CI_COMMIT="$CI_TESTED_HEAD"                 # the merged release PR's CI-tested head
 else
   MERGED_SHA="$(git rev-parse "origin/$DEFAULT_BRANCH")"
+  CI_COMMIT="$RELEASE_COMMIT"                 # the release PR head this run built + CI-tested
 fi
 MERGED_VER="$(git show "$MERGED_SHA:apps/cli/package.json" | jq -r .version)"
 [[ "$MERGED_VER" == "$TARGET" ]] || die "merged $DEFAULT_BRANCH is at $MERGED_VER, not $TARGET -- refusing to tag/publish"
-# A normal release compares against the release-commit tree. A catch-up release
-# skips that commit because main already carries TARGET, so compare against the
-# exact base tree that passed preflight and was built locally. Either way, a
-# concurrent merge must abort before the tag or registry can point at artifacts
-# produced from a different source tree.
-if $HISTORICAL_CATCHUP; then
-  EXPECTED_TREE="$(git rev-parse "$MERGED_RELEASE_SHA^{tree}")"
-else
-  EXPECTED_TREE="${BRANCH_TREE:-$(git rev-parse "$BASE_SHA^{tree}")}"
+
+# CI_COMMIT is, by construction, the commit GH Actions ran the full matrix on (a
+# normal run built it via commit-tree and pushed it as the PR head; a catch-up
+# fetched it from pull/<pr>/head and re-asserted CI green). Its tree is the
+# CI-tested tree. Re-assert its version so we never tag a mismatched commit.
+[[ -n "${CI_COMMIT:-}" ]] || die "internal: no CI-tested release commit resolved -- refusing to publish"
+[[ "$(git show "$CI_COMMIT:apps/cli/package.json" | jq -r .version)" == "$TARGET" ]] \
+  || die "CI-tested release commit ${CI_COMMIT:0:9} is not version $TARGET -- refusing to publish"
+
+# Tag the merge commit when its tree still matches the CI-tested tree (clean, keeps
+# the tag on the default branch); on concurrent-merge drift, tag the CI-tested
+# release commit so the published artifact is exactly what CI validated.
+PUBLISH_SHA="$(scripts/select-publish-commit.sh "$MERGED_SHA" "$CI_COMMIT")"
+if [[ "$PUBLISH_SHA" != "$MERGED_SHA" ]]; then
+  yellow "Concurrent merge drifted $DEFAULT_BRANCH during CI; tagging the CI-tested release commit ${PUBLISH_SHA:0:9} (its tree passed the full matrix). Commits that merged during the window ride the next release."
 fi
-[[ "$(git rev-parse "$MERGED_SHA^{tree}")" == "$EXPECTED_TREE" ]] \
-  || die "merged tree != built tree -- refusing to publish (concurrent merge or stray push on $RELEASE_BRANCH)"
 
-# Bring the working-tree package.json/CHANGELOG to exactly the merged code so the
-# published tarball matches merged main. dist/ was already built from the same
-# source (base + bump) earlier and is unaffected.
-git checkout -q "$MERGED_SHA" -- package.json CHANGELOG.md
+# The published tarball is built on the home base from a fresh checkout of the
+# tag (below), so the trigger box's working tree is not the publish source and is
+# left untouched here -- restore_release_tree keeps it clean for a re-run.
 
-# ----- Tag at the merged commit (idempotent) -----
+# ----- Tag at the CI-tested release commit (idempotent) -----
 REMOTE_TAG_SHA="$(remote_tag_commit "v$TARGET")"
-[[ -z "$REMOTE_TAG_SHA" || "$REMOTE_TAG_SHA" == "$MERGED_SHA" ]] \
-  || die "remote tag v$TARGET points at $REMOTE_TAG_SHA, not verified release commit $MERGED_SHA"
+[[ -z "$REMOTE_TAG_SHA" || "$REMOTE_TAG_SHA" == "$PUBLISH_SHA" ]] \
+  || die "remote tag v$TARGET points at $REMOTE_TAG_SHA, not verified release commit $PUBLISH_SHA"
 if git rev-parse --verify --quiet "refs/tags/v$TARGET" >/dev/null; then
-  [[ "$(git rev-parse "refs/tags/v$TARGET^{commit}")" == "$MERGED_SHA" ]] \
-    || die "local tag v$TARGET does not point at the verified release commit $MERGED_SHA"
+  [[ "$(git rev-parse "refs/tags/v$TARGET^{commit}")" == "$PUBLISH_SHA" ]] \
+    || die "local tag v$TARGET does not point at the verified release commit $PUBLISH_SHA"
   gray "Tag v$TARGET already exists locally at the verified release commit"
 else
-  git tag "v$TARGET" "$MERGED_SHA"
-  green "Created tag v$TARGET at $(git rev-parse --short "$MERGED_SHA")"
+  git tag "v$TARGET" "$PUBLISH_SHA"
+  green "Created tag v$TARGET at $(git rev-parse --short "$PUBLISH_SHA")"
 fi
 
-# ----- Publish @phnx-labs -----
-bold "Publishing $PHNX_PKG@$TARGET..."
-if ! npm publish --access=public --provenance=false; then
-  red "publish failed for $PHNX_PKG"
-  red "the PR is merged and the tag exists locally; rerun to retry publish: $0 $TARGET --apply"
-  exit 1
-fi
-green "Published $PHNX_PKG@$TARGET"
-echo
-
-# @swarmify/agents-cli legacy shim no longer published as of v1.20.0.
-
-# ----- Push the tag; restore the working tree to a clean state -----
+# ----- Push the tag (git, on the trigger box) so the home base can resolve it -----
+# The tag is created + pushed here, before the privileged phase, so the home base
+# resolves the exact release commit from origin. @swarmify/agents-cli legacy shim
+# is no longer published as of v1.20.0.
+#
+# The lease gate belongs HERE, not on the `git tag` above: a local tag is local
+# and reversible, the PUSH is the irreversible, shared act. Gating only the tag
+# creation left this push ungated whenever the local tag already existed (a
+# re-run, or a prior attempt), because that path skips the else branch entirely
+# and falls straight through to here.
+require_lease "pushing tag v$TARGET"
 git push origin "v$TARGET"
+phase_ok "CI-tested tree verified; tag v$TARGET at ${PUBLISH_SHA:0:9} pushed"
 
-# ----- Publish the signed + notarized macOS computer helper as a release asset
-# for this tag. Best-effort: npm is already published, so a failure here is a
-# warning + a copy-paste retry, never a hard release failure. macOS + Developer
-# ID + notary creds required, so it runs on a Mac (locally, or the sign host). -----
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  bold "Publishing the macOS computer helper asset for v$TARGET..."
-  if command -v agents >/dev/null 2>&1; then
-    agents secrets exec apple.com -- scripts/publish-computer-helper-mac.sh "$TARGET" \
-      || yellow "computer-helper publish failed — retry on a Mac: agents secrets exec apple.com -- scripts/publish-computer-helper-mac.sh $TARGET"
-  else
-    APPLE_ID="${APPLE_ID:-}" scripts/publish-computer-helper-mac.sh "$TARGET" \
-      || yellow "computer-helper publish failed — retry: scripts/publish-computer-helper-mac.sh $TARGET (needs APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID)"
-  fi
-else
-  yellow "Skipping macOS computer-helper asset (not on macOS)."
-  yellow "  Publish it from a Mac with signing creds:"
-  yellow "    agents secrets exec apple.com -- apps/cli/scripts/publish-computer-helper-mac.sh $TARGET"
-fi
-
+# Restore the working tree to clean now that the tag is durable; the privileged
+# phase below builds from a fresh checkout of the tag (locally on the home base,
+# or over ssh), never from this working tree.
 restore_release_tree
+
+# ----- Privileged phase: build + sign + notarize + npm publish + computer-helper -----
+# Routes to the home base ($RELEASE_HOME_BASE): inline if we ARE it, else over ssh.
+# The npm token is resolved on the home base and never crosses to this box. On
+# failure this halts with the cause; the tag + merge are durable, so a re-run
+# resumes at the publish (the already-published short-circuit + tag idempotency
+# make it safe).
+phase "Build + sign + notarize + npm publish + computer-helper" "$RELEASE_HOME_BASE"
+require_lease "publishing $PHNX_PKG@$TARGET"
+route_home_base_phase \
+  || phase_fail "privileged phase failed on the home base ($RELEASE_HOME_BASE) -- PR merged + tag v$TARGET pushed; rerun to retry: $0 $TARGET --apply"
+phase_ok "published $PHNX_PKG@$TARGET from $RELEASE_HOME_BASE (token resolved there; no Touch ID)"
+
+# ----- Verify the published version live (from the trigger box) -----
+phase "Verify live" "$THIS_HOST"
+PUBLISHED_NOW="$(npm view "$PHNX_PKG@$TARGET" version 2>/dev/null || true)"
+if [[ "$PUBLISHED_NOW" == "$TARGET" ]]; then
+  phase_ok "npm registry reports $PHNX_PKG@$TARGET; tag v$TARGET pushed"
+else
+  phase_fail "npm registry does not yet report $PHNX_PKG@$TARGET (saw '${PUBLISHED_NOW:-none}') -- check the home-base publish output"
+fi
 
 green "Released $TARGET"
 gray "Local $DEFAULT_BRANCH is behind origin by the release commit -- run: git pull --ff-only"

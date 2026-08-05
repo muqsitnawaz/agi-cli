@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { SessionEvent } from './types.js';
 import {
+  bashToolCounts,
   classifyFileChanges,
   changeCounts,
   toolHistogram,
@@ -44,6 +45,16 @@ describe('classifyFileChanges', () => {
     expect(changes).toHaveLength(0);
   });
 
+  it('excludes noise paths (node_modules, .system, agents-cli internal archives)', () => {
+    const changes = classifyFileChanges([
+      tool('Write', '/repo/node_modules/pkg/index.js'),
+      tool('Write', '/repo/.system'),
+      tool('Write', '/home/u/.agents/.history/runs/daily/x.md'),
+      tool('Write', '/repo/src/real.ts'),
+    ]);
+    expect(changes).toEqual([{ path: '/repo/src/real.ts', op: 'created' }]);
+  });
+
   it('created then deleted then recreated nets to created (file exists)', () => {
     const changes = classifyFileChanges([
       tool('Write', 'tmp/x'),
@@ -66,6 +77,11 @@ describe('extractDeletedPaths', () => {
   it('ignores non-delete commands', () => {
     expect(extractDeletedPaths('echo rm not-a-delete')).toEqual([]);
   });
+  it('drops shell junk: redirect tokens, unexpanded vars, node_modules, .system', () => {
+    expect(extractDeletedPaths('rm -rf node_modules 2>&1')).toEqual([]);
+    expect(extractDeletedPaths('rm -rf "$WT/apps/cli/.system" 2>/dev/null')).toEqual([]);
+    expect(extractDeletedPaths('rm -f app.log 2>&1')).toEqual(['app.log']);
+  });
 });
 
 describe('changeCounts', () => {
@@ -85,15 +101,99 @@ describe('toolHistogram', () => {
   });
 });
 
+// Real captured runner summary blobs — pasted verbatim from an actual run of
+// each runner so the anchored parser is validated against reality, not a sketch.
+// vitest 4.1.9 and bun 1.3.x outputs were captured on this machine; jest/pytest/
+// mocha footers are the runners' documented, long-stable summary formats.
+const VITEST_MIXED = `
+ ❯ b.test.ts:4:31
+
+ Test Files  1 failed (1)
+      Tests  4 failed | 294 passed (298)
+   Start at  13:42:52
+   Duration  84ms (transform 11ms, setup 0ms, import 17ms, tests 3ms, environment 0ms)
+`;
+const VITEST_ALLPASS = `
+ Test Files  1 passed (1)
+      Tests  442 passed (442)
+   Start at  13:44:10
+   Duration  120ms
+`;
+const JEST_OUTPUT = `
+PASS  src/a.test.ts
+Test Suites: 1 failed, 3 passed, 4 total
+Tests:       2 failed, 294 passed, 296 total
+Snapshots:   0 total
+Time:        1.234 s
+`;
+const PYTEST_OUTPUT = `
+tests/test_a.py .....F                                              [100%]
+==================== 294 passed, 2 failed in 1.23s ====================
+`;
+const PYTEST_ALLPASS = `
+tests/test_a.py ....                                                [100%]
+========================= 442 passed in 0.98s =========================
+`;
+const BUN_OUTPUT = `
+a.test.ts:
+(pass) one [0.10ms]
+(fail) bad [0.12ms]
+
+ 294 pass
+ 2 fail
+ 296 expect() calls
+Ran 296 tests across 1 file. [31.00ms]
+`;
+const MOCHA_OUTPUT = `
+  my suite
+    ✓ does a thing
+    ✗ does another
+
+  294 passing (1s)
+  2 failing
+`;
+
 describe('detectTestResult', () => {
-  it('correlates a runner with the following result (vitest pass/fail)', () => {
-    const r = detectTestResult([
-      tool('Bash', undefined, 'bun run test'),
-      result('Test Files 1 failed | 16 passed\nTests 4 failed | 294 passed'),
-    ]);
+  it('reads a real vitest summary (mixed pass/fail)', () => {
+    const r = detectTestResult([tool('Bash', undefined, 'bun run test'), result(VITEST_MIXED)]);
     expect(r?.runner).toBe('tests');
     expect(r?.passed).toBe(294);
     expect(r?.failed).toBe(4);
+    expect(r?.ok).toBe(true);
+  });
+
+  it('reads a real vitest all-pass summary', () => {
+    const r = detectTestResult([tool('Bash', undefined, 'vitest run'), result(VITEST_ALLPASS)]);
+    expect(r?.passed).toBe(442);
+    expect(r?.failed).toBe(0);
+  });
+
+  it('reads a real jest summary (Tests: line)', () => {
+    const r = detectTestResult([tool('Bash', undefined, 'jest'), result(JEST_OUTPUT)]);
+    expect(r?.passed).toBe(294);
+    expect(r?.failed).toBe(2);
+  });
+
+  it('reads a real pytest summary rule line', () => {
+    const r = detectTestResult([tool('Bash', undefined, 'pytest'), result(PYTEST_OUTPUT)]);
+    expect(r?.runner).toBe('pytest');
+    expect(r?.passed).toBe(294);
+    expect(r?.failed).toBe(2);
+    const clean = detectTestResult([tool('Bash', undefined, 'pytest'), result(PYTEST_ALLPASS)]);
+    expect(clean?.passed).toBe(442);
+    expect(clean?.failed).toBe(0);
+  });
+
+  it('reads a real bun test summary block (N pass / N fail + Ran N tests)', () => {
+    const r = detectTestResult([tool('Bash', undefined, 'bun test'), result(BUN_OUTPUT)]);
+    expect(r?.passed).toBe(294);
+    expect(r?.failed).toBe(2);
+  });
+
+  it('reads a real mocha summary (N passing / N failing)', () => {
+    const r = detectTestResult([tool('Bash', undefined, 'mocha'), result(MOCHA_OUTPUT)]);
+    expect(r?.passed).toBe(294);
+    expect(r?.failed).toBe(2);
   });
 
   it('reads tsc as clean when no TS errors', () => {
@@ -105,11 +205,11 @@ describe('detectTestResult', () => {
 
   it('returns the LAST run when several happen', () => {
     const r = detectTestResult([
-      tool('Bash', undefined, 'bun test'), result('1 passed'),
-      tool('Bash', undefined, 'pytest'), result('3 passed, 1 failed'),
+      tool('Bash', undefined, 'bun test'), result(BUN_OUTPUT),
+      tool('Bash', undefined, 'pytest'), result(PYTEST_OUTPUT),
     ]);
     expect(r?.runner).toBe('pytest');
-    expect(r?.passed).toBe(3);
+    expect(r?.passed).toBe(294);
   });
 
   it('returns undefined when nothing ran', () => {
@@ -132,5 +232,89 @@ describe('detectTestResult', () => {
     ]);
     expect(r?.runner).toBe('tests');
     expect(r?.failed).toBe(1);
+  });
+
+  // ---- Negative cases: the over-count bug this fix closes ----
+
+  it('does NOT report "442 passwords generated" as 442 pass', () => {
+    const r = detectTestResult([
+      tool('Bash', undefined, 'bun run test'),
+      result('Setting up fixtures...\n442 passwords generated for the seed corpus\nRan 0 tests across 0 files. [1ms]'),
+    ]);
+    // No real ` N pass` summary line present → no bogus pass count.
+    expect(r?.passed).toBeUndefined();
+  });
+
+  it('does NOT report "442 files" from git status as a pass count', () => {
+    const r = detectTestResult([
+      tool('Bash', undefined, 'npm test'),
+      result('git status: 442 files changed, 0 passed validation stage'),
+    ]);
+    expect(r?.passed).toBeUndefined();
+    expect(r?.ok).toBe(false);
+  });
+
+  it('does NOT report a "442 passes/sec" benchmark as 442 pass', () => {
+    const r = detectTestResult([
+      tool('Bash', undefined, 'vitest bench'),
+      result('benchmark: hot path — 442 passes/sec (± 3%)'),
+    ]);
+    expect(r?.passed).toBeUndefined();
+  });
+
+  it('does NOT classify "bun test:setup" (a script sub-target) as a test run', () => {
+    // Only the setup script runs; its output happens to contain "88 passed"
+    // prose. Neither the command nor the output is a real test run.
+    const r = detectTestResult([
+      tool('Bash', undefined, 'bun test:setup'),
+      result('seeded db; 88 passed the schema check'),
+    ]);
+    expect(r).toBeUndefined();
+  });
+
+  it('does NOT classify "npm run test:watch" as a test run', () => {
+    const r = detectTestResult([
+      tool('Bash', undefined, 'npm run test:watch'),
+      result('watching for changes... 12 passed earlier'),
+    ]);
+    expect(r).toBeUndefined();
+  });
+
+  it('does NOT classify "pnpm test:ci" as a test run', () => {
+    const r = detectTestResult([
+      tool('Bash', undefined, 'pnpm test:ci'),
+      result('orchestrating ci; 5 passed the lint gate'),
+    ]);
+    expect(r).toBeUndefined();
+  });
+
+  it('still classifies a real "bun test" invocation (positive control)', () => {
+    const r = detectTestResult([tool('Bash', undefined, 'bun test'), result(BUN_OUTPUT)]);
+    expect(r?.runner).toBe('tests');
+    expect(r?.passed).toBe(294);
+  });
+});
+
+describe('bashToolCounts', () => {
+  it('counts recognized Bash tools by bucket key', () => {
+    const counts = bashToolCounts([
+      tool('Bash', undefined, 'git status'),
+      tool('Bash', undefined, 'git commit -m fix'),
+      tool('Bash', undefined, 'git status'),
+      tool('Bash', undefined, 'ffmpeg -i a.mp4 b.mp4'),
+    ]);
+    expect(counts).toEqual({
+      'git status': 2,
+      'git commit': 1,
+      ffmpeg: 1,
+    });
+  });
+
+  it('ignores non-Bash tool_use events', () => {
+    expect(bashToolCounts([tool('Write', 'src/x.ts'), tool('Read', 'src/y.ts')])).toEqual({});
+  });
+
+  it('buckets unknown commands as other', () => {
+    expect(bashToolCounts([tool('Bash', undefined, './custom-script arg')])).toEqual({ other: 1 });
   });
 });

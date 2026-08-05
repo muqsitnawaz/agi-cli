@@ -24,17 +24,12 @@ const prevHome = process.env.HOME;
 const prevEnvToken = process.env.SHARE_WRITE_TOKEN;
 const prevNoAgent = process.env.AGENTS_SECRETS_NO_AGENT;
 const prevNoUsage = process.env.AGENTS_NO_USAGE_TRACK;
-const prevNoPrompt = process.env.AGENTS_SECRETS_NO_PROMPT;
 
 process.env.HOME = HOME;
 process.env.AGENTS_SECRETS_NO_AGENT = '1';
 process.env.AGENTS_NO_USAGE_TRACK = '1';
-// These tests install an in-memory keychain backend (no real Touch ID) and read
-// it directly. On darwin-headless (the release-gated macOS CI matrix)
-// isHeadlessSecretsContext() would otherwise be true, forcing the agentOnly
-// no-prompt path to throw before the in-memory read. Pin NO_PROMPT=0 so reads go
-// straight to the seeded backend, matching the direct-read intent on every OS.
-process.env.AGENTS_SECRETS_NO_PROMPT = '0';
+// These tests install an in-memory keychain backend and explicitly bypass the
+// production broker-only guard.
 
 const {
   secretsKeychainItem,
@@ -42,7 +37,8 @@ const {
   setKeychainServiceHashingForTest,
   setKeychainToken,
 } = await import('../secrets/index.js');
-const { readAndResolveBundleEnv, writeBundle } = await import('../secrets/bundles.js');
+const { readAndResolveBundleEnv, readBundle, writeBundle, setKeychainAgentOnlyBypassForTest } = await import('../secrets/bundles.js');
+setKeychainAgentOnlyBypassForTest(true);
 const {
   DEFAULT_CF_BUNDLE,
   generateWriteToken,
@@ -139,6 +135,38 @@ describe('share config', () => {
     expect(shareRuntimeEnv()).toEqual({ SHARE_WRITE_TOKEN: 'bundle-token' });
   });
 
+  it('a new share bundle is stored no-ACL (never tier) so auto-share is silent', () => {
+    storeWriteToken('bundle-token');
+    // storeWriteToken defaults a fresh share bundle to `never` — the low-sensitivity
+    // R2 token must not be biometry-gated, or every `agents run` re-prompts.
+    expect(readBundle(SHARE_BUNDLE).policy).toBe('never');
+  });
+
+  it('auto-share NEVER raises Touch ID on a biometry-gated bundle — returns undefined, not a prompt', () => {
+    setKeychainAgentOnlyBypassForTest(false);
+    writeShareConfig({
+      baseUrl: 'https://share.example.com',
+      accountId: 'acct',
+      workerName: 'agents-share',
+      bucketName: 'agents-share',
+    });
+    // A pre-existing hold-tier (biometry-ACL'd) share bundle that is NOT broker-held.
+    setKeychainToken(secretsKeychainItem(SHARE_BUNDLE, SHARE_TOKEN_KEY), 'gated-token');
+    writeBundle({
+      name: SHARE_BUNDLE,
+      policy: 'hold',
+      vars: { [SHARE_TOKEN_KEY]: `keychain:${SHARE_TOKEN_KEY}` },
+    } as SecretsBundle);
+    // The auto-inject read is agentOnly: on a locked keychain bundle it resolves to
+    // undefined (no token injected) rather than popping a sheet — the per-run storm
+    // fix (SEC-13). The agent can still publish via its own explicit `agents share`.
+    try {
+      expect(shareRuntimeEnv()).toBeUndefined();
+    } finally {
+      setKeychainAgentOnlyBypassForTest(true);
+    }
+  });
+
   it('uses the injected token for runtime env without touching the bundle', () => {
     writeShareConfig({
       baseUrl: 'https://share.example.com',
@@ -148,7 +176,7 @@ describe('share config', () => {
     });
     process.env.SHARE_WRITE_TOKEN = 'env-token';
 
-    expect(shareRuntimeEnv({ agentOnly: true })).toEqual({ SHARE_WRITE_TOKEN: 'env-token' });
+    expect(shareRuntimeEnv()).toEqual({ SHARE_WRITE_TOKEN: 'env-token' });
   });
 
   it('reads Cloudflare provisioning credentials from the cloudflare bundle by default', () => {
@@ -194,6 +222,5 @@ afterAll(() => {
   else process.env.AGENTS_SECRETS_NO_AGENT = prevNoAgent;
   if (prevNoUsage === undefined) delete process.env.AGENTS_NO_USAGE_TRACK;
   else process.env.AGENTS_NO_USAGE_TRACK = prevNoUsage;
-  if (prevNoPrompt === undefined) delete process.env.AGENTS_SECRETS_NO_PROMPT;
-  else process.env.AGENTS_SECRETS_NO_PROMPT = prevNoPrompt;
+  setKeychainAgentOnlyBypassForTest(false);
 });

@@ -44,6 +44,12 @@ else
     SRC=".build/debug/MenubarHelper"
 fi
 
+# Gate the artifact on the headless self-tests (single-instance flock, bounded
+# children). Runs against the just-built binary, BEFORE signing/notarization, so
+# a regression fails the build instead of shipping — and never wastes a notarize
+# submit. These modes exit before AppKit, so they need no GUI/signing.
+scripts/test-menubar.sh "$SRC"
+
 DEST_DIR="dist"
 mkdir -p "$DEST_DIR"
 
@@ -52,19 +58,30 @@ DEST="$DEST_DIR/menubar-helper-mac"
 cp "$SRC" "$DEST"
 
 # .app bundle. LSUIElement=true keeps it out of the Dock and the ⌘-Tab
-# switcher — it lives only in the menu bar. We skip notarization (a status item
-# has no Keychain ACL), but the helper DOES need a stable code identity: its
-# clip→paste feature (Clip.swift) synthesizes a ⌘-V keystroke, which requires an
-# Accessibility (TCC) grant, and macOS 26+ SIGKILLs an unsigned/invalid binary
-# at launch. Prefer a Developer ID identity — it survives npm's tarball
-# round-trip (an ad-hoc/linker signature gets stripped to "not signed at all",
-# which the install-time re-sign in install-menubar.ts then heals per machine).
+# switcher — it lives only in the menu bar. The helper needs a code identity
+# macOS accepts end-to-end: its clip→paste feature (Clip.swift) synthesizes a
+# ⌘-V keystroke, which requires an Accessibility (TCC) grant, and macOS 26+
+# SIGKILLs an unsigned/invalid binary at launch while Gatekeeper rejects an
+# un-notarized one as "damaged" (which crashes AppKit during launch).
+#
+# So a release build is Developer-ID signed AND notarized + stapled — the same
+# treatment the keychain helper gets (build-keychain-helper.sh). A Developer ID
+# signature and the stapled ticket both survive npm's tarball round-trip (the
+# ticket is a plain file inside the bundle), so the installed helper launches
+# with NO per-machine re-signing. Notarization is MANDATORY whenever we sign
+# with a real Developer ID (below); an ad-hoc dev build skips it and is caught
+# by prepack (verify-menubar-helper.sh), so an un-notarized helper can't ship.
 APP="$DEST_DIR/MenubarHelper.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 cp "$SRC" "$APP/Contents/MacOS/MenubarHelper"
-generate_app_icon "$REPO_ROOT/assets/logo.png" "$APP/Contents/Resources/AppIcon.icns"
+# Icon source is the current agents-cli mark (assets/app-icon.svg -> app-icon.png):
+# the lime-tile lowercase `a` shared with the agi-cli web favicon and the menu-bar
+# glyph (Icon.swift), NOT the legacy assets/logo.png gradient `A`. This drives the
+# notification's app icon — both the left-hand bundle icon (CFBundleIconFile) and
+# the right-hand contentImage (appIconImage in PromptPanel.swift loads AppIcon.icns).
+generate_app_icon "$REPO_ROOT/assets/app-icon.png" "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -75,7 +92,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.phnx-labs.agents-menubar</string>
     <key>CFBundleName</key>
-    <string>Agents Menu Bar</string>
+    <string>AGI Menu</string>
+    <key>CFBundleDisplayName</key>
+    <string>AGI Menu</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
@@ -96,14 +115,47 @@ if [ -z "$SIGN_ID" ]; then
 fi
 if [ -z "$SIGN_ID" ]; then
     SIGN_ID="-"
-    echo "  WARNING: no Developer ID identity found — signing ad-hoc." >&2
-    echo "  npm will strip this signature; machines self-heal via install-menubar.ts" >&2
-    echo "  but the Accessibility grant re-prompts each upgrade. Sign on a host with" >&2
-    echo "  the Developer ID cert (see remote-sign-mac.sh) for a stable identity." >&2
+    echo "  WARNING: no Developer ID identity found — signing ad-hoc (DEV ONLY)." >&2
+    echo "  An ad-hoc build cannot be notarized, so prepack (verify-menubar-helper.sh)" >&2
+    echo "  refuses to pack it. Sign on a host with the Developer ID cert + the" >&2
+    echo "  apple.com secrets bundle to produce a shippable, notarized helper." >&2
 fi
 echo "  signing with: $SIGN_ID"
 codesign --force --options runtime --sign "$SIGN_ID" --identifier com.phnx-labs.agents-menubar "$APP" 2>&1 | sed 's/^/  /'
 codesign --force --options runtime --sign "$SIGN_ID" --identifier com.phnx-labs.agents-menubar "$DEST" 2>&1 | sed 's/^/  /'
+
+# Notarize + staple — MANDATORY for a RELEASE build. Gatekeeper on macOS 26+
+# rejects an un-notarized app as "damaged", so a signed-but-not-notarized helper
+# is not shippable. Creds come from the `apple.com` secrets bundle — both release
+# callers (release.sh, remote-sign-mac.sh) run this build under `agents secrets
+# exec apple.com`, the same vars the keychain helper + CLI binary notarize with,
+# so a release build fails loud here if they're missing. A debug build (local
+# Swift dev) skips notarization and never ships; an ad-hoc release (SIGN_ID="-",
+# no Developer ID) skips too and is caught by the prepack gate
+# (verify-menubar-helper.sh) so it can't ship un-notarized.
+if [ "$MODE" = "release" ] && [ "$SIGN_ID" != "-" ]; then
+  : "${APPLE_ID:?notarization requires APPLE_ID (from the apple.com secrets bundle)}"
+  : "${APPLE_APP_SPECIFIC_PASSWORD:?notarization requires APPLE_APP_SPECIFIC_PASSWORD (apple.com bundle)}"
+  : "${APPLE_TEAM_ID:?notarization requires APPLE_TEAM_ID (apple.com bundle)}"
+  NOTARIZE_ZIP="$DEST_DIR/MenubarHelper-notarize.zip"
+  NOTARY_LOG="$DEST_DIR/menubar-notary.log"
+  echo "  packaging $APP for notarization..."
+  ditto -c -k --keepParent "$APP" "$NOTARIZE_ZIP"
+  echo "  submitting for notarization (~1 min)..."
+  xcrun notarytool submit "$NOTARIZE_ZIP" \
+    --apple-id "$APPLE_ID" \
+    --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+    --team-id "$APPLE_TEAM_ID" \
+    --wait | tee "$NOTARY_LOG"
+  grep -q "status: Accepted" "$NOTARY_LOG" \
+    || { echo "  ERROR: menubar notarization did not report 'status: Accepted'" >&2; exit 1; }
+  rm -f "$NOTARIZE_ZIP"
+  echo "  stapling ticket to $APP..."
+  xcrun stapler staple "$APP" 2>&1 | sed 's/^/  /'
+  echo "  verifying Gatekeeper acceptance (spctl)..."
+  spctl --assess --type execute "$APP" 2>&1 | sed 's/^/  /' \
+    || { echo "  ERROR: spctl rejected the stapled helper — notarization incomplete" >&2; exit 1; }
+fi
 
 echo "built: $DEST"
 echo "built: $APP"

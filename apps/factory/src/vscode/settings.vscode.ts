@@ -13,17 +13,19 @@ import { readPromptsFromPath, writePromptsToPath, DEFAULT_PROMPTS } from '../cor
 import { openExternalUrl, isAllowedWebviewCommand } from './webviewSecurity';
 import * as terminals from './terminals.vscode';
 import * as swarm from './swarm.vscode';
+import { notifyNewlyWaiting } from './waitingNotifier.vscode';
 import { fetchAllTasks, detectAvailableSources } from './tasks.vscode';
 import { getBuiltInByTitle, configFromDef } from './agents.vscode';
 import { openSingleAgentWithQueue, runHeadlessAgent, focusSessionInTerminal } from './extension';
 import { generateClaudeSessionId } from '../core/prewarm.simple';
 import { nudgeSession } from '../mcp/watchdog-bridge';
-import { runAgents } from '../core/agentsBin';
+import { runAgents, resolveAgentsBin, bootstrapPath } from '../core/agentsBin';
 import { AgentLaunchMode, extractPlanFromSessionJson, planTextToSteps } from '../core/agents';
 import { CLAUDE_TITLE } from '../core/utils';
 import { discoverRecentSessions, getSessionPathBySessionId } from './sessions.vscode';
 import { formatTerminalTitle, parseTerminalName, getSessionChunk } from '../core/utils';
 import { getBuiltInByKey, getBuiltInDefByTitle } from '../core/agents';
+import { FORK_LINEAGE_KEY, type ForkEdge } from '../core/forkLineage';
 import {
   mapInventoriesToInstalledAgents,
   buildDispatchHosts,
@@ -61,12 +63,28 @@ import { startForemanAudio, ForemanAudioSession } from './foreman.audio';
 import { runSmartTurn, capHistory } from './foreman.smart';
 import { buildTaskDispatchPrompt } from '../core/tasks';
 import { draftDispatchPrompt, type DraftTicket } from '../core/draftPrompt';
-import { listRegisteredDevices, fetchDeviceStats, countRunningAgents, resolveSecret, getDeviceSyncStatus } from './deviceHealth.vscode';
+import {
+  fetchRegisteredDevices,
+  getRegisteredDevicesCache,
+  getDeviceSyncStatus,
+  listRegisteredDevices,
+  setRegisteredDevicesCache,
+  type Device,
+} from './deviceHealth.vscode';
 import { inferProjectCandidates } from '../core/projectIndex';
 import { normalizeHost, buildRemoteFocusCommand } from '../core/remoteSessions';
 import { rankRepos } from '../core/repoIndex';
 import { detectProjects } from '../core/projectDetect';
 import { getSyncStatus } from '../core/repoSync';
+import {
+  FLOOR_SNAPSHOT_KEY,
+  FLOOR_DEVICES_KEY,
+  FLOOR_INVENTORY_KEY,
+  isInventoryStale,
+  parseFloorDevicesSnapshot,
+  parseFloorInventorySnapshot,
+  parseFloorSnapshot,
+} from '../core/floorSnapshot';
 import {
   isWindowsDevicePlatform,
   encodePowershellScript,
@@ -343,14 +361,21 @@ function buildDeviceSyncShell(policy: 'off' | 'safe' | 'aggressive'): string {
 
 const deviceExecFileAsync = promisify(execFile);
 
-// Spawn a coding agent on a registered device over SSH, honoring the resolved
-// credentials (identity file / user) and the auto-sync policy. Fire-and-forget:
+async function runAgentsSsh(host: string, remote: string, timeout: number): Promise<void> {
+  const bin = await resolveAgentsBin();
+  await deviceExecFileAsync(bin, ['ssh', host, '--', remote], {
+    timeout,
+    env: { ...process.env, PATH: `${bootstrapPath(bin)}:${process.env.PATH ?? ''}` },
+  });
+}
+
+// Spawn a coding agent on a registered device through agents-cli's SSH broker,
+// honoring the auto-sync policy. Fire-and-forget:
 // the remote agent is backgrounded (nohup) so the ssh call returns promptly.
 // Returns an error string to surface inline, or null on success.
 async function dispatchToDevice(input: {
   agentType: string;
   host: string;
-  secretRef?: string;
   projectPath: string;
   repoSlug?: string;
   syncPolicy: 'off' | 'safe' | 'aggressive';
@@ -359,10 +384,9 @@ async function dispatchToDevice(input: {
   /** Device registry platform (windows/macos/linux) — selects remote shell. */
   platform?: string;
 }): Promise<string | null> {
-  const { agentType, host, secretRef, projectPath, repoSlug, syncPolicy, mode, prompt, platform } = input;
+  const { agentType, host, projectPath, repoSlug, syncPolicy, mode, prompt, platform } = input;
   if (!projectPath) return 'Device dispatch: no project path resolved — pick a repo/project first.';
 
-  const creds = secretRef ? await resolveSecret(secretRef) : {};
   const windows = isWindowsDevicePlatform(platform);
 
   // Windows remotes: PowerShell script (no bash). POSIX: bash snippet (unchanged).
@@ -424,13 +448,8 @@ async function dispatchToDevice(input: {
     }
   }
 
-  const target = creds.user ? `${creds.user}@${host}` : host;
-  const args = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=accept-new'];
-  if (creds.identityFile) args.push('-i', creds.identityFile);
-  // `--` stops ssh option parsing; shell dialect follows device platform (RUSH-1481).
-  args.push('--', target, buildDeviceDispatchRemoteCmd(remote, platform));
   try {
-    await deviceExecFileAsync('ssh', args, { timeout: 60_000 });
+    await runAgentsSsh(host, buildDeviceDispatchRemoteCmd(remote, platform), 60_000);
     return null;
   } catch (err) {
     const e = err as { stderr?: string; message?: string };
@@ -890,7 +909,12 @@ async function getFloorTerminalDetailsForWebview(workspacePath?: string): Promis
   return withAttachmentThumbnailUris(await terminals.getFloorTerminalDetails(workspacePath));
 }
 
-async function openPlanPreview(pathValue: string, kind: string | undefined, host: string | undefined): Promise<void> {
+async function openPlanPreview(
+  context: vscode.ExtensionContext,
+  pathValue: string,
+  kind: string | undefined,
+  host: string | undefined,
+): Promise<void> {
   const target = pathValue.trim();
   if (!target) return;
   if (/^https?:\/\//i.test(target)) {
@@ -918,10 +942,30 @@ async function openPlanPreview(pathValue: string, kind: string | undefined, host
   }
   if (!resolvedPath || !fs.existsSync(resolvedPath)) return;
   const uri = vscode.Uri.file(resolvedPath);
+  const readerEnabled = getSettings(context).editor?.markdownViewerEnabled ?? true;
+  // Prefer the Agents Reader for .md (TipTap) and .html (artifact preview under
+  // .agents/artifacts|plans|reports and elsewhere). Fallbacks match the old
+  // behavior when the reader is off.
+  if (readerEnabled) {
+    const {
+      readerViewTypeForPath,
+      AGENTS_HTML_READER,
+      AGENTS_MARKDOWN_EDITOR,
+    } = await import('../core/editorAssociations');
+    const viewType =
+      (kind === 'html' ? AGENTS_HTML_READER : undefined) ||
+      (kind === 'markdown' ? AGENTS_MARKDOWN_EDITOR : undefined) ||
+      readerViewTypeForPath(resolvedPath);
+    if (viewType) {
+      await vscode.commands.executeCommand('vscode.openWith', uri, viewType);
+      return;
+    }
+  }
   if (kind === 'markdown' || resolvedPath.toLowerCase().endsWith('.md')) {
     await vscode.commands.executeCommand('markdown.showPreview', uri);
     return;
   }
+  // HTML (and other previews) without the reader: system browser.
   await vscode.env.openExternal(uri);
 }
 
@@ -946,10 +990,28 @@ async function openAttachmentPreview(pathValue: string, host: string | undefined
 }
 
 
-async function openFileOrDiffInEditor(pathValue: string): Promise<void> {
+async function openFileOrDiffInEditor(
+  context: vscode.ExtensionContext | undefined,
+  pathValue: string,
+): Promise<void> {
   const resolvedPath = resolveEditorPath(pathValue);
   if (!resolvedPath || !fs.existsSync(resolvedPath)) return;
   const fileUri = vscode.Uri.file(resolvedPath);
+
+  // Artifact / plan HTML+MD: open in the Agents Reader when enabled so
+  // .agents/artifacts/*.html renders instead of raw source.
+  if (context) {
+    const readerEnabled = getSettings(context).editor?.markdownViewerEnabled ?? true;
+    if (readerEnabled) {
+      const { readerViewTypeForPath } = await import('../core/editorAssociations');
+      const viewType = readerViewTypeForPath(resolvedPath);
+      if (viewType) {
+        await vscode.commands.executeCommand('vscode.openWith', fileUri, viewType);
+        return;
+      }
+    }
+  }
+
   const previousActiveUri = vscode.window.activeTextEditor?.document.uri;
 
   try {
@@ -1155,6 +1217,9 @@ async function pushFloorUpdate(workspacePath?: string): Promise<void> {
   ]);
   if (!settingsPanel || !floorSubscribed) return;
   lastFloorTasks = floorTasks;
+  // RUSH-2039: page the user when a session (Codex included) enters the
+  // approval-waiting state. Edge-triggered so it fires once per wait.
+  notifyNewlyWaiting(floorTerminals);
   settingsPanel.webview.postMessage({ type: 'allTerminalsData', terminals: floorTerminals });
   settingsPanel.webview.postMessage({ type: 'tasksData', tasks: floorTasks });
   // Re-reconcile so newly-spawned terminals get watched too.
@@ -1450,22 +1515,47 @@ export function openPanelAndFocusQuickSpawn(context: vscode.ExtensionContext): v
   }, alreadyOpen ? 0 : 500);
 }
 
+// Kick the Floor grid back into polling after a reconnect. The webview gates
+// its local/remote session sweeps on the last panelVisibility it received
+// (usePanelVisibility). onDidChangeViewState only fires on a view-state
+// TRANSITION, so a Remote-SSH drop where the panel stayed visible the whole
+// time never re-arms the poll — the grid looks frozen until the user hides and
+// re-reveals the tab. Re-posting the panel's real visibility on reconnect
+// unfreezes it. No-op when the panel is closed. Reuses the same message the
+// visibility listener posts — no new webview contract.
+export function resumeFloorPolling(): void {
+  if (!settingsPanel) return;
+  settingsPanel.webview.postMessage({
+    type: 'panelVisibility',
+    visible: settingsPanel.visible,
+  });
+}
+
 // Cache for agent inventories. agents view --json takes 4-6s because it hits
-// vendor APIs for usage stats. Within the TTL, repeat calls are instant.
+// vendor APIs for usage stats. Shared 60s SWR with panel/dispatch ONLY — the
+// SnapshotDetector 4s tick does not call agents view (see monitor/snapshotDetector).
 // Strategy mutations bust the cache so the UI reflects the new state.
-const INVENTORY_CACHE_TTL_MS = 60_000;
 const INVENTORY_AGENT_KEYS = ['claude', 'codex', 'gemini', 'opencode', 'cursor', 'kimi', 'grok', 'droid', 'antigravity', 'copilot', 'amp'];
 let cachedInventories: { data: Record<string, AgentInventory>; fetchedAt: number } | null = null;
 let inventoryFetchInflight: Promise<Record<string, AgentInventory>> | null = null;
+/** Activation seed ran once for this extension host lifetime. */
+let floorActivationSeeded = false;
+let floorActivationSeedPromise: Promise<void> | null = null;
+let floorDataContext: vscode.ExtensionContext | null = null;
 
-async function getCachedAgentInventories(force = false): Promise<Record<string, AgentInventory>> {
-  if (!force && cachedInventories && Date.now() - cachedInventories.fetchedAt < INVENTORY_CACHE_TTL_MS) {
-    return cachedInventories.data;
-  }
+async function revalidateAgentInventories(): Promise<Record<string, AgentInventory>> {
   if (inventoryFetchInflight) return inventoryFetchInflight;
   inventoryFetchInflight = (async () => {
     const data = await fetchAgentInventories(INVENTORY_AGENT_KEYS);
-    cachedInventories = { data, fetchedAt: Date.now() };
+    const fetchedAt = Date.now();
+    cachedInventories = { data, fetchedAt };
+    if (floorDataContext) {
+      await floorDataContext.globalState.update(FLOOR_INVENTORY_KEY, { data, fetchedAt });
+    }
+    settingsPanel?.webview.postMessage({
+      type: 'agentInventoriesData',
+      agentInventories: data,
+    });
     return data;
   })();
   try {
@@ -1475,8 +1565,76 @@ async function getCachedAgentInventories(force = false): Promise<Record<string, 
   }
 }
 
+async function getCachedAgentInventories(force = false): Promise<Record<string, AgentInventory>> {
+  if (force) return revalidateAgentInventories();
+  const current = cachedInventories?.data ?? {};
+  if (isInventoryStale(cachedInventories?.fetchedAt)) {
+    void revalidateAgentInventories().catch((err) =>
+      console.error('[SETTINGS] Agent inventory revalidation failed:', err),
+    );
+  }
+  return current;
+}
+
 function invalidateAgentInventoryCache(): void {
-  cachedInventories = null;
+  if (cachedInventories) cachedInventories.fetchedAt = 0;
+}
+
+/**
+ * Wire last-good Floor snapshot persistence + run the one-shot activation seed:
+ * at most one `agents devices list --json` and one `agents sessions --active
+ * --local --json`. Subsequent local updates come from monitor events / the 60s
+ * local backstop; remote fleet refresh is user-triggered only.
+ */
+export async function seedFloorDataPipeline(context: vscode.ExtensionContext): Promise<void> {
+  const remote = await import('./remoteSessions.vscode');
+  floorDataContext = context;
+  remote.setFloorSnapshotStore({
+    read: () => parseFloorSnapshot(context.globalState.get(FLOOR_SNAPSHOT_KEY)) ?? null,
+    write: (snap) => {
+      void context.globalState.update(FLOOR_SNAPSHOT_KEY, snap);
+    },
+  });
+  const persistedDevices = parseFloorDevicesSnapshot(context.globalState.get(FLOOR_DEVICES_KEY));
+  if (persistedDevices) {
+    setRegisteredDevicesCache(persistedDevices.devices as Device[]);
+    remote.seedFloorHostsFromDevices(persistedDevices.devices);
+  }
+  const persistedInventory = parseFloorInventorySnapshot(context.globalState.get(FLOOR_INVENTORY_KEY));
+  if (persistedInventory && !cachedInventories) {
+    cachedInventories = {
+      data: persistedInventory.data as Record<string, AgentInventory>,
+      fetchedAt: persistedInventory.fetchedAt,
+    };
+  }
+  if (floorActivationSeedPromise) return floorActivationSeedPromise;
+  if (floorActivationSeeded) return;
+  floorActivationSeeded = true;
+  // One registry read (devices list --json) + one local sessions seed. Never
+  // doctor / devices status / fleet status / projects status.
+  floorActivationSeedPromise = Promise.all([
+    (async () => {
+      try {
+        const devices = await fetchRegisteredDevices();
+        const fetchedAt = Date.now();
+        await context.globalState.update(FLOOR_DEVICES_KEY, { devices, fetchedAt });
+        remote.seedFloorHostsFromDevices(devices);
+        settingsPanel?.webview.postMessage({
+          type: 'devicesData',
+          devices,
+          local: normalizeHost(hostname()),
+        });
+      } catch (err) {
+        console.error('[SETTINGS] Device registry activation seed failed:', err);
+      }
+    })(),
+    remote.seedLocalSessionsOnce(getSettings(context).projectRules ?? []),
+  ]).then(() => undefined);
+  try {
+    await floorActivationSeedPromise;
+  } finally {
+    floorActivationSeedPromise = null;
+  }
 }
 
 export function openPanel(context: vscode.ExtensionContext): void {
@@ -1528,6 +1686,11 @@ export function registerPanelSerializer(context: vscode.ExtensionContext): void 
 
 function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext): void {
   settingsPanel = panel;
+
+  // Floor last-good store + at-most-one activation seed (devices list + local sessions).
+  void seedFloorDataPipeline(context).catch((err) =>
+    console.error('[SETTINGS] Floor data pipeline seed failed:', err),
+  );
 
   // Set the tab icon
   settingsPanel.iconPath = theme.buildIconPathFromUri(context.extensionUri, 'agents.png');
@@ -1802,17 +1965,17 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         break;
       }
       case 'fetchDispatchData': {
-        // Data the consolidated Dispatch panel needs: installed agents (reusing the
-        // cached `agents view --json` inventory — no re-exec), the unified host
-        // roster with live per-host load, and projects ranked by session-index
-        // usage. Host live-load also rides the separate 'hostSessions' message; this
-        // one seeds the panel on open.
+        // Dispatch opens from persisted/cached inventory + last-good host sessions.
+        // Never probeCpu and never per-device CPU/memory + sessions fan-out.
         try {
           const { fetchHostSessions, LOCAL_LABEL } = await import('./remoteSessions.vscode');
-          const [inventories, hostResult] = await Promise.all([
-            getCachedAgentInventories(),
-            fetchHostSessions(Date.now(), { probeCpu: true, projectRules: getSettings(context).projectRules ?? [] }),
-          ]);
+          const inventories = await getCachedAgentInventories();
+          // Non-force is cache-only even on a true cold start; activation owns
+          // the one device-registry read and local-session seed.
+          const hostResult = await fetchHostSessions(Date.now(), {
+            force: false,
+            projectRules: getSettings(context).projectRules ?? [],
+          });
           const defaultTitle = context.globalState.get<string>('agents.defaultAgentTitle', 'CC');
           const defaultAgentId = getBuiltInDefByTitle(defaultTitle)?.key ?? 'claude';
           const agents = mapInventoriesToInstalledAgents(inventories, defaultAgentId);
@@ -1837,9 +2000,19 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         break;
       }
       // ---- managed projects (curated sidebar/dispatch list) ----
+      // All reads/saves/deletes shell through `agents projects` (managedProjects.ts).
+      // Errors stay explicit on the outbound message for inline UI display.
       case 'fetchManagedProjects': {
-        const projects = await readManagedProjects();
-        settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+        try {
+          const projects = await readManagedProjects();
+          settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+        } catch (err) {
+          settingsPanel?.webview.postMessage({
+            type: 'managedProjectsData',
+            projects: [],
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         break;
       }
       case 'fetchLinearProjects': {
@@ -1850,16 +2023,32 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
       case 'saveManagedProject': {
         const p = message?.project as ManagedProject | undefined;
         if (p && typeof p.id === 'string' && typeof p.name === 'string' && typeof p.path === 'string') {
-          const projects = await upsertManagedProject(p);
-          settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+          try {
+            const projects = await upsertManagedProject(p);
+            settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+          } catch (err) {
+            settingsPanel?.webview.postMessage({
+              type: 'managedProjectsData',
+              projects: [],
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
         break;
       }
       case 'deleteManagedProject': {
         const id = message?.id;
         if (typeof id === 'string') {
-          const projects = await deleteManagedProject(id);
-          settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+          try {
+            const projects = await deleteManagedProject(id);
+            settingsPanel?.webview.postMessage({ type: 'managedProjectsData', projects });
+          } catch (err) {
+            settingsPanel?.webview.postMessage({
+              type: 'managedProjectsData',
+              projects: [],
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
         break;
       }
@@ -1896,41 +2085,28 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         // session bucket into this name so the machine shows once under its real
         // name instead of duplicated as 'this-mac' + the registry name.
         const local = normalizeHost(hostname());
-        try {
-          const devices = await listRegisteredDevices();
-          settingsPanel?.webview.postMessage({ type: 'devicesData', devices, local });
-        } catch (err) {
-          console.error('[SETTINGS] Error listing devices:', err);
-          settingsPanel?.webview.postMessage({ type: 'devicesData', devices: [], local });
-        }
+        const devices = getRegisteredDevicesCache() ?? [];
+        settingsPanel?.webview.postMessage({ type: 'devicesData', devices, local });
         break;
       }
       case 'deviceHealth': {
-        // Online status comes from the agents-cli registry (tailscale.online).
-        // For online devices only, fetch live load (loadAvg/mem) and running
-        // agent count over their real address; skip offline hosts to avoid SSH
-        // hangs.
-        try {
-          const devices = await listRegisteredDevices();
-          const health = await Promise.all(
-            devices.map(async (device) => {
-              if (!device.online) {
-                return { device, stats: { host: device.host, reachable: false, runningAgents: 0, fetchedAt: Date.now() } };
-              }
-              const isLocal = isLocalDeviceHost(device.host);
-              const creds = device.secretRef ? await resolveSecret(device.secretRef) : {};
-              const [stats, runningAgents] = await Promise.all([
-                fetchDeviceStats(device.host, { isLocal, identityFile: creds.identityFile, user: creds.user || device.user }),
-                countRunningAgents(device.host, { isLocal }),
-              ]);
-              return { device, stats: { ...stats, reachable: true, runningAgents } };
-            }),
-          );
-          settingsPanel?.webview.postMessage({ type: 'deviceHealthData', health });
-        } catch (err) {
-          console.error('[SETTINGS] Error fetching device health:', err);
-          settingsPanel?.webview.postMessage({ type: 'deviceHealthData', health: [] });
-        }
+        // Registry-only reachability for the Floor/dispatch device list.
+        // Per-device CPU/memory + sessions SSH fan-out is intentionally removed
+        // from this path (Factory Floor performance track): online/offline comes
+        // from `agents devices list --json` only. Live load is not required to
+        // open Dispatch; ranking uses last-good session counts when present.
+        const devices = getRegisteredDevicesCache() ?? [];
+        const now = Date.now();
+        const health = devices.map((device) => ({
+          device,
+          stats: {
+            host: device.host,
+            reachable: device.online === true,
+            runningAgents: 0,
+            fetchedAt: now,
+          },
+        }));
+        settingsPanel?.webview.postMessage({ type: 'deviceHealthData', health });
         break;
       }
       case 'projectCandidates': {
@@ -1957,7 +2133,6 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
       case 'repoSync': {
         const root = typeof message.root === 'string' ? message.root : '';
         const syncHost = typeof message.host === 'string' ? message.host : '';
-        const syncSecretRef = typeof message.secretRef === 'string' ? message.secretRef : undefined;
         if (!root) {
           settingsPanel?.webview.postMessage({ type: 'repoSyncData', root: '', status: null });
           break;
@@ -1967,8 +2142,7 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
           // not on the local mac. Falls back to the local repo for this-mac.
           let status;
           if (syncHost && !isLocalDeviceHost(syncHost)) {
-            const creds = syncSecretRef ? await resolveSecret(syncSecretRef) : {};
-            status = await getDeviceSyncStatus(syncHost, root, { isLocal: false, identityFile: creds.identityFile, user: creds.user });
+            status = await getDeviceSyncStatus(syncHost, root, { isLocal: false });
           } else {
             status = await getSyncStatus(root, { fetch: true });
           }
@@ -2084,21 +2258,31 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         settingsPanel?.webview.postMessage({ type: 'sessionsData', sessions });
         break;
       case 'fetchHostSessions': {
-        // Tier-1 cross-host aggregation: active sessions from this machine +
-        // every reachable SSH/Tailscale host, in parallel. A dead host is marked
-        // offline rather than failing the batch.
+        // Remote fleet: last-good by default; force=true runs one bare
+        // `agents sessions --active --json`. Automatic UI polls must omit force
+        // so they never re-trigger fleet SSH. Manual refresh should pass force.
         try {
           const { fetchHostSessions } = await import('./remoteSessions.vscode');
-          const { hosts, sessions: hostSessions, groups, fetchedAt } = await fetchHostSessions(
-            Date.now(),
-            { projectRules: getSettings(context).projectRules ?? [] },
-          );
+          const force = message?.force === true;
+          const {
+            hosts,
+            sessions: hostSessions,
+            groups,
+            fetchedAt,
+            hostFreshness,
+            fromCache,
+          } = await fetchHostSessions(Date.now(), {
+            force,
+            projectRules: getSettings(context).projectRules ?? [],
+          });
           settingsPanel?.webview.postMessage({
             type: 'hostSessions',
             hosts,
             sessions: hostSessions,
             groups,
             fetchedAt,
+            hostFreshness,
+            fromCache: fromCache === true,
           });
         } catch (err) {
           console.error('[SETTINGS] Error fetching host sessions:', err);
@@ -2108,24 +2292,27 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
             sessions: [],
             groups: [],
             fetchedAt: Date.now(),
+            hostFreshness: {},
+            fromCache: true,
           });
         }
         break;
       }
       case 'fetchLocalSessions': {
-        // Local-only fast path (the 3s feed poll): this machine's sessions with no
-        // SSH and no host discovery. Rides a distinct 'localSessions' message so the
-        // webview replaces only the this-mac rows and leaves remote rows intact.
+        // Local-only: seed + 60s backstop (no SSH). Rides 'localSessions' so the
+        // webview replaces only this-mac rows and leaves remote rows intact.
         try {
           const { fetchLocalSessions } = await import('./remoteSessions.vscode');
-          const { sessions: localSessions, fetchedAt } = await fetchLocalSessions(
+          const force = message?.force === true;
+          const { sessions: localSessions, fetchedAt, fromCache } = await fetchLocalSessions(
             Date.now(),
-            getSettings(context).projectRules ?? [],
+            { force, projectRules: getSettings(context).projectRules ?? [] },
           );
           settingsPanel?.webview.postMessage({
             type: 'localSessions',
             sessions: localSessions,
             fetchedAt,
+            fromCache: fromCache === true,
           });
         } catch (err) {
           console.error('[SETTINGS] Error fetching local sessions:', err);
@@ -2184,13 +2371,16 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         // every online registered device — with the CLI's per-session outcome
         // metrics (duration/cost/tokens). Fetched lazily when the Recap center
         // opens; rides its own 'recapSessions' message.
+        // The fork edges ride along: a fork shares no id with its parent, so
+        // without them the ledger shows two rows that look unrelated.
+        const forkEdges = context.globalState.get<ForkEdge[]>(FORK_LINEAGE_KEY, []);
         try {
           const { fetchRecapSessions } = await import('./remoteSessions.vscode');
           const sessions = await fetchRecapSessions(20, getSettings(context).projectRules ?? []);
-          settingsPanel?.webview.postMessage({ type: 'recapSessions', sessions });
+          settingsPanel?.webview.postMessage({ type: 'recapSessions', sessions, forkEdges });
         } catch (err) {
           console.error('[SETTINGS] Error fetching recap sessions:', err);
-          settingsPanel?.webview.postMessage({ type: 'recapSessions', sessions: [] });
+          settingsPanel?.webview.postMessage({ type: 'recapSessions', sessions: [], forkEdges });
         }
         break;
       }
@@ -2287,8 +2477,8 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         // Throughput now rides the CLI payload (ActiveSession.tokPerSec, issue
         // #741): sum the rows belonging to this window's live terminals instead
         // of re-reading and re-parsing each transcript here. fetchLocalSessions
-        // is short-TTL cached, so the 2.5s webview poll shares subprocesses with
-        // the feed poll.
+        // is served from the 60s local last-good backstop, so the 2.5s webview
+        // animation read does not create a recurring CLI subprocess.
         let total = 0;
         try {
           const { fetchLocalSessions } = await import('./remoteSessions.vscode');
@@ -2308,12 +2498,11 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
       case 'dispatchTask': {
         const agentType = typeof message.agentType === 'string' ? message.agentType : 'claude';
         // Device target: spawn the agent on a registered machine over SSH, in the
-        // resolved project path, honoring the auto-sync policy + resolved creds.
+        // resolved project path, honoring the auto-sync policy.
         // Kept separate from the local/cloud branches below (which are unchanged).
         if (message.target === 'device') {
           const deviceHost = typeof message.host === 'string' ? message.host : '';
           const projectPath = typeof message.projectPath === 'string' ? message.projectPath : '';
-          const secretRef = typeof message.secretRef === 'string' ? message.secretRef : undefined;
           const syncPolicy: 'off' | 'safe' | 'aggressive' =
             message.syncPolicy === 'off' || message.syncPolicy === 'aggressive' ? message.syncPolicy : 'safe';
           const deviceMode: DispatchModeMsg =
@@ -2345,7 +2534,6 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
           const err = await dispatchToDevice({
             agentType,
             host: deviceHost,
-            secretRef,
             projectPath,
             repoSlug: typeof message.repoSlug === 'string' ? message.repoSlug : undefined,
             syncPolicy,
@@ -2901,12 +3089,17 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         break;
       case 'openTerminalFile':
         if (message.path) {
-          await openFileOrDiffInEditor(message.path);
+          await openFileOrDiffInEditor(context, message.path);
         }
         break;
       case 'openPlanPreview':
         if (typeof message.path === 'string') {
-          await openPlanPreview(message.path, typeof message.kind === 'string' ? message.kind : undefined, typeof message.host === 'string' ? message.host : undefined);
+          await openPlanPreview(
+            context,
+            message.path,
+            typeof message.kind === 'string' ? message.kind : undefined,
+            typeof message.host === 'string' ? message.host : undefined,
+          );
         }
         break;
       case 'openAttachmentPreview':
@@ -2987,14 +3180,27 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         }
         break;
       case 'getWatchdogStatus': {
-        const enabled = vscode.workspace.getConfiguration('agents.watchdog').get<boolean>('enabled', false);
-        settingsPanel?.webview.postMessage({ type: 'watchdogStatus', enabled });
+        // The enable state lives in the CLI daemon watchdog now (the
+        // extension's `agents.watchdog.*` settings were deleted with the loop).
+        try {
+          const { stdout } = await runAgents('watchdog status --json');
+          const parsed = JSON.parse(stdout) as { enabled?: boolean };
+          settingsPanel?.webview.postMessage({ type: 'watchdogStatus', enabled: !!parsed.enabled });
+        } catch {
+          settingsPanel?.webview.postMessage({ type: 'watchdogStatus', enabled: false });
+        }
         break;
       }
       case 'setWatchdogEnabled': {
         const next = !!message.value;
-        await vscode.workspace.getConfiguration('agents.watchdog').update('enabled', next, vscode.ConfigurationTarget.Global);
-        settingsPanel?.webview.postMessage({ type: 'watchdogStatus', enabled: next });
+        try {
+          await runAgents(`watchdog ${next ? 'enable' : 'disable'}`);
+          settingsPanel?.webview.postMessage({ type: 'watchdogStatus', enabled: next });
+        } catch (err) {
+          vscode.window.showErrorMessage(
+            `agents watchdog ${next ? 'enable' : 'disable'} failed: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
         break;
       }
       case 'getWatchdogLog': {
@@ -3167,7 +3373,7 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
               if (replyHost) {
                 const remote = ['tmux', '-S', reply.muxSocket!, 'send-keys', '-t', reply.muxTarget!, ...keyArgs]
                   .map(shq).join(' ');
-                await execFileAsync('ssh', [replyHost, remote], { timeout: 20_000 });
+                await runAgentsSsh(replyHost, remote, 20_000);
               } else {
                 await execFileAsync('tmux', ['-S', reply.muxSocket!, 'send-keys', '-t', reply.muxTarget!, ...keyArgs], { timeout: 20_000 });
               }
@@ -3189,12 +3395,12 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
           } else if (reply.kind === 'cloud') {
             if (!reply.cloudTaskId) { postReplyResult(false, 'Missing cloud task id'); break; }
             const args = `cloud message ${shq(reply.cloudTaskId)} ${shq(replyText)}`;
-            if (replyHost) await execFileAsync('ssh', [replyHost, 'agents', 'cloud', 'message', reply.cloudTaskId, replyText], { timeout: 30_000 });
+            if (replyHost) await runAgentsSsh(replyHost, `agents cloud message ${shq(reply.cloudTaskId)} ${shq(replyText)}`, 30_000);
             else await runAgents(args);
             postReplyResult(true);
           } else if (reply.kind === 'team') {
             if (!reply.teamName) { postReplyResult(false, 'Missing team name'); break; }
-            if (replyHost) await execFileAsync('ssh', [replyHost, 'agents', 'factory', 'answer', reply.teamName, replyText], { timeout: 30_000 });
+            if (replyHost) await runAgentsSsh(replyHost, `agents factory answer ${shq(reply.teamName)} ${shq(replyText)}`, 30_000);
             else await runAgents(`factory answer ${shq(reply.teamName)} ${shq(replyText)}`);
             postReplyResult(true);
           } else {

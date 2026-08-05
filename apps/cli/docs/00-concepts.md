@@ -40,7 +40,7 @@ A **resource** is any named item inside a DotAgents repo. Resources are typed by
 
 | Kind | What it is | Agent format |
 |------|-----------|--------------|
-| `commands` | Slash commands and prompt shortcuts | `.md` (most agents), `.toml` (Gemini) |
+| `commands` | Slash commands and prompt shortcuts | `.md` (most agents), `.toml` only for legacy Gemini reads |
 | `skills` | Knowledge packs injected into the agent's context | Directory with `SKILL.md` |
 | `hooks` | Shell scripts that fire on agent lifecycle events | `.sh` scripts + `hooks.yaml` manifest |
 | `rules` | Persistent memory / instructions for the agent | `AGENTS.md` → `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, … |
@@ -51,7 +51,7 @@ A **resource** is any named item inside a DotAgents repo. Resources are typed by
 
 Resources are installed once in `~/.agents/` and synced to every supported agent's native format automatically. Sync happens when you run `agents use`, `agents repos pull`, or explicitly via `agents sync`.
 
-To inspect what's installed, use the per-kind listers — `agents commands list`, `agents skills list`, `agents hooks list`, `agents mcp list`, `agents permissions list`, `agents subagents list`, `agents profiles list`. There is no single `agents resources` viewer that prints a merged cross-kind table today; if you want one, file an issue.
+To inspect what's installed, use the per-kind listers — `agents commands list`, `agents skills list`, `agents hooks list`, `agents mcp list`, `agents permissions list`, `agents subagents list`, `agents profiles list`. For a single merged cross-kind table — every resource with its winning layer resolved across project → user → extras → system — run `agents view --merged`.
 
 To inspect a single repo on its own — its git state plus per-kind resource counts — use `agents repos view <repo>` (`system`, `user`, `project`, or an extra-repo alias). Omit the name for an interactive picker. It renders without opening anything; add `--brief` for the header only or `--json` for machine-readable output.
 
@@ -128,6 +128,36 @@ password from a Keychain bundle via an askpass shim. `agents devices render --wr
 emits a `~/.ssh/config.d/agents` include so plain `ssh`/`scp`/`rsync` resolve the
 same logical names.
 
+**Per-device and fleet-wide settings** live in the same two-tier agents.yaml
+store as version pins. `agents devices configure <name>` sets device-scope keys
+(`--max-agents`, `--scheduler on|off`) and `agents devices
+note <name> "…"` appends free-form operator notes — both land under `config:` in
+`~/.agents/devices/<name>/agents.yaml`, so they are per-machine by default and
+can be written for a peer from any box (the `devices/` tree syncs, each machine
+reads only its own). `agents devices set-interactive <name>` sets the one
+user-scope key, `config.interactiveHost` in the *central* agents.yaml: the
+device agents show YOU artifacts on (browser opens, dashboards), so skills stop
+guessing "the online macOS box". The interactive host is marked `★ interactive`
+in `agents devices list`; `list --json` carries each row's `config` and an
+`interactive` flag. The default browser profile is likewise device-local config
+(`browser.profile` → `agents browser profiles set-default`). Unset keys always
+mean today's behavior. The key registry is `src/lib/device-config.ts`.
+
+The keys are consumed, not just stored. `scheduler.enabled=false` keeps the
+routines scheduler from starting on that device — `routines add` skips the
+auto-start with the reason, `routines start` refuses, and a running daemon
+re-evaluates the gate on every SIGHUP reload, so flipping the key never needs a
+daemon restart. `agents.max-concurrent` feeds host ranking, and what counts
+toward it depends on the consumer: Factory auto-launch counts device-wide
+running agents, while teams placement counts the team's own roster on the
+device (local teammates included); a capped device is excluded from auto-pick
+with a stated reason, and an all-capped pool fails loud. Setup asks instead of
+guessing: bare `agents setup` ends with a skippable preferences step (which
+machine you sit at → `interactive.host`; which browser agents drive here →
+`browser.profile`), `agents setup fleet` offers the interactive host after a
+sync, and `agents setup browser` highlights the auto-detect winner in its
+picker.
+
 **Hosts** — machines you dispatch agent work to. `agents hosts add` enrolls a
 target either from an existing `~/.ssh/config` stanza (connection details stay in
 ssh config; agents-cli stores only a caps/os overlay) or *inline* (with its own
@@ -140,7 +170,15 @@ SSH to that machine — supported on virtually every first-class group (`repos`,
 handling (`run`, `sessions`, `feed`, `computer`, `secrets`, `logs`). Groups with
 no remote semantics reject the flag with a clear message rather than commander's
 raw `unknown option`. The target may be a registered host name, a capability tag
-(`--host gpu --any`), or a raw `user@host`.
+(`--host gpu --any`), a raw `user@host`, or the special value `auto`
+(`--device auto` / `--host auto`) to affinity-pick a host from 14-day session
+usage on `sessions.db` (weighted sample among online devices). `auto` is resolved
+by the shared `matchHost` core (below), so `agents run --device auto`, `agents
+ssh auto`, and `agents teams add --device auto` all pick the same way — `agents
+ssh` is the one exception that refuses a pick landing on the machine you're
+already on (`agents ssh` dials OUT to a remote box, so self is never the useful
+outcome) rather than silently self-dialing. Harness is always the agent you
+type — never auto-picked. Affinity failure degrades to local.
 
 The two registries feed **one host pool** behind the `HostProvider` seam:
 `local` (agents.yaml overlay ∪ ssh-config) registers first, `devices` (the
@@ -160,6 +198,51 @@ ps`), and routines placement (`agents routines add … --run-on <name>`). See
 [hosts.md](hosts.md) for the `--host` execution model and the option-forwarding
 contract.
 
+## Placement
+
+**One question, one object:** *where does the agent body run?*
+
+```yaml
+where:
+  kind: local | device | fleet | cloud | lease
+  target: yosemite-s0 | auto | hetzner   # optional
+```
+
+The CLI still accepts the historical flags; they all map onto this shape
+(`src/lib/placement.ts`). Prefer **`--where`** on `agents run` when you want
+one door:
+
+| Intent | Placement | Flag / path (aliases still work) |
+|---|---|---|
+| This machine | `kind: local` | (default) · `--where local` |
+| Named fleet / host box | `kind: device, target: <name>` | `--where device:<name>` · `--host` / `--device` |
+| Affinity pick (14d usage) | `kind: device, target: auto` | `--where auto` · `--device auto` |
+| Disposable crabbox | `kind: lease` | `--where lease` · `--lease` |
+| Warm crabbox reuse | `kind: lease, target: <slug>` | `--box <slug>` |
+| Routines: body on one box | `kind: device` | `--run-on <name>` · `--placement host` |
+| Routines: pick any online | `kind: fleet` | `--placement fleet` |
+| Vendor cloud task | `kind: cloud` | `--cloud` · `--where cloud[:provider]` · `agents cloud run …` |
+
+**Cloud placement.** `--cloud` routes the run to the agent's native vendor
+cloud through the provider registry — the same dispatch as `agents cloud run
+--agent <agent>`, tracked by `agents cloud list/status/logs/cancel/message`.
+Routing: claude→rush, codex→codex, droid→factory, antigravity→antigravity;
+`--provider` overrides. An agent with no native cloud (kimi, grok, cursor,
+opencode, …) fails loud unless `--provider` is given. Cloud tasks run in the
+provider's workspace on the provider's accounts, so local-run flags
+(`--loop`, `--resume`, `--secrets`, `--terminal`, `--cwd`, account strategy,
+…) are rejected rather than silently dropped, and `--repo` / `--branch` /
+`--cloud-env` require `--cloud`. Source: `src/commands/run-cloud.ts`,
+`src/lib/cloud/dispatch.ts` (the one dispatch path both surfaces share).
+
+**Owner is not placement.** On monitors, `--device` pins who *evaluates and
+fires* (exactly-once owner). `--run-on` is where the *action body* runs. Same
+word `--device`, opposite jobs — always say "owner" vs "body placement" in
+docs and help.
+
+Mixing doors fails loud (`--where` + `--host`, `--host` + `--lease`, …). Source
+of truth: [`src/lib/placement.ts`](../src/lib/placement.ts).
+
 ---
 
 ## Capability matrix
@@ -170,8 +253,7 @@ contract.
 |------|-------|-----|-------------|--------|----------|---------|-----------|-------|-----------|
 | Claude | yes | yes | yes | yes | yes | yes | yes | `CLAUDE.md` | yes |
 | Codex | >= 0.116.0 | yes | >= 0.138.0 | yes | < 0.117.0 · skills ($name, >= 0.117) | >= 0.128.0 | >= 0.117.0 | `AGENTS.md` | no |
-| Gemini † | >= 0.26.0 | yes | yes | yes | yes (.toml) | >= 0.8.0 | >= 0.36.0 | `GEMINI.md` | no |
-| Cursor | no | yes | no | yes | yes | no | no | `.cursorrules` | no |
+| Cursor | yes | yes | yes | yes | IDE + skills ($name) | yes | >= 2026.1.22 | `.cursorrules` | no |
 | OpenCode | no | yes | >= 1.1.1 | yes | yes | no | no | `AGENTS.md` | no |
 | OpenClaw | yes | yes | yes | yes | gateway | yes | yes | `workspace/AGENTS.md` | no |
 | Copilot | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
@@ -184,19 +266,29 @@ contract.
 | Kimi | yes | yes | yes | yes | no | yes | yes | `AGENTS.md` | yes |
 | Droid | yes | yes | >= 0.57.5 | >= 0.26.0 | yes | yes | yes | `AGENTS.md` | no |
 | Hermes | no | yes | yes | yes | no | yes | no | `MEMORY.md` | no |
-| ForgeCode | no | yes | yes | yes | yes | no | yes | `AGENTS.md` | no |
+| Pi (Oh My Pi) | no | yes | no | yes | yes | no | yes | `AGENTS.md` | no |
 
-**† Gemini is deprecated.** Google retired the Gemini CLI for free/Pro/Ultra tiers on June 18, 2026 (announced at Google I/O 2026); Antigravity CLI (`antigravity`) is the successor. agents-cli still manages existing Gemini installs but warns on `agents add gemini` / `agents teams add … gemini`.
+Pi (`omp`) is Claude-compatible — it natively reads `.claude/commands`, `.mcp.json`, and
+Claude-shaped subagents, and keeps its own native resources under `~/.omp/agent/`
+(skills, commands, `agents/`, the `AGENTS.md` context file, and `.mcp.json`). Its MCP
+covers stdio + http + headers. Hooks are off (omp hooks are per-tool JS/TS extension
+modules, not event→shell-command registrations); allowlist is off (approval is per-TOOL
+only via `tools.approval`, no command/path patterns); plugins are off (npm/TS modules, not
+the Claude marketplace manifest). Its cross-provider model catalog (OpenRouter, OpenAI,
+Anthropic, xAI, DeepSeek, …) surfaces in `agents view` / `agents models pi` via
+`omp models --json`.
 
-Permissions sync is gated on the `allowlist` capability (Claude, Codex >= 0.138.0, Gemini, Cursor, OpenCode >= 1.1.1, Antigravity, Grok, Kimi, Kiro 2.8.0+, Goose, Droid >= 0.57.5, OpenClaw, Copilot, Hermes, and ForgeCode). Workflow sync writes Claude workflow bundles, Kimi `type: flow` skills with an `agents_workflow` ownership marker, Goose recipe YAML, Antigravity workflow markdown (since 1.0.6), and OpenClaw Lobster `.lobster` files under `.openclaw/workflows/` with an `AGENTS_CLI_WORKFLOW` ownership marker. Antigravity workflows are the one non-version-isolated target: `agy` scans a single shared `~/.gemini/config/global_workflows/` at startup (a real HOME directory, never symlinked per version), so agents-cli writes there once for all installed antigravity versions and reads it back the same way — the `agents_workflow` marker guards user-authored files from being overwritten or removed. **Host CLIs** (`agents cli`) are agent-agnostic PATH binaries — not in this matrix. Install paths call `supports(agent, cap, version)` before writing; gated capabilities skip with a clear reason instead of silently ignored config.
+**Gemini is hard-deprecated.** Google retired the Gemini CLI for free/Pro/Ultra
+tiers on June 18, 2026 (announced at Google I/O 2026); Antigravity CLI
+(`antigravity`) is the successor. agents-cli keeps the legacy `gemini` id only
+for old sessions/config, and blocks `agents add gemini`, `agents import gemini`,
+and `agents sync gemini`.
 
-Gemini permission sync maps canonical Bash rules to its native `ShellTool(...)` entries under `tools.core` / `tools.exclude`. Other canonical permission tools are not representable in Gemini's native allowlist grammar and are skipped.
+Permissions sync is gated on the `allowlist` capability (Claude, Codex >= 0.138.0, Cursor, OpenCode >= 1.1.1, Antigravity, Grok, Kimi, Kiro 2.8.0+, Goose, Droid >= 0.57.5, OpenClaw, Copilot, and Hermes). Workflow sync writes Claude workflow bundles, Kimi `type: flow` skills with an `agents_workflow` ownership marker, Goose recipe YAML, Antigravity workflow markdown (since 1.0.6), and OpenClaw Lobster `.lobster` files under `.openclaw/workflows/` with an `AGENTS_CLI_WORKFLOW` ownership marker. Antigravity workflows are the one non-version-isolated target: `agy` scans a single shared `~/.gemini/config/global_workflows/` at startup (a real HOME directory, never symlinked per version), so agents-cli writes there once for all installed antigravity versions and reads it back the same way — the `agents_workflow` marker guards user-authored files from being overwritten or removed. **Host CLIs** (`agents clis`) are agent-agnostic PATH binaries — not in this matrix. Install paths call `supports(agent, cap, version)` before writing; gated capabilities skip with a clear reason instead of silently ignored config.
 
 OpenClaw gates at tool granularity only, so permission sync maps just **blanket** (whole-tool) rules to `~/.openclaw/openclaw.json` `tools.alsoAllow` (allow) / `tools.deny` (deny): `bash → exec`, `read → read`, `write`/`edit → write`, `webfetch → web_fetch`, `websearch → web_search`. Sub-command/path/domain rules (`Bash(git:*)`, `Write(secrets/**)`, `WebFetch(domain:x)`) have no tool-level equivalent and are skipped. The absolute `tools.allow` list is never touched.
 
 Hermes permission sync maps canonical Bash allow rules to `~/.hermes/config.yaml` `command_allowlist` and Bash deny rules to `approvals.deny`. Hermes stores command globs only; session-scoped `/tools` toggles are not config-persistent and are not written.
-
-ForgeCode permission sync writes `~/.forge/permissions.yaml` policies by operation family: `bash → command`, `read`/`grep`/`glob → read`, `write`/`edit → write`, and web rules to `url`. Forge only reads that file when `.forge.toml` has `restricted = true`; MCP tools bypass `permissions.yaml` entirely.
 
 ### Per-command targeting
 
@@ -205,7 +297,7 @@ Slash commands in `commands/*.md` can narrow sync with optional YAML frontmatter
 ```yaml
 ---
 description: Required one-line summary
-agents: [claude, cursor, codex]   # omit = all command-capable agents
+agents: [claude, cursor, codex]   # omit = all compatible agents; Cursor receives both formats
 since: "0.116.0"                  # minimum agent CLI version (inclusive)
 until: "0.117.0"                  # exclusive upper bound
 ---
@@ -213,4 +305,4 @@ until: "0.117.0"                  # exclusive upper bound
 
 `commandAppliesTo()` in `src/lib/commands.ts` evaluates these fields after the agent-level `commands` / commands-as-skills gate. The check runs on central sync (`~/.agents/commands/` user/system → version home) and on `agents commands install`; project `.agents/commands/` files are discovered in place and are not filtered by `agents:`.
 
-Example: `.agents/commands/version.md` targets Claude, Codex, Gemini, Cursor, OpenCode, Copilot, and Grok; Antigravity is excluded until harness support is verified.
+Example: `.agents/commands/version.md` targets Claude, Codex, Cursor, OpenCode, Copilot, and Grok. Cursor receives both an IDE command file and an Agent Skill because cursor-agent does not load the IDE's `.cursor/commands/` files; Antigravity is excluded until harness support is verified.

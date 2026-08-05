@@ -30,7 +30,6 @@ Central storage (user > system):
   <version-home>/
     .claude/hooks/<name>.sh          Copied script (Claude)
     .codex/hooks/<name>.sh           Copied script (Codex)
-    .gemini/hooks/<name>.sh          Copied script (Gemini)
     ...
 
   registerHooksToSettings() writes resolved paths into agent-native config:
@@ -43,12 +42,16 @@ Central storage (user > system):
                                     │
                                     ▼
   Agent reads registered hooks from its settings file and execs the registered
-  command with event context as JSON on stdin. For a hook that declares matches:
-  (and/or cache:) the registered command is a generated wrapper shim, not the raw
-  script. The shim evaluates the matches: predicates first (a port of shouldFire()
-  in src/lib/hooks/match.ts): if any predicate fails it exits 0 without running
-  the script; if all pass it execs the real script (then applies cache: if set).
-  A hook with neither matches: nor cache: is registered by its raw script path.
+  command with event context as JSON on stdin. For a hook that declares
+  matches:, cache:, or a bare matcher: (the tool-name filter, e.g. git-guard's
+  matcher: Bash), the registered command is a generated wrapper shim, not the
+  raw script. The shim evaluates the matches: predicates first (a port of
+  shouldFire() in src/lib/hooks/match.ts): if any predicate fails it exits 0
+  without running the script; if all pass it execs the real script (then
+  applies cache: if set) and appends a hook.fire timing sample either way. A
+  hook with none of matches:/cache:/matcher: is registered by its raw script
+  path with no timing wrapper — a bare lifecycle hook with nothing to gate,
+  cache, or filter by tool.
 ```
 
 ## Command Reference
@@ -66,7 +69,7 @@ Central storage (user > system):
 |---------|------|--------|
 | `list` | `-a, --agent <agent>` | Filter to a specific agent; supports `agent@version` syntax |
 | `list` | `-s, --scope <scope>` | `user` (global), `project` (repo), or `all` (default) |
-| `add` | `-a, --agents <list>` | Target specific agents/versions: `claude`, `codex@0.116.0`, `gemini@default` |
+| `add` | `-a, --agents <list>` | Target specific agents/versions: `claude`, `codex@0.116.0`, `antigravity@default` |
 | `add` | `--names <list>` | Install specific hooks by name from `~/.agents/hooks/` (comma-separated) |
 | `add` | `-y, --yes` | Skip all prompts |
 | `remove` | `-a, --agents <list>` | Limit removal to specific agents |
@@ -82,7 +85,7 @@ hooks:
     script: post-edit.sh               # filename in ~/.agents/hooks/
     events:
       - PostToolUse
-    timeout: 30                        # seconds; default 600
+    timeout: 30s                       # seconds, or a duration string (5s, 2m, 1h30m); default 600
     matcher: "Edit"                    # optional: tool name filter (PreToolUse/PostToolUse)
     matches:
       cwd_includes: /projects/myapp    # predicate: only fire in this path
@@ -106,7 +109,7 @@ hooks:
 |-------|------|----------|-------------|
 | `script` | string | yes | Filename of the shell script in `~/.agents/hooks/` (or system hooks dir) |
 | `events` | `string[]` | yes | One or more lifecycle events that trigger this hook |
-| `timeout` | number | no | Seconds before the hook is killed; default `600` |
+| `timeout` | number \| string | no | Time before the hook is killed; default `600`. A bare number is seconds; a duration string (`5s`, `2m`, `1h30m`) is also accepted and normalized to seconds |
 | `matcher` | string | no | Tool name substring filter for `PreToolUse`/`PostToolUse` events (Codex) |
 | `matches` | `HookMatches` | no | Predicate set; all predicates AND together |
 | `enabled` | boolean | no | Set `false` in user layer to disable a system-shipped hook of the same name |
@@ -154,40 +157,66 @@ cache:
 
 ### What it generates
 
-When the registrar sees `cache:` on a hook, it writes a per-hook shim under `~/.agents/.cache/shims/hooks/<name>.sh` and registers that shim's path in the agent's native settings file (`~/.claude/settings.json`, `~/.codex/hooks.json`, etc.) instead of the raw script. The shim:
+When the registrar sees `cache:`, `matches:`, or a bare `matcher:` on a hook,
+it writes a per-hook shim under `~/.agents/.cache/shims/hooks/<name>.sh` and
+registers that shim's path in the agent's native settings file
+(`~/.claude/settings.json`, `~/.codex/hooks.json`, etc.) instead of the raw
+script. The shim:
 
 1. Reads stdin once (Claude/Codex/Gemini pass JSON to every hook).
-2. Computes the cache file path from `key:`.
-3. If the cache is fresh, serves it (cache=hit).
-4. If stale + `prefetch: background`, serves stale + spawns a detached refresh (cache=stale-prefetch).
-5. If stale + no prefetch, runs the real script + caches the output (cache=miss).
-6. Appends one JSONL line per fire to `~/.agents/.cache/logs/events-YYYY-MM-DD.jsonl`.
+2. If `cache:` is set: computes the cache file path from `key:`, serves it if
+   fresh (cache=hit), serves stale + spawns a detached refresh when
+   `prefetch: background` (cache=stale-prefetch), or runs the real script +
+   caches the output (cache=miss). A hook with no `cache:` (matches:/matcher:
+   only) is a pure pass-through — it just execs the script, no cache read/write.
+3. Appends one JSONL line per fire to `~/.agents/.cache/logs/events-YYYY-MM-DD.jsonl`.
+4. Appends one NDJSON line to the disposable perf spool
+   (`~/.agents/.cache/perf/spool.jsonl`), drained into `perf.db` on the next
+   `agents perf` / `agents hooks profile` open. This line carries `cwd` and
+   `session_id` when the hook's own stdin JSON has them — that's what lets
+   `agents perf hooks --project <key>` scope a hook's rollup to one repo.
 
-Stale shim files are garbage-collected automatically when a hook is renamed, deleted, or has its `cache:` field removed.
+Steps 3-4 (timing) run for EVERY shimmed hook, cache or not — that's what
+makes a matcher-only hook like git-guard show up in `agents perf hooks`.
 
-### `agents hooks profile`
+Stale shim files are garbage-collected automatically when a hook is renamed,
+deleted, or loses its `cache:`/`matches:`/`matcher:` field entirely.
+
+### `agents hooks profile` / `agents perf hooks`
 
 ```
 agents hooks profile              # last 7 days, table form
 agents hooks profile --days 30
 agents hooks profile --json | jq
 agents hooks profile --warn-ms 500
+agents perf hooks                 # same rollup under the perf surface
 ```
 
-Aggregates `hook.fire` events into per-hook p50/p99/mean/max + cache hit rate. Any hook whose p99 exceeds `--warn-ms` (default 2000) and has no cache config gets flagged as a candidate for `cache:`.
+Aggregates hook timings into per-hook p50/p95/p99/mean/max + cache hit rate +
+error/timeout rate. Primary source is the indexed warehouse
+`~/.agents/.cache/perf/perf.db` (safe to wipe). Falls back to the legacy daily
+JSONL when the warehouse is empty. Any hook whose p99 exceeds `--warn-ms`
+(default 2000) and has no cache hits gets flagged as a candidate for `cache:`.
 
-Only hooks with `cache:` are instrumented today — that's deliberate. Opting into the primitive is what surfaces the data. To make every hook show up, declare `cache: 5m` on it (or `cache: 1s` to effectively disable caching while still getting timing).
+Hooks are instrumented when a generated shim wraps them — `cache:`, `matches:`,
+or a bare `matcher:` are each enough. A hook with none of the three (a plain
+lifecycle hook with nothing to gate, cache, or filter by tool) is the only kind
+that never shows up here; add `matches:`/`matcher:`/`cache:` to opt it in, then
+resync.
+
+See also [`06-observability.md`](./06-observability.md) for the `agents perf`
+summary (`commands`, `run`, multi-section default).
 
 
 ### Supported Events
 
 | Event | When it fires | Agents |
 |-------|--------------|--------|
-| `SessionStart` | Agent session begins | Claude, Codex, Gemini, Grok, Copilot (`sessionStart`), Kiro, Goose, Cursor (`sessionStart`), Hermes (`on_session_start`) |
+| `SessionStart` | Agent session begins | Claude, Codex, Grok, Copilot (`sessionStart`), Kiro, Goose, Cursor (`sessionStart`), Hermes (`on_session_start`) |
 | `SessionEnd` | Agent session ends | Claude, Grok, Copilot (`sessionEnd`), Goose, Cursor (`sessionEnd`), Hermes (`on_session_end`) |
-| `UserPromptSubmit` | User prompt received before model sees it | Claude, Gemini (as `BeforeAgent`), Grok, Copilot (`userPromptSubmitted`), Kiro, Goose, Cursor (`beforeSubmitPrompt`), Hermes (`pre_llm_call`) |
-| `PreToolUse` | Before a tool call executes | Claude, Codex, Gemini, Antigravity (`before_tool_call`), Copilot (`preToolUse`), Kiro, Goose, Cursor (`preToolUse`), Hermes (`pre_tool_call`) |
-| `PostToolUse` | After a tool call completes | Claude, Codex, Gemini, Antigravity (mapped to `after_model_call`), Copilot (`postToolUse`), Kiro, Goose, Cursor (`postToolUse`), Hermes (`post_tool_call`) |
+| `UserPromptSubmit` | User prompt received before model sees it | Claude, Grok, Copilot (`userPromptSubmitted`), Kiro, Goose, Cursor (`beforeSubmitPrompt`), Hermes (`pre_llm_call`) |
+| `PreToolUse` | Before a tool call executes | Claude, Codex, Antigravity (`before_tool_call`), Copilot (`preToolUse`), Kiro, Goose, Cursor (`preToolUse`), Hermes (`pre_tool_call`) |
+| `PostToolUse` | After a tool call completes | Claude, Codex, Antigravity (mapped to `after_model_call`), Copilot (`postToolUse`), Kiro, Goose, Cursor (`postToolUse`), Hermes (`post_tool_call`) |
 | `SubagentStop` | A subagent finishes | Claude, Cursor (`subagentStop`), Hermes (`subagent_stop`) |
 | `PreCompact` | Before context compaction | Claude, Grok, Copilot (`preCompact`), Cursor (`preCompact`) |
 | `Stop` | Agent stops (final turn) | Claude, Codex, Antigravity (`on_loop_stop`), Grok, Copilot (`agentStop`), Kiro, Goose, Cursor (`stop`), Hermes (`on_session_finalize`) |
@@ -195,6 +224,26 @@ Only hooks with `cache:` are instrumented today — that's deliberate. Opting in
 | `OnError` | Agent encounters an error | Antigravity (`on_error`), Copilot (`errorOccurred`) |
 
 Event name mapping across agents is handled in `src/lib/hooks.ts`: `GEMINI_EVENT_MAP`, `ANTIGRAVITY_EVENT_MAP`, Grok's `eventMap`, `COPILOT_EVENT_MAP`, `KIRO_EVENT_MAP`, `GOOSE_EVENT_MAP`, `CURSOR_EVENT_MAP`, and `HERMES_EVENT_MAP`.
+
+## Version-home deduplication
+
+Each installed harness version has its own synced hook scripts. Every native
+registrar emits one entry per logical manifest resource and event. For the
+Claude-shaped and Codex read-modify-write formats, existing registrations are
+also deduplicated by logical hook resource name, not absolute path, so the same
+hook copied under several version homes is registered once and the active
+version's command is authoritative. Other harnesses rewrite their one managed
+hook file from the manifest on each sync and therefore cannot accumulate sibling
+version paths there.
+
+Run `agents doctor` to inspect the copies. Identical same-name scripts across
+versions are warnings because they add runtime noise and cost if registered
+together. Same-name scripts with different SHA-256 hashes are critical drift:
+an older version can otherwise enforce stale rules while the active copy passes.
+The inspection covers every hooks-capable harness. The text report and `agents
+doctor --json` both name every affected version and the authoritative active
+version; JSON consumers such as the menu-bar health view receive the same
+findings under `health.issues` and `duplicateHooks`.
 
 Hermes (Nous Research, ≥ 0.11.0) declares hooks under a `hooks:` block in `~/.hermes/config.yaml` (shared with `mcp_servers`); the registrar read-modify-writes that YAML doc so sibling keys survive. Each entry is `{ command, timeout, matcher? }` (timeout defaults to 60s, capped at 300s).
 

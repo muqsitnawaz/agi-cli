@@ -121,7 +121,6 @@ vi.mock('../src/lib/subagents.js', () => ({
   transformSubagentForCopilot: () => '',
   transformSubagentForCursor: () => '',
   transformSubagentForDroid: () => '',
-  transformSubagentForForge: () => '',
   transformSubagentForGoose: () => '',
   transformSubagentForKiro: () => '',
   transformSubagentForOpenCode: () => '',
@@ -858,7 +857,7 @@ describe('syncResourcesToVersion', () => {
       expect(content).toContain('Debug prompt');
     });
 
-    it('converts markdown to TOML for gemini', () => {
+    it('does not sync commands for hard-deprecated gemini', () => {
       setupCentralResources();
       const versionHome = path.join(AGENTS_DIR, 'versions', 'gemini', '1.0.0', 'home');
       fs.mkdirSync(versionHome, { recursive: true });
@@ -866,18 +865,9 @@ describe('syncResourcesToVersion', () => {
       const result = syncResourcesToVersion('gemini', '1.0.0');
 
       const commandsDir = path.join(versionHome, '.gemini', 'commands');
-      expect(result.commands).toBe(true);
-      expect(fs.existsSync(path.join(commandsDir, 'debug.toml'))).toBe(true);
-      // Should NOT have .md files
+      expect(result.commands).toBe(false);
+      expect(fs.existsSync(path.join(commandsDir, 'debug.toml'))).toBe(false);
       expect(fs.existsSync(path.join(commandsDir, 'debug.md'))).toBe(false);
-      // Verify TOML content
-      const toml = fs.readFileSync(path.join(commandsDir, 'debug.toml'), 'utf-8');
-      expect(toml).toContain('name = "debug"');
-      expect(toml).toContain('description =');
-      expect(toml).toContain("prompt = '''");
-      // Variable syntax should be converted
-      expect(toml).toContain('{{args}}');
-      expect(toml).not.toContain('$ARGUMENTS');
     });
 
     it('skips commands for agents without command capability', () => {
@@ -1078,15 +1068,15 @@ describe('syncResourcesToVersion', () => {
       expect(content).toContain('Be kind');
     });
 
-    it('writes GEMINI.md for gemini', () => {
+    it('does not write memory for hard-deprecated gemini', () => {
       setupCentralResources();
       const versionHome = path.join(AGENTS_DIR, 'versions', 'gemini', '1.0.0', 'home');
       fs.mkdirSync(versionHome, { recursive: true });
 
       const result = syncResourcesToVersion('gemini', '1.0.0');
 
-      expect(result.memory).toContain('GEMINI.md');
-      expect(fs.existsSync(path.join(versionHome, '.gemini', 'GEMINI.md'))).toBe(true);
+      expect(result.memory).toEqual([]);
+      expect(fs.existsSync(path.join(versionHome, '.gemini', 'GEMINI.md'))).toBe(false);
     });
 
     it('inlines all subrules listed in the active preset', () => {
@@ -1237,11 +1227,25 @@ describe('installVersion', () => {
     }
   });
 
-  it('gracefully redirects a version-pinned external install to the current release (RUSH-1321)', async () => {
+  it.skipIf(IS_WINDOWS)('gracefully redirects a version-pinned external install to the current release (RUSH-1321)', async () => {
     // A self-updating agent (no VERSION token in the installer) can't pin. A
     // network-free `true` installer stands in for the real curl/brew script.
+    // A stub `agy` (antigravity's actual cliCommand — NOT the agent id) on
+    // PATH lets the post-install version probe resolve for real (RUSH-1321's
+    // own follow-up fix: installVersion no longer tolerates an unresolvable
+    // probe by silently falling back to the literal string 'latest' — see
+    // relocateGrokBinaryToVersionHome).
     const original = AGENTS.antigravity.installScript;
     AGENTS.antigravity.installScript = 'true';
+
+    const fakeBinDir = path.join(TEST_ROOT, 'fakebin');
+    fs.mkdirSync(fakeBinDir, { recursive: true });
+    const stub = path.join(fakeBinDir, 'agy');
+    fs.writeFileSync(stub, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "antigravity 1.9.9"; exit 0; fi\nexit 0\n', 'utf-8');
+    fs.chmodSync(stub, 0o755);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}${path.delimiter}${originalPath}`;
 
     try {
       const result = await installVersion('antigravity', '1.2.3');
@@ -1249,11 +1253,13 @@ describe('installVersion', () => {
       // No longer a hard `does not support version-pinned installs` error — the
       // pin is redirected to installing the current release.
       expect(result.success).toBe(true);
+      expect(result.installedVersion).toBe('1.9.9'); // the live version, not the ignored pin
       expect(result.error ?? '').not.toContain('does not support version-pinned installs');
       // The ignored `1.2.3` pin did NOT create a fictional `1.2.3` version dir.
       expect(fs.existsSync(path.join(AGENTS_DIR, 'versions', 'antigravity', '1.2.3'))).toBe(false);
     } finally {
       AGENTS.antigravity.installScript = original;
+      process.env.PATH = originalPath;
     }
   });
 });
@@ -1285,16 +1291,15 @@ describe('getActuallySyncedResources', () => {
     expect(synced.commands).not.toContain('notes');
   });
 
-  it('detects .toml commands for gemini', () => {
+  it('does not detect commands for hard-deprecated gemini', () => {
     const { agentDir } = setupVersionHome('gemini', '1.0.0');
     const commandsDir = path.join(agentDir, 'commands');
     fs.mkdirSync(commandsDir, { recursive: true });
     fs.writeFileSync(path.join(commandsDir, 'debug.toml'), 'name = "debug"');
-    fs.writeFileSync(path.join(commandsDir, 'plan.md'), '# should be ignored for gemini');
+    fs.writeFileSync(path.join(commandsDir, 'plan.md'), '# legacy command');
 
     const synced = getActuallySyncedResources('gemini', '1.0.0');
-    expect(synced.commands).toContain('debug');
-    expect(synced.commands).not.toContain('plan'); // .md ignored for toml agent
+    expect(synced.commands).toEqual([]);
   });
 
   it('detects skills when content matches central source', () => {

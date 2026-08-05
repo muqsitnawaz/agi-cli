@@ -25,6 +25,10 @@ import { registerSetupBrowserCommand, runBrowserWizard } from './setup-browser.j
 import { registerSetupComputerCommand, runComputerWizard } from './setup-computer.js';
 import { registerSetupShareCommand, runShareWizard } from './setup-share.js';
 import { registerSetupMineCommand } from './setup-mine.js';
+import { registerSetupSecretsCommand } from './setup-secrets.js';
+import { registerSetupFleetCommand } from './setup-fleet.js';
+import { registerSetupWatchdogCommand, runWatchdogSetupWizard } from './setup-watchdog.js';
+import { runPreferencesStep } from './setup-preferences.js';
 
 const HOME = os.homedir();
 
@@ -153,15 +157,6 @@ export async function runSetup(program: Command, options: { force?: boolean; sup
     console.log(chalk.gray(`Discovered ${dev.synced} device${dev.synced === 1 ? '' : 's'} on your tailnet (agents devices list).`));
   }
 
-  // Offer guided cross-machine session-sync provisioning (interactive, opt-in,
-  // and never blocking — any failure/decline falls through to the rest of setup).
-  try {
-    const { promptAndProvisionSessionSync } = await import('./sync-provision.js');
-    await promptAndProvisionSessionSync({ explicit: false });
-  } catch (err) {
-    console.log(chalk.yellow(`Session-sync setup skipped: ${(err as Error).message}`));
-  }
-
   // Offer to import existing unmanaged installations
   if (unmanaged.length > 0 && isInteractiveTerminal()) {
     console.log(chalk.bold('\nFound existing installations:\n'));
@@ -229,6 +224,11 @@ export async function runSetup(program: Command, options: { force?: boolean; sup
   // stops at the system-repo bootstrap above, unchanged.
   await runSetupHub();
 
+  // Preferences step: the two questions that keep agents off the wrong machine —
+  // which box you sit at (interactive host) and which browser agents drive here.
+  // TTY-only, skippable, and writes the same keys as `agents devices …`.
+  await runPreferencesStep();
+
   console.log(chalk.bold('\nSetup complete. Try:'));
   console.log(chalk.cyan('  agents view                 ') + chalk.gray(' # see what\'s installed'));
   console.log(chalk.cyan('  agents run <agent> "hello"  ') + chalk.gray(' # run an agent'));
@@ -275,12 +275,15 @@ async function runSetupHub(): Promise<void> {
   if (!isInteractiveTerminal()) return;
   try {
     const { checkbox } = await import('@inquirer/prompts');
-    const picks = await checkbox<'browser' | 'computer' | 'share'>({
+    const picks = await checkbox<'browser' | 'computer' | 'share' | 'secrets' | 'fleet' | 'watchdog'>({
       message: 'Set up optional capabilities now? (space to select, enter to confirm)',
       choices: [
         { name: 'browser  — drive a real Chrome/Brave/Edge for web automation', value: 'browser' },
         { name: 'computer — control native macOS apps (screenshot, click, type)', value: 'computer' },
         { name: 'share    — publish shareable links (Cloudflare R2 + Worker)', value: 'share' },
+        { name: 'secrets  — choose storage defaults and import existing credentials', value: 'secrets' },
+        { name: 'fleet    — discover Tailscale devices and configure SSH access', value: 'fleet' },
+        { name: 'watchdog — resume stalled agent sessions on selected devices', value: 'watchdog' },
       ],
     });
     for (const pick of picks) {
@@ -288,6 +291,9 @@ async function runSetupHub(): Promise<void> {
       if (pick === 'browser') await runBrowserWizard();
       else if (pick === 'computer') await runComputerWizard();
       else if (pick === 'share') await runShareWizard();
+      else if (pick === 'secrets') await import('./setup-secrets.js').then((m) => m.runSecretsSetupWizard());
+      else if (pick === 'fleet') await import('./setup-fleet.js').then((m) => m.runFleetSetupWizard());
+      else if (pick === 'watchdog') await runWatchdogSetupWizard();
     }
   } catch (err) {
     if (isPromptCancelled(err)) return;
@@ -303,11 +309,14 @@ export function registerSetupCommand(program: Command): void {
     .option('-f, --force', 'Re-run setup even if ~/.agents/.system/ already exists (use with caution)')
     .option('--no-system-repo', 'Skip cloning the system repo (you must populate ~/.agents/.system/ yourself)');
 
-  // Capability subcommands: `agents setup browser|computer|share|mine`.
+  // Capability subcommands: `agents setup browser|computer|share|mine|secrets|fleet`.
   registerSetupBrowserCommand(setupCmd);
   registerSetupComputerCommand(setupCmd);
   registerSetupShareCommand(setupCmd);
   registerSetupMineCommand(setupCmd);
+  registerSetupSecretsCommand(setupCmd);
+  registerSetupFleetCommand(setupCmd);
+  registerSetupWatchdogCommand(setupCmd);
 
   setHelpSections(setupCmd, {
     examples: `
@@ -321,20 +330,29 @@ export function registerSetupCommand(program: Command): void {
       agents setup browser
       agents setup computer
       agents setup share
+      agents setup secrets
+      agents setup fleet
+      agents setup watchdog
     `,
     notes: `
       What it does:
         1. Clones the system repo into ~/.agents/.system/
         2. Imports any unmanaged agent installations it finds
-        3. On a TTY, offers to set up optional capabilities (browser/computer/share)
+        3. On a TTY, offers to set up optional capabilities (browser/computer/share/secrets/fleet/watchdog)
+        4. On a TTY, asks preferences: which machine you sit at (interactive host)
+           and which browser agents drive here — both skippable, both the same
+           keys 'agents devices set-interactive' / 'browser profiles set-default' write
 
       Capability setup can also be run any time on its own:
         agents setup browser    # detect a browser + create the default profile
         agents setup computer    # install the signed macOS helper + grant permissions
         agents setup share       # provision or join a Cloudflare share endpoint
+        agents setup secrets     # choose secrets backend/policy defaults + import
+        agents setup fleet       # discover Tailscale devices + configure SSH access
+        agents setup watchdog    # choose which devices run the watchdog routine
 
       To install CLIs from agents.yaml and sync resources into version homes:
-        agents repo refresh -y
+        agents sync --local -y
     `,
   });
 

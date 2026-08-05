@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   buildExecCommand,
   resolveInteractive,
@@ -12,6 +12,7 @@ import {
   resolveHeadlessMode,
   defaultModeFor,
   headlessPlanStallCommand,
+  codexWritableRootsConfig,
   type ExecOptions,
 } from '../exec.js';
 import type { AgentId, Mode } from '../types.js';
@@ -137,9 +138,22 @@ describe('buildExecCommand', () => {
       expect(planCmd).not.toContain('--dangerously-skip-permissions');
     });
 
-    it('cursor edit produces no flags (edit is cursor default)', () => {
-      const cmd = buildExecCommand(opts({ agent: 'cursor', mode: 'edit' }));
+    it('cursor headless edit trusts the selected workspace without using -f', () => {
+      const cmd = buildExecCommand(opts({ agent: 'cursor', mode: 'edit', headless: true }));
+      expect(cmd).toContain('--trust');
       expect(cmd).not.toContain('-f');
+    });
+
+    it('cursor interactive edit preserves Cursor workspace trust prompting', () => {
+      const cmd = buildExecCommand(opts({
+        agent: 'cursor',
+        mode: 'edit',
+        prompt: undefined,
+        interactive: true,
+      }));
+      expect(cmd).not.toContain('--trust');
+      expect(cmd).not.toContain('-f');
+      expect(cmd).toEqual(['cursor-agent']);
     });
 
     it('cursor skip produces -f', () => {
@@ -743,6 +757,69 @@ describe('buildExecCommand', () => {
     });
   });
 
+  // --- Codex sandbox: implicit ~/.agents writable root ---
+  //
+  // Codex's workspace-write sandbox blocks $HOME, so `agents ...` the model
+  // shells out to can't write ~/.agents (askpass shim, secrets, sessions),
+  // which broke remote `agents run codex`. A fresh edit run gets ~/.agents via
+  // --add-dir; resume forms (which reject --add-dir) get it via -c writable_roots.
+  describe('codex ~/.agents writable root', () => {
+    const AGENTS_DIR = path.join(HOME, '.agents');
+
+    it('fresh codex edit run implicitly grants ~/.agents as a writable root', () => {
+      const cmd = buildExecCommand(opts({ agent: 'codex', mode: 'edit' }));
+      const dirs = cmd.reduce<string[]>((acc, v, i) => (v === '--add-dir' ? [...acc, cmd[i + 1]] : acc), []);
+      expect(dirs).toContain(AGENTS_DIR);
+    });
+
+    it('dedupes ~/.agents when the user also passes it explicitly', () => {
+      const cmd = buildExecCommand(opts({ agent: 'codex', mode: 'edit', addDirs: [AGENTS_DIR, '/x'] }));
+      const dirs = cmd.reduce<string[]>((acc, v, i) => (v === '--add-dir' ? [...acc, cmd[i + 1]] : acc), []);
+      expect(dirs.filter((d) => d === AGENTS_DIR)).toHaveLength(1);
+      expect(dirs).toContain('/x');
+    });
+
+    it('does NOT add ~/.agents for codex read-only (plan) — no writes happen there', () => {
+      const cmd = buildExecCommand(opts({ agent: 'codex', mode: 'plan' }));
+      expect(cmd).not.toContain(AGENTS_DIR);
+    });
+
+    it('does NOT add --add-dir for codex skip (sandbox already dropped)', () => {
+      const cmd = buildExecCommand(opts({ agent: 'codex', mode: 'skip' }));
+      expect(cmd).not.toContain('--add-dir');
+    });
+
+    it('does NOT grant the implicit root to claude (codex-sandbox-specific)', () => {
+      const cmd = buildExecCommand(opts({ agent: 'claude', mode: 'edit' }));
+      expect(cmd).not.toContain(AGENTS_DIR);
+    });
+
+    it('codex headless resume grants ~/.agents via -c writable_roots (rejects --add-dir)', () => {
+      const cmd = buildExecCommand(opts({
+        agent: 'codex', mode: 'edit', resume: true, sessionId: 'abc-1', prompt: 'go',
+      }));
+      expect(cmd).not.toContain('--add-dir');
+      const ci = cmd.indexOf(codexWritableRootsConfig(AGENTS_DIR));
+      expect(ci).toBeGreaterThan(0);
+      expect(cmd[ci - 1]).toBe('-c');
+    });
+
+    it('codex interactive TUI resume grants ~/.agents via -c writable_roots (rejects --add-dir)', () => {
+      const cmd = buildExecCommand(opts({
+        agent: 'codex', mode: 'edit', resume: true, sessionId: 'abc-2', interactive: true, prompt: undefined,
+      }));
+      expect(cmd).not.toContain('--add-dir');
+      const ci = cmd.indexOf(codexWritableRootsConfig(AGENTS_DIR));
+      expect(ci).toBeGreaterThan(0);
+      expect(cmd[ci - 1]).toBe('-c');
+    });
+
+    it('codexWritableRootsConfig emits a TOML array of the quoted dir', () => {
+      expect(codexWritableRootsConfig('/home/u/.agents'))
+        .toBe('sandbox_workspace_write.writable_roots=["/home/u/.agents"]');
+    });
+  });
+
   // WORKFLOW.md frontmatter tools/mcpServers → Claude headless capability flags
   // (issue #324). buildExecCommand is pure: the command layer resolves the
   // registry / writes the mcp-config file and gates on `allowlist`; here we
@@ -1172,6 +1249,62 @@ describe('resolveMode', () => {
 });
 
 describe('resolveHeadlessMode (RUSH-1810)', () => {
+  it('warns exactly once when one run builds argv more than once', () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const warningState = {};
+    const options = opts({ agent: 'cursor', mode: 'plan', modeWarningState: warningState });
+    buildExecCommand(options);
+    buildExecCommand(options);
+    expect(write.mock.calls.filter(([line]) => String(line).includes('read-only plan mode'))).toHaveLength(1);
+    write.mockRestore();
+  });
+
+  it('warns for every agent in a fallback chain sharing one warning state', () => {
+    // runWithFallback spreads one state object across every attempt. Each agent
+    // degrades independently and the agent that actually runs is usually not the
+    // first, so a single latch silently dropped the warning that mattered.
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const shared = {};
+    buildExecCommand(opts({ agent: 'cursor', mode: 'plan', modeWarningState: shared }));
+    buildExecCommand(opts({ agent: 'antigravity', mode: 'plan', modeWarningState: shared }));
+    const warned = write.mock.calls
+      .map(([line]) => String(line))
+      .filter((line) => line.includes('(writable) instead'));
+    expect(warned).toHaveLength(2);
+    expect(warned.some((l) => l.includes('cursor'))).toBe(true);
+    expect(warned.some((l) => l.includes('antigravity'))).toBe(true);
+    write.mockRestore();
+  });
+
+  it('still warns only once for the same agent built twice in one run', () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const shared = {};
+    buildExecCommand(opts({ agent: 'cursor', mode: 'plan', modeWarningState: shared }));
+    buildExecCommand(opts({ agent: 'cursor', mode: 'plan', modeWarningState: shared }));
+    expect(
+      write.mock.calls.map(([l]) => String(l)).filter((l) => l.includes('(writable) instead')),
+    ).toHaveLength(1);
+    write.mockRestore();
+  });
+
+  it('suppresses degradation warnings for a quiet run', () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    buildExecCommand(opts({
+      agent: 'cursor',
+      mode: 'plan',
+      modeWarningState: { quiet: true },
+    }));
+    expect(write).not.toHaveBeenCalled();
+    write.mockRestore();
+  });
+
+  it('warns when codex auto resolves to edit', () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    expect(resolveHeadlessMode('codex', 'auto', false)).toBe('edit');
+    expect(write).toHaveBeenCalledWith("[agents] codex has no 'auto' mode; using 'edit'.\n");
+    write.mockRestore();
+  });
+
   it('downgrades headless plan to auto for kimi (headlessPlan:false → kimi keeps auto)', () => {
     expect(AGENTS.kimi.capabilities.headlessPlan).toBe(false);
     expect(resolveHeadlessMode('kimi', 'plan', false)).toBe('auto');

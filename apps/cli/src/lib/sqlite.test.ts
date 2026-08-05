@@ -86,7 +86,11 @@ describe('sqlite shim named-parameter binds', () => {
 
     const out = execFileSync('bun', [path.resolve(process.cwd(), 'src/index.ts'), 'sessions', '--all', '--local', '--json'], {
       cwd: process.cwd(),
-      env: { ...process.env, HOME: home, AGENTS_REAL_HOME: home },
+      // USERPROFILE too: discover.ts roots its scan at os.homedir(), which
+      // ignores HOME on Windows. With only HOME set, state.ts writes the index
+      // under the temp home while the transcript scan reads the runner's real
+      // profile, so the session is never found.
+      env: { ...process.env, HOME: home, USERPROFILE: home, AGENTS_REAL_HOME: home },
       stdio: ['ignore', 'pipe', 'inherit'],
     }).toString('utf-8');
     expect(JSON.parse(out).map((s: { id: string }) => s.id)).toContain(sessionId);

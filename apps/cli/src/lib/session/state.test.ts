@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import * as path from 'node:path';
 import type { SessionEvent } from './types.js';
 import {
   inferActivity,
@@ -13,6 +14,8 @@ import {
   extractCreatedTicket,
   structuredQuestionFromAsk,
   extractTodoProgress,
+  extractTodoProgressFromEvents,
+  extractRecentDirectoriesTouched,
 } from './state.js';
 
 const now = Date.now();
@@ -373,6 +376,56 @@ describe('inferSessionState — composed', () => {
 });
 
 describe('extractTodoProgress (RUSH-1380)', () => {
+  it('folds TaskCreate and TaskUpdate as an event log', () => {
+    const p = extractTodoProgressFromEvents([
+      tool('TaskCreate', { subject: 'Inspect loader', description: 'Read formats', activeForm: 'Inspecting loader' }),
+      tool('TaskCreate', { subject: 'Refactor loader', activeForm: 'Refactoring loader' }),
+      tool('TaskCreate', { subject: 'Remove me' }),
+      tool('TaskUpdate', { taskId: '1', status: 'completed' }),
+      tool('TaskUpdate', { taskId: '2', status: 'in_progress', subject: 'Refactor config loader' }),
+      tool('TaskUpdate', { taskId: '3', status: 'deleted' }),
+    ]);
+    expect(p).toEqual({
+      items: [
+        { content: 'Inspect loader', status: 'completed', description: 'Read formats', activeForm: 'Inspecting loader' },
+        { content: 'Refactor config loader', status: 'in_progress', activeForm: 'Refactoring loader' },
+      ],
+      done: 1,
+      total: 2,
+      activeForm: 'Refactoring loader',
+    });
+  });
+
+  it('normalizes Grok todo_write and Droid nested TodoWrite snapshots', () => {
+    const grok = extractTodoProgressFromEvents([tool('todo_write', { todos: [
+      { content: 'One', status: 'completed' }, { content: 'Two', status: 'in_progress' },
+    ] })]);
+    const droid = extractTodoProgressFromEvents([tool('TodoWrite', { input: { todos: [
+      { content: 'One', status: 'completed' }, { content: 'Two', status: 'in_progress', activeForm: 'Doing two' },
+    ] } })]);
+    expect(grok).toMatchObject({ done: 1, total: 2, activeForm: 'Two' });
+    expect(droid).toMatchObject({ done: 1, total: 2, activeForm: 'Doing two' });
+  });
+
+  // Fixture paths are built through `path` so the case reads the same on every
+  // platform. extractRecentDirectoriesTouched resolves with the host's path
+  // flavor (its inputs are always host-native: db.ts:852 bails before enrichment
+  // when filePath is empty, which is exactly how remote transcripts are indexed
+  // — hosts/session-index.ts sets `filePath: ''`). A hardcoded POSIX literal
+  // therefore breaks on win32, where `path.resolve('/repo')` is drive-rooted
+  // (`D:\repo`) while `path.isAbsolute('/repo/tests')` is already true, so the
+  // relative and absolute forms of the same directory stop string-matching and
+  // dedup silently splits one entry into two.
+  it('derives recent directories from edit/write and shell cwd events', () => {
+    const root = path.resolve('/repo');
+    const src = path.join(root, 'src');
+    const tests = path.join(root, 'tests');
+    expect(extractRecentDirectoriesTouched([
+      tool('Edit', { file_path: path.join('src', 'a.ts') }),  // relative → resolved against cwd, then dirname'd
+      tool('exec_command', { cmd: 'bun test', workdir: tests }),
+      tool('Write', { file_path: path.join(src, 'b.ts') }),   // absolute → same dir as the Edit, so it dedups
+    ], root)).toEqual([tests, src]);
+  });
   it('tallies done/total and surfaces the in-progress activeForm', () => {
     const p = extractTodoProgress({
       todos: [
@@ -486,5 +539,67 @@ describe('extractTodoProgress (RUSH-1380)', () => {
   it('no TodoWrite ⇒ no todos field', () => {
     const s = inferActivity([msg('user', 'hi'), tool('Bash', { command: 'ls' })], { pidAlive: true, mtimeMs: fresh });
     expect(s.todos).toBeUndefined();
+  });
+});
+
+describe('detectSpawnedTeam — rejects prose and flag values', () => {
+  // Every string below was pulled from a real transcript on a live index, where
+  // it had been indexed as a team name. They only became visible once the row
+  // started rendering a `team:<name>` badge, at which point a wrong name is
+  // worse than none.
+  it('ignores a backticked mention inside prose or tool output', () => {
+    const line =
+      '`agents run --device auto` and `agents teams add --device auto`\n"is_error":false\n=== installed binary carries';
+    expect(detectSpawnedTeam(line)).toBeUndefined();
+  });
+
+  it('does not run the flag-skip across a newline into another line\'s word', () => {
+    // `\s` in the flag-skip let a match starting on one line capture a bareword
+    // from the next — a heredoc of docs indexed as `team:installed`.
+    expect(detectSpawnedTeam('agents teams add --device auto\nsomething installed here')).toBeUndefined();
+  });
+
+  it('ignores a single-character doc placeholder', () => {
+    expect(detectSpawnedTeam('`agents teams create t --host <name>`')).toBeUndefined();
+  });
+
+  it('ignores an English article after the sub-verb', () => {
+    expect(detectSpawnedTeam('you can use agents teams add a teammate later')).toBeUndefined();
+  });
+
+  it('lets a value-taking flag swallow its value instead of naming the team', () => {
+    expect(detectSpawnedTeam('agents teams add --device yosemite-s0 remote-team codex "x"')).toBe('remote-team');
+    expect(detectSpawnedTeam('agents teams add my-team claude "go" --worktree auth --mode edit')).toBe('my-team');
+  });
+
+  it('still detects a real invocation after a shell separator or at a line start', () => {
+    expect(detectSpawnedTeam('cd /repo && agents teams create shipit')).toBe('shipit');
+    expect(detectSpawnedTeam('agents teams create lineage-probe\nagents teams start lineage-probe')).toBe(
+      'lineage-probe'
+    );
+  });
+});
+
+describe('detectSpawnedTeam — review findings from PR #1710', () => {
+  it('lets a QUOTED flag value be swallowed whole', () => {
+    // `-d`/`--description` normally carries a phrase. A value pattern of \S+ stops
+    // at the first space, so the rest of the phrase fell out of the flag branch and
+    // the next word became the "team name" — the same corruption class the earlier
+    // --device fix was supposed to close, still open for the commonest flag.
+    expect(detectSpawnedTeam('agents teams create -d "sessions lineage" my-team')).toBe('my-team');
+    expect(detectSpawnedTeam('agents teams create --description "redesign resume picker" my-team')).toBe('my-team');
+    expect(detectSpawnedTeam("agents teams create -d 'single quoted phrase' my-team")).toBe('my-team');
+  });
+
+  it('detects a team name that starts with a digit', () => {
+    // createTeam validates nothing (lib/teams/registry.ts), so digit-leading names
+    // are legal. Narrowing the capture class to [A-Za-z] silently stopped detecting
+    // them; the all-digits junk it was meant to stop is rejected by the guard instead.
+    expect(detectSpawnedTeam('agents teams create 2fa-migration')).toBe('2fa-migration');
+    expect(detectSpawnedTeam('agents teams create 3d-viewer')).toBe('3d-viewer');
+  });
+
+  it('still rejects an all-digits token', () => {
+    expect(detectSpawnedTeam('agents teams add --after 22 ')).toBeUndefined();
   });
 });

@@ -27,6 +27,7 @@ function runCommandsExpression(home: string, expression: string): unknown {
   const child = spawnSync(tsxBin, ['-e', `
     import {
       diffVersionCommands,
+      installCommand,
       installCommandToVersion,
       listCommandsInVersionHome,
       listPluginCommandNames,
@@ -66,10 +67,12 @@ function scaffoldInstalledVersion(home: string, agent: string, version: string):
 }
 
 /** Place a command .md in the system commands dir so listCentralCommands() finds it. */
-function writeSystemCommand(home: string, name: string, content: string): void {
+function writeSystemCommand(home: string, name: string, content: string): string {
   const dir = path.join(home, '.agents', '.system', 'commands');
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, `${name}.md`), content, 'utf-8');
+  const source = path.join(dir, `${name}.md`);
+  fs.writeFileSync(source, content, 'utf-8');
+  return source;
 }
 
 /** Path to the trash commands dir for a given HOME: home/.agents/.trash/commands */
@@ -206,6 +209,41 @@ describe('diffVersionCommands — plugin-bundled commands are source-managed', (
 });
 
 describe('version command management', () => {
+  it('installs an unmanaged Cursor command to both surfaces through the package installation path', () => {
+    const home = makeTempHome();
+    const source = writeSystemCommand(
+      home,
+      'package-command',
+      '---\nname: package-command\ndescription: Package command\n---\n\nPackage command body.',
+    );
+
+    const installed = runCommandsExpression(
+      home,
+      `installCommand(${JSON.stringify(source)}, 'cursor', 'package-command', 'copy')`
+    ) as { error?: string };
+
+    expect(installed.error).toBeUndefined();
+    expect(fs.existsSync(path.join(home, '.cursor', 'commands', 'package-command.md'))).toBe(true);
+    expect(fs.existsSync(path.join(home, '.cursor', 'skills', 'package-command', 'SKILL.md'))).toBe(true);
+  });
+
+  it('installs and removes Cursor commands from both native and generated-skill surfaces', () => {
+    const home = makeTempHome();
+    writeSystemCommand(home, 'recap', 'Summarize this session.');
+
+    const installed = runCommandsExpression(home, "installCommandToVersion('cursor', '2026.07.23-e383d2b', 'recap')") as { success: boolean };
+    const cursorHome = path.join(versionHomePath(home, 'cursor', '2026.07.23-e383d2b'), '.cursor');
+
+    expect(installed.success).toBe(true);
+    expect(fs.existsSync(path.join(cursorHome, 'commands', 'recap.md'))).toBe(true);
+    expect(fs.existsSync(path.join(cursorHome, 'skills', 'recap', 'SKILL.md'))).toBe(true);
+
+    const removed = runCommandsExpression(home, "removeCommandFromVersion('cursor', '2026.07.23-e383d2b', 'recap')") as { success: boolean };
+    expect(removed.success).toBe(true);
+    expect(fs.existsSync(path.join(cursorHome, 'commands', 'recap.md'))).toBe(false);
+    expect(fs.existsSync(path.join(cursorHome, 'skills', 'recap', 'SKILL.md'))).toBe(false);
+  });
+
   it('installs, lists, diffs, and removes generated command skills for Codex 0.117.0+', () => {
     const home = makeTempHome();
     // codex 0.117.0 uses shouldInstallCommandAsSkill (skills path, not prompts file).
@@ -240,28 +278,6 @@ describe('version command management', () => {
       ? fs.readdirSync(path.join(trashCommandsDir(home), 'codex', '0.117.0'))
       : [];
     expect(trashEntries).toHaveLength(0);
-  });
-});
-
-describe('ForgeCode native command install', () => {
-  it('installs a native .md command to ~/.forge/commands/ (not command-as-skill)', () => {
-    const home = makeTempHome();
-    // forge: format=markdown, commands: true, commandsSubdir='commands' => native .md,
-    // NOT the command-as-skill path (which fires only when commands is unsupported).
-    writeSystemCommand(home, 'my-cmd', '---\ndescription: Test command\n---\nDo something.');
-    scaffoldInstalledVersion(home, 'forge', '1.0.0');
-
-    const installed = runCommandsExpression(home, "installCommandToVersion('forge', '1.0.0', 'my-cmd', 'copy')") as { success: boolean };
-    expect(installed.success).toBe(true);
-
-    // Native command file lands under the forge version home's .forge/commands/.
-    const commandsDir = path.join(versionHomePath(home, 'forge', '1.0.0'), '.forge', 'commands');
-    expect(fs.existsSync(path.join(commandsDir, 'my-cmd.md'))).toBe(true);
-    // It must be a plain command file, not a SKILL.md wrapper.
-    expect(fs.existsSync(path.join(versionHomePath(home, 'forge', '1.0.0'), '.forge', 'skills', 'my-cmd', 'SKILL.md'))).toBe(false);
-
-    const listed = runCommandsExpression(home, "listCommandsInVersionHome('forge', '1.0.0')") as string[];
-    expect(listed).toEqual(['my-cmd']);
   });
 });
 
@@ -358,28 +374,20 @@ describe('removeCommandFromVersion soft-delete', () => {
     expect(trashedContent).toContain('Do something.');
   });
 
-  it('moves a .toml command to trash for gemini (format=toml)', () => {
+  it('skips command installs for hard-deprecated gemini', () => {
     const home = makeTempHome();
-    // gemini: format=toml (agents.ts:215), commandsSubdir='commands' (agents.ts:211)
     writeSystemCommand(home, 'plan', '---\ndescription: Plan something\n---\nPlan the work.');
     scaffoldInstalledVersion(home, 'gemini', '1.0.0');
 
-    runCommandsExpression(home, "installCommandToVersion('gemini', '1.0.0', 'plan', 'copy')");
+    const install = runCommandsExpression(home, "installCommandToVersion('gemini', '1.0.0', 'plan', 'copy')") as { success: boolean; skipped?: boolean; skipReason?: string };
 
     const commandsDir = path.join(versionHomePath(home, 'gemini', '1.0.0'), '.gemini', 'commands');
-    expect(fs.existsSync(path.join(commandsDir, 'plan.toml'))).toBe(true);
-
-    const result = runCommandsExpression(home, "removeCommandFromVersion('gemini', '1.0.0', 'plan')") as { success: boolean };
-    expect(result.success).toBe(true);
-
+    expect(install).toEqual({
+      success: true,
+      skipped: true,
+      skipReason: 'gemini@1.0.0: /plan not supported for this agent version',
+    });
     expect(fs.existsSync(path.join(commandsDir, 'plan.toml'))).toBe(false);
-
-    // Trash must use .toml extension (commands.ts:400: ext = AGENTS[agent].format === 'toml' ? '.toml' : '.md')
-    const trashSubDir = path.join(trashCommandsDir(home), 'gemini', '1.0.0', 'plan');
-    expect(fs.existsSync(trashSubDir)).toBe(true);
-    const trashFiles = fs.readdirSync(trashSubDir);
-    expect(trashFiles).toHaveLength(1);
-    expect(trashFiles[0]).toMatch(/^plan\.toml\.\d{4}-\d{2}-\d{2}T/);
   });
 
   it('returns success without touching trash when the command does not exist', () => {

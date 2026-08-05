@@ -13,6 +13,7 @@ import {
   loadPluginManifest,
   discoverPluginCommands,
   discoverPluginAgentDefs,
+  discoverPluginWorkflows,
   discoverPluginBin,
   discoverPluginHooks,
   expandPluginVars,
@@ -26,9 +27,6 @@ import {
   inspectPluginCapabilities,
   pluginCapabilityLabels,
   pluginResourceGroups,
-  installGeminiPlugin,
-  isGeminiPluginInstalled,
-  removeGeminiPlugin,
   installGoosePlugin,
   isGoosePluginInstalled,
   installHermesPlugin,
@@ -60,6 +58,7 @@ function makeDiscoveredPlugin(root: string, manifest: PluginManifest): Discovere
     scripts: [],
     commands: [],
     agentDefs: [],
+    workflows: [],
     memory: [],
 
     bin: [],
@@ -68,6 +67,10 @@ function makeDiscoveredPlugin(root: string, manifest: PluginManifest): Discovere
     monitors: [],
     hasMcp: false,
     hasSettings: false,
+    // Fixture roots here are synthetic paths, not real plugin/repo layouts —
+    // repoRoot is unused by these tests, so a plain non-git value is fine.
+    repoRoot: path.dirname(path.dirname(root)),
+    snapshotSha: undefined,
   };
 }
 
@@ -127,80 +130,6 @@ describe('loadPluginManifest', () => {
   });
 });
 
-describe('Gemini extension plugin install', () => {
-  let tmpDir: string;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-test-'));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it('copies a plugin bundle to .gemini/extensions with gemini-extension.json', () => {
-    const root = makePluginRoot(tmpDir, { name: 'gem-ext', version: '1.2.3', description: 'Gemini extension' });
-    fs.mkdirSync(path.join(root, 'commands'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'commands', 'ship.md'), '# Ship\n');
-    fs.writeFileSync(path.join(root, '.mcp.json'), JSON.stringify({
-      mcpServers: {
-        demo: {
-          command: 'node',
-          args: ['${CLAUDE_PLUGIN_ROOT}/server.js'],
-        },
-      },
-    }));
-
-    const plugin = makeDiscoveredPlugin(root, { name: 'gem-ext', version: '1.2.3', description: 'Gemini extension' });
-    plugin.commands = ['ship'];
-    plugin.hasMcp = true;
-    const versionHome = path.join(tmpDir, 'home');
-
-    expect(installGeminiPlugin(plugin, versionHome)).toBe(true);
-    expect(isGeminiPluginInstalled('gem-ext', versionHome)).toBe(true);
-
-    const dest = path.join(versionHome, '.gemini', 'extensions', 'gem-ext');
-    expect(fs.existsSync(path.join(dest, 'commands', 'ship.md'))).toBe(true);
-    const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'gemini-extension.json'), 'utf-8'));
-    expect(manifest).toEqual({
-      name: 'gem-ext',
-      version: '1.2.3',
-      description: 'Gemini extension',
-      mcpServers: {
-        demo: {
-          command: 'node',
-          args: ['${extensionPath}/server.js'],
-        },
-      },
-    });
-
-    expect(removeGeminiPlugin('gem-ext', versionHome)).toBe(true);
-    expect(isGeminiPluginInstalled('gem-ext', versionHome)).toBe(false);
-  });
-
-  it('does not sync live Gemini extensions with executable surfaces unless explicitly allowed', async () => {
-    const root = makePluginRoot(tmpDir, { name: 'gem-ext', version: '1.2.3', description: 'Gemini extension' });
-    fs.writeFileSync(path.join(root, '.mcp.json'), JSON.stringify({
-      mcpServers: {
-        demo: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/server.js'] },
-      },
-    }));
-
-    const plugin = makeDiscoveredPlugin(root, { name: 'gem-ext', version: '1.2.3', description: 'Gemini extension' });
-    plugin.hasMcp = true;
-    const versionHome = path.join(tmpDir, 'home');
-
-    const { syncPluginToVersion } = await import('./plugins.js');
-    const untrusted = syncPluginToVersion(plugin, 'gemini', versionHome);
-    expect(untrusted.success).toBe(false);
-    expect(isGeminiPluginInstalled('gem-ext', versionHome)).toBe(false);
-
-    const trusted = syncPluginToVersion(plugin, 'gemini', versionHome, { allowExecSurfaces: true });
-    expect(trusted.success).toBe(true);
-    expect(isGeminiPluginInstalled('gem-ext', versionHome)).toBe(true);
-  });
-});
-
 // ─── Symlink-escape hardening (RUSH-1755) ───────────────────────────────────────
 
 describe('plugin install strips symlinks escaping the install root (RUSH-1755)', () => {
@@ -212,32 +141,6 @@ describe('plugin install strips symlinks escaping the install root (RUSH-1755)',
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it('Gemini: drops a .agents-cli-managed symlink pointing outside destRoot and writes a real marker instead', () => {
-    // Attacker's file the symlink aims at, seeded with known contents.
-    const secretDir = path.join(tmpDir, 'outside');
-    fs.mkdirSync(secretDir, { recursive: true });
-    const secret = path.join(secretDir, 'victim');
-    fs.writeFileSync(secret, 'ORIGINAL', 'utf-8');
-
-    const root = makePluginRoot(tmpDir, { name: 'evil', version: '1.0.0', description: 'Evil' });
-    // Malicious symlink: the follow-up writeFileSync(.agents-cli-managed) would
-    // write THROUGH this link to the attacker path without the fix.
-    fs.symlinkSync(secret, path.join(root, '.agents-cli-managed'), 'file');
-
-    const plugin = makeDiscoveredPlugin(root, { name: 'evil', version: '1.0.0', description: 'Evil' });
-    const versionHome = path.join(tmpDir, 'home');
-
-    expect(installGeminiPlugin(plugin, versionHome)).toBe(true);
-
-    const dest = path.join(versionHome, '.gemini', 'extensions', 'evil');
-    const marker = path.join(dest, '.agents-cli-managed');
-    // The write-through was neutralized: the outside file is untouched...
-    expect(fs.readFileSync(secret, 'utf-8')).toBe('ORIGINAL');
-    // ...and the marker in destRoot is a real regular file (not a symlink).
-    expect(fs.lstatSync(marker).isSymbolicLink()).toBe(false);
-    expect(fs.readFileSync(marker, 'utf-8')).toContain('plugin=evil');
   });
 
   // Creating symlinks on Windows needs elevation/Developer Mode, so the CI
@@ -378,6 +281,42 @@ describe('discoverPlugins', () => {
       expect(plugins[0]?.root).toBe(path.join(pluginsDir, 'linked-plugin'));
       // Provenance: a user-repo plugin is stamped with the canonical marketplace.
       expect(plugins[0]?.marketplace).toBe('agents-cli');
+      // #12: repoRoot is the DotAgents repo containing plugins/ (its
+      // grandparent), and snapshotSha is undefined for this plain (non-git) temp dir.
+      expect(plugins[0]?.repoRoot).toBe(tmpDir);
+      expect(plugins[0]?.snapshotSha).toBeUndefined();
+    } finally {
+      vi.doUnmock('./state.js');
+      vi.resetModules();
+    }
+  });
+
+  it('#12: repoRoot/snapshotSha resolve to the real DotAgents repo commit when tmpDir IS a git repo', async () => {
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('git', ['init', '-q', tmpDir]);
+    execFileSync('git', ['-C', tmpDir, 'config', 'user.email', 'test@example.com']);
+    execFileSync('git', ['-C', tmpDir, 'config', 'user.name', 'Test']);
+    execFileSync('git', ['-C', tmpDir, 'commit', '--allow-empty', '-q', '-m', 'init']);
+    const expectedSha = execFileSync('git', ['-C', tmpDir, 'rev-parse', '--short', 'HEAD']).toString().trim();
+
+    makePluginRoot(tmpDir, { name: 'git-tracked-plugin' });
+    fs.renameSync(path.join(tmpDir, 'test-plugin'), path.join(pluginsDir, 'git-tracked-plugin'));
+
+    vi.resetModules();
+    vi.doMock('./state.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('./state.js')>();
+      return { ...actual, getPluginsDir: () => pluginsDir, getEnabledExtraRepos: () => [], getProjectPluginsDir: () => null, getSystemPluginsDir: () => path.join(tmpDir, 'no-system') };
+    });
+
+    try {
+      const { discoverPlugins: discover } = await import('./plugins.js');
+      const { _resetSnapshotShaCacheForTest } = await import('./git.js');
+      _resetSnapshotShaCacheForTest();
+      const plugins = discover();
+      expect(plugins.map((plugin) => plugin.name)).toEqual(['git-tracked-plugin']);
+      expect(plugins[0]?.repoRoot).toBe(tmpDir);
+      expect(plugins[0]?.snapshotSha).toBe(expectedSha);
+      _resetSnapshotShaCacheForTest();
     } finally {
       vi.doUnmock('./state.js');
       vi.resetModules();
@@ -610,6 +549,33 @@ describe('discoverPluginCommands', () => {
 });
 
 // ─── discoverPluginAgentDefs ──────────────────────────────────────────────────
+
+describe('discoverPluginWorkflows', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-plugin-wf-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns empty when workflows/ is missing', () => {
+    expect(discoverPluginWorkflows(tmpDir)).toEqual([]);
+  });
+
+  it('lists directories that contain WORKFLOW.md', () => {
+    const wfDir = path.join(tmpDir, 'workflows', 'ship-it');
+    fs.mkdirSync(wfDir, { recursive: true });
+    fs.writeFileSync(path.join(wfDir, 'WORKFLOW.md'), '---\ndescription: ship\n---\n');
+    fs.mkdirSync(path.join(tmpDir, 'workflows', 'no-manifest'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, 'workflows', '.hidden'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, 'workflows', '.hidden', 'WORKFLOW.md'), '---\ndescription: x\n---\n');
+
+    expect(discoverPluginWorkflows(tmpDir)).toEqual(['ship-it']);
+  });
+});
 
 describe('discoverPluginAgentDefs', () => {
   let tmpDir: string;
@@ -1060,6 +1026,7 @@ describe('syncPluginToVersion (native marketplace install)', () => {
       scripts: [],
       commands: [],
       agentDefs: [],
+      workflows: [],
       memory: [],
 
       bin: [],
@@ -1215,6 +1182,7 @@ describe('syncPluginToVersion (droid native marketplace install)', () => {
       scripts: [],
       commands: [],
       agentDefs: [],
+      workflows: [],
       memory: [],
 
       bin: [],
@@ -1346,7 +1314,7 @@ describe('syncPluginToVersion (per-marketplace routing)', () => {
     const plugin: DiscoveredPlugin = {
       name, root: pluginRoot,
       manifest: { name, version: '1.0.0', description: 'routed' },
-      skills: [], hooks: [], scripts: [], commands: [], agentDefs: [], memory: [],
+      skills: [], hooks: [], scripts: [], commands: [], agentDefs: [], workflows: [], memory: [],
  bin: [],
       mcpServers: [], lspServers: [], monitors: [],
       hasMcp: false, hasSettings: false,
@@ -1417,7 +1385,7 @@ describe('syncPluginToVersion (per-marketplace routing)', () => {
         {
           name: 'code', root: pluginRoot,
           manifest: { name: 'code', version: '1.0.0', description: marketplace },
-          skills: [], hooks: [], scripts: [], commands: [], agentDefs: [], memory: [],
+          skills: [], hooks: [], scripts: [], commands: [], agentDefs: [], workflows: [], memory: [],
  bin: [],
           mcpServers: [], lspServers: [], monitors: [], hasMcp: false, hasSettings: false,
           marketplace,
@@ -1461,7 +1429,7 @@ describe('removePluginFromVersion', () => {
     const plugin: DiscoveredPlugin = {
       name: 'mp', root: pluginRoot,
       manifest: { name: 'mp', version: '1.0.0', description: 'test' },
-      skills: [], hooks: [], scripts: [], commands: [], agentDefs: [], memory: [],
+      skills: [], hooks: [], scripts: [], commands: [], agentDefs: [], workflows: [], memory: [],
  bin: [],
       mcpServers: [], lspServers: [], monitors: [],
       hasMcp: false, hasSettings: false,
@@ -1611,6 +1579,7 @@ describe('syncPluginToVersion (opencode TS modules)', () => {
       scripts: [],
       commands: [],
       agentDefs: [],
+      workflows: [],
       memory: [],
 
       bin: [],
@@ -1719,6 +1688,7 @@ describe('syncPluginToVersion (cursor native marketplace install)', () => {
       scripts: [],
       commands: [],
       agentDefs: [],
+      workflows: [],
       memory: [],
 
       bin: [],
@@ -1814,6 +1784,7 @@ describe('syncPluginToVersion (goose Open Plugins install)', () => {
       scripts: [],
       commands: [],
       agentDefs: [],
+      workflows: [],
       memory: [],
 
       bin: [],
@@ -1889,6 +1860,7 @@ describe('syncPluginToVersion (hermes plugin install)', () => {
       scripts: [],
       commands: [],
       agentDefs: [],
+      workflows: [],
       memory: [],
       bin: [],
       mcpServers: [],

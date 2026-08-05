@@ -4,8 +4,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
-import { renderLeasedBoxesSection } from './ssh.js';
+import { renderLeasedBoxesSection, showLeasedBoxesSection, raceFleetPingDeadline } from './ssh.js';
 import type { CrabboxBox } from '../lib/crabbox/cli.js';
+import { fanOutDevices, type FanOutDeviceTarget } from '../lib/devices/fleet.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const INDEX = path.join(REPO_ROOT, 'src', 'index.ts');
@@ -93,6 +94,50 @@ describe('ssh askpass', () => {
   });
 });
 
+describe('runFleetPing overall-deadline (RUSH-2041)', () => {
+  // Calls the real exported raceFleetPingDeadline with a genuinely hanging
+  // fanOut promise. The only test double is the fanOut (the network boundary) —
+  // the deadline logic itself is the shipped code path, not a reimplementation.
+  it('exits promptly and marks all remotes failed/skipped when the overall deadline fires before probes settle', async () => {
+    const OVERALL_TIMEOUT_MS = 50;
+
+    const remoteTargets: FanOutDeviceTarget[] = [
+      { name: 'worker-a' },                            // probeable: hangs forever
+      { name: 'worker-b' },                            // probeable: hangs forever
+      { name: 'offline-c', skip: 'offline' as const }, // pre-skipped
+    ];
+
+    // A fanOut that never settles — stands in for a hung sshExecAsync call.
+    // The per-device timeout is longer than OVERALL_TIMEOUT_MS so it can't
+    // resolve the race before the overall deadline fires.
+    const hangingFanOut = new Promise<Awaited<ReturnType<typeof fanOutDevices<string[], FanOutDeviceTarget>>>>(() => {
+      /* intentionally never resolves */
+    });
+
+    const start = Date.now();
+    const remote = await raceFleetPingDeadline(hangingFanOut, remoteTargets, OVERALL_TIMEOUT_MS);
+    const elapsed = Date.now() - start;
+
+    // Must resolve well inside the overall budget — not hang indefinitely.
+    expect(elapsed).toBeLessThan(OVERALL_TIMEOUT_MS + 50);
+
+    // Every remote target comes back as failed or skipped — none are missing.
+    expect(remote).toHaveLength(3);
+    const byName = Object.fromEntries(remote.map((r) => [r.name, r]));
+
+    expect(byName['worker-a'].status).toBe('failed');
+    expect(byName['worker-a'].error).toBe('fleet ping overall deadline exceeded');
+
+    expect(byName['worker-b'].status).toBe('failed');
+    expect(byName['worker-b'].error).toBe('fleet ping overall deadline exceeded');
+
+    // The pre-skipped device keeps its skip status and reason, no error.
+    expect(byName['offline-c'].status).toBe('skipped');
+    expect(byName['offline-c'].reason).toBe('offline');
+    expect(byName['offline-c'].error).toBeUndefined();
+  }, 2000);
+});
+
 describe('renderLeasedBoxesSection — F4 devices "Leased boxes" (RUSH-1923)', () => {
   const NOW = 1_700_000_000;
   const box = (over: Partial<CrabboxBox> = {}): CrabboxBox => ({
@@ -128,5 +173,101 @@ describe('renderLeasedBoxesSection — F4 devices "Leased boxes" (RUSH-1923)', (
     expect(flat).not.toContain('203.0.113.9');
     expect(flat).toContain('agents run --box <slug>');
     expect(flat).toContain('agents lease stop <slug>');
+  });
+});
+
+describe('showLeasedBoxesSection — devices list leased-boxes gate (RUSH-2190)', () => {
+  // The section load scans the keychain for bundle credentials and can raise a
+  // Touch ID sheet after the table prints, so the default list must never reach
+  // for it. These pin the exact gate so a refactor can't silently reopen it.
+  it('is off by default and off for --json-style calls (no flags)', () => {
+    expect(showLeasedBoxesSection({})).toBe(false);
+    expect(showLeasedBoxesSection({ stats: true })).toBe(false);
+  });
+
+  it('is on only with an explicit --all', () => {
+    expect(showLeasedBoxesSection({ all: true })).toBe(true);
+    expect(showLeasedBoxesSection({ all: true, stats: true })).toBe(true);
+  });
+
+  it('--no-stats stays a hard opt-out even with --all', () => {
+    expect(showLeasedBoxesSection({ all: true, stats: false })).toBe(false);
+    expect(showLeasedBoxesSection({ stats: false })).toBe(false);
+  });
+});
+
+describe('devices auto-launch preferences', () => {
+  // tests/setup.ts pins AGENTS_DEVICES_DIR for hermeticity, and run() forwards
+  // the whole env — so the spawned CLI reads its registry from there, NOT from
+  // the fixture HOME. Pin it at the fixture's devices dir in both the seed and
+  // the child env so the test exercises one registry under either runner.
+  function devicesDir(): string {
+    return path.join(testHome, '.agents', '.history', 'devices');
+  }
+
+  function devicesEnv(): Record<string, string> {
+    return { AGENTS_DEVICES_DIR: devicesDir() };
+  }
+
+  function autoLaunchPath(): string {
+    return path.join(devicesDir(), 'auto-launch.json');
+  }
+
+  // These commands refuse a device that is not registered, so the fixture has
+  // to contain one — seeding the registry the CLI reads is the cheapest way to
+  // exercise the real command path end to end.
+  function registerDevice(name: string): void {
+    fs.mkdirSync(devicesDir(), { recursive: true });
+    const now = new Date().toISOString();
+    fs.writeFileSync(
+      path.join(devicesDir(), 'registry.json'),
+      JSON.stringify({
+        [name]: {
+          name,
+          platform: 'macos',
+          shell: 'posix',
+          user: 'someone',
+          address: { via: 'tailscale', dnsName: `${name}.example.ts.net` },
+          auth: { method: 'key' },
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    );
+  }
+
+  it('disable and enable persist through the CLI', () => {
+    guardedHome();
+    registerDevice('zion');
+
+    expect(run(['devices', 'disable', 'zion'], devicesEnv()).status).toBe(0);
+    const disabled = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
+    expect(disabled.devices.zion).toEqual({ enabled: false });
+
+    expect(run(['devices', 'enable', 'zion'], devicesEnv()).status).toBe(0);
+    const enabled = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
+    expect(enabled.devices.zion).toBeUndefined();
+  });
+
+  it('prefer and unprefer persist through the CLI', () => {
+    guardedHome();
+    registerDevice('mac-mini');
+
+    expect(run(['devices', 'prefer', 'mac-mini'], devicesEnv()).status).toBe(0);
+    const preferred = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
+    expect(preferred.devices['mac-mini']).toEqual({ preferred: true });
+
+    expect(run(['devices', 'unprefer', 'mac-mini'], devicesEnv()).status).toBe(0);
+    const unpreferred = JSON.parse(fs.readFileSync(autoLaunchPath(), 'utf-8'));
+    expect(unpreferred.devices['mac-mini']).toBeUndefined();
+  });
+
+  it('refuses a device that is not registered instead of writing a dead entry', () => {
+    guardedHome();
+    registerDevice('zion');
+    const r = run(['devices', 'disable', 'zoin'], devicesEnv());
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/Unknown device 'zoin'/);
+    expect(fs.existsSync(autoLaunchPath())).toBe(false);
   });
 });

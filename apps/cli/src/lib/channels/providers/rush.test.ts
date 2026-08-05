@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { buildRushSendArgs, rushProviders, RUSH_CHANNELS } from './rush.js';
+import {
+  buildRushOwnerMessageArgs,
+  buildRushSendArgs,
+  rushProviders,
+  RUSH_CHANNELS,
+} from './rush.js';
 
 describe('buildRushSendArgs', () => {
   it('builds the rush send argv with required channel/id and --json', () => {
-    const args = buildRushSendArgs('telegram', 'hello', { target: '6078999250' });
-    expect(args).toEqual(['send', 'hello', '--channel', 'telegram', '--id', '6078999250', '--json']);
+    const args = buildRushSendArgs('telegram', 'hello', { target: 'chat-123' });
+    expect(args).toEqual(['send', 'hello', '--channel', 'telegram', '--id', 'chat-123', '--json']);
   });
 
   it('appends --thread and repeatable --attachment', () => {
@@ -21,6 +26,12 @@ describe('buildRushSendArgs', () => {
   });
 });
 
+describe('buildRushOwnerMessageArgs', () => {
+  it('uses the verified owner-scoped iMessage command', () => {
+    expect(buildRushOwnerMessageArgs('hello')).toEqual(['message', 'send', '--text', 'hello']);
+  });
+});
+
 describe('rushProviders', () => {
   it('exposes one provider per rush channel, named by channel', () => {
     expect(rushProviders.map((p) => p.name).sort()).toEqual([...RUSH_CHANNELS].sort());
@@ -28,9 +39,21 @@ describe('rushProviders', () => {
 
   it('dry-run short-circuits without shelling out', async () => {
     const tg = rushProviders.find((p) => p.name === 'telegram')!;
-    const res = await tg.send('hi', { target: '6078999250', dryRun: true });
+    const res = await tg.send('hi', { target: 'chat-123', dryRun: true });
     expect(res.ok).toBe(true);
     expect(res.channel).toBe('telegram');
-    expect(res.id).toBe('6078999250');
+    expect(res.id).toBe('chat-123');
+  });
+
+  it('builds an addressable gateway command for explicit iMessage recipients', () => {
+    expect(buildRushSendArgs('imessage', 'hello', { target: '+18055550100' })).toEqual([
+      'send',
+      'hello',
+      '--channel',
+      'imessage',
+      '--id',
+      '+18055550100',
+      '--json',
+    ]);
   });
 });

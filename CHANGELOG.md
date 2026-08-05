@@ -2,7 +2,32 @@
 
 ## Unreleased
 
+- **`agents devices list` moves "Leased boxes" behind `--all`; the default list no longer touches the keychain or pops Touch ID (RUSH-2190).** See
+  `apps/cli/.changelog/next/devices-list-all-flag.md`.
+
+- **Scheduled routines no longer overlap or outlive their configured timeout (RUSH-2186).** See
+  `apps/cli/CHANGELOG.md`.
+
+- **Codex hook sync no longer leaves startup warnings after upgrades.** See
+  `apps/cli/.changelog/next/codex-hook-sync-warnings.md`.
+
+- **Session lifecycle status is explicit (RUSH-2066).** `agents sessions --active`
+  now reports dead processes as `closed` and days-stale/dangling sessions as
+  `abandoned`, and `agents hq floor` no longer renders those rows as idle. See
+  `apps/cli/CHANGELOG.md`.
+
+- **Project routines opt-in + host placement strategy (RUSH-2035).** `agents routines enable-project` / `sync` / `--placement local|host|fleet|cloud`. See `apps/cli/CHANGELOG.md`.
+
+- Secrets: name the requesting harness, bundle, reason, and duration in macOS
+  Touch ID prompts, and scope cached unlocks to the harness type, with
+  `secrets unlock --for <agent>`. Agent-triggered approval is **not** part of
+  this: an agent launch never raises a sheet, it fails fast naming
+  `agents secrets unlock <bundle>`. Only an `agents secrets` command run in a plain
+  shell prompts; beneath an agent it inherits `AGENTS_RUNTIME` and refuses too.
+
 ### Added
+
+- **`ag view grok` now shows usage limits.** It parses the latest billing period config and subscription tier from Grok's local `unified.jsonl` log, avoiding the need for an inaccessible network endpoint.
 
 - **`agents sessions migrate` (alias `detach`) relocates a RUNNING session onto another
   machine, then stops the source here (RUSH-1977).** Move the live agent — not just its
@@ -210,6 +235,13 @@
   `apps/cli/src/lib/crabbox/lease.ts`, `apps/cli/src/lib/types.ts`.
 
 ### Fixed
+
+- **Factory Floor cards keep their task context and their section counts agree.**
+  Cross-host sessions now recover the original task from `topic`, legacy `prompt`,
+  `firstUserMessage`, label, worktree, or branch before showing a clear `No topic`
+  placeholder. Background/headless runs are hidden by default and available through
+  the new **Background** feed toggle. One view-model partition now supplies both the
+  rendered Needs you / active / done cards and their displayed counts (RUSH-2031).
 
 - **`agents run <agent> --fallback …` no longer disables account rotation.**
   A `--fallback` chain skipped strategy resolution entirely ("strategy balanced

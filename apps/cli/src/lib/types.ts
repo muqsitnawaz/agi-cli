@@ -7,12 +7,32 @@
  */
 
 import type { CloudProviderId } from './cloud/types.js';
+import type { FeedBroadcastConfig } from './feed-broadcast.js';
 
-/** Unique identifier for a supported AI coding agent. */
-export type AgentId = 'claude' | 'codex' | 'gemini' | 'cursor' | 'opencode' | 'openclaw' | 'copilot' | 'amp' | 'kiro' | 'goose' | 'antigravity' | 'grok' | 'kimi' | 'droid' | 'hermes' | 'forge';
+/** Unique identifier for a current or legacy AI coding agent. */
+export type AgentId = 'claude' | 'codex' | 'gemini' | 'cursor' | 'opencode' | 'openclaw' | 'copilot' | 'amp' | 'kiro' | 'goose' | 'antigravity' | 'grok' | 'kimi' | 'droid' | 'hermes' | 'pi';
 
 /** How `agents run <agent>` chooses an installed version when none is pinned. */
 export type RunStrategy = 'pinned' | 'available' | 'balanced';
+
+/**
+ * Reserved `<agent>` keyword for `agents run auto` — full-auto dispatch:
+ * host (14d launch affinity) → harness (best-account headroom, weighted) →
+ * account (balanced). Lives in lib (not commands/) because both the run
+ * command (exec.ts) and the host dispatch layer (hosts/dispatch.ts, which
+ * arms the chain-hop guard for remote `run auto`) must agree on it.
+ */
+export const RUN_AUTO_KEYWORD = 'auto';
+
+/**
+ * Env var a host dispatcher exports into the remote SHELL when it dispatches
+ * `agents run auto`: tells the remote CLI its host layer is already resolved,
+ * so it must not re-run affinity and chain-hop to a third host. It rides the
+ * shell-export prelude (hosts/dispatch.ts `remoteRunShellPrelude`) because
+ * `--env` flags only reach the spawned AGENT's env — the remote CLI's own
+ * process.env (which exec.ts `runAutoDefaultsToAffinity` reads) never sees them.
+ */
+export const RUN_AUTO_HOST_RESOLVED_ENV = 'AGENTS_RUN_AUTO_HOST_RESOLVED';
 
 /** Per-agent run strategy config. */
 export interface AgentRunConfig {
@@ -70,7 +90,7 @@ export interface BudgetConfig {
 }
 
 /** Preview features that users can opt into via `agents beta`. */
-export type BetaFeatureName = 'drive' | 'factory' | 'session-sync';
+export type BetaFeatureName = 'factory';
 
 /** Subset of chalk color names used for agent-specific terminal output. */
 export type ChalkColor = 'magenta' | 'green' | 'blue' | 'cyan' | 'yellowBright' | 'redBright' | 'whiteBright' | 'blueBright' | 'greenBright' | 'magentaBright' | 'cyanBright';
@@ -118,11 +138,11 @@ export interface AgentConfig {
    */
   cloudProvider?: CloudProviderId;
   /**
-   * Set when the upstream vendor has retired this agent's CLI. Presence marks
-   * the agent deprecated (it is never blocked from use); `warnAgentDeprecated`
-   * surfaces this in yellow whenever a user installs the agent or adds it to a
-   * team. Point `replacement` at the successor agent so the warning can suggest
-   * a migration path.
+   * Set when the upstream vendor has retired this agent's CLI. A warning-only
+   * deprecation leaves the agent manageable; a hard deprecation keeps the id
+   * parseable for legacy state but excludes it from install/import/sync targets.
+   * Point `replacement` at the successor agent so messages can suggest a
+   * migration path.
    */
   deprecated?: {
     /** Vendor that retired it, e.g. "Google". */
@@ -135,6 +155,8 @@ export interface AgentConfig {
     replacement?: AgentId;
     /** Announcement URL for the deprecation. */
     url?: string;
+    /** Hard-deprecated agents are retained only for legacy reads. */
+    hard?: boolean;
   };
   capabilities: {
     hooks: Capability;
@@ -187,6 +209,15 @@ export interface AgentConfig {
      * rules file (inline all @-imports) when syncing it into the version home.
      */
     rulesImports?: boolean;
+    /**
+     * Whether the agent can open an interactive REPL session when launched with
+     * NO prompt (bare invocation). Agents whose CLI exits immediately without a
+     * prompt (e.g. cursor-agent) must declare `false` here; agents that open a
+     * TUI/REPL with no args declare `true`. Used by the `auto` harness picker
+     * to avoid routing a prompt-less interactive run to a harness that would
+     * exit silently (RUSH-2185, EXEC-23a).
+     */
+    interactiveRepl?: Capability;
   };
 }
 
@@ -202,7 +233,7 @@ export type Capability = boolean | { since?: string; until?: string };
 export type RulesCapability = false | { file: string };
 
 /** Names of every gateable capability on AgentConfig. */
-export type CapabilityName = 'hooks' | 'mcp' | 'mcpHttp' | 'mcpHeaders' | 'allowlist' | 'skills' | 'commands' | 'plugins' | 'subagents' | 'rules' | 'workflows' | 'memory';
+export type CapabilityName = 'hooks' | 'mcp' | 'mcpHttp' | 'mcpHeaders' | 'allowlist' | 'skills' | 'commands' | 'plugins' | 'subagents' | 'rules' | 'workflows' | 'memory' | 'interactiveRepl';
 /**
  * Permission modes controlling agent autonomy.
  *   plan  read-only investigation; no writes, no shell side-effects
@@ -297,6 +328,12 @@ export type HookCache = string | HookCacheConfig;
 export interface ManifestHook {
   script: string;
   events: string[];
+  /**
+   * Seconds before the hook is killed (default 600). In agents.yaml this may be
+   * written as a bare number (seconds) or a duration string (`5s`, `2m`,
+   * `1h30m`); `parseHookManifest` normalizes it to a seconds number here, so
+   * consumers always see a number.
+   */
   timeout?: number;
   matcher?: string;
   /** @deprecated Use the agent capability table; field is ignored. */
@@ -532,10 +569,16 @@ export interface RegistrySearchResult {
 
 /** A package that has been resolved from a registry and is ready to install. */
 export interface ResolvedPackage {
-  type: 'mcp' | 'skill' | 'git';
+  /** `plugin` is Phase 5 packaging: `agents install plugin:<spec>` → plugins install. */
+  type: 'mcp' | 'skill' | 'git' | 'plugin';
   source: string;
   mcpEntry?: McpServerEntry;
   skillEntry?: SkillEntry;
+  /**
+   * Plugin install spec (`name@url`, path, or bare source) when `type === 'plugin'`.
+   * Same grammar as `agents plugins install <spec>`.
+   */
+  pluginSpec?: string;
 }
 
 /** Categories of resources that can be synced into an agent version home. */
@@ -639,6 +682,12 @@ export interface DiscoveredPlugin {
   commands: string[];
   /** Subagent .md files in the plugin's agents/ directory (names without extension). */
   agentDefs: string[];
+  /**
+   * Workflow directory names under the plugin's `workflows/` (each must contain
+   * WORKFLOW.md). Phase 5 packaging: plugins may package workflows as entrypoints;
+   * `agents run <name>` resolves them via project > user > plugin > extra > system.
+   */
+  workflows: string[];
   /** Memory fact basenames from the plugin's memory/ directory (without .md). */
   memory: string[];
   /** Executable files in the plugin's bin/ directory. */
@@ -660,6 +709,20 @@ export interface DiscoveredPlugin {
    * (e.g. workflow-scoped) — those default to the user marketplace on sync.
    */
   marketplace?: string;
+  /**
+   * Absolute path to the DotAgents repo root containing this plugin — the
+   * grandparent of `root` (`<repo>/plugins/<name>` → `<repo>`), true for every
+   * marketplace kind (user/system/extra/project). DotAgents repos are
+   * git-tracked (plugins.ts), so this pairs with {@link snapshotSha}.
+   */
+  repoRoot: string;
+  /**
+   * Short HEAD sha of `repoRoot`'s git checkout, lazily resolved (a getter,
+   * not computed at discovery time) and memoized per repoRoot
+   * (`git.ts` `resolveSnapshotSha`) — see `ResolvedResource.snapshotSha` for
+   * the identical rationale. `undefined` when `repoRoot` isn't a git repo.
+   */
+  readonly snapshotSha: string | undefined;
 }
 
 /**
@@ -753,6 +816,27 @@ export interface BrandConfig {
   enabled: boolean;
 }
 
+/**
+ * An actor -- a responsible entity behind a run (a human today, a top-level
+ * agent later). Keyed in the `actors:` map by a short slug. Every field is
+ * optional enrichment over what `tailscale whois` already resolves: pin a
+ * preferred git email, add a github handle, or override the display name.
+ * `login` is the tailnet login-name to match against (defaults to the map key).
+ * See lib/actor.ts.
+ */
+export interface ActorConfig {
+  /** 'human' (default) or 'agent'. Only humans get personal git credit. */
+  kind?: 'human' | 'agent';
+  /** Display + git author name. Overrides the tailnet DisplayName. */
+  name?: string;
+  /** Git author email. Overrides the tailnet login email. */
+  email?: string;
+  /** GitHub handle, for PR attribution. */
+  github?: string;
+  /** Tailnet login-name this entry matches. Defaults to the map key. */
+  login?: string;
+}
+
 /** Top-level structure of ~/.agents/.system/agents.yaml -- the CLI's persistent state. */
 export interface Meta {
   agents?: Partial<Record<AgentId, string>>;
@@ -769,6 +853,26 @@ export interface Meta {
   isolatedAgents?: Partial<Record<AgentId, string>>;
   run?: RunConfig;
   /**
+   * Cost-tier overrides for `--model cheap|default|best|ultra`. Keyed by the same
+   * `<agent>:<version>` selector run.defaults uses (`kimi:*`, `kimi:0.19.2`); each
+   * value maps a tier to a concrete model id. Written by `agents models tier set`,
+   * never hand-edited. Resolution: exact version selector wins over `<agent>:*`,
+   * which wins over the auto-ranking. See lib/model-tier-overrides.ts.
+   */
+  model?: {
+    tiers?: Record<string, Partial<Record<'cheap' | 'default' | 'best' | 'ultra', string>>>;
+  };
+  /**
+   * Daemon watchdog config. `rotate` (default `on`) lets the watchdog rotate a
+   * rate-limited session IN PLACE onto a healthy account/harness via
+   * `agents run auto` — see lib/watchdog/rotate.ts. Set `off` to keep the
+   * nudge-only behavior (the Factory `agents.watchdog.autoRotate: false`
+   * migration writes `off` here).
+   */
+  watchdog?: {
+    rotate?: 'on' | 'off';
+  };
+  /**
    * `agents run --lease` config. `secretsBundle` names the keychain secrets bundle
    * whose provider token (e.g. `HCLOUD_TOKEN`) crabbox uses to reach the cloud API.
    * When unset, the bundle is resolved by env (`AGENTS_LEASE_SECRETS_BUNDLE`) then
@@ -778,9 +882,10 @@ export interface Meta {
     secretsBundle?: string;
   };
   /** macOS secrets-agent config. `policy` is the default prompt policy for
-   * bundles without an explicit per-bundle policy: `daily` (the default) asks
-   * once per ~7 days, `always` asks every time. `auto` (default on) lets the
-   * first real keychain read of a `daily` bundle populate the broker so
+   * bundles without an explicit per-bundle policy: `hold` (the default) asks
+   * once per hold window (7 days out of the box), `always` asks every time.
+   * `auto` (default on) lets the
+   * first real keychain read of a `hold` bundle populate the broker so
    * concurrent runs read silently — set it `false` to force a prompt on every read.
    * `holdMs` caps how long an unlocked/auto-cached bundle is held before the next
    * read re-prompts (default 7 days; e.g. 86400000 for a 24h cap). Clamped to
@@ -789,7 +894,13 @@ export interface Meta {
    * passing `--durable` per unlock; off means the secure split default (survive
    * upgrade/restart, re-lock on sleep). */
   secrets?: {
-    policy?: 'always' | 'daily';
+    /** Default storage backend used when `agents secrets create/import` create a
+     * new bundle without `--backend` or `--synced`. */
+    backend?: 'keychain' | 'file' | 'vault';
+    /** Default prompt policy. `hold` (the default) holds a bundle for
+     * `agent.holdMs`; `daily`/`session` are accepted aliases kept so an existing
+     * agents.yaml keeps working. See SecretsPolicy in lib/secrets/bundles.ts. */
+    policy?: 'always' | 'hold' | 'daily';
     agent?: {
       auto?: boolean;
       holdMs?: number;
@@ -798,6 +909,19 @@ export interface Meta {
   };
   /** Spend guardrails (issue #346). User-global caps; project agents.yaml overrides. */
   budget?: BudgetConfig;
+  /**
+   * `agents feed post` fan-out. `broadcast` maps a sink name to either an argv
+   * template (`command:`, run for each post) or an in-process channel delivery
+   * (`channel:`, the same registry `agents send`/`agents notify` use), so
+   * mirroring to a tracker, a messaging CLI, or a channel provider is the
+   * operator's config rather than an integration compiled into this CLI. When
+   * this is unset/empty, an important-level post falls back to `notify.owner`
+   * implicitly (RUSH-2123) — see lib/feed-broadcast.ts and
+   * docs/06-observability.md.
+   */
+  feed?: {
+    broadcast?: FeedBroadcastConfig;
+  };
   beta?: {
     enabled?: BetaFeatureName[];
   };
@@ -830,6 +954,12 @@ export interface Meta {
    * commands + curated resource profile. See lib/brand.ts.
    */
   brands?: Record<string, BrandConfig>;
+  /**
+   * Actors keyed by slug -- who is behind a run. Enriches or overrides the
+   * identity `tailscale whois` resolves (git email, github handle, display
+   * name, human vs agent). See lib/actor.ts.
+   */
+  actors?: Record<string, ActorConfig>;
   /**
    * Removal tombstones for SEEDED_REGISTRIES presets, keyed like `skill.hermes`.
    *
@@ -867,6 +997,29 @@ export interface Meta {
    */
   defaultBrowserProfile?: string;
   /**
+   * User-scope config block (`config:` in central agents.yaml). Holds the
+   * user-scope keys from the device-config registry (`lib/device-config.ts`) —
+   * today just `interactiveHost`. Syncs fleet-wide via `agents repo push/pull`.
+   * Device-scope keys live in {@link Meta.deviceConfig} instead.
+   */
+  config?: Record<string, unknown>;
+  /**
+   * Device-scope config block, carried in memory under a distinct field so it
+   * can never leak into the central (synced) agents.yaml: `writeMetaUnlocked`
+   * routes it to `~/.agents/devices/<machine>/agents.yaml` under the `config:`
+   * key (mirroring how `defaultBrowserProfile` is routed), and
+   * `overlayMachineLocal` reads it back. Holds the device-scope keys from the
+   * device-config registry (`maxAgents`, `schedulerEnabled`, `notes`). Per-machine by design — unset = today's behavior.
+   */
+  deviceConfig?: Record<string, unknown>;
+  /**
+   * Routine names enabled on this machine. In memory this stays distinct from
+   * portable user config; state.ts writes it as top-level `routines:` in
+   * `~/.agents/devices/<machine>/agents.yaml`. Presence in the list is the whole
+   * activation state: absent means disabled on this device.
+   */
+  deviceRoutines?: string[];
+  /**
    * Agent-host registry keyed by host name (`agents hosts`). Portable user
    * config synced with `agents repo push/pull`. For `ssh-config` hosts this is
    * just an overlay (caps/os) — the connection details stay in ~/.ssh/config and
@@ -894,15 +1047,81 @@ export interface Meta {
   };
   /**
    * Owner/channel notification config for `agents send` / `agents notify`.
-   * `owner` is the default recipient for `agents notify` (channel + target).
-   * `transports` maps a user-facing channel name to the provider that actually
-   * delivers it — explicit, one provider per channel, no fallback. Omitted keys
-   * default to name-identity (channel `slack` -> provider `slack`).
+   * `owner` is the address expanded by `--to owner` and by `agents notify`
+   * (channel + target). `transports` maps a user-facing channel name to the
+   * provider that actually delivers it — explicit, one provider per channel,
+   * no fallback. Omitted keys default to name-identity (channel `slack` ->
+   * provider `slack`).
    */
   notify?: {
     owner?: { channel: string; to: string };
     transports?: Record<string, string>;
   };
+  /**
+   * Routines daemon settings. `projects` is the allowlist of project roots
+   * whose `.agents/routines/*.yml` may be synced into `~/.agents/routines/`
+   * and fired by the daemon — never auto-discovered from a cloned public
+   * repo without an explicit opt-in (`agents routines enable-project`).
+   * Paths are stored absolute (or home-relative `~/…`).
+   */
+  routines?: {
+    projects?: string[];
+  };
+}
+
+// ─── humans.yaml types ────────────────────────────────────────────────────────
+
+/** A single delivery channel entry in humans.yaml. */
+export interface HumanChannel {
+  /** Canonical channel identifier (e.g. "imessage", "call"). */
+  id: string;
+  /** Provider transport (e.g. "rush", "twilio"). */
+  transport: string;
+  /** Provider-specific recipient (phone number, user id, address). */
+  to?: string;
+  /** If true the channel is watched for incoming messages. */
+  watch?: boolean;
+  /** Shell command to invoke (for call channels). */
+  cmd?: string;
+  /** Credentials bundle name (`agents secrets`). */
+  creds?: string;
+  /** Whether the channel is intrusive (e.g. voice call). */
+  intrusive?: boolean;
+}
+
+/** Severity-to-channel-list escalation policy in humans.yaml. */
+export interface HumanPolicy {
+  low?: string[];
+  normal?: string[];
+  critical?: string[];
+}
+
+/** Owner identity and contact configuration in humans.yaml. */
+export interface HumanOwner {
+  /** Display name. */
+  name?: string;
+  /** IANA timezone string (e.g. "America/Los_Angeles"). */
+  timezone?: string;
+  /** Quiet hours as "HH:MM-HH:MM" in local time. */
+  quiet_hours?: string;
+  /** Default notification severity when unspecified. */
+  default_severity?: 'low' | 'normal' | 'critical';
+  /** Short-form channel config for `agents send --to owner` (channel + recipient). */
+  notify?: { channel: string; to: string };
+  /** Full delivery-channel definitions. */
+  channels?: HumanChannel[];
+  /** Severity-to-channel escalation policy. */
+  policy?: HumanPolicy;
+}
+
+/**
+ * Versioned humans.yaml config — owner identity, channels, and notification
+ * policy. Written to ~/.agents/humans.yaml by `migrateHumans()`.
+ */
+export interface HumansConfig {
+  /** Schema version. Always 1. */
+  version: 1;
+  owner?: HumanOwner;
 }
 
 /** Persisted agent-host entry in agents.yaml (overlay or inline). */
@@ -956,7 +1175,7 @@ export interface BrowserProfileConfig {
   logHost?: string;
 }
 
-/** Options controlling which agents and resources are synced during `agents repo refresh` / `agents use`. */
+/** Options controlling which agents and resources are synced during `agents sync` / `agents use`. */
 export interface SyncOptions {
   agents?: AgentId[];
   yes?: boolean;

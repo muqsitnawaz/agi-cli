@@ -23,6 +23,8 @@ import {
   resolveJobPrompt,
   parseTimeout,
   writeRunMeta,
+  listRuns,
+  getJobRunsDir,
   getRunDir,
   jobRunsOnThisDevice,
   checkJobDeviceEligibility,
@@ -32,7 +34,7 @@ import { getRunsDir } from './state.js';
 import type { AgentId } from './types.js';
 import { prepareJobHome, buildSpawnEnv, getJobHomePath } from './sandbox.js';
 import { resolveModel, buildReasoningFlags } from './models.js';
-import { createTimer, maybeRotate, redactPrompt } from './events.js';
+import { createTimer, redactPrompt } from './events.js';
 import {
   normalizeMode,
   resolveHeadlessMode,
@@ -45,10 +47,13 @@ import {
   type ExecEffort,
   type FallbackEntry,
 } from './exec.js';
+import { resolveActor } from './actor.js';
 import type { LoopDeps } from './loop.js';
 import { loadTask as loadHostTask } from './hosts/tasks.js';
 import { reconcileTask as reconcileHostTask } from './hosts/reconcile.js';
-import { backgroundSpawnOptions } from './platform/process.js';
+import { backgroundSpawnOptions, killTree } from './platform/process.js';
+import lockfile from 'proper-lockfile';
+import { ensureLockTarget } from './fs-atomic.js';
 import { walkForFiles } from './fs-walk.js';
 import { getBinaryPath, isVersionInstalled, resolveVersion } from './versions.js';
 import {
@@ -57,10 +62,14 @@ import {
   resolveAccountVersion,
   rotationFailoverChain,
   readinessFromCandidate,
+  formatNoHealthyAccountError,
+  type RotateCandidate,
   type RotateResult,
 } from './rotate.js';
 import { readAuthHealth, isDeadVerdict } from './auth-health.js';
 import { machineId } from './machine-id.js';
+import { isSelfUpdatingAgent } from './agents.js';
+import { expandLocalHome, getProjectRoot } from './project-root.js';
 
 /** Result of a completed job execution, including metadata and optional report. */
 export interface RunResult {
@@ -68,19 +77,122 @@ export interface RunResult {
   reportPath: string | null;
 }
 
+export class RoutineAlreadyRunningError extends Error {
+  constructor(jobName: string, runId: string) {
+    super(`Routine '${jobName}' already has a running execution (${runId})`);
+    this.name = 'RoutineAlreadyRunningError';
+  }
+}
+
+const ROUTINE_LAUNCH_LOCK_STALE_MS = 30_000;
+const ROUTINE_LAUNCH_LOCK_WAIT_MS = 10_000;
+
+function activeRoutineRun(config: Pick<JobConfig, 'name' | 'timeout'>): RunMeta | null {
+  const timeoutMs = parseTimeout(config.timeout) || 10 * 60 * 1000;
+  const now = Date.now();
+  const runs = listRuns(config.name);
+  for (let i = runs.length - 1; i >= 0; i--) {
+    const run = runs[i];
+    if (run.status !== 'running') continue;
+    if (run.pid && isPidOurs(run.pid, run.spawnedAt)) return run;
+    if (!run.pid) {
+      const startedAt = Date.parse(run.startedAt);
+      if (Number.isFinite(startedAt) && now - startedAt < (run.timeoutMs ?? timeoutMs)) return run;
+    }
+  }
+  return null;
+}
+
+async function withRoutineLaunchClaim<T>(config: JobConfig, launch: () => Promise<T>): Promise<T> {
+  const target = path.join(getJobRunsDir(config.name), '.launch-claim');
+  ensureLockTarget(target, '', 0o700);
+  const release = await lockfile.lock(target, {
+    stale: ROUTINE_LAUNCH_LOCK_STALE_MS,
+    retries: {
+      retries: Math.ceil(ROUTINE_LAUNCH_LOCK_WAIT_MS / 100),
+      factor: 1,
+      minTimeout: 100,
+      maxTimeout: 100,
+    },
+  });
+  try {
+    const active = activeRoutineRun(config);
+    if (active) throw new RoutineAlreadyRunningError(config.name, active.runId);
+    return await launch();
+  } finally {
+    await release();
+  }
+}
+
+function terminateRoutineTree(pid: number | null): void {
+  if (!pid) return;
+  if (process.platform === 'win32') {
+    killTree(pid);
+    return;
+  }
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch { /* already exited */ }
+}
+
 /** CLI command templates per agent, with {prompt} as a placeholder. */
 const AGENT_COMMANDS: Record<string, string[]> = {
   claude: ['claude', '-p', '--verbose', '{prompt}', '--output-format', 'stream-json', '--permission-mode', 'plan'],
   codex: ['codex', 'exec', '--sandbox', 'workspace-write', '{prompt}', '--json'],
   gemini: ['gemini', '{prompt}', '--output-format', 'stream-json'],
+  cursor: ['cursor-agent', '-p', '{prompt}', '--output-format', 'stream-json'],
   kimi: ['kimi', '--prompt', '{prompt}', '--output-format', 'stream-json'],
   droid: ['droid', 'exec', '{prompt}', '-o', 'stream-json'],
 };
 
+/** Agents the daemon can actually run, derived from the command table above
+ * so the `--agent` help and any validation can never drift from it. */
+export const ROUTINE_AGENT_IDS = Object.freeze(Object.keys(AGENT_COMMANDS));
+
+/**
+ * Where each agent's transcript files live under an overlay HOME, mirroring
+ * `SESSION_ROOT_SPECS` (session/discover.ts) — the CLI's own source of truth
+ * for which on-disk trees hold live session files. Kept in this shape (not a
+ * shared import) because `archiveRoutineTranscripts` only needs a flat
+ * root+ext pair to `walkForFiles`, not the version-home/backup fan-out
+ * `getAgentSessionDirs` does for live discovery.
+ *
+ * `opencode` is deliberately absent: `SESSION_ROOT_SPECS` itself has no entry
+ * for it — its transcripts live in one incrementally-scanned SQLite db
+ * (`scanOpenCodeIncremental`), not a per-session file tree — so there is
+ * nothing here to mirror without inventing a new discovery path.
+ */
 const ROUTINE_TRANSCRIPT_SPECS: Partial<Record<AgentId, Array<{ root: string[]; ext: string }>>> = {
   claude: [{ root: ['.claude', 'projects'], ext: '.jsonl' }],
   codex: [{ root: ['.codex', 'sessions'], ext: '.jsonl' }],
+  cursor: [{ root: ['.cursor', 'projects'], ext: '.jsonl' }],
+  gemini: [{ root: ['.gemini', 'tmp'], ext: '.json' }],
+  antigravity: [{ root: ['.gemini', 'antigravity-cli', 'conversations'], ext: '.db' }],
+  droid: [{ root: ['.factory', 'sessions'], ext: '.jsonl' }],
+  // Kimi splits a session across two files (session/discover.ts:4382-4384):
+  // state.json (title/timestamps) and agents/main/wire.jsonl (the actual
+  // conversation). Both extensions are needed — .json alone archives only
+  // the metadata shell and silently drops every message.
+  kimi: [
+    { root: ['.kimi-code', 'sessions'], ext: '.json' },
+    { root: ['.kimi-code', 'sessions'], ext: '.jsonl' },
+  ],
+  grok: [{ root: ['.grok', 'sessions'], ext: '.json' }],
 };
+
+/** Stable working directory for routine children, independent of the daemon's launch cwd. */
+export function routineSpawnCwd(
+  config: Pick<JobConfig, 'repo'>,
+  configuredRoot: string | undefined = getProjectRoot(),
+): string {
+  if (!config.repo) return os.homedir();
+  const [owner, repo] = config.repo.split('/');
+  if (configuredRoot) {
+    const root = path.resolve(expandLocalHome(configuredRoot));
+    if (path.basename(root) === owner) return path.join(root, repo);
+  }
+  return path.join(os.homedir(), 'src', 'github.com', owner, repo);
+}
 
 /** Build the full CLI argv for executing a job, applying mode, model, and permission flags. */
 export function buildJobCommand(config: JobConfig, resolvedPrompt: string): string[] {
@@ -169,6 +281,21 @@ export function buildJobCommand(config: JobConfig, resolvedPrompt: string): stri
       cmd.push('--approval-mode', 'auto_edit');
     } else if (mode === 'skip') {
       cmd.push('--yolo');
+    }
+
+    appendModelAndReasoning(cmd, config);
+  }
+
+  if (config.agent === 'cursor') {
+    // cursor-agent supports --plan, but the capability registry has not been
+    // upgraded yet. RUSH-2101 tracks adding that read-only mode after PR #1721.
+    const cursorMode = resolveHeadlessMode('cursor', mode, false, `routine ${config.name}`);
+    if (cursorMode === 'skip') {
+      cmd.push('-f');
+    } else {
+      // The configured cwd is the user's workspace trust decision. --trust is
+      // narrower than --yolo/-f because it does not bypass tool permissions.
+      cmd.push('--trust');
     }
 
     appendModelAndReasoning(cmd, config);
@@ -332,6 +459,7 @@ export interface RoutineLaunchPlan {
 export async function resolveRoutineLaunch(
   config: JobConfig,
   cwd: string = process.cwd(),
+  deps: { resolveRunVersion?: typeof resolveRunVersion } = {},
 ): Promise<RoutineLaunchPlan> {
   if (config.workflow) {
     return { chain: [], rotation: null, pinned: false };
@@ -373,10 +501,12 @@ export async function resolveRoutineLaunch(
   const strategy = getConfiguredRunStrategy(agent, cwd);
   let version: string | undefined;
   let rotation: RotateResult | null = null;
+  let exhausted: RotateCandidate[] | undefined;
   try {
-    const resolved = await resolveRunVersion(agent, strategy, cwd);
+    const resolved = await (deps.resolveRunVersion ?? resolveRunVersion)(agent, strategy, cwd);
     version = resolved.version ?? undefined;
     rotation = resolved.rotation;
+    exhausted = resolved.exhausted;
     if (rotation) {
       const label = rotation.picked.email
         ? `${rotation.picked.email} · ${agent}@${rotation.picked.version}`
@@ -397,7 +527,7 @@ export async function resolveRoutineLaunch(
           `[agents] routine ${config.name}: skipped ${reasons}\n`,
         );
       }
-    } else if (!version) {
+    } else if (!version && !exhausted) {
       process.stderr.write(
         `[agents] routine ${config.name}: strategy ${strategy} found no usable ${agent} version; ` +
           `falling back to default pin\n`,
@@ -407,6 +537,14 @@ export async function resolveRoutineLaunch(
     process.stderr.write(
       `[agents] routine ${config.name}: strategy ${strategy} skipped: ${(err as Error).message}\n`,
     );
+  }
+
+  // Zero healthy accounts is NOT a "fall back to the default pin" case — that
+  // pin is exactly the exhausted account an unattended routine would hammer
+  // every tick (RUSH-2132). Throwing fails the job run (nonzero), and the
+  // message text is the contract the Factory watchdog tail-detects.
+  if (exhausted) {
+    throw new Error(formatNoHealthyAccountError(agent, strategy, exhausted));
   }
 
   if (!version) {
@@ -471,6 +609,7 @@ export function buildRoutineSpawnEnv(
   agent: AgentId,
   version: string | undefined,
   timezone?: string,
+  overlayHome?: string,
 ): Record<string, string> {
   const execEnv = buildExecEnv({
     agent,
@@ -483,6 +622,27 @@ export function buildRoutineSpawnEnv(
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(execEnv)) {
     if (v !== undefined) out[k] = v;
+  }
+  // A routine authenticates through the pinned account's own CLAUDE_CONFIG_DIR
+  // login on THIS box (buildExecEnv points it at the per-account version home).
+  // Claude Code's interactive session refreshes itself per-device; keeping the
+  // daemon out of the credential entirely is what avoids the fleet-wide rotation
+  // logout — a shared/rotating token was the cause, not the fix.
+  //
+  // Injecting a token was already ruled out, but INHERITING one was not:
+  // buildExecEnv spreads the ambient process.env (exec.ts) and sanitizeProcessEnv
+  // only strips loader/interpreter vars, never credentials. So on any box whose
+  // daemon environment happens to carry CLAUDE_CODE_OAUTH_TOKEN, every routine
+  // spawn silently ran on that one shared rotating token instead of the host's
+  // own login — the exact fleet-wide-logout path, arriving by inheritance rather
+  // than injection. CI never caught it because CI has no token to inherit; a
+  // provisioned box does. Drop it here so a routine always uses the login of the
+  // machine it runs on.
+  delete out.CLAUDE_CODE_OAUTH_TOKEN;
+  if (agent === 'cursor' && overlayHome) {
+    // prepareJobHome links this host's Cursor auth file here. Pin XDG_CONFIG_HOME
+    // to the overlay so an ambient value cannot bypass the routine sandbox.
+    out.XDG_CONFIG_HOME = path.join(overlayHome, '.config');
   }
   if (timezone) out.TZ = timezone;
   return out;
@@ -509,6 +669,7 @@ function spawnJobAttempt(
   attemptLogPath: string,
   timeoutMs: number,
   combinedLogPath?: string,
+  cwd: string = os.homedir(),
 ): Promise<SpawnAttemptResult> {
   // Isolate this attempt's output so detectRateLimit never sees prior attempts.
   fs.writeFileSync(attemptLogPath, '', { mode: 0o600 });
@@ -516,7 +677,7 @@ function spawnJobAttempt(
   return new Promise((resolve) => {
     const child = spawn(cmd[0], cmd.slice(1), {
       stdio: ['ignore', stdoutFd, stdoutFd],
-      ...backgroundSpawnOptions({ fdStdio: true }),
+      ...backgroundSpawnOptions({ cwd, fdStdio: true }),
       env,
     });
 
@@ -591,16 +752,47 @@ function spawnJobAttempt(
  * Single-shot path: pre-flight version/account selection + mid-run rate-limit
  * failover across healthy same-agent accounts (RUSH-1016).
  */
+/**
+ * Actor provenance for a routine run (RUSH-2020): `actor` is the routine's
+ * CREATOR (carried from the job config), `triggeredBy` is whoever kicked off THIS
+ * run (`resolveActor().id` — a person for a manual run, `UNRESOLVED@<host>` for an
+ * unattended scheduled fire). Spread into every RunMeta so a fired cron traces
+ * back to the person who scheduled it.
+ */
+function runProvenance(config: JobConfig): { actor?: string; triggeredBy: string } {
+  return { ...(config.actor ? { actor: config.actor } : {}), triggeredBy: resolveActor().id };
+}
+
+/**
+ * Inject the routine creator's actor into a run's base env so the fired agent
+ * INHERITS it (the `AGENTS_ACTOR` path in actor.ts) instead of re-resolving to
+ * `UNRESOLVED@<host>` on an unattended fire — so its session, events, and commits
+ * all attribute to the person who scheduled the routine (RUSH-2020). Mutates and
+ * returns the same env object for call-site brevity.
+ */
+function injectRoutineActor(env: Record<string, string>, config: JobConfig): Record<string, string> {
+  if (config.actor && !env.AGENTS_ACTOR) env.AGENTS_ACTOR = config.actor;
+  return env;
+}
+
 export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<RunResult> {
   const eligibility = checkJobDeviceEligibility(config);
   if (eligibility) {
     throw new Error(eligibility.message);
   }
-  // `host:` placement — the job body runs on another machine over SSH; local
-  // version selection / sandbox / spawn do not apply. Sync callers (manual
-  // `routines run`, catchup) follow the remote run to completion.
-  if (config.host) {
-    return executeJobOnHost(config, { detached: false });
+  // Placement (hostStrategy / bare host:) — body may run on another machine
+  // over SSH or in the cloud; local version selection / sandbox / spawn then
+  // do not apply. Sync callers (manual `routines run`, catchup) follow the
+  // remote run to completion when possible.
+  {
+    const { resolvePlacementTarget } = await import('./routines-placement.js');
+    const target = resolvePlacementTarget(config);
+    if (target.mode === 'host') {
+      return executeJobOnHost({ ...config, host: target.host }, { detached: false });
+    }
+    if (target.mode === 'cloud') {
+      return executeJobOnCloud(config, { detached: false });
+    }
   }
 
   // Command-mode: run a plain shell command directly (no agent, no rotation,
@@ -609,8 +801,6 @@ export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<Ru
   if (config.command) {
     return executeCommandJobForeground(config);
   }
-
-  maybeRotate();
 
   const launch = await resolveRoutineLaunch(config);
   const primaryVersion = launch.chain[0]?.version ?? config.version;
@@ -637,9 +827,12 @@ export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<Ru
   const runDir = getRunDir(config.name, runId);
   fs.mkdirSync(runDir, { recursive: true });
 
-  const baseEnv = useSandbox
-    ? buildSpawnEnv(overlayHome!)
-    : { ...process.env } as Record<string, string>;
+  const baseEnv = injectRoutineActor(
+    useSandbox
+      ? buildSpawnEnv(overlayHome!, config.env)
+      : { ...process.env } as Record<string, string>,
+    config,
+  );
 
   // Workflows run via `agents run <workflow>` which delegates to claude under the hood.
   // Use 'claude' as the effective agent for report extraction and metadata when workflow is set.
@@ -649,6 +842,7 @@ export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<Ru
   const meta: RunMeta = {
     jobName: config.name,
     runId,
+    ...runProvenance(config),
     agent: effectiveAgent,
     ...(config.workflow ? { workflow: config.workflow } : {}),
     pid: null,
@@ -686,16 +880,20 @@ export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<Ru
 
   // Loop path: delegate to runLoop (same driver as `agents run --loop` / workflow loop:).
   if (config.loop) {
-    const spawnEnv = buildRoutineSpawnEnv(baseEnv, effectiveAgent, primaryVersion, config.timezone);
+    const spawnEnv = buildRoutineSpawnEnv(baseEnv, effectiveAgent, primaryVersion, config.timezone, overlayHome);
     const execOptions: ExecOptions = {
       agent: effectiveAgent,
-      version: primaryVersion,
+      // Routine-supported self-updating CLIs (Cursor/Droid) use one global
+      // binary; a versioned shim would point at a nonexistent isolated install.
+      version: isSelfUpdatingAgent(effectiveAgent) ? undefined : primaryVersion,
       prompt: resolvedPrompt,
       mode: normalizeMode(config.mode),
       effort: config.effort as ExecEffort,
       env: spawnEnv,
       json: true,
       headless: true,
+      modeWarningContext: `routine ${config.name}`,
+      modeWarningState: {},
       ...(config.config?.model ? { model: config.config.model as string } : {}),
       ...(config.allow?.dirs ? {
         addDirs: config.allow.dirs
@@ -756,14 +954,14 @@ export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<Ru
           if (config.timezone) e.TZ = config.timezone;
           return e;
         })()
-      : buildRoutineSpawnEnv(baseEnv, attemptAgent, attemptVersion, config.timezone);
+      : buildRoutineSpawnEnv(baseEnv, attemptAgent, attemptVersion, config.timezone, overlayHome);
 
     // Remaining timeout budget shared across failover attempts.
     const elapsed = Date.now() - Date.parse(meta.startedAt);
     const remaining = Math.max(1_000, timeoutMs - (Number.isFinite(elapsed) ? elapsed : 0));
 
     const attemptLogPath = path.join(runDir, `stdout.attempt-${i}.log`);
-    const attempt = await spawnJobAttempt(cmd, spawnEnv, attemptLogPath, remaining, stdoutPath);
+    const attempt = await spawnJobAttempt(cmd, spawnEnv, attemptLogPath, remaining, stdoutPath, routineSpawnCwd(config));
     meta.pid = attempt.pid;
     writeRunMeta(meta);
 
@@ -864,6 +1062,89 @@ export async function executeJob(config: JobConfig, deps?: LoopDeps): Promise<Ru
   return { meta, reportPath: null };
 }
 
+/**
+ * Dispatch a routine to the agent's native cloud provider (or the configured
+ * default). Writes a local run record with `cloudTaskId` so list/runs still
+ * work; does not wait for cloud completion on the detached path.
+ */
+async function executeJobOnCloud(config: JobConfig, opts: { detached: boolean }): Promise<RunResult> {
+  if (config.workflow) {
+    throw new Error(`Routine '${config.name}' runs a workflow bundle, which can't execute in the cloud yet — remove 'hostStrategy: cloud' or 'workflow:'.`);
+  }
+  if (config.loop) {
+    throw new Error(`Routine '${config.name}' uses 'loop:', which can't execute in the cloud yet — remove 'hostStrategy: cloud' or 'loop:'.`);
+  }
+  if (config.command) {
+    throw new Error(`Routine '${config.name}' uses 'command:', which can't execute in the cloud yet — remove 'hostStrategy: cloud' or 'command:'.`);
+  }
+  if (!config.agent) {
+    throw new Error(`Routine '${config.name}' hostStrategy: cloud requires an agent`);
+  }
+
+  const { resolveProvider } = await import('./cloud/registry.js');
+  const { insertTask } = await import('./cloud/store.js');
+  const provider = resolveProvider(undefined, config.agent);
+
+  const timer = createTimer('agent.run', {
+    agent: config.agent,
+    jobName: config.name,
+    mode: config.mode,
+    placement: 'cloud',
+    ...redactPrompt(config.prompt),
+    schedule: config.schedule,
+  });
+
+  const runId = generateRunId();
+  const runDir = getRunDir(config.name, runId);
+  fs.mkdirSync(runDir, { recursive: true });
+
+  const meta: RunMeta = {
+    jobName: config.name,
+    runId,
+    ...runProvenance(config),
+    agent: config.agent,
+    pid: null,
+    spawnedAt: Date.now(),
+    status: 'running',
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    exitCode: null,
+  };
+  writeRunMeta(meta);
+
+  try {
+    const task = await provider.dispatch({
+      prompt: resolveJobPrompt(config),
+      agent: config.agent,
+      repo: config.repo,
+      timeout: config.timeout,
+      model: config.config?.model as string | undefined,
+    });
+    try { insertTask(task); } catch { /* store is best-effort */ }
+    meta.cloudTaskId = task.id;
+    meta.cloudProvider = task.provider;
+
+    // Terminal cloud responses (e.g. antigravity) finalize immediately.
+    // Async providers leave the run `running` with the cloud task id for
+    // the user to follow via `agents cloud status`.
+    if (task.status === 'completed') {
+      finalizeRunMeta(meta, 'completed', 0);
+    } else if (task.status === 'failed' || task.status === 'cancelled') {
+      finalizeRunMeta(meta, 'failed', 1, { errorMessage: task.summary ?? `cloud ${task.status}` });
+    }
+    // Non-terminal statuses stay `running` for both detached and sync paths;
+    // the user follows via `agents cloud status <id>`.
+    writeRunMeta(meta);
+    timer.end({ status: meta.status, exitCode: meta.exitCode ?? undefined, runId });
+    return { meta, reportPath: null };
+  } catch (err) {
+    finalizeRunMeta(meta, 'failed', 1, { errorMessage: (err as Error).message });
+    writeRunMeta(meta);
+    timer.end({ status: 'failed', exitCode: 1, runId, error: (err as Error).message });
+    throw err;
+  }
+}
+
 async function executeJobOnHost(config: JobConfig, opts: { detached: boolean }): Promise<RunResult> {
   if (config.workflow) {
     throw new Error(`Routine '${config.name}' runs a workflow bundle, which can't execute on a host yet — remove 'host:' or 'workflow:'.`);
@@ -893,6 +1174,7 @@ async function executeJobOnHost(config: JobConfig, opts: { detached: boolean }):
   const meta: RunMeta = {
     jobName: config.name,
     runId,
+    ...runProvenance(config),
     agent: config.agent,
     pid: null, // no local process — the run lives on the host
     spawnedAt: Date.now(),
@@ -947,6 +1229,7 @@ async function executeCommandJobForeground(config: JobConfig): Promise<RunResult
   const meta: RunMeta = {
     jobName: config.name,
     runId,
+    ...runProvenance(config),
     command: config.command,
     pid: null,
     spawnedAt: Date.now(),
@@ -966,7 +1249,7 @@ async function executeCommandJobForeground(config: JobConfig): Promise<RunResult
   const result = await new Promise<{ exitCode: number | null; status: 'completed' | 'failed' | 'timeout'; error?: string }>((resolve) => {
     const child = spawn(cmd[0], cmd.slice(1), {
       stdio: ['ignore', stdoutFd, stdoutFd],
-      ...backgroundSpawnOptions({ fdStdio: true }),
+      ...backgroundSpawnOptions({ cwd: routineSpawnCwd(config), fdStdio: true }),
       env,
     });
 
@@ -1025,26 +1308,58 @@ async function executeCommandJobForeground(config: JobConfig): Promise<RunResult
   return { meta, reportPath: null };
 }
 
-/** Spawn a job as a detached process and return immediately with run metadata. */
+/**
+ * Optional lifecycle callbacks for a detached routine run. The daemon passes an
+ * `onFinish` that fires the branded finish/output notification (RUSH-2030) — it
+ * runs from the in-process settle() when the child exits, the only seam that
+ * observes the live running→terminal transition (the monitor tick would already
+ * see a finalized record and skip it). Never let a hook throw into finalization.
+ */
+export interface RoutineHooks {
+  /** Called once with the finalized meta when the run reaches a terminal state. */
+  onFinish?: (meta: RunMeta) => void;
+}
+
+/** Invoke a lifecycle hook without letting a caller error break run finalization. */
+function safeHook(fn: (() => void) | undefined): void {
+  if (!fn) return;
+  try { fn(); } catch { /* hooks are best-effort */ }
+}
 
 /** Spawn a job as a detached process and return immediately with run metadata. */
-export async function executeJobDetached(config: JobConfig): Promise<RunMeta> {
+export async function executeJobDetached(config: JobConfig, hooks?: RoutineHooks): Promise<RunMeta> {
   const eligibility = checkJobDeviceEligibility(config);
   if (eligibility) {
     process.stderr.write(`[agents] daemon: skipping '${config.name}' — ${eligibility.message}\n`);
     throw new Error(eligibility.message);
   }
-  // `host:` placement — dispatch over SSH and return; the monitor finalizes.
-  if (config.host) {
-    const { meta } = await executeJobOnHost(config, { detached: true });
-    return meta;
+  return withRoutineLaunchClaim(config, () => executeJobDetachedClaimed(config, hooks));
+}
+
+async function executeJobDetachedClaimed(config: JobConfig, hooks?: RoutineHooks): Promise<RunMeta> {
+  // Placement (hostStrategy / bare host:) — dispatch off-box and return; the
+  // monitor finalizes host: runs, cloud runs stay terminal when dispatch ends.
+  // Either way the in-process onFinish hook does not fire for off-box routines
+  // (the monitor tick observes an already-finalized record), so notify-desktop
+  // sends the finish notification only for local detached runs below (RUSH-2030).
+  {
+    const { resolvePlacementTarget } = await import('./routines-placement.js');
+    const target = resolvePlacementTarget(config);
+    if (target.mode === 'host') {
+      const { meta } = await executeJobOnHost({ ...config, host: target.host }, { detached: true });
+      return meta;
+    }
+    if (target.mode === 'cloud') {
+      const { meta } = await executeJobOnCloud(config, { detached: true });
+      return meta;
+    }
   }
 
   // Command-mode: fire a plain shell command detached (no agent, no rotation,
   // no pinning, no sandbox overlay). Still writes a run record so the daemon,
   // list/runs, and overdue tracking keep working.
   if (config.command) {
-    return executeCommandJobDetached(config);
+    return executeCommandJobDetached(config, hooks);
   }
 
   // Pre-flight: pick a healthy version/account so the daemon does not launch
@@ -1052,6 +1367,15 @@ export async function executeJobDetached(config: JobConfig): Promise<RunMeta> {
   // wait); the next schedule tick re-selects if this attempt still fails.
   const launch = await resolveRoutineLaunch(config);
   const version = launch.chain[0]?.version ?? config.version;
+
+  const timer = createTimer('agent.run', {
+    agent: config.agent,
+    version,
+    jobName: config.name,
+    mode: config.mode,
+    ...redactPrompt(config.prompt),
+    schedule: config.schedule,
+  });
 
   const resolvedPrompt = resolveJobPrompt(config);
   let cmd = buildJobCommand(config, resolvedPrompt);
@@ -1075,9 +1399,12 @@ export async function executeJobDetached(config: JobConfig): Promise<RunMeta> {
   const stdoutPath = path.join(runDir, 'stdout.log');
   const stdoutFd = fs.openSync(stdoutPath, 'w', 0o600);
 
-  const baseEnv = useSandbox
-    ? buildSpawnEnv(overlayHome!)
-    : { ...process.env } as Record<string, string>;
+  const baseEnv = injectRoutineActor(
+    useSandbox
+      ? buildSpawnEnv(overlayHome!, config.env)
+      : { ...process.env } as Record<string, string>,
+    config,
+  );
   const spawnEnv = dispatchesViaAgentsRun(config)
     ? (() => {
         const e = { ...baseEnv };
@@ -1085,33 +1412,60 @@ export async function executeJobDetached(config: JobConfig): Promise<RunMeta> {
         return e;
       })()
     // Non-command path only: config.agent is always set here (command/workflow branch earlier).
-    : buildRoutineSpawnEnv(baseEnv, config.agent!, version, config.timezone);
+    : buildRoutineSpawnEnv(baseEnv, config.agent!, version, config.timezone, overlayHome);
 
   const effectiveAgent: AgentId = config.workflow ? 'claude' : config.agent!;
 
   const meta: RunMeta = {
     jobName: config.name,
     runId,
+    ...runProvenance(config),
     agent: effectiveAgent,
     ...(config.workflow ? { workflow: config.workflow } : {}),
     pid: null,
     spawnedAt: Date.now(),
+    timeoutMs: parseTimeout(config.timeout) || 10 * 60 * 1000,
     status: 'running',
     startedAt: new Date().toISOString(),
     completedAt: null,
     exitCode: null,
   };
 
+  // Auth preflight (mirrors executeJob): with no injected token, a daemon-fired
+  // Claude routine authenticates via the pinned account's own CLAUDE_CONFIG_DIR
+  // login. If the last live probe rejected that (agent, version)'s token, the run
+  // is guaranteed to 401 — fail fast with a re-login hint instead of spawning a
+  // doomed run + poisoned report. Cache-only; fails OPEN on any non-dead/missing
+  // verdict, and agents with no live probe (codex/gemini/grok) are never blocked.
+  const preflightVersion = launch.chain[0]?.version;
+  if (preflightVersion) {
+    const health = readAuthHealth(machineId(), effectiveAgent, preflightVersion);
+    if (health && isDeadVerdict(health.verdict)) {
+      const reason = `auth_preflight: ${health.verdict}`;
+      process.stderr.write(
+        `[agents] routine ${config.name}: ${effectiveAgent}@${preflightVersion} token ${health.verdict} — skipping run (re-login required)\n`,
+      );
+      try { fs.closeSync(stdoutFd); } catch { /* already closed */ }
+      finalizeRunMeta(meta, 'failed', 1, { errorMessage: reason });
+      writeRunMeta(meta);
+      archiveRoutineTranscripts(meta, runDir, overlayHome);
+      timer.end({ status: 'failed', exitCode: 1, runId, error: reason });
+      return meta;
+    }
+  }
+
   const child = spawn(cmd[0], cmd.slice(1), {
     stdio: ['ignore', stdoutFd, stdoutFd],
-    ...backgroundSpawnOptions({ fdStdio: true }),
+    ...backgroundSpawnOptions({ cwd: routineSpawnCwd(config), fdStdio: true }),
     env: spawnEnv,
   });
 
   let settled = false;
+  let timeoutTimer: NodeJS.Timeout | undefined;
   const settle = (status: RunMeta['status'], exitCode: number | null, errorMessage?: string) => {
     if (settled) return;
     settled = true;
+    if (timeoutTimer) clearTimeout(timeoutTimer);
     finalizeRunMeta(meta, status, exitCode, errorMessage ? { errorMessage } : undefined);
     writeRunMeta(meta);
     archiveRoutineTranscripts(meta, runDir, overlayHome);
@@ -1119,7 +1473,16 @@ export async function executeJobDetached(config: JobConfig): Promise<RunMeta> {
     // the login error, which would poison the next run's {last_report} prompt.
     const isAuthFailure = !!errorMessage && errorMessage.startsWith('auth_failed:');
     if (status !== 'timeout' && !isAuthFailure) extractAndSaveReport(stdoutPath, effectiveAgent, runDir);
+    timer.end({ status, exitCode: exitCode ?? undefined, runId, ...(errorMessage ? { error: errorMessage } : {}) });
+    // Fire the finish/output notification AFTER the report is written so the hook
+    // can read report.md (RUSH-2030). Best-effort; never breaks finalization.
+    safeHook(hooks?.onFinish ? () => hooks.onFinish!(meta) : undefined);
   };
+
+  timeoutTimer = setTimeout(() => {
+    terminateRoutineTree(child.pid ?? null);
+    settle('timeout', null, 'exceeded configured timeout');
+  }, meta.timeoutMs);
 
   child.on('exit', (code) => {
     let logText = '';
@@ -1152,7 +1515,7 @@ export async function executeJobDetached(config: JobConfig): Promise<RunMeta> {
   meta.pid = child.pid || null;
   writeRunMeta(meta);
 
-  return meta;
+  return { ...meta };
 }
 
 /**
@@ -1161,7 +1524,13 @@ export async function executeJobDetached(config: JobConfig): Promise<RunMeta> {
  * un-sandboxed, unref, then record the pid. The daemon does not wait for exit;
  * `monitorRunningJobs` reaps the record on the next tick.
  */
-function executeCommandJobDetached(config: JobConfig): RunMeta {
+function executeCommandJobDetached(config: JobConfig, hooks?: RoutineHooks): RunMeta {
+  const timer = createTimer('agent.run', {
+    jobName: config.name,
+    mode: config.mode,
+    schedule: config.schedule,
+  });
+
   const runId = generateRunId();
   const runDir = getRunDir(config.name, runId);
   fs.mkdirSync(runDir, { recursive: true });
@@ -1186,9 +1555,11 @@ function executeCommandJobDetached(config: JobConfig): RunMeta {
   const meta: RunMeta = {
     jobName: config.name,
     runId,
+    ...runProvenance(config),
     command: config.command,
     pid: null,
     spawnedAt: Date.now(),
+    timeoutMs: parseTimeout(config.timeout) || 10 * 60 * 1000,
     status: 'running',
     startedAt: new Date().toISOString(),
     completedAt: null,
@@ -1197,7 +1568,7 @@ function executeCommandJobDetached(config: JobConfig): RunMeta {
 
   const child = spawn(cmd[0], cmd.slice(1), {
     stdio: ['ignore', stdoutFd, stdoutFd],
-    ...backgroundSpawnOptions({ fdStdio: true }),
+    ...backgroundSpawnOptions({ cwd: routineSpawnCwd(config), fdStdio: true }),
     env,
   });
 
@@ -1205,12 +1576,22 @@ function executeCommandJobDetached(config: JobConfig): RunMeta {
   // fire-and-forget call, so the exit event fires here. (monitorRunningJobs no
   // longer force-fails command jobs; it reads exit-code only on the restart edge.)
   let settled = false;
-  const settle = (status: RunMeta['status'], exitCode: number, errorMessage?: string) => {
+  let timeoutTimer: NodeJS.Timeout | undefined;
+  const settle = (status: RunMeta['status'], exitCode: number | null, errorMessage?: string) => {
     if (settled) return;
     settled = true;
+    if (timeoutTimer) clearTimeout(timeoutTimer);
     finalizeRunMeta(meta, status, exitCode, errorMessage ? { errorMessage } : undefined);
     writeRunMeta(meta);
+    timer.end({ status, exitCode: exitCode ?? undefined, runId, ...(errorMessage ? { error: errorMessage } : {}) });
+    // Finish notification (RUSH-2030). For command routines the threshold only
+    // surfaces failures, decided in routine-notify.ts. Best-effort.
+    safeHook(hooks?.onFinish ? () => hooks.onFinish!(meta) : undefined);
   };
+  timeoutTimer = setTimeout(() => {
+    terminateRoutineTree(child.pid ?? null);
+    settle('timeout', null, 'exceeded configured timeout');
+  }, meta.timeoutMs);
   child.on('exit', (code) => settle(code === 0 ? 'completed' : 'failed', code ?? 1));
   child.on('error', (err) => {
     settle('failed', 1, err.message);
@@ -1223,7 +1604,7 @@ function executeCommandJobDetached(config: JobConfig): RunMeta {
   meta.pid = child.pid || null;
   writeRunMeta(meta);
 
-  return meta;
+  return { ...meta };
 }
 
 function extractAndSaveReport(
@@ -1260,7 +1641,7 @@ export function extractReport(stdoutPath: string, agentType: AgentId): string | 
       try {
         const parsed = JSON.parse(line);
 
-        if (agentType === 'claude') {
+        if (agentType === 'claude' || agentType === 'cursor') {
           if (parsed.type === 'assistant' && parsed.message?.content) {
             for (const block of parsed.message.content) {
               if (block.type === 'text' && block.text) {
@@ -1298,7 +1679,7 @@ export function extractReport(stdoutPath: string, agentType: AgentId): string | 
  *  that carries `is_error`. If we find it, the run completed cleanly (modulo
  *  agent-reported error). If not, the process likely died mid-stream and the
  *  caller should treat the run as failed. */
-function inferFinalStatusFromLog(
+export function inferFinalStatusFromLog(
   stdoutPath: string,
   agent: AgentId,
 ): { status: 'completed' | 'failed'; exitCode: number } | null {
@@ -1311,7 +1692,7 @@ function inferFinalStatusFromLog(
     for (let i = lines.length - 1, scanned = 0; i >= 0 && scanned < 20; i--, scanned++) {
       try {
         const parsed = JSON.parse(lines[i]);
-        if (agent === 'claude' && parsed.type === 'result') {
+        if ((agent === 'claude' || agent === 'cursor') && parsed.type === 'result') {
           return parsed.is_error
             ? { status: 'failed', exitCode: 1 }
             : { status: 'completed', exitCode: 0 };
@@ -1419,8 +1800,10 @@ export function monitorRunningJobs(): void {
         const isCommandRun = Boolean(meta.command) || !meta.agent;
 
         const wallClockMs = Date.now() - Date.parse(meta.startedAt);
-        if (Number.isFinite(wallClockMs) && wallClockMs > MAX_WALL_CLOCK_MS) {
-          finalizeRunMeta(meta, 'timeout', null, { errorMessage: 'exceeded max wall clock' });
+        const timeoutMs = meta.timeoutMs ?? MAX_WALL_CLOCK_MS;
+        if (Number.isFinite(wallClockMs) && wallClockMs > timeoutMs) {
+          terminateRoutineTree(meta.pid);
+          finalizeRunMeta(meta, 'timeout', null, { errorMessage: 'exceeded configured timeout' });
           writeRunMeta(meta);
           if (!isCommandRun) {
             extractAndSaveReport(stdoutPath, meta.agent!, runDirPath);

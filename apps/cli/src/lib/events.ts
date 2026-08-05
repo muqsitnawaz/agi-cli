@@ -1,8 +1,8 @@
 /**
  * Centralized event logging for agents-cli.
  *
- * Structured JSONL audit log at ~/.agents/events.jsonl with lossless numbered
- * gzip rotation at 10 MB and rich metadata for debugging/auditing.
+ * Structured JSONL audit logs at ~/.agents/.history/events/YYYY-MM-DD/events.jsonl with
+ * lossless numbered gzip rotation at 10 MiB and bounded retention.
  *
  * Features:
  * - Rich metadata: hostname, platform, arch, pid, timezone
@@ -17,9 +17,39 @@ import * as path from 'path';
 import * as os from 'os';
 import { createHash } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { parseSshConnection } from './session/provenance.js';
 import { ensureLockTarget, withFileLock } from './fs-atomic.js';
 import { getUserAgentsDir } from './state.js';
+import { stampProvenance, resetEventProvenanceForTest } from './event-provenance.js';
+import type { ActorKind } from './actor.js';
+
+/** Lazy perf warehouse write — avoids a hard cycle at module load. */
+function recordPerfTiming(payload: {
+  label: string;
+  durationMs: number;
+  status?: string;
+  agent?: string;
+  version?: string;
+  sessionId?: string;
+  cwd?: string;
+}): void {
+  try {
+    // Dynamic import keeps events.ts free of a load-time dependency on perf/db.
+    void import('./perf/spool.js').then(({ recordSample }) => {
+      recordSample({
+        kind: 'perf.timing',
+        label: payload.label,
+        durationMs: payload.durationMs,
+        status: payload.status,
+        agent: payload.agent,
+        agentVersion: payload.version,
+        sessionId: payload.sessionId,
+        cwd: payload.cwd,
+      });
+    }).catch(() => { /* fail soft */ });
+  } catch {
+    // fail soft
+  }
+}
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -29,16 +59,46 @@ import { getUserAgentsDir } from './state.js';
 // unlike _resetForTest it survives a bare reset AND propagates to CLI subprocesses
 // a test spawns, so fixture events can never land in the user's real log (#910).
 let _eventsPath: string | undefined;
-function eventsPath(): string {
-  return (_eventsPath ??= process.env.AGENTS_EVENTS_PATH || path.join(getUserAgentsDir(), 'events.jsonl'));
+let _eventsPathOverride = false;
+let _legacyMigrationChecked = false;
+let _userAgentsDirOverride: string | undefined;
+function userAgentsDir(): string {
+  return _userAgentsDirOverride ?? getUserAgentsDir();
+}
+function localDateKey(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
-function eventsDir(): string {
-  return path.dirname(eventsPath());
+function eventsRoot(): string {
+  if (_eventsPathOverride && _eventsPath) return path.dirname(_eventsPath);
+  return path.join(userAgentsDir(), '.history', 'events');
+}
+
+function eventsPath(date: Date = new Date()): string {
+  if (_eventsPathOverride && _eventsPath) return _eventsPath;
+  const override = _userAgentsDirOverride ? undefined : process.env.AGENTS_EVENTS_PATH;
+  if (override) {
+    _eventsPathOverride = true;
+    return (_eventsPath = override);
+  }
+  return path.join(eventsRoot(), localDateKey(date), 'events.jsonl');
+}
+
+function eventsDir(date: Date = new Date()): string {
+  return path.dirname(eventsPath(date));
 }
 
 /** Default retention period in days. */
 const DEFAULT_RETENTION_DAYS = 7;
+
+/** Default total footprint for the active log plus gzip archives (50 MiB). */
+const DEFAULT_MAX_STORAGE_BYTES = 50 * 1024 * 1024;
+
+/** Cross-process marker used to avoid a full archive scan on every append. */
+const PRUNE_MARKER = '.last-prune';
 
 /** Default max length for truncated strings. */
 const DEFAULT_TRUNCATE_LENGTH = 500;
@@ -83,8 +143,16 @@ export type EventType =
   | 'browser.close'
   | 'browser.navigate'
   | 'browser.screenshot'
-  // Secrets (no values logged)
+  // Computer (native desktop automation via the computer-helper daemon)
+  | 'computer.action'
+  // Secrets (no values logged) — the value-free lifecycle vocabulary funnelled
+  // through emitSecretAudit (lib/secrets/audit.ts).
   | 'secrets.get'
+  | 'secrets.unlocked'
+  | 'secrets.create'
+  | 'secrets.import'
+  | 'secrets.export'
+  | 'secrets.view'
   | 'secrets.set'
   | 'secrets.delete'
   | 'secrets.rename'
@@ -119,6 +187,14 @@ export type EventType =
   // Sessions
   | 'session.start'
   | 'session.end'
+  // Webhooks
+  | 'webhook.received'
+  | 'webhook.authorized'
+  | 'webhook.rejected'
+  | 'webhook.matched'
+  | 'webhook.fired'
+  | 'webhook.handler.start'
+  | 'webhook.handler.end'
   // Agent activity (emitted at hook time; see lib/activity.ts). These share the
   // one event vocabulary so operational and agent-semantic events read as a
   // single stream via lib/event-stream.ts.
@@ -131,16 +207,73 @@ export type EventType =
   | 'pushed'
   | 'subagent.spawned'
   | 'artifact.created'
+  | 'task.completed'
+  | 'checklist.created'
+  | 'status.posted'
   | 'file.edited'
+  // Factory (the VS Code extension). Emitted OUT OF PROCESS via
+  // `agents events emit` — the extension host is not an agents-cli process, so
+  // it cannot call emit() directly. See commands/events.ts.
+  | 'factory.command'
+  | 'factory.action'
+  | 'factory.uri'
+  | 'factory.launch'
   // Generic
+  | 'friction'
   | 'error'
   | 'warn'
   | 'info'
   | 'debug';
 
+/**
+ * Every {@link EventType}, as a runtime-checkable table.
+ *
+ * Typed `Record<EventType, true>` on purpose: the object literal is
+ * exhaustiveness-checked at COMPILE time, so adding a member to the union
+ * without adding it here fails `tsc`. That is what keeps the runtime validator
+ * (`isEventType`, used by `agents events emit` to reject an unknown kind from an
+ * out-of-process producer) from silently drifting behind the union.
+ */
+const EVENT_TYPE_TABLE: Record<EventType, true> = {
+  'agent.run.start': true, 'agent.run.end': true, 'agent.spawn.start': true, 'agent.spawn.end': true,
+  'version.install': true, 'version.switch': true, 'version.remove': true,
+  'skill.install': true, 'skill.remove': true,
+  'browser.launch': true, 'browser.close': true, 'browser.navigate': true, 'browser.screenshot': true,
+  'computer.action': true,
+  'secrets.get': true, 'secrets.unlocked': true, 'secrets.create': true, 'secrets.import': true, 'secrets.export': true, 'secrets.view': true, 'secrets.set': true, 'secrets.delete': true, 'secrets.rename': true,
+  'cloud.dispatch': true, 'cloud.complete': true, 'cloud.cancel': true, 'cloud.message': true,
+  'teams.create': true, 'teams.add': true, 'teams.start': true, 'teams.complete': true, 'teams.disband': true,
+  'hook.fire': true, 'hook.complete': true, 'hook.error': true,
+  'mcp.add': true, 'mcp.remove': true, 'mcp.register': true,
+  'resource.sync': true,
+  'rotation.resolved': true,
+  'command.start': true, 'command.end': true,
+  'perf.timing': true,
+  'session.start': true, 'session.end': true,
+  'webhook.received': true, 'webhook.authorized': true, 'webhook.rejected': true, 'webhook.matched': true,
+  'webhook.fired': true, 'webhook.handler.start': true, 'webhook.handler.end': true,
+  'plan.created': true, 'pr.opened': true, 'pr.merged': true, 'worktree.created': true,
+  'worktree.removed': true, 'commit.created': true, 'pushed': true, 'subagent.spawned': true,
+  'artifact.created': true, 'task.completed': true, 'checklist.created': true, 'status.posted': true,
+  'file.edited': true,
+  'factory.command': true, 'factory.action': true, 'factory.uri': true, 'factory.launch': true,
+  'friction': true, 'error': true, 'warn': true, 'info': true, 'debug': true,
+};
+
+/** Every known event kind. Derived from {@link EVENT_TYPE_TABLE}, never hand-listed. */
+export const EVENT_TYPES: readonly EventType[] = Object.keys(EVENT_TYPE_TABLE) as EventType[];
+
+const EVENT_TYPE_SET: ReadonlySet<string> = new Set<string>(EVENT_TYPES);
+
+/** Runtime guard for an event kind arriving from outside this process. */
+export function isEventType(value: string): value is EventType {
+  return EVENT_TYPE_SET.has(value);
+}
+
 const AUDIT_EVENTS: ReadonlySet<string> = new Set([
   'command.start', 'command.end',
-  'secrets.get', 'secrets.set', 'secrets.delete', 'secrets.rename',
+  'secrets.get', 'secrets.unlocked', 'secrets.create', 'secrets.import', 'secrets.export', 'secrets.view',
+  'secrets.set', 'secrets.delete', 'secrets.rename',
   'teams.create', 'teams.add', 'teams.start', 'teams.complete', 'teams.disband',
   'cloud.dispatch', 'cloud.complete', 'cloud.cancel', 'cloud.message',
   'version.install', 'version.switch', 'version.remove',
@@ -148,6 +281,11 @@ const AUDIT_EVENTS: ReadonlySet<string> = new Set([
   'mcp.add', 'mcp.remove', 'mcp.register',
   'rotation.resolved',
   'session.start', 'session.end',
+  // An external process reaching into the user's editor (the CLI's
+  // vscodium-agent backend driving `/spawn` / `/inject` / `/focus`) is a
+  // "who reached in from outside" fact, which is what the audit lane answers.
+  // The other factory.* kinds are ordinary info — a palette press is not audit.
+  'factory.uri',
 ]);
 
 export function levelFor(event: EventType): EventLevel {
@@ -162,6 +300,14 @@ export interface EventMeta {
   tz: string;
   tzName: string;
   hostname: string;
+  /**
+   * Normalized, joinable device id (`machine-id.ts::machineId()`) — the same key
+   * `agents devices`/session-sync use, so an event can be matched to a device.
+   * `hostname` is the raw `os.hostname()`; `machineId` is `zion` for `Zion.local`.
+   * Optional on the type so legacy records (pre-provenance-floor) and the activity
+   * stream still parse; `emit()` always stamps it on the operational log.
+   */
+  machineId?: string;
   platform: NodeJS.Platform;
   arch: string;
   pid: number;
@@ -173,6 +319,10 @@ export interface EventMeta {
   osUser: string;
   transport: 'local' | 'ssh';
   sshClientIp?: string;
+  /** Resolved actor id — which human/agent is behind this event (RUSH-2020). */
+  actor?: string;
+  /** Actor kind (`human`/`agent`). */
+  kind?: ActorKind | 'unknown';
 }
 
 export interface EventPayload {
@@ -180,6 +330,10 @@ export interface EventPayload {
   agent?: string;
   version?: string;
   sessionId?: string;
+  /** Spawn-time join key (AGENT_LAUNCH_ID) mapping this action to its launch. */
+  launchId?: string;
+  /** The session that spawned this one (AGENTS_PARENT_SESSION_ID) — lineage edge. */
+  parentSessionId?: string;
 
   // Context
   cwd?: string;
@@ -233,6 +387,8 @@ function getTimezoneName(): string {
 }
 
 function ensureLogsDir(): void {
+  eventsPath(); // Resolve an explicit AGENTS_EVENTS_PATH before migration checks.
+  migrateLegacyEventLogs();
   if (!fs.existsSync(eventsDir())) {
     fs.mkdirSync(eventsDir(), { recursive: true, mode: DIR_MODE });
   } else {
@@ -242,6 +398,104 @@ function ensureLogsDir(): void {
     } catch {
       // May fail if not owner
     }
+  }
+}
+
+/**
+ * Move root-level and interim flat-history event families into dated directories.
+ *
+ * The common case is a whole-family rename into an empty destination. A
+ * Each segment is assigned to the local calendar day of its filesystem mtime;
+ * new writes are split by day at source. A partially completed migration keeps
+ * the destination active file authoritative and assigns a fresh archive number,
+ * so no record is overwritten or silently discarded. The legacy active-file
+ * lock serializes this with older installed processes that still append there.
+ */
+export function migrateLegacyEventLogs(userDir: string = userAgentsDir()): number {
+  if (_eventsPathOverride || _legacyMigrationChecked) return 0;
+  _legacyMigrationChecked = true;
+
+  const destinationRoot = path.join(userDir, '.history', 'events');
+  const legacyActive = path.join(userDir, 'events.jsonl');
+  const interimActive = path.join(destinationRoot, 'events.jsonl');
+  const listArchives = (dir: string): Array<{ file: string; number: number }> => {
+    try {
+      return fs.readdirSync(dir)
+      .map((file) => ({ file, match: file.match(/^events\.(\d+)\.jsonl\.gz$/) }))
+      .filter((entry): entry is { file: string; match: RegExpMatchArray } => entry.match !== null)
+      .map((entry) => ({ file: entry.file, number: Number(entry.match[1]) }))
+      .sort((a, b) => a.number - b.number);
+    } catch {
+      return [];
+    }
+  };
+  const hasSourceFiles = fs.existsSync(legacyActive) || fs.existsSync(interimActive) ||
+    listArchives(userDir).length > 0 || listArchives(destinationRoot).length > 0;
+
+  if (!hasSourceFiles) return 0;
+
+  try {
+    fs.mkdirSync(destinationRoot, { recursive: true, mode: DIR_MODE });
+    ensureLockTarget(legacyActive, '', DIR_MODE);
+    return withFileLock(legacyActive, () => {
+      ensureLockTarget(interimActive, '', DIR_MODE);
+      return withFileLock(interimActive, () => {
+        const sourceFamilies = [
+          { dir: userDir, active: legacyActive, archives: listArchives(userDir) },
+          { dir: destinationRoot, active: interimActive, archives: listArchives(destinationRoot) },
+        ];
+        let moved = 0;
+
+        const nextArchiveNumber = (dir: string): number => {
+          const numbers = fs.readdirSync(dir)
+            .map((file) => file.match(/^events\.(\d+)\.jsonl\.gz$/))
+            .filter((match): match is RegExpMatchArray => match !== null)
+            .map((match) => Number(match[1]));
+          return (numbers.length ? Math.max(...numbers) : 0) + 1;
+        };
+        const withDestinationLock = <T>(dayDir: string, fn: () => T): T => {
+          const destinationActive = path.join(dayDir, 'events.jsonl');
+          fs.mkdirSync(dayDir, { recursive: true, mode: DIR_MODE });
+          ensureLockTarget(destinationActive, '', DIR_MODE);
+          return withFileLock(destinationActive, fn);
+        };
+
+        for (const family of sourceFamilies) {
+          const activeBytes = fs.existsSync(family.active) ? fs.statSync(family.active).size : 0;
+          if (activeBytes > 0) {
+            const activeStat = fs.statSync(family.active);
+            const dayDir = path.join(destinationRoot, localDateKey(activeStat.mtime));
+            withDestinationLock(dayDir, () => {
+              const archivePath = path.join(dayDir, `events.${nextArchiveNumber(dayDir)}.jsonl.gz`);
+              fs.writeFileSync(archivePath, gzipSync(fs.readFileSync(family.active)), { mode: FILE_MODE });
+              fs.utimesSync(archivePath, activeStat.atime, activeStat.mtime);
+              fs.truncateSync(family.active, 0);
+            });
+            moved++;
+          }
+
+          for (const archive of family.archives) {
+            const source = path.join(family.dir, archive.file);
+            const dayDir = path.join(destinationRoot, localDateKey(fs.statSync(source).mtime));
+            withDestinationLock(dayDir, () => {
+              const destination = path.join(dayDir, `events.${nextArchiveNumber(dayDir)}.jsonl.gz`);
+              fs.renameSync(source, destination);
+            });
+            moved++;
+          }
+
+          try {
+            if (fs.existsSync(family.active) && fs.statSync(family.active).size === 0) fs.unlinkSync(family.active);
+          } catch { /* an older process may have reopened it */ }
+        }
+        return moved;
+      });
+    });
+  } catch {
+    // Audit logging must remain fail-soft. Files stay at the legacy path and a
+    // later process retries because this guard is process-local.
+    _legacyMigrationChecked = false;
+    return 0;
   }
 }
 
@@ -264,8 +518,9 @@ const SECRET_PATH = /\/(secrets|credentials|\.env|user\.yaml)\b/i;
 const SENSITIVE_ARG_NAME = /password|secret|token|key|api[-_]?key|auth/i;
 const SENSITIVE_PAYLOAD_KEY = /password|secret|token|api[-_]?key|auth/i;
 const RESERVED_META_KEYS = new Set([
-  'ts', 'tz', 'tzName', 'hostname', 'platform', 'arch', 'pid', 'ppid',
+  'ts', 'tz', 'tzName', 'hostname', 'machineId', 'platform', 'arch', 'pid', 'ppid',
   'event', 'level', 'caller', 'session', 'osUser', 'transport', 'sshClientIp',
+  'actor', 'kind',
 ]);
 
 function promptMarker(value: string): string {
@@ -422,37 +677,6 @@ export function detectCaller(
   return { kind: stdoutIsTTY ? 'terminal' : 'script' };
 }
 
-// ─── Audit attribution ────────────────────────────────────────────────────────
-
-interface AuditOrigin {
-  osUser: string;
-  transport: 'local' | 'ssh';
-  sshClientIp?: string;
-}
-
-/**
- * Who is running this process and from where. Derived once per process from the
- * OS user and $SSH_CONNECTION (via the same parser the sessions layer uses), then
- * cached — provenance can't change mid-process, so every emit() pays for it once.
- */
-let _origin: AuditOrigin | undefined;
-function auditOrigin(): AuditOrigin {
-  if (_origin) return _origin;
-  let osUser = 'unknown';
-  try {
-    osUser = os.userInfo().username;
-  } catch {
-    // Container/edge cases where the uid has no passwd entry.
-  }
-  const ssh = process.env.SSH_CONNECTION ? parseSshConnection(process.env.SSH_CONNECTION) : undefined;
-  _origin = {
-    osUser,
-    transport: ssh ? 'ssh' : 'local',
-    ...(ssh ? { sshClientIp: ssh.clientIp } : {}),
-  };
-  return _origin;
-}
-
 // ─── Core API ─────────────────────────────────────────────────────────────────
 
 /**
@@ -460,8 +684,14 @@ function auditOrigin(): AuditOrigin {
  *
  * @param event - The event type
  * @param payload - Event-specific data (agent, version, cwd, etc.)
+ * @param overrides - Envelope fields the CALLER owns rather than the writer.
+ *   Only `ts` today: a batched out-of-process producer (`agents events emit`)
+ *   records when each event HAPPENED, but flushes them together later, so
+ *   stamping write-time would collapse a whole batch onto the flush instant and
+ *   corrupt every `--since` boundary. `ts` stays in RESERVED_META_KEYS so a
+ *   *payload* still cannot inject it — this explicit channel is the only way in.
  */
-export function emit(event: EventType, payload: EventPayload = {}): void {
+export function emit(event: EventType, payload: EventPayload = {}, overrides: { ts?: string } = {}): void {
   if (isDisabled()) return;
 
   try {
@@ -470,8 +700,10 @@ export function emit(event: EventType, payload: EventPayload = {}): void {
     const caller = detectCaller();
     const safePayload = sanitizePayload(payload);
     const record: EventRecord = {
+      // Provenance floor first: env-sourced defaults an explicit payload overrides.
+      ...stampProvenance(),
       ...safePayload,
-      ts: new Date().toISOString(),
+      ts: overrides.ts ?? new Date().toISOString(),
       tz: getTimezoneOffset(),
       tzName: getTimezoneName(),
       hostname: os.hostname(),
@@ -483,7 +715,6 @@ export function emit(event: EventType, payload: EventPayload = {}): void {
       level: levelFor(event),
       caller: caller.kind,
       ...(caller.session ? { session: caller.session } : {}),
-      ...auditOrigin(),
     };
 
     const line = JSON.stringify(record) + '\n';
@@ -502,7 +733,8 @@ export function emit(event: EventType, payload: EventPayload = {}): void {
         }
       }
 
-      maybeGzipRotateLocked(logPath);
+      const rotated = maybeGzipRotateLocked(logPath);
+      maybePruneLocked(rotated);
     });
   } catch {
     // Silent failure - logging should never break the CLI
@@ -552,20 +784,40 @@ export function time<T>(label: string, fn: () => T, payload: EventPayload = {}):
   const start = Date.now();
   try {
     const result = fn();
+    const durationMs = Date.now() - start;
     emit('perf.timing', {
       ...payload,
       label,
-      durationMs: Date.now() - start,
+      durationMs,
       status: 'success',
+    });
+    recordPerfTiming({
+      label,
+      durationMs,
+      status: 'success',
+      agent: payload.agent,
+      version: payload.version,
+      sessionId: payload.sessionId,
+      cwd: payload.cwd,
     });
     return result;
   } catch (err) {
+    const durationMs = Date.now() - start;
     emit('perf.timing', {
       ...payload,
       label,
-      durationMs: Date.now() - start,
+      durationMs,
       status: 'error',
       error: err instanceof Error ? err.message : String(err),
+    });
+    recordPerfTiming({
+      label,
+      durationMs,
+      status: 'error',
+      agent: payload.agent,
+      version: payload.version,
+      sessionId: payload.sessionId,
+      cwd: payload.cwd,
     });
     throw err;
   }
@@ -586,20 +838,40 @@ export async function timeAsync<T>(
   const start = Date.now();
   try {
     const result = await fn();
+    const durationMs = Date.now() - start;
     emit('perf.timing', {
       ...payload,
       label,
-      durationMs: Date.now() - start,
+      durationMs,
       status: 'success',
+    });
+    recordPerfTiming({
+      label,
+      durationMs,
+      status: 'success',
+      agent: payload.agent,
+      version: payload.version,
+      sessionId: payload.sessionId,
+      cwd: payload.cwd,
     });
     return result;
   } catch (err) {
+    const durationMs = Date.now() - start;
     emit('perf.timing', {
       ...payload,
       label,
-      durationMs: Date.now() - start,
+      durationMs,
       status: 'error',
       error: err instanceof Error ? err.message : String(err),
+    });
+    recordPerfTiming({
+      label,
+      durationMs,
+      status: 'error',
+      agent: payload.agent,
+      version: payload.version,
+      sessionId: payload.sessionId,
+      cwd: payload.cwd,
     });
     throw err;
   }
@@ -635,12 +907,21 @@ export function createTimer(label: string, payload: EventPayload = {}): {
     },
     end(endPayload: EventPayload = {}): void {
       const durationMs = Date.now() - start;
+      const merged = { ...payload, ...endPayload };
       emit('perf.timing', {
-        ...payload,
-        ...endPayload,
+        ...merged,
         label,
         durationMs,
         phases: marks,
+      });
+      recordPerfTiming({
+        label,
+        durationMs,
+        status: typeof merged.status === 'string' ? merged.status : undefined,
+        agent: merged.agent,
+        version: merged.version,
+        sessionId: merged.sessionId,
+        cwd: merged.cwd,
       });
     },
   };
@@ -663,20 +944,40 @@ export function withTiming<Args extends unknown[], R>(
     const start = Date.now();
     try {
       const result = await fn(...args);
+      const durationMs = Date.now() - start;
       emit('perf.timing', {
         ...basePayload,
         label,
-        durationMs: Date.now() - start,
+        durationMs,
         status: 'success',
+      });
+      recordPerfTiming({
+        label,
+        durationMs,
+        status: 'success',
+        agent: basePayload.agent,
+        version: basePayload.version,
+        sessionId: basePayload.sessionId,
+        cwd: basePayload.cwd,
       });
       return result;
     } catch (err) {
+      const durationMs = Date.now() - start;
       emit('perf.timing', {
         ...basePayload,
         label,
-        durationMs: Date.now() - start,
+        durationMs,
         status: 'error',
         error: err instanceof Error ? err.message : String(err),
+      });
+      recordPerfTiming({
+        label,
+        durationMs,
+        status: 'error',
+        agent: basePayload.agent,
+        version: basePayload.version,
+        sessionId: basePayload.sessionId,
+        cwd: basePayload.cwd,
       });
       throw err;
     }
@@ -725,12 +1026,30 @@ export function emitError(
   });
 }
 
+/**
+ * Emit a friction event — a structured, point-of-use record of a failure or
+ * block the CLI just hit. `surface` is the subsystem (teams, browser, secrets,
+ * guard, …); `failureId` is a stable slug that lets the nightly routine group
+ * the same failure across sessions (e.g. 'remote-cwd-on-add', 'not-installed').
+ */
+export function emitFriction(
+  surface: string,
+  failureId: string,
+  payload: EventPayload = {}
+): void {
+  emit('friction', {
+    ...payload,
+    surface,
+    failureId,
+  });
+}
+
 // ─── Gzip rotation ──────────────────────────────────────────────────────────
 
 /** Rotate the active file while its append lock is held. */
-function maybeGzipRotateLocked(logPath: string): void {
+function maybeGzipRotateLocked(logPath: string): boolean {
   const stat = fs.statSync(logPath);
-  if (stat.size < GZIP_ROTATION_BYTES) return;
+  if (stat.size < GZIP_ROTATION_BYTES) return false;
 
   const raw = fs.readFileSync(logPath);
   const tmpArchive = path.join(eventsDir(), `.events.1.jsonl.gz.${process.pid}.tmp`);
@@ -751,6 +1070,7 @@ function maybeGzipRotateLocked(logPath: string): void {
     }
     fs.renameSync(tmpArchive, path.join(eventsDir(), 'events.1.jsonl.gz'));
     fs.truncateSync(logPath, 0);
+    return true;
   } catch (err) {
     try { fs.unlinkSync(tmpArchive); } catch { /* best-effort cleanup */ }
     throw err;
@@ -759,47 +1079,163 @@ function maybeGzipRotateLocked(logPath: string): void {
 
 // ─── Rotation ─────────────────────────────────────────────────────────────────
 
-/**
- * Remove log files older than the retention period.
- * Removes numbered gzip archives whose filesystem mtime exceeds retention.
- *
- * @param retentionDays - Number of days to keep (default 7, from DEFAULT_RETENTION_DAYS)
- * @returns Number of files removed
- */
-export function rotate(retentionDays: number = DEFAULT_RETENTION_DAYS): number {
-  try {
-    if (!fs.existsSync(eventsDir())) return 0;
+interface EventLogFile {
+  path: string;
+  gzip: boolean;
+  currentActive: boolean;
+  mtimeMs: number;
+  size: number;
+}
 
-    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-    const files = fs.readdirSync(eventsDir()).filter(f => /^events\.\d+\.jsonl\.gz$/.test(f));
-    let removed = 0;
-
-    for (const file of files) {
-      const filePath = path.join(eventsDir(), file);
-      if (fs.statSync(filePath).mtimeMs < cutoff) {
-        fs.unlinkSync(filePath);
-        removed++;
-      }
+function listEventLogFiles(): EventLogFile[] {
+  const current = eventsPath();
+  const files: EventLogFile[] = [];
+  const addFile = (filePath: string, gzip: boolean) => {
+    try {
+      const stat = fs.statSync(filePath);
+      files.push({
+        path: filePath,
+        gzip,
+        currentActive: filePath === current,
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+      });
+    } catch { /* file may rotate while an unlocked reader enumerates */ }
+  };
+  const addDirectory = (dir: string) => {
+    let names: string[] = [];
+    try { names = fs.readdirSync(dir); } catch { return; }
+    for (const name of names) {
+      if (name !== 'events.jsonl' && !/^events\.\d+\.jsonl\.gz$/.test(name)) continue;
+      addFile(path.join(dir, name), name.endsWith('.gz'));
     }
+  };
 
-    return removed;
-  } catch {
-    return 0;
+  if (_eventsPathOverride) {
+    if (path.basename(current) !== 'events.jsonl') {
+      addFile(current, false);
+      let names: string[] = [];
+      try { names = fs.readdirSync(eventsDir()); } catch { return files; }
+      for (const name of names) {
+        if (/^events\.\d+\.jsonl\.gz$/.test(name)) addFile(path.join(eventsDir(), name), true);
+      }
+      return files;
+    }
+    addDirectory(eventsDir());
+    return files;
+  }
+
+  let days: string[] = [];
+  try { days = fs.readdirSync(eventsRoot()).filter((name) => /^\d{4}-\d{2}-\d{2}$/.test(name)); } catch { return files; }
+  for (const day of days) addDirectory(path.join(eventsRoot(), day));
+  return files;
+}
+
+function removeEmptyDayDirectories(): void {
+  if (_eventsPathOverride) return;
+  let days: string[] = [];
+  try { days = fs.readdirSync(eventsRoot()).filter((name) => /^\d{4}-\d{2}-\d{2}$/.test(name)); } catch { return; }
+  for (const day of days) {
+    const dir = path.join(eventsRoot(), day);
+    try { if (fs.readdirSync(dir).length === 0) fs.rmdirSync(dir); } catch { /* best effort */ }
   }
 }
 
-/**
- * Lazy rotation - runs at most once per day per process.
- */
-let lastRotationCheck = 0;
-export function maybeRotate(): void {
-  const now = Date.now();
-  const oneDayMs = 24 * 60 * 60 * 1000;
-
-  if (now - lastRotationCheck > oneDayMs) {
-    lastRotationCheck = now;
-    rotate();
+function finalizePastDayLogs(): void {
+  if (_eventsPathOverride) return;
+  const currentDay = localDateKey();
+  for (const file of listEventLogFiles()) {
+    if (path.basename(file.path) !== 'events.jsonl') continue;
+    if (path.basename(path.dirname(file.path)) === currentDay) continue;
+    try {
+      withFileLock(file.path, () => {
+        const dir = path.dirname(file.path);
+        const numbers = fs.readdirSync(dir)
+          .map((name) => name.match(/^events\.(\d+)\.jsonl\.gz$/))
+          .filter((match): match is RegExpMatchArray => match !== null)
+          .map((match) => Number(match[1]));
+        const next = (numbers.length ? Math.max(...numbers) : 0) + 1;
+        const target = path.join(dir, `events.${next}.jsonl.gz`);
+        const sourceStat = fs.statSync(file.path);
+        fs.writeFileSync(target, gzipSync(fs.readFileSync(file.path)), { mode: FILE_MODE });
+        fs.utimesSync(target, sourceStat.atime, sourceStat.mtime);
+        fs.unlinkSync(file.path);
+      });
+    } catch { /* retry on the next prune */ }
   }
+}
+
+export interface RotationResult {
+  removedByAge: number;
+  removedBySize: number;
+  bytesReclaimed: number;
+}
+
+function pruneEventLogsLocked(
+  retentionDays: number = DEFAULT_RETENTION_DAYS,
+  maxStorageBytes: number = DEFAULT_MAX_STORAGE_BYTES,
+): RotationResult {
+  finalizePastDayLogs();
+  const result: RotationResult = { removedByAge: 0, removedBySize: 0, bytesReclaimed: 0 };
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  let files = listEventLogFiles();
+
+  for (const file of files) {
+    if (file.currentActive || file.mtimeMs >= cutoff) continue;
+    try {
+      fs.unlinkSync(file.path);
+      result.removedByAge++;
+      result.bytesReclaimed += file.size;
+    } catch { /* another process may already have removed it */ }
+  }
+
+  files = listEventLogFiles();
+  let totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+  const oldestFirst = files
+    .filter((file) => !file.currentActive)
+    .sort((a, b) => a.mtimeMs - b.mtimeMs || a.path.localeCompare(b.path));
+  for (const file of oldestFirst) {
+    if (totalBytes <= maxStorageBytes) break;
+    try {
+      fs.unlinkSync(file.path);
+      totalBytes -= file.size;
+      result.removedBySize++;
+      result.bytesReclaimed += file.size;
+    } catch { /* another process may already have removed it */ }
+  }
+
+  removeEmptyDayDirectories();
+  return result;
+}
+
+/** Apply age retention and the total-size ceiling immediately. */
+export function rotate(
+  retentionDays: number = DEFAULT_RETENTION_DAYS,
+  maxStorageBytes: number = DEFAULT_MAX_STORAGE_BYTES,
+): RotationResult {
+  try {
+    ensureLogsDir();
+    const active = eventsPath();
+    ensureLockTarget(active, '', DIR_MODE);
+    return withFileLock(active, () => pruneEventLogsLocked(retentionDays, maxStorageBytes));
+  } catch {
+    return { removedByAge: 0, removedBySize: 0, bytesReclaimed: 0 };
+  }
+}
+
+/** Prune daily across processes, and immediately after a size rotation. */
+function maybePruneLocked(force: boolean): void {
+  const marker = path.join(eventsRoot(), PRUNE_MARKER);
+  const oneDayMs = 24 * 60 * 60 * 1000;
+  let due = force;
+  try { due ||= Date.now() - fs.statSync(marker).mtimeMs > oneDayMs; } catch { due = true; }
+  if (!due) return;
+
+  const maxBytes = force
+    ? DEFAULT_MAX_STORAGE_BYTES - GZIP_ROTATION_BYTES
+    : DEFAULT_MAX_STORAGE_BYTES;
+  pruneEventLogsLocked(DEFAULT_RETENTION_DAYS, maxBytes);
+  try { fs.writeFileSync(marker, '', { mode: FILE_MODE }); } catch { /* retry next append */ }
 }
 
 // ─── Query ────────────────────────────────────────────────────────────────────
@@ -816,26 +1252,23 @@ export function query(options: {
   eventTypes?: EventType[];
   level?: EventLevel;
   agent?: string;
+  /** Only events stamped with this session id (payload `sessionId`, the provenance floor). */
+  sessionId?: string;
   caller?: string;
   command?: string;
   module?: string;
+  /** Only events carrying this bundle name in their payload (e.g. secrets events). */
+  bundle?: string;
   limit?: number;
 }): EventRecord[] {
-  const { startDate, endDate = new Date(), eventTypes, level, agent, caller, command, module, limit } = options;
+  const { startDate, endDate = new Date(), eventTypes, level, agent, sessionId, caller, command, module, bundle, limit } = options;
   const results: EventRecord[] = [];
 
-  if (!fs.existsSync(eventsDir())) return results;
-
-  const files: Array<{ path: string; gzip: boolean }> = [];
-  if (fs.existsSync(eventsPath())) files.push({ path: eventsPath(), gzip: false });
-  const archives = fs.readdirSync(eventsDir())
-    .map((file) => ({ file, match: file.match(/^events\.(\d+)\.jsonl\.gz$/) }))
-    .filter((entry): entry is { file: string; match: RegExpMatchArray } => entry.match !== null)
-    .map((entry) => ({ file: entry.file, number: Number(entry.match[1]) }))
-    .sort((a, b) => a.number - b.number);
-  for (const archive of archives) {
-    files.push({ path: path.join(eventsDir(), archive.file), gzip: true });
-  }
+  eventsPath(); // Resolve AGENTS_EVENTS_PATH before deciding whether to migrate.
+  migrateLegacyEventLogs();
+  const files = listEventLogFiles().sort((a, b) =>
+    Number(b.currentActive) - Number(a.currentActive) || b.mtimeMs - a.mtimeMs || b.path.localeCompare(a.path)
+  );
 
   const startMs = startDate?.getTime();
   const endMs = endDate?.getTime();
@@ -864,10 +1297,15 @@ export function query(options: {
         if (eventTypes && !eventTypes.includes(record.event)) continue;
         if (level && (record.level ?? levelFor(record.event as EventType)) !== level) continue;
         if (agent && record.agent !== agent) continue;
+        if (sessionId && record.sessionId !== sessionId) continue;
         if (caller && record.caller !== caller) continue;
         if (command && record.command !== command &&
             !(typeof record.command === 'string' && record.command.startsWith(command + ' '))) continue;
         if (module && record.module !== module) continue;
+        // Filter bundle in the SAME scan, before the limit cutoff — a post-filter
+        // on the already-capped result silently drops matching-bundle records that
+        // fell outside the newest-`limit` window (a data-loss bug for an audit query).
+        if (bundle && record.bundle !== bundle) continue;
 
         results.push(record);
 
@@ -928,6 +1366,8 @@ export interface EventStats {
   byEvent: Record<string, number>;
   byModule: Record<string, number>;
   byUser: Record<string, number>;
+  /** Event counts grouped by resolved actor id (the human/agent behind them). */
+  byActor: Record<string, number>;
   fileCount: number;
   totalBytes: number;
 }
@@ -943,6 +1383,7 @@ export function stats(options: { days?: number } = {}): EventStats {
   const byEvent: Record<string, number> = {};
   const byModule: Record<string, number> = {};
   const byUser: Record<string, number> = {};
+  const byActor: Record<string, number> = {};
 
   for (const r of records) {
     const lvl = r.level ?? levelFor(r.event as EventType);
@@ -951,22 +1392,15 @@ export function stats(options: { days?: number } = {}): EventStats {
     if (r.module) byModule[r.module] = (byModule[r.module] ?? 0) + 1;
     const user = `${r.osUser ?? '?'}@${r.hostname}`;
     byUser[user] = (byUser[user] ?? 0) + 1;
+    if (r.actor) byActor[r.actor] = (byActor[r.actor] ?? 0) + 1;
   }
 
   let fileCount = 0;
   let totalBytes = 0;
   try {
-    if (fs.existsSync(eventsDir())) {
-      const files = fs.readdirSync(eventsDir()).filter(f =>
-        f === 'events.jsonl' || /^events\.\d+\.jsonl\.gz$/.test(f)
-      );
-      fileCount = files.length;
-      for (const f of files) {
-        try {
-          totalBytes += fs.statSync(path.join(eventsDir(), f)).size;
-        } catch { /* skip */ }
-      }
-    }
+    const files = listEventLogFiles();
+    fileCount = files.length;
+    totalBytes = files.reduce((sum, file) => sum + file.size, 0);
   } catch { /* skip */ }
 
   return {
@@ -975,6 +1409,7 @@ export function stats(options: { days?: number } = {}): EventStats {
     byEvent,
     byModule,
     byUser,
+    byActor,
     fileCount,
     totalBytes,
   };
@@ -986,9 +1421,11 @@ export function getLogsPath(): string {
   return eventsPath();
 }
 
-export function _resetForTest(overrideEventsPath?: string): void {
+export function _resetForTest(overrideEventsPath?: string, overrideUserAgentsDir?: string): void {
   _eventsPath = overrideEventsPath;
-  _origin = undefined;
+  _eventsPathOverride = Boolean(overrideEventsPath);
+  _userAgentsDirOverride = overrideUserAgentsDir;
+  _legacyMigrationChecked = false;
+  resetEventProvenanceForTest();
   _chmoddedPath = undefined;
-  lastRotationCheck = 0;
 }

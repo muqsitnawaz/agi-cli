@@ -1,14 +1,18 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { spawn } from 'node:child_process';
 import { gunzipSync, gzipSync } from 'node:zlib';
+import lockfile from 'proper-lockfile';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  emit, emitStart, emitCommand, query, rotate, stats,
+  emit, emitStart, emitCommand, emitFriction, query, rotate, stats,
   redactPrompt, redactArgs, truncate,
   detectCaller,
-  _resetForTest,
+  levelFor, isEventType, EVENT_TYPES,
+  getLogsPath, _resetForTest,
 } from './events.js';
+import { resetActorCache } from './actor.js';
 
 const tempDirs: string[] = [];
 
@@ -73,6 +77,63 @@ describe('events', () => {
       expect(records[0].level).toBe('warn');
     });
 
+    it('stamps the resolved actor + kind on every record (RUSH-2020)', () => {
+      // Force an inherited actor via env so the resolve is deterministic offline.
+      process.env.AGENTS_ACTOR = 'ada@example.com';
+      process.env.AGENTS_ACTOR_KIND = 'human';
+      resetActorCache();
+      try {
+        setupLogsDir();
+        emit('info', { module: 'test' });
+        const rec = query({})[0];
+        expect(rec.actor).toBe('ada@example.com');
+        expect(rec.kind).toBe('human');
+      } finally {
+        delete process.env.AGENTS_ACTOR;
+        delete process.env.AGENTS_ACTOR_KIND;
+        resetActorCache();
+      }
+    });
+
+    it('stamps the provenance floor (full sessionId, agent, launchId, parentSessionId, machineId) from env', () => {
+      process.env.AGENT_SESSION_ID = '11111111-2222-3333-4444-555555555555';
+      process.env.AGENTS_AGENT_NAME = 'claude';
+      process.env.AGENT_LAUNCH_ID = 'launch-abc';
+      process.env.AGENTS_PARENT_SESSION_ID = '99999999-8888-7777-6666-555555555555';
+      try {
+        setupLogsDir();
+        emit('info', { module: 'test' });
+        const rec = query({})[0];
+        // Full untruncated session id — the new floor field, stamped unconditionally
+        // (unlike the caller-gated 8-char `session`, which needs CLAUDECODE/terminal env).
+        expect(rec.sessionId).toBe('11111111-2222-3333-4444-555555555555');
+        expect(rec.agent).toBe('claude');
+        expect(rec.launchId).toBe('launch-abc');
+        expect(rec.parentSessionId).toBe('99999999-8888-7777-6666-555555555555');
+        // machineId is always present and joinable (normalized).
+        expect(rec.machineId).toBeDefined();
+        expect(rec.machineId).toBe(rec.machineId!.toLowerCase());
+      } finally {
+        delete process.env.AGENT_SESSION_ID;
+        delete process.env.AGENTS_AGENT_NAME;
+        delete process.env.AGENT_LAUNCH_ID;
+        delete process.env.AGENTS_PARENT_SESSION_ID;
+      }
+    });
+
+    it('lets an explicit payload field override the env provenance default', () => {
+      process.env.AGENTS_AGENT_NAME = 'claude';
+      try {
+        setupLogsDir();
+        // cloud.dispatch passes its own task agent — it must win over the env default.
+        emit('cloud.dispatch', { module: 'cloud', agent: 'codex' });
+        const rec = query({})[0];
+        expect(rec.agent).toBe('codex');
+      } finally {
+        delete process.env.AGENTS_AGENT_NAME;
+      }
+    });
+
     it('assigns debug level to debug events', () => {
       setupLogsDir();
       emit('debug', { module: 'test' });
@@ -101,6 +162,24 @@ describe('events', () => {
       } else {
         expect(files.length).toBe(0);
       }
+    });
+
+    it('emitFriction writes a friction event with surface and failureId', () => {
+      const logsDir = setupLogsDir();
+      emitFriction('teams', 'remote-cwd-on-add', { error: 'cannot use --remote-cwd' });
+
+      const files = fs.readdirSync(logsDir).filter(f => f === 'events.jsonl');
+      expect(files).toEqual(['events.jsonl']);
+
+      const content = fs.readFileSync(path.join(logsDir, 'events.jsonl'), 'utf-8');
+      const record = JSON.parse(content.trim().split('\n').pop()!);
+      expect(record.event).toBe('friction');
+      expect(record.surface).toBe('teams');
+      expect(record.failureId).toBe('remote-cwd-on-add');
+      expect(record.error).toBe('cannot use --remote-cwd');
+      expect(record.level).toBe('info');
+      expect(record.ts).toBeDefined();
+      expect(record.hostname).toBeDefined();
     });
   });
 
@@ -249,6 +328,20 @@ describe('events', () => {
       expect(results[0].module).toBe('secrets');
     });
 
+    it('filters by sessionId — the scoped read enrichCachedSessionMeta uses instead of a transcript re-scan', () => {
+      setupLogsDir();
+      emit('browser.navigate', { sessionId: 'sess-a', url: 'https://x' });
+      emit('browser.navigate', { sessionId: 'sess-b', url: 'https://y' });
+      emit('computer.action', { sessionId: 'sess-a', command: 'click' });
+
+      const forA = query({ sessionId: 'sess-a' });
+      expect(forA).toHaveLength(2);
+      expect(forA.every((r) => r.sessionId === 'sess-a')).toBe(true);
+
+      expect(query({ sessionId: 'sess-b' })).toHaveLength(1);
+      expect(query({ sessionId: 'sess-does-not-exist' })).toHaveLength(0);
+    });
+
     it('filters by environment-derived caller identity', () => {
       setupLogsDir();
       emit('info', { module: 'test' });
@@ -321,9 +414,164 @@ describe('events', () => {
       const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
       fs.utimesSync(gzFile, old, old);
 
-      const removed = rotate(7);
-      expect(removed).toBe(1);
+      const result = rotate(7);
+      expect(result.removedByAge).toBe(1);
+      expect(result.removedBySize).toBe(0);
       expect(fs.existsSync(gzFile)).toBe(false);
+    });
+
+    it('runs retention from the central emit path', () => {
+      const logsDir = setupLogsDir();
+      const gzFile = path.join(logsDir, 'events.1.jsonl.gz');
+      fs.writeFileSync(gzFile, gzipSync(Buffer.from('{"event":"info"}\n')));
+      const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      fs.utimesSync(gzFile, old, old);
+
+      emit('info', { module: 'prune-trigger' });
+
+      expect(fs.existsSync(gzFile)).toBe(false);
+      expect(query({ module: 'prune-trigger' })).toHaveLength(1);
+    });
+
+    it('writes into a local-date directory under .history/events', () => {
+      const userDir = makeTempDir();
+      _resetForTest(undefined, userDir);
+
+      emit('info', { module: 'dated-layout' });
+
+      const expectedDay = [
+        new Date().getFullYear(),
+        String(new Date().getMonth() + 1).padStart(2, '0'),
+        String(new Date().getDate()).padStart(2, '0'),
+      ].join('-');
+      const expected = path.join(userDir, '.history', 'events', expectedDay, 'events.jsonl');
+      expect(getLogsPath()).toBe(expected);
+      expect(fs.existsSync(expected)).toBe(true);
+    });
+
+    it('migrates root event files without losing queryable records', () => {
+      const userDir = makeTempDir();
+      const legacyActive = path.join(userDir, 'events.jsonl');
+      const legacyArchive = path.join(userDir, 'events.1.jsonl.gz');
+      const record = (module: string) => JSON.stringify({
+        ts: new Date().toISOString(), event: 'info', level: 'info', module,
+      }) + '\n';
+      fs.writeFileSync(legacyActive, record('legacy-active'));
+      fs.writeFileSync(legacyArchive, gzipSync(Buffer.from(record('legacy-archive'))));
+      _resetForTest(undefined, userDir);
+
+      emit('info', { module: 'new-write' });
+
+      expect(fs.existsSync(legacyActive)).toBe(false);
+      expect(fs.existsSync(legacyArchive)).toBe(false);
+      expect(query({}).map((entry) => entry.module)).toEqual(
+        expect.arrayContaining(['legacy-active', 'legacy-archive', 'new-write']),
+      );
+    });
+
+    it('migrates the interim flat history layout shipped by v14', () => {
+      const userDir = makeTempDir();
+      const interimDir = path.join(userDir, '.history', 'events');
+      fs.mkdirSync(interimDir, { recursive: true });
+      const record = (module: string) => JSON.stringify({
+        ts: new Date().toISOString(), event: 'info', level: 'info', module,
+      }) + '\n';
+      const interimActive = path.join(interimDir, 'events.jsonl');
+      const interimArchive = path.join(interimDir, 'events.1.jsonl.gz');
+      fs.writeFileSync(interimActive, record('interim-active'));
+      fs.writeFileSync(interimArchive, gzipSync(Buffer.from(record('interim-archive'))));
+      _resetForTest(undefined, userDir);
+
+      emit('info', { module: 'new-write' });
+
+      expect(fs.existsSync(interimActive)).toBe(false);
+      expect(fs.existsSync(interimArchive)).toBe(false);
+      expect(query({}).map((entry) => entry.module)).toEqual(
+        expect.arrayContaining(['interim-active', 'interim-archive', 'new-write']),
+      );
+    });
+
+    it('removes the oldest files until the total storage ceiling is met', () => {
+      const logsDir = setupLogsDir();
+      const active = path.join(logsDir, 'events.jsonl');
+      fs.writeFileSync(active, '{"event":"info"}\n');
+      for (let i = 1; i <= 3; i++) {
+        const archive = path.join(logsDir, `events.${i}.jsonl.gz`);
+        fs.writeFileSync(archive, Buffer.alloc(1024, i));
+        const stamp = new Date(Date.now() - (4 - i) * 60_000);
+        fs.utimesSync(archive, stamp, stamp);
+      }
+
+      const result = rotate(365, 1500);
+      const remainingBytes = fs.readdirSync(logsDir)
+        .filter((name) => name === 'events.jsonl' || name.endsWith('.jsonl.gz'))
+        .reduce((sum, name) => sum + fs.statSync(path.join(logsDir, name)).size, 0);
+      expect(result.removedBySize).toBe(2);
+      expect(result.bytesReclaimed).toBe(2048);
+      expect(remainingBytes).toBeLessThanOrEqual(1500);
+    });
+
+    it('keeps the source mtime when finalizing a past day so age pruning removes it', () => {
+      const userDir = makeTempDir();
+      _resetForTest(undefined, userDir);
+      const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      const day = [
+        old.getFullYear(),
+        String(old.getMonth() + 1).padStart(2, '0'),
+        String(old.getDate()).padStart(2, '0'),
+      ].join('-');
+      const dayDir = path.join(userDir, '.history', 'events', day);
+      fs.mkdirSync(dayDir, { recursive: true });
+      const raw = path.join(dayDir, 'events.jsonl');
+      fs.writeFileSync(raw, '{"event":"info"}\n');
+      fs.utimesSync(raw, old, old);
+
+      const result = rotate(7);
+
+      expect(result.removedByAge).toBe(1);
+      expect(fs.existsSync(dayDir)).toBe(false);
+    });
+
+    it('serializes past-day finalization with migration archive allocation', async () => {
+      const home = makeTempDir();
+      const dayDir = path.join(home, '.agents', '.history', 'events', '2026-07-01');
+      fs.mkdirSync(dayDir, { recursive: true });
+      const raw = path.join(dayDir, 'events.jsonl');
+      fs.writeFileSync(raw, '{"event":"info"}\n');
+      const release = await lockfile.lock(raw);
+      const modulePath = path.resolve('src/lib/events.ts');
+      const child = spawn(
+        'node',
+        ['--import', 'tsx', '-e', `console.log('READY'); const { rotate } = await import(${JSON.stringify(modulePath)}); rotate(365);`],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, HOME: home, AGENTS_EVENTS_PATH: '' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      await new Promise<void>((resolve, reject) => {
+        child.once('error', reject);
+        child.stdout.once('data', () => resolve());
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(fs.existsSync(path.join(dayDir, 'events.1.jsonl.gz'))).toBe(false);
+
+      await release();
+      const exitCode = await new Promise<number | null>((resolve) => child.once('close', resolve));
+
+      expect(exitCode).toBe(0);
+      expect(fs.existsSync(path.join(dayDir, 'events.1.jsonl.gz'))).toBe(true);
+    });
+
+    it('queries rotated archives when AGENTS_EVENTS_PATH has a custom filename', () => {
+      const logsDir = makeTempDir();
+      _resetForTest(path.join(logsDir, 'custom-events.jsonl'));
+      fs.writeFileSync(getLogsPath(), `${' '.repeat(10 * 1024 * 1024)}\n`);
+
+      emit('info', { module: 'custom-override-trigger' });
+
+      expect(query({ module: 'custom-override-trigger' })).toHaveLength(1);
+      expect(fs.existsSync(path.join(logsDir, 'events.1.jsonl.gz'))).toBe(true);
     });
   });
 
@@ -342,6 +590,23 @@ describe('events', () => {
       expect(s.byEvent['secrets.get']).toBe(1);
       expect(s.byModule.secrets).toBe(1);
       expect(s.fileCount).toBe(1);
+    });
+
+    it('groups events by actor (RUSH-2020)', () => {
+      process.env.AGENTS_ACTOR = 'grace@example.com';
+      process.env.AGENTS_ACTOR_KIND = 'human';
+      resetActorCache();
+      try {
+        setupLogsDir();
+        emit('info', { module: 'test' });
+        emit('warn', { module: 'test' });
+        const s = stats({ days: 1 });
+        expect(s.byActor['grace@example.com']).toBe(2);
+      } finally {
+        delete process.env.AGENTS_ACTOR;
+        delete process.env.AGENTS_ACTOR_KIND;
+        resetActorCache();
+      }
     });
   });
 
@@ -389,5 +654,98 @@ describe('events', () => {
       expect(results[0].command).toBe('run');
       expect(results[0].args).toEqual(['claude', '-p', 'hi']);
     });
+  });
+
+  describe('activity event types', () => {
+    it('accepts checklist events in the EventType union through emit/query', () => {
+      setupLogsDir();
+      emit('task.completed', { agent: 'claude', detail: 'Write tests 2/3 done' });
+      emit('checklist.created', { agent: 'claude', detail: '3 tasks' });
+
+      const tasks = query({ eventTypes: ['task.completed'] });
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0].event).toBe('task.completed');
+      expect(tasks[0].detail).toBe('Write tests 2/3 done');
+
+      const lists = query({ eventTypes: ['checklist.created'] });
+      expect(lists).toHaveLength(1);
+      expect(lists[0].event).toBe('checklist.created');
+    });
+  });
+});
+
+describe('event-kind table (the drift guard for out-of-process producers)', () => {
+  it('exposes every union member at runtime, including the factory.* kinds', () => {
+    // EVENT_TYPES is derived from a Record<EventType, true>, so tsc already
+    // rejects a union member with no table entry. This pins the runtime half:
+    // isEventType is what `agents events emit` uses to reject an unknown kind.
+    for (const kind of ['factory.command', 'factory.action', 'factory.uri', 'factory.launch']) {
+      expect(EVENT_TYPES).toContain(kind);
+      expect(isEventType(kind)).toBe(true);
+    }
+    expect(EVENT_TYPES).toContain('command.start');
+    expect(EVENT_TYPES).toContain('status.posted');
+  });
+
+  it('registers browser.navigate, browser.screenshot, and computer.action as real, non-audit kinds (#11)', () => {
+    // browser.navigate/browser.screenshot were declared in the EventType union
+    // but never emitted anywhere — this pins them (and the new computer.action
+    // kind) as accepted, info-level events now that BrowserService and the
+    // computer-actions CLI actually call emit() with them.
+    for (const kind of ['browser.navigate', 'browser.screenshot', 'computer.action']) {
+      expect(EVENT_TYPES).toContain(kind);
+      expect(isEventType(kind)).toBe(true);
+      expect(levelFor(kind as never)).toBe('info');
+    }
+  });
+
+  it('rejects a near-miss kind rather than accepting a typo', () => {
+    expect(isEventType('factory.clik')).toBe(false);
+    expect(isEventType('')).toBe(false);
+    expect(isEventType('Factory.Command')).toBe(false);
+  });
+
+  it('classifies factory.uri as audit and the other factory kinds as info', () => {
+    // An external process driving the user's editor is a "who reached in" fact.
+    expect(levelFor('factory.uri')).toBe('audit');
+    // A palette press is not.
+    expect(levelFor('factory.command')).toBe('info');
+    expect(levelFor('factory.action')).toBe('info');
+    expect(levelFor('factory.launch')).toBe('info');
+  });
+});
+
+describe('emit() timestamp override', () => {
+  it('honours a caller-supplied ts so a batched producer keeps real event times', () => {
+    setupLogsDir();
+    const happenedAt = '2026-08-03T01:02:03.000Z';
+
+    emit('factory.command', { module: 'factory' }, { ts: happenedAt });
+
+    const records = query({});
+    expect(records).toHaveLength(1);
+    expect(records[0].ts).toBe(happenedAt);
+  });
+
+  it('still refuses a ts smuggled through the PAYLOAD', () => {
+    setupLogsDir();
+    const forged = '1999-01-01T00:00:00.000Z';
+
+    // ts stays in RESERVED_META_KEYS: only the explicit override channel may set
+    // it, so an arbitrary payload cannot backdate a record.
+    emit('factory.command', { ts: forged } as unknown as Record<string, unknown>);
+
+    const records = query({});
+    expect(records).toHaveLength(1);
+    expect(records[0].ts).not.toBe(forged);
+  });
+
+  it('defaults to write time when no override is passed', () => {
+    setupLogsDir();
+    const before = Date.now();
+    emit('factory.command', {});
+    const ts = Date.parse(query({})[0].ts);
+    expect(ts).toBeGreaterThanOrEqual(before - 1000);
+    expect(ts).toBeLessThanOrEqual(Date.now() + 1000);
   });
 });

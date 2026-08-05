@@ -9,7 +9,7 @@
 import type { Command } from 'commander';
 import { addHostOption } from '../lib/hosts/option.js';
 import chalk from 'chalk';
-import { visibleWidth, termLink } from '../lib/format.js';
+import { termLink } from '../lib/format.js';
 import ora from 'ora';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -28,7 +28,7 @@ import {
   colorAgent,
 } from '../lib/agents.js';
 import type { AccountInfo, CliState } from '../lib/agents.js';
-import { loginHint } from '../lib/signin-badge.js';
+import { ambientClaudeToken, loginHint } from '../lib/signin-badge.js';
 import type { AgentId } from '../lib/types.js';
 import { machineId } from '../lib/machine-id.js';
 import { authCacheKey, formatCheckedAge, readAuthHealthCache, type AuthHealth } from '../lib/auth-health.js';
@@ -50,13 +50,6 @@ import {
   getVersionHomePath,
   getVersionDir,
   resolveVersion,
-  getAvailableResources,
-  getActuallySyncedResources,
-  getNewResources,
-  getProjectOnlyResources,
-  hasNewResources,
-  promptNewResourceSelection,
-  syncResourcesToVersion,
   removeVersion,
   printTrashFooter,
   reconcileStaleLatestForAgent,
@@ -72,6 +65,7 @@ import {
   removeShim,
 } from '../lib/shims.js';
 import { getAgentResources, listResources } from '../lib/resources.js';
+import { renderMergedResources } from '../lib/merged-resources.js';
 import { resolveVersionFilter, AgentSpecError } from '../lib/agent-spec/index.js';
 import { listCliStatus } from '../lib/cli-resources.js';
 import { isCapable } from '../lib/capabilities.js';
@@ -83,36 +77,74 @@ import { composeRulesFromState, type ComposedSubrule } from '../lib/rules/compos
 import { getConfiguredRunStrategy } from '../lib/rotate.js';
 import { resolveRunDefaults } from '../lib/run-defaults.js';
 import { resolveConfiguredModel, type ConfiguredModelSource } from '../lib/models.js';
-import { listProfiles, profileSummary, type ProfileSummary } from '../lib/profiles.js';
-import { loadManifest, isStale } from '../lib/staleness/index.js';
+import { listProfiles, profileExists, profileSummary, readProfile, type Profile, type ProfileSummary } from '../lib/profiles.js';
+import { getByokUsageForHarness, hasByokProvider, renderByokBar, type ByokUsageResult } from '../lib/byok-usage.js';
+import { renderHarnessDetail } from './harness.js';
 import { confirm } from '@inquirer/prompts';
 import { formatPath, isInteractiveTerminal, isPromptCancelled } from './utils.js';
-import { terminalWidth, truncateToWidth, stringWidth } from '../lib/session/width.js';
+import { terminalWidth, truncateToWidth, stringWidth, padToWidth } from '../lib/session/width.js';
 
 /** Shared account identity formatter, re-exported for the view-specific tests. */
 export const accountColumnLabel = accountDisplayLabel;
 
 /**
- * Group profile summaries by their host harness, optionally filtered to a
- * single agent. Profile YAMLs that fail validation are silently skipped by
- * `listProfiles` so this never throws on a malformed file.
+ * Overview (`agents view` with no agent filter) caps compact usage windows so
+ * multi-meter agents (Antigravity's four model quotas, Droid's three buckets)
+ * cannot force every row to pad past the terminal width and wrap. Single-agent
+ * views leave the cap unset and show every blocking window.
  */
-function getProfilesByAgent(filterAgentId?: AgentId): Map<AgentId, ProfileSummary[]> {
-  const byAgent = new Map<AgentId, ProfileSummary[]>();
-  for (const profile of listProfiles()) {
-    if (filterAgentId && profile.host.agent !== filterAgentId) continue;
-    const summary = profileSummary(profile);
-    const existing = byAgent.get(profile.host.agent);
-    if (existing) existing.push(summary);
-    else byAgent.set(profile.host.agent, [summary]);
-  }
-  return byAgent;
+const OVERVIEW_MAX_USAGE_WINDOWS = 2;
+
+/** Fixed width for the last-active column ("just now", "8h ago", "2d ago"). */
+const LAST_ACTIVE_COL_WIDTH = 10;
+
+/**
+ * Join fixed view columns with a consistent two-space gutter. Empty trailing
+ * columns are dropped so a row without an auth chip does not grow a dangling
+ * gutter, but interior empties stay padded so later columns stay aligned.
+ */
+export function joinViewColumns(cols: string[]): string {
+  // Trim only pure-trailing empty strings so auth/status can be absent without
+  // shifting earlier columns for rows that do carry them.
+  let end = cols.length;
+  while (end > 0 && cols[end - 1] === '') end--;
+  return cols.slice(0, end).join('  ');
 }
 
-/** Build the usage-column equivalent for a profile row: "profile  <model>". */
-function profileKindAndModel(model: string, planWidth: number): string {
-  const kind = 'profile'.padEnd(Math.max(planWidth, 'profile'.length));
-  return `${kind}  ${model}`;
+/**
+ * Custom harnesses (the `~/.agents/profiles/*.yml` bundles), sorted by name and
+ * optionally narrowed to the ones that run on one host agent. YAMLs that fail
+ * validation are silently skipped by `listProfiles`, so this never throws on a
+ * malformed file.
+ */
+function getHarnesses(filterAgentId?: AgentId): ProfileSummary[] {
+  return listProfiles()
+    .filter((profile) => !filterAgentId || profile.host.agent === filterAgentId)
+    .map(profileSummary);
+}
+
+/** Version-first label: "<version> (forked from <host>[, tracks default])" */
+function harnessVersionLabel(harness: ProfileSummary, globalDefault: string | null): string {
+  const version = harness.hostVersion ?? globalDefault;
+  if (version) {
+    const trailer = harness.hostVersion
+      ? chalk.gray(` (forked from ${harness.agent})`)
+      : chalk.gray(` (forked from ${harness.agent}, `) +
+        chalk.green(`tracks default`) +
+        chalk.gray(`)`);
+    return `${version}${trailer}`;
+  }
+  return chalk.gray(`(forked from ${harness.agent})`);
+}
+
+/** One-hop or two-hop fork origin label for the harness block header. */
+function buildHarnessOrigin(harness: ProfileSummary, allHarnesses: ProfileSummary[]): string {
+  if (!harness.forkedFrom || harness.forkedFrom === harness.agent) return 'custom';
+  const parent = allHarnesses.find((h) => h.name === harness.forkedFrom);
+  if (parent?.forkedFrom) {
+    return `custom · forked from ${harness.forkedFrom} -> ${parent.forkedFrom}`;
+  }
+  return `custom · forked from ${harness.forkedFrom}`;
 }
 
 /**
@@ -193,10 +225,10 @@ export interface ViewSectionFilter {
   rules?: boolean;
   hooks?: boolean;
   promptcuts?: boolean;
-  cli?: boolean;
+  clis?: boolean;
 }
 
-const SECTION_KEYS = ['commands', 'skills', 'mcp', 'workflows', 'plugins', 'rules', 'hooks', 'promptcuts', 'cli'] as const;
+const SECTION_KEYS = ['commands', 'skills', 'mcp', 'workflows', 'plugins', 'rules', 'hooks', 'promptcuts', 'clis'] as const;
 type SectionKey = (typeof SECTION_KEYS)[number];
 
 /**
@@ -225,38 +257,44 @@ export function descriptionForPrefix(desc: string | undefined, prefix: string): 
   return summarizeDescription(desc, budget);
 }
 
-function getProfileSummaries(filterAgentId?: AgentId): ProfileSummary[] {
-  return listProfiles()
-    .filter((profile) => !filterAgentId || profile.host.agent === filterAgentId)
-    .map(profileSummary);
-}
+/**
+ * Render custom harnesses as their own agent-type blocks — peers of the native
+ * Claude/Codex blocks, not indented rows under the host CLI that executes them.
+ * `agents run <name>` already treats a custom harness like a native agent id, so
+ * `agents view` lists it the same way: a bold name header, then one row carrying
+ * the model, the account/auth state, and the host it runs on.
+ *
+ * `installedHosts` is the set of agent ids with a usable install; a harness whose
+ * host is missing is flagged rather than silently listed as runnable.
+ */
+export function renderHarnessBlocks(
+  harnesses: ProfileSummary[],
+  installedHosts: Set<AgentId>,
+  showPaths: boolean,
+  byokMap?: Map<string, ByokUsageResult>,
+): void {
+  if (harnesses.length === 0) return;
 
-function renderProfilesSection(profiles: ProfileSummary[]): void {
-  if (profiles.length === 0) return;
+  const modelWidth = Math.max(...harnesses.map((h) => h.model.length));
+  const authWidth = Math.max(...harnesses.map((h) => h.auth.length));
 
-  const nameWidth = Math.max(4, ...profiles.map((p) => p.name.length));
-  const hostWidth = Math.max(4, ...profiles.map((p) => p.host.length));
-  const providerWidth = Math.max(8, ...profiles.map((p) => p.provider.length));
-
-  console.log(chalk.bold('Profiles\n'));
-  console.log(
-    `  ${chalk.gray('NAME'.padEnd(nameWidth))}  ` +
-    `${chalk.gray('HOST'.padEnd(hostWidth))}  ` +
-    `${chalk.gray('PROVIDER'.padEnd(providerWidth))}  ` +
-    chalk.gray('MODEL'),
-  );
-
-  for (const profile of profiles) {
+  for (const harness of harnesses) {
+    const origin = buildHarnessOrigin(harness, harnesses);
+    const missingHost = installedHosts.has(harness.agent)
+      ? ''
+      : chalk.yellow(` (host ${harness.agent} not installed)`);
+    console.log(`  ${chalk.bold(harness.label)}${chalk.gray(` (${origin})`)}${missingHost}`);
+    const versionTag = harnessVersionLabel(harness, getGlobalDefault(harness.agent));
+    const byokEntry = byokMap?.get(harness.name);
+    const byokBar = byokEntry ? `  ${renderByokBar(byokEntry)}` : '';
     console.log(
-      `  ${chalk.cyan(profile.name.padEnd(nameWidth))}  ` +
-      `${profile.host.padEnd(hostWidth)}  ` +
-      `${profile.provider.padEnd(providerWidth)}  ` +
-      chalk.gray(profile.model),
+      `    ${chalk.yellow(harness.model.padEnd(modelWidth))}  ` +
+        `${chalk.cyan(harness.auth.padEnd(authWidth))}  ` +
+        versionTag + byokBar,
     );
+    if (showPaths) console.log(chalk.gray(`      ${harness.path}`));
+    console.log();
   }
-  console.log(chalk.gray('\n  Run: agents run <profile> [prompt]'));
-  console.log(chalk.gray('       agents profiles view <profile>'));
-  console.log();
 }
 
 /**
@@ -274,7 +312,7 @@ function hostCliSourceTag(source: string): string {
 
 /**
  * Render the host-CLI section. Host CLIs are host-global: declared in any
- * DotAgents repo's `cli/` (project > user > system > extras), installed to PATH
+ * DotAgents repo's `clis/` (project > user > system > extras), installed to PATH
  * rather than copied into a version home. They render identically in the overview
  * and in a per-agent detail view because every agent on the host shares them.
  * The source tag shows which repo layer declared each — so user-level and
@@ -284,7 +322,7 @@ function renderHostClisSection(cwd: string): void {
   const { statuses, errors } = listCliStatus(cwd);
   console.log(chalk.bold('\nHost CLIs\n'));
   if (statuses.length === 0) {
-    console.log(`  ${chalk.gray('none declared')} ${chalk.gray('— add one with `agents cli add <name>`')}`);
+    console.log(`  ${chalk.gray('none declared')} ${chalk.gray('— add one with `agents clis add <name>`')}`);
   } else {
     const nameWidth = Math.max(...statuses.map((s) => s.manifest.name.length));
     let anyMissing = false;
@@ -299,7 +337,7 @@ function renderHostClisSection(cwd: string): void {
       console.log(prefix + desc);
     }
     if (anyMissing) {
-      console.log(chalk.gray('  Install missing with `agents cli install`'));
+      console.log(chalk.gray('  Install missing with `agents clis install`'));
     }
   }
   for (const err of errors) {
@@ -333,6 +371,8 @@ async function showInstalledVersions(
   const spinner = ora({ text: spinnerText, isSilent: !process.stdout.isTTY }).start();
 
   const agentsToShow = filterAgentId ? [filterAgentId] : ALL_AGENT_IDS;
+  // Overview caps meter count; single-agent view shows every blocking window.
+  const usageWindowCap = filterAgentId ? undefined : OVERVIEW_MAX_USAGE_WINDOWS;
 
   // A globally-installed CLI is superseded only by a NORMAL managed version — that
   // is when agents-cli owns the launcher and a "global" row would just be our own
@@ -359,10 +399,8 @@ async function showInstalledVersions(
         .map(async (agentId) => [agentId, await getUnmanagedCliState(agentId)] as const)
     )
   ) as Partial<Record<AgentId, CliState>>;
-  spinner.stop();
   const showPaths = !!filterAgentId;
-  const profilesByAgent = getProfilesByAgent(filterAgentId);
-  const profileSummaries = [...profilesByAgent.values()].flat();
+  const harnesses = getHarnesses(filterAgentId);
 
   // Auto-heal stale versioned aliases. Pre-v2 aliases (e.g. pre-CLAUDE_CONFIG_DIR
   // claude shims) silently route login through the default version's symlinked
@@ -384,13 +422,16 @@ async function showInstalledVersions(
   }
   // Shim healing is silent — users don't need to know about internal repairs
 
-  console.log(chalk.bold('Installed Agent CLIs\n'));
-
   const selfHost = machineId();
   // Read the auth-health cache once (not per version row — see the batching note above).
   const authCache = readAuthHealthCache();
 
-  // Pre-fetch account info for all versions in parallel
+  // Pre-fetch account info for all versions in parallel. Spinner stays up through
+  // account + usage so a multi-account cold path doesn't leave a blank terminal
+  // after "Checking…" vanishes (the hang the screenshots caught).
+  spinner.text = filterAgentId
+    ? `Loading ${agentLabel(filterAgentId)} accounts...`
+    : 'Loading accounts and usage...';
   const infoFetches: Promise<{ agentId: AgentId; version: string; home: string; info: AccountInfo }>[] = [];
   const globalInfoFetches: Promise<{ agentId: AgentId; cliVersion: string | null; info: AccountInfo }>[] = [];
   for (const agentId of agentsToShow) {
@@ -434,6 +475,7 @@ async function showInstalledVersions(
   // or org scope, not a specific installed version. Version homes cache those
   // values independently, so older installs can show stale values. Reuse the
   // freshest cache entry per stable usage identity and keep lastActive per version.
+  // Goes through the unified usage core (SWR cache + concurrency cap + timeout).
   const { canonicalByUsageKey, usageByKey } = await getUsageInfoByIdentity([
     ...infoResults.map(({ agentId, home, version, info }) => ({
       agentId,
@@ -447,6 +489,9 @@ async function showInstalledVersions(
       info,
     })),
   ], { forceRefresh: viewOpts?.forceRefresh });
+
+  spinner.stop();
+  console.log(chalk.bold('Installed Agent CLIs\n'));
 
   const mergeCanonical = (info: AccountInfo): AccountInfo => {
     const key = getUsageLookupKey(info);
@@ -471,12 +516,10 @@ async function showInstalledVersions(
   // Separate version-managed from globally-installed agents
   const versionManaged: AgentId[] = [];
   const globallyInstalled: AgentId[] = [];
-  const profileOnly: AgentId[] = [];
 
   for (const agentId of agentsToShow) {
     const versions = listInstalledVersions(agentId);
     const cliState = cliStates[agentId];
-    const hasProfiles = (profilesByAgent.get(agentId)?.length ?? 0) > 0;
 
     if (versions.length > 0) {
       versionManaged.push(agentId);
@@ -484,10 +527,11 @@ async function showInstalledVersions(
     if (cliState?.installed) {
       // Isolated-only installs sit alongside the global CLI rather than replacing it.
       if (!hasNonIsolatedVersion(agentId)) globallyInstalled.push(agentId);
-    } else if (versions.length === 0 && hasProfiles) {
-      profileOnly.push(agentId);
     }
   }
+  // A custom harness runs through its host CLI, so it is only launchable when
+  // that host has an install of some kind.
+  const installedHosts = new Set<AgentId>([...versionManaged, ...globallyInstalled]);
 
   // For self-updating global-binary agents (droid) the on-disk version-dir name
   // is a stale label — the real version is whatever `<cli> --version` reports.
@@ -549,14 +593,9 @@ async function showInstalledVersions(
           maxModelWidth = Math.max(maxModelWidth, model.length);
         }
       }
-      // Profile rows share these columns with version rows so they line up.
-      for (const profile of profilesByAgent.get(agentId) ?? []) {
-        maxVerLabel = Math.max(maxVerLabel, profile.name.length);
-        maxEmail = Math.max(maxEmail, profile.auth.length);
-        maxPlanWidth = Math.max(maxPlanWidth, 'profile'.length);
-      }
     }
-    // Second pass: compute max visible usage + status widths (now that maxPlanWidth is settled)
+    // Second pass: compute max visible usage + status widths (now that maxPlanWidth is settled).
+    // stringWidth (not String.length) so chalk + block-bar glyphs pad correctly.
     for (const agentId of versionManaged) {
       const versions = listInstalledVersions(agentId);
       for (const v of versions) {
@@ -565,14 +604,15 @@ async function showInstalledVersions(
         const usageKey = getUsageLookupKey(info);
         const usageInfo = usageKey ? usageByKey.get(usageKey) : undefined;
         const usageUnavailable = agentReportsUsage(agentId) && !!info?.signedIn && !usageInfo?.snapshot;
-        const usageStr = formatUsageSummary(info?.plan || null, usageInfo?.snapshot || null, maxPlanWidth, { unavailable: usageUnavailable });
-        maxUsageWidth = Math.max(maxUsageWidth, visibleWidth(usageStr));
+        const usageUnverified = !!usageInfo?.snapshot && !!usageInfo.error;
+        const usageStr = formatUsageSummary(info?.plan || null, usageInfo?.snapshot || null, maxPlanWidth, {
+          unavailable: usageUnavailable,
+          unverified: usageUnverified,
+          maxWindows: usageWindowCap,
+        });
+        maxUsageWidth = Math.max(maxUsageWidth, stringWidth(usageStr));
         const statusStr = formatUsageStatusBadge(info?.usageStatus);
-        maxStatusWidth = Math.max(maxStatusWidth, visibleWidth(statusStr));
-      }
-      for (const profile of profilesByAgent.get(agentId) ?? []) {
-        const usageEquivalent = profileKindAndModel(profile.model, maxPlanWidth);
-        maxUsageWidth = Math.max(maxUsageWidth, visibleWidth(usageEquivalent));
+        maxStatusWidth = Math.max(maxStatusWidth, stringWidth(statusStr));
       }
     }
 
@@ -617,17 +657,26 @@ async function showInstalledVersions(
         const usageKey = getUsageLookupKey(vInfo);
         const usageInfo = usageKey ? usageByKey.get(usageKey) : undefined;
 
-        // Build columns, trimming trailing whitespace when columns are empty
+        // Fixed columns for every signed-in row so status / lastActive / auth
+        // stay vertically aligned across agents — even when this row has no
+        // usage bars or no rate-limit badge. Skipping empty columns mid-table
+        // was what made the multi-agent view look unjustified next to
+        // `agents view claude`.
         const parts = [`    ${label}`];
         // Configured model — same priority as the version, right beside it.
         if (maxModelWidth > 0) {
           const model = modelByKey.get(`${agentId}:${version}`) ?? '';
-          parts.push(chalk.yellow(model.padEnd(maxModelWidth)));
+          parts.push(chalk.yellow(padToWidth(model, maxModelWidth)));
         }
         const hasEmail = !!vInfo?.email;
         const signedIn = !!vInfo?.signedIn;
         const usageUnavailable = agentReportsUsage(agentId) && signedIn && !usageInfo?.snapshot;
-        const usageStr = formatUsageSummary(vInfo?.plan || null, usageInfo?.snapshot || null, maxPlanWidth, { unavailable: usageUnavailable });
+        const usageUnverified = !!usageInfo?.snapshot && !!usageInfo.error;
+        const usageStr = formatUsageSummary(vInfo?.plan || null, usageInfo?.snapshot || null, maxPlanWidth, {
+          unavailable: usageUnavailable,
+          unverified: usageUnverified,
+          maxWindows: usageWindowCap,
+        });
         const hasUsage = usageStr.length > 0;
         // Only show lastActive for versions with an actual logged-in account.
         // Otherwise it reflects install time (misleading "just now" for fresh installs).
@@ -639,27 +688,37 @@ async function showInstalledVersions(
         if (runDefaults.mode) runDefaultBits.push(`mode:${runDefaults.mode}`);
 
         if (!hasEmail && !hasUsage && !signedIn) {
-          // Installed but never signed in
-          parts.push(chalk.gray('(logged out — log in with: ' + loginHint(agentId) + ')'));
+          // No per-version credential. That is NOT the same as unusable: Claude
+          // Code authenticates from `CLAUDE_CODE_OAUTH_TOKEN` when the
+          // environment carries one, and a run then succeeds against whatever
+          // account minted that token — while `signedIn` (agents.ts: `!!email`,
+          // read from this version home's `.claude.json`) stays false because no
+          // account was ever written here. Reporting that as "logged out" reads
+          // as a locked-out account and sends people hunting a login that is not
+          // missing; naming the ambient token instead points at the real state —
+          // every version on this box resolves to the SAME account, so balanced
+          // rotation across them is not actually rotating.
+          parts.push(chalk.gray(
+            ambientClaudeToken(agentId)
+              ? '(no per-version login — using ambient CLAUDE_CODE_OAUTH_TOKEN)'
+              : '(logged out — log in with: ' + loginHint(agentId) + ')',
+          ));
         } else {
-          if (hasEmail || hasUsage || hasActive || signedIn) {
-            // Signed-in agents without a local email show their account id
-            // (Kimi's user_id) or a "signed in" placeholder (Antigravity) so they
-            // read as logged in, not blank.
-            const display = accountColumnLabel(vInfo);
-            const emailCol = display.padEnd(maxEmail);
-            parts.push(display ? chalk.cyan(emailCol) : ' '.repeat(maxEmail));
+          // Always emit account / usage / status / lastActive columns once any
+          // signed-in row exists in the table (widths are global). Empty cells
+          // are space-padded so later columns do not drift left.
+          const display = accountColumnLabel(vInfo);
+          parts.push(display ? chalk.cyan(padToWidth(display, maxEmail)) : ' '.repeat(maxEmail));
+          if (maxUsageWidth > 0) {
+            parts.push(padToWidth(usageStr, maxUsageWidth));
           }
-          if (hasUsage || hasActive) {
-            const usagePad = ' '.repeat(Math.max(0, maxUsageWidth - visibleWidth(usageStr)));
-            parts.push(usageStr + usagePad);
-          }
-          const statusStr = formatUsageStatusBadge(vInfo?.usageStatus);
           if (maxStatusWidth > 0) {
-            const statusPad = ' '.repeat(Math.max(0, maxStatusWidth - visibleWidth(statusStr)));
-            parts.push(statusStr + statusPad);
+            const statusStr = formatUsageStatusBadge(vInfo?.usageStatus);
+            parts.push(padToWidth(statusStr, maxStatusWidth));
           }
-          if (hasActive) parts.push(activeStr);
+          // Fixed-width lastActive so the auth chip (●/○/◐) lines up even when
+          // some rows have no email-derived lastActive.
+          parts.push(hasActive ? padToWidth(activeStr, LAST_ACTIVE_COL_WIDTH) : ' '.repeat(LAST_ACTIVE_COL_WIDTH));
         }
         if (runDefaultBits.length > 0) {
           parts.push(chalk.gray(`run ${runDefaultBits.join(' ')}`));
@@ -667,25 +726,10 @@ async function showInstalledVersions(
         const authChip = liveAuthChip(authCache, selfHost, agentId, version);
         if (authChip) parts.push(authChip);
 
-        console.log(parts.join('  '));
+        console.log(joinViewColumns(parts));
         if (showPaths) {
           const versionDir = getVersionDir(agentId, version);
           console.log(chalk.gray(`      ${versionDir}`));
-        }
-      }
-
-      // Profile rows share the same columns as versions: name | auth | "profile"+model.
-      // No status badge, no last-active — profiles don't accumulate usage state.
-      for (const profile of profilesByAgent.get(agentId) ?? []) {
-        const nameCol = chalk.cyan(profile.name.padEnd(maxVerLabel));
-        // Pad the model column so profile rows line up with version rows.
-        const modelPad = maxModelWidth > 0 ? `${' '.repeat(maxModelWidth)}  ` : '';
-        const authCol = chalk.gray(profile.auth.padEnd(maxEmail));
-        const usageEquivalent = profileKindAndModel(profile.model, maxPlanWidth);
-        const usagePad = ' '.repeat(Math.max(0, maxUsageWidth - visibleWidth(usageEquivalent)));
-        console.log(`    ${nameCol}  ${modelPad}${authCol}  ${chalk.gray(usageEquivalent + usagePad)}`);
-        if (showPaths) {
-          console.log(chalk.gray(`      ${profile.path}`));
         }
       }
 
@@ -699,6 +743,34 @@ async function showInstalledVersions(
     }
   }
 
+  // Custom harnesses sit in the same list as the native ones — they are run the
+  // same way (`agents run <name>`), so they read as their own agent type rather
+  // than as an indented row under whichever host CLI executes them.
+  const byokMap = new Map<string, ByokUsageResult>();
+  const byKeychainItem = new Map<string, { profile: Profile; names: string[] }>();
+  for (const h of harnesses) {
+    if (!h.provider || !hasByokProvider(h.provider)) continue;
+    let prof: Profile | null = null;
+    try { prof = readProfile(h.name); } catch { continue; }
+    if (!prof.auth) continue;
+    const item = prof.auth.keychainItem;
+    const existing = byKeychainItem.get(item);
+    if (existing) { existing.names.push(h.name); }
+    else { byKeychainItem.set(item, { profile: prof, names: [h.name] }); }
+  }
+  if (byKeychainItem.size > 0) {
+    const fetched = await Promise.all(
+      [...byKeychainItem.values()].map(({ profile, names }) =>
+        getByokUsageForHarness(profile, { forceRefresh: viewOpts?.forceRefresh }).then((result) => ({ result, names }))
+      )
+    );
+    for (const { result, names } of fetched) {
+      if (!result?.budget) continue;
+      for (const name of names) byokMap.set(name, result);
+    }
+  }
+  renderHarnessBlocks(harnesses, installedHosts, showPaths, byokMap.size > 0 ? byokMap : undefined);
+
   // Show globally installed (not managed) agents
   if (globallyInstalled.length > 0) {
     console.log(chalk.bold('Not Managed by Agents CLI\n'));
@@ -710,17 +782,24 @@ async function showInstalledVersions(
         return `${cliState?.version || 'installed'} (global)`.length;
       })
     );
-    // Pre-pass: max badge width so rows with `lastActive` line up whether or
-    // not THIS row carries a throttle badge. Without this, the row that DOES
-    // have "out of credits" shifts every other row's `lastActive` left by
-    // ~16 chars, exactly what the version-managed block at maxStatusWidth
-    // already solves above.
+    // Pre-pass: max badge/usage/email widths so columns line up the same way
+    // the version-managed block does (stringWidth for chalk-aware padding).
     let gMaxStatusWidth = 0;
+    let gMaxUsageWidth = 0;
+    let gMaxEmail = 0;
     for (const agentId of globallyInstalled) {
       const gInfoRaw = globalInfoMap.get(agentId);
       const gInfo = gInfoRaw ? mergeCanonical(gInfoRaw) : undefined;
-      const w = visibleWidth(formatUsageStatusBadge(gInfo?.usageStatus));
-      if (w > gMaxStatusWidth) gMaxStatusWidth = w;
+      gMaxStatusWidth = Math.max(gMaxStatusWidth, stringWidth(formatUsageStatusBadge(gInfo?.usageStatus)));
+      const gUsageKey = getUsageLookupKey(gInfo);
+      const gUsage = gUsageKey ? usageByKey.get(gUsageKey) : undefined;
+      const gUsageStr = formatUsageSummary(gInfo?.plan || null, gUsage?.snapshot || null, 3, {
+        unverified: !!gUsage?.snapshot && !!gUsage.error,
+        maxWindows: usageWindowCap,
+      });
+      gMaxUsageWidth = Math.max(gMaxUsageWidth, stringWidth(gUsageStr));
+      const gDisplay = accountColumnLabel(gInfo);
+      if (gDisplay) gMaxEmail = Math.max(gMaxEmail, gDisplay.length);
     }
 
     for (const agentId of globallyInstalled) {
@@ -736,43 +815,23 @@ async function showInstalledVersions(
       const parts = [`    ${verLabel}${padding}`];
       const gUsageKey = getUsageLookupKey(gInfo);
       const gUsage = gUsageKey ? usageByKey.get(gUsageKey) : undefined;
-      const gUsageStr = formatUsageSummary(gInfo?.plan || null, gUsage?.snapshot || null);
+      const gUsageStr = formatUsageSummary(gInfo?.plan || null, gUsage?.snapshot || null, 3, {
+        unverified: !!gUsage?.snapshot && !!gUsage.error,
+        maxWindows: usageWindowCap,
+      });
       const gActiveStr = gInfo ? formatLastActive(gInfo.lastActive) : '';
       if (gInfo?.email || gUsageStr || gActiveStr || gInfo?.signedIn) {
         const gDisplay = accountColumnLabel(gInfo);
-        parts.push(gDisplay ? chalk.cyan(gDisplay) : '');
+        parts.push(gDisplay ? chalk.cyan(padToWidth(gDisplay, gMaxEmail)) : ' '.repeat(gMaxEmail));
       }
-      if (gUsageStr || gActiveStr) parts.push(gUsageStr);
-      const gStatusStr = formatUsageStatusBadge(gInfo?.usageStatus);
+      if (gMaxUsageWidth > 0) parts.push(padToWidth(gUsageStr, gMaxUsageWidth));
       if (gMaxStatusWidth > 0) {
-        const statusPad = ' '.repeat(Math.max(0, gMaxStatusWidth - visibleWidth(gStatusStr)));
-        parts.push(gStatusStr + statusPad);
+        parts.push(padToWidth(formatUsageStatusBadge(gInfo?.usageStatus), gMaxStatusWidth));
       }
-      if (gActiveStr) parts.push(gActiveStr);
-      console.log(parts.join('  '));
+      if (gActiveStr) parts.push(padToWidth(gActiveStr, LAST_ACTIVE_COL_WIDTH));
+      console.log(joinViewColumns(parts));
       if (showPaths && cliState?.path) {
         console.log(chalk.gray(`      ${cliState.path}`));
-      }
-      // Profile rows under a globally-installed harness. Use a simpler
-      // alignment here since this section doesn't share column state with
-      // the version-managed block.
-      // An isolated-only agent now appears in BOTH blocks; its profiles already
-      // rendered under the version-managed one, so don't print them twice.
-      const profilesHere = versionManaged.includes(agentId) ? [] : (profilesByAgent.get(agentId) ?? []);
-      if (profilesHere.length > 0) {
-        const nameWidth = Math.max(globalMaxVerLabel, ...profilesHere.map((p) => p.name.length));
-        const authWidth = Math.max(...profilesHere.map((p) => p.auth.length));
-        for (const profile of profilesHere) {
-          console.log(
-            `    ${chalk.cyan(profile.name.padEnd(nameWidth))}  ` +
-              `${chalk.gray(profile.auth.padEnd(authWidth))}  ` +
-              `${chalk.gray('profile')}  ` +
-              chalk.gray(profile.model),
-          );
-          if (showPaths) {
-            console.log(chalk.gray(`      ${profile.path}`));
-          }
-        }
       }
       if (agent.npmPackage && cliState?.version) {
         console.log(chalk.gray(`    Manage: agents add ${agentId}@${cliState.version} -y`));
@@ -785,38 +844,12 @@ async function showInstalledVersions(
     }
   }
 
-  // Agents with no install but with profiles defined — render under the same
-  // harness header so users find them where they look.
-  if (profileOnly.length > 0) {
-    if (versionManaged.length === 0 && globallyInstalled.length === 0) {
-      console.log(chalk.bold('Profile-only Agents\n'));
-    }
-    for (const agentId of profileOnly) {
-      const profilesHere = profilesByAgent.get(agentId) ?? [];
-      console.log(`  ${chalk.bold(agentLabel(agentId))}${chalk.yellow(' (profile only)')}`);
-      const nameWidth = Math.max(...profilesHere.map((p) => p.name.length));
-      const authWidth = Math.max(...profilesHere.map((p) => p.auth.length));
-      for (const profile of profilesHere) {
-        console.log(
-          `    ${chalk.cyan(profile.name.padEnd(nameWidth))}  ` +
-            `${chalk.gray(profile.auth.padEnd(authWidth))}  ` +
-            `${chalk.gray('profile')}  ` +
-            chalk.gray(profile.model),
-        );
-        if (showPaths) {
-          console.log(chalk.gray(`      ${profile.path}`));
-        }
-      }
-      console.log();
-    }
-  }
-
   // If filtering to a specific agent and not found
   if (
     filterAgentId &&
     versionManaged.length === 0 &&
     globallyInstalled.length === 0 &&
-    profileOnly.length === 0
+    harnesses.length === 0
   ) {
     console.log(`  ${chalk.bold(agentLabel(filterAgentId))}: ${chalk.gray('not installed')}`);
     console.log();
@@ -826,8 +859,7 @@ async function showInstalledVersions(
   if (
     versionManaged.length === 0 &&
     globallyInstalled.length === 0 &&
-    profileOnly.length === 0 &&
-    profileSummaries.length === 0 &&
+    harnesses.length === 0 &&
     !filterAgentId
   ) {
     console.log(chalk.gray('  No agent CLIs installed.'));
@@ -835,52 +867,31 @@ async function showInstalledVersions(
     console.log();
   }
 
+  // `--refresh` used to print a table that looked fully refreshed no matter how
+  // many accounts it had failed to reach, so a box whose every Claude credential
+  // had expired rendered identically to a healthy one — the bars beside each row
+  // came from a cache that the run had not managed to update. Name the accounts
+  // it could not confirm, and why.
+  if (viewOpts?.forceRefresh) {
+    const unrefreshed: string[] = [];
+    for (const [key, usage] of usageByKey) {
+      if (!usage.error) continue;
+      const label = canonicalByUsageKey.get(key)?.email ?? key;
+      unrefreshed.push(`    ${label.padEnd(24)} ${chalk.gray(usage.error)}`);
+    }
+    if (unrefreshed.length > 0) {
+      const noun = unrefreshed.length === 1 ? 'account' : 'accounts';
+      console.log(chalk.yellow(`  Could not refresh ${unrefreshed.length} ${noun} — bars above are the last cached reading:`));
+      for (const line of unrefreshed) console.log(line);
+      console.log();
+    }
+  }
+
   // Host CLIs are host-global, not per-agent — show them once in the overview.
   if (!filterAgentId) {
     renderHostClisSection(process.cwd());
   }
 
-  // Check for new resources when viewing a specific agent
-  if (filterAgentId && versionManaged.length > 0) {
-    const defaultVersion = getGlobalDefault(filterAgentId);
-    if (defaultVersion) {
-      const manifest = loadManifest(filterAgentId, defaultVersion);
-      const cwd = process.cwd();
-      if (manifest && !isStale(manifest, filterAgentId, defaultVersion, cwd)) {
-        return;
-      }
-
-      const available = getAvailableResources();
-      const synced = getActuallySyncedResources(filterAgentId, defaultVersion);
-      const projectOnly = getProjectOnlyResources();
-      const newResources = getNewResources(available, synced, projectOnly);
-
-      if (hasNewResources(newResources, filterAgentId, defaultVersion)) {
-        try {
-          const selection = await promptNewResourceSelection(filterAgentId, newResources, defaultVersion);
-          if (selection && Object.keys(selection).length > 0) {
-            const result = syncResourcesToVersion(filterAgentId, defaultVersion, selection);
-            const synced: string[] = [];
-            if (result.commands) synced.push('commands');
-            if (result.skills) synced.push('skills');
-            if (result.hooks) synced.push('hooks');
-            if (result.memory.length > 0) synced.push('memory');
-            if (result.permissions) synced.push('permissions');
-            if (result.mcp.length > 0) synced.push('mcp');
-            if (result.plugins.length > 0) synced.push('plugins');
-            if (result.workflows.length > 0) synced.push('workflows');
-
-            if (synced.length > 0) {
-              console.log(chalk.green(`\nSynced to ${agentLabel(filterAgentId)}@${defaultVersion}: ${synced.join(', ')}`));
-            }
-          }
-        } catch (err) {
-          if (isPromptCancelled(err)) return;
-          throw err;
-        }
-      }
-    }
-  }
 }
 
 /**
@@ -1183,7 +1194,7 @@ async function showAgentResources(
   if (shouldRenderSection('promptcuts', filter)) {
     renderPromptcuts();
   }
-  if (shouldRenderSection('cli', filter)) {
+  if (shouldRenderSection('clis', filter)) {
     renderHostClisSection(cwd);
   }
 
@@ -1199,6 +1210,18 @@ async function showAgentResources(
 export interface ViewJsonVersion {
   version: string;
   isDefault: boolean;
+  /**
+   * Installed with `--isolated`. The human view has shown this since the isolated
+   * tag landed, but JSON carried no signal at all, so tooling could not tell a
+   * sandboxed copy from one that owns the user's launcher and real config.
+   */
+  isolated: boolean;
+  /**
+   * The isolated copy a bare `agents run <agent>` resolves to. Separate from
+   * `isDefault`, which is the GLOBAL default an isolated version can never be —
+   * reporting only `isDefault: false` hid the fact that this one is selected.
+   */
+  isIsolatedDefault: boolean;
   signedIn: boolean;
   email: string | null;
   // Opaque account identifier when the credential exposes one but no email
@@ -1218,6 +1241,11 @@ export interface ViewJsonVersion {
   overageCredits?: { amount: number; currency: string } | null;
   windows: Array<{
     key: 'session' | 'week' | 'sonnet_week' | 'month';
+    // What the window meters — 'Current session'/'Current week' for most
+    // agents, the model id for Antigravity's per-model quota buckets (whose
+    // keys are all 'session', so the label is the only way to tell them
+    // apart). Optional for backward compatibility with older consumers.
+    label?: string;
     usedPercent: number;
     resetsAt: string | null;
   }>;
@@ -1236,7 +1264,8 @@ export interface ViewJsonVersion {
 export interface ViewJsonAgent {
   agent: AgentId;
   versions: ViewJsonVersion[];
-  profiles: ProfileSummary[];
+  /** Custom harnesses that run on this agent as their host CLI. */
+  harnesses: ProfileSummary[];
 }
 
 /** Resource sections that --resources can include in --json output. */
@@ -1421,7 +1450,7 @@ export function parseResourceSections(
  * agents-cli extension's "resume current session in best available version"
  * command).
  */
-async function collectAgentsJson(filterAgentId?: AgentId, resourceSections?: Set<ResourceSection>): Promise<ViewJsonAgent[]> {
+export async function collectAgentsJson(filterAgentId?: AgentId, resourceSections?: Set<ResourceSection>): Promise<ViewJsonAgent[]> {
   const agentsToShow = filterAgentId ? [filterAgentId] : ALL_AGENT_IDS;
   const wantResources = !!resourceSections && resourceSections.size > 0;
   // Only pay for the git-status + resource scans when resources were requested.
@@ -1478,6 +1507,8 @@ async function collectAgentsJson(filterAgentId?: AgentId, resourceSections?: Set
     const entry: ViewJsonVersion = {
       version,
       isDefault: version === globalDefault,
+      isolated: isVersionIsolated(agentId, version),
+      isIsolatedDefault: getIsolatedDefault(agentId) === version,
       signedIn: info.signedIn,
       email: info.email,
       accountId: info.accountId,
@@ -1489,6 +1520,7 @@ async function collectAgentsJson(filterAgentId?: AgentId, resourceSections?: Set
       windows: snapshot
         ? snapshot.windows.map((w) => ({
             key: w.key,
+            label: w.label,
             usedPercent: w.usedPercent,
             resetsAt: w.resetsAt ? w.resetsAt.toISOString() : null,
           }))
@@ -1514,7 +1546,7 @@ async function collectAgentsJson(filterAgentId?: AgentId, resourceSections?: Set
     else byAgent.set(agentId, [entry]);
   }
 
-  const profilesByAgent = getProfilesByAgent(filterAgentId);
+  const harnesses = getHarnesses(filterAgentId);
   const out: ViewJsonAgent[] = [];
   for (const agentId of agentsToShow) {
     const versions = byAgent.get(agentId) ?? [];
@@ -1522,7 +1554,7 @@ async function collectAgentsJson(filterAgentId?: AgentId, resourceSections?: Set
       if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
       return compareVersions(b.version, a.version);
     });
-    out.push({ agent: agentId, versions, profiles: profilesByAgent.get(agentId) ?? [] });
+    out.push({ agent: agentId, versions, harnesses: harnesses.filter((h) => h.agent === agentId) });
   }
   return out;
 }
@@ -1784,8 +1816,15 @@ export async function viewAction(
     detailed?: boolean;
     refresh?: boolean;
     live?: boolean;
+    merged?: boolean;
   } & ViewSectionFilter,
 ): Promise<void> {
+  // --merged renders the cross-layer, first-wins resource surface (the former
+  // `agents resources`), independent of the per-version detail view below.
+  if (options?.merged) {
+    renderMergedResources();
+    return;
+  }
   // --live is a shorter-to-type alias of --refresh; both force a live probe.
   const forceRefresh = options?.refresh === true || options?.live === true;
   // --resources / --detailed imply --json (they only shape structured output).
@@ -1804,7 +1843,7 @@ export async function viewAction(
     rules: options?.rules,
     hooks: options?.hooks,
     promptcuts: options?.promptcuts,
-    cli: options?.cli,
+    clis: options?.clis,
   };
   const filterIsSet = SECTION_KEYS.some((k) => filter[k]);
 
@@ -1840,6 +1879,17 @@ export async function viewAction(
 
   const agentId = resolveAgentName(agentName);
   if (!agentId) {
+    // A custom harness is an agent type here, not an unknown name: `agents run
+    // <name>` launches it, so `agents view <name>` describes it.
+    if (profileExists(agentName)) {
+      const harness = profileSummary(readProfile(agentName));
+      if (json) {
+        console.log(JSON.stringify(harness, null, 2));
+        return;
+      }
+      renderHarnessDetail(agentName);
+      return;
+    }
     if (json) {
       console.log(JSON.stringify({ error: formatAgentError(agentName) }));
       process.exit(1);
@@ -1879,7 +1929,7 @@ export async function viewAction(
     // --json ignores the @version suffix, but --resources/--detailed (or a
     // section flag) now attach each version's resource inventory + sync-state.
     const data = await collectAgentsJson(agentId, resourceSections);
-    console.log(JSON.stringify(data[0] ?? { agent: agentId, versions: [], profiles: [] }, null, 2));
+    console.log(JSON.stringify(data[0] ?? { agent: agentId, versions: [], harnesses: [] }, null, 2));
     return;
   }
 
@@ -1916,7 +1966,8 @@ export function registerViewCommand(program: Command): void {
     .option('--rules', 'Show only rules in the detail view.')
     .option('--hooks', 'Show only hooks in the detail view.')
     .option('--promptcuts', 'Show only promptcuts in the detail view.')
-    .option('--cli', 'Show only host CLIs (declared in cli/, installed to PATH).')
+    .option('--clis', 'Show only host CLIs (declared in clis/, installed to PATH).')
+    .option('--merged', 'Show the merged, first-wins resource surface across all layers (project, user, extras, system) in one table with the winning layer per row.')
     .addHelpText('after', `
 Examples:
   # Show all installed agents with versions, accounts, and usage
@@ -1924,6 +1975,9 @@ Examples:
 
   # Show versions for one agent
   agents view claude
+
+  # Describe one custom harness (host, model, provider, auth, path)
+  agents view deepseek-flash
 
   # Detailed view: resources, commands, skills, MCP servers for a specific version
   agents view claude@2.1.112
@@ -1947,6 +2001,9 @@ Examples:
   agents view claude@default --plugins --workflows
   agents view claude --commands    # implicitly the default version
 
+  # Merged, first-wins resource surface across all layers, with the winning layer
+  agents view --merged
+
 When to use:
   - Checking which agents are installed and what their default versions are
   - Seeing which account each version is logged into (useful for multi-account setups)
@@ -1955,8 +2012,10 @@ When to use:
   - Cleaning up stale versions left behind after upgrading (--prune)
 
 Output:
-  - Without arguments: table of all agents with versions, emails, usage stats
+  - Without arguments: table of all agents with versions, emails, usage stats,
+    then one block per custom harness (see 'agents harness')
   - With agent name: versions for that agent, showing which is the default
+  - With a custom harness name: that harness's host, model, provider, and auth
   - With agent@version: detailed breakdown of resources synced to that version
   - With --json: structured JSON with version, isDefault, signedIn, email, plan,
     usageStatus, per-window usedPercent, lastActive, and path
@@ -1973,6 +2032,7 @@ Output:
         resources?: string | boolean;
         detailed?: boolean;
         refresh?: boolean;
+        merged?: boolean;
       } & ViewSectionFilter,
     ) => viewAction(agentArg, options));
 }

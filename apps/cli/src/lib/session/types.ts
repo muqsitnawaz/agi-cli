@@ -8,26 +8,55 @@
  */
 
 /** Agents that store session data on disk and can be discovered by `agents sessions`. */
-export type SessionAgentId = 'claude' | 'codex' | 'gemini' | 'antigravity' | 'opencode' | 'openclaw' | 'rush' | 'hermes' | 'grok' | 'kimi' | 'droid';
+export type SessionAgentId = 'claude' | 'codex' | 'gemini' | 'antigravity' | 'opencode' | 'openclaw' | 'rush' | 'hermes' | 'grok' | 'kimi' | 'droid' | 'cursor';
+
+/** Effective permissions mode used to launch a managed agent session. */
+export type SessionRunMode = 'plan' | 'edit' | 'auto' | 'skip';
 
 /** All agents with session discovery support, in display order. */
-export const SESSION_AGENTS: SessionAgentId[] = ['claude', 'codex', 'gemini', 'antigravity', 'opencode', 'openclaw', 'rush', 'hermes', 'grok', 'kimi', 'droid'];
+export const SESSION_AGENTS: SessionAgentId[] = ['claude', 'codex', 'gemini', 'antigravity', 'opencode', 'openclaw', 'rush', 'hermes', 'grok', 'kimi', 'droid', 'cursor'];
+
+/**
+ * True when `agent` stores session data `agents sessions` can discover (a member
+ * of {@link SESSION_AGENTS}). The single predicate every session-index writer
+ * gates on, so "is this a trackable agent?" is decided in exactly one place.
+ */
+export function isSessionTrackedAgent(agent: string): agent is SessionAgentId {
+  return (SESSION_AGENTS as string[]).includes(agent);
+}
 
 /** A single normalized event within a session (message, tool call, thinking, etc.). */
 export interface SessionEvent {
-  type: 'message' | 'tool_use' | 'tool_result' | 'thinking' | 'error' | 'init' | 'result' | 'usage' | 'attachment';
+  type: 'message' | 'tool_use' | 'tool_result' | 'thinking' | 'error' | 'init' | 'result' | 'usage' | 'attachment' | 'hook' | 'interrupt';
   agent: SessionAgentId;
   timestamp: string;
   role?: 'user' | 'assistant';
   content?: string;
   tool?: string;
+  /** Harness-native call identity, used to correlate concurrent results. */
+  callId?: string;
   args?: Record<string, any>;
   path?: string;
   command?: string;
   success?: boolean;
+  /** Structured harness outcome; never inferred from free-text output. */
+  outcome?: 'ok' | 'error' | 'unknown';
+  exitCode?: number;
+  statusCode?: number;
+  errorCode?: string;
   output?: string;
   /** Internal: marks tool_use events from local commands */
   _local?: boolean;
+  /**
+   * Internal: marks a `role=user` message that is harness-injected scaffolding
+   * (Claude `<bash-input>`/`<bash-stdout>` from `!`-prefix runs, `<system-reminder>`,
+   * `<task-notification>`, `<command-*>` wrappers, `[Request interrupted]`, skill
+   * bodies, hook feedback) rather than a genuine user turn. Set centrally in
+   * `parseSession` via `isSyntheticUserMessage`. Such events are excluded from
+   * `--include user` and are not counted as turn starts by `--first`/`--last`,
+   * but stay in the default full stream so `--markdown` keeps full fidelity.
+   */
+  _synthetic?: boolean;
   // Fields for usage events (type === 'usage')
   model?: string;
   inputTokens?: number;
@@ -38,6 +67,21 @@ export interface SessionEvent {
   name?: string;
   mediaType?: string;
   sizeBytes?: number;
+  // Fields for hook events (type === 'hook') — a harness hook firing recorded in
+  // the transcript (Claude hook_success/hook_additional_context/hook_error
+  // attachments). Hook name as configured (e.g. "SessionStart:startup").
+  hookName?: string;
+  /** Lifecycle event the hook fired on (SessionStart, PreToolUse, …). */
+  hookEvent?: string;
+  /**
+   * Slash-command invocation name (e.g. `/recap`, `/code:commit`), captured
+   * two ways in a Claude transcript: a `role=user` message whose content is
+   * the `<command-name>` wrapper Claude injects for a typed slash command
+   * (`parseClaudeContent`, see `prompt.ts`'s `extractSlashCommandName`), or a
+   * `tool_use` event for the `SlashCommand` tool (a command the MODEL invoked
+   * programmatically, not the user). Undefined for every other event.
+   */
+  slashCommand?: string;
 }
 
 /** A displayable file attachment discovered in a session transcript. */
@@ -48,10 +92,12 @@ export interface SessionAttachment {
   sizeBytes?: number;
 }
 
-/** One checklist item, as Claude's `TodoWrite` (`content`) or Codex's `update_plan` (`step`) emits it. */
+/** One normalized checklist/task item emitted by any transcript harness. */
 export interface TodoItem {
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
+  /** Optional longer explanation supplied by task-based harnesses. */
+  description?: string;
   /** Present-continuous label shown while this item is the active step. */
   activeForm?: string;
 }
@@ -79,6 +125,14 @@ export interface TeamOrigin {
   handle?: string;
   /** Agent mode: 'plan', 'edit', 'auto', or 'skip' ('full' accepted as legacy alias for 'skip'). */
   mode?: string;
+  /** The team this teammate belongs to (`task_name` in its meta.json). */
+  team?: string;
+  /**
+   * The orchestrator session that spawned this teammate (`parent_session_id`).
+   * Absent for a team started outside any agent session, and for teammates whose
+   * meta dir has aged past the teams cleanup window.
+   */
+  parentSessionId?: string;
 }
 
 /** Lightweight metadata for a discovered session, used in listings and pickers. */
@@ -111,8 +165,26 @@ export interface SessionMeta {
   costUsd?: number;
   /** Wall-clock duration in ms (lastTs − firstTs), persisted at scan time. */
   durationMs?: number;
+  /** Underlying LLM model observed in the transcript, when the agent records one. */
+  model?: string;
+  toolCallCount?: number;
   version?: string;
+  /**
+   * Email of the account that produced the session. Display-only: two orgs can share
+   * one email, so never group on this — group on `accountKey`.
+   */
   account?: string;
+  /**
+   * Org-scoped identity of the producing account (`claude:org=<uuid>`), or
+   * `unattributed:<reason>` when it cannot be established. The correct grouping key:
+   * a Team seat and a personal Max plan under one email are separate quota buckets.
+   * See lib/session/claude-accounts.ts for how a transcript is attributed.
+   */
+  accountKey?: string;
+  /** Organization display name of the producing account, when known. */
+  accountOrg?: string;
+  /** Effective normalized launch mode captured by the SessionStart hook. */
+  mode?: SessionRunMode;
   topic?: string;
   /**
    * The session's human-readable name — one field, several sources with a plain
@@ -162,6 +234,39 @@ export interface SessionMeta {
    * instead of re-parsing the transcript. Absent when the session wrote no list.
    */
   todos?: TodoProgress;
+  /** Most-recent unique directories changed or used as a shell working directory. */
+  recentDirectoriesTouched?: string[];
+  /**
+   * Skills invoked during the session (structurally identical to
+   * session/highlights.ts's SkillUse — declared inline here rather than
+   * imported, to avoid a circular import: highlights.ts imports SessionEvent
+   * from this file). Populated by discover.ts's incremental Claude
+   * accumulator (ClaudeParseState.skillEvents, run through extractSkills at
+   * finalize) so session/db.ts's upsertSessionsBatch can write
+   * session_resource_usage rows WITHOUT re-parsing the whole transcript —
+   * the same reason meta.todos/recentDirectoriesTouched are pre-computed by
+   * the caller for claude/codex instead of left to db.ts's re-parse path.
+   */
+  skillsUsed?: Array<{ name: string; count: number }>;
+  /** Sibling of {@link skillsUsed} for slash-command invocations (SessionEvent.slashCommand). */
+  slashCommandsUsed?: Array<{ name: string; count: number }>;
+  /**
+   * Whether this session emitted at least one `browser.navigate` /
+   * `browser.screenshot` event, computed at scan time from a sessionId-scoped
+   * read of the events log (events.ts `query({ sessionId })`) rather than a
+   * transcript re-scan — see `detectToolUsage` in session/db.ts. `undefined`
+   * means a legacy row this scanner hasn't computed the field for yet (never
+   * collapsed to `false`, so a consumer — e.g. sessions-picker.ts's
+   * `classifySessionTool` — knows to fall back to a transcript-derived guess
+   * instead of trusting a false negative).
+   */
+  usedBrowser?: boolean;
+  /** Sibling of {@link usedBrowser} for `computer.action` events. */
+  usedComputer?: boolean;
+  /** Linear project containing ticketId, resolved lazily and cached in SQLite. */
+  linearProject?: string;
+  /** Browser URL for linearProject. */
+  linearProjectUrl?: string;
   /**
    * True when the session was spawned programmatically (SDK entrypoint) rather
    * than by a human at the Claude CLI. Captured at scan time from the JSONL
@@ -176,6 +281,20 @@ export interface SessionMeta {
    * undefined for sessions obtained outside that path.
    */
   machine?: string;
+  /**
+   * Resolved actor id (`resolveActor().id`) who initiated this session — a
+   * tailnet login/email for a resolved human, or `UNRESOLVED@<host>`. Persisted
+   * write-once at session creation and preserved across content rescans (kept
+   * out of the DB upsert's ON CONFLICT set). Undefined for rows created before
+   * actor stamping. RUSH-2018.
+   */
+  actor?: string;
+  /**
+   * The actor's kind (`resolveActor().kind`): `'human'` for a person-initiated
+   * run, `'agent'` for one an agent spawned. Pairs with {@link actor}, same
+   * split as `AGENTS_ACTOR` / `AGENTS_ACTOR_KIND` on the exec env. RUSH-2018.
+   */
+  initiatedBy?: 'human' | 'agent';
   /**
    * True only for rows pulled from another machine over the live cross-machine
    * fan-out (`remote-list.ts`) — their transcript is on that peer's disk, so

@@ -16,6 +16,7 @@
  */
 import { gatherRemoteAgentsJson } from '../remote-agents-json.js';
 import type { ActiveSession } from './active.js';
+import { parseViewingIn } from './viewing-in.js';
 
 /**
  * Recursion guard, passed as an env var (not a CLI flag) so an OLDER remote
@@ -28,7 +29,10 @@ export const NO_FANOUT_ENV = 'AGENTS_SESSIONS_LOCAL';
  * Parse a peer's `--active --json` stdout into active sessions, tagging each
  * with `machine`. Defensive against version skew / partial output: non-JSON or
  * a non-array yields `[]`, and non-object entries are dropped rather than
- * throwing. Exported for unit testing without a live tailnet.
+ * throwing. `viewingIn` arrives as a display string from a current peer and as
+ * an `{app, tab}` object from one that predates the flattening, so it is
+ * normalized here — the single boundary where a foreign row becomes internal.
+ * Exported for unit testing without a live tailnet.
  */
 export function parseRemoteActive(stdout: string, machine: string): ActiveSession[] {
   let parsed: unknown;
@@ -41,7 +45,9 @@ export function parseRemoteActive(stdout: string, machine: string): ActiveSessio
   const out: ActiveSession[] = [];
   for (const x of parsed) {
     if (x && typeof x === 'object' && !Array.isArray(x)) {
-      out.push({ ...(x as ActiveSession), machine });
+      const row = { ...(x as ActiveSession), machine };
+      row.viewingIn = parseViewingIn((x as { viewingIn?: unknown }).viewingIn);
+      out.push(row);
     }
   }
   return out;
@@ -58,13 +64,16 @@ export interface RemoteActiveResult {
  * (from `--host`), fan out to exactly those. Otherwise sweep the registered,
  * online devices from `ag devices`, excluding this machine and any without an
  * address. Results from all peers run in parallel and are flattened.
+ * `opts.quiet` suppresses the per-device stderr line for callers that report
+ * skipped peers once, compactly, themselves.
  */
-export async function gatherRemoteActive(hosts?: string[]): Promise<RemoteActiveResult> {
+export async function gatherRemoteActive(hosts?: string[], opts?: { quiet?: boolean }): Promise<RemoteActiveResult> {
   const result = await gatherRemoteAgentsJson({
     args: ['sessions', '--active', '--json'],
     noFanoutEnv: NO_FANOUT_ENV,
     hosts,
     parse: parseRemoteActive,
+    quiet: opts?.quiet,
   });
   return { sessions: result.items, deviceCount: result.deviceCount };
 }

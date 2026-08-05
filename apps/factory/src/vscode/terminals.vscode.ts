@@ -7,6 +7,8 @@ import * as fs from 'fs/promises';
 import { AgentConfig } from './agents.vscode';
 
 import { fetchGitInfo } from '../monitor/snapshotDetector';
+import { findAgentInTree, SHELL_ADOPTION_TREE_DEPTH } from '../monitor/readinessDetector';
+import type { AgentLauncherKey } from '../core/terminalReadiness';
 import { PanelSnapshotPayload, SnapshotWatch } from '../monitor/protocol';
 import { generateTerminalId, resolveRestoredVersion, RunningCounts } from '../core/terminals';
 import * as sessionsPersist from '../core/sessions.persist';
@@ -28,7 +30,6 @@ import {
   SessionAgentType
 } from '../core/utils';
 import { registerTerminal as registerSessionTracker } from './sessionTracker';
-import { relabelTmuxPane } from './tmux';
 
 // getTerminalsByAgentType runs 5x (one per agent type) on every 10s floor poll
 // and again on every terminal open/close. Its per-terminal/per-session debug
@@ -87,11 +88,17 @@ export interface EditorTerminal {
   pid?: number;             // Shell process ID
   messageQueue: string[];   // Queued messages to send after terminal ready
   sessionId?: string;       // CLI session ID (for resume, history reading)
+  host?: string;            // Device the agent runs on when offloaded via `agents run --host`;
+                            // undefined for a local tab. The session's transcript lives on THAT
+                            // machine, so every by-session lookup (label, preview, resume) has to
+                            // route through `--host <name>` instead of the local filesystem.
   agentType?: SessionAgentType; // Agent type for session operations
   version?: string;         // Pinned agent version ("2.1.113"); undefined when unknown
   account?: string;         // Resolved account email for this terminal when known
   statusVersion?: string;   // Display-only version from agents-cli metadata
   statusAccount?: string;   // Display-only account from agents-cli metadata
+  identitySessionId?: string; // Session id whose version/account are cached above AND both fields resolved; retry gate — re-fetch while the live id differs (rerun / /clear, or account not yet indexed)
+  identityAppliedSessionId?: string; // Session id the cached version/account were applied for (even if a field is null); display gate — the status bar shows them only for THIS session, never a prior binding's leftover
   approvalStatus?: 'pending' | 'approved' | 'running' | 'complete'; // Swarm approval status
   autoLabelPollerId?: NodeJS.Timeout; // Poller for auto-label fetch (cleared once label is set)
 }
@@ -137,6 +144,8 @@ export interface ClosedSession {
   terminalId: string;
   prefix: string;
   sessionId?: string;
+  /** Device the closed session ran on, so reopening resumes it there. */
+  host?: string;
   label?: string;
   agentType?: SessionAgentType;
   version?: string;
@@ -215,6 +224,21 @@ export function getById(id: string): EditorTerminal | undefined {
   return editorTerminals.get(id);
 }
 
+/**
+ * The live editor-terminal entry for a CLI session id, if one is tracked in
+ * this window. Used to reveal the terminal from an approval-waiting
+ * notification (RUSH-2039). Skips entries whose process has exited.
+ */
+export function getBySessionId(sessionId: string): EditorTerminal | undefined {
+  if (!sessionId) return undefined;
+  for (const entry of editorTerminals.values()) {
+    if (entry.sessionId === sessionId && entry.terminal.exitStatus === undefined) {
+      return entry;
+    }
+  }
+  return undefined;
+}
+
 export function getAllTerminals(): EditorTerminal[] {
   return Array.from(editorTerminals.values());
 }
@@ -240,7 +264,14 @@ export function register(
   agentConfig: Omit<AgentConfig, 'count'> | null,
   pid?: number,
   context?: vscode.ExtensionContext,
-  initialLabel?: string
+  initialLabel?: string,
+  // The tab's ORIGINAL creation time, when one is being restored. A reload or a
+  // tmux reattach builds a new vscode.Terminal widget for an agent that has been
+  // running for hours, and `createdAt` is what dates that agent's own session
+  // records (liveSessionIdForShell) — stamping it "now" would make the still-live
+  // agent's SessionStart record look like it predates its own tab and get
+  // discarded. Omitted for a genuinely new tab, which is created now by definition.
+  createdAt?: number,
 ): void {
   // Check if terminal is already registered (prevents race condition with onDidOpenTerminal)
   const existingId = terminalToId.get(terminal);
@@ -255,7 +286,7 @@ export function register(
     id,
     terminal,
     agentConfig,
-    createdAt: Date.now(),
+    createdAt: createdAt ?? Date.now(),
     pid,
     messageQueue: []
   };
@@ -319,11 +350,6 @@ export async function setLabel(
     schedulePersist();
 
     stopAutoLabelPoller(terminal);
-
-    // Keep the tmux pane border in sync with the tab. A manual label wins over
-    // the auto-label; clearing it (label=undefined) falls back to the auto-label.
-    // Fire-and-forget — tmux styling is best-effort, never load-bearing.
-    void relabelTmuxPane(terminal, label ?? entry.autoLabel).catch(() => { /* ignore */ });
   } else {
     console.log(`[DEBUG setLabel] No entry found for terminal - label NOT saved!`);
   }
@@ -338,10 +364,6 @@ export function setAutoLabel(terminal: vscode.Terminal, autoLabel: string | unde
       entry.autoLabelPollerId = undefined;
       console.log(`[TERMINALS] Cleared auto-label poller for terminal "${terminal.name}" - label set: "${autoLabel}"`);
     }
-    // Surface the resolved topic in the tmux pane border (a manual label, if
-    // set, still takes precedence). This fires even when the terminal isn't
-    // focused — unlike the tab rename, which must briefly activate it.
-    void relabelTmuxPane(terminal, entry.label ?? autoLabel).catch(() => { /* ignore */ });
   }
 }
 
@@ -488,11 +510,26 @@ export function adoptShellAsAgent(
   return true;
 }
 
-export function setVersion(terminal: vscode.Terminal, version: string): void {
+/** Record the device an offloaded terminal runs on (see EditorTerminal.host). */
+export function setHost(terminal: vscode.Terminal, host: string): void {
   const entry = getByTerminal(terminal);
   if (entry) {
-    entry.version = version;
-    entry.statusVersion = version;
+    entry.host = host;
+    schedulePersist();
+  } else {
+    console.error(`[TERMINALS] FAILED to set host - terminal "${terminal.name}" not found in registry.`);
+  }
+}
+
+export function setVersion(terminal: vscode.Terminal, version: string | null | undefined): void {
+  const entry = getByTerminal(terminal);
+  if (entry) {
+    // A null/empty version CLEARS the cached value rather than being ignored: a
+    // harness the CLI records no version for (Kimi, Grok, …) must not keep a
+    // version left over from a prior binding in the same terminal.
+    const normalized = version?.trim() || undefined;
+    entry.version = normalized;
+    entry.statusVersion = normalized;
     schedulePersist();
   } else {
     console.error(`[TERMINALS] FAILED to set version - terminal "${terminal.name}" not found in registry.`);
@@ -633,6 +670,18 @@ export async function scanExisting(
     const persistedByTerminalId = identOpts.terminalId
       ? persistedSessions.find(p => p.terminalId === identOpts.terminalId)
       : undefined;
+
+    // Recover the offloaded device BEFORE any host-dependent lookup runs. VS Code
+    // restores terminals without our env vars, so `entry.host` is lost on reload
+    // unless we rehydrate it from the persisted session here. Without this, a
+    // remote session's resume command degrades to a local raw binary and the
+    // label poller reads the wrong filesystem (extension.ts restore callers pass
+    // `session.host` into buildVersionedResumeCommand; scanExisting is the other
+    // reload path that must keep it, RUSH-2047).
+    if (persistedByTerminalId?.host) {
+      setHost(terminal, persistedByTerminalId.host);
+    }
+
     const pinnedVersion = resolveRestoredVersion(
       identOpts.version,
       persistedByTerminalId?.version
@@ -649,6 +698,42 @@ export async function scanExisting(
       setAgentType(terminal, agentType);
     }
     let sessionId = identOpts.sessionId;
+
+    // Strategy 0 (authoritative): ask the process ACTUALLY running in this
+    // pane. env (AGENT_SESSION_ID), the tab-name chunk, and the persisted
+    // store are all captured at spawn time and go stale the moment the live
+    // session changes (a /continue or a resume/rotate switches the running
+    // session id) — and VS Code frequently drops `creationOptions.env` across
+    // a Remote-SSH window reload, forcing the recency-based fallbacks below.
+    // Those fallbacks match only by agent prefix + "most recent", so on reload
+    // a tab can be bound to a SIBLING session (wrong id, account, and version)
+    // that merely looks newest. The live process's own `--session-id`/`--resume`
+    // arg is the only signal tied to THIS pane, so it wins over every heuristic.
+    //
+    // Gate on THIS tab's agent: findAgentInTree only returns a descendant of
+    // `agentType`, so a nested/stray other-agent process (e.g. a codex spawned
+    // under a Claude tab's shell) can never bind this tab to the wrong agent's
+    // session. Only override an existing env id when the live id actually
+    // disagrees — a matching id is left untouched.
+    if (pid !== undefined && agentType) {
+      try {
+        const live = await findAgentInTree(
+          pid,
+          SHELL_ADOPTION_TREE_DEPTH,
+          agentType as AgentLauncherKey
+        );
+        if (live?.sessionId && live.sessionId !== sessionId) {
+          console.log(
+            `[TERMINALS] Live-process sessionId ${live.sessionId} (pid=${pid}, ` +
+              `${live.agentKey}) overrides ${sessionId ?? 'none'} from env`
+          );
+          sessionId = live.sessionId;
+        }
+      } catch {
+        // Process may have exited or the probe failed; fall through to the
+        // best-effort heuristics below.
+      }
+    }
 
     // Strategy 1: Try to recover from sessionChunk in terminal name
     if (!sessionId && info.sessionChunk && agentType) {
@@ -1272,10 +1357,12 @@ export function buildPersistedSessions(): sessionsPersist.PersistedSession[] {
       terminalId: entry.id,
       prefix: entry.agentConfig.prefix,
       sessionId: entry.sessionId,
+      host: entry.host,
       label: entry.label,
       agentType: entry.agentType,
       version: entry.version,
-      createdAt: entry.createdAt
+      createdAt: entry.createdAt,
+      agentPid: entry.pid,
     });
   }
 

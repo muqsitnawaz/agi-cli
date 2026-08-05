@@ -49,17 +49,6 @@ export const MONITOR_OP = {
    */
   armShellAdoption: 'arm-shell-adoption',
   /**
-   * Follower -> monitor: replace this window's watchdog watch slice (#70). The
-   * monitor's watchdog detector runs ONE machine-wide tick that stats each
-   * registered session file and polls `agents view --json` per agent, then
-   * broadcasts a `watchdog/stall` fact (and a `watchdog/versions` fact). The
-   * window that owns the stalled session resolves the fact back to its own
-   * terminal and delivers the nudge/rotate — detection is centralized, delivery
-   * stays per-window. This is the cross-window successor to the window-local
-   * `fs.stat`/`agents view` polling watchdog tick (watchdog.vscode.ts).
-   */
-  watchdogWatch: 'watchdog-watch',
-  /**
    * Follower -> monitor: replace this window's panel-snapshot watch slice (#71).
    * The monitor's snapshot detector runs ONE machine-wide tick that computes the
    * GLOBAL per-tick work every visible panel/floor used to fork on its own 4s
@@ -98,30 +87,6 @@ export interface ArmShellAdoptionRequest {
   pid: number;
 }
 
-/** Agent kinds the watchdog detector monitors for stalls. */
-export type WatchdogAgentType = 'claude' | 'codex' | 'gemini';
-
-/** One session the owning window asks the monitor to watch for a stall (#70). */
-export interface WatchdogWatch {
-  /** CLI session UUID — the key the stall fact is broadcast under. */
-  sessionId: string;
-  agentType: WatchdogAgentType;
-  /** Absolute path to the session file the detector stats for staleness. */
-  sessionFilePath: string;
-  /** Idle threshold before a session counts as stalled. */
-  stallMs: number;
-  /** Beyond this the session is dormant — detector stays silent. */
-  dormantMs: number;
-  /** When set, the detector also polls `agents view <agentKey> --json`. */
-  rotateAgentKey?: string;
-}
-
-export interface WatchdogWatchRequest {
-  op: typeof MONITOR_OP.watchdogWatch;
-  windowId: string;
-  watches: WatchdogWatch[];
-}
-
 /** One workspace/agent tuple a window asks the monitor to snapshot (#71). */
 export interface SnapshotWatch {
   /** Workspace root — `git branch`/`git diff --numstat` + worktree list keyed here. */
@@ -143,7 +108,6 @@ export type MonitorRequest =
   | SnapshotRequest
   | ArmAgentRequest
   | ArmShellAdoptionRequest
-  | WatchdogWatchRequest
   | SnapshotWatchRequest;
 
 export interface ReportTuplesAck {
@@ -179,10 +143,6 @@ export const MONITOR_FACT = {
   session: 'monitor.session',
   /** A tracked session file was written (warmth signal for kill/restart). */
   sessionWarmth: 'monitor.session-warmth',
-  /** A watched session has gone idle past its stall threshold (#70). */
-  watchdogStall: 'monitor.watchdog-stall',
-  /** `agents view <agentKey> --json` polled once machine-wide (#70). */
-  watchdogVersions: 'monitor.watchdog-versions',
   /** The merged panel/floor snapshot computed once machine-wide (#71). */
   panelSnapshot: 'monitor.panel-snapshot',
 } as const;
@@ -234,29 +194,6 @@ export interface SessionFactPayload {
 export interface SessionWarmthPayload {
   filePath: string;
   ts: number;
-}
-
-/**
- * A watched session has been idle past its stall threshold (#70). Broadcast by
- * the leader's watchdog detector keyed by `sessionId`; the window that owns that
- * session resolves it to its own `vscode.Terminal` and runs the nudge pipeline.
- */
-export interface WatchdogStallPayload {
-  sessionId: string;
-  agentType: WatchdogAgentType;
-  /** How long the session file has been untouched (now - mtime). */
-  idleMs: number;
-  mtimeMs: number;
-}
-
-/**
- * The parsed result of one machine-wide `agents view <agentKey> --json` poll
- * (#70). Windows consume this for the auto-rotate exhaustion check instead of
- * each spawning the CLI; they fall back to a local fetch while disconnected.
- */
-export interface WatchdogVersionsPayload {
-  agentKey: string;
-  view: AgentsViewJsonAgent;
 }
 
 /** Per-workspace git facts (`git branch --show-current` + `git diff --numstat HEAD`). */
@@ -348,19 +285,6 @@ export function isSessionWarmth(
   );
 }
 
-/** Narrow a raw broadcast event to a watchdog stall fact (#70). */
-export function isWatchdogStall(
-  event: MonitorEvent,
-): event is MonitorEvent & { payload: WatchdogStallPayload } {
-  const p = event.payload as WatchdogStallPayload | undefined;
-  return (
-    event.type === MONITOR_FACT.watchdogStall &&
-    !!p &&
-    typeof p.sessionId === 'string' &&
-    typeof p.idleMs === 'number'
-  );
-}
-
 /** Narrow a raw broadcast event to a panel-snapshot fact (#71). */
 export function isPanelSnapshot(
   event: MonitorEvent,
@@ -372,19 +296,5 @@ export function isPanelSnapshot(
     typeof p.gitByRoot === 'object' &&
     typeof p.worktreesByRoot === 'object' &&
     typeof p.usageByAgent === 'object'
-  );
-}
-
-/** Narrow a raw broadcast event to a watchdog versions fact (#70). */
-export function isWatchdogVersions(
-  event: MonitorEvent,
-): event is MonitorEvent & { payload: WatchdogVersionsPayload } {
-  const p = event.payload as WatchdogVersionsPayload | undefined;
-  return (
-    event.type === MONITOR_FACT.watchdogVersions &&
-    !!p &&
-    typeof p.agentKey === 'string' &&
-    !!p.view &&
-    Array.isArray((p.view as AgentsViewJsonAgent).versions)
   );
 }

@@ -1,8 +1,8 @@
 # Agents
 
-Orchestrate Claude, Codex, Gemini, and Cursor in parallel — from one IDE. Open source. Free.
+Orchestrate Claude, Codex, Antigravity, and Cursor in parallel — from one IDE. Open source. Free.
 
-Turn your editor into a command center for orchestrating Claude, Codex, Gemini, and Cursor in parallel. Each agent runs as a full-screen editor tab. Each agent can spawn sub-agents. You orchestrate — approving plans, monitoring execution, shipping faster.
+Turn your editor into a command center for orchestrating Claude, Codex, Antigravity, and Cursor in parallel. Each agent runs as a full-screen editor tab. Each agent can spawn sub-agents. You orchestrate — approving plans, monitoring execution, shipping faster.
 
 ## Why an IAE?
 
@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/phnx-labs/agents-cli/main/scripts/i
 
 | Shortcut | Action |
 | --- | --- |
-| `Cmd+Shift+A` | Spawn new agent |
+| `Cmd+Shift+A` | Spawn new agent — smart pick: agent type by recent/frequent usage, version balanced, least-busy host |
 | `Cmd+Shift+L` | Label agent by task |
 | `Cmd+Shift+C` | Clear and restart agent |
 | `Cmd+Shift+D` | Open Dashboard |
@@ -57,7 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/phnx-labs/agents-cli/main/scripts/i
 
 ### Agent Terminals
 
-Spawn any agent as a full-screen editor tab. Built-in support for Claude Code, Codex, Gemini, OpenCode, and Cursor. Add custom agents through settings.
+Spawn any agent as a full-screen editor tab. Built-in support for Claude Code, Codex, Antigravity, OpenCode, and Cursor. Add custom agents through settings.
 
 ### Session Persistence
 
@@ -68,10 +68,14 @@ Every open agent terminal is fully restorable. Session ID, icon, and custom labe
 - **Labels** - Tag agents by task (`Cmd+Shift+L`). Status bar shows active agent and label.
 - **TODO.md parsing** - Discovers TODO.md files in your workspace. Spawn agents directly from task items.
 - **Session history** - Browse recent sessions from the dashboard. Resume any previous conversation.
+- **Fork a session** - `Agents: Fork` starts a sibling agent on the active tab's session, leaving the original running. `Agents: Fork (Pick Host)` forks that same session onto a device you choose — same harness, same balanced account rotation, only the machine changes; the sibling opens beside the tab it came from and reads the transcript back from wherever it lives. `Agents: Fork (Pick Session)` opens a session browser first — recent sessions grouped by the machine they live on, with a title-bar button to browse any registered device. The fork runs where the session lives, so picking a session from a fleet box starts the sibling agent on that box. `Agents: Fork (Recap)` uses that same browser and starts a new sibling in the selected session's exact host, directory, and harness with `/recap <full-id>` queued. The public system command supplies context only: it does not resume, attach to, or inherit the selected session.
+- **Fork pairs in the Recap ledger** - a fork and the session it came from finish as two rows that share no id. Factory remembers the edge and reunites them: one side-by-side row in Recap, parent on the left, fork on the right, each stamped with the machine it ran on and its own duration/cost/PR.
+- **Agents: Resume** - Pick several sessions at once; each reopens in its own tab with its agent's icon. Sessions still running with no terminal attached — the agent survived in tmux, the window that showed it did not — are listed first and pre-selected, so a crashed window is one command away from being back.
+- **Resume variants** - `Agents: Resume (Pick Session)` lists only abandoned sessions — detached, backgrounded, parked, or idle, nothing currently open anywhere — and resumes each on the device it was created on. `Agents: Resume (Pick Host)` reopens the active tab's session on a device you pick (same harness, same version). `Agents: Resume (Pick Harness)` continues the active tab's session in a different harness on the same device, replaying the transcript through the universal `/continue` flow. `Agents: Resume (Best Profile)` rotates the active tab to the signed-in account with the most usage headroom (`Cmd+Shift+J`).
 
 ### Factory Floor
 
-The dashboard's mission control. A live grid of every agent on the floor — local IDE tabs, background teams, and cloud dispatches — beside your Linear cycle. Compose and dispatch work with the Cmd+K composer, drag issue cards onto agents, or send a ticket straight to the cloud.
+The dashboard's mission control. A live grid of interactive agents and cloud dispatches beside your Linear cycle. Background/headless runs are hidden by default; use the **Background** feed toggle when you need them. Compose and dispatch work with the Cmd+K composer, drag issue cards onto agents, or send a ticket straight to the cloud.
 
 Agent cards surface outputs such as PRs, spawned teams, created tickets, and plan
 artifacts. `.html` and `ref-*.md` plans detected in session output, worktree
@@ -93,7 +97,7 @@ Generate commit messages from staged changes with `Cmd+Shift+G`. Learns from you
 - **Auto-start** - Configure which agents launch when VS Code opens
 - **Default models** - Set preferred model per agent type
 - **Shell terminals** - Spawn plain shells alongside agents (`Cmd+Shift+S`)
-- **Markdown editor** - Custom `.md` editor with image paste support
+- **Reader** - Notion-style `.md` editor (TipTap) plus sandboxed HTML preview for artifacts-cli pages; Command Palette: `Agents: Reader (Enable)` / `Agents: Reader (Disable)`
 - **Notifications** - Native macOS notifications when agents need attention
 
 ## For Teams
@@ -105,7 +109,7 @@ Generate commit messages from staged changes with `Cmd+Shift+G`. Learns from you
 ## Requirements
 
 - VS Code or Cursor
-- Agent CLIs installed (`claude`, `codex`, `gemini`, `cursor-agent`, `opencode`)
+- Agent CLIs installed (`claude`, `codex`, `antigravity`, `cursor-agent`, `opencode`)
 - OpenAI API key (optional, for commit generation and the Foreman voice orb)
 - ffmpeg (optional, for the Foreman voice orb: `brew install ffmpeg`)
 

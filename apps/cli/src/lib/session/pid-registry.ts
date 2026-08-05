@@ -27,6 +27,19 @@ export interface PidSessionEntry {
   sessionId?: string;
   cwd?: string;
   /**
+   * Resolved actor id (`resolveActor().id`) stamped at spawn — who initiated this
+   * run. A tailnet login/email for a resolved human, or `UNRESOLVED@<host>` when
+   * it can't be determined. Read back by the active-sessions path to surface an
+   * `owner` per session (RUSH-2018), so a co-located fleet shows who launched what.
+   */
+  actor?: string;
+  /**
+   * The actor's kind (`resolveActor().kind`): `'human'` for a person-initiated
+   * run, `'agent'` for one an agent spawned. Pairs with {@link actor} the same way
+   * `AGENTS_ACTOR` / `AGENTS_ACTOR_KIND` do on the exec env.
+   */
+  initiatedBy?: 'human' | 'agent';
+  /**
    * The launch id minted by `ag run` and exported to the child as
    * `AGENT_LAUNCH_ID`. The agent's SessionStart hook records the SAME id in its
    * own state file (`terminals/sessions/<pid>.json`, `launch_id`), so the two
@@ -141,8 +154,15 @@ export function listPidSessionEntries(): PidSessionEntry[] {
   return out;
 }
 
-/** Remove entries whose pid is no longer alive. Best-effort housekeeping. */
-export function prunePidSessionRegistry(isAlive: (pid: number) => boolean): void {
+/**
+ * Remove entries whose pid is no longer alive. Best-effort housekeeping.
+ *
+ * `isAlive` receives the entry's recorded `startedAtMs` so it can reject a pid
+ * that a newer process recycled (a "zombie" registry entry), not just one that
+ * no longer exists. An unreadable/corrupt entry falls back to the pid-only
+ * check.
+ */
+export function prunePidSessionRegistry(isAlive: (pid: number, startedAtMs?: number) => boolean): void {
   let files: string[];
   try {
     files = fs.readdirSync(pidRegistryDir()).filter(f => f.endsWith('.json'));
@@ -151,7 +171,15 @@ export function prunePidSessionRegistry(isAlive: (pid: number) => boolean): void
   }
   for (const f of files) {
     const pid = Number(f.slice(0, -'.json'.length));
-    if (!Number.isInteger(pid) || isAlive(pid)) continue;
+    if (!Number.isInteger(pid)) continue;
+    let startedAtMs: number | undefined;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(pidRegistryDir(), f), 'utf8'));
+      if (typeof parsed?.startedAtMs === 'number') startedAtMs = parsed.startedAtMs;
+    } catch {
+      /* unreadable/corrupt — fall back to the pid-only liveness check */
+    }
+    if (isAlive(pid, startedAtMs)) continue;
     try {
       fs.unlinkSync(path.join(pidRegistryDir(), f));
     } catch {

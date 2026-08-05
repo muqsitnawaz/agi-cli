@@ -1,18 +1,19 @@
 /**
  * Commands writer.
  *
- * Two physical formats, picked per-(agent, version) at write time:
+ * Two physical formats, selected per-(agent, version) at write time. Most
+ * agents receive one format; dual-write registry targets receive both:
  *
  *  - command-as-skill — fires when `shouldInstallCommandAsSkill(agent, version)`
  *    is true. Used for Codex >= 0.117.0 (commands capability ends, skills
  *    capability remains) and agents with skills but no native command-file dir
- *    such as kimi. Writes `{agentDir}/skills/<name>/SKILL.md` with the
+ *    such as Kimi. Cursor also receives this format in addition to its IDE
+ *    command file. Writes `{agentDir}/skills/<name>/SKILL.md` with the
  *    `agents_command` marker; the agent picks it up as a slash-command equivalent.
  *
  *  - native command file — `{agentDir}/<commandsSubdir>/<name>.md` (or .toml
  *    when the agent's format is toml). Standard path for Claude, Codex
- *    < 0.117.0, Gemini, Cursor, OpenCode, Copilot, Amp, Kiro, Roo,
- *    Antigravity.
+ *    < 0.117.0, Cursor, OpenCode, Copilot, Amp, Kiro, Roo, Antigravity.
  *
  * Source resolution is `resolveCommandSource` (user → system → extras —
  * project layer intentionally excluded).
@@ -20,12 +21,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentId } from '../../types.js';
-import { AGENTS, agentConfigDirName } from '../../agents.js';
+import { AGENTS, MANAGED_AGENT_IDS, agentConfigDirName } from '../../agents.js';
 import { supports } from '../../capabilities.js';
 import { safeJoin } from '../../paths.js';
 import { markdownToToml } from '../../convert.js';
 import { commandAppliesTo, parseCommandMetadata } from '../../commands.js';
-import { installCommandSkillToVersion, shouldInstallCommandAsSkill } from '../../command-skills.js';
+import {
+  installCommandSkillToVersion,
+  shouldAlsoInstallCommandAsSkill,
+  shouldInstallCommandAsSkill,
+} from '../../command-skills.js';
 import { installGooseCommandToVersion } from '../../goose-commands.js';
 import type { ResourceWriter, WriteArgs, WriteResult } from './types.js';
 import { resolveCommandSource, trustedSkillRoots } from './sources.js';
@@ -39,6 +44,7 @@ function buildCommandsWriter(agent: AgentId): ResourceWriter<string[]> {
       const agentConfig = AGENTS[agent];
       const agentDir = path.join(versionHome, agentConfigDirName(agent));
       const commandsAsSkills = shouldInstallCommandAsSkill(agent, version);
+      const commandsAlsoAsSkills = shouldAlsoInstallCommandAsSkill(agent, version);
       const supportsCommands = supports(agent, 'commands', version).ok;
 
       // Version-gated agents (e.g. goose skills >= 1.25.0) are registered but
@@ -61,18 +67,22 @@ function buildCommandsWriter(agent: AgentId): ResourceWriter<string[]> {
         const metadata = parseCommandMetadata(srcFile);
         if (!commandAppliesTo(agent, version, metadata).ok) continue;
 
-        if (commandsAsSkills) {
+        if (commandsAsSkills || commandsAlsoAsSkills) {
           const installed = installCommandSkillToVersion(agentDir, cmd, srcFile, skillRoots);
+          // installed.skipped means a real skill source already owns this name,
+          // which is a deliberate no-op, not a failure — the native file is still written.
           if (!installed.success) continue;
-        } else if (agent === 'goose') {
+        }
+
+        if (supportsCommands && agent === 'goose') {
           // Goose: recipe YAML + config.yaml slash_commands entry, not a file copy.
           const installed = installGooseCommandToVersion(versionHome, cmd, srcFile);
           if (!installed.success) continue;
-        } else if (agentConfig.format === 'toml') {
+        } else if (supportsCommands && agentConfig.format === 'toml') {
           const content = fs.readFileSync(srcFile, 'utf-8');
           const tomlContent = markdownToToml(cmd, content);
           fs.writeFileSync(safeJoin(commandsTarget, `${cmd}.toml`), tomlContent);
-        } else {
+        } else if (supportsCommands) {
           fs.copyFileSync(srcFile, safeJoin(commandsTarget, `${cmd}.md`));
         }
         synced.push(cmd);
@@ -85,8 +95,9 @@ function buildCommandsWriter(agent: AgentId): ResourceWriter<string[]> {
 // Built lazily on first access — see lazy-map.ts for the cycle rationale.
 //
 // Registration covers two cases:
-//   - native commands (claude, codex < 0.117.0, gemini, grok, etc.) — `commands` cap
+//   - native commands (claude, codex < 0.117.0, grok, etc.) — `commands` cap
 //   - commands-as-skills (kimi, codex >= 0.117.0)
+//   - dual-write commands plus command-skills (cursor)
 //
 // Agents that have skills but use a NATIVE non-file slash-command system
 // (openclaw → Gateway-based commands) are NOT registered. They declare
@@ -94,7 +105,7 @@ function buildCommandsWriter(agent: AgentId): ResourceWriter<string[]> {
 // commands, so there's nothing to write and nothing to convert.
 export const commandsWriters = lazyAgentMap<ResourceWriter<string[]>>(() => {
   const m: Partial<Record<AgentId, ResourceWriter<string[]>>> = {};
-  for (const id of Object.keys(AGENTS) as AgentId[]) {
+  for (const id of MANAGED_AGENT_IDS) {
     const cfg = AGENTS[id];
     if (cfg.capabilities.commands === false && (!cfg.skillsDir || cfg.skillsDir === '')) continue;
     // Skills-capable agent with no native command-file dir: convert commands to

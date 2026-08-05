@@ -11,7 +11,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { IS_WINDOWS, isWindowsAbsolutePath } from './platform/index.js';
-import { getPackageLocalPath, getDeviceMetaPath } from './state.js';
+import { getPackageLocalPath } from './state.js';
 import { DEFAULT_SYSTEM_REPO, systemRepoSlug } from './types.js';
 
 /**
@@ -93,9 +93,22 @@ export function assertValidBranchName(branch: string): void {
  *
  * Prefer this over `git.push(remote, branch)` whenever the branch comes from
  * repo state rather than a hard-coded literal.
+ *
+ * Pass `targetBranch` to push the local `branch` to a differently-named remote
+ * branch (`git push origin <branch>:<targetBranch>`) — used when publishing the
+ * working tree to a branch other than the checked-out one.
  */
-export async function pushOrigin(git: SimpleGit, branch: string): Promise<void> {
+export async function pushOrigin(
+  git: SimpleGit,
+  branch: string,
+  targetBranch?: string,
+): Promise<void> {
   assertValidBranchName(branch);
+  if (targetBranch && targetBranch !== branch) {
+    assertValidBranchName(targetBranch);
+    await git.raw(['push', '--', 'origin', `${branch}:${targetBranch}`]);
+    return;
+  }
   await git.raw(['push', '--', 'origin', branch]);
 }
 
@@ -403,6 +416,80 @@ export async function getRepoCommit(repoPath: string): Promise<string> {
   }
 }
 
+/** Compact, self-contained state of a git repo — branch, short HEAD, and a
+ *  dirty flag — for cross-device comparison (RUSH-2027). Synchronous and
+ *  best-effort: a non-repo or unreadable path yields `null` fields, never a
+ *  throw, so a device's `doctor --json` payload always serializes. */
+export interface RepoStateSnapshot {
+  branch: string | null;
+  head: string | null;
+  dirty: boolean;
+}
+
+/** Read {@link RepoStateSnapshot} for `repoPath` using plumbing commands so the
+ *  result is stable across git versions and never mutates the tree. Returns null
+ *  when the path is not a git worktree. */
+export function readRepoState(repoPath: string): RepoStateSnapshot | null {
+  const runGit = (args: string[]): string | null => {
+    try {
+      return execFileSync('git', ['-C', repoPath, ...args], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+        .toString()
+        .trim();
+    } catch {
+      return null;
+    }
+  };
+  // Gate on a real worktree first; `rev-parse --is-inside-work-tree` prints
+  // `true` only inside one, and returns non-zero (→ null) otherwise.
+  if (runGit(['rev-parse', '--is-inside-work-tree']) !== 'true') return null;
+  const branchRaw = runGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const branch = branchRaw && branchRaw !== 'HEAD' ? branchRaw : null; // detached → null
+  const headRaw = runGit(['rev-parse', 'HEAD']);
+  const head = headRaw ? headRaw.slice(0, 8) : null;
+  const porcelain = runGit(['status', '--porcelain']);
+  const dirty = porcelain != null && porcelain.length > 0;
+  return { branch, head, dirty };
+}
+
+/** Memoized per repoRoot — a resolveResource()/listResources()/plugin-discovery
+ *  call that touches many resources from the SAME DotAgents repo must not shell
+ *  out to git once per resource. */
+const _snapshotShaCache = new Map<string, string | undefined>();
+
+/**
+ * The short HEAD sha of the git repo at `repoRoot` (`git -C <repoRoot>
+ * rev-parse --short HEAD`), for provenance — "which commit of this DotAgents
+ * repo was this resource/plugin resolved from". `undefined` when `repoRoot`
+ * isn't a git repo (or has no commits yet), never a throw.
+ *
+ * Deliberately synchronous + resolved once and cached: callers (resources.ts,
+ * plugins.ts) attach this as a lazy getter on the resolved object, so a
+ * consumer that never inspects provenance never pays for the git shell-out —
+ * see {@link ResolvedResource.snapshotSha} / {@link DiscoveredPlugin.snapshotSha}.
+ */
+export function resolveSnapshotSha(repoRoot: string): string | undefined {
+  const cached = _snapshotShaCache.get(repoRoot);
+  if (cached !== undefined || _snapshotShaCache.has(repoRoot)) return cached;
+  let sha: string | undefined;
+  try {
+    const raw = execFileSync('git', ['-C', repoRoot, 'rev-parse', '--short', 'HEAD'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).toString().trim();
+    sha = raw || undefined;
+  } catch {
+    sha = undefined;
+  }
+  _snapshotShaCache.set(repoRoot, sha);
+  return sha;
+}
+
+/** Test seam: clear the memoized snapshot-sha cache between test cases. */
+export function _resetSnapshotShaCacheForTest(): void {
+  _snapshotShaCache.clear();
+}
+
 /**
  * Get the current GitHub username using gh CLI.
  * Returns null if gh is not installed or user is not authenticated.
@@ -473,6 +560,16 @@ export async function getRemoteUrl(repoPath: string): Promise<string | null> {
   } catch {
     /* not a git repo or no remotes */
     return null;
+  }
+}
+
+/** The repo's checked-out branch, or 'main' on a detached HEAD / read failure. */
+export async function getCurrentBranch(repoPath: string): Promise<string> {
+  try {
+    const status = await simpleGit(repoPath).status();
+    return status.current || 'main';
+  } catch {
+    return 'main';
   }
 }
 
@@ -548,13 +645,26 @@ export type CommitAndPushResult = {
  * Clean tree + local ahead of origin still pushes — "nothing to commit" is not
  * "nothing to push". Reports "already up to date" only when `ahead === 0` and
  * there is nothing to commit.
+ *
+ * `targetBranch` pushes the working tree to a differently-named remote branch
+ * (`<current>:<targetBranch>`) and is reported back as the result `branch`, so
+ * callers that print a branch-scoped URL reference where the commit actually
+ * landed — not the checked-out branch.
  */
-export async function commitAndPush(repoPath: string, message: string): Promise<CommitAndPushResult> {
+export async function commitAndPush(
+  repoPath: string,
+  message: string,
+  targetBranch?: string,
+): Promise<CommitAndPushResult> {
   try {
     const git = simpleGit(repoPath);
     let status = await git.status();
     const branch = status.current || 'main';
     assertValidBranchName(branch);
+    if (targetBranch) assertValidBranchName(targetBranch);
+    // The branch the commit ends up on remotely — the checked-out branch unless
+    // an explicit target was requested.
+    const pushedBranch = targetBranch || branch;
 
     let committed = false;
     if (status.files.length > 0) {
@@ -565,7 +675,10 @@ export async function commitAndPush(repoPath: string, message: string): Promise<
     }
 
     const ahead = status.ahead ?? 0;
-    if (!committed && ahead === 0) {
+    // A same-branch push short-circuits when there is nothing new; a push to a
+    // different target branch must still run even from a clean, non-ahead tree,
+    // since the target may not carry these commits yet.
+    if (!committed && ahead === 0 && pushedBranch === branch) {
       return {
         success: true,
         detail: 'already up to date',
@@ -578,12 +691,12 @@ export async function commitAndPush(repoPath: string, message: string): Promise<
     // Capture remote tip before push for a real ref range in the detail string.
     let before = '';
     try {
-      before = (await git.raw(['rev-parse', '--short=8', `origin/${branch}`])).trim();
+      before = (await git.raw(['rev-parse', '--short=8', `origin/${pushedBranch}`])).trim();
     } catch {
       /* origin/<branch> may not exist yet (first push) */
     }
 
-    await pushOrigin(git, branch);
+    await pushOrigin(git, branch, targetBranch);
 
     let after = '';
     try {
@@ -607,7 +720,7 @@ export async function commitAndPush(repoPath: string, message: string): Promise<
     return {
       success: true,
       detail,
-      branch,
+      branch: pushedBranch,
       committed,
       pushed: true,
     };
@@ -884,51 +997,47 @@ export function displayHomePath(dir: string): string {
  * branch reconciles instead of failing with "Need to specify how to reconcile
  * divergent branches".
  */
-/**
- * Auto-commit the machine's OWN generated per-device meta file
- * (`devices/<machineId>/agents.yaml`) if it's the dirty state blocking a pull.
- *
- * That file is committed + synced (so every machine can introspect every other
- * machine's pins), but each box rewrites its own copy whenever a pin changes —
- * leaving the tree perpetually dirty and wedging `agents repo pull` (which
- * refuses a dirty tree). This durably commits just that one path (explicit
- * pathspec) so the pull can proceed; genuine user edits to OTHER files are left
- * untouched and still (correctly) block the pull. No-op when the meta path isn't
- * inside `dir` (system/extra repos) or isn't dirty. Returns the committed rel
- * path, or null. `metaAbs` is injectable for tests; defaults to the live path.
- */
-export async function commitOwnDeviceMeta(
-  dir: string,
-  metaAbs: string = getDeviceMetaPath(),
-): Promise<string | null> {
-  const resolvedDir = path.resolve(dir);
-  const resolvedMeta = path.resolve(metaAbs);
-  if (resolvedMeta !== resolvedDir && !resolvedMeta.startsWith(resolvedDir + path.sep)) {
-    return null; // meta lives outside this repo — not ours to commit here
-  }
-  const rel = path.relative(resolvedDir, resolvedMeta).split(path.sep).join('/');
-  try {
-    const git = simpleGit(dir);
-    const status = await git.status();
-    const dirty = status.files.some((f) => f.path === rel);
-    if (!dirty) return null;
-    await git.add([rel]);
-    const machine = path.basename(path.dirname(resolvedMeta));
-    await git.commit(`chore(devices): snapshot ${machine} agent pins`, [rel]);
-    return rel;
-  } catch {
-    return null; // best-effort — never let this block the pull path
-  }
-}
-
 export async function pullRepo(
   dir: string,
 ): Promise<{ success: boolean; commit: string; error?: string; branch?: string }> {
   try {
     const git = simpleGit(dir);
-    // Commit this machine's own device-meta first so a per-machine pin change
-    // never wedges the pull. Genuine edits elsewhere still block below.
-    await commitOwnDeviceMeta(dir);
+
+    // A rebase left in progress by an earlier run must be reported as itself.
+    // Without this the dirty-tree guard below claims "Blocked by local changes",
+    // which is both wrong and actively harmful advice mid-rebase on a detached
+    // HEAD.
+    // Ask git where the state dirs live rather than assuming `<dir>/.git/` is a
+    // directory. In a worktree `.git` is a FILE containing `gitdir: <path>`, so
+    // path.join(dir, '.git', 'rebase-merge') can never exist and the check would
+    // silently never fire. `rev-parse --git-path` resolves both layouts.
+    const gitPath = async (name: string): Promise<string | null> => {
+      try {
+        const raw = (await git.raw(['rev-parse', '--git-path', name])).trim();
+        return path.isAbsolute(raw) ? raw : path.join(dir, raw);
+      } catch {
+        return null;
+      }
+    };
+    const [rebaseMerge, rebaseApply] = await Promise.all([
+      gitPath('rebase-merge'),
+      gitPath('rebase-apply'),
+    ]);
+    const rebaseInProgress =
+      (rebaseMerge !== null && fs.existsSync(rebaseMerge)) ||
+      (rebaseApply !== null && fs.existsSync(rebaseApply));
+    if (rebaseInProgress) {
+      return {
+        success: false,
+        commit: '',
+        error:
+          `A previous rebase is still in progress — finish or abort it, then pull again.\n\n` +
+          `  cd ${displayHomePath(dir)} && git status\n` +
+          `  git rebase --continue   # after resolving\n` +
+          `  git rebase --abort      # to discard the attempt`,
+      };
+    }
+
     const status = await git.status();
 
     if (!status.isClean()) {
@@ -940,13 +1049,16 @@ export async function pullRepo(
     }
 
     const branch = status.current || 'main';
-    await git.fetch('origin');
 
     // Resolve the upstream ref to fast-forward against. Prefer the local
     // branch's tracking config; otherwise ask origin for its default branch.
     let tracking = status.tracking;
     if (!tracking) {
+      // No tracking config: fetch origin so its HEAD is known, then ask which
+      // branch it points at. This path only ever concerns origin — a branch with
+      // no upstream has no other remote to consult.
       try {
+        await git.fetch('origin');
         await git.raw(['remote', 'set-head', 'origin', '--auto']);
         const sym = await git.raw(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
         tracking = sym.trim();
@@ -954,6 +1066,24 @@ export async function pullRepo(
         tracking = `origin/${branch}`;
       }
     }
+
+    // Split the remote-tracking ref (<remote>/<branch>) into its parts and pull
+    // THOSE. Hardcoding 'origin' while comparing against `tracking` is how a
+    // branch tracking e.g. upstream/main silently 'succeeded': revparse saw a
+    // difference, the pull fetched origin/main (already current), and pullRepo
+    // returned success having moved nothing — the same "reported ok, pulled
+    // nothing" failure this change exists to remove. Branch names may contain
+    // slashes, so split on the FIRST separator only.
+    const sep = tracking.indexOf('/');
+    const remoteName = sep > 0 ? tracking.slice(0, sep) : 'origin';
+    const remoteBranch = sep > 0 ? tracking.slice(sep + 1) : branch;
+
+    // Bare fetch: updates every remote, so the revparse below sees a fresh ref
+    // whichever one the branch tracks. Deliberately argument-less — simple-git's
+    // fetchTask only forwards a remote when BOTH remote and branch are passed,
+    // so `fetch(remoteName)` would silently drop the argument and do exactly
+    // this anyway. Saying so beats an inert argument that reads as targeted.
+    await git.fetch();
 
     const localRef = await git.revparse(['HEAD']);
     const remoteRef = await git.revparse([tracking]).catch(() => null);
@@ -971,12 +1101,28 @@ export async function pullRepo(
     }
 
     try {
-      await git.merge(['--ff-only', tracking]);
-    } catch {
+      // Rebase, not --ff-only. Fast-forward refuses ANY divergence, conflict or
+      // not, so a single local commit permanently wedged the pull with nothing
+      // actually in conflict. Matches syncRepoGit (below) and this function's doc.
+      //
+      // Pull the RESOLVED tracking ref, not `branch`: when the local branch has
+      // no tracking config the block above falls back to origin's default head,
+      // which may be named differently (local `main` vs origin `master`). Using
+      // `branch` there asks origin for a ref it does not have.
+      assertValidBranchName(remoteBranch);
+      await git.pull(remoteName, remoteBranch, { '--rebase': 'true' });
+    } catch (err) {
+      // Abort so the tree is restored, matching the atomicity --ff-only gave us.
+      // Without this a conflict leaves the repo detached, mid-rebase, with
+      // conflict markers written into live config (this repo is ~/.agents —
+      // agents.yaml and AGENTS.md are in it), and every later pull misreports
+      // the cause. `agents sync` reaches this path unattended across the fleet,
+      // so a wedged checkout would be worse than the bug this fixes.
+      await git.raw(['rebase', '--abort']).catch(() => { /* not mid-rebase */ });
       return {
         success: false,
         commit: '',
-        error: `Blocked by local commits. Push or reset them before pulling.\n\n  cd ${displayHomePath(dir)} && git log --oneline HEAD...${tracking}`,
+        error: `Rebase onto ${tracking} hit a conflict — the pull was rolled back, nothing changed.\n\nResolve the divergence, then pull again:\n\n  cd ${displayHomePath(dir)} && git log --oneline HEAD...${tracking}\n\n${(err as Error).message}`,
       };
     }
 
@@ -1277,4 +1423,37 @@ export async function tryAutoPull(dir: string): Promise<{ pulled: boolean; error
   } catch (err) {
     return { pulled: false, error: (err as Error).message };
   }
+}
+
+/**
+ * How many commits `dir`'s checked-out branch is behind its upstream, read from
+ * the LAST-FETCHED remote-tracking ref — no network call. Returns null when the
+ * dir is not a git repo, has no upstream configured, or git errors.
+ *
+ * Used by `agents doctor` to flag a source layer (`~/.agents`, `~/.agents/.system`)
+ * that is reconciled against stale truth. Staleness relative to origin is a
+ * background auto-pull concern; this surfaces the same fact synchronously in the
+ * per-version verdict.
+ */
+export function commitsBehindUpstream(dir: string): { behind: number; branch: string } | null {
+  if (!isGitRepo(dir)) return null;
+  const run = (args: string[]): string | null => {
+    try {
+      return execFileSync('git', ['-C', dir, ...args], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        encoding: 'utf8',
+      }).trim();
+    } catch {
+      return null;
+    }
+  };
+  // Name of the upstream ref (e.g. `origin/main`) for the human-readable message.
+  const branch = run(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']);
+  if (!branch) return null;
+  // `--count HEAD..@{upstream}` = commits on upstream not yet in HEAD = behind.
+  const raw = run(['rev-list', '--count', 'HEAD..@{upstream}']);
+  if (raw === null) return null;
+  const behind = parseInt(raw, 10);
+  if (!Number.isFinite(behind)) return null;
+  return { behind, branch };
 }

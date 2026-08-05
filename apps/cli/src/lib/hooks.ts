@@ -14,10 +14,9 @@ import * as os from 'os';
 import * as path from 'path';
 import * as yaml from 'yaml';
 import * as TOML from 'smol-toml';
-import { AGENTS, ALL_AGENT_IDS, agentConfigDirName } from './agents.js';
+import { AGENTS, ALL_AGENT_IDS, agentConfigDirName, isAgentHardDeprecated } from './agents.js';
 import { supports, explainSkip, capableAgents } from './capabilities.js';
-import { setGeminiAutoUpdateDisabled, updateGeminiSettings } from './gemini-settings.js';
-import { getAgentsDir, getHooksDir as getSystemHooksDir, getUserHooksDir, getUserAgentsDir, getSystemAgentsDir, getProjectAgentsDir, getTrashHooksDir, getEnabledExtraRepos, getResolvedRulesDir, getUserRulesDir } from './state.js';
+import { getAgentsDir, getHooksDir as getSystemHooksDir, getUserHooksDir, getUserAgentsDir, getSystemAgentsDir, getProjectAgentsDir, getTrashHooksDir, getEnabledExtraRepos, getResolvedRulesDir, getUserRulesDir, getPerfDir } from './state.js';
 import { collectSubruleHooksFromState } from './rules/compose.js';
 
 function getCentralHooksDir(): string { return getUserHooksDir(); }
@@ -35,11 +34,66 @@ function resolveContainedHookPath(hooksRoot: string, script: string): string | n
   return resolved;
 }
 
+/**
+ * Subdirectories under hooks/ that group event families (e.g. session-starts/).
+ * Scripts one level down are first-class hooks; their install name remains the
+ * file basename so version-home copies stay flat and doctor/diff keep matching.
+ */
+const HOOK_GROUP_SKIP_DIRS = new Set(['node_modules', '.git', '.cache']);
+
 export function resolveHookScriptPath(script: string): string | null {
   const extraDirs = getEnabledExtraRepos().map(e => e.dir);
   for (const root of [getUserAgentsDir(), ...extraDirs, getSystemAgentsDir()]) {
-    const resolved = resolveContainedHookPath(path.join(root, 'hooks'), script);
+    const hooksRoot = path.join(root, 'hooks');
+    const resolved = resolveContainedHookPath(hooksRoot, script);
     if (resolved) return resolved;
+    // Basename fallback: manifests may say `session-starts/foo.sh` or just
+    // `foo.sh` while the file lives under a one-level group dir.
+    const base = path.basename(script);
+    const nested = findHookScriptInGroupDirs(hooksRoot, base);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+/**
+ * Find `basename` under hooks/<group>/ (one level). Skips known non-group dirs.
+ * Returns the first match in sorted group order for stability.
+ */
+function findHookScriptInGroupDirs(hooksRoot: string, basename: string): string | null {
+  if (!fs.existsSync(hooksRoot)) return null;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(hooksRoot).sort();
+  } catch {
+    return null;
+  }
+  for (const name of entries) {
+    if (name.startsWith('.') || HOOK_GROUP_SKIP_DIRS.has(name)) continue;
+    const groupDir = path.join(hooksRoot, name);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(groupDir);
+    } catch {
+      continue;
+    }
+    if (!st.isDirectory() || st.isSymbolicLink()) continue;
+    // Only treat dirs that themselves contain scripts as groups (session-starts/),
+    // not fixture-only directory bundles (tests/).
+    let hasScript = false;
+    try {
+      for (const child of fs.readdirSync(groupDir)) {
+        if (SCRIPT_EXTENSIONS.has(path.extname(child).toLowerCase())) {
+          const cp = path.join(groupDir, child);
+          if (fs.existsSync(cp) && fs.statSync(cp).isFile()) { hasScript = true; break; }
+        }
+      }
+    } catch {
+      continue;
+    }
+    if (!hasScript) continue;
+    const candidate = path.join(groupDir, basename);
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
   }
   return null;
 }
@@ -153,22 +207,160 @@ function isStaleSiblingVersionCommand(
   return id !== null && id.agent === current.agent && id.version !== current.version;
 }
 
-import { getEffectiveHome, getVersionHomePath, listInstalledVersions } from './versions.js';
+function hookResourceName(command: string): string {
+  const withoutArgs = command.trim().split(/\s+/)[0];
+  return path.basename(withoutArgs).replace(/\.[^.]+$/, '');
+}
+
+/**
+ * Collapse version-scoped registrations by logical resource identity rather
+ * than absolute command path. When the same resource is present in several
+ * homes, the active home's command wins even if it appears later. Commands
+ * outside version homes are user-owned and remain untouched.
+ */
+export function deduplicateVersionHookCommands(
+  commands: string[],
+  activeVersionHome: string,
+): string[] {
+  const active = versionHomeIdentity(activeVersionHome);
+  if (!active) return [...commands];
+
+  const selected = new Map<string, { command: string; active: boolean }>();
+  const passthrough: string[] = [];
+  for (const command of commands) {
+    const identity = versionHomeIdentity(command);
+    if (!identity || identity.agent !== active.agent) {
+      passthrough.push(command);
+      continue;
+    }
+    const key = `${identity.agent}\0${hookResourceName(command)}`;
+    const candidateIsActive = identity.version === active.version;
+    const prior = selected.get(key);
+    if (!prior || (!prior.active && candidateIsActive)) {
+      selected.set(key, { command, active: candidateIsActive });
+    }
+  }
+  return [...passthrough, ...Array.from(selected.values(), ({ command }) => command)];
+}
+
+/**
+ * Collapse a matcher group's hook entries down to the deduplicated command
+ * multiset {@link deduplicateVersionHookCommands} returns, preserving order and
+ * the concrete entry objects. The deduped list is honored as a per-command
+ * budget, NOT a membership set: two identical active-version entries collapse to
+ * one because the budget for that command is one. (A membership `Set.has` test
+ * would keep both — the bug this replaces.) Passthrough (user / non-version-home)
+ * commands keep their original multiplicity, so genuine user hooks are untouched.
+ */
+function collapseVersionHookEntries<T extends { command: string }>(
+  entries: T[],
+  activeVersionHome: string,
+): T[] {
+  const budget = new Map<string, number>();
+  for (const command of deduplicateVersionHookCommands(entries.map((e) => e.command), activeVersionHome)) {
+    budget.set(command, (budget.get(command) ?? 0) + 1);
+  }
+  return entries.filter((e) => {
+    const remaining = budget.get(e.command) ?? 0;
+    if (remaining <= 0) return false;
+    budget.set(e.command, remaining - 1);
+    return true;
+  });
+}
+
+import { getEffectiveHome, getVersionHomePath, listInstalledVersions, resolveVersion } from './versions.js';
 import type { AgentId, InstalledHook, ManifestHook } from './types.js';
-import { generateHookShim, isValidHookShimName, parseCacheConfig, removeHookShim } from './hooks/cache.js';
+import { generateHookShim, getHookShimPath, isValidHookShimName, parseCacheConfig, removeHookShim } from './hooks/cache.js';
 import { getHookShimsDir } from './state.js';
 
 export type HookEntry = { name: string; scriptPath: string; dataFile?: string };
 
+export interface VersionHookCopy {
+  agent: AgentId;
+  version: string;
+  name: string;
+  path: string;
+  hash: string;
+  active: boolean;
+}
+
+export interface DuplicateVersionHook {
+  agent: AgentId;
+  name: string;
+  kind: 'duplicate' | 'drift';
+  authoritative: VersionHookCopy;
+  copies: VersionHookCopy[];
+}
+
+function hookContentHash(scriptPath: string): string {
+  return crypto.createHash('sha256').update(fs.readFileSync(scriptPath)).digest('hex');
+}
+
+/**
+ * Inspect every installed hooks-capable harness without assuming a native
+ * settings format. Same-name copies with one content hash are installation
+ * noise; multiple hashes are drift. The active version is always selected as
+ * the authoritative copy when it participates in the group.
+ */
+export function inspectDuplicateVersionHooks(cwd = process.cwd()): DuplicateVersionHook[] {
+  const byResource = new Map<string, VersionHookCopy[]>();
+  for (const { agent, version } of iterHooksCapableVersions()) {
+    const activeVersion = resolveVersion(agent, cwd);
+    for (const entry of listHooksInVersionHome(agent, version)) {
+      let hash: string;
+      try {
+        hash = hookContentHash(entry.scriptPath);
+      } catch {
+        continue;
+      }
+      const copy: VersionHookCopy = {
+        agent,
+        version,
+        name: entry.name,
+        path: entry.scriptPath,
+        hash,
+        active: version === activeVersion,
+      };
+      const key = `${agent}\0${entry.name}`;
+      const copies = byResource.get(key) ?? [];
+      copies.push(copy);
+      byResource.set(key, copies);
+    }
+  }
+
+  const findings: DuplicateVersionHook[] = [];
+  for (const copies of byResource.values()) {
+    if (copies.length < 2) continue;
+    copies.sort((a, b) => a.version.localeCompare(b.version, undefined, { numeric: true }));
+    const authoritative = copies.find((copy) => copy.active) ?? copies[copies.length - 1];
+    findings.push({
+      agent: authoritative.agent,
+      name: authoritative.name,
+      kind: new Set(copies.map((copy) => copy.hash)).size === 1 ? 'duplicate' : 'drift',
+      authoritative,
+      copies,
+    });
+  }
+  return findings.sort((a, b) => `${a.agent}/${a.name}`.localeCompare(`${b.agent}/${b.name}`));
+}
+
 /**
  * Resolve the command path to register for a hook.
  *
- * Returns either the raw script path (neither `cache:` nor `matches:` set,
- * legacy behavior) or the path to a generated wrapper shim. The shim is written
- * as a side effect when `cache:` and/or `matches:` is configured — it enforces
- * the `matches:` gate at fire time and layers the caching/timing machinery when
- * `cache:` is set. The agent-native settings file gets the same shape either
- * way — just a different command path.
+ * Returns either the raw script path (no `cache:`, `matches:`, or `matcher:`
+ * set — a bare lifecycle hook with nothing to gate or time) or the path to a
+ * generated wrapper shim. The shim is written as a side effect when `cache:`
+ * and/or `matches:` is configured — it enforces the `matches:` gate at fire
+ * time and layers the caching/timing machinery when `cache:` is set.
+ *
+ * A hook that declares only `matcher:` (e.g. git-guard/rm-guard scoped to the
+ * `Bash` tool, no `cache:`/`matches:`) also gets a shim now — a pass-through
+ * one with no gate and no cache, whose only job is the trailing timing sample
+ * (see PASSTHROUGH_TAIL in hooks/cache.ts). Before this, a matcher-only hook
+ * took the raw-path branch and fired completely uninstrumented: `agents perf
+ * hooks` showed zero samples for it no matter how often it ran. The agent-
+ * native settings file gets the same shape either way — just a different
+ * command path.
  */
 function resolveHookCommand(
   name: string,
@@ -181,17 +373,20 @@ function resolveHookCommand(
   const cache = parseCacheConfig(hookDef.cache);
   const matches = hookDef.matches;
   const hasMatches = matches != null && Object.keys(matches).length > 0;
-  if (!cache && !hasMatches) {
-    // No caching and no matches: gate opted in — make sure a previously
-    // generated shim from an earlier `cache:`/`matches:` config is gone so the
-    // JSONL doesn't keep claiming hits.
+  const hasMatcher = !!hookDef.matcher;
+  if (!cache && !hasMatches && !hasMatcher) {
+    // Nothing to gate, cache, or time: make sure a previously generated shim
+    // from an earlier cache:/matches:/matcher config is gone so the JSONL
+    // doesn't keep claiming hits.
     removeHookShim(name);
     return toPortableCommand(scriptPath);
   }
-  // A shim is generated when the hook opts into caching and/or declares
-  // `matches:` predicates. The shim enforces the `matches:` gate at fire time
-  // (skipping the script when predicates don't hold) and, when `cache:` is set,
-  // layers the cache/timing machinery on top.
+  // A shim is generated when the hook opts into caching, declares `matches:`
+  // predicates, or declares a `matcher:` (even alone — see the doc comment
+  // above). The shim enforces the `matches:` gate at fire time (skipping the
+  // script when predicates don't hold) and, when `cache:` is set, layers the
+  // cache/timing machinery on top; with neither, it is a pure pass-through
+  // timing wrapper.
   return toPortableCommand(generateHookShim({ name, scriptPath, cache, matches }));
 }
 
@@ -289,15 +484,18 @@ function removeHookFiles(dir: string, name: string): void {
 }
 
 /**
- * List hook entries in a single directory, grouping script + data files by
- * basename. Exported so doctor-diff can reuse the same grouping the sync path
- * applies; without this, doctor would double-count `foo.sh` and `foo.yaml`.
+ * Collect hook-adjacent files from a hooks root: top-level files plus files in
+ * one-level group subdirs (e.g. hooks/session-starts/*.sh). Group dirs exist
+ * only for layout; the install/list name stays the file basename so sync and
+ * doctor keep a flat version-home model.
  */
-export function listHookEntriesFromDir(dir: string): HookEntry[] {
-  if (!fs.existsSync(dir)) {
-    return [];
-  }
-
+function collectHookFilesFromRoot(dir: string): {
+  name: string;
+  base: string;
+  ext: string;
+  fullPath: string;
+  isExec: boolean;
+}[] {
   const files: {
     name: string;
     base: string;
@@ -306,30 +504,105 @@ export function listHookEntriesFromDir(dir: string): HookEntry[] {
     isExec: boolean;
   }[] = [];
 
-  for (const file of fs.readdirSync(dir)) {
-    const fullPath = path.join(dir, file);
-    const stat = fs.statSync(fullPath);
-    if (!stat.isFile()) continue;
-    const ext = path.extname(file);
-    const base = path.basename(file, ext);
+  const pushFile = (fullPath: string, fileName: string, mode: number) => {
+    const ext = path.extname(fileName);
+    const base = path.basename(fileName, ext);
     files.push({
-      name: file,
+      name: fileName,
       base,
       ext,
       fullPath,
-      isExec: isExecutable(stat.mode),
+      isExec: isExecutable(mode),
     });
+  };
+
+  let top: string[];
+  try {
+    top = fs.readdirSync(dir);
+  } catch {
+    return files;
   }
 
-  const grouped = new Map<string, typeof files>();
+  for (const file of top) {
+    if (file.startsWith('.')) continue;
+    const fullPath = path.join(dir, file);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(fullPath);
+    } catch {
+      continue;
+    }
+    if (stat.isSymbolicLink()) continue;
+    if (stat.isFile()) {
+      pushFile(fullPath, file, stat.mode);
+      continue;
+    }
+    if (!stat.isDirectory() || HOOK_GROUP_SKIP_DIRS.has(file)) continue;
+    // One-level event-group layout: hooks/<group>/<script>. Only dirs that
+    // contain top-level scripts are groups; fixture-only dirs (tests/) are not.
+    let nested: string[];
+    try {
+      nested = fs.readdirSync(fullPath);
+    } catch {
+      continue;
+    }
+    const nestedFiles: { nestedName: string; nestedPath: string; mode: number }[] = [];
+    let hasScript = false;
+    for (const nestedName of nested) {
+      if (nestedName.startsWith('.')) continue;
+      const nestedPath = path.join(fullPath, nestedName);
+      let nstat: fs.Stats;
+      try {
+        nstat = fs.lstatSync(nestedPath);
+      } catch {
+        continue;
+      }
+      if (nstat.isSymbolicLink() || !nstat.isFile()) continue;
+      nestedFiles.push({ nestedName, nestedPath, mode: nstat.mode });
+      if (SCRIPT_EXTENSIONS.has(path.extname(nestedName).toLowerCase())) hasScript = true;
+    }
+    if (!hasScript) continue;
+    for (const n of nestedFiles) pushFile(n.nestedPath, n.nestedName, n.mode);
+  }
+  return files;
+}
+
+/**
+ * List hook entries in a single directory, grouping script + data files by
+ * basename. Also discovers scripts in one-level group subdirs
+ * (hooks/session-starts/). Exported so doctor-diff can reuse the same grouping
+ * the sync path applies; without this, doctor would double-count `foo.sh` and
+ * `foo.yaml`. On basename collision, the top-level file wins over a nested one.
+ */
+export function listHookEntriesFromDir(dir: string): HookEntry[] {
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
+
+  const files = collectHookFilesFromRoot(dir);
+
+  // Prefer top-level over nested when basenames collide (stable install name).
+  const byBase = new Map<string, typeof files>();
   for (const file of files) {
-    const list = grouped.get(file.base) || [];
-    list.push(file);
-    grouped.set(file.base, list);
+    const list = byBase.get(file.base) || [];
+    // Top-level files sit directly under dir; nested have an extra path segment.
+    const isTop = path.dirname(file.fullPath) === path.resolve(dir);
+    if (isTop) list.unshift(file);
+    else list.push(file);
+    byBase.set(file.base, list);
   }
 
   const entries: HookEntry[] = [];
-  for (const [base, group] of grouped) {
+  for (const [base, groupAll] of byBase) {
+    // Keep only files that share the winning script's directory so a nested
+    // data sidecar next to a nested script still pairs, and a top-level
+    // winner is not paired with a nested yaml of the same basename.
+    const winnerScript =
+      groupAll.find((f) => SCRIPT_EXTENSIONS.has(f.ext.toLowerCase())) ||
+      groupAll.find((f) => f.isExec && !NON_SCRIPT_EXTENSIONS.has(f.ext.toLowerCase()));
+    if (!winnerScript) continue;
+    const groupDir = path.dirname(winnerScript.fullPath);
+    const group = groupAll.filter((f) => path.dirname(f.fullPath) === groupDir);
     group.sort((a, b) => a.name.localeCompare(b.name));
     // A group is a hook only if it has an actual script: a script extension,
     // OR an executable bit on a file whose extension is not a known data /
@@ -556,6 +829,154 @@ export function getVersionHooksDir(agent: AgentId, version: string): string {
  */
 export function listHooksInVersionHome(agent: AgentId, version: string): HookEntry[] {
   return listHookEntriesFromDir(getVersionHooksDir(agent, version));
+}
+
+// ─── wiring inspection (settings.json family: claude, droid) ──────────────────
+
+/**
+ * Agents whose hooks register through {@link registerHooksForClaude} — a native
+ * settings.json shaped `hooks[event] = [{ matcher, hooks: [{ command }] }]`, with
+ * no event renaming. These are the only agents this read-only wiring inspector
+ * understands; every other harness uses a divergent config format and/or event
+ * map (Gemini/Antigravity settings.json variants, Codex config.toml, the OpenCode
+ * plugin, …), so it reports them unsupported rather than risk a false verdict.
+ */
+const SETTINGS_JSON_HOOK_FAMILY: readonly AgentId[] = ['claude', 'droid'];
+
+export interface HookWiringIssue {
+  /** Hook name (script basename minus extension). */
+  name: string;
+  /** Native lifecycle event the hook should be wired to (Stop, PreToolUse, …). */
+  event: string;
+  /** Matcher group the hook belongs to under `event` (`''` = the catch-all
+   *  group). Real hooks scope by matcher — ask-user-question-guard=AskUserQuestion,
+   *  user-message-guard=Bash — so wiring is verified per (event, matcher). */
+  matcher: string;
+  /** The command settings.json should reference for this hook under `event`. */
+  command: string;
+}
+
+export interface HookWiringReport {
+  /** Whether this agent's hook config format is understood by the inspector. */
+  supported: boolean;
+  /** Absolute path of the settings file inspected (when supported). */
+  settingsPath?: string;
+  /** Number of hooks the manifest says should be wired for this version. */
+  expected?: number;
+  /** settings.json does not exist — nothing declared can be wired. */
+  settingsMissing?: boolean;
+  /** settings.json exists but is not valid JSON — wiring can't be verified. */
+  settingsUnparseable?: boolean;
+  /** Hooks whose file is present/resolvable but that are NOT referenced in the
+   *  event array settings.json should carry them in. */
+  unwired: HookWiringIssue[];
+}
+
+/**
+ * Verify that every hook the manifest says should be wired for a (claude|droid)
+ * version is actually REFERENCED in that version's native settings.json — not
+ * merely present as a file on disk.
+ *
+ * `agents doctor` compares hook FILES against source (see diffHooks in
+ * doctor-diff.ts) but never checks the wiring, so a hook whose script is
+ * byte-identical to source yet missing from settings.json's PreToolUse/Stop/…
+ * array reads as "ok" while it never fires. This closes that blind spot.
+ *
+ * Read-only by construction: it mirrors registerHooksForClaude's command
+ * resolution WITHOUT the shim-generation / chmod side effects that
+ * resolveHookCommand performs, so it never mutates the version home.
+ */
+export function checkVersionHookWiring(agent: AgentId, version: string): HookWiringReport {
+  if (!AGENTS[agent].supportsHooks || !SETTINGS_JSON_HOOK_FAMILY.includes(agent)) {
+    return { supported: false, unwired: [] };
+  }
+
+  const versionHome = getVersionHomePath(agent, version);
+  const settingsPath = path.join(versionHome, agentConfigDirName(agent), 'settings.json');
+  const localHooksDir = getVersionHooksDir(agent, version);
+
+  // Resolve ONLY to a script that was actually synced for THIS agent+version: the
+  // copy in the version home hooks dir, or an absolute subrule-dir path (those are
+  // registered in place, never copied). Deliberately NO central-source fallback —
+  // sync wires `selectHookManifest(parseHookManifest(), hooksToSync)` where
+  // hooksToSync is the per-agent selected set (versions.ts), so a hook the manifest
+  // declares but that was never synced into THIS version home (e.g. a claude-scoped
+  // hook viewed for droid) must not be expected here. A missing-but-declared hook
+  // is a FILE gap that diffHooks reports as `missing`, not a wiring gap.
+  // No ensureExecutable — that chmods, and this path must not touch disk.
+  const resolveScript = (script: string): string | null => {
+    if (path.isAbsolute(script) && fs.existsSync(script)) return script;
+    return resolveContainedHookPath(localHooksDir, script);
+  };
+  // Read-only mirror of resolveHookCommand — same command string, no shim write.
+  const expectedCommand = (name: string, hookDef: ManifestHook): string | null => {
+    const scriptPath = resolveScript(hookDef.script);
+    if (!scriptPath) return null;
+    if (!isValidHookShimName(name)) return null;
+    const cache = parseCacheConfig(hookDef.cache);
+    const hasMatches = hookDef.matches != null && Object.keys(hookDef.matches).length > 0;
+    if (!cache && !hasMatches && !hookDef.matcher) return toPortableCommand(scriptPath);
+    return toPortableCommand(getHookShimPath(name));
+  };
+
+  const manifest = parseHookManifest({ warn: false });
+  const expected: HookWiringIssue[] = [];
+  for (const [name, hookDef] of Object.entries(manifest)) {
+    if (!hookDef.events || hookDef.events.length === 0) continue;
+    const command = expectedCommand(name, hookDef);
+    if (!command) continue; // script unresolved — a file gap, reported by diffHooks
+    // Mirror registerHooksForClaude: a hook registers under the matcher group
+    // `hookDef.matcher || ''` for each of its events.
+    const matcher = hookDef.matcher || '';
+    for (const event of hookDef.events) expected.push({ name, event, matcher, command });
+  }
+
+  if (!fs.existsSync(settingsPath)) {
+    return {
+      supported: true,
+      settingsPath,
+      expected: expected.length,
+      settingsMissing: expected.length > 0,
+      unwired: [],
+    };
+  }
+  let config: Record<string, unknown>;
+  try {
+    config = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+  } catch {
+    return {
+      supported: true,
+      settingsPath,
+      expected: expected.length,
+      settingsUnparseable: true,
+      unwired: [],
+    };
+  }
+
+  // Command strings actually referenced, keyed by (event, matcher) — a hook wired
+  // under the WRONG matcher group must NOT read as wired, so scope by matcher and
+  // not just by event.
+  const wiredByGroup = new Map<string, Set<string>>();
+  const groupKey = (event: string, matcher: string): string => `${event}\n${matcher}`;
+  const hooks = config.hooks && typeof config.hooks === 'object'
+    ? (config.hooks as Record<string, unknown>)
+    : {};
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups as Array<{ matcher?: unknown; hooks?: Array<{ command?: unknown }> }>) {
+      if (!group || !Array.isArray(group.hooks)) continue;
+      const matcher = typeof group.matcher === 'string' ? group.matcher : '';
+      const key = groupKey(event, matcher);
+      let cmds = wiredByGroup.get(key);
+      if (!cmds) { cmds = new Set<string>(); wiredByGroup.set(key, cmds); }
+      for (const h of group.hooks) {
+        if (h && typeof h.command === 'string') cmds.add(h.command);
+      }
+    }
+  }
+
+  const unwired = expected.filter((e) => !wiredByGroup.get(groupKey(e.event, e.matcher))?.has(e.command));
+  return { supported: true, settingsPath, expected: expected.length, unwired };
 }
 
 /**
@@ -840,13 +1261,52 @@ export function listCentralHooks(): HookEntry[] {
 }
 
 /**
+ * Normalize a hook `timeout` from agents.yaml into a whole number of seconds.
+ *
+ * A bare number stays seconds (`timeout: 30` → 30) for backward compatibility.
+ * A Go-style duration string is parsed into seconds: `5s`, `2m`, `1h30m`,
+ * `90s`, `1h`. This intentionally does NOT reuse {@link parseTimeout} from
+ * routines.ts — that one returns milliseconds, has no seconds (`s`) unit, and
+ * floors at one minute, none of which fit hook timeouts (typically 5–600s).
+ *
+ * Returns the seconds value, or `null` when the input is not a positive number
+ * or a parseable duration string — the caller decides how to surface that.
+ */
+export function normalizeHookTimeoutSeconds(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value > 0 ? value : null;
+  }
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (s === '') return null;
+    // A bare integer string means seconds, matching the bare-number form.
+    if (/^\d+$/.test(s)) {
+      const n = Number(s);
+      return n > 0 ? n : null;
+    }
+    const m = s.match(/^(?:(\d+)w)?(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/i);
+    if (!m) return null;
+    const weeks = Number(m[1] || 0);
+    const days = Number(m[2] || 0);
+    const hours = Number(m[3] || 0);
+    const minutes = Number(m[4] || 0);
+    const seconds = Number(m[5] || 0);
+    const total = ((weeks * 7 + days) * 24 + hours) * 3600 + minutes * 60 + seconds;
+    return total > 0 ? total : null;
+  }
+  return null;
+}
+
+/**
  * Parse hook manifests. Reads system hooks from ~/.agents/.system/hooks.yaml
  * (npm-shipped defaults) and user hooks from the `hooks:` section of
  * ~/.agents/agents.yaml. Merges with user-wins-on-key-collision precedence.
  * A user entry with `enabled: false` disables the system-shipped hook of
  * the same name without forking the system file.
  *
- * Hooks marked `enabled: false` are dropped from the returned map.
+ * Hooks marked `enabled: false` are dropped from the returned map. A hook
+ * `timeout` written as a duration string (`5s`, `2m`) is normalized to a
+ * seconds number here, so every downstream serializer keeps reading a number.
  */
 export function parseHookManifest(opts: { warn?: boolean } = {}): Record<string, ManifestHook> {
   const warn = opts.warn !== false;
@@ -909,6 +1369,28 @@ export function parseHookManifest(opts: { warn?: boolean } = {}): Record<string,
   for (const [name, def] of Object.entries(merged)) {
     if (def.enabled === false) delete merged[name];
   }
+
+  // Normalize each surviving hook's timeout to a seconds number, so the raw
+  // agents.yaml can express it as a duration string (`5s`, `2m`) while every
+  // downstream serializer keeps consuming a plain number. An unparseable value
+  // is dropped with a warning rather than silently coerced to a wrong duration.
+  for (const [name, def] of Object.entries(merged)) {
+    const raw = (def as { timeout?: unknown }).timeout;
+    if (raw === undefined) continue;
+    const seconds = normalizeHookTimeoutSeconds(raw);
+    if (seconds === null) {
+      if (warn) {
+        console.warn(
+          `[agents hooks] Hook '${name}' has an invalid timeout ${JSON.stringify(raw)}; ` +
+          `expected seconds or a duration string like '5s', '2m', '1h30m'. Ignoring it.`,
+        );
+      }
+      delete def.timeout;
+    } else {
+      def.timeout = seconds;
+    }
+  }
+
   return merged;
 }
 
@@ -1074,6 +1556,9 @@ export function registerHooksToSettings(
   hookManifest?: Record<string, ManifestHook>,
   agentsDirOverride?: string
 ): { registered: string[]; errors: string[] } {
+  if (isAgentHardDeprecated(agentId)) {
+    return { registered: [], errors: [] };
+  }
   const manifest = hookManifest || parseHookManifest();
   if (Object.keys(manifest).length === 0) {
     if (agentId === 'opencode') {
@@ -1105,13 +1590,27 @@ export function registerHooksToSettings(
       return resolveContainedHookPath(path.join(overrideRoots[0], 'hooks'), script);
     }
     if (localHooksDir) {
-      const local = resolveContainedHookPath(localHooksDir, script);
+      // Prefer the exact relative path, then a flat basename copy (sync flattens
+      // group-dir scripts into the version-home hooks/ root).
+      const local =
+        resolveContainedHookPath(localHooksDir, script) ||
+        resolveContainedHookPath(localHooksDir, path.basename(script));
       if (local) return local;
     }
     return resolveHookScriptPath(script);
   };
   const managedPrefixes = overrideRoots
-    ? [path.join(overrideRoots[0], 'hooks') + path.sep]
+    ? [
+        path.join(overrideRoots[0], 'hooks') + path.sep,
+        // The shim dir is one global location regardless of which hooks
+        // source (agentsDirOverride vs the normal user/system dirs) resolved
+        // the underlying script, so it belongs in every managedPrefixes
+        // shape — omitting it here left a shim path unrecognized as managed
+        // under the override branch, so a hook's matcher/event change never
+        // GC'd its stale shim-path entry (only reachable via a caller that
+        // passes agentsDirOverride; no production call site does today).
+        getHookShimsDir() + path.sep,
+      ]
     : [
         ...getManagedHookPrefixes(),
         ...(localHooksDir ? [localHooksDir + path.sep] : []),
@@ -1138,9 +1637,6 @@ export function registerHooksToSettings(
   }
   if (agentId === 'codex') {
     return registerHooksForCodex(versionHome, manifest, resolveScript, managedPrefixes);
-  }
-  if (agentId === 'gemini') {
-    return registerHooksForGemini(versionHome, manifest, resolveScript, managedPrefixes);
   }
   if (agentId === 'antigravity') {
     return registerHooksForAntigravity(versionHome, manifest, resolveScript, managedPrefixes);
@@ -1245,9 +1741,42 @@ function registerHooksForOpenCode(
 
   const serializedDirect = JSON.stringify(Object.fromEntries(direct), null, 2);
   const serializedLifecycle = JSON.stringify(Object.fromEntries(lifecycle), null, 2);
+  // Same disposable perf spool the bash shims (hooks/cache.ts) append to — see
+  // the timedOut branch below for why OpenCode needs its own writer.
+  const perfSpoolPath = path.join(getPerfDir(), 'spool.jsonl');
   const pluginSource = `// Generated by agents-cli. Re-run agents sync to update.
+import fs from "node:fs"
+import os from "node:os"
+
 const directHooks = ${serializedDirect}
 const lifecycleHooks = ${serializedLifecycle}
+const PERF_SPOOL = ${JSON.stringify(perfSpoolPath)}
+
+function recordTimeoutSample(hook, payload) {
+  // hook.command already ran through a generated shim (hooks/cache.ts) that
+  // writes its own hook.fire sample on exit — but Bun.spawn's child.kill()
+  // below (SIGTERM) tears the shim down before it reaches that trailing
+  // printf, so a timed-out fire would otherwise leave ZERO trace in the
+  // warehouse. Write the sample ourselves from the side that knows it timed out.
+  try {
+    fs.mkdirSync(PERF_SPOOL.slice(0, PERF_SPOOL.lastIndexOf("/")), { recursive: true })
+    const line = JSON.stringify({
+      ts_ms: Date.now(),
+      kind: "hook.fire",
+      label: hook.name,
+      duration_ms: hook.timeout * 1000,
+      cache: "none",
+      exit_code: null,
+      status: "timeout",
+      cwd: payload && typeof payload.cwd === "string" ? payload.cwd : undefined,
+      session_id: payload && typeof payload.session_id === "string" ? payload.session_id : undefined,
+      hostname: (() => { try { return os.hostname() } catch { return "unknown" } })(),
+    }) + "\\n"
+    fs.appendFileSync(PERF_SPOOL, line)
+  } catch {
+    // best effort — never let sample recording break the timeout error path
+  }
+}
 
 function matches(hook, tool) {
   if (!hook.matcher) return true
@@ -1287,6 +1816,7 @@ async function runHooks(hooks, payload, $, matchTool = false) {
       const exitCode = await child.exited.finally(() => clearTimeout(timer))
       const stderr = await new Response(child.stderr).text()
       if (timedOut) {
+        recordTimeoutSample(hook, payload)
         throw new Error(\`\${hook.name} timed out after \${hook.timeout} seconds\`)
       }
       if (exitCode !== 0) {
@@ -1344,17 +1874,6 @@ const ANTIGRAVITY_EVENT_MAP: Record<string, string> = {
   OnError: 'on_error',
 };
 
-/**
- * Gemini has no native UserPromptSubmit event — map it to BeforeAgent,
- * the closest lifecycle phase that fires before the model sees the prompt.
- * Note: gemini's BeforeAgent can only APPEND via additionalContext — it
- * cannot replace the prompt. The hook script branches on caller to emit
- * the correct protocol.
- */
-const GEMINI_EVENT_MAP: Record<string, string> = {
-  UserPromptSubmit: 'BeforeAgent',
-};
-
 function registerHooksForClaude(
   versionHome: string,
   manifest: Record<string, ManifestHook>,
@@ -1410,11 +1929,12 @@ function registerHooksForClaude(
       hooks?: Array<{ type: string; command: string; timeout?: number }>;
     }>) {
       if (!group.hooks) continue;
-      group.hooks = group.hooks.filter(
+      const managed = group.hooks.filter(
         (h) =>
           (!isManagedHookCommand(h.command, managedPrefixes) || currentManifestPaths.has(h.command)) &&
           !isStaleSiblingVersionCommand(h.command, currentVh)
       );
+      group.hooks = collapseVersionHookEntries(managed, versionHome);
     }
   }
 
@@ -1588,13 +2108,21 @@ function registerHooksForCodex(
     if (resolved) currentManifestPaths.add(resolved);
   }
 
+  // Identity of the version home being synced. Codex stores hooks in a shared
+  // hooks.json per CODEX_HOME, but agents-cli registers version-scoped command
+  // paths; without this, old version entries keep firing after upgrades.
+  const currentVh = versionHomeIdentity(versionHome);
+
   // Remove stale entries from all event groups
   for (const eventGroups of Object.values(hooksFile.hooks)) {
     for (const group of eventGroups) {
       if (!group.hooks) continue;
-      group.hooks = group.hooks.filter(
-        (h) => !isManagedHookCommand(h.command, managedPrefixes) || currentManifestPaths.has(h.command)
+      const managed = group.hooks.filter(
+        (h) =>
+          (!isManagedHookCommand(h.command, managedPrefixes) || currentManifestPaths.has(h.command)) &&
+          !isStaleSiblingVersionCommand(h.command, currentVh)
       );
+      group.hooks = collapseVersionHookEntries(managed, versionHome);
     }
   }
   for (const [event, eventGroups] of Object.entries(hooksFile.hooks)) {
@@ -1645,7 +2173,8 @@ function registerHooksForCodex(
       }
 
       const existingIdx = group.hooks.findIndex((h) => h.command === commandPath);
-      const hookEntry = { type: 'command', command: commandPath, timeout };
+      const eventTimeout = event === 'SessionEnd' ? Math.min(timeout, 3) : timeout;
+      const hookEntry = { type: 'command', command: commandPath, timeout: eventTimeout };
 
       if (existingIdx >= 0) {
         group.hooks[existingIdx] = hookEntry;
@@ -1745,103 +2274,6 @@ function registerHooksForCodex(
     fs.writeFileSync(configPath, TOML.stringify(tomlConfig as Parameters<typeof TOML.stringify>[0]), 'utf-8');
   } catch (err) {
     errors.push(`Failed to update config.toml: ${(err as Error).message}`);
-  }
-
-  return { registered, errors };
-}
-
-function registerHooksForGemini(
-  versionHome: string,
-  manifest: Record<string, ManifestHook>,
-  resolveScript: (script: string) => string | null,
-  managedPrefixes: string[]
-): { registered: string[]; errors: string[] } {
-  const registered: string[] = [];
-  const errors: string[] = [];
-
-  const settingsPath = path.join(versionHome, '.gemini', 'settings.json');
-  try {
-    updateGeminiSettings(settingsPath, (config) => {
-      setGeminiAutoUpdateDisabled(config);
-
-      if (!config.hooks || typeof config.hooks !== 'object') {
-        config.hooks = {};
-      }
-      const hooks = config.hooks as Record<string, unknown[]>;
-
-      const currentManifestPaths = new Set<string>();
-      for (const [hookName, hookDef] of Object.entries(manifest)) {
-        if (!hookDef.events || hookDef.events.length === 0) continue;
-        const resolved = resolveHookCommand(hookName, hookDef, resolveScript);
-        if (resolved) currentManifestPaths.add(resolved);
-      }
-
-      for (const eventEntries of Object.values(hooks)) {
-        if (!Array.isArray(eventEntries)) continue;
-        for (const group of eventEntries as Array<{
-          hooks?: Array<{ type: string; command: string; timeout?: number }>;
-        }>) {
-          if (!group.hooks) continue;
-          group.hooks = group.hooks.filter(
-            (h) => !isManagedHookCommand(h.command, managedPrefixes) || currentManifestPaths.has(h.command)
-          );
-        }
-      }
-      for (const [event, eventEntries] of Object.entries(hooks)) {
-        if (!Array.isArray(eventEntries)) continue;
-        hooks[event] = (eventEntries as Array<{ hooks?: unknown[] }>).filter(
-          (g) => g.hooks && g.hooks.length > 0
-        );
-      }
-
-      for (const [name, hookDef] of Object.entries(manifest)) {
-        if (!hookDef.events || hookDef.events.length === 0) continue;
-
-        const commandPath = resolveHookCommand(name, hookDef, resolveScript);
-        if (!commandPath) {
-          errors.push(`${name}: script not found in user or system hooks dir`);
-          continue;
-        }
-
-        const timeoutMs = (hookDef.timeout || 600) * 1000;
-
-        for (const event of hookDef.events) {
-          const geminiEvent = GEMINI_EVENT_MAP[event] ?? event;
-
-          if (!hooks[geminiEvent]) {
-            hooks[geminiEvent] = [];
-          }
-
-          const eventEntries = hooks[geminiEvent] as Array<{
-            matcher?: string;
-            hooks?: Array<{ name?: string; type: string; command: string; timeout?: number }>;
-          }>;
-
-          const matcher = hookDef.matcher || '';
-          let matcherGroup = eventEntries.find((e) => (e.matcher || '') === matcher);
-          if (!matcherGroup) {
-            matcherGroup = { matcher, hooks: [] };
-            eventEntries.push(matcherGroup);
-          }
-          if (!matcherGroup.hooks) {
-            matcherGroup.hooks = [];
-          }
-
-          const existingIdx = matcherGroup.hooks.findIndex((h) => h.command === commandPath);
-          const hookEntry = { name, type: 'command' as const, command: commandPath, timeout: timeoutMs };
-
-          if (existingIdx >= 0) {
-            matcherGroup.hooks[existingIdx] = hookEntry;
-          } else {
-            matcherGroup.hooks.push(hookEntry);
-          }
-
-          registered.push(`${name} -> ${geminiEvent}`);
-        }
-      }
-    });
-  } catch (err) {
-    errors.push(`Failed to write gemini settings.json: ${(err as Error).message}`);
   }
 
   return { registered, errors };

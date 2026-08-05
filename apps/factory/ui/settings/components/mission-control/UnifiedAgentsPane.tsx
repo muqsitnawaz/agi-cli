@@ -32,7 +32,7 @@ import { BacklogCenter } from './BacklogCenter'
 import { PrBoardPane } from './PrBoardPane'
 import { buildPrBoard, collectPrUrls, type PrStatusLike } from './prBoardModel'
 import { RecapPane } from './RecapPane'
-import { buildRecap } from './recapModel'
+import { buildRecap, type RecapForkEdge } from './recapModel'
 import { TaskDetail } from '../bench/TaskDetail'
 import type { FlatTask } from '../bench/TaskCard'
 import { TicketDetail } from './TicketDetail'
@@ -45,9 +45,11 @@ import {
   clusterByQuestion,
   sortAgents,
   groupAgents,
+  partitionFloorAgents,
   sessionTaskLine,
   ticketWorkers,
   projectRollups,
+  visibleFloorAgents,
   type FloorAgent,
   type FloorAttachment,
   type FloorTicket,
@@ -89,12 +91,12 @@ import type {
 
 const FLOOR_PREFS_KEY = 'swarmify.floorPrefs.v1'
 
-// Two-tier refresh of cross-host sessions. Local (this-mac, no SSH) is cheap → fast;
-// the remote SSH fan-out is expensive → slow. Both are visibility-gated. Local tab
-// agents already stream via the extension's fs.watch push, so these only drive the
-// remote + cross-window rows that the one-shot mount fetch used to leave frozen.
-const LOCAL_POLL_MS = 3_000
-const REMOTE_POLL_MS = 45_000
+// Floor session refresh is event-driven + manual — no recurring local/remote
+// polling (issue #2030). Local tab agents stream via the extension's monitor /
+// webview pushes; remote rows refresh when the operator clicks the freshness
+// chip (or on the one-shot seed when the panel becomes visible).
+export { REMOTE_STALE_MS, THROUGHPUT_TICK_MS } from './floorRefresh'
+import { REMOTE_STALE_MS, THROUGHPUT_TICK_MS } from './floorRefresh'
 
 interface FloorPrefs {
   plain: boolean
@@ -324,11 +326,22 @@ function statusLabel(status: UnifiedAgent['status']): string {
   return status
 }
 
-// Throughput counter -- live pulsing sparkline for LLM output tok/s
+// Throughput counter — data tick once per second; CSS transitions interpolate
+// bar heights. No 140ms React state churn (issue #2030 / floor performance).
 export function ThroughputCounter({ tokensPerSec }: { tokensPerSec: number }) {
   const BAR_COUNT = 24
   const [bars, setBars] = useState<number[]>(() => Array(BAR_COUNT).fill(0))
   const [displayValue, setDisplayValue] = useState(tokensPerSec)
+  const prefersReducedMotion = useRef(false)
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+    prefersReducedMotion.current = mq.matches
+    const onChange = () => { prefersReducedMotion.current = mq.matches }
+    mq.addEventListener?.('change', onChange)
+    return () => mq.removeEventListener?.('change', onChange)
+  }, [])
 
   useEffect(() => {
     if (tokensPerSec <= 0) {
@@ -338,6 +351,9 @@ export function ThroughputCounter({ tokensPerSec }: { tokensPerSec: number }) {
     }
 
     const nextBar = () => {
+      if (prefersReducedMotion.current) {
+        return Math.max(2, Math.min(22, tokensPerSec / 70))
+      }
       const variance = 0.5 + Math.random() * 1.0
       return Math.max(2, Math.min(22, (tokensPerSec * variance) / 70))
     }
@@ -349,18 +365,19 @@ export function ThroughputCounter({ tokensPerSec }: { tokensPerSec: number }) {
         return next
       })
       setDisplayValue(prev => {
+        if (prefersReducedMotion.current) return Math.round(tokensPerSec)
         const target = tokensPerSec * (0.88 + Math.random() * 0.24)
         return Math.round(prev * 0.55 + target * 0.45)
       })
     }
 
     tick()
-    const id = setInterval(tick, 140)
+    const id = setInterval(tick, THROUGHPUT_TICK_MS)
     return () => clearInterval(id)
   }, [tokensPerSec])
 
   return (
-    <div className="sw-throughput" title="LLM output tokens per second (estimated)">
+    <div className="sw-throughput" title="LLM output tokens per second (estimated)" data-tick-ms={THROUGHPUT_TICK_MS}>
       <div className="sw-throughput-sparkline">
         {bars.map((h, i) => (
           <div key={i} className="sw-spark-bar" style={{ height: h }} />
@@ -650,6 +667,9 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   // Recap ledger: fleet-wide recent (ended) sessions. null = not fetched yet — the
   // sweep is expensive (SSH fan-out), so it runs lazily when the Recap center opens.
   const [recapSessions, setRecapSessions] = useState<RemoteSessionLike[] | null>(null)
+  // Fork edges recorded at launch by `Agents: Fork …` — what lets the ledger pair
+  // a fork back up with the session it came from (their ids share nothing).
+  const [recapForkEdges, setRecapForkEdges] = useState<RecapForkEdge[]>([])
   const [floorSort, setFloorSort] = useState<FloorSort>('needs')
   // Group the live feed by an axis. Defaults to 'outcome' (ticket/PR/worktree) so a
   // fleet-scale floor shows deliverables, not ~1,100 agents (RUSH-1479). NEEDS YOU
@@ -669,6 +689,7 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   const [hostPins, setHostPins] = useState<string[] | null>(floorPrefs0.hostPins)
   const [statusChips, setStatusChips] = useState<StatusChip[]>([])
   const [abbrChips, setAbbrChips] = useState<AgentAbbr[]>([])
+  const [showBackground, setShowBackground] = useState(false)
   const [savedViews, setSavedViews] = useState<SavedView[]>(() => loadSavedViews())
 
   const activeViewName = useMemo(() => {
@@ -723,7 +744,16 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   const [hostRoster, setHostRoster] = useState<Array<{ name: string; online: boolean }>>([])
   // Freshness of the cross-host (remote) sweep, for the LIVE ACTIVITY sync chip.
   const [lastRemoteSync, setLastRemoteSync] = useState(0)
+  const [lastLocalSync, setLastLocalSync] = useState(0)
   const [syncingHosts, setSyncingHosts] = useState(false)
+  // Per-host freshness from optional hostSessions.groups / hostFreshness fields
+  // (host track may add these; keep backward-compat when absent).
+  const [hostFreshness, setHostFreshness] = useState<Record<string, number>>({})
+  const [remoteSyncError, setRemoteSyncError] = useState<string | null>(null)
+  // Optional host signal: agents CLI missing / unusable (never blocks cached rows).
+  const [cliUnavailable, setCliUnavailable] = useState(false)
+  // Managed-project command failures (agents projects …) — inline, never toast.
+  const [projectCommandError, setProjectCommandError] = useState<string | null>(null)
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null)
   const [hostInventories, setHostInventories] = useState<Record<string, HostInventory>>({})
   const [hostConfigError, setHostConfigError] = useState<string | null>(null)
@@ -755,8 +785,11 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   // Cross-host merge: fold genuinely-remote sessions into the Floor. Two message
   // types arrive here:
   //   hostSessions  — full sweep (every online host); replaces the whole set + roster.
-  //   localSessions — this-mac only (the fast 3s poll); replaces just the this-mac rows
-  //                   so remote rows from the slower sweep are preserved.
+  //                   On failure (ok===false / error string), KEEP last-good rows.
+  //   localSessions — this-mac only (event-driven / one-shot seed); replaces just the
+  //                   this-mac rows so remote rows from the last sweep are preserved.
+  // Optional typed fields from the host track (groups, hostFreshness, cliAvailable)
+  // are accepted when present; absent fields keep backward compile compatibility.
   // Per-agent reply failures ('replyResult' with ok=false) surface inline near the reply
   // control instead of a toast; cleared on the next successful send.
   // Local-only Floor still works if neither ever arrives.
@@ -775,6 +808,14 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
         return
       }
       if (msg?.type === 'hostSessions') {
+        const failed = msg.ok === false || typeof msg.error === 'string'
+        if (failed) {
+          // Retain last-good sessions/roster; surface the error on the freshness chip.
+          setRemoteSyncError(typeof msg.error === 'string' ? msg.error : 'Host sync failed')
+          if (typeof msg.fetchedAt === 'number') setLastRemoteSync(msg.fetchedAt)
+          setSyncingHosts(false)
+          return
+        }
         setRemoteSessions(Array.isArray(msg.sessions) ? (msg.sessions as RemoteSessionLike[]) : [])
         const roster = Array.isArray(msg.hosts)
           ? (msg.hosts as Array<{ name: string; online: boolean }>)
@@ -784,10 +825,34 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
         setHostRoster(roster)
         setOfflineHosts(roster.filter((h) => !h.online).map((h) => h.name))
         setLastRemoteSync(typeof msg.fetchedAt === 'number' ? msg.fetchedAt : Date.now())
+        setRemoteSyncError(null)
         setSyncingHosts(false)
+        // Optional per-host freshness: groups[{host,fetchedAt}] or hostFreshness map.
+        const nextFresh: Record<string, number> = {}
+        if (Array.isArray(msg.groups)) {
+          for (const g of msg.groups as Array<{ host?: string; fetchedAt?: number }>) {
+            if (g && typeof g.host === 'string' && typeof g.fetchedAt === 'number') {
+              nextFresh[g.host] = g.fetchedAt
+            }
+          }
+        }
+        if (msg.hostFreshness && typeof msg.hostFreshness === 'object') {
+          for (const [k, v] of Object.entries(msg.hostFreshness as Record<string, unknown>)) {
+            if (typeof v === 'number') nextFresh[k] = v
+          }
+        }
+        if (Object.keys(nextFresh).length) setHostFreshness(nextFresh)
+        if (typeof msg.cliAvailable === 'boolean') setCliUnavailable(!msg.cliAvailable)
       } else if (msg?.type === 'localSessions') {
         const local = Array.isArray(msg.sessions) ? (msg.sessions as RemoteSessionLike[]) : []
+        // On local failure keep previous this-mac rows (last-good).
+        if (msg.ok === false || typeof msg.error === 'string') {
+          if (typeof msg.fetchedAt === 'number') setLastLocalSync(msg.fetchedAt)
+          return
+        }
         setRemoteSessions((prev) => [...prev.filter((s) => s.host !== 'this-mac'), ...local])
+        setLastLocalSync(typeof msg.fetchedAt === 'number' ? msg.fetchedAt : Date.now())
+        if (typeof msg.cliAvailable === 'boolean') setCliUnavailable(!msg.cliAvailable)
       } else if (msg?.type === 'recentSessions') {
         const rh = typeof msg.host === 'string' ? msg.host : ''
         const recent = Array.isArray(msg.sessions) ? (msg.sessions as RemoteSessionLike[]) : []
@@ -805,31 +870,20 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
         }
       } else if (msg?.type === 'recapSessions') {
         setRecapSessions(Array.isArray(msg.sessions) ? (msg.sessions as RemoteSessionLike[]) : [])
+        setRecapForkEdges(Array.isArray(msg.forkEdges) ? (msg.forkEdges as RecapForkEdge[]) : [])
       }
     }
     window.addEventListener('message', onMsg)
     return () => window.removeEventListener('message', onMsg)
   }, [])
 
-  // Remote tier: sweep every online host over SSH. Expensive, so poll slowly and only
-  // while the panel is visible; the sweep itself is cheapened backend-side (offline
-  // hosts skipped, one SSH per host, CPU probe decoupled). Mirrors the throughput poll.
+  // One-shot seed when the panel becomes visible — NOT a recurring poll. Local rows
+  // then update from monitor/webview events; remote refresh is the manual chip only.
   useEffect(() => {
     if (!panelVisible) return
-    const sweep = () => { setSyncingHosts(true); postMessage({ type: 'fetchHostSessions' }) }
-    sweep()
-    const id = setInterval(sweep, REMOTE_POLL_MS)
-    return () => clearInterval(id)
-  }, [panelVisible])
-
-  // Local tier: this-mac sessions with no SSH — cheap, so poll fast. Keeps the feed
-  // feeling live for local agents between the slow remote sweeps.
-  useEffect(() => {
-    if (!panelVisible) return
-    const poll = () => postMessage({ type: 'fetchLocalSessions' })
-    poll()
-    const id = setInterval(poll, LOCAL_POLL_MS)
-    return () => clearInterval(id)
+    setSyncingHosts(true)
+    postMessage({ type: 'fetchLocalSessions' })
+    postMessage({ type: 'fetchHostSessions' })
   }, [panelVisible])
 
   // Host detail pane: receive fetched inventories + config-action errors.
@@ -850,14 +904,25 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   // Managed projects + linkable Linear projects for the sidebar top-3 and the
   // Projects pane. Fetch on mount; the host re-sends managedProjectsData after any
   // save/delete, so no optimistic update is needed. projectFolderPicked answers the
-  // pane's Browse… button and prefills its add form.
+  // pane's Browse… button and prefills its add form. Command failures surface
+  // inline on the Projects pane (never a toast). When managedProjectsData carries
+  // error, KEEP last-good projects (same last-good pattern as hostSessions).
   useEffect(() => {
     postMessage({ type: 'fetchManagedProjects' })
     postMessage({ type: 'fetchLinearProjects' })
     const onMsg = (event: MessageEvent) => {
       const msg = event.data
-      if (msg?.type === 'managedProjectsData' && Array.isArray(msg.projects)) {
-        setManagedProjects(msg.projects as ManagedProject[])
+      if (msg?.type === 'managedProjectsData') {
+        const failed = typeof msg.error === 'string'
+        if (failed) {
+          // Retain last-good projects; surface the error inline on Projects pane.
+          setProjectCommandError(msg.error)
+          return
+        }
+        if (Array.isArray(msg.projects)) {
+          setManagedProjects(msg.projects as ManagedProject[])
+          setProjectCommandError(null)
+        }
       } else if (msg?.type === 'linearProjectsData' && Array.isArray(msg.projects)) {
         setLinearProjects(msg.projects as LinearProjectLite[])
       } else if (msg?.type === 'projectFolderPicked' && typeof msg.path === 'string') {
@@ -867,6 +932,11 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
           name: typeof msg.name === 'string' ? msg.name : '',
           suggestedLinear: msg.suggestedLinear as LinearProjectLite | undefined,
         })
+      } else if (
+        (msg?.type === 'managedProjectsError' || msg?.type === 'projectCommandError')
+        && typeof msg.error === 'string'
+      ) {
+        setProjectCommandError(msg.error)
       }
     }
     window.addEventListener('message', onMsg)
@@ -895,9 +965,9 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   }, [])
 
   // Registered-device data for the Dispatch panel's device path. Fetched when the
-  // panel opens (device health SSH-probes every host, so we don't probe on every
-  // mount). deviceHealth returns ALL registered devices folded with live stats
-  // (reachable flag included) so offline devices still list as disabled rows.
+  // panel opens. deviceHealth is activation-cache backed (PR #2031) — registry
+  // online/offline only, no per-host SSH CPU/memory fan-out — so this is cheap
+  // enough to request when Dispatch opens. Offline devices still list as rows.
   useEffect(() => {
     if (!dispatchOpen) return
     postMessage({ type: 'deviceHealth' })
@@ -1335,10 +1405,10 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
       return
     }
     if (!panelVisible) {
-      // Panel hidden: stop polling AND zero the throughput. ThroughputCounter
-      // early-returns its 140ms sparkline interval when tokensPerSec <= 0, so
-      // resetting here clears the animation instead of letting it run off-screen
-      // against the last frozen value.
+      // Panel hidden: stop host throughput probes AND zero the value.
+      // ThroughputCounter early-returns its 1s sparkline interval when
+      // tokensPerSec <= 0, so resetting here clears the animation instead of
+      // letting it run off-screen against the last frozen value.
       setLiveThroughput(0)
       onThroughputChange?.(0)
       return
@@ -1380,21 +1450,6 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   const onDraftPrompt = useCallback((payload: { tickets: DraftTicketPayload[]; hint: string }) => {
     postMessage({ type: 'draftPrompt', tickets: payload.tickets, hint: payload.hint })
   }, [])
-
-  const handleNewAgent = (agent: string) => {
-    const commands: Record<string, string> = {
-      claude: 'agents.newClaude',
-      codex: 'agents.newCodex',
-      gemini: 'agents.newGemini',
-      antigravity: 'agents.newAntigravity',
-      grok: 'agents.newGrok',
-      kimi: 'agents.newKimi',
-      droid: 'agents.newDroid',
-      opencode: 'agents.newOpencode',
-      cursor: 'agents.newCursor',
-    }
-    postMessage({ type: 'executeCommand', command: commands[agent] })
-  }
 
   const handleFocusTerminal = (t: TerminalInfo) => {
     postMessage({ type: 'focusTerminal', terminalId: t.id })
@@ -1512,7 +1567,7 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
 
   // Center list scoped by project filter + host filter + status/agent chips + search.
   const scopedAgents = useMemo(() => {
-    let list = floorAgents
+    let list = visibleFloorAgents(floorAgents, showBackground)
     if (projFilter) list = list.filter((a) => a.project === projFilter)
     if (hostFilter) list = list.filter((a) => (a.hostLabel ?? a.host) === hostFilter)
     if (statusChips.length) list = list.filter((a) => statusChips.some((c) => (c === 'needs' ? a.needs : a.phase === c)))
@@ -1520,7 +1575,7 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
     const q = floorSearch.trim().toLowerCase()
     if (q) list = list.filter((a) => `${a.name} ${a.branch} ${a.verb} ${a.target} ${a.project} ${a.host} ${a.hostLabel ?? ''}`.toLowerCase().includes(q))
     return list
-  }, [floorAgents, projFilter, hostFilter, statusChips, abbrChips, floorSearch])
+  }, [floorAgents, showBackground, projFilter, hostFilter, statusChips, abbrChips, floorSearch])
 
   // Empty host filter -> show that host's recent sessions instead of a blank pane.
   // Fetch once per host (lazily), then adapt through the SAME card path as live agents.
@@ -1551,10 +1606,11 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   const recapDays = useMemo(() => {
     if (!recapSessions) return []
     const liveIds = new Set(floorAgents.map((a) => a.sessionId).filter((id): id is string => !!id))
-    return buildRecap(recapSessions, liveIds, Date.now())
-  }, [recapSessions, floorAgents])
+    return buildRecap(recapSessions, liveIds, Date.now(), recapForkEdges)
+  }, [recapSessions, floorAgents, recapForkEdges])
 
-  const needsAgents = useMemo(() => scopedAgents.filter((a) => a.needs), [scopedAgents])
+  const feedPartition = useMemo(() => partitionFloorAgents(scopedAgents), [scopedAgents])
+  const needsAgents = feedPartition.needs
   const waitingAgents = useMemo(() => needsAgents.filter((a) => a.phase === 'waiting'), [needsAgents])
   const failedAgents = useMemo(() => needsAgents.filter((a) => a.phase === 'failed'), [needsAgents])
   const questionClusters = useMemo(() => clusterByQuestion(waitingAgents), [waitingAgents])
@@ -1570,13 +1626,14 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
   // lane; done (without an unreviewed PR — those are NEEDS YOU) is the terminal
   // lane. idle is no longer dropped from the feed.
   const runningFeed = useMemo(
-    () => sortAgents(scopedAgents.filter((a) => !a.needs && (a.phase === 'running' || a.phase === 'idle')), floorSort),
-    [scopedAgents, floorSort]
+    () => sortAgents(feedPartition.active, floorSort),
+    [feedPartition, floorSort]
   )
   const doneFeed = useMemo(
-    () => sortAgents(scopedAgents.filter((a) => !a.needs && a.phase === 'done'), floorSort),
-    [scopedAgents, floorSort]
+    () => sortAgents(feedPartition.done, floorSort),
+    [feedPartition, floorSort]
   )
+  const groupedFeed = useMemo(() => [...runningFeed, ...doneFeed], [runningFeed, doneFeed])
 
   const floorRunning = useMemo(() => floorAgents.filter((a) => a.phase === 'running').length, [floorAgents])
   const floorTok = useMemo(() => floorAgents.reduce((s, a) => s + a.tok, 0) + liveThroughput, [floorAgents, liveThroughput])
@@ -1954,8 +2011,9 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
               </div>
             )}
             {/* Streaming Activity feed: the recent assistant messages (markdown), newest at
-                the bottom, capped by a live "now" verb/target indicator that updates on the
-                3s poll. Falls back to the single last response when only `resp` is carried. */}
+                the bottom, capped by a live "now" verb/target indicator updated from
+                monitor/webview events. Falls back to the single last response when only
+                `resp` is carried. */}
             {(a.messages.length > 0 || a.resp || a.verb || a.target) && (
               <div className="sw-unified-detail-section">
                 <div className="sw-section-label">Activity</div>
@@ -2086,6 +2144,8 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
           onToggleAbbr: (a) => setAbbrChips((cur) => (
             cur.includes(a) ? cur.filter((c) => c !== a) : [...cur, a]
           )),
+          showBackground,
+          onToggleBackground: () => setShowBackground((current) => !current),
         }}
       />
       {(needsAgents.length > 0 || pendingPlans.length > 0) && (
@@ -2149,20 +2209,55 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
         </>
       )}
 
-      <div className="feed-sec">{floorGroup === 'none' ? `RUNNING · ${runningFeed.length}` : `GROUPED BY ${floorGroup.toUpperCase()}${floorSubgroup !== 'none' && floorSubgroup !== floorGroup ? ` / ${floorSubgroup.toUpperCase()}` : ''} · ${runningFeed.length + doneFeed.length}`}<span className="ln" />
+      <div className="feed-sec">{floorGroup === 'none' ? `RUNNING · ${runningFeed.length}` : `GROUPED BY ${floorGroup.toUpperCase()}${floorSubgroup !== 'none' && floorSubgroup !== floorGroup ? ` / ${floorSubgroup.toUpperCase()}` : ''} · ${groupedFeed.length}`}<span className="ln" />
         <span
-          className={`fresh${syncingHosts ? ' syncing' : ''}${!syncingHosts && lastRemoteSync > 0 && nowMs - lastRemoteSync > 2 * REMOTE_POLL_MS ? ' stale' : ''}`}
-          title="Last cross-host sync. Click to refresh now."
-          onClick={() => { if (!syncingHosts) { setSyncingHosts(true); postMessage({ type: 'fetchHostSessions' }) } }}
+          className={`fresh${syncingHosts ? ' syncing' : ''}${!syncingHosts && (remoteSyncError || (lastRemoteSync > 0 && nowMs - lastRemoteSync > REMOTE_STALE_MS)) ? ' stale' : ''}`}
+          title={remoteSyncError
+            ? `Last sync failed: ${remoteSyncError}. Click to retry (cached rows stay visible).`
+            : 'Last cross-host sync. Click to refresh remote hosts now.'}
+          onClick={() => { if (!syncingHosts) { setSyncingHosts(true); setRemoteSyncError(null); postMessage({ type: 'fetchHostSessions', force: true }) } }}
+          role="button"
+          data-testid="host-freshness-chip"
         >
           <span className="rot"><Icon name="refresh" size={11} /></span>
           {syncingHosts
-            ? 'syncing hosts…'
-            : lastRemoteSync > 0
-              ? `hosts synced ${sinceFromMs(Math.max(0, nowMs - lastRemoteSync))} ago`
-              : 'not synced yet'}
+            ? 'refreshing hosts…'
+            : remoteSyncError
+              ? `sync failed · retry`
+              : lastRemoteSync > 0
+                ? `hosts ${sinceFromMs(Math.max(0, nowMs - lastRemoteSync))} ago`
+                : 'refresh hosts'}
         </span>
+        {lastLocalSync > 0 && (
+          <span className="fresh local-fresh" title="Last local session seed / event update" data-testid="local-freshness-chip">
+            local {sinceFromMs(Math.max(0, nowMs - lastLocalSync))} ago
+          </span>
+        )}
       </div>
+      {cliUnavailable && (
+        <div className="feed-empty feed-empty-warn" role="status" data-testid="cli-unavailable">
+          <strong>agents CLI unavailable.</strong> Cached floor rows stay visible. Install or fix PATH with <span className="mono">agents --version</span>, then refresh hosts.
+        </div>
+      )}
+      {hostRoster.length === 0 && !syncingHosts && lastRemoteSync > 0 && (
+        <div className="feed-empty" role="status" data-testid="zero-hosts">
+          No hosts registered. Add a device with <span className="mono">agents devices</span>, or open Dispatch once devices are online.
+        </div>
+      )}
+      {floorAgents.length === 0 && !syncingHosts && !cliUnavailable && (
+        <div className="feed-empty" role="status" data-testid="zero-sessions">
+          No running sessions. Dispatch an agent from the strip above, or refresh hosts if work is running on another machine.
+        </div>
+      )}
+      {Object.keys(hostFreshness).length > 0 && (
+        <div className="host-freshness-line" data-testid="per-host-freshness">
+          {Object.entries(hostFreshness).map(([host, at]) => (
+            <span key={host} className="host-fresh-pill" title={`Last good data for ${host}`}>
+              {host} · {sinceFromMs(Math.max(0, nowMs - at))}
+            </span>
+          ))}
+        </div>
+      )}
       {floorGroup === 'none'
         ? runningFeed.map((a) => (
             <FeedRow onOpenTask={openTaskFromAgent}
@@ -2179,7 +2274,7 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
               onOpenTerminal={openTerminalForAgent}
             />
           ))
-        : [...groupAgents([...runningFeed, ...doneFeed], floorGroup).entries()].map(([k, arr]) => {
+        : [...groupAgents(groupedFeed, floorGroup).entries()].map(([k, arr]) => {
             // When grouped by project, enrich the header: "N agents" + a Linear project
             // link pill (mockup: "agents-cli · 8 agents · RUSH · Agents CLI").
             const projectPill = (axis: FloorGroupBy | 'none', key: string) => (
@@ -2283,8 +2378,9 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
         rollups={floorRollups}
         linearProjects={linearProjects}
         pickedFolder={pickedFolder}
-        onSave={(p) => postMessage({ type: 'saveManagedProject', project: p })}
-        onDelete={(id) => postMessage({ type: 'deleteManagedProject', id })}
+        commandError={projectCommandError}
+        onSave={(p) => { setProjectCommandError(null); postMessage({ type: 'saveManagedProject', project: p }) }}
+        onDelete={(id) => { setProjectCommandError(null); postMessage({ type: 'deleteManagedProject', id }) }}
         onPickFolder={() => postMessage({ type: 'pickProjectFolder' })}
         onClose={() => setCenter('agents')}
       />
@@ -2337,10 +2433,6 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
           onTogglePlain={() => setPlain((o) => !o)}
           sort={floorSort}
           onSort={setFloorSort}
-          group={floorGroup}
-          onGroup={handleFloorGroup}
-          subgroup={floorSubgroup}
-          onSubgroup={setFloorSubgroup}
           ticketGroup={ticketGroup}
           onTicketGroup={handleTicketGroup}
           ticketSubgroup={ticketSubgroup}
@@ -2363,8 +2455,10 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
             needsOnly={statusChips.includes('needs')}
             projects={managedProjects}
             devices={
+              // Running counts come only from floorAgents (session collection) —
+              // never a second deviceHealth runningAgents source.
               dispatchDevices.length
-                ? dispatchDevices.map((d) => ({ name: d.name, online: !!d.reachable, agents: d.runningAgents ?? 0 }))
+                ? dispatchDevices.map((d) => ({ name: d.name, online: !!d.reachable, agents: 0 }))
                 : fleetDevices.map((d) => ({ name: d.name, online: d.online, agents: 0 }))
             }
             offlineHosts={offlineHosts}
@@ -2384,7 +2478,7 @@ export function UnifiedAgentsPane({ terminals, tasks, tasksLoading, unifiedTasks
             offlineHosts={offlineHosts}
             devices={
               dispatchDevices.length
-                ? dispatchDevices.map((d) => ({ name: d.name, online: !!d.reachable, agents: d.runningAgents ?? 0 }))
+                ? dispatchDevices.map((d) => ({ name: d.name, online: !!d.reachable, agents: 0 }))
                 : fleetDevices.map((d) => ({ name: d.name, online: d.online, agents: 0 }))
             }
             hostPins={effectiveHostPins}

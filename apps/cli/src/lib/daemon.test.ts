@@ -1,14 +1,13 @@
 /**
  * Daemon service-manifest generation.
  *
- * The load-bearing security contract under test (RUSH-1759): the Claude OAuth
- * token stored in the `claude` secrets bundle is NEVER written into the launchd
- * plist / systemd unit, even when one is configured — a persisted service
- * manifest is a plaintext credential on disk. The daemon obtains the token at
- * startup from the secure store instead (readDaemonClaudeOAuthToken). The
- * Keychain itself is swapped for an in-memory backend via
- * setKeychainBackendForTest so the generators can be exercised with a token
- * configured and proven to omit it.
+ * The load-bearing security contract under test: the service manifest (launchd
+ * plist / systemd unit) NEVER embeds a Claude OAuth token — even when one is
+ * configured in the `claude` secrets bundle. The daemon holds no Claude
+ * credential of its own; routine runs authenticate through the per-account
+ * CLAUDE_CONFIG_DIR login on the device. The Keychain is swapped for an
+ * in-memory backend via setKeychainBackendForTest so a token can be configured
+ * and the generators proven to omit it.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -21,8 +20,6 @@ import { fileURLToPath } from 'url';
 import {
   generateLaunchdPlist,
   generateSystemdUnit,
-  readDaemonClaudeOAuthToken,
-  buildDetachedDaemonEnv,
   getDaemonLaunch,
   getAgentsInvocation,
   getAgentsBinPath,
@@ -34,6 +31,11 @@ import {
   writeDaemonPid,
   removeDaemonPid,
   shouldTakeOverBroker,
+  schedulerGateTransition,
+  anchorDaemonCwd,
+  describeEphemeralDaemonRoot,
+  warnEphemeralDaemonRoot,
+  validateDaemonBinary,
 } from './daemon.js';
 import { ipcEndpoint } from './platform/index.js';
 
@@ -69,11 +71,6 @@ function seedKeychainBacked(value: string): void {
   setKeychainToken(secretsKeychainItem('claude', 'CLAUDE_CODE_OAUTH_TOKEN'), value);
 }
 
-/** Seed the `claude` bundle with a literal CLAUDE_CODE_OAUTH_TOKEN. */
-function seedLiteral(value: string): void {
-  writeBundle({ name: 'claude', vars: { CLAUDE_CODE_OAUTH_TOKEN: value } });
-}
-
 let restore: KeychainBackend | null = null;
 let prevNoAgent: string | undefined;
 
@@ -96,37 +93,6 @@ afterEach(() => {
   setKeychainBackendForTest(restore);
   if (prevNoAgent === undefined) delete process.env.AGENTS_SECRETS_NO_AGENT;
   else process.env.AGENTS_SECRETS_NO_AGENT = prevNoAgent;
-});
-
-describe('readDaemonClaudeOAuthToken', () => {
-  it('returns null when the bundle does not exist', () => {
-    expect(readDaemonClaudeOAuthToken()).toBeNull();
-  });
-
-  it('returns a keychain-backed token', () => {
-    seedKeychainBacked('sk-ant-oat01-abc123');
-    expect(readDaemonClaudeOAuthToken({ allowPrompt: true })).toBe('sk-ant-oat01-abc123');
-  });
-
-  it('returns a token stored as a literal (the no-op footgun fix)', () => {
-    seedLiteral('sk-ant-oat01-literal');
-    expect(readDaemonClaudeOAuthToken({ allowPrompt: true })).toBe('sk-ant-oat01-literal');
-  });
-
-  it('trims surrounding whitespace from the stored token', () => {
-    seedKeychainBacked('  sk-ant-oat01-abc123\n');
-    expect(readDaemonClaudeOAuthToken({ allowPrompt: true })).toBe('sk-ant-oat01-abc123');
-  });
-
-  it('treats an empty/whitespace-only token as absent', () => {
-    seedKeychainBacked('   ');
-    expect(readDaemonClaudeOAuthToken({ allowPrompt: true })).toBeNull();
-  });
-
-  it('does not fall through to Keychain when prompting is unavailable', () => {
-    seedKeychainBacked('sk-ant-oat01-must-not-be-read');
-    expect(readDaemonClaudeOAuthToken({ allowPrompt: false })).toBeNull();
-  });
 });
 
 describe('writeOwnerOnlyServiceManifest', () => {
@@ -174,34 +140,74 @@ describe('generateLaunchdPlist', () => {
     expect(plist).not.toContain('v24.0.0');
   });
 
-  it('omits the token even when one is configured in the claude bundle (RUSH-1759)', () => {
+  it('omits the token even when one is configured in the claude bundle', () => {
     seedKeychainBacked('sk-ant-oat01-abc123');
-    // Sanity: the token IS resolvable — proving the omission below is the
-    // generator's doing, not an empty bundle.
-    expect(readDaemonClaudeOAuthToken({ allowPrompt: true })).toBe('sk-ant-oat01-abc123');
     const plist = generateLaunchdPlist();
     expect(plist).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
     expect(plist).not.toContain('sk-ant-oat01-abc123');
   });
 });
 
-describe('generateSystemdUnit', () => {
+describe.skipIf(process.platform === 'win32')('generateSystemdUnit', () => {
   it('never embeds a token Environment line, only PATH', () => {
     expect(generateSystemdUnit()).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
   });
 
-  it('omits the token even when one is configured in the claude bundle (RUSH-1759)', () => {
+  it('omits the token even when one is configured in the claude bundle', () => {
     seedKeychainBacked('sk-ant-oat01-abc123');
-    expect(readDaemonClaudeOAuthToken({ allowPrompt: true })).toBe('sk-ant-oat01-abc123');
     const unit = generateSystemdUnit();
     expect(unit).not.toContain('CLAUDE_CODE_OAUTH_TOKEN');
     expect(unit).not.toContain('sk-ant-oat01-abc123');
   });
 
+  // Parse the daemon PATH into ordered segments — robust to whatever
+  // `process.execPath` is on the runner (CI's Node is /usr/local/bin/node, a dev
+  // box's is deep in nvm), so the assertions test the real invariants, not a
+  // substring that only holds for one machine's layout.
+  const systemdPath = (unit: string): string[] => {
+    const m = unit.match(/^Environment=PATH=(.+)$/m);
+    if (!m) throw new Error('no PATH line in systemd unit');
+    return m[1].split(':');
+  };
+  const launchdPath = (plist: string): string[] => {
+    const m = plist.match(/<key>PATH<\/key>\s*<string>([^<]+)<\/string>/);
+    if (!m) throw new Error('no PATH in launchd plist');
+    return m[1].split(':');
+  };
+
   it('pins the running Node bin dir first on PATH and drops the stale hardcoded nvm version', () => {
-    const unit = generateSystemdUnit();
-    expect(unit).toContain(`Environment=PATH=${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`);
-    expect(unit).not.toContain('v24.0.0');
+    const segs = systemdPath(generateSystemdUnit());
+    expect(segs[0]).toBe(path.dirname(process.execPath));
+    expect(segs).toEqual(expect.arrayContaining(['/usr/local/bin', '/usr/bin', '/bin']));
+    expect(generateSystemdUnit()).not.toContain('v24.0.0');
+  });
+
+  it('also puts the agents shim dir on PATH so a child routine resolves `agents` (exit-127 fix)', () => {
+    // A shim installed OUTSIDE the Node bin dir — the ~/.local/bin global-install
+    // shape that left the daemon PATH carrying only the Node dir, so every
+    // `command` routine shelling out to `agents …` died with exit 127.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-shim-'));
+    const shimDir = path.join(tmpDir, 'local-bin');
+    fs.mkdirSync(shimDir, { recursive: true });
+    const shim = path.join(shimDir, 'agents');
+    fs.writeFileSync(shim, '');
+    try {
+      const unitSegs = systemdPath(generateSystemdUnit(shim));
+      expect(unitSegs[0]).toBe(path.dirname(process.execPath)); // Node still first
+      expect(unitSegs).toContain(shimDir); // the shim's dir is now on PATH — the fix
+      expect(launchdPath(generateLaunchdPlist(shim))).toContain(shimDir);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('dedups the whole PATH — no dir appears twice, even for a /usr/local/bin install', () => {
+    // Shim beside Node, and (on CI) Node itself in /usr/local/bin: the assembled
+    // list collides with the system dirs. Full-list dedup must collapse them.
+    const nodeDir = path.dirname(process.execPath);
+    const segs = systemdPath(generateSystemdUnit(path.join(nodeDir, 'agents')));
+    expect(segs.length).toBe(new Set(segs).size);
+    expect(segs[0]).toBe(nodeDir);
   });
 
   it('pins a JavaScript install to the Node runtime that installed the service', () => {
@@ -244,29 +250,6 @@ describe('service manifest CLI entry injection', () => {
       process.argv[1] = savedArgv1;
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
-  });
-});
-
-describe('buildDetachedDaemonEnv', () => {
-  it('injects the token when configured and absent from the base env', () => {
-    seedKeychainBacked('sk-ant-oat01-detached');
-    const env = buildDetachedDaemonEnv(
-      { PATH: '/usr/bin' },
-      readDaemonClaudeOAuthToken({ allowPrompt: true }),
-    );
-    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat01-detached');
-    expect(env.PATH).toBe('/usr/bin');
-  });
-
-  it('leaves an already-set token untouched (launchd-provided wins)', () => {
-    seedKeychainBacked('sk-ant-oat01-fromKeychain');
-    const env = buildDetachedDaemonEnv({ CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-fromEnv' });
-    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-ant-oat01-fromEnv');
-  });
-
-  it('adds no token key when none is configured', () => {
-    const env = buildDetachedDaemonEnv({ PATH: '/usr/bin' });
-    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
   });
 });
 
@@ -685,5 +668,170 @@ describe('shouldTakeOverBroker (RUSH-1817: daemon self-heals a dead standalone)'
 
   it('never clobbers a reachable (healthy) standalone broker', () => {
     expect(shouldTakeOverBroker(false, true)).toBe(false);
+  });
+});
+
+describe('anchorDaemonCwd', () => {
+  let originalCwd: string;
+
+  beforeEach(() => {
+    originalCwd = process.cwd();
+  });
+
+  afterEach(() => {
+    // The tests below chdir into temp dirs (some deleted); restore a valid cwd so
+    // later tests and vitest teardown aren't left standing in a dead directory.
+    try {
+      process.chdir(originalCwd);
+    } catch {
+      process.chdir(os.homedir());
+    }
+  });
+
+  // Windows refuses to remove a directory that is a live process's cwd, so the
+  // rmSync below throws EBUSY and the test fails on its own setup. That is not a
+  // gap in coverage: the state being reproduced — a process standing in a
+  // directory that no longer exists — cannot arise on Windows for the same
+  // reason. The recovery this asserts is POSIX-only by construction.
+  it.skipIf(process.platform === 'win32')('recovers a deleted working directory by anchoring to home', () => {
+    // Reproduce the exact routine-outage failure: the daemon is running with its
+    // cwd inside a directory (a git worktree, in the real incident) that then gets
+    // removed out from under it. A process cannot chdir out of a deleted directory
+    // on its own, so every job it spawns inherits the dead cwd and Bun crashes with
+    // `ENOENT: Bun could not find a file` at startup. anchorDaemonCwd must recover.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-cwd-'));
+    const realTmp = fs.realpathSync(tmp);
+    process.chdir(realTmp);
+    fs.rmSync(realTmp, { recursive: true, force: true });
+
+    // Sanity: we are genuinely standing in a deleted directory now. On Linux,
+    // process.cwd() throws ENOENT here — the precondition of the outage.
+    let cwdBroken = false;
+    try {
+      process.cwd();
+    } catch {
+      cwdBroken = true;
+    }
+    expect(cwdBroken).toBe(true);
+
+    const resolved = anchorDaemonCwd();
+    expect(resolved).toBe(os.homedir());
+    // cwd() must now succeed and point at home — spawns will inherit a live dir.
+    expect(fs.realpathSync(process.cwd())).toBe(fs.realpathSync(os.homedir()));
+  });
+
+  it('anchors to home even when launched from an unrelated valid directory', () => {
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-cwd-')));
+    try {
+      process.chdir(tmp);
+      const resolved = anchorDaemonCwd();
+      expect(resolved).toBe(os.homedir());
+      expect(fs.realpathSync(process.cwd())).toBe(fs.realpathSync(os.homedir()));
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('describeEphemeralDaemonRoot', () => {
+  // A daemon launched from an ephemeral path wedges on every dynamic import once
+  // that path is removed — the /tmp/rv-head incident. This predicate is what
+  // both the launch-time check (validateDaemonBinary) and the runtime startup
+  // self-check (warnEphemeralDaemonRoot) share, so it must classify precisely.
+  it('flags a git worktree entry', () => {
+    expect(describeEphemeralDaemonRoot('/home/u/.agents/worktrees/rv/apps/cli/src/index.ts')).toBe('a git worktree');
+  });
+
+  it('flags /tmp and /private/tmp entries (the /tmp/rv-head case)', () => {
+    expect(describeEphemeralDaemonRoot('/tmp/rv-head/apps/cli/src/index.ts')).toBe('a temporary directory');
+    expect(describeEphemeralDaemonRoot('/private/tmp/rv-head/apps/cli/src/index.ts')).toBe('a temporary directory');
+  });
+
+  it('flags macOS /var/folders and linux /dev/shm entries', () => {
+    expect(describeEphemeralDaemonRoot('/var/folders/xy/abc/T/build/index.js')).toBe('a temporary directory');
+    expect(describeEphemeralDaemonRoot('/private/var/folders/xy/abc/T/build/index.js')).toBe('a temporary directory');
+    expect(describeEphemeralDaemonRoot('/dev/shm/build/index.js')).toBe('a temporary directory');
+  });
+
+  it('returns null for stable install roots and normal checkouts', () => {
+    // Version home (the real install location), a global npm prefix, and an
+    // ordinary source checkout under $HOME must NOT be flagged — else every
+    // dev run and every install would emit a spurious wedge warning.
+    expect(describeEphemeralDaemonRoot('/home/u/.agents/.history/versions/agents/1.20.88/node_modules/@phnx-labs/agents-cli/dist/index.js')).toBeNull();
+    expect(describeEphemeralDaemonRoot('/opt/homebrew/lib/node_modules/@phnx-labs/agents-cli/dist/index.js')).toBeNull();
+    expect(describeEphemeralDaemonRoot('/home/u/src/github.com/x/agents-cli/apps/cli/src/index.ts')).toBeNull();
+    // A directory merely named "tmp" under $HOME is not a temp root (anchored match).
+    expect(describeEphemeralDaemonRoot('/home/u/tmp/agents-cli/dist/index.js')).toBeNull();
+  });
+});
+
+describe('warnEphemeralDaemonRoot', () => {
+  // The runtime startup self-check: it must warn (return the message) for an
+  // ephemeral launch root, stay silent (null) for a stable one, and never throw
+  // — including when the bin resolver itself throws (getAgentsBinPath can, when a
+  // shim's main entry is missing). resolveBin is injected so all three branches
+  // hit the real code path without mocking the module.
+  it('warns for an ephemeral launch root (the /tmp/rv-head case)', () => {
+    const msg = warnEphemeralDaemonRoot(() => '/tmp/rv-head/apps/cli/src/index.ts');
+    expect(msg).not.toBeNull();
+    expect(msg).toContain('a temporary directory');
+    expect(msg).toContain('/tmp/rv-head/apps/cli/src/index.ts');
+  });
+
+  it('stays silent for a stable version-home launch root', () => {
+    expect(
+      warnEphemeralDaemonRoot(() => '/home/u/.agents/.history/versions/agents/1.20.88/dist/index.js'),
+    ).toBeNull();
+  });
+
+  it('is non-fatal when the bin resolver throws', () => {
+    let result: string | null = 'sentinel';
+    expect(() => {
+      result = warnEphemeralDaemonRoot(() => {
+        throw new Error('no main CLI entry');
+      });
+    }).not.toThrow();
+    expect(result).toBeNull();
+  });
+
+  it('does not throw when resolving the real launch binary', () => {
+    // Default resolver (getAgentsBinPath against the live argv[1]) must run
+    // through the try without throwing — this is what runDaemon calls at startup.
+    expect(() => warnEphemeralDaemonRoot()).not.toThrow();
+  });
+});
+
+describe('validateDaemonBinary (ephemeral-root warning)', () => {
+  it('warns when the daemon binary is under /tmp', () => {
+    const { warnings } = validateDaemonBinary('/tmp/rv-head/apps/cli/src/index.ts');
+    expect(warnings.some((w) => w.includes('a temporary directory'))).toBe(true);
+  });
+
+  it('warns when the daemon binary is inside a git worktree', () => {
+    const { warnings } = validateDaemonBinary('/home/u/.agents/worktrees/rv/apps/cli/src/index.ts');
+    expect(warnings.some((w) => w.includes('a git worktree'))).toBe(true);
+  });
+
+  it('does not emit a wedge warning for a version-home install', () => {
+    const { warnings } = validateDaemonBinary('/home/u/.agents/.history/versions/agents/1.20.88/dist/index.js');
+    expect(warnings.some((w) => /worktree|temporary directory/.test(w))).toBe(false);
+  });
+});
+
+describe('schedulerGateTransition (scheduler.enabled re-evaluated on SIGHUP)', () => {
+  it('boots the scheduler when the gate flipped on while the daemon ran scheduler-less', () => {
+    expect(schedulerGateTransition(false, true)).toBe('boot');
+  });
+
+  it('stops a running scheduler when the gate flipped off', () => {
+    expect(schedulerGateTransition(true, false)).toBe('stop');
+  });
+
+  it('reloads a running scheduler when the gate is unchanged', () => {
+    expect(schedulerGateTransition(true, true)).toBe('reload');
+  });
+
+  it('stays dark when the gate is off and nothing runs', () => {
+    expect(schedulerGateTransition(false, false)).toBe('none');
   });
 });

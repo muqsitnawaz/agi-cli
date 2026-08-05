@@ -13,17 +13,52 @@ import * as yaml from 'yaml';
 import { Cron } from 'croner';
 import { getRoutinesDir, getSystemRoutinesDir, getRunsDir, ensureAgentsDir, getProjectRoutinesDir } from './state.js';
 import { safeJoin, isSafeSegmentName } from './paths.js';
+import { isSafeProjectName } from './projects.js';
 import { atomicWriteFileSync } from './fs-atomic.js';
 import type { AgentId } from './types.js';
 import { ALL_AGENT_IDS } from './agents.js';
 import type { LoopConfig } from './loop.js';
 import { machineId, normalizeHost } from './machine-id.js';
+import { resolveActor } from './actor.js';
+import { percentile } from './percentile.js';
+import {
+  enabledRoutineNames,
+  replaceEnabledRoutines,
+  routineEnabledOnThisDevice,
+  setRoutineEnabledOnThisDevice,
+} from './routine-activation.js';
 
 /** Tool/site/directory allow-list for sandboxed job execution. */
 export interface JobAllowConfig {
   tools?: string[];
   sites?: string[];
   dirs?: string[];
+}
+
+/**
+ * Where a routine's job body executes when the daemon fires it.
+ * Distinct from `devices` (which daemon may *fire*) and from the CLI `--host`
+ * remote-management passthrough (manage routines *on* another machine).
+ */
+export type HostStrategy = 'local' | 'host' | 'fleet' | 'cloud';
+
+export const HOST_STRATEGIES: readonly HostStrategy[] = ['local', 'host', 'fleet', 'cloud'] as const;
+
+/**
+ * Provenance for a routine that was materialised from a project
+ * (`.agents/routines/*.yml` synced into the user layer after opt-in).
+ */
+export interface JobSource {
+  /** Always `project` today; reserved for future layers. */
+  kind: 'project';
+  /** Absolute path to the project root that owns the YAML. */
+  projectPath: string;
+  /** GitHub `owner/repo` when the project has a GitHub origin remote. */
+  repo?: string;
+  /** Branch at last sync (when known). */
+  branch?: string;
+  /** Short commit SHA at last sync (when known). */
+  commit?: string;
 }
 
 /** GitHub webhook events a routine can be triggered by. */
@@ -98,6 +133,10 @@ export interface LinearJobTrigger {
   teamKey?: string;
   /** Required issue label name. */
   label?: string;
+  /** Current Linear state name that must match (e.g. `Plan`). */
+  stateTo?: string;
+  /** Previous Linear state name that must match (e.g. `Triage`). */
+  stateFrom?: string;
 }
 
 export type JobTrigger = GithubJobTrigger | LinearJobTrigger;
@@ -142,16 +181,67 @@ export interface JobConfig {
    */
   devices?: string[];
   /**
+   * Whether a fire this device missed (daemon down, laptop asleep, wedged event
+   * loop) is run late. Defaults to true: croner only schedules forward from
+   * "now", so without catch-up a missed fire is simply lost and the routine
+   * silently does not run.
+   *
+   * Set `catchup: false` for a routine whose value is tied to its clock — a
+   * 9am standup brief is worthless at 3pm. An opted-out routine still records
+   * the miss (a `missed` run), it just is not re-run.
+   */
+  catchup?: boolean;
+  /**
+   * When this routine came into existence, ISO 8601. Stamped once by
+   * {@link writeJob}, like `actor`.
+   *
+   * Overdue detection needs it: `detectOverdueJobs` walks back a week for the
+   * most recent expected fire, so without a floor a brand-new routine is
+   * "overdue" for occurrences that happened before it was written. Harmless
+   * when catch-up was a manual command; with auto-catchup it would run every
+   * newly created routine once, immediately.
+   */
+  createdAt?: string;
+  /**
+   * Environment variables injected into the spawned run, on top of the sandbox
+   * overlay's own. Merged by `buildSpawnEnv`, so it applies to both the
+   * foreground and detached execution paths.
+   */
+  env?: Record<string, string>;
+  /**
    * Execution placement — run the job body on this machine over SSH (a
    * registered host, device, capability tag, or user@host) instead of locally.
    * Distinct from `devices`: `devices` says which daemon may FIRE the job,
    * `host` says where the dispatched run EXECUTES. CLI flag: `--run-on`
    * (`--host` on routines commands already means "manage routines on that
    * machine" via the remote passthrough).
+   *
+   * When `hostStrategy` is set, it owns placement semantics; `host` is then
+   * only required for `hostStrategy: host` (or when strategy is inferred from
+   * a bare `host:` field for back-compat).
    */
   host?: string;
+  /**
+   * Where the job body should run when the daemon fires it.
+   * - `local`  — on the firing machine (default / current behavior)
+   * - `host`   — on the named `host` over SSH (maps to `--run-on`)
+   * - `fleet`  — pick one online registered device per run (no cross-device
+   *              double-fire; the firing pin stays on `devices`)
+   * - `cloud`  — dispatch via the agent's native cloud provider
+   *
+   * CLI flag: `--placement` (not `--host`, which is the remote-management
+   * passthrough). Omitted strategy falls back to `host` when `host:` is set,
+   * otherwise `local`.
+   */
+  hostStrategy?: HostStrategy;
   /** Working directory on the host for `host:`-placed runs. */
   remoteCwd?: string;
+  /**
+   * Provenance for routines materialised from a project
+   * (`<project>/.agents/routines/*.yml` → user-layer copy after opt-in).
+   * Absent for hand-authored user/system routines.
+   */
+  source?: JobSource;
   variables?: Record<string, string>;
   sandbox?: boolean;
   allow?: JobAllowConfig;
@@ -188,6 +278,133 @@ export interface JobConfig {
   resume?: string;
   /** When set, executeJob runs this job through the loop driver instead of once. */
   loop?: LoopConfig;
+  /**
+   * Actor id of whoever CREATED this routine (`resolveActor().id`, stamped by
+   * `writeJob` at creation and preserved across edits). Propagated into each
+   * fired run's env and RunMeta so an unattended cron traces back to the person
+   * who scheduled it, not the `UNRESOLVED@<host>` a live resolve would give.
+   * RUSH-2020.
+   */
+  actor?: string;
+  /**
+   * Named projects this routine belongs to. Metadata-only: organises the
+   * routine under a project group in `agents routines list` and the menu bar;
+   * has no effect on scheduling or execution.
+   *
+   * Special values:
+   * - `["*"]` — routine applies to all defined projects (the "All projects" group).
+   * - A single name — routine belongs to that specific project.
+   * - Multiple names — routine spans several projects ("Cross-project" group).
+   * - Absent/empty — routine belongs to no project ("Operations" group).
+   */
+  projects?: string[];
+}
+
+/**
+ * Canonical form of a routine's `projects` field: drop non-string and empty
+ * entries and deduplicate while preserving first-seen order. This is the single
+ * source of truth for project-name normalization, applied at the schema
+ * boundary (`writeJob` before persistence) and at grouping (`computeProjectGroupKind`)
+ * so a hand-authored YAML with duplicates (`projects: [myapp, myapp]`) is
+ * treated identically to the canonical single-entry form everywhere.
+ *
+ * Returns `undefined` when nothing survives, so callers can omit the field.
+ */
+export function normalizeProjects(projects: string[] | undefined): string[] | undefined {
+  if (!Array.isArray(projects) || projects.length === 0) return undefined;
+  const out = [...new Set(projects.filter((p): p is string => typeof p === 'string' && p !== ''))];
+  return out.length === 0 ? undefined : out;
+}
+
+/**
+ * A routine's project bucket, discriminated by `kind` so buckets are never keyed
+ * on their human display label. A named project called literally "Operations" or
+ * "Cross-project" is `{ kind: 'named', name }` and can never collide with the
+ * `operations` / `cross` special buckets that happen to share those titles.
+ */
+export type ProjectGroup =
+  | { kind: 'named'; name: string }
+  | { kind: 'all' }
+  | { kind: 'cross' }
+  | { kind: 'operations' }
+  | { kind: 'unknown' };
+
+/**
+ * Classify a routine's `projects` field into a discriminated {@link ProjectGroup}.
+ * Duplicates are collapsed first ({@link normalizeProjects}), so `[myapp, myapp]`
+ * is a single named project, not a "Cross-project" span.
+ *
+ * @param projects - The routine's projects array (may be undefined).
+ * @param knownProjectNames - The set of currently defined project names (from `listProjectDefs`).
+ */
+export function computeProjectGroupKind(
+  projects: string[] | undefined,
+  knownProjectNames: Set<string>,
+): ProjectGroup {
+  const norm = normalizeProjects(projects);
+  if (!norm) return { kind: 'operations' };
+  if (norm.length === 1 && norm[0] === '*') return { kind: 'all' };
+  const hasUnknown = norm.some((p) => p !== '*' && !knownProjectNames.has(p));
+  if (hasUnknown) return { kind: 'unknown' };
+  if (norm.length === 1) return { kind: 'named', name: norm[0] };
+  return { kind: 'cross' };
+}
+
+/** Human display title for a {@link ProjectGroup}. */
+export function projectGroupTitle(group: ProjectGroup): string {
+  switch (group.kind) {
+    case 'named': return group.name;
+    case 'all': return 'All projects';
+    case 'cross': return 'Cross-project';
+    case 'operations': return 'Operations';
+    case 'unknown': return 'Unknown projects';
+  }
+}
+
+/**
+ * Stable bucket key for a {@link ProjectGroup}. Named projects key on their name
+ * under a `named:` prefix; specials key on their `kind` under a `special:` prefix.
+ * The two namespaces can never collide, so a project named "Operations" gets its
+ * own bucket separate from the no-project "Operations" special.
+ */
+export function projectGroupKey(group: ProjectGroup): string {
+  return group.kind === 'named' ? `named:${group.name}` : `special:${group.kind}`;
+}
+
+/** Sort rank for a {@link ProjectGroup}: named projects first, then specials in a fixed order. */
+export function projectGroupOrder(group: ProjectGroup): number {
+  switch (group.kind) {
+    case 'named': return 0;
+    case 'all': return 1;
+    case 'cross': return 2;
+    case 'operations': return 3;
+    case 'unknown': return 4;
+  }
+}
+
+/**
+ * Compute the display group label for a routine's `projects` field.
+ *
+ * Kept as the label-returning form for the JSON `projectGroup` field and any
+ * text consumer; grouping and ordering use the discriminated
+ * {@link computeProjectGroupKind}/{@link projectGroupKey} instead so buckets are
+ * never keyed on the label.
+ *
+ * @param projects - The routine's projects array (may be undefined).
+ * @param knownProjectNames - The set of currently defined project names (from `listProjectDefs`).
+ *
+ * Returns one of:
+ * - A specific project name — when `projects` has exactly one known name.
+ * - `"All projects"` — when `projects` is `["*"]`.
+ * - `"Cross-project"` — when `projects` has multiple distinct known entries.
+ * - `"Operations"` — when `projects` is absent or empty.
+ * - `"Unknown projects"` — when any entry is no longer a defined project (stale).
+ */
+export function computeProjectGroup(
+  projects: string[] | undefined,
+  knownProjectNames: Set<string>,
+): string {
+  return projectGroupTitle(computeProjectGroupKind(projects, knownProjectNames));
 }
 
 /** Metadata for a single job execution, persisted as JSON in the run directory. */
@@ -201,7 +418,16 @@ export interface RunMeta {
   pid: number | null;
   /** Process birth time (epoch ms) recorded at spawn for pid-reuse detection. */
   spawnedAt?: number;
-  status: 'running' | 'completed' | 'failed' | 'timeout';
+  /** Configured execution deadline persisted for daemon-restart recovery. */
+  timeoutMs?: number;
+  /**
+   * `missed` is not an execution outcome — it is the record that a scheduled
+   * fire never happened (the daemon was down, asleep, or wedged when it came
+   * due). Without it a miss leaves no trace at all and the listing keeps
+   * showing the previous run's status as if it were current. Written by
+   * `claimMissedFire` (catchup.ts), never by the runner.
+   */
+  status: 'running' | 'completed' | 'failed' | 'timeout' | 'missed';
   startedAt: string;
   completedAt: string | null;
   exitCode: number | null;
@@ -214,6 +440,22 @@ export interface RunMeta {
   /** The host-task sidecar id backing a `host:` run; the daemon monitor
    *  finalizes the run by reconciling it against the remote `.exit`. */
   hostTaskId?: string;
+  /** Cloud provider task id when `hostStrategy: cloud` dispatched the run. */
+  cloudTaskId?: string;
+  /** Cloud provider id when the run was cloud-dispatched. */
+  cloudProvider?: string;
+  /**
+   * Actor id of the routine's CREATOR (stamped at creation, carried from the job
+   * config). Answers "whose scheduled run is this" for an unattended cron fire,
+   * where resolving the actor live would only yield `UNRESOLVED@<host>`. RUSH-2020.
+   */
+  actor?: string;
+  /**
+   * Actor id that TRIGGERED this particular run (`resolveActor().id` at fire
+   * time): a person for a manual `agents routines run`, `UNRESOLVED@<host>` for
+   * an unattended scheduled fire. Distinct from {@link actor} (the creator).
+   */
+  triggeredBy?: string;
 }
 
 /**
@@ -249,10 +491,111 @@ export function finalizeRunMeta(
  * `yosemite-s0` all agree. Every fire path (cron scheduler, webhook,
  * catchup/overdue, manual run) gates on this.
  */
-export function jobRunsOnThisDevice(config: Pick<JobConfig, 'devices'>): boolean {
-  if (!config.devices || config.devices.length === 0) return true;
-  const self = machineId();
-  return config.devices.some((d) => normalizeHost(d) === self);
+export function jobRunsOnThisDevice(config: Pick<JobConfig, 'name' | 'devices'>): boolean {
+  const activated = routineEnabledOnThisDevice(config.name);
+  if (activated !== null) return activated;
+  const owner = routineOwnerDevice(config);
+  // Unrestricted: no pin means fleet-wide by design (`watchdog`, `check-updates`).
+  if (owner === null) return true;
+  return owner === machineId();
+}
+
+/**
+ * The ONE device that owns a routine — the single daemon allowed to fire it.
+ *
+ * `devices` is an allowlist, and every listed device used to fire
+ * independently, so a routine pinned to two boxes ran **twice** per schedule:
+ * two full agent sessions doing identical work, burning double the quota. On
+ * this fleet seven routines were in that state, e.g. `security-sweep` running
+ * at 15:30:02 on one box and 15:30:03 on the other, both completing.
+ *
+ * Ownership is a pure function of the config — the first entry in normalized
+ * sort order — so every daemon independently reaches the same answer with no
+ * lease, no cross-device coordination, and no split brain when the fleet
+ * partitions. A multi-entry pin is a misconfiguration
+ * ({@link hasAmbiguousDevicePin}); this keeps such a routine running exactly
+ * once instead of silently dropping it, while `validateJob` refuses to create
+ * a new one and `agents doctor` surfaces the existing ones.
+ *
+ * Returns null when the routine is unrestricted (empty or omitted `devices`).
+ */
+export function routineOwnerDevice(config: Pick<JobConfig, 'devices'>): string | null {
+  // A non-array `devices` is a separate validation error; don't throw here and
+  // don't double-report it.
+  if (!Array.isArray(config.devices)) return null;
+  const devices = config.devices.map((d) => normalizeHost(String(d))).filter(Boolean);
+  if (devices.length === 0) return null;
+  return [...devices].sort()[0];
+}
+
+/**
+ * Does this routine name more than one distinct device? Such a pin used to mean
+ * "fire on each of them"; it now means "fire only on the first", which is
+ * almost certainly not what the author intended either way — so it is reported
+ * as a misconfiguration rather than silently reinterpreted.
+ */
+export function hasAmbiguousDevicePin(config: Pick<JobConfig, 'devices'>): boolean {
+  if (!Array.isArray(config.devices)) return false;
+  const devices = new Set(config.devices.map((d) => normalizeHost(String(d))).filter(Boolean));
+  return devices.size > 1;
+}
+
+/** One routine whose `devices` names more than one machine, with its resolved owner. */
+export interface AmbiguousDevicePin {
+  name: string;
+  devices: string[];
+  /** The device that now fires it — the rest are inert. */
+  owner: string;
+}
+
+/**
+ * Every routine carrying a multi-device pin. Surfaced by `agents doctor` and
+ * `agents routines list` so an existing misconfiguration is visible rather than
+ * silently reinterpreted: before ownership became singular each of these fired
+ * once per listed device, doubling the work and the agent spend.
+ */
+export function findAmbiguousDevicePins(cwd?: string): AmbiguousDevicePin[] {
+  return listJobs(cwd)
+    .filter((job) => job.enabled && hasAmbiguousDevicePin(job))
+    .map((job) => ({
+      name: job.name,
+      devices: (job.devices ?? []).map((d) => normalizeHost(d)),
+      owner: routineOwnerDevice(job) ?? '',
+    }));
+}
+
+/**
+ * Resolve the effective host strategy for a job.
+ * Bare `host:` without an explicit strategy implies `host` (back-compat with
+ * pre-hostStrategy YAML). Otherwise default to `local`.
+ */
+export function resolveHostStrategy(
+  config: Pick<JobConfig, 'hostStrategy' | 'host'>,
+): HostStrategy {
+  if (config.hostStrategy) return config.hostStrategy;
+  if (config.host) return 'host';
+  return 'local';
+}
+
+/**
+ * Parse a CLI `--placement` value into a HostStrategy, or null when empty.
+ * Throws a human-readable Error for unknown values.
+ */
+export function parseHostStrategy(raw: string | undefined | null): HostStrategy | null {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const v = raw.trim().toLowerCase();
+  if ((HOST_STRATEGIES as readonly string[]).includes(v)) return v as HostStrategy;
+  throw new Error(`Invalid placement '${raw}'. Use one of: ${HOST_STRATEGIES.join(', ')}`);
+}
+
+/**
+ * Strategies that dispatch the job body off the firing machine. Without a
+ * `devices` pin every daemon in the fleet would fire and each would dispatch
+ * once — N× duplicate runs. Callers pin to this machine when the user did not
+ * set an explicit allowlist.
+ */
+export function placementRequiresFiringPin(strategy: HostStrategy): boolean {
+  return strategy === 'host' || strategy === 'fleet' || strategy === 'cloud';
 }
 
 /** Human presentation of a device-affinity mismatch for commands and runner. */
@@ -279,7 +622,10 @@ export function checkJobDeviceEligibility(
   if (jobRunsOnThisDevice(config)) return null;
   const allowed = (config.devices ?? []).map((d) => normalizeHost(d));
   const allowedLabel = allowed.join(', ');
-  const firstHost = allowed[0] ?? 'HOST';
+  // The owner is the lowest normalized name, not the first entry as written —
+  // suggesting allowed[0] on an unsorted list points at a device that will
+  // refuse the run for exactly the same reason.
+  const firstHost = routineOwnerDevice(config) ?? allowed[0] ?? 'HOST';
   const message = `Job '${config.name}' can only run on: ${allowedLabel}`;
   const suggestion = `agents routines run ${config.name} --host ${firstHost}`;
   return { message, suggestion, allowedLabel, firstHost };
@@ -346,7 +692,7 @@ export function listJobs(cwd?: string): JobConfig[] {
       jobs.push(job);
     }
   }
-  return jobs;
+  return jobs.map(applyDeviceActivation);
 }
 
 /**
@@ -372,11 +718,16 @@ export function readJob(name: string, cwd?: string): JobConfig | null {
   for (const { scope, path: dir } of dirs) {
     const job = readJobFromDir(dir, name);
     if (job) {
-      if (scope === 'project') return overlayUserRoutineDevices(job, readJobFromDir(userDir, name));
-      return job;
+      if (scope === 'project') return applyDeviceActivation(overlayUserRoutineDevices(job, readJobFromDir(userDir, name)));
+      return applyDeviceActivation(job);
     }
   }
   return null;
+}
+
+function applyDeviceActivation(job: JobConfig): JobConfig {
+  const activated = routineEnabledOnThisDevice(job.name);
+  return activated === null ? job : { ...job, enabled: activated };
 }
 
 function readJobFromDir(dir: string, name: string): JobConfig | null {
@@ -400,10 +751,26 @@ function readJobFile(filePath: string): JobConfig | null {
     // treated as unavailable/inert rather than unrestricted.
     if (Object.prototype.hasOwnProperty.call(parsed, 'device')) return null;
 
+    // Fail closed on a malformed `devices` too. Ownership treats a non-array as
+    // "no pin", and the daemon's load path never calls validateJob — so a YAML
+    // typo (`devices: yosemite-s0` instead of a list) would silently promote the
+    // routine to fleet-wide and fire it on EVERY box. Inert-and-loud beats
+    // unrestricted-and-silent.
+    if (Object.prototype.hasOwnProperty.call(parsed, 'devices')
+        && parsed.devices !== undefined
+        && parsed.devices !== null
+        && !Array.isArray(parsed.devices)) {
+      return null;
+    }
+
     return {
       ...JOB_DEFAULTS,
       ...parsed,
       name: parsed.name || path.basename(filePath).replace(/\.ya?ml$/, ''),
+      // Before a device manifest exists, preserve only explicit legacy state.
+      // A new built-in definition with no `enabled:` field stays opt-in until
+      // setup materializes this host's routines list.
+      enabled: Object.prototype.hasOwnProperty.call(parsed, 'enabled') ? parsed.enabled !== false : false,
     } as JobConfig;
   } catch {
     return null;
@@ -418,6 +785,15 @@ function readJobFile(filePath: string): JobConfig | null {
  */
 export function writeJob(config: JobConfig): void {
   ensureAgentsDir();
+  // Stamp the creator once (RUSH-2020). An edit re-writes a config loaded from
+  // disk, which already carries `actor`, so this preserves the original creator;
+  // only a brand-new routine (no actor yet) gets the current resolver.
+  if (!config.actor) config.actor = resolveActor().id;
+  // Stamped once, on first write, and preserved by every later edit (an edit
+  // re-writes a config loaded from disk, which already carries it). This is the
+  // floor overdue detection uses so a routine is never judged against fires
+  // that predate it.
+  if (!config.createdAt) config.createdAt = new Date().toISOString();
   const jobsDir = getRoutinesDir();
   const ymlPath = safeJoin(jobsDir, config.name + '.yml');
   const yamlPath = safeJoin(jobsDir, config.name + '.yaml');
@@ -436,10 +812,17 @@ export function writeJob(config: JobConfig): void {
   if (output.mode === 'auto') delete output.mode;
   if (output.effort === 'auto') delete output.effort;
   if (output.timeout === '10m') delete output.timeout;
-  if (output.enabled === true) delete output.enabled;
+  delete output.enabled;
   if (output.runOnce === false || output.runOnce === undefined) delete output.runOnce;
-  const devArr = output.devices as string[] | undefined;
-  if (!devArr || devArr.length === 0) delete output.devices;
+  if (output.catchup === true || output.catchup === undefined) delete output.catchup;
+  delete output.devices;
+  // Persist projects in canonical form: deduplicated, first-seen order, field
+  // omitted when nothing survives. This is the schema boundary, so a routine
+  // written from any path (add, edit, enable/disable re-write) lands canonical
+  // regardless of how the caller assembled the array.
+  const normProjects = normalizeProjects(output.projects as string[] | undefined);
+  if (normProjects) output.projects = normProjects;
+  else delete output.projects;
 
   let existingText: string | null = null;
   if (ymlExists || yamlExists) {
@@ -506,8 +889,21 @@ export function deleteJob(name: string): boolean {
 export function setJobEnabled(name: string, enabled: boolean): void {
   const job = readJob(name);
   if (!job) throw new Error(`Job '${name}' not found`);
-  job.enabled = enabled;
-  writeJob(job);
+  const legacyEnabled = enabledRoutineNames() === null
+    ? listJobs().filter((candidate) => candidate.enabled && jobRunsOnThisDevice(candidate)).map((candidate) => candidate.name)
+    : [];
+  setRoutineEnabledOnThisDevice(name, enabled, legacyEnabled);
+}
+
+/** Materialize legacy definition state into this device's activation manifest. */
+export function migrateLegacyRoutineActivation(): boolean {
+  if (enabledRoutineNames() !== null) return false;
+  const jobs = listJobs();
+  if (!jobs.some((job) => job.enabled || Array.isArray(job.devices))) return false;
+  replaceEnabledRoutines(
+    jobs.filter((job) => job.enabled && jobRunsOnThisDevice(job)).map((job) => job.name),
+  );
+  return true;
 }
 
 /** Validate a partial job config, returning a list of human-readable errors. */
@@ -604,24 +1000,47 @@ export function validateJob(config: Partial<JobConfig>): string[] {
   if ((config as Record<string, unknown>).device !== undefined) {
     errors.push('singular "device" key is no longer supported — replace with devices: [<name>] (an array)');
   }
+  if (config.hostStrategy !== undefined) {
+    if (!HOST_STRATEGIES.includes(config.hostStrategy)) {
+      errors.push(`hostStrategy must be one of: ${HOST_STRATEGIES.join(', ')}`);
+    }
+  }
+  const strategy = resolveHostStrategy(config);
   if (config.host !== undefined) {
     if (typeof config.host !== 'string' || config.host.trim() === '') {
       errors.push('host must be a non-empty machine name (a registered host, device, capability tag, or user@host)');
     }
-    // v1: the workflow bundle and the loop driver (with its signal files) live
-    // on the firing machine — neither can cross SSH to the target yet.
+  }
+  if (strategy === 'host' && (!config.host || config.host.trim() === '')) {
+    errors.push("hostStrategy: host requires host: (set via --run-on or host: in YAML)");
+  }
+  // Remote placement (host/fleet/cloud) can't carry workflow/loop/command yet —
+  // those live on the firing machine.
+  if (strategy === 'host' || strategy === 'fleet' || strategy === 'cloud') {
     if (config.workflow) {
-      errors.push("host: can't be combined with workflow: yet (the bundle lives on the firing machine) — run the workflow locally or convert it to a plain prompt");
+      errors.push(`${strategy} placement can't be combined with workflow: yet — run the workflow locally or convert it to a plain prompt`);
     }
     if (config.loop) {
-      errors.push("host: can't be combined with loop: yet (the loop driver and its signal files live on the firing machine)");
+      errors.push(`${strategy} placement can't be combined with loop: yet (the loop driver and its signal files live on the firing machine)`);
     }
     if (config.command) {
-      errors.push("host: can't be combined with command: yet (a plain shell command has no agent to place remotely) — run it locally, or convert it to a prompt");
+      errors.push(`${strategy} placement can't be combined with command: yet (a plain shell command has no agent to place remotely)`);
     }
   }
-  if (config.remoteCwd !== undefined && config.host === undefined) {
-    errors.push('remoteCwd only applies to host:-placed routines — set host: too, or drop it');
+  if (config.remoteCwd !== undefined && strategy !== 'host' && strategy !== 'fleet') {
+    errors.push('remoteCwd only applies to host/fleet-placed routines — set hostStrategy: host|fleet, or drop it');
+  }
+  if (config.source !== undefined) {
+    if (!config.source || typeof config.source !== 'object') {
+      errors.push('source must be an object');
+    } else {
+      if (config.source.kind !== 'project') {
+        errors.push("source.kind must be 'project'");
+      }
+      if (typeof config.source.projectPath !== 'string' || config.source.projectPath.trim() === '') {
+        errors.push('source.projectPath must be a non-empty absolute path');
+      }
+    }
   }
   if (config.devices !== undefined) {
     if (!Array.isArray(config.devices)) {
@@ -635,7 +1054,39 @@ export function validateJob(config: Partial<JobConfig>): string[] {
       }
     }
   }
-
+  // A routine belongs to exactly one device. Listing several used to fire it
+  // once per device — duplicate work, duplicate spend — and making them elect
+  // one owner at runtime would need cross-device coordination nobody wants.
+  if (hasAmbiguousDevicePin(config)) {
+    errors.push(
+      `devices lists ${new Set((config.devices as string[]).map((d) => normalizeHost(String(d)))).size} devices; a routine runs on exactly one. ` +
+      'Pin the single device that should own it, e.g. devices: [yosemite-s0]. ' +
+      'Omit devices entirely for a routine that genuinely belongs on every machine.',
+    );
+  }
+  if (config.catchup !== undefined && typeof config.catchup !== 'boolean') {
+    errors.push('catchup must be a boolean (false to skip running a missed fire late)');
+  }
+  if (config.projects !== undefined) {
+    if (!Array.isArray(config.projects)) {
+      errors.push('projects must be an array of project names (or ["*"] for all projects)');
+    } else if (config.projects.length === 1 && config.projects[0] === '*') {
+      // ["*"] is valid: "all projects" sentinel
+    } else if (config.projects.includes('*')) {
+      errors.push('projects: "*" (all projects) must be the sole entry');
+    } else {
+      for (const p of config.projects) {
+        if (typeof p !== 'string' || p.trim() === '') {
+          errors.push('each entry in projects must be a non-empty project name');
+          break;
+        }
+        if (!isSafeProjectName(p)) {
+          errors.push(`invalid project name "${p}": must start with a letter or digit, contain only letters, digits, dots, hyphens, or underscores`);
+          break;
+        }
+      }
+    }
+  }
   return errors;
 }
 
@@ -682,6 +1133,12 @@ export function validateTrigger(trigger: unknown): string[] {
   if (linear.label !== undefined && typeof linear.label !== 'string') {
     errors.push('trigger.label must be a string');
   }
+  if (linear.stateTo !== undefined && typeof linear.stateTo !== 'string') {
+    errors.push('trigger.stateTo must be a string');
+  }
+  if (linear.stateFrom !== undefined && typeof linear.stateFrom !== 'string') {
+    errors.push('trigger.stateFrom must be a string');
+  }
   return errors;
 }
 
@@ -699,8 +1156,228 @@ export function isPastEndAt(config: Pick<JobConfig, 'endAt'>, now: Date = new Da
   return now.getTime() >= end;
 }
 
+export interface OneShotScheduleParts {
+  minute: number;
+  hour: number;
+  day: number;
+  month: number;
+}
+
+export function parseOneShotLikeSchedule(schedule: string | undefined | null): OneShotScheduleParts | null {
+  if (!schedule) return null;
+  const parts = schedule.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minuteRaw, hourRaw, dayRaw, monthRaw, weekdayRaw] = parts;
+  if (weekdayRaw !== '*') return null;
+  if (![minuteRaw, hourRaw, dayRaw, monthRaw].every((p) => /^\d+$/.test(p))) return null;
+
+  const minute = parseInt(minuteRaw, 10);
+  const hour = parseInt(hourRaw, 10);
+  const day = parseInt(dayRaw, 10);
+  const month = parseInt(monthRaw, 10);
+  if (minute < 0 || minute > 59) return null;
+  if (hour < 0 || hour > 23) return null;
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > 31) return null;
+  return { minute, hour, day, month };
+}
+
+export function isOneShotLikeSchedule(schedule: string | undefined | null): boolean {
+  return parseOneShotLikeSchedule(schedule) !== null;
+}
+
+export function isOneShotRoutine(config: Pick<JobConfig, 'schedule' | 'runOnce'>): boolean {
+  return Boolean(config.runOnce || isOneShotLikeSchedule(config.schedule));
+}
+
+function zonedParts(date: Date, timezone: string): OneShotScheduleParts & { year: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false,
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const get = (type: string): number => parseInt(parts.find((p) => p.type === type)?.value ?? '0', 10);
+  return {
+    year: get('year'),
+    month: get('month'),
+    day: get('day'),
+    hour: get('hour'),
+    minute: get('minute'),
+  };
+}
+
+function zonedDateToUtc(year: number, parts: OneShotScheduleParts, timezone: string): Date | null {
+  const targetUtc = Date.UTC(year, parts.month - 1, parts.day, parts.hour, parts.minute, 0, 0);
+  let candidate = new Date(targetUtc);
+  for (let i = 0; i < 4; i++) {
+    const actual = zonedParts(candidate, timezone);
+    const actualUtc = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute, 0, 0);
+    const delta = actualUtc - targetUtc;
+    if (delta === 0) break;
+    candidate = new Date(candidate.getTime() - delta);
+  }
+  const verify = zonedParts(candidate, timezone);
+  if (
+    verify.year !== year ||
+    verify.month !== parts.month ||
+    verify.day !== parts.day ||
+    verify.hour !== parts.hour ||
+    verify.minute !== parts.minute
+  ) {
+    return null;
+  }
+  return candidate;
+}
+
+export function oneShotScheduleFireDate(
+  schedule: string | undefined | null,
+  now: Date = new Date(),
+  timezone?: string,
+): Date | null {
+  const parts = parseOneShotLikeSchedule(schedule);
+  if (!parts) return null;
+
+  if (timezone) {
+    try {
+      const year = zonedParts(now, timezone).year;
+      return zonedDateToUtc(year, parts, timezone);
+    } catch {
+      return null;
+    }
+  }
+
+  const fireAt = new Date(now.getFullYear(), parts.month - 1, parts.day, parts.hour, parts.minute, 0, 0);
+  if (
+    fireAt.getFullYear() !== now.getFullYear() ||
+    fireAt.getMonth() !== parts.month - 1 ||
+    fireAt.getDate() !== parts.day ||
+    fireAt.getHours() !== parts.hour ||
+    fireAt.getMinutes() !== parts.minute
+  ) {
+    return null;
+  }
+  return fireAt;
+}
+
+export function isPastOneShotRoutine(
+  config: Pick<JobConfig, 'schedule' | 'runOnce' | 'timezone'>,
+  now: Date = new Date(),
+): boolean {
+  if (!isOneShotRoutine(config)) return false;
+  const fireAt = oneShotScheduleFireDate(config.schedule, now, config.timezone);
+  return Boolean(fireAt && now.getTime() >= fireAt.getTime());
+}
+
+export function hasCompletedOneShotRun(
+  config: Pick<JobConfig, 'name' | 'schedule' | 'runOnce' | 'timezone'>,
+  now: Date = new Date(),
+): boolean {
+  if (!isPastOneShotRoutine(config, now)) return false;
+  const fireAt = oneShotScheduleFireDate(config.schedule, now, config.timezone);
+  if (!fireAt) return false;
+  const latest = getLatestRun(config.name);
+  if (!latest || latest.status === 'running') return false;
+  const startedAt = Date.parse(latest.startedAt);
+  return Number.isFinite(startedAt) && startedAt >= fireAt.getTime() - 60_000;
+}
+
+export function shouldPurgeCompletedOneShotRoutine(
+  config: Pick<JobConfig, 'name' | 'schedule' | 'runOnce' | 'timezone'>,
+  now: Date = new Date(),
+): boolean {
+  return hasCompletedOneShotRun(config, now);
+}
+
+/**
+ * Context passed to `resolveJobPrompt` when a job is fired by a webhook. Lets
+ * prompts use `{{issue.identifier}}`, `{{updatedFrom.state.name}}`, etc.
+ */
+export interface WebhookContext {
+  source: string;
+  event: string;
+  action?: string;
+  issue?: unknown;
+  updatedFrom?: unknown;
+  pull_request?: unknown;
+  repository?: unknown;
+}
+
+function getPath(obj: unknown, path: string): unknown {
+  const parts = path.split('.');
+  let current: unknown = obj;
+  for (const part of parts) {
+    if (current === null || current === undefined) return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+/**
+ * Substitute `{{dotted.path}}` placeholders in a string using a webhook context.
+ * Missing values are replaced with an empty string.
+ */
+export function substituteWebhookPrompt(prompt: string, context: WebhookContext): string {
+  return prompt.replace(/\{\{([^{}]+)\}\}/g, (_, rawPath: string) => {
+    const value = getPath(context, rawPath.trim());
+    if (value === undefined || value === null) return '';
+    return String(value);
+  });
+}
+
+/**
+ * Substitute `{{dotted.path}}` placeholders in a string destined for a SHELL,
+ * quoting every substituted value so payload content cannot break out of it.
+ *
+ * `run.command` is executed through a shell, and its context is built from an
+ * external webhook payload — `issue.title`, `issue.description`, and the GitHub
+ * `pull_request` fields are free text any outside contributor can set. Pasting
+ * those in raw (as {@link substituteWebhookPrompt} does, correctly, for prompts)
+ * turns an operator's `echo {{issue.title}}` into a command-injection sink.
+ *
+ * The template itself is operator-authored and stays unquoted, so pipes,
+ * redirects, and `&&` in the configured command keep working. Only the
+ * interpolated values are quoted.
+ *
+ * POSIX `sh` quoting: wrap in single quotes and close/escape/reopen for any
+ * embedded single quote. `exec` uses `cmd.exe` on Windows, which does not
+ * honour these rules — see `assertShellSubstitutionSupported`.
+ */
+export function substituteWebhookCommand(command: string, context: WebhookContext): string {
+  return command.replace(/\{\{([^{}]+)\}\}/g, (_, rawPath: string) => {
+    const value = getPath(context, rawPath.trim());
+    if (value === undefined || value === null) return "''";
+    return `'${String(value).replace(/'/g, `'\\''`)}'`;
+  });
+}
+
+/**
+ * Refuse a `run.command` carrying placeholders on a platform whose shell we
+ * cannot safely quote for. `child_process.exec` runs through `cmd.exe` on
+ * Windows, where POSIX single-quoting is not a quoting mechanism at all, so
+ * {@link substituteWebhookCommand} would not contain a hostile value.
+ *
+ * Fail loud rather than execute something we cannot prove is safe.
+ */
+export function assertShellSubstitutionSupported(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === 'win32' && /\{\{[^{}]+\}\}/.test(command)) {
+    throw new Error(
+      'run.command with {{…}} placeholders is not supported on Windows: the values come from an ' +
+        'untrusted webhook payload and cmd.exe cannot be quoted safely. Use run.prompt, or a ' +
+        'command with no placeholders.',
+    );
+  }
+}
+
 /** Expand built-in and user-defined template variables in a job's prompt string. */
-export function resolveJobPrompt(config: JobConfig): string {
+export function resolveJobPrompt(config: JobConfig, context?: WebhookContext): string {
   const now = new Date();
   const tz = config.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -725,6 +1402,11 @@ export function resolveJobPrompt(config: JobConfig): string {
     for (const [key, value] of Object.entries(config.variables)) {
       prompt = prompt.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
     }
+  }
+
+  // Webhook-driven variables ({{issue.identifier}}, {{updatedFrom.state.name}}, ...)
+  if (context) {
+    prompt = substituteWebhookPrompt(prompt, context);
   }
 
   // Last report (special handling). Only a COMPLETED run's report is injected —
@@ -807,6 +1489,43 @@ export function getLatestCompletedRun(jobName: string): RunMeta | null {
   return null;
 }
 
+/** Duration + outcome rollup for a job's run history. */
+export interface RoutineStats {
+  /** Total run records (any status, including `missed`). */
+  count: number;
+  failed: number;
+  missed: number;
+  avgMs: number;
+  p50: number;
+  p95: number;
+}
+
+/**
+ * Fold a job's run history (`listRuns`) into a duration + outcome summary.
+ * `missed` fires (no process ever ran) carry no `duration` and are excluded
+ * from the latency percentiles but still counted in `count`/`missed`.
+ */
+export function routineStats(jobName: string): RoutineStats {
+  const runs = listRuns(jobName);
+  const failed = runs.filter((r) => r.status === 'failed' || r.status === 'timeout').length;
+  const missed = runs.filter((r) => r.status === 'missed').length;
+  const durations = runs
+    .map((r) => r.duration)
+    .filter((d): d is number => typeof d === 'number' && Number.isFinite(d))
+    .sort((a, b) => a - b);
+  const avgMs = durations.length > 0
+    ? Math.round(durations.reduce((sum, d) => sum + d, 0) / durations.length)
+    : 0;
+  return {
+    count: runs.length,
+    failed,
+    missed,
+    avgMs,
+    p50: Math.round(percentile(durations, 50)),
+    p95: Math.round(percentile(durations, 95)),
+  };
+}
+
 /** Persist run metadata to its run directory as meta.json. */
 export function writeRunMeta(meta: RunMeta): void {
   ensureAgentsDir();
@@ -869,6 +1588,27 @@ export function getJobPath(name: string): string | null {
     if (fs.existsSync(filePath)) {
       return filePath;
     }
+  }
+  return null;
+}
+
+/**
+ * Resolve a routine's YAML across EVERY layer `listJobs`/`readJob` read — user
+ * then system — not just the user dir.
+ *
+ * `getJobPath` is user-layer only because its callers write there. Read paths
+ * that ask "when did this routine come to exist" need the system layer too:
+ * a built-in shipped in the system repo has no user-layer file and no
+ * `createdAt`, so a user-layer-only lookup returns null, the overdue floor is
+ * skipped, and the routine reads as instantly overdue on first daemon start —
+ * exactly the case the floor exists to prevent.
+ */
+export function resolveJobFilePath(name: string): string | null {
+  const userPath = getJobPath(name);
+  if (userPath) return userPath;
+  for (const ext of ['.yml', '.yaml']) {
+    const filePath = safeJoin(getSystemRoutinesDir(), name + ext);
+    if (fs.existsSync(filePath)) return filePath;
   }
   return null;
 }
@@ -962,6 +1702,7 @@ export function installJobFromSource(sourcePath: string, name: string): { succes
     }
 
     writeJob(config);
+    setJobEnabled(config.name, config.enabled);
     return { success: true };
   } catch (err) {
     return { success: false, error: (err as Error).message };

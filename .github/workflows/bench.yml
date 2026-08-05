@@ -1,14 +1,17 @@
 name: Bench
 
-# Perf benchmark harnesses (bench/ + tests/bench-*). Deliberately Linux-only
-# and NON-gating:
+# Post-merge performance benchmark harnesses (bench/ + tests/bench-*).
+# Deliberately Linux-only and informational:
 #
 #   * No per-OS bench legs. The correctness matrix (ubuntu/macOS/Windows x
 #     node 22/24) lives in ci.yml — cross-platform bench numbers add noise
 #     without signal right now, so there is no Windows/macOS/Linux bench fan-out.
-#   * The bench steps are `continue-on-error` — a regression or a nonzero exit
+#   * Most bench steps are `continue-on-error` — a regression or a nonzero exit
 #     never fails the job or blocks a merge. Numbers are informational; read
 #     them in the step log. Infra failures (checkout/install) still surface red.
+#   * The distributed session-query threshold remains a PR gate inside the
+#     `cli-preflight` job in tests.yml. It also runs here to keep the post-merge
+#     benchmark record complete.
 #
 # Each harness runs against a fresh HOME (mktemp -d) so results depend on the
 # harness, not on leftover runner state. resolve-perf no-ops when no agent
@@ -16,8 +19,6 @@ name: Bench
 
 on:
   push:
-    branches: ['main', 'release/**']
-  pull_request:
     branches: ['main', 'release/**']
   workflow_dispatch:
 
@@ -53,3 +54,7 @@ jobs:
       - name: Bench — concurrent session writes
         continue-on-error: true
         run: HOME="$(mktemp -d)" bun tests/bench-concurrent-writes.ts
+
+      - name: Bench — distributed session-query regression guard (RUSH-2118)
+        # NOT continue-on-error, deliberately — see the file header comment.
+        run: bun bench/sessions-active-perf.ts

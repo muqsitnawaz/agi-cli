@@ -1,14 +1,26 @@
 import AppKit
 import Carbon.HIToolbox
 
-// agents-cli menu bar helper. A no-Dock (.accessory) status-bar app whose
-// lifecycle is tied to the routines scheduler daemon — the daemon spawns it on
-// start and it self-terminates when the daemon's PID goes away.
+// agents-cli menu bar helper. A no-Dock (.accessory) status-bar app run as a
+// launchd user agent (`com.phnx-labs.agents-menubar`, KeepAlive), installed and
+// started by `agents menubar enable` -> install-menubar.ts. Do NOT hand-launch
+// the interactive mode: launchd starts it in the GUI session, which is the only
+// context where its global chords can hold the Accessibility grant they need
+// (see Guards.swift).
 //
 // Usage:
-//   MenubarHelper                 # daemon-spawned; quits when daemon stops
-//   MENUBAR_STANDALONE=1 ...      # dev: stay up even with no daemon running
+//   MenubarHelper                 # status item + global hotkeys (launchd-started)
+//   MenubarHelper --notify ...    # one-shot: post a desktop notification, exit
 //   AGENTS_BIN=/path/to/agents    # override the `agents` binary location
+
+// One-shot notification delivery for the daemon (RUSH-2030). Posts and exits
+// WITHOUT starting the status-bar UI, so the daemon can fire branded, actionable
+// notifications by spawning the installed .app in this mode. The notification is
+// attributed to this bundle, so it shows the app's AppIcon (the agents-cli mark)
+// instead of the generic osascript/Script Editor icon. See Notifier (PromptPanel.swift).
+if CommandLine.arguments.contains("--notify") {
+    Notifier.runOneShot(CommandLine.arguments)
+}
 
 // Benchmark mode: time the data-layer methods that build the menu, then exit.
 // No GUI session needed — LocalState reads files, AgentsCLI shells the CLI.
@@ -30,6 +42,57 @@ if ProcessInfo.processInfo.environment["MENUBAR_ISSUE_TEST"] == "1" {
     IssueSelfTest.run()
 }
 
+// Launch-guard self-test: exercise the remote-shell and argument predicates
+// that gate the interactive mode below, print PASS/FAIL, exit. See Guards.swift.
+if ProcessInfo.processInfo.environment["MENUBAR_GUARD_TEST"] == "1" {
+    GuardsSelfTest.run()
+}
+
+// Single-instance self-test: take real flocks and assert the contention
+// outcomes that keep exactly one status item alive. See SingleInstance.swift.
+if ProcessInfo.processInfo.environment["MENUBAR_SINGLE_TEST"] == "1" {
+    SingleInstanceSelfTest.run()
+}
+
+// Child-process self-test: spawn real processes and assert they are bounded by
+// a deadline, killed as a group, and tracked so the next launch can reap them.
+// See ChildProcess.swift.
+if ProcessInfo.processInfo.environment["MENUBAR_CHILD_TEST"] == "1" {
+    ChildProcessSelfTest.run()
+}
+
+// High-load warning self-test: exercise the load classifier + remote-cache
+// filtering (reachable / freshness / cutoff / self-row skip), then print the live
+// loadedDevices() for this box, print PASS/FAIL, exit. See LoadedDeviceSelfTest.swift.
+if ProcessInfo.processInfo.environment["MENUBAR_LOAD_TEST"] == "1" {
+    LoadedDeviceSelfTest.run()
+}
+
+// Everything past here installs the status item and registers the global
+// chords, so it must only run where those chords can actually be serviced.
+// Refuses an ssh-started launch or an unrecognized flag — the two ways a helper
+// that can never hold the Accessibility grant has ended up owning Cmd-Shift-V.
+Guards.enforceForInteractiveLaunch()
+
+// ...and only once. A second helper surfaces the running one's menu and exits
+// rather than installing a duplicate status item (see SingleInstance.swift).
+SingleInstance.enforceOrSurface()
+
+// Kill whatever the previous helper left running. This runs BEFORE any AppKit
+// call on purpose: the death being cleaned up after is a SIGSEGV inside
+// `NSApplication.shared` itself (SLSNewConnection returns null when WindowServer
+// is starved, AppKit dereferences it), so cleanup placed after that line would
+// be skipped by the exact crash it exists to recover from — and the CLI children
+// it abandons are what starve WindowServer in the first place. Only the winner
+// of the single-instance lock reaps, so a surfacing duplicate never kills the
+// incumbent's live children. See ChildProcess.swift.
+let reaped = ChildProcess.reapOrphansFromPreviousLaunch()
+if reaped > 0 {
+    FileHandle.standardError.write(Data(
+        "MenubarHelper: reaped \(reaped) orphaned CLI child process group(s) from a previous launch.\n".utf8
+    ))
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
@@ -39,14 +102,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let controller: StatusItemController
     init(_ c: StatusItemController) { self.controller = c }
     let hotkey = HotkeyManager()
-    let promptController = PromptPanelController()
+    // One panel, two entry points: the Cmd-Shift-O chord and the menu's
+    // "New Task…" row. The status item owns it so both summon the same instance
+    // and an interrupted capture is restored either way.
+    var promptController: PromptPanelController { controller.promptController }
     func applicationDidFinishLaunching(_ notification: Notification) {
         controller.install()
+        // Construct the static panel now and prewarm disk-backed content in the
+        // background. Cmd-Shift-O then only orders an existing window and focuses
+        // its text field; it never waits for session history or image decoding.
+        promptController.prepare()
+        // A duplicate launch surrenders (SingleInstance) and posts this instead
+        // of adding a second status item — so answering it by opening the menu
+        // is what makes "launch it again" show the helper the user already has.
+        //
+        // .deliverImmediately is load-bearing, and only the selector-based
+        // overload accepts it: this app is `.accessory` and so never the active
+        // app, and the default suspension behavior queues a distributed
+        // notification for an inactive app rather than delivering it — the menu
+        // would simply never open.
+        DistributedNotificationCenter.default().addObserver(
+            controller, selector: #selector(StatusItemController.surface(_:)),
+            name: SingleInstance.surfaceNotification, object: nil,
+            suspensionBehavior: .deliverImmediately
+        )
+        // Own notification click-through (RUSH-2030): the daemon posts branded
+        // notifications via one-shot `--notify` processes, but this persistent
+        // instance is the NSUserNotificationCenter delegate that opens their
+        // click URL (a run report/log, or the runs folder) when clicked.
+        Notifier.wireClickHandler()
         let mods = UInt32(cmdKey | shiftKey)
         hotkey.register([
             .init(id: HotkeyManager.clipID, keyCode: UInt32(kVK_ANSI_V), modifiers: mods,
+                  label: "Cmd-Shift-V (paste clip reference)",
                   onFire: { Clip.run() }),
             .init(id: HotkeyManager.promptID, keyCode: UInt32(kVK_ANSI_O), modifiers: mods,
+                  label: "Cmd-Shift-O (quick capture)",
                   onFire: { [weak self] in self?.promptController.summon() }),
         ])
         // Preview the quick-issue panel without the global hotkey (QA / a machine

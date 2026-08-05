@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'child_process';
+import { Command } from 'commander';
 import type { OpenBlock } from '../lib/feed.js';
 import {
   controlFeedSession,
@@ -10,11 +11,42 @@ import {
   parseRemoteFeed,
   prepareLocalFeedBlocks,
   remoteFeedHostsToDial,
+  resolveFeedFilter,
   sessionHintsFromActive,
   shouldIncludeLocalFeed,
+  registerFeedCommand,
+  FEED_POST_HELP,
 } from './feed.js';
 import { groupBlocksByOutcome } from '../lib/feed-outcome.js';
 import { GLYPH } from '../lib/comms-render.js';
+import { formatActivityLine } from '../lib/activity.js';
+
+describe('resolveFeedFilter', () => {
+  it('defaults to needs and normalizes aliases', () => {
+    expect(resolveFeedFilter(undefined)).toBe('needs');
+    expect(resolveFeedFilter('')).toBe('needs');
+    expect(resolveFeedFilter('bogus')).toBe('needs');
+    expect(resolveFeedFilter('needs')).toBe('needs');
+    expect(resolveFeedFilter('Updates')).toBe('updates');
+    expect(resolveFeedFilter('update')).toBe('updates');
+    expect(resolveFeedFilter('ALL')).toBe('all');
+  });
+});
+
+describe('feed post help', () => {
+  it('explains session recovery and the milestone-versus-important delivery policy', () => {
+    const program = new Command();
+    registerFeedCommand(program);
+    const feed = program.commands.find((command) => command.name() === 'feed');
+    const post = feed?.commands.find((command) => command.name() === 'post');
+    const help = post?.helpInformation() ?? '';
+
+    expect(help).toContain('launch activity / pid registry');
+    expect(FEED_POST_HELP).toContain('A milestone is always recorded, but it does not text');
+    expect(FEED_POST_HELP).toContain('Add --level important for a');
+    expect(FEED_POST_HELP).toContain('The owner destination comes from humans.yaml');
+  });
+});
 
 const children: ChildProcess[] = [];
 
@@ -206,5 +238,34 @@ describe('sessionHintsFromActive', () => {
       prNumber: 12,
       worktreeSlug: 'rush-9-fix',
     });
+  });
+
+  it('maps session cwd into project hint, worktree-aware', () => {
+    const hints = sessionHintsFromActive([
+      {
+        sessionId: 'sess-wt',
+        agentId: 'agent-wt',
+        cwd: '/home/muqsit/src/agents-cli/.agents/worktrees/feature-x',
+      },
+      {
+        sessionId: 'sess-plain',
+        cwd: '/home/muqsit/src/sidecar',
+      },
+    ]);
+    expect(hints[0].project).toBe('agents-cli');
+    expect(hints[1].project).toBe('sidecar');
+  });
+});
+
+describe('formatActivityLine', () => {
+  it('renders checklist milestone events', () => {
+    const base = { v: 1, ts: new Date().toISOString(), sessionId: 's', mailboxId: 's', host: 'zion', runtime: 'headless' } as const;
+    const taskCompleted = formatActivityLine({ ...base, event: 'task.completed', tier: 'milestone', agent: 'claude', detail: 'Write tests 2/3 done' });
+    expect(taskCompleted).toContain('task completed');
+    expect(taskCompleted).toContain('Write tests 2/3 done');
+
+    const checklistCreated = formatActivityLine({ ...base, event: 'checklist.created', tier: 'milestone', agent: 'claude', detail: '3 tasks' });
+    expect(checklistCreated).toContain('checklist created');
+    expect(checklistCreated).toContain('3 tasks');
   });
 });

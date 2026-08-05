@@ -80,7 +80,7 @@ function expectScanParity(inc: any, full: any) {
     'timestamp', 'cwd', 'gitBranch', 'version', 'topic', 'entrypoint',
     'messageCount', 'tokenCount', 'outputTokens', 'costUsd', 'durationMs',
     'lastActivity', 'contentText', 'prUrl', 'prNumber', 'worktreeSlug',
-    'ticketId', 'createdTickets', 'spawnedTeam', 'plan',
+    'ticketId', 'createdTickets', 'spawnedTeam', 'plan', 'todos', 'recentDirectoriesTouched',
   ];
   for (const f of fields) {
     expect(inc[f], `field ${f}`).toEqual(full[f]);
@@ -94,6 +94,8 @@ function richLines(): object[] {
     { type: 'user', timestamp: '2026-06-28T00:00:00.000Z', cwd: '/home/u/repo', gitBranch: 'RUSH-42-fix', version: '2.1.0', entrypoint: 'cli', message: { role: 'user', content: 'investigate the flaky exec test' } },
     { type: 'assistant', timestamp: '2026-06-28T00:01:00.000Z', uuid: 'a-1', message: { id: 'msg_1', model: 'claude-sonnet-4-5', content: [{ type: 'text', text: 'looking' }], usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 5, cache_creation_input_tokens: 3 } } },
     { type: 'assistant', timestamp: '2026-06-28T00:02:00.000Z', uuid: 'a-2', message: { id: 'msg_2', model: 'claude-sonnet-4-5', content: [{ type: 'tool_use', id: 'plan-1', name: 'ExitPlanMode', input: { plan: '# Plan\n- step one' } }], usage: { input_tokens: 50, output_tokens: 10 } } },
+    { type: 'assistant', timestamp: '2026-06-28T00:02:10.000Z', uuid: 'task-1', message: { id: 'task-msg-1', model: 'claude-sonnet-4-5', content: [{ type: 'tool_use', id: 'tc-1', name: 'TaskCreate', input: { subject: 'Inspect', activeForm: 'Inspecting' } }, { type: 'tool_use', id: 'edit-1', name: 'Edit', input: { file_path: '/home/u/repo/src/config.ts' } }], usage: { input_tokens: 1, output_tokens: 1 } } },
+    { type: 'assistant', timestamp: '2026-06-28T00:02:20.000Z', uuid: 'task-2', message: { id: 'task-msg-2', model: 'claude-sonnet-4-5', content: [{ type: 'tool_use', id: 'tu-1', name: 'TaskUpdate', input: { taskId: '1', status: 'completed' } }], usage: { input_tokens: 1, output_tokens: 1 } } },
     { type: 'user', timestamp: '2026-06-28T00:03:00.000Z', message: { role: 'user', content: 'yes go ahead' } },
     { type: 'ai-title', aiTitle: 'Flaky exec test fix', sessionId: 's' },
     { type: 'assistant', timestamp: '2026-06-28T00:04:00.000Z', uuid: 'a-3', message: { id: 'msg_3', model: 'claude-sonnet-4-5', content: [{ type: 'text', text: 'done' }], usage: { input_tokens: 30, output_tokens: 40 } } },
@@ -351,5 +353,46 @@ describe('incremental parity — partial trailing line', () => {
 
     const full = await scanClaudeSession(fp);
     expectScanParity(step3.scan, full);
+  });
+});
+
+describe('incremental parity — skill/slash-command usage (#12)', () => {
+  // A Skill tool_use, a user-typed <command-name> wrapper, and a model-invoked
+  // SlashCommand tool_use — the three sources session_resource_usage draws on.
+  function skillAndCommandLines(): object[] {
+    return [
+      { type: 'user', timestamp: '2026-06-28T00:00:00.000Z', cwd: '/home/u/repo', message: { role: 'user', content: 'run the teams skill' } },
+      { type: 'assistant', timestamp: '2026-06-28T00:00:10.000Z', uuid: 'a-1', message: { id: 'msg_1', model: 'claude-sonnet-4-5', content: [{ type: 'tool_use', id: 'sk-1', name: 'Skill', input: { skill: 'teams' } }], usage: { input_tokens: 5, output_tokens: 5 } } },
+      { type: 'user', timestamp: '2026-06-28T00:00:20.000Z', message: { role: 'user', content: '<command-message>recap</command-message>\n<command-name>/recap</command-name>' } },
+      { type: 'assistant', timestamp: '2026-06-28T00:00:30.000Z', uuid: 'a-2', message: { id: 'msg_2', model: 'claude-sonnet-4-5', content: [{ type: 'tool_use', id: 'sk-2', name: 'Skill', input: { skill: 'teams' } }], usage: { input_tokens: 5, output_tokens: 5 } } },
+      { type: 'assistant', timestamp: '2026-06-28T00:00:40.000Z', uuid: 'a-3', message: { id: 'msg_3', model: 'claude-sonnet-4-5', content: [{ type: 'tool_use', id: 'sc-1', name: 'SlashCommand', input: { command: '/code:commit fix the bug' } }], usage: { input_tokens: 5, output_tokens: 5 } } },
+    ];
+  }
+
+  it('replaying across a split at EVERY line index equals a full parse, including skillsUsed/slashCommandsUsed', async () => {
+    const lines = skillAndCommandLines();
+    const fullSerialized = lines.map((l) => JSON.stringify(l));
+    for (let k = 1; k < fullSerialized.length; k++) {
+      const chunkA = fullSerialized.slice(0, k).join('\n');
+      const chunkB = fullSerialized.slice(k).join('\n');
+      const { inc, full } = await replay([chunkA, chunkB]);
+      expectScanParity(inc, full);
+      expect(inc.skillsUsed, `split at ${k}`).toEqual(full.skillsUsed);
+      expect(inc.slashCommandsUsed, `split at ${k}`).toEqual(full.slashCommandsUsed);
+    }
+  });
+
+  it('a full parse tallies both skills and both slash-command sources correctly', async () => {
+    const full = await scanClaudeSession(await (async () => {
+      const fp = path.join(dir, 'skills-full.jsonl');
+      fs.writeFileSync(fp, jsonl(skillAndCommandLines()));
+      return fp;
+    })());
+    expect(full.skillsUsed).toEqual([{ name: 'teams', count: 2 }]);
+    // Both have count 1, so tie-broken alphabetically: '/code:commit' < '/recap'.
+    expect(full.slashCommandsUsed).toEqual([
+      { name: '/code:commit', count: 1 },
+      { name: '/recap', count: 1 },
+    ]);
   });
 });

@@ -15,6 +15,8 @@ export interface TeamRow {
   team: TaskInfo;
   agents: AgentStatusDetail[];
   description?: string;
+  /** Short id of the session that spawned this team, when the index knows it. */
+  spawnedBy?: string;
 }
 
 export interface PickedTeam {
@@ -24,7 +26,6 @@ export interface PickedTeam {
 const AGENT_LABEL: Record<string, string> = {
   claude: 'Claude',
   codex: 'Codex',
-  gemini: 'Gemini',
   cursor: 'Cursor',
   opencode: 'OpenCode',
 };
@@ -146,7 +147,8 @@ export function formatTeamRow(row: TeamRow, nameWidth: number, compositionWidth:
   const runtime = runtimeSpan(t);
   const age = chalk.gray(relTime(t.modified_at));
 
-  const middleParts = [status, work, runtime].filter(Boolean);
+  const spawnedBy = row.spawnedBy ? chalk.green(`by ${row.spawnedBy}`) : '';
+  const middleParts = [status, work, runtime, spawnedBy].filter(Boolean);
   const middle = middleParts.join(chalk.gray(' · '));
 
   return `${name}  ${composition}  ${middle}${middle ? chalk.gray(' · ') : ''}${age}`;

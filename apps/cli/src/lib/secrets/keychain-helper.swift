@@ -1,6 +1,11 @@
 import Foundation
 import Security
 import LocalAuthentication
+
+var operationPrompt = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_PROMPT"] ?? "Unlock agents-cli secrets"
+let operationPromptWithoutDuration = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_PROMPT_BASE"] ?? operationPrompt
+let defaultBundlePolicy = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_DEFAULT_POLICY"] ?? "daily"
+let forcePromptDuration = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_FORCE_DURATION"] == "1"
 import AppKit
 
 func writeStderr(_ message: String) {
@@ -23,6 +28,8 @@ let authContext: LAContext = {
     return ctx
 }()
 
+let skipAuthenticationUI = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_SKIP_AUTH_UI"] == "1"
+
 // Build the access control that gates every item we write: unlock requires a
 // current-enrollment biometry match OR the device passcode, and the item is
 // scoped to this device only. The OS itself enforces this on every
@@ -42,6 +49,39 @@ func buildBiometryAccessControl() -> SecAccessControl {
         die(2, "Failed to build biometry access control: \(msg)")
     }
     return access
+}
+
+// A "silent" service is one the CLI stores WITHOUT a biometry ACL by contract:
+// bundle metadata (`agents-cli.bundles.<name>` cleartext, or `agents-cli.h.<32
+// hex>.m` hashed) and the HMAC key (`agents-cli.hmackey`). Their reads must never
+// pop Touch ID — enumeration (`secrets list`) and the pre-value hmackey read are
+// on the silent path (SEC-4/SEC-11/SEC-12). Value items are NOT silent here; their
+// per-bundle tier is reconciled by the TS layer (never ⇒ no-ACL). This gate exists
+// so the JIT migrate/rehome paths below re-add a silent item WITHOUT re-stamping it
+// with the biometry ACL — the bug that turned a no-ACL metadata/hmackey item into a
+// gated one on read and produced a SECOND Touch ID sheet.
+func isSilentServiceName(_ service: String) -> Bool {
+    if service == "agents-cli.hmackey" { return true }
+    if service.hasPrefix("agents-cli.bundles.") { return true }
+    if service.hasPrefix("agents-cli.h.") && service.hasSuffix(".m") {
+        let mid = service.dropFirst("agents-cli.h.".count).dropLast(".m".count)
+        if mid.count == 32 && mid.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) {
+            return true
+        }
+    }
+    return false
+}
+
+// Attach the tier-correct protection to a fresh SecItemAdd attribute dict: silent
+// items (metadata, hmackey) get the no-ACL accessibility that `set-no-acl` uses;
+// everything else keeps the biometry-or-passcode ACL. Centralized so the migrate
+// and rehome paths cannot drift apart.
+func applyMigrationProtection(_ attrs: inout [CFString: Any], service: String) {
+    if isSilentServiceName(service) {
+        attrs[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+    } else {
+        attrs[kSecAttrAccessControl] = buildBiometryAccessControl()
+    }
 }
 
 // The data-protection keychain access group. This is the
@@ -170,8 +210,8 @@ func readItem(service: String, account: String) -> ReadOutcome {
     dpQuery[kSecReturnData] = kCFBooleanTrue!
     dpQuery[kSecMatchLimit] = kSecMatchLimitOne
     dpQuery[kSecUseAuthenticationContext] = authContext
-    dpQuery[kSecUseAuthenticationUI] = kSecUseAuthenticationUIAllow
-    dpQuery[kSecUseOperationPrompt] = "Unlock agents-cli secrets" as CFString
+    dpQuery[kSecUseAuthenticationUI] = skipAuthenticationUI ? kSecUseAuthenticationUISkip : kSecUseAuthenticationUIAllow
+    dpQuery[kSecUseOperationPrompt] = operationPrompt as CFString
     var dpResult: AnyObject?
     let dpStatus = SecItemCopyMatching(dpQuery as CFDictionary, &dpResult)
     if dpStatus == errSecSuccess,
@@ -193,8 +233,8 @@ func readItem(service: String, account: String) -> ReadOutcome {
     orphanQuery[kSecReturnPersistentRef] = kCFBooleanTrue!
     orphanQuery[kSecMatchLimit] = kSecMatchLimitOne
     orphanQuery[kSecUseAuthenticationContext] = authContext
-    orphanQuery[kSecUseAuthenticationUI] = kSecUseAuthenticationUIAllow
-    orphanQuery[kSecUseOperationPrompt] = "Unlock agents-cli secrets" as CFString
+    orphanQuery[kSecUseAuthenticationUI] = skipAuthenticationUI ? kSecUseAuthenticationUISkip : kSecUseAuthenticationUIAllow
+    orphanQuery[kSecUseOperationPrompt] = operationPrompt as CFString
     var orphanResult: AnyObject?
     let orphanStatus = SecItemCopyMatching(orphanQuery as CFDictionary, &orphanResult)
     if orphanStatus == errSecSuccess,
@@ -212,8 +252,8 @@ func readItem(service: String, account: String) -> ReadOutcome {
     fileQuery[kSecReturnData] = kCFBooleanTrue!
     fileQuery[kSecMatchLimit] = kSecMatchLimitOne
     fileQuery[kSecUseAuthenticationContext] = authContext
-    fileQuery[kSecUseAuthenticationUI] = kSecUseAuthenticationUIAllow
-    fileQuery[kSecUseOperationPrompt] = "Unlock agents-cli secrets" as CFString
+    fileQuery[kSecUseAuthenticationUI] = skipAuthenticationUI ? kSecUseAuthenticationUISkip : kSecUseAuthenticationUIAllow
+    fileQuery[kSecUseOperationPrompt] = operationPrompt as CFString
     var fileResult: AnyObject?
     let fileStatus = SecItemCopyMatching(fileQuery as CFDictionary, &fileResult)
     guard fileStatus == errSecSuccess,
@@ -257,7 +297,9 @@ func migrateInline(service: String, account: String, value: String) {
     // errSecDuplicateItem; that delete IS scoped (dpBase carries the DP flag).
     SecItemDelete(dpBase(service: service, account: account) as CFDictionary)
     var addAttrs = dpBase(service: service, account: account)
-    addAttrs[kSecAttrAccessControl] = buildBiometryAccessControl()
+    // Silent items (metadata, hmackey) migrate no-ACL; forcing the biometry ACL
+    // here is what turned a silent item into a gated one on read (the 2nd sheet).
+    applyMigrationProtection(&addAttrs, service: service)
     addAttrs[kSecValueData] = valueData
     let addStatus = SecItemAdd(addAttrs as CFDictionary, nil)
     if addStatus != errSecSuccess {
@@ -282,7 +324,8 @@ func rehomeOrphan(service: String, account: String, value: String, orphanRef: Da
     // hit errSecDuplicateItem, then add the pinned copy with the biometry ACL.
     SecItemDelete(dpBase(service: service, account: account) as CFDictionary)
     var addAttrs = dpBase(service: service, account: account)
-    addAttrs[kSecAttrAccessControl] = buildBiometryAccessControl()
+    // Silent items (metadata, hmackey) re-home no-ACL; see applyMigrationProtection.
+    applyMigrationProtection(&addAttrs, service: service)
     addAttrs[kSecValueData] = valueData
     let addStatus = SecItemAdd(addAttrs as CFDictionary, nil)
     guard addStatus == errSecSuccess else {
@@ -347,6 +390,7 @@ case "list":
         kSecReturnAttributes: kCFBooleanTrue!,
         kSecUseDataProtectionKeychain: kCFBooleanTrue!,
         kSecAttrSynchronizable: kCFBooleanFalse!,
+        kSecUseAuthenticationUI: kSecUseAuthenticationUISkip,
     ]
     var items: [[String: Any]] = []
     for query in [fileQuery, dpQuery] {
@@ -484,6 +528,18 @@ case "get-batch":
         let outcome = readItem(service: service, account: account)
         dieIfCancelled(outcome.status)
         if let value = outcome.value {
+            // Bundle metadata is the first batch item and is no-ACL, so it can
+            // refine the prompt before the first protected value triggers UI.
+            // Only daily bundles are auto-held; always/never reads must not
+            // claim a duration that does not exist.
+            if let data = value.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let tier = json["tier"] as? String
+                let daily = tier == "daily" || tier == "session" || (tier == nil && defaultBundlePolicy == "daily")
+                if !forcePromptDuration && !daily {
+                    operationPrompt = operationPromptWithoutDuration
+                }
+            }
             if service.hasPrefix("agents-cli.") {
                 if outcome.needsMigration {
                     migrateInline(service: service, account: account, value: value)
@@ -754,6 +810,7 @@ case "list-synced":
         kSecClass: kSecClassGenericPassword,
         kSecMatchLimit: kSecMatchLimitAll,
         kSecReturnAttributes: kCFBooleanTrue!,
+        kSecUseAuthenticationUI: kSecUseAuthenticationUISkip,
         kSecUseDataProtectionKeychain: kCFBooleanTrue!,
         kSecAttrSynchronizable: kCFBooleanTrue!,
     ]

@@ -35,16 +35,11 @@ import {
   SnapshotWatchRequest,
   TerminalTuple,
   TuplesSnapshotPayload,
-  WatchdogStallPayload,
-  WatchdogVersionsPayload,
-  WatchdogWatchRequest,
 } from './protocol';
 import { ReadinessDetector } from './readinessDetector';
 import { SessionWatcher } from './sessionWatcher';
 import { WatcherRoot } from './sessionParse';
-import { WatchdogDetector } from './watchdogDetector';
 import { SnapshotDetector } from './snapshotDetector';
-import { AgentsViewJsonAgent } from '../core/resumeInBest';
 
 /** Enable + configure the centralized detectors (#68, #69). */
 export interface MonitorDetectorOptions {
@@ -56,14 +51,6 @@ export interface MonitorDetectorOptions {
   sessionRoots?: WatcherRoot[];
   /** Session-watcher debounce (tests). */
   sessionDebounceMs?: number;
-  /** Run the sessionId-keyed watchdog stall detector (#70). Default true. */
-  watchdog?: boolean;
-  /** Watchdog stat cadence (tests). */
-  watchdogTickMs?: number;
-  /** Watchdog `agents view` cadence (tests). */
-  watchdogViewPollMs?: number;
-  /** Inject the `agents view` fetcher (tests). */
-  watchdogFetchView?: (agentKey: string) => Promise<AgentsViewJsonAgent | null>;
   /** Run the panel/floor snapshot detector (#71). Default true. */
   snapshot?: boolean;
   /** Snapshot recompute cadence (tests). */
@@ -97,7 +84,6 @@ export class MonitorHost {
   private readonly detectorOpts?: MonitorDetectorOptions;
   private readinessDetector?: ReadinessDetector;
   private sessionWatcher?: SessionWatcher;
-  private watchdogDetector?: WatchdogDetector;
   private snapshotDetector?: SnapshotDetector;
 
   constructor(options: MonitorHostOptions = {}) {
@@ -116,11 +102,6 @@ export class MonitorHost {
   /** Live session roots being watched (verification/tests). */
   get watchedRootCount(): number {
     return this.sessionWatcher?.watchedRootCount ?? 0;
-  }
-
-  /** Distinct sessions the watchdog detector is watching (verification/tests). */
-  get watchedSessionCount(): number {
-    return this.watchdogDetector?.watchedSessionCount ?? 0;
   }
 
   /** Distinct snapshot tuples the detector is computing (verification/tests). */
@@ -144,8 +125,6 @@ export class MonitorHost {
     this.readinessDetector = undefined;
     this.sessionWatcher?.stop();
     this.sessionWatcher = undefined;
-    this.watchdogDetector?.stop();
-    this.watchdogDetector = undefined;
     this.snapshotDetector?.stop();
     this.snapshotDetector = undefined;
     this.slices.clear();
@@ -177,16 +156,6 @@ export class MonitorHost {
         debounceMs: opts.sessionDebounceMs,
       });
       this.sessionWatcher.start();
-    }
-    if (opts.watchdog !== false) {
-      this.watchdogDetector = new WatchdogDetector({
-        emitStall: (fact) => this.broadcastWatchdogStall(fact),
-        emitVersions: (fact) => this.broadcastWatchdogVersions(fact),
-        tickMs: opts.watchdogTickMs,
-        viewPollMs: opts.watchdogViewPollMs,
-        fetchView: opts.watchdogFetchView,
-      });
-      this.watchdogDetector.start();
     }
     if (opts.snapshot !== false) {
       this.snapshotDetector = new SnapshotDetector({
@@ -220,11 +189,6 @@ export class MonitorHost {
     if (req && op === MONITOR_OP.armShellAdoption) {
       const r = req as ArmShellAdoptionRequest;
       this.readinessDetector?.armShellAdoption(r.pid);
-      return { ok: true };
-    }
-    if (req && op === MONITOR_OP.watchdogWatch) {
-      const r = req as WatchdogWatchRequest;
-      this.watchdogDetector?.setWatches(r.windowId, r.watches ?? []);
       return { ok: true };
     }
     if (req && op === MONITOR_OP.snapshotWatch) {
@@ -273,14 +237,6 @@ export class MonitorHost {
 
   private broadcastSessionWarmth(payload: SessionWarmthPayload): void {
     this.broadcast(MONITOR_FACT.sessionWarmth, payload);
-  }
-
-  private broadcastWatchdogStall(payload: WatchdogStallPayload): void {
-    this.broadcast(MONITOR_FACT.watchdogStall, payload);
-  }
-
-  private broadcastWatchdogVersions(payload: WatchdogVersionsPayload): void {
-    this.broadcast(MONITOR_FACT.watchdogVersions, payload);
   }
 
   private broadcastPanelSnapshot(payload: PanelSnapshotPayload): void {

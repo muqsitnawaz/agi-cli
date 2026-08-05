@@ -76,7 +76,13 @@ jobs:
         run: bun run build
 
       - name: Test
-        run: bun run test
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            echo "Windows release leg stops after install + native deps + build; full Vitest remains on Linux and path-filtered Windows gates."
+          else
+            bun run test
+          fi
 
   # No CI publish job — publishing happens locally on macOS via
   # `scripts/release.sh <version> --apply`.
