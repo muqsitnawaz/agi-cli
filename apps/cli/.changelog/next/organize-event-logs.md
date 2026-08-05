@@ -1,1 +1,0 @@
-- Move operational event logs from the git-backed `~/.agents/` root into `~/.agents/.history/events/`, including existing numbered gzip archives.
