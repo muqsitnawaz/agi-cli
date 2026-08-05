@@ -16,6 +16,7 @@ import {
   readProfile,
   resolveProfileForRun,
   writeProfile,
+  profileExists,
   listProfiles,
   type Profile,
 } from './profiles.js';
