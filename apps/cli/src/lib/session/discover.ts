@@ -2700,9 +2700,26 @@ function readHermesMeta(filePath: string): { meta: SessionMeta; content: string 
  * Muse Code stores one session per directory under
  * ~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl (event-sourced
  * JSONL). Walk the tree for session.jsonl files and index each one.
+ *
+ * Also scan version homes (`versions/muse/<v>/home/.local/share/muse/sessions`)
+ * so managed/isolated runs that rewrite HOME still show up in `agents sessions`.
  */
 function scanMuseIncremental(onProgress?: (p: ScanProgress) => void): Promise<void> {
-  if (!fs.existsSync(MUSE_SESSIONS_DIR)) return Promise.resolve();
+  const roots: string[] = [];
+  if (fs.existsSync(MUSE_SESSIONS_DIR)) roots.push(MUSE_SESSIONS_DIR);
+  for (const root of VERSIONS_ROOTS) {
+    const versionsBase = path.join(root, 'versions', 'muse');
+    if (!fs.existsSync(versionsBase)) continue;
+    try {
+      for (const version of fs.readdirSync(versionsBase)) {
+        const dir = path.join(versionsBase, version, 'home', '.local', 'share', 'muse', 'sessions');
+        if (fs.existsSync(dir)) roots.push(dir);
+      }
+    } catch {
+      /* unreadable */
+    }
+  }
+  if (roots.length === 0) return Promise.resolve();
 
   const filePaths: string[] = [];
   const walk = (dir: string): void => {
@@ -2723,7 +2740,7 @@ function scanMuseIncremental(onProgress?: (p: ScanProgress) => void): Promise<vo
       }
     }
   };
-  walk(MUSE_SESSIONS_DIR);
+  for (const root of roots) walk(root);
 
   const changed = filterChangedFiles(filePaths);
   if (changed.length === 0) return Promise.resolve();

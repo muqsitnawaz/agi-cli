@@ -372,7 +372,7 @@ describe('buildExecCommand', () => {
         expect(cmd[cmd.indexOf('--reasoning-effort') + 1]).toBe('high');
       });
 
-      it('headless resume uses --session-id; interactive uses resume subcommand', () => {
+      it('headless resume uses --session-id; interactive uses resume <id> in that order', () => {
         const headless = buildExecCommand(opts({
           agent: 'muse',
           mode: 'edit',
@@ -389,16 +389,25 @@ describe('buildExecCommand', () => {
 
         const interactive = buildExecCommand(opts({
           agent: 'muse',
-          mode: 'edit',
+          mode: 'plan',
           prompt: undefined,
           interactive: true,
           resume: true,
           sessionId: 'dbb09ec7-85fd-44bb-905a-95b9c39bb5b6',
         }));
-        expect(interactive).toContain('resume');
-        expect(interactive).toContain('dbb09ec7-85fd-44bb-905a-95b9c39bb5b6');
+        // Order is load-bearing: `muse resume <uuid> …flags`, never
+        // `muse resume --disable-write <uuid>`.
+        expect(interactive.slice(0, 3)).toEqual([
+          'muse',
+          'resume',
+          'dbb09ec7-85fd-44bb-905a-95b9c39bb5b6',
+        ]);
         expect(interactive).not.toContain('exec');
         expect(interactive).not.toContain('--session-id');
+        // Mode flags come AFTER the session id.
+        const idIdx = interactive.indexOf('dbb09ec7-85fd-44bb-905a-95b9c39bb5b6');
+        const flagIdx = interactive.indexOf('--disable-write');
+        expect(flagIdx).toBeGreaterThan(idIdx);
       });
 
       it('json adds --json', () => {

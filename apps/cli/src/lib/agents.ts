@@ -800,20 +800,25 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     instructionsFile: 'AGENTS.md',
     format: 'markdown',
     variableSyntax: '$ARGUMENTS',
-    supportsHooks: true,
+    // Native Muse hooks exist, but agents-cli has no registrar — leave off.
+    supportsHooks: false,
     capabilities: {
-      // Project hooks: <repo>/.muse/hooks.json; user hooks in settings.json.
-      // Lifecycle events include SessionStart, PreToolUse, PostToolUse, Stop, …
-      hooks: true,
+      // Muse natively supports project `.muse/hooks.json` and settings hooks,
+      // but agents-cli has no registerHooksForMuse writer yet — keep false so
+      // the capability table stays truthful (Pi pattern).
+      hooks: false,
       mcp: true,
       mcpHttp: true,
       mcpHeaders: true,
-      // Approval modes (--approval-mode untrusted|on-request|never) + sandbox.
-      allowlist: true,
+      // Approval modes exist on the CLI (--approval-mode, --yolo) but there is
+      // no agents-cli permissions writer for Muse settings — keep false.
+      allowlist: false,
       skills: true,
       // No slash-command file dir; skills double as reusable workflows.
       commands: false,
-      plugins: true,
+      // Plugins exist under ~/.local/share/muse/plugins, but agents-cli has no
+      // muse plugin install path yet — keep false until a writer lands.
+      plugins: false,
       // Runtime multi-agent / subagents exist, but there is no installable
       // subagent-definition directory for agents-cli to sync into (capability
       // table must stay truthful — see subagents-registry completeness).

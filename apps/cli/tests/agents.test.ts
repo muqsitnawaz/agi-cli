@@ -178,14 +178,15 @@ describe('pi (Oh My Pi)', () => {
 });
 
 describe('Muse Code install targets', () => {
-  it('registers Muse with skills, MCP, hooks, plugins, AGENTS.md rules, and no subagent install dir', () => {
+  it('registers Muse with skills, MCP, AGENTS.md rules; hooks/plugins/allowlist false until writers land', () => {
     expect(ALL_AGENT_IDS).toContain('muse');
     expect(capableAgents('mcp')).toContain('muse');
     expect(capableAgents('skills')).toContain('muse');
-    expect(capableAgents('plugins')).toContain('muse');
-    expect(capableAgents('hooks')).toContain('muse');
-    expect(capableAgents('allowlist')).toContain('muse');
     expect(capableAgents('memory')).toContain('muse');
+    // Native Muse surfaces exist, but agents-cli has no writers yet — keep false.
+    expect(capableAgents('plugins')).not.toContain('muse');
+    expect(capableAgents('hooks')).not.toContain('muse');
+    expect(capableAgents('allowlist')).not.toContain('muse');
     expect(capableAgents('commands')).not.toContain('muse');
     // Runtime multi-agent exists, but agents-cli has no installable subagent target.
     expect(capableAgents('subagents')).not.toContain('muse');

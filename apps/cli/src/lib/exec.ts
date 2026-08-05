@@ -871,21 +871,22 @@ export function buildExecCommand(options: ExecOptions): string[] {
     }
   }
 
-  // Muse interactive resume is a subcommand (`muse resume <id>`), not a flag.
-  // Headless resume keeps the base `muse exec` and uses `--session-id` via the
-  // normal resume flag path below. When resuming interactively, append the
-  // resume verb so the session id becomes a positional later.
-  if (options.agent === 'muse' && options.resume && interactive && !cmd.includes('resume')) {
-    cmd.push('resume');
-  }
-
   // Native resume with a `{ subcommand }` shape (codex) appends the resume verb
   // to the base: `codex exec` -> `codex exec resume` (headless) and, after the
   // interactive drop above, `codex` -> `codex resume` (TUI). The session id is
   // pushed later as the first positional (before any prompt). `{ flag }` agents
   // (claude) need no base change — the flag is appended with the id below.
+  //
+  // Muse interactive resume is also a subcommand (`muse resume <id>`), but the
+  // session id MUST sit immediately after the verb — mode/model flags come
+  // after. So for interactive muse we push both `resume` and the id here, and
+  // skip the later generic resume flag path.
   const resumeSpec = options.resume ? template.resume : undefined;
-  if (resumeSpec && 'subcommand' in resumeSpec) {
+  let museInteractiveResumeDone = false;
+  if (options.agent === 'muse' && options.resume && interactive && options.sessionId) {
+    cmd.push('resume', options.sessionId);
+    museInteractiveResumeDone = true;
+  } else if (resumeSpec && 'subcommand' in resumeSpec) {
     cmd.push(resumeSpec.subcommand);
   }
 
@@ -1045,12 +1046,8 @@ export function buildExecCommand(options: ExecOptions): string[] {
   // agents (codex) already pushed the verb above, so the id is the first
   // positional here — placed before the prompt positional appended later. Without
   // `resume`, the legacy claude-only `--session-id` CREATES a session with that id.
-  if (options.resume && options.sessionId && resumeSpec) {
-    if (options.agent === 'muse' && interactive) {
-      // Interactive form is `muse resume <uuid>` — the verb was pushed above;
-      // the session id is the first positional (before any prompt).
-      cmd.push(options.sessionId);
-    } else if ('flag' in resumeSpec) {
+  if (options.resume && options.sessionId && resumeSpec && !museInteractiveResumeDone) {
+    if ('flag' in resumeSpec) {
       const flag = interactive
         ? (resumeSpec.interactiveFlag ?? resumeSpec.flag)
         : (resumeSpec.headlessFlag ?? resumeSpec.flag);
