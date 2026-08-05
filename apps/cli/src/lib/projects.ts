@@ -104,9 +104,25 @@ export interface ProjectDef {
   /** External context sources (Drive, docs, …). */
   integrations?: ProjectIntegration[];
   /** Linear project link — reuses the existing GraphQL path. */
-  linear?: { projectId?: string; url?: string };
+  linear?: { projectId?: string; url?: string; name?: string };
   /** Free-form doc links surfaced in `projects show`. */
   docs?: string[];
+  /**
+   * Auto-dispatch settings. When `enabled` is true and `maxAgents > 0` and the
+   * project has a `linear.projectId`, the daemon polls Linear for delegated-Todo
+   * tickets and dispatches them up to the concurrency cap. This replaces the
+   * former ~/.agents/factory/projects.json registry.
+   */
+  dispatch?: {
+    /** Opt-in: enable auto-dispatch for this project (default: off). */
+    enabled?: boolean;
+    /** Per-project concurrency cap for auto-dispatched agents. */
+    maxAgents?: number;
+    /** Optional provider pin: 'rush' | 'codex' | 'factory' | 'host' | … */
+    provider?: string;
+    /** For provider='host': which machine to dispatch onto (name/device/cap tag). */
+    host?: string;
+  };
 }
 
 /** A project name safe to use as a filename: no separators, `..`, or leading dot. */
@@ -228,8 +244,18 @@ export function validateProjectDef(raw: unknown, sourceName?: string): ProjectDe
     def.linear = {};
     if (typeof l.projectId === 'string') def.linear.projectId = l.projectId;
     if (typeof l.url === 'string') def.linear.url = l.url;
+    if (typeof l.name === 'string') def.linear.name = l.name;
   }
   if (Array.isArray(o.docs)) def.docs = o.docs.filter((d): d is string => typeof d === 'string');
+
+  if (o.dispatch && typeof o.dispatch === 'object' && !Array.isArray(o.dispatch)) {
+    const d = o.dispatch as Record<string, unknown>;
+    def.dispatch = {};
+    if (d.enabled === true || d.enabled === false) def.dispatch.enabled = d.enabled;
+    if (typeof d.maxAgents === 'number' && Number.isFinite(d.maxAgents)) def.dispatch.maxAgents = d.maxAgents;
+    if (typeof d.provider === 'string') def.dispatch.provider = d.provider;
+    if (typeof d.host === 'string') def.dispatch.host = d.host;
+  }
 
   return def;
 }
