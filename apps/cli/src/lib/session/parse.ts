@@ -140,7 +140,21 @@ export function safeReadSessionFile(filePath: string, maxBytes: number = SESSION
 /**
  * Auto-detect agent type from file path and parse the session.
  */
-export function parseSession(filePath: string, agent?: SessionAgentId): SessionEvent[] {
+export interface ParseSessionOptions {
+  /** Keep normalized tool results compact by default; renderers can request full output. */
+  maxToolOutputChars?: number;
+}
+
+function truncateNormalizedToolOutput(output: string, maxChars: number): string {
+  if (!Number.isFinite(maxChars) || output.length <= maxChars) return output;
+  return `${output.slice(0, maxChars)}\n\n[Output truncated: ${output.length - maxChars} characters omitted.]`;
+}
+
+export function parseSession(
+  filePath: string,
+  agent?: SessionAgentId,
+  opts: ParseSessionOptions = {},
+): SessionEvent[] {
   const detected = agent || detectAgent(filePath);
   if (!detected) {
     throw new Error(`Cannot detect agent type from path: ${filePath}`);
@@ -169,7 +183,11 @@ export function parseSession(filePath: string, agent?: SessionAgentId): SessionE
   // from `!`-prefix runs, `<system-reminder>`, etc.) as `_synthetic` so turn
   // slicing and `--include user` count only genuine user intent — one place,
   // every harness, instead of per-consumer regex.
+  const maxToolOutputChars = opts.maxToolOutputChars ?? 500;
   for (const e of events) {
+    if (e.type === 'tool_result' && e.output) {
+      e.output = truncateNormalizedToolOutput(e.output, maxToolOutputChars);
+    }
     sanitizeEvent(e);
     if (e.type === 'message' && e.role === 'user' && isSyntheticUserMessage(e.content)) {
       e._synthetic = true;
@@ -488,7 +506,11 @@ export function parseClaudeContent(content: string): SessionEvent[] {
                 exitCode: structured.exitCode,
                 statusCode: structured.statusCode,
                 errorCode: structured.errorCode,
-                output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+                // Not truncated here: `parseSession` caps every event's `output`
+                // centrally via `maxToolOutputChars` (default 500, the same
+                // bound this site used to hardcode), so the render path can ask
+                // for the full text with `Infinity`.
+                output,
               });
             }
 
@@ -687,7 +709,7 @@ export function parseCodexContent(content: string): SessionEvent[] {
           exitCode: result.exitCode,
           statusCode: result.statusCode,
           errorCode: result.errorCode,
-          output: result.text.length > 500 ? result.text.slice(0, 497) + '...' : result.text,
+          output: result.text,
         });
 
         if (callId) callMap.delete(callId);
@@ -739,7 +761,7 @@ export function parseCodexContent(content: string): SessionEvent[] {
           exitCode: result.exitCode,
           statusCode: result.statusCode,
           errorCode: result.errorCode,
-          output: result.text.length > 500 ? result.text.slice(0, 497) + '...' : result.text,
+          output: result.text,
         });
 
         if (callId) callMap.delete(callId);
@@ -871,7 +893,7 @@ export function parseGemini(filePath: string): SessionEvent[] {
               tool: toolName,
               callId: typeof tc.id === 'string' ? tc.id : undefined,
               success: tc.status === 'success',
-              output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+              output,
             });
           }
         }
@@ -1254,7 +1276,7 @@ export function parseGrok(filePath: string): SessionEvent[] {
         callId,
         success: structuredError ? false : structuredSuccess ? true : undefined,
         outcome: structuredError ? 'error' : structuredSuccess ? 'ok' : 'unknown',
-        output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+        output: output,
       });
       if (callId) toolCallMap.delete(callId);
     }
@@ -1382,7 +1404,7 @@ export function parseOpenCode(filePath: string): SessionEvent[] {
               tool: toolName,
               callId,
               success: state.status === 'completed',
-              output: outputStr.length > 500 ? outputStr.slice(0, 497) + '...' : outputStr,
+              output: outputStr,
             });
           }
           break;
@@ -1496,7 +1518,7 @@ export function parseRush(filePath: string): SessionEvent[] {
         tool: info?.tool ?? (typeof raw.name === 'string' ? raw.name : 'unknown'),
         callId,
         success,
-        output: outputStr.length > 500 ? outputStr.slice(0, 497) + '...' : outputStr,
+        output: outputStr,
       });
 
       if (callId) toolCallMap.delete(callId);
@@ -1712,7 +1734,7 @@ export function parseKimi(filePath: string): SessionEvent[] {
           callId,
           success: structuredError ? false : structuredSuccess ? true : undefined,
           outcome: structuredError ? 'error' : structuredSuccess ? 'ok' : 'unknown',
-          output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+          output: output,
         });
 
         if (callId) {
@@ -1857,7 +1879,7 @@ function parseAnthropicMessageJsonl(filePath: string, agent: 'cursor' | 'droid')
         } else {
           events.push({
             type: 'tool_result', agent, timestamp, tool: toolInfo?.tool, callId: toolId, success: true,
-            output: output.length > 500 ? output.slice(0, 497) + '...' : output,
+            output: output,
           });
         }
         if (toolId) toolUseMap.delete(toolId);
