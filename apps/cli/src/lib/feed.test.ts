@@ -14,7 +14,6 @@ import {
   readBlock,
   removeBlock,
   blockIdForSession,
-  buildDeclaredBlock,
   recordAnswer,
   recordMessageReceipt,
   recordContinued,
