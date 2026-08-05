@@ -321,7 +321,7 @@ function hostCliSourceTag(source: string): string {
 
 /**
  * Render the host-CLI section. Host CLIs are host-global: declared in any
- * DotAgents repo's `cli/` (project > user > system > extras), installed to PATH
+ * DotAgents repo's `clis/` (project > user > system > extras), installed to PATH
  * rather than copied into a version home. They render identically in the overview
  * and in a per-agent detail view because every agent on the host shares them.
  * The source tag shows which repo layer declared each — so user-level and

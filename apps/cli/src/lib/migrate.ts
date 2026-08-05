@@ -1925,21 +1925,16 @@ export function migrateWatchdogSentinelToRoutine(
 }
 
 /**
- * Rename cli/ → clis/ in user, system, and project (.agents/) layers.
+ * Rename cli/ → clis/ in each of the given `.agents/` directories.
  *
- * One-way, idempotent: no-op when src is absent. Throws when both src and
- * dest exist — the user must resolve the conflict manually before proceeding.
+ * One-way, idempotent: no-op when src is absent. Throws when both
+ * `<dir>/cli` and `<dir>/clis` exist — the user must resolve the conflict
+ * manually before proceeding. Exported for unit-testing with temp dirs.
  */
-function migrateCliDirToClis(): void {
-  const layers: Array<[string, string]> = [
-    [path.join(USER_DIR, 'cli'), path.join(USER_DIR, 'clis')],
-    [path.join(SYSTEM_DIR, 'cli'), path.join(SYSTEM_DIR, 'clis')],
-  ];
-  const projectDotAgents = path.join(process.cwd(), '.agents');
-  if (fs.existsSync(projectDotAgents)) {
-    layers.push([path.join(projectDotAgents, 'cli'), path.join(projectDotAgents, 'clis')]);
-  }
-  for (const [src, dest] of layers) {
+export function migrateCliDirToClis(agentsDirs: string[]): void {
+  for (const agentsDir of agentsDirs) {
+    const src = path.join(agentsDir, 'cli');
+    const dest = path.join(agentsDir, 'clis');
     if (!fs.existsSync(src)) continue;
     if (fs.existsSync(dest)) {
       throw new Error(
@@ -1955,7 +1950,10 @@ function migrateCliDirToClis(): void {
 export async function runMigration(): Promise<void> {
   // MUST run first: every other migrator reads SYSTEM_DIR (the new path).
   foldLegacySystemRepo();
-  migrateCliDirToClis();
+  const cliMigrateDirs = [USER_DIR, SYSTEM_DIR];
+  const projectDotAgents = path.join(process.cwd(), '.agents');
+  if (fs.existsSync(projectDotAgents)) cliMigrateDirs.push(projectDotAgents);
+  migrateCliDirToClis(cliMigrateDirs);
   migrateAgentsYaml();
   deleteSystemPromptsJson();
   migrateSystemConfigJson();
