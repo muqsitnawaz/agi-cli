@@ -52,6 +52,25 @@ describe('runMigration', () => {
     expect(fs.existsSync(path.join(userDir, 'events.1.jsonl.gz'))).toBe(false);
   });
 
+  it('preserves root and history event logs when both layouts contain data', () => {
+    const eventsDir = path.join(userDir, '.history', 'events');
+    fs.mkdirSync(eventsDir, { recursive: true });
+    fs.writeFileSync(path.join(eventsDir, 'events.jsonl'), '{"event":"history"}\n');
+    fs.writeFileSync(path.join(eventsDir, 'events.1.jsonl.gz'), 'history-archive');
+    fs.writeFileSync(path.join(userDir, 'events.jsonl'), '{"event":"root"}\n');
+    fs.writeFileSync(path.join(userDir, 'events.1.jsonl.gz'), 'root-archive');
+
+    runRealMigration();
+
+    expect(fs.readFileSync(path.join(eventsDir, 'events.jsonl'), 'utf-8')).toBe(
+      '{"event":"history"}\n{"event":"root"}\n',
+    );
+    expect(fs.readFileSync(path.join(eventsDir, 'events.1.jsonl.gz'), 'utf-8')).toBe('history-archive');
+    expect(fs.readFileSync(path.join(eventsDir, 'events.2.jsonl.gz'), 'utf-8')).toBe('root-archive');
+    expect(fs.existsSync(path.join(userDir, 'events.jsonl'))).toBe(false);
+    expect(fs.existsSync(path.join(userDir, 'events.1.jsonl.gz'))).toBe(false);
+  });
+
   it('moves legacy files into the user repo and deletes dead files', () => {
     fs.writeFileSync(path.join(systemDir, 'agents.yaml'), 'agents:\n  claude: "1.0.0"\n');
     fs.writeFileSync(path.join(systemDir, 'prompts.json'), '{}');

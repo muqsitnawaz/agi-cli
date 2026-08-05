@@ -947,8 +947,41 @@ function migrateEventLogsToHistory(): void {
   } catch {
     return;
   }
-  for (const file of files) {
-    moveFileOnce(path.join(USER_DIR, file), path.join(destination, file));
+  try { fs.mkdirSync(destination, { recursive: true, mode: 0o700 }); } catch { return; }
+
+  const active = files.find((file) => file === 'events.jsonl');
+  if (active) {
+    const src = path.join(USER_DIR, active);
+    const dest = path.join(destination, active);
+    if (!fs.existsSync(dest)) {
+      moveFileOnce(src, dest);
+    } else {
+      try {
+        const existing = fs.readFileSync(dest);
+        const legacy = fs.readFileSync(src);
+        const separator = existing.length > 0 && existing.at(-1) !== 0x0a && legacy.length > 0
+          ? Buffer.from('\n')
+          : Buffer.alloc(0);
+        fs.appendFileSync(dest, Buffer.concat([separator, legacy]));
+        fs.unlinkSync(src);
+      } catch { /* preserve the source for a later retry */ }
+    }
+  }
+
+  const archives = files
+    .map((file) => ({ file, match: file.match(/^events\.(\d+)\.jsonl\.gz$/) }))
+    .filter((entry): entry is { file: string; match: RegExpMatchArray } => entry.match !== null)
+    .sort((a, b) => Number(a.match[1]) - Number(b.match[1]));
+  let nextArchive = fs.readdirSync(destination).reduce((max, file) => {
+    const match = file.match(/^events\.(\d+)\.jsonl\.gz$/);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 0) + 1;
+  for (const archive of archives) {
+    const preferred = path.join(destination, archive.file);
+    const dest = fs.existsSync(preferred)
+      ? path.join(destination, `events.${nextArchive++}.jsonl.gz`)
+      : preferred;
+    moveFileOnce(path.join(USER_DIR, archive.file), dest);
   }
 }
 
