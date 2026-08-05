@@ -39,7 +39,7 @@ function resolveContainedHookPath(hooksRoot: string, script: string): string | n
  * Scripts one level down are first-class hooks; their install name remains the
  * file basename so version-home copies stay flat and doctor/diff keep matching.
  */
-const HOOK_GROUP_SKIP_DIRS = new Set(['tests', 'test', 'node_modules', '.git', '.cache']);
+const HOOK_GROUP_SKIP_DIRS = new Set(['node_modules', '.git', '.cache']);
 
 export function resolveHookScriptPath(script: string): string | null {
   const extraDirs = getEnabledExtraRepos().map(e => e.dir);
@@ -78,6 +78,20 @@ function findHookScriptInGroupDirs(hooksRoot: string, basename: string): string 
       continue;
     }
     if (!st.isDirectory() || st.isSymbolicLink()) continue;
+    // Only treat dirs that themselves contain scripts as groups (session-starts/),
+    // not fixture-only directory bundles (tests/).
+    let hasScript = false;
+    try {
+      for (const child of fs.readdirSync(groupDir)) {
+        if (SCRIPT_EXTENSIONS.has(path.extname(child).toLowerCase())) {
+          const cp = path.join(groupDir, child);
+          if (fs.existsSync(cp) && fs.statSync(cp).isFile()) { hasScript = true; break; }
+        }
+      }
+    } catch {
+      continue;
+    }
+    if (!hasScript) continue;
     const candidate = path.join(groupDir, basename);
     if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
   }
@@ -524,13 +538,16 @@ function collectHookFilesFromRoot(dir: string): {
       continue;
     }
     if (!stat.isDirectory() || HOOK_GROUP_SKIP_DIRS.has(file)) continue;
-    // One-level event-group layout: hooks/<group>/<script>
+    // One-level event-group layout: hooks/<group>/<script>. Only dirs that
+    // contain top-level scripts are groups; fixture-only dirs (tests/) are not.
     let nested: string[];
     try {
       nested = fs.readdirSync(fullPath);
     } catch {
       continue;
     }
+    const nestedFiles: { nestedName: string; nestedPath: string; mode: number }[] = [];
+    let hasScript = false;
     for (const nestedName of nested) {
       if (nestedName.startsWith('.')) continue;
       const nestedPath = path.join(fullPath, nestedName);
@@ -541,8 +558,11 @@ function collectHookFilesFromRoot(dir: string): {
         continue;
       }
       if (nstat.isSymbolicLink() || !nstat.isFile()) continue;
-      pushFile(nestedPath, nestedName, nstat.mode);
+      nestedFiles.push({ nestedName, nestedPath, mode: nstat.mode });
+      if (SCRIPT_EXTENSIONS.has(path.extname(nestedName).toLowerCase())) hasScript = true;
     }
+    if (!hasScript) continue;
+    for (const n of nestedFiles) pushFile(n.nestedPath, n.nestedName, n.mode);
   }
   return files;
 }

@@ -121,10 +121,30 @@ export function listPluginSkillNames(options: { agent?: AgentId; plugins?: Set<s
 }
 
 /**
- * Subdirectories under hooks/ that group event families (session-starts/, …).
+ * Subdirectories under hooks/ that are never group dirs.
  * Must stay in lockstep with HOOK_GROUP_SKIP_DIRS in hooks.ts.
  */
-const HOOK_GROUP_SKIP_DIRS = new Set(['tests', 'test', 'node_modules', '.git', '.cache']);
+const HOOK_GROUP_SKIP_DIRS = new Set(['node_modules', '.git', '.cache']);
+
+const HOOK_SCRIPT_EXTS = new Set([
+  '.sh', '.bash', '.zsh', '.py', '.js', '.ts', '.mjs', '.cjs', '.rb', '.pl', '.ps1', '.cmd', '.bat',
+]);
+
+function dirHasTopLevelScripts(groupDir: string): boolean {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(groupDir);
+  } catch {
+    return false;
+  }
+  for (const name of entries) {
+    if (name.startsWith('.')) continue;
+    const ext = path.extname(name).toLowerCase();
+    if (!HOOK_SCRIPT_EXTS.has(ext)) continue;
+    if (isLiveFile(path.join(groupDir, name))) return true;
+  }
+  return false;
+}
 
 function findNestedHookFile(hooksRoot: string, basename: string): string | null {
   if (!isLiveDir(hooksRoot)) return null;
@@ -138,6 +158,8 @@ function findNestedHookFile(hooksRoot: string, basename: string): string | null 
     if (name.startsWith('.') || HOOK_GROUP_SKIP_DIRS.has(name)) continue;
     const groupDir = path.join(hooksRoot, name);
     if (!isLiveDir(groupDir)) continue;
+    // Only group dirs (those with scripts) contribute nested scripts.
+    if (!dirHasTopLevelScripts(groupDir)) continue;
     const candidate = path.join(groupDir, basename);
     if (isLiveFile(candidate)) return candidate;
   }
@@ -145,11 +167,10 @@ function findNestedHookFile(hooksRoot: string, basename: string): string | null 
 }
 
 /**
- * Find the trusted source file for a hook by name.
- * `name` is usually a basename (`04-session-identity.sh`); may also be a
- * one-level relative path (`session-starts/04-session-identity.sh`). Nested
- * group-dir scripts resolve either way so sync/doctor keep working after the
- * session-starts layout.
+ * Find the trusted source for a hook by name.
+ * - File basename (`04-session-identity.sh`) or relative path
+ *   (`session-starts/04-session-identity.sh`) → script file
+ * - Directory basename (`tests`) → directory bundle (fixtures-only etc.)
  */
 export function resolveHookSource(name: string): string | null {
   const roots = [
@@ -174,7 +195,9 @@ export function resolveHookSource(name: string): string | null {
     } else if (isSafeSegmentName(name)) {
       try {
         const top = safeJoin(hooksRoot, name);
+        // File script first; then directory bundle (e.g. tests/ fixtures).
         if (isLiveFile(top)) return top;
+        if (isLiveDir(top) && !dirHasTopLevelScripts(top)) return top;
       } catch {
         /* invalid segment */
       }

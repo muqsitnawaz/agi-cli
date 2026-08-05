@@ -54,8 +54,10 @@ describe('hooks group subdirs (session-starts layout)', () => {
     writeHook('top.sh');
     writeHook('session-starts/04-session-identity.sh');
     writeHook('session-starts/05-session-start-autosync.sh');
-    // tests/ is skipped as a group dir
-    writeHook('tests/not-a-hook.sh');
+    // Fixture-only dir (no top-level scripts) is a directory bundle, not a group.
+    const fixtures = path.join(SYSTEM_DIR, 'hooks', 'tests', 'fixtures');
+    fs.mkdirSync(fixtures, { recursive: true });
+    fs.writeFileSync(path.join(fixtures, 'input.json'), '{"ok":true}\n');
 
     const entries = listHookEntriesFromDir(path.join(SYSTEM_DIR, 'hooks'));
     const names = entries.map((e) => e.name).sort();

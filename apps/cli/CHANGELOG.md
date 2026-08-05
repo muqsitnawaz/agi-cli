@@ -1,16 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- **Hooks: one-level group subdirs (e.g. `hooks/session-starts/`) are first-class.**
-  SessionStart (and other event-family) scripts can live under `hooks/<group>/`
-  while keep install names as the file basename. `listHookEntriesFromDir`,
-  `resolveHookScriptPath`, `resolveHookSource`, and the available-hooks scan in
-  `syncResourcesToVersion` all discover nested scripts; registration falls back
-  to a flat version-home basename copy. `tests/` and similar dirs are skipped.
-  Source: `apps/cli/src/lib/hooks.ts`, `apps/cli/src/lib/staleness/writers/sources.ts`,
-  `apps/cli/src/lib/versions.ts`, `apps/cli/src/lib/__tests__/hooks-nested-groups.test.ts`.
-
 ## 1.22.14
 
 - **`agents secrets view <bundle> --reveal` now resolves a locked keychain bundle
