@@ -39,6 +39,19 @@ function devicePinsFile(): string {
 }
 
 describe('runMigration', () => {
+  it('moves operational event logs into the durable history bucket', () => {
+    fs.writeFileSync(path.join(userDir, 'events.jsonl'), '{"event":"info"}\n');
+    fs.writeFileSync(path.join(userDir, 'events.1.jsonl.gz'), 'archive');
+
+    runRealMigration();
+
+    const eventsDir = path.join(userDir, '.history', 'events');
+    expect(fs.readFileSync(path.join(eventsDir, 'events.jsonl'), 'utf-8')).toBe('{"event":"info"}\n');
+    expect(fs.readFileSync(path.join(eventsDir, 'events.1.jsonl.gz'), 'utf-8')).toBe('archive');
+    expect(fs.existsSync(path.join(userDir, 'events.jsonl'))).toBe(false);
+    expect(fs.existsSync(path.join(userDir, 'events.1.jsonl.gz'))).toBe(false);
+  });
+
   it('moves legacy files into the user repo and deletes dead files', () => {
     fs.writeFileSync(path.join(systemDir, 'agents.yaml'), 'agents:\n  claude: "1.0.0"\n');
     fs.writeFileSync(path.join(systemDir, 'prompts.json'), '{}');

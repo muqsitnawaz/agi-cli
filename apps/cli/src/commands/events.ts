@@ -1,7 +1,7 @@
 /**
  * `agents events` — read the unified event stream.
  *
- * One stream over BOTH operational events (`~/.agents/events.jsonl`: every
+ * One stream over BOTH operational events (`~/.agents/.history/events/events.jsonl`: every
  * `agents <module> <cmd>` invocation plus typed events like secrets access,
  * version installs) AND agent-semantic events (the per-session activity logs:
  * plans, PRs, worktrees, sub-agents, artifacts). Each is stamped with who ran
