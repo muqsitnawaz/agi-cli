@@ -957,12 +957,19 @@ function migrateEventLogsToHistory(): void {
       moveFileOnce(src, dest);
     } else {
       try {
-        const existing = fs.readFileSync(dest);
-        const legacy = fs.readFileSync(src);
-        const separator = existing.length > 0 && existing.at(-1) !== 0x0a && legacy.length > 0
-          ? Buffer.from('\n')
-          : Buffer.alloc(0);
-        fs.appendFileSync(dest, Buffer.concat([separator, legacy]));
+        const lines = [fs.readFileSync(src, 'utf-8'), fs.readFileSync(dest, 'utf-8')]
+          .flatMap((content) => content.split('\n').filter(Boolean))
+          .map((line, index) => {
+            try {
+              const timestamp = Date.parse((JSON.parse(line) as { ts?: string }).ts ?? '');
+              return { line, index, timestamp: Number.isNaN(timestamp) ? Number.MAX_SAFE_INTEGER : timestamp };
+            } catch {
+              return { line, index, timestamp: Number.MAX_SAFE_INTEGER };
+            }
+          })
+          .sort((a, b) => a.timestamp - b.timestamp || a.index - b.index)
+          .map(({ line }) => line);
+        atomicWriteFileSync(dest, `${lines.join('\n')}\n`, { mode: 0o600 });
         fs.unlinkSync(src);
       } catch { /* preserve the source for a later retry */ }
     }

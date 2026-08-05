@@ -33,6 +33,20 @@ function runRealMigration(): void {
   );
 }
 
+function queryNewestEvent(): Record<string, unknown> {
+  const modulePath = path.resolve(process.cwd(), 'src/lib/events.ts');
+  const stdout = execFileSync(
+    'bun',
+    ['-e', `import { query } from ${JSON.stringify(modulePath)}; console.log(JSON.stringify(query({ limit: 1 })[0]));`],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: testHome, AGENTS_EVENTS_PATH: '' },
+      encoding: 'utf-8',
+    },
+  );
+  return JSON.parse(stdout.trim()) as Record<string, unknown>;
+}
+
 /** Path to this machine's per-device pin file after the split migration. */
 function devicePinsFile(): string {
   return path.join(userDir, 'devices', 'testdev', 'agents.yaml');
@@ -55,16 +69,18 @@ describe('runMigration', () => {
   it('preserves root and history event logs when both layouts contain data', () => {
     const eventsDir = path.join(userDir, '.history', 'events');
     fs.mkdirSync(eventsDir, { recursive: true });
-    fs.writeFileSync(path.join(eventsDir, 'events.jsonl'), '{"event":"history"}\n');
+    fs.writeFileSync(path.join(eventsDir, 'events.jsonl'), '{"event":"info","module":"history-new","ts":"2025-08-05T12:00:00.000Z"}\n');
     fs.writeFileSync(path.join(eventsDir, 'events.1.jsonl.gz'), 'history-archive');
-    fs.writeFileSync(path.join(userDir, 'events.jsonl'), '{"event":"root"}\n');
+    fs.writeFileSync(path.join(userDir, 'events.jsonl'), '{"event":"info","module":"root-old","ts":"2025-08-04T12:00:00.000Z"}\n');
     fs.writeFileSync(path.join(userDir, 'events.1.jsonl.gz'), 'root-archive');
 
     runRealMigration();
 
     expect(fs.readFileSync(path.join(eventsDir, 'events.jsonl'), 'utf-8')).toBe(
-      '{"event":"history"}\n{"event":"root"}\n',
+      '{"event":"info","module":"root-old","ts":"2025-08-04T12:00:00.000Z"}\n' +
+      '{"event":"info","module":"history-new","ts":"2025-08-05T12:00:00.000Z"}\n',
     );
+    expect(queryNewestEvent().module).toBe('history-new');
     expect(fs.readFileSync(path.join(eventsDir, 'events.1.jsonl.gz'), 'utf-8')).toBe('history-archive');
     expect(fs.readFileSync(path.join(eventsDir, 'events.2.jsonl.gz'), 'utf-8')).toBe('root-archive');
     expect(fs.existsSync(path.join(userDir, 'events.jsonl'))).toBe(false);
