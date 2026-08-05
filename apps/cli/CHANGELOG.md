@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **`agents humans show owner [--json]`** — new command that reads the canonical `~/.agents/humans.yaml` owner identity and channel config. Source: `apps/cli/src/commands/humans.ts`, `apps/cli/src/lib/humans.ts`.
+
+- **Automatic migration of owner config to `humans.yaml`** (issue #2006). On first run after upgrade, `notify.owner` from `agents.yaml` and frontmatter from `owner.md` are merged into `~/.agents/humans.yaml` (versioned, `version: 1`). `agents send --to owner` / `agents notify` read `humans.yaml` first and fall back to `agents.yaml`. Source: `apps/cli/src/lib/migrate.ts`, `apps/cli/src/lib/notify.ts`, `apps/cli/src/lib/channels/send.ts`.
+
+- **`memory` no longer treats `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md` as memory facts.** `isFactFile()` now excludes these rule files so `agents memory list` and sync do not pick up repo instruction files. Source: `apps/cli/src/lib/memory.ts`.
+
+- **Webhooks directories are no longer created eagerly.** `ensureAgentsDir()` used to create `webhooks/` and `.system/webhooks/` on every startup even when the webhook feature is unused. These dirs are now created on first write. Source: `apps/cli/src/lib/state.ts`.
+
+- **`permissions install` and `permissions remove` now operate on `groups/`.** `installPermissionSet` and `removePermissionSet` previously wrote to the root `~/.agents/permissions/` directory, mismatching `discoverPermissionGroups()` which reads from `groups/`. All three write paths now use `~/.agents/permissions/groups/`. Source: `apps/cli/src/lib/permissions.ts`.
+
+- **Terminals directory canonicalized under `.cache/`.** The stale migration exemption that left `~/.agents/terminals/` at the user root is removed; Factory already reads from `~/.agents/.cache/terminals/`. Existing `~/.agents/terminals/` is moved to `~/.agents/.cache/terminals/` on next startup. Source: `apps/cli/src/lib/migrate.ts`.
+
 ## 1.22.10
 
 - **Plugins package workflows (Phase 5 packaging slice).** A plugin’s `workflows/<name>/WORKFLOW.md` is discovered and resolved by `agents run <name>` with precedence project > user > plugin > extra > system — no separate install into `~/.agents/workflows/` required. Plugin inventory / resource groups list `workflows`. Source: `apps/cli/src/lib/workflows.ts`, `apps/cli/src/lib/plugins.ts`, `apps/cli/src/lib/resources/workflows.ts`.
