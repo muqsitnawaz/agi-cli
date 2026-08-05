@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -8,8 +8,13 @@ import * as crypto from 'crypto';
 // HOME at first import, and mirrorPath lands files under ~/.agents/.history) so
 // placement tests never touch the real session store. The module is loaded
 // dynamically in beforeAll, after HOME is set.
+const REAL_HOME = process.env.HOME;
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-bundle-home-'));
 process.env.HOME = TMP_HOME;
+
+afterAll(() => {
+  if (REAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = REAL_HOME;
+});
 
 type BundleMod = typeof import('./bundle.js');
 let B: BundleMod;

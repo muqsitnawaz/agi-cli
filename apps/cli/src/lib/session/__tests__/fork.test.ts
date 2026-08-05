@@ -7,6 +7,8 @@ import * as path from 'path';
 // module-level base dirs resolve inside an isolated temp HOME. Running
 // in-process under vitest uses node:sqlite; the shipped standalone binary runs
 // bun:sqlite, whose named binds are covered by src/lib/sqlite.test.ts.
+const REAL_HOME = process.env.HOME;
+const REAL_AGENTS_REAL_HOME = process.env.AGENTS_REAL_HOME;
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'fork-test-'));
 process.env.HOME = TEST_HOME;
 process.env.AGENTS_REAL_HOME = TEST_HOME;
@@ -18,6 +20,8 @@ type SessionMeta = import('../types.js').SessionMeta;
 afterAll(() => {
   closeDB();
   fs.rmSync(TEST_HOME, { recursive: true, force: true });
+  if (REAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = REAL_HOME;
+  if (REAL_AGENTS_REAL_HOME === undefined) delete process.env.AGENTS_REAL_HOME; else process.env.AGENTS_REAL_HOME = REAL_AGENTS_REAL_HOME;
 });
 
 /** Write a Claude transcript under TEST_HOME and return its metadata. `tag`

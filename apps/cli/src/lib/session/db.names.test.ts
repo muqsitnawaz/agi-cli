@@ -1,13 +1,20 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
 // Isolate the sessions DB under a temp HOME before db.js/state.js capture the
 // path at import time.
+const REAL_HOME = process.env.HOME;
+const REAL_USERPROFILE = process.env.USERPROFILE;
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-dbnames-'));
 process.env.HOME = TEST_HOME;
 process.env.USERPROFILE = TEST_HOME;
+
+afterAll(() => {
+  if (REAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = REAL_HOME;
+  if (REAL_USERPROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = REAL_USERPROFILE;
+});
 
 const { upsertSession, seedLabelsFromNames, syncLabels, ftsSearch, getSessionById } =
   await import('./db.js');

@@ -7,6 +7,7 @@ import * as path from 'path';
 // override. Plain top-level statements run before the dynamic `await import`
 // below, so vi.hoisted is not needed (and is also not supported by Bun's
 // native test runner).
+const REAL_HOME = process.env.HOME;
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-db-test-'));
 process.env.HOME = TEST_HOME;
 
@@ -100,6 +101,7 @@ describe('querySessions version filter', () => {
 afterAll(() => {
   closeDB();
   fs.rmSync(TEST_HOME, { recursive: true, force: true });
+  if (REAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = REAL_HOME;
 });
 
 const COST_FILES_DIR = path.join(TEST_HOME, 'cost-files');

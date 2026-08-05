@@ -1,12 +1,37 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+
+// Isolate the sessions DB and history dir under a temp HOME before db.js /
+// discover.js / state.js capture the path at import time. Without this, the
+// routine-archive test writes real dirs to ~/.agents/.history/runs/ which race
+// with discover.test.ts's getSessionRoots() call running in a parallel fork.
+// Static imports are hoisted above module-level code in ESM, so we must use
+// dynamic imports for the modules that cache HOME at load time.
+const REAL_HOME = process.env.HOME;
+const REAL_USERPROFILE = process.env.USERPROFILE;
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-discover-test-'));
+process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
+fs.mkdirSync(path.join(TEST_HOME, '.agents', '.history', 'sessions'), { recursive: true });
+
+afterAll(() => {
+  if (REAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = REAL_HOME;
+  if (REAL_USERPROFILE === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = REAL_USERPROFILE;
+  fs.rmSync(TEST_HOME, { recursive: true, force: true });
+});
+
+// Dynamic imports so state.js / db.js / discover.js see TEST_HOME in process.env.HOME.
 import Database from '../../sqlite.js';
-import { buildFtsQuery, getDB } from '../db.js';
-import { scanClaudeSession, parseCodexThreadNameIndex, shouldDeferRecentAppend, machineForSessionFile, discoverSessions, resolveSessionById, readGrokMeta } from '../discover.js';
-import { machineId } from '../sync/config.js';
-import { getHistoryDir } from '../../state.js';
+type DbModule = typeof import('../db.js');
+type DiscoverModule = typeof import('../discover.js');
+type SyncConfigModule = typeof import('../sync/config.js');
+type StateModule = typeof import('../../state.js');
+const { buildFtsQuery, getDB } = await import('../db.js') as DbModule;
+const { scanClaudeSession, parseCodexThreadNameIndex, shouldDeferRecentAppend, machineForSessionFile, discoverSessions, resolveSessionById, readGrokMeta } = await import('../discover.js') as DiscoverModule;
+const { machineId } = await import('../sync/config.js') as SyncConfigModule;
+const { getHistoryDir } = await import('../../state.js') as StateModule;
 
 describe('machineForSessionFile', () => {
   it('reads the origin machine from the cross-machine mirror path', () => {

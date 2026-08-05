@@ -1,11 +1,16 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
 // Isolate the cache under a temp HOME before state.js captures HOME at import.
+const REAL_HOME = process.env.HOME;
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-runnames-'));
 process.env.HOME = TEST_HOME;
+
+afterAll(() => {
+  if (REAL_HOME === undefined) delete process.env.HOME; else process.env.HOME = REAL_HOME;
+});
 
 const { recordRunName, buildRunNameMap, runNamesDir } = await import('./run-names.js');
 
