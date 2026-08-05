@@ -54,7 +54,7 @@ agents notify --text "same as send --to owner"
 agents feed post --title "CHANGELOG pushed" "Watching CI and mac-mini E2E"
 ```
 
-The write-stores: `~/.agents/events.jsonl` (operational audit), per-session
+The write-stores: `~/.agents/.history/events/events.jsonl` (operational audit), per-session
 `~/.agents/.history/activity/<id>.jsonl` (agent milestones), and the disposable
 perf warehouse `~/.agents/.cache/perf/perf.db` (latency samples). Audit + activity
 are merged at read time by `event-stream.ts::readUnifiedEvents`. Perf is a
@@ -168,7 +168,7 @@ Separate from the fleet-state sources below (which answer "what's running *now*"
 the **audit event log** answers "who did what, and from where". Every
 `agents <module> <command>` invocation is recorded — team create/disband, agent
 run, secrets access, version installs — as a structured JSONL line at
-`~/.agents/events.jsonl` (directory `0700`, file `0600`). At 10 MB the active
+`~/.agents/.history/events/events.jsonl` (directory `0700`, file `0600`). At 10 MB the active
 file rotates losslessly to `events.1.jsonl.gz`; older archives shift to
 `events.2.jsonl.gz`, `events.3.jsonl.gz`, and so on.
 

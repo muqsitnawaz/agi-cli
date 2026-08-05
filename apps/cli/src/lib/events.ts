@@ -1,7 +1,7 @@
 /**
  * Centralized event logging for agents-cli.
  *
- * Structured JSONL audit log at ~/.agents/events.jsonl with lossless numbered
+ * Structured JSONL audit log at ~/.agents/.history/events/events.jsonl with lossless numbered
  * gzip rotation at 10 MB and rich metadata for debugging/auditing.
  *
  * Features:
@@ -18,7 +18,7 @@ import * as os from 'os';
 import { createHash } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { ensureLockTarget, withFileLock } from './fs-atomic.js';
-import { getUserAgentsDir } from './state.js';
+import { getHistoryDir } from './state.js';
 import { stampProvenance, resetEventProvenanceForTest } from './event-provenance.js';
 import type { ActorKind } from './actor.js';
 
@@ -60,7 +60,7 @@ function recordPerfTiming(payload: {
 // a test spawns, so fixture events can never land in the user's real log (#910).
 let _eventsPath: string | undefined;
 function eventsPath(): string {
-  return (_eventsPath ??= process.env.AGENTS_EVENTS_PATH || path.join(getUserAgentsDir(), 'events.jsonl'));
+  return (_eventsPath ??= process.env.AGENTS_EVENTS_PATH || path.join(getHistoryDir(), 'events', 'events.jsonl'));
 }
 
 function eventsDir(): string {

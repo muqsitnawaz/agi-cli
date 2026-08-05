@@ -43,7 +43,7 @@ function runCli(home: string, args: string[]) {
 }
 
 function readEvents(home: string): Array<Record<string, unknown>> {
-  const eventsPath = path.join(home, '.agents', 'events.jsonl');
+  const eventsPath = path.join(home, '.agents', '.history', 'events', 'events.jsonl');
   if (!fs.existsSync(eventsPath)) return [];
   const out: Array<Record<string, unknown>> = [];
   for (const line of fs.readFileSync(eventsPath, 'utf-8').split('\n').filter(Boolean)) {
