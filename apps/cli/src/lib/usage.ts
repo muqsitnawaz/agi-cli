@@ -894,7 +894,37 @@ export function formatUsageSection(usage: UsageInfo): string[] {
 /** Fetch Codex usage by scanning the most recent session files for rate-limit events. */
 async function getCodexUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
   try {
-    const files = collectCodexSessionFiles(options?.home);
+    // Codex usage is read from on-disk session transcripts, which carry no
+    // account identity and are not removed on logout. To keep the bar scoped to
+    // the account signed in NOW, floor the scan at the current login time: the
+    // id_token's `auth_time` claim — the OIDC time-of-authentication. A session
+    // written before that login belongs to whoever was signed in before (e.g.
+    // after `codex logout` + login into a different account), and showing its
+    // rate_limits is the "wrong usage after switch" bug.
+    //
+    // `auth_time` — not the auth.json file mtime — is the correct floor: Codex
+    // rewrites auth.json on every token refresh (advancing its mtime), but a
+    // refresh_token grant does not re-authenticate the user, so `auth_time`
+    // stays at the real login. Flooring on mtime would blank the bar after each
+    // background refresh; flooring on `auth_time` does not. No readable
+    // credential means the version is signed out — report no usage. A credential
+    // that carries no `auth_time` falls back to no floor (prior behavior) rather
+    // than hide a signed-in account's usage.
+    const base = options?.home || os.homedir();
+    let sinceMs: number | undefined;
+    try {
+      const tokens = (
+        JSON.parse(fs.readFileSync(path.join(base, '.codex', 'auth.json'), 'utf-8')) as {
+          tokens?: { id_token?: string; access_token?: string };
+        }
+      ).tokens;
+      const authTime = decodeJwtPayload(tokens?.id_token || tokens?.access_token || '')?.auth_time;
+      if (typeof authTime === 'number' && authTime > 0) sinceMs = authTime * 1000;
+    } catch {
+      return { snapshot: null, error: null };
+    }
+
+    const files = collectCodexSessionFiles(options?.home, sinceMs);
     for (const filePath of files) {
       const match = await readLatestCodexRateLimits(filePath);
       if (!match) continue;
@@ -1469,8 +1499,15 @@ function normalizeDroidWindow(
   };
 }
 
-/** Collect Codex JSONL session files sorted newest-first. */
-function collectCodexSessionFiles(home?: string): string[] {
+/**
+ * Collect Codex JSONL session files sorted newest-first.
+ *
+ * `sinceMs` drops files modified before it. Codex session transcripts are not
+ * tagged with the account that wrote them, so this mtime floor is how usage is
+ * kept account-scoped: a session older than the current login belongs to a
+ * prior account (see {@link getCodexUsageInfo}).
+ */
+function collectCodexSessionFiles(home?: string, sinceMs?: number): string[] {
   const base = home || os.homedir();
   const dir = path.join(base, '.codex', 'sessions');
   if (!fs.existsSync(dir)) return [];
@@ -1483,6 +1520,7 @@ function collectCodexSessionFiles(home?: string): string[] {
     seenFiles.add(real);
     const stat = safeStatSync(filePath);
     if (!stat) continue;
+    if (sinceMs !== undefined && stat.mtimeMs < sinceMs) continue;
     files.push({ path: filePath, mtime: stat.mtimeMs });
   }
 

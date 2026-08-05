@@ -303,7 +303,7 @@ src/
     monitors/          # `agents monitors` — event-triggered watchers (source→condition→action); native state-diff store; MonitorEngine runs in the daemon beside the cron scheduler. See docs/10-monitors.md
     projects.ts        # `agents projects` — named multi-repo project defs (~/.agents/projects/*.yaml) layered above the --project convention (resolveProjectRef in project-root.ts); project-status.ts rolls live sessions + merged PRs + artifacts into the progress card. Beta-gated. See docs/11-projects.md
     migrate.ts         # One-shot idempotent migrations
-    session/           # `agents sessions` READER — discovery/parse/render of agent transcripts; also `migrate-targets.ts` (the `sessions migrate` target scorer); `db.ts` `queryResourceUsageStats`/`backfillResourceUsage` back `agents sessions stats` + `sessions backfill resources` (skill/command usage rollup, session_resource_usage + resource_scan_ledger)
+    session/           # `agents sessions` READER — discovery/parse/render of agent transcripts; also `migrate-targets.ts` (the `sessions migrate` target scorer); `db.ts` `queryResourceUsageStats`/`backfillResourceUsage` back `agents sessions stats` + `sessions backfill resources` (skill/command usage rollup, session_resource_usage + resource_scan_ledger); `claude-accounts.ts` attributes each Claude transcript to the account that produced it (account_key) and `insights.ts` extracts the behavioural facets behind `agents insights` (session_insights cache)
     terminal/          # Terminal launch engine — tab/split in iTerm/Ghostty/tmux/Terminal.app, local or --host;
                        #   preferred.ts resolves WHICH terminal for a GUI caller (from live sessions' host app)
     cloud/             # Provider registry (Rush / Codex / Factory / Antigravity)
@@ -317,6 +317,28 @@ src/
 Note: `src/lib/session/` here is the transcript **reader**. The live-session
 **writer** is a separate package, [`packages/session-tracker`](../../packages/session-tracker)
 — different data, different consumer; see its AGENTS.md.
+
+### `agents sessions` preview architecture (map before you touch it)
+
+The interactive UI is three picker variants in `src/lib/picker.ts`: `itemPicker`
+(single-select, `space` toggles preview), `dynamicPicker` (async data source, used
+by the session browser, `tab` toggles preview), and a multi-select variant. All
+render a right/bottom **preview pane** built by `buildPreview(session)` in
+`src/commands/sessions-picker.ts` — a header (agent/model/cwd/tokens/ticket/PR) plus
+`formatCompactPreview` (prompt, files/changes, hooks, errors, tests, last response).
+
+Routing lives in `src/commands/sessions.ts`: `isBareBrowserListing`
+(+`hasNoBrowserDisqualifyingFlags`) gates the bare fleet-wide listing to the rich
+`runSessionBrowser` ([`src/commands/sessions-browser.ts`](src/commands/sessions-browser.ts));
+a query/filter falls through to `pickSessionInteractive` → `sessionPicker`.
+`--flat`/`--tree`/`--json`/`--no-interactive` print non-interactive views with no
+preview. `PICKER_RECENT_COUNT = 15` caps the picker's list rows.
+
+Gotcha: the preview pane has **no guaranteed height** — `availablePreviewRows =
+terminalRows() - fixedRows` (`picker.ts`), and `limitPreviewHeight` returns `''` when
+that collapses, so the preview can silently vanish on a full/short terminal (the
+RUSH-2198 bug). See the [§Contracts §Sessions spec](docs/specifications.md#sessions)
+for the non-empty-preview invariant (SES-8).
 
 ## Bundled native helpers (where the tarball's `.app`s come from)
 
