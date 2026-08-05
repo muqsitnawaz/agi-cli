@@ -69,7 +69,7 @@ describe('live session status flags', () => {
     const cwd = path.join(tempHome, 'work', 'status-fixture');
     const liveSessionId = 'abcd1111-1111-4111-8111-111111111111';
     const crashedSessionId = 'abcd2222-2222-4222-8222-222222222222';
-    const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' });
+    const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30_000)'], { stdio: 'ignore' });
     try {
       writeUpdateCache(tempHome);
       const projectKey = cwd.replace(/[/.]/g, '-');
@@ -81,14 +81,41 @@ describe('live session status flags', () => {
         'Waiting for the user to choose',
         new Date(Date.now() - 15 * 60_000).toISOString(),
       );
+      fs.appendFileSync(
+        path.join(tempHome, '.claude', 'projects', projectKey, `${liveSessionId}.jsonl`),
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: new Date(Date.now() - 15 * 60_000).toISOString(),
+          sessionId: liveSessionId,
+          message: {
+            role: 'assistant',
+            content: [{
+              type: 'tool_use',
+              id: 'ask-status-filter',
+              name: 'AskUserQuestion',
+              input: {
+                questions: [{
+                  question: 'Choose the next step',
+                  header: 'Scope',
+                  options: [
+                    { label: 'Continue', description: 'Keep working' },
+                    { label: 'Stop', description: 'End the session' },
+                  ],
+                }],
+              },
+            }],
+          },
+        }) + '\\n',
+        'utf-8',
+      );
       const registry = path.join(tempHome, '.agents', '.cache', 'terminals', 'live-terminals.json');
       fs.mkdirSync(path.dirname(registry), { recursive: true });
       fs.writeFileSync(registry, JSON.stringify({
         'stale-window': {
           at: new Date(Date.now() - 11 * 60_000).toISOString(),
           entries: [
-            { sessionId: liveSessionId, pid: sleeper.pid, kind: 'claude', cwd },
-            { sessionId: crashedSessionId, pid: 2_000_000_003, kind: 'claude', cwd },
+            { sessionId: liveSessionId, pid: sleeper.pid, kind: 'claude', cwd, startedAtMs: Date.now() },
+            { sessionId: crashedSessionId, pid: 2_000_000_003, kind: 'claude', cwd, startedAtMs: Date.now() },
           ],
         },
       }));
@@ -429,7 +456,7 @@ exit 1
 }
 
 function runAgents(args: string[], cwd: string, home: string, envOverrides: Record<string, string> = {}) {
-  return spawnSync(process.execPath, ['--import', tsxLoaderUrl, cliEntry, ...args], {
+  return spawnSync('node', ['--import', tsxLoaderUrl, cliEntry, ...args], {
     cwd,
     env: {
       ...process.env,
