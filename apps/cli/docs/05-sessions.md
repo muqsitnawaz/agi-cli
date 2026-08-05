@@ -16,7 +16,8 @@ interchangeable — pick the verb for the intent:
 
 | Intent | Verb |
 | --- | --- |
-| Jump to a **live** session (attach its terminal, or open a new tab and resume a copy) | `agents sessions focus [id]` |
+| Jump to a **live** session, or multi-select several and open each as a tab (attach its pane, or resume a copy) | `agents sessions focus [id]` |
+| Scope the picker to one device and/or a live-state (composes) | `agents sessions focus --orphan --device <host>` |
 | Attach only — never open a new tab / fork a copy | `agents sessions focus [id] --attach-only` |
 | Deprecated alias of focus --attach-only | `agents sessions go` (prints a deprecation notice) |
 | Interactive → **headless** (keep working unattended) | `agents sessions detach <id>` |
@@ -25,9 +26,19 @@ interchangeable — pick the verb for the intent:
 | Resume one session in its original harness, version, device, cwd, and mode | `agents resume <id>` |
 | Continue one session from a script / `run` path | `agents run <agent> --resume <id> …` |
 
-`focus` is the default “take me there” for a live process. `attach` / `detach` are
-the presence pair (foreground ↔ background). `resume` is the multi-open / history
-path. Top-level `agents resume <id-or-label>` is the strict single-session shortcut:
+`focus` is the default “take me there” for a live process. With no id it opens a
+multi-select picker over the live fleet: check several and each opens as a new tab
+in the terminal you're in (Ghostty / iTerm / tmux, auto-detected), reusing
+`resume`'s batch open + flood guard. Per tab it keeps live semantics — a tmux
+session is *joined* (a second client, no fork), local or remote over SSH; a session
+with no attach rail resumes a copy in the tab, reported never silently dropped.
+`--device/--host <name>` scopes the picker to those devices and the `--active`
+live-state filters (`--orphan`/`--crashed`/`--waiting`/`--idle`/`--working`/…) narrow
+by status; the two compose (`focus --orphan --device yosemite-s0`). A direct
+`focus <id>` still single-jumps, and `--attach-only` keeps the old `go` behavior
+(attach one or refuse). `attach` / `detach` are the presence pair (foreground ↔
+background). `resume` is the multi-open / history path. Top-level
+`agents resume <id-or-label>` is the strict single-session shortcut:
 a full **UUID** checks the local SQLite index first and resolves with **zero** SSH on
 a local hit; only on a local miss does it fan out to registered devices, and there the
 fan-out is cancellable and early-exits — the first peer holding the UUID resolves the
