@@ -6,6 +6,19 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
+- **Reader association fix + HTML artifacts + command titles.** Factory wrote
+  `workbench.editorAssociations` as a legacy array (`[{ viewType, filenamePattern }]`).
+  VS Code only accepts the object map (`{ "*.md": "agents.markdownEditor" }`), so the
+  toggle saved but files kept opening as raw text. Now writes the object shape,
+  migrates the old array on read, and pins patterns to `default` when disabled.
+  Commands are renamed to `Agents: Reader (Enable)` / `Agents: Reader (Disable)`
+  (same style as Watchdog). Reader also owns `*.html` / `*.htm` via a sandboxed
+  HTML preview (`agents.htmlReader`) so artifacts-cli pages render instead of
+  showing source. Floor/plan open paths no longer shell HTML out to the system
+  browser — `openPlanPreview` and file clicks use `vscode.openWith` for the
+  Reader, so `.agents/artifacts/**/*.html` (and plans/reports) open in-editor.
+  Source: `src/core/editorAssociations.ts`, `src/vscode/workbench.vscode.ts`,
+  `src/vscode/htmlReader.ts`, `src/vscode/settings.vscode.ts`, `package.json`.
 - **Status bar no longer shows a stale/stranger identity for a tab (fixes a Kimi
   tab displaying a Claude `2.1.218` and a wrong `session_…` id).** Two independent
   defects. (1) The live-session-id lookup resolves a tab's session by reading the
