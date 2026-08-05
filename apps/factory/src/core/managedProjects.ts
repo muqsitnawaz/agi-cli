@@ -15,6 +15,18 @@ import { homedir } from 'os';
 import YAML from 'yaml';
 import { runAgents, AgentsBinNotFoundError } from './agentsBin';
 
+/** Mirror of cli/src/lib/projects.ts isSafeProjectName — no path separators or dot-escapes. */
+function isSafeId(id: string): boolean {
+  return (
+    typeof id === 'string' &&
+    id.length > 0 &&
+    id.length <= 64 &&
+    /^[a-z0-9][a-z0-9._-]*$/i.test(id) &&
+    id !== '.' &&
+    id !== '..'
+  );
+}
+
 /**
  * A curated project. The webview mirrors this shape field-for-field in
  * ui/settings/components/mission-control/floorModel.ts — keep them in sync.
@@ -243,6 +255,7 @@ export async function readManagedProjects(): Promise<ManagedProject[]> {
 
 /** Add a new project or update an existing one (matched by id). Returns the new list. */
 export async function upsertManagedProject(project: ManagedProject): Promise<ManagedProject[]> {
+  if (!isSafeId(project.id)) throw new Error(`Unsafe project id: ${JSON.stringify(project.id)}`);
   const dir = projectsDir();
   await fs.promises.mkdir(dir, { recursive: true });
   const yaml = await buildProjectYaml(project);
@@ -252,6 +265,7 @@ export async function upsertManagedProject(project: ManagedProject): Promise<Man
 
 /** Remove a project by id (deletes its YAML file). Returns the new list. */
 export async function deleteManagedProject(id: string): Promise<ManagedProject[]> {
+  if (!isSafeId(id)) throw new Error(`Unsafe project id: ${JSON.stringify(id)}`);
   try {
     await fs.promises.unlink(path.join(projectsDir(), `${id}.yaml`));
   } catch {

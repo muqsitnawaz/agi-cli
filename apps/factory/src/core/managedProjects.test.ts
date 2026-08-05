@@ -1,5 +1,5 @@
 import { test, describe, expect } from 'bun:test';
-import { defToManaged, projectNameFromPath } from './managedProjects';
+import { defToManaged, projectNameFromPath, upsertManagedProject, deleteManagedProject } from './managedProjects';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -81,5 +81,20 @@ describe('defToManaged', () => {
     const m = defToManaged({});
     expect(m.id).toBe('');
     expect(m.name).toBe('');
+  });
+});
+
+describe('upsertManagedProject / deleteManagedProject — id safety', () => {
+  test('upsert rejects a path-traversal id', async () => {
+    const bad = { id: '../secret', name: 'x', path: '/tmp/x', confidence: 'high', source: 'manual' } as Parameters<typeof upsertManagedProject>[0];
+    await expect(upsertManagedProject(bad)).rejects.toThrow(/Unsafe project id/);
+  });
+
+  test('delete rejects a path-traversal id', async () => {
+    await expect(deleteManagedProject('../secret')).rejects.toThrow(/Unsafe project id/);
+  });
+
+  test('delete rejects a dot-dot id', async () => {
+    await expect(deleteManagedProject('..')).rejects.toThrow(/Unsafe project id/);
   });
 });
