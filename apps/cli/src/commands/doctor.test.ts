@@ -232,7 +232,6 @@ describe('healthBlockLines (triaged health rendering)', () => {
   });
 });
 
-
 describe('doctor target + qualifier survives --device forwarding (issue #2058)', () => {
   it('stripRoutingFlags removes --device but preserves the target qualifier verbatim', () => {
     const args = ['claude@latest', '--device', 'remotebox', '--diff'];
