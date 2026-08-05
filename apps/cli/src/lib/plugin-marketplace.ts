@@ -222,6 +222,11 @@ function dirExists(p: string): boolean {
 // ─── Per-version paths ────────────────────────────────────────────────────────
 
 function pluginsRootForVersion(agent: AgentId, versionHome: string): string {
+  // Muse Code keeps its plugin store under XDG data (`~/.local/share/muse/plugins`),
+  // not under the config dir. Under HOME isolation the version home is $HOME.
+  if (agent === 'muse') {
+    return path.join(versionHome, '.local', 'share', 'muse', 'plugins');
+  }
   return path.join(versionHome, agentConfigDirName(agent), 'plugins');
 }
 
@@ -843,6 +848,11 @@ export function addPluginToSettings(pluginName: string, marketplaceName: string,
     } catch {
       settings = {};
     }
+  }
+
+  // Muse refuses to start without schema_version: 1.
+  if (agent === 'muse' && settings.schema_version === undefined) {
+    settings.schema_version = 1;
   }
 
   if (!settings.enabledPlugins || typeof settings.enabledPlugins !== 'object') {

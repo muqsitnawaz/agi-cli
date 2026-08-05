@@ -271,7 +271,7 @@ Antigravity CLI, Grok CLI, OpenCode — features target these six first.
 | Goose | `goose` | ≥1.34 | ✓ | ✓ | ≥1.25 | — | ✓ | — | ✓ |
 | Droid | `droid` | ✓ | ✓ | ≥0.57.5 | ≥0.26 | ✓ | ✓ | ✓ | — |
 | Hermes | `hermes` | ≥0.11 | ✓ | — | ✓ | — | — | — | — |
-| Muse Code | `muse` | — | ✓ | — | ✓ | — | — | — | — |
+| Muse Code | `muse` | ✓ | ✓ | — | ✓ | — | ✓ | — | — |
 | Pi (Oh My Pi) | `pi` | — | ✓ | — | ✓ | ✓ | — | ✓ | — |
 
 ✓ = supported · — = not · version cell = only within that range (out-of-range =

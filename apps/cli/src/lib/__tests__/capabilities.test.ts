@@ -237,6 +237,11 @@ describe('capableAgents()', () => {
     expect(agents).toContain('hermes');
   });
 
+  it('includes muse for hooks (Claude-shaped settings.json under ~/.config/muse)', () => {
+    const agents = capableAgents('hooks');
+    expect(agents).toContain('muse');
+  });
+
   it('includes OpenCode hooks through its plugin API and excludes amp', () => {
     const agents = capableAgents('hooks');
     expect(agents).toContain('opencode');

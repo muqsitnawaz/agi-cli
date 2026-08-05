@@ -800,25 +800,27 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     instructionsFile: 'AGENTS.md',
     format: 'markdown',
     variableSyntax: '$ARGUMENTS',
-    // Native Muse hooks exist, but agents-cli has no registrar — leave off.
-    supportsHooks: false,
+    // Muse hooks use the Claude-shaped settings.json hooks block (matcher +
+    // command groups) under ~/.config/muse/settings.json, plus project
+    // `.muse/hooks.json`. registerHooksForClaude is reused with Muse's config
+    // dir and schema_version: 1.
+    supportsHooks: true,
+    // Claude-compatible marketplace layout + native `.muse-plugin/` manifest.
+    pluginManifestDir: '.muse-plugin',
     capabilities: {
-      // Muse natively supports project `.muse/hooks.json` and settings hooks,
-      // but agents-cli has no registerHooksForMuse writer yet — keep false so
-      // the capability table stays truthful (Pi pattern).
-      hooks: false,
+      // Hooks: Claude-compatible event→matcher→command groups in settings.json.
+      hooks: true,
       mcp: true,
       mcpHttp: true,
       mcpHeaders: true,
-      // Approval modes exist on the CLI (--approval-mode, --yolo) but there is
-      // no agents-cli permissions writer for Muse settings — keep false.
+      // Muse's safety model is approval-mode + OS sandbox (CLI flags), not a
+      // Claude-style tool-name allow/deny list. No settings.permissions writer.
       allowlist: false,
       skills: true,
       // No slash-command file dir; skills double as reusable workflows.
       commands: false,
-      // Plugins exist under ~/.local/share/muse/plugins, but agents-cli has no
-      // muse plugin install path yet — keep false until a writer lands.
-      plugins: false,
+      // Plugins: Claude marketplace + .muse-plugin (syncPluginToVersion).
+      plugins: true,
       // Runtime multi-agent / subagents exist, but there is no installable
       // subagent-definition directory for agents-cli to sync into (capability
       // table must stay truthful — see subagents-registry completeness).

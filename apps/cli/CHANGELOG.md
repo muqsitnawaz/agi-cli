@@ -15,10 +15,13 @@
   a key is present, otherwise local 7-day token totals. MCP writes to
   `~/.config/muse/settings.json` (`mcp_servers`, `schema_version: 1`). Model
   catalog: `muse-spark-1.2` (default), `1.1`, `1.2-contributor` with offline
-  pricing. Aliases: `muse-code`, `meta-muse`. Hooks/plugins/allowlist stay
-  capability-false until agents-cli writers land (Muse still has native hooks).
-  Source: `apps/cli/src/lib/{agents,exec,models,usage,mcp,runner,shims}.ts`,
-  `apps/cli/src/lib/session/{discover,parse,types}.ts`.
+  pricing. Aliases: `muse-code`, `meta-muse`. Hooks write Claude-shaped
+  matcher groups into `~/.config/muse/settings.json` (`schema_version: 1`);
+  plugins use the Claude marketplace layout under the XDG data plugin store
+  (`~/.local/share/muse/plugins`) with `.muse-plugin` manifests. Allowlist
+  stays false (Muse uses approval-mode + sandbox, not tool-name allow/deny).
+  Source: `apps/cli/src/lib/{agents,exec,models,usage,mcp,hooks,plugins,
+  plugin-marketplace,runner,shims}.ts`, `apps/cli/src/lib/session/*`.
 
 ## 1.22.19
 

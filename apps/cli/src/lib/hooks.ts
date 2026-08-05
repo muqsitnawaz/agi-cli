@@ -841,7 +841,7 @@ export function listHooksInVersionHome(agent: AgentId, version: string): HookEnt
  * map (Gemini/Antigravity settings.json variants, Codex config.toml, the OpenCode
  * plugin, …), so it reports them unsupported rather than risk a false verdict.
  */
-const SETTINGS_JSON_HOOK_FAMILY: readonly AgentId[] = ['claude', 'droid'];
+const SETTINGS_JSON_HOOK_FAMILY: readonly AgentId[] = ['claude', 'droid', 'muse'];
 
 export interface HookWiringIssue {
   /** Hook name (script basename minus extension). */
@@ -1635,6 +1635,19 @@ export function registerHooksToSettings(
       agentConfigDirName('droid')
     );
   }
+  if (agentId === 'muse') {
+    // Muse Code: Claude-compatible hooks block in ~/.config/muse/settings.json
+    // (events SessionStart / PreToolUse / …, matcher groups, command hooks).
+    // settings.json MUST carry schema_version: 1 or Muse refuses to start.
+    return registerHooksForClaude(
+      versionHome,
+      manifest,
+      resolveScript,
+      managedPrefixes,
+      agentConfigDirName('muse'),
+      { schemaVersion: 1 }
+    );
+  }
   if (agentId === 'codex') {
     return registerHooksForCodex(versionHome, manifest, resolveScript, managedPrefixes);
   }
@@ -1879,7 +1892,8 @@ function registerHooksForClaude(
   manifest: Record<string, ManifestHook>,
   resolveScript: (script: string) => string | null,
   managedPrefixes: string[],
-  configDirName = '.claude'
+  configDirName = '.claude',
+  options?: { schemaVersion?: number }
 ): { registered: string[]; errors: string[] } {
   const registered: string[] = [];
   const errors: string[] = [];
@@ -1897,6 +1911,11 @@ function registerHooksForClaude(
       errors.push('Failed to parse settings.json');
       return { registered, errors };
     }
+  }
+
+  // Muse (and any future agent that pins a settings schema) requires this key.
+  if (options?.schemaVersion !== undefined && config.schema_version === undefined) {
+    config.schema_version = options.schemaVersion;
   }
 
   if (!config.hooks || typeof config.hooks !== 'object') {
