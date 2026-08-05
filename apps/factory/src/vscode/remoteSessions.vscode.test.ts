@@ -1,5 +1,19 @@
-import { test, expect } from 'bun:test';
-import { mapWithConcurrency } from './remoteSessions.vscode';
+import { test, expect, afterEach } from 'bun:test';
+import {
+  mapWithConcurrency,
+  setFloorSnapshotStore,
+  getLastGoodFloorSnapshot,
+  __resetRemoteSessionsCachesForTests,
+  fetchHostSessions,
+  __remoteSessionsTestCounters,
+} from './remoteSessions.vscode';
+import {
+  acceptSuccessfulFloorFetch,
+  retainLastGoodOnFailure,
+  shouldRunBareFleetFetch,
+  type FloorHostSessionsSnapshot,
+} from '../core/floorSnapshot';
+import type { HostInfo, RemoteSession } from '../core/remoteSessions';
 
 // mapWithConcurrency bounds the host fan-out. A broken bound is what froze the M5,
 // and order preservation matters because results are zipped back to their host by
@@ -38,3 +52,63 @@ test('an empty list resolves to an empty array', async () => {
   const out = await mapWithConcurrency([] as number[], 4, async (n) => n);
   expect(out).toEqual([]);
 });
+
+// --- Floor last-good / force-only fleet policy (real store, no CLI required) ---
+
+afterEach(() => {
+  __resetRemoteSessionsCachesForTests();
+});
+
+function sampleSnap(): FloorHostSessionsSnapshot {
+  const hosts: HostInfo[] = [
+    { name: 'this-mac', online: true, agents: 1, load: 'free', uses: 1 },
+    { name: 'yosemite', online: true, agents: 1, load: 'free', uses: 1 },
+  ];
+  const sessions = [
+    { sessionId: 'local-1', host: 'this-mac' },
+    { sessionId: 'remote-1', host: 'yosemite' },
+  ] as RemoteSession[];
+  return acceptSuccessfulFloorFetch(null, {
+    hosts,
+    sessions,
+    groups: [
+      { host: 'this-mac', online: true, fetchedAt: 1000, sessions: [sessions[0]] },
+      { host: 'yosemite', online: true, fetchedAt: 1000, sessions: [sessions[1]] },
+    ],
+    fetchedAt: 1000,
+  });
+}
+
+test('setFloorSnapshotStore hydrates last-good so non-force fetchHostSessions does zero bare CLI calls', async () => {
+  const snap = sampleSnap();
+  let written: FloorHostSessionsSnapshot | null = null;
+  setFloorSnapshotStore({
+    read: () => snap,
+    write: (s) => {
+      written = s;
+    },
+  });
+  expect(getLastGoodFloorSnapshot()?.sessions).toHaveLength(2);
+  expect(shouldRunBareFleetFetch(false, true)).toBe(false);
+
+  __remoteSessionsTestCounters.reset();
+  const before = __remoteSessionsTestCounters.bareActiveCalls;
+  // Three "poll" calls that the UI would fire — must not invoke fleet CLI.
+  const a = await fetchHostSessions(Date.now(), { force: false });
+  const b = await fetchHostSessions(Date.now(), { force: false });
+  const c = await fetchHostSessions(Date.now(), { force: false });
+  expect(__remoteSessionsTestCounters.bareActiveCalls).toBe(before);
+  expect(a.fromCache).toBe(true);
+  expect(b.sessions.map((s) => s.sessionId).sort()).toEqual(['local-1', 'remote-1']);
+  expect(c.hostFreshness?.yosemite).toBe(1000);
+  expect(written).toBeNull(); // non-force read does not rewrite
+});
+
+test('retainLastGoodOnFailure keeps remote rows when a refresh fails', () => {
+  const prev = sampleSnap();
+  const kept = retainLastGoodOnFailure(prev);
+  expect(kept?.fromCache).toBe(true);
+  expect(kept?.sessions.map((s) => s.sessionId)).toContain('remote-1');
+  expect(kept?.fetchedAt).toBe(1000);
+});
+

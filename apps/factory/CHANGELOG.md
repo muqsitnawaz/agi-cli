@@ -6,12 +6,21 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
-- **Panel snapshot poll: one `agents view --json` for every harness per tick.** The
-  centralized SnapshotDetector used to fork `agents view <type> --json` once per
-  watched agent type every 4s. It now loads the full inventory in a single process
-  (`fetchAllUsage`) and slices by agent — same shape as the CLI snapshot inventory,
-  without paying for sessions when the panel only needs usage. Tests that inject
-  only `fetchUsage` keep the per-agent path. Source: `apps/factory/src/monitor/snapshotDetector.ts`.
+- **Floor data pipeline: last-good snapshot, no recurring fleet fan-out.** The
+  extension host persists the last successful Floor host/sessions snapshot in
+  `globalState` (`agents.floorSnapshot.v1`) and returns it immediately. Activation
+  (panel wire) seeds at most one `agents devices list --json` and one
+  `agents sessions --active --local --json`. Remote fleet refresh is user-triggered
+  only (`fetchHostSessions` with `force: true` → one bare `agents sessions --active
+  --json`); failures keep last-good rows and record per-host freshness. Dispatch
+  opens from cached inventory + last-good sessions and no longer probes per-device
+  CPU/memory. SnapshotDetector's 4s tick no longer runs `agents view --json`
+  (inventory is a 60s SWR cache shared only by panel/dispatch). Protocol adds
+  optional `force` / `hostFreshness` / `fromCache` fields on floor host/local
+  session messages. Source: `apps/factory/src/core/floorSnapshot.ts`,
+  `apps/factory/src/vscode/remoteSessions.vscode.ts`,
+  `apps/factory/src/vscode/settings.vscode.ts`,
+  `apps/factory/src/monitor/snapshotDetector.ts`.
 
 - **Resume picker: selection no longer clears, and rows say what differs.** The
   batch picker announced "N detached sessions pre-selected" while showing `0 Selected`
