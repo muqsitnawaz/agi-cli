@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Muse Code (Meta) harness support.** `muse` is a first-class agent: install via
+  `curl -fsSL https://dev.meta.ai/install.sh | sh`, run with `agents run muse`,
+  and use in teams. Modes map to Muse safety flags (`--disable-write` /
+  `--disable-approval` / `--yolo`); `--model` and `--reasoning-effort` are
+  forwarded; headless is `muse exec` with `--json`; interactive resume is
+  `muse resume <id>`, headless resume is `--session-id`. Sessions under
+  `~/.local/share/muse/sessions/` are discovered and parsed; usage shows Meta
+  Model API rate limits when a key is present, otherwise local 7-day token
+  totals. MCP writes to `~/.config/muse/settings.json` (`mcp_servers`,
+  `schema_version: 1`). Model catalog: `muse-spark-1.2` (default), `1.1`,
+  `1.2-contributor` with offline pricing. Aliases: `muse-code`, `meta-muse`.
+  Source: `apps/cli/src/lib/{agents,exec,models,usage,mcp,runner,shims}.ts`,
+  `apps/cli/src/lib/session/{discover,parse,types}.ts`.
+
 ## 1.22.19
 
 ### Fixed

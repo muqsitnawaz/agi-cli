@@ -701,6 +701,7 @@ function writeMcpConfigSupportsAgent(agentId: AgentId): boolean {
     case 'opencode':
     case 'hermes':
     case 'pi':
+    case 'muse':
       return true;
     default:
       return false;
@@ -924,6 +925,52 @@ export function writeMcpConfig(
 
       fs.mkdirSync(path.dirname(configPath), { recursive: true });
       fs.writeFileSync(configPath, yaml.stringify(config), 'utf-8');
+      break;
+    }
+    case 'muse': {
+      // Muse Code settings.json: requires schema_version: 1; MCP lives under
+      // mcp_servers with an explicit transport (stdio | streamable_http).
+      // See https://dev.meta.ai/docs/muse-code/extending#mcp
+      let config: Record<string, unknown> = {};
+      if (fs.existsSync(configPath)) {
+        try {
+          config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        } catch {
+          config = {};
+        }
+      }
+      if (config.schema_version === undefined) {
+        config.schema_version = 1;
+      }
+
+      const mcpServers: Record<string, unknown> =
+        mode === 'merge' && config.mcp_servers && typeof config.mcp_servers === 'object' && !Array.isArray(config.mcp_servers)
+          ? { ...(config.mcp_servers as Record<string, unknown>) }
+          : {};
+
+      for (const server of servers) {
+        if (server.transport === 'stdio') {
+          mcpServers[server.name] = {
+            transport: 'stdio',
+            command: server.command,
+            args: server.args || [],
+            ...(server.env && Object.keys(server.env).length > 0 ? { env: server.env } : {}),
+            enabled: true,
+          };
+        } else {
+          mcpServers[server.name] = {
+            transport: 'streamable_http',
+            url: server.url,
+            ...(server.headers && Object.keys(server.headers).length > 0 ? { headers: server.headers } : {}),
+            enabled: true,
+          };
+        }
+      }
+
+      config.mcp_servers = mcpServers;
+
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
       break;
     }
   }

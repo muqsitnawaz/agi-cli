@@ -172,12 +172,13 @@ describe('mcpHttp / mcpHeaders capability gates', () => {
       'claude',
       'codex',
       'hermes',
+      'muse',
       'pi',
     ]);
   });
 
-  it('capableAgents(mcpHeaders) is claude and pi (the header-honoring writers)', () => {
-    expect(capableAgents('mcpHeaders').sort()).toEqual(['claude', 'pi']);
+  it('capableAgents(mcpHeaders) is claude, muse, and pi (the header-honoring writers)', () => {
+    expect(capableAgents('mcpHeaders').sort()).toEqual(['claude', 'muse', 'pi']);
   });
 });
 

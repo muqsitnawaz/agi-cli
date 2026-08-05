@@ -587,6 +587,22 @@ elif [ "$AGENT" = "droid" ]; then
       esac
     fi
   fi
+elif [ "$AGENT" = "muse" ]; then
+  # Muse Code installs a self-updating launcher at ~/.local/bin/muse (curl
+  # installer from dev.meta.ai). No npm package. Same shims-dir re-exec guard
+  # as droid.
+  BINARY=$(adopted_original_bin || echo "")
+  if [ -z "$BINARY" ]; then
+    MUSE_BINARY="$HOME/.local/bin/muse"
+    if [ -x "$MUSE_BINARY" ] && [ "$(readlink -f "$MUSE_BINARY" 2>/dev/null)" != "$(readlink -f "$AGENTS_USER_DIR/.cache/shims/$CLI_COMMAND" 2>/dev/null)" ]; then
+      BINARY="$MUSE_BINARY"
+    else
+      BINARY=$(command -v muse 2>/dev/null || echo "")
+      case "$(readlink -f "$BINARY" 2>/dev/null)" in
+        "$AGENTS_USER_DIR/.cache/shims/"*) BINARY="" ;;
+      esac
+    fi
+  fi
 else
   BINARY="$VERSION_DIR/node_modules/.bin/$CLI_COMMAND"
 fi
@@ -1047,6 +1063,17 @@ if [ -x "$DROID_BINARY" ]; then
   BINARY="$DROID_BINARY"
 else
   BINARY=$(command -v droid 2>/dev/null || echo "")
+  case "$BINARY" in
+    "$HOME/.agents/.cache/shims/"*) BINARY="" ;;
+  esac
+fi`
+          : agent === 'muse'
+            ? `# Muse Code installs a self-updating launcher at ~/.local/bin/muse.
+MUSE_BINARY="$HOME/.local/bin/muse"
+if [ -x "$MUSE_BINARY" ]; then
+  BINARY="$MUSE_BINARY"
+else
+  BINARY=$(command -v muse 2>/dev/null || echo "")
   case "$BINARY" in
     "$HOME/.agents/.cache/shims/"*) BINARY="" ;;
   esac

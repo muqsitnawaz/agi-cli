@@ -80,6 +80,8 @@ const HOME = os.homedir();
 const VERSIONS_ROOTS = [getHistoryDir(), getAgentsDir()];
 const RUSH_SESSIONS_DIR = path.join(HOME, '.rush', 'sessions');
 const HERMES_SESSIONS_DIR = path.join(HOME, '.hermes', 'sessions');
+/** Muse Code sessions: ~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl */
+const MUSE_SESSIONS_DIR = path.join(HOME, '.local', 'share', 'muse', 'sessions');
 
 /** How long OpenClaw channel/cron snapshots stay valid before we re-shell-out. */
 const OPENCLAW_TTL_MS = 60_000;
@@ -495,6 +497,7 @@ function dispatchAgentScan(
     case 'droid': return scanDroidIncremental(onProgress);
     case 'grok': return scanGrokIncremental(onProgress);
     case 'cursor': return scanCursorIncremental(onProgress);
+    case 'muse': return scanMuseIncremental(onProgress);
     default: return Promise.resolve();
   }
 }
@@ -2688,6 +2691,152 @@ function readHermesMeta(filePath: string): { meta: SessionMeta; content: string 
     model,
     topic,
     messageCount: messageCount || (typeof session.message_count === 'number' ? session.message_count : undefined),
+  };
+
+  return { meta, content: userTexts.join('\n') };
+}
+
+/**
+ * Muse Code stores one session per directory under
+ * ~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl (event-sourced
+ * JSONL). Walk the tree for session.jsonl files and index each one.
+ */
+function scanMuseIncremental(onProgress?: (p: ScanProgress) => void): Promise<void> {
+  if (!fs.existsSync(MUSE_SESSIONS_DIR)) return Promise.resolve();
+
+  const filePaths: string[] = [];
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        // Skip subagent child sessions — nested under subagent/<id>/
+        if (ent.name === 'subagent') continue;
+        walk(full);
+      } else if (ent.name === 'session.jsonl') {
+        filePaths.push(full);
+      }
+    }
+  };
+  walk(MUSE_SESSIONS_DIR);
+
+  const changed = filterChangedFiles(filePaths);
+  if (changed.length === 0) return Promise.resolve();
+
+  onProgress?.({ agent: 'muse', parsed: 0, total: changed.length });
+
+  const scanEntries: ScanEntry[] = [];
+  const touched: Array<{ filePath: string; scan: ScanStamp }> = [];
+  const seen = new Set<string>();
+  let parsed = 0;
+  for (const { filePath, scan } of changed) {
+    try {
+      const result = readMuseMeta(filePath);
+      if (result && !seen.has(result.meta.id)) {
+        seen.add(result.meta.id);
+        scanEntries.push({ meta: result.meta, content: result.content, scan });
+      } else {
+        touched.push({ filePath, scan });
+      }
+    } catch {
+      touched.push({ filePath, scan });
+    }
+    parsed++;
+    onProgress?.({ agent: 'muse', parsed, total: changed.length });
+  }
+
+  upsertSessionsBatch(scanEntries);
+  recordScans(touched);
+  return Promise.resolve();
+}
+
+/** Parse a Muse session.jsonl for session metadata + first user prompt text. */
+function readMuseMeta(filePath: string): { meta: SessionMeta; content: string } | null {
+  // Path shape: .../sessions/YYYY/MM/DD/<uuid>/session.jsonl
+  const sessionId = path.basename(path.dirname(filePath));
+  if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return null;
+
+  let content: string;
+  try {
+    content = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return null;
+  }
+
+  const userTexts: string[] = [];
+  let topic: string | undefined;
+  let messageCount = 0;
+  let model: string | undefined;
+  let project: string | undefined;
+  let firstTs: string | undefined;
+  let lastTs: string | undefined;
+
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    let raw: any;
+    try {
+      raw = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (typeof raw.recorded_at === 'number') {
+      const v = raw.recorded_at as number;
+      // Muse logs use microseconds; values < 1e14 are treated as milliseconds.
+      const ms = v > 1e14 ? Math.floor(v / 1000) : v;
+      const ts = new Date(ms).toISOString();
+      if (!firstTs) firstTs = ts;
+      lastTs = ts;
+    }
+
+    const payloadType = raw.payload_type as string | undefined;
+    const payload = raw.payload;
+
+    if (payloadType === 'runtime.session.metadata') {
+      const record = payload?.record;
+      if (typeof record?.workspace_root === 'string') project = record.workspace_root;
+    }
+
+    if (payloadType === 'runtime.command_intake.received') {
+      const cmd = payload?.record?.command;
+      if (cmd?.kind === 'turn_submit' && typeof cmd.prompt === 'string' && cmd.prompt.trim()) {
+        messageCount++;
+        userTexts.push(cmd.prompt.trim());
+        if (!topic) topic = extractSessionTopic(cmd.prompt.trim());
+      }
+    }
+
+    const event = payload?.event ?? payload;
+    if (event?.kind === 'assistant_message_committed' && typeof event.text === 'string') {
+      messageCount++;
+    }
+    if (event?.kind === 'model_request_configured' && typeof event.model === 'string') {
+      model = event.model;
+    }
+    if (typeof event?.model === 'string' && !model) model = event.model;
+  }
+
+  const stat = safeStatSync(filePath);
+  const timestamp = lastTs
+    || firstTs
+    || (stat ? stat.mtime.toISOString() : new Date().toISOString());
+
+  const shortId = deriveShortId(sessionId);
+  const meta: SessionMeta = {
+    id: sessionId,
+    shortId,
+    agent: 'muse',
+    timestamp,
+    project,
+    filePath,
+    model,
+    topic,
+    messageCount: messageCount || undefined,
   };
 
   return { meta, content: userTexts.join('\n') };

@@ -326,6 +326,93 @@ describe('buildExecCommand', () => {
       },
     );
 
+    describe('muse (Meta Muse Code)', () => {
+      it('headless base is muse exec with positional prompt', () => {
+        const cmd = buildExecCommand(opts({ agent: 'muse', mode: 'edit', prompt: 'hi', headless: true }));
+        expect(cmd[0]).toBe('muse');
+        expect(cmd[1]).toBe('exec');
+        expect(cmd).toContain('hi');
+      });
+
+      it('interactive drops the exec subcommand', () => {
+        const cmd = buildExecCommand(opts({
+          agent: 'muse',
+          mode: 'edit',
+          prompt: undefined,
+          interactive: true,
+        }));
+        expect(cmd[0]).toBe('muse');
+        expect(cmd).not.toContain('exec');
+      });
+
+      it('maps modes to Muse safety flags', () => {
+        const plan = buildExecCommand(opts({ agent: 'muse', mode: 'plan', headless: true }));
+        expect(plan).toContain('--disable-write');
+
+        const auto = buildExecCommand(opts({ agent: 'muse', mode: 'auto', headless: true }));
+        expect(auto).toContain('--disable-approval');
+        expect(auto).not.toContain('--yolo');
+
+        const skip = buildExecCommand(opts({ agent: 'muse', mode: 'skip', headless: true }));
+        expect(skip).toContain('--yolo');
+      });
+
+      it('forwards --model and --reasoning-effort', () => {
+        const cmd = buildExecCommand(opts({
+          agent: 'muse',
+          mode: 'edit',
+          prompt: 'hi',
+          headless: true,
+          model: 'muse-spark-1.2',
+          effort: 'high',
+        }));
+        expect(cmd).toContain('--model');
+        expect(cmd[cmd.indexOf('--model') + 1]).toBe('muse-spark-1.2');
+        expect(cmd).toContain('--reasoning-effort');
+        expect(cmd[cmd.indexOf('--reasoning-effort') + 1]).toBe('high');
+      });
+
+      it('headless resume uses --session-id; interactive uses resume subcommand', () => {
+        const headless = buildExecCommand(opts({
+          agent: 'muse',
+          mode: 'edit',
+          prompt: 'continue',
+          headless: true,
+          resume: true,
+          sessionId: 'dbb09ec7-85fd-44bb-905a-95b9c39bb5b6',
+        }));
+        expect(headless).toContain('exec');
+        expect(headless).toContain('--session-id');
+        expect(headless[headless.indexOf('--session-id') + 1]).toBe(
+          'dbb09ec7-85fd-44bb-905a-95b9c39bb5b6',
+        );
+
+        const interactive = buildExecCommand(opts({
+          agent: 'muse',
+          mode: 'edit',
+          prompt: undefined,
+          interactive: true,
+          resume: true,
+          sessionId: 'dbb09ec7-85fd-44bb-905a-95b9c39bb5b6',
+        }));
+        expect(interactive).toContain('resume');
+        expect(interactive).toContain('dbb09ec7-85fd-44bb-905a-95b9c39bb5b6');
+        expect(interactive).not.toContain('exec');
+        expect(interactive).not.toContain('--session-id');
+      });
+
+      it('json adds --json', () => {
+        const cmd = buildExecCommand(opts({
+          agent: 'muse',
+          mode: 'edit',
+          prompt: 'hi',
+          headless: true,
+          json: true,
+        }));
+        expect(cmd).toContain('--json');
+      });
+    });
+
     it('kimi json adds --output-format stream-json', () => {
       const cmd = buildExecCommand(opts({ agent: 'kimi', prompt: 'do the thing', mode: 'edit', json: true }));
       expect(cmd).toContain('--output-format');
