@@ -18,12 +18,15 @@ import {
   toolOriginSessions,
   toolSearchFleetSortError,
   toolSearchForwardedArgs,
+  matchesLiveStatus,
+  requestedLiveStatuses,
 } from './sessions.js';
 import { remoteAgentsJsonCommand } from '../lib/remote-agents-json.js';
 import { NO_FANOUT_ENV } from '../lib/session/remote-active.js';
 import { parseRemoteList } from '../lib/session/remote-list.js';
 import { needsWindowsShell, composeWin32CommandLine } from '../lib/platform/index.js';
 import type { SessionMeta } from '../lib/session/types.js';
+import type { ActiveSession } from '../lib/session/active.js';
 
 const repoRoot = process.cwd();
 const cliEntry = path.join(repoRoot, 'src', 'index.ts');
@@ -34,6 +37,33 @@ const cliEntry = path.join(repoRoot, 'src', 'index.ts');
 // problem and shell:true arg-concatenation (which would split multi-word query
 // args like "prompt text").
 const tsxLoaderUrl = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
+
+describe('live session status flags', () => {
+  const row = (over: Partial<ActiveSession>): ActiveSession => ({
+    context: 'terminal', kind: 'codex', status: 'running', ...over,
+  });
+
+  it('maps every convenience flag and deduplicates --orphan/--orphaned', () => {
+    expect(requestedLiveStatuses({
+      working: true, idle: true, waiting: true, orphan: true, orphaned: true,
+      crashed: true, closed: true, abandoned: true, queued: true, unknown: true,
+    })).toEqual([
+      'working', 'idle', 'waiting', 'orphaned', 'crashed', 'closed', 'abandoned', 'queued', 'unknown',
+    ]);
+  });
+
+  it('distinguishes working from idle and waiting activity', () => {
+    expect(matchesLiveStatus(row({ activity: 'working' }), 'working')).toBe(true);
+    expect(matchesLiveStatus(row({ status: 'idle', activity: 'idle' }), 'working')).toBe(false);
+    expect(matchesLiveStatus(row({ status: 'input_required', activity: 'waiting_input' }), 'waiting')).toBe(true);
+  });
+
+  it('matches lifecycle states exactly', () => {
+    for (const status of ['idle', 'orphaned', 'crashed', 'closed', 'abandoned', 'queued', 'unknown'] as const) {
+      expect(matchesLiveStatus(row({ status }), status)).toBe(true);
+    }
+  });
+});
 
 describe('toolSearchForwardedArgs', () => {
   it('removes coordinator device flags and forces a whole-index local peer query', () => {
