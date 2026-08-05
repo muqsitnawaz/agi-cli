@@ -105,7 +105,7 @@ describe('live session status flags', () => {
               },
             }],
           },
-        }) + '\\n',
+        }) + '\n',
         'utf-8',
       );
       const registry = path.join(tempHome, '.agents', '.cache', 'terminals', 'live-terminals.json');
