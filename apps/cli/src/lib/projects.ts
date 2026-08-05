@@ -35,6 +35,7 @@ import { getProjectsDir } from './state.js';
 import { safeJoin } from './paths.js';
 import { toHomeRelative, expandLocalHome } from './project-root.js';
 import { resolveProjectKey } from './project-key.js';
+import { atomicWriteFileSync } from './fs-atomic.js';
 
 /** A git repo bound to a project, with an optional monorepo subpath. */
 export interface ProjectRepo {
@@ -110,8 +111,7 @@ export interface ProjectDef {
   /**
    * Auto-dispatch settings. When `enabled` is true and `maxAgents > 0` and the
    * project has a `linear.projectId`, the daemon polls Linear for delegated-Todo
-   * tickets and dispatches them up to the concurrency cap. This replaces the
-   * former ~/.agents/factory/projects.json registry.
+   * tickets and dispatches them up to the concurrency cap.
    */
   dispatch?: {
     /** Opt-in: enable auto-dispatch for this project (default: off). */
@@ -307,6 +307,7 @@ export function listProjectDefs(): ProjectDef[] {
 /**
  * Persist a project definition, normalizing `root`/`defaultPath` to home-relative
  * so it stays portable across machines. Creates the projects dir on first write.
+ * Writes via temp+rename so readers never see a partial file.
  */
 export function writeProjectDef(def: ProjectDef): string {
   const validated = validateProjectDef(def, def.name);
@@ -328,7 +329,7 @@ export function writeProjectDef(def: ProjectDef): string {
   );
   const target = projectDefPath(def.name);
   fs.mkdirSync(getProjectsDir(), { recursive: true });
-  fs.writeFileSync(target, yaml.stringify(clean), 'utf8');
+  atomicWriteFileSync(target, yaml.stringify(clean), 'utf8');
   return target;
 }
 

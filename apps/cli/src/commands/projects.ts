@@ -38,6 +38,7 @@ import {
   removeProjectDef,
   projectDefPath,
   isSafeProjectName,
+  validateProjectDef,
   type ProjectDef,
   type ProjectContext,
   type ProjectGoal,
@@ -474,7 +475,11 @@ export function registerProjectsCommands(program: Command): void {
     examples: `
       agents projects import --from-linear  # the projects you actually track
       agents projects add rush --repo phnx-labs/rush --path apps/web
-      agents projects list
+      agents projects list                 # definitions only (no session scan)
+      agents projects list --with-agents   # opt-in local active counts
+      agents projects list --json          # machine-readable defs (Factory uses this)
+      echo '{...}' | agents projects save --json  # create/update one def from stdin
+      agents projects rm rush --json       # machine-readable delete
       agents projects status              # every project, across the whole fleet
       agents projects status rush         # one project (same body as view/show)
       agents projects view rush           # alias of status <name>
@@ -484,22 +489,31 @@ export function registerProjectsCommands(program: Command): void {
     `,
     notes: `
       Definitions are hand-editable YAML in ~/.agents/projects/ and sync across
-      machines with 'agents push/pull'.
+      machines with 'agents push/pull'. Factory reads and writes only through
+      these commands — never ~/.agents/factory/projects.json.
     `,
   });
 
   // ---- list ----
   projects
     .command('list')
-    .description('List defined projects with their root, repo, and live agent count.')
+    .description('List defined projects (definitions only by default; no session scan).')
     .option('--json', 'Machine-readable output')
-    .action(async (opts: { json?: boolean }) => {
+    .option('--with-agents', 'Include local active agent counts (opt-in; never SSH)')
+    .action(async (opts: { json?: boolean; withAgents?: boolean }) => {
       const defs = listProjectDefs();
+      // Definitions-only by default: zero session scan / SSH. --with-agents is
+      // an explicit opt-in for local active counts only (getActiveSessions is
+      // local; it never fans out).
+      const roll = opts.withAgents
+        ? rollupSessionsByProject(defs, await getActiveSessions())
+        : undefined;
       if (opts.json) {
-        const roll = rollupSessionsByProject(defs, await getActiveSessions());
         console.log(
           JSON.stringify(
-            defs.map((d) => ({ ...d, agents: roll.get(d.name)?.agents ?? 0 })),
+            opts.withAgents
+              ? defs.map((d) => ({ ...d, agents: roll!.get(d.name)?.agents ?? 0 }))
+              : defs,
             null,
             2,
           ),
@@ -510,7 +524,6 @@ export function registerProjectsCommands(program: Command): void {
         console.log(chalk.gray('No projects defined. Add one: agents projects add <name>'));
         return;
       }
-      const roll = rollupSessionsByProject(defs, await getActiveSessions());
       const rows: ProjectListRow[] = defs.map((d) => ({
         name: d.name,
         path: truncate(d.root ?? d.defaultPath ?? '', LIST_PATH_MAX),
@@ -518,10 +531,11 @@ export function registerProjectsCommands(program: Command): void {
       }));
       const w = computeProjectListWidths(rows);
       for (const [i, d] of defs.entries()) {
-        const agents = roll.get(d.name)?.agents ?? 0;
         const row = rows[i];
+        const agentsSuffix =
+          opts.withAgents && roll ? ` ${roll.get(d.name)?.agents ?? 0} agents` : '';
         console.log(
-          `  ${chalk.bold(row.name.padEnd(w.name))} ${chalk.dim(row.path.padEnd(w.path))} ${chalk.cyan(row.repo.padEnd(w.repo))} ${agents} agents`,
+          `  ${chalk.bold(row.name.padEnd(w.name))} ${chalk.dim(row.path.padEnd(w.path))} ${chalk.cyan(row.repo.padEnd(w.repo))}${agentsSuffix}`,
         );
       }
     });
@@ -942,16 +956,73 @@ export function registerProjectsCommands(program: Command): void {
       console.log(chalk.green(`${def.name} → Linear project "${p.name}" (${p.id})${p.url ? ` ${p.url}` : ''}`));
     });
 
+  // ---- save ----
+  projects
+    .command('save')
+    .description('Create or update one project from a complete ProjectDef JSON object on stdin.')
+    .option('--json', 'Required: read ProjectDef JSON from stdin; print the saved definition as JSON')
+    .action(async (opts: { json?: boolean }) => {
+      if (!opts.json) {
+        console.error(chalk.red('projects save requires --json (pipe one complete ProjectDef JSON object on stdin).'));
+        process.exit(1);
+      }
+      const chunks: Buffer[] = [];
+      for await (const c of process.stdin) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks).toString('utf8').trim();
+      if (!raw) {
+        console.error(chalk.red('projects save --json: empty stdin (expected one ProjectDef JSON object).'));
+        process.exit(1);
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        console.error(chalk.red(`projects save --json: invalid JSON: ${e instanceof Error ? e.message : String(e)}`));
+        process.exit(1);
+      }
+      let def: ProjectDef;
+      try {
+        def = validateProjectDef(parsed);
+      } catch (e) {
+        console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+        process.exit(1);
+      }
+      writeProjectDef(def);
+      const saved = loadProjectDef(def.name);
+      if (!saved) {
+        console.error(chalk.red(`projects save: wrote "${def.name}" but could not reload it`));
+        process.exit(1);
+      }
+      console.log(JSON.stringify(saved, null, 2));
+    });
+
   // ---- rm ----
   projects
     .command('rm <name>')
     .alias('remove')
     .description('Delete a project definition. Never touches the repo.')
-    .action((name: string) => {
+    .option('--json', 'Machine-readable success / error')
+    .action((name: string, opts: { json?: boolean }) => {
+      if (!isSafeProjectName(name)) {
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, name, error: `Invalid project name: "${name}"` }));
+        } else {
+          console.error(chalk.red(`Invalid project name: "${name}"`));
+        }
+        process.exit(1);
+      }
       if (removeProjectDef(name)) {
-        console.log(chalk.green(`Removed project "${name}"`));
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: true, name, removed: true }));
+        } else {
+          console.log(chalk.green(`Removed project "${name}"`));
+        }
       } else {
-        console.error(chalk.red(`No project named "${name}".`));
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, name, error: `No project named "${name}"` }));
+        } else {
+          console.error(chalk.red(`No project named "${name}".`));
+        }
         process.exit(1);
       }
     });
