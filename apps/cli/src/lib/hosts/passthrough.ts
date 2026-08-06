@@ -56,8 +56,16 @@ interface RemoteSpec {
  * (`repo`/`repos`, `exec`/`run`) so either argv form routes the same way.
  *
  * Prefer adding here over per-command SSH code — this is the single choke point.
+ *
+ * Every key MUST be a real top-level command (a `KNOWN_TOP_LEVEL_COMMANDS`
+ * member) — `passthrough.test.ts` asserts it. A key that is not one is dead:
+ * the gate in {@link maybeRunOnHost} rejects the name as unknown before this
+ * table is consulted, and before that gate existed it SSH'd a command the peer
+ * would also reject. `cli`/`packages`/`versions`/`daemon` were exactly that
+ * (the commands are `clis`, `registry`/`search`/`install`/`publish`,
+ * `add`/`use`/`list`, and none) and were removed.
  */
-const REMOTE_PASSTHROUGH: Record<string, RemoteSpec> = {
+export const REMOTE_PASSTHROUGH: Record<string, RemoteSpec> = {
   // status / inspect
   view: {},
   inspect: {},
@@ -85,10 +93,8 @@ const REMOTE_PASSTHROUGH: Record<string, RemoteSpec> = {
   permissions: {},
   perms: {},
   mcp: {},
-  cli: {},
   subagents: {},
   workflows: {},
-  packages: {},
   models: {},
   profiles: {},
   defaults: {},
@@ -109,13 +115,11 @@ const REMOTE_PASSTHROUGH: Record<string, RemoteSpec> = {
   lock: {},
   feedback: {},
   wallet: {},
-  daemon: {},
   pty: {},
   tmux: {},
   watchdog: {},
   factory: {},
   browser: {},
-  versions: {},
 };
 
 /**
@@ -123,7 +127,7 @@ const REMOTE_PASSTHROUGH: Record<string, RemoteSpec> = {
  * fall through to local commander even when the flag is present. Do not add
  * these to {@link REMOTE_PASSTHROUGH}.
  */
-const OWN_HOST_COMMANDS = new Set([
+export const OWN_HOST_COMMANDS = new Set([
   'run',
   'exec', // deprecated alias of run
   'harness', // `--host <agent>` names the host CLI to run under, not a remote device
@@ -617,70 +621,22 @@ export async function maybeRunOnHost(
   const doctorPath = isDoctorCommand && !/^win/i.test((remoteOs ?? '').trim())
     ? { PATH: '$HOME/.agents/.cache/shims:$HOME/.local/bin:$PATH' }
     : undefined;
-  process.exitCode = streamAgentsOnHost(host, forwarded, {
-    remoteCwd,
-    interactive,
-    extraEnv: doctorPath,
-    remoteOs,
-    target,
-  });
-  return true;
-}
-
-/**
- * Run `agents <forwardedArgs>` on `host` over SSH, streaming its output, and
- * return the exit code. The single place the SSH hop is built, so every remote
- * `agents` invocation carries identical env semantics.
- *
- * Forwards actor provenance (`AGENTS_ACTOR`/`GIT_` vars) across the hop, merged UNDER
- * `extraEnv` so a caller-supplied PATH still wins — without this the remote
- * re-resolves the actor from THIS box's SSH_CONNECTION and mis-credits it
- * (RUSH-2028). Flows to both POSIX (export) and Windows ($env:) dialects.
- * AGENTS_FLEET_REMOTE marks this as a fleet-dispatched run so the far side can
- * gate consent-sensitive actions — the browser consent gate
- * (lib/browser/remote-control.ts) reads it to allow/deny a cross-machine drive.
- */
-export function streamAgentsOnHost(
-  host: Host,
-  forwardedArgs: string[],
-  opts: {
-    remoteCwd?: string;
-    interactive?: boolean;
-    extraEnv?: Record<string, string>;
-    remoteOs?: string;
-    target?: string;
-  } = {},
-): number {
-  const target = opts.target ?? sshTargetFor(host);
-  const remoteOs = opts.remoteOs ?? resolveRemoteOsSync(host.name);
-  const env = withActorEnv({ ...opts.extraEnv, AGENTS_FLEET_REMOTE: '1' });
-  const remoteCmd = buildRemoteAgentsInvocation(forwardedArgs, opts.remoteCwd, remoteOs, env);
-  const code = sshStream(target, remoteCmd, { tty: !!opts.interactive, multiplex: true });
+  // Forward actor provenance (AGENTS_ACTOR*/GIT_*) across the SSH hop, merged
+  // UNDER the doctor PATH so that PATH still wins — without this the remote
+  // re-resolves the actor from THIS box's SSH_CONNECTION and mis-credits it
+  // (RUSH-2028). Flows to both POSIX (export) and Windows ($env:) dialects.
+  // AGENTS_FLEET_REMOTE marks this as a fleet-dispatched `--host` run so the far
+  // side can gate consent-sensitive actions — the browser consent gate
+  // (lib/browser/remote-control.ts) reads it to allow/deny a cross-machine drive.
+  const env = withActorEnv({ ...doctorPath, AGENTS_FLEET_REMOTE: '1' });
+  const remoteCmd = buildRemoteAgentsInvocation(forwarded, remoteCwd, remoteOs, env);
+  const code = sshStream(target, remoteCmd, { tty: interactive, multiplex: true });
   if (code === 255) {
     console.error(
       chalk.red(`${host.name}: unreachable over SSH (asleep, offline, or host key changed?).`) +
         chalk.gray(' Check: agents hosts check ' + host.name),
     );
   }
-  return code;
-}
-
-/**
- * Resolve a device/host name and run `agents <forwardedArgs>` there.
- *
- * Used by the resume router (commands/resume.ts, sessions.ts) to send a session
- * back to the machine that owns its transcript, so it reaches the SAME SSH path
- * as `--host` rather than a second, divergent transport (RUSH-2022).
- */
-export async function runAgentsOnDevice(
-  deviceName: string,
-  forwardedArgs: string[],
-  opts: { interactive?: boolean; remoteCwd?: string; env?: Record<string, string> } = {},
-): Promise<number> {
-  const host = await resolveTargetHost(deviceName, false);
-  return streamAgentsOnHost(host, forwardedArgs, {
-    interactive: opts.interactive,
-    remoteCwd: opts.remoteCwd,
-    extraEnv: opts.env,
-  });
+  process.exitCode = code;
+  return true;
 }

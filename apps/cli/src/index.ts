@@ -124,6 +124,8 @@ if (IS_DEV_BUILD) {
 import {
   COMMAND_LOADERS,
   LAZY_COMMAND_NAMES,
+  isKnownTopLevelCommand,
+  suggestTopLevelCommand,
   loadView,
   loadInspect,
   loadFeedback,
@@ -1155,51 +1157,15 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadUninstall);
 }
 
-/** Calculate the Levenshtein edit distance between two strings. */
-function levenshtein(a: string, b: string): number {
-  const m = a.length;
-  const n = b.length;
-  const dp: number[][] = Array(m + 1)
-    .fill(null)
-    .map(() => Array(n + 1).fill(0));
-  for (let i = 0; i <= m; i++) dp[i][0] = i;
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      dp[i][j] =
-        a[i - 1] === b[j - 1]
-          ? dp[i - 1][j - 1]
-          : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
-    }
-  }
-  return dp[m][n];
-}
-
-// Auto-correct typos with edit distance 1
+// Unknown command. The distance-1 auto-correct happens EARLIER (before the
+// --host router — see below), so anything reaching here has no near match worth
+// rewriting; report it and suggest.
 program.on('command:*', (operands) => {
   const unknown = operands[0];
-  const allCommands = program.commands.map((c) => c.name());
-
-  let closest: string | null = null;
-  let minDist = Infinity;
-  for (const cmd of allCommands) {
-    const dist = levenshtein(unknown, cmd);
-    if (dist < minDist) {
-      minDist = dist;
-      closest = cmd;
-    }
-  }
-
-  if (minDist === 1 && closest) {
-    const args = process.argv.slice(2);
-    args[0] = closest;
-    program.parse(['node', 'agents', ...args]);
-    return;
-  }
-
+  const closest = suggestTopLevelCommand(unknown);
   console.error(`error: unknown command '${unknown}'`);
-  if (closest && minDist <= 3) {
-    console.error(`(Did you mean ${closest}?)`);
+  if (closest && closest.distance <= 3) {
+    console.error(`(Did you mean ${closest.name}?)`);
   }
   process.exit(1);
 });
@@ -1208,7 +1174,7 @@ program.on('command:*', (operands) => {
 // and the doc flags (--version/--help/-h) drive both the registration strategy
 // and whether the update check + background sync run at all.
 const passedArgs = process.argv.slice(2);
-const requestedCommand = passedArgs.find((arg) => !arg.startsWith('-'));
+let requestedCommand = passedArgs.find((arg) => !arg.startsWith('-'));
 const verboseStartup = passedArgs.includes('--verbose');
 // Help and version output are pure documentation — they must never gate on
 // setup, otherwise `agents <cmd> --help` becomes useless on a fresh box.
@@ -1221,7 +1187,24 @@ const helpOrVersionRequested = passedArgs.some(
 // spellcheck), while `agents` itself is unaffected. `brandDisabled` is empty for
 // the unbranded CLI, so all of this is a no-op there.
 const brandDisabled = disabledCommandsForActiveBrand();
-const requestedIsDisabled = requestedCommand !== undefined && brandDisabled.has(requestedCommand);
+let requestedIsDisabled = requestedCommand !== undefined && brandDisabled.has(requestedCommand);
+
+// Correct a one-letter typo BEFORE the --host router and before registration, so
+// the corrected command's own `--host` support decides the routing. Doing it
+// after (commander's `command:*` handler used to) meant `agents docto --host box`
+// never re-consulted the router and dead-ended on a LOCAL doctor with an unknown
+// option. A brand-disabled name is not a correction target — under that brand the
+// command does not exist. RUSH-2022.
+if (requestedCommand !== undefined && !isKnownTopLevelCommand(requestedCommand)) {
+  const suggestion = suggestTopLevelCommand(requestedCommand);
+  if (suggestion?.distance === 1 && !brandDisabled.has(suggestion.name)) {
+    const idx = passedArgs.indexOf(requestedCommand);
+    passedArgs[idx] = suggestion.name;
+    process.argv[idx + 2] = suggestion.name;
+    requestedCommand = suggestion.name;
+    requestedIsDisabled = false;
+  }
+}
 
 // `--host` passthrough: run this invocation on a remote machine over SSH instead
 // of locally. Handled before any local command registration / update check /
@@ -1239,9 +1222,6 @@ if (requestedCommand !== undefined && !helpOrVersionRequested && !requestedIsDis
 // Register only the command(s) this invocation actually uses. Lazy commands
 // (sessions/teams/cloud) are handled after applyGlobalHelpConventions below.
 const isLazyRequest = requestedCommand !== undefined && LAZY_COMMAND_NAMES.has(requestedCommand);
-// Set when the requested name maps to no command: the lazy tree is then also
-// registered below so the spellcheck can suggest `sessions`/`teams`/`cloud`.
-let requestedIsUnknown = false;
 if (requestedIsDisabled) {
   // The brand turned this command off: register the full tree so the "did you
   // mean" picker still works, then strip the disabled commands below so the
@@ -1254,7 +1234,6 @@ if (requestedIsDisabled) {
     // spellcheck and edit-distance-1 auto-correct (the command:* handler above)
     // see the same candidate set — and ordering — as main.
     await registerAllEagerCommands();
-    requestedIsUnknown = true;
   }
 }
 // When requestedCommand is undefined (bare invocation, --version, --help, -h) no
@@ -1270,19 +1249,6 @@ applyGlobalHelpConventions(program);
 // only when explicitly requested, keeping lightweight commands off that path.
 if (isLazyRequest && !requestedIsDisabled) {
   for (const loader of COMMAND_LOADERS[requestedCommand!]) await reg(loader);
-} else if (requestedIsUnknown) {
-  // Unknown command: the lazy names must be candidates too, or `agents session`
-  // (a typo for the very much lazy `sessions`) gets no "did you mean" at all —
-  // the miss the RUSH-2022 report walked into. Registration order still mirrors
-  // main: lazy commands come after applyGlobalHelpConventions.
-  const seen = new Set<ModuleLoader>();
-  for (const name of LAZY_COMMAND_NAMES) {
-    for (const loader of COMMAND_LOADERS[name] ?? []) {
-      if (seen.has(loader)) continue;
-      seen.add(loader);
-      await reg(loader);
-    }
-  }
 }
 
 // White-label: remove any commands this brand disabled so they resolve as

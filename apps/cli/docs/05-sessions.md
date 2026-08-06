@@ -54,9 +54,11 @@ lookup and SIGTERMs the rest, so a fast peer's hit is not bounded by the
 slowest/unreachable peer's timeout. It then routes to the owning device and invokes the
 version that created the session with its recorded cwd and launch mode. **"Routes to the
 owning device" is an SSH hop, not a local start:** when the session's origin machine is
-another box, `agents resume` re-runs itself there over the same transport `--host` uses,
-because the harness's conversation state lives on that machine — starting it here would
-run the agent against state this box has never seen. `--here` overrides and runs locally.
+another box, `agents resume` re-runs itself there over the same peer transport the
+picker uses, because the harness's conversation state lives on that machine — starting
+it here would run the agent against state this box has never seen. `--here` overrides
+and runs locally. `agents sessions attach <id>` hops the same way, as an *attach*: both
+halves of it (the detach record and the headless process it stops) are on the owner.
 A run dispatched with `agents run --device <box>` records `<box>` as its origin machine in
 the local index, so it resumes back on that box rather than on the machine that dispatched
 it (RUSH-2022). An exact

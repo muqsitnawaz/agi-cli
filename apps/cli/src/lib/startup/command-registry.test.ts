@@ -12,6 +12,7 @@ import {
   LAZY_COMMAND_NAMES,
   KNOWN_TOP_LEVEL_COMMANDS,
   isKnownTopLevelCommand,
+  suggestTopLevelCommand,
 } from './command-registry.js';
 
 /** Register every module in the loader table onto one fresh program. */
@@ -49,6 +50,18 @@ describe('KNOWN_TOP_LEVEL_COMMANDS', () => {
     for (const name of ['perms', 'exec', 'jobs', 'cron', 'check', 'resources', 'hq', 'upgrade', '_internal']) {
       expect(isKnownTopLevelCommand(name)).toBe(true);
     }
+  });
+
+  it('suggests the lazily-registered group a typo meant — the RUSH-2022 miss', () => {
+    // The old spellcheck ranked against the commands registered SO FAR, and
+    // `sessions` is lazy, so this typo got no suggestion at all.
+    expect(suggestTopLevelCommand('session')).toEqual({ name: 'sessions', distance: 1 });
+    expect(suggestTopLevelCommand('sesions')).toEqual({ name: 'sessions', distance: 1 });
+    expect(suggestTopLevelCommand('docto')).toEqual({ name: 'doctor', distance: 1 });
+  });
+
+  it('never suggests an internal command', () => {
+    expect(suggestTopLevelCommand('_internal')?.name).not.toBe('_internal');
   });
 
   it('rejects a name the CLI does not register', () => {

@@ -21,7 +21,7 @@
  */
 
 import type { SessionMeta } from './types.js';
-import { machineId, normalizeHost } from '../machine-id.js';
+import { normalizeHost } from '../machine-id.js';
 import { isSelfHost } from '../devices/self-host.js';
 
 /**
@@ -58,11 +58,12 @@ export function consumeResumePinned(): boolean {
 export function sessionOwnerDevice(session: Pick<SessionMeta, 'machine'>): string | undefined {
   const owner = session.machine?.trim();
   if (!owner) return undefined;
-  // `isSelfHost` matches every identity this box answers to (short id, tailnet
-  // dnsName, loopback), not just `machineId()` — a mirror tagged with the
-  // tailnet name of THIS machine is local, not a peer (cf. RUSH-2114).
-  if (owner.toLowerCase() === machineId().toLowerCase() || isSelfHost(owner)) return undefined;
-  return owner;
+  // `isSelfHost` matches every identity this box answers to — `machineId()`
+  // itself, the tailnet dnsName and its short form, loopback (devices/
+  // self-host.ts `selfAliases`) — so a mirror tagged with this machine's tailnet
+  // name is local, not a peer (cf. RUSH-2114). No separate `machineId()`
+  // comparison: it is one of those aliases.
+  return isSelfHost(owner) ? undefined : owner;
 }
 
 /**

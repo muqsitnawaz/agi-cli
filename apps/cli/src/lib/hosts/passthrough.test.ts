@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { flagValue, maybeRunOnHost, runFleetPassthrough } from './passthrough.js';
+import { flagValue, maybeRunOnHost, runFleetPassthrough, REMOTE_PASSTHROUGH, OWN_HOST_COMMANDS } from './passthrough.js';
+import { KNOWN_TOP_LEVEL_COMMANDS } from '../startup/command-registry.js';
 import { machineId } from '../session/sync/config.js';
 import type { DeviceProfile, DeviceRegistry } from '../devices/registry.js';
 
@@ -37,6 +38,21 @@ describe('flagValue', () => {
   });
   it('returns undefined when absent', () => {
     expect(flagValue(['view', '--json'], 'host', 'H')).toBeUndefined();
+  });
+});
+
+describe('routing tables name only real commands (RUSH-2022)', () => {
+  // The unknown-command gate rejects a name before either table is consulted, so
+  // a key that is not a registered command is unreachable — and was already
+  // broken before the gate (it SSH'd a command the peer would reject too).
+  it('every REMOTE_PASSTHROUGH key is a registered top-level command', () => {
+    const phantom = Object.keys(REMOTE_PASSTHROUGH).filter((c) => !KNOWN_TOP_LEVEL_COMMANDS.has(c));
+    expect(phantom).toEqual([]);
+  });
+
+  it('every OWN_HOST_COMMANDS entry is a registered top-level command', () => {
+    const phantom = [...OWN_HOST_COMMANDS].filter((c) => !KNOWN_TOP_LEVEL_COMMANDS.has(c));
+    expect(phantom).toEqual([]);
   });
 });
 

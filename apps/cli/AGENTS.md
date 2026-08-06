@@ -342,17 +342,32 @@ for the non-empty-preview invariant (SES-8).
 
 ### Resume is machine-bound — check the owner before you start a harness
 
-The picker lists the **whole fleet**, so anything that resumes a picked row can be
-handed a session whose harness state lives on another box. Route every such path
-through `sessionOwnerDevice`
-([`src/lib/session/resume-owner.ts`](src/lib/session/resume-owner.ts)) — the one
-answer to "may this resume run here?". A non-`undefined` result means the caller
-either hops to that device (`agents resume`, `resumeSessionInPlace`) or refuses by
-name (`sessions resume`, which opens tabs on a single machine); never start the
-harness locally. A synced mirror is the trap: its transcript IS readable here, so
-nothing fails until the agent is asked to continue a conversation it has never seen,
-and `sessions-resume.ts`'s `fs.existsSync(cwd)` fallback then quietly resumed in
-`process.cwd()` (RUSH-2022).
+**Reading and resuming follow different machines, and conflating them is the bug.**
+Reading follows the FILE — a synced mirror is on this disk, so only a live fan-out
+row (`_remote`) must be read on the peer (`transcriptOnPeerOf` in
+`sessions-picker.ts`). Resuming follows the HARNESS STATE, which is on the owning
+machine whatever the transcript's location. A mirror is therefore readable and NOT
+resumable, and that is the trap: nothing fails until the agent is asked to continue
+a conversation it has never seen, and `sessions-resume.ts`'s `fs.existsSync(cwd)`
+fallback then quietly resumed in `process.cwd()` (RUSH-2022).
+
+`sessionOwnerDevice`
+([`src/lib/session/resume-owner.ts`](src/lib/session/resume-owner.ts)) is the one
+answer to "may this resume run here?". Every path that starts a harness from a picked
+row consults it first: `agents resume` and the `agents sessions` picker hop to the
+owner, `sessions attach` hops as an **attach** (its detach record and the headless
+process it stops are both on the owner — hopping as a bare resume would skip the
+stop and leave two processes on one transcript), and `sessions resume`, which opens
+tabs on a single machine, refuses by name. `resumeSessionInPlace` is the LOCAL
+takeover and now **fails loud** if it is handed a peer-owned session — reaching it
+with one means a caller skipped its routing step.
+
+The hop uses `runOnPeer` ([`src/lib/session/remote-list.ts`](src/lib/session/remote-list.ts)),
+not the `--host` passthrough. Two reasons: the passthrough re-discovers locally and
+dead-ends for a session that exists only on the peer, and it marks the run
+`AGENTS_FLEET_REMOTE` — a one-shot command may carry that consent marker, but a
+resumed session would inherit it for its whole life and `agents browser start` inside
+it would be refused as a cross-machine drive.
 
 The signal is only as good as what wrote it: `machine` on a host-dispatched run is
 stamped by [`src/lib/hosts/session-index.ts`](src/lib/hosts/session-index.ts) from

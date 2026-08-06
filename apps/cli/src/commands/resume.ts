@@ -95,18 +95,22 @@ export function registerResumeCommand(program: Command): void {
         if (!options.quiet) {
           process.stderr.write(chalk.gray(`[agents] session ${outcome.session.shortId} belongs to ${owner} → resuming there\n`));
         }
-        const { runAgentsOnDevice } = await import('../lib/hosts/passthrough.js');
-        process.exitCode = await runAgentsOnDevice(
-          owner,
+        // `runOnPeer` is the existing transport for "this session's transcript
+        // and agent binary are on that box" (lib/session/remote-list.ts) — the
+        // same one the picker already uses. Not the `--host` passthrough: that
+        // one re-discovers locally and marks the run AGENTS_FLEET_REMOTE, which
+        // a long-lived resumed session must not inherit.
+        const { runOnPeer } = await import('../lib/session/remote-list.js');
+        const rc = await runOnPeer(
           buildResumeRemoteArgs(outcome.session.id, prompt, options),
-          {
-            // No remoteCwd: the owner resolves the session's recorded cwd itself
-            // (and `--cwd` is already forwarded), so the hop never depends on
-            // this box's idea of a directory that must exist over there.
-            interactive: !!process.stdout.isTTY,
-            env: { [RESUME_PINNED_ENV]: '1' },
-          },
+          owner,
+          { tty: !!process.stdout.isTTY, env: { [RESUME_PINNED_ENV]: '1' } },
         );
+        if (rc === 'no-target') {
+          console.error(chalk.red(`Session ${outcome.session.shortId} lives on ${owner}, which isn't a reachable device right now.`));
+          console.error(chalk.gray(`Register/wake it (agents devices), or run there: agents ssh ${owner}`));
+          process.exitCode = 1;
+        }
         return;
       }
 

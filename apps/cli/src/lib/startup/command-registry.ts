@@ -304,3 +304,39 @@ export const KNOWN_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set<string>([
 export function isKnownTopLevelCommand(name: string): boolean {
   return KNOWN_TOP_LEVEL_COMMANDS.has(name);
 }
+
+/** Levenshtein edit distance. */
+function levenshtein(a: string, b: string): number {
+  const dp: number[][] = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+/**
+ * Nearest real command to a mistyped name, with its edit distance — the single
+ * spellcheck used both by the pre-parse typo correction in src/index.ts and by
+ * the `command:*` unknown-command message.
+ *
+ * Candidates come from {@link KNOWN_TOP_LEVEL_COMMANDS}, not from the commands
+ * registered so far: registration is lazy, so the previously-used candidate set
+ * could not see `sessions`/`teams`/`cloud` at all and the very typo RUSH-2022
+ * reported (`session`) got no suggestion. Ties break on the name's order in the
+ * set, which is the loader table's declaration order.
+ */
+export function suggestTopLevelCommand(name: string): { name: string; distance: number } | null {
+  let best: { name: string; distance: number } | null = null;
+  for (const candidate of KNOWN_TOP_LEVEL_COMMANDS) {
+    if (candidate.startsWith('_')) continue; // internal, never suggest
+    const distance = levenshtein(name, candidate);
+    if (!best || distance < best.distance) best = { name: candidate, distance };
+  }
+  return best;
+}
