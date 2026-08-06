@@ -280,20 +280,53 @@ const DIST_DIR = path.join(__dirname, '../../dist');
 /** A dist module, as the `file://` specifier a spawned child can import. */
 const dist = (rel: string): string => pathToFileURL(path.join(DIST_DIR, rel)).href;
 
-/** Cold-import `specs` in a fresh Node process. Empty list = the spawn floor. */
+/**
+ * Cold-import `specs` in a fresh Node process. Empty list = the spawn floor.
+ *
+ * Fails loud on a non-zero exit. A mistyped or moved specifier makes the child
+ * die in ~13ms — BELOW the ~14-18ms bare-spawn baseline — so a swallowed
+ * failure would not just go unnoticed, it would read as the fastest row in the
+ * table. The repo's fail-loud-at-boundaries convention, applied to a benchmark:
+ * a row that measures nothing must say so, not post a good number.
+ */
 function coldImport(specs: string[]): void {
   const src = specs.map((s) => `await import(${JSON.stringify(s)});`).join('\n');
-  spawnSync(process.execPath, ['--input-type=module', '-e', src], { stdio: 'ignore' });
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', src], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  if (r.status !== 0) {
+    throw new Error(`cold import failed (status ${r.status}, signal ${r.signal}): ${String(r.stderr).slice(0, 400)}`);
+  }
 }
 
-/** The static imports of src/index.ts, in source order. */
+/**
+ * The static imports of src/index.ts, in source order.
+ *
+ * They do NOT stop at index.ts:215. index.ts:513-524 declares three more, and
+ * ESM hoists them into the same block as the rest — the built entry proves it:
+ * dist/index.js:393 (state.js) and dist/index.js:394 (brand.js) sit in the same
+ * unbroken import block as dist/index.js:8 (commander). Both are load-bearing
+ * here, not incidental: brand.ts:20 imports agents.js, and agents.ts:26 imports
+ * ./versions.js — so this list reaches the 3738-line sync engine by a SECOND
+ * edge, independent of self-update.ts:20. A version of this bench that stopped
+ * at index.ts:215 measured a saving that the real graph does not get (caught in
+ * review on PR #2280).
+ *
+ * index.ts:515-524 is a second import statement from ./lib/self-update.js,
+ * already listed once below — ESM evaluates a module once per process, so
+ * listing it twice would measure nothing extra.
+ *
+ * `node:os` is deliberately absent though index.ts:13 declares it: nothing in
+ * index.ts references `os`, so tsc elides it (dist/index.js:8-13 has no os
+ * import). This list is the graph the built entry actually loads.
+ */
 const BOOTSTRAP_GRAPH: string[] = [
   'commander', // index.ts:10
   'chalk', // index.ts:11
-  'node:fs', 'node:os', 'node:path', 'node:url', // index.ts:12-15
+  'node:fs', 'node:path', 'node:url', // index.ts:12, 14, 15
   dist('lib/startup/dev-build.js'), // index.ts:16
   dist('lib/secrets/sync-commands.js'), // index.ts:36
-  dist('lib/self-update.js'), // index.ts:86-95
+  dist('lib/self-update.js'), // index.ts:86-95 (and again at index.ts:515-524)
   dist('lib/startup/command-registry.js'), // index.ts:124-207
   dist('lib/help.js'), // index.ts:208
   dist('lib/whats-new.js'), // index.ts:209
@@ -302,6 +335,8 @@ const BOOTSTRAP_GRAPH: string[] = [
   dist('lib/events.js'), // index.ts:213
   dist('lib/event-provenance.js'), // index.ts:214
   dist('lib/format.js'), // index.ts:215
+  dist('lib/state.js'), // index.ts:513
+  dist('lib/brand.js'), // index.ts:514
 ];
 
 const SPAWN_OPTS = { time: 3000, iterations: 12 } as const;
@@ -319,8 +354,8 @@ describe('startup module loading — one cold `node -e "await import(...)"` per 
     coldImport(['chalk']);
   }, SPAWN_OPTS);
 
-  bench('node:fs + node:os + node:path + node:url (index.ts:12-15) — builtins, snapshot-resident', () => {
-    coldImport(['node:fs', 'node:os', 'node:path', 'node:url']);
+  bench('node:fs + node:path + node:url (index.ts:12, 14, 15) — builtins, snapshot-resident; index.ts:13 `os` is unused and tsc elides it (absent from dist/index.js:8-13)', () => {
+    coldImport(['node:fs', 'node:path', 'node:url']);
   }, SPAWN_OPTS);
 
   bench('lib/startup/dev-build.js (index.ts:16)', () => {
@@ -366,21 +401,48 @@ describe('startup module loading — one cold `node -e "await import(...)"` per 
   bench('lib/format.js (index.ts:215) — re-enters the events graph via format.ts:12', () => {
     coldImport([dist('lib/format.js')]);
   }, SPAWN_OPTS);
+
+  bench('lib/state.js (index.ts:513) — imported directly, not only via events.ts:21', () => {
+    coldImport([dist('lib/state.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/brand.js (index.ts:514) — the SECOND edge to lib/versions.js: brand.ts:20 -> agents.js, agents.ts:26 -> versions.js', () => {
+    coldImport([dist('lib/brand.js')]);
+  }, SPAWN_OPTS);
 });
 
 /**
  * The graphs, not the pieces. Individual rows above double-count shared
- * subgraphs (state.js is reached from events.js AND format.js, platform/index.js
- * from self-update.js AND directly), so their sum is not the real cost. These
- * rows import a whole graph in ONE child, which is what an invocation pays.
+ * subgraphs (state.js is reached from events.js, format.js AND index.ts:513
+ * directly; platform/index.js from self-update.js and directly), so their sum is
+ * not the real cost. These rows import a whole graph in ONE child, which is what
+ * an invocation pays.
  *
- * `redirected` is not hypothetical arithmetic: it imports the exact set
- * self-update.js's graph reduces to when its one `compareVersions` import
- * (self-update.ts:20) points at the leaf that actually owns that function
- * (agent-spec/primitives.ts:50) instead of at ./versions.js, which merely
- * re-exports it (versions.ts:34, and the note at versions.ts:2327-2328). Its
- * only other module import is platform/index.js (self-update.ts:21); the rest is
- * builtins (self-update.ts:15-19).
+ * lib/versions.js — 3738 lines, and the single largest thing in the graph —
+ * enters by TWO independent edges, which is the point of the rows below:
+ *
+ *   index.ts:86-95  -> self-update.ts:20  -> versions.js   (a re-export shim)
+ *   index.ts:514    -> brand.ts:20        -> agents.js -> agents.ts:26 -> versions.js
+ *
+ * The first edge is removable on one line: versions.ts does not define
+ * `compareVersions`, it re-exports it (versions.ts:34, note at
+ * versions.ts:2327-2328) from agent-spec/primitives.ts:50, a file with zero
+ * imports. The second is NOT — agents.ts:26 imports three real functions
+ * (resolveVersion, getVersionHomePath, getBinaryPath; versions.ts:2205, :1126,
+ * :1006), and brand.js cannot be deferred because resolveBrandName() is called
+ * at module scope (index.ts:241), as is getUpdateCheckPath() from state.js
+ * (index.ts:525).
+ *
+ * agents.js is the sole waypoint for that second edge, and it has two feeders:
+ * brand.ts:20 and capabilities.ts:11. Both therefore reach versions.js, which is
+ * why cutting agents.ts:26 — not deferring brand.js — is what the third row
+ * measures.
+ *
+ * So `oneEdgeCut` measures what cutting ONLY the easy edge buys — the honest
+ * answer being "almost nothing", because the other edge still pulls the same
+ * module. `bothEdgesCut` measures the headroom if agents.ts:26 were also cut:
+ * it substitutes agents.js's own imports (agents.ts:12-27) MINUS the versions.js
+ * edge, so it is a real measured lower bound on that graph, not arithmetic.
  *
  * `deferrable` additionally drops events.js / event-provenance.js / format.js.
  * Every symbol index.ts binds from those three is called only inside a function
@@ -388,7 +450,7 @@ describe('startup module loading — one cold `node -e "await import(...)"` per 
  * (index.ts:298) inside the preAction/postAction hooks, stampProvenance
  * (index.ts:337) inside postAction, emitFriction (index.ts:942) inside the
  * `_internal friction` action, die (index.ts:919) inside the `hq` tombstone
- * action.
+ * action. state.js stays regardless — index.ts:513 imports it directly.
  *
  * `floor` is the irreducible cost: commander + chalk + the builtins, which the
  * CLI cannot start without.
@@ -398,27 +460,55 @@ const SELF_UPDATE_REDIRECTED: string[] = [
   dist('lib/agent-spec/primitives.js'), // where compareVersions is defined (primitives.ts:50)
   dist('lib/platform/index.js'), // self-update.ts:21
 ];
+/**
+ * agents.ts:12-27 minus the one `./versions.js` edge at agents.ts:26.
+ *
+ * capabilities.js (agents.ts:27) is deliberately excluded, and that exclusion is
+ * the whole subtlety of this row. capabilities.ts:11 imports `./agents.js` and
+ * nothing else local, so as BUILT today `capabilities.js -> agents.js ->
+ * versions.js` — importing it here would silently re-add the exact module this
+ * row exists to remove, and the row would measure nothing (it initially did: it
+ * came out SLOWER than TODAY). In the counterfactual where agents.ts:26 is gone,
+ * capabilities.js's only edge leads to an agents.js that carries no versions.js,
+ * so it contributes nothing beyond what this list already holds.
+ */
+const AGENTS_WITHOUT_VERSIONS: string[] = [
+  'node:child_process', 'node:util', 'node:crypto', 'node:fs', 'node:path', 'node:os', // agents.ts:12-17
+  'smol-toml', 'yaml', 'chalk', // agents.ts:18-20
+  dist('lib/platform/index.js'), // agents.ts:22
+  dist('lib/fs-walk.js'), // agents.ts:23
+  dist('lib/fuzzy.js'), // agents.ts:24
+  dist('lib/state.js'), // agents.ts:25
+];
 const WITHOUT_SELF_UPDATE = BOOTSTRAP_GRAPH.filter((s) => !s.endsWith('self-update.js'));
-const REDIRECTED_GRAPH = [...WITHOUT_SELF_UPDATE, ...SELF_UPDATE_REDIRECTED];
-const DEFERRABLE_GRAPH = REDIRECTED_GRAPH.filter(
+const ONE_EDGE_CUT = [...WITHOUT_SELF_UPDATE, ...SELF_UPDATE_REDIRECTED];
+const BOTH_EDGES_CUT = [
+  ...ONE_EDGE_CUT.filter((s) => !s.endsWith('brand.js')),
+  ...AGENTS_WITHOUT_VERSIONS,
+];
+const DEFERRABLE_GRAPH = BOTH_EDGES_CUT.filter(
   (s) => !s.endsWith('events.js') && !s.endsWith('event-provenance.js') && !s.endsWith('format.js'),
 );
-const FLOOR_GRAPH = ['commander', 'chalk', 'node:fs', 'node:os', 'node:path', 'node:url'];
+const FLOOR_GRAPH = ['commander', 'chalk', 'node:fs', 'node:path', 'node:url'];
 
 describe('startup module loading — the whole eager graph in one cold process (what every `agents` invocation actually pays before argv is read)', () => {
   bench('BASELINE: bare `node -e ""` — same spawn floor as the rows below', () => {
     coldImport([]);
   }, SPAWN_OPTS);
 
-  bench('TODAY: the full index.ts:10-215 graph', () => {
+  bench('TODAY: the full graph (index.ts:10-215 AND index.ts:513-524)', () => {
     coldImport(BOOTSTRAP_GRAPH);
   }, SPAWN_OPTS);
 
-  bench('self-update.ts:20 redirected to agent-spec/primitives.js — drops the 3738-line lib/versions.js sync engine from the graph', () => {
-    coldImport(REDIRECTED_GRAPH);
+  bench('ONE EDGE CUT: self-update.ts:20 redirected to agent-spec/primitives.js — versions.js still arrives via index.ts:514 -> brand.ts:20 -> agents.ts:26', () => {
+    coldImport(ONE_EDGE_CUT);
   }, SPAWN_OPTS);
 
-  bench('...and events.js + event-provenance.js + format.js deferred into the hook bodies that use them', () => {
+  bench('BOTH EDGES CUT: that plus agents.ts:26 no longer importing versions.js (agents.ts:12-27 substituted without it) — the headroom, and the only shape where versions.js leaves the graph', () => {
+    coldImport(BOTH_EDGES_CUT);
+  }, SPAWN_OPTS);
+
+  bench('...and events.js + event-provenance.js + format.js deferred into the hook bodies that use them (state.js stays: index.ts:513)', () => {
     coldImport(DEFERRABLE_GRAPH);
   }, SPAWN_OPTS);
 
