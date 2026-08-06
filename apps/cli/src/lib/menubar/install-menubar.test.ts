@@ -198,13 +198,18 @@ describe('mayInstallMenubarHelper', () => {
   const brew = '/opt/homebrew/lib/node_modules/@phnx-labs/agents-cli/dist/index.js';
   const nvm = '/Users/me/.nvm/versions/node/v24.15.0/lib/node_modules/@phnx-labs/agents-cli/dist/index.js';
   const HOUR = 60 * 60 * 1000;
-  // Healthy install, recent heal — the fields that are not what a case is about.
+  // Healthy install, recent heal, no stamped helper version — the fields that
+  // are not what a case is about. `installedHelperVersion: null` means these
+  // pre-existing cases exercise the LEGACY (pre-version-stamp) path unchanged;
+  // version-arbitration cases below set it explicitly.
   const base = {
     helperExecMissing: false,
     needsDevIdHeal: false,
     msSinceLastHeal: 60_000,
     cooldownMs: HOUR,
     sourceIsDeveloperId: true,
+    installedHelperVersion: null as string | null,
+    activeVersion: '1.22.25',
   };
 
   it('refuses a foreign install while the recorded owner still exists (#2109)', () => {
@@ -296,6 +301,87 @@ describe('mayInstallMenubarHelper', () => {
     // must not be written into the plist or used to seize ownership.
     expect(mayInstallMenubarHelper({
       ...base, plistEntry: brew, activeEntry: null, ownerEntryExists: true,
+    })).toBe(false);
+  });
+});
+
+// Regression guard for #2210: the ownership cooldown above treated every
+// foreign signed install alike, so it never compared the CANDIDATE's own CLI
+// version against the version actually STAMPED on the installed helper
+// (`.menubar-version`). Observed on Zion: CLI 1.22.25 (Homebrew) invoked while
+// the running helper was still 1.22.5 (an NVM install had reclaimed ownership
+// after the cooldown) — the newer binary sat in npm while the pre-fix helper
+// kept running.
+describe('mayInstallMenubarHelper — version-aware arbitration (#2210)', () => {
+  const brew = '/opt/homebrew/lib/node_modules/@phnx-labs/agents-cli/dist/index.js';
+  const nvm = '/Users/me/.nvm/versions/node/v24.15.0/lib/node_modules/@phnx-labs/agents-cli/dist/index.js';
+  const HOUR = 60 * 60 * 1000;
+  // Owner (`plistEntry`) still exists, so every case here goes through the
+  // version-arbitration branch, not the missing-owner escape.
+  const base = {
+    plistEntry: brew,
+    activeEntry: nvm,
+    ownerEntryExists: true,
+    helperExecMissing: false,
+    needsDevIdHeal: false,
+    cooldownMs: HOUR,
+    sourceIsDeveloperId: true,
+  };
+
+  it('a newer install takes over immediately, bypassing the cooldown entirely', () => {
+    // The exact Zion shape: the invoking install (1.22.25) is newer than the
+    // helper actually running (1.22.5), and the last heal was seconds ago — well
+    // inside the cooldown window. Version-aware arbitration must not wait it out.
+    expect(mayInstallMenubarHelper({
+      ...base, installedHelperVersion: '1.22.5', activeVersion: '1.22.25',
+      msSinceLastHeal: 5_000,
+    })).toBe(true);
+  });
+
+  it('an older install never replaces a newer helper, even long past the cooldown', () => {
+    // Before this fix, waiting out MENUBAR_TAKEOVER_COOLDOWN_MS let the OLDER
+    // install reclaim and downgrade the helper — the second bullet in #2210's
+    // root cause. Age of the last heal must not matter here.
+    expect(mayInstallMenubarHelper({
+      ...base, installedHelperVersion: '1.22.25', activeVersion: '1.22.5',
+      msSinceLastHeal: HOUR + 1,
+    })).toBe(false);
+  });
+
+  it('equal-version installations do not oscillate ownership, even past the cooldown', () => {
+    // Two installs at the identical version have no correctness reason to trade
+    // ownership — that trade is exactly the "restarts roughly hourly until one
+    // is removed" churn the old pure-cooldown rule produced.
+    expect(mayInstallMenubarHelper({
+      ...base, installedHelperVersion: '1.22.25', activeVersion: '1.22.25',
+      msSinceLastHeal: HOUR + 1,
+    })).toBe(false);
+  });
+
+  it('a version-newer ad-hoc/dev build still cannot seize a healthy Developer-ID helper', () => {
+    // RUSH-2134 extended to the version-aware path: a dev build's version string
+    // sorting higher must not be enough to recopy an un-notarized bundle over a
+    // good one (Gatekeeper then rejects the result as "damaged").
+    expect(mayInstallMenubarHelper({
+      ...base, installedHelperVersion: '1.22.5', activeVersion: '1.22.25',
+      msSinceLastHeal: 5_000, sourceIsDeveloperId: false,
+    })).toBe(false);
+  });
+
+  it('legacy unversioned recovery remains possible: a pre-stamp helper still uses the ad-hoc/cooldown gate', () => {
+    // No `.menubar-version` marker to compare against (an install that predates
+    // the stamp) — falls through to the original ownership-cooldown escape
+    // rather than being permanently refused.
+    expect(mayInstallMenubarHelper({
+      ...base, installedHelperVersion: null, activeVersion: '1.22.25',
+      msSinceLastHeal: HOUR + 1,
+    })).toBe(true);
+  });
+
+  it('legacy unversioned recovery still refuses an ad-hoc build on the timer', () => {
+    expect(mayInstallMenubarHelper({
+      ...base, installedHelperVersion: null, activeVersion: '1.22.25',
+      msSinceLastHeal: HOUR + 1, sourceIsDeveloperId: false,
     })).toBe(false);
   });
 });

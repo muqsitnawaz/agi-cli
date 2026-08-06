@@ -693,24 +693,45 @@ executable or a Developer-ID heal proceeds from any install, since a bundle that
 isn't there cannot be contested and blocking it leaves the menu bar dead with no
 automatic recovery; (2) a non-owner takes over immediately once the recorded owner
 is **gone from disk**; (3) otherwise a non-owner may still take over **once per
-`MENUBAR_TAKEOVER_COOLDOWN_MS`** (1h, stamped in `.menubar-last-heal`). Without (3)
-a stale-but-present copy — an old nvm node dir nobody runs — owns the plist forever
-while the user's actual daily driver upgrades and never heals again. The cooldown
-turns an every-invocation storm into at most one restart per hour while leaving
-every install able to make progress. `agents menubar setup` bypasses the gate
-entirely and stays the immediate manual fix.
+`MENUBAR_TAKEOVER_COOLDOWN_MS`** (1h, stamped in `.menubar-last-heal`) — but ONLY
+when the helper predates the version stamp (see version-aware arbitration below).
+Without (3) a stale-but-present LEGACY copy — an old nvm node dir nobody runs —
+owns the plist forever while the user's actual daily driver upgrades and never
+heals again. `agents menubar setup` bypasses the gate entirely and stays the
+immediate manual fix.
 
-Two caveats worth knowing before you tune any of this. **(a)** Escape (3) is
-refused to a source bundle that is not Developer-ID signed: `scripts/install.sh`
-puts an ad-hoc dev build beside the npm global, and letting it win a *timed*
-takeover would recopy an un-notarized bundle over a good one, which Gatekeeper
-rejects as "damaged" and AppKit crashes on (RUSH-2134) — a broken menu bar rather
-than a cosmetic restart. It can still adopt via (2), the case that must never
-deadlock. **(b)** The cooldown bounds the loop but does not converge it: two
-installs that are *both* invoked regularly trade ownership every cooldown, so the
-helper restarts roughly hourly until one is removed. That is deliberate — the
-alternative is stranding one of them — and the real fix is a single install
-(#2147 covers making the multi-install banner actually name them all).
+**Version-aware arbitration replaced the cooldown as the primary decision
+(#2210).** The pure ownership gate above could not tell "real upgrade" from "any
+other foreign install", so a NEWER install waited out the same hour as any
+contender, and once the cooldown lapsed an OLDER install could reclaim and
+downgrade the helper — a released Swift fix could sit in npm while the user kept
+running the pre-fix binary (observed on Zion: CLI 1.22.25 vs. a helper still
+running 1.22.5). `mayInstallMenubarHelper` now compares the candidate's OWN cli
+version against the version stamped next to the currently installed helper
+(`.menubar-version`) once ownership and the repair escapes are settled:
+
+- **strictly newer → takes over immediately**, no cooldown wait (still gated on
+  `sourceIsDeveloperId`, below);
+- **strictly older → refused outright**, cooldown or not — a stale copy can never
+  downgrade a newer helper;
+- **equal → refused** — no correctness benefit to swapping identical versions,
+  and this is what closes caveat (b): two equal-version installs invoked
+  regularly no longer trade ownership every cooldown.
+
+A helper with no stamped version (predates the `.menubar-version` marker) falls
+through to the ORIGINAL ownership-cooldown escape (3) above, so recovery from
+that legacy state is exactly as possible as before this arbitration existed.
+
+Two caveats worth knowing before you tune any of this. **(a)** Both the timed
+legacy escape (3) and the "newer wins" branch are refused to a source bundle that
+is not Developer-ID signed: `scripts/install.sh` puts an ad-hoc dev build beside
+the npm global, and letting it win — on a timer, or because its (often synthetic)
+version string sorts higher — would recopy an un-notarized bundle over a good one,
+which Gatekeeper rejects as "damaged" and AppKit crashes on (RUSH-2134) — a broken
+menu bar rather than a cosmetic restart. It can still adopt via (2), the case that
+must never deadlock. **(b)** (resolved by #2210) — equal-version installs no
+longer oscillate; the real fix of collapsing to a single install is still tracked
+separately (#2147 covers making the multi-install banner actually name them all).
 
 **Do NOT "improve" this by comparing bundle content.** It looks like the obvious
 gate and it does not work: the helper is rebuilt, re-signed and re-notarized on

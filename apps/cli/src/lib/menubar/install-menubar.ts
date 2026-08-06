@@ -24,6 +24,7 @@ import { sleepSync } from '../fs-atomic.js';
 import { getRuntimeStateDir, getHelpersDir } from '../state.js';
 import { getCliVersion, resolveAgentsBin, resolveInstalledLayout } from '../version.js';
 import { copyAppBundle, withInstallLock } from '../app-bundle-install.js';
+import { compareVersions } from '../agent-spec/primitives.js';
 
 const APP_BUNDLE_NAME = 'MenubarHelper.app';
 const INSTALL_DIR_NAME = 'agents-cli';
@@ -505,6 +506,30 @@ export function disableMenubarService(): void {
  * install cannot hold the helper hostage, and a live one cannot be fought over.
  * A same-install upgrade keeps its entry path, so `npm update` still installs
  * the new helper normally. Pure so the truth table is unit-testable.
+ *
+ * Ownership alone left one gap (#2210): it treats every foreign signed install
+ * alike, so a NEWER install waits out the same cooldown as any other contender,
+ * and once the cooldown lapses an OLDER install can reclaim and downgrade the
+ * helper — a released fix can sit in npm while the user keeps running the
+ * pre-fix binary. Version-aware arbitration closes that: once ownership and the
+ * repair escapes above are settled, compare the CANDIDATE'S OWN cli version
+ * (`activeVersion`, what it would stamp if it installs) against the version
+ * stamped next to the CURRENTLY INSTALLED helper (`installedHelperVersion`,
+ * read from `.menubar-version` — not the candidate's *plist* entry, since the
+ * stamp is what says which binary is actually running):
+ *   - strictly newer -> take over immediately, no cooldown wait (still gated on
+ *     `sourceIsDeveloperId` — RUSH-2134: an ad-hoc build must never seize a
+ *     healthy Developer-ID helper just because its version string sorts higher);
+ *   - strictly older -> refuse outright, cooldown or not, so a stale copy can
+ *     never downgrade a newer helper;
+ *   - equal -> refuse. There is no correctness benefit to swapping identical
+ *     versions, and the old cooldown-based takeover let two regularly-invoked
+ *     equal-version installs trade ownership every cooldown forever — the
+ *     oscillation this closes.
+ * A null `installedHelperVersion` (the helper predates the `.menubar-version`
+ * stamp) falls through to the pre-version ad-hoc/cooldown gate below, so
+ * recovery from that legacy unstamped state remains exactly as possible as
+ * before this arbitration existed.
  */
 export function mayInstallMenubarHelper(opts: {
   /** `AGENTS_ENTRY` baked into the installed plist — the recorded owner. */
@@ -519,10 +544,15 @@ export function mayInstallMenubarHelper(opts: {
   needsDevIdHeal: boolean;
   /** ms since the last self-heal reinstall, or null if none is recorded. */
   msSinceLastHeal: number | null;
-  /** How long a non-owner waits before it may take over. */
+  /** How long a non-owner waits before it may take over (legacy/unversioned only). */
   cooldownMs: number;
   /** This install's OWN shipped bundle is Developer-ID signed (not ad-hoc/dev). */
   sourceIsDeveloperId: boolean;
+  /** Version stamped next to the currently installed helper (`.menubar-version`),
+   *  or null when it predates the stamp (legacy install). */
+  installedHelperVersion: string | null;
+  /** This install's own CLI version — what it would stamp if it installs. */
+  activeVersion: string;
 }): boolean {
   // Repairs are never gated: a missing binary or a broken signing identity leaves
   // the menu bar dead or re-prompting for Accessibility, and no other install can
@@ -535,7 +565,18 @@ export function mayInstallMenubarHelper(opts: {
   if (!opts.plistEntry) return true;
   if (opts.plistEntry === opts.activeEntry) return true; // we are the owner
   if (!opts.ownerEntryExists) return true; // the recorded owner is gone
-  // A foreign install while the owner still exists. Refusing outright bounds the
+
+  // A foreign install while the owner still exists. Version-aware arbitration
+  // (see the docblock above) — only when there IS a stamped version to compare;
+  // a legacy pre-stamp helper falls through to the ad-hoc/cooldown gate below.
+  if (opts.installedHelperVersion) {
+    const cmp = compareVersions(opts.activeVersion, opts.installedHelperVersion);
+    if (cmp > 0) return opts.sourceIsDeveloperId; // strictly newer — take over now
+    return false; // equal or older — never downgrade, never oscillate
+  }
+
+  // Legacy path: the installed helper predates the `.menubar-version` stamp, so
+  // there is nothing to compare versions against. Refusing outright bounds the
   // loop but strands the user when the recorded owner is a stale copy that simply
   // still sits on disk (an old nvm node dir) while their daily driver upgrades:
   // that install would never heal again. So it may take over, but only once per
@@ -596,6 +637,8 @@ function mayHealMenubar(needsDevIdHeal: boolean): boolean {
     msSinceLastHeal: msSinceLastMenubarHeal(),
     cooldownMs: MENUBAR_TAKEOVER_COOLDOWN_MS,
     sourceIsDeveloperId: Boolean(src) && hasDeveloperIdSignature(src as string),
+    installedHelperVersion: readInstalledMenubarVersion(),
+    activeVersion: getCliVersion(),
   });
 }
 
