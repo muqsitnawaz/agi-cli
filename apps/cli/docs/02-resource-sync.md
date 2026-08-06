@@ -114,12 +114,16 @@ agents sync claude              # the resolved default version (interactive prev
 agents sync claude@all          # every installed Claude version
 agents sync claude@all system   # scope to one DotAgent repo: system | user | project | <alias>
 agents sync claude --repo user  # same, via the flag form
+agents sync --json              # machine-readable umbrella result (also used by --host all)
+agents sync --host all          # fan out umbrella sync across every registered device
 ```
 
 A repo scope reconciles **only** that layer's resources into the target
 version(s), leaving the other layers' already-synced resources untouched. Bare
 `agents sync` (no agent) runs the umbrella verb — fetch remote state, then
-reconcile every installed agent.
+reconcile every installed agent. `--json` emits a single JSON object on stdout
+(and forces non-interactive mode); the fleet fan-out path (`--host all` /
+`--device all`) injects `--json` on each peer so the roster can parse results.
 
 ## MCP Servers: Per-Agent JSON Write
 
@@ -224,6 +228,12 @@ Per-agent conversion is lossy in both directions:
   danger-full-access; credential dirs (`~/.ssh`, `~/.aws`, `~/.config`) are
   excluded, and any roots the user set are unioned in, not clobbered
   (`permissions.ts`: `codexDefaultWritableRoots`, `mergeCodexSandboxWrite`).
+  Native launches then apply the managed `agents-plan` or `agents-edit` named
+  permission profile at runtime. This keeps network independent from filesystem
+  access: plan is read-only with network, while edit adds the workspace,
+  `~/.agents`, the cache baseline above, and caller-supplied writable roots. The
+  runtime profile uses `approval_policy="on-request"`; only explicit `skip`
+  bypasses approvals and sandboxing.
   Deny rules are emitted as Starlark to a generated `agents-deny.rules` file
   (`permissions.ts:38-56`).
 - Kiro 2.8.0+ maps canonical shell, filesystem, and web rules into v3

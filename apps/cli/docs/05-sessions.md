@@ -22,30 +22,34 @@ interchangeable — pick the verb for the intent:
 | Deprecated alias of focus --attach-only | `agents sessions go` (prints a deprecation notice) |
 | Interactive → **headless** (keep working unattended) | `agents sessions detach <id>` |
 | Headless → **interactive** in this terminal | `agents sessions attach <id>` |
-| Multi-select history and open each in a tab/split | `agents sessions resume [query]` |
+| Reopen one identity directly, or multi-select history into tabs/splits | `agents sessions resume [id-or-alias]` / `agents sessions resume` |
 | Resume one session in its original harness, version, device, cwd, and mode | `agents resume <id>` |
-| Resume a batch on the machine that owns them | `agents sessions resume --host <device>` |
 | Continue one session from a script / `run` path | `agents run <agent> --resume <id> …` |
 
-`focus` is the default “take me there” for a live process. With no id it opens a
+`focus` is the default “take me there” action. With an id or tmux alias it resolves
+the canonical session across the fleet, rechecks liveness, and attaches only when
+the process and pane are alive. A retained dead tmux pane is diagnostic state, not
+an attach target; the command resumes the native conversation on its owning device.
+With no id it opens a
 multi-select picker over the live fleet: check several and each opens as a new tab
 in the terminal you're in (Ghostty / iTerm / tmux, auto-detected), reusing
 `resume`'s batch open + flood guard. Per tab it keeps live semantics — a tmux
 session is *joined* (a second client, no fork), local or remote over SSH; a session
 with no attach rail resumes a copy in the tab, reported never silently dropped.
-`sessions resume` opens its tabs on ONE machine — this box, or the `--host <device>`
-you point it at — and the picker lists the whole fleet, so a selected session owned by
-a **different** box is **skipped by name** rather than started against state that
-machine does not have; the skip line gives the command that reaches it
-(`agents resume <id>`, or `agents sessions resume --host <owner>`). A session this
-machine owns is never skipped, `--host` or not: opening a locally-forked copy on the
-machine the user sits at is the `/fork` handoff, and that destination is explicit.
+`sessions resume` opens each selected session in a tab running the canonical
+`agents resume <id>`, and that command owns source-device routing — so a session
+owned by another box opens its tab here and hops to its owner from inside it,
+rather than starting a harness against state that machine does not have.
 `--device/--host <name>` scopes the picker to those devices and the `--active`
 live-state filters (`--orphan`/`--crashed`/`--waiting`/`--idle`/`--working`/…) narrow
 by status; the two compose (`focus --orphan --device yosemite-s0`). A direct
 `focus <id>` still single-jumps, and `--attach-only` keeps the old `go` behavior
 (attach one or refuse). `attach` / `detach` are the presence pair (foreground ↔
-background). `resume` is the multi-open / history path. Top-level
+background). Bare `sessions resume` is the multi-open/history path. Passing a UUID,
+unique UUID prefix, full tmux name such as `ag-codex-c1f3d813`, or unique alias
+suffix such as `c1f3d813` runs the same live-first lifecycle directly. Tmux aliases
+are bound durably to the harness-native ID at SessionStart and resolve on the device
+that owns them; ambiguous prefixes/suffixes fail instead of guessing. Top-level
 `agents resume <id-or-label>` is the strict single-session shortcut:
 a full **UUID** checks the local SQLite index first and resolves with **zero** SSH on
 a local hit; only on a local miss does it fan out to registered devices, and there the
@@ -600,7 +604,7 @@ agents sessions --agent codex@0.116.0
 agents sessions "auth refactor"
 
 # Include team-spawned sessions (hidden by default)
-agents sessions --teams
+agents sessions --team   # alias of --teams
 
 # One team's whole lineage: the session that spawned it, plus (with --teams) its
 # teammates. Spans every directory and all time — a team's teammates run in their
@@ -677,6 +681,16 @@ the local machine (`getActiveSessions`) and, unless `--local`, every registered 
 device over SSH, through one shared gather — `gatherActiveSessions` in
 `src/commands/sessions.ts`. `--host`/`--device` **scopes** that sweep to the named
 machines rather than adding to it.
+
+**Cross-surface cache (RUSH-2062).** The default path is cache-first against a
+daemon-warmed snapshot (`src/lib/session/session-cache.ts`, ~15s freshness). The
+daemon publishes this host's local active set on a short tick; menubar, Factory,
+watchdog, and CLI share it instead of each re-running the full gather. Live status
+stays inside that short window (`forceRefresh` / `AGENTS_SESSIONS_FORCE_REFRESH=1`
+re-gathers). Immutable identity fields are memoized by transcript mtime and never
+carry live status. `sessions --host` is likewise cache-first in
+`src/lib/session/remote.ts` (a reachable host skips SSH while the cache is fresh;
+unreachable still falls back to any age).
 
 On a TTY it opens the interactive browser seeded to running-only; `--json`,
 `--waiting`, and `--no-interactive` print the static grouped view instead. Both read

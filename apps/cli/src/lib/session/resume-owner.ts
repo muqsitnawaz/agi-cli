@@ -18,10 +18,16 @@
  * have. Before RUSH-2022 that happened silently — `sessions-resume.ts` even fell
  * back to `process.cwd()` when the recorded cwd did not exist locally, so a
  * remote session resumed in whatever directory the user happened to be in.
+ *
+ * Callers act on the answer differently, and the difference is deliberate:
+ * `agents resume` and `agents sessions attach` HOP to the owner over SSH, while
+ * `resumeSessionInPlace` — the local takeover every routed caller reaches only
+ * after deciding — REFUSES. The batch `sessions resume` needs no check of its
+ * own: each of its tabs runs the canonical `agents resume <id>`
+ * (lib/session/resume-command.ts), which routes itself.
  */
 
 import type { SessionMeta } from './types.js';
-import { normalizeHost } from '../machine-id.js';
 import { isSelfHost } from '../devices/self-host.js';
 
 /**
@@ -66,35 +72,3 @@ export function sessionOwnerDevice(session: Pick<SessionMeta, 'machine'>): strin
   return isSelfHost(owner) ? undefined : owner;
 }
 
-/**
- * The owning device when `session` cannot be resumed at `destination`, else
- * `undefined`.
- *
- * `destination` is where a batch resume is opening its terminal surfaces:
- * `undefined` for this machine, or the `--host <alias>` a `sessions resume` was
- * pointed at.
- *
- * Only a **peer-owned** session is ever flagged, and only when the destination
- * is not that peer. A session this machine owns is never flagged, including when
- * the caller aimed a `--host` somewhere else: that is the `/fork` handoff — fork
- * here, open the copy on the machine the user is sitting at — an explicit,
- * user-named destination rather than the silent wrong-machine start this guard
- * exists to stop (see `commands/fork.md` in the .agents-system repo).
- *
- * An untagged row (`machine` unset) is never flagged either — there is nothing
- * to compare, so the caller keeps its existing behaviour.
- */
-export function resumeDestinationMismatch(
-  session: Pick<SessionMeta, 'machine'>,
-  destination: string | undefined,
-): string | undefined {
-  const owner = sessionOwnerDevice(session);
-  if (!owner) return undefined;
-  if (!destination) return owner;
-  return sameDevice(owner, destination) ? undefined : owner;
-}
-
-/** Compare two device names the way the registry does: first label, case-insensitive. */
-function sameDevice(a: string, b: string): boolean {
-  return normalizeHost(a) === normalizeHost(b);
-}

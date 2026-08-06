@@ -24,6 +24,7 @@ import {
   resolveHostSshTarget,
   verifyRemoteKeychainPush,
   keychainWriteFailureMessage,
+  buildRemoteFileImportCommand,
 } from '../lib/secrets/remote.js';
 import { remoteShellFor, buildWindowsStdinImportCommand } from '../lib/hosts/remote-cmd.js';
 import { resolveRemoteOsSync } from '../lib/hosts/remote-os.js';
@@ -377,11 +378,28 @@ function maybePrintSyncedHint(name: string, stillPresent: boolean): void {
  * defaults). Shared with the command action so the wiring is unit-testable
  * without a live SSH session.
  */
-export function buildRemoteUnlockArgs(names: string[], opts: { all?: boolean; ttl?: string; durable?: boolean }): string[] {
+export function resolveUnlockTtlMs(ttl: string | undefined, until: string | undefined, now: number = Date.now()): number {
+  if (ttl && until) throw new Error('--ttl and --until are mutually exclusive.');
+  if (until) {
+    const expiresAt = Date.parse(until);
+    if (!Number.isFinite(expiresAt)) throw new Error("Invalid --until '" + until + "'. Use an ISO date or timestamp.");
+    if (expiresAt <= now) throw new Error("Invalid --until '" + until + "': date must be in the future.");
+    return expiresAt - now;
+  }
+  if (ttl) {
+    const secs = parseDuration(ttl);
+    if (!secs) throw new Error("Invalid --ttl '" + ttl + "'. Use e.g. 30m, 2h, 8h, 3d.");
+    return secs * 1000;
+  }
+  return secretsHoldMs();
+}
+
+export function buildRemoteUnlockArgs(names: string[], opts: { all?: boolean; ttl?: string; until?: string; durable?: boolean }): string[] {
   return [
     'unlock',
     ...(opts.all ? ['--all'] : names),
     ...(opts.ttl ? ['--ttl', opts.ttl] : []),
+    ...(opts.until ? ['--until', opts.until] : []),
     // Forward --durable so a remote unlock honors it too; without this the remote
     // silently falls back to its own secrets.agent.durable default (off).
     ...(opts.durable ? ['--durable'] : []),
@@ -452,11 +470,6 @@ function getCliVersion(): string {
   } catch {
     return '0.0.0';
   }
-}
-
-/** POSIX single-quote a string for safe interpolation into a remote shell command. */
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -1453,7 +1466,7 @@ export function registerSecretsCommands(program: Command): void {
           console.log(chalk.yellow(`No description found. Add one: agents secrets describe ${bundle.name} "what this bundle is for"`));
         }
         if (bundle.allow_exec) console.log(chalk.yellow('allow_exec: true'));
-        if (bundle.backend === 'file') console.log(chalk.gray('backend: file (passphrase-encrypted; reads need AGENTS_SECRETS_PASSPHRASE, no Touch ID)'));
+        if (bundle.backend === 'file') console.log(chalk.gray('backend: file (encrypted at rest; headless reads via a machine-local key, or AGENTS_SECRETS_PASSPHRASE if set — no Touch ID)'));
         if (bundle.backend === 'vault') console.log(chalk.gray('storage: synced (age-encrypted ~/.agents/vault.age; needs agents login)'));
         if (bundlePolicy(bundle) === 'never') {
           console.log(chalk.red.bold('policy: never — NO biometry ACL; reads are silent (no Touch ID, no user-presence check). Automation-only.'));
@@ -1696,7 +1709,7 @@ export function registerSecretsCommands(program: Command): void {
           console.log(chalk.red('Stored without biometry protection — reads are silent. Automation-only; rotate anything sensitive out of it.'));
         }
         if (backend === 'file') {
-          console.log(chalk.gray('File-backed: items are AES-256-GCM encrypted under AGENTS_SECRETS_PASSPHRASE (no Touch ID).'));
+          console.log(chalk.gray('File-backed: items are AES-256-GCM encrypted at rest under a machine-local key (or AGENTS_SECRETS_PASSPHRASE if set); headless reads, no Touch ID.'));
         }
         if (backend === 'vault') {
           console.log(chalk.gray('Synced: items are encrypted in ~/.agents/vault.age. Copy that file with your sync tool of choice.'));
@@ -2195,7 +2208,7 @@ Examples:
     .option('--vault <name>', '1Password vault name (used with --to-1password)')
     .option('--host <target...>', 'Push the bundle over SSH to this target (host alias or user@host); repeatable for multiple machines')
     .option('--device <target...>', 'Alias for --host; repeatable')
-    .option('--remote-backend <backend>', 'Backend for the bundle on the remote (with --host): keychain (default) or file (passphrase-encrypted, headless-readable). file forwards AGENTS_SECRETS_PASSPHRASE over stdin.', 'keychain')
+    .option('--remote-backend <backend>', 'Backend for the bundle on the remote (with --host): keychain (default) or file. file is headless-readable via the remote\'s machine-local key; it forwards AGENTS_SECRETS_PASSPHRASE over stdin only if set (opt-in).', 'keychain')
     .option('--force', 'Overwrite existing keys/items on the target (used with --to-1password and --host)')
     .option('--format <shell|json>', 'Output for --plaintext export: shell (default) or json (lossless, machine-readable; used by remote resolve)', 'shell')
     .option('--to-file <path>', 'Write the bundle as an AES-256-GCM encrypted offline file (needs AGENTS_SECRETS_PASSPHRASE; symmetric counterpart of import --from-file)')
@@ -2240,22 +2253,16 @@ Examples:
         if (hosts.length > 0) {
           for (const h of hosts) assertValidSshTarget(h);
           const remoteBackend = parseBackendOpt(opts.remoteBackend);
-          // For a file-backed remote bundle the remote must encrypt at rest with
-          // a passphrase. We forward the LOCAL AGENTS_SECRETS_PASSPHRASE — the
-          // operator unlocks it once on this (trusted, biometry-gated) machine —
-          // and ship it as the FIRST stdin line so it never lands in argv / `ps`
-          // / the remote shell history. The remote `read -r` consumes that line;
-          // `agents secrets import --from /dev/stdin` reads the .env remainder.
-          let remotePassphrase = '';
-          if (remoteBackend === 'file') {
-            remotePassphrase = process.env.AGENTS_SECRETS_PASSPHRASE ?? '';
-            if (!remotePassphrase) {
-              throw new Error(
-                '--remote-backend file needs AGENTS_SECRETS_PASSPHRASE set locally to encrypt the ' +
-                'bundle at rest on the remote. Set it for this command, then unlock it the same way per run.'
-              );
-            }
-          }
+          // For a file-backed remote bundle a passphrase is OPTIONAL. The file
+          // store is passphrase-free by default: with AGENTS_SECRETS_PASSPHRASE
+          // unset the remote `import --backend file` auto-provisions the remote's
+          // own machine-local key (0600 under ~/.agents/.secrets-key/), so reads
+          // are HEADLESS. We forward the LOCAL AGENTS_SECRETS_PASSPHRASE only when
+          // the operator opts in by setting it (e.g. to key the bundle off-disk
+          // under a shared secret) — shipped as the FIRST stdin line so it never
+          // lands in argv / `ps` / the remote shell history. Forcing a shared
+          // passphrase would defeat headless reads, so we no longer require one.
+          const remotePassphrase = remoteBackend === 'file' ? (process.env.AGENTS_SECRETS_PASSPHRASE ?? '') : '';
           const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `ssh export`, keyMode: 'storage', agentOnly: true });
           const dotenv = bundleEnvToDotenv(env);
           const keyCount = Object.keys(env).length;
@@ -2271,20 +2278,22 @@ Examples:
           for (const host of hosts) {
             let res: SshExecResult;
             if (remoteBackend === 'file') {
-              // File backend forwards AGENTS_SECRETS_PASSPHRASE as the FIRST stdin
-              // line (consumed by `read`, so it never lands in argv / `ps` /
-              // remote history), then the .env. That `read`/`export` prologue is
-              // POSIX shell — refuse a Windows target cleanly rather than emit
-              // broken PowerShell.
+              // File backend: headless-readable via the remote's machine-local key
+              // when no passphrase is set; otherwise forwards AGENTS_SECRETS_PASSPHRASE
+              // as the FIRST stdin line (consumed by `read`, so it never lands in
+              // argv / `ps` / remote history), then the .env. Both build a POSIX
+              // `bash -lc` command — refuse a Windows target cleanly rather than
+              // emit broken PowerShell.
               if (remoteShellFor(resolveRemoteOsSync(host.split('@').pop() ?? host)) === 'powershell') {
                 failures++;
                 console.error(chalk.red(`${host}: file backend export to a Windows target is not yet supported.`));
                 continue;
               }
-              const remoteAgents =
-                `IFS= read -r AGENTS_SECRETS_PASSPHRASE; export AGENTS_SECRETS_PASSPHRASE; ` +
-                `agents secrets import ${shellQuote(resolvedBundleName)} --from - --backend file${opts.force ? ' --force' : ''}`;
-              res = sshExec(host, `bash -lc ${shellQuote(remoteAgents)}`, { input: `${remotePassphrase}\n${dotenv}` });
+              const { remoteCmd, input } = buildRemoteFileImportCommand(resolvedBundleName, dotenv, {
+                passphrase: remotePassphrase,
+                force: opts.force,
+              });
+              res = sshExec(host, remoteCmd, { input });
             } else if (remoteShellFor(resolveRemoteOsSync(host.split('@').pop() ?? host)) === 'powershell') {
               // Keychain on a Windows target: the `agents.ps1` shim doesn't
               // forward ssh-piped stdin to node, so `--from -` would hang.
@@ -2644,11 +2653,16 @@ Examples:
     .command('unlock [names...]')
     .description('Hold a bundle in the secrets-agent after one Touch ID, so concurrent runs read it without re-prompting (macOS). With --host, unlock FILE-backed bundle(s) on a remote (the passphrase prompt surfaces over the SSH TTY); keychain/biometry bundles are GUI-only and can\'t be remote-unlocked.')
     .option('--ttl <duration>', 'How long to hold it (e.g. 30m, 8h, 3d). Default 7d.')
+    .option('--until <date>', 'Hold until this absolute date or timestamp (for example 2026-08-06T12:00:00Z). Mutually exclusive with --ttl.')
     .option('--durable', 'Keep the unlock across sleep + reboot too (default: survives upgrade/restart but re-locks on sleep). Set secrets.agent.durable in agents.yaml to make this the default.')
     .option('--for <agent>', 'Narrow the unlock to ONE harness type (for example claude, codex, or kimi). Default: the grant is global — every harness and a plain shell can read it, so one Touch ID covers them all.')
     .option('--all', 'Unlock every configured bundle')
     .option('--host <target>', 'Unlock the bundle(s) on this remote machine over SSH instead of locally (file-backed bundles only — the remote\'s passphrase prompt surfaces on your terminal over a -tt session). Single-valued (NOT variadic) so it never swallows the bundle name: `unlock <name> --host <machine>`.')
-    .action(async (names: string[], opts: { ttl?: string; durable?: boolean; all?: boolean; host?: string; for?: string }) => {
+    .action(async (names: string[], opts: { ttl?: string; until?: string; durable?: boolean; all?: boolean; host?: string; for?: string }) => {
+      if (opts.ttl && opts.until) {
+        console.error(chalk.red('--ttl and --until are mutually exclusive.'));
+        process.exit(1);
+      }
       // Single-valued (not variadic): a variadic --host greedily consumes the
       // positional bundle name (`unlock --host mac wztest` -> host=[mac,wztest],
       // names=[]). Unlock targets one remote at a time anyway.
@@ -2683,6 +2697,12 @@ Examples:
         if (failures > 0) process.exit(1);
         return;
       }
+      if (opts.until) {
+        try { resolveUnlockTtlMs(undefined, opts.until); } catch (err) {
+          console.error(chalk.red((err as Error).message));
+          process.exit(1);
+        }
+      }
       if (process.platform !== 'darwin') {
         // No broker + no biometry prompt off darwin: secrets already resolve
         // durably from the OS store (libsecret / Credential Manager) on every
@@ -2696,15 +2716,14 @@ Examples:
         console.error(chalk.red('Specify one or more bundle names, or --all.'));
         process.exit(1);
       }
-      let ttlMs = secretsHoldMs(); // default hold, capped by secrets.agent.holdMs
-      if (opts.ttl) {
-        const secs = parseDuration(opts.ttl);
-        if (!secs) {
-          console.error(chalk.red(`Invalid --ttl '${opts.ttl}'. Use e.g. 30m, 2h, 8h, 3d.`));
-          process.exit(1);
-        }
-        ttlMs = secs * 1000;
+      let ttlMs: number;
+      try {
+        ttlMs = resolveUnlockTtlMs(opts.ttl, opts.until);
+      } catch (err) {
+        console.error(chalk.red((err as Error).message));
+        process.exit(1);
       }
+      const expiresAt = Date.now() + ttlMs;
       if (!(await ensureAgentRunning())) {
         console.error(chalk.red('Could not start the secrets broker.'));
         process.exit(1);
@@ -2730,7 +2749,7 @@ Examples:
             noAgent: true,
             caller: 'unlock secrets',
             agent: harness,
-            duration: humanRemaining(Date.now() + ttlMs),
+            duration: humanRemaining(expiresAt),
             keyMode: 'storage',
           });
           // Migrations are authorized only by this explicit unlock. The bundle
@@ -2746,7 +2765,7 @@ Examples:
             saveSession(name, {
               bundle,
               env,
-              expiresAt: Date.now() + ttlMs,
+              expiresAt,
               sleepPersist: durable,
               harness,
             });
@@ -2765,7 +2784,7 @@ Examples:
               agent: harness,
               ttlMs,
             });
-            console.log(`${chalk.green('unlocked')} ${chalk.cyan(name)} ${chalk.gray(`(${Object.keys(env).length} keys, ${humanRemaining(Date.now() + ttlMs)})`)}`);
+            console.log(`${chalk.green('unlocked')} ${chalk.cyan(name)} ${chalk.gray(`(${Object.keys(env).length} keys, ${humanRemaining(expiresAt)})`)}`);
           } else {
             console.error(chalk.red(`Failed to load '${name}' into the agent.`));
           }
