@@ -102,7 +102,8 @@ const PROBE_TIMEOUT_MS = 4_000;
 // timer, the Dispatch panel, each launch) never each spawn a full-fleet fan-out
 // of `agents` subprocesses for the same host.
 const statsStore = createTimedCache<DeviceStats>();
-const agentCountStore = createTimedCache<number>();
+// null means SSH-unreachable (not "zero agents") — see countRunningAgentsOnce (RUSH-2054).
+const agentCountStore = createTimedCache<number | null>();
 
 function augmentedEnv(binPath: string): NodeJS.ProcessEnv {
   return { ...process.env, PATH: `${bootstrapPath(binPath)}:${process.env.PATH ?? ''}` };
@@ -166,11 +167,11 @@ async function fetchDeviceStatsOnce(
   }
 }
 
-export async function countRunningAgents(host: string, opts: { isLocal: boolean }): Promise<number> {
+export async function countRunningAgents(host: string, opts: { isLocal: boolean }): Promise<number | null> {
   return cachedInFlight(agentCountStore, host, CACHE_TTL_MS, () => countRunningAgentsOnce(host, opts));
 }
 
-async function countRunningAgentsOnce(host: string, opts: { isLocal: boolean }): Promise<number> {
+async function countRunningAgentsOnce(host: string, opts: { isLocal: boolean }): Promise<number | null> {
   try {
     const bin = await resolveAgentsBin();
     const args = ['sessions', '--active', '--json'];
@@ -182,7 +183,12 @@ async function countRunningAgentsOnce(host: string, opts: { isLocal: boolean }):
     const parsed = JSON.parse(stdout);
     return Array.isArray(parsed) ? parsed.length : 0;
   } catch {
-    return 0;
+    // Local: a failing `agents sessions` means zero active sessions, not unreachable.
+    // Remote: any failure (timeout, SSH refused, CLI error) means the device is
+    // unreachable or non-functional — return null so callers never treat it as idle
+    // and select it as the least-busy candidate (RUSH-2054).
+    if (opts.isLocal) return 0;
+    return null;
   }
 }
 

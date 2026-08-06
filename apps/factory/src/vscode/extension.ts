@@ -13,7 +13,7 @@ import { AgentsMarkdownEditorProvider, swarmCurrentDocument } from './customEdit
 import { AgentsHtmlReaderProvider } from './htmlReader';
 import * as git from './git.vscode';
 import { AgentSettings, hasLoginEnabled, PromptEntry, QUICK_LAUNCH_SLOT_KEYS, getQuickLaunchSlot, QuickLaunchSlot, QuickLaunchSlotKey } from '../core/settings';
-import { listRegisteredDevices, countRunningAgents, fetchDeviceStats } from './deviceHealth.vscode';
+import { listRegisteredDevices, countRunningAgents, fetchDeviceStats, probeReachable } from './deviceHealth.vscode';
 import { normalizeHost } from '../core/remoteSessions';
 import { pickBestHost, cappedOutDevices, noHostReason, deviceHasUsableVersion, resolveBalancePool, DeviceLoad } from '../core/launchHost';
 import {
@@ -393,7 +393,9 @@ async function refreshLaunchHealthCache(context: vscode.ExtensionContext): Promi
         name: device.name,
         online: true,
         sshReachable: stats.reachable,
-        running,
+        // null means SSH-unreachable; sshReachable already captures the truth.
+        // Display 0 so the floor card shows something renderable (RUSH-2054).
+        running: running ?? 0,
         loadAvg1: stats.loadAvg1,
         memPercent: stats.memPercent,
         usableAgents: Object.fromEntries(usable),
@@ -469,9 +471,19 @@ async function resolveBalancedHost(pool?: string[], agentKey?: string): Promise<
     () => Promise.all(eligible.map(async (c): Promise<DeviceLoad> => {
       const dev = byName.get(normalizeHost(c.name));
       const host = dev?.host ?? c.name;
+      // Pre-filter: confirm SSH is up before spending the session-count round-trip.
+      // A Tailscale-online device that refuses SSH looks idle (running=0) to
+      // countRunningAgents, making it win least-busy unfairly. Mark it
+      // online:false so pickBestHost excludes it entirely (RUSH-2054).
+      const reachable = await probeReachable(host);
+      if (!reachable) return { ...c, online: false, running: 0 };
       const running = await countRunningAgents(c.name, { isLocal: false });
+      // null means the session count failed even after SSH was confirmed — treat
+      // the device as unreachable rather than as idle (RUSH-2054).
+      if (running === null) return { ...c, online: false, running: 0 };
       if (!agentKey) return { ...c, running };
       // Agent-aware: probe hardware health + usable-version in parallel.
+      // SSH is already proven reachable, so these calls should complete quickly.
       const [stats, usableVersion] = await Promise.all([
         fetchDeviceStats(host, { isLocal: false }),
         hostHasUsableVersion(c.name, agentKey),
@@ -487,6 +499,12 @@ async function resolveBalancedHost(pool?: string[], agentKey?: string): Promise<
   );
   const best = pickBestHost(loaded);
   if (best) return best;
+  // Distinct message when every candidate failed the SSH probe so the operator
+  // knows it's a connectivity gap, not a capacity or version problem (RUSH-2054).
+  if (loaded.length > 0 && loaded.every(d => !d.online)) {
+    vscode.window.showWarningMessage('Balanced launch: all fleet devices are SSH-unreachable (Tailscale online but not accepting connections) — running locally.');
+    return undefined;
+  }
   // State WHY the pool produced nothing — caps first (an operator boundary to
   // raise), then agent usability. See noHostReason.
   const reason = noHostReason(loaded, agentKey);
