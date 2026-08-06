@@ -340,6 +340,25 @@ that collapses, so the preview can silently vanish on a full/short terminal (the
 RUSH-2198 bug). See the [§Contracts §Sessions spec](docs/specifications.md#sessions)
 for the non-empty-preview invariant (SES-8).
 
+### Resume is machine-bound — check the owner before you start a harness
+
+The picker lists the **whole fleet**, so anything that resumes a picked row can be
+handed a session whose harness state lives on another box. Route every such path
+through `sessionOwnerDevice`
+([`src/lib/session/resume-owner.ts`](src/lib/session/resume-owner.ts)) — the one
+answer to "may this resume run here?". A non-`undefined` result means the caller
+either hops to that device (`agents resume`, `resumeSessionInPlace`) or refuses by
+name (`sessions resume`, which opens tabs on a single machine); never start the
+harness locally. A synced mirror is the trap: its transcript IS readable here, so
+nothing fails until the agent is asked to continue a conversation it has never seen,
+and `sessions-resume.ts`'s `fs.existsSync(cwd)` fallback then quietly resumed in
+`process.cwd()` (RUSH-2022).
+
+The signal is only as good as what wrote it: `machine` on a host-dispatched run is
+stamped by [`src/lib/hosts/session-index.ts`](src/lib/hosts/session-index.ts) from
+the dispatch host. Any new writer of an `agents run --device`-shaped row must set it,
+or the index will claim the dispatching box.
+
 ## Bundled native helpers (where the tarball's `.app`s come from)
 
 Two native helpers plus the standalone signed CLI binary ship **inside** this

@@ -24,6 +24,7 @@ interchangeable — pick the verb for the intent:
 | Headless → **interactive** in this terminal | `agents sessions attach <id>` |
 | Multi-select history and open each in a tab/split | `agents sessions resume [query]` |
 | Resume one session in its original harness, version, device, cwd, and mode | `agents resume <id>` |
+| Resume a batch on the machine that owns them | `agents sessions resume --host <device>` |
 | Continue one session from a script / `run` path | `agents run <agent> --resume <id> …` |
 
 `focus` is the default “take me there” for a live process. With no id it opens a
@@ -32,6 +33,13 @@ in the terminal you're in (Ghostty / iTerm / tmux, auto-detected), reusing
 `resume`'s batch open + flood guard. Per tab it keeps live semantics — a tmux
 session is *joined* (a second client, no fork), local or remote over SSH; a session
 with no attach rail resumes a copy in the tab, reported never silently dropped.
+`sessions resume` opens its tabs on ONE machine — this box, or the `--host <device>`
+you point it at — and the picker lists the whole fleet, so a selected session owned by
+a **different** box is **skipped by name** rather than started against state that
+machine does not have; the skip line gives the command that reaches it
+(`agents resume <id>`, or `agents sessions resume --host <owner>`). A session this
+machine owns is never skipped, `--host` or not: opening a locally-forked copy on the
+machine the user sits at is the `/fork` handoff, and that destination is explicit.
 `--device/--host <name>` scopes the picker to those devices and the `--active`
 live-state filters (`--orphan`/`--crashed`/`--waiting`/`--idle`/`--working`/…) narrow
 by status; the two compose (`focus --orphan --device yosemite-s0`). A direct
@@ -44,7 +52,14 @@ a local hit; only on a local miss does it fan out to registered devices, and the
 fan-out is cancellable and early-exits — the first peer holding the UUID resolves the
 lookup and SIGTERMs the rest, so a fast peer's hit is not bounded by the
 slowest/unreachable peer's timeout. It then routes to the owning device and invokes the
-version that created the session with its recorded cwd and launch mode. An exact
+version that created the session with its recorded cwd and launch mode. **"Routes to the
+owning device" is an SSH hop, not a local start:** when the session's origin machine is
+another box, `agents resume` re-runs itself there over the same transport `--host` uses,
+because the harness's conversation state lives on that machine — starting it here would
+run the agent against state this box has never seen. `--here` overrides and runs locally.
+A run dispatched with `agents run --device <box>` records `<box>` as its origin machine in
+the local index, so it resumes back on that box rather than on the machine that dispatched
+it (RUSH-2022). An exact
 **label** always consults the fleet (labels are not globally unique, so a same-label
 session could live on another peer): a unique match auto-resumes, a cross-machine
 collision surfaces as an ambiguity, and an ambiguous short-id prefix still surfaces
