@@ -639,6 +639,9 @@ key — no Touch ID, no GUI. (`codesign` itself still needs the Developer ID ide
 unlocked keychain on the build host — a one-time `security import` of the `.p12`,
 unrelated to `agents secrets`.)
 
+<!-- docs-hygiene:allow-master-key-discussion — a bounded per-command export, sourced
+     and unset around one command. Reviewed; see src/lib/secrets/docs-hygiene.test.ts. -->
+
 **Opt-in shared passphrase.** To key the remote bundle under a shared secret held off
 disk instead of the remote's machine-local key, set `AGENTS_SECRETS_PASSPHRASE` on the
 laptop before the push — it is forwarded over ssh stdin (never argv), and the remote
@@ -655,6 +658,8 @@ P="$(agents secrets exec release.key -- printenv PASSPHRASE)"           # one To
 ssh mac-mini 'AGENTS_SECRETS_PASSPHRASE=$(cat) \
   agents secrets exec rush.releases -- ./rush/app/scripts/release.sh 0.10.0 alpha.1 --yes' <<<"$P"
 ```
+
+<!-- /docs-hygiene:allow-master-key-discussion -->
 
 ## Demo
 
@@ -785,6 +790,9 @@ disk error), and a store already encrypted under an explicit
 `AGENTS_SECRETS_PASSPHRASE` still needs that same value — read it without one and
 decryption fails.
 
+<!-- docs-hygiene:allow-master-key-discussion — the warning itself must be able to
+     name the rc export it forbids. Reviewed; see src/lib/secrets/docs-hygiene.test.ts. -->
+
 **Do not export the master passphrase from a shell rc file.** A `~/.zshenv`
 export is **not** equivalent to the 0600 key file, and treating it as such is
 what caused RUSH-1968 on seven worker boxes. The key file is read by the one
@@ -803,6 +811,8 @@ process. If what you actually need is unattended `push`/`pull`, that is
 `AGENTS_SYNC_PASSPHRASE`, a separate transport secret — see
 [Share a bundle with a teammate](#5-share-a-bundle-with-a-teammate). Exporting
 the master key to get headless sync is the exact mistake this split removes.
+
+<!-- /docs-hygiene:allow-master-key-discussion -->
 
 **What the file store protects against.** Encryption-at-rest with the key in a
 0600 file — the same posture as an SSH private key. It defends against on-disk
