@@ -1,5 +1,374 @@
 # Changelog
 
+## 1.22.25
+
+---
+issue: 2108
+type: fixed
+---
+
+`agents sessions focus ... --active` now excludes closed and crashed registry rows; explicit lifecycle filters such as `--closed` and `--crashed` still select them. Per-device `latest` / `oldest` selectors also wait for the peer's filtered index result instead of widening to live rows whose version is unknown.
+
+- **`agents doctor` now reports the file-store master key when it is live in the
+  process environment, not just when it is exported from a shell rc file
+  (RUSH-1968).** `rc-hygiene.ts` scans FILES, which leaves a real hole: a value
+  inherited by a long-lived process outlives the rc line that set it, so an operator
+  who deletes `~/.zshenv:8` gets a clean `rc-secret-export` while every shell, editor
+  and agent started before the edit still carries the key and hands it to everything
+  they spawn. Confirmed on `yosemite-s1`, which has zero rc exports and still had the
+  value in its environment. The new `env-secret-export` warning names that state and
+  says the deletion is not sufficient; like every other finding it reports only that
+  the variable is set, never its value. Expected inside a release sign context
+  (`headless-sign-context.sh` sets it deliberately), which the message says so an
+  operator on the home base does not chase it. Source:
+  `apps/cli/src/lib/secrets/rc-hygiene.ts` (`masterPassphraseInEnv`),
+  `apps/cli/src/lib/devices/doctor-findings.ts`, `apps/cli/src/commands/doctor.ts`.
+
+- **`agents doctor --devices` now reports a remote box's secret hygiene, and its
+  inventory probe no longer times out on a slow box (RUSH-1968).** The fan-out ran
+  each remote's own `doctor --json` but parsed only `.fleet`, discarding the
+  `findings` the remote had already computed — so a leaking box read as clean from
+  anywhere but itself. The remote's `rc-secret-export` / `env-secret-export` rows
+  now ride back, but the remote contributes exactly one thing: the **kind**. Severity,
+  message and remediation are generated locally, and `device` is overwritten with the
+  name that was dialled. Each of those matters separately — a remediation is a command
+  a human copies and runs, a message is the one place a secret value could re-enter a
+  readout that otherwise never prints one, a severity decides the CRITICAL section, and
+  a device name decides which box gets blamed. The cost is detail: the fleet row names
+  the box and the kind, and says to run `agents doctor` there for the file and line.
+  Only those two kinds forward — sign-in and divergence rows are recomputed centrally
+  and would otherwise double.
+
+  Separately, the probe's 30s timeout was below the real cost of the command it
+  runs — `doctor --json` measures 57s on `yosemite-m0` and 136s on an idle box — so
+  every slow device silently contributed nothing at all: no inventory, no sign-in,
+  no divergence. Raised to 180s, matching `ChildProcess.doctorTimeout`, which was set
+  to 180 for this same command for this same reason. Source:
+  `apps/cli/src/commands/doctor.ts` (`asRemoteSecretFindings`, `probeFleetInventory`).
+
+- **Feed and menu-bar session counts now use the `agents sessions --active` lifecycle model (RUSH-1993).**
+  Feed outcome headers count distinct mailbox agents in every state, so repeated
+  open blocks from one agent cannot make `needs you` exceed `agents`. Feed rows
+  replace generic `terminal` with a known host app and label routine-spawned
+  sessions as `routine:<name>`. The menu-bar snapshot backfills the same routine
+  metadata as active-session JSON and renders the full canonical status set
+  (`working`, `waiting`, `idle`, `queued`, `orphan`, `crashed`, `closed`,
+  `abandoned`, `unknown`) without reclassifying warm rows from attention files.
+  Source: `apps/cli/src/commands/feed.ts`, `apps/cli/src/commands/sessions.ts`,
+  `apps/cli/src/lib/feed-outcome.ts`, `apps/cli/src/lib/menubar/snapshot.ts`,
+  `apps/cli/menubar/Sources/MenubarHelper/{LocalState,StatusItemController}.swift`.
+
+- **A typo'd command with `--host` said the opposite of the truth (RUSH-2022).** The
+  `--host`/`--device` router runs before commander parses, so `agents session resume
+  --host <box>` (one letter off `sessions`, which *does* accept `--host`) reported
+  ``  `agents session` does not support --host/--device `` — a true statement about a
+  command nobody typed. Unknown names now fall through to `unknown command '<name>'`
+  with a did-you-mean, and the spellcheck can suggest the lazily-registered groups
+  (`sessions`/`teams`/`cloud`/…) it previously could not see. A real command with no
+  remote semantics still gets the flag-support error. Source:
+  `apps/cli/src/lib/hosts/passthrough.ts`, `apps/cli/src/lib/startup/command-registry.ts`.
+
+- **`agents publish` is in the lazy command table.** `commands/packages.ts` registers it
+  at top level but the registry did not list it, so it only resolved through the
+  unknown-command fallback that loads the whole command tree. Found by the new test
+  that pins the command-name set against the real tree.
+
+- **A mistyped command keeps its `--host`.** The distance-1 auto-correct now re-checks
+  routing after correcting the name, so `agents docto --host <box>` corrects to
+  `doctor` **and actually routes to `<box>`** — previously the corrected command
+  re-parsed locally with a `--host` it silently dropped (a regression caught in review:
+  it used to fail loudly with the wrong message, corrected-but-unrouted made it fail
+  silently instead). `apps/cli/src/index.ts`.
+
+- **Cursor now supports `--mode plan` headless and interactive (RUSH-2101).** The
+  capability registry previously listed only `edit` and `skip`, so `agents run cursor --mode plan`
+  and routine jobs silently degraded to writable `edit`. `cursor-agent` has supported `--plan`
+  since the 2026-01-16 CLI release; the registry, `AGENT_COMMANDS` flag mapping, and the routine
+  runner now forward it correctly. Source: `apps/cli/src/lib/agents.ts`, `apps/cli/src/lib/exec.ts`,
+  `apps/cli/src/lib/runner.ts`.
+
+- **`agents sessions resume` picker now filters in-memory on every keystroke instead of re-querying the database (RUSH-2212).** The `filter` callback in the multi-select picker was calling `filterSessionsByQuery`, which runs a full-text search scan against `sessions.db` on every character typed. It now uses the same cheap in-memory substring match (`sessionMatchesQuery`) the session browser already applies, so the picker stays responsive regardless of library size. Source: `apps/cli/src/commands/sessions-resume.ts`.
+
+---
+type: minor
+---
+
+Add Cursor Cloud Agents as a native cloud provider so `agents run cursor --cloud` and `agents cloud run --agent cursor` dispatch through Cursor's v1 REST API, with status, streaming, cancellation, and follow-up runs.
+
+- **A starved `coreauthd` can no longer hang `secrets list` forever (RUSH-2233).**
+  The keychain helper's `list` runs two passes, and the data-protection pass omits
+  `kSecUseAuthenticationUI: …Fail` on purpose (that flag drops every biometry-ACL
+  item even when authentication is healthy). Omitting it means the query still
+  reaches LocalAuthentication/`coreauthd`, which has no deadline of its own — a
+  wedged `coreauthd` left `SecItemCopyMatching` blocked for the life of the
+  process. That is *why* helpers accumulated for the bounded-spawn + reaper work
+  in RUSH-2231/2232 to clean up. The pass now runs on a background thread behind
+  a 3-second wait: on timeout the helper logs one line to stderr, skips the pass,
+  and prints whatever the file-keychain pass produced — the same handling the
+  screen-locked `errSecInteractionNotAllowed` case already got. Set
+  `AGENTS_KEYCHAIN_LIST_TIMEOUT_MS` to override the deadline;
+  `AGENTS_KEYCHAIN_BOUNDED_TEST=1` runs the helper's headless self-test for the
+  bounded wait. Source: `apps/cli/src/lib/secrets/keychain-helper.swift`.
+
+- **Use one three-minute AGI Menu snapshot and one watchdog executor (RUSH-2260).**
+  The menu bar now reads routines, 40 indexed recent sessions, the daemon-warmed
+  active-session cache, and persisted watchdog state in one subprocess every three
+  minutes; `doctor --json` remains independently limited to 15 minutes. The menu no
+  longer executes watchdog ticks. The daemon is the sole automatic watchdog executor,
+  warms active sessions on the same three-minute cadence, is gated by device-local
+  `watchdog.enabled`, and cleans failed/timeout routine process groups that are still
+  alive before they can overlap a replacement run. Source:
+  `apps/cli/src/lib/menubar/snapshot.ts`, `apps/cli/src/lib/daemon.ts`,
+  `apps/cli/src/lib/routine-process-cleanup.ts`.
+
+- **Add Warp Agent CLI (Oz) as a harness (RUSH-2261).** `warp` is now a
+  first-class harness: `agents add warp`, `agents run warp`, `agents teams add
+  <team> warp`, resource sync, and `agents view` all work. The CLI command is
+  `oz` (the shared Warp binary); install is self-updating via
+  `brew install --cask oz` (macOS) / `oz-stable` apt|yum|pacman (Linux), config
+  lives under `~/.warp/`, the rules/context file is `AGENTS.md`, and auth is
+  `oz login` (browser OAuth) or a `WARP_API_KEY` token for headless/CI.
+  Capabilities are truthful and gated by `supports()`: MCP (Claude
+  `.mcp.json` schema at `~/.warp/.mcp.json`, stdio + http with headers) and
+  skills are on; hooks, allowlist, commands, plugins, subagents, workflows, and
+  memory are off (Oz exposes no matching install surface). Sessions are not
+  indexed — Oz stores conversations server-side (retrieved with auth via
+  `oz run conversation get <id>`), so there is no local transcript for
+  `agents sessions`. No usage bar — Oz exposes no usage/limits endpoint.
+  Source: `apps/cli/src/lib/{agents,exec,mcp}.ts`.
+
+`scripts/release.sh` now runs orchestration in a fresh release-owned worktree, so a dirty shared checkout or feature branch no longer blocks or contaminates a release.
+
+- **Plugin discovery warns instead of silently skipping a directory with no
+  `.claude-plugin/plugin.json` (RUSH-2270).** A `plugins/<name>/` directory missing
+  (or with a malformed) manifest was invisible to `agents plugins list`/`info`/`sync`,
+  `agents doctor`, and the marketplace materialize-into-version-homes step, with zero
+  diagnostic anywhere in the chain — no `agents sync`/`agents repo pull` could
+  surface it, since discovery dropped it before any of those ran. Found via a real
+  case: the `work` plugin merged to `phnx-labs/.agents-system` without its manifest
+  and sat invisible for a full merge cycle; the same fix run against this box's own
+  `~/.agents/plugins/duck` found it missing one too. `discoverPluginsInDir` now
+  writes one `agents-cli:` warning to stderr naming the directory and the missing
+  manifest path, matching the existing advisory-not-fatal pattern
+  `syncMarketplaceManifest` already uses for a malformed (as opposed to missing)
+  manifest. Source: `apps/cli/src/lib/plugins.ts`.
+
+- **Muse login is recognized under `providers.meta` (balanced no longer signed_out).**
+  Live `muse login` writes `~/.config/muse/auth.json` as
+  `{ schema_version, providers: { meta: { access_token, user_email, … } } }`.
+  The presence detector only walked one object level, so it never saw the token
+  under `providers.meta` and reported signed-out after a successful OAuth —
+  `agents run muse` under balanced then failed with "excluded: 0.1.0
+  (signed_out)". Detection now recurses into nested provider slots and surfaces
+  `user_email` when present. Source: `apps/cli/src/lib/agents.ts`.
+
+- **File-backed secret resolution now fails on decryption errors instead of treating unreadable ciphertext as an absent value (RUSH-2264).** A wrong `AGENTS_SECRETS_PASSPHRASE` or tampered encrypted value now reports the affected file-store item and stops before launching a consumer with an empty secret such as `HCLOUD_TOKEN`. Source: `apps/cli/src/lib/secrets/filestore.ts`, `apps/cli/src/lib/secrets/bundles.ts`.
+
+## 1.22.24
+
+- **`agents run --lease` now shares one warm pool across repositories by default (RUSH-2225).** Repo sandbox/CI `profile:` labels no longer split lease reuse into one idle box per repo; a dedicated lease pool is explicit with `.crabbox.yaml` `leaseProfile:`. An empty pool keeps its newly warmed box for later callers. Concurrent runs attach with crabbox `--reclaim` and launch with separate working trees, agent homes, and credential files, so callers share compute without clobbering run state. Switching repos re-syncs the checkout, trading cache latency for lower idle-compute cost. Source: `apps/cli/src/lib/crabbox/config.ts`, `apps/cli/src/lib/crabbox/lease.ts`, `apps/cli/src/commands/exec.ts`.
+
+- **`agents sessions insights` turns multi-harness session history into an action list
+  (RUSH-2280).** The existing `agents insights` command is now also nested under the
+  sessions noun, accepts repeatable `--agent` filters, and reports deterministic offline
+  friction/thrash, owner corrections, automatable repeats, harness split, and ranked
+  rule/skill/automation/product actions with evidence counts and shortened sample session
+  ids. `/sessions-insights` is a thin agent entry over the same CLI implementation;
+  `--narrative` remains opt-in and receives aggregate data only. Source:
+  `apps/cli/src/commands/insights.ts`, `apps/cli/src/lib/session/insights.ts`,
+  `.agents/commands/sessions-insights.md`.
+
+- **`agents sessions focus` recovers dead panes and shares the sessions browser's selectors (GH-2108).** A retained tmux `remain-on-exit` pane is probed through `#{pane_dead}` immediately before attach, so dead or missing panes no longer open a `Pane is dead` screen. `focus` accepts session ids, topic/path searches, `agent@version` selectors (including per-device `latest`/`oldest`), device, project/time, team/routine, skill/plugin, favorites, and the complete live-state union. Focus, resume, attach, and `run --resume` now use one recovery decision on the origin device: a healthy exact origin performs native resume; otherwise balanced selection chooses a healthy version of the same harness and sends `/continue <id>` to read the indexed transcript, including transcripts retained under version trash. Host-dispatched rows persist the dispatch host as their origin, and `attach` routes its detach-record cleanup there before resuming. No usable same-harness version fails with the device, origin version, and account-health reason. Source: `apps/cli/src/commands/focus.ts`, `apps/cli/src/commands/sessions-browser.ts`, `apps/cli/src/lib/session/recovery.ts`.
+
+- **`agents secrets setup` no longer tells you to set `AGENTS_SECRETS_PASSPHRASE`, and
+  `docs/secrets.md` stops recommending the shell-rc export it flags as a leak
+  (RUSH-1968).** The file-backend note read `set AGENTS_SECRETS_PASSPHRASE for headless
+  encrypted-file reads`, implying a requirement; headless reads have worked with no
+  passphrase since the store began auto-provisioning a 0600 machine-local key, so it now
+  says so and names the real path. The docs were worse than merely stale: they called an
+  rc export *"Recommended for shared/CI machines"* and the 0600 key file *"identical to"*
+  it, which is how a master key ended up in `~/.zshenv` on seven worker boxes. That
+  equivalence is inverted — the key file is read by one process, an rc export is inherited
+  by every child and readable from `/proc/<pid>/environ` — and the section also named a
+  pre-#479 key path (`~/.agents/.cache/secrets/.passphrase`, now
+  `~/.agents/.secrets-key/passphrase`) and a TTY prompt step `getPassphrase` no longer
+  has. A new `docs-hygiene.test.ts` pins those claims against the shipped doc so the
+  advice cannot drift back. Source: `apps/cli/docs/secrets.md`,
+  `apps/cli/src/commands/setup-secrets.ts`, `apps/cli/src/lib/secrets/filestore.ts`.
+
+- **`agents secrets push`/`pull`, `agents sync --secrets`, and `agents secrets
+  export --to-file` / `import --from-file` read `AGENTS_SYNC_PASSPHRASE` now;
+  `AGENTS_SECRETS_PASSPHRASE` is the file store's master key and nothing else
+  (RUSH-1968).** One variable meant two different secrets: the local file store's master
+  key, and the passphrase that seals a bundle for transport. The store stopped needing a
+  passphrase once it auto-provisioned a machine-local key, but headless `push`/`pull`
+  still hard-failed without one — so the only way to get unattended sync on a worker box
+  was to export the **master key** fleet-wide, handing every same-user process the key to
+  the whole store. Splitting them means a box that only needs headless sync sets
+  `AGENTS_SYNC_PASSPHRASE` and never has the master key in its environment. The old name
+  still works for sync as a deprecated fallback — warned exactly once per process, so a
+  `push --all` over many bundles does not flood stderr — so scripted CI and release
+  automation keep working across the upgrade. The headless error now names the new
+  variable (`A sync passphrase is required. Run from a TTY, or set
+  AGENTS_SYNC_PASSPHRASE.`), and `agents sync`'s skip line with it — it previously read
+  `no passphrase available`, naming nothing an operator could act on. Note the legacy
+  fallback only works where that value is also the store's master key, since the old name
+  still keys the store; that coupling is the thing being retired. Resolution moved to
+  one chokepoint so the once-per-process promise holds rather than being per-call-site. Also
+  corrects `SEC-29a`, which claimed the variable applied "exclusively" to the file and
+  age-vault backends: the age-vault backend never reads it (it is gated by `agents
+  login`), and sync plus the portable `--to-file` envelope were two more consumers — the
+  new `SEC-29b` states the split as a normative invariant. Source:
+  `apps/cli/src/lib/secrets/sync-passphrase.ts`, `apps/cli/src/commands/secrets-sync.ts`,
+  `apps/cli/src/commands/sync.ts`, `apps/cli/src/lib/sync-umbrella.ts`.
+
+- Added `--team` as an alias for `agents sessions --teams`. (RUSH-1995)
+- Added absolute `agents secrets unlock --until <date>` expiry, mutually exclusive with relative `--ttl`. (RUSH-1960)
+- Added persisted per-agent-version reasoning effort defaults and surfaced them in `agents view`. (RUSH-2005)
+
+- **`agents feed` no longer crashes when the session index is locked (RUSH-2006).**
+  Outcome enrichment calls `discoverSessions` against `sessions.db`; under concurrent
+  scanner/daemon pressure that open can throw `SQLITE_BUSY` / "database is locked"
+  and take down the whole feed. A lock error now degrades to an empty meta set with a
+  stderr warning so blocks still render. Source: `apps/cli/src/commands/feed.ts`.
+
+- **`agents events --event` / filtered activity reads no longer miss matches under
+  `--limit` (RUSH-2093).** The unified reader capped activity records *before*
+  applying the event-type filter, so a rare match older than the newest-N routine
+  rows (e.g. one `pr.opened` under twenty `file.edited`) was silently dropped. Event
+  types are now passed into `readRecentActivity` so the cap counts matching rows; a
+  non-`activity` `--module` skips the activity half entirely. Source:
+  `apps/cli/src/lib/event-stream.ts`.
+
+- **`agents mcp add` no longer strips comments from `agents.yaml`.** The
+  write path (`writeManifest` / `serializeManifest` in `src/lib/manifest.ts`)
+  used plain `yaml.stringify`, which dropped every hand-written comment on
+  every add. It now round-trips via `yaml.parseDocument` and edits only the
+  keys that changed — the same approach `serializeCentral` already uses for
+  the central meta file (RUSH-2090).
+
+- **Hook cache refresh is now single-flight, backs off on failure, and logs its
+  real exit code (RUSH-2121).** The background refresh in the hook cache shim
+  acquires an atomic `mkdir` lock, so concurrent hook invocations no longer
+  stampede into N parallel refreshes; a persistently-failing refresh records a
+  failure timestamp and is skipped until a 60s backoff elapses instead of
+  re-firing on every invocation; and the refresh now emits a `hook.cache.refresh`
+  event carrying the subshell's real exit code instead of a hardcoded `0`.
+  Source: `apps/cli/src/lib/hooks/cache.ts`.
+
+- **`agents sync --host all` no longer fails every peer with `unknown option
+  '--json'`.** Fleet fan-out injects `--json` on each remote so the roster can
+  parse per-device results, but `sync` never registered the flag. Register
+  `--json` on `agents sync` and emit a machine-readable umbrella/agent/repo
+  payload so peers accept the flag and return parseable stdout (RUSH-2216).
+  Source: `apps/cli/src/commands/sync.ts`.
+
+- **A wedged keychain can no longer pile up `agents` processes (RUSH-2231, RUSH-2232).**
+  A stalled macOS `coreauthd` used to hang the signed keychain helper's XPC receive
+  forever, so every secrets-touching `agents` command blocked and dozens of helper
+  processes plus their `<defunct>` zombies accumulated and made the machine sluggish.
+  Two fixes: **(Layer 1)** every keychain-helper `spawnSync` is now bounded and
+  hard-killed (SIGKILL) on timeout — 8s for never-prompt verbs (`has`/`set`/`delete`/
+  `list*`), 60s for the may-prompt reads (`get`/`get-batch`/`migrate-*`) — surfacing a
+  typed timeout error and arming the read back-off instead of hanging.
+  **(Layer 3)** the daemon reaps the backlog: a 5-minute tick kills orphaned helpers
+  (reparented to PID 1, past a 30s grace) and, two-sweep-debounced, the helper child of
+  an `agents` proc stuck past 90s (child first, escalating to the parent only if it
+  stays wedged) — never touching a process whose start-time can't be captured or whose
+  path doesn't match the helper. Any keychain touch now also opportunistically starts
+  the daemon so the reaper runs even on a secrets-only box. Source:
+  `apps/cli/src/lib/secrets/index.ts`, `apps/cli/src/lib/secrets/reaper.ts`,
+  `apps/cli/src/lib/daemon.ts`.
+
+- **`agents inspect` and `agents doctor` now report harness-scoped hook inventory as capable, on-disk, wired, and unmanaged state.** Their JSON output carries the same state sets from `getResourceInventory`, so a harness with hook files or native wiring no longer collapses to a misleading `Hooks (0)` summary. Inventory is keyed by agent harness and installed version, not by configured model. Source: `apps/cli/src/lib/resource-inventory.ts`, `apps/cli/src/commands/inspect.ts`, `apps/cli/src/lib/doctor-diff.ts`.
+
+- **Fix: the keychain-helper reaper never reaped on macOS.** The daemon reaper shelled `ps -o etimes` — a GNU/Linux procps keyword that macOS `ps` rejects with a non-zero exit — so `execFileSync` threw on every tick and `reapOrphanedKeychainProcesses` returned `reaped: 0` on its only supported platform, leaving orphaned/wedged `Agents CLI` helper processes to pile up. Switched to the portable BSD `etime` keyword (`[[dd-]hh:]mm:ss`) with a parser to seconds. This also un-quarantines the darwin integration test that #2153 had to `it.skip` to unblock releases: that test's symlink fixture was correct all along — it read `reaped: 0` only because the reaper's own `ps etimes` call threw before parsing anything. Verified on macOS 15.4.1: 20/20 reaper tests pass, the integration test reaping a real orphaned sleeper. Source: `apps/cli/src/lib/secrets/reaper.ts`, `reaper.test.ts`.
+
+- **`agents modes [agent[@version]]` lists the permission modes a harness accepts.** The modes analog of `agents models`: for Claude / Codex / Cursor / …, shows which `--mode plan|edit|auto|skip` values work, the native CLI flags, the native default (`*`), any configured `run.defaults` mode, and degrade notes (e.g. plan→edit on Antigravity). `agents inspect` also prints the mode list next to capabilities, and `agents run --help` / `agents models` point at the new command. Source: `apps/cli/src/commands/modes.ts`, `apps/cli/src/lib/agent-modes.ts`.
+
+- **`agents insights --all` now works as an alias for `--since all`.** It previously
+  exited with `unknown option '--all'` — a hard failure in the middle of a report the
+  user asked for, on the spelling most people reach for first. An explicit `--since`
+  still wins, so `--all --since 7d` resolves to 7d rather than silently contradicting
+  itself. Source: `apps/cli/src/commands/insights.ts`.
+
+- **Coexisting agents-cli installs no longer fight over the menu-bar helper.** The
+  helper lives at one path in Application Support, but every install on the box runs
+  the startup self-heal, and both the version stamp and the plist's baked
+  `AGENTS_ENTRY` record whichever copy acted last — so each copy read the others'
+  marks as drift and recopied the app bundle over them. Recopying replaces the
+  executable under the running helper and kills it, launchd `KeepAlive` restarts it,
+  and the next copy repeats it: a new pid every 5-15 seconds, 578 launches in one
+  observed helper log, and a status item that never stayed visible while
+  `agents menubar status` still reported `running: yes` (a pid always existed). The
+  plist's `AGENTS_ENTRY` is now treated as the owner and only the owner reinstalls
+  freely; a same-install upgrade keeps its entry path, so `npm update` still installs
+  the new helper normally. Another install still gets there — immediately if the
+  recorded owner is gone from disk, otherwise at most once an hour — so a stale copy
+  that merely still sits on disk can't freeze the menu bar for whichever install the
+  user actually upgrades. Repairs (a missing helper executable, a Developer-ID heal)
+  are never gated, and `agents menubar setup` bypasses the gate as the immediate
+  manual fix. An ad-hoc/dev-signed build never wins the timed takeover — recopying
+  an un-notarized bundle over a good one gets it rejected as "damaged" — though it
+  can still adopt a helper whose owner is gone. Two installs that are both invoked
+  regularly still trade ownership at the cooldown, so the helper restarts about once
+  an hour until one is removed; that is bounded rather than converged, and the real
+  fix remains a single install. `agents menubar status` no longer promises that a
+  stale helper "runs on next `agents` startup", which is not guaranteed on a
+  multi-install box. Fixes #2109. Source:
+  `apps/cli/src/lib/menubar/install-menubar.ts`.
+
+- **Muse Code global binary is visible to `agents view` / `isVersionInstalled`.**
+  Muse installs a single self-updating launcher at `~/.local/bin/muse` (same
+  shape as droid), but `getBinaryPath` still resolved a version-home
+  `node_modules/.bin/muse` that never exists. After `agents import muse` /
+  `agents add muse`, version dirs now resolve to that global path so managed
+  view, collapse, and live-version bookkeeping match what actually executes;
+  install no longer writes a self-referential shim symlink. Source:
+  `apps/cli/src/lib/versions.ts`.
+
+- **Muse multi-version isolation matches Claude/Codex (XDG pin, not bare symlink).**
+  Claude/Codex isolate per version with `CLAUDE_CONFIG_DIR` / `CODEX_HOME`.
+  Muse has no dedicated config env; it reads `$XDG_CONFIG_HOME/muse` and
+  `$XDG_DATA_HOME/muse`. After `agents import muse`, `~/.config/muse` is a
+  symlink into the version home — Muse refuses that path with
+  `Agent Definition filesystem source failed: SymlinkOrReparse` and exits 1
+  (the Zion `agents run muse@0.1.0` failure). Managed launches now pin
+  `XDG_CONFIG_HOME` + `XDG_DATA_HOME` into the version home from `buildExecEnv`,
+  the main shim, and versioned aliases (`muse@0.1.0`), the same way Claude pins
+  `CLAUDE_CONFIG_DIR`. Muse is also listed in `CONFIG_ENV_ISOLATED_AGENTS` so
+  `--isolated` installs are honest. Source: `apps/cli/src/lib/{exec,shims}.ts`.
+
+- **Scheduled routines now run on a per-account `claude setup-token` when one is
+  provisioned, instead of throwing it away.** `buildRoutineSpawnEnv` unconditionally
+  deleted `CLAUDE_CODE_OAUTH_TOKEN`, so even after `buildExecEnv` injected a long-lived,
+  non-rotating setup-token from the reserved file-backed `auth` bundle
+  (`resolveClaudeSetupToken`), a routine still fell back to the version home's rotating
+  `.credentials.json` login. With one Claude account signed into several version homes
+  (or several fleet boxes), that rotating login is the single-use-refresh-token
+  revocation storm — one home's refresh silently revokes every sibling copy, so an
+  unattended routine keeps landing on a just-revoked token and dies with `auth_failed:
+  OAuth access token has been revoked` / `Please run /login`, even though `agents view`
+  shows the account healthy. The delete now distinguishes the two flavours: a
+  per-account setup-token (keyed to this home's own account) is re-asserted and KEPT; an
+  inherited *ambient* token (a shared value the daemon env happened to carry — the
+  RUSH-1822 fleet-logout path) is still stripped so a routine never runs on it.
+  Provision the token with `/fleet:mint-auth`. Source:
+  `apps/cli/src/lib/runner.ts` (`buildRoutineSpawnEnv`).
+
+- **Resolved secrets no longer appear in `ps` for tmux-launched agents
+  (RUSH-2100).** An interactive `agents run` wraps the agent in tmux via
+  `exec env K=V … <agent>`, which put the entire exec env — every resolved
+  secrets-bundle value — into the pane's command line, readable by any process of
+  the same user. On one fleet box six live processes carried
+  `AGENTS_SECRETS_PASSPHRASE`, the key that decrypts every file-backed bundle on
+  that machine. The pane now sources a `0600` env file and unlinks it before
+  `exec`, so only the file path is argv-visible; a missing file aborts the pane
+  rather than launching half-configured. Every key routes through the file, not a
+  curated "secret-bearing" subset, so a newly added credential is covered without
+  anyone maintaining a list. Source: `apps/cli/src/lib/exec.ts`,
+  `apps/cli/docs/specifications.md` (SEC-8a).
+
 ## 1.22.23
 
 - **Daemon-warmed cross-surface session-status cache (RUSH-2062).** Menubar,

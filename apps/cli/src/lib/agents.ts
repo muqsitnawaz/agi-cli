@@ -301,6 +301,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     color: 'cyan',
     cliCommand: 'cursor-agent',
     npmPackage: '',
+    cloudProvider: 'cursor',
     installScript: 'curl https://cursor.com/install -fsS | bash && mv ~/.local/bin/agent ~/.local/bin/cursor-agent && grep -q "/.local/bin" ~/.zshrc || echo \'export PATH="$HOME/.local/bin:$PATH"\' >> ~/.zshrc',
     configDir: path.join(HOME, '.cursor'),
     commandsDir: path.join(HOME, '.cursor', 'commands'),
@@ -328,7 +329,7 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     // See transformSubagentForCursor / https://cursor.com/docs/subagents.
     // interactiveRepl: false — cursor-agent exits immediately with no argv. It requires a
     // prompt to do anything useful; a bare invocation is not a REPL (RUSH-2185, EXEC-23a).
-    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '2026.1.22' }, rules: { file: '.cursorrules' }, workflows: false, memory: false, modes: ['edit', 'skip'], interactiveRepl: false }, // allowlist: ~/.cursor/cli-config.json
+    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: true, plugins: true, subagents: { since: '2026.1.22' }, rules: { file: '.cursorrules' }, workflows: false, memory: false, modes: ['plan', 'edit', 'skip'], interactiveRepl: false }, // allowlist: ~/.cursor/cli-config.json
   },
   opencode: {
     id: 'opencode',
@@ -406,14 +407,22 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
     instructionsFile: 'workspace/AGENTS.md', // Primary memory file (also has SOUL.md, IDENTITY.md, etc.)
     format: 'markdown',
     variableSyntax: '{{ARGUMENTS}}',
-    supportsHooks: true,
+    // hooks: NOT supported. OpenClaw only exposes a fixed set of internal,
+    // named hooks (e.g. `boot-md`, which runs BOOT.md on gateway restart) —
+    // there is no general event->shell-command registration surface (no
+    // PreToolUse/PostToolUse/UserPromptSubmit equivalent an agents-cli
+    // hooks.yaml manifest could target). registerHooksToSettings has no
+    // `openclaw` case and silently no-ops (RUSH-2122: capability claimed
+    // hooks:true with zero hooks ever installed). Flip back to `true` only
+    // alongside a real registerHooksForOpenClaw implementation.
+    supportsHooks: false,
     // allowlist: maps blanket (whole-tool) rules to ~/.openclaw/openclaw.json
     // tools.alsoAllow (allow) / tools.deny (deny). OpenClaw gates at tool
     // granularity only, so sub-command/path/domain patterns are skipped.
     // OpenClaw is self-updating (no pinned since), so `true` is correct.
     // Workflows sync as Lobster `.lobster` files under `.openclaw/workflows/`;
     // the Lobster tool runs them by receiving the file path as `pipeline`.
-    capabilities: { hooks: true, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: false, plugins: true, subagents: true, rules: { file: 'workspace/AGENTS.md' }, workflows: true, memory: true, modes: ['plan', 'edit', 'skip'], interactiveRepl: true },
+    capabilities: { hooks: false, mcp: true, mcpHttp: false, mcpHeaders: false, allowlist: true, skills: true, commands: false, plugins: true, subagents: true, rules: { file: 'workspace/AGENTS.md' }, workflows: true, memory: true, modes: ['plan', 'edit', 'skip'], interactiveRepl: true },
   },
   copilot: {
     id: 'copilot',
@@ -834,10 +843,100 @@ export const AGENTS: Record<AgentId, AgentConfig> = {
       interactiveRepl: true,
     },
   },
+  // Warp Agent CLI (`oz`) — the standalone coding-agent CLI on Warp's "Oz"
+  // platform (the same shared Warp binary invoked via the `oz` symlink). Native
+  // binary via `brew install --cask oz` (macOS) / `oz-stable` apt|yum|pacman
+  // package (Linux); self-updating, no npm package. Config lives under `~/.warp/`
+  // (`.mcp.json`, `skills/`, `tab_configs/`, `worktrees/`, `remote-server`).
+  // Headless: `oz agent run --prompt "<task>" [--model <id>]` (local) /
+  // `oz agent run-cloud` (cloud). Auth: `oz login` (browser OAuth) or a
+  // `WARP_API_KEY` env token for headless/CI (`oz api-key create`). Rules/context
+  // file is `AGENTS.md` (also reads WARP.md / CLAUDE.md). Autonomy is governed by
+  // the selected agent profile (`--profile`), not a per-run permission flag.
+  // Sessions/conversations are stored SERVER-SIDE (retrieved with auth via
+  // `oz run conversation get <id>`), so there is no local transcript for
+  // `agents sessions` to index — warp is intentionally absent from SESSION_AGENTS.
+  // Docs: https://docs.warp.dev/reference/cli
+  warp: {
+    id: 'warp',
+    name: 'Warp',
+    color: 'blueBright',
+    cliCommand: 'oz',
+    npmPackage: '',
+    installScript: 'brew install --cask oz',
+    configDir: path.join(HOME, '.warp'),
+    commandsDir: '',
+    commandsSubdir: '',
+    skillsDir: path.join(HOME, '.warp', 'skills'),
+    hooksDir: 'hooks',
+    instructionsFile: 'AGENTS.md',
+    format: 'markdown',
+    variableSyntax: '$ARGUMENTS',
+    // Oz has no event->shell-command hook registration surface (its documented
+    // capabilities are agent-profiles-permissions, codebase-context,
+    // full-terminal-use, mcp, planning, rules, slash-commands — no hooks).
+    supportsHooks: false,
+    capabilities: {
+      hooks: false,
+      // MCP: Oz reads the Claude `{ "mcpServers": {...} }` schema from
+      // `.warp/.mcp.json` (user `~/.warp/.mcp.json`, project `<root>/.warp/.mcp.json`)
+      // and accepts `--mcp <path|json>` at run time; `oz mcp list` reads them
+      // back. stdio + http with headers, same schema as Claude's .mcp.json.
+      mcp: true,
+      mcpHttp: true,
+      mcpHeaders: true,
+      // Autonomy is governed by the selected agent profile
+      // (agent-profiles-permissions), not a Claude-style tool-name allow/deny
+      // list agents-cli can write — so no allowlist writer (mirrors muse).
+      allowlist: false,
+      // Skills: `--skill <spec>` + `oz agent skills`; searched in
+      // `.agents/skills/`, `.warp/skills/`, `.claude/skills/`, `.codex/skills/`.
+      skills: true,
+      // Slash-commands are native/server-managed (no droppable markdown
+      // command-file directory for agents-cli to sync into).
+      commands: false,
+      // No Claude marketplace / plugin manifest support.
+      plugins: false,
+      // Cloud agents + agent profiles are server-side; no installable
+      // subagent-definition directory to sync into (keeps the table truthful).
+      subagents: false,
+      rules: { file: 'AGENTS.md' },
+      workflows: false,
+      memory: false,
+      // Oz has no per-run permission flag; a single autonomous mode maps to no
+      // flags (the `--profile` selection governs autonomy). Mirrors hermes.
+      modes: ['edit'],
+      rulesImports: false,
+      // `oz agent run` requires a prompt (--prompt/--saved-prompt/--task-id/
+      // --skill), so a bare invocation opens no REPL.
+      interactiveRepl: false,
+    },
+  },
 };
 
 /** All current and legacy agent IDs derived from the AGENTS registry. */
 export const ALL_AGENT_IDS: AgentId[] = Object.keys(AGENTS) as AgentId[];
+
+/**
+ * CLI command templates per agent for daemon-fired routine jobs, with
+ * {prompt} as a placeholder. Lives here (not runner.ts) so routines.ts can
+ * import ROUTINE_AGENT_IDS for schedule-time validation without a circular
+ * import (runner.ts already imports from routines.ts).
+ */
+export const ROUTINE_AGENT_COMMANDS: Record<string, string[]> = {
+  claude: ['claude', '-p', '--verbose', '{prompt}', '--output-format', 'stream-json', '--permission-mode', 'plan'],
+  codex: ['codex', 'exec', '{prompt}', '--json'],
+  gemini: ['gemini', '{prompt}', '--output-format', 'stream-json'],
+  cursor: ['cursor-agent', '-p', '{prompt}', '--output-format', 'stream-json'],
+  kimi: ['kimi', '--prompt', '{prompt}', '--output-format', 'stream-json'],
+  droid: ['droid', 'exec', '{prompt}', '-o', 'stream-json'],
+  muse: ['muse', 'exec', '{prompt}', '--json'],
+};
+
+/** Agents the routine daemon can actually run when firing locally, derived
+ * from the command table above so the `--agent` help and validateJob's
+ * schedule-time check can never drift from it. */
+export const ROUTINE_AGENT_IDS = Object.freeze(Object.keys(ROUTINE_AGENT_COMMANDS));
 
 /** Agents retained only for legacy reads, not install/import/sync targets. */
 export const HARD_DEPRECATED_AGENT_IDS: AgentId[] = ALL_AGENT_IDS.filter((id) => AGENTS[id].deprecated?.hard);
@@ -1624,22 +1723,41 @@ function isValidOpenCodeCredential(value: unknown): boolean {
 
 /**
  * Whether a Muse Code `~/.config/muse/auth.json` document holds any usable
- * access token. The launcher stores per-provider slots (e.g. `meta`) each with
- * an `access_token` string; a top-level `access_token` is also accepted.
- * Never returns the secret itself — presence only.
+ * access token. Live shape from `muse login` (device OAuth, Muse Code 0.1.0):
+ *   { schema_version: 1, providers: { meta: { access_token, api_key, user_email, … } } }
+ * Also accept top-level or one-level-nested tokens for older/alternate writers.
+ * Recurses into objects so `providers.meta.access_token` is found — a flat
+ * one-level walk only saw `providers` and reported signed-out after a successful
+ * login (balanced then excluded the account). Never returns the secret itself.
  */
-function museAuthHasToken(value: unknown): boolean {
+function museAuthHasToken(value: unknown, depth = 0): boolean {
+  if (depth > 4) return false;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const root = value as Record<string, unknown>;
   if (typeof root.access_token === 'string' && root.access_token.length > 0) return true;
   if (typeof root.api_key === 'string' && root.api_key.length > 0) return true;
   for (const slot of Object.values(root)) {
-    if (!slot || typeof slot !== 'object' || Array.isArray(slot)) continue;
-    const entry = slot as Record<string, unknown>;
-    if (typeof entry.access_token === 'string' && entry.access_token.length > 0) return true;
-    if (typeof entry.api_key === 'string' && entry.api_key.length > 0) return true;
+    if (museAuthHasToken(slot, depth + 1)) return true;
   }
   return false;
+}
+
+/** Best-effort email from a Muse auth.json (providers.meta.user_email, etc.). */
+function museAuthEmail(value: unknown, depth = 0): string | null {
+  if (depth > 4) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const root = value as Record<string, unknown>;
+  if (typeof root.user_email === 'string' && root.user_email.includes('@')) {
+    return root.user_email;
+  }
+  if (typeof root.email === 'string' && root.email.includes('@')) {
+    return root.email;
+  }
+  for (const slot of Object.values(root)) {
+    const found = museAuthEmail(slot, depth + 1);
+    if (found) return found;
+  }
+  return null;
 }
 
 /**
@@ -2074,10 +2192,8 @@ export async function getAccountInfo(
       }
       case 'muse': {
         // Muse Code authenticates with META_API_KEY (env, highest priority) or
-        // a stored OAuth/API credential at ~/.config/muse/auth.json. The auth
-        // file is launcher-managed JSON with per-provider slots holding
-        // access_token; there is no email claim, so we report signed-in + a
-        // stable identity key (env-key vs provider slots) like kimi/opencode.
+        // a stored OAuth/API credential at ~/.config/muse/auth.json. Live file
+        // shape nests under providers.meta (access_token + optional user_email).
         if (process.env.META_API_KEY?.trim() || process.env.MODEL_API_KEY?.trim()) {
           const accountKey = buildIdentityKey(agentId, [['auth', 'env']]);
           return { ...empty, signedIn: true, accountId: 'env', accountKey, lastActive };
@@ -2086,12 +2202,20 @@ export async function getAccountInfo(
         if (!authPath) return { ...empty, lastActive };
         const data = JSON.parse(await fs.promises.readFile(authPath, 'utf-8'));
         if (!data || typeof data !== 'object') return { ...empty, lastActive };
-        // auth.json shape: { meta?: { access_token }, … } or similar slots.
-        // Any object with a nested access_token (or a top-level one) counts.
-        const hasToken = museAuthHasToken(data);
-        if (!hasToken) return { ...empty, lastActive };
-        const accountKey = buildIdentityKey(agentId, [['auth', 'file']]);
-        return { ...empty, signedIn: true, accountId: 'file', accountKey, lastActive };
+        if (!museAuthHasToken(data)) return { ...empty, lastActive };
+        const email = museAuthEmail(data);
+        const accountKey = buildIdentityKey(
+          agentId,
+          email ? [['email', email]] : [['auth', 'file']],
+        );
+        return {
+          ...empty,
+          signedIn: true,
+          email,
+          accountId: email ?? 'file',
+          accountKey,
+          lastActive,
+        };
       }
       default:
         return { ...empty, lastActive };
@@ -2813,6 +2937,9 @@ export function getUserMcpConfigPath(agentId: AgentId): string {
     case 'muse':
       // Muse Code: MCP lives in ~/.config/muse/settings.json under mcp_servers.
       return path.join(agent.configDir, 'settings.json');
+    case 'warp':
+      // Oz reads user-scope MCP from ~/.warp/.mcp.json (Claude schema).
+      return path.join(agent.configDir, '.mcp.json');
     default:
       // Gemini and others use settings.json
       return path.join(agent.configDir, 'settings.json');
@@ -2854,6 +2981,8 @@ export function getMcpConfigPathForHome(agentId: AgentId, home: string): string 
       return path.join(home, '.omp', 'agent', '.mcp.json');
     case 'muse':
       return path.join(home, '.config', 'muse', 'settings.json');
+    case 'warp':
+      return path.join(home, '.warp', '.mcp.json');
     default:
       return path.join(home, agentConfigDirName(agentId), 'settings.json');
   }
@@ -2901,6 +3030,9 @@ export function getProjectMcpConfigPath(agentId: AgentId, cwd: string = process.
       // Muse project MCP rides the same settings schema under .muse/settings.json
       // when present; otherwise fall back to the user settings path.
       return path.join(cwd, '.muse', 'settings.json');
+    case 'warp':
+      // Oz reads project MCP from <root>/.warp/.mcp.json (Claude schema).
+      return path.join(cwd, '.warp', '.mcp.json');
     default:
       return path.join(cwd, `.${agentId}`, 'settings.json');
   }
@@ -3067,6 +3199,10 @@ export const AGENT_NAME_ALIASES: Record<string, AgentId> = {
   'muse-code': 'muse',
   'muse-spark': 'muse',
   'meta-muse': 'muse',
+  warp: 'warp',
+  oz: 'warp',
+  'warp-agent': 'warp',
+  'warp-cli': 'warp',
 };
 
 /**

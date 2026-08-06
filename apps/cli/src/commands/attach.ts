@@ -7,11 +7,11 @@
  */
 import type { Command } from 'commander';
 import chalk from 'chalk';
-import { discoverSessions } from '../lib/session/discover.js';
-import { resumeSessionInPlace } from './sessions.js';
-import { readDetachRecord, clearDetachRecord, isHeadlessAlive } from '../lib/session/detached.js';
-import { sessionOwnerDevice, consumeResumePinned, RESUME_PINNED_ENV } from '../lib/session/resume-owner.js';
+import type { SessionMeta } from '../lib/session/types.js';
 import { runOnPeer } from '../lib/session/remote-list.js';
+import { sessionRecoveryPeer } from '../lib/session/recovery.js';
+import { resolveSessionMetadataValue, resumeSessionInPlace } from './sessions.js';
+import { readDetachRecord, clearDetachRecord, isHeadlessAlive } from '../lib/session/detached.js';
 
 export function registerAttachCommand(program: Command): void {
   program
@@ -24,38 +24,34 @@ export function registerAttachCommand(program: Command): void {
 }
 
 export async function attachAction(id: string): Promise<void> {
-  // Read (and clear) the routing pin first so it never reaches the agent's children.
-  const pinned = consumeResumePinned();
-  const q = id.toLowerCase();
-  // Rich meta carries the pinned version + origin cwd the resume needs.
-  const metas = await discoverSessions({ all: true, since: '90d', limit: 2000 });
-  const meta = metas.find((m) => m.id === id) ?? metas.find((m) => m.id.toLowerCase().startsWith(q));
-  if (!meta) {
+  const outcome = await resolveSessionMetadataValue(id);
+  if (outcome.kind === 'partial') {
+    console.error(chalk.red(`Could not resolve session while these devices were unavailable: ${outcome.failedPeers.join(', ')}`));
+    process.exitCode = 2;
+    return;
+  }
+  if (outcome.kind === 'not-found') {
     console.error(chalk.red(`No session matching "${id}".`));
     console.error(chalk.gray('  See your sessions: agents sessions'));
     process.exitCode = 1;
     return;
   }
+  if (outcome.kind === 'ambiguous') {
+    console.error(chalk.red(`"${id}" matches ${outcome.candidates.length} sessions. Pass the full session id.`));
+    process.exitCode = 1;
+    return;
+  }
+  const meta = outcome.session;
 
-  // A session that ran on another device attaches THERE — as an attach, not a
-  // bare resume. Both halves of this command are machine-local: the detach
-  // record below lives on the owner's disk, and so does the headless process it
-  // stops. Hopping with `agents resume` instead would skip that stop entirely
-  // and leave two processes on one transcript, which is the precise thing the
-  // next block exists to prevent (RUSH-2022).
-  const owner = pinned ? undefined : sessionOwnerDevice(meta);
-  if (owner) {
-    console.log(chalk.gray(`Session ${meta.shortId} belongs to ${owner} — attaching there over SSH…`));
-    // Same routing pin the resume hop carries: the far side runs it, never
-    // routes again. It cannot loop today (the owner sees itself as local), but
-    // that rests on an invariant in resume-owner.ts rather than a guard here.
-    const rc = await runOnPeer(['sessions', 'attach', meta.id], owner, {
-      tty: true,
-      env: { [RESUME_PINNED_ENV]: '1' },
-    });
-    if (rc === 'no-target') {
-      console.error(chalk.red(`${owner} isn't a reachable device right now.`));
-      console.error(chalk.gray(`  Register/wake it (agents devices), or run there: agents ssh ${owner}`));
+  // Route the WHOLE attach operation to the origin, not just its eventual
+  // resume. The detach record and headless PID are device-local; clearing them
+  // here would leave the real background continuation running beside a second
+  // process on the owning machine.
+  const peer = sessionRecoveryPeer(meta);
+  if (peer) {
+    const routed = await runOnPeer(attachRecoveryArgs(meta), peer, { tty: true });
+    if (routed === 'no-target') {
+      console.error(chalk.red(`Cannot attach ${meta.shortId}: origin device ${peer} is not a registered reachable peer.`));
       process.exitCode = 1;
     }
     return;
@@ -77,4 +73,8 @@ export async function attachAction(id: string): Promise<void> {
 
   console.log(chalk.gray(`Attaching ${meta.agent} ${meta.id.slice(0, 8)} — resuming interactively…`));
   await resumeSessionInPlace(meta);
+}
+
+export function attachRecoveryArgs(session: Pick<SessionMeta, 'id'>): string[] {
+  return ['sessions', 'attach', session.id];
 }

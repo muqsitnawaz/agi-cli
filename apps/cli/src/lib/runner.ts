@@ -70,7 +70,7 @@ import {
 } from './rotate.js';
 import { readAuthHealth, isDeadVerdict } from './auth-health.js';
 import { machineId } from './machine-id.js';
-import { isSelfUpdatingAgent } from './agents.js';
+import { isSelfUpdatingAgent, ROUTINE_AGENT_COMMANDS as AGENT_COMMANDS, ROUTINE_AGENT_IDS } from './agents.js';
 import { expandLocalHome, getProjectRoot } from './project-root.js';
 
 /** Result of a completed job execution, including metadata and optional report. */
@@ -95,7 +95,7 @@ function activeRoutineRun(config: Pick<JobConfig, 'name' | 'timeout'>): RunMeta 
   const runs = listRuns(config.name);
   for (let i = runs.length - 1; i >= 0; i--) {
     const run = runs[i];
-    if (run.status !== 'running') continue;
+    if (!['running', 'failed', 'timeout'].includes(run.status)) continue;
     if (run.pid && isPidOurs(run.pid, run.spawnedAt)) return run;
     if (!run.pid) {
       const startedAt = Date.parse(run.startedAt);
@@ -136,21 +136,6 @@ function terminateRoutineTree(pid: number | null): void {
     process.kill(-pid, 'SIGKILL');
   } catch { /* already exited */ }
 }
-
-/** CLI command templates per agent, with {prompt} as a placeholder. */
-const AGENT_COMMANDS: Record<string, string[]> = {
-  claude: ['claude', '-p', '--verbose', '{prompt}', '--output-format', 'stream-json', '--permission-mode', 'plan'],
-  codex: ['codex', 'exec', '{prompt}', '--json'],
-  gemini: ['gemini', '{prompt}', '--output-format', 'stream-json'],
-  cursor: ['cursor-agent', '-p', '{prompt}', '--output-format', 'stream-json'],
-  kimi: ['kimi', '--prompt', '{prompt}', '--output-format', 'stream-json'],
-  droid: ['droid', 'exec', '{prompt}', '-o', 'stream-json'],
-  muse: ['muse', 'exec', '{prompt}', '--json'],
-};
-
-/** Agents the daemon can actually run, derived from the command table above
- * so the `--agent` help and any validation can never drift from it. */
-export const ROUTINE_AGENT_IDS = Object.freeze(Object.keys(AGENT_COMMANDS));
 
 /**
  * Where each agent's transcript files live under an overlay HOME, mirroring
@@ -286,10 +271,9 @@ export function buildJobCommand(config: JobConfig, resolvedPrompt: string): stri
   }
 
   if (config.agent === 'cursor') {
-    // cursor-agent supports --plan, but the capability registry has not been
-    // upgraded yet. RUSH-2101 tracks adding that read-only mode after PR #1721.
-    const cursorMode = resolveHeadlessMode('cursor', mode, false, `routine ${config.name}`);
-    if (cursorMode === 'skip') {
+    if (mode === 'plan') {
+      cmd.push('--plan');
+    } else if (mode === 'skip') {
       cmd.push('-f');
     } else {
       // The configured cwd is the user's workspace trust decision. --trust is

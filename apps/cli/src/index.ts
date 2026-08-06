@@ -124,8 +124,6 @@ if (IS_DEV_BUILD) {
 import {
   COMMAND_LOADERS,
   LAZY_COMMAND_NAMES,
-  isKnownTopLevelCommand,
-  suggestTopLevelCommand,
   loadView,
   loadInspect,
   loadFeedback,
@@ -447,7 +445,7 @@ Credentials and profiles:
 Diagnostics:
   doctor [agent[@version]]        Diagnose CLI availability, sync status, and resource divergence; --check for the CI drift gate
   usage [agent]                   Show rate-limit and quota usage per agent
-  insights                        How you work — tools, friction, rhythm, split by Claude account
+  insights                        Session friction, corrections, repeated work, and ranked actions
   perf                            Latency rollups (hooks, commands, runs) from the disposable perf warehouse
 
 Config sync:
@@ -1159,19 +1157,67 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadUninstall);
 }
 
-// Unknown command. The distance-1 auto-correct happens EARLIER (before the
-// --host router — see below), so anything reaching here has no near match worth
-// rewriting; report it and suggest.
+/** Calculate the Levenshtein edit distance between two strings. */
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array(m + 1)
+    .fill(null)
+    .map(() => Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] =
+        a[i - 1] === b[j - 1]
+          ? dp[i - 1][j - 1]
+          : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+// Auto-correct typos with edit distance 1
 program.on('command:*', (operands) => {
   const unknown = operands[0];
-  const closest = suggestTopLevelCommand(unknown);
+  const allCommands = program.commands.map((c) => c.name());
+
+  let closest: string | null = null;
+  let minDist = Infinity;
+  for (const cmd of allCommands) {
+    const dist = levenshtein(unknown, cmd);
+    if (dist < minDist) {
+      minDist = dist;
+      closest = cmd;
+    }
+  }
+
+  if (minDist === 1 && closest) {
+    const args = process.argv.slice(2);
+    args[0] = closest;
+    // The typo'd name was unknown, so the top-level --host router (which ran
+    // before commander parsing, against the ORIGINAL name) could not have
+    // routed it - it correctly fell through to reach this handler at all
+    // (that fallthrough is this ticket's own fix). But falling through to a
+    // plain local re-parse means a routing flag on a corrected REAL
+    // host-routable command (e.g. `docto --host box`, corrected to `doctor`)
+    // silently ran LOCALLY instead of remotely, with no error - worse than
+    // the loud "does not support --host" this ticket replaced. Re-run the
+    // router with the CORRECTED name before falling through to local parse;
+    // it already no-ops when no routing flag is present. RUSH-2022 review r2.
+    void (async () => {
+      const { maybeRunOnHost } = await import('./lib/hosts/passthrough.js');
+      if (await maybeRunOnHost(closest, args)) {
+        process.exit(process.exitCode ?? 0);
+      }
+      program.parse(['node', 'agents', ...args]);
+    })();
+    return;
+  }
+
   console.error(`error: unknown command '${unknown}'`);
-  // Never point at a command this brand turned off: the suggestion set is static
-  // now, so unlike the old live `program.commands` it still contains names that
-  // were stripped below — `unknown command 'view'` / `(Did you mean view?)` is
-  // nonsense to a user for whom `view` does not exist.
-  if (closest && closest.distance <= 3 && !brandDisabled.has(closest.name)) {
-    console.error(`(Did you mean ${closest.name}?)`);
+  if (closest && minDist <= 3) {
+    console.error(`(Did you mean ${closest}?)`);
   }
   process.exit(1);
 });
@@ -1180,7 +1226,7 @@ program.on('command:*', (operands) => {
 // and the doc flags (--version/--help/-h) drive both the registration strategy
 // and whether the update check + background sync run at all.
 const passedArgs = process.argv.slice(2);
-let requestedCommand = passedArgs.find((arg) => !arg.startsWith('-'));
+const requestedCommand = passedArgs.find((arg) => !arg.startsWith('-'));
 const verboseStartup = passedArgs.includes('--verbose');
 // Help and version output are pure documentation — they must never gate on
 // setup, otherwise `agents <cmd> --help` becomes useless on a fresh box.
@@ -1193,33 +1239,7 @@ const helpOrVersionRequested = passedArgs.some(
 // spellcheck), while `agents` itself is unaffected. `brandDisabled` is empty for
 // the unbranded CLI, so all of this is a no-op there.
 const brandDisabled = disabledCommandsForActiveBrand();
-let requestedIsDisabled = requestedCommand !== undefined && brandDisabled.has(requestedCommand);
-
-// Correct a one-letter typo BEFORE the --host router and before registration, so
-// the corrected command's own `--host` support decides the routing. Doing it
-// after (commander's `command:*` handler used to) meant `agents docto --host box`
-// never re-consulted the router and dead-ended on a LOCAL doctor with an unknown
-// option. A brand-disabled name is not a correction target — under that brand the
-// command does not exist. RUSH-2022.
-// Only argv[0]: `requestedCommand` is "first token that doesn't start with -",
-// which in a leading-flag form like `agents --host box view` picks up the FLAG'S
-// VALUE (`box`). Reading that as a command is a pre-existing wart; REWRITING it
-// would be a new bug — a device named one letter off a command would have its
-// name silently replaced. A typo anywhere but position 0 falls through to the
-// plain `unknown command` + did-you-mean.
-if (
-  requestedCommand !== undefined &&
-  passedArgs[0] === requestedCommand &&
-  !isKnownTopLevelCommand(requestedCommand)
-) {
-  const suggestion = suggestTopLevelCommand(requestedCommand);
-  if (suggestion?.distance === 1 && !brandDisabled.has(suggestion.name)) {
-    passedArgs[0] = suggestion.name;
-    process.argv[2] = suggestion.name;
-    requestedCommand = suggestion.name;
-    requestedIsDisabled = false;
-  }
-}
+const requestedIsDisabled = requestedCommand !== undefined && brandDisabled.has(requestedCommand);
 
 // `--host` passthrough: run this invocation on a remote machine over SSH instead
 // of locally. Handled before any local command registration / update check /
@@ -1237,6 +1257,9 @@ if (requestedCommand !== undefined && !helpOrVersionRequested && !requestedIsDis
 // Register only the command(s) this invocation actually uses. Lazy commands
 // (sessions/teams/cloud) are handled after applyGlobalHelpConventions below.
 const isLazyRequest = requestedCommand !== undefined && LAZY_COMMAND_NAMES.has(requestedCommand);
+// Set when the requested name maps to no command: the lazy tree is then also
+// registered below so the spellcheck can suggest `sessions`/`teams`/`cloud`.
+let requestedIsUnknown = false;
 if (requestedIsDisabled) {
   // The brand turned this command off: register the full tree so the "did you
   // mean" picker still works, then strip the disabled commands below so the
@@ -1249,6 +1272,7 @@ if (requestedIsDisabled) {
     // spellcheck and edit-distance-1 auto-correct (the command:* handler above)
     // see the same candidate set — and ordering — as main.
     await registerAllEagerCommands();
+    requestedIsUnknown = true;
   }
 }
 // When requestedCommand is undefined (bare invocation, --version, --help, -h) no
@@ -1264,6 +1288,19 @@ applyGlobalHelpConventions(program);
 // only when explicitly requested, keeping lightweight commands off that path.
 if (isLazyRequest && !requestedIsDisabled) {
   for (const loader of COMMAND_LOADERS[requestedCommand!]) await reg(loader);
+} else if (requestedIsUnknown) {
+  // Unknown command: the lazy names must be candidates too, or `agents session`
+  // (a typo for the very much lazy `sessions`) gets no "did you mean" at all —
+  // the miss the RUSH-2022 report walked into. Registration order still mirrors
+  // main: lazy commands come after applyGlobalHelpConventions.
+  const seen = new Set<ModuleLoader>();
+  for (const name of LAZY_COMMAND_NAMES) {
+    for (const loader of COMMAND_LOADERS[name] ?? []) {
+      if (seen.has(loader)) continue;
+      seen.add(loader);
+      await reg(loader);
+    }
+  }
 }
 
 // White-label: remove any commands this brand disabled so they resolve as

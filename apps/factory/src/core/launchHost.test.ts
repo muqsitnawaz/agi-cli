@@ -294,3 +294,25 @@ test('noHostReason: nothing to say → null', () => {
   // No agentKey (agent-unaware caller) keeps the legacy silent fallback.
   expect(noHostReason([{ name: 's0', online: true, running: 0 }])).toBeNull();
 });
+
+// RUSH-2054 regression: a Tailscale-online but SSH-unreachable device was
+// returning null from countRunningAgents (before the fix: returning 0), which
+// made it appear idle and win the least-busy pick. The fix marks it online:false
+// so pickBestHost excludes it; this test pins that behavior.
+test('pickBestHost: SSH-unreachable device (online:false) never wins over a reachable but busier one (RUSH-2054 regression)', () => {
+  expect(
+    pickBestHost([
+      { name: 'unreachable', online: false, running: 0 },
+      { name: 'reachable', online: true, running: 2 },
+    ]),
+  ).toBe('reachable');
+});
+
+test('pickBestHost: all devices SSH-unreachable (online:false) → returns null (RUSH-2054)', () => {
+  expect(
+    pickBestHost([
+      { name: 'a', online: false, running: 0 },
+      { name: 'b', online: false, running: 0 },
+    ]),
+  ).toBeNull();
+});

@@ -51,7 +51,8 @@ import { shouldInstallCommandAsSkill, commandSkillMatches, commandSkillName } fr
 import { gooseCommandMatches, gooseCommandsDir } from './goose-commands.js';
 import { supports } from './capabilities.js';
 import { listSkillsInVersionHome, getVersionSkillsDir } from './skills.js';
-import { listHooksInVersionHome, getVersionHooksDir, listHookEntriesFromDir, checkVersionHookWiring, type HookWiringReport } from './hooks.js';
+import { listHookEntriesFromDir, type HookWiringReport } from './hooks.js';
+import { getResourceInventory, type ResourceInventory } from './resource-inventory.js';
 
 const RULES_DOC_FILENAME = 'README.md';
 
@@ -114,6 +115,8 @@ export interface VersionResourceReport {
   /** Wiring inspection for the version's native settings.json (claude/droid).
    *  Populated only when the `hooks` kind is in scope. */
   hookWiring?: HookWiringReport;
+  /** Harness-scoped hook state from the shared inventory engine. */
+  hookInventory?: ResourceInventory;
   /** Source layers behind their upstream. Filled by the doctor command (a git
    *  probe), not the pure diff — undefined when uncomputed. */
   sourceBehind?: SourceLayerBehind[];
@@ -370,10 +373,9 @@ function diffSkills(agent: AgentId, version: string, cwd: string, excludeProject
 
 // ─── hooks ────────────────────────────────────────────────────────────────────
 
-function diffHooks(agent: AgentId, version: string, cwd: string): ResourceDiff[] {
+function diffHooks(agent: AgentId, version: string, cwd: string, inventory: ResourceInventory): ResourceDiff[] {
   if (!AGENTS[agent].supportsHooks) return [];
-  const installedEntries = listHooksInVersionHome(agent, version);
-  const installedByName = new Map(installedEntries.map((e) => [e.name, e]));
+  const installedByName = new Map(inventory.onDisk.map((e) => [e.name, e]));
   // Sync intentionally excludes project/.agents/hooks/ — mirror that.
   const layerBases = buildLayerBases(cwd, 'hooks', { excludeProject: true });
 
@@ -398,13 +400,13 @@ function diffHooks(agent: AgentId, version: string, cwd: string): ResourceDiff[]
       continue;
     }
     const a = readSafe(src.entry.scriptPath);
-    const b = readSafe(installed.scriptPath);
+    const b = readSafe(installed.path);
     let matches = a != null && b != null && normalize(a) === normalize(b);
-    if (matches && src.entry.dataFile && installed.dataFile) {
+    if (matches && src.entry.dataFile && installed.detail) {
       const ad = readSafe(src.entry.dataFile);
-      const bd = readSafe(installed.dataFile);
+      const bd = readSafe(installed.detail);
       matches = ad != null && bd != null && normalize(ad) === normalize(bd);
-    } else if (matches && (!!src.entry.dataFile !== !!installed.dataFile)) {
+    } else if (matches && (!!src.entry.dataFile !== !!installed.detail)) {
       matches = false;
     }
     rows.push({
@@ -413,13 +415,13 @@ function diffHooks(agent: AgentId, version: string, cwd: string): ResourceDiff[]
       status: matches ? 'ok' : 'diff',
       source: src.layer,
       sourcePath: src.entry.scriptPath,
-      homePath: installed.scriptPath,
+      homePath: installed.path,
     });
   }
 
   for (const [name, installed] of installedByName) {
     if (seen.has(name)) continue;
-    rows.push({ kind: 'hooks', name, status: 'extra', homePath: installed.scriptPath });
+    rows.push({ kind: 'hooks', name, status: 'extra', homePath: installed.path });
   }
 
   return rows.sort((a, b) => a.name.localeCompare(b.name));
@@ -695,11 +697,12 @@ export function diffVersionResources(
 
   if (requested.has('commands')) empty.commands = diffCommands(agent, version, cwd, excludeProject);
   if (requested.has('skills')) empty.skills = diffSkills(agent, version, cwd, excludeProject);
-  if (requested.has('hooks')) empty.hooks = diffHooks(agent, version, cwd);
+  const hookInventory = requested.has('hooks') ? getResourceInventory(agent, version, 'hooks', { cwd }) : undefined;
+  if (hookInventory) empty.hooks = diffHooks(agent, version, cwd, hookInventory);
   // Wiring check: a hook FILE can be present and byte-identical to source (ok
   // above) yet never referenced in settings.json, so it never fires. Only
   // meaningful when hooks are in scope.
-  const hookWiring = requested.has('hooks') ? checkVersionHookWiring(agent, version) : undefined;
+  const hookWiring = hookInventory?.wiring;
   if (requested.has('rules')) empty.rules = diffRules(agent, version, cwd, excludeProject);
   if (requested.has('mcp')) empty.mcp = diffPresenceOnly('mcp', available.mcp, synced.mcp);
   if (requested.has('permissions')) empty.permissions = diffPresenceOnly('permissions', available.permissions, synced.permissions);
@@ -731,6 +734,7 @@ export function diffVersionResources(
     kinds: empty,
     summary: { ok, diff, missing, extra },
     ...(hookWiring ? { hookWiring } : {}),
+    ...(hookInventory ? { hookInventory } : {}),
   };
 }
 

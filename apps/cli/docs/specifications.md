@@ -503,6 +503,27 @@ SSH access (§7); rendering sessions that no harness produced.
   persistence MUST use ledger byte totals and read only changed ordinals
   (`lib/session/db.ts`; `lib/session/tool-store.ts`; `lib/session/tool-index.ts`;
   `commands/sessions-backfill.ts`; `commands/sessions.ts`).
+- **SES-42 (MUST).** An `ensureToolIndex` pass over a Claude/Codex transcript that
+  only grew MUST read only the bytes appended since the last pass (incremental
+  discovery already appends via `toolIndexMode`; this is the backfill side).
+  Schema v36's `tool_scan_ledger`
+  carries a resume point — `parsed_offset`, the byte just past the last complete
+  record consumed, and `parser_state`, the collector snapshot at that offset — and
+  the scan MUST resume there and persist with `mode: 'append'`, leaving the
+  session's already-stored call rows in place. The resume point MUST be refused,
+  and the whole file re-read, when the extractor version differs, no resume point
+  is recorded, the ledger's source path does not match, or the file is shorter
+  than what was already parsed. A record with no trailing newline MUST be indexed
+  but MUST NOT advance `parsed_offset`, so re-reading it next scan re-derives the
+  same ordinals rather than duplicating the call. Harnesses parsed whole into
+  memory record no resume point and stay full replaces.
+  Every `tool_call_text` row MUST be addressed by the `rowid` of the `tool_calls`
+  row it describes; its `call_key` is UNINDEXED, so a `call_key` predicate scans
+  the entire index once per call.
+  The scan path MUST also perform bounded, threshold-gated FTS compaction
+  (`maintainSessionSearchIndex`) so index health does not depend on a human
+  running `agents sessions optimize`
+  (`lib/session/tool-index.ts`; `lib/session/tool-store.ts`; `lib/session/db.ts`).
 - **SES-35 (MUST).** Fleet tool search MUST cap each peer's stdout at 16 MiB,
   query at most six peers concurrently, and subtract the exact encoded local
   envelope plus 64 KiB of coordinator headroom from the 15 MiB aggregate receive
@@ -551,6 +572,38 @@ SSH access (§7); rendering sessions that no harness produced.
   NOT use embeddings, a vector database, semantic search, or model calls
   (`lib/session/shell-programs.ts`; `lib/session/tool-store.ts`;
   `lib/session/tool-index.ts`; `commands/sessions.ts`).
+- **SES-38 (MUST).** `sessions focus` MUST use the session browser's canonical
+  candidate/filter pipeline for selector-driven focus. A unique session id or
+  prefix MAY focus directly; an agent/version or text selector MUST show the
+  preview picker even when exactly one row matches. Agent version aliases
+  `latest` and `oldest` MUST resolve on each queried device, not on the caller.
+  Device, project/time, team/routine, skill/plugin, favorites, and live-state
+  flags MUST compose, and several live states MUST form the same OR-union as
+  `sessions --active` (`commands/sessions-browser.ts` `BrowserFilter`,
+  `collectSessionCandidates`, `applyFilters`; `commands/focus.ts` `focusAction`;
+  tests `commands/sessions-browser.test.ts`, `commands/focus.test.ts`).
+  Bare `--active` MUST exclude terminally-dead rows retained by the live registry;
+  explicit `--closed` / `--crashed` filters MUST remain able to select those rows.
+  A per-device `latest` / `oldest` query MUST NOT admit an unindexed live row whose
+  version was not part of the peer's filtered result.
+- **SES-39 (MUST).** Focus MUST query tmux `#{pane_dead}` immediately before
+  attach. A dead or missing pane MUST NOT attach. Session recovery MUST run on
+  the origin device and MUST choose native resume only for the exact healthy
+  origin version in its isolated home. An absent, signed-out, revoked, exhausted,
+  or non-native origin MUST select a healthy version of the same harness and use
+  `/continue <id>` against the indexed transcript; it MUST NOT native-resume from
+  another version home or choose another harness. With no usable version it MUST
+  fail with the device, origin version, and account-health reason
+  (`commands/go.ts` `probeAttachRail`; `lib/tmux/session.ts` `paneExitStatus`;
+  `lib/session/recovery.ts`; `commands/exec.ts`; tests
+  `lib/session/recovery.test.ts`, `commands/focus.test.ts`).
+- **SES-40 (MUST).** Focus, single and multi-session resume, attach, and both
+  concrete-id and picker forms of `run --resume` MUST route through SES-39's one
+  origin-device recovery decision. A host-dispatched session row MUST persist
+  the dispatch host as `machine`. Cross-device attach MUST route before reading
+  the detach record or stopping its headless PID, because both are local to the
+  origin (`lib/hosts/session-index.ts`; `commands/attach.ts`; `commands/exec.ts`;
+  tests `lib/hosts/session-index.test.ts`, `commands/attach.test.ts`).
 
 ---
 
@@ -635,6 +688,12 @@ The command surface (bare `sessions [query]`, `tail`, `sync`, `resume`, `focus`,
   a transcript already current at `RESOURCE_INDEX_VERSION`
   (`commands/sessions-stats.ts`; `commands/sessions-backfill.ts`;
   `lib/session/db.ts` `queryResourceUsageStats`/`backfillResourceUsage`).
+- **SES-IF-4c (MUST).** `sessions insights` and top-level `insights` MUST invoke
+  the same implementation. The default report MUST be deterministic and offline,
+  MUST include friction, corrections, automatable repeats, harness split, and ranked
+  evidence-backed actions, and MUST NOT emit raw transcript text or full local paths.
+  `--agent` MUST be repeatable. `--narrative` MAY call a coach only with aggregate
+  report data (`commands/insights.ts`; `lib/session/insights.ts`).
 
 #### 4.3 stdout / stderr / exit discipline
 
@@ -824,6 +883,24 @@ Given one Bash call contains `git status; git diff`; When
 tool call, and 1 distinct session (`lib/session/tool-index.test.ts`;
 `commands/sessions.test.ts`).
 
+**GWT-14 — A retained dead pane recovers.**
+Given a session whose tmux pane remains after the harness exited with status 0;
+When `agents sessions focus <id>` runs; Then focus observes `pane_dead=1`, does
+not attach the pane, and invokes centralized session recovery
+(`commands/focus.test.ts`; `lib/tmux/session.test.ts`).
+
+**GWT-15 — A removed origin version continues on the same harness.**
+Given a Claude session from version 2.1.187, that version is absent, and healthy
+Claude 2.1.218 is installed on the origin device; When the session recovers;
+Then the target is `claude@2.1.218` in `/continue` mode, never native resume and
+never another harness (`lib/session/recovery.test.ts`).
+
+**GWT-16 — A cross-device attach stops the origin continuation.**
+Given a detached session indexed on another device; When `agents sessions attach
+<id>` runs; Then the whole attach command executes on the indexed origin before
+it reads the detach record, stops the headless PID, or invokes recovery
+(`commands/attach.ts`; `commands/attach.test.ts`).
+
 ---
 
 ## Secrets
@@ -986,7 +1063,7 @@ access control (that is 1Password/Vault; this tool is device-local first).
   auto-share read therefore resolve `agentOnly: true` unconditionally
   (`commands/exec.ts` secrets injection; `lib/share/config.ts` `shareRuntimeEnv`),
   NOT gated on `isHeadlessSecretsContext()`. Gating the launch read on tty let a
-  watchdog's `agents run auto --interactive` (routine + menu-bar tick, ~2 min)
+  watchdog's `agents run auto --interactive` (daemon-owned pass)
   prompt for a `hold` bundle and pile up helper sheets. **Given** an interactive
   `agents run --secrets <hold-bundle>` whose bundle is not broker-held **When** it
   launches **Then** it fails fast naming `agents secrets unlock <bundle>`, no sheet.
@@ -1091,6 +1168,33 @@ access control (that is 1Password/Vault; this tool is device-local first).
   macOS sheet itself emits no event. **No read path is exempt** from the audit
   funnel — a code path that resolves a value without an `emitSecretAudit` record is a
   spec violation.
+- **SEC-30 (MUST).** **An existence answer and a read answer MUST NOT contradict, and a
+  read refusal MUST be reported as a refusal, never as absence.** A bundle read MUST
+  build its keychain read set from the bundle's **declared keys** (the `keychain:` refs
+  in its metadata), not solely from an enumeration of its namespace: the macOS helper's
+  `list` omits biometry-ACL'd items (`kSecUseAuthenticationUISkip`) and skips the whole
+  data-protection pass on a locked keychain (`keychain-helper.swift` `list`), so an
+  enumeration-only read set turns a present secret into a false "not found"
+  (`readAndResolveBundleEnv` unions the declared keys with the enumeration —
+  `lib/secrets/bundles.ts`). When a declared item still resolves to no value, the read
+  MUST classify it before erroring: an item that `hasKeychainToken` reports **present**
+  (which counts `errSecInteractionNotAllowed` as present, matching what `secrets view`
+  shows) MUST be reported as **present-but-unreadable** with how to unlock, and MUST NOT
+  print a remediation that would overwrite it (`agents secrets add`); only a **proven
+  absence** may print the add remediation (`missingBundleKeychainItemError`,
+  `lib/secrets/bundles.ts`). **Given** `secrets view` shows a key as `stored` **When**
+  `secrets view --reveal` / `unlock` reads it **Then** it returns the value or an
+  explicit read-failure — never `stored item '<item>' not found`.
+- **SEC-31 (MUST).** An existence or delete probe that cannot reach the keychain MUST
+  fail loud, never answer a false "no". `hasKeychainToken` and `deleteKeychainToken`
+  (`lib/secrets/index.ts`) MUST treat only the helper's exit 0 (present / deleted) and
+  exit 1 (genuinely absent / nothing to delete) as answers; any other outcome — helper
+  error, spawn failure, or the SIGKILL timeout (`spawnKeychainHelper`,
+  `KeychainHelperTimeoutError`) — MUST throw a reachability error rather than return
+  `false`, because a swallowed failure silently disarms the destructive-write guards
+  (`bundleExists`, the `--force` overwrite checks, the rename/purge) that key on these
+  primitives (RUSH-2235). Every keychain-helper spawn stays bounded by that timeout +
+  SIGKILL so a wedged `coreauthd` can never hang the parent (RUSH-2231/2232).
 
 #### 3.4 Authorization model
 
@@ -1145,9 +1249,20 @@ access control (that is 1Password/Vault; this tool is device-local first).
 - **SEC-29a (MUST NOT).** The default keychain flow MUST NOT require a passphrase or
   read one from an environment variable to keep a bundle unlocked. On macOS the
   Keychain is gated by the OS login only; `AGENTS_SECRETS_PASSPHRASE` applies
-  **exclusively** to the encrypted-file (SEC-2) and age-vault (SEC-3) fallback
-  backends and MUST NOT be introduced into, or required by, the keychain path
-  (SEC-8 already strips it from every injected child env).
+  **exclusively** to the encrypted-file store (SEC-2) — it is that store's master
+  key and nothing else — and MUST NOT be introduced into, or required by, the
+  keychain path (SEC-8 already strips it from every injected child env). The
+  age-vault backend (SEC-3) does NOT read it; that backend is gated by
+  `agents login` (`lib/secrets/vault.ts`).
+- **SEC-29b (MUST).** Transport passphrases MUST use `AGENTS_SYNC_PASSPHRASE`, not
+  the file-store master key: `push`/`pull` (SEC-23) and the portable
+  `export --to-file` / `import --from-file` envelope seal data for a DIFFERENT
+  trust boundary than the local store. `AGENTS_SECRETS_PASSPHRASE` MUST remain
+  honoured there only as a deprecated fallback, warned exactly once per process
+  (`lib/secrets/sync-passphrase.ts`). Overloading one variable for both is what
+  put a file-store master key into a shell rc file on seven worker boxes
+  (RUSH-1968): the store stopped needing a passphrase, headless sync still did,
+  so the master key was exported fleet-wide to satisfy sync.
 
 #### 3.5 Sharing & sync
 
@@ -2094,8 +2209,8 @@ nothing but its own view cache.
 - **SING-1 (MUST).** Every fleet-affecting capability MUST have exactly one scheduler
   and one executor: the agents-cli daemon (`agents __daemon-run`,
   `apps/cli/src/lib/daemon.ts`) or a CLI command the daemon or the user drives.
-  Status: **Current** for routines (`lib/scheduler.ts`), the watchdog
-  (the system `routines/watchdog.yml` definition, WD-1), and rotate (`lib/watchdog/rotate.ts`).
+  Status: **Current** for routines (`lib/scheduler.ts`), the daemon-native watchdog
+  (`lib/daemon.ts`, WD-1), and rotate (`lib/watchdog/rotate.ts`).
 - **SING-2 (MUST NOT).** A UI surface (apps/factory, the menubar app, the iOS app)
   MUST NOT own a timer, watcher, or loop that detects a condition and performs a
   fleet-affecting action. Detection and decision MUST live in the CLI, which holds
@@ -2208,7 +2323,7 @@ is not two daemons existing — it is two daemons consuming the **same** input.
 
 ## Watchdog
 
-The normative contract for `agents watchdog` — the routine that detects **idle** agents
+The normative contract for `agents watchdog` — the daemon-owned service that detects **idle** agents
 and steers them to completion. The how-it-works companion is [watchdog.md](watchdog.md).
 Requirement keywords **MUST / MUST NOT / SHOULD / MAY** are per RFC 2119; scenarios are
 Given/When/Then so they map 1:1 to tests.
@@ -2225,14 +2340,13 @@ not the watchdog's.
 
 #### 2.1 Trigger & lifecycle
 
-- **WD-1 (MUST).** The always-on watchdog MUST be a daemon-fired cron routine, not a
-  bespoke loop — the routine command is `agents watchdog --nudge` on
-  schedule in the system `routines/watchdog.yml`. Each fire MUST run exactly one
-  bounded tick.
+- **WD-1 (MUST).** The agents daemon MUST be the sole automatic watchdog scheduler and
+  executor. When device-local `watchdog.enabled` is true it MUST run one bounded,
+  non-overlapping pass every three minutes. UI surfaces MUST only render persisted state.
 - **WD-2 (MUST).** Delivery MUST occur only when `--nudge` is set; without it a tick is a
   dry run that reports "would nudge" and delivers nothing (`lib/watchdog/runner.ts`).
-- **WD-3 (MUST).** `enable`/`disable` MUST be backed by the routine store (create/pause the
-  job), and `status` MUST reflect the routine's real state (`commands/watchdog.ts`).
+- **WD-3 (MUST).** `on`/`off` MUST write the typed device-local `watchdog.enabled`
+  setting, and `status` MUST reflect that setting (`commands/watchdog.ts`).
 
 #### 2.2 Detection — idle is the target
 

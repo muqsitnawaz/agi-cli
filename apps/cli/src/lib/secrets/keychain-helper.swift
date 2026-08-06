@@ -348,6 +348,107 @@ func dieIfCancelled(_ status: OSStatus) {
     }
 }
 
+// A slot a worker thread publishes into, readable only under the lock. This is
+// what makes ABANDONING a worker safe: after the deadline the caller stops
+// looking at the slot, and the late write lands somewhere no one races on.
+final class BoundedSlot<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T?
+
+    func publish(_ v: T) {
+        lock.lock()
+        value = v
+        lock.unlock()
+    }
+
+    func take() -> T? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+// Run `work` on a background thread and give up after `timeout`, returning nil.
+//
+// There is no cancel API for an in-flight SecItemCopyMatching, so the only way
+// to bound one is to stop waiting on it — the worker keeps running (leaking one
+// thread for the rest of this short-lived process) while the caller proceeds.
+// That trade is the whole point: a leaked thread in a helper that exits in
+// milliseconds costs nothing, whereas a helper stuck forever inside the keychain
+// is what accumulates into the pileup this bound exists to stop.
+func boundedWait<T>(_ timeout: TimeInterval, _ work: @escaping () -> T) -> T? {
+    let slot = BoundedSlot<T>()
+    let done = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .userInitiated).async {
+        slot.publish(work())
+        done.signal()
+    }
+    guard done.wait(timeout: .now() + timeout) == .success else { return nil }
+    return slot.take()
+}
+
+// How long `list` waits on the data-protection pass before skipping it.
+// Overridable so the skip path is exercisable end-to-end (a healthy coreauthd
+// answers in milliseconds and a starved one cannot be summoned on demand).
+let listDataProtectionTimeout: TimeInterval = {
+    guard let raw = ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_LIST_TIMEOUT_MS"],
+          let ms = Double(raw), ms >= 0 else { return 3 }
+    return ms / 1000
+}()
+
+let listDataProtectionTimeoutLabel: String = {
+    let seconds = listDataProtectionTimeout
+    if seconds < 1 { return "\(Int((seconds * 1000).rounded())) ms" }
+    if seconds == seconds.rounded() { return "\(Int(seconds)) seconds" }
+    return String(format: "%.1f seconds", seconds)
+}()
+
+// Self-test for the bounded wait (AGENTS_KEYCHAIN_BOUNDED_TEST=1). Headless and
+// keychain-free, so it runs on any Mac against an unsigned build — that is what
+// lets scripts/build-keychain-helper.sh gate the artifact on it before signing.
+//
+// Every margin below is deliberately wide (a worker sleeping 10s against a 0.2s
+// deadline, asserted released within 5s). A build gate that flakes on a loaded
+// machine gets disabled, so the assertions test the ORDER OF MAGNITUDE — bound
+// fired vs worker ran to completion — never a tight stopwatch.
+if ProcessInfo.processInfo.environment["AGENTS_KEYCHAIN_BOUNDED_TEST"] == "1" {
+    var failures = 0
+    func check(_ label: String, _ ok: Bool) {
+        print("\(ok ? "ok" : "FAIL") - \(label)")
+        if !ok { failures += 1 }
+    }
+
+    check("work finishing inside the deadline returns its value", boundedWait(5) { 42 } == 42)
+
+    let slowStarted = Date()
+    let slowResult = boundedWait(0.2) { () -> Int in
+        Thread.sleep(forTimeInterval: 10)
+        return 42
+    }
+    let slowElapsed = Date().timeIntervalSince(slowStarted)
+    check("work outrunning the deadline yields nil", slowResult == nil)
+    check("the caller is released at the deadline, not at completion (\(String(format: "%.2f", slowElapsed))s of a 10s worker)", slowElapsed < 5)
+
+    // A worker that publishes after the caller walked away must not corrupt
+    // anything — the abandoned-worker case, run for real.
+    let late = BoundedSlot<Int>()
+    _ = boundedWait(0.2) { () -> Int in
+        Thread.sleep(forTimeInterval: 2)
+        late.publish(7)
+        return 7
+    }
+    check("caller sees nothing from a worker still running", late.take() == nil)
+    // Poll rather than sleeping a fixed span, so a slow machine waits longer
+    // instead of failing.
+    let deadline = Date().addingTimeInterval(30)
+    while late.take() == nil && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+    check("abandoned worker still completes safely", late.take() == 7)
+
+    check("zero timeout skips immediately", boundedWait(0) { Thread.sleep(forTimeInterval: 5); return 1 } == nil)
+
+    exit(failures == 0 ? 0 : 1)
+}
+
 let args = CommandLine.arguments
 guard args.count >= 2 else {
     die(2, "Usage: agents-keychain <get|get-batch|set|set-no-acl|delete|has|list|list-legacy|list-orphans|migrate-acl|migrate-orphans|list-synced|get-batch-synced|delete-synced> ...")
@@ -390,12 +491,40 @@ case "list":
         kSecReturnAttributes: kCFBooleanTrue!,
         kSecUseDataProtectionKeychain: kCFBooleanTrue!,
         kSecAttrSynchronizable: kCFBooleanFalse!,
-        kSecUseAuthenticationUI: kSecUseAuthenticationUISkip,
     ]
+    // No kSecUseAuthenticationUI on the DP pass — attributes-only, exactly as the
+    // note at the top of this case requires. A UI key would bound the pass
+    // cheaply, but neither value is usable here: kSecUseAuthenticationUIFail errors
+    // out of the DP keychain wholesale, and kSecUseAuthenticationUISkip silently
+    // omits every biometry-ACL item — which is precisely the value items `list`
+    // exists to enumerate (RUSH-2251: with UISkip present, every hold/always-policy
+    // bundle enumerated zero value items and became unreadable). Omitting the key
+    // instead never evaluates an ACL (attributes without kSecReturnData), so it
+    // neither prompts nor filters. It does still hit LocalAuthentication/coreauthd,
+    // so a starved coreauthd could block SecItemCopyMatching with no deadline of
+    // its own (RUSH-2233) — the boundedWait below is its only bound, and skips the
+    // pass on timeout.
     var items: [[String: Any]] = []
     for query in [fileQuery, dpQuery] {
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status: OSStatus
+        // The pass carrying kSecUseDataProtectionKeychain IS the DP pass — read
+        // it off the query rather than off loop position, so the two passes stay
+        // a plain literal list.
+        if query[kSecUseDataProtectionKeychain] != nil {
+            guard let outcome = boundedWait(listDataProtectionTimeout, { () -> (OSStatus, AnyObject?) in
+                var dpResult: AnyObject?
+                let dpStatus = SecItemCopyMatching(query as CFDictionary, &dpResult)
+                return (dpStatus, dpResult)
+            }) else {
+                writeStderr("list: data-protection keychain did not answer within \(listDataProtectionTimeoutLabel) (coreauthd unresponsive); skipping that pass — file-keychain results only")
+                continue
+            }
+            status = outcome.0
+            result = outcome.1
+        } else {
+            status = SecItemCopyMatching(query as CFDictionary, &result)
+        }
         if status == errSecItemNotFound { continue }
         // The DP keybag locks with the screen; enumeration then reports
         // errSecInteractionNotAllowed wholesale. Skip the pass instead of

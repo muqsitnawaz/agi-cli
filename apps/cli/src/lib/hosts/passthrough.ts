@@ -621,22 +621,50 @@ export async function maybeRunOnHost(
   const doctorPath = isDoctorCommand && !/^win/i.test((remoteOs ?? '').trim())
     ? { PATH: '$HOME/.agents/.cache/shims:$HOME/.local/bin:$PATH' }
     : undefined;
-  // Forward actor provenance (AGENTS_ACTOR*/GIT_*) across the SSH hop, merged
-  // UNDER the doctor PATH so that PATH still wins — without this the remote
-  // re-resolves the actor from THIS box's SSH_CONNECTION and mis-credits it
-  // (RUSH-2028). Flows to both POSIX (export) and Windows ($env:) dialects.
-  // AGENTS_FLEET_REMOTE marks this as a fleet-dispatched `--host` run so the far
-  // side can gate consent-sensitive actions — the browser consent gate
-  // (lib/browser/remote-control.ts) reads it to allow/deny a cross-machine drive.
-  const env = withActorEnv({ ...doctorPath, AGENTS_FLEET_REMOTE: '1' });
-  const remoteCmd = buildRemoteAgentsInvocation(forwarded, remoteCwd, remoteOs, env);
-  const code = sshStream(target, remoteCmd, { tty: interactive, multiplex: true });
+  process.exitCode = streamAgentsOnHost(host, forwarded, {
+    remoteCwd,
+    interactive,
+    extraEnv: doctorPath,
+    remoteOs,
+    target,
+  });
+  return true;
+}
+
+/**
+ * Run `agents <forwardedArgs>` on `host` over SSH, streaming its output, and
+ * return the exit code. The single place the SSH hop is built, so every remote
+ * `agents` invocation carries identical env semantics.
+ *
+ * Forwards actor provenance (`AGENTS_ACTOR`/`GIT_` vars) across the hop, merged UNDER
+ * `extraEnv` so a caller-supplied PATH still wins — without this the remote
+ * re-resolves the actor from THIS box's SSH_CONNECTION and mis-credits it
+ * (RUSH-2028). Flows to both POSIX (export) and Windows ($env:) dialects.
+ * AGENTS_FLEET_REMOTE marks this as a fleet-dispatched run so the far side can
+ * gate consent-sensitive actions — the browser consent gate
+ * (lib/browser/remote-control.ts) reads it to allow/deny a cross-machine drive.
+ */
+export function streamAgentsOnHost(
+  host: Host,
+  forwardedArgs: string[],
+  opts: {
+    remoteCwd?: string;
+    interactive?: boolean;
+    extraEnv?: Record<string, string>;
+    remoteOs?: string;
+    target?: string;
+  } = {},
+): number {
+  const target = opts.target ?? sshTargetFor(host);
+  const remoteOs = opts.remoteOs ?? resolveRemoteOsSync(host.name);
+  const env = withActorEnv({ ...opts.extraEnv, AGENTS_FLEET_REMOTE: '1' });
+  const remoteCmd = buildRemoteAgentsInvocation(forwardedArgs, opts.remoteCwd, remoteOs, env);
+  const code = sshStream(target, remoteCmd, { tty: !!opts.interactive, multiplex: true });
   if (code === 255) {
     console.error(
       chalk.red(`${host.name}: unreachable over SSH (asleep, offline, or host key changed?).`) +
         chalk.gray(' Check: agents hosts check ' + host.name),
     );
   }
-  process.exitCode = code;
-  return true;
+  return code;
 }

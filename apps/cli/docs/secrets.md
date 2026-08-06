@@ -282,10 +282,15 @@ A file-backed bundle is encrypted at rest and reads with **no biometry** — the
 choice whenever the remote can't satisfy a Touch ID prompt. By default the remote
 encrypts it under a **machine-local key** it auto-provisions (a 0600 file under
 `~/.agents/.secrets-key/`), so the push needs no passphrase and the remote's reads are
-fully headless. Set `AGENTS_SECRETS_PASSPHRASE` locally only to **opt into** a shared
+fully headless.
+<!-- docs-hygiene:allow-master-key-discussion — `export --host` legitimately forwards the
+     MASTER key to key the remote's own store; this is store provisioning, not transport
+     sync. Reviewed; see src/lib/secrets/docs-hygiene.test.ts. -->
+Set `AGENTS_SECRETS_PASSPHRASE` locally only to **opt into** a shared
 off-disk key: when set it is forwarded over ssh stdin (never argv) and the remote keys
 the bundle under it instead — meaning that same passphrase is then required to read it,
-so only set it when you want that. Alternatively, unlock the remote login keychain
+so only set it when you want that.
+<!-- /docs-hygiene:allow-master-key-discussion --> Alternatively, unlock the remote login keychain
 first (an interactive login / `agents secrets unlock` on the target) and retry the
 keychain push. See [File-backed bundles](#file-backed-bundles-headless--remote) and
 [Recipe 8](#8-headless-release-on-a-remote-mac).
@@ -384,14 +389,14 @@ The Windows push bridge is `buildWindowsStdinImportCommand` in
 | `secrets import [bundle] --from 1password:<vault>` | Import from a 1Password vault (requires `op` CLI; `--from-1password --vault <name>` is a deprecated alias) | `agents secrets import prod --from 1password:Personal` |
 | `secrets import [bundle] --from icloud` | Recover a bundle stranded in the iCloud Keychain by the pre-biometry era (macOS; omit the bundle name for an interactive multi-select of everything discovered) | `agents secrets import hetzner.com --from icloud` |
 | `secrets import --from icloud --purge` | After a successful import, delete the iCloud copies (propagates to your other devices) | `agents secrets import --from icloud --purge` |
-| `secrets import [bundle] --from-file <path>` | Recover from an AES-256-GCM encrypted offline bundle file (needs `AGENTS_SECRETS_PASSPHRASE`; server-independent, symmetric counterpart of `export --to-file`) | `agents secrets import prod --from-file prod.enc` |
+| `secrets import [bundle] --from-file <path>` | Recover from an AES-256-GCM encrypted offline bundle file (needs `AGENTS_SYNC_PASSPHRASE`; server-independent, symmetric counterpart of `export --to-file`) | `agents secrets import prod --from-file prod.enc` |
 | `secrets import [bundle] --from-ssh --host <peer>` | Pull a bundle from a fleet peer over SSH and import it locally (no dependency on api.prix.dev) | `agents secrets import prod --from-ssh --host mac-mini` |
 | `secrets import ... --all-plaintext` | Store imported values as literals, skip keychain | `agents secrets import prod --from .env --all-plaintext` |
 | `secrets import ... --force` | Overwrite existing keys | `agents secrets import prod --from .env --force` |
 | `secrets export [bundle]` | Print `KEY=VALUE` lines for shell eval | `eval "$(agents secrets export prod --plaintext)"` |
 | `secrets export [bundle] --to-1password --vault <name>` | Push bundle to a 1Password vault | `agents secrets export prod --to-1password --vault Team` |
 | `secrets export ... --force` | Overwrite existing 1Password items | `agents secrets export prod --to-1password --vault Team --force` |
-| `secrets export [bundle] --to-file <path>` | Write the bundle as an AES-256-GCM encrypted offline file (needs `AGENTS_SECRETS_PASSPHRASE`; symmetric counterpart of `import --from-file`) | `agents secrets export prod --to-file prod.enc` |
+| `secrets export [bundle] --to-file <path>` | Write the bundle as an AES-256-GCM encrypted offline file (needs `AGENTS_SYNC_PASSPHRASE`; symmetric counterpart of `import --from-file`) | `agents secrets export prod --to-file prod.enc` |
 | `secrets export [bundle] --host <target>` | Push the bundle over SSH to a remote (repeatable; `--device` is an alias). Keychain-backed by default; the push read-back-verifies the write and fails loudly if it didn't persist | `agents secrets export apple.com --host mac-mini` |
 | `secrets export ... --remote-backend file` | Push as a headless-readable file bundle (no passphrase — the remote keys it with its machine-local key; forwards `AGENTS_SECRETS_PASSPHRASE` only if set) — for a **headless sign host** whose login keychain is locked over SSH | `agents secrets export apple.com --host mac-mini --remote-backend file` |
 
@@ -576,6 +581,8 @@ agents secrets pull prod
 
 Plaintext never leaves the machine — the bundle is sealed with AES-256-GCM before upload. Source: `src/commands/secrets-sync.ts:7-8`.
 
+Headless (CI, a worker box with no TTY), set `AGENTS_SYNC_PASSPHRASE` instead of being prompted. That is the **transport** passphrase and nothing else — deliberately not `AGENTS_SECRETS_PASSPHRASE`, which is the file store's master key (see [File-backed bundles](#file-backed-bundles-headless--remote)). Exporting the master key to get headless sync hands every same-user process the key to the whole store, which is what RUSH-1968 was. The old name is still accepted here and warns once per process. Source: `src/lib/secrets/sync-passphrase.ts`.
+
 ### 6. Run a one-off command with secrets
 
 ```bash
@@ -640,7 +647,9 @@ unrelated to `agents secrets`.)
 **Opt-in shared passphrase.** To key the remote bundle under a shared secret held off
 disk instead of the remote's machine-local key, set `AGENTS_SECRETS_PASSPHRASE` on the
 laptop before the push — it is forwarded over ssh stdin (never argv), and the remote
-then requires that same passphrase to read the bundle:
+then requires that same passphrase to read the bundle. Note the shape below: sourced
+per command from the secrets store and `unset` right after, never persisted into your
+environment (see the warning under [File-backed bundles](#file-backed-bundles-headless--remote)).
 
 ```bash
 export AGENTS_SECRETS_PASSPHRASE="$(agents secrets exec release.key -- printenv PASSPHRASE)"
@@ -754,28 +763,63 @@ When that happens (or when `secret-tool` isn't installed), `agents secrets`
 transparently falls back to an **AES-256-GCM encrypted-file store** under
 `~/.agents/.cache/secrets/` (one `<item>.enc` file per secret, mode 0600).
 
-The encryption key (passphrase) is resolved in this order:
+The encryption key (passphrase) is resolved from these sources, in order. There
+is **no TTY step anywhere in this list**, and no resolution failure for want of a
+key — the store works out of the box on every platform without anyone setting,
+typing, or remembering one (`getPassphrase`, `src/lib/secrets/filestore.ts`).
+Within a single process the resolved key is cached, so this lookup runs once:
 
-1. **`AGENTS_SECRETS_PASSPHRASE`** — if set, always used. This is the way to
-   keep the key **off disk** (e.g. exported from a password manager, or sourced
-   into the shell per session). Recommended for shared/CI machines.
-2. **An existing machine-local passphrase** — `~/.agents/.cache/secrets/.passphrase`
-   (mode 0600), if one was provisioned earlier. Used for both interactive and
-   headless runs so they always agree.
-3. **A TTY prompt** — interactive sessions are asked for the passphrase.
-4. **Auto-provisioned** — on a headless run (no TTY) with none of the above, a
-   random passphrase is generated once and written to
-   `~/.agents/.cache/secrets/.passphrase` (mode 0600). This is what makes
-   `agents secrets` work out of the box on a server.
+1. **`AGENTS_SECRETS_PASSPHRASE`** — if set, always wins. An **opt-in** for
+   holding the key off disk, not a requirement. See the warning below before
+   reaching for it.
+2. **An existing machine-local key** — `~/.agents/.secrets-key/passphrase`
+   (mode 0600), if one was provisioned earlier. Deliberately outside the store
+   directory so a scan of `~/.agents/.cache/secrets/` never turns up key and
+   ciphertext together.
+3. **The legacy co-located key** — `~/.agents/.cache/secrets/.passphrase` is
+   read as a fallback, never written, on a machine provisioned before #479; new
+   keys always go to the path in step 2.
+4. **Auto-provisioned** — with none of the above, a random 32-byte key is
+   generated once and written to `~/.agents/.secrets-key/passphrase` (mode 0600),
+   on every platform including macOS. This is what makes `agents secrets` work
+   on a fresh headless box with no setup.
 
-**Security model of the file store.** The auto-provisioned passphrase is
-encryption-at-rest with the key held in a 0600 file — the same posture as an SSH
-private key, and identical to the common `export AGENTS_SECRETS_PASSPHRASE=… ` in
-`~/.zshenv` (chmod 600) workaround. It protects against on-disk plaintext
-exposure (backups, accidental commits, `.env` leaks), not against another
-process running as the same user. For a key held **off disk**, set
-`AGENTS_SECRETS_PASSPHRASE` (it always takes precedence) or unlock the keyring
-(e.g. configure `pam_gnome_keyring` for SSH login).
+Two things can still fail, and neither is "you forgot to set a passphrase":
+provisioning throws if it cannot write the key file at all (a permissions or
+disk error), and a store already encrypted under an explicit
+`AGENTS_SECRETS_PASSPHRASE` still needs that same value — read it without one and
+decryption fails.
+
+<!-- docs-hygiene:allow-master-key-discussion — the warning itself must be able to
+     name the rc export it forbids. Reviewed; see src/lib/secrets/docs-hygiene.test.ts. -->
+
+**Do not export the master passphrase from a shell rc file.** A `~/.zshenv`
+export is **not** equivalent to the 0600 key file, and treating it as such is
+what caused RUSH-1968 on seven worker boxes. The key file is read by the one
+process that needs it; a shell-rc export is inherited by **every** process the
+login shell spawns and is readable from `/proc/<pid>/environ` by any same-user
+process. `.zshenv` is worse still — zsh sources it on *every* invocation,
+including non-interactive `ssh host 'cmd'`, so the master key lands in the
+environment of essentially everything the box runs. `agents doctor` flags such an
+export as an `rc-secret-export` finding. (Source: `src/lib/secrets/rc-hygiene.ts`.)
+
+<!-- /docs-hygiene:allow-master-key-discussion -->
+
+So: leave the machine-local key in place and set nothing. Reach for
+`AGENTS_SECRETS_PASSPHRASE` only when you have a specific reason to keep the key
+off disk **and** a way to supply it per command rather than persisting it into
+your environment — sourced from a password manager, or injected by a secret
+manager into one process. If what you actually need is unattended `push`/`pull`,
+that is `AGENTS_SYNC_PASSPHRASE`, a separate transport secret — see
+[Share a bundle with a teammate](#5-share-a-bundle-with-a-teammate). Reaching for
+the master key to get unattended sync is the exact mistake this split removes.
+
+**What the file store protects against.** Encryption-at-rest with the key in a
+0600 file — the same posture as an SSH private key. It defends against on-disk
+plaintext exposure (backups, accidental commits, `.env` leaks), not against
+another process running as the same user. For a stronger boundary, unlock the
+keyring (e.g. configure `pam_gnome_keyring` for SSH login) so secrets live in a
+daemon's locked memory instead.
 
 **Rotating the passphrase.** When the machine-local key is compromised (e.g. it
 was exported into the process environment and captured), rotate it with:

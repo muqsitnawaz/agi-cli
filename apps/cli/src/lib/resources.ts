@@ -9,7 +9,7 @@ import type { AgentId } from './types.js';
 import { AGENTS, listInstalledMcpsWithScope } from './agents.js';
 import { listInstalledCommandsWithScope } from './commands.js';
 import { listInstalledSkillsWithScope, type SkillParseError } from './skills.js';
-import { listInstalledHooksWithScope } from './hooks.js';
+import { listOnDiskHooks } from './resource-inventory.js';
 import { listInstalledInstructionsWithScope } from './rules/rules.js';
 import { getEffectiveHome } from './versions.js';
 import { listMcpServerConfigs } from './mcp.js';
@@ -449,11 +449,14 @@ export function getAgentResources(
     }
   }
 
-  // Hooks
+  // Hooks — routed through the resource-inventory chokepoint (RUSH-2238) so
+  // inspect/doctor/view share one listing and one (absolute-hooksDir-safe)
+  // path resolution.
   const hooks: ResourceEntry[] = [];
-  for (const hook of listInstalledHooksWithScope(agentId, cwd, { home })) {
-    if (shouldInclude(hook.scope)) {
-      hooks.push({ name: hook.name, path: hook.path, scope: hook.scope });
+  for (const ref of listOnDiskHooks(agentId, { cwd, home })) {
+    const hookScope = ref.source as 'user' | 'project';
+    if (shouldInclude(hookScope)) {
+      hooks.push({ name: ref.name, path: ref.path, scope: hookScope });
     }
   }
 

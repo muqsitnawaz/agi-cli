@@ -734,6 +734,21 @@ export function hookContentMatches(
   }
 }
 
+/**
+ * Hooks dir for an agent under an arbitrary home (version home or effective
+ * home). An agent whose `hooksDir` is configured absolute under `$HOME` (grok,
+ * kimi) must be translated to config-dir-relative first — a raw `path.join`
+ * would embed the absolute path as a relative segment and produce a hybrid
+ * path that never exists (RUSH-2237).
+ */
+export function getHooksDirInHome(agentId: AgentId, home: string): string {
+  const config = AGENTS[agentId];
+  const hooksDir = path.isAbsolute(config.hooksDir)
+    ? path.relative(config.configDir, config.hooksDir)
+    : config.hooksDir;
+  return path.join(home, agentConfigDirName(agentId), hooksDir);
+}
+
 export function listInstalledHooksWithScope(
   agentId: AgentId,
   cwd: string = process.cwd(),
@@ -770,7 +785,7 @@ export function listInstalledHooksWithScope(
 
   // User-scoped hooks (version-aware when home is provided)
   const home = options?.home || getEffectiveHome(agentId);
-  const userDir = path.join(home, agentConfigDirName(agentId), agent.hooksDir);
+  const userDir = getHooksDirInHome(agentId, home);
   const userHooks = listHookEntriesFromDir(userDir);
   for (const hook of userHooks) {
     addHook(hook, 'user', agentId);
@@ -820,8 +835,7 @@ export async function installHooks(
  * Path to the hooks dir of a specific version home (not the active one).
  */
 export function getVersionHooksDir(agent: AgentId, version: string): string {
-  const home = getVersionHomePath(agent, version);
-  return path.join(home, agentConfigDirName(agent), AGENTS[agent].hooksDir);
+  return getHooksDirInHome(agent, getVersionHomePath(agent, version));
 }
 
 /**
@@ -831,17 +845,17 @@ export function listHooksInVersionHome(agent: AgentId, version: string): HookEnt
   return listHookEntriesFromDir(getVersionHooksDir(agent, version));
 }
 
-// ─── wiring inspection (settings.json family: claude, droid) ──────────────────
+// ─── wiring inspection ────────────────────────────────────────────────────────
 
 /**
- * Agents whose hooks register through {@link registerHooksForClaude} — a native
- * settings.json shaped `hooks[event] = [{ matcher, hooks: [{ command }] }]`, with
- * no event renaming. These are the only agents this read-only wiring inspector
- * understands; every other harness uses a divergent config format and/or event
- * map (Gemini/Antigravity settings.json variants, Codex config.toml, the OpenCode
- * plugin, …), so it reports them unsupported rather than risk a false verdict.
+ * Native hook-config families understood by this read-only inspector. Claude,
+ * Droid, and Muse share settings.json; Grok uses the same grouped event shape
+ * in hooks/hooks.json; Kimi stores one hook per [[hooks]] config.toml table.
+ * Other harnesses report unsupported rather than risk a false verdict.
  */
 const SETTINGS_JSON_HOOK_FAMILY: readonly AgentId[] = ['claude', 'droid', 'muse'];
+const HOOKS_JSON_HOOK_FAMILY: readonly AgentId[] = ['grok'];
+const TOML_ARRAY_HOOK_FAMILY: readonly AgentId[] = ['kimi'];
 
 export interface HookWiringIssue {
   /** Hook name (script basename minus extension). */
@@ -852,7 +866,7 @@ export interface HookWiringIssue {
    *  group). Real hooks scope by matcher — ask-user-question-guard=AskUserQuestion,
    *  user-message-guard=Bash — so wiring is verified per (event, matcher). */
   matcher: string;
-  /** The command settings.json should reference for this hook under `event`. */
+  /** The command the harness-native config should reference under `event`. */
   command: string;
 }
 
@@ -863,19 +877,23 @@ export interface HookWiringReport {
   settingsPath?: string;
   /** Number of hooks the manifest says should be wired for this version. */
   expected?: number;
-  /** settings.json does not exist — nothing declared can be wired. */
+  /** Native hook config does not exist — nothing declared can be wired. */
   settingsMissing?: boolean;
-  /** settings.json exists but is not valid JSON — wiring can't be verified. */
+  /** Native hook config cannot be parsed — wiring can't be verified. */
   settingsUnparseable?: boolean;
   /** Hooks whose file is present/resolvable but that are NOT referenced in the
-   *  event array settings.json should carry them in. */
+   *  native event group/entry should carry them in. */
   unwired: HookWiringIssue[];
+  /** Expected hooks that ARE referenced in native config (expected − unwired).
+   *  Empty whenever wiring cannot be verified (unsupported family, missing or
+   *  unparseable settings). */
+  wired: HookWiringIssue[];
 }
 
 /**
- * Verify that every hook the manifest says should be wired for a (claude|droid)
- * version is actually REFERENCED in that version's native settings.json — not
- * merely present as a file on disk.
+ * Verify that every hook the manifest says should be wired is actually
+ * referenced in that version's harness-native config, not merely present as a
+ * file on disk.
  *
  * `agents doctor` compares hook FILES against source (see diffHooks in
  * doctor-diff.ts) but never checks the wiring, so a hook whose script is
@@ -887,12 +905,21 @@ export interface HookWiringReport {
  * resolveHookCommand performs, so it never mutates the version home.
  */
 export function checkVersionHookWiring(agent: AgentId, version: string): HookWiringReport {
-  if (!AGENTS[agent].supportsHooks || !SETTINGS_JSON_HOOK_FAMILY.includes(agent)) {
-    return { supported: false, unwired: [] };
+  if (
+    !AGENTS[agent].supportsHooks ||
+    (!SETTINGS_JSON_HOOK_FAMILY.includes(agent) &&
+      !HOOKS_JSON_HOOK_FAMILY.includes(agent) &&
+      !TOML_ARRAY_HOOK_FAMILY.includes(agent))
+  ) {
+    return { supported: false, unwired: [], wired: [] };
   }
 
   const versionHome = getVersionHomePath(agent, version);
-  const settingsPath = path.join(versionHome, agentConfigDirName(agent), 'settings.json');
+  const settingsPath = HOOKS_JSON_HOOK_FAMILY.includes(agent)
+    ? path.join(versionHome, '.grok', 'hooks', 'hooks.json')
+    : TOML_ARRAY_HOOK_FAMILY.includes(agent)
+      ? path.join(versionHome, '.kimi-code', 'config.toml')
+      : path.join(versionHome, agentConfigDirName(agent), 'settings.json');
   const localHooksDir = getVersionHooksDir(agent, version);
 
   // Resolve ONLY to a script that was actually synced for THIS agent+version: the
@@ -925,10 +952,16 @@ export function checkVersionHookWiring(agent: AgentId, version: string): HookWir
     if (!hookDef.events || hookDef.events.length === 0) continue;
     const command = expectedCommand(name, hookDef);
     if (!command) continue; // script unresolved — a file gap, reported by diffHooks
-    // Mirror registerHooksForClaude: a hook registers under the matcher group
-    // `hookDef.matcher || ''` for each of its events.
-    const matcher = hookDef.matcher || '';
-    for (const event of hookDef.events) expected.push({ name, event, matcher, command });
+    for (const event of hookDef.events) {
+      if (HOOKS_JSON_HOOK_FAMILY.includes(agent)) {
+        const matcher = GROK_MATCHER_EVENTS.has(event)
+          ? (GROK_MATCHER_ALIASES[hookDef.matcher || ''] ?? hookDef.matcher ?? '')
+          : '';
+        expected.push({ name, event, matcher, command });
+      } else {
+        expected.push({ name, event, matcher: hookDef.matcher || '', command });
+      }
+    }
   }
 
   if (!fs.existsSync(settingsPath)) {
@@ -938,11 +971,15 @@ export function checkVersionHookWiring(agent: AgentId, version: string): HookWir
       expected: expected.length,
       settingsMissing: expected.length > 0,
       unwired: [],
+      wired: [],
     };
   }
   let config: Record<string, unknown>;
   try {
-    config = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    const raw = fs.readFileSync(settingsPath, 'utf-8');
+    config = TOML_ARRAY_HOOK_FAMILY.includes(agent)
+      ? TOML.parse(raw) as Record<string, unknown>
+      : JSON.parse(raw);
   } catch {
     return {
       supported: true,
@@ -950,6 +987,7 @@ export function checkVersionHookWiring(agent: AgentId, version: string): HookWir
       expected: expected.length,
       settingsUnparseable: true,
       unwired: [],
+      wired: [],
     };
   }
 
@@ -958,25 +996,40 @@ export function checkVersionHookWiring(agent: AgentId, version: string): HookWir
   // not just by event.
   const wiredByGroup = new Map<string, Set<string>>();
   const groupKey = (event: string, matcher: string): string => `${event}\n${matcher}`;
-  const hooks = config.hooks && typeof config.hooks === 'object'
-    ? (config.hooks as Record<string, unknown>)
-    : {};
-  for (const [event, groups] of Object.entries(hooks)) {
-    if (!Array.isArray(groups)) continue;
-    for (const group of groups as Array<{ matcher?: unknown; hooks?: Array<{ command?: unknown }> }>) {
-      if (!group || !Array.isArray(group.hooks)) continue;
-      const matcher = typeof group.matcher === 'string' ? group.matcher : '';
-      const key = groupKey(event, matcher);
+  if (TOML_ARRAY_HOOK_FAMILY.includes(agent)) {
+    const hooks = Array.isArray(config.hooks) ? config.hooks : [];
+    for (const hook of hooks as Array<{ event?: unknown; matcher?: unknown; command?: unknown }>) {
+      if (typeof hook.event !== 'string' || typeof hook.command !== 'string') continue;
+      const matcher = typeof hook.matcher === 'string' ? hook.matcher : '';
+      const key = groupKey(hook.event, matcher);
       let cmds = wiredByGroup.get(key);
       if (!cmds) { cmds = new Set<string>(); wiredByGroup.set(key, cmds); }
-      for (const h of group.hooks) {
-        if (h && typeof h.command === 'string') cmds.add(h.command);
+      cmds.add(hook.command);
+    }
+  } else {
+    const hooks = config.hooks && typeof config.hooks === 'object'
+      ? (config.hooks as Record<string, unknown>)
+      : {};
+    for (const [event, groups] of Object.entries(hooks)) {
+      if (!Array.isArray(groups)) continue;
+      for (const group of groups as Array<{ matcher?: unknown; hooks?: Array<{ command?: unknown }> }>) {
+        if (!group || !Array.isArray(group.hooks)) continue;
+        const matcher = typeof group.matcher === 'string' ? group.matcher : '';
+        const key = groupKey(event, matcher);
+        let cmds = wiredByGroup.get(key);
+        if (!cmds) { cmds = new Set<string>(); wiredByGroup.set(key, cmds); }
+        for (const h of group.hooks) {
+          if (h && typeof h.command === 'string') cmds.add(h.command);
+        }
       }
     }
   }
 
-  const unwired = expected.filter((e) => !wiredByGroup.get(groupKey(e.event, e.matcher))?.has(e.command));
-  return { supported: true, settingsPath, expected: expected.length, unwired };
+  const isWired = (entry: HookWiringIssue): boolean =>
+    wiredByGroup.get(groupKey(entry.event, entry.matcher))?.has(entry.command) ?? false;
+  const unwired = expected.filter((entry) => !isWired(entry));
+  const wired = expected.filter(isWired);
+  return { supported: true, settingsPath, expected: expected.length, unwired, wired };
 }
 
 /**
@@ -1577,7 +1630,7 @@ export function registerHooksToSettings(
   // Scripts are copied into the version home during sync — prefer that stable
   // local path so registered commands don't break when source dirs change.
   const localHooksDir = !overrideRoots
-    ? path.join(versionHome, agentConfigDirName(agentId), AGENTS[agentId].hooksDir)
+    ? getHooksDirInHome(agentId, versionHome)
     : null;
   const resolveScript = (script: string): string | null => {
     // Subrule-dir hooks declare an already-absolute script path. Use it

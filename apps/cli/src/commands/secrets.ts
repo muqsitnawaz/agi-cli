@@ -27,6 +27,9 @@ import {
   buildRemoteFileImportCommand,
 } from '../lib/secrets/remote.js';
 import { remoteShellFor, buildWindowsStdinImportCommand } from '../lib/hosts/remote-cmd.js';
+import { resolveBundleForPush, pushResolvedBundleToHost, bundleEnvToDotenv, type RemoteBackend } from '../lib/secrets/push.js';
+
+export { bundleEnvToDotenv };
 import { resolveRemoteOsSync } from '../lib/hosts/remote-os.js';
 import {
   bundleBackend,
@@ -113,6 +116,7 @@ import { readMeta } from '../lib/state.js';
 import { parseDuration } from '../lib/hooks/cache.js';
 import { emit, query } from '../lib/events.js';
 import { emitSecretAudit } from '../lib/secrets/audit.js';
+import { SYNC_PASSPHRASE_ENV, resolveSyncPassphraseFromEnv } from '../lib/secrets/sync-passphrase.js';
 import {
   getBundleUsage,
   getAllBundleUsage,
@@ -472,26 +476,6 @@ function getCliVersion(): string {
   }
 }
 
-/**
- * Serialize a resolved env map to `.env` lines that round-trip losslessly through
- * `parseDotenv` on the remote: `KEY="VALUE"`. parseDotenv strips exactly one outer
- * quote pair and takes the inner bytes verbatim (no unescaping), so any single-line
- * value survives unchanged with no escaping. Newlines would break its line-based
- * parse, so multi-line values are rejected rather than silently corrupted.
- */
-export function bundleEnvToDotenv(env: Record<string, string>): string {
-  const lines: string[] = [];
-  for (const [k, v] of Object.entries(env)) {
-    if (/[\r\n]/.test(v)) {
-      throw new Error(
-        `Key '${k}' has a multi-line value; the SSH .env transport can't carry newlines. ` +
-        `Set it directly on the remote with 'agents secrets add ${k} --value-stdin'.`,
-      );
-    }
-    lines.push(`${k}="${v}"`);
-  }
-  return lines.join('\n') + '\n';
-}
 
 /**
  * Encrypt a resolved env map to an offline bundle file using AES-256-GCM
@@ -2087,7 +2071,7 @@ Examples:
     .option('--synced', 'When creating the bundle, store it in the age-encrypted synced secrets file')
     .option('--force', 'Overwrite an existing key in the bundle')
     .option('--purge', 'With --from icloud: delete the iCloud copies after a successful import (iCloud propagates the deletion to your other devices)')
-    .option('--from-file <path>', 'Import from an AES-256-GCM encrypted offline bundle file (needs AGENTS_SECRETS_PASSPHRASE; symmetric counterpart of export --to-file)')
+    .option('--from-file <path>', `Import from an AES-256-GCM encrypted offline bundle file (needs ${SYNC_PASSPHRASE_ENV}; symmetric counterpart of export --to-file)`)
     .option('--from-ssh', 'Pull the bundle from a fleet peer over SSH and import it locally (requires --host)')
     .option('--host <peer>', 'SSH peer to pull from when using --from-ssh (host alias or user@host)')
     .action(async (bundleName: string | undefined, opts: {
@@ -2117,10 +2101,11 @@ Examples:
           );
         }
         if (opts.fromFile) {
-          const passphrase = process.env.AGENTS_SECRETS_PASSPHRASE ?? '';
+          // Transport, not the local store's master key — see lib/secrets/sync-passphrase.ts.
+          const passphrase = resolveSyncPassphraseFromEnv().value ?? '';
           if (!passphrase) {
             throw new Error(
-              '--from-file needs AGENTS_SECRETS_PASSPHRASE set to decrypt the bundle file.'
+              `--from-file needs ${SYNC_PASSPHRASE_ENV} set to decrypt the bundle file.`
             );
           }
           const env = importBundleFromFile(opts.fromFile, passphrase);
@@ -2211,7 +2196,7 @@ Examples:
     .option('--remote-backend <backend>', 'Backend for the bundle on the remote (with --host): keychain (default) or file. file is headless-readable via the remote\'s machine-local key; it forwards AGENTS_SECRETS_PASSPHRASE over stdin only if set (opt-in).', 'keychain')
     .option('--force', 'Overwrite existing keys/items on the target (used with --to-1password and --host)')
     .option('--format <shell|json>', 'Output for --plaintext export: shell (default) or json (lossless, machine-readable; used by remote resolve)', 'shell')
-    .option('--to-file <path>', 'Write the bundle as an AES-256-GCM encrypted offline file (needs AGENTS_SECRETS_PASSPHRASE; symmetric counterpart of import --from-file)')
+    .option('--to-file <path>', `Write the bundle as an AES-256-GCM encrypted offline file (needs ${SYNC_PASSPHRASE_ENV}; symmetric counterpart of import --from-file)`)
     .action(async (bundleName: string | undefined, opts: {
       plaintext?: boolean;
       to1password?: boolean;
@@ -2232,10 +2217,11 @@ Examples:
         const resolvedBundleName = bundleName ?? (await pickBundleName('export'));
 
         if (opts.toFile) {
-          const passphrase = process.env.AGENTS_SECRETS_PASSPHRASE ?? '';
+          // Transport, not the local store's master key — see lib/secrets/sync-passphrase.ts.
+          const passphrase = resolveSyncPassphraseFromEnv().value ?? '';
           if (!passphrase) {
             throw new Error(
-              '--to-file needs AGENTS_SECRETS_PASSPHRASE set to encrypt the bundle. ' +
+              `--to-file needs ${SYNC_PASSPHRASE_ENV} set to encrypt the bundle. ` +
               'Set it for this command, then supply the same value when importing.'
             );
           }
@@ -2252,101 +2238,42 @@ Examples:
         const hosts = opts.host ?? [];
         if (hosts.length > 0) {
           for (const h of hosts) assertValidSshTarget(h);
-          const remoteBackend = parseBackendOpt(opts.remoteBackend);
+          const parsedBackend = parseBackendOpt(opts.remoteBackend);
+          // `--remote-backend` documents keychain|file only, and parseBackendOpt
+          // exits on anything else — but its return type still admits 'vault',
+          // which has no remote-push path. Refuse it here rather than let it fall
+          // through to the keychain branch and half-work.
+          if (parsedBackend === 'vault') {
+            console.error(chalk.red("--remote-backend vault is not supported; use 'keychain' or 'file'."));
+            process.exit(1);
+          }
+          const remoteBackend: RemoteBackend = parsedBackend;
           // For a file-backed remote bundle a passphrase is OPTIONAL. The file
           // store is passphrase-free by default: with AGENTS_SECRETS_PASSPHRASE
           // unset the remote `import --backend file` auto-provisions the remote's
           // own machine-local key (0600 under ~/.agents/.secrets-key/), so reads
           // are HEADLESS. We forward the LOCAL AGENTS_SECRETS_PASSPHRASE only when
-          // the operator opts in by setting it (e.g. to key the bundle off-disk
-          // under a shared secret) — shipped as the FIRST stdin line so it never
-          // lands in argv / `ps` / the remote shell history. Forcing a shared
-          // passphrase would defeat headless reads, so we no longer require one.
+          // the operator opts in by setting it. Forcing a shared passphrase would
+          // defeat headless reads, so we no longer require one.
           const remotePassphrase = remoteBackend === 'file' ? (process.env.AGENTS_SECRETS_PASSPHRASE ?? '') : '';
-          const { env } = readAndResolveBundleEnv(resolvedBundleName, { caller: `ssh export`, keyMode: 'storage', agentOnly: true });
-          const dotenv = bundleEnvToDotenv(env);
-          const keyCount = Object.keys(env).length;
-          // Drive the remote's own `agents secrets import --from -` so the values
-          // land in its chosen backend, reading the .env off ssh stdin (never
-          // parsed by a remote shell — `--from -` replaces the POSIX-only
-          // `/dev/stdin`). The keychain path is built OS-aware via
-          // `remoteSecretsRaw` (bash -lc on POSIX, PowerShell on Windows), so it
-          // works on macOS, Linux AND Windows targets. `import` auto-creates the
-          // bundle, so no separate `create` (the old `|| true` was a POSIXism
-          // that broke on PowerShell: `'true' is not recognized`).
+          // Resolve ONCE for N hosts — reading a bundle can prompt, and doing it
+          // per host would prompt per host.
+          const resolvedForPush = resolveBundleForPush(resolvedBundleName, 'ssh export');
+          const keyCount = resolvedForPush.keyCount;
           let failures = 0;
           for (const host of hosts) {
-            let res: SshExecResult;
-            if (remoteBackend === 'file') {
-              // File backend: headless-readable via the remote's machine-local key
-              // when no passphrase is set; otherwise forwards AGENTS_SECRETS_PASSPHRASE
-              // as the FIRST stdin line (consumed by `read`, so it never lands in
-              // argv / `ps` / remote history), then the .env. Both build a POSIX
-              // `bash -lc` command — refuse a Windows target cleanly rather than
-              // emit broken PowerShell.
-              if (remoteShellFor(resolveRemoteOsSync(host.split('@').pop() ?? host)) === 'powershell') {
-                failures++;
-                console.error(chalk.red(`${host}: file backend export to a Windows target is not yet supported.`));
-                continue;
-              }
-              const { remoteCmd, input } = buildRemoteFileImportCommand(resolvedBundleName, dotenv, {
-                passphrase: remotePassphrase,
-                force: opts.force,
-              });
-              res = sshExec(host, remoteCmd, { input });
-            } else if (remoteShellFor(resolveRemoteOsSync(host.split('@').pop() ?? host)) === 'powershell') {
-              // Keychain on a Windows target: the `agents.ps1` shim doesn't
-              // forward ssh-piped stdin to node, so `--from -` would hang.
-              // Bridge the piped .env through PowerShell into a temp file and
-              // import `--from <file>` (deleted afterwards). Same hardened ssh
-              // engine, .env still only ever crosses the wire over ssh stdin.
-              res = sshExec(host, buildWindowsStdinImportCommand(resolvedBundleName, { force: opts.force }), { input: dotenv });
-            } else {
-              // Keychain on a POSIX target: OS-aware wrapping + hardened ssh
-              // engine (BatchMode, ConnectTimeout, keepalive, control-socket
-              // reuse) via the same path the READ inverse (`remoteResolveEnv`)
-              // uses. `--from -` reads the .env off ssh stdin.
-              res = remoteSecretsRaw(
-                host,
-                ['import', resolvedBundleName, '--from', '-', ...(opts.force ? ['--force'] : [])],
-                { input: dotenv, osLookupName: host },
-              );
-            }
-            if (res.code === null) {
+            const out = pushResolvedBundleToHost(resolvedForPush, resolvedBundleName, host, {
+              remoteBackend,
+              force: opts.force,
+              passphrase: remotePassphrase,
+              operation: 'ssh export',
+            });
+            if (!out.ok) {
               failures++;
-              console.error(chalk.red(`${host}: ${res.stderr.trim() || (res.timedOut ? 'ssh timed out' : 'ssh failed')}`));
+              console.error(chalk.red(`${host}: ${out.message}`));
               continue;
             }
-            if (res.code !== 0) {
-              failures++;
-              const msg = (res.stderr || res.stdout || '').trim();
-              console.error(chalk.red(`${host}: remote import failed (exit ${res.code})${msg ? `: ${msg}` : ''}`));
-              continue;
-            }
-            // A keychain-backed push to a macOS remote over headless SSH can land
-            // the bundle metadata but no READABLE value items: the remote login
-            // keychain is locked in the non-interactive SSH context, so Security
-            // accepts the write but the biometry-ACL'd item is unreadable, and the
-            // remote `import` still exits 0. Read the bundle back the same way a
-            // release will (drops the plaintext, keeps only key presence; the
-            // remote's headless `agentOnly` guard fails fast, so no Touch ID) and
-            // FAIL LOUDLY if the keys didn't materialize — rather than leave a
-            // metadata-only bundle that breaks later with "stored item not found".
-            // The file backend is headless-readable by construction, so skip it.
-            if (remoteBackend === 'keychain') {
-              const verdict = verifyRemoteKeychainPush(host, resolvedBundleName, Object.keys(env), { osLookupName: host });
-              if (!verdict.ok) {
-                failures++;
-                if (verdict.kind === 'locked-keychain') {
-                  console.error(chalk.red(keychainWriteFailureMessage(host, resolvedBundleName, verdict.reason)));
-                } else {
-                  console.error(chalk.red(`${host}: pushed '${resolvedBundleName}' but could not verify it on the remote: ${verdict.reason}`));
-                }
-                continue;
-              }
-            }
-            const remoteMsg = (res.stdout || '').trim().split('\n').map((l) => l.trim()).filter(Boolean).pop();
-            console.log(chalk.green(`${host} -> '${resolvedBundleName}': ${remoteMsg || `${keyCount} key(s) exported`}`));
+            console.log(chalk.green(`${host} -> '${resolvedBundleName}': ${out.message}`));
           }
           emitSecretAudit({ event: 'secrets.export', bundle: resolvedBundleName, operation: `export --host ${hosts.join(',')}`, source: 'ssh', host: hosts.join(','), status: failures > 0 ? 'error' : 'success', keyCount });
           if (failures > 0) process.exit(1);

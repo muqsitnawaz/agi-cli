@@ -123,11 +123,10 @@ describe('buildExecCommand', () => {
       expect(cmd).toContain('--yolo');
     });
 
-    it('cursor plan degrades to edit (cursor has no read-only mode)', () => {
-      // Same flags as an explicit edit run — no -f (that's skip).
+    it('cursor plan produces --plan', () => {
       const cmd = buildExecCommand(opts({ agent: 'cursor', mode: 'plan' }));
+      expect(cmd).toContain('--plan');
       expect(cmd).not.toContain('-f');
-      // Command still builds (does not throw).
       expect(cmd[0]).toBe('cursor-agent');
     });
 
@@ -1099,6 +1098,16 @@ describe('buildExecCommand', () => {
       }
     });
 
+    it('injects XDG config/data homes for pinned Muse versions', () => {
+      // Muse has no MUSE_CONFIG_DIR; isolation is XDG (Claude/Codex pattern).
+      // Without this, adopt leaves ~/.config/muse as a symlink and Muse dies
+      // with SymlinkOrReparse.
+      const env = buildExecEnv(opts({ agent: 'muse', version: '0.1.0' }));
+      const versionHome = path.join(HOME, '.agents', '.history', 'versions', 'muse', '0.1.0', 'home');
+      expect(env.XDG_CONFIG_HOME).toBe(path.join(versionHome, '.config'));
+      expect(env.XDG_DATA_HOME).toBe(path.join(versionHome, '.local', 'share'));
+    });
+
     it('injects KIMI_CODE_HOME for pinned Kimi versions', () => {
       const env = buildExecEnv(opts({ agent: 'kimi', version: '0.11.0' }));
       expect(env.KIMI_CODE_HOME).toBe(
@@ -1330,9 +1339,8 @@ describe('resolveMode', () => {
   });
 
   it("degrades 'plan' to the agent's safest mode when plan is unsupported", () => {
-    // cursor / antigravity / kiro have no read-only mode — modes[0] is edit.
-    expect(AGENTS.cursor.capabilities.modes).not.toContain('plan');
-    expect(resolveMode('cursor', 'plan')).toBe('edit');
+    // antigravity / kiro have no read-only mode — modes[0] is edit.
+    expect(AGENTS.antigravity.capabilities.modes).not.toContain('plan');
     expect(resolveMode('antigravity', 'plan')).toBe('edit');
     expect(resolveMode('kiro', 'plan')).toBe('edit');
   });
@@ -1351,10 +1359,10 @@ describe('resolveHeadlessMode (RUSH-1810)', () => {
   it('warns exactly once when one run builds argv more than once', () => {
     const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const warningState = {};
-    const options = opts({ agent: 'cursor', mode: 'plan', modeWarningState: warningState });
+    const options = opts({ agent: 'antigravity', mode: 'plan', modeWarningState: warningState });
     buildExecCommand(options);
     buildExecCommand(options);
-    expect(write.mock.calls.filter(([line]) => String(line).includes('read-only plan mode'))).toHaveLength(1);
+    expect(write.mock.calls.filter(([line]) => String(line).includes('(writable) instead'))).toHaveLength(1);
     write.mockRestore();
   });
 
@@ -1364,13 +1372,13 @@ describe('resolveHeadlessMode (RUSH-1810)', () => {
     // first, so a single latch silently dropped the warning that mattered.
     const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const shared = {};
-    buildExecCommand(opts({ agent: 'cursor', mode: 'plan', modeWarningState: shared }));
+    buildExecCommand(opts({ agent: 'kiro', mode: 'plan', modeWarningState: shared }));
     buildExecCommand(opts({ agent: 'antigravity', mode: 'plan', modeWarningState: shared }));
     const warned = write.mock.calls
       .map(([line]) => String(line))
       .filter((line) => line.includes('(writable) instead'));
     expect(warned).toHaveLength(2);
-    expect(warned.some((l) => l.includes('cursor'))).toBe(true);
+    expect(warned.some((l) => l.includes('kiro'))).toBe(true);
     expect(warned.some((l) => l.includes('antigravity'))).toBe(true);
     write.mockRestore();
   });
@@ -1378,8 +1386,8 @@ describe('resolveHeadlessMode (RUSH-1810)', () => {
   it('still warns only once for the same agent built twice in one run', () => {
     const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const shared = {};
-    buildExecCommand(opts({ agent: 'cursor', mode: 'plan', modeWarningState: shared }));
-    buildExecCommand(opts({ agent: 'cursor', mode: 'plan', modeWarningState: shared }));
+    buildExecCommand(opts({ agent: 'antigravity', mode: 'plan', modeWarningState: shared }));
+    buildExecCommand(opts({ agent: 'antigravity', mode: 'plan', modeWarningState: shared }));
     expect(
       write.mock.calls.map(([l]) => String(l)).filter((l) => l.includes('(writable) instead')),
     ).toHaveLength(1);
@@ -1389,7 +1397,7 @@ describe('resolveHeadlessMode (RUSH-1810)', () => {
   it('suppresses degradation warnings for a quiet run', () => {
     const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     buildExecCommand(opts({
-      agent: 'cursor',
+      agent: 'antigravity',
       mode: 'plan',
       modeWarningState: { quiet: true },
     }));
@@ -1420,10 +1428,11 @@ describe('resolveHeadlessMode (RUSH-1810)', () => {
     expect(resolveHeadlessMode('grok', 'plan', true)).toBe('plan');
   });
 
-  it('leaves headless plan untouched for agents with headlessPlan absent (claude/codex)', () => {
+  it('leaves headless plan untouched for agents with headlessPlan absent (claude/codex/cursor)', () => {
     expect(AGENTS.claude.capabilities.headlessPlan).toBeUndefined();
     expect(resolveHeadlessMode('claude', 'plan', false)).toBe('plan');
     expect(resolveHeadlessMode('codex', 'plan', false)).toBe('plan');
+    expect(resolveHeadlessMode('cursor', 'plan', false)).toBe('plan');
   });
 
   it('passes non-plan modes straight through resolveMode (headless kimi skip → skip)', () => {
@@ -1436,8 +1445,8 @@ describe('defaultModeFor', () => {
   it('returns the first listed mode for each agent', () => {
     // Antigravity: ['edit', 'skip'] — no plan, so default must be edit.
     expect(defaultModeFor('antigravity')).toBe('edit');
-    // Cursor: ['edit', 'skip'] — same.
-    expect(defaultModeFor('cursor')).toBe('edit');
+    // Cursor: ['plan', 'edit', 'skip'] — plan is the read-only default.
+    expect(defaultModeFor('cursor')).toBe('plan');
     // Claude: ['plan', 'edit', 'auto', 'skip'] — plan is safest.
     expect(defaultModeFor('claude')).toBe('plan');
     // Kiro: edit-only.

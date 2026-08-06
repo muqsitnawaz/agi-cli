@@ -102,9 +102,10 @@ const AGENT_NAMES: Record<AgentType, string> = {
   antigravity: 'Antigravity',
   kimi: 'Kimi',
   droid: 'Droid',
+  warp: 'Warp',
 };
 
-const VALID_AGENTS: AgentType[] = ['claude', 'codex', 'cursor', 'opencode', 'grok', 'antigravity', 'kimi', 'droid'];
+const VALID_AGENTS: AgentType[] = ['claude', 'codex', 'cursor', 'opencode', 'grok', 'antigravity', 'kimi', 'droid', 'warp'];
 // 'full' kept as historical alias for 'skip'; normalized to 'skip' downstream.
 const VALID_MODES = ['plan', 'edit', 'auto', 'skip', 'full'] as const;
 const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'] as const;
@@ -234,6 +235,21 @@ function snapshotToStatusDetail(agent: TeamListAgentSnapshot): AgentStatusDetail
 function fullName(type: AgentType, version: string | null | undefined): string {
   const name = AGENT_NAMES[type];
   return version ? `${name} ${version}` : name;
+}
+
+/**
+ * One-line operator nudge after `teams start`: teammates are briefed to post
+ * IMPORTANT milestones to the feed (RUSH-2250), and this is how to watch them.
+ * Print-only — no engine behavior.
+ */
+export function printFeedHint(team: string): void {
+  console.log(
+    chalk.gray('Tip: teammates post IMPORTANT milestones to the feed (') +
+    chalk.cyan('agents feed timeline') +
+    chalk.gray('); watch team progress with ') +
+    chalk.cyan(`agents teams status ${team}`) +
+    chalk.gray('.'),
+  );
 }
 
 /**
@@ -489,6 +505,7 @@ async function runOneWave(mgr: AgentManager, team: string, json: boolean): Promi
       console.log(`  ${chalk.blue(h)}  ${chalk.gray('after')} ${a.after.join(', ')}`);
     }
   }
+  if (launched.length > 0) printFeedHint(team);
 }
 
 /**
@@ -1498,7 +1515,7 @@ export function registerTeamsCommands(program: Command): void {
     .alias('a')
     .description("Add a teammate to work on a task. Runs in background; returns immediately. Use 'status' to check in.")
     .option('-n, --name <name>', 'Friendly name for this teammate (e.g. alice). Required if using --after. Unique within team.')
-    .option('-m, --mode <mode>', `Permissions: plan (read-only) | edit (can write files) | auto (smart classifier auto-approves safe ops) | skip (bypass all permission prompts). 'full' accepted as alias for skip. Teammates run headless: plan works headless on claude/codex/droid/opencode; kimi/grok/cursor/antigravity have no headless plan mode and auto-downgrade a plan request to auto.`, 'edit')
+    .option('-m, --mode <mode>', `Permissions: plan (read-only) | edit (can write files) | auto (smart classifier auto-approves safe ops) | skip (bypass all permission prompts). 'full' accepted as alias for skip. Teammates run headless: plan works headless on claude/codex/cursor/droid/opencode; kimi/grok/antigravity have no headless plan mode and auto-downgrade a plan request to auto.`, 'edit')
     .option('-e, --effort <effort>', `Reasoning intensity: ${VALID_EFFORTS.join('|')}`, 'medium')
     .option('--model <model>', 'Cost tier (cheap|default|best|ultra) or a concrete id (e.g. claude-opus-4-8); tiers resolve per harness+version to a supported model')
     .option(
@@ -2065,12 +2082,37 @@ export function registerTeamsCommands(program: Command): void {
         await warnThrottledTeammates(mgr, team);
       }
 
+      // Health-/harness-aware pre-flight (RUSH-2002): if the team declares a
+      // device pool and no device in it can run a pending teammate's agent, fail
+      // loud here rather than launching a wave that strands teammates pending.
+      // --force downgrades it to a warning so the user can still try.
+      const placementError = await mgr.preflightPlacement(team);
+      if (placementError) {
+        if (isJsonMode(opts)) {
+          console.log(JSON.stringify({
+            team,
+            error: 'no-viable-device',
+            message: placementError.message,
+            excluded: placementError.excluded,
+          }));
+          if (!opts.force) { process.exitCode = 1; return; }
+        } else if (opts.force) {
+          console.error(chalk.yellow(`⚠ ${placementError.message}\n  Continuing anyway (--force).`));
+        } else {
+          console.error(chalk.red(placementError.message));
+          process.exitCode = 1;
+          return;
+        }
+      }
+
       emit('teams.start', { module: 'teams', team, watch: Boolean(opts.watch) });
 
       if (!opts.watch) {
         await runOneWave(mgr, team, Boolean(opts.json));
         return;
       }
+
+      if (!isJsonMode(opts)) printFeedHint(team);
 
       const intervalMs = Math.max(1000, Number.parseInt(opts.interval, 10) * 1000 || 8000);
       const maxWaves = Math.max(1, Number.parseInt(opts.maxWaves, 10) || 1000);

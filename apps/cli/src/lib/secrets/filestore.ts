@@ -125,11 +125,13 @@ function readMachinePassphrase(): string | null {
  * the keyring is locked and no AGENTS_SECRETS_PASSPHRASE is set.
  *
  * Security model: this is encryption-at-rest with the key held in a 0600 file —
- * the same posture as an SSH private key, and identical to the common
- * "export AGENTS_SECRETS_PASSPHRASE=… in ~/.zshenv (chmod 600)" workaround. The
- * keyring (key in a daemon's locked memory) is stronger but is unavailable
- * without a graphical/unlocked session. For an off-disk key, set
- * AGENTS_SECRETS_PASSPHRASE (it always takes precedence) or unlock the keyring.
+ * the same posture as an SSH private key. It is NOT equivalent to the common
+ * "export AGENTS_SECRETS_PASSPHRASE=… in ~/.zshenv (chmod 600)" workaround, and
+ * is strictly safer: this file is read by the one process that needs it, while
+ * a shell-rc export is inherited by every process the login shell spawns and is
+ * readable from /proc/<pid>/environ by any same-user process (RUSH-1968; see
+ * rc-hygiene.ts). The keyring (key in a daemon's locked memory) is stronger
+ * still but is unavailable without a graphical/unlocked session.
  */
 function provisionMachinePassphrase(): string {
   const existing = readMachinePassphrase();
@@ -161,9 +163,11 @@ function provisionMachinePassphrase(): string {
  * Resolve the passphrase for the encrypted file store.
  *
  * Order: AGENTS_SECRETS_PASSPHRASE > previously-provisioned machine-local key >
- * a freshly auto-provisioned machine-local key. It NEVER prompts and NEVER
- * hard-fails — the file store must work on every platform (macOS included)
- * without the user setting, typing, or remembering a passphrase. Provisioning
+ * legacy co-located key > a freshly auto-provisioned machine-local key. It NEVER
+ * prompts, and never fails for WANT of a passphrase — the file store must work on
+ * every platform (macOS included) without the user setting, typing, or
+ * remembering one. (It can still throw if provisioning cannot write the key file
+ * at all; that is a disk/permissions failure, not a missing passphrase.) Provisioning
  * writes a 0600 key file (encryption-at-rest, same posture as an SSH key); set
  * AGENTS_SECRETS_PASSPHRASE to opt into an off-disk key.
  */
@@ -266,6 +270,18 @@ function fileGet(item: string): string {
   }
 }
 
+function fileGetBatch(items: string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const item of items) {
+    // A missing file is an absent item. Any error reading an existing file,
+    // especially an AES-GCM authentication failure, is a broken store and must
+    // stop the caller rather than silently produce an incomplete environment.
+    if (!fileHas(item)) continue;
+    out.set(item, fileGet(item));
+  }
+  return out;
+}
+
 function fileSet(item: string, value: string): void {
   ensureFileDir();
   // Under the store lock: a write must not interleave with a rotation's swap.
@@ -312,6 +328,7 @@ export function fileStoreHasItems(): boolean {
 export const fileStore = {
   has: fileHas,
   get: fileGet,
+  getBatch: fileGetBatch,
   set: fileSet,
   delete: fileDelete,
   list: fileList,

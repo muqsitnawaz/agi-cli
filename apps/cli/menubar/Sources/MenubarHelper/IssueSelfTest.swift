@@ -31,6 +31,7 @@ enum IssueSelfTest {
         testLinearCache()
         testTicketDispatchContract()
         testActiveDisplay()
+        testCanonicalSessionStatuses()
         testAgentAvatar()
         if failures == 0 {
             print("\nALL PASS")
@@ -38,6 +39,20 @@ enum IssueSelfTest {
         }
         print("\n\(failures) FAILED")
         exit(1)
+    }
+
+    private static func testCanonicalSessionStatuses() {
+        let cases: [(SessionStatus, String, String)] = [
+            (.running, "working", "●"), (.inputRequired, "waiting", "◐"),
+            (.idle, "idle", "○"), (.queued, "queued", "○"),
+            (.closed, "closed", "×"), (.abandoned, "abandoned", "⊘"),
+            (.orphaned, "orphan", "◍"), (.crashed, "crashed", "✗"),
+            (.unknown, "unknown", "◌"),
+        ]
+        for (status, label, glyph) in cases {
+            check("canonical status label \(status.rawValue)", ActiveDisplay.statusLabel(status) == label)
+            check("canonical status glyph \(status.rawValue)", ActiveDisplay.statusGlyph(status) == glyph)
+        }
     }
 
     // imageFiles must return images newest-first ACROSS dirs, skip non-images and
@@ -634,13 +649,17 @@ enum IssueSelfTest {
                                      thisMachine: ActiveDisplay.normalizeHost("Zion.local"))
                   == "local")
 
-        let summary = ActiveDisplay.projectSummary(repo: "agents-cli", running: 8, idle: 1,
-                                                   machines: ["zion", "zion"])
-        check("project summary carries counts and single host",
-              summary.contains("agents-cli") && summary.contains("●8")
-                  && summary.contains("◐1") && summary.contains("zion"),
+        let summary = ActiveDisplay.projectSummary(
+            repo: "agents-cli",
+            statuses: [.running: 8, .idle: 1, .queued: 2, .orphaned: 1],
+            machines: ["zion", "zion"]
+        )
+        check("project summary carries every status and single host",
+              summary.contains("agents-cli") && summary.contains("●8 working")
+                  && summary.contains("○1 idle") && summary.contains("○2 queued")
+                  && summary.contains("◍1 orphan") && summary.contains("zion"),
               detail: summary)
-        let multi = ActiveDisplay.projectSummary(repo: "x", running: 2, idle: 0,
+        let multi = ActiveDisplay.projectSummary(repo: "x", statuses: [.running: 2],
                                                  machines: ["a", "b"])
         check("multi-host summary says N hosts",
               multi.contains("2 hosts"), detail: multi)

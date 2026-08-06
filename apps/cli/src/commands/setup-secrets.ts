@@ -95,7 +95,7 @@ function printBackendNotes(backend: SetupSecretsBackend): void {
   if (backend === 'keychain') {
     console.log(chalk.gray('backend: keychain — macOS reads may ask for Touch ID or the device password.'));
   } else if (backend === 'file') {
-    console.log(chalk.gray('backend: file — set AGENTS_SECRETS_PASSPHRASE for headless encrypted-file reads.'));
+    console.log(chalk.gray('backend: file — encrypted at rest; headless reads need no passphrase by default, via a machine-local key at ~/.agents/.secrets-key/passphrase.'));
   } else {
     console.log(chalk.gray('backend: vault — synced ~/.agents/vault.age storage; unlock it with agents login.'));
   }

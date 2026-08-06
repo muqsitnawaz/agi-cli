@@ -14,7 +14,7 @@ import type { SessionAgentId, SessionEvent, SessionMeta, SessionRunMode } from '
 import { parseSession } from './parse.js';
 import { extractRecentDirectoriesTouched, extractTodoProgressFromEvents } from './state.js';
 import { getSessionsDir, getSessionsDbPath } from '../state.js';
-import { query as queryEvents } from '../events.js';
+import { query as queryEvents, queryToolUsageForSessions } from '../events.js';
 import { machineForSessionFile } from './origin-machine.js';
 import { loadSessionActorIndex, readSessionActorRecord } from './actor-sidecar.js';
 import { toolCallsFromEvents, type IndexedToolCall } from './tool-calls.js';
@@ -31,7 +31,7 @@ const DB_PATH = getSessionsDbPath();
 /** Current schema version; bumped when migrations are added. Exported so tests
  * assert against the constant instead of hardcoding a number that every bump
  * then has to chase (docs/05-sessions.md calls the constant the source of truth). */
-export const SCHEMA_VERSION = 34;
+export const SCHEMA_VERSION = 36;
 
 /**
  * Bump to force `agents sessions backfill resources` to re-derive every
@@ -211,6 +211,12 @@ CREATE TABLE IF NOT EXISTS tool_program_occurrences (
 CREATE INDEX IF NOT EXISTS idx_tool_program_occurrences_program
   ON tool_program_occurrences(program, call_key);
 
+-- Derived search index over tool_calls. call_key is UNINDEXED -- it is carried
+-- for display, NOT for lookup: an FTS5 table has no index on an ordinary column,
+-- so DELETE ... WHERE call_key = ? scans the whole index once per call, which is
+-- quadratic in a session's call count. Every write here therefore addresses a
+-- row by rowid, mirroring the tool_calls.rowid of the call it describes, so a
+-- delete is a single rowid seek (tool-store.ts persistToolCalls/deleteSessionCalls).
 CREATE VIRTUAL TABLE IF NOT EXISTS tool_call_text USING fts5(
   call_key UNINDEXED,
   tool,
@@ -231,7 +237,15 @@ CREATE TABLE IF NOT EXISTS tool_scan_ledger (
   extractor_version INTEGER NOT NULL,
   indexed_at INTEGER NOT NULL,
   call_count INTEGER NOT NULL,
-  evidence_bytes INTEGER NOT NULL
+  evidence_bytes INTEGER NOT NULL,
+  -- Resume point for the incremental tool scan. parsed_offset is the byte
+  -- offset just past the last COMPLETE newline-terminated record consumed, and
+  -- parser_state is the serialized ToolCallCollector snapshot at that offset
+  -- (next ordinal + still-unresolved calls). Together they let the next scan of
+  -- a session that only grew read the appended bytes instead of the whole file.
+  -- NULL means "no resume point" — the next scan re-reads from byte 0.
+  parser_state TEXT,
+  parsed_offset INTEGER
 );
 
 -- Skill/slash-command usage per session (#12), computed from a session's
@@ -302,7 +316,7 @@ CREATE TABLE IF NOT EXISTS session_insights (
  * re-derives on the next `agents insights` instead of silently reporting stale
  * numbers alongside fresh ones. Same role as RESOURCE_INDEX_VERSION.
  */
-export const INSIGHTS_EXTRACTOR_VERSION = 3;
+export const INSIGHTS_EXTRACTOR_VERSION = 4;
 
 /** Raw row shape returned from the sessions table. */
 export interface SessionRow {
@@ -923,6 +937,58 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
     `);
   }
 
+  if (fromVersion < 35) {
+    // v34 -> v35: the default listing sort was `ORDER BY IFNULL(last_activity,
+    // timestamp) DESC` — wrapping the column in IFNULL() makes SQLite unable to
+    // satisfy it from idx_sessions_last_activity, so every list/resume query did
+    // a full table sort instead of an index walk (RUSH-2211). Every upsert path
+    // already writes a non-NULL last_activity (resolveLastActivity falls back to
+    // `timestamp`, itself NOT NULL) — the only rows that can still be NULL here
+    // are ones written before the v8 migration that somehow slipped the backfill,
+    // or seeded directly by a test. Backfill them so the column is unconditionally
+    // NOT NULL, then querySessions can sort on the bare column and use the index.
+    db.exec(`UPDATE sessions SET last_activity = timestamp WHERE last_activity IS NULL`);
+  }
+
+  if (fromVersion < 36) {
+    // v35 -> v36: make the tool index incremental, and stop paying a full FTS
+    // scan per deleted call.
+    //
+    // (a) tool_scan_ledger gains a resume point (parser_state + parsed_offset).
+    //     Existing rows get NULLs, which read as "no resume point": the next
+    //     scan of each session re-reads it once from byte 0 and records a resume
+    //     point, so every scan after that is incremental. No ledger is wiped.
+    //
+    // (b) tool_call_text is rebuilt so its rowid mirrors tool_calls.rowid. The
+    //     old rows were inserted with FTS5-assigned rowids and are only
+    //     addressable by the UNINDEXED call_key, i.e. a full index scan per
+    //     delete. There is no ALTER for that, and the rowids cannot be repaired
+    //     in place, so the table is dropped and repopulated from tool_calls --
+    //     the same non-destructive derived-table rebuild v27 did (the source of
+    //     truth is tool_calls, which is untouched). The rebuild also lands the
+    //     content as one merged segment, which is the compaction
+    //     optimizeSessionSearchIndex would otherwise have to do afterwards.
+    const ledgerCols = new Set(
+      (db.prepare(`PRAGMA table_info(tool_scan_ledger)`).all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    if (!ledgerCols.has('parser_state')) db.exec(`ALTER TABLE tool_scan_ledger ADD COLUMN parser_state TEXT`);
+    if (!ledgerCols.has('parsed_offset')) db.exec(`ALTER TABLE tool_scan_ledger ADD COLUMN parsed_offset INTEGER`);
+    db.exec(`
+      DROP TABLE IF EXISTS tool_call_text;
+      CREATE VIRTUAL TABLE tool_call_text USING fts5(
+        call_key UNINDEXED,
+        tool,
+        input,
+        output,
+        error,
+        tokenize = 'trigram'
+      );
+      INSERT INTO tool_call_text (rowid, call_key, tool, input, output, error)
+      SELECT rowid, call_key, tool, input, coalesce(output, ''), coalesce(error, '')
+      FROM tool_calls;
+    `);
+  }
 }
 
 /**
@@ -1116,6 +1182,55 @@ export function optimizeSessionSearchIndex(): FtsOptimizeResult[] {
     db.prepare(`INSERT INTO ${table}(${table}) VALUES('optimize')`).run();
     return { table, segmentsBefore, segmentsAfter: segments(table) };
   });
+}
+
+/**
+ * Segment count above which a scan pays for a slice of merge work. Below it the
+ * index is small enough that querying it is not the bottleneck and merging is
+ * pure overhead on every scan.
+ */
+const FTS_MAINTENANCE_SEGMENT_THRESHOLD = 512;
+
+/**
+ * Page budget for one incremental merge. FTS5's `'merge'` command does at most
+ * this much work and returns — it is not `'optimize'`, which merges the whole
+ * index in one unbounded pass. That bound is why this can run on the scan path:
+ * the cost per scan is fixed, and repeated scans converge the index instead of
+ * one scan stalling on a multi-gigabyte compaction.
+ */
+const FTS_MAINTENANCE_MERGE_PAGES = 64;
+
+/**
+ * Keep the FTS indexes from degrading on the normal scan path.
+ *
+ * `optimizeSessionSearchIndex` is the full, unbounded compaction behind
+ * `agents sessions optimize`. Leaving it as the ONLY compaction meant the index
+ * degraded until a human happened to run that command, which is how
+ * `tool_call_text_data` reached gigabytes for tens of MB of content. This is the
+ * automatic counterpart: bounded, threshold-gated, and safe to call after every
+ * batch of writes. Non-destructive — merging never changes what is searchable.
+ *
+ * Returns one result per table it actually merged (empty when every table is
+ * under the threshold, which is the common case on a warm index).
+ */
+export function maintainSessionSearchIndex(
+  db: Database.Database = getDB(),
+  options: { segmentThreshold?: number; mergePages?: number } = {},
+): FtsOptimizeResult[] {
+  const threshold = options.segmentThreshold ?? FTS_MAINTENANCE_SEGMENT_THRESHOLD;
+  const pages = options.mergePages ?? FTS_MAINTENANCE_MERGE_PAGES;
+  // Hardcoded literals — never interpolate caller input into an identifier.
+  const tables = ['tool_call_text', 'session_text'];
+  const segments = (table: string): number =>
+    (db.prepare(`SELECT count(*) AS n FROM ${table}_data`).get() as { n: number }).n;
+  const results: FtsOptimizeResult[] = [];
+  for (const table of tables) {
+    const segmentsBefore = segments(table);
+    if (segmentsBefore < threshold) continue;
+    db.prepare(`INSERT INTO ${table}(${table}, rank) VALUES('merge', ?)`).run(pages);
+    results.push({ table, segmentsBefore, segmentsAfter: segments(table) });
+  }
+  return results;
 }
 
 // ---------------------------------------------------------------------------
@@ -1807,6 +1922,7 @@ export function upsertSessionsBatch(
     scan?: ScanStamp;
     parserState?: string;
     contentText?: string;
+    events?: SessionEvent[];
     toolCalls?: IndexedToolCall[];
     toolScan?: ScanStamp;
     toolIndexMode?: 'replace' | 'append';
@@ -1859,9 +1975,10 @@ export function upsertSessionsBatch(
             const stat = fs.statSync(toolSourcePath);
             return { fileMtimeMs: stat.mtimeMs, fileSize: stat.size };
           })();
-      // Non-resumable harnesses already parse here for todos/recent dirs. Derive
-      // the tool index from those same in-memory events: no second file read.
-      const events = parseSession(entry.meta.filePath, entry.meta.agent);
+      // Some non-resumable scanners already normalized the transcript while
+      // deriving metadata. Reuse those events; scanners that only read summary
+      // metadata fall back to exactly one normalized parse here.
+      const events = entry.events ?? parseSession(entry.meta.filePath, entry.meta.agent);
       writeResourceUsage(entry.meta.id, events, entry.meta.cwd);
       return {
         ...entry,
@@ -1872,6 +1989,8 @@ export function upsertSessionsBatch(
         },
         toolCalls: toolCallsFromEvents(events),
         toolScan,
+        // These are complete event arrays, not an appended tail. Append would
+        // duplicate existing evidence even when persistToolCalls supports it.
         toolIndexMode: 'replace' as const,
       };
     } catch {
@@ -1879,6 +1998,15 @@ export function upsertSessionsBatch(
     }
   });
   const writtenEntries: typeof enrichedEntries = [];
+
+  // Pre-compute browser/computer usage for all sessions outside the write
+  // transaction. detectToolUsage scans all event log files (O(files) I/O
+  // per call) and holding the SQLite write lock during that scan is what
+  // causes the "DB locked" errors (RUSH-2006). One pass for the whole batch
+  // costs O(files) total instead of O(N × files) inside the lock.
+  const toolUsageBySession = queryToolUsageForSessions(
+    new Set(enrichedEntries.map(e => e.meta.id)),
+  );
 
   const txn = db.transaction((items: typeof entries) => {
     // Re-read the ledger now that we hold the write lock. Any file committed
@@ -1910,7 +2038,7 @@ export function upsertSessionsBatch(
       // back when the error escapes `fn`, so catching + skipping here leaves the txn valid
       // and committable. We deliberately do NOT stamp the ledger for a skipped row, so the
       // next scan re-tries it (self-healing once the underlying parser is fixed).
-      const toolUsage = detectToolUsage(meta.id);
+      const toolUsage = toolUsageBySession.get(meta.id) ?? { usedBrowser: false, usedComputer: false };
       // claude/codex skip enrichCachedSessionMeta above (preserving their
       // resumable-parse optimization) — write their pre-computed
       // skillsUsed/slashCommandsUsed (folded incrementally by discover.ts's
@@ -2009,11 +2137,17 @@ export function upsertSessionsBatch(
     const toolScan = entry.toolScan ?? entry.scan;
     if (!toolScan || !entry.toolCalls) continue;
     try {
-      persistToolCalls(db, entry.meta, entry.toolCalls, toolScan, entry.toolIndexMode ?? 'replace');
+      persistToolCalls(db, entry.meta, entry.toolCalls, toolScan, { mode: entry.toolIndexMode ?? 'replace' });
     } catch {
       // Boundary is intentionally retryable via tool_scan_ledger.
     }
   }
+  // Every batch appends FTS segments (session_text always, tool_call_text for the
+  // harnesses indexed above). Pay a bounded slice of the merge here so the
+  // scan path keeps its own index healthy instead of leaving all compaction to
+  // the manual `agents sessions optimize` (RUSH-2208). Threshold-gated, so a
+  // small index costs two counts and nothing else.
+  maintainSessionSearchIndex(db);
 }
 
 /**
@@ -2369,6 +2503,50 @@ function buildSessionWhere(options: QueryOptions): { clause: string; params: any
   return { clause, params };
 }
 
+/**
+ * Resolve which of the given file paths no longer exist, batching the check
+ * per directory instead of one `fs.existsSync` stat syscall per file.
+ * Transcript trees put many sessions in the same directory (one Claude
+ * `~/.claude/projects/<slug>/` holds every session for that project), so
+ * `readdirSync` once per directory and a Set membership test collapses what
+ * used to be N stat syscalls into (number of distinct directories) readdir
+ * syscalls — the same existence answer, far fewer syscalls on a large index
+ * (RUSH-2211). Falls back to per-file existsSync only when the directory
+ * itself can't be listed (permissions, race with a concurrent delete).
+ */
+function findMissingFilePaths(filePaths: string[]): Set<string> {
+  const byDir = new Map<string, Set<string>>();
+  for (const p of filePaths) {
+    const dir = path.dirname(p);
+    let basenames = byDir.get(dir);
+    if (!basenames) {
+      basenames = new Set();
+      byDir.set(dir, basenames);
+    }
+    basenames.add(path.basename(p));
+  }
+
+  const missing = new Set<string>();
+  for (const [dir, basenames] of byDir) {
+    let entries: Set<string>;
+    try {
+      entries = new Set(fs.readdirSync(dir));
+    } catch {
+      // Directory itself is gone (or unreadable) — every file in it is missing.
+      // Also covers the race where readdir loses to a concurrent delete: fall
+      // back to a direct stat rather than assuming existence.
+      for (const base of basenames) {
+        if (!fs.existsSync(path.join(dir, base))) missing.add(path.join(dir, base));
+      }
+      continue;
+    }
+    for (const base of basenames) {
+      if (!entries.has(base)) missing.add(path.join(dir, base));
+    }
+  }
+  return missing;
+}
+
 /** Query sessions from the database, applying filters and ordering by last-activity descending (default). */
 export function querySessions(options: QueryOptions = {}): SessionMeta[] {
   const db = getDB();
@@ -2381,12 +2559,19 @@ export function querySessions(options: QueryOptions = {}): SessionMeta[] {
     : '';
   // NULLs last so unpriced / duration-less rows never crowd out real data when
   // sorting by cost or duration. timestamp is never null (NOT NULL column).
+  // Default sort is the bare `last_activity` column, not `IFNULL(last_activity,
+  // timestamp)` — the v35 migration backfills every row so last_activity is
+  // never NULL, and every upsert path (resolveLastActivity) keeps it that way
+  // going forward. Wrapping the column in IFNULL() defeats
+  // idx_sessions_last_activity (SQLite can't use an index on an expression that
+  // isn't the bare column); the bare column lets the planner walk the index
+  // instead of sorting the whole result set (RUSH-2211).
   const orderClause =
     options.sortBy === 'cost'
       ? 'ORDER BY cost_usd IS NULL, cost_usd DESC, timestamp DESC'
       : options.sortBy === 'duration'
         ? 'ORDER BY duration_ms IS NULL, duration_ms DESC, timestamp DESC'
-        : 'ORDER BY IFNULL(last_activity, timestamp) DESC, timestamp DESC';
+        : 'ORDER BY last_activity DESC, timestamp DESC';
   const sql = `SELECT * FROM sessions ${clause} ${orderClause} ${limitClause}`;
   const rows = db.prepare(sql).all(...params) as SessionRow[];
   if (options.skipExistenceCheck) {
@@ -2399,7 +2584,8 @@ export function querySessions(options: QueryOptions = {}): SessionMeta[] {
   // surfacing in the Factory UI if any code path forgets to rewrite (#136).
   // Synthetic rows (OpenClaw channels/cron — see scanOpenClawIncremental) carry
   // an empty file_path and are exempt; they're keyed by CLI output, not files.
-  const missing = rows.filter(r => r.file_path && !fs.existsSync(r.file_path));
+  const missingPaths = findMissingFilePaths(rows.map(r => r.file_path).filter((p): p is string => !!p));
+  const missing = rows.filter(r => r.file_path && missingPaths.has(r.file_path));
   if (missing.length > 0) {
     const purge = db.transaction(() => {
       for (const row of missing) purgeToolCalls(db, row.id);
@@ -3028,6 +3214,20 @@ export function buildFtsQuery(input: string): { expr: string; terms: string[] } 
 }
 
 /**
+ * Build a `label:(...)` FTS5 column-filter MATCH expression for the label
+ * tier. Unlike `buildFtsQuery` (2-char floor, tuned for full-content search),
+ * this allows 1-char terms: label search is the interactive type-ahead path —
+ * the query grows one keystroke at a time, so a single character has to be
+ * indexable too. Terms are filtered to `[a-z0-9]` before being embedded in the
+ * expression string, so there's no FTS5 syntax injection from user input.
+ */
+function buildLabelFtsQuery(input: string): string {
+  const terms = input.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length >= 1);
+  if (terms.length === 0) return '';
+  return `label:(${terms.map(t => `${t}*`).join(' OR ')})`;
+}
+
+/**
  * Label-first search. Sessions whose custom label substring-matches the query
  * always rank ahead of FTS5 hits — this gives predictable behavior when a user
  * types the exact name they gave a session via /rename.
@@ -3055,10 +3255,34 @@ export function ftsSearch(input: string, limit = 200): FtsHit[] {
   // its `label` — set by an agent title / `/rename`, or seeded at launch from
   // `agents run --name`. Typing it resolves the session ahead of any FTS content
   // hit.
-  const labelRows = db.prepare(`
-    SELECT id, label FROM sessions
-    WHERE label IS NOT NULL AND LOWER(label) LIKE ?
-  `).all(`%${lower}%`) as Array<{ id: string; label: string | null }>;
+  //
+  // Candidates come from the FTS5 `label` column, not a raw `LOWER(label) LIKE
+  // '%q%'` scan of `sessions`: a leading wildcard can't use any index, so on a
+  // large session table that was a full-table scan on every keystroke of
+  // interactive search (RUSH-2211). `session_text.label` is kept 1:1 with
+  // `sessions.label` by every upsert path (storedFtsLabel), so this is the
+  // same data, indexed. Token-prefix matching seeks the FTS index instead of
+  // scanning every row, at the cost of only matching at token boundaries — a
+  // substring inside a single token (e.g. "ckf" inside "quickfix") no longer
+  // matches, since FTS5 only indexes prefixes of whole tokens, not arbitrary
+  // interior slices. (A slice spanning a token boundary, like "ix-b" inside
+  // "fix-bug", still matches: "ix-b" tokenizes to "ix" + "b", and "b" is a
+  // valid prefix of the "bug" token.) That's the accepted trade-off for an
+  // indexable interactive path; the exact/prefix/contains scoring below still
+  // runs in JS over the FTS candidate set, so ranking among real matches is
+  // unchanged. Only a query with no indexable token (rare — e.g.
+  // punctuation-only input) falls back to the direct scan rather than
+  // silently dropping the tier.
+  const labelMatchExpr = buildLabelFtsQuery(input);
+  const labelRows = labelMatchExpr
+    ? (db.prepare(`
+        SELECT session_id AS id, label FROM session_text
+        WHERE session_text MATCH ?
+      `).all(labelMatchExpr) as Array<{ id: string; label: string | null }>)
+    : (db.prepare(`
+        SELECT id, label FROM sessions
+        WHERE label IS NOT NULL AND LOWER(label) LIKE ?
+      `).all(`%${lower}%`) as Array<{ id: string; label: string | null }>);
 
   let hasExactLabelMatch = false;
   for (const row of labelRows) {

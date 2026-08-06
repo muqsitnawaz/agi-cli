@@ -35,6 +35,8 @@
   <a href="https://dev.meta.ai/docs/muse-code" title="Meta Muse Code"><strong>Muse</strong></a>
   &nbsp;&nbsp;&nbsp;&nbsp;
   <a href="https://omp.sh" title="Oh My Pi"><strong>Pi</strong></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://docs.warp.dev/reference/cli" title="Warp Agent CLI (Oz)"><strong>Warp</strong></a>
 </p>
 
 https://agents-cli.sh/demo.mp4
@@ -146,6 +148,13 @@ agents run antigravity "Write tests for the fixed code"
 ```
 
 Each resolves to the project-pinned version with skills, MCP servers, and permissions already synced. Single-typo names auto-correct across every command — `agents view cladue` resolves to `claude`, `agents add codx@latest` to `codex`.
+
+`agents run claude "task" --lease` reuses one shared warm crabbox pool across
+repositories by default. Concurrent runs share the box but execute in isolated
+`~/workspaces/<repo>-<run>` directories with separate agent homes and credential
+files. Add `leaseProfile: private-hot-box` to
+`.crabbox.yaml` only when a repo intentionally needs a dedicated warm pool;
+cross-repo reuse trades re-sync latency for lower idle-compute cost.
 
 ### Rate-limited? Keep working.
 
@@ -286,7 +295,15 @@ agents sessions backfill tools --fleet
 agents sessions stats
 agents sessions stats --zero            # only the never-invoked (dead weight)
 agents sessions backfill resources      # fold historical sessions into the usage index
+
+# Friction, owner corrections, repeated recipes, and ranked actions across harnesses
+agents sessions insights --since 30d
+agents sessions insights --agent claude --agent codex --json
+# Top-level alias
+agents insights --since 7d
 ```
+
+`sessions insights` is deterministic and offline by default. It caches per-session facets, compares harnesses, and emits an actions table with evidence counts plus shortened sample session ids. `--narrative` is opt-in and receives aggregates only, never raw transcripts. The installed `/sessions-insights` slash command invokes the same CLI source of truth.
 
 Interactive picker when you're in a terminal. Structured output (`--json`, `--markdown`, filtered by role or turn count) when piped.
 
@@ -303,6 +320,7 @@ agents sessions --idle              # stopped between turns (fleet-wide)
 agents sessions --orphan            # agent outlived its terminal client
 agents sessions --crashed           # terminal and agent disappeared uncleanly
 agents sessions focus a1b2c3d4      # jump back into one — attach in place, or resume
+agents sessions focus claude@latest --device yosemite-s0  # pick latest there
 ```
 
 On a terminal, `agents sessions --active` (and a bare `agents sessions`) open the **interactive session browser** — one filter you drive with single keys, re-pulled live across the fleet:
@@ -332,7 +350,7 @@ Filters **stack** (they AND together), the active set shows in the header, and t
 | --- | --- |
 | ![sessions browser, preview hidden](assets/demos/sessions-preview-before.png) | ![sessions browser, preview open with a links line](assets/demos/sessions-preview-after.png) |
 
-Each live session resolves to `working`, `waiting_input` (with why -- a question, a plan review, or a permission prompt), `idle`, or a lifecycle state such as `orphaned`, `crashed`, `closed`, `abandoned`, `queued`, or `unknown`. Pass the matching flag (`--working`, `--idle`, `--waiting`, `--orphan`, `--crashed`, `--closed`, `--abandoned`, `--queued`, `--unknown`) directly; each implies `--active`, and several flags form a union. The fleet fan-out is already the default; `--local` opts out. `--all` instead widens historical directory and time scope. Rows also carry badges for the PR, worktree, and ticket. `agents sessions focus [id]` attaches the live pane in place -- the tmux split locally or over SSH, or its Ghostty tab -- and falls back to a fresh tab + resume when the terminal is gone.
+Each live session resolves to `working`, `waiting_input` (with why -- a question, a plan review, or a permission prompt), `idle`, or a lifecycle state such as `orphaned`, `crashed`, `closed`, `abandoned`, `queued`, or `unknown`. Pass the matching flag (`--working`, `--idle`, `--waiting`, `--orphan`, `--crashed`, `--closed`, `--abandoned`, `--queued`, `--unknown`) directly; each implies `--active`, and several flags form a union. The fleet fan-out is already the default; `--local` opts out. `--all` instead widens historical directory and time scope. Rows also carry badges for the PR, worktree, and ticket. `agents sessions focus [selector]` accepts the same agent/version, device, time, team, project, skill/plugin, favorite, and live-state filters as the session browser. A unique id focuses directly; an agent/version or text selector always opens the preview picker. Immediately before attach it checks the tmux pane process: a living pane is joined in place, while a dead/missing pane enters recovery instead of showing tmux's `Pane is dead` screen.
 
 Landing on a session cold? `agents sessions <id>` prints a catch-up digest: an inferred title, files changed grouped by directory (created / modified / deleted), a histogram of which tools did the work (including parsed Bash commands -- `git`, `npm`, `ffmpeg`, `ssh`, and so on), and the last test verdict -- the signals to reload a task in seconds.
 
@@ -351,11 +369,11 @@ agents resume 019fd0c8-b3e9-77a2-a1a4-444698c4d897  # original harness/version/d
 agents run auto --resume 019fd0c8-b3e9-77a2-a1a4-444698c4d897  # adapt if its account is unavailable
 ```
 
-`agents sessions resume` reopens several sessions in whatever terminal you're in -- auto-detected across iTerm, Ghostty, tmux, and the VSCodium agent-terminal, or forced with `--iterm` / `--ghostty` / `--tmux` / `--vscodium`. `agents resume <id>` resumes one session without requiring you to name its harness: exact IDs take a local SQLite fast path, then resolve fleet-wide and restore the source harness, version, device, cwd, and recorded launch mode. Back them with **tmux** and the runs turn durable: detach, close your editor, reboot the GUI -- the session is still alive to `agents tmux attach`. The whole `agents tmux` subsystem (persistent multiplexer sessions that survive editor restarts and can be shared with other tools) sits underneath.
+`agents sessions resume` reopens several sessions in whatever terminal you're in -- auto-detected across iTerm, Ghostty, tmux, and the VSCodium agent-terminal, or forced with `--iterm` / `--ghostty` / `--tmux` / `--vscodium`. `agents resume <id>` resumes one session without requiring you to name its harness: exact IDs take a local SQLite fast path, then resolve fleet-wide and recover on the source device. If the origin version is installed, signed in, and healthy, its isolated home performs native resume. Otherwise a healthy version of the **same harness** starts with `/continue <id>`, which reads the indexed transcript even when the old version home is retained under version trash. It never native-resumes from a different isolated home. Back them with **tmux** and the runs turn durable: detach, close your editor, reboot the GUI -- the session is still alive to `agents tmux attach`. The whole `agents tmux` subsystem (persistent multiplexer sessions that survive editor restarts and can be shared with other tools) sits underneath.
 
 ### Send an agent to the background — and bring it back
 
-Running 30 agents and drowning in terminal tabs? `agents sessions detach <id>` stops a session's interactive process and keeps it working **headless** in the background -- it drives its task to done unattended, no tab, lower cost. `agents sessions attach <id>` brings it back: version-pinned resume into a live TUI, the same session and full history (including whatever it did while backgrounded).
+Running 30 agents and drowning in terminal tabs? `agents sessions detach <id>` stops a session's interactive process and keeps it working **headless** in the background -- it drives its task to done unattended, no tab, lower cost. `agents sessions attach <id>` brings it back through the same origin-device recovery decision: native resume in the exact healthy origin home, or same-harness `/continue` when that home is unavailable, with the full indexed history (including whatever it did while backgrounded).
 
 ```
 agents sessions detach a1b2c3d4     # go headless in the background, keep working
@@ -404,7 +422,7 @@ agents watchdog --nudge    # actually inject "Continue." into the stalled split
 agents watchdog --watch    # daemon loop: a tick every --interval
 ```
 
-`agents watchdog` detects a stalled session, resolves the *exact* terminal split it lives in (tmux, iTerm, VSCodium, or a raw pty), and injects a nudge -- `Continue.` by default, or set `--text`. It's dry by default; `--nudge` acts on a single tick, and `agents watchdog on|off` enables or disables the built-in routine on this device. `agents setup watchdog` chooses devices. Steer a single run with `agents watchdog policy <id> off | keep | handsoff`.
+`agents watchdog` detects a stalled session, resolves the *exact* terminal split it lives in (tmux, iTerm, VSCodium, or a raw pty), and injects a nudge -- `Continue.` by default, or set `--text`. It's dry by default; `--nudge` acts on a single tick. `agents watchdog on|off` controls the device-local daemon pass, which runs once every three minutes. Steer a single run with `agents watchdog policy <id> off | keep | handsoff`.
 
 A stalled session whose tail shows a hard account limit ("You've hit your weekly limit · resets …") is **rotated in place** instead of nudged: the watchdog gates on the same healthy-account selection `agents run auto` makes (zero healthy → one skip event per cooldown window, terminal untouched), injects the harness's exit sequence, relaunches `agents run auto --interactive --session-id <uuid>` in the *same* tab, then replays the old session's resume once the new TUI is live. Default on; `agents watchdog rotate off` disables it (nudging stays on).
 
@@ -608,10 +626,10 @@ Team state is observable via `agents teams list --json` / `agents teams status -
 
 ## Cloud
 
-Some work shouldn't tie up your laptop. `agents cloud run` hands a task to a managed provider that clones the repo, plans, implements, tests, and opens a PR -- while your terminal stays free. A fifth provider, `host`, dispatches the same way onto machines you own: `agents cloud run "…" --host gpu-box` (tasks track in `agents cloud ps` and `agents hosts ps` alike).
+Some work shouldn't tie up your laptop. `agents cloud run` hands a task to a managed provider that clones the repo, plans, implements, tests, and opens a PR -- while your terminal stays free. The `host` provider dispatches the same way onto machines you own: `agents cloud run "…" --host gpu-box` (tasks track in `agents cloud ps` and `agents hosts ps` alike).
 
 <p align="center">
-  <img src="assets/cloud.svg" alt="agents cloud run dispatches one prompt to a managed provider (Rush, Codex, Factory, or Antigravity) that clones, plans, tests, and opens a pull request while you keep working" width="100%" />
+  <img src="assets/cloud.svg" alt="agents cloud run dispatches one prompt to a managed provider (Rush, Codex, Cursor, Factory, or Antigravity) that runs while you keep working" width="100%" />
 </p>
 
 ```bash
@@ -625,7 +643,7 @@ agents cloud message <id> "also update the changelog"  # steer it mid-run
 agents cloud cancel <id>
 ```
 
-Four managed backends behind one interface (`agents cloud providers`):
+Five managed backends behind one interface (`agents cloud providers`):
 
 | Provider | What runs | Notes |
 |---|---|---|
@@ -633,6 +651,7 @@ Four managed backends behind one interface (`agents cloud providers`):
 | `codex` | A pre-built Codex Cloud environment | Target it with `--env`. |
 | `factory` | `droid exec` on a cloud VM | Computer-use; pick the box with `--computer`. |
 | `antigravity` | Gemini managed agents | Antigravity harness in a remote sandbox. |
+| `cursor` | Cursor Cloud Agents | v1 REST API with repo, status, SSE, cancel, and follow-up runs. |
 
 Auto-routes each `--agent` to its native cloud, or pin the backend with `--provider`. Instead of dispatching now, register a run as an **event trigger** with `--on pull_request` (also `push`, `issue_comment`, `workflow_run`) -- it persists as a trigger-bound routine that fires on the event. `--json` on every subcommand for scripting.
 
@@ -809,6 +828,12 @@ agents browser done                  # Close task's tabs when finished
 
 # Need to address a different task in the same shell? Override per call:
 agents browser screenshot --task other-flow
+
+# Repeated observe/action loops: one Node process and daemon socket stay warm.
+printf '%s\n' \
+  '{"action":"screenshot","path":"/tmp/page.jpg"}' \
+  '{"action":"click","atX":320,"atY":540}' \
+  | agents browser stream --task "$AGENTS_BROWSER_TASK"
 ```
 
 ### Why this works where Playwright fails

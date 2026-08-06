@@ -95,7 +95,7 @@ export function headlessPlanStallCommand(args: {
  *   (every agent supports edit-like behavior as its default).
  * - `plan` on an agent without a read-only mode degrades to the agent's
  *   safest native mode (`capabilities.modes[0]`, typically `edit`). Agents
- *   like antigravity/cursor/kiro have no plan flag; hard-failing made
+ *   like antigravity/kiro have no plan flag; hard-failing made
  *   multi-agent scripts (`--mode plan` for everyone) unusable and diverged
  *   from `agents teams add`, which already defaults to `edit`. Callers that
  *   care (the `agents run` CLI) must surface a warning when requested ≠
@@ -116,7 +116,7 @@ export function resolveMode(agent: AgentId, requested: Mode): Mode {
 
   if (requested === 'plan') {
     // No read-only mode on this agent. modes[0] is the declared safest mode
-    // (edit for antigravity/cursor/kiro/…). Prefer that over hard-fail so
+    // (edit for antigravity/kiro/…). Prefer that over hard-fail so
     // uniform multi-agent `--mode plan` dispatches still run.
     return supported[0];
   }
@@ -135,8 +135,8 @@ export function resolveMode(agent: AgentId, requested: Mode): Mode {
  * `--prompt` + `--plan`, and grok's `--permission-mode plan` silently stalls at
  * its ExitPlanMode gate. For those agents, a headless plan request degrades to
  * `auto` (kimi -p auto-runs; grok maps auto→edit via resolveMode) with a visible
- * one-line stderr warning, mirroring the graceful plan→edit degrade cursor and
- * antigravity get for having no plan flag at all. Interactive runs are never
+ * one-line stderr warning, mirroring the graceful plan→edit degrade antigravity
+ * and kiro get for having no plan flag at all. Interactive runs are never
  * downgraded. This is the single source of truth shared by buildExecCommand
  * (agents run / teams) and the routine runner.
  */
@@ -160,13 +160,9 @@ export function resolveHeadlessMode(
   if (mode !== requested) {
     const subject = warningContext ? `${warningContext}: ` : '';
     if (requested === 'plan') {
-      const limitation = agent === 'cursor'
-        ? "cursor's read-only plan mode is not enabled in this build"
-        : `${agent} has no read-only 'plan' mode`;
       warn(
-        `[agents] ${subject}${limitation}; ` +
-        `running '${mode}' (writable) instead${agent === 'cursor' ? ' (RUSH-2101)' : ''}. ` +
-        `Pass --mode ${mode} to silence this.\n`,
+        `[agents] ${subject}${agent} has no read-only 'plan' mode; ` +
+        `running '${mode}' (writable) instead. Pass --mode ${mode} to silence this.\n`,
       );
     } else {
       warn(`[agents] ${subject}${agent} has no '${requested}' mode; using '${mode}'.\n`);
@@ -490,6 +486,27 @@ export function buildExecEnv(options: ExecOptions): NodeJS.ProcessEnv {
     delete result.CLAUDE_CONFIG_DIR;
     delete result.CODEX_HOME;
     delete result.COPILOT_HOME;
+  } else if (options.agent === 'muse') {
+    // Muse has no MUSE_CONFIG_DIR. Config is XDG-based:
+    //   $XDG_CONFIG_HOME/muse  (settings, skills, hooks, auth)
+    //   $XDG_DATA_HOME/muse    (sessions, plugins)
+    // Pin both into the version home so multi-version isolation matches
+    // Claude's CLAUDE_CONFIG_DIR / Codex's CODEX_HOME, and so Muse never
+    // resolves through the adopt-time ~/.config/muse symlink (SymlinkOrReparse).
+    const cwd = options.cwd || process.cwd();
+    const resolvedVersion = options.version ?? resolveVersion('muse', cwd);
+    const version = options.version
+      ? resolvedVersion
+      : (resolvedVersion && isVersionInstalled('muse', resolvedVersion) ? resolvedVersion : null);
+    if (version) {
+      const versionHome = getVersionHomePath('muse', version);
+      result.XDG_CONFIG_HOME = path.join(versionHome, '.config');
+      result.XDG_DATA_HOME = path.join(versionHome, '.local', 'share');
+    }
+    delete result.CLAUDE_CONFIG_DIR;
+    delete result.CODEX_HOME;
+    delete result.COPILOT_HOME;
+    delete result.KIMI_CODE_HOME;
   } else {
     delete result.CLAUDE_CONFIG_DIR;
     delete result.CODEX_HOME;
@@ -641,6 +658,7 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     base: ['cursor-agent'],
     promptFlag: '-p',
     modeFlags: {
+      plan: ['--plan'],
       edit: [],
       skip: ['-f'],
     },
@@ -833,6 +851,23 @@ export const AGENT_COMMANDS: Record<AgentId, AgentCommandTemplate> = {
     // Flag form covers headless (`--session-id`). Interactive uses the
     // `resume` subcommand — special-cased in buildExecCommand.
     resume: { flag: '--session-id' },
+  },
+  // Warp Agent CLI (`oz agent run`). Headless is `-p/--prompt "<task>"`; JSON is
+  // the global `--output-format json`. Autonomy comes from the selected agent
+  // profile (`--profile`), not a per-run permission flag, so the single `edit`
+  // mode maps to no flags (mirrors hermes). `--model` overrides the base model
+  // (`oz model list`). No `resume`: Oz's `oz agent run --conversation <id>`
+  // continues a SERVER-SIDE conversation by id, and warp is not session-tracked
+  // (absent from SESSION_AGENTS), so agents-cli has no local id to resume from —
+  // declaring it would make nativeResume(warp) true against an unreachable path.
+  warp: {
+    base: ['oz', 'agent', 'run'],
+    promptFlag: '-p',
+    modeFlags: {
+      edit: [],
+    },
+    jsonFlags: ['--output-format', 'json'],
+    modelFlag: '--model',
   },
 };
 
@@ -1601,7 +1636,7 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
 
   // The agent could exit before we attach (fast failure). Don't attach to an
   // already-dead pane — surface its output + status directly and tear down.
-  const before = pane ? await paneExitStatus(pane, socket) : { dead: false };
+  const before = pane ? await paneExitStatus(pane, socket) : { found: false, dead: false, status: undefined };
   if (before.dead) {
     // F2 (RUSH-2185 / EXEC-23a): for interactive runs, ALWAYS recap — a clean
     // exit-0 before attach means the harness has no interactive REPL and the
@@ -1627,7 +1662,7 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
     } catch { return false; }
   };
 
-  const after = pane ? await paneExitStatus(pane, socket) : { dead: false };
+  const after = pane ? await paneExitStatus(pane, socket) : { found: false, dead: false, status: undefined };
   if (after.dead) {
     // Nonzero exit after attach → the agent crashed rather than the user
     // detaching cleanly (a clean detach leaves the pane ALIVE, handled below).

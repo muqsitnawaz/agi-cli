@@ -119,11 +119,13 @@ gives each device its warnings plus a compact accounts/versions line (every
 installed version + its account, provable ✓ / ✗). Single-machine `agents doctor`
 collapses to the CRITICAL section plus one `▸ <machine>` block. Severity:
 **critical** is `logged-out` (provable), `missing-hook`, `missing-plugin`,
-`unwired-hook` and `cli-missing`; **warning** is `logout-unprovable`,
+`unwired-hook`, `cli-missing` and `owner-sink-unreachable` (the feed/notify
+owner-delivery lane can't reach the owner from this box, RUSH-2262); **warning**
+is `logout-unprovable`,
 `missing-resource`, `content-drift`, `never-synced`, `stale`, `repo-behind`,
 `repo-drift`, `version-skew`, `fleet-resource-gap`, `orphan`, `duplicate-hook`,
 `duplicate-hook-drift`, `host-cli-missing`, `host-cli-invalid`,
-`rc-secret-export`, `exec-policy` and `stale-cli`. (RUSH-2162 moved
+`rc-secret-export`, `env-secret-export`, `exec-policy` and `stale-cli`. (RUSH-2162 moved
 `never-synced` and `duplicate-hook-drift` to warning — both are stale-sync states
 one `agents sync` resolves.)
 
@@ -175,6 +177,7 @@ testable without a shell, PowerShell, or an installed CLI):
 | Check | Input | Finding kind |
 |---|---|---|
 | Credential-shaped shell-rc exports (RUSH-1968) | `rcSecrets` | `rc-secret-export` |
+| The file-store master key live in the process env (RUSH-1968) | `masterPassphraseInEnv` | `env-secret-export` |
 | Windows exec policy blocking `agents.ps1` | `execPolicy` | `exec-policy` |
 | Hooks duplicated across version homes | `duplicateHooks` | `duplicate-hook{,-drift}` |
 | Declared host CLIs not on PATH | `hostClis.statuses` | `host-cli-missing` |
@@ -246,6 +249,16 @@ resource / agent-version / config-repo present on one box but missing on another
 Read-only by default — divergence detection never installs or syncs. `--json`
 carries a stable `fleet` divergence block for the VS Code extension / Agency.
 
+### 10. Session recovery is one decision on the origin device
+
+`resolveSessionRecovery` in `src/lib/session/recovery.ts` is the only place that
+chooses native resume versus `/continue`. Focus, resume, attach, and
+`run --resume` route through it. Native resume is valid only for the exact healthy
+origin version in its isolated home; a removed, signed-out, revoked, or exhausted
+origin rotates to a healthy version of the same harness and reads the indexed
+transcript with `/continue`. Never add a caller-local fallback that native-resumes
+another version home, and never let `run auto` change harnesses during recovery.
+
 ## Supported harnesses
 
 The supported harnesses are the entries in the `AGENTS` registry
@@ -264,7 +277,7 @@ Antigravity CLI, Grok CLI, OpenCode — features target these six first.
 | ★ Grok CLI | `grok` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ≥0.2.111 |
 | ★ OpenCode | `opencode` | ≥0.3.130 | ✓ | ≥1.1.1 | ✓ | ✓ | ✓ | — | — |
 | Cursor | `cursor` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ≥2026.1.22 | — |
-| OpenClaw | `openclaw` | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
+| OpenClaw | `openclaw` | — | ✓ | ✓ | ✓ | — | ✓ | ✓ | ✓ |
 | Copilot | `copilot` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ≥0.0.353 | — |
 | Amp | `amp` | — | ✓ | — | ✓ | ✓ | — | — | — |
 | Kiro | `kiro` | ≥0.10 | ✓ | ≥2.8 | ✓ | ✓ | — | ≥1.23 | — |
@@ -273,13 +286,14 @@ Antigravity CLI, Grok CLI, OpenCode — features target these six first.
 | Hermes | `hermes` | ≥0.11 | ✓ | — | ✓ | — | — | — | — |
 | Muse Code | `muse` | ✓ | ✓ | — | ✓ | — | ✓ | — | — |
 | Pi (Oh My Pi) | `pi` | — | ✓ | — | ✓ | ✓ | — | ✓ | — |
+| Warp Agent CLI | `warp` | — | ✓ | — | ✓ | — | — | — | — |
 
 ✓ = supported · — = not · version cell = only within that range (out-of-range =
 skipped silently). [`src/lib/agents.ts`](src/lib/agents.ts) is canonical — keep this
 snapshot in sync. `workflows` is `claude`/`kimi`/`goose`/`antigravity` (≥1.0.6, written to the
 shared HOME-global `~/.gemini/config/global_workflows/`, not a per-version home), `openclaw` (Lobster `.lobster` files under `.openclaw/workflows/`), and `grok` (≥0.2.111, native Rhai under `.grok/workflows/`); `mcp` is universal; `allowlist` is
 `claude`/`cursor`/`opencode`/`antigravity`/`grok`/`kimi`/`kiro`/`droid`/`goose`/`openclaw`/`copilot` (Copilot writes per-location approvals to `~/.copilot/permissions-config.json`; OpenClaw is tool-level only —
-blanket rules map to `~/.openclaw/openclaw.json` `tools.alsoAllow`/`tools.deny`, sub-command patterns skipped); `subagents` is `claude`/`codex`/`kiro`/`kimi`/`grok`/`openclaw`/`droid`/`copilot`/`antigravity`/`cursor` (≥2026.1.22)/`pi`. **Pi (Oh My Pi, `omp`)** is Claude-compatible: it natively reads `.claude/commands`, `.mcp.json`, and Claude-shaped subagents, and keeps its own native resources under `~/.omp/agent/` (skills, commands, subagents `agents/`, `AGENTS.md` context, `.mcp.json`). `mcp` covers stdio + http + headers. `hooks`/`allowlist`/`plugins` are OFF: omp hooks are per-tool JS/TS extension modules (not event->shell-command registrations), approval is per-TOOL only (`tools.approval`, no command/path patterns), and plugins are npm/TS modules (not the Claude marketplace manifest). Its cross-provider model catalog (OpenRouter/OpenAI/Anthropic/xAI/DeepSeek/…) surfaces in `agents view` / `agents models pi` via `omp models --json`.
+blanket rules map to `~/.openclaw/openclaw.json` `tools.alsoAllow`/`tools.deny`, sub-command patterns skipped); `subagents` is `claude`/`codex`/`kiro`/`kimi`/`grok`/`openclaw`/`droid`/`copilot`/`antigravity`/`cursor` (≥2026.1.22)/`pi`. **Pi (Oh My Pi, `omp`)** is Claude-compatible: it natively reads `.claude/commands`, `.mcp.json`, and Claude-shaped subagents, and keeps its own native resources under `~/.omp/agent/` (skills, commands, subagents `agents/`, `AGENTS.md` context, `.mcp.json`). `mcp` covers stdio + http + headers. `hooks`/`allowlist`/`plugins` are OFF: omp hooks are per-tool JS/TS extension modules (not event->shell-command registrations), approval is per-TOOL only (`tools.approval`, no command/path patterns), and plugins are npm/TS modules (not the Claude marketplace manifest). Its cross-provider model catalog (OpenRouter/OpenAI/Anthropic/xAI/DeepSeek/…) surfaces in `agents view` / `agents models pi` via `omp models --json`. **Warp Agent CLI (`oz`)** is the coding-agent CLI on Warp's Oz platform (the shared Warp binary invoked via the `oz` symlink). Install is self-updating via `brew install --cask oz` (macOS) / the `oz-stable` apt|yum|pacman package (Linux); config lives under `~/.warp/`, the rules/context file is `AGENTS.md`, and auth is `oz login` (browser OAuth) or a `WARP_API_KEY` token for headless/CI (`oz api-key create`). Headless run is `oz agent run --prompt "<task>" [--model <id>]`; autonomy is governed by the selected agent profile (`--profile`), not a per-run permission flag, so the single `edit` mode maps to no flags (mirrors Hermes). `mcp` covers stdio + http + headers via the Claude `.mcp.json` schema at `~/.warp/.mcp.json` (project `<root>/.warp/.mcp.json`); `skills` come from `--skill` + `oz agent skills`. `hooks`/`allowlist`/`commands`/`plugins`/`subagents`/`workflows`/`memory` are OFF: Oz has no event→shell hook registration, its permissions are profile-based (not a Claude tool allow/deny list), slash-commands are native/server-managed, and cloud agents/profiles are server-side (no installable subagent dir). Warp is intentionally **absent from `SESSION_AGENTS`** — Oz stores conversations server-side (retrieved with auth via `oz run conversation get <id>`), so there is no local transcript for `agents sessions` to index — and it exposes no usage/limits endpoint, so `agents view` shows no usage bar for it.
 **Gemini is hard-deprecated.** Keep the legacy `gemini` id only for parsing old
 sessions/config; `agents add gemini`, `agents import gemini`, and
 `agents sync gemini` fail and point users to Antigravity.
@@ -301,10 +315,11 @@ src/
     shims.ts           # Shim generation, config symlink switching
     hooks.ts           # hooks.yaml parser + per-agent registrar
     hooks/match.ts     # `matches:` predicate evaluator
+    browser/           # browser daemon service + existing CDP connection pool; ipc.ts owns one-shot and persistent socket clients, stream.ts owns the NDJSON action loop
     monitors/          # `agents monitors` — event-triggered watchers (source→condition→action); native state-diff store; MonitorEngine runs in the daemon beside the cron scheduler. See docs/10-monitors.md
     projects.ts        # `agents projects` — named multi-repo project defs (~/.agents/projects/*.yaml) layered above the --project convention (resolveProjectRef in project-root.ts); project-status.ts rolls live sessions + merged PRs + artifacts into the progress card. Beta-gated. See docs/11-projects.md
     migrate.ts         # One-shot idempotent migrations
-    session/           # `agents sessions` READER — discovery/parse/render of agent transcripts; also `migrate-targets.ts` (the `sessions migrate` target scorer); `db.ts` `queryResourceUsageStats`/`backfillResourceUsage` back `agents sessions stats` + `sessions backfill resources` (skill/command usage rollup, session_resource_usage + resource_scan_ledger); `claude-accounts.ts` attributes each Claude transcript to the account that produced it (account_key) and `insights.ts` extracts the behavioural facets behind `agents insights` (session_insights cache)
+    session/           # `agents sessions` READER — discovery/parse/render of agent transcripts; also `migrate-targets.ts` (the `sessions migrate` target scorer); `db.ts` `queryResourceUsageStats`/`backfillResourceUsage` back `agents sessions stats` + `sessions backfill resources` (skill/command usage rollup, session_resource_usage + resource_scan_ledger); `claude-accounts.ts` attributes each Claude transcript to the account that produced it (account_key) and `insights.ts` extracts the cached multi-harness friction/correction/automation facets behind `agents sessions insights` (`agents insights` alias)
     terminal/          # Terminal launch engine — tab/split in iTerm/Ghostty/tmux/Terminal.app, local or --host;
                        #   preferred.ts resolves WHICH terminal for a GUI caller (from live sessions' host app)
     cloud/             # Provider registry (Rush / Codex / Factory / Antigravity)
@@ -433,9 +448,9 @@ Nothing from `apps/`, `native/`, or sibling `packages/` can leak into the tarbal
 
 ## Releasing
 
-**Self-routing, zero-config.** Run it from ANY fleet box with an empty
-environment — no variables to set, no Touch ID, no hand-moved credentials. Run
-from a clean, in-sync `main`:
+**Self-routing, zero-config.** Run it from ANY fleet box and ANY checkout state —
+no variables to set, no Touch ID, no hand-moved credentials, and no requirement
+that the caller be on a clean `main`:
 
 ```bash
 scripts/release.sh <version>          # dry-run: bump, type-check, tarball preview, detected state
@@ -447,12 +462,21 @@ each phase labeled with the box it runs on and a ✓/✗ result:
 
 | Work | Runs on | How it's chosen |
 |---|---|---|
-| Orchestrate: bump, changelog, PR, tag | the box you invoked it on | it's already there (git + gh only) |
-| CI / tests (Linux) | a **crabbox** (Hetzner Linux VM) | [`scripts/sandbox.sh`](scripts/sandbox.sh) selects an available box for this repo's `.crabbox.yaml` profile or warms a fresh one — **dynamic, never a hardcoded instance** |
+| Orchestrate: bump, changelog, PR, tag | a detached worktree on the box you invoked it on | fresh `origin/<default>` under `.agents/worktrees/release-v<version>-<pid>` |
+| CI / tests (Linux) | a **crabbox** workspace (Hetzner Linux VM) | [`scripts/sandbox.sh`](scripts/sandbox.sh) reclaims an available warm box and syncs into `~/workspaces/<repo>-<task>`; it warms capacity only when the shared pool has none — **dynamic, never a hardcoded or release-exclusive instance** |
 | Build, sign+notarize, npm publish, computer-helper | the **home base** | one hardcoded constant `RELEASE_HOME_BASE="mac-mini"` in `release.sh`; the script detects if it's already there (`scutil --get LocalHostName` / `hostname -s`), else reaches it over `ssh` |
 
 `mac-mini` is the only hardcoded machine name (it holds the Developer ID cert +
 npm publish rights). The crabbox is **not** hardcoded.
+
+**The caller checkout is never mutated or gated.** `release.sh` immediately
+fetches origin and re-enters the release from a detached, release-owned worktree
+at fresh `origin/<default>`. Version bumps, changelog folding, release-branch
+construction, CI orchestration, merging, and tagging happen there. The worktree
+is removed on every exit path, so a dirty shared `main`, an agent feature branch,
+or another branch already checking out `main` cannot block or contaminate a
+release. The isolated tree installs dependencies from its pinned lockfile; it
+does not borrow `node_modules` or staged files from the caller.
 
 **One releaser at a time — the lease.** Because the script runs from any box, two
 agents on two machines could enter it at once; they then clobber the same release
@@ -597,6 +621,58 @@ healthy `running: yes`. `agents menubar setup` is the recovery path — it ends
 every live helper and re-kickstarts the service so the survivor is always
 launchd's.
 
+**Only the install that OWNS the helper may reinstall it.** The startup self-heal
+(`installMenubarLaunchAgentOnUpgrade`, every darwin invocation) reinstalls when the
+version stamp drifted or the plist's baked entry names another install. Both of
+those record *whichever copy acted last*, so on a box with several agents-cli
+copies each one read the others' marks as drift and recopied the bundle over them —
+and recopying replaces the executable under the running helper, killing it, after
+which `KeepAlive` restarts it and the next copy repeats it. Observed: a new pid
+every 5-15s, 578 launches in one helper log, a status item that never stayed
+visible, and `agents menubar status` still saying `running: yes` because a pid
+always existed (#2109). `mayInstallMenubarHelper` gates it: the plist's
+`AGENTS_ENTRY` names the owner, and only the owner reinstalls freely. A same-install
+upgrade keeps its entry path, so `npm update` still lands normally.
+
+Three escapes keep the gate from becoming a **stuck state**, which is how the first
+version of it regressed: (1) **repairs are never gated** — a missing helper
+executable or a Developer-ID heal proceeds from any install, since a bundle that
+isn't there cannot be contested and blocking it leaves the menu bar dead with no
+automatic recovery; (2) a non-owner takes over immediately once the recorded owner
+is **gone from disk**; (3) otherwise a non-owner may still take over **once per
+`MENUBAR_TAKEOVER_COOLDOWN_MS`** (1h, stamped in `.menubar-last-heal`). Without (3)
+a stale-but-present copy — an old nvm node dir nobody runs — owns the plist forever
+while the user's actual daily driver upgrades and never heals again. The cooldown
+turns an every-invocation storm into at most one restart per hour while leaving
+every install able to make progress. `agents menubar setup` bypasses the gate
+entirely and stays the immediate manual fix.
+
+Two caveats worth knowing before you tune any of this. **(a)** Escape (3) is
+refused to a source bundle that is not Developer-ID signed: `scripts/install.sh`
+puts an ad-hoc dev build beside the npm global, and letting it win a *timed*
+takeover would recopy an un-notarized bundle over a good one, which Gatekeeper
+rejects as "damaged" and AppKit crashes on (RUSH-2134) — a broken menu bar rather
+than a cosmetic restart. It can still adopt via (2), the case that must never
+deadlock. **(b)** The cooldown bounds the loop but does not converge it: two
+installs that are *both* invoked regularly trade ownership every cooldown, so the
+helper restarts roughly hourly until one is removed. That is deliberate — the
+alternative is stranding one of them — and the real fix is a single install
+(#2147 covers making the multi-install banner actually name them all).
+
+**Do NOT "improve" this by comparing bundle content.** It looks like the obvious
+gate and it does not work: the helper is rebuilt, re-signed and re-notarized on
+every release (`menubar/scripts/build.sh` via `release.sh`), so consecutive
+releases ship byte-different bundles from identical Swift source. Measured on
+1.22.20/21/22 — same 2876288-byte executable, three different sha256s, and three
+different **CDHashes** (so stripping the CMS/timestamp blob doesn't rescue it
+either). Any digest gate reports "changed" for precisely the skew case it was
+meant to exempt. Ownership is the only signal here that is stable across
+independently-signed builds. Related: the secrets broker hit the same
+multi-install failure and answered it differently, by keeping a *hot* broker alive
+across version skew (`shouldTeardownVersionSkewedBroker`, `src/lib/secrets/agent.ts`;
+#435, PR #909) — same disease, and a third `KeepAlive` helper will need one of
+these two answers rather than a fresh rediscovery.
+
 **The lock fd is `O_CLOEXEC`, and `acquire` self-heals a stale lock.** The lock is
 opened `O_RDWR | O_CREAT | O_CLOEXEC` so no spawned child can inherit the
 descriptor — a pre-fix `doctor` child that inherited it and orphaned at PPID 1 held
@@ -726,7 +802,8 @@ bug; fix the drift. It uses RFC-2119 MUST/SHOULD language, cites the implementin
   clauses match distinct calls, tool queries never parse transcripts, and exact
   static program counts retain repeated sites with wrapper/effective roles;
   versioned tool envelopes do not replace the list/detail JSON contracts
-  (SES-31..SES-37, SES-IF-4a); `agents sessions stats` emits its own versioned
+  (SES-31..SES-37, SES-IF-4a); `agents sessions insights` emits aggregate-only
+  actions and keeps `agents insights` as its top-level alias (SES-IF-4c); `agents sessions stats` emits its own versioned
   `sessions-stats` rollup of skill/command usage and never the list/detail shape
   (SES-IF-4b); `agents sessions
   export --encrypt` seals every transcript

@@ -61,7 +61,12 @@ function printStatus(s: MenubarStatus, opts: { brief?: boolean } = {}): void {
     console.log(chalk.gray('  End them with `agents menubar setup`.'));
   }
   if (s.stale) {
-    console.log(chalk.yellow('\n  Installed AGI Menu is stale — runs on next `agents` startup, or `agents menubar setup` now.'));
+    // Not "runs on next startup": the self-heal only reinstalls from the install
+    // that owns the helper, or from another one once the takeover cooldown has
+    // passed (mayInstallMenubarHelper) — so on a box with several agents-cli
+    // copies this can persist for a while. `setup` bypasses the gate and is the
+    // immediate fix.
+    console.log(chalk.yellow('\n  Installed AGI Menu is stale — `agents menubar setup` updates it now.'));
   } else if (!s.serviceInstalled && !s.disabledByUser) {
     console.log(chalk.gray('\n  Set it up with `agents menubar setup`.'));
   }
@@ -140,6 +145,15 @@ export function registerMenubarCommands(program: Command): void {
       again, run \`agents menubar disable\`.
     `,
   });
+
+  menubar
+    .command('snapshot', { hidden: true })
+    .description('Emit the consolidated AGI Menu polling snapshot.')
+    .option('--json', 'Emit machine-readable JSON')
+    .action(async () => {
+      const { computeMenubarSnapshot } = await import('../lib/menubar/snapshot.js');
+      process.stdout.write(`${JSON.stringify(await computeMenubarSnapshot())}\n`);
+    });
 
   menubar
     .command('enable')

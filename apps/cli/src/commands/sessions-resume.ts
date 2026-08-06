@@ -17,14 +17,13 @@ import { filterTeamSessions } from '../lib/session/team-filter.js';
 import { multiItemPicker, itemPicker } from '../lib/picker.js';
 import { buildPreview } from './sessions-picker.js';
 import {
-  filterSessionsByQuery,
   formatPickerLabel,
   pickerColumnsFor,
-  buildResumeCommand,
+  buildSessionRecoveryCommand,
   resumeSessionInPlace,
-  resumeOnOwnerIfRemote,
   parseAgentFilter,
 } from './sessions.js';
+import { sessionMatchesQuery } from './sessions-browser.js';
 import {
   openSurfaces,
   availableBackends,
@@ -39,8 +38,9 @@ import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
 import { setHelpSections } from '../lib/help.js';
 import { confirm } from '@inquirer/prompts';
 import { spawn } from 'node:child_process';
-import { buildCanonicalResumeCommand } from '../lib/session/resume-command.js';
 import { looksLikeSessionId } from '../lib/session/discover.js';
+import { machineId } from '../lib/session/sync/config.js';
+import { sessionOriginDevice, sessionRecoveryDestinationMatches } from '../lib/session/recovery.js';
 
 /** Opening more than this many live sessions at once asks for confirmation first. */
 export const CONFIRM_THRESHOLD = 5;
@@ -71,7 +71,7 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
     .option('--teams', 'Include team-spawned sessions (hidden by default)')
     .option('--since <time>', 'Only sessions newer than this (e.g., 2h, 7d, 4w, or ISO date)')
     .option('-n, --limit <n>', 'Maximum number of sessions to load into the picker', '200')
-    .option('--host <alias>', 'Resume on a remote host over SSH (defaults to tmux there)')
+    .option('--host <alias>', 'Open on the session origin host over SSH; the host must match every selected session')
     .option('--iterm', 'Force the iTerm backend')
     .option('--ghostty', 'Force the Ghostty backend')
     .option('--tmux', 'Force the tmux backend')
@@ -103,8 +103,8 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
       - Layout: one tab per session by default. --splits packs session pairs side by side in each tab.
       - Backend: auto-detected from the terminal you're in (iTerm / Ghostty / tmux); override with --iterm/--ghostty/--tmux/--vscodium.
       - --vscodium opens each session as an agent terminal tab in VSCodium via the swarm-ext extension (works with --host too).
-      - --host <alias> resumes on a remote machine over the same SSH transport as 'sessions --host' (defaults to tmux).
-      - Each session opens version-pinned, in its own cwd. Non-resumable agents are skipped with a note.
+      - --host <alias> opens the terminal surface on that host only when it is the selected sessions' origin; recovery never migrates a session to another device.
+      - Recovery runs on the session's origin device: exact healthy origin uses native resume; otherwise a healthy version of the same harness receives /continue <id>.
     `,
   });
 
@@ -155,7 +155,7 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
     chosen = await multiItemPicker<SessionMeta>({
       message: 'Select sessions to resume:',
       items: sessions,
-      filter: (q: string) => (q.trim() ? filterSessionsByQuery(sessions, q) : sessions),
+      filter: (q: string) => (q.trim() ? sessions.filter((s) => sessionMatchesQuery(s, q)) : sessions),
       labelFor: (s, q) => formatPickerLabel(s, q, cols),
       keyFor: (s) => s.id,
       buildPreview,
@@ -170,23 +170,24 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
   }
   if (!chosen || chosen.length === 0) return;
 
-  // 2. Turn the selection into surfaces. Every tab runs the canonical
-  // `agents resume <id>`, which owns source-device routing — so a peer-owned
-  // session opens its tab here and hops to its owner from inside it, and the
-  // local cwd below is only where that tab starts. `agents resume` then supplies
-  // the recorded cwd on the native-resume tier (exec.ts, `canResumeNatively`);
-  // the `/continue` replay tier sets none, so there the tab's directory is what
-  // the harness inherits — unchanged from before this PR
-  // (lib/session/resume-command.ts, RUSH-2022).
+  if (options.host) {
+    const requestedHost = options.host;
+    const mismatches = chosen
+      .map((session) => resumeHostMismatch(session, requestedHost))
+      .filter((message): message is string => message !== null);
+    if (mismatches.length > 0) {
+      for (const message of mismatches) console.error(chalk.red(message));
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  // 2. Route every selection through the owning device's recovery resolver.
   const items: Array<SurfaceItem & { session: SessionMeta }> = [];
   for (const s of chosen) {
-    const command = buildCanonicalResumeCommand(s.id);
+    const command = buildSessionRecoveryCommand(s, !!options.host);
     const cwd = s.cwd && fs.existsSync(s.cwd) ? s.cwd : process.cwd();
     items.push({ session: s, cwd, command });
-  }
-  if (items.length === 0) {
-    console.log(chalk.gray('Nothing resumable in the selection.'));
-    return;
   }
 
   // 3. Resolve the backend (and host).
@@ -203,20 +204,12 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
     if (!proceed) return;
   }
 
-  // 5a. No tab-capable backend (off-macOS, not in tmux, local) — resume in place,
-  // sequentially. This path never runs `command`, so it is the one place the
-  // canonical `agents resume <id>` does NOT carry out source-device routing for
-  // us: route each peer-owned session explicitly, or `resumeSessionInPlace`
-  // (rightly) refuses it. Reached on any Linux box in a plain ssh shell, since
-  // tmux gates on $TMUX and the other backends on darwin (RUSH-2022).
+  // 5a. No tab-capable backend (off-macOS, not in tmux, local) — resume in place, sequentially.
   if (backend === 'inplace') {
     if (items.length > 1) {
       console.log(chalk.gray(`Resuming ${items.length} sessions one at a time (no tab-capable terminal detected).`));
     }
-    for (const it of items) {
-      if (await resumeOnOwnerIfRemote(it.session)) continue;
-      await resumeSessionInPlace(it.session);
-    }
+    for (const it of items) await resumeSessionInPlace(it.session);
     return;
   }
 
@@ -292,6 +285,16 @@ export function resolveResumePacking(options: Pick<ResumeOptions, 'splits'>): Pa
   return options.splits ? 'two-per-tab' : 'tabs';
 }
 
+export function resumeHostMismatch(
+  session: Pick<SessionMeta, 'shortId' | 'machine'>,
+  requestedHost: string,
+  self = machineId(),
+): string | null {
+  const origin = sessionOriginDevice(session, self);
+  return sessionRecoveryDestinationMatches(session, requestedHost, self)
+    ? null
+    : `Session ${session.shortId} originated on ${origin}; --host ${requestedHost} cannot move recovery to another device.`;
+}
 
 /**
  * Decide which backend to launch into. Returns a concrete backend, `'inplace'`

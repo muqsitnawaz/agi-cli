@@ -106,13 +106,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // off the click path and rendered from warm caches when the menu opens.
     private var cachedRoutines: [Routine] = []
     private var routinesLoaded = false
-    private var routinesInFlight = false
-    private var routinesFetchedAt: Date?
 
     private var cachedRecentSessions: [RecentSession] = []
     private var recentSessionsLoaded = false
-    private var recentSessionsInFlight = false
-    private var recentSessionsFetchedAt: Date?
 
     // The engine's active-session list (`sessions --active --local --json`) —
     // authoritative coverage (tmux/IDE/headless), but costs seconds, so it rides
@@ -121,20 +117,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // fills in.
     private var cachedActiveSessions: [ActiveSession] = []
     private var activeSessionsLoaded = false
-    private var activeSessionsInFlight = false
-    private var activeSessionsFetchedAt: Date?
 
     private var cachedDoctorOverview: DoctorOverview?
     private var doctorLoaded = false
     private var doctorInFlight = false
     private var doctorFetchedAt: Date?
 
-    // RUSH-1415: watchdog auto-nudge. Each tick runs `agents watchdog`; when the
-    // toggle (watchdogEnabled) is on it injects "Continue." into stalled splits.
+    // Watchdog state is read from the consolidated snapshot. The daemon is the
+    // sole repeating executor; this helper only toggles device-local enablement.
     private var cachedWatchdog: WatchdogTick?
     private var watchdogEnabled = false
-    private var watchdogInFlight = false
-    private var watchdogFetchedAt: Date?
+    private var snapshotInFlight = false
+    private var snapshotFetchedAt: Date?
+    private static let snapshotRefreshInterval: TimeInterval = 3 * 60
 
     // Density: rich rows carry the session title / question / routine schedule
     // inline; compact folds them to one-liners. `auto` (the default) is rich
@@ -248,11 +243,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
         }
         checkDaemonLiveness()
-        refreshRoutines()
-        refreshRecentSessions()
-        refreshActiveSessions()
+        refreshSnapshot()
         refreshDoctorOverview()
-        refreshWatchdog()
     }
 
     /// Poll the scheduler's liveness on every tick — the one check that must
@@ -292,18 +284,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func loadDumpCaches() {
-        cachedRoutines = AgentsCLI.routines()
-        routinesLoaded = true
-        routinesFetchedAt = Date()
-
-        cachedRecentSessions = AgentsCLI.recentSessions(limit: 40)
-        recentSessionsLoaded = true
-        recentSessionsFetchedAt = Date()
-        promptController.updateRecentSessions(cachedRecentSessions)
-
-        cachedActiveSessions = AgentsCLI.activeSessions()
-        activeSessionsLoaded = true
-        activeSessionsFetchedAt = Date()
+        if let snapshot = AgentsCLI.menubarSnapshot() {
+            applySnapshot(snapshot)
+            snapshotFetchedAt = Date()
+        }
 
         cachedDoctorOverview = AgentsCLI.doctorOverview()
         doctorLoaded = true
@@ -311,51 +295,31 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     // MARK: Cached CLI refreshes
-    private func refreshRoutines() {
-        if routinesInFlight { return }
-        if let t = routinesFetchedAt, Date().timeIntervalSince(t) < 20 { return }
-        routinesInFlight = true
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let r = AgentsCLI.routines()
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.cachedRoutines = r
-                self.routinesLoaded = true
-                self.routinesFetchedAt = Date()
-                self.routinesInFlight = false
-            }
-        }
+    private func applySnapshot(_ snapshot: MenubarSnapshot) {
+        cachedRoutines = snapshot.routines
+        routinesLoaded = true
+        cachedRecentSessions = snapshot.recentSessions
+        recentSessionsLoaded = true
+        promptController.updateRecentSessions(snapshot.recentSessions)
+        cachedActiveSessions = snapshot.activeSessions
+        activeSessionsLoaded = true
+        watchdogEnabled = snapshot.watchdog.enabled
+        cachedWatchdog = snapshot.watchdog.lastTick
     }
 
-    private func refreshRecentSessions() {
-        if recentSessionsInFlight { return }
-        if let t = recentSessionsFetchedAt, Date().timeIntervalSince(t) < 45 { return }
-        recentSessionsInFlight = true
+    private func refreshSnapshot() {
+        if snapshotInFlight { return }
+        if let t = snapshotFetchedAt, Date().timeIntervalSince(t) < Self.snapshotRefreshInterval { return }
+        snapshotInFlight = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let s = AgentsCLI.recentSessions(limit: 40)
+            let snapshot = AgentsCLI.menubarSnapshot()
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.cachedRecentSessions = s
-                self.recentSessionsLoaded = true
-                self.recentSessionsFetchedAt = Date()
-                self.recentSessionsInFlight = false
-                self.promptController.updateRecentSessions(s)
-            }
-        }
-    }
-
-    private func refreshActiveSessions() {
-        if activeSessionsInFlight { return }
-        if let t = activeSessionsFetchedAt, Date().timeIntervalSince(t) < 30 { return }
-        activeSessionsInFlight = true
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let a = AgentsCLI.activeSessions()
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.cachedActiveSessions = a
-                self.activeSessionsLoaded = true
-                self.activeSessionsFetchedAt = Date()
-                self.activeSessionsInFlight = false
+                if let snapshot {
+                    self.applySnapshot(snapshot)
+                    self.snapshotFetchedAt = Date()
+                }
+                self.snapshotInFlight = false
             }
         }
     }
@@ -391,33 +355,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    // RUSH-1415: run one watchdog tick each poll. Reads the enable sentinel first,
-    // then ticks with nudge=enabled so auto-nudge fires only when the toggle is on
-    // (detect-only otherwise). No time-throttle: nudging must be timely, and the
-    // CLI's cooldown ledger already prevents re-nudging the same split.
-    private func refreshWatchdog() {
-        if watchdogInFlight { return }
-        // Throttle like the sibling refreshers: a 30s floor keeps this well under
-        // the 5m stall threshold (still timely) while cutting the two subprocess
-        // spawns per tick from 6x/min to ~2x/min on a battery-sensitive helper.
-        if let t = watchdogFetchedAt, Date().timeIntervalSince(t) < 30 { return }
-        watchdogInFlight = true
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let enabled = AgentsCLI.watchdogStatus()?.enabled ?? false
-            let tick = AgentsCLI.watchdogTick(nudge: enabled)
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.watchdogEnabled = enabled
-                self.cachedWatchdog = tick
-                self.watchdogFetchedAt = Date()
-                self.watchdogInFlight = false
-            }
-        }
-    }
-
     private func refreshBadge() {
         guard let button = statusItem.button else { return }
-        let attention = badgeSessions.filter { $0.status == .attention }.count
+        let attention = badgeSessions.filter { $0.status == .inputRequired }.count
         let running = badgeSessions.filter { $0.status == .running }.count
         let pending = badgePending.count
         if attention > 0 || !badgeLoaded.isEmpty {
@@ -464,11 +404,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 recentSessions: cachedRecentSessions, routines: cachedRoutines,
                 doctor: cachedDoctorOverview, daemonPid: daemonPid, pending: pending, loaded: loaded)
         refreshBadge()
-        refreshRoutines()
-        refreshRecentSessions()
-        refreshActiveSessions()
+        refreshSnapshot()
         refreshDoctorOverview()
-        refreshWatchdog()
     }
 
     // The one rule: attention floats to the top triage strip (wait-time sorted,
@@ -491,7 +428,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // failing/overdue routines and a stopped scheduler — so the menu is rich
         // whenever the triage strip has anything to say, not only when a session
         // is blocked.
-        let attention = sessions.filter { $0.status == .attention }.count
+        let attention = sessions.filter { $0.status == .inputRequired }.count
         let routinesFailing = routines.contains { routineNeedsAttention($0) }
         let schedulerStopped = daemonPid == nil && !routines.isEmpty
         let needsYou = attention + loaded.count + (routinesFailing ? 1 : 0) + (schedulerStopped ? 1 : 0)
@@ -516,7 +453,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         // Live work grouped by repo — attention rows live in the triage strip,
         // not here. Skipped entirely on a calm, idle machine.
-        let live = sessions.filter { $0.status == .running || $0.status == .idle }
+        let live = sessions.filter { $0.status != .inputRequired }
         if !live.isEmpty || !browserTasks.isEmpty {
             addActive(menu, live: live, browserTasks: browserTasks, rich: rich)
             menu.addItem(.separator())
@@ -539,22 +476,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         addFooter(menu, daemonPid: daemonPid)
     }
 
-    // Swap the cheap terminal rows for the engine's list once the warm cache
-    // has it. The engine list also carries teams/cloud contexts — those are
-    // dropped here because the cheap sources own them (titles from meta.json /
-    // tasks.db that the engine payload lacks); keeping both would double-count.
+    // Swap every cheap row for the engine's canonical list once the warm cache
+    // has it. This preserves the exact lifecycle status and row count emitted by
+    // `agents sessions --active --local --json` across terminal, teams, cloud,
+    // tmux, and headless contexts. Cheap files are cold-start display only.
     private func merged(_ cheap: [Session]) -> [Session] {
         guard activeSessionsLoaded, !cachedActiveSessions.isEmpty else { return cheap }
-        let engineTerminals = cachedActiveSessions.filter {
-            $0.context != "teams" && $0.context != "cloud"
-        }
-        return LocalState.sessions(fromActive: engineTerminals)
-            + cheap.filter { $0.context != "terminal" }
+        return LocalState.sessions(fromActive: cachedActiveSessions)
     }
 
     // MARK: Sections
     private func addHeader(_ menu: NSMenu, sessions: [Session], plusNeeds: Int = 0) {
-        let attn = sessions.filter { $0.status == .attention }.count + plusNeeds
+        let attn = sessions.filter { $0.status == .inputRequired }.count + plusNeeds
         let running = sessions.filter { $0.status == .running }.count
         let status: String
         let color: NSColor
@@ -601,7 +534,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                                    loaded: [LoadedDevice], rich: Bool) -> Bool {
         var rows: [(String, NSColor, String, NSMenu?)] = []   // glyph, color, text, submenu
 
-        let blocked = sessions.filter { $0.status == .attention }
+        let blocked = sessions.filter { $0.status == .inputRequired }
         let groups = Dictionary(grouping: blocked) { s in "\(s.agent)\u{0000}\(s.repo)" }
         // Sort each group oldest-first, then order groups by their oldest wait.
         let sortedGroups = groups.values.map { group -> [Session] in
@@ -760,12 +693,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // Expand rebuilds from the warm cache only — no CLI, no re-index.
     private func addActive(_ menu: NSMenu, live: [Session], browserTasks: [BrowserTask], rich: Bool) {
         let totalRun = live.filter { $0.status == .running }.count
-        let totalIdle = live.count - totalRun
+        let totalIdle = live.filter { $0.status == .idle }.count
         let projectCount = Set(live.map { $0.repo.isEmpty ? "other" : $0.repo }).count
         var head = "ACTIVE"
         var bits: [String] = []
         if totalRun > 0 { bits.append("\(totalRun) run") }
         if totalIdle > 0 { bits.append("\(totalIdle) idle") }
+        let otherStatuses = Dictionary(grouping: live.filter {
+            $0.status != .running && $0.status != .idle
+        }, by: \.status)
+        for status in otherStatuses.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+            bits.append("\(otherStatuses[status]!.count) \(ActiveDisplay.statusLabel(status))")
+        }
         if projectCount > 0 { bits.append("\(projectCount) project\(projectCount == 1 ? "" : "s")") }
         if !bits.isEmpty { head += " · " + bits.joined(separator: " · ") }
         addSectionTitle(menu, head, color: .secondaryLabelColor)
@@ -781,12 +720,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         for repo in orderedKeys {
             guard let group = groups[repo] else { continue }
-            let running = group.filter { $0.status == .running }.count
-            let idle = group.count - running
+            let statuses = Dictionary(grouping: group, by: \.status).mapValues(\.count)
             let machines = group.compactMap(\.machine)
             let open = expandedProjects.contains(repo)
-            let summary = ActiveDisplay.projectSummary(repo: repo, running: running,
-                                                       idle: idle, machines: machines)
+            let summary = ActiveDisplay.projectSummary(repo: repo, statuses: statuses,
+                                                       machines: machines)
             let header = NSMenuItem(title: summary, action: nil, keyEquivalent: "")
             let headerView = ProjectAccordionRowView(summary: summary, repo: repo,
                                                      sessionCount: group.count, expanded: open)
@@ -820,8 +758,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// Agent summary under an expanded project. Detail lives in the › submenu
     /// (linkable ticket/PR/cwd, locality, duration) — not a second accordion.
     private func makeSessionRow(session s: Session, rich: Bool) -> NSMenuItem {
-        let glyph = s.status == .running ? "●" : (s.status == .attention ? "⚠" : "◐")
-        let color = s.status == .running ? run : (s.status == .attention ? wait : idleC)
+        let glyph = ActiveDisplay.statusGlyph(s.status)
+        let color = s.status == .running ? run : (s.status == .inputRequired ? wait : idleC)
         let agent = LocalState.agentLabel(s.agent)
         let host = s.machine ?? thisMachine
         let age = ActiveDisplay.ageLabel(fromMs: s.lastActivityMs ?? s.startedAtMs)
@@ -832,6 +770,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if let t = s.ticketId, !t.isEmpty { chips.append("🎫\(t)") }
         if let pr = ActiveDisplay.prNumber(from: s.prLink) { chips.append("PR#\(pr)") }
         else if let link = s.prLink, !link.isEmpty { chips.append("PR") }
+        if s.origin == "routine" {
+            chips.append(s.routineName.map { "routine:\($0)" } ?? "routine")
+        }
 
         var line = "\(glyph) \(agent) · \(host)"
         if let surface = s.surface, !surface.isEmpty { line += " · \(surface)" }
@@ -889,7 +830,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // rest already starts with glyph when built above — strip the leading glyph
         // if present so we don't double it.
         var body = rest
-        for prefix in ["● ", "◐ ", "⚠ "] {
+        for prefix in ["● ", "◐ ", "○ ", "⊘ ", "× ", "✗ ", "◍ ", "◌ "] {
             if body.hasPrefix(prefix) { body = String(body.dropFirst(prefix.count)); break }
         }
         out.append(NSAttributedString(string: body, attributes: [
@@ -974,8 +915,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             switch s.status {
             case .running: return "● running"
             case .idle: return "◐ idle"
-            case .attention: return "⚠ needs you"
-            case .queued: return "queued"
+            case .inputRequired: return "waiting"
+            case .orphaned: return "orphan"
+            default: return ActiveDisplay.statusLabel(s.status)
             }
         }()
         var timeLine = statusWord

@@ -23,6 +23,8 @@ import {
   toolSearchFleetSortError,
   toolSearchForwardedArgs,
   matchesLiveStatus,
+  isRunningLiveSession,
+  resolveSessionAgentName,
   requestedLiveStatuses,
 } from './sessions.js';
 import { remoteAgentsJsonCommand } from '../lib/remote-agents-json.js';
@@ -41,6 +43,15 @@ const cliEntry = path.join(repoRoot, 'src', 'index.ts');
 // problem and shell:true arg-concatenation (which would split multi-word query
 // args like "prompt text").
 const tsxLoaderUrl = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
+
+describe('session harness name resolution', () => {
+  it('shares canonical aliases and typo correction with focus selectors', () => {
+    expect(resolveSessionAgentName('claude-code')).toBe('claude');
+    expect(resolveSessionAgentName('cladue')).toBe('claude');
+    expect(resolveSessionAgentName('GROK')).toBe('grok');
+    expect(resolveSessionAgentName('not-a-harness')).toBeNull();
+  });
+});
 
 describe('live session status flags', () => {
   const row = (over: Partial<ActiveSession>): ActiveSession => ({
@@ -66,6 +77,14 @@ describe('live session status flags', () => {
     for (const status of ['idle', 'orphaned', 'crashed', 'closed', 'abandoned', 'queued', 'unknown'] as const) {
       expect(matchesLiveStatus(row({ status }), status)).toBe(true);
     }
+  });
+
+  it('distinguishes active rows from dead rows retained for recovery filters', () => {
+    expect(isRunningLiveSession(row({ status: 'running', pidAlive: true }))).toBe(true);
+    expect(isRunningLiveSession(row({ status: 'orphaned' }))).toBe(true);
+    expect(isRunningLiveSession(row({ status: 'closed', pidAlive: false }))).toBe(false);
+    expect(isRunningLiveSession(row({ status: 'crashed' }))).toBe(false);
+    expect(isRunningLiveSession(row({ status: 'abandoned', pidAlive: false }))).toBe(false);
   });
 
   it('routes aliases, unions, and the waiting exit gate through the real CLI', () => {
@@ -140,6 +159,12 @@ describe('live session status flags', () => {
       const waitingUnion = runAgents(['sessions', '--waiting', '--orphan', '--json', '--local'], cwd, tempHome);
       expect(waitingUnion.status).toBe(1);
       expect(JSON.parse(waitingUnion.stdout).map((row: ActiveSession) => row.sessionId)).toContain(liveSessionId);
+
+      const active = runAgents(['sessions', '--active', '--json', '--local'], cwd, tempHome);
+      expect(active.status, active.stderr).toBe(0);
+      const activeIds = JSON.parse(active.stdout).map((row: ActiveSession) => row.sessionId);
+      expect(activeIds).toContain(liveSessionId);
+      expect(activeIds).not.toContain(crashedSessionId);
     } finally {
       sleeper.kill('SIGTERM');
       fs.rmSync(tempHome, { recursive: true, force: true });

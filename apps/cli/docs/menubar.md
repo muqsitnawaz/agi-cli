@@ -8,10 +8,18 @@ The menu bar helper (`MenubarHelper.app`) is a no-Dock, `.accessory` status-bar
 app. Its icon — the agents-cli `a` mark — sits in the menu bar and answers, at a
 glance, "what are my agents doing right now, and does anything need me?"
 
-It reads state **directly from disk** and never invokes the `agents` CLI to
-populate the menu, so opening it costs a few file reads and never triggers the
-sessions transcript re-index. It shells the CLI only for *actions* (starting a
-session, running a routine).
+It keeps menu state warm with one read-only `agents menubar snapshot --json`
+subprocess every three minutes. That command reads indexed/cache state and never
+re-indexes transcripts. Opening the menu uses the warm result; CLI actions remain
+explicit controls (starting a session, running a routine).
+
+The snapshot carries the same rows and lifecycle status as
+`agents sessions --active --local --json`. After the warm snapshot loads, the
+menu does not infer status again from terminal registries or attention files;
+those cheap files are used only during cold start. The ACTIVE section therefore
+uses the CLI words `working`, `waiting`, `idle`, `queued`, `orphan`, `crashed`,
+`closed`, `abandoned`, and `unknown`, and routine sessions carry
+`routine:<name>` when the indexed name is available.
 
 macOS only. It is auto-enabled for every user (see [Lifecycle](#lifecycle)); opt
 out with `agents menubar disable`.
@@ -161,8 +169,8 @@ One rule shapes the menu: **attention floats up, context groups down.**
  │ New Session                                ⌘N │   submenu: one entry per agent
  ├────────────────────────────────────────────────┤
  │ ACTIVE · 3 run · 1 idle · 2 projects          │   projects collapsed by default
- │   ▶ agents-cli  ●2 ◐1  zion                   │   accordion: ▶ folds agents open
- │   ▼ web  ●1  zion                             │
+│   ▶ agents-cli  ●2 working ○1 idle  zion      │   accordion: ▶ folds agents open
+│   ▼ web  ●1 working  zion                     │
  │     ● Codex · zion · 12m  ⌥ PR#42 — title   › │   › side submenu = full detail
  ├────────────────────────────────────────────────┤
  │ ROUTINES · 16 · next 7:00 PM · 2 paused       │   next few upcoming + failing
@@ -200,7 +208,8 @@ One rule shapes the menu: **attention floats up, context groups down.**
   [terminal-engine.md → Choosing a terminal](terminal-engine.md#choosing-a-terminal-for-a-gui-caller).
   (It used to always open Terminal.app.)
 - **ACTIVE** — **project accordion** + **session detail submenu**. Projects are
-  **collapsed by default** as a status strip (`▶ agents-cli  ●8 ◐1  zion`).
+  **collapsed by default** as a status strip
+  (`▶ agents-cli  ●8 working ◐1 waiting ○1 idle  zion`).
   Click `▶`/`▼` to fold the project open **inline** and list its agents.
   The project header is an embedded menu control, so expanding or collapsing
   mutates only that project's rows inside the current menu tracking session; it
@@ -313,12 +322,14 @@ the helper can no longer become the second, and `status` now lists every copy.
 
 ## Data sources
 
-The helper assembles the menu by reading these directly — no CLI, no re-index:
+The helper assembles the menu from these cached/indexed sources through one snapshot
+command every three minutes; the 10-second badge/liveness checks stay local:
 
 | Source | Path | Gives |
 |---|---|---|
 | Terminals | `~/.agents/.cache/terminals/live-terminals.json` | extension-registered terminals (agent, cwd, pid, label) — cold start + 10s badge poll |
-| Active sessions | `agents sessions --active --local --json` (warm cache, 30s TTL) | every local session (tmux / IDE / headless) with running-vs-idle — feeds triage + ACTIVE once loaded |
+| Menu snapshot | `agents menubar snapshot --json` every three minutes | routines, 40 indexed recent sessions, daemon-warmed local active sessions with the exact `sessions --active` lifecycle status, and persisted watchdog status in one subprocess |
+| Doctor | `agents doctor --json` every 15 minutes | install and configuration health; kept separate because it is substantially heavier |
 | Teams | `~/.agents/.history/teams/agents/<id>/meta.json` | running teammate agents |
 | Cloud | `~/.agents/.cache/cloud/tasks.db` (SQLite) | cloud tasks, incl. `input_required` or `needs_review` → "awaiting input" |
 | Attention sentinels | `~/.agents/.cache/state/attention/<sessionId>` | terminal sessions awaiting input — mtime = wait start, content = the awaiting message (written by the Notification hook). On read, sentinels whose sessionId is not in the current live-terminals set are unlinked as orphans (defense against sessions killed hard, hookless Claude versions, or sessionId mismatches). |
@@ -343,6 +354,21 @@ The helper is a launchd user service (`com.phnx-labs.agents-menubar`,
   self-heal re-copies the bundle, rewrites the plist, and restarts it — so
   `npm update` actually moves users onto the new helper instead of leaving the
   old one running.
+- **One owner, when several installs coexist.** The helper lives at one path, but
+  every agents-cli copy on the box runs the self-heal. The plist's `AGENTS_ENTRY`
+  records the owner, and only the owner re-copies the bundle freely — otherwise
+  each copy reads the others' marks as drift and reinstalls over them, killing the
+  running helper every few seconds (#2109). A same-install `npm update` keeps its
+  entry path, so upgrades are unaffected. Another install still gets there:
+  immediately if the recorded owner is gone from disk, otherwise at most once an
+  hour (`.menubar-last-heal`), and never on that timer if its own bundle is
+  ad-hoc/dev-signed — recopying an un-notarized bundle over a good one gets it
+  rejected as "damaged". Repairs (missing executable, Developer-ID heal) are never
+  gated. `agents menubar setup` bypasses all of this and is the immediate fix.
+
+  Two installs that are *both* invoked regularly will keep trading ownership at
+  the cooldown, so the helper restarts about once an hour until one is removed —
+  bounded and survivable, but the real fix is a single install.
 - **Opt-out is sticky.** `agents menubar disable` writes
   `~/.agents/.cache/state/menubar.disabled`; the auto-enable honors it, so a
   disabled menu bar never silently returns on the next upgrade. Re-enable with
@@ -459,6 +485,7 @@ the current bundle on any version bump.
 | `~/Library/LaunchAgents/com.phnx-labs.agents-menubar.plist` | launchd service |
 | `~/Library/Application Support/agents-cli/MenubarHelper.app` | installed helper bundle |
 | `~/Library/Application Support/agents-cli/.menubar-version` | installed-version stamp |
+| `~/Library/Application Support/agents-cli/.menubar-last-heal` | last self-heal reinstall, epoch ms — the non-owner takeover cooldown |
 | `~/.agents/.cache/state/menubar.disabled` | sticky opt-out marker |
 | `~/.agents/.cache/helpers/menubar/menubar.log` | helper stdout / stderr |
 | `~/.agents/.history/menubar/recent-tickets.json` | tickets filed from the quick-dispatch panel (RECENT TICKETS) |

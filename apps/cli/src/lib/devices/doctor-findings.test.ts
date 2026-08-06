@@ -364,6 +364,37 @@ describe('rc-hygiene + exec-policy findings (restored from the pre-RUSH-2069 adv
     expect(buildLocalFindings(localInput({ rcSecrets: [] })).some((f) => f.kind === 'rc-secret-export')).toBe(false);
   });
 
+  it('the master key live in the process env is its own warning', () => {
+    const findings = buildLocalFindings(localInput({ masterPassphraseInEnv: true }));
+    const env = findings.filter((f) => f.kind === 'env-secret-export');
+    expect(env).toHaveLength(1);
+    expect(env[0].severity).toBe('warning');
+    // "restart the shell" alone is wrong: the value lives in every long-lived
+    // parent that inherited it, each still handing it to new children.
+    expect(env[0].remediation).toContain('unset at the source');
+    expect(env[0].remediation).toContain('agents daemon');
+    // The message must never carry the value — only that it is set.
+    expect(env[0].message).toContain('AGENTS_SECRETS_PASSPHRASE is set in this process environment');
+  });
+
+  it('the env finding fires with NO rc export present — the gap it exists for', () => {
+    // The whole point: a value inherited by a long-lived process outlives the rc
+    // line that set it, so deleting the line leaves `rcSecrets` empty while the
+    // key is still in flight. A file scan alone reports that box clean.
+    const findings = buildLocalFindings(localInput({ rcSecrets: [], masterPassphraseInEnv: true }));
+    expect(findings.some((f) => f.kind === 'rc-secret-export')).toBe(false);
+    expect(findings.some((f) => f.kind === 'env-secret-export')).toBe(true);
+  });
+
+  it('not set → no env finding', () => {
+    expect(buildLocalFindings(localInput({ masterPassphraseInEnv: false }))
+      .some((f) => f.kind === 'env-secret-export')).toBe(false);
+    // Absent input behaves as false rather than throwing — every other local
+    // input is optional and a remote payload may omit it.
+    expect(buildLocalFindings(localInput({}))
+      .some((f) => f.kind === 'env-secret-export')).toBe(false);
+  });
+
   it.each(['Restricted', 'AllSigned'] as const)(
     'a Windows %s execution policy warns that agents.ps1 is blocked',
     (policy) => {
@@ -631,6 +662,64 @@ describe('remediationFor', () => {
 
   it('stale-cli → upgrade', () => {
     expect(remediationFor({ ...base, kind: 'stale-cli' })).toBe('upgrade');
+  });
+
+  it('owner-sink-unreachable → the rush PATH + login fix', () => {
+    const r = remediationFor({ ...base, kind: 'owner-sink-unreachable' });
+    // Names the two real levers: non-interactive PATH (RUSH-2258) and login.
+    expect(r).toContain('~/.zshenv');
+    expect(r).toContain('rush login');
+  });
+});
+
+describe('owner-sink-unreachable finding (RUSH-2262)', () => {
+  it('a configured-but-unreachable owner lane is a CRITICAL naming the reason', () => {
+    const notOnPath = buildLocalFindings(localInput({
+      ownerSink: { configured: true, reachable: false, channel: 'imessage', reason: 'rush-not-on-path' },
+    }));
+    expect(notOnPath).toHaveLength(1);
+    expect(notOnPath[0]).toMatchObject({
+      severity: 'critical', kind: 'owner-sink-unreachable', device: 'boxA',
+    });
+    expect(notOnPath[0].message).toContain('imessage');
+    expect(notOnPath[0].message).toContain("not on this box's PATH");
+
+    const signedOut = buildLocalFindings(localInput({
+      ownerSink: { configured: true, reachable: false, channel: 'imessage', reason: 'rush-signed-out' },
+    }));
+    expect(signedOut).toHaveLength(1);
+    expect(signedOut[0].message).toContain('no usable session here');
+    // Severity emitted matches FINDING_SEVERITY — the rubric-consistency contract.
+    expect(signedOut[0].severity).toBe(FINDING_SEVERITY['owner-sink-unreachable']);
+  });
+
+  it('a reachable owner lane emits NO finding', () => {
+    expect(buildLocalFindings(localInput({
+      ownerSink: { configured: true, reachable: true, channel: 'imessage' },
+    }))).toEqual([]);
+  });
+
+  it('an un-opted-in box (no owner configured) emits NO finding', () => {
+    // configured:false means the fleet does not use owner delivery — not "broken".
+    expect(buildLocalFindings(localInput({
+      ownerSink: { configured: false, reachable: false },
+    }))).toEqual([]);
+    // And an absent probe (no ownerSink input) also emits nothing.
+    expect(buildLocalFindings(localInput())).toEqual([]);
+  });
+
+  it('renders in the CRITICAL section with an `owner` subject, not a blank label', () => {
+    const findings = buildLocalFindings(localInput({
+      ownerSink: { configured: true, reachable: false, channel: 'imessage', reason: 'rush-signed-out' },
+    }));
+    const out = renderFindings(findings, { boxA: {} }, { fleet: false, baseline: 'boxA' })
+      .map(stripAnsi);
+    const critLine = out.find((l) => l.includes('owner unreachable'));
+    expect(critLine).toBeDefined();
+    // Left column is `owner` (subjectLabel would be empty for a no-agent finding),
+    // and the row carries its remediation.
+    expect(critLine).toMatch(/\bowner\b/);
+    expect(critLine).toContain('rush login');
   });
 });
 

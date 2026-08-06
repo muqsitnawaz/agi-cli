@@ -12,12 +12,9 @@
  * local run. The `[host/<name>]` label mirrors the cloud path's
  * `[cloud/<status>]` convention.
  *
- * `machine` is the DISPATCH HOST, not this box: the transcript and the agent
- * process both live over there, which is exactly what `machine` means
- * (session/types.ts). Getting this wrong is not cosmetic — `sessions --host`
- * filters on it and the resume router (session/resume-owner.ts) reads it to
- * decide whether a resume may run here, so an unset value read as "local" and
- * restarted a remote run on the dispatching box (RUSH-2022).
+ * `machine` is the dispatch host, not this box. Both the transcript and the
+ * version-isolated harness home live there; omitting it makes the SQLite upsert
+ * infer this box from the empty file path and sends recovery to the wrong home.
  */
 
 import * as fs from 'fs';
@@ -55,10 +52,6 @@ export function hostSessionMeta(task: HostTask, ctx: HostSessionContext): Sessio
     // Remote transcript — no local file. Empty file_path is the sentinel the DB
     // stale-filter treats as "always live" (see module doc).
     filePath: '',
-    // The transcript AND the agent process live on the dispatch host, so that is
-    // the session's origin machine. Leaving it unset made the index claim the
-    // dispatching box, which is what let `agents resume <id>` restart a remote
-    // run locally against state this machine never had (RUSH-2022).
     machine: normalizeHost(task.host),
     topic: ctx.prompt.split('\n')[0]?.slice(0, 120) || undefined,
     // The run's `--name` seeds the label (resolves `agents sessions <name>` and
@@ -138,9 +131,6 @@ export function registerInteractiveHostSession(ctx: InteractiveHostSessionContex
         timestamp: ctx.createdAt ?? new Date().toISOString(),
         cwd: ctx.cwd,
         filePath: '',
-        // Same origin-machine stamp as the detached path above (RUSH-2022) — an
-        // interactive `agents run --device <box>` is the exact case the report
-        // walked into: the TUI is here, the session is there.
         machine: normalizeHost(ctx.host),
         label: ctx.name || `[host/${ctx.host}]`,
       },

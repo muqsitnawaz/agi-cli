@@ -16,9 +16,11 @@ interchangeable — pick the verb for the intent:
 
 | Intent | Verb |
 | --- | --- |
-| Jump to a **live** session, or multi-select several and open each as a tab (attach its pane, or resume a copy) | `agents sessions focus [id]` |
-| Scope the picker to one device and/or a live-state (composes) | `agents sessions focus --orphan --device <host>` |
+| Focus by unique id, or multi-select history/live rows and open tabs | `agents sessions focus [selector]` |
+| Select by harness/version on a device (`latest` resolves there) | `agents sessions focus claude@latest --device <host>` |
+| Compose browser filters, including live-state unions | `agents sessions focus claude --orphan --waiting --device <host>` |
 | Attach only — never open a new tab / fork a copy | `agents sessions focus [id] --attach-only` |
+| Re-enter a dropped remote terminal (attach live pane, else resume) | `agents reconnect [id]` / `agents sessions reconnect [id]` |
 | Deprecated alias of focus --attach-only | `agents sessions go` (prints a deprecation notice) |
 | Interactive → **headless** (keep working unattended) | `agents sessions detach <id>` |
 | Headless → **interactive** in this terminal | `agents sessions attach <id>` |
@@ -29,54 +31,54 @@ interchangeable — pick the verb for the intent:
 `focus` is the default “take me there” action. With an id or tmux alias it resolves
 the canonical session across the fleet, rechecks liveness, and attaches only when
 the process and pane are alive. A retained dead tmux pane is diagnostic state, not
-an attach target; the command resumes the native conversation on its owning device.
-With no id it opens a
+an attach target; the command enters centralized recovery on its owning device.
+With no selector or filter it opens a
 multi-select picker over the live fleet: check several and each opens as a new tab
 in the terminal you're in (Ghostty / iTerm / tmux, auto-detected), reusing
 `resume`'s batch open + flood guard. Per tab it keeps live semantics — a tmux
 session is *joined* (a second client, no fork), local or remote over SSH; a session
-with no attach rail resumes a copy in the tab, reported never silently dropped.
-`sessions resume` opens each selected session in a tab running the canonical
-`agents resume <id>`, and that command owns source-device routing — so a session
-owned by another box opens its tab here and hops to its owner from inside it,
-rather than starting a harness against state that machine does not have. With no
-tab-capable terminal (a plain ssh shell), sessions resume one at a time and take
-the same hop directly.
-`--device/--host <name>` scopes the picker to those devices and the `--active`
-live-state filters (`--orphan`/`--crashed`/`--waiting`/`--idle`/`--working`/…) narrow
-by status; the two compose (`focus --orphan --device yosemite-s0`). A direct
-`focus <id>` still single-jumps, and `--attach-only` keeps the old `go` behavior
-(attach one or refuse). `attach` / `detach` are the presence pair (foreground ↔
-background). Bare `sessions resume` is the multi-open/history path. Passing a UUID,
-unique UUID prefix, full tmux name such as `ag-codex-c1f3d813`, or unique alias
-suffix such as `c1f3d813` runs the same live-first lifecycle directly. Tmux aliases
-are bound durably to the harness-native ID at SessionStart and resolve on the device
-that owns them; ambiguous prefixes/suffixes fail instead of guessing. Top-level
+with no attach rail enters recovery in the tab, reported never silently dropped.
+Any selector or filter switches to the shared sessions-browser candidate pipeline:
+agent/version (`claude@2.1.187`, `claude@latest`), device/host/local, project/time,
+team/routine, skill/plugin, favorites, and the complete live-state union. A unique
+id focuses directly; agent/version and text selectors always show the rich preview
+picker, even for one result. `latest` and `oldest` resolve independently on each
+queried device. A full tmux name such as `ag-codex-c1f3d813` and a unique alias
+suffix such as `c1f3d813` resolve to the harness-native session ID on the device
+that owns them; ambiguous prefixes and suffixes fail instead of guessing.
+`--attach-only` keeps the old `go` behavior (attach one living
+process or refuse). `reconnect` is the recovery-first sibling for a dropped remote
+terminal: it attaches the live pane if it survived, else resumes the session, and
+with no id targets the most recent session started from the current directory (the
+one that most likely just dropped) rather than the fleet picker — the manual
+companion to the automatic reattach that runs when `agents run --device <box>`
+loses its ssh link (see [hosts.md](hosts.md)). `attach` / `detach` are the presence
+pair (foreground ↔ background). Bare `resume` is the multi-open/history path. Top-level
 `agents resume <id-or-label>` is the strict single-session shortcut:
 a full **UUID** checks the local SQLite index first and resolves with **zero** SSH on
 a local hit; only on a local miss does it fan out to registered devices, and there the
 fan-out is cancellable and early-exits — the first peer holding the UUID resolves the
 lookup and SIGTERMs the rest, so a fast peer's hit is not bounded by the
 slowest/unreachable peer's timeout. It then routes to the owning device and invokes the
-version that created the session with its recorded cwd and launch mode. **"Routes to the
-owning device" is an SSH hop, not a local start:** when the session's origin machine is
-another box, `agents resume` re-runs itself there over the same peer transport the
-picker uses, because the harness's conversation state lives on that machine — starting
-it here would run the agent against state this box has never seen. `--here` overrides
-and runs locally. `agents sessions attach <id>` hops the same way, as an *attach*: both
-halves of it (the detach record and the headless process it stops) are on the owner.
-A run dispatched with `agents run --device <box>` records `<box>` as its origin machine in
-the local index, so it resumes back on that box rather than on the machine that dispatched
-it (RUSH-2022). An exact
+version that created the session with its recorded cwd and launch mode. An exact
 **label** always consults the fleet (labels are not globally unique, so a same-label
 session could live on another peer): a unique match auto-resumes, a cross-machine
 collision surfaces as an ambiguity, and an ambiguous short-id prefix still surfaces
-every candidate. `agents run auto --resume <id>` is
-the adaptive form: it prefers native resume when the original harness/version is
-healthy and otherwise lets the normal router select an available harness/account,
-then hands the transcript over through `/continue`. Detail in **Background &
+every candidate. `agents run auto --resume <id>` is the adaptive form: on the
+origin device it prefers native resume only when the original harness/version is
+installed and healthy. Otherwise the account router selects a healthy version of
+the **same harness** and hands the indexed transcript over through `/continue`. It
+never native-resumes from a different version's isolated home. If no same-harness
+version is usable, the command names the device, origin version, and account-health
+reason. Detail in **Background &
 foreground (detach / attach)** below, and
 `agents sessions --help`.
+
+Before focus attaches tmux, it queries `#{pane_dead}` on the owning device. A
+retained `remain-on-exit` pane is not proof of a living agent: dead and missing
+panes recover; living panes attach. The attach shell repeats the check so a pane
+that exits between selection and tab launch fails instead of opening tmux's
+`Pane is dead` screen.
 
 ## Architecture
 
@@ -137,6 +139,28 @@ was scanned within the last 10 minutes, so an in-place append is never missed. A
 create / delete / rename bumps the dir mtime and forces a full re-walk of that dir.
 Set `AGENTS_SESSIONS_NO_DIR_LEDGER=1` to disable the short-circuit and force the old
 full per-file walk.
+
+**OpenCode is stamped per row, not per file.** It keeps every session in one shared
+`~/.local/share/opencode/opencode.db`, so that file's `(mtime, size)` moves whenever
+*any* session is written and cannot say which one changed. Its `scan_ledger` stamp is
+keyed by the synthetic `opencode.db#<id>` path and holds, for that session alone: the
+newest write time across its `session` row, its messages, and its parts, paired with
+the total byte length of its message + part payloads. The file-level stat is kept only
+as the cheap "nothing changed at all" short-circuit for the whole harness. Before this,
+one new turn re-emitted every indexed OpenCode session (up to the scan's `LIMIT 1000`)
+and re-opened the database once per re-emitted session to re-parse a transcript that
+had not moved (RUSH-2210).
+
+Both halves of that stamp are load-bearing. `session.time_updated` alone is **not** the
+session's change signal — on a real database, parts land long after the session row was
+last touched (one session carried `time_updated = 1771316403087` with its newest part
+over four hours later), so a stamp built from it would call that session unchanged
+forever. And the byte total is a genuine size rather than a row counter, because
+`sessions.file_size` is read back as bytes elsewhere: `ensureToolIndex` uses it as the
+tool-backfill byte budget and `toolCallsForBackfill` as the 16 MiB in-memory parser cap
+([`src/lib/session/tool-index.ts`](../src/lib/session/tool-index.ts)). A per-session
+message + part byte total is the honest parse cost, where this column previously held
+the whole database's size for every OpenCode row.
 
 Cursor is installed outside agents-cli's version homes. Once any managed agent
 version exists, the default managed scope excludes Cursor transcripts; pass
@@ -328,6 +352,25 @@ normal session cache. It clears only `tool_scan_ledger`, so historical occurrenc
 rows are rebuilt explicitly without forcing ordinary session history to reparse.
 The ledger is keyed by session id; its source path is retained for maintenance,
 not resolved or checked during a query.
+
+Schema v36 makes the **backfill** side of that lifecycle incremental too.
+Incremental discovery already appended (`toolIndexMode: 'append'`, `discover.ts`),
+carrying its own continuation in `scan_ledger.parser_state`; `ensureToolIndex`
+did not, so every `agents sessions backfill tools` pass re-read the transcript
+from byte 0 and deleted the session's evidence to rewrite it. `tool_scan_ledger`
+now carries its own resume point — `parsed_offset` (the byte just past the last
+complete record consumed) and `parser_state` (the collector snapshot at that
+offset) — so a transcript that only grew is read from where the last pass stopped
+and merged with `mode: 'append'`. A discovery-driven write records no resume point
+of its own and clears the columns, which is correct: it keeps the tool ledger's
+stamp current, so the next backfill pass finds nothing to do at all. The resume point is refused, and the whole file
+re-read, on a different extractor version, a ledger source path that does not
+match, or a file shorter than what was already parsed. Harnesses parsed whole into
+memory record no resume point and remain full replaces. The same migration rebuilds
+`tool_call_text` so each row sits at the `rowid` of the `tool_calls` row it
+describes: its `call_key` is UNINDEXED, so the previous `DELETE ... WHERE call_key
+= ?` scanned the whole FTS index once per call. Neither ledger is wiped — existing
+sessions re-read once, record a resume point, and are incremental after that.
 
 Schema v33 adds `account_key` / `account_org` and `idx_sessions_account_key`. Its
 migration also leaves `scan_ledger` alone: attribution derives from `file_path` and
@@ -696,7 +739,13 @@ unreachable still falls back to any age).
 
 On a TTY it opens the interactive browser seeded to running-only; `--json`,
 `--waiting`, and `--no-interactive` print the static grouped view instead. Both read
-the same gather, so they always agree on what is live.
+the same gather and the same running predicate, so they always agree on what is live.
+The registry retains terminally-dead rows for recovery, but bare `--active` excludes
+`closed`, `crashed`, and rows whose process is positively dead. Explicit lifecycle
+filters such as `--closed` and `--crashed` select those retained rows instead.
+Per-device `latest` / `oldest` selectors accept only rows returned by that device's
+version-filtered index query; an unindexed live row with no resolved version does not
+silently widen the picker.
 
 **Team lineage.** A teams teammate row carries the id of the **orchestrator** that
 spawned it — the session that ran `agents teams add`, captured from
@@ -949,9 +998,15 @@ not a per-agent special case. (In the Factory extension: **Agents: Detach**
     a `teams` session must be stopped through `agents teams` so the team supervisor's
     PID-reuse-safe stop path and bookkeeping stay in sync — `detach` won't SIGTERM a
     teammate out from under it.
-- **attach**: stop the headless continuation (if any), then `resumeSessionInPlace`
-  the session interactively in the current terminal — the same session, full history,
-  including whatever the background run did.
+- **attach**: route the whole operation to the origin device, stop the headless
+  continuation there (if any), then `resumeSessionInPlace` interactively — the
+  same session and full history, including whatever the background run did. The
+  detach-record lookup and PID stop happen after routing so a cross-device attach
+  cannot leave the real background process running beside a second recovery.
+
+Host-dispatched session rows persist the dispatch host as `machine`. Their empty
+remote `filePath` therefore cannot make the SQLite index infer the dispatching box
+as the origin or send recovery into the wrong device's isolated version home.
 
 The record `detach` writes (`~/.agents/.system/detached/<id>.json`, one file per
 session; see `lib/session/detached.ts`) is the source of truth for **presence**, which
@@ -1196,6 +1251,23 @@ session's `from → to`, mode, move-vs-copy, and status; a session that hops A�
 three lines, its lineage. Source: `src/commands/sessions-migrate.ts`,
 `src/lib/session/migrate-targets.ts`, `src/lib/session/migrations.ts`.
 
+## Cross-harness workflow insights
+
+`agents sessions insights` analyzes the last 30 days by default across every indexed
+session-capable harness. The existing `agents insights` spelling is an alias. Repeat
+`--agent` to compare a subset, use the standard `--host`/`--device` routing flags for a
+specific machine, and use `--json` for the structured report.
+
+The deterministic report runs offline and includes friction/thrash, owner corrections,
+automatable command recipes, the harness split, and a ranked actions table. Facets are
+cached in `session_insights` and invalidated by transcript mtime/size. Sample evidence is
+limited to shortened session ids; transcript text, credentials, and local paths are not
+included. `--narrative` is explicitly opt-in and sends only the aggregate report to the
+coach process.
+
+Agents can invoke the same source of truth through `/sessions-insights`; the slash entry
+is a thin command wrapper, not a second analyzer.
+
 ## Skill/plugin/slash-command usage (`session_resource_usage`)
 
 A separate table, `session_resource_usage(session_id, kind, name, plugin,
@@ -1371,4 +1443,4 @@ fan-out specifically.
 - `agents sessions <id> --artifacts` — list files created/modified in a session
 - `agents teams status` — session state for team-coordinated runs
 - `agents cloud logs <id>` — for remote cloud dispatches (different subsystem)
-- `agents sessions optimize` — compact the FTS5 search index (`tool_call_text` / `session_text`) when it has bloated from repeated re-indexing, which slows or hangs `agents sessions`. FTS5 appends a segment per insert and never self-merges the scanner's delete+insert churn; this runs `'optimize'` to merge segments + purge tombstones, non-destructively. Reclaimed space frees as reusable pages (VACUUM with the daemon stopped returns it to disk). Wireable to a weekly routine so the index never re-bloats.
+- `agents sessions optimize` — compact the FTS5 search index (`tool_call_text` / `session_text`) in one full pass. FTS5 appends a segment per insert and leaves a tombstone per delete; this runs `'optimize'` to merge every segment + purge tombstones, non-destructively. Reclaimed space frees as reusable pages (VACUUM with the daemon stopped returns it to disk). Since 1.22.25 the scan path also compacts on its own — after a batch of writes it runs a bounded incremental `'merge'` (`maintainSessionSearchIndex`), gated on a segment-count threshold so a healthy index costs nothing — so this command is the manual, unbounded catch-up for an index that already bloated, not the only thing standing between the DB and gigabytes of unmerged segments.
