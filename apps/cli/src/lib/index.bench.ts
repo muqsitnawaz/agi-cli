@@ -270,8 +270,8 @@ describe('command-registry.ts loaders — warm in-process registration only (mod
  * dead work.
  *
  * That matters because the `__secrets-*` tokens are not a rare debug surface:
- * `agentGetSync` (secrets/agent.ts:994-996) and `agentPingSync`
- * (secrets/agent.ts:1040) call `syncClient` (secrets/agent.ts:973-987), which
+ * `agentGetSync` (secrets/agent.ts:994-996) and `agentReachableSync`
+ * (secrets/agent.ts:1037-1042) call `syncClient` (secrets/agent.ts:973-987), which
  * does a real `spawnSync(command, args, ...)` (secrets/agent.ts:983) of THIS
  * CLI -- one whole fresh Node process, and therefore one whole fresh
  * package.json read + parse, per synchronous secrets read. index.ts:44-51
