@@ -39,7 +39,9 @@ with no attach rail resumes a copy in the tab, reported never silently dropped.
 `sessions resume` opens each selected session in a tab running the canonical
 `agents resume <id>`, and that command owns source-device routing — so a session
 owned by another box opens its tab here and hops to its owner from inside it,
-rather than starting a harness against state that machine does not have.
+rather than starting a harness against state that machine does not have. With no
+tab-capable terminal (a plain ssh shell), sessions resume one at a time and take
+the same hop directly.
 `--device/--host <name>` scopes the picker to those devices and the `--active`
 live-state filters (`--orphan`/`--crashed`/`--waiting`/`--idle`/`--working`/…) narrow
 by status; the two compose (`focus --orphan --device yosemite-s0`). A direct

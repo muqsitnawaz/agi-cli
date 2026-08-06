@@ -3366,19 +3366,31 @@ export async function handlePickedSession(picked: PickedSession): Promise<void> 
     return;
   }
 
-  const owner = sessionOwnerDevice(picked.session);
-  if (owner) {
-    console.log(chalk.gray(`Resuming ${picked.session.shortId} on ${owner} over SSH...`));
-    // `agents resume <id>` is the strict single-session path — one pick, one
-    // resume. (`sessions resume <shortId>` would re-open a picker over there.)
-    const rc = await runOnPeer(['resume', picked.session.id], owner, {
-      tty: true,
-      env: { [RESUME_PINNED_ENV]: '1' },
-    });
-    if (rc === 'no-target') warnNoPeerTarget(owner, picked.session);
-    return;
-  }
+  if (await resumeOnOwnerIfRemote(picked.session)) return;
   await resumeSessionInPlace(picked.session);
+}
+
+/**
+ * Resume `session` on the machine that owns it, when that is not this one.
+ * Returns true when it handled the resume (hopped, or reported an unreachable
+ * owner), false when the session is local and the caller should take over here.
+ *
+ * The one hop for a foreground, one-session-at-a-time resume — shared by the
+ * `agents sessions` picker and by `sessions resume`'s no-tab-backend path, which
+ * would otherwise reach `resumeSessionInPlace` and be refused (RUSH-2022).
+ */
+export async function resumeOnOwnerIfRemote(session: SessionMeta): Promise<boolean> {
+  const owner = sessionOwnerDevice(session);
+  if (!owner) return false;
+  console.log(chalk.gray(`Resuming ${session.shortId} on ${owner} over SSH...`));
+  // `agents resume <id>` is the strict single-session path — one pick, one
+  // resume. (`sessions resume <shortId>` would re-open a picker over there.)
+  const rc = await runOnPeer(['resume', session.id], owner, {
+    tty: true,
+    env: { [RESUME_PINNED_ENV]: '1' },
+  });
+  if (rc === 'no-target') warnNoPeerTarget(owner, session);
+  return true;
 }
 
 /**

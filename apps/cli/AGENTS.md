@@ -359,9 +359,11 @@ row consults it first: `agents resume` and the `agents sessions` picker hop to t
 owner, and `sessions attach` hops as an **attach** (its detach record and the
 headless process it stops are both on the owner — hopping as a bare resume would
 skip the stop and leave two processes on one transcript). The batch
-`sessions resume` needs no check of its own: every tab it opens runs the canonical
-`agents resume <id>` (`lib/session/resume-command.ts`), whose docblock already
-promised source-device routing — this is what makes that true.
+`sessions resume` mostly inherits it for free: every TAB it opens runs the
+canonical `agents resume <id>` (`lib/session/resume-command.ts`), whose docblock
+already promised source-device routing — this is what makes that true. Its
+no-tab-backend path (`inplace`, which any Linux box in a plain ssh shell lands on)
+never runs that command, so it routes explicitly via `resumeOnOwnerIfRemote`.
 `resumeSessionInPlace` is the LOCAL takeover and **fails loud** if it is handed a
 peer-owned session, since reaching it with one means a caller skipped its routing
 step.

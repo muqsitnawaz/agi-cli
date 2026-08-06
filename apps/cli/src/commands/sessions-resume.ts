@@ -22,6 +22,7 @@ import {
   pickerColumnsFor,
   buildResumeCommand,
   resumeSessionInPlace,
+  resumeOnOwnerIfRemote,
   parseAgentFilter,
 } from './sessions.js';
 import {
@@ -172,7 +173,10 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
   // 2. Turn the selection into surfaces. Every tab runs the canonical
   // `agents resume <id>`, which owns source-device routing — so a peer-owned
   // session opens its tab here and hops to its owner from inside it, and the
-  // local cwd below is only where that tab starts, never where the harness runs
+  // local cwd below is only where that tab starts. `agents resume` then supplies
+  // the recorded cwd on the native-resume tier (exec.ts, `canResumeNatively`);
+  // the `/continue` replay tier sets none, so there the tab's directory is what
+  // the harness inherits — unchanged from before this PR
   // (lib/session/resume-command.ts, RUSH-2022).
   const items: Array<SurfaceItem & { session: SessionMeta }> = [];
   for (const s of chosen) {
@@ -199,12 +203,20 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
     if (!proceed) return;
   }
 
-  // 5a. No tab-capable backend (off-macOS, not in tmux, local) — resume in place, sequentially.
+  // 5a. No tab-capable backend (off-macOS, not in tmux, local) — resume in place,
+  // sequentially. This path never runs `command`, so it is the one place the
+  // canonical `agents resume <id>` does NOT carry out source-device routing for
+  // us: route each peer-owned session explicitly, or `resumeSessionInPlace`
+  // (rightly) refuses it. Reached on any Linux box in a plain ssh shell, since
+  // tmux gates on $TMUX and the other backends on darwin (RUSH-2022).
   if (backend === 'inplace') {
     if (items.length > 1) {
       console.log(chalk.gray(`Resuming ${items.length} sessions one at a time (no tab-capable terminal detected).`));
     }
-    for (const it of items) await resumeSessionInPlace(it.session);
+    for (const it of items) {
+      if (await resumeOnOwnerIfRemote(it.session)) continue;
+      await resumeSessionInPlace(it.session);
+    }
     return;
   }
 
