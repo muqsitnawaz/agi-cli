@@ -1,0 +1,209 @@
+/**
+ * Tests for getResourceInventory (RUSH-2238) — the single inventory chokepoint
+ * behind inspect/doctor. Asserts the four states stay distinct (capable vs
+ * declared vs onDisk vs wired), that onDisk resolves through the RUSH-2237
+ * absolute-hooksDir fix (grok/kimi version homes list their real hooks), that
+ * unmanaged = onDisk − declared, and that getAgentResources routes its hooks
+ * listing through the inventory module.
+ *
+ * Runs in subprocesses with HOME=testHome because the path constants in
+ * state.ts capture HOME at module-load (mirrors hooks.test.ts).
+ */
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+let testHome: string;
+let userDir: string;
+let systemDir: string;
+
+beforeEach(() => {
+  testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'resource-inventory-test-'));
+  userDir = path.join(testHome, '.agents');
+  systemDir = path.join(userDir, '.system');
+  fs.mkdirSync(systemDir, { recursive: true });
+  fs.writeFileSync(path.join(userDir, 'agents.yaml'), 'agents:\n  claude: "2.0.0"\n');
+});
+
+afterEach(() => {
+  fs.rmSync(testHome, { recursive: true, force: true });
+});
+
+interface InventoryReport {
+  agent: string;
+  version: string;
+  kind: string;
+  capable: boolean;
+  declared: Array<{ name: string; path: string; source: string }>;
+  onDisk: Array<{ name: string; path: string; source: string }>;
+  wired: Array<{ name: string; path: string; source: string; detail?: string }>;
+  unmanaged: Array<{ name: string; path: string; source: string }>;
+  wiringSupported: boolean;
+}
+
+function runInventory(agent: string, version: string, opts: { register?: boolean } = {}): InventoryReport {
+  const modulePath = path.resolve(process.cwd(), 'src/lib/resource-inventory.ts');
+  const versionsPath = path.resolve(process.cwd(), 'src/lib/versions.ts');
+  const hooksPath = path.resolve(process.cwd(), 'src/lib/hooks.ts');
+  const register = opts.register
+    ? `
+      const { getVersionHomePath } = await import(${JSON.stringify(versionsPath)});
+      const { registerHooksToSettings } = await import(${JSON.stringify(hooksPath)});
+      registerHooksToSettings(${JSON.stringify(agent)}, getVersionHomePath(${JSON.stringify(agent)}, ${JSON.stringify(version)}));
+    `
+    : '';
+  const script = `
+    const mod = await import(${JSON.stringify(modulePath)});
+    ${register}
+    console.log(JSON.stringify(mod.getResourceInventory(${JSON.stringify(agent)}, ${JSON.stringify(version)}, 'hooks')));
+  `;
+  const out = execFileSync('bun', ['-e', script], {
+    cwd: process.cwd(),
+    env: { ...process.env, HOME: testHome },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  }).toString('utf-8');
+  return JSON.parse(out);
+}
+
+/** Seed a hook script inside a version home (nested relativeScript allowed). */
+function seedVersionHook(agent: string, version: string, configDir: string, relativeScript: string): string {
+  const hooksDir = path.join(userDir, '.history', 'versions', agent, version, 'home', configDir, 'hooks');
+  const scriptPath = path.join(hooksDir, relativeScript);
+  fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+  fs.writeFileSync(scriptPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  return hooksDir;
+}
+
+/** Declare a hook at the system layer (a file under <system>/hooks/). */
+function seedDeclaredHook(name: string): void {
+  const dir = path.join(systemDir, 'hooks');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${name}.sh`), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+}
+
+/** Seed a system-layer hook manifest entry + the script in a claude version home. */
+function seedClaudeVersionWithHook(version: string, hookName: string, event: string): void {
+  fs.writeFileSync(
+    path.join(systemDir, 'agents.yaml'),
+    `hooks:\n  ${hookName}:\n    script: ${hookName}.sh\n    events: [${event}]\n`,
+  );
+  seedVersionHook('claude', version, '.claude', `${hookName}.sh`);
+}
+
+describe('getResourceInventory (hooks)', () => {
+  it('lists on-disk hooks from a grok version home via the absolute-hooksDir fix', () => {
+    seedVersionHook('grok', '1.0.0', '.grok', 'guard.sh');
+    seedVersionHook('grok', '1.0.0', '.grok', 'stop/00-agent-verify-work-complete.sh');
+
+    const inv = runInventory('grok', '1.0.0');
+
+    expect(inv.capable).toBe(true);
+    const names = inv.onDisk.map((r) => r.name);
+    expect(names).toContain('guard');
+    expect(names).toContain('00-agent-verify-work-complete');
+    for (const ref of inv.onDisk) {
+      expect(ref.path).toContain(path.join('.history', 'versions', 'grok', '1.0.0', 'home', '.grok', 'hooks'));
+      expect(fs.existsSync(ref.path)).toBe(true);
+    }
+  });
+
+  it('reports wiringSupported=false and empty wired for grok (wiring parser is a follow-up)', () => {
+    seedVersionHook('grok', '1.0.0', '.grok', 'guard.sh');
+
+    const inv = runInventory('grok', '1.0.0');
+
+    expect(inv.wiringSupported).toBe(false);
+    expect(inv.wired).toEqual([]);
+  });
+
+  it('computes unmanaged as onDisk minus declared', () => {
+    seedDeclaredHook('guard');
+    seedVersionHook('kimi', '1.0.0', '.kimi-code', 'guard.sh');
+    seedVersionHook('kimi', '1.0.0', '.kimi-code', 'rogue.sh');
+
+    const inv = runInventory('kimi', '1.0.0');
+
+    expect(inv.declared.map((r) => r.name)).toContain('guard');
+    expect(inv.onDisk.map((r) => r.name)).toEqual(expect.arrayContaining(['guard', 'rogue']));
+    // 'guard' is declared → managed; 'rogue' is on disk but declared nowhere.
+    expect(inv.unmanaged.map((r) => r.name)).toEqual(['rogue']);
+  });
+
+  it('reports a hook as wired once the real registrar has written settings.json', () => {
+    seedDeclaredHook('demo-guard');
+    seedClaudeVersionWithHook('2.0.0', 'demo-guard', 'PreToolUse');
+
+    const inv = runInventory('claude', '2.0.0', { register: true });
+
+    expect(inv.capable).toBe(true);
+    expect(inv.wiringSupported).toBe(true);
+    expect(inv.wired.map((r) => r.name)).toEqual(['demo-guard']);
+    expect(inv.wired[0].detail).toBe('PreToolUse');
+    expect(inv.unmanaged).toEqual([]);
+  });
+
+  it('keeps wired empty when the registrar never ran (on-disk is not wiring)', () => {
+    seedClaudeVersionWithHook('2.0.0', 'demo-guard', 'PreToolUse');
+    const configDir = path.join(userDir, '.history', 'versions', 'claude', '2.0.0', 'home', '.claude');
+    fs.writeFileSync(path.join(configDir, 'settings.json'), JSON.stringify({ hooks: {} }, null, 2));
+
+    const inv = runInventory('claude', '2.0.0');
+
+    expect(inv.wiringSupported).toBe(true);
+    expect(inv.onDisk.map((r) => r.name)).toContain('demo-guard');
+    expect(inv.wired).toEqual([]);
+  });
+
+  it('reports capable=false below the version gate without touching disk', () => {
+    // codex hooks gate at 0.116.0 — an older pinned version is not capable.
+    const inv = runInventory('codex', '0.100.0');
+
+    expect(inv.capable).toBe(false);
+    expect(inv.onDisk).toEqual([]);
+    expect(inv.wired).toEqual([]);
+    expect(inv.wiringSupported).toBe(false);
+  });
+
+  it('fails loud for kinds without an implementation', () => {
+    const modulePath = path.resolve(process.cwd(), 'src/lib/resource-inventory.ts');
+    const script = `
+      const mod = await import(${JSON.stringify(modulePath)});
+      try {
+        mod.getResourceInventory('claude', '2.0.0', 'skills');
+        console.log('NO_THROW');
+      } catch (err) {
+        console.log(err.message);
+      }
+    `;
+    const out = execFileSync('bun', ['-e', script], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: testHome },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    }).toString('utf-8');
+    expect(out.trim()).toContain("kind 'skills' is not implemented yet");
+  });
+});
+
+describe('getAgentResources hooks wiring', () => {
+  it('lists grok version-home hooks through the inventory chokepoint', () => {
+    seedVersionHook('grok', '1.0.0', '.grok', 'guard.sh');
+    const home = path.join(userDir, '.history', 'versions', 'grok', '1.0.0', 'home');
+
+    const resourcesPath = path.resolve(process.cwd(), 'src/lib/resources.ts');
+    const script = `
+      const mod = await import(${JSON.stringify(resourcesPath)});
+      const res = mod.getAgentResources('grok', { home: ${JSON.stringify(home)} });
+      console.log(JSON.stringify(res.hooks));
+    `;
+    const out = execFileSync('bun', ['-e', script], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: testHome },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    }).toString('utf-8');
+    const hooks = JSON.parse(out) as Array<{ name: string; path: string }>;
+    expect(hooks.map((h) => h.name)).toContain('guard');
+    expect(hooks[0].path).toContain(path.join('home', '.grok', 'hooks'));
+  });
+});

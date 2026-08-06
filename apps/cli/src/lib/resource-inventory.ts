@@ -1,0 +1,184 @@
+/**
+ * Resource inventory — the single chokepoint for "what does this agent@version
+ * have" (RUSH-2238, parent RUSH-2236; spec: openspec/specs/resource-inventory).
+ *
+ * One API answers four orthogonal questions per (agent, version, kind):
+ *
+ *   capable   — the agent+version feature flags allow the kind at all
+ *   declared  — resources the DotAgents layers (project/user/system/extra)
+ *               declare for sync
+ *   onDisk    — resources actually installed in the version home filesystem
+ *               (the installed-resource truth — NOT agents.yaml tracking data)
+ *   wired     — resources the harness native config references so they fire
+ *   unmanaged — onDisk − declared (orphans no layer declares anymore)
+ *
+ * Callers (inspect, doctor, view, sync) MUST come here rather than
+ * re-implementing path joins or config parsing per command. Wiring parsing is
+ * currently implemented only for the settings.json hook family (claude, droid,
+ * muse) via checkVersionHookWiring; grok hooks.json / kimi config.toml wiring
+ * parsers are a follow-up teammate's scope, so `wired` is empty and
+ * `wiringSupported` is false for those harnesses.
+ */
+
+import type { AgentId } from './types.js';
+import { AGENTS } from './agents.js';
+import { supports } from './capabilities.js';
+import { listResources } from './resources.js';
+import {
+  checkVersionHookWiring,
+  listHooksInVersionHome,
+  listInstalledHooksWithScope,
+} from './hooks.js';
+
+/** Resource kinds the inventory can report. Only 'hooks' is implemented so far
+ *  (RUSH-2238); the remaining kinds land with their follow-up tickets. */
+export type InventoryKind = 'hooks' | 'skills' | 'commands' | 'plugins' | 'mcp';
+
+/** A reference to one resource in one state (declared / onDisk / wired). */
+export interface ResourceRef {
+  /** Stable install name (script basename without extension for hooks). */
+  name: string;
+  /** Declared/onDisk: absolute file path. Wired: the command string the native
+   *  config references. */
+  path: string;
+  /** Origin: a layer name for declared ('project' | 'user' | 'system' | extra
+   *  repo alias), 'user'/'project' scope or 'version-home' for onDisk,
+   *  'native-config' for wired. */
+  source: string;
+  /** Optional context — e.g. the lifecycle events a wired hook fires on. */
+  detail?: string;
+}
+
+export interface ResourceInventory {
+  agent: AgentId;
+  version: string;
+  kind: InventoryKind;
+  /** Agent+version feature flags allow this kind (version-aware gate). */
+  capable: boolean;
+  /** Declared in the DotAgents layers. */
+  declared: ResourceRef[];
+  /** Installed on disk in the version home. */
+  onDisk: ResourceRef[];
+  /** Referenced by the harness native config (empty when wiringSupported is
+   *  false — the format parser for that harness is not implemented yet). */
+  wired: ResourceRef[];
+  /** onDisk − declared: installed orphans no layer declares. */
+  unmanaged: ResourceRef[];
+  /** Whether this harness's native wiring format is parsed. When false,
+   *  `wired: []` means "unknown", NOT "nothing wired". */
+  wiringSupported: boolean;
+}
+
+const IMPLEMENTED_KINDS: readonly InventoryKind[] = ['hooks'];
+
+/**
+ * The single inventory API. Harness-scoped (claude/codex/grok/kimi/droid) —
+ * never a model or profile. Throws for kinds without an implementation rather
+ * than returning a half-empty report that looks like truth.
+ */
+export function getResourceInventory(
+  agent: AgentId,
+  version: string,
+  kind: InventoryKind,
+  opts: { cwd?: string } = {}
+): ResourceInventory {
+  if (!IMPLEMENTED_KINDS.includes(kind)) {
+    // Fail loud at the boundary: the kind is part of the API shape but its
+    // inventory lands with a RUSH-2236 follow-up — a silent empty report would
+    // read as "nothing installed".
+    throw new Error(
+      `getResourceInventory: kind '${kind}' is not implemented yet (implemented: ${IMPLEMENTED_KINDS.join(', ')}; tracked under RUSH-2236)`
+    );
+  }
+  return hooksInventory(agent, version, opts.cwd);
+}
+
+/**
+ * On-disk hook listing for an explicit home (version home or effective home)
+ * plus the project overlay — the one listing `getAgentResources` routes
+ * through, so inspect/doctor/view share a single hooks source. Paths resolve
+ * through the absolute-hooksDir-safe join (RUSH-2237), so grok/kimi version
+ * homes list their real hooks.
+ */
+export function listOnDiskHooks(
+  agent: AgentId,
+  opts: { home?: string; cwd?: string } = {}
+): ResourceRef[] {
+  return listInstalledHooksWithScope(agent, opts.cwd ?? process.cwd(), { home: opts.home }).map(
+    (h) => ({
+      name: h.name,
+      path: h.path,
+      source: h.scope,
+      detail: h.dataFile,
+    })
+  );
+}
+
+function hooksInventory(agent: AgentId, version: string, cwd?: string): ResourceInventory {
+  const capable = supports(agent, 'hooks', version).ok;
+
+  // Declared: the layered DotAgents repos are the declaration surface. Hook
+  // script names carry their extension here ('git-guard.sh'); normalize to the
+  // extension-less install name so declared/onDisk sets compare.
+  const declared: ResourceRef[] = listResources('hooks', cwd).map((r) => ({
+    name: r.name.replace(/\.[^./]+$/, ''),
+    path: r.path,
+    source: r.source,
+  }));
+
+  // onDisk / wired need the version home; both are empty for an agent whose
+  // hooks capability is gated off (unknown agents included — AGENTS lookup
+  // would otherwise throw).
+  let onDisk: ResourceRef[] = [];
+  let wired: ResourceRef[] = [];
+  let wiringSupported = false;
+  if (capable && AGENTS[agent]?.supportsHooks) {
+    onDisk = listHooksInVersionHome(agent, version).map((e) => ({
+      name: e.name,
+      path: e.scriptPath,
+      source: 'version-home',
+      detail: e.dataFile,
+    }));
+
+    const report = checkVersionHookWiring(agent, version);
+    wiringSupported = report.supported;
+    if (report.supported) {
+      // One ref per hook, events folded into detail — a hook wired under
+      // PreToolUse AND Stop is one inventory entry, not two.
+      const eventsByName = new Map<string, Set<string>>();
+      const commandByName = new Map<string, string>();
+      for (const issue of report.wired) {
+        let events = eventsByName.get(issue.name);
+        if (!events) {
+          events = new Set<string>();
+          eventsByName.set(issue.name, events);
+          commandByName.set(issue.name, issue.command);
+        }
+        events.add(issue.event);
+      }
+      wired = [...eventsByName.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, events]) => ({
+          name,
+          path: commandByName.get(name)!,
+          source: 'native-config',
+          detail: [...events].sort().join('/'),
+        }));
+    }
+  }
+
+  const declaredNames = new Set(declared.map((r) => r.name));
+  const unmanaged = onDisk.filter((r) => !declaredNames.has(r.name));
+
+  return {
+    agent,
+    version,
+    kind: 'hooks',
+    capable,
+    declared,
+    onDisk,
+    wired,
+    unmanaged,
+    wiringSupported,
+  };
+}

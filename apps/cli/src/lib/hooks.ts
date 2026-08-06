@@ -734,6 +734,21 @@ export function hookContentMatches(
   }
 }
 
+/**
+ * Hooks dir for an agent under an arbitrary home (version home or effective
+ * home). An agent whose `hooksDir` is configured absolute under `$HOME` (grok,
+ * kimi) must be translated to config-dir-relative first — a raw `path.join`
+ * would embed the absolute path as a relative segment and produce a hybrid
+ * path that never exists (RUSH-2237).
+ */
+export function getHooksDirInHome(agentId: AgentId, home: string): string {
+  const config = AGENTS[agentId];
+  const hooksDir = path.isAbsolute(config.hooksDir)
+    ? path.relative(config.configDir, config.hooksDir)
+    : config.hooksDir;
+  return path.join(home, agentConfigDirName(agentId), hooksDir);
+}
+
 export function listInstalledHooksWithScope(
   agentId: AgentId,
   cwd: string = process.cwd(),
@@ -770,7 +785,7 @@ export function listInstalledHooksWithScope(
 
   // User-scoped hooks (version-aware when home is provided)
   const home = options?.home || getEffectiveHome(agentId);
-  const userDir = path.join(home, agentConfigDirName(agentId), agent.hooksDir);
+  const userDir = getHooksDirInHome(agentId, home);
   const userHooks = listHookEntriesFromDir(userDir);
   for (const hook of userHooks) {
     addHook(hook, 'user', agentId);
@@ -820,12 +835,7 @@ export async function installHooks(
  * Path to the hooks dir of a specific version home (not the active one).
  */
 export function getVersionHooksDir(agent: AgentId, version: string): string {
-  const home = getVersionHomePath(agent, version);
-  const config = AGENTS[agent];
-  const hooksDir = path.isAbsolute(config.hooksDir)
-    ? path.relative(config.configDir, config.hooksDir)
-    : config.hooksDir;
-  return path.join(home, agentConfigDirName(agent), hooksDir);
+  return getHooksDirInHome(agent, getVersionHomePath(agent, version));
 }
 
 /**
@@ -874,6 +884,10 @@ export interface HookWiringReport {
   /** Hooks whose file is present/resolvable but that are NOT referenced in the
    *  event array settings.json should carry them in. */
   unwired: HookWiringIssue[];
+  /** Expected hooks that ARE referenced in settings.json (expected − unwired).
+   *  Empty whenever wiring cannot be verified (unsupported family, missing or
+   *  unparseable settings). */
+  wired: HookWiringIssue[];
 }
 
 /**
@@ -892,7 +906,7 @@ export interface HookWiringReport {
  */
 export function checkVersionHookWiring(agent: AgentId, version: string): HookWiringReport {
   if (!AGENTS[agent].supportsHooks || !SETTINGS_JSON_HOOK_FAMILY.includes(agent)) {
-    return { supported: false, unwired: [] };
+    return { supported: false, unwired: [], wired: [] };
   }
 
   const versionHome = getVersionHomePath(agent, version);
@@ -942,6 +956,7 @@ export function checkVersionHookWiring(agent: AgentId, version: string): HookWir
       expected: expected.length,
       settingsMissing: expected.length > 0,
       unwired: [],
+      wired: [],
     };
   }
   let config: Record<string, unknown>;
@@ -954,6 +969,7 @@ export function checkVersionHookWiring(agent: AgentId, version: string): HookWir
       expected: expected.length,
       settingsUnparseable: true,
       unwired: [],
+      wired: [],
     };
   }
 
@@ -979,8 +995,11 @@ export function checkVersionHookWiring(agent: AgentId, version: string): HookWir
     }
   }
 
-  const unwired = expected.filter((e) => !wiredByGroup.get(groupKey(e.event, e.matcher))?.has(e.command));
-  return { supported: true, settingsPath, expected: expected.length, unwired };
+  const isWired = (e: HookWiringIssue): boolean =>
+    wiredByGroup.get(groupKey(e.event, e.matcher))?.has(e.command) ?? false;
+  const unwired = expected.filter((e) => !isWired(e));
+  const wired = expected.filter(isWired);
+  return { supported: true, settingsPath, expected: expected.length, unwired, wired };
 }
 
 /**
