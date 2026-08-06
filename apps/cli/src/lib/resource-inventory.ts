@@ -26,6 +26,7 @@ import {
   checkVersionHookWiring,
   listHooksInVersionHome,
   listInstalledHooksWithScope,
+  type HookWiringReport,
 } from './hooks.js';
 
 /** Resource kinds the inventory can report. Only 'hooks' is implemented so far
@@ -65,6 +66,8 @@ export interface ResourceInventory {
   /** Whether this harness's native wiring format is parsed. When false,
    *  `wired: []` means "unknown", NOT "nothing wired". */
   wiringSupported: boolean;
+  /** Native-format diagnostic retained for doctor; derived in this same pass. */
+  wiring?: HookWiringReport;
 }
 
 const IMPLEMENTED_KINDS: readonly InventoryKind[] = ['hooks'];
@@ -130,6 +133,7 @@ function hooksInventory(agent: AgentId, version: string, cwd?: string): Resource
   let onDisk: ResourceRef[] = [];
   let wired: ResourceRef[] = [];
   let wiringSupported = false;
+  let wiring: HookWiringReport | undefined;
   if (capable && AGENTS[agent]?.supportsHooks) {
     onDisk = listHooksInVersionHome(agent, version).map((e) => ({
       name: e.name,
@@ -139,6 +143,7 @@ function hooksInventory(agent: AgentId, version: string, cwd?: string): Resource
     }));
 
     const report = checkVersionHookWiring(agent, version);
+    wiring = report;
     wiringSupported = report.supported;
     if (report.supported) {
       // One ref per hook, events folded into detail — a hook wired under
@@ -178,5 +183,6 @@ function hooksInventory(agent: AgentId, version: string, cwd?: string): Resource
     wired,
     unmanaged,
     wiringSupported,
+    wiring,
   };
 }

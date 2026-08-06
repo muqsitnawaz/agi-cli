@@ -1024,6 +1024,11 @@ function renderTargetText(report: VersionResourceReport, options: { showDiff: bo
     // scope; absent kinds with empty arrays still render so the operator
     // sees what was checked. options.requestedKinds drives this.
     if (options.requestedKinds && !options.requestedKinds.has(kind)) continue;
+    if (kind === 'hooks' && report.hookInventory) {
+      const wired = report.hookInventory.wiringSupported ? String(report.hookInventory.wired.length) : 'unknown';
+      const unmanaged = report.hookInventory.unmanaged.length > 0 ? ` · unmanaged ${report.hookInventory.unmanaged.length}` : '';
+      console.log(chalk.gray(`  inventory: capable ${report.hookInventory.capable ? 'yes' : 'no'} · on-disk ${report.hookInventory.onDisk.length} · wired ${wired}${unmanaged}`));
+    }
     renderKindSection(kind, rows, report.layers, options);
     // A hook file can reconcile "ok" above yet be absent from settings.json — a
     // present-but-dead hook. Surface that right under the hooks section.
