@@ -10,6 +10,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   planKeychainReap,
+  parseEtimeToSeconds,
   ORPHAN_GRACE_SEC,
   STUCK_GRACE_SEC,
   resetKeychainReaperCandidatesForTest,
@@ -33,6 +34,31 @@ function candidatesFrom(entries: [number, StuckParentCandidate][]): Map<number, 
 
 beforeEach(() => {
   resetKeychainReaperCandidatesForTest();
+});
+
+describe('parseEtimeToSeconds — macOS BSD etime format', () => {
+  // Regression for RUSH-2268: the reaper shelled `ps -o etimes` (a GNU/Linux
+  // procps keyword), which macOS `ps` rejects with a non-zero exit, so
+  // execFileSync threw and the reaper reaped nothing on its only platform.
+  // The portable keyword is `etime` in `[[dd-]hh:]mm:ss` form.
+  it('parses mm:ss', () => {
+    expect(parseEtimeToSeconds('00:04')).toBe(4);
+    expect(parseEtimeToSeconds('32:10')).toBe(32 * 60 + 10);
+  });
+  it('parses hh:mm:ss', () => {
+    expect(parseEtimeToSeconds('01:02:03')).toBe(3723);
+  });
+  it('parses dd-hh:mm:ss', () => {
+    expect(parseEtimeToSeconds('14-04:10:52')).toBe(((14 * 24 + 4) * 60 + 10) * 60 + 52);
+  });
+  it('returns null for a bare integer (the Linux etimes shape it no longer emits)', () => {
+    expect(parseEtimeToSeconds('42')).toBeNull();
+  });
+  it('returns null for garbage', () => {
+    expect(parseEtimeToSeconds('')).toBeNull();
+    expect(parseEtimeToSeconds('abc')).toBeNull();
+    expect(parseEtimeToSeconds('1:2:3:4')).toBeNull();
+  });
 });
 
 describe('planKeychainReap — orphaned helper class (PPID==1)', () => {
@@ -186,7 +212,7 @@ describe('planKeychainReap — mixed snapshots', () => {
 });
 
 describe('reapOrphanedKeychainProcesses (darwin integration)', () => {
-  it.skipIf(process.platform !== 'darwin')('reaps a real orphaned sleeper that matches the helper path', () => {
+  it.skipIf(process.platform !== 'darwin')('reaps a real orphaned sleeper that matches the helper path', async () => {
     const { spawn, execFileSync } = require('child_process');
     const os = require('os');
     const path = require('path');
@@ -207,36 +233,48 @@ describe('reapOrphanedKeychainProcesses (darwin integration)', () => {
       'Agents CLI',
     );
     fs.mkdirSync(path.dirname(fakeHelper), { recursive: true });
-    fs.writeFileSync(fakeHelper, '#!/bin/sh\nsleep 300\n', { mode: 0o755 });
+    // Symlink to the real (code-signed) /bin/sleep rather than writing a
+    // `#!/bin/sh` script: a shell script shows in `ps -o command=` as its
+    // interpreter (`/bin/sh <path>`), which never satisfies the reaper's exact
+    // helper-path match, and a *copy* of a system binary is killed on launch by
+    // AMFI for an invalid signature. Exec'ing the symlink runs the signed
+    // /bin/sleep with argv[0] == fakeHelper, so `ps` reports the helper path.
+    fs.symlinkSync('/bin/sleep', fakeHelper);
 
     // Launch through a disposable shell that exits immediately, so the sleeper
     // is reparented to init (PPID 1).
-    const launcher = spawn('sh', ['-c', `${JSON.stringify(fakeHelper)} &`], {
+    const launcher = spawn('sh', ['-c', `${JSON.stringify(fakeHelper)} 600 &`], {
       detached: true,
       stdio: 'ignore',
     });
     launcher.unref();
 
-    // Wait long enough to exceed the orphan grace window.
-    const deadline = Date.now() + 2_000 + (ORPHAN_GRACE_SEC * 1_000);
-    while (Date.now() < deadline) { /* spin synchronously to stay inside the test */ }
+    // Wait past the orphan grace window (async — do NOT busy-spin: a synchronous
+    // 30s spin pegs a core and blocks the event loop for the whole window).
+    await new Promise((resolve) => setTimeout(resolve, (ORPHAN_GRACE_SEC + 3) * 1_000));
 
-    // Confirm the sleeper is actually orphaned before the reaper runs.
+    // Confirm the sleeper is actually orphaned (PPID 1) before the reaper runs.
     let sleeperPid = 0;
     try {
-      const psOut = execFileSync('ps', ['-ax', '-o', 'pid=,ppid=,etimes=,command='], { encoding: 'utf-8' });
+      const psOut = execFileSync('ps', ['-ax', '-o', 'pid=,ppid=,etime=,command='], { encoding: 'utf-8' });
       for (const line of psOut.split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith(fakeHelper) || trimmed.includes(fakeHelper)) {
-          const pid = parseInt(trimmed.match(/^(\d+)/)?.[1] ?? '0', 10);
-          if (pid > 0) { sleeperPid = pid; break; }
+        const m = line.trim().match(/^(\d+)\s+(\d+)\s+\S+\s+(.*)$/);
+        if (!m) continue;
+        const command = m[3];
+        if (command === fakeHelper || command.startsWith(`${fakeHelper} `)) {
+          sleeperPid = parseInt(m[1], 10);
+          expect(parseInt(m[2], 10)).toBe(1); // reparented to init/launchd
+          break;
         }
       }
     } catch { /* ignore */ }
+    expect(sleeperPid).toBeGreaterThan(0);
 
     try {
-      const { setInstallRootForTest } = require('./install-helper.js');
-      const { reapOrphanedKeychainProcesses } = require('./reaper.js');
+      // Dynamic ESM import (not require): a CJS `require` of a local TS module
+      // does not resolve under vitest — only builtins do.
+      const { setInstallRootForTest } = await import('./install-helper.js');
+      const { reapOrphanedKeychainProcesses } = await import('./reaper.js');
       const prevRoot = setInstallRootForTest(tmpDir);
       try {
         const result = reapOrphanedKeychainProcesses();
