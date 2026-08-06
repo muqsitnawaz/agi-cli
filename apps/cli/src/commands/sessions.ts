@@ -51,6 +51,7 @@ import { runRemoteSessions, buildForwardedArgs, ensureWholeIndex } from '../lib/
 import { formatRelativeTime, formatCompactAge, sessionAgeParts, type SessionAgeParts } from '../lib/session/relative-time.js';
 import { renderConversationMarkdown, renderSummary, renderSummaryHeader, computeSummaryStats, renderJson, filterEvents, parseRoleList, linkPath, linkUrl, shortenModel, type FilterOptions } from '../lib/session/render.js';
 import { linearIssueUrl } from '../lib/session/linear.js';
+import { sessionOwnerDevice, RESUME_PINNED_ENV } from '../lib/session/resume-owner.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { AGENTS, colorAgent, resolveAgentName } from '../lib/agents.js';
 import { getShimsDir } from '../lib/state.js';
@@ -3493,16 +3494,6 @@ export async function pickSessionInteractive(
   }
 }
 
-/**
- * The machine a picked session lives on when its transcript is on that peer's
- * disk (folded in over the live fan-out), else undefined. Keys off `_remote`,
- * NOT `machine !== local`: a synced mirror is machine-tagged too, but its file
- * is a local mirror path, so it must be read/resumed locally like any other.
- */
-function remoteMachineOf(session: SessionMeta): string | undefined {
-  return session._remote ? session.machine : undefined;
-}
-
 /** True when the peer wasn't a dialable device; prints one clear line so a
  * remote pick never dead-ends silently. */
 function warnNoPeerTarget(machine: string, session: SessionMeta): void {
@@ -3531,27 +3522,47 @@ export async function handlePickedSession(picked: PickedSession): Promise<void> 
     console.log(chalk.gray(`Watch for it with: agents sessions --active${picked.session.machine ? ` --host ${picked.session.machine}` : ''}`));
     return;
   }
-  // A session on another machine is read/resumed ON that machine over SSH — its
-  // transcript and agent binary live there. Both actions execute on the peer
-  // (not a local `--host` hop, which would discover locally and dead-end for a
-  // session that exists only on the peer).
-  const remote = remoteMachineOf(picked.session);
-  if (remote) {
-    if (picked.action === 'view') {
-      const rc = await runOnPeer(['sessions', picked.session.shortId, '--markdown'], remote);
-      if (rc === 'no-target') warnNoPeerTarget(remote, picked.session);
-    } else {
-      console.log(chalk.gray(`Resuming ${picked.session.shortId} on ${remote} over SSH...`));
-      const rc = await runOnPeer(['sessions', 'resume', picked.session.shortId], remote, { tty: true });
-      if (rc === 'no-target') warnNoPeerTarget(remote, picked.session);
-    }
-    return;
-  }
+  // Reading and resuming are on DIFFERENT machines' terms, and conflating them
+  // is what RUSH-2022 was. Reading follows the FILE: a synced mirror sits on
+  // this disk, so only a live fan-out row (`_remote`) has to be read on the
+  // peer. Resuming follows the HARNESS STATE, which is on the owning machine
+  // whatever the transcript's location — a mirror included.
   if (picked.action === 'view') {
+    const readFrom = picked.session._remote ? picked.session.machine : undefined;
+    if (readFrom) {
+      const rc = await runOnPeer(['sessions', picked.session.shortId, '--markdown'], readFrom);
+      if (rc === 'no-target') warnNoPeerTarget(readFrom, picked.session);
+      return;
+    }
     await renderSession(picked.session, 'summary', {});
     return;
   }
+
+  if (await resumeOnOwnerIfRemote(picked.session)) return;
   await resumeSessionInPlace(picked.session);
+}
+
+/**
+ * Resume `session` on the machine that owns it, when that is not this one.
+ * Returns true when it handled the resume (hopped, or reported an unreachable
+ * owner), false when the session is local and the caller should take over here.
+ *
+ * The one hop for a foreground, one-session-at-a-time resume — shared by the
+ * `agents sessions` picker and by `sessions resume`'s no-tab-backend path, which
+ * would otherwise reach `resumeSessionInPlace` and be refused (RUSH-2022).
+ */
+export async function resumeOnOwnerIfRemote(session: SessionMeta): Promise<boolean> {
+  const owner = sessionOwnerDevice(session);
+  if (!owner) return false;
+  console.log(chalk.gray(`Resuming ${session.shortId} on ${owner} over SSH...`));
+  // `agents resume <id>` is the strict single-session path — one pick, one
+  // resume. (`sessions resume <shortId>` would re-open a picker over there.)
+  const rc = await runOnPeer(['resume', session.id], owner, {
+    tty: true,
+    env: { [RESUME_PINNED_ENV]: '1' },
+  });
+  if (rc === 'no-target') warnNoPeerTarget(owner, session);
+  return true;
 }
 
 /**
@@ -3562,6 +3573,21 @@ export async function handlePickedSession(picked: PickedSession): Promise<void> 
  * version-pinned launcher is genuinely missing.
  */
 export async function resumeSessionInPlace(session: SessionMeta): Promise<void> {
+  // This function is the LOCAL takeover, and every caller is responsible for
+  // routing a peer-owned session before it gets here (the picker above,
+  // `agents resume`, `sessions attach`). Reaching it with one anyway means a
+  // caller skipped that step, so refuse rather than start the harness against
+  // state this box does not have — the `fs.existsSync(session.cwd)` fallback
+  // just below is exactly how that used to pass unnoticed, quietly swapping in
+  // `process.cwd()` when the recorded directory was a peer's path (RUSH-2022).
+  const owner = sessionOwnerDevice(session);
+  if (owner) {
+    console.error(chalk.red(`Session ${session.shortId} belongs to ${owner} — it cannot resume on this machine.`));
+    console.error(chalk.gray(`  Resume it there: agents resume ${session.id}`));
+    process.exitCode = 1;
+    return;
+  }
+
   const cwd = session.cwd && fs.existsSync(session.cwd)
     ? session.cwd
     : process.cwd();

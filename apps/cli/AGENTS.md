@@ -382,6 +382,45 @@ that collapses, so the preview can silently vanish on a full/short terminal (the
 RUSH-2198 bug). See the [§Contracts §Sessions spec](docs/specifications.md#sessions)
 for the non-empty-preview invariant (SES-8).
 
+### Resume is machine-bound — check the owner before you start a harness
+
+**Reading and resuming follow different machines, and conflating them is the bug.**
+Reading follows the FILE — a synced mirror is on this disk, so only a live fan-out
+row (`_remote`) must be read on the peer (`transcriptOnPeerOf` in
+`sessions-picker.ts`). Resuming follows the HARNESS STATE, which is on the owning
+machine whatever the transcript's location. A mirror is therefore readable and NOT
+resumable, and that is the trap: nothing fails until the agent is asked to continue
+a conversation it has never seen, and `sessions-resume.ts`'s `fs.existsSync(cwd)`
+fallback then quietly resumed in `process.cwd()` (RUSH-2022).
+
+`sessionOwnerDevice`
+([`src/lib/session/resume-owner.ts`](src/lib/session/resume-owner.ts)) is the one
+answer to "may this resume run here?". Every path that starts a harness from a picked
+row consults it first: `agents resume` and the `agents sessions` picker hop to the
+owner, and `sessions attach` hops as an **attach** (its detach record and the
+headless process it stops are both on the owner — hopping as a bare resume would
+skip the stop and leave two processes on one transcript). The batch
+`sessions resume` mostly inherits it for free: every TAB it opens runs the
+canonical `agents resume <id>` (`lib/session/resume-command.ts`), whose docblock
+already promised source-device routing — this is what makes that true. Its
+no-tab-backend path (`inplace`, which any Linux box in a plain ssh shell lands on)
+never runs that command, so it routes explicitly via `resumeOnOwnerIfRemote`.
+`resumeSessionInPlace` is the LOCAL takeover and **fails loud** if it is handed a
+peer-owned session, since reaching it with one means a caller skipped its routing
+step.
+
+The hop uses `runOnPeer` ([`src/lib/session/remote-list.ts`](src/lib/session/remote-list.ts)),
+not the `--host` passthrough. Two reasons: the passthrough re-discovers locally and
+dead-ends for a session that exists only on the peer, and it marks the run
+`AGENTS_FLEET_REMOTE` — a one-shot command may carry that consent marker, but a
+resumed session would inherit it for its whole life and `agents browser start` inside
+it would be refused as a cross-machine drive.
+
+The signal is only as good as what wrote it: `machine` on a host-dispatched run is
+stamped by [`src/lib/hosts/session-index.ts`](src/lib/hosts/session-index.ts) from
+the dispatch host. Any new writer of an `agents run --device`-shaped row must set it,
+or the index will claim the dispatching box.
+
 ## Bundled native helpers (where the tarball's `.app`s come from)
 
 Two native helpers plus the standalone signed CLI binary ship **inside** this
