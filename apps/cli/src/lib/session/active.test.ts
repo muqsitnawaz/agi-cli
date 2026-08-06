@@ -2,7 +2,9 @@ import { describe, it, expect, afterAll } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { resolveCwds, LSOF_CONCURRENCY, agentKindFromComm, sessionAgentComms, activeStatusFromCloudStatus, resolveFallbackStatus, lifecycleStatus, ABANDONED_STALE_MS, resolvePaneIdentity, matchOriginDevice, annotateOrchestratorLabels, summarizeMission } from './active.js';
+import { resolveCwds, PROBE_CONCURRENCY, enrichProvenance, agentKindFromComm, sessionAgentComms, activeStatusFromCloudStatus, resolveFallbackStatus, lifecycleStatus, ABANDONED_STALE_MS, resolvePaneIdentity, matchOriginDevice, annotateOrchestratorLabels, summarizeMission } from './active.js';
+import type { ActiveSession } from './active.js';
+import type { SessionProvenance } from './provenance.js';
 import { SESSION_AGENTS } from './types.js';
 import type { HookSessionIndex } from './hook-sessions.js';
 import type { DeviceProfile, DeviceRegistry } from '../devices/registry.js';
@@ -225,7 +227,7 @@ describe('activeStatusFromCloudStatus', () => {
 const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 describe('resolveCwds', () => {
-  it('bounds the lsof fan-out to LSOF_CONCURRENCY (no simultaneous burst)', async () => {
+  it('bounds the lsof fan-out to PROBE_CONCURRENCY (no simultaneous burst)', async () => {
     let inFlight = 0;
     let maxInFlight = 0;
     const pids = Array.from({ length: 30 }, (_, i) => i + 1000);
@@ -242,7 +244,7 @@ describe('resolveCwds', () => {
     const cwds = await resolveCwds(pids, probe);
 
     // The whole point of the mitigation: never all-at-once (unbounded => 30).
-    expect(maxInFlight).toBeLessThanOrEqual(LSOF_CONCURRENCY);
+    expect(maxInFlight).toBeLessThanOrEqual(PROBE_CONCURRENCY);
     expect(maxInFlight).toBeGreaterThan(1); // still concurrent within the bound, not serial
     // Contract preserved: one cwd per pid, in input order.
     expect(cwds).toEqual(pids.map(p => `/cwd/${p}`));
@@ -346,5 +348,53 @@ describe('summarizeMission (team task/target from the spawn prompt)', () => {
     expect(summarizeMission('')).toBeUndefined();
     expect(summarizeMission('   \n  ')).toBeUndefined();
     expect(summarizeMission(null)).toBeUndefined();
+  });
+});
+
+describe('enrichProvenance (bounded ps fan-out — RUSH-2063)', () => {
+  const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+  const mk = (pid?: number): ActiveSession =>
+    pid === undefined ? { context: 'terminal', kind: 'claude' } : { context: 'terminal', kind: 'claude', pid };
+  const prov = (pid: number): SessionProvenance => ({ host: `h-${pid}`, transport: 'local', reply: null });
+
+  it('bounds the ps fan-out to PROBE_CONCURRENCY (no simultaneous burst)', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const sessions = Array.from({ length: 30 }, (_, i) => mk(i + 1000));
+    // Overlapping probes: an unbounded Promise.all would pile all 30 up at once
+    // (the ~77-concurrent-`ps` bug on a busy box). The bound must cap it.
+    const probe = async (pid: number): Promise<SessionProvenance> => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await delay(20);
+      inFlight--;
+      return prov(pid);
+    };
+
+    await enrichProvenance(sessions, probe);
+
+    expect(maxInFlight).toBeLessThanOrEqual(PROBE_CONCURRENCY);
+    expect(maxInFlight).toBeGreaterThan(1); // still concurrent within the bound, not serial
+    // Contract preserved: every session gets ITS OWN provenance, none dropped.
+    for (const s of sessions) expect(s.provenance?.host).toBe(`h-${s.pid}`);
+  });
+
+  it('assigns each session its own provenance even when probes finish out of order', async () => {
+    const sessions = [5, 4, 3, 2, 1].map(mk);
+    const probe = async (pid: number): Promise<SessionProvenance> => {
+      await delay(pid * 3); // pid 1 finishes last though it starts among the first
+      return prov(pid);
+    };
+    await enrichProvenance(sessions, probe);
+    expect(sessions.map(s => s.provenance?.host)).toEqual(['h-5', 'h-4', 'h-3', 'h-2', 'h-1']);
+  });
+
+  it('skips a session with no pid; leaves a session whose probe returns undefined untouched', async () => {
+    const withPid = mk(1234);
+    const noPid = mk();
+    const probe = async (pid: number): Promise<SessionProvenance | undefined> => (pid === 1234 ? prov(pid) : undefined);
+    await enrichProvenance([withPid, noPid], probe);
+    expect(withPid.provenance?.host).toBe('h-1234');
+    expect(noPid.provenance).toBeUndefined();
   });
 });

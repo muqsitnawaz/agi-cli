@@ -2,6 +2,14 @@
 
 ## 1.22.22
 
+- **`agents sessions --active` no longer fans out one `ps` provenance probe per live
+  session at once (RUSH-2063).** On a busy interactive box (~77 sessions) the status
+  gather spawned up to ~77 concurrent `ps eww` subprocesses, and every session-status
+  surface (menubar, Factory, watchdog, CLI) triggers a gather. The provenance fan-out is
+  now bounded and staggered through the same shared `PROBE_CONCURRENCY` ceiling the `lsof`
+  cwd probe already used — results are identical, only the spawn rate is capped. Source:
+  `apps/cli/src/lib/session/active.ts`.
+
 - **New: `agents insights` — how you work, split by the Claude account that did the
   work.** Tool and language mix, friction (interruptions, tool-error classes, your own
   reply latency), what you changed (line deltas, files, commits), an hour-of-day

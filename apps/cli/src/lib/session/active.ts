@@ -59,13 +59,18 @@ export function resolveOwner(pidActor: string | null | undefined, sessionId: str
 }
 
 /**
- * Per-PID `lsof` probes run bounded and staggered rather than as one parallel
- * fan-out: a simultaneous system-wide `lsof` burst reads to behavioral EDR
- * (CrowdStrike Falcon) as lateral-movement recon. Results are identical — the
- * cwds are just gathered at a bounded spawn rate instead of a single burst.
+ * Both per-PID syscall probes on the session-status path — the `lsof` cwd probe
+ * and the `ps` provenance probe — shell one subprocess per live session. Each
+ * runs bounded and staggered through this one shared ceiling rather than as a
+ * parallel fan-out: a simultaneous system-wide burst (up to one spawn per
+ * session, ~77 on a busy interactive box) reads to behavioral EDR (CrowdStrike
+ * Falcon) as lateral-movement recon, and stacks that many processes at once.
+ * Results are identical — the data is gathered at a bounded spawn rate instead
+ * of a single burst; only the rate changes. One bound, not a magic number per
+ * probe.
  */
-export const LSOF_CONCURRENCY = 4;
-const LSOF_STAGGER_MS = 10;
+export const PROBE_CONCURRENCY = 4;
+const PROBE_STAGGER_MS = 10;
 
 /**
  * Hard ceilings on the two syscalls the status path shells out to. Without them
@@ -1275,7 +1280,7 @@ export function resolveCwds(
   pids: number[],
   probe: (pid: number) => Promise<string | undefined> = getCwdForPid,
 ): Promise<(string | undefined)[]> {
-  return mapBounded(pids, probe, { concurrency: LSOF_CONCURRENCY, staggerMs: LSOF_STAGGER_MS });
+  return mapBounded(pids, probe, { concurrency: PROBE_CONCURRENCY, staggerMs: PROBE_STAGGER_MS });
 }
 
 /**
@@ -1976,11 +1981,23 @@ function foldPresence(rows: ActiveSession[]): void {
  * authoritative mux/reply the pane already gave us. Skipping this (the old
  * behavior) is exactly why ssh-launched tmux sessions rendered as local.
  */
-async function enrichProvenance(sessions: ActiveSession[]): Promise<void> {
-  await Promise.all(
-    sessions.map(async (s) => {
+/**
+ * Fill in each session's launch provenance from its pid, bounded and staggered
+ * so the `ps` probes no longer fan out as one simultaneous burst (~one spawn per
+ * live session — up to ~77 at once on a busy interactive box). Each session is
+ * mutated in place, so the result is identical to an unbounded `Promise.all`;
+ * only the spawn rate is capped. The `probe` seam is injectable for testing the
+ * bound; production always uses the real `ps`-backed `detectProvenance`.
+ */
+export async function enrichProvenance(
+  sessions: ActiveSession[],
+  probe: (pid: number) => Promise<SessionProvenance | undefined> = detectProvenance,
+): Promise<void> {
+  await mapBounded(
+    sessions,
+    async (s) => {
       if (!s.pid) return;
-      const probed = await detectProvenance(s.pid);
+      const probed = await probe(s.pid);
       if (!probed) return;
       if (!s.provenance) {
         s.provenance = probed;
@@ -1993,7 +2010,8 @@ async function enrichProvenance(sessions: ActiveSession[]): Promise<void> {
         s.provenance.ssh = probed.ssh;
       }
       if (probed.term && !s.provenance.term) s.provenance.term = probed.term;
-    }),
+    },
+    { concurrency: PROBE_CONCURRENCY, staggerMs: PROBE_STAGGER_MS },
   );
 }
 
