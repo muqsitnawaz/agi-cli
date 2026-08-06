@@ -46,7 +46,7 @@
  *   - EXACTLY ONE version home is written: `writeTarget`, the OLDEST installed
  *     claude, never the newest and never the `~/.claude`-symlinked default. The
  *     stage-3 full sync copies resources into it, orphan-sweeps stale entries
- *     (versions.ts:2945/3013/3036/3067/3214) and rewrites its
+ *     (versions.ts:2945/2976/3013/3036/3067/3214) and rewrites its
  *     `.sync-manifest.json` (versions.ts:3264 `saveManifest`). Only the MANIFEST
  *     is restored on exit -- captured below as raw bytes, and deleted again if it
  *     did not exist before. The synced resources are left in place, exactly as a
@@ -65,12 +65,21 @@
  *   - The first sync of a version whose selectors are unset writes default
  *     resource patterns into ~/.agents/agents.yaml (versions.ts:2806 ->
  *     state.ts:1266 `ensureVersionResourcePatterns`, which no-ops once set).
- *   - `registerHooksToSettings` rewrites `writeTarget`'s settings.json AND, via
- *     `sweepOrphanShims` (hooks.ts:1632), unlinks stale shims from the GLOBAL
- *     hook-shims dir (hooks.ts:1607, `getHookShimsDir()` -> state.ts:138) --
- *     outside every version home. The bench passes the full live manifest, so
- *     only shims that are ALREADY orphaned are removed, identical to a real
- *     `agents sync`; no live shim is touched.
+ *   - `registerHooksToSettings` rewrites `writeTarget`'s settings.json and also
+ *     writes OUTSIDE every version home, in two places. All of it is exactly
+ *     what a real `agents sync` does, and none of it is inert:
+ *       * the GLOBAL hook-shims dir (`getHookShimsDir()` -> state.ts:138):
+ *         `sweepOrphanShims` (hooks.ts:1632) unlinks shims whose hook is gone
+ *         (hooks.ts:1607); `generateHookShim` (hooks.ts:390 ->
+ *         hooks/cache.ts:149/152) rewrites a live shim whose content drifted
+ *         and re-chmods 0o755 otherwise -- so a LIVE shim is touched on every
+ *         call, not only an orphaned one; and `removeHookShim` (hooks.ts:381 ->
+ *         hooks/cache.ts:611) unlinks the live shim of a hook that declares no
+ *         `cache:` / `matches:` / `matcher:`.
+ *       * the hook SOURCE scripts in the DotAgents repos: `ensureExecutable`
+ *         (hooks.ts:1644 -> hooks.ts:441) chmods `mode | 0o755` on any hook
+ *         script that is not already executable. Hooks register by source path
+ *         and are never copied, so this mutates the user's `hooks/` tree.
  *
  * This file is NOT part of `vitest run`: vitest.config.ts:11 includes only
  * `*.test.ts` globs and there is no `benchmark.include`, so it is reached
