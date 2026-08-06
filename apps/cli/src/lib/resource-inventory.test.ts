@@ -109,13 +109,55 @@ describe('getResourceInventory (hooks)', () => {
     }
   });
 
-  it('reports wiringSupported=false and empty wired for grok (wiring parser is a follow-up)', () => {
+  it.each([
+    ['grok', '.grok'],
+    ['kimi', '.kimi-code'],
+  ])('reports registrar-written %s hooks as wired', (agent, configDir) => {
+    seedDeclaredHook('guard');
+    fs.writeFileSync(
+      path.join(systemDir, 'agents.yaml'),
+      'hooks:\n  guard:\n    script: guard.sh\n    events: [PreToolUse]\n    matcher: Bash\n',
+    );
+    seedVersionHook(agent, '1.0.0', configDir, 'guard.sh');
+
+    const inv = runInventory(agent, '1.0.0', { register: true });
+
+    expect(inv.wiringSupported).toBe(true);
+    expect(inv.wired.map((r) => r.name)).toEqual(['guard']);
+    expect(inv.wired[0].detail).toBe('PreToolUse');
+  });
+
+  it('does not report unmanaged Grok hook commands as inventory wiring', () => {
+    fs.writeFileSync(
+      path.join(systemDir, 'agents.yaml'),
+      'hooks:\n  guard:\n    script: guard.sh\n    events: [PreToolUse]\n',
+    );
     seedVersionHook('grok', '1.0.0', '.grok', 'guard.sh');
+    const hooksPath = path.join(userDir, '.history', 'versions', 'grok', '1.0.0', 'home', '.grok', 'hooks', 'hooks.json');
+    fs.writeFileSync(hooksPath, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ command: '/user/custom.sh' }] }] } }));
 
     const inv = runInventory('grok', '1.0.0');
 
-    expect(inv.wiringSupported).toBe(false);
+    expect(inv.wiringSupported).toBe(true);
     expect(inv.wired).toEqual([]);
+  });
+
+  it('reads the live-sized Grok hooks.json shape with 38 managed hooks', () => {
+    const names = Array.from({ length: 38 }, (_, i) => `managed-${i + 1}`);
+    fs.writeFileSync(
+      path.join(systemDir, 'agents.yaml'),
+      `hooks:\n${names.map((name) => `  ${name}:\n    script: ${name}.sh\n    events: [Stop]`).join('\n')}\n`,
+    );
+    for (const name of names) {
+      seedDeclaredHook(name);
+      seedVersionHook('grok', '1.0.0', '.grok', `${name}.sh`);
+    }
+
+    const inv = runInventory('grok', '1.0.0', { register: true });
+
+    expect(inv.wiringSupported).toBe(true);
+    expect(inv.wired).toHaveLength(38);
+    expect(inv.wired.map((r) => r.name)).toEqual([...names].sort());
   });
 
   it('computes unmanaged as onDisk minus declared', () => {

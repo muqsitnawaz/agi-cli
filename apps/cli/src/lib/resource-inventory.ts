@@ -13,11 +13,9 @@
  *   unmanaged — onDisk − declared (orphans no layer declares anymore)
  *
  * Callers (inspect, doctor, view, sync) MUST come here rather than
- * re-implementing path joins or config parsing per command. Wiring parsing is
- * currently implemented only for the settings.json hook family (claude, droid,
- * muse) via checkVersionHookWiring; grok hooks.json / kimi config.toml wiring
- * parsers are a follow-up teammate's scope, so `wired` is empty and
- * `wiringSupported` is false for those harnesses.
+ * re-implementing path joins or config parsing per command. Wiring parsing
+ * currently covers the settings.json family (claude, droid,
+ * muse), Grok hooks.json, and Kimi config.toml via checkVersionHookWiring.
  */
 
 import type { AgentId } from './types.js';
