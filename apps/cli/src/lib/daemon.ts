@@ -941,6 +941,29 @@ export async function runDaemon(): Promise<void> {
   };
   const brokerSelfHealInterval = setInterval(() => { void runBrokerSelfHeal(); }, 60_000);
 
+  // RUSH-2232: reap orphaned keychain helpers and `agents` processes stuck on a
+  // keychain call. Runs as a 5-min interval in the daemon (the single executor)
+  // so no UI surface can race it. The reaper shells `ps` once, plans kills in a
+  // pure function, and executes via killTree.
+  let reapingKeychain = false;
+  const runKeychainReap = async () => {
+    if (reapingKeychain) return;
+    reapingKeychain = true;
+    try {
+      const { reapOrphanedKeychainProcesses } = await import('./secrets/reaper.js');
+      const result = reapOrphanedKeychainProcesses();
+      if (result.reaped > 0) {
+        log('WARN', `Reaped ${result.reaped} keychain orphan/stuck process(es)`);
+        for (const d of result.details) log('WARN', `  ${d}`);
+      }
+    } catch (err) {
+      log('ERROR', `Keychain reaper failed: ${(err as Error).message}`);
+    } finally {
+      reapingKeychain = false;
+    }
+  };
+  const keychainReapInterval = setInterval(() => { void runKeychainReap(); }, 5 * 60_000);
+
   const handleReload = () => {
     log('INFO', 'Reloading jobs (SIGHUP)');
     // Refresh user-layer copies of opted-in project routines BEFORE the
@@ -999,6 +1022,7 @@ export async function runDaemon(): Promise<void> {
     clearInterval(usageRefreshInterval);
     clearTimeout(usageRefreshKickoff);
     clearInterval(brokerSelfHealInterval);
+    clearInterval(keychainReapInterval);
     hostedBroker?.close();
     removeDaemonPid();
     removeHeartbeat();
