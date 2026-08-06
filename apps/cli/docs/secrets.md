@@ -282,10 +282,15 @@ A file-backed bundle is encrypted at rest and reads with **no biometry** — the
 choice whenever the remote can't satisfy a Touch ID prompt. By default the remote
 encrypts it under a **machine-local key** it auto-provisions (a 0600 file under
 `~/.agents/.secrets-key/`), so the push needs no passphrase and the remote's reads are
-fully headless. Set `AGENTS_SECRETS_PASSPHRASE` locally only to **opt into** a shared
+fully headless.
+<!-- docs-hygiene:allow-master-key-discussion — `export --host` legitimately forwards the
+     MASTER key to key the remote's own store; this is store provisioning, not transport
+     sync. Reviewed; see src/lib/secrets/docs-hygiene.test.ts. -->
+Set `AGENTS_SECRETS_PASSPHRASE` locally only to **opt into** a shared
 off-disk key: when set it is forwarded over ssh stdin (never argv) and the remote keys
 the bundle under it instead — meaning that same passphrase is then required to read it,
-so only set it when you want that. Alternatively, unlock the remote login keychain
+so only set it when you want that.
+<!-- /docs-hygiene:allow-master-key-discussion --> Alternatively, unlock the remote login keychain
 first (an interactive login / `agents secrets unlock` on the target) and retry the
 keychain push. See [File-backed bundles](#file-backed-bundles-headless--remote) and
 [Recipe 8](#8-headless-release-on-a-remote-mac).
@@ -639,15 +644,12 @@ key — no Touch ID, no GUI. (`codesign` itself still needs the Developer ID ide
 unlocked keychain on the build host — a one-time `security import` of the `.p12`,
 unrelated to `agents secrets`.)
 
-<!-- docs-hygiene:allow-master-key-discussion — a bounded per-command export, sourced
-     and unset around one command. Reviewed; see src/lib/secrets/docs-hygiene.test.ts. -->
-
 **Opt-in shared passphrase.** To key the remote bundle under a shared secret held off
 disk instead of the remote's machine-local key, set `AGENTS_SECRETS_PASSPHRASE` on the
 laptop before the push — it is forwarded over ssh stdin (never argv), and the remote
 then requires that same passphrase to read the bundle. Note the shape below: sourced
-per command from the secrets store and `unset` right after, never parked in a shell rc
-file (see the warning under [File-backed bundles](#file-backed-bundles-headless--remote)).
+per command from the secrets store and `unset` right after, never persisted into your
+environment (see the warning under [File-backed bundles](#file-backed-bundles-headless--remote)).
 
 ```bash
 export AGENTS_SECRETS_PASSPHRASE="$(agents secrets exec release.key -- printenv PASSPHRASE)"
@@ -658,8 +660,6 @@ P="$(agents secrets exec release.key -- printenv PASSPHRASE)"           # one To
 ssh mac-mini 'AGENTS_SECRETS_PASSPHRASE=$(cat) \
   agents secrets exec rush.releases -- ./rush/app/scripts/release.sh 0.10.0 alpha.1 --yes' <<<"$P"
 ```
-
-<!-- /docs-hygiene:allow-master-key-discussion -->
 
 ## Demo
 
@@ -803,16 +803,16 @@ including non-interactive `ssh host 'cmd'`, so the master key lands in the
 environment of essentially everything the box runs. `agents doctor` flags such an
 export as an `rc-secret-export` finding. (Source: `src/lib/secrets/rc-hygiene.ts`.)
 
+<!-- /docs-hygiene:allow-master-key-discussion -->
+
 So: leave the machine-local key in place and set nothing. Reach for
 `AGENTS_SECRETS_PASSPHRASE` only when you have a specific reason to keep the key
-off disk **and** a way to supply it that is not a shell rc file — sourced per
-command from a password manager, or injected by a secret manager into one
-process. If what you actually need is unattended `push`/`pull`, that is
-`AGENTS_SYNC_PASSPHRASE`, a separate transport secret — see
-[Share a bundle with a teammate](#5-share-a-bundle-with-a-teammate). Exporting
-the master key to get headless sync is the exact mistake this split removes.
-
-<!-- /docs-hygiene:allow-master-key-discussion -->
+off disk **and** a way to supply it per command rather than persisting it into
+your environment — sourced from a password manager, or injected by a secret
+manager into one process. If what you actually need is unattended `push`/`pull`,
+that is `AGENTS_SYNC_PASSPHRASE`, a separate transport secret — see
+[Share a bundle with a teammate](#5-share-a-bundle-with-a-teammate). Reaching for
+the master key to get unattended sync is the exact mistake this split removes.
 
 **What the file store protects against.** Encryption-at-rest with the key in a
 0600 file — the same posture as an SSH private key. It defends against on-disk
