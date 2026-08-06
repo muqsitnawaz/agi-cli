@@ -16,8 +16,13 @@ import SQLite3
 enum SessionStatus: String {
     case running
     case idle
-    case attention   // blocked waiting for the user (Notification hook) or cloud needs_review
+    case inputRequired = "input_required"
     case queued
+    case closed
+    case abandoned
+    case orphaned
+    case crashed
+    case unknown
 }
 
 struct Session {
@@ -40,6 +45,8 @@ struct Session {
     let lastActivityMs: Double?
     let preview: String?
     let owner: String?
+    let origin: String?
+    let routineName: String?
 
     /// Prefer topic/label/preview for "what" — never leave a bare agent name alone
     /// when the engine already carried a better signal.
@@ -55,6 +62,29 @@ struct Session {
 
 // Pure formatting helpers for the ACTIVE accordion (unit-tested).
 enum ActiveDisplay {
+    /// Exact lifecycle word used by the CLI active-session model.
+    static func statusLabel(_ status: SessionStatus) -> String {
+        switch status {
+        case .running: return "working"
+        case .inputRequired: return "waiting"
+        case .orphaned: return "orphan"
+        default: return status.rawValue
+        }
+    }
+
+    static func statusGlyph(_ status: SessionStatus) -> String {
+        switch status {
+        case .running: return "●"
+        case .inputRequired: return "◐"
+        case .idle, .queued: return "○"
+        case .abandoned: return "⊘"
+        case .closed: return "×"
+        case .crashed: return "✗"
+        case .orphaned: return "◍"
+        case .unknown: return "◌"
+        }
+    }
+
     /// Prefer engine topic, then terminal label, then a short preview line.
     static func workTitle(topic: String?, label: String?, preview: String?,
                           terminalTitle: String?) -> String {
@@ -116,13 +146,18 @@ enum ActiveDisplay {
         return "remote · \(m)"
     }
 
-    /// Collapsed project row: `agents-cli  ●8 ◐1  zion`.
-    static func projectSummary(repo: String, running: Int, idle: Int,
+    /// Collapsed project row includes every lifecycle state reported by the CLI.
+    static func projectSummary(repo: String, statuses: [SessionStatus: Int],
                                machines: [String]) -> String {
         var parts: [String] = [repo]
-        var counts: [String] = []
-        if running > 0 { counts.append("●\(running)") }
-        if idle > 0 { counts.append("◐\(idle)") }
+        let order: [SessionStatus] = [
+            .running, .inputRequired, .idle, .queued, .orphaned,
+            .crashed, .closed, .abandoned, .unknown,
+        ]
+        let counts = order.compactMap { status -> String? in
+            guard let count = statuses[status], count > 0 else { return nil }
+            return "\(statusGlyph(status))\(count) \(statusLabel(status))"
+        }
         if !counts.isEmpty { parts.append(counts.joined(separator: " ")) }
         let hosts = Array(Set(machines.filter { !$0.isEmpty })).sorted()
         if hosts.count == 1 {
@@ -428,10 +463,7 @@ enum LocalState {
             let repo = Self.repoName(from: a.cwd)
                 ?? a.cwd.map { ($0 as NSString).lastPathComponent }
                 ?? ""
-            let status: SessionStatus = mark != nil ? .attention
-                : a.status == "running" ? .running
-                : a.status == "input_required" ? .attention
-                : a.status == "queued" ? .queued : .idle
+            let status = SessionStatus(rawValue: a.status) ?? .unknown
             let work = ActiveDisplay.workTitle(topic: a.topic, label: a.label,
                                                preview: a.preview,
                                                terminalTitle: sid.isEmpty ? nil : titles[sid])
@@ -439,11 +471,12 @@ enum LocalState {
                                context: a.context ?? "terminal",
                                title: work,
                                question: mark?.text ?? "",
-                               attentionSinceMs: status == .attention ? mark?.sinceMs : nil,
+                               attentionSinceMs: status == .inputRequired ? mark?.sinceMs : nil,
                                machine: a.machine, surface: a.host, sessionId: a.sessionId,
                                ticketId: a.ticketId, prLink: a.prLink,
                                startedAtMs: a.startedAtMs, lastActivityMs: a.lastActivityMs,
-                               preview: a.preview, owner: a.owner))
+                               preview: a.preview, owner: a.owner,
+                               origin: a.origin, routineName: a.routineName))
         }
         return out
     }
@@ -534,11 +567,11 @@ enum LocalState {
                 out.append(Session(agent: kind, repo: repo, cwd: cwd, status: status,
                                    context: "terminal", title: label,
                                    question: mark?.text ?? "",
-                                   attentionSinceMs: status == .attention ? mark?.sinceMs : nil,
+                                   attentionSinceMs: status == .inputRequired ? mark?.sinceMs : nil,
                                    machine: nil, surface: nil, sessionId: sid.isEmpty ? nil : sid,
                                    ticketId: nil, prLink: nil,
                                    startedAtMs: nil, lastActivityMs: nil,
-                                   preview: nil, owner: nil))
+                                   preview: nil, owner: nil, origin: nil, routineName: nil))
             }
         }
         return out
@@ -565,7 +598,7 @@ enum LocalState {
                                machine: nil, surface: nil, sessionId: id,
                                ticketId: nil, prLink: nil,
                                startedAtMs: nil, lastActivityMs: nil,
-                               preview: nil, owner: nil))
+                               preview: nil, owner: nil, origin: nil, routineName: nil))
         }
         return out
     }
@@ -592,16 +625,16 @@ enum LocalState {
             let prompt = col(stmt, 2) ?? ""
             let repo = col(stmt, 3) ?? (col(stmt, 4) ?? "cloud")
             let status: SessionStatus = raw == "running" ? .running
-                : (raw == "input_required" || raw == "needs_review") ? .attention : .queued
+                : (raw == "input_required" || raw == "needs_review") ? .inputRequired : .queued
             out.append(Session(agent: agent, repo: repo, cwd: nil,
                                status: status, context: "cloud",
                                title: String(prompt.prefix(60)),
-                               question: status == .attention ? "needs review" : "",
+                               question: status == .inputRequired ? "needs review" : "",
                                attentionSinceMs: nil,
                                machine: nil, surface: "cloud", sessionId: nil,
                                ticketId: nil, prLink: nil,
                                startedAtMs: nil, lastActivityMs: nil,
-                               preview: nil, owner: nil))
+                               preview: nil, owner: nil, origin: nil, routineName: nil))
         }
         return out
     }
@@ -610,7 +643,7 @@ enum LocalState {
     // attention sentinel wins; else claude transcript mtime (cheap single stat);
     // else default running when alive (mirrors active.ts classifyActivity fallback).
     private static func sessionStatus(sessionId: String, kind: String, cwd: String?, attention: Set<String>) -> SessionStatus {
-        if !sessionId.isEmpty, attention.contains(sessionId) { return .attention }
+        if !sessionId.isEmpty, attention.contains(sessionId) { return .inputRequired }
         if kind == "claude", let cwd, let mtime = claudeTranscriptMtimeMs(sessionId: sessionId, cwd: cwd) {
             return (nowMs() - mtime) < activeWindowMs ? .running : .idle
         }

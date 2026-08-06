@@ -13,6 +13,14 @@ subprocess every three minutes. That command reads indexed/cache state and never
 re-indexes transcripts. Opening the menu uses the warm result; CLI actions remain
 explicit controls (starting a session, running a routine).
 
+The snapshot carries the same rows and lifecycle status as
+`agents sessions --active --local --json`. After the warm snapshot loads, the
+menu does not infer status again from terminal registries or attention files;
+those cheap files are used only during cold start. The ACTIVE section therefore
+uses the CLI words `working`, `waiting`, `idle`, `queued`, `orphan`, `crashed`,
+`closed`, `abandoned`, and `unknown`, and routine sessions carry
+`routine:<name>` when the indexed name is available.
+
 macOS only. It is auto-enabled for every user (see [Lifecycle](#lifecycle)); opt
 out with `agents menubar disable`.
 
@@ -161,8 +169,8 @@ One rule shapes the menu: **attention floats up, context groups down.**
  │ New Session                                ⌘N │   submenu: one entry per agent
  ├────────────────────────────────────────────────┤
  │ ACTIVE · 3 run · 1 idle · 2 projects          │   projects collapsed by default
- │   ▶ agents-cli  ●2 ◐1  zion                   │   accordion: ▶ folds agents open
- │   ▼ web  ●1  zion                             │
+│   ▶ agents-cli  ●2 working ○1 idle  zion      │   accordion: ▶ folds agents open
+│   ▼ web  ●1 working  zion                     │
  │     ● Codex · zion · 12m  ⌥ PR#42 — title   › │   › side submenu = full detail
  ├────────────────────────────────────────────────┤
  │ ROUTINES · 16 · next 7:00 PM · 2 paused       │   next few upcoming + failing
@@ -200,7 +208,8 @@ One rule shapes the menu: **attention floats up, context groups down.**
   [terminal-engine.md → Choosing a terminal](terminal-engine.md#choosing-a-terminal-for-a-gui-caller).
   (It used to always open Terminal.app.)
 - **ACTIVE** — **project accordion** + **session detail submenu**. Projects are
-  **collapsed by default** as a status strip (`▶ agents-cli  ●8 ◐1  zion`).
+  **collapsed by default** as a status strip
+  (`▶ agents-cli  ●8 working ◐1 waiting ○1 idle  zion`).
   Click `▶`/`▼` to fold the project open **inline** and list its agents.
   The project header is an embedded menu control, so expanding or collapsing
   mutates only that project's rows inside the current menu tracking session; it
@@ -319,7 +328,7 @@ command every three minutes; the 10-second badge/liveness checks stay local:
 | Source | Path | Gives |
 |---|---|---|
 | Terminals | `~/.agents/.cache/terminals/live-terminals.json` | extension-registered terminals (agent, cwd, pid, label) — cold start + 10s badge poll |
-| Menu snapshot | `agents menubar snapshot --json` every three minutes | routines, 40 indexed recent sessions, daemon-warmed local active sessions, and persisted watchdog status in one subprocess |
+| Menu snapshot | `agents menubar snapshot --json` every three minutes | routines, 40 indexed recent sessions, daemon-warmed local active sessions with the exact `sessions --active` lifecycle status, and persisted watchdog status in one subprocess |
 | Doctor | `agents doctor --json` every 15 minutes | install and configuration health; kept separate because it is substantially heavier |
 | Teams | `~/.agents/.history/teams/agents/<id>/meta.json` | running teammate agents |
 | Cloud | `~/.agents/.cache/cloud/tasks.db` (SQLite) | cloud tasks, incl. `input_required` or `needs_review` → "awaiting input" |
