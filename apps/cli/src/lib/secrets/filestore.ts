@@ -125,11 +125,13 @@ function readMachinePassphrase(): string | null {
  * the keyring is locked and no AGENTS_SECRETS_PASSPHRASE is set.
  *
  * Security model: this is encryption-at-rest with the key held in a 0600 file —
- * the same posture as an SSH private key, and identical to the common
- * "export AGENTS_SECRETS_PASSPHRASE=… in ~/.zshenv (chmod 600)" workaround. The
- * keyring (key in a daemon's locked memory) is stronger but is unavailable
- * without a graphical/unlocked session. For an off-disk key, set
- * AGENTS_SECRETS_PASSPHRASE (it always takes precedence) or unlock the keyring.
+ * the same posture as an SSH private key. It is NOT equivalent to the common
+ * "export AGENTS_SECRETS_PASSPHRASE=… in ~/.zshenv (chmod 600)" workaround, and
+ * is strictly safer: this file is read by the one process that needs it, while
+ * a shell-rc export is inherited by every process the login shell spawns and is
+ * readable from /proc/<pid>/environ by any same-user process (RUSH-1968; see
+ * rc-hygiene.ts). The keyring (key in a daemon's locked memory) is stronger
+ * still but is unavailable without a graphical/unlocked session.
  */
 function provisionMachinePassphrase(): string {
   const existing = readMachinePassphrase();
