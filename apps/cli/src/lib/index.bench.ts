@@ -75,7 +75,7 @@
  */
 import { describe, bench } from 'vitest';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { Command } from 'commander';
 import {
@@ -239,4 +239,91 @@ describe('command-registry.ts loaders — warm in-process registration only (mod
   bench('loadSessions()(new Command()) — registerSessionsCommands body only, no import cost after first sample', async () => {
     (await loadSessions())(new Command());
   });
+});
+
+/**
+ * ============================================================================
+ * Eager self-update IMPORT GRAPH — cold module-evaluation cost (index.ts:86-95).
+ *
+ * The groups above bench the RUNTIME cost of the functions checkForUpdates
+ * calls. This group benches a different, earlier cost: the one-time
+ * module-EVALUATION of the `import { ... } from './self-update.js'` statement
+ * at index.ts:86-95, which ESM hoists and runs on EVERY `agents` invocation
+ * before command registration -- including the `--version`/`--help` fast paths
+ * that skip checkForUpdates/spawnDetachedSync entirely (index.ts:114-118 sets
+ * only env; the checkForUpdates/spawnDetachedSync guards live at the parse site,
+ * but the self-update MODULE body still evaluates unconditionally because the
+ * import is static, not dynamic like the COMMAND_LOADERS thunks at index.ts:124).
+ *
+ * self-update.ts's own body is tiny, but its static `import { compareVersions }
+ * from './versions.js'` (self-update.ts:20 -- the binding is used once, at
+ * self-update.ts:132) drags the ENTIRE versions.ts dependency graph onto the
+ * eager path: versions.ts statically imports yaml, chalk, smol-toml,
+ * @inquirer/prompts and ~40 local modules (state, resources, agents,
+ * permissions, mcp, plugins, hooks, staleness, ...) at versions.ts:17-68. That
+ * is the "versions.ts reaches the eager graph by two edges (~94ms)" cost tracked
+ * in RUSH-2331; the self-update.ts:20 import is one of those two edges.
+ * self-update.ts's OTHER local import, needsWindowsShell from './platform/
+ * index.js' (self-update.ts:21), is a zero-import leaf (platform/index.ts has no
+ * imports; IS_WINDOWS = process.platform === 'win32' at platform/index.ts:15),
+ * benched below to show it is not the cost.
+ *
+ * compareVersions is defined in the zero-dependency leaf ./agent-spec/
+ * primitives.ts (primitives.ts:50, docblock "zero dependencies") and merely
+ * RE-EXPORTED by versions.ts (versions.ts:34 imports it from primitives;
+ * versions.ts:2327-2328 re-exports it "so existing `import { compareVersions }
+ * from './versions.js'` sites keep working"). So the compareVersions self-update
+ * calls is byte-for-byte the same function whether reached via versions.js or
+ * primitives.js -- primitives.js is benched below as the proposed replacement
+ * source, and the delta versions.js MINUS primitives.js is the measured cost of
+ * the heavy edge that swapping self-update.ts:20 would remove.
+ *
+ * MEASUREMENT REGIME: each module is imported in a FRESH `node` child process
+ * (spawnSync, --input-type=module, a bare `await import(<file url>)`), because
+ * Node caches an ESM module after its first import IN THIS PROCESS -- and this
+ * bench file already statically imports self-update.js at its top, so an
+ * in-process dynamic import would measure a warm cache (~0), not the real cold
+ * cost a user's shell pays on a fresh `agents` process. Spawning the real built
+ * dist/lib/*.js (produced by `bun run build`; NOT the TS source, which Node
+ * cannot import without a loader) mirrors exactly how the installed CLI pays
+ * this: one cold node process, one cold module graph, per invocation. Every
+ * number therefore includes node's ~14ms process-startup floor -- the `bare
+ * node, imports nothing` baseline below measures that floor so the module-graph
+ * cost is read as (module MINUS bare), not the raw number. No mocking: real
+ * child processes, real built artifacts, real filesystem.
+ *
+ * Bounded iteration counts (each spawn is a real fork+exec of node, ~15-110ms),
+ * mirroring the real-cold-process groups earlier in this file.
+ */
+const DIST_LIB = path.join(__dirname, '../../dist/lib');
+function importCost(relFromDistLib: string | null): void {
+  const code = relFromDistLib === null
+    ? ''
+    : `await import(${JSON.stringify(pathToFileURL(path.join(DIST_LIB, relFromDistLib)).href)})`;
+  // spawnSync (not execFileSync) so a non-zero child exit never throws inside
+  // the timed callback; every path below is verified to import cleanly on this
+  // box, but the bench stays robust to environment drift.
+  spawnSync(process.execPath, ['--input-type=module', '-e', code], { stdio: 'ignore' });
+}
+
+describe('eager self-update import graph — cold `node` module-eval, fresh process per sample (index.ts:86-95)', () => {
+  bench('baseline: bare `node -e ""`, imports nothing — the process-startup floor every number below sits on top of', () => {
+    importCost(null);
+  }, { time: 4000, iterations: 20 });
+
+  bench('import dist/lib/agent-spec/primitives.js — the zero-dependency leaf that OWNS compareVersions (primitives.ts:50); proposed replacement source for self-update.ts:20', () => {
+    importCost('agent-spec/primitives.js');
+  }, { time: 4000, iterations: 20 });
+
+  bench('import dist/lib/platform/index.js — self-update.ts:21 needsWindowsShell dep, a zero-import leaf (platform/index.ts) — shown to NOT be the cost', () => {
+    importCost('platform/index.js');
+  }, { time: 4000, iterations: 20 });
+
+  bench('import dist/lib/self-update.js — the FULL eager graph as shipped: self-update body + versions.js (via self-update.ts:20) + platform leaf. This is what index.ts:86-95 evaluates on EVERY invocation', () => {
+    importCost('self-update.js');
+  }, { time: 4000, iterations: 20 });
+
+  bench('import dist/lib/versions.js — the heavy transitive dep pulled in SOLELY for compareVersions (yaml/chalk/smol-toml/@inquirer/prompts + ~40 locals, versions.ts:17-68); RUSH-2331 ~94ms', () => {
+    importCost('versions.js');
+  }, { time: 4000, iterations: 20 });
 });
