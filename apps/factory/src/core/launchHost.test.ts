@@ -316,3 +316,20 @@ test('pickBestHost: all devices SSH-unreachable (online:false) → returns null 
     ]),
   ).toBeNull();
 });
+
+test('resolveBalancePool: online:false devices (SSH-unreachable) are not filtered out pre-probe — pickBestHost is the gate (RUSH-2054)', () => {
+  // resolveBalancePool only excludes: local machine and explicit-pool misses.
+  // online:false devices stay in the pool so resolveBalancedHost can mark them
+  // unreachable (via probeReachable) and let pickBestHost filter them out.
+  const pool = resolveBalancePool(
+    [
+      { name: 'zion', online: true, running: 0 },
+      { name: 'unreachable', online: false, running: 0 },
+      { name: 'reachable', online: true, running: 2 },
+    ],
+    { localName: 'zion' },
+  );
+  expect(pool.map(d => d.name)).toEqual(['unreachable', 'reachable']);
+  // pickBestHost filters out the offline entry and picks the online one.
+  expect(pickBestHost(pool)).toBe('reachable');
+});
