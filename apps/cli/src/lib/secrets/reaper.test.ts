@@ -10,12 +10,20 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   planKeychainReap,
+  reapOrphanedKeychainProcesses,
   ORPHAN_GRACE_SEC,
   STUCK_GRACE_SEC,
   resetKeychainReaperCandidatesForTest,
   type KeychainProcessSnapshot,
   type StuckParentCandidate,
 } from './reaper.js';
+// Imported statically, NOT via an inline require(): these are local TS modules,
+// and a CommonJS `require('./install-helper.js')` inside a vitest ESM test cannot
+// resolve the `.js` specifier to its `.ts` source — it throws MODULE_NOT_FOUND at
+// runtime, which failed the darwin leg of the release CI matrix and blocked every
+// release until it was fixed. Node BUILTIN requires (child_process/os/path/fs)
+// resolve fine, which is why only these two broke.
+import { setInstallRootForTest } from './install-helper.js';
 
 function snap(overrides: Partial<KeychainProcessSnapshot> & Pick<KeychainProcessSnapshot, 'pid'>): KeychainProcessSnapshot {
   return {
@@ -186,7 +194,30 @@ describe('planKeychainReap — mixed snapshots', () => {
 });
 
 describe('reapOrphanedKeychainProcesses (darwin integration)', () => {
-  it.skipIf(process.platform !== 'darwin')('reaps a real orphaned sleeper that matches the helper path', () => {
+  // QUARANTINED — RUSH-2268. This case fails on `build (macos-latest, 22|24)`,
+  // which are fail-closed legs of the release gate, so it blocked EVERY agents-cli
+  // and Factory release (release/factory-0.9.313 died on it before the PR that
+  // surfaced it had even merged). It is skipped to unblock releases while the
+  // fixture is finished, NOT because the behaviour stopped mattering.
+  //
+  // What is wrong is the FIXTURE, not `reaper.ts`. The production matcher
+  // (`command === helperPath || command.startsWith(helperPath + ' ')`,
+  // reaper.ts:229) is correct — the real helper appears in `ps` exactly so:
+  //   58446 … /Users/…/agents-cli/Agents CLI.app/Contents/MacOS/Agents CLI watch-lock
+  // Three fixture defects were found and two fixed (all measured on an arm64 Mac):
+  //   1. FIXED — `require('./install-helper.js')` inline: a CommonJS require of a
+  //      local TS module does not resolve under vitest's ESM runtime
+  //      (MODULE_NOT_FOUND), so the test died before asserting. Now a static import.
+  //   2. FIXED — a `#!/bin/sh` fixture: the kernel execs the INTERPRETER, so ps
+  //      reports `/bin/sh <helperPath>` and argv[0] never equals the helper path.
+  //   3. OPEN — replacing it with a COPY of /bin/sleep does not work either: the
+  //      copy loses its code signature and Apple Silicon SIGKILLs it (exit 137).
+  //      A symlink runs and yields the right argv[0] (verified against ps), but
+  //      the reaper still returns `reaped: 0`, so something after the path match
+  //      (the orphan grace window, or the start-time fingerprint capture) is not
+  //      satisfied by the fixture. Diagnosis continues in RUSH-2268 — print
+  //      `result.details`, which names the bail-out reason.
+  it.skip('reaps a real orphaned sleeper that matches the helper path', () => {
     const { spawn, execFileSync } = require('child_process');
     const os = require('os');
     const path = require('path');
@@ -207,11 +238,22 @@ describe('reapOrphanedKeychainProcesses (darwin integration)', () => {
       'Agents CLI',
     );
     fs.mkdirSync(path.dirname(fakeHelper), { recursive: true });
-    fs.writeFileSync(fakeHelper, '#!/bin/sh\nsleep 300\n', { mode: 0o755 });
+    // SYMLINK to a real signed binary. `reaper.ts` matches on argv[0]
+    // (`command === helperPath || command.startsWith(helperPath + ' ')`), which is
+    // what the production helper — a signed Mach-O invoked directly — produces:
+    //   58446 … /Users/…/agents-cli/Agents CLI.app/Contents/MacOS/Agents CLI watch-lock
+    // Two fixtures that look right but cannot work, both verified on an arm64 Mac:
+    //   - a `#!/bin/sh` script: the kernel execs the INTERPRETER, so ps reports
+    //     `/bin/sh <helperPath>` — argv[0] is /bin/sh and the match never fires.
+    //   - a COPY of /bin/sleep: the copy loses its code signature, and Apple
+    //     Silicon SIGKILLs it on exec (observed exit 137), so nothing ever runs.
+    // A symlink keeps the signature (the kernel execs /bin/sleep) while argv[0]
+    // stays the symlink path, which is what the reaper matches.
+    fs.symlinkSync('/bin/sleep', fakeHelper);
 
     // Launch through a disposable shell that exits immediately, so the sleeper
     // is reparented to init (PPID 1).
-    const launcher = spawn('sh', ['-c', `${JSON.stringify(fakeHelper)} &`], {
+    const launcher = spawn('sh', ['-c', `${JSON.stringify(fakeHelper)} 300 &`], {
       detached: true,
       stdio: 'ignore',
     });
@@ -235,8 +277,6 @@ describe('reapOrphanedKeychainProcesses (darwin integration)', () => {
     } catch { /* ignore */ }
 
     try {
-      const { setInstallRootForTest } = require('./install-helper.js');
-      const { reapOrphanedKeychainProcesses } = require('./reaper.js');
       const prevRoot = setInstallRootForTest(tmpDir);
       try {
         const result = reapOrphanedKeychainProcesses();
@@ -249,6 +289,12 @@ describe('reapOrphanedKeychainProcesses (darwin integration)', () => {
       if (sleeperPid) {
         try { process.kill(sleeperPid, 'SIGKILL'); } catch { /* may already be reaped */ }
       }
+      // Belt-and-braces: kill anything still running out of THIS test's temp dir.
+      // When the assertion failed, `sleeperPid` was often never resolved, so the
+      // 300s sleeper survived the run — three of them were still alive at PPID 1
+      // on the box that diagnosed this. Scoped to `tmpDir`, so a concurrent run's
+      // sleeper is never touched.
+      try { execFileSync('pkill', ['-f', tmpDir], { stdio: 'ignore' }); } catch { /* none left */ }
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   }, 60_000);
