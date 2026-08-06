@@ -75,7 +75,7 @@
  */
 import { describe, bench } from 'vitest';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { Command } from 'commander';
 import {
@@ -239,4 +239,222 @@ describe('command-registry.ts loaders — warm in-process registration only (mod
   bench('loadSessions()(new Command()) — registerSessionsCommands body only, no import cost after first sample', async () => {
     (await loadSessions())(new Command());
   });
+});
+
+/**
+ * ============================================================================
+ * Module loading: the eager ESM graph index.ts evaluates BEFORE any argv fast
+ * path (index.ts:10-16, 36, 86-95, 124-215) and the command modules
+ * COMMAND_LOADERS pulls in afterwards (command-registry.ts:32-119).
+ *
+ * This is a different cost from the registration group above. Registration
+ * measures the commander work a command's registrar does; this measures the
+ * cost of *evaluating the module graph itself* — disk reads, parse, and
+ * top-level evaluation of every transitively imported module. ESM hoists the
+ * static imports at index.ts:10-16 / 36 / 86-95 / 124-215 above every statement
+ * in the file, so all of it is paid before `process.argv[2] === '__vault-age-
+ * helper'` (index.ts:38) can short-circuit, before the secrets-broker intercept
+ * (index.ts:71-84), and before `--version` prints. index.ts:17-21 states this is
+ * the thing "that gets cold starts under the target"; command-registry.ts:4-13
+ * states the same for the command tree.
+ *
+ * Method — cold child process per sample, no mocking. Node caches an ESM module
+ * for the life of a process, so a second in-process `import()` of the same
+ * specifier measures nothing but a Map lookup: an honest module-load number can
+ * only come from a fresh process. Each bench below spawns a real `node
+ * --input-type=module -e "await import(...)"` that imports the REAL built
+ * modules under dist/ (the same artifacts `agents` runs, built by
+ * scripts/build.sh / bun install's `prepare`), against this machine's real
+ * filesystem. Every bench in the group spawns the identical shape, so the
+ * constant Node-spawn floor cancels between rows; `BASELINE` below is that floor
+ * measured directly, so any row minus BASELINE is that graph's own load cost.
+ *
+ * index.ts itself is deliberately NOT imported here, for the reason in this
+ * file's top docblock: it has top-level await, reads process.argv, and ends in
+ * program.parseAsync() (index.ts:1440), so importing it would run the CLI. The
+ * import list below is transcribed from its static imports instead, in source
+ * order, and `bootstrapGraph` unions them into the single graph a real
+ * invocation evaluates.
+ */
+const DIST_DIR = path.join(__dirname, '../../dist');
+/** A dist module, as the `file://` specifier a spawned child can import. */
+const dist = (rel: string): string => pathToFileURL(path.join(DIST_DIR, rel)).href;
+
+/** Cold-import `specs` in a fresh Node process. Empty list = the spawn floor. */
+function coldImport(specs: string[]): void {
+  const src = specs.map((s) => `await import(${JSON.stringify(s)});`).join('\n');
+  spawnSync(process.execPath, ['--input-type=module', '-e', src], { stdio: 'ignore' });
+}
+
+/** The static imports of src/index.ts, in source order. */
+const BOOTSTRAP_GRAPH: string[] = [
+  'commander', // index.ts:10
+  'chalk', // index.ts:11
+  'node:fs', 'node:os', 'node:path', 'node:url', // index.ts:12-15
+  dist('lib/startup/dev-build.js'), // index.ts:16
+  dist('lib/secrets/sync-commands.js'), // index.ts:36
+  dist('lib/self-update.js'), // index.ts:86-95
+  dist('lib/startup/command-registry.js'), // index.ts:124-207
+  dist('lib/help.js'), // index.ts:208
+  dist('lib/whats-new.js'), // index.ts:209
+  dist('lib/platform/index.js'), // index.ts:211
+  dist('lib/cli-entry.js'), // index.ts:212
+  dist('lib/events.js'), // index.ts:213
+  dist('lib/event-provenance.js'), // index.ts:214
+  dist('lib/format.js'), // index.ts:215
+];
+
+const SPAWN_OPTS = { time: 3000, iterations: 12 } as const;
+
+describe('startup module loading — one cold `node -e "await import(...)"` per index.ts eager import (index.ts:10-215)', () => {
+  bench('BASELINE: bare `node -e ""` — the spawn floor every row below also pays; subtract it to get load cost', () => {
+    coldImport([]);
+  }, SPAWN_OPTS);
+
+  bench('commander (index.ts:10)', () => {
+    coldImport(['commander']);
+  }, SPAWN_OPTS);
+
+  bench('chalk (index.ts:11)', () => {
+    coldImport(['chalk']);
+  }, SPAWN_OPTS);
+
+  bench('node:fs + node:os + node:path + node:url (index.ts:12-15) — builtins, snapshot-resident', () => {
+    coldImport(['node:fs', 'node:os', 'node:path', 'node:url']);
+  }, SPAWN_OPTS);
+
+  bench('lib/startup/dev-build.js (index.ts:16)', () => {
+    coldImport([dist('lib/startup/dev-build.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/secrets/sync-commands.js (index.ts:36) — the leaf the docblock at index.ts:58-61 says is cheap to bind here', () => {
+    coldImport([dist('lib/secrets/sync-commands.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/self-update.js (index.ts:86-95) — pulls lib/versions.js via self-update.ts:20', () => {
+    coldImport([dist('lib/self-update.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/startup/command-registry.js (index.ts:124-207) — every COMMAND_LOADERS entry is a dynamic import inside a thunk (command-registry.ts:32-119), so the table itself loads no command module', () => {
+    coldImport([dist('lib/startup/command-registry.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/help.js (index.ts:208)', () => {
+    coldImport([dist('lib/help.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/whats-new.js (index.ts:209)', () => {
+    coldImport([dist('lib/whats-new.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/platform/index.js (index.ts:211) — `export *` barrel over paths/exec/links/process/ipc/winpath (platform/index.ts:19-24)', () => {
+    coldImport([dist('lib/platform/index.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/cli-entry.js (index.ts:212)', () => {
+    coldImport([dist('lib/cli-entry.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/events.js (index.ts:213) — pulls lib/state.js + lib/fs-atomic.js (events.ts:20-21)', () => {
+    coldImport([dist('lib/events.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/event-provenance.js (index.ts:214)', () => {
+    coldImport([dist('lib/event-provenance.js')]);
+  }, SPAWN_OPTS);
+
+  bench('lib/format.js (index.ts:215) — re-enters the events graph via format.ts:12', () => {
+    coldImport([dist('lib/format.js')]);
+  }, SPAWN_OPTS);
+});
+
+/**
+ * The graphs, not the pieces. Individual rows above double-count shared
+ * subgraphs (state.js is reached from events.js AND format.js, platform/index.js
+ * from self-update.js AND directly), so their sum is not the real cost. These
+ * rows import a whole graph in ONE child, which is what an invocation pays.
+ *
+ * `redirected` is not hypothetical arithmetic: it imports the exact set
+ * self-update.js's graph reduces to when its one `compareVersions` import
+ * (self-update.ts:20) points at the leaf that actually owns that function
+ * (agent-spec/primitives.ts:50) instead of at ./versions.js, which merely
+ * re-exports it (versions.ts:34, and the note at versions.ts:2327-2328). Its
+ * only other module import is platform/index.js (self-update.ts:21); the rest is
+ * builtins (self-update.ts:15-19).
+ *
+ * `deferrable` additionally drops events.js / event-provenance.js / format.js.
+ * Every symbol index.ts binds from those three is called only inside a function
+ * body, never at module scope: emit (index.ts:292, 314) and redactArgs
+ * (index.ts:298) inside the preAction/postAction hooks, stampProvenance
+ * (index.ts:337) inside postAction, emitFriction (index.ts:942) inside the
+ * `_internal friction` action, die (index.ts:919) inside the `hq` tombstone
+ * action.
+ *
+ * `floor` is the irreducible cost: commander + chalk + the builtins, which the
+ * CLI cannot start without.
+ */
+const SELF_UPDATE_REDIRECTED: string[] = [
+  'node:fs', 'node:os', 'node:path', 'node:crypto', 'node:child_process', // self-update.ts:15-19
+  dist('lib/agent-spec/primitives.js'), // where compareVersions is defined (primitives.ts:50)
+  dist('lib/platform/index.js'), // self-update.ts:21
+];
+const WITHOUT_SELF_UPDATE = BOOTSTRAP_GRAPH.filter((s) => !s.endsWith('self-update.js'));
+const REDIRECTED_GRAPH = [...WITHOUT_SELF_UPDATE, ...SELF_UPDATE_REDIRECTED];
+const DEFERRABLE_GRAPH = REDIRECTED_GRAPH.filter(
+  (s) => !s.endsWith('events.js') && !s.endsWith('event-provenance.js') && !s.endsWith('format.js'),
+);
+const FLOOR_GRAPH = ['commander', 'chalk', 'node:fs', 'node:os', 'node:path', 'node:url'];
+
+describe('startup module loading — the whole eager graph in one cold process (what every `agents` invocation actually pays before argv is read)', () => {
+  bench('BASELINE: bare `node -e ""` — same spawn floor as the rows below', () => {
+    coldImport([]);
+  }, SPAWN_OPTS);
+
+  bench('TODAY: the full index.ts:10-215 graph', () => {
+    coldImport(BOOTSTRAP_GRAPH);
+  }, SPAWN_OPTS);
+
+  bench('self-update.ts:20 redirected to agent-spec/primitives.js — drops the 3738-line lib/versions.js sync engine from the graph', () => {
+    coldImport(REDIRECTED_GRAPH);
+  }, SPAWN_OPTS);
+
+  bench('...and events.js + event-provenance.js + format.js deferred into the hook bodies that use them', () => {
+    coldImport(DEFERRABLE_GRAPH);
+  }, SPAWN_OPTS);
+
+  bench('FLOOR: commander + chalk + builtins only — what the CLI cannot start without', () => {
+    coldImport(FLOOR_GRAPH);
+  }, SPAWN_OPTS);
+});
+
+/**
+ * The command modules COMMAND_LOADERS imports once a top-level name is resolved
+ * (index.ts:1271-1280 -> command-registry.ts:32-119). These load AFTER the
+ * bootstrap graph above and are the larger half of a real cold start, so the
+ * last row measures one on TOP of the bootstrap graph — the true marginal cost
+ * of `agents view` over the bootstrap the process already paid, not a number
+ * measured in isolation and assumed to add.
+ */
+const COMMAND_MODULE_OPTS = { time: 6000, iterations: 12 } as const;
+
+describe('startup module loading — command modules pulled by COMMAND_LOADERS (command-registry.ts:32-119)', () => {
+  bench('BASELINE: bare `node -e ""` — same spawn floor as the rows below', () => {
+    coldImport([]);
+  }, COMMAND_MODULE_OPTS);
+
+  bench('commands/view.js (loadView, command-registry.ts:32)', () => {
+    coldImport([dist('commands/view.js')]);
+  }, COMMAND_MODULE_OPTS);
+
+  bench('commands/doctor.js (loadDoctor, command-registry.ts:65)', () => {
+    coldImport([dist('commands/doctor.js')]);
+  }, COMMAND_MODULE_OPTS);
+
+  bench('commands/sessions.js (loadSessions, command-registry.ts:107) — the SQLite-backed session stack', () => {
+    coldImport([dist('commands/sessions.js')]);
+  }, COMMAND_MODULE_OPTS);
+
+  bench('bootstrap graph THEN commands/view.js — the real `agents view` module-load path, in order', () => {
+    coldImport([...BOOTSTRAP_GRAPH, dist('commands/view.js')]);
+  }, COMMAND_MODULE_OPTS);
 });
