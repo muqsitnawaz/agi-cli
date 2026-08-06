@@ -1950,7 +1950,6 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
     );
   });
   txn();
-  markSessionIndexMutation();
 }
 
 /** Batch-upsert sessions with their FTS5 content and scan stamps in a single transaction. */
@@ -2173,7 +2172,6 @@ export function upsertSessionsBatch(
     }
   });
   txn(enrichedEntries);
-  if (writtenEntries.length > 0) markSessionIndexMutation();
   // Tool evidence shares the transcript parse above but owns an independent
   // transaction/ledger. If this write fails, the normal session row remains
   // valid and ensureToolIndex retries from the missing tool ledger later.
@@ -2559,15 +2557,18 @@ function buildSessionWhere(options: QueryOptions): { clause: string; params: any
  * `readdirSync` once per directory and a Set membership test collapses what
  * used to be N stat syscalls into (number of distinct directories) readdir
  * syscalls — the same existence answer, far fewer syscalls on a large index
- * (RUSH-2211). The resulting path membership is cached until a local index
- * mutation or SQLite data_version change from a concurrent writer invalidates
- * it (RUSH-2318). Falls back to per-file existsSync when a directory cannot be
+ * (RUSH-2211). Each directory membership set is cached by directory mtime+size,
+ * so filesystem-only creates and deletes invalidate it without a SQLite write
+ * (RUSH-2318). Falls back to per-file existsSync when a directory cannot be
  * listed.
  */
-const sessionFileMembershipCache = new Map<string, boolean>();
-let sessionIndexMutationVersion = 0;
-let cachedSessionIndexMutationVersion = -1;
-let cachedSessionDataVersion = -1;
+interface DirectoryMembershipCacheEntry {
+  mtimeMs: number;
+  size: number;
+  entries: Set<string>;
+}
+
+const directoryMembershipCache = new Map<string, DirectoryMembershipCacheEntry>();
 let directoryMembershipSweepCount = 0;
 
 /** Process-local diagnostics for the real-filesystem existence-cache tests. */
@@ -2577,35 +2578,13 @@ export function getSessionExistenceCacheStats(): { sweeps: number } {
 
 /** Clear process-local directory membership state when the session DB closes. */
 function clearSessionExistenceCache(): void {
-  sessionFileMembershipCache.clear();
-  cachedSessionIndexMutationVersion = -1;
-  cachedSessionDataVersion = -1;
+  directoryMembershipCache.clear();
   directoryMembershipSweepCount = 0;
 }
 
-function markSessionIndexMutation(): void {
-  sessionIndexMutationVersion++;
-}
-
-function sqliteDataVersion(db: Database.Database): number {
-  const row = db.prepare('PRAGMA data_version').get() as { data_version: number };
-  return row.data_version;
-}
-
-function findMissingFilePaths(db: Database.Database, filePaths: string[]): Set<string> {
-  const dataVersion = sqliteDataVersion(db);
-  if (
-    cachedSessionDataVersion !== dataVersion
-    || cachedSessionIndexMutationVersion !== sessionIndexMutationVersion
-  ) {
-    sessionFileMembershipCache.clear();
-    cachedSessionDataVersion = dataVersion;
-    cachedSessionIndexMutationVersion = sessionIndexMutationVersion;
-  }
-
+function findMissingFilePaths(filePaths: string[]): Set<string> {
   const byDir = new Map<string, Set<string>>();
   for (const p of filePaths) {
-    if (sessionFileMembershipCache.has(p)) continue;
     const dir = path.dirname(p);
     let basenames = byDir.get(dir);
     if (!basenames) {
@@ -2619,29 +2598,30 @@ function findMissingFilePaths(db: Database.Database, filePaths: string[]): Set<s
   for (const [dir, basenames] of byDir) {
     let entries: Set<string>;
     try {
-      entries = new Set(fs.readdirSync(dir));
-      directoryMembershipSweepCount++;
+      const stat = fs.statSync(dir);
+      const cached = directoryMembershipCache.get(dir);
+      if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+        entries = cached.entries;
+      } else {
+        entries = new Set(fs.readdirSync(dir));
+        directoryMembershipCache.set(dir, { mtimeMs: stat.mtimeMs, size: stat.size, entries });
+        directoryMembershipSweepCount++;
+      }
     } catch {
+      directoryMembershipCache.delete(dir);
       // Directory itself is gone (or unreadable) — every file in it is missing.
       // Also covers the race where readdir loses to a concurrent delete: fall
       // back to a direct stat rather than assuming existence.
       for (const base of basenames) {
         const filePath = path.join(dir, base);
-        const exists = fs.existsSync(filePath);
-        sessionFileMembershipCache.set(filePath, exists);
-        if (!exists) missing.add(filePath);
+        if (!fs.existsSync(filePath)) missing.add(filePath);
       }
       continue;
     }
     for (const base of basenames) {
       const filePath = path.join(dir, base);
-      const exists = entries.has(base);
-      sessionFileMembershipCache.set(filePath, exists);
-      if (!exists) missing.add(filePath);
+      if (!entries.has(base)) missing.add(filePath);
     }
-  }
-  for (const filePath of filePaths) {
-    if (sessionFileMembershipCache.get(filePath) === false) missing.add(filePath);
   }
   return missing;
 }
@@ -2683,7 +2663,7 @@ export function querySessions(options: QueryOptions = {}): SessionMeta[] {
   // surfacing in the Factory UI if any code path forgets to rewrite (#136).
   // Synthetic rows (OpenClaw channels/cron — see scanOpenClawIncremental) carry
   // an empty file_path and are exempt; they're keyed by CLI output, not files.
-  const missingPaths = findMissingFilePaths(db, rows.map(r => r.file_path).filter((p): p is string => !!p));
+  const missingPaths = findMissingFilePaths(rows.map(r => r.file_path).filter((p): p is string => !!p));
   const missing = rows.filter(r => r.file_path && missingPaths.has(r.file_path));
   if (missing.length > 0) {
     const purge = db.transaction(() => {
@@ -3494,6 +3474,5 @@ export function updateSessionFilePaths(oldPrefix: string, newPrefix: string): nu
     }
   });
   txn();
-  markSessionIndexMutation();
   return rows.length;
 }
