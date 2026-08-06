@@ -1195,12 +1195,21 @@ let requestedIsDisabled = requestedCommand !== undefined && brandDisabled.has(re
 // never re-consulted the router and dead-ended on a LOCAL doctor with an unknown
 // option. A brand-disabled name is not a correction target — under that brand the
 // command does not exist. RUSH-2022.
-if (requestedCommand !== undefined && !isKnownTopLevelCommand(requestedCommand)) {
+// Only argv[0]: `requestedCommand` is "first token that doesn't start with -",
+// which in a leading-flag form like `agents --host box view` picks up the FLAG'S
+// VALUE (`box`). Reading that as a command is a pre-existing wart; REWRITING it
+// would be a new bug — a device named one letter off a command would have its
+// name silently replaced. A typo anywhere but position 0 falls through to the
+// plain `unknown command` + did-you-mean.
+if (
+  requestedCommand !== undefined &&
+  passedArgs[0] === requestedCommand &&
+  !isKnownTopLevelCommand(requestedCommand)
+) {
   const suggestion = suggestTopLevelCommand(requestedCommand);
   if (suggestion?.distance === 1 && !brandDisabled.has(suggestion.name)) {
-    const idx = passedArgs.indexOf(requestedCommand);
-    passedArgs[idx] = suggestion.name;
-    process.argv[idx + 2] = suggestion.name;
+    passedArgs[0] = suggestion.name;
+    process.argv[2] = suggestion.name;
     requestedCommand = suggestion.name;
     requestedIsDisabled = false;
   }
