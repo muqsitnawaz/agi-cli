@@ -303,9 +303,10 @@ function coldImport(specs: string[]): void {
  * The static imports of src/index.ts, in source order.
  *
  * They do NOT stop at index.ts:215. index.ts:513-524 declares three more, and
- * ESM hoists them into the same block as the rest — the built entry proves it:
- * dist/index.js:393 (state.js) and dist/index.js:394 (brand.js) sit in the same
- * unbroken import block as dist/index.js:8 (commander). Both are load-bearing
+ * ESM hoists them with the rest — the built entry keeps them as top-level
+ * imports at dist/index.js:393 (state.js) and dist/index.js:394 (brand.js),
+ * evaluated before any statement runs, exactly like dist/index.js:8
+ * (commander). Both are load-bearing
  * here, not incidental: brand.ts:20 imports agents.js, and agents.ts:26 imports
  * ./versions.js — so this list reaches the 3738-line sync engine by a SECOND
  * edge, independent of self-update.ts:20. A version of this bench that stopped
@@ -318,7 +319,12 @@ function coldImport(specs: string[]): void {
  *
  * `node:os` is deliberately absent though index.ts:13 declares it: nothing in
  * index.ts references `os`, so tsc elides it (dist/index.js:8-13 has no os
- * import). This list is the graph the built entry actually loads.
+ * import). platform/index.js is elided from the entry for the same reason —
+ * index.ts:211 binds IS_WINDOWS and nothing uses it, so `platform/index.js`
+ * appears nowhere in dist/index.js — but unlike `os` it stays in this list,
+ * because the graph loads it anyway one level down (self-update.ts:21,
+ * agents.ts:22). Its row below is labelled accordingly. This list is the graph
+ * the built entry actually loads, not the one the source appears to declare.
  */
 const BOOTSTRAP_GRAPH: string[] = [
   'commander', // index.ts:10
@@ -330,7 +336,7 @@ const BOOTSTRAP_GRAPH: string[] = [
   dist('lib/startup/command-registry.js'), // index.ts:124-207
   dist('lib/help.js'), // index.ts:208
   dist('lib/whats-new.js'), // index.ts:209
-  dist('lib/platform/index.js'), // index.ts:211
+  dist('lib/platform/index.js'), // declared at index.ts:211 but elided; really loaded via self-update.ts:21 / agents.ts:22
   dist('lib/cli-entry.js'), // index.ts:212
   dist('lib/events.js'), // index.ts:213
   dist('lib/event-provenance.js'), // index.ts:214
@@ -382,7 +388,7 @@ describe('startup module loading — one cold `node -e "await import(...)"` per 
     coldImport([dist('lib/whats-new.js')]);
   }, SPAWN_OPTS);
 
-  bench('lib/platform/index.js (index.ts:211) — `export *` barrel over paths/exec/links/process/ipc/winpath (platform/index.ts:19-24)', () => {
+  bench('lib/platform/index.js — `export *` barrel over paths/exec/links/process/ipc/winpath (platform/index.ts:19-24); index.ts:211 binds IS_WINDOWS but nothing uses it so tsc elides that edge, and the graph reaches it via self-update.ts:21 / agents.ts:22 instead', () => {
     coldImport([dist('lib/platform/index.js')]);
   }, SPAWN_OPTS);
 
