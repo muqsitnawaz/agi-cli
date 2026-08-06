@@ -1142,6 +1142,11 @@ export function buildExecCommand(options: ExecOptions): string[] {
       // The OpenCode TUI takes an initial prompt via --prompt; a bare positional
       // on the default command is parsed as a project path, not a message.
       cmd.push('--prompt', options.prompt);
+    } else if (interactive && options.agent === 'claude') {
+      // Claude's -p is --print, not a prompt-value flag. In an interactive run
+      // the initial prompt is positional; emitting `-p /continue <id>` turns a
+      // focus recovery into a one-shot print process that immediately exits.
+      cmd.push(options.prompt);
     } else if (template.promptFlag === 'positional') {
       cmd.push(options.prompt);
     } else {
@@ -1511,7 +1516,7 @@ export function formatPaneTail(raw: string, maxLines = 30): string {
  *      (Ctrl-b d) — return 0 and LEAVE the session for `agents focus` to re-attach.
  */
 async function runInTmux(options: ExecOptions, executable: string, args: string[]): Promise<SpawnResult> {
-  const { createSession, hasSession, killSession, paneExitStatus, setSessionHook, slugifyName, agentPaneDiedHook, markSessionHookSchema } = await import('./tmux/session.js');
+  const { createSession, killSession, paneExitStatus, prepareSessionForResume, setSessionHook, slugifyName, agentPaneDiedHook, markSessionHookSchema } = await import('./tmux/session.js');
   const { getDefaultSocketPath } = await import('./tmux/paths.js');
   const { attachTmux, runTmux } = await import('./tmux/binary.js');
 
@@ -1522,14 +1527,10 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
 
   // A native resume must not create a competing wrapper for a live session.
   // A retained dead pane is reaped before the harness resumes normally.
-  if (options.resume && await hasSession(name, socket)) {
-    const existing = await createSession({ name, cwd, socket, source: 'cli', attachExisting: true });
+  if (options.resume && await prepareSessionForResume(name, socket) === 'attach') {
     if (options.sessionId) writeSessionAliasRecord(options.sessionId, name);
-    if (!existing.pane || !(await paneExitStatus(existing.pane, socket)).dead) {
-      await attachTmux({ socket, args: ['attach-session', '-t', name] });
-      return { exitCode: 0, stderr: '', stdout: '' };
-    }
-    await killSession(name, socket);
+    await attachTmux({ socket, args: ['attach-session', '-t', name] });
+    return { exitCode: 0, stderr: '', stdout: '' };
   }
 
   // SessionStart learns some harness IDs only after launch. Carry the wrapper
