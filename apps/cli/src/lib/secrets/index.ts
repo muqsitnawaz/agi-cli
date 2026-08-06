@@ -813,6 +813,94 @@ export function rekeyStatus(): {
 }
 
 /**
+ * Timeout for never-prompt helper verbs (has/set/delete/list*), and the two
+ * silent `/usr/bin/security` probes: a wedged `coreauthd` can hang the helper's
+ * XPC receive forever, so bound it. These never raise a Touch ID sheet, so the
+ * only reason to hang is a broken keychain — 8s is generous for a local query.
+ */
+export const KEYCHAIN_SILENT_TIMEOUT_MS = 8_000;
+
+/**
+ * Timeout for may-prompt helper verbs (get/get-batch/get-batch-synced/
+ * migrate-*), all gated by `assertRawKeychainReadAllowed` so they only reach a
+ * TTY where a human can answer Touch ID. 60s leaves room to authenticate while
+ * still bounding a wedged `coreauthd` that would otherwise hang forever.
+ */
+export const KEYCHAIN_INTERACTIVE_TIMEOUT_MS = 60_000;
+
+/**
+ * Thrown when a keychain-helper (or `/usr/bin/security`) spawn is hard-killed on
+ * its timeout — the wedged-`coreauthd` case (RUSH-2231). Typed so read callers
+ * can arm the read back-off before rethrowing, and so a caller distinguishes a
+ * hung keychain from a plain non-zero exit.
+ */
+export class KeychainHelperTimeoutError extends Error {
+  constructor(public readonly bin: string, public readonly timeoutMs: number) {
+    super(
+      `Keychain helper timed out after ${Math.round(timeoutMs / 1000)}s ` +
+        `(keychain locked / LocalAuthentication unresponsive) — retry; ` +
+        `if it persists, lock/unlock the screen or reboot.`,
+    );
+    this.name = 'KeychainHelperTimeoutError';
+  }
+}
+
+/** Whether the once-per-process daemon boot has been attempted (Layer-3 boot). */
+let daemonBootAttempted = false;
+/** Under the vitest runner, do not spawn a background daemon from a keychain
+ *  touch; a test can re-enable via {@link setKeychainDaemonBootForTest}. */
+let daemonBootEnabled = !process.env.VITEST;
+
+export function setKeychainDaemonBootForTest(enabled: boolean): void {
+  daemonBootEnabled = enabled;
+  daemonBootAttempted = false;
+}
+
+/**
+ * Bring the reaper online opportunistically (RUSH-2232 boot path). A
+ * secrets-only machine (e.g. a SessionStart hook doing `secrets get`) never
+ * reaches `secrets unlock`/broker code, so the daemon — which runs the keychain
+ * reaper on a tick — would never start there. Every keychain touch is a chance
+ * to start it. Once per process, macOS only, fire-and-forget: a keychain read
+ * must never block on (or fail because of) daemon startup, and the dynamic
+ * import keeps the daemon's heavy deps out of every secrets process's static graph.
+ */
+function ensureReaperDaemonOnce(): void {
+  if (daemonBootAttempted || !daemonBootEnabled) return;
+  daemonBootAttempted = true;
+  if (process.platform !== 'darwin') return; // the keychain reaper is macOS only
+  void import('../daemon.js')
+    .then(({ ensureDaemonStarted }) => {
+      try { ensureDaemonStarted(); } catch { /* best-effort */ }
+    })
+    .catch(() => { /* daemon module unavailable — best-effort */ });
+}
+
+/**
+ * Run a keychain-helper (or `/usr/bin/security`) `spawnSync`, bounded by
+ * `timeoutMs` and hard-killed (SIGKILL, not the default SIGTERM — the hang is a
+ * Mach `mach_msg` receive that ignores SIGTERM). A timeout leaves `status` null
+ * with the kill signal recorded (and, for the deadline, an `ETIMEDOUT` error);
+ * either shape is surfaced as a typed {@link KeychainHelperTimeoutError} so a
+ * wedged `coreauthd` can no longer hang the parent forever. Also fires the
+ * once-per-process reaper-daemon boot.
+ */
+export function spawnKeychainHelper(
+  bin: string,
+  args: readonly string[],
+  opts: SpawnSyncOptions,
+  timeoutMs: number,
+): ReturnType<typeof spawnSync> {
+  ensureReaperDaemonOnce();
+  const result = spawnSync(bin, args as string[], { ...opts, timeout: timeoutMs, killSignal: 'SIGKILL' });
+  const timedOut =
+    (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ||
+    (result.status === null && result.signal != null);
+  if (timedOut) throw new KeychainHelperTimeoutError(bin, timeoutMs);
+  return result;
+}
+
+/**
  * Check if a keychain/keyring item exists. Never prompts for biometry.
  *
  * Throws when the item cannot be reached — on macOS, when the signed helper is
@@ -833,14 +921,14 @@ export function hasKeychainToken(item: string): boolean {
   if (isLinux()) return linuxBackend.has(item);
   if (isWindows()) return windowsBackend.has(item);
   if (!isOurItem(item)) {
-    return spawnSync('/usr/bin/security', ['find-generic-password', '-a', os.userInfo().username, '-s', item], {
+    return spawnKeychainHelper('/usr/bin/security', ['find-generic-password', '-a', os.userInfo().username, '-s', item], {
       stdio: ['ignore', 'ignore', 'ignore'],
-    }).status === 0;
+    }, KEYCHAIN_SILENT_TIMEOUT_MS).status === 0;
   }
   const bin = getKeychainHelperPath();
-  return spawnSync(bin, ['has', item, os.userInfo().username], {
+  return spawnKeychainHelper(bin, ['has', item, os.userInfo().username], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  }).status === 0;
+  }, KEYCHAIN_SILENT_TIMEOUT_MS).status === 0;
 }
 
 /**
@@ -947,9 +1035,19 @@ export function getKeychainToken(item: string, context: KeychainReadContext = {}
   if (isLinux()) return linuxBackend.get(item);
   if (isWindows()) return windowsBackend.get(item);
   if (!isOurItem(item)) {
-    const sec = spawnSync('/usr/bin/security', ['find-generic-password', '-a', os.userInfo().username, '-s', item, '-w'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    // Bare no-ACL items normally read silently, but a legacy trusted-app item
+    // could pop the password sheet — bound it interactively so a user can type,
+    // yet a wedged coreauthd still can't hang forever. A timeout arms the
+    // back-off (like any failed read) before rethrowing.
+    let sec: ReturnType<typeof spawnSync>;
+    try {
+      sec = spawnKeychainHelper('/usr/bin/security', ['find-generic-password', '-a', os.userInfo().username, '-s', item, '-w'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }, KEYCHAIN_INTERACTIVE_TIMEOUT_MS);
+    } catch (err) {
+      if (err instanceof KeychainHelperTimeoutError && !context.silentNoAcl) noteKeychainReadFailure(requested);
+      throw err;
+    }
     if (sec.status === 0) {
       const token = sec.stdout?.toString().trim();
       if (token) {
@@ -960,15 +1058,23 @@ export function getKeychainToken(item: string, context: KeychainReadContext = {}
     throw new Error(`Keychain item '${requested}' not found.`);
   }
   const bin = getKeychainHelperPath();
-  const result = spawnSync(bin, ['get', item, os.userInfo().username], {
-    env: {
-      ...process.env,
-      AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context),
-      AGENTS_KEYCHAIN_PROMPT_BASE: keychainOperationPrompt({ ...context, duration: undefined }),
-      AGENTS_KEYCHAIN_SKIP_AUTH_UI: context.silentNoAcl ? '1' : '0',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  let result: ReturnType<typeof spawnSync>;
+  try {
+    result = spawnKeychainHelper(bin, ['get', item, os.userInfo().username], {
+      env: {
+        ...process.env,
+        AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context),
+        AGENTS_KEYCHAIN_PROMPT_BASE: keychainOperationPrompt({ ...context, duration: undefined }),
+        AGENTS_KEYCHAIN_SKIP_AUTH_UI: context.silentNoAcl ? '1' : '0',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }, KEYCHAIN_INTERACTIVE_TIMEOUT_MS);
+  } catch (err) {
+    // A still-wedged coreauthd keeps timing out; arm the back-off so the next
+    // poll fails fast instead of re-hanging (RUSH-2231).
+    if (err instanceof KeychainHelperTimeoutError && !context.silentNoAcl) noteKeychainReadFailure(requested);
+    throw err;
+  }
   // Exit 1 is a plain miss — no prompt was raised, so it opens no back-off.
   if (result.status === 1) throw new Error(`Keychain item '${requested}' not found.`);
   if (result.status !== 0) {
@@ -1038,19 +1144,27 @@ export function getKeychainTokens(items: string[], context: KeychainReadContext 
     return result;
   }
   const bin = getKeychainHelperPath();
-  const child = spawnSync(bin, ['get-batch', os.userInfo().username, ...storageItems], {
-    env: {
-      ...process.env,
-      AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context),
-      AGENTS_KEYCHAIN_PROMPT_BASE: keychainOperationPrompt({ ...context, duration: undefined }),
-      AGENTS_KEYCHAIN_SKIP_AUTH_UI: context.silentNoAcl ? '1' : '0',
-      // The signed helper's own vocabulary is unchanged (it predates the rename
-      // and ships as a separately-versioned binary), so map to its legacy token.
-      AGENTS_KEYCHAIN_DEFAULT_POLICY: (context.defaultPolicy ?? 'hold') === 'hold' ? 'daily' : (context.defaultPolicy as string),
-      AGENTS_KEYCHAIN_FORCE_DURATION: context.forceDuration ? '1' : '0',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  let child: ReturnType<typeof spawnSync>;
+  try {
+    child = spawnKeychainHelper(bin, ['get-batch', os.userInfo().username, ...storageItems], {
+      env: {
+        ...process.env,
+        AGENTS_KEYCHAIN_PROMPT: keychainOperationPrompt(context),
+        AGENTS_KEYCHAIN_PROMPT_BASE: keychainOperationPrompt({ ...context, duration: undefined }),
+        AGENTS_KEYCHAIN_SKIP_AUTH_UI: context.silentNoAcl ? '1' : '0',
+        // The signed helper's own vocabulary is unchanged (it predates the rename
+        // and ships as a separately-versioned binary), so map to its legacy token.
+        AGENTS_KEYCHAIN_DEFAULT_POLICY: (context.defaultPolicy ?? 'hold') === 'hold' ? 'daily' : (context.defaultPolicy as string),
+        AGENTS_KEYCHAIN_FORCE_DURATION: context.forceDuration ? '1' : '0',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }, KEYCHAIN_INTERACTIVE_TIMEOUT_MS);
+  } catch (err) {
+    // One back-off memo covers the whole batch (like a cancel below): a wedged
+    // coreauthd keeps timing out, so suppress the next retry (RUSH-2231).
+    if (err instanceof KeychainHelperTimeoutError && !context.silentNoAcl) noteKeychainReadFailure(backoffKey);
+    throw err;
+  }
   if (child.status !== 0 && !context.silentNoAcl) noteKeychainReadFailure(backoffKey);
   if (child.status === 4) {
     throw new Error(`Touch ID cancelled while reading ${items.length} keychain item(s).`);
@@ -1199,10 +1313,10 @@ export function setKeychainToken(item: string, value: string, opts?: { noAcl?: b
   // re-notarized helper; an older pinned helper dies with "Unknown command:
   // set-no-acl" (exit 2), surfaced below — never a silent ACL'd downgrade.
   const helperCmd = opts?.noAcl ? 'set-no-acl' : 'set';
-  const result = spawnSync(bin, [helperCmd, item, os.userInfo().username], {
+  const result = spawnKeychainHelper(bin, [helperCmd, item, os.userInfo().username], {
     input: value,
     stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  }, KEYCHAIN_SILENT_TIMEOUT_MS);
   if (result.status !== 0) {
     const msg = result.stderr?.toString().trim();
     if (opts?.noAcl && /unknown command/i.test(msg ?? '')) {
@@ -1229,9 +1343,9 @@ export function deleteKeychainToken(item: string): boolean {
   if (isLinux()) return linuxBackend.delete(item);
   if (isWindows()) return windowsBackend.delete(item);
   const bin = getKeychainHelperPath();
-  const deleted = spawnSync(bin, ['delete', item, os.userInfo().username], {
+  const deleted = spawnKeychainHelper(bin, ['delete', item, os.userInfo().username], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  }).status === 0;
+  }, KEYCHAIN_SILENT_TIMEOUT_MS).status === 0;
   // A deleted item must fail its next read as plain "not found", not with a
   // stale back-off error left over from a pre-delete cancel.
   if (deleted) clearKeychainReadBackoff(requested);
@@ -1267,9 +1381,9 @@ export function listKeychainItems(prefix: string): string[] {
   if (isLinux()) return apply(linuxBackend.list(mapped.prefix));
   if (isWindows()) return apply(windowsBackend.list(mapped.prefix));
   const bin = getKeychainHelperPath();
-  const result = spawnSync(bin, ['list', mapped.prefix], {
+  const result = spawnKeychainHelper(bin, ['list', mapped.prefix], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  }, KEYCHAIN_SILENT_TIMEOUT_MS);
   if (result.status !== 0) {
     const msg = result.stderr?.toString().trim();
     throw new Error(msg || `Failed to enumerate keychain items with prefix '${prefix}'.`);
@@ -1293,9 +1407,9 @@ export function listLegacyKeychainItems(prefix: string): string[] {
   assertSupportedPlatform();
   if (isLinux()) return [];
   const bin = getKeychainHelperPath();
-  const result = spawnSync(bin, ['list-legacy', prefix], {
+  const result = spawnKeychainHelper(bin, ['list-legacy', prefix], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  }, KEYCHAIN_SILENT_TIMEOUT_MS);
   if (result.status !== 0) {
     const msg = result.stderr?.toString().trim();
     throw new Error(msg || `Failed to enumerate legacy keychain items with prefix '${prefix}'.`);
@@ -1340,9 +1454,9 @@ export function listSyncedKeychainItems(prefix: string): string[] {
   assertSupportedPlatform();
   if (isLinux() || isWindows()) return [];
   const bin = getKeychainHelperPath();
-  const result = spawnSync(bin, ['list-synced', prefix], {
+  const result = spawnKeychainHelper(bin, ['list-synced', prefix], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  }, KEYCHAIN_SILENT_TIMEOUT_MS);
   if (result.status !== 0) {
     const msg = result.stderr?.toString().trim();
     throw new Error(msg || `Failed to enumerate iCloud keychain items with prefix '${prefix}'.`);
@@ -1365,9 +1479,9 @@ export function getSyncedKeychainTokens(items: string[]): Map<string, string> {
   assertSupportedPlatform();
   if (isLinux() || isWindows()) return result;
   const bin = getKeychainHelperPath();
-  const child = spawnSync(bin, ['get-batch-synced', os.userInfo().username, ...items], {
+  const child = spawnKeychainHelper(bin, ['get-batch-synced', os.userInfo().username, ...items], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  }, KEYCHAIN_INTERACTIVE_TIMEOUT_MS);
   if (child.status === 4) {
     throw new Error(`Auth cancelled while reading ${items.length} iCloud keychain item(s).`);
   }
@@ -1391,9 +1505,9 @@ export function deleteSyncedKeychainItem(item: string): boolean {
   assertSupportedPlatform();
   if (isLinux() || isWindows()) return false;
   const bin = getKeychainHelperPath();
-  return spawnSync(bin, ['delete-synced', item, os.userInfo().username], {
+  return spawnKeychainHelper(bin, ['delete-synced', item, os.userInfo().username], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  }).status === 0;
+  }, KEYCHAIN_SILENT_TIMEOUT_MS).status === 0;
 }
 
 /**
@@ -1410,9 +1524,9 @@ export function migrateKeychainItem(item: string): boolean {
   if (isLinux()) return linuxBackend.has(item);
   if (isWindows()) return windowsBackend.has(item);
   const bin = getKeychainHelperPath();
-  const result = spawnSync(bin, ['migrate-acl', item, os.userInfo().username], {
+  const result = spawnKeychainHelper(bin, ['migrate-acl', item, os.userInfo().username], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  }, KEYCHAIN_INTERACTIVE_TIMEOUT_MS);
   if (result.status === 0) return true;
   if (result.status === 1) return false;
   const msg = result.stderr?.toString().trim();
@@ -1431,9 +1545,9 @@ export function listOrphanedKeychainItems(prefix: string): string[] {
   assertSupportedPlatform();
   if (isLinux() || isWindows()) return [];
   const bin = getKeychainHelperPath();
-  const result = spawnSync(bin, ['list-orphans', prefix, os.userInfo().username], {
+  const result = spawnKeychainHelper(bin, ['list-orphans', prefix, os.userInfo().username], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  }, KEYCHAIN_SILENT_TIMEOUT_MS);
   if (result.status !== 0) {
     const msg = result.stderr?.toString().trim();
     throw new Error(msg || `Failed to enumerate orphaned keychain items with prefix '${prefix}'.`);
@@ -1494,9 +1608,9 @@ export function migrateOrphanedKeychainItems(prefix: string): OrphanMigrationRes
   assertSupportedPlatform();
   if (isLinux() || isWindows()) return [];
   const bin = getKeychainHelperPath();
-  const result = spawnSync(bin, ['migrate-orphans', prefix, os.userInfo().username], {
+  const result = spawnKeychainHelper(bin, ['migrate-orphans', prefix, os.userInfo().username], {
     stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  }, KEYCHAIN_INTERACTIVE_TIMEOUT_MS);
   if (result.status === 4) throw new Error('Touch ID cancelled during orphan migration.');
   if (result.status !== 0) {
     const msg = result.stderr?.toString().trim();

@@ -46,6 +46,18 @@ function installedExecutablePath(): string {
 }
 
 /**
+ * The installed helper's executable path WITHOUT any install side effect —
+ * unlike {@link getKeychainHelperPath}, this never copies or re-signs the
+ * bundle. The reaper (`reaper.ts`) needs the path to exact-match against a `ps`
+ * snapshot; a missing install just means no process matches (nothing to reap),
+ * so triggering an install from a cleanup sweep would be wrong. Pure path math
+ * (no darwin assertion) so it is callable from the platform-agnostic reaper.
+ */
+export function getInstalledKeychainHelperExecPath(): string {
+  return installedExecutablePath();
+}
+
+/**
  * Locate the source `.app` bundle shipped alongside the compiled JS.
  *
  * Resolution order:

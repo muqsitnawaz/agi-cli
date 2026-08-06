@@ -23,16 +23,86 @@ import {
   HMAC_KEY_ITEM,
   keychainServiceAlias,
   keychainOperationPrompt,
+  KeychainHelperTimeoutError,
+  KEYCHAIN_SILENT_TIMEOUT_MS,
+  KEYCHAIN_INTERACTIVE_TIMEOUT_MS,
   listKeychainItems,
   parseOrphanMigrationOutput,
   readHmacKeyRecord,
   rekeyServiceNames,
   setKeychainBackendForTest,
+  setKeychainDaemonBootForTest,
   setKeychainServiceHashingForTest,
   setKeychainToken,
+  spawnKeychainHelper,
   withRawKeychainServiceNames,
   type KeychainBackend,
 } from './index.js';
+import {
+  KEYCHAIN_READ_BACKOFF_TTL_MS,
+  isKeychainReadBackedOff,
+  noteKeychainReadFailure,
+  setKeychainReadBackoffDirForTest,
+} from './read-backoff.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+describe('spawnKeychainHelper (RUSH-2231: bounded helper spawn, SIGKILL on timeout)', () => {
+  it('hard-kills and throws the typed error when the helper hangs past the bound', () => {
+    const started = Date.now();
+    // A real hung child (sleeps far longer than the bound) stands in for a wedged
+    // helper on a stalled coreauthd; the wrapper must not wait for it.
+    let thrown: unknown;
+    try {
+      spawnKeychainHelper('/bin/sh', ['-c', 'sleep 30'], { stdio: ['ignore', 'pipe', 'pipe'] }, 300);
+    } catch (err) {
+      thrown = err;
+    }
+    const elapsed = Date.now() - started;
+    expect(thrown).toBeInstanceOf(KeychainHelperTimeoutError);
+    expect((thrown as KeychainHelperTimeoutError).timeoutMs).toBe(300);
+    expect(elapsed).toBeLessThan(5_000); // returned ~at the bound, not after 30s
+  });
+
+  it('returns the result for a command that completes inside the bound', () => {
+    const r = spawnKeychainHelper('/bin/sh', ['-c', 'printf ok'], { stdio: ['ignore', 'pipe', 'pipe'] }, 8_000);
+    expect(r.status).toBe(0);
+    expect(r.stdout?.toString()).toBe('ok');
+  });
+
+  it('exposes the two timeout buckets', () => {
+    expect(KEYCHAIN_SILENT_TIMEOUT_MS).toBe(8_000);
+    expect(KEYCHAIN_INTERACTIVE_TIMEOUT_MS).toBe(60_000);
+  });
+
+  it('a caught timeout arms the read back-off (the getKeychainToken glue)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kc-backoff-'));
+    setKeychainReadBackoffDirForTest(dir);
+    try {
+      const key = 'some-item';
+      expect(isKeychainReadBackedOff(key)).toBe(false);
+      try {
+        spawnKeychainHelper('/bin/sh', ['-c', 'sleep 30'], { stdio: ['ignore', 'pipe', 'pipe'] }, 200);
+      } catch (err) {
+        if (err instanceof KeychainHelperTimeoutError) noteKeychainReadFailure(key);
+        else throw err;
+      }
+      expect(isKeychainReadBackedOff(key)).toBe(true);
+      expect(isKeychainReadBackedOff(key, Date.now() + KEYCHAIN_READ_BACKOFF_TTL_MS + 1)).toBe(false);
+    } finally {
+      setKeychainReadBackoffDirForTest(null);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('setKeychainDaemonBootForTest toggles the once-per-process boot guard', () => {
+    // Under vitest the boot is disabled by default; the seam exists to flip it.
+    expect(() => setKeychainDaemonBootForTest(false)).not.toThrow();
+    expect(() => setKeychainDaemonBootForTest(true)).not.toThrow();
+    setKeychainDaemonBootForTest(false); // leave it off for the rest of the suite
+  });
+});
 
 describe('keychainOperationPrompt', () => {
   it('names the harness, bundle, reason, and duration', () => {

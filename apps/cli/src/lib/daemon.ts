@@ -941,6 +941,34 @@ export async function runDaemon(): Promise<void> {
   };
   const brokerSelfHealInterval = setInterval(() => { void runBrokerSelfHeal(); }, 60_000);
 
+  // RUSH-2232: reap orphaned macOS keychain-helper processes and `agents` procs
+  // stuck on a keychain read. A wedged coreauthd hangs the signed helper; before
+  // Layer 1 (RUSH-2231) bounded the helper spawnSync, dozens of orphans + their
+  // <defunct> zombies piled up and made the machine sluggish. Layer 1 stops NEW
+  // pileups; this clears the backlog on a 5-min tick. The candidate list carries
+  // the two-sweep debounce state in memory across ticks (the daemon is the sole
+  // executor). Overlap-guarded; macOS-only work happens inside the reaper (no-op
+  // elsewhere). Best-effort — a flaky ps snapshot must not crash the daemon.
+  let reapingKeychain = false;
+  let keychainReapCandidates: import('./secrets/reaper.js').KeychainReapCandidate[] = [];
+  const runKeychainReap = async () => {
+    if (reapingKeychain) return;
+    reapingKeychain = true;
+    try {
+      const { reapOrphanedKeychainProcesses } = await import('./secrets/reaper.js');
+      const r = reapOrphanedKeychainProcesses(keychainReapCandidates);
+      keychainReapCandidates = r.nextCandidates;
+      if (r.reaped > 0) {
+        log('WARN', `Keychain reaper: killed ${r.reaped} stuck/orphaned process(es) — ${r.killed.map((k) => `${k.role} pid ${k.pid}`).join(', ')}`);
+      }
+    } catch (err) {
+      log('WARN', `Keychain reaper skipped: ${(err as Error).message}`);
+    } finally {
+      reapingKeychain = false;
+    }
+  };
+  const keychainReapInterval = setInterval(() => { void runKeychainReap(); }, 5 * 60_000);
+
   const handleReload = () => {
     log('INFO', 'Reloading jobs (SIGHUP)');
     // Refresh user-layer copies of opted-in project routines BEFORE the
@@ -999,6 +1027,7 @@ export async function runDaemon(): Promise<void> {
     clearInterval(usageRefreshInterval);
     clearTimeout(usageRefreshKickoff);
     clearInterval(brokerSelfHealInterval);
+    clearInterval(keychainReapInterval);
     hostedBroker?.close();
     removeDaemonPid();
     removeHeartbeat();
