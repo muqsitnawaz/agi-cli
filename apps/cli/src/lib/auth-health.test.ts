@@ -7,6 +7,7 @@ import {
   classifyHttpStatus,
   mergeAuthHealthEntries,
   formatCheckedAge,
+  harnessAvailabilityForHost,
   probeDetail,
   summarizeHostAuth,
   summarizeVerdicts,
@@ -200,6 +201,59 @@ describe('summarizeHostAuth', () => {
   it('returns an empty summary for a host with no cached rows', () => {
     const r = summarizeHostAuth(cache, 'never-probed');
     expect(r).toEqual({ live: 0, present: 0, degraded: 0, revoked: 0, total: 0, oldestCheckedAt: null });
+  });
+});
+
+describe('harnessAvailabilityForHost', () => {
+  const h = (verdict: AuthVerdict): AuthHealth => ({ verdict, checkedAt: 1000 });
+
+  it('available when the agent has any signed-in row (live)', () => {
+    const cache = { 'zion:claude:2.1.170': h('live'), 'zion:codex:0.1.0': h('unverified') };
+    expect(harnessAvailabilityForHost(cache, 'zion', 'claude')).toBe('available');
+  });
+
+  it('available for a soft/unverifiable but signed-in verdict', () => {
+    expect(harnessAvailabilityForHost({ 'zion:codex:0.1.0': h('unverified') }, 'zion', 'codex')).toBe('available');
+    expect(harnessAvailabilityForHost({ 'zion:kimi:0.1.0': h('expired') }, 'zion', 'kimi')).toBe('available');
+    expect(harnessAvailabilityForHost({ 'zion:claude:1.0.0': h('rate_limited') }, 'zion', 'claude')).toBe('available');
+  });
+
+  it('unknown when the host has no cached rows at all (never probed)', () => {
+    expect(harnessAvailabilityForHost({ 'zion:claude:1.0.0': h('live') }, 'never-probed', 'claude')).toBe('unknown');
+    expect(harnessAvailabilityForHost({}, 'zion', 'claude')).toBe('unknown');
+  });
+
+  it('unavailable when the host was probed but the agent is absent', () => {
+    // Host has a codex row → it WAS probed; claude has no row → provably absent.
+    const cache = { 'zion:codex:0.1.0': h('unverified') };
+    expect(harnessAvailabilityForHost(cache, 'zion', 'claude')).toBe('unavailable');
+  });
+
+  it('unavailable when the agent has only a revoked token', () => {
+    const cache = { 'zion:claude:1.0.0': h('revoked') };
+    expect(harnessAvailabilityForHost(cache, 'zion', 'claude')).toBe('unavailable');
+  });
+
+  it('a signed-in row outweighs a sibling revoked row', () => {
+    const cache = { 'zion:claude:1.0.0': h('revoked'), 'zion:claude:1.1.0': h('live') };
+    expect(harnessAvailabilityForHost(cache, 'zion', 'claude')).toBe('available');
+  });
+
+  it('unknown when the agent has only an indeterminate error probe', () => {
+    const cache = { 'zion:claude:1.0.0': h('error') };
+    expect(harnessAvailabilityForHost(cache, 'zion', 'claude')).toBe('unknown');
+  });
+
+  it('matches on the host prefix, not a substring (no cross-host bleed)', () => {
+    // 'zion-2' must not satisfy a query for 'zion'.
+    const cache = { 'zion-2:claude:1.0.0': h('live') };
+    expect(harnessAvailabilityForHost(cache, 'zion', 'claude')).toBe('unknown');
+  });
+
+  it('matches the agent prefix exactly (claude != claude-ish)', () => {
+    // A row for another agent proves the host was probed; the queried agent is absent.
+    const cache = { 'zion:opencode:0.1.0': h('live') };
+    expect(harnessAvailabilityForHost(cache, 'zion', 'claude')).toBe('unavailable');
   });
 });
 

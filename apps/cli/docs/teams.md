@@ -297,7 +297,7 @@ agents teams start feat --watch
 ```bash
 agents teams create feat --devices zion,yosemite-s0,yosemite-s1 \
   --repo https://github.com/you/your-repo.git
-agents teams add feat claude "..." --name w1                    # auto-scheduled (least-loaded)
+agents teams add feat claude "..." --name w1                    # auto-scheduled (health-aware)
 agents teams add feat claude "..." --name w2 --device yosemite-s1   # or pin
 agents teams start feat --watch
 ```
@@ -306,8 +306,28 @@ agents teams start feat --watch
 
 1. teammate has `--device X` → **X** (explicit pin — no pool required)
 2. else the team pool is a **single** device → that device (whole team there)
-3. else the team pool has **many** devices → **auto-scheduled** (least-loaded)
+3. else the team pool has **many** devices → **auto-scheduled** (health-aware)
 4. else (no pin, no pool) → **local**, exactly like today
+
+**Auto-schedule is health-, load-, and harness-aware (RUSH-2002).** For a
+many-device pool the scheduler reads the same cached fleet signals `agents fleet
+status` shows (DeviceStats + auth-health, no fresh SSH in steady state) and:
+
+- **drops** devices that are unreachable, overloaded (`headroom: loaded`), or at
+  their `agents.max-concurrent` cap;
+- **drops** devices that provably can't run the requested harness — the box was
+  probed and the agent is absent or only holds a revoked token (a box with no
+  cached data is *kept*, ranked after a proven-available one, so a cold cache
+  never manufactures a false "can't run");
+- **ranks** the survivors by (a) requested agent installed + signed in, (b) lower
+  load / memory, (c) fewer running teammates.
+
+If **no** device in the pool can run the requested agent, `teams start` fails loud
+rather than launching onto a box that can't run it — e.g. `No device in the team
+pool can run claude@2.1.112 (checked zion, yosemite-s0). Run 'agents fleet status
+--verbose' to see which harnesses each box has installed and signed in, or 'agents
+fleet login' to sign one in.` Run `agents fleet status --verbose` (or `agents
+fleet ping`) to see per-box harness availability.
 
 **Repo provisioning.** The team's `--repo` (defaulting to the local checkout's
 `origin`) is used to ensure the code is present on each device — an existing

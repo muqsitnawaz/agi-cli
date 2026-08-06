@@ -258,6 +258,60 @@ export function summarizeHostAuth(
   return { live, present, degraded, revoked, total, oldestCheckedAt: oldest };
 }
 
+/**
+ * Whether a device can run one harness right now, derived from its cached auth
+ * rows — the signal the teams scheduler ranks on ("requested agent installed +
+ * signed in"). Pure: reads the map the caller loaded via {@link readAuthHealthCache}.
+ *
+ * - `available`   — the agent has at least one signed-in cached row (any verdict
+ *                   except `revoked`/`unconfigured`; `error` alone is indeterminate).
+ * - `unavailable` — the box WAS probed (it has rows for some agent) but this agent
+ *                   has no usable row: absent entirely, or present only as `revoked`.
+ * - `unknown`     — the box has no cached rows at all (never probed / cold cache).
+ *                   The scheduler must NOT exclude these — a cold cache is not proof
+ *                   a box can't run the harness.
+ *
+ * Agent-level, not version-level on purpose: the auth cache only holds installs
+ * that carry a credential, so it cannot reliably prove a specific *version* is
+ * absent (a version can share a global login and never appear). Version pinning
+ * is still enforced downstream when the teammate actually launches.
+ *
+ * Keyed by {@link authCacheKey} (`host:agent:version`); matched on the `host:`
+ * and `host:agent:` prefixes so a version segment can never be mistaken for a host.
+ */
+export function harnessAvailabilityForHost(
+  cache: Record<string, AuthHealth>,
+  host: string,
+  agent: AgentId | string,
+): 'available' | 'unavailable' | 'unknown' {
+  const hostPrefix = `${host}:`;
+  const agentPrefix = `${host}:${agent}:`;
+  let hostHasAnyRow = false;
+  let agentRows = 0;
+  let signedIn = false;
+  let determinateAgentRow = false;
+  for (const [key, health] of Object.entries(cache)) {
+    if (!key.startsWith(hostPrefix)) continue;
+    hostHasAnyRow = true;
+    if (!key.startsWith(agentPrefix)) continue;
+    agentRows++;
+    // `error` is an indeterminate network blip — not signed in, and NOT proof of
+    // absence either. Every other verdict is determinate.
+    if (health.verdict === 'error') continue;
+    determinateAgentRow = true;
+    // Signed-in = a credential the server hasn't rejected: live, or the soft /
+    // unverifiable states (unverified/expired/rate_limited). `revoked` = rejected,
+    // `unconfigured` = no credential — neither counts as signed in.
+    if (health.verdict !== 'revoked' && health.verdict !== 'unconfigured') signedIn = true;
+  }
+  if (!hostHasAnyRow) return 'unknown';
+  if (signedIn) return 'available';
+  // Agent rows exist but only indeterminate `error` probes → don't claim absence.
+  if (agentRows > 0 && !determinateAgentRow) return 'unknown';
+  // Host was probed and this agent has no usable row (absent, revoked, or unconfigured).
+  return 'unavailable';
+}
+
 /** Human "3m ago" style age for a checkedAt timestamp. */
 export function formatCheckedAge(checkedAt: number, now: number = Date.now()): string {
   const secs = Math.max(0, Math.round((now - checkedAt) / 1000));

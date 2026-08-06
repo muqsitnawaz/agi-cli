@@ -35,8 +35,19 @@ import { resolveRemoteOsSync } from '../hosts/remote-os.js';
 import { pullRemoteLogDelta, REMOTE_MIRROR_MAX_BYTES } from '../hosts/progress.js';
 import { createRemoteWorktree, ensureRemoteRepo } from './remoteWorktree.js';
 import { getTeam } from './registry.js';
-import { resolvePlacement, cappedDevices } from './scheduler.js';
+import {
+  resolvePlacement,
+  cappedDevices,
+  type PlacementOptions,
+  type DeviceHealthInput,
+  type HarnessAvailability,
+} from './scheduler.js';
 import { readMaxConcurrentCaps } from '../device-config.js';
+import { getDevice, type DeviceProfile } from '../devices/registry.js';
+import { loadFleetStats } from '../devices/stats-cache.js';
+import { headroom, type DeviceStats } from '../devices/health.js';
+import { readAuthHealthCache, harnessAvailabilityForHost, type AuthHealth } from '../auth-health.js';
+import { machineId } from '../machine-id.js';
 import chalk from 'chalk';
 
 let lastMemoryWarnAt = 0;
@@ -1389,6 +1400,20 @@ export class AgentManager {
 
   private constructorAgentsDir: string | null = null;
 
+  /**
+   * Short-TTL memo of the fleet signals the health-aware scheduler reads
+   * (DeviceStats + auth-health), keyed by the sorted pool. A `teams start` fires
+   * maybeSchedulePlacement once per teammate; without this each would re-run the
+   * cache-first probe. Keyed + TTL'd so a burst shares one fetch but a later wave
+   * still gets fresh numbers.
+   */
+  private placementFleetCache: {
+    key: string;
+    at: number;
+    promise: Promise<{ stats: Map<string, DeviceStats>; auth: Record<string, AuthHealth> }>;
+  } | null = null;
+  private static readonly PLACEMENT_FLEET_TTL_MS = 15_000;
+
   constructor(
     maxAgents: number = 50,
     agentsDir: string | null = null,
@@ -2085,16 +2110,91 @@ export class AgentManager {
     if (!teamMeta) return;
     const roster = await this.listByTask(taskName);
     const pool = teamMeta.devices ?? [];
-    const maxConcurrent = pool.length > 1 ? readMaxConcurrentCaps(pool) : undefined;
-    if (maxConcurrent) {
+    let opts: PlacementOptions | undefined;
+    // Only a many-device pool reaches the auto-pick; a pool of 0/1 short-circuits
+    // in resolvePlacement before caps/health matter, so skip the fleet probe.
+    if (pool.length > 1) {
+      const maxConcurrent = readMaxConcurrentCaps(pool);
       for (const c of cappedDevices(pool, roster, maxConcurrent)) {
         console.error(chalk.dim(
           `[placement] '${c.device}' excluded from auto-pick — at its agents.max-concurrent cap (${c.running}/${c.cap} running)`,
         ));
       }
+      const agentId = agent.agentType as AgentId;
+      const { health, harness } = await this.gatherPlacementSignals(pool, agentId);
+      opts = {
+        maxConcurrent,
+        health,
+        harness,
+        requestedLabel: agent.version ? `${agentId}@${agent.version}` : agentId,
+      };
     }
-    const { device } = resolvePlacement(teamMeta, null, roster, { maxConcurrent });
+    const { device } = resolvePlacement(teamMeta, null, roster, opts);
     if (device) await this.resolveScheduledPlacement(agent, device, taskName);
+  }
+
+  /**
+   * Build the per-device health + harness-availability maps the health-aware
+   * scheduler ranks on, from cache-first fleet signals. DeviceStats come from the
+   * daemon-warmed stats cache (`loadFleetStats`, no ssh in steady state) and
+   * harness availability from the fleet auth-health cache — both degrade to
+   * `unknown`/`unreachable` rather than throwing, so a cold cache reduces the pick
+   * to least-loaded instead of a false blocker.
+   */
+  private async gatherPlacementSignals(
+    pool: string[],
+    agentId: AgentId,
+  ): Promise<{ health: Record<string, DeviceHealthInput>; harness: Record<string, HarnessAvailability> }> {
+    const { stats, auth } = await this.loadPlacementFleet(pool);
+    const health: Record<string, DeviceHealthInput> = {};
+    const harness: Record<string, HarnessAvailability> = {};
+    for (const d of pool) {
+      const s = stats.get(d);
+      health[d] = {
+        reachable: s?.reachable,
+        headroom: headroom(s),
+        loadPercent: s?.loadPercent,
+        memPercent: s?.memPercent,
+      };
+      harness[d] = harnessAvailabilityForHost(auth, d, agentId);
+    }
+    return { health, harness };
+  }
+
+  /**
+   * Fetch (or serve from a short-TTL memo) the DeviceStats + auth-health for a
+   * pool. Never throws — a stats-probe failure yields an empty map (every device
+   * reads `unknown`, so the pick degrades to least-loaded, never a wrong exclusion).
+   */
+  private async loadPlacementFleet(
+    pool: string[],
+  ): Promise<{ stats: Map<string, DeviceStats>; auth: Record<string, AuthHealth> }> {
+    const key = [...pool].sort().join(',');
+    const now = Date.now();
+    const cached = this.placementFleetCache;
+    if (cached && cached.key === key && now - cached.at < AgentManager.PLACEMENT_FLEET_TTL_MS) {
+      return cached.promise;
+    }
+    const promise = (async () => {
+      const profiles = (await Promise.all(pool.map((n) => getDevice(n).catch(() => null)))).filter(
+        (d): d is DeviceProfile => d !== null,
+      );
+      let stats = new Map<string, DeviceStats>();
+      try {
+        ({ stats } = await loadFleetStats(profiles, { selfName: machineId() }));
+      } catch {
+        // Degrade to no stats — the pick falls back to load-count + harness only.
+      }
+      let auth: Record<string, AuthHealth> = {};
+      try {
+        auth = readAuthHealthCache();
+      } catch {
+        auth = {};
+      }
+      return { stats, auth };
+    })();
+    this.placementFleetCache = { key, at: now, promise };
+    return promise;
   }
 
   /**

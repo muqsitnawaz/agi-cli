@@ -7,7 +7,15 @@
  * short-circuit never fires, keeping assertions host-independent.
  */
 import { describe, it, expect } from 'vitest';
-import { resolvePlacement, pickLeastLoaded, cappedDevices, type RosterEntry } from './scheduler.js';
+import {
+  resolvePlacement,
+  pickLeastLoaded,
+  pickHealthiest,
+  cappedDevices,
+  type RosterEntry,
+  type DeviceHealthInput,
+  type HarnessAvailability,
+} from './scheduler.js';
 import { machineId } from '../machine-id.js';
 
 const running = (hostName: string | null): RosterEntry => ({ hostName, status: 'running' });
@@ -117,6 +125,162 @@ describe('agents.max-concurrent caps (auto-pick only)', () => {
     expect(
       resolvePlacement({ devices: ['box-a'] }, null, roster, { maxConcurrent: { 'box-a': 1 } }),
     ).toEqual({ device: 'box-a' });
+  });
+});
+
+describe('pickHealthiest — health-, load-, and harness-aware pick', () => {
+  const H = (h: DeviceHealthInput): DeviceHealthInput => h;
+
+  it('with no fleet data reduces to least-loaded (fewest running, ties by order)', () => {
+    const roster = [running('box-a'), running('box-a'), running('box-b')];
+    expect(pickHealthiest(['box-a', 'box-b', 'box-c'], roster)).toBe('box-c');
+    expect(pickHealthiest(['box-a', 'box-b'], [])).toBe('box-a');
+    expect(pickHealthiest(['box-b', 'box-a'], [])).toBe('box-b');
+  });
+
+  it('excludes an unreachable device from the pick', () => {
+    const health = { 'box-a': H({ reachable: false }), 'box-b': H({ reachable: true, headroom: 'busy' }) };
+    // box-a is first by order and 0-load, but unreachable → box-b wins.
+    expect(pickHealthiest(['box-a', 'box-b'], [], { health })).toBe('box-b');
+  });
+
+  it('excludes an overloaded (headroom: loaded) device from the pick', () => {
+    const health = { 'box-a': H({ reachable: true, headroom: 'loaded', loadPercent: 95 }), 'box-b': H({ reachable: true, headroom: 'busy', loadPercent: 60 }) };
+    expect(pickHealthiest(['box-a', 'box-b'], [], { health })).toBe('box-b');
+  });
+
+  it('prefers the requested-agent-available device over an unknown one', () => {
+    // box-a is idle + first, box-b is busier — but harness availability is the
+    // top-priority key, so a proven-available box-b still loses to... no: box-a
+    // is unknown, box-b is available → box-b wins despite being busier.
+    const health = {
+      'box-a': H({ reachable: true, headroom: 'idle', loadPercent: 5 }),
+      'box-b': H({ reachable: true, headroom: 'busy', loadPercent: 60 }),
+    };
+    const harness: Record<string, HarnessAvailability> = { 'box-a': 'unknown', 'box-b': 'available' };
+    expect(pickHealthiest(['box-a', 'box-b'], [], { health, harness })).toBe('box-b');
+  });
+
+  it('among equally-available devices, ranks by lower load/memory', () => {
+    const health = {
+      'box-a': H({ reachable: true, headroom: 'busy', loadPercent: 70, memPercent: 30 }),
+      'box-b': H({ reachable: true, headroom: 'light', loadPercent: 25, memPercent: 20 }),
+    };
+    const harness: Record<string, HarnessAvailability> = { 'box-a': 'available', 'box-b': 'available' };
+    // worst-signal: box-a=70, box-b=25 → box-b is roomier.
+    expect(pickHealthiest(['box-a', 'box-b'], [], { health, harness })).toBe('box-b');
+  });
+
+  it('uses memory when it is the worse signal', () => {
+    const health = {
+      'box-a': H({ reachable: true, loadPercent: 10, memPercent: 90 }),
+      'box-b': H({ reachable: true, loadPercent: 40, memPercent: 40 }),
+    };
+    // box-a worst=90 (mem), box-b worst=40 → box-b.
+    expect(pickHealthiest(['box-a', 'box-b'], [], { health })).toBe('box-b');
+  });
+
+  it('breaks a load tie by fewer running teammates', () => {
+    const roster = [running('box-a')];
+    const health = {
+      'box-a': H({ reachable: true, loadPercent: 30, memPercent: 30 }),
+      'box-b': H({ reachable: true, loadPercent: 30, memPercent: 30 }),
+    };
+    expect(pickHealthiest(['box-a', 'box-b'], roster, { health })).toBe('box-b');
+  });
+
+  it('never excludes an unknown-harness device (cold cache is not proof)', () => {
+    const harness: Record<string, HarnessAvailability> = { 'box-a': 'unknown', 'box-b': 'unknown' };
+    // No availability data at all → still picks (degrades to load/order), never throws.
+    expect(pickHealthiest(['box-a', 'box-b'], [], { harness })).toBe('box-a');
+  });
+
+  it('excludes a provably-unavailable device but keeps an unknown one', () => {
+    const harness: Record<string, HarnessAvailability> = { 'box-a': 'unavailable', 'box-b': 'unknown' };
+    expect(pickHealthiest(['box-a', 'box-b'], [], { harness })).toBe('box-b');
+  });
+
+  it('fails loud naming the agent when EVERY eligible device is unavailable', () => {
+    const harness: Record<string, HarnessAvailability> = { 'box-a': 'unavailable', 'box-b': 'unavailable' };
+    expect(() => pickHealthiest(['box-a', 'box-b'], [], { harness, requestedLabel: 'claude@2.1.112' }))
+      .toThrow(/No device in the team pool can run claude@2\.1\.112/);
+    expect(() => pickHealthiest(['box-a', 'box-b'], [], { harness, requestedLabel: 'claude@2.1.112' }))
+      .toThrow(/box-a, box-b/);
+  });
+
+  it('the loud unavailable message points at a real availability command', () => {
+    const harness: Record<string, HarnessAvailability> = { 'box-a': 'unavailable' };
+    expect(() => pickHealthiest(['box-a', 'box-b'], [], {
+      harness: { ...harness, 'box-b': 'unavailable' },
+      availabilityHint: 'agents fleet status --verbose',
+    })).toThrow(/agents fleet status --verbose/);
+  });
+
+  it('fails loud naming each drop reason when NO device is even eligible', () => {
+    const health = {
+      'box-a': H({ reachable: false }),
+      'box-b': H({ reachable: true, headroom: 'loaded' }),
+    };
+    expect(() => pickHealthiest(['box-a', 'box-b'], [], { health, requestedLabel: 'codex' }))
+      .toThrow(/No viable device in the team pool for codex/);
+    expect(() => pickHealthiest(['box-a', 'box-b'], [], { health, requestedLabel: 'codex' }))
+      .toThrow(/box-a \(unreachable\), box-b \(overloaded\)/);
+  });
+
+  it('an all-capped pool fails loud with the drop reason', () => {
+    const roster = [running('box-a'), running('box-a'), running('box-b')];
+    expect(() => pickHealthiest(['box-a', 'box-b'], roster, { maxConcurrent: { 'box-a': 2, 'box-b': 1 } }))
+      .toThrow(/at max-concurrent cap \(2\/2\).*at max-concurrent cap \(1\/1\)/);
+  });
+
+  it('a cap excludes a device even when it is otherwise the healthiest', () => {
+    const roster = [running('box-a')];
+    const health = {
+      'box-a': H({ reachable: true, headroom: 'idle', loadPercent: 5 }),
+      'box-b': H({ reachable: true, headroom: 'busy', loadPercent: 60 }),
+    };
+    const harness: Record<string, HarnessAvailability> = { 'box-a': 'available', 'box-b': 'available' };
+    // box-a would win on every key, but it is at its 1/1 cap → box-b.
+    expect(pickHealthiest(['box-a', 'box-b'], roster, { health, harness, maxConcurrent: { 'box-a': 1 } })).toBe('box-b');
+  });
+
+  it('ranks numeric load correctly (not string-coerced): 100 is worse than 7', () => {
+    const health = {
+      'box-a': H({ reachable: true, loadPercent: 100, memPercent: 100 }),
+      'box-b': H({ reachable: true, loadPercent: 7, memPercent: 7 }),
+    };
+    // A naive array `<` would order "…,100,…" before "…,7,…"; a correct numeric
+    // compare picks box-b.
+    expect(pickHealthiest(['box-a', 'box-b'], [], { health })).toBe('box-b');
+  });
+
+  it('throws on an empty pool (caller must guard)', () => {
+    expect(() => pickHealthiest([], [])).toThrow(/empty device pool/);
+  });
+});
+
+describe('resolvePlacement routes step 3 through the health-aware pick', () => {
+  it('uses harness availability when health/harness are supplied', () => {
+    const health: Record<string, DeviceHealthInput> = {
+      'box-a': { reachable: true, headroom: 'idle', loadPercent: 5 },
+      'box-b': { reachable: true, headroom: 'busy', loadPercent: 60 },
+    };
+    const harness: Record<string, HarnessAvailability> = { 'box-a': 'unavailable', 'box-b': 'available' };
+    // box-a is idle + first, but can't run the agent → box-b.
+    expect(resolvePlacement({ devices: ['box-a', 'box-b'] }, null, [], { health, harness }))
+      .toEqual({ device: 'box-b' });
+  });
+
+  it('falls back to least-loaded when no fleet data is supplied', () => {
+    const roster = [running('box-a')];
+    expect(resolvePlacement({ devices: ['box-a', 'box-b'] }, null, roster))
+      .toEqual({ device: 'box-b' });
+  });
+
+  it('surfaces the loud failure when the pool cannot run the agent', () => {
+    const harness: Record<string, HarnessAvailability> = { 'box-a': 'unavailable', 'box-b': 'unavailable' };
+    expect(() => resolvePlacement({ devices: ['box-a', 'box-b'] }, null, [], { harness, requestedLabel: 'claude@2.1.112' }))
+      .toThrow(/No device in the team pool can run claude@2\.1\.112/);
   });
 });
 
