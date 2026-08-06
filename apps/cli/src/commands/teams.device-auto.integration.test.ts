@@ -15,8 +15,7 @@ import path from 'node:path';
  * throwaway HOME with no devices registered under a unique machine id, which
  * makes the affinity engine's only eligible candidate "this machine" —
  * deterministic without needing a real device fleet. The teammate name is
- * deliberately invalid so the command fails fast on `unknown-teammate`
- * *after* device resolution, instead of spawning a real agent process.
+ * deliberately invalid so the command cannot spawn a real agent process.
  */
 describe.skipIf(process.platform === 'win32')('agents teams add --device auto (RUSH-2185)', () => {
   let home: string;
@@ -68,12 +67,8 @@ describe.skipIf(process.platform === 'win32')('agents teams add --device auto (R
 
     expect(out).not.toContain(`Unknown device 'auto'`);
     expect(out).not.toContain(`Couldn't resolve --device "auto"`);
-    // The affinity engine's only eligible candidate is this machine (unique
-    // AGENTS_SYNC_MACHINE_ID, nothing registered under it) — banner confirms
-    // the sentinel was actually resolved, not silently ignored.
-    expect(out).toContain('device=auto → local');
-    // Fails later, on the deliberately-invalid teammate name — proves device
-    // resolution got out of the way rather than being the failure itself.
+    // Teammate validation now precedes the harness-aware live placement probe;
+    // the pure resolveDeviceAuto tests cover the concrete local/remote pick.
     expect(status).not.toBe(0);
     expect(out).toContain(`Unknown teammate 'not-a-real-agent-xyz'`);
   });

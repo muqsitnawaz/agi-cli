@@ -2,8 +2,6 @@
 
 ## 1.22.26
 
-- **`agents run --device auto` and `agents teams add --device auto` now choose from live fleet health instead of 14-day launch affinity (RUSH-2001).** The picker probes candidates in parallel, excludes unreachable, overloaded, and missing-agent machines, prefers signed-in candidates with the lowest normalized load, and keeps execution local when no remote is better. Remote readiness now uses `agents view --json`, preserving the installed/sign-in split instead of treating every remote sign-in state as unknown. Source: `apps/cli/src/lib/smart-launch.ts`, `apps/cli/src/lib/teams/placement-probe.ts`, `apps/cli/src/lib/hosts/ready.ts`, `apps/cli/src/commands/exec.ts`, `apps/cli/src/commands/teams.ts`.
-
 - Make bare `agents setup` a re-runnable onboarding hub with live capability status and direct access to browser, computer, secrets, fleet, share, watchdog, and preference wizards.
 
 - **`agents apply --provision-secrets` pushes the manifest's declared secrets
