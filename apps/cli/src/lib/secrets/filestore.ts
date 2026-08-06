@@ -163,9 +163,11 @@ function provisionMachinePassphrase(): string {
  * Resolve the passphrase for the encrypted file store.
  *
  * Order: AGENTS_SECRETS_PASSPHRASE > previously-provisioned machine-local key >
- * a freshly auto-provisioned machine-local key. It NEVER prompts and NEVER
- * hard-fails — the file store must work on every platform (macOS included)
- * without the user setting, typing, or remembering a passphrase. Provisioning
+ * legacy co-located key > a freshly auto-provisioned machine-local key. It NEVER
+ * prompts, and never fails for WANT of a passphrase — the file store must work on
+ * every platform (macOS included) without the user setting, typing, or
+ * remembering one. (It can still throw if provisioning cannot write the key file
+ * at all; that is a disk/permissions failure, not a missing passphrase.) Provisioning
  * writes a 0600 key file (encryption-at-rest, same posture as an SSH key); set
  * AGENTS_SECRETS_PASSPHRASE to opt into an off-disk key.
  */

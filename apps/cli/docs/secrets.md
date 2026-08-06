@@ -758,10 +758,11 @@ When that happens (or when `secret-tool` isn't installed), `agents secrets`
 transparently falls back to an **AES-256-GCM encrypted-file store** under
 `~/.agents/.cache/secrets/` (one `<item>.enc` file per secret, mode 0600).
 
-The encryption key (passphrase) is resolved in this order. It **never prompts and
-never hard-fails** — the store works out of the box on every platform without
-anyone setting, typing, or remembering a passphrase
-(`getPassphrase`, `src/lib/secrets/filestore.ts`):
+The encryption key (passphrase) is resolved from these sources, in order. It
+**never prompts**, and it never fails for want of a passphrase — the store works
+out of the box on every platform without anyone setting, typing, or remembering
+one (`getPassphrase`, `src/lib/secrets/filestore.ts`). Within a single process the
+resolved key is cached, so this lookup runs once:
 
 1. **`AGENTS_SECRETS_PASSPHRASE`** — if set, always wins. An **opt-in** for
    holding the key off disk, not a requirement. See the warning below before
@@ -769,12 +770,20 @@ anyone setting, typing, or remembering a passphrase
 2. **An existing machine-local key** — `~/.agents/.secrets-key/passphrase`
    (mode 0600), if one was provisioned earlier. Deliberately outside the store
    directory so a scan of `~/.agents/.cache/secrets/` never turns up key and
-   ciphertext together. (A pre-#479 machine may still carry the old co-located
-   `.passphrase`; it is read, never written.)
-3. **Auto-provisioned** — with neither of the above, a random 32-byte key is
+   ciphertext together.
+3. **The legacy co-located key** — `~/.agents/.cache/secrets/.passphrase`, on a
+   machine provisioned before #479. Read as a fallback, never written; new keys
+   always go to the path in step 2.
+4. **Auto-provisioned** — with none of the above, a random 32-byte key is
    generated once and written to `~/.agents/.secrets-key/passphrase` (mode 0600),
    on every platform including macOS. This is what makes `agents secrets` work
    on a fresh headless box with no setup.
+
+Two things can still fail, and neither is "you forgot to set a passphrase":
+provisioning throws if it cannot write the key file at all (a permissions or
+disk error), and a store already encrypted under an explicit
+`AGENTS_SECRETS_PASSPHRASE` still needs that same value — read it without one and
+decryption fails.
 
 **Do not export the master passphrase from a shell rc file.** A `~/.zshenv`
 export is **not** equivalent to the 0600 key file, and treating it as such is
