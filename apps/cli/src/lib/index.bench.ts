@@ -74,8 +74,10 @@
  * `@ts-expect-error` (TS2578, unused directive) that no gate caught.
  */
 import { describe, bench } from 'vitest';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Command } from 'commander';
 import {
   readUpdateCache,
   shouldPromptUpgrade,
@@ -83,7 +85,10 @@ import {
   findAgentsCliInstalls,
   resolveRunningPackageRoot,
 } from './self-update.js';
-import { getUpdateCheckPath } from './state.js';
+import { getUpdateCheckPath, getAgentsDir, getMigratedSentinelPath } from './state.js';
+import { isGitRepo } from './git.js';
+import { foldLegacySystemRepo } from './migrate.js';
+import { ensureInitialized } from '../commands/setup.js';
 // Real built artifact (see docblock above) -- NOT './auto-pull.js', which
 // would resolve to the unbuilt TS source and always miss the worker script.
 // dist/lib/auto-pull.d.ts exists (tsconfig.json declaration:true), so this
@@ -93,6 +98,19 @@ import { spawnDetachedSync } from '../../dist/lib/auto-pull.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPDATE_CHECK_FILE = getUpdateCheckPath();
 const REAL_PATH = process.env.PATH || '';
+
+// The bootstrap init/migration triad (index.ts:1354-1411): the SYSTEM_DIR and
+// sentinel paths, and the value the sentinel is compared against, exactly as
+// index.ts computes them. tests/setup.ts leaves HOME untouched (tests/setup.ts:44),
+// so these resolve to the real ~/.agents on this box -- no mocking.
+const SYSTEM_DIR = getAgentsDir();
+const MIGRATED_SENTINEL_FILE = getMigratedSentinelPath();
+// index.ts:1397 -- the sentinel value keyed to the migration SCHEMA version.
+const SENTINEL_VALUE = 'v15';
+// ensureInitialized(program) (setup.ts) only touches `program` on the
+// not-yet-set-up branch; on a settled install it returns right after isGitRepo,
+// so a bare Command is never read. Reused across iterations.
+const BENCH_PROGRAM = new Command();
 
 describe('checkForUpdates — maybeWarnMultiInstall (index.ts:535-575): the PATH + known-install-root scan', () => {
   bench('resolveRunningPackageRoot(__dirname) — real path math, no fs walk when not a bunfs virtual path (self-update.ts:177)', () => {
@@ -133,4 +151,74 @@ describe('spawnDetachedSync — real detached child_process.spawn against the bu
     delete process.env.AGENTS_NO_AUTOPULL;
     spawnDetachedSync();
   }, { time: 2000, iterations: 10 });
+});
+
+/**
+ * The SECOND half of the CLI-entry hot path: the init/migration triad that
+ * runs on EVERY ordinary `agents <cmd>` invocation AFTER checkForUpdates /
+ * spawnDetachedSync (benched above) and BEFORE `program.parseAsync()`
+ * (index.ts:1440). Three checks fire in sequence at index.ts:1354-1411, each
+ * unconditional on a non-exempt command (`setup`/`help`/`uninstall` are the
+ * only exemptions, index.ts:1357):
+ *
+ *   1. foldLegacySystemRepo()          index.ts:1369  (migrate.ts:49)
+ *        -> fs.lstatSync(~/.agents-system)  (migrate.ts:51) — one syscall.
+ *        Deliberately OUTSIDE the sentinel guard (index.ts:1359-1365): the
+ *        sentinel predates the fold, so it can't gate it. On this box
+ *        ~/.agents-system is absent, so the lstat THROWS ENOENT and is caught
+ *        (migrate.ts:51) — the settled-install steady state.
+ *   2. ensureInitialized(program)      index.ts:1380  (setup.ts)
+ *        -> isGitRepo(getAgentsDir())       (setup.ts) = fs.existsSync(
+ *        ~/.agents/.system/.git) (git.ts). On a set-up box that returns true
+ *        and ensureInitialized returns immediately — never reaching the
+ *        interactive/exit branches — so this single existsSync IS the whole
+ *        per-command cost of the function.
+ *   3. migration sentinel gate         index.ts:1399-1403
+ *        -> fs.existsSync(sentinel) && fs.readFileSync(sentinel,'utf-8').trim()
+ *        === 'v15'. When it matches (settled install), needRun=false and
+ *        runMigration() (index.ts:1405) is NOT called. Two syscalls
+ *        (existsSync THEN readFileSync — a TOCTOU double-stat of the same path).
+ *
+ * No mocking: every call hits the real filesystem via the real path constants
+ * (getAgentsDir / getMigratedSentinelPath), which tests/setup.ts leaves pointing
+ * at the real ~/.agents (tests/setup.ts:44 — HOME untouched).
+ *
+ * runMigration() (migrate.ts, ~40 sub-migrators) is NOT benched by executing it.
+ * It is gated by the sentinel (verified `v15` on this box), so it does NOT run on
+ * a settled install — the very path this file measures is the guard that keeps it
+ * off the hot path. And it MUTATES live state on a sentinel miss —
+ * migrateSplitDeviceLocalMeta (migrate.ts) rewrites the real ~/.agents/agents.yaml
+ * when it still carries machine-local `agents:`/`versions:` keys, migrateCliDirToClis
+ * (migrate.ts) throws on a cli/+clis/ collision, and repairAgentConfigSymlinks
+ * (migrate.ts:686) re-points ~/.claude & co. Running that sweep in a benchmark loop
+ * against the user's real ~/.agents would corrupt it, so it is deliberately left
+ * unexecuted; the sentinel-gate bench below is what quantifies its per-command
+ * amortized cost (one cache-file read that decides whether the sweep runs at all).
+ */
+describe('init/migration triad (index.ts:1354-1411) — per-command bootstrap checks before parse', () => {
+  bench('foldLegacySystemRepo() — real fs.lstatSync(~/.agents-system) ENOENT+catch on a folded install (index.ts:1369, migrate.ts:49-52)', () => {
+    foldLegacySystemRepo();
+  });
+
+  bench('isGitRepo(getAgentsDir()) — real fs.existsSync(~/.agents/.system/.git); the entire settled-install cost of ensureInitialized (index.ts:1380, setup.ts, git.ts)', () => {
+    isGitRepo(SYSTEM_DIR);
+  });
+
+  bench('ensureInitialized(program) — the real named function; on a set-up box returns right after isGitRepo, so ~equal to the bench above (index.ts:1380, setup.ts)', async () => {
+    await ensureInitialized(BENCH_PROGRAM);
+  });
+
+  bench('migration sentinel gate — real fs.existsSync + fs.readFileSync(~/.agents/.cache/.migrated).trim() === "v15" (index.ts:1399-1403)', () => {
+    if (fs.existsSync(MIGRATED_SENTINEL_FILE) && fs.readFileSync(MIGRATED_SENTINEL_FILE, 'utf-8').trim() === SENTINEL_VALUE) {
+      /* needRun = false — runMigration() skipped */
+    }
+  });
+
+  bench('full triad end-to-end: foldLegacySystemRepo + isGitRepo + sentinel gate — every fs syscall an ordinary command runs before parse (index.ts:1369,1380,1399-1403)', () => {
+    foldLegacySystemRepo();
+    isGitRepo(SYSTEM_DIR);
+    if (fs.existsSync(MIGRATED_SENTINEL_FILE) && fs.readFileSync(MIGRATED_SENTINEL_FILE, 'utf-8').trim() === SENTINEL_VALUE) {
+      /* needRun = false */
+    }
+  });
 });
