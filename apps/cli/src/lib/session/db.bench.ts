@@ -81,9 +81,9 @@ afterAll(() => {
 });
 
 describe.skipIf(!haveRealDb)('querySessions — session listing (agents sessions)', () => {
-  // The real operational default: unfiltered fleet listing WITH the existence
-  // check (findMissingFilePaths readdir sweep + stale-row purge). Dominant cost.
-  bench('full listing, existence check ON (readdir ~735 dirs + purge stale rows)', () => {
+  // The real operational default: the first iteration populates membership;
+  // later iterations reuse it while the SQLite index version is unchanged.
+  bench('full listing, cached existence check ON', () => {
     querySessions({});
   });
 
