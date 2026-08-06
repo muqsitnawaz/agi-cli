@@ -23,6 +23,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+// Pure command-construction / mode resolution — runs on every platform (RUSH-2215 review).
+const describeExec = describe;
+
 function opts(overrides: Partial<ExecOptions>): ExecOptions {
   return {
     agent: 'claude',
@@ -41,7 +44,7 @@ const ALL_AGENTS = Object.keys(AGENT_COMMANDS) as AgentId[];
 // version-home builder does so the expected path matches on every OS.
 const HOME = process.env.HOME ?? os.homedir();
 
-describe('buildExecCommand', () => {
+describeExec('buildExecCommand', () => {
   it('launches kiro with --v3 so standalone hooks load (RUSH-1612)', () => {
     const cmd = buildExecCommand(opts({ agent: 'kiro', mode: 'edit', prompt: 'hi' }));
     expect(cmd[0]).toBe('kiro-cli');
@@ -877,8 +880,12 @@ describe('buildExecCommand', () => {
     it('dedupes ~/.agents when the user also passes it explicitly', () => {
       const cmd = buildExecCommand(opts({ agent: 'codex', mode: 'edit', addDirs: [AGENTS_DIR, '/x'] }));
       const rendered = cmd.join(' ');
-      expect(rendered.match(new RegExp(`${AGENTS_DIR.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\" = true`, 'g'))).toHaveLength(1);
-      expect(rendered).toContain('"/x" = true');
+      // Match the TOML fragment the same way the implicit-grant test does
+      // (JSON.stringify path), so Windows backslashes do not break the regex.
+      const grant = `${JSON.stringify(AGENTS_DIR)} = true`;
+      const escaped = grant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      expect(rendered.match(new RegExp(escaped, 'g'))).toHaveLength(1);
+      expect(rendered).toContain(JSON.stringify('/x') + ' = true');
     });
 
     it('does NOT add ~/.agents for codex read-only (plan) — no writes happen there', () => {
@@ -1235,7 +1242,7 @@ describe('buildExecCommand', () => {
   });
 });
 
-describe('detectRateLimit', () => {
+describeExec('detectRateLimit', () => {
   it.each([
     ['Anthropic 5-hour limit', 'Your 5-hour limit has been reached. Resets in 2h.'],
     ['generic rate-limit phrasing', 'Error: rate limit exceeded for claude-opus'],
@@ -1264,7 +1271,7 @@ describe('detectRateLimit', () => {
   });
 });
 
-describe('buildFallbackPrompt', () => {
+describeExec('buildFallbackPrompt', () => {
   const uuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
 
   it('returns /continue <id> when next agent is Claude and we have a session ID', () => {
@@ -1295,7 +1302,7 @@ describe('buildFallbackPrompt', () => {
   });
 });
 
-describe('normalizeMode', () => {
+describeExec('normalizeMode', () => {
   it.each<[string, Mode]>([
     ['plan', 'plan'],
     ['edit', 'edit'],
@@ -1317,7 +1324,7 @@ describe('normalizeMode', () => {
   });
 });
 
-describe('resolveMode', () => {
+describeExec('resolveMode', () => {
   it("returns the requested mode when supported (claude/skip)", () => {
     expect(resolveMode('claude', 'skip')).toBe('skip');
   });
@@ -1355,7 +1362,7 @@ describe('resolveMode', () => {
   });
 });
 
-describe('resolveHeadlessMode (RUSH-1810)', () => {
+describeExec('resolveHeadlessMode (RUSH-1810)', () => {
   it('warns exactly once when one run builds argv more than once', () => {
     const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const warningState = {};
@@ -1441,7 +1448,7 @@ describe('resolveHeadlessMode (RUSH-1810)', () => {
   });
 });
 
-describe('defaultModeFor', () => {
+describeExec('defaultModeFor', () => {
   it('returns the first listed mode for each agent', () => {
     // Antigravity: ['edit', 'skip'] — no plan, so default must be edit.
     expect(defaultModeFor('antigravity')).toBe('edit');
@@ -1460,7 +1467,7 @@ describe('defaultModeFor', () => {
   });
 });
 
-describe('implicitModeFor', () => {
+describeExec('implicitModeFor', () => {
   it('defaults Codex to safe writable and other harnesses to plan', () => {
     expect(implicitModeFor('codex')).toBe('edit');
     expect(implicitModeFor('claude')).toBe('plan');
@@ -1468,7 +1475,7 @@ describe('implicitModeFor', () => {
   });
 });
 
-describe('headlessPlanStallCommand', () => {
+describeExec('headlessPlanStallCommand', () => {
   // The footgun: `ag run claude "/code:commit"` with no --mode defaults to
   // read-only plan, then hangs forever at ExitPlanMode in a headless run.
   it('blocks a slash command run headless under implicit-default plan', () => {

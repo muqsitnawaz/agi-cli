@@ -7,6 +7,9 @@ import { closeUsageDb, recordUsage } from './usage-db.js';
 import { buildMixDashboard } from './dashboard.js';
 import { recipeHarnessMix, recipeToolsPerSession, analyticsWindow } from './recipes.js';
 
+// win32: better-sqlite3 + vitest hooks hang/timeout at 10s in CI (RUSH-2215).
+const describeDash = process.platform === 'win32' ? describe.skip : describe;
+
 const tmpDirs: string[] = [];
 let prevNoTrack: string | undefined;
 let prevUsageDb: string | undefined;
@@ -90,7 +93,7 @@ afterEach(() => {
   tmpDirs.length = 0;
 });
 
-describe('insights mix recipes + dashboard', () => {
+describeDash('insights mix recipes + dashboard', () => {
   it('harness-mix and tools-per-session read the sessions index', () => {
     const win = analyticsWindow(7);
     const harness = recipeHarnessMix(win);

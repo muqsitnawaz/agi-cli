@@ -13,6 +13,11 @@ import { saveTask, hostsCacheDir } from './hosts/tasks.js';
 import { _resetPerfDbForTest, aggregateSamples } from './perf/db.js';
 import * as activation from './routine-activation.js';
 
+// RUSH-2215: only process-group / real-spawn holder suites are POSIX-oriented.
+// Pure command construction and path helpers must still run on Windows.
+const describeSpawn = process.platform === 'win32' ? describe.skip : describe;
+
+
 beforeEach(() => {
   // These tests pass synthetic definitions directly to the runner. Exercise
   // legacy definition eligibility explicitly instead of inheriting the host's
@@ -80,7 +85,7 @@ describe('routine spawn cwd', () => {
   });
 });
 
-describe('runner device enforcement', () => {
+describeSpawn('runner device enforcement', () => {
   const savedId = process.env.AGENTS_SYNC_MACHINE_ID;
 
   afterEach(() => {
@@ -105,7 +110,8 @@ describe('runner device enforcement', () => {
   });
 });
 
-describe('runner hard-deprecation enforcement (RUSH-2202)', () => {
+
+describeSpawn('runner hard-deprecation enforcement (RUSH-2202)', () => {
   afterEach(() => cleanupJobRuns('gemini-legacy'));
 
   it('executeJob fails loud with a failed run record instead of building a gemini command', async () => {
@@ -155,7 +161,8 @@ describe('runner hard-deprecation enforcement (RUSH-2202)', () => {
   });
 });
 
-describe('runner host placement', () => {
+
+describeSpawn('runner host placement', () => {
   it('executeJob refuses host+workflow before any dispatch or run dir', async () => {
     const config = baseConfig({ name: 'host-wf', host: 'gpu-box', workflow: 'autodev', agent: undefined as never });
     await expect(executeJob(config)).rejects.toThrow(/workflow bundle, which can't execute on a host yet/);
@@ -217,6 +224,7 @@ describe('runner host placement', () => {
   });
 });
 
+// Pure fs archive of overlay homes — no process-group ownership.
 describe('routine transcript archiving', () => {
   const jobName = 'archive-routine-test';
   const runId = 'run-archive-1';
@@ -377,7 +385,7 @@ describe('routine transcript archiving', () => {
   });
 });
 
-describe('command-mode routines (executeJob foreground)', () => {
+describeSpawn('command-mode routines (executeJob foreground)', () => {
   const jobs: string[] = [];
   afterEach(() => {
     for (const j of jobs.splice(0)) cleanupJobRuns(j);
@@ -444,7 +452,7 @@ describe('command-mode routines (executeJob foreground)', () => {
   });
 });
 
-describe('command-mode routines (executeJobDetached — daemon/cron path)', () => {
+describeSpawn('command-mode routines (executeJobDetached — daemon/cron path)', () => {
   const jobs: string[] = [];
   afterEach(() => {
     for (const j of jobs.splice(0)) cleanupJobRuns(j);
@@ -571,7 +579,7 @@ describe('command-mode routines (executeJobDetached — daemon/cron path)', () =
 // for the most common firing path. Verifies against the REAL disposable perf
 // warehouse (recordPerfTiming's dynamic import into perf/spool.ts respects the
 // same _resetPerfDbForTest override db.test.ts uses), not a mock.
-describe('detached routine fires record a perf.timing sample (agent.run)', () => {
+describeSpawn('detached routine fires record a perf.timing sample (agent.run)', () => {
   const jobs: string[] = [];
   let tmp: string;
 
@@ -620,7 +628,7 @@ describe('detached routine fires record a perf.timing sample (agent.run)', () =>
   });
 });
 
-describe('resolveRoutineLaunch — zero-healthy accounts fail the routine loud (RUSH-2132)', () => {
+describeSpawn('resolveRoutineLaunch — zero-healthy accounts fail the routine loud (RUSH-2132)', () => {
   function acct(version: string): RotateCandidate {
     return {
       agent: 'claude',

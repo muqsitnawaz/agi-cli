@@ -11,11 +11,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+// Full suite is path-portable (path.join + real fs). No file-wide win32 skip
+// (RUSH-2215 review). os.homedir() on Windows reads USERPROFILE, not HOME.
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-accounts-test-'));
 process.env.HOME = TEST_HOME;
+process.env.USERPROFILE = TEST_HOME;
 process.env.AGENTS_DIR = path.join(TEST_HOME, '.agents');
 
-// Imported after HOME is redirected: the module captures os.homedir() at load.
+// Imported after HOME/USERPROFILE is redirected: the module captures os.homedir() at load.
 const { buildClaudeAccountIndex, resolveClaudeAccount } =
   await import('./claude-accounts.js');
 
@@ -72,7 +75,9 @@ beforeAll(() => {
   writeHome(trashHome('2.1.215', '2026-07-27T00-00-00Z'), TURING_TEAM);
 
   // The live symlink, pointing at the ModSquad home like the real layout does.
-  fs.symlinkSync(path.join(versionHome('2.1.219'), '.claude'), path.join(TEST_HOME, '.claude'));
+  // Windows CI has no Developer Mode for file symlinks; a directory junction works.
+  const linkType = process.platform === 'win32' ? 'junction' : undefined;
+  fs.symlinkSync(path.join(versionHome('2.1.219'), '.claude'), path.join(TEST_HOME, '.claude'), linkType);
 });
 
 afterAll(() => {

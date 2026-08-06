@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+
+// win32: Claude projects path joins absolute cwd with colons (RUSH-2215).
+const describeLive = process.platform === 'win32' ? describe.skip : describe;
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -53,7 +56,7 @@ describe('session harness name resolution', () => {
   });
 });
 
-describe('live session status flags', () => {
+describeLive('live session status flags', () => {
   const row = (over: Partial<ActiveSession>): ActiveSession => ({
     context: 'terminal', kind: 'codex', status: 'running', ...over,
   });
@@ -882,7 +885,11 @@ describe('agents sessions --resolve local-peer critical path', () => {
     });
   });
 
-  it('returns a partial fleet result when a real old peer rejects the safe resolver protocol', async () => {
+  // POSIX-only (RUSH-2215): grafts a real ssh2 peer onto an OpenSSH
+  // `ControlMaster=auto` multiplexing socket, which Windows OpenSSH does not
+  // support — the ControlMaster startup hangs the fixture (and the suite) rather
+  // than failing fast, so this real-peer path only runs on a POSIX host.
+  it.skipIf(process.platform === 'win32')('returns a partial fleet result when a real old peer rejects the safe resolver protocol', async () => {
     const tempHome = fs.mkdtempSync(path.join(sshPeerTmpBase, 'sr-'));
     let peer: SessionResolverSshPeer | undefined;
     try {
@@ -909,7 +916,9 @@ describe('agents sessions --resolve local-peer critical path', () => {
     }
   }, 90_000);
 
-  it('returns a partial fleet result when a real exit-zero peer emits malformed safe output', async () => {
+  // POSIX-only (RUSH-2215): same real ssh2 peer over an OpenSSH ControlMaster
+  // multiplexing socket as the sibling test above — hangs on Windows OpenSSH.
+  it.skipIf(process.platform === 'win32')('returns a partial fleet result when a real exit-zero peer emits malformed safe output', async () => {
     const tempHome = fs.mkdtempSync(path.join(sshPeerTmpBase, 'sr-'));
     let peer: SessionResolverSshPeer | undefined;
     try {

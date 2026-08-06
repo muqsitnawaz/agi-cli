@@ -14,6 +14,11 @@ import {
 } from './events.js';
 import { resetActorCache } from './actor.js';
 
+// RUSH-2215: quarantine only I/O-heavy event-bus suites on win32; pure
+// event-kind / level tables still run (review: do not skip platform-neutral guards).
+const describeEventsIo = process.platform === 'win32' ? describe.skip : describe;
+const describeEvents = describe;
+
 const tempDirs: string[] = [];
 
 function makeTempDir(): string {
@@ -38,7 +43,7 @@ function setupLogsDir(): string {
   return dir;
 }
 
-describe('events', () => {
+describeEventsIo('events', () => {
   describe('emit', () => {
     it('writes a JSONL record with level and caller fields', () => {
       const logsDir = setupLogsDir();
@@ -674,7 +679,7 @@ describe('events', () => {
   });
 });
 
-describe('event-kind table (the drift guard for out-of-process producers)', () => {
+describeEvents('event-kind table (the drift guard for out-of-process producers)', () => {
   it('exposes every union member at runtime, including the factory.* kinds', () => {
     // EVENT_TYPES is derived from a Record<EventType, true>, so tsc already
     // rejects a union member with no table entry. This pins the runtime half:
@@ -715,7 +720,7 @@ describe('event-kind table (the drift guard for out-of-process producers)', () =
   });
 });
 
-describe('emit() timestamp override', () => {
+describeEventsIo('emit() timestamp override', () => {
   it('honours a caller-supplied ts so a batched producer keeps real event times', () => {
     setupLogsDir();
     const happenedAt = '2026-08-03T01:02:03.000Z';

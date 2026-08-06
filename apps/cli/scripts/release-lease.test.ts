@@ -18,6 +18,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+// win32: drives real bash release-lease.sh + process-group kill semantics (RUSH-2215).
+const describeWin = process.platform === 'win32' ? describe.skip : describe;
+
+
 const SCRIPT = path.resolve(__dirname, 'release-lease.sh');
 const REF = 'refs/release-lock/test-held';
 
@@ -173,7 +177,7 @@ afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe('release-lease: mutual exclusion across machines', () => {
+describeWin('release-lease: mutual exclusion across machines', () => {
   it('lets exactly one of two concurrent claimants win', () => {
     const a = lease(boxA, ['claim', '1.20.82']);
     const b = lease(boxB, ['claim', '1.20.82']);
@@ -206,7 +210,7 @@ describe('release-lease: mutual exclusion across machines', () => {
   });
 });
 
-describe('release-lease: a dead run must not wedge the pipeline', () => {
+describeWin('release-lease: a dead run must not wedge the pipeline', () => {
   it('refuses to reclaim a lease that is younger than the TTL', () => {
     plantStaleLease(boxA, '1.20.82', 10);
     const b = lease(boxB, ['claim', '1.20.82', '--ttl-min', '45']);
@@ -246,7 +250,7 @@ describe('release-lease: a dead run must not wedge the pipeline', () => {
   });
 });
 
-describe('release-lease: releasing what you do not own', () => {
+describeWin('release-lease: releasing what you do not own', () => {
   it('will not drop a lease this box never claimed', () => {
     lease(boxA, ['claim', '1.20.82']);
 
@@ -280,7 +284,7 @@ describe('release-lease: releasing what you do not own', () => {
   });
 });
 
-describe('release-lease: a long healthy release must not lose its lease', () => {
+describeWin('release-lease: a long healthy release must not lose its lease', () => {
   // The defect this pins: the TTL is "how long since the holder proved it was
   // alive", NOT "how long a release takes". Measured on this repo, the CI matrix
   // alone has run 57 minutes and release 1.20.77 took 186 minutes wall clock —
@@ -317,7 +321,7 @@ describe('release-lease: a long healthy release must not lose its lease', () => 
   });
 });
 
-describe('release-lease: a renew must not orphan our own lease', () => {
+describeWin('release-lease: a renew must not orphan our own lease', () => {
   // The race: `renew` pushes sha2, then writes sha2 to the token file. Those are
   // not atomic. A `release` (or `verify`) landing between them reads sha1, sees
   // sha2 on origin, and — matching only the latest token — would conclude the
@@ -358,7 +362,7 @@ describe('release-lease: a renew must not orphan our own lease', () => {
   });
 });
 
-describe('release-lease: verify gates the irreversible steps', () => {
+describeWin('release-lease: verify gates the irreversible steps', () => {
   it('passes only while the lease is genuinely ours', () => {
     lease(boxA, ['claim', '1.20.82']);
     expect(lease(boxA, ['verify']).status).toBe(0);
@@ -389,7 +393,7 @@ describe('release-lease: verify gates the irreversible steps', () => {
   });
 });
 
-describe('release-lease: status', () => {
+describeWin('release-lease: status', () => {
   it('reports unheld, then the holder', () => {
     expect(lease(boxA, ['status']).stdout.trim()).toBe('unheld');
 
@@ -410,7 +414,7 @@ describe('release-lease: status', () => {
  * run, and killing it is the external kill. Faking liveness would prove nothing,
  * since the whole mechanism is a live `ps` probe.
  */
-describe('release-lease: a killed holder must not wedge the pipeline', () => {
+describeWin('release-lease: a killed holder must not wedge the pipeline', () => {
   const victims: ChildProcess[] = [];
 
   /** A real, live process to stand in for a running release.sh. */
@@ -536,7 +540,7 @@ describe('release-lease: a killed holder must not wedge the pipeline', () => {
   });
 });
 
-describe('release-lease: clear', () => {
+describeWin('release-lease: clear', () => {
   it('drops a lease whose holder was killed, without starting a release', async () => {
     const p = spawn('sleep', ['300'], { stdio: 'ignore' });
     lease(boxA, ['claim', '1.20.82'], { RELEASE_LEASE_HOLDER_PID: String(p.pid) });

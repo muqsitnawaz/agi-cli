@@ -7,6 +7,11 @@ import { shouldTapStdout, resolveInteractive, inferredInteractiveWithoutTty, bui
 import type { ExecOptions } from './exec.js';
 import { mailboxDir } from './mailbox.js';
 
+// RUSH-2215: do not skip the whole file on win32 — Windows-specific suites
+// (e.g. resolveShimSpawn .cmd) and pure string/auth detectors must run.
+// Only tmux / multiplex-style suites are POSIX-process oriented.
+const describePosix = process.platform === 'win32' ? describe.skip : describe;
+
 // Real logged-out Claude stream-json tail, captured from an actual failed
 // routine run on disk (drain-linear-cli, 2026-07-27). Ground truth: `terminal_reason`
 // is "completed", so only the `error:"authentication_failed"` marker and the
@@ -479,7 +484,7 @@ describe('resolveShimSpawn (Windows .cmd shim exec, #shims)', () => {
   });
 });
 
-describe('shouldWrapInTmux (interactive spawn-wrap gate)', () => {
+describePosix('shouldWrapInTmux (interactive spawn-wrap gate)', () => {
   /** The wrap-eligible baseline: interactive, macOS, not nested, no opt-out, tmux present. */
   const base: TmuxWrapContext = {
     interactive: true,
@@ -517,7 +522,7 @@ describe('shouldWrapInTmux (interactive spawn-wrap gate)', () => {
   });
 });
 
-describe('formatPaneTail (dead-pane failure recap)', () => {
+describePosix('formatPaneTail (dead-pane failure recap)', () => {
   it('keeps the last N non-empty lines, right-stripped, in order', () => {
     const raw = 'a  \n\n b\nc\t\n\n';
     expect(formatPaneTail(raw, 2)).toBe(' b\nc');
@@ -542,7 +547,7 @@ describe('formatPaneTail (dead-pane failure recap)', () => {
   });
 });
 
-describe('buildTmuxAgentCommand (env-preserving pane command)', () => {
+describePosix('buildTmuxAgentCommand (env-preserving pane command)', () => {
   it('execs the agent with a full env prefix (bare values need no quoting)', () => {
     const cmd = buildTmuxAgentCommand('claude', ['--permission-mode', 'plan'], {
       CLAUDE_CONFIG_DIR: '/home/me/.agents/versions/claude/2.1/home/.claude',
@@ -600,7 +605,7 @@ describe('buildTmuxAgentCommand (env-preserving pane command)', () => {
 // SSH hop (RUSH-2034); every local run passes none and gets a fresh mint. The
 // adopt-vs-mint decision is what lets the launcher resolve a non-Claude agent's
 // real remote session id from the hook record afterwards.
-describe('resolveLaunchId', () => {
+describePosix('resolveLaunchId', () => {
   it('adopts a launcher-forwarded id verbatim (the cross-hop correlation key)', () => {
     expect(resolveLaunchId('LID-from-host-42')).toBe('LID-from-host-42');
   });
@@ -630,7 +635,7 @@ describe('resolveLaunchId', () => {
 // shouldRecapDeadPane and isPaneKnownAliveFromQueryResult are pure extractions
 // of the decision logic inside runInTmux — testable without a real tmux process.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('shouldRecapDeadPane', () => {
+describePosix('shouldRecapDeadPane', () => {
   // (a) Interactive exit-0 fast-fail — the harness exited cleanly without ever
   // opening a REPL.  The user sees only a bare `[detached]`; we must surface a
   // failure banner even though the exit code is 0.
@@ -661,7 +666,7 @@ describe('shouldRecapDeadPane', () => {
   });
 });
 
-describe('isPaneKnownAliveFromQueryResult', () => {
+describePosix('isPaneKnownAliveFromQueryResult', () => {
   // (c) Positive proof the pane is alive — tmux returned exactly "0".
   it('(c) code=0 stdout="0" → true (pane is definitively alive)', () => {
     expect(isPaneKnownAliveFromQueryResult(0, '0')).toBe(true);
@@ -685,7 +690,7 @@ describe('isPaneKnownAliveFromQueryResult', () => {
   });
 });
 
-describe('tmux env file (no secret VALUE in the process table, RUSH-2100)', () => {
+describePosix('tmux env file (no secret VALUE in the process table, RUSH-2100)', () => {
   const SECRET = 'a4d66e0acc150218-master-passphrase';
 
   it('keeps every value out of the pane command when envFile is set', () => {
