@@ -821,7 +821,11 @@ export async function installHooks(
  */
 export function getVersionHooksDir(agent: AgentId, version: string): string {
   const home = getVersionHomePath(agent, version);
-  return path.join(home, agentConfigDirName(agent), AGENTS[agent].hooksDir);
+  const config = AGENTS[agent];
+  const hooksDir = path.isAbsolute(config.hooksDir)
+    ? path.relative(config.configDir, config.hooksDir)
+    : config.hooksDir;
+  return path.join(home, agentConfigDirName(agent), hooksDir);
 }
 
 /**

@@ -42,6 +42,68 @@ interface WiringReport {
   unwired: Array<{ name: string; event: string; command: string }>;
 }
 
+interface VersionHooksReport {
+  dir: string;
+  names: string[];
+}
+
+function runVersionHooksInventory(agent: string, version: string): VersionHooksReport {
+  const modulePath = path.resolve(process.cwd(), 'src/lib/hooks.ts');
+  const script = `
+    const mod = await import(${JSON.stringify(modulePath)});
+    console.log(JSON.stringify({
+      dir: mod.getVersionHooksDir(${JSON.stringify(agent)}, ${JSON.stringify(version)}),
+      names: mod.listHooksInVersionHome(${JSON.stringify(agent)}, ${JSON.stringify(version)}).map((entry) => entry.name),
+    }));
+  `;
+  const out = execFileSync('bun', ['-e', script], {
+    cwd: process.cwd(),
+    env: { ...process.env, HOME: testHome },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  }).toString('utf-8');
+  return JSON.parse(out);
+}
+
+function seedVersionHook(agent: string, version: string, configDir: string, relativeScript: string): string {
+  const hooksDir = path.join(userDir, '.history', 'versions', agent, version, 'home', configDir, 'hooks');
+  const scriptPath = path.join(hooksDir, relativeScript);
+  fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+  fs.writeFileSync(scriptPath, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  return hooksDir;
+}
+
+describe('version hooks path resolution', () => {
+  it.each([
+    ['grok', '.grok'],
+    ['kimi', '.kimi-code'],
+  ])('maps absolute %s hooksDir into its version home', (agent, configDir) => {
+    const hooksDir = seedVersionHook(agent, '1.0.0', configDir, 'guard.sh');
+
+    const report = runVersionHooksInventory(agent, '1.0.0');
+
+    expect(report.dir).toBe(hooksDir);
+    expect(fs.existsSync(report.dir)).toBe(true);
+    expect(report.names).toContain('guard');
+  });
+
+  it('keeps a relative hooksDir under the version config directory', () => {
+    const hooksDir = seedVersionHook('claude', '2.0.0', '.claude', 'guard.sh');
+
+    const report = runVersionHooksInventory('claude', '2.0.0');
+
+    expect(report.dir).toBe(hooksDir);
+    expect(report.names).toContain('guard');
+  });
+
+  it('lists a hook in a nested event directory from the resolved version root', () => {
+    seedVersionHook('grok', '1.0.0', '.grok', 'stop/00-agent-verify-work-complete.sh');
+
+    const report = runVersionHooksInventory('grok', '1.0.0');
+
+    expect(report.names).toContain('00-agent-verify-work-complete');
+  });
+});
+
 /** Seed a system-layer hook manifest + a version-home hooks dir carrying the
  *  hook script, so the inspector resolves a command it expects to be wired. */
 function seedClaudeVersionWithHook(version: string, hookName: string, event: string): string {
