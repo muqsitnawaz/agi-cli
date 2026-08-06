@@ -170,7 +170,7 @@ export function viewAgentSignedIn(view: string, agent: string): boolean | undefi
       versions?: Array<{ signedIn?: boolean }>;
     }>;
     const row = rows.find((candidate) => candidate.agent?.toLowerCase() === agent.toLowerCase());
-    if (!row) return false;
+    if (!row) return undefined;
     const verdicts = (row.versions ?? [])
       .map((version) => version.signedIn)
       .filter((value): value is boolean => typeof value === 'boolean');

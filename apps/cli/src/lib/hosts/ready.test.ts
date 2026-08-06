@@ -49,7 +49,7 @@ describe('viewAgentSignedIn', () => {
   const view = JSON.stringify([{ agent: 'codex', versions: [{ signedIn: false }, { signedIn: true }] }]);
   it('reads the per-version sign-in split from agents view JSON', () => {
     expect(viewAgentSignedIn(view, 'codex')).toBe(true);
-    expect(viewAgentSignedIn(view, 'claude')).toBe(false);
+    expect(viewAgentSignedIn(view, 'claude')).toBeUndefined();
     expect(viewAgentSignedIn('not json', 'codex')).toBeUndefined();
   });
 });
