@@ -1,0 +1,1 @@
+- **Repeated full session listings reuse transcript membership (RUSH-2318).** The process caches each transcript directory's membership by mtime+size, avoiding repeated directory reads while filesystem-only session creates and deletes still invalidate immediately. Source: `apps/cli/src/lib/session/db.ts`.

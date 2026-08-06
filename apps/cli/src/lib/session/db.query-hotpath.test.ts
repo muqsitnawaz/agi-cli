@@ -12,7 +12,6 @@ import { afterAll, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import Database from '../sqlite.js';
 
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-qhotpath-'));
 process.env.HOME = TEST_HOME;
@@ -21,7 +20,6 @@ process.env.USERPROFILE = TEST_HOME;
 const {
   closeDB,
   getDB,
-  getDBPath,
   getSessionExistenceCacheStats,
   upsertSession,
   querySessions,
@@ -73,7 +71,7 @@ describe('querySessions default sort uses the last_activity index', () => {
 });
 
 describe('querySessions batched existence check', () => {
-  it('reuses unchanged directory membership and invalidates on concurrent create and remove', () => {
+  it('reuses unchanged directory membership and invalidates on concurrent create and remove', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-qhp-cache-'));
     const first = path.join(dir, 'first.jsonl');
     const concurrent = path.join(dir, 'concurrent.jsonl');
@@ -89,23 +87,17 @@ describe('querySessions batched existence check', () => {
       .toEqual(['exist-cache-first']);
     expect(getSessionExistenceCacheStats().sweeps).toBe(afterFirstSweep);
 
-    // A concurrent writer creates the transcript and updates its indexed row.
-    // PRAGMA data_version is the cross-connection invalidation signal, so this
+    // A concurrent writer can create the transcript without touching SQLite.
+    // The directory metadata is the cross-process invalidation signal, so this
     // process must not keep the cached "missing" membership result.
+    await new Promise(resolve => setTimeout(resolve, 10));
     fs.writeFileSync(concurrent, '{}');
-    const writer = new Database(getDBPath());
-    writer.prepare(`UPDATE sessions SET label = 'concurrent-writer' WHERE id = ?`)
-      .run('exist-cache-concurrent');
-    writer.close();
     expect(new Set(querySessions({ idPrefix: 'exist-cache-' }).map(row => row.id)))
       .toEqual(new Set(['exist-cache-first', 'exist-cache-concurrent']));
     expect(getSessionExistenceCacheStats().sweeps).toBe(afterFirstSweep + 1);
 
+    await new Promise(resolve => setTimeout(resolve, 10));
     fs.unlinkSync(first);
-    const remover = new Database(getDBPath());
-    remover.prepare(`UPDATE sessions SET label = 'concurrent-remover' WHERE id = ?`)
-      .run('exist-cache-first');
-    remover.close();
     expect(querySessions({ idPrefix: 'exist-cache-' }).map(row => row.id))
       .toEqual(['exist-cache-concurrent']);
     expect(getSessionExistenceCacheStats().sweeps).toBe(afterFirstSweep + 2);
