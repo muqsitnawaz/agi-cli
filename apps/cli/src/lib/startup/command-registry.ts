@@ -305,6 +305,34 @@ export function isKnownTopLevelCommand(name: string): boolean {
   return KNOWN_TOP_LEVEL_COMMANDS.has(name);
 }
 
+/**
+ * Loader-table keys that are commander **aliases**, not command names — the
+ * second name a command answers to (`agents rm` → `remove`, `agents fleet` →
+ * `devices`). They are real invocable commands, so they belong in
+ * {@link KNOWN_TOP_LEVEL_COMMANDS}, but they are NOT spellcheck targets: see
+ * {@link CANONICAL_TOP_LEVEL_COMMANDS}. `command-registry.test.ts` pins this
+ * list against the aliases the real command tree registers, so a new one cannot
+ * slip in unlisted.
+ */
+const TOP_LEVEL_ALIASES = ['fleet', 'harnesses', 'mailbox', 'purge', 'repo', 'rm'] as const;
+
+/**
+ * The spellcheck's candidate set: every top-level command name, aliases removed.
+ *
+ * Aliases are excluded because a two-letter alias sits one edit from a long,
+ * common command and wins the tie. `rm` (alias of the hidden `remove`, itself an
+ * alias of `prune`) is one edit from `run` — so ranking over the full set turned
+ * `agents rn claude "fix the tests"`, a one-key slip on the most-used command in
+ * the CLI, into an **uninstall**. Commander's own `.name()` never exposed `rm`,
+ * which is why the pre-RUSH-2022 spellcheck was safe here; keep that property.
+ */
+export const CANONICAL_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set(
+  [...KNOWN_TOP_LEVEL_COMMANDS].filter((name) => !(TOP_LEVEL_ALIASES as readonly string[]).includes(name)),
+);
+
+/** The alias subset of {@link KNOWN_TOP_LEVEL_COMMANDS}, for the pinning test. */
+export const TOP_LEVEL_ALIAS_NAMES: readonly string[] = TOP_LEVEL_ALIASES;
+
 /** Levenshtein edit distance. */
 function levenshtein(a: string, b: string): number {
   const dp: number[][] = Array.from({ length: a.length + 1 }, () => Array(b.length + 1).fill(0));
@@ -325,15 +353,16 @@ function levenshtein(a: string, b: string): number {
  * spellcheck used both by the pre-parse typo correction in src/index.ts and by
  * the `command:*` unknown-command message.
  *
- * Candidates come from {@link KNOWN_TOP_LEVEL_COMMANDS}, not from the commands
- * registered so far: registration is lazy, so the previously-used candidate set
- * could not see `sessions`/`teams`/`cloud` at all and the very typo RUSH-2022
- * reported (`session`) got no suggestion. Ties break on the name's order in the
- * set, which is the loader table's declaration order.
+ * Candidates come from {@link CANONICAL_TOP_LEVEL_COMMANDS}, not from the
+ * commands registered so far: registration is lazy, so the previously-used
+ * candidate set could not see `sessions`/`teams`/`cloud` at all and the very
+ * typo RUSH-2022 reported (`session`) got no suggestion. Aliases are excluded —
+ * see that set for why `rm` must never be a target. Ties break on the name's
+ * order in the set, which is the loader table's declaration order.
  */
 export function suggestTopLevelCommand(name: string): { name: string; distance: number } | null {
   let best: { name: string; distance: number } | null = null;
-  for (const candidate of KNOWN_TOP_LEVEL_COMMANDS) {
+  for (const candidate of CANONICAL_TOP_LEVEL_COMMANDS) {
     if (candidate.startsWith('_')) continue; // internal, never suggest
     const distance = levenshtein(name, candidate);
     if (!best || distance < best.distance) best = { name: candidate, distance };

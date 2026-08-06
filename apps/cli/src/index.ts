@@ -1164,7 +1164,11 @@ program.on('command:*', (operands) => {
   const unknown = operands[0];
   const closest = suggestTopLevelCommand(unknown);
   console.error(`error: unknown command '${unknown}'`);
-  if (closest && closest.distance <= 3) {
+  // Never point at a command this brand turned off: the suggestion set is static
+  // now, so unlike the old live `program.commands` it still contains names that
+  // were stripped below — `unknown command 'view'` / `(Did you mean view?)` is
+  // nonsense to a user for whom `view` does not exist.
+  if (closest && closest.distance <= 3 && !brandDisabled.has(closest.name)) {
     console.error(`(Did you mean ${closest.name}?)`);
   }
   process.exit(1);
