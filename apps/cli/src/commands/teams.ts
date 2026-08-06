@@ -1659,7 +1659,9 @@ export function registerTeamsCommands(program: Command): void {
           effectiveRepo = (await getRemoteUrl(process.cwd())) ?? '';
         }
         try {
-          hostRepoPath = ensureRemoteRepo(hostTarget!, effectiveRepo, team);
+          hostRepoPath = ensureRemoteRepo(hostTarget!, effectiveRepo, team, {
+            extraSshArgs: host.identityFile ? ['-i', host.identityFile, '-o', 'IdentitiesOnly=yes'] : [],
+          });
         } catch (err) {
           dieFriction(
             'teams',
@@ -2340,10 +2342,11 @@ export function registerTeamsCommands(program: Command): void {
         try {
           if (agent.hostName && agent.hostTarget && agent.repoPath) {
             // Distributed teammate: guard + remove the worktree ON THE HOST.
-            if (remoteWorktreeDirty(agent.hostTarget, agent.worktreePath)) {
+            const ssh = { extraSshArgs: agent.hostIdentityFile ? ['-i', agent.hostIdentityFile, '-o', 'IdentitiesOnly=yes'] : [] };
+            if (remoteWorktreeDirty(agent.hostTarget, agent.worktreePath, ssh)) {
               worktreeKept = true;
             } else {
-              removeRemoteWorktree(agent.hostTarget, agent.repoPath, agent.worktreeName);
+              removeRemoteWorktree(agent.hostTarget, agent.repoPath, agent.worktreeName, true, ssh);
             }
           } else {
             const dirty = await hasUncommittedChanges(agent.worktreePath);
@@ -2573,10 +2576,11 @@ export function registerTeamsCommands(program: Command): void {
           try {
             if (agent.hostName && agent.hostTarget && agent.repoPath) {
               // Distributed teammate: guard + remove the worktree ON THE HOST.
-              if (remoteWorktreeDirty(agent.hostTarget, agent.worktreePath)) {
+              const ssh = { extraSshArgs: agent.hostIdentityFile ? ['-i', agent.hostIdentityFile, '-o', 'IdentitiesOnly=yes'] : [] };
+              if (remoteWorktreeDirty(agent.hostTarget, agent.worktreePath, ssh)) {
                 keptWorktrees.push(agent.worktreeName);
               } else {
-                removeRemoteWorktree(agent.hostTarget, agent.repoPath, agent.worktreeName);
+                removeRemoteWorktree(agent.hostTarget, agent.repoPath, agent.worktreeName, true, ssh);
               }
             } else {
               const dirty = await hasUncommittedChanges(agent.worktreePath);

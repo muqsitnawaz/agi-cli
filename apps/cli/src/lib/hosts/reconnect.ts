@@ -73,7 +73,7 @@
  * is failing to put the user back into the agent.
  */
 import { sshExec, sshStream, shellQuote } from '../ssh-exec.js';
-import { sshTargetFor, type Host } from './types.js';
+import { hostIdentityArgs, sshTargetFor, type Host } from './types.js';
 
 /** ssh's connection-layer failure code — the signal that the link dropped rather
  *  than the remote command exiting on its own. Mirrors ssh-exec.ts `sshStream`. */
@@ -251,14 +251,16 @@ export function reattachRemoteCommand(sessionId: string): string {
  */
 export function reattachRemoteSession(host: Host, sessionId: string): ReconnectOutcome {
   const target = sshTargetFor(host);
+  const extraSshArgs = hostIdentityArgs(host);
   // Fresh (non-multiplexed) reachability probe: code 0 means the handshake actually
   // completed, so a hung/failed connect is never mistaken for a live reconnection.
-  const probe = sshExec(target, 'true', { multiplex: false });
+  // RUSH-2265: pass host identity on every hop (probe + stream), not only the first.
+  const probe = sshExec(target, 'true', { multiplex: false, extraSshArgs });
   if (probe.code !== 0) return { code: SSH_CONN_FAILURE, connected: false, heldMs: 0 };
   // Timed from AFTER the probe returned, so this is the attach's own duration and
   // carries none of the connect phase the file header rules out as a signal.
   const startedAt = Date.now();
-  const code = sshStream(target, reattachRemoteCommand(sessionId), { tty: true });
+  const code = sshStream(target, reattachRemoteCommand(sessionId), { tty: true, extraSshArgs });
   return { code, connected: true, heldMs: Date.now() - startedAt };
 }
 
