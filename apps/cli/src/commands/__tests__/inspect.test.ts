@@ -50,6 +50,7 @@ function makeFixture(): string {
   const versionHome = path.join(home, '.agents', '.history', 'versions', 'claude', '9.9.9', 'home');
   const claudeCfg = path.join(versionHome, '.claude');
   mkdir(claudeCfg);
+  writeFile(path.join(claudeCfg, 'hooks', 'local-only.sh'), '#!/bin/sh\nexit 0\n');
 
   // Default pin
   writeFile(
@@ -164,6 +165,18 @@ describe('agents inspect', () => {
     // Counts include at least our two seeded skills and one command.
     expect(data.resources.skills.total).toBeGreaterThanOrEqual(2);
     expect(data.resources.commands.total).toBeGreaterThanOrEqual(1);
+    expect(data.resources.hooks.capable).toBe(true);
+    expect(data.resources.hooks.onDisk.map((hook: { name: string }) => hook.name)).toContain('local-only');
+    expect(data.resources.hooks.wired).toEqual([]);
+    expect(data.resources.hooks.unmanaged.map((hook: { name: string }) => hook.name)).toContain('local-only');
+    expect(data.resources.hooks.wiringSupported).toBe(true);
+  });
+
+  it('prints hook state counts instead of a bare Hooks (0)', () => {
+    const r = run(fixtureHome, ['inspect', 'claude']);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('capable yes · on-disk 1 · wired 0 · unmanaged 1');
+    expect(r.stdout).not.toContain('Hooks (0)');
   });
 
   it('--brief skips resources + sessions in JSON output', () => {

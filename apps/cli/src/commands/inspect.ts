@@ -46,6 +46,7 @@ import {
   type SkillResourceEntry,
 } from '../lib/resources.js';
 import { listHookEntriesFromDir } from '../lib/hooks.js';
+import { getResourceInventory, type ResourceInventory } from '../lib/resource-inventory.js';
 import { listMcpServerConfigs, discoverMcpConfigsFromRepo, type McpYamlConfig } from '../lib/mcp.js';
 import { discoverPlugins, discoverPluginsInDir, pluginResourceGroups, type PluginResourceGroup } from '../lib/plugins.js';
 import { PLUGIN_GROUP_COLORS } from './plugins.js';
@@ -176,7 +177,7 @@ export interface InspectOptions {
 
 export function registerInspectCommand(program: Command): void {
   const cmd = addHostOption(program.command('inspect <target>'))
-    .description('Inspect one installed agent at one version, or a DotAgents repo (user|system|project|alias|path) — paths, capabilities, resources, drill into any kind.')
+    .description('Inspect one installed agent harness at one version (not a model), or a DotAgents repo — paths, capabilities, resources, and hook capable/on-disk/wired state.')
     .option('--brief', 'header + capabilities only; skip resources/sessions')
     .option('--json', 'machine-readable JSON output');
 
@@ -661,6 +662,7 @@ async function renderSummary(agent: AgentId, version: string, versionHome: strin
   const capabilities = collectCapabilities(agent, version);
 
   const itemsByKind = options.brief ? null : collectItemsByKind(agent, versionHome);
+  const hookInventory = options.brief ? null : getResourceInventory(agent, version, 'hooks');
   const hookByScript = options.brief ? null : hookManifestByScript(loadCentralHookManifest());
   const mcpConfigs = options.brief ? null : new Map(listMcpServerConfigs().map(s => [s.name, s.config]));
 
@@ -690,7 +692,7 @@ async function renderSummary(agent: AgentId, version: string, versionHome: strin
         headlessPlan: modeCat.headlessPlan,
         unsupported: modeCat.unsupported,
       },
-      resources: itemsByKind ? summaryResourcesJson(itemsByKind, hookByScript!, mcpConfigs!) : null,
+      resources: itemsByKind ? summaryResourcesJson(itemsByKind, hookByScript!, mcpConfigs!, hookInventory!) : null,
       sessions,
     };
     console.log(JSON.stringify(json, null, 2));
@@ -738,7 +740,8 @@ async function renderSummary(agent: AgentId, version: string, versionHome: strin
     for (const kind of SIMPLE_KINDS) {
       printSimpleResourceRow(kind, itemsByKind[kind]);
     }
-    printExpandedSection('Hooks', hookRows(itemsByKind.hooks, hookByScript!));
+    console.log(`  ${chalk.bold('Hooks')}  ${chalk.gray(formatHookInventoryCounts(hookInventory!))}`);
+    printExpandedSection('Hook files', hookRows(itemsByKind.hooks, hookByScript!));
     printExpandedSection('Plugins', pluginRows(itemsByKind.plugins));
     printExpandedSection('MCP', mcpRows(itemsByKind.mcp, mcpConfigs!));
   }
@@ -900,13 +903,21 @@ function summaryResourcesJson(
   itemsByKind: Record<DrillableKind, ResourceItem[]>,
   hookByScript: Map<string, ManifestHook>,
   mcpConfigs: Map<string, McpYamlConfig>,
+  hookInventory: ResourceInventory,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const kind of DRILLABLE_KINDS) {
     const items = itemsByKind[kind];
     const base = { total: items.length, bySource: countBySource(items.map(i => i.source)) };
     if (kind === 'hooks') {
-      out[kind] = { ...base, items: items.map(i => {
+      out[kind] = { ...base,
+        capable: hookInventory.capable,
+        declared: hookInventory.declared,
+        onDisk: hookInventory.onDisk,
+        wired: hookInventory.wired,
+        unmanaged: hookInventory.unmanaged,
+        wiringSupported: hookInventory.wiringSupported,
+        items: items.map(i => {
         const h = hookByScript.get(i.name);
         return { name: i.name, source: i.source, events: h?.events ?? [], matcher: h?.matcher, matches: h?.matches, cache: h?.cache };
       }) };
@@ -927,6 +938,12 @@ function summaryResourcesJson(
     }
   }
   return out;
+}
+
+function formatHookInventoryCounts(inventory: ResourceInventory): string {
+  const wired = inventory.wiringSupported ? String(inventory.wired.length) : 'unknown';
+  const unmanaged = inventory.unmanaged.length > 0 ? ` · unmanaged ${inventory.unmanaged.length}` : '';
+  return `capable ${inventory.capable ? 'yes' : 'no'} · on-disk ${inventory.onDisk.length} · wired ${wired}${unmanaged}`;
 }
 
 function collectKind(agent: AgentId, versionHome: string, kind: DrillableKind): ResourceItem[] {
