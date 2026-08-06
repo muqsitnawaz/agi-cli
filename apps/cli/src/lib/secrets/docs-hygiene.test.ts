@@ -70,6 +70,29 @@ const RC_FILE = String.raw`~/\.(zshenv|zshrc|bashrc|bash_profile|profile)\b|\bsh
  */
 const FILE_STORE_HEADING = '## Linux: headless servers and the encrypted-file fallback';
 
+/**
+ * Matches of `claim` in `text` that are NOT negated, judged per match rather
+ * than per sentence.
+ *
+ * A whole-sentence exclusion list is defeated by adding a word — the sentence
+ * makes the prohibited claim AND contains "not" somewhere, so it is skipped
+ * entirely. Here the negation must sit in the 30 characters immediately before
+ * the match (or lead it), so appending a disclaimer elsewhere in the sentence
+ * changes nothing.
+ */
+function negatedMatches(text: string, claim: RegExp, negation: RegExp): string[] {
+  const out: string[] = [];
+  const re = new RegExp(claim.source, claim.flags.includes('g') ? claim.flags : `${claim.flags}g`);
+  for (const m of text.matchAll(re)) {
+    const at = m.index ?? 0;
+    const before = text.slice(Math.max(0, at - 30), at);
+    const lead = m[0].slice(0, 30);
+    if (negation.test(before) || negation.test(lead)) continue;
+    out.push(m[0].replace(/\s+/g, ' ').trim());
+  }
+  return out;
+}
+
 function fileStoreSection(): string {
   const text = guarded();
   const start = text.indexOf(FILE_STORE_HEADING);
@@ -79,14 +102,32 @@ function fileStoreSection(): string {
 }
 
 describe('docs/secrets.md hygiene (RUSH-1968)', () => {
-  it('marks its exception regions in matched pairs', () => {
-    // guarded() asserts termination; this pins the count so a stray opener or a
-    // deleted closer is a loud failure rather than a silently widened exception.
+  it('keeps its exceptions few, small, paired, and reviewed', () => {
+    // A marked region is a DELIBERATE override — text inside it is exempt from
+    // every check below. That is the point: the warning has to name the export
+    // it forbids, and `export --host` legitimately forwards the master key to
+    // key a remote's own store. It is also the design's soft spot, so regions
+    // are pinned three ways — how many, properly paired, and how big. Widening
+    // one, or adding a third, fails here and forces the change through review.
     const text = doc();
     const opens = text.split(ALLOW_OPEN).length - 1;
     const closes = text.split(ALLOW_CLOSE).length - 1;
     expect(opens).toBe(closes);
     expect(opens).toBe(2);
+
+    // Each region: big enough for its paragraph, far too small to hide a
+    // section in. Measured on what guarded() actually strips.
+    let i = 0;
+    const sizes: number[] = [];
+    for (;;) {
+      const open = text.indexOf(ALLOW_OPEN, i);
+      if (open === -1) break;
+      const close = text.indexOf(ALLOW_CLOSE, open);
+      sizes.push(close - open);
+      i = close + ALLOW_CLOSE.length;
+    }
+    for (const size of sizes) expect(size).toBeLessThan(1200);
+    expect(sizes.reduce((a, b) => a + b, 0)).toBeLessThan(2000);
   });
 
   it('never mentions a shell rc file outside a marked region', () => {
@@ -108,16 +149,18 @@ describe('docs/secrets.md hygiene (RUSH-1968)', () => {
   it('never equates the 0600 key file with an environment or rc export', () => {
     // The inverted claim is what made the export look sanctioned. Checked over
     // the guarded text, so the warning's own "is **not** equivalent" sentence
-    // (inside a marked region) cannot be mistaken for the claim it refutes —
+    // (inside the marked region) cannot be mistaken for the claim it refutes —
     // and no sentence can buy immunity by containing the word "not".
+    //
+    // Matched over the raw text, NOT sentence by sentence: the claim splits
+    // across a period trivially ("The key file is equivalent. It is just a shell
+    // rc export."), which a per-sentence scan misses.
     const equivalence = new RegExp(
-      String.raw`\b(identical|equivalent|the same as|no different|no safer|as safe as)\b[^.]{0,140}` +
-      String.raw`(export|rc file|shell rc|~/\.zsh|environment variable|env var)`,
-      'i',
+      String.raw`\b(identical|equivalent|the same as|no different|no safer|as safe as)\b[\s\S]{0,160}?` +
+      String.raw`(\bexport\b|\brc file\b|\bshell rc\b|~/\.zsh|\benvironment variable\b|\benv var\b)`,
+      'gi',
     );
-    const offenders = guarded()
-      .split(/(?<=[.!?])\s+|\n{2,}/)
-      .filter((s) => equivalence.test(s));
+    const offenders = guarded().match(equivalence) ?? [];
     expect(offenders).toEqual([]);
   });
 
@@ -154,13 +197,13 @@ describe('docs/secrets.md hygiene (RUSH-1968)', () => {
     const promptClaim = new RegExp(
       String.raw`\b(prompts?|asks?|asked|requests?|requested|prompted)\b[^.]{0,90}\bpassphrase\b` +
       String.raw`|\bpassphrase\b[^.]{0,60}\b(prompt|is requested|is asked)\b`,
-      'i',
+      'gi',
     );
-    const offenders = section
-      .split(/(?<=[.!?])\s+|\n{2,}/)
-      .filter((s) => promptClaim.test(s))
-      // The section must be able to state that it does NOT prompt.
-      .filter((s) => !/\bnever prompts\b|\bno prompt\b|\bdoes not prompt\b|without being prompted/i.test(s));
+    // Negation is checked PER MATCH, adjacent to the verb — not per sentence.
+    // A sentence-level exclusion list is defeated by appending a word: "the
+    // command asks for a passphrase (no prompt is needed elsewhere)" would clear
+    // a whole-sentence filter while still making the false claim.
+    const offenders = negatedMatches(section, promptClaim, /\b(never|not|no|without|neither)\b/i);
     expect(offenders).toEqual([]);
     expect(doc()).toMatch(/\*\*never prompts\*\*/i);
   });
@@ -169,16 +212,24 @@ describe('docs/secrets.md hygiene (RUSH-1968)', () => {
     const text = doc();
     expect(text).toContain('AGENTS_SYNC_PASSPHRASE');
 
-    // No passage outside a marked region may tell a headless/CI reader to set
+    // No passage outside the marked region may tell a headless/CI reader to set
     // the MASTER key so that push/pull works. That instruction is RUSH-1968.
-    const offenders = guarded()
-      .split(/(?<=[.!?])\s+|\n{2,}/)
-      .filter((s) => s.includes('AGENTS_SECRETS_PASSPHRASE'))
-      .filter((s) => /\b(headless|CI|unattended|no TTY|worker box)\b/i.test(s))
-      .filter((s) => /\b(push|pull|sync)\b/i.test(s))
-      // Descriptive mentions stating the variable is OPTIONAL are the opposite
-      // of the failure mode; only an instruction to set it counts.
-      .filter((s) => !/no passphrase|only if set|opt(-| )in|if it sets one/i.test(s));
+    //
+    // Judged per match on the imperative itself — "set AGENTS_SECRETS_PASSPHRASE"
+    // in a headless/sync context — with the negation adjacent, so appending
+    // "this is opt-in" cannot excuse it the way a sentence-level filter allowed.
+    const instruction = /\b(set|export|define|configure)\s+`?AGENTS_SECRETS_PASSPHRASE/gi;
+    const offenders = negatedMatches(guarded(), instruction, /\b(never|not|no|without|instead of|rather than)\b/i)
+      .filter((_m, i) => {
+        // Only flag when the surrounding passage is about headless/unattended sync.
+        const at = [...guarded().matchAll(instruction)][i]?.index ?? 0;
+        const around = guarded().slice(Math.max(0, at - 300), at + 300);
+        // No "but it's optional" exclusion here: that is the add-a-word hole
+        // again — appending "this is opt-in" would excuse the instruction. The
+        // imperative + a headless-sync context is the whole test.
+        return /\b(headless|CI|unattended|no TTY|worker box)\b/i.test(around)
+          && /\b(push|pull|sync)\b/i.test(around);
+      });
     expect(offenders).toEqual([]);
   });
 });
