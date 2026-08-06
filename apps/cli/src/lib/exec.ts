@@ -18,7 +18,7 @@ import { isTierToken, resolveTier } from './model-tiers.js';
 import { emitStart, createTimer, redactPrompt, redactArgs } from './events.js';
 import { sanitizeProcessEnv } from './secrets/bundles.js';
 import { resolveActor, actorEnv } from './actor.js';
-import { getShimsDir, getHistoryDir, getUserAgentsDir } from './state.js';
+import { getShimsDir, getHistoryDir, getUserAgentsDir, getRuntimeStateDir } from './state.js';
 import { resolveCodexHome } from './codex-home.js';
 import { readCodexConfiguredModel } from './shims.js';
 import { writePidSessionEntry, extractSessionIdArg } from './session/pid-registry.js';
@@ -1390,14 +1390,54 @@ export function buildTmuxAgentCommand(
   executable: string,
   args: string[],
   env: NodeJS.ProcessEnv,
-  opts: { redactEnvValues?: boolean } = {},
+  opts: { redactEnvValues?: boolean; envFile?: string } = {},
 ): string {
+  const agentCmd = [executable, ...args].map(shellQuote).join(' ');
+  // envFile: source the values instead of inlining them, so no VALUE ever lands
+  // in the pane's argv. `exec env K=V …` put every resolved secret into the
+  // process table, readable by any process of this user — on one fleet box six
+  // live processes carried the secrets-store master passphrase, which decrypts
+  // every file-backed bundle including the Claude OAuth tokens (RUSH-2100).
+  // `set -a` exports what the file assigns; the file is unlinked before `exec`,
+  // so it exists only for the sourcing itself. A missing file aborts the pane
+  // rather than silently launching with a half-built env.
+  if (opts.envFile) {
+    const f = shellQuote(opts.envFile);
+    // Remove the file whether or not sourcing succeeds — a bare `. f || exit 1`
+    // strands the plaintext env (incl. the secrets-store master passphrase) on
+    // disk on any source failure, worse than the argv leak this replaces
+    // (RUSH-2100). Capture the source rc, unlink, then honor it.
+    return `set -a; . ${f}; __agents_rc=$?; set +a; rm -f ${f}; [ "$__agents_rc" -eq 0 ] || exit 1; exec ${agentCmd}`;
+  }
   const envPrefix = Object.entries(env)
     .filter(([k, v]) => v !== undefined && EXEC_ENV_KEY_PATTERN.test(k))
     .map(([k, v]) => `${k}=${opts.redactEnvValues ? '<redacted>' : shellQuote(String(v))}`)
     .join(' ');
-  const agentCmd = [executable, ...args].map(shellQuote).join(' ');
   return `exec env ${envPrefix} ${agentCmd}`;
+}
+
+/**
+ * Serialize the pane env to a shell-sourceable file, created 0600 and exclusively
+ * (`wx`) so it can never adopt a pre-existing file's mode or content.
+ *
+ * EVERY key goes in the file, not a curated "secret-bearing" subset: a denylist
+ * has to be updated for each new credential and is wrong the moment someone
+ * forgets, whereas routing all of it through the file makes the guarantee hold by
+ * construction. Keys are filtered to valid shell identifiers for the same reason
+ * `env` needed it — an exported function (`BASH_FUNC_x%%`) is not assignable.
+ */
+export function writeTmuxEnvFile(env: NodeJS.ProcessEnv, filePath: string): void {
+  const body = Object.entries(env)
+    .filter(([k, v]) => v !== undefined && EXEC_ENV_KEY_PATTERN.test(k))
+    .map(([k, v]) => `${k}=${shellQuote(String(v))}`)
+    .join('\n');
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const fd = fs.openSync(filePath, 'wx', 0o600);
+  try {
+    fs.writeSync(fd, `${body}\n`);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /**
@@ -1460,16 +1500,31 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
   // SessionStart learns some harness IDs only after launch. Carry the wrapper
   // name into that hook so it can bind both identities durably.
   const execEnv = { ...buildExecEnv(options), AGENT_TMUX_SESSION_NAME: name };
-  // Launch with the real env (secret VALUES materialized into the pane); persist
-  // only a value-redacted copy in SessionMeta.cmd so resolved secrets never hit
-  // disk via the informational cmd field (RUSH-1758).
-  const cmd = buildTmuxAgentCommand(executable, args, execEnv);
+  // The pane sources its env from a 0600 file it unlinks before exec, so no
+  // resolved secret VALUE reaches the process table (RUSH-2100). SessionMeta.cmd
+  // keeps the value-redacted inline form — the human-readable record of what ran,
+  // which never carried real values anyway (RUSH-1758).
+  const envFile = path.join(
+    getRuntimeStateDir(), 'tmux-env', `${name}-${randomUUID().slice(0, 8)}.env`,
+  );
+  writeTmuxEnvFile(execEnv, envFile);
+  const cmd = buildTmuxAgentCommand(executable, args, execEnv, { envFile });
   const metaCmd = buildTmuxAgentCommand(executable, args, execEnv, { redactEnvValues: true });
 
   const labels: Record<string, string> = { agent: options.agent };
   if (options.sessionId) labels.sessionId = options.sessionId;
 
-  const meta = await createSession({ name, cmd, metaCmd, cwd, socket, source: 'cli', labels });
+  // Only a launched pane sources-and-unlinks the env file. If createSession
+  // throws, the pane never runs, so the resolved secrets (incl. the master
+  // passphrase) would linger on disk — remove it on that failure path
+  // (RUSH-2100). On success the detached pane owns the unlink.
+  let meta;
+  try {
+    meta = await createSession({ name, cmd, metaCmd, cwd, socket, source: 'cli', labels });
+  } catch (err) {
+    try { fs.rmSync(envFile, { force: true }); } catch { /* best-effort */ }
+    throw err;
+  }
   const pane = meta.pane;
 
   if (options.sessionId) writeSessionAliasRecord(options.sessionId, name);
