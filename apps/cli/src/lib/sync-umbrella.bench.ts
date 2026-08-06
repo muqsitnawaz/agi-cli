@@ -45,10 +45,12 @@
  * exhaustive; anything added here must be added to it:
  *   - EXACTLY ONE version home is written: `writeTarget`, the OLDEST installed
  *     claude, never the newest and never the `~/.claude`-symlinked default. The
- *     stage-3 full sync copies resources into it and rewrites its
- *     `.sync-manifest.json` (versions.ts:3264 `saveManifest`); its pre-run state
- *     is captured below and restored on exit, including deleting a manifest that
- *     did not exist before.
+ *     stage-3 full sync copies resources into it, orphan-sweeps stale entries
+ *     (versions.ts:2945/3013/3036/3067/3214) and rewrites its
+ *     `.sync-manifest.json` (versions.ts:3264 `saveManifest`). Only the MANIFEST
+ *     is restored on exit -- captured below as raw bytes, and deleted again if it
+ *     did not exist before. The synced resources are left in place, exactly as a
+ *     real `agents sync claude@<version>` would leave them.
  *   - Every OTHER installed version is touched only by stage 6, which is
  *     restricted to versions whose manifest is present and fresh, so
  *     `syncResourcesToVersion` provably takes the versions.ts:2878 early return
@@ -63,7 +65,12 @@
  *   - The first sync of a version whose selectors are unset writes default
  *     resource patterns into ~/.agents/agents.yaml (versions.ts:2806 ->
  *     state.ts:1266 `ensureVersionResourcePatterns`, which no-ops once set).
- *   - `registerHooksToSettings` rewrites `writeTarget`'s settings.json.
+ *   - `registerHooksToSettings` rewrites `writeTarget`'s settings.json AND, via
+ *     `sweepOrphanShims` (hooks.ts:1632), unlinks stale shims from the GLOBAL
+ *     hook-shims dir (hooks.ts:1607, `getHookShimsDir()` -> state.ts:138) --
+ *     outside every version home. The bench passes the full live manifest, so
+ *     only shims that are ALREADY orphaned are removed, identical to a real
+ *     `agents sync`; no live shim is touched.
  *
  * This file is NOT part of `vitest run`: vitest.config.ts:11 includes only
  * `*.test.ts` globs and there is no `benchmark.include`, so it is reached
