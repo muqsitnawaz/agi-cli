@@ -259,24 +259,41 @@ describe('command-registry.ts loaders — warm in-process registration only (mod
  * from './versions.js'` (self-update.ts:20 -- the binding is used once, at
  * self-update.ts:132) drags the ENTIRE versions.ts dependency graph onto the
  * eager path: versions.ts statically imports yaml, chalk, smol-toml,
- * @inquirer/prompts and ~40 local modules (state, resources, agents,
+ * @inquirer/prompts and 27 local modules (state, resources, agents,
  * permissions, mcp, plugins, hooks, staleness, ...) at versions.ts:17-68. That
  * is the "versions.ts reaches the eager graph by two edges (~94ms)" cost tracked
  * in RUSH-2331; the self-update.ts:20 import is one of those two edges.
  * self-update.ts's OTHER local import, needsWindowsShell from './platform/
- * index.js' (self-update.ts:21), is a zero-import leaf (platform/index.ts has no
- * imports; IS_WINDOWS = process.platform === 'win32' at platform/index.ts:15),
- * benched below to show it is not the cost.
+ * index.js' (self-update.ts:21), is NOT a leaf: platform/index.ts re-exports six
+ * submodules (paths/exec/links/process/ipc/winpath, platform/index.ts:19-24) and
+ * transitively pulls the third-party proper-lockfile (process.ts:7 ->
+ * fs-atomic.ts:4). Benched standalone below it costs ~18-20ms -- real, but a
+ * fraction of the versions.js graph, and NOT the dominant cost. It matters for
+ * the swap arithmetic (see below), not as the headline.
  *
  * compareVersions is defined in the zero-dependency leaf ./agent-spec/
  * primitives.ts (primitives.ts:50, docblock "zero dependencies") and merely
  * RE-EXPORTED by versions.ts (versions.ts:34 imports it from primitives;
- * versions.ts:2327-2328 re-exports it "so existing `import { compareVersions }
- * from './versions.js'` sites keep working"). So the compareVersions self-update
+ * versions.ts:2329 `export { compareVersions };`, with the explanatory comment
+ * at versions.ts:2327-2328, "so existing `import { compareVersions } from
+ * './versions.js'` sites keep working"). So the compareVersions self-update
  * calls is byte-for-byte the same function whether reached via versions.js or
  * primitives.js -- primitives.js is benched below as the proposed replacement
- * source, and the delta versions.js MINUS primitives.js is the measured cost of
- * the heavy edge that swapping self-update.ts:20 would remove.
+ * source.
+ *
+ * SWAP ARITHMETIC (why the win is ~66ms, NOT the full versions.js delta):
+ * versions.ts:48 ITSELF imports './platform/index.js', so today platform is
+ * already resident once versions.js loads -- Node caches by resolved URL, so
+ * self-update.ts:21's own platform import is currently free. The measured proof
+ * is below: self-update.js's over-baseline delta (~83ms) matches versions.js's
+ * (~87ms) almost exactly, NOT versions.js + platform -- platform is subsumed in
+ * versions.js. After swapping self-update.ts:20 to primitives.js, versions.js no
+ * longer loads, so self-update.ts:21's platform import stops being subsumed and
+ * becomes a standalone ~18-20ms cost. Projected post-swap self-update.js import
+ * ~= baseline + primitives (~2ms) + platform (~18-20ms) ~= baseline + ~20ms, vs
+ * baseline + ~83ms today: a real saving of ~63ms, not the ~84ms that a naive
+ * versions.js-MINUS-primitives.js subtraction implies. Every term is measured
+ * in the group below.
  *
  * MEASUREMENT REGIME: each module is imported in a FRESH `node` child process
  * (spawnSync, --input-type=module, a bare `await import(<file url>)`), because
@@ -315,15 +332,15 @@ describe('eager self-update import graph — cold `node` module-eval, fresh proc
     importCost('agent-spec/primitives.js');
   }, { time: 4000, iterations: 20 });
 
-  bench('import dist/lib/platform/index.js — self-update.ts:21 needsWindowsShell dep, a zero-import leaf (platform/index.ts) — shown to NOT be the cost', () => {
+  bench('import dist/lib/platform/index.js — self-update.ts:21 needsWindowsShell dep; re-exports 6 submodules + transitively proper-lockfile (platform/index.ts:19-24). Subsumed in versions.js today (versions.ts:48); standalone ~18-20ms AFTER the swap', () => {
     importCost('platform/index.js');
   }, { time: 4000, iterations: 20 });
 
-  bench('import dist/lib/self-update.js — the FULL eager graph as shipped: self-update body + versions.js (via self-update.ts:20) + platform leaf. This is what index.ts:86-95 evaluates on EVERY invocation', () => {
+  bench('import dist/lib/self-update.js — the FULL eager graph as shipped: self-update body + versions.js (via self-update.ts:20; platform is subsumed inside it via versions.ts:48). This is what index.ts:86-95 evaluates on EVERY invocation', () => {
     importCost('self-update.js');
   }, { time: 4000, iterations: 20 });
 
-  bench('import dist/lib/versions.js — the heavy transitive dep pulled in SOLELY for compareVersions (yaml/chalk/smol-toml/@inquirer/prompts + ~40 locals, versions.ts:17-68); RUSH-2331 ~94ms', () => {
+  bench('import dist/lib/versions.js — the heavy transitive dep pulled in SOLELY for compareVersions (yaml/chalk/smol-toml/@inquirer/prompts + 27 locals, versions.ts:17-68); RUSH-2331 ~94ms', () => {
     importCost('versions.js');
   }, { time: 4000, iterations: 20 });
 });
