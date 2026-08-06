@@ -41,6 +41,7 @@ import { runRemoteSessions, buildForwardedArgs, ensureWholeIndex } from '../lib/
 import { formatRelativeTime, formatCompactAge, sessionAgeParts, type SessionAgeParts } from '../lib/session/relative-time.js';
 import { renderConversationMarkdown, renderSummary, renderSummaryHeader, computeSummaryStats, renderJson, filterEvents, parseRoleList, linkPath, linkUrl, shortenModel, type FilterOptions } from '../lib/session/render.js';
 import { linearIssueUrl } from '../lib/session/linear.js';
+import { sessionOwnerDevice, RESUME_PINNED_ENV } from '../lib/session/resume-owner.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import { AGENTS, colorAgent, resolveAgentName } from '../lib/agents.js';
 import { getShimsDir } from '../lib/state.js';
@@ -3339,6 +3340,23 @@ export async function handlePickedSession(picked: PickedSession): Promise<void> 
  * version-pinned launcher is genuinely missing.
  */
 export async function resumeSessionInPlace(session: SessionMeta): Promise<void> {
+  // A session that ran on another device keeps its harness state there. Resuming
+  // it here would start the agent against state this box does not have — and the
+  // `fs.existsSync(session.cwd)` fallback below hid exactly that, quietly
+  // swapping in `process.cwd()` when the recorded directory was a peer's path
+  // (RUSH-2022). Route the takeover to the owner over the same SSH transport
+  // `--host` uses.
+  const owner = sessionOwnerDevice(session);
+  if (owner) {
+    console.log(chalk.gray(`Session ${session.shortId} belongs to ${owner} — resuming there over SSH…`));
+    const { runAgentsOnDevice } = await import('../lib/hosts/passthrough.js');
+    process.exitCode = await runAgentsOnDevice(owner, ['resume', session.id], {
+      interactive: !!process.stdout.isTTY,
+      env: { [RESUME_PINNED_ENV]: '1' },
+    });
+    return;
+  }
+
   const cwd = session.cwd && fs.existsSync(session.cwd)
     ? session.cwd
     : process.cwd();

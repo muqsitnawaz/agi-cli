@@ -34,6 +34,7 @@ import {
   type EngineContext,
   type Packing,
 } from '../lib/terminal/index.js';
+import { resumeDestinationMismatch } from '../lib/session/resume-owner.js';
 import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
 import { setHelpSections } from '../lib/help.js';
 import { confirm } from '@inquirer/prompts';
@@ -156,7 +157,10 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
   }
   if (!chosen || chosen.length === 0) return;
 
-  // 2. Split the selection into resumable surfaces and skipped agents (no silent drop).
+  // 2. Split the selection into resumable surfaces and skipped sessions (no
+  // silent drop): an agent with no resume support, or a session whose harness
+  // state lives on a machine this batch is not opening tabs on.
+  const destination = options.host;
   const items: Array<SurfaceItem & { session: SessionMeta }> = [];
   for (const s of chosen) {
     const command = buildResumeCommand(s);
@@ -164,7 +168,29 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
       console.log(chalk.yellow(`  skip ${s.shortId} — resume is not supported for ${s.agent} sessions yet`));
       continue;
     }
-    const cwd = s.cwd && fs.existsSync(s.cwd) ? s.cwd : process.cwd();
+    // The picker offers fleet-wide rows, so a peer-owned session can be
+    // selected. Its transcript may even be readable here (a synced mirror), but
+    // the harness's conversation state is not — and the cwd below would then
+    // silently fall back to `process.cwd()`, resuming in whatever directory the
+    // user happens to be in. Refuse it, naming the device (RUSH-2022).
+    const mismatch = resumeDestinationMismatch(s, destination);
+    if (mismatch) {
+      console.log(
+        chalk.yellow(`  skip ${s.shortId} — belongs to ${mismatch}`) +
+          chalk.gray(destination
+            ? `, not --host ${destination}. Run: agents sessions resume --host ${mismatch}`
+            : `, not this machine. Run: agents resume ${s.id}`),
+      );
+      continue;
+    }
+    const cwd = resumeCwd(s, destination);
+    if (cwd === undefined) {
+      console.log(
+        chalk.yellow(`  skip ${s.shortId} — no recorded working directory`) +
+          chalk.gray(`, and this machine's cannot stand in for one on ${destination}`),
+      );
+      continue;
+    }
     items.push({ session: s, cwd, command });
   }
   if (items.length === 0) {
@@ -228,6 +254,31 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
 
 export function resolveResumePacking(options: Pick<ResumeOptions, 'splits'>): Packing {
   return options.splits ? 'two-per-tab' : 'tabs';
+}
+
+/**
+ * The directory a resumed session's tab should open in, or `undefined` when this
+ * machine has nothing truthful to offer.
+ *
+ * The recorded `cwd` belongs to the session's own machine, so probing it with a
+ * LOCAL `fs.existsSync` only means something when the tabs open locally. With
+ * `--host <device>` the tab is a `tmux new-window -c <cwd>` over there: a
+ * directory absent here may well exist on that box, and substituting this box's
+ * `process.cwd()` hands the peer a path it does not have. That substitution is
+ * the same defect as the wrong-machine resume — an existsSync on the wrong
+ * machine deciding a remote path (RUSH-2022) — so remote batches take the record
+ * as written, and a session with no record at all is refused rather than opened
+ * somewhere invented.
+ *
+ * `exists` is injectable so the local branch is testable without touching disk.
+ */
+export function resumeCwd(
+  session: Pick<SessionMeta, 'cwd'>,
+  destination: string | undefined,
+  exists: (p: string) => boolean = fs.existsSync,
+): string | undefined {
+  if (destination) return session.cwd || undefined;
+  return session.cwd && exists(session.cwd) ? session.cwd : process.cwd();
 }
 
 /**

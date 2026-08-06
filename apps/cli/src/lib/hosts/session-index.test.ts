@@ -15,9 +15,14 @@ import type { HostTask } from './tasks.js';
 // hermetic pattern as session/__tests__/db.test.ts.
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-hostsession-'));
 process.env.HOME = TEST_HOME;
+// Pin this box's identity so "is the dispatch host a peer?" is decidable no
+// matter which machine runs the suite (a runner literally named `yosemite-s0`
+// would otherwise read the fixture host as itself).
+process.env.AGENTS_SYNC_MACHINE_ID = 'dispatcher-box';
 
 const { hostSessionMeta, registerHostSession, registerInteractiveHostSession, captureRemoteSessionId } =
   await import('./session-index.js');
+const { sessionOwnerDevice } = await import('../session/resume-owner.js');
 const { findSessionsById, querySessions, closeDB } = await import('../session/db.js');
 const { saveTask, loadTask, localLogPath, hostsCacheDir } = await import('./tasks.js');
 const { sessionIdMarkerLine } = await import('./session-marker.js');
@@ -27,6 +32,7 @@ const { sessionIdMarkerLine } = await import('./session-marker.js');
 // tests. Matches the single-teardown shape of db.test.ts:100-102.
 afterAll(() => {
   closeDB();
+  delete process.env.AGENTS_SYNC_MACHINE_ID;
   fs.rmSync(TEST_HOME, { recursive: true, force: true });
 });
 
@@ -59,6 +65,13 @@ describe('hostSessionMeta', () => {
     expect(meta!.topic).toBe('first line');
   });
 
+  it('stamps the DISPATCH HOST as the origin machine, not this box (RUSH-2022)', () => {
+    // The transcript and the agent process live on `box`. An unset machine read
+    // as "local", so `agents resume <id>` restarted the run here instead.
+    const meta = hostSessionMeta(task({ host: 'BOX.tail.ts.net' }), { cwd: '/x', prompt: 'p' });
+    expect(meta!.machine).toBe('box'); // normalized: first label, lowercased
+  });
+
   it('seeds the label with the run --name when present (falls back to the host tag)', () => {
     const meta = hostSessionMeta(task({ name: 'remote-audit' }), { cwd: '/x', prompt: 'p' });
     expect(meta!.label).toBe('remote-audit');
@@ -88,6 +101,10 @@ describe('registerInteractiveHostSession', () => {
     expect(byId[0].agent).toBe('claude');
     expect(byId[0].label).toBe('remote-claude');
     expect(byId[0].filePath).toBe('');
+    // Persisted through the DB round-trip, so the resume router can read it back
+    // from the index and refuse a local resume (RUSH-2022).
+    expect(byId[0].machine).toBe('yosemite-s0');
+    expect(sessionOwnerDevice(byId[0])).toBe('yosemite-s0');
   });
 
   it('is a no-op for agents that are not session-tracked', () => {

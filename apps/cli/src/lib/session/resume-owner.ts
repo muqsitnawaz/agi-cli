@@ -1,0 +1,99 @@
+/**
+ * Where a session may be resumed — the one place that answers "does this
+ * transcript belong to another machine?" and, when it does, runs the resume
+ * THERE instead of here.
+ *
+ * A session's agent state lives on the box that produced it: the harness keeps
+ * its own conversation store under that machine's home, and `machine` on a
+ * SessionMeta records where the transcript originated (see session/types.ts).
+ * A row can reach this box two ways and BOTH are remote-owned:
+ *
+ *  - a **synced mirror** — locally readable at `backups/<agent>/<machine>/…`,
+ *    which is exactly why the old code could not tell: the transcript file is
+ *    right there, so nothing failed until the harness was asked to resume a
+ *    conversation it has never seen;
+ *  - a **live fan-out row** (`_remote`), whose `filePath` is on the peer's disk.
+ *
+ * Resuming either one locally starts the harness against state it does not
+ * have. Before RUSH-2022 that happened silently — `sessions-resume.ts` even fell
+ * back to `process.cwd()` when the recorded cwd did not exist locally, so a
+ * remote session resumed in whatever directory the user happened to be in.
+ */
+
+import type { SessionMeta } from './types.js';
+import { machineId, normalizeHost } from '../machine-id.js';
+import { isSelfHost } from '../devices/self-host.js';
+
+/**
+ * Set on the SSH hop that sends a resume to its owning device: the far side must
+ * run it, never route again.
+ *
+ * An env var rather than a flag, deliberately. The fleet is mixed-version — a
+ * peer on the released CLI would die on an unknown `--here` with
+ * `error: unknown option '--here'`, breaking the very hop this feature adds. An
+ * unrecognized exported variable is inert on every version, so routing works
+ * against old and new peers alike. The far side deletes it after reading
+ * ({@link consumeResumePinned}) so it cannot leak into the agent's own children.
+ */
+export const RESUME_PINNED_ENV = 'AGENTS_RESUME_PINNED';
+
+/**
+ * Whether this process was handed a resume by its owner-routing hop — read once,
+ * then cleared so a nested `agents resume` inside the running agent still routes
+ * normally.
+ */
+export function consumeResumePinned(): boolean {
+  const pinned = process.env[RESUME_PINNED_ENV] === '1';
+  delete process.env[RESUME_PINNED_ENV];
+  return pinned;
+}
+
+/**
+ * The peer that owns `session`'s state, or `undefined` when this machine does.
+ *
+ * Undefined is also the answer for an untagged row (`machine` unset — a session
+ * obtained outside `discoverSessions`): there is nothing to route to, so the
+ * caller keeps the local behaviour rather than inventing a target.
+ */
+export function sessionOwnerDevice(session: Pick<SessionMeta, 'machine'>): string | undefined {
+  const owner = session.machine?.trim();
+  if (!owner) return undefined;
+  // `isSelfHost` matches every identity this box answers to (short id, tailnet
+  // dnsName, loopback), not just `machineId()` — a mirror tagged with the
+  // tailnet name of THIS machine is local, not a peer (cf. RUSH-2114).
+  if (owner.toLowerCase() === machineId().toLowerCase() || isSelfHost(owner)) return undefined;
+  return owner;
+}
+
+/**
+ * The owning device when `session` cannot be resumed at `destination`, else
+ * `undefined`.
+ *
+ * `destination` is where a batch resume is opening its terminal surfaces:
+ * `undefined` for this machine, or the `--host <alias>` a `sessions resume` was
+ * pointed at.
+ *
+ * Only a **peer-owned** session is ever flagged, and only when the destination
+ * is not that peer. A session this machine owns is never flagged, including when
+ * the caller aimed a `--host` somewhere else: that is the `/fork` handoff — fork
+ * here, open the copy on the machine the user is sitting at — an explicit,
+ * user-named destination rather than the silent wrong-machine start this guard
+ * exists to stop (see `commands/fork.md` in the .agents-system repo).
+ *
+ * An untagged row (`machine` unset) is never flagged either — there is nothing
+ * to compare, so the caller keeps its existing behaviour.
+ */
+export function resumeDestinationMismatch(
+  session: Pick<SessionMeta, 'machine'>,
+  destination: string | undefined,
+): string | undefined {
+  const owner = sessionOwnerDevice(session);
+  if (!owner) return undefined;
+  if (!destination) return owner;
+  return sameDevice(owner, destination) ? undefined : owner;
+}
+
+/** Compare two device names the way the registry does: first label, case-insensitive. */
+function sameDevice(a: string, b: string): boolean {
+  return normalizeHost(a) === normalizeHost(b);
+}
