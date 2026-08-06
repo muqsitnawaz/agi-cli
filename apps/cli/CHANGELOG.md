@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.22.23
+
+- Added `--team` as an alias for `agents sessions --teams`. (RUSH-1995)
+- Added absolute `agents secrets unlock --until <date>` expiry, mutually exclusive with relative `--ttl`. (RUSH-1960)
+- Added persisted per-agent-version reasoning effort defaults and surfaced them in `agents view`. (RUSH-2005)
+
 ## 1.22.22
 
 - **New: `agents insights` — how you work, split by the Claude account that did the
