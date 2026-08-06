@@ -208,6 +208,40 @@ describe('getResourceInventory (hooks)', () => {
     expect(inv.wiringSupported).toBe(false);
   });
 
+  it.each([
+    ['grok', '.grok', 'hooks/hooks.json', '{ not json'],
+    ['kimi', '.kimi-code', 'config.toml', 'hooks = [ this is not toml'],
+  ])(
+    'treats unparseable %s native config as wiring unknown (not wired 0)',
+    (agent, configDir, relativeConfig, garbage) => {
+      seedDeclaredHook('guard');
+      fs.writeFileSync(
+        path.join(systemDir, 'agents.yaml'),
+        'hooks:\n  guard:\n    script: guard.sh\n    events: [PreToolUse]\n',
+      );
+      seedVersionHook(agent, '1.0.0', configDir, 'guard.sh');
+      const configPath = path.join(
+        userDir,
+        '.history',
+        'versions',
+        agent,
+        '1.0.0',
+        'home',
+        configDir,
+        relativeConfig,
+      );
+      fs.mkdirSync(path.dirname(configPath), { recursive: true });
+      fs.writeFileSync(configPath, garbage);
+
+      const inv = runInventory(agent, '1.0.0');
+
+      // Format is known, but parse failed — must not report authoritative wired:0.
+      expect(inv.wiringSupported).toBe(false);
+      expect(inv.wired).toEqual([]);
+      expect(inv.onDisk.map((r) => r.name)).toContain('guard');
+    },
+  );
+
   it('fails loud for kinds without an implementation', () => {
     const modulePath = path.resolve(process.cwd(), 'src/lib/resource-inventory.ts');
     const script = `

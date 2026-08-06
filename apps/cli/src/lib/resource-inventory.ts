@@ -63,8 +63,9 @@ export interface ResourceInventory {
   wired: ResourceRef[];
   /** onDisk − declared: installed orphans no layer declares. */
   unmanaged: ResourceRef[];
-  /** Whether this harness's native wiring format is parsed. When false,
-   *  `wired: []` means "unknown", NOT "nothing wired". */
+  /** Whether this harness's native wiring was read successfully. When false,
+   *  `wired: []` means "unknown" (unsupported family OR unparseable config),
+   *  NOT "nothing wired". Format-supported but corrupt configs set this false. */
   wiringSupported: boolean;
   /** Native-format diagnostic retained for doctor; derived in this same pass. */
   wiring?: HookWiringReport;
@@ -144,8 +145,11 @@ function hooksInventory(agent: AgentId, version: string, cwd?: string): Resource
 
     const report = checkVersionHookWiring(agent, version);
     wiring = report;
-    wiringSupported = report.supported;
-    if (report.supported) {
+    // supported=true means the harness format is known; settingsUnparseable means
+    // we could not trust the file. Only report wired counts when the parse succeeded —
+    // otherwise inspect/doctor would render "wired 0" for corrupt configs (PR #2140 review).
+    wiringSupported = report.supported && !report.settingsUnparseable;
+    if (wiringSupported) {
       // One ref per hook, events folded into detail — a hook wired under
       // PreToolUse AND Stop is one inventory entry, not two.
       const eventsByName = new Map<string, Set<string>>();
