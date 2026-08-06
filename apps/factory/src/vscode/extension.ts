@@ -531,6 +531,14 @@ async function resolveSlotHost(slot: QuickLaunchSlot): Promise<string | undefine
     vscode.window.showWarningMessage(`Launch host "${target}" is offline — running locally.`);
     return undefined;
   }
+  // Tailscale-online is not SSH-reachable — probe first to avoid dispatching to
+  // a host that will immediately fail (same class as RUSH-2054).
+  const host = dev.host ?? dev.name;
+  const reachable = await probeReachable(host);
+  if (!reachable) {
+    vscode.window.showWarningMessage(`Launch host "${target}" is SSH-unreachable (Tailscale online but not accepting connections) — running locally.`);
+    return undefined;
+  }
   return dev.name;
 }
 

@@ -6,6 +6,8 @@ All notable changes to the Factory extension are documented here. Format follows
 
 ## [Unreleased]
 
+- **SSH-unreachable fleet devices no longer win balanced host picks.** A device that is Tailscale-online but not accepting SSH connections previously appeared idle (running agent count of 0) and was selected as least-busy, causing every auto-dispatch to immediately fail. The balanced picker now probes reachability first and marks unreachable devices offline; a distinct warning explains connectivity vs. capacity failures when all candidates are unreachable. The same guard applies to explicit Quick Launch slot hosts. (RUSH-2054)
+
 ## [0.9.313] - 2026-08-05
 
 - **Resume delegates session lifecycle to agents-cli.** The picker keeps its
