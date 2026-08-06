@@ -2,7 +2,7 @@
 
 ## 1.22.26
 
-- **Fix: an older agents-cli install could reclaim and downgrade the menu-bar helper (#2210).** `mayInstallMenubarHelper` now compares the invoking install's own version against the version stamped on the currently installed helper: a strictly newer install takes over immediately (no cooldown wait), a strictly older install is refused outright, and equal-version installs no longer trade ownership every cooldown. A helper that predates the version stamp still recovers through the original ownership-cooldown path.
+- **Fix: an older agents-cli install could reclaim and downgrade the menu-bar helper (#2210).** `mayInstallMenubarHelper` now compares the invoking install's own version against the version stamped on the currently installed helper: a strictly newer install takes over immediately (no cooldown wait), a strictly older install is refused outright, and equal-version installs no longer trade ownership every cooldown. A helper that predates the version stamp still recovers through the original ownership-cooldown path. Source: `apps/cli/src/lib/menubar/install-menubar.ts`.
 
 - Make bare `agents setup` a re-runnable onboarding hub with live capability status and direct access to browser, computer, secrets, fleet, share, watchdog, and preference wizards.
 
