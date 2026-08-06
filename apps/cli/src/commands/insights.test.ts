@@ -246,4 +246,22 @@ describe('agents insights', () => {
     expect(after.facets).toBe(before.facets);          // same input, same answer
     expect(after.computed_at).toBeGreaterThanOrEqual(before.computed_at);
   });
+
+  it('recomputes facets written by the previous extractor version', async () => {
+    const { getDB, INSIGHTS_EXTRACTOR_VERSION } = await import('../lib/session/db.js');
+    await runInsights(['--json', '--since', 'all']);
+    const db = getDB();
+    const id = 'aaaaaaaa-0000-0000-0000-00000000000a';
+    db.prepare(`UPDATE session_insights SET extractor_version = ? WHERE session_id = ?`)
+      .run(INSIGHTS_EXTRACTOR_VERSION - 1, id);
+
+    await runInsights(['--json', '--since', 'all']);
+
+    const row = db.prepare(`SELECT extractor_version, facets FROM session_insights WHERE session_id = ?`)
+      .get(id) as { extractor_version: number; facets: string };
+    expect(row.extractor_version).toBe(INSIGHTS_EXTRACTOR_VERSION);
+    expect(JSON.parse(row.facets)).toMatchObject({
+      frictionSignals: {}, correctionSignals: {}, automationSignals: {},
+    });
+  });
 });
