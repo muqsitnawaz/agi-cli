@@ -74,6 +74,7 @@
  * `@ts-expect-error` (TS2578, unused directive) that no gate caught.
  */
 import { describe, bench } from 'vitest';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -239,4 +240,142 @@ describe('command-registry.ts loaders — warm in-process registration only (mod
   bench('loadSessions()(new Command()) — registerSessionsCommands body only, no import cost after first sample', async () => {
     (await loadSessions())(new Command());
   });
+});
+
+/**
+ * ============================================================================
+ * Startup package.json read + parse (index.ts:30-34).
+ *
+ * The first four statements of the entrypoint, verbatim:
+ *
+ *   30  // Get version from package.json
+ *   31  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+ *   32  const packageJsonPath = path.join(__dirname, '..', 'package.json');
+ *   33  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+ *   34  const VERSION = packageJson.version;
+ *
+ * These are top-level module statements, so they run on EVERY `agents`
+ * invocation without exception -- including the argv fast paths that exit
+ * before commander is ever constructed:
+ *
+ *   index.ts:38     `__vault-age-helper`  -> import + run + process.exit
+ *   index.ts:71-84  `__secrets-get` / `__secrets-ping` / `__secrets-lock`
+ *                    -> import agent.js + run + process.exit(code)
+ *
+ * Neither fast path reads VERSION: the first VERSION consumer is
+ * `detectDevBuild(process.argv[1] || '', VERSION)` at index.ts:113, which is
+ * BELOW both blocks. (`grep -n packageJson src/index.ts` returns exactly
+ * index.ts:32, :33, :34 -- the parsed object is never used for anything but
+ * `.version` at index.ts:34.) So on those paths the whole read + parse is
+ * dead work.
+ *
+ * That matters because the `__secrets-*` tokens are not a rare debug surface:
+ * `agentGetSync` (secrets/agent.ts:994-996) and `agentPingSync`
+ * (secrets/agent.ts:1040) call `syncClient` (secrets/agent.ts:973-987), which
+ * does a real `spawnSync(command, args, ...)` (secrets/agent.ts:983) of THIS
+ * CLI -- one whole fresh Node process, and therefore one whole fresh
+ * package.json read + parse, per synchronous secrets read. index.ts:44-51
+ * documents that spawn-per-read design and is why those tokens are
+ * intercepted above commander in the first place.
+ *
+ * The file being read is the real published `apps/cli/package.json` (20
+ * top-level keys, 21 dependencies, 3987 bytes as of this commit). This bench
+ * resolves it the same way index.ts does at runtime -- relative to the running
+ * module -- so it measures the identical file: dist/index.js's
+ * `path.join(__dirname, '..')` (index.ts:32) is `apps/cli/`, and this file's
+ * `path.join(__dirname, '../..')` from `src/lib/` is also `apps/cli/`.
+ *
+ * As with the other groups in this file, index.ts itself cannot be imported
+ * (top-level await, process.argv reads, an eventual program.parse() -- see the
+ * docblock at the top of this file), and these four statements are inline
+ * module-level code rather than an exported function, so there is nothing to
+ * call. The statements are therefore re-executed here against the real file --
+ * identical calls in identical order, with one extra pure `..` segment in the
+ * path.join because this file sits one directory deeper than the entrypoint --
+ * and complemented by a real cold-process group that runs the actual built
+ * dist/index.js on the fast paths described above.
+ *
+ * Decomposition benched below: the path math (index.ts:31-32) separately from
+ * the fs read and the JSON.parse (index.ts:33), so a proposal that removes
+ * only one half can be costed. Two alternatives are measured against the real
+ * statement rather than asserted: a targeted `"version"` extraction off the
+ * same raw string (no full parse), and a compiled-in constant (the floor: zero
+ * fs, zero parse).
+ *
+ * No mocking: every call reads the real apps/cli/package.json off this
+ * machine's real filesystem, and the cold-process group spawns the real built
+ * dist/index.js.
+ */
+const PKG_JSON_PATH = path.join(__dirname, '..', '..', 'package.json');
+const PKG_JSON_RAW = fs.readFileSync(PKG_JSON_PATH, 'utf-8');
+const PKG_JSON_BYTES = Buffer.byteLength(PKG_JSON_RAW, 'utf-8');
+const VERSION_RE = /"version"\s*:\s*"([^"]+)"/;
+
+describe(`startup package.json read + parse (index.ts:31-34) — real apps/cli/package.json, ${PKG_JSON_BYTES} bytes`, () => {
+  // One `..` more than index.ts:32 in every path.join below: this file sits at
+  // src/lib/, one directory deeper than the entrypoint, so `../..` lands on the
+  // same apps/cli/ that dist/index.js's single `..` does. Same file, same
+  // syscall, one extra pure string segment.
+  bench('index.ts:31-32 path math only: path.dirname(fileURLToPath(import.meta.url)) + path.join(..., "package.json") — no fs, no parse', () => {
+    const dir = path.dirname(fileURLToPath(import.meta.url));
+    path.join(dir, '..', '..', 'package.json');
+  });
+
+  bench('index.ts:33 read half only: fs.readFileSync(packageJsonPath, "utf-8")', () => {
+    fs.readFileSync(PKG_JSON_PATH, 'utf-8');
+  });
+
+  bench('index.ts:33 parse half only: JSON.parse(<already-read string>) — 20 top-level keys, 21 dependencies', () => {
+    JSON.parse(PKG_JSON_RAW);
+  });
+
+  bench('index.ts:31-34 end to end: path math + readFileSync + JSON.parse + .version — what every `agents` process pays before any argv dispatch', () => {
+    const dir = path.dirname(fileURLToPath(import.meta.url));
+    const p = path.join(dir, '..', '..', 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(p, 'utf-8'));
+    void pkg.version;
+  });
+
+  bench('ALTERNATIVE A — read, then targeted "version" extraction instead of JSON.parse: fs.readFileSync + /"version"\\s*:\\s*"([^"]+)"/ (keeps the fs read, drops the full parse)', () => {
+    const raw = fs.readFileSync(PKG_JSON_PATH, 'utf-8');
+    void VERSION_RE.exec(raw)?.[1];
+  });
+
+  bench('ALTERNATIVE B — compiled-in constant (the floor): zero fs, zero parse, what a build-time version stamp would cost', () => {
+    void '0.0.0-bench';
+  });
+});
+
+/**
+ * Real cold-process cost of the two argv fast paths that pay index.ts:31-34
+ * and never read VERSION (index.ts:38, index.ts:71-84), measured against
+ * `--version`, which does consume it (index.ts:248 `.version(VERSION)`).
+ *
+ * Every arg list here is verified to exit deterministically on this machine
+ * without touching stdin or the network: `--version` exits 0,
+ * `__secrets-ping` exits 3 (secrets/agent.ts:1040 -> broker miss/down),
+ * `__vault-age-helper` exits 1. `spawnSync` is used (not execFileSync) so a
+ * non-zero exit never throws inside the timed callback.
+ *
+ * These numbers are the denominator for the in-process group above: they say
+ * what fraction of a real fast-path process the package.json read + parse
+ * actually is, which is the difference between a worthwhile optimization and
+ * noise inside Node's own startup.
+ */
+describe('startup package.json — real cold `node dist/index.js <fast-path>` process spawn (index.ts:38, 71-84)', () => {
+  bench('FLOOR: bare `node -e ""` — Node bootstrap alone, zero agents-cli code; the irreducible cost every row below sits on top of', () => {
+    spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  }, { time: 4000, iterations: 15 });
+
+  bench('`--version` — VERSION genuinely consumed (index.ts:248 .version(VERSION))', () => {
+    runCli(['--version']);
+  }, { time: 4000, iterations: 15 });
+
+  bench('`__secrets-ping` — argv fast path at index.ts:71-84, exits at index.ts:83 without ever reading VERSION; spawned per secrets read by secrets/agent.ts:983', () => {
+    runCli(['__secrets-ping']);
+  }, { time: 4000, iterations: 15 });
+
+  bench('`__vault-age-helper` — argv fast path at index.ts:38, exits at index.ts:41 without ever reading VERSION', () => {
+    runCli(['__vault-age-helper']);
+  }, { time: 4000, iterations: 15 });
 });
