@@ -138,7 +138,7 @@ gives each device its warnings plus a compact accounts/versions line (every
 installed version + its account, provable ✓ / ✗). Single-machine `agents doctor`
 collapses to the CRITICAL section plus one `▸ <machine>` block. Severity:
 **critical** is `logged-out` (provable), `missing-hook`, `missing-plugin`,
-`unwired-hook`, `cli-missing`, `ssh-key-enrollment` and `owner-sink-unreachable` (the feed/notify
+`unwired-hook`, `hook-runtime-broken`, `cli-missing`, `ssh-key-enrollment` and `owner-sink-unreachable` (the feed/notify
 owner-delivery lane can't reach the owner from this box, RUSH-2262); **warning**
 is `logout-unprovable`,
 `missing-resource`, `content-drift`, `never-synced`, `stale`, `repo-behind`,
