@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { executeJobDetached } from './runner.js';
+import { executeJob, executeJobDetached } from './runner.js';
 import { slotRunId, claimRunSlot, getRunDir, getJobRunsDir, readRunMeta } from './routines.js';
 import type { JobConfig, RunMeta } from './routines.js';
 import * as activation from './routine-activation.js';
@@ -95,6 +95,20 @@ describeSpawn('single-fire + overlap + blocked (executeJobDetached)', () => {
     expect(later.activeRunId).toBe(first.runId);
     expect(later.pid).toBeNull();
     await waitTerminal(cfg.name, first.runId, 8000);
+  });
+
+  it('a concurrent foreground request skips immediately instead of queueing behind the active run', async () => {
+    const cfg = commandConfig('foreground-overlap', 'sleep 2');
+    const firstPromise = executeJob(cfg, undefined, { kind: 'manual' });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const second = await executeJob(cfg, undefined, { kind: 'manual' });
+    expect(second.meta.status).toBe('skipped');
+    expect(second.meta.skipReason).toBe('active_run');
+    expect(second.meta.activeRunId).toBeDefined();
+    expect(second.meta.pid).toBeNull();
+    const first = await firstPromise;
+    expect(first.meta.status).toBe('completed');
+    expect(second.meta.activeRunId).toBe(first.meta.runId);
   });
 
   it('an agent routine with no project/cwd is BLOCKED (execution_context_missing), no spawn', async () => {

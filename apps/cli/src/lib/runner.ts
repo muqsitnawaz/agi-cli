@@ -205,6 +205,27 @@ function writeTerminalRecord(
   return meta;
 }
 
+/** Persist the cross-entry-point active claim before releasing the launch lock. */
+function writeActiveClaim(config: JobConfig, attempt: RoutineAttempt): RunMeta {
+  const now = new Date().toISOString();
+  const meta: RunMeta = {
+    jobName: config.name,
+    runId: attempt.runId,
+    ...runProvenance(config),
+    ...attempt.stamp,
+    ...(config.workflow ? { workflow: config.workflow } : config.command ? { command: config.command } : config.agent ? { agent: config.agent } : {}),
+    pid: null,
+    spawnedAt: Date.now(),
+    status: 'running',
+    startedAt: now,
+    completedAt: null,
+    exitCode: null,
+    timeoutMs: parseTimeout(config.timeout) || 10 * 60 * 1000,
+  };
+  writeRunMeta(meta);
+  return meta;
+}
+
 /**
  * Allocate a routine attempt BEFORE any placement / version / sandbox / preflight
  * / dispatch work, so every rejected, skipped, or blocked fire leaves exactly one
@@ -322,8 +343,10 @@ function allocateRoutineAttempt(config: JobConfig, trigger: RoutineTrigger): Att
 }
 
 /**
- * Run one routine attempt under the lock + unified allocation. `run` is the
- * placement/command/agent dispatch, invoked only when the attempt proceeds;
+ * Claim one routine attempt under the short launch lock, then execute after
+ * releasing it. The persisted `running` claim makes a concurrent entry point
+ * skip immediately instead of waiting for a foreground run to finish. `run` is
+ * the placement/command/agent dispatch, invoked only when the attempt proceeds;
  * `wrapTerminal` adapts a pre-spawn terminal record into the caller's return type.
  */
 async function runWithAttempt<T>(
@@ -332,26 +355,30 @@ async function runWithAttempt<T>(
   run: (attempt: RoutineAttempt) => Promise<T>,
   wrapTerminal: (meta: RunMeta) => T,
 ): Promise<T> {
-  return withRoutineLock(config, async () => {
+  const claimed = await withRoutineLock(config, async () => {
     const alloc = allocateRoutineAttempt(config, trigger);
-    if (!alloc.proceed) return wrapTerminal(alloc.terminal);
-    try {
-      return await run(alloc.attempt);
-    } catch (err) {
-      const message = (err as Error).message;
-      const existing = readRunMeta(config.name, alloc.attempt.runId);
-      if (existing) {
-        finalizeRunMeta(existing, 'failed', 1, { errorMessage: message });
-        writeRunMeta(existing);
-        return wrapTerminal(existing);
-      }
-      return wrapTerminal(writeTerminalRecord(config, alloc.attempt.runId, 'blocked', trigger, {
-        ...alloc.attempt.stamp,
-        readiness: { code: 'target_unreachable', message },
-        errorMessage: message,
-      }));
-    }
+    if (!alloc.proceed) return { terminal: alloc.terminal } as const;
+    writeActiveClaim(config, alloc.attempt);
+    return { attempt: alloc.attempt } as const;
   });
+  if ('terminal' in claimed) return wrapTerminal(claimed.terminal);
+
+  try {
+    return await run(claimed.attempt);
+  } catch (err) {
+    const message = (err as Error).message;
+    const existing = readRunMeta(config.name, claimed.attempt.runId);
+    if (existing) {
+      finalizeRunMeta(existing, 'failed', 1, { errorMessage: message });
+      writeRunMeta(existing);
+      return wrapTerminal(existing);
+    }
+    return wrapTerminal(writeTerminalRecord(config, claimed.attempt.runId, 'blocked', trigger, {
+      ...claimed.attempt.stamp,
+      readiness: { code: 'target_unreachable', message },
+      errorMessage: message,
+    }));
+  }
 }
 
 function terminateRoutineTree(pid: number | null): void {
