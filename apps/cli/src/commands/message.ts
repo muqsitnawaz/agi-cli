@@ -27,6 +27,10 @@ import { resolveProvider } from '../lib/cloud/registry.js';
 import { mailboxDir, enqueue } from '../lib/mailbox.js';
 import { getAgentsInvocation } from '../lib/daemon.js';
 import { resolveMessageTarget, mailboxIdForActiveSession } from '../lib/mailbox-target.js';
+import { findTaskByName, findTaskBySessionId, loadTask } from '../lib/hosts/tasks.js';
+import { reconcileTask } from '../lib/hosts/reconcile.js';
+import { decideHostDispatchDelivery, type HostDispatchDelivery } from '../lib/hosts/message-target.js';
+import { sshExec, shellQuote } from '../lib/ssh-exec.js';
 import {
   blockIdForSession,
   listBlocks,
@@ -269,8 +273,62 @@ export function registerMessageCommand(program: Command): void {
           die(`"${target}" matches ${res.candidates.length} running agents:\n${lines}\nRe-run with a full id.`);
           return;
         }
-        case 'none':
-          die(`No running agent or cloud task matches "${target}". List targets with \`agents sessions --active\`.`);
+        case 'none': {
+          // Not a live local/teams/cloud agent — try a detached `--device`
+          // dispatch (the records `agents hosts ps` reads). A `--no-follow`
+          // remote run has no LOCAL session, so it never appears above; without
+          // this branch `agents message <name>`/`<session-id>` returns a
+          // misleading "no running agent" for a dispatch that IS running with a
+          // live pid (RUSH-2366, third defect).
+          const dispatch = findTaskByName(target) ?? findTaskBySessionId(target) ?? loadTask(target);
+          if (dispatch) {
+            const healed = reconcileTask(dispatch);
+            const decision = decideHostDispatchDelivery(healed);
+            if (decision.kind === 'unreachable') die(decision.reason);
+            await forwardMessageToHostDispatch(decision, text);
+            return;
+          }
+          die(
+            `No running agent or cloud task matches "${target}". List local agents with ` +
+            `\`agents sessions --active\`, or a detached remote run with \`agents hosts ps\`.`,
+          );
+        }
       }
     });
+}
+
+/**
+ * Deliver a message to a detached `--device` dispatch by running `agents message`
+ * ON its host over ssh — the remote box owns the agent's mailbox, so we forward
+ * the steer to where the session actually lives. Fails loud with the host named
+ * if the ssh hop or the remote delivery fails.
+ */
+async function forwardMessageToHostDispatch(
+  decision: Extract<HostDispatchDelivery, { kind: 'forward' }>,
+  text: string,
+): Promise<void> {
+  const remoteCmd = `agents message ${shellQuote(decision.sessionId)} ${shellQuote(text)}`;
+  const res = sshExec(decision.target, remoteCmd, {
+    timeoutMs: 15000,
+    multiplex: true,
+    extraSshArgs: decision.identityFile ? ['-i', decision.identityFile, '-o', 'IdentitiesOnly=yes'] : undefined,
+  });
+  if (res.code === null) {
+    die(
+      `Could not reach ${decision.host} to deliver the message to '${decision.label}' ` +
+      `(ssh failed or timed out). Retry, or steer it directly: ` +
+      `\`agents ssh ${decision.host} 'agents message ${decision.sessionId} "<text>"'\`.`,
+    );
+  }
+  if (res.code !== 0) {
+    const detail = (res.stderr || res.stdout || '').trim();
+    die(
+      `Delivery to '${decision.label}' on ${decision.host} failed${detail ? `: ${detail}` : ''}. ` +
+      `Read its output with \`agents hosts logs ${decision.label}\`.`,
+    );
+  }
+  console.log(
+    chalk.green(`Message forwarded to ${chalk.cyan(decision.label)} on ${chalk.cyan(decision.host)}.`) +
+    (res.stdout.trim() ? `\n${chalk.dim(res.stdout.trim())}` : ''),
+  );
 }
