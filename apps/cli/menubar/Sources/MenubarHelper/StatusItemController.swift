@@ -1537,15 +1537,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 sub.addItem(disabled("Health"))
                 for finding in visible {
                     sub.addItem(disabled("  \(DoctorHealth.context(finding))"))
-                    sub.addItem(disabled("    \(trim(finding.message, 96))"))
+                    sub.addItem(disabled("    \(DoctorHealth.detail(finding))"))
                 }
                 let remainder = DoctorHealth.remainderCount(findings)
                 if remainder > 0 {
-                    sub.addItem(disabled("+\(remainder) more — run agents doctor --devices"))
+                    sub.addItem(disabled("+\(remainder) more — run `agents doctor`"))
                 }
             }
             sub.addItem(.separator())
-            let doctorItem = NSMenuItem(title: "Run agents doctor --devices", action: #selector(onRunDoctor), keyEquivalent: "")
+            let doctorItem = NSMenuItem(title: "Run agents doctor", action: #selector(onRunDoctor), keyEquivalent: "")
             doctorItem.target = self
             sub.addItem(doctorItem)
             let open = NSMenuItem(title: "Open ~/.agents", action: #selector(onOpenAgentsHome), keyEquivalent: "")
@@ -1575,7 +1575,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             sub.addItem(disabled("All agents installed & synced"))
         }
         sub.addItem(.separator())
-        let doctorItem = NSMenuItem(title: "Run agents doctor --devices", action: #selector(onRunDoctor), keyEquivalent: "")
+        let doctorItem = NSMenuItem(title: "Run agents doctor", action: #selector(onRunDoctor), keyEquivalent: "")
         doctorItem.target = self
         sub.addItem(doctorItem)
         let open = NSMenuItem(title: "Open ~/.agents", action: #selector(onOpenAgentsHome), keyEquivalent: "")

@@ -179,10 +179,26 @@ enum DoctorHealth {
         var parts = [finding.severity]
         if let device = finding.device, !device.isEmpty { parts.append(device) }
         if let agent = finding.agent, !agent.isEmpty {
-            let version = finding.version ?? finding.versions?.first
-            parts.append(version.map { "\(agent)@\($0)" } ?? agent)
+            // Mirror the CLI's subjectLabel (doctor-findings.ts): a collapsed row
+            // reads `agent (N versions)`, a single-version row `agent @version`.
+            if let versions = finding.versions, versions.count > 1 {
+                parts.append("\(agent) (\(versions.count) versions)")
+            } else {
+                let version = finding.version ?? finding.versions?.first
+                parts.append(version.map { "\(agent) @\($0)" } ?? agent)
+            }
         }
         return parts.joined(separator: " · ")
+    }
+
+    /// The second display row: the problem plus the exact fix doctor computed,
+    /// so a finding is actionable from the menu itself. Display-only — the menu
+    /// never runs the remediation. Pure so the headless self-test can pin it.
+    static func detail(_ finding: DoctorFinding, max: Int = 96) -> String {
+        let fix = finding.remediation ?? ""
+        let full = fix.isEmpty ? finding.message : "\(finding.message) → \(fix)"
+        if full.count <= max { return full }
+        return String(full.prefix(max - 1)) + "…"
     }
 }
 
