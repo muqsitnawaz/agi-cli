@@ -214,7 +214,11 @@ function writeActiveClaim(config: JobConfig, attempt: RoutineAttempt): RunMeta {
     ...runProvenance(config),
     ...attempt.stamp,
     ...(config.workflow ? { workflow: config.workflow } : config.command ? { command: config.command } : config.agent ? { agent: config.agent } : {}),
-    pid: null,
+    // The launcher owns this provisional claim until the command/agent child
+    // replaces it with its own pid. Recording the owner makes a crash between
+    // lock release and child spawn recoverable instead of wedging the routine
+    // for its full configured timeout.
+    pid: process.pid,
     spawnedAt: Date.now(),
     status: 'running',
     startedAt: now,
@@ -355,11 +359,11 @@ async function runWithAttempt<T>(
   run: (attempt: RoutineAttempt) => Promise<T>,
   wrapTerminal: (meta: RunMeta) => T,
 ): Promise<T> {
-  const claimed = await withRoutineLock(config, async () => {
+  const claimed: { terminal: RunMeta } | { attempt: RoutineAttempt } = await withRoutineLock(config, async () => {
     const alloc = allocateRoutineAttempt(config, trigger);
-    if (!alloc.proceed) return { terminal: alloc.terminal } as const;
+    if (!alloc.proceed) return { terminal: alloc.terminal };
     writeActiveClaim(config, alloc.attempt);
-    return { attempt: alloc.attempt } as const;
+    return { attempt: alloc.attempt };
   });
   if ('terminal' in claimed) return wrapTerminal(claimed.terminal);
 

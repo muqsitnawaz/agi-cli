@@ -1401,6 +1401,69 @@ describeRoutines('routines run --json', () => {
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
+
+  it('two independent CLI processes do not serialize overlapping foreground runs', async () => {
+    const home = makeHome({
+      jobs: [{
+        name: 'overlap-job',
+        schedule: '0 3 * * *',
+        command: 'sleep 2',
+        mode: 'auto',
+        effort: 'auto',
+        timeout: '10m',
+        enabled: true,
+        prompt: '',
+      }],
+      registry,
+    });
+    const childEnv = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      AGENTS_DEVICES_DIR: path.join(home, '.agents', '.history', 'devices'),
+      AGENTS_SKIP_MIGRATION: '1',
+    };
+    try {
+      const first = spawn('node', ['--import', TSX_IMPORT, CLI_ENTRYPOINT, 'routines', 'run', 'overlap-job', '--json'], {
+        cwd: REPO_ROOT,
+        env: childEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let firstStdout = '';
+      let firstStderr = '';
+      first.stdout.setEncoding('utf8');
+      first.stderr.setEncoding('utf8');
+      first.stdout.on('data', (chunk) => { firstStdout += chunk; });
+      first.stderr.on('data', (chunk) => { firstStderr += chunk; });
+
+      const runsDir = path.join(home, '.agents', '.history', 'routines', 'overlap-job', 'runs');
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const runIds = fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((entry) => !entry.startsWith('.')) : [];
+        if (runIds.some((runId) => {
+          const metaPath = path.join(runsDir, runId, 'meta.json');
+          return fs.existsSync(metaPath) && JSON.parse(fs.readFileSync(metaPath, 'utf8')).status === 'running';
+        })) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      const second = run(home, ['run', 'overlap-job', '--json']);
+      expect(second.status, second.stderr).toBe(0);
+      expect(JSON.parse(second.stdout.trim())).toMatchObject({
+        jobName: 'overlap-job',
+        status: 'skipped',
+      });
+
+      const firstExit = await new Promise<number | null>((resolve) => first.once('close', resolve));
+      expect(firstExit, firstStderr).toBe(0);
+      expect(JSON.parse(firstStdout.trim())).toMatchObject({
+        jobName: 'overlap-job',
+        status: 'completed',
+      });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describeRoutines('buildRunsJson', () => {
