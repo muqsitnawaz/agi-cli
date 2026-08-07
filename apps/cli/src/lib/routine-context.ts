@@ -50,6 +50,7 @@ export type RoutineReadinessCode =
   | 'agent_unavailable'
   | 'agent_auth_failed'
   | 'target_unreachable'
+  | 'placement_unsupported'
   | 'migration_conflict';
 
 export interface RoutineReadiness {

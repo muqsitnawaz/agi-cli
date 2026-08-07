@@ -120,4 +120,24 @@ describeSpawn('single-fire + overlap + blocked (executeJobDetached)', () => {
     expect(final.resolvedCwd).toBe('~');
     expect(final.triggerKind).toBe('manual');
   });
+
+  it('a wrong-device request persists a skipped attempt before returning', async () => {
+    const cfg = commandConfig('wrong-owner-attempt', 'exit 0');
+    cfg.devices = ['definitely-another-device'];
+    const meta = await executeJobDetached(cfg, undefined, { kind: 'manual' });
+    expect(meta.status).toBe('skipped');
+    expect(meta.skipReason).toBe('wrong_owner');
+    expect(meta.pid).toBeNull();
+    expect(readRunMeta(cfg.name, meta.runId)?.skipReason).toBe('wrong_owner');
+  });
+
+  it('an unsupported placement persists a blocked attempt before returning', async () => {
+    const cfg = commandConfig('unsupported-placement-attempt', 'exit 0');
+    cfg.host = 'some-host';
+    const meta = await executeJobDetached(cfg, undefined, { kind: 'manual' });
+    expect(meta.status).toBe('blocked');
+    expect(meta.readiness?.code).toBe('placement_unsupported');
+    expect(meta.pid).toBeNull();
+    expect(readRunMeta(cfg.name, meta.runId)?.status).toBe('blocked');
+  });
 });

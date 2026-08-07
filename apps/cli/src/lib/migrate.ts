@@ -15,7 +15,7 @@ import type { AgentId } from './types.js';
 import { machineId } from './machine-id.js';
 import { AGENTS, agentConfigDirName, findInPath } from './agents.js';
 import { createLink } from './platform/index.js';
-import { migrateLegacyRoutineActivation, setJobEnabled, listJobs } from './routines.js';
+import { migrateLegacyRoutineActivation, setJobEnabled, listJobs, validateJob } from './routines.js';
 import { addEnabledRoutinesOnUpgrade, enabledRoutineNames, replaceEnabledRoutines } from './routine-activation.js';
 import { evaluateActivationReadiness } from './routine-readiness.js';
 import { DAEMON_TICK_ROUTINE_NAMES } from './daemon-ticks.js';
@@ -1923,7 +1923,7 @@ export function pauseUnreadyEnabledRoutines(): void {
     if (!enabledSet.has(job.name)) continue;
     let ready = true;
     try {
-      ready = evaluateActivationReadiness(job).ready;
+      ready = validateJob(job).length === 0 && evaluateActivationReadiness(job).ready;
     } catch {
       ready = true; // never pause a routine because readiness itself threw
     }

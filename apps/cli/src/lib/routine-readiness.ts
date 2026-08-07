@@ -5,16 +5,19 @@
  * `edit`, `doctor`, and `resume` all run before activating a routine: ready →
  * active, any proven blocker → saved paused with a stable code + repair command.
  *
- * The heavy live checks the plan defers to `doctor --fix` (a live auth smoke, a
- * Codex workspace-trust probe) are NOT run here — they need network / a spawned
- * process and belong to the interactive repair surface. Structural context
- * readiness and agent availability are the deterministic checks every save runs.
+ * Structural context readiness is synchronous for the scheduler. Interactive
+ * add/edit/doctor/resume additionally call the live variant below, which probes
+ * authentication and Codex's native workspace-trust record before activation.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+import * as TOML from 'smol-toml';
 import type { JobConfig } from './routines.js';
 import { resolveJobExecutionContext, resolveHostStrategy } from './routines.js';
 import { evaluateRoutineReadiness, type RoutineReadinessResult, type PlacementMode } from './routine-context.js';
-import { resolveVersion } from './versions.js';
+import { getVersionHomePath, resolveVersion } from './versions.js';
+import { probeLocalFleetAuth } from './auth-health.js';
 
 /**
  * Evaluate whether a routine is ready to activate on this box. `probeAgent`
@@ -54,4 +57,52 @@ export function formatReadinessBlocker(result: RoutineReadinessResult): string {
   if (result.ready || !result.readiness) return 'ready';
   const { code, message, repair } = result.readiness;
   return `${code}: ${message}${repair ? `\n  repair: ${repair}` : ''}`;
+}
+
+function codexWorkspaceTrusted(version: string, cwd: string): boolean {
+  try {
+    const configPath = path.join(getVersionHomePath('codex', version), '.codex', 'config.toml');
+    const parsed = TOML.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    const projects = parsed.projects as Record<string, { trust_level?: string }> | undefined;
+    return Object.entries(projects ?? {}).some(([root, project]) => {
+      if (project.trust_level !== 'trusted') return false;
+      const relative = path.relative(root, cwd);
+      return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Interactive setup/repair readiness. Unlike the scheduler's deterministic
+ * structural gate, this completes a real local auth request and reads Codex's
+ * native trust record before add/edit/resume can activate the definition.
+ */
+export async function evaluateActivationReadinessLive(config: JobConfig): Promise<RoutineReadinessResult> {
+  const structural = evaluateActivationReadiness(config);
+  if (!structural.ready) return structural;
+
+  const mode = resolveHostStrategy(config);
+  if (mode !== 'local' || !config.agent || config.workflow || config.command) return structural;
+  const version = resolveVersion(config.agent as never);
+  if (!version) return structural;
+  const context = resolveJobExecutionContext(config, { mode: 'local' });
+
+  let authVerdict: { ok: boolean; reason?: string } | undefined;
+  const rows = await probeLocalFleetAuth({ agents: [config.agent as never] });
+  const row = rows.find((candidate) => candidate.version === version);
+  if (row) {
+    authVerdict = row.health.verdict === 'revoked'
+      ? { ok: false, reason: row.health.verdict }
+      : { ok: true };
+  }
+
+  return evaluateRoutineReadiness(context, {
+    agentInstalled: () => true,
+    ...(config.agent === 'codex' && context.absoluteCwd
+      ? { codexTrusted: () => codexWorkspaceTrusted(version, context.absoluteCwd!) }
+      : {}),
+    ...(authVerdict ? { authOk: () => authVerdict! } : {}),
+  }, { agent: config.agent });
 }

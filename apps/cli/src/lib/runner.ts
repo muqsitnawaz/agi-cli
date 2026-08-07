@@ -257,6 +257,41 @@ function allocateRoutineAttempt(config: JobConfig, trigger: RoutineTrigger): Att
     };
   }
 
+  const eligibility = checkJobDeviceEligibility(config);
+  if (eligibility) {
+    return {
+      proceed: false,
+      terminal: writeTerminalRecord(config, runId, 'skipped', trigger, {
+        skipReason: 'wrong_owner',
+        errorMessage: eligibility.message,
+      }),
+    };
+  }
+
+  if (!config.workflow && config.agent && ROUTINE_AGENT_IDS.includes(config.agent) && isAgentHardDeprecated(config.agent)) {
+    const reason = hardDeprecationError(config.agent);
+    return {
+      proceed: false,
+      terminal: writeTerminalRecord(config, runId, 'blocked', trigger, {
+        readiness: { code: 'agent_unavailable', message: reason },
+        errorMessage: reason,
+      }),
+    };
+  }
+
+  try {
+    assertRunnablePlacement(config);
+  } catch (err) {
+    const message = (err as Error).message;
+    return {
+      proceed: false,
+      terminal: writeTerminalRecord(config, runId, 'blocked', trigger, {
+        readiness: { code: 'placement_unsupported', message },
+        errorMessage: message,
+      }),
+    };
+  }
+
   // 3. Readiness: resolve the execution context for the routine's placement.
   //    Local placement inspects this box's filesystem; host/fleet/cloud defer
   //    existence (the remote fs is unreachable here) and enforce portability only.
@@ -1062,62 +1097,11 @@ function injectRoutineActor(env: Record<string, string>, config: JobConfig): Rec
   return env;
 }
 
-/**
- * `routines add`/`routines edit` refuse to create a routine pinned to a
- * hard-deprecated harness (commands/routines.ts), but that check runs only at
- * CLI-write time. A routine YAML written before the harness was deprecated, or
- * edited directly on disk / synced from another device, has no equivalent gate
- * at fire time — the daemon would happily build and spawn `gemini …` against a
- * backend Google retired. Fail loud here, before any version/account
- * resolution or sandbox prep, so a legacy routine skips with the same message
- * every other entry point (`sync`, `exec`, `import`, `run-cloud`, `versions`)
- * already shows instead of a doomed, confusing spawn failure.
- */
-function hardDeprecationRunFailure(config: JobConfig, agent: AgentId): RunMeta {
-  const runId = generateRunId();
-  const runDir = getRunDir(config.name, runId);
-  fs.mkdirSync(runDir, { recursive: true });
-  const reason = hardDeprecationError(agent);
-  const meta: RunMeta = {
-    jobName: config.name,
-    runId,
-    ...runProvenance(config),
-    agent,
-    pid: null,
-    spawnedAt: Date.now(),
-    status: 'running',
-    startedAt: new Date().toISOString(),
-    completedAt: null,
-    exitCode: null,
-  };
-  writeRunMeta(meta);
-  process.stderr.write(`[agents] routine ${config.name}: ${reason}\n`);
-  finalizeRunMeta(meta, 'failed', 1, { errorMessage: reason });
-  writeRunMeta(meta);
-  return meta;
-}
-
 export async function executeJob(
   config: JobConfig,
   deps?: LoopDeps,
   trigger: RoutineTrigger = { kind: 'manual' },
 ): Promise<RunResult> {
-  const eligibility = checkJobDeviceEligibility(config);
-  if (eligibility) {
-    throw new Error(eligibility.message);
-  }
-
-  // Hard-deprecated harness (e.g. gemini): fail loud before placement, version/
-  // account resolution, or sandbox prep — local, host, AND cloud placement all
-  // share this one gate (a hard-deprecated agent has no `cloudProvider` entry,
-  // so cloud placement would otherwise silently fall back to the default
-  // provider instead of refusing). See hardDeprecationRunFailure.
-  if (!config.workflow && config.agent && ROUTINE_AGENT_IDS.includes(config.agent) && isAgentHardDeprecated(config.agent)) {
-    return { meta: hardDeprecationRunFailure(config, config.agent), reportPath: null };
-  }
-
-  assertRunnablePlacement(config);
-
   // Unified attempt: allocate + persist the run record (or a terminal blocked/
   // skipped record) BEFORE placement, version selection, sandbox, or preflight —
   // and hold the active-run claim so a manual run cannot overlap a scheduled one.
@@ -1558,7 +1542,7 @@ async function executeJobOnHost(config: JobConfig, opts: { detached: boolean }, 
     effort: config.effort,
     model: config.config?.model as string | undefined,
     timeout: config.timeout, // enforced by the REMOTE agents run
-    remoteCwd: config.remoteCwd,
+    remoteCwd: config.cwd,
     name: config.name,
     cwd: runDir,
     follow: !opts.detached,
@@ -1698,20 +1682,6 @@ export async function executeJobDetached(
   hooks?: RoutineHooks,
   trigger: RoutineTrigger = { kind: 'manual' },
 ): Promise<RunMeta> {
-  const eligibility = checkJobDeviceEligibility(config);
-  if (eligibility) {
-    process.stderr.write(`[agents] daemon: skipping '${config.name}' — ${eligibility.message}\n`);
-    throw new Error(eligibility.message);
-  }
-
-  // Hard-deprecated harness (e.g. gemini): fail loud before the attempt is even
-  // allocated — the harness can never run, so context/slot resolution is moot.
-  if (!config.workflow && config.agent && ROUTINE_AGENT_IDS.includes(config.agent) && isAgentHardDeprecated(config.agent)) {
-    return hardDeprecationRunFailure(config, config.agent);
-  }
-
-  assertRunnablePlacement(config);
-
   return runWithAttempt(
     config,
     trigger,
