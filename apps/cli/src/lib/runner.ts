@@ -2204,10 +2204,11 @@ export function monitorRunningJobs(): void {
     try {
       runDirs = fs.readdirSync(jobRunsPath, { withFileTypes: true })
         .filter((e) => e.isDirectory());
-    } catch {
+    } catch (err) {
       // A retention/cleanup pass may remove a job directory after the root
       // snapshot. The next monitor sweep observes the remaining state.
-      continue;
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw err;
     }
 
     for (const runDirEntry of runDirs) {
