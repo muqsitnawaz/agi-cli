@@ -219,7 +219,10 @@ function writeActiveClaim(config: JobConfig, attempt: RoutineAttempt): RunMeta {
     // lock release and child spawn recoverable instead of wedging the routine
     // for its full configured timeout.
     pid: process.pid,
-    spawnedAt: Date.now(),
+    // `isPidOurs` compares this value with the OS process birth time. The
+    // daemon may have been alive for days before claiming a routine, so the
+    // claim must carry the launcher's birth, not the claim timestamp.
+    spawnedAt: Date.now() - process.uptime() * 1000,
     status: 'running',
     startedAt: now,
     completedAt: null,

@@ -132,6 +132,27 @@ describeSpawn('single-fire + overlap + blocked (executeJobDetached)', () => {
     expect(result.meta.runId).not.toBe(staleRunId);
   });
 
+  it('treats an old but live launcher identity as active', async () => {
+    const cfg = commandConfig('old-live-launcher', 'exit 0');
+    const activeRunId = 'old-live-launcher-run';
+    fs.mkdirSync(getRunDir(cfg.name, activeRunId), { recursive: true });
+    fs.writeFileSync(path.join(getRunDir(cfg.name, activeRunId), 'meta.json'), JSON.stringify({
+      jobName: cfg.name,
+      runId: activeRunId,
+      pid: process.pid,
+      spawnedAt: Date.now() - process.uptime() * 1000,
+      status: 'running',
+      startedAt: new Date(Date.now() - 60_000).toISOString(),
+      completedAt: null,
+      exitCode: null,
+      timeoutMs: 60_000,
+    } satisfies RunMeta));
+
+    const result = await executeJob(cfg, undefined, { kind: 'manual' });
+    expect(result.meta.status).toBe('skipped');
+    expect(result.meta.activeRunId).toBe(activeRunId);
+  });
+
   it('an agent routine with no project/cwd is BLOCKED (execution_context_missing), no spawn', async () => {
     jobs.push('ctxless-agent');
     const cfg: JobConfig = {
