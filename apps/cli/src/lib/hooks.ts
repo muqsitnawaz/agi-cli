@@ -1033,15 +1033,14 @@ export function inspectBrokenManagedHookRuntimeArtifacts(
     artifacts.push(...managedHookRuntimeArtifactsForVersion(agent, version));
   }
 
-  const relevantShimPaths = filter?.agent
-    ? new Set(
-      artifacts
-        .filter((artifact) =>
-          artifact.agent === filter.agent &&
-          (!filter.version || artifact.version === filter.version),
-        )
-        .map((artifact) => artifact.shimPath),
+  const requestedArtifacts = filter?.agent
+    ? artifacts.filter((artifact) =>
+      artifact.agent === filter.agent &&
+      (!filter.version || artifact.version === filter.version),
     )
+    : undefined;
+  const relevantShimPaths = requestedArtifacts
+    ? new Set(eligibleHookRuntimeArtifacts(requestedArtifacts).map((artifact) => artifact.shimPath))
     : undefined;
 
   const broken: BrokenManagedHookRuntimeArtifact[] = [];
@@ -1129,8 +1128,7 @@ function selectCanonicalHookRuntimeArtifacts<T extends ManagedHookRuntimeArtifac
   // No hook runtime exists for a version that does not support hooks. Isolated
   // versions never own a global generated shim, even when a caller names one:
   // selecting it would repoint every harness at a private version home.
-  const hookCapable = artifacts.filter((a) => supports(a.agent, 'hooks', a.version).ok);
-  const pool = hookCapable.filter((a) => !isVersionIsolated(a.agent, a.version));
+  const pool = eligibleHookRuntimeArtifacts(artifacts);
 
   const byPath = new Map<string, T[]>();
   for (const artifact of pool) {
@@ -1143,6 +1141,17 @@ function selectCanonicalHookRuntimeArtifacts<T extends ManagedHookRuntimeArtifac
     selected.push(pickCanonicalHookRuntimeArtifact(group));
   }
   return selected;
+}
+
+/** Versions that may own — and therefore diagnose — a shared generated shim. */
+function eligibleHookRuntimeArtifacts<T extends ManagedHookRuntimeArtifact>(
+  artifacts: T[],
+): T[] {
+  return artifacts.filter(
+    (artifact) =>
+      supports(artifact.agent, 'hooks', artifact.version).ok &&
+      !isVersionIsolated(artifact.agent, artifact.version),
+  );
 }
 
 /**

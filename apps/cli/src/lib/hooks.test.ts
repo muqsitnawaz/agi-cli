@@ -519,6 +519,62 @@ describe('repairManagedHookRuntimeArtifacts', () => {
     expect(r.body).not.toContain(r.codexScript);
   });
 
+  it('does not report a shared shim for an isolated requested version', () => {
+    seedClaudeVersionWithGeneratedShim('2.0.0', 'runtime-guard', 'PreToolUse');
+    seedClaudeVersionWithGeneratedShim('3.0.0', 'runtime-guard', 'PreToolUse');
+    fs.writeFileSync(path.join(userDir, '.history', 'versions', 'claude', '3.0.0', '.isolated'), 'test\n');
+
+    const out = runRuntime(`
+      const global = mod.inspectBrokenManagedHookRuntimeArtifacts();
+      const inspected = mod.inspectBrokenManagedHookRuntimeArtifacts({ agent: 'claude', version: '3.0.0' });
+      const wiring = mod.checkVersionHookWiring('claude', '3.0.0');
+      console.log(JSON.stringify({ global, inspected, wiring }));
+    `);
+    const r = JSON.parse(out) as {
+      global: Array<{ reason: string }>;
+      inspected: unknown[];
+      wiring: WiringReport;
+    };
+
+    expect(r.global.map((artifact) => artifact.reason)).toEqual(['missing']);
+    expect(r.inspected).toEqual([]);
+    expect(r.wiring.runtimeBroken).toEqual([]);
+  });
+
+  it('does not report a shared shim for a hooks-incompatible requested version', () => {
+    seedClaudeVersionWithGeneratedShim('2.0.0', 'runtime-guard', 'PreToolUse');
+    plantCodexBinary('0.115.0');
+    const codexScript = path.join(
+      userDir,
+      '.history',
+      'versions',
+      'codex',
+      '0.115.0',
+      'home',
+      '.codex',
+      'hooks',
+      'runtime-guard.sh',
+    );
+    fs.mkdirSync(path.dirname(codexScript), { recursive: true });
+    fs.writeFileSync(codexScript, '#!/bin/sh\necho CODEX\n', { mode: 0o755 });
+
+    const out = runRuntime(`
+      const global = mod.inspectBrokenManagedHookRuntimeArtifacts();
+      const inspected = mod.inspectBrokenManagedHookRuntimeArtifacts({ agent: 'codex', version: '0.115.0' });
+      const wiring = mod.checkVersionHookWiring('codex', '0.115.0');
+      console.log(JSON.stringify({ global, inspected, wiring }));
+    `);
+    const r = JSON.parse(out) as {
+      global: Array<{ reason: string }>;
+      inspected: unknown[];
+      wiring: WiringReport;
+    };
+
+    expect(r.global.map((artifact) => artifact.reason)).toEqual(['missing']);
+    expect(r.inspected).toEqual([]);
+    expect(r.wiring.runtimeBroken).toEqual([]);
+  });
+
   it('rewrites an executable wrapper whose SOURCE points to a removed old version', () => {
     seedClaudeVersionWithGeneratedShim('1.0.0', 'runtime-guard', 'PreToolUse');
     seedClaudeVersionWithGeneratedShim('2.0.0', 'runtime-guard', 'PreToolUse');
