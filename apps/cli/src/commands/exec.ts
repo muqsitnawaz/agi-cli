@@ -2213,13 +2213,13 @@ export function registerRunCommand(program: Command): void {
       let workflowHasSubagents = false;
       const cwd = options.cwd ?? process.cwd();
 
+      if (accountPickerRequested && profileExists(rawAgent)) {
+        console.error(chalk.red(
+          `Account selection is not available for custom harness '${rawAgent}'. Run its concrete host agent with @ instead.`,
+        ));
+        process.exit(1);
+      }
       if (accountPickerRequested && !isValidAgent(rawAgent)) {
-        if (profileExists(rawAgent)) {
-          console.error(chalk.red(
-            `Account selection is not available for custom harness '${rawAgent}'. Run its concrete host agent with @ instead.`,
-          ));
-          process.exit(1);
-        }
         if (resolveWorkflowRef(rawAgent, cwd)) {
           console.error(chalk.red(
             `Account selection is not available for workflow '${rawAgent}'. Run a concrete agent with @ instead.`,
@@ -2264,13 +2264,11 @@ export function registerRunCommand(program: Command): void {
         if (options.sessionId && agent !== 'claude' && !options.quiet) {
           process.stderr.write(chalk.yellow(`[agents] --session-id ignored: auto picked ${agent} (only claude accepts a forced session id)\n`));
         }
-      } else if (isValidAgent(rawAgent)) {
-        agent = rawAgent;
       } else if (profileExists(rawAgent)) {
-        // Not a known agent id, but a profile by this name exists. Profiles
-        // bind (host agent, version, env overrides, keychain-backed auth)
-        // so Chinese models (Kimi, DeepSeek, Qwen, GLM) can run inside
-        // Claude Code without a local proxy.
+        // A profile by this exact name exists. Profiles bind (host agent,
+        // version, env overrides, keychain-backed auth) so Chinese models
+        // (Kimi, DeepSeek, Qwen, GLM) can run inside Claude Code without a
+        // local proxy, including when the profile name matches a native id.
         try {
           const resolved = resolveProfileForRun(rawAgent, options.model);
           agent = resolved.agent;
@@ -2299,6 +2297,8 @@ export function registerRunCommand(program: Command): void {
           console.error(chalk.red((err as Error).message));
           process.exit(1);
         }
+      } else if (isValidAgent(rawAgent)) {
+        agent = rawAgent;
       } else if (resolveWorkflowRef(rawAgent, cwd)) {
         // Workflow: explicit directory, project .agents/workflows/<name>, user, system, or extra repo.
         // Resolution follows resource precedence: direct path, then project > user > system > extras.
