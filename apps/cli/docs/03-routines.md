@@ -214,8 +214,8 @@ check the local directory, installed harness, live authentication, and Codex
 workspace trust. An explicit host placement additionally resolves the target's
 HOME/project catalog, proves reachability and real write access there, and probes
 the target harness. Fleet and cloud placement cannot prove a selected target at
-definition time, so target-dependent checks are deferred to dispatch and any
-failure is recorded as a blocked attempt. Workflow and command routines receive
+definition time, so target-dependent checks are deferred to the run path and any
+failure remains recorded in attempt history. Workflow and command routines receive
 the structural checks that apply to their execution path. A syntactically valid
 definition with a proven blocker is saved paused with a stable finding and repair
 command. `resume` reruns readiness and does not bypass it.
@@ -1384,8 +1384,9 @@ foreground paths. A later slot while work is active writes a `skipped` attempt
 linked to the active run and spawns no process.
 
 Every requested attempt receives run metadata before placement, account selection,
-sandbox construction, readiness, or dispatch. `blocked` means readiness prevented
-any agent process from starting; `failed` means execution started and failed;
+sandbox construction, readiness, or dispatch. `blocked` means the readiness gate
+prevented entry into placement; `failed` means placement, dispatch, or execution
+failed after the run path began;
 `skipped` means another slot/active/owner claim won. Routine history is therefore
 complete even when no transcript was created. `agents sessions --routines` builds
 its routine picker from definitions and run directories so zero-session routines
