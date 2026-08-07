@@ -29,8 +29,9 @@
  * any box.
  *
  * No existing bench covered this path before this file. `index.bench.ts` covers
- * the OTHER two per-invocation entry costs (`checkForUpdates` index.ts:755 and
- * `spawnDetachedSync` index.ts:1330) and states so in its own header;
+ * the OTHER two per-invocation entry costs (`checkForUpdates` index.ts:774 and
+ * `spawnDetachedSync` index.ts:1366-1367 — `index.bench.ts:2-3` still cites the
+ * pre-drift 755/1330, verified against HEAD here) and states so in its header;
  * `hosts/dispatch.bench.ts` covers host resolution and SSH command-building —
  * i.e. what runs AFTER `maybeRunOnHost` decides to route. Neither imports
  * `passthrough.ts`, so the every-invocation bootstrap measured here was
