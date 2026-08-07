@@ -373,7 +373,8 @@ function renderShim(
 ${cacheHeader}${matchesHeader}
 set -u
 
-HOOK_NAME=${q(name)}
+export AGENTS_HOOK_NAME=${q(name)}
+HOOK_NAME="$AGENTS_HOOK_NAME"
 SOURCE=${q(scriptPath)}
 CACHE_DIR=${q(cacheDir)}
 LOGS_DIR=${q(logsDir)}

@@ -74,7 +74,7 @@ row its surface sits in.
 | **Specified here** | `sessions`, `secrets`, `run`, the scheduling/executor singularity, `watchdog` | RFC-2119 requirements + Given/When/Then. A change that deviates is a bug in the code or in this doc. |
 | **Governed in part** | `routines`, `monitors`, `doctor` | One requirement reaches them, no command contract does. `routines`/`monitors` are bound by [§Scheduling & execution singularity](#scheduling--execution-singularity) (SING-5, SING-8, SING-9) — who may schedule and execute them. `doctor` is bound by SEC-17 for one behavior only: warning on a credential-shaped var in a shell rc file. Everything else these commands do is unspecified. |
 | **Documented, not specified** | `hosts`, `teams`, `cloud`, `browser`, `computer`, `plugins`, `subagents`, `workflows`, `profiles`, `share`, `pty`, `menubar`, resource sync (`skills`/`rules`/`commands`/`hooks`/`mcp`/`permissions`), version management (`add`/`use`/`prune`/`import`/`export`) | A design doc describes the mechanism — [hosts.md](hosts.md), [teams.md](teams.md), [cloud.md](cloud.md), [02-resource-sync.md](02-resource-sync.md), [01-version-management.md](01-version-management.md), … — but states **no** requirements. Verified: `hosts.md`, `teams.md` and `cloud.md` contain **zero capitalized RFC-2119 keywords**. `hosts.md` and `teams.md` do use lowercase "must" in prose ("the remote run must be bounded", `hosts.md:124`; "you must declare what each one owns", `teams.md:207`) — which reads normative but is not, per this document's own capitalization rule. That is exactly the trap: treat those docs as explanation, never as a contract. |
-| **Unspecified** | `wallet`, `helper`, `sync`/`apply`/`status`, `worktree`, `webhook`, `funnel`, `lease`, `mailboxes`, `feed`, `message`/`send`, `budget`, `audit`, and the remaining groups | Neither a spec nor a design doc. Behavior is whatever the code does today; nothing here entitles a caller to it. |
+| **Unspecified** | `helper`, `sync`/`apply`/`status`, `worktree`, `webhook`, `funnel`, `lease`, `mailboxes`, `feed`, `message`/`send`, `budget`, `audit`, and the remaining groups | Neither a spec nor a design doc. Behavior is whatever the code does today; nothing here entitles a caller to it. |
 
 **Where the absence bites hardest.** These act on other machines, hold durable
 state, or sit next to credentials, and have no normative contract today:
@@ -89,9 +89,9 @@ state, or sit next to credentials, and have no normative contract today:
    cross-teammate seam is unguarded by any requirement.
 3. **`cloud`** (`commands/cloud.ts`) — dispatches to external infrastructure whose state
    lives off this machine entirely.
-4. **`wallet`, `helper`** (`commands/wallet.ts`, `commands/helper.ts`) — a payment-card
-   vault and the signed Keychain helper sit directly against the credential boundary
-   that [§Secrets](#secrets) specifies, without inheriting any of its requirements.
+4. **`helper`** (`commands/helper.ts`) — the signed Keychain helper sits directly
+   against the credential boundary that [§Secrets](#secrets) specifies, without
+   inheriting any of its requirements. The former `wallet` vault was removed.
 5. **`sync` / `apply` / `status`** — the fleet-reconciliation trio that mutates every
    installed version's config on every machine.
 

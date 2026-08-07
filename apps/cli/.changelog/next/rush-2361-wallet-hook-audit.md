@@ -1,0 +1,2 @@
+- Remove the Touch ID-backed `agents wallet` vault and redirect callers to `agents secrets`.
+- Attribute secret audit events from hook process trees to the hook that triggered them.

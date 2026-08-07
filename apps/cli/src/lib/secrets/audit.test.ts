@@ -46,6 +46,7 @@ function setupEvents(): void {
 
 afterEach(() => {
   delete process.env.AGENTS_AGENT_NAME;
+  delete process.env.AGENTS_HOOK_NAME;
   _resetForTest();
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* ok */ }
@@ -127,6 +128,20 @@ describe('emitSecretAudit', () => {
     emitSecretAudit({ event: 'secrets.get', bundle: 'b', keyCount: 0 });
     const r = query({ eventTypes: ['secrets.get'] })[0];
     expect(r).not.toHaveProperty('agent');
+  });
+
+  it('attributes a secret access to the hook process tree that triggered it', () => {
+    setupEvents();
+    process.env.AGENTS_HOOK_NAME = 'linear';
+    emitSecretAudit({ event: 'secrets.get', bundle: 'auth', source: 'agent' });
+    expect(query({ eventTypes: ['secrets.get'] })[0].hook).toBe('linear');
+  });
+
+  it('prefers explicit hook attribution over the ambient marker', () => {
+    setupEvents();
+    process.env.AGENTS_HOOK_NAME = 'ambient';
+    emitSecretAudit({ event: 'secrets.get', bundle: 'auth', hook: 'explicit' });
+    expect(query({ eventTypes: ['secrets.get'] })[0].hook).toBe('explicit');
   });
 });
 

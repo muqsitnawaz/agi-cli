@@ -75,6 +75,8 @@ export interface SecretAuditParams {
    * remote | sync-push | broker | broker+durable.
    */
   source?: string;
+  /** Hook whose process tree triggered the access, when applicable. */
+  hook?: string;
   status?: 'success' | 'error';
   /** Env/key NAMES exposed — names only, never values. */
   keys?: string[];
@@ -112,12 +114,14 @@ export function resolveAuditAgent(explicit?: string): string | undefined {
  */
 export function emitSecretAudit(p: SecretAuditParams): void {
   const agent = resolveAuditAgent(p.agent);
+  const hook = p.hook || process.env.AGENTS_HOOK_NAME;
   emit(p.event, {
     module: 'secrets',
     ...(p.bundle !== undefined ? { bundle: p.bundle } : {}),
     ...(p.item !== undefined ? { item: p.item } : {}),
     ...(p.operation !== undefined ? { operation: p.operation } : {}),
     ...(p.source !== undefined ? { source: p.source } : {}),
+    ...(hook ? { hook } : {}),
     ...(p.status !== undefined ? { status: p.status } : {}),
     ...(p.keys !== undefined ? { keys: p.keys } : {}),
     ...(p.keyCount !== undefined ? { keyCount: p.keyCount } : {}),

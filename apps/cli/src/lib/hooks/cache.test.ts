@@ -125,7 +125,8 @@ describe('generateHookShim', () => {
     expect(body).toMatch(/PREFETCH='background'/);
     expect(body).toMatch(/KEY_MODE='per-cwd'/);
     expect(body).toMatch(/SOURCE='\/path\/to\/real\.sh'/);
-    expect(body).toMatch(/HOOK_NAME='linear'/);
+    expect(body).toMatch(/export AGENTS_HOOK_NAME='linear'/);
+    expect(body).toMatch(/HOOK_NAME="\$AGENTS_HOOK_NAME"/);
   });
 
   it('is idempotent — same input produces same content', () => {
