@@ -14,7 +14,17 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `upgrade`, `_internal`).
 
-_97 command groups · 563 commands._
+_98 command groups · 568 commands._
+
+## accounts — Browse and name signed-in harness accounts
+
+```
+agents accounts                     Browse and name signed-in harness accounts
+agents accounts list                Alias for accounts
+agents accounts name <label>        Name one signed-in account; matching installed versions are found automatically
+agents accounts remove <label>
+agents accounts rename <old> <new>
+```
 
 ## add — Download and install agent CLI versions. Enables subsidized API usage through managed binaries.
 

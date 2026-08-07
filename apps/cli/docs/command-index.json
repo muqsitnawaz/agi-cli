@@ -1,8 +1,92 @@
 {
   "command": "agents",
-  "groups": 97,
-  "commands": 563,
+  "groups": 98,
+  "commands": 568,
   "tree": [
+    {
+      "name": "accounts",
+      "path": "accounts",
+      "aliases": [],
+      "description": "Browse and name signed-in harness accounts",
+      "args": [],
+      "options": [
+        {
+          "flags": "--json",
+          "description": "Machine-readable discovered accounts"
+        }
+      ],
+      "subcommands": [
+        {
+          "name": "list",
+          "path": "accounts list",
+          "aliases": [],
+          "description": "Alias for accounts",
+          "args": [],
+          "options": [
+            {
+              "flags": "--json",
+              "description": ""
+            }
+          ],
+          "subcommands": []
+        },
+        {
+          "name": "name",
+          "path": "accounts name",
+          "aliases": [],
+          "description": "Name one signed-in account; matching installed versions are found automatically",
+          "args": [
+            {
+              "name": "label",
+              "required": true,
+              "variadic": false
+            }
+          ],
+          "options": [
+            {
+              "flags": "--from <agent@version>",
+              "description": "Non-interactive identity source"
+            }
+          ],
+          "subcommands": []
+        },
+        {
+          "name": "remove",
+          "path": "accounts remove",
+          "aliases": [],
+          "description": "",
+          "args": [
+            {
+              "name": "label",
+              "required": true,
+              "variadic": false
+            }
+          ],
+          "options": [],
+          "subcommands": []
+        },
+        {
+          "name": "rename",
+          "path": "accounts rename",
+          "aliases": [],
+          "description": "",
+          "args": [
+            {
+              "name": "old",
+              "required": true,
+              "variadic": false
+            },
+            {
+              "name": "new",
+              "required": true,
+              "variadic": false
+            }
+          ],
+          "options": [],
+          "subcommands": []
+        }
+      ]
+    },
     {
       "name": "add",
       "path": "add",
@@ -9305,6 +9389,10 @@
         {
           "flags": "--strategy <strategy>",
           "description": "Version/account selection strategy: pinned | available | balanced. Defaults to run.<agent>.strategy, then balanced (spreads load across healthy accounts and skips any that are rate-limited). (Legacy `rotate` accepted as alias for `balanced`.)"
+        },
+        {
+          "flags": "--account <label>",
+          "description": "Run a healthy installed version currently signed into this named account (never falls back to another identity)"
         },
         {
           "flags": "--acp",

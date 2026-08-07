@@ -117,6 +117,7 @@ export const loadAudit: ModuleLoader = async () => (await import('../../commands
 export const loadWebhook: ModuleLoader = async () => (await import('../../commands/webhook.js')).registerWebhookCommand;
 export const loadFunnel: ModuleLoader = async () => (await import('../../commands/funnel.js')).registerFunnelCommand;
 export const loadHumans: ModuleLoader = async () => (await import('../../commands/humans.js')).registerHumansCommands;
+export const loadAccounts: ModuleLoader = async () => (await import('../../commands/accounts.js')).registerAccountsCommand;
 export const loadDaemon: ModuleLoader = async () => (await import('../../commands/daemon.js')).registerDaemonCommand;
 
 /**
@@ -154,6 +155,7 @@ export const LAZY_COMMAND_NAMES: ReadonlySet<string> = new Set([
  * are handled directly in src/index.ts.
  */
 export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
+  accounts: [loadAccounts],
   view: [loadView],
   inspect: [loadInspect],
   feedback: [loadFeedback],
