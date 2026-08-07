@@ -124,6 +124,26 @@ describeRoutines('routines add help', () => {
   });
 });
 
+describeRoutines('routines edit transaction', () => {
+  it('leaves the live definition and activation unchanged when edited YAML is invalid', () => {
+    const home = makeHome({
+      jobs: [{ name: 'atomic-edit', schedule: '0 3 * * *', command: 'true', enabled: true }],
+    });
+    const routinePath = path.join(home, '.agents', 'routines', 'atomic-edit.yml');
+    const before = fs.readFileSync(routinePath, 'utf-8');
+    const editor = path.join(home, 'invalid-editor.sh');
+    fs.writeFileSync(editor, '#!/bin/sh\nprintf "name: [invalid" > "$1"\n', { mode: 0o755 });
+    try {
+      const result = run(home, ['edit', 'atomic-edit', '--yaml'], { EDITOR: editor });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('Routine not saved');
+      expect(fs.readFileSync(routinePath, 'utf-8')).toBe(before);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
 function writeRunMeta(home: string, jobName: string, runId: string, meta: Record<string, unknown>): void {
   const runDir = path.join(home, '.agents', '.history', 'runs', jobName, runId);
   fs.mkdirSync(runDir, { recursive: true });
@@ -222,6 +242,9 @@ const baseJob = {
   schedule: '0 3 * * *',
   agent: 'claude',
   prompt: 'noop',
+  // Agent routines now need an execution anchor to activate (RUSH-2290); home
+  // is a valid one and keeps these device/eligibility fixtures ready.
+  cwd: '~',
   // Legacy fixture state: tests that specifically cover the new manifest model
   // materialize a device document below.
   enabled: true,
@@ -1191,6 +1214,7 @@ describeRoutines('routines add --devices empty/whitespace fails closed', () => {
         '--schedule', '0 3 * * *',
         '--agent', 'claude',
         '--prompt', 'hi',
+        '--cwd', '~',
         '--devices', 'yosemite-s0',
       ], { AGENTS_SYNC_MACHINE_ID: 'yosemite-s0' });
       expect(res.status).toBe(0);
