@@ -71,17 +71,26 @@ describe('Codex routine permission profiles', () => {
 });
 
 describe('routine spawn cwd', () => {
-  it('uses the existing home directory when no repo is declared', () => {
-    const cwd = routineSpawnCwd({});
+  it('uses the home directory when no project/cwd execution anchor is declared', () => {
+    const cwd = routineSpawnCwd({ name: 'r' });
     expect(cwd).toBe(os.homedir());
     expect(fs.statSync(cwd).isDirectory()).toBe(true);
   });
 
-  it('resolves owner/repo against the configured owner project root', () => {
-    expect(routineSpawnCwd(
-      { repo: 'phnx-labs/agents-cli' },
-      path.join(os.homedir(), 'src', 'github.com', 'phnx-labs'),
-    )).toBe(path.join(os.homedir(), 'src', 'github.com', 'phnx-labs', 'agents-cli'));
+  it('no longer infers a checkout from repo — repo is external identity, not a cwd', () => {
+    // Removing repo→directory inference is the fix: `repo` is GitHub/cloud
+    // identity only. A repo-only routine has no execution anchor, so it lands in
+    // $HOME (and the readiness gate pauses such an agent routine before it fires).
+    expect(routineSpawnCwd({ name: 'r', repo: 'phnx-labs/agents-cli' } as never)).toBe(os.homedir());
+  });
+
+  it('resolves an absolute-under-home cwd', () => {
+    const dir = fs.mkdtempSync(path.join(os.homedir(), '.routine-cwd-test-'));
+    try {
+      expect(routineSpawnCwd({ name: 'r', cwd: dir })).toBe(dir);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -510,24 +519,33 @@ describeSpawn('command-mode routines (executeJobDetached — daemon/cron path)',
     expect(final.errorMessage).toBeUndefined();
   });
 
-  it('allows only one detached execution of the same routine at a time', async () => {
+  it('allows only one detached execution — a second attempt is a skipped/active_run record, not a launch', async () => {
     const command = `${JSON.stringify(process.execPath)} -e "setTimeout(() => {}, 600)"`;
     const config = commandConfig('cmd-det-single-flight', command.replace('600)', '5000)'));
 
     const first = await executeJobDetached(config);
-    await expect(executeJobDetached(config)).rejects.toBeInstanceOf(RoutineAlreadyRunningError);
+    // The overlap no longer throws — it records a skipped attempt that links the
+    // live run and launches nothing (the plan's non-overlap contract).
+    const overlap = await executeJobDetached(config);
+    expect(overlap.status).toBe('skipped');
+    expect(overlap.skipReason).toBe('active_run');
+    expect(overlap.activeRunId).toBe(first.runId);
+    expect(overlap.pid).toBeNull();
 
     const final = await waitTerminal(config.name, first.runId, 7000);
     expect(final.status).toBe('completed');
   });
 
-  it('blocks a replacement while a failed record still owns a live process', async () => {
+  it('a replacement while a failed record still owns a live process is skipped, linking the live run', async () => {
     const command = `${JSON.stringify(process.execPath)} -e "setTimeout(() => {}, 5000)"`;
     const config = commandConfig('cmd-det-failed-live', command);
     const first = await executeJobDetached(config);
     writeRunMeta({ ...first, status: 'failed', completedAt: new Date().toISOString(), exitCode: 1 });
 
-    await expect(executeJobDetached(config)).rejects.toBeInstanceOf(RoutineAlreadyRunningError);
+    const overlap = await executeJobDetached(config);
+    expect(overlap.status).toBe('skipped');
+    expect(overlap.skipReason).toBe('active_run');
+    expect(overlap.activeRunId).toBe(first.runId);
     await waitTerminal(config.name, first.runId, 7000);
   });
 
