@@ -1618,6 +1618,26 @@ skips the audit funnel, a flag that stops crossing the `--host` SSH boundary.
 When code and this spec disagree, one of them is a bug; fixing the drift is
 mandatory, not optional.
 
+Logical account labels (issue #2300) add four requirements to that funnel:
+
+- **EXEC-ACCOUNT-1 (MUST).** A logical account label MUST store only a derived,
+  non-secret identity fingerprint centrally (`lib/accounts/registry.ts`,
+  `lib/accounts/capability.ts` `accountFingerprint`); raw tokens, emails, and
+  provider account ids MUST remain inside the harness version home.
+- **EXEC-ACCOUNT-2 (MUST).** Attaching a version to a label MUST inspect the
+  version's live auth state (`getAccountInfo`) and MUST NOT write a binding when
+  the identity is missing, generic, or differs from the label's existing identity
+  for that harness (`commands/accounts.ts` `verifyIdentity`/`attachTarget`).
+- **EXEC-ACCOUNT-3 (MUST).** `agents run --account <label>` and a label-pinned
+  routine MUST select only a version whose live identity fingerprint matches the
+  label on the current device, and MUST fail loud rather than fall back to
+  balanced rotation or another identity (`lib/accounts/resolve.ts`
+  `resolveAccountLabel`, `commands/exec.ts`, `lib/runner.ts`). Bindings live in
+  `~/.agents/devices/<host>/accounts.yaml`, keyed by the normalized `machineId()`
+  so attach and run agree.
+- **EXEC-ACCOUNT-4 (MUST).** `--account` MUST be rejected for vendor-cloud and
+  lease placement, which never touch a local version home (`commands/exec.ts`).
+
 Requirement keywords **MUST / MUST NOT / SHOULD / MAY** are used per
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119). Every requirement cites the
 `file:line` that implements it, under `apps/cli/src/` unless noted. Behavioral

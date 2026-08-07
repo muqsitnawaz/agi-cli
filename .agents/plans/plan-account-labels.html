@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Logical account labels across devices and harness versions</title>
+<style>
+:root{--font-body:Inter,Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--font-display:Inter,Inter,system-ui,sans-serif;--font-mono:"JetBrains Mono","JetBrains Mono","SFMono-Regular",Consolas,monospace;}
+@page{margin:24px}
+:root{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;--content-width:980px;--page-padding:24px;--mobile-page-padding:16px;--hero-top:40px;--hero-bottom:28px;--section-spacing:36px;--figure-spacing:22px;--panel-padding:16px;--footer-spacing:64px;--print-margin:24px;--code:#0c0f0d;--code-text:#e7ece8;--radius:10px}
+@media(prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--bg:#0a0a0a;--surface:#111312;--surface-alt:#161a18;--line:#26302a;--text:#e7ece8;--muted:#8b938c;--accent:#a3e635;--accent-alt:#5ad6c0;--warn:#f5c451;--danger:#ff6b6b;}}
+:root[data-theme="light"]{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0a0a0a;--surface:#111312;--surface-alt:#161a18;--line:#26302a;--text:#e7ece8;--muted:#8b938c;--accent:#a3e635;--accent-alt:#5ad6c0;--warn:#f5c451;--danger:#ff6b6b;}
+@media print{:root,:root[data-theme="light"],:root[data-theme="dark"]{color-scheme:light;--bg:#faf9f6;--surface:#ffffff;--surface-alt:#f2f4f0;--line:#e2e6df;--text:#1a1c1a;--muted:#5c655c;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-body);line-height:1.6;-webkit-font-smoothing:antialiased;transition:background-color .15s ease,color .15s ease}main{width:100%;max-width:var(--content-width);min-width:0;margin:0 auto;padding:24px var(--page-padding) 80px}.document-header{display:flex;align-items:center;justify-content:flex-end;min-height:42px;border-bottom:1px solid var(--line);color:var(--muted);font-family:var(--font-mono);font-size:12px}.header-label{min-width:0;margin-right:auto;padding-right:12px;overflow-wrap:anywhere;color:var(--text);font-weight:650}.theme-toggle{display:inline-flex;flex:0 0 auto;align-items:center;gap:6px;height:30px;padding:0 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--muted);font:500 12px/1 var(--font-mono);cursor:pointer}.theme-toggle:hover{color:var(--accent);border-color:var(--accent)}.theme-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.hero{padding:var(--hero-top) 0 var(--hero-bottom);border-bottom:1px solid var(--line)}.kicker{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;font-family:var(--font-mono);font-size:12px;text-transform:uppercase;letter-spacing:.14em;color:var(--accent);font-weight:500}.kicker-part{color:var(--accent)}.kicker-separator{color:var(--muted);padding:0 2px}.status-badge{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:999px;border:1px solid color-mix(in srgb,var(--warn) 40%,var(--line));background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn);font-family:var(--font-mono);font-size:10.5px;font-weight:650;letter-spacing:.1em;text-transform:uppercase;line-height:1}.status-badge.status-implementing,.status-badge.status-in-progress,.status-badge.status-review,.status-badge.status-done,.status-badge.status-complete{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent)}.hero h1{font-family:var(--font-display);font-size:clamp(30px,4vw,44px);line-height:1.1;margin:12px 0 14px;letter-spacing:-.01em}.summary{max-width:760px;color:var(--muted);font-size:17px;margin:0}.meta{display:grid;gap:14px;margin-top:20px}.facts-line{margin:0;color:var(--muted);font-family:var(--font-mono);font-size:12.5px;line-height:1.7}.meta-block{display:grid;gap:8px}.meta-label{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:500}.meta-row{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0;padding:0}.chip{display:inline-flex;align-items:center;gap:4px;max-width:100%;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 11px;color:var(--muted);font-family:var(--font-mono);font-size:11.5px;line-height:1.5}.chip-value{color:var(--text);overflow-wrap:anywhere}.chip-icon{display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1.5px;fill:currentColor;flex:0 0 auto}.chip-favicon{display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1.5px;border-radius:2px;object-fit:contain;flex:0 0 auto}.chip-value a{color:inherit;text-decoration:none}.chip-value a:hover{text-decoration:underline}.provenance-line{margin:0;color:var(--muted);font-family:var(--font-mono);font-size:12.5px;line-height:1.7}.provenance-line a{color:var(--accent-alt);text-decoration:none}.provenance-line a:hover{text-decoration:underline}.provenance-part{color:var(--muted)}.meta-sep{margin:0 7px;opacity:.45}.toc{display:flex;flex-wrap:wrap;gap:6px 16px;margin:24px 0 8px;font-family:var(--font-mono);font-size:13px}.toc a{color:var(--muted);text-decoration:none}.toc a:hover{color:var(--accent)}.toc a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.toc-index{color:var(--accent);font-family:var(--font-mono);font-size:.9em}.artifact-body{min-width:0;padding-top:18px;counter-reset:section}h2{font-size:24px;margin:var(--section-spacing) 0 12px;line-height:1.2;letter-spacing:-.01em}.artifact-body>h2{counter-increment:section}.artifact-body>h2::before{content:counter(section,decimal-leading-zero);font-family:var(--font-mono);font-size:.62em;color:var(--accent);margin-right:10px;opacity:.85}h3{font-size:17px;margin:calc(var(--section-spacing) * .78) 0 10px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}p,li,dd,figcaption{overflow-wrap:anywhere}pre{background:var(--code);color:var(--code-text);padding:var(--panel-padding);border-radius:12px;overflow:auto;border:1px solid var(--line)}code{font-family:var(--font-mono);font-size:.88em;background:var(--surface-alt);border:1px solid var(--line);border-radius:5px;padding:1.5px 6px;color:var(--accent-alt)}pre code{background:none;border:none;padding:0;color:inherit}table{width:100%;border-collapse:collapse;margin:18px 0}th,td{border-bottom:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{font-family:var(--font-mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500}blockquote{border-left:3px solid var(--accent);padding-left:var(--panel-padding);color:var(--muted);margin-left:0}img{display:block;max-width:100%;height:auto}svg{max-width:100%;height:auto}.artifact-body>p>img{margin:var(--figure-spacing) auto}.artifact-grid{display:grid;gap:var(--panel-padding);margin:var(--figure-spacing) 0}.artifact-grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}.artifact-grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}.artifact-panel,.artifact-stat{min-width:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding)}.artifact-panel h3{margin:10px 0 8px;font-size:16px}.artifact-stat-value,.artifact-stat-label{display:block}.artifact-stat-value{color:var(--text);font-family:var(--font-display);font-size:24px;line-height:1.15}.artifact-stat-label{margin-top:6px;color:var(--muted);font-size:13px}.artifact-tag{display:inline-block;--tag-color:var(--muted);background:color-mix(in srgb,var(--tag-color) 12%,transparent);border:1px solid color-mix(in srgb,var(--tag-color) 30%,transparent);border-radius:6px;padding:2px 8px;color:var(--tag-color);font-family:var(--font-mono);font-size:11px;font-weight:600;text-transform:uppercase}.artifact-tag-accent{--tag-color:var(--accent)}.artifact-callout{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0;background:var(--surface-alt);padding:var(--panel-padding)}.artifact-callout-warn{border-left-color:var(--warn)}.artifact-callout-danger{border-left-color:var(--danger)}.artifact-callout strong{color:var(--text)}.artifact-figure{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding);overflow-x:auto}.artifact-figure>img,.artifact-image{width:auto;max-width:100%;height:auto;margin:0 auto}.artifact-figure-diagram{background:#0e120f;border-color:#26302a}.artifact-diagram{display:block;width:100%;height:auto;margin:0 auto}.artifact-figure-tall{width:100%;max-width:394px;margin-left:auto;margin-right:auto}.artifact-figure figcaption{margin-top:12px;color:var(--muted);font-family:var(--font-mono);font-size:12px;text-align:center}.artifact-figure.artifact-figure-diagram figcaption{color:#8b938c}.artifact-legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:12px 0;color:var(--muted);font-family:var(--font-mono);font-size:11.5px}.document-footer{margin-top:var(--footer-spacing);padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-family:var(--font-mono);font-size:12px}
+@media(max-width:720px){main{padding:32px var(--mobile-page-padding) 64px}.artifact-grid-2,.artifact-grid-3{grid-template-columns:1fr}.artifact-figure{padding:min(12px,var(--panel-padding))}.artifact-figure-wide .artifact-diagram{min-width:640px}table{display:block;max-width:100%;overflow-x:auto}th,td{min-width:140px;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}}
+@media print{body{transition:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}.toc,.theme-toggle{display:none}.document-header-empty{display:none}main{max-width:none;padding:0}:root[data-pdf-layout="poster"] main{max-width:var(--content-width);margin:0 auto;padding:var(--print-margin)}.chip{background:var(--surface)}.chip-value{color:var(--text)}.provenance-line,.provenance-line a,.facts-line{color:var(--text)}.status-badge{color:var(--text);border-color:var(--line)}h2,h3{break-after:avoid-page}.artifact-figure,.artifact-grid,.artifact-panel,.artifact-stat,.artifact-callout,pre,table,blockquote,.meta{break-inside:avoid}.artifact-figure-wide .artifact-diagram{min-width:0}.artifact-figure-tall{max-width:330px}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--text);text-decoration:underline}}
+</style>
+</head>
+<body>
+<main>
+<header class="document-header document-header-empty"><button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false" title="Toggle color theme"><span aria-hidden="true">&#9680;</span> theme</button></header>
+<section class="hero">
+<div class="kicker"><span class="kicker-part">agents-cli</span><span class="kicker-separator" aria-hidden="true">&middot;</span><span class="kicker-part">plan</span><span class="status-badge status-implementing">implementing</span></div>
+<h1>Logical account labels across devices and harness versions</h1>
+<p class="summary">Name a signed-in identity once, bind it to installed versions per device, and route runs and routines to it by name — without ever copying a credential. The fleet-synced registry stores only hashed fingerprints; explicit account routing fails loud instead of falling back to another identity.
+</p>
+<div class="meta" aria-label="Artifact metadata"><p class="facts-line">Central ~/.agents/accounts.yaml stores one SHA-256 fingerprint per (label, harness)<span class="meta-sep" aria-hidden="true">·</span>Per-device ~/.agents/devices/&lt;host&gt;/accounts.yaml maps a label to versions or '*'<span class="meta-sep" aria-hidden="true">·</span>attach verifies the version's live identity before writing; run --account never falls back<span class="meta-sep" aria-hidden="true">·</span>Labelable harnesses are derived from ACCOUNT_INSPECTION_AGENT_IDS, pinned by a completeness test</p><p class="provenance-line" aria-label="Provenance"><span class="provenance-part"><a href="https://github.com/phnx-labs/agents-cli" target="_blank" rel="noopener">phnx-labs/agents-cli</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">agents/account-labels-iso</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">#2300</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Claude</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Muqsit</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">yosemite-s0</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">019fdbdf</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">2026-08-07</span></p></div>
+</section>
+<nav class="toc" aria-label="Artifact sections"><a href="#purpose"><span class="toc-index">01&nbsp;&middot;&nbsp;</span>Purpose</a><a href="#proposed-changes"><span class="toc-index">02&nbsp;&middot;&nbsp;</span>Proposed Changes</a><a href="#public-interface"><span class="toc-index">03&nbsp;&middot;&nbsp;</span>Public Interface</a><a href="#validation"><span class="toc-index">04&nbsp;&middot;&nbsp;</span>Validation</a><a href="#risks"><span class="toc-index">05&nbsp;&middot;&nbsp;</span>Risks</a><a href="#tracking"><span class="toc-index">06&nbsp;&middot;&nbsp;</span>Tracking</a></nav><article class="artifact-body"><h1>Logical account labels across devices and harness versions</h1>
+<h2 id="purpose">Purpose</h2>
+<p>Every installed harness version keeps its own credential, so one Claude or Codex
+version can be signed into different identities on different machines, and one
+identity can back several versions. <code>agents devices accounts</code> / <code>harnesses</code>
+expose raw identities but cannot give them a durable name or record an intended
+version assignment. Operators want to name an identity once, say which installed
+versions on which device run under it, and select it for a run or routine — with
+no credential ever leaving the version home.</p>
+<div class="artifact-callout">A label names an identity; a device binding names where that identity is installed. Only a non-secret fingerprint crosses the device boundary, and a binding is written only after the live identity matches.</div><h2 id="proposed-changes">Proposed Changes</h2>
+<p>Two synced files, both separate from <code>agents.yaml</code> (an older CLI rewrites
+<code>agents.yaml</code> but never these, so it cannot erase them), plus a verified,
+fail-loud resolver shared by <code>run</code> and routines.</p>
+<svg viewBox="0 0 920 300" role="img" aria-label="Account label data flow" xmlns="http://www.w3.org/2000/svg">
+  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#8b949e"></path></marker></defs>
+  <rect x="24" y="96" width="210" height="108" rx="14" fill="#161b22" stroke="#a3e635" stroke-width="3"></rect>
+  <text x="129" y="134" fill="#a3e635" text-anchor="middle" font-size="19">Version home</text>
+  <text x="129" y="164" fill="#ffffff" text-anchor="middle" font-size="15">local credential</text>
+  <text x="129" y="186" fill="#8b949e" text-anchor="middle" font-size="13">never copied</text>
+  <rect x="332" y="34" width="256" height="96" rx="14" fill="#161b22" stroke="#58a6ff" stroke-width="3"></rect>
+  <text x="460" y="72" fill="#58a6ff" text-anchor="middle" font-size="18">accounts.yaml (synced)</text>
+  <text x="460" y="100" fill="#ffffff" text-anchor="middle" font-size="14">label -&gt; fingerprint</text>
+  <rect x="332" y="172" width="256" height="96" rx="14" fill="#161b22" stroke="#d2a8ff" stroke-width="3"></rect>
+  <text x="460" y="210" fill="#d2a8ff" text-anchor="middle" font-size="18">devices/&lt;host&gt;/accounts.yaml</text>
+  <text x="460" y="238" fill="#ffffff" text-anchor="middle" font-size="14">label -&gt; versions | '*'</text>
+  <rect x="686" y="96" width="210" height="108" rx="14" fill="#161b22" stroke="#a3e635" stroke-width="3"></rect>
+  <text x="791" y="134" fill="#a3e635" text-anchor="middle" font-size="19">run --account</text>
+  <text x="791" y="164" fill="#ffffff" text-anchor="middle" font-size="15">verified pick</text>
+  <text x="791" y="186" fill="#f0883e" text-anchor="middle" font-size="13">fail loud, no fallback</text>
+  <path d="M234 128 L332 90" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"></path>
+  <text x="270" y="96" fill="#8b949e" font-size="12">fingerprint</text>
+  <path d="M234 172 L332 216" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"></path>
+  <text x="270" y="212" fill="#8b949e" font-size="12">bind version</text>
+  <path d="M588 82 L686 122" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"></path>
+  <path d="M588 220 L686 178" stroke="#8b949e" stroke-width="3" marker-end="url(#arrow)"></path>
+</svg><table>
+<thead>
+<tr>
+<th>File</th>
+<th>Role</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>src/lib/accounts/capability.ts</code></td>
+<td><code>LABELABLE_AGENT_IDS</code> (derived, pinned by a completeness test) + <code>accountFingerprint</code> (accountKey -&gt; email -&gt; accountId, hashed)</td>
+</tr>
+<tr>
+<td><code>src/lib/accounts/registry.ts</code></td>
+<td>Central <code>~/.agents/accounts.yaml</code>: one fingerprint per (label, harness); one-identity-per-label enforced</td>
+</tr>
+<tr>
+<td><code>src/lib/accounts/bindings.ts</code></td>
+<td>Per-device <code>~/.agents/devices/&lt;host&gt;/accounts.yaml</code>: version lists, <code>'*'</code> = version-global</td>
+</tr>
+<tr>
+<td><code>src/lib/accounts/resolve.ts</code></td>
+<td><code>resolveAccountLabel</code> — verifies live identity per candidate, fails loud, never falls back</td>
+</tr>
+<tr>
+<td><code>src/lib/accounts/status.ts</code></td>
+<td><code>labelForIdentity</code> — annotates inventory / <code>view</code> rows</td>
+</tr>
+<tr>
+<td><code>src/commands/accounts.ts</code></td>
+<td><code>list / label / attach / detach / rename / remove</code></td>
+</tr>
+<tr>
+<td><code>src/commands/exec.ts</code></td>
+<td><code>agents run --account &lt;label&gt;</code> (reject cloud/lease)</td>
+</tr>
+<tr>
+<td><code>src/lib/runner.ts</code></td>
+<td>routine <code>account:</code> accepts a label (fail loud)</td>
+</tr>
+<tr>
+<td><code>src/lib/devices/harness-inventory.ts</code></td>
+<td>additive <code>label</code> on <code>HarnessRow</code> / <code>AccountGroup</code></td>
+</tr>
+</tbody></table>
+<h2 id="public-interface">Public Interface</h2>
+<pre><code>agents accounts label work claude@2.1.220         # name the live identity; bind that version
+agents accounts attach work codex@0.146.0         # add a second harness to the same label
+agents accounts attach work codex@*               # version-global: every installed codex here
+agents accounts list --json                       # labels, identities, bindings, drift
+agents accounts detach work claude@2.1.219        # drop one device binding
+agents run claude --account work                  # run only a verified 'work' version
+</code></pre>
+<p>Routines pin a label the same way: <code>account: work</code> in the routine YAML.</p>
+<h2 id="validation">Validation</h2>
+<table>
+<thead>
+<tr>
+<th>Check</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Fingerprints only, no secrets synced</td>
+<td><code>registry.test.ts</code> asserts the file carries no <code>@</code>/email</td>
+</tr>
+<tr>
+<td>One identity cannot be two labels</td>
+<td><code>registry.test.ts</code> expects a throw on the second label</td>
+</tr>
+<tr>
+<td><code>'*'</code> expands to all installed; list intersects installs</td>
+<td><code>bindings.test.ts</code></td>
+</tr>
+<tr>
+<td>Verified match resolves; drifted identity fails loud</td>
+<td><code>resolve.test.ts</code> (real claude install fixture)</td>
+</tr>
+<tr>
+<td>Device default is normalized <code>machineId()</code></td>
+<td><code>accounts.test.ts</code> asserts binding under <code>devices/testbox/</code></td>
+</tr>
+<tr>
+<td>Labelable set == inspectable − hard-deprecated</td>
+<td><code>capability.test.ts</code> completeness test</td>
+</tr>
+</tbody></table>
+<pre><code>bun run build &amp;&amp; npx vitest run src/lib/accounts src/commands/accounts.test.ts
+</code></pre>
+<h2 id="risks">Risks</h2>
+<table>
+<thead>
+<tr>
+<th>Risk</th>
+<th>Control</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>A bound version drifts to another identity</td>
+<td><code>run --account</code> / <code>list</code> re-verify the live fingerprint; a mismatch is skipped / flagged</td>
+</tr>
+<tr>
+<td>Rotation silently picks another account</td>
+<td><code>--account</code> bypasses the strategy path and fails loud</td>
+</tr>
+<tr>
+<td>Synced config leaks identity</td>
+<td>The central registry holds only truncated SHA-256 fingerprints</td>
+</tr>
+<tr>
+<td>A per-device token-hash identity differs across boxes</td>
+<td>Documented; attach re-verifies on each device that binds it</td>
+</tr>
+</tbody></table>
+<h2 id="tracking">Tracking</h2>
+<ul>
+<li><a href="https://github.com/phnx-labs/agents-cli/issues/2300">GitHub issue #2300</a></li>
+<li>Delivered in this PR: library, command, <code>run</code>/routine wiring, inventory labels, tests, docs, CHANGELOG.</li>
+</ul>
+</article>
+
+</main>
+<script type="application/json" id="artifacts-source">{"encoding":"base64","markdown":"LS0tCmtpbmQ6IHBsYW4KdGl0bGU6IExvZ2ljYWwgYWNjb3VudCBsYWJlbHMgYWNyb3NzIGRldmljZXMgYW5kIGhhcm5lc3MgdmVyc2lvbnMKc3VtbWFyeTogPgogIE5hbWUgYSBzaWduZWQtaW4gaWRlbnRpdHkgb25jZSwgYmluZCBpdCB0byBpbnN0YWxsZWQgdmVyc2lvbnMgcGVyIGRldmljZSwgYW5kCiAgcm91dGUgcnVucyBhbmQgcm91dGluZXMgdG8gaXQgYnkgbmFtZSDigJQgd2l0aG91dCBldmVyIGNvcHlpbmcgYSBjcmVkZW50aWFsLiBUaGUKICBmbGVldC1zeW5jZWQgcmVnaXN0cnkgc3RvcmVzIG9ubHkgaGFzaGVkIGZpbmdlcnByaW50czsgZXhwbGljaXQgYWNjb3VudCByb3V0aW5nCiAgZmFpbHMgbG91ZCBpbnN0ZWFkIG9mIGZhbGxpbmcgYmFjayB0byBhbm90aGVyIGlkZW50aXR5LgpzdGF0dXM6IGltcGxlbWVudGluZwp0cmFja2luZzogIiMyMzAwIgpmYWN0czoKICAtIENlbnRyYWwgfi8uYWdlbnRzL2FjY291bnRzLnlhbWwgc3RvcmVzIG9uZSBTSEEtMjU2IGZpbmdlcnByaW50IHBlciAobGFiZWwsIGhhcm5lc3MpCiAgLSBQZXItZGV2aWNlIH4vLmFnZW50cy9kZXZpY2VzLzxob3N0Pi9hY2NvdW50cy55YW1sIG1hcHMgYSBsYWJlbCB0byB2ZXJzaW9ucyBvciAnKicKICAtIGF0dGFjaCB2ZXJpZmllcyB0aGUgdmVyc2lvbidzIGxpdmUgaWRlbnRpdHkgYmVmb3JlIHdyaXRpbmc7IHJ1biAtLWFjY291bnQgbmV2ZXIgZmFsbHMgYmFjawogIC0gTGFiZWxhYmxlIGhhcm5lc3NlcyBhcmUgZGVyaXZlZCBmcm9tIEFDQ09VTlRfSU5TUEVDVElPTl9BR0VOVF9JRFMsIHBpbm5lZCBieSBhIGNvbXBsZXRlbmVzcyB0ZXN0Ci0tLQoKIyBMb2dpY2FsIGFjY291bnQgbGFiZWxzIGFjcm9zcyBkZXZpY2VzIGFuZCBoYXJuZXNzIHZlcnNpb25zCgojIyBQdXJwb3NlCgpFdmVyeSBpbnN0YWxsZWQgaGFybmVzcyB2ZXJzaW9uIGtlZXBzIGl0cyBvd24gY3JlZGVudGlhbCwgc28gb25lIENsYXVkZSBvciBDb2RleAp2ZXJzaW9uIGNhbiBiZSBzaWduZWQgaW50byBkaWZmZXJlbnQgaWRlbnRpdGllcyBvbiBkaWZmZXJlbnQgbWFjaGluZXMsIGFuZCBvbmUKaWRlbnRpdHkgY2FuIGJhY2sgc2V2ZXJhbCB2ZXJzaW9ucy4gYGFnZW50cyBkZXZpY2VzIGFjY291bnRzYCAvIGBoYXJuZXNzZXNgCmV4cG9zZSByYXcgaWRlbnRpdGllcyBidXQgY2Fubm90IGdpdmUgdGhlbSBhIGR1cmFibGUgbmFtZSBvciByZWNvcmQgYW4gaW50ZW5kZWQKdmVyc2lvbiBhc3NpZ25tZW50LiBPcGVyYXRvcnMgd2FudCB0byBuYW1lIGFuIGlkZW50aXR5IG9uY2UsIHNheSB3aGljaCBpbnN0YWxsZWQKdmVyc2lvbnMgb24gd2hpY2ggZGV2aWNlIHJ1biB1bmRlciBpdCwgYW5kIHNlbGVjdCBpdCBmb3IgYSBydW4gb3Igcm91dGluZSDigJQgd2l0aApubyBjcmVkZW50aWFsIGV2ZXIgbGVhdmluZyB0aGUgdmVyc2lvbiBob21lLgoKPGRpdiBjbGFzcz0iYXJ0aWZhY3QtY2FsbG91dCI+QSBsYWJlbCBuYW1lcyBhbiBpZGVudGl0eTsgYSBkZXZpY2UgYmluZGluZyBuYW1lcyB3aGVyZSB0aGF0IGlkZW50aXR5IGlzIGluc3RhbGxlZC4gT25seSBhIG5vbi1zZWNyZXQgZmluZ2VycHJpbnQgY3Jvc3NlcyB0aGUgZGV2aWNlIGJvdW5kYXJ5LCBhbmQgYSBiaW5kaW5nIGlzIHdyaXR0ZW4gb25seSBhZnRlciB0aGUgbGl2ZSBpZGVudGl0eSBtYXRjaGVzLjwvZGl2PgoKIyMgUHJvcG9zZWQgQ2hhbmdlcwoKVHdvIHN5bmNlZCBmaWxlcywgYm90aCBzZXBhcmF0ZSBmcm9tIGBhZ2VudHMueWFtbGAgKGFuIG9sZGVyIENMSSByZXdyaXRlcwpgYWdlbnRzLnlhbWxgIGJ1dCBuZXZlciB0aGVzZSwgc28gaXQgY2Fubm90IGVyYXNlIHRoZW0pLCBwbHVzIGEgdmVyaWZpZWQsCmZhaWwtbG91ZCByZXNvbHZlciBzaGFyZWQgYnkgYHJ1bmAgYW5kIHJvdXRpbmVzLgoKPHN2ZyB2aWV3Qm94PSIwIDAgOTIwIDMwMCIgcm9sZT0iaW1nIiBhcmlhLWxhYmVsPSJBY2NvdW50IGxhYmVsIGRhdGEgZmxvdyIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICA8ZGVmcz48bWFya2VyIGlkPSJhcnJvdyIgbWFya2VyV2lkdGg9IjEwIiBtYXJrZXJIZWlnaHQ9IjEwIiByZWZYPSI4IiByZWZZPSIzIiBvcmllbnQ9ImF1dG8iPjxwYXRoIGQ9Ik0wLDAgTDAsNiBMOSwzIHoiIGZpbGw9IiM4Yjk0OWUiLz48L21hcmtlcj48L2RlZnM+CiAgPHJlY3QgeD0iMjQiIHk9Ijk2IiB3aWR0aD0iMjEwIiBoZWlnaHQ9IjEwOCIgcng9IjE0IiBmaWxsPSIjMTYxYjIyIiBzdHJva2U9IiNhM2U2MzUiIHN0cm9rZS13aWR0aD0iMyIvPgogIDx0ZXh0IHg9IjEyOSIgeT0iMTM0IiBmaWxsPSIjYTNlNjM1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjE5Ij5WZXJzaW9uIGhvbWU8L3RleHQ+CiAgPHRleHQgeD0iMTI5IiB5PSIxNjQiIGZpbGw9IiNmZmZmZmYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTUiPmxvY2FsIGNyZWRlbnRpYWw8L3RleHQ+CiAgPHRleHQgeD0iMTI5IiB5PSIxODYiIGZpbGw9IiM4Yjk0OWUiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtc2l6ZT0iMTMiPm5ldmVyIGNvcGllZDwvdGV4dD4KICA8cmVjdCB4PSIzMzIiIHk9IjM0IiB3aWR0aD0iMjU2IiBoZWlnaHQ9Ijk2IiByeD0iMTQiIGZpbGw9IiMxNjFiMjIiIHN0cm9rZT0iIzU4YTZmZiIgc3Ryb2tlLXdpZHRoPSIzIi8+CiAgPHRleHQgeD0iNDYwIiB5PSI3MiIgZmlsbD0iIzU4YTZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxOCI+YWNjb3VudHMueWFtbCAoc3luY2VkKTwvdGV4dD4KICA8dGV4dCB4PSI0NjAiIHk9IjEwMCIgZmlsbD0iI2ZmZmZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNCI+bGFiZWwgLT4gZmluZ2VycHJpbnQ8L3RleHQ+CiAgPHJlY3QgeD0iMzMyIiB5PSIxNzIiIHdpZHRoPSIyNTYiIGhlaWdodD0iOTYiIHJ4PSIxNCIgZmlsbD0iIzE2MWIyMiIgc3Ryb2tlPSIjZDJhOGZmIiBzdHJva2Utd2lkdGg9IjMiLz4KICA8dGV4dCB4PSI0NjAiIHk9IjIxMCIgZmlsbD0iI2QyYThmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxOCI+ZGV2aWNlcy8mbHQ7aG9zdCZndDsvYWNjb3VudHMueWFtbDwvdGV4dD4KICA8dGV4dCB4PSI0NjAiIHk9IjIzOCIgZmlsbD0iI2ZmZmZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNCI+bGFiZWwgLT4gdmVyc2lvbnMgfCAnKic8L3RleHQ+CiAgPHJlY3QgeD0iNjg2IiB5PSI5NiIgd2lkdGg9IjIxMCIgaGVpZ2h0PSIxMDgiIHJ4PSIxNCIgZmlsbD0iIzE2MWIyMiIgc3Ryb2tlPSIjYTNlNjM1IiBzdHJva2Utd2lkdGg9IjMiLz4KICA8dGV4dCB4PSI3OTEiIHk9IjEzNCIgZmlsbD0iI2EzZTYzNSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxOSI+cnVuIC0tYWNjb3VudDwvdGV4dD4KICA8dGV4dCB4PSI3OTEiIHk9IjE2NCIgZmlsbD0iI2ZmZmZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxNSI+dmVyaWZpZWQgcGljazwvdGV4dD4KICA8dGV4dCB4PSI3OTEiIHk9IjE4NiIgZmlsbD0iI2YwODgzZSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1zaXplPSIxMyI+ZmFpbCBsb3VkLCBubyBmYWxsYmFjazwvdGV4dD4KICA8cGF0aCBkPSJNMjM0IDEyOCBMMzMyIDkwIiBzdHJva2U9IiM4Yjk0OWUiIHN0cm9rZS13aWR0aD0iMyIgbWFya2VyLWVuZD0idXJsKCNhcnJvdykiLz4KICA8dGV4dCB4PSIyNzAiIHk9Ijk2IiBmaWxsPSIjOGI5NDllIiBmb250LXNpemU9IjEyIj5maW5nZXJwcmludDwvdGV4dD4KICA8cGF0aCBkPSJNMjM0IDE3MiBMMzMyIDIxNiIgc3Ryb2tlPSIjOGI5NDllIiBzdHJva2Utd2lkdGg9IjMiIG1hcmtlci1lbmQ9InVybCgjYXJyb3cpIi8+CiAgPHRleHQgeD0iMjcwIiB5PSIyMTIiIGZpbGw9IiM4Yjk0OWUiIGZvbnQtc2l6ZT0iMTIiPmJpbmQgdmVyc2lvbjwvdGV4dD4KICA8cGF0aCBkPSJNNTg4IDgyIEw2ODYgMTIyIiBzdHJva2U9IiM4Yjk0OWUiIHN0cm9rZS13aWR0aD0iMyIgbWFya2VyLWVuZD0idXJsKCNhcnJvdykiLz4KICA8cGF0aCBkPSJNNTg4IDIyMCBMNjg2IDE3OCIgc3Ryb2tlPSIjOGI5NDllIiBzdHJva2Utd2lkdGg9IjMiIG1hcmtlci1lbmQ9InVybCgjYXJyb3cpIi8+Cjwvc3ZnPgoKfCBGaWxlIHwgUm9sZSB8CnwgLS0tIHwgLS0tIHwKfCBgc3JjL2xpYi9hY2NvdW50cy9jYXBhYmlsaXR5LnRzYCB8IGBMQUJFTEFCTEVfQUdFTlRfSURTYCAoZGVyaXZlZCwgcGlubmVkIGJ5IGEgY29tcGxldGVuZXNzIHRlc3QpICsgYGFjY291bnRGaW5nZXJwcmludGAgKGFjY291bnRLZXkgLT4gZW1haWwgLT4gYWNjb3VudElkLCBoYXNoZWQpIHwKfCBgc3JjL2xpYi9hY2NvdW50cy9yZWdpc3RyeS50c2AgfCBDZW50cmFsIGB+Ly5hZ2VudHMvYWNjb3VudHMueWFtbGA6IG9uZSBmaW5nZXJwcmludCBwZXIgKGxhYmVsLCBoYXJuZXNzKTsgb25lLWlkZW50aXR5LXBlci1sYWJlbCBlbmZvcmNlZCB8CnwgYHNyYy9saWIvYWNjb3VudHMvYmluZGluZ3MudHNgIHwgUGVyLWRldmljZSBgfi8uYWdlbnRzL2RldmljZXMvPGhvc3Q+L2FjY291bnRzLnlhbWxgOiB2ZXJzaW9uIGxpc3RzLCBgJyonYCA9IHZlcnNpb24tZ2xvYmFsIHwKfCBgc3JjL2xpYi9hY2NvdW50cy9yZXNvbHZlLnRzYCB8IGByZXNvbHZlQWNjb3VudExhYmVsYCDigJQgdmVyaWZpZXMgbGl2ZSBpZGVudGl0eSBwZXIgY2FuZGlkYXRlLCBmYWlscyBsb3VkLCBuZXZlciBmYWxscyBiYWNrIHwKfCBgc3JjL2xpYi9hY2NvdW50cy9zdGF0dXMudHNgIHwgYGxhYmVsRm9ySWRlbnRpdHlgIOKAlCBhbm5vdGF0ZXMgaW52ZW50b3J5IC8gYHZpZXdgIHJvd3MgfAp8IGBzcmMvY29tbWFuZHMvYWNjb3VudHMudHNgIHwgYGxpc3QgLyBsYWJlbCAvIGF0dGFjaCAvIGRldGFjaCAvIHJlbmFtZSAvIHJlbW92ZWAgfAp8IGBzcmMvY29tbWFuZHMvZXhlYy50c2AgfCBgYWdlbnRzIHJ1biAtLWFjY291bnQgPGxhYmVsPmAgKHJlamVjdCBjbG91ZC9sZWFzZSkgfAp8IGBzcmMvbGliL3J1bm5lci50c2AgfCByb3V0aW5lIGBhY2NvdW50OmAgYWNjZXB0cyBhIGxhYmVsIChmYWlsIGxvdWQpIHwKfCBgc3JjL2xpYi9kZXZpY2VzL2hhcm5lc3MtaW52ZW50b3J5LnRzYCB8IGFkZGl0aXZlIGBsYWJlbGAgb24gYEhhcm5lc3NSb3dgIC8gYEFjY291bnRHcm91cGAgfAoKIyMgUHVibGljIEludGVyZmFjZQoKYGBgYmFzaAphZ2VudHMgYWNjb3VudHMgbGFiZWwgd29yayBjbGF1ZGVAMi4xLjIyMCAgICAgICAgICMgbmFtZSB0aGUgbGl2ZSBpZGVudGl0eTsgYmluZCB0aGF0IHZlcnNpb24KYWdlbnRzIGFjY291bnRzIGF0dGFjaCB3b3JrIGNvZGV4QDAuMTQ2LjAgICAgICAgICAjIGFkZCBhIHNlY29uZCBoYXJuZXNzIHRvIHRoZSBzYW1lIGxhYmVsCmFnZW50cyBhY2NvdW50cyBhdHRhY2ggd29yayBjb2RleEAqICAgICAgICAgICAgICAgIyB2ZXJzaW9uLWdsb2JhbDogZXZlcnkgaW5zdGFsbGVkIGNvZGV4IGhlcmUKYWdlbnRzIGFjY291bnRzIGxpc3QgLS1qc29uICAgICAgICAgICAgICAgICAgICAgICAjIGxhYmVscywgaWRlbnRpdGllcywgYmluZGluZ3MsIGRyaWZ0CmFnZW50cyBhY2NvdW50cyBkZXRhY2ggd29yayBjbGF1ZGVAMi4xLjIxOSAgICAgICAgIyBkcm9wIG9uZSBkZXZpY2UgYmluZGluZwphZ2VudHMgcnVuIGNsYXVkZSAtLWFjY291bnQgd29yayAgICAgICAgICAgICAgICAgICMgcnVuIG9ubHkgYSB2ZXJpZmllZCAnd29yaycgdmVyc2lvbgpgYGAKClJvdXRpbmVzIHBpbiBhIGxhYmVsIHRoZSBzYW1lIHdheTogYGFjY291bnQ6IHdvcmtgIGluIHRoZSByb3V0aW5lIFlBTUwuCgojIyBWYWxpZGF0aW9uCgp8IENoZWNrIHwgSG93IHwKfCAtLS0gfCAtLS0gfAp8IEZpbmdlcnByaW50cyBvbmx5LCBubyBzZWNyZXRzIHN5bmNlZCB8IGByZWdpc3RyeS50ZXN0LnRzYCBhc3NlcnRzIHRoZSBmaWxlIGNhcnJpZXMgbm8gYEBgL2VtYWlsIHwKfCBPbmUgaWRlbnRpdHkgY2Fubm90IGJlIHR3byBsYWJlbHMgfCBgcmVnaXN0cnkudGVzdC50c2AgZXhwZWN0cyBhIHRocm93IG9uIHRoZSBzZWNvbmQgbGFiZWwgfAp8IGAnKidgIGV4cGFuZHMgdG8gYWxsIGluc3RhbGxlZDsgbGlzdCBpbnRlcnNlY3RzIGluc3RhbGxzIHwgYGJpbmRpbmdzLnRlc3QudHNgIHwKfCBWZXJpZmllZCBtYXRjaCByZXNvbHZlczsgZHJpZnRlZCBpZGVudGl0eSBmYWlscyBsb3VkIHwgYHJlc29sdmUudGVzdC50c2AgKHJlYWwgY2xhdWRlIGluc3RhbGwgZml4dHVyZSkgfAp8IERldmljZSBkZWZhdWx0IGlzIG5vcm1hbGl6ZWQgYG1hY2hpbmVJZCgpYCB8IGBhY2NvdW50cy50ZXN0LnRzYCBhc3NlcnRzIGJpbmRpbmcgdW5kZXIgYGRldmljZXMvdGVzdGJveC9gIHwKfCBMYWJlbGFibGUgc2V0ID09IGluc3BlY3RhYmxlIOKIkiBoYXJkLWRlcHJlY2F0ZWQgfCBgY2FwYWJpbGl0eS50ZXN0LnRzYCBjb21wbGV0ZW5lc3MgdGVzdCB8CgpgYGBiYXNoCmJ1biBydW4gYnVpbGQgJiYgbnB4IHZpdGVzdCBydW4gc3JjL2xpYi9hY2NvdW50cyBzcmMvY29tbWFuZHMvYWNjb3VudHMudGVzdC50cwpgYGAKCiMjIFJpc2tzCgp8IFJpc2sgfCBDb250cm9sIHwKfCAtLS0gfCAtLS0gfAp8IEEgYm91bmQgdmVyc2lvbiBkcmlmdHMgdG8gYW5vdGhlciBpZGVudGl0eSB8IGBydW4gLS1hY2NvdW50YCAvIGBsaXN0YCByZS12ZXJpZnkgdGhlIGxpdmUgZmluZ2VycHJpbnQ7IGEgbWlzbWF0Y2ggaXMgc2tpcHBlZCAvIGZsYWdnZWQgfAp8IFJvdGF0aW9uIHNpbGVudGx5IHBpY2tzIGFub3RoZXIgYWNjb3VudCB8IGAtLWFjY291bnRgIGJ5cGFzc2VzIHRoZSBzdHJhdGVneSBwYXRoIGFuZCBmYWlscyBsb3VkIHwKfCBTeW5jZWQgY29uZmlnIGxlYWtzIGlkZW50aXR5IHwgVGhlIGNlbnRyYWwgcmVnaXN0cnkgaG9sZHMgb25seSB0cnVuY2F0ZWQgU0hBLTI1NiBmaW5nZXJwcmludHMgfAp8IEEgcGVyLWRldmljZSB0b2tlbi1oYXNoIGlkZW50aXR5IGRpZmZlcnMgYWNyb3NzIGJveGVzIHwgRG9jdW1lbnRlZDsgYXR0YWNoIHJlLXZlcmlmaWVzIG9uIGVhY2ggZGV2aWNlIHRoYXQgYmluZHMgaXQgfAoKIyMgVHJhY2tpbmcKCi0gW0dpdEh1YiBpc3N1ZSAjMjMwMF0oaHR0cHM6Ly9naXRodWIuY29tL3BobngtbGFicy9hZ2VudHMtY2xpL2lzc3Vlcy8yMzAwKQotIERlbGl2ZXJlZCBpbiB0aGlzIFBSOiBsaWJyYXJ5LCBjb21tYW5kLCBgcnVuYC9yb3V0aW5lIHdpcmluZywgaW52ZW50b3J5IGxhYmVscywgdGVzdHMsIGRvY3MsIENIQU5HRUxPRy4K"}</script>
+<script>
+(() => {
+  const root = document.documentElement;
+  const button = document.querySelector('.theme-toggle');
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
+  const configured = "system";
+  const stored = () => { try { const value = localStorage.getItem('artifacts-theme'); return value === 'light' || value === 'dark' ? value : null; } catch { return null; } };
+  const preferred = () => stored() || (configured === 'system' ? (media.matches ? 'dark' : 'light') : configured);
+  const apply = (theme, persist) => {
+    root.dataset.theme = theme;
+    root.style.colorScheme = theme;
+    const next = theme === 'dark' ? 'light' : 'dark';
+    button.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+    button.setAttribute('title', 'Switch to ' + next + ' theme');
+    button.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+    if (persist) { try { localStorage.setItem('artifacts-theme', theme); } catch {} }
+  };
+  apply(preferred(), false);
+  button.addEventListener('click', () => apply(root.dataset.theme === 'dark' ? 'light' : 'dark', true));
+  media.addEventListener('change', () => { if (configured === 'system' && !stored()) apply(media.matches ? 'dark' : 'light', false); });
+})();
+</script>
+</body>
+</html>

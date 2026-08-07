@@ -272,6 +272,40 @@ Everything but the collector is pure and unit-tested
 ([`harness-inventory.test.ts`](src/lib/devices/harness-inventory.test.ts)). Agent
 coverage is `ALL_AGENT_IDS`-driven, so a new harness is included automatically.
 
+Each signed-in row also carries its **logical account label** (issue #2300) when
+one is attached — see below.
+
+### 9b. Logical account labels (`agents accounts`, issue #2300)
+
+`agents accounts` names a signed-in identity and binds it to installed versions
+per device, so a run/routine can select an account by an operator-owned name
+instead of an email or a GC-prone version number. Three design choices are
+load-bearing:
+
+- **Two files, both separate from `agents.yaml`.** The central registry
+  ([`lib/accounts/registry.ts`](src/lib/accounts/registry.ts),
+  `~/.agents/accounts.yaml`) maps `(label, harness) → fingerprint` and rides the
+  `~/.agents` git sync; per-device bindings
+  ([`lib/accounts/bindings.ts`](src/lib/accounts/bindings.ts),
+  `~/.agents/devices/<host>/accounts.yaml`) map `(label, harness) → versions`
+  (or `'*'` for version-global). Both are their own top-level files precisely so
+  an **older CLI that rewrites `agents.yaml` cannot erase them**. Bindings key on
+  the normalized `machineId()`, the same key `run` reads — do not use
+  `os.hostname()`.
+- **Registry-driven coverage, no per-agent branches.** The labelable set is
+  derived (`LABELABLE_AGENT_IDS = ACCOUNT_INSPECTION_AGENT_IDS − hard-deprecated`,
+  [`lib/accounts/capability.ts`](src/lib/accounts/capability.ts)), pinned by
+  `capability.test.ts`. The fingerprint is one priority chain over the normalized
+  `AccountInfo` (`accountKey` → `email` → `accountId`), hashed — never a raw
+  secret, and a generic "signed in" with no key is unlabelable by construction.
+- **Verified, fail-loud routing.** `attach`/`label` read the version's LIVE
+  identity before writing (`commands/accounts.ts`), and `resolveAccountLabel`
+  ([`lib/accounts/resolve.ts`](src/lib/accounts/resolve.ts)) — shared by
+  `run --account` (`commands/exec.ts`) and label-pinned routines
+  (`lib/runner.ts`) — only returns a version whose live fingerprint still matches
+  and otherwise FAILS; explicit account routing never falls back to another
+  identity, and `--account` is rejected for cloud/lease placement.
+
 ### 10. Session recovery is one decision on the origin device
 
 `resolveSessionRecovery` in `src/lib/session/recovery.ts` is the only place that

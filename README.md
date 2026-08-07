@@ -200,6 +200,19 @@ A trailing `@` opens an account picker before either an interactive or prompt-ba
 
 Account selection is available for Claude, Codex, Gemini, Cursor, Antigravity, Grok, Kimi, Droid, and OpenCode. It requires a terminal and cannot be combined with `--resume`, `--strategy`/`--balanced`, `--lease`, or `--host`/`--device`; profiles and workflows must use their concrete host agent instead.
 
+### Name an account, run it by name
+
+The same identity can be signed into different versions on different machines. Give it a durable name once and route to it anywhere:
+
+```bash
+agents accounts label work claude@2.1.220           # name the identity signed into that version
+agents accounts attach work codex@*                 # add every installed codex on this box (version-global)
+agents accounts list                                # labels, identities, bindings, and drift
+agents run claude --account work                    # run only a verified 'work' version — never another account
+```
+
+The central `~/.agents/accounts.yaml` registry stores **only a SHA-256 identity fingerprint** per harness — no email, account id, or token ever leaves the version home — and it syncs fleet-wide. Which installed versions run under a label lives per-device in `~/.agents/devices/<host>/accounts.yaml`. `attach` verifies the version's live login before writing, and `run --account` / a label-pinned routine **fail loud** rather than fall back to a different identity. `--account` is rejected for vendor-cloud and lease placement.
+
 ### Chain agents
 
 ```bash

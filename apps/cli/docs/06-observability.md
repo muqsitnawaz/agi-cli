@@ -1462,6 +1462,32 @@ Two deliberate boundaries worth knowing:
 The same fields are exposed programmatically via `agents view --json`
 (`email`, `accountId`, `plan`, `usageStatus`, `windows`).
 
+### Logical account labels in the inventory
+
+`agents devices harnesses` / `agents devices accounts`
+([`src/lib/devices/harness-inventory.ts`](../src/lib/devices/harness-inventory.ts))
+annotate each signed-in install with its logical **label** when one is attached
+(issue #2300). Every `HarnessRow` and `AccountGroup` carries an additive
+`label: string \| null`; the text tables show it as a trailing `[label]` tag (so
+an unlabeled row is byte-for-byte unchanged), and `--json` gains the nullable
+`label` field alongside the existing account fields. The mapping is a single
+registry read per host — the live identity's fingerprint looked up in
+`~/.agents/accounts.yaml` (`labelForIdentity`,
+[`src/lib/accounts/status.ts`](../src/lib/accounts/status.ts)).
+
+`agents accounts list` is the dedicated lens: labels, their per-harness
+identities, this device's version bindings, and **drift** — a bound version that
+is now signed out or signed into a different identity than the label names
+(checked live only for installs on the machine you run it on).
+
+**Cross-device fingerprint caveat.** A fingerprint is stable across devices for a
+harness whose identity is a uuid or email (Claude, Codex): the same account
+produces the same fingerprint everywhere, so a label defined on one box matches
+that account on another. A harness whose only stable key is a per-device token
+hash (e.g. Antigravity without a JWT `sub`) fingerprints differently per device;
+its label still works locally (attach verifies on the box that binds it), but the
+same account on a second device needs its own `attach` there.
+
 ## Budget Guardrails (`agents budget`)
 
 `agents cost` is the observability half — it tells you what you already spent.

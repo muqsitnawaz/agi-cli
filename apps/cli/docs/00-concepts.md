@@ -112,6 +112,43 @@ two `pid → id` writers (the CLI's registry vs the SessionStart hook).
 
 ---
 
+## Logical account labels
+
+Every installed harness version keeps its own credential, so the same Claude or
+Codex version can be signed into different identities on different devices, and
+one identity can back several versions. `agents accounts` puts an operator-owned
+**label** above those local credentials so you can name an identity once and
+route runs to it:
+
+```bash
+agents accounts label work claude@2.1.220          # name the identity signed into that version
+agents accounts attach work claude@2.1.219 codex@0.146.0
+agents accounts attach work codex@*                # version-global: every installed codex here
+agents accounts list                               # labels, per-harness identities, bindings, drift
+agents run claude --account work                   # run only a verified 'work' version
+```
+
+Two files back it, and both are deliberately separate from `agents.yaml` so an
+older agents-cli — which rewrites `agents.yaml` but knows nothing of these —
+cannot erase them:
+
+- **Central registry `~/.agents/accounts.yaml`** — fleet-synced (rides the
+  `~/.agents` git sync). Stores only a SHA-256 **identity fingerprint** per
+  `(label, harness)`; no email, account id, or token ever leaves the version
+  home. A label holds at most one identity per harness, and one identity belongs
+  to at most one label.
+- **Per-device bindings `~/.agents/devices/<host>/accounts.yaml`** — which
+  installed versions on that device run under each label. A version list, or `*`
+  for version-global auth (the whole harness is one account on that box).
+
+`attach`/`label` verify the version's **live** identity (`getAccountInfo`) before
+writing a binding — a version signed into a different identity is refused, and a
+generic "signed in" with no distinguishing key cannot be labeled. `run --account`
+and label-pinned routines resolve to a bound version whose live fingerprint still
+matches and **fail loud** otherwise; explicit account routing never falls back to
+another identity. `--account` is rejected for vendor-cloud and lease placement,
+which never touch a local version home.
+
 ## Devices & Hosts
 
 agents-cli can run commands on **other machines**, not just the local one. Two

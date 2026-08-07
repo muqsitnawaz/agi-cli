@@ -756,6 +756,19 @@ at fire time, the run warns and falls back to the strategy rather than refusing 
 so a stale pin degrades to "unpinned", never to "dead". List signed-in accounts
 with `agents view`.
 
+**`account:` also accepts a logical account label** (see
+[00-concepts.md](00-concepts.md#logical-account-labels)). When the value names a
+label defined in `~/.agents/accounts.yaml` that has an identity for the routine's
+harness, it resolves to the installed version whose live identity fingerprint
+matches the label — and, unlike the legacy email/accountKey pin above, a labeled
+routine **fails loud** if no bound version matches rather than falling back to
+another account. A labeled account is the durable, cross-device way to keep an
+unattended routine on one identity even as version numbers churn:
+
+```yaml
+account: work               # a label — resolves to the 'work' identity, fails loud if absent
+```
+
 ## Execution Flow
 
 Temporal sequence from cron fire to report saved.
