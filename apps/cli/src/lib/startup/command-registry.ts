@@ -29,6 +29,7 @@ export type ModuleLoader = () => Promise<Registrar>;
 // One loader per command module. Each dynamically imports the module and hands
 // back its register function. Kept as named consts so src/index.ts can compose
 // them into the exact main-branch registration order for the slow path.
+export const loadAccounts: ModuleLoader = async () => (await import('../../commands/accounts.js')).registerAccountsCommand;
 export const loadView: ModuleLoader = async () => (await import('../../commands/view.js')).registerViewCommand;
 export const loadInspect: ModuleLoader = async () => (await import('../../commands/inspect.js')).registerInspectCommand;
 export const loadFeedback: ModuleLoader = async () => (await import('../../commands/feedback.js')).registerFeedbackCommand;
@@ -153,6 +154,7 @@ export const LAZY_COMMAND_NAMES: ReadonlySet<string> = new Set([
  * are handled directly in src/index.ts.
  */
 export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
+  accounts: [loadAccounts],
   view: [loadView],
   inspect: [loadInspect],
   feedback: [loadFeedback],

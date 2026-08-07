@@ -71,6 +71,8 @@ interface ExecCommandActionOptions {
   fallback?: string;
   balanced?: boolean;
   strategy?: string;
+  /** Restrict selection to the locally bound logical account label (issue #2300). */
+  account?: string;
   /**
    * @deprecated Hidden alias for `--device auto`. Resolved before host dispatch.
    * Remove after one release.
@@ -781,6 +783,7 @@ export function registerRunCommand(program: Command): void {
       '--strategy <strategy>',
       'Version/account selection strategy: pinned | available | balanced. Defaults to run.<agent>.strategy, then balanced (spreads load across healthy accounts and skips any that are rate-limited). (Legacy `rotate` accepted as alias for `balanced`.)',
     )
+    .option('--account <label>', 'Run the installed version attached to this logical account label on the current device (verified by identity; never falls back to another account)')
     .option(
       '--acp',
       'Route through the Agent Client Protocol instead of direct exec. Supported for claude via @zed-industries/claude-code-acp adapter. Unified event stream; emits ndjson when --json.',
@@ -1030,6 +1033,21 @@ export function registerRunCommand(program: Command): void {
           console.error(chalk.red(
             `--cloud is a vendor cloud placement; these only apply to local/machine runs: ${conflicts.join(', ')}. Drop them, or drop --cloud.`,
           ));
+          process.exit(1);
+        }
+      }
+
+      // --account selects a LOCAL installed identity by verified fingerprint
+      // (issue #2300); it is meaningless for a placement that never touches a
+      // local version home. Reject it BEFORE the cloud/lease dispatch paths
+      // below branch off — the strategy-path guard alone is too late for them.
+      if (options.account) {
+        const whereStr = typeof options.where === 'string' ? options.where.trim().toLowerCase() : '';
+        const placement =
+          options.cloud || options.provider || options.lease ||
+          /^(cloud|lease)(:|$)/.test(whereStr);
+        if (placement) {
+          console.error(chalk.red('--account selects a local installed identity and cannot be combined with cloud or lease placement.'));
           process.exit(1);
         }
       }
@@ -2539,6 +2557,25 @@ export function registerRunCommand(program: Command): void {
 
       version = resolveVersionAlias(agent, version);
 
+      if (options.account) {
+        // Placement conflicts (cloud/lease) are rejected earlier, before those
+        // paths dispatch. Here we resolve the label on the local path.
+        const { resolveAccountLabel } = await import('../lib/accounts/resolve.js');
+        const resolution = await resolveAccountLabel(agent, options.account);
+        if (!resolution.ok) {
+          // Fail loud — an explicit --account NEVER falls back to another account.
+          console.error(chalk.red(resolution.reason));
+          process.exit(1);
+        }
+        if (version && !resolution.matches.includes(version)) {
+          console.error(chalk.red(
+            `${agent}@${version} is not signed into account label '${options.account}' on this device.`,
+          ));
+          process.exit(1);
+        }
+        version = version ?? resolution.version;
+      }
+
       // --resume: resolve a prior conversation and rewrite the run target to
       // continue it. `version` here is already the alias-resolved candidate-version
       // FILTER (undefined for default/any, concrete for @latest/@oldest/@x.y.z);
@@ -2709,7 +2746,7 @@ export function registerRunCommand(program: Command): void {
       // the bare primary still resolves through the strategy — otherwise every
       // `agents run claude --fallback codex` run lands on the pinned default
       // account and account rotation silently stops (the gh-monitor heal bug).
-      if (!accountPickerRequested && (strategy !== 'pinned' || options.balanced || explicitStrategy)) {
+      if (!accountPickerRequested && !options.account && (strategy !== 'pinned' || options.balanced || explicitStrategy)) {
         if (version) {
           process.stderr.write(chalk.yellow(`[agents] strategy ${strategy} ignored: version ${version} is pinned\n`));
         } else if (fromProfile) {

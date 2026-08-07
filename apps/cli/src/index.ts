@@ -124,6 +124,7 @@ if (IS_DEV_BUILD) {
 import {
   COMMAND_LOADERS,
   LAZY_COMMAND_NAMES,
+  loadAccounts,
   loadView,
   loadInspect,
   loadFeedback,
@@ -1070,6 +1071,7 @@ async function registerEagerForRequest(name: string): Promise<boolean> {
  * picker — must match main byte-for-byte.
  */
 async function registerAllEagerCommands(): Promise<void> {
+  await reg(loadAccounts);
   await reg(loadView);
   registerResourcesTombstoneCommand(program);
   await reg(loadShare);

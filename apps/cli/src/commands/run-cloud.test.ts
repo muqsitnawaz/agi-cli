@@ -85,6 +85,8 @@ describe('runCloudConflicts', () => {
     expect(runCloudConflicts({ fallback: 'codex' })).toContain('--fallback');
     expect(runCloudConflicts({ strategy: 'balanced' })).toContain('--strategy');
     expect(runCloudConflicts({ balanced: true })).toContain('--balanced');
+    // --account is a local identity selector; rejected for cloud placement (issue #2300).
+    expect(runCloudConflicts({ account: 'work' })).toContain('--account');
     expect(runCloudConflicts({ cwd: '/tmp/x' })).toContain('--cwd');
     expect(runCloudConflicts({ env: ['A=B'] })).toContain('--env');
     expect(runCloudConflicts({ notify: true })).toContain('--notify');

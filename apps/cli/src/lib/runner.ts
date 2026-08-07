@@ -594,6 +594,21 @@ export async function resolveRoutineLaunch(
   // credential (RUSH-1957). Falls through to the strategy only when the account
   // is not signed in on this box, with a loud warning rather than a silent stall.
   if (config.account) {
+    // A logical account label (issue #2300) is a first-class pin: it resolves to
+    // the installed version whose live identity matches the label's fingerprint
+    // and FAILS LOUD if none does — a labeled routine must never silently run
+    // under a different identity. Only a value that is NOT a known label falls
+    // back to the legacy email/accountKey match below.
+    const { readAccountLabels } = await import('./accounts/registry.js');
+    const isLabel = readAccountLabels().labels[config.account]?.[agent] !== undefined;
+    if (isLabel) {
+      const { resolveAccountLabel } = await import('./accounts/resolve.js');
+      const resolution = await resolveAccountLabel(agent, config.account);
+      if (!resolution.ok) {
+        throw new Error(`routine ${config.name}: account label '${config.account}' — ${resolution.reason}`);
+      }
+      return { chain: [{ agent, version: resolution.version }], rotation: null, pinned: true };
+    }
     const version = await resolveAccountVersion(agent, config.account);
     if (version) {
       return { chain: [{ agent, version }], rotation: null, pinned: true };

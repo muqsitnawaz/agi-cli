@@ -52,6 +52,8 @@ const RUN_CLOUD_CONFLICTS: Array<{ field: string; flag: string; set: (v: unknown
   { field: 'fallback', flag: '--fallback', set: (v) => v !== undefined },
   { field: 'strategy', flag: '--strategy', set: (v) => v !== undefined },
   { field: 'balanced', flag: '--balanced', set: (v) => v === true },
+  // --account selects a local installed identity; a cloud task has no version home.
+  { field: 'account', flag: '--account', set: (v) => v !== undefined },
   { field: 'cwd', flag: '--cwd', set: (v) => v !== undefined },
   { field: 'project', flag: '--project', set: (v) => v !== undefined },
   { field: 'addDir', flag: '--add-dir', set: (v) => Array.isArray(v) && (v as string[]).length > 0 },
