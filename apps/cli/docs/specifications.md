@@ -214,6 +214,13 @@ SSH access (§7); rendering sessions that no harness produced.
   first-prompt `topic`; the picker uses pure regex/heuristic digests
   (`lib/session/digest.ts:1-9`). No preview path may make a network/LLM call or
   block on async I/O.
+
+- **SES-9a (MUST).** `sessions preview <id-or-prefix>` MUST resolve ID-shaped
+  selectors through the SQLite ID index across the selected fleet. A full UUID
+  MAY return on its first exact hit; a short prefix MUST wait for all selected
+  peers and fail closed when any peer is unavailable. Durable preview data MUST
+  be invalidated by the transcript's actual mtime + size. Live status MUST NOT
+  be stored in that durable digest and MUST expire within 15 seconds.
 - **SES-10 (MUST).** A preview string MUST be cleaned of terminal/harness noise
   (OSC titles, CSI/SGR, harness tags, collapsed whitespace) before display
   (`cleanPreview`, `commands/sessions.ts:329-337`), and truncated width-aware
