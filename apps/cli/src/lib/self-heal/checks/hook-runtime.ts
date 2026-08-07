@@ -13,7 +13,7 @@ export const hookRuntimeCheck: HealCheck = {
   title: 'Generated hook runtime shims',
   cadence: 'frequent',
   async run(ctx: HealCtx): Promise<CheckResult> {
-    const report = repairManagedHookRuntimeArtifacts({ dryRun: ctx.dryRun });
+    const report = repairManagedHookRuntimeArtifacts({ dryRun: ctx.dryRun, unattended: true });
     return resultOf(report.fixed, report.needsAttention);
   },
 };

@@ -389,12 +389,15 @@ describe('repairManagedHookRuntimeArtifacts', () => {
     expect(r.pass1.attempts[0].repaired).toBe(false);
     expect(r.pass1.fixed).toEqual([]);
     expect(r.pass1.needsAttention).toHaveLength(1);
-    expect(r.pass1.needsAttention[0]).toMatch(/^hook shim runtime-guard: /);
-    // Independent second pass also attempts once (still broken) — not an
-    // in-pass retry loop.
+    // Stable: errno codes + detector reason only — no absolute paths/temp UUIDs.
+    expect(r.pass1.needsAttention[0]).toMatch(
+      /^hook shim runtime-guard: repair failed \[[A-Z0-9_]+\]: cannot inspect \([A-Z0-9_]+\)$/,
+    );
+    expect(r.pass1.needsAttention[0]).not.toMatch(/\/tmp\/|\.tmp|[0-9a-f]{8}-[0-9a-f]{4}/i);
+    // Independent second pass: identical needsAttention (stable for fleet aggregation).
     expect(r.pass2.attempts).toHaveLength(1);
     expect(r.pass2.attemptedPaths).toHaveLength(1);
-    expect(r.pass2.needsAttention[0]).toMatch(/^hook shim runtime-guard: /);
+    expect(r.pass2.needsAttention).toEqual(r.pass1.needsAttention);
   });
 
   it('dedupes multiple versions to one generation attempt per unique path', () => {
@@ -423,5 +426,42 @@ describe('repairManagedHookRuntimeArtifacts', () => {
     expect(r.attemptedPaths).toBe(1);
     expect(r.attempts).toBe(1);
     expect(r.fixed).toEqual(['hook shim runtime-guard']);
+  });
+
+  it('picks the global-default version source when multiple versions share a shim path', () => {
+    // Older version first alphabetically so a naive sort would pick 1.0.0.
+    seedClaudeVersionWithGeneratedShim('1.0.0', 'runtime-guard', 'PreToolUse');
+    seedClaudeVersionWithGeneratedShim('2.0.0', 'runtime-guard', 'PreToolUse');
+    // Distinct script contents so the embedded SOURCE is observable.
+    const v1 = path.join(userDir, '.history', 'versions', 'claude', '1.0.0', 'home', '.claude', 'hooks', 'runtime-guard.sh');
+    const v2 = path.join(userDir, '.history', 'versions', 'claude', '2.0.0', 'home', '.claude', 'hooks', 'runtime-guard.sh');
+    fs.writeFileSync(v1, '#!/bin/sh\necho OLD\nexit 0\n', { mode: 0o755 });
+    fs.writeFileSync(v2, '#!/bin/sh\necho NEW\nexit 0\n', { mode: 0o755 });
+    // agents.yaml already pins claude: "2.0.0" from beforeEach.
+    const out = runRuntime(`
+      const fs = await import('node:fs');
+      const pass = mod.repairManagedHookRuntimeArtifacts({ filter: { agent: 'claude' } });
+      const shimPath = pass.attempts[0]?.path;
+      const body = shimPath && fs.existsSync(shimPath) ? fs.readFileSync(shimPath, 'utf-8') : '';
+      console.log(JSON.stringify({
+        fixed: pass.fixed,
+        attempts: pass.attempts.length,
+        body,
+        defaultScript: ${JSON.stringify(v2)},
+        oldScript: ${JSON.stringify(v1)},
+      }));
+    `);
+    const r = JSON.parse(out) as {
+      fixed: string[];
+      attempts: number;
+      body: string;
+      defaultScript: string;
+      oldScript: string;
+    };
+    expect(r.attempts).toBe(1);
+    expect(r.fixed).toEqual(['hook shim runtime-guard']);
+    // SOURCE embeds the default version's script, not the older 1.0.0 copy.
+    expect(r.body).toContain(r.defaultScript);
+    expect(r.body).not.toContain(r.oldScript);
   });
 });
