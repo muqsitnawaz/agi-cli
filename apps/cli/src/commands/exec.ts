@@ -637,17 +637,18 @@ async function handleTerminalHandoff(
   // the whole Kimi/DeepSeek/Qwen/GLM path — for `--terminal` runs only.
   const rawTarget = parseRunAccountPickerRequest(agentSpec).normalizedAgentSpec.split('@')[0];
   const knownAgent = resolveAgentName(rawTarget);
-  if (knownAgent && isAgentHardDeprecated(knownAgent)) {
+  const [{ profileExists }, { resolveWorkflowRef }] = await Promise.all([
+    import('../lib/profiles.js'),
+    import('../lib/workflows.js'),
+  ]);
+  const hasProfile = profileExists(rawTarget);
+  if (knownAgent && !hasProfile && isAgentHardDeprecated(knownAgent)) {
     console.error(chalk.red(hardDeprecationError(knownAgent)));
     process.exit(1);
   }
   if (!knownAgent) {
-    const [{ profileExists }, { resolveWorkflowRef }] = await Promise.all([
-      import('../lib/profiles.js'),
-      import('../lib/workflows.js'),
-    ]);
     const probeCwd = options.cwd ?? process.cwd();
-    if (!profileExists(rawTarget) && !resolveWorkflowRef(rawTarget, probeCwd)) {
+    if (!hasProfile && !resolveWorkflowRef(rawTarget, probeCwd)) {
       console.error(chalk.red(
         `Unknown agent, profile, or workflow: ${rawTarget}. See \`agents list\` for the installed harnesses.`,
       ));
@@ -1118,8 +1119,10 @@ export function registerRunCommand(program: Command): void {
       }
 
       // Hard-deprecated harnesses cannot be run — point the user at the successor.
-      const runBaseAgentId = resolveAgentName(normalizedAgentSpec.split('@')[0]);
-      if (runBaseAgentId && isAgentHardDeprecated(runBaseAgentId)) {
+      const runBaseAgentName = normalizedAgentSpec.split('@')[0];
+      const runBaseAgentId = resolveAgentName(runBaseAgentName);
+      const { profileExists: runProfileExists } = await import('../lib/profiles.js');
+      if (runBaseAgentId && !runProfileExists(runBaseAgentName) && isAgentHardDeprecated(runBaseAgentId)) {
         console.error(chalk.red(hardDeprecationError(runBaseAgentId)));
         process.exit(1);
       }

@@ -533,4 +533,49 @@ describe('custom harness names take precedence over native agent ids', () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('runs a custom harness named after a hard-deprecated native id', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'exec-profile-deprecated-name-'));
+    const binDir = path.join(root, 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.mkdirSync(path.join(root, '.agents', '.system', '.git'), { recursive: true });
+    fs.mkdirSync(path.join(root, '.agents', 'profiles'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.agents', 'agents.yaml'), 'agents: {}\n');
+    fs.writeFileSync(
+      path.join(root, '.agents', 'profiles', 'gemini.yml'),
+      [
+        'name: gemini',
+        'host:',
+        '  agent: opencode',
+        'provider: openrouter',
+        'env:',
+        '  OPENCODE_MODEL: deepseek/deepseek-v3.2',
+        '',
+      ].join('\n'),
+    );
+    const opencode = path.join(binDir, process.platform === 'win32' ? 'opencode.cmd' : 'opencode');
+    fs.writeFileSync(
+      opencode,
+      process.platform === 'win32'
+        ? '@echo OK\r\n'
+        : '#!/bin/sh\nprintf "OK\\n"\n',
+      { mode: 0o755 },
+    );
+    try {
+      const tsxImport = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
+      const result = spawnSync(
+        'node',
+        ['--import', tsxImport, path.resolve(import.meta.dirname, '..', 'index.ts'), 'run', 'gemini', 'probe', '--mode', 'plan', '--quiet', '--cwd', root],
+        {
+          cwd: path.resolve(import.meta.dirname, '..', '..'),
+          env: { ...process.env, HOME: root, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}` },
+          encoding: 'utf8',
+        },
+      );
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+      expect(result.stderr).toContain("Resolved custom harness 'gemini' -> opencode");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
