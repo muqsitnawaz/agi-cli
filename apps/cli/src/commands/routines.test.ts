@@ -222,6 +222,9 @@ const baseJob = {
   schedule: '0 3 * * *',
   agent: 'claude',
   prompt: 'noop',
+  // Agent routines now need an execution anchor to activate (RUSH-2290); home
+  // is a valid one and keeps these device/eligibility fixtures ready.
+  cwd: '~',
   // Legacy fixture state: tests that specifically cover the new manifest model
   // materialize a device document below.
   enabled: true,
@@ -1191,6 +1194,7 @@ describeRoutines('routines add --devices empty/whitespace fails closed', () => {
         '--schedule', '0 3 * * *',
         '--agent', 'claude',
         '--prompt', 'hi',
+        '--cwd', '~',
         '--devices', 'yosemite-s0',
       ], { AGENTS_SYNC_MACHINE_ID: 'yosemite-s0' });
       expect(res.status).toBe(0);
