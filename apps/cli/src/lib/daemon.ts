@@ -26,8 +26,9 @@ import { BrowserService } from './browser/service.js';
 import { BrowserIPCServer } from './browser/ipc.js';
 import { redactSecrets } from './redact.js';
 import { getAgentsBinPath, getCliLaunch, BUN_VIRTUAL_ROOT } from './cli-entry.js';
-import { isSchedulerEnabled, assertSchedulerEnabled } from './device-config.js';
+import { isSchedulerEnabled, assertSchedulerEnabled, isDaemonEnabled } from './device-config.js';
 import { reapTerminalRoutineProcesses } from './routine-process-cleanup.js';
+import { recordSubsystemOk, recordSubsystemError, SUBSYSTEM_SECRETS_BROKER, SUBSYSTEM_BROWSER_IPC } from './daemon-health.js';
 
 const PID_FILE = 'daemon.pid';
 const LOCK_FILE = 'daemon.lock';
@@ -482,8 +483,11 @@ export async function runDaemon(): Promise<void> {
       hostedBroker = await startHostedBroker();
       if (hostedBroker) log('INFO', 'Secrets broker hosted in daemon (socket-first)');
     }
+    recordSubsystemOk(SUBSYSTEM_SECRETS_BROKER);
   } catch (err) {
-    log('WARN', `Secrets broker host skipped: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    log('WARN', `Secrets broker host skipped: ${message}`);
+    recordSubsystemError(SUBSYSTEM_SECRETS_BROKER, message);
   }
 
   // scheduler.enabled=false in this machine's device doc means NO routines fire
@@ -702,8 +706,11 @@ export async function runDaemon(): Promise<void> {
   try {
     await browserIPC.start();
     log('INFO', 'Browser IPC server started');
+    recordSubsystemOk(SUBSYSTEM_BROWSER_IPC);
   } catch (err) {
-    log('ERROR', `Browser IPC failed to start: ${(err as Error).message}`);
+    const message = (err as Error).message;
+    log('ERROR', `Browser IPC failed to start: ${message}`);
+    recordSubsystemError(SUBSYSTEM_BROWSER_IPC, message);
   }
 
   writeHeartbeat();
@@ -1023,6 +1030,11 @@ export function startDaemon(agentsBin?: string): { pid: number | null; method: s
  * happened to bring it up. See issue #415.
  */
 export function ensureDaemonStarted(): { pid: number | null; method: string } | null {
+  // RUSH-2354: honor daemon.enabled — a background-adjacent caller (secrets
+  // unlock, browser start, ...) must not resurrect a daemon the owner
+  // explicitly turned off. `agents daemon start` is the deliberate override
+  // and calls startDaemon() directly instead of going through this helper.
+  if (!isDaemonEnabled()) return null;
   try {
     return startDaemon();
   } catch {
