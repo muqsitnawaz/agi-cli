@@ -116,6 +116,13 @@ function plantClaudeBinary(version: string): void {
   fs.writeFileSync(stub, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
 }
 
+function plantCodexBinary(version: string): void {
+  const binDir = path.join(userDir, '.history', 'versions', 'codex', version, 'node_modules', '.bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  const stub = path.join(binDir, 'codex');
+  fs.writeFileSync(stub, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+}
+
 /** Seed a system-layer hook manifest + a version-home hooks dir carrying the
  *  hook script, so the inspector resolves a command it expects to be wired. */
 function seedClaudeVersionWithHook(version: string, hookName: string, event: string): string {
@@ -459,6 +466,57 @@ describe('repairManagedHookRuntimeArtifacts', () => {
     // SOURCE embeds the default version's script, not the older 1.0.0 copy.
     expect(r.body).toContain(r.defaultScript);
     expect(r.body).not.toContain(r.oldScript);
+  });
+
+  it('uses the global canonical owner when another harness checks the same shim', () => {
+    const claudeHome = seedClaudeVersionWithGeneratedShim('2.0.0', 'runtime-guard', 'PreToolUse');
+    const claudeScript = path.join(claudeHome, '.claude', 'hooks', 'runtime-guard.sh');
+    fs.writeFileSync(claudeScript, '#!/bin/sh\necho CLAUDE\n', { mode: 0o755 });
+
+    plantCodexBinary('0.130.0');
+    const codexScript = path.join(
+      userDir,
+      '.history',
+      'versions',
+      'codex',
+      '0.130.0',
+      'home',
+      '.codex',
+      'hooks',
+      'runtime-guard.sh',
+    );
+    fs.mkdirSync(path.dirname(codexScript), { recursive: true });
+    fs.writeFileSync(codexScript, '#!/bin/sh\necho CODEX\n', { mode: 0o755 });
+
+    const out = runRuntime(`
+      const fs = await import('node:fs');
+      const repair = mod.repairManagedHookRuntimeArtifacts();
+      const claude = mod.checkVersionHookWiring('claude', '2.0.0');
+      const codex = mod.checkVersionHookWiring('codex', '0.130.0');
+      const shim = process.env.AGENTS_HOOK_SHIMS_DIR + '/runtime-guard.sh';
+      console.log(JSON.stringify({
+        repair,
+        claude,
+        codex,
+        body: fs.readFileSync(shim, 'utf8'),
+        claudeScript: ${JSON.stringify(claudeScript)},
+        codexScript: ${JSON.stringify(codexScript)},
+      }));
+    `);
+    const r = JSON.parse(out) as {
+      repair: RuntimeRepairReport;
+      claude: WiringReport;
+      codex: WiringReport;
+      body: string;
+      claudeScript: string;
+      codexScript: string;
+    };
+
+    expect(r.repair.fixed).toEqual(['hook shim runtime-guard']);
+    expect(r.claude.runtimeBroken).toEqual([]);
+    expect(r.codex.runtimeBroken).toEqual([]);
+    expect(r.body).toContain(`SOURCE='${r.claudeScript}'`);
+    expect(r.body).not.toContain(r.codexScript);
   });
 
   it('rewrites an executable wrapper whose SOURCE points to a removed old version', () => {

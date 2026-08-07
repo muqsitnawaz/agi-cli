@@ -1016,12 +1016,16 @@ export function inspectBrokenManagedHookRuntimeArtifacts(
   filter?: { agent?: AgentId; version?: string },
   platform: NodeJS.Platform = process.platform,
 ): BrokenManagedHookRuntimeArtifact[] {
-  // An exact version is added to the installed set when absent so a targeted
-  // doctor inspection can diagnose a materialized-but-gutted home. Keep the
-  // other installed versions too: the generated destination is global and its
-  // source must be chosen from the canonical owner, not the caller's order.
-  const versions = iterHooksCapableVersions(filter?.agent ? { agent: filter.agent } : undefined);
-  if (filter?.agent && filter.version && !versions.some((v) => v.version === filter.version)) {
+  // Generated destinations are shared across every harness. Always select the
+  // owner from the global population first; an agent-scoped doctor call may
+  // restrict which shim names are relevant, but must not change the expected
+  // SOURCE for a shared wrapper.
+  const versions = iterHooksCapableVersions();
+  if (
+    filter?.agent &&
+    filter.version &&
+    !versions.some((v) => v.agent === filter.agent && v.version === filter.version)
+  ) {
     versions.push({ agent: filter.agent, version: filter.version });
   }
   const artifacts: ManagedHookRuntimeArtifact[] = [];
@@ -1029,8 +1033,20 @@ export function inspectBrokenManagedHookRuntimeArtifacts(
     artifacts.push(...managedHookRuntimeArtifactsForVersion(agent, version));
   }
 
+  const relevantShimPaths = filter?.agent
+    ? new Set(
+      artifacts
+        .filter((artifact) =>
+          artifact.agent === filter.agent &&
+          (!filter.version || artifact.version === filter.version),
+        )
+        .map((artifact) => artifact.shimPath),
+    )
+    : undefined;
+
   const broken: BrokenManagedHookRuntimeArtifact[] = [];
   for (const artifact of selectCanonicalHookRuntimeArtifacts(artifacts)) {
+    if (relevantShimPaths && !relevantShimPaths.has(artifact.shimPath)) continue;
     const reason = hookRuntimeProblem(artifact, platform);
     if (reason) broken.push({ ...artifact, reason });
   }
