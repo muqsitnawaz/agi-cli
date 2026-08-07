@@ -75,8 +75,8 @@ import { setHelpSections } from '../lib/help.js';
 import { registerSessionsTailCommand } from './sessions-tail.js';
 import { registerSessionsResumeCommand } from './sessions-resume.js';
 import { registerSessionsForkCommand } from './fork.js';
-import { registerSessionsFavoriteCommand } from './sessions-favorite.js';
-import { isFavorite, listFavorites } from '../lib/session/favorites.js';
+import { registerSessionsBookmarkCommand } from './sessions-bookmark.js';
+import { isBookmarked, listBookmarks } from '../lib/session/bookmarks.js';
 import { registerGoCommand } from './go.js';
 import { registerFocusCommand } from './focus.js';
 import { registerReconnectCommand } from './reconnect.js';
@@ -167,8 +167,8 @@ interface SessionsOptions extends SessionFilterOptions {
   abandoned?: boolean;
   queued?: boolean;
   unknown?: boolean;
-  /** Show only favorited sessions — the `f` key's flag twin. */
-  favorites?: boolean;
+  /** Show only bookmarked sessions — the `b` key's flag twin. */
+  bookmarks?: boolean;
   /** Enrich the listing with live glyphs/preview for running rows. Default on;
    * `--no-live` sets this false. Commander's `--no-` convention. */
   live?: boolean;
@@ -1537,33 +1537,37 @@ async function gatherActiveSessionsLive(
 async function renderActiveSessions(
   asJson: boolean,
   waitingOnly = false,
-  opts: { local?: boolean; hosts?: string[]; favoritesOnly?: boolean; statuses?: LiveStatusFilter[] } = {},
+  opts: {
+    local?: boolean;
+    hosts?: string[];
+    bookmarksOnly?: boolean;
+    statuses?: LiveStatusFilter[];
+    routine?: boolean | string;
+  } = {},
 ): Promise<void> {
   const self = machineId();
   const gathered = await gatherActiveSessions(opts);
   const { remoteDeviceCount } = gathered;
-  // --favorites narrows the live view too. Applied HERE, not only in the
+  // Backfill agent version, refs, created time, and routine provenance from the
+  // historical index. Routine filtering needs that provenance before it narrows
+  // the live pool; doing it here also enriches both JSON and human output.
+  backfillActiveRowsFromIndex(gathered.sessions);
+  // --bookmarks narrows the live view too. Applied HERE, not only in the
   // browser: the browser is skipped for --json, --waiting, a pipe, a multi-host
   // scope, and an SSH-fanout peer, and the flag silently did nothing on every
-  // one of those paths — including `--active --favorites --json`, which is
+  // one of those paths — including `--active --bookmarks --json`, which is
   // exactly what the browser's own `y` copy-cmd hands to an agent.
-  const merged = opts.favoritesOnly
-    ? gathered.sessions.filter((s) => !!s.sessionId && listFavorites().has(s.sessionId))
+  const merged = opts.bookmarksOnly
+    ? gathered.sessions.filter((s) => !!s.sessionId && listBookmarks().has(s.sessionId))
     : gathered.sessions;
+  const routineFiltered = filterActiveSessionsByRoutine(merged, opts.routine);
 
   // Status flags form a union. --waiting additionally retains its scriptable
   // gate: exit non-zero when the union contains a session awaiting the user.
   const statusFiltered = opts.statuses?.length
-    ? merged.filter((session) => opts.statuses!.some((status) => matchesLiveStatus(session, status)))
-    : merged.filter(isRunningLiveSession);
+    ? routineFiltered.filter((session) => opts.statuses!.some((status) => matchesLiveStatus(session, status)))
+    : routineFiltered.filter(isRunningLiveSession);
   const sessions = statusFiltered;
-
-  // Backfill agent version + ticket/PR/label/created onto the live rows from the
-  // historical index (RUSH-2205) — a running process reports none of these, and
-  // an orphan row usually lacks them. Done before both the JSON and human paths
-  // so every consumer (incl. the SSH fan-out's remote --json) sees enriched rows;
-  // transcripts sync across the fleet, so a remote row resolves from the local DB.
-  backfillActiveRowsFromIndex(sessions);
 
   if (asJson) {
     // Resolve who is watching each local tmux pane before serializing: `viewingIn`
@@ -1610,6 +1614,25 @@ async function renderActiveSessions(
 
   // Scriptable gate: a non-zero exit when anything is waiting on the user.
   if (waitingOnly && sessions.some(isAwaitingUser)) process.exitCode = 1;
+}
+
+/** Apply the routine selector to enriched live rows for every non-browser active view. */
+export function filterActiveSessionsByRoutine(
+  sessions: ActiveSession[],
+  routine: boolean | string | undefined,
+): ActiveSession[] {
+  if (!routine) return sessions;
+  const routineSessions = sessions.filter((session) =>
+    session.origin === 'routine' || !!session.routineName,
+  );
+  if (typeof routine !== 'string') return routineSessions;
+  const names = [...new Set(
+    routineSessions.map((session) => session.routineName).filter((name): name is string => !!name),
+  )];
+  const selected = resolveRoutineName(routine, names);
+  return selected
+    ? routineSessions.filter((session) => session.routineName === selected)
+    : [];
 }
 
 export type LiveStatusFilter =
@@ -1691,7 +1714,9 @@ export function hasNoBrowserDisqualifyingFlags(
 ): boolean {
   return (
     !query &&
-    !options.routine &&
+    // A named team view is a flat selectable pool; the bare --teams report
+    // stays grouped and printed because the browser cannot preserve its shape.
+    (!options.teams || !!options.inTeam) &&
     !options.flat &&
     !options.tree &&
     !options.markdown &&
@@ -1882,7 +1907,7 @@ function canonicalSessionsCommand(query: string | undefined, options: SessionsOp
   if (options.until) a.push('--until', options.until);
   if (options.local) a.push('--local');
   if (options.waiting) a.push('--waiting');
-  if (options.favorites) a.push('--favorites');
+  if (options.bookmarks) a.push('--bookmarks');
   const q = (query ?? '').trim();
   if (q) a.push(JSON.stringify(q));
   return 'ag ' + a.join(' ');
@@ -1997,7 +2022,7 @@ export async function renderSessionPreview(
     }));
     return;
   }
-  const headline = formatLiveStatusHeadline(live, isFavorite(session.id));
+  const headline = formatLiveStatusHeadline(live, isBookmarked(session.id));
   if (headline) console.log(headline);
   console.log(buildPreview(session));
 }
@@ -2012,11 +2037,11 @@ export async function renderSessionPreview(
  * reads "orphan" and knows it means "still running in tmux with no window
  * attached", so those two spell it out.
  */
-export function formatLiveStatusHeadline(live: ActiveSession | undefined, favorite = false): string {
-  const star = favorite ? chalk.yellow('★ ') : '';
+export function formatLiveStatusHeadline(live: ActiveSession | undefined, bookmarked = false): string {
+  const star = bookmarked ? chalk.yellow('★ ') : '';
   // With no live row there is no status to lead with, so the star has to say
   // what it means on its own — a bare `★` above a preview reads as noise.
-  if (!live) return favorite ? chalk.yellow('★ favorited') : '';
+  if (!live) return bookmarked ? chalk.yellow('★ bookmarked') : '';
   const { glyph } = liveGlyphAndPreview(live);
   const word = liveStatusWord(live) || live.status;
   // One definition, shared with `--waiting`. A second local copy drifted: the
@@ -2413,7 +2438,8 @@ async function sessionsAction(
           host: options.host,
           since: options.since,
           all: options.all,
-          favorites: options.favorites,
+          bookmarks: options.bookmarks,
+          routine: options.routine,
         }),
         { local: options.local === true, hosts: options.host },
       );
@@ -2425,8 +2451,9 @@ async function sessionsAction(
     await renderActiveSessions(options.json === true, options.waiting === true, {
       local: forceLocal,
       hosts: options.host,
-      favoritesOnly: options.favorites === true,
+      bookmarksOnly: options.bookmarks === true,
       statuses: liveStatuses,
+      routine: options.routine,
     });
     return;
   }
@@ -2442,12 +2469,10 @@ async function sessionsAction(
   // printed/render paths (agents and scripts unaffected). An explicit --since seeds
   // the browser's window so the flag is honored, not swallowed.
   //
-  // `--teams` diverts to the printed team-grouped report (printTeamsView, below):
-  // grouping teammates under their team is a shape the flat fuzzy picker cannot
-  // represent, so like --tree it is a printed listing, not an interactive pick.
-  // --teams --flat/--tree keep their inline table rendering; a search query keeps
-  // the picker so `<term> --teams` still searches.
-  if (isBareBrowserListing(options, query) && !options.teams) {
+  // Bare `--teams` still diverts to the printed team-grouped report because the
+  // flat picker cannot preserve that shape. `--in-team <name> --teams` is one
+  // flat lineage, so it qualifies through hasNoBrowserDisqualifyingFlags.
+  if (isBareBrowserListing(options, query)) {
     const { runSessionBrowser, bareBrowserSeed } = await import('./sessions-browser.js');
     await runSessionBrowser(
       bareBrowserSeed({
@@ -2457,7 +2482,8 @@ async function sessionsAction(
         since: options.since,
         host: options.host,
         inTeam: options.inTeam,
-        favorites: options.favorites,
+        bookmarks: options.bookmarks,
+        routine: options.routine,
       }),
       { local: options.local === true, hosts: options.host },
     );
@@ -2653,11 +2679,11 @@ async function sessionsAction(
     // read. Match either, after that pass has populated `teamOrigin`.
     if (options.inTeam) sessions = sessions.filter((s) => matchesTeam(s, options.inTeam!));
 
-    // --favorites narrows to the starred set. Applied here, before the JSON
-    // emit, so `--favorites --json` is the machine-readable twin of the `f` key.
-    if (options.favorites) {
-      const starred = listFavorites();
-      sessions = sessions.filter((s) => starred.has(s.id));
+    // --bookmarks narrows to the bookmarked set. Applied here, before the JSON
+    // emit, so `--bookmarks --json` is the machine-readable twin of the `b` key.
+    if (options.bookmarks) {
+      const bookmarks = listBookmarks();
+      sessions = sessions.filter((s) => bookmarks.has(s.id));
     }
 
     if (toolEvidenceMode) {
@@ -2987,7 +3013,7 @@ export function flatSessionRow(
   live?: ActiveSession,
   showTicket = false,
   cols: PickerColumns = {},
-  favorite = false,
+  bookmarked = false,
 ): string {
   const agentColor = colorAgent(session.agent);
   const age = sessionAgeParts(session.timestamp, session.lastActivity);
@@ -3027,11 +3053,11 @@ export function flatSessionRow(
   const width = terminalWidth();
   const requestedModelW = cols.showModel ? (cols.modelWidth ?? PICKER_MODEL_MAX) : 0;
   // Same conditional 2 cells as the picker's marker, for the same reason.
-  const favW = cols.showFavorite ? 2 : 0;
-  const favCell = cols.showFavorite ? (favorite ? chalk.yellow('★ ') : '  ') : '';
+  const bookmarkW = cols.showBookmark ? 2 : 0;
+  const bookmarkCell = cols.showBookmark ? (bookmarked ? chalk.yellow('★ ') : '  ') : '';
   // Sized against the last-activity label alone, so the creation field is an
   // additive decision the row makes only once it knows what space is left.
-  const fixedW = favW + (10 + 9 + 8 + 16) + glyphW + statusW + machineW + ticketW + wtW + team.width + stringWidth(age.last) + 1;
+  const fixedW = bookmarkW + (10 + 9 + 8 + 16) + glyphW + statusW + machineW + ticketW + wtW + team.width + stringWidth(age.last) + 1;
   const modelSlack = width - fixedW - MIN_TOPIC_W;
   const modelW = requestedModelW <= modelSlack
     ? requestedModelW
@@ -3040,7 +3066,7 @@ export function flatSessionRow(
   const topicW = Math.max(MIN_TOPIC_W, width - fixedW - modelW - when.extraW);
 
   return (
-    favCell +
+    bookmarkCell +
     chalk.white(padToWidth(truncateToWidth(session.shortId, 9), 10)) +
     agentColor(padToWidth(truncateToWidth(session.agent, 8), 9)) +
     chalk.yellow(padToWidth(truncateToWidth(session.version || '-', 7), 8)) +
@@ -3262,9 +3288,9 @@ function printSessionTable(sessions: SessionMeta[], hiddenCount = 0, tree = fals
   // column (and its compact labels) is computed the same way the picker does it.
   const showTicket = sessions.some((s) => ticketLabel(s) !== '');
   const cols = pickerColumnsFor(sessions);
-  const favorites = listFavorites();
+  const bookmarks = listBookmarks();
   for (const session of sessions) {
-    console.log(flatSessionRow(session, liveIndex?.get(session.id), showTicket, cols, favorites.has(session.id)));
+    console.log(flatSessionRow(session, liveIndex?.get(session.id), showTicket, cols, bookmarks.has(session.id)));
   }
 
   const countLine = `${sessions.length} session${sessions.length === 1 ? '' : 's'}.`;
@@ -3609,11 +3635,11 @@ export interface PickerColumns {
    */
   showHost?: boolean;
   /**
-   * Render the favorite marker column. Like every other conditional column here,
+   * Render the bookmark marker column. Like every other conditional column here,
    * it earns its 2 cells only when some row in the pool is actually starred — a
-   * user who has never favorited anything pays nothing for the feature.
+   * user who has never bookmarked anything pays nothing for the feature.
    */
-  showFavorite?: boolean;
+  showBookmark?: boolean;
   /**
    * Render the live status column (`working` / `waiting` / `orphan` / `crashed`).
    * Live-only, gated the same way as {@link showHost}: it comes from the
@@ -3689,10 +3715,10 @@ export function pickerColumnsFor(sessions: SessionMeta[]): PickerColumns {
     showModel: sessions.some((s) => !!s.model),
     modelWidth: modelColumnWidth(sessions),
     showTicket: sessions.some((s) => ticketLabel(s) !== ''),
-    showFavorite: (() => {
+    showBookmark: (() => {
       // One read of the store per pool, not one per row.
-      const starred = listFavorites();
-      return starred.size > 0 && sessions.some((s) => starred.has(s.id));
+      const bookmarks = listBookmarks();
+      return bookmarks.size > 0 && sessions.some((s) => bookmarks.has(s.id));
     })(),
   };
 }
@@ -3720,7 +3746,7 @@ export function formatPickerLabel(
   cols: PickerColumns = {},
   ssh?: SshOriginTag,
   host = '',
-  favorite = false,
+  bookmarked = false,
   live?: ActiveSession,
 ): string {
   const agentColor = colorAgent(s.agent);
@@ -3768,11 +3794,11 @@ export function formatPickerLabel(
   const ticketW = cols.showTicket ? TICKET_W + 1 : 0;
   const hostW = cols.showHost ? PICKER_HOST_W : 0;
   const wtW = wt ? stringWidth(wt) + 1 : 0;
-  // Within a pool that HAS starred rows the marker holds its 2 cells whether this
-  // row is starred or not, so the columns after it never jog; a pool with none
-  // drops the column entirely (`showFavorite`) and costs nothing.
-  const favW = cols.showFavorite ? 2 : 0;
-  const favCell = cols.showFavorite ? (favorite ? chalk.yellow('★ ') : '  ') : '';
+  // Within a pool that HAS bookmarked rows the marker holds its 2 cells whether
+  // this row is bookmarked or not, so the columns after it never jog; a pool
+  // with none drops the column entirely (`showBookmark`) and costs nothing.
+  const bookmarkW = cols.showBookmark ? 2 : 0;
+  const bookmarkCell = cols.showBookmark ? (bookmarked ? chalk.yellow('★ ') : '  ') : '';
   // The same status word the flat listing shows, so a session that is `orphan`
   // or `crashed` reads that way in the browser too — not only in its preview.
   // Constant width whenever the column is on. `liveStatusCell` already pads its
@@ -3785,12 +3811,12 @@ export function formatPickerLabel(
   // Sized against the last-activity label alone; the creation field is then an
   // additive decision made against whatever width is left (see the flat listing).
   const baseTopicW =
-    terminalWidth() - gutter - favW - statusW - (10 + 9 + 8 + 16) - machineColW - hostW - ticketW - wtW - sshW - team.width - stringWidth(age.last) - 1;
+    terminalWidth() - gutter - bookmarkW - statusW - (10 + 9 + 8 + 16) - machineColW - hostW - ticketW - wtW - sshW - team.width - stringWidth(age.last) - 1;
   const when = timeCell(age, baseTopicW);
   const topicW = Math.max(MIN_TOPIC_W, baseTopicW - when.extraW);
 
   return (
-    favCell +
+    bookmarkCell +
     // Truncated, not just padded: an indexed shortId is always 8 chars, but a
     // live row with no session id is named by its pid or cloud task, which can
     // run past the column and shunt every later column out of alignment.
@@ -5083,6 +5109,7 @@ export function registerSessionsCommands(program: Command): void {
     .option('--grok', 'Shorthand for --agent grok')
     .option('--opencode', 'Shorthand for --agent opencode')
     .option('--all', 'Widen every non-status filter to "all": every directory (not just this project) and all time (no window cap). Status filters like --active still compose; -a/--device/--since still narrow their axis.')
+    .option('--bookmarks', 'Show only bookmarked sessions — bookmark them with `*` in the browser or `agents sessions bookmark <id>`')
     .option('--unmanaged', "Also show sessions from your own ~/.<agent> installs (hidden once agents-cli manages that agent)")
     .option('--team, --teams', 'Show team-spawned sessions (hidden by default), grouped by team — each team names its spawner and spawn time, teammates show their mode + handle, and team-flagged spawns with no teammate record sink into a (no team) bucket. --flat/--tree keep the plain inline table')
     .option('--in-team <name>', "Only this team: the session that spawned it plus (with --teams) its teammates. Spans every directory and all time, since a team's worktrees and history sit outside the default window.")
@@ -5116,7 +5143,6 @@ export function registerSessionsCommands(program: Command): void {
     .option('--abandoned', 'Show sessions with no transcript progress for the abandonment window (implies --active)')
     .option('--queued', 'Show queued sessions that have not started running (implies --active)')
     .option('--unknown', 'Show sessions whose live state cannot be determined (implies --active)')
-    .option('--favorites', 'Show only favorited sessions — favorite them with `*` in the browser or `agents sessions favorite <id>`')
     .option('--tree', 'Group the listing by directory; drops the id/version columns for readability')
     .option('--flat', 'Plain flat table (one row per session) instead of the grouped project overview')
     .option('--no-live', 'Do not enrich the listing with live status/preview for running sessions')
@@ -5299,7 +5325,7 @@ export function registerSessionsCommands(program: Command): void {
   registerSessionsTailCommand(sessionsCmd);
   registerSessionsResumeCommand(sessionsCmd);
   registerSessionsForkCommand(sessionsCmd);
-  registerSessionsFavoriteCommand(sessionsCmd);
+  registerSessionsBookmarkCommand(sessionsCmd);
   registerGoCommand(sessionsCmd);
   registerFocusCommand(sessionsCmd);
   registerReconnectCommand(sessionsCmd);
