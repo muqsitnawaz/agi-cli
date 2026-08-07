@@ -929,7 +929,15 @@ export interface HookWiringReport {
  * dangling symlink is deliberately distinguished from an absent file because
  * the repair/remediation is the same but the diagnostic is materially clearer.
  */
-function hookRuntimeProblem(shimPath: string, platform: NodeJS.Platform = process.platform): string | null {
+function shellQuoteForHookShim(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function hookRuntimeProblem(
+  artifact: ManagedHookRuntimeArtifact,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  const { shimPath } = artifact;
   let link: fs.Stats;
   try {
     link = fs.lstatSync(shimPath);
@@ -954,6 +962,18 @@ function hookRuntimeProblem(shimPath: string, platform: NodeJS.Platform = proces
   // Windows does not use a POSIX executable bit; requiring it there would
   // continuously rewrite healthy .sh files on Windows hosts.
   if (platform !== 'win32' && (target.mode & 0o111) === 0) return 'not executable';
+  try {
+    const body = fs.readFileSync(shimPath, 'utf-8');
+    // The global shim must name the selected live version-home script. A
+    // wrapper can remain executable while its SOURCE points to an older or
+    // deleted version; detect that without running either script.
+    if (!body.includes(`SOURCE=${shellQuoteForHookShim(artifact.scriptPath)}`)) {
+      return 'source mismatch';
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return `cannot inspect (${code || 'error'})`;
+  }
   return null;
 }
 
@@ -996,19 +1016,23 @@ export function inspectBrokenManagedHookRuntimeArtifacts(
   filter?: { agent?: AgentId; version?: string },
   platform: NodeJS.Platform = process.platform,
 ): BrokenManagedHookRuntimeArtifact[] {
-  const broken: BrokenManagedHookRuntimeArtifact[] = [];
-  // A caller that names an exact version (the wiring inspector and doctor)
-  // must inspect that home even if its launch binary is currently absent. The
-  // global self-heal sweep deliberately keeps iterHooksCapableVersions, which
-  // limits unattended repairs to installed, runnable versions.
-  const versions = filter?.agent && filter.version
-    ? [{ agent: filter.agent, version: filter.version }]
-    : iterHooksCapableVersions(filter);
+  // An exact version is added to the installed set when absent so a targeted
+  // doctor inspection can diagnose a materialized-but-gutted home. Keep the
+  // other installed versions too: the generated destination is global and its
+  // source must be chosen from the canonical owner, not the caller's order.
+  const versions = iterHooksCapableVersions(filter?.agent ? { agent: filter.agent } : undefined);
+  if (filter?.agent && filter.version && !versions.some((v) => v.version === filter.version)) {
+    versions.push({ agent: filter.agent, version: filter.version });
+  }
+  const artifacts: ManagedHookRuntimeArtifact[] = [];
   for (const { agent, version } of versions) {
-    for (const artifact of managedHookRuntimeArtifactsForVersion(agent, version)) {
-      const reason = hookRuntimeProblem(artifact.shimPath, platform);
-      if (reason) broken.push({ ...artifact, reason });
-    }
+    artifacts.push(...managedHookRuntimeArtifactsForVersion(agent, version));
+  }
+
+  const broken: BrokenManagedHookRuntimeArtifact[] = [];
+  for (const artifact of selectCanonicalHookRuntimeArtifacts(artifacts)) {
+    const reason = hookRuntimeProblem(artifact, platform);
+    if (reason) broken.push({ ...artifact, reason });
   }
   return broken.sort((a, b) =>
     a.shimPath.localeCompare(b.shimPath) ||
@@ -1049,8 +1073,6 @@ export interface RepairManagedHookRuntimeOptions {
   dryRun?: boolean;
   filter?: { agent?: AgentId; version?: string };
   platform?: NodeJS.Platform;
-  /** Daemon mode: skip isolated and hooks-incompatible version homes. */
-  unattended?: boolean;
 }
 
 /**
@@ -1059,9 +1081,9 @@ export interface RepairManagedHookRuntimeOptions {
  * SOURCE script — picking the wrong version permanently points every harness
  * at a stale or dead path.
  */
-function pickCanonicalHookRuntimeArtifact(
-  candidates: BrokenManagedHookRuntimeArtifact[],
-): BrokenManagedHookRuntimeArtifact {
+function pickCanonicalHookRuntimeArtifact<T extends ManagedHookRuntimeArtifact>(
+  candidates: T[],
+): T {
   if (candidates.length === 1) return candidates[0];
   const agents = Array.from(new Set(candidates.map((c) => c.agent))).sort();
   for (const agent of agents) {
@@ -1082,28 +1104,25 @@ function pickCanonicalHookRuntimeArtifact(
 }
 
 /**
- * One repair target per unique shim path. Unattended sweeps skip isolated
- * version homes (no resource carry-over). A doctor filter that names an exact
- * agent+version keeps that home even when isolated.
+ * One repair target per unique shim path. Generated shims are global, so both
+ * unattended and explicit repair leave isolated/private version homes out.
  */
-function selectHookRuntimeRepairTargets(
-  broken: BrokenManagedHookRuntimeArtifact[],
-  filter?: { agent?: AgentId; version?: string },
-  unattended = false,
-): BrokenManagedHookRuntimeArtifact[] {
+function selectCanonicalHookRuntimeArtifacts<T extends ManagedHookRuntimeArtifact>(
+  artifacts: T[],
+): T[] {
   // No hook runtime exists for a version that does not support hooks. Isolated
   // versions never own a global generated shim, even when a caller names one:
   // selecting it would repoint every harness at a private version home.
-  const hookCapable = broken.filter((a) => supports(a.agent, 'hooks', a.version).ok);
+  const hookCapable = artifacts.filter((a) => supports(a.agent, 'hooks', a.version).ok);
   const pool = hookCapable.filter((a) => !isVersionIsolated(a.agent, a.version));
 
-  const byPath = new Map<string, BrokenManagedHookRuntimeArtifact[]>();
+  const byPath = new Map<string, T[]>();
   for (const artifact of pool) {
     const list = byPath.get(artifact.shimPath) ?? [];
     list.push(artifact);
     byPath.set(artifact.shimPath, list);
   }
-  const selected: BrokenManagedHookRuntimeArtifact[] = [];
+  const selected: T[] = [];
   for (const group of byPath.values()) {
     selected.push(pickCanonicalHookRuntimeArtifact(group));
   }
@@ -1111,16 +1130,17 @@ function selectHookRuntimeRepairTargets(
 }
 
 /**
- * Stable failure text: errno code + prior detector reason only.
- * Never include absolute paths or randomized temp basenames — those break
- * cross-device / menu-bar aggregation of identical failures.
+ * Stable failure text: errno code + managed destination + detector reason.
+ * Never include the randomized atomic-temp basename, so repeated failed
+ * passes report an identical actionable finding for the same shim.
  */
 function stableHookRuntimeRepairFailure(
+  artifact: ManagedHookRuntimeArtifact,
   before: string,
   err: unknown,
 ): string {
   const code = (err as NodeJS.ErrnoException)?.code;
-  return `repair failed [${code || 'UNKNOWN'}]: ${before}`;
+  return `repair failed [${code || 'UNKNOWN'}] at ${artifact.shimPath}: ${before}`;
 }
 
 /**
@@ -1136,7 +1156,7 @@ export function repairManagedHookRuntimeArtifact(
   artifact: ManagedHookRuntimeArtifact,
   platform: NodeJS.Platform = process.platform,
 ): { repaired: boolean; reason?: string } {
-  const before = hookRuntimeProblem(artifact.shimPath, platform);
+  const before = hookRuntimeProblem(artifact, platform);
   // Already healthy (e.g. race with another pass) — no-op, no needsAttention.
   if (!before) return { repaired: false };
   try {
@@ -1147,10 +1167,10 @@ export function repairManagedHookRuntimeArtifact(
       matches: artifact.matches,
     });
   } catch (err) {
-    return { repaired: false, reason: stableHookRuntimeRepairFailure(before, err) };
+    return { repaired: false, reason: stableHookRuntimeRepairFailure(artifact, before, err) };
   }
   // Post-repair reinspection — prove the artifact is usable without executing it.
-  const after = hookRuntimeProblem(artifact.shimPath, platform);
+  const after = hookRuntimeProblem(artifact, platform);
   return after
     ? { repaired: false, reason: `${before}; repair did not produce a usable shim (${after})` }
     : { repaired: true };
@@ -1173,9 +1193,8 @@ export function repairManagedHookRuntimeArtifacts(
 ): HookRuntimeRepairReport {
   const platform = opts.platform ?? process.platform;
   const dryRun = opts.dryRun ?? false;
-  const unattended = opts.unattended ?? false;
   const brokenBefore = inspectBrokenManagedHookRuntimeArtifacts(opts.filter, platform);
-  const targets = selectHookRuntimeRepairTargets(brokenBefore, opts.filter, unattended);
+  const targets = selectCanonicalHookRuntimeArtifacts(brokenBefore);
 
   const attemptedPaths: string[] = [];
   const attempts: HookRuntimeRepairAttempt[] = [];

@@ -374,11 +374,10 @@ describe('repairManagedHookRuntimeArtifacts', () => {
     seedClaudeVersionWithGeneratedShim('2.0.0', 'runtime-guard', 'PreToolUse');
     const out = runRuntime(`
       const fs = await import('node:fs');
-      const path = await import('node:path');
-      // Occupy AGENTS_HOOK_SHIMS_DIR as a file so mkdirSync/write cannot place a shim.
-      const shimsDir = process.env.AGENTS_HOOK_SHIMS_DIR!;
-      fs.mkdirSync(path.dirname(shimsDir), { recursive: true });
-      fs.writeFileSync(shimsDir, 'not-a-dir\\n', { mode: 0o644 });
+      // A directory at the destination forces the atomic temp-file rename to
+      // fail. The emitted finding must not leak that temp path or its UUID.
+      const shim = process.env.AGENTS_HOOK_SHIMS_DIR + '/runtime-guard.sh';
+      fs.mkdirSync(shim, { recursive: true });
       const pass1 = mod.repairManagedHookRuntimeArtifacts({ filter: { agent: 'claude', version: '2.0.0' } });
       const pass2 = mod.repairManagedHookRuntimeArtifacts({ filter: { agent: 'claude', version: '2.0.0' } });
       console.log(JSON.stringify({ pass1, pass2 }));
@@ -388,19 +387,16 @@ describe('repairManagedHookRuntimeArtifacts', () => {
     expect(r.pass1.attempts[0].attempted).toBe(true);
     expect(r.pass1.attempts[0].repaired).toBe(false);
     expect(r.pass1.fixed).toEqual([]);
-    expect(r.pass1.needsAttention).toHaveLength(1);
-    // Stable: errno codes + detector reason only — no absolute paths/temp UUIDs.
-    expect(r.pass1.needsAttention[0]).toMatch(
-      /^hook shim runtime-guard: repair failed \[[A-Z0-9_]+\]: cannot inspect \([A-Z0-9_]+\)$/,
-    );
-    expect(r.pass1.needsAttention[0]).not.toMatch(/\/tmp\/|\.tmp|[0-9a-f]{8}-[0-9a-f]{4}/i);
+    expect(r.pass1.needsAttention).toEqual([
+      `hook shim runtime-guard: repair failed [EISDIR] at ${shimPathInTestHome('runtime-guard')}: not a regular file`,
+    ]);
     // Independent second pass: identical needsAttention (stable for fleet aggregation).
     expect(r.pass2.attempts).toHaveLength(1);
     expect(r.pass2.attemptedPaths).toHaveLength(1);
     expect(r.pass2.needsAttention).toEqual(r.pass1.needsAttention);
   });
 
-  it('dedupes multiple versions to one generation attempt per unique path', () => {
+  it('selects one canonical repair target when multiple versions share a path', () => {
     seedClaudeVersionWithGeneratedShim('2.0.0', 'runtime-guard', 'PreToolUse');
     seedClaudeVersionWithGeneratedShim('2.1.0', 'runtime-guard', 'PreToolUse');
     const out = runRuntime(`
@@ -421,7 +417,7 @@ describe('repairManagedHookRuntimeArtifacts', () => {
       attempts: number;
       fixed: string[];
     };
-    expect(r.brokenCount).toBeGreaterThanOrEqual(2);
+    expect(r.brokenCount).toBe(1);
     expect(r.uniquePaths).toBe(1);
     expect(r.attemptedPaths).toBe(1);
     expect(r.attempts).toBe(1);
@@ -463,5 +459,54 @@ describe('repairManagedHookRuntimeArtifacts', () => {
     // SOURCE embeds the default version's script, not the older 1.0.0 copy.
     expect(r.body).toContain(r.defaultScript);
     expect(r.body).not.toContain(r.oldScript);
+  });
+
+  it('rewrites an executable wrapper whose SOURCE points to a removed old version', () => {
+    seedClaudeVersionWithGeneratedShim('1.0.0', 'runtime-guard', 'PreToolUse');
+    seedClaudeVersionWithGeneratedShim('2.0.0', 'runtime-guard', 'PreToolUse');
+    const oldScript = path.join(userDir, '.history', 'versions', 'claude', '1.0.0', 'home', '.claude', 'hooks', 'runtime-guard.sh');
+    const defaultScript = path.join(userDir, '.history', 'versions', 'claude', '2.0.0', 'home', '.claude', 'hooks', 'runtime-guard.sh');
+    fs.rmSync(oldScript);
+
+    const staleShim = `#!/bin/sh\nSOURCE='${oldScript}'\n`;
+    const out = runRuntime(`
+      const fs = await import('node:fs');
+      const shim = process.env.AGENTS_HOOK_SHIMS_DIR + '/runtime-guard.sh';
+      fs.mkdirSync(process.env.AGENTS_HOOK_SHIMS_DIR!, { recursive: true });
+      fs.writeFileSync(shim, ${JSON.stringify(staleShim)}, { mode: 0o755 });
+      const before = mod.inspectBrokenManagedHookRuntimeArtifacts({ agent: 'claude', version: '2.0.0' });
+      const repair = mod.repairManagedHookRuntimeArtifacts({ filter: { agent: 'claude' } });
+      console.log(JSON.stringify({
+        before: before.map((entry) => entry.reason),
+        repair,
+        body: fs.readFileSync(shim, 'utf8'),
+      }));
+    `);
+    const r = JSON.parse(out) as { before: string[]; repair: RuntimeRepairReport; body: string };
+
+    expect(r.before).toEqual(['source mismatch']);
+    expect(r.repair.fixed).toEqual(['hook shim runtime-guard']);
+    expect(r.body).toContain(`# Source: ${defaultScript}`);
+    expect(r.body).toContain(`SOURCE='${defaultScript}'`);
+    expect(r.body).not.toContain(oldScript);
+  });
+
+  it('does not select isolated or hooks-incompatible homes as global shim owners', () => {
+    seedClaudeVersionWithGeneratedShim('3.0.0', 'runtime-guard', 'PreToolUse');
+    fs.writeFileSync(path.join(userDir, '.history', 'versions', 'claude', '3.0.0', '.isolated'), 'test\n');
+
+    const codexHooks = path.join(userDir, '.history', 'versions', 'codex', '0.115.0', 'home', '.codex', 'hooks');
+    fs.mkdirSync(codexHooks, { recursive: true });
+    fs.writeFileSync(path.join(codexHooks, 'runtime-guard.sh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+    const out = runRuntime(`
+      const isolated = mod.repairManagedHookRuntimeArtifacts({ filter: { agent: 'claude' } });
+      const tooOld = mod.repairManagedHookRuntimeArtifacts({ filter: { agent: 'codex', version: '0.115.0' } });
+      console.log(JSON.stringify({ isolated, tooOld }));
+    `);
+    const r = JSON.parse(out) as { isolated: RuntimeRepairReport; tooOld: RuntimeRepairReport };
+
+    expect(r.isolated.attempts).toEqual([]);
+    expect(r.tooOld.attempts).toEqual([]);
   });
 });
