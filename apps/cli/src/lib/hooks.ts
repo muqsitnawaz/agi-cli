@@ -1155,17 +1155,17 @@ function eligibleHookRuntimeArtifacts<T extends ManagedHookRuntimeArtifact>(
 }
 
 /**
- * Stable failure text: errno code + managed destination + detector reason.
- * Never include the randomized atomic-temp basename, so repeated failed
- * passes report an identical actionable finding for the same shim.
+ * Stable failure text: errno code + detector reason only.
+ * Never include absolute paths or randomized atomic-temp basenames — those
+ * break cross-device / menu-bar aggregation of identical failures. The hook
+ * name is attached by the caller (`hook shim <name>: …`).
  */
 function stableHookRuntimeRepairFailure(
-  artifact: ManagedHookRuntimeArtifact,
   before: string,
   err: unknown,
 ): string {
   const code = (err as NodeJS.ErrnoException)?.code;
-  return `repair failed [${code || 'UNKNOWN'}] at ${artifact.shimPath}: ${before}`;
+  return `repair failed [${code || 'UNKNOWN'}]: ${before}`;
 }
 
 /**
@@ -1192,7 +1192,7 @@ export function repairManagedHookRuntimeArtifact(
       matches: artifact.matches,
     });
   } catch (err) {
-    return { repaired: false, reason: stableHookRuntimeRepairFailure(artifact, before, err) };
+    return { repaired: false, reason: stableHookRuntimeRepairFailure(before, err) };
   }
   // Post-repair reinspection — prove the artifact is usable without executing it.
   const after = hookRuntimeProblem(artifact, platform);

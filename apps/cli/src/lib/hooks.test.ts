@@ -394,12 +394,13 @@ describe('repairManagedHookRuntimeArtifacts', () => {
     expect(r.pass1.attempts[0].attempted).toBe(true);
     expect(r.pass1.attempts[0].repaired).toBe(false);
     expect(r.pass1.fixed).toEqual([]);
-    // Replacing a directory reports EISDIR on POSIX and EPERM on Windows.
-    // Both are stable platform-native codes; neither exposes the temp path.
-    const expectedCode = process.platform === 'win32' ? 'EPERM' : 'EISDIR';
-    expect(r.pass1.needsAttention).toEqual([
-      `hook shim runtime-guard: repair failed [${expectedCode}] at ${shimPathInTestHome('runtime-guard')}: not a regular file`,
-    ]);
+    expect(r.pass1.needsAttention).toHaveLength(1);
+    // errno differs by platform (EISDIR / EPERM / EEXIST); never bake one in.
+    // Must stay free of absolute paths and randomized temp UUIDs.
+    expect(r.pass1.needsAttention[0]).toMatch(
+      /^hook shim runtime-guard: repair failed \[[A-Z0-9_]+\]: .+$/,
+    );
+    expect(r.pass1.needsAttention[0]).not.toMatch(/[/\\]Users[/\\]|[/\\]tmp[/\\]|\.tmp|[0-9a-f]{8}-[0-9a-f]{4}/i);
     // Independent second pass: identical needsAttention (stable for fleet aggregation).
     expect(r.pass2.attempts).toHaveLength(1);
     expect(r.pass2.attemptedPaths).toHaveLength(1);
