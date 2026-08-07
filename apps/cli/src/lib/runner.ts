@@ -2200,8 +2200,15 @@ export function monitorRunningJobs(): void {
 
   for (const jobDir of jobDirs) {
     const jobRunsPath = path.join(runsDir, jobDir.name);
-    const runDirs = fs.readdirSync(jobRunsPath, { withFileTypes: true })
-      .filter((e) => e.isDirectory());
+    let runDirs: fs.Dirent[];
+    try {
+      runDirs = fs.readdirSync(jobRunsPath, { withFileTypes: true })
+        .filter((e) => e.isDirectory());
+    } catch {
+      // A retention/cleanup pass may remove a job directory after the root
+      // snapshot. The next monitor sweep observes the remaining state.
+      continue;
+    }
 
     for (const runDirEntry of runDirs) {
       const metaPath = path.join(jobRunsPath, runDirEntry.name, 'meta.json');
