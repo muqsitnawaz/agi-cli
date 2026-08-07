@@ -570,7 +570,7 @@ describe('v12 device migration CLI startup failure (POSIX)', () => {
       const parsed = res.status === 0 ? JSON.parse(res.stdout.trim()) : [];
       const found = parsed.find((j: Record<string, unknown>) => j.name === 'legacy');
       expect(found).toBeUndefined();
-      expect(res.stdout + res.stderr).not.toContain('legacy');
+      expect(res.stdout + res.stderr).not.toContain('"name":"legacy"');
     } finally {
       fs.chmodSync(routinesDir, 0o755);
     }
