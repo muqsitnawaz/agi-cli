@@ -208,12 +208,17 @@ target user's home because device-local housekeeping commands commonly operate
 there. Absolute paths outside the user's home are local-device-only; host, fleet,
 and cloud placement rejects them as non-portable.
 
-Creation, edit, and resume run the same target-aware readiness checks: project
-binding, directory existence/type, write access for the selected mode, harness
-availability, workspace trust, authentication, target reachability, and placement
-support. A syntactically valid definition with an operational blocker is saved
-paused with a stable finding and repair command. `resume` reruns readiness and
-does not bypass it.
+Creation, edit, and resume all run the same readiness entry point. Every placement
+gets structural project/CWD and portability checks. Local agent routines also
+check the local directory, installed harness, live authentication, and Codex
+workspace trust. An explicit host placement additionally resolves the target's
+HOME/project catalog, proves reachability and real write access there, and probes
+the target harness. Fleet and cloud placement cannot prove a selected target at
+definition time, so target-dependent checks are deferred to dispatch and any
+failure is recorded as a blocked attempt. Workflow and command routines receive
+the structural checks that apply to their execution path. A syntactically valid
+definition with a proven blocker is saved paused with a stable finding and repair
+command. `resume` reruns readiness and does not bypass it.
 
 ```bash
 agents routines add morning-briefing \
@@ -1301,8 +1306,8 @@ agents routines add <name> --all-projects --schedule "0 9 * * *" \
   --agent claude --prompt "..."       # Tag to all defined projects
 agents routines add <path.yml>        # Add from YAML file
 agents routines add <name> --at "14:30" --agent claude --prompt "..."            # One-shot
-agents routines edit <name>           # Edit through the prefilled routine flow
-agents routines edit <name> --yaml    # Transactional raw YAML edit
+agents routines edit <name>           # Transactional temporary-YAML editor
+agents routines edit <name> --yaml    # Same editor; explicit compatibility flag
 agents routines remove <name>         # Delete a job
 agents routines pause <name>          # Disable a job
 agents routines resume <name>         # Re-enable a paused job
@@ -1382,9 +1387,10 @@ Every requested attempt receives run metadata before placement, account selectio
 sandbox construction, readiness, or dispatch. `blocked` means readiness prevented
 any agent process from starting; `failed` means execution started and failed;
 `skipped` means another slot/active/owner claim won. Routine history is therefore
-complete even when no transcript was created. `agents sessions --routines` joins
-optional archived sessions onto this history rather than using transcripts as the
-routine catalog.
+complete even when no transcript was created. `agents sessions --routines` builds
+its routine picker from definitions and run directories so zero-session routines
+remain selectable, but its result rows are archived sessions. Use `agents routines
+runs <name>` for canonical attempt history, including attempts with no transcript.
 
 `agents routines status` reports the scheduler as `running`, `wedged`, or `stopped`. A live PID whose heartbeat is more than three monitor ticks old is `wedged`; the status output includes the restart command. Both `routines list` and `routines status` also finalize orphaned `running` records before rendering. Run metadata records process birth time to reject recycled PIDs and persists the configured execution deadline. Detached children are killed when that deadline expires, including after a scheduler restart.
 
