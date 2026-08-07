@@ -659,7 +659,7 @@ SSH access (§7); rendering sessions that no harness produced.
 
 #### 4.1 Command surface
 
-The command surface (bare `sessions [query]`, `tail`, `sync`, `resume`, `focus`,
+The command surface (bare `sessions [query]`, `preview`, `tail`, `sync`, `resume`, `focus`,
 `detach`, `attach`, `inject`, `export`, `import`, `migrate`/`relocate`,
 `migrations`, `backfill tools`, `fork`) with flags is the reference in
 [05-sessions.md](05-sessions.md); this spec governs the guarantees behind it.
