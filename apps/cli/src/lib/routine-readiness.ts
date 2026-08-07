@@ -18,6 +18,11 @@ import { resolveJobExecutionContext, resolveHostStrategy } from './routines.js';
 import { evaluateRoutineReadiness, type RoutineReadinessResult, type PlacementMode } from './routine-context.js';
 import { getVersionHomePath, resolveVersion } from './versions.js';
 import { probeLocalFleetAuth } from './auth-health.js';
+import { resolveHostRunTarget } from './hosts/run-target.js';
+import { hostIdentityArgs, sshTargetFor } from './hosts/types.js';
+import { probeHost } from './hosts/ready.js';
+import { sshExec, shellQuote } from './ssh-exec.js';
+import { encodePowershell, powershellQuote, POWERSHELL_PROGRESS_SILENCE } from './hosts/remote-cmd.js';
 
 /**
  * Evaluate whether a routine is ready to activate on this box. `probeAgent`
@@ -84,25 +89,105 @@ export async function evaluateActivationReadinessLive(config: JobConfig): Promis
   if (!structural.ready) return structural;
 
   const mode = resolveHostStrategy(config);
+  if (mode === 'host' && config.host) return evaluateHostActivationReadiness(config);
   if (mode !== 'local' || !config.agent || config.workflow || config.command) return structural;
   const version = resolveVersion(config.agent as never);
   if (!version) return structural;
   const context = resolveJobExecutionContext(config, { mode: 'local' });
 
-  let authVerdict: { ok: boolean; reason?: string } | undefined;
+  let authVerdict: { ok: boolean; reason?: string };
   const rows = await probeLocalFleetAuth({ agents: [config.agent as never] });
   const row = rows.find((candidate) => candidate.version === version);
-  if (row) {
-    authVerdict = row.health.verdict === 'revoked'
-      ? { ok: false, reason: row.health.verdict }
-      : { ok: true };
-  }
+  const accepted = new Set(['live', 'rate_limited', 'unverified']);
+  authVerdict = row && accepted.has(row.health.verdict)
+    ? { ok: true }
+    : { ok: false, reason: row?.health.verdict ?? 'unconfigured' };
 
   return evaluateRoutineReadiness(context, {
     agentInstalled: () => true,
     ...(config.agent === 'codex' && context.absoluteCwd
       ? { codexTrusted: () => codexWorkspaceTrusted(version, context.absoluteCwd!) }
       : {}),
-    ...(authVerdict ? { authOk: () => authVerdict! } : {}),
+    authOk: () => authVerdict,
   }, { agent: config.agent });
+}
+
+/** Resolve and probe the actual SSH target used by a host-placed routine. */
+export async function evaluateHostActivationReadiness(config: JobConfig): Promise<RoutineReadinessResult> {
+  const host = await resolveHostRunTarget(config.host!);
+  const target = sshTargetFor(host);
+  const identity = hostIdentityArgs(host);
+  if (!probeHost(target, host.os, identity).reachable) {
+    return evaluateRoutineReadiness(resolveJobExecutionContext(config, { mode: 'host', probe: null }), {
+      targetReachable: () => false,
+    }, { agent: config.agent });
+  }
+
+  const windows = host.os?.toLowerCase().includes('win') ?? false;
+  const homeCommand = windows
+    ? `powershell -NoProfile -EncodedCommand ${encodePowershell(`${POWERSHELL_PROGRESS_SILENCE}; Write-Output ("__HOME__" + $HOME); & agents projects list --json`)}`
+    : `bash -lc ${shellQuote('printf "__HOME__%s\\n" "$HOME"; agents projects list --json')}`;
+  const projectResult = sshExec(target, homeCommand, { timeoutMs: 20_000, extraSshArgs: identity });
+  if (projectResult.code !== 0) {
+    return evaluateRoutineReadiness(resolveJobExecutionContext(config, { mode: 'host', probe: null }), {
+      targetReachable: () => false,
+    }, { agent: config.agent });
+  }
+  const lines = projectResult.stdout.split(/\r?\n/);
+  const targetHome = lines.shift()?.replace(/^__HOME__/, '') || '~';
+  const defs = JSON.parse(lines.join('\n')) as Array<{ name: string; root?: string; defaultPath?: string }>;
+  const def = config.project ? defs.find((candidate) => candidate.name === config.project) : undefined;
+  const projectResolution = config.project
+    ? (def ? { defined: true as const, base: def.defaultPath ?? def.root } : { defined: false as const })
+    : undefined;
+  const unprobed = resolveJobExecutionContext(config, { mode: 'host', targetHome, probe: null, projectResolution });
+  if (!unprobed.ready || !unprobed.absoluteCwd) return { context: unprobed, ready: false, readiness: unprobed.readiness };
+
+  const check = windows
+    ? `powershell -NoProfile -EncodedCommand ${encodePowershell(`$d=${powershellQuote(unprobed.absoluteCwd)}; if (-not (Test-Path -LiteralPath $d -PathType Container)) { exit 1 }; $p=Join-Path $d ([IO.Path]::GetRandomFileName()); try { New-Item -ItemType File -Path $p -ErrorAction Stop | Out-Null; Remove-Item -LiteralPath $p -Force; exit 0 } catch { exit 1 }`)}`
+    : `test -d ${shellQuote(unprobed.absoluteCwd)} && test -w ${shellQuote(unprobed.absoluteCwd)}`;
+  const fsResult = sshExec(target, check, { timeoutMs: 12_000, extraSshArgs: identity });
+  if (fsResult.code !== 0) {
+    return evaluateRoutineReadiness({ ...unprobed, ready: false, readiness: {
+      code: 'workspace_not_writable',
+      message: `the execution directory is missing or not writable on ${host.name}: ${unprobed.resolvedCwd}`,
+    } });
+  }
+
+  if (config.agent && !config.workflow && !config.command) {
+    if (config.agent === 'codex') {
+      const args = ['run', 'codex', 'Reply with exactly ROUTINE_READY', '--mode', 'plan', '--timeout', '45s', '--json'];
+      const command = windows
+        ? `powershell -NoProfile -EncodedCommand ${encodePowershell(`${POWERSHELL_PROGRESS_SILENCE}; Set-Location -LiteralPath ${powershellQuote(unprobed.absoluteCwd)}; & agents ${args.map(powershellQuote).join(' ')}`)}`
+        : `cd ${shellQuote(unprobed.absoluteCwd)} && agents ${args.map(shellQuote).join(' ')}`;
+      const probe = sshExec(target, command, { timeoutMs: 60_000, extraSshArgs: identity });
+      if (probe.code !== 0) {
+        const detail = `${probe.stderr}\n${probe.stdout}`.trim();
+        const untrusted = detail.includes('trusted directory') || detail.includes('trusted workspace');
+        return evaluateRoutineReadiness(unprobed, {
+          ...(untrusted ? { codexTrusted: () => false } : { authOk: () => ({ ok: false, reason: detail || 'probe failed' }) }),
+        }, { agent: config.agent });
+      }
+    } else {
+      const pingArgs = ['devices', 'ping', '--local', '--json'];
+      const command = windows
+        ? `powershell -NoProfile -EncodedCommand ${encodePowershell(`${POWERSHELL_PROGRESS_SILENCE}; & agents ${pingArgs.map(powershellQuote).join(' ')}`)}`
+        : `agents ${pingArgs.map(shellQuote).join(' ')}`;
+      const probe = sshExec(target, command, { timeoutMs: 30_000, extraSshArgs: identity });
+      let verdict = 'error';
+      if (probe.code === 0) {
+        try {
+          const payload = JSON.parse(probe.stdout) as { rows?: Array<{ agent: string; health: { verdict: string } }> };
+          verdict = payload.rows?.find((row) => row.agent === config.agent)?.health.verdict ?? 'unconfigured';
+        } catch { verdict = 'error'; }
+      }
+      if (!new Set(['live', 'rate_limited', 'unverified']).has(verdict)) {
+        return evaluateRoutineReadiness(unprobed, {
+          authOk: () => ({ ok: false, reason: verdict }),
+        }, { agent: config.agent });
+      }
+    }
+  }
+
+  return { context: unprobed, ready: true };
 }

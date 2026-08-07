@@ -468,15 +468,15 @@ export function jobRoutineKind(config: Pick<JobConfig, 'agent' | 'workflow' | 'c
  */
 export function resolveJobExecutionContext(
   config: Pick<JobConfig, 'name' | 'project' | 'cwd' | 'agent' | 'workflow' | 'command'>,
-  opts: { targetHome?: string; mode?: PlacementMode; probe?: ContextFsProbe | null } = {},
+  opts: { targetHome?: string; mode?: PlacementMode; probe?: ContextFsProbe | null; projectResolution?: ProjectResolution } = {},
 ): ResolvedExecutionContext {
   const targetHome = opts.targetHome ?? os.homedir();
   const mode = opts.mode ?? 'local';
   const probe = opts.probe === null
     ? undefined
     : (opts.probe ?? (mode === 'local' ? realFsProbe() : undefined));
-  let projectResolution: ProjectResolution | undefined;
-  if (config.project !== undefined) {
+  let projectResolution: ProjectResolution | undefined = opts.projectResolution;
+  if (config.project !== undefined && projectResolution === undefined) {
     const def = loadProjectDef(config.project);
     projectResolution = def
       ? { defined: true, base: projectBasePath(def, true) } // portable (~/) base form

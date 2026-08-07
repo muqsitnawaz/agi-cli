@@ -1248,8 +1248,8 @@ export function registerRoutinesCommands(program: Command): void {
           const job = yaml.parse(raw) as JobConfig;
           const errors = validateJob(job);
           if (errors.length > 0) throw new Error(errors.join('\n'));
-          fs.renameSync(editPath, targetPath);
           const readiness = await evaluateActivationReadinessLive(job);
+          fs.renameSync(editPath, targetPath);
           if (!readiness.ready) setJobEnabled(job.name, false);
           console.log(chalk.green(`\nJob '${name}' saved${readiness.ready ? '' : ' paused (not ready)'}`));
           if (isDaemonRunning()) {

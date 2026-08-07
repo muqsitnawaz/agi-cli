@@ -14,7 +14,17 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `upgrade`, `_internal`).
 
-_97 command groups · 563 commands._
+_98 command groups · 570 commands._
+
+## accounts — Browse and name signed-in harness accounts
+
+```
+agents accounts                     Browse and name signed-in harness accounts
+agents accounts list                Alias for accounts
+agents accounts name <label>        Name one signed-in account; matching installed versions are found automatically
+agents accounts remove <label>
+agents accounts rename <old> <new>
+```
 
 ## add — Download and install agent CLI versions. Enables subsidized API usage through managed binaries.
 
@@ -711,7 +721,8 @@ agents routines catchup                 Run any routines that missed their last 
 agents routines cleanup                 Remove expired one-shot routines that already fired and still have a user-layer YAML file.
 agents routines devices [name]          View or change the devices where a routine is enabled. Without flags, opens an interactive picker (requires a TTY).
 agents routines disable-project [path]  Remove a project from the project-routines allowlist. Use --remove-synced to also delete the user-layer copies.
-agents routines edit [name]             Open a routine in $EDITOR. Creates a new YAML template if the routine does not exist.
+agents routines doctor [name]           Check a routine's execution-context and harness readiness. Bare or --all checks every routine; --fix applies safe activation repairs (activate a now-ready paused routine; pause a broken active one).
+agents routines edit [name]             Edit a prefilled routine transactionally; invalid YAML never replaces the live definition.
 agents routines enable-project [path]   Opt a project's .agents/routines/*.yml into daemon firing. Requires explicit approval — project routines never auto-fire from a cloned repo. Materialises copies into ~/.agents/routines/ with source provenance.
 agents routines list                    See all scheduled jobs, when they run next, and their last execution status
 agents routines logs [name]             Show a run’s concise summary — status + extracted report. --full for the raw stdout stream; --run for a specific past run.
@@ -820,7 +831,7 @@ agents sessions backfill resources          Derive historical skill/slash-comman
 agents sessions backfill tools              Parse historical tool calls once into the local SQLite index.
 agents sessions detach <id>                 Send a live agent to the background — stop its terminal, keep it working headless
 agents sessions export [selectors...]       Bundle sessions (by id, query, or the parent selection flags like --since/-a) into a portable archive.
-agents sessions favorite [ids...]           Star sessions so they are easy to find again — list them with --favorites, or `f` in the browser.
+agents sessions favorite [ids...]           Favorite sessions so they are easy to find again — list them with --favorites, or `f` in the browser.
 agents sessions focus [selector]            Focus sessions by id, harness/version, topic, device, or live state; attach living panes and recover ended ones
 agents sessions fork <session>              Branch a session into a new, independent copy you can continue separately. The original is untouched.
 agents sessions go [id]                     Deprecated alias for `sessions focus --attach-only`
@@ -841,6 +852,7 @@ agents sessions insights tools-per-session  Mix recipe: tools-per-session
 agents sessions migrate [session-id]        Relocate a running session onto another machine (fleet worker, device, or ephemeral box), then stop the source here.
 agents sessions migrations                  Show the migration ledger — sessions handed off to/from other machines.
 agents sessions optimize                    Compact the session search index (FTS5), reclaiming bloat from repeated re-indexing
+agents sessions preview <id>                Show one rich session card without rendering the full transcript
 agents sessions reconnect [session-id]      Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
 agents sessions render <selectors...>       Render one or more sessions as readable, redacted Markdown for review or sharing.
 agents sessions resume [query]              Reopen one session by canonical identity, or multi-select history into terminal tabs/splits.

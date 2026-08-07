@@ -335,7 +335,22 @@ async function runWithAttempt<T>(
   return withRoutineLock(config, async () => {
     const alloc = allocateRoutineAttempt(config, trigger);
     if (!alloc.proceed) return wrapTerminal(alloc.terminal);
-    return run(alloc.attempt);
+    try {
+      return await run(alloc.attempt);
+    } catch (err) {
+      const message = (err as Error).message;
+      const existing = readRunMeta(config.name, alloc.attempt.runId);
+      if (existing) {
+        finalizeRunMeta(existing, 'failed', 1, { errorMessage: message });
+        writeRunMeta(existing);
+        return wrapTerminal(existing);
+      }
+      return wrapTerminal(writeTerminalRecord(config, alloc.attempt.runId, 'blocked', trigger, {
+        ...alloc.attempt.stamp,
+        readiness: { code: 'target_unreachable', message },
+        errorMessage: message,
+      }));
+    }
   });
 }
 
@@ -1505,6 +1520,10 @@ async function executeJobOnHost(config: JobConfig, opts: { detached: boolean }, 
   }
   const { resolveHostRunTarget, dispatchPromptToHost } = await import('./hosts/run-target.js');
   const host = await resolveHostRunTarget(config.host!);
+  const { evaluateHostActivationReadiness } = await import('./routine-readiness.js');
+  const readiness = await evaluateHostActivationReadiness(config);
+  if (!readiness.ready) throw new Error(`${readiness.readiness?.code ?? 'not_ready'}: ${readiness.readiness?.message ?? 'target is not ready'}`);
+  const remoteCwd = readiness.context.resolvedCwd;
 
   const timer = createTimer('agent.run', {
     agent: config.agent,
@@ -1542,7 +1561,7 @@ async function executeJobOnHost(config: JobConfig, opts: { detached: boolean }, 
     effort: config.effort,
     model: config.config?.model as string | undefined,
     timeout: config.timeout, // enforced by the REMOTE agents run
-    remoteCwd: config.cwd,
+    remoteCwd,
     name: config.name,
     cwd: runDir,
     follow: !opts.detached,
