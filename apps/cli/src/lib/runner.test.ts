@@ -45,6 +45,7 @@ function baseConfig(partial: Partial<JobConfig> = {}): JobConfig {
     timeout: '10m',
     enabled: true,
     prompt: 'do it',
+    cwd: '~',
     ...partial,
   } as JobConfig;
 }
@@ -100,22 +101,28 @@ describeSpawn('runner device enforcement', () => {
   afterEach(() => {
     if (savedId === undefined) delete process.env.AGENTS_SYNC_MACHINE_ID;
     else process.env.AGENTS_SYNC_MACHINE_ID = savedId;
+    cleanupJobRuns('test-job');
+    cleanupJobRuns('guard-reject');
   });
 
-  it('executeJob throws the canonical message when this machine is not in the devices allowlist', async () => {
+  it('executeJob persists a skipped attempt when this machine is not in the devices allowlist', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
     const config = baseConfig({ devices: ['yosemite-s0', 'mac-mini'] });
-    await expect(executeJob(config)).rejects.toThrow("Job 'test-job' can only run on: yosemite-s0, mac-mini");
+    const { meta } = await executeJob(config);
+    expect(meta.status).toBe('skipped');
+    expect(meta.skipReason).toBe('wrong_owner');
+    expect(meta.errorMessage).toBe("Job 'test-job' can only run on: yosemite-s0, mac-mini");
   });
 
-  it('executeJobDetached throws the canonical message; no run directory is created', async () => {
+  it('executeJobDetached persists the canonical wrong-owner result without spawning', async () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
     const config = baseConfig({ name: 'guard-reject', devices: ['yosemite-s0'] });
 
-    await expect(executeJobDetached(config)).rejects.toThrow("Job 'guard-reject' can only run on: yosemite-s0");
-
-    const runDir = path.dirname(getRunDir(config.name, 'any'));
-    expect(fs.existsSync(runDir)).toBe(false);
+    const meta = await executeJobDetached(config);
+    expect(meta.status).toBe('skipped');
+    expect(meta.skipReason).toBe('wrong_owner');
+    expect(meta.pid).toBeNull();
+    expect(meta.errorMessage).toBe("Job 'guard-reject' can only run on: yosemite-s0");
   });
 });
 
@@ -123,12 +130,13 @@ describeSpawn('runner device enforcement', () => {
 describeSpawn('runner hard-deprecation enforcement (RUSH-2202)', () => {
   afterEach(() => cleanupJobRuns('gemini-legacy'));
 
-  it('executeJob fails loud with a failed run record instead of building a gemini command', async () => {
+  it('executeJob blocks with a visible run record instead of building a gemini command', async () => {
     const config = baseConfig({ name: 'gemini-legacy', agent: 'gemini' });
     const { meta, reportPath } = await executeJob(config);
 
-    expect(meta.status).toBe('failed');
-    expect(meta.exitCode).toBe(1);
+    expect(meta.status).toBe('blocked');
+    expect(meta.exitCode).toBeNull();
+    expect(meta.readiness?.code).toBe('agent_unavailable');
     expect(meta.agent).toBe('gemini');
     expect(meta.errorMessage).toBe(hardDeprecationError('gemini'));
     expect(reportPath).toBeNull();
@@ -136,16 +144,17 @@ describeSpawn('runner hard-deprecation enforcement (RUSH-2202)', () => {
     // The failure is persisted, not just returned — `agents routines runs` and
     // the daemon's own record-keeping see the same skip reason.
     const persisted = readRunMeta(config.name, meta.runId);
-    expect(persisted?.status).toBe('failed');
+    expect(persisted?.status).toBe('blocked');
     expect(persisted?.errorMessage).toBe(hardDeprecationError('gemini'));
   });
 
-  it('executeJobDetached fails loud with a failed run record instead of spawning gemini', async () => {
+  it('executeJobDetached blocks with a visible run record instead of spawning gemini', async () => {
     const config = baseConfig({ name: 'gemini-legacy', agent: 'gemini' });
     const meta = await executeJobDetached(config);
 
-    expect(meta.status).toBe('failed');
-    expect(meta.exitCode).toBe(1);
+    expect(meta.status).toBe('blocked');
+    expect(meta.exitCode).toBeNull();
+    expect(meta.readiness?.code).toBe('agent_unavailable');
     expect(meta.pid).toBeNull();
     expect(meta.errorMessage).toBe(hardDeprecationError('gemini'));
   });
@@ -161,7 +170,8 @@ describeSpawn('runner hard-deprecation enforcement (RUSH-2202)', () => {
     const config = baseConfig({ name: 'gemini-legacy', agent: 'gemini', hostStrategy: 'cloud' });
     const { meta, reportPath } = await executeJob(config);
 
-    expect(meta.status).toBe('failed');
+    expect(meta.status).toBe('blocked');
+    expect(meta.readiness?.code).toBe('agent_unavailable');
     expect(meta.errorMessage).toBe(hardDeprecationError('gemini'));
     expect(reportPath).toBeNull();
     // No cloud dispatch happened — no cloudTaskId/cloudProvider was ever set.
@@ -172,16 +182,25 @@ describeSpawn('runner hard-deprecation enforcement (RUSH-2202)', () => {
 
 
 describeSpawn('runner host placement', () => {
-  it('executeJob refuses host+workflow before any dispatch or run dir', async () => {
-    const config = baseConfig({ name: 'host-wf', host: 'gpu-box', workflow: 'autodev', agent: undefined as never });
-    await expect(executeJob(config)).rejects.toThrow(/workflow bundle, which can't execute on a host yet/);
-    expect(fs.existsSync(path.dirname(getRunDir(config.name, 'any')))).toBe(false);
+  afterEach(() => {
+    cleanupJobRuns('host-wf');
+    cleanupJobRuns('host-loop');
   });
 
-  it('executeJob refuses host+loop before any dispatch or run dir', async () => {
+  it('executeJob records host+workflow as blocked before any dispatch', async () => {
+    const config = baseConfig({ name: 'host-wf', host: 'gpu-box', workflow: 'autodev', agent: undefined as never });
+    const { meta } = await executeJob(config);
+    expect(meta.status).toBe('blocked');
+    expect(meta.readiness?.code).toBe('placement_unsupported');
+    expect(meta.errorMessage).toMatch(/workflow bundle, which can't execute on a host yet/);
+  });
+
+  it('executeJob records host+loop as blocked before any dispatch', async () => {
     const config = baseConfig({ name: 'host-loop', host: 'gpu-box', loop: { maxIterations: 3 } });
-    await expect(executeJob(config)).rejects.toThrow(/uses 'loop:', which can't execute on a host yet/);
-    expect(fs.existsSync(path.dirname(getRunDir(config.name, 'any')))).toBe(false);
+    const { meta } = await executeJob(config);
+    expect(meta.status).toBe('blocked');
+    expect(meta.readiness?.code).toBe('placement_unsupported');
+    expect(meta.errorMessage).toMatch(/uses 'loop:', which can't execute on a host yet/);
   });
 
   it('monitorRunningJobs finalizes a host-placed run from its terminal sidecar (no local pid)', () => {
