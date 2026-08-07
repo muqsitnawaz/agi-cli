@@ -193,6 +193,7 @@ import {
   loadWebhook,
   loadFunnel,
   loadHumans,
+  loadAccounts,
   loadSsh,
   loadPull,
   loadPush,
@@ -1164,6 +1165,7 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadWebhook);
   await reg(loadFunnel);
   await reg(loadHumans);
+  await reg(loadAccounts);
   registerHqTombstoneCommand(program);
   await reg(loadFeed);
   await reg(loadMailboxes);
