@@ -1407,7 +1407,10 @@ describeRoutines('routines run --json', () => {
       jobs: [{
         name: 'overlap-job',
         schedule: '0 3 * * *',
-        command: 'sleep 2',
+        // Source-mode CLI startup under CI can take several seconds. Keep the
+        // first process alive long enough for a second independent source-mode
+        // invocation to reach the claim while it is genuinely active.
+        command: 'sleep 10',
         mode: 'auto',
         effort: 'auto',
         timeout: '10m',
@@ -1436,19 +1439,24 @@ describeRoutines('routines run --json', () => {
       first.stdout.on('data', (chunk) => { firstStdout += chunk; });
       first.stderr.on('data', (chunk) => { firstStderr += chunk; });
 
-      const runsDir = path.join(home, '.agents', '.history', 'routines', 'overlap-job', 'runs');
+      const runsDir = path.join(home, '.agents', '.history', 'runs', 'overlap-job');
       const deadline = Date.now() + 10_000;
+      let observedRunning = false;
       while (Date.now() < deadline) {
         const runIds = fs.existsSync(runsDir) ? fs.readdirSync(runsDir).filter((entry) => !entry.startsWith('.')) : [];
         if (runIds.some((runId) => {
           const metaPath = path.join(runsDir, runId, 'meta.json');
           return fs.existsSync(metaPath) && JSON.parse(fs.readFileSync(metaPath, 'utf8')).status === 'running';
-        })) break;
+        })) {
+          observedRunning = true;
+          break;
+        }
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
+      expect(observedRunning).toBe(true);
 
       const second = run(home, ['run', 'overlap-job', '--json']);
-      expect(second.status, second.stderr).toBe(0);
+      expect(second.status, second.stderr).toBe(1);
       expect(JSON.parse(second.stdout.trim())).toMatchObject({
         jobName: 'overlap-job',
         status: 'skipped',
