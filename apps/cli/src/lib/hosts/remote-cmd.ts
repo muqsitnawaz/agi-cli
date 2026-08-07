@@ -97,6 +97,7 @@ export const RUN_OPTION_FORWARDING: Record<string, RunOptionForwarding> = {
   fallback: 'forward',
   balanced: 'forward',
   strategy: 'forward',
+  account: 'forward', // the label is fleet-synced; the remote resolves it against ITS per-device bindings and fails loud there if unmatched (never falls back)
   loop: 'forward',
   maxIterations: 'forward',
   budget: 'forward',

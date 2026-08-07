@@ -1634,7 +1634,11 @@ Logical account labels (issue #2300) add four requirements to that funnel:
   balanced rotation or another identity (`lib/accounts/resolve.ts`
   `resolveAccountLabel`, `commands/exec.ts`, `lib/runner.ts`). Bindings live in
   `~/.agents/devices/<host>/accounts.yaml`, keyed by the normalized `machineId()`
-  so attach and run agree.
+  so attach and run agree. Across a `--host`/`--device` SSH hop the label MUST be
+  forwarded (`RUN_OPTION_FORWARDING.account = 'forward'`, `lib/hosts/remote-cmd.ts`;
+  emitted by `buildRunForwardedArgs`, `lib/hosts/dispatch.ts`) so the remote
+  resolves it against ITS own per-device bindings and fails loud there — never
+  silently dropped to the remote's default account.
 - **EXEC-ACCOUNT-4 (MUST).** `--account` MUST be rejected for vendor-cloud and
   lease placement, which never touch a local version home (`commands/exec.ts`).
 

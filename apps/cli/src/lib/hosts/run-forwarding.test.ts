@@ -100,6 +100,16 @@ describe('buildRunForwardedArgs — forwarded options land in the remote argv', 
     ]);
   });
 
+  it('forwards --account so the remote resolves the label against its own bindings (issue #2300)', () => {
+    // A logical account label is fleet-synced; forwarding it (not dropping it)
+    // is what keeps a --host run from silently landing on another identity.
+    expect(RUN_OPTION_FORWARDING.account).toBe('forward');
+    const args = buildRunForwardedArgs({ agent: 'claude', prompt: 'x', account: 'work' });
+    const i = args.indexOf('--account');
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe('work');
+  });
+
   it('omits effort "auto" — the remote default, forwarding it is noise', () => {
     const args = buildRunForwardedArgs({ agent: 'codex', prompt: 'p', effort: 'auto' });
     expect(args).not.toContain('--effort');
