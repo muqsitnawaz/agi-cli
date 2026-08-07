@@ -579,3 +579,82 @@ describe('custom harness names take precedence over native agent ids', () => {
     }
   });
 });
+
+/**
+ * RUSH-2339 — `agents run <agent>` on a machine without that harness.
+ *
+ * Before the fix the launch fell through to the bare `cliCommand` and died as
+ * `sh: 1: exec: cursor-agent: not found` (exit 127), after a `⚠ cursor looks
+ * logged out` banner that was also wrong — it is not logged out, it is absent.
+ *
+ * These drive the REAL `agents run` command in a subprocess against a planted
+ * HOME (`.agents/.system` git-inited so `ensureInitialized` passes) and a PATH
+ * holding only what the test plants. No mocks: the second case genuinely
+ * launches the harness stub, which is the whole point — a self-installed
+ * harness with no version home MUST still run, so the guard cannot be a
+ * "does agents-cli manage a version" check.
+ */
+describe.skipIf(process.platform === 'win32')('agents run — harness not installed (RUSH-2339)', () => {
+  // Resolved lazily: the describe factory body runs even when skipIf skips the
+  // block, so an eager lookup would fail collection on a box without bun.
+  const bunBin = () => execFileSync('sh', ['-c', 'command -v bun'], { encoding: 'utf-8' }).trim();
+  // Anchor on this file, not process.cwd() — vitest inherits the invoking shell's
+  // cwd, so a run started from the repo root would not find src/index.ts.
+  const appRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+
+  function runAgentsRun(home: string, pathDir: string) {
+    return spawnSync(bunBin(), [path.join(appRoot, 'src', 'index.ts'), 'run', 'cursor', 'hi', '--mode', 'plan', '--quiet'], {
+      cwd: appRoot,
+      env: { ...process.env, HOME: home, PATH: [pathDir, '/usr/bin', '/bin'].join(path.delimiter) },
+      encoding: 'utf-8',
+      timeout: 60_000,
+    });
+  }
+
+  function plantHome(): { home: string; pathDir: string } {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'run-not-installed-home-'));
+    const pathDir = fs.mkdtempSync(path.join(os.tmpdir(), 'run-not-installed-path-'));
+    fs.mkdirSync(path.join(home, '.agents', '.system'), { recursive: true });
+    execFileSync('git', ['-C', path.join(home, '.agents', '.system'), 'init', '-q']);
+    return { home, pathDir };
+  }
+
+  it('fails loud with an actionable message instead of exiting 127', () => {
+    const { home, pathDir } = plantHome();
+    try {
+      const res = runAgentsRun(home, pathDir);
+      const out = `${res.stdout}${res.stderr}`;
+
+      expect(res.status).toBe(1);
+      expect(res.status).not.toBe(127);
+      expect(out).toContain('cursor is not installed on this machine');
+      expect(out).toContain('agents add cursor');
+      // The two wrong messages the bug produced must be gone.
+      expect(out).not.toContain('looks logged out');
+      expect(out).not.toContain('not found');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(pathDir, { recursive: true, force: true });
+    }
+  });
+
+  it('still launches a harness installed manually on PATH with no version home', () => {
+    const { home, pathDir } = plantHome();
+    try {
+      const stub = path.join(pathDir, 'cursor-agent');
+      fs.writeFileSync(stub, '#!/bin/sh\necho STUB_CURSOR_RAN\nexit 0\n');
+      fs.chmodSync(stub, 0o755);
+      expect(fs.existsSync(path.join(home, '.agents', '.history', 'versions', 'cursor'))).toBe(false);
+
+      const res = runAgentsRun(home, pathDir);
+      const out = `${res.stdout}${res.stderr}`;
+
+      expect(out).toContain('STUB_CURSOR_RAN');
+      expect(out).not.toContain('is not installed on this machine');
+      expect(res.status).toBe(0);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(pathDir, { recursive: true, force: true });
+    }
+  });
+});
