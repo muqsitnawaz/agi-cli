@@ -394,8 +394,11 @@ describe('repairManagedHookRuntimeArtifacts', () => {
     expect(r.pass1.attempts[0].attempted).toBe(true);
     expect(r.pass1.attempts[0].repaired).toBe(false);
     expect(r.pass1.fixed).toEqual([]);
+    // Replacing a directory reports EISDIR on POSIX and EPERM on Windows.
+    // Both are stable platform-native codes; neither exposes the temp path.
+    const expectedCode = process.platform === 'win32' ? 'EPERM' : 'EISDIR';
     expect(r.pass1.needsAttention).toEqual([
-      `hook shim runtime-guard: repair failed [EISDIR] at ${shimPathInTestHome('runtime-guard')}: not a regular file`,
+      `hook shim runtime-guard: repair failed [${expectedCode}] at ${shimPathInTestHome('runtime-guard')}: not a regular file`,
     ]);
     // Independent second pass: identical needsAttention (stable for fleet aggregation).
     expect(r.pass2.attempts).toHaveLength(1);
