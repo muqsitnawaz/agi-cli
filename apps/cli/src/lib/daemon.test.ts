@@ -758,7 +758,11 @@ describe('daemon self-terminate guard on a missing state dir (RUSH-2367)', () =>
         // Delete the whole HOME while the daemon is still running — the
         // real-world shape of a test's cleanup racing (and losing to) its own
         // kill signal, or a killed test runner whose `finally` never ran.
-        fs.rmSync(tmpHome, { recursive: true, force: true });
+        // The live daemon can finish an already-started heartbeat while the
+        // recursive removal walks the tree. Let Node retry transient ENOTEMPTY
+        // races; the assertion below still requires the state tree to remain
+        // absent and the daemon to terminate within the fixed deadline.
+        fs.rmSync(tmpHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 
         // The guard polls every 300ms above; give it several cycles of margin.
         expect(await waitFor(() => !alive(pid!), 10_000)).toBe(true);

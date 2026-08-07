@@ -838,10 +838,15 @@ export async function runDaemon(): Promise<void> {
   let healing = false;
   const runHealCheck = async () => {
     if (healing) return;
+    // The daemon's state directory is its liveness boundary. Once that tree is
+    // removed, background maintenance must not recreate it while the
+    // self-terminate guard is shutting the process down.
+    if (!fs.existsSync(getDaemonDirRoot())) return;
     healing = true;
     try {
       const { runSelfHeal, selfHealChangedAnything, selfHealNeedsAttention, summarizeSelfHeal } =
         await import('./self-heal/registry.js');
+      if (!fs.existsSync(getDaemonDirRoot())) return;
       // Background heal is conservative (mode: 'safe'): fixes low-risk drift (shims,
       // symlink adoption, PATH, missing resources) and only reports risky ones. The
       // 30s kickoff means shims/PATH settle shortly after the daemon starts. No

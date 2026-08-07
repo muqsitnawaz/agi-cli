@@ -110,6 +110,19 @@ describe('severity rubric', () => {
     expect(f?.message).toContain("hook 'rm-guard'");
   });
 
+  it('a wired hook with a broken generated shim is CRITICAL, even when wiring itself is unsupported', () => {
+    const findings = buildLocalFindings(localInput({
+      reports: [report('claude', '2.1.0', {}, {
+        supported: false, unwired: [], wired: [],
+        runtimeBroken: [{ name: 'git-guard', path: '/h/shims/hooks/git-guard.sh', reason: 'missing' }],
+      } as any)],
+    }));
+    const f = findings.find((x) => x.kind === 'hook-runtime-broken');
+    expect(f?.severity).toBe('critical');
+    expect(f?.message).toBe("hook 'git-guard' wired but its generated shim is missing");
+    expect(f?.remediation).toBe('agents doctor claude@2.1.0 --fix');
+  });
+
   it('a never-synced version collapses its missing resources to ONE warning (not critical)', () => {
     const hooks = Array.from({ length: 20 }, (_, i) => ({ kind: 'hooks' as const, name: `h${i}`, status: 'missing' as const }));
     const findings = buildLocalFindings(localInput({
