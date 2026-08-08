@@ -112,6 +112,44 @@ describe('routine session catalog', () => {
       fs.rmSync(tempHome, { recursive: true, force: true });
     }
   });
+
+  it('passes a boolean global scope to the real indexed routine query', () => {
+    const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-routine-index-scope-'));
+    try {
+      writeUpdateCache(tempHome);
+      const invokingCwd = path.join(tempHome, 'work', 'unrelated-repo');
+      const routineCwd = path.join(tempHome, 'work', 'scheduled-repo');
+      const sessionId = 'face2403-2222-4222-8333-444455556666';
+      const filePath = path.join(tempHome, `${sessionId}.jsonl`);
+      fs.mkdirSync(invokingCwd, { recursive: true });
+      fs.writeFileSync(filePath, '', 'utf-8');
+      const seed = [
+        "import { upsertSession, closeDB } from './src/lib/session/db.ts';",
+        `upsertSession(${JSON.stringify({
+          id: sessionId, shortId: sessionId.slice(0, 8), agent: 'claude',
+          timestamp: '2026-08-08T03:00:00.000Z', filePath, cwd: routineCwd,
+          origin: 'routine', routineName: 'nightly-review',
+        })}, '');`,
+        'closeDB();',
+      ].join(' ');
+      const seeded = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', seed], {
+        cwd: repoRoot,
+        env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
+        encoding: 'utf8',
+      });
+      expect(seeded.status, seeded.stderr).toBe(0);
+
+      const result = runAgents(
+        ['sessions', '--routine', 'nightly-review', '--json', '--local'],
+        invokingCwd,
+        tempHome,
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect((JSON.parse(result.stdout) as SessionMeta[]).map((row) => row.id)).toEqual([sessionId]);
+    } finally {
+      fs.rmSync(tempHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('positional installed agent version filters', () => {

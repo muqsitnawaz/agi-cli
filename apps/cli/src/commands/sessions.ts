@@ -2621,7 +2621,7 @@ async function sessionsAction(
       // --in-team spans directories by construction: a team's teammates run in
       // their own worktrees, so scoping to the current cwd hides most of the
       // lineage the flag exists to show.
-      all: pathFilter ? undefined : options.all || wantsWholeTeam || wantsWholeRoutine || toolSpansDevices,
+      all: pathFilter ? undefined : !!options.all || wantsWholeTeam || wantsWholeRoutine || toolSpansDevices,
       cwd: process.cwd(),
       // Default overview scopes to the current repo SUBTREE (prefix match), so a
       // monorepo shows its sub-projects grouped instead of collapsing to the one
