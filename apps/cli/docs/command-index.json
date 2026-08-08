@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "command": "agents",
   "groups": 102,
-  "commands": 575,
+  "commands": 578,
   "root": {
     "name": "agents",
     "path": "",
@@ -70,9 +70,99 @@
           "negate": false
         }
       ],
-      "examples": "agents accounts\nagents accounts name work\nagents accounts name work --from claude@2.1.220\nagents run claude --account work",
-      "notes": "First run the harness and complete its normal login. A label names one provider account; every matching installed version is discovered automatically. OAuth credentials are never copied or shared.",
+      "examples": "agents accounts\nagents accounts name work\nagents accounts name work --from claude@2.1.220\nagents accounts add cursor-work --provider cursor --auth api-key\nagents accounts add cursor-work --provider cursor --auth api-key --from-secrets cursor-bundle:API_KEY\nagents accounts set-key cursor-work\nagents accounts inspect cursor-work\nagents run claude --account work",
+      "notes": "For managed-login accounts: run the harness and complete its normal login first, then name it. For api-key accounts: keys are stored in the device keychain and never written to YAML.",
       "subcommands": [
+        {
+          "name": "add",
+          "path": "accounts add",
+          "aliases": [],
+          "description": "Add an API-key account",
+          "args": [
+            {
+              "name": "name",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            }
+          ],
+          "options": [
+            {
+              "flags": "--provider <name>",
+              "description": "Agent that uses an API key (cursor)",
+              "long": "--provider",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--auth <type>",
+              "description": "Authentication type: api-key",
+              "long": "--auth",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--from-secrets <bundle:key>",
+              "description": "Read the API key from an existing agents secrets bundle entry",
+              "long": "--from-secrets",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
+        {
+          "name": "inspect",
+          "path": "accounts inspect",
+          "aliases": [],
+          "description": "Show the stored record for a named account (no secrets)",
+          "args": [
+            {
+              "name": "name",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            }
+          ],
+          "options": [
+            {
+              "flags": "--json",
+              "description": "Machine-readable output",
+              "long": "--json",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
         {
           "name": "list",
           "path": "accounts list",
@@ -185,6 +275,42 @@
             }
           ],
           "options": [
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
+        {
+          "name": "set-key",
+          "path": "accounts set-key",
+          "aliases": [],
+          "description": "Update the API key for an api-key account",
+          "args": [
+            {
+              "name": "name",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            }
+          ],
+          "options": [
+            {
+              "flags": "--from-secrets <bundle:key>",
+              "description": "Read the new key from an existing agents secrets bundle entry",
+              "long": "--from-secrets",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
             {
               "flags": "-h, --help",
               "description": "Show help",
