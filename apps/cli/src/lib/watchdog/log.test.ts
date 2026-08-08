@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { appendWatchdogEvents, boundTailLines, trimToLast, formatEvent, WATCHDOG_TAIL_MAX_CHARS, type WatchdogEvent } from './log.js';
+import { appendWatchdogEvents, boundTailLines, parseWatchdogEvents, trimToLast, formatEvent, WATCHDOG_TAIL_MAX_CHARS, type WatchdogEvent } from './log.js';
 
 const KNOWN_KINDS = new Set(['tick', 'decision', 'nudge', 'rotate', 'error']);
 
@@ -76,6 +76,26 @@ describe('appendWatchdogEvents', () => {
   it('is a no-op for an empty event list', () => {
     appendWatchdogEvents([], { logPath });
     expect(fs.existsSync(logPath)).toBe(false);
+  });
+
+  it('sanitizes malformed optional fields instead of leaking unsafe values', () => {
+    const [event] = parseWatchdogEvents(JSON.stringify({
+      ts: 1,
+      kind: 'decision',
+      message: 'valid',
+      terminalId: 7,
+      tailLines: ['safe', 8],
+      inspections: [{ terminalId: 9, agentType: 'claude', message: 'skip', reason: 'working' }],
+    }));
+    expect(event.terminalId).toBeUndefined();
+    expect(event.tailLines).toEqual(['safe']);
+    expect(event.inspections).toEqual([{
+      terminalId: undefined,
+      agentType: 'claude',
+      message: 'skip',
+      reason: 'working',
+      stalledForMs: undefined,
+    }]);
   });
 });
 

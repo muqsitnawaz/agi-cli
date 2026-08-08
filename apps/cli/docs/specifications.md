@@ -2830,7 +2830,7 @@ not the watchdog's.
 #### 2.6 Audit history
 
 - **WD-19 (MUST).** `agents watchdog history [sessionId]` MUST expose the persisted audit
-  trail newest-first, MUST support machine-readable output, and MUST NOT return raw
+  trail newest-first, including non-action session inspections, MUST support machine-readable output, and MUST NOT return raw
   transcript `tailLines` or message excerpts (`lib/watchdog/history.ts`, `commands/watchdog.ts`).
 
 ### 3. Given/When/Then scenarios
@@ -2863,7 +2863,8 @@ timestamp" (WD-8).
 **GWT-W6 — Audit history is useful without disclosing transcript content.**
 Given persisted decisions and heartbeat ticks; When an operator runs
 `agents watchdog history <sessionId> --json`; Then matching decisions are returned newest
-first without raw transcript tails or message excerpts, and ticks appear only with `--all`
+first alongside compact inspection results, without raw transcript tails or message excerpts,
+and heartbeat rows appear only with `--all`
 (WD-19).
 
 ### 4. Known gaps

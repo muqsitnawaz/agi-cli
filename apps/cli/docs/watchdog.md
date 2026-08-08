@@ -135,8 +135,8 @@ rotate state.
 
 ## Audit history
 
-`agents watchdog history [sessionId]` shows persisted decisions, nudges, rotates, and
-errors newest-first. Use `--since 24h`, `--limit 100`, or `--all` to include heartbeat
+`agents watchdog history [sessionId]` shows every session inspection plus persisted
+decisions, nudges, rotates, and errors newest-first. Use `--since 24h`, `--limit 100`, or `--all` to include heartbeat
 ticks; `--json` provides the same filtered records for scripts. Raw transcript tails and
 message excerpts are never returned by this command. The optional session id accepts a
 full id or prefix.

@@ -2,7 +2,7 @@ import type { WatchdogEvent, WatchdogEventKind } from './log.js';
 
 export interface WatchdogHistoryEntry {
   ts: number;
-  kind: WatchdogEventKind;
+  kind: WatchdogEventKind | 'inspection';
   sessionId?: string;
   agent?: string;
   message: string;
@@ -30,13 +30,18 @@ export function selectWatchdogHistory(
     : (options.nowMs ?? Date.now()) - options.sinceMs;
   const session = options.sessionId?.toLowerCase();
 
-  return events
-    .filter((event) => options.includeTicks || event.kind !== 'tick')
-    .filter((event) => event.ts >= cutoff)
-    .filter((event) => !session || event.terminalId?.toLowerCase().startsWith(session))
-    .sort((a, b) => b.ts - a.ts)
-    .slice(0, limit)
-    .map((event) => ({
+  const expanded = events.flatMap((event): WatchdogHistoryEntry[] => {
+    const inspections = event.inspections?.map((inspection) => ({
+      ts: event.ts,
+      kind: 'inspection' as const,
+      sessionId: inspection.terminalId,
+      agent: inspection.agentType,
+      message: inspection.message,
+      reason: inspection.reason,
+      stalledForMs: inspection.stalledForMs,
+    })) ?? [];
+    if (event.kind === 'tick' && !options.includeTicks) return inspections;
+    return [...inspections, {
       ts: event.ts,
       kind: event.kind,
       sessionId: event.terminalId,
@@ -45,5 +50,13 @@ export function selectWatchdogHistory(
       reason: event.reason,
       stalledForMs: event.stalledForMs,
       nudgeText: event.nudgeText,
-    }));
+    }];
+  });
+
+  return expanded
+    .filter((entry) => entry.ts >= cutoff)
+    .filter((entry) => !session || entry.sessionId?.toLowerCase().startsWith(session))
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, limit)
+    ;
 }

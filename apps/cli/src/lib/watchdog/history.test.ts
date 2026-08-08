@@ -38,4 +38,22 @@ describe('watchdog history', () => {
     expect(selectWatchdogHistory(events)).toEqual([]);
     expect(selectWatchdogHistory(events, { includeTicks: true })).toHaveLength(1);
   });
+
+  it('expands compact tick inspections into session history', () => {
+    const events = [{
+      ts: 100,
+      kind: 'tick' as const,
+      message: '2 live',
+      inspections: [{ terminalId: 'session-1', agentType: 'claude', message: 'skip', reason: 'working' }],
+    }];
+    expect(selectWatchdogHistory(events, { sessionId: 'session-1' })).toEqual([{
+      ts: 100,
+      kind: 'inspection',
+      sessionId: 'session-1',
+      agent: 'claude',
+      message: 'skip',
+      reason: 'working',
+      stalledForMs: undefined,
+    }]);
+  });
 });
