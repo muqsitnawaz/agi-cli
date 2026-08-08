@@ -1666,6 +1666,23 @@ Logical account selection adds three requirements to that funnel:
   dispatch MUST forward the label and resolve it against the remote host's live
   version homes (`lib/hosts/dispatch.ts`; `lib/hosts/run-target.ts`). Local labels
   MUST be rejected for cloud and lease placement.
+- **EXEC-ACCOUNT-4 (MUST).** A named API-key account (`agents accounts add <name>
+  --provider cursor --auth api-key --from-secrets <bundle>:<KEY>`) is
+  **independent of any installed harness version** — it exists in the account
+  registry (`lib/account-registry.ts`) as a label that resolves to a secrets
+  bundle reference, not to a version home fingerprint. `resolveAccountForExec`
+  MUST inject the account's key as `CURSOR_API_KEY` (the `injectionEnv` field)
+  into the spawn environment before exec, overriding any profile or ambient
+  value but yielding to an explicit caller-supplied `--env CURSOR_API_KEY=…`
+  (`commands/exec.ts`). `agents run cursor --account <name>` MUST select the
+  newest installed Cursor version and inject the key; it MUST fail closed when no
+  installed version is found. Under the `balanced` strategy, `collectApiKeyAccountCandidates`
+  (`lib/rotate.ts`) synthesises one healthy candidate per named API-key account,
+  each targeting the newest installed version — so bare `agents run cursor` may
+  select a named API-key account. Usage for an API-key account is unavailable:
+  `getCursorUsageInfo` returns `usageApiKeyUnverifiableError` rather than reading
+  the device-global OAuth session, because Cursor exposes no per-API-key usage
+  endpoint and the device OAuth session does not belong to the API-key account.
 
 Requirement keywords **MUST / MUST NOT / SHOULD / MAY** are used per
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119). Every requirement cites the
@@ -1851,24 +1868,19 @@ schema (`--json` passes through each agent's native stream format).
 
   Status: `[Drift]` — a named deviation from EXEC-13's per-version isolation
   contract, scoped (with the two ways to close it) in EXEC-GAP-1.
-- **EXEC-16a (MUST).** Muse and Cursor have no dedicated config-dir env var, so
-  `buildExecEnv` isolates them via XDG instead: it pins `XDG_CONFIG_HOME`
-  (and `XDG_DATA_HOME` for muse) at the version home (`lib/exec.ts`, the muse
-  and cursor arms). For Cursor this is what makes multiple accounts real: the
-  OAuth token that gates login lives at `$XDG_CONFIG_HOME/cursor/auth.json`
-  (verified empirically — relocating `XDG_CONFIG_HOME` relocates the login;
-  `~/.cursor/cli-config.json` is only account metadata), so each version home is
-  a distinct Cursor account, authenticated from its own token, isolated per run
-  (no global `~/.cursor` symlink swap — concurrent runs on different accounts do
-  not clobber one another). `CREDENTIAL_FILE_SEGMENTS.cursor`
-  (`lib/agents.ts`) verifies signed-in per home against that token, and
-  `seedActiveCursorLoginPerVersion` (`lib/migrate.ts`) migrates the legacy
-  global token into the active account's home on upgrade. The versioned-alias
-  shim mirrors the same `XDG_CONFIG_HOME` export (`CONFIG_ENV_ISOLATED_AGENTS`
-  includes cursor). Cursor's HOME-relative `~/.cursor` (cli-config.json,
-  chats) has no env override and stays on the shared home; the routine overlay
-  path (`buildRoutineSpawnEnv`) is unchanged and still seeds from the active
-  login by design.
+- **EXEC-16a (MUST).** Muse has no dedicated config-dir env var, so
+  `buildExecEnv` isolates it via XDG: it pins `XDG_CONFIG_HOME` and
+  `XDG_DATA_HOME` at the version home (`lib/exec.ts`, the muse arm).
+  Cursor's OAuth login is **device-global** — one browser sign-in per machine,
+  not per installed version. `buildExecEnv` sets no XDG or config-dir override
+  for Cursor; the versioned-alias shim omits Cursor from `CONFIG_ENV_ISOLATED_AGENTS`
+  for the same reason. Multiple Cursor accounts are supported through **named
+  API-key accounts** (see EXEC-ACCOUNT-4), not through per-version XDG isolation.
+  `CREDENTIAL_FILE_SEGMENTS.cursor` (`lib/agents.ts`) verifies the shared device
+  login; `getCursorUsageInfo` refuses to read usage for a named API-key account
+  — returning `usageApiKeyUnverifiableError` — because there is no per-account
+  OAuth session to read from, and attributing the device OAuth session to an API-key
+  account would produce incorrect data.
 - **EXEC-17 (MUST).** The Windows `.cmd` shim delegate
   (`execShimPassthrough`) MUST route its env through the same `buildExecEnv`
   `agents run` uses (`lib/exec.ts:1059`) — so on Windows the isolated-agent

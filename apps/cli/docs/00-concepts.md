@@ -137,6 +137,36 @@ with no binding file or cross-provider OAuth association. `run --account` picks
 a healthy matching version and fails when none exists; it never falls back to a
 different account. Vendor-cloud and lease placement do not use local labels.
 
+**API-key accounts (Cursor).** Cursor's browser OAuth is device-global — one
+sign-in per machine, shared across all installed versions. Multi-account Cursor
+runs use named API-key accounts instead of per-version OAuth isolation:
+
+```bash
+# Register a Cursor API key from your secrets bundle:
+agents accounts add work --provider cursor --auth api-key \
+  --from-secrets cursor-keys:CURSOR_API_KEY_WORK
+
+# Set or rotate the key for an existing account:
+agents accounts set-key work --from-secrets cursor-keys:CURSOR_API_KEY_WORK
+
+# Inspect and verify the account:
+agents accounts inspect work
+
+# Run with an explicit account — fails closed if the account is missing:
+agents run cursor --account work
+```
+
+An API-key account is independent of any installed Cursor version; the registry
+holds only the secrets bundle reference. At exec time `resolveAccountForExec`
+injects `CURSOR_API_KEY` into the child's environment — overriding any profile or
+ambient value, yielding to an explicit `--env CURSOR_API_KEY=…`. Bare
+`agents run cursor` (balanced rotation) treats each healthy named API-key account
+as a candidate targeting the newest installed version, so rotation works without
+an explicit `--account`. Usage bars are unavailable for API-key accounts: Cursor
+exposes no per-API-key usage endpoint, so `agents view cursor` shows a
+`usage unavailable` notice rather than reading the device OAuth session and
+attributing it to the wrong account.
+
 agents-cli can run commands on **other machines**, not just the local one. Two
 independent registries back this, both using SSH as the only transport (no daemon).
 
