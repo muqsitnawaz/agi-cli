@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.22.33
+
+- **Release tags are annotated with the folded changelog notes.** `scripts/release.sh` now creates `v<version>` as an annotated tag whose message is `Release <version>` plus the body of `.changelog/<version>.md` (the same notes that already become the release PR body). Agents keep writing one fragment under `.changelog/next/`; there is no separate tag-description channel. The already-published missing-tag recovery path uses the same helper with `--force`. Source: `apps/cli/scripts/release.sh`.
+
+`agents sessions --routines` once again opens the routine picker across every working directory instead of an empty current-repository session browser.
+
 ## 1.22.32
 
 - **Routines validate execution context before activation and fire once per schedule slot (RUSH-2290).** A routine selects one execution `project` plus a portable `cwd`; add/edit save proven blockers paused, durable slot and active-run claims prevent duplicate or overlapping launches, and every blocked/skipped/pre-spawn attempt remains visible without requiring a session transcript. Source: `apps/cli/src/lib/routine-context.ts`, `apps/cli/src/lib/routine-readiness.ts`, `apps/cli/src/lib/runner.ts`.
