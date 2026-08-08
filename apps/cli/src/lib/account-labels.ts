@@ -17,7 +17,7 @@ import {
 
 export interface AccountLabel { agent: AgentId; fingerprint: string }
 export interface AccountLabelsDocument { labels: Record<string, AccountLabel> }
-export interface DiscoveredAccount { agent: AgentId; fingerprint: string; display: string; versions: string[]; label: string | null }
+export interface DiscoveredAccount { agent: AgentId; fingerprint: string; display: string; versions: string[]; label: string | null; credentialKind: 'managed-login' | 'api-key' }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -73,9 +73,17 @@ export async function discoverAccounts(agentIds: readonly AgentId[] = ACCOUNT_IN
     for (const candidate of await collectRunCandidates(agent)) {
       if (!candidate.signedIn || !candidate.accountKey) continue;
       const fingerprint = identityFingerprint(agent, candidate.accountKey); const key = `${agent}:${fingerprint}`; const existing = grouped.get(key);
-      if (existing) existing.versions.push(candidate.version); else grouped.set(key, { agent, fingerprint, display: candidate.accountLabel || 'signed-in account', versions: [candidate.version], label: labelForFingerprint(agent, fingerprint, labels) });
+      if (existing) existing.versions.push(candidate.version); else grouped.set(key, { agent, fingerprint, display: candidate.accountLabel || 'signed-in account', versions: [candidate.version], label: labelForFingerprint(agent, fingerprint, labels), credentialKind: 'managed-login' });
     }
   }));
+  // Named api-key accounts have no per-version signed-in state — surface them from the registry.
+  const registry = readRegistry();
+  for (const record of Object.values(registry.accounts)) {
+    if (record.credential.kind !== 'api-key') continue;
+    if (!(agentIds as readonly string[]).includes(record.agent)) continue;
+    const fingerprint = record.id; const key = `${record.agent}:${fingerprint}`;
+    if (!grouped.has(key)) grouped.set(key, { agent: record.agent, fingerprint, display: record.label, versions: listInstalledVersions(record.agent), label: record.label, credentialKind: 'api-key' });
+  }
   return [...grouped.values()].sort((a, b) => a.agent.localeCompare(b.agent) || a.display.localeCompare(b.display));
 }
 

@@ -1139,6 +1139,33 @@ describe('getAccountInfo — cursor (cli-config authInfo + separate auth.json)',
     const info = await getAccountInfo('cursor', makeTempDir());
     expect(info.signedIn).toBe(false);
   });
+
+  it('treats cursor as signed out when cli-config has email but auth.json is absent', async () => {
+    const home = makeTempDir();
+    fs.mkdirSync(path.join(home, '.cursor'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.cursor', 'cli-config.json'), JSON.stringify({
+      authInfo: { email: 'muqsitnawaz@gmail.com', userId: 27457401, authId: 'google-oauth2|106748008124572295566' },
+    }));
+    // auth.json absent — stale profile must not prove sign-in
+    const info = await getAccountInfo('cursor', home);
+    expect(info.signedIn).toBe(false);
+    expect(info.email).toBe('muqsitnawaz@gmail.com');
+  });
+
+  it('treats cursor as signed out when auth.json has no accessToken', async () => {
+    const home = makeTempDir();
+    fs.mkdirSync(path.join(home, '.cursor'), { recursive: true });
+    fs.mkdirSync(path.join(home, '.config', 'cursor'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.cursor', 'cli-config.json'), JSON.stringify({
+      authInfo: { email: 'muqsitnawaz@gmail.com', userId: 27457401, authId: 'google-oauth2|106748008124572295566' },
+    }));
+    fs.writeFileSync(path.join(home, '.config', 'cursor', 'auth.json'), JSON.stringify({
+      refreshToken: 'eyJ.ghi.jkl', // no accessToken field
+    }));
+    const info = await getAccountInfo('cursor', home);
+    expect(info.signedIn).toBe(false);
+    expect(info.email).toBe('muqsitnawaz@gmail.com');
+  });
 });
 
 describe('getAccountInfo — Claude organization identity', () => {

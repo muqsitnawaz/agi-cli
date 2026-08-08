@@ -2163,7 +2163,7 @@ export async function getAccountInfo(
             } catch { /* unreadable token file */ }
           }
           const accountKey = buildIdentityKey(agentId, [['user', accountId]]);
-          return { ...empty, email, accountId, accountKey, signedIn: hasToken || !!email, lastActive };
+          return { ...empty, email, accountId, accountKey, signedIn: hasToken, lastActive };
         } catch {}
         return { ...empty, lastActive };
       }
