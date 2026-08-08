@@ -191,6 +191,23 @@ location is the one canonical store, not a per-install dotfile, so there is no
 "unmanaged own copy" to hide. Both behaviors key off the composite FORM, never a harness
 name, so any future single-shared-DB harness inherits them.
 
+**A file-gone session is archived, not lost — the DB is authoritative for its user turns (RUSH-2436).**
+`findMissingFilePaths` still detects when a transcript file has vanished (an `agents remove`
+trash move, a manual `rm`, a `.history` version-home rotation, a box reimage), but what
+happens next changed. The session's user-turn text is already stored durably in the
+`session_text` FTS `content` column at scan time (for every harness, keyed by
+`session_id`), so a file-gone row whose content survives is now **kept and flagged
+`archived`** instead of being dropped: it still appears in `agents sessions` listings,
+`agents sessions <id> --include user` renders its user turns from the DB (with an
+`archived — transcript file removed; user turns served from the local DB` banner) rather
+than a bare "file no longer exists" note, and the picker preview does the same. Session
+history depth is therefore bounded by DB retention, not transcript-file lifetime. A
+file-gone row with **empty** content is a phantom (a stale/moved `file_path`) and stays
+suppressed. Two safety changes ride with this: merely *listing* a file-gone session no
+longer PURGES its redacted tool-call evidence (that destructive purge-on-read is removed;
+only `purgeMissingToolCallsInDirectory` prunes evidence), and a persisted `archived_at`
+column (schema v38) records the first confirmation that a scanned file went missing.
+
 **OpenCode field coverage (RUSH-2358).** The scan reads what OpenCode's own DB records,
 so an OpenCode row carries the same burn/usage fields as any other harness:
 

@@ -465,6 +465,27 @@ SSH access (§7); rendering sessions that no harness produced.
 - **SES-30 (MUST).** One malformed row's constraint failure MUST NOT roll back the
   batch and MUST NOT stamp that row's ledger entry, so it is retried next scan
   (self-healing) (`lib/session/db.ts:975-982,1035-1039`).
+- **SES-40 (MUST).** The local index MUST be authoritative for a session's
+  user-turn content: a session whose transcript file is gone from disk but whose
+  `session_text` `content` still holds its user turns MUST remain listable and
+  renderable, not dropped (RUSH-2436). `querySessions` and `topSessionsByCost`
+  MUST keep such a row, flagged `archived` (persisted `sessions.archived_at`,
+  schema v38, stamped once on the first confirmation the scanned file is gone);
+  `agents sessions <id>` (the `findSessionsById` path) MUST resolve it, and the
+  render + picker-preview paths MUST serve its user turns from the DB
+  (`readSessionContent` / `readArchivedSessionPreview`) rather than falling back to
+  a metadata-only note. A file-gone row with **no** cached content is a phantom (a
+  stale/moved `file_path`) and MUST stay suppressed. Merely listing a file-gone
+  session MUST NOT delete its redacted tool-call evidence — the destructive
+  purge-on-read from the missing-file branch is removed; only directory-scoped
+  cleanup (`purgeMissingToolCallsInDirectory`) prunes evidence
+  (`lib/session/db.ts` `querySessions`/`topSessionsByCost`/`readSessionContent`/`readArchivedSessionPreview`;
+  `commands/sessions.ts` `renderArchivedSession`; `commands/sessions-picker.ts` `buildPreview`/`loadSessionPreviewDigest`).
+  Because a moved-file phantom that a scan forgot to rewrite still carries content,
+  it is now archived rather than dropped; in practice real harnesses derive the id
+  from transcript content and rewrite `file_path` on the same row, so no such
+  duplicate arises (Status: `[Landed]`; the content-vs-phantom discriminator is
+  content presence, not supersession detection — SES-GAP-9).
 - **SES-31 (MUST).** Tool-call evidence MUST be redacted before persistence and
   bounded to 16 KiB input, 1 KiB successful output, or 4 KiB error output.
   Raw evidence and shell source MUST be bounded to 64 KiB before redaction or
@@ -867,6 +888,14 @@ normative — a change that widens/narrows a cell is a spec change.
   older CLI opening a DB written by a newer one silently proceeds instead of
   failing safe (`lib/session/db.ts` schema gate). The "fail safe on newer DB"
   guarantee is aspirational until a guard is added.
+- **SES-GAP-9.** The archived-vs-phantom discriminator (SES-40) is *content
+  presence*, not supersession detection. A file-gone row keeps `archived` iff its
+  `session_text` content is non-empty; there is no signal for "this session's
+  content now lives under another current row." For real harnesses this is a
+  non-issue (the id is content-derived, so a rename rewrites `file_path` on the one
+  row), but a synthetic harness that keys the id off the filename would surface a
+  renamed session's old id as an archived duplicate. Closing it needs a
+  supersession signal from the scanner (out of the Layer-1 read-path scope).
 ---
 
 ### 8. Given/When/Then scenarios
