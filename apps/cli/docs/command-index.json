@@ -1,7 +1,7 @@
 {
   "command": "agents",
   "groups": 99,
-  "commands": 569,
+  "commands": 570,
   "tree": [
     {
       "name": "accounts",
@@ -14206,6 +14206,38 @@
         }
       ],
       "subcommands": [
+        {
+          "name": "history",
+          "path": "watchdog history",
+          "aliases": [],
+          "description": "Show persisted Watchdog decisions and actions, newest first.",
+          "args": [
+            {
+              "name": "sessionId",
+              "required": false,
+              "variadic": false
+            }
+          ],
+          "options": [
+            {
+              "flags": "--limit <count>",
+              "description": "Maximum events to show"
+            },
+            {
+              "flags": "--since <duration>",
+              "description": "Only events within a duration such as 2h or 7d"
+            },
+            {
+              "flags": "--all",
+              "description": "Include heartbeat tick events"
+            },
+            {
+              "flags": "--json",
+              "description": "Emit safe structured history (transcript content is excluded)"
+            }
+          ],
+          "subcommands": []
+        },
         {
           "name": "off",
           "path": "watchdog off",

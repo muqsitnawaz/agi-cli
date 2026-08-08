@@ -42,6 +42,34 @@ export interface WatchdogEvent {
   nudgeText?: string;
 }
 
+const WATCHDOG_EVENT_KINDS = new Set<WatchdogEventKind>(['tick', 'decision', 'nudge', 'rotate', 'error']);
+
+/** Parse the audit log without letting a partial final append hide valid rows. */
+export function parseWatchdogEvents(text: string): WatchdogEvent[] {
+  const events: WatchdogEvent[] = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const value = JSON.parse(line) as Partial<WatchdogEvent>;
+      if (
+        typeof value.ts !== 'number' ||
+        typeof value.kind !== 'string' ||
+        !WATCHDOG_EVENT_KINDS.has(value.kind as WatchdogEventKind) ||
+        typeof value.message !== 'string'
+      ) continue;
+      events.push(value as WatchdogEvent);
+    } catch {
+      // Interrupted writers can leave one partial row; earlier rows remain useful.
+    }
+  }
+  return events;
+}
+
+export function readWatchdogEvents(logPath = WATCHDOG_LOG_PATH): WatchdogEvent[] {
+  if (!fs.existsSync(logPath)) return [];
+  return parseWatchdogEvents(fs.readFileSync(logPath, 'utf8'));
+}
+
 /** Serialize one event to a JSONL line (no trailing newline). */
 export function formatEvent(ev: WatchdogEvent): string {
   return JSON.stringify(ev);
@@ -53,6 +81,24 @@ export function formatEvent(ev: WatchdogEvent): string {
  * history, small enough to bound the file the UI polls.
  */
 export const WATCHDOG_LOG_MAX_LINES = 2000;
+export const WATCHDOG_TAIL_MAX_CHARS = 4096;
+
+/** Keep the newest transcript context without letting it consume the audit window. */
+export function boundTailLines(lines: string[], maxChars = WATCHDOG_TAIL_MAX_CHARS): string[] {
+  const kept: string[] = [];
+  let remaining = maxChars;
+  for (let i = lines.length - 1; i >= 0 && remaining > 0; i--) {
+    const line = lines[i];
+    if (line.length <= remaining) {
+      kept.unshift(line);
+      remaining -= line.length;
+    } else {
+      kept.unshift(line.slice(-remaining));
+      remaining = 0;
+    }
+  }
+  return kept;
+}
 
 /** Trim a JSONL body to the last `maxLines` events (same logic as the reader). */
 export function trimToLast(text: string, maxLines: number): string {
@@ -85,7 +131,10 @@ export function appendWatchdogEvents(
       } catch {
         /* first write — no file yet */
       }
-      const appended = events.map(formatEvent).join('\n') + '\n';
+      const boundedEvents = events.map((event) => event.tailLines === undefined
+        ? event
+        : { ...event, tailLines: boundTailLines(event.tailLines) });
+      const appended = boundedEvents.map(formatEvent).join('\n') + '\n';
       const body = trimToLast(existing + appended, maxLines);
       atomicWriteFileSync(logPath, body);
     });

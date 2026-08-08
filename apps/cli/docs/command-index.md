@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `upgrade`, `_internal`).
 
-_99 command groups · 569 commands._
+_99 command groups · 570 commands._
 
 ## accounts — Browse and name signed-in harness accounts
 
@@ -1045,6 +1045,7 @@ agents wallet show <id>                   Reveal a card. Touch ID required. Argu
 
 ```
 agents watchdog                              Auto-nudge stalled agent terminals: detect stalls, resolve the exact split, inject "Continue." — no menu-bar needed.
+agents watchdog history [sessionId]          Show persisted Watchdog decisions and actions, newest first.
 agents watchdog off                          Disable the daemon watchdog pass on this device.
 agents watchdog on                           Enable the daemon watchdog pass on this device.
 agents watchdog policy <sessionId> <policy>  Set per-session policy: off (ignore) | keep (default) | handsoff (detect + flag, never inject).
