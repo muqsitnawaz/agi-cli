@@ -996,8 +996,15 @@ export function removeShim(agent: AgentId): boolean {
  *        alias failed with "not installed" whenever the binary was staged into
  *        the versioned home (installer run with GROK_HOME set, or grok
  *        self-update under the shim).
+ *  v16 — remove the false Cursor XDG_CONFIG_HOME isolation. Cursor's OAuth
+ *        login is device-global (one browser sign-in per machine, no
+ *        per-account subpath), so pinning XDG_CONFIG_HOME at a version home
+ *        never isolated anything — it pointed a different path at the SAME
+ *        single session. A `cursor@<version>` alias now shares the device
+ *        login like every other cursor launch (parity with buildExecEnv),
+ *        instead of advertising isolation it never had.
  */
-export const VERSIONED_ALIAS_SCHEMA_VERSION = 15;
+export const VERSIONED_ALIAS_SCHEMA_VERSION = 16;
 
 /** Internal marker string used to embed the schema version in versioned alias scripts. */
 const VERSIONED_ALIAS_VERSION_MARKER = 'agents-versioned-alias-version:';
@@ -1027,8 +1034,18 @@ function assertSafeVersion(version: string): void {
  *
  * KEEP IN SYNC with the `managedEnv` switch in `generateVersionedAliasScript`.
  * The colocated test `shims.isolation-capability.test.ts` enforces this.
+ *
+ * Cursor is deliberately absent: its OAuth login is device-global (one
+ * browser sign-in per machine, stored at `$XDG_CONFIG_HOME/cursor/auth.json`
+ * with no per-account subpath), so pointing `XDG_CONFIG_HOME` at a private
+ * version home does not isolate it — the copy would still be reading/writing
+ * the SAME single device session through a different path, not a separate
+ * one. `buildExecEnv` (`lib/exec.ts`) already treats cursor this way; a
+ * per-version account is reached only via a named API-key account
+ * (`agents accounts add <name> --provider cursor --auth api-key`), which is
+ * independent of any installed version and is never isolated by env var.
  */
-export const CONFIG_ENV_ISOLATED_AGENTS: readonly AgentId[] = ['claude', 'codex', 'copilot', 'cursor', 'grok', 'kimi', 'opencode', 'muse'];
+export const CONFIG_ENV_ISOLATED_AGENTS: readonly AgentId[] = ['claude', 'codex', 'copilot', 'grok', 'kimi', 'opencode', 'muse'];
 
 /**
  * Whether an agent supports a clean `--isolated` install — i.e. its config
@@ -1099,14 +1116,18 @@ export KIMI_CODE_HOME="$HOME/.agents/.history/versions/${agent}/${version}/home/
 export XDG_CONFIG_HOME="$HOME/.agents/.history/versions/${agent}/${version}/home/.config"
 export XDG_DATA_HOME="$HOME/.agents/.history/versions/${agent}/${version}/home/.local/share"
 `
-              : agent === 'cursor'
-                ? `
-# Cursor: no config-dir env var. Its OAuth token (the login gate) lives at
-# $XDG_CONFIG_HOME/cursor/auth.json, so pin XDG_CONFIG_HOME at the version home
-# to isolate each account's login for direct aliases (parity with buildExecEnv).
-export XDG_CONFIG_HOME="$HOME/.agents/.history/versions/${agent}/${version}/home/.config"
-`
-                : '';
+              // Cursor: deliberately NOT isolated. Its OAuth login is
+              // device-global (one browser sign-in per machine at
+              // $XDG_CONFIG_HOME/cursor/auth.json with no per-account
+              // subpath) — pinning XDG_CONFIG_HOME at a version home would
+              // still point at the SAME single session through a different
+              // path, not a separate one, so a `cursor@<version>` alias
+              // falls through to no managedEnv and shares the device login
+              // like every other cursor launch. Parity with buildExecEnv
+              // (`lib/exec.ts`) and CONFIG_ENV_ISOLATED_AGENTS above. A
+              // per-version *account* is reached only via a named API-key
+              // account, which is not env-var isolated either.
+              : '';
   const launchArgs = agent === 'codex' ? ` ${codexShimLaunchArgs()}` : '';
 
   // Resolve the binary the same way the main shim does (see generateShimScript).

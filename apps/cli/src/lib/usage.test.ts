@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { claudeAccessTokenNeedsRefresh, claudeUsageAccessTokenNoRefresh, loadClaudeOauth, getClaudeKeychainService, swrWindowMsFor, getUsageInfo, getUsageInfoForIdentity, writeClaudeUsageCache, setClaudeUsageCachePathForTest, deriveUsageHeadroom, formatUsageSummary, usageNoCredentialError, usageExpiredCredentialError, usageRejectedError, probeClaudeStatus, probeKimiStatus, type UsageSnapshot } from './usage.js';
+import { claudeAccessTokenNeedsRefresh, claudeUsageAccessTokenNoRefresh, loadClaudeOauth, getClaudeKeychainService, swrWindowMsFor, getUsageInfo, getUsageInfoForIdentity, writeClaudeUsageCache, setClaudeUsageCachePathForTest, deriveUsageHeadroom, formatUsageSummary, usageNoCredentialError, usageExpiredCredentialError, usageRejectedError, usageApiKeyUnverifiableError, probeClaudeStatus, probeKimiStatus, type UsageSnapshot } from './usage.js';
 import type { AccountInfo } from './agents.js';
 import { noteUsageRateLimited, setUsageBackoffDirForTest } from './usage-backoff.js';
 import { setKeychainToken, setKeychainBackendForTest, secretsKeychainItem, type KeychainBackend } from './secrets/index.js';
@@ -840,5 +840,62 @@ describe('getUsageInfo(codex) — usage is scoped to the current login', () => {
     const info = await getUsageInfo('codex', { home });
     const session = info.snapshot?.windows.find((w) => w.key === 'session');
     expect(session?.usedPercent).toBe(42);
+  });
+});
+
+describe('Cursor usage refuses to attribute a device OAuth session to a named api-key account', () => {
+  // Real files on disk (no mocks): a valid, unexpired Cursor OAuth login —
+  // exactly what a device-global `cursor login` leaves behind. Without the
+  // credentialKind guard, getCursorUsageInfo would read these and return that
+  // OAuth account's live usage, mislabeled as belonging to whatever named
+  // api-key account the caller actually asked about.
+  let home: string;
+
+  function b64url(obj: unknown): string {
+    return Buffer.from(JSON.stringify(obj)).toString('base64url');
+  }
+
+  function writeSignedInCursorHome(dir: string): void {
+    fs.mkdirSync(path.join(dir, '.cursor'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.cursor', 'cli-config.json'),
+      JSON.stringify({ authInfo: { email: 'device-owner@example.com', authId: 'google-oauth2|123' } }),
+    );
+    fs.mkdirSync(path.join(dir, '.config', 'cursor'), { recursive: true });
+    const jwt = `${b64url({ alg: 'none' })}.${b64url({ exp: Math.floor(Date.now() / 1000) + 3600 })}.sig`;
+    fs.writeFileSync(
+      path.join(dir, '.config', 'cursor', 'auth.json'),
+      JSON.stringify({ accessToken: jwt, refreshToken: 'r' }),
+    );
+  }
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-cursor-apikey-'));
+    writeSignedInCursorHome(home);
+  });
+
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('refuses an api-key account even though a valid device OAuth session exists on disk', async () => {
+    const usage = await getUsageInfo('cursor', { home, credentialKind: 'api-key' });
+
+    expect(usage.snapshot).toBeNull();
+    expect(usage.error).toBe(usageApiKeyUnverifiableError('Cursor'));
+  });
+
+  it('still attempts the normal read when no credentialKind is given (managed-login path unaffected)', async () => {
+    // Corrupt cli-config.json so readCursorCredentials fails closed (returns
+    // null) before any network call — proves the api-key guard did NOT fire
+    // (it would have returned synchronously with usageApiKeyUnverifiableError)
+    // and the call instead reached the real credential-reading code path.
+    fs.writeFileSync(path.join(home, '.cursor', 'cli-config.json'), '{ not json');
+
+    const usage = await getUsageInfo('cursor', { home });
+
+    expect(usage.snapshot).toBeNull();
+    expect(usage.error).not.toBe(usageApiKeyUnverifiableError('Cursor'));
+    expect(usage.error).toContain('Cursor');
   });
 });

@@ -692,7 +692,7 @@ describe('remediationFor', () => {
       .toBe('agents run kimi@0.19.2');
   });
 
-  it.each(['gemini', 'antigravity', 'droid'] as const)(
+  it.each(['gemini', 'antigravity', 'droid', 'cursor'] as const)(
     '%s has NO per-version isolation → shared login (no fake per-version fix)',
     (agent) => {
       const r = remediationFor({ ...base, kind: 'logged-out', agent, version: '9.9.9' });
@@ -701,13 +701,16 @@ describe('remediationFor', () => {
     },
   );
 
-  it('cursor now isolates its token per version home → version-targeted run (RUSH-2400)', () => {
-    // Cursor's login used to be shared; it now pins XDG_CONFIG_HOME per version
-    // home (buildExecEnv), so each account authenticates from its own token and
-    // the remediation must target the specific version, not claim a shared login.
+  it('cursor is device-global — never a per-version repair, even for a named api-key account', () => {
+    // Cursor's OAuth login is one browser sign-in per machine, not per version
+    // home (buildExecEnv deletes any per-version config env for cursor; see
+    // CONFIG_ENV_ISOLATED_AGENTS in lib/shims.ts, which cursor is deliberately
+    // absent from). Suggesting `agents run cursor@<version>` here would be a
+    // lie: logging into that one version logs into every version at once.
     const r = remediationFor({ ...base, kind: 'logged-out', agent: 'cursor', version: '9.9.9' });
-    expect(r).toBe('agents run cursor@9.9.9');
-    expect(r).not.toContain('shared across all');
+    expect(r).not.toBe('agents run cursor@9.9.9');
+    expect(r).not.toContain('agents run cursor@9.9.9');
+    expect(r).toContain('shared across all');
   });
 
   it('opencode uses `auth login`, forwarded into the version home', () => {

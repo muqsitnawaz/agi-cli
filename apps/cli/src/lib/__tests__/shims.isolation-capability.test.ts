@@ -21,10 +21,6 @@ const CONFIG_ENV_BY_AGENT: Record<(typeof CONFIG_ENV_ISOLATED_AGENTS)[number], s
   // Muse has no dedicated config env; isolation is XDG (proved: empty
   // XDG_CONFIG_HOME works; adopt symlink at ~/.config/muse fails SymlinkOrReparse).
   muse: 'XDG_CONFIG_HOME',
-  // Cursor has no dedicated config env either; its OAuth token (the login gate)
-  // is at $XDG_CONFIG_HOME/cursor/auth.json, so pinning XDG_CONFIG_HOME per
-  // version home isolates each account's login (proved empirically).
-  cursor: 'XDG_CONFIG_HOME',
 };
 const ALL_CONFIG_ENVS = Object.values(CONFIG_ENV_BY_AGENT);
 
@@ -65,6 +61,20 @@ describe('isolated-install capability', () => {
       for (const env of ALL_CONFIG_ENVS) {
         expect(script).not.toContain(`export ${env}=`);
       }
+    }
+  });
+
+  // Regression: Cursor's OAuth login is device-global (one browser sign-in per
+  // machine, no per-account subpath) — a `cursor@<version>` alias must never
+  // claim per-version isolation it does not have, whether via XDG_CONFIG_HOME
+  // or any other env var. See CONFIG_ENV_ISOLATED_AGENTS's docblock.
+  it('cursor is not isolation-capable and its alias exports no config-dir env var', () => {
+    expect(supportsIsolatedInstall('cursor')).toBe(false);
+    expect(CONFIG_ENV_ISOLATED_AGENTS).not.toContain('cursor');
+    const script = generateVersionedAliasScript('cursor', V);
+    expect(script).not.toMatch(/export\s+XDG_CONFIG_HOME=/);
+    for (const env of ALL_CONFIG_ENVS) {
+      expect(script).not.toContain(`export ${env}=`);
     }
   });
 });

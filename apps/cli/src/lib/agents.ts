@@ -1464,9 +1464,15 @@ const CREDENTIAL_FILE_SEGMENTS: Partial<Record<AgentId, string[][]>> = {
   muse: [['.config', 'muse', 'auth.json']],
   // Cursor's OAuth token — the login gate — is at $XDG_CONFIG_HOME/cursor/auth.json
   // (~/.config/cursor/auth.json by default). cli-config.json holds only account
-  // metadata; the token file is what a real launch authenticates from, so a
-  // version home with no token of its own is genuinely logged out once runs pin
-  // XDG_CONFIG_HOME per home (see buildExecEnv).
+  // metadata; the token file is what a real launch authenticates from. Cursor's
+  // login is DEVICE-GLOBAL, not per version home — buildExecEnv (`lib/exec.ts`)
+  // deliberately never pins XDG_CONFIG_HOME per version for cursor, and cursor is
+  // absent from CONFIG_ENV_ISOLATED_AGENTS (`lib/shims.ts`) — so a version home
+  // with no token of its own is NOT genuinely logged out on its own;
+  // resolveAccountCredentialPath's fallback to the active real-HOME token is what
+  // keeps every installed version reading as signed in when the shared device
+  // login exists. A named API-key account (`agents accounts add-key`) is a
+  // separate credential path entirely, not reflected here.
   cursor: [['.config', 'cursor', 'auth.json']],
 };
 

@@ -97,6 +97,19 @@ export function usageUnreachableError(agent: string, cause?: unknown): string {
     ? `${agent} usage read failed: ${detail}`
     : `${agent} usage read failed.`;
 }
+/**
+ * A named api-key account (`account-registry.ts`) has no filesystem home of
+ * its own — the key is injected at spawn time, never written to a config
+ * directory. Some usage sources (Cursor: `WorkosCursorSessionToken`, an OAuth
+ * cookie) can only ever read whatever single OAuth session happens to be on
+ * this machine, which may belong to a completely different account than the
+ * one this read was asked about. Reading it anyway would silently mislabel
+ * that OAuth account's usage as this api-key account's — worse than reporting
+ * nothing. Report honestly instead.
+ */
+export function usageApiKeyUnverifiableError(agent: string): string {
+  return `${agent} usage cannot be read for an api-key account — the usage endpoint only exposes this machine's single OAuth session, which cannot be verified to be this account.`;
+}
 
 /**
  * True when a Claude OAuth access token is within the refresh leeway of expiry
@@ -191,6 +204,17 @@ export interface UsageIdentityInput {
   info: AccountInfo;
   home?: string;
   cliVersion?: string | null;
+  /**
+   * Set for a named account backed by an api-key credential
+   * (`account-registry.ts`, e.g. a Cursor account added via `agents accounts
+   * add-key`). Such an account has no per-account filesystem home — the key
+   * is injected at spawn time, never written to a config directory — so a
+   * usage source that only reads local OAuth files (Cursor: no other kind
+   * exists) MUST refuse rather than fall back to reading whatever OAuth
+   * session happens to be on this machine and mislabeling it as this
+   * account's usage. See {@link usageApiKeyUnverifiableError}.
+   */
+  credentialKind?: 'managed-login' | 'api-key' | null;
 }
 
 /** Options for fetching usage data. */
@@ -205,6 +229,8 @@ interface UsageOptions {
    * setup-token, or `<home>/.claude/.credentials.json` only.
    */
   fileOnly?: boolean;
+  /** See {@link UsageIdentityInput.credentialKind}. */
+  credentialKind?: 'managed-login' | 'api-key' | null;
 }
 
 /** Canonical input for a single usage fetch operation. */
@@ -212,6 +238,7 @@ export interface UsageFetchInput {
   agentId: AgentId;
   home?: string;
   cliVersion: string | null;
+  credentialKind?: 'managed-login' | 'api-key' | null;
   organizationId: string | null;
 }
 
@@ -353,6 +380,7 @@ export function buildCanonicalUsageContext(inputs: UsageIdentityInput[]): {
       home: input.home,
       cliVersion: input.cliVersion || null,
       organizationId: input.info.organizationId,
+      credentialKind: input.credentialKind ?? null,
     });
   }
 
@@ -429,6 +457,7 @@ export async function getUsageInfoByIdentity(
         agentId: input.agentId,
         home: input.home,
         cliVersion: input.cliVersion,
+        credentialKind: input.credentialKind,
         info: canonicalByUsageKey.get(key)!,
       }, opts),
     }),
@@ -500,6 +529,7 @@ export async function getUsageInfoForIdentity(
       home: input.home,
       cliVersion: input.cliVersion,
       organizationId: input.info.organizationId,
+      credentialKind: input.credentialKind,
     });
   }
 
@@ -570,6 +600,7 @@ async function fetchLiveUsageDeduped(
       home: input.home,
       cliVersion: input.cliVersion,
       organizationId: input.info.organizationId,
+      credentialKind: input.credentialKind,
     });
 
     if (usage.snapshot?.source === 'live') {
@@ -2753,6 +2784,12 @@ async function fetchCursorUsageSummaryWindows(cookie: string): Promise<UsageWind
  * renders instead of reporting three swallowed failures.
  */
 async function getCursorUsageInfo(options?: UsageOptions): Promise<UsageInfo> {
+  // A named api-key account has no OAuth session of its own — refuse before
+  // touching any cli-config.json/auth.json on disk. See
+  // {@link usageApiKeyUnverifiableError}.
+  if (options?.credentialKind === 'api-key') {
+    return { snapshot: null, error: usageApiKeyUnverifiableError('Cursor') };
+  }
   try {
     const base = options?.home || os.homedir();
     const creds = readCursorCredentials(base);
