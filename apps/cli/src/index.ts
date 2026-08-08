@@ -208,6 +208,7 @@ import {
   loadSend,
   loadFeed,
   loadMailboxes,
+  loadCp,
   type ModuleLoader,
 } from './lib/startup/command-registry.js';
 import { applyGlobalHelpConventions } from './lib/help.js';
@@ -1197,6 +1198,7 @@ async function registerAllEagerCommands(): Promise<void> {
   await reg(loadRepo);
   await reg(loadSetup);
   await reg(loadUninstall);
+  await reg(loadCp);
 }
 
 /** Calculate the Levenshtein edit distance between two strings. */
