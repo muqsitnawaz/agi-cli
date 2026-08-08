@@ -56,4 +56,19 @@ describe('watchdog history', () => {
       stalledForMs: undefined,
     }]);
   });
+
+  it('reserves room for actions when a large inspection batch fills the limit', () => {
+    const inspections = Array.from({ length: 60 }, (_, i) => ({
+      terminalId: `session-${i}`,
+      agentType: 'claude',
+      message: 'skip',
+      reason: 'active',
+    }));
+    const history = selectWatchdogHistory([
+      { ts: 200, kind: 'tick', message: '60 live', inspections },
+      { ts: 100, kind: 'nudge', message: 'continued', terminalId: 'action-session' },
+    ], { limit: 50 });
+    expect(history).toHaveLength(50);
+    expect(history.some((entry) => entry.kind === 'nudge')).toBe(true);
+  });
 });

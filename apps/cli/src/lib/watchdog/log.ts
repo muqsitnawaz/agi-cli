@@ -63,6 +63,7 @@ export function parseWatchdogEvents(text: string): WatchdogEvent[] {
       const value = JSON.parse(line) as Record<string, unknown>;
       if (
         typeof value.ts !== 'number' ||
+        !Number.isFinite(value.ts) ||
         typeof value.kind !== 'string' ||
         !WATCHDOG_EVENT_KINDS.has(value.kind as WatchdogEventKind) ||
         typeof value.message !== 'string'

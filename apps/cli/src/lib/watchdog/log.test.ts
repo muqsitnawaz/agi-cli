@@ -97,6 +97,10 @@ describe('appendWatchdogEvents', () => {
       stalledForMs: undefined,
     }]);
   });
+
+  it('rejects non-finite timestamps', () => {
+    expect(parseWatchdogEvents('{"ts":1e400,"kind":"tick","message":"bad"}')).toEqual([]);
+  });
 });
 
 describe('trimToLast / formatEvent', () => {

@@ -53,10 +53,17 @@ export function selectWatchdogHistory(
     }];
   });
 
-  return expanded
+  const matching = expanded
     .filter((entry) => entry.ts >= cutoff)
     .filter((entry) => !session || entry.sessionId?.toLowerCase().startsWith(session))
-    .sort((a, b) => b.ts - a.ts)
-    .slice(0, limit)
-    ;
+    .sort((a, b) => b.ts - a.ts);
+  if (matching.length <= limit) return matching;
+
+  // A busy tick can contain more inspections than the display limit. Keep the
+  // newest timeline, but reserve one row for the newest real action.
+  const newest = matching.slice(0, limit);
+  if (newest.some((entry) => entry.kind !== 'inspection')) return newest;
+  const newestAction = matching.find((entry) => entry.kind !== 'inspection');
+  if (!newestAction) return newest;
+  return [...newest.slice(0, limit - 1), newestAction].sort((a, b) => b.ts - a.ts);
 }
