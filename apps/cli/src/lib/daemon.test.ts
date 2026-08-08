@@ -966,6 +966,70 @@ describe('daemon self-terminate guard on a missing state dir (RUSH-2367)', () =>
  * socket, broker socket, runs dir) resolves inside the temp state dir and the
  * test can never touch a live daemon on the dev machine.
  */
+// RUSH-2423: shutdown is reachable from SIGTERM, SIGINT, and the state-dir
+// self-check, and two can arrive together (a service manager SIGTERMing a daemon
+// whose state dir was just removed). handleShutdown was only INCIDENTALLY safe
+// against that — every step inside it happens to be idempotent — which is a
+// property the next step added would silently have to re-earn. The guard makes
+// single-shot a property of the function.
+describe('handleShutdown is structurally single-shot (RUSH-2423)', () => {
+  it.skipIf(process.platform === 'win32')('runs once when repeated SIGTERMs arrive during shutdown', async () => {
+    if (!fs.existsSync(DIST_ENTRY)) execFileSync('npm', ['run', 'build'], { cwd: REPO_ROOT, stdio: 'ignore' });
+    const home = fs.mkdtempSync(path.join('/tmp', 'agd-dbl-'));
+    const systemDir = path.join(home, '.agents', '.system');
+    fs.mkdirSync(systemDir, { recursive: true });
+    execFileSync('git', ['init', '-q', systemDir]);
+    const env = { ...process.env, HOME: home };
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    const daemonLog = path.join(home, '.agents', '.cache', 'helpers', 'daemon', 'logs.jsonl');
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const waitFor = async (cond: () => boolean, ms: number) => {
+      const end = Date.now() + ms;
+      while (Date.now() < end) { if (cond()) return true; await new Promise((r) => setTimeout(r, 50)); }
+      return cond();
+    };
+
+    let pid: number | null = null;
+    try {
+      pid = startDetached({ agentsBin: DIST_ENTRY, logPath: path.join(home, 'd.log'), env }).pid!;
+      expect(await waitFor(() => fs.existsSync(daemonLog) && fs.readFileSync(daemonLog, 'utf-8').includes('Browser IPC server started'), 20_000)).toBe(true);
+
+      // Repeated SIGTERMs while the first shutdown is still in flight — a
+      // service manager escalating, or a second `agents daemon stop`.
+      //
+      // Deliberately spaced rather than simultaneous: two signals delivered in
+      // the SAME tick kill the daemon outright before any handler logs, which
+      // is a PRE-EXISTING behaviour unrelated to this guard (verified against a
+      // build without it — same zero-line result), so asserting on it would be
+      // testing node's signal delivery, not this code.
+      for (let i = 0; i < 3; i++) {
+        try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(await waitFor(() => !alive(pid!), 15_000)).toBe(true);
+
+      // Exactly one shutdown, not three.
+      const shutdownLines = fs.readFileSync(daemonLog, 'utf-8')
+        .split('\n').filter((l) => l.includes('Daemon shutting down'));
+      expect(shutdownLines.length).toBe(1);
+    } finally {
+      try { if (pid) process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+      if (pid) await waitFor(() => !alive(pid!), 5_000);
+      for (let a = 0; ; a++) {
+        try { fs.rmSync(home, { recursive: true, force: true }); break; }
+        catch (err) { if (a >= 10) throw err; await new Promise((r) => setTimeout(r, 100)); }
+      }
+    }
+  }, 60_000);
+});
+
+// KNOWN GAP (RUSH-2423): the 15 `skipIf(process.platform === 'win32')` blocks in
+// this file mean the daemon's Windows behaviour — the taskkill/`killTree` stop
+// path, named-pipe IPC release, and the POSIX-only instance registry being
+// absent — has no automated coverage at all. Each skips for a real reason (they
+// drive `ps`, POSIX signals, or AF_UNIX sockets, none of which exist on
+// Windows), so closing this needs Windows-shaped equivalents plus a Windows CI
+// runner, not an un-skip. Tracked in RUSH-2423; deliberately not attempted here.
 describe('agents daemon stop — asserts its postcondition (RUSH-2355)', () => {
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
   const waitFor = async (cond: () => boolean, timeoutMs: number) => {

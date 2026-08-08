@@ -11,7 +11,7 @@ import { spawn, execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { getDaemonDir as getDaemonDirRoot } from './state.js';
+import { getDaemonDir } from './state.js';
 import { isAlive, killTree, backgroundSpawnOptions, waitForExit } from './platform/index.js';
 import { listJobs as listAllJobs, type JobConfig } from './routines.js';
 import { syncAllProjectRoutines } from './routines-project.js';
@@ -29,6 +29,13 @@ import { redactSecrets } from './redact.js';
 import { getAgentsBinPath, getCliLaunch, BUN_VIRTUAL_ROOT } from './cli-entry.js';
 import { isSchedulerEnabled, assertSchedulerEnabled, isDaemonEnabled } from './device-config.js';
 import { reapTerminalRoutineProcesses } from './routine-process-cleanup.js';
+import {
+  runSelfHealTick,
+  runBrokerSelfHealTick,
+  runKeychainReapTick,
+  runStateDirSelfCheckTick,
+  shouldTakeOverBroker,
+} from './daemon-ticks.js';
 import { recordSubsystemOk, recordSubsystemError, recordSubsystemErrorReason, readSubsystemHealth, SUBSYSTEM_SECRETS_BROKER, SUBSYSTEM_BROWSER_IPC, SUBSYSTEM_DAEMON_START } from './daemon-health.js';
 
 const PID_FILE = 'daemon.pid';
@@ -50,6 +57,28 @@ const MONITOR_TICK_MS = 60_000;
  */
 const CATCHUP_TICK_MS = 5 * 60_000;
 const WEDGE_THRESHOLD_TICKS = 3;
+
+/**
+ * Cadences for the in-process background ticks, named here beside the other
+ * tick constants instead of being inline literals at their `setInterval` (RUSH-2423).
+ * Each is a deliberate trade, not a round number:
+ *
+ * - **Self-heal** repairs slow rot (a stale non-default version, an invalid
+ *   plugin manifest), so it is cheap to be late and expensive to run often —
+ *   hence 6h, plus one staggered kickoff ~30s after start so shims and PATH
+ *   settle shortly after boot without making launch itself busy.
+ * - **Broker self-heal** is a bare `agentPing`, and the failure it recovers
+ *   from wedges every keychain-backed secret on the box, so it runs minutely.
+ * - **Keychain reap** shells `ps` once per pass; 5 min bounds that cost while
+ *   still clearing orphans well inside a human's attention span.
+ * - **State-dir self-check** is two `fs` reads. The env override exists for
+ *   tests, which cannot wait a minute to observe the self-terminate guard.
+ */
+const SELF_HEAL_TICK_MS = 6 * 60 * 60_000;
+const SELF_HEAL_KICKOFF_MS = 30_000;
+const BROKER_SELF_HEAL_TICK_MS = 60_000;
+const KEYCHAIN_REAP_TICK_MS = 5 * 60_000;
+const STATE_DIR_CHECK_TICK_MS = 60_000;
 
 /**
  * Crash-loop prevention (RUSH-2418). Three layers, because none of them alone
@@ -81,16 +110,24 @@ const DAEMON_START_LIMIT_BURST = 5;
  */
 export const DAEMON_AUTOSTART_FAILURE_LIMIT = 5;
 
+// Moved to daemon-ticks.ts beside the self-heal tick that uses it (RUSH-2422);
+// re-exported so existing `from './daemon.js'` importers keep resolving.
+export { shouldTakeOverBroker };
+
 /**
- * RUSH-1817: decide whether the daemon should (re)take over hosting the secrets
- * broker. The startup host decision is one-shot; this drives the periodic
- * self-heal re-check. Take over ONLY when the daemon is not already hosting AND
- * no healthy broker answers a ping — i.e. a standalone the daemon deferred to at
- * start has since died or crash-looped. Never take over while our in-process
- * broker is hosting, and never clobber a reachable (healthy) broker.
+ * Wrap a tick so it never runs concurrently with itself. Replaces the four
+ * hand-rolled `let healing = false` / `let reapingKeychain = false` booleans
+ * that used to sit inline in runDaemon — same guarantee, declared once.
  */
-export function shouldTakeOverBroker(isHosting: boolean, brokerReachable: boolean): boolean {
-  return !isHosting && !brokerReachable;
+function onceAtATime(fn: () => void | Promise<void>): () => void {
+  let inFlight = false;
+  return () => {
+    if (inFlight) return;
+    inFlight = true;
+    void (async () => {
+      try { await fn(); } finally { inFlight = false; }
+    })();
+  };
 }
 
 /**
@@ -111,18 +148,30 @@ export function schedulerGateTransition(running: boolean, enabled: boolean): Sch
   return enabled ? 'boot' : 'none';
 }
 
-function getDaemonDir(): string {
-  const dir = getDaemonDirRoot();
+/**
+ * The daemon state dir, created if absent.
+ *
+ * Distinct from `state.ts`'s {@link getDaemonDir}, which only resolves the path.
+ * The two were both named `getDaemonDir` with different behaviour, which forced
+ * this module to alias its own import (`getDaemonDirRoot`) to dodge the
+ * collision and made "which one am I calling?" a question at every call site.
+ * The mkdir side effect is the whole difference, so the name says it — and it
+ * is load-bearing in the other direction too: the state-dir self-check MUST
+ * read the path without creating it, or the guard recreates the very tree whose
+ * absence it is checking for.
+ */
+function ensureDaemonDir(): string {
+  const dir = getDaemonDir();
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
 function getPidPath(): string {
-  return path.join(getDaemonDir(), PID_FILE);
+  return path.join(ensureDaemonDir(), PID_FILE);
 }
 
 function getLockPath(): string {
-  return path.join(getDaemonDir(), LOCK_FILE);
+  return path.join(ensureDaemonDir(), LOCK_FILE);
 }
 
 /**
@@ -161,8 +210,16 @@ function acquireStartLock(): (() => void) | null {
   }
 }
 
-function getLogPath(): string {
-  return path.join(getDaemonDir(), LOG_FILE);
+/**
+ * Absolute path to the daemon's structured log.
+ *
+ * Exported because two commands built the same path from a hardcoded
+ * `'logs.jsonl'` literal (`commands/daemon.ts`, `commands/routines.ts`), so
+ * renaming the file would have silently pointed them at nothing (RUSH-2423).
+ * One definition, three callers.
+ */
+export function getDaemonLogPath(): string {
+  return path.join(ensureDaemonDir(), LOG_FILE);
 }
 
 function getLaunchdPlistPath(): string {
@@ -204,7 +261,7 @@ export interface DaemonHeartbeat {
 }
 
 function getHeartbeatPath(): string {
-  return path.join(getDaemonDir(), HEARTBEAT_FILE);
+  return path.join(ensureDaemonDir(), HEARTBEAT_FILE);
 }
 
 export function writeHeartbeat(pid: number = process.pid): void {
@@ -375,24 +432,24 @@ function evictIncumbentDaemon(pid: number): void {
   waitForExit(pid, STOP_KILL_GRACE_MS);
 }
 
-/** Directory that registers every live daemon of THIS device (one per daemon dir). */
+/** Directory that registers every live daemon of THIS device (one per state dir). */
 function getDaemonInstancesDir(): string {
-  return path.join(getDaemonDirRoot(), 'instances');
+  return path.join(getDaemonDir(), 'instances');
 }
 
 /**
  * Record this daemon in the device's instance registry — a marker file named by
  * pid under `<daemonDir>/instances/`. The registry, not a process scan, is how
  * the reaper enumerates the device singleton: because the dir lives INSIDE the
- * daemon dir (`AGENTS_DAEMON_DIR` ?? `<HOME>/.agents/.cache/helpers/daemon`), every
+ * state dir (`AGENTS_DAEMON_DIR` ?? `<HOME>/.agents/.cache/helpers/daemon`), every
  * daemon of one device — however it was launched — registers in the same place,
  * while a genuinely separate install/home or a test fixture registers under its
- * own daemon dir and is invisible here. This is what fixes the two-entry pile-up:
+ * own state dir and is invisible here. This is what fixes the two-entry pile-up:
  * the compiled `dist/bin/agents` binary and the `node <shim>` JS entry have
  * different `process.argv[1]`, so the old launch-entry-scoped `ps` match never
  * reaped across them and duplicates accumulated (78 observed on one box), every
  * routine double-firing. Best-effort — the reaper self-heals a missing/stale
- * marker, and reading another process's ENV to key on the daemon dir directly is
+ * marker, and reading another process's ENV to key on the state dir directly is
  * not portable (hardened macOS hides it from `ps`), so identity rides the shared
  * on-disk registry instead. No-op on Windows (POSIX-only reaper).
  */
@@ -495,7 +552,7 @@ function rotateLogsIfNeeded(logPath: string): void {
 
 /** Append a JSONL log entry to the daemon log file (owner-only permissions). */
 export function log(level: string, message: string): void {
-  const logPath = getLogPath();
+  const logPath = getDaemonLogPath();
   rotateLogsIfNeeded(logPath);
   const entry = { ts: new Date().toISOString(), level: level.toUpperCase(), message: redactSecrets(message) };
   fs.appendFileSync(logPath, JSON.stringify(entry) + '\n', 'utf-8');
@@ -578,8 +635,8 @@ export async function runDaemon(): Promise<void> {
   }
   // Unlike the pid and heartbeat files, this marker is written exactly once
   // for this daemon lifetime. Status probes deliberately repair those other
-  // files, so they cannot prove that the original state tree still exists.
-  const lifetimePath = path.join(getDaemonDirRoot(), LIFETIME_FILE);
+  // files, so they cannot prove that the original state dir still exists.
+  const lifetimePath = path.join(getDaemonDir(), LIFETIME_FILE);
   const lifetimeToken = `${process.pid}:${Date.now()}`;
   fs.writeFileSync(lifetimePath, lifetimeToken, 'utf-8');
   log('INFO', `Daemon started (PID: ${process.pid})`);
@@ -864,127 +921,40 @@ export async function runDaemon(): Promise<void> {
     if (reaped.length > 0) log('WARN', `Reaped ${reaped.length} terminal routine process group(s): ${reaped.join(', ')}`);
   }, MONITOR_TICK_MS);
 
-  // Resource safety check: heal gaps between what DotAgents repos define and
-  // what's actually installed in each agent home — the slow rot that nothing
-  // else catches (a non-default version left stale, a Claude-invalid plugin
-  // manifest silently rejecting a whole plugin). Conservative 'safe' mode: it
-  // fills missing resources, repairs invalid manifests, and fast-forwards
-  // provably-unmodified stale plugins, but never overwrites hand-edited content
-  // or a plugin it can't prove is pristine — those it reports for `doctor --fix`.
-  // Runs ~every 6h plus once ~30s after startup (staggered so launch isn't busy).
-  let healing = false;
-  const runHealCheck = async () => {
-    if (healing) return;
-    // The daemon's state directory is its liveness boundary. Once that tree is
-    // removed, background maintenance must not recreate it while the
-    // self-terminate guard is shutting the process down.
-    if (!fs.existsSync(getDaemonDirRoot())) return;
-    healing = true;
-    try {
-      const { runSelfHeal, selfHealChangedAnything, selfHealNeedsAttention, summarizeSelfHeal } =
-        await import('./self-heal/registry.js');
-      if (!fs.existsSync(getDaemonDirRoot())) return;
-      // Background heal is conservative (mode: 'safe'): fixes low-risk drift (shims,
-      // symlink adoption, PATH, missing resources) and only reports risky ones. The
-      // 30s kickoff means shims/PATH settle shortly after the daemon starts. No
-      // desktop toast here — background heal is silent by design; the log is the record.
-      const report = await runSelfHeal({ mode: 'safe' });
-      if (selfHealChangedAnything(report) || selfHealNeedsAttention(report)) {
-        log('INFO', `self-heal: ${summarizeSelfHeal(report)}`);
-      }
-    } catch (err) {
-      log('ERROR', `self-heal check failed: ${(err as Error).message}`);
-    } finally {
-      healing = false;
-    }
-  };
-  const healInterval = setInterval(() => { void runHealCheck(); }, 6 * 60 * 60_000);
-  const healKickoff = setTimeout(() => { void runHealCheck(); }, 30_000);
+  // ── Background ticks ───────────────────────────────────────────────────
+  // Bodies live in daemon-ticks.ts (RUSH-2422); what stays here is the wiring
+  // runDaemon is actually responsible for — cadence, re-entrancy, and the
+  // dependencies each tick cannot resolve for itself. `onceAtATime` replaces
+  // the four hand-rolled in-flight booleans this file used to carry.
+  const healTick = onceAtATime(() => runSelfHealTick({
+    log,
+    stateDirExists: () => fs.existsSync(getDaemonDir()),
+  }));
+  const healInterval = setInterval(healTick, SELF_HEAL_TICK_MS);
+  // Staggered so launch itself is not busy; shims and PATH settle shortly after.
+  const healKickoff = setTimeout(healTick, SELF_HEAL_KICKOFF_MS);
 
-  // RUSH-1817: the startup host decision above is one-shot. If a standalone
-  // broker answered agentPing() at daemon start, the daemon declined to host —
-  // but should that standalone later die or crash-loop, nothing takes over and
-  // every `agents secrets unlock|export|start` fails until a manual restart
-  // (this wedged all keychain-backed secrets on zion and blocked a release).
-  // Re-probe on a cadence: whenever the daemon is NOT itself hosting AND no
-  // healthy broker answers a ping, take over hosting. startHostedBroker binds
-  // the socket only when it is free, so a take-over never races a live broker.
-  let selfHealingBroker = false;
-  const runBrokerSelfHeal = async () => {
-    if (selfHealingBroker) return;
-    selfHealingBroker = true;
-    try {
-      const { agentPing, startHostedBroker } = await import('./secrets/agent.js');
-      const reachable = (await agentPing()).reachable;
-      if (!shouldTakeOverBroker(hostedBroker != null, reachable)) return;
-      hostedBroker = await startHostedBroker();
-      if (hostedBroker) {
-        log('WARN', 'Secrets broker was unreachable; daemon took over hosting (self-heal)');
-      }
-    } catch (err) {
-      log('WARN', `Secrets broker self-heal skipped: ${(err as Error).message}`);
-    } finally {
-      selfHealingBroker = false;
-    }
-  };
-  const brokerSelfHealInterval = setInterval(() => { void runBrokerSelfHeal(); }, 60_000);
+  const brokerSelfHealInterval = setInterval(onceAtATime(() => runBrokerSelfHealTick({
+    log,
+    isHosting: () => hostedBroker != null,
+    onHosted: (broker: unknown) => { hostedBroker = broker as typeof hostedBroker; },
+  })), BROKER_SELF_HEAL_TICK_MS);
 
-  // RUSH-2232: reap orphaned keychain helpers and `agents` processes stuck on a
-  // keychain call. Runs as a 5-min interval in the daemon (the single executor)
-  // so no UI surface can race it. The reaper shells `ps` once, plans kills in a
-  // pure function, and executes via killTree.
-  let reapingKeychain = false;
-  const runKeychainReap = async () => {
-    if (reapingKeychain) return;
-    reapingKeychain = true;
-    try {
-      const { reapOrphanedKeychainProcesses } = await import('./secrets/reaper.js');
-      const result = reapOrphanedKeychainProcesses();
-      if (result.reaped > 0) {
-        log('WARN', `Reaped ${result.reaped} keychain orphan/stuck process(es)`);
-        for (const d of result.details) log('WARN', `  ${d}`);
-      }
-    } catch (err) {
-      log('ERROR', `Keychain reaper failed: ${(err as Error).message}`);
-    } finally {
-      reapingKeychain = false;
-    }
-  };
-  const keychainReapInterval = setInterval(() => { void runKeychainReap(); }, 5 * 60_000);
+  const keychainReapInterval = setInterval(
+    onceAtATime(() => runKeychainReapTick({ log })),
+    KEYCHAIN_REAP_TICK_MS,
+  );
 
-  // RUSH-2367: self-terminate if this daemon's own state dir has been removed
-  // out from under it — the shape of a leaked test-fixture daemon whose /tmp
-  // HOME was deleted by its test's own cleanup while the process itself
-  // somehow survived (lost the SIGTERM/SIGKILL race, or outlived a killed
-  // test runner before its `finally` ever ran). Nothing else can reach a
-  // daemon in that state: no `agents daemon` command targets it, since a
-  // different HOME resolves a different getDaemonDir() and therefore a
-  // different instance registry — without this it runs forever. Reads
-  // Reads the lifetime marker directly, never the local getDaemonDir() wrapper,
-  // which recreates the directory as a side effect and would defeat the check.
-  // Heartbeat/status paths may recreate the directory and pid file after a
-  // deletion; they never recreate this per-lifetime token.
-  let checkingStateDir = false;
-  const runStateDirSelfCheck = (): void => {
-    if (checkingStateDir) return;
-    checkingStateDir = true;
-    try {
-      let markerMatches = false;
-      try {
-        markerMatches = fs.readFileSync(lifetimePath, 'utf-8') === lifetimeToken;
-      } catch {
-        // A missing state tree or marker is the condition this guard detects.
-      }
-      if (!markerMatches) {
-        log('WARN', `Daemon state dir ${getDaemonDirRoot()} no longer exists; exiting (self-terminate guard)`);
-        void handleShutdown();
-      }
-    } finally {
-      checkingStateDir = false;
-    }
-  };
-  const stateDirCheckMs = Number(process.env.AGENTS_DAEMON_STATE_DIR_CHECK_MS) || 60_000;
-  const stateDirCheckInterval = setInterval(runStateDirSelfCheck, stateDirCheckMs);
+  // The env override exists for tests, which cannot wait a minute to observe
+  // the self-terminate guard.
+  const stateDirCheckMs = Number(process.env.AGENTS_DAEMON_STATE_DIR_CHECK_MS) || STATE_DIR_CHECK_TICK_MS;
+  const stateDirCheckInterval = setInterval(() => runStateDirSelfCheckTick({
+    log,
+    lifetimePath,
+    lifetimeToken,
+    stateDir: getDaemonDir(),
+    onStale: () => { void handleShutdown(); },
+  }), stateDirCheckMs);
 
   // RUSH-2418: startup is over — the scheduler, browser IPC, broker decision,
   // monitor engine and every background tick are up. Only NOW does this daemon
@@ -1030,7 +1000,17 @@ export async function runDaemon(): Promise<void> {
     }
   };
 
+  // Structurally single-shot (RUSH-2423). Shutdown is reachable from SIGTERM,
+  // SIGINT, and the state-dir self-check, and two of those can arrive together
+  // — a service manager that SIGTERMs a daemon whose state dir was just
+  // removed. It was only incidentally safe before (the steps happen to be
+  // idempotent); the guard makes it a property of the function instead of a
+  // property of every step inside it, which the next step added would have to
+  // re-earn.
+  let shuttingDown = false;
   const handleShutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     log('INFO', 'Daemon shutting down');
     stopScheduler();
     monitorEngine.stop();
@@ -1044,7 +1024,7 @@ export async function runDaemon(): Promise<void> {
     try {
       if (fs.readFileSync(lifetimePath, 'utf-8') === lifetimeToken) fs.unlinkSync(lifetimePath);
     } catch {
-      // Already removed with the state tree, or replaced by a newer owner.
+      // Already removed with the state dir, or replaced by a newer owner.
     }
     hostedBroker?.close();
     removeDaemonPid();
@@ -1098,7 +1078,7 @@ export function generateLaunchdPlist(
   agentsBin: string = getAgentsBinPath(),
 ): string {
   const launch = getDaemonLaunch(agentsBin);
-  const logPath = getLogPath();
+  const logPath = getDaemonLogPath();
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1517,7 +1497,7 @@ interface StartDetachedOptions {
 
 export function startDetached(opts: StartDetachedOptions = {}): { pid: number | null; method: string } {
   const agentsBin = opts.agentsBin ?? getAgentsBinPath();
-  const logPath = opts.logPath ?? getLogPath();
+  const logPath = opts.logPath ?? getDaemonLogPath();
   const logFd = fs.openSync(logPath, 'a');
 
   const { command, args } = getDaemonLaunch(agentsBin);
@@ -1596,7 +1576,7 @@ function claimedPid(read: () => number | null): number | null {
 function stopResidueArtifacts(stoppedPid: number | null): StopResidueArtifact[] {
   const artifacts: StopResidueArtifact[] = [];
 
-  const lifetimePath = path.join(getDaemonDirRoot(), LIFETIME_FILE);
+  const lifetimePath = path.join(getDaemonDir(), LIFETIME_FILE);
   const lifetimeOwner = claimedPid(() => {
     const raw = fs.readFileSync(lifetimePath, 'utf-8').split(':')[0];
     const n = parseInt(raw, 10);
@@ -1660,7 +1640,7 @@ export interface DaemonStopResult {
 /**
  * Live `__daemon-run` processes still registered in THIS state dir's instance
  * registry, excluding `exclude`. State-dir-scoped by construction: the registry
- * lives inside this daemon dir, so a daemon serving a DIFFERENT state dir (a test
+ * lives inside this state dir, so a daemon serving a DIFFERENT state dir (a test
  * fixture with its own HOME, a separate install/home) registers elsewhere and is
  * invisible here — it is never a stop/takeover target. POSIX-only (the registry
  * and its `ps` liveness probe are); `[]` on Windows.
@@ -1873,7 +1853,7 @@ export function getDaemonStatus(): {
     running,
     pid,
     jobCount,
-    logPath: getLogPath(),
+    logPath: getDaemonLogPath(),
     binaryPath,
     heartbeat: readHeartbeat(),
   };
@@ -1881,7 +1861,7 @@ export function getDaemonStatus(): {
 
 /** Read the daemon log, optionally limited to the last N lines. */
 export function readDaemonLog(lines?: number): string {
-  const logPath = getLogPath();
+  const logPath = getDaemonLogPath();
   if (!fs.existsSync(logPath)) return '(no log file)';
 
   const content = fs.readFileSync(logPath, 'utf-8');
