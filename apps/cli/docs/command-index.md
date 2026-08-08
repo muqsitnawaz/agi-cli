@@ -574,6 +574,13 @@ agents plugins sync <name> [agent]            Apply a plugin to an agent. Syncs 
 agents plugins update [name]                  Re-pull a plugin from its original source and re-sync to all versions
 ```
 
+## pr — Standalone PR lifecycle commands (land, …).
+
+```
+agents pr            Standalone PR lifecycle commands (land, …).
+agents pr land <pr>  Watch a PR through CI and a non-author review, then rebase-merge on green. Fails loud on red CI or conflict; never uses --admin.
+```
+
 ## profile — Activate top-level resource profiles across commands, skills, hooks, rules, MCP, permissions, and secrets.
 
 ```
