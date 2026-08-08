@@ -1,37 +1,71 @@
 import * as crypto from 'crypto';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as yaml from 'yaml';
-import { atomicWriteFileSync } from './fs-atomic.js';
 import { getUserAgentsDir } from './state.js';
 import { ACCOUNT_INSPECTION_AGENT_IDS } from './agents.js';
 import type { AgentId } from './types.js';
 import { collectRunCandidates, pickBalancedCandidate } from './rotate.js';
+import { listInstalledVersions } from './versions.js';
+import {
+  accountRegistryPath,
+  addManagedLoginAccount,
+  findByLabel,
+  readRegistry,
+  removeAccount,
+  renameAccount,
+} from './account-registry.js';
+
+// ── Public types (kept for backward compat with runner.ts, exec.ts, etc.) ──
 
 export interface AccountLabel { agent: AgentId; fingerprint: string }
 export interface AccountLabelsDocument { labels: Record<string, AccountLabel> }
 export interface DiscoveredAccount { agent: AgentId; fingerprint: string; display: string; versions: string[]; label: string | null }
 
-function emptyDocument(): AccountLabelsDocument { return { labels: {} }; }
-export function identityFingerprint(agent: string, accountKey: string): string { return crypto.createHash('sha256').update(`${agent}\0${accountKey}`).digest('hex'); }
-export function accountLabelsPath(base = getUserAgentsDir()): string { return path.join(base, 'accounts.yaml'); }
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+export function identityFingerprint(agent: string, accountKey: string): string {
+  return crypto.createHash('sha256').update(`${agent}\0${accountKey}`).digest('hex');
+}
+
+/** Same path as the account registry — both read/write accounts.yaml. */
+export function accountLabelsPath(base = getUserAgentsDir()): string {
+  return accountRegistryPath(base);
+}
+
+/**
+ * Read all named accounts as the legacy label-map shape. Includes both
+ * managed-login and api-key accounts so runner.ts existence checks work.
+ * For api-key accounts, `fingerprint` is set to the account id (a UUID) —
+ * runner.ts only uses it for existence, not auth matching.
+ */
 export function readAccountLabels(base = getUserAgentsDir()): AccountLabelsDocument {
-  const file = accountLabelsPath(base); if (!fs.existsSync(file)) return emptyDocument();
-  const value = yaml.parse(fs.readFileSync(file, 'utf8'));
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Account labels corrupted at ${file}: expected a YAML map.`);
-  const doc = value as AccountLabelsDocument; doc.labels ??= {}; return doc;
+  const doc = readRegistry(base);
+  const labels: Record<string, AccountLabel> = {};
+  for (const record of Object.values(doc.accounts)) {
+    labels[record.label] = {
+      agent: record.agent,
+      fingerprint: record.credential.kind === 'managed-login'
+        ? record.credential.fingerprint
+        : record.id,
+    };
+  }
+  return { labels };
 }
-function writeAccountLabels(doc: AccountLabelsDocument, base = getUserAgentsDir()): void { const file = accountLabelsPath(base); fs.mkdirSync(path.dirname(file), { recursive: true }); atomicWriteFileSync(file, yaml.stringify(doc)); }
-function assertLabel(label: string): void { if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(label)) throw new Error('Label must start with a letter or number and contain only letters, numbers, dot, underscore, or dash.'); }
+
+/** Name a managed-login account. Delegates to the unified account registry. */
 export function nameAccount(label: string, agent: AgentId, fingerprint: string, base = getUserAgentsDir()): void {
-  assertLabel(label); const doc = readAccountLabels(base);
-  for (const [other, account] of Object.entries(doc.labels)) if (other !== label && account.agent === agent && account.fingerprint === fingerprint) throw new Error(`This ${agent} account is already named '${other}'.`);
-  if (doc.labels[label] && (doc.labels[label].agent !== agent || doc.labels[label].fingerprint !== fingerprint)) throw new Error(`Account label '${label}' already names another account.`);
-  doc.labels[label] = { agent, fingerprint }; writeAccountLabels(doc, base);
+  addManagedLoginAccount(label, agent, fingerprint, base);
 }
-export function renameAccountLabel(oldLabel: string, newLabel: string, base = getUserAgentsDir()): void { assertLabel(newLabel); const doc = readAccountLabels(base); if (!doc.labels[oldLabel]) throw new Error(`Unknown account label '${oldLabel}'.`); if (doc.labels[newLabel]) throw new Error(`Account label '${newLabel}' already exists.`); doc.labels[newLabel] = doc.labels[oldLabel]; delete doc.labels[oldLabel]; writeAccountLabels(doc, base); }
-export function removeAccountLabel(label: string, base = getUserAgentsDir()): void { const doc = readAccountLabels(base); if (!doc.labels[label]) throw new Error(`Unknown account label '${label}'.`); delete doc.labels[label]; writeAccountLabels(doc, base); }
-export function labelForFingerprint(agent: AgentId, fingerprint: string, doc = readAccountLabels()): string | null { return Object.entries(doc.labels).find(([, account]) => account.agent === agent && account.fingerprint === fingerprint)?.[0] ?? null; }
+
+export function renameAccountLabel(oldLabel: string, newLabel: string, base = getUserAgentsDir()): void {
+  renameAccount(oldLabel, newLabel, base);
+}
+
+export function removeAccountLabel(label: string, base = getUserAgentsDir()): void {
+  removeAccount(label, base);
+}
+
+export function labelForFingerprint(agent: AgentId, fingerprint: string, doc = readAccountLabels()): string | null {
+  return Object.entries(doc.labels).find(([, account]) => account.agent === agent && account.fingerprint === fingerprint)?.[0] ?? null;
+}
 
 export async function discoverAccounts(agentIds: readonly AgentId[] = ACCOUNT_INSPECTION_AGENT_IDS): Promise<DiscoveredAccount[]> {
   const labels = readAccountLabels(); const grouped = new Map<string, DiscoveredAccount>();
@@ -46,8 +80,24 @@ export async function discoverAccounts(agentIds: readonly AgentId[] = ACCOUNT_IN
 }
 
 export async function resolveAccountLabel(agent: AgentId, label: string): Promise<string> {
-  const account = readAccountLabels().labels[label]; if (!account) throw new Error(`Unknown account label '${label}'.`); if (account.agent !== agent) throw new Error(`Account label '${label}' names a ${account.agent} account, not ${agent}.`);
-  const candidates = (await collectRunCandidates(agent)).filter(candidate => candidate.accountKey && identityFingerprint(agent, candidate.accountKey) === account.fingerprint);
-  const result = pickBalancedCandidate(candidates); if (!result) throw new Error(`No healthy installed ${agent} version is currently signed into account '${label}'.`);
+  const doc = readRegistry();
+  const record = findByLabel(label, doc);
+  if (!record) throw new Error(`Unknown account label '${label}'.`);
+  if (record.agent !== agent) throw new Error(`Account label '${label}' names a ${record.agent} account, not ${agent}.`);
+
+  // api-key accounts: any installed version works — key is injected at spawn time
+  if (record.credential.kind === 'api-key') {
+    const versions = listInstalledVersions(agent);
+    if (!versions.length) throw new Error(`No installed ${agent} version found for account '${label}'.`);
+    return versions[versions.length - 1];
+  }
+
+  // managed-login: match fingerprint against signed-in candidates
+  const fingerprint = record.credential.fingerprint;
+  const candidates = (await collectRunCandidates(agent)).filter(
+    candidate => candidate.accountKey && identityFingerprint(agent, candidate.accountKey) === fingerprint,
+  );
+  const result = pickBalancedCandidate(candidates);
+  if (!result) throw new Error(`No healthy installed ${agent} version is currently signed into account '${label}'.`);
   return result.picked.version;
 }

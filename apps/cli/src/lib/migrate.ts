@@ -19,6 +19,7 @@ import { migrateLegacyRoutineActivation, setJobEnabled, listJobs, validateJob } 
 import { addEnabledRoutinesOnUpgrade, enabledRoutineNames, replaceEnabledRoutines } from './routine-activation.js';
 import { evaluateActivationReadiness } from './routine-readiness.js';
 import { DAEMON_TICK_ROUTINE_NAMES } from './daemon-ticks.js';
+import { readRegistry } from './account-registry.js';
 
 const HOME = process.env.HOME ?? os.homedir();
 const USER_DIR = path.join(HOME, '.agents');
@@ -2291,4 +2292,21 @@ export async function runMigration(): Promise<void> {
   // infinite-exec-loop). Also runs after the bucket moves so it scans the
   // canonical HISTORY_DIR/versions tree.
   repairSelfReferentialBinShims();
+
+  // Eagerly trigger the v1→v2 account registry migration so later reads see a
+  // stable UUID-keyed v2 document rather than the old label-only format.
+  migrateAccountLabelsToRegistry();
+}
+
+/**
+ * Trigger transparent v1→v2 account registry migration. A call to readRegistry()
+ * is sufficient — it detects the v1 label-only format and writes the v2 document
+ * back on first read. Safe to call on a machine that already has v2 data (no-op).
+ */
+function migrateAccountLabelsToRegistry(): void {
+  try {
+    readRegistry();
+  } catch {
+    // Migration is best-effort; a missing or corrupted file is handled at runtime.
+  }
 }

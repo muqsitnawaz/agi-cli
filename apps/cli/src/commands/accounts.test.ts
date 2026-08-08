@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fingerprintFromSource } from './accounts.js';
+import { fingerprintFromSource, parseBundleKey } from './accounts.js';
 
 describe('accounts name --from', () => {
   it('rejects an installed version absent from launchable account discovery', async () => {
@@ -27,5 +27,27 @@ describe('accounts name --from', () => {
         label: null,
       }],
     })).resolves.toEqual({ agent: 'claude', fingerprint: 'work-fingerprint', versions: ['2.1.219', '2.1.220'] });
+  });
+});
+
+describe('parseBundleKey', () => {
+  it('parses a valid bundle:key pair', () => {
+    expect(parseBundleKey('cursor-bundle:API_KEY')).toEqual({ bundle: 'cursor-bundle', key: 'API_KEY' });
+  });
+
+  it('allows colons in the key portion', () => {
+    expect(parseBundleKey('mybundle:foo:bar')).toEqual({ bundle: 'mybundle', key: 'foo:bar' });
+  });
+
+  it('rejects missing bundle (leading colon)', () => {
+    expect(() => parseBundleKey(':API_KEY')).toThrow('Expected bundle:key');
+  });
+
+  it('rejects missing key (trailing colon)', () => {
+    expect(() => parseBundleKey('mybundle:')).toThrow('Expected bundle:key');
+  });
+
+  it('rejects no colon at all', () => {
+    expect(() => parseBundleKey('justabundle')).toThrow('Expected bundle:key');
   });
 });
