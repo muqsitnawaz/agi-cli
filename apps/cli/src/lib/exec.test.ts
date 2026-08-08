@@ -229,26 +229,15 @@ describe('buildExecEnv — Claude Code auto-updater suppression for pinned manag
   });
 });
 
-describe('buildExecEnv — Cursor per-account login isolation (XDG_CONFIG_HOME)', () => {
-  it('pins XDG_CONFIG_HOME at the version home so each Cursor account uses its own token', () => {
-    // Cursor has no config-dir env var; its OAuth token (the login gate) is at
-    // $XDG_CONFIG_HOME/cursor/auth.json. Pinning XDG_CONFIG_HOME per version home
-    // is what makes `agents run cursor@<v>` authenticate as that account.
+describe('buildExecEnv — Cursor api-key injection via options.env', () => {
+  it('a caller-supplied CURSOR_API_KEY in options.env wins over process.env', () => {
+    const env = buildExecEnv(execOpts({ agent: 'cursor', version: '2026.08.04', env: { CURSOR_API_KEY: 'sk-test-123' } }));
+    expect(env.CURSOR_API_KEY).toBe('sk-test-123');
+  });
+
+  it('does not set XDG_CONFIG_HOME for cursor — OAuth is device-global', () => {
     const env = buildExecEnv(execOpts({ agent: 'cursor', version: '2026.08.04' }));
-    expect(env.XDG_CONFIG_HOME).toBe(path.join(getVersionHomePath('cursor', '2026.08.04'), '.config'));
-  });
-
-  it('a different pinned Cursor version resolves to a different config home (real multi-account)', () => {
-    const a = buildExecEnv(execOpts({ agent: 'cursor', version: '2026.08.04' }));
-    const b = buildExecEnv(execOpts({ agent: 'cursor', version: '2026.07.23' }));
-    expect(a.XDG_CONFIG_HOME).not.toBe(b.XDG_CONFIG_HOME);
-    expect(a.XDG_CONFIG_HOME).toContain(path.join('cursor', '2026.08.04'));
-    expect(b.XDG_CONFIG_HOME).toContain(path.join('cursor', '2026.07.23'));
-  });
-
-  it('a caller-provided XDG_CONFIG_HOME override still wins', () => {
-    const env = buildExecEnv(execOpts({ agent: 'cursor', version: '2026.08.04', env: { XDG_CONFIG_HOME: '/custom/xdg' } }));
-    expect(env.XDG_CONFIG_HOME).toBe('/custom/xdg');
+    expect(env.XDG_CONFIG_HOME).toBeUndefined();
   });
 });
 

@@ -2101,39 +2101,6 @@ function migrateHumans(): void {
 }
 
 /**
- * Cursor's OAuth token historically lived only in the global
- * ~/.config/cursor/auth.json, shared across every version home. Cursor runs now
- * pin XDG_CONFIG_HOME per version home (real per-account isolation — see
- * buildExecEnv), so the current login must be copied into the active account's
- * version home or it would read as logged out after upgrade. The active account
- * is the home the ~/.cursor symlink currently targets. Idempotent: skips when
- * the home already has its own token, and a no-op for unmanaged Cursor installs
- * (where ~/.cursor is a real dir, not a symlink into a version home).
- */
-export function seedActiveCursorLoginPerVersion(): void {
-  const realHome = process.env.AGENTS_REAL_HOME || os.homedir();
-  const globalAuth = path.join(realHome, '.config', 'cursor', 'auth.json');
-  let versionHome: string;
-  try {
-    if (!fs.existsSync(globalAuth)) return;
-    // ~/.cursor -> .../versions/cursor/<version>/home/.cursor ; the version home
-    // is that link's parent directory.
-    const link = fs.readlinkSync(path.join(realHome, '.cursor'));
-    const resolved = path.isAbsolute(link) ? link : path.resolve(realHome, link);
-    versionHome = path.dirname(resolved);
-  } catch {
-    return; // not a symlink (unmanaged install) or unreadable — nothing to seed
-  }
-  if (!versionHome.includes(path.join('versions', 'cursor'))) return;
-  const dest = path.join(versionHome, '.config', 'cursor', 'auth.json');
-  try {
-    if (fs.existsSync(dest)) return;
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.copyFileSync(globalAuth, dest);
-  } catch { /* best-effort — a failed seed just means one re-login */ }
-}
-
-/**
  * Fold the pre-markdown Kimi subagent layout out of every kimi version home.
  *
  * agents-cli used to write each Kimi subagent as a `<name>.yaml` +
@@ -2212,9 +2179,6 @@ export async function runMigration(): Promise<void> {
   migratePromptcutsIntoHooks();
   migrateSystemVersionsToUser();
   mergeOverlappingVersionHomes();
-  // Cursor runs now isolate the login per version home; preserve the current
-  // login by seeding the active home's token from the legacy global copy.
-  seedActiveCursorLoginPerVersion();
   // Drop the pre-markdown Kimi subagent files; the registry now writes <name>.md.
   migrateKimiSubagentsToMarkdown();
   migrateRunsIntoRoutines();

@@ -2196,6 +2196,7 @@ export function registerRunCommand(program: Command): void {
       let agent: AgentId;
       let version: string | undefined = rawVersion || undefined;
       let profileEnv: Record<string, string> | undefined;
+      let accountInjectionEnv: Record<string, string> | undefined;
       let fromProfile = false;
       let profileFallbackModel: { envKey: string; model: string } | undefined;
       let workflowModel: string | undefined;
@@ -2552,9 +2553,23 @@ export function registerRunCommand(program: Command): void {
           console.error(chalk.red('--account selects a local installed identity and cannot be combined with cloud or lease placement.'));
           process.exit(1);
         }
-        const { resolveAccountLabel } = await import('../lib/account-labels.js');
-        try { const selected = await resolveAccountLabel(agent, options.account); if (version && version !== selected) throw new Error(`${agent}@${version} is not a healthy match for account '${options.account}'.`); version ??= selected; }
-        catch (err) { console.error(chalk.red((err as Error).message)); process.exit(1); }
+        try {
+          const { resolveAccountForExec } = await import('../lib/account-registry.js');
+          const resolved = resolveAccountForExec(options.account);
+          if (resolved.agent !== agent) {
+            throw new Error(`Account '${options.account}' names a ${resolved.agent} account, not ${agent}.`);
+          }
+          if (resolved.credentialKind === 'api-key') {
+            // api-key accounts work with any installed version; key is injected at spawn time.
+            accountInjectionEnv = resolved.injectionEnv;
+          } else {
+            // managed-login: select the version signed into this account.
+            const { resolveAccountLabel } = await import('../lib/account-labels.js');
+            const selected = await resolveAccountLabel(agent, options.account);
+            if (version && version !== selected) throw new Error(`${agent}@${version} is not a healthy match for account '${options.account}'.`);
+            version ??= selected;
+          }
+        } catch (err) { console.error(chalk.red((err as Error).message)); process.exit(1); }
       }
 
       // --resume: resolve a prior conversation and rewrite the run target to
@@ -3067,14 +3082,16 @@ export function registerRunCommand(program: Command): void {
         ? shareRuntimeEnv()
         : undefined;
 
-      // Merge order (later wins): profile env < auto share token < secrets bundles < --env K=V.
+      // Merge order (later wins): profile env < auto share token < secrets bundles < account key < --env K=V.
       // Profile carries provider auth; secrets bundles carry user-defined
-      // values; --env is the per-invocation override. The share token is
-      // best-effort: if it is not already in env or an unlocked bundle, unrelated
-      // runs keep working, and `agents share` itself still fails loudly on use.
-      const hasOverrides = profileEnv || autoShareEnv || options.secrets.length > 0 || userEnv;
+      // values; accountInjectionEnv injects the api-key resolved from the device
+      // keychain (CURSOR_API_KEY etc.); --env is the per-invocation override.
+      // The share token is best-effort: if it is not already in env or an
+      // unlocked bundle, unrelated runs keep working, and `agents share` itself
+      // still fails loudly on use.
+      const hasOverrides = profileEnv || autoShareEnv || options.secrets.length > 0 || accountInjectionEnv || userEnv;
       const env: Record<string, string> | undefined = hasOverrides
-        ? { ...(profileEnv ?? {}), ...(autoShareEnv ?? {}), ...secretsEnv, ...(userEnv ?? {}) }
+        ? { ...(profileEnv ?? {}), ...(autoShareEnv ?? {}), ...secretsEnv, ...(accountInjectionEnv ?? {}), ...(userEnv ?? {}) }
         : undefined;
 
       const modelSource = runCmd.getOptionValueSource('model');
