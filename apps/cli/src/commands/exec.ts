@@ -225,7 +225,8 @@ export function hostInteractiveNeedsCorrelationId(
 /** Build a one-line banner describing which version the strategy picked. */
 function formatRotationBanner(result: RotateResult, verb: string = 'balanced'): string {
   const { picked, healthy, excluded } = result;
-  const label = picked.email ? `${picked.email} · ${picked.agent}@${picked.version}` : `${picked.agent}@${picked.version}`;
+  const identity = picked.email || picked.accountLabel || null;
+  const label = identity ? `${identity} · ${picked.agent}@${picked.version}` : `${picked.agent}@${picked.version}`;
   const ratio = `${healthy.length} of ${healthy.length + excluded.length} healthy`;
   // Say it when the pick was a guess. A machine whose usage refresh is failing
   // reports old percentages with total confidence, so a silent banner reads
@@ -2799,6 +2800,16 @@ export function registerRunCommand(program: Command): void {
             } else if (resolved.version) {
               version = resolved.version;
               rotationResult = resolved.rotation;
+              // The strategy can pick a named api-key account (RotateCandidate
+              // synthesized by collectApiKeyAccountCandidates) rather than an
+              // installed-version's ambient managed-login credential. Carry that
+              // selection into the spawn env through the same canonical resolver
+              // explicit `--account` uses, so the run never silently falls back
+              // to whatever OAuth credential happens to sit in the version home.
+              if (resolved.rotation?.picked.credentialKind === 'api-key' && resolved.rotation.picked.accountLabel) {
+                const { resolveAccountForExec } = await import('../lib/account-registry.js');
+                accountInjectionEnv = resolveAccountForExec(resolved.rotation.picked.accountLabel).injectionEnv;
+              }
               if (resolved.rotation && !options.quiet) {
                 const banner = formatRotationBanner(resolved.rotation, strategy);
                 process.stderr.write(chalk.gray(banner + '\n'));

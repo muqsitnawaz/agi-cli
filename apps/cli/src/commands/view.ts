@@ -75,6 +75,8 @@ import { isGitRepo, getGitSyncStatus } from '../lib/git.js';
 import { getCentralRulesFileName } from '../lib/rules/rules.js';
 import { composeRulesFromState, type ComposedSubrule } from '../lib/rules/compose.js';
 import { getConfiguredRunStrategy } from '../lib/rotate.js';
+import { readRegistry } from '../lib/account-registry.js';
+import { hasKeychainToken, secretsKeychainItem } from '../lib/secrets/index.js';
 import { resolveRunDefaults } from '../lib/run-defaults.js';
 import { resolveConfiguredModel, type ConfiguredModelSource } from '../lib/models.js';
 import { listProfiles, profileExists, profileSummary, readProfile, type Profile, type ProfileSummary } from '../lib/profiles.js';
@@ -766,6 +768,22 @@ async function showInstalledVersions(
         if (showPaths) {
           const versionDir = getVersionDir(agentId, version);
           console.log(chalk.gray(`      ${versionDir}`));
+        }
+      }
+
+      // Named api-key accounts (e.g. Cursor) are independent of any installed
+      // version — one secret runs against whichever version is launched — so
+      // they render as their own section here, once per account, rather than
+      // being duplicated onto (or into) every installed-version row above.
+      const apiKeyAccounts = Object.values(readRegistry().accounts).filter(
+        (record) => record.agent === agentId && record.credential.kind === 'api-key',
+      );
+      if (apiKeyAccounts.length > 0) {
+        console.log(chalk.gray('    API-key accounts:'));
+        for (const record of apiKeyAccounts) {
+          const available = hasKeychainToken(secretsKeychainItem(record.id, 'API_KEY'));
+          const availability = available ? chalk.green('available') : chalk.red('missing from keychain');
+          console.log(`      ${chalk.cyan(record.label)} ${chalk.gray('(api-key)')} — ${availability}`);
         }
       }
 

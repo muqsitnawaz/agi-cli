@@ -17,8 +17,9 @@ import {
   type AccountInfo,
   type CredentialPresence,
 } from './agents.js';
-import { readMeta, writeMeta, getHelpersDir } from './state.js';
+import { readMeta, writeMeta, getHelpersDir, getUserAgentsDir } from './state.js';
 import { listInstalledVersions, getVersionHomePath, resolveVersion } from './versions.js';
+import { readRegistry } from './account-registry.js';
 import { getProjectRunConfigs } from './run-config.js';
 import { emit } from './events.js';
 import {
@@ -77,6 +78,21 @@ export interface RotateCandidate {
    */
   authVerdict: AuthVerdict | null;
   lastActive: Date | null;
+  /**
+   * Id of the named account (`account-registry.ts`) this candidate represents,
+   * or null for an unnamed ambient/managed-login credential. Set for every
+   * synthesized api-key candidate (see {@link collectApiKeyAccountCandidates})
+   * so a picker can resolve the exact credential to inject at spawn time
+   * without re-deriving it from `accountLabel` string matching.
+   */
+  accountId: string | null;
+  /**
+   * Credential kind backing this candidate, or null when it isn't tied to a
+   * named account record. `'api-key'` candidates carry a secret that must be
+   * injected via {@link resolveAccountForExec} at spawn time rather than
+   * relying on the harness's ambient OAuth/managed-login credential.
+   */
+  credentialKind: 'managed-login' | 'api-key' | null;
 }
 
 export interface RotateResult {
@@ -704,6 +720,57 @@ export function formatNoHealthyHarnessError(
   return `agents: no healthy harness for 'run auto' — excluded: ${excludedStr}; earliest window resets ${resetSummary}. Sign in an account or wait for a window to reset.`;
 }
 
+/**
+ * Synthesize one routing candidate per named api-key account for `agent`
+ * (`account-registry.ts`) — e.g. named Cursor accounts backed by an API key
+ * in the device keychain rather than an OAuth/managed-login credential.
+ *
+ * These accounts are independent of any installed version: naming one
+ * (`agents accounts add-key`) never touches `~/.agents/versions/`, so a
+ * candidate is only synthesized when at least one version is actually
+ * installed — otherwise there is nothing to launch into and the agent's
+ * candidate list is empty regardless (mirrors {@link collectRunCandidates}'s
+ * own installed-version gate). The candidate always targets the newest
+ * installed version (same choice `resolveAccountLabel` makes for an explicit
+ * `--account` pin) since the key works with any installed version — the
+ * secret is injected at spawn time, not baked into a version home.
+ *
+ * `installedVersions` is injectable so callers (and tests) can supply an
+ * already-fetched list instead of re-reading the versions directory.
+ */
+export function collectApiKeyAccountCandidates(
+  agent: AgentId,
+  installedVersions: string[] = listInstalledVersions(agent),
+  base: string = getUserAgentsDir(),
+): RotateCandidate[] {
+  if (installedVersions.length === 0) return [];
+  const version = installedVersions[installedVersions.length - 1];
+  const doc = readRegistry(base);
+  const candidates: RotateCandidate[] = [];
+  for (const record of Object.values(doc.accounts)) {
+    if (record.agent !== agent || record.credential.kind !== 'api-key') continue;
+    candidates.push({
+      agent,
+      version,
+      accountKey: record.id,
+      accountLabel: record.label,
+      email: null,
+      usageKey: null,
+      usageStatus: null,
+      usageSnapshot: null,
+      usageError: null,
+      usageMinutesToLimit: null,
+      plan: null,
+      signedIn: true,
+      authVerdict: null,
+      lastActive: null,
+      accountId: record.id,
+      credentialKind: 'api-key',
+    });
+  }
+  return candidates;
+}
+
 export async function collectRunCandidates(agent: AgentId): Promise<RotateCandidate[]> {
   const versions = listInstalledVersions(agent);
   // Read the local auth-health probe cache once (cache-only, no network — the
@@ -742,6 +809,8 @@ export async function collectRunCandidates(agent: AgentId): Promise<RotateCandid
         signedIn: launchable,
         authVerdict,
         lastActive: info.lastActive,
+        accountId: null,
+        credentialKind: null,
       };
     })
   );
@@ -766,7 +835,7 @@ export async function collectRunCandidates(agent: AgentId): Promise<RotateCandid
     { readOnly: true }
   );
 
-  return rows.map(({ home: _home, info, ...candidate }) => {
+  const installedCandidates = rows.map(({ home: _home, info, ...candidate }) => {
     const usageKey = getUsageLookupKey(info);
     const usage = usageKey ? usageByKey.get(usageKey) : undefined;
     // Projected headroom is a separate cache-only read (also off the network) —
@@ -781,6 +850,11 @@ export async function collectRunCandidates(agent: AgentId): Promise<RotateCandid
       usageMinutesToLimit: headroom?.minutesToLimit ?? null,
     };
   });
+
+  // Named api-key accounts (e.g. Cursor) route alongside installed-version
+  // candidates so a bare balanced run picks among them too, instead of only
+  // ever falling back to the harness's ambient OAuth credential.
+  return [...installedCandidates, ...collectApiKeyAccountCandidates(agent, versions)];
 }
 
 /**

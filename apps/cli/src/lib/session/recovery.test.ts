@@ -43,6 +43,8 @@ function candidate(version: string, over: Partial<RotateCandidate> = {}): Rotate
     signedIn: true,
     authVerdict: null,
     lastActive: null,
+    accountId: null,
+    credentialKind: null,
     ...over,
   };
 }

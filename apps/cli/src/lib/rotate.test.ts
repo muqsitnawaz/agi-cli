@@ -23,6 +23,7 @@ import {
   capacityWeight,
   PROJECTION_HORIZON_MIN,
   resolveRunVersion,
+  collectApiKeyAccountCandidates,
   type RotateCandidate,
   type RotateResult,
   type FailoverArmingContext,
@@ -30,6 +31,24 @@ import {
 import { runWithFallback } from './exec.js';
 import type { AgentId } from './types.js';
 import type { UsageSnapshot, UsageWindowKey } from './usage.js';
+import {
+  type KeychainBackend,
+  setKeychainBackendForTest,
+} from './secrets/index.js';
+import { addApiKeyAccount } from './account-registry.js';
+
+class MemKeychainBackend implements KeychainBackend {
+  store = new Map<string, string>();
+  has(item: string) { return this.store.has(item); }
+  get(item: string) {
+    const v = this.store.get(item);
+    if (v === undefined) throw new Error(`missing keychain item: ${item}`);
+    return v;
+  }
+  set(item: string, value: string) { this.store.set(item, value); }
+  delete(item: string) { return this.store.delete(item); }
+  list(prefix: string) { return [...this.store.keys()].filter(k => k.startsWith(prefix)); }
+}
 
 /**
  * Build a healthy RotateCandidate (signed in, no live snapshot
@@ -51,6 +70,8 @@ function candidate(over: Partial<RotateCandidate> & { version: string }): Rotate
     signedIn: true,
     authVerdict: null,
     lastActive: null,
+    accountId: null,
+    credentialKind: null,
     ...over,
   };
 }
@@ -805,5 +826,73 @@ describe('resolveRunVersion — fail-loud signal on zero healthy (RUSH-2132)', (
     });
     expect(resolved.rotation).toBeNull();
     expect(resolved.exhausted).toBeUndefined();
+  });
+});
+
+describe('collectApiKeyAccountCandidates — named api-key accounts on real accounts.yaml storage', () => {
+  let root = '';
+  let mem: MemKeychainBackend;
+  let prevBackend: KeychainBackend | null;
+
+  const setup = () => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-rotate-apikey-'));
+    mem = new MemKeychainBackend();
+    prevBackend = setKeychainBackendForTest(mem);
+  };
+  const teardown = () => {
+    setKeychainBackendForTest(prevBackend);
+    fs.rmSync(root, { recursive: true, force: true });
+  };
+  afterEach(() => { if (root) teardown(); });
+
+  it('is empty with no installed versions, even when a named account exists', () => {
+    setup();
+    addApiKeyAccount('work', 'cursor', 'sk-real-key', root);
+    expect(collectApiKeyAccountCandidates('cursor', [], root)).toEqual([]);
+  });
+
+  it('is empty with no named accounts, even with versions installed', () => {
+    setup();
+    expect(collectApiKeyAccountCandidates('cursor', ['2026.1.1'], root)).toEqual([]);
+  });
+
+  it('synthesizes one candidate per named api-key account, targeting the newest installed version', () => {
+    setup();
+    const work = addApiKeyAccount('work', 'cursor', 'sk-work', root);
+    const personal = addApiKeyAccount('personal', 'cursor', 'sk-personal', root);
+
+    const candidates = collectApiKeyAccountCandidates('cursor', ['2025.12.1', '2026.1.1'], root);
+
+    expect(candidates).toHaveLength(2);
+    for (const c of candidates) {
+      expect(c.agent).toBe('cursor');
+      expect(c.version).toBe('2026.1.1');
+      expect(c.credentialKind).toBe('api-key');
+      expect(c.signedIn).toBe(true);
+      expect(c.authVerdict).toBeNull();
+    }
+    const labels = candidates.map((c) => c.accountLabel).sort();
+    expect(labels).toEqual(['personal', 'work']);
+    const ids = candidates.map((c) => c.accountId).sort();
+    expect(ids).toEqual([personal.id, work.id].sort());
+    // accountKey doubles as the dedup identity in pickBalancedCandidate — must
+    // be the stable account id, distinct per named account.
+    expect(candidates.map((c) => c.accountKey).sort()).toEqual(ids);
+  });
+
+  it('excludes accounts belonging to a different agent', () => {
+    setup();
+    addApiKeyAccount('other-agent-key', 'cursor', 'sk-cursor', root);
+    expect(collectApiKeyAccountCandidates('claude' as AgentId, ['1.0.0'], root)).toEqual([]);
+  });
+
+  it('a balanced pick over only api-key candidates selects a named account and stays eligible', () => {
+    setup();
+    addApiKeyAccount('work', 'cursor', 'sk-work', root);
+    const candidates = collectApiKeyAccountCandidates('cursor', ['2026.1.1'], root);
+    const result = pickBalancedCandidate(candidates);
+    expect(result?.picked.accountLabel).toBe('work');
+    expect(result?.picked.credentialKind).toBe('api-key');
+    expect(result?.excluded).toEqual([]);
   });
 });

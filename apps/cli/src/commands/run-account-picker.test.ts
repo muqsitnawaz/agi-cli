@@ -36,6 +36,8 @@ function candidate(overrides: Partial<RotateCandidate> = {}): RotateCandidate {
     signedIn: true,
     authVerdict: null,
     lastActive: null,
+    accountId: null,
+    credentialKind: null,
     ...overrides,
   };
 }
