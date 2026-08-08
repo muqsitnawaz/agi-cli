@@ -30,7 +30,6 @@ import {
   stopDaemon,
   signalDaemonReload,
   findSurvivingStateDirDaemons,
-  getDaemonLogPath,
   isDaemonAutostartCircuitOpen,
 } from '../lib/daemon.js';
 import { getConfigValue, setConfigValue, isDaemonEnabled } from '../lib/device-config.js';
@@ -434,7 +433,7 @@ async function runLogs(opts: { lines?: string; follow?: boolean; level?: string;
   const lineCount = opts.lines ? parseInt(opts.lines, 10) : 50;
 
   if (opts.follow) {
-    const logPath = getDaemonLogPath();
+    const logPath = path.join(getDaemonDir(), 'logs.jsonl');
     for (const entry of parseLogLines(readDaemonLog(lineCount)).filter((e) => passesFilters(e, opts.level, sinceMs))) {
       if (opts.json) console.log(JSON.stringify(entry));
       else printLogEntry(entry);

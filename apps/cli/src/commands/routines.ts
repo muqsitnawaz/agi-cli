@@ -22,7 +22,6 @@ import {
   readDaemonPid,
   readDaemonLog,
   getDaemonStatus,
-  getDaemonLogPath,
 } from '../lib/daemon.js';
 import { assertSchedulerEnabled, assertDaemonEnabled, isDaemonEnabled } from '../lib/device-config.js';
 import { resolveAgentName, isAgentHardDeprecated, hardDeprecationError, ROUTINE_AGENT_IDS } from '../lib/agents.js';
@@ -2209,7 +2208,7 @@ export function registerRoutinesCommands(program: Command): void {
       if (options.follow) {
         const { getDaemonDir } = await import('../lib/state.js');
         const { followFile } = await import('../lib/log-follow.js');
-        const logPath = getDaemonLogPath();
+        const logPath = path.join(getDaemonDir(), 'logs.jsonl');
         const recent = readDaemonLog(parseInt(options.lines, 10));
         if (recent) console.log(recent);
         const stop = followFile(logPath, (text) => process.stdout.write(text), { fromEnd: true });
