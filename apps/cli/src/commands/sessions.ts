@@ -38,7 +38,7 @@ import { stringWidth, truncateToWidth, padToWidth, terminalWidth } from '../lib/
 import type { SessionActivity, AwaitingReason } from '../lib/session/state.js';
 import { inferSessionState } from '../lib/session/state.js';
 import { discoverSessions, queryIndexedSessions, countSessionsInScope, resolveSessionById, isCompleteSessionId, looksLikeSessionId, searchContentIndex, parseTimeFilter, getSessionRoots, scopeToManaged, type DiscoverOptions, type ScanProgress } from '../lib/session/discover.js';
-import { findSessionsById, querySessions, getSessionById } from '../lib/session/db.js';
+import { findSessionsById, querySessions, getSessionById, readSessionContent, readArchivedSessionPreview } from '../lib/session/db.js';
 import {
   filterTeamSessions,
   shouldShowTeamSessions,
@@ -72,6 +72,7 @@ import {
   formatTodoCompact,
   githubRepoUrlFromCwd,
   type PickedSession,
+  type SessionPreviewDigest,
 } from './sessions-picker.js';
 import { setHelpSections } from '../lib/help.js';
 import { registerSessionsTailCommand } from './sessions-tail.js';
@@ -3735,6 +3736,56 @@ export async function renderSessionLogJson(session: SessionMeta): Promise<void> 
   await renderSession(session, 'json', {});
 }
 
+/**
+ * Render a file-gone (archived) session from the local DB (RUSH-2436). The
+ * transcript file is deleted, but the user turns survive in session_text and the
+ * last-computed digest in session_preview_cache — serve those so `agents sessions
+ * <id>` still shows the prompts instead of an empty metadata dump. User-turn text
+ * is the durable content every harness stores; assistant text survives only as
+ * the cached digest's `lastAssistant` snippet, shown when present.
+ */
+function renderArchivedSession(
+  session: SessionMeta,
+  mode: ViewMode,
+  _options: { redact?: boolean } = {},
+): void {
+  const content = (readSessionContent(session.id) ?? '').trim();
+  const digest = readArchivedSessionPreview<SessionPreviewDigest>(session.id);
+  if (mode === 'json') {
+    // Minimal machine shape for a file-gone session: the durable user content
+    // plus the cached preview digest, tagged archived. Deliberately NOT the full
+    // { session, events } contract — there are no events to parse.
+    console.log(JSON.stringify({
+      session: { ...session, archived: true },
+      archived: true,
+      userContent: content,
+      preview: digest ?? null,
+    }, null, 2));
+    return;
+  }
+  const agentColor = colorAgent(session.agent);
+  const absTime = formatAbsoluteTime(session.timestamp);
+  const title = (session as any).label || session.topic;
+  console.log('');
+  if (title) console.log(chalk.bold.white(title));
+  console.log(
+    agentColor(session.agent) +
+    (session.version ? chalk.yellow(` ${session.version}`) : '') +
+    (session.project ? chalk.cyan(`  ${session.project}`) : '') +
+    chalk.gray(`  ${absTime} (${formatRelativeTime(session.timestamp)})`) +
+    (session.account ? chalk.gray(` · ${session.account}`) : '')
+  );
+  console.log(chalk.yellow('archived — transcript file removed; user turns served from the local DB'));
+  console.log(chalk.gray('─'.repeat(60)));
+  console.log(chalk.cyan('User:'));
+  console.log(content);
+  if (digest?.lastAssistant?.trim()) {
+    console.log('');
+    console.log(chalk.magenta('Last assistant:'));
+    console.log(digest.lastAssistant.trim());
+  }
+}
+
 async function renderSession(
   session: SessionMeta,
   mode: ViewMode,
@@ -3744,6 +3795,15 @@ async function renderSession(
   // OpenCode stores sessions in SQLite; filePath is "db_path#session_id"
   const realPath = session.filePath.split('#')[0];
   if (!fs.existsSync(realPath)) {
+    // The transcript file is gone, but the session's user turns are stored
+    // durably in the local DB (session_text), so serve those instead of a bare
+    // metadata dump (RUSH-2436). This is what makes an archived session still
+    // render its prompts after `agents remove` / rm / a box reimage.
+    const archivedContent = readSessionContent(session.id);
+    if (archivedContent && archivedContent.trim() !== '') {
+      renderArchivedSession(session, mode, options);
+      return;
+    }
     console.log(chalk.yellow('Session transcript not available (file no longer exists).'));
     console.log(chalk.gray(`Path: ${session.filePath}`));
     if (session.version) console.log(chalk.gray(`Version: ${session.agent} ${session.version}`));
