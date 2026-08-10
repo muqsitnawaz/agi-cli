@@ -82,6 +82,8 @@ export interface PushBundleOptions {
   operation: string;
   /** Preserve an automation account's permanent prompt-free policy remotely. */
   policyNever?: boolean;
+  /** Permit a human-invoked push to read locally without requiring the agent broker. */
+  agentOnly?: boolean;
 }
 
 export interface PushBundleResult {
@@ -258,5 +260,5 @@ export function pushBundleToHost(
   host: string,
   opts: PushBundleOptions,
 ): PushBundleResult {
-  return pushResolvedBundleToHost(resolveBundleForPush(bundle, opts.operation), bundle, host, opts);
+  return pushResolvedBundleToHost(resolveBundleForPush(bundle, opts.operation, { agentOnly: opts.agentOnly }), bundle, host, opts);
 }

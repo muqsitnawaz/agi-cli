@@ -137,6 +137,7 @@ export function registerAccountsCommand(program: Command): void {
         force: o.force,
         operation: 'accounts sync',
         policyNever: true,
+        agentOnly: false,
       });
       if (!result.ok) throw new Error(`${result.message}\nRetry: agents accounts sync ${account.name} --device ${o.device}${o.force ? ' --force' : ''}`);
       console.log(chalk.green(`${account.name} synced to ${o.device} (${result.keyCount} keys, ${remoteBackend} backend, policy never).`));
