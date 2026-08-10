@@ -35,6 +35,8 @@ import { resolveRemoteOsSync } from '../hosts/remote-os.js';
 import { pullRemoteLogDelta, REMOTE_MIRROR_MAX_BYTES } from '../hosts/progress.js';
 import { createRemoteWorktree, ensureRemoteRepo } from './remoteWorktree.js';
 import { getTeam, isTeamDisbanded } from './registry.js';
+import { loadProjectDef, projectDirsAbs, type ProjectDef } from '../projects.js';
+import { parseProjectRef } from '../project-root.js';
 import { resolvePlacement, classifyExclusions, NoViableDeviceError } from './scheduler.js';
 import { probePoolSignals } from './placement-probe.js';
 import { readMaxConcurrentCaps } from '../device-config.js';
@@ -560,6 +562,18 @@ export async function collectTeamsDoctorData(): Promise<Record<string, TeamsDoct
     })
   );
   return result;
+}
+
+/**
+ * The project's SECONDARY bound dirs to grant a local teammate as `--add-dir`:
+ * `projectDirsAbs` (primary first, resolved locally, missing dirs already
+ * dropped) minus the primary — filtered against the teammate's own cwd so the
+ * cwd (granted separately in `buildCommand`) is never duplicated. Only Claude
+ * and Codex consume `--add-dir`; `buildCommand` gates on that.
+ */
+export function projectTeammateAddDirs(def: ProjectDef, cwd: string): string[] {
+  const cwdAbs = path.resolve(cwd);
+  return projectDirsAbs(def, { forRemote: false }).slice(1).filter((d) => d !== cwdAbs);
 }
 
 let AGENTS_DIR: string | null = null;
@@ -2211,6 +2225,7 @@ export class AgentManager {
     // forwarded). Effort is a separate knob wired into buildReasoningFlags
     // inside buildCommand.
     const resolvedModel: string | null = agent.model ?? null;
+    const projectAddDirs = await this.resolveProjectAddDirs(agent);
     const cmd = this.buildCommand(
       agent.agentType,
       agent.prompt,
@@ -2222,6 +2237,7 @@ export class AgentManager {
       agent.version,
       agent.profileName,
       resume,
+      projectAddDirs,
     );
 
     debug(`Launching ${agent.agentType} agent ${agent.agentId} [${agent.mode}]${resume ? ' (resume)' : ''}: ${cmd.slice(0, 3).join(' ')}...`);
@@ -2747,6 +2763,25 @@ export class AgentManager {
     return args;
   }
 
+  /**
+   * The project's SECONDARY bound dirs to grant a local teammate as --add-dir.
+   *
+   * When the teammate's team is bound to a defined project
+   * (`teams create --project`), this returns `projectDirsAbs` minus the primary
+   * (the teammate's cwd), resolved locally (absolute, missing dirs dropped),
+   * deduped against the cwd. A distributed teammate (`hostName` set → `cwd` null)
+   * resolves its dirs on the host, so it gets none here. No project → `[]`.
+   */
+  private async resolveProjectAddDirs(agent: AgentProcess): Promise<string[]> {
+    if (!agent.cwd) return [];
+    const meta = await getTeam(agent.taskName);
+    if (!meta?.project) return [];
+    const { slug } = parseProjectRef(meta.project);
+    const def = slug ? loadProjectDef(slug) : undefined;
+    if (!def) return [];
+    return projectTeammateAddDirs(def, agent.cwd);
+  }
+
   private buildCommand(
     agentType: AgentType,
     prompt: string,
@@ -2758,6 +2793,7 @@ export class AgentManager {
     version: string | null = null,
     profileName: string | null = null,
     resume?: { id: string; message: string },
+    addDirs: string[] = [],
   ): string[] {
     // Route through getAgentsInvocation so a teammate launched by the compiled
     // standalone binary (#315) doesn't relaunch as `agents /$bunfs/root/agents …`
@@ -2782,6 +2818,15 @@ export class AgentManager {
     // Claude: grant access to the teammate's working directory.
     if (agentType === 'claude' && cwd) {
       cmd.push('--add-dir', cwd);
+    }
+
+    // Project-bound team (`teams create --project`): grant the project's OTHER
+    // bound dirs (projectDirsAbs minus the primary, resolved in
+    // resolveProjectAddDirs). Only Claude and Codex consume --add-dir — the
+    // inner `agents run` drops it for every other harness (exec.ts add-dir gate),
+    // so gate here to keep the command honest.
+    if (addDirs.length > 0 && (agentType === 'claude' || agentType === 'codex')) {
+      for (const dir of addDirs) cmd.push('--add-dir', dir);
     }
 
     // Codex's workspace-write sandbox blocks writes outside cwd. Factory

@@ -15,7 +15,7 @@
  * through the real `recordScannedKeys` store-write — so the decision, the store
  * reads (real `isHostPinned`), and the pin are all exercised without a network.
  */
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -31,11 +31,13 @@ import {
   isAlwaysFreshRepo,
   isInsideGitWorkTree,
   parseRunAccountPickerRequest,
+  projectRunAddDirs,
   runAccountPickerConflicts,
   runAutoDefaultsToAffinity,
   hostInteractiveNeedsCorrelationId,
   RUN_AUTO_KEYWORD,
 } from './exec.js';
+import { writeProjectDef } from '../lib/projects.js';
 import { isHostPinned, recordScannedKeys } from '../lib/devices/known-hosts.js';
 import { ALL_AGENT_IDS } from '../lib/agents.js';
 
@@ -656,5 +658,72 @@ describe.skipIf(process.platform === 'win32')('agents run — harness not instal
       fs.rmSync(home, { recursive: true, force: true });
       fs.rmSync(pathDir, { recursive: true, force: true });
     }
+  });
+});
+
+// RUSH-2487: `agents run --project <slug>` grants the project's SECONDARY bound
+// dirs (every bound dir except the primary/cwd) via --add-dir, deduped against
+// the user's explicit --add-dir. This is the merge that feeds options.addDir at
+// the dispatch site.
+describe('projectRunAddDirs — --project grants the secondary bound dirs', () => {
+  let projDir: string;
+  let primary: string;
+  let web: string;
+  let sys: string;
+  let missing: string;
+
+  beforeAll(() => {
+    projDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proj-run-adddirs-'));
+    process.env.AGENTS_PROJECTS_DIR = projDir;
+    // Real dirs so the local (forRemote:false) resolver keeps them; a missing
+    // one proves local drops it while remote keeps it.
+    const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'proj-run-dirs-')));
+    primary = path.join(base, 'agents-cli');
+    web = path.join(base, 'agents-cli-web');
+    sys = path.join(base, 'dot-system');
+    missing = path.join(base, 'never-checked-out');
+    for (const d of [primary, web, sys]) fs.mkdirSync(d, { recursive: true });
+    writeProjectDef({
+      name: 'projruntest',
+      root: primary,
+      defaultPath: primary,
+      // The primary is duplicated in repos (the real agents-cli def does this);
+      // projectDirsAbs dedups it, so it must never reappear as a secondary.
+      repos: [
+        { slug: 'a/agents-cli', path: primary },
+        { slug: 'a/agents-cli-web', path: web },
+        { slug: 'a/dot-system', path: sys },
+        { slug: 'a/never', path: missing },
+      ],
+    });
+  });
+  afterAll(() => {
+    delete process.env.AGENTS_PROJECTS_DIR;
+    fs.rmSync(projDir, { recursive: true, force: true });
+  });
+
+  it('returns the secondary dirs, primary dropped, missing dir dropped locally', () => {
+    const dirs = projectRunAddDirs('projruntest', false, []);
+    expect(dirs).toEqual([web, sys]);
+    expect(dirs).not.toContain(primary);
+    expect(dirs).not.toContain(missing);
+  });
+
+  it('dedups against the user\'s explicit --add-dir', () => {
+    expect(projectRunAddDirs('projruntest', false, [web])).toEqual([sys]);
+    expect(projectRunAddDirs('projruntest', false, [web, sys])).toEqual([]);
+  });
+
+  it('forRemote keeps a dir the local box has not checked out (home-relative)', () => {
+    // forRemote resolution never drops a missing dir — a box missing a checkout
+    // is the remote's concern. These temp dirs sit outside HOME so they stay
+    // absolute, but the missing one must still be present.
+    const dirs = projectRunAddDirs('projruntest', true, []);
+    expect(dirs).toContain(missing);
+    expect(dirs).not.toContain(primary);
+  });
+
+  it('returns [] for an unknown / convention-only project', () => {
+    expect(projectRunAddDirs('no-such-project', false, [])).toEqual([]);
   });
 });

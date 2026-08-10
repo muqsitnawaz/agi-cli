@@ -203,3 +203,47 @@ describe('printFeedHint', () => {
     expect(out).toContain('IMPORTANT milestones');
   });
 });
+
+// RUSH-2487: `teams create --project <slug>` binds the team to a defined project
+// so `teams add` lands teammates in its primary dir with the sibling grants.
+describe('teams create --project (RUSH-2487)', () => {
+  function seedProject(home: string, slug: string): void {
+    const pdir = path.join(home, '.agents', 'projects');
+    fs.mkdirSync(pdir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pdir, `${slug}.yaml`),
+      `name: ${slug}\nroot: ~/src/${slug}\ndefaultPath: ~/src/${slug}\n`,
+    );
+  }
+
+  it('stores the project slug in the team meta and echoes it', () => {
+    const { stdout, status, home } = run(
+      ['teams', 'create', 'proj-bound', '--project', 'myproj'],
+      (home) => seedProject(home, 'myproj'),
+    );
+
+    expect(status, stdout).toBe(0);
+    expect(stdout).toContain('project: myproj');
+    const reg = JSON.parse(
+      fs.readFileSync(path.join(home, '.agents', '.history', 'teams', 'registry.json'), 'utf-8'),
+    );
+    expect(reg['proj-bound'].project).toBe('myproj');
+  });
+
+  it('rejects an undefined project loudly (fail-loud, not silent no-grant)', () => {
+    const { status, home } = run(['teams', 'create', 'proj-bad', '--project', 'no-such-project']);
+
+    expect(status).toBe(1);
+    const eventsPath = path.join(home, '.agents', 'events.jsonl');
+    const friction = fs
+      .readFileSync(eventsPath, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l))
+      .find((r) => r.event === 'friction' && r.failureId === 'unknown-project');
+    expect(friction).toBeDefined();
+    expect(friction.error).toContain('no-such-project');
+    // The team must NOT have been created with a bogus binding.
+    expect(fs.existsSync(path.join(home, '.agents', '.history', 'teams', 'registry.json'))).toBe(false);
+  });
+});

@@ -1598,8 +1598,9 @@ export function registerTeamsCommands(program: Command): void {
     .option('--devices <list>', 'Pool of machines this team may run teammates on (comma-separated). Enables distributed auto-scheduling.')
     .option('--hosts <list>', 'Alias for --devices.')
     .option('--repo <urlOrPath>', 'How each remote (--device) teammate gets the code — ONE git URL/path for the whole team (existing checkout reused, else cloned). A team is single-repo; for work across repos, make one team per repo. Defaults to this checkout origin.')
+    .option('--project <slug>', "Bind the team to a defined project (`agents projects`): a teammate added without --cwd/--worktree lands in the project's primary dir, and every local teammate is granted the project's other bound dirs via --add-dir (Claude/Codex only).")
     .option('--json', 'Output machine-readable JSON')
-    .action(async (team: string, opts: { description?: string; enableWorktrees?: boolean; useWorktree?: string; devices?: string; hosts?: string; repo?: string; json?: boolean }) => {
+    .action(async (team: string, opts: { description?: string; enableWorktrees?: boolean; useWorktree?: string; devices?: string; hosts?: string; repo?: string; project?: string; json?: boolean }) => {
       try {
         // --devices / --hosts are aliases; commander can't express a two-name
         // option that isn't a short flag, so merge them here. Split on comma,
@@ -1646,12 +1647,26 @@ export function registerTeamsCommands(program: Command): void {
           }
         }
 
+        // --project must name a DEFINED project (`agents projects`): the teammate
+        // cwd + add-dirs are resolved from its definition via projectDirsAbs, so a
+        // convention-only slug with no <slug>.yaml would silently grant nothing.
+        // Fail loud here instead of at spawn.
+        if (opts.project) {
+          const { loadProjectDef } = await import('../lib/projects.js');
+          const { parseProjectRef } = await import('../lib/project-root.js');
+          const { slug } = parseProjectRef(opts.project);
+          if (!slug || !loadProjectDef(slug)) {
+            dieFriction('teams', 'unknown-project', `No defined project '${opts.project}'. Define it with: agents projects add ${opts.project ?? '<slug>'}`);
+          }
+        }
+
         const meta = await createTeam(team, {
           description: opts.description,
           enableWorktrees: opts.enableWorktrees,
           useWorktree: opts.useWorktree,
           devices,
           repo,
+          project: opts.project,
         });
         if (isJsonMode(opts)) {
           console.log(JSON.stringify({ team, ...meta }, null, 2));
@@ -1663,6 +1678,7 @@ export function registerTeamsCommands(program: Command): void {
         if (meta.use_worktree) console.log(chalk.gray(`  worktree: ${meta.use_worktree}`));
         if (meta.devices && meta.devices.length) console.log(chalk.gray(`  devices: ${meta.devices.join(', ')}`));
         if (meta.repo) console.log(chalk.gray(`  repo: ${meta.repo}`));
+        if (meta.project) console.log(chalk.gray(`  project: ${meta.project}`));
         console.log();
         console.log(chalk.gray('Add your first teammate:'));
         if (meta.enable_worktrees) {
@@ -2049,10 +2065,24 @@ export function registerTeamsCommands(program: Command): void {
         dieFriction('teams', 'worktree-requires-enable-worktrees', `--worktree requires --enable-worktrees on the team. Recreate the team with: agents teams create ${team} --enable-worktrees`);
       }
 
+      // A team bound to a defined project (`teams create --project`) lands a
+      // teammate in the project's PRIMARY dir when neither a worktree nor --cwd
+      // pins one. Resolved locally (absolute) — a distributed teammate resolves
+      // its own dir on the host, so this only feeds the local precedence below.
+      let projectPrimary: string | undefined;
+      if (!hostName && !worktreePath && !opts.cwd && teamMeta?.project) {
+        const { loadProjectDef, projectBasePath } = await import('../lib/projects.js');
+        const { parseProjectRef } = await import('../lib/project-root.js');
+        const { slug } = parseProjectRef(teamMeta.project);
+        const def = slug ? loadProjectDef(slug) : undefined;
+        if (def) projectPrimary = projectBasePath(def, false);
+      }
+
       // Distributed teammates have no LOCAL cwd — their working dir lives on the
       // host (repoPath / the remote worktree). Local teammates default to the
-      // worktree path, then --cwd, then the current directory.
-      const cwd = hostName ? null : (worktreePath ?? opts.cwd ?? process.cwd());
+      // worktree path, then --cwd, then the project's primary dir, then the
+      // current directory.
+      const cwd = hostName ? null : (worktreePath ?? opts.cwd ?? projectPrimary ?? process.cwd());
 
       // Factory teammates: prepend the worker-skill preamble to every task
       // prompt so implementers/testers/reviewers know about the Ledger, the

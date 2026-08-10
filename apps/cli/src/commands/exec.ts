@@ -34,6 +34,8 @@ import { spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { isSessionTrackedAgent } from '../lib/session/types.js';
 import { applyActiveRulesPresetAtRun } from '../lib/rules/run-sync.js';
+import { loadProjectDef, projectDirsAbs } from '../lib/projects.js';
+import { parseProjectRef, toRemotePortable, expandLocalHome } from '../lib/project-root.js';
 
 interface ExecCommandActionOptions {
   mode: ExecMode;
@@ -608,6 +610,35 @@ async function resolveRunCwd(
 }
 
 /**
+ * The SECONDARY dirs a `--project` run grants as `--add-dir`: every dir the
+ * defined project binds (`projectDirsAbs`, primary first) except the primary
+ * (which is the run's cwd), deduped against dirs the user already passed via
+ * `--add-dir`. `forRemote` matches the cwd resolution — `~/…` on a `--host` run
+ * (the host re-roots them; `toRemotePortable` at the dispatch site is a no-op on
+ * a `~/…` entry), absolute locally (missing dirs already dropped by
+ * `projectDirsAbs`). Returns `[]` for a convention-only / unknown project.
+ */
+export function projectRunAddDirs(
+  projectRef: string,
+  forRemote: boolean,
+  existing: string[],
+): string[] {
+  const { slug } = parseProjectRef(projectRef);
+  const def = slug ? loadProjectDef(slug) : undefined;
+  if (!def) return [];
+  const norm = (s: string) => (forRemote ? toRemotePortable(s) : path.resolve(expandLocalHome(s)));
+  const seen = new Set(existing.map(norm));
+  const out: string[] = [];
+  for (const dir of projectDirsAbs(def, { forRemote }).slice(1)) {
+    const key = norm(dir);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(dir);
+  }
+  return out;
+}
+
+/**
  * `--terminal`: hand this run to a real terminal tab and exit.
  *
  * The terminal is detected from the user's live sessions, so a run started from
@@ -747,7 +778,7 @@ export function registerRunCommand(program: Command): void {
     .option('--cwd <dir>', 'Working directory for the agent (defaults to current directory). With --host, the directory ON the host.')
     .option(
       '-P, --project <ref>',
-      'Project shorthand <slug>[@worktree], resolved against your projects root (auto-inferred, cached). Sets the cwd locally or on --host.',
+      "Project shorthand <slug>[@worktree], resolved against your projects root (auto-inferred, cached). Sets the cwd locally or on --host. A defined project's other bound dirs are granted via --add-dir (Claude and Codex only; silently dropped for other harnesses).",
     )
     .option(
       '--add-dir <dir>',
@@ -1697,7 +1728,13 @@ export function registerRunCommand(program: Command): void {
       // it); locally it becomes an absolute path. It owns the working directory,
       // so it is mutually exclusive with both --cwd and --remote-cwd.
       if (options.project) {
-        options.cwd = await resolveRunCwd(options, { forRemote: hostGiven.length > 0 });
+        const forRemote = hostGiven.length > 0;
+        options.cwd = await resolveRunCwd(options, { forRemote });
+        // A DEFINED project binds several dirs (`projectDirsAbs`, primary first).
+        // The primary is the cwd above; grant the SECONDARY dirs as --add-dir so
+        // the agent can read the project's other bound repos, not just its cwd.
+        // Only Claude and Codex consume --add-dir (see the --project help note).
+        options.addDir.push(...projectRunAddDirs(options.project, forRemote, options.addDir));
       }
 
       if (hostGiven.length > 0) {
