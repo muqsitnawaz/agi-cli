@@ -313,23 +313,51 @@ export async function resolveClaudeCredentialsBlob(opts?: {
  * copy is simply skipped, so `buildCredentialScript` returns `''` (a no-op box
  * bootstrap) rather than throwing on a not-signed-in runtime.
  */
-export function buildCredentialScript(
+/**
+ * The native OAuth runtimes among `picked` that actually have a credential to copy
+ * — signed in locally (`credPath`) or a Claude OAuth blob supplied — i.e. the ones
+ * a transfer would leak. A picked runtime with nothing to copy is not refused.
+ */
+export function refusedNativeOAuthRuntimes(
   picked: AgentId[],
   detected: DetectedRuntime[],
   extras?: { claudeCredentialsJson?: string | null },
-): string {
+): AgentId[] {
   const byId = new Map(detected.map((d) => [d.id, d]));
-  const wouldTransfer = picked.filter((id) => {
+  return picked.filter((id) => {
     if (!isNativeOAuthRuntime(id)) return false;
     const hasLocalFile = !!byId.get(id)?.credPath && LEASE_RUNTIMES.some((c) => c.id === id);
     const hasClaudeToken = id === 'claude' && !!extras?.claudeCredentialsJson;
     return hasLocalFile || hasClaudeToken;
   });
-  if (wouldTransfer.length > 0) {
-    throw new Error(nativeOAuthTransferRefusal(wouldTransfer));
+}
+
+/**
+ * Throw the SING-1b refusal if any picked runtime would transfer a native OAuth
+ * login. Callers should invoke this at a FAIL-FAST point — before any expensive or
+ * costly side effect (e.g. before `crabboxWarmup` leases a paid box) — so a refused
+ * `--lease` never leaks infra, mirroring how `--copy-creds` refuses before it opens
+ * an SSH connection.
+ */
+export function assertNoNativeOAuthTransfer(
+  picked: AgentId[],
+  detected: DetectedRuntime[],
+  extras?: { claudeCredentialsJson?: string | null },
+): void {
+  const refused = refusedNativeOAuthRuntimes(picked, detected, extras);
+  if (refused.length > 0) {
+    throw new Error(nativeOAuthTransferRefusal(refused));
   }
-  // No native credential to copy → nothing to serialize. (No non-native runtime
-  // exists today, so this is always the empty string; the filter above keeps the
-  // shape general in case one is ever added.)
+}
+
+export function buildCredentialScript(
+  picked: AgentId[],
+  detected: DetectedRuntime[],
+  extras?: { claudeCredentialsJson?: string | null },
+): string {
+  assertNoNativeOAuthTransfer(picked, detected, extras);
+  // Past the refusal there is nothing to serialize — every runtime this handles is
+  // native OAuth, so a non-refused set has no credential to copy. (Always '' today;
+  // the shape stays general in case a non-native runtime is ever added.)
   return '';
 }

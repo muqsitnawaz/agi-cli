@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
-import { buildCredentialScript, isNativeOAuthRuntime, LEASE_RUNTIMES, pickRuntimes, resolveClaudeCredentialsBlob, inferLeaseRuntime, profileNeedsBaseRuntimeCredentials, type DetectedRuntime } from './runtimes.js';
+import { assertNoNativeOAuthTransfer, buildCredentialScript, isNativeOAuthRuntime, LEASE_RUNTIMES, pickRuntimes, refusedNativeOAuthRuntimes, resolveClaudeCredentialsBlob, inferLeaseRuntime, profileNeedsBaseRuntimeCredentials, type DetectedRuntime } from './runtimes.js';
 import type { AgentId } from '../types.js';
 import { getPreset } from '../profiles-presets.js';
 import { profileFromPreset } from '../profiles.js';
@@ -85,6 +85,26 @@ describe('buildCredentialScript — native OAuth transfer is refused (SING-1b)',
 
   it('an empty runtime set is a no-op — nothing to copy, nothing forbidden', () => {
     expect(buildCredentialScript([], [])).toBe('');
+  });
+
+  it('does NOT refuse a native runtime that is not signed in locally (nothing to copy)', () => {
+    // credPath null and no claude blob → nothing would transfer → no refusal, so a
+    // --lease of a not-signed-in runtime still bootstraps. This is why the fail-fast
+    // guard keys on refusedNativeOAuthRuntimes, not on the runtime id alone.
+    const notSignedIn: DetectedRuntime[] = [
+      { id: 'claude', label: 'Claude Code', email: null, signedIn: false, credPath: null },
+    ];
+    expect(refusedNativeOAuthRuntimes(['claude'], notSignedIn)).toEqual([]);
+    expect(() => assertNoNativeOAuthTransfer(['claude'], notSignedIn)).not.toThrow();
+    expect(buildCredentialScript(['claude'], notSignedIn)).toBe('');
+  });
+
+  it('assertNoNativeOAuthTransfer / refusedNativeOAuthRuntimes flag a signed-in native runtime', () => {
+    const signedIn: DetectedRuntime[] = [detected('claude'), detected('codex')];
+    expect(refusedNativeOAuthRuntimes(['claude', 'codex'], signedIn).sort()).toEqual(['claude', 'codex']);
+    expect(() => assertNoNativeOAuthTransfer(['claude'], signedIn)).toThrow(/Refusing to copy native OAuth/i);
+    // A Claude OAuth blob alone (no credPath) is also enough to refuse.
+    expect(refusedNativeOAuthRuntimes(['claude'], [{ id: 'claude', label: 'c', email: null, signedIn: true, credPath: null }], { claudeCredentialsJson: OAUTH_BLOB })).toEqual(['claude']);
   });
 });
 

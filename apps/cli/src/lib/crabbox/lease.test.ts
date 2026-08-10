@@ -250,6 +250,22 @@ describe('buildBootstrapScript', () => {
   });
 });
 
+describe('leaseAndRun — refuses a native OAuth copy BEFORE leasing a box (SING-1b, no leak)', () => {
+  it('rejects a signed-in native runtime before any crabbox interaction', async () => {
+    // credPath is SET, so `assertNoNativeOAuthTransfer` at the very top of
+    // leaseAndRun throws — before crabboxFind / crabboxWarmup ever runs, so no box
+    // is leased (nothing to pay for or leak). If the refusal lived only inside
+    // buildBootstrapScript (post-warmup), this call would instead reach the crabbox
+    // layer and fail with a different error (or hang on a real lease).
+    const signedIn: DetectedRuntime[] = [
+      { id: 'claude', label: 'Claude Code', email: 'a@b.com', signedIn: true, credPath: '/tmp/claude-signedin.json' },
+    ];
+    await expect(
+      leaseAndRun({ agent: 'claude', prompt: 'hi', runtimes: ['claude'], detected: signedIn }),
+    ).rejects.toThrow(/Refusing to copy native OAuth/i);
+  });
+});
+
 describe('leaseWorkspaceId', () => {
   it('keeps the repo name readable and separates concurrent process runs', () => {
     expect(leaseWorkspaceId('/src/Agents CLI', 1_800_000_000_000, 41)).toMatch(/^agents-cli-[a-z0-9]+-15$/);

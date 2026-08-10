@@ -94,8 +94,10 @@ set of actions across five dimensions:
   is absent, even if some other claude is already there. Version-pinned specs
   trigger a per-device `agents view --json` probe to read the installed version set.
 - **config** — `sync-config` for the declared `sync:` scopes.
-- **login** — `push-login` where a portable credential can be propagated;
-  `needs-login` where the login is desired but genuinely can't be (see below).
+- **login** — always `needs-login` when a login is desired. A native OAuth /
+  session login is never copied between devices (SING-1b, RUSH-2527), so `apply`
+  no longer propagates one (there is no `push-login` action anymore): log in on the
+  box itself, or sync a portable provider account (`agents accounts sync`).
 - **secrets** — `push-secret` for a declared bundle when `--provision-secrets` is
   set and the gates below pass; `needs-secret` (a manual reminder) otherwise. Runs
   **last**, because it is the most sensitive mutation `apply` performs: every
