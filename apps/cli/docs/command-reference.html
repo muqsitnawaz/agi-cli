@@ -481,12 +481,15 @@ email) into a single row. Use `agents devices harnesses` for the per-install vie
 
       # Reconcile every device to the profile
       agents fleet apply -y</code></pre></article>
-<article id="devices-capture" data-search="capture devices capture  snapshot the live environment (roster names, agents, browser, secret-bundle names, routines) into agents.yaml fleet:. --dry-run print the fleet: block that would be written, and exit --from-pins record per-device agents from committed devices/&lt;name&gt;/agents.yaml --device &lt;name&gt; capture a single device -h, --help show help  "><div class="command-head"><h3><code>agents devices capture</code></h3></div><p>Snapshot the live environment (roster names, agents, browser, secret-bundle names, routines) into agents.yaml fleet:.</p><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>--dry-run</code></td><td>print the fleet: block that would be written, and exit</td><td></td><td></td></tr><tr><td><code>--from-pins</code></td><td>record per-device agents from committed devices/&lt;name&gt;/agents.yaml</td><td></td><td></td></tr><tr><td><code>--device &lt;name&gt;</code></td><td>capture a single device</td><td></td><td></td></tr><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table></article>
-<article id="devices-config" data-search="config devices config  get, set, or unset a device’s settings (scheduler, agent cap, ssh overrides, auto-launch, notes). bare opens an interactive settings menu (tty) or prints the resolved config (piped). stored centrally in ~/.agents/agents.yaml under fleet.devices.&lt;name&gt;.config — synced, so any box can configure any device. name  key  value  --unset reset the key to its default (removes the stored value) --json output machine-readable json -h, --help show help agents devices config mac-mini                            # settings menu (tty) / print config (piped)
-      agents devices config mac-mini agents.max-concurrent 4    # cap concurrent agents
+<article id="devices-capture" data-search="capture devices capture  snapshot the live environment (roster names, agents, browser, secret-bundle names, routines) into agents.yaml fleet:. --dry-run print the fleet: block that would be written, and exit --from-pins record this machine&#39;s pinned agents (peer pins are machine-local and never sync) --device &lt;name&gt; capture a single device -h, --help show help  "><div class="command-head"><h3><code>agents devices capture</code></h3></div><p>Snapshot the live environment (roster names, agents, browser, secret-bundle names, routines) into agents.yaml fleet:.</p><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>--dry-run</code></td><td>print the fleet: block that would be written, and exit</td><td></td><td></td></tr><tr><td><code>--from-pins</code></td><td>record THIS machine&#39;s pinned agents (peer pins are machine-local and never sync)</td><td></td><td></td></tr><tr><td><code>--device &lt;name&gt;</code></td><td>capture a single device</td><td></td><td></td></tr><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table></article>
+<article id="devices-config" data-search="config devices config  get, set, or unset a device’s settings (scheduler, agent cap, ssh overrides, auto-launch, notes). bare opens an interactive settings menu (tty) or prints the resolved config (piped). per-device values live in the tracked devices/&lt;name&gt;/agents.yaml config: block; --fleet targets the fleet-wide defaults (central fleet.defaults.config) every device inherits unless it overrides the key. name  key  value  --fleet target the fleet-wide defaults layer instead of a device (first positional is the key) --unset reset the key at that layer (a device key then inherits the fleet default) --json output machine-readable json (each key carries its source: device | fleet | default) -h, --help show help agents devices config mac-mini                            # settings menu (tty) / print config (piped)
+      agents devices config mac-mini agents.max-concurrent 4    # cap concurrent agents on mac-mini
       agents devices config mac-mini scheduler.enabled off      # no routines firing there
-      agents devices config mac-mini scheduler.enabled          # read one key back
-      agents devices config mac-mini scheduler.enabled --unset  # back to the default
+      agents devices config mac-mini scheduler.enabled          # read the effective value back
+      agents devices config mac-mini scheduler.enabled --unset  # inherit the fleet default again
+      agents devices config --fleet scheduler.enabled off       # fleet-wide default (all devices)
+      agents devices config --fleet agents.max-concurrent 2     # every box caps at 2 unless it overrides
+      agents devices config --fleet                             # print the fleet defaults layer
       agents devices config mac-mini notes &quot;runs the releases&quot;  # append an operator note
       agents devices config win-mini ssh.auth password          # password auth…
       agents devices config win-mini ssh.bundle muqsit          # …from this secrets bundle
@@ -494,26 +497,34 @@ email) into a single row. Use `agents devices harnesses` for the per-install vie
       agents devices config mac-mini auto-launch.enabled off    # exclude from factory auto-launch
       agents devices config mac-mini auto-launch.preferred on   # boost in auto-launch ranking
       agents devices config zion interactive.host zion          # user scope: where agents show you artifacts
-      agents devices config mac-mini --json                     # machine-readable keys: agents.max-concurrent, scheduler.enabled, daemon.enabled,
+      agents devices config mac-mini --json                     # machine-readable, per-key source keys: agents.max-concurrent, scheduler.enabled, daemon.enabled,
       watchdog.enabled, browser.remote-control, browser.profile, notes,
       ssh.user, ssh.auth (key|password), ssh.bundle, ssh.bundle-key,
       ssh.identity-file, platform (windows|linux|macos|unknown),
       auto-launch.enabled, auto-launch.preferred — plus the user-scope
       interactive.host (stored centrally; the device name is syntax only).
 
+      three layers, read in order — built-in default &lt; fleet default
+      (--fleet, central fleet.defaults.config) &lt; per-device value
+      (devices/&lt;name&gt;/agents.yaml config:). both files are tracked and sync
+      with &#39;agents repo push/pull&#39;; per-device files are conflict-free because
+      each machine writes only its own folder. --unset removes the value at
+      the targeted layer, so a device key falls back to the fleet default.
+
       booleans take on/off (or true/false). &#39;notes&#39; appends one entry per
-      invocation. values land in ~/.agents/agents.yaml under
-      fleet.devices.&lt;name&gt;.config and sync with &#39;agents repo push/pull&#39;.
-      ssh.* / platform / user overlay the discovered registry profile at dial
-      time. scheduler.enabled / daemon.enabled take effect when the daemon
-      reloads or restarts on that device.
+      invocation. ssh.* / platform / user overlay the discovered registry
+      profile at dial time. scheduler.enabled / daemon.enabled take effect
+      when the daemon reloads or restarts on that device.
 
       the retired subcommands still work and forward here: configure, note,
-      set, set-interactive, enable, disable, prefer, unprefer."><div class="command-head"><h3><code>agents devices config &lt;name&gt; [key] [value...]</code></h3></div><p>Get, set, or unset a device’s settings (scheduler, agent cap, ssh overrides, auto-launch, notes). Bare opens an interactive settings menu (TTY) or prints the resolved config (piped). Stored centrally in ~/.agents/agents.yaml under fleet.devices.&lt;name&gt;.config — synced, so any box can configure any device.</p><h4>Arguments</h4><table><thead><tr><th>Argument</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>&lt;name&gt;</code></td><td>—</td><td></td><td></td></tr><tr><td><code>[key]</code></td><td>—</td><td></td><td></td></tr><tr><td><code>[value...]</code></td><td>—</td><td></td><td></td></tr></tbody></table><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>--unset</code></td><td>reset the key to its default (removes the stored value)</td><td></td><td></td></tr><tr><td><code>--json</code></td><td>output machine-readable JSON</td><td></td><td></td></tr><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table><h4>Examples</h4><pre><code>agents devices config mac-mini                            # settings menu (TTY) / print config (piped)
-      agents devices config mac-mini agents.max-concurrent 4    # cap concurrent agents
+      set, set-interactive, enable, disable, prefer, unprefer."><div class="command-head"><h3><code>agents devices config [name] [key] [value...]</code></h3></div><p>Get, set, or unset a device’s settings (scheduler, agent cap, ssh overrides, auto-launch, notes). Bare opens an interactive settings menu (TTY) or prints the resolved config (piped). Per-device values live in the tracked devices/&lt;name&gt;/agents.yaml config: block; --fleet targets the fleet-wide defaults (central fleet.defaults.config) every device inherits unless it overrides the key.</p><h4>Arguments</h4><table><thead><tr><th>Argument</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>[name]</code></td><td>—</td><td></td><td></td></tr><tr><td><code>[key]</code></td><td>—</td><td></td><td></td></tr><tr><td><code>[value...]</code></td><td>—</td><td></td><td></td></tr></tbody></table><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>--fleet</code></td><td>target the fleet-wide defaults layer instead of a device (first positional is the key)</td><td></td><td></td></tr><tr><td><code>--unset</code></td><td>reset the key at that layer (a device key then inherits the fleet default)</td><td></td><td></td></tr><tr><td><code>--json</code></td><td>output machine-readable JSON (each key carries its source: device | fleet | default)</td><td></td><td></td></tr><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table><h4>Examples</h4><pre><code>agents devices config mac-mini                            # settings menu (TTY) / print config (piped)
+      agents devices config mac-mini agents.max-concurrent 4    # cap concurrent agents on mac-mini
       agents devices config mac-mini scheduler.enabled off      # no routines firing there
-      agents devices config mac-mini scheduler.enabled          # read one key back
-      agents devices config mac-mini scheduler.enabled --unset  # back to the default
+      agents devices config mac-mini scheduler.enabled          # read the effective value back
+      agents devices config mac-mini scheduler.enabled --unset  # inherit the fleet default again
+      agents devices config --fleet scheduler.enabled off       # fleet-wide default (all devices)
+      agents devices config --fleet agents.max-concurrent 2     # every box caps at 2 unless it overrides
+      agents devices config --fleet                             # print the fleet defaults layer
       agents devices config mac-mini notes &quot;runs the releases&quot;  # append an operator note
       agents devices config win-mini ssh.auth password          # password auth…
       agents devices config win-mini ssh.bundle muqsit          # …from this secrets bundle
@@ -521,19 +532,24 @@ email) into a single row. Use `agents devices harnesses` for the per-install vie
       agents devices config mac-mini auto-launch.enabled off    # exclude from Factory auto-launch
       agents devices config mac-mini auto-launch.preferred on   # boost in auto-launch ranking
       agents devices config zion interactive.host zion          # user scope: where agents show YOU artifacts
-      agents devices config mac-mini --json                     # machine-readable</code></pre><h4>Notes</h4><p class="notes">Keys: agents.max-concurrent, scheduler.enabled, daemon.enabled,
+      agents devices config mac-mini --json                     # machine-readable, per-key source</code></pre><h4>Notes</h4><p class="notes">Keys: agents.max-concurrent, scheduler.enabled, daemon.enabled,
       watchdog.enabled, browser.remote-control, browser.profile, notes,
       ssh.user, ssh.auth (key|password), ssh.bundle, ssh.bundle-key,
       ssh.identity-file, platform (windows|linux|macos|unknown),
       auto-launch.enabled, auto-launch.preferred — plus the user-scope
       interactive.host (stored centrally; the device name is syntax only).
 
+      Three layers, read in order — built-in default &lt; fleet default
+      (--fleet, central fleet.defaults.config) &lt; per-device value
+      (devices/&lt;name&gt;/agents.yaml config:). Both files are tracked and sync
+      with &#39;agents repo push/pull&#39;; per-device files are conflict-free because
+      each machine writes only its own folder. --unset removes the value at
+      the targeted layer, so a device key falls back to the fleet default.
+
       Booleans take on/off (or true/false). &#39;notes&#39; appends one entry per
-      invocation. Values land in ~/.agents/agents.yaml under
-      fleet.devices.&lt;name&gt;.config and sync with &#39;agents repo push/pull&#39;.
-      ssh.* / platform / user overlay the discovered registry profile at dial
-      time. scheduler.enabled / daemon.enabled take effect when the daemon
-      reloads or restarts on that device.
+      invocation. ssh.* / platform / user overlay the discovered registry
+      profile at dial time. scheduler.enabled / daemon.enabled take effect
+      when the daemon reloads or restarts on that device.
 
       The retired subcommands still work and forward here: configure, note,
       set, set-interactive, enable, disable, prefer, unprefer.</p></article>
