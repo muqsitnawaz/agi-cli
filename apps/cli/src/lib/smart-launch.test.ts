@@ -6,6 +6,7 @@ import {
   isDeviceAuto,
   applyDeviceAutoToOptions,
   resolveDeviceAuto,
+  formatNoHealthyDeviceError,
   type WeightedCandidate,
 } from './smart-launch.js';
 import type { AffinityRow } from './session/db.js';
@@ -27,6 +28,13 @@ describe('affinityWeights', () => {
     expect(w.every((c) => c.key !== '(unknown)')).toBe(true);
     expect(w.every((c) => c.launches > 0)).toBe(true);
   });
+});
+
+it('truthfully describes installed devices with no ready account', () => {
+  expect(formatNoHealthyDeviceError(['local', 'busy'], new Map([
+    ['local', { reachable: true, headroom: 'idle', installed: false, signedIn: false }],
+    ['busy', { reachable: true, headroom: 'loaded', installed: true, signedIn: true }],
+  ]))).toContain("local (no ready harness account), busy (overloaded)");
 });
 
 describe('sampleWeighted', () => {
@@ -146,6 +154,7 @@ describe('resolveDeviceAuto', () => {
       ]),
     })).rejects.toThrow('no healthy device can run codex');
   });
+
 
   it('keeps live load placement when run auto has not selected a harness yet', async () => {
     const plan = await resolveDeviceAuto(undefined, {

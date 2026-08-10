@@ -14,7 +14,6 @@ import { probePoolSignals } from './teams/placement-probe.js';
 import { pickBestDevice, type DevicePlacementSignal } from './teams/scheduler.js';
 import type { AgentType } from './teams/agents.js';
 import { getAccountInfo } from './agents.js';
-import { formatNoHealthyHarnessError } from './rotate.js';
 
 /** Peakiness of usage weights; >1 amplifies the most-used option. */
 export const DEFAULT_AFFINITY_ALPHA = 1.3;
@@ -109,6 +108,26 @@ export interface DeviceAutoPlan {
   pickedDeviceKey: string;
 }
 
+export function formatNoHealthyDeviceError(
+  pool: string[],
+  signals: Map<string, DevicePlacementSignal>,
+  agent?: string,
+): string {
+  const excluded = pool.map((key) => {
+    const signal = signals.get(key);
+    const reason = signal?.reachable !== true
+      ? 'unreachable'
+      : signal.headroom === 'loaded'
+        ? 'overloaded'
+        : signal.installed !== true || signal.signedIn !== true
+          ? 'no ready harness account'
+          : 'ineligible';
+    return `${key} (${reason})`;
+  }).join(', ');
+  const target = agent ? `can run ${agent}` : "for 'run auto'";
+  return `agents: no healthy device ${target} — excluded: ${excluded}; earliest window resets unknown`;
+}
+
 /**
  * Pick the least-loaded healthy device that can run `agent` when the harness is
  * known. `run auto` omits the agent and treats any ready account on the device
@@ -152,8 +171,7 @@ export async function resolveDeviceAuto(
     return signal.installed === true && signal.signedIn === true;
   });
   if (eligiblePool.length === 0) {
-    if (!agent) throw new Error(formatNoHealthyHarnessError([]));
-    throw new Error(`agents: no healthy device can run ${agent}; earliest window resets unknown`);
+    throw new Error(formatNoHealthyDeviceError(pool, signals, agent));
   }
   const picked = pickBestDevice(eligiblePool, [], { signals, agentLabel: agent });
   return {
