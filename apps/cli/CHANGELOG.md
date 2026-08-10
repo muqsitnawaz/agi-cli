@@ -162,6 +162,8 @@
 
 ## 1.22.30
 
+- **Device approvals and dismissals now follow the user DotAgents repo across the fleet (RUSH-2377).** `agents devices register`, `add`, `sync`, `ignore`, `unignore`, and `remove` persist a three-state decision under the central `agents.yaml` `fleet.discovery` map: `approved`, `ignored`, or absent/pending. After `agents repo pull user`, the CLI reconciles those portable decisions into the local `.history/devices` registry and ignore-list, resolving approved connection details live from Tailscale. IPs, SSH users/auth, and reachability remain machine-local and never enter Git. Source: `apps/cli/src/lib/devices/discovery-policy.ts`, `apps/cli/src/commands/{ssh,repo}.ts`.
+
 - **`agents secrets import --force` now repairs a bundle whose metadata record is
   undecryptable (#2305).** A file store whose key was lost or rotated out from
   under it leaves bundles present but unreadable — exactly the state provisioning

@@ -1121,7 +1121,7 @@ function registerDevicesCommands(program: Command): void {
 
   devicesCmd
     .command('register <name>')
-    .description('Register a discovered node and sync the approval through devices/<name>/agents.yaml.')
+    .description('Register a discovered node and sync the approval through agents.yaml fleet.discovery.')
     .action(async (name: string) => {
       try {
         const nodes = parseTailscaleStatus(tailscaleStatusJson());
@@ -1143,7 +1143,7 @@ function registerDevicesCommands(program: Command): void {
 
   devicesCmd
     .command('ignore <name>')
-    .description('Dismiss a node and sync the decision through devices/<name>/agents.yaml (also removes it locally).')
+    .description('Dismiss a node and sync the decision through agents.yaml fleet.discovery (also removes it locally).')
     .action(async (name: string) => {
       try {
         await removeDevice(name);
