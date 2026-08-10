@@ -51,7 +51,7 @@ describe('normalizeHost', () => {
 
 describe('resolveSessionHost', () => {
   // This is the fix for the "all sessions attributed to the local machine" bug: a
-  // Stream rows already carry their authoritative source machine, so we must
+  // bare `sessions --active --json` fans out over the whole fleet, so we must
   // bucket each row by ITS OWN `machine` id, not the host we queried.
   const LOCAL_ID = 'zion';
   const LOCAL_LABEL = 'this-mac';
@@ -811,7 +811,7 @@ describe('buildRemoteFocusCommand — attach a remote session over SSH', () => {
     const cmd = buildRemoteFocusCommand('abc12345', 'yosemite-s0');
     expect(cmd.startsWith('ssh -t ')).toBe(true);
     expect(cmd).toContain(`'yosemite-s0'`); // host is quoted, not dropped
-    expect(cmd).toContain('agents sessions focus');
+    expect(cmd).toContain('agents sessions resume');
     expect(cmd).toContain('abc12345');
     expect(cmd).toContain('--local');
   });
