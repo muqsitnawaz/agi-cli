@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "command": "agents",
-  "groups": 103,
-  "commands": 581,
+  "groups": 104,
+  "commands": 586,
   "root": {
     "name": "agents",
     "path": "",
@@ -2615,7 +2615,7 @@
           "name": "start",
           "path": "browser start",
           "aliases": [],
-          "description": "Start a browser task. Pass --profile <name>; omit to use your configured default (`agents browser profiles set-default`), else auto-pick an installed Chromium-family browser.",
+          "description": "Start a browser task. Pass --profile <name>; omit to use your configured default (`agents config set browser.profile <name>`), else auto-pick an installed Chromium-family browser.",
           "args": [],
           "options": [
             {
@@ -5521,6 +5521,163 @@
       ]
     },
     {
+      "name": "config",
+      "path": "config",
+      "aliases": [],
+      "description": "Unified config barrel: get, set, list, and unset agent run defaults, tier overrides, and device options.",
+      "args": [],
+      "options": [
+        {
+          "flags": "-h, --help",
+          "description": "Show help",
+          "short": "-h",
+          "long": "--help",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        }
+      ],
+      "examples": "agents config set run.claude@*.model best\n      agents config set run.claude@*.tier.best claude-opus-4-8\n      agents config set run.claude@2.1.45.model claude-opus-4-8\n      agents config set run.claude@*.mode auto\n      agents config set interactive.host zion\n      agents config set browser.profile work\n      agents config set devices.mac-mini.max-agents 4\n      agents config get run.claude@*.model\n      agents config unset run.claude@*.tier.best\n      agents config list",
+      "notes": "Every agent/harness reference uses agent@version. Use * for all versions.\n      Tier overrides are part of the run namespace: run.<agent@version>.tier.<tier>.\n      Old commands (defaults run, models tier, devices configure, etc.) still work\n      but delegate here and print a deprecation warning.",
+      "subcommands": [
+        {
+          "name": "get",
+          "path": "config get",
+          "aliases": [],
+          "description": "Get the current value of a config key",
+          "args": [
+            {
+              "name": "key",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            }
+          ],
+          "options": [
+            {
+              "flags": "--json",
+              "description": "Output machine-readable JSON",
+              "long": "--json",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
+        {
+          "name": "list",
+          "path": "config list",
+          "aliases": [],
+          "description": "List configured config keys and their values",
+          "args": [],
+          "options": [
+            {
+              "flags": "--device <name>",
+              "description": "List config for a specific device instead of this machine",
+              "long": "--device",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--json",
+              "description": "Output machine-readable JSON",
+              "long": "--json",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
+        {
+          "name": "set",
+          "path": "config set",
+          "aliases": [],
+          "description": "Set a config key",
+          "args": [
+            {
+              "name": "key",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            },
+            {
+              "name": "value",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            }
+          ],
+          "options": [
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
+        {
+          "name": "unset",
+          "path": "config unset",
+          "aliases": [],
+          "description": "Unset a config key (restore default behavior)",
+          "args": [
+            {
+              "name": "key",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            }
+          ],
+          "options": [
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        }
+      ]
+    },
+    {
       "name": "cost",
       "path": "cost",
       "aliases": [],
@@ -6450,7 +6607,9 @@
         {
           "name": "configure",
           "path": "devices configure",
-          "aliases": [],
+          "aliases": [
+            "config"
+          ],
           "description": "Get or set per-device config: --max-agents, --scheduler. Written to ~/.agents/devices/<name>/agents.yaml (works for any device — the devices/ tree syncs). Unset = default behavior.",
           "args": [
             {
@@ -6480,6 +6639,15 @@
               "negate": false
             },
             {
+              "flags": "--inherited",
+              "description": "also show user-level keys (e.g. interactive.host) that apply to this device",
+              "long": "--inherited",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
               "flags": "--json",
               "description": "output machine-readable JSON",
               "long": "--json",
@@ -6499,8 +6667,8 @@
               "negate": false
             }
           ],
-          "examples": "agents devices configure mac-mini --max-agents 4      # cap concurrent agents\n      agents devices configure mac-mini --scheduler off     # no routines firing there\n      agents devices configure mac-mini                     # print its current config\n      agents devices configure mac-mini --json              # machine-readable",
-          "notes": "Run it on any machine for any device: the value lands in\n      ~/.agents/devices/<name>/agents.yaml locally and reaches the device on the\n      next 'agents repo push/pull'. Unset keys keep today's behavior.\n      --scheduler takes effect when the daemon reloads or restarts on that\n      device ('agents routines start' / the reload a 'routines add' sends).\n      For the default browser profile use 'agents browser profiles set-default\n      <name>'; for free-form text use 'agents devices note'.",
+          "examples": "agents devices config mac-mini --max-agents 4         # cap concurrent agents\n      agents devices config mac-mini --scheduler off        # no routines firing there\n      agents devices config mac-mini                        # print its current config\n      agents devices config mac-mini --inherited            # include user-level keys\n      agents devices config mac-mini --json                 # machine-readable",
+          "notes": "Run it on any machine for any device: the value lands in\n      ~/.agents/devices/<name>/agents.yaml locally and reaches the device on the\n      next 'agents repo push/pull'. Unset keys keep today's behavior.\n      --scheduler takes effect when the daemon reloads or restarts on that\n      device ('agents routines start' / the reload a 'routines add' sends).\n      For the default browser profile use 'agents config set browser.profile\n      <name>'; for free-form text use 'agents devices note'.\n      User-level keys such as interactive.host live in ~/.agents/agents.yaml and\n      sync fleet-wide; use --inherited to see them in this device view.",
           "subcommands": []
         },
         {

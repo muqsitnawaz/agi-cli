@@ -269,6 +269,12 @@ export function listConfig(opts?: ConfigTarget): ConfigEntry[] {
   return CONFIG_KEYS.map((spec) => getConfigValue(spec.name, opts));
 }
 
+/** List user-scope config keys with their values. Used to show inherited settings
+ * in per-device views without implying those keys are device-local. */
+export function listUserConfig(): ConfigEntry[] {
+  return CONFIG_KEYS.filter((spec) => spec.scope === 'user').map((spec) => getConfigValue(spec.name));
+}
+
 // ─── Writes ───────────────────────────────────────────────────────────────────
 
 function setInMeta(spec: ConfigKeySpec, value: unknown): void {
@@ -361,7 +367,7 @@ export function assertSchedulerEnabled(): void {
   if (isSchedulerEnabled()) return;
   throw new Error(
     `The routines scheduler is disabled on this device (scheduler.enabled=false in ~/.agents/devices/${machineId()}/agents.yaml). ` +
-      `Re-enable with: agents devices configure ${machineId()} --scheduler on`,
+      `Re-enable with: agents config set devices.${machineId()}.scheduler on`,
   );
 }
 

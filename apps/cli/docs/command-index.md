@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_103 command groups · 581 commands._
+_104 command groups · 586 commands._
 
 ## accounts — Manage durable provider credentials
 
@@ -114,7 +114,7 @@ agents browser sessions                       Browse a profile's captured screen
 agents browser set                            Set browser emulation options
 agents browser set device <device-name>       Emulate a device (iPhone 14, iPad, MacBook Pro)
 agents browser set viewport <width> <height>  Set viewport size
-agents browser start                          Start a browser task. Pass --profile <name>; omit to use your configured default (`agents browser profiles set-default`), else auto-pick an installed Chromium-family browser.
+agents browser start                          Start a browser task. Pass --profile <name>; omit to use your configured default (`agents config set browser.profile <name>`), else auto-pick an installed Chromium-family browser.
 agents browser status                         Show running browser tasks
 agents browser stop                           Stop a browser task and close its tabs; with --profile, detach the whole profile (close browser + drop cached connection)
 agents browser stream                         Keep one process and daemon IPC socket open; read NDJSON requests from stdin and write NDJSON responses
@@ -185,6 +185,16 @@ agents computer stop         Deactivate the helper daemon — local launchd (mac
 agents computer type         Set a field value (--id) or paste at a coordinate (--x --y)
 agents computer type-text    Type an arbitrary unicode string into the focused field (focus first via click/focus)
 agents computer wait         Wait for a duration (--duration) or for an element (--id / --role/--label) to satisfy --until
+```
+
+## config — Unified config barrel: get, set, list, and unset agent run defaults, tier overrides, and device options.
+
+```
+agents config                    Unified config barrel: get, set, list, and unset agent run defaults, tier overrides, and device options.
+agents config get <key>          Get the current value of a config key
+agents config list               List configured config keys and their values
+agents config set <key> <value>  Set a config key
+agents config unset <key>        Unset a config key (restore default behavior)
 ```
 
 ## cost — Roll up $ cost and duration across local agent sessions
