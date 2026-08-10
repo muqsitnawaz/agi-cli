@@ -38,7 +38,7 @@ export type ForkSessionRequest =
   | { ok: false; reason: 'no_session' | 'no_agent' };
 
 export function strategyForForkAgent(agentKey: string): RunStrategy | undefined {
-  // A fork is balanced like every other launch (apps/factory/AGENTS.md § "Launch
+  // A fork is balanced like every other launch (apps/ext/AGENTS.md § "Launch
   // contract"). Only 'shell' — not an agent runner — carries no strategy.
   return isAgentRunner(agentKey) ? 'balanced' : undefined;
 }

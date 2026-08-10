@@ -213,7 +213,7 @@ if [ -z "\$(git -C "\$CACHE" branch -r --contains "\$SHA" 2>/dev/null)" ]; then
 fi
 git -C "\$CACHE" checkout --quiet --detach "\$SHA"
 
-cd "\$CACHE/apps/factory"
+cd "\$CACHE/apps/ext"
 bun install --silent
 (cd ui && bun install --silent)
 bash scripts/release.sh "\$VERSION" $flags --publish-phase

@@ -9,7 +9,7 @@ from one place.
 
 **Two main projects live here:** (a) the **agents CLI** — [`apps/cli`](apps/cli),
 the published `@phnx-labs/agents-cli` — and (b) the **CLI's VS Code extension,
-Factory** — [`apps/factory`](apps/factory). Everything else (`apps/ios`,
+Factory** — [`apps/ext`](apps/ext). Everything else (`apps/ios`,
 `native/computer-*`, `packages/*`) is a **helper app / library for one feature**,
 not a main project.
 
@@ -39,7 +39,7 @@ assets/ demo/ website/   Brand, launch demo, landing (repo-root, not shipped in 
 | Component | What it is | Read |
 |---|---|---|
 | [`apps/cli`](apps/cli) | The CLI — version mgmt, config sync, sessions, teams, cloud, browser, computer, secrets | [AGENTS.md](apps/cli/AGENTS.md) · [README.md](apps/cli/README.md) |
-| [`apps/factory`](apps/factory) | Factory VS Code extension — spawns agent terminals as tabs, Factory Floor dashboard, dispatch | [AGENTS.md](apps/factory/AGENTS.md) · [README.md](apps/factory/README.md) |
+| [`apps/ext`](apps/ext) | Factory VS Code extension — spawns agent terminals as tabs, Factory Floor dashboard, dispatch | [AGENTS.md](apps/ext/AGENTS.md) · [README.md](apps/ext/README.md) |
 | [`apps/ios`](apps/ios) | Fleet Cockpit — iOS/iPadOS control-plane app over the anchor (`agents serve --control`) | [AGENTS.md](apps/ios/AGENTS.md) · [README.md](apps/ios/README.md) |
 | [`native/computer-mac`](native/computer-mac) | macOS `agents computer` backend (Swift) | [AGENTS.md](native/computer-mac/AGENTS.md) · [README.md](native/computer-mac/README.md) |
 | [`native/computer-win`](native/computer-win) | Windows `agents computer` backend (C#/.NET) | [AGENTS.md](native/computer-win/AGENTS.md) · [README.md](native/computer-win/README.md) |
@@ -84,7 +84,7 @@ and [`architecture.md`](apps/cli/docs/architecture.md).
   (`agents hosts`); `-H/--host <name>` routes a command to any of them. This is the
   cross-device fabric under sessions, teams, run, and cloud.
 - **One engine, many consumers.** `apps/cli` owns the state — the session index, the
-  pid→id registry, `sessions`/`teams`/`run`/`cloud`, and the SSH fan-out. `apps/factory`
+  pid→id registry, `sessions`/`teams`/`run`/`cloud`, and the SSH fan-out. `apps/ext`
   is a **consumer**: the VS Code UI layer that shells out to
   `agents sessions --active --json`, holding no data models of its own — not a separate
   codebase. Fix a mechanism in the CLI and every consumer benefits.
@@ -158,7 +158,7 @@ one-off command in a PR.
 | CLI dev install | [`apps/cli/scripts/install.sh`](apps/cli/scripts/install.sh) | side-by-side dev build at `~/.local/agents-cli-dev`, exposed via `~/.local/bin/agents`; does not touch the registry install |
 | CLI tests | `bun run test:remote` (in `apps/cli`) | full vitest suite offloaded to a remote crabbox via [`sandbox.sh`](apps/cli/scripts/sandbox.sh) — the laptop-safe path |
 | CLI release | [`apps/cli/scripts/release.sh`](apps/cli/scripts/release.sh) `<version> [--apply]` | zero-config self-routing publish of `@phnx-labs/agents-cli` to npm: runnable from any fleet box with an empty environment — tests on a dynamic crabbox, PR + CI, then build/sign/notarize/publish on the `mac-mini` home base (the one hardcoded name); prints a `[n/6]` phase tracker. Legacy `@swarmify` shim built for reference, not published |
-| Factory build / release | [`apps/factory/scripts/build.sh`](apps/factory/scripts/build.sh) `<version>` · [`release.sh`](apps/factory/scripts/release.sh) `<x.y.z> [--confirm] [--host <name>] [--here]` | ships `swarmify.swarm-ext` to VS Code Marketplace + Open VSX (dry-run without `--confirm`). Self-routing like the CLI release: the marketplace PATs live in the `vs-marketplace` secrets bundle on one machine, and tokens never move between hosts, so invoking from a box without the bundle probes `zion` then `mac-mini` and re-runs the publish there against a clean clone of the same commit. `--host` pins the publish box, `--here` refuses to route |
+| Factory build / release | [`apps/ext/scripts/build.sh`](apps/ext/scripts/build.sh) `<version>` · [`release.sh`](apps/ext/scripts/release.sh) `<x.y.z> [--confirm] [--host <name>] [--here]` | ships `swarmify.swarm-ext` to VS Code Marketplace + Open VSX (dry-run without `--confirm`). Self-routing like the CLI release: the marketplace PATs live in the `vs-marketplace` secrets bundle on one machine, and tokens never move between hosts, so invoking from a box without the bundle probes `zion` then `mac-mini` and re-runs the publish there against a clean clone of the same commit. `--host` pins the publish box, `--here` refuses to route |
 | agents-dbg app release | [`scripts/release.sh`](scripts/release.sh) `<version> [--confirm]` | root — builds/signs/notarizes the debug Mac app, uploads the GitHub release, updates the Homebrew tap |
 | computer-mac build | [`native/computer-mac/scripts/build.sh`](native/computer-mac/scripts/build.sh) | Swift daemon |
 
@@ -208,7 +208,7 @@ absolute home paths before it lands. Never scatter scratch in `/tmp` or the repo
     Do not re-enable the trigger until #1767 is resolved.
 - **The default branch is untouchable.** Every change is a git worktree + PR — never
   edit or commit on `main`. Worktrees live under `.agents/worktrees/<slug>/`.
-- **VS Code publish identity is frozen.** `apps/factory` publishes as publisher
+- **VS Code publish identity is frozen.** `apps/ext` publishes as publisher
   `swarmify`, name `swarm-ext`, appId `com.swarmify.factory`, productName `Factory`.
   Never change these — it would orphan the Marketplace listing. The product is called
   **Factory**; the CLI is **agents-cli**. (There is no "Agency.Li" — that was a
@@ -285,7 +285,7 @@ the exception.
   soup where an object-in-path reads clearer, or ships a non-trivial tool on commander's
   default help instead of a workflow-first `setHelpSections` block.
 - **No second scheduler.** A PR that adds a timer, watcher, or polling loop in
-  `apps/factory` (or any UI surface) that *acts* — spawns, resumes, kills, injects,
+  `apps/ext` (or any UI surface) that *acts* — spawns, resumes, kills, injects,
   dispatches, rotates, fires a routine — rather than polling read-only state for
   rendering is a double-fire bug in waiting. Flag it with `file:line`. The action
   belongs in the CLI daemon or a CLI command; the UI may only render the state and wire

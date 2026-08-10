@@ -3,7 +3,7 @@
 // current UI can be seen/screenshotted without the VS Code extension host. Not
 // shipped (vite.settings.config.ts only inputs settings/index.html); a dev harness.
 //
-// Run:  cd apps/factory/ui && bunx vite --config vite.preview.config.ts
+// Run:  cd apps/ext/ui && bunx vite --config vite.preview.config.ts
 //   URL params:  ?view=agents|subtabs|feed|dispatch|sidebar|…  &  ?theme=dark|light
 //   Agents surface (cache-first proof): ?view=agents&stale=1  or  ?view=subtabs&center=agents
 //   Dispatch from cached hosts/targets: ?view=dispatch  or  ?view=agents&dispatch=1

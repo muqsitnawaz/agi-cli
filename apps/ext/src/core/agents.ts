@@ -239,7 +239,7 @@ export function wrapNativeAgentCommand(command: string, isShell: boolean): strin
   return `exec ${command}`;
 }
 
-// The launch contract (apps/factory/AGENTS.md § "Launch contract"): EVERY agent
+// The launch contract (apps/ext/AGENTS.md § "Launch contract"): EVERY agent
 // runner launches through `agents run <agent> --interactive --strategy balanced
 // --mode auto`, on this machine, an auto-picked host, or a picked host alike. The
 // only thing that is NOT a runner is 'shell' — a plain terminal, not an agent — so

@@ -95,7 +95,7 @@ See [01-version-management.md](01-version-management.md) for install and switchi
 agents-cli is two application-layer surfaces over one shared set of on-disk state.
 **`apps/cli`** (the `agents` / `ag` CLI) is the framework: it owns the SQLite session
 index, `sessions` / `teams` / `run` / `cloud`, the pid→id registry, the audit log,
-and the SSH fan-out to peers. **`apps/factory`** (the Factory VS Code extension) is a
+and the SSH fan-out to peers. **`apps/ext`** (the Factory VS Code extension) is a
 consumer: it spawns agent terminals and renders the Factory Floor, but for live state
 it shells out to `agents sessions --active --json` and reshapes the JSON — it holds no
 data models of its own. Fix a mechanism in the CLI and every consumer benefits. Full

@@ -67,11 +67,11 @@ else
 fi
 
 # --- Test 3: Structural soundness ------------------------------------------
-# Both invocation shapes should work: from repo root and from apps/factory/.
+# Both invocation shapes should work: from repo root and from apps/ext/.
 # Simulate the path resolution for both shapes.
 
-# Shape A: from repo root — BASH_SOURCE[0] = apps/factory/scripts/install.sh
-SIMULATED_SOURCE="$REPO_ROOT/apps/factory/scripts/install.sh"
+# Shape A: from repo root — BASH_SOURCE[0] = apps/ext/scripts/install.sh
+SIMULATED_SOURCE="$REPO_ROOT/apps/ext/scripts/install.sh"
 RESOLVED_DIR="$(cd "$(dirname "$SIMULATED_SOURCE")" && pwd)"
 if [ -f "$RESOLVED_DIR/activate.sh" ]; then
     pass "activate.sh reachable from repo-root invocation shape"
@@ -79,7 +79,7 @@ else
     fail "activate.sh NOT reachable from repo-root invocation (resolved: $RESOLVED_DIR)"
 fi
 
-# Shape B: from apps/factory/ — BASH_SOURCE[0] = scripts/install.sh
+# Shape B: from apps/ext/ — BASH_SOURCE[0] = scripts/install.sh
 SIMULATED_SOURCE="$FACTORY_ROOT/scripts/install.sh"
 RESOLVED_DIR="$(cd "$(dirname "$SIMULATED_SOURCE")" && pwd)"
 if [ -f "$RESOLVED_DIR/activate.sh" ]; then

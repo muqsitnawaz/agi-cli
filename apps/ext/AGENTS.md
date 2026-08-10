@@ -105,7 +105,7 @@ Rules for this package:
 The Factory Floor feed + Dispatch panel are a React webview (`ui/settings`, top component `UnifiedAgentsPane.tsx`). To SEE and verify UI changes, do NOT install the packaged `.vsix` and drive VS Code via accessibility automation (`osascript` / `agents computer`) to open the dashboard — that steals your focus and is slow. Use the committed preview harness, which renders the real components with representative data in a plain browser page you can screenshot:
 
 ```
-cd apps/factory/ui && bun run dev
+cd apps/ext/ui && bun run dev
 # open http://localhost:5173/settings/preview/?view=feed   (or ?view=dispatch)
 #   add &theme=dark  or  &theme=light
 ```
@@ -116,7 +116,7 @@ Gotchas:
 - A built `preview-dist/index.html` opened over `file://` renders BLANK (Chromium CORS-blocks ES-module `<script src>` over file://). Serve over http (`bun run dev`), or inline the built JS/CSS into one self-contained HTML.
 - To screenshot a browser window on another macOS Space, `screencapture -o` grabs the wrong Space; use a window-targeted capture (e.g. `agents computer screenshot --bundle <id> --window-id <id>`), which is focus-safe.
 
-For logic-only changes, `bun test` in `apps/factory/` runs the `mission-control/*.test.ts` suites (floorModel, floorAdapter, dispatch, savedViews, etc.).
+For logic-only changes, `bun test` in `apps/ext/` runs the `mission-control/*.test.ts` suites (floorModel, floorAdapter, dispatch, savedViews, etc.).
 
 ## Testing extension-host logic
 
@@ -128,7 +128,7 @@ Extension-host behavior lives in `src/vscode/` and depends on the real `vscode` 
 
 ```bash
 # Run on the target host (e.g. mac-mini), or wrap with `agents ssh mac-mini "..."`
-cd apps/factory
+cd apps/ext
 bash scripts/build.sh <version>
 bash scripts/install.sh <version>   # installs to Code/Cursor/Codium + reloads via activate.sh
 
@@ -159,15 +159,15 @@ Factory's auto-host selection reads per-device enable/prefer flags managed by th
 
 Source of truth:
 - Persistence + CLI commands: `apps/cli/src/lib/devices/registry.ts` (`loadAutoLaunchPreferences`, `setAutoLaunchEnabled`, `setAutoLaunchPreferred`) and `apps/cli/src/commands/ssh.ts`.
-- Extension consumption: `apps/factory/src/core/deviceAutoLaunch.ts`.
-- Filtering/bias applied: `apps/factory/src/core/launchHistory.ts` (`pickCachedLaunchHost`) and `apps/factory/src/vscode/extension.ts` (`resolveCachedAutoHost`, `resolveBalancedHost`).
+- Extension consumption: `apps/ext/src/core/deviceAutoLaunch.ts`.
+- Filtering/bias applied: `apps/ext/src/core/launchHistory.ts` (`pickCachedLaunchHost`) and `apps/ext/src/vscode/extension.ts` (`resolveCachedAutoHost`, `resolveBalancedHost`).
 
 ## Releasing to the Marketplace
 
 Use `scripts/release.sh` from any fleet box. It routes itself to the machine that holds the `vs-marketplace` secrets bundle (currently `zion`) and publishes from a clean clone of the commit.
 
 ```bash
-cd apps/factory
+cd apps/ext
 bash scripts/release.sh 0.9.xxx --confirm
 ```
 

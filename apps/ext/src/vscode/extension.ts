@@ -840,7 +840,7 @@ async function launchAgent(context: vscode.ExtensionContext, opts: LaunchAgentOp
     return;
   }
   // Balanced account/version rotation for every agent runner, always — the launch
-  // contract has no per-harness exception (apps/factory/AGENTS.md). Shell is not a
+  // contract has no per-harness exception (apps/ext/AGENTS.md). Shell is not a
   // runner, so it carries no strategy (it never routes through `agents run`).
   const strategy: RunStrategy | undefined = isAgentRunner(agentKey) ? 'balanced' : undefined;
 
@@ -2249,7 +2249,7 @@ async function openSingleAgent(
   // picked-host launches alike — so `--strategy balanced --mode auto` applies
   // uniformly (grok/kimi/droid included; they used to launch as raw binaries with
   // no rotation). Shell is the only non-runner and keeps its raw command. This is
-  // the launch contract in apps/factory/AGENTS.md; there is no per-harness list.
+  // the launch contract in apps/ext/AGENTS.md; there is no per-harness list.
   if (agentKey && isAgentRunner(agentKey)) {
     // Mint Claude's session id up front for LOCAL and REMOTE alike. The id is
     // what every downstream surface keys off: the status bar, the auto-label

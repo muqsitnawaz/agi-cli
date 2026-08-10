@@ -309,7 +309,7 @@ describe('planTextToSteps', () => {
   });
 });
 
-// The launch contract (apps/factory/AGENTS.md § "Launch contract"): every agent
+// The launch contract (apps/ext/AGENTS.md § "Launch contract"): every agent
 // runner launches through `agents run <agent> --interactive --strategy balanced
 // --mode auto`, on local / auto-host / picked-host alike. Shell is the sole
 // non-runner. These tests pin that invariant — there is no per-harness allowlist.
@@ -341,7 +341,7 @@ describe('launch contract — every runner is balanced', () => {
       )).toBe(`agents run ${key} --interactive --strategy balanced --mode auto`);
       // Unpinned, no host, not local (QuickLaunch balanced) — CLI affinity-picks
       // the device via --device auto. (New X (Auto) resolves a concrete --host
-      // itself instead; see launchAgent + apps/factory/AGENTS.md launch contract.)
+      // itself instead; see launchAgent + apps/ext/AGENTS.md launch contract.)
       expect(buildAgentLaunchCommand(
         key, null, undefined, undefined, undefined, 'balanced', undefined, {},
       )).toBe(`agents run ${key} --interactive --device auto --strategy balanced --mode auto`);

@@ -18,7 +18,7 @@ writing; treat them as pointers, not guarantees.
   state and every mechanism: the SQLite transcript index, `sessions` / `teams` /
   `run` / `cloud`, the CLI-side pid→id registry, the audit log, and the SSH fan-out
   to peer machines.
-- **`apps/factory` — the Factory VS Code extension. A consumer.** It spawns agent
+- **`apps/ext` — the Factory VS Code extension. A consumer.** It spawns agent
   terminals as tabs and renders the Factory Floor dashboard, but it holds **no data
   models of its own** beyond the live-session state file. For "what's running", it
   shells out to the CLI (`agents sessions --active --json`) and reshapes the JSON.
@@ -27,7 +27,7 @@ writing; treat them as pointers, not guarantees.
 flowchart LR
   subgraph machine["one machine"]
     CLI["apps/cli — the agents CLI<br/><b>the framework</b><br/>sessions index · teams · run · cloud<br/>pid-registry · events.jsonl · SSH fan-out"]
-    FAC["apps/factory — Factory extension<br/><b>a consumer</b><br/>terminal tabs · Factory Floor<br/>file-watcher · watchdog socket"]
+    FAC["apps/ext — Factory extension<br/><b>a consumer</b><br/>terminal tabs · Factory Floor<br/>file-watcher · watchdog socket"]
     CLI -- "exposes: agents sessions --active --json" --> FAC
   end
   CLI --> DB[("sessions.db<br/>SQLite + FTS5")]
@@ -41,7 +41,7 @@ how live state is computed (or cached) benefits every consumer — a terminal, t
 extension, another machine — at once. The extension is a thin reshaping layer.
 
 > The Factory extension is a **separate product** with its own publish identity
-> (publisher `swarmify`, name `swarm-ext`). See [`apps/factory/AGENTS.md`](../../factory/AGENTS.md).
+> (publisher `swarmify`, name `swarm-ext`). See [`apps/ext/AGENTS.md`](../../factory/AGENTS.md).
 
 ---
 
@@ -118,7 +118,7 @@ sequenceDiagram
   terminal, which the CLI never launched — for harnesses that expose a hook.
 
 **Reader split:** the CLI reads `by-pid/`; the **extension** reads `sessions/`
-(`apps/factory/src/core/liveSession.ts`). Same pid→id data, two writers, two readers.
+(`apps/ext/src/core/liveSession.ts`). Same pid→id data, two writers, two readers.
 The join key already exists — the hook records `terminal_id` / `launch_id` from the
 env the launcher sets (`AGENT_TERMINAL_ID`, `AGENT_LAUNCH_ID`) — so the two files can
 be merged behind one path later; today both exist because neither subsumes the other
@@ -229,7 +229,7 @@ of each live transcript, infers `working` / `waiting_input` / `idle`, and comput
 tokens/sec ([`src/lib/session/active.ts`](../src/lib/session/active.ts),
 `readSessionTailWithRaw` → `inferSessionState` → `computeTokPerSec`). There is no
 resident cache: each call pays the recompute, and the Factory extension polls it
-(local sessions ~3s, remote peers ~45s, `apps/factory/ui/.../UnifiedAgentsPane.tsx`).
+(local sessions ~3s, remote peers ~45s, `apps/ext/ui/.../UnifiedAgentsPane.tsx`).
 Other machines are reached by running the same command over SSH per peer.
 
 ### Coarse status is honest, not guessed

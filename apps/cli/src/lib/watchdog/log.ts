@@ -6,7 +6,7 @@
  * by the retired extension-side watchdog; now the always-on CLI watchdog owns it.
  *
  * The event SHAPE here is a deliberate, verbatim replica of the reader in
- * apps/factory/src/core/watchdogLog.ts (WatchdogEvent / WatchdogEventKind /
+ * apps/ext/src/core/watchdogLog.ts (WatchdogEvent / WatchdogEventKind /
  * WATCHDOG_LOG_PATH / the trim cap). The repo forbids cross-app imports
  * (CLAUDE.md repo map), so the two files are kept in sync by hand — a change to
  * the Factory reader's shape must be mirrored here. There is no import between
@@ -17,7 +17,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { withFileLock, atomicWriteFileSync, ensureLockTarget } from '../fs-atomic.js';
 
-/** Same path the Factory reader pulls (apps/factory/src/core/watchdogLog.ts). */
+/** Same path the Factory reader pulls (apps/ext/src/core/watchdogLog.ts). */
 export const WATCHDOG_LOG_PATH = path.join(os.homedir(), '.agents', '.cache', 'logs', 'watchdog.log');
 
 /** Kinds the Factory reader accepts. Keep in lockstep with watchdogLog.ts. */
