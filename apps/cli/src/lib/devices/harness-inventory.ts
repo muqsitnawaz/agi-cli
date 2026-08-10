@@ -215,7 +215,8 @@ export function groupByAccount(rows: HarnessRow[]): AccountGroup[] {
     // miss), else the first member with any real usage data, else the first row.
     const withData = members.filter((m) => m.quota.status !== null);
     const rep =
-      withData.find((m) => m.quota.status === 'rate_limited') ?? withData[0] ?? members[0];
+      withData.find((m) => m.quota.status === 'out_of_credits' || m.quota.status === 'rate_limited') ??
+      withData[0] ?? members[0];
     const quota = rep.quota;
     const { ready, reason } = computeReady(signedIn, quota);
     return {
