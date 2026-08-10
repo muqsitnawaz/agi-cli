@@ -65,6 +65,19 @@ describe('device doc carries only machine-local pins (config moved to the centra
     const fleet = readMeta().fleet;
     expect((fleet?.devices as Record<string, { config?: Record<string, unknown> }>).testbox.config).toEqual({ maxAgents: 4 });
   });
+
+  it('preserves this device discovery decision across unrelated meta writes', async () => {
+    fs.mkdirSync(path.dirname(devicePath()), { recursive: true });
+    fs.writeFileSync(devicePath(), 'discovery:\n  status: approved\nconfig:\n  maxAgents: 3\n');
+    const { readMeta, updateMeta } = await freshState();
+
+    expect(readMeta().deviceDiscovery).toEqual({ status: 'approved' });
+    updateMeta((m) => ({ ...m, defaultBrowserProfile: 'comet-local' }));
+
+    const device = fs.readFileSync(devicePath(), 'utf-8');
+    expect(device).toContain('status: approved');
+    expect(device).toContain('maxAgents: 3');
+  });
 });
 
 describe('reading state never writes a tracked agents.yaml (RUSH-1925)', () => {
