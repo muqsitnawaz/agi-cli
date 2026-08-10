@@ -177,7 +177,7 @@ const USER_PROMPTCUTS_FILE = path.join(USER_AGENTS_DIR, 'hooks', 'promptcuts.yam
  * Header prepended to every agents.yaml the CLI writes (central and per-device
  * docs). Carries the yaml-language-server schema hint so editors validate the
  * file against `schema/agents-yaml.schema.json`. Exported so
- * `lib/device-config.ts` writes a sibling device's doc with the same header.
+ * `lib/devices/config-migration.ts` rewrites a device doc with the same header.
  */
 export const META_HEADER = `# agents-cli metadata
 # Auto-generated - do not edit manually

@@ -132,7 +132,7 @@ import { registerCommandGroups, setHelpSections } from '../lib/help.js';
 
 /** One-line summary of a device for `list`. `isSelf` marks the machine this
  * command is running on so it stands out from the rest of the tailnet.
- * `isInteractive` marks the configured interactive host (`devices set-interactive`). */
+ * `isInteractive` marks the configured interactive host (`devices config <name> interactive.host`). */
 function deviceSummary(d: DeviceProfile, isSelf = false, stats?: DeviceStats, isInteractive = false): string {
   d = resolveDeviceProfile(d);
   const addr = hostNameFor(d) ?? chalk.gray('no address');
