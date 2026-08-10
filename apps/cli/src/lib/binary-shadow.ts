@@ -18,10 +18,29 @@ export interface AgentsBinaryShadow {
   version?: string;
 }
 
-/** Realpath of `p`, or `p` itself if it cannot be resolved. */
-function safeRealpath(p: string): string {
-  try { return fs.realpathSync(p); }
-  catch { return p; }
+/**
+ * Compare two filesystem paths for identity, resolving symlinks and (on
+ * Windows) 8.3 short-name vs long-name divergence via the OS realpath.
+ * Mirrors the helper in state.ts — TEMP on GHA Windows is `RUNNER~1` while
+ * `where` returns `runneradmin`.
+ */
+function isSamePath(a: string, b: string): boolean {
+  try {
+    return fs.realpathSync.native(a) === fs.realpathSync.native(b);
+  } catch {
+    const norm = (p: string) =>
+      process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p);
+    return norm(a) === norm(b);
+  }
+}
+
+/** Realpath key for de-dupe; falls back to a case-folded resolve. */
+function pathKey(p: string): string {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    return process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p);
+  }
 }
 
 /**
@@ -39,15 +58,14 @@ export function detectAgentsBinaryShadows(
   currentBin: string = getAgentsBinPath(),
   extraDirs: readonly string[] = defaultWellKnownDirs(),
 ): AgentsBinaryShadow[] {
-  const currentReal = safeRealpath(currentBin);
-
   const seen = new Set<string>();
   const shadows: AgentsBinaryShadow[] = [];
 
   function addIfShadow(candidate: string): void {
-    if (seen.has(candidate)) return;
-    seen.add(candidate);
-    if (safeRealpath(candidate) === currentReal) return;
+    const key = pathKey(candidate);
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (isSamePath(candidate, currentBin)) return;
     let version: string | undefined;
     try {
       version = execFileSync(candidate, ['--version'], { encoding: 'utf-8', env: process.env })
@@ -64,7 +82,7 @@ export function detectAgentsBinaryShadows(
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean)[0];
-    if (pathAgents && safeRealpath(pathAgents) !== currentReal) {
+    if (pathAgents && !isSamePath(pathAgents, currentBin)) {
       addIfShadow(pathAgents);
     }
   } catch { /* no `agents` resolved on PATH */ }
