@@ -69,7 +69,6 @@ import {
 } from '../core/utils';
 import { generateLabelWithLLM } from '../core/labelgen';
 import { readClaudeSessionName, readClaudeSessionNameInfo } from '../core/sessionName';
-import { resolveTerminalCwd, tryReleaseWorktreeForTerminal } from '../core/worktree';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { DEFAULT_DISPLAY_PREFERENCES } from '../core/settings';
@@ -1589,17 +1588,6 @@ export async function activate(context: vscode.ExtensionContext) {
           });
         }
 
-        // Lazy release of the per-terminal worktree (no-op unless
-        // agents.worktreePerTerminal is enabled). Safe-by-default: only removes
-        // when clean and merged; otherwise leaves the worktree for the user to
-        // inspect or for `agents worktree prune` to revisit later.
-        if (entry?.id) {
-          const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-          if (workspaceFolder) {
-            tryReleaseWorktreeForTerminal(workspaceFolder, entry.id);
-          }
-        }
-
         terminals.unregister(terminal);
         updateActiveAgentContextKey(vscode.window.activeTerminal, context.extensionPath);
       })();
@@ -1758,17 +1746,13 @@ async function openSingleAgent(
   // Handle session ID for supported agent types
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
 
-  // Generate the terminal-id up front so we can provision a per-terminal worktree
-  // (opt-in via agents.worktreePerTerminal) before the terminal is created.
   const terminalId = terminals.nextId(agentConfig.prefix);
-  const { cwd, isolated: worktreeIsolated } = await resolveTerminalCwd(workspaceFolder, terminalId);
+  const cwd = workspaceFolder;
 
   // If the workspace folder is a bound directory of a defined project, let the
   // CLI resolve `--project <slug>` to a cwd itself (locally or on `host`)
-  // instead of Factory computing/forwarding one by hand. Skipped for a
-  // worktree-isolated terminal — that cwd is a fresh, unbound worktree, not the
-  // project's own checkout.
-  const projectSlug = worktreeIsolated ? undefined : await resolveProjectForCwd(workspaceFolder);
+  // instead of Factory computing/forwarding one by hand.
+  const projectSlug = await resolveProjectForCwd(workspaceFolder);
 
   let sessionId: string | null = null;
 
@@ -1835,7 +1819,6 @@ async function openSingleAgent(
     location: editorLocation,
     name: title,
     env: buildAgentTerminalEnv(terminalId, sessionId, cwd, undefined, { scrubSensitive: agentKey !== 'shell', kind: agentKey === 'shell' ? 'shell' : 'agent' }),
-    cwd: worktreeIsolated ? cwd : undefined,
     isTransient: true
   });
 
@@ -3213,11 +3196,8 @@ export async function openSingleAgentWithQueue(
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
   const terminalId = terminals.nextId(agentConfig.prefix);
   // An explicit cwd (task dispatch resolved the task's repo to a local clone)
-  // pins the terminal there; otherwise the workspace folder + optional
-  // worktree isolation applies as before.
-  const { cwd, isolated: worktreeIsolated } = opts?.cwd
-    ? { cwd: opts.cwd, isolated: false }
-    : await resolveTerminalCwd(workspaceFolder, terminalId);
+  // pins the terminal there; otherwise use the workspace folder.
+  const cwd = opts?.cwd ?? workspaceFolder;
 
   // Determine agent key and handle session ID
   const builtInDef = getBuiltInByPrefix(agentConfig.prefix);
@@ -3266,7 +3246,7 @@ export async function openSingleAgentWithQueue(
     location: editorLocation,
     name: title,
     env: buildAgentTerminalEnv(terminalId, sessionId, cwd),
-    cwd: worktreeIsolated || opts?.cwd ? cwd : undefined,
+    cwd: opts?.cwd ? cwd : undefined,
     isTransient: true
   });
 
