@@ -18,25 +18,30 @@ export interface AgentsBinaryShadow {
   version?: string;
 }
 
-/** Realpath of `p`, or `p` itself if it cannot be resolved. */
-function safeRealpath(p: string): string {
-  try { return fs.realpathSync(p); }
-  catch { return p; }
-}
-
 /** Whether two path spellings identify the same file. */
 function sameFile(a: string, b: string): boolean {
   try {
+    if (fs.realpathSync.native(a) === fs.realpathSync.native(b)) return true;
+  } catch { /* compare file identity and normalized spellings below */ }
+
+  try {
     const aStat = fs.statSync(a);
     const bStat = fs.statSync(b);
-    if (aStat.dev === bStat.dev && aStat.ino === bStat.ino) return true;
-  } catch { /* compare their resolved path spellings below */ }
+    if (aStat.ino !== 0 && aStat.dev === bStat.dev && aStat.ino === bStat.ino) return true;
+  } catch { /* compare normalized spellings below */ }
 
-  const aReal = safeRealpath(a);
-  const bReal = safeRealpath(b);
   return process.platform === 'win32'
-    ? aReal.toLowerCase() === bReal.toLowerCase()
-    : aReal === bReal;
+    ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase()
+    : path.resolve(a) === path.resolve(b);
+}
+
+/** Stable de-duplication key for a candidate path. */
+function pathKey(candidate: string): string {
+  try { return fs.realpathSync.native(candidate); }
+  catch {
+    const resolved = path.resolve(candidate);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  }
 }
 
 /**
@@ -54,15 +59,14 @@ export function detectAgentsBinaryShadows(
   currentBin: string = getAgentsBinPath(),
   extraDirs: readonly string[] = defaultWellKnownDirs(),
 ): AgentsBinaryShadow[] {
-  const currentReal = safeRealpath(currentBin);
-
   const seen = new Set<string>();
   const shadows: AgentsBinaryShadow[] = [];
 
   function addIfShadow(candidate: string): void {
-    if (seen.has(candidate)) return;
-    seen.add(candidate);
-    if (sameFile(candidate, currentReal)) return;
+    const key = pathKey(candidate);
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (sameFile(candidate, currentBin)) return;
     let version: string | undefined;
     try {
       version = execFileSync(candidate, ['--version'], { encoding: 'utf-8', env: process.env })
@@ -79,7 +83,7 @@ export function detectAgentsBinaryShadows(
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean)[0];
-    if (pathAgents && !sameFile(pathAgents, currentReal)) {
+    if (pathAgents && !sameFile(pathAgents, currentBin)) {
       addIfShadow(pathAgents);
     }
   } catch { /* no `agents` resolved on PATH */ }
