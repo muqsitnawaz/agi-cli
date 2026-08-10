@@ -7,8 +7,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { AgentId } from './types.js';
 import { AGENTS, listInstalledMcpsWithScope } from './agents.js';
-import { listInstalledCommandsWithScope } from './commands.js';
-import { listInstalledSkillsWithScope, type SkillParseError } from './skills.js';
+import { listInstalledCommandsWithScope, parseCommandMetadata } from './commands.js';
+import { listInstalledSkillsWithScope, parseSkillMetadata, type SkillParseError } from './skills.js';
 import { listOnDiskHooks } from './resource-inventory.js';
 import { listInstalledInstructionsWithScope } from './rules/rules.js';
 import { getEffectiveHome } from './versions.js';
@@ -66,14 +66,50 @@ export interface ResolvedResource {
    * repo (or has no commits).
    */
   readonly snapshotSha: string | undefined;
+  /**
+   * Alternate names this resource declares in its frontmatter `aliases:`, which
+   * {@link resolveResource} matches in addition to the canonical name. Lazily
+   * read from disk on first access and memoized, so listing resources never pays
+   * for it unless a caller inspects an alias. `undefined` when the resource
+   * declares none (or for a kind that doesn't support aliases — only `skills` and
+   * `commands` do), mirroring {@link snapshotSha} so a strict `toEqual` on a
+   * ResolvedResource ignores the absent field.
+   */
+  readonly aliases: string[] | undefined;
 }
 
-/** Build a ResolvedResource with a lazy, memoized `snapshotSha` getter. */
-function withProvenance(base: { name: string; path: string; source: string; repoRoot: string }): ResolvedResource {
+/**
+ * The declared frontmatter `aliases:` of a single resource, or `[]` for a kind
+ * that doesn't support aliases. Only `skills` (SKILL.md) and `commands` carry
+ * them today. `resourcePath` is the skill directory or the command file.
+ */
+export function resourceAliases(kind: ResourceKind, resourcePath: string): string[] {
+  if (kind === 'skills') return parseSkillMetadata(resourcePath)?.aliases ?? [];
+  if (kind === 'commands') return parseCommandMetadata(resourcePath)?.aliases ?? [];
+  return [];
+}
+
+/** Build a ResolvedResource with lazy, memoized `snapshotSha` and `aliases` getters. */
+function withProvenance(
+  base: { name: string; path: string; source: string; repoRoot: string },
+  kind: ResourceKind,
+): ResolvedResource {
+  let aliasesComputed = false;
+  let aliasesCache: string[] | undefined;
   return {
     ...base,
     get snapshotSha() {
       return resolveSnapshotSha(base.repoRoot);
+    },
+    get aliases() {
+      if (!aliasesComputed) {
+        const found = resourceAliases(kind, base.path);
+        // Undefined (not []) when none, so a strict toEqual on a ResolvedResource
+        // ignores it — the same convention snapshotSha uses.
+        aliasesCache = found.length > 0 ? found : undefined;
+        aliasesComputed = true;
+      }
+      return aliasesCache;
     },
   };
 }
@@ -154,7 +190,7 @@ export function resolveResource(
     const exactPath = path.join(dir, name);
     if (fs.existsSync(exactPath)) {
       if (resourceIsActive(kind, name, source)) {
-        return withProvenance({ name, path: exactPath, source, repoRoot });
+        return withProvenance({ name, path: exactPath, source, repoRoot }, kind);
       }
       continue;
     }
@@ -166,9 +202,36 @@ export function resolveResource(
       const withExt = exactPath + ext;
       if (fs.existsSync(withExt)) {
         if (resourceIsActive(kind, name, source)) {
-          return withProvenance({ name, path: withExt, source, repoRoot });
+          return withProvenance({ name, path: withExt, source, repoRoot }, kind);
         }
         continue;
+      }
+    }
+  }
+
+  // Alias fallback (skills/commands only). A resource may declare `aliases:` in
+  // its frontmatter; match `name` against those AFTER every layer's canonical
+  // lookup above has missed, so a canonical resource named `name` always wins a
+  // collision regardless of layer. Layer precedence still applies among aliases,
+  // and entries are sorted so a same-layer alias collision resolves deterministically.
+  if (kind === 'skills' || kind === 'commands') {
+    for (const [dir, source, repoRoot] of candidates) {
+      if (!fs.existsSync(dir)) continue;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+        if (entry.name.startsWith('.')) continue;
+        const rawName = entry.name.replace(/\.(md|yaml|yml)$/, '');
+        if (isDirectoryDoc(kind, rawName)) continue;
+        const resourcePath = path.join(dir, entry.name);
+        if (!resourceAliases(kind, resourcePath).includes(name)) continue;
+        if (!resourceIsActive(kind, rawName, source)) continue;
+        // Resolve to the canonical resource (its real name), not the alias.
+        return withProvenance({ name: rawName, path: resourcePath, source, repoRoot }, kind);
       }
     }
   }
@@ -249,7 +312,7 @@ export function listResources(
             path: full,
             source,
             repoRoot,
-          }));
+          }, kind));
           continue;
         }
         if (!stat.isDirectory() || HOOK_GROUP_SKIP.has(name)) continue;
@@ -282,7 +345,7 @@ export function listResources(
               path: path.join(full, script),
               source,
               repoRoot,
-            }));
+            }, kind));
           }
         } else {
           // Fixture-only directory bundle (hooks/tests/fixtures/…).
@@ -294,7 +357,7 @@ export function listResources(
             path: full,
             source,
             repoRoot,
-          }));
+          }, kind));
         }
       }
     }
@@ -324,7 +387,7 @@ export function listResources(
         path: path.join(dir, entry.name),
         source,
         repoRoot,
-      }));
+      }, kind));
     }
   }
 
