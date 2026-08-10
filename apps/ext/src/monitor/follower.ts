@@ -25,8 +25,6 @@ import {
   MONITOR_OP,
   ReportTuplesAck,
   ReportTuplesRequest,
-  SnapshotWatch,
-  SnapshotWatchRequest,
   TerminalTuple,
 } from './protocol';
 
@@ -110,7 +108,7 @@ export class MonitorFollower<T> {
   /**
    * Subscribe to EVERY raw broadcast event (readiness/session/etc.), not just
    * resolved tuple snapshots. The wiring layer uses this to route the migrated
-   * facts (#68, #69) into terminalReadiness / sessionTracker. Returns an
+   * readiness and CLI session-stream facts into their presentation stores. Returns an
    * unsubscribe function.
    */
   onMonitorEvent(listener: (event: MonitorEvent) => void): () => void {
@@ -129,28 +127,6 @@ export class MonitorFollower<T> {
       return true;
     } catch (err) {
       console.error('[MONITOR] armAgent failed:', err);
-      return false;
-    }
-  }
-
-  /**
-   * Replace this window's panel-snapshot watch slice on the monitor (#71). The
-   * leader computes git/worktree/usage/teams once and broadcasts a `panel-snapshot`
-   * fact this window renders from. Returns false (rather than throwing) while
-   * disconnected so the caller keeps computing the snapshot locally.
-   */
-  async setSnapshotWatches(watches: SnapshotWatch[]): Promise<boolean> {
-    if (!this.client.connected) return false;
-    const request: SnapshotWatchRequest = {
-      op: MONITOR_OP.snapshotWatch,
-      windowId: this.windowId,
-      watches,
-    };
-    try {
-      await this.client.request(request);
-      return true;
-    } catch (err) {
-      console.error('[MONITOR] setSnapshotWatches failed:', err);
       return false;
     }
   }

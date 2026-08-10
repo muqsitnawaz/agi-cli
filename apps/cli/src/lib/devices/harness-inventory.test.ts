@@ -21,15 +21,27 @@ function snapshot(windows: UsageWindow[], source: 'live' | 'last_seen' = 'live')
   return { source, sourceLabel: source, capturedAt: null, windows };
 }
 
+function quota(status: QuotaSummary['status'], usedPercent: number | null, stale = false): QuotaSummary {
+  return {
+    status,
+    verdict: status ?? 'unavailable',
+    usedPercent,
+    stale,
+    capturedAt: null,
+    resetsAt: null,
+    unavailableReason: status ? null : 'usage unavailable',
+  };
+}
+
 /** A HarnessRow with sane defaults, overridable per test. */
 function row(overrides: Partial<HarnessRow> = {}): HarnessRow {
-  const quota: QuotaSummary = overrides.quota ?? { status: 'available', usedPercent: 10, stale: false };
+  const quotaValue: QuotaSummary = overrides.quota ?? quota('available', 10);
   return {
     agent: 'claude',
     version: '1.0.0',
     account: 'a@ex.com',
     signedIn: true,
-    quota,
+    quota: quotaValue,
     ready: true,
     ...overrides,
   };
@@ -37,8 +49,8 @@ function row(overrides: Partial<HarnessRow> = {}): HarnessRow {
 
 describe('summarizeQuota', () => {
   it('returns null status and no percent when there is no snapshot', () => {
-    expect(summarizeQuota(null)).toEqual({ status: null, usedPercent: null, stale: false });
-    expect(summarizeQuota(snapshot([]))).toEqual({ status: null, usedPercent: null, stale: false });
+    expect(summarizeQuota(null)).toEqual(quota(null, null));
+    expect(summarizeQuota(snapshot([]))).toEqual(quota(null, null));
   });
 
   it('takes the highest utilization across blocking windows', () => {
@@ -74,35 +86,73 @@ describe('summarizeQuota', () => {
     expect(q.status).toBe('available');
     expect(q.usedPercent).toBe(99);
   });
+
+  it('exposes verdict, capture time, earliest reset, and no unavailable reason', () => {
+    const capturedAt = new Date('2026-08-10T10:00:00.000Z');
+    const later = new Date('2026-08-11T10:00:00.000Z');
+    const earlier = new Date('2026-08-10T12:00:00.000Z');
+    const snap = snapshot([
+      { ...win('session', 20), resetsAt: later },
+      { ...win('week', 40), resetsAt: earlier },
+    ]);
+    snap.capturedAt = capturedAt;
+    expect(summarizeQuota(snap)).toMatchObject({
+      verdict: 'available',
+      capturedAt: capturedAt.toISOString(),
+      resetsAt: earlier.toISOString(),
+      unavailableReason: null,
+    });
+  });
+
+  it('preserves account-level out_of_credits without a usage snapshot', () => {
+    expect(summarizeQuota(null, null, 'out_of_credits')).toEqual({
+      ...quota('out_of_credits', null),
+      unavailableReason: null,
+    });
+  });
+
+  it('returns an explicit provider error when quota is unavailable', () => {
+    expect(summarizeQuota(null, 'provider timed out')).toMatchObject({
+      verdict: 'unavailable',
+      unavailableReason: 'provider timed out',
+    });
+  });
 });
 
 describe('computeReady', () => {
   it('is not ready and reasons "signed out" when signed out', () => {
-    expect(computeReady(false, { status: null, usedPercent: null, stale: false })).toEqual({
+    expect(computeReady(false, quota(null, null))).toEqual({
       ready: false,
       reason: 'signed out',
     });
   });
 
   it('is not ready and reasons "rate-limited" when throttled', () => {
-    expect(computeReady(true, { status: 'rate_limited', usedPercent: 100, stale: false })).toEqual({
+    expect(computeReady(true, quota('rate_limited', 100))).toEqual({
       ready: false,
       reason: 'rate-limited',
     });
   });
 
+  it('is not ready when the account is out of credits', () => {
+    expect(computeReady(true, quota('out_of_credits', null))).toEqual({
+      ready: false,
+      reason: 'out of credits',
+    });
+  });
+
   it('is ready when signed in and not throttled — even with no quota data', () => {
-    expect(computeReady(true, { status: null, usedPercent: null, stale: false })).toEqual({ ready: true });
-    expect(computeReady(true, { status: 'available', usedPercent: 30, stale: false })).toEqual({ ready: true });
+    expect(computeReady(true, quota(null, null))).toEqual({ ready: true });
+    expect(computeReady(true, quota('available', 30))).toEqual({ ready: true });
   });
 });
 
 describe('formatQuota', () => {
   it('renders limited / percent / dash, marking cached with *', () => {
-    expect(formatQuota({ status: 'rate_limited', usedPercent: 100, stale: false })).toBe('limited');
-    expect(formatQuota({ status: 'available', usedPercent: 42, stale: false })).toBe('42%');
-    expect(formatQuota({ status: 'available', usedPercent: 42, stale: true })).toBe('42%*');
-    expect(formatQuota({ status: null, usedPercent: null, stale: false })).toBe('—');
+    expect(formatQuota(quota('rate_limited', 100))).toBe('limited');
+    expect(formatQuota(quota('available', 42))).toBe('42%');
+    expect(formatQuota(quota('available', 42, true))).toBe('42%*');
+    expect(formatQuota(quota(null, null))).toBe('—');
   });
 });
 
@@ -133,8 +183,8 @@ describe('groupByAccount', () => {
 
   it('surfaces a throttled member so a rate-limit is never hidden by an available sibling', () => {
     const groups = groupByAccount([
-      row({ agent: 'droid', version: '1', account: 'x@ex.com', quota: { status: 'available', usedPercent: 5, stale: false } }),
-      row({ agent: 'droid', version: '2', account: 'x@ex.com', quota: { status: 'rate_limited', usedPercent: 100, stale: false }, ready: false, reason: 'rate-limited' }),
+      row({ agent: 'droid', version: '1', account: 'x@ex.com', quota: quota('available', 5) }),
+      row({ agent: 'droid', version: '2', account: 'x@ex.com', quota: quota('rate_limited', 100), ready: false, reason: 'rate-limited' }),
     ]);
     expect(groups[0].quota.status).toBe('rate_limited');
     expect(groups[0].ready).toBe(false);
@@ -155,7 +205,7 @@ describe('groupByAccount', () => {
 describe('renderHarnessMatrix', () => {
   it('groups rows under each device and shows account / signed / quota / ready', () => {
     const out = renderHarnessMatrix([
-      { host: 'zion', rows: [row({ agent: 'claude', version: '1.2.3', account: 'me@ex.com', quota: { status: 'available', usedPercent: 12, stale: false } })] },
+      { host: 'zion', rows: [row({ agent: 'claude', version: '1.2.3', account: 'me@ex.com', quota: quota('available', 12) })] },
     ]).join('\n');
     expect(out).toContain('Fleet harnesses');
     expect(out).toContain('zion');
@@ -167,7 +217,7 @@ describe('renderHarnessMatrix', () => {
 
   it('shows a signed-out install with its reason, not "ready"', () => {
     const out = renderHarnessMatrix([
-      { host: 'box', rows: [row({ signedIn: false, account: null, ready: false, reason: 'signed out', quota: { status: null, usedPercent: null, stale: false } })] },
+      { host: 'box', rows: [row({ signedIn: false, account: null, ready: false, reason: 'signed out', quota: quota(null, null) })] },
     ]).join('\n');
     expect(out).toContain('signed out');
   });

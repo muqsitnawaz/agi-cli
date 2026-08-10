@@ -1,5 +1,6 @@
 import { buildForkSessionRequest, type ForkSessionSource } from '../core/forkSession';
 import type { RunStrategy } from '../core/agents';
+import { sessionPresentationStore } from '../core/sessionPresentationStore';
 
 export interface ForkPickHostLaunch<ViewColumn> {
   prompt: string;
@@ -34,17 +35,11 @@ export function sessionIdForTerminal(activeJson: string, terminalId: string): st
   return match?.sessionId.trim() || null;
 }
 
-export async function remoteForkSessionId(
-  run: (args: string, options: { maxBuffer: number; timeout: number }) => Promise<{ stdout: string }>,
+export function remoteForkSessionId(
   host: string,
   terminalId: string,
-  quote: (value: string) => string,
-): Promise<string | null> {
-  const { stdout } = await run(`sessions --active --json --host ${quote(host)}`, {
-    maxBuffer: 16 * 1024 * 1024,
-    timeout: 45_000,
-  });
-  return sessionIdForTerminal(stdout, terminalId);
+): string | null {
+  return sessionPresentationStore.terminalSessionMap(host).get(terminalId) ?? null;
 }
 
 /** Wait for a just-launched sibling to publish its session id. Local forks use

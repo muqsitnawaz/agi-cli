@@ -36,6 +36,7 @@ import {
   executionKind,
   printRoutineDrilldown,
   parseRemoteComputerSessionRows,
+  serializeSessionPickerRows,
   type RoutineDrilldown,
 } from './sessions.js';
 import type { RunMeta } from '../lib/routines.js';
@@ -62,6 +63,27 @@ describe('session harness name resolution', () => {
     expect(resolveSessionAgentName('cladue')).toBe('claude');
     expect(resolveSessionAgentName('GROK')).toBe('grok');
     expect(resolveSessionAgentName('not-a-harness')).toBeNull();
+  });
+});
+
+describe('session picker JSON contract', () => {
+  it('joins durable and cached live state into one recovery-ready row', () => {
+    const session = {
+      id: 'aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb', shortId: 'aaaaaaaa', agent: 'codex',
+      timestamp: '2026-08-10T00:00:00.000Z', lastActivity: '2026-08-10T00:01:00.000Z',
+      filePath: '/sessions/a.jsonl', cwd: '/repo',
+    } satisfies SessionMeta;
+    const live = {
+      context: 'terminal', kind: 'codex', sessionId: session.id, status: 'idle',
+      machine: 'box-a', pid: 42, cwd: '/repo', lastActivityMs: 123,
+    } satisfies ActiveSession;
+    expect(serializeSessionPickerRows([session], [live], 'self')).toEqual([
+      expect.objectContaining({
+        id: session.id, state: 'idle', resumable: true, unwatched: true,
+        viewingIn: null, sourceDevice: 'box-a', lastActivityMs: 123, pid: 42,
+        recovery: { command: 'agents', args: ['sessions', 'resume', session.id, '--device', 'box-a'], cwd: '/repo' },
+      }),
+    ]);
   });
 });
 

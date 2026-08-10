@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { buildAgentLaunchCommand, usesManagedAgentLaunch } from '../core/agents';
+import { sessionPresentationStore } from '../core/sessionPresentationStore';
 import {
   handleForkPickHost,
   remoteForkSessionId,
@@ -131,9 +132,7 @@ describe('fork command contributions', () => {
   });
 
   test('a remote non-Claude fork resolves its child id by AGENT_TERMINAL_ID', async () => {
-    const active = JSON.stringify([
-      { terminalId: 'CX-sibling-terminal', sessionId: 'sibling-session-id' },
-    ]);
+    sessionPresentationStore.clear();
     const calls: string[] = [];
     const resolved = await resolveForkSessionId({
       initialSessionId: null,
@@ -146,16 +145,10 @@ describe('fork command contributions', () => {
       readRemote: async (host, terminalId) => {
         calls.push(`${host}:${terminalId}`);
         if (calls.length === 1) return null;
-        return remoteForkSessionId(
-          async (args, options) => {
-            expect(args).toBe("sessions --active --json --host 'chosen-host'");
-            expect(options).toEqual({ maxBuffer: 16 * 1024 * 1024, timeout: 45_000 });
-            return { stdout: active };
-          },
-          host,
-          terminalId,
-          value => `'${value}'`,
-        );
+        sessionPresentationStore.apply({ version: 1, type: 'reset', sessions: [
+          { terminalId: 'CX-sibling-terminal', sessionId: 'sibling-session-id', machine: 'chosen-host' },
+        ] });
+        return remoteForkSessionId(host, terminalId);
       },
     });
     expect(calls).toEqual([
