@@ -144,7 +144,7 @@ describe('resolveDeviceAuto', () => {
         ['local', { reachable: true, headroom: 'idle', installed: true, signedIn: false }],
         ['remote', { reachable: true, headroom: 'idle', installed: true, signedIn: false }],
       ]),
-    })).rejects.toThrow('empty device pool');
+    })).rejects.toThrow('no healthy device can run codex');
   });
 
   it('keeps live load placement when run auto has not selected a harness yet', async () => {
