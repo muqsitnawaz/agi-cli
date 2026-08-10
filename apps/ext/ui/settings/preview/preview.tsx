@@ -21,6 +21,7 @@ import { FeedItem, TicketStrip } from '../components/mission-control/FeedItem'
 import { SessionsPane } from '../components/mission-control/SessionsPane'
 import { SavedViews } from '../components/mission-control/SavedViewsBar'
 import { DispatchPanel } from '../components/mission-control/DispatchPanel'
+import { TopBar } from '../components/mission-control/TopBar'
 import { BacklogCenter } from '../components/mission-control/BacklogCenter'
 import { PrBoardPane } from '../components/mission-control/PrBoardPane'
 import { buildPrBoard, type PrStatusLike } from '../components/mission-control/prBoardModel'
@@ -984,6 +985,29 @@ function Preview() {
     return (
       <div className={`swarmify-root ${theme}`} style={{ minHeight: '100vh' }}>
         <div className="sw-floor-dashboard"><PreviewErrorBoundary><LaunchMatrixPreview /></PreviewErrorBoundary></div>
+      </div>
+    )
+  }
+  // ?view=topbar — the dashboard navbar on its own: brand wordmark, tab strip,
+  // search, and the right-hand control cluster. The only place the product name
+  // is rendered, so this is how a rename of it gets looked at before shipping.
+  if (view === 'topbar') {
+    return (
+      <div className={`swarmify-root ${theme}`} style={{ minHeight: '100vh' }}>
+        <div className="sw-floor-dashboard">
+          <PreviewErrorBoundary>
+            <TopBar
+              version="0.9.303"
+              activeTab="floor"
+              onTabChange={noop}
+              activeSwarmCount={44}
+              isLightTheme={theme === 'light'}
+              search=""
+              onSearch={noop}
+              throughputTokensPerSec={0}
+            />
+          </PreviewErrorBoundary>
+        </div>
       </div>
     )
   }

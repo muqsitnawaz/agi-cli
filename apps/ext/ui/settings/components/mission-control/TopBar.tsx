@@ -60,7 +60,7 @@ export function TopBar({
           className={`sw-tab ${activeTab === 'floor' ? 'active' : ''}`}
           onClick={() => onTabChange('floor')}
         >
-          Floor
+          Fleet
           {activeSwarmCount > 0 && <span className="sw-tab-badge">{activeSwarmCount}</span>}
         </button>
         <button
