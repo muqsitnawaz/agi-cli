@@ -6,6 +6,7 @@
  */
 import * as fs from 'fs';
 import * as yaml from 'yaml';
+import { stringifyDoc } from './yaml-io.js';
 import { ensureLockTarget, atomicWriteFileSync, withFileLock } from './fs-atomic.js';
 import type { Manifest } from './types.js';
 import { safeJoin } from './paths.js';
@@ -66,10 +67,12 @@ export function serializeManifest(manifest: Manifest, existingContent?: string |
   // Nothing changed → keep the file byte-identical (comments intact).
   if (!changed) return existingContent;
 
-  // Force BLOCK style: an existing flow root (e.g. legacy `{}`) would otherwise
-  // make edited nodes render flow. collectionStyle pins the whole doc block
-  // while parseDocument still preserves comments + key ordering.
-  return isEmpty ? '' : doc.toString({ collectionStyle: 'block' });
+  // stringifyDoc still normalizes a legacy flow root (`{}`) to block so edited
+  // nodes do not render flow, but no longer forces block on a normal document —
+  // that flattened committed flow sequences and made this writer disagree with
+  // the other agents.yaml writers (RUSH-2505). parseDocument still preserves
+  // comments + key ordering.
+  return isEmpty ? '' : stringifyDoc(doc);
 }
 
 /** Read and parse agents.yaml from a directory. Returns null if the file does not exist. */
