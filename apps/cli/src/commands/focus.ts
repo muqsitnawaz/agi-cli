@@ -275,7 +275,10 @@ export async function focusAction(id: string | undefined, opts: FocusOptions): P
     }
 
     let exact = textSelector && looksLikeIdSelector(textSelector)
-      ? sessions.filter((session) => session.id.toLowerCase().startsWith(textSelector.toLowerCase()))
+      ? dedupeSessionsByLogicalId(
+          sessions.filter((session) => session.id.toLowerCase().startsWith(textSelector.toLowerCase())),
+          self,
+        )
       : [];
     // A tmux alias naming a LIVE local session attaches directly. This must run
     // before the metadata resolver: that resolver treats an unmatched alias as a
@@ -425,6 +428,39 @@ function looksLikeIdentitySelector(selector: string | undefined): selector is st
  * SES-39's "re-read `pane_dead` immediately before attach" is honoured here:
  * liveness is queried at attach time, not read from the roster.
  */
+/**
+ * Rank two rows that are the same logical session, best first.
+ *
+ * Prefer the row that can actually be acted on: a real transcript over a
+ * phantom index entry (a purged copy indexes with an empty `filePath`), then
+ * this machine's copy over a peer mirror — resuming is machine-bound, so the
+ * local row is the one whose harness state exists here.
+ */
+function sessionRowRank(s: SessionMeta, self?: string): number {
+  return (s.filePath ? 4 : 0) + (self && s.machine === self ? 2 : 0) + (s._remote ? 0 : 1);
+}
+
+/**
+ * Collapse rows that are the SAME logical session.
+ *
+ * A transcript syncs across the fleet, so one session appears once per machine
+ * holding a copy. SES-IF-2a: "Synced copies sharing the same full id MUST count
+ * as one logical session." `fleetCandidatesByQuery` already groups this way, but
+ * this path filtered raw rows instead — so `focus <full-uuid>` answered
+ * "is ambiguous (2 sessions). Use more of the id." with no longer id to give.
+ * Measured on zion: one of the two rows had no transcript at all
+ * ("Session transcript not available (file no longer exists). Path: ").
+ */
+export function dedupeSessionsByLogicalId(rows: SessionMeta[], self?: string): SessionMeta[] {
+  const byId = new Map<string, SessionMeta>();
+  for (const row of rows) {
+    const key = row.id.toLowerCase();
+    const held = byId.get(key);
+    if (!held || sessionRowRank(row, self) > sessionRowRank(held, self)) byId.set(key, row);
+  }
+  return [...byId.values()];
+}
+
 export type TmuxAliasState = 'not-an-alias' | 'no-server' | 'absent' | 'dead' | 'live';
 
 /** Shape of the tmux alias the CLI mints for an agent session: `ag-<agent>-<hex>`. */
