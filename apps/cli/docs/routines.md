@@ -352,7 +352,7 @@ agents routines add ux-tests \
 Run the localhost receiver with signing keys from an `agents secrets` bundle:
 
 ```bash
-agents webhook serve --secrets-bundle webhooks --port 8787
+agents webhooks serve --secrets-bundle webhooks --port 8787
 ```
 
 The bundle may contain `GITHUB_WEBHOOK_SECRET`, `LINEAR_WEBHOOK_SECRET`, or both.
@@ -388,7 +388,7 @@ Operational runbook:
 2. Start the receiver on the ingress host and leave it bound to localhost:
 
    ```bash
-   agents webhook serve --secrets-bundle webhooks --host 127.0.0.1 --port 8787
+   agents webhooks serve --secrets-bundle webhooks --host 127.0.0.1 --port 8787
    ```
 
 3. Enable Funnel only after the receiver is listening:
@@ -400,7 +400,7 @@ Operational runbook:
 
 4. Rotate a signing key source by source. Set the new source secret in the
    `webhooks` bundle, update the provider webhook configuration to sign with the
-   new value, restart `agents webhook serve`, then send one signed test delivery
+   new value, restart `agents webhooks serve`, then send one signed test delivery
    before deleting the old provider secret.
 
 5. Disable public ingress before stopping or moving the receiver:
@@ -533,13 +533,13 @@ For GitHub webhooks the context includes `repository`, `pull_request`, and
 
 #### mac-mini ingress with funnel
 
-Handlers are fired by the same `agents webhook serve` receiver as routine
+Handlers are fired by the same `agents webhooks serve` receiver as routine
 triggers. On a headless Mac (e.g. `mac-mini`), expose it publicly with
 Tailscale Funnel:
 
 ```bash
 # On mac-mini
-agents webhook serve --secrets-bundle webhooks --port 8787 &
+agents webhooks serve --secrets-bundle webhooks --port 8787 &
 agents funnel up mac-mini --local-port 8787 --port 443
 ```
 

@@ -116,7 +116,7 @@ export const loadMailboxes: ModuleLoader = async () => (await import('../../comm
 export const loadServe: ModuleLoader = async () => (await import('../../commands/serve.js')).registerServeCommand;
 export const loadShare: ModuleLoader = async () => (await import('../../commands/share.js')).registerShareCommands;
 export const loadAudit: ModuleLoader = async () => (await import('../../commands/audit.js')).registerAuditCommands;
-export const loadWebhook: ModuleLoader = async () => (await import('../../commands/webhook.js')).registerWebhookCommand;
+export const loadWebhooks: ModuleLoader = async () => (await import('../../commands/webhook.js')).registerWebhooksCommand;
 export const loadFunnel: ModuleLoader = async () => (await import('../../commands/funnel.js')).registerFunnelCommand;
 export const loadHumans: ModuleLoader = async () => (await import('../../commands/humans.js')).registerHumansCommands;
 export const loadAccounts: ModuleLoader = async () => (await import('../../commands/accounts.js')).registerAccountsCommand;
@@ -276,7 +276,7 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   // commands/share.ts) — same module, registered as its own program.command().
   unshare: [loadShare],
   audit: [loadAudit],
-  webhook: [loadWebhook],
+  webhooks: [loadWebhooks],
   funnel: [loadFunnel],
   humans: [loadHumans],
   daemon: [loadDaemon],
@@ -316,6 +316,9 @@ export const KNOWN_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set<string>([
   ...Object.keys(COMMAND_LOADERS),
   ...INLINE_COMMAND_NAMES,
 ]);
+
+/** Removed command names that must remain unknown instead of typo-correcting to a replacement. */
+export const RETIRED_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set(['webhook']);
 
 /** Whether `name` is a top-level command this CLI registers. See {@link KNOWN_TOP_LEVEL_COMMANDS}. */
 export function isKnownTopLevelCommand(name: string): boolean {

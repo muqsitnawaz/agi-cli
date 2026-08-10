@@ -30078,8 +30078,8 @@
       ]
     },
     {
-      "name": "webhook",
-      "path": "webhook",
+      "name": "webhooks",
+      "path": "webhooks",
       "aliases": [],
       "description": "Run a localhost signed webhook receiver for routine triggers.",
       "args": [],
@@ -30098,7 +30098,7 @@
       "subcommands": [
         {
           "name": "serve",
-          "path": "webhook serve",
+          "path": "webhooks serve",
           "aliases": [],
           "description": "Receive signed GitHub/Linear webhooks on /hooks/<source> and fire matching routines.",
           "args": [],
