@@ -6,10 +6,8 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import { AgentConfig } from './agents.vscode';
 
-import { fetchGitInfo } from '../monitor/snapshotDetector';
 import { findAgentInTree, SHELL_ADOPTION_TREE_DEPTH } from '../monitor/readinessDetector';
 import type { AgentLauncherKey } from '../core/terminalReadiness';
-import { PanelSnapshotPayload, SnapshotWatch } from '../monitor/protocol';
 import { generateTerminalId, resolveRestoredVersion, RunningCounts } from '../core/terminals';
 import * as sessionsPersist from '../core/sessions.persist';
 import { getSessionPathBySessionId, getSessionPreviewInfo, getOpenCodeSessionPreviewInfo, getCursorSessionPreviewInfo, SessionPreviewInfo } from './sessions.vscode';
@@ -29,7 +27,6 @@ import {
   canonicalToConfigPrefix,
   SessionAgentType
 } from '../core/utils';
-import { registerTerminal as registerSessionTracker } from './sessionTracker';
 
 // getTerminalsByAgentType runs 5x (one per agent type) on every 10s floor poll
 // and again on every terminal open/close. Its per-terminal/per-session debug
@@ -434,25 +431,8 @@ export function setSessionId(terminal: vscode.Terminal, sessionId: string): void
     // Persist to disk
     schedulePersist();
 
-    maybeRegisterWithSessionTracker(terminal, entry.agentType, sessionId);
   } else {
     console.error(`[TERMINALS] FAILED to set sessionId - terminal "${terminal.name}" not found in registry. This may indicate a race condition.`);
-  }
-}
-
-function maybeRegisterWithSessionTracker(
-  terminal: vscode.Terminal,
-  agentType: SessionAgentType | undefined,
-  sessionId: string | undefined,
-  adoptExistingSession = false,
-): void {
-  if (agentType !== 'claude' && agentType !== 'codex' && agentType !== 'gemini' && agentType !== 'opencode') return;
-  const workspacePath = vscode.workspace?.workspaceFolders?.[0]?.uri.fsPath;
-  if (!workspacePath) return;
-  try {
-    registerSessionTracker(terminal, agentType, workspacePath, sessionId, adoptExistingSession);
-  } catch (err) {
-    console.error('[TERMINALS] sessionTracker.registerTerminal failed', err);
   }
 }
 
@@ -468,10 +448,6 @@ export function setAgentType(
     // Persist to disk
     schedulePersist();
 
-    // Register with sessionTracker even without a sessionId so the fs watcher
-    // can adopt one when the agent CLI writes a fresh rollout/jsonl file.
-    // Critical for Codex 0.124+ which dropped session id from its TUI banner.
-    maybeRegisterWithSessionTracker(terminal, agentType, entry.sessionId, adoptExistingSession);
   } else {
     console.error(`[TERMINALS] FAILED to set agentType - terminal "${terminal.name}" not found in registry.`);
   }
@@ -511,7 +487,6 @@ export function adoptShellAsAgent(
   }
 
   schedulePersist();
-  maybeRegisterWithSessionTracker(terminal, agentType, entry.sessionId);
   return true;
 }
 
@@ -941,87 +916,6 @@ const AGENT_ROLE_HINTS: Record<string, { role: string; hint: string }> = {
   shell: { role: 'shell', hint: 'Command execution' }
 };
 
-interface WorkspaceGitInfo {
-  branch: string | null;
-  numstat: Record<string, { added: number; removed: number }>;
-}
-const gitInfoCache = new Map<string, { ts: number; info: WorkspaceGitInfo }>();
-const GIT_INFO_TTL_MS = 2000;
-// IN-FLIGHT GUARD (#71): coalesce concurrent computations for the same workspace
-// so overlapping panel/floor ticks never fork `git` twice for one path.
-const gitInfoInFlight = new Map<string, Promise<WorkspaceGitInfo>>();
-
-// --- Monitor follower routing (#71) ---------------------------------------
-//
-// When connected to the centralized monitor, the leader's snapshot detector
-// computes git/worktree/usage/teams ONCE machine-wide and broadcasts a
-// `panel-snapshot` fact; this module + agentPanel render from it instead of
-// each window forking the subprocesses on its own 4s poll. When disconnected
-// (election race, leader loss) the local compute below runs as the fallback.
-// The local code is preserved, not deleted; it is gated on connectivity.
-let snapshotMonitorConnected: () => boolean = () => false;
-let latestPanelSnapshot: PanelSnapshotPayload | undefined;
-let snapshotArmSink: ((watches: SnapshotWatch[]) => void) | undefined;
-
-/** Wire the predicate the snapshot consumers consult for local-vs-broadcast. */
-export function setSnapshotMonitorConnectivity(fn: () => boolean): void {
-  snapshotMonitorConnected = fn;
-}
-
-/** Wire the sink that arms the monitor with this window's snapshot watches. */
-export function setSnapshotArmSink(
-  fn: ((watches: SnapshotWatch[]) => void) | undefined,
-): void {
-  snapshotArmSink = fn;
-}
-
-/** Replace this window's snapshot watch slice on the monitor (#71). */
-export function armSnapshotWatches(watches: SnapshotWatch[]): void {
-  snapshotArmSink?.(watches);
-}
-
-/** Apply a broadcast panel-snapshot fact: cache it for the panel + floor. */
-export function ingestPanelSnapshotFact(payload: PanelSnapshotPayload): void {
-  latestPanelSnapshot = payload;
-}
-
-/** True while this window is consuming the leader's broadcast snapshot. */
-export function isSnapshotMonitorConnected(): boolean {
-  return snapshotMonitorConnected();
-}
-
-/** The latest broadcast snapshot, or undefined before the first one arrives. */
-export function getLatestPanelSnapshot(): PanelSnapshotPayload | undefined {
-  return latestPanelSnapshot;
-}
-
-async function getWorkspaceGitInfo(workspacePath: string): Promise<WorkspaceGitInfo> {
-  // Prefer the leader's broadcast: one git fork machine-wide, not one per window.
-  if (snapshotMonitorConnected()) {
-    const broadcast = latestPanelSnapshot?.gitByRoot[workspacePath];
-    if (broadcast) return broadcast;
-  }
-
-  const now = Date.now();
-  const cached = gitInfoCache.get(workspacePath);
-  if (cached && now - cached.ts < GIT_INFO_TTL_MS) return cached.info;
-
-  const existing = gitInfoInFlight.get(workspacePath);
-  if (existing) return existing;
-
-  const compute = (async () => {
-    // Canonical git compute lives in snapshotDetector (the leader uses the same).
-    const info = await fetchGitInfo(workspacePath);
-    gitInfoCache.set(workspacePath, { ts: Date.now(), info });
-    return info;
-  })().finally(() => {
-    gitInfoInFlight.delete(workspacePath);
-  });
-
-  gitInfoInFlight.set(workspacePath, compute);
-  return compute;
-}
-
 const SESSION_SUMMARY_CACHE_MAX = 200;
 type SessionSummaryCacheEntry = {
   mtimeMs: number;
@@ -1289,22 +1183,11 @@ export async function getTerminalsByAgentType(
     }
   }
 
-  // Annotate with workspace cwd/branch + per-file diff stats (cached per workspace).
+  // The CLI session stream already supplies cwd and branch. The extension does
+  // not run a parallel git status implementation to decorate those records.
   if (workspacePath && results.length > 0) {
-    const gitInfo = await getWorkspaceGitInfo(workspacePath).catch(() => null);
     for (const result of results) {
       result.cwd = workspacePath;
-      if (gitInfo) {
-        result.branch = gitInfo.branch;
-        if (result.recentFiles && result.recentFiles.length > 0) {
-          const stats: Record<string, { added: number; removed: number }> = {};
-          for (const f of result.recentFiles) {
-            const s = gitInfo.numstat[f] || gitInfo.numstat[path.resolve(workspacePath, f)];
-            if (s) stats[f] = s;
-          }
-          if (Object.keys(stats).length > 0) result.recentFileStats = stats;
-        }
-      }
     }
   }
 

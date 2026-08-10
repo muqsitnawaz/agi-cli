@@ -36,7 +36,6 @@ import { ensureWatchdogMcpInstalled } from '../mcp/watchdogInstall';
 import * as notifications from './notifications.vscode';
 import * as terminals from './terminals.vscode';
 import { fetchLocalSessions, fetchRemoteSessionLabelSource, fetchSessionIdentity, fetchRecapSessions, LOCAL_LABEL, LOCAL_MACHINE_ID, mapWithConcurrency } from './remoteSessions.vscode';
-import * as sessionTracker from './sessionTracker';
 import { runRecapHeadless, isRecapSupported } from './recap.vscode';
 import { buildAgentTerminalEnv } from '../core/terminals';
 import {
@@ -1298,15 +1297,6 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Initialize terminal readiness event tracking (shell integration + close cleanup)
   readiness.initReadiness(context);
-
-  sessionTracker.initSessionTracker(context);
-  context.subscriptions.push(
-    sessionTracker.onSessionChanged((terminal, _oldId, newId) => {
-      terminals.setSessionId(terminal, newId);
-      startAutoLabelPollerForTerminal(terminal, context);
-      updateStatusBarForTerminal(terminal, context.extensionPath);
-    }),
-  );
 
   // Cross-window live-terminal registry: every VS Code window publishes its
   // agent terminals to a shared JSON file so the Foreman (and future tools)
@@ -5591,13 +5581,7 @@ function initMonitorHost(context: vscode.ExtensionContext): void {
     // snapshot detector (#71) on the leader only. The snapshot detector's teams
     // fetch is vscode-coupled, so it's injected here (host.ts stays vscode-free).
     const host = new MonitorHost({
-      detectors: {
-        // Session state comes only from the CLI's versioned stream. Readiness is
-        // presentation mechanics; filesystem session parsing and periodic panel
-        // recomputation are deliberately disabled in the extension.
-        session: false,
-        snapshot: false,
-      },
+      detectors: {},
     });
     void host.start().catch((err) => console.error('[MONITOR] host start failed:', err));
     return { dispose: () => { void host.stop().catch(() => {}); } };
@@ -5670,15 +5654,10 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
   // probing while connected and fall back when not.
   const connected = () => follower.connected;
   readiness.setMonitorConnectivity(connected);
-  sessionTracker.setMonitorConnectivity(connected);
   readiness.setMonitorArmSink({
     armAgent: (pid, agentKey, sessionId) => { void follower.armAgent(pid, agentKey, sessionId); },
     armShellAdoption: (pid) => { void follower.armShellAdoption(pid); },
   });
-  // Snapshot (#71): the leader computes git/worktrees/usage/teams once and
-  // broadcasts; the panel/floor render from the fact and arm their watch slice.
-  terminals.setSnapshotMonitorConnectivity(connected);
-  terminals.setSnapshotArmSink((watches) => { void follower.setSnapshotWatches(watches); });
 
   const proto = require('../monitor/protocol') as typeof import('../monitor/protocol');
   const factSub = follower.onMonitorEvent((event) => {
@@ -5691,12 +5670,6 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
         sessionId: p.sessionId,
         childPid: p.childPid,
       });
-    } else if (proto.isSessionFact(event)) {
-      sessionTracker.ingestSessionFact(event.payload);
-    } else if (proto.isSessionWarmth(event)) {
-      sessionTracker.ingestSessionWarmth(event.payload.filePath);
-    } else if (proto.isPanelSnapshot(event)) {
-      terminals.ingestPanelSnapshotFact(event.payload);
     } else if (proto.isSessionCliFact(event)) {
       if (sessionStore.apply(event.payload)) void settings.refreshFloorFromSessionStream();
     }

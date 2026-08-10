@@ -1,5 +1,5 @@
 // Monitor host runtime — foundation 3/3 of the centralized-monitor epic (#64),
-// extended by the migrations (#68, #69).
+// extended by the readiness and canonical CLI session-stream migrations.
 //
 // The elected leader (#65) == the monitor. While this window holds the lease it
 // runs ONE `MonitorBroadcastServer` (#66); followers connect to it, report their
@@ -8,14 +8,11 @@
 //   - a ReadinessDetector (#68) fed the union of all windows' shell pids, which
 //     broadcasts tabReady/shellReady/promptReady/agentReady + ShellAdoptionInfo
 //     facts keyed by pid;
-//   - a SessionWatcher (#69) that watches each session root once and broadcasts
-//     parsed session + warmth facts.
 // Followers map every fact back to their own terminals window-locally.
 //
 // Kept vscode-free so it runs and tests in a plain process against real Unix
 // sockets and real subprocesses/files (see *.test.ts).
 
-import * as path from 'path';
 import { MonitorBroadcastServer } from './broadcast';
 import { MonitorEvent } from './broadcastTypes';
 import {
@@ -25,43 +22,20 @@ import {
   MONITOR_FACT,
   MONITOR_OP,
   MonitorRequest,
-  PanelSnapshotPayload,
   ReadinessFactPayload,
   ReportTuplesAck,
-  SessionFactPayload,
-  SessionWarmthPayload,
   ShellAdoptionFactPayload,
   SnapshotReply,
-  SnapshotWatchRequest,
   TerminalTuple,
   TuplesSnapshotPayload,
 } from './protocol';
 import { ReadinessDetector } from './readinessDetector';
-import { SessionWatcher } from './sessionWatcher';
-import { WatcherRoot } from './sessionParse';
-import { SnapshotDetector } from './snapshotDetector';
 import { SessionCliStream } from './sessionCliStream';
 
-/** Enable + configure the centralized detectors (#68, #69). */
+/** Enable + configure the centralized presentation detectors. */
 export interface MonitorDetectorOptions {
   /** Run the pid-keyed readiness detector. Default true. */
   readiness?: boolean;
-  /** Run the machine-wide session watcher. Default true. */
-  session?: boolean;
-  /** Override the session-watcher roots (tests). */
-  sessionRoots?: WatcherRoot[];
-  /** Session-watcher debounce (tests). */
-  sessionDebounceMs?: number;
-  /** Run the panel/floor snapshot detector (#71). Default true. */
-  snapshot?: boolean;
-  /** Snapshot recompute cadence (tests). */
-  snapshotTickMs?: number;
-  /**
-   * Inject the vscode-coupled `agents teams list` fetcher (#71). The wiring layer
-   * (extension.ts) supplies `listTeamsForCwd`; omitted in tests/standalone so the
-   * snapshot fact simply carries no teams.
-   */
-  snapshotFetchTeams?: (cwd: string) => Promise<unknown[]>;
   /** Consume the canonical agents-cli session stream. Default true. */
   sessionCli?: boolean;
 }
@@ -86,8 +60,6 @@ export class MonitorHost {
 
   private readonly detectorOpts?: MonitorDetectorOptions;
   private readinessDetector?: ReadinessDetector;
-  private sessionWatcher?: SessionWatcher;
-  private snapshotDetector?: SnapshotDetector;
   private sessionCliStream?: SessionCliStream;
 
   constructor(options: MonitorHostOptions = {}) {
@@ -103,15 +75,6 @@ export class MonitorHost {
     return this.server.clientCount;
   }
 
-  /** Live session roots being watched (verification/tests). */
-  get watchedRootCount(): number {
-    return this.sessionWatcher?.watchedRootCount ?? 0;
-  }
-
-  /** Distinct snapshot tuples the detector is computing (verification/tests). */
-  get watchedSnapshotKeyCount(): number {
-    return this.snapshotDetector?.watchedKeyCount ?? 0;
-  }
 
   /** Bind the broadcast socket, start detectors, and begin serving followers. */
   async start(): Promise<void> {
@@ -127,10 +90,6 @@ export class MonitorHost {
     this.running = false;
     this.readinessDetector?.stop();
     this.readinessDetector = undefined;
-    this.sessionWatcher?.stop();
-    this.sessionWatcher = undefined;
-    this.snapshotDetector?.stop();
-    this.snapshotDetector = undefined;
     this.sessionCliStream?.stop();
     this.sessionCliStream = undefined;
     this.slices.clear();
@@ -161,23 +120,6 @@ export class MonitorHost {
       });
       this.syncDetectorPids();
     }
-    if (opts.session !== false) {
-      this.sessionWatcher = new SessionWatcher({
-        emit: (fact) => this.broadcastSession(fact),
-        emitWarmth: (fact) => this.broadcastSessionWarmth(fact),
-        roots: opts.sessionRoots,
-        debounceMs: opts.sessionDebounceMs,
-      });
-      this.sessionWatcher.start();
-    }
-    if (opts.snapshot !== false) {
-      this.snapshotDetector = new SnapshotDetector({
-        emit: (fact) => this.broadcastPanelSnapshot(fact),
-        tickMs: opts.snapshotTickMs,
-        fetchTeams: opts.snapshotFetchTeams,
-      });
-      this.snapshotDetector.start();
-    }
   }
 
   private handleRequest(
@@ -202,11 +144,6 @@ export class MonitorHost {
     if (req && op === MONITOR_OP.armShellAdoption) {
       const r = req as ArmShellAdoptionRequest;
       this.readinessDetector?.armShellAdoption(r.pid);
-      return { ok: true };
-    }
-    if (req && op === MONITOR_OP.snapshotWatch) {
-      const r = req as SnapshotWatchRequest;
-      this.snapshotDetector?.setWatches(r.windowId, r.watches ?? []);
       return { ok: true };
     }
     throw new Error(`Unknown monitor request op: ${JSON.stringify(op)}`);
@@ -241,18 +178,4 @@ export class MonitorHost {
     this.broadcast(MONITOR_FACT.shellAdoption, payload);
   }
 
-  private broadcastSession(payload: SessionFactPayload): void {
-    // Feed the session-file fast path so an armed agentReady can resolve from
-    // the file appearing (mirrors armSessionFileFastPath).
-    this.readinessDetector?.noteSessionFile(path.basename(payload.filePath));
-    this.broadcast(MONITOR_FACT.session, payload);
-  }
-
-  private broadcastSessionWarmth(payload: SessionWarmthPayload): void {
-    this.broadcast(MONITOR_FACT.sessionWarmth, payload);
-  }
-
-  private broadcastPanelSnapshot(payload: PanelSnapshotPayload): void {
-    this.broadcast(MONITOR_FACT.panelSnapshot, payload);
-  }
 }

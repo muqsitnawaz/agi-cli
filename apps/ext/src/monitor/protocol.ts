@@ -9,8 +9,6 @@
 // neither side hand-rolls (and drifts) the same shapes.
 
 import { MonitorEvent } from './broadcastTypes';
-import { AgentsViewJsonAgent } from '../core/resumeInBest';
-import { WorktreeRef } from '../core/panel.helpers';
 
 /** A single agent terminal as seen by the window that owns it. */
 export interface TerminalTuple {
@@ -59,7 +57,6 @@ export const MONITOR_OP = {
    * successor to `buildSnapshot` (agentPanel) + `getWorkspaceGitInfo` (terminals);
    * the local compute stays as the disconnected-case fallback.
    */
-  snapshotWatch: 'snapshot-watch',
 } as const;
 
 export interface ReportTuplesRequest {
@@ -88,27 +85,11 @@ export interface ArmShellAdoptionRequest {
 }
 
 /** One workspace/agent tuple a window asks the monitor to snapshot (#71). */
-export interface SnapshotWatch {
-  /** Workspace root — `git branch`/`git diff --numstat` + worktree list keyed here. */
-  workspaceRoot: string;
-  /** Active terminal cwd — `agents teams list` keyed here. Defaults to workspaceRoot. */
-  cwd?: string;
-  /** Bound agent type — `agents view <type> --json` usage keyed here. */
-  agentType?: string;
-}
-
-export interface SnapshotWatchRequest {
-  op: typeof MONITOR_OP.snapshotWatch;
-  windowId: string;
-  watches: SnapshotWatch[];
-}
-
 export type MonitorRequest =
   | ReportTuplesRequest
   | SnapshotRequest
   | ArmAgentRequest
-  | ArmShellAdoptionRequest
-  | SnapshotWatchRequest;
+  | ArmShellAdoptionRequest;
 
 export interface ReportTuplesAck {
   ok: true;
@@ -140,11 +121,6 @@ export const MONITOR_FACT = {
   /** A known agent CLI was adopted under a shell pid (#68). */
   shellAdoption: 'monitor.shell-adoption',
   /** A new/changed session file was parsed by the machine-wide watcher (#69). */
-  session: 'monitor.session',
-  /** A tracked session file was written (warmth signal for kill/restart). */
-  sessionWarmth: 'monitor.session-warmth',
-  /** The merged panel/floor snapshot computed once machine-wide (#71). */
-  panelSnapshot: 'monitor.panel-snapshot',
   /** Versioned session state emitted by the agents-cli watch stream. */
   sessionCli: 'monitor.session-cli',
 } as const;
@@ -188,63 +164,6 @@ export interface ShellAdoptionFactPayload {
   childPid: number;
 }
 
-/** Agent kinds the machine-wide session watcher recognizes. */
-export type SessionAgentKind = 'claude' | 'codex' | 'gemini' | 'opencode';
-
-/**
- * A new/changed session file parsed by the machine-wide watcher (#69). Carries
- * the same head metadata `sessionTracker` parses locally today, so a follower
- * runs the identical (window-local) correlation against its own terminals
- * without re-reading the file.
- */
-export interface SessionFactPayload {
-  agentType: SessionAgentKind;
-  /** Absolute path to the session file. */
-  filePath: string;
-  /** session id derived from the filename. */
-  fileSessionId: string;
-  /** File creation time; distinguishes a new tab's rollout from old same-cwd files. */
-  birthtimeMs: number;
-  mtimeMs: number;
-  forkedFromId?: string;
-  codexCwd?: string;
-  geminiProjectHash?: string;
-  geminiSessionId?: string;
-  opencodeDirectory?: string;
-  opencodeSessionId?: string;
-}
-
-/** A tracked session file was written — keeps the follower's dormancy clock. */
-export interface SessionWarmthPayload {
-  filePath: string;
-  ts: number;
-}
-
-/** Per-workspace git facts (`git branch --show-current` + `git diff --numstat HEAD`). */
-export interface GitNumstat {
-  branch: string | null;
-  /** Keyed by BOTH the relative and the absolute path, mirroring getWorkspaceGitInfo. */
-  numstat: Record<string, { added: number; removed: number }>;
-}
-
-/**
- * The merged panel/floor snapshot the leader's snapshot detector computes once
- * per tick and broadcasts (#71). Each map is keyed so a follower looks up only
- * the slice its visible panel needs:
- *   - gitByRoot / worktreesByRoot — keyed by workspace root
- *   - teamsByCwd                  — keyed by the active terminal cwd
- *   - usageByAgent                — keyed by agent type (the raw `agents view`)
- *
- * `teamsByCwd` carries `unknown[]` so this wire type stays vscode-free; the
- * consumer casts each entry back to its `TeamWithMates`.
- */
-export interface PanelSnapshotPayload {
-  gitByRoot: Record<string, GitNumstat>;
-  worktreesByRoot: Record<string, WorktreeRef[]>;
-  teamsByCwd: Record<string, unknown[]>;
-  usageByAgent: Record<string, AgentsViewJsonAgent>;
-  ts: number;
-}
 
 /** Narrow a raw broadcast event to a tuples-snapshot fact. */
 export function isTuplesSnapshot(
@@ -285,40 +204,3 @@ export function isShellAdoptionFact(
 }
 
 /** Narrow a raw broadcast event to a session fact. */
-export function isSessionFact(
-  event: MonitorEvent,
-): event is MonitorEvent & { payload: SessionFactPayload } {
-  const p = event.payload as SessionFactPayload | undefined;
-  return (
-    event.type === MONITOR_FACT.session &&
-    !!p &&
-    typeof p.agentType === 'string' &&
-    typeof p.filePath === 'string'
-  );
-}
-
-/** Narrow a raw broadcast event to a session-warmth fact. */
-export function isSessionWarmth(
-  event: MonitorEvent,
-): event is MonitorEvent & { payload: SessionWarmthPayload } {
-  const p = event.payload as SessionWarmthPayload | undefined;
-  return (
-    event.type === MONITOR_FACT.sessionWarmth &&
-    !!p &&
-    typeof p.filePath === 'string'
-  );
-}
-
-/** Narrow a raw broadcast event to a panel-snapshot fact (#71). */
-export function isPanelSnapshot(
-  event: MonitorEvent,
-): event is MonitorEvent & { payload: PanelSnapshotPayload } {
-  const p = event.payload as PanelSnapshotPayload | undefined;
-  return (
-    event.type === MONITOR_FACT.panelSnapshot &&
-    !!p &&
-    typeof p.gitByRoot === 'object' &&
-    typeof p.worktreesByRoot === 'object' &&
-    typeof p.usageByAgent === 'object'
-  );
-}
