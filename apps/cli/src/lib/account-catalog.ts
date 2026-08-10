@@ -1,87 +1,46 @@
-/**
- * Unified account discovery (RUSH-2470).
- *
- * Two kinds of account can authenticate a harness, and this module lists them
- * as one set:
- *
- *   - `bundle`      a canonical credential account (an `agents secrets` bundle;
- *                   see [[account-registry]] / [[account-schema]]).
- *   - `oauth-native` a harness's own OAuth login (Claude's native sign-in, …).
- *
- * Native OAuth stays native: it is surfaced here for selection but is never
- * copied into or rewritten as a bundle — the harness continues to own it. The
- * native source is injected (an array or a lazy supplier) rather than probed
- * here, so this module stays pure over its inputs and the harness-login
- * inspection lives with the harness code that owns it.
- */
+import { ALL_AGENT_IDS, getAccountInfo, supportsAccountInspection } from './agents.js';
+import { getVersionHomePath, listInstalledVersions } from './versions.js';
 import type { AgentId } from './types.js';
-import { getUserAgentsDir } from './state.js';
-import { hasKeychainToken } from './secrets/index.js';
-import { readAccountRegistry, type CredentialAccount } from './account-registry.js';
-import type { AccountAuthKind } from './account-provider-registry.js';
 
-export type AccountSource = 'bundle' | 'oauth-native';
-
-/** A harness-owned native OAuth login, surfaced but not converted. */
-export interface NativeOAuthAccount {
+export interface NativeAccountCatalogEntry {
+  kind: 'native';
+  id: string;
   agent: AgentId;
-  provider: string;
   display: string;
-  fingerprint?: string;
+  email: string | null;
+  versions: string[];
 }
 
-/** One row of unified account discovery. */
-export interface CatalogAccount {
-  source: AccountSource;
-  name: string;
-  provider: string;
-  /** Auth kind — set for bundle accounts only. */
-  auth?: AccountAuthKind;
-  /** Stable id (ACCOUNT_ID) — set for bundle accounts only. */
-  id?: string;
-  /** Owning harness — set for native OAuth accounts only. */
-  agent?: AgentId;
-  /** Whether the credential is present on this device. */
-  secretPresent: boolean;
+export function groupNativeAccountRows(rows: Array<{ agent: AgentId; version: string; accountKey: string | null; email: string | null; signedIn: boolean }>): NativeAccountCatalogEntry[] {
+  const grouped = new Map<string, NativeAccountCatalogEntry>();
+  for (const row of rows) {
+    if (!row.signedIn) continue;
+    const identity = row.accountKey ?? row.email?.toLowerCase();
+    if (!identity) continue;
+    const key = `${row.agent}:${identity}`;
+    const existing = grouped.get(key);
+    if (existing) existing.versions.push(row.version);
+    else grouped.set(key, {
+      kind: 'native',
+      id: identity,
+      agent: row.agent,
+      display: row.email ?? identity,
+      email: row.email,
+      versions: [row.version],
+    });
+  }
+  return [...grouped.values()].map(entry => ({ ...entry, versions: [...new Set(entry.versions)].sort() }))
+    .sort((a, b) => a.agent.localeCompare(b.agent) || a.display.localeCompare(b.display));
 }
 
-export interface AccountCatalogOptions {
-  base?: string;
-  /** Native OAuth logins to fold into discovery (default: none). */
-  nativeAccounts?: NativeOAuthAccount[] | (() => NativeOAuthAccount[]);
-}
-
-export function catalogFromCredential(account: CredentialAccount): CatalogAccount {
-  return {
-    source: 'bundle',
-    name: account.name,
-    provider: account.provider,
-    auth: account.auth,
-    id: account.id,
-    secretPresent: hasKeychainToken(account.secretRef),
-  };
-}
-
-export function catalogFromNative(account: NativeOAuthAccount): CatalogAccount {
-  return {
-    source: 'oauth-native',
-    name: account.display,
-    provider: account.provider,
-    agent: account.agent,
-    // A native login's credential lives inside the harness; its presence is
-    // the harness's business, so discovery reports it as available.
-    secretPresent: true,
-  };
-}
-
-/**
- * List every account across both sources, sorted by name (then source), with
- * bundle-backed credential accounts and native OAuth logins side by side.
- */
-export function listAccountCatalog(opts: AccountCatalogOptions = {}): CatalogAccount[] {
-  const base = opts.base ?? getUserAgentsDir();
-  const bundle = Object.values(readAccountRegistry(base).accounts).map(catalogFromCredential);
-  const nativeSource = opts.nativeAccounts;
-  const native = (typeof nativeSource === 'function' ? nativeSource() : nativeSource ?? []).map(catalogFromNative);
-  return [...bundle, ...native].sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source));
+/** Discover signed-in harness-native identities without copying their auth files. */
+export async function discoverNativeAccounts(): Promise<NativeAccountCatalogEntry[]> {
+  const rows: Array<{ agent: AgentId; version: string; accountKey: string | null; email: string | null; signedIn: boolean }> = [];
+  for (const agent of ALL_AGENT_IDS.filter(supportsAccountInspection)) {
+    for (const version of listInstalledVersions(agent)) {
+      const info = await getAccountInfo(agent, getVersionHomePath(agent, version));
+      rows.push({ agent, version, accountKey: info.accountKey, email: info.email, signedIn: info.signedIn });
+    }
+  }
+  return groupNativeAccountRows(rows);
 }

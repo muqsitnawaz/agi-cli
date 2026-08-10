@@ -20,7 +20,7 @@ import * as crypto from 'node:crypto';
 import * as yaml from 'yaml';
 import { atomicWriteFileSync } from './fs-atomic.js';
 import { getUserAgentsDir } from './state.js';
-import type { AgentId } from './types.js';
+import type { AgentId, Meta } from './types.js';
 import { deleteKeychainToken, getKeychainToken, hasKeychainToken } from './secrets/index.js';
 import { bundleExists, deleteBundle, listBundles, readBundle, renameBundle, writeBundleWithItems } from './secrets/bundles.js';
 import { getAccountProvider, type AccountAuthKind } from './account-provider-registry.js';
@@ -131,12 +131,26 @@ function archiveLegacyFile(file: string, archiveName: string): void {
 export function readAccountRegistry(base = getUserAgentsDir()): AccountRegistryDocument {
   migrateLegacyRegistryFile(base);
   const accounts: Record<string, CredentialAccount> = {};
-  for (const account of readAccountBundles()) accounts[account.id] = account;
+  for (const account of readAccountBundles()) {
+    const existing = accounts[account.id];
+    if (existing && existing.name !== account.name) {
+      throw new Error(
+        `Account bundles '${existing.name}' and '${account.name}' share ACCOUNT_ID '${account.id}'. ` +
+        'Remove the stale duplicate before using this account.',
+      );
+    }
+    accounts[account.id] = account;
+  }
   return { version: 2, accounts };
 }
 
 export function findAccount(name: string, doc = readAccountRegistry()): CredentialAccount | null {
   return doc.accounts[name] ?? Object.values(doc.accounts).find(account => account.name === name) ?? null;
+}
+
+/** Explicit selection wins over a configured per-harness default. */
+export function resolveAccountSelection(explicit: string | undefined, agent: AgentId, meta: Pick<Meta, 'accounts'>): string | undefined {
+  return explicit ?? meta.accounts?.defaults?.[agent];
 }
 
 function profileConsumers(name: string, base: string): string[] {
@@ -146,6 +160,29 @@ function profileConsumers(name: string, base: string): string[] {
   for (const file of fs.readdirSync(dir).filter(value => /\.ya?ml$/.test(value))) {
     const raw = yaml.parse(fs.readFileSync(path.join(dir, file), 'utf8')) as Record<string, unknown> | null;
     if (raw?.account === name) consumers.push(file.replace(/\.ya?ml$/, ''));
+  }
+  return consumers.sort();
+}
+
+function defaultConsumers(account: CredentialAccount, base: string): string[] {
+  const file = path.join(base, 'agents.yaml');
+  if (!fs.existsSync(file)) return [];
+  const raw = yaml.parse(fs.readFileSync(file, 'utf8')) as Pick<Meta, 'accounts'> | null;
+  return Object.entries(raw?.accounts?.defaults ?? {})
+    .filter(([, selected]) => selected === account.id || selected === account.name)
+    .map(([agent]) => agent)
+    .sort();
+}
+
+function routineConsumers(account: CredentialAccount, base: string): string[] {
+  const dir = path.join(base, 'routines');
+  if (!fs.existsSync(dir)) return [];
+  const consumers: string[] = [];
+  for (const file of fs.readdirSync(dir).filter(value => /\.ya?ml$/.test(value))) {
+    const raw = yaml.parse(fs.readFileSync(path.join(dir, file), 'utf8')) as Record<string, unknown> | null;
+    if (raw?.account === account.id || raw?.account === account.name) {
+      consumers.push(String(raw.name ?? file.replace(/\.ya?ml$/, '')));
+    }
   }
   return consumers.sort();
 }
@@ -197,16 +234,27 @@ export function renameAccount(oldName: string, newName: string, base = getUserAg
 export function removeAccount(name: string, base = getUserAgentsDir()): void {
   const account = findAccount(name, readAccountRegistry(base));
   if (!account) throw new Error(`Unknown account '${name}'.`);
-  const consumers = [...new Set([...profileConsumers(account.name, base), ...profileConsumers(account.id, base)])].sort();
-  if (consumers.length) throw new Error(`Account '${account.name}' is used by harness${consumers.length === 1 ? '' : 'es'}: ${consumers.join(', ')}. Reassign them before removing it.`);
+  const profiles = [...new Set([...profileConsumers(account.name, base), ...profileConsumers(account.id, base)])].sort();
+  const defaults = defaultConsumers(account, base);
+  const routines = routineConsumers(account, base);
+  const consumers = [
+    ...(profiles.length ? [`profiles: ${profiles.join(', ')}`] : []),
+    ...(defaults.length ? [`defaults: ${defaults.join(', ')}`] : []),
+    ...(routines.length ? [`routines: ${routines.join(', ')}`] : []),
+  ];
+  if (consumers.length) {
+    throw new Error(`Account '${account.name}' is still in use (${consumers.join('; ')}). Reassign those consumers before removing it.`);
+  }
   deleteKeychainToken(account.secretRef);
   deleteBundle(account.name);
 }
 
-export function inspectAccount(name: string, base = getUserAgentsDir()): CredentialAccount & { secretPresent: boolean } {
+export function inspectAccount(name: string, base = getUserAgentsDir()): CredentialAccount & { secretPresent: boolean; policy: 'never' } {
   const account = findAccount(name, readAccountRegistry(base));
   if (!account) throw new Error(`Unknown account '${name}'.`);
-  return { ...account, secretPresent: hasKeychainToken(account.secretRef) };
+  const bundle = readBundle(account.name);
+  if (bundle.policy !== 'never') throw new Error(`Account bundle '${account.name}' must use secrets policy 'never'.`);
+  return { ...account, secretPresent: hasKeychainToken(account.secretRef), policy: bundle.policy };
 }
 
 export function resolveCredentialAccount(name: string, host: AgentId, expectedProvider?: string, base = getUserAgentsDir()): ResolvedCredentialAccount {

@@ -116,26 +116,34 @@ two `pid → id` writers (the CLI's registry vs the SessionStart hook).
 
 ### Credential accounts
 
-An account is a named, durable provider credential. It is independent of agent
-versions: one OpenRouter account can authenticate multiple compatible harnesses,
-and rotating its key does not change its stable id or name.
+`agents accounts` shows two kinds of identity together. Native OAuth stays in the
+harness version home where its normal login flow created it. A provider account is
+one `agents secrets` bundle that can authenticate every compatible harness; the
+bundle name is the account label and rotating its key does not change `ACCOUNT_ID`.
 
 ```bash
 agents accounts
 agents accounts add work --provider anthropic --auth setup-token
 agents accounts add gateway --provider openrouter --auth api-key \
   --from-secrets openrouter.ai:OPENROUTER_API_KEY
+agents accounts set-default claude gateway
+agents accounts sync gateway --device yosemite-s0
 agents run claude --account work
 ```
 
-`~/.agents/accounts.yaml` stores the stable id, name, provider, authentication
-kind, and a device-local secret reference. Raw credentials remain in the OS
-credential store. Supported credential kinds are API keys, long-lived Claude
-setup tokens, and bearer tokens. Native OAuth login remains owned by the harness;
-agents-cli does not turn a login discovered in an agent version home into a named
-account. A custom harness can set `account: <name>`, and a per-run `--account`
-overrides that default. An incompatible provider/host pair or a missing secret
-fails before the agent process starts.
+The account bundle has a fixed shape: `ACCOUNT_ID`, `PROVIDER`, `AUTH_TYPE`,
+optional `BASE_URL`, and either `API_KEY` or `TOKEN`. It always uses secrets policy
+`never`, so a background agent launch cannot raise Touch ID. On Linux workers,
+`accounts sync` writes the bundle to the encrypted file backend using a
+machine-local key; Windows uses Credential Manager. Values cross SSH on stdin,
+never argv. Sync is explicit and copies provider bundles only. It never copies
+native OAuth files.
+
+Resolution order is explicit `--account`, then the compatible account selected by
+`accounts set-default`, then the harness's native/balanced behavior. An incompatible
+provider/host pair or a bundle absent from the destination fails before the agent
+process starts. A migrated v2 `accounts.yaml` becomes these bundles transactionally;
+the old registry is archived only after every bundle was written successfully.
 
 Usage and authentication health are device-local read models owned by the
 agents-cli daemon. Every ordinary consumer (`agents run`, `view`, `versions`,

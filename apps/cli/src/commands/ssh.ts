@@ -818,7 +818,7 @@ async function runFleetPing(opts: { json?: boolean; local?: boolean; verbose?: b
 // process, then SSH each peer's `devices harnesses --local --json` worker.
 // ---------------------------------------------------------------------------
 
-interface HarnessInventoryOpts {
+export interface HarnessInventoryOpts {
   agents?: AgentId[];
   devices?: string[];
   refresh?: boolean;
@@ -917,7 +917,7 @@ async function runDevicesHarnesses(opts: HarnessInventoryOpts): Promise<void> {
   else for (const line of renderHarnessMatrix(results)) console.log(line);
 }
 
-async function runDevicesAccounts(opts: HarnessInventoryOpts): Promise<void> {
+export async function runDevicesAccounts(opts: HarnessInventoryOpts): Promise<void> {
   if (opts.local) {
     const rows = await collectLocalHarnessInventory({ agents: opts.agents, refresh: opts.refresh });
     if (opts.json) console.log(JSON.stringify({ host: machineId(), accounts: groupByAccount(rows) }));

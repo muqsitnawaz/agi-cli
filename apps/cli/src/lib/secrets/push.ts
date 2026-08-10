@@ -80,6 +80,8 @@ export interface PushBundleOptions {
   passphrase?: string;
   /** Label for the audit trail — `export --host` vs `fleet apply`. */
   operation: string;
+  /** Preserve an automation account's permanent prompt-free policy remotely. */
+  policyNever?: boolean;
 }
 
 export interface PushBundleResult {
@@ -229,6 +231,14 @@ export function pushResolvedBundleToHost(
       return fail(verdict.kind === 'locked-keychain'
         ? keychainWriteFailureMessage(host, bundle, verdict.reason)
         : `pushed '${bundle}' but could not verify it on the remote: ${verdict.reason}`);
+    }
+  }
+
+  if (opts.policyNever) {
+    const policy = remoteSecretsRaw(host, ['policy', bundle, 'never', '--i-understand'], { osLookupName: host });
+    if (policy.code !== 0) {
+      const msg = (policy.stderr || policy.stdout || '').trim();
+      return fail(`pushed '${bundle}' but could not set remote policy never${msg ? `: ${msg}` : ''}`);
     }
   }
 

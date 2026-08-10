@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "command": "agents",
   "groups": 104,
-  "commands": 581,
+  "commands": 584,
   "root": {
     "name": "agents",
     "path": "",
@@ -47,13 +47,22 @@
       "name": "accounts",
       "path": "accounts",
       "aliases": [],
-      "description": "Manage durable provider credentials",
+      "description": "Browse native logins and manage provider account bundles",
       "args": [],
       "options": [
         {
           "flags": "--json",
           "description": "Machine-readable account metadata",
           "long": "--json",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--fleet",
+          "description": "Show native OAuth identities across reachable devices",
+          "long": "--fleet",
           "required": false,
           "optional": false,
           "variadic": false,
@@ -70,7 +79,7 @@
           "negate": false
         }
       ],
-      "examples": "agents accounts add work --provider anthropic --auth setup-token\nagents accounts add openrouter-work --provider openrouter --auth api-key --from-secrets openrouter.ai:OPENROUTER_API_KEY\nagents accounts set-key work\nagents accounts inspect work --json\nagents run claude --account work",
+      "examples": "agents accounts add work --provider anthropic --auth setup-token\nagents accounts add openrouter-work --provider openrouter --auth api-key --from-secrets openrouter.ai:OPENROUTER_API_KEY\nagents accounts set-key work\nagents accounts inspect work --json\nagents accounts set-default claude work\nagents accounts sync work --device yosemite-s0\nagents run claude --account work",
       "notes": "Accounts are durable credentials, independent of agent versions. Native OAuth login remains managed by the harness and is not copied or renamed by agents-cli.",
       "subcommands": [
         {
@@ -123,6 +132,33 @@
               "variadic": false,
               "negate": false
             },
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
+        {
+          "name": "clear-default",
+          "path": "accounts clear-default",
+          "aliases": [],
+          "description": "Return a harness to native login or balanced account selection",
+          "args": [
+            {
+              "name": "agent",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            }
+          ],
+          "options": [
             {
               "flags": "-h, --help",
               "description": "Show help",
@@ -262,6 +298,39 @@
           "subcommands": []
         },
         {
+          "name": "set-default",
+          "path": "accounts set-default",
+          "aliases": [],
+          "description": "Use a provider account for a harness when --account is omitted",
+          "args": [
+            {
+              "name": "agent",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            },
+            {
+              "name": "name",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            }
+          ],
+          "options": [
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
+        {
           "name": "set-key",
           "path": "accounts set-key",
           "aliases": [],
@@ -280,6 +349,51 @@
               "description": "Import from an existing agents secrets entry",
               "long": "--from-secrets",
               "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
+        {
+          "name": "sync",
+          "path": "accounts sync",
+          "aliases": [],
+          "description": "Copy one provider account bundle to a worker device",
+          "args": [
+            {
+              "name": "name",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            }
+          ],
+          "options": [
+            {
+              "flags": "--device <device>",
+              "description": "Destination device or SSH host",
+              "long": "--device",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--force",
+              "description": "Replace matching keys on the destination",
+              "long": "--force",
+              "required": false,
               "optional": false,
               "variadic": false,
               "negate": false

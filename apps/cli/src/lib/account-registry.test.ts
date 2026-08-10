@@ -1,9 +1,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as yaml from 'yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setKeychainBackendForTest, setKeychainToken, type KeychainBackend } from './secrets/index.js';
-import { addAccount, inspectAccount, readAccountRegistry, removeAccount, renameAccount, resolveCredentialAccount, setAccountSecret } from './account-registry.js';
+import { addAccount, inspectAccount, readAccountRegistry, removeAccount, renameAccount, resolveAccountSelection, resolveCredentialAccount, setAccountSecret } from './account-registry.js';
+import { buildAccountBundle } from './account-schema.js';
 
 class MemoryKeychain implements KeychainBackend {
   values = new Map<string, string>();
@@ -62,6 +64,13 @@ describe('credential account registry (bundle-canonical)', () => {
     });
   });
 
+  it('prefers explicit selection, then a per-harness default', () => {
+    const meta = { accounts: { defaults: { claude: 'default-work' } } };
+    expect(resolveAccountSelection('one-run', 'claude', meta)).toBe('one-run');
+    expect(resolveAccountSelection(undefined, 'claude', meta)).toBe('default-work');
+    expect(resolveAccountSelection(undefined, 'codex', meta)).toBeUndefined();
+  });
+
   it('rotates a credential without changing the stable id or name', () => {
     const before = addAccount('work', 'cursor', 'api-key', 'old-key', root);
     setAccountSecret('work', 'new-key', root);
@@ -80,7 +89,32 @@ describe('credential account registry (bundle-canonical)', () => {
     const renamed = inspectAccount('company', root);
     expect(renamed.id).toBe(before.id); // ACCOUNT_ID survives the rename
     expect(resolveCredentialAccount('company', 'claude', undefined, root).env.ANTHROPIC_AUTH_TOKEN).toBe('secret');
-    expect(() => removeAccount('company', root)).toThrow('used by harness: deepseek');
+    expect(() => removeAccount('company', root)).toThrow('profiles: deepseek');
+  });
+
+  it('refuses removal while defaults or routines still select the account', () => {
+    const account = addAccount('work', 'openrouter', 'api-key', 'secret', root);
+    fs.writeFileSync(path.join(root, 'agents.yaml'), yaml.stringify({ accounts: { defaults: { claude: account.id } } }));
+    fs.mkdirSync(path.join(root, 'routines'));
+    fs.writeFileSync(path.join(root, 'routines', 'daily.yml'), yaml.stringify({ name: 'daily', agent: 'claude', account: 'work' }));
+
+    expect(() => removeAccount('work', root)).toThrow('defaults: claude; routines: daily');
+    expect(inspectAccount('work', root).secretPresent).toBe(true);
+  });
+
+  it('fails loud when two bundles carry the same stable account id', () => {
+    const account = addAccount('before-rename', 'openrouter', 'api-key', 'secret', root);
+    const duplicate = buildAccountBundle({
+      id: account.id,
+      name: 'after-rename',
+      provider: account.provider,
+      auth: account.auth,
+    }, 'other-secret');
+    writeBundleWithItems(duplicate.bundle, duplicate.items);
+
+    expect(() => readAccountRegistry(root)).toThrow(
+      "Account bundles 'after-rename' and 'before-rename' share ACCOUNT_ID",
+    );
   });
 
   it('removes the account and its device-local credential', () => {
