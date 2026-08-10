@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_96 command groups · 561 commands._
+_95 command groups · 557 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -1050,13 +1050,4 @@ agents workflows add [source]   Install workflows from a source (GitHub, local) 
 agents workflows list [agent]   Show installed workflows and which agent versions they are synced to
 agents workflows remove [name]  Remove a workflow from version homes (interactive picker if no name given)
 agents workflows view [name]    Read workflow details (description, subagents, model, MCP)
-```
-
-## worktree — Provision, release, and prune per-terminal git worktrees for agent isolation.
-
-```
-agents worktree                          Provision, release, and prune per-terminal git worktrees for agent isolation.
-agents worktree provision <terminal-id>  Create (or reuse) an isolated worktree for an agent terminal. Prints the absolute path.
-agents worktree prune                    Try to release every agent worktree under .agents/worktrees/. Skips dirty or unpushed ones.
-agents worktree release <terminal-id>    Remove the worktree if clean and the branch is merged or has no unpushed commits.
 ```
