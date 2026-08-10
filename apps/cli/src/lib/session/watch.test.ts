@@ -52,4 +52,29 @@ describe('session watch protocol', () => {
     expect(events.filter((event) => event.type === 'upsert')).toHaveLength(3);
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it('consumes a first publication written during the startup handoff', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-watch-handoff-'));
+    const journalPath = path.join(dir, 'active.jsonl');
+    const controller = new AbortController();
+    const statuses: string[] = [];
+    const watching = watchLocalSessions({
+      scope: 'local', signal: controller.signal, journalPath, journalPollMs: 5,
+      readCache: () => {
+        fs.appendFileSync(journalPath, `${JSON.stringify({
+          version: 1, scope: 'local', capturedAt: 2, upserts: [], removes: [],
+        })}\n`);
+        return undefined;
+      },
+      emit: (event) => {
+        if (event.type === 'scope') {
+          statuses.push(event.status);
+          if (event.status === 'available') controller.abort();
+        }
+      },
+    });
+    await watching;
+    expect(statuses).toEqual(['unavailable', 'available']);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });

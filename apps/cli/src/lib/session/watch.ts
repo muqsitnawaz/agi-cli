@@ -192,6 +192,9 @@ export async function watchLocalSessions(options: WatchLocalOptions): Promise<vo
     const heartbeatTimer = setInterval(() => options.emit(state.heartbeat(options.scope)), heartbeatMs);
     const stop = () => { fs.unwatchFile(journal, journalListener); clearInterval(heartbeatTimer); resolve(); };
     options.signal.addEventListener('abort', stop, { once: true });
+    // Close the offset/read/watch handoff: a publisher may append after the
+    // startup offset is captured but before watchFile is registered.
+    readAppended();
   });
 }
 
