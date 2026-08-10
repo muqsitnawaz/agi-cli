@@ -191,11 +191,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   registry: [loadPackages],
   search: [loadPackages],
   install: [loadPackages],
-  // packages.ts also registers `publish` at top level (commands/packages.ts:435).
-  // It was missing here, so `agents publish` only worked via the unknown-command
-  // fallback that registers the whole tree — and the --host router could not see
-  // it as a real command at all (RUSH-2022).
-  publish: [loadPackages],
   routines: [loadRoutines],
   monitors: [loadMonitors],
   projects: [loadProjects],
