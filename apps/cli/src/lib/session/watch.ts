@@ -1,4 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { loadDevices, isControlDevice, isDialableDevice } from '../devices/registry.js';
+import { deviceIdentityArgs, sshTargetFor } from '../devices/connect.js';
+import { machineId, normalizeHost } from '../machine-id.js';
+import { SSH_OPTS, controlOpts, shellQuote } from '../ssh-exec.js';
+import { buildWindowsAgentsCommand, remoteShellFor } from '../hosts/remote-cmd.js';
 import type { ActiveSession } from './active.js';
 import { loadLocalActiveSessions } from './session-cache.js';
 
@@ -9,10 +16,10 @@ export const SESSION_WATCH_HEARTBEAT_MS = 15_000;
 export type SessionWatchScopeStatus = 'available' | 'unavailable';
 
 export type SessionWatchEnvelope =
-  | { version: 1; type: 'reset'; streamId: string; sequence: number; scope: string; rows: SessionWatchRow[] }
-  | { version: 1; type: 'upsert'; streamId: string; sequence: number; scope: string; rowKey: string; row: SessionWatchRow }
-  | { version: 1; type: 'remove'; streamId: string; sequence: number; scope: string; rowKey: string }
-  | { version: 1; type: 'scope'; streamId: string; sequence: number; scope: string; status: SessionWatchScopeStatus; reason?: string }
+  | { version: 1; type: 'reset'; streamId: string; sequence: number; capturedAt: number; scope: string; rows: SessionWatchRow[] }
+  | { version: 1; type: 'upsert'; streamId: string; sequence: number; capturedAt: number; scope: string; rowKey: string; row: SessionWatchRow }
+  | { version: 1; type: 'remove'; streamId: string; sequence: number; capturedAt: number; scope: string; rowKey: string }
+  | { version: 1; type: 'scope'; streamId: string; sequence: number; capturedAt: number; scope: string; status: SessionWatchScopeStatus; reason?: string }
   | { version: 1; type: 'heartbeat'; streamId: string; sequence: number; scope: string; capturedAt: number };
 
 export interface SessionWatchRow extends Omit<ActiveSession, 'viewingIn'> {
@@ -61,8 +68,8 @@ export class SessionWatchState {
 
   constructor(streamId: string = randomUUID()) { this.streamId = streamId; }
 
-  private base<T extends SessionWatchEnvelope['type']>(type: T): { version: 1; type: T; streamId: string; sequence: number } {
-    return { version: SESSION_WATCH_VERSION, type, streamId: this.streamId, sequence: ++this.sequence };
+  private base<T extends SessionWatchEnvelope['type']>(type: T): { version: 1; type: T; streamId: string; sequence: number; capturedAt: number } {
+    return { version: SESSION_WATCH_VERSION, type, streamId: this.streamId, sequence: ++this.sequence, capturedAt: Date.now() };
   }
 
   reset(scope: string, sourceRows: ActiveSession[]): SessionWatchEnvelope {
@@ -146,4 +153,74 @@ export async function watchLocalSessions(options: WatchLocalOptions): Promise<vo
     const stop = () => { clearInterval(refreshTimer); clearInterval(heartbeatTimer); resolve(); };
     options.signal.addEventListener('abort', stop, { once: true });
   });
+}
+
+export interface WatchFleetOptions {
+  signal: AbortSignal;
+  emit: (event: SessionWatchEnvelope) => void;
+  reconnectMs?: number;
+}
+
+function remoteWatchCommand(os: string): string {
+  const args = ['sessions', 'watch', '--json', '--local'];
+  return remoteShellFor(os) === 'powershell'
+    ? buildWindowsAgentsCommand({ args })
+    : `bash -lc ${shellQuote(`agents ${args.map(shellQuote).join(' ')}`)}`;
+}
+
+/**
+ * Subscribe to every dialable compute device with one persistent SSH process.
+ * A peer disconnect emits `scope: unavailable` but no removes; reconnecting
+ * peer resets only its own scope. There is no recurring fleet list command.
+ */
+export async function watchFleetSessions(options: WatchFleetOptions): Promise<void> {
+  const local = watchLocalSessions({ scope: machineId(), signal: options.signal, emit: options.emit });
+  let devices: Awaited<ReturnType<typeof loadDevices>>;
+  try { devices = await loadDevices(); }
+  catch { await local; return; }
+  const self = machineId();
+  const peers = Object.values(devices).filter((device) =>
+    isDialableDevice(device)
+    && !isControlDevice(device)
+    && normalizeHost(device.name) !== self
+    && ['windows', 'linux', 'macos'].includes(device.platform),
+  );
+  const reconnectMs = options.reconnectMs ?? 2_000;
+  const peerTasks = peers.map(async (device) => {
+    const scope = normalizeHost(device.name);
+    const state = new SessionWatchState();
+    while (!options.signal.aborted) {
+      let target: string;
+      try { target = sshTargetFor(device); }
+      catch (error) {
+        options.emit(state.scope(scope, 'unavailable', error instanceof Error ? error.message : String(error)));
+        break;
+      }
+      const child = spawn('ssh', [
+        ...SSH_OPTS, ...controlOpts(), ...deviceIdentityArgs(device), target, remoteWatchCommand(device.platform),
+      ], { stdio: ['ignore', 'pipe', 'ignore'] });
+      const stop = () => child.kill('SIGTERM');
+      options.signal.addEventListener('abort', stop, { once: true });
+      const reader = createInterface({ input: child.stdout! });
+      reader.on('line', (line) => {
+        try {
+          const event = JSON.parse(line) as SessionWatchEnvelope;
+          if (event.version === SESSION_WATCH_VERSION && typeof event.sequence === 'number') options.emit(event);
+        } catch { /* incomplete/non-protocol peer output is not state */ }
+      });
+      const code = await new Promise<number | null>((resolve) => {
+        child.once('error', () => resolve(null));
+        child.once('close', resolve);
+      });
+      reader.close();
+      options.signal.removeEventListener('abort', stop);
+      if (options.signal.aborted) break;
+      options.emit(state.scope(scope, 'unavailable', code === null ? 'ssh failed' : `ssh exited ${code}`));
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, reconnectMs);
+        options.signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+      });
+    }
+  });
+  await Promise.all([local, ...peerTasks]);
 }

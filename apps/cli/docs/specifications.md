@@ -532,7 +532,31 @@ SSH access (§7); rendering sessions that no harness produced.
   route through the same placement/decrypt path as a local bundle
   (`commands/sessions-import.ts:pullFromR2` → `planImport`/`writeImport`).
 
-#### 3.6 Index / DB
+#### 3.6 Incremental consumer stream
+
+- **SES-41 (MUST).** `agents sessions watch --json` MUST emit newline-delimited,
+  versioned envelopes carrying `streamId` and a strictly increasing `sequence`.
+  Version 1 defines `reset`, `upsert`, `remove`, `scope`, and `heartbeat`; heartbeat
+  envelopes carry `capturedAt`. A row's `rowKey` MUST be stable within its device
+  scope and MUST be treated as opaque by consumers
+  (`lib/session/watch.ts:5-31,56-99`; `lib/session/watch.test.ts:10-18`).
+- **SES-42 (MUST).** The stream MUST include current sessions and retained recovery
+  states. Each row MUST carry CLI-owned recovery/lifecycle metadata; an unavailable
+  device scope MUST emit `scope: unavailable` without removing its retained rows,
+  and a reconnect MUST replace only that scope through its next reset
+  (`lib/session/watch.ts:33-49,68-95,169-220`; `lib/session/watch.test.ts:20-26`).
+- **SES-43 (MUST).** The default stream MUST hold one long-lived local subscription
+  and one long-lived SSH subscription per dialable compute device. `--local` MUST
+  suppress peer subscriptions. Neither path may poll transcript history; the local
+  stream refreshes through the shared live cache/state path
+  (`lib/session/watch.ts:111-149,164-220`; `commands/sessions-watch.ts:27-38`).
+- **SES-44 (MUST).** A one-shot `agents sessions ... --json` listing is distinct
+  from the incremental stream, but MUST expose the same picker-facing lifecycle,
+  device, viewing, and recovery metadata in each durable row. Consumers MUST NOT
+  need a second live-session join (`commands/sessions.ts:849-887,3150-3160`;
+  `commands/sessions.test.ts:61-83`).
+
+#### 3.7 Index / DB
 
 - **SES-28 (MUST).** The index MUST open with WAL + `busy_timeout=30000` so
   multiple processes read concurrently, and use the built-in sqlite binding

@@ -1,12 +1,12 @@
 import type { Command } from 'commander';
 import { machineId } from '../lib/machine-id.js';
 import { setHelpSections } from '../lib/help.js';
-import { watchLocalSessions } from '../lib/session/watch.js';
+import { watchFleetSessions, watchLocalSessions } from '../lib/session/watch.js';
 
 export function registerSessionsWatchCommand(parent: Command): void {
   const command = parent.command('watch')
     .description('Stream canonical live and recoverable session row changes as NDJSON')
-    .requiredOption('--json', 'Emit versioned NDJSON envelopes')
+    .option('--json', 'Emit versioned NDJSON envelopes')
     .option('--local', 'Watch only this machine');
 
   setHelpSections(command, {
@@ -24,16 +24,18 @@ export function registerSessionsWatchCommand(parent: Command): void {
     `,
   });
 
-  command.action(async () => {
+  command.action(async (_options: { local?: boolean; json?: boolean }, invoked: Command) => {
+    const options = invoked.optsWithGlobals() as { local?: boolean; json?: boolean };
+    if (!options.json) invoked.error('error: required option \'--json\' not specified');
     const controller = new AbortController();
     const stop = () => controller.abort();
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
     try {
-      await watchLocalSessions({
-        scope: machineId(), signal: controller.signal,
-        emit: (event) => process.stdout.write(`${JSON.stringify(event)}\n`),
-      });
+      const emit = (event: Parameters<Parameters<typeof watchFleetSessions>[0]['emit']>[0]) =>
+        process.stdout.write(`${JSON.stringify(event)}\n`);
+      if (options.local) await watchLocalSessions({ scope: machineId(), signal: controller.signal, emit });
+      else await watchFleetSessions({ signal: controller.signal, emit });
     } finally {
       process.off('SIGINT', stop);
       process.off('SIGTERM', stop);

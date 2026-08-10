@@ -844,6 +844,45 @@ export function serializeActiveSessionsForJson(
   }));
 }
 
+export interface SessionPickerJsonRow extends SessionMeta {
+  state: ActiveSession['status'] | 'inactive';
+  resumable: boolean;
+  unwatched: boolean;
+  viewingIn: string | null;
+  sourceDevice: string;
+  lastActivityMs: number;
+  pid: number | null;
+  recovery: { command: 'agents'; args: string[]; cwd?: string } | null;
+}
+
+/** Canonical JSON row consumed by resume pickers and other session UIs. */
+export function serializeSessionPickerRows(
+  sessions: SessionMeta[],
+  liveSessions: ActiveSession[],
+  self: string = machineId(),
+): SessionPickerJsonRow[] {
+  const liveById = new Map(liveSessions.filter((row) => row.sessionId).map((row) => [row.sessionId!, row]));
+  return sessions.map((session) => {
+    const live = liveById.get(session.id);
+    const sourceDevice = live?.machine ?? session.machine ?? self;
+    const viewingIn = live ? viewingInLabel(live) ?? null : null;
+    const resumable = buildResumeCommand(session) !== null;
+    return {
+      ...session,
+      state: live?.status ?? 'inactive',
+      resumable,
+      unwatched: !viewingIn,
+      viewingIn,
+      sourceDevice,
+      lastActivityMs: live?.lastActivityMs ?? Date.parse(session.lastActivity ?? session.timestamp),
+      pid: live?.pid ?? null,
+      recovery: resumable
+        ? { command: 'agents', args: ['sessions', 'resume', session.id, '--device', sourceDevice], ...(session.cwd ? { cwd: session.cwd } : {}) }
+        : null,
+    };
+  });
+}
+
 /**
  * Compact, colour-coded badges for the durable/awaiting signals. Text-only (no
  * emoji, per repo convention): `plan` / `ask` / `perm` for why it's waiting,
@@ -3141,7 +3180,14 @@ async function sessionsAction(
       const filtered = searchQuery
         ? resolveSessionQuery(sessions, searchQuery).matches
         : sessions;
-      process.stdout.write(serializeSessionsJson(filtered));
+      // JSON is the canonical picker contract: enrich the durable rows once
+      // from the shared live cache so every consumer gets lifecycle/recovery
+      // metadata without performing its own join or transcript scan.
+      const live = await gatherActiveSessions({
+        local: options.local === true || process.env[NO_FANOUT_ENV] === '1',
+        hosts: options.host,
+      });
+      process.stdout.write(serializeSessionsJson(serializeSessionPickerRows(filtered, live.sessions)));
       return;
     }
 
