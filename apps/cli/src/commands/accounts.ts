@@ -132,12 +132,19 @@ export function registerAccountsCommand(program: Command): void {
       const account = findAccount(name);
       if (!account) throw new Error(`Unknown provider account '${name}'.`);
       const remoteBackend = resolveRemoteOsSync(o.device) === 'win32' ? 'keychain' : 'file';
+      const literalValues = {
+        ACCOUNT_ID: account.id,
+        PROVIDER: account.provider,
+        AUTH_TYPE: account.auth,
+        ...(account.baseUrl ? { BASE_URL: account.baseUrl } : {}),
+      };
       const result = pushBundleToHost(account.name, o.device, {
         remoteBackend,
         force: o.force,
         operation: 'accounts sync',
         policyNever: true,
         agentOnly: false,
+        literalValues,
       });
       if (!result.ok) throw new Error(`${result.message}\nRetry: agents accounts sync ${account.name} --device ${o.device}${o.force ? ' --force' : ''}`);
       console.log(chalk.green(`${account.name} synced to ${o.device} (${result.keyCount} keys, ${remoteBackend} backend, policy never).`));
