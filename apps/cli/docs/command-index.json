@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "command": "agents",
-  "groups": 96,
-  "commands": 568,
+  "groups": 95,
+  "commands": 567,
   "root": {
     "name": "agents",
     "path": "",
@@ -30261,26 +30261,6 @@
           "subcommands": []
         }
       ]
-    },
-    {
-      "name": "whoami",
-      "path": "whoami",
-      "aliases": [],
-      "description": "Show synced-secrets login status",
-      "args": [],
-      "options": [
-        {
-          "flags": "-h, --help",
-          "description": "Show help",
-          "short": "-h",
-          "long": "--help",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        }
-      ],
-      "subcommands": []
     },
     {
       "name": "workflows",

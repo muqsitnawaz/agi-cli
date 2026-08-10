@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_96 command groups · 568 commands._
+_95 command groups · 567 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -1050,12 +1050,6 @@ agents watchdog status                       Show whether the daemon watchdog pa
 ```
 agents webhook        Run a localhost signed webhook receiver for routine triggers.
 agents webhook serve  Receive signed GitHub/Linear webhooks on /hooks/<source> and fire matching routines.
-```
-
-## whoami — Show synced-secrets login status
-
-```
-agents whoami  Show synced-secrets login status
 ```
 
 ## workflows — Manage multi-agent pipeline workflows (WORKFLOW.md bundles)
