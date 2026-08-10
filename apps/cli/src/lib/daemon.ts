@@ -1066,11 +1066,18 @@ export async function runDaemon(): Promise<void> {
         const dev = await runDeviceSync({ soft: true, mode: 'refresh' });
         // Soft-fail: re-run the on-disk set through the writer so registered /
         // ignored sentinels still get pruned; do not invent a full clear.
+        const before = new Set(readPendingSentinels().map((p) => p.name));
         await reconcilePendingSentinels(dev.ok ? dev.pending : readPendingSentinels());
         if (dev.ok && dev.pending.length) {
           log('INFO', `devices: ${dev.pending.length} new pending (${dev.pending.map((p) => p.name).join(', ')})`);
         } else if (!dev.ok) {
-          log('WARN', `device probe soft-fail (pruned known non-pending): ${dev.reason ?? 'unknown'}`);
+          const after = new Set(readPendingSentinels().map((p) => p.name));
+          const pruned = [...before].filter((n) => !after.has(n));
+          // Silent when nothing changed (no-tailscale hosts soft-fail every tick).
+          // INFO only when we actually removed a phantom so operators can see cleanup.
+          if (pruned.length) {
+            log('INFO', `device probe soft-fail pruned ${pruned.length} non-pending (${pruned.join(', ')}): ${dev.reason ?? 'unknown'}`);
+          }
         }
       } catch (err) {
         log('WARN', `device probe tick failed: ${(err as Error).message}`);

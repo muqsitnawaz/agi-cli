@@ -24,12 +24,17 @@ import * as path from 'path';
 
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-devices-pending-test-'));
 process.env.HOME = TEST_HOME;
+// Match apps/cli/tests/setup.ts: pending sentinels resolve via AGENTS_STATE_DIR,
+// not HOME. Pin both so this file stays hermetic when run alone or under vitest.
+process.env.AGENTS_STATE_DIR = path.join(TEST_HOME, 'state');
+process.env.AGENTS_DEVICES_DIR = path.join(TEST_HOME, 'devices');
 
 const { reconcilePendingSentinels, clearPendingSentinel, readPendingSentinels } = await import('./pending.js');
 const { addIgnored, removeIgnored, removeDevice, upsertDevice } = await import('./registry.js');
+const { getDevicesPendingDir } = await import('../state.js');
 
 function pendingDir(): string {
-  return path.join(TEST_HOME, '.agents', '.cache', 'state', 'devices-pending');
+  return getDevicesPendingDir();
 }
 
 beforeEach(async () => {
