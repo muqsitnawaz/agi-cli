@@ -879,6 +879,7 @@ export async function resolveRoutineLaunch(
     resolveRunVersion?: typeof resolveRunVersion;
     resolveAccountVersion?: typeof resolveAccountVersion;
     findCredentialAccount?: (name: string) => boolean;
+    readMeta?: typeof readMeta;
     resolveCredentialAccount?: (name: string, host: AgentId) => { env: Record<string, string> };
   } = {},
 ): Promise<RoutineLaunchPlan> {
@@ -895,7 +896,7 @@ export async function resolveRoutineLaunch(
     : false;
   const selectedCredential = config.account
     ? (explicitCredential ? config.account : undefined)
-    : resolveAccountSelection(undefined, agent, readMeta());
+    : resolveAccountSelection(undefined, agent, (deps.readMeta ?? readMeta)());
   if (selectedCredential) {
     (deps.resolveCredentialAccount ?? resolveCredentialAccount)(selectedCredential, agent);
   }
