@@ -36,7 +36,12 @@ Both come from the same mistake: **agents-cli touching the interactive login.**
    stores, syncs, or references a harness's interactive OAuth login. Not for usage,
    not for fleet sync, not for account selection. It is never written to the keychain
    by us and never copied across devices. It stays on the box that minted it and
-   refreshes itself there.
+   refreshes itself there. Enforced on the transfer path too (RUSH-2527): `agents
+   run --host --copy-creds` no longer serializes a native login (Claude OAuth +
+   codex/grok/gemini `auth.json`) to another device — it **refuses** and steers to
+   a portable provider account (`src/lib/hosts/credentials.ts` →
+   `buildHostCredentialScript`; SING-1b). Portable account bundles still cross the
+   fleet through the explicit `agents accounts sync` path.
 
 3. **The only credential agents-cli manages is a deliberate, durable credential.** A
    long-lived, **non-rotating** OAuth setup-token / API key / bearer token
