@@ -5,32 +5,37 @@ import type { ProjectRule } from './settings';
 /** Window-local projection of the canonical CLI stream; contains no lifecycle logic. */
 export class SessionPresentationStore {
   private rows = new Map<string, unknown>();
-  private version = -1;
-  private currentScope: unknown;
+  private sequences = new Map<string, number>();
+  private scopes = new Map<string, { status: 'available' | 'unavailable'; reason?: string }>();
 
   apply(event: SessionCliFactPayload): boolean {
-    if (event.version < this.version) return false;
-    this.version = event.version;
+    const previous = this.sequences.get(event.streamId) ?? 0;
+    if (event.sequence <= previous) return false;
+    this.sequences.set(event.streamId, event.sequence);
     if (event.type === 'reset') {
-      this.rows.clear();
-      for (const row of event.sessions ?? []) {
-        const id = this.idOf(row);
-        if (id) this.rows.set(id, row);
+      for (const [rowKey, value] of this.rows) {
+        if (this.scopeOf(value) === event.scope) this.rows.delete(rowKey);
+      }
+      for (const row of event.rows ?? []) {
+        const rowKey = this.rowKeyOf(row);
+        if (rowKey) this.rows.set(rowKey, row);
       }
     } else if (event.type === 'upsert') {
-      const id = this.idOf(event.session);
-      if (id) this.rows.set(id, event.session);
-    } else if (event.type === 'remove' && event.id) {
-      this.rows.delete(event.id);
-    } else if (event.type === 'scope') {
-      this.currentScope = event.scope;
+      const rowKey = event.rowKey || this.rowKeyOf(event.row);
+      if (rowKey && event.row) this.rows.set(rowKey, event.row);
+    } else if (event.type === 'remove' && event.rowKey) {
+      this.rows.delete(event.rowKey);
+    } else if (event.type === 'scope' && event.status) {
+      this.scopes.set(event.scope, { status: event.status, ...(event.reason ? { reason: event.reason } : {}) });
     }
     return true;
   }
 
   sessions(): unknown[] { return [...this.rows.values()]; }
-  scope(): unknown { return this.currentScope; }
-  clear(): void { this.rows.clear(); this.version = -1; this.currentScope = undefined; }
+  scope(scope: string): { status: 'available' | 'unavailable'; reason?: string } | undefined {
+    return this.scopes.get(scope);
+  }
+  clear(): void { this.rows.clear(); this.sequences.clear(); this.scopes.clear(); }
 
   /** Normalize the CLI stream rows for UI rendering without starting another query. */
   presentedSessions(
@@ -68,11 +73,16 @@ export class SessionPresentationStore {
     return result;
   }
 
-  private idOf(value: unknown): string | undefined {
+  private rowKeyOf(value: unknown): string | undefined {
     if (!value || typeof value !== 'object') return undefined;
-    const row = value as { id?: unknown; sessionId?: unknown };
-    const id = row.id ?? row.sessionId;
-    return typeof id === 'string' && id ? id : undefined;
+    const rowKey = (value as { rowKey?: unknown }).rowKey;
+    return typeof rowKey === 'string' && rowKey ? rowKey : undefined;
+  }
+
+  private scopeOf(value: unknown): string | undefined {
+    if (!value || typeof value !== 'object') return undefined;
+    const scope = (value as { sourceDevice?: unknown }).sourceDevice;
+    return typeof scope === 'string' ? scope : undefined;
   }
 }
 

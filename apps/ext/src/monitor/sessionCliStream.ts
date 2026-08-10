@@ -1,12 +1,8 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { createInterface } from 'readline';
 
-export type SessionCliEvent =
-  | { version: number; type: 'reset'; sessions: unknown[] }
-  | { version: number; type: 'upsert'; session: unknown }
-  | { version: number; type: 'remove'; id: string }
-  | { version: number; type: 'scope'; scope: unknown }
-  | { version: number; type: 'heartbeat'; ts?: number };
+import type { SessionCliFactPayload as SessionCliEvent } from './protocol';
+export type { SessionCliEvent };
 
 export interface SessionCliStreamOptions {
   emit: (event: SessionCliEvent) => void;
@@ -32,7 +28,8 @@ export class SessionCliStream {
     lines.on('line', (line) => {
       try {
         const event = JSON.parse(line) as SessionCliEvent;
-        if (event && Number.isInteger(event.version) && typeof event.type === 'string') {
+        if (event?.version === 1 && typeof event.streamId === 'string'
+          && Number.isInteger(event.sequence) && typeof event.type === 'string') {
           this.options.emit(event);
         }
       } catch {

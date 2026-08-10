@@ -126,13 +126,17 @@ export const MONITOR_FACT = {
 } as const;
 
 export interface SessionCliFactPayload {
-  version: number;
+  version: 1;
   type: 'reset' | 'upsert' | 'remove' | 'scope' | 'heartbeat';
-  sessions?: unknown[];
-  session?: unknown;
-  id?: string;
-  scope?: unknown;
-  ts?: number;
+  streamId: string;
+  sequence: number;
+  capturedAt: number;
+  scope: string;
+  rows?: unknown[];
+  row?: unknown;
+  rowKey?: string;
+  status?: 'available' | 'unavailable';
+  reason?: string;
 }
 
 export function isSessionCliFact(
@@ -141,7 +145,9 @@ export function isSessionCliFact(
   const payload = event.payload as SessionCliFactPayload | undefined;
   return event.type === MONITOR_FACT.sessionCli
     && !!payload
-    && Number.isInteger(payload.version)
+    && payload.version === 1
+    && typeof payload.streamId === 'string'
+    && Number.isInteger(payload.sequence)
     && typeof payload.type === 'string';
 }
 

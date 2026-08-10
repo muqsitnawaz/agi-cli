@@ -9,7 +9,8 @@ describe('session id hydration from the canonical CLI stream', () => {
     sessionPresentationStore.apply({
       version: 1,
       type: 'reset',
-      sessions: [{ sessionId: 'session-1', terminalId: 'CX-1', machine: 'box-a' }],
+      streamId: 'stream-a', sequence: 1, capturedAt: 1, scope: 'box-a',
+      rows: [{ rowKey: 'one', sourceDevice: 'box-a', sessionId: 'session-1', terminalId: 'CX-1', machine: 'box-a' }],
     });
     expect(await fetchTerminalIdSessionMap('box-a')).toEqual(new Map([['CX-1', 'session-1']]));
     expect(await resolveSessionIdForTerminal('CX-1', 'box-a')).toBe('session-1');
@@ -19,9 +20,10 @@ describe('session id hydration from the canonical CLI stream', () => {
     sessionPresentationStore.apply({
       version: 1,
       type: 'reset',
-      sessions: [
-        { sessionId: 'one', terminalId: 'T-1', machine: 'box-a' },
-        { sessionId: 'two', terminalId: 'T-2', machine: 'box-b' },
+      streamId: 'stream-b', sequence: 1, capturedAt: 1, scope: 'fleet',
+      rows: [
+        { rowKey: 'one', sourceDevice: 'box-a', sessionId: 'one', terminalId: 'T-1', machine: 'box-a' },
+        { rowKey: 'two', sourceDevice: 'box-b', sessionId: 'two', terminalId: 'T-2', machine: 'box-b' },
       ],
     });
     expect(await fetchTerminalIdSessionMap('box-a')).toEqual(new Map([['T-1', 'one']]));
