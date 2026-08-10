@@ -5,3 +5,4 @@
 - **`agents sessions reap` is removed** (it shipped in 1.22.36 alongside the dead-pane reaper). The 5-minute daemon sweep stays — it is the part that matters, and it only kills sessions where *all* panes are dead. The daemon calls the reaper directly, and `agents tmux kill <name>` (idempotent) already covers the manual case.
 
 Source: `apps/cli/src/commands/sessions-resume.ts`, `apps/cli/src/commands/focus.ts`, `apps/cli/src/commands/{attach,reconnect,go}.ts`, `apps/cli/src/lib/session/types.ts`.
+
