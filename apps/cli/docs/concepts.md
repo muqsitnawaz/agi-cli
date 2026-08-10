@@ -110,10 +110,12 @@ agents-cli is two application-layer surfaces over one shared set of on-disk stat
 **`apps/cli`** (the `agents` / `ag` CLI) is the framework: it owns the SQLite session
 index, `sessions` / `teams` / `run` / `cloud`, the pid→id registry, the audit log,
 and the SSH fan-out to peers. **`apps/ext`** (AGI EXT, the VS Code extension) is a
-consumer: it spawns agent terminals and renders the Fleet, but for live state
-it shells out to `agents sessions --active --json` and reshapes the JSON — it holds no
-data models of its own. Fix a mechanism in the CLI and every consumer benefits. Full
-detail in [architecture.md](architecture.md).
+consumer: it spawns agent terminals, renders CLI-owned state, and sends controls back
+through CLI commands. One elected extension monitor owns a long-lived
+`agents sessions watch --json` stream; Resume and Fork query transcript history only
+when their pickers open. The extension does not discover sessions, rank launch targets,
+or read tracker/watchdog state itself. Fix a mechanism in the CLI and every consumer
+benefits. Full detail in [architecture.md](architecture.md).
 
 ## Two kinds of "session"
 
@@ -253,13 +255,21 @@ no remote semantics reject the flag with a clear message rather than commander's
 raw `unknown option`. The target may be a registered host name, a capability tag
 (`--host gpu --any`), a raw `user@host`, or the special value `auto`
 (`--device auto` / `--host auto`) to pick the least-loaded reachable host where
-the requested agent is installed and signed in, keeping execution local when no
-remote is better. `agents run` and `agents teams add` use this live harness-aware
+the requested agent has an eligible account. The local device is evaluated by
+the same rule; an unreachable, overloaded, signed-out, rate-limited, or
+out-of-credits pool fails loud instead of silently launching locally. `agents run` and `agents teams add` use this live harness-aware
 pick. Generic host-only callers such as `agents ssh auto`, which have no requested
 harness to validate, retain the 14-day `sessions.db` affinity resolver; `agents
 ssh` also refuses a pick that lands on the current machine because its purpose is
 to dial out. Harness is always the agent you type, never auto-picked. Probe
-failure degrades to local.
+failure aborts automatic placement.
+
+UI clients read the owning JSON surfaces: `agents devices list --json` for the
+effective profile/config and resource health, `agents devices status --json` for
+the fleet health report, and `agents devices accounts --json` for account quota
+verdicts and timestamps. These reads are advisory; launch remains one CLI-owned
+transaction, for example `agents run auto --interactive --device auto --strategy
+balanced --mode auto`.
 
 The two registries feed **one host pool** behind the `HostProvider` seam:
 `local` (agents.yaml overlay ∪ ssh-config) registers first, `devices` (the

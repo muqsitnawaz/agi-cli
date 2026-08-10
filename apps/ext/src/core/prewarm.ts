@@ -184,7 +184,7 @@ export function buildVersionedResumeCommand(
   _version?: string,
   _host?: string,
 ): string {
-  return `agents sessions resume ${shellQuoteArg(sessionId)}`;
+  return `agents sessions resume ${shellQuoteArg(sessionId)} --vscodium`;
 }
 
 /** Quote a session selector only when shell syntax requires it. */
