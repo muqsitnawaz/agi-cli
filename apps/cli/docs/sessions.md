@@ -11,27 +11,45 @@ OpenClaw, Rush, Hermes, Grok, Kimi, Droid, and Cursor (the `SESSION_AGENTS` set 
 
 ## Session lifecycle verbs
 
-These subcommands sit on one axis (get back into a conversation). They are **not**
-interchangeable — pick the verb for the intent:
+**One verb gets you back in.** `agents sessions resume` detects which state the
+session is in rather than making you pick a verb for it:
 
 | Intent | Verb |
 | --- | --- |
-| Focus by unique id, or multi-select history/live rows and open tabs | `agents sessions focus [selector]` |
-| Select by harness/version on a device (`latest` resolves there) | `agents sessions focus claude@latest --device <host>` |
-| Compose browser filters, including live-state unions | `agents sessions focus claude --orphan --waiting --device <host>` |
-| Attach only — never open a new tab / fork a copy | `agents sessions focus [id] --attach-only` |
-| Re-enter a dropped remote terminal (attach live pane, else resume) | `agents reconnect [id]` / `agents sessions reconnect [id]` |
-| Deprecated alias of focus --attach-only | `agents sessions go` (prints a deprecation notice) |
+| Get back into a session — by id, id prefix, or `ag-<agent>-<shortid>` tmux alias | `agents sessions resume <id-or-alias>` |
+| Attach only — never open a new tab / fork a copy | `agents sessions resume <id> --attach-only` |
+| Multi-select history and open each as a tab/split | `agents sessions resume` |
 | Interactive → **headless** (keep working unattended) | `agents sessions detach <id>` |
-| Headless → **interactive** in this terminal | `agents sessions attach <id>` |
-| Reopen one identity directly, or multi-select history into tabs/splits | `agents sessions resume [id-or-alias]` / `agents sessions resume` |
 | Resume one session in its original harness, version, device, cwd, and mode | `agents resume <id>` |
 | Continue one session from a script / `run` path | `agents run <agent> --resume <id> …` |
+| Branch a copy you can continue separately | `agents sessions fork <id>` |
+| Raw escape hatch — attach a tmux session by name, no session index involved | `agents tmux attach <name>` |
 
-`focus` is the default “take me there” action. With an id or tmux alias it resolves
+Given `<id-or-alias>`, `resume` resolves the canonical session across the fleet,
+rechecks liveness, and then: attaches a **live tmux pane**; brings a **headless**
+session to the foreground; or **recovers** an ended one on its owning device. A
+retained dead pane is diagnostic state, not an attach target.
+
+**Retired (hidden, still working for one release, each prints the replacement):**
+
+| Retired | Use instead |
+| --- | --- |
+| `agents sessions attach <id>` | `agents sessions resume <id>` |
+| `agents reconnect [id]` | `agents sessions resume` |
+| `agents sessions go <id>` | `agents sessions resume <id> --attach-only` |
+| `agents sessions focus` | `agents sessions resume` (focus remains the internal dispatcher) |
+
+`resume` is the one “take me there” action. With an id or tmux alias it resolves
 the canonical session across the fleet, rechecks liveness, and attaches only when
 the process and pane are alive. A retained dead tmux pane is diagnostic state, not
 an attach target; the command enters centralized recovery on its owning device.
+
+A live `ag-<agent>-<shortid>` tmux session attaches by NAME even when the session
+index cannot attribute it. That matters for harnesses whose alias suffix is the
+launch id rather than the harness session id, and which write no
+`state/sessions/<pid>.json` record — previously the alias fell through to a keyword
+search and such a pane had no working selector at all.
+
 With no selector or filter it opens a
 multi-select picker over the live fleet: check several and each opens as a new tab
 in the terminal you're in (Ghostty / iTerm / tmux, auto-detected), reusing
@@ -41,19 +59,16 @@ with no attach rail enters recovery in the tab, reported never silently dropped.
 Any selector or filter switches to the shared sessions-browser candidate pipeline:
 agent/version (`claude@2.1.187`, `claude@latest`), device/host/local, project/time,
 team/routine, skill/plugin, bookmarks, and the complete live-state union. A unique
-id focuses directly; agent/version and text selectors always show the rich preview
+id resolves directly; agent/version and text selectors always show the rich preview
 picker, even for one result. `latest` and `oldest` resolve independently on each
 queried device. A full tmux name such as `ag-codex-c1f3d813` and a unique alias
 suffix such as `c1f3d813` resolve to the harness-native session ID on the device
-that owns them; ambiguous prefixes and suffixes fail instead of guessing.
-`--attach-only` keeps the old `go` behavior (attach one living
-process or refuse). `reconnect` is the recovery-first sibling for a dropped remote
-terminal: it attaches the live pane if it survived, else resumes the session, and
-with no id targets the most recent session started from the current directory (the
-one that most likely just dropped) rather than the fleet picker — the manual
-companion to the automatic reattach that runs when `agents run --device <box>`
-loses its ssh link (see [hosts.md](hosts.md)). `attach` / `detach` are the presence
-pair (foreground ↔ background). Bare `resume` is the multi-open/history path. Top-level
+that owns them; ambiguous prefixes and suffixes fail instead of guessing. Synced
+copies of one transcript count as **one** logical session, so a full UUID never
+reports an ambiguity.
+`--attach-only` attaches one living process or refuses, never forking a copy.
+`detach` is the inverse direction (foreground → background); it stops the
+interactive process and respawns the agent headless, which no other verb does. Top-level
 `agents resume <id-or-label>` is the strict single-session shortcut:
 a full **UUID** checks the local SQLite index first and resolves with **zero** SSH on
 a local hit; only on a local miss does it fan out to registered devices, and there the
@@ -1320,7 +1335,7 @@ healthy one in the row list.
 the bookmarked ones. Outside a TTY, `agents sessions bookmark <id>` (`--remove`, `--list`,
 `--json`) does the same, and `agents sessions --bookmarks` is the flag twin of `b` — so
 the `y` copy-cmd round-trips a bookmarked view into a command. `f` focuses the highlighted
-session through the same attach-or-recover decision as `agents sessions focus <id>`;
+session through the same attach-or-recover decision as `agents sessions resume <id>`;
 Enter keeps its existing resume behavior.
 
 Bookmarks live in `~/.agents/.history/bookmarks.json` keyed by session id, **not** in

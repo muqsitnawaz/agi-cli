@@ -93,6 +93,9 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
       agents sessions resume 019fd114
       agents sessions resume ag-codex-c1f3d813
 
+      # Attach a living pane only — never resume a copy (the old go)
+      agents sessions resume 019fd114 --attach-only
+
       # Force a backend / side-by-side splits / a remote host
       agents sessions resume --ghostty
       agents sessions resume --vscodium
@@ -100,7 +103,10 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
       agents sessions resume --host zion --tmux
     `,
     notes: `
-      - A UUID/prefix or ag-<agent>-<suffix> alias bypasses the picker: a live pane is attached; an inactive session resumes on its owning device.
+      - This is the ONE verb for getting back in. It detects the state: a live tmux pane is attached, a headless session comes to the foreground, an ended one recovers on its owning device.
+      - A UUID/prefix or ag-<agent>-<suffix> alias bypasses the picker. A live alias attaches by name even when the session index cannot attribute it.
+      - Retired spellings still work for one release and print the replacement: sessions attach, sessions go, reconnect.
+      - Going the other way (foreground -> background) is 'agents sessions detach <id>'.
       - With no identity selector, space toggles a session, enter confirms, and tab toggles the preview pane.
       - Layout: one tab per session by default. --splits packs session pairs side by side in each tab.
       - Backend: auto-detected from the terminal you're in (iTerm / Ghostty / tmux); override with --iterm/--ghostty/--tmux/--vscodium.
