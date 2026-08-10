@@ -92,6 +92,7 @@ function writeDeviceDoc(docPath: string, doc: Record<string, unknown>): void {
         fs.rmdirSync(path.dirname(docPath));
       } catch { /* not empty — other files live in the device dir */ }
     } else {
+      fs.mkdirSync(path.dirname(docPath), { recursive: true });
       atomicWriteFileSync(docPath, META_HEADER + yaml.stringify(doc));
     }
   } catch (err) {
