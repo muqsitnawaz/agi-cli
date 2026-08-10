@@ -135,7 +135,12 @@ function statusWord(status: LiveStatusFilter): string {
 
 export function registerFocusCommand(program: Command): void {
   const cmd = program
-    .command('focus')
+    // Hidden, but deliberately NOT warned. `sessions resume <id>` dispatches by
+    // spawning `agents sessions focus <id>` (buildSessionLifecycleArgs), so a
+    // deprecation notice here would print on every ordinary resume. focus is now
+    // the internal lifecycle dispatcher; `resume` is the surface. Do not add a
+    // console.warn here without first removing that delegation.
+    .command('focus', { hidden: true })
     .argument('[selector]', 'Session id/prefix, agent@version, or topic/path search')
     .option('--local', 'Only this machine (skip the cross-host sweep)')
     .option('--attach-only', 'Attach only — never open a new tab / resume a copy (the old `go` behavior)')
