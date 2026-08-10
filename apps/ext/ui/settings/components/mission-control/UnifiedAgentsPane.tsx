@@ -152,7 +152,7 @@ const NEW_AGENT_MENU: Array<{ agent: string; name: string; abbr: string; keys: s
 
 type FilterTab = 'all' | 'terminal' | 'cloud' | 'team'
 
-type FleetTaskType = 'plan' | 'implement' | 'test' | 'review' | 'bugfix' | 'docs'
+type FactoryTaskType = 'plan' | 'implement' | 'test' | 'review' | 'bugfix' | 'docs'
 
 function compactHumanLabel(text: string | null | undefined): string {
   const line = (text || '').split('\n').map((l) => l.trim()).find(Boolean) || ''
@@ -196,10 +196,10 @@ interface UnifiedAgent {
   linearIssue?: string | null
   mode?: string
   // AGI EXT metadata surfaced as badges in the UI
-  taskType?: FleetTaskType | null
+  taskType?: FactoryTaskType | null
   teammateName?: string | null
   /** For team rows, a roll-up count of task-types across members. */
-  taskTypeCounts?: Partial<Record<FleetTaskType, number>>
+  taskTypeCounts?: Partial<Record<FactoryTaskType, number>>
   // Watchdog-specific
   watchdogEvents?: WatchdogEventUI[]
 }
@@ -245,9 +245,9 @@ function buildUnifiedList(terminals: TerminalInfo[], tasks: TaskSummary[]): Unif
       const allFiles = task.agents.flatMap((a) => [...(a.files_created || []), ...(a.files_modified || [])]).slice(0, 6)
       const totalTools = task.agents.reduce((s, a) => s + (a.bash_commands?.length || 0), 0)
       const linear = task.agents.map((a) => a.linear_issue).find(Boolean)
-      const taskTypeCounts: Partial<Record<FleetTaskType, number>> = {}
+      const taskTypeCounts: Partial<Record<FactoryTaskType, number>> = {}
       for (const a of task.agents) {
-        const tt = a.task_type as FleetTaskType | null | undefined
+        const tt = a.task_type as FactoryTaskType | null | undefined
         if (tt) taskTypeCounts[tt] = (taskTypeCounts[tt] ?? 0) + 1
       }
       items.push({
@@ -299,7 +299,7 @@ function buildUnifiedList(terminals: TerminalInfo[], tasks: TaskSummary[]): Unif
         toolCalls: a.bash_commands?.length || 0,
         linearIssue: a.linear_issue,
         mode: a.mode,
-        taskType: (a.task_type as FleetTaskType | null | undefined) ?? null,
+        taskType: (a.task_type as FactoryTaskType | null | undefined) ?? null,
         teammateName: a.name ?? null,
       })
     }

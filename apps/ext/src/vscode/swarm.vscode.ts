@@ -607,7 +607,7 @@ export interface AgentDetail {
   cloud_summary?: string | null;
   branch?: string | null;
   linear_issue?: string | null;
-  // Fleet label metadata (propagated from agents-cli meta.json via teams status).
+  // Software Factory label metadata (propagated from agents-cli meta.json via teams status).
   task_type?: 'plan' | 'implement' | 'test' | 'review' | 'bugfix' | 'docs' | null;
   name?: string | null;
   after?: string[];

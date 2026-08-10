@@ -390,7 +390,7 @@ agents sessions detach a1b2c3d4     # go headless in the background, keep workin
 agents sessions attach a1b2c3d4     # resume it interactively, right here
 ```
 
-Both are agent-agnostic -- they route through the same `agents run --resume` path (native resume for Claude/Codex, `/continue` replay for the rest). `agents sessions --active` shows each session's **owner** (the human who launched it, resolved from the tailnet identity, or `-` for an unresolved local run) and its `presence` -- `attached` (you're watching it), `background` (running headless), or `parked` (its background run finished) -- so the menu bar and the ext show who is running what, and where. In AGI EXT, **Agents: Detach** (`Cmd/Ctrl+K B`) and **Agents: Attach** (`Cmd/Ctrl+K A`) do the same over the focused terminal.
+Both are agent-agnostic -- they route through the same `agents run --resume` path (native resume for Claude/Codex, `/continue` replay for the rest). `agents sessions --active` shows each session's **owner** (the human who launched it, resolved from the tailnet identity, or `-` for an unresolved local run) and its `presence` -- `attached` (you're watching it), `background` (running headless), or `parked` (its background run finished) -- so the menu bar and AGI EXT show who is running what, and where. In AGI EXT, **Agents: Detach** (`Cmd/Ctrl+K B`) and **Agents: Attach** (`Cmd/Ctrl+K A`) do the same over the focused terminal.
 
 ---
 
@@ -1076,7 +1076,7 @@ one always-on daemon per device. `agents daemon` is its runtime surface:
 
 ```bash
 agents daemon                # identity + duplicates + per-service health (same as status)
-agents daemon status --json  # machine-readable, for scripts / the ext
+agents daemon status --json  # machine-readable, for scripts / AGI EXT
 
 agents daemon start          # start it (bypasses daemon.enabled -- the deliberate override)
 agents daemon stop           # stop it

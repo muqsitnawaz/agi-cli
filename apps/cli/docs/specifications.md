@@ -2685,7 +2685,7 @@ a machine-wide process sweep.)
   **WHEN** the command completes, **THEN** the CLI's config is the state that
   changed (`agents watchdog rotate off`), and the daemon, the menubar, and every
   other surface observe the same off state.
-- **GIVEN** a limited session lives in a Factory editor tab, **WHEN** the daemon
+- **GIVEN** a limited session lives in an AGI EXT editor tab, **WHEN** the daemon
   rotates it, **THEN** the daemon drives the extension's `/inject` endpoint to act
   in that tab — the extension performs no detection or decision of its own.
 - **GIVEN** a contributor adds a `setInterval` in apps/ext, **WHEN** the
@@ -2712,7 +2712,7 @@ a machine-wide process sweep.)
   the same ticket. It is now the shipped `auto-dispatch` system routine, which
   satisfies SING-9(a) via an owner pin: `agents routines devices auto-dispatch --set
   <device>`.
-- **SING-GAP-1.** The Factory monitor leader/follower protocol
+- **SING-GAP-1.** The AGI EXT monitor leader/follower protocol
   (apps/ext `src/monitor/`) still coordinates presence fan-out inside the
   extension with its own election. It performs no fleet-affecting action today
   (post-#1914 it broadcasts read-side snapshots only), so it satisfies SING-2, but

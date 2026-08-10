@@ -8,5 +8,7 @@
   the word keep every identifier, path, and env var they had — Factory.ai/droid
   (`~/.factory`, `FACTORY_API_KEY`, the `factory` cloud provider), the beta-gated
   `agents factory` Software Factory command (`FACTORY_FLOOR_URL`,
-  `~/.agents/factory.yml`), and Rush Cloud's own Factory Floor — and their comments
-  still name them, not the extension.
+  `~/.agents/factory.yml`), and Rush Cloud's own Factory Floor. Their comments and
+  their user-facing labels still name them — `agents teams --task-type` remains a
+  "Factory label" because it configures the Software Factory worker, not this
+  dashboard.
