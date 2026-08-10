@@ -858,6 +858,13 @@ export async function runDaemon(): Promise<void> {
         ? `workflow: ${config.workflow}`
         : `agent: ${config.agent}`;
     log('INFO', `Triggering job '${config.name}' (${jobLabel})`);
+    emit('routine.start', {
+      module: 'routine',
+      name: config.name,
+      kind: config.command ? 'command' : config.workflow ? 'workflow' : 'agent',
+      ...(config.agent ? { agent: config.agent } : {}),
+      ...(config.workflow ? { workflow: config.workflow } : {}),
+    });
     // RUSH-2030: branded desktop notification on start (agent/workflow routines;
     // suppressed for command housekeeping). Finish/output is fired from the
     // onFinish hook below — executeJobDetached finalizes the run in-process, so
@@ -867,6 +874,14 @@ export async function runDaemon(): Promise<void> {
     try {
       const meta = await executeJobDetached(config, {
         onFinish: (final) => {
+          emit('routine.end', {
+            module: 'routine',
+            name: final.jobName,
+            runId: final.runId,
+            status: final.status,
+            ...(final.duration != null ? { durationMs: final.duration } : {}),
+            ...(final.exitCode != null ? { exitCode: final.exitCode } : {}),
+          });
           try { notifyRoutineFinish(final); } catch { /* best-effort */ }
           // RUSH-2288: a failed/timed-out routine also reaches the OWNER's phone
           // (in-process owner channel stack), not just the local desktop. Green
@@ -884,6 +899,12 @@ export async function runDaemon(): Promise<void> {
     } catch (err) {
       const message = (err as Error).message;
       log('ERROR', `Job '${config.name}' failed to spawn: ${message}`);
+      emit('routine.end', {
+        module: 'routine',
+        name: config.name,
+        status: 'failed',
+        detail: redactSecrets(message).slice(0, 500),
+      });
       // RUSH-2030: the START ping already fired unconditionally above. A pre-spawn
       // failure produces no run record and thus no onFinish, so send a synthetic
       // "failed to start" finish here — otherwise the user is left with an orphaned
@@ -967,6 +988,12 @@ export async function runDaemon(): Promise<void> {
       const { runWatchdogPass } = await import('./watchdog/service.js');
       const result = await runWatchdogPass({ nudge: true });
       log('INFO', `watchdog: ${result.counts.total} live, ${result.counts.stalled} stalled, ${result.counts.nudged} nudged`);
+      emit('watchdog.action', {
+        module: 'watchdog',
+        total: result.counts.total,
+        stalled: result.counts.stalled,
+        nudged: result.counts.nudged,
+      });
     } catch (err) {
       log('WARN', `watchdog tick failed: ${(err as Error).message}`);
     } finally {
