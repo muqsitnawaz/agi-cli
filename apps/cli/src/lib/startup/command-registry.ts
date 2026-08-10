@@ -54,7 +54,6 @@ export const loadRoutines: ModuleLoader = async () => (await import('../../comma
 export const loadMonitors: ModuleLoader = async () => (await import('../../commands/monitors.js')).registerMonitorsCommands;
 export const loadProjects: ModuleLoader = async () => (await import('../../commands/projects.js')).registerProjectsCommands;
 export const loadRun: ModuleLoader = async () => (await import('../../commands/exec.js')).registerRunCommand;
-export const loadResume: ModuleLoader = async () => (await import('../../commands/resume.js')).registerResumeCommand;
 export const loadOpen: ModuleLoader = async () => (await import('../../commands/open.js')).registerOpenCommand;
 export const loadReconnect: ModuleLoader = async () => (await import('../../commands/reconnect.js')).registerReconnectCommand;
 export const loadFork: ModuleLoader = async () => (await import('../../commands/fork.js')).registerForkCommand;
@@ -116,13 +115,10 @@ export const loadDaemon: ModuleLoader = async () => (await import('../../command
  * inherit the root's custom help formatter rather than getting the per-command
  * recursive pass. Keeping that ordering preserves their `--help` output exactly.
  */
-// `roster` is an observe-umbrella alias of `sessions --active` — same module,
-// same SQLite stack, same post-help registration order as sessions.
+// `roster` was a sessions --active alias — removed; use sessions --active.
 export const LAZY_COMMAND_NAMES: ReadonlySet<string> = new Set([
   'sessions',
-  'resume',
   'reconnect',
-  'roster',
   'teams',
   'cloud',
   'message',
@@ -175,7 +171,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   monitors: [loadMonitors],
   projects: [loadProjects],
   run: [loadRun],
-  resume: [loadResume],
   open: [loadOpen],
   reconnect: [loadReconnect],
   fork: [loadFork],
@@ -222,8 +217,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   uninstall: [loadUninstall],
   upgrade: [loadUpgrade],
   sessions: [loadSessions],
-  // Observe-umbrella alias of sessions --active (same lazy module).
-  roster: [loadSessions],
   teams: [loadTeams],
   tickets: [loadTickets],
   cloud: [loadCloud],
@@ -298,6 +291,8 @@ export const RETIRED_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set([
   'profiles',
   'snapshot',
   'cp',
+  'resume',
+  'roster',
 ]);
 
 

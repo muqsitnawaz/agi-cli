@@ -49,7 +49,7 @@ Thin second names for the product jobs — **no store merge**:
 |---|---|---|
 | What needs me? | `agents inbox` | `agents feed` |
 | What did agents post? | `agents timeline` | `agents feed --filter updates` |
-| Who is live? | `agents roster` | `agents sessions --active` |
+| Who is live? | `agents sessions --active` | `agents sessions --active` |
 
 `agents audit` and `agents logs` **are** aliases of `events` (with default family filters). Do not re-introduce a second store or query path.
 

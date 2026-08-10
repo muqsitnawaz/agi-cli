@@ -41,7 +41,7 @@ interchangeable — pick the verb for the intent:
 | Interactive → **headless** (keep working unattended) | `agents sessions detach <id>` |
 | Headless → **interactive** in this terminal | `agents sessions attach <id>` |
 | Reopen one identity directly, or multi-select history into tabs/splits | `agents sessions resume [id-or-alias]` / `agents sessions resume` |
-| Resume one session in its original harness, version, device, cwd, and mode | `agents resume <id>` |
+| Resume one session in its original harness, version, device, cwd, and mode | `agents sessions resume <id>` |
 | Continue one session from a script / `run` path | `agents run <agent> --resume <id> …` |
 
 `focus` is the default “take me there” action. With an id or tmux alias it resolves
@@ -70,7 +70,7 @@ one that most likely just dropped) rather than the fleet picker — the manual
 companion to the automatic reattach that runs when `agents run --device <box>`
 loses its ssh link (see [hosts.md](hosts.md)). `attach` / `detach` are the presence
 pair (foreground ↔ background). Bare `resume` is the multi-open/history path. Top-level
-`agents resume <id-or-label>` is the strict single-session shortcut:
+`agents sessions resume <id-or-label>` is the strict single-session shortcut:
 a full **UUID** checks the local SQLite index first and resolves with **zero** SSH on
 a local hit; only on a local miss does it fan out to registered devices, and there the
 fan-out is cancellable and early-exits — the first peer holding the UUID resolves the
@@ -1192,7 +1192,7 @@ filename, so a fork copies the transcript to a new-uuid file in the same
 directory, rewrites the embedded per-line `sessionId`, registers the new row via
 `upsertSession`, and labels it (`fork of <original>` by default, via the same
 run-name sidecar as `agents run --name`). The fork resolves immediately by
-`agents sessions` / `agents resume` and is version-pinned like any other session.
+`agents sessions` / `agents sessions resume` and is version-pinned like any other session.
 
 Scope: v1 supports **Claude** (single-file transcript, native `--resume`). Codex
 (single-file) is a natural next step; multi-file agents (grok, kimi) and DB-only

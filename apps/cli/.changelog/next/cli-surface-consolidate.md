@@ -7,4 +7,6 @@
   - Matrix runs use `agents run --broadcast` (with `--list-tasks` / `--results` / `--task`); top-level `bench` is removed.
   - Top-level `agents profiles` is removed — use `agents harness` (same `~/.agents/profiles/*.yml`).
   - Top-level `agents cp` is removed — use plain `scp` (or `scp -3` for host-to-host); no fleet broadcast advantage.
-  Source: `apps/cli/src/commands/{secrets-vault,accounts,budget,config,cost,output,insights,mine,setup-mine,snapshot,ssh,exec,run-broadcast,harness,profiles}.ts`, `apps/cli/src/lib/startup/command-registry.ts`.
+  - Top-level `agents resume` folds into `agents sessions resume` (strict id/prompt path + multi-select picker).
+  - Top-level `agents roster` is removed — use `agents sessions --active`.
+  Source: `apps/cli/src/commands/{secrets-vault,accounts,budget,config,cost,output,insights,mine,setup-mine,snapshot,ssh,exec,run-broadcast,harness,profiles,resume,sessions-resume}.ts`, `apps/cli/src/lib/startup/command-registry.ts`.

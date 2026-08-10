@@ -1,12 +1,13 @@
 /**
- * `agents sessions resume` — multi-select sessions and fan each one out into a
- * terminal surface via the terminal launch engine (src/lib/terminal).
+ * `agents sessions resume` — the one resume surface.
  *
- * Unlike the single-select picker behind bare `agents sessions` (which resumes
- * one session in place), this opens a checkbox picker, then asks where the
- * chosen sessions should resume. By default each session opens in its own tab in
- * the terminal you're in — iTerm / Ghostty / tmux, locally or on a remote host
- * via --host. `--splits` opts into packing two sessions side by side per tab.
+ * - Strict single-session: `sessions resume <id> [prompt]` with optional
+ *   --mode/--headless/--interactive/--cwd/--quiet/--here (formerly top-level
+ *   `agents resume`). Identity resolution + owner-device hop live in resume.ts.
+ * - Multi-select: bare `sessions resume` opens a checkbox picker and fans each
+ *   pick into a terminal tab/split via the terminal launch engine.
+ * - Direct id/alias always takes the strict path; live-pane attach is
+ *   `sessions focus`.
  */
 import * as fs from 'fs';
 import chalk from 'chalk';
@@ -41,11 +42,12 @@ import { spawn } from 'node:child_process';
 import { looksLikeSessionId } from '../lib/session/discover.js';
 import { machineId } from '../lib/session/sync/config.js';
 import { sessionOriginDevice, sessionRecoveryDestinationMatches } from '../lib/session/recovery.js';
+import { runStrictResume, wantsStrictResume, type StrictResumeOptions } from './resume.js';
 
 /** Opening more than this many live sessions at once asks for confirmation first. */
 export const CONFIRM_THRESHOLD = 5;
 
-export interface ResumeOptions {
+export interface ResumeOptions extends StrictResumeOptions {
   agent?: string;
   all?: boolean;
   teams?: boolean;
@@ -64,8 +66,9 @@ export interface ResumeOptions {
 export function registerSessionsResumeCommand(sessionsCmd: Command): void {
   const cmd = sessionsCmd
     .command('resume')
-    .argument('[query]', 'Session id/tmux alias to reopen directly, or text that filters the picker')
-    .description('Reopen one session by canonical identity, or multi-select history into terminal tabs/splits.')
+    .argument('[query]', 'Session id/tmux alias/label for strict resume, or text that filters the picker')
+    .argument('[prompt]', 'Optional follow-up prompt (strict resume with original harness/version/device)')
+    .description('Resume a session by id (strict), or multi-select history into terminal tabs/splits.')
     .option('-a, --agent <agent>', 'Filter by agent type and version (e.g., claude, codex@0.116.0)')
     .option('--all', 'Include sessions from every directory (not just current project)')
     .option('--teams', 'Include team-spawned sessions (hidden by default)')
@@ -77,19 +80,26 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
     .option('--tmux', 'Force the tmux backend')
     .option('--vscodium', 'Force the VSCodium agent-terminal backend (swarm-ext)')
     .option('--terminal-app', 'Force macOS Terminal.app (no split support — panes become tabs)')
-    .option('--splits', 'Pack two sessions side by side per tab (default: one tab per session)');
+    .option('--splits', 'Pack two sessions side by side per tab (default: one tab per session)')
+    .option('-m, --mode <mode>', 'Strict resume: override the recorded launch mode')
+    .option('-i, --interactive', 'Strict resume: interactive even when a prompt is provided')
+    .option('--headless', 'Strict resume: headless (a prompt is required)')
+    .option('--cwd <path>', 'Strict resume: override the recorded working directory')
+    .option('-q, --quiet', 'Strict resume: suppress routing banners')
+    .option('--here', 'Strict resume: run on this machine even if the session belongs to another device');
 
   setHelpSections(cmd, {
     examples: `
+      # Strict resume by full id (former top-level agents resume)
+      agents sessions resume 019fd0c8-b3e9-77a2-a1a4-444698c4d897
+      agents sessions resume 019fd0c8-b3e9-77a2-a1a4-444698c4d897 "finish the tests"
+      agents sessions resume ag-codex-c1f3d813 --mode edit
+
       # Pick several sessions; each opens in its own tab
       agents sessions resume
 
       # Pre-filter the pool before selecting (space in the filter → use [query])
       agents sessions resume "auth middleware"
-
-      # Reopen one session from any device by UUID prefix or tmux alias
-      agents sessions resume 019fd114
-      agents sessions resume ag-codex-c1f3d813
 
       # Force a backend / side-by-side splits / a remote host
       agents sessions resume --ghostty
@@ -98,32 +108,49 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
       agents sessions resume --host zion --tmux
     `,
     notes: `
-      - A UUID/prefix or ag-<agent>-<suffix> alias bypasses the picker: a live pane is attached; an inactive session resumes on its owning device.
+      - Strict path (id/tmux alias/label + optional prompt/--mode/--headless/--here): restores original harness, version, device, account, cwd, and mode. Searches the fleet; a local full-id hit resumes with zero SSH. Replaces the former top-level agents sessions resume.
+      - Attach a live pane without forking: agents sessions focus <id>.
       - With no identity selector, space toggles a session, enter confirms, and tab toggles the preview pane.
       - Layout: one tab per session by default. --splits packs session pairs side by side in each tab.
       - Backend: auto-detected from the terminal you're in (iTerm / Ghostty / tmux); override with --iterm/--ghostty/--tmux/--vscodium.
       - --vscodium opens each session as an agent terminal tab in VSCodium via the swarm-ext extension (works with --host too).
       - --host <alias> opens the terminal surface on that host only when it is the selected sessions' origin; recovery never migrates a session to another device.
-      - Recovery runs on the session's origin device: exact healthy origin uses native resume; otherwise a healthy version of the same harness receives /continue <id>.
+      - Use agents run auto --resume <id> when the original account is unavailable and another harness may continue.
     `,
   });
 
-  cmd.action(async (query: string | undefined, options: ResumeOptions) => {
-    await sessionsResumeAction(query, options);
+  cmd.action(async (query: string | undefined, prompt: string | undefined, options: ResumeOptions) => {
+    await sessionsResumeAction(query, prompt, options);
   });
 }
 
-async function sessionsResumeAction(query: string | undefined, options: ResumeOptions): Promise<void> {
+async function sessionsResumeAction(
+  query: string | undefined,
+  prompt: string | undefined,
+  options: ResumeOptions,
+): Promise<void> {
+  const strictOpts: StrictResumeOptions = {
+    mode: options.mode,
+    interactive: options.interactive,
+    headless: options.headless,
+    cwd: options.cwd,
+    quiet: options.quiet,
+    here: options.here,
+  };
+
+  // Direct id/alias (or label with prompt/strict flags) → strict resume
+  // (former top-level `agents sessions resume`). Live-pane attach is `sessions focus`.
+  if (query && (isDirectResumeSelector(query) || wantsStrictResume(prompt, strictOpts))) {
+    await runStrictResume(query.trim(), prompt, strictOpts);
+    return;
+  }
+
   if (!isInteractiveTerminal()) {
-    console.error(chalk.red('sessions resume needs an interactive terminal.'));
+    console.error(chalk.red('sessions resume needs an interactive terminal (or pass a session id for strict resume).'));
     process.exitCode = 1;
     return;
   }
 
-  if (query && isDirectResumeSelector(query)) {
-    await dispatchSessionLifecycleInPlace(query.trim(), options.host ? [options.host] : []);
-    return;
-  }
 
   const { agent, version } = parseAgentFilter(options.agent);
   const limit = parseInt(options.limit || '200', 10);
@@ -259,15 +286,14 @@ export function isDirectResumeSelector(query: string): boolean {
   return looksLikeSessionId(selector) || /^ag-[a-z][a-z0-9-]*-[0-9a-f]{8}$/i.test(selector);
 }
 
-/** Re-enter through the top-level command so fleet routing and harness policy
+/** Re-enter through sessions resume so fleet routing and harness policy
  * stay centralized. The child inherits this terminal for a real interactive resume. */
 export async function resumeSelectorInPlace(selector: string): Promise<void> {
-  await spawnCliInPlace(['resume', selector]);
+  await spawnCliInPlace(['sessions', 'resume', selector]);
 }
 
-/** Direct identities use focus as the lifecycle dispatcher: it rechecks the
- * live fleet, attaches a healthy pane, and falls through to `agents resume`
- * only when the process is no longer attachable. */
+/** Direct identities historically used focus as the lifecycle dispatcher. Prefer
+ * `sessions resume <id>` (strict) or `sessions focus <id>` (attach) explicitly. */
 export async function dispatchSessionLifecycleInPlace(selector: string, hosts: string[] = []): Promise<void> {
   await spawnCliInPlace(buildSessionLifecycleArgs(selector, hosts));
 }

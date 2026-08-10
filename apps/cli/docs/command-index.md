@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_81 command groups · 537 commands._
+_79 command groups · 535 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -581,18 +581,6 @@ agents repos view [name]         Show one repo's contents: git state and per-kin
 agents restore <target>  Restore a soft-deleted agent version (e.g. "codex@0.141.0") removed via prune/remove
 ```
 
-## resume — Resume a session by id, tmux alias, or exact label with its original harness, version, device, account, cwd, and mode. Searches the fleet automatically; a local full-id hit resumes with zero SSH.
-
-```
-agents resume <session> [prompt]  Resume a session by id, tmux alias, or exact label with its original harness, version, device, account, cwd, and mode. Searches the fleet automatically; a local full-id hit resumes with zero SSH.
-```
-
-## roster — Live agent roster (alias of `agents sessions --active`). Who is running right now.
-
-```
-agents roster  Live agent roster (alias of `agents sessions --active`). Who is running right now.
-```
-
 ## routines — Schedule agents to run on a cron schedule or at a specific time. The daemon starts at install/upgrade and on setup when daemon.enabled is not false; routines add also ensures it is running.
 
 ```
@@ -699,10 +687,10 @@ agents send [text]  Deliver a message through a channel provider (imessage, slac
 agents serve  Read-only local web companion: team diffs, routines, and cloud status (binds 127.0.0.1 only).
 ```
 
-## sessions — Find, browse, and read agent conversation transcripts. Live roster: `agents sessions --active` (alias: `agents roster`).
+## sessions — Find, browse, and read agent conversation transcripts. Live roster: `agents sessions --active`.
 
 ```
-agents sessions [query]                     Find, browse, and read agent conversation transcripts. Live roster: `agents sessions --active` (alias: `agents roster`).
+agents sessions [query]                     Find, browse, and read agent conversation transcripts. Live roster: `agents sessions --active`.
 agents sessions attach <id>                 Bring a backgrounded agent to the foreground — resume it interactively here
 agents sessions backfill                    Populate derived session data explicitly.
 agents sessions backfill resources          Derive historical skill/slash-command usage once into the local SQLite index.
@@ -734,7 +722,7 @@ agents sessions preview <id>                Show one rich session card without r
 agents sessions reap                        Kill tmux sessions whose panes are all dead, and the helper processes their agents left behind.
 agents sessions reconnect [session-id]      Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
 agents sessions render <selectors...>       Render one or more sessions as readable, redacted Markdown for review or sharing.
-agents sessions resume [query]              Reopen one session by canonical identity, or multi-select history into terminal tabs/splits.
+agents sessions resume [query] [prompt]     Resume a session by id (strict), or multi-select history into terminal tabs/splits.
 agents sessions stats                       Which skills/commands you actually invoke, and which installed ones are dead weight.
 agents sessions tail [sessionId]            Stream compact live lines from a session file as events are written. Long-running: Ctrl+C to stop. Claude and Codex only.
 agents sessions watch                       Stream canonical live and recoverable session row changes as NDJSON

@@ -1034,7 +1034,7 @@ export function registerRunCommand(program: Command): void {
         given. --cloud is mutually exclusive with --host/--lease and with
         local-run flags (--loop, --resume, --secrets, --terminal, …).
 
-      Resume: --resume <id> resolves full IDs locally first, then fleet-wide, and recovers on the source device with its cwd/mode. The exact healthy origin version uses native resume; otherwise a healthy version of the same harness replays via /continue. agents resume <id> infers the harness too.
+      Resume: --resume <id> resolves full IDs locally first, then fleet-wide, and recovers on the source device with its cwd/mode. The exact healthy origin version uses native resume; otherwise a healthy version of the same harness replays via /continue. agents sessions resume <id> infers the harness too.
 
       Passthrough: everything after -- is forwarded verbatim to the underlying agent CLI.
         agents run kimi -- --plan --some-native-flag value
@@ -1266,7 +1266,7 @@ export function registerRunCommand(program: Command): void {
         if (!autoHarnessRequested && requestedAgent !== resolvedResumeSource.agent) {
           console.error(chalk.red(
             `Session ${resolvedResumeSource.shortId} belongs to ${resolvedResumeSource.agent}, not ${requestedAgent}. ` +
-            `Use: agents resume ${resolvedResumeSource.id}`,
+            `Use: agents sessions resume ${resolvedResumeSource.id}`,
           ));
           process.exit(1);
         }
