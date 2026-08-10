@@ -299,7 +299,45 @@ describe('resolveRoutineLaunch (RUSH-1016 — pin + failover chain)', () => {
       chain: [{ agent: 'claude', version: '2.1.9' }],
       rotation: null,
       pinned: true,
+      forwardAccount: false,
     });
+  });
+
+  it('fails closed instead of rotating when a native account pin is unavailable', async () => {
+    let strategyCalled = false;
+    const error = await resolveRoutineLaunch(
+      baseJob({ name: 'missing-native', account: 'person@example.com', agent: 'claude' }),
+      process.cwd(),
+      {
+        findCredentialAccount: () => false,
+        resolveAccountVersion: async () => null,
+        resolveRunVersion: async () => {
+          strategyCalled = true;
+          return { version: '2.1.219', rotation: null };
+        },
+      },
+    ).then(() => null, (cause: unknown) => cause as Error);
+
+    expect(error?.message).toContain("account 'person@example.com' is not signed in");
+    expect(error?.message).toContain('refusing to rotate');
+    expect(strategyCalled).toBe(false);
+  });
+
+  it('does not forward a native identity through the durable --account resume path', async () => {
+    const config = baseJob({
+      name: 'native-resume',
+      account: 'person@example.com',
+      agent: 'claude',
+      resume: 'sess-1',
+    });
+    const launch = await resolveRoutineLaunch(config, process.cwd(), {
+      findCredentialAccount: () => false,
+      resolveAccountVersion: async () => '2.1.9',
+    });
+
+    expect(buildJobCommand(config, 'continue', launch.forwardAccount !== false)).toEqual([
+      'agents', 'run', 'claude', '--resume', 'sess-1', 'continue', '--mode', 'plan',
+    ]);
   });
 });
 

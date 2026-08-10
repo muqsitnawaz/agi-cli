@@ -450,14 +450,14 @@ export function routineSpawnCwd(
 }
 
 /** Build the full CLI argv for executing a job, applying mode, model, and permission flags. */
-export function buildJobCommand(config: JobConfig, resolvedPrompt: string): string[] {
+export function buildJobCommand(config: JobConfig, resolvedPrompt: string, forwardAccount = true): string[] {
   // Workflow branch: delegate to `agents run <workflow>` which handles subagent
   // injection, WORKFLOW.md orchestration, and model selection via frontmatter.
   // appendModelAndReasoning is intentionally skipped — the workflow frontmatter
   // owns model selection. No --timeout flag: the runner enforces its own SIGTERM/SIGKILL.
   if (config.workflow) {
     const cmd = ['agents', 'run', config.workflow, resolvedPrompt, '--mode', config.mode];
-    if (config.account) cmd.push('--account', config.account);
+    if (config.account && forwardAccount) cmd.push('--account', config.account);
     return cmd;
   }
 
@@ -472,7 +472,7 @@ export function buildJobCommand(config: JobConfig, resolvedPrompt: string): stri
   // it, not a fresh, context-less agent that would refuse an "opaque" instruction.
   if (config.resume) {
     const cmd = ['agents', 'run', agent, '--resume', config.resume, resolvedPrompt, '--mode', config.mode];
-    if (config.account) cmd.push('--account', config.account);
+    if (config.account && forwardAccount) cmd.push('--account', config.account);
     return cmd;
   }
 
@@ -861,6 +861,8 @@ export interface RoutineLaunchPlan {
   rotation: RotateResult | null;
   /** True when `config.version` pinned the target (no rotation). */
   pinned: boolean;
+  /** False when `account` names a harness-native login rather than a durable credential. */
+  forwardAccount?: boolean;
 }
 
 /**
@@ -907,10 +909,11 @@ export async function resolveRoutineLaunch(
         chain: [{ agent, version: accountVersion }],
         rotation: null,
         pinned: true,
+        forwardAccount: false,
       };
     }
-    process.stderr.write(
-      `[agents] routine ${config.name}: account '${config.account}' is not signed in; falling back to ${getConfiguredRunStrategy(agent, cwd)}\n`,
+    throw new Error(
+      `Routine '${config.name}' account '${config.account}' is not signed in for ${agent}; refusing to rotate to another account.`,
     );
   }
   if (config.version) {
@@ -924,6 +927,7 @@ export async function resolveRoutineLaunch(
       chain: [{ agent, version }],
       rotation: null,
       pinned: true,
+      ...(config.account ? { forwardAccount: explicitCredential } : {}),
     };
   }
 
@@ -1378,7 +1382,7 @@ async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undefined, a
 
   // Single-shot path: build the command once, then walk the launch chain on
   // rate/usage-limit failures (same detectRateLimit patterns as agents run).
-  const baseCmd = buildJobCommand(config, resolvedPrompt);
+  const baseCmd = buildJobCommand(config, resolvedPrompt, launch.forwardAccount !== false);
   const stdoutPath = path.join(runDir, 'stdout.log');
   // Truncate the log for a clean run; failover attempts append.
   fs.writeFileSync(stdoutPath, '', { mode: 0o600 });
@@ -1852,7 +1856,7 @@ async function executeJobDetachedClaimed(config: JobConfig, attempt: RoutineAtte
   });
 
   const resolvedPrompt = resolveJobPrompt(config);
-  let cmd = buildJobCommand(config, resolvedPrompt);
+  let cmd = buildJobCommand(config, resolvedPrompt, launch.forwardAccount !== false);
   // workflow AND resume dispatch through `agents run` — never binary-pin them (pinning
   // rewrites cmd[0] to the agent binary → broken `<binary> run …`).
   if (!dispatchesViaAgentsRun(config) && version && config.agent) {
