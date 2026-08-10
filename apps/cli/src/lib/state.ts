@@ -27,6 +27,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as yaml from 'yaml';
+import { stringifyDoc } from './yaml-io.js';
 import { execFileSync } from 'child_process';
 import { ensureLockTarget, atomicWriteFileSync, withFileLock } from './fs-atomic.js';
 import type { Meta, RegistryType } from './types.js';
@@ -1028,11 +1029,13 @@ function serializeCentral(central: Record<string, unknown>): string {
   // writeIfChanged skips it and the churn loop never starts.
   if (!changed) return existing;
   // Everything cleared → header only (never leave a flow `{}` behind).
-  // Otherwise force BLOCK style: an existing flow root (e.g. a legacy `{}`) would
-  // otherwise make the edited nodes render flow (`disabledCommands: [ teams ]`
-  // instead of a `- teams` block list). collectionStyle pins the whole doc block
-  // while parseDocument still preserves comments + key ordering.
-  return isEmpty ? META_HEADER : doc.toString({ collectionStyle: 'block' });
+  // Otherwise stringifyDoc: it still normalizes a legacy flow root (`{}`) to
+  // block, so edited nodes do not render flow (`disabledCommands: [ teams ]`
+  // instead of a `- teams` block list), but it no longer forces block on a
+  // normal document — that flattened committed flow sequences and made this
+  // writer disagree with feed.ts/activity.ts/migrate.ts on the same file
+  // (RUSH-2505). parseDocument still preserves comments + key ordering.
+  return isEmpty ? META_HEADER : stringifyDoc(doc);
 }
 
 function writeMetaUnlocked(meta: Meta): void {
