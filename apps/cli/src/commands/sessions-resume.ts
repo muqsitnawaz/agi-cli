@@ -60,6 +60,7 @@ export interface ResumeOptions {
   terminalApp?: boolean;
   splits?: boolean;
   attachOnly?: boolean;
+  local?: boolean;
 }
 
 export function registerSessionsResumeCommand(sessionsCmd: Command): void {
@@ -78,6 +79,7 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
     .option('--tmux', 'Force the tmux backend')
     .option('--vscodium', 'Force the VSCodium agent-terminal backend (swarm-ext)')
     .option('--terminal-app', 'Force macOS Terminal.app (no split support — panes become tabs)')
+    .option('--local', 'Only this machine (skip the cross-host sweep)')
     .option('--attach-only', 'With an id/alias: attach a living pane only — never resume a copy')
     .option('--splits', 'Pack two sessions side by side per tab (default: one tab per session)');
 
@@ -129,7 +131,7 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
   }
 
   if (query && isDirectResumeSelector(query)) {
-    await dispatchSessionLifecycleInPlace(query.trim(), options.host ? [options.host] : [], options.attachOnly === true);
+    await dispatchSessionLifecycleInPlace(query.trim(), options.host ? [options.host] : [], options.attachOnly === true, options.local === true);
     return;
   }
 
@@ -272,15 +274,22 @@ export async function dispatchSessionLifecycleInPlace(
   selector: string,
   hosts: string[] = [],
   attachOnly = false,
+  local = false,
 ): Promise<void> {
-  await spawnCliInPlace(buildSessionLifecycleArgs(selector, hosts, attachOnly));
+  await spawnCliInPlace(buildSessionLifecycleArgs(selector, hosts, attachOnly, local));
 }
 
-export function buildSessionLifecycleArgs(selector: string, hosts: string[] = [], attachOnly = false): string[] {
+export function buildSessionLifecycleArgs(
+  selector: string,
+  hosts: string[] = [],
+  attachOnly = false,
+  local = false,
+): string[] {
   return [
     'sessions', 'focus', selector,
     ...hosts.flatMap(host => ['--host', host]),
     ...(attachOnly ? ['--attach-only'] : []),
+    ...(local ? ['--local'] : []),
   ];
 }
 

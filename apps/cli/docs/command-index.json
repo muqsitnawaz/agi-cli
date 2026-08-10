@@ -23631,6 +23631,15 @@
               "negate": false
             },
             {
+              "flags": "--local",
+              "description": "Only this machine (skip the cross-host sweep)",
+              "long": "--local",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
               "flags": "--attach-only",
               "description": "With an id/alias: attach a living pane only — never resume a copy",
               "long": "--attach-only",

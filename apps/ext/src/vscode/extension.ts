@@ -245,7 +245,7 @@ function agentsSpawnEnv(): NodeJS.ProcessEnv {
 // Dispatch an agent HEADLESS: `agents run <agent> --mode <m> --headless -p <prompt>`
 // spawned DETACHED with no terminal tab. The run outlives this call (`unref`) and
 // shows in `agents sessions --active` under this machine as context:'headless', so it
-// can be focused/resumed later via `agents sessions focus`. No shell: args go straight
+// can be focused/resumed later via `agents sessions resume`. No shell: args go straight
 // to the binary (prompt stays a single arg, no quoting hazard).
 export function runHeadlessAgent(
   agentKey: string,
@@ -265,7 +265,7 @@ export function runHeadlessAgent(
   child.unref();
 }
 
-// Focus a session: `agents sessions focus <id>` opens/attaches a real terminal on it (a
+// Focus a session: `agents sessions resume <id>` opens/attaches a real terminal on it (a
 // background/headless run reopens in a new tab and resumes; a live terminal session is
 // attached). It auto-resolves the surface (no interactive picker), so it's safe to run
 // detached from the extension host.
@@ -317,7 +317,7 @@ async function detachAgentToBackground(): Promise<void> {
 
 // Bring a backgrounded/parked agent to the foreground: pick from the CLI's
 // active-session list (presence background/parked) and open a terminal running
-// `agents sessions attach <id>`, which resumes the session interactively in that tab.
+// `agents sessions resume <id>`, which resumes the session interactively in that tab.
 async function attachAgentFromBackground(): Promise<void> {
   const { sessions } = await fetchLocalSessions();
   const backgrounded = sessions.filter((s) => s.presence === 'background' || s.presence === 'parked');
@@ -337,7 +337,7 @@ async function attachAgentFromBackground(): Promise<void> {
   if (!pick?.sessionId) return;
   const term = vscode.window.createTerminal({ name: `attach ${pick.sessionId.slice(0, 8)}`, env: agentsSpawnEnv() });
   term.show();
-  term.sendText(`agents sessions attach ${pick.sessionId}`);
+  term.sendText(`agents sessions resume ${pick.sessionId}`);
 }
 
 export function focusSessionInTerminal(sessionId: string): void {

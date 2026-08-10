@@ -51,6 +51,14 @@ describe('buildSessionLifecycleArgs', () => {
     expect(buildSessionLifecycleArgs('019fd114')).toEqual(['sessions', 'focus', '019fd114']);
   });
 
+  // apps/ext's remote path shells `agents sessions resume <id> --local` on the
+  // peer; without the flag that call dies on an unknown option.
+  it('forwards --local so the extension remote path keeps working', () => {
+    expect(buildSessionLifecycleArgs('019fd114', [], false, true)).toEqual([
+      'sessions', 'focus', '019fd114', '--local',
+    ]);
+  });
+
   it('keeps both the host scope and the flag together', () => {
     expect(buildSessionLifecycleArgs('019fd114', ['zion'], true)).toEqual([
       'sessions', 'focus', '019fd114', '--host', 'zion', '--attach-only',

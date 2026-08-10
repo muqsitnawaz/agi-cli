@@ -3275,7 +3275,7 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         }
         break;
       // Focus a session — open/attach a real terminal on it (handles the headless
-      // "open it and step in" case). Local delegates to `agents sessions focus <id>`
+      // "open it and step in" case). Local delegates to `agents sessions resume <id>`
       // detached (native terminal tab); a session on a REMOTE device gets a VS Code
       // terminal that ssh's in and focuses it there (mirrors focusRemoteSession).
       case 'focusSession': {

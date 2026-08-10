@@ -1207,11 +1207,13 @@ agents (opencode) need per-agent handling. For an unsupported harness the comman
 fails loud and names the manual branch — start a fresh agent and seed it with
 `/continue <id>` (the source stays put) — rather than a silent no-op or fake copy.
 
-## Background & foreground (detach / attach)
+## Background & foreground (detach / resume)
 
 `agents sessions detach <id>` sends a live agent session to the background;
-`agents sessions attach <id>` brings it back. They live under `sessions` alongside
-`focus`/`resume` — the session-lifecycle axis — and route through the same
+`agents sessions resume <id>` brings it back — bringing a headless session to the
+foreground is one of the states `resume` detects, so there is no separate verb for
+it. (`agents sessions attach` still works for one release and prints this
+replacement.) Both route through the same
 version-pinned `agents run --resume` path everything else uses, so they are
 agent-agnostic (native resume for Claude/Codex, `/continue` replay for the rest),
 not a per-agent special case. (In AGI EXT: **Agents: Detach**
