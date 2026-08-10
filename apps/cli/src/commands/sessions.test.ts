@@ -1273,7 +1273,48 @@ describe('agents sessions --resolve local-peer critical path', () => {
       kind: 'resolved',
       session,
     });
+    // A short-id PREFIX unique among the REACHABLE fleet is owned by a known
+    // device, so an unrelated offline peer no longer discards it. Resolution keys
+    // on owner reachability, not "did every registered device answer": the match
+    // resolves as `resolved-unconfirmed` carrying the dark peer. (Was `partial`
+    // before the RUSH-2479 follow-up. ACT paths still refuse an unconfirmed prefix;
+    // only READ paths render it.)
     expect(metadataResolveOutcome([session], { sessions: [], unreachable: ['offline-box'] }, '019fd0c8')).toEqual({
+      kind: 'resolved-unconfirmed',
+      session,
+      unconfirmedPeers: ['offline-box'],
+    });
+    // With every peer answering, the same prefix resolves outright.
+    expect(metadataResolveOutcome([session], { sessions: [], unreachable: [] }, '019fd0c8')).toEqual({
+      kind: 'resolved',
+      session,
+    });
+  });
+
+  it('a short-id prefix collision across the reachable fleet is ambiguous, not a false unique', () => {
+    const a: SessionMeta = {
+      id: '019fd0c8-b3e9-77a2-a1a4-444698c4d897',
+      shortId: '019fd0c8', agent: 'codex', version: '0.146.0', mode: 'edit',
+      machine: 'yosemite-s0', timestamp: '2026-08-05T09:29:43.616Z', filePath: '/sessions/a.jsonl',
+    };
+    const b: SessionMeta = {
+      id: '019fd0c8-1111-4222-8333-444444444444',
+      shortId: '019fd0c8', agent: 'claude', version: '2.1.0', mode: 'edit',
+      machine: 'zion', timestamp: '2026-08-05T10:00:00.000Z', filePath: '/sessions/b.jsonl',
+    };
+    // Two DISTINCT sessions share the 8-hex prefix and both are reachable →
+    // fleetCandidatesByQuery groups by full id, so this is a real ambiguity, never
+    // a `resolved-unconfirmed` false unique.
+    const outcome = metadataResolveOutcome([a], { sessions: [b], unreachable: [] }, '019fd0c8');
+    expect(outcome.kind).toBe('ambiguous');
+    if (outcome.kind === 'ambiguous') expect(outcome.candidates).toHaveLength(2);
+  });
+
+  it('a prefix with no reachable match and a dark peer stays partial (the match may live there)', () => {
+    // Nothing reachable holds the prefix, and a peer is dark — the honest answer is
+    // partial, because the session could be on the box that did not answer. This is
+    // the ONLY partial for an ID selector now.
+    expect(metadataResolveOutcome([], { sessions: [], unreachable: ['offline-box'] }, '019fd0c8')).toEqual({
       kind: 'partial',
       failedPeers: ['offline-box'],
     });
