@@ -308,7 +308,6 @@ Config sync:
   sync [agent]                    Re-materialize installed version homes; --local to skip fetching
   repo init --path <dir>          Scaffold your own editable repo from a template
   repo add <path|gh:user/repo>    Merge an extra repo after the system repo
-  lock [--frozen]                 Write/verify agents.lock (SHA-256 of resolved resources); --frozen fails on drift
 
 Beta features:
   beta                            Enable preview features (factory and more)
@@ -511,7 +510,8 @@ async function installResolvedPackage(metadata: NpmPackageMetadata): Promise<voi
   // getKeychainHelperPath() to repair it on their next secret operation. The new
   // package is already on disk, so the dynamic import resolves the freshly-installed
   // helper module + bundle. Best-effort: an upgrade must never fail because the
-  // helper could not be reinstalled (`agents helper install --force` stays available).
+  // helper could not be reinstalled (the lazy staleness check in
+  // getKeychainHelperPath() still repairs it on the next secret operation).
   if (process.platform === 'darwin') {
     try {
       const { ensureKeychainHelperInstalled } = await import('./lib/secrets/install-helper.js');

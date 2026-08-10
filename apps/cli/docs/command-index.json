@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "command": "agents",
-  "groups": 104,
-  "commands": 584,
+  "groups": 102,
+  "commands": 578,
   "root": {
     "name": "agents",
     "path": "",
@@ -8790,107 +8790,6 @@
       ]
     },
     {
-      "name": "helper",
-      "path": "helper",
-      "aliases": [],
-      "description": "Manage the signed macOS Keychain helper (.app) install",
-      "args": [],
-      "options": [
-        {
-          "flags": "-h, --help",
-          "description": "Show help",
-          "short": "-h",
-          "long": "--help",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        }
-      ],
-      "subcommands": [
-        {
-          "name": "install",
-          "path": "helper install",
-          "aliases": [],
-          "description": "Copy the bundled .app to ~/Library/Application Support/agents-cli/",
-          "args": [],
-          "options": [
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
-          "name": "status",
-          "path": "helper status",
-          "aliases": [],
-          "description": "Show source, destination, codesign and notarization status",
-          "args": [],
-          "options": [
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
-          "name": "update",
-          "path": "helper update",
-          "aliases": [],
-          "description": "Reinstall the .app, overwriting any existing copy (alias of install)",
-          "args": [],
-          "options": [
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
-          "name": "where",
-          "path": "helper where",
-          "aliases": [],
-          "description": "Print the absolute path to the installed helper executable",
-          "args": [],
-          "options": [
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        }
-      ]
-    },
-    {
       "name": "hooks",
       "path": "hooks",
       "aliases": [],
@@ -10732,45 +10631,6 @@
           "optional": false,
           "variadic": false,
           "negate": false
-        },
-        {
-          "flags": "-h, --help",
-          "description": "Show help",
-          "short": "-h",
-          "long": "--help",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        }
-      ],
-      "subcommands": []
-    },
-    {
-      "name": "lock",
-      "path": "lock",
-      "aliases": [],
-      "description": "Write or verify agents.lock — a SHA-256 manifest of resolved resources",
-      "args": [],
-      "options": [
-        {
-          "flags": "--cwd <path>",
-          "description": "Working directory to resolve resources and the project root from",
-          "long": "--cwd",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--frozen",
-          "description": "Verify resolved resources match agents.lock exactly; fail (non-zero) on any drift",
-          "long": "--frozen",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false,
-          "defaultValue": false
         },
         {
           "flags": "-h, --help",

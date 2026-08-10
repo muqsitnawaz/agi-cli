@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_104 command groups · 584 commands._
+_102 command groups · 578 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -321,16 +321,6 @@ agents harness rename <old-name> <new-name>  Rename a custom harness (updates fo
 agents harness view <name>                   Show one custom harness (host, model, provider, auth, path).
 ```
 
-## helper — Manage the signed macOS Keychain helper (.app) install
-
-```
-agents helper          Manage the signed macOS Keychain helper (.app) install
-agents helper install  Copy the bundled .app to ~/Library/Application Support/agents-cli/
-agents helper status   Show source, destination, codesign and notarization status
-agents helper update   Reinstall the .app, overwriting any existing copy (alias of install)
-agents helper where    Print the absolute path to the installed helper executable
-```
-
 ## hooks — Automate workflows by running shell scripts in response to agent events
 
 ```
@@ -418,12 +408,6 @@ agents lease stop <slug>  Stop (release) a leased crabbox box now.
 
 ```
 agents list [agent]  List installed agent CLI versions
-```
-
-## lock — Write or verify agents.lock — a SHA-256 manifest of resolved resources
-
-```
-agents lock  Write or verify agents.lock — a SHA-256 manifest of resolved resources
 ```
 
 ## login — Unlock synced secrets for this shell session

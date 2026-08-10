@@ -77,11 +77,9 @@ export const loadHarness: ModuleLoader = async () => (await import('../../comman
 export const loadSecrets: ModuleLoader = async () => (await import('../../commands/secrets.js')).registerSecretsCommands;
 export const loadLogin: ModuleLoader = async () => (await import('../../commands/login.js')).registerLoginCommands;
 export const loadWallet: ModuleLoader = async () => (await import('../../commands/wallet.js')).registerWalletCommands;
-export const loadHelper: ModuleLoader = async () => (await import('../../commands/helper.js')).registerHelperCommand;
 export const loadMenubar: ModuleLoader = async () => (await import('../../commands/menubar.js')).registerMenubarCommands;
 export const loadBeta: ModuleLoader = async () => (await import('../../commands/beta.js')).registerBetaCommands;
 export const loadSync: ModuleLoader = async () => (await import('../../commands/sync.js')).registerSyncCommand;
-export const loadLock: ModuleLoader = async () => (await import('../../commands/lock.js')).registerLockCommand;
 export const loadRefreshRules: ModuleLoader = async () => (await import('../../commands/refresh-rules.js')).registerRefreshRulesCommand;
 export const loadFactory: ModuleLoader = async () => (await import('../../commands/factory.js')).registerFactoryCommands;
 export const loadUsage: ModuleLoader = async () => (await import('../../commands/usage.js')).registerUsageCommand;
@@ -225,11 +223,9 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   logout: [loadLogin],
   whoami: [loadLogin],
   wallet: [loadWallet],
-  helper: [loadHelper],
   menubar: [loadMenubar],
   beta: [loadBeta],
   sync: [loadSync],
-  lock: [loadLock],
   'refresh-rules': [loadRefreshRules],
   factory: [loadFactory],
   usage: [loadUsage],
