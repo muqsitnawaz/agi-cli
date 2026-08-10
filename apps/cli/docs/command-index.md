@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_82 command groups · 538 commands._
+_81 command groups · 537 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -185,12 +185,6 @@ agents config get <key>                  Get the current value of a config key
 agents config list                       List configured config keys and their values
 agents config set <key> <value>          Set a config key
 agents config unset <key>                Unset a config key (restore default behavior)
-```
-
-## cp — Copy a file or directory between fleet hosts. Either endpoint may be host:path (remote) or an absolute local path.
-
-```
-agents cp <src> <dst>  Copy a file or directory between fleet hosts. Either endpoint may be host:path (remote) or an absolute local path.
 ```
 
 ## daemon — The always-on daemon: secrets broker, browser IPC, watchdog, and the routines scheduler. Bare `agents daemon` shows status.

@@ -65,6 +65,24 @@ describe('KNOWN_TOP_LEVEL_COMMANDS', () => {
     expect(isKnownTopLevelCommand('export')).toBe(false);
   });
 
+  it('does not recognize removed surface-prune top-level names', () => {
+    for (const name of ['login', 'logout', 'budget', 'bench', 'mine', 'cost', 'output', 'profiles', 'snapshot', 'cp']) {
+      expect(isKnownTopLevelCommand(name)).toBe(false);
+    }
+  });
+
+  it('keeps pruned names in RETIRED so distance-1 typos do not auto-correct into live commands', async () => {
+    const { RETIRED_TOP_LEVEL_COMMANDS } = await import('./command-registry.js');
+    const { closestTopLevelCommand } = await import('./spellcheck.js');
+    // Smoking gun for removing `cp`: levenshtein('cp','mcp') === 1 would otherwise
+    // silently run `agents mcp`.
+    expect(RETIRED_TOP_LEVEL_COMMANDS.has('cp')).toBe(true);
+    expect(closestTopLevelCommand('cp', KNOWN_TOP_LEVEL_COMMANDS)).toEqual({ closest: 'mcp', minDist: 1 });
+    for (const name of ['login', 'logout', 'budget', 'bench', 'mine', 'cost', 'output', 'profiles', 'snapshot', 'cp', 'webhook']) {
+      expect(RETIRED_TOP_LEVEL_COMMANDS.has(name)).toBe(true);
+    }
+  });
+
   it('registers the plural webhooks command without a singular alias', async () => {
     const program = await buildFullCommandTree();
     const names = program.commands.flatMap((command) => [command.name(), ...command.aliases()]);

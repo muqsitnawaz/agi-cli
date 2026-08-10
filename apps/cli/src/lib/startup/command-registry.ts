@@ -108,7 +108,6 @@ export const loadWebhooks: ModuleLoader = async () => (await import('../../comma
 export const loadHumans: ModuleLoader = async () => (await import('../../commands/humans.js')).registerHumansCommands;
 export const loadAccounts: ModuleLoader = async () => (await import('../../commands/accounts.js')).registerAccountsCommand;
 export const loadDaemon: ModuleLoader = async () => (await import('../../commands/daemon.js')).registerDaemonCommand;
-export const loadCp: ModuleLoader = async () => (await import('../../commands/cp.js')).registerCpCommand;
 
 /**
  * Commands whose modules pull in the SQLite-backed session/cloud stack. They are
@@ -246,7 +245,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   webhooks: [loadWebhooks],
   humans: [loadHumans],
   daemon: [loadDaemon],
-  cp: [loadCp],
 };
 
 /**
@@ -283,7 +281,24 @@ export const KNOWN_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set<string>([
   ...INLINE_COMMAND_NAMES,
 ]);
 
-export const RETIRED_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set(['webhook']);
+/**
+ * Former top-level names that must NOT auto-correct (edit-distance 1) into a
+ * live command. Without this, `agents cp` becomes `agents mcp` and similar
+ * silent misroutes land after a surface prune.
+ */
+export const RETIRED_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set([
+  'webhook',
+  'login',
+  'logout',
+  'budget',
+  'bench',
+  'mine',
+  'cost',
+  'output',
+  'profiles',
+  'snapshot',
+  'cp',
+]);
 
 
 /** Whether `name` is a top-level command this CLI registers. See {@link KNOWN_TOP_LEVEL_COMMANDS}. */
