@@ -30,6 +30,37 @@ import { RUN_AUTO_KEYWORD, RUN_AUTO_HOST_RESOLVED_ENV } from '../types.js';
 // here so existing `hosts/dispatch.js` importers and tests keep resolving them.
 export { deriveMirroredCwd, homeRemainder, remoteCdPrefix };
 
+/**
+ * Diagnostic helper for RUSH-2441: log the requested agent and initial remote
+ * `agents run` argv without changing normal command output.
+ */
+export function logForwardedArgs(
+  kind: string,
+  agent: string,
+  version: string | undefined,
+  args: string[],
+  hasPrompt: boolean,
+): void {
+  if (!process.env.AGENTS_DISPATCH_DEBUG) return;
+  const safeArgs = [...args];
+  if (safeArgs[0] === 'run' && safeArgs[2] && hasPrompt) {
+    safeArgs[2] = '<prompt>';
+  }
+  for (let i = 0; i < safeArgs.length; i++) {
+    if (safeArgs[i] === '--env' && safeArgs[i + 1]) {
+      const key = safeArgs[i + 1].split('=', 1)[0];
+      safeArgs[i + 1] = `${key}=<redacted>`;
+      i++;
+    } else if (safeArgs[i] === '--') {
+      safeArgs.splice(i + 1, safeArgs.length - i - 1, '<passthrough redacted>');
+      break;
+    }
+  }
+  process.stderr.write(
+    `[dispatch:${kind}] agent=${agent}${version ? `@${version}` : ''} args=${JSON.stringify(safeArgs)}\n`,
+  );
+}
+
 // Use $HOME (not ~) so the path is correct whether or not it's quoted and
 // regardless of the run's cwd. Task ids are 8 hex chars, so these paths are
 // injection-safe to interpolate unquoted into remote commands.
@@ -487,6 +518,7 @@ export function buildRunForwardedArgs(opts: DispatchOptions): string[] {
   else if (opts.sessionId) args.push('--session-id', opts.sessionId);
   if (opts.emitSessionId) args.push('--emit-session-id');
   if (opts.passthroughArgs && opts.passthroughArgs.length > 0) args.push('--', ...opts.passthroughArgs);
+  logForwardedArgs('headless', opts.agent, opts.version, args, true);
   return args;
 }
 
@@ -568,6 +600,7 @@ export function buildInteractiveRunForwardedArgs(opts: InteractiveDispatchOption
   if (opts.passthroughArgs && opts.passthroughArgs.length > 0) {
     args.push('--', ...opts.passthroughArgs);
   }
+  logForwardedArgs('interactive', opts.agent, opts.version, args, Boolean(opts.prompt && opts.forceInteractive));
   return args;
 }
 
