@@ -576,7 +576,7 @@ async function runFleetStatus(opts: { json?: boolean; strict?: boolean; stats?: 
   const remoteTargets: FleetStatusTarget[] = remoteFleetTargets(planned, self)
     .map((t) => ({
       name: t.device.name,
-      platform: t.device.platform,
+      platform: resolveDeviceProfile(t.device).platform,
       // Fail fast: gate the expensive version+doctor dials on the reachability
       // verdict the cheap stats probe already computed one step earlier. A box
       // it found unreachable skips straight to an `unreachable` row instead of
@@ -765,7 +765,7 @@ async function runFleetPing(opts: { json?: boolean; local?: boolean; verbose?: b
 
   const remoteTargets: FleetStatusTarget[] = remoteFleetTargets(planned, self).map((t) => ({
     name: t.device.name,
-    platform: t.device.platform,
+    platform: resolveDeviceProfile(t.device).platform,
     skip: t.skip,
     dialTarget: fleetDialTarget(t.device),
     extraSshArgs: deviceIdentityArgs(t.device),
@@ -868,7 +868,7 @@ async function collectFleetHarnesses(opts: HarnessInventoryOpts): Promise<HostHa
   const planned = planFleetTargets(reg);
   let remoteTargets: FleetStatusTarget[] = remoteFleetTargets(planned, self).map((t) => ({
     name: t.device.name,
-    platform: t.device.platform,
+    platform: resolveDeviceProfile(t.device).platform,
     skip: t.skip,
     dialTarget: fleetDialTarget(t.device),
     extraSshArgs: deviceIdentityArgs(t.device),
