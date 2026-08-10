@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_101 command groups · 582 commands._
+_96 command groups · 563 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -190,10 +190,10 @@ agents computer type-text    Type an arbitrary unicode string into the focused f
 agents computer wait         Wait for a duration (--duration) or for an element (--id / --role/--label) to satisfy --until
 ```
 
-## config — Unified config barrel: get, set, list, and unset agent run defaults, tier overrides, and device options.
+## config — Get, set, list, and unset run defaults, tier overrides, the projects root, and device options.
 
 ```
-agents config                    Unified config barrel: get, set, list, and unset agent run defaults, tier overrides, and device options.
+agents config                    Get, set, list, and unset run defaults, tier overrides, the projects root, and device options.
 agents config get <key>          Get the current value of a config key
 agents config list               List configured config keys and their values
 agents config set <key> <value>  Set a config key
@@ -215,28 +215,21 @@ agents cp <src> <dst>  Copy a file or directory between fleet hosts. Either endp
 ## daemon — The always-on daemon: secrets broker, browser IPC, watchdog, and the routines scheduler. Bare `agents daemon` shows status.
 
 ```
-agents daemon           The always-on daemon: secrets broker, browser IPC, watchdog, and the routines scheduler. Bare `agents daemon` shows status.
-agents daemon disable   Persist daemon.enabled: false — nothing auto-starts the daemon until re-enabled. Does not stop a running daemon.
-agents daemon doctor    One-shot health check: identity, duplicates, hosted services, scheduler. Non-zero exit on problems.
-agents daemon enable    Clear the daemon.enabled kill switch. Does not start the daemon by itself.
-agents daemon logs      Read the daemon's own log (lifecycle + subsystem errors — not routine run output).
-agents daemon reload    Send SIGHUP to reload jobs and re-evaluate the scheduler.enabled gate, without a restart.
-agents daemon restart   Stop then start the daemon.
-agents daemon services  The two hosted services (secrets broker, browser IPC): bound state, socket path, and health.
-agents daemon start     Start the daemon. Bypasses daemon.enabled — this is the deliberate override.
-agents daemon status    Identity (state/pid/uptime/binary), duplicate daemons, daemons running deleted code, and per-service health.
-agents daemon stop      Stop the daemon.
-```
-
-## defaults — Manage default options for agents-cli commands
-
-```
-agents defaults                       Manage default options for agents-cli commands
-agents defaults project-root [path]   Show or set the projects root for `agents run --project` (auto-inferred when unset)
-agents defaults run                   Manage selector-based defaults for `agents run`
-agents defaults run list              List configured run defaults
-agents defaults run set <selector>    Set defaults for an agent/version selector
-agents defaults run unset <selector>  Remove defaults for an agent/version selector
+agents daemon                       The always-on daemon: secrets broker, browser IPC, watchdog, and the routines scheduler. Bare `agents daemon` shows status.
+agents daemon disable               Persist daemon.enabled: false — nothing auto-starts the daemon until re-enabled. Does not stop a running daemon.
+agents daemon doctor                One-shot health check: identity, duplicates, hosted services, scheduler. Non-zero exit on problems.
+agents daemon enable                Clear the daemon.enabled kill switch. Does not start the daemon by itself.
+agents daemon funnel                Manage Tailscale Funnel exposure for a fleet webhook receiver.
+agents daemon funnel down <host>    Disable Tailscale Funnel exposure for a public HTTPS port.
+agents daemon funnel status <host>  Show Tailscale Funnel status on a fleet host.
+agents daemon funnel up <host>      Expose a localhost webhook receiver through Tailscale Funnel.
+agents daemon logs                  Read the daemon's own log (lifecycle + subsystem errors — not routine run output).
+agents daemon reload                Send SIGHUP to reload jobs and re-evaluate the scheduler.enabled gate, without a restart.
+agents daemon restart               Stop then start the daemon.
+agents daemon services              The two hosted services (secrets broker, browser IPC): bound state, socket path, and health. See sibling `daemon funnel` for public ingress.
+agents daemon start                 Start the daemon. Bypasses daemon.enabled — this is the deliberate override.
+agents daemon status                Identity (state/pid/uptime/binary), duplicate daemons, daemons running deleted code, and per-service health.
+agents daemon stop                  Stop the daemon.
 ```
 
 ## devices — Registry of SSH device profiles (platform, user, address, auth), self-populated from Tailscale. Alias: fleet.
@@ -284,12 +277,6 @@ agents events       Read the unified event stream (operational + agent activity)
 agents events emit  Record events produced outside this process (reads JSONL on stdin)
 ```
 
-## export — Copy an isolated install's config out to your real ~/.<agent>
-
-```
-agents export <spec>  Copy an isolated install's config out to your real ~/.<agent>
-```
-
 ## feed — Operator inbox + agent status posts (aliases: inbox = needs-you; timeline = --filter updates)
 
 ```
@@ -301,15 +288,6 @@ agents feed post <text...>  Post a status update to the fleet activity stream (f
 
 ```
 agents feedback [summary...]  Open a pre-filled feedback Discussion or bug report
-```
-
-## funnel — Manage Tailscale Funnel exposure for a fleet webhook receiver.
-
-```
-agents funnel                Manage Tailscale Funnel exposure for a fleet webhook receiver.
-agents funnel down <host>    Disable Tailscale Funnel exposure for a public HTTPS port.
-agents funnel status <host>  Show Tailscale Funnel status on a fleet host.
-agents funnel up <host>      Expose a localhost webhook receiver through Tailscale Funnel.
 ```
 
 ## harness — Custom harnesses — name a (host CLI + model) combo and run it like a native agent type.
@@ -590,17 +568,6 @@ agents plugins remove [name]                  Unsync a plugin from all agent ver
 agents plugins update [name]                  Re-pull a plugin from its original source and re-sync to all versions
 ```
 
-## profile — Activate top-level resource profiles across commands, skills, hooks, rules, MCP, permissions, and secrets.
-
-```
-agents profile             Activate top-level resource profiles across commands, skills, hooks, rules, MCP, permissions, and secrets.
-agents profile clear       Clear the active top-level resource profile and reconcile installed versions
-agents profile list        List top-level resource profiles
-agents profile set <name>  Create or update a top-level resource profile
-agents profile status      Show the active top-level resource profile
-agents profile use <name>  Activate a top-level resource profile and reconcile installed versions
-```
-
 ## profiles — Named bundles of (host CLI, endpoint, model, auth) — run Kimi/DeepSeek/Qwen/etc through Claude Code without a proxy.
 
 ```
@@ -612,8 +579,6 @@ agents profiles login <provider>   Store or rotate the API key for a provider (e
 agents profiles logout <provider>  Remove a stored provider key from keychain
 agents profiles presets            List built-in presets (OpenRouter + direct providers)
 agents profiles remove <name>      Delete a profile (keychain token is kept — use `profiles logout <provider>` to remove)
-agents profiles status             Alias for `agents profile status`
-agents profiles use <name>         Alias for `agents profile use <name>`
 agents profiles view <name>        Show a profile (env, host, auth source, preset link)
 ```
 
@@ -1096,13 +1061,4 @@ agents workflows add [source]   Install workflows from a source (GitHub, local) 
 agents workflows list [agent]   Show installed workflows and which agent versions they are synced to
 agents workflows remove [name]  Remove a workflow from version homes (interactive picker if no name given)
 agents workflows view [name]    Read workflow details (description, subagents, model, MCP)
-```
-
-## worktree — Provision, release, and prune per-terminal git worktrees for agent isolation.
-
-```
-agents worktree                          Provision, release, and prune per-terminal git worktrees for agent isolation.
-agents worktree provision <terminal-id>  Create (or reuse) an isolated worktree for an agent terminal. Prints the absolute path.
-agents worktree prune                    Try to release every agent worktree under .agents/worktrees/. Skips dirty or unpushed ones.
-agents worktree release <terminal-id>    Remove the worktree if clean and the branch is merged or has no unpushed commits.
 ```

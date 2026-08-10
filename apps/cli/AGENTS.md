@@ -390,7 +390,6 @@ intentionally not a per-device key. To see it in the per-device view, use
 The old commands still work but are deprecated and print a warning pointing to
 `agents config`:
 
-- `agents defaults run` → `agents config`
 - `agents models tier` → `agents config set run.<agent@version>.tier.<tier>`
 - `agents devices set-interactive` → `agents config set interactive.host <name>`
 - `agents devices configure` → `agents config set devices.<name>.<key>`
@@ -1022,7 +1021,7 @@ carries a trailing `Status: [Intended]` or `[Drift]` line naming its `-GAP-`.
 Beyond the two above, the document also specifies **§Agent execution**,
 **§Scheduling & execution singularity**, and **§Watchdog**. It does **not** cover
 every command group — `hosts`, `teams`, and `cloud` have design docs but zero
-RFC-2119 requirements, and surfaces like `wallet`, `worktree`, and `sync`/`apply`
+RFC-2119 requirements, and surfaces like `wallet` and `sync`/`apply`
 have neither. The
 [coverage inventory](docs/specifications.md#coverage-inventory) says which row a
 surface sits in; check it before treating a behavior as guaranteed.
