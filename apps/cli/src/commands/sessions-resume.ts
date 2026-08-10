@@ -11,7 +11,7 @@
 import * as fs from 'fs';
 import chalk from 'chalk';
 import type { Command } from 'commander';
-import type { SessionMeta } from '../lib/session/types.js';
+import { isAgentTmuxAlias, type SessionMeta } from '../lib/session/types.js';
 import { discoverSessions } from '../lib/session/discover.js';
 import { filterTeamSessions } from '../lib/session/team-filter.js';
 import { multiItemPicker, itemPicker } from '../lib/picker.js';
@@ -248,7 +248,7 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
  * the existing pre-filtered picker, while an explicit identity resumes directly. */
 export function isDirectResumeSelector(query: string): boolean {
   const selector = query.trim();
-  return looksLikeSessionId(selector) || /^ag-[a-z][a-z0-9-]*-[0-9a-f]{8}$/i.test(selector);
+  return looksLikeSessionId(selector) || isAgentTmuxAlias(selector);
 }
 
 /** Re-enter through the top-level command so fleet routing and harness policy

@@ -20,7 +20,7 @@ import { confirm } from '@inquirer/prompts';
 import { gatherLiveTargets, pickLiveTarget, pickLiveTargets, jumpTo, probeAttachRail, refuseFallback, type AttachRailLiveness, type UnreachableFallback } from './go.js';
 import { sessionProcessIsLocal, sessionProcessHost, type ActiveSession } from '../lib/session/active.js';
 import { attachTmux, getDefaultSocketPath, hasSession, runTmux } from '../lib/tmux/index.js';
-import { SESSION_AGENTS, type SessionMeta, type SessionAgentId } from '../lib/session/types.js';
+import { SESSION_AGENTS, isAgentTmuxAlias, type SessionMeta, type SessionAgentId } from '../lib/session/types.js';
 import {
   buildSessionRecoveryCommand,
   filterSessionsByQuery,
@@ -405,7 +405,7 @@ function looksLikeIdSelector(selector: string | undefined): selector is string {
 function looksLikeIdentitySelector(selector: string | undefined): selector is string {
   return !!selector && (
     /^[0-9a-f][0-9a-f-]{5,}$/i.test(selector) ||
-    /^ag-[a-z][a-z0-9-]*-[0-9a-f]{8}$/i.test(selector)
+    isAgentTmuxAlias(selector)
   );
 }
 
@@ -463,9 +463,10 @@ export function dedupeSessionsByLogicalId(rows: SessionMeta[], self?: string): S
 
 export type TmuxAliasState = 'not-an-alias' | 'no-server' | 'absent' | 'dead' | 'live';
 
-/** Shape of the tmux alias the CLI mints for an agent session: `ag-<agent>-<hex>`. */
+/** Shape of the tmux alias the CLI mints for an agent session: `ag-<agent>-<shortid>`.
+ * Delegates to the one canonical matcher beside the name parsers in active.ts. */
 export function looksLikeTmuxAlias(selector: string): boolean {
-  return /^ag-[a-z][a-z0-9-]*-[0-9a-f]{6,}$/i.test(selector);
+  return isAgentTmuxAlias(selector);
 }
 
 /**
