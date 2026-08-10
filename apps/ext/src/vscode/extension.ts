@@ -112,19 +112,15 @@ import {
   registerForkPickSessionCommand,
   runSessionBrowserPicker,
 } from './sessionBrowser.vscode';
-import type { RemoteSession, RawActiveSession } from '../core/remoteSessions';
+import type { RemoteSession } from '../core/remoteSessions';
 import {
   abandonedCandidates,
-  buildResumeCandidates,
   defaultPickedIds,
   distinctiveTopic,
   nextPreselection,
   sharedTopicPrefixes,
-  RESUME_PICKER_CACHE_KEY,
   STATE_HEADINGS,
-  type RecentSessionRow,
   type ResumeCandidate,
-  type ResumePickerCache,
   type ResumeState,
 } from '../core/resumePicker';
 import { buildHarnessOptions, type HarnessOption } from '../core/resumeTarget';
@@ -2853,7 +2849,7 @@ async function hostHasUsableVersion(host: string, agentKey: string): Promise<boo
  */
 async function listSessionsViaCli(limit = 30): Promise<CliSessionItem[]> {
   const { runAgents } = await import('../core/agentsBin');
-  const { stdout } = await runAgents(`sessions --all -n ${limit} --json`, {
+  const { stdout } = await runAgents(`sessions --all --json --no-interactive --limit ${limit}`, {
     maxBuffer: 10 * 1024 * 1024,
   });
   const parsed = JSON.parse(stdout);
@@ -2867,17 +2863,6 @@ async function listSessionsViaCli(limit = 30): Promise<CliSessionItem[]> {
  * at it. Bare (no `--local`) so a session stranded on another fleet box shows up
  * too; those resume over SSH.
  */
-async function listActiveSessionsViaCli(): Promise<RawActiveSession[]> {
-  const { runAgents } = await import('../core/agentsBin');
-  const { stdout } = await runAgents('sessions --active --json', {
-    maxBuffer: 16 * 1024 * 1024,
-    timeout: 45_000,
-  });
-  const parsed = JSON.parse(stdout);
-  if (!Array.isArray(parsed)) return [];
-  return parsed.filter((r) => r && typeof r === 'object') as RawActiveSession[];
-}
-
 // formatSessionWhen and cleanSessionTopic moved to ../core/sessionBrowser (pure,
 // unit-tested) and are imported at the top of this file; the fork picker and the
 // resume picker both call the shared implementations.
@@ -3183,11 +3168,25 @@ function resumeCandidateItems(candidates: ResumeCandidate[], checked: ReadonlySe
 }
 
 async function fetchResumeCandidates(): Promise<ResumeCandidate[]> {
-  const [recent, live] = await Promise.all([
-    listSessionsViaCli(RESUME_PICKER_LIMIT),
-    listActiveSessionsViaCli(),
-  ]);
-  return buildResumeCandidates(recent as RecentSessionRow[], live, normalizeHost(os.hostname()));
+  // The CLI owns lifecycle classification, cross-device aggregation, ranking,
+  // and deduplication. Opening (or manually refreshing) the picker performs one
+  // bounded read; the extension only adapts those rows for QuickPick.
+  const rows = await listSessionsViaCli(RESUME_PICKER_LIMIT) as Array<CliSessionItem & Partial<ResumeCandidate>>;
+  return rows.map((row) => ({
+    id: row.id,
+    shortId: row.shortId || row.id.slice(0, 8),
+    agent: row.agent || '',
+    version: row.version,
+    account: row.account,
+    project: row.project,
+    cwd: row.cwd,
+    topic: row.topic,
+    state: row.state || 'idle',
+    viewingIn: row.viewingIn || '',
+    host: row.host || '',
+    lastActivityMs: row.lastActivityMs || Date.parse(row.timestamp || '') || 0,
+    pid: row.pid || 0,
+  }));
 }
 
 /**
@@ -3211,39 +3210,20 @@ async function resumeSessionsBatch(
   opts: { title?: string; abandonedOnly?: boolean } = {},
 ) {
   const select = (cs: ResumeCandidate[]) => (opts.abandonedOnly ? abandonedCandidates(cs) : cs);
-  const rawCache = context.globalState.get<ResumePickerCache>(RESUME_PICKER_CACHE_KEY);
-  // Shape-check like the host picker cache: a drifted entry must degrade to
-  // the cold path, not crash item building on a non-array.
-  const cached = rawCache && Array.isArray(rawCache.candidates) ? rawCache : undefined;
-  let initial = select(cached?.candidates ?? []);
-  // Set when the cold path just did a live fleet read — the background
-  // revalidate below must not fire a second, identical sweep right after it.
-  // (Reachable with a warm cache in abandonedOnly mode: the snapshot filters
-  // to empty, so the cold path runs even though `cached` is non-empty.)
-  let coldFetched = false;
-
-  // Cold start (no snapshot yet): the live read fans out across the fleet over
-  // SSH, so it can take seconds — show progress rather than leaving the
-  // palette looking hung. CLI-missing errors surface here, as before.
-  if (initial.length === 0) {
-    let fresh: ResumeCandidate[];
-    try {
-      fresh = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Window, title: 'Agents: finding resumable sessions…' },
-        fetchResumeCandidates,
-      );
-    } catch (err: any) {
+  let initial: ResumeCandidate[];
+  try {
+    initial = select(await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: 'Agents: finding resumable sessions…' },
+      fetchResumeCandidates,
+    ));
+  } catch (err: any) {
       const msg = err?.stderr || err?.message || String(err);
       if (msg.includes('ENOENT') || msg.includes('not found')) {
         vscode.window.showInformationMessage('agents CLI not found. Install with: npm i -g @phnx-labs/agents-cli');
       } else {
         vscode.window.showInformationMessage(`Failed to list sessions: ${msg.slice(0, 160)}`);
       }
-      return;
-    }
-    void context.globalState.update(RESUME_PICKER_CACHE_KEY, { candidates: fresh, fetchedAt: Date.now() } satisfies ResumePickerCache);
-    initial = select(fresh);
-    coldFetched = true;
+    return;
   }
 
   if (initial.length === 0) {
@@ -3279,21 +3259,7 @@ async function resumeSessionsBatch(
   };
   applyItems(initial);
 
-  // The warm path rendered a snapshot — revalidate in the background and swap
-  // the fresh list in when it lands. (The cold path just fetched, so it is
-  // already fresh.)
   let pickerDisposed = false;
-  if (!coldFetched && cached && cached.candidates.length > 0) {
-    quickPick.busy = true;
-    void fetchResumeCandidates()
-      .then((fresh) => {
-        void context.globalState.update(RESUME_PICKER_CACHE_KEY, { candidates: fresh, fetchedAt: Date.now() } satisfies ResumePickerCache);
-        const filtered = select(fresh);
-        if (!pickerDisposed && filtered.length > 0) applyItems(filtered);
-      })
-      .catch((err) => console.error('[resumeSessionsBatch] refresh failed:', err))
-      .finally(() => { if (!pickerDisposed) quickPick.busy = false; });
-  }
 
   let chosen: ResumeCandidate[];
   try {
@@ -5635,7 +5601,6 @@ function initMonitorLeader(context: vscode.ExtensionContext): void {
 function initMonitorHost(context: vscode.ExtensionContext): void {
   const { runOnLeaderOnly } = require('../monitor/gate') as typeof import('../monitor/gate');
   const { MonitorHost } = require('../monitor/host') as typeof import('../monitor/host');
-  const { listTeamsForCwd } = require('./foreman.sources') as typeof import('./foreman.sources');
   const gate = runOnLeaderOnly(() => {
     // detectors enables the centralized readiness probes (#68), the machine-wide
     // session watcher (#69), and the panel/floor
@@ -5643,7 +5608,11 @@ function initMonitorHost(context: vscode.ExtensionContext): void {
     // fetch is vscode-coupled, so it's injected here (host.ts stays vscode-free).
     const host = new MonitorHost({
       detectors: {
-        snapshotFetchTeams: (cwd) => listTeamsForCwd(cwd) as Promise<unknown[]>,
+        // Session state comes only from the CLI's versioned stream. Readiness is
+        // presentation mechanics; filesystem session parsing and periodic panel
+        // recomputation are deliberately disabled in the extension.
+        session: false,
+        snapshot: false,
       },
     });
     void host.start().catch((err) => console.error('[MONITOR] host start failed:', err));
@@ -5664,6 +5633,8 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
   type TerminalTuple = import('../monitor/protocol').TerminalTuple;
 
   const windowId = computeWindowId(vscode.env.sessionId, process.pid);
+  const { SessionPresentationStore } = require('../core/sessionPresentationStore') as typeof import('../core/sessionPresentationStore');
+  const sessionStore = new SessionPresentationStore();
 
   // Resolve a broadcast pid/sessionId back to THIS window's terminal, scanning
   // only the window-local registry (stays per-window per epic #64).
@@ -5743,6 +5714,8 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
       sessionTracker.ingestSessionWarmth(event.payload.filePath);
     } else if (proto.isPanelSnapshot(event)) {
       terminals.ingestPanelSnapshotFact(event.payload);
+    } else if (proto.isSessionCliFact(event)) {
+      sessionStore.apply(event.payload);
     }
   });
   context.subscriptions.push({ dispose: factSub });

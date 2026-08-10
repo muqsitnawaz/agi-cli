@@ -145,7 +145,29 @@ export const MONITOR_FACT = {
   sessionWarmth: 'monitor.session-warmth',
   /** The merged panel/floor snapshot computed once machine-wide (#71). */
   panelSnapshot: 'monitor.panel-snapshot',
+  /** Versioned session state emitted by the agents-cli watch stream. */
+  sessionCli: 'monitor.session-cli',
 } as const;
+
+export interface SessionCliFactPayload {
+  version: number;
+  type: 'reset' | 'upsert' | 'remove' | 'scope' | 'heartbeat';
+  sessions?: unknown[];
+  session?: unknown;
+  id?: string;
+  scope?: unknown;
+  ts?: number;
+}
+
+export function isSessionCliFact(
+  event: MonitorEvent,
+): event is MonitorEvent & { payload: SessionCliFactPayload } {
+  const payload = event.payload as SessionCliFactPayload | undefined;
+  return event.type === MONITOR_FACT.sessionCli
+    && !!payload
+    && Number.isInteger(payload.version)
+    && typeof payload.type === 'string';
+}
 
 export interface TuplesSnapshotPayload {
   tuples: TerminalTuple[];

@@ -40,6 +40,7 @@ import { ReadinessDetector } from './readinessDetector';
 import { SessionWatcher } from './sessionWatcher';
 import { WatcherRoot } from './sessionParse';
 import { SnapshotDetector } from './snapshotDetector';
+import { SessionCliStream } from './sessionCliStream';
 
 /** Enable + configure the centralized detectors (#68, #69). */
 export interface MonitorDetectorOptions {
@@ -61,6 +62,8 @@ export interface MonitorDetectorOptions {
    * snapshot fact simply carries no teams.
    */
   snapshotFetchTeams?: (cwd: string) => Promise<unknown[]>;
+  /** Consume the canonical agents-cli session stream. Default true. */
+  sessionCli?: boolean;
 }
 
 export interface MonitorHostOptions {
@@ -85,6 +88,7 @@ export class MonitorHost {
   private readinessDetector?: ReadinessDetector;
   private sessionWatcher?: SessionWatcher;
   private snapshotDetector?: SnapshotDetector;
+  private sessionCliStream?: SessionCliStream;
 
   constructor(options: MonitorHostOptions = {}) {
     this.detectorOpts = options.detectors;
@@ -127,6 +131,8 @@ export class MonitorHost {
     this.sessionWatcher = undefined;
     this.snapshotDetector?.stop();
     this.snapshotDetector = undefined;
+    this.sessionCliStream?.stop();
+    this.sessionCliStream = undefined;
     this.slices.clear();
     await this.server.close();
   }
@@ -141,6 +147,13 @@ export class MonitorHost {
   private startDetectors(): void {
     const opts = this.detectorOpts;
     if (!opts) return;
+    if (opts.sessionCli !== false) {
+      this.sessionCliStream = new SessionCliStream({
+        emit: (event) => this.broadcast(MONITOR_FACT.sessionCli, event),
+        onError: (message) => console.error(`[MONITOR] ${message}`),
+      });
+      this.sessionCliStream.start();
+    }
     if (opts.readiness !== false) {
       this.readinessDetector = new ReadinessDetector({
         emit: (fact) => this.broadcastReadiness(fact),

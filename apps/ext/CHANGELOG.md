@@ -6,6 +6,12 @@ All notable changes to AGI EXT (the VS Code extension) are documented here. Form
 
 ## [Unreleased]
 
+- **AGI EXT now delegates session recovery to agents-cli.** Opening the Resume
+  picker performs one bounded `agents sessions --all --json --no-interactive
+  --limit 60` read, and selected sessions execute `agents sessions resume <id>
+  --vscodium`. The extension no longer joins a second active-session query or
+  maintains a stale resume-candidate cache.
+
 ## [0.9.315] - 2026-08-10
 
 - **Launch Warp with the right command.** The Warp agent's `cliCommand` was still the
