@@ -110,8 +110,8 @@ export interface DeviceAutoPlan {
 
 /**
  * Pick the least-loaded healthy device that can run `agent` when the harness is
- * known. `run auto` omits the agent and ranks the same live health/load signals
- * without an installed-harness filter. The local machine participates in the
+ * known. `run auto` omits the agent and treats any ready account on the device
+ * as eligible. The local machine participates in the
  * same probe and must pass the same eligibility checks. An empty eligible pool
  * fails loud; automatic placement never silently becomes a local launch.
  */
