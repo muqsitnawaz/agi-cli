@@ -212,7 +212,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   secrets: [loadSecrets],
   login: [loadLogin],
   logout: [loadLogin],
-  whoami: [loadLogin],
   wallet: [loadWallet],
   helper: [loadHelper],
   menubar: [loadMenubar],
