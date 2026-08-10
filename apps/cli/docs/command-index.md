@@ -1075,11 +1075,11 @@ agents watchdog rotate <state>               Turn in-place rotate of rate-limite
 agents watchdog status                       Show whether the daemon watchdog pass is enabled and where state is written.
 ```
 
-## webhook — Run a localhost signed webhook receiver for routine triggers.
+## webhooks — Run a localhost signed webhook receiver for routine triggers.
 
 ```
-agents webhook        Run a localhost signed webhook receiver for routine triggers.
-agents webhook serve  Receive signed GitHub/Linear webhooks on /hooks/<source> and fire matching routines.
+agents webhooks        Run a localhost signed webhook receiver for routine triggers.
+agents webhooks serve  Receive signed GitHub/Linear webhooks on /hooks/<source> and fire matching routines.
 ```
 
 ## whoami — Show synced-secrets login status
