@@ -41,6 +41,7 @@ import { spawn } from 'node:child_process';
 import { looksLikeSessionId } from '../lib/session/discover.js';
 import { machineId } from '../lib/session/sync/config.js';
 import { sessionOriginDevice, sessionRecoveryDestinationMatches } from '../lib/session/recovery.js';
+import { collectSessionResumeCandidates } from './sessions-resume-candidates.js';
 
 /** Opening more than this many live sessions at once asks for confirmation first. */
 export const CONFIRM_THRESHOLD = 5;
@@ -59,6 +60,10 @@ export interface ResumeOptions {
   /** --terminal-app: force macOS Terminal.app. Named to avoid reading as `run --terminal`. */
   terminalApp?: boolean;
   splits?: boolean;
+  candidates?: boolean;
+  json?: boolean;
+  abandonedOnly?: boolean;
+  local?: boolean;
 }
 
 export function registerSessionsResumeCommand(sessionsCmd: Command): void {
@@ -78,6 +83,11 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
     .option('--vscodium', 'Force the VSCodium agent-terminal backend (swarm-ext)')
     .option('--terminal-app', 'Force macOS Terminal.app (no split support — panes become tabs)')
     .option('--splits', 'Pack two sessions side by side per tab (default: one tab per session)');
+  cmd
+    .option('--candidates', 'Emit the canonical recent + live resume candidate union (requires --json)')
+    .option('--abandoned-only', 'With --candidates, exclude sessions already watched in another terminal')
+    .option('--json', 'With --candidates, emit machine-readable JSON')
+    .option('--local', 'With --candidates, skip fleet peers');
 
   setHelpSections(cmd, {
     examples: `
@@ -96,6 +106,10 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
       agents sessions resume --vscodium
       agents sessions resume --splits
       agents sessions resume --host zion --tmux
+
+      # Machine callers: complete, ordered recent + live union
+      agents sessions resume --candidates --json
+      agents sessions resume --candidates --abandoned-only --json
     `,
     notes: `
       - A UUID/prefix or ag-<agent>-<suffix> alias bypasses the picker: a live pane is attached; an inactive session resumes on its owning device.
@@ -105,15 +119,30 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
       - --vscodium opens each session as an agent terminal tab in VSCodium via the swarm-ext extension (works with --host too).
       - --host <alias> opens the terminal surface on that host only when it is the selected sessions' origin; recovery never migrates a session to another device.
       - Recovery runs on the session's origin device: exact healthy origin uses native resume; otherwise a healthy version of the same harness receives /continue <id>.
+      - --candidates owns the union, lifecycle classification, ordering, source placement, and recovery argv used by UI clients.
     `,
   });
 
-  cmd.action(async (query: string | undefined, options: ResumeOptions) => {
-    await sessionsResumeAction(query, options);
+  cmd.action(async (query: string | undefined) => {
+    await sessionsResumeAction(query, { ...sessionsCmd.opts(), ...cmd.opts() } as ResumeOptions);
   });
 }
 
 async function sessionsResumeAction(query: string | undefined, options: ResumeOptions): Promise<void> {
+  if (options.candidates) {
+    if (query) throw new Error('--candidates does not accept a query.');
+    const limit = parseInt(options.limit || '200', 10);
+    const result = await collectSessionResumeCandidates({
+      limit,
+      local: options.local,
+      abandonedOnly: options.abandonedOnly,
+    });
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  if (options.abandonedOnly || options.local) {
+    throw new Error('--abandoned-only and --local require --candidates.');
+  }
   if (!isInteractiveTerminal()) {
     console.error(chalk.red('sessions resume needs an interactive terminal.'));
     process.exitCode = 1;
