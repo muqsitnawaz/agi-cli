@@ -63,12 +63,12 @@ describe('placementFromRunFlags', () => {
     expect(placementFromRunFlags({ host: 'zion' })).toEqual({
       kind: 'device',
       target: 'zion',
-      source: '--host/--device',
+      source: '--device',
     });
     expect(placementFromRunFlags({ device: 'auto' })).toEqual({
       kind: 'device',
       target: 'auto',
-      source: '--host/--device',
+      source: '--device',
     });
     expect(placementFromRunFlags({ lease: true })).toEqual({
       kind: 'lease',

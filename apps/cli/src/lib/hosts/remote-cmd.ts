@@ -161,8 +161,8 @@ export const RUN_OPTION_FORWARDING: Record<string, RunOptionForwarding> = {
 /** Actionable messages for value-aware rejections, keyed by attribute name. */
 export const RUN_OPTION_REJECT_MESSAGES: Record<string, string> = {
   terminal:
-    '--terminal opens a tab on THIS machine; it cannot be combined with --host. ' +
-    'Drop --terminal to dispatch to the host, or drop --host to open the tab here. ' +
+    '--terminal opens a tab on THIS machine; it cannot be combined with --device. ' +
+    'Drop --terminal to dispatch to the device, or drop --device to open the tab here. ' +
     'To watch a remote run in a terminal, dispatch it and follow with `agents sessions focus <id>`.',
   secrets:
     '--secrets cannot cross the SSH boundary — Keychain values are never sent to a host implicitly. ' +
@@ -171,7 +171,7 @@ export const RUN_OPTION_REJECT_MESSAGES: Record<string, string> = {
   secretsKeys: '--secrets-keys applies to --secrets bundles, which cannot cross the SSH boundary (see --secrets).',
   allowExpired: '--allow-expired applies to --secrets bundles, which cannot cross the SSH boundary (see --secrets).',
   resumeCheckpoint: '--resume-checkpoint reads a local checkpoint.json — it cannot resume a run on another machine. Run it locally, or start a fresh --loop run on the host.',
-  resumeBare: '--resume with no id opens the interactive picker, which cannot run across a detached host dispatch. Pass a concrete session id: agents run <agent> --resume <id> --host <name>.',
+  resumeBare: '--resume with no id opens the interactive picker, which cannot run across a detached host dispatch. Pass a concrete session id: agents run <agent> --resume <id> --device <name>.',
 };
 
 /**

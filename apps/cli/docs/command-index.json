@@ -9105,7 +9105,7 @@
       "name": "hosts",
       "path": "hosts",
       "aliases": [],
-      "description": "Register and inspect agent hosts (machines you offload runs to with `agents run --host <name>`).",
+      "description": "Register and inspect agent hosts (machines you offload runs to with `agents run --device <name>`).",
       "args": [],
       "options": [
         {

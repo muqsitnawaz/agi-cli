@@ -309,7 +309,7 @@ async function doStop(ref: string): Promise<void> {
 export function registerHostsCommand(program: Command): void {
   const hosts = program
     .command('hosts')
-    .description('Register and inspect agent hosts (machines you offload runs to with `agents run --host <name>`).');
+    .description('Register and inspect agent hosts (machines you offload runs to with `agents run --device <name>`).');
 
   hosts
     .command('add [name] [target]')
