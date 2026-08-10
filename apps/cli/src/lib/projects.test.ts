@@ -17,7 +17,7 @@ import {
   resolveProjectNameForCwd,
   type ProjectDef,
 } from './projects.js';
-import { repoForDir } from '../commands/projects.js';
+import { repoForDir, reposFromDirFlags } from '../commands/projects.js';
 
 const HOME = process.env.HOME ?? os.homedir();
 let dir: string;
@@ -304,6 +304,29 @@ describe('repoForDir (--dir slug inference + home-relative storage)', () => {
 
   it('throws when the dir does not exist', () => {
     expect(() => repoForDir(path.join(os.tmpdir(), 'projtest-absent-xyz-123'))).toThrow(/not found/);
+  });
+
+  it('reposFromDirFlags maps several dirs, and rejects --slug with more than one dir', () => {
+    const a = fs.mkdtempSync(path.join(os.tmpdir(), 'projtest-a-'));
+    const b = fs.mkdtempSync(path.join(os.tmpdir(), 'projtest-b-'));
+    try {
+      for (const d of [a, b]) {
+        execFileSync('git', ['init', '-q'], { cwd: d });
+      }
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:o/a.git'], { cwd: a });
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:o/b.git'], { cwd: b });
+      // Two dirs, each slug from its own origin, no override.
+      expect(reposFromDirFlags([a, b], undefined)).toEqual([
+        { slug: 'o/a', path: path.resolve(a) },
+        { slug: 'o/b', path: path.resolve(b) },
+      ]);
+      // A single-dir --slug override is fine; more than one is a loud error.
+      expect(reposFromDirFlags([a], 'x/y')).toEqual([{ slug: 'x/y', path: path.resolve(a) }]);
+      expect(() => reposFromDirFlags([a, b], 'x/y')).toThrow(/single --dir/);
+    } finally {
+      fs.rmSync(a, { recursive: true, force: true });
+      fs.rmSync(b, { recursive: true, force: true });
+    }
   });
 });
 

@@ -312,16 +312,25 @@ missing`). The workspace probe (`workspaceTargetsForDef`) and every spawn path
 read this one list.
 
 **At spawn, the bound dirs become `--add-dir` grants — for Claude and Codex
-only.** `agents run --project <name>` and `agents teams create --project
-<name>` resolve the project's `projectDirsAbs` list and fold the non-primary
-directories into the harness's directory grants (the primary is already the
-cwd). This lands only where a harness has a real "additional accessible
-directory" surface: **Claude** receives them as native `--add-dir` flags
-(`lib/exec.ts:1269`, gated on `agent === 'claude'`), and **Codex** folds them
-into its named edit profile's writable `workspace_roots` (`lib/exec.ts:1133`).
+only.** The directory grants are wired in the companion tracks of RUSH-2487,
+each reading this same `projectDirsAbs` resolver so the binding here and the
+grant there cannot drift: `agents run --project <name>` and `agents teams
+create --project <name>` fold the non-primary directories into the harness's
+directory grants (the primary is already the cwd), and the Factory / VS Codium
+extension reads the resolver so a project opened there binds the same set. The
+grants land only where a harness has a real "additional accessible directory"
+surface: **Claude** receives them as native `--add-dir` flags (the existing
+plumbing gates on `agent === 'claude'`, `lib/exec.ts:1269`), and **Codex** folds
+them into its named edit profile's writable `workspace_roots` (`lib/exec.ts:1133`).
 Every other harness has no equivalent, so the grants are **dropped** for it —
-the agent still runs, with its cwd only. The Factory / VS Codium extension
-reads the same resolver so a project opened there binds the same directory set.
+the agent still runs, with its cwd only.
+
+> **What lands in each track.** This spine track ships the `projectDirsAbs`
+> resolver, the `--dir`/`--add-dir`/`--rm-dir` binding flags, and the workspace
+> probe reading the resolver. The `agents run --project` / `agents teams create
+> --project` grant wiring and the extension change land in the companion RUSH-2487
+> tracks; until those merge, binding a directory is recorded in the definition and
+> surfaced by `projects status`/`view` but is not yet folded into a spawn's grants.
 
 ## Importing — from Linear
 

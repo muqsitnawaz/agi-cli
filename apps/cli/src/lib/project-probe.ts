@@ -73,7 +73,16 @@ function git(absPath: string, args: string[]): string | undefined {
  */
 export function probeRepoWorkspace(absPath: string): RepoWorkspaceStatus {
   const status: RepoWorkspaceStatus = { path: toHomeRelative(absPath), present: false };
-  if (!fs.existsSync(path.join(absPath, '.git'))) return status;
+  // A `.git` at this exact path (a dir, or the FILE a linked worktree uses) is
+  // the fast, offline presence signal. But a project narrowed with `defaultPath`
+  // (`agents projects add rush --path apps/web`) probes a monorepo SUBDIR that
+  // owns no `.git` of its own yet sits inside a checked-out work tree — asking
+  // git resolves it so a healthy project is not falsely reported `✗ missing`
+  // (the canonical dir list now leads with `defaultPath ?? root`). A bare `.git`
+  // short-circuits the git call and keeps the broken-`.git` case present-with-error.
+  if (!fs.existsSync(path.join(absPath, '.git'))) {
+    if (git(absPath, ['rev-parse', '--is-inside-work-tree']) !== 'true') return status;
+  }
   status.present = true;
 
   const branch = git(absPath, ['rev-parse', '--abbrev-ref', 'HEAD']);

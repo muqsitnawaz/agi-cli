@@ -135,6 +135,19 @@ describe('probeRepoWorkspace', () => {
     expect(s.branch).toBe('wt-branch');
   });
 
+  it('treats a monorepo subdir (no own .git, inside a work tree) as present with the repo state', () => {
+    // A project narrowed with `defaultPath` (e.g. `--path apps/web`) probes a
+    // subdir that owns no `.git`; it must report the enclosing repo's state, not
+    // a false `✗ missing`.
+    const { repo } = repoWithUpstream('mono');
+    const sub = path.join(repo, 'apps', 'web');
+    fs.mkdirSync(sub, { recursive: true });
+    const s = probeRepoWorkspace(sub);
+    expect(s.present).toBe(true);
+    expect(s.branch).toBe('main');
+    expect(s.error).toBeUndefined();
+  });
+
   it('surfaces a broken .git as present-with-error, never silently clean', () => {
     const broken = path.join(dir, 'broken');
     fs.mkdirSync(path.join(broken, '.git'), { recursive: true });

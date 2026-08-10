@@ -164,7 +164,7 @@ export function repoForDir(dir: string, slugOverride?: string): ProjectRepo {
  * passing it with several is a loud error rather than silently stamping every
  * dir with the same slug.
  */
-function reposFromDirFlags(dirs: string[], slug: string | undefined): ProjectRepo[] {
+export function reposFromDirFlags(dirs: string[], slug: string | undefined): ProjectRepo[] {
   if (slug && dirs.length > 1) {
     throw new Error('--slug applies to a single --dir; pass one --dir at a time when overriding the slug.');
   }
