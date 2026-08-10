@@ -907,7 +907,7 @@ async function runRoutinesBrowser(options: RoutinesListOptions): Promise<void> {
 export function registerRoutinesCommands(program: Command): void {
   const routinesCmd = program
     .command('routines')
-    .description('Schedule agents to run on a cron schedule or at a specific time. The daemon starts at install/upgrade and on setup; routines add also ensures it is running.');
+    .description('Schedule agents to run on a cron schedule or at a specific time. The daemon starts at install/upgrade and on setup when daemon.enabled is not false; routines add also ensures it is running.');
 
   addHostOption(routinesCmd);
 
