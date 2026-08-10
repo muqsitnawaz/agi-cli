@@ -397,7 +397,21 @@ export async function inspectRepo(repo: RepoTarget, options: InspectOptions): Pr
   const jsonHead = { repo: repo.label, root: repo.root };
 
   if (drill) {
-    const items = collectRepoKind(repo, drill.kind);
+    // Routines carry live state, and an unreadable device document silently
+    // removes that device from every `devices` cell — say so on this path too,
+    // not only in the overview.
+    let items: ResourceItem[];
+    if (drill.kind === 'routines') {
+      const provider = defaultRoutineLive();
+      items = collectRepoRoutines(repo, provider.live);
+      if (!options.json) {
+        for (const err of provider.errors) {
+          console.error(chalk.yellow(`device config unreadable — ${err}`));
+        }
+      }
+    } else {
+      items = collectRepoKind(repo, drill.kind);
+    }
     if (drill.query === true || drill.query === undefined) {
       // A repo's hooks are wired by its OWN agents.yaml, not by whatever this
       // machine has installed centrally — the same manifest the repo overview
@@ -541,6 +555,25 @@ function defaultRoutineLive(): { live: (name: string) => RoutineLiveState; error
     return { live: () => NO_LIVE_STATE, errors: [(err as Error).message] };
   }
   const thisDevice = (() => { try { return currentRoutineDevice(); } catch { return ''; } })();
+  const errors = [...index.errors];
+
+  // This device's own doc is read through readMeta, which THROWS on a corrupt
+  // one. Falling back to the file's `enabled:` silently would be the same
+  // silent-failure class the index's error collection just removed, so record it
+  // once — the answer is identical for every routine on this machine.
+  let ownDocError: string | null = null;
+  const enabledOnThisDevice = (name: string): boolean | null => {
+    try {
+      return routineEnabledOnThisDevice(name);
+    } catch (err) {
+      if (!ownDocError) {
+        ownDocError = `this device's own config is unreadable — ${(err as Error).message}`;
+        errors.push(ownDocError);
+      }
+      return null;
+    }
+  };
+
   const live = (name: string): RoutineLiveState => {
     const run = latestRunOf(name);
     return {
@@ -548,12 +581,12 @@ function defaultRoutineLive(): { live: (name: string) => RoutineLiveState; error
       materialized: index.materialized,
       thisDevice,
       // The same call applyDeviceActivation makes — per-machine, not fleet-wide.
-      enabledHere: (() => { try { return routineEnabledOnThisDevice(name); } catch { return null; } })(),
+      enabledHere: enabledOnThisDevice(name),
       lastStatus: run?.status ?? null,
       lastAt: run?.startedAt ?? null,
     };
   };
-  return { live, errors: index.errors };
+  return { live, errors };
 }
 
 /** `2h` / `3d` / `just now` — compact enough for a 10-column cell. */
@@ -628,7 +661,6 @@ export function routineDescription(job: JobConfig | null, raw: string): string {
   }
   return '';
 }
-
 
 /**
  * Read every routine one DotAgents repo declares.
@@ -2053,11 +2085,15 @@ function routineRows(items: ResourceItem[]): RichRow[] {
     const last = extraOf(item, 'last');
     // Pad the PLAIN strings, then colour. Padding a chalk-wrapped string counts
     // the escape codes as width and silently steals columns from the next cell.
+    // The trailing problem gets what the three sized cells leave, or it would
+    // blow the row past the terminal and break the alignment this budget exists
+    // to hold — a 147-column row at COLUMNS=100 in testing.
+    const problemW = Math.max(12, budget - firesW - devicesW - stringWidth(last) - 8);
     const detail = [
       chalk.gray(truncateToWidth(fires, firesW).padEnd(firesW)),
       (devices === 'none ⚠' ? chalk.yellow : chalk.gray)(truncateToWidth(devices, devicesW).padEnd(devicesW)),
       colorLast(last),
-      problem ? chalk.red(`  ⚠ ${problem}`) : '',
+      problem ? chalk.red(truncateToWidth(`  ⚠ ${problem}`, problemW)) : '',
     ].join('  ').trimEnd();
     return {
       source: item.source,
