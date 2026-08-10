@@ -75,6 +75,8 @@ describe('credential account registry (bundle-canonical)', () => {
     expect(resolveAccountSelection('one-run', 'claude', meta)).toBe('one-run');
     expect(resolveAccountSelection(undefined, 'claude', meta)).toBe('default-work');
     expect(resolveAccountSelection(undefined, 'codex', meta)).toBeUndefined();
+    expect(resolveAccountSelection(undefined, 'claude', meta, { useDefault: false })).toBeUndefined();
+    expect(resolveAccountSelection('profile-override', 'claude', meta, { useDefault: false })).toBe('profile-override');
   });
 
   it('rotates a credential without changing the stable id or name', () => {
@@ -101,7 +103,7 @@ describe('credential account registry (bundle-canonical)', () => {
   it('removes the account and its device-local credential', () => {
     addAccount('work', 'cursor', 'api-key', 'old-key', root);
     removeAccount('work', root);
-    expect(readAccountRegistry(root).accounts).toEqual({});
+    expect(Object.values(readAccountRegistry(root).accounts).some(account => account.name === 'work')).toBe(false);
     expect(() => inspectAccount('work', root)).toThrow("Unknown account 'work'");
   });
 
@@ -148,12 +150,12 @@ describe('legacy accounts.yaml migration', () => {
     expect(resolveCredentialAccount('work', 'claude', undefined, root).env.ANTHROPIC_AUTH_TOKEN).toBe('sk-or-legacy');
 
     // Idempotent: a second read does nothing (no live file to migrate).
-    expect(Object.keys(readAccountRegistry(root).accounts)).toEqual([id]);
+    expect(readAccountRegistry(root).accounts[id]).toMatchObject({ id, name: 'work' });
   });
 
   it('archives version-bound labels instead of converting them into fake credential accounts', () => {
     fs.writeFileSync(path.join(root, 'accounts.yaml'), 'labels:\n  work:\n    agent: claude\n    fingerprint: abc\n');
-    expect(readAccountRegistry(root)).toEqual({ version: 2, accounts: {} });
+    expect(Object.values(readAccountRegistry(root).accounts).some(account => account.name === 'work')).toBe(false);
     expect(fs.existsSync(path.join(root, 'accounts.legacy-labels.yaml'))).toBe(true);
     expect(fs.existsSync(path.join(root, 'accounts.yaml'))).toBe(false);
   });

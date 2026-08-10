@@ -55,7 +55,7 @@ function parseAuth(raw: string): AccountAuthKind {
 export function registerAccountsCommand(program: Command): void {
   const accounts = program.command('accounts').description('Browse native logins and manage provider account bundles')
     .option('--json', 'Machine-readable account metadata')
-    .option('--fleet', 'Show native OAuth identities across reachable devices')
+    .option('--fleet', 'Show harness-native signed-in identities across reachable devices')
     .action((o: { json?: boolean; fleet?: boolean }) => printAccounts(!!o.json, !!o.fleet));
   accounts.command('list').description('List credential accounts').option('--json', 'Machine-readable account metadata').action((o: { json?: boolean }, command: Command) => printAccounts(!!(o.json || command.optsWithGlobals().json)));
 
@@ -151,6 +151,6 @@ agents accounts inspect work --json
 agents accounts set-default claude work
 agents accounts sync work --device yosemite-s0
 agents run claude --account work`,
-    notes: 'Accounts are durable credentials, independent of agent versions. Native OAuth login remains managed by the harness and is not copied or renamed by agents-cli.',
+    notes: 'Provider accounts are durable credentials independent of agent versions. Harness-native auth remains managed by each harness and is not copied or renamed by agents-cli.',
   });
 }
