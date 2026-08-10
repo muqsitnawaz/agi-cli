@@ -53,4 +53,4 @@
   `projectProbeTargets`), `apps/cli/src/lib/project-root.ts` (`resolveProjectDirs`),
   `apps/cli/src/commands/projects.ts` (`projectRepoFromDir`), `apps/cli/src/commands/exec.ts`,
   `apps/cli/src/commands/teams.ts`, `apps/cli/src/lib/teams/{registry,agents,api}.ts`,
-  `apps/cli/docs/11-projects.md`.
+  `apps/cli/docs/projects.md`.
