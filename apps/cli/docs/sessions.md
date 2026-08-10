@@ -11,43 +11,53 @@ OpenClaw, Rush, Hermes, Grok, Kimi, Droid, and Cursor (the `SESSION_AGENTS` set 
 
 ## Session lifecycle verbs
 
-### Incremental session state for UI consumers
-
-Long-lived consumers subscribe to the CLI-owned session state instead of
-reimplementing discovery or polling session history:
-
-```bash
-agents sessions watch --json
-agents sessions watch --json --local
-```
-
-The command writes NDJSON envelopes. Version 1 defines `reset`, `upsert`,
-`remove`, `scope`, and `heartbeat` events. Consumers treat `rowKey` as opaque
-and order events by `(streamId, sequence)`. When a device scope becomes
-unavailable, its last rows remain recovery entries until that scope sends a new
-reset; unavailability is not interpreted as session removal.
-
-These subcommands sit on one axis (get back into a conversation). They are **not**
-interchangeable — pick the verb for the intent:
+**One verb gets you back in.** `agents sessions resume` detects which state the
+session is in rather than making you pick a verb for it:
 
 | Intent | Verb |
 | --- | --- |
-| Focus by unique id, or multi-select history/live rows and open tabs | `agents sessions focus [selector]` |
-| Select by harness/version on a device (`latest` resolves there) | `agents sessions focus claude@latest --device <host>` |
-| Compose browser filters, including live-state unions | `agents sessions focus claude --orphan --waiting --device <host>` |
-| Attach only — never open a new tab / fork a copy | `agents sessions focus [id] --attach-only` |
-| Re-enter a dropped remote terminal (attach live pane, else resume) | `agents reconnect [id]` / `agents sessions reconnect [id]` |
-| Deprecated alias of focus --attach-only | `agents sessions go` (prints a deprecation notice) |
+| Get back into a session — by id, id prefix, or `ag-<agent>-<shortid>` tmux alias | `agents sessions resume <id-or-alias>` |
+| Attach only — never open a new tab / fork a copy | `agents sessions resume <id> --attach-only` |
+| Multi-select history and open each as a tab/split | `agents sessions resume` |
 | Interactive → **headless** (keep working unattended) | `agents sessions detach <id>` |
-| Headless → **interactive** in this terminal | `agents sessions attach <id>` |
-| Reopen one identity directly, or multi-select history into tabs/splits | `agents sessions resume [id-or-alias]` / `agents sessions resume` |
 | Resume one session in its original harness, version, device, cwd, and mode | `agents resume <id>` |
 | Continue one session from a script / `run` path | `agents run <agent> --resume <id> …` |
+| Branch a copy you can continue separately | `agents sessions fork <id>` |
+| Raw escape hatch — attach a tmux session by name, no session index involved | `agents tmux attach <name>` |
 
-`focus` is the default “take me there” action. With an id or tmux alias it resolves
+Given `<id-or-alias>`, `resume` resolves the canonical session across the fleet,
+rechecks liveness, and then: attaches a **live tmux pane**; brings a **headless**
+session to the foreground; or **recovers** an ended one on its owning device. A
+retained dead pane is diagnostic state, not an attach target.
+
+**Retired (hidden, still working for one release, each prints the replacement):**
+
+| Retired | Use instead |
+| --- | --- |
+| `agents sessions attach <id>` | `agents sessions resume <id>` |
+| `agents reconnect [id]` | `agents sessions resume` (see the note below for bare `reconnect`) |
+| `agents sessions go <id>` | `agents sessions resume <id> --attach-only` |
+| `agents sessions focus` | `agents sessions resume` (focus remains the internal dispatcher) |
+
+**One behaviour is being dropped, deliberately.** Bare `agents reconnect` (no id)
+auto-targeted the most recently active session started in the *current directory* —
+"the terminal that most likely just dropped" — and attached it with no prompt. Bare
+`agents sessions resume` always opens the multi-select picker instead. The zero-typing
+recovery path therefore goes away when `reconnect` is removed after its one-release
+deprecation window. If that workflow matters, it should land on `resume` (as a flag or
+a no-id default) before `reconnect` is deleted — tracked on RUSH-2498.
+
+`resume` is the one “take me there” action. With an id or tmux alias it resolves
 the canonical session across the fleet, rechecks liveness, and attaches only when
 the process and pane are alive. A retained dead tmux pane is diagnostic state, not
 an attach target; the command enters centralized recovery on its owning device.
+
+A live `ag-<agent>-<shortid>` tmux session attaches by NAME even when the session
+index cannot attribute it. That matters for harnesses whose alias suffix is the
+launch id rather than the harness session id, and which write no
+`state/sessions/<pid>.json` record — previously the alias fell through to a keyword
+search and such a pane had no working selector at all.
+
 With no selector or filter it opens a
 multi-select picker over the live fleet: check several and each opens as a new tab
 in the terminal you're in (Ghostty / iTerm / tmux, auto-detected), reusing
@@ -57,19 +67,16 @@ with no attach rail enters recovery in the tab, reported never silently dropped.
 Any selector or filter switches to the shared sessions-browser candidate pipeline:
 agent/version (`claude@2.1.187`, `claude@latest`), device/host/local, project/time,
 team/routine, skill/plugin, bookmarks, and the complete live-state union. A unique
-id focuses directly; agent/version and text selectors always show the rich preview
+id resolves directly; agent/version and text selectors always show the rich preview
 picker, even for one result. `latest` and `oldest` resolve independently on each
 queried device. A full tmux name such as `ag-codex-c1f3d813` and a unique alias
 suffix such as `c1f3d813` resolve to the harness-native session ID on the device
-that owns them; ambiguous prefixes and suffixes fail instead of guessing.
-`--attach-only` keeps the old `go` behavior (attach one living
-process or refuse). `reconnect` is the recovery-first sibling for a dropped remote
-terminal: it attaches the live pane if it survived, else resumes the session, and
-with no id targets the most recent session started from the current directory (the
-one that most likely just dropped) rather than the fleet picker — the manual
-companion to the automatic reattach that runs when `agents run --device <box>`
-loses its ssh link (see [hosts.md](hosts.md)). `attach` / `detach` are the presence
-pair (foreground ↔ background). Bare `resume` is the multi-open/history path. Top-level
+that owns them; ambiguous prefixes and suffixes fail instead of guessing. Synced
+copies of one transcript count as **one** logical session, so a full UUID never
+reports an ambiguity.
+`--attach-only` attaches one living process or refuses, never forking a copy.
+`detach` is the inverse direction (foreground → background); it stops the
+interactive process and respawns the agent headless, which no other verb does. Top-level
 `agents resume <id-or-label>` is the strict single-session shortcut:
 a full **UUID** checks the local SQLite index first and resolves with **zero** SSH on
 a local hit; only on a local miss does it fan out to registered devices, and there the
@@ -1200,11 +1207,13 @@ agents (opencode) need per-agent handling. For an unsupported harness the comman
 fails loud and names the manual branch — start a fresh agent and seed it with
 `/continue <id>` (the source stays put) — rather than a silent no-op or fake copy.
 
-## Background & foreground (detach / attach)
+## Background & foreground (detach / resume)
 
 `agents sessions detach <id>` sends a live agent session to the background;
-`agents sessions attach <id>` brings it back. They live under `sessions` alongside
-`focus`/`resume` — the session-lifecycle axis — and route through the same
+`agents sessions resume <id>` brings it back — bringing a headless session to the
+foreground is one of the states `resume` detects, so there is no separate verb for
+it. (`agents sessions attach` still works for one release and prints this
+replacement.) Both route through the same
 version-pinned `agents run --resume` path everything else uses, so they are
 agent-agnostic (native resume for Claude/Codex, `/continue` replay for the rest),
 not a per-agent special case. (In AGI EXT: **Agents: Detach**
@@ -1250,73 +1259,6 @@ Presence is **derived, never asserted**: a record only says "this session was de
 whether it is `background` or `parked` is decided live from the recorded pid plus its
 start-time fingerprint (which defeats PID reuse). Ad-hoc headless runs and cloud/team
 rows carry no presence — they are not on this axis.
-
-## Reaping what an exited agent left behind (`sessions reap`)
-
-An interactive agent is the leaf of a detached tmux pane, and the pane is created
-with `remain-on-exit on` so the harness can read the agent's exit status and
-capture its final output. Two things then accumulate:
-
-- **Dead panes.** A retained pane whose agent exited is diagnostic state; nothing
-  in the attach path collects it when the client that launched it is gone (an SSH
-  drop, a closed terminal).
-- **Helper processes.** Destroying a pane SIGHUPs only its FOREGROUND process
-  group. An MCP server or a harness background daemon that moved itself into its
-  own process group survives, reparents to init, and holds its memory forever.
-  Measured on the fleet: one pane holding 2.5 GB of Claude Code background daemons
-  22 days after its session ended, and 34 orphaned `cgraph-mcp --daemon`
-  processes on a single worker (RUSH-2521).
-
-```bash
-agents sessions reap             # collect both
-agents sessions reap --dry-run   # list what would be collected, kill nothing
-agents sessions reap --json      # { reaped, sessions, details, processes, processDetails, warnings }
-```
-
-The routines daemon runs the same sweep every 5 minutes
-([`src/lib/daemon.ts`](../src/lib/daemon.ts) `runDeadPaneReap`), and `killSession`
-collects a session's helpers as it tears that session down, so an agent that exits
-normally leaves nothing behind without waiting for a tick.
-
-**How a helper is attributed to its session (tier 1 — Linux only today).** Every
-OS handle that names the pane is destroyed by the exit itself — ppid ancestry is
-replaced by init, the controlling terminal is disassociated from the whole POSIX
-session when its leader exits, and the surviving helpers are precisely the ones
-that left the pane's process group. What does survive is the environment: the pane
-exports `AGENT_TMUX_SESSION_NAME` and every descendant inherits it, reparented or
-not. A process carrying that marker is reaped when its tmux session no longer
-exists, or when that session has **no attached client AND** its agent pane process
-has exited. A live agent or an attached client protects everything it owns, and the
-routines daemon, the secrets broker, and the reaping process's own ancestry are
-never candidates. Reading that marker needs another process's environment, which is
-a plain `/proc/<pid>/environ` file read on Linux but has no working equivalent on
-macOS: modern `ps -E` no longer prints another process's environment at all
-(verified on macOS Sequoia), so `readAgentProcesses()` returns every macOS process
-with no marker and tier 1 correctly finds nothing to do there — safe, not
-effective. Only tier 2 (below) reaps anything on macOS today.
-
-**When tmux itself can't be asked.** Tier 1 only trusts an ABSENT session as proof
-of "gone" when the tmux query that built that answer actually completed — a query
-that threw (tmux missing/unsupported version, a spawn failure, or a timed-out
-server) skips tier 1 entirely for that tick rather than treating "we don't know" as
-"there's nothing here". `agents sessions reap --json`'s `warnings` array (and a
-`WARN`-level daemon log line) says so when it happens; tier 2 is unaffected, since
-it never consults tmux at all.
-
-A harness that starts its background daemons with a scrubbed environment is matched
-on the owner it declares in its own argv instead (tier 2) — Claude Code's
-`daemon run --spawned-by {…,"pid":N}` pool is reaped, with its `bg-pty-host` /
-`bg-spare` workers, once pid `N` is dead. Those rules live in
-`DETACHED_HELPER_RULES` ([`src/lib/tmux/orphan-reap.ts`](../src/lib/tmux/orphan-reap.ts)),
-one entry per harness, and are anchored on the process's REAL executable (argv[0]'s
-basename) rather than a substring match anywhere in its command line — a `grep`,
-`cat`, or pager viewing this rule's own source, or an agent whose prompt happens to
-quote it, must never become a kill seed. A process still owned by a live or
-attached pane is excluded from seeding tier 2 too, whatever its own argv says.
-
-Note that this collects **everything** a session's agent spawned, not only MCP
-servers — a server the agent deliberately backgrounded inside its pane is torn down
-with the session too.
 
 ## Lost hosts: `crashed` and `orphaned`
 
@@ -1403,7 +1345,7 @@ healthy one in the row list.
 the bookmarked ones. Outside a TTY, `agents sessions bookmark <id>` (`--remove`, `--list`,
 `--json`) does the same, and `agents sessions --bookmarks` is the flag twin of `b` — so
 the `y` copy-cmd round-trips a bookmarked view into a command. `f` focuses the highlighted
-session through the same attach-or-recover decision as `agents sessions focus <id>`;
+session through the same attach-or-recover decision as `agents sessions resume <id>`;
 Enter keeps its existing resume behavior.
 
 Bookmarks live in `~/.agents/.history/bookmarks.json` keyed by session id, **not** in
@@ -1555,11 +1497,7 @@ The flow reuses existing primitives rather than reinventing transport or resume:
    starts the server a fresh worker/box lacks — the generic `new-window` backend needs a
    live server), then confirm the pane is *live* (not merely created) before proceeding.
    For an ephemeral box, migrate git-clones the repo and checks out the (WIP) branch first
-   so the cwd resolves. The session is created on the target's **agents socket** — the
-   same one its own reaper queries (`readAllPaneOwners`, see "Reaping what an exited
-   agent left behind" above) — not tmux's bare default OS socket; landing on the wrong
-   socket made the migrated agent invisible to its own reaper, which killed it as
-   `tmux-session-gone` on the next tick (RUSH-2521).
+   so the cwd resolves.
 7. **Stop the source** (`killSession`) — but only after the target session is confirmed
    live. `--keep` skips this (copy, not move).
 
@@ -1596,6 +1534,9 @@ cached in `session_insights` and invalidated by transcript mtime/size. Sample ev
 limited to shortened session ids; transcript text, credentials, and local paths are not
 included. `--narrative` is explicitly opt-in and sends only the aggregate report to the
 coach process.
+
+Agents can invoke the same source of truth through `/sessions-insights`; the slash entry
+is a thin command wrapper, not a second analyzer.
 
 ## Skill/plugin/slash-command usage (`session_resource_usage`)
 
