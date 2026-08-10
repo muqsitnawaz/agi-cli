@@ -145,6 +145,21 @@ provider/host pair or a bundle absent from the destination fails before the agen
 process starts. A migrated v2 `accounts.yaml` becomes these bundles transactionally;
 the old registry is archived only after every bundle was written successfully.
 
+Usage and authentication health are device-local read models owned by the
+agents-cli daemon. Every ordinary consumer (`agents run`, `view`, `versions`,
+`teams`, device inventory, and Factory) reads the same persisted snapshots and
+never calls a provider or scans usage logs on its render path. The daemon
+considers usage every 60 seconds (each account retains its provider-aware due
+time and backoff) and authentication every three minutes. `agents usage
+<agent> --refresh`, `agents view --refresh`, and inventory refreshes request an
+explicit collection through the same per-account cross-process lease; concurrent
+CLI processes wait for and reuse the first published result.
+
+Only safe metadata crosses devices: account identity, quota snapshots, and auth
+verdicts. Raw API keys remain in each device's credential store. OAuth remains
+per-device and harness-managed; use the harness's interactive login on the
+interactive device rather than copying its OAuth files to another machine.
+
 agents-cli can run commands on **other machines**, not just the local one. Two
 independent registries back this, both using SSH as the only transport (no daemon).
 
