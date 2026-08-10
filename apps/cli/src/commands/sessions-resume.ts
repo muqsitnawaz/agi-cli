@@ -59,6 +59,7 @@ export interface ResumeOptions {
   /** --terminal-app: force macOS Terminal.app. Named to avoid reading as `run --terminal`. */
   terminalApp?: boolean;
   splits?: boolean;
+  attachOnly?: boolean;
 }
 
 export function registerSessionsResumeCommand(sessionsCmd: Command): void {
@@ -77,6 +78,7 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
     .option('--tmux', 'Force the tmux backend')
     .option('--vscodium', 'Force the VSCodium agent-terminal backend (swarm-ext)')
     .option('--terminal-app', 'Force macOS Terminal.app (no split support — panes become tabs)')
+    .option('--attach-only', 'With an id/alias: attach a living pane only — never resume a copy')
     .option('--splits', 'Pack two sessions side by side per tab (default: one tab per session)');
 
   setHelpSections(cmd, {
@@ -121,7 +123,7 @@ async function sessionsResumeAction(query: string | undefined, options: ResumeOp
   }
 
   if (query && isDirectResumeSelector(query)) {
-    await dispatchSessionLifecycleInPlace(query.trim(), options.host ? [options.host] : []);
+    await dispatchSessionLifecycleInPlace(query.trim(), options.host ? [options.host] : [], options.attachOnly === true);
     return;
   }
 
@@ -260,12 +262,20 @@ export async function resumeSelectorInPlace(selector: string): Promise<void> {
 /** Direct identities use focus as the lifecycle dispatcher: it rechecks the
  * live fleet, attaches a healthy pane, and falls through to `agents resume`
  * only when the process is no longer attachable. */
-export async function dispatchSessionLifecycleInPlace(selector: string, hosts: string[] = []): Promise<void> {
-  await spawnCliInPlace(buildSessionLifecycleArgs(selector, hosts));
+export async function dispatchSessionLifecycleInPlace(
+  selector: string,
+  hosts: string[] = [],
+  attachOnly = false,
+): Promise<void> {
+  await spawnCliInPlace(buildSessionLifecycleArgs(selector, hosts, attachOnly));
 }
 
-export function buildSessionLifecycleArgs(selector: string, hosts: string[] = []): string[] {
-  return ['sessions', 'focus', selector, ...hosts.flatMap(host => ['--host', host])];
+export function buildSessionLifecycleArgs(selector: string, hosts: string[] = [], attachOnly = false): string[] {
+  return [
+    'sessions', 'focus', selector,
+    ...hosts.flatMap(host => ['--host', host]),
+    ...(attachOnly ? ['--attach-only'] : []),
+  ];
 }
 
 function asyncExitCode(child: ReturnType<typeof spawn>): Promise<number> {
