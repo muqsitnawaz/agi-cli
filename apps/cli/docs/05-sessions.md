@@ -25,8 +25,13 @@ interchangeable — pick the verb for the intent:
 | Interactive → **headless** (keep working unattended) | `agents sessions detach <id>` |
 | Headless → **interactive** in this terminal | `agents sessions attach <id>` |
 | Reopen one identity directly, or multi-select history into tabs/splits | `agents sessions resume [id-or-alias]` / `agents sessions resume` |
+| Read complete historical + live rows with canonical lifecycle and recovery metadata | `agents sessions --all --json` |
 | Resume one session in its original harness, version, device, cwd, and mode | `agents resume <id>` |
 | Continue one session from a script / `run` path | `agents run <agent> --resume <id> …` |
+
+The JSON listing is one row model, not separate history and roster schemas.
+`--active`, `--idle`, `--crashed`, `--abandoned`, and the other existing lifecycle
+flags narrow those same enriched rows; they do not require a second join.
 
 `focus` is the default “take me there” action. With an id or tmux alias it resolves
 the canonical session across the fleet, rechecks liveness, and attaches only when

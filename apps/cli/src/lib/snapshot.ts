@@ -3,11 +3,11 @@
  *
  * Consumers (Factory watchdog, menubar, fleet scripts) used to fork:
  *   agents view <agent> --json  × N harnesses
- *   agents sessions --active --json + a recent transcript listing
+ *   agents sessions --active --json
  *   agents feed --json          (sometimes)
  *
  * That is N+2 process starts per poll tick. This module gathers the same
- * shapes and the joined resume rows in one invocation so poll count drops to 1 without redefining
+ * shapes in one invocation so poll count drops to 1 without redefining
  * `agents status` (which stays the UnifiedSyncStatus sync contract).
  *
  * Stores are not merged — inventory still comes from view, active rows from
@@ -20,7 +20,6 @@ import { computeAgentCounts, type FleetAgentCounts } from './fleet-status.js';
 import type { AgentId } from './types.js';
 import type { UnifiedSyncStatus } from './sync-status.js';
 import type { ViewJsonAgent } from '../commands/view.js';
-import { buildSessionResumeCandidates, type SessionResumeCandidate } from './session/resume-candidates.js';
 
 /** One open-block row in the optional feed summary (no full question bodies). */
 export interface SnapshotFeedBlock {
@@ -64,8 +63,6 @@ export interface FleetSnapshot {
   inventory: ViewJsonAgent[];
   /** Live sessions — same row shape as `agents sessions --active --json`. */
   sessions: SnapshotSessionRow[];
-  /** Recent transcripts joined with live state, canonically ordered for resume UIs. */
-  resumableSessions: SessionResumeCandidate[];
   /** How many remote devices contributed sessions (0 when --local). */
   remoteDeviceCount: number;
   /** Running/live tallies derived from `sessions` (same as fleet-status). */
@@ -123,7 +120,6 @@ export function assembleSnapshot(parts: {
   capturedAt: string;
   inventory: ViewJsonAgent[];
   sessions: SnapshotSessionRow[];
-  resumableSessions?: SessionResumeCandidate[];
   remoteDeviceCount: number;
   feed?: SnapshotFeedSummary;
   sync?: UnifiedSyncStatus;
@@ -134,7 +130,6 @@ export function assembleSnapshot(parts: {
     capturedAt: parts.capturedAt,
     inventory: parts.inventory,
     sessions: parts.sessions,
-    resumableSessions: parts.resumableSessions ?? [],
     remoteDeviceCount: parts.remoteDeviceCount,
     agents: computeAgentCounts(
       parts.sessions.map((s) => ({
@@ -160,17 +155,16 @@ export async function computeSnapshot(
   // local: false (from --all-hosts) → full sessions --active fan-out.
   const localOnly = opts.hosts?.length ? false : opts.local !== false;
 
-  const [{ collectAgentsJson }, sessionsMod, browserMod] = await Promise.all([
+  const [{ collectAgentsJson }, sessionsMod] = await Promise.all([
     import('../commands/view.js'),
     import('../commands/sessions.js'),
-    import('../commands/sessions-browser.js'),
   ]);
 
   const inventoryP = collectAgentsJson(opts.agent);
-  const sessionsP = browserMod.collectSessionCandidates(
-    { projectScope: 'all', window: undefined, limit: 200, sort: 'timestamp' },
-    { local: localOnly, hosts: opts.hosts, includeLive: true },
-  );
+  const sessionsP = sessionsMod.gatherActiveSessions({
+    local: localOnly,
+    hosts: opts.hosts,
+  });
 
   const feedP = opts.withFeed
     ? Promise.resolve(summarizeFeedBlocks(listBlocks(), opts.feedLimit ?? 50))
@@ -188,20 +182,14 @@ export async function computeSnapshot(
   ]);
 
   const sessions = sessionsMod.serializeActiveSessionsForJson(
-    gathered.activeSessions,
-  ) as SnapshotSessionRow[];
-  const resumableSessions = buildSessionResumeCandidates(
     gathered.sessions,
-    gathered.liveById,
-    gathered.self,
-  );
+  ) as SnapshotSessionRow[];
 
   return assembleSnapshot({
     host: machineId(),
     capturedAt: new Date().toISOString(),
     inventory,
     sessions,
-    resumableSessions,
     remoteDeviceCount: gathered.remoteDeviceCount,
     feed,
     sync,

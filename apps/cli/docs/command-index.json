@@ -25895,7 +25895,7 @@
       "name": "snapshot",
       "path": "snapshot",
       "aliases": [],
-      "description": "One-process poll snapshot: install inventory + active and resumable sessions (optional feed/sync). Not the sync-status command — use `agents status` for drift.",
+      "description": "One-process poll snapshot: install inventory + active sessions (optional feed/sync). Not the sync-status command — use `agents status` for drift.",
       "args": [],
       "options": [
         {
@@ -26000,7 +26000,7 @@
           "negate": false
         }
       ],
-      "examples": "# One-shot inventory + local active sessions (JSON)\n      agents snapshot --json\n\n      # Same, plus open feed blocks for needs-you polls\n      agents snapshot --json --with-feed\n\n      # Fleet-wide active + resumable sessions\n      agents snapshot --json --all-hosts\n\n      # Inventory for one harness only (Factory-style usage poll)\n      agents snapshot --json --agent claude\n\n      # Run the whole snapshot on another device\n      agents snapshot --json --host yosemite-s0",
+      "examples": "# One-shot inventory + local active sessions (JSON)\n      agents snapshot --json\n\n      # Same, plus open feed blocks for needs-you polls\n      agents snapshot --json --with-feed\n\n      # Fleet-wide active sessions (matches sessions --active scope)\n      agents snapshot --json --all-hosts\n\n      # Inventory for one harness only (Factory-style usage poll)\n      agents snapshot --json --agent claude\n\n      # Run the whole snapshot on another device\n      agents snapshot --json --host yosemite-s0",
       "subcommands": []
     },
     {

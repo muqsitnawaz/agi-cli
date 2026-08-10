@@ -615,34 +615,23 @@ export function applyFilters(
 export async function collectSessionCandidates(
   initial: Partial<BrowserFilter>,
   opts: { local?: boolean; hosts?: string[]; includeLive?: boolean } = {},
-): Promise<{
-  sessions: SessionMeta[];
-  liveById: Map<string, ActiveSession>;
-  activeSessions: ActiveSession[];
-  remoteDeviceCount: number;
-  self: string;
-  unreachable: string[];
-}> {
+): Promise<{ sessions: SessionMeta[]; liveById: Map<string, ActiveSession>; self: string; unreachable: string[] }> {
   const self = machineId();
   const filter = buildInitialFilter(initial);
   if (filter.statuses.length > 0) filter.running = true;
   const hosts = opts.hosts && opts.hosts.length > 0 ? opts.hosts : undefined;
   const pool = await fetchRawPool(filter, self, opts.local ?? false, hosts, true);
   let liveById = new Map<string, ActiveSession>();
-  let activeSessions: ActiveSession[] = [];
-  let remoteDeviceCount = 0;
   if (filter.running || opts.includeLive) {
-    const gathered = await gatherActiveSessions({ local: opts.local ?? false, hosts });
-    activeSessions = gathered.sessions;
-    remoteDeviceCount = gathered.remoteDeviceCount;
-    liveById = indexLiveRows(activeSessions, self);
+    const { sessions } = await gatherActiveSessions({ local: opts.local ?? false, hosts });
+    liveById = indexLiveRows(sessions, self);
   }
   const includeUnindexedLive = !filter.agent?.match(/@(latest|oldest)$/);
   const rows = filter.running || opts.includeLive
     ? mergeLiveIntoPool(pool.rows, liveById, self, includeUnindexedLive)
     : pool.rows;
   const sessions = applyFilters(rows, liveById, filter, self, listBookmarks());
-  return { sessions, liveById, activeSessions, remoteDeviceCount, self, unreachable: pool.unreachable };
+  return { sessions, liveById, self, unreachable: pool.unreachable };
 }
 
 /** Derive the SSH-launch origin tag for a picker row from the live index. Set

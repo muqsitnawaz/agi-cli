@@ -2741,10 +2741,36 @@ async function sessionsAction(
       );
       return;
     }
+
+    // Machine callers get the same durable+live row contract as `--all
+    // --json`, narrowed by the existing lifecycle flags. Discovery, live union,
+    // and filtering stay in the shared browser pipeline; no second live scan.
+    if (options.json) {
+      const forceLocal = options.local === true || process.env.AGENTS_SESSIONS_LOCAL === '1';
+      const { collectSessionCandidates } = await import('./sessions-browser.js');
+      const collected = await collectSessionCandidates({
+        running: true,
+        statuses: liveStatuses,
+        teams: options.teams === true,
+        agent: options.agent,
+        bookmarks: options.bookmarks === true,
+        projectScope: 'all',
+        window: options.since ?? (options.all ? undefined : '30d'),
+        until: options.until,
+        routine: options.routine ?? false,
+        limit: Number.parseInt(options.limit ?? DEFAULT_LIMIT, 10),
+      }, { local: forceLocal, hosts: options.host, includeLive: true });
+      await enrichTmuxLocators([...collected.liveById.values()].filter((row) => !row.machine || row.machine === collected.self));
+      const { enrichSessionJsonRows } = await import('../lib/session/json-row.js');
+      const rows = enrichSessionJsonRows(collected.sessions, collected.liveById, collected.self);
+      process.stdout.write(serializeSessionsJson(rows));
+      if (options.waiting && rows.length > 0) process.exitCode = 1;
+      return;
+    }
     // AGENTS_SESSIONS_LOCAL is set by a parent fan-out invocation (see
     // remote-active.ts) so a peer answers for itself without recursing.
     const forceLocal = options.local === true || process.env.AGENTS_SESSIONS_LOCAL === '1';
-    await renderActiveSessions(options.json === true, options.waiting === true, {
+    await renderActiveSessions(false, options.waiting === true, {
       local: forceLocal,
       hosts: options.host,
       bookmarksOnly: options.bookmarks === true,
@@ -3100,9 +3126,24 @@ async function sessionsAction(
       // each peer) would fall to FTS content search and return every transcript
       // that merely MENTIONS the id, defeating exact remote resolution. A genuine
       // search phrase keeps the ranked metadata+content path.
-      const filtered = searchQuery
+      let filtered = searchQuery
         ? resolveSessionQuery(sessions, searchQuery).matches
         : sessions;
+      // `--all --json` is the canonical complete session-row model: durable
+      // history plus every live row that fell outside the history cap, enriched
+      // by the same single live gather used by `--active`. A peer answering a
+      // parent fan-out stays local so this cannot recursively sweep the fleet.
+      if (options.all && !searchQuery) {
+        const forceLocal = options.local === true || process.env[NO_FANOUT_ENV] === '1';
+        const gathered = await gatherActiveSessions({ local: forceLocal, hosts: options.host });
+        const self = machineId();
+        await enrichTmuxLocators(gathered.sessions.filter((row) => !row.machine || row.machine === self));
+        const { indexLiveRows, mergeLiveIntoPool } = await import('./sessions-browser.js');
+        const liveById = indexLiveRows(gathered.sessions, self);
+        filtered = mergeLiveIntoPool(filtered, liveById, self);
+        const { enrichSessionJsonRows } = await import('../lib/session/json-row.js');
+        filtered = enrichSessionJsonRows(filtered, liveById, self);
+      }
       process.stdout.write(serializeSessionsJson(filtered));
       return;
     }
