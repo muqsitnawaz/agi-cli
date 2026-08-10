@@ -5,6 +5,7 @@ import * as yaml from 'yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { secretsKeychainItem, setKeychainBackendForTest, setKeychainToken, type KeychainBackend } from './secrets/index.js';
 import { writeBundleWithItems } from './secrets/bundles.js';
+import { _resetFileStoreForTest } from './secrets/filestore.js';
 import { addAccount, inspectAccount, readAccountRegistry, removeAccount, renameAccount, resolveAccountSelection, resolveCredentialAccount, setAccountSecret } from './account-registry.js';
 import { buildAccountBundle } from './account-schema.js';
 
@@ -26,8 +27,22 @@ function metadataBlobs(keychain: MemoryKeychain): string[] {
 describe('credential account registry (bundle-canonical)', () => {
   let root: string;
   let keychain: MemoryKeychain;
-  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-accounts-')); keychain = new MemoryKeychain(); setKeychainBackendForTest(keychain); });
-  afterEach(() => { setKeychainBackendForTest(null); fs.rmSync(root, { recursive: true, force: true }); });
+  let previousMetaIndex: string | undefined;
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-accounts-'));
+    previousMetaIndex = process.env.AGENTS_SECRETS_META_INDEX_FILE;
+    process.env.AGENTS_SECRETS_META_INDEX_FILE = path.join(root, 'bundle-index.json');
+    _resetFileStoreForTest({ fileDir: path.join(root, 'secrets'), passphrase: 'account-registry-test' });
+    keychain = new MemoryKeychain();
+    setKeychainBackendForTest(keychain);
+  });
+  afterEach(() => {
+    setKeychainBackendForTest(null);
+    _resetFileStoreForTest();
+    if (previousMetaIndex === undefined) delete process.env.AGENTS_SECRETS_META_INDEX_FILE;
+    else process.env.AGENTS_SECRETS_META_INDEX_FILE = previousMetaIndex;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
 
   it('stores the account as a never-policy bundle with the secret out of the metadata', () => {
     addAccount('work', 'openrouter', 'api-key', 'sk-or-secret', root);
@@ -148,8 +163,22 @@ describe('credential account registry (bundle-canonical)', () => {
 describe('legacy accounts.yaml migration', () => {
   let root: string;
   let keychain: MemoryKeychain;
-  beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-accounts-mig-')); keychain = new MemoryKeychain(); setKeychainBackendForTest(keychain); });
-  afterEach(() => { setKeychainBackendForTest(null); fs.rmSync(root, { recursive: true, force: true }); });
+  let previousMetaIndex: string | undefined;
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-accounts-mig-'));
+    previousMetaIndex = process.env.AGENTS_SECRETS_META_INDEX_FILE;
+    process.env.AGENTS_SECRETS_META_INDEX_FILE = path.join(root, 'bundle-index.json');
+    _resetFileStoreForTest({ fileDir: path.join(root, 'secrets'), passphrase: 'account-migration-test' });
+    keychain = new MemoryKeychain();
+    setKeychainBackendForTest(keychain);
+  });
+  afterEach(() => {
+    setKeychainBackendForTest(null);
+    _resetFileStoreForTest();
+    if (previousMetaIndex === undefined) delete process.env.AGENTS_SECRETS_META_INDEX_FILE;
+    else process.env.AGENTS_SECRETS_META_INDEX_FILE = previousMetaIndex;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
 
   it('transactionally migrates v2 accounts into bundles, preserving the UUID, and archives only after success', () => {
     const id = '11111111-2222-3333-4444-555555555555';

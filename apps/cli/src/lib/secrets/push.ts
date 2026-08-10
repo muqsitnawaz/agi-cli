@@ -84,6 +84,8 @@ export interface PushBundleOptions {
   policyNever?: boolean;
   /** Permit a human-invoked push to read locally without requiring the agent broker. */
   agentOnly?: boolean;
+  /** Non-secret literals whose bundle value kind must survive the dotenv transport. */
+  literalValues?: Record<string, string>;
 }
 
 export interface PushBundleResult {
@@ -241,6 +243,14 @@ export function pushResolvedBundleToHost(
     if (policy.code !== 0) {
       const msg = (policy.stderr || policy.stdout || '').trim();
       return fail(`pushed '${bundle}' but could not set remote policy never${msg ? `: ${msg}` : ''}`);
+    }
+  }
+
+  for (const [key, value] of Object.entries(opts.literalValues ?? {})) {
+    const literal = remoteSecretsRaw(host, ['add', bundle, key, '--value', value], { osLookupName: host });
+    if (literal.code !== 0) {
+      const msg = (literal.stderr || literal.stdout || '').trim();
+      return fail(`pushed '${bundle}' but could not preserve literal ${key}${msg ? `: ${msg}` : ''}`);
     }
   }
 
