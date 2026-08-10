@@ -68,17 +68,17 @@ describe('devices command', () => {
     expect(stdout).not.toContain('Usage: agents devices');
   });
 
-  it('persists add, ignore, and unignore decisions in the synced target device document', () => {
+  it('persists add, ignore, and unignore decisions in the synced fleet manifest', () => {
     guardedHome();
-    const policyPath = path.join(testHome, '.agents', 'devices', 'mac-mini', 'agents.yaml');
+    const policyPath = path.join(testHome, '.agents', 'agents.yaml');
 
     const added = run(['devices', 'add', 'mac-mini', 'operator@mac-mini.internal', '--platform', 'macos']);
     expect(added.status).toBe(0);
-    expect(fs.readFileSync(policyPath, 'utf-8')).toContain('status: approved');
+    expect(fs.readFileSync(policyPath, 'utf-8')).toContain('mac-mini: approved');
 
     const ignored = run(['devices', 'ignore', 'mac-mini']);
     expect(ignored.status).toBe(0);
-    expect(fs.readFileSync(policyPath, 'utf-8')).toContain('status: ignored');
+    expect(fs.readFileSync(policyPath, 'utf-8')).toContain('mac-mini: ignored');
 
     const unignored = run(['devices', 'unignore', 'mac-mini']);
     expect(unignored.status).toBe(0);

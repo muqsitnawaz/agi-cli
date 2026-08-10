@@ -250,12 +250,12 @@ agents devices apply                           Reconcile the fleet to a declared
 agents devices capture                         Snapshot the live environment (roster names, agents, browser, secret-bundle names, routines) into agents.yaml fleet:.
 agents devices config <name> [key] [value...]  Get, set, or unset a device’s settings (scheduler, agent cap, ssh overrides, auto-launch, notes). Bare opens an interactive settings menu (TTY) or prints the resolved config (piped). Stored centrally in ~/.agents/agents.yaml under fleet.devices.<name>.config — synced, so any box can configure any device.
 agents devices harnesses                       Per device, one row per installed agent@version: account, signed-in, quota, and a single ready verdict. SSH-probes each online box.
-agents devices ignore <name>                   Dismiss a node from auto-discovery so it is never re-suggested (and remove it from the registry if present).
+agents devices ignore <name>                   Dismiss a node and sync the decision through agents.yaml fleet.discovery (also removes it locally).
 agents devices list                            List registered devices with platform, address, reachability, and live resource headroom.
 agents devices login                           Log agent CLIs into fleet boxes over SSH: drive each box's device-code OAuth, scrape the URL + code, and surface every pending login in one local browser page. Default drives all codes at once; --interactive walks one box at a time (codes requested just-in-time so they don't expire).
 agents devices pair-ios [name]                 Pair an iPhone/iPad cockpit (RUSH-1733): mint a control token for `agents serve --control` and mark the device control-only. The token is shown ONCE — enter it in the app. Run this on the anchor.
 agents devices ping                            Live auth health: complete a real request for every agent account across the fleet (unlike the cached "signed in" flag). Writes the shared auth-health cache read by `agents view` and `fleet status`.
-agents devices register <name>                 Register a discovered (pending) node by name — used by the menu-bar "NEW DEVICES → Register" action.
+agents devices register <name>                 Register a discovered node and sync the approval through agents.yaml fleet.discovery.
 agents devices render                          Render the registry to ssh_config. Prints to stdout, or use --write to update ~/.ssh/config.d/agents.
 agents devices rm <name>                       Remove a device from the registry.
 agents devices run <cmd...>                    Run a command on every online registered device. Offline devices are skipped. Alias surface: agents fleet run …

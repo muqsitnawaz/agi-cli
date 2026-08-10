@@ -6866,7 +6866,7 @@
           "name": "ignore",
           "path": "devices ignore",
           "aliases": [],
-          "description": "Dismiss a node and sync the decision through devices/<name>/agents.yaml (also removes it locally).",
+          "description": "Dismiss a node and sync the decision through agents.yaml fleet.discovery (also removes it locally).",
           "args": [
             {
               "name": "name",
@@ -7128,7 +7128,7 @@
           "name": "register",
           "path": "devices register",
           "aliases": [],
-          "description": "Register a discovered node and sync the approval through devices/<name>/agents.yaml.",
+          "description": "Register a discovered node and sync the approval through agents.yaml fleet.discovery.",
           "args": [
             {
               "name": "name",

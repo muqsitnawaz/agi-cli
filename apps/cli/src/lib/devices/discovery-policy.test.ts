@@ -12,8 +12,8 @@ async function freshModules() {
   return { ...policy, ...registry };
 }
 
-function deviceFile(name: string): string {
-  return path.join(home, '.agents', 'devices', name, 'agents.yaml');
+function centralFile(): string {
+  return path.join(home, '.agents', 'agents.yaml');
 }
 
 beforeEach(() => {
@@ -28,22 +28,22 @@ afterEach(() => {
 });
 
 describe('synced device discovery policy', () => {
-  it('round-trips approved, ignored, and pending while preserving sibling device config', async () => {
-    const file = deviceFile('mac-mini');
+  it('round-trips approved, ignored, and pending while preserving sibling fleet config', async () => {
+    const file = centralFile();
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, 'config:\n  maxAgents: 2\nnotes: keep-me\n');
+    fs.writeFileSync(file, 'fleet:\n  devices:\n    mac-mini:\n      config:\n        maxAgents: 2\n');
     const { getDeviceDiscoveryStatus, setDeviceDiscoveryStatus } = await freshModules();
 
     setDeviceDiscoveryStatus('mac-mini', 'approved');
     expect(getDeviceDiscoveryStatus('mac-mini')).toBe('approved');
     expect(fs.readFileSync(file, 'utf-8')).toContain('maxAgents: 2');
-    expect(fs.readFileSync(file, 'utf-8')).toContain('notes: keep-me');
 
     setDeviceDiscoveryStatus('mac-mini', 'ignored');
     expect(getDeviceDiscoveryStatus('mac-mini')).toBe('ignored');
 
     setDeviceDiscoveryStatus('mac-mini', undefined);
     expect(getDeviceDiscoveryStatus('mac-mini')).toBeUndefined();
+    expect(fs.readFileSync(file, 'utf-8')).not.toContain('discovery:');
     expect(fs.readFileSync(file, 'utf-8')).toContain('maxAgents: 2');
   });
 
