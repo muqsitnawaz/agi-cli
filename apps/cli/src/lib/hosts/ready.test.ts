@@ -3,6 +3,7 @@ import {
   parseReadyProbe,
   viewHasAgent,
   viewAgentSignedIn,
+  viewAgentEligible,
   viewAgentVersions,
   viewHasAgentVersion,
   isConcreteVersionPin,
@@ -56,6 +57,22 @@ describe('viewAgentSignedIn', () => {
     expect(viewAgentSignedIn(view, 'codex')).toBe(true);
     expect(viewAgentSignedIn(view, 'claude')).toBeUndefined();
     expect(viewAgentSignedIn('not json', 'codex')).toBeUndefined();
+  });
+});
+
+describe('viewAgentEligible', () => {
+  it('requires a signed-in version that is not known to be usage-blocked', () => {
+    const view = JSON.stringify([
+      { agent: 'codex', versions: [
+        { signedIn: true, usageStatus: 'rate_limited' },
+        { signedIn: false, usageStatus: 'available' },
+      ] },
+      { agent: 'claude', versions: [{ signedIn: true, usageStatus: null }] },
+    ]);
+    expect(viewAgentEligible(view, 'codex')).toBe(false);
+    expect(viewAgentEligible(view, 'claude')).toBe(true);
+    expect(viewAgentEligible(view, 'droid')).toBe(false);
+    expect(viewAgentEligible('not json', 'codex')).toBeUndefined();
   });
 });
 

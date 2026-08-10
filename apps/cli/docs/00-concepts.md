@@ -279,6 +279,14 @@ docs and help.
 Mixing doors fails loud (`--where` + `--host`, `--host` + `--lease`, …). Source
 of truth: [`src/lib/placement.ts`](../src/lib/placement.ts).
 
+**UI clients do not select and then launch an automatic target.** A picker may
+read `agents devices list --json` for effective device config and `agents devices
+harnesses --json` for account eligibility and quota freshness, but that snapshot
+is advisory. The action is always `agents run <agent> --where auto`: the CLI
+re-evaluates placement and account eligibility in the launch transaction. Turning
+an earlier picker suggestion into `--host <name>` creates a stale race and is not
+automatic placement.
+
 ---
 
 ## Capability matrix

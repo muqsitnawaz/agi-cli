@@ -252,6 +252,32 @@ export function viewAgentSignedIn(view: string, agent: string): boolean | undefi
   }
 }
 
+/**
+ * Whether any installed version is eligible for a new run: signed in and not
+ * blocked by a known usage limit. Unknown usage remains eligible; the CLI must
+ * not invent a throttle when a provider exposes no quota endpoint.
+ */
+export function viewAgentEligible(view: string, agent: string): boolean | undefined {
+  try {
+    const rows = JSON.parse(view) as Array<{
+      agent?: string;
+      versions?: Array<{ signedIn?: boolean; usageStatus?: string | null }>;
+    }>;
+    if (!Array.isArray(rows)) return undefined;
+    const row = rows.find((candidate) => candidate.agent?.toLowerCase() === agent.toLowerCase());
+    if (!row) return false;
+    const versions = row.versions ?? [];
+    if (versions.length === 0) return false;
+    return versions.some((version) =>
+      version.signedIn === true &&
+      version.usageStatus !== 'rate_limited' &&
+      version.usageStatus !== 'out_of_credits'
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 export interface EnsureReadyOptions {
   agent: string;
   /**

@@ -28,7 +28,7 @@ import { buildSshInvocation, writeAskpassShim } from '../devices/connect.js';
 import {
   buildReadyProbeCommand,
   parseReadyProbe,
-  viewAgentSignedIn,
+  viewAgentEligible,
   viewHasAgent,
 } from '../hosts/ready.js';
 import { localMachineId } from '../session/origin-machine.js';
@@ -92,7 +92,7 @@ function probeRemoteReadiness(
         if (!probe.reachable) return resolve({ installed: undefined, signedIn: undefined });
         if (!probe.version) return resolve({ installed: false, signedIn: false });
         const installed = viewHasAgent(probe.view, agent);
-        resolve({ installed, signedIn: installed ? viewAgentSignedIn(probe.view, agent) : false });
+        resolve({ installed, signedIn: installed ? viewAgentEligible(probe.view, agent) : false });
       },
     );
   });

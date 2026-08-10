@@ -37,8 +37,17 @@ function row(overrides: Partial<HarnessRow> = {}): HarnessRow {
 
 describe('summarizeQuota', () => {
   it('returns null status and no percent when there is no snapshot', () => {
-    expect(summarizeQuota(null)).toEqual({ status: null, usedPercent: null, stale: false });
-    expect(summarizeQuota(snapshot([]))).toEqual({ status: null, usedPercent: null, stale: false });
+    expect(summarizeQuota(null)).toEqual({
+      status: null, usedPercent: null, stale: false, capturedAt: null, unavailableReason: null,
+    });
+    expect(summarizeQuota(snapshot([]))).toEqual({
+      status: null, usedPercent: null, stale: false, capturedAt: null, unavailableReason: null,
+    });
+
+    expect(summarizeQuota(null, 'stale')).toMatchObject({
+      capturedAt: null,
+      unavailableReason: 'stale',
+    });
   });
 
   it('takes the highest utilization across blocking windows', () => {

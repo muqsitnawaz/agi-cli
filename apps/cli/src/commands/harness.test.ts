@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as state from '../lib/state.js';
 import { addProfile, applyFromSecrets } from './profiles.js';
-import { buildFork, buildEdit, hasEditFlags, forkNeedsWizard, addNeedsWizard } from './harness.js';
+import { buildFork, buildEdit, hasEditFlags, forkNeedsWizard, addNeedsWizard, nativeHarnessCatalog } from './harness.js';
 import { profileExists, readProfile, writeProfile, type Profile } from '../lib/profiles.js';
 import { setKeychainBackendForTest, secretsKeychainItem, getKeychainToken, type KeychainBackend } from '../lib/secrets/index.js';
 import { keychainItemName } from '../lib/secrets/profiles.js';
@@ -56,6 +56,19 @@ describe('addProfile — host + model one-shot (custom harness)', () => {
   it('validates an account before writing a new harness', async () => {
     await expect(addProfile('unwritten', { host: 'claude', model: 'x', account: 'typo' }, 'Harness')).rejects.toThrow("Unknown account 'typo'");
     expect(profileExists('unwritten')).toBe(false);
+  });
+});
+
+describe('nativeHarnessCatalog', () => {
+  it('exposes identity, launch command, modes, and capabilities from the CLI registry', () => {
+    const claude = nativeHarnessCatalog().find((entry) => entry.id === 'claude');
+    expect(claude).toMatchObject({
+      id: 'claude',
+      name: 'Claude',
+      cliCommand: 'claude',
+      modes: ['plan', 'edit', 'auto', 'skip'],
+      capabilities: { skills: true, interactiveRepl: true },
+    });
   });
 });
 
