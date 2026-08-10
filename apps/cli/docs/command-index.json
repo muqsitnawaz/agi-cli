@@ -10223,6 +10223,15 @@
           "negate": false
         },
         {
+          "flags": "--routines [query]",
+          "description": "list routines; pass a name (fuzzy) to show detail",
+          "long": "--routines",
+          "required": false,
+          "optional": true,
+          "variadic": false,
+          "negate": false
+        },
+        {
           "flags": "--command <query>",
           "description": "show detail for one command by name (fuzzy)",
           "long": "--command",
@@ -10280,6 +10289,15 @@
           "flags": "--subagent <query>",
           "description": "show detail for one subagent by name (fuzzy)",
           "long": "--subagent",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--routine <query>",
+          "description": "show detail for one routine by name (fuzzy)",
+          "long": "--routine",
           "required": true,
           "optional": false,
           "variadic": false,
