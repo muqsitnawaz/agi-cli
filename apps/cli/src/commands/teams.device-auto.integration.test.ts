@@ -65,6 +65,7 @@ describe.skipIf(process.platform === 'win32')('agents teams add --device auto (R
     expect(out).not.toContain(`Unknown device 'auto'`);
     expect(out).not.toContain(`Couldn't resolve --device "auto"`);
     expect(out).not.toContain(`Unknown teammate 'claude'`);
+    expect(out).not.toContain('device=auto → local');
     expect(out).toContain('agents: no healthy device can run claude');
   });
 });
