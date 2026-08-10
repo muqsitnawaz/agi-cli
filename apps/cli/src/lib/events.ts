@@ -784,15 +784,31 @@ export function emitStart(
   const startTime = Date.now();
   emit(startEvent, payload);
 
-  const endEvent = startEvent.replace('.start', '.end') as EventType;
-
   return (endPayload: EventPayload = {}) => {
-    emit(endEvent, {
-      ...payload,
-      ...endPayload,
-      durationMs: Date.now() - startTime,
-    });
+    emit(
+      startEvent.replace('.start', '.end') as EventType,
+      { ...payload, ...endPayload, durationMs: Date.now() - startTime }
+    );
   };
+}
+
+export function emitRoutineEnd(meta: {
+  jobName: string;
+  runId?: string;
+  status: string;
+  duration?: number;
+  exitCode?: number | null;
+  detail?: string;
+}): void {
+  emit('routine.end', {
+    module: 'routine',
+    name: meta.jobName,
+    status: meta.status,
+    ...(meta.runId ? { runId: meta.runId } : {}),
+    ...(meta.duration != null ? { durationMs: meta.duration } : {}),
+    ...(meta.exitCode != null ? { exitCode: meta.exitCode } : {}),
+    ...(meta.detail ? { detail: meta.detail } : {}),
+  });
 }
 
 // ─── Timing Utilities ─────────────────────────────────────────────────────────

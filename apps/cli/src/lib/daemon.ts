@@ -32,7 +32,7 @@ import { reapTerminalRoutineProcesses } from './routine-process-cleanup.js';
 import { recordSubsystemOk, recordSubsystemError, recordSubsystemErrorReason, readSubsystemHealth, SUBSYSTEM_SECRETS_BROKER, SUBSYSTEM_BROWSER_IPC, SUBSYSTEM_DAEMON_START } from './daemon-health.js';
 import { startAccountStateService } from './account-state-service.js';
 import { runFleetCacheWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
-import { emit } from './events.js';
+import { emit, emitRoutineEnd } from './events.js';
 
 const PID_FILE = 'daemon.pid';
 const LIFETIME_FILE = 'daemon.lifetime';
@@ -874,14 +874,7 @@ export async function runDaemon(): Promise<void> {
     try {
       const meta = await executeJobDetached(config, {
         onFinish: (final) => {
-          emit('routine.end', {
-            module: 'routine',
-            name: final.jobName,
-            runId: final.runId,
-            status: final.status,
-            ...(final.duration != null ? { durationMs: final.duration } : {}),
-            ...(final.exitCode != null ? { exitCode: final.exitCode } : {}),
-          });
+          emitRoutineEnd(final);
           try { notifyRoutineFinish(final); } catch { /* best-effort */ }
           // RUSH-2288: a failed/timed-out routine also reaches the OWNER's phone
           // (in-process owner channel stack), not just the local desktop. Green
@@ -899,9 +892,8 @@ export async function runDaemon(): Promise<void> {
     } catch (err) {
       const message = (err as Error).message;
       log('ERROR', `Job '${config.name}' failed to spawn: ${message}`);
-      emit('routine.end', {
-        module: 'routine',
-        name: config.name,
+      emitRoutineEnd({
+        jobName: config.name,
         status: 'failed',
         detail: redactSecrets(message).slice(0, 500),
       });
