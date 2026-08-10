@@ -31,6 +31,8 @@ import {
 } from './protocol';
 import { ReadinessDetector } from './readinessDetector';
 import { SessionCliStream } from './sessionCliStream';
+import { SessionCliReplay } from './sessionCliStream';
+import type { Socket } from 'net';
 
 /** Enable + configure the centralized presentation detectors. */
 export interface MonitorDetectorOptions {
@@ -61,6 +63,7 @@ export class MonitorHost {
   private readonly detectorOpts?: MonitorDetectorOptions;
   private readinessDetector?: ReadinessDetector;
   private sessionCliStream?: SessionCliStream;
+  private readonly sessionCliReplay = new SessionCliReplay();
 
   constructor(options: MonitorHostOptions = {}) {
     this.detectorOpts = options.detectors;
@@ -108,7 +111,10 @@ export class MonitorHost {
     if (!opts) return;
     if (opts.sessionCli !== false) {
       this.sessionCliStream = new SessionCliStream({
-        emit: (event) => this.broadcast(MONITOR_FACT.sessionCli, event),
+        emit: (event) => {
+          this.sessionCliReplay.ingest(event);
+          this.broadcast(MONITOR_FACT.sessionCli, event);
+        },
         onError: (message) => console.error(`[MONITOR] ${message}`),
       });
       this.sessionCliStream.start();
@@ -124,6 +130,7 @@ export class MonitorHost {
 
   private handleRequest(
     payload: unknown,
+    socket?: Socket,
   ): ReportTuplesAck | SnapshotReply | ArmAck {
     const req = payload as MonitorRequest | undefined;
     const op = req?.op;
@@ -131,6 +138,11 @@ export class MonitorHost {
       this.slices.set(req.windowId, req.tuples ?? []);
       this.syncDetectorPids();
       this.broadcastSnapshot();
+      if (socket) {
+        for (const event of this.sessionCliReplay.envelopes(req.windowId)) {
+          this.server.sendTo(socket, { type: MONITOR_FACT.sessionCli, payload: event, ts: Date.now() });
+        }
+      }
       return { ok: true, windowId: req.windowId, count: req.tuples?.length ?? 0 };
     }
     if (req && op === MONITOR_OP.snapshot) {

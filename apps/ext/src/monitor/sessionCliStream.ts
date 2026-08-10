@@ -10,6 +10,57 @@ export interface SessionCliStreamOptions {
   spawnWatch?: () => ChildProcessWithoutNullStreams;
 }
 
+/** Current CLI-owned rows retained only so a late follower can receive a reset. */
+export class SessionCliReplay {
+  private readonly scopes = new Map<string, {
+    rows: Map<string, unknown>;
+    capturedAt: number;
+    status?: 'available' | 'unavailable';
+    reason?: string;
+  }>();
+
+  ingest(event: SessionCliEvent): void {
+    const current = this.scopes.get(event.scope) ?? {
+      rows: new Map<string, unknown>(),
+      capturedAt: event.capturedAt,
+    };
+    current.capturedAt = event.capturedAt;
+    if (event.type === 'reset') {
+      current.rows = new Map((event.rows ?? []).flatMap((row) => {
+        const rowKey = row && typeof row === 'object' ? (row as { rowKey?: unknown }).rowKey : undefined;
+        return typeof rowKey === 'string' ? [[rowKey, row] as const] : [];
+      }));
+    } else if (event.type === 'upsert' && event.rowKey && event.row) {
+      current.rows.set(event.rowKey, event.row);
+    } else if (event.type === 'remove' && event.rowKey) {
+      current.rows.delete(event.rowKey);
+    } else if (event.type === 'scope' && event.status) {
+      current.status = event.status;
+      current.reason = event.reason;
+    }
+    this.scopes.set(event.scope, current);
+  }
+
+  envelopes(clientKey: string): SessionCliEvent[] {
+    const events: SessionCliEvent[] = [];
+    for (const [scope, current] of this.scopes) {
+      const streamId = `replay:${clientKey}:${scope}`;
+      events.push({
+        version: 1, type: 'reset', streamId, sequence: 1,
+        capturedAt: current.capturedAt, scope, rows: [...current.rows.values()],
+      });
+      if (current.status) {
+        events.push({
+          version: 1, type: 'scope', streamId, sequence: 2,
+          capturedAt: current.capturedAt, scope, status: current.status,
+          ...(current.reason ? { reason: current.reason } : {}),
+        });
+      }
+    }
+    return events;
+  }
+}
+
 /** Owns the single long-lived CLI session stream for the elected monitor. */
 export class SessionCliStream {
   private child?: ChildProcessWithoutNullStreams;
