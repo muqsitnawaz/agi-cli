@@ -485,7 +485,7 @@ Custom endpoints — drop a YAML file at ~/.agents/profiles/<name>.yml:
     envVar: ANTHROPIC_AUTH_TOKEN
     keychainItem: agents-cli.ollama.token
 
-Profiles store no secrets — safe to use 'agents repo push user' with a shared repo.
+Profiles store no secrets — safe to 'agents push' to a shared repo.
 
 Examples:
   # One-time: store the OpenRouter key (every preset reuses it)
