@@ -214,9 +214,14 @@ registry stays the **discovery cache** (address, tailscale snapshot,
 reachability); the config's `ssh.*` / `platform` / user values overlay the
 registry profile at dial time (`src/lib/devices/resolve-profile.ts`), so
 `agents ssh`, the ssh_config render, host dispatch, and the `devices list`
-table all honor them. The one user-scope key, `interactive.host`
+table all honor them. The user-scope key `interactive.host`
 (`config.interactiveHost`), names the device agents show YOU artifacts on
 (browser opens, dashboards), so skills stop guessing "the online macOS box".
+Usage collection has a separate user-scope pin, `usage.primary-host`
+(`config.usagePrimaryHost`), operated only through `agents config set|get|unset|list`.
+`resolveUsagePrimaryHost()` resolves the explicit usage pin first, then falls back to
+`interactive.host`, then to no primary host. The interactive host answers where the
+user sees artifacts; it does not by itself declare that device authoritative for usage.
 The interactive host is marked `★ interactive` in `agents devices list`;
 `list --json` carries each row's effective profile plus its `config` block and
 an `interactive` flag. The retired subcommands (`configure`, `note`, `set`,
@@ -409,5 +414,3 @@ aliases: [deploy, ship]           # alternate names this command also resolves u
 ```
 
 `commandAppliesTo()` in `src/lib/commands.ts` evaluates these fields after the agent-level `commands` / commands-as-skills gate. The check runs on central sync (`~/.agents/commands/` user/system → version home) and on `agents commands install`; project `.agents/commands/` files are discovered in place and are not filtered by `agents:`.
-
-Example: `.agents/commands/version.md` targets Claude, Codex, Cursor, OpenCode, Copilot, and Grok. Cursor receives both an IDE command file and an Agent Skill because cursor-agent does not load the IDE's `.cursor/commands/` files; Antigravity is excluded until harness support is verified.
