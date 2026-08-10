@@ -1,8 +1,8 @@
 /**
- * Join a Factory tab to a CLI-authoritative session id via AGENT_TERMINAL_ID.
+ * Join a AGI EXT tab to a CLI-authoritative session id via AGENT_TERMINAL_ID.
  *
  * The CLI surfaces `terminalId` on `agents sessions --active --json` when the
- * launch inherited AGENT_TERMINAL_ID (Factory stamps it on every agent tab and
+ * launch inherited AGENT_TERMINAL_ID (AGI EXT stamps it on every agent tab and
  * forwards it across `--host`/`--device`). That is the one key that survives an
  * SSH hop and a /clear — not cwd, not newest transcript file.
  */

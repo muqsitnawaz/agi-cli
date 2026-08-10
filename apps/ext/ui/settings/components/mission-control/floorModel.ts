@@ -190,11 +190,11 @@ export interface FloorAgent {
    * collapses orphaned/crashed into a state it can't tell apart. The Sessions
    * surface reads this to route a detached-but-alive session into the "needs
    * reconnecting" band. '' / undefined when the CLI supplied no status (e.g. a
-   * Factory-owned local tab, which is attached by definition).
+   * AGI EXT-owned local tab, which is attached by definition).
    */
   liveStatus?: string
   /** Whether the session's OS process is still alive (from the CLI `pidAlive`).
-   *  Undefined for Factory-owned tabs (always live). Distinguishes an orphaned but
+   *  Undefined for AGI EXT-owned tabs (always live). Distinguishes an orphaned but
    *  running session (resume attaches) from a crashed one (resume relaunches). */
   pidAlive?: boolean
 }

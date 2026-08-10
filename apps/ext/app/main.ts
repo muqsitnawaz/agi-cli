@@ -1,4 +1,4 @@
-// Standalone Electron app: the Factory work stream running outside any editor.
+// Standalone Electron app: the AGI EXT work stream running outside any editor.
 // It loads the exact same React UI bundle the VS Code webview uses (built by
 // vite.standalone.config.ts) and feeds it floor data over IPC, speaking the same
 // message protocol the extension host does. Running agents show as telemetry; the

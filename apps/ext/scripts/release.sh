@@ -203,7 +203,7 @@ command -v git >/dev/null 2>&1 || { echo "Error: git not found on \$(hostname)."
 command -v vsce >/dev/null 2>&1 || { echo "Installing @vscode/vsce..."; bun add -g @vscode/vsce >/dev/null; }
 command -v ovsx >/dev/null 2>&1 || { echo "Installing ovsx..."; bun add -g ovsx >/dev/null; }
 
-CACHE="\$HOME/.cache/factory-release/agents-cli"
+CACHE="\$HOME/.cache/ext-release/agents-cli"
 mkdir -p "\$(dirname "\$CACHE")"
 [ -d "\$CACHE/.git" ] || git clone --quiet "\$ORIGIN" "\$CACHE"
 git -C "\$CACHE" fetch --quiet origin

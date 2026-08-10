@@ -195,7 +195,7 @@ interface UnifiedAgent {
   toolCalls: number
   linearIssue?: string | null
   mode?: string
-  // Factory metadata surfaced as badges in the UI
+  // AGI EXT metadata surfaced as badges in the UI
   taskType?: FactoryTaskType | null
   teammateName?: string | null
   /** For team rows, a roll-up count of task-types across members. */

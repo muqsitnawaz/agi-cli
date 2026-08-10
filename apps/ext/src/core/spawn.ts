@@ -51,7 +51,7 @@ export interface SpawnSurfaceInput {
 // Pick the surface for a spawn request. Pure so the matrix is testable without
 // the VS Code API; the glue in spawnCommandTerminal just executes the choice.
 //
-// Factory no longer spawns tmux-backed terminals at the extension level, so a
+// AGI EXT no longer spawns tmux-backed terminals at the extension level, so a
 // split always means a native VS Code terminal split.
 export function resolveSpawnSurface(input: SpawnSurfaceInput): SpawnSurface {
   const splitting = input.wantsSplit && input.hasParent;

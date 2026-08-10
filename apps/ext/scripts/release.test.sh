@@ -7,7 +7,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FACTORY_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+EXT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RELEASE_SH="$SCRIPT_DIR/release.sh"
 FAIL=0
 
@@ -23,7 +23,7 @@ else
 fi
 
 PACKAGE_TEST_COMMAND="$(
-    cd "$FACTORY_ROOT"
+    cd "$EXT_ROOT"
     bun -e 'console.log(require("./package.json").scripts?.test ?? "")'
 )"
 if [ -n "$PACKAGE_TEST_COMMAND" ]; then

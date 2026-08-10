@@ -806,11 +806,14 @@ async function createTicketForForeman(
   }
 }
 
-// Factory config: read/write ~/.agents/factory/config.json.
+// Software Factory config: read/write ~/.agents/factory/config.json. This is the
+// beta-gated `agents factory` feature, NOT this extension — the name predates the
+// AGI EXT rename and stays because it is the CLI command's own config path.
 // Kept in this module so the panel can edit it via `factoryConfigRead` /
-// `factoryConfigWrite` without needing to shell out to the agents CLI. The
-// CLI and panel share the exact same file, so either side sees the other's
-// writes.
+// `factoryConfigWrite` without needing to shell out to the agents CLI.
+// NOTE: nothing on the CLI side reads this file today — `agents factory` reads
+// ~/.agents/factory.yml (apps/cli/src/lib/factory/snapshot.ts). Only the panel
+// round-trips config.json.
 const DEFAULT_FACTORY_CONFIG = {
   cloud_priority: ['rush', 'codex', 'local'] as const,
   auto_detect_repo: true,
@@ -1504,7 +1507,7 @@ export function openPanelAndDispatch(context: vscode.ExtensionContext): void {
   }, alreadyOpen ? 0 : 500);
 }
 
-// Open the new-agent composer in the Factory panel. Bound to cmd+k while the
+// Open the new-agent composer in the AGI EXT panel. Bound to cmd+k while the
 // panel is active (VS Code eats cmd+k as a chord prefix before the webview
 // sees the keydown, so the shortcut has to be contributed at this layer).
 export function openPanelAndFocusQuickSpawn(context: vscode.ExtensionContext): void {
@@ -1639,6 +1642,9 @@ export async function seedFloorDataPipeline(context: vscode.ExtensionContext): P
 
 /** Tab title for the dashboard webview. Shown in the VS Code editor tab. */
 const PANEL_TITLE = 'AGI EXT';
+/** Title shipped before the AGI EXT rename; still matched so a tab restored from
+ *  an older build is reclaimed instead of surviving beside the new one. */
+const LEGACY_PANEL_TITLE = 'Factory';
 
 export function openPanel(context: vscode.ExtensionContext): void {
   if (settingsPanel) {
@@ -1648,12 +1654,11 @@ export function openPanel(context: vscode.ExtensionContext): void {
 
   // Close any orphaned dashboard tab (tab restored after a restart but its
   // webview never revived, e.g. by a pre-serializer extension version). A
-  // fresh panel replaces it below. 'Factory' is the pre-rename title: a tab
-  // restored from a build older than the AGI EXT rename still carries it, and
-  // without it that stale tab survives alongside the new one.
+  // fresh panel replaces it below. LEGACY_PANEL_TITLE covers a tab restored from
+  // a build older than the AGI EXT rename, which still carries the old label.
   for (const group of vscode.window.tabGroups.all) {
     for (const tab of group.tabs) {
-      if (tab.input instanceof vscode.TabInputWebview && (tab.label === PANEL_TITLE || tab.label === 'Factory')) {
+      if (tab.input instanceof vscode.TabInputWebview && (tab.label === PANEL_TITLE || tab.label === LEGACY_PANEL_TITLE)) {
         void vscode.window.tabGroups.close(tab);
       }
     }
@@ -1674,7 +1679,7 @@ export function openPanel(context: vscode.ExtensionContext): void {
 
 // VS Code restores webview tabs across window reloads but keeps them blank
 // until the owning extension reattaches through a serializer. Without this,
-// a restored Factory tab stayed white forever.
+// a restored AGI EXT tab stayed white forever.
 export function registerPanelSerializer(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.window.registerWebviewPanelSerializer('agentsSettings', {

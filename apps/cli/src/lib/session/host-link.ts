@@ -35,7 +35,7 @@ export type HostLink =
 
 /**
  * How long an IDE window's registry slice may go without a refresh before we
- * treat that window as gone. The Factory extension force-republishes its slice
+ * treat that window as gone. The AGI EXT force-republishes its slice
  * every 4 minutes (`KEEPALIVE_FORCE_MS` in `apps/ext/src/vscode/foreman.registry.ts`)
  * and on every terminal open/close, so a slice this old means the window is no
  * longer running — it is not merely quiet. Deliberately the same 10 minutes the

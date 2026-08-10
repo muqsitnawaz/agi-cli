@@ -153,7 +153,7 @@ export function ProjectsPane({ projects, rollups = {}, linearProjects, pickedFol
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="title">Projects</span>
           <span className="sub">{projects.length} CLI-managed</span>
-          <span className="host-cap" title="Owned by agents projects — Factory only renders">CLI-managed</span>
+          <span className="host-cap" title="Owned by agents projects — AGI EXT only renders">CLI-managed</span>
         </div>
         <button className="host-btn" onClick={onClose}>
           <Icon name="chevL" size={12} /> back to agents

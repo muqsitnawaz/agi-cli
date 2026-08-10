@@ -965,7 +965,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         // ── Primary action ────────────────────────────────────────────────
         // Land in this session — attaches locally, or SSHes to its owning box
-        // (`agents sessions focus`, the same call Factory's Focus button uses), so
+        // (`agents sessions focus`, the same call the ext's Focus button uses), so
         // it works whether the session is here or on a fleet peer. First so the one
         // thing you usually want is under the cursor.
         if let sid = s.sessionId, !sid.isEmpty {

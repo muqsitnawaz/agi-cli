@@ -210,7 +210,7 @@ export function buildAgentLaunchCommand(
     command += ` --model ${defaultModel}`;
   }
   // Dispatch mode -> `agents run --mode plan|auto|edit`, next to --model/--strategy.
-  // Default to 'auto' when the caller has no preference — interactive Factory
+  // Default to 'auto' when the caller has no preference — interactive AGI EXT
   // launches must start in a writable posture so the agent can edit files.
   // Skip when the caller already threaded an explicit --mode via additionalFlags
   // so we never emit it twice.

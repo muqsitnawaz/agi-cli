@@ -134,7 +134,7 @@ describe('managedToProjectDef', () => {
     expect(def.agents).toBeUndefined();
   });
 
-  test('preserves prior dispatch fields when an older Factory payload omits them', () => {
+  test('preserves prior dispatch fields when an older AGI EXT payload omits them', () => {
     const def = managedToProjectDef(
       {
         id: 'rush',

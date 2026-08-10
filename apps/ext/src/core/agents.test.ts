@@ -368,7 +368,7 @@ describe('launch contract — every runner is balanced', () => {
 });
 
 describe('buildAgentLaunchCommand', () => {
-  // RUSH-2038: interactive Factory launches must default to --mode auto so the
+  // RUSH-2038: interactive AGI EXT launches must default to --mode auto so the
   // agent starts in a writable posture instead of stalling in read-only plan mode.
 
   test('no mode supplied -> defaults to --mode auto', () => {

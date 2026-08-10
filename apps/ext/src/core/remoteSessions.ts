@@ -151,7 +151,7 @@ export interface RemoteSession {
   host: string;
   sessionId: string;
   /**
-   * `AGENT_TERMINAL_ID` from the CLI active payload when present — how a Factory
+   * `AGENT_TERMINAL_ID` from the CLI active payload when present — how a AGI EXT
    * tab re-identifies its own session on a remote device without inventing ids.
    * '' when the launch did not inherit a terminal id.
    */
@@ -383,7 +383,7 @@ export interface RawActiveSession {
    *  machine a session runs on. Absent for cloud rows (attributed to the querier). */
   machine?: string;
   /**
-   * Factory / editor tab id (`AGENT_TERMINAL_ID`) when the launch inherited it.
+   * AGI EXT / editor tab id (`AGENT_TERMINAL_ID`) when the launch inherited it.
    * Join key for "which session is MY tab running?" across `--host`/`--device`.
    */
   terminalId?: string;

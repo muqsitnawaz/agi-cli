@@ -735,7 +735,7 @@ describe('toFloorAgentFromRemote', () => {
       sinceMs: 1_000,
       startedAtMs: NOW - 1_000,
       label: 'factory floor labels',
-      topic: 'Fix Factory header labels',
+      topic: 'Fix AGI EXT header labels',
       context: 'terminal',
       cloudTaskId: '',
       cloudProvider: '',

@@ -1,4 +1,4 @@
-// Curated project store — Factory is a thin shell over `agents projects`.
+// Curated project store — AGI EXT is a thin shell over `agents projects`.
 //
 // Reads, saves, and deletes go ONLY through the CLI:
 //   agents projects list --json
@@ -88,7 +88,7 @@ export function defToManaged(def: Record<string, unknown>): ManagedProject {
 
 /**
  * Build a complete ProjectDef JSON object for `agents projects save --json`.
- * Merges Factory-managed fields onto any prior definition so unmanaged fields
+ * Merges AGI EXT-managed fields onto any prior definition so unmanaged fields
  * (goals, contexts, integrations, docs, …) survive an edit from the Floor.
  */
 export function managedToProjectDef(

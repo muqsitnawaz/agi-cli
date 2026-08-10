@@ -37,7 +37,7 @@ describe('normalizeEditorAssociations', () => {
     ).toEqual({ '*.md': AGENTS_MARKDOWN_EDITOR });
   });
 
-  test('migrates the legacy array shape Factory used to write', () => {
+  test('migrates the legacy array shape AGI EXT used to write', () => {
     expect(
       normalizeEditorAssociations([
         { viewType: AGENTS_MARKDOWN_EDITOR, filenamePattern: '*.md' },

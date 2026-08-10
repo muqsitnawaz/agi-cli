@@ -26,7 +26,7 @@ DIST_DIR="$PROJECT_ROOT/dist"
 
 # Version stamping is build input, not a source edit. Restore package.json on
 # every exit so a release clone remains reusable after both success and failure.
-PACKAGE_JSON_BACKUP="$(mktemp "${TMPDIR:-/tmp}/factory-package-json.XXXXXX")"
+PACKAGE_JSON_BACKUP="$(mktemp "${TMPDIR:-/tmp}/ext-package-json.XXXXXX")"
 cp "$PROJECT_ROOT/package.json" "$PACKAGE_JSON_BACKUP"
 restore_package_json() {
     cp "$PACKAGE_JSON_BACKUP" "$PROJECT_ROOT/package.json"

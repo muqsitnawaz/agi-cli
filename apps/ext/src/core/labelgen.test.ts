@@ -8,7 +8,7 @@ describe('generateLabelWithLLM', () => {
     expect(await generateLabelWithLLM('   \n  ')).toBeNull();
   });
 
-  it.skipIf(process.env.FACTORY_AGENT_INTEGRATION !== '1')(
+  it.skipIf(process.env.EXT_AGENT_INTEGRATION !== '1')(
     'returns a short title for a real task description',
     async () => {
       const result = await generateLabelWithLLM(

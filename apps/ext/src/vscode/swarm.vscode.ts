@@ -607,7 +607,7 @@ export interface AgentDetail {
   cloud_summary?: string | null;
   branch?: string | null;
   linear_issue?: string | null;
-  // Factory metadata (propagated from agents-cli meta.json via teams status).
+  // AGI EXT metadata (propagated from agents-cli meta.json via teams status).
   task_type?: 'plan' | 'implement' | 'test' | 'review' | 'bugfix' | 'docs' | null;
   name?: string | null;
   after?: string[];

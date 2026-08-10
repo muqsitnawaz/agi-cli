@@ -511,7 +511,7 @@ export function toFloorAgentFromUnified(
     since: sinceFromIso(u.timestamp, opts.nowMs),
     // u.timestamp is the session's last-activity stamp, so the heartbeat is exact locally.
     lastActivityMs: isoToMs(u.timestamp),
-    // A Factory-owned tab carries no reliable start epoch in the unified model; 0
+    // A AGI EXT-owned tab carries no reliable start epoch in the unified model; 0
     // means "unknown", which the Started sort orders last. Default sort is recency.
     startedAtMs: 0,
     files: u.files.length,

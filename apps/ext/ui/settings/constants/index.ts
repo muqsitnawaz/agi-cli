@@ -145,7 +145,7 @@ export const TODO_MARKDOWN_ALLOWED_ATTRS = ['href', 'title', 'target', 'rel', 'c
 // Sessions per page for pagination
 export const SESSIONS_PER_PAGE = 20
 
-// Factory function to create BUILT_IN_AGENTS (needs icons at runtime)
+// AGI EXT function to create BUILT_IN_AGENTS (needs icons at runtime)
 export function createBuiltInAgents(icons: {
   claude: string
   codex: ThemedIcon

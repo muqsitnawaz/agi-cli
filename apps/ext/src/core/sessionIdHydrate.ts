@@ -1,5 +1,5 @@
 /**
- * Batched session-id discovery for Factory tabs.
+ * Batched session-id discovery for AGI EXT tabs.
  *
  * One `agents sessions --active --json` (optionally `--host <device>`) per host,
  * shared across every tab on that host via {@link cachedInFlight}. Hard timeouts
@@ -101,7 +101,7 @@ export async function fetchTerminalIdSessionMap(
 
 /**
  * Resolve one tab's session id from the batched active map.
- * `terminalId` is Factory's AGENT_TERMINAL_ID (EditorTerminal.id).
+ * `terminalId` is the ext's AGENT_TERMINAL_ID (EditorTerminal.id).
  */
 export async function resolveSessionIdForTerminal(
   terminalId: string | undefined,

@@ -3,7 +3,7 @@
  * written to a real directory. No mocks: seams are `AGENTS_PROJECTS_DIR` and a
  * throwaway HOME with a stub `linear` on PATH.
  *
- * There is no Factory import path. `~/.agents/factory/projects.json` is never
+ * There is no ext import path. `~/.agents/factory/projects.json` is never
  * read; import keeps `--from-linear` only.
  */
 

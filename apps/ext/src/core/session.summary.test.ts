@@ -363,7 +363,7 @@ describe('extractSessionQuickSummary', () => {
         timestamp: '2026-07-12T10:00:00Z',
         message: {
           content: [
-            { type: 'text', text: 'Here is the failing Factory screen.' },
+            { type: 'text', text: 'Here is the failing AGI EXT screen.' },
             {
               type: 'image',
               name: 'factory-floor.png',

@@ -19,7 +19,7 @@ import {
 
 // The Sessions surface: one place to see every session you own — local + remote,
 // active + orphaned — and resume any of them, or a whole project's worth after a
-// reboot. It reads the roster Factory already polls (floorAgents); every filter /
+// reboot. It reads the roster AGI EXT already polls (floorAgents); every filter /
 // sort / group runs client-side, and the list is virtualized (fixed-offset
 // windowing below), so hundreds of rows render like twenty.
 

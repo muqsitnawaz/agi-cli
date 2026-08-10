@@ -2428,7 +2428,7 @@ nothing but its own view cache.
   MUST NOT own a timer, watcher, or loop that detects a condition and performs a
   fleet-affecting action. Detection and decision MUST live in the CLI, which holds
   the first-party state (sessions.db, usage snapshots, the device registry).
-  Canonical violation: the Factory watchdog rotate loop (2026-08-03) racing the
+  Canonical violation: the ext watchdog rotate loop (2026-08-03) racing the
   daemon's view of account health; canonical fix: PR #1914, which deleted it.
 - **SING-3 (MUST).** Where an action needs a UI-owned surface (typing into an editor
   tab, opening a tab), the UI MUST expose a narrow endpoint the CLI drives — the

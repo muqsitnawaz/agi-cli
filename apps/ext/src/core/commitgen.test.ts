@@ -45,7 +45,7 @@ describe('sanitizeCommitMessage', () => {
 });
 
 describe('generateCommitMessageWithClaude (integration, may be slow)', () => {
-  test.skipIf(process.env.FACTORY_AGENT_INTEGRATION !== '1')(
+  test.skipIf(process.env.EXT_AGENT_INTEGRATION !== '1')(
     'produces a conventional-commit message for a simple diff',
     async () => {
       const prompt = `Write ONE conventional-commit message for the staged changes below.

@@ -946,7 +946,7 @@ function Sessions() {
       base({ id: 'orph2', abbr: 'AG', project: 'agents-cli', hostLabel: 'yosemite-s0', host: 'yosemite-s0', phase: 'idle', liveStatus: 'orphaned', since: '52m', topic: 'Audit verify-work-complete hook effectiveness (PR #2367)' }),
       base({ id: 'crash1', abbr: 'KM', project: 'agents-cli', hostLabel: 'mac-mini', host: 'mac-mini', phase: 'failed', liveStatus: 'crashed', since: '2h', topic: 'perf(sessions): non-resumable upsert consumers on tool-store.ts' }),
       base({ id: 'aband1', abbr: 'DR', project: 'agents-cli', hostLabel: 'yosemite-m2', host: 'yosemite-m2', phase: 'idle', liveStatus: 'abandoned', since: '3h', topic: 'Fleet cache warm routine to daemon service migration (RUSH-2451)' }),
-      base({ id: 'wait1', abbr: 'CC', project: 'agents-cli', hostLabel: 'zion', host: 'this-mac', phase: 'waiting', liveStatus: 'waiting', needs: true, since: '20s', topic: 'Improve Factory UI: star + resume the sessions surface' }),
+      base({ id: 'wait1', abbr: 'CC', project: 'agents-cli', hostLabel: 'zion', host: 'this-mac', phase: 'waiting', liveStatus: 'waiting', needs: true, since: '20s', topic: 'Improve AGI EXT UI: star + resume the sessions surface' }),
       base({ id: 'run1', abbr: 'CX', project: 'rush', hostLabel: 'yosemite-m4', host: 'yosemite-m4', phase: 'running', liveStatus: 'running', tok: 44, since: '8s', topic: 'Landing site OG cards + share preview unfurl' }),
       base({ id: 'idle1', abbr: 'KM', project: 'artifacts-cli', hostLabel: 'zion', host: 'this-mac', phase: 'idle', liveStatus: 'idle', since: '6m', topic: 'artifacts-cli: poster PDF tag layout + light/dark parity' }),
       ...Array.from({ length: 40 }, (_, i) => base({

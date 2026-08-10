@@ -3,7 +3,7 @@
  *
  * Codex transcripts are named `rollout-<timestamp>-<uuid>.jsonl`. The real
  * session id is the UUID (also in `session_meta.payload.id` and Codex `/status`).
- * Factory historically used the full file stem as the id, which polluted the
+ * AGI EXT historically used the full file stem as the id, which polluted the
  * status bar and broke resume/copy. Prefer the CLI's UUID; fall back to the
  * raw value when it is already a clean id (Claude, Grok, OpenCode, …).
  */

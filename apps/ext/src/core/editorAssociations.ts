@@ -2,7 +2,7 @@
  * VS Code's `workbench.editorAssociations` is an object map:
  *   { "*.md": "agents.markdownEditor", "*.html": "agents.htmlReader" }
  *
- * Older Factory builds wrote a legacy array of `{ viewType, filenamePattern }`
+ * Older AGI EXT builds wrote a legacy array of `{ viewType, filenamePattern }`
  * entries. That shape is ignored by the editor resolver, so the Reader toggle
  * appeared to save but never changed which editor opened files.
  */
@@ -25,7 +25,7 @@ export const MARKDOWN_PATTERN = '*.md';
 /**
  * Normalize whatever is stored for `workbench.editorAssociations` into the
  * object map VS Code actually consumes. Accepts the current object shape and
- * the legacy array shape Factory used to write.
+ * the legacy array shape AGI EXT used to write.
  */
 export function normalizeEditorAssociations(value: unknown): EditorAssociations {
   if (value && typeof value === 'object' && !Array.isArray(value)) {

@@ -291,7 +291,7 @@ describe('buildVersionedResumeCommand', () => {
   });
 
   test('version argument is ignored (CLI resolves originating version)', () => {
-    // The CLI resolves the version; Factory must not pin one.
+    // The CLI resolves the version; AGI EXT must not pin one.
     expect(buildVersionedResumeCommand('claude', 'abc123', '2.1.113')).toBe(
       'agents sessions resume abc123',
     );

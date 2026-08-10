@@ -1315,7 +1315,7 @@ interface DroidLimitWindow {
   windowEnd?: string | null;
 }
 
-/** Response shape from Factory's billing limits endpoint (subset we render). */
+/** Response shape from the ext's billing limits endpoint (subset we render). */
 export interface DroidBillingLimitsResponse {
   usesTokenRateLimitsBilling?: boolean | null;
   limits?: {
@@ -1328,7 +1328,7 @@ export interface DroidBillingLimitsResponse {
 }
 
 /**
- * Fetch Droid usage via Factory's billing limits API — the same endpoint the
+ * Fetch Droid usage via the ext's billing limits API — the same endpoint the
  * droid CLI polls for its token-limit banner. The WorkOS access token comes
  * from the locally decrypted ~/.factory/auth.v2.file (the same credential
  * account identity in agents.ts reads).

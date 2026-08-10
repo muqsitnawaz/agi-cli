@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { resolveSpawnSurface } from './spawn';
 
-// The `…/spawn` URI verb reopens a session as an editor tab. Factory no longer
+// The `…/spawn` URI verb reopens a session as an editor tab. AGI EXT no longer
 // spawns tmux-backed terminals at the extension level, so every request lands on
 // a plain VS Code terminal surface.
 describe('resolveSpawnSurface', () => {

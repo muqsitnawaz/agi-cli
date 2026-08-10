@@ -1,5 +1,5 @@
 /**
- * Remote shell selection for Factory device dispatch (RUSH-1481).
+ * Remote shell selection for AGI EXT device dispatch (RUSH-1481).
  * Mirrors agents-cli remoteShellFor / PowerShell -EncodedCommand.
  */
 

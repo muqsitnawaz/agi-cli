@@ -167,7 +167,7 @@ export function selectBestSession(
 /**
  * Build resume command for a pre-warmed session.
  *
- * Every resume goes through `agents sessions resume <id>`. Factory supplies
+ * Every resume goes through `agents sessions resume <id>`. AGI EXT supplies
  * identity only; the CLI owns live attach, harness, version, and fleet routing.
  */
 export function buildResumeCommand(session: PrewarmedSession): string {

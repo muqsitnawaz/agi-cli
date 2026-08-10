@@ -71,7 +71,7 @@ export interface DetectedTicket {
 
 /**
  * Detect per-session rate-limit / usage-limit signals in assistant or error
- * text (RUSH-1523). Matches the same shapes Factory's prewarm detectBlockingPrompt
+ * text (RUSH-1523). Matches the same shapes the ext's prewarm detectBlockingPrompt
  * uses, plus common Claude/Codex/Gemini limit strings.
  */
 export function detectRateLimited(text?: string): boolean {

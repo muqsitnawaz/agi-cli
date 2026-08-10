@@ -43,7 +43,7 @@ Grok, Droid, and others as **interchangeable surfaces**:
 5. Session index across harnesses and devices
 6. Fleet (SSH devices/hosts), multi-cloud dispatch, secrets, routines, monitors
 7. Real-world tools: `browser`, `computer`
-8. Factory VS Code extension as a consumer of the same CLI state
+8. AGI EXT VS Code extension as a consumer of the same CLI state
 
 ### Gas Town
 

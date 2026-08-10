@@ -11,8 +11,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FACTORY_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-REPO_ROOT="$(cd "$FACTORY_ROOT/../.." && pwd)"
+EXT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$EXT_ROOT/../.." && pwd)"
 INSTALL_SH="$SCRIPT_DIR/install.sh"
 FAIL=0
 
@@ -80,7 +80,7 @@ else
 fi
 
 # Shape B: from apps/ext/ — BASH_SOURCE[0] = scripts/install.sh
-SIMULATED_SOURCE="$FACTORY_ROOT/scripts/install.sh"
+SIMULATED_SOURCE="$EXT_ROOT/scripts/install.sh"
 RESOLVED_DIR="$(cd "$(dirname "$SIMULATED_SOURCE")" && pwd)"
 if [ -f "$RESOLVED_DIR/activate.sh" ]; then
     pass "activate.sh reachable from package-cwd invocation shape"

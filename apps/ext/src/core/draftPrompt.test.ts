@@ -63,7 +63,7 @@ describe('draftDispatchPrompt', () => {
     expect(await draftDispatchPrompt([{ title: '  ' }], '  ')).toBeNull();
   });
 
-  it.skipIf(process.env.FACTORY_AGENT_INTEGRATION !== '1')(
+  it.skipIf(process.env.EXT_AGENT_INTEGRATION !== '1')(
     'drafts a real work order from a ticket (headless agent)',
     async () => {
       const result = await draftDispatchPrompt(

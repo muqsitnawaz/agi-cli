@@ -1244,7 +1244,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // Store context for deactivate
   extensionContext = context;
 
-  // Revive any Factory dashboard tab VS Code restored from the previous
+  // Revive any AGI EXT dashboard tab VS Code restored from the previous
   // session. Must be registered before any await so the restored webview
   // doesn't sit blank while activation runs.
   settings.registerPanelSerializer(context);
@@ -1546,7 +1546,7 @@ export async function activate(context: vscode.ExtensionContext) {
   await maybeRunFirstSetup(context);
 
   // Warm the persisted auto-launch cache away from the command path. Refreshes
-  // are deliberately fire-and-forget: opening Factory must not wait on SSH.
+  // are deliberately fire-and-forget: opening AGI EXT must not wait on SSH.
   refreshLaunchHealthCacheInBackground(context);
   // Warm the host picker's device rows at startup — the cheap registry read
   // only (no fleet sweep) — so the FIRST "(Pick Host)" open renders every host
@@ -2969,7 +2969,7 @@ async function copySessionId() {
 
 /**
  * The agent key a session resumes under, for the PICKER paths (`Agents: Resume`
- * and `Agents: Session Resume`). Every harness Factory presents can be resumed
+ * and `Agents: Session Resume`). Every harness AGI EXT presents can be resumed
  * here — the five prewarm agents through their native flag, the rest through
  * `agents run --resume` (see buildVersionedResumeCommand) — so the gate is
  * membership in the agent registry, not the prewarm subset. `shell` is excluded:

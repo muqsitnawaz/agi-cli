@@ -220,7 +220,7 @@ export type CloudProvider = 'rush' | 'codex' | 'factory'
  * Build the shell command we send to the Rush Cloud terminal for a cloud
  * dispatch. 'rush' routes through `rush cloud run` (legacy, Rush-specific).
  * Any other provider routes through the cloud-agnostic `agents cloud run
- * --provider X` so Codex/Factory get the same repo-picker UX.
+ * --provider X` so Codex/AGI EXT get the same repo-picker UX.
  *
  * `safePrompt` must already be escaped for single-quote embedding by the
  * caller (`prompt.replace(/'/g, "'\\''")`). The repos list is joined with
