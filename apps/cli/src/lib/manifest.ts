@@ -70,7 +70,7 @@ export function serializeManifest(manifest: Manifest, existingContent?: string |
   // Force BLOCK style: an existing flow root (e.g. legacy `{}`) would otherwise
   // make edited nodes render flow. collectionStyle pins the whole doc block
   // while parseDocument still preserves comments + key ordering.
-  return isEmpty ? '' : stringifyDoc(doc, { collectionStyle: 'block' });
+  return isEmpty ? '' : stringifyDoc(doc);
 }
 
 /** Read and parse agents.yaml from a directory. Returns null if the file does not exist. */

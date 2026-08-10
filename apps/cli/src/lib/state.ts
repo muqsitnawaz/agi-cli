@@ -1033,7 +1033,7 @@ function serializeCentral(central: Record<string, unknown>): string {
   // otherwise make the edited nodes render flow (`disabledCommands: [ teams ]`
   // instead of a `- teams` block list). collectionStyle pins the whole doc block
   // while parseDocument still preserves comments + key ordering.
-  return isEmpty ? META_HEADER : stringifyDoc(doc, { collectionStyle: 'block' });
+  return isEmpty ? META_HEADER : stringifyDoc(doc);
 }
 
 function writeMetaUnlocked(meta: Meta): void {

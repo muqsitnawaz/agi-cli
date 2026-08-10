@@ -1,45 +1,41 @@
 import * as yaml from 'yaml';
 
 /**
- * The single canonical serialization for a shared, committed YAML document.
+ * The single serialization used by every writer that edits a shared, committed
+ * YAML document in place.
  *
- * `agents.yaml` has five in-place writers — `state.ts`, `manifest.ts`,
- * `feed.ts`, `activity.ts` and `migrate.ts` — and before this they did not
- * agree on the bytes they emit. Two forced block style; three took the emitter
- * defaults. So the same key flip-flopped depending on which command last
- * touched the file:
- *
- *     registries:            vs      registries:
- *       mcp: {}                        mcp:
- *                                        {}
- *
- * and the emitter also pads flow collections by default, rewriting
+ * RUSH-2505 had two halves. The first: the `yaml` emitter pads flow collections
+ * by default, so a round trip rewrote
  *
  *     command: [agents, notify, "{message}"]
  * as
  *     command: [ agents, notify, "{message}" ]
  *
+ * The second, which outlived the first fix: `agents.yaml` has five in-place
+ * writers, and they did not agree on collection style. `state.ts` and
+ * `manifest.ts` forced block while `feed.ts`, `activity.ts` and `migrate.ts`
+ * took the defaults, so an empty map came out as
+ *
+ *     mcp:            from two of them, and      mcp: {}
+ *       {}                                        from the other three,
+ *
+ * and each group rewrote the other's output on the next command.
+ *
  * Both diffs are semantically no-ops, which is what made them dangerous. The
  * working tree went permanently dirty, then `agents repo pull` refused
  * ("Blocked by local changes") and `git merge --ff-only` refused, so the box
  * silently stopped receiving fleet config. Seven boxes fell 37-52 commits
- * behind this way and nothing reported it (RUSH-2505).
+ * behind and nothing reported it.
  *
- * Pinning both options is what makes the round trip byte-stable: measured
- * against the real committed `~/.agents/agents.yaml`, `collectionStyle: 'block'`
- * round-trips and `flowCollectionPadding: false` alone does not. `block` is
- * also the shape already on disk, because `state.ts` and `manifest.ts` have
- * always written it — this makes the other three agree rather than inventing a
- * new format. `flowCollectionPadding` still matters for the collections block
- * style cannot flatten (an empty `{}` / `[]`).
- *
- * Every writer that edits a shared, committed YAML file in place must go
- * through here rather than calling `String(doc)` / `doc.toString()` directly,
- * so the shape is decided once instead of at each call site.
+ * Routing every writer through one function is what fixes the second half: the
+ * same document can only produce one result, so there is nothing left to
+ * oscillate. `collectionStyle` is deliberately NOT pinned — forcing block would
+ * flatten a committed flow sequence, which is its own dirtying diff and is
+ * covered by a test in `feed.test.ts`.
  *
  * Caller options merge last, so a writer with a genuine reason to differ still
  * can — but it then owns the drift it causes.
  */
 export function stringifyDoc(doc: yaml.Document, options: yaml.ToStringOptions = {}): string {
-  return doc.toString({ collectionStyle: 'block', flowCollectionPadding: false, ...options });
+  return doc.toString({ flowCollectionPadding: false, ...options });
 }

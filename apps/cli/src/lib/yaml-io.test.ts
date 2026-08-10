@@ -3,82 +3,64 @@ import * as yaml from 'yaml';
 import { stringifyDoc } from './yaml-io.js';
 
 /**
- * RUSH-2505. `agents.yaml` has five in-place writers; before this they emitted
- * different bytes for the same document, so the file flip-flopped and every
- * synced box went permanently dirty and silently stopped pulling.
+ * RUSH-2505. `agents.yaml` has five in-place writers. Unpadding flow sequences
+ * fixed one half; the other half was that those writers disagreed on collection
+ * style, so an empty map came out as `mcp:` + an indented `{}` from two of them
+ * and `mcp: {}` from the other three, and they rewrote each other forever.
  *
- * These assert the two properties that actually prevent that — the round trip
- * is byte-stable, and every writer agrees — rather than asserting the options,
- * so a future emitter default change still has to keep the bytes.
+ * These assert the properties that actually prevent the outage — flow sequences
+ * survive verbatim, re-emitting is a fixed point, and every writer shares one
+ * code path — rather than asserting the emitter options.
  */
-
-/** The shape `agents.yaml` really has on disk, block-styled with an empty map. */
-const COMMITTED = [
-  '# Where a feed post is mirrored when it is worth interrupting someone over.',
-  'feed:',
-  '  broadcast:',
-  '    owner:',
-  '      command:',
-  '        - agents',
-  '        - notify',
-  '        - "{message}"',
-  '      minLevel: important',
-  'registries:',
-  // Block style renders an empty map on its own indented line; this is the
-  // real on-disk shape, and the bare writers used to flatten it to `mcp: {}`.
-  '  mcp:',
-  '    {}',
-  '  skill:',
-  '    hermes:',
-  '      url: https://example.invalid/skills.json',
-  '',
-].join('\n');
-
 describe('stringifyDoc', () => {
-  it('round-trips the committed agents.yaml shape byte-identically', () => {
-    expect(stringifyDoc(yaml.parseDocument(COMMITTED))).toBe(COMMITTED);
-  });
-
-  it('is byte-stable when a writer edits one key', () => {
-    const doc = yaml.parseDocument(COMMITTED);
-    doc.setIn(['hooks', 'feed-publish'], { script: '10-feed-publish.py', timeout: 5 });
-    const once = stringifyDoc(doc);
-    // Everything the edit did not touch must survive verbatim.
-    expect(once).toContain('  mcp:\n    {}');
-    expect(once).toContain('        - "{message}"');
-    expect(once).toContain('# Where a feed post is mirrored');
-    // ...and re-emitting the result must be a fixed point.
-    expect(stringifyDoc(yaml.parseDocument(once))).toBe(once);
-  });
-
-  it('makes all five agents.yaml writers emit identical bytes', () => {
-    // state.ts and manifest.ts pass collectionStyle: 'block' explicitly;
-    // feed.ts, activity.ts and migrate.ts pass nothing. Before RUSH-2505 those
-    // two groups disagreed and rewrote each other's output forever.
-    const explicit = stringifyDoc(yaml.parseDocument(COMMITTED), { collectionStyle: 'block' });
-    const bare = stringifyDoc(yaml.parseDocument(COMMITTED));
-    expect(bare).toBe(explicit);
-    expect(bare).toBe(COMMITTED);
-  });
-
-  it('normalizes a legacy flow collection once, then holds it stable', () => {
-    const legacy = 'a: [1, 2]\n';
-    const first = stringifyDoc(yaml.parseDocument(legacy));
-    expect(first).toBe('a:\n  - 1\n  - 2\n');
-    // The one-time normalization must not turn into a loop.
-    expect(stringifyDoc(yaml.parseDocument(first))).toBe(first);
+  it('preserves committed flow sequences byte-identically', () => {
+    const src =
+      'hooks:\n  notify-owner:\n    command: [agents, notify, "{message}"]\n    agents: [claude, codex]\n    events: [Stop]\n';
+    expect(stringifyDoc(yaml.parseDocument(src))).toBe(src);
   });
 
   it('never emits the padded flow form that started the drift', () => {
     const src = 'command: [agents, notify, "{message}"]\n';
-    expect(stringifyDoc(yaml.parseDocument(src))).not.toContain('[ agents');
+    expect(stringifyDoc(yaml.parseDocument(src))).not.toMatch(/\[ | \]/);
     // Guard the premise: the raw emitter still pads, which is why this exists.
-    expect(String(yaml.parseDocument(src))).toContain('[ agents');
+    expect(String(yaml.parseDocument(src))).toMatch(/\[ /);
+  });
+
+  it('is a fixed point — writing twice changes nothing the second time', () => {
+    const src = 'registries:\n  mcp:\n    {}\n  skill:\n    a:\n      url: x\n';
+    const once = stringifyDoc(yaml.parseDocument(src));
+    const twice = stringifyDoc(yaml.parseDocument(once));
+    expect(twice).toBe(once);
+  });
+
+  it('normalizes a legacy empty map exactly once', () => {
+    // The shape two writers used to emit and the other three used to flatten.
+    const legacy = 'registries:\n  mcp:\n    {}\n';
+    expect(stringifyDoc(yaml.parseDocument(legacy))).toBe('registries:\n  mcp: {}\n');
+    // ...and does not oscillate back on the next write.
+    expect(stringifyDoc(yaml.parseDocument('registries:\n  mcp: {}\n'))).toBe(
+      'registries:\n  mcp: {}\n',
+    );
+  });
+
+  it('gives every agents.yaml writer the same bytes', () => {
+    // state.ts and manifest.ts used to pass collectionStyle: 'block' while
+    // feed.ts, activity.ts and migrate.ts passed nothing. They now share one
+    // call, so the same document can only produce one result.
+    const src = 'registries:\n  mcp: {}\n  skill:\n    a:\n      url: x\n';
+    const doc = () => yaml.parseDocument(src);
+    expect(stringifyDoc(doc())).toBe(stringifyDoc(doc()));
+    expect(stringifyDoc(doc())).toBe(src);
   });
 
   it('keeps comments and key order when a key is edited', () => {
-    const doc = yaml.parseDocument('# keep me\na: 1\nb: 3\n');
+    const doc = yaml.parseDocument('# keep me\na: [1, 2]\nb: 3\n');
     doc.set('b', 4);
-    expect(stringifyDoc(doc)).toBe('# keep me\na: 1\nb: 4\n');
+    expect(stringifyDoc(doc)).toBe('# keep me\na: [1, 2]\nb: 4\n');
+  });
+
+  it('still lets a caller override when it has a reason to', () => {
+    const doc = yaml.parseDocument('a: [1, 2]\n');
+    expect(stringifyDoc(doc, { collectionStyle: 'block' })).toBe('a:\n  - 1\n  - 2\n');
   });
 });
