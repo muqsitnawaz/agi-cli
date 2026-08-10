@@ -14,6 +14,7 @@ import { probePoolSignals } from './teams/placement-probe.js';
 import { pickBestDevice, type DevicePlacementSignal } from './teams/scheduler.js';
 import type { AgentType } from './teams/agents.js';
 import { getAccountInfo } from './agents.js';
+import { formatNoHealthyHarnessError } from './rotate.js';
 
 /** Peakiness of usage weights; >1 amplifies the most-used option. */
 export const DEFAULT_AFFINITY_ALPHA = 1.3;
@@ -150,6 +151,10 @@ export async function resolveDeviceAuto(
     if (!agent) return opts.probe ? true : signal.installed === true && signal.signedIn === true;
     return signal.installed === true && signal.signedIn === true;
   });
+  if (eligiblePool.length === 0) {
+    if (!agent) throw new Error(formatNoHealthyHarnessError([]));
+    throw new Error(`agents: no healthy device can run ${agent}; earliest window resets unknown`);
+  }
   const picked = pickBestDevice(eligiblePool, [], { signals, agentLabel: agent });
   return {
     host: picked === local ? null : picked,
