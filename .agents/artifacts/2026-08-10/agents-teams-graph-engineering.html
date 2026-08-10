@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agents teams · distributed DAG orchestration — graph engineering</title>
+<meta name="description" content="How agents-cli runs multi-agent teams as a directed acyclic graph: --after dependencies, wave scheduling, worktrees, and multi-device placement. Graph engineering in practice.">
+<style>
+  :root{
+    --bg:#0a0a0a; --panel:#111312; --panel2:#161a18; --ink:#e7ece8; --dim:#8b938c;
+    --line:#26302a; --accent:#a3e635; --amber:#f5c451; --red:#ff6b6b; --cyan:#5ad6c0;
+    --violet:#c4b5fd;
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  :root[data-theme="light"]{
+    --bg:#faf9f6; --panel:#fff; --panel2:#f2f4f0; --ink:#1a1c1a; --dim:#5c655c;
+    --line:#e2e6df; --accent:#4d7c0f; --amber:#b45309; --red:#dc2626; --cyan:#0e7490;
+    --violet:#6d28d9;
+  }
+  :root[data-theme="light"] .fig{background:#0e120f;border-color:#26302a}
+  :root[data-theme="light"] .fig figcaption{color:#8b938c}
+  :root[data-theme="light"] .fig figcaption b{color:#e7ece8}
+  :root[data-theme="light"] pre{background:#0c0f0d;color:#e7ece8}
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding:52px 28px 110px}
+  header.hero{border-bottom:1px solid var(--line);padding-bottom:28px;margin-bottom:36px}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);margin:0 0 14px}
+  h1{font-size:34px;line-height:1.14;margin:0 0 14px;font-weight:700;letter-spacing:-.015em}
+  h1 .accent{color:var(--accent)}
+  .sub{color:var(--dim);font-size:17.5px;max-width:70ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+  .chip{font-family:var(--mono);font-size:11.5px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:4px 11px;background:var(--panel)}
+  .chip b{color:var(--ink);font-weight:500}
+  h2{font-size:23px;margin:52px 0 10px;letter-spacing:-.01em;scroll-margin-top:18px}
+  h2 .n{font-family:var(--mono);color:var(--accent);font-size:15px;margin-right:10px;opacity:.9}
+  h3{font-size:15.5px;margin:22px 0 8px;font-family:var(--mono);color:var(--cyan);font-weight:500}
+  p{margin:10px 0}.lead{color:var(--dim)}
+  code{font-family:var(--mono);font-size:.86em;background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:1.5px 6px;color:var(--cyan)}
+  a{color:var(--accent);text-decoration:none}a:hover{border-bottom:1px solid var(--accent)}
+  .fig{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 20px 16px;margin:20px 0;overflow-x:auto}
+  .fig figcaption{font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:14px;text-align:center}
+  .fig figcaption b{color:var(--ink)}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14.5px}
+  th,td{text-align:left;padding:10px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);font-weight:500}
+  .callout{border-left:3px solid var(--accent);background:var(--panel2);border-radius:0 10px 10px 0;padding:14px 18px;margin:18px 0}
+  .callout.warn{border-left-color:var(--amber)}
+  .callout .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);display:block;margin-bottom:5px}
+  .callout.warn .lbl{color:var(--amber)}
+  .toc{font-family:var(--mono);font-size:13px;display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:18px}
+  .toc a{color:var(--dim)}.toc a:hover{color:var(--accent)}
+  pre{font-family:var(--mono);font-size:12.5px;background:#0c0f0d;border:1px solid var(--line);border-radius:12px;padding:14px 16px;overflow-x:auto;line-height:1.55;color:#e7ece8;margin:14px 0}
+  pre .c{color:#8b938c}pre .k{color:#a3e635}pre .s{color:#5ad6c0}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin:20px 0}
+  @media(max-width:720px){.stats{grid-template-columns:1fr 1fr}}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 14px}
+  .stat .v{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--accent);letter-spacing:-.02em}
+  .stat .l{font-family:var(--mono);font-size:10.5px;color:var(--dim);letter-spacing:.06em;text-transform:uppercase;margin-top:5px}
+  .stat .s{font-size:12.5px;color:var(--dim);margin-top:3px}
+  .tag{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:6px;font-weight:600;display:inline-block}
+  .tag.a{background:rgba(163,230,53,.12);color:var(--accent);border:1px solid rgba(163,230,53,.3)}
+  .tag.b{background:rgba(90,214,192,.1);color:var(--cyan);border:1px solid rgba(90,214,192,.28)}
+  .tag.c{background:rgba(245,196,81,.1);color:var(--amber);border:1px solid rgba(245,196,81,.28)}
+  .tag.d{background:rgba(196,181,253,.12);color:var(--violet);border:1px solid rgba(196,181,253,.28)}
+  .path{font-family:var(--mono);font-size:12.5px;color:var(--cyan)}
+  .foot{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--dim)}
+  .themebtn{position:fixed;top:14px;right:14px;z-index:9;font-family:var(--mono);font-size:12px;color:var(--dim);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer}
+  .themebtn:hover{color:var(--accent);border-color:var(--accent)}
+  ul{margin:8px 0;padding-left:20px}li{margin:5px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .cite{font-size:13px;color:var(--dim);margin:6px 0}
+  .cite a{font-size:13px}
+</style>
+</head>
+<body>
+<button class="themebtn" id="tb" onclick="tt()">◐ light</button>
+<script>
+  var r=document.documentElement;
+  function set(t){r.setAttribute('data-theme',t);document.getElementById('tb').textContent=t==='light'?'◑ dark':'◐ light'}
+  set(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  function tt(){set(r.getAttribute('data-theme')==='light'?'dark':'light')}
+</script>
+<div class="wrap">
+
+<header class="hero">
+  <p class="kicker">agents-cli · teams · graph engineering</p>
+  <h1>Multi-agent work is a <span class="accent">graph</span>.<br>Teams make the edges explicit.</h1>
+  <p class="sub">
+    <code>agents teams</code> turns a multi-step coding goal into a <b>directed acyclic graph</b>
+    of agent processes: nodes are named teammates, edges are <code>--after</code> dependencies,
+    and a supervisor drains the DAG <b>wave by wave</b> — locally or across a device pool.
+    That is graph engineering applied to real CLIs (Claude, Codex, Grok, …), not a slide deck.
+  </p>
+  <div class="meta">
+    <span class="chip">product <b>agents teams</b></span>
+    <span class="chip">edge <b>--after name[,name]</b></span>
+    <span class="chip">runtime <b>start --watch</b></span>
+    <span class="chip">as of <b>2026-08-10</b></span>
+    <span class="chip">source <b>lib/teams/*</b></span>
+  </div>
+  <nav class="toc">
+    <a href="#s1">01 · graph eng</a>
+    <a href="#s2">02 · the edge</a>
+    <a href="#s3">03 · waves</a>
+    <a href="#s4">04 · distributed</a>
+    <a href="#s5">05 · boundaries</a>
+    <a href="#s6">06 · cookbook</a>
+    <a href="#s7">07 · code map</a>
+  </nav>
+</header>
+
+<div class="stats">
+  <div class="stat"><div class="v">DAG</div><div class="l">Topology</div><div class="s">nodes = teammates · edges = --after</div></div>
+  <div class="stat"><div class="v">Waves</div><div class="l">Scheduler</div><div class="s">parallel ready set each tick</div></div>
+  <div class="stat"><div class="v">Devices</div><div class="l">Placement</div><div class="s">pin · pool · least-loaded</div></div>
+  <div class="stat"><div class="v">Disk</div><div class="l">State machine</div><div class="s">meta.json · restartable</div></div>
+</div>
+
+<!-- 01 -->
+<h2 id="s1"><span class="n">01</span>What “graph engineering” means here</h2>
+<p class="lead">In 2026 the industry name for designing multi-agent <em>topology</em> — not just one agent’s tool loop — is <b>graph engineering</b>.</p>
+
+<div class="callout">
+  <span class="lbl">Working definition</span>
+  Graph engineering designs the multi-agent system as an explicit graph: which nodes exist
+  (agents, joins, human checkpoints), which transitions are allowed, and how work routes.
+  Loop engineering designs how each node thinks. You need both.
+  <span class="cite">— TrueFoundry, “Graph Engineering for Multi-Agent Systems” (Jul 2026); explainx.ai synthesis (Jul 2026)</span>
+</div>
+
+<p>Linear chains (A then B then C) break under real product work: independent surfaces want
+parallelism; QA should wait on both backend <em>and</em> frontend; a planner can add nodes mid-flight.
+A DAG encodes that structure once — true parallelism for independent nodes, joins for
+multi-parent deps, no circular waits.</p>
+<p class="cite">See also: <a href="https://tianpan.co/blog/2026-04-10-dag-first-agent-orchestration-linear-chains-scale">DAG-First Agent Orchestration</a> (Apr 2026);
+Microsoft Conductor (YAML deterministic multi-agent graphs, May 2026);
+LangGraph multi-agent workflows (nodes + edges + state).</p>
+
+<figure class="fig">
+<svg viewBox="0 0 960 280" role="img" aria-label="Linear chain vs DAG for agent teams">
+  <text x="160" y="36" fill="#ff6b6b" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">LINEAR CHAIN</text>
+  <rect x="40" y="60" width="80" height="36" rx="8" fill="#161a18" stroke="#26302a"/>
+  <text x="80" y="82" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">auth</text>
+  <path d="M120 78 L150 78" stroke="#ff6b6b" fill="none"/>
+  <rect x="150" y="60" width="80" height="36" rx="8" fill="#161a18" stroke="#26302a"/>
+  <text x="190" y="82" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">ui</text>
+  <path d="M230 78 L260 78" stroke="#ff6b6b" fill="none"/>
+  <rect x="260" y="60" width="80" height="36" rx="8" fill="#161a18" stroke="#26302a"/>
+  <text x="300" y="82" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">qa</text>
+  <text x="180" y="130" fill="#8b938c" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">ui waits on auth even if files are independent</text>
+
+  <text x="640" y="36" fill="#a3e635" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">DAG (agents teams)</text>
+  <rect x="480" y="50" width="90" height="36" rx="8" fill="#12160f" stroke="#a3e635"/>
+  <text x="525" y="72" fill="#a3e635" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">auth</text>
+  <rect x="640" y="50" width="90" height="36" rx="8" fill="#12160f" stroke="#a3e635"/>
+  <text x="685" y="72" fill="#a3e635" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">ui</text>
+  <path d="M525 86 L525 130" stroke="#5ad6c0" fill="none"/>
+  <path d="M685 86 L685 130" stroke="#5ad6c0" fill="none"/>
+  <path d="M525 130 L685 130" stroke="#5ad6c0" fill="none"/>
+  <path d="M605 130 L605 160" stroke="#5ad6c0" fill="none"/>
+  <rect x="560" y="160" width="90" height="36" rx="8" fill="#161a18" stroke="#f5c451"/>
+  <text x="605" y="182" fill="#f5c451" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">qa</text>
+  <text x="640" y="230" fill="#8b938c" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">wave 1: auth ∥ ui · wave 2: qa --after auth,ui</text>
+  <text x="480" y="265" fill="#5c655c" font-size="11" font-family="ui-monospace,Menlo,monospace">Independent surfaces race · join waits for both</text>
+</svg>
+<figcaption><b>Same goal, better topology.</b> Parallel independent work + multi-parent join is the default multi-agent pattern in production systems (2026).</figcaption>
+</figure>
+
+<!-- 02 -->
+<h2 id="s2"><span class="n">02</span>The edge: <code>--after</code> (and “before”)</h2>
+<p class="lead">In agents-cli the edge is declared on the <em>dependent</em> node: “start me only after these names finish.”</p>
+
+<pre><span class="c"># Nodes</span>
+agents teams add feat claude "Implement /api/pricing" --name <span class="s">backend</span>
+agents teams add feat codex  "Build pricing UI"       --name <span class="s">frontend</span>
+
+<span class="c"># Edge: qa depends on both (multi-parent join)</span>
+agents teams add feat claude "Playwright suite" --name <span class="s">qa</span> --after <span class="s">backend,frontend</span>
+</pre>
+
+<table>
+  <thead><tr><th>Concept</th><th>In graph theory</th><th>In <code>agents teams</code></th></tr></thead>
+  <tbody>
+    <tr><td>Node</td><td>Vertex / task</td><td>Named teammate (<code>--name</code>)</td></tr>
+    <tr><td>Edge</td><td>A → B “B after A”</td><td><code>add … --name B --after A</code></td></tr>
+    <tr><td>Join</td><td>Multi-inbound edges</td><td><code>--after A,B,C</code> (all must complete)</td></tr>
+    <tr><td>“Before”</td><td>Inverse edge language</td><td>Not a flag — declare on the child with <code>--after</code></td></tr>
+    <tr><td>Cycle</td><td>Forbidden in a DAG</td><td>Rejected at add time (<code>validateAddPreconditions</code>)</td></tr>
+    <tr><td>Ready set</td><td>Zero indegree remaining</td><td><code>startReady(team)</code> each wave</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="lbl">Why no --before flag</span>
+  Edges are stored on the dependent’s <code>meta.json</code> as <code>after: string[]</code>.
+  Writing “B before A” from A’s side would be the same edge; one direction keeps
+  the graph unambiguous and cycle checks simple. Name is required when using
+  <code>--after</code> because deps are by name, not UUID.
+</div>
+
+<!-- 03 -->
+<h2 id="s3"><span class="n">03</span>Wave scheduler — how the graph runs</h2>
+<p class="lead">The supervisor is a classic DAG dispatcher: poll disk, launch the ready set, wait, repeat until drained.</p>
+
+<figure class="fig">
+<svg viewBox="0 0 960 300" role="img" aria-label="Supervisor wave loop">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#a3e635"/></marker>
+  </defs>
+  <rect x="40" y="40" width="160" height="50" rx="10" fill="#12160f" stroke="#a3e635"/>
+  <text x="120" y="70" fill="#a3e635" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">rescanFromDisk</text>
+  <path d="M200 65 L250 65" stroke="#a3e635" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="250" y="40" width="180" height="50" rx="10" fill="#161a18" stroke="#5ad6c0"/>
+  <text x="340" y="70" fill="#5ad6c0" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">prefetchRemoteStatus</text>
+  <path d="M430 65 L480 65" stroke="#a3e635" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="480" y="40" width="140" height="50" rx="10" fill="#12160f" stroke="#a3e635"/>
+  <text x="550" y="70" fill="#a3e635" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">startReady</text>
+  <path d="M620 65 L670 65" stroke="#a3e635" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="670" y="40" width="140" height="50" rx="10" fill="#161a18" stroke="#f5c451"/>
+  <text x="740" y="70" fill="#f5c451" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">onWave</text>
+  <path d="M810 65 L860 65" stroke="#a3e635" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="860" y="40" width="60" height="50" rx="10" fill="#161a18" stroke="#26302a"/>
+  <text x="890" y="70" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">wait</text>
+
+  <path d="M890 90 L890 140 L120 140 L120 90" stroke="#26302a" stroke-dasharray="4 3" fill="none"/>
+  <text x="480" y="165" fill="#8b938c" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">loop until pending+running == 0 · or max-waves · or SIGINT · or budget breach</text>
+
+  <!-- states -->
+  <text x="40" y="210" fill="#8b938c" font-size="11" font-family="ui-monospace,Menlo,monospace">STATE MACHINE (per teammate)</text>
+  <rect x="40" y="225" width="100" height="36" rx="8" fill="#161a18" stroke="#26302a"/>
+  <text x="90" y="247" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">PENDING</text>
+  <path d="M140 243 L180 243" stroke="#a3e635" fill="none" marker-end="url(#ar)"/>
+  <rect x="180" y="225" width="100" height="36" rx="8" fill="#12160f" stroke="#a3e635"/>
+  <text x="230" y="247" fill="#a3e635" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">RUNNING</text>
+  <path d="M280 243 L320 243" stroke="#a3e635" fill="none" marker-end="url(#ar)"/>
+  <rect x="320" y="225" width="110" height="36" rx="8" fill="#161a18" stroke="#5ad6c0"/>
+  <text x="375" y="247" fill="#5ad6c0" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">COMPLETED</text>
+  <path d="M230 261 L230 280 L500 280 L500 243 L430 243" stroke="#ff6b6b" fill="none"/>
+  <rect x="500" y="225" width="100" height="36" rx="8" fill="#1a1212" stroke="#ff6b6b"/>
+  <text x="550" y="247" fill="#ff6b6b" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">FAILED</text>
+  <text x="40" y="290" fill="#5c655c" font-size="11" font-family="ui-monospace,Menlo,monospace">lib/teams/supervisor.ts · runSupervisor · default interval 8s</text>
+</svg>
+<figcaption><b>Continuous dispatch.</b> Mid-flight <code>teams add</code> is picked up on the next rescan — the graph can grow while it runs (Factory planner pattern).</figcaption>
+</figure>
+
+<pre>agents teams start pricing-page --watch
+<span class="c"># --interval 8   seconds between waves (default)</span>
+<span class="c"># --max-waves 1000</span>
+<span class="c"># --json         one JSON object per wave</span>
+</pre>
+
+<div class="grid2">
+  <div class="panel">
+    <h3 style="margin-top:0">Wave N</h3>
+    <ul>
+      <li>Any teammate whose <code>after[]</code> are all terminal → launch</li>
+      <li>Independent ready nodes launch <b>together</b></li>
+      <li>Distributed: one SSH prefetch per host, not per teammate</li>
+    </ul>
+  </div>
+  <div class="panel">
+    <h3 style="margin-top:0">Drained ≠ all green</h3>
+    <ul>
+      <li><code>pending + running == 0</code> ends the loop</li>
+      <li>Check <code>failed</code> count — failures still drain</li>
+      <li>Optional live budget can stop the whole team</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 04 -->
+<h2 id="s4"><span class="n">04</span>Distributed teams — same graph, many machines</h2>
+<p class="lead">One orchestrator owns the DAG. Teammates can run on different fleet devices; placement is a separate axis from dependency.</p>
+
+<figure class="fig">
+<svg viewBox="0 0 960 300" role="img" aria-label="Distributed placement vs DAG edges">
+  <rect x="360" y="20" width="240" height="50" rx="10" fill="#12160f" stroke="#a3e635"/>
+  <text x="480" y="50" fill="#a3e635" font-size="13" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">orchestrator (teams start --watch)</text>
+
+  <path d="M400 70 L200 110" stroke="#5ad6c0" fill="none"/>
+  <path d="M480 70 L480 110" stroke="#5ad6c0" fill="none"/>
+  <path d="M560 70 L760 110" stroke="#5ad6c0" fill="none"/>
+
+  <rect x="80" y="120" width="240" height="140" rx="12" fill="#161a18" stroke="#26302a"/>
+  <text x="200" y="150" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">yosemite-s0</text>
+  <rect x="110" y="170" width="80" height="30" rx="6" fill="#12160f" stroke="#a3e635"/>
+  <text x="150" y="190" fill="#a3e635" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">backend</text>
+  <rect x="210" y="170" width="80" height="30" rx="6" fill="#12160f" stroke="#a3e635"/>
+  <text x="250" y="190" fill="#a3e635" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">docs</text>
+  <text x="200" y="230" fill="#8b938c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">--device pin or pool pick</text>
+
+  <rect x="360" y="120" width="240" height="140" rx="12" fill="#161a18" stroke="#26302a"/>
+  <text x="480" y="150" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">yosemite-s1</text>
+  <rect x="420" y="170" width="120" height="30" rx="6" fill="#12160f" stroke="#a3e635"/>
+  <text x="480" y="190" fill="#a3e635" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">frontend</text>
+  <text x="480" y="230" fill="#8b938c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">worktree on remote</text>
+
+  <rect x="640" y="120" width="240" height="140" rx="12" fill="#161a18" stroke="#26302a"/>
+  <text x="760" y="150" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">zion (laptop)</text>
+  <rect x="700" y="170" width="120" height="30" rx="6" fill="#161a18" stroke="#f5c451"/>
+  <text x="760" y="190" fill="#f5c451" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">qa --after …</text>
+  <text x="760" y="230" fill="#8b938c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">waits for deps fleet-wide</text>
+</svg>
+<figcaption><b>Two axes.</b> <code>--after</code> is time/order. <code>--device</code> / <code>--devices</code> is where. The supervisor still sees one team graph.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th>Placement rule</th><th>Behavior</th></tr></thead>
+  <tbody>
+    <tr><td><code>--device X</code> on add</td><td>Pin — never second-guessed</td></tr>
+    <tr><td>Pool of one</td><td>Whole team on that device</td></tr>
+    <tr><td>Pool of many (unpinned)</td><td>Best-viable: reachable, not overloaded, agent installed, under cap, least loaded</td></tr>
+    <tr><td>No pool / no pin</td><td>Local</td></tr>
+    <tr><td>No viable device</td><td><b>Fail loud</b> — never silent fallback to local</td></tr>
+  </tbody>
+</table>
+
+<pre>agents teams create feat \
+  --devices yosemite-s0,yosemite-s1 \
+  --repo git@github.com:org/app.git \
+  --enable-worktrees
+
+agents teams add feat claude "API" --name backend  --device yosemite-s0 --worktree api
+agents teams add feat claude "UI"  --name frontend --device yosemite-s1 --worktree ui
+agents teams add feat claude "QA"  --name qa --after backend,frontend --worktree qa
+agents teams start feat --watch
+</pre>
+
+<!-- 05 -->
+<h2 id="s5"><span class="n">05</span>Boundary contracts — the other half of the graph</h2>
+<p class="lead">Topology without ownership is a race. Parallel teammates need file boundaries; <code>--after</code> only orders time.</p>
+
+<div class="callout">
+  <span class="lbl">Rule from the agents-cli playbook</span>
+  If A must finish <em>before</em> B can start because they edit the same files, the split is wrong.
+  Re-cut ownership so independent nodes truly are independent — then use <code>--after</code> only for real data dependencies (API ready → QA).
+</div>
+
+<table>
+  <thead><tr><th>Anti-pattern</th><th>Fix</th></tr></thead>
+  <tbody>
+    <tr><td>Two edit-mode agents, shared checkout, no worktrees</td><td><code>--enable-worktrees</code> + unique <code>--worktree</code> names</td></tr>
+    <tr><td>Serializing independent work with <code>--after</code></td><td>Drop the edge; run same wave</td></tr>
+    <tr><td>Cross-repo team with one <code>--repo</code></td><td>One team per repo</td></tr>
+    <tr><td>Assuming shared memory between teammates</td><td>Pass outcomes via PRs, files, or explicit messages (<code>teams message</code>)</td></tr>
+  </tbody>
+</table>
+
+<p>Modes: <code>plan</code> (read-only) · <code>edit</code> · <code>auto</code> · <code>skip</code>. Pair plan-mode reviewers with edit-mode implementors on separate branches.</p>
+
+<!-- 06 -->
+<h2 id="s6"><span class="n">06</span>Cookbook</h2>
+<pre><span class="c"># 1. Create + DAG + watch</span>
+agents teams create pricing -d "Ship /pricing end-to-end" --enable-worktrees
+agents teams add pricing claude "Backend tiers API"     --name backend  --worktree backend
+agents teams add pricing codex  "Frontend pricing page" --name frontend --worktree frontend
+agents teams add pricing claude "E2E Playwright"        --name qa --after backend,frontend --worktree qa
+agents teams start pricing --watch
+
+<span class="c"># 2. Mid-flight graph growth (planner adds a node)</span>
+agents teams add pricing claude "Fix flake from QA log" --name bugfix --after qa --worktree bugfix
+<span class="c"># supervisor rescans disk next wave and stages it</span>
+
+<span class="c"># 3. Steer / resume</span>
+agents teams message pricing qa "Skip visual snapshot for now"
+agents teams resume  pricing backend "Review green — rebase-merge then release"
+
+<span class="c"># 4. Observe</span>
+agents teams status pricing
+agents sessions --teams          <span class="c"># teammate sessions tagged [team/…]</span>
+agents teams disband pricing
+</pre>
+
+<!-- 07 -->
+<h2 id="s7"><span class="n">07</span>Code map</h2>
+<table>
+  <thead><tr><th>File</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr><td><span class="path">commands/teams.ts</span></td><td>CLI: create / add / start / status / message / …</td></tr>
+    <tr><td><span class="path">lib/teams/agents.ts</span></td><td>Teammate process model · <code>after[]</code> · <code>validateAddPreconditions</code> · <code>startReady</code></td></tr>
+    <tr><td><span class="path">lib/teams/supervisor.ts</span></td><td><code>runSupervisor</code> wave loop (shared with factory run)</td></tr>
+    <tr><td><span class="path">lib/teams/scheduler.ts</span></td><td>Device placement cascade (pin / pool / least-loaded / fail-loud)</td></tr>
+    <tr><td><span class="path">lib/teams/worktree.ts</span> · <span class="path">remoteWorktree.ts</span></td><td>Isolated branches for parallel edit</td></tr>
+    <tr><td><span class="path">lib/teams/registry.ts</span></td><td>Team registry on disk</td></tr>
+    <tr><td><span class="path">docs/teams.md</span></td><td>Full reference</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <span class="lbl">One-liner for friends</span>
+  <b>agents teams is graph engineering for coding agents:</b> declare a DAG with named
+  teammates and <code>--after</code> edges, isolate edit surfaces with worktrees, place nodes
+  across devices with <code>--device</code>/<code>--devices</code>, and let <code>start --watch</code> drain ready
+  waves until the graph is done. Not shared memory — explicit topology + disk state.
+</div>
+
+<div class="foot">
+  agents teams · graph engineering explainer · grounded in phnx-labs/agents-cli lib/teams/*
+  · industry context 2026 (DAG-first orchestration, TrueFoundry graph engineering, LangGraph)
+  · 2026-08-10 · sibling of agents-sessions-cross-device-index.html · ◐ theme
+</div>
+
+</div>
+</body>
+</html>
