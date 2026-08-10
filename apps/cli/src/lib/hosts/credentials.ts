@@ -19,40 +19,17 @@
 
 import type { AgentId } from '../types.js';
 import type { DetectedRuntime } from '../crabbox/runtimes.js';
-import { LEASE_RUNTIMES } from '../crabbox/runtimes.js';
+import { isNativeOAuthRuntime, nativeOAuthTransferRefusal } from '../crabbox/runtimes.js';
 
-/**
- * The runtimes `--copy-creds` knows how to provision are all native OAuth /
- * session logins (every `LEASE_RUNTIMES` entry: Claude, Codex, Gemini, Grok).
- * There is no non-native runtime it ever transferred, so this set is the whole
- * of it — kept derived from `LEASE_RUNTIMES` rather than re-listed so a new
- * runtime can never be silently exempted.
- */
-const NATIVE_OAUTH_RUNTIMES = new Set<AgentId>(LEASE_RUNTIMES.map((c) => c.id));
-
-/** True when `id` is a native OAuth / session login that MUST NOT be copied between devices. */
-export function isNativeOAuthRuntime(id: AgentId): boolean {
-  return NATIVE_OAUTH_RUNTIMES.has(id);
-}
+// The native-OAuth predicate + refusal are canonical in `crabbox/runtimes.ts`
+// (next to `LEASE_RUNTIMES`), so `--copy-creds` here and `--lease` there refuse
+// against exactly the same set. Re-export for this module's existing consumers.
+export { isNativeOAuthRuntime, nativeOAuthTransferRefusal } from '../crabbox/runtimes.js';
 
 export interface HostCredentials {
   runtimes: AgentId[];
   detected: DetectedRuntime[];
   claudeCredentialsJson?: string | null;
-}
-
-/** The fail-loud message naming the forbidden runtimes and the portable path to use instead. */
-export function nativeOAuthTransferRefusal(nativeRuntimes: AgentId[]): string {
-  return (
-    `Refusing to copy native OAuth / session credentials to another device: ${nativeRuntimes.join(', ')}.\n` +
-    `A rotating harness login copied across machines is invalidated on its next server-side token ` +
-    `refresh — it logs the rest of the fleet out — so agents-cli never stores or transfers a harness's ` +
-    `interactive login (docs/specifications.md SING-1b).\n` +
-    `Use a portable provider account instead — a long-lived, non-rotating API key / setup-token that is ` +
-    `safe to reuse on many devices:\n` +
-    `    agents accounts add <name> --provider <provider> --auth <api-key|setup-token>\n` +
-    `    agents accounts sync <name> --device <host>`
-  );
 }
 
 /**
