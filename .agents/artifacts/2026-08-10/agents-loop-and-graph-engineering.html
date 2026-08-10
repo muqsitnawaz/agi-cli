@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loop + Graph Engineering · why agents-cli fits 2026</title>
+<meta name="description" content="Graph engineering and loop engineering are the 2026 agent stack. agents-cli ships both: governed single-agent loops and multi-agent DAGs across your fleet.">
+<style>
+  :root{
+    --bg:#0a0a0a; --panel:#111312; --panel2:#161a18; --ink:#e7ece8; --dim:#8b938c;
+    --line:#26302a; --accent:#a3e635; --amber:#f5c451; --red:#ff6b6b; --cyan:#5ad6c0;
+    --violet:#c4b5fd;
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  :root[data-theme="light"]{
+    --bg:#faf9f6; --panel:#fff; --panel2:#f2f4f0; --ink:#1a1c1a; --dim:#5c655c;
+    --line:#e2e6df; --accent:#4d7c0f; --amber:#b45309; --red:#dc2626; --cyan:#0e7490;
+    --violet:#6d28d9;
+  }
+  :root[data-theme="light"] .fig{background:#0e120f;border-color:#26302a}
+  :root[data-theme="light"] .fig figcaption{color:#8b938c}
+  :root[data-theme="light"] .fig figcaption b{color:#e7ece8}
+  :root[data-theme="light"] pre{background:#0c0f0d;color:#e7ece8}
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding:52px 28px 110px}
+  header.hero{border-bottom:1px solid var(--line);padding-bottom:28px;margin-bottom:36px}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);margin:0 0 14px}
+  h1{font-size:34px;line-height:1.14;margin:0 0 14px;font-weight:700;letter-spacing:-.015em}
+  h1 .accent{color:var(--accent)}
+  .sub{color:var(--dim);font-size:17.5px;max-width:72ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+  .chip{font-family:var(--mono);font-size:11.5px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:4px 11px;background:var(--panel)}
+  .chip b{color:var(--ink);font-weight:500}
+  h2{font-size:23px;margin:52px 0 10px;letter-spacing:-.01em;scroll-margin-top:18px}
+  h2 .n{font-family:var(--mono);color:var(--accent);font-size:15px;margin-right:10px;opacity:.9}
+  h3{font-size:15.5px;margin:22px 0 8px;font-family:var(--mono);color:var(--cyan);font-weight:500}
+  p{margin:10px 0}.lead{color:var(--dim)}
+  code{font-family:var(--mono);font-size:.86em;background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:1.5px 6px;color:var(--cyan)}
+  a{color:var(--accent);text-decoration:none}a:hover{border-bottom:1px solid var(--accent)}
+  .fig{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 20px 16px;margin:20px 0;overflow-x:auto}
+  .fig figcaption{font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:14px;text-align:center}
+  .fig figcaption b{color:var(--ink)}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14.5px}
+  th,td{text-align:left;padding:10px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);font-weight:500}
+  .callout{border-left:3px solid var(--accent);background:var(--panel2);border-radius:0 10px 10px 0;padding:14px 18px;margin:18px 0}
+  .callout.warn{border-left-color:var(--amber)}
+  .callout .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);display:block;margin-bottom:5px}
+  .callout.warn .lbl{color:var(--amber)}
+  .toc{font-family:var(--mono);font-size:13px;display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:18px}
+  .toc a{color:var(--dim)}.toc a:hover{color:var(--accent)}
+  pre{font-family:var(--mono);font-size:12.5px;background:#0c0f0d;border:1px solid var(--line);border-radius:12px;padding:14px 16px;overflow-x:auto;line-height:1.55;color:#e7ece8;margin:14px 0}
+  pre .c{color:#8b938c}pre .k{color:#a3e635}pre .s{color:#5ad6c0}
+  .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:20px 0}
+  @media(max-width:720px){.stats{grid-template-columns:1fr}}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 18px}
+  .stat .v{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--accent);letter-spacing:-.02em}
+  .stat .l{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.06em;text-transform:uppercase;margin-top:6px}
+  .stat .s{font-size:14px;color:var(--dim);margin-top:8px;line-height:1.5}
+  .tag{font-family:var(--mono);font-size:11px;padding:2px 7px;border-radius:6px;font-weight:600;display:inline-block}
+  .tag.a{background:rgba(163,230,53,.12);color:var(--accent);border:1px solid rgba(163,230,53,.3)}
+  .tag.b{background:rgba(90,214,192,.1);color:var(--cyan);border:1px solid rgba(90,214,192,.28)}
+  .tag.d{background:rgba(196,181,253,.12);color:var(--violet);border:1px solid rgba(196,181,253,.28)}
+  .path{font-family:var(--mono);font-size:12.5px;color:var(--cyan)}
+  .foot{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12px;color:var(--dim)}
+  .themebtn{position:fixed;top:14px;right:14px;z-index:9;font-family:var(--mono);font-size:12px;color:var(--dim);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 13px;cursor:pointer}
+  .themebtn:hover{color:var(--accent);border-color:var(--accent)}
+  ul{margin:8px 0;padding-left:20px}li{margin:5px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.grid2{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .cite{font-size:13px;color:var(--dim)}
+</style>
+</head>
+<body>
+<button class="themebtn" id="tb" onclick="tt()">◐ light</button>
+<script>
+  var r=document.documentElement;
+  function set(t){r.setAttribute('data-theme',t);document.getElementById('tb').textContent=t==='light'?'◑ dark':'◐ light'}
+  set(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  function tt(){set(r.getAttribute('data-theme')==='light'?'dark':'light')}
+</script>
+<div class="wrap">
+
+<header class="hero">
+  <p class="kicker">agents-cli · product thesis · 2026</p>
+  <h1>Loop engineering + graph engineering<br>are the stack. <span class="accent">agents-cli is both.</span></h1>
+  <p class="sub">
+    The industry has finally named the two layers that matter: how <b>one agent</b> runs
+    (loop engineering), and how <b>many agents</b> are wired (graph engineering).
+    Most tools pick one. agents-cli was built as a <b>distributed agent factory</b> —
+    governed loops on real harnesses, DAGs across your machines, and the fleet ops to keep them honest.
+  </p>
+  <div class="meta">
+    <span class="chip">loop <b>agents run · sessions · skills</b></span>
+    <span class="chip">graph <b>teams --after · devices</b></span>
+    <span class="chip">fleet <b>hosts · routines · watchdog</b></span>
+    <span class="chip">as of <b>2026-08-10</b></span>
+  </div>
+  <nav class="toc">
+    <a href="#s1">01 · the split</a>
+    <a href="#s2">02 · loop map</a>
+    <a href="#s3">03 · graph map</a>
+    <a href="#s4">04 · they compose</a>
+    <a href="#s5">05 · why now</a>
+    <a href="#s6">06 · one recipe</a>
+  </nav>
+</header>
+
+<div class="stats">
+  <div class="stat">
+    <div class="v">Loop engineering</div>
+    <div class="l">One agentic node</div>
+    <div class="s">Observe → reason → act → verify. Skills, tools, secrets, budgets, traces, resume. The quality of a single run.</div>
+  </div>
+  <div class="stat">
+    <div class="v">Graph engineering</div>
+    <div class="l">Topology of many nodes</div>
+    <div class="s">Who exists, who waits on whom, where they run, how work joins. The quality of coordination at scale.</div>
+  </div>
+</div>
+
+<div class="callout">
+  <span class="lbl">Industry framing (2026)</span>
+  Graph engineering designs topology; loop engineering designs execution inside each agentic node.
+  They <b>compose</b>, not replace: a graph of unengineered loops is an org chart of unreliable employees;
+  excellent loops with accidental topology fail as coordination debt.
+  <span class="cite">— TrueFoundry “Graph Engineering for Multi-Agent Systems” (Jul 2026); LangChain “The Art of Loop Engineering” (Jun 2026)</span>
+</div>
+
+<!-- 01 -->
+<h2 id="s1"><span class="n">01</span>The split — and why most stacks break it</h2>
+<figure class="fig">
+<svg viewBox="0 0 960 260" role="img" aria-label="Loop inside graph topology">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#a3e635"/></marker>
+  </defs>
+  <!-- outer graph -->
+  <rect x="40" y="30" width="880" height="200" rx="16" fill="#0e120f" stroke="#26302a"/>
+  <text x="60" y="55" fill="#8b938c" font-size="11" font-family="ui-monospace,Menlo,monospace">GRAPH — agents teams · --after · devices · worktrees</text>
+
+  <rect x="80" y="80" width="200" height="110" rx="12" fill="#12160f" stroke="#a3e635"/>
+  <text x="180" y="110" fill="#a3e635" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">backend</text>
+  <text x="180" y="135" fill="#8b938c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">LOOP</text>
+  <text x="180" y="155" fill="#5c655c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">run · skills · secrets</text>
+  <text x="180" y="172" fill="#5c655c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">sessions · resume</text>
+
+  <rect x="360" y="80" width="200" height="110" rx="12" fill="#12160f" stroke="#a3e635"/>
+  <text x="460" y="110" fill="#a3e635" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">frontend</text>
+  <text x="460" y="135" fill="#8b938c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">LOOP</text>
+  <text x="460" y="155" fill="#5c655c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">worktree isolation</text>
+  <text x="460" y="172" fill="#5c655c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">device pool</text>
+
+  <path d="M280 135 L360 135" stroke="#5ad6c0" fill="none" opacity=".4"/>
+  <path d="M180 190 L180 210 L460 210 L460 190" stroke="#f5c451" fill="none"/>
+  <path d="M320 210 L320 230" stroke="#f5c451" fill="none"/>
+
+  <rect x="640" y="80" width="220" height="110" rx="12" fill="#161a18" stroke="#f5c451"/>
+  <text x="750" y="110" fill="#f5c451" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">qa --after backend,frontend</text>
+  <text x="750" y="135" fill="#8b938c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">LOOP + JOIN</text>
+  <text x="750" y="155" fill="#5c655c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">waits for wave · then runs</text>
+  <text x="750" y="172" fill="#5c655c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">message / resume mid-flight</text>
+
+  <text x="480" y="250" fill="#5c655c" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Each box is a governed loop. The arrows and join are the engineered graph.</text>
+</svg>
+<figcaption><b>Compose, don’t collapse.</b> frameworks that only ship graphs with weak loops (or only loops with no topology) leave half the problem unsolved.</figcaption>
+</figure>
+
+<!-- 02 -->
+<h2 id="s2"><span class="n">02</span>Loop engineering → what agents-cli gives you</h2>
+<p class="lead">A production loop is not “chat with tools.” It is identity, skills, permissions, secrets, durable state, and recovery — around the model call.</p>
+
+<table>
+  <thead><tr><th>Loop primitive (2026 language)</th><th>agents-cli surface</th></tr></thead>
+  <tbody>
+    <tr><td>Pick a harness + version</td><td><code>agents add / use / view</code> · profiles · model tiers</td></tr>
+    <tr><td>System prompt / memory</td><td><code>rules</code> · DotAgents layered <code>AGENTS.md</code></td></tr>
+    <tr><td>Skills &amp; knowledge packs</td><td><code>skills</code> · plugins · registry install</td></tr>
+    <tr><td>Tools / connectors</td><td><code>mcp</code> · browser · computer · pty</td></tr>
+    <tr><td>Permissions / guardrails</td><td><code>permissions</code> · <code>--mode plan|edit|auto|skip</code></td></tr>
+    <tr><td>Secrets / identity</td><td><code>secrets</code> (keychain) · <code>run --secrets</code></td></tr>
+    <tr><td>Hooks on lifecycle</td><td><code>hooks</code> · subagents</td></tr>
+    <tr><td>Durable transcript / resume</td><td><code>sessions</code> · <code>run --resume</code> · export/import</td></tr>
+    <tr><td>Observe the loop</td><td><code>logs</code> · <code>perf</code> · <code>insights</code> · <code>usage</code></td></tr>
+    <tr><td>Unattended / evented loops</td><td><code>routines</code> · webhooks · monitors · watchdog</td></tr>
+  </tbody>
+</table>
+
+<pre><span class="c"># One well-engineered loop</span>
+agents run claude@2.1.207 "Land RUSH-1234" \
+  --mode edit --secrets eng --model best
+agents sessions --active
+agents sessions &lt;id&gt; --markdown --last 5
+</pre>
+
+<div class="callout">
+  <span class="lbl">Loopcraft, operationalized</span>
+  LangChain’s “Art of Loop Engineering” stacks agent → verification → event-driven loops.
+  agents-cli is that stack as a CLI you already use: run, sessions, resume, watchdog nudge, routines on a schedule — on Claude/Codex/Grok/… subscriptions you already pay for.
+</div>
+
+<!-- 03 -->
+<h2 id="s3"><span class="n">03</span>Graph engineering → what agents-cli gives you</h2>
+<p class="lead">Topology is not a YAML research paper. It is named nodes, explicit edges, parallel ready sets, joins, and placement across machines.</p>
+
+<table>
+  <thead><tr><th>Graph primitive</th><th>agents-cli surface</th></tr></thead>
+  <tbody>
+    <tr><td>Named nodes</td><td><code>teams add … --name backend</code></td></tr>
+    <tr><td>Dependency edges</td><td><code>--after backend,frontend</code> (DAG; cycles rejected)</td></tr>
+    <tr><td>Parallel wave</td><td>Independent nodes launch together on <code>start --watch</code></td></tr>
+    <tr><td>Join / multi-parent</td><td><code>--after A,B,C</code> waits for all</td></tr>
+    <tr><td>Isolation per node</td><td><code>--enable-worktrees</code> · boundary contracts</td></tr>
+    <tr><td>Placement</td><td><code>--device</code> pin · <code>--devices</code> pool · least-loaded</td></tr>
+    <tr><td>Mid-flight mutation</td><td><code>teams add</code> while supervisor runs (disk rescan)</td></tr>
+    <tr><td>Steer / re-enter</td><td><code>teams message</code> · <code>teams resume</code></td></tr>
+    <tr><td>Cloud nodes</td><td><code>--cloud rush|codex|factory</code></td></tr>
+    <tr><td>Observe the graph</td><td><code>teams status</code> · <code>sessions --teams</code> · <code>roster</code></td></tr>
+  </tbody>
+</table>
+
+<pre><span class="c"># Graph: parallel implementors + join QA</span>
+agents teams create ship --enable-worktrees --devices yosemite-s0,yosemite-s1
+agents teams add ship claude "API" --name backend  --worktree api --device yosemite-s0
+agents teams add ship claude "UI"  --name frontend --worktree ui  --device yosemite-s1
+agents teams add ship claude "E2E" --name qa --after backend,frontend --worktree qa
+agents teams start ship --watch
+</pre>
+
+<!-- 04 -->
+<h2 id="s4"><span class="n">04</span>They compose — the factory shape</h2>
+<p class="lead">agents-cli’s README already says it: a framework for running a <b>distributed agent factory</b>. That is loop × graph × fleet.</p>
+
+<figure class="fig">
+<svg viewBox="0 0 960 220" role="img" aria-label="Three layers: loop graph fleet">
+  <rect x="40" y="30" width="280" height="160" rx="14" fill="#12160f" stroke="#a3e635"/>
+  <text x="180" y="70" fill="#a3e635" font-size="14" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="600">LOOP</text>
+  <text x="180" y="100" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">run · skills · mcp</text>
+  <text x="180" y="122" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">secrets · permissions</text>
+  <text x="180" y="144" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">sessions · resume</text>
+  <text x="180" y="170" fill="#8b938c" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">quality of one agent</text>
+
+  <rect x="340" y="30" width="280" height="160" rx="14" fill="#12160f" stroke="#5ad6c0"/>
+  <text x="480" y="70" fill="#5ad6c0" font-size="14" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="600">GRAPH</text>
+  <text x="480" y="100" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">teams · --after DAG</text>
+  <text x="480" y="122" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">waves · worktrees</text>
+  <text x="480" y="144" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">message · pr-watch</text>
+  <text x="480" y="170" fill="#8b938c" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">topology of many agents</text>
+
+  <rect x="640" y="30" width="280" height="160" rx="14" fill="#12160f" stroke="#c4b5fd"/>
+  <text x="780" y="70" fill="#c4b5fd" font-size="14" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="600">FLEET</text>
+  <text x="780" y="100" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">devices · hosts</text>
+  <text x="780" y="122" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">routines · watchdog</text>
+  <text x="780" y="144" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">feed · roster · share</text>
+  <text x="780" y="170" fill="#8b938c" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">ops for many machines</text>
+</svg>
+<figcaption><b>TrueFoundry’s “fleet of governed loops”</b> is this middle→right: many engineered loops, plus topology, plus operability. agents-cli puts all three in one binary.</figcaption>
+</figure>
+
+<div class="grid2">
+  <div class="panel">
+    <h3 style="margin-top:0">Without loop eng</h3>
+    <ul>
+      <li>Pretty DAG, flaky nodes</li>
+      <li>No resume, no secrets hygiene</li>
+      <li>Can’t replay or search what happened</li>
+    </ul>
+  </div>
+  <div class="panel">
+    <h3 style="margin-top:0">Without graph eng</h3>
+    <ul>
+      <li>Hero single agent does everything</li>
+      <li>Serial wall-clock, merge conflicts</li>
+      <li>No joins, no device placement</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 05 -->
+<h2 id="s5"><span class="n">05</span>Why this is popular <em>now</em> — and why agents-cli fits</h2>
+<ul>
+  <li><b>Models got good enough</b> that multi-step work fails on coordination, not IQ.</li>
+  <li><b>Linear chains broke</b> under parallel surfaces (DAG-first articles, Apr 2026+).</li>
+  <li><b>LangGraph / Conductor / crews</b> made topology visible — users now ask for the same in the coding CLI they live in.</li>
+  <li><b>Fleet reality</b>: subscriptions and GPUs sit on many machines; placement is part of the graph.</li>
+</ul>
+<p>agents-cli’s advantage is not another framework in Python — it is <b>your existing agent CLIs</b>, orchestrated:</p>
+<ul>
+  <li>Same Claude / Codex / Grok / Cursor you already run</li>
+  <li>Same subscriptions and keychain secrets</li>
+  <li>SSH fleet you already own</li>
+  <li>Disk-backed state (sessions DB, team meta) so supervisors restart</li>
+</ul>
+
+<div class="callout warn">
+  <span class="lbl">Positioning line</span>
+  <b>Loop engineering makes each agent trustworthy. Graph engineering makes many agents coherent.
+  agents-cli is the open CLI that ships both — and the fleet layer to run them on your machines.</b>
+</div>
+
+<!-- 06 -->
+<h2 id="s6"><span class="n">06</span>One recipe that uses both</h2>
+<pre><span class="c"># LOOP: skill + secrets + mode on every node</span>
+<span class="c"># GRAPH: DAG + worktrees + devices</span>
+
+agents teams create landing --enable-worktrees \
+  --devices yosemite-s0,yosemite-s1 -d "Ship pricing page"
+
+agents teams add landing claude "Implement pricing API" \
+  --name api --worktree api --mode edit --model best
+
+agents teams add landing claude "Build pricing UI" \
+  --name ui --worktree ui --mode edit
+
+agents teams add landing claude "Playwright + ship checklist" \
+  --name qa --after api,ui --worktree qa --mode edit
+
+agents teams start landing --watch
+
+<span class="c"># Observe loops inside the graph</span>
+agents sessions --teams
+agents teams status landing
+agents teams message landing qa "Skip flaky snapshot; land the rest"
+</pre>
+
+<p class="lead">Deeper dives (siblings):</p>
+<ul>
+  <li><a href="https://share.agents-cli.sh/agents-sessions-cross-device">Sessions · index + cross-device query</a> (loop memory / recall)</li>
+  <li><a href="https://share.agents-cli.sh/muqsitnawaz/agents-teams-graph-engineering">Teams · DAG orchestration</a> (graph runtime)</li>
+</ul>
+
+<div class="foot">
+  loop + graph engineering · agents-cli product thesis · 2026-08-10 ·
+  sources: TrueFoundry graph/loop engineering, LangChain loopcraft, agents-cli README + docs/teams.md + docs/sessions.md · ◐ theme
+</div>
+
+</div>
+</body>
+</html>
