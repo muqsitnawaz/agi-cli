@@ -8,7 +8,7 @@ import { isSensitiveEnvKey } from './terminals';
  *
  * The whole-transcript derivations that used to live here — current activity,
  * waiting-for-input, output-token throughput — were deleted in issue #741: the
- * CLI's state engine computes them and `agents sessions --active --json` carries
+ * CLI's state engine computes them and `agents sessions watch --json` carries
  * them as ActiveSession.activity / awaitingReason / tokPerSec.
  *
  * The todo/plan-progress transcript parser was likewise deleted in RUSH-1503: the

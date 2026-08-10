@@ -88,3 +88,21 @@ export async function runUsageRefreshTick(): Promise<void> {
     `usage refresh: ${r.refreshed} refreshed, ${r.failed} failed, ${r.skippedNotDue} not-due, ${r.skippedBackoff} backed-off, ${r.skippedCap} capped; BYOK ${byok.refreshed} refreshed, ${byok.skipped} not-due`,
   );
 }
+
+/**
+ * Active-sessions warm (RUSH-2062 / RUSH-2484): publish THIS host's live session
+ * rows so `agents sessions watch` (and the extension that tails it) receive
+ * journal deltas. Publish-own only — no cross-host SSH.
+ *
+ * Cadence matches {@link DEFAULT_ACTIVE_CACHE_MAX_AGE_MS} so one-shot readers and
+ * long-lived watchers share one writer. Without this tick the journal has no
+ * continuous producer and Factory freezes after the initial cache snapshot.
+ */
+export async function runActiveSessionsWarmTick(
+  opts: { gather?: () => Promise<import('./session/active.js').ActiveSession[]> } = {},
+): Promise<{ sessions: number }> {
+  const { publishLocalActiveSessions } = await import('./session/session-cache.js');
+  const r = await publishLocalActiveSessions({ gather: opts.gather });
+  console.log(`active-sessions warm: ${r.sessions.length} session(s) published`);
+  return { sessions: r.sessions.length };
+}

@@ -2,8 +2,8 @@
 //
 // The picker joins two CLI reads that answer different questions:
 //
-//   `agents sessions --all --json`     what transcripts exist (durable, resumable)
-//   `agents sessions --active --json`  which of them have a process alive right now
+//   `agents sessions --all --json`     one bounded, picker-open history read
+//   `agents sessions watch --json`     shared authoritative live state
 //
 // The join is what makes the list useful. A transcript alone can't tell you the
 // agent is still running with nobody watching it — that is the case the user
@@ -49,8 +49,8 @@ export const STATE_HEADINGS: Record<ResumeState, string> = {
 
 /**
  * Persisted snapshot behind the resume picker's stale-while-revalidate flow:
- * the picker renders the last candidate list instantly (the live fleet read
- * takes seconds over SSH) and swaps items in place when the refresh lands.
+ * the picker renders the last bounded history result instantly while its single
+ * picker-open history read completes.
  */
 export interface ResumePickerCache {
   candidates: ResumeCandidate[];

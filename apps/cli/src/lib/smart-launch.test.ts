@@ -6,6 +6,7 @@ import {
   isDeviceAuto,
   applyDeviceAutoToOptions,
   resolveDeviceAuto,
+  formatNoHealthyDeviceError,
   type WeightedCandidate,
 } from './smart-launch.js';
 import type { AffinityRow } from './session/db.js';
@@ -27,6 +28,13 @@ describe('affinityWeights', () => {
     expect(w.every((c) => c.key !== '(unknown)')).toBe(true);
     expect(w.every((c) => c.launches > 0)).toBe(true);
   });
+});
+
+it('truthfully describes installed devices with no ready account', () => {
+  expect(formatNoHealthyDeviceError(['local', 'busy'], new Map([
+    ['local', { reachable: true, headroom: 'idle', installed: false, signedIn: false }],
+    ['busy', { reachable: true, headroom: 'loaded', installed: true, signedIn: true }],
+  ]))).toContain("local (no ready harness account), busy (overloaded)");
 });
 
 describe('sampleWeighted', () => {
@@ -111,17 +119,42 @@ describe('resolveDeviceAuto', () => {
     expect(plan.pickedDeviceKey).toBe('idle');
   });
 
-  it('falls back to local when live probing cannot produce a viable remote', async () => {
-    const plan = await resolveDeviceAuto('codex', {
+  it('fails loud when live probing cannot evaluate placement', async () => {
+    await expect(resolveDeviceAuto('codex', {
       localMachine: 'local',
       eligibleHosts: ['local', 'remote'],
       probe: async () => {
         throw new Error('probe unavailable');
       },
-    });
-    expect(plan.host).toBeNull();
-    expect(plan.pickedDeviceKey).toBe('local');
+    })).rejects.toThrow('probe unavailable');
   });
+
+  it('excludes unreachable, signed-out, capped, and overloaded choices', async () => {
+    const plan = await resolveDeviceAuto('codex', {
+      localMachine: 'local',
+      eligibleHosts: ['local', 'offline', 'capped', 'loaded', 'ready'],
+      probe: async () => new Map([
+        ['local', { reachable: true, headroom: 'light', installed: true, signedIn: false }],
+        ['offline', { reachable: false, headroom: 'idle', installed: true, signedIn: true }],
+        ['capped', { reachable: true, headroom: 'idle', installed: true, signedIn: false }],
+        ['loaded', { reachable: true, headroom: 'loaded', installed: true, signedIn: true }],
+        ['ready', { reachable: true, headroom: 'light', installed: true, signedIn: true }],
+      ]),
+    });
+    expect(plan.host).toBe('ready');
+  });
+
+  it('fails loud when every account is ineligible', async () => {
+    await expect(resolveDeviceAuto('codex', {
+      localMachine: 'local',
+      eligibleHosts: ['local', 'remote'],
+      probe: async () => new Map([
+        ['local', { reachable: true, headroom: 'idle', installed: true, signedIn: false }],
+        ['remote', { reachable: true, headroom: 'idle', installed: true, signedIn: false }],
+      ]),
+    })).rejects.toThrow('no healthy device can run codex');
+  });
+
 
   it('keeps live load placement when run auto has not selected a harness yet', async () => {
     const plan = await resolveDeviceAuto(undefined, {
@@ -156,7 +189,6 @@ describe('applyDeviceAutoToOptions', () => {
     expect(options.device).toBe('yosemite-s1');
     expect(options.balanced).toBe(true);
     expect(result.attempted).toBe(true);
-    expect(result.skipped).toBeUndefined();
     expect(result.banner?.hostLabel).toBe('yosemite-s1');
     expect(result.banner?.deviceHint).toContain('yosemite-s1:5%');
     expect(result.banner?.acctNote).toBe('accounts=balanced');
@@ -215,17 +247,15 @@ describe('applyDeviceAutoToOptions', () => {
     expect(result.deprecationSmart).toBe(true);
   });
 
-  it('degrades to local on resolve failure without throwing', async () => {
+  it('preserves the auto request and throws on placement failure', async () => {
     const options = { device: 'auto' as string | undefined, balanced: undefined as boolean | undefined };
-    const result = await applyDeviceAutoToOptions(options, {
+    await expect(applyDeviceAutoToOptions(options, {
       resolve: () => {
         throw new Error('db locked');
       },
-    });
-    expect(result.skipped).toBe('db locked');
-    expect(options.device).toBeUndefined();
+    })).rejects.toThrow('db locked');
+    expect(options.device).toBe('auto');
     expect(options.balanced).toBeUndefined();
-    expect(result.banner).toBeUndefined();
   });
 
   it('preserves strategy override and account-picker note', async () => {

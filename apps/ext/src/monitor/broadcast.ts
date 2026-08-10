@@ -132,6 +132,11 @@ export class MonitorBroadcastServer {
     }
   }
 
+  /** Push an event to one follower, used to replay current state on join. */
+  sendTo(socket: net.Socket, event: MonitorEvent): void {
+    this.writeRaw(socket, encodeFrame({ kind: 'event', event }));
+  }
+
   private writeFrame(socket: net.Socket, frame: MonitorFrame): void {
     this.writeRaw(socket, encodeFrame(frame));
   }

@@ -1,134 +1,41 @@
-import { describe, test, expect, beforeEach } from 'bun:test';
-import {
-  activeMapCacheKey,
-  fetchTerminalIdSessionMap,
-  needsSessionIdHydrate,
-  resetSessionIdHydrateCacheForTests,
-  resolveSessionIdForTerminal,
-  ACTIVE_MAP_TTL_REMOTE_MS,
-} from './sessionIdHydrate';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { activeMapCacheKey, fetchTerminalIdSessionMap, needsSessionIdHydrate, resolveSessionIdForTerminal } from './sessionIdHydrate';
+import { sessionPresentationStore } from './sessionPresentationStore';
 
-beforeEach(() => {
-  resetSessionIdHydrateCacheForTests();
-});
+afterEach(() => sessionPresentationStore.clear());
 
-describe('activeMapCacheKey', () => {
-  test('undefined host → local key', () => {
-    expect(activeMapCacheKey(undefined, 'yosemite-s1', 'yosemite-s1')).toBe('__local__');
-  });
-
-  test('same-machine --device collapses to local (no self-SSH)', () => {
-    expect(activeMapCacheKey('yosemite-s1', 'yosemite-s1', 'yosemite-s1')).toBe('__local__');
-    expect(activeMapCacheKey('yosemite-s1', 'yosemite-s1.tailnet', 'yosemite-s1')).toBe('__local__');
-  });
-
-  test('different device stays as a host key', () => {
-    expect(activeMapCacheKey('yosemite-s0', 'yosemite-s1', 'yosemite-s1')).toBe('yosemite-s0');
-  });
-});
-
-describe('fetchTerminalIdSessionMap / resolveSessionIdForTerminal', () => {
-  test('15 concurrent tabs on one host share ONE CLI invocation', async () => {
-    let calls = 0;
-    const runAgents = async () => {
-      calls++;
-      await new Promise((r) => setTimeout(r, 10));
-      return {
-        stdout: JSON.stringify([
-          { terminalId: 'GK-1', sessionId: '019fd199-da69-7c21-9477-5577a6dd725d' },
-          { terminalId: 'GK-2', sessionId: '019fd178-2fab-7d60-857a-53f3dc793303' },
-        ]),
-        stderr: '',
-      };
-    };
-    const now = 1_000;
-    const results = await Promise.all(
-      Array.from({ length: 15 }, (_, i) =>
-        resolveSessionIdForTerminal(`GK-${(i % 2) + 1}`, 'yosemite-s0', {
-          runAgents,
-          now,
-          localHostname: 'zion',
-        }),
-      ),
-    );
-    expect(calls).toBe(1);
-    expect(results.filter((r) => r === '019fd199-da69-7c21-9477-5577a6dd725d').length).toBe(8);
-    expect(results.filter((r) => r === '019fd178-2fab-7d60-857a-53f3dc793303').length).toBe(7);
-  });
-
-  test('TTL cache: second wave inside TTL does not re-fetch', async () => {
-    let calls = 0;
-    const runAgents = async () => {
-      calls++;
-      return {
-        stdout: JSON.stringify([
-          { terminalId: 'CX-1', sessionId: 'rollout-2026-08-05T02-03-01-019fd129-6e9f-7082-ad08-9c22de9f1234' },
-        ]),
-        stderr: '',
-      };
-    };
-    const t0 = 5_000;
-    expect(
-      await resolveSessionIdForTerminal('CX-1', 'box-a', {
-        runAgents,
-        now: t0,
-        localHostname: 'zion',
-      }),
-    ).toBe('019fd129-6e9f-7082-ad08-9c22de9f1234');
-    expect(
-      await resolveSessionIdForTerminal('CX-1', 'box-a', {
-        runAgents,
-        now: t0 + ACTIVE_MAP_TTL_REMOTE_MS - 1,
-        localHostname: 'zion',
-      }),
-    ).toBe('019fd129-6e9f-7082-ad08-9c22de9f1234');
-    expect(calls).toBe(1);
-  });
-
-  test('CLI failure → empty map (unmapped, not wrong)', async () => {
-    const runAgents = async () => {
-      throw new Error('ssh timeout');
-    };
-    const map = await fetchTerminalIdSessionMap('dead-box', {
-      runAgents,
-      now: 1,
-      localHostname: 'zion',
+describe('session id hydration from the canonical CLI stream', () => {
+  test('maps terminal ids without launching another agents sessions query', async () => {
+    sessionPresentationStore.apply({
+      version: 1,
+      type: 'reset',
+      streamId: 'stream-a', sequence: 1, capturedAt: 1, scope: 'box-a',
+      rows: [{ rowKey: 'one', sourceDevice: 'box-a', sessionId: 'session-1', terminalId: 'CX-1', machine: 'box-a' }],
     });
-    expect(map.size).toBe(0);
-    expect(
-      await resolveSessionIdForTerminal('GK-1', 'dead-box', {
-        runAgents,
-        now: 1,
-        localHostname: 'zion',
-      }),
-    ).toBeUndefined();
+    expect(await fetchTerminalIdSessionMap('box-a')).toEqual(new Map([['CX-1', 'session-1']]));
+    expect(await resolveSessionIdForTerminal('CX-1', 'box-a')).toBe('session-1');
   });
 
-  test('local path uses --local (no --host) via isLocal key', async () => {
-    let seenArgs = '';
-    const runAgents = async (args: string) => {
-      seenArgs = args;
-      return { stdout: '[]', stderr: '' };
-    };
-    await fetchTerminalIdSessionMap(undefined, {
-      runAgents,
-      now: 1,
-      localHostname: 'yosemite-s1',
+  test('scopes remote rows by host', async () => {
+    sessionPresentationStore.apply({
+      version: 1,
+      type: 'reset',
+      streamId: 'stream-b', sequence: 1, capturedAt: 1, scope: 'fleet',
+      rows: [
+        { rowKey: 'one', sourceDevice: 'box-a', sessionId: 'one', terminalId: 'T-1', machine: 'box-a' },
+        { rowKey: 'two', sourceDevice: 'box-b', sessionId: 'two', terminalId: 'T-2', machine: 'box-b' },
+      ],
     });
-    expect(seenArgs).toContain('--local');
-    expect(seenArgs).not.toContain('--host');
-    expect(seenArgs).not.toContain('--where');
+    expect(await fetchTerminalIdSessionMap('box-a')).toEqual(new Map([['T-1', 'one']]));
   });
 });
 
-describe('needsSessionIdHydrate', () => {
-  test('true when missing or rollout stem', () => {
+describe('session id hydration helpers', () => {
+  test('same-machine placement collapses to the local key', () => {
+    expect(activeMapCacheKey('zion.tailnet', 'zion', 'zion')).toBe('__local__');
+  });
+  test('dirty or absent ids still need hydration', () => {
     expect(needsSessionIdHydrate(undefined)).toBe(true);
-    expect(needsSessionIdHydrate('')).toBe(true);
-    expect(needsSessionIdHydrate('rollout-2026-08-05T00-00-00-aaaa-bbbb-cccc-ddddeeee')).toBe(true);
-  });
-
-  test('false for a clean UUID', () => {
-    expect(needsSessionIdHydrate('019fd199-da69-7c21-9477-5577a6dd725d')).toBe(false);
+    expect(needsSessionIdHydrate('rollout-2026-session')).toBe(true);
   });
 });

@@ -158,6 +158,21 @@ describe('loadLocalActiveSessions — cross-surface snapshot', () => {
     const onDisk = readActiveSessionsCache('local');
     expect(onDisk?.capturedAt).toBe(99_000);
     expect(onDisk?.sessions[0].sessionId).toBe('daemon');
+    const journal = fs.readFileSync(`${paths.snap}.journal.jsonl`, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(journal.at(-1)).toMatchObject({ version: 1, scope: 'local', capturedAt: 99_000 });
+    expect(journal.at(-1).upserts[0].sessionId).toBe('daemon');
+  });
+
+  it('journals the first empty publication so a watcher marks the scope available', async () => {
+    await publishLocalActiveSessions({ nowMs: 101_000, gather: async () => [] });
+    const journal = fs.readFileSync(`${paths.snap}.journal.jsonl`, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(journal.at(-1)).toMatchObject({
+      version: 1,
+      scope: 'local',
+      capturedAt: 101_000,
+      upserts: [],
+      removes: [],
+    });
   });
 });
 

@@ -11,6 +11,22 @@ OpenClaw, Rush, Hermes, Grok, Kimi, Droid, and Cursor (the `SESSION_AGENTS` set 
 
 ## Session lifecycle verbs
 
+### Incremental session state for UI consumers
+
+Long-lived consumers subscribe to the CLI-owned session state instead of
+reimplementing discovery or polling session history:
+
+```bash
+agents sessions watch --json
+agents sessions watch --json --local
+```
+
+The command writes NDJSON envelopes. Version 1 defines `reset`, `upsert`,
+`remove`, `scope`, and `heartbeat` events. Consumers treat `rowKey` as opaque
+and order events by `(streamId, sequence)`. When a device scope becomes
+unavailable, its last rows remain recovery entries until that scope sends a new
+reset; unavailability is not interpreted as session removal.
+
 These subcommands sit on one axis (get back into a conversation). They are **not**
 interchangeable — pick the verb for the intent:
 

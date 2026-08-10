@@ -542,6 +542,16 @@ async function probeRemoteHealth(target: FleetStatusTarget): Promise<Omit<FleetH
   };
 }
 
+/** Effective device-scoped config, keyed by the canonical YAML key. */
+function deviceConfigJson(name: string): Record<string, unknown> | undefined {
+  const config: Record<string, unknown> = {};
+  for (const entry of listConfig({ device: name })) {
+    if (entry.spec.scope !== 'device' || entry.value === undefined) continue;
+    config[entry.spec.yamlKey] = entry.value;
+  }
+  return Object.keys(config).length > 0 ? config : undefined;
+}
+
 async function runFleetStatus(opts: { json?: boolean; strict?: boolean; stats?: boolean; refresh?: boolean; live?: boolean; local?: boolean; verbose?: boolean }): Promise<void> {
   const reg = await loadDevices();
   const self = machineId();
@@ -665,7 +675,20 @@ async function runFleetStatus(opts: { json?: boolean; strict?: boolean; stats?: 
 
   const report = buildFleetHealthReport(rows, new Date(), { self });
   if (opts.json) {
-    console.log(JSON.stringify(report, null, 2));
+    const interactiveHost = getConfigValue('interactive.host').value as string | undefined;
+    console.log(JSON.stringify({
+      ...report,
+      devices: report.devices.map((row) => {
+        const registered = reg[row.name];
+        const config = deviceConfigJson(row.name);
+        return {
+          ...row,
+          profile: registered ? resolveDeviceProfile(registered) : { name: row.name },
+          interactive: row.name === interactiveHost,
+          ...(config ? { config } : {}),
+        };
+      }),
+    }, null, 2));
   } else if (opts.verbose) {
     // Full grid: the auth/CLI/sync/version columns and the warnings rollup.
     for (const line of renderFleetWarnings(report)) console.log(line);
@@ -851,7 +874,7 @@ async function probeRemoteHarnesses(
  * the local and remote rows. Bounded by the same per-device + overall deadlines
  * as `fleet ping`, so one unreachable box can never stall the glance.
  */
-async function collectFleetHarnesses(opts: HarnessInventoryOpts): Promise<HostHarnessResult[]> {
+export async function collectFleetHarnesses(opts: HarnessInventoryOpts): Promise<HostHarnessResult[]> {
   const self = machineId();
   const want = opts.devices?.length ? new Set(opts.devices) : null;
   const results: HostHarnessResult[] = [];
@@ -1553,40 +1576,15 @@ function registerDevicesCommands(program: Command): void {
       }
     });
 
-  /** Device-scope config block for `list --json`, keyed by yamlKey (set keys only). */
-  const deviceConfigJson = (name: string): Record<string, unknown> | undefined => {
-    const config: Record<string, unknown> = {};
-    for (const entry of listConfig({ device: name })) {
-      if (entry.spec.scope !== 'device' || entry.value === undefined) continue;
-      config[entry.spec.yamlKey] = entry.value;
-    }
-    return Object.keys(config).length > 0 ? config : undefined;
-  };
-
   const runList = async (opts: { json?: boolean; stats?: boolean; full?: boolean; refresh?: boolean; live?: boolean; all?: boolean } = {}) => {
     const reg = await loadDevices();
     const names = Object.keys(reg).sort();
     const interactiveHost = getConfigValue('interactive.host').value as string | undefined;
-    if (opts.json) {
-      // Registry + central config block, always fast — AGI EXT
-      // polls this path. Each row is the EFFECTIVE profile (registry overlaid
-      // with the central ssh.*/platform/user config) and carries its
-      // device-scope `config` (maxAgents, schedulerEnabled, notes, ssh*,
-      // autoLaunch* — set keys only) plus an `interactive` flag for the
-      // configured interactive host.
-      process.stdout.write(
-        JSON.stringify(
-          names.map((n) => {
-            const config = deviceConfigJson(n);
-            return { ...resolveDeviceProfile(reg[n]), interactive: n === interactiveHost, ...(config ? { config } : {}) };
-          }),
-          null,
-          2,
-        ) + '\n',
-      );
-      return;
-    }
     if (names.length === 0) {
+      if (opts.json) {
+        process.stdout.write('[]\n');
+        return;
+      }
       console.log(chalk.gray("No devices. Run 'agents devices sync' or 'agents devices add <name> <user@host>'."));
       return;
     }
@@ -1620,6 +1618,20 @@ function registerDevicesCommands(program: Command): void {
       if (statsMap) await writeReachability(collectReachabilityWriteBacks(reg, statsMap)).catch(() => {});
     }
 
+    if (opts.json) {
+      process.stdout.write(JSON.stringify(names.map((name) => {
+        const config = deviceConfigJson(name);
+        const health = statsMap?.get(name);
+        return {
+          ...resolveDeviceProfile(reg[name]),
+          interactive: name === interactiveHost,
+          ...(config ? { config } : {}),
+          ...(health ? { health: { ...health, headroom: headroom(health) } } : {}),
+        };
+      }), null, 2) + '\n');
+      return;
+    }
+
     console.log(chalk.bold(`Devices (${names.length})`));
     for (const line of renderDeviceTable(reg, names, self, statsMap, opts.full, interactiveHost)) console.log(line);
     if (freshness?.servedFromCache && freshness.oldestFetchedAt != null) {
@@ -1643,7 +1655,7 @@ function registerDevicesCommands(program: Command): void {
     .command('list')
     .alias('ls')
     .description('List registered devices with platform, address, reachability, and live resource headroom.')
-    .option('--json', 'output the registry as a JSON array (for scripts and hooks)')
+    .option('--json', 'output effective device profiles, config, and health as a JSON array')
     .option('--no-stats', 'skip the live resource probe (instant; names/addresses only)')
     .option('--refresh', 'force a live probe of every device, bypassing the cache')
     .option('--live', 'alias of --refresh (shorter to type)')

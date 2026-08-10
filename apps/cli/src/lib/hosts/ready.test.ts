@@ -57,6 +57,14 @@ describe('viewAgentSignedIn', () => {
     expect(viewAgentSignedIn(view, 'claude')).toBeUndefined();
     expect(viewAgentSignedIn('not json', 'codex')).toBeUndefined();
   });
+
+  it('rejects signed-in versions that are capped', () => {
+    const view = JSON.stringify([{ agent: 'codex', versions: [
+      { signedIn: true, usageStatus: 'rate_limited' },
+      { signedIn: true, usageStatus: 'out_of_credits' },
+    ] }]);
+    expect(viewAgentSignedIn(view, 'codex')).toBe(false);
+  });
 });
 
 describe('parseReadyProbe', () => {
