@@ -13,6 +13,7 @@ import { normalizeHost } from './machine-id.js';
 import { probePoolSignals } from './teams/placement-probe.js';
 import { pickBestDevice, type DevicePlacementSignal } from './teams/scheduler.js';
 import type { AgentType } from './teams/agents.js';
+import { getAccountInfo } from './agents.js';
 
 /** Peakiness of usage weights; >1 amplifies the most-used option. */
 export const DEFAULT_AFFINITY_ALPHA = 1.3;
@@ -111,7 +112,8 @@ export interface DeviceAutoPlan {
  * Pick the least-loaded healthy device that can run `agent` when the harness is
  * known. `run auto` omits the agent and ranks the same live health/load signals
  * without an installed-harness filter. The local machine participates in the
- * same probe; a fully unusable fleet degrades to local instead of stranding a run.
+ * same probe and must pass the same eligibility checks. An empty eligible pool
+ * fails loud; automatic placement never silently becomes a local launch.
  */
 export async function resolveDeviceAuto(
   agent?: string,
@@ -125,26 +127,40 @@ export async function resolveDeviceAuto(
   const pool = [...new Set((opts.eligibleHosts ?? listOnlineDeviceNames(local)).map(normalizeHost))];
   if (!pool.includes(local)) pool.push(local);
 
-  try {
-    const signals = await (opts.probe ?? probePoolSignals)(pool, agent as AgentType | undefined);
-    const picked = pickBestDevice(pool, [], { signals, agentLabel: agent });
-    return {
-      host: picked === local ? null : picked,
-      pickedDeviceKey: picked,
-      candidates: pool.map((key) => ({
-        key,
-        loadPercent: signals.get(key)?.loadPercent,
-        installed: signals.get(key)?.installed,
-        signedIn: signals.get(key)?.signedIn,
-      })),
-    };
-  } catch {
-    return {
-      host: null,
-      pickedDeviceKey: local,
-      candidates: [{ key: local }],
-    };
+  const signals = await (opts.probe ?? probePoolSignals)(pool, agent as AgentType | undefined);
+  if (!agent && !opts.probe) {
+    const { collectFleetHarnesses } = await import('../commands/ssh.js');
+    const inventory = await collectFleetHarnesses({ devices: pool });
+    const byHost = new Map(inventory.map((result) => [normalizeHost(result.host), result]));
+    for (const key of pool) {
+      const result = byHost.get(key);
+      const accountEligible = !!result && !result.error && !result.skipped && result.rows.some((row) => row.ready);
+      const current = signals.get(key);
+      if (current) signals.set(key, { ...current, installed: accountEligible, signedIn: accountEligible });
+    }
   }
+  if (agent && !opts.probe && signals.has(local)) {
+    const info = await getAccountInfo(agent as import('./types.js').AgentId).catch(() => null);
+    const eligible = !!info?.signedIn && info.usageStatus !== 'rate_limited' && info.usageStatus !== 'out_of_credits';
+    signals.set(local, { ...signals.get(local)!, signedIn: eligible });
+  }
+  const eligiblePool = pool.filter((key) => {
+    const signal = signals.get(key);
+    if (signal?.reachable !== true || signal.headroom === 'loaded') return false;
+    if (!agent) return opts.probe ? true : signal.installed === true && signal.signedIn === true;
+    return signal.installed === true && signal.signedIn === true;
+  });
+  const picked = pickBestDevice(eligiblePool, [], { signals, agentLabel: agent });
+  return {
+    host: picked === local ? null : picked,
+    pickedDeviceKey: picked,
+    candidates: pool.map((key) => ({
+      key,
+      loadPercent: signals.get(key)?.loadPercent,
+      installed: signals.get(key)?.installed,
+      signedIn: signals.get(key)?.signedIn,
+    })),
+  };
 }
 
 /**
@@ -221,12 +237,10 @@ export type DeviceAutoHostOptions = {
 };
 
 export type DeviceAutoApplyResult = {
-  /** True when affinity ran (success or degrade-to-local). */
+  /** True when automatic placement ran successfully. */
   attempted: boolean;
   /** True when deprecated `--smart` was seen. */
   deprecationSmart: boolean;
-  /** Affinity threw: host slots cleared → local; message for stderr. */
-  skipped?: string;
   /** Present when affinity resolved without error. */
   banner?: {
     hostLabel: string;
@@ -237,8 +251,8 @@ export type DeviceAutoApplyResult = {
 
 /**
  * Apply `--device auto` / `--host auto` (and deprecated `--smart`) onto run options.
- * Mutates `options` in place. On affinity failure, clears auto slots (local) and
- * returns `skipped` — never throws; callers must not hard-exit.
+ * Mutates `options` in place. Placement failures propagate without rewriting
+ * `auto`, so callers fail loud instead of silently launching locally.
  */
 export async function applyDeviceAutoToOptions(
   options: DeviceAutoHostOptions,
@@ -263,42 +277,28 @@ export async function applyDeviceAutoToOptions(
     return { attempted: false, deprecationSmart };
   }
 
-  try {
-    const resolve: () => DeviceAutoPlan | Promise<DeviceAutoPlan> =
-      deps.resolve ?? (() => resolveDeviceAuto(deps.agent));
-    const plan = await resolve();
-    const concrete = plan.host; // null = local
-    for (const k of HOST_SLOTS) {
-      if (isDeviceAuto(options[k])) {
-        options[k] = concrete ?? undefined;
-      }
+  const resolve: () => DeviceAutoPlan | Promise<DeviceAutoPlan> =
+    deps.resolve ?? (() => resolveDeviceAuto(deps.agent));
+  const plan = await resolve();
+  const concrete = plan.host; // null = local
+  for (const k of HOST_SLOTS) {
+    if (isDeviceAuto(options[k])) {
+      options[k] = concrete ?? undefined;
     }
-    const accountPickerRequested = deps.accountPickerRequested ?? false;
-    if (!accountPickerRequested && !options.strategy && !options.balanced) {
-      options.balanced = true;
-    }
-    const hostLabel = concrete ?? 'local';
-    const deviceHint = plan.candidates
-      .slice(0, 4)
-      .map((c) => `${c.key}:${c.loadPercent === undefined ? '?' : `${Math.round(c.loadPercent)}%`}`)
-      .join(', ');
-    const acctNote = accountPickerRequested ? 'accounts=picker' : 'accounts=balanced';
-    return {
-      attempted: true,
-      deprecationSmart,
-      banner: { hostLabel, deviceHint, acctNote },
-    };
-  } catch (err) {
-    // Graceful degrade: clear auto slots so the run continues locally.
-    for (const k of HOST_SLOTS) {
-      if (isDeviceAuto(options[k])) {
-        options[k] = undefined;
-      }
-    }
-    return {
-      attempted: true,
-      deprecationSmart,
-      skipped: (err as Error).message,
-    };
   }
+  const accountPickerRequested = deps.accountPickerRequested ?? false;
+  if (!accountPickerRequested && !options.strategy && !options.balanced) {
+    options.balanced = true;
+  }
+  const hostLabel = concrete ?? 'local';
+  const deviceHint = plan.candidates
+    .slice(0, 4)
+    .map((c) => `${c.key}:${c.loadPercent === undefined ? '?' : `${Math.round(c.loadPercent)}%`}`)
+    .join(', ');
+  const acctNote = accountPickerRequested ? 'accounts=picker' : 'accounts=balanced';
+  return {
+    attempted: true,
+    deprecationSmart,
+    banner: { hostLabel, deviceHint, acctNote },
+  };
 }

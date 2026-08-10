@@ -825,11 +825,11 @@ export function registerRunCommand(program: Command): void {
     )
     .option(
       '--host <name>',
-      'Offload this run onto another machine over SSH — a device name, registered host, or user@host. Pass "auto" to pick the least-loaded reachable device where the requested agent is installed and signed in, keeping the run local when no remote is better. Same as --where device:<name>. See `agents devices`.',
+      'Offload this run onto another machine over SSH — a device name, registered host, or user@host. Pass "auto" to pick the least-loaded reachable device with an eligible account; an unavailable or capped pool fails loud. Same as --where device:<name>. See `agents devices`.',
     )
     .option(
       '--device <name>',
-      'Alias of --host. Pass "auto" for affinity-based device pick (same as --where auto).',
+      'Alias of --host. Pass "auto" for live health/account-aware device placement.',
     )
     .option('--remote-cwd <dir>', "Explicit host working directory for --host runs, used VERBATIM (overrides --cwd; usually --cwd suffices — it re-roots a local-home path onto the remote home). Pass a single-quoted '$HOME/…' or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you).")
     .option('--no-follow', 'With --host, dispatch detached and return immediately (track via `agents hosts ps/logs`).')
@@ -911,6 +911,7 @@ export function registerRunCommand(program: Command): void {
       # account headroom, then a balanced account on it
       agents run auto "fix the flaky test" --mode edit
       agents run auto --host yosemite-s0 "fix the flaky test"   # pin the host
+      agents run auto --interactive --device auto --strategy balanced --mode auto
 
       # Placement (one door — where the body runs). Old flags still work.
       agents run claude "…" --where device:yosemite-s0   # = --host yosemite-s0
@@ -1285,7 +1286,7 @@ export function registerRunCommand(program: Command): void {
 
       // --device auto / --host auto (and deprecated --smart): live fleet pick.
       // Harness is always the agent the user typed — never auto-picked.
-      // Affinity failure degrades to local (does not kill the run).
+      // Placement failure propagates; an automatic request never becomes local.
       {
         const { applyDeviceAutoToOptions } = await import('../lib/smart-launch.js');
         const result = await applyDeviceAutoToOptions(options, {
@@ -1299,13 +1300,6 @@ export function registerRunCommand(program: Command): void {
         if (!options.quiet && result.deprecationSmart) {
           process.stderr.write(
             chalk.yellow('[agents] --smart is deprecated; use --device auto\n'),
-          );
-        }
-        if (!options.quiet && result.skipped) {
-          process.stderr.write(
-            chalk.yellow(
-              `[agents] device=auto skipped: ${result.skipped} (running local)\n`,
-            ),
           );
         }
         if (!options.quiet && result.banner) {
