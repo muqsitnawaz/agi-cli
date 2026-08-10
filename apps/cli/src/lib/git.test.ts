@@ -487,12 +487,11 @@ describe('commitAndPush (clean-but-ahead + dirty)', () => {
     expect(fs.readFileSync(path.join(verify, 'safe-push.txt'), 'utf8')).toBe('ok\n');
   });
 
-  // #1061: `agents publish --branch dev` must land the index on `dev`, not on
-  // the checked-out `main`. commitAndPush(local, msg, 'dev') pushes to origin/dev
-  // and reports branch: 'dev' so the printed raw URL references where it landed.
+  // A caller targeting a named branch must not mutate the checked-out branch.
+  // commitAndPush(local, msg, 'dev') pushes to origin/dev and reports the branch.
   it('pushes to a named target branch, not the checked-out one', async () => {
     fs.writeFileSync(path.join(local, 'skills-index.json'), '{"skills":[]}\n');
-    const res = await commitAndPush(local, 'publish index', 'dev');
+    const res = await commitAndPush(local, 'update index', 'dev');
     expect(res.success).toBe(true);
     expect(res.pushed).toBe(true);
     expect(res.branch).toBe('dev');

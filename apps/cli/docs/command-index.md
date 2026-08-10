@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_101 command groups · 582 commands._
+_100 command groups · 581 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -657,12 +657,6 @@ agents pty signal <id> [signal]  Send a POSIX signal to the running process. Def
 agents pty start                 Start a new PTY session and return its ID. The session persists until you stop it.
 agents pty stop <id>             Stop a PTY session and clean up. The session ID becomes invalid.
 agents pty write <id> <input>    Send keystrokes to the PTY (like typing into the terminal). Processes escape sequences by default.
-```
-
-## publish — Generate a skills-index.json for a git repo and push it, making its skills discoverable via agents search/install
-
-```
-agents publish  Generate a skills-index.json for a git repo and push it, making its skills discoverable via agents search/install
 ```
 
 ## reconnect — Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session

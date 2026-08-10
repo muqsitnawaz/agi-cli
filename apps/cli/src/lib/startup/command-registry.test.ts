@@ -37,6 +37,7 @@ describe('KNOWN_TOP_LEVEL_COMMANDS', () => {
   });
 
   it('rejects a name the CLI does not register', () => {
+    expect(isKnownTopLevelCommand('publish')).toBe(false);
     expect(isKnownTopLevelCommand('session')).toBe(false); // the RUSH-2022 typo
     expect(isKnownTopLevelCommand('zzzznotacommand')).toBe(false);
     expect(isKnownTopLevelCommand('')).toBe(false);

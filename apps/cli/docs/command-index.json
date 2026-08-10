@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "command": "agents",
-  "groups": 101,
-  "commands": 582,
+  "groups": 100,
+  "commands": 581,
   "root": {
     "name": "agents",
     "path": "",
@@ -15826,62 +15826,6 @@
           "subcommands": []
         }
       ]
-    },
-    {
-      "name": "publish",
-      "path": "publish",
-      "aliases": [],
-      "description": "Generate a skills-index.json for a git repo and push it, making its skills discoverable via agents search/install",
-      "args": [],
-      "options": [
-        {
-          "flags": "--repo <alias>",
-          "description": "Publish an extra repo added via `agents repo add` (default: your ~/.agents repo)",
-          "long": "--repo",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--name <name>",
-          "description": "Registry name to suggest in the output (default: the repo name)",
-          "long": "--name",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--branch <branch>",
-          "description": "Branch to push the index to and reference in the raw URL (default: the repo's current branch)",
-          "long": "--branch",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--dry-run",
-          "description": "Write the index and print the URL without committing or pushing",
-          "long": "--dry-run",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "-h, --help",
-          "description": "Show help",
-          "short": "-h",
-          "long": "--help",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        }
-      ],
-      "subcommands": []
     },
     {
       "name": "reconnect",
