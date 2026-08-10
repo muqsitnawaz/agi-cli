@@ -1,5 +1,6 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { createInterface } from 'readline';
+import { bootstrapPath, resolveAgentsBin } from '../core/agentsBin';
 
 import type { SessionCliFactPayload as SessionCliEvent } from './protocol';
 export type { SessionCliEvent };
@@ -12,6 +13,7 @@ export interface SessionCliStreamOptions {
 
 /** Current CLI-owned rows retained only so a late follower can receive a reset. */
 export class SessionCliReplay {
+  private replaySequence = 0;
   private readonly scopes = new Map<string, {
     rows: Map<string, unknown>;
     capturedAt: number;
@@ -44,7 +46,7 @@ export class SessionCliReplay {
   envelopes(clientKey: string): SessionCliEvent[] {
     const events: SessionCliEvent[] = [];
     for (const [scope, current] of this.scopes) {
-      const streamId = `replay:${clientKey}:${scope}`;
+      const streamId = `replay:${clientKey}:${scope}:${++this.replaySequence}`;
       events.push({
         version: 1, type: 'reset', streamId, sequence: 1,
         capturedAt: current.capturedAt, scope, rows: [...current.rows.values()],
@@ -64,16 +66,32 @@ export class SessionCliReplay {
 /** Owns the single long-lived CLI session stream for the elected monitor. */
 export class SessionCliStream {
   private child?: ChildProcessWithoutNullStreams;
+  private running = false;
 
   constructor(private readonly options: SessionCliStreamOptions) {}
 
   start(): void {
-    if (this.child) return;
-    const child = this.options.spawnWatch?.() ?? spawn(
-      'agents',
-      ['sessions', 'watch', '--json'],
-      { stdio: ['pipe', 'pipe', 'pipe'] },
-    );
+    if (this.child || this.running) return;
+    this.running = true;
+    if (this.options.spawnWatch) {
+      this.attach(this.options.spawnWatch());
+      return;
+    }
+    void resolveAgentsBin().then((bin) => {
+      if (!this.running) return;
+      const augmented = bootstrapPath(bin);
+      this.attach(spawn(bin, ['sessions', 'watch', '--json'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, PATH: `${augmented}:${process.env.PATH ?? ''}` },
+      }));
+    }).catch((error) => {
+      this.running = false;
+      this.options.onError?.(error instanceof Error ? error.message : String(error));
+    });
+  }
+
+  private attach(child: ChildProcessWithoutNullStreams): void {
+    if (!this.running) { child.kill(); return; }
     this.child = child;
     const lines = createInterface({ input: child.stdout });
     lines.on('line', (line) => {
@@ -91,6 +109,7 @@ export class SessionCliStream {
     child.stderr.on('data', (chunk) => { stderr += String(chunk); });
     child.once('exit', (code) => {
       this.child = undefined;
+      this.running = false;
       if (code !== 0) {
         this.options.onError?.(
           stderr.trim() || 'This version of agents-cli does not support sessions watch --json. Upgrade agents-cli.',
@@ -100,6 +119,7 @@ export class SessionCliStream {
   }
 
   stop(): void {
+    this.running = false;
     this.child?.kill();
     this.child = undefined;
   }

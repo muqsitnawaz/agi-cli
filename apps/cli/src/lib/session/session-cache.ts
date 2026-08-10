@@ -257,6 +257,7 @@ export function writeActiveSessionsCache(
     } catch {
       // empty
     }
+    const hadPrevious = Boolean(entries[scope]);
     const previousSessions = entries[scope]?.sessions ?? [];
     entries[scope] = snap;
     const body: SnapshotFile = { version: 1, entries };
@@ -275,7 +276,7 @@ export function writeActiveSessionsCache(
     });
     const removes = [...previous.keys()].filter((key) => !next.has(key));
     try {
-      if (upserts.length > 0 || removes.length > 0) {
+      if (!hadPrevious || upserts.length > 0 || removes.length > 0) {
         fs.appendFileSync(activeSessionsJournalPath(), `${JSON.stringify({
           version: 1, scope, capturedAt: snap.capturedAt, upserts, removes,
         } satisfies ActiveSessionsJournalRecord)}\n`);

@@ -3,8 +3,8 @@
 
 import * as vscode from 'vscode';
 import { TaskSource, TaskSourceSettings } from '../core/settings';
-import { UnifiedTask, CycleInfo, groupTasksBySource } from '../core/tasks';
-import { runAgents } from '../core/agentsBin';
+import { UnifiedTask, CycleInfo, buildTicketsListArgs, groupTasksBySource } from '../core/tasks';
+import { runAgentsArgs } from '../core/agentsBin';
 
 export interface TaskFetchResult {
   tasks: UnifiedTask[];
@@ -21,13 +21,7 @@ interface TicketsListResult {
 }
 
 async function listTickets(enabled: TaskSourceSettings, cwd?: string): Promise<TicketsListResult> {
-  const flags = [
-    enabled.linear ? '' : '--no-linear',
-    enabled.github ? '' : '--no-github',
-    enabled.githubAssignedOnly ? '--github-assigned-only' : '',
-    cwd ? `--cwd ${JSON.stringify(cwd)}` : '',
-  ].filter(Boolean).join(' ');
-  const { stdout } = await runAgents(`tickets list --json ${flags}`.trim());
+  const { stdout } = await runAgentsArgs(buildTicketsListArgs(enabled, cwd));
   const parsed = JSON.parse(stdout) as TicketsListResult;
   if (!Array.isArray(parsed.tickets) || !parsed.sources) {
     throw new Error('agents tickets list --json returned an unsupported payload; upgrade agents-cli');

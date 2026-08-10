@@ -9,13 +9,14 @@
 // subsequent commands with an absolute path and a bootstrapped PATH that
 // includes node so the `#!/usr/bin/env node` shebang resolves.
 
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const CACHE_TTL_MS = 60_000;
 
 let cachedBin: string | undefined;
@@ -122,6 +123,21 @@ export async function runAgents(
   const augmented = bootstrapPath(bin);
   const escaped = `'${bin.replace(/'/g, `'\\''`)}'`;
   return execAsync(`${escaped} ${args}`, {
+    timeout: options.timeout ?? 30_000,
+    maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
+    cwd: options.cwd,
+    env: { ...process.env, PATH: `${augmented}:${process.env.PATH ?? ''}` },
+  });
+}
+
+/** Run agents through an argv boundary; use this whenever arguments contain user data. */
+export async function runAgentsArgs(
+  args: string[],
+  options: RunAgentsOptions = {},
+): Promise<{ stdout: string; stderr: string }> {
+  const bin = await resolveAgentsBin();
+  const augmented = bootstrapPath(bin);
+  return execFileAsync(bin, args, {
     timeout: options.timeout ?? 30_000,
     maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
     cwd: options.cwd,

@@ -33,10 +33,12 @@ test('SessionCliReplay gives a late window the current rows without another CLI 
     { rowKey: 'b', sourceDevice: 'zion', sessionId: 'current' },
   });
   replay.ingest({ version: 1, type: 'scope', streamId: 'cli', sequence: 4, capturedAt: 4, scope: 'zion', status: 'available' });
-  expect(replay.envelopes('late-window')).toEqual([
-    { version: 1, type: 'reset', streamId: 'replay:late-window:zion', sequence: 1, capturedAt: 4, scope: 'zion', rows: [
+  const first = replay.envelopes('late-window');
+  expect(first).toEqual([
+    { version: 1, type: 'reset', streamId: 'replay:late-window:zion:1', sequence: 1, capturedAt: 4, scope: 'zion', rows: [
       { rowKey: 'b', sourceDevice: 'zion', sessionId: 'current' },
     ] },
-    { version: 1, type: 'scope', streamId: 'replay:late-window:zion', sequence: 2, capturedAt: 4, scope: 'zion', status: 'available' },
+    { version: 1, type: 'scope', streamId: 'replay:late-window:zion:1', sequence: 2, capturedAt: 4, scope: 'zion', status: 'available' },
   ]);
+  expect(replay.envelopes('late-window')[0].streamId).not.toBe(first[0].streamId);
 });
