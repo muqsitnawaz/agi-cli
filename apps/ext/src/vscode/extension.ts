@@ -565,7 +565,7 @@ async function resolveBalancedHost(pool?: string[], agentKey?: string): Promise<
 async function resolveSlotHost(slot: QuickLaunchSlot): Promise<string | undefined> {
   const target = slot.runOn?.trim();
   if (!target || target === 'local') return undefined;
-  if (target === BALANCED_HOST) return resolveBalancedHost(slot.balancePool, slot.agent);
+  if (target === BALANCED_HOST) return 'auto';
   const devices = await listRegisteredDevices();
   const dev = devices.find(d => normalizeHost(d.name) === normalizeHost(target));
   if (!dev) {
@@ -776,91 +776,25 @@ async function resolveAutoAgentKey(
 }
 
 async function launchAgent(context: vscode.ExtensionContext, opts: LaunchAgentOpts = {}): Promise<void> {
-  // Automatic launch is a thin CLI request. The CLI owns harness, device,
-  // account, quota, and health selection; the extension only hosts the terminal.
-  if (!opts.pickHost && !opts.host && !opts.local) {
-    const terminal = vscode.window.createTerminal({
-      name: 'Agents Auto',
-      location: { viewColumn: vscode.ViewColumn.Active },
-      isTransient: true,
-    });
-    terminal.show(false);
-    await sendCommandWhenReady(
-      terminal,
-      'agents run auto --interactive --device auto --strategy balanced --mode auto',
-    );
-    return;
-  }
-
-  // 1. Host. Device-first pick, an explicit host, or (later) auto.
   let host = opts.host;
   if (opts.pickHost) {
     const picked = await pickLaunchHost(context, 'New agent — run on…', opts.agentKey);
     if (picked.cancelled) return;
-    host = picked.host; // undefined here means the user chose "This Mac"
-  }
-
-  // 2. Harness. Explicit, or auto by availability on the chosen host + recent usage.
-  const agentKey = opts.agentKey ?? await resolveAutoAgentKey(context, host);
-  if (!agentKey) {
-    vscode.window.showWarningMessage(
-      host ? `New Agent: no usable agent found on ${host}.` : 'New Agent: no installed agent available to launch.',
-    );
-    return;
-  }
-
-  if (opts.autoHost && !AUTO_HOST_AGENT_KEYS.has(agentKey)) {
-    vscode.window.showInformationMessage(`${getBuiltInByKey(agentKey)?.title ?? agentKey} does not expose account health; pick a host instead.`);
-    const picked = await pickLaunchHost(context, `New ${getBuiltInByKey(agentKey)?.title ?? agentKey} — run on…`, agentKey);
-    if (picked.cancelled) return;
     host = picked.host;
   }
-
-  if (opts.autoHost && AUTO_HOST_AGENT_KEYS.has(agentKey)) {
-    host = resolveCachedAutoHost(context, agentKey);
-    if (!host) {
-      // Cache cold/stale (first launch after activation, >5min idle, or the
-      // background fleet sweep hasn't landed on a loaded box). Don't silently
-      // run local — do the same live, favorites-aware fleet sweep the default
-      // New-agent path uses (honors enable/prefer, drops hosts with no usable
-      // version, ranks by load). It only returns undefined — and we fall back
-      // to local — when no fleet device is genuinely eligible. Also warm the
-      // cache so the NEXT auto launch is instant.
-      refreshLaunchHealthCacheInBackground(context);
-      host = await resolveBalancedHost(undefined, agentKey);
-    }
-  }
-
-  // 3. Auto host (agent-aware least-busy) only when the caller neither pinned a
-  //    host nor asked to pick one nor forced local.
-  if (host === undefined && !opts.pickHost && !opts.local && !opts.autoHost) {
-    host = await resolveBalancedHost(undefined, agentKey);
-  }
-
-  // 4. Config + strategy. Balanced version/account rotation is the default for
-  //    every harness that supports it; there is no pinned-version path here.
-  const def = getBuiltInByKey(agentKey);
-  const agentConfig = def && getBuiltInByTitle(context.extensionPath, def.title);
-  if (!agentConfig) {
-    vscode.window.showWarningMessage(`New Agent: ${agentKey} is not available.`);
-    return;
-  }
-  // Balanced account/version rotation for every agent runner, always — the launch
-  // contract has no per-harness exception (apps/ext/AGENTS.md). Shell is not a
-  // runner, so it carries no strategy (it never routes through `agents run`).
-  const strategy: RunStrategy | undefined = isAgentRunner(agentKey) ? 'balanced' : undefined;
-
-  let launched = false;
-  try {
-    await openSingleAgent(context, agentConfig, undefined, undefined, strategy, host);
-    launched = true;
-  } finally {
-    await saveLaunchHistory(context, host ?? 'local', launched);
-  }
-
-  const hostLabel = host ? ` on ${host}` : '';
-  const stratLabel = strategy === 'balanced' ? ' (balanced)' : '';
-  vscode.window.setStatusBarMessage(`New Agent: ${def!.title}${stratLabel}${hostLabel}`, 4000);
+  const automatic = !opts.agentKey;
+  const agent = opts.agentKey ?? 'auto';
+  let command = `agents run ${agent} --interactive`;
+  if (host) command += ` --device ${shquote(host)}`;
+  else if (automatic && !opts.local) command += ' --device auto';
+  command += ' --strategy balanced --mode auto';
+  const terminal = vscode.window.createTerminal({
+    name: automatic ? 'Agents Auto' : `Agents ${agent}`,
+    location: { viewColumn: vscode.ViewColumn.Active },
+    isTransient: true,
+  });
+  terminal.show(false);
+  await sendCommandWhenReady(terminal, command);
 }
 
 // Terminal readiness detection moved to src/vscode/terminalReadiness.ts.
@@ -2768,6 +2702,10 @@ interface AgentViewResponse {
   versions: AgentVersionInfo[];
 }
 
+async function hostHasUsableVersion(host: string, agentKey: string): Promise<boolean> {
+  return deviceHasUsableVersion(await listAgentVersions(agentKey, host));
+}
+
 // List an agent's installed versions with login/usage health. A `host` targets a
 // remote device via `agents view <agent> --host <device> --json` (RUSH-2025 host
 // health probe); omit it for the local machine. A remote probe gets a longer
@@ -2791,11 +2729,6 @@ async function listAgentVersions(agentKey: string, host?: string): Promise<Agent
 // agent — the RUSH-2025 "usable version" test. A probe failure (offline, no SSH,
 // agent not installed) yields an empty list, so the device is reported unusable
 // and gets filtered out of the balancer rather than launched into blindly.
-async function hostHasUsableVersion(host: string, agentKey: string): Promise<boolean> {
-  const versions = await listAgentVersions(agentKey, host);
-  return deviceHasUsableVersion(versions);
-}
-
 /**
  * The recent-transcript listing. `sessions` takes the query as a positional
  * argument and has no `list` subcommand — passing one made commander treat the
