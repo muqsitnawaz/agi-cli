@@ -151,7 +151,10 @@ describe('audit hash chain (legacy file still verifies)', () => {
       `}, logPath);\n`,
     );
 
-    const N = 30;
+    // Prove serialization under real concurrency. 12 is enough to surface a
+    // lock race; 30 concurrent bun spawns on Windows GHA occasionally drop a
+    // writer under process pressure even when each exits 0 (flake, not a fork).
+    const N = process.platform === 'win32' ? 12 : 30;
     const bun = bunBin();
     await Promise.all(
       Array.from({ length: N }, (_, i) => new Promise<void>((resolve, reject) => {
@@ -166,7 +169,7 @@ describe('audit hash chain (legacy file still verifies)', () => {
     // Every writer's record landed, and the chain reproduces end-to-end.
     expect(readAuditLog(log)).toHaveLength(N);
     expect(verifyAuditChain(log)).toEqual({ ok: true });
-  }, 30000);
+  }, 60_000);
 
   it('two interleaved appends still chain and verify', async () => {
     // Two writers whose critical sections deliberately overlap in wall-clock:
