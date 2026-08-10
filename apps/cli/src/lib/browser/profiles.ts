@@ -19,8 +19,8 @@ export const DEFAULT_BROWSER_PROFILE_NAME = 'default';
  * `agents browser profiles set-default`), or undefined when unset. When set, it
  * is the profile `agents browser start` resolves to for BOTH the no-`--profile`
  * path and an explicit `--profile default`. Stored as this machine's
- * `browser.profile` device-config key (central `fleet.devices.<name>.config`
- * block — see lib/device-config.ts).
+ * `browser.profile` device-config key (the per-device doc's `config:` block —
+ * see lib/device-config.ts).
  */
 export function getConfiguredDefaultProfileName(): string | undefined {
   return (getConfigValue('browser.profile').value as string | undefined) || undefined;

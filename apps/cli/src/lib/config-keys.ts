@@ -242,9 +242,9 @@ export function configKeyStorageHint(parsed: ParsedConfigKey): string {
       return 'config.interactiveHost';
     case 'browser':
       return parsed.device
-        ? `fleet.devices.${parsed.device}.config.defaultBrowserProfile`
-        : 'fleet.devices.<self>.config.defaultBrowserProfile';
+        ? `devices/${parsed.device}/agents.yaml config.defaultBrowserProfile`
+        : 'devices/<self>/agents.yaml config.defaultBrowserProfile';
     case 'device':
-      return `fleet.devices.${parsed.device}.config ${devicePropertyToConfigName(parsed.property)}`;
+      return `devices/${parsed.device}/agents.yaml config (${devicePropertyToConfigName(parsed.property)}; fleet default: fleet.defaults.config)`;
   }
 }

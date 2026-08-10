@@ -114,8 +114,8 @@ function setConfig(parsed: ParsedConfigKey, value: unknown): void {
       return;
     }
     case 'browser': {
-      // Device-local default lives in the central fleet.devices.<name>.config
-      // block (same store `agents devices config` / getConfigValue use). Bare
+      // Device-local default lives in the per-device doc's config: block
+      // (same store `agents devices config` / getConfigValue use). Bare
       // browser.profile targets this machine; devices.<name>.browser.profile
       // targets a peer.
       setConfigValue(
@@ -235,8 +235,8 @@ function* listCentralConfigEntries(): Generator<{ key: string; value: unknown; h
   if (meta.config?.interactiveHost !== undefined) {
     yield { key: 'interactive.host', value: meta.config.interactiveHost, hint: 'config.interactiveHost' };
   }
-  // This machine's default browser profile lives in fleet.devices.<self>.config
-  // (device-config), not the legacy top-level Meta.defaultBrowserProfile field.
+  // This machine's default browser profile lives in its per-device doc
+  // (browser.profile via device-config), not a top-level Meta field.
   const browserProfile = getConfigValue('browser.profile').value;
   if (browserProfile !== undefined) {
     const key = 'browser.profile';

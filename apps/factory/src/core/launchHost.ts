@@ -21,14 +21,14 @@ export interface DeviceLoad {
   loadAvg1?: number;
   memPercent?: number;
   // User preference from `agents devices config <name> auto-launch.preferred on`
-  // (central fleet.devices.<name>.config block). A
+  // (per-device doc config:, over the fleet.defaults.config layer). A
   // preferred device gets PREFERENCE_BONUS shaved off its score so it wins
   // against otherwise-equivalent machines. Lives here rather than in each
   // caller so EVERY ranking path — the warm-cache pick and the balanced pool
   // pick both route through hostScore — honors the preference identically.
   preferred?: boolean;
   // Operator cap from `agents devices config <name> agents.max-concurrent N`
-  // (read from the central fleet.devices.<name>.config block). A device at its
+  // (read from the per-device doc config:, over fleet.defaults.config). A device at its
   // cap is EXCLUDED from the
   // auto-pick entirely — it never reaches hostScore. undefined = uncapped
   // (the default).
