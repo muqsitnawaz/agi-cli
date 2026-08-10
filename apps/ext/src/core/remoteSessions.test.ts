@@ -51,7 +51,7 @@ describe('normalizeHost', () => {
 
 describe('resolveSessionHost', () => {
   // This is the fix for the "all sessions attributed to the local machine" bug: a
-  // bare `sessions --active --json` fans out over the whole fleet, so we must
+  // Stream rows already carry their authoritative source machine, so we must
   // bucket each row by ITS OWN `machine` id, not the host we queried.
   const LOCAL_ID = 'zion';
   const LOCAL_LABEL = 'this-mac';

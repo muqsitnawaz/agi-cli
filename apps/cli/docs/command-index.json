@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "command": "agents",
   "groups": 96,
-  "commands": 561,
+  "commands": 562,
   "root": {
     "name": "agents",
     "path": "",
@@ -23967,6 +23967,46 @@
           ],
           "examples": "# Follow the most recent active Claude or Codex session\n      agents sessions tail --latest\n\n      # Follow a specific session by short or full ID\n      agents sessions tail a1b2c3d4\n\n      # Replay from the beginning, then follow\n      agents sessions tail a1b2c3d4 --from-start\n\n      # Pipe raw events through jq to extract just user messages\n      agents sessions tail --latest --json | jq 'select(.type == \"user\")'",
           "notes": "- Only Claude and Codex sessions are tailable — they append JSONL one event per line.\n      - Live tail is compact by default; pass --json for the raw JSONL stream.\n      - Gemini, OpenCode, and OpenClaw use formats that rewrite the file or store state elsewhere.",
+          "subcommands": []
+        },
+        {
+          "name": "watch",
+          "path": "sessions watch",
+          "aliases": [],
+          "description": "Stream canonical live and recoverable session row changes as NDJSON",
+          "args": [],
+          "options": [
+            {
+              "flags": "--json",
+              "description": "Emit versioned NDJSON envelopes",
+              "long": "--json",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--local",
+              "description": "Watch only this machine",
+              "long": "--local",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "examples": "# Subscribe to session changes for a long-lived UI consumer\n      agents sessions watch --json\n\n      # Subscribe only to this machine\n      agents sessions watch --json --local",
+          "notes": "- Each line is one versioned reset, upsert, remove, scope, or heartbeat envelope.\n      - rowKey is opaque. Order changes by streamId + sequence.\n      - An unavailable scope retains its last rows until that scope reconnects.",
           "subcommands": []
         }
       ]
