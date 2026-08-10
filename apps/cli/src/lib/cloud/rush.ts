@@ -155,14 +155,17 @@ async function findInstallation(token: string, owner: string, repo: string): Pro
 export interface AccountManifestEntry {
   version: string;
   email: string;
-  cred_fp: string;
 }
 
 /**
- * Manifest of the user's local Claude accounts. Sent on every dispatch so the
- * server can detect "new account" or "token rotated" drift and ask the client
- * to upload the underlying credentials. The manifest itself contains no
- * secrets — only public-ish identifiers + a hash of each token.
+ * Manifest of the user's local Claude accounts (version + account email only).
+ * Sent on a non-balanced dispatch so the server knows which accounts exist and
+ * can route to one. It carries **no credential material** and does NOT read the
+ * native OAuth login (RUSH-2527 / SING-1b): agents-cli never reads a harness's
+ * interactive login to build this. When the server needs the underlying token
+ * (a new account, or a rotation it can't otherwise resolve) it asks the client to
+ * upload it — an EXPLICIT, consent-gated path (`AGENTS_RUSH_UPLOAD_TOKENS=1` /
+ * `--upload-account-tokens`, see `hasRushUploadConsent`), never an implicit read.
  */
 export interface AccountManifest {
   fp: string;
@@ -281,16 +284,16 @@ export async function buildAccountManifest(strategy?: string): Promise<AccountMa
     candidateVersions = rows.filter((r): r is { version: string; email: string } => r !== null);
   }
 
-  const entries: AccountManifestEntry[] = [];
-  for (const { version, email } of candidateVersions) {
-    const home = getVersionHomePath('claude', version);
-    const blob = await readClaudeCredentialsBlob(home);
-    if (!blob) continue;
-    entries.push({ version, email, cred_fp: sha256(blob) });
-  }
+  // RUSH-2527 / SING-1b: do NOT read the native OAuth login to fingerprint it.
+  // The manifest carries version + account email only — enough for the server to
+  // route to an account. If the server needs the token itself, it asks the client
+  // to upload it on the EXPLICIT, consent-gated retry path (buildAccountTokensPayload
+  // behind hasRushUploadConsent); it is never read implicitly here.
+  const entries: AccountManifestEntry[] = candidateVersions
+    .map(({ version, email }) => ({ version, email }))
+    .sort((a, b) => a.version.localeCompare(b.version));
 
   if (entries.length === 0) return null;
-  entries.sort((a, b) => a.version.localeCompare(b.version));
   const fp = sha256(JSON.stringify(entries));
   return { fp, versions: entries };
 }

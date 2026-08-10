@@ -97,12 +97,14 @@ describe('buildDispatchBody', () => {
     ).toThrow(/at least one entry/);
   });
 
-  it('includes account_manifest when supplied', () => {
+  it('includes account_manifest (version + email only, no credential material) when supplied', () => {
+    // RUSH-2527 / SING-1b: the manifest carries no token hash — agents-cli never
+    // reads the native OAuth login to build it. Only version + account email ride.
     const manifest = {
       fp: 'aaaa',
       versions: [
-        { version: '2.1.110', email: 'a@b.com', cred_fp: 'h1' },
-        { version: '2.1.112', email: 'c@d.com', cred_fp: 'h2' },
+        { version: '2.1.110', email: 'a@b.com' },
+        { version: '2.1.112', email: 'c@d.com' },
       ],
     };
     const body = buildDispatchBody({
@@ -111,6 +113,8 @@ describe('buildDispatchBody', () => {
       accountManifest: manifest,
     });
     expect(body.account_manifest).toEqual(manifest);
+    // No per-version credential fingerprint / token anywhere in the ordinary body.
+    expect(JSON.stringify(body)).not.toContain('cred_fp');
     expect(body.account_tokens).toBeUndefined();
   });
 
