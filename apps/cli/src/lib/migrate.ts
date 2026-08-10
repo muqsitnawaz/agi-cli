@@ -604,22 +604,32 @@ function migratePermissionSetsToPresets(): void {
  * switching is owned by `agents use`, not the migrator.
  */
 function repairAgentConfigSymlinks(): void {
-  // Version pins live in the per-device file post-split (~/.agents/devices/<machine>/
-  // agents.yaml); central agents.yaml may still carry them mid-transition. Read
-  // device first (authoritative), then central, first-seen-agent wins.
+  // Version pins live in the machine-local pins JSON (~/.agents/.history/
+  // devices/pins-<machine>.json); the tracked device doc and central
+  // agents.yaml may still carry them mid-transition. Read pins first
+  // (authoritative), then the legacy locations, first-seen-agent wins.
   const defaults: Array<{ agent: string; version: string }> = [];
-  const collectPins = (file: string): void => {
+  const seen = new Set<string>();
+  const collectJsonPins = (file: string): void => {
+    let pins: { agents?: Record<string, string> };
+    try { pins = JSON.parse(fs.readFileSync(file, 'utf-8')) as typeof pins; } catch { return; }
+    for (const [agent, version] of Object.entries(pins?.agents ?? {})) {
+      if (!seen.has(agent)) { seen.add(agent); defaults.push({ agent, version }); }
+    }
+  };
+  const collectYamlPins = (file: string): void => {
     let text: string;
     try { text = fs.readFileSync(file, 'utf-8'); } catch { return; }
     const block = text.match(/^agents:\s*\n((?:  [^\n]*\n)+)/m);
     if (!block) return;
     for (const line of block[1].split('\n')) {
       const m = line.match(/^\s+([a-z][a-z0-9_-]*):\s*([^\s#]+)/);
-      if (m && !defaults.some((d) => d.agent === m[1])) defaults.push({ agent: m[1], version: m[2] });
+      if (m && !seen.has(m[1])) { seen.add(m[1]); defaults.push({ agent: m[1], version: m[2] }); }
     }
   };
-  collectPins(path.join(USER_DIR, 'devices', machineId(), 'agents.yaml'));
-  collectPins(path.join(USER_DIR, 'agents.yaml'));
+  collectJsonPins(path.join(USER_DIR, '.history', 'devices', `pins-${machineId()}.json`));
+  collectYamlPins(path.join(USER_DIR, 'devices', machineId(), 'agents.yaml'));
+  collectYamlPins(path.join(USER_DIR, 'agents.yaml'));
   if (defaults.length === 0) return;
 
   let repaired = 0;
