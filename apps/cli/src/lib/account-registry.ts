@@ -374,3 +374,48 @@ export function resolveCredentialAccount(name: string, host: AgentId, expectedPr
     env: { ...connectionEnv, [envVar]: getKeychainToken(account.secretRef) },
   };
 }
+
+/** The account a spawn should launch under, classified for the exec path. */
+export type SpawnAccount =
+  | { kind: 'provider'; id: string; name: string; agent: AgentId; env: Record<string, string> }
+  | { kind: 'native'; id: string; name: string; agent: AgentId; identityKey: string; scope: 'version' | 'device' };
+
+/**
+ * Resolve the account a run should launch under, following the binding order
+ * (explicit → exact `agent@version` → device-scoped `agent` → per-harness
+ * default) and classifying the result:
+ *
+ * - **provider** → the injected env is resolved here (fails closed when the
+ *   credential is absent or the provider cannot authenticate the host).
+ * - **native** → returns the identity the caller must confirm is live on the
+ *   execution device; **no secret or env is produced**, because a native login
+ *   is owned by the harness and read from its own home. The caller validates the
+ *   live fingerprint against the installed version before spawn.
+ *
+ * A native account bound to a different harness than the one being launched
+ * fails loudly (EXEC-ACCOUNT-4). Returns null when nothing is selected.
+ */
+export function resolveSpawnAccount(
+  explicit: string | undefined,
+  agent: AgentId,
+  version: string | undefined,
+  meta: Pick<Meta, 'accounts'>,
+  opts: { useDefault?: boolean; provider?: string; base?: string; target?: string } = {},
+): SpawnAccount | null {
+  // The binding lookup key. A custom harness passes its own profile/harness name
+  // (a run of `deepseek` must find a binding on `deepseek`, not `claude@x`); a
+  // native/global run keys on the exact `agent@version` installation.
+  const target = opts.target ?? (version ? `${agent}@${version}` : agent);
+  const selection = resolveAccountSelection(explicit, agent, meta, { useDefault: opts.useDefault, target });
+  if (!selection) return null;
+  const unified = findUnifiedAccount(selection, meta);
+  if (!unified) throw new Error(`Unknown account '${selection}'.`);
+  if (unified.kind === 'native') {
+    if (unified.agent !== agent) {
+      throw new Error(`Account '${unified.name}' is a ${unified.agent} login and cannot authenticate the ${agent} harness.`);
+    }
+    return { kind: 'native', id: unified.id, name: unified.name, agent, identityKey: unified.identityKey, scope: unified.scope };
+  }
+  const resolved = resolveCredentialAccount(unified.name, agent, opts.provider, opts.base ?? getUserAgentsDir());
+  return { kind: 'provider', id: resolved.id, name: resolved.name, agent, env: resolved.env };
+}
