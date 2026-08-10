@@ -1402,7 +1402,8 @@ function registerDevicesCommands(program: Command): void {
       try {
         configTombstoneNotice('enable <name>', 'config <name> auto-launch.enabled on');
         await mustGetDevice(name);
-        await runDevicesConfig(name, 'auto-launch.enabled', ['on'], { quiet: true });
+        // Back to the default (enabled) = remove the key.
+        await runDevicesConfig(name, 'auto-launch.enabled', [], { unset: true, quiet: true });
         console.log(chalk.green(`Enabled '${name}'`) + chalk.gray(' for Factory auto-launch.'));
       } catch (err: any) {
         console.error(chalk.red(err.message));
@@ -1444,7 +1445,8 @@ function registerDevicesCommands(program: Command): void {
       try {
         configTombstoneNotice('unprefer <name>', 'config <name> auto-launch.preferred off');
         await mustGetDevice(name);
-        await runDevicesConfig(name, 'auto-launch.preferred', ['off'], { quiet: true });
+        // Back to the default (not preferred) = remove the key.
+        await runDevicesConfig(name, 'auto-launch.preferred', [], { unset: true, quiet: true });
         console.log(chalk.green(`No longer preferring '${name}'`) + chalk.gray(' for Factory auto-launch.'));
       } catch (err: any) {
         console.error(chalk.red(err.message));
