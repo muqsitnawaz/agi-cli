@@ -250,12 +250,11 @@ export async function runEventsCommand(options: EventsOptions, forceAudit: boole
     return;
   }
 
-  // --audit is the legacy "ops only" flag.
-  let includeActivity = !(forceAudit || options.audit);
-  if (includeFamilies || excludeFamilies) {
-    // Family layer owns includeActivity; leave default true for applyFamilies.
-    includeActivity = true;
-  }
+  // --audit / forceAudit = ops-only when no family flags. Families own the
+  // source selection via applyFamilies — never override includeActivity after.
+  const includeActivity = (includeFamilies?.length || excludeFamilies?.length)
+    ? true
+    : !(forceAudit || options.audit);
 
   const fetched = readUnifiedEvents({
     startDate,
@@ -268,7 +267,7 @@ export async function runEventsCommand(options: EventsOptions, forceAudit: boole
     command: options.command,
     module: options.module,
     limit: limit === undefined ? undefined : limit + 1,
-    includeActivity: forceAudit || options.audit ? false : includeActivity,
+    includeActivity,
     includeFamilies,
     excludeFamilies,
   });
@@ -304,7 +303,8 @@ function levelColor(level: string): string {
   return chalk.blue(level);
 }
 
-async function runStats(opts: { since?: string; json?: boolean }): Promise<void> {
+/** Shared by `events stats` and the `logs stats` alias. */
+export async function runEventsStats(opts: { since?: string; json?: boolean }): Promise<void> {
   let days = 7;
   if (opts.since) {
     try {
@@ -357,7 +357,7 @@ Examples:
   agents events --include runs           Dispatched-run outcomes (was audit list)
   agents events --include activity       Agent milestones only
   agents events --include ops            Operational events only
-  agents events --include security       Audit-level (secrets, browser, …)
+  agents events --include security       Audit-level (secrets, command.*, daemon, …)
   agents events --module secrets         Every secret accessed or revealed
   agents events --module secrets --bundle share
   agents events --event pr.opened --since 7d
@@ -379,28 +379,31 @@ Examples:
     .description('Show aggregate event statistics')
     .option('--since <time>', 'Window size (e.g. 7d, 30d; default 7d)')
     .option('--json', 'Output stats as JSON')
-    .action(async (opts: { since?: string; json?: boolean }) => runStats(opts));
+    .action(async (opts: { since?: string; json?: boolean }) => runEventsStats(opts));
 
   events
     .command('rotate')
     .description('Apply event retention and the storage ceiling immediately')
     .option('--days <n>', 'Retention period in days (default 7)', '7')
     .option('--max-mb <n>', 'Total event storage ceiling in MiB (default 50)', '50')
-    .action((opts: { days?: string; maxMb?: string }) => {
-      const days = Math.max(1, parseInt(opts.days ?? '7', 10) || 7);
-      const maxMb = Math.max(1, parseInt(opts.maxMb ?? '50', 10) || 50);
-      const result = rotate(days, maxMb * 1024 * 1024);
-      const removed = result.removedByAge + result.removedBySize;
-      if (removed > 0) {
-        console.log(
-          `Removed ${removed} event file${removed === 1 ? '' : 's'} ` +
-          `(${result.removedByAge} by age, ${result.removedBySize} by size); ` +
-          `reclaimed ${humanBytes(result.bytesReclaimed)}.`,
-        );
-      } else {
-        console.log(chalk.gray(`No event files removed (retention ${days} days, ceiling ${maxMb} MiB).`));
-      }
-    });
+    .action((opts: { days?: string; maxMb?: string }) => runEventsRotate(opts));
+}
+
+/** Shared by `events rotate` and the `logs rotate` alias. */
+export function runEventsRotate(opts: { days?: string; maxMb?: string }): void {
+  const days = Math.max(1, parseInt(opts.days ?? '7', 10) || 7);
+  const maxMb = Math.max(1, parseInt(opts.maxMb ?? '50', 10) || 50);
+  const result = rotate(days, maxMb * 1024 * 1024);
+  const removed = result.removedByAge + result.removedBySize;
+  if (removed > 0) {
+    console.log(
+      `Removed ${removed} event file${removed === 1 ? '' : 's'} ` +
+      `(${result.removedByAge} by age, ${result.removedBySize} by size); ` +
+      `reclaimed ${humanBytes(result.bytesReclaimed)}.`,
+    );
+  } else {
+    console.log(chalk.gray(`No event files removed (retention ${days} days, ceiling ${maxMb} MiB).`));
+  }
 }
 
 /** commander repeatable-option collector. */

@@ -104,9 +104,9 @@ function applyInclude(q: UnifiedQuery, families: EventFamily[]): UnifiedQuery {
     const union = new Set<EventType>();
     for (const set of typeSets) for (const t of set) union.add(t);
     if (eventTypes?.length) {
+      // Intersect with --event; empty means no match (never silently widen).
       const allowed = new Set(eventTypes);
       eventTypes = [...union].filter((t) => allowed.has(t));
-      if (eventTypes.length === 0) eventTypes = [...union];
     } else {
       eventTypes = [...union];
     }

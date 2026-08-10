@@ -125,4 +125,16 @@ describe('applyFamilies / readUnifiedEvents', () => {
       applyFamilies({ includeFamilies: ['ops'], excludeFamilies: ['commands'] }),
     ).toThrow(/mutually exclusive/);
   });
+
+  it('--include runs ∩ --event secrets.get yields empty (no silent widen)', () => {
+    setup();
+    emit('run.dispatched', { module: 'run', agent: 'claude', version: '1', mode: 'plan', outcome: 'ok', exitCode: 0 });
+    emit('secrets.get', { module: 'secrets' });
+    const rows = readUnifiedEvents({
+      includeFamilies: ['runs'],
+      eventTypes: ['secrets.get'],
+      limit: 50,
+    });
+    expect(rows.length).toBe(0);
+  });
 });
