@@ -106,6 +106,15 @@
               "negate": false
             },
             {
+              "flags": "--base-url <url>",
+              "description": "Optional endpoint override stored with the account",
+              "long": "--base-url",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
               "flags": "--from-secrets <bundle:key>",
               "description": "Import from an existing agents secrets entry",
               "long": "--from-secrets",
