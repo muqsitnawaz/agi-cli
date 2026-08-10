@@ -5617,8 +5617,7 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
   type TerminalTuple = import('../monitor/protocol').TerminalTuple;
 
   const windowId = computeWindowId(vscode.env.sessionId, process.pid);
-  const { SessionPresentationStore } = require('../core/sessionPresentationStore') as typeof import('../core/sessionPresentationStore');
-  const sessionStore = new SessionPresentationStore();
+  const { sessionPresentationStore: sessionStore } = require('../core/sessionPresentationStore') as typeof import('../core/sessionPresentationStore');
 
   // Resolve a broadcast pid/sessionId back to THIS window's terminal, scanning
   // only the window-local registry (stays per-window per epic #64).
@@ -5699,7 +5698,7 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
     } else if (proto.isPanelSnapshot(event)) {
       terminals.ingestPanelSnapshotFact(event.payload);
     } else if (proto.isSessionCliFact(event)) {
-      sessionStore.apply(event.payload);
+      if (sessionStore.apply(event.payload)) void settings.refreshFloorFromSessionStream();
     }
   });
   context.subscriptions.push({ dispose: factSub });

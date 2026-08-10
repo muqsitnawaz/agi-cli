@@ -36,3 +36,6 @@ export class SessionPresentationStore {
     return typeof id === 'string' && id ? id : undefined;
   }
 }
+
+/** Exactly one presentation store per extension host process. */
+export const sessionPresentationStore = new SessionPresentationStore();

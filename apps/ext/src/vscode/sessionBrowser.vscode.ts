@@ -2,7 +2,6 @@ import type { BrowsableSession } from '../core/sessionBrowser';
 import type { RunStrategy } from '../core/agents';
 import { buildForkSessionRequest } from '../core/forkSession';
 import { forkHostForSession, type SessionBrowserSessionRow } from '../core/sessionBrowser';
-import { normalizeActiveSessions } from '../core/remoteSessions';
 
 export interface SessionBrowserRunResult {
   stdout: string;
@@ -32,46 +31,13 @@ export async function loadBrowsableSessions(
     quote: (value: string) => string;
   },
 ): Promise<BrowsableSession[]> {
-  const scope = opts.device ? ` --host ${opts.quote(opts.device)}` : '';
-  const timeout = opts.device ? 45_000 : 20_000;
-  const listed = await run(`sessions --all -n ${opts.limit} --json${scope}`, {
+  const timeout = 45_000;
+  const listed = await run(`sessions --all --json --no-interactive --limit ${opts.limit}`, {
     maxBuffer: 16 * 1024 * 1024,
     timeout,
   });
-  if (opts.device && listed.stderr.trim()) throw new Error(listed.stderr.trim());
-  const sessions = parseSessionList(listed.stdout);
-
-  const browsingCurrentDevice = (opts.device ?? opts.localMachine) ===
-    (opts.currentSessionDevice ?? opts.localMachine);
-  if (!opts.currentSessionId || !browsingCurrentDevice ||
-      sessions.some(session => session.id === opts.currentSessionId || session.shortId === opts.currentSessionId)) {
-    return sessions;
-  }
-  const currentSessionId = opts.currentSessionId;
-
-  const exact = await run(`sessions --active --json${scope}`, {
-    maxBuffer: 16 * 1024 * 1024,
-    timeout,
-  });
-  if (opts.device && exact.stderr.trim()) throw new Error(exact.stderr.trim());
-  const [current] = normalizeActiveSessions(
-    exact.stdout,
-    opts.device ?? opts.localMachine,
-    Date.now(),
-  ).filter(session => session.sessionId === currentSessionId || session.sessionId.startsWith(currentSessionId));
-  if (current) {
-    sessions.push({
-      id: current.sessionId,
-      shortId: current.sessionId.slice(0, 8),
-      agent: current.agentType,
-      timestamp: new Date(current.startedAtMs ?? current.lastActivityMs ?? 0).toISOString(),
-      project: current.project,
-      cwd: current.cwd,
-      topic: current.topic,
-      machine: current.host,
-    });
-  }
-  return sessions;
+  if (listed.stderr.trim()) throw new Error(listed.stderr.trim());
+  return parseSessionList(listed.stdout);
 }
 
 export class LatestSessionBrowserRequest {

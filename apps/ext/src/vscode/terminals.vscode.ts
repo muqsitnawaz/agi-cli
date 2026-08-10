@@ -13,7 +13,7 @@ import { PanelSnapshotPayload, SnapshotWatch } from '../monitor/protocol';
 import { generateTerminalId, resolveRestoredVersion, RunningCounts } from '../core/terminals';
 import * as sessionsPersist from '../core/sessions.persist';
 import { getSessionPathBySessionId, getSessionPreviewInfo, getOpenCodeSessionPreviewInfo, getCursorSessionPreviewInfo, SessionPreviewInfo } from './sessions.vscode';
-import { fetchLocalSessions } from './remoteSessions.vscode';
+import { sessionPresentationStore } from '../core/sessionPresentationStore';
 import type { RemoteSession } from '../core/remoteSessions';
 import { extractSessionQuickDetails, SessionAttachment, SessionQuickDetails, SessionQuickSummary, SessionSummaryAgentType } from '../core/session.summary';
 import {
@@ -1034,12 +1034,8 @@ const sessionSummaryCache = new Map<string, SessionSummaryCacheEntry>();
 // waiting-for-input (issue #741). fetchLocalSessions has its own short-TTL cache,
 // so the five per-agent-type calls of one floor poll share a single subprocess.
 async function localCliSessionsById(): Promise<Map<string, RemoteSession>> {
-  try {
-    const { sessions } = await fetchLocalSessions();
-    return new Map(sessions.filter((s) => s.sessionId).map((s) => [s.sessionId, s]));
-  } catch {
-    return new Map();
-  }
+  const sessions = sessionPresentationStore.sessions() as RemoteSession[];
+  return new Map(sessions.filter((s) => s.sessionId).map((s) => [s.sessionId, s]));
 }
 
 const SESSION_CONTENT_TAIL_BYTES = 256 * 1024;

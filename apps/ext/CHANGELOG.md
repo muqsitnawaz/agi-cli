@@ -18,6 +18,12 @@ All notable changes to AGI EXT (the VS Code extension) are documented here. Form
   The extension no longer SSH-probes CPU/memory, counts remote sessions itself,
   reads the watchdog JSONL/playbook, or maintains those policy implementations.
 
+- **Task and panel acquisition are CLI-backed.** Unified tasks come from one
+  `agents tickets list --json` response, session browsing uses the same bounded
+  on-demand history command as Resume, and dashboard refreshes are driven by the
+  elected session stream. Direct Linear/GitHub aggregation and session/team file
+  watchers were removed.
+
 ## [0.9.315] - 2026-08-10
 
 - **Launch Warp with the right command.** The Warp agent's `cliCommand` was still the

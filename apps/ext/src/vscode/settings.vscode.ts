@@ -1058,9 +1058,6 @@ export async function resolveQuickLaunchAliases(
 // Module state
 let settingsPanel: vscode.WebviewPanel | undefined;
 
-// Session file watchers for live updates
-const sessionWatchers = new Map<string, fs.FSWatcher>();
-let sessionUpdateTimeout: NodeJS.Timeout | undefined;
 let currentlySubscribedAgentType: string | null = null;
 
 // Notify settings panel when integration status changes
@@ -1070,59 +1067,13 @@ export function notifyIntegrationStatus(provider: string, connected: boolean): v
 
 // Clean up all session file watchers
 function cleanupSessionWatchers(): void {
-  for (const watcher of sessionWatchers.values()) {
-    watcher.close();
-  }
-  sessionWatchers.clear();
   currentlySubscribedAgentType = null;
-  if (sessionUpdateTimeout) {
-    clearTimeout(sessionUpdateTimeout);
-    sessionUpdateTimeout = undefined;
-  }
 }
 
 // Subscribe to session file changes for live updates
 async function subscribeToAgentSessions(agentType: string, workspacePath?: string): Promise<void> {
-  // Clean up previous subscriptions
-  cleanupSessionWatchers();
   currentlySubscribedAgentType = agentType;
-
-  // Get all terminals of this agent type
-  const terminalDetails = await terminals.getTerminalsByAgentType(agentType, workspacePath);
-
-  // For each terminal with a session, watch the session file
-  for (const terminal of terminalDetails) {
-    if (!terminal.sessionId) continue;
-
-    // Map agentType to session agent type
-    const sessionAgentType = agentType as 'claude' | 'codex' | 'gemini';
-    if (!['claude', 'codex', 'gemini'].includes(agentType)) continue;
-
-    try {
-      const sessionPath = await getSessionPathBySessionId(terminal.sessionId, sessionAgentType, workspacePath);
-      if (!sessionPath || sessionWatchers.has(sessionPath)) continue;
-
-      const watcher = fs.watch(sessionPath, { persistent: false }, () => {
-        // Debounce updates - wait 500ms after last change
-        if (sessionUpdateTimeout) clearTimeout(sessionUpdateTimeout);
-        sessionUpdateTimeout = setTimeout(async () => {
-          if (!settingsPanel || !settingsPanel.visible || currentlySubscribedAgentType !== agentType) return;
-
-          // Re-fetch terminal data and push to webview
-          const updatedTerminals = await terminals.getTerminalsByAgentType(agentType, workspacePath);
-          settingsPanel.webview.postMessage({
-            type: 'agentTerminalsData',
-            agentType,
-            terminals: updatedTerminals
-          });
-        }, 500);
-      });
-
-      sessionWatchers.set(sessionPath, watcher);
-    } catch {
-      // Ignore errors - session file may not exist yet
-    }
-  }
+  await pushSubscribedAgentTerminalUpdate(workspacePath);
 }
 
 async function pushSubscribedAgentTerminalUpdate(workspacePath?: string): Promise<void> {
@@ -1138,7 +1089,6 @@ async function pushSubscribedAgentTerminalUpdate(workspacePath?: string): Promis
     terminals: terminalDetails
   });
 
-  await subscribeToAgentSessions(subscribedAgentType, workspacePath);
 }
 
 // --- Floor live streaming ---------------------------------------------------
@@ -1147,58 +1097,10 @@ async function pushSubscribedAgentTerminalUpdate(workspacePath?: string): Promis
 // on change (debounced). Mirrors subscribeToAgentSessions but for the whole
 // Floor. New terminals are picked up by re-reconciling the watch set after each
 // push (and by the existing onDidOpenTerminal listener).
-const floorSessionWatchers = new Map<string, fs.FSWatcher>();
-let floorUpdateTimeout: NodeJS.Timeout | undefined;
 let floorSubscribed = false;
 
 function cleanupFloorWatchers(): void {
-  for (const w of floorSessionWatchers.values()) {
-    try { w.close(); } catch { /* ignore */ }
-  }
-  floorSessionWatchers.clear();
-  if (floorUpdateTimeout) {
-    clearTimeout(floorUpdateTimeout);
-    floorUpdateTimeout = undefined;
-  }
   floorSubscribed = false;
-}
-
-async function watchFloorSessions(workspacePath?: string): Promise<void> {
-  for (const w of floorSessionWatchers.values()) {
-    try { w.close(); } catch { /* ignore */ }
-  }
-  floorSessionWatchers.clear();
-
-  const onChange = () => {
-    if (floorUpdateTimeout) clearTimeout(floorUpdateTimeout);
-    floorUpdateTimeout = setTimeout(() => { void pushFloorUpdate(workspacePath); }, 500);
-  };
-
-  // Team status changes (start/stop/disband) stream in via the teams config.
-  try {
-    const teamsConfig = path.join(homedir(), '.agents', 'teams', 'config.json');
-    if (fs.existsSync(teamsConfig)) {
-      floorSessionWatchers.set(teamsConfig, fs.watch(teamsConfig, { persistent: false }, onChange));
-    }
-  } catch { /* ignore */ }
-
-  // One watcher per live floor-terminal session file.
-  try {
-    const floorTerminals = await terminals.getFloorTerminalDetails(workspacePath);
-    for (const t of floorTerminals) {
-      if (!t.sessionId) continue;
-      if (!['claude', 'codex', 'gemini'].includes(t.agentType)) continue;
-      try {
-        const sessionPath = await getSessionPathBySessionId(
-          t.sessionId,
-          t.agentType as 'claude' | 'codex' | 'gemini',
-          workspacePath,
-        );
-        if (!sessionPath || floorSessionWatchers.has(sessionPath)) continue;
-        floorSessionWatchers.set(sessionPath, fs.watch(sessionPath, { persistent: false }, onChange));
-      } catch { /* session file may not exist yet */ }
-    }
-  } catch { /* ignore */ }
 }
 
 // Last successfully-fetched floor tasks. Re-served when a fetch throws so the
@@ -1219,13 +1121,17 @@ async function pushFloorUpdate(workspacePath?: string): Promise<void> {
   notifyNewlyWaiting(floorTerminals);
   settingsPanel.webview.postMessage({ type: 'allTerminalsData', terminals: floorTerminals });
   settingsPanel.webview.postMessage({ type: 'tasksData', tasks: floorTasks });
-  // Re-reconcile so newly-spawned terminals get watched too.
-  await watchFloorSessions(workspacePath);
+}
+
+/** Called by the window's session-stream follower; no filesystem watcher. */
+export async function refreshFloorFromSessionStream(): Promise<void> {
+  const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  await Promise.all([pushSubscribedAgentTerminalUpdate(workspacePath), pushFloorUpdate(workspacePath)]);
 }
 
 async function subscribeFloor(workspacePath?: string): Promise<void> {
   floorSubscribed = true;
-  await watchFloorSessions(workspacePath);
+  await pushFloorUpdate(workspacePath);
 }
 
 // Data directory: ~/.agents/
