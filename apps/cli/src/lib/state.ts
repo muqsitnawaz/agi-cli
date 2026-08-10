@@ -921,6 +921,7 @@ const META_KEY_SCOPE: Record<keyof Meta, 'central' | 'device'> = {
   versions: 'device',
   deviceRoutines: 'device',
   // Central — synced via agents.yaml.
+  accounts: 'central',
   run: 'central',
   model: 'central',
   watchdog: 'central',
