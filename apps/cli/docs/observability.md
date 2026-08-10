@@ -11,8 +11,9 @@ whose *consumer* and *axis* match your question, not whichever you remember firs
 
 | Command | Role (one line) | Source | Consumer |
 |---|---|---|---|
-| **`events`** | **Raw unified event stream = the ops trail.** Everything: secrets access, command invocations, version/skill/mcp/team ops, browser events, plus agent milestones. `--follow` to tail, `--audit` for ops-only. `agents logs audit` is a compatibility alias backed by this same reader. | dated `events/*.jsonl` + per-session `activity/*.jsonl`, merged by `readUnifiedEvents` | Audit, debugging, monitoring (human + machine) |
-| **`audit`** | **Tamper-evident run-dispatch chain** (hash-chained exec log). Not the same as `events`. | `~/.agents` audit log | Governance / CI verify |
+| **`events`** | **The one timeline.** Ops (secrets, keychain, daemon, browser, computer, command.*, teams, …) + agent activity + run-dispatch outcomes (`run.dispatched`). Filter with `--include`/`--exclude` families (`ops`, `activity`, `commands`, `runs`, `security`). | dated `events/*.jsonl` + per-session `activity/*.jsonl`, merged by `readUnifiedEvents` | Audit, debugging, monitoring (human + machine) |
+| **`audit`** | **Thin alias of `events --include runs`.** Legacy hash-chain file is verify-only for old history. | same events engine | Governance / quick run list |
+| **`logs`** | **Thin alias of `events`.** Subcommands `audit`/`stats`/`rotate` re-dispatch. Content lives on `sessions` / `hosts logs`. | same events engine | Muscle-memory |
 | **`perf`** | **Latency rollups.** p50/p99 for hooks, CLI commands, and `agent.run` timings. Indexed SQLite — not a full scan of the audit log. Not popularity, not behaviour. | `~/.agents/.cache/perf/perf.db` (disposable) | Humans optimizing boot/run cost + `--json` |
 | **`insights`** | **How work looks — one verb, two engines.** Bare = behavioural report (transcript content, account split). `insights mix` / recipes = cheap counters (harness/model/token/secrets). Former top-level `agents trends` is a deprecated alias of the mix tree only. | behaviour: `sessions.db` + `session_insights`; mix: `sessions.db` + `usage.db` | Human + `--json` |
 | **`feed`** / **`inbox`** | **Needs-you inbox + status posts.** Open blocks (decisions agents are waiting on) + `feed post` milestones. `inbox` ≡ `feed`. Scope with `--project`. | `.history/feed/*` + active sessions | Humans (operator inbox) + agents (progress) |
@@ -50,7 +51,7 @@ Thin second names for the product jobs — **no store merge**:
 | What did agents post? | `agents timeline` | `agents feed --filter updates` |
 | Who is live? | `agents roster` | `agents sessions --active` |
 
-Do **not** alias `audit` to `events` — `agents audit` is already the run-dispatch chain.
+`agents audit` and `agents logs` **are** aliases of `events` (with default family filters). Do not re-introduce a second store or query path.
 
 ### Delivery vs record vs control (RUSH-2123)
 
