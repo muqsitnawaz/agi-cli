@@ -1637,6 +1637,9 @@ export async function seedFloorDataPipeline(context: vscode.ExtensionContext): P
   }
 }
 
+/** Tab title for the dashboard webview. Shown in the VS Code editor tab. */
+const PANEL_TITLE = 'AGI EXT';
+
 export function openPanel(context: vscode.ExtensionContext): void {
   if (settingsPanel) {
     settingsPanel.reveal();
@@ -1645,10 +1648,12 @@ export function openPanel(context: vscode.ExtensionContext): void {
 
   // Close any orphaned dashboard tab (tab restored after a restart but its
   // webview never revived, e.g. by a pre-serializer extension version). A
-  // fresh panel replaces it below.
+  // fresh panel replaces it below. 'Factory' is the pre-rename title: a tab
+  // restored from a build older than the AGI EXT rename still carries it, and
+  // without it that stale tab survives alongside the new one.
   for (const group of vscode.window.tabGroups.all) {
     for (const tab of group.tabs) {
-      if (tab.input instanceof vscode.TabInputWebview && tab.label === 'Factory') {
+      if (tab.input instanceof vscode.TabInputWebview && (tab.label === PANEL_TITLE || tab.label === 'Factory')) {
         void vscode.window.tabGroups.close(tab);
       }
     }
@@ -1656,7 +1661,7 @@ export function openPanel(context: vscode.ExtensionContext): void {
 
   const panel = vscode.window.createWebviewPanel(
     'agentsSettings',
-    'Factory',
+    PANEL_TITLE,
     vscode.ViewColumn.One,
     {
       enableScripts: true,
@@ -2092,7 +2097,7 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
       case 'deviceHealth': {
         // Registry-only reachability for the Floor/dispatch device list.
         // Per-device CPU/memory + sessions SSH fan-out is intentionally removed
-        // from this path (Factory Floor performance track): online/offline comes
+        // from this path (Fleet performance track): online/offline comes
         // from `agents devices list --json` only. Live load is not required to
         // open Dispatch; ranking uses last-good session counts when present.
         const devices = getRegisteredDevicesCache() ?? [];
@@ -3163,7 +3168,7 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         break;
       }
       case 'focusRushCloudTerminal': {
-        // Used by the Factory Floor's "dispatch timed out" banner — jumps
+        // Used by the Fleet's "dispatch timed out" banner — jumps
         // the user to the cloud terminal so they can read the actual error.
         if (rushCloudTerminal && rushCloudTerminal.exitStatus === undefined) {
           rushCloudTerminal.show(true);

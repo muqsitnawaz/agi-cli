@@ -1,4 +1,4 @@
-// Factory Floor — shared webview view-model + pure logic contract.
+// Fleet — shared webview view-model + pure logic contract.
 //
 // Lives in ui/ (NOT src/core) because the webview bundle is isolated from the
 // extension host: no ui/ file may import from src/*. Data crosses the boundary
@@ -845,7 +845,7 @@ function cleanOption(raw: string): string {
 
 /**
  * Deliverable key for one agent: ticket > PR > worktree slug > Unassigned.
- * Mirrors CLI `deriveOutcome` so Factory Floor and `agents feed` group the same way.
+ * Mirrors CLI `deriveOutcome` so Fleet and `agents feed` group the same way.
  */
 export function outcomeLabel(a: Pick<FloorAgent, 'ticket' | 'pr' | 'worktreeSlug'>): string {
   if (a.ticket) return a.ticket

@@ -465,7 +465,7 @@ async function resolveBalancedHost(pool?: string[], agentKey?: string): Promise<
     return undefined;
   }
   // Look up each eligible device's registry entry for its SSH address so
-  // the hardware probe can reach it (mirrors the Factory Floor device-health
+  // the hardware probe can reach it (mirrors the Fleet device-health
   // fetch in settings.vscode.ts).
   const byName = new Map(devices.map(d => [normalizeHost(d.name), d]));
   const loaded: DeviceLoad[] = await vscode.window.withProgress(
@@ -1393,7 +1393,7 @@ export async function activate(context: vscode.ExtensionContext) {
   // (`agents watchdog enable`, under `agents __daemon-run`) is the sole
   // watchdog — stall nudging AND rotate-on-exhaustion, injecting into vscodium
   // tabs via the `/inject` URI verb over live-terminals.json and writing the
-  // shared watchdog.log the Factory Floor status card reads. What remains here
+  // shared watchdog.log the Fleet status card reads. What remains here
   // is the palette on/off and the one-time settings migration.
   context.subscriptions.push(...registerWatchdogPaletteCommands(vscode.commands.registerCommand));
 

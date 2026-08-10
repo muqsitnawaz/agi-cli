@@ -39,7 +39,7 @@ assets/ demo/ website/   Brand, launch demo, landing (repo-root, not shipped in 
 | Component | What it is | Read |
 |---|---|---|
 | [`apps/cli`](apps/cli) | The CLI — version mgmt, config sync, sessions, teams, cloud, browser, computer, secrets | [AGENTS.md](apps/cli/AGENTS.md) · [README.md](apps/cli/README.md) |
-| [`apps/ext`](apps/ext) | Factory VS Code extension — spawns agent terminals as tabs, Factory Floor dashboard, dispatch | [AGENTS.md](apps/ext/AGENTS.md) · [README.md](apps/ext/README.md) |
+| [`apps/ext`](apps/ext) | Factory VS Code extension — spawns agent terminals as tabs, Fleet dashboard, dispatch | [AGENTS.md](apps/ext/AGENTS.md) · [README.md](apps/ext/README.md) |
 | [`apps/ios`](apps/ios) | Fleet Cockpit — iOS/iPadOS control-plane app over the anchor (`agents serve --control`) | [AGENTS.md](apps/ios/AGENTS.md) · [README.md](apps/ios/README.md) |
 | [`native/computer-mac`](native/computer-mac) | macOS `agents computer` backend (Swift) | [AGENTS.md](native/computer-mac/AGENTS.md) · [README.md](native/computer-mac/README.md) |
 | [`native/computer-win`](native/computer-win) | Windows `agents computer` backend (C#/.NET) | [AGENTS.md](native/computer-win/AGENTS.md) · [README.md](native/computer-win/README.md) |

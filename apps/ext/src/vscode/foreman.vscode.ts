@@ -1,4 +1,4 @@
-// Foreman: voice coordinator for the factory floor.
+// Foreman: voice coordinator for the fleet.
 //
 // Extension host responsibilities:
 //   1. Compute the live floor digest on demand and return it to the webview,
@@ -54,7 +54,7 @@ export {
 };
 
 
-// Two canonical sources for "what's on the factory floor":
+// Two canonical sources for "what's on the fleet":
 //   1. Live terminals across EVERY IDE window (from the shared registry) -
 //      authoritative for "actually running right now"
 //   2. Local session metadata from agents-cli (topic, project, gitBranch,

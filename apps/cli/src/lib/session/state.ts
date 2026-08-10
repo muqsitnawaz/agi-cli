@@ -117,7 +117,7 @@ export interface SessionState {
   plan?: string;
   /**
    * Live plan progress from the most recent `TodoWrite` (RUSH-1380). Present when
-   * the session has written a todo list; drives the Factory Floor N/M pill +
+   * the session has written a todo list; drives the Fleet N/M pill +
    * checklist, notably for remote/device-dispatched agents with no local stream.
    */
   todos?: TodoProgress;

@@ -1,4 +1,4 @@
-// Standalone visual preview of the current Factory Floor feed + Dispatch panel.
+// Standalone visual preview of the current Fleet feed + Dispatch panel.
 // Renders the SAME components the webview uses, with representative data, so the
 // current UI can be seen/screenshotted without the VS Code extension host. Not
 // shipped (vite.settings.config.ts only inputs settings/index.html); a dev harness.

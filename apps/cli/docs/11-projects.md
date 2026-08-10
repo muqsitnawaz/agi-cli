@@ -60,7 +60,7 @@ integrations:                   # external context, surfaced in `projects show`
     label: "design docs"
 linear:
   projectId: a1b2c3d4-…
-  name: "Rush"                  # display name (used by Factory Floor / feeds)
+  name: "Rush"                  # display name (used by Fleet / feeds)
 dispatch:
   enabled: true                 # opt into auto-dispatch from Linear
   maxAgents: 3                  # cap on concurrent auto-dispatched agents
@@ -77,8 +77,8 @@ dispatch:
 | `contexts[]` | `{path, purpose}` described starting points — indexed anchors for agents. |
 | `goals[]` | `{objective, measure}` the OKR-shaped outcomes a project serves — a project may have several. The objective is the "why"; `measure` is the optional key result. Milestones (pulled from Linear) are the dated checkpoints toward them. |
 | `integrations[]` | `{kind, url, label}` external context sources. |
-| `linear` | `{projectId, url, name}` — reuses the existing Linear path. `name` is a display label (shown in Factory Floor and the activity feed); the other two are set by `agents projects link`. |
-| `dispatch` | `{enabled, maxAgents, provider, host}` — auto-dispatch settings read by `agents __auto-dispatch` and by the Factory Floor dispatch panel. All subfields are optional. `enabled: true` opts the project into auto-dispatch; `provider` optionally pins a `agents cloud` backend (`rush`, `codex`, `factory`, `host`, …), otherwise the delegated agent's native cloud backend is used; `host` selects a named fleet device when `provider: host`. |
+| `linear` | `{projectId, url, name}` — reuses the existing Linear path. `name` is a display label (shown in Fleet and the activity feed); the other two are set by `agents projects link`. |
+| `dispatch` | `{enabled, maxAgents, provider, host}` — auto-dispatch settings read by `agents __auto-dispatch` and by the Fleet dispatch panel. All subfields are optional. `enabled: true` opts the project into auto-dispatch; `provider` optionally pins a `agents cloud` backend (`rush`, `codex`, `factory`, `host`, …), otherwise the delegated agent's native cloud backend is used; `host` selects a named fleet device when `provider: host`. |
 
 ## Resolution — definition first, convention fallback
 

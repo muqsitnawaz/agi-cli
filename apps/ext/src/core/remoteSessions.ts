@@ -190,7 +190,7 @@ export interface RemoteSession {
   /** Last few assistant turns (most-recent last), one line each — panel context. [] when none. */
   tail: string[];
   /** Live plan checklist from the CLI's most recent `TodoWrite` (RUSH-1380). Lets the
-   *  Factory Floor show an N/M pill + checklist for remote / device-dispatched agents
+   *  Fleet show an N/M pill + checklist for remote / device-dispatched agents
    *  that have no local tool-call stream. Absent when the session wrote no todo list. */
   todos?: RemoteTodoItem[];
   /** Raw CLI output text, when the active-session payload carries it. */

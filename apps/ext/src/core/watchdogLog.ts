@@ -3,7 +3,7 @@ import * as path from 'path';
 
 // Watchdog event log: formatting + parsing for the JSONL feed at
 // ~/.agents/.cache/logs/watchdog.log. The webview pulls this file periodically
-// to render the Watchdog activity card on the Factory Floor.
+// to render the Watchdog activity card on the Fleet.
 
 export const WATCHDOG_LOG_PATH = path.join(os.homedir(), '.agents', '.cache', 'logs', 'watchdog.log');
 

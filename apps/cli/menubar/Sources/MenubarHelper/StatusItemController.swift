@@ -69,7 +69,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // row and the global chord summon the SAME panel — one panel means an
     // interrupted capture is restored whichever way you come back to it.
     let promptController = PromptPanelController()
-    // Factory Floor status palette (design-system.css). Brand green is accent /
+    // Fleet status palette (design-system.css). Brand green is accent /
     // selection only — never a status. running/idle/waiting/failed are the four
     // status colors, shared with the full dashboard so this reads as its quick view.
     private let brand = NSColor(srgbRed: 0xa3 / 255.0, green: 0xe6 / 255.0, blue: 0x35 / 255.0, alpha: 1) // #a3e635

@@ -1,4 +1,4 @@
-// Per-host inventory + configuration for the Factory Floor host detail pane.
+// Per-host inventory + configuration for the Fleet host detail pane.
 //
 // Data path: `agents view [--host <name>] --json --resources all` gives the
 // installed agents, versions, accounts, usage, and synced resources on a host

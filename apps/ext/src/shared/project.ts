@@ -5,7 +5,7 @@
 // comments) — the drift that makes a session's project resolve differently on
 // each side. One impl, no lockstep. Pure functions, no vscode/node imports.
 
-/** Ordered cwd->project mapping for Factory Floor grouping. */
+/** Ordered cwd->project mapping for Fleet grouping. */
 export interface ProjectRule {
   pattern: string;
   project: string;

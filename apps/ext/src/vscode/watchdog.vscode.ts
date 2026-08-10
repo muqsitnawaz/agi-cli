@@ -10,7 +10,7 @@ import { bootstrapPath, resolveAgentsBin } from '../core/agentsBin';
 // watchdog: it owns stall-nudging AND rotate-on-exhaustion, injecting into
 // vscodium tabs through the extension's `/inject` URI verb over
 // live-terminals.json, and writing the shared `~/.agents/.cache/logs/
-// watchdog.log` feed the Factory Floor status card reads (core/watchdogLog.ts).
+// watchdog.log` feed the Fleet status card reads (core/watchdogLog.ts).
 //
 // What remains here:
 //   1. The palette on/off — `Agents: Watchdog (Enable|Disable)` shell out to
@@ -18,7 +18,7 @@ import { bootstrapPath, resolveAgentsBin } from '../core/agentsBin';
 //   2. The one-time settings migration (deleted `agents.watchdog.*` settings).
 //   3. The user-editable playbook file scaffold — the CLI daemon owns nudging
 //      now, so this file drives no in-extension behavior; the helpers stay
-//      because the Factory Floor settings panel still surfaces it for editing.
+//      because the Fleet settings panel still surfaces it for editing.
 
 // --- Playbook scaffold (surfaced by the settings panel) ---------------------
 

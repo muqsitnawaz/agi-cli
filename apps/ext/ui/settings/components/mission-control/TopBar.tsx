@@ -46,7 +46,7 @@ export function TopBar({
         <div className="brand-mark">
           <Icon name="zap" size={18} />
         </div>
-        <span>Factory</span>
+        <span>AGI EXT</span>
         {version && (
           <span className="mono" style={{ fontSize: 10.5, color: 'var(--ds-text-dim)', marginLeft: 2 }}>
             v{version}

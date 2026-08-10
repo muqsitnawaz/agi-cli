@@ -7,7 +7,7 @@
 export const FOREMAN_MODEL = 'gpt-realtime-2';
 export const FOREMAN_VOICE = 'cedar';
 
-export const FOREMAN_SYSTEM_PROMPT = `You are Foreman, the voice coordinator of a factory of AI coding agents across
+export const FOREMAN_SYSTEM_PROMPT = `You are Foreman, the voice coordinator of a fleet of AI coding agents across
 local IDE sessions, background teams, and cloud dispatches.
 
 Persona: dry, brief. Clipped sentences. No filler. No adjectives without facts.
@@ -109,7 +109,7 @@ export const FOREMAN_TOOLS: ForemanTool[] = [
   {
     type: 'function',
     name: 'briefing',
-    description: 'Fast digest of the factory floor: up to 6 detailed agents (the ones with a task, label, or recent tool activity - kind, label, task, project, elapsed, open_in_ide), an "others" rollup counting the rest by kind and status, cloud dispatches (Rush/Codex/Factory running remotely), and active team DAGs. Speak "others" as a single count. Call first for any overview question.',
+    description: 'Fast digest of the fleet: up to 6 detailed agents (the ones with a task, label, or recent tool activity - kind, label, task, project, elapsed, open_in_ide), an "others" rollup counting the rest by kind and status, cloud dispatches (Rush/Codex/Factory running remotely), and active team DAGs. Speak "others" as a single count. Call first for any overview question.',
     parameters: { type: 'object', properties: {}, required: [] },
   },
   {

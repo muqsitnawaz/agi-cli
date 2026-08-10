@@ -119,7 +119,7 @@ export interface PromptEntry {
 export type SwarmAgentType = 'claude' | 'codex' | 'gemini';
 export const ALL_SWARM_AGENTS: SwarmAgentType[] = ['claude', 'codex', 'gemini'];
 
-// User-defined mapping from a session cwd to a Factory Floor project group.
+// User-defined mapping from a session cwd to a Fleet project group.
 // Canonical definition + resolveProject live in src/shared/project.ts (imported by
 // both the host and the webview); imported for local use + re-exported so existing
 // consumers keep their `from './settings'` path.
@@ -151,7 +151,7 @@ export interface AgentSettings {
   showWelcomeScreen: boolean;       // Open dashboard on VS Code startup
   taskSources: TaskSourceSettings;  // Task sources for Tasks tab
   githubOwner?: string;             // Default GitHub owner for cloud dispatch (e.g. "muqsitnawaz")
-  projectRules?: ProjectRule[];     // Ordered cwd->project mappings for Factory Floor grouping
+  projectRules?: ProjectRule[];     // Ordered cwd->project mappings for Fleet grouping
 }
 
 export interface EditorPreferences {

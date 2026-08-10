@@ -19,7 +19,7 @@ writing; treat them as pointers, not guarantees.
   `run` / `cloud`, the CLI-side pid→id registry, the audit log, and the SSH fan-out
   to peer machines.
 - **`apps/ext` — the Factory VS Code extension. A consumer.** It spawns agent
-  terminals as tabs and renders the Factory Floor dashboard, but it holds **no data
+  terminals as tabs and renders the Fleet dashboard, but it holds **no data
   models of its own** beyond the live-session state file. For "what's running", it
   shells out to the CLI (`agents sessions --active --json`) and reshapes the JSON.
 
@@ -27,7 +27,7 @@ writing; treat them as pointers, not guarantees.
 flowchart LR
   subgraph machine["one machine"]
     CLI["apps/cli — the agents CLI<br/><b>the framework</b><br/>sessions index · teams · run · cloud<br/>pid-registry · events.jsonl · SSH fan-out"]
-    FAC["apps/ext — Factory extension<br/><b>a consumer</b><br/>terminal tabs · Factory Floor<br/>file-watcher · watchdog socket"]
+    FAC["apps/ext — Factory extension<br/><b>a consumer</b><br/>terminal tabs · Fleet<br/>file-watcher · watchdog socket"]
     CLI -- "exposes: agents sessions --active --json" --> FAC
   end
   CLI --> DB[("sessions.db<br/>SQLite + FTS5")]

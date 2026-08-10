@@ -1,7 +1,7 @@
 /**
  * Waiting/approval notification transition logic (RUSH-2039).
  *
- * The Factory Floor already knows when a session is blocked waiting for input
+ * The Fleet already knows when a session is blocked waiting for input
  * (`TerminalDetail.waitingForInput`, fed by the CLI's own state engine — for
  * Codex this is now driven by the PermissionRequest feed hook). But knowing it
  * and telling the user are two different things: before this, a blocked Codex

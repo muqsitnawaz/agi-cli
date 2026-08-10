@@ -13,7 +13,7 @@ import {
 } from './floorModel'
 import type { UnifiedTask } from '../../types'
 
-// Regression tests for the Factory Floor visibility fixes. Each asserts a
+// Regression tests for the Fleet visibility fixes. Each asserts a
 // user-visible outcome that was broken, so a future edit that reintroduces the bug
 // fails here rather than silently in the UI.
 

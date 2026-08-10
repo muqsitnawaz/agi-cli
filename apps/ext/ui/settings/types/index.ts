@@ -174,7 +174,7 @@ export interface NotificationSettings {
   enabledAgents: string[]
 }
 
-// Ordered cwd->project mapping for Factory Floor grouping.
+// Ordered cwd->project mapping for Fleet grouping.
 // Canonical in src/shared/project.ts (shared with the host via @shared) — imported
 // for local use (AgentSettings.projectRules below) + re-exported for consumers.
 import type { ProjectRule } from '@shared/project'

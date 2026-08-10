@@ -73,7 +73,7 @@ Every open agent terminal is fully restorable. Session ID, icon, and custom labe
 - **Agents: Resume** - Pick one or several sessions; each reopens in its own tab with its agent's icon. Detached live sessions still sort first, but nothing is pre-selected. Factory sends only the canonical session ID to the CLI, which attaches a live pane or resumes an inactive conversation on its owning device.
 - **Resume variants** - `Agents: Resume (Pick Session)` lists only abandoned sessions — detached, backgrounded, parked, or idle, nothing currently open anywhere — and resumes each on the device it was created on. `Agents: Resume (Pick Host)` reopens the active tab's session on a device you pick (same harness, same version). `Agents: Resume (Pick Harness)` continues the active tab's session in a different harness on the same device, replaying the transcript through the universal `/continue` flow. `Agents: Resume (Best Profile)` rotates the active tab to the signed-in account with the most usage headroom (`Cmd+Shift+J`).
 
-### Factory Floor
+### Fleet
 
 The dashboard's mission control. A live grid of interactive agents and cloud dispatches beside your Linear cycle. Background/headless runs are hidden by default; use the **Background** feed toggle when you need them. Compose and dispatch work with the Cmd+K composer, drag issue cards onto agents, or send a ticket straight to the cloud.
 
@@ -86,7 +86,7 @@ right edge.
 
 ### Foreman Voice Orb
 
-Talk to your factory. Tap the orb in the dashboard and ask "what's running?", "what's left this cycle?", or "dispatch RUSH-557 to the cloud" — a realtime voice model answers out loud with live floor state, and it can dispatch tickets, spawn agents, and file Linear issues for you. Tap to talk, tap again to stop, or press-and-hold to talk only while pressed. A silent-mode toggle under the orb switches replies to text-only transcript.
+Talk to your fleet. Tap the orb in the dashboard and ask "what's running?", "what's left this cycle?", or "dispatch RUSH-557 to the cloud" — a realtime voice model answers out loud with live floor state, and it can dispatch tickets, spawn agents, and file Linear issues for you. Tap to talk, tap again to stop, or press-and-hold to talk only while pressed. A silent-mode toggle under the orb switches replies to text-only transcript.
 
 ### AI Git Commits
 

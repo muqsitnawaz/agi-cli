@@ -1,7 +1,7 @@
 /**
  * Canonical watchdog event log (watchdog-brain-v2).
  *
- * The Factory Floor renders a read-only "Watchdog activity" card from the JSONL
+ * The Fleet renders a read-only "Watchdog activity" card from the JSONL
  * feed at ~/.agents/.cache/logs/watchdog.log. That feed was historically written
  * by the retired extension-side watchdog; now the always-on CLI watchdog owns it.
  *

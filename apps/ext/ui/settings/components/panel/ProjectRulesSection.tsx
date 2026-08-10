@@ -13,7 +13,7 @@ const SEP: React.CSSProperties = { fontSize: 11, color: 'var(--ds-text-dim)' }
 
 /**
  * Project Rules: an ordered list of cwd->project mappings that control how the
- * Factory Floor groups agent cards. The first rule whose pattern matches a
+ * Fleet groups agent cards. The first rule whose pattern matches a
  * session's cwd wins; a pattern is a glob (** spans directories, * does not) or a
  * plain path prefix. Persisted in AgentSettings.projectRules via onSaveSettings.
  */
@@ -57,7 +57,7 @@ export function ProjectRulesSection({ settings, onSaveSettings }: ProjectRulesSe
     <section className="sw-panel-section">
       <div className="sw-panel-section-head">Project Rules</div>
       <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 8 }}>
-        Map a session path to a Factory Floor project group. The first matching rule
+        Map a session path to a Fleet project group. The first matching rule
         wins; a pattern is a glob (<code>**</code> spans directories) or a path prefix.
         Without a rule, a path folds to its git repo (worktrees included).
       </div>
