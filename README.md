@@ -559,7 +559,7 @@ Dispatch any read-only or config command -- and `agents run` itself -- to anothe
 ```bash
 # Enroll a machine
 agents devices add gpu-box gpu-box.local
-agents devices status                   # reachable? which agents-cli version?
+agents devices status                   # fleet health rollup: reachability + agents-cli versions
 
 # Run there instead of locally
 agents run claude --host gpu-box "profile this build"   # headless: follows live by default

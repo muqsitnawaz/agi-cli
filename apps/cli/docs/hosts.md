@@ -462,10 +462,12 @@ agent routing a GPU eval to a host tagged `gpu`).
   (`Meta.hosts`), not from a CLI flag.
 - `agents devices list [--json]` — print the registry (name · address · os · caps).
   **No probing** — pure metadata, instant, machine-readable for the driver agent.
-- `agents devices status <name>` — the *only* command that touches the network: one
-  SSH probe to that host → reachable? remote `agents --version` + `agents list`
-  (which agents are installed). This is also what `ensureHostReady` calls before
-  dispatch (lazy, single-host — never a fleet poll).
+- `agents devices status` — the health command that touches the network: it
+  SSH-probes every registered device (reachable? remote `agents --version` +
+  installed agents) as a **fleet rollup** — there is no single-host `check`
+  subcommand. The per-host readiness probe still runs, but internally via
+  `ensureHostReady` at dispatch time (lazy, single-host — never a fleet poll), not
+  as a standalone command.
 - `agents devices rm <name>` / `agents devices sync` (opt-in:
   prefill entries from `tailscale status` names; reads only, connects to nothing).
 
