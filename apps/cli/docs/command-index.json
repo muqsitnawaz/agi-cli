@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "command": "agents",
-  "groups": 96,
-  "commands": 565,
+  "groups": 95,
+  "commands": 562,
   "root": {
     "name": "agents",
     "path": "",
@@ -693,138 +693,9 @@
       "name": "audit",
       "path": "audit",
       "aliases": [],
-      "description": "Alias of `agents events --include runs` — dispatched-run outcomes",
+      "description": "Inspect the tamper-evident audit log of dispatched runs",
       "args": [],
       "options": [
-        {
-          "flags": "--include <families>",
-          "description": "Only these families (comma-sep): ops, activity, commands, runs, security",
-          "long": "--include",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--exclude <families>",
-          "description": "Drop these families (comma-sep): ops, activity, commands, runs, security",
-          "long": "--exclude",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--module <name>",
-          "description": "Only events from this group (e.g. teams, secrets, activity, daemon, browser)",
-          "long": "--module",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--command <path>",
-          "description": "Only this command path — prefix match (e.g. \"teams create\")",
-          "long": "--command",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--event <type>",
-          "description": "Only this typed event (repeatable, e.g. secrets.get, run.dispatched, pr.opened)",
-          "long": "--event",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false,
-          "defaultValue": []
-        },
-        {
-          "flags": "--agent <name>",
-          "description": "Only events tagged with this agent",
-          "long": "--agent",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--caller <kind>",
-          "description": "Only this caller kind (claude-code, codex, gemini, cursor, terminal, script)",
-          "long": "--caller",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--level <level>",
-          "description": "Only this level: audit, warn, info, debug",
-          "long": "--level",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--session <id>",
-          "description": "Only events from this session (the provenance sessionId) — e.g. trace which session read a secret",
-          "long": "--session",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--bundle <name>",
-          "description": "Only events carrying this bundle in their payload — e.g. `--module secrets --bundle share` for every read of the share bundle",
-          "long": "--bundle",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--since <time>",
-          "description": "Only events newer than this (e.g. 2h, 7d, or ISO date)",
-          "long": "--since",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--limit <n>",
-          "description": "Max records to show; 0 for no cap (default 50)",
-          "long": "--limit",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false,
-          "defaultValue": "50"
-        },
-        {
-          "flags": "--json",
-          "description": "Output raw records as JSON",
-          "long": "--json",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "-f, --follow",
-          "description": "Tail today's operational log live",
-          "short": "-f",
-          "long": "--follow",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
         {
           "flags": "-h, --help",
           "description": "Show help",
@@ -841,9 +712,28 @@
           "name": "list",
           "path": "audit list",
           "aliases": [],
-          "description": "Alias of `agents audit` / `agents events --include runs`",
+          "description": "Print recent audit records (oldest-first)",
           "args": [],
           "options": [
+            {
+              "flags": "--limit <n>",
+              "description": "Max records to show (default 50)",
+              "long": "--limit",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false,
+              "defaultValue": "50"
+            },
+            {
+              "flags": "--json",
+              "description": "Output raw records as JSON",
+              "long": "--json",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
             {
               "flags": "-h, --help",
               "description": "Show help",
@@ -861,7 +751,7 @@
           "name": "verify",
           "path": "audit verify",
           "aliases": [],
-          "description": "Walk the legacy hash-chain file (pre-unification history only)",
+          "description": "Walk the hash chain and report OK or the first broken index",
           "args": [],
           "options": [
             {
@@ -7847,30 +7737,12 @@
       "name": "events",
       "path": "events",
       "aliases": [],
-      "description": "Read the unified event stream (ops + activity + run dispatch)",
+      "description": "Read the unified event stream (operational + agent activity)",
       "args": [],
       "options": [
         {
-          "flags": "--include <families>",
-          "description": "Only these families (comma-sep): ops, activity, commands, runs, security",
-          "long": "--include",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--exclude <families>",
-          "description": "Drop these families (comma-sep): ops, activity, commands, runs, security",
-          "long": "--exclude",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
           "flags": "--module <name>",
-          "description": "Only events from this group (e.g. teams, secrets, activity, daemon, browser)",
+          "description": "Only events from this group (e.g. teams, secrets, activity)",
           "long": "--module",
           "required": true,
           "optional": false,
@@ -7888,7 +7760,7 @@
         },
         {
           "flags": "--event <type>",
-          "description": "Only this typed event (repeatable, e.g. secrets.get, run.dispatched, pr.opened)",
+          "description": "Only this typed event (repeatable, e.g. secrets.get, secrets.unlocked, pr.opened)",
           "long": "--event",
           "required": true,
           "optional": false,
@@ -7981,7 +7853,7 @@
         },
         {
           "flags": "--audit",
-          "description": "Deprecated: operational events only — prefer --include ops or --exclude activity",
+          "description": "Operational events only (skip agent activity)",
           "long": "--audit",
           "required": false,
           "optional": false,
@@ -8047,84 +7919,6 @@
           ],
           "examples": "# 1. Produce one JSON object per line (this is the whole input format).\n      printf '%s\\n' '{\"event\":\"factory.command\",\"commandId\":\"agents.newClaude\"}' \\\n        | agents events emit --source factory\n\n      # 2. Flush a batch and check what landed.\n      agents events emit --source factory --json < batch.jsonl\n\n      # 3. Read it back. --limit 0 matters whenever you aggregate.\n      agents events --module factory --limit 0 --json",
           "notes": "`event` is required and must be a known kind. `ts` (ISO-8601) is optional\n      and defaults to now — pass it so a batched producer records when each event\n      HAPPENED rather than when it flushed.\n\n      Envelope keys: ts, sessionId, mailboxId, terminalId, launchId, tmuxPane,\n      host, runtime, agent, tool, detail, url, project, cwd. Any other key is\n      payload and passes through the usual redaction.\n\n      A milestone kind (e.g. factory.launch) REQUIRES a sessionId — the activity\n      log is one file per session. Milestones route there; everything else goes\n      to the operational log. `agents events` reads both.\n\n      Rejection is per line: one bad line never discards the batch. Exit is 1 if\n      any line was rejected.",
-          "subcommands": []
-        },
-        {
-          "name": "rotate",
-          "path": "events rotate",
-          "aliases": [],
-          "description": "Apply event retention and the storage ceiling immediately",
-          "args": [],
-          "options": [
-            {
-              "flags": "--days <n>",
-              "description": "Retention period in days (default 7)",
-              "long": "--days",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false,
-              "defaultValue": "7"
-            },
-            {
-              "flags": "--max-mb <n>",
-              "description": "Total event storage ceiling in MiB (default 50)",
-              "long": "--max-mb",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false,
-              "defaultValue": "50"
-            },
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
-          "name": "stats",
-          "path": "events stats",
-          "aliases": [],
-          "description": "Show aggregate event statistics",
-          "args": [],
-          "options": [
-            {
-              "flags": "--since <time>",
-              "description": "Window size (e.g. 7d, 30d; default 7d)",
-              "long": "--since",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--json",
-              "description": "Output stats as JSON",
-              "long": "--json",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
           "subcommands": []
         }
       ]
@@ -10826,7 +10620,7 @@
       "name": "logs",
       "path": "logs",
       "aliases": [],
-      "description": "Alias of `agents events`. Pass an id to see the content redirect.",
+      "description": "Show a run log, audit trail, or stats. Subcommands: audit, stats, rotate.",
       "args": [
         {
           "name": "id",
@@ -10837,54 +10631,18 @@
       ],
       "options": [
         {
-          "flags": "--include <families>",
-          "description": "Only these families (comma-sep): ops, activity, commands, runs, security",
-          "long": "--include",
+          "flags": "--host <name>",
+          "description": "Scope to runs dispatched to a host",
+          "long": "--host",
           "required": true,
           "optional": false,
           "variadic": false,
           "negate": false
         },
         {
-          "flags": "--exclude <families>",
-          "description": "Drop these families (comma-sep): ops, activity, commands, runs, security",
-          "long": "--exclude",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--module <name>",
-          "description": "Only events from this group (e.g. teams, secrets, activity, daemon, browser)",
-          "long": "--module",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--command <path>",
-          "description": "Only this command path — prefix match (e.g. \"teams create\")",
-          "long": "--command",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--event <type>",
-          "description": "Only this typed event (repeatable, e.g. secrets.get, run.dispatched, pr.opened)",
-          "long": "--event",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false,
-          "defaultValue": []
-        },
-        {
-          "flags": "--agent <name>",
-          "description": "Only events tagged with this agent",
+          "flags": "-a, --agent <agent>",
+          "description": "Filter by agent (e.g. claude, codex@0.116.0)",
+          "short": "-a",
           "long": "--agent",
           "required": true,
           "optional": false,
@@ -10892,18 +10650,9 @@
           "negate": false
         },
         {
-          "flags": "--caller <kind>",
-          "description": "Only this caller kind (claude-code, codex, gemini, cursor, terminal, script)",
-          "long": "--caller",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--level <level>",
-          "description": "Only this level: audit, warn, info, debug",
-          "long": "--level",
+          "flags": "--version <version>",
+          "description": "Filter by agent version",
+          "long": "--version",
           "required": true,
           "optional": false,
           "variadic": false,
@@ -10911,7 +10660,7 @@
         },
         {
           "flags": "--session <id>",
-          "description": "Only events from this session (the provenance sessionId) — e.g. trace which session read a secret",
+          "description": "Select a session/run by id (same as the positional id)",
           "long": "--session",
           "required": true,
           "optional": false,
@@ -10919,45 +10668,8 @@
           "negate": false
         },
         {
-          "flags": "--bundle <name>",
-          "description": "Only events carrying this bundle in their payload — e.g. `--module secrets --bundle share` for every read of the share bundle",
-          "long": "--bundle",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--since <time>",
-          "description": "Only events newer than this (e.g. 2h, 7d, or ISO date)",
-          "long": "--since",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--limit <n>",
-          "description": "Max records to show; 0 for no cap (default 50)",
-          "long": "--limit",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false,
-          "defaultValue": "50"
-        },
-        {
-          "flags": "--json",
-          "description": "Output raw records as JSON",
-          "long": "--json",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
           "flags": "-f, --follow",
-          "description": "Tail today's operational log live",
+          "description": "Follow live output",
           "short": "-f",
           "long": "--follow",
           "required": false,
@@ -10966,9 +10678,19 @@
           "negate": false
         },
         {
-          "flags": "--audit",
-          "description": "Deprecated: operational events only — prefer --include ops or --exclude activity",
-          "long": "--audit",
+          "flags": "-m, --full",
+          "description": "Show the full raw transcript / stdout instead of the concise summary",
+          "short": "-m",
+          "long": "--full",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--json",
+          "description": "Machine-readable JSON: a host task as { kind, task, log }, a session as the redacted { session, events } (same shape as `sessions <id> --json`)",
+          "long": "--json",
           "required": false,
           "optional": false,
           "variadic": false,
@@ -10990,30 +10712,12 @@
           "name": "audit",
           "path": "logs audit",
           "aliases": [],
-          "description": "Alias of `agents events --include ops`",
+          "description": "Alias for `agents events --audit`",
           "args": [],
           "options": [
             {
-              "flags": "--include <families>",
-              "description": "Only these families (comma-sep): ops, activity, commands, runs, security",
-              "long": "--include",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--exclude <families>",
-              "description": "Drop these families (comma-sep): ops, activity, commands, runs, security",
-              "long": "--exclude",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
               "flags": "--module <name>",
-              "description": "Only events from this group (e.g. teams, secrets, activity, daemon, browser)",
+              "description": "Only events from this group (e.g. teams, secrets, activity)",
               "long": "--module",
               "required": true,
               "optional": false,
@@ -11031,7 +10735,7 @@
             },
             {
               "flags": "--event <type>",
-              "description": "Only this typed event (repeatable, e.g. secrets.get, run.dispatched, pr.opened)",
+              "description": "Only this typed event (repeatable, e.g. secrets.get, secrets.unlocked, pr.opened)",
               "long": "--event",
               "required": true,
               "optional": false,
@@ -11139,7 +10843,7 @@
           "name": "rotate",
           "path": "logs rotate",
           "aliases": [],
-          "description": "Alias of `agents events rotate`",
+          "description": "Apply event retention and the storage ceiling immediately",
           "args": [],
           "options": [
             {
@@ -11179,7 +10883,7 @@
           "name": "stats",
           "path": "logs stats",
           "aliases": [],
-          "description": "Alias of `agents events stats`",
+          "description": "Show aggregate audit statistics",
           "args": [],
           "options": [
             {
@@ -30168,26 +29872,6 @@
           "subcommands": []
         }
       ]
-    },
-    {
-      "name": "whoami",
-      "path": "whoami",
-      "aliases": [],
-      "description": "Show synced-secrets login status",
-      "args": [],
-      "options": [
-        {
-          "flags": "-h, --help",
-          "description": "Show help",
-          "short": "-h",
-          "long": "--help",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        }
-      ],
-      "subcommands": []
     },
     {
       "name": "workflows",
