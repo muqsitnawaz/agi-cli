@@ -20,6 +20,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
+import { stringifyDoc } from './yaml-io.js';
 import chalk from 'chalk';
 import { relTime, truncate } from './format.js';
 import { getActivityDir, getUserAgentsDir } from './state.js';
@@ -1800,7 +1801,7 @@ export function ensureActivityLogHook(userAgentsDir: string = getUserAgentsDir()
     }
     if (installed) {
       const tmpYaml = `${agentsYamlPath}.${process.pid}.tmp`;
-      fs.writeFileSync(tmpYaml, String(yamlDoc));
+      fs.writeFileSync(tmpYaml, stringifyDoc(yamlDoc));
       fs.renameSync(tmpYaml, agentsYamlPath);
     }
 

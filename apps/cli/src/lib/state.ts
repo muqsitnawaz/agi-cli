@@ -27,6 +27,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as yaml from 'yaml';
+import { stringifyDoc } from './yaml-io.js';
 import { execFileSync } from 'child_process';
 import { ensureLockTarget, atomicWriteFileSync, withFileLock } from './fs-atomic.js';
 import type { Meta, RegistryType } from './types.js';
@@ -1032,7 +1033,7 @@ function serializeCentral(central: Record<string, unknown>): string {
   // otherwise make the edited nodes render flow (`disabledCommands: [ teams ]`
   // instead of a `- teams` block list). collectionStyle pins the whole doc block
   // while parseDocument still preserves comments + key ordering.
-  return isEmpty ? META_HEADER : doc.toString({ collectionStyle: 'block' });
+  return isEmpty ? META_HEADER : stringifyDoc(doc, { collectionStyle: 'block' });
 }
 
 function writeMetaUnlocked(meta: Meta): void {

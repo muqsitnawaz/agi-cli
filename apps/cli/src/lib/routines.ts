@@ -10,6 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
+import { stringifyDoc } from './yaml-io.js';
 import { Cron } from 'croner';
 import { getRoutinesDir, getSystemRoutinesDir, getRunsDir, ensureAgentsDir, getProjectRoutinesDir } from './state.js';
 import * as os from 'os';
@@ -1028,7 +1029,7 @@ export function serializeJob(output: Record<string, unknown>, existingText: stri
     if (!(key in output)) doc.delete(key);
   }
 
-  return doc.toString();
+  return stringifyDoc(doc);
 }
 
 /** Delete a job config file by name. Returns true if the file existed. */
