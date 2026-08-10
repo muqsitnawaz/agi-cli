@@ -12,10 +12,10 @@ import path from 'node:path';
  * (matchHost in ../lib/hosts/registry.ts) that `agents ssh auto` uses.
  *
  * Real CLI, real filesystem, no mocking: drive the built entrypoint against a
- * throwaway HOME with no devices registered under a unique machine id, which
- * makes the affinity engine's only eligible candidate "this machine" —
- * deterministic without needing a real device fleet. `teams add` only records
- * the teammate, so a valid harness exercises placement without spawning it.
+ * throwaway HOME with no devices registered under a unique machine id. With no
+ * signed-in harness in that isolated home, authoritative placement must reach
+ * the shared resolver and fail loud with "no healthy device" — deterministic
+ * without needing a real device fleet.
  */
 describe.skipIf(process.platform === 'win32')('agents teams add --device auto (RUSH-2185)', () => {
   let home: string;
@@ -64,6 +64,6 @@ describe.skipIf(process.platform === 'win32')('agents teams add --device auto (R
     expect(out).not.toContain(`Unknown device 'auto'`);
     expect(out).not.toContain(`Couldn't resolve --device "auto"`);
     expect(out).not.toContain(`Unknown teammate 'claude'`);
-    expect(out).toContain('device=auto → local');
+    expect(out).toContain('agents: no healthy device can run claude');
   });
 });
