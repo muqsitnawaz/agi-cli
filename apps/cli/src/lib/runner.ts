@@ -36,7 +36,7 @@ import {
   resolveHostStrategy,
 } from './routines.js';
 import type { ResolvedExecutionContext, PlacementMode } from './routine-context.js';
-import { getRunsDir, getUserAgentsDir } from './state.js';
+import { getRunsDir, getUserAgentsDir, readMeta } from './state.js';
 import type { AgentId } from './types.js';
 import { shortCodexHome } from './codex-home.js';
 import { prepareJobHome, buildSpawnEnv, getJobHomePath } from './sandbox.js';
@@ -843,9 +843,10 @@ export async function resolveRoutineLaunch(
   // resolveRoutineLaunch is only called for agent jobs (workflow returns above;
   // command jobs branch out of execute*Job before reaching this).
   const agent = config.agent!;
-  if (config.account) {
-    const { resolveCredentialAccount } = await import('./account-registry.js');
-    (deps.resolveCredentialAccount ?? resolveCredentialAccount)(config.account, agent);
+  const { resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+  const selectedAccount = resolveAccountSelection(config.account, agent, readMeta());
+  if (selectedAccount) {
+    (deps.resolveCredentialAccount ?? resolveCredentialAccount)(selectedAccount, agent);
   }
   if (config.version) {
     const version = config.version;
@@ -1215,9 +1216,10 @@ async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undefined, a
   // Use 'claude' as the effective agent for report extraction and metadata when workflow is set.
   // (command jobs branched out earlier, so config.agent is set on the non-workflow path.)
   const effectiveAgent: AgentId = config.workflow ? 'claude' : config.agent!;
-  if (config.account && !dispatchesViaAgentsRun(config)) {
-    const { resolveCredentialAccount } = await import('./account-registry.js');
-    Object.assign(baseEnv, resolveCredentialAccount(config.account, effectiveAgent).env);
+  if (!dispatchesViaAgentsRun(config)) {
+    const { resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+    const selectedAccount = resolveAccountSelection(config.account, effectiveAgent, readMeta());
+    if (selectedAccount) Object.assign(baseEnv, resolveCredentialAccount(selectedAccount, effectiveAgent).env);
   }
 
   const meta: RunMeta = {
@@ -1810,9 +1812,10 @@ async function executeJobDetachedClaimed(config: JobConfig, attempt: RoutineAtte
       : { ...process.env } as Record<string, string>,
     config,
   );
-  if (config.account && !dispatchesViaAgentsRun(config)) {
-    const { resolveCredentialAccount } = await import('./account-registry.js');
-    Object.assign(baseEnv, resolveCredentialAccount(config.account, config.agent!).env);
+  if (!dispatchesViaAgentsRun(config)) {
+    const { resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+    const selectedAccount = resolveAccountSelection(config.account, config.agent!, readMeta());
+    if (selectedAccount) Object.assign(baseEnv, resolveCredentialAccount(selectedAccount, config.agent!).env);
   }
   const spawnEnv = dispatchesViaAgentsRun(config)
     ? (() => {
