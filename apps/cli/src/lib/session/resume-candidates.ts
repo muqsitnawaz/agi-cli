@@ -1,8 +1,7 @@
-import type { ActiveSession } from '../lib/session/active.js';
-import type { SessionMeta } from '../lib/session/types.js';
-import { normalizeHost } from '../lib/machine-id.js';
-import { viewingInLabel } from '../lib/session/viewing-in.js';
-import { collectSessionCandidates } from './sessions-browser.js';
+import type { ActiveSession } from './active.js';
+import type { SessionMeta } from './types.js';
+import { normalizeHost } from '../machine-id.js';
+import { viewingInLabel } from './viewing-in.js';
 
 export type ResumeCandidateState = 'detached' | 'background' | 'parked' | 'inactive' | 'watched';
 
@@ -24,6 +23,8 @@ export interface SessionResumeCandidate {
   cwd?: string;
   topic?: string;
   state: ResumeCandidateState;
+  /** Canonical picker predicate: false only when another terminal is watching. */
+  unwatched: boolean;
   viewingIn: string;
   host: string;
   sourceHost: string;
@@ -59,11 +60,11 @@ export function resumeCandidateState(live: ActiveSession | undefined): ResumeCan
   return viewingInLabel(live) === 'detached' ? 'detached' : 'watched';
 }
 
+/** Project the browser's canonical recent + live union into stable snapshot rows. */
 export function buildSessionResumeCandidates(
   sessions: SessionMeta[],
   liveById: Map<string, ActiveSession>,
   self: string,
-  abandonedOnly = false,
 ): SessionResumeCandidate[] {
   const local = normalizeHost(self);
   const seen = new Set<string>();
@@ -77,7 +78,6 @@ export function buildSessionResumeCandidates(
     // render a roster row. That locator is not a durable resume identity.
     if (live && !live.sessionId) continue;
     const state = resumeCandidateState(live);
-    if (abandonedOnly && state === 'watched') continue;
     const sourceHost = normalizeHost(session.machine ?? live?.machine ?? self);
     const host = sourceHost === local ? '' : sourceHost;
     const viewer = live ? viewingInLabel(live) : undefined;
@@ -91,6 +91,7 @@ export function buildSessionResumeCandidates(
       cwd: session.cwd ?? live?.cwd,
       topic: cleanText(session.label, session.topic, live?.label, live?.topic),
       state,
+      unwatched: state !== 'watched',
       viewingIn: viewer && viewer !== 'detached' ? viewer : '',
       host,
       sourceHost,
@@ -110,24 +111,4 @@ export function buildSessionResumeCandidates(
     if (a.lastActivityMs !== b.lastActivityMs) return b.lastActivityMs - a.lastActivityMs;
     return a.id.localeCompare(b.id);
   });
-}
-
-export async function collectSessionResumeCandidates(options: {
-  limit?: number;
-  local?: boolean;
-  abandonedOnly?: boolean;
-} = {}): Promise<{ candidates: SessionResumeCandidate[]; unreachable: string[] }> {
-  const result = await collectSessionCandidates(
-    {
-      projectScope: 'all',
-      window: undefined,
-      limit: options.limit ?? 200,
-      sort: 'timestamp',
-    },
-    { local: options.local, includeLive: true },
-  );
-  return {
-    candidates: buildSessionResumeCandidates(result.sessions, result.liveById, result.self, options.abandonedOnly),
-    unreachable: result.unreachable,
-  };
 }

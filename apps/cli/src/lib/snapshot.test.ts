@@ -76,6 +76,7 @@ describe('assembleSnapshot', () => {
     expect(snap.host).toBe('zion');
     expect(snap.inventory).toBe(inventory);
     expect(snap.sessions).toHaveLength(2);
+    expect(snap.resumableSessions).toEqual([]);
     expect(snap.agents).toEqual({
       running: 1,
       live: 2,

@@ -25,7 +25,6 @@ interchangeable — pick the verb for the intent:
 | Interactive → **headless** (keep working unattended) | `agents sessions detach <id>` |
 | Headless → **interactive** in this terminal | `agents sessions attach <id>` |
 | Reopen one identity directly, or multi-select history into tabs/splits | `agents sessions resume [id-or-alias]` / `agents sessions resume` |
-| Read the canonical resume-picker rows (recent + live, already classified and ordered) | `agents sessions resume --candidates --json` |
 | Resume one session in its original harness, version, device, cwd, and mode | `agents resume <id>` |
 | Continue one session from a script / `run` path | `agents run <agent> --resume <id> …` |
 

@@ -469,8 +469,12 @@ Three diagnostics with distinct scopes (RUSH-2027):
 - `agents snapshot` — **one-process consumer poll** for install inventory + active sessions
   (optional feed / sync). Replaces the N× `view --json` + `sessions --active --json` fork
   storm. Default sessions scope is this machine; `--all-hosts` matches full active fan-out.
-  JSON contract: `FleetSnapshot` version 1 (`inventory`, `sessions`, `agents`, optional
-  `feed` / `sync`). Does **not** replace `agents status` (UnifiedSyncStatus / drift).
+  JSON contract: `FleetSnapshot` version 1 (`inventory`, active `sessions`, canonically
+  joined and ordered `resumableSessions`, `agents`, optional `feed` / `sync`). Each
+  resumable row carries its lifecycle state, `unwatched` picker predicate, source host,
+  last activity, and the `agents sessions resume` recovery invocation. Use `--all-hosts`
+  when a consumer needs the fleet-wide resume set. Does **not** replace `agents status`
+  (UnifiedSyncStatus / drift).
 
   The daemon no longer force-probes every device every 3 minutes (the old N² ssh
   fan-out and orphaned-probe pile-up, RUSH-2114).
