@@ -6,7 +6,8 @@ import { readMeta, updateMeta } from '../lib/state.js';
 import type { AgentId } from '../lib/types.js';
 import { ALL_AGENT_IDS, getAccountInfo, resolveAgentName } from '../lib/agents.js';
 import { getVersionHomePath, listInstalledVersions } from '../lib/versions.js';
-import { nativeAccountCapability } from '../lib/account-capabilities.js';
+import { nativeAccountCapability, nativeAccountNameable } from '../lib/account-capabilities.js';
+import { profileExists, readProfile, type Profile } from '../lib/profiles.js';
 import { pushBundleToHost } from '../lib/secrets/push.js';
 import { resolveRemoteOsSync } from '../lib/hosts/remote-os.js';
 import { runDevicesAccounts } from './ssh.js';
@@ -26,14 +27,44 @@ function parseInstallation(raw: string): { agent: AgentId; version: string } {
 async function nativeIdentityFromSource(raw: string): Promise<{ agent: AgentId; version: string; identityKey: string; identityLabel?: string; scope: 'version' | 'device' }> {
   const parsed = parseInstallation(raw);
   const capability = nativeAccountCapability(parsed.agent);
-  if (capability.status !== 'supported' || capability.scope === 'unsupported') {
+  if (!nativeAccountNameable(parsed.agent)) {
     throw new Error(`${parsed.agent} native accounts are ${capability.status}; agents-cli cannot safely name or attach this login.`);
   }
   if (!listInstalledVersions(parsed.agent).includes(parsed.version)) throw new Error(`${raw} is not installed.`);
   const info = await getAccountInfo(parsed.agent, getVersionHomePath(parsed.agent, parsed.version));
-  const identityKey = info.accountKey ?? info.email?.toLowerCase();
+  // A `conditional` (email-only) harness such as Muse needs a live email; a
+  // `strong`/`opaque` harness uses its stable account key. No identity → reject.
+  const identityKey = capability.inspection === 'email'
+    ? info.email?.toLowerCase()
+    : info.accountKey ?? info.email?.toLowerCase();
   if (!info.signedIn || !identityKey) throw new Error(`${raw} has no stable signed-in identity. Run it and complete its normal login first.`);
-  return { ...parsed, identityKey, identityLabel: info.email ?? undefined, scope: capability.scope };
+  return { agent: parsed.agent, version: parsed.version, identityKey, identityLabel: info.email ?? undefined, scope: capability.scope as 'version' | 'device' };
+}
+
+type AttachTarget =
+  | { kind: 'installation'; agent: AgentId; version: string }
+  | { kind: 'device-agent'; agent: AgentId }
+  | { kind: 'profile'; profile: Profile };
+
+/**
+ * Classify + validate an attach target, rejecting a typo BEFORE any binding is
+ * written: it must be an existing custom-harness profile, an installed
+ * `agent@version`, or a known harness id.
+ */
+export function classifyAttachTarget(target: string): AttachTarget {
+  if (profileExists(target)) return { kind: 'profile', profile: readProfile(target) };
+  if (target.includes('@')) {
+    const at = target.lastIndexOf('@');
+    const agent = resolveAgentName(target.slice(0, at));
+    const version = target.slice(at + 1);
+    if (!agent) throw new Error(`Unknown harness '${target.slice(0, at)}' in target '${target}'.`);
+    if (!version) throw new Error(`Target '${target}' is missing a version.`);
+    if (!listInstalledVersions(agent).includes(version)) throw new Error(`${agent}@${version} is not installed.`);
+    return { kind: 'installation', agent, version };
+  }
+  const agent = resolveAgentName(target);
+  if (agent) return { kind: 'device-agent', agent };
+  throw new Error(`Unknown attach target '${target}'. Expected an installed <agent>@<version>, a harness id, or an existing custom harness profile.`);
 }
 
 export function parseBundleKey(raw: string): { bundle: string; key: string } {
@@ -152,17 +183,26 @@ export function registerAccountsCommand(program: Command): void {
       const meta = readMeta();
       const account = findUnifiedAccount(name, meta);
       if (!account) throw new Error(`Unknown account '${name}'.`);
+      // Validate the target exists before mutating any binding.
+      const t = classifyAttachTarget(target);
+      const targetAgent = t.kind === 'profile' ? t.profile.host.agent : t.agent;
       if (account.kind === 'native') {
+        // A provider-backed profile injects provider env at spawn, which would run
+        // under a different credential than the native identity claims — refuse it.
+        if (t.kind === 'profile' && t.profile.provider) {
+          throw new Error(`Custom harness '${target}' is provider-backed (${t.profile.provider}); it cannot host the native login account '${account.name}'. Attach a matching provider account instead.`);
+        }
+        if (targetAgent !== account.agent) throw new Error(`Account '${account.name}' is a ${account.agent} login; '${target}' runs ${targetAgent}.`);
         if (account.scope === 'device') {
-          if (target !== account.agent) throw new Error(`${account.agent} authentication is device-scoped. Attach it with 'agents accounts attach ${account.name} ${account.agent}'.`);
+          if (t.kind !== 'device-agent') throw new Error(`${account.agent} authentication is device-scoped. Attach it with 'agents accounts attach ${account.name} ${account.agent}'.`);
         } else {
+          if (t.kind !== 'installation') throw new Error(`${account.agent} authentication is per-version. Attach '${account.name}' to a specific ${account.agent}@<version>.`);
           const identity = await nativeIdentityFromSource(target);
-          if (identity.agent !== account.agent || identity.identityKey !== account.identityKey) throw new Error(`'${target}' is signed in to a different identity than account '${account.name}'.`);
+          if (identity.identityKey !== account.identityKey) throw new Error(`'${target}' is signed in to a different identity than account '${account.name}'.`);
         }
       } else {
-        const at = target.lastIndexOf('@');
-        const nativeAgent = resolveAgentName(at > 0 ? target.slice(0, at) : target);
-        if (nativeAgent) getAccountProvider(account.provider).envFor(nativeAgent, account.auth);
+        // Provider account: it must be able to authenticate the target's harness.
+        getAccountProvider(account.provider).envFor(targetAgent, account.auth);
       }
       bindAccount(name, target);
       console.log(chalk.green(`Attached ${account.name} to ${target}.`));

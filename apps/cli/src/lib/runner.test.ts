@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
-import { archiveRoutineTranscripts, buildJobCommand, executeJob, executeJobDetached, monitorRunningJobs, resolveRoutineLaunch, RoutineAlreadyRunningError, routineSpawnCwd, snapshotRoutineTranscriptBase } from './runner.js';
+import { archiveRoutineTranscripts, assertRoutineAccountLocalForPlacement, buildJobCommand, executeJob, executeJobDetached, monitorRunningJobs, resolveRoutineLaunch, RoutineAlreadyRunningError, routineSpawnCwd, snapshotRoutineTranscriptBase } from './runner.js';
 import { getRunDir, readRunMeta, writeRunMeta } from './routines.js';
 import { getVersionHomePath } from './versions.js';
 import type { JobConfig, RunMeta } from './routines.js';
@@ -773,5 +773,28 @@ describeSpawn('resolveRoutineLaunch — zero-healthy accounts fail the routine l
       resolveAccountVersion: async () => '1.0.0',
     }).then(() => null, (e: unknown) => e as Error);
     expect(err?.message).toContain('is a claude login and cannot authenticate codex');
+  });
+});
+
+describe('assertRoutineAccountLocalForPlacement — native accounts never dispatch off-box', () => {
+  // Called at the top of BOTH the foreground (executeJobPlaced) and detached
+  // (executeJobDetachedClaimed) placement blocks, before host/cloud dispatch.
+  it('rejects a native routine account before a host dispatch', async () => {
+    await expect(
+      assertRoutineAccountLocalForPlacement({ name: 'r', account: 'work' }, 'host', { account: { kind: 'native', id: 'n', name: 'work', agent: 'claude', identityKey: 'k', scope: 'version' } }),
+    ).rejects.toThrow('device-local claude login and cannot run on a host placement');
+  });
+
+  it('rejects a native routine account before a cloud dispatch', async () => {
+    await expect(
+      assertRoutineAccountLocalForPlacement({ name: 'r', account: 'work' }, 'cloud', { account: { kind: 'native', id: 'n', name: 'work', agent: 'codex', identityKey: 'k', scope: 'version' } }),
+    ).rejects.toThrow('cannot run on a cloud placement');
+  });
+
+  it('allows a provider account on host and cloud, and no-ops without an account', async () => {
+    const provider = { kind: 'provider' as const, id: 'p', name: 'prov', provider: 'openrouter', auth: 'api-key' as const, secretRef: 'r' };
+    await expect(assertRoutineAccountLocalForPlacement({ name: 'r', account: 'prov' }, 'host', { account: provider })).resolves.toBeUndefined();
+    await expect(assertRoutineAccountLocalForPlacement({ name: 'r', account: 'prov' }, 'cloud', { account: provider })).resolves.toBeUndefined();
+    await expect(assertRoutineAccountLocalForPlacement({ name: 'r' }, 'host', {})).resolves.toBeUndefined();
   });
 });

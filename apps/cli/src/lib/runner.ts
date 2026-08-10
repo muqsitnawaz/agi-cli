@@ -1045,6 +1045,32 @@ export function pinJobBinary(cmd: string[], agent: AgentId, version: string | un
  * Such commands must NOT be binary-pinned (pinning rewrites cmd[0] to the agent binary,
  * producing a broken `<binary> run …`) and must not receive a version-pinned spawn env.
  */
+/**
+ * A native routine account is a device-local harness login: it lives only in the
+ * home of the device that signed in and cannot be forwarded off-box. Routine
+ * placement (host/cloud) is resolved BEFORE {@link resolveRoutineLaunch}, so this
+ * guard runs at the top of both the foreground and detached dispatch paths to
+ * reject a native account before any remote/cloud dispatch — never after. A
+ * provider account (a portable, synced bundle) is allowed. `account` is
+ * injectable so the guard is unit-tested for both placement modes without a
+ * registry or a real dispatch.
+ */
+export async function assertRoutineAccountLocalForPlacement(
+  config: Pick<JobConfig, 'name' | 'account'>,
+  mode: 'host' | 'cloud',
+  deps: { account?: import('./account-registry.js').UnifiedAccount | null; readMeta?: typeof readMeta } = {},
+): Promise<void> {
+  if (!config.account) return;
+  let account = deps.account;
+  if (account === undefined) {
+    const { findUnifiedAccount } = await import('./account-registry.js');
+    account = findUnifiedAccount(config.account, (deps.readMeta ?? readMeta)());
+  }
+  if (account?.kind === 'native') {
+    throw new Error(`Routine '${config.name}' account '${config.account}' is a device-local ${account.agent} login and cannot run on a ${mode} placement. Use a provider account, or place this routine on the device that holds the login.`);
+  }
+}
+
 export function dispatchesViaAgentsRun(config: Pick<JobConfig, 'workflow' | 'resume'>): boolean {
   return Boolean(config.workflow || config.resume);
 }
@@ -1251,6 +1277,9 @@ async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undefined, a
   {
     const { resolvePlacementTarget } = await import('./routines-placement.js');
     const target = resolvePlacementTarget(config);
+    if (target.mode === 'host' || target.mode === 'cloud') {
+      await assertRoutineAccountLocalForPlacement(config, target.mode);
+    }
     if (target.mode === 'host') {
       return executeJobOnHost({ ...config, host: target.host }, { detached: false }, attempt);
     }
@@ -1844,6 +1873,9 @@ async function executeJobDetachedClaimed(config: JobConfig, attempt: RoutineAtte
   {
     const { resolvePlacementTarget } = await import('./routines-placement.js');
     const target = resolvePlacementTarget(config);
+    if (target.mode === 'host' || target.mode === 'cloud') {
+      await assertRoutineAccountLocalForPlacement(config, target.mode);
+    }
     if (target.mode === 'host') {
       const { meta } = await executeJobOnHost({ ...config, host: target.host }, { detached: true }, attempt);
       return meta;

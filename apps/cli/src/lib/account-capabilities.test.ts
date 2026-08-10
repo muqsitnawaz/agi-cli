@@ -1,15 +1,57 @@
 import { describe, expect, it } from 'vitest';
 import { ALL_AGENT_IDS } from './agents.js';
-import { NATIVE_ACCOUNT_CAPABILITIES } from './account-capabilities.js';
+import { NATIVE_ACCOUNT_CAPABILITIES, nativeAccountNameable } from './account-capabilities.js';
 
 describe('native account capability registry', () => {
   it('classifies every harness exactly once', () => {
     expect(Object.keys(NATIVE_ACCOUNT_CAPABILITIES).sort()).toEqual([...ALL_AGENT_IDS].sort());
   });
 
-  it('does not claim attachment support without inspectable identity state', () => {
+  it('never claims name/attach support without an inspectable identity', () => {
     for (const capability of Object.values(NATIVE_ACCOUNT_CAPABILITIES)) {
-      if (capability.status === 'supported') expect(capability.inspection).not.toBe('none');
+      if (capability.status === 'supported' || capability.status === 'conditional') {
+        expect(capability.inspection).not.toBe('none');
+        expect(capability.scope).not.toBe('unsupported');
+      }
     }
+  });
+
+  it('pins the version-scoped strong set to exactly Claude / Codex / Grok', () => {
+    const versionStrong = ALL_AGENT_IDS.filter((id) => {
+      const cap = NATIVE_ACCOUNT_CAPABILITIES[id];
+      return cap.scope === 'version' && cap.inspection === 'strong';
+    });
+    expect(versionStrong.sort()).toEqual(['claude', 'codex', 'grok']);
+  });
+
+  it('treats Muse as a conditional, email-only version harness', () => {
+    expect(NATIVE_ACCOUNT_CAPABILITIES.muse).toEqual({ inspection: 'email', scope: 'version', status: 'conditional' });
+  });
+
+  it('blocks Cursor from native naming/attachment', () => {
+    expect(NATIVE_ACCOUNT_CAPABILITIES.cursor.status).toBe('unsupported');
+    expect(nativeAccountNameable('cursor')).toBe(false);
+  });
+
+  it('records Antigravity / Kimi / Droid / OpenCode as device-scoped opaque but UNSUPPORTED', () => {
+    // No device-id discriminator in NativeAccount → an opaque/singleton identity
+    // cannot be proven unique across synced metadata, so naming is refused.
+    for (const id of ['antigravity', 'kimi', 'droid', 'opencode'] as const) {
+      expect(NATIVE_ACCOUNT_CAPABILITIES[id]).toEqual({ inspection: 'opaque', scope: 'device', status: 'unsupported' });
+      expect(nativeAccountNameable(id)).toBe(false);
+    }
+  });
+
+  it('never marks an opaque harness supported/conditional (no safe device identity yet)', () => {
+    for (const [, cap] of Object.entries(NATIVE_ACCOUNT_CAPABILITIES)) {
+      if (cap.inspection === 'opaque') expect(['unsupported', 'discovery-only']).toContain(cap.status);
+    }
+  });
+
+  it('exposes nameability for the supported + conditional set only', () => {
+    expect(nativeAccountNameable('claude')).toBe(true);
+    expect(nativeAccountNameable('muse')).toBe(true); // conditional
+    expect(nativeAccountNameable('gemini')).toBe(false); // discovery-only
+    expect(nativeAccountNameable('copilot')).toBe(false); // unsupported
   });
 });
