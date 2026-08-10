@@ -18,7 +18,7 @@ import chalk from 'chalk';
 import * as fs from 'fs';
 import { getLogsPath, stats, rotate, type EventRecord, type EventType, type EventLevel } from '../lib/events.js';
 import { readUnifiedEvents } from '../lib/event-stream.js';
-import { parseFamilyList, EVENT_FAMILIES } from '../lib/event-families.js';
+import { parseFamilyList, EVENT_FAMILIES, type EventFamily } from '../lib/event-families.js';
 import { ingestBatch } from '../lib/events-ingest.js';
 import { setHelpSections } from '../lib/help.js';
 
@@ -234,8 +234,8 @@ export async function runEventsCommand(options: EventsOptions, forceAudit: boole
 
   let limit: number | undefined;
   let startDate: Date | undefined;
-  let includeFamilies;
-  let excludeFamilies;
+  let includeFamilies: EventFamily[] | undefined;
+  let excludeFamilies: EventFamily[] | undefined;
   try {
     limit = resolveEventsLimit(options.limit);
     startDate = options.since ? parseSince(options.since) : undefined;
@@ -252,7 +252,7 @@ export async function runEventsCommand(options: EventsOptions, forceAudit: boole
 
   // --audit / forceAudit = ops-only when no family flags. Families own the
   // source selection via applyFamilies — never override includeActivity after.
-  const includeActivity = (includeFamilies?.length || excludeFamilies?.length)
+  const includeActivity = (includeFamilies !== undefined || excludeFamilies !== undefined)
     ? true
     : !(forceAudit || options.audit);
 
