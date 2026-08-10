@@ -108,7 +108,9 @@ export function registerAccountsCommand(program: Command): void {
       const account = findAccount(name);
       if (!account) throw new Error(`Unknown provider account '${name}'.`);
       getAccountProvider(account.provider).envFor(agent, account.auth);
-      updateMeta(meta => ({ ...meta, accounts: { ...meta.accounts, defaults: { ...meta.accounts?.defaults, [agent]: account.name } } }));
+      // Defaults follow the stable account id, so renaming the bundle cannot
+      // strand bare runs on a deleted label. findAccount accepts ids and names.
+      updateMeta(meta => ({ ...meta, accounts: { ...meta.accounts, defaults: { ...meta.accounts?.defaults, [agent]: account.id } } }));
       console.log(chalk.green(`${agent} now uses account '${account.name}' unless --account overrides it.`));
     });
 

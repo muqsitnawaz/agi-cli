@@ -877,6 +877,7 @@ export async function resolveRoutineLaunch(
   cwd: string = process.cwd(),
   deps: {
     resolveRunVersion?: typeof resolveRunVersion;
+    resolveAccountVersion?: typeof resolveAccountVersion;
     resolveCredentialAccount?: (name: string, host: AgentId) => { env: Record<string, string> };
   } = {},
 ): Promise<RoutineLaunchPlan> {
@@ -887,10 +888,28 @@ export async function resolveRoutineLaunch(
   // resolveRoutineLaunch is only called for agent jobs (workflow returns above;
   // command jobs branch out of execute*Job before reaching this).
   const agent = config.agent!;
-  const { resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
-  const selectedAccount = resolveAccountSelection(config.account, agent, readMeta());
-  if (selectedAccount) {
-    (deps.resolveCredentialAccount ?? resolveCredentialAccount)(selectedAccount, agent);
+  const { findAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+  const explicitCredential = config.account
+    ? (deps.resolveCredentialAccount !== undefined || findAccount(config.account) !== null)
+    : false;
+  const selectedCredential = explicitCredential
+    ? config.account
+    : resolveAccountSelection(undefined, agent, readMeta());
+  if (selectedCredential) {
+    (deps.resolveCredentialAccount ?? resolveCredentialAccount)(selectedCredential, agent);
+  }
+  if (config.account && !explicitCredential && !config.version) {
+    const accountVersion = await (deps.resolveAccountVersion ?? resolveAccountVersion)(agent, config.account);
+    if (accountVersion) {
+      return {
+        chain: [{ agent, version: accountVersion }],
+        rotation: null,
+        pinned: true,
+      };
+    }
+    process.stderr.write(
+      `[agents] routine ${config.name}: account '${config.account}' is not signed in; falling back to ${getConfiguredRunStrategy(agent, cwd)}\n`,
+    );
   }
   if (config.version) {
     const version = config.version;
@@ -1261,8 +1280,10 @@ async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undefined, a
   // (command jobs branched out earlier, so config.agent is set on the non-workflow path.)
   const effectiveAgent: AgentId = config.workflow ? 'claude' : config.agent!;
   if (!dispatchesViaAgentsRun(config)) {
-    const { resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
-    const selectedAccount = resolveAccountSelection(config.account, effectiveAgent, readMeta());
+    const { findAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+    const selectedAccount = config.account && !findAccount(config.account)
+      ? undefined
+      : resolveAccountSelection(config.account, effectiveAgent, readMeta());
     if (selectedAccount) Object.assign(baseEnv, resolveCredentialAccount(selectedAccount, effectiveAgent).env);
   }
 
@@ -1857,8 +1878,10 @@ async function executeJobDetachedClaimed(config: JobConfig, attempt: RoutineAtte
     config,
   );
   if (!dispatchesViaAgentsRun(config)) {
-    const { resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
-    const selectedAccount = resolveAccountSelection(config.account, config.agent!, readMeta());
+    const { findAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+    const selectedAccount = config.account && !findAccount(config.account)
+      ? undefined
+      : resolveAccountSelection(config.account, config.agent!, readMeta());
     if (selectedAccount) Object.assign(baseEnv, resolveCredentialAccount(selectedAccount, config.agent!).env);
   }
   const spawnEnv = dispatchesViaAgentsRun(config)

@@ -284,13 +284,17 @@ describe('resolveRoutineLaunch (RUSH-1016 — pin + failover chain)', () => {
     expect(plan.chain).toEqual([{ agent: 'claude', version: '2.1.0' }]);
   });
 
-  it('a missing durable account fails before version selection', async () => {
-    const error = await resolveRoutineLaunch(
-      baseJob({ name: 'ghost-account', account: 'missing', agent: 'claude' }),
+  it('resolves a legacy login-email account pin to its installed version', async () => {
+    const plan = await resolveRoutineLaunch(
+      baseJob({ name: 'oauth-account', account: 'person@example.com', agent: 'claude' }),
       process.cwd(),
-      { resolveCredentialAccount: () => { throw new Error("Unknown account 'missing'."); } },
-    ).then(() => null, value => value as Error);
-    expect(error?.message).toBe("Unknown account 'missing'.");
+      { resolveAccountVersion: async () => '2.1.9' },
+    );
+    expect(plan).toEqual({
+      chain: [{ agent: 'claude', version: '2.1.9' }],
+      rotation: null,
+      pinned: true,
+    });
   });
 });
 
