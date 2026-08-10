@@ -878,6 +878,7 @@ export async function resolveRoutineLaunch(
   deps: {
     resolveRunVersion?: typeof resolveRunVersion;
     resolveAccountVersion?: typeof resolveAccountVersion;
+    findCredentialAccount?: (name: string) => boolean;
     resolveCredentialAccount?: (name: string, host: AgentId) => { env: Record<string, string> };
   } = {},
 ): Promise<RoutineLaunchPlan> {
@@ -890,10 +891,10 @@ export async function resolveRoutineLaunch(
   const agent = config.agent!;
   const { findAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
   const explicitCredential = config.account
-    ? (deps.resolveCredentialAccount !== undefined || findAccount(config.account) !== null)
+    ? (deps.findCredentialAccount?.(config.account) ?? (deps.resolveCredentialAccount !== undefined || findAccount(config.account) !== null))
     : false;
-  const selectedCredential = explicitCredential
-    ? config.account
+  const selectedCredential = config.account
+    ? (explicitCredential ? config.account : undefined)
     : resolveAccountSelection(undefined, agent, readMeta());
   if (selectedCredential) {
     (deps.resolveCredentialAccount ?? resolveCredentialAccount)(selectedCredential, agent);

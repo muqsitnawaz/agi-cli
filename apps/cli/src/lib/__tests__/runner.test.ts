@@ -288,7 +288,11 @@ describe('resolveRoutineLaunch (RUSH-1016 — pin + failover chain)', () => {
     const plan = await resolveRoutineLaunch(
       baseJob({ name: 'oauth-account', account: 'person@example.com', agent: 'claude' }),
       process.cwd(),
-      { resolveAccountVersion: async () => '2.1.9' },
+      {
+        findCredentialAccount: () => false,
+        resolveCredentialAccount: () => { throw new Error('provider default must not preflight'); },
+        resolveAccountVersion: async () => '2.1.9',
+      },
     );
     expect(plan).toEqual({
       chain: [{ agent: 'claude', version: '2.1.9' }],
