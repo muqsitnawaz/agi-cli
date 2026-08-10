@@ -126,7 +126,6 @@ export const RUN_OPTION_FORWARDING: Record<string, RunOptionForwarding> = {
   raw: 'local-only', // interactive builder forwards --raw itself
   tmux: 'local-only',
   disableTmux: 'local-only',
-  host: 'local-only',
   device: 'local-only',
   where: 'local-only', // expands into host/lease before dispatch; never re-forwarded
   on: 'local-only',

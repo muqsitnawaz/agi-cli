@@ -82,6 +82,14 @@ agents doctor claude@default                                   # per-resource re
 agents run claude "Reply with exactly PINGOK" --mode plan       # headless read-only ping
 ```
 
+Need a credential that isn't a browser login — a setup-token, an API key for a
+BYOK gateway, a team's shared key? `agents accounts add <name> --provider <p>
+--auth <type>` stores it as a named, Touch-ID-free bundle you select with
+`agents run <agent> --account <name>` or make the default with `agents
+accounts set-default <agent> <name>`; `agents accounts sync <name> --device
+<device>` copies it to another machine. See [Accounts](../../../README.md#accounts)
+in the root README.
+
 `--mode plan` is read-only (safe to run against anything); `edit` lets the
 agent write files, `auto` auto-approves safe operations and prompts for risky
 ones, `skip` bypasses all permission prompts. Omit the prompt argument for an
@@ -123,7 +131,7 @@ this:
   automatically also a host; `agents hosts add` can additionally enroll a
   machine from an existing `~/.ssh/config` entry.
 
-See [`00-concepts.md`](00-concepts.md#devices--hosts) for the full model,
+See [`concepts.md`](concepts.md#devices--hosts) for the full model,
 [`fleet.md`](fleet.md) for the reconcile profile, and [`hosts.md`](hosts.md)
 for the `--device` dispatch flag.
 
@@ -180,18 +188,18 @@ Two things worth knowing exist, without dumping their full docs here:
   (`phnx-labs/.agents-system`) rather than duplicated here.
 - **`agents routines`** — run any agent on a cron schedule or at a specific
   time, with sandboxed permissions and a long-running scheduler daemon that
-  auto-starts on the first `routines add`. See [`03-routines.md`](03-routines.md).
+  auto-starts on the first `routines add`. See [`routines.md`](routines.md).
 
 ## 7. Where next
 
 | Topic | Doc |
 |---|---|
-| Concepts — DotAgents repos, resource resolution, devices vs hosts | [`00-concepts.md`](00-concepts.md) |
+| Concepts — DotAgents repos, resource resolution, devices vs hosts | [`concepts.md`](concepts.md) |
 | Agent cheat sheet — the dozen concepts agents need on one page | [`AGENT-CHEATSHEET.md`](AGENT-CHEATSHEET.md) |
 | Teams — DAG dependencies, worktree isolation, cloud dispatch | [`teams.md`](teams.md) |
 | Fleet profile sync — the `fleet:` manifest and `agents apply` | [`fleet.md`](fleet.md) |
 | Hosts — dispatching `agents run` over SSH | [`hosts.md`](hosts.md) |
 | Browser — driving Chrome/Brave/Edge via CDP | [`browser.md`](browser.md) |
 | Secrets — Keychain-backed env bundles | [`secrets.md`](secrets.md) |
-| Routines — cron-scheduled and webhook-triggered runs | [`03-routines.md`](03-routines.md) |
+| Routines — cron-scheduled and webhook-triggered runs | [`routines.md`](routines.md) |
 | Full command reference | root [`README.md`](../../../README.md) and [`docs/README.md`](README.md) |

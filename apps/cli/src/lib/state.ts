@@ -636,11 +636,11 @@ export function getDevicesRegistryPath(): string { return path.join(getDevicesDi
 /** Path to the device ignore-list — tailscale node names the user dismissed, so auto-discovery never re-suggests them. Per-machine, same dir as the registry. */
 export function getDevicesIgnoredPath(): string { return path.join(getDevicesDir(), 'ignored.json'); }
 
-/** Path to the LEGACY device auto-launch preference file — which registered devices are eligible/preferred for Factory's auto-host selection. Superseded by the central `fleet.devices.<name>.config` block; only lib/devices/config-migration.ts still reads it (to fold + remove it). */
+/** Path to the LEGACY device auto-launch preference file — which registered devices are eligible/preferred for the ext's auto-host selection. Superseded by the central `fleet.devices.<name>.config` block; only lib/devices/config-migration.ts still reads it (to fold + remove it). */
 export function getDevicesAutoLaunchPath(): string { return path.join(getDevicesDir(), 'auto-launch.json'); }
 
 /** Dir of "pending device" sentinels (~/.agents/.cache/state/devices-pending/) — one empty-ish file per newly-discovered, not-yet-approved tailnet node. Written by the daemon probe, read by the menu-bar helper (mirrors the attention sentinel dir). */
-export function getDevicesPendingDir(): string { return path.join(RUNTIME_STATE_DIR, 'devices-pending'); }
+export function getDevicesPendingDir(): string { return path.join(getRuntimeStateDir(), 'devices-pending'); }
 
 /** Path to cloud dispatch cache (~/.agents/.cache/cloud/). */
 export function getCloudDir(): string { return CLOUD_DIR; }
@@ -676,8 +676,23 @@ export function getPerfDbPath(): string { return path.join(getPerfDir(), 'perf.d
 /** Path to the hook-shim NDJSON spool drained into perf.db on open. */
 export function getPerfSpoolPath(): string { return path.join(getPerfDir(), 'spool.jsonl'); }
 
-/** Path to per-process runtime state (~/.agents/.cache/state/). */
-export function getRuntimeStateDir(): string { return RUNTIME_STATE_DIR; }
+/**
+ * Path to per-process runtime state (~/.agents/.cache/state/).
+ *
+ * `AGENTS_STATE_DIR` redirects it in tests — the same test-isolation escape
+ * hatch as `AGENTS_DEVICES_DIR` / `AGENTS_LOGS_DIR`, and resolved at call time
+ * for the same reason (a suite pins it after this module is imported).
+ *
+ * Without it the suite writes into the operator's LIVE state. Concretely: the
+ * device registry and ignore-list already redirect via `AGENTS_DEVICES_DIR`, so
+ * under test both read empty — and any code path reaching
+ * `reconcilePendingSentinels` then computed "every tailnet node is new" and
+ * wrote those sentinels into the real `devices-pending/`, which is exactly what
+ * the menu bar renders. Running the suite on a dev machine surfaced all 20
+ * tailnet nodes as NEW DEVICES, including registered and explicitly ignored
+ * ones, and looked like the operator's ignore list had been lost.
+ */
+export function getRuntimeStateDir(): string { return process.env.AGENTS_STATE_DIR ?? RUNTIME_STATE_DIR; }
 
 /** Path to companion-extension scratch (~/.agents/.cache/companion/). */
 export function getCompanionDir(): string { return COMPANION_CACHE_DIR; }
@@ -920,7 +935,10 @@ const META_KEY_SCOPE: Record<keyof Meta, 'central' | 'device'> = {
   isolatedAgents: 'device',
   versions: 'device',
   deviceRoutines: 'device',
+  deviceConfig: 'device',
+  deviceBrowser: 'device',
   // Central — synced via agents.yaml.
+  accounts: 'central',
   run: 'central',
   model: 'central',
   watchdog: 'central',
@@ -932,7 +950,7 @@ const META_KEY_SCOPE: Record<keyof Meta, 'central' | 'device'> = {
   registries: 'central',
   profiles: 'central',
   source: 'central',
-  projectRoot: 'central',
+  projectRoot: 'device',
   extraRepos: 'central',
   brands: 'central',
   actors: 'central',
@@ -1018,7 +1036,7 @@ function serializeCentral(central: Record<string, unknown>): string {
 }
 
 function writeMetaUnlocked(meta: Meta): void {
-  const { agents, isolatedAgents, versions, deviceRoutines, ...central } = meta;
+  const { agents, isolatedAgents, versions, deviceRoutines, deviceConfig, deviceBrowser, projectRoot, ...central } = meta;
 
   // Write the machine-local files FIRST, then strip central — so a crash mid-write
   // never removes pins/versions from central before they're persisted elsewhere.
@@ -1030,15 +1048,25 @@ function writeMetaUnlocked(meta: Meta): void {
   // it does not have.
   const hasIsolatedAgents = !!isolatedAgents && Object.keys(isolatedAgents).length > 0;
   const hasDeviceRoutines = Array.isArray(deviceRoutines);
-  if (hasAgents || hasIsolatedAgents || hasDeviceRoutines) {
+  // Machine-visibility operator config. Lives here rather than in the synced
+  // central file because nothing off-box reads it — and because
+  // browser.remote-control is a consent flag that must not propagate on pull.
+  const hasDeviceConfig = !!deviceConfig && Object.keys(deviceConfig).length > 0;
+  const hasDeviceBrowser = !!deviceBrowser && Object.keys(deviceBrowser).length > 0;
+  // An inferred local filesystem path — machine state, never fleet policy.
+  const hasProjectRoot = typeof projectRoot === 'string' && projectRoot.length > 0;
+  if (hasAgents || hasIsolatedAgents || hasDeviceRoutines || hasDeviceConfig || hasDeviceBrowser || hasProjectRoot) {
     // Device-local doc carries `agents:` pins and `routines:` — per-machine and
     // must never land in central agents.yaml (which syncs). Operator config
     // used to ride this doc under `config:`; it now lives centrally under
     // `fleet.devices.<name>.config` (see lib/device-config.ts).
-    const deviceDoc: Partial<Meta> & { routines?: string[] } = {};
+    const deviceDoc: Partial<Meta> & { routines?: string[]; config?: Record<string, unknown> } = {};
     if (hasAgents) deviceDoc.agents = agents;
     if (hasIsolatedAgents) deviceDoc.isolatedAgents = isolatedAgents;
     if (hasDeviceRoutines) deviceDoc.routines = deviceRoutines;
+    if (hasDeviceConfig) deviceDoc.config = deviceConfig;
+    if (hasDeviceBrowser) deviceDoc.browser = deviceBrowser;
+    if (hasProjectRoot) deviceDoc.projectRoot = projectRoot;
     fs.mkdirSync(path.dirname(devicePath), { recursive: true });
     writeIfChanged(devicePath, META_HEADER + yaml.stringify(deviceDoc));
   } else if (fs.existsSync(devicePath)) {
@@ -1084,6 +1112,13 @@ function overlayMachineLocal(meta: Meta): Meta {
     if (dm) {
       if (dm?.agents) meta.agents = { ...meta.agents, ...dm.agents };
       if (dm?.isolatedAgents) meta.isolatedAgents = { ...meta.isolatedAgents, ...dm.isolatedAgents };
+      if (typeof dm?.projectRoot === 'string') meta.projectRoot = dm.projectRoot;
+      if (dm?.browser && typeof dm.browser === 'object' && !Array.isArray(dm.browser)) {
+        meta.deviceBrowser = { ...meta.deviceBrowser, ...(dm.browser as Record<string, never>) };
+      }
+      if (dm?.config && typeof dm.config === 'object' && !Array.isArray(dm.config)) {
+        meta.deviceConfig = { ...meta.deviceConfig, ...(dm.config as Record<string, unknown>) };
+      }
       if (dm && Object.prototype.hasOwnProperty.call(dm, 'routines')) {
         if (!Array.isArray(dm.routines) || dm.routines.some((name) => typeof name !== 'string')) {
           throw new Error(`Device config corrupted at ${devicePath}: routines must be a string list.`);

@@ -13,7 +13,6 @@ import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { createRequire } from 'module';
-import { BUILTIN_ROUTINE_NAMES } from '../lib/builtin-routines.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const require = createRequire(import.meta.url);
@@ -105,14 +104,13 @@ describeDaemon('agents daemon', () => {
     expect(payload.daemonEnabled).toBe(true);
     expect(payload.services.secretsBroker).toHaveProperty('reachable', false);
     expect(payload.services.browserIpc).toHaveProperty('bound', false);
-    // The daemon now OWNS the housekeeping ticks as built-in routines (the lowest
-    // definition layer), so even a fresh install with nothing on disk carries them.
-    // Assert against the built-in count, not a hardcoded number, so it can't drift
-    // from builtin-routines.ts (same drift-guard as builtin-routines.test.ts).
+    // Daemon housekeeping (watchdog, device-probe, ...) are plain daemon-core
+    // timers, NOT routines (RUSH-2495), so a fresh install with nothing on disk
+    // carries zero scheduled routines.
     expect(payload.scheduler).toEqual(
       expect.objectContaining({
-        routineCount: BUILTIN_ROUTINE_NAMES.length,
-        enabledCount: BUILTIN_ROUTINE_NAMES.length,
+        routineCount: 0,
+        enabledCount: 0,
         failingCount: 0,
       }),
     );
@@ -136,11 +134,18 @@ describeDaemon('agents daemon', () => {
     expect(payload.state).toBe('disabled');
     expect(payload.daemonEnabled).toBe(false);
 
-    // Persisted to disk, not just in-process — a fresh CLI invocation (the
-    // status call above) reads it back from the central fleet.devices block.
+    // Persisted to disk, not just in-process — the status call above is a fresh
+    // CLI invocation that read it back. It lands in THIS machine's own doc, not
+    // the fleet-shared agents.yaml: the kill switch is machine-local, so syncing
+    // it would disable the daemon on every box that pulls.
+    // The doc is keyed by this machine's id, which the test does not pin — read
+    // whichever device dir the CLI created rather than hardcoding a name.
+    const devicesDir = path.join(home, '.agents', 'devices');
+    const [machineDir] = fs.readdirSync(devicesDir);
+    const localDoc = fs.readFileSync(path.join(devicesDir, machineDir, 'agents.yaml'), 'utf-8');
+    expect(localDoc).toContain('daemonEnabled: false');
     const central = fs.readFileSync(path.join(home, '.agents', 'agents.yaml'), 'utf-8');
-    expect(central).toContain('daemonEnabled: false');
-    expect(central).toContain('fleet:');
+    expect(central).not.toContain('daemonEnabled');
   });
 
   it('enable clears the kill switch again', () => {
