@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import chalk from 'chalk';
 import { confirm } from '@inquirer/prompts';
 import { gatherLiveTargets, pickLiveTarget, pickLiveTargets, jumpTo, probeAttachRail, refuseFallback, type AttachRailLiveness, type UnreachableFallback } from './go.js';
-import { sessionProcessIsLocal, sessionProcessHost, type ActiveSession } from '../lib/session/active.js';
+import { sessionProcessIsLocal, sessionProcessHost, shortIdFromName, type ActiveSession } from '../lib/session/active.js';
 import { attachTmux, getDefaultSocketPath, hasSession, runTmux } from '../lib/tmux/index.js';
 import { SESSION_AGENTS, isAgentTmuxAlias, type SessionMeta, type SessionAgentId } from '../lib/session/types.js';
 import {
@@ -235,7 +235,7 @@ export async function focusAction(id: string | undefined, opts: FocusOptions): P
   const fallback = selectFallback(opts.attachOnly);
 
   const agentSelector = focusAgentSelector(id, opts);
-  const textSelector = id && !agentSelector ? id : undefined;
+  let textSelector = id && !agentSelector ? id : undefined;
   const filtered = !!id || hasFocusFilters(opts, statuses);
 
   // Preserve the fast live multi-picker for an unqualified `focus`. Every
@@ -279,9 +279,10 @@ export async function focusAction(id: string | undefined, opts: FocusOptions): P
       console.error(chalk.yellow(`Unavailable devices: ${unreachable.join(', ')}`));
     }
 
-    let exact = textSelector && looksLikeIdSelector(textSelector)
+    const idSelector = textSelector && looksLikeIdSelector(textSelector) ? textSelector.toLowerCase() : undefined;
+    let exact = idSelector
       ? dedupeSessionsByLogicalId(
-          sessions.filter((session) => session.id.toLowerCase().startsWith(textSelector.toLowerCase())),
+          sessions.filter((session) => session.id.toLowerCase().startsWith(idSelector)),
           self,
         )
       : [];
@@ -290,6 +291,23 @@ export async function focusAction(id: string | undefined, opts: FocusOptions): P
     // keyword query, so `ag-kimi-632c1fbc` came back as 13 unrelated text hits
     // while the pane was alive and attachable the whole time.
     if (exact.length === 0 && textSelector && !hosts.length && await attachLiveTmuxAlias(textSelector)) return;
+
+    // Not live (or remote-scoped): an alias still carries the session's shortid,
+    // so resolve by THAT rather than handing the whole `ag-<agent>-<shortid>`
+    // string to the resolver — which treats an unmatched alias as a keyword
+    // query and answered `"ag-claude-dead5678" matches 200 sessions` for a pane
+    // whose process had simply exited. SES-41 requires an alias to resolve to one
+    // canonical session id.
+    if (textSelector && isAgentTmuxAlias(textSelector)) {
+      const short = shortIdFromName(textSelector);
+      if (short) {
+        textSelector = short;
+        exact = dedupeSessionsByLogicalId(
+          sessions.filter((session) => session.id.toLowerCase().startsWith(short)),
+          self,
+        );
+      }
+    }
 
     if (exact.length === 0 && textSelector && looksLikeIdentitySelector(textSelector)) {
       const outcome = await resolveSessionMetadataValue(textSelector, { local, hosts });
