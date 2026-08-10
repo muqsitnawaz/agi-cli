@@ -82,13 +82,23 @@ a single name namespace (`meta.accounts`):
   account cannot be `sync`ed. A native lookup reads only `meta`, never the provider
   bundle store or the keychain.
 
-**Attachment scope comes from the harness.** `account-capabilities.ts` classifies
-each harness: a `version`-scoped harness (Claude, Codex, Grok, Muse) authenticates
-per installed version, so a native account attaches to an exact `agent@version`; a
-`device`-scoped harness (Cursor, OpenCode, Antigravity, Kimi, Droid) authenticates
-once per device, so it attaches to the bare `agent`. `attach` validates the live
-identity of the target before binding — a version-scoped target must currently be
-signed in to the same identity — and injects no secret or env.
+**Only a safely-identifiable native login is nameable/attachable.**
+`account-capabilities.ts` is the canonical table, and it is deliberately
+conservative — a `NativeAccount` stores no device-id discriminator, so a login
+whose identity can't be proven unique across synced metadata is marked
+**unsupported** rather than falsely supported:
+
+| Harness | Native account naming |
+|---|---|
+| Claude, Codex, Grok | **supported** — version-scoped, strong account key; attach to an exact `agent@version` |
+| Muse | **conditional** — version-scoped, email-only; nameable only when the login exposes an email |
+| Antigravity, Kimi, Droid, OpenCode | **unsupported** — device-scoped but opaque/singleton; the identity can't be proven distinct across devices (Droid exposes no account key; Antigravity/OpenCode can alias two credentials as one) |
+| Cursor | **unsupported (blocked)** — multi-account isolation unresolved; use its API-key provider account instead |
+| everything else | **unsupported** / discovery-only |
+
+`agents accounts name`/`attach` refuse an unsupported harness. For a supported
+(version-scoped) login, `attach` validates the target is currently signed in to the
+same identity before binding, and injects no secret or env.
 
 The commands read like the task, object first:
 
@@ -98,7 +108,7 @@ The commands read like the task, object first:
 | `agents accounts name <agent@version> <name>` | Name a signed-in native installation |
 | `agents accounts add <name> --provider <p> --auth <t>` | Store a provider credential account |
 | `agents accounts view <account>` (alias `inspect`) | Show one account — kind, custody, and its attachments |
-| `agents accounts attach <account> <target>` | Bind a native or provider account to an installation / custom harness (`target` is `agent@version` for version-scoped, `agent` for device-scoped) |
+| `agents accounts attach <account> <target>` | Bind an account to a target. A **native** account attaches only to a supported `agent@version` installation. A **provider** account attaches to an `agent@version`, a bare harness id, or an existing custom-harness profile. Typos and unsupported targets are rejected before binding. |
 | `agents accounts detach <account> <target>` | Remove one attachment |
 | `agents accounts rename <old> <new>` / `remove <name>` | Rename or remove either kind; `remove` refuses while a binding, a per-harness default, or a harness profile still references the account |
 | `agents accounts sync <account> <device>` | Copy a provider account bundle to a worker (native records have no bytes to copy) |

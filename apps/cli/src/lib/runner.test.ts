@@ -791,10 +791,13 @@ describe('assertRoutineAccountLocalForPlacement — native accounts never dispat
     ).rejects.toThrow('cannot run on a cloud placement');
   });
 
-  it('allows a provider account on host and cloud, and no-ops without an account', async () => {
+  it('allows a provider account on host (forwarded by name), rejects it on cloud, no-ops without an account', async () => {
     const provider = { kind: 'provider' as const, id: 'p', name: 'prov', provider: 'openrouter', auth: 'api-key' as const, secretRef: 'r' };
+    // Host: allowed — the remote resolves its own bundle from the forwarded name.
     await expect(assertRoutineAccountLocalForPlacement({ name: 'r', account: 'prov' }, 'host', { account: provider })).resolves.toBeUndefined();
-    await expect(assertRoutineAccountLocalForPlacement({ name: 'r', account: 'prov' }, 'cloud', { account: provider })).resolves.toBeUndefined();
+    // Cloud: fails loud — no secure provider-account injection there yet.
+    await expect(assertRoutineAccountLocalForPlacement({ name: 'r', account: 'prov' }, 'cloud', { account: provider }))
+      .rejects.toThrow('cloud placement cannot securely inject it');
     await expect(assertRoutineAccountLocalForPlacement({ name: 'r' }, 'host', {})).resolves.toBeUndefined();
   });
 });

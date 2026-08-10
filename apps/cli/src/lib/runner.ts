@@ -1046,13 +1046,18 @@ export function pinJobBinary(cmd: string[], agent: AgentId, version: string | un
  * producing a broken `<binary> run …`) and must not receive a version-pinned spawn env.
  */
 /**
- * A native routine account is a device-local harness login: it lives only in the
- * home of the device that signed in and cannot be forwarded off-box. Routine
- * placement (host/cloud) is resolved BEFORE {@link resolveRoutineLaunch}, so this
- * guard runs at the top of both the foreground and detached dispatch paths to
- * reject a native account before any remote/cloud dispatch — never after. A
- * provider account (a portable, synced bundle) is allowed. `account` is
- * injectable so the guard is unit-tested for both placement modes without a
+ * Assert a routine's account can be dispatched to the resolved placement, BEFORE
+ * any off-box dispatch (placement is resolved before {@link resolveRoutineLaunch}),
+ * at the top of both the foreground and detached paths:
+ *
+ * - **native** account → rejected for host AND cloud: a native login is a
+ *   device-local harness credential that cannot be forwarded off-box.
+ * - **provider** account + **cloud** → rejected (fail loud): the cloud dispatch
+ *   has no secure way to inject a device-local provider bundle yet.
+ * - **provider** account + **host** → allowed: the host dispatch forwards the
+ *   account NAME (the remote resolves its own local bundle — no secret copied).
+ *
+ * `account` is injectable so the guard is unit-tested for both modes without a
  * registry or a real dispatch.
  */
 export async function assertRoutineAccountLocalForPlacement(
@@ -1068,6 +1073,9 @@ export async function assertRoutineAccountLocalForPlacement(
   }
   if (account?.kind === 'native') {
     throw new Error(`Routine '${config.name}' account '${config.account}' is a device-local ${account.agent} login and cannot run on a ${mode} placement. Use a provider account, or place this routine on the device that holds the login.`);
+  }
+  if (mode === 'cloud' && account?.kind === 'provider') {
+    throw new Error(`Routine '${config.name}' account '${config.account}' is a provider credential; cloud placement cannot securely inject it yet. Run this routine locally or on a host that holds the bundle.`);
   }
 }
 
@@ -1715,6 +1723,10 @@ async function executeJobOnHost(config: JobConfig, opts: { detached: boolean }, 
     mode: normalizeMode(config.mode),
     effort: config.effort,
     model: config.config?.model as string | undefined,
+    // Forward the provider account by NAME — the remote resolves its own local
+    // bundle, so no secret crosses the wire. Native accounts never reach here
+    // (assertRoutineAccountLocalForPlacement rejects them before dispatch).
+    account: config.account,
     timeout: config.timeout, // enforced by the REMOTE agents run
     remoteCwd,
     name: config.name,
