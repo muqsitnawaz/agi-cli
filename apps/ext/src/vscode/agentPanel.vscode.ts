@@ -1698,13 +1698,7 @@ function extractPrUrls(lines: string[]): PullRequestRef[] {
   return extractPrUrlsHelper(lines);
 }
 
-/**
- * Enumerate every worktree attached to `workspaceRoot` via
- * `git worktree list --porcelain`. Delegates to the canonical `fetchWorktrees`
- * (snapshotDetector) the leader runs, so the local fallback and the broadcast
- * path share one implementation. Returns [] when the directory isn't a git repo
- * or git isn't available.
- */
+/** Build presentation rows from the canonical session stream plus the workspace root. */
 type UsageStatus = 'available' | 'rate_limited' | 'out_of_credits' | null;
 
 /**

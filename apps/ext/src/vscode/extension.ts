@@ -2265,50 +2265,6 @@ interface CliSessionItem {
   tokenCount?: number;
 }
 
-interface AgentVersionInfo {
-  version: string;
-  isDefault: boolean;
-  signedIn: boolean;
-  email?: string;
-  plan?: string;
-  usageStatus?: 'available' | 'rate_limited' | 'out_of_credits';
-  windows?: Array<{
-    key: string;
-    usedPercent: number;
-    resetsAt: string;
-  }>;
-  lastActive?: string;
-  path?: string;
-}
-
-interface AgentViewResponse {
-  agent: string;
-  versions: AgentVersionInfo[];
-}
-
-// List an agent's installed versions with login/usage health. A `host` targets a
-// remote device via `agents view <agent> --host <device> --json` (RUSH-2025 host
-// health probe); omit it for the local machine. A remote probe gets a longer
-// timeout since it makes an SSH round-trip.
-async function listAgentVersions(agentKey: string, host?: string): Promise<AgentVersionInfo[]> {
-  const { runAgents } = await import('../core/agentsBin');
-  try {
-    const hostFlag = host ? ` --host ${shquote(host)}` : '';
-    const { stdout } = await runAgents(`view ${agentKey}${hostFlag} --json`, {
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: host ? 15_000 : 30_000,
-    });
-    const parsed: AgentViewResponse = JSON.parse(stdout);
-    return parsed.versions || [];
-  } catch {
-    return [];
-  }
-}
-
-// True when `host` has at least one signed-in, non-throttled version of the
-// agent — the RUSH-2025 "usable version" test. A probe failure (offline, no SSH,
-// agent not installed) yields an empty list, so the device is reported unusable
-// and gets filtered out of the balancer rather than launched into blindly.
 /**
  * The recent-transcript listing. `sessions` takes the query as a positional
  * argument and has no `list` subcommand — passing one made commander treat the
