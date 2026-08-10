@@ -43,7 +43,7 @@ describe('synced device discovery policy', () => {
 
     setDeviceDiscoveryStatus('mac-mini', undefined);
     expect(getDeviceDiscoveryStatus('mac-mini')).toBeUndefined();
-    expect(fs.readFileSync(file, 'utf-8')).not.toContain('discovery:');
+    expect(fs.readFileSync(file, 'utf-8')).toContain('discovery: {}');
     expect(fs.readFileSync(file, 'utf-8')).toContain('maxAgents: 2');
   });
 
@@ -80,5 +80,47 @@ describe('synced device discovery policy', () => {
     expect(result).toMatchObject({ approved: ['zion'], registered: [], unresolved: [] });
     expect(await isIgnored('zion')).toBe(false);
     expect(await getDevice('zion')).toMatchObject({ user: 'operator', address: { dnsName: 'zion.internal' } });
+  });
+
+  it('propagates pending by clearing stale local registry and ignore state', async () => {
+    const { addIgnored, getDevice, isIgnored, reconcileDeviceDiscoveryPolicies, setDeviceDiscoveryStatus, upsertDevice } = await freshModules();
+    await upsertDevice('old-laptop', {
+      platform: 'linux',
+      address: { via: 'manual', dnsName: 'old-laptop.internal' },
+    });
+    await addIgnored('ipad');
+    setDeviceDiscoveryStatus('old-laptop', 'approved');
+    setDeviceDiscoveryStatus('ipad', 'ignored');
+    setDeviceDiscoveryStatus('old-laptop', undefined);
+    setDeviceDiscoveryStatus('ipad', undefined);
+
+    await reconcileDeviceDiscoveryPolicies();
+
+    expect(await getDevice('old-laptop')).toBeNull();
+    expect(await isIgnored('ipad')).toBe(false);
+  });
+
+  it('registers an approved device from real Tailscale JSON parsing', async () => {
+    const { getDevice, registerApprovedDevicesFromTailscale } = await freshModules();
+    const json = JSON.stringify({
+      Peer: {
+        node: {
+          HostName: 'New Laptop',
+          DNSName: 'new-laptop.example.ts.net.',
+          OS: 'linux',
+          TailscaleIPs: ['100.64.0.9'],
+          Online: true,
+          CurAddr: '192.0.2.1:41641',
+        },
+      },
+    });
+
+    const result = await registerApprovedDevicesFromTailscale(json, ['new-laptop'], [], ['new-laptop']);
+
+    expect(result).toMatchObject({ registered: ['new-laptop'], unresolved: [] });
+    expect(await getDevice('new-laptop')).toMatchObject({
+      platform: 'linux',
+      address: { via: 'tailscale', dnsName: 'new-laptop.example.ts.net', ip: '100.64.0.9' },
+    });
   });
 });

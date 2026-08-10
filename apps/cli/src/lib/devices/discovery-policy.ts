@@ -37,7 +37,10 @@ export function setDeviceDiscoveryStatus(name: string, status: DeviceDiscoverySt
     const fleet = {
       ...meta.fleet,
       devices: meta.fleet?.devices ?? {},
-      discovery: Object.keys(discovery).length > 0 ? discovery : undefined,
+      // Keep an empty map as the synced tombstone: it distinguishes "policy is
+      // authoritative and every device is pending" from an older config that
+      // has never opted into portable discovery decisions.
+      discovery,
     };
     return { ...meta, fleet };
   });
@@ -62,9 +65,21 @@ export function loadDeviceDiscoveryPolicies(): Map<string, DeviceDiscoveryStatus
  * reported as unresolved rather than written with invented connection details.
  */
 export async function reconcileDeviceDiscoveryPolicies(): Promise<DeviceDiscoveryReconcileResult> {
+  const configured = readMeta().fleet?.discovery;
+  if (configured === undefined) {
+    return { approved: [], ignored: [], registered: [], unresolved: [] };
+  }
   const policies = loadDeviceDiscoveryPolicies();
   const approved = [...policies].filter(([, s]) => s === 'approved').map(([n]) => n).sort();
   const ignored = [...policies].filter(([, s]) => s === 'ignored').map(([n]) => n).sort();
+
+  const registry = await loadDevices();
+  const localIgnored = await loadIgnored();
+  const pending = new Set([...Object.keys(registry), ...localIgnored].filter((name) => !policies.has(name)));
+  for (const name of pending) {
+    await removeDevice(name);
+    await removeIgnored(name);
+  }
 
   for (const name of ignored) {
     await removeDevice(name);
@@ -72,16 +87,27 @@ export async function reconcileDeviceDiscoveryPolicies(): Promise<DeviceDiscover
   }
   for (const name of approved) await removeIgnored(name);
 
-  const registry = await loadDevices();
-  const missing = approved.filter((name) => !registry[name]);
+  const currentRegistry = await loadDevices();
+  const missing = approved.filter((name) => !currentRegistry[name]);
   if (missing.length === 0) return { approved, ignored, registered: [], unresolved: [] };
 
-  let nodes;
+  let json: string;
   try {
-    nodes = parseTailscaleStatus(tailscaleStatusJson());
+    json = tailscaleStatusJson();
   } catch {
     return { approved, ignored, registered: [], unresolved: missing };
   }
+  return registerApprovedDevicesFromTailscale(json, approved, ignored, missing);
+}
+
+/** Complete reconciliation from real `tailscale status --json` output. */
+export async function registerApprovedDevicesFromTailscale(
+  json: string,
+  approved: string[],
+  ignored: string[],
+  missing: string[],
+): Promise<DeviceDiscoveryReconcileResult> {
+  const nodes = parseTailscaleStatus(json);
   const byName = new Map(nodes.map((node) => [node.name, node]));
   const registered: string[] = [];
   const unresolved: string[] = [];

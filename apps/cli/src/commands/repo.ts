@@ -1311,6 +1311,10 @@ Examples:
         if (result.success) {
           const pushed = result.pushed ? ' (pushed)' : '';
           spinner.succeed(`${formatRepoTarget(t.alias, t.dir)}: ${result.commit}${pushed}`);
+          if (t.alias === 'user') {
+            const { reconcileDeviceDiscoveryPolicies } = await import('../lib/devices/discovery-policy.js');
+            await reconcileDeviceDiscoveryPolicies();
+          }
         } else {
           spinner.fail(`${formatRepoTarget(t.alias, t.dir)}: ${result.error}`);
           process.exitCode = 1;

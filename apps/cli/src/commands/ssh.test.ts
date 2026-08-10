@@ -82,7 +82,7 @@ describe('devices command', () => {
 
     const unignored = run(['devices', 'unignore', 'mac-mini']);
     expect(unignored.status).toBe(0);
-    expect(fs.readFileSync(policyPath, 'utf-8')).not.toContain('discovery:');
+    expect(fs.readFileSync(policyPath, 'utf-8')).toContain('discovery: {}');
   });
 });
 
