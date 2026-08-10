@@ -64,5 +64,6 @@ describe('enrichSessionJsonRows', () => {
       [session()], new Map([[session().id, live({ viewingIn: { app: 'ghostty', tab: 2 } })]]), 'zion',
     )[0];
     expect(watched).toMatchObject({ state: 'watched', unwatched: false, viewingIn: 'ghostty tab 2' });
+    expect(watched).toMatchObject({ context: 'terminal', kind: 'claude', status: 'running' });
   });
 });

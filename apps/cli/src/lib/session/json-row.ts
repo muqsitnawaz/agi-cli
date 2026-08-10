@@ -65,6 +65,11 @@ export function enrichSessionJsonRows(
     const remote = sourceDevice !== local;
     const viewer = live ? viewingInLabel(live) : undefined;
     rows.push({
+      // Preserve the established `--active --json` fields (context, kind,
+      // status, activity, pidAlive, provenance, refs) when this durable row is
+      // reached through a lifecycle filter. Durable metadata then wins shared
+      // names, and the canonical fields below normalize the join.
+      ...(live ?? {}),
       ...session,
       state,
       resumable: true,
