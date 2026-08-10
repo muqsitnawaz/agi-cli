@@ -27,15 +27,31 @@ import * as yaml from 'yaml';
  * silently stopped receiving fleet config. Seven boxes fell 37-52 commits
  * behind and nothing reported it.
  *
- * Routing every writer through one function is what fixes the second half: the
- * same document can only produce one result, so there is nothing left to
- * oscillate. `collectionStyle` is deliberately NOT pinned — forcing block would
- * flatten a committed flow sequence, which is its own dirtying diff and is
- * covered by a test in `feed.test.ts`.
+ * Two constraints pull in opposite directions, and both are real:
+ *
+ *  - Forcing `collectionStyle: 'block'` unconditionally flattens a committed
+ *    flow sequence into a block list — its own dirtying diff, asserted against
+ *    by the RUSH-2505 case in `feed.test.ts`.
+ *  - Never forcing it regresses what `state.ts` and `manifest.ts` were guarding:
+ *    when the document ROOT is flow (a legacy `{}` or `{a: 1}` file), every
+ *    edited node inherits flow, so a `doc.set()` yields
+ *    `{a: 1, disabledCommands: [teams]}` instead of a block mapping.
+ *
+ * So block is forced exactly when the root is flow, which is the only case that
+ * needs it, and left alone otherwise. Every writer gets the same rule, so the
+ * same document can only produce one result and there is nothing left to
+ * oscillate.
  *
  * Caller options merge last, so a writer with a genuine reason to differ still
  * can — but it then owns the drift it causes.
  */
 export function stringifyDoc(doc: yaml.Document, options: yaml.ToStringOptions = {}): string {
-  return doc.toString({ flowCollectionPadding: false, ...options });
+  // A flow root makes every edited node render flow; normalize the whole doc to
+  // block in that case only. `contents.flow` is undefined for a block root.
+  const rootIsFlow = (doc.contents as { flow?: boolean } | null)?.flow === true;
+  return doc.toString({
+    flowCollectionPadding: false,
+    ...(rootIsFlow ? { collectionStyle: 'block' as const } : {}),
+    ...options,
+  });
 }

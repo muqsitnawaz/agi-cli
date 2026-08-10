@@ -63,4 +63,19 @@ describe('stringifyDoc', () => {
     const doc = yaml.parseDocument('a: [1, 2]\n');
     expect(stringifyDoc(doc, { collectionStyle: 'block' })).toBe('a:\n  - 1\n  - 2\n');
   });
+  it('normalizes a legacy FLOW ROOT to block, the case state.ts guarded', () => {
+    // A legacy `{}` / `{a: 1}` file makes every edited node inherit flow, so a
+    // plain edit used to yield `{a: 1, disabledCommands: [teams]}`.
+    const doc = yaml.parseDocument('{a: 1}\n');
+    doc.set('disabledCommands', ['teams']);
+    expect(stringifyDoc(doc)).toBe('a: 1\ndisabledCommands:\n  - teams\n');
+  });
+
+  it('does NOT flatten a committed flow sequence under a block root', () => {
+    // The other half of the same tension: forcing block everywhere would break
+    // this, which feed.test.ts also asserts end-to-end.
+    const doc = yaml.parseDocument('a: 1\nb: [1, 2]\n');
+    doc.set('a', 2);
+    expect(stringifyDoc(doc)).toBe('a: 2\nb: [1, 2]\n');
+  });
 });

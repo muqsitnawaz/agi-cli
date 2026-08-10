@@ -67,9 +67,11 @@ export function serializeManifest(manifest: Manifest, existingContent?: string |
   // Nothing changed → keep the file byte-identical (comments intact).
   if (!changed) return existingContent;
 
-  // Force BLOCK style: an existing flow root (e.g. legacy `{}`) would otherwise
-  // make edited nodes render flow. collectionStyle pins the whole doc block
-  // while parseDocument still preserves comments + key ordering.
+  // stringifyDoc still normalizes a legacy flow root (`{}`) to block so edited
+  // nodes do not render flow, but no longer forces block on a normal document —
+  // that flattened committed flow sequences and made this writer disagree with
+  // the other agents.yaml writers (RUSH-2505). parseDocument still preserves
+  // comments + key ordering.
   return isEmpty ? '' : stringifyDoc(doc);
 }
 
