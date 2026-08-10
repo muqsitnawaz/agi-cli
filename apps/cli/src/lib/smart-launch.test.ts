@@ -111,16 +111,37 @@ describe('resolveDeviceAuto', () => {
     expect(plan.pickedDeviceKey).toBe('idle');
   });
 
-  it('falls back to local when live probing cannot produce a viable remote', async () => {
-    const plan = await resolveDeviceAuto('codex', {
+  it('fails loud when live probing fails instead of silently launching locally', async () => {
+    await expect(resolveDeviceAuto('codex', {
       localMachine: 'local',
       eligibleHosts: ['local', 'remote'],
       probe: async () => {
         throw new Error('probe unavailable');
       },
+    })).rejects.toThrow('probe unavailable');
+  });
+
+  it('fails loud when local and remote accounts are both exhausted', async () => {
+    await expect(resolveDeviceAuto('codex', {
+      localMachine: 'local',
+      eligibleHosts: ['local', 'remote'],
+      probe: async () => new Map([
+        ['local', { reachable: true, installed: true, signedIn: false, headroom: 'idle' }],
+        ['remote', { reachable: true, installed: true, signedIn: false, headroom: 'idle' }],
+      ]),
+    })).rejects.toThrow(/local \(not-eligible\).*remote \(not-eligible\)/);
+  });
+
+  it('excludes an exhausted local account and selects an eligible remote', async () => {
+    const plan = await resolveDeviceAuto('codex', {
+      localMachine: 'local',
+      eligibleHosts: ['local', 'remote'],
+      probe: async () => new Map([
+        ['local', { reachable: true, installed: true, signedIn: false, headroom: 'idle' }],
+        ['remote', { reachable: true, installed: true, signedIn: true, headroom: 'light' }],
+      ]),
     });
-    expect(plan.host).toBeNull();
-    expect(plan.pickedDeviceKey).toBe('local');
+    expect(plan.host).toBe('remote');
   });
 
   it('keeps live load placement when run auto has not selected a harness yet', async () => {
@@ -215,17 +236,15 @@ describe('applyDeviceAutoToOptions', () => {
     expect(result.deprecationSmart).toBe(true);
   });
 
-  it('degrades to local on resolve failure without throwing', async () => {
+  it('fails loud on resolve failure and preserves the auto request', async () => {
     const options = { device: 'auto' as string | undefined, balanced: undefined as boolean | undefined };
-    const result = await applyDeviceAutoToOptions(options, {
+    await expect(applyDeviceAutoToOptions(options, {
       resolve: () => {
         throw new Error('db locked');
       },
-    });
-    expect(result.skipped).toBe('db locked');
-    expect(options.device).toBeUndefined();
+    })).rejects.toThrow('db locked');
+    expect(options.device).toBe('auto');
     expect(options.balanced).toBeUndefined();
-    expect(result.banner).toBeUndefined();
   });
 
   it('preserves strategy override and account-picker note', async () => {

@@ -189,6 +189,14 @@ describe('classifyExclusions — health/harness filters (RUSH-2002)', () => {
     expect(excluded).toEqual([{ device: 'box-a', reason: 'not-installed' }]);
   });
 
+  it('excludes a device with no eligible account', () => {
+    const { eligible, excluded } = classifyExclusions(['box-a', 'box-b'], [], {
+      signals: sig({ 'box-a': { installed: true, signedIn: false }, 'box-b': { installed: true, signedIn: true } }),
+    });
+    expect(eligible).toEqual(['box-b']);
+    expect(excluded).toEqual([{ device: 'box-a', reason: 'not-eligible' }]);
+  });
+
   it('folds the cap check in alongside signals, with running/cap detail', () => {
     const roster = [running('box-a'), running('box-a')];
     const { eligible, excluded } = classifyExclusions(['box-a', 'box-b'], roster, {
@@ -216,7 +224,7 @@ describe('classifyExclusions — health/harness filters (RUSH-2002)', () => {
 });
 
 describe('pickBestDevice — health/harness/load ranking (RUSH-2002)', () => {
-  it('prefers a signed-in device over a merely installed one', () => {
+  it('excludes an ineligible device instead of merely sorting it lower', () => {
     const signals = sig({
       'box-a': { installed: true, signedIn: false, headroom: 'idle' },
       'box-b': { installed: true, signedIn: true, headroom: 'idle' },

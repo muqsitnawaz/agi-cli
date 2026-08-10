@@ -71,6 +71,13 @@ describe('summarizeQuota', () => {
     expect(summarizeQuota(snapshot([win('week', 100)])).status).toBe('rate_limited');
   });
 
+  it('preserves canonical out_of_credits even without a quota snapshot', () => {
+    const quota = summarizeQuota(null, null, 'out_of_credits');
+    expect(quota.status).toBe('out_of_credits');
+    expect(computeReady(true, quota)).toEqual({ ready: false, reason: 'out of credits' });
+    expect(formatQuota(quota)).toBe('no credits');
+  });
+
   it('marks a cached (last_seen) snapshot stale', () => {
     expect(summarizeQuota(snapshot([win('session', 5)], 'last_seen')).stale).toBe(true);
   });

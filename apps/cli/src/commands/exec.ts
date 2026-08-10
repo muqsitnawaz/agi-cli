@@ -825,7 +825,7 @@ export function registerRunCommand(program: Command): void {
     )
     .option(
       '--host <name>',
-      'Offload this run onto another machine over SSH — a device name, registered host, or user@host. Pass "auto" to pick the least-loaded reachable device where the requested agent is installed and signed in, keeping the run local when no remote is better. Same as --where device:<name>. See `agents devices`.',
+      'Offload this run onto another machine over SSH — a device name, registered host, or user@host. Pass "auto" to pick the least-loaded reachable device with an eligible account; local participates in the same comparison, and an all-ineligible pool fails loud. Same as --where device:<name>. See `agents devices`.',
     )
     .option(
       '--device <name>',

@@ -111,7 +111,7 @@ export interface DeviceAutoPlan {
  * Pick the least-loaded healthy device that can run `agent` when the harness is
  * known. `run auto` omits the agent and ranks the same live health/load signals
  * without an installed-harness filter. The local machine participates in the
- * same probe; a fully unusable fleet degrades to local instead of stranding a run.
+ * same probe. A fully unusable fleet fails loud; local is a candidate, not a fallback.
  */
 export async function resolveDeviceAuto(
   agent?: string,
@@ -125,26 +125,18 @@ export async function resolveDeviceAuto(
   const pool = [...new Set((opts.eligibleHosts ?? listOnlineDeviceNames(local)).map(normalizeHost))];
   if (!pool.includes(local)) pool.push(local);
 
-  try {
-    const signals = await (opts.probe ?? probePoolSignals)(pool, agent as AgentType | undefined);
-    const picked = pickBestDevice(pool, [], { signals, agentLabel: agent });
-    return {
-      host: picked === local ? null : picked,
-      pickedDeviceKey: picked,
-      candidates: pool.map((key) => ({
-        key,
-        loadPercent: signals.get(key)?.loadPercent,
-        installed: signals.get(key)?.installed,
-        signedIn: signals.get(key)?.signedIn,
-      })),
-    };
-  } catch {
-    return {
-      host: null,
-      pickedDeviceKey: local,
-      candidates: [{ key: local }],
-    };
-  }
+  const signals = await (opts.probe ?? probePoolSignals)(pool, agent as AgentType | undefined);
+  const picked = pickBestDevice(pool, [], { signals, agentLabel: agent });
+  return {
+    host: picked === local ? null : picked,
+    pickedDeviceKey: picked,
+    candidates: pool.map((key) => ({
+      key,
+      loadPercent: signals.get(key)?.loadPercent,
+      installed: signals.get(key)?.installed,
+      signedIn: signals.get(key)?.signedIn,
+    })),
+  };
 }
 
 /**
@@ -289,16 +281,6 @@ export async function applyDeviceAutoToOptions(
       banner: { hostLabel, deviceHint, acctNote },
     };
   } catch (err) {
-    // Graceful degrade: clear auto slots so the run continues locally.
-    for (const k of HOST_SLOTS) {
-      if (isDeviceAuto(options[k])) {
-        options[k] = undefined;
-      }
-    }
-    return {
-      attempted: true,
-      deprecationSmart,
-      skipped: (err as Error).message,
-    };
+    throw err instanceof Error ? err : new Error(String(err));
   }
 }

@@ -38,7 +38,8 @@ agents run claude "…"                  --host auto                # same (host
 Pass `auto` as the `--host` / `--device` value to pick a host from 14-day session
 affinity (weighted by launch counts on `sessions.db` `machine`; most-used online
 device has highest probability). Harness stays the agent you typed — never
-auto-picked. Affinity failure degrades to local rather than aborting the run.
+auto-picked. The local machine participates in the same eligibility comparison;
+placement failure or an all-ineligible pool aborts instead of silently launching locally.
 
 ### `agents run auto` — all three routing layers
 

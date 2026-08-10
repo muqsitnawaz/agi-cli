@@ -89,7 +89,7 @@ export interface PlacementOptions {
 }
 
 /** Why a device was excluded from the viable set, for the fail-loud message. */
-export type ExclusionReason = 'unreachable' | 'overloaded' | 'capped' | 'not-installed';
+export type ExclusionReason = 'unreachable' | 'overloaded' | 'capped' | 'not-installed' | 'not-eligible';
 
 /** A pool device dropped from the auto-pick, with the reason + live detail. */
 export interface ExcludedDevice {
@@ -277,6 +277,10 @@ export function classifyExclusions(
     }
     if (s?.installed === false) {
       excluded.push({ device: d, reason: 'not-installed' });
+      continue;
+    }
+    if (s?.signedIn === false) {
+      excluded.push({ device: d, reason: 'not-eligible' });
       continue;
     }
     if (s?.headroom === 'loaded') {

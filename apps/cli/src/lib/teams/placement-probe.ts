@@ -33,8 +33,9 @@ import {
 } from '../hosts/ready.js';
 import { localMachineId } from '../session/origin-machine.js';
 import { normalizeHost } from '../machine-id.js';
-import { checkCliAvailable, checkCliSignedIn, type AgentType } from './agents.js';
+import { checkCliAvailable, type AgentType } from './agents.js';
 import type { DevicePlacementSignal } from './scheduler.js';
+import { collectLocalHarnessInventory } from '../devices/harness-inventory.js';
 
 /** Per-remote readiness probe budget — matches the health probe's short window
  * (`agents view` on a warm box is sub-second; a wedged one degrades to unknown). */
@@ -139,7 +140,8 @@ export async function probePoolSignals(
         const isSelf = normalizeHost(d.name) === self;
         if (isSelf) {
           const inst = checkCliAvailable(agent)[0];
-          const signedIn = inst ? await checkCliSignedIn(agent) : undefined;
+          const rows = inst ? await collectLocalHarnessInventory({ agents: [agent] }) : [];
+          const signedIn = inst ? rows.some((row) => row.ready) : false;
           return [d.name, { installed: inst, signedIn }];
         }
         return [d.name, await probeRemoteReadiness(d, agent)];
