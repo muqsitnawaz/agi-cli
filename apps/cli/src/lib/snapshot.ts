@@ -20,34 +20,6 @@ import { computeAgentCounts, type FleetAgentCounts } from './fleet-status.js';
 import type { AgentId } from './types.js';
 import type { UnifiedSyncStatus } from './sync-status.js';
 import type { ViewJsonAgent } from '../commands/view.js';
-import type { HarnessRow } from './devices/harness-inventory.js';
-import { ALL_AGENT_IDS, AGENTS } from './agents.js';
-
-export interface SnapshotHarness {
-  id: AgentId;
-  name: string;
-  cliCommand: string;
-  modes: readonly string[];
-  capabilities: Record<string, unknown>;
-}
-
-export interface SnapshotDevice {
-  /** Canonical device name. */
-  name: string;
-  /** Effective registry profile after central config overlays. */
-  profile: Record<string, unknown>;
-  /** Effective device-scoped config, keyed by canonical yaml key. */
-  config: Record<string, unknown>;
-  /** Installed harness/account/quota eligibility rows. */
-  harnesses: HarnessRow[];
-  /** Newest eligibility verdict timestamp, ISO-8601. */
-  capturedAt: string | null;
-  freshness: {
-    status: 'fresh' | 'stale' | 'unavailable';
-    ageMs: number | null;
-    unavailableReason: string | null;
-  };
-}
 
 /** One open-block row in the optional feed summary (no full question bodies). */
 export interface SnapshotFeedBlock {
@@ -89,10 +61,6 @@ export interface FleetSnapshot {
   capturedAt: string;
   /** Installed agent inventory — same shape as `agents view --json`. */
   inventory: ViewJsonAgent[];
-  /** Native harness identity/capability catalog derived from AGENTS. */
-  harnesses: SnapshotHarness[];
-  /** Canonical per-device launch-readiness view. */
-  devices: SnapshotDevice[];
   /** Live sessions — same row shape as `agents sessions --active --json`. */
   sessions: SnapshotSessionRow[];
   /** How many remote devices contributed sessions (0 when --local). */
@@ -151,8 +119,6 @@ export function assembleSnapshot(parts: {
   host: string;
   capturedAt: string;
   inventory: ViewJsonAgent[];
-  harnesses?: SnapshotHarness[];
-  devices?: SnapshotDevice[];
   sessions: SnapshotSessionRow[];
   remoteDeviceCount: number;
   feed?: SnapshotFeedSummary;
@@ -163,14 +129,6 @@ export function assembleSnapshot(parts: {
     host: parts.host,
     capturedAt: parts.capturedAt,
     inventory: parts.inventory,
-    harnesses: parts.harnesses ?? ALL_AGENT_IDS.map((id) => ({
-      id,
-      name: AGENTS[id].name,
-      cliCommand: AGENTS[id].cliCommand,
-      modes: AGENTS[id].capabilities.modes,
-      capabilities: AGENTS[id].capabilities as unknown as Record<string, unknown>,
-    })),
-    devices: parts.devices ?? [],
     sessions: parts.sessions,
     remoteDeviceCount: parts.remoteDeviceCount,
     agents: computeAgentCounts(
@@ -216,19 +174,11 @@ export async function computeSnapshot(
     ? import('./sync-status.js').then((m) => m.computeSyncStatus())
     : Promise.resolve(undefined);
 
-  // Device eligibility fans out independently from active sessions. Start it
-  // in the same wave so --all-hosts pays one network deadline, not two.
-  const devicesP = collectSnapshotDevices({
-    agent: opts.agent,
-    allHosts: !localOnly,
-  });
-
-  const [inventory, gathered, feed, sync, devices] = await Promise.all([
+  const [inventory, gathered, feed, sync] = await Promise.all([
     inventoryP,
     sessionsP,
     feedP,
     syncP,
-    devicesP,
   ]);
 
   const sessions = sessionsMod.serializeActiveSessionsForJson(
@@ -239,64 +189,9 @@ export async function computeSnapshot(
     host: machineId(),
     capturedAt: new Date().toISOString(),
     inventory,
-    devices,
     sessions,
     remoteDeviceCount: gathered.remoteDeviceCount,
     feed,
     sync,
-  });
-}
-
-/** Gather canonical device profiles + eligibility without consumer-side joins. */
-export async function collectSnapshotDevices(opts: {
-  agent?: AgentId;
-  allHosts: boolean;
-  now?: number;
-}): Promise<SnapshotDevice[]> {
-  const now = opts.now ?? Date.now();
-  const [{ loadDevices }, { resolveDeviceProfile }, deviceConfig, sshCommand, harnessInventory] = await Promise.all([
-    import('./devices/registry.js'),
-    import('./devices/resolve-profile.js'),
-    import('./device-config.js'),
-    import('../commands/ssh.js'),
-    import('./devices/harness-inventory.js'),
-  ]);
-  const registry = await loadDevices();
-  const self = machineId();
-  const names = [...new Set([self, ...Object.keys(registry)])].sort();
-  const results = opts.allHosts
-    ? await sshCommand.collectFleetHarnesses({ agents: opts.agent ? [opts.agent] : undefined })
-    : [{ host: self, rows: await harnessInventory.collectLocalHarnessInventory({ agents: opts.agent ? [opts.agent] : undefined }) }];
-  const byHost = new Map(results.map((result) => [result.host, result]));
-
-  return names.map((name) => {
-    const result = byHost.get(name);
-    const rows = result?.rows ?? [];
-    const capturedMs = rows.reduce((latest, row) => Math.max(latest, row.capturedAt ?? 0), 0);
-    const quotaCaptured = rows
-      .map((row) => row.quota.capturedAt)
-      .filter((value): value is number => typeof value === 'number' && value > 0);
-    const oldestDataMs = quotaCaptured.length > 0 ? Math.min(...quotaCaptured) : capturedMs;
-    const ageMs = oldestDataMs > 0 ? Math.max(0, now - oldestDataMs) : null;
-    const unavailableReason = result?.error ?? result?.skipped ?? (!result ? 'not requested' : null);
-    const config: Record<string, unknown> = {};
-    for (const entry of deviceConfig.listConfig({ device: name })) {
-      if (entry.spec.scope === 'device' && entry.value !== undefined) config[entry.spec.yamlKey] = entry.value;
-    }
-    const profile = registry[name]
-      ? resolveDeviceProfile(registry[name]) as unknown as Record<string, unknown>
-      : { name };
-    return {
-      name,
-      profile,
-      config,
-      harnesses: rows,
-      capturedAt: capturedMs > 0 ? new Date(capturedMs).toISOString() : null,
-      freshness: {
-        status: unavailableReason ? 'unavailable' as const : rows.some((row) => row.quota.stale) ? 'stale' as const : 'fresh' as const,
-        ageMs,
-        unavailableReason,
-      },
-    };
   });
 }

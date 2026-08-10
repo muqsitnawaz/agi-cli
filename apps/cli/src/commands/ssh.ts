@@ -115,7 +115,6 @@ import {
   authCellColor,
   formatCheckedAge,
   isDeadVerdict,
-  probeLocalFleetAuth,
   readAuthHealthCache,
   summarizeHostAuth,
   summarizeVerdicts,
@@ -737,12 +736,11 @@ export async function raceFleetPingDeadline<T, Target extends FanOutDeviceTarget
 
 async function runFleetPing(opts: { json?: boolean; local?: boolean; verbose?: boolean; strict?: boolean }): Promise<void> {
   const self = machineId();
-  const cliVersion = getCliVersion();
+  const { refreshLocalFleetAuthState } = await import('../lib/daemon-ticks.js');
 
   // --local: probe just this host. Used both directly and as the fan-out worker.
   if (opts.local) {
-    const rows = await probeLocalFleetAuth({ cliVersion });
-    writeFleetAuthRows(self, rows);
+    const { authRows: rows } = await refreshLocalFleetAuthState();
     if (opts.json) {
       console.log(JSON.stringify({ host: self, rows }));
     } else {
@@ -759,8 +757,7 @@ async function runFleetPing(opts: { json?: boolean; local?: boolean; verbose?: b
   const planned = planFleetTargets(reg);
   const results: FleetPingHostResult[] = [];
 
-  const localRows = await probeLocalFleetAuth({ cliVersion });
-  writeFleetAuthRows(self, localRows);
+  const { authRows: localRows } = await refreshLocalFleetAuthState();
   results.push({ host: self, rows: localRows });
 
   const remoteTargets: FleetStatusTarget[] = remoteFleetTargets(planned, self).map((t) => ({
@@ -821,7 +818,7 @@ async function runFleetPing(opts: { json?: boolean; local?: boolean; verbose?: b
 // process, then SSH each peer's `devices harnesses --local --json` worker.
 // ---------------------------------------------------------------------------
 
-export interface HarnessInventoryOpts {
+interface HarnessInventoryOpts {
   agents?: AgentId[];
   devices?: string[];
   refresh?: boolean;
@@ -854,7 +851,7 @@ async function probeRemoteHarnesses(
  * the local and remote rows. Bounded by the same per-device + overall deadlines
  * as `fleet ping`, so one unreachable box can never stall the glance.
  */
-export async function collectFleetHarnesses(opts: HarnessInventoryOpts): Promise<HostHarnessResult[]> {
+async function collectFleetHarnesses(opts: HarnessInventoryOpts): Promise<HostHarnessResult[]> {
   const self = machineId();
   const want = opts.devices?.length ? new Set(opts.devices) : null;
   const results: HostHarnessResult[] = [];
@@ -1566,25 +1563,6 @@ function registerDevicesCommands(program: Command): void {
     const reg = await loadDevices();
     const names = Object.keys(reg).sort();
     const interactiveHost = getConfigValue('interactive.host').value as string | undefined;
-    if (opts.json) {
-      // Registry + central config block, always fast — the Factory extension
-      // polls this path. Each row is the EFFECTIVE profile (registry overlaid
-      // with the central ssh.*/platform/user config) and carries its
-      // device-scope `config` (maxAgents, schedulerEnabled, notes, ssh*,
-      // autoLaunch* — set keys only) plus an `interactive` flag for the
-      // configured interactive host.
-      process.stdout.write(
-        JSON.stringify(
-          names.map((n) => {
-            const config = deviceConfigJson(n);
-            return { ...resolveDeviceProfile(reg[n]), interactive: n === interactiveHost, ...(config ? { config } : {}) };
-          }),
-          null,
-          2,
-        ) + '\n',
-      );
-      return;
-    }
     if (names.length === 0) {
       console.log(chalk.gray("No devices. Run 'agents devices sync' or 'agents devices add <name> <user@host>'."));
       return;
@@ -1619,6 +1597,30 @@ function registerDevicesCommands(program: Command): void {
       if (statsMap) await writeReachability(collectReachabilityWriteBacks(reg, statsMap)).catch(() => {});
     }
 
+    if (opts.json) {
+      // This is the canonical device read surface: effective registry profile,
+      // device-scoped config, interactive-host designation, and health from the
+      // same cache/probe path used by the human table. Account/quota eligibility
+      // remains owned by `devices accounts --json`.
+      process.stdout.write(
+        JSON.stringify(
+          names.map((n) => {
+            const config = deviceConfigJson(n);
+            const health = statsMap?.get(n);
+            return {
+              ...resolveDeviceProfile(reg[n]),
+              interactive: n === interactiveHost,
+              ...(config ? { config } : {}),
+              ...(health ? { health: { ...health, headroom: headroom(health) } } : {}),
+            };
+          }),
+          null,
+          2,
+        ) + '\n',
+      );
+      return;
+    }
+
     console.log(chalk.bold(`Devices (${names.length})`));
     for (const line of renderDeviceTable(reg, names, self, statsMap, opts.full, interactiveHost)) console.log(line);
     if (freshness?.servedFromCache && freshness.oldestFetchedAt != null) {
@@ -1642,7 +1644,7 @@ function registerDevicesCommands(program: Command): void {
     .command('list')
     .alias('ls')
     .description('List registered devices with platform, address, reachability, and live resource headroom.')
-    .option('--json', 'output the registry as a JSON array (for scripts and hooks)')
+    .option('--json', 'output effective device profiles, config, and health as a JSON array')
     .option('--no-stats', 'skip the live resource probe (instant; names/addresses only)')
     .option('--refresh', 'force a live probe of every device, bypassing the cache')
     .option('--live', 'alias of --refresh (shorter to type)')

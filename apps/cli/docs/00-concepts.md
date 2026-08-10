@@ -281,9 +281,10 @@ Mixing doors fails loud (`--where` + `--host`, `--host` + `--lease`, …). Sourc
 of truth: [`src/lib/placement.ts`](../src/lib/placement.ts).
 
 **UI clients do not select and then launch an automatic target.** A picker reads
-`agents snapshot --json --all-hosts` for canonical harness identity, effective
-device config, account eligibility, and quota freshness, but that snapshot is
-advisory. The action is always `agents run <agent> --where auto`: the CLI
+the owning device surfaces: `agents devices list --json` for effective profiles,
+config, and health, plus `agents devices accounts --json` for account/quota
+eligibility. Those reads are advisory. The action is always
+`agents run <agent> --where auto`: the CLI
 re-evaluates placement and account eligibility in the launch transaction. Turning
 an earlier picker suggestion into `--host <name>` creates a stale race and is not
 automatic placement.
