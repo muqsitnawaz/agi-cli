@@ -14777,7 +14777,7 @@
         }
       ],
       "examples": "agents projects import --from-linear  # the projects you actually track\n      agents projects add rush --repo phnx-labs/rush --path apps/web\n      agents projects list                 # definitions only (no session scan)\n      agents projects list --with-agents   # opt-in local active counts\n      agents projects list --json          # machine-readable defs (Factory uses this)\n      echo '{...}' | agents projects save --json  # create/update one def from stdin\n      agents projects rm rush --json       # machine-readable delete\n      agents projects status              # every project, across the whole fleet\n      agents projects status rush         # one project (same body as view/show)\n      agents projects view rush           # alias of status <name>\n      agents projects status --device s0  # scope to one device (or --devices a,b,c)\n      agents projects link rush --linear  # bind the Linear project (auto-suggest)\n      agents run --project rush           # land an agent in the project",
-      "notes": "Definitions are hand-editable YAML in ~/.agents/projects/ and sync across\n      machines with 'agents push/pull'. Factory reads and writes only through\n      these commands — never ~/.agents/factory/projects.json.",
+      "notes": "Definitions are hand-editable YAML in ~/.agents/projects/, committed and\n      distributed to the fleet with 'agents repo push user' ('agents push' was\n      removed). Factory reads and writes only through these commands — never\n      ~/.agents/factory/projects.json.",
       "subcommands": [
         {
           "name": "add",
@@ -14815,6 +14815,24 @@
               "flags": "--repo <owner/repo>",
               "description": "Primary GitHub slug (defaults to the origin remote)",
               "long": "--repo",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--dir <path...>",
+              "description": "Bind another local repo dir; its slug is read from that dir's origin. Repeatable",
+              "long": "--dir",
+              "required": true,
+              "optional": false,
+              "variadic": true,
+              "negate": false
+            },
+            {
+              "flags": "--slug <owner/repo>",
+              "description": "Slug override for a single --dir with no origin remote",
+              "long": "--slug",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -15132,6 +15150,33 @@
               "required": true,
               "optional": false,
               "variadic": true,
+              "negate": false
+            },
+            {
+              "flags": "--add-dir <path...>",
+              "description": "Bind another local repo dir; its slug is read from that dir's origin. Repeatable",
+              "long": "--add-dir",
+              "required": true,
+              "optional": false,
+              "variadic": true,
+              "negate": false
+            },
+            {
+              "flags": "--rm-dir <path...>",
+              "description": "Unbind a previously-bound local repo dir. Repeatable",
+              "long": "--rm-dir",
+              "required": true,
+              "optional": false,
+              "variadic": true,
+              "negate": false
+            },
+            {
+              "flags": "--slug <owner/repo>",
+              "description": "Slug override for a single --add-dir with no origin remote",
+              "long": "--slug",
+              "required": true,
+              "optional": false,
+              "variadic": false,
               "negate": false
             },
             {
