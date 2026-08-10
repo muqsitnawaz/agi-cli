@@ -152,9 +152,10 @@ export function routineDeviceIndex(): RoutineDeviceIndex {
     }
 
     materialized = true;
-    for (const routine of routines as string[]) {
-      const name = routine.trim();
-      if (!name) continue;
+    // Same normalization the writers use (`replaceEnabledRoutines`), so a device
+    // that lists a routine twice, or with stray whitespace, cannot make the index
+    // disagree with `enabledRoutineNames` about what that device enables.
+    for (const name of normalizeRoutineNames(routines as string[])) {
       const devices = byRoutine.get(name);
       if (devices) devices.push(entry.name);
       else byRoutine.set(name, [entry.name]);

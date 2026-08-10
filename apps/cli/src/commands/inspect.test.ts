@@ -576,8 +576,14 @@ function repoAt(root: string) {
 /** Live state a test controls, so nothing reads the developer's real fleet. */
 function fakeLive(overrides: Partial<RoutineLiveState> = {}): (name: string) => RoutineLiveState {
   return () => ({
-    devices: [], materialized: false, thisDevice: 'testbox', lastStatus: null, lastAt: null, ...overrides,
+    devices: [], materialized: false, thisDevice: 'testbox', enabledHere: null,
+    lastStatus: null, lastAt: null, ...overrides,
   });
+}
+
+/** One `extra` row's value, or '' — mirrors the renderers' accessor. */
+function extraValue(item: { extra?: Array<[string, string]> }, key: string): string {
+  return item.extra?.find(([k]) => k === key)?.[1] ?? '';
 }
 
 const AGENT_ROUTINE = 'name: daily\nschedule: "0 9 * * *"\nagent: claude\nprompt: Review the queue and file what is stale.\n';
@@ -632,11 +638,32 @@ describe('collectRepoRoutines', () => {
     expect(item.extra?.find(([k]) => k === 'problem')?.[1]).toMatch(/invalid YAML/);
   });
 
-  it('flags a .yml/.yaml collision and still lists the routine once', () => {
-    const root = makeRoutinesRepo({ 'dup.yml': 'name: dup\nagent: claude\n', 'dup.yaml': 'name: dup\nagent: claude\n' });
+  it('flags a .yml/.yaml collision and describes the file the loader actually loads', () => {
+    // readJobFromDir tries `.yml` before `.yaml`, so `.yml` is what fires. A plain
+    // alphabetical sort described `.yaml` — the wrong schedule and command.
+    const root = makeRoutinesRepo({
+      'dup.yaml': 'name: dup\nschedule: "0 9 * * *"\ncommand: echo FROM_YAML\n',
+      'dup.yml': 'name: dup\nschedule: "0 3 * * *"\ncommand: echo FROM_YML\n',
+    });
     const items = collectRepoRoutines(repoAt(root), fakeLive());
     expect(items).toHaveLength(1);
+    expect(items[0].path).toMatch(/dup\.yml$/);
+    expect(items[0].json?.command).toBe('echo FROM_YML');
+    expect(items[0].json?.scheduleHuman).toBe('daily at 3:00 AM');
+    // The problem reaches BOTH renderers: extra for the panes, json for --json.
     expect(items[0].extra?.find(([k]) => k === 'problem')?.[1]).toMatch(/both \.yml and \.yaml/);
+    expect(String(items[0].json?.problem)).toMatch(/both \.yml and \.yaml/);
+  });
+
+  it('keeps a collided routine\'s schedule and status in the overview row', () => {
+    // A duplicate sibling must not blank an otherwise-healthy routine's row.
+    const root = makeRoutinesRepo({
+      'dup.yml': 'name: dup\nschedule: "0 3 * * *"\ncommand: echo hi\n',
+      'dup.yaml': 'name: dup\ncommand: echo bye\n',
+    });
+    const [item] = collectRepoRoutines(repoAt(root), fakeLive({ devices: ['testbox'], materialized: true }));
+    expect(extraValue(item, 'fires')).toBe('daily at 3:00 AM');
+    expect(extraValue(item, 'devices')).toBe('testbox');
   });
 
   it('folds the enabled devices and the last run into extra', () => {
@@ -664,12 +691,26 @@ describe('collectRepoRoutines', () => {
 
   it('reports enablement for THIS device, matching `agents routines list`', () => {
     const root = makeRoutinesRepo({ 'daily.yml': AGENT_ROUTINE });
-    // Enabled elsewhere on the fleet is not enabled here.
-    const [elsewhere] = collectRepoRoutines(repoAt(root), fakeLive({ devices: ['other'], materialized: true }));
-    expect(elsewhere.json?.enabled).toBe(false);
+    // enabledHere is this device's own answer — the same one applyDeviceActivation asks.
+    const [off] = collectRepoRoutines(repoAt(root), fakeLive({ devices: ['other'], materialized: true, enabledHere: false }));
+    expect(off.json?.enabled).toBe(false);
 
-    const [here] = collectRepoRoutines(repoAt(root), fakeLive({ devices: ['testbox'], materialized: true }));
-    expect(here.json?.enabled).toBe(true);
+    const [on] = collectRepoRoutines(repoAt(root), fakeLive({ devices: ['testbox'], materialized: true, enabledHere: true }));
+    expect(on.json?.enabled).toBe(true);
+  });
+
+  it('keeps the file value when THIS device has no allowlist, even if a peer does', () => {
+    // The freshly-synced-member case. `materialized` is fleet-wide, so keying
+    // `enabled` on it reported `no` for routines the daemon was actively firing.
+    // applyDeviceActivation only overrides when THIS device answers non-null.
+    const root = makeRoutinesRepo({
+      'on.yml': 'name: on\nschedule: "0 9 * * *"\nagent: claude\nenabled: true\n',
+      'off.yml': 'name: off\nschedule: "0 9 * * *"\nagent: claude\nenabled: false\n',
+    });
+    const peerOnly = fakeLive({ devices: ['mac-mini'], materialized: true, enabledHere: null });
+    const items = collectRepoRoutines(repoAt(root), peerOnly);
+    expect(items.find(i => i.name === 'on')?.json?.enabled).toBe(true);
+    expect(items.find(i => i.name === 'off')?.json?.enabled).toBe(false);
   });
 
   it('keeps every extra value free of ANSI — they become JSON keys', () => {

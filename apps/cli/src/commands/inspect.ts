@@ -67,7 +67,12 @@ import {
   type JobConfig,
   type RunMeta,
 } from '../lib/routines.js';
-import { routineDeviceIndex, currentRoutineDevice, type RoutineDeviceIndex } from '../lib/routine-activation.js';
+import {
+  routineDeviceIndex,
+  currentRoutineDevice,
+  routineEnabledOnThisDevice,
+  type RoutineDeviceIndex,
+} from '../lib/routine-activation.js';
 import { humanizeCron } from '../lib/routines-format.js';
 
 /** Resource kinds the inspect command can drill into. */
@@ -462,6 +467,17 @@ export interface RoutineLiveState {
   materialized: boolean;
   /** This machine's name, for reporting whether the routine is enabled here. */
   thisDevice: string;
+  /**
+   * THIS machine's activation answer, from `routineEnabledOnThisDevice` — the
+   * same call `applyDeviceActivation` makes. `null` means this device has not
+   * materialized its own allowlist, so the file's `enabled:` still governs.
+   *
+   * Deliberately separate from `materialized`, which is fleet-wide: a box whose
+   * own device doc has no `routines:` key while a synced peer's does is the
+   * normal state of a freshly-joined machine, and conflating the two reported
+   * `enabled: no` for routines the daemon was actively firing.
+   */
+  enabledHere: boolean | null;
   /** Last run's status, or null if it has never run on a device we can see. */
   lastStatus: RunMeta['status'] | null;
   /** ISO timestamp of that run's start. */
@@ -469,21 +485,19 @@ export interface RoutineLiveState {
 }
 
 const NO_LIVE_STATE: RoutineLiveState = {
-  devices: [], materialized: false, thisDevice: '', lastStatus: null, lastAt: null,
+  devices: [], materialized: false, thisDevice: '', enabledHere: null, lastStatus: null, lastAt: null,
 };
 
 /**
  * Whether the routine actually runs on this machine.
  *
- * Mirrors `applyDeviceActivation`: once a device has materialized a `routines:`
- * list, membership in it is the whole answer and the file's own `enabled:` no
- * longer matters. Reporting the raw file value here would contradict
- * `agents routines list` — and print `enabled: false` for a routine that ran
- * two hours ago.
+ * Exactly `applyDeviceActivation` (`lib/routines.ts`): this device's own
+ * allowlist answer wins when it exists, and the file's `enabled:` governs only
+ * while that answer is `null`. Measured at the same scope as the daemon's, so
+ * `agents inspect --routines` and `agents routines list` cannot disagree.
  */
 function routineEnabledHere(config: JobConfig, live: RoutineLiveState): boolean {
-  if (!live.materialized) return config.enabled;
-  return live.thisDevice !== '' && live.devices.includes(live.thisDevice);
+  return live.enabledHere === null ? config.enabled : live.enabledHere;
 }
 
 /**
@@ -511,25 +525,35 @@ function latestRunOf(name: string, maxProbes = 20): RunMeta | null {
   return null;
 }
 
-/** Default live provider: one fleet index per collect, one bounded run read per routine. */
-function defaultRoutineLive(): (name: string) => RoutineLiveState {
+/**
+ * Default live provider: one fleet index per collect, one bounded run read per
+ * routine, and this device's own activation answer per routine.
+ *
+ * Returns the collected `errors` alongside so the caller can surface an
+ * unreadable device document instead of letting the affected device silently
+ * vanish from every `devices` cell.
+ */
+function defaultRoutineLive(): { live: (name: string) => RoutineLiveState; errors: string[] } {
   let index: RoutineDeviceIndex;
   try {
     index = routineDeviceIndex();
-  } catch {
-    return () => NO_LIVE_STATE;
+  } catch (err) {
+    return { live: () => NO_LIVE_STATE, errors: [(err as Error).message] };
   }
   const thisDevice = (() => { try { return currentRoutineDevice(); } catch { return ''; } })();
-  return (name: string) => {
+  const live = (name: string): RoutineLiveState => {
     const run = latestRunOf(name);
     return {
       devices: index.byRoutine.get(name) ?? [],
       materialized: index.materialized,
       thisDevice,
+      // The same call applyDeviceActivation makes — per-machine, not fleet-wide.
+      enabledHere: (() => { try { return routineEnabledOnThisDevice(name); } catch { return null; } })(),
       lastStatus: run?.status ?? null,
       lastAt: run?.startedAt ?? null,
     };
   };
+  return { live, errors: index.errors };
 }
 
 /** `2h` / `3d` / `just now` — compact enough for a 10-column cell. */
@@ -605,23 +629,6 @@ export function routineDescription(job: JobConfig | null, raw: string): string {
   return '';
 }
 
-/** `zion`, `zion +2`, `none` — the Devices cell, uncoloured. */
-export function compactDevices(live: RoutineLiveState): string {
-  if (live.devices.length === 0) return live.materialized ? 'none' : 'unset';
-  if (live.devices.length === 1) return live.devices[0];
-  return `${live.devices[0]} +${live.devices.length - 1}`;
-}
-
-/** `ok 2h`, `fail 3d`, `never` — the Last cell, uncoloured, ≤10 chars. */
-export function compactLast(live: RoutineLiveState, now: Date = new Date()): string {
-  if (!live.lastStatus) return 'never';
-  const age = compactAge(live.lastAt, now);
-  const word = live.lastStatus === 'completed' ? 'ok'
-    : live.lastStatus === 'failed' ? 'fail'
-    : live.lastStatus === 'running' ? 'running'
-    : live.lastStatus;
-  return age ? `${word} ${age}` : word;
-}
 
 /**
  * Read every routine one DotAgents repo declares.
@@ -634,7 +641,7 @@ export function compactLast(live: RoutineLiveState, now: Date = new Date()): str
  */
 export function collectRepoRoutines(
   repo: RepoTarget,
-  live: (name: string) => RoutineLiveState = defaultRoutineLive(),
+  live: (name: string) => RoutineLiveState = defaultRoutineLive().live,
   now: Date = new Date(),
 ): ResourceItem[] {
   const dir = path.join(repo.root, 'routines');
@@ -647,10 +654,19 @@ export function collectRepoRoutines(
   const seen = new Map<string, ResourceItem>();
 
   // Files only: `routines/<name>/home/` is a sandbox overlay HOME, not a routine.
+  //
+  // `.yml` before `.yaml` for the same basename, because that is the order
+  // `readJobFromDir` tries — so when both exist we describe the file the daemon
+  // actually loads. A plain alphabetical sort put `.yaml` first and reported the
+  // wrong schedule and command for a routine that fires from its sibling.
   const files = entries
     .filter(e => e.isFile() && /\.ya?ml$/.test(e.name) && !e.name.startsWith('.'))
     .map(e => e.name)
-    .sort();
+    .sort((a, b) => {
+      const an = a.replace(/\.ya?ml$/, ''), bn = b.replace(/\.ya?ml$/, '');
+      if (an !== bn) return an.localeCompare(bn);
+      return (a.endsWith('.yml') ? 0 : 1) - (b.endsWith('.yml') ? 0 : 1);
+    });
 
   for (const file of files) {
     const filePath = path.join(dir, file);
@@ -660,9 +676,12 @@ export function collectRepoRoutines(
 
     const existing = seen.get(name);
     if (existing) {
-      // `writeJob` refuses to edit a routine with both extensions; surface the
-      // ambiguity here rather than silently listing one of them.
-      existing.extra = [...(existing.extra ?? []), ['problem', 'both .yml and .yaml exist — resolve before editing']];
+      // `writeJob` refuses to edit a routine with both extensions. Keep the item
+      // built from the file that loads, and flag the ambiguity on it — in `extra`
+      // for the panes AND in `json` so a --json consumer sees it too.
+      const collision = `both .yml and .yaml exist — ${file} is ignored; resolve before editing`;
+      existing.extra = [...(existing.extra ?? []), ['problem', collision]];
+      if (existing.json) existing.json.problem = collision;
       continue;
     }
 
@@ -868,9 +887,19 @@ function renderRepoSummary(repo: RepoTarget, options: InspectOptions): void {
   let totalBytes = 0, totalFiles = 0;
   let repoHookByScript: Map<string, ManifestHook> = new Map();
   let repoMcpConfigs: Map<string, McpYamlConfig> = new Map();
+  let routineActivationErrors: string[] = [];
   if (!options.brief) {
     for (const kind of DRILLABLE_KINDS) {
-      const items = collectRepoKind(repo, kind);
+      // Routines share one live provider across the collect so the fleet index is
+      // read once, and so its errors survive to be reported below.
+      let items: ResourceItem[];
+      if (kind === 'routines') {
+        const provider = defaultRoutineLive();
+        routineActivationErrors = provider.errors;
+        items = collectRepoRoutines(repo, provider.live);
+      } else {
+        items = collectRepoKind(repo, kind);
+      }
       // `routines/` also holds `<name>/home/` sandbox overlays — often far larger
       // than the definitions and not resources at all, so weigh the files listed
       // rather than the directory tree.
@@ -993,6 +1022,11 @@ function renderRepoSummary(repo: RepoTarget, options: InspectOptions): void {
       console.log('');
       console.log(`  ${chalk.yellow('⚠')}  ${dark}`);
       console.log(chalk.gray(`     Fix:  agents routines devices <name> --set <device>`));
+    }
+    // An unreadable device document silently removes that device from every
+    // `devices` cell, which reads as "not enabled there" — say so instead.
+    for (const err of routineActivationErrors) {
+      console.log(chalk.gray(`  device config unreadable — ${err}`));
     }
   }
 
@@ -1516,7 +1550,7 @@ function collectKind(agent: AgentId, versionHome: string, kind: DrillableKind): 
  * unsynced project routine that can never fire is not listed as if it could.
  */
 function agentRoutineItems(agent: AgentId): ResourceItem[] {
-  const live = defaultRoutineLive();
+  const { live } = defaultRoutineLive();
   const now = new Date();
   let jobs: JobConfig[];
   try { jobs = listJobs(); } catch { return []; }
@@ -2008,7 +2042,11 @@ function routineRows(items: ResourceItem[]): RichRow[] {
 
   return ordered.map(item => {
     const problem = extraOf(item, 'problem');
-    if (problem) {
+    const fires = extraOf(item, 'fires');
+    // A routine with no `fires` never parsed — the problem IS the whole row. One
+    // that parsed but carries a problem (a duplicate-extension sibling) keeps its
+    // schedule and status, with the problem appended rather than replacing them.
+    if (problem && !fires) {
       return { source: item.source, name: item.name, linkTarget: item.linkTarget, detail: chalk.red(problem) };
     }
     const devices = compactDeviceCell(extraOf(item, 'devices'));
@@ -2016,10 +2054,11 @@ function routineRows(items: ResourceItem[]): RichRow[] {
     // Pad the PLAIN strings, then colour. Padding a chalk-wrapped string counts
     // the escape codes as width and silently steals columns from the next cell.
     const detail = [
-      chalk.gray(truncateToWidth(extraOf(item, 'fires'), firesW).padEnd(firesW)),
+      chalk.gray(truncateToWidth(fires, firesW).padEnd(firesW)),
       (devices === 'none ⚠' ? chalk.yellow : chalk.gray)(truncateToWidth(devices, devicesW).padEnd(devicesW)),
       colorLast(last),
-    ].join('  ');
+      problem ? chalk.red(`  ⚠ ${problem}`) : '',
+    ].join('  ').trimEnd();
     return {
       source: item.source,
       name: item.name,
@@ -2045,13 +2084,19 @@ function agentRoutineRows(items: ResourceItem[]): RichRow[] {
   }));
 }
 
-/** `ok 2h` / `fail 3d` / `never` — the Last column, ≤10 chars to fit the cell. */
-function routineLastCell(item: ResourceItem): string {
+/**
+ * `ok 2h` / `fail 3d` / `never` — the Last column, clamped to the 10-wide cell.
+ *
+ * The picker path pads without truncating, so an 11-char `blocked 3d` would push
+ * the next column; the abbreviations cover only the two commonest statuses, so
+ * the clamp is what actually holds the invariant.
+ */
+function routineLastCell(item: ResourceItem, width = 10): string {
   const last = extraOf(item, 'last');
   if (!last || last === 'never run') return 'never';
   const [status, , age] = last.split(' ');
   const word = status === 'completed' ? 'ok' : status === 'failed' ? 'fail' : status;
-  return age ? `${word} ${age}` : word;
+  return truncateToWidth(age ? `${word} ${age}` : word, width);
 }
 
 /**
