@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
-import { archiveRoutineTranscripts, assertRoutineAccountLocalForPlacement, buildJobCommand, executeJob, executeJobDetached, monitorRunningJobs, resolveRoutineLaunch, RoutineAlreadyRunningError, routineSpawnCwd, snapshotRoutineTranscriptBase } from './runner.js';
+import { archiveRoutineTranscripts, assertRoutineAccountLocalForPlacement, buildHostDispatchOptions, buildJobCommand, executeJob, executeJobDetached, monitorRunningJobs, resolveRoutineLaunch, RoutineAlreadyRunningError, routineSpawnCwd, snapshotRoutineTranscriptBase } from './runner.js';
 import { getRunDir, readRunMeta, writeRunMeta } from './routines.js';
 import { getVersionHomePath } from './versions.js';
 import type { JobConfig, RunMeta } from './routines.js';
@@ -789,6 +789,23 @@ describe('assertRoutineAccountLocalForPlacement — native accounts never dispat
     await expect(
       assertRoutineAccountLocalForPlacement({ name: 'r', account: 'work' }, 'cloud', { account: { kind: 'native', id: 'n', name: 'work', agent: 'codex', identityKey: 'k', scope: 'version' } }),
     ).rejects.toThrow('cannot run on a cloud placement');
+  });
+
+  it('the host dispatch boundary forwards the provider account by name (not dropped)', () => {
+    // executeJobOnHost builds its dispatch options here; the account MUST ride
+    // along or the remote runs under the wrong identity (the review regression).
+    const opts = buildHostDispatchOptions(
+      { name: 'r', agent: 'claude', account: 'prov', prompt: 'hello', mode: 'auto' } as never,
+      { remoteCwd: '/w', runDir: '/run', detached: false },
+    );
+    expect(opts.account).toBe('prov');
+    expect(opts.agent).toBe('claude');
+    expect(opts.remoteCwd).toBe('/w');
+    expect(opts.follow).toBe(true);
+    // No account configured → nothing forwarded.
+    const bare = buildHostDispatchOptions({ name: 'r', agent: 'claude', prompt: 'x', mode: 'auto' } as never, { remoteCwd: '/w', runDir: '/run', detached: true });
+    expect(bare.account).toBeUndefined();
+    expect(bare.follow).toBe(false);
   });
 
   it('allows a provider account on host (forwarded by name), rejects it on cloud, no-ops without an account', async () => {

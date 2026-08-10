@@ -1079,6 +1079,31 @@ export async function assertRoutineAccountLocalForPlacement(
   }
 }
 
+/**
+ * Build the options passed to `dispatchPromptToHost` for a host routine. Split
+ * out so the execution boundary is unit-testable: it MUST forward the routine's
+ * `account` by name (the remote resolves its own local bundle; no secret copied)
+ * — dropping it silently ran the remote under the wrong identity.
+ */
+export function buildHostDispatchOptions(
+  config: JobConfig,
+  ctx: { remoteCwd: string | undefined; runDir: string; detached: boolean },
+): import('./hosts/run-target.js').HostPromptRun {
+  return {
+    agent: config.agent!,
+    prompt: resolveJobPrompt(config),
+    mode: normalizeMode(config.mode),
+    effort: config.effort,
+    model: config.config?.model as string | undefined,
+    account: config.account,
+    timeout: config.timeout, // enforced by the REMOTE agents run
+    remoteCwd: ctx.remoteCwd,
+    name: config.name,
+    cwd: ctx.runDir,
+    follow: !ctx.detached,
+  };
+}
+
 export function dispatchesViaAgentsRun(config: Pick<JobConfig, 'workflow' | 'resume'>): boolean {
   return Boolean(config.workflow || config.resume);
 }
@@ -1277,7 +1302,7 @@ export async function executeJob(
   );
 }
 
-async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undefined, attempt: RoutineAttempt): Promise<RunResult> {
+export async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undefined, attempt: RoutineAttempt): Promise<RunResult> {
   // Placement (hostStrategy / bare host:) — body may run on another machine
   // over SSH or in the cloud; local version selection / sandbox / spawn then
   // do not apply. Sync callers (manual `routines run`, catchup) follow the
@@ -1717,22 +1742,7 @@ async function executeJobOnHost(config: JobConfig, opts: { detached: boolean }, 
   };
   writeRunMeta(meta);
 
-  const { task, exitCode } = await dispatchPromptToHost(host, {
-    agent: config.agent!,
-    prompt: resolveJobPrompt(config),
-    mode: normalizeMode(config.mode),
-    effort: config.effort,
-    model: config.config?.model as string | undefined,
-    // Forward the provider account by NAME — the remote resolves its own local
-    // bundle, so no secret crosses the wire. Native accounts never reach here
-    // (assertRoutineAccountLocalForPlacement rejects them before dispatch).
-    account: config.account,
-    timeout: config.timeout, // enforced by the REMOTE agents run
-    remoteCwd,
-    name: config.name,
-    cwd: runDir,
-    follow: !opts.detached,
-  });
+  const { task, exitCode } = await dispatchPromptToHost(host, buildHostDispatchOptions(config, { remoteCwd, runDir, detached: opts.detached }));
   meta.hostTaskId = task.id;
 
   // Sync path: a real exit code finalizes now. -1 (follow window closed) and
