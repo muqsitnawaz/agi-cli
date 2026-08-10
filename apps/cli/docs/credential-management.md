@@ -93,8 +93,8 @@ deliberately created with `agents accounts add` and explicitly pushed with
 
 ## How each surface changes
 
-- **`agents apply`** stops copying login files. `FLEET_AUTH_FILES` loses its copy
-  role; the `push-login` / `--recv-auth` login-materialize path is removed. Per
+- **`agents apply`** does not copy login files. `FLEET_AUTH_FILES` is inventory
+  metadata only; fleet apply has no native-login materialization path. Per
   agent per box `apply` surfaces: "logged in" / "log in on this box" (interactive or
   `agents fleet login`) / "add or sync a provider account (`agents accounts add` /
   `sync`)" — driven by whether the box has its own login or a declared account

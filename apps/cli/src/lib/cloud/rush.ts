@@ -30,10 +30,8 @@ import { selectBalancedVersion } from '../rotate.js';
 const PROXY_BASE = process.env.RUSH_PROXY_BASE ?? 'https://api.prix.dev';
 const USER_YAML = path.join(os.homedir(), '.rush', 'user.yaml');
 
-// The Rush upload-consent surface (RushConsentFile / hasRushUploadConsent /
-// recordRushUploadConsent, AGENTS_RUSH_UPLOAD_TOKENS, --upload-account-tokens) was
-// REMOVED (RUSH-2527 / SING-1b): there is no consented way to copy a native OAuth
-// login to the cloud. A server token request now fails loud (see dispatch()).
+// Native OAuth/session credentials never cross the cloud boundary. A server
+// token request fails loud rather than materializing a harness login (see dispatch()).
 
 interface UserYaml {
   session?: {
@@ -417,10 +415,11 @@ export class RushCloudProvider implements CloudProvider {
             `agents-cli never copies a native OAuth / session login off this machine (SING-1b) —`,
             `a rotating token uploaded to the cloud is invalidated on its next refresh.`,
             ``,
-            `Use a portable provider account for cloud dispatch instead — a long-lived, non-rotating`,
-            `API key / setup-token that is safe to run in the cloud:`,
+            `Portable provider accounts can run locally or on a pinned fleet device, but cloud`,
+            `placement does not securely inject them yet. Create and sync one with:`,
             `    agents accounts add <name> --provider anthropic --auth api-key    # or: --auth setup-token`,
-            `then dispatch under that account. See docs/credential-management.md (SING-1b).`,
+            `    agents accounts sync <name> <device>`,
+            `then run locally or on that device with --account <name>. See docs/credential-management.md (SING-1b).`,
           ].join('\n'),
         );
       }

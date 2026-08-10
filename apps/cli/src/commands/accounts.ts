@@ -6,6 +6,7 @@ import { readMeta, updateMeta } from '../lib/state.js';
 import type { AgentId } from '../lib/types.js';
 import { ALL_AGENT_IDS } from '../lib/agents.js';
 import { pushBundleToHost } from '../lib/secrets/push.js';
+import { assertCredentialTransportHostPinned, resolveHostSshTarget } from '../lib/secrets/remote.js';
 import { resolveRemoteOsSync } from '../lib/hosts/remote-os.js';
 import { runDevicesAccounts } from './ssh.js';
 import { discoverNativeAccounts } from '../lib/account-catalog.js';
@@ -130,9 +131,11 @@ export function registerAccountsCommand(program: Command): void {
     .description('Copy one provider account bundle to a worker device')
     .requiredOption('--device <device>', 'Destination device or SSH host')
     .option('--force', 'Replace matching keys on the destination')
-    .action((name: string, o: { device: string; force?: boolean }) => {
+    .action(async (name: string, o: { device: string; force?: boolean }) => {
       const account = findAccount(name);
       if (!account) throw new Error(`Unknown provider account '${name}'.`);
+      const sshTarget = await resolveHostSshTarget(o.device);
+      assertCredentialTransportHostPinned(sshTarget);
       const remoteBackend = resolveRemoteOsSync(o.device) === 'win32' ? 'keychain' : 'file';
       const literalValues = {
         ACCOUNT_ID: account.id,

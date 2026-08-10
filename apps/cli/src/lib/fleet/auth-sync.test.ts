@@ -4,9 +4,6 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   snapshotAuth,
-  materializeAuth,
-  buildAuthBundle,
-  parseAuthBundle,
   FLEET_AUTH_FILES,
   isPropagatableAgent,
   hasPortableAuthFiles,
@@ -24,8 +21,8 @@ function seedFile(home: string, rel: string, content: string, mode = 0o600): voi
 // RUSH-2527 / SING-1b: a native OAuth / session login MUST NOT be copied between
 // devices. `snapshotAuth` — the read/capture side of `apply`'s former login
 // propagation — therefore captures NOTHING, for every agent, on every platform,
-// signed in or not. (The receive primitive `materializeAuth` still exists but is
-// no longer wired into `apply`; a small mechanical test keeps it honest.)
+// signed in or not. The old receive/materialize primitive is deleted, so there
+// is no hidden write path left to exercise.
 describe('snapshotAuth — native OAuth logins are never captured (SING-1b)', () => {
   it('captures nothing even for a signed-in portable runtime (codex) on Linux', () => {
     const src = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-src-'));
@@ -59,46 +56,6 @@ describe('snapshotAuth — native OAuth logins are never captured (SING-1b)', ()
     const snap = snapshotAuth(['droid'], { home: src, platform: 'linux' });
     expect(snap.files).toEqual([]);
     expect(snap.bound).toEqual([]);
-  });
-});
-
-describe('materializeAuth — the receive primitive still writes what it is given', () => {
-  // No longer reached by `apply` (nothing captures/sends a bundle), but kept as a
-  // pure file-write primitive; its bundle-safety guard is exercised via parseAuthBundle.
-  it('writes the files of a hand-built bundle to a target home', () => {
-    const dst = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-dst-'));
-    const bundle = buildAuthBundle('src-box', [
-      { agent: 'codex', rel: '.codex/auth.json', contentB64: Buffer.from('{"t":"x"}').toString('base64'), mode: 0o600 },
-    ]);
-    const res = materializeAuth(bundle, { home: dst });
-    expect(res.errors).toEqual([]);
-    expect(res.written).toEqual(['codex']);
-    expect(fs.readFileSync(path.join(dst, '.codex/auth.json'), 'utf-8')).toBe('{"t":"x"}');
-  });
-});
-
-describe('parseAuthBundle', () => {
-  it('accepts a well-formed bundle', () => {
-    const b = buildAuthBundle('box', [{ agent: 'codex', rel: '.codex/auth.json', contentB64: 'eA==', mode: 0o600 }]);
-    const parsed = parseAuthBundle(JSON.stringify(b));
-    expect(parsed.source).toBe('box');
-    expect(parsed.files).toHaveLength(1);
-  });
-
-  it('rejects path traversal in rel', () => {
-    const evil = { v: 1, source: 'box', files: [{ agent: 'x', rel: '../../etc/passwd', contentB64: 'eA==', mode: 0o600 }] };
-    expect(() => parseAuthBundle(JSON.stringify(evil))).toThrow(/unsafe path/);
-  });
-
-  it('rejects an absolute rel', () => {
-    const evil = { v: 1, source: 'box', files: [{ agent: 'x', rel: '/etc/shadow', contentB64: 'eA==', mode: 0o600 }] };
-    expect(() => parseAuthBundle(JSON.stringify(evil))).toThrow(/unsafe path/);
-  });
-
-  it('rejects a malformed / wrong-version bundle', () => {
-    expect(() => parseAuthBundle('not json')).toThrow(/valid JSON/);
-    expect(() => parseAuthBundle(JSON.stringify({ v: 2, source: 'b', files: [] }))).toThrow(/version/);
-    expect(() => parseAuthBundle(JSON.stringify({ v: 1, files: [] }))).toThrow(/source/);
   });
 });
 

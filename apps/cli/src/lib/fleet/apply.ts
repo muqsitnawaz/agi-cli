@@ -490,9 +490,7 @@ export function reconcileDevice(row: DeviceDiff, device: DeviceProfile, ctx: Exe
     ok = ok && syncOk;
   }
 
-  // 4. login propagation — REMOVED (RUSH-2527 / SING-1b). A native OAuth login is
-  // never copied between devices, so `apply` emits no `push-login` action and has
-  // nothing to send here; every agent that needs a login is surfaced as
+  // 4. Native login materialization does not exist. Every agent that needs a login is surfaced as
   // `needs-login` (per-box login / portable-account guidance) in the diff above.
 
   // 5. secrets provisioning — LAST, and deliberately so. It is the most

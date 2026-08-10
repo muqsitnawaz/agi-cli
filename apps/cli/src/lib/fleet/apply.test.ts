@@ -31,7 +31,7 @@ describe('diffFleet', () => {
     { device: 's1', agents: ['claude@latest', 'codex@latest'], sync: ['user'], login: 'sync' },
   ];
 
-  it('plans install-cli + add both agents + sync, and NEVER a push-login (SING-1b)', () => {
+  it('plans install-cli + add both agents + sync, and surfaces native logins as manual', () => {
     const probes = new Map<string, DeviceProbe>([
       ['s1', { device: 's1', reachable: true, platform: 'linux', cliVersion: undefined, installedAgents: [] }],
     ]);
@@ -40,9 +40,7 @@ describe('diffFleet', () => {
     expect(kinds).toContain('install-cli');
     expect(kinds.filter((k) => k === 'add-agent')).toHaveLength(2);
     expect(kinds).toContain('sync-config');
-    // A native OAuth login is never copied between devices — no push-login is ever
-    // emitted; both login:sync agents surface as needs-login (log in per box).
-    expect(kinds).not.toContain('push-login');
+    // Both login:sync agents surface as needs-login (log in per box).
     expect(kinds.filter((k) => k === 'needs-login')).toHaveLength(2);
     expect(plan.devices[0].loginBlocked.sort()).toEqual(['claude', 'codex']);
   });
@@ -57,7 +55,6 @@ describe('diffFleet', () => {
     expect(kinds).not.toContain('upgrade-cli');
     expect(kinds).not.toContain('add-agent');
     expect(kinds).toContain('sync-config');
-    expect(kinds).not.toContain('push-login');
     expect(kinds.filter((k) => k === 'needs-login')).toHaveLength(2);
   });
 
@@ -77,7 +74,6 @@ describe('diffFleet', () => {
       ['mac', { device: 'mac', reachable: true, platform: 'macos', cliVersion: CLI, installedAgents: ['claude', 'codex'] }],
     ]);
     const plan = diffFleet(macDesired, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['claude', 'codex']) });
-    expect(plan.actions.some((a) => a.kind === 'push-login')).toBe(false);
     // Both claude and codex are surfaced as needs-login — a native OAuth login is
     // never copied, on any platform.
     for (const id of ['claude', 'codex']) {
@@ -109,7 +105,6 @@ describe('diffFleet', () => {
       ['mac', { device: 'mac', reachable: true, platform: 'macos', cliVersion: CLI, installedAgents: ['grok'] }],
     ]);
     const plan = diffFleet(macDesired, probes, { targetCliVersion: CLI, sourceAuth: srcAuth([]) });
-    expect(plan.actions.some((a) => a.kind === 'push-login')).toBe(false);
     expect(plan.actions.some((a) => a.agent === 'grok' && a.kind === 'needs-login')).toBe(true);
     expect(plan.devices[0].loginBlocked).toEqual(['grok']);
   });
@@ -119,7 +114,6 @@ describe('diffFleet', () => {
       ['s1', { device: 's1', reachable: true, platform: 'linux', cliVersion: CLI, installedAgents: ['claude', 'codex'] }],
     ]);
     const plan = diffFleet(desired, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['codex'], ['claude']) });
-    expect(plan.actions.some((a) => a.kind === 'push-login')).toBe(false);
     expect(plan.devices[0].loginBlocked.sort()).toEqual(['claude', 'codex']);
     const detail = plan.actions.find((a) => a.agent === 'claude' && a.kind === 'needs-login')?.detail;
     expect(detail).toMatch(/SING-1b/);
@@ -133,7 +127,6 @@ describe('diffFleet', () => {
       ['s1', { device: 's1', reachable: true, platform: 'linux', cliVersion: CLI, installedAgents: ['droid', 'codex'] }],
     ]);
     const plan = diffFleet(droidDesired, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['droid', 'codex']) });
-    expect(plan.actions.some((a) => a.kind === 'push-login')).toBe(false);
     for (const id of ['droid', 'codex']) {
       expect(plan.actions.some((a) => a.agent === id && a.kind === 'needs-login')).toBe(true);
     }
@@ -157,7 +150,6 @@ describe('diffFleet', () => {
       ['s1', { device: 's1', reachable: true, platform: 'linux', cliVersion: CLI, installedAgents: ['codex'] }],
     ]);
     const plan = diffFleet(skipDesired, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['codex']) });
-    expect(plan.actions.map((a) => a.kind)).not.toContain('push-login');
     expect(plan.actions).toEqual([]);
   });
 });
@@ -432,7 +424,6 @@ describe('diffFleet — version-aware add-agent', () => {
       }],
     ]);
     const plan = diffFleet(roster, probes, { targetCliVersion: CLI, sourceAuth: srcAuth(['claude']) });
-    expect(plan.actions.filter((a) => a.kind === 'push-login')).toHaveLength(0);
     expect(plan.actions.filter((a) => a.kind === 'needs-login')).toHaveLength(1);
   });
 });
