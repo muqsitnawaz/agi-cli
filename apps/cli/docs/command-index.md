@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_96 command groups · 568 commands._
+_96 command groups · 571 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -218,21 +218,24 @@ agents cp <src> <dst>  Copy a file or directory between fleet hosts. Either endp
 ## daemon — The always-on daemon: secrets broker, browser IPC, watchdog, and the routines scheduler. Bare `agents daemon` shows status.
 
 ```
-agents daemon                       The always-on daemon: secrets broker, browser IPC, watchdog, and the routines scheduler. Bare `agents daemon` shows status.
-agents daemon disable               Persist daemon.enabled: false — nothing auto-starts the daemon until re-enabled. Does not stop a running daemon.
-agents daemon doctor                One-shot health check: identity, duplicates, hosted services, scheduler. Non-zero exit on problems.
-agents daemon enable                Clear the daemon.enabled kill switch. Does not start the daemon by itself.
-agents daemon funnel                Manage Tailscale Funnel exposure for a fleet webhook receiver.
-agents daemon funnel down <host>    Disable Tailscale Funnel exposure for a public HTTPS port.
-agents daemon funnel status <host>  Show Tailscale Funnel status on a fleet host.
-agents daemon funnel up <host>      Expose a localhost webhook receiver through Tailscale Funnel.
-agents daemon logs                  Read the daemon's own log (lifecycle + subsystem errors — not routine run output).
-agents daemon reload                Send SIGHUP to reload jobs and re-evaluate the scheduler.enabled gate, without a restart.
-agents daemon restart               Stop then start the daemon.
-agents daemon services              The two hosted services (secrets broker, browser IPC): bound state, socket path, and health. See sibling `daemon funnel` for public ingress.
-agents daemon start                 Start the daemon. Bypasses daemon.enabled — this is the deliberate override.
-agents daemon status                Identity (state/pid/uptime/binary), duplicate daemons, daemons running deleted code, and per-service health.
-agents daemon stop                  Stop the daemon.
+agents daemon                             The always-on daemon: secrets broker, browser IPC, watchdog, and the routines scheduler. Bare `agents daemon` shows status.
+agents daemon disable                     Persist daemon.enabled: false — nothing auto-starts the daemon until re-enabled. Does not stop a running daemon.
+agents daemon doctor                      One-shot health check: identity, duplicates, hosted services, scheduler. Non-zero exit on problems.
+agents daemon enable                      Clear the daemon.enabled kill switch. Does not start the daemon by itself.
+agents daemon funnel                      Manage Tailscale Funnel exposure for a fleet webhook receiver.
+agents daemon funnel down <host>          Disable Tailscale Funnel exposure for a public HTTPS port.
+agents daemon funnel status <host>        Show Tailscale Funnel status on a fleet host.
+agents daemon funnel up <host>            Expose a localhost webhook receiver through Tailscale Funnel.
+agents daemon logs                        Read the daemon's own log (lifecycle + subsystem errors — not routine run output).
+agents daemon reload                      Send SIGHUP to reload jobs and re-evaluate the scheduler.enabled gate, without a restart.
+agents daemon restart                     Stop then start the daemon.
+agents daemon services                    The hosted services: health, bound state, socket path, and per-service toggles.
+agents daemon services disable <service>  Disable a daemon service.
+agents daemon services enable <service>   Enable a daemon service.
+agents daemon services list               List every daemon service and whether it is enabled.
+agents daemon start                       Start the daemon. Bypasses daemon.enabled — this is the deliberate override.
+agents daemon status                      Identity (state/pid/uptime/binary), duplicate daemons, daemons running deleted code, and per-service health.
+agents daemon stop                        Stop the daemon.
 ```
 
 ## devices — Registry of SSH device profiles (platform, user, address, auth), self-populated from Tailscale. Alias: fleet.
@@ -826,7 +829,7 @@ agents sessions migrate [session-id]        Relocate a running session onto anot
 agents sessions migrations                  Show the migration ledger — sessions handed off to/from other machines.
 agents sessions optimize                    Compact the session search index (FTS5), reclaiming bloat from repeated re-indexing
 agents sessions preview <id>                Show one rich session card without rendering the full transcript
-agents sessions reap                        Kill tmux sessions whose panes are all dead.
+agents sessions reap                        Kill tmux sessions whose panes are all dead, and the helper processes their agents left behind.
 agents sessions reconnect [session-id]      Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
 agents sessions render <selectors...>       Render one or more sessions as readable, redacted Markdown for review or sharing.
 agents sessions resume [query]              Reopen one session by canonical identity, or multi-select history into terminal tabs/splits.
