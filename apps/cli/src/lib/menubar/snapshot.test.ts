@@ -44,13 +44,21 @@ describe('menubar snapshot', () => {
     // Auto-launch flags live in central ~/.agents/agents.yaml under
     // fleet.devices.<name>.config — so this test needs a redirected HOME, which
     // state.ts captures at import time: fresh modules, dynamic import.
+    //
+    // computeMenubarSnapshot also opens the sessions index (querySessions). On
+    // Windows the better-sqlite3 handle keeps sessions.db locked, so afterEach's
+    // rmSync of the temp HOME fails with EBUSY unless we pin AGENTS_SESSIONS_DB
+    // and closeDB() — same pattern as the RUSH-2336 suite below.
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'menubar-snapshot-home-'));
     dirs.push(home);
     const prevHome = process.env.HOME;
     const previousDevicesDir = process.env.AGENTS_DEVICES_DIR;
+    const prevSessionsDb = process.env.AGENTS_SESSIONS_DB;
     process.env.HOME = home;
     const devicesDir = path.join(home, '.agents', '.history', 'devices');
     process.env.AGENTS_DEVICES_DIR = devicesDir;
+    process.env.AGENTS_SESSIONS_DB = path.join(home, 'sessions.db');
+    closeDB();
     vi.resetModules();
 
     const now = new Date().toISOString();
@@ -82,10 +90,13 @@ describe('menubar snapshot', () => {
         { name: 'zion', preferred: true },
       ]);
     } finally {
+      closeDB();
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
       if (previousDevicesDir === undefined) delete process.env.AGENTS_DEVICES_DIR;
       else process.env.AGENTS_DEVICES_DIR = previousDevicesDir;
+      if (prevSessionsDb === undefined) delete process.env.AGENTS_SESSIONS_DB;
+      else process.env.AGENTS_SESSIONS_DB = prevSessionsDb;
       vi.resetModules();
     }
   });

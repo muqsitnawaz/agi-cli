@@ -4,10 +4,11 @@ import * as os from 'os';
 import * as path from 'path';
 import * as state from '../lib/state.js';
 import { addProfile, applyFromSecrets } from './profiles.js';
-import { readProfile } from '../lib/profiles.js';
+import { readProfile, resolveProfileForRun } from '../lib/profiles.js';
 import { setKeychainBackendForTest, secretsKeychainItem, getKeychainToken, type KeychainBackend } from '../lib/secrets/index.js';
 import { keychainItemName } from '../lib/secrets/profiles.js';
 import { writeBundleWithItems, keychainRef } from '../lib/secrets/bundles.js';
+import { addAccount, findAccount } from '../lib/account-registry.js';
 
 let TEST_ROOT: string;
 let USER_DIR: string;
@@ -47,11 +48,14 @@ afterEach(() => {
 });
 
 describe('addProfile — --from-secrets threading (host + model path)', () => {
-  it('copies the bundle value into the harness\'s own keychain item and attaches auth', async () => {
+  it('migrates the copied bundle value into a durable account reference', async () => {
     await addProfile('corp', { host: 'claude', model: 'gpt-x', authProvider: 'corp', fromSecrets: 'prod' }, 'Harness');
     const p = readProfile('corp');
-    expect(p.auth).toEqual({ envVar: 'ANTHROPIC_AUTH_TOKEN', keychainItem: 'agents-cli.corp.token' });
-    expect(getKeychainToken(keychainItemName('corp'))).toBe('sk-test-secret');
+    expect(p.auth).toBeUndefined();
+    const account = findAccount(p.account!);
+    expect(account?.provider).toBe('proxy');
+    expect(getKeychainToken(account!.secretRef)).toBe('sk-test-secret');
+    expect(resolveProfileForRun('corp').env.ANTHROPIC_AUTH_TOKEN).toBe('sk-test-secret');
   });
 
   it('does not clobber the host\'s own keychain item when --from-secrets is given without --auth-provider', async () => {
@@ -74,12 +78,26 @@ describe('addProfile — --from-secrets threading (host + model path)', () => {
     expect(getKeychainToken(keychainItemName('claude'))).toBe(preExisting);
     // ...and the harness's own auth was attached under the bundle's name instead.
     const p = readProfile('corp');
-    expect(p.provider).toBe('prod');
-    expect(getKeychainToken(keychainItemName('prod'))).toBe('sk-test-secret');
+    expect(p.provider).toBe('proxy');
+    const account = findAccount(p.account!);
+    expect(account?.provider).toBe('proxy');
+    expect(getKeychainToken(account!.secretRef)).toBe('sk-test-secret');
   });
 });
 
 describe('addProfile — --from-secrets threading (preset path)', () => {
+  it('uses a durable account without acquiring the preset legacy token', async () => {
+    const account = addAccount('openrouter-work', 'openrouter', 'api-key', 'sk-account-secret', USER_DIR);
+
+    await expect(
+      addProfile('kimi-account', { preset: 'kimi', account: 'openrouter-work' }, 'Harness'),
+    ).resolves.toBeUndefined();
+
+    const profile = readProfile('kimi-account');
+    expect(profile.account).toBe(account.id);
+    expect(profile.provider).toBe('openrouter');
+  });
+
   it('skips the interactive key prompt entirely — a preset that normally requires auth still succeeds non-interactively', async () => {
     // 'kimi' is not authOptional, so without --from-secrets this would call
     // ensureProviderToken -> promptForSecret, which throws outside a TTY. A
@@ -89,7 +107,9 @@ describe('addProfile — --from-secrets threading (preset path)', () => {
       addProfile('kimi', { preset: 'kimi', fromSecrets: 'prod' }, 'Harness'),
     ).resolves.toBeUndefined();
     const p = readProfile('kimi');
-    expect(getKeychainToken(p.auth!.keychainItem)).toBe('sk-test-secret');
+    const account = findAccount(p.account!);
+    expect(account?.provider).toBe('openrouter');
+    expect(getKeychainToken(account!.secretRef)).toBe('sk-test-secret');
   });
 });
 

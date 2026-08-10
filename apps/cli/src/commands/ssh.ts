@@ -1493,7 +1493,7 @@ function registerDevicesCommands(program: Command): void {
     .option('--max-agents <n>', 'cap concurrent agents')
     .option('--scheduler <on|off>', 'allow the routines scheduler (daemon) to fire on this device')
     .option('--json', 'output machine-readable JSON')
-    .action(async (name: string, opts: { maxAgents?: string; scheduler?: string; json?: boolean }) => {
+    .action(async (name: string, opts: { maxAgents?: string; scheduler?: string; inherited?: boolean; json?: boolean }) => {
       try {
         configTombstoneNotice('configure <name> [--max-agents N] [--scheduler on|off]', 'config <name> <key> <value>');
         await mustGetDevice(name);
