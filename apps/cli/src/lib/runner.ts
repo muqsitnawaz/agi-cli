@@ -892,18 +892,30 @@ export async function resolveRoutineLaunch(
   // resolveRoutineLaunch is only called for agent jobs (workflow returns above;
   // command jobs branch out of execute*Job before reaching this).
   const agent = config.agent!;
-  const { findAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+  const { findAccount, findUnifiedAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+  const meta = (deps.readMeta ?? readMeta)();
   const explicitCredential = config.account
     ? (deps.findCredentialAccount?.(config.account) ?? (deps.resolveCredentialAccount !== undefined || findAccount(config.account) !== null))
     : false;
   const selectedCredential = config.account
     ? (explicitCredential ? config.account : undefined)
-    : resolveAccountSelection(undefined, agent, (deps.readMeta ?? readMeta)());
+    : resolveAccountSelection(undefined, agent, meta);
   if (selectedCredential) {
-    (deps.resolveCredentialAccount ?? resolveCredentialAccount)(selectedCredential, agent);
+    // A default/binding may resolve to a native account — never route that
+    // through the provider credential path (it has no bundle to resolve).
+    const unified = findUnifiedAccount(selectedCredential, meta);
+    if (unified?.kind !== 'native') (deps.resolveCredentialAccount ?? resolveCredentialAccount)(selectedCredential, agent);
   }
   if (config.account && !explicitCredential) {
-    const accountVersion = await (deps.resolveAccountVersion ?? resolveAccountVersion)(agent, config.account);
+    // A native routine account is named by its durable name; the version matcher
+    // keys on the identity (email/accountKey), so translate before resolving,
+    // and refuse a login that belongs to a different harness.
+    const unified = findUnifiedAccount(config.account, meta);
+    if (unified?.kind === 'native' && unified.agent !== agent) {
+      throw new Error(`Routine '${config.name}' account '${config.account}' is a ${unified.agent} login and cannot authenticate ${agent}.`);
+    }
+    const identity = unified?.kind === 'native' ? unified.identityKey : config.account;
+    const accountVersion = await (deps.resolveAccountVersion ?? resolveAccountVersion)(agent, identity);
     if (accountVersion) {
       if (config.version && config.version !== accountVersion) {
         throw new Error(
@@ -1291,11 +1303,15 @@ async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undefined, a
   // (command jobs branched out earlier, so config.agent is set on the non-workflow path.)
   const effectiveAgent: AgentId = config.workflow ? 'claude' : config.agent!;
   if (!dispatchesViaAgentsRun(config)) {
-    const { findAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
-    const selectedAccount = config.account && !findAccount(config.account)
-      ? undefined
-      : resolveAccountSelection(config.account, effectiveAgent, readMeta());
-    if (selectedAccount) Object.assign(baseEnv, resolveCredentialAccount(selectedAccount, effectiveAgent).env);
+    const { findUnifiedAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+    const meta = readMeta();
+    const selectedAccount = resolveAccountSelection(config.account, effectiveAgent, meta);
+    if (selectedAccount) {
+      // Only a provider account injects env; a native account (explicit or via a
+      // device-scoped binding) is read from the harness home and forwards nothing.
+      const unified = findUnifiedAccount(selectedAccount, meta);
+      if (unified?.kind === 'provider') Object.assign(baseEnv, resolveCredentialAccount(selectedAccount, effectiveAgent).env);
+    }
   }
 
   const meta: RunMeta = {

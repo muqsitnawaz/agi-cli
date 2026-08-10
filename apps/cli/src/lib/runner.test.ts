@@ -750,4 +750,28 @@ describeSpawn('resolveRoutineLaunch — zero-healthy accounts fail the routine l
     expect(err?.message).toBe("Account 'work' cannot authenticate the codex harness.");
     expect(strategyCalled).toBe(false);
   });
+
+  it('a native routine account pins the installed version by its identity, forwarding nothing', async () => {
+    const meta = { accounts: { native: { n1: { id: 'n1', name: 'work', agent: 'claude' as const, identityKey: 'claude:user=1', scope: 'version' as const } } } };
+    let askedIdentity: string | undefined;
+    const plan = await resolveRoutineLaunch({ ...baseConfig(), account: 'work' }, process.cwd(), {
+      findCredentialAccount: () => false, // 'work' is native, not a provider credential
+      readMeta: () => meta as never,
+      resolveAccountVersion: async (_agent, identity) => { askedIdentity = identity; return '2.1.220'; },
+    });
+    // The durable name was translated to the identity key before matching...
+    expect(askedIdentity).toBe('claude:user=1');
+    // ...and the run pins that install without forwarding/injecting the login.
+    expect(plan).toMatchObject({ pinned: true, forwardAccount: false, chain: [{ agent: 'claude', version: '2.1.220' }] });
+  });
+
+  it('a native routine account named for another harness fails closed', async () => {
+    const meta = { accounts: { native: { n1: { id: 'n1', name: 'work', agent: 'claude' as const, identityKey: 'k', scope: 'version' as const } } } };
+    const err = await resolveRoutineLaunch({ ...baseConfig(), agent: 'codex', account: 'work' }, process.cwd(), {
+      findCredentialAccount: () => false,
+      readMeta: () => meta as never,
+      resolveAccountVersion: async () => '1.0.0',
+    }).then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toContain('is a claude login and cannot authenticate codex');
+  });
 });
