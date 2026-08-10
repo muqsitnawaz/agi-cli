@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { isFreshFleetAuthSnapshot } from './daemon-ticks.js';
+import { usageRefreshRole } from './usage-fleet.js';
 
 describe('isFreshFleetAuthSnapshot', () => {
   const minimum = 1_000;
@@ -18,5 +19,16 @@ describe('isFreshFleetAuthSnapshot', () => {
     expect(isFreshFleetAuthSnapshot({ row, authRows: [] }, minimum)).toBe(false);
     expect(isFreshFleetAuthSnapshot({ row, authRows: [{ ...authRow, health: { ...authRow.health, checkedAt: minimum - 1 } }] }, minimum)).toBe(false);
     expect(isFreshFleetAuthSnapshot({ row, authRows: [authRow] }, minimum)).toBe(true);
+  });
+});
+
+describe('usage refresh publisher/subscriber gate', () => {
+  it('publishes locally when this host is primary or the pin is absent', () => {
+    expect(usageRefreshRole(undefined, 'zion')).toBe('publisher');
+    expect(usageRefreshRole('zion', 'zion')).toBe('publisher');
+  });
+
+  it('subscribes without provider refreshes when another host is primary', () => {
+    expect(usageRefreshRole('yosemite-s0', 'zion')).toBe('subscriber');
   });
 });
