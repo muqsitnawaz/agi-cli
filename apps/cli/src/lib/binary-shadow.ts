@@ -18,38 +18,25 @@ export interface AgentsBinaryShadow {
   version?: string;
 }
 
-/**
- * Compare two filesystem paths for identity.
- *
- * On Windows GHA, TEMP is often the 8.3 form (`RUNNER~1`) while `where` returns
- * the long form (`runneradmin`). Prefer native realpath (same pattern as
- * state.ts); fall back to device+inode only when ino is non-zero so two
- * unrelated files with ino=0 are not collapsed together.
- */
-function isSamePath(a: string, b: string): boolean {
-  try {
-    if (fs.realpathSync.native(a) === fs.realpathSync.native(b)) return true;
-  } catch { /* fall through */ }
-
-  try {
-    const sa = fs.statSync(a);
-    const sb = fs.statSync(b);
-    if (sa.ino !== 0 && sa.ino === sb.ino && sa.dev === sb.dev) return true;
-  } catch { /* fall through */ }
-
-  if (process.platform === 'win32') {
-    return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
-  }
-  return path.resolve(a) === path.resolve(b);
+/** Realpath of `p`, or `p` itself if it cannot be resolved. */
+function safeRealpath(p: string): string {
+  try { return fs.realpathSync(p); }
+  catch { return p; }
 }
 
-/** Stable de-dupe key for a candidate path. */
-function pathKey(p: string): string {
+/** Whether two path spellings identify the same file. */
+function sameFile(a: string, b: string): boolean {
   try {
-    return fs.realpathSync.native(p);
-  } catch {
-    return process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p);
-  }
+    const aStat = fs.statSync(a);
+    const bStat = fs.statSync(b);
+    if (aStat.dev === bStat.dev && aStat.ino === bStat.ino) return true;
+  } catch { /* compare their resolved path spellings below */ }
+
+  const aReal = safeRealpath(a);
+  const bReal = safeRealpath(b);
+  return process.platform === 'win32'
+    ? aReal.toLowerCase() === bReal.toLowerCase()
+    : aReal === bReal;
 }
 
 /**
@@ -67,14 +54,15 @@ export function detectAgentsBinaryShadows(
   currentBin: string = getAgentsBinPath(),
   extraDirs: readonly string[] = defaultWellKnownDirs(),
 ): AgentsBinaryShadow[] {
+  const currentReal = safeRealpath(currentBin);
+
   const seen = new Set<string>();
   const shadows: AgentsBinaryShadow[] = [];
 
   function addIfShadow(candidate: string): void {
-    const key = pathKey(candidate);
-    if (seen.has(key)) return;
-    seen.add(key);
-    if (isSamePath(candidate, currentBin)) return;
+    if (seen.has(candidate)) return;
+    seen.add(candidate);
+    if (sameFile(candidate, currentReal)) return;
     let version: string | undefined;
     try {
       version = execFileSync(candidate, ['--version'], { encoding: 'utf-8', env: process.env })
@@ -91,7 +79,7 @@ export function detectAgentsBinaryShadows(
       .split(/\r?\n/)
       .map((s) => s.trim())
       .filter(Boolean)[0];
-    if (pathAgents && !isSamePath(pathAgents, currentBin)) {
+    if (pathAgents && !sameFile(pathAgents, currentReal)) {
       addIfShadow(pathAgents);
     }
   } catch { /* no `agents` resolved on PATH */ }
