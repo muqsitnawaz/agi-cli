@@ -620,8 +620,16 @@ export function getDevicesRegistryPath(): string { return path.join(getDevicesDi
 /** Path to the device ignore-list — tailscale node names the user dismissed, so auto-discovery never re-suggests them. Per-machine, same dir as the registry. */
 export function getDevicesIgnoredPath(): string { return path.join(getDevicesDir(), 'ignored.json'); }
 
-/** Path to the LEGACY device auto-launch preference file — which registered devices are eligible/preferred for Factory's auto-host selection. Superseded by the central `fleet.devices.<name>.config` block; only lib/devices/config-migration.ts still reads it (to fold + remove it). */
+/** Path to the LEGACY device auto-launch preference file — which registered devices are eligible/preferred for Factory's auto-host selection. Superseded by the per-device doc `config:` block; only lib/devices/config-migration.ts still reads it (to fold + remove it). */
 export function getDevicesAutoLaunchPath(): string { return path.join(getDevicesDir(), 'auto-launch.json'); }
+
+/** Path to THIS machine's agent pins — the `agents:` global defaults and
+ * `isolatedAgents:` pointers. Each pin names a version installed on THIS
+ * machine, so it is machine-local runtime state and lives beside the device
+ * registry under `.history/devices/` (untracked) — NOT in the tracked
+ * per-device doc, where auto-written pins caused commit churn on every
+ * `agents use` / install. Read at call time like the other devices-dir paths. */
+export function getDevicePinsPath(): string { return path.join(getDevicesDir(), `pins-${machineId()}.json`); }
 
 /** Dir of "pending device" sentinels (~/.agents/.cache/state/devices-pending/) — one empty-ish file per newly-discovered, not-yet-approved tailnet node. Written by the daemon probe, read by the menu-bar helper (mirrors the attention sentinel dir). */
 export function getDevicesPendingDir(): string { return path.join(RUNTIME_STATE_DIR, 'devices-pending'); }
@@ -810,9 +818,11 @@ function safeMtimeMs(filePath: string): number {
 }
 
 /**
- * Per-device machine-local version pins — `~/.agents/devices/<machine>/agents.yaml`.
- * Committed and synced, but each machine only ever writes its OWN folder, so
- * pulls never conflict. `<machine>` = machineId() (Tailscale-aligned short name).
+ * The tracked per-device operator doc — `~/.agents/devices/<machine>/agents.yaml`.
+ * Operator-owned fields only: `routines:` (device-local activation) and
+ * `config:` (written by lib/device-config.ts). Agent pins do NOT live here
+ * (they are machine-local runtime state — see {@link getDevicePinsPath}).
+ * `<machine>` = machineId() (Tailscale-aligned short name).
  */
 export function getDeviceMetaPath(): string {
   return path.join(USER_AGENTS_DIR, 'devices', machineId(), 'agents.yaml');
@@ -827,16 +837,17 @@ export function getVersionResourcesPath(): string {
 }
 
 /**
- * Combined cache stamp across all four Meta sources: central + system
- * agents.yaml, this machine's device pins, and the version-resources tracking.
- * A delimited string, NOT a numeric sum — summing down-scaled epoch-ms values
- * loses precision (float64 rounds sub-unit terms away at ~1.75e12), so a change
- * in any one file must contribute at full resolution.
+ * Combined cache stamp across all Meta sources: central + system agents.yaml,
+ * this machine's pins file and tracked device doc, and the version-resources
+ * tracking. A delimited string, NOT a numeric sum — summing down-scaled
+ * epoch-ms values loses precision (float64 rounds sub-unit terms away at
+ * ~1.75e12), so a change in any one file must contribute at full resolution.
  */
 function currentMetaStamp(): string {
   return safeMtimeMs(META_FILE)
     + '|' + safeMtimeMs(SYSTEM_META_FILE)
     + '|' + safeMtimeMs(getDeviceMetaPath())
+    + '|' + safeMtimeMs(getDevicePinsPath())
     + '|' + safeMtimeMs(getVersionResourcesPath());
 }
 
@@ -877,12 +888,14 @@ function writeIfChanged(filePath: string, content: string): void {
 }
 
 /**
- * Partition the in-memory Meta across three files by sync-domain:
+ * Partition the in-memory Meta across four files by sync-domain:
  *   - central  `~/.agents/agents.yaml`             — portable, everything else
- *              (including the user-scope `config:` block and the per-device
- *              operator config under `fleet.devices.<name>.config`)
- *   - device   `~/.agents/devices/<machine>/agents.yaml` — `agents:` pins +
- *              `routines:` (all per-machine)
+ *              (including the user-scope `config:` block and the fleet-wide
+ *              config defaults under `fleet.defaults.config`)
+ *   - device   `~/.agents/devices/<machine>/agents.yaml` — TRACKED operator doc:
+ *              `routines:` + `config:` (per-device operator settings)
+ *   - pins     `~/.agents/.history/devices/pins-<host>.json` — `agents:` +
+ *              `isolatedAgents:` (machine-local runtime, untracked)
  *   - history  `~/.agents/.history/version-resources.json` — `versions:` (machine-local)
  * All callers funnel through writeMeta → here, so nothing else changes. Empty
  * `agents:` / `versions:` are not written (no empty committed files).
@@ -1006,31 +1019,60 @@ function writeMetaUnlocked(meta: Meta): void {
 
   // Write the machine-local files FIRST, then strip central — so a crash mid-write
   // never removes pins/versions from central before they're persisted elsewhere.
-  const devicePath = getDeviceMetaPath();
   const hasAgents = !!agents && Object.keys(agents).length > 0;
   // The isolated pointer names a version installed on THIS machine, exactly like a
-  // global pin, so it belongs beside `agents:` in the device file rather than in the
+  // global pin, so it belongs beside `agents` in the pins file rather than in the
   // central doc that syncs — otherwise another machine inherits a pointer to a copy
   // it does not have.
   const hasIsolatedAgents = !!isolatedAgents && Object.keys(isolatedAgents).length > 0;
-  const hasDeviceRoutines = Array.isArray(deviceRoutines);
-  if (hasAgents || hasIsolatedAgents || hasDeviceRoutines) {
-    // Device-local doc carries `agents:` pins and `routines:` — per-machine and
-    // must never land in central agents.yaml (which syncs). Operator config
-    // used to ride this doc under `config:`; it now lives centrally under
-    // `fleet.devices.<name>.config` (see lib/device-config.ts).
-    const deviceDoc: Partial<Meta> & { routines?: string[] } = {};
-    if (hasAgents) deviceDoc.agents = agents;
-    if (hasIsolatedAgents) deviceDoc.isolatedAgents = isolatedAgents;
-    if (hasDeviceRoutines) deviceDoc.routines = deviceRoutines;
+  // Pins (`agents:` defaults + `isolatedAgents:`) are machine-local runtime
+  // state — they live in the untracked .history pins JSON, never in the tracked
+  // per-device doc (auto-written pins there caused commit churn on every
+  // `agents use` / install).
+  const pinsPath = getDevicePinsPath();
+  if (hasAgents || hasIsolatedAgents) {
+    const pins: { agents?: Meta['agents']; isolatedAgents?: Meta['isolatedAgents'] } = {};
+    if (hasAgents) pins.agents = agents;
+    if (hasIsolatedAgents) pins.isolatedAgents = isolatedAgents;
+    fs.mkdirSync(path.dirname(pinsPath), { recursive: true });
+    writeIfChanged(pinsPath, JSON.stringify(pins, null, 2) + '\n');
+  } else if (fs.existsSync(pinsPath)) {
+    // Every pin was cleared. Persist the emptied file instead of skipping the
+    // write — otherwise the stale pins file survives and overlayMachineLocal
+    // re-applies the removed pin on the next read.
+    writeIfChanged(pinsPath, '{}\n');
+  }
+
+  // The tracked per-device doc carries operator-owned fields only: `routines:`
+  // (device-local activation) from here, `config:` from lib/device-config.ts.
+  // Merge over the existing doc so a `config:` block written outside this path
+  // is never clobbered. Pins are stripped defensively — they belong to the pins
+  // file now (the migration strips them too; a hand-edited doc converges on the
+  // next write).
+  const devicePath = getDeviceMetaPath();
+  let doc: Record<string, unknown> = {};
+  if (fs.existsSync(devicePath)) {
+    try {
+      const parsed = yaml.parse(fs.readFileSync(devicePath, 'utf-8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        doc = parsed as Record<string, unknown>;
+      }
+    } catch { /* preserve the existing tolerance for malformed legacy device YAML */ }
+  }
+  delete doc.agents;
+  delete doc.isolatedAgents;
+  if (Array.isArray(deviceRoutines)) doc.routines = deviceRoutines;
+  else delete doc.routines;
+  if (Object.keys(doc).length > 0) {
     fs.mkdirSync(path.dirname(devicePath), { recursive: true });
-    writeIfChanged(devicePath, META_HEADER + yaml.stringify(deviceDoc));
+    writeIfChanged(devicePath, META_HEADER + yaml.stringify(doc));
   } else if (fs.existsSync(devicePath)) {
-    // Every device-local value was cleared. Persist the emptied doc instead of
-    // skipping the write — otherwise the stale device file survives and
-    // overlayMachineLocal re-applies the removed pin/default on the next read,
-    // leaving a dangling value (e.g. a default pointing at a deleted profile).
-    writeIfChanged(devicePath, META_HEADER + yaml.stringify({ agents: {} }));
+    // Nothing operator-owned remains — remove the doc rather than leaving an
+    // empty tracked file behind.
+    fs.rmSync(devicePath, { force: true });
+    try {
+      fs.rmdirSync(path.dirname(devicePath));
+    } catch { /* not empty — other files live in the device dir */ }
   }
 
   if (versions && Object.keys(versions).length > 0) {
@@ -1045,35 +1087,38 @@ function writeMetaUnlocked(meta: Meta): void {
 
 /**
  * Overlay this machine's local state onto a central-portable Meta:
- *   - `agents:` and `isolatedAgents:` from the device file (device wins; the union
+ *   - `agents:` and `isolatedAgents:` from the pins file (device wins; the union
  *     both preserves the one-level merge and self-heals a pre-migration central that
  *     still has pins)
- *   - `routines:` from the device file into `deviceRoutines` (device-local
- *     routine activation)
+ *   - `routines:` from the tracked device doc into `deviceRoutines` (device-local
+ *     routine activation; the doc's `config:` block is read by
+ *     lib/device-config.ts, not overlaid here)
  *   - `versions:` from the history JSON (wholesale replace; falls back to
  *     whatever central carried when the history file doesn't exist yet)
- *
- * (Device operator config is NOT overlaid here: it lives centrally under
- * `fleet.devices.<name>.config` — see lib/device-config.ts. The legacy
- * `config:`/`defaultBrowserProfile:` keys in a device doc are folded into the
- * central block by lib/devices/config-migration.ts.)
  */
 function overlayMachineLocal(meta: Meta): Meta {
+  const pinsPath = getDevicePinsPath();
+  if (fs.existsSync(pinsPath)) {
+    try {
+      const pins = JSON.parse(fs.readFileSync(pinsPath, 'utf-8')) as {
+        agents?: Meta['agents'];
+        isolatedAgents?: Meta['isolatedAgents'];
+      };
+      if (pins?.agents) meta.agents = { ...meta.agents, ...pins.agents };
+      if (pins?.isolatedAgents) meta.isolatedAgents = { ...meta.isolatedAgents, ...pins.isolatedAgents };
+    } catch { /* ignore malformed pins file */ }
+  }
   const devicePath = getDeviceMetaPath();
   if (fs.existsSync(devicePath)) {
     let dm: (Meta & { routines?: unknown }) | null = null;
     try {
       dm = yaml.parse(fs.readFileSync(devicePath, 'utf-8')) as Meta & { routines?: unknown };
     } catch { /* preserve the existing tolerance for malformed legacy device YAML */ }
-    if (dm) {
-      if (dm?.agents) meta.agents = { ...meta.agents, ...dm.agents };
-      if (dm?.isolatedAgents) meta.isolatedAgents = { ...meta.isolatedAgents, ...dm.isolatedAgents };
-      if (dm && Object.prototype.hasOwnProperty.call(dm, 'routines')) {
-        if (!Array.isArray(dm.routines) || dm.routines.some((name) => typeof name !== 'string')) {
-          throw new Error(`Device config corrupted at ${devicePath}: routines must be a string list.`);
-        }
-        meta.deviceRoutines = dm.routines;
+    if (dm && Object.prototype.hasOwnProperty.call(dm, 'routines')) {
+      if (!Array.isArray(dm.routines) || dm.routines.some((name) => typeof name !== 'string')) {
+        throw new Error(`Device config corrupted at ${devicePath}: routines must be a string list.`);
       }
+      meta.deviceRoutines = dm.routines;
     }
   }
   const vrPath = getVersionResourcesPath();

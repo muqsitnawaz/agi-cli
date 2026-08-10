@@ -1,33 +1,45 @@
 /**
- * Device/user config keys — typed read/write over the central agents.yaml store.
+ * Device/user config keys — typed read/write over the three-layer store.
  *
  * One registry (`CONFIG_KEYS`) maps each CLI dotted name to where it lives:
  *   - user scope   → central `~/.agents/agents.yaml` under `config:` (syncs
  *                    fleet-wide via `agents repo push/pull`)
- *   - device scope → central `~/.agents/agents.yaml` under
- *                    `fleet.devices.<name>.config` — the ONE store for
- *                    per-device operator settings. Central means a setting is
- *                    readable/writable from any box, syncs with the repo, and
- *                    is backed up with it. Names and non-secret values only
- *                    (a secrets-bundle NAME is fine; a credential never is).
+ *   - device scope → the per-device TRACKED doc
+ *                    `~/.agents/devices/<name>/agents.yaml` under `config:` —
+ *                    conflict-free by construction (each machine writes only
+ *                    its own folder, and the churny auto-written pins no longer
+ *                    share the file)
+ *   - fleet layer  → central `~/.agents/agents.yaml` under
+ *                    `fleet.defaults.config` — fleet-wide defaults written by
+ *                    `agents devices config --fleet <key> <value>`
+ *
+ * Read order for a device-scope key: built-in default < fleet.defaults.config
+ * < per-device config:. Names and non-secret values only (a secrets-bundle
+ * NAME is fine; a credential never is).
  *
  * The device registry (`~/.agents/.history/devices/registry.json`) stays the
  * DISCOVERY cache (address, tailscale snapshot, reachability); the profile
  * fields config can override (ssh.*, platform, user) are overlaid onto it at
  * read time by `lib/devices/resolve-profile.ts`.
  *
- * Legacy stores (per-device `devices/<host>/agents.yaml` config and
- * `.history/devices/auto-launch.json`) are folded into the central block once
- * by `lib/devices/config-migration.ts`, invoked on the first read/write in a
- * process — after migration there is ONE read path, no fallback branches.
+ * Legacy stores (central `fleet.devices.<name>.config`, legacy auto-launch.json,
+ * doc-level defaultBrowserProfile, pins in tracked docs) are folded into this
+ * layout once by `lib/devices/config-migration.ts`, invoked on the first
+ * read/write in a process — after migration there is ONE read path per layer,
+ * no fallback branches.
  *
  * Unset always means today's behavior (the documented default).
  */
 
-import { readMeta, updateMeta } from './state.js';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as yaml from 'yaml';
+import { META_HEADER, getUserAgentsDir, readMeta, updateMeta } from './state.js';
+import { atomicWriteFileSync } from './fs-atomic.js';
 import { machineId } from './machine-id.js';
 import { assertValidDeviceName } from './devices/registry.js';
-import { fleetDevicesMapForWrite, migrateDeviceConfigToCentral } from './devices/config-migration.js';
+import { migrateDeviceConfigStores } from './devices/config-migration.js';
+import type { FleetManifest } from './fleet/types.js';
 
 /** Which tier of the agents.yaml store a key lives in. */
 export type ConfigScope = 'user' | 'device';
@@ -51,18 +63,23 @@ export interface ConfigKeySpec {
   validate?: (value: unknown) => string | null;
 }
 
+/** Which layer set a key's effective value (`default` = unset, built-in behavior). */
+export type ConfigSource = 'user' | 'device' | 'fleet' | 'default';
+
 /** A key with its resolved value and the layer that set it. */
 export interface ConfigEntry {
   spec: ConfigKeySpec;
-  /** The stored value, or undefined when unset (unset = default behavior). */
+  /** The effective value, or undefined when unset (unset = default behavior). */
   value: unknown;
-  /** Which layer set it; undefined when unset. */
-  layer?: ConfigScope;
+  /** Which layer set the effective value. */
+  source: ConfigSource;
 }
 
-/** Options scoping a read/write to a specific device (default: this machine). */
+/** Options scoping a read/write: a specific device (default: this machine), or the fleet-defaults layer. */
 export interface ConfigTarget {
   device?: string;
+  /** Write/read the fleet-wide defaults layer (central fleet.defaults.config). */
+  fleet?: boolean;
 }
 
 const DEVICE_PLATFORMS = ['windows', 'linux', 'macos', 'unknown'] as const;
@@ -260,7 +277,7 @@ function assertValidValue(spec: ConfigKeySpec, value: unknown): void {
 let migrationDone = false;
 
 /**
- * Fold the legacy per-device config stores into the central block, once per
+ * Fold the legacy config/pins stores into the current layout, once per
  * process. A failure is loud but non-fatal — config reads must keep working,
  * and the next process retries the fold. Honors AGENTS_SKIP_MIGRATION=1, the
  * same gate bootstrap's runMigration uses (tests pin it so a fork never folds
@@ -269,29 +286,89 @@ let migrationDone = false;
 export function ensureDeviceConfigMigrated(): void {
   if (migrationDone || process.env.AGENTS_SKIP_MIGRATION === '1') return;
   try {
-    migrateDeviceConfigToCentral();
+    migrateDeviceConfigStores();
     migrationDone = true;
   } catch (err: any) {
     console.error(`device config migration failed (${err?.message ?? err}); a later run retries`);
   }
 }
 
-// ─── Reads ────────────────────────────────────────────────────────────────────
+// ─── Layer reads ──────────────────────────────────────────────────────────────
+
+/** Path to a device's tracked operator doc (`devices/<name>/agents.yaml`). */
+function deviceDocPath(device: string): string {
+  return path.join(getUserAgentsDir(), 'devices', device, 'agents.yaml');
+}
 
 /**
- * The raw device-scope config block for `device` from the central
- * `fleet.devices.<name>.config` map ({} when unset). This is the single read
- * path post-migration — the profile resolver (`lib/devices/resolve-profile.ts`)
+ * Read a device's doc. Returns null when the file does not exist. A malformed
+ * file is a hard error — silently returning null would let the next write wipe
+ * the device's routines/config (same contract as routine-activation's reader).
+ */
+function readDeviceDoc(device: string): Record<string, unknown> | null {
+  const p = deviceDocPath(device);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(p, 'utf-8');
+  } catch (err: any) {
+    if (err && err.code === 'ENOENT') return null;
+    throw err;
+  }
+  const corrupted = (detail: string) =>
+    new Error(`Device config corrupted at ${p}: ${detail}. Inspect and restore from backup.`);
+  let parsed: unknown;
+  try {
+    parsed = yaml.parse(raw);
+  } catch (err: any) {
+    throw corrupted(err?.message ?? String(err));
+  }
+  if (parsed === null || parsed === undefined) return {};
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw corrupted(`expected a YAML map, got ${Array.isArray(parsed) ? 'a list' : JSON.stringify(parsed)}`);
+  }
+  const doc = parsed as Record<string, unknown>;
+  if (doc.config !== undefined && (typeof doc.config !== 'object' || doc.config === null || Array.isArray(doc.config))) {
+    throw corrupted('config: must be a mapping');
+  }
+  return doc;
+}
+
+/** Write a device doc (atomic), preserving keys this module does not own
+ * (`routines:`). A doc left empty is removed instead of leaving an empty
+ * tracked file behind. */
+function writeDeviceDoc(device: string, doc: Record<string, unknown>): void {
+  const p = deviceDocPath(device);
+  if (Object.keys(doc).length === 0) {
+    try {
+      fs.rmSync(p, { force: true });
+      fs.rmdirSync(path.dirname(p));
+    } catch { /* dir not empty, or the file was already gone */ }
+    return;
+  }
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  atomicWriteFileSync(p, META_HEADER + yaml.stringify(doc));
+}
+
+/** The fleet-defaults config layer (central `fleet.defaults.config`; {} when unset). */
+export function readFleetConfigDefaults(): Record<string, unknown> {
+  const config = readMeta().fleet?.defaults?.config;
+  return config && typeof config === 'object' && !Array.isArray(config) ? config : {};
+}
+
+/** The device layer only: the doc's `config:` block ({} when unset). */
+function readDeviceDocConfig(device: string): Record<string, unknown> {
+  return (readDeviceDoc(device)?.config as Record<string, unknown> | undefined) ?? {};
+}
+
+/**
+ * The effective device-scope config block for `device`: fleet.defaults.config
+ * overlaid with the per-device doc's config:. This is the single read path
+ * post-migration — the profile resolver (`lib/devices/resolve-profile.ts`)
  * goes through here. Deliberately does NOT auto-trigger the migration: it
- * serves the hot dial/render paths, and the keys it resolves (ssh.*, platform)
- * are new — they never existed in the legacy stores. Keys with legacy data are
- * read through the public API below, which triggers the fold.
+ * serves the hot dial/render paths. Sync and cheap (small local files).
  */
 export function readDeviceConfigValues(device: string): Record<string, unknown> {
-  const devices = readMeta().fleet?.devices;
-  if (!devices || devices === 'all') return {};
-  const config = devices[device]?.config;
-  return config && typeof config === 'object' && !Array.isArray(config) ? config : {};
+  return { ...readFleetConfigDefaults(), ...readDeviceDocConfig(device) };
 }
 
 /** The device a targeted read/write applies to (default: this machine). */
@@ -299,19 +376,26 @@ function targetDevice(opts?: ConfigTarget): string {
   return opts?.device ?? machineId();
 }
 
-/** Get one config key's value and the layer that set it. */
+/** Get one config key's effective value and the layer that set it. */
 export function getConfigValue(name: string, opts?: ConfigTarget): ConfigEntry {
   ensureDeviceConfigMigrated();
   const spec = configKeySpec(name);
   if (spec.scope === 'user') {
     const value = readMeta().config?.[spec.yamlKey];
-    return { spec, value, layer: value !== undefined ? 'user' : undefined };
+    return { spec, value, source: value !== undefined ? 'user' : 'default' };
   }
-  const value = readDeviceConfigValues(targetDevice(opts))[spec.yamlKey];
-  return { spec, value, layer: value !== undefined ? 'device' : undefined };
+  if (opts?.fleet) {
+    const value = readFleetConfigDefaults()[spec.yamlKey];
+    return { spec, value, source: value !== undefined ? 'fleet' : 'default' };
+  }
+  const docConfig = readDeviceDocConfig(targetDevice(opts));
+  if (spec.yamlKey in docConfig) return { spec, value: docConfig[spec.yamlKey], source: 'device' };
+  const fleetConfig = readFleetConfigDefaults();
+  if (spec.yamlKey in fleetConfig) return { spec, value: fleetConfig[spec.yamlKey], source: 'fleet' };
+  return { spec, value: undefined, source: 'default' };
 }
 
-/** List every known key with its value and the layer that set it. */
+/** List every known key with its effective value and the layer that set it. */
 export function listConfig(opts?: ConfigTarget): ConfigEntry[] {
   return CONFIG_KEYS.map((spec) => getConfigValue(spec.name, opts));
 }
@@ -324,33 +408,37 @@ export function listUserConfig(): ConfigEntry[] {
 
 // ─── Writes ───────────────────────────────────────────────────────────────────
 
-function setInCentralBlock(device: string, spec: ConfigKeySpec, value: unknown): void {
+/** The fleet manifest for a defaults write: `devices` materializes as an
+ * explicit empty map (NOT 'all') so `agents apply` targets nothing until the
+ * operator declares a roster. */
+function fleetForDefaultsWrite(fleet: FleetManifest | undefined): FleetManifest {
+  return { ...fleet, devices: fleet && fleet.devices !== undefined ? fleet.devices : {} };
+}
+
+function setInFleetDefaults(spec: ConfigKeySpec, value: unknown): void {
   updateMeta((m) => {
-    const devices = fleetDevicesMapForWrite(m.fleet);
-    const prev = devices[device] ?? {};
-    devices[device] = { ...prev, config: { ...prev.config, [spec.yamlKey]: value } };
-    return { ...m, fleet: { ...m.fleet, devices } };
+    const fleet = fleetForDefaultsWrite(m.fleet);
+    const defaults = { ...fleet.defaults, config: { ...fleet.defaults?.config, [spec.yamlKey]: value } };
+    return { ...m, fleet: { ...fleet, defaults } };
   });
 }
 
-function unsetInCentralBlock(device: string, spec: ConfigKeySpec): void {
+function unsetInFleetDefaults(spec: ConfigKeySpec): void {
   updateMeta((m) => {
-    const stored = m.fleet?.devices;
-    if (!stored || stored === 'all') return m; // nothing stored — unset is a no-op (never upgrade 'all' for one)
-    const prev = stored[device];
-    if (!prev?.config || !(spec.yamlKey in prev.config)) return m; // key not present — no write needed
-    const config = { ...prev.config };
+    const stored = m.fleet?.defaults?.config;
+    if (!stored || !(spec.yamlKey in stored)) return m; // nothing stored — no-op
+    const config = { ...stored };
     delete config[spec.yamlKey];
-    const override = { ...prev };
-    if (Object.keys(config).length > 0) override.config = config;
-    else delete override.config;
-    const devices = { ...stored };
-    if (Object.keys(override).length > 0) devices[device] = override;
-    else delete devices[device];
-    const fleet = { ...m.fleet, devices };
+    const defaults = { ...m.fleet!.defaults };
+    if (Object.keys(config).length > 0) defaults.config = config;
+    else delete defaults.config;
+    const fleet: FleetManifest = { ...m.fleet!, devices: m.fleet!.devices };
+    if (Object.keys(defaults).length > 0) fleet.defaults = defaults;
+    else delete fleet.defaults;
     // Drop the fleet block entirely when the unset emptied a block that holds
     // nothing else — don't leave a vestigial `fleet: {devices: {}}` behind.
-    if (Object.keys(devices).length === 0 && !fleet.defaults && !fleet.secrets && !fleet.routines) {
+    const devicesEmpty = fleet.devices !== 'all' && Object.keys(fleet.devices).length === 0;
+    if (devicesEmpty && !fleet.defaults && !fleet.secrets && !fleet.routines) {
       const { fleet: _, ...rest } = m;
       void _;
       return rest;
@@ -359,23 +447,55 @@ function unsetInCentralBlock(device: string, spec: ConfigKeySpec): void {
   });
 }
 
-/** Set a config key (validated). Device-scope keys target this machine unless `opts.device` names a peer. */
+function setInDeviceDoc(device: string, spec: ConfigKeySpec, value: unknown): void {
+  const doc = readDeviceDoc(device) ?? {};
+  doc.config = { ...(doc.config as Record<string, unknown> | undefined), [spec.yamlKey]: value };
+  writeDeviceDoc(device, doc);
+}
+
+function unsetInDeviceDoc(device: string, spec: ConfigKeySpec): void {
+  const doc = readDeviceDoc(device);
+  if (!doc) return; // nothing stored — unset is a no-op
+  const config = doc.config as Record<string, unknown> | undefined;
+  if (!config || !(spec.yamlKey in config)) return; // key not present — no write needed
+  delete config[spec.yamlKey];
+  if (Object.keys(config).length > 0) doc.config = config;
+  else delete doc.config;
+  writeDeviceDoc(device, doc);
+}
+
+/**
+ * Set a config key (validated). Device-scope keys target this machine unless
+ * `opts.device` names a peer; `opts.fleet` writes the fleet-wide defaults layer
+ * instead. User-scope keys reject `fleet` (they are already fleet-wide).
+ */
 export function setConfigValue(name: string, value: unknown, opts?: ConfigTarget): void {
   ensureDeviceConfigMigrated();
   const spec = configKeySpec(name);
   assertValidValue(spec, value);
   if (spec.scope === 'user') {
+    if (opts?.fleet) {
+      throw new Error(`Config key '${spec.name}' is user-scope (already fleet-wide) — --fleet does not apply.`);
+    }
     updateMeta((m) => ({ ...m, config: { ...m.config, [spec.yamlKey]: value } }));
     return;
   }
-  setInCentralBlock(targetDevice(opts), spec, value);
+  if (opts?.fleet) {
+    setInFleetDefaults(spec, value);
+    return;
+  }
+  setInDeviceDoc(targetDevice(opts), spec, value);
 }
 
-/** Unset a config key — restores default behavior. No-op when already unset. */
+/** Unset a config key — restores the next layer down (fleet default, then the
+ * built-in default). No-op when already unset at that layer. */
 export function unsetConfigValue(name: string, opts?: ConfigTarget): void {
   ensureDeviceConfigMigrated();
   const spec = configKeySpec(name);
   if (spec.scope === 'user') {
+    if (opts?.fleet) {
+      throw new Error(`Config key '${spec.name}' is user-scope (already fleet-wide) — --fleet does not apply.`);
+    }
     updateMeta((m) => {
       if (!m.config || !(spec.yamlKey in m.config)) return m;
       const next = { ...m.config };
@@ -384,7 +504,11 @@ export function unsetConfigValue(name: string, opts?: ConfigTarget): void {
     });
     return;
   }
-  unsetInCentralBlock(targetDevice(opts), spec);
+  if (opts?.fleet) {
+    unsetInFleetDefaults(spec);
+    return;
+  }
+  unsetInDeviceDoc(targetDevice(opts), spec);
 }
 
 // ─── Auto-launch preferences (Factory auto-host selection) ────────────────────
@@ -402,7 +526,7 @@ export function isAutoLaunchEnabled(name: string): boolean {
 }
 
 /** Set whether a device is enabled for auto-launch. Setting the default
- * (enabled) removes the key to keep the block minimal. */
+ * (enabled) removes the key to keep the doc minimal. */
 export function setAutoLaunchEnabled(name: string, enabled: boolean): void {
   assertValidDeviceName(name);
   if (enabled) unsetConfigValue('auto-launch.enabled', { device: name });
@@ -416,27 +540,32 @@ export function isAutoLaunchPreferred(name: string): boolean {
 }
 
 /** Set whether a device is preferred for auto-launch. Setting the default
- * (not preferred) removes the key to keep the block minimal. */
+ * (not preferred) removes the key to keep the doc minimal. */
 export function setAutoLaunchPreferred(name: string, preferred: boolean): void {
   assertValidDeviceName(name);
   if (preferred) setConfigValue('auto-launch.preferred', true, { device: name });
   else unsetConfigValue('auto-launch.preferred', { device: name });
 }
 
-/** Every device's auto-launch flags, keyed by device name (set flags only) —
- * the shape Factory's launch ranking consumes. */
+/** Every device's auto-launch flags, keyed by device name (device-layer set
+ * flags only) — the shape the menu-bar snapshot consumes. */
 export function loadAutoLaunchPreferences(): Record<string, AutoLaunchPreference> {
   ensureDeviceConfigMigrated();
-  const devices = readMeta().fleet?.devices;
   const out: Record<string, AutoLaunchPreference> = {};
-  if (!devices || devices === 'all') return out;
-  for (const [name, override] of Object.entries(devices)) {
-    const config = override?.config;
-    if (!config) continue;
+  const devicesRoot = path.join(getUserAgentsDir(), 'devices');
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(devicesRoot, { withFileTypes: true });
+  } catch {
+    return out; // no devices/ tree — no flags
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const config = readDeviceDocConfig(entry.name);
     const pref: AutoLaunchPreference = {};
     if (config.autoLaunchEnabled === false) pref.enabled = false;
     if (config.autoLaunchPreferred === true) pref.preferred = true;
-    if (pref.enabled !== undefined || pref.preferred !== undefined) out[name] = pref;
+    if (pref.enabled !== undefined || pref.preferred !== undefined) out[entry.name] = pref;
   }
   return out;
 }
@@ -457,7 +586,7 @@ export function isSchedulerEnabled(): boolean {
 export function assertSchedulerEnabled(): void {
   if (isSchedulerEnabled()) return;
   throw new Error(
-    `The routines scheduler is disabled on this device (scheduler.enabled=false in ~/.agents/agents.yaml fleet.devices.${machineId()}.config). ` +
+    `The routines scheduler is disabled on this device (scheduler.enabled=false in ~/.agents/devices/${machineId()}/agents.yaml). ` +
       `Re-enable with: agents devices config ${machineId()} scheduler.enabled on`,
   );
 }
@@ -477,16 +606,16 @@ export function isDaemonEnabled(): boolean {
 export function assertDaemonEnabled(): void {
   if (isDaemonEnabled()) return;
   throw new Error(
-    `The daemon is disabled on this device (daemon.enabled=false in ~/.agents/agents.yaml fleet.devices.${machineId()}.config). ` +
+    `The daemon is disabled on this device (daemon.enabled=false in ~/.agents/devices/${machineId()}/agents.yaml). ` +
       `Re-enable with: agents daemon enable`,
   );
 }
 
 /**
- * Read the `agents.max-concurrent` cap for each named device from the central
- * config block (no SSH). Devices without a cap are omitted — uncapped is the
- * default. Used as an input to host ranking (teams placement, Factory
- * auto-launch), never as a remote probe.
+ * Read the effective `agents.max-concurrent` cap for each named device (fleet
+ * defaults layered under the per-device doc; no SSH). Devices without a cap
+ * are omitted — uncapped is the default. Used as an input to host ranking
+ * (teams placement, Factory auto-launch), never as a remote probe.
  */
 export function readMaxConcurrentCaps(devices: string[]): Record<string, number> {
   const caps: Record<string, number> = {};

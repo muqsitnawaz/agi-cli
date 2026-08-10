@@ -16,7 +16,8 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import * as yaml from 'yaml';
 import { loadDevices, isControlDevice } from '../lib/devices/registry.js';
-import { readMeta, updateMeta, getDeviceMetaPath } from '../lib/state.js';
+import { readMeta, updateMeta, getDevicePinsPath } from '../lib/state.js';
+import { machineId } from '../lib/machine-id.js';
 import { listBundles } from '../lib/secrets/bundles.js';
 import { listJobs } from '../lib/routines.js';
 import { captureFleet, type CaptureInputs } from '../lib/fleet/capture.js';
@@ -28,29 +29,22 @@ interface CaptureOptions {
   device?: string;
 }
 
-/** The committed per-device pin dir: `~/.agents/devices/`. Derived from the
- * device-meta path so it honors any AGENTS_HOME override the same way. */
-function devicesPinDir(): string {
-  return path.dirname(path.dirname(getDeviceMetaPath()));
-}
-
-/** Read `devices/<name>/agents.yaml` pin files into `name -> [id@latest]`. Only
- * used with `--from-pins`; keeps capture zero-SSH by reading committed state. */
+/** Read THIS machine's pins file into `name -> [id@latest]`. Only used with
+ * `--from-pins`; keeps capture zero-SSH by reading local state. Pins are
+ * machine-local runtime state (`.history/devices/pins-<host>.json`, untracked)
+ * — peer pins never sync, so only this machine contributes; peers inherit the
+ * captured fleet defaults. */
 function agentsFromPins(names: string[]): Record<string, string[]> {
-  const dir = devicesPinDir();
-  const out: Record<string, string[]> = {};
-  for (const name of names) {
-    const p = path.join(dir, name, 'agents.yaml');
-    if (!fs.existsSync(p)) continue;
-    try {
-      const doc = yaml.parse(fs.readFileSync(p, 'utf-8')) as { agents?: Record<string, unknown> };
-      const ids = doc?.agents ? Object.keys(doc.agents) : [];
-      if (ids.length > 0) out[name] = ids.map((id) => `${id}@latest`);
-    } catch {
-      /* skip an unparsable pin file — capture is best-effort per device */
-    }
+  const self = machineId();
+  if (!names.includes(self)) return {};
+  let pins: { agents?: Record<string, unknown> };
+  try {
+    pins = JSON.parse(fs.readFileSync(getDevicePinsPath(), 'utf-8')) as typeof pins;
+  } catch {
+    return {}; // no pins file (or unparsable) — capture is best-effort
   }
-  return out;
+  const ids = pins?.agents ? Object.keys(pins.agents) : [];
+  return ids.length > 0 ? { [self]: ids.map((id) => `${id}@latest`) } : {};
 }
 
 async function runCapture(opts: CaptureOptions): Promise<void> {
@@ -112,7 +106,7 @@ export function registerFleetCaptureCommand(devicesCmd: Command): void {
     .command('capture')
     .description('Snapshot the live environment (roster names, agents, browser, secret-bundle names, routines) into agents.yaml fleet:.')
     .option('--dry-run', 'print the fleet: block that would be written, and exit')
-    .option('--from-pins', 'record per-device agents from committed devices/<name>/agents.yaml')
+    .option('--from-pins', "record THIS machine's pinned agents (peer pins are machine-local and never sync)")
     .option('--device <name>', 'capture a single device')
     .action(async (opts: CaptureOptions) => {
       try {
