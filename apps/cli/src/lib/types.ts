@@ -1021,8 +1021,9 @@ export interface Meta {
    * user-scope keys from the device-config registry (`lib/device-config.ts`) —
    * currently `interactiveHost` and `usagePrimaryHost`. Syncs fleet-wide via
    * `agents repo push/pull`.
-   * Device-scope keys live under `fleet.devices.<name>.config` instead (see
-   * {@link Meta.fleet}).
+   * Device-scope keys live in the per-device doc
+   * `devices/<name>/agents.yaml` `config:` block, layered over the fleet-wide
+   * defaults in {@link Meta.fleet} (`fleet.defaults.config`).
    */
   config?: Record<string, unknown>;
   /**
@@ -1032,18 +1033,6 @@ export interface Meta {
    * activation state: absent means disabled on this device.
    */
   deviceRoutines?: string[];
-  /**
-   * Machine-local operator config — the device-scope keys whose `visibility` is
-   * `machine` (see lib/device-config.ts). state.ts writes it as `config:` inside
-   * `~/.agents/devices/<machine>/agents.yaml`, which is gitignored, so it never
-   * reaches the fleet-shared agents.yaml.
-   *
-   * These are the keys nothing off-box reads. Keeping them out of the shared file
-   * is both a churn fix (13 machines were writing one tracked path) and a
-   * security one: `browser.remote-control` gates whether OTHER machines may drive
-   * this box's browser, so syncing one box's opt-in to the rest was wrong.
-   */
-  deviceConfig?: Record<string, unknown>;
   /**
    * Agent-host registry keyed by host name (the `--host`/`--device` dispatch overlay). Portable user
    * config synced with `agents repo push/pull`. For `ssh-config` hosts this is
@@ -1055,9 +1044,9 @@ export interface Meta {
    * Declarative fleet profile (`agents apply` / `ag apply`). Additive to the
    * schema — project `agents:` version-pins are untouched. Declares which agents
    * every device should have, which config to sync, and how login propagates.
-   * `fleet.devices.<name>.config` is also the central store for per-device
-   * operator config (`agents devices config <name>`) — the device-scope keys of
-   * the `lib/device-config.ts` registry.
+   * `fleet.defaults.config` is also the fleet-wide DEFAULTS layer of the
+   * device-config store (`agents devices config --fleet <key> <value>`) — read
+   * between the built-in default and the per-device doc's `config:` block.
    * Full shape in `lib/fleet/types.ts` (FleetManifest).
    */
   fleet?: import('./fleet/types.js').FleetManifest;
