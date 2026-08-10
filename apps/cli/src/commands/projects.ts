@@ -193,13 +193,16 @@ function normDirKey(p: string): string {
 }
 
 /**
- * A bound-repo entry's identity is its (path, subpath) LOCATION, not its slug.
- * Same path + different subpath are two distinct bindings (a monorepo can bind
- * `apps/web` and `apps/api` of one checkout), so keying on path alone would
- * silently collapse them.
+ * A bound-repo entry's identity is its (location, subpath). Same path + different
+ * subpath are two distinct bindings (a monorepo can bind `apps/web` and
+ * `apps/api` of one checkout), so keying on path alone would silently collapse
+ * them. A path-less entry (a bound slug with no local checkout) keys on its
+ * slug, not the empty string — otherwise every path-less entry shares one key
+ * and two of them collapse the same way. `JSON.stringify` gives an unambiguous,
+ * NUL-free separator that stays reviewable in a text diff.
  */
 function repoLocationKey(r: ProjectRepo): string {
-  return JSON.stringify([r.path ? normDirKey(r.path) : '', r.subpath ?? '']);
+  return JSON.stringify([r.path ? normDirKey(r.path) : r.slug, r.subpath ?? '']);
 }
 
 /**

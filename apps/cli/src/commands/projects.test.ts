@@ -206,6 +206,15 @@ describe('mergeBoundDirs / removeBoundDirs (set --add-dir/--rm-dir)', () => {
     ]);
   });
 
+  it('keeps two path-less (slug-only) entries — they key by slug, not the empty string', () => {
+    // A bound slug with no local checkout must not collapse into another one on
+    // the next --add-dir: keying a path-less entry as '' made them share a key.
+    expect(mergeBoundDirs([{ slug: 'o/one' }, { slug: 'o/two' }], [])).toEqual([
+      { slug: 'o/one' },
+      { slug: 'o/two' },
+    ]);
+  });
+
   it('refreshes an exact (path, subpath) match in place, and appends a genuinely new one', () => {
     expect(
       mergeBoundDirs([{ slug: 'old/x', path: '~/src/x' }], [{ slug: 'new/x', path: '~/src/x' }]),
