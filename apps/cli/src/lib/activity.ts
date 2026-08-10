@@ -20,6 +20,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
+import { stringifyDoc } from './yaml-io.js';
 import chalk from 'chalk';
 import { relTime, truncate } from './format.js';
 import { getActivityDir, getUserAgentsDir } from './state.js';
@@ -1800,7 +1801,13 @@ export function ensureActivityLogHook(userAgentsDir: string = getUserAgentsDir()
     }
     if (installed) {
       const tmpYaml = `${agentsYamlPath}.${process.pid}.tmp`;
-      fs.writeFileSync(tmpYaml, String(yamlDoc));
+      // `flowCollectionPadding: false` matches the committed formatting — see the
+      // twin `ensureFeedPublishHook` in feed.ts. Without it, re-emitting a
+      // committed flow node (`[a, b]` -> `[ a, b ]`) leaves the git-backed
+      // `~/.agents` tree permanently dirty and blocks `agents repo pull`
+      // fleet-wide (RUSH-2505). This writer runs back-to-back with the feed one
+      // on the `agents feed` path, so both must round-trip cleanly.
+      fs.writeFileSync(tmpYaml, stringifyDoc(yamlDoc));
       fs.renameSync(tmpYaml, agentsYamlPath);
     }
 
