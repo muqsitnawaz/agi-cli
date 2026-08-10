@@ -102,8 +102,10 @@ function readAllDeviceConfigs(): Record<string, Record<string, unknown>> {
 
 function flagsFromConfig(config: Record<string, unknown>): AutoLaunchPreference {
   const pref: AutoLaunchPreference = {};
-  if (config.autoLaunchEnabled === false) pref.enabled = false;
-  if (config.autoLaunchPreferred === true) pref.preferred = true;
+  // Record any boolean the operator actually wrote — including an explicit
+  // `true`, which is how a device overrides a fleet-wide `false`.
+  if (typeof config.autoLaunchEnabled === 'boolean') pref.enabled = config.autoLaunchEnabled;
+  if (typeof config.autoLaunchPreferred === 'boolean') pref.preferred = config.autoLaunchPreferred;
   return pref;
 }
 

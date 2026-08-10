@@ -128,10 +128,11 @@ describeDaemon('agents daemon', () => {
     expect(payload.daemonEnabled).toBe(false);
 
     // Persisted to disk, not just in-process — a fresh CLI invocation (the
-    // status call above) reads it back from the central fleet.devices block.
-    const central = fs.readFileSync(path.join(home, '.agents', 'agents.yaml'), 'utf-8');
-    expect(central).toContain('daemonEnabled: false');
-    expect(central).toContain('fleet:');
+    // status call above) reads it back from the tracked per-device doc.
+    const devicesDir = path.join(home, '.agents', 'devices');
+    const [device] = fs.readdirSync(devicesDir);
+    const doc = fs.readFileSync(path.join(devicesDir, device, 'agents.yaml'), 'utf-8');
+    expect(doc).toContain('daemonEnabled: false');
   });
 
   it('enable clears the kill switch again', () => {

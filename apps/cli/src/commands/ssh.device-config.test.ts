@@ -9,7 +9,9 @@ import { fileURLToPath } from 'url';
 // retired-subcommand tombstones (configure / note / set / set-interactive /
 // enable / disable / prefer / unprefer). Spawns the REAL CLI against a
 // throwaway HOME (same pattern as ssh.test.ts) — no mocking; the assertions
-// read the actual central agents.yaml the commands wrote.
+// read the actual files the commands wrote: per-device docs under
+// devices/<name>/agents.yaml (device layer) and central agents.yaml
+// fleet.defaults.config (fleet layer).
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const INDEX = path.join(REPO_ROOT, 'src', 'index.ts');
 
@@ -52,13 +54,18 @@ function centralDoc(): string {
   return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : '';
 }
 
+function deviceDoc(name: string): string {
+  const p = path.join(testHome, '.agents', 'devices', name, 'agents.yaml');
+  return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8') : '';
+}
+
 function addDevice(name: string, target = 'muqsit@192.0.2.1'): void {
   const r = run(['devices', 'add', name, target]);
   expect(r.status, r.stderr).toBe(0);
 }
 
 describe('devices config', () => {
-  it('sets, gets, and unsets device-scope keys in the central fleet block', () => {
+  it('sets, gets, and unsets device-scope keys in the per-device doc', () => {
     guardedHome();
     addDevice('mac-mini', 'muqsit@192.0.2.2');
 
@@ -67,20 +74,21 @@ describe('devices config', () => {
     expect(set.stdout).toContain('agents.max-concurrent = 4');
     expect(run(['devices', 'config', 'mac-mini', 'scheduler.enabled', 'off']).status).toBe(0);
 
-    const central = centralDoc();
-    expect(central).toContain('fleet:');
-    expect(central).toContain('mac-mini:');
-    expect(central).toContain('maxAgents: 4');
-    expect(central).toContain('schedulerEnabled: false');
+    const doc = deviceDoc('mac-mini');
+    expect(doc).toContain('config:');
+    expect(doc).toContain('maxAgents: 4');
+    expect(doc).toContain('schedulerEnabled: false');
+    // Device scope never lands in central.
+    expect(centralDoc()).not.toContain('maxAgents');
 
     const got = run(['devices', 'config', 'mac-mini', 'agents.max-concurrent', '--json']);
     expect(got.status).toBe(0);
-    expect(JSON.parse(got.stdout)).toEqual({ device: 'mac-mini', key: 'agents.max-concurrent', value: 4 });
+    expect(JSON.parse(got.stdout)).toEqual({ device: 'mac-mini', key: 'agents.max-concurrent', value: 4, source: 'device' });
 
     const unset = run(['devices', 'config', 'mac-mini', 'agents.max-concurrent', '--unset']);
     expect(unset.status).toBe(0);
     expect(JSON.parse(run(['devices', 'config', 'mac-mini', 'agents.max-concurrent', '--json']).stdout).value).toBeNull();
-    expect(centralDoc()).not.toContain('maxAgents');
+    expect(deviceDoc('mac-mini')).not.toContain('maxAgents');
   });
 
   it('appends notes and accepts on/off/true/false booleans', () => {
@@ -98,7 +106,7 @@ describe('devices config', () => {
     expect(run(['devices', 'config', 'mac-mini', 'auto-launch.enabled', 'true']).status).toBe(0);
   });
 
-  it('prints the resolved config bare (non-TTY) and as JSON', () => {
+  it('prints the resolved config bare (non-TTY) and as JSON with per-key sources', () => {
     guardedHome();
     addDevice('mac-mini', 'muqsit@192.0.2.2');
     expect(run(['devices', 'config', 'mac-mini', 'agents.max-concurrent', '4']).status).toBe(0);
@@ -110,7 +118,10 @@ describe('devices config', () => {
     expect(show.stdout).toContain('auto-launch.enabled');
 
     const json = run(['devices', 'config', 'mac-mini', '--json']);
-    expect(JSON.parse(json.stdout)).toEqual({ device: 'mac-mini', config: { 'agents.max-concurrent': 4 } });
+    const parsed = JSON.parse(json.stdout);
+    expect(parsed.device).toBe('mac-mini');
+    expect(parsed.config['agents.max-concurrent']).toEqual({ value: 4, source: 'device' });
+    expect(parsed.config['scheduler.enabled']).toEqual({ value: null, source: 'default' });
   });
 
   it('rejects bad values and unknown keys loudly', () => {
@@ -129,24 +140,85 @@ describe('devices config', () => {
     expect(run(['devices', 'config', 'ghost', 'agents.max-concurrent', '2']).status).toBe(1);
   });
 
-  it('stores ssh.* profile overrides centrally and resolves them into list --json', () => {
+  it('stores ssh.* profile overrides in the device doc and resolves them into list --json', () => {
     guardedHome();
     addDevice('worker', 'muqsit@192.0.2.3');
 
     expect(run(['devices', 'config', 'worker', 'ssh.identity-file', '/keys/fleet worker']).status).toBe(0);
-    expect(centralDoc()).toContain('sshIdentityFile: /keys/fleet worker');
+    expect(deviceDoc('worker')).toContain('sshIdentityFile: /keys/fleet worker');
 
     const listed = run(['devices', 'list', '--json']);
     expect(listed.status, listed.stderr).toBe(0);
     const worker = JSON.parse(listed.stdout).find((device: { name: string }) => device.name === 'worker');
-    // The row is the EFFECTIVE profile — registry overlaid with the config.
+    // The row is the EFFECTIVE profile — registry overlaid with the config layers.
     expect(worker.auth).toMatchObject({ method: 'key', identityFile: '/keys/fleet worker' });
     expect(worker.config).toMatchObject({ sshIdentityFile: '/keys/fleet worker' });
   });
 });
 
+describe('devices config --fleet (fleet-wide defaults layer)', () => {
+  it('writes central fleet.defaults.config and every device inherits it', () => {
+    guardedHome();
+    addDevice('mac-mini', 'muqsit@192.0.2.2');
+    addDevice('zion', 'muqsit@192.0.2.1');
+
+    const set = run(['devices', 'config', '--fleet', 'scheduler.enabled', 'off']);
+    expect(set.status, set.stderr).toBe(0);
+    expect(set.stdout).toContain('scheduler.enabled = false');
+
+    const central = centralDoc();
+    expect(central).toContain('defaults:');
+    expect(central).toContain('schedulerEnabled: false');
+    // No device doc is written for a fleet default.
+    expect(deviceDoc('mac-mini')).not.toContain('schedulerEnabled');
+
+    // Both devices report the fleet-sourced effective value.
+    for (const name of ['mac-mini', 'zion']) {
+      const got = JSON.parse(run(['devices', 'config', name, 'scheduler.enabled', '--json']).stdout);
+      expect(got).toEqual({ device: name, key: 'scheduler.enabled', value: false, source: 'fleet' });
+    }
+  });
+
+  it('a device value wins over the fleet default; unsetting falls back to it', () => {
+    guardedHome();
+    addDevice('mac-mini', 'muqsit@192.0.2.2');
+
+    expect(run(['devices', 'config', '--fleet', 'agents.max-concurrent', '2']).status).toBe(0);
+    expect(run(['devices', 'config', 'mac-mini', 'agents.max-concurrent', '4']).status).toBe(0);
+    expect(JSON.parse(run(['devices', 'config', 'mac-mini', 'agents.max-concurrent', '--json']).stdout))
+      .toEqual({ device: 'mac-mini', key: 'agents.max-concurrent', value: 4, source: 'device' });
+
+    expect(run(['devices', 'config', 'mac-mini', 'agents.max-concurrent', '--unset']).status).toBe(0);
+    expect(JSON.parse(run(['devices', 'config', 'mac-mini', 'agents.max-concurrent', '--json']).stdout))
+      .toEqual({ device: 'mac-mini', key: 'agents.max-concurrent', value: 2, source: 'fleet' });
+
+    // --fleet --unset removes the default; the key is back to built-in behavior.
+    expect(run(['devices', 'config', '--fleet', 'agents.max-concurrent', '--unset']).status).toBe(0);
+    expect(JSON.parse(run(['devices', 'config', 'mac-mini', 'agents.max-concurrent', '--json']).stdout))
+      .toEqual({ device: 'mac-mini', key: 'agents.max-concurrent', value: null, source: 'default' });
+  });
+
+  it('bare --fleet prints the defaults layer; user-scope keys reject --fleet', () => {
+    guardedHome();
+    expect(run(['devices', 'config', '--fleet', 'agents.max-concurrent', '2']).status).toBe(0);
+
+    const bare = run(['devices', 'config', '--fleet']);
+    expect(bare.status).toBe(0);
+    expect(bare.stdout).toContain('Fleet-wide config defaults');
+    expect(bare.stdout).toContain('agents.max-concurrent');
+
+    const json = JSON.parse(run(['devices', 'config', '--fleet', '--json']).stdout);
+    expect(json.fleet).toBe(true);
+    expect(json.config['agents.max-concurrent']).toEqual({ value: 2, source: 'fleet' });
+
+    const userScope = run(['devices', 'config', '--fleet', 'interactive.host', 'zion']);
+    expect(userScope.status).toBe(1);
+    expect(userScope.stderr).toContain('user-scope');
+  });
+});
+
 describe('retired-subcommand tombstones', () => {
-  it('configure forwards: stderr notice, same central write, same --json shape', () => {
+  it('configure forwards: stderr notice, device-doc write, --json shape', () => {
     guardedHome();
     addDevice('mac-mini', 'muqsit@192.0.2.2');
 
@@ -157,18 +229,16 @@ describe('retired-subcommand tombstones', () => {
     expect(set.stdout).not.toContain('Deprecated');
     expect(set.stdout).toContain('agents.max-concurrent = 4');
 
-    const central = centralDoc();
-    expect(central).toContain('maxAgents: 4');
-    expect(central).toContain('schedulerEnabled: false');
+    const doc = deviceDoc('mac-mini');
+    expect(doc).toContain('maxAgents: 4');
+    expect(doc).toContain('schedulerEnabled: false');
 
     const got = run(['devices', 'configure', 'mac-mini', '--json']);
     expect(got.status).toBe(0);
     const parsed = JSON.parse(got.stdout);
     expect(parsed.device).toBe('mac-mini');
-    expect(parsed.config).toMatchObject({
-      'agents.max-concurrent': 4,
-      'scheduler.enabled': false,
-    });
+    expect(parsed.config['agents.max-concurrent']).toEqual({ value: 4, source: 'device' });
+    expect(parsed.config['scheduler.enabled']).toEqual({ value: false, source: 'device' });
 
     const show = run(['devices', 'configure', 'mac-mini']);
     expect(show.status).toBe(0);
@@ -190,8 +260,8 @@ describe('retired-subcommand tombstones', () => {
     expect(first.stderr).toContain('Deprecated');
     expect(run(['devices', 'note', 'mac-mini', 'do not', 'reboot']).status).toBe(0);
 
-    expect(centralDoc()).toContain('- runs the releases');
-    expect(centralDoc()).toContain('- do not reboot');
+    expect(deviceDoc('mac-mini')).toContain('- runs the releases');
+    expect(deviceDoc('mac-mini')).toContain('- do not reboot');
 
     const got = run(['devices', 'note', 'mac-mini', '--json']);
     expect(JSON.parse(got.stdout).notes).toEqual(['runs the releases', 'do not reboot']);
@@ -228,7 +298,7 @@ describe('retired-subcommand tombstones', () => {
     expect(ghost.stderr).toContain("Unknown device 'ghost'");
   });
 
-  it('set forwards: ssh.* flags land in the central block; key-auth guard holds', () => {
+  it('set forwards: ssh.* flags land in the device doc; key-auth guard holds', () => {
     guardedHome();
     addDevice('worker', 'muqsit@192.0.2.3');
     expect(run(['devices', 'set', 'worker', '--auth', 'password', '--bundle', 'legacy', '--bundle-key', 'password']).status).toBe(0);
@@ -236,7 +306,7 @@ describe('retired-subcommand tombstones', () => {
     const set = run(['devices', 'set', 'worker', '--auth', 'key', '--identity-file', '/keys/fleet worker']);
     expect(set.status, set.stderr).toBe(0);
     expect(set.stderr).toContain('Deprecated');
-    expect(centralDoc()).toContain('sshIdentityFile: /keys/fleet worker');
+    expect(deviceDoc('worker')).toContain('sshIdentityFile: /keys/fleet worker');
 
     const listed = run(['devices', 'list', '--json']);
     const worker = JSON.parse(listed.stdout).find((device: { name: string }) => device.name === 'worker');
@@ -252,7 +322,7 @@ describe('retired-subcommand tombstones', () => {
     expect(invalid.stderr).toContain('--identity-file requires key auth');
   });
 
-  it('enable/disable/prefer/unprefer forward to the auto-launch keys', () => {
+  it('enable/disable/prefer/unprefer forward to the auto-launch keys in the device doc', () => {
     guardedHome();
     addDevice('zion');
 
@@ -260,15 +330,15 @@ describe('retired-subcommand tombstones', () => {
     expect(off.status, off.stderr).toBe(0);
     expect(off.stderr).toContain('Deprecated');
     expect(off.stderr).toContain('auto-launch.enabled off');
-    expect(centralDoc()).toContain('autoLaunchEnabled: false');
+    expect(deviceDoc('zion')).toContain('autoLaunchEnabled: false');
 
     expect(run(['devices', 'enable', 'zion']).status).toBe(0);
-    expect(centralDoc()).not.toContain('autoLaunchEnabled');
+    expect(deviceDoc('zion')).not.toContain('autoLaunchEnabled');
 
     expect(run(['devices', 'prefer', 'zion']).status).toBe(0);
-    expect(centralDoc()).toContain('autoLaunchPreferred: true');
+    expect(deviceDoc('zion')).toContain('autoLaunchPreferred: true');
     expect(run(['devices', 'unprefer', 'zion']).status).toBe(0);
-    expect(centralDoc()).not.toContain('autoLaunchPreferred');
+    expect(deviceDoc('zion')).not.toContain('autoLaunchPreferred');
 
     const ghost = run(['devices', 'disable', 'zoin']);
     expect(ghost.status).toBe(1);
@@ -287,7 +357,7 @@ describe('retired-subcommand tombstones', () => {
 });
 
 describe('devices list surfaces the config', () => {
-  it('marks the interactive host in the table and carries config in --json', () => {
+  it('marks the interactive host in the table and carries device-layer config in --json', () => {
     guardedHome();
     addDevice('zion');
     addDevice('mac-mini', 'muqsit@192.0.2.2');

@@ -553,12 +553,14 @@ parse_pins_default() {
   [ -f "$pins" ] || return 0
   awk -v agent="$AGENT" '
     /^  "agents":/ { in_agents=1; next }
-    in_agents && /^  }/ { in_agents=0; exit }
-    in_agents && $0 ~ "^    \"" agent "\":" {
-      line=$0
-      sub(/^[^:]*:[[:space:]]*"/, "", line)
-      sub(/".*$/, "", line)
-      print line; exit
+    in_agents && /^  }/ { exit }
+    in_agents {
+      needle = "\\"" agent "\\":"
+      if (index($0, needle) > 0) {
+        line = substr($0, index($0, needle) + length(needle))
+        gsub(/[[:space:],"]/, "", line)
+        print line; exit
+      }
     }
   ' "$pins"
 }
