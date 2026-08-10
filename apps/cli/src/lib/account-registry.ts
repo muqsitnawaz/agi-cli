@@ -24,7 +24,8 @@ import type { AgentId, Meta } from './types.js';
 import { deleteKeychainToken, getKeychainToken, hasKeychainToken } from './secrets/index.js';
 import { bundleExists, deleteBundle, listBundles, readBundle, renameBundle, writeBundleWithItems } from './secrets/bundles.js';
 import { getAccountProvider, type AccountAuthKind } from './account-provider-registry.js';
-import { accountSecretItem, buildAccountBundle, parseAccountBundle, type AccountSchemaRecord } from './account-schema.js';
+import { accountSecretItem, assertAccountName, buildAccountBundle, parseAccountBundle, type AccountSchemaRecord } from './account-schema.js';
+import { foldLegacyLabels } from './account-aliases.js';
 
 export interface CredentialAccount {
   id: string;
@@ -38,14 +39,9 @@ export interface CredentialAccount {
 export interface AccountRegistryDocument { version: 2; accounts: Record<string, CredentialAccount> }
 export interface ResolvedCredentialAccount { id: string; name: string; provider: string; auth: AccountAuthKind; env: Record<string, string> }
 
-const NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 const AUTH_KINDS: readonly AccountAuthKind[] = ['api-key', 'setup-token', 'bearer-token'];
 
 export function accountRegistryPath(base = getUserAgentsDir()): string { return path.join(base, 'accounts.yaml'); }
-
-function assertName(name: string): void {
-  if (!NAME.test(name)) throw new Error('Account name must start with a letter or number and contain only letters, numbers, dot, underscore, or dash.');
-}
 
 function isAccountAuthKind(value: unknown): value is AccountAuthKind {
   return typeof value === 'string' && AUTH_KINDS.includes(value as AccountAuthKind);
@@ -85,10 +81,17 @@ function migrateLegacyRegistryFile(base: string): void {
   const raw = yaml.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown> | null;
   if (!raw || Array.isArray(raw)) throw new Error(`Account registry corrupted at ${file}: expected a YAML map.`);
 
-  // Legacy version-bound labels (pre-credential-accounts) are not credentials —
-  // archive them so they are never resurrected as fake accounts.
+  // Legacy version-bound labels (pre-credential-accounts) are not credential
+  // accounts — but they DID name native logins, so recover them as durable
+  // native aliases ([[account-aliases]]) rather than discarding them, then
+  // archive the source. A malformed label map folds to zero aliases and is
+  // still archived, so it is never resurrected as a fake credential account.
   if (raw.version === undefined && raw.labels !== undefined) {
-    archiveLegacyFile(file, 'accounts.legacy-labels.yaml');
+    const labels = (raw.labels && typeof raw.labels === 'object' && !Array.isArray(raw.labels))
+      ? raw.labels as Record<string, unknown>
+      : {};
+    foldLegacyLabels(labels, base);
+    archiveLegacyFile(file, 'accounts.legacy-labels.migrated.yaml');
     return;
   }
   if (raw.version !== 2) throw new Error(`Unsupported account registry version '${String(raw.version)}' at ${file}.`);
@@ -103,7 +106,7 @@ function migrateLegacyRegistryFile(base: string): void {
     if (!isAccountAuthKind(auth)) throw new Error(`Account '${key}' has unsupported auth kind '${String(auth)}'.`);
     const id = String(item.id ?? key);
     const name = String(item.name ?? '');
-    assertName(name);
+    assertAccountName(name);
     const provider = String(item.provider ?? '');
     const legacySecretRef = String(item.secretRef ?? `agents-cli.accounts.${id}.credential`);
     retiredSecretItems.push(legacySecretRef);
@@ -181,7 +184,7 @@ function renameProfileConsumers(oldName: string, newName: string, base: string):
 export interface AddAccountOptions { baseUrl?: string }
 
 export function addAccount(name: string, provider: string, auth: AccountAuthKind, secret: string, base = getUserAgentsDir(), opts: AddAccountOptions = {}): CredentialAccount {
-  assertName(name);
+  assertAccountName(name);
   const adapter = getAccountProvider(provider);
   adapter.validate(auth, secret);
   if (bundleExists(name)) throw new Error(`Secrets bundle '${name}' already exists. Choose a different account name.`);
@@ -203,7 +206,7 @@ export function setAccountSecret(name: string, secret: string, base = getUserAge
 }
 
 export function renameAccount(oldName: string, newName: string, base = getUserAgentsDir()): void {
-  assertName(newName);
+  assertAccountName(newName);
   const doc = readAccountRegistry(base);
   const account = findAccount(oldName, doc);
   if (!account) throw new Error(`Unknown account '${oldName}'.`);

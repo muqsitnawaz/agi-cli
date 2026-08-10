@@ -66,6 +66,42 @@ Both come from the same mistake: **agents-cli touching the interactive login.**
    harness**, including the hard ones (Droid, Kimi). Solution decided per credential
    *type*, not per agent name.
 
+## One account namespace: provider credentials and named native logins (RUSH-2527)
+
+An **account** is one authorization identity, and it comes in two kinds that share
+a single name namespace:
+
+- **Provider credential accounts** — a durable API key, setup token, or bearer
+  token the CLI stores as a policy-`never` secrets bundle (invariant 4 above).
+  Created with `agents accounts add`.
+- **Native login aliases** — a durable *name* for a harness's own signed-in
+  identity. `agents accounts name <source> <name>` (e.g.
+  `agents accounts name claude@2.1.220 work`) records metadata only — a stable id,
+  the harness, and the identity **fingerprint** (`sha256(agent\0identity)`), never
+  a token or the raw email. The name follows the identity fingerprint, not a
+  version, so it survives version churn and shows in `agents accounts` /
+  `agents view`. agents-cli never copies a native login's auth bytes and cannot
+  `sync` it — native logins are per-device by design.
+
+The commands read like the task, object first:
+
+| Command | Behavior |
+|---|---|
+| `agents accounts` / `list` | Unified list: provider account bundles + named native logins |
+| `agents accounts name <agent[@version]> <name>` | Name a signed-in native login |
+| `agents accounts add <name> --provider <p> --auth <t>` | Store a provider credential account |
+| `agents accounts view <account>` | Show one account (provider credential or native login) |
+| `agents accounts attach <account> <harness>` | Use a credential account as a harness default (positional `set-default`) |
+| `agents accounts detach <account> <harness>` | Stop using it as that harness's default |
+| `agents accounts rename <old> <new>` / `remove <name>` | Rename or remove either kind; `remove` refuses while a harness profile or a default binding still references the account |
+| `agents accounts sync <account> <device>` | Copy a provider account bundle to a worker (native aliases have nothing to copy) |
+
+`set-default` / `clear-default` remain as the harness-first spelling of
+`attach` / `detach`. Legacy version-bound native labels (the retired
+`accounts.yaml` `labels:` map, and any `accounts.legacy-labels.yaml` an older CLI
+archived) are recovered into aliases on first read by their preserved fingerprint,
+then archived as `.migrated` so the recovery runs once.
+
 ## What is "held" and shared (the ingredients)
 
 | ingredient | where | shared across fleet? | why safe |

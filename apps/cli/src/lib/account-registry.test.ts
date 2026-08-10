@@ -6,6 +6,7 @@ import { secretsKeychainItem, setKeychainBackendForTest, setKeychainToken, type 
 import { writeBundleWithItems } from './secrets/bundles.js';
 import { _resetFileStoreForTest } from './secrets/filestore.js';
 import { addAccount, inspectAccount, readAccountRegistry, removeAccount, renameAccount, resolveAccountSelection, resolveCredentialAccount, setAccountSecret } from './account-registry.js';
+import { findAliasByName, readNativeAliases } from './account-aliases.js';
 
 class MemoryKeychain implements KeychainBackend {
   values = new Map<string, string>();
@@ -197,10 +198,13 @@ describe('legacy accounts.yaml migration', () => {
     expect(readAccountRegistry(root).accounts[id]).toMatchObject({ id, name: 'work' });
   });
 
-  it('archives version-bound labels instead of converting them into fake credential accounts', () => {
+  it('recovers version-bound labels as native aliases instead of fake credential accounts', () => {
     fs.writeFileSync(path.join(root, 'accounts.yaml'), 'labels:\n  work:\n    agent: claude\n    fingerprint: abc\n');
+    // The label is not a credential account...
     expect(Object.values(readAccountRegistry(root).accounts).some(account => account.name === 'work')).toBe(false);
-    expect(fs.existsSync(path.join(root, 'accounts.legacy-labels.yaml'))).toBe(true);
+    // ...it is recovered as a durable native alias, and the source is archived once.
+    expect(findAliasByName('work', readNativeAliases(root))).toMatchObject({ name: 'work', agent: 'claude', fingerprint: 'abc' });
+    expect(fs.existsSync(path.join(root, 'accounts.legacy-labels.migrated.yaml'))).toBe(true);
     expect(fs.existsSync(path.join(root, 'accounts.yaml'))).toBe(false);
   });
 
