@@ -89,8 +89,8 @@ describe('buildForwardedArgs', () => {
     ).toEqual(['sessions', 'auth bug']);
   });
 
-  it('drops --device (the --host alias) and its value, keeping the rest', () => {
-    // --device merges into the host set in the handler, so its tokens must be
+  it('drops --device and its value, keeping the rest', () => {
+    // --device merges into the device set in the handler, so its tokens must be
     // stripped too — else the peer would try to re-fan-out to that device.
     expect(
       buildForwardedArgs(argv('sessions', 'auth bug', '--device', 'yosemite-s0', '--json'), new Set(['yosemite-s0'])),
@@ -173,7 +173,7 @@ describe('buildRemoteCommand', () => {
       .toEqual(['sessions', '$(whoami); rm -rf /', '--json']);
   });
 
-  it('pins the peer local so --host does not re-sweep its fleet', () => {
+  it('pins the peer local so --device does not re-sweep its fleet', () => {
     // Without AGENTS_SESSIONS_LOCAL=1 the remote `agents sessions` fans back out
     // to every device it knows (incl. us) and prints a spurious "unreachable".
     expect(buildRemoteCommand(['sessions', '--agent', 'codex'])).toContain('AGENTS_SESSIONS_LOCAL=1');

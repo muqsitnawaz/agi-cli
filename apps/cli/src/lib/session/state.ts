@@ -320,15 +320,15 @@ const GH_ISSUE_URL_RE = /https:\/\/github\.com\/[^\s"'()<>]+\/issues\/(\d+)/;
  * Flags of `teams create` / `teams add` that take a value, so the value is not
  * mistaken for the positional team name. Mirrors their value-taking flags in
  * `commands/teams.ts` — most are `.option('… <x>')` registrations, but
- * `--device`/`--host` come from `addHostOption`, so auditing this list against
- * `.option(` alone would wrongly drop them. A flag missing here degrades to "no
+ * `--device` comes from `addHostOption`, so auditing this list against
+ * `.option(` alone would wrongly drop it. A flag missing here degrades to "no
  * team detected", never to a wrong one.
  */
 const TEAM_VALUE_FLAGS = [
   '-d', '--description', '--use-worktree', '--devices', '--hosts', '--repo',
   '-n', '--name', '-m', '--mode', '-e', '--effort', '--model', '--env',
   '--cwd', '--worktree', '--after', '--task-type', '--cloud', '--branch',
-  '--device', '--host',
+  '--device',
 ];
 
 /**

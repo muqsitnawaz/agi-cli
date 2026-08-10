@@ -4353,7 +4353,7 @@ export function formatPickerLabel(
 /** Hints rotated above the picker so the flags/features stay discoverable. */
 const PICKER_TIPS: string[] = [
   'Tip: narrow with -a/--agent (e.g. -a codex), or --project <name> for another folder.',
-  "Tip: --all searches every directory; -H/--host <machine> folds in another box's sessions.",
+  "Tip: --all searches every directory; -D/--device <machine> folds in another box's sessions.",
   'Tip: just type to fuzzy-search prompts and responses; press space to preview a session.',
   'Tip: --since 2d / --until <date> bound the time window; pass a session id to open it directly.',
 ];
@@ -5774,8 +5774,7 @@ export function registerSessionsCommands(program: Command): void {
     .option('--flat', 'Plain flat table (one row per session) instead of the grouped project overview')
     .option('--no-live', 'Do not enrich the listing with live status/preview for running sessions')
     .option('--cloud', 'Source sessions from Rush Cloud (captured runs) instead of local disk')
-    .option('-H, --host <target...>', 'Run this query on remote machine(s) over SSH (host alias or user@host; repeatable)')
-    .option('--device <target...>', 'Alias for --host (device alias from `agents devices`; repeatable). `--device all` searches the whole fleet (the default).')
+    .option('-D, --device <target...>', 'Run this query on remote machine(s) over SSH (device alias from `agents devices`, user@host, or `all` to search the whole fleet; repeatable)')
     .addOption(new Option('--devices <target...>', 'Plural alias for --device (accepts `all`/`fleet`).').hideHelp())
     .option('--fleet', 'With --include tools: query every registered online compute device and merge compact matches')
     .option('--count', 'With one program:<name> tool query: count static occurrences, containing calls, and sessions')
@@ -5930,8 +5929,7 @@ export function registerSessionsCommands(program: Command): void {
     .option('-a, --agent <agent>', 'Narrow the ID to one agent type/version')
     .option('-p, --project <name>', 'Narrow the ID to one project')
     .option('--local', 'Only this machine; do not resolve the ID across the fleet')
-    .option('-H, --host <target...>', 'Resolve only on the named device(s)')
-    .option('--device <target...>', 'Alias for --host')
+    .option('-D, --device <target...>', 'Resolve only on the named device(s)')
     .option('--json', 'Output the session preview as JSON');
 
   setHelpSections(previewCmd, {

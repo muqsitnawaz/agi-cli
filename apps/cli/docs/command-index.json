@@ -4570,7 +4570,7 @@
       "name": "computer",
       "path": "computer",
       "aliases": [],
-      "description": "Drive macOS apps via Accessibility, or a remote Windows host with --host — list, screenshot, click, type",
+      "description": "Drive macOS apps via Accessibility, or a remote Windows device with --device — list, screenshot, click, type",
       "args": [],
       "options": [
         {
@@ -4620,9 +4620,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -4694,9 +4694,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -4777,9 +4777,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -4869,9 +4869,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -4971,9 +4971,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5036,9 +5036,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5110,9 +5110,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5193,9 +5193,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5249,9 +5249,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5332,9 +5332,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5357,13 +5357,13 @@
           "name": "reload",
           "path": "computer reload",
           "aliases": [],
-          "description": "Reload the allow-list policy (SIGHUP the local daemon) — or restart a remote Windows daemon with --host",
+          "description": "Reload the allow-list policy (SIGHUP the local daemon) — or restart a remote Windows daemon with --device",
           "args": [],
           "options": [
             {
-              "flags": "--host <device>",
+              "flags": "--device <name>",
               "description": "Restart the remote Windows daemon (its scheduled task) instead of SIGHUPing the local one",
-              "long": "--host",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5417,9 +5417,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5529,9 +5529,9 @@
               "defaultValue": 1024
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5585,9 +5585,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5622,7 +5622,7 @@
             },
             {
               "flags": "--out <path>",
-              "description": "Output image path — extension auto-corrected to the encoded format (JPEG on macOS, PNG on a Windows --host)",
+              "description": "Output image path — extension auto-corrected to the encoded format (JPEG on macOS, PNG on a Windows --device)",
               "long": "--out",
               "required": true,
               "optional": false,
@@ -5724,9 +5724,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5781,7 +5781,7 @@
           "options": [
             {
               "flags": "--machine <name>",
-              "description": "Only rows invoked from/driving this machine (hostname, machineId, or --host device)",
+              "description": "Only rows invoked from/driving this machine (hostname, machineId, or --device name)",
               "long": "--machine",
               "required": true,
               "optional": false,
@@ -5834,13 +5834,13 @@
           "aliases": [
             "install-helper"
           ],
-          "description": "Install the helper — locally to /Applications/ (macOS), or to a remote Windows host with --host",
+          "description": "Install the helper — locally to /Applications/ (macOS), or to a remote Windows device with --device",
           "args": [],
           "options": [
             {
-              "flags": "--host <device>",
+              "flags": "--device <name>",
               "description": "Provision a remote Windows device (push the exe + register a LOGON task) instead of installing locally",
-              "long": "--host",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5863,13 +5863,13 @@
           "name": "start",
           "path": "computer start",
           "aliases": [],
-          "description": "Activate the helper daemon — local launchd (macOS) or a remote Windows tunnel with --host",
+          "description": "Activate the helper daemon — local launchd (macOS) or a remote Windows tunnel with --device",
           "args": [],
           "options": [
             {
-              "flags": "--host <device>",
-              "description": "Open a tunnel to the remote Windows daemon and record it for --host verbs",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Open a tunnel to the remote Windows daemon and record it for --device verbs",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5892,13 +5892,13 @@
           "name": "status",
           "path": "computer status",
           "aliases": [],
-          "description": "Report install state, daemon state, and Accessibility trust — or a remote Windows daemon with --host",
+          "description": "Report install state, daemon state, and Accessibility trust — or a remote Windows daemon with --device",
           "args": [],
           "options": [
             {
-              "flags": "--host <device>",
+              "flags": "--device <name>",
               "description": "Report the remote Windows daemon (tunnel + liveness) instead of the local helper",
-              "long": "--host",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -5921,13 +5921,13 @@
           "name": "stop",
           "path": "computer stop",
           "aliases": [],
-          "description": "Deactivate the helper daemon — local launchd (macOS) or a remote Windows tunnel with --host",
+          "description": "Deactivate the helper daemon — local launchd (macOS) or a remote Windows tunnel with --device",
           "args": [],
           "options": [
             {
-              "flags": "--host <device>",
+              "flags": "--device <name>",
               "description": "Tear down the remote tunnel and unregister the scheduled task",
-              "long": "--host",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -6008,9 +6008,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -6136,9 +6136,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -6255,9 +6255,9 @@
               "negate": false
             },
             {
-              "flags": "--host <device>",
-              "description": "Drive a remote Windows device (requires `agents computer start --host <device>` first)",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Drive a remote Windows device (requires `agents computer start --device <name>` first)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -6463,7 +6463,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -6472,7 +6472,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -6481,7 +6481,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -8560,7 +8560,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -8569,7 +8569,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -8578,7 +8578,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -8650,17 +8650,8 @@
         },
         {
           "flags": "--devices",
-          "description": "Check agent readiness AND cross-device harness divergence (missing resources/versions, repo drift) on every registered device (alias --hosts)",
+          "description": "Check agent readiness AND cross-device harness divergence (missing resources/versions, repo drift) on every registered device",
           "long": "--devices",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--hosts",
-          "description": "Alias of --devices",
-          "long": "--hosts",
           "required": false,
           "optional": false,
           "variadic": false,
@@ -9048,18 +9039,9 @@
           "negate": false
         },
         {
-          "flags": "-H, --host <target...>",
+          "flags": "-D, --device <target...>",
           "description": "Scope to remote machine(s) over SSH; repeatable",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": true,
-          "negate": false
-        },
-        {
-          "flags": "--device <target...>",
-          "description": "Alias for --host; repeatable",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -10226,7 +10208,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -10235,7 +10217,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -10244,7 +10226,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -10842,7 +10824,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -10851,7 +10833,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -10860,7 +10842,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -11160,7 +11142,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -11169,7 +11151,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -11178,7 +11160,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -11289,9 +11271,9 @@
       ],
       "options": [
         {
-          "flags": "--host <name>",
-          "description": "Scope to runs dispatched to a host",
-          "long": "--host",
+          "flags": "--device <name>",
+          "description": "Scope to runs dispatched to a device",
+          "long": "--device",
           "required": true,
           "optional": false,
           "variadic": false,
@@ -13713,7 +13695,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -13722,7 +13704,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -13731,7 +13713,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -16364,7 +16346,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -16373,7 +16355,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -16382,7 +16364,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -16585,7 +16567,7 @@
             },
             {
               "flags": "--devices-all",
-              "description": "Report repo sync state across ALL reachable fleet devices (alias: --hosts-all).",
+              "description": "Report repo sync state across ALL reachable fleet devices.",
               "long": "--devices-all",
               "required": false,
               "optional": false,
@@ -16593,27 +16575,9 @@
               "negate": false
             },
             {
-              "flags": "--hosts-all",
-              "description": "Alias of --devices-all.",
-              "long": "--hosts-all",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
               "flags": "--devices <who>",
-              "description": "Fleet devices to report on: \"all\", or a comma-separated device list (alias: --hosts).",
+              "description": "Fleet devices to report on: \"all\", or a comma-separated device list.",
               "long": "--devices",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--hosts <who>",
-              "description": "Alias of --devices.",
-              "long": "--hosts",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -17263,7 +17227,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -17272,7 +17236,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -17281,7 +17245,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -17426,7 +17390,7 @@
             },
             {
               "flags": "--placement <strategy>",
-              "description": "BODY placement strategy: local|host|fleet|cloud (default: local, or host when --run-on is set). Maps to the shared Placement model (local|device|fleet|cloud). Not the same as --host (which manages routines on a remote machine).",
+              "description": "BODY placement strategy: local|host|fleet|cloud (default: local, or host when --run-on is set). Maps to the shared Placement model (local|device|fleet|cloud). Not the same as --device (which manages routines on a remote machine).",
               "long": "--placement",
               "required": true,
               "optional": false,
@@ -17626,7 +17590,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -17635,7 +17599,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -17644,7 +17608,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -17701,7 +17665,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -17710,7 +17674,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -17719,7 +17683,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -17776,7 +17740,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -17785,7 +17749,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -17794,7 +17758,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -17867,7 +17831,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -17876,7 +17840,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -17885,7 +17849,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -17942,7 +17906,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -17951,7 +17915,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -17960,7 +17924,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18042,7 +18006,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18051,7 +18015,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18060,7 +18024,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18160,7 +18124,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18169,7 +18133,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18178,7 +18142,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18235,7 +18199,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18244,7 +18208,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18253,7 +18217,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18329,7 +18293,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18338,7 +18302,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18347,7 +18311,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18422,7 +18386,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18431,7 +18395,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18440,7 +18404,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18495,7 +18459,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18504,7 +18468,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18513,7 +18477,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18578,7 +18542,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18587,7 +18551,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18596,7 +18560,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18660,7 +18624,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18669,7 +18633,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18678,7 +18642,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18742,7 +18706,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18751,7 +18715,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18760,7 +18724,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18829,7 +18793,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18838,7 +18802,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18847,7 +18811,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18895,7 +18859,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18904,7 +18868,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18913,7 +18877,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -18977,7 +18941,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -18986,7 +18950,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -18995,7 +18959,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -19043,7 +19007,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -19052,7 +19016,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -19061,7 +19025,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -19109,7 +19073,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -19118,7 +19082,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -19127,7 +19091,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -19191,7 +19155,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -19200,7 +19164,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -19209,7 +19173,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -19264,7 +19228,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -19273,7 +19237,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -19282,7 +19246,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -19367,7 +19331,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -19376,7 +19340,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -19385,7 +19349,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -19723,7 +19687,7 @@
         },
         {
           "flags": "--cwd <dir>",
-          "description": "Working directory for the agent (defaults to current directory). With --host, the directory ON the host.",
+          "description": "Working directory for the agent (defaults to current directory). With --device, the directory ON the device.",
           "long": "--cwd",
           "required": true,
           "optional": false,
@@ -19732,7 +19696,7 @@
         },
         {
           "flags": "-P, --project <ref>",
-          "description": "Project shorthand <slug>[@worktree], resolved against your projects root (auto-inferred, cached). Sets the cwd locally or on --host.",
+          "description": "Project shorthand <slug>[@worktree], resolved against your projects root (auto-inferred, cached). Sets the cwd locally or on --device.",
           "short": "-P",
           "long": "--project",
           "required": true,
@@ -20028,7 +19992,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Explicit host working directory for --host runs, used VERBATIM (overrides --cwd; usually --cwd suffices — it re-roots a local-home path onto the remote home). Pass a single-quoted '$HOME/…' or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you).",
+          "description": "Explicit device working directory for --device runs, used VERBATIM (overrides --cwd; usually --cwd suffices — it re-roots a local-home path onto the remote home). Pass a single-quoted '$HOME/…' or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you).",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -20046,7 +20010,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -20055,7 +20019,7 @@
         },
         {
           "flags": "--copy-creds",
-          "description": "With --host, copy the picked runtime credentials (and Claude OAuth token) to the host, then shred them after the run. Opt-in per run.",
+          "description": "With --device, copy the picked runtime credentials (and Claude OAuth token) to the device, then shred them after the run. Opt-in per run.",
           "long": "--copy-creds",
           "required": false,
           "optional": false,
@@ -20064,7 +20028,7 @@
         },
         {
           "flags": "--lease [backend]",
-          "description": "Run on a cloud box (via crabbox) and tear it down after — reuses a warm box from the repo's profile pool when one is ready (--fresh forces a new box). Optional backend selects the cloud (hetzner/aws/do). Same as --where lease[:backend]. Unlike --host, no machine is registered.",
+          "description": "Run on a cloud box (via crabbox) and tear it down after — reuses a warm box from the repo's profile pool when one is ready (--fresh forces a new box). Optional backend selects the cloud (hetzner/aws/do). Same as --where lease[:backend]. Unlike --device, no machine is registered.",
           "long": "--lease",
           "required": false,
           "optional": true,
@@ -20136,7 +20100,7 @@
         },
         {
           "flags": "--cloud",
-          "description": "Vendor cloud placement: dispatch to the agent's native cloud (claude→rush, codex→codex, cursor→cursor, droid→factory, antigravity→antigravity) and stream the result. Same dispatch as `agents cloud run --agent <agent>`; tracked by `agents cloud list/status/logs`. Same as --where cloud. Mutually exclusive with --host/--lease and local-run flags.",
+          "description": "Vendor cloud placement: dispatch to the agent's native cloud (claude→rush, codex→codex, cursor→cursor, droid→factory, antigravity→antigravity) and stream the result. Same dispatch as `agents cloud run --agent <agent>`; tracked by `agents cloud list/status/logs`. Same as --where cloud. Mutually exclusive with --device/--lease and local-run flags.",
           "long": "--cloud",
           "required": false,
           "optional": false,
@@ -20609,7 +20573,7 @@
           "name": "exec",
           "path": "secrets exec",
           "aliases": [],
-          "description": "Run a command with the bundle's secrets injected into the environment (use --host to resolve the bundle from a remote machine, ephemerally)",
+          "description": "Run a command with the bundle's secrets injected into the environment (use --device to resolve the bundle from a remote machine, ephemerally)",
           "args": [
             {
               "name": "bundle",
@@ -20626,9 +20590,9 @@
           ],
           "options": [
             {
-              "flags": "--host <target>",
-              "description": "Resolve <bundle> on a remote host over SSH and inject it (ephemeral — never stored on this machine)",
-              "long": "--host",
+              "flags": "--device <target>",
+              "description": "Resolve <bundle> on a remote device over SSH and inject it (ephemeral — never stored on this machine)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -20669,7 +20633,7 @@
           "name": "export",
           "path": "secrets export",
           "aliases": [],
-          "description": "Resolve a bundle and print KEY=VALUE lines, push it to a 1Password vault with --to-1password, or push it to remote machine(s) over SSH with --host.",
+          "description": "Resolve a bundle and print KEY=VALUE lines, push it to a 1Password vault with --to-1password, or push it to remote machine(s) over SSH with --device.",
           "args": [
             {
               "name": "bundle",
@@ -20707,17 +20671,8 @@
               "negate": false
             },
             {
-              "flags": "--host <target...>",
-              "description": "Push the bundle over SSH to this target (host alias or user@host); repeatable for multiple machines",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": true,
-              "negate": false
-            },
-            {
               "flags": "--device <target...>",
-              "description": "Alias for --host; repeatable",
+              "description": "Push the bundle over SSH to this device (host alias or user@host); repeatable for multiple machines",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -20726,7 +20681,7 @@
             },
             {
               "flags": "--remote-backend <backend>",
-              "description": "Backend for the bundle on the remote (with --host): keychain (default) or file. file is headless-readable via the remote's machine-local key; it forwards AGENTS_SECRETS_PASSPHRASE over stdin only if set (opt-in).",
+              "description": "Backend for the bundle on the remote device (with --device): keychain (default) or file. file is headless-readable via the remote's machine-local key; it forwards AGENTS_SECRETS_PASSPHRASE over stdin only if set (opt-in).",
               "long": "--remote-backend",
               "required": true,
               "optional": false,
@@ -20736,7 +20691,7 @@
             },
             {
               "flags": "--force",
-              "description": "Overwrite existing keys/items on the target (used with --to-1password and --host)",
+              "description": "Overwrite existing keys/items on the target (used with --to-1password and --device)",
               "long": "--force",
               "required": false,
               "optional": false,
@@ -21027,7 +20982,7 @@
             },
             {
               "flags": "--from-ssh",
-              "description": "Pull the bundle from a fleet peer over SSH and import it locally (requires --host)",
+              "description": "Pull the bundle from a fleet peer over SSH and import it locally (requires --device)",
               "long": "--from-ssh",
               "required": false,
               "optional": false,
@@ -21035,9 +20990,9 @@
               "negate": false
             },
             {
-              "flags": "--host <peer>",
-              "description": "SSH peer to pull from when using --from-ssh (host alias or user@host)",
-              "long": "--host",
+              "flags": "--device <peer>",
+              "description": "SSH peer to pull from when using --from-ssh (device alias or user@host)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -21100,7 +21055,7 @@
           "aliases": [
             "ls"
           ],
-          "description": "List configured secrets bundles, optionally filtered (use --host/--hosts for other machines over SSH)",
+          "description": "List configured secrets bundles, optionally filtered (use --device/--devices for other machines over SSH)",
           "args": [
             {
               "name": "query",
@@ -21111,26 +21066,8 @@
           ],
           "options": [
             {
-              "flags": "--host <target>",
-              "description": "List bundles on a remote host over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--hosts <list>",
-              "description": "Comma-separated hosts to list in one shot, e.g. yosemite-s0,yosemite-s1",
-              "long": "--hosts",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
               "flags": "--device <target>",
-              "description": "Alias for --host",
+              "description": "List bundles on a remote device over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -21139,7 +21076,7 @@
             },
             {
               "flags": "--devices <list>",
-              "description": "Alias for --hosts",
+              "description": "Comma-separated devices to list in one shot, e.g. yosemite-s0,yosemite-s1",
               "long": "--devices",
               "required": true,
               "optional": false,
@@ -22097,9 +22034,9 @@
               "negate": false
             },
             {
-              "flags": "--host <target>",
-              "description": "Unlock the bundle(s) on this remote machine over SSH instead of locally (file-backed bundles only — the remote's passphrase prompt surfaces on your terminal over a -tt session). Single-valued (NOT variadic) so it never swallows the bundle name: `unlock <name> --host <machine>`.",
-              "long": "--host",
+              "flags": "--device <target>",
+              "description": "Unlock the bundle(s) on this remote device over SSH instead of locally (file-backed bundles only — the remote's passphrase prompt surfaces on your terminal over a -tt session). Single-valued (NOT variadic) so it never swallows the bundle name: `unlock <name> --device <machine>`.",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -22162,26 +22099,8 @@
               "negate": false
             },
             {
-              "flags": "--host <target>",
-              "description": "Show a bundle on a remote host over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--hosts <list>",
-              "description": "Comma-separated hosts to show in one shot, e.g. yosemite-s0,yosemite-s1",
-              "long": "--hosts",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
               "flags": "--device <target>",
-              "description": "Alias for --host",
+              "description": "Show a bundle on a remote device over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -22190,7 +22109,7 @@
             },
             {
               "flags": "--devices <list>",
-              "description": "Alias for --hosts",
+              "description": "Comma-separated devices to show in one shot, e.g. yosemite-s0,yosemite-s1",
               "long": "--devices",
               "required": true,
               "optional": false,
@@ -22846,18 +22765,9 @@
           "negate": false
         },
         {
-          "flags": "-H, --host <target...>",
-          "description": "Run this query on remote machine(s) over SSH (host alias or user@host; repeatable)",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": true,
-          "negate": false
-        },
-        {
-          "flags": "--device <target...>",
-          "description": "Alias for --host (device alias from `agents devices`; repeatable). `--device all` searches the whole fleet (the default).",
+          "flags": "-D, --device <target...>",
+          "description": "Run this query on remote machine(s) over SSH (device alias from `agents devices`, user@host, or `all` to search the whole fleet; repeatable)",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -23324,9 +23234,9 @@
               "negate": false
             },
             {
-              "flags": "--host <target>",
-              "description": "Deliver on a remote host over SSH (tmux/AppleScript backends)",
-              "long": "--host",
+              "flags": "--device <target>",
+              "description": "Deliver on a remote device over SSH (tmux/AppleScript backends)",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -23371,7 +23281,7 @@
             }
           ],
           "examples": "# Nudge a stalled agent by session id (resolves its tmux pane)\n      agents sessions inject a1b2c3d4 \"continue\"\n\n      # Target a tmux pane directly (what a watchdog already holds)\n      agents sessions inject _ \"continue\" --pane %3 --socket /tmp/agents/tmux.sock\n\n      # Type into an agents-pty session without submitting\n      agents sessions inject _ \"ls\" --pty $SID --no-enter",
-          "notes": "- Ink-TUI Enter semantics: by default the text and Enter are two separate\n        writes, which is what Claude's Ink TUI needs. --combined fuses them.\n      - A session is addressable by id when it resolves to a precise split —\n        tmux, iTerm, a VSCodium/Cursor/VS Code integrated terminal, or a pty\n        (resolveInjectTargetForSession). Use --pane/--pty for direct targeting.\n      - Built on the Terminal Engine (src/lib/terminal): --host runs the tmux /\n        AppleScript spec over the same SSH transport the launch engine uses.",
+          "notes": "- Ink-TUI Enter semantics: by default the text and Enter are two separate\n        writes, which is what Claude's Ink TUI needs. --combined fuses them.\n      - A session is addressable by id when it resolves to a precise split —\n        tmux, iTerm, a VSCodium/Cursor/VS Code integrated terminal, or a pty\n        (resolveInjectTargetForSession). Use --pane/--pty for direct targeting.\n      - Built on the Terminal Engine (src/lib/terminal): --device runs the tmux /\n        AppleScript spec over the same SSH transport the launch engine uses.",
           "subcommands": []
         },
         {
@@ -23402,7 +23312,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -23411,7 +23321,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -23420,7 +23330,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -24009,9 +23919,9 @@
               "negate": false
             },
             {
-              "flags": "--host <name>",
-              "description": "Explicit target: an enrolled host, a device, or a warm ephemeral box slug",
-              "long": "--host",
+              "flags": "--device <name>",
+              "description": "Explicit target: an enrolled host, device, or a warm ephemeral box slug",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -24065,7 +23975,7 @@
               "negate": false
             }
           ],
-          "examples": "# Move the session in THIS pane onto the least-busy fleet worker\n      agents sessions migrate --auto\n\n      # Move a specific session onto a named host\n      agents sessions migrate a1b2c3d4 --host yosemite-s1\n\n      # Spin up a fresh ephemeral box and move onto it\n      agents sessions migrate --lease\n\n      # Copy (don't stop the source), letting the agent wrap up its own dirty tree\n      agents sessions migrate --host box-a --keep --agent-wrapup",
+          "examples": "# Move the session in THIS pane onto the least-busy fleet worker\n      agents sessions migrate --auto\n\n      # Move a specific session onto a named host\n      agents sessions migrate a1b2c3d4 --device yosemite-s1\n\n      # Spin up a fresh ephemeral box and move onto it\n      agents sessions migrate --lease\n\n      # Copy (don't stop the source), letting the agent wrap up its own dirty tree\n      agents sessions migrate --device box-a --keep --agent-wrapup",
           "notes": "- Without a [session-id], migrate resolves the session running in THIS tmux pane ($TMUX_PANE).\n      - Default --mode rehydrate: the transcript is shipped to the target and the agent reads it there\n        with 'agents sessions <id>' (its own judgment on --last/--include so long tool output can't\n        blow context), then continues. Robust across every harness.\n      - --mode resume attempts a native '<agent> --resume' on the target — faithful, but best-effort:\n        the target agent must have the session registered, so migrate falls back to rehydrate when it can't.\n      - The source is stopped only AFTER the target's session is confirmed live; --keep skips the stop (copy).\n      - Every migrate appends to the ledger — see 'agents sessions migrations' for where each session went.",
           "subcommands": []
         },
@@ -24182,18 +24092,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <target...>",
+              "flags": "-D, --device <target...>",
               "description": "Resolve only on the named device(s)",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": true,
-              "negate": false
-            },
-            {
-              "flags": "--device <target...>",
-              "description": "Alias for --host",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -24346,9 +24247,9 @@
               "defaultValue": "200"
             },
             {
-              "flags": "--host <alias>",
-              "description": "Open on the session origin host over SSH; the host must match every selected session",
-              "long": "--host",
+              "flags": "--device <alias>",
+              "description": "Open on the session origin device over SSH; the device must match every selected session",
+              "long": "--device",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -25176,7 +25077,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -25185,7 +25086,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -25194,7 +25095,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -25552,7 +25453,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -25561,7 +25462,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -25570,7 +25471,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -25685,7 +25586,7 @@
         },
         {
           "flags": "--json",
-          "description": "Emit machine-readable JSON (also accepted so fleet fan-out via --host all can parse each peer)",
+          "description": "Emit machine-readable JSON (also accepted so fleet fan-out via --device all can parse each peer)",
           "long": "--json",
           "required": false,
           "optional": false,
@@ -25944,7 +25845,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -25953,7 +25854,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -25962,7 +25863,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -26161,7 +26062,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -26170,7 +26071,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -26179,7 +26080,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -26218,15 +26119,6 @@
               "flags": "--devices <list>",
               "description": "Pool of machines this team may run teammates on (comma-separated). Enables distributed auto-scheduling.",
               "long": "--devices",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--hosts <list>",
-              "description": "Alias for --devices.",
-              "long": "--hosts",
               "required": true,
               "optional": false,
               "variadic": false,
@@ -26387,7 +26279,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -26396,7 +26288,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -26405,7 +26297,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -26596,7 +26488,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -26605,7 +26497,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -26614,7 +26506,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -26687,7 +26579,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -26696,7 +26588,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -26705,7 +26597,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -26873,7 +26765,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -26882,7 +26774,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -26891,7 +26783,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -26964,7 +26856,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -26973,7 +26865,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -26982,7 +26874,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -27088,7 +26980,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -27097,7 +26989,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -27106,7 +26998,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -27225,7 +27117,7 @@
             },
             {
               "flags": "--remote-cwd <dir>",
-              "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+              "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
               "long": "--remote-cwd",
               "required": true,
               "optional": false,
@@ -27234,7 +27126,7 @@
             },
             {
               "flags": "--no-tty",
-              "description": "Force non-interactive output for --host runs even from a terminal.",
+              "description": "Force non-interactive output for --device runs even from a terminal.",
               "long": "--no-tty",
               "required": false,
               "optional": false,
@@ -27243,7 +27135,7 @@
             },
             {
               "flags": "--any",
-              "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+              "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
               "long": "--any",
               "required": false,
               "optional": false,
@@ -28815,7 +28707,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -28824,7 +28716,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -28833,7 +28725,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -28962,7 +28854,7 @@
         },
         {
           "flags": "--remote-cwd <dir>",
-          "description": "Working directory on the host for --host runs. Resolves on the REMOTE host — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
+          "description": "Working directory on the device for --device runs. Resolves on the REMOTE device — pass a '$HOME'-relative path (single-quoted so your local shell doesn't expand it) or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you). No effect on 'teams add'.",
           "long": "--remote-cwd",
           "required": true,
           "optional": false,
@@ -28971,7 +28863,7 @@
         },
         {
           "flags": "--no-tty",
-          "description": "Force non-interactive output for --host runs even from a terminal.",
+          "description": "Force non-interactive output for --device runs even from a terminal.",
           "long": "--no-tty",
           "required": false,
           "optional": false,
@@ -28980,7 +28872,7 @@
         },
         {
           "flags": "--any",
-          "description": "With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.",
+          "description": "With --device <cap> (a capability tag), pick any matching device instead of erroring when several match.",
           "long": "--any",
           "required": false,
           "optional": false,
@@ -29530,9 +29422,9 @@
               "negate": false
             },
             {
-              "flags": "--host <addr>",
+              "flags": "--bind <addr>",
               "description": "Bind address (default 127.0.0.1)",
-              "long": "--host",
+              "long": "--bind",
               "required": true,
               "optional": false,
               "variadic": false,

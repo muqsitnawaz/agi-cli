@@ -33,7 +33,7 @@ describe('isDirectResumeSelector', () => {
 describe('buildSessionLifecycleArgs', () => {
   it('routes an identity through focus and preserves source-device scope', () => {
     expect(buildSessionLifecycleArgs('ag-codex-c1f3d813', ['yosemite-s0'])).toEqual([
-      'sessions', 'focus', 'ag-codex-c1f3d813', '--host', 'yosemite-s0',
+      'sessions', 'focus', 'ag-codex-c1f3d813', '--device', 'yosemite-s0',
     ]);
   });
 

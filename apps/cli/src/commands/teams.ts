@@ -1604,7 +1604,6 @@ export function registerTeamsCommands(program: Command): void {
     .option('--enable-worktrees', 'Each teammate works in its own git worktree (requires --worktree on add)')
     .option('--use-worktree <path>', 'All teammates share this existing worktree path (mutually exclusive with --enable-worktrees)')
     .option('--devices <list>', 'Pool of machines this team may run teammates on (comma-separated). Enables distributed auto-scheduling.')
-    .option('--hosts <list>', 'Alias for --devices.')
     .option('--repo <urlOrPath>', 'How each remote (--device) teammate gets the code — ONE git URL/path for the whole team (existing checkout reused, else cloned). A team is single-repo; for work across repos, make one team per repo. Defaults to this checkout origin.')
     .option('--project <slug>', "Work this team on a defined project: its primary directory is each local teammate's base cwd, its other directories become --add-dir grants")
     .option('--json', 'Output machine-readable JSON')
@@ -1766,17 +1765,9 @@ export function registerTeamsCommands(program: Command): void {
       await ensureTeam(team);
       const teamMeta = await getTeam(team);
 
-      // `--device`/`--host` are aliases (addHostOption registers both). For `teams
-      // add` the passthrough special-cases them as PLACEMENT, not routing, so the
-      // local action reads them here. Reject a conflicting pair.
-      let explicitDevice = (() => {
-        const h = opts.host;
-        const d = opts.device;
-        if (h && d && h !== d) {
-          dieFriction('teams', 'conflicting-host-device', 'Conflicting --host/--device values — pass just one.');
-        }
-        return h ?? d ?? null;
-      })();
+      // For `teams add` the passthrough special-cases --device as PLACEMENT,
+      // not routing, so the local action reads it here.
+      let explicitDevice = opts.device ?? null;
 
       // `auto` is the same live fleet sentinel `agents run --device auto` resolves
       // (RUSH-2185) — pick the concrete device name up front so the local-machine

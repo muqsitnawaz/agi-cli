@@ -192,7 +192,7 @@ async function deliverViaHostReroute(
   text: string,
   opts: { from?: string; as?: string; surface?: string; ttl?: string },
 ): Promise<void> {
-  const argv = ['message', route.remoteRef, text, '--host', route.host];
+  const argv = ['message', route.remoteRef, text, '--device', route.host];
   if (opts.from) argv.push('--from', opts.from);
   if (opts.as) argv.push('--as', opts.as);
   if (opts.surface) argv.push('--surface', opts.surface);
