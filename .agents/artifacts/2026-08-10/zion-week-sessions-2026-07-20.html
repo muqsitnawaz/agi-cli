@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zion · Week of Agent Work · Jul 14–20</title>
+<style>
+  :root{
+    --bg:#0a0a0a; --panel:#111312; --panel2:#161a18; --ink:#e7ece8; --dim:#8b938c;
+    --line:#26302a; --accent:#a3e635; --amber:#f5c451; --red:#ff6b6b; --cyan:#5ad6c0;
+    --violet:#c4b5fd; --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  }
+  :root[data-theme="light"]{
+    --bg:#faf9f6; --panel:#ffffff; --panel2:#f2f4f0; --ink:#1a1c1a; --dim:#5c655c;
+    --line:#e2e6df; --accent:#4d7c0f; --amber:#b45309; --red:#dc2626; --cyan:#0e7490;
+    --violet:#6d28d9;
+  }
+  :root[data-theme="light"] .fig{background:#0e120f;border-color:#26302a}
+  :root[data-theme="light"] .fig figcaption{color:#8b938c}
+  :root[data-theme="light"] .fig figcaption b{color:#e7ece8}
+
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1040px;margin:0 auto;padding:56px 28px 120px}
+  header.hero{border-bottom:1px solid var(--line);padding-bottom:28px;margin-bottom:36px}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 14px}
+  h1{font-size:34px;line-height:1.15;margin:0 0 12px;font-weight:700;letter-spacing:-.01em}
+  h1 .accent{color:var(--accent)}
+  .sub{color:var(--dim);font-size:17px;max-width:72ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+  .chip{font-family:var(--mono);font-size:11.5px;color:var(--dim);border:1px solid var(--line);
+    border-radius:999px;padding:4px 11px;background:var(--panel)}
+  .chip b{color:var(--ink);font-weight:500}
+  h2{font-size:23px;margin:48px 0 8px;letter-spacing:-.01em;scroll-margin-top:20px}
+  h2 .n{font-family:var(--mono);color:var(--accent);font-size:15px;margin-right:10px;opacity:.85}
+  p{margin:10px 0}
+  .lead{color:var(--dim)}
+  code{font-family:var(--mono);font-size:.88em;background:var(--panel2);border:1px solid var(--line);
+    border-radius:5px;padding:1.5px 6px;color:var(--cyan)}
+  a{color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
+  a:hover{border-bottom-color:var(--accent)}
+  .fig{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px 22px 18px;margin:22px 0;overflow-x:auto}
+  .fig figcaption{font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:14px;text-align:center}
+  .fig figcaption b{color:var(--ink)}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:22px 0}
+  @media(max-width:760px){.grid2,.stats{grid-template-columns:1fr 1fr}}
+  @media(max-width:480px){.stats{grid-template-columns:1fr}}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 16px}
+  .stat .v{font-family:var(--mono);font-size:28px;font-weight:600;color:var(--accent);letter-spacing:-.02em;line-height:1.1}
+  .stat .l{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.06em;text-transform:uppercase;margin-top:6px}
+  .stat .s{font-size:13px;color:var(--dim);margin-top:4px}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);font-weight:500}
+  .tag{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:6px;font-weight:600;display:inline-block}
+  .tag.a{background:rgba(163,230,53,.12);color:var(--accent);border:1px solid rgba(163,230,53,.3)}
+  .tag.b{background:rgba(90,214,192,.1);color:var(--cyan);border:1px solid rgba(90,214,192,.28)}
+  .tag.c{background:rgba(245,196,81,.1);color:var(--amber);border:1px solid rgba(245,196,81,.28)}
+  .tag.d{background:rgba(196,181,253,.12);color:var(--violet);border:1px solid rgba(196,181,253,.28)}
+  .tag.e{background:rgba(255,107,107,.1);color:var(--red);border:1px solid rgba(255,107,107,.28)}
+  .callout{border-left:3px solid var(--accent);background:var(--panel2);border-radius:0 10px 10px 0;
+    padding:14px 18px;margin:18px 0}
+  .callout.warn{border-left-color:var(--amber)}
+  .callout .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--accent);display:block;margin-bottom:5px}
+  .callout.warn .lbl{color:var(--amber)}
+  .toc{font-family:var(--mono);font-size:13px;display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:18px}
+  .toc a{color:var(--dim);border:0}.toc a:hover{color:var(--accent)}
+  .foot{margin-top:60px;padding-top:22px;border-top:1px solid var(--line);color:var(--dim);
+    font-family:var(--mono);font-size:12px}
+  .themebtn{position:fixed;top:16px;right:16px;z-index:9;font-family:var(--mono);font-size:12px;
+    color:var(--dim);background:var(--panel);border:1px solid var(--line);border-radius:999px;
+    padding:6px 13px;cursor:pointer}
+  .themebtn:hover{color:var(--accent);border-color:var(--accent)}
+  .theme-list{display:grid;gap:10px;margin:18px 0}
+  .theme-row{display:grid;grid-template-columns:160px 1fr 70px;gap:12px;align-items:center}
+  .theme-row .name{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+  .theme-row .bar-wrap{background:var(--panel2);border:1px solid var(--line);border-radius:8px;height:22px;overflow:hidden}
+  .theme-row .bar{height:100%;border-radius:8px;background:linear-gradient(90deg,var(--accent),var(--cyan));
+    min-width:2px;display:flex;align-items:center;padding-left:8px;font-family:var(--mono);font-size:10px;color:#0a0a0a;font-weight:600}
+  .theme-row .amt{font-family:var(--mono);font-size:12px;color:var(--dim);text-align:right}
+  .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 0 rgba(163,230,53,.5);margin-right:6px;vertical-align:middle;
+    animation:pulse 1.8s ease infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(163,230,53,.45)}70%{box-shadow:0 0 0 10px rgba(163,230,53,0)}100%{box-shadow:0 0 0 0 rgba(163,230,53,0)}}
+  @media print{.themebtn{display:none} body{background:#fff;color:#111}}
+</style>
+</head>
+<body>
+<button class="themebtn" onclick="tt()" id="tb">◐ light</button>
+<script>
+  var r=document.documentElement;
+  function set(t){r.setAttribute('data-theme',t);document.getElementById('tb').textContent=(t==='light'?'◑ dark':'◐ light')}
+  set(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+  function tt(){set(r.getAttribute('data-theme')==='light'?'dark':'light')}
+</script>
+<div class="wrap">
+
+<header class="hero">
+  <p class="kicker">Zion · Personal laptop · Agent sessions</p>
+  <h1>One week on <span class="accent">zion</span>:<br>the control-plane laptop</h1>
+  <p class="sub">Your Mac wasn’t idle — it was the interactive control plane for agents-cli.
+  Fleet, secrets/auth, Linear backlog, Factory/share, and a content burst. Pulled live via
+  <code>agents sessions --host zion --since 7d</code>.</p>
+  <div class="meta">
+    <span class="chip"><b>196</b>&nbsp;sessions</span>
+    <span class="chip"><b>120</b>&nbsp;substantive</span>
+    <span class="chip"><b>40</b>&nbsp;PRs touched</span>
+    <span class="chip">cost&nbsp;<b>~$3.36k</b></span>
+    <span class="chip">as of&nbsp;<b>2026-07-20</b></span>
+    <span class="chip">source: <b>agents sessions</b></span>
+  </div>
+  <nav class="toc">
+    <a href="#s1">01 · snapshot</a>
+    <a href="#s2">02 · cadence</a>
+    <a href="#s3">03 · themes</a>
+    <a href="#s4">04 · top sessions</a>
+    <a href="#s5">05 · agents mix</a>
+    <a href="#s6">06 · live now</a>
+  </nav>
+</header>
+
+<div class="stats">
+  <div class="stat"><div class="v" data-count="196">196</div><div class="l">Sessions</div><div class="s">7 days, local on zion</div></div>
+  <div class="stat"><div class="v" data-count="120">120</div><div class="l">Real work</div><div class="s">minus cron + hellos</div></div>
+  <div class="stat"><div class="v">$3.36k</div><div class="l">API cost</div><div class="s">Claude-heavy spend</div></div>
+  <div class="stat"><div class="v" data-count="40">40</div><div class="l">PRs</div><div class="s">across agents-cli &amp; monorepo</div></div>
+</div>
+
+<!-- ============ 01 ============ -->
+<h2 id="s1"><span class="n">01</span>The takeaway</h2>
+<p class="lead">Zion is where you <em>drive</em> the fleet — not where bulk tickets land. Heavy
+merge-train work fans to Yosemite; zion owns UX, secrets, fleet visibility, reviews, and content.</p>
+
+<div class="callout">
+  <span class="lbl">Single sentence</span>
+  Jul 16–20 on zion: ship the agents-cli control surfaces (fleet · secrets · auth · share),
+  clear Linear portfolio debt, and write the Go-harness / browser-use story.
+</div>
+
+<figure class="fig">
+<svg viewBox="0 0 960 280" role="img" aria-label="Zion as control plane among fleet devices">
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#a3e635"/></marker>
+    <marker id="ar2" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0 0 L7 4 L0 8 z" fill="#5ad6c0"/></marker>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#a3e635" stop-opacity=".25"/><stop offset="100%" stop-color="#a3e635" stop-opacity="0"/></radialGradient>
+  </defs>
+  <!-- glow under zion -->
+  <circle cx="480" cy="120" r="90" fill="url(#glow)"/>
+  <!-- zion center -->
+  <rect x="390" y="88" width="180" height="64" rx="12" fill="#12160f" stroke="#a3e635" stroke-width="1.5"/>
+  <text x="480" y="114" fill="#a3e635" font-size="13" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="600">ZION</text>
+  <text x="480" y="134" fill="#8b938c" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">personal Mac · control plane</text>
+
+  <!-- mac-mini -->
+  <rect x="40" y="40" width="150" height="48" rx="8" fill="#161a18" stroke="#26302a"/>
+  <text x="115" y="68" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">mac-mini</text>
+  <path d="M190 64 L385 110" stroke="#5ad6c0" stroke-width="1.2" fill="none" marker-end="url(#ar2)" opacity=".85"/>
+  <text x="250" y="72" fill="#5ad6c0" font-size="10" font-family="ui-monospace,Menlo,monospace">SSH hop</text>
+
+  <!-- yosemite-s0 -->
+  <rect x="40" y="160" width="150" height="48" rx="8" fill="#161a18" stroke="#26302a"/>
+  <text x="115" y="188" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">yosemite-s0</text>
+  <path d="M190 184 L385 130" stroke="#26302a" stroke-width="1.2" stroke-dasharray="4 3" fill="none"/>
+  <text x="240" y="168" fill="#ff6b6b" font-size="10" font-family="ui-monospace,Menlo,monospace">key denied</text>
+
+  <!-- yosemite-s1 -->
+  <rect x="770" y="40" width="150" height="48" rx="8" fill="#161a18" stroke="#26302a"/>
+  <text x="845" y="68" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">yosemite-s1</text>
+  <path d="M770 64 L575 110" stroke="#a3e635" stroke-width="1.2" fill="none" opacity=".5"/>
+
+  <!-- cloud -->
+  <rect x="770" y="160" width="150" height="48" rx="8" fill="#161a18" stroke="#26302a"/>
+  <text x="845" y="188" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">rush cloud</text>
+  <path d="M770 184 L575 130" stroke="#a3e635" stroke-width="1.2" fill="none" opacity=".5"/>
+
+  <!-- bottom legend -->
+  <text x="480" y="240" fill="#8b938c" font-size="11.5" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Zion drives reviews · secrets · fleet UI · blogs — workers execute ticket loops</text>
+  <text x="480" y="260" fill="#5ad6c0" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">196 sessions · $3.36k · 40 PRs · Jul 16–20 2026</text>
+</svg>
+<figcaption><b>Fleet topology from zion’s view.</b> mac-mini can SSH into zion; yosemite-s0 cannot (key not authorized).</figcaption>
+</figure>
+
+<!-- ============ 02 ============ -->
+<h2 id="s2"><span class="n">02</span>Cadence — spend by day</h2>
+<p class="lead">Jul 17 was the peak engineering day. Jul 18 almost quiet. Today (20) is the second spike — auth + backlog + content.</p>
+
+<figure class="fig">
+<svg viewBox="0 0 960 320" role="img" aria-label="Bar chart of substantive sessions and cost by day">
+  <!-- axes -->
+  <line x1="80" y1="40" x2="80" y2="250" stroke="#26302a"/>
+  <line x1="80" y1="250" x2="900" y2="250" stroke="#26302a"/>
+  <text x="40" y="50" fill="#8b938c" font-size="10" font-family="ui-monospace,Menlo,monospace">cost</text>
+
+  <!-- grid lines -->
+  <line x1="80" y1="80" x2="900" y2="80" stroke="#1a221c" stroke-dasharray="3 4"/>
+  <line x1="80" y1="140" x2="900" y2="140" stroke="#1a221c" stroke-dasharray="3 4"/>
+  <line x1="80" y1="200" x2="900" y2="200" stroke="#1a221c" stroke-dasharray="3 4"/>
+  <text x="72" y="84" fill="#5c655c" font-size="10" text-anchor="end" font-family="ui-monospace,Menlo,monospace">$1.8k</text>
+  <text x="72" y="144" fill="#5c655c" font-size="10" text-anchor="end" font-family="ui-monospace,Menlo,monospace">$1.2k</text>
+  <text x="72" y="204" fill="#5c655c" font-size="10" text-anchor="end" font-family="ui-monospace,Menlo,monospace">$0.6k</text>
+  <text x="72" y="254" fill="#5c655c" font-size="10" text-anchor="end" font-family="ui-monospace,Menlo,monospace">$0</text>
+
+  <!-- max cost 1804 -> height 170px from baseline 250, so y = 250 - (cost/1804)*170 -->
+  <!-- Jul 16: $194, 24 sess  height=18 -->
+  <rect x="140" y="232" width="72" height="18" rx="4" fill="#5ad6c0" opacity=".9"/>
+  <text x="176" y="226" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">$194</text>
+  <text x="176" y="270" fill="#8b938c" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Jul 16</text>
+  <text x="176" y="286" fill="#5c655c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">24 sess</text>
+
+  <!-- Jul 17: $1804, 50  height=170 -->
+  <rect x="290" y="80" width="72" height="170" rx="4" fill="#a3e635"/>
+  <text x="326" y="74" fill="#a3e635" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="600">$1.8k</text>
+  <text x="326" y="270" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Jul 17</text>
+  <text x="326" y="286" fill="#a3e635" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">50 sess · peak</text>
+
+  <!-- Jul 18: $5, 7  height=2 -->
+  <rect x="440" y="248" width="72" height="2" rx="1" fill="#5ad6c0" opacity=".7"/>
+  <text x="476" y="242" fill="#8b938c" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">$5</text>
+  <text x="476" y="270" fill="#8b938c" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Jul 18</text>
+  <text x="476" y="286" fill="#5c655c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">7 sess</text>
+
+  <!-- Jul 19: $242, 17  height=23 -->
+  <rect x="590" y="227" width="72" height="23" rx="4" fill="#5ad6c0" opacity=".9"/>
+  <text x="626" y="221" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">$242</text>
+  <text x="626" y="270" fill="#8b938c" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Jul 19</text>
+  <text x="626" y="286" fill="#5c655c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">17 sess</text>
+
+  <!-- Jul 20: $1116, 22  height=105 -->
+  <rect x="740" y="145" width="72" height="105" rx="4" fill="#f5c451"/>
+  <text x="776" y="139" fill="#f5c451" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="600">$1.1k</text>
+  <text x="776" y="270" fill="#e7ece8" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Jul 20</text>
+  <text x="776" y="286" fill="#f5c451" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">22 sess · today</text>
+
+  <text x="480" y="312" fill="#5c655c" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Substantive sessions only · cost bars scaled to Jul 17 peak ($1,804)</text>
+</svg>
+<figcaption><b>Daily burn.</b> Two spikes: platform surface day (17) and auth/backlog/content day (20).</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th>Day</th><th>Sessions</th><th>Cost</th><th>Character</th></tr></thead>
+  <tbody>
+    <tr><td>Jul 16</td><td>24</td><td>$194</td><td>Merge train, droid usage bars, secrets hold, hosts-as-run-options</td></tr>
+    <tr><td><b>Jul 17</b></td><td><b>50</b></td><td><b>$1.8k</b></td><td>Fleet cockpit/arcade/visibility · monitors · routines · SEO · Touch ID · cycle-20</td></tr>
+    <tr><td>Jul 18</td><td>7</td><td>$5</td><td>Quiet — fleet queries, X feed, agi-cli-web audit</td></tr>
+    <tr><td>Jul 19</td><td>17</td><td>$242</td><td>Ghostty SSH, secrets daemon, public share, Pranjal review, menu bar</td></tr>
+    <tr><td><b>Jul 20</b></td><td><b>22</b></td><td><b>$1.1k</b></td><td>Auth health · secrets unlock · login warning · backlog leak · blogs · factory UI</td></tr>
+  </tbody>
+</table>
+
+<!-- ============ 03 ============ -->
+<h2 id="s3"><span class="n">03</span>Where the money went — themes</h2>
+<p class="lead">Clustered by topic (substantive cost). Fleet + auth alone are over $1k — the laptop’s real job this week.</p>
+
+<div class="theme-list">
+  <div class="theme-row"><div class="name">Fleet / SSH / devices</div><div class="bar-wrap"><div class="bar" style="width:100%">$572</div></div><div class="amt">$572</div></div>
+  <div class="theme-row"><div class="name">Auth / secrets / login</div><div class="bar-wrap"><div class="bar" style="width:94%;background:linear-gradient(90deg,#f5c451,#a3e635)">$536</div></div><div class="amt">$536</div></div>
+  <div class="theme-row"><div class="name">Linear / backlog</div><div class="bar-wrap"><div class="bar" style="width:77%;background:linear-gradient(90deg,#ff6b6b,#f5c451)">$443</div></div><div class="amt">$443</div></div>
+  <div class="theme-row"><div class="name">Factory / cloud / Rush</div><div class="bar-wrap"><div class="bar" style="width:74%;background:linear-gradient(90deg,#5ad6c0,#a3e635)">$426</div></div><div class="amt">$426</div></div>
+  <div class="theme-row"><div class="name">Monitors / routines</div><div class="bar-wrap"><div class="bar" style="width:65%;background:linear-gradient(90deg,#c4b5fd,#5ad6c0)">$374</div></div><div class="amt">$374</div></div>
+  <div class="theme-row"><div class="name">Other shipping (PRs)</div><div class="bar-wrap"><div class="bar" style="width:61%">$347</div></div><div class="amt">$347</div></div>
+  <div class="theme-row"><div class="name">Web / SEO / share</div><div class="bar-wrap"><div class="bar" style="width:57%;background:linear-gradient(90deg,#5ad6c0,#c4b5fd)">$328</div></div><div class="amt">$328</div></div>
+  <div class="theme-row"><div class="name">Content / blogs</div><div class="bar-wrap"><div class="bar" style="width:18%;background:#5ad6c0">$104</div></div><div class="amt">$104</div></div>
+  <div class="theme-row"><div class="name">PR review / merge</div><div class="bar-wrap"><div class="bar" style="width:10%;background:#8b938c">$55</div></div><div class="amt">$55</div></div>
+</div>
+
+<figure class="fig">
+<svg viewBox="0 0 960 340" role="img" aria-label="Theme map as connected nodes">
+  <defs>
+    <marker id="dot" markerWidth="6" markerHeight="6" refX="3" refY="3"><circle cx="3" cy="3" r="2" fill="#a3e635"/></marker>
+  </defs>
+  <!-- center -->
+  <circle cx="480" cy="170" r="52" fill="#12160f" stroke="#a3e635" stroke-width="1.5"/>
+  <text x="480" y="166" fill="#a3e635" font-size="12" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="600">agents-cli</text>
+  <text x="480" y="184" fill="#8b938c" font-size="10" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">on zion</text>
+
+  <!-- spokes -->
+  <line x1="480" y1="118" x2="480" y2="48" stroke="#26302a"/>
+  <rect x="400" y="18" width="160" height="36" rx="8" fill="#161a18" stroke="#a3e635"/>
+  <text x="480" y="40" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Fleet $572</text>
+
+  <line x1="430" y1="130" x2="220" y2="70" stroke="#26302a"/>
+  <rect x="100" y="50" width="160" height="36" rx="8" fill="#161a18" stroke="#f5c451"/>
+  <text x="180" y="72" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Auth $536</text>
+
+  <line x1="530" y1="130" x2="740" y2="70" stroke="#26302a"/>
+  <rect x="700" y="50" width="160" height="36" rx="8" fill="#161a18" stroke="#ff6b6b"/>
+  <text x="780" y="72" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Linear $443</text>
+
+  <line x1="430" y1="210" x2="220" y2="270" stroke="#26302a"/>
+  <rect x="100" y="254" width="160" height="36" rx="8" fill="#161a18" stroke="#5ad6c0"/>
+  <text x="180" y="276" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Factory $426</text>
+
+  <line x1="530" y1="210" x2="740" y2="270" stroke="#26302a"/>
+  <rect x="700" y="254" width="160" height="36" rx="8" fill="#161a18" stroke="#c4b5fd"/>
+  <text x="780" y="276" fill="#e7ece8" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Monitors $374</text>
+
+  <line x1="480" y1="222" x2="480" y2="300" stroke="#26302a"/>
+  <rect x="390" y="300" width="180" height="28" rx="8" fill="#161a18" stroke="#26302a"/>
+  <text x="480" y="318" fill="#8b938c" font-size="11" text-anchor="middle" font-family="ui-monospace,Menlo,monospace">Web · content · reviews</text>
+</svg>
+<figcaption><b>Theme map.</b> Everything orbits agents-cli; the five heavy nodes are fleet, auth, Linear, factory, monitors.</figcaption>
+</figure>
+
+<!-- ============ 04 ============ -->
+<h2 id="s4"><span class="n">04</span>Top sessions by cost</h2>
+<table>
+  <thead><tr><th>Cost</th><th>Session</th><th>Work</th><th>Track</th></tr></thead>
+  <tbody>
+    <tr><td><code>$295</code></td><td><code>83e4626c</code></td><td>linear-backlog-leak-investigation</td><td><span class="tag e">RUSH-899</span> PR#1258</td></tr>
+    <tr><td><code>$211</code></td><td><code>0cabd0e6</code></td><td>script-mode-routines-llm</td><td><span class="tag a">PR#1159</span></td></tr>
+    <tr><td><code>$190</code></td><td><code>b6be8e98</code></td><td>fleet-visibility-consistency-fixes</td><td><span class="tag c">RUSH-1753</span></td></tr>
+    <tr><td><code>$163</code></td><td><code>29835911</code></td><td>agents-monitors-watchers</td><td><span class="tag c">RUSH-1415</span></td></tr>
+    <tr><td><code>$150</code></td><td><code>4bdcbde4</code></td><td>Screenshots → product visuals</td><td><span class="tag b">PR#2</span></td></tr>
+    <tr><td><code>$148</code></td><td><code>f2314c23</code></td><td>persist-secrets-unlock-state</td><td><span class="tag d">AES-256</span> PR#1293</td></tr>
+    <tr><td><code>$139</code></td><td><code>6c0c111d</code></td><td>agi-cli-seo-automation</td><td><span class="tag b">PR#2</span></td></tr>
+    <tr><td><code>$138</code></td><td><code>fc7b3fdf</code></td><td>show-agent-login-state-warning</td><td><span class="tag d">AES-256</span> PR#1284</td></tr>
+    <tr><td><code>$138</code></td><td><code>d77f2823</code></td><td>cycle-20-ticket-portfolio-clear</td><td><span class="tag c">RUSH-1776</span></td></tr>
+    <tr><td><code>$129</code></td><td><code>77ef9e0a</code></td><td>live-auth-health-check</td><td><span class="tag a">PR#1285</span></td></tr>
+    <tr><td><code>$123</code></td><td><code>c32e4ca2</code></td><td>Plan next steps</td><td><span class="tag a">PR#1193</span></td></tr>
+    <tr><td><code>$119</code></td><td><code>a1523d2b</code></td><td>cloudflare-r2-share-command</td><td><span class="tag a">PR#1220</span></td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="lbl">Noise filter</span>
+  ~76 of 196 sessions are Rush hourly competitive-watch cron jobs or 2-message hellos/byes.
+  Cost above is almost entirely Claude on real engineering threads.
+</div>
+
+<!-- ============ 05 ============ -->
+<h2 id="s5"><span class="n">05</span>Agent mix</h2>
+
+<figure class="fig">
+<svg viewBox="0 0 960 220" role="img" aria-label="Agent session counts as proportional bars">
+  <!-- Claude 110/196 = 56% -->
+  <text x="40" y="42" fill="#8b938c" font-size="12" font-family="ui-monospace,Menlo,monospace">claude</text>
+  <rect x="120" y="26" width="540" height="24" rx="6" fill="#a3e635"/>
+  <text x="670" y="42" fill="#e7ece8" font-size="12" font-family="ui-monospace,Menlo,monospace">110 · ~$3.36k</text>
+
+  <text x="40" y="82" fill="#8b938c" font-size="12" font-family="ui-monospace,Menlo,monospace">rush</text>
+  <rect x="120" y="66" width="289" height="24" rx="6" fill="#f5c451"/>
+  <text x="420" y="82" fill="#e7ece8" font-size="12" font-family="ui-monospace,Menlo,monospace">59 · cron watches</text>
+
+  <text x="40" y="122" fill="#8b938c" font-size="12" font-family="ui-monospace,Menlo,monospace">kimi</text>
+  <rect x="120" y="106" width="69" height="24" rx="6" fill="#c4b5fd"/>
+  <text x="200" y="122" fill="#e7ece8" font-size="12" font-family="ui-monospace,Menlo,monospace">14</text>
+
+  <text x="40" y="162" fill="#8b938c" font-size="12" font-family="ui-monospace,Menlo,monospace">codex</text>
+  <rect x="120" y="146" width="54" height="24" rx="6" fill="#5ad6c0"/>
+  <text x="185" y="162" fill="#e7ece8" font-size="12" font-family="ui-monospace,Menlo,monospace">11</text>
+
+  <text x="40" y="202" fill="#8b938c" font-size="12" font-family="ui-monospace,Menlo,monospace">droid</text>
+  <rect x="120" y="186" width="10" height="24" rx="4" fill="#8b938c"/>
+  <text x="145" y="202" fill="#e7ece8" font-size="12" font-family="ui-monospace,Menlo,monospace">2</text>
+</svg>
+<figcaption><b>Session count by agent.</b> Claude does the expensive work; Rush session count is inflated by hourly watches.</figcaption>
+</figure>
+
+<div class="grid2">
+  <div>
+    <h3 style="margin-top:0;font-size:15px;color:var(--dim);font-family:var(--mono)">Shipped surfaces (sample)</h3>
+    <ul>
+      <li>Fleet visibility, arcade status, iOS cockpit</li>
+      <li>Secrets unlock + login warning + live auth health</li>
+      <li>Touch ID noise, R2 share, factory UI</li>
+      <li>Monitors/watchers, script-mode routines</li>
+      <li>Go harness + browser-use blogs, SMB value prop</li>
+    </ul>
+  </div>
+  <div>
+    <h3 style="margin-top:0;font-size:15px;color:var(--dim);font-family:var(--mono)">Notable PR band</h3>
+    <ul>
+      <li><code>agents-cli</code> #1159 · #1209 · #1212 · #1220 · #1223</li>
+      <li>#1258 · #1283–#1293 · #1302 · #1308–#1310</li>
+      <li>monorepo blogs #1168 · #1170 · #1172 · logo #1169</li>
+      <li>system: arcade #92 · Clify #108 · SEO #2</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============ 06 ============ -->
+<h2 id="s6"><span class="n">06</span><span class="live-dot"></span>Live on zion (when rendered)</h2>
+<p class="lead">Snapshot from <code>agents sessions --active --local</code> on zion around render time — ~14 active across codium + tmux.</p>
+
+<table>
+  <thead><tr><th>State</th><th>Agent</th><th>Work</th></tr></thead>
+  <tbody>
+    <tr><td><span class="tag a">working</span></td><td>Claude <code>83e4626c</code></td><td>linear-backlog-leak-investigation · RUSH-899</td></tr>
+    <tr><td><span class="tag a">working</span></td><td>Codex <code>019f7e5a</code></td><td>team /root agent</td></tr>
+    <tr><td><span class="tag c">idle</span></td><td>Claude · codium</td><td>Clify plugin · blogs · SMB value prop · API auth</td></tr>
+    <tr><td><span class="tag c">idle</span></td><td>Claude · tmux</td><td>YouTube-on-Mac-Mini · review sessions last week</td></tr>
+    <tr><td><span class="tag b">cron</span></td><td>Rush</td><td>Hourly competitive watch (background)</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <span class="lbl">How to re-query</span>
+  From a machine that can SSH to zion (mac-mini works; yosemite-s0 currently key-denied):
+  <br><code>agents sessions --all --since 7d --host zion --flat</code>
+  · <code>agents sessions --active --host zion</code>
+</div>
+
+<div class="foot">
+  zion-week-sessions · data from agents sessions --local on zion · window Jul 16–20 2026 ·
+  rendered 2026-07-20 · Grok on yosemite-s0 via mac-mini hop · self-contained HTML · ◐ toggles theme
+</div>
+
+</div>
+<script>
+  // Count-up only in interactive browsers (print/webdriver keeps baked values)
+  if (!navigator.webdriver) {
+    document.querySelectorAll('.stat .v[data-count]').forEach(function(el){
+      var target = parseInt(el.getAttribute('data-count'), 10);
+      if (!target) return;
+      var start = 0, t0 = null, dur = 700;
+      function step(ts){
+        if (!t0) t0 = ts;
+        var p = Math.min(1, (ts - t0) / dur);
+        el.textContent = Math.round(start + (target - start) * (1 - Math.pow(1-p, 3)));
+        if (p < 1) requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    });
+  }
+</script>
+</body>
+</html>
