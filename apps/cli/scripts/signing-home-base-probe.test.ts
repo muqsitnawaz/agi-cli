@@ -77,6 +77,73 @@ describe('signing home-base probe: an unprovisioned box fails fast', () => {
   });
 });
 
+/** Run a git command, throwing on failure. */
+function git(cwd: string, ...args: string[]) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf-8' });
+  if (r.status !== 0) {
+    throw new Error(`git ${args.join(' ')} in ${cwd} failed: ${r.stderr}`);
+  }
+  return r.stdout;
+}
+
+/**
+ * A "new home base" fixture: a real git checkout whose LOCAL branch and
+ * working tree predate the commit that added embedded.provisionprofile, but
+ * whose `origin` remote (a second local repo, standing in for GitHub) already
+ * has it on `main` -- exactly RUSH-2541's "a Mac that has not previously been
+ * home base": its own on-disk checkout has simply never been pulled forward.
+ */
+function staleHomeBaseFixture(): string {
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sign-probe-origin-'));
+  git(remote, 'init', '--quiet', '-b', 'main');
+  git(remote, 'config', 'user.email', 'test@example.com');
+  git(remote, 'config', 'user.name', 'test');
+  git(remote, 'commit', '--quiet', '--allow-empty', '-m', 'before the profile existed');
+
+  const checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'sign-probe-checkout-'));
+  git(checkout, 'clone', '--quiet', remote, '.');
+  git(checkout, 'config', 'user.email', 'test@example.com');
+  git(checkout, 'config', 'user.name', 'test');
+
+  // The remote gains the profile AFTER the clone -- the checkout's local main
+  // and working tree never see it until something fetches origin/main, which
+  // is exactly what the probe must now do.
+  const binDir = path.join(remote, 'apps/cli/bin');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, 'embedded.provisionprofile'), 'PROFILE');
+  git(remote, 'add', 'apps/cli/bin/embedded.provisionprofile');
+  git(remote, 'commit', '--quiet', '-m', 'commit embedded.provisionprofile (2567004b4)');
+
+  expect(fs.existsSync(path.join(checkout, 'apps/cli/bin/embedded.provisionprofile'))).toBe(false);
+  return checkout;
+}
+
+describe('signing home-base probe: a new home base recovers via origin (RUSH-2541)', () => {
+  it('passes the provisionprofile gate when the local checkout is stale but origin has it', () => {
+    // Before this fix, the probe checked ONLY the on-disk working tree and
+    // never fetched, so a legitimately new home base -- cloned before the
+    // profile was committed, or simply never pulled since -- reported
+    // "unprovisioned" forever, exactly like the box release.sh's own seed
+    // step (home_base_wt_snippet) is built to recover from.
+    const { out } = probe(staleHomeBaseFixture());
+    expect(out).not.toContain('embedded.provisionprofile');
+  });
+
+  it('still fails the provisionprofile gate when neither the checkout nor origin has it', () => {
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'sign-probe-origin-empty-'));
+    git(remote, 'init', '--quiet', '-b', 'main');
+    git(remote, 'config', 'user.email', 'test@example.com');
+    git(remote, 'config', 'user.name', 'test');
+    git(remote, 'commit', '--quiet', '--allow-empty', '-m', 'no profile ever');
+    const checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'sign-probe-checkout-empty-'));
+    git(checkout, 'clone', '--quiet', remote, '.');
+
+    const { status, out } = probe(checkout);
+    expect(status).not.toBe(0);
+    expect(out).toContain('embedded.provisionprofile');
+  });
+});
+
 describe('signing home-base probe: it cannot advance a release', () => {
   it('the probe performs no git/gh/npm mutations', () => {
     // The whole point is to fail BEFORE the merge + tag. A probe that itself ran

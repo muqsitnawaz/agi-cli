@@ -437,17 +437,30 @@ git -C "\$REPO_ROOT" worktree add --quiet --detach "\$WT" "v$1" \\
   || { echo "could not create home-base publish worktree at \$WT" >&2; exit 1; }
 [ -z "\$(git -C "\$WT" status --short | grep '^ D')" ] \\
   || { echo "home-base publish worktree \$WT is incomplete -- refusing to build" >&2; exit 1; }
-# The signed keychain + menu-bar helpers need bin/embedded.provisionprofile — an
-# Apple provisioning profile that is gitignored (never committed, /apps/cli/bin/
-# is ignored wholesale), so the tag worktree has no bin/ at all. Seed it from the
-# home base's own checkout (REPO_ROOT has it) before the helper build reads it;
-# without this the home-base phase dies "Missing .../bin/embedded.provisionprofile"
-# on every release, regardless of which box triggered it.
+# The signed keychain + menu-bar helpers need bin/embedded.provisionprofile -- an
+# Apple provisioning profile that is a COMMITTED input as of commit 2567004b4
+# (negated out of .gitignore: /apps/cli/bin/* + !/apps/cli/bin/embedded.provisionprofile),
+# so any tag cut after that commit already carries it in the checked-out \$WT
+# tree, with nothing left to seed. Two cases still need recovery: an OLDER tag
+# cut before 2567004b4 (e.g. the stuck v1.22.36) genuinely lacks it in its own
+# tree, and a home base whose own on-disk checkout (REPO_ROOT) has simply never
+# been git-pulled past that commit -- "any Mac that has not previously been home
+# base" (RUSH-2541) -- lacks it on disk even though origin does not. The fetch
+# above always refreshes origin/\$DEFAULT_BRANCH's remote-tracking ref regardless
+# of REPO_ROOT's local working-tree state, so recover the blob from THAT ref
+# rather than trusting whatever happens to be checked out on REPO_ROOT's disk.
 mkdir -p "\$WT/apps/cli/bin"
-if [ -f "\$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" ]; then
+DEFAULT_BRANCH="\$(git -C "\$REPO_ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')"
+[ -n "\$DEFAULT_BRANCH" ] || DEFAULT_BRANCH="main"
+if [ -f "\$WT/apps/cli/bin/embedded.provisionprofile" ]; then
+  : # already in the tagged tree -- nothing to seed
+elif git -C "\$REPO_ROOT" show "origin/\$DEFAULT_BRANCH:apps/cli/bin/embedded.provisionprofile" > "\$WT/apps/cli/bin/embedded.provisionprofile" 2>/dev/null; then
+  : # recovered from the freshly-fetched origin/\$DEFAULT_BRANCH ref
+elif [ -f "\$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" ]; then
   cp "\$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" "\$WT/apps/cli/bin/embedded.provisionprofile"
 else
-  echo "warning: \$REPO_ROOT/apps/cli/bin/embedded.provisionprofile absent on the home base; the signed helper build will fail" >&2
+  echo "error: apps/cli/bin/embedded.provisionprofile not found on the tagged tree, on origin/\$DEFAULT_BRANCH, or on this home base's disk. It is a committed file (see commit 2567004b4) -- recover it from git history and verify apps/cli/bin/embedded.provisionprofile is tracked on origin/\$DEFAULT_BRANCH, then retry. Do NOT regenerate it at developer.apple.com; the existing profile is valid until 2044." >&2
+  exit 1
 fi
 cd "\$WT/apps/cli"
 scripts/release.sh $1 --home-base-phase --device "$RELEASE_HOME_BASE"

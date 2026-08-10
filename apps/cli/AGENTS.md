@@ -648,9 +648,14 @@ tagged). `release.sh` now **preflights the resolved home base BEFORE any mutatio
 ([`scripts/signing-home-base-probe.sh`](scripts/signing-home-base-probe.sh), run on
 that box over `agents ssh`): an unprovisioned `--device` aborts at the preflight,
 before the crabbox/PR/merge/tag phases, naming the exact gap, so a mac-mini outage
-no longer risks a half-finished release. Provisioning a *new* signing home base (seeding the
-keychain, the pass files, and the secrets bundles) is tracked by **RUSH-2541** — do
-that first, then `--device <that-mac>` works.
+no longer risks a half-finished release. `apps/cli/bin/embedded.provisionprofile` is a
+committed input (commit 2567004b4) that self-heals — the preflight and the
+home-base phase both recover it from a freshly fetched `origin/<default>` ref when
+the box's own on-disk checkout predates that commit, so a brand-new home base
+never needs the profile hand-copied over (RUSH-2541). The keychain (Developer ID
+identity in a headless-unlockable keychain) and the `apple.com`/`npmjs.com`
+secrets bundles remain genuinely manual, per-machine provisioning steps — seed
+those first, then `--device <that-mac>` works.
 
 **The caller checkout is never mutated or gated.** `release.sh` immediately
 fetches origin and re-enters the release from a detached, release-owned worktree
