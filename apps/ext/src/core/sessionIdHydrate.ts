@@ -10,14 +10,9 @@
  */
 
 import * as os from 'os';
-import { cachedInFlight, createTimedCache, type TimedCache } from './cachedInFlight';
-import { runAgents } from './agentsBin';
 import { normalizeHost } from './remoteSessions';
-import {
-  parseActiveSessionJoinRows,
-  terminalIdToSessionIdMap,
-} from './sessionIdJoin';
 import { canonicalSessionId, isRolloutSessionStem } from './canonicalSessionId';
+import { sessionPresentationStore } from './sessionPresentationStore';
 
 /** Local active feed TTL — short enough to pick up a new Grok SessionStart. */
 export const ACTIVE_MAP_TTL_LOCAL_MS = 3_000;
@@ -32,11 +27,9 @@ const LOCAL_CACHE_KEY = '__local__';
 
 export type TerminalIdSessionMap = Map<string, string>;
 
-let mapCache: TimedCache<TerminalIdSessionMap> = createTimedCache();
-
 /** Test-only: reset the shared cache between unit tests. */
 export function resetSessionIdHydrateCacheForTests(): void {
-  mapCache = createTimedCache();
+  // The canonical stream store owns freshness; there is no extension cache.
 }
 
 /**
@@ -61,10 +54,6 @@ export function isLocalActiveMapKey(key: string): boolean {
   return key === LOCAL_CACHE_KEY;
 }
 
-function shellQuote(arg: string): string {
-  return `'${arg.replace(/'/g, `'\\''`)}'`;
-}
-
 /**
  * Fetch terminalId → sessionId for one host (or local). Coalesced + TTL'd.
  * On timeout / CLI failure returns an empty map (leave unmapped, never wrong).
@@ -72,31 +61,12 @@ function shellQuote(arg: string): string {
 export async function fetchTerminalIdSessionMap(
   host: string | undefined,
   deps: {
-    runAgents?: typeof runAgents;
     now?: number;
     localHostname?: string;
   } = {},
 ): Promise<TerminalIdSessionMap> {
-  const run = deps.runAgents ?? runAgents;
-  const now = deps.now ?? Date.now();
   const key = activeMapCacheKey(host, deps.localHostname);
-  const isLocal = isLocalActiveMapKey(key);
-  const ttl = isLocal ? ACTIVE_MAP_TTL_LOCAL_MS : ACTIVE_MAP_TTL_REMOTE_MS;
-  const timeout = isLocal ? ACTIVE_MAP_TIMEOUT_LOCAL_MS : ACTIVE_MAP_TIMEOUT_REMOTE_MS;
-
-  return cachedInFlight(mapCache, key, ttl, async () => {
-    // `--local` for this machine; `--host <device>` for a real offload.
-    // Never `--where`.
-    const args = isLocal
-      ? 'sessions --active --local --json'
-      : `sessions --active --json --host ${shellQuote(host!.trim())}`;
-    try {
-      const { stdout } = await run(args, { timeout });
-      return terminalIdToSessionIdMap(parseActiveSessionJoinRows(stdout));
-    } catch {
-      return new Map();
-    }
-  }, now);
+  return sessionPresentationStore.terminalSessionMap(isLocalActiveMapKey(key) ? undefined : host);
 }
 
 /**

@@ -66,7 +66,9 @@ import {
   type Device,
 } from './deviceHealth.vscode';
 import { inferProjectCandidates } from '../core/projectIndex';
-import { normalizeHost, buildRemoteFocusCommand } from '../core/remoteSessions';
+import { normalizeHost, buildRemoteFocusCommand, groupByHost, type HostInfo } from '../core/remoteSessions';
+import { sessionPresentationStore } from '../core/sessionPresentationStore';
+import { LOCAL_LABEL, LOCAL_MACHINE_ID } from './remoteSessions.vscode';
 import { rankRepos } from '../core/repoIndex';
 import { detectProjects } from '../core/projectDetect';
 import { getSyncStatus } from '../core/repoSync';
@@ -1484,24 +1486,13 @@ function invalidateAgentInventoryCache(): void {
 }
 
 /**
- * Wire last-good Floor snapshot persistence + run the one-shot activation seed:
- * at most one `agents devices list --json` and one `agents sessions --active
- * --local --json`. Subsequent local updates come from monitor events / the 60s
- * local backstop; remote fleet refresh is user-triggered only.
+ * Seed the device registry used alongside the canonical CLI session stream.
  */
 export async function seedFloorDataPipeline(context: vscode.ExtensionContext): Promise<void> {
-  const remote = await import('./remoteSessions.vscode');
   floorDataContext = context;
-  remote.setFloorSnapshotStore({
-    read: () => parseFloorSnapshot(context.globalState.get(FLOOR_SNAPSHOT_KEY)) ?? null,
-    write: (snap) => {
-      void context.globalState.update(FLOOR_SNAPSHOT_KEY, snap);
-    },
-  });
   const persistedDevices = parseFloorDevicesSnapshot(context.globalState.get(FLOOR_DEVICES_KEY));
   if (persistedDevices) {
     setRegisteredDevicesCache(persistedDevices.devices as Device[]);
-    remote.seedFloorHostsFromDevices(persistedDevices.devices);
   }
   const persistedInventory = parseFloorInventorySnapshot(context.globalState.get(FLOOR_INVENTORY_KEY));
   if (persistedInventory && !cachedInventories) {
@@ -1513,15 +1504,11 @@ export async function seedFloorDataPipeline(context: vscode.ExtensionContext): P
   if (floorActivationSeedPromise) return floorActivationSeedPromise;
   if (floorActivationSeeded) return;
   floorActivationSeeded = true;
-  // One registry read (devices list --json) + one local sessions seed. Never
-  // doctor / devices status / fleet status / projects status.
-  floorActivationSeedPromise = Promise.all([
-    (async () => {
+  floorActivationSeedPromise = (async () => {
       try {
         const devices = await fetchRegisteredDevices();
         const fetchedAt = Date.now();
         await context.globalState.update(FLOOR_DEVICES_KEY, { devices, fetchedAt });
-        remote.seedFloorHostsFromDevices(devices);
         settingsPanel?.webview.postMessage({
           type: 'devicesData',
           devices,
@@ -1530,9 +1517,7 @@ export async function seedFloorDataPipeline(context: vscode.ExtensionContext): P
       } catch (err) {
         console.error('[SETTINGS] Device registry activation seed failed:', err);
       }
-    })(),
-    remote.seedLocalSessionsOnce(getSettings(context).projectRules ?? []),
-  ]).then(() => undefined);
+    })();
   try {
     await floorActivationSeedPromise;
   } finally {
@@ -1878,14 +1863,12 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         // Dispatch opens from persisted/cached inventory + last-good host sessions.
         // Never probeCpu and never per-device CPU/memory + sessions fan-out.
         try {
-          const { fetchHostSessions, LOCAL_LABEL } = await import('./remoteSessions.vscode');
           const inventories = await getCachedAgentInventories();
-          // Non-force is cache-only even on a true cold start; activation owns
-          // the one device-registry read and local-session seed.
-          const hostResult = await fetchHostSessions(Date.now(), {
-            force: false,
-            projectRules: getSettings(context).projectRules ?? [],
-          });
+          const sessions = sessionPresentationStore.presentedSessions(
+            LOCAL_MACHINE_ID,
+            LOCAL_LABEL,
+            getSettings(context).projectRules ?? [],
+          );
           const defaultTitle = context.globalState.get<string>('agents.defaultAgentTitle', 'CC');
           const defaultAgentId = getBuiltInDefByTitle(defaultTitle)?.key ?? 'claude';
           const agents = mapInventoriesToInstalledAgents(inventories, defaultAgentId);
@@ -1893,15 +1876,18 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
           // device selector (sourced from `agents devices` with correct online
           // status) — keeping remotes out of here avoids a duplicate, stale,
           // all-offline host roster.
-          const hosts = buildDispatchHosts(hostResult.hosts, LOCAL_LABEL).filter((h) => h.kind !== 'remote');
+          const localAgents = sessions.filter((session) => session.host === LOCAL_LABEL).length;
+          const hosts = buildDispatchHosts([
+            { name: LOCAL_LABEL, online: true, agents: localAgents, load: 'unavailable', uses: localAgents },
+          ], LOCAL_LABEL).filter((h) => h.kind !== 'remote');
           // Targets come from the CURATED managed-projects list (enriched with live
           // session `uses` + confidence + linked Linear name), so the dropdown shows
           // real repos even with nothing running. Falls back to session-derived
           // ranking only if the managed list is empty (e.g. detection produced none).
           const managed = await readManagedProjects();
           const targets = managed.length
-            ? buildManagedTargets(managed, hostResult.sessions)
-            : rankTargets(hostResult.sessions);
+            ? buildManagedTargets(managed, sessions)
+            : rankTargets(sessions);
           settingsPanel?.webview.postMessage({ type: 'dispatchData', agents, hosts, targets });
         } catch (err) {
           console.error('[SETTINGS] Error fetching dispatch data:', err);
@@ -2168,23 +2154,27 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         settingsPanel?.webview.postMessage({ type: 'sessionsData', sessions });
         break;
       case 'fetchHostSessions': {
-        // Remote fleet: last-good by default; force=true runs one bare
-        // `agents sessions --active --json`. Automatic UI polls must omit force
-        // so they never re-trigger fleet SSH. Manual refresh should pass force.
         try {
-          const { fetchHostSessions } = await import('./remoteSessions.vscode');
-          const force = message?.force === true;
-          const {
-            hosts,
-            sessions: hostSessions,
-            groups,
+          const fetchedAt = Date.now();
+          const hostSessions = sessionPresentationStore.presentedSessions(
+            LOCAL_MACHINE_ID,
+            LOCAL_LABEL,
+            getSettings(context).projectRules ?? [],
             fetchedAt,
-            hostFreshness,
-            fromCache,
-          } = await fetchHostSessions(Date.now(), {
-            force,
-            projectRules: getSettings(context).projectRules ?? [],
-          });
+          );
+          const counts = new Map<string, number>();
+          for (const session of hostSessions) counts.set(session.host, (counts.get(session.host) ?? 0) + 1);
+          const devices = getRegisteredDevicesCache() ?? [];
+          const hosts: HostInfo[] = [
+            { name: LOCAL_LABEL, online: true, agents: counts.get(LOCAL_LABEL) ?? 0, load: 'unavailable', uses: counts.get(LOCAL_LABEL) ?? 0 },
+            ...devices.filter((device) => normalizeHost(device.name) !== LOCAL_MACHINE_ID).map((device) => {
+              const name = normalizeHost(device.name);
+              const agents = counts.get(name) ?? 0;
+              return { name, online: device.online || agents > 0, agents, load: device.online || agents > 0 ? 'unavailable' as const : 'off' as const, uses: agents };
+            }),
+          ];
+          const groups = groupByHost(hostSessions, hosts, fetchedAt);
+          const hostFreshness = Object.fromEntries(hosts.map((host) => [host.name, fetchedAt]));
           settingsPanel?.webview.postMessage({
             type: 'hostSessions',
             hosts,
@@ -2192,7 +2182,7 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
             groups,
             fetchedAt,
             hostFreshness,
-            fromCache: fromCache === true,
+            fromCache: false,
           });
         } catch (err) {
           console.error('[SETTINGS] Error fetching host sessions:', err);
@@ -2209,20 +2199,19 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         break;
       }
       case 'fetchLocalSessions': {
-        // Local-only: seed + 60s backstop (no SSH). Rides 'localSessions' so the
-        // webview replaces only this-mac rows and leaves remote rows intact.
         try {
-          const { fetchLocalSessions } = await import('./remoteSessions.vscode');
-          const force = message?.force === true;
-          const { sessions: localSessions, fetchedAt, fromCache } = await fetchLocalSessions(
-            Date.now(),
-            { force, projectRules: getSettings(context).projectRules ?? [] },
-          );
+          const fetchedAt = Date.now();
+          const localSessions = sessionPresentationStore.presentedSessions(
+            LOCAL_MACHINE_ID,
+            LOCAL_LABEL,
+            getSettings(context).projectRules ?? [],
+            fetchedAt,
+          ).filter((session) => session.host === LOCAL_LABEL);
           settingsPanel?.webview.postMessage({
             type: 'localSessions',
             sessions: localSessions,
             fetchedAt,
-            fromCache: fromCache === true,
+            fromCache: false,
           });
         } catch (err) {
           console.error('[SETTINGS] Error fetching local sessions:', err);
@@ -2391,13 +2380,13 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         // animation read does not create a recurring CLI subprocess.
         let total = 0;
         try {
-          const { fetchLocalSessions } = await import('./remoteSessions.vscode');
           const windowSessionIds = new Set(
             terminals.getAllTerminals()
               .filter((t) => t.terminal.exitStatus === undefined && t.sessionId)
               .map((t) => t.sessionId as string),
           );
-          const { sessions } = await fetchLocalSessions();
+          const sessions = sessionPresentationStore.presentedSessions(LOCAL_MACHINE_ID, LOCAL_LABEL)
+            .filter((session) => session.host === LOCAL_LABEL);
           for (const s of sessions) {
             if (windowSessionIds.has(s.sessionId)) total += s.tokPerSec;
           }

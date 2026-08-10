@@ -285,7 +285,7 @@ export interface HostGroup {
 
 /** Live load bucket for a host. Mirrors dispatch.types.ts HostLoad (webview
  *  contract) — kept in sync by hand; the two are NOT shared across the boundary. */
-export type HostLoad = 'idle' | 'free' | 'busy' | 'hot' | 'off';
+export type HostLoad = 'idle' | 'free' | 'busy' | 'hot' | 'off' | 'unavailable';
 
 /** Reachability + live load of a discovered host. `agents`/`load`/`uses` are the
  *  live-load fields the Dispatch panel reads; they ride the existing hostSessions

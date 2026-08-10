@@ -35,7 +35,8 @@ import { startWatchdogBridge } from '../mcp/watchdog-bridge';
 import { ensureWatchdogMcpInstalled } from '../mcp/watchdogInstall';
 import * as notifications from './notifications.vscode';
 import * as terminals from './terminals.vscode';
-import { fetchLocalSessions, fetchRemoteSessionLabelSource, fetchSessionIdentity, fetchRecapSessions, LOCAL_LABEL, LOCAL_MACHINE_ID, mapWithConcurrency } from './remoteSessions.vscode';
+import { fetchRemoteSessionLabelSource, fetchSessionIdentity, fetchRecapSessions, LOCAL_LABEL, LOCAL_MACHINE_ID, mapWithConcurrency } from './remoteSessions.vscode';
+import { sessionPresentationStore } from '../core/sessionPresentationStore';
 import { runRecapHeadless, isRecapSupported } from './recap.vscode';
 import { buildAgentTerminalEnv } from '../core/terminals';
 import {
@@ -315,7 +316,8 @@ async function detachAgentToBackground(): Promise<void> {
 // active-session list (presence background/parked) and open a terminal running
 // `agents sessions attach <id>`, which resumes the session interactively in that tab.
 async function attachAgentFromBackground(): Promise<void> {
-  const { sessions } = await fetchLocalSessions();
+  const sessions = sessionPresentationStore.presentedSessions(LOCAL_MACHINE_ID, LOCAL_LABEL)
+    .filter((session) => session.host === LOCAL_LABEL);
   const backgrounded = sessions.filter((s) => s.presence === 'background' || s.presence === 'parked');
   if (backgrounded.length === 0) {
     void vscode.window.showInformationMessage('No backgrounded agents to bring forward. Send one back with “Agents: Detach”.');
@@ -5151,7 +5153,7 @@ async function recordFork(
     readRemote: async (host, id) => {
       try {
         const { runAgents } = await import('../core/agentsBin');
-        return remoteForkSessionId(runAgents, host, id, shquote);
+        return remoteForkSessionId(host, id);
       } catch {
         return null;
       }
@@ -5601,7 +5603,6 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
   type TerminalTuple = import('../monitor/protocol').TerminalTuple;
 
   const windowId = computeWindowId(vscode.env.sessionId, process.pid);
-  const { sessionPresentationStore: sessionStore } = require('../core/sessionPresentationStore') as typeof import('../core/sessionPresentationStore');
 
   // Resolve a broadcast pid/sessionId back to THIS window's terminal, scanning
   // only the window-local registry (stays per-window per epic #64).
@@ -5671,7 +5672,7 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
         childPid: p.childPid,
       });
     } else if (proto.isSessionCliFact(event)) {
-      if (sessionStore.apply(event.payload)) void settings.refreshFloorFromSessionStream();
+      if (sessionPresentationStore.apply(event.payload)) void settings.refreshFloorFromSessionStream();
     }
   });
   context.subscriptions.push({ dispose: factSub });
