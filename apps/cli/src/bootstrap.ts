@@ -272,12 +272,12 @@ Packages:
 
 Run and dispatch:
   run <agent|profile> [prompt]    Run an agent. Omit prompt for interactive mode.
-  defaults                        Configure run defaults by agent/version selector
+  config                          Configure run defaults, project root, and device options
   teams                           Coordinate multiple agents on shared work
   routines                        Run agents on a cron schedule (scheduler auto-starts)
   daemon                          Runtime status/control for the always-on daemon (secrets broker, browser IPC, scheduler)
   webhook                         Receive signed GitHub/Linear webhooks for trigger routines
-  funnel                          Expose a webhook receiver through Tailscale Funnel
+  daemon funnel                   Expose a webhook receiver through Tailscale Funnel
   sessions                        Browse, search, and replay past runs (live-search in TTY; grouped by workspace)
   logs                            Alias of events (timeline). Content: sessions / hosts logs
   browser                         Automate a browser — navigate, click, screenshot, console, network
@@ -293,7 +293,6 @@ Observe (read the fleet — no store merge; aliases point at the real readers):
   status                          Sync/drift only (not the live fleet snapshot)
 
 Credentials and profiles:
-  profile                         Activate resource profiles across skills, MCP, permissions, and secrets
   profiles                        Bundles of (host CLI, endpoint, model, auth)
   secrets                         Keychain-backed env bundles; use 'secrets exec <bundle> -- <cmd>' to inject into a subprocess
 

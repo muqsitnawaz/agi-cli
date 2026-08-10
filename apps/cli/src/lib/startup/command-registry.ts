@@ -50,7 +50,6 @@ export const loadWorktree: ModuleLoader = async () => (await import('../../comma
 export const loadVersions: ModuleLoader = async () => (await import('../../commands/versions.js')).registerVersionsCommands;
 export const loadUpdate: ModuleLoader = async () => (await import('../../commands/update.js')).registerUpdateCommand;
 export const loadImport: ModuleLoader = async () => (await import('../../commands/import.js')).registerImportCommand;
-export const loadExport: ModuleLoader = async () => (await import('../../commands/export.js')).registerExportCommand;
 export const loadPackages: ModuleLoader = async () => (await import('../../commands/packages.js')).registerPackagesCommands;
 export const loadRoutines: ModuleLoader = async () => (await import('../../commands/routines.js')).registerRoutinesCommands;
 export const loadMonitors: ModuleLoader = async () => (await import('../../commands/monitors.js')).registerMonitorsCommands;
@@ -60,7 +59,6 @@ export const loadResume: ModuleLoader = async () => (await import('../../command
 export const loadOpen: ModuleLoader = async () => (await import('../../commands/open.js')).registerOpenCommand;
 export const loadReconnect: ModuleLoader = async () => (await import('../../commands/reconnect.js')).registerReconnectCommand;
 export const loadFork: ModuleLoader = async () => (await import('../../commands/fork.js')).registerForkCommand;
-export const loadDefaults: ModuleLoader = async () => (await import('../../commands/defaults.js')).registerDefaultsCommands;
 export const loadConfig: ModuleLoader = async () => (await import('../../commands/config.js')).registerConfigCommand;
 export const loadSet: ModuleLoader = async () => (await import('../../commands/set.js')).registerSetCommand;
 export const loadModels: ModuleLoader = async () => (await import('../../commands/models.js')).registerModelsCommand;
@@ -119,7 +117,6 @@ export const loadServe: ModuleLoader = async () => (await import('../../commands
 export const loadShare: ModuleLoader = async () => (await import('../../commands/share.js')).registerShareCommands;
 export const loadAudit: ModuleLoader = async () => (await import('../../commands/audit.js')).registerAuditCommands;
 export const loadWebhook: ModuleLoader = async () => (await import('../../commands/webhook.js')).registerWebhookCommand;
-export const loadFunnel: ModuleLoader = async () => (await import('../../commands/funnel.js')).registerFunnelCommand;
 export const loadHumans: ModuleLoader = async () => (await import('../../commands/humans.js')).registerHumansCommands;
 export const loadAccounts: ModuleLoader = async () => (await import('../../commands/accounts.js')).registerAccountsCommand;
 export const loadDaemon: ModuleLoader = async () => (await import('../../commands/daemon.js')).registerDaemonCommand;
@@ -185,7 +182,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   update: [loadUpdate],
   prune: [loadVersions, loadPrune],
   import: [loadImport],
-  export: [loadExport],
   registry: [loadPackages],
   search: [loadPackages],
   install: [loadPackages],
@@ -202,7 +198,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   open: [loadOpen],
   reconnect: [loadReconnect],
   fork: [loadFork],
-  defaults: [loadDefaults],
   config: [loadConfig],
   set: [loadSet],
   models: [loadModels],
@@ -213,7 +208,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   apply: [loadApply],
   status: [loadStatus],
   snapshot: [loadSnapshot],
-  profile: [loadProfiles],
   profiles: [loadProfiles],
   harness: [loadHarness],
   harnesses: [loadHarness],
@@ -281,7 +275,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   unshare: [loadShare],
   audit: [loadAudit],
   webhook: [loadWebhook],
-  funnel: [loadFunnel],
   humans: [loadHumans],
   daemon: [loadDaemon],
   cp: [loadCp],
