@@ -902,11 +902,16 @@ export async function resolveRoutineLaunch(
   if (selectedCredential) {
     (deps.resolveCredentialAccount ?? resolveCredentialAccount)(selectedCredential, agent);
   }
-  if (config.account && !explicitCredential && !config.version) {
+  if (config.account && !explicitCredential) {
     const accountVersion = await (deps.resolveAccountVersion ?? resolveAccountVersion)(agent, config.account);
     if (accountVersion) {
+      if (config.version && config.version !== accountVersion) {
+        throw new Error(
+          `Routine '${config.name}' account '${config.account}' is signed in at ${agent}@${accountVersion}, not pinned ${agent}@${config.version}.`,
+        );
+      }
       return {
-        chain: [{ agent, version: accountVersion }],
+        chain: [{ agent, version: config.version ?? accountVersion }],
         rotation: null,
         pinned: true,
         forwardAccount: false,

@@ -339,6 +339,47 @@ describe('resolveRoutineLaunch (RUSH-1016 — pin + failover chain)', () => {
       'agents', 'run', 'claude', '--resume', 'sess-1', 'continue', '--mode', 'plan',
     ]);
   });
+
+  it('rejects a version pin that does not own the requested native identity', async () => {
+    const error = await resolveRoutineLaunch(
+      baseJob({
+        name: 'wrong-native-version',
+        account: 'person@example.com',
+        agent: 'claude',
+        version: '2.1.0',
+      }),
+      process.cwd(),
+      {
+        findCredentialAccount: () => false,
+        resolveAccountVersion: async () => '2.1.9',
+      },
+    ).then(() => null, (cause: unknown) => cause as Error);
+
+    expect(error?.message).toContain('signed in at claude@2.1.9, not pinned claude@2.1.0');
+  });
+
+  it('accepts a version pin only when that version owns the native identity', async () => {
+    const plan = await resolveRoutineLaunch(
+      baseJob({
+        name: 'matching-native-version',
+        account: 'person@example.com',
+        agent: 'claude',
+        version: '2.1.9',
+      }),
+      process.cwd(),
+      {
+        findCredentialAccount: () => false,
+        resolveAccountVersion: async () => '2.1.9',
+      },
+    );
+
+    expect(plan).toEqual({
+      chain: [{ agent: 'claude', version: '2.1.9' }],
+      rotation: null,
+      pinned: true,
+      forwardAccount: false,
+    });
+  });
 });
 
 describe('buildRoutineSpawnEnv', () => {
