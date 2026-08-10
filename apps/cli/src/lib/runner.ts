@@ -902,9 +902,19 @@ export async function resolveRoutineLaunch(
   if (selectedCredential) {
     (deps.resolveCredentialAccount ?? resolveCredentialAccount)(selectedCredential, agent);
   }
-  if (config.account && !explicitCredential && !config.version) {
+  if (config.account && !explicitCredential) {
     const accountVersion = await (deps.resolveAccountVersion ?? resolveAccountVersion)(agent, config.account);
-    if (accountVersion) {
+    if (!accountVersion) {
+      throw new Error(
+        `Routine '${config.name}' account '${config.account}' is not signed in for ${agent}; refusing to rotate to another account.`,
+      );
+    }
+    if (config.version && config.version !== accountVersion) {
+      throw new Error(
+        `Routine '${config.name}' account '${config.account}' belongs to ${agent}@${accountVersion}, not pinned ${agent}@${config.version}.`,
+      );
+    }
+    if (!config.version) {
       return {
         chain: [{ agent, version: accountVersion }],
         rotation: null,
@@ -912,9 +922,6 @@ export async function resolveRoutineLaunch(
         forwardAccount: false,
       };
     }
-    throw new Error(
-      `Routine '${config.name}' account '${config.account}' is not signed in for ${agent}; refusing to rotate to another account.`,
-    );
   }
   if (config.version) {
     const version = config.version;

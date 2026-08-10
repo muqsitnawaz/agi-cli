@@ -323,6 +323,20 @@ describe('resolveRoutineLaunch (RUSH-1016 — pin + failover chain)', () => {
     expect(strategyCalled).toBe(false);
   });
 
+  it('fails closed when a native account and explicit version pin identify different homes', async () => {
+    const error = await resolveRoutineLaunch(
+      baseJob({ name: 'mismatched-native', version: '2.1.0', account: 'person@example.com', agent: 'claude' }),
+      process.cwd(),
+      {
+        findCredentialAccount: () => false,
+        resolveAccountVersion: async () => '2.1.9',
+      },
+    ).then(() => null, (cause: unknown) => cause as Error);
+
+    expect(error?.message).toContain("account 'person@example.com' belongs to claude@2.1.9");
+    expect(error?.message).toContain('not pinned claude@2.1.0');
+  });
+
   it('does not forward a native identity through the durable --account resume path', async () => {
     const config = baseJob({
       name: 'native-resume',
