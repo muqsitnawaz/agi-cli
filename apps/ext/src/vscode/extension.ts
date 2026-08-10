@@ -401,10 +401,10 @@ async function launchAgent(context: vscode.ExtensionContext, opts: LaunchAgentOp
   }
   const automatic = !opts.agentKey;
   const agent = opts.agentKey ?? 'auto';
-  let command = `agents run ${agent} --interactive`;
-  if (host) command += ` --device ${shquote(host)}`;
-  else if (automatic && !opts.local) command += ' --device auto';
-  command += ' --strategy balanced --mode auto';
+  const command = buildAgentLaunchCommand(
+    agent, null, undefined, undefined, undefined, 'balanced', 'auto',
+    { ...(host ? { host } : {}), local: Boolean(opts.local) && !opts.autoHost },
+  );
   const terminal = vscode.window.createTerminal({
     name: automatic ? 'Agents Auto' : `Agents ${agent}`,
     location: { viewColumn: vscode.ViewColumn.Active },

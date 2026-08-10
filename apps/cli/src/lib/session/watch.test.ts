@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ActiveSession } from './active.js';
-import { SessionWatchState, sessionWatchRowKey, watchLocalSessions } from './watch.js';
+import { applyPeerSessionEvent, SessionWatchState, sessionWatchRowKey, watchLocalSessions } from './watch.js';
 
 const row = (sessionId: string, status: ActiveSession['status'] = 'running'): ActiveSession => ({
   context: 'terminal', kind: 'codex', sessionId, status, cwd: '/repo', lastActivityMs: 10,
@@ -24,6 +24,22 @@ describe('session watch protocol', () => {
     state.reset('box', [row('retained', 'crashed')]);
     expect(state.scope('box', 'unavailable', 'ssh closed')).toMatchObject({ type: 'scope', status: 'unavailable', sequence: 2 });
     expect(state.update('box', [row('retained', 'crashed')])).toEqual([]);
+  });
+
+  it('binds peer rows and envelopes to the SSH device scope', () => {
+    const remote = new SessionWatchState('remote-stream');
+    const bound = new SessionWatchState('bound-stream');
+    const rows = new Map<string, ActiveSession>();
+    const [reset] = applyPeerSessionEvent(bound, 'remote-box', rows, remote.reset('local-machine', [row('unsafe; id')]));
+
+    expect(reset).toMatchObject({ type: 'reset', streamId: 'bound-stream', scope: 'remote-box' });
+    if (reset.type !== 'reset') throw new Error('expected reset');
+    expect(reset.rows[0]).toMatchObject({
+      sessionId: 'unsafe; id',
+      sourceDevice: 'remote-box',
+      recovery: { args: ['sessions', 'resume', 'unsafe; id', '--device', 'remote-box'] },
+    });
+    expect(reset.rows[0]?.machine).toBe('remote-box');
   });
 
   it('reads one reset then consumes multiple writer ticks with zero repeated gathers', async () => {
@@ -75,6 +91,24 @@ describe('session watch protocol', () => {
     });
     await watching;
     expect(statuses).toEqual(['unavailable', 'available']);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not present a stale startup snapshot as available live state', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-watch-stale-'));
+    const controller = new AbortController();
+    const events: Array<{ type: string; status?: string; rows?: unknown[] }> = [];
+    await watchLocalSessions({
+      scope: 'local', signal: controller.signal, journalPath: path.join(dir, 'active.jsonl'),
+      readCache: () => ({ version: 1, scope: 'local', capturedAt: 1, sessions: [row('stale')] }),
+      emit: (event) => {
+        events.push(event);
+        if (event.type === 'scope') controller.abort();
+      },
+    });
+
+    expect(events[0]).toMatchObject({ type: 'reset', rows: [] });
+    expect(events[1]).toMatchObject({ type: 'scope', status: 'unavailable' });
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });

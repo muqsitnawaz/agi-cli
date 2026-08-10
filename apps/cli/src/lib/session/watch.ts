@@ -12,6 +12,8 @@ import type { ActiveSession } from './active.js';
 import {
   activeSessionsJournalPath,
   activeSessionJournalIdentity,
+  DEFAULT_ACTIVE_CACHE_MAX_AGE_MS,
+  isActiveSnapshotFresh,
   readActiveSessionsCache,
   type ActiveSessionsJournalRecord,
 } from './session-cache.js';
@@ -130,6 +132,39 @@ export class SessionWatchState {
   }
 }
 
+/**
+ * Re-sequence a peer stream under the device reached by SSH. Peer-provided
+ * scope, machine, sourceDevice, stream ids, and row keys are not authority for
+ * where a row came from.
+ */
+export function applyPeerSessionEvent(
+  state: SessionWatchState,
+  scope: string,
+  rows: Map<string, ActiveSession>,
+  event: SessionWatchEnvelope,
+): SessionWatchEnvelope[] {
+  const bindRow = (row: SessionWatchRow): ActiveSession => {
+    const { rowKey: _rowKey, sourceDevice: _sourceDevice, resumable: _resumable,
+      unwatched: _unwatched, recovery: _recovery, viewingIn: _viewingIn, ...session } = row;
+    return { ...session, machine: scope };
+  };
+  if (event.type === 'reset') {
+    rows.clear();
+    for (const row of event.rows) rows.set(row.rowKey, bindRow(row));
+    return [state.reset(scope, [...rows.values()])];
+  }
+  if (event.type === 'upsert') {
+    rows.set(event.rowKey, bindRow(event.row));
+    return state.update(scope, [...rows.values()]);
+  }
+  if (event.type === 'remove') {
+    rows.delete(event.rowKey);
+    return state.update(scope, [...rows.values()]);
+  }
+  if (event.type === 'scope') return [state.scope(scope, event.status, event.reason)];
+  return [state.heartbeat(scope, event.capturedAt)];
+}
+
 export interface WatchLocalOptions {
   scope: string;
   signal: AbortSignal;
@@ -153,8 +188,9 @@ export async function watchLocalSessions(options: WatchLocalOptions): Promise<vo
   let offset = 0;
   try { offset = fs.statSync(journal).size; } catch { /* first publication */ }
   const initial = readCache('local');
-  options.emit(state.reset(options.scope, initial?.sessions ?? []));
-  options.emit(state.scope(options.scope, initial ? 'available' : 'unavailable', initial ? undefined : 'awaiting publisher'));
+  const initialFresh = initial && isActiveSnapshotFresh(initial.capturedAt, Date.now(), DEFAULT_ACTIVE_CACHE_MAX_AGE_MS);
+  options.emit(state.reset(options.scope, initialFresh ? initial.sessions : []));
+  options.emit(state.scope(options.scope, initialFresh ? 'available' : 'unavailable', initialFresh ? undefined : 'awaiting publisher'));
   if (options.signal.aborted) return;
   await new Promise<void>((resolve) => {
     let partial = '';
@@ -232,6 +268,7 @@ export async function watchFleetSessions(options: WatchFleetOptions): Promise<vo
   const peerTasks = peers.map(async (device) => {
     const scope = normalizeHost(device.name);
     const state = new SessionWatchState();
+    const peerRows = new Map<string, ActiveSession>();
     while (!options.signal.aborted) {
       let target: string;
       try { target = sshTargetFor(device); }
@@ -248,7 +285,9 @@ export async function watchFleetSessions(options: WatchFleetOptions): Promise<vo
       reader.on('line', (line) => {
         try {
           const event = JSON.parse(line) as SessionWatchEnvelope;
-          if (event.version === SESSION_WATCH_VERSION && typeof event.sequence === 'number') options.emit(event);
+          if (event.version === SESSION_WATCH_VERSION && typeof event.sequence === 'number') {
+            for (const bound of applyPeerSessionEvent(state, scope, peerRows, event)) options.emit(bound);
+          }
         } catch { /* incomplete/non-protocol peer output is not state */ }
       });
       const code = await new Promise<number | null>((resolve) => {
