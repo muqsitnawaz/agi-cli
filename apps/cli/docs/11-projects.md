@@ -267,7 +267,7 @@ A local workspace probe always feeds this footer (cheap, no SSH). The full per-h
 | `agents projects status [name] [--json] [--window N] [--no-remote] [--device name...] [--devices a,b,c]` (aliases `view`, `show`) | Progress card for every project across the whole fleet (per-device workspace drift over SSH), or one named project. Named form also prints every milestone and the stored definition. `--device`/`--devices` scopes the fan-out to a subset. |
 | `agents projects link <name> --linear [query]` | Bind a Linear project into the def (`linear.projectId` + url). No query → auto-suggests from the def name + repo slug; ambiguous/none lists candidates and exits 1. Powers the `linear` card line. |
 | `agents projects import --from-linear` | Import the workspace's Linear projects (via the `linear` CLI) as definitions. See [Importing](#importing--from-linear). There is no ext import path — `~/.agents/factory/projects.json` is never read. |
-| `agents projects set <name> [--repo\|--root\|--path\|--description\|--goal objective:measure\|--add-dir path...\|--rm-dir path...\|--slug owner/repo]` | Change one field, preserving every other. `--goal` (repeatable) replaces the goals list. `--add-dir` / `--rm-dir` (repeatable) bind / unbind a local repo dir in `repos[]` — `--add-dir` reads the slug from that dir's `origin` (never the path); `--slug` overrides it for a single dir with no origin. Use this rather than `add --force`, which rebuilds the definition from flags alone. |
+| `agents projects set <name> [--repo\|--root\|--path\|--description\|--goal objective:measure\|--add-dir path...\|--rm-dir path...\|--slug owner/repo]` | Change one field, preserving every other. `--goal` (repeatable) replaces the goals list. `--add-dir` / `--rm-dir` (repeatable) bind / unbind a local repo dir in `repos[]` — `--add-dir` reads the slug from that dir's `origin` (never the path); `--slug` overrides it for a single dir with no origin. A `--rm-dir` value that matches no bound dir is an error (exit 1, definition untouched), never a silent no-op. Use this rather than `add --force`, which rebuilds the definition from flags alone. |
 | `agents projects rm <name> [--json]` | Delete the definition (never touches the repo). `--json` prints `{ ok, name, removed }` (or `{ ok: false, name, error }` on failure). |
 
 `agents run --project <name>` is unchanged in spelling — it just resolves richer
@@ -319,14 +319,19 @@ ordered directory list, in two shapes of the same list:
 does not exist (a fleet box missing a checkout never yields a bogus path);
 `forRemote: true` keeps each entry home-relative (`~/…`) for the remote shell to
 re-root and keeps every entry (the missing one surfaces in the workspace probe
-as `✗ missing`). Both the probe and every spawn path read this one resolver.
+as `✗ missing`). The workspace probe reads this resolver today; the spawn paths
+and the AGI EXT extension are converged onto it in the companion RUSH-2487
+tracks. Until those land, the extension still builds its own list, with the
+opposite primary precedence (`root ?? defaultPath` in
+`apps/ext/src/core/managedProjects.ts:55`, versus `defaultPath ?? root` here) —
+so for a def that sets both, the two disagree on the first directory.
 
 **At spawn, the bound dirs become `--add-dir` grants — for Claude and Codex
 only.** The directory grants are wired in the companion tracks of RUSH-2487,
 each reading this same `projectDirsAbs` resolver so the binding here and the
 grant there cannot drift: `agents run --project <name>` and `agents teams
 create --project <name>` fold the non-primary directories into the harness's
-directory grants (the primary is already the cwd), and the Factory / VS Codium
+directory grants (the primary is already the cwd), and the AGI EXT / VS Codium
 extension reads the resolver so a project opened there binds the same set. The
 grants land only where a harness has a real "additional accessible directory"
 surface: **Claude** receives them as native `--add-dir` flags (the existing

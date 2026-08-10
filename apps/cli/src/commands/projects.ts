@@ -187,9 +187,17 @@ export function reposFromDirFlags(dirs: string[], slug: string | undefined): Pro
   return dirs.map((d) => repoForDir(d, dirs.length === 1 ? slug : undefined));
 }
 
-/** Home-relative key for a bound-dir path, for dedup/removal matching. */
+/**
+ * Absolute-path key for a bound-dir path, for dedup/removal matching — the SAME
+ * `path.resolve(expandLocalHome(...))` the add side ({@link repoForDir}) applies,
+ * so a stored entry and a `--rm-dir` value normalize identically. Keying on
+ * `toHomeRelative` instead did not: it returns its argument unchanged for a path
+ * outside `$HOME` (`lib/project-root.ts:31`), so a trailing slash survived and
+ * `--rm-dir /Volumes/ext/src/a/` matched nothing against a stored
+ * `/Volumes/ext/src/a`.
+ */
 function normDirKey(p: string): string {
-  return toHomeRelative(expandLocalHome(p));
+  return path.resolve(expandLocalHome(p));
 }
 
 /**
@@ -223,10 +231,21 @@ export function mergeBoundDirs(existing: ProjectRepo[], added: ProjectRepo[]): P
   return result;
 }
 
-/** Drop every bound-repo entry whose path matches one of `rmDirs` (any subpath). */
-export function removeBoundDirs(existing: ProjectRepo[], rmDirs: string[]): ProjectRepo[] {
+/**
+ * Drop every bound-repo entry whose path matches one of `rmDirs` (any subpath),
+ * and report the `rmDirs` values that matched nothing. An unmatched value is a
+ * typo or a dir that was never bound — the caller must say so rather than write
+ * the def back unchanged and print success.
+ */
+export function removeBoundDirs(
+  existing: ProjectRepo[],
+  rmDirs: string[],
+): { kept: ProjectRepo[]; unmatched: string[] } {
+  const bound = new Set(existing.filter((r) => r.path).map((r) => normDirKey(r.path!)));
+  const unmatched = rmDirs.filter((d) => !bound.has(normDirKey(d)));
   const remove = new Set(rmDirs.map(normDirKey));
-  return existing.filter((r) => !(r.path && remove.has(normDirKey(r.path))));
+  const kept = existing.filter((r) => !(r.path && remove.has(normDirKey(r.path))));
+  return { kept, unmatched };
 }
 
 /**
@@ -1008,7 +1027,16 @@ export function registerProjectsCommands(program: Command): void {
       // so re-adding a dir refreshes its slug in place while a same-path binding
       // under a different subpath is preserved — never silently collapsed.
       if (opts.rmDir?.length) {
-        const kept = removeBoundDirs(def.repos ?? [], opts.rmDir);
+        const { kept, unmatched } = removeBoundDirs(def.repos ?? [], opts.rmDir);
+        if (unmatched.length) {
+          // A --rm-dir that matches nothing is a typo or an already-unbound dir.
+          // Exiting here (before writeProjectDef) leaves the def untouched — the
+          // alternative was printing "Updated <name>" over a no-op.
+          console.error(chalk.red(`Not a bound dir of "${def.name}": ${unmatched.join(', ')}`));
+          const bound = (def.repos ?? []).filter((r) => r.path).map((r) => r.path!);
+          console.error(chalk.gray(`  Bound dirs: ${bound.length ? bound.join(' · ') : '(none)'}`));
+          process.exit(1);
+        }
         def.repos = kept.length ? kept : undefined; // drop an empty list so the YAML stays clean
       }
       if (opts.addDir?.length) {

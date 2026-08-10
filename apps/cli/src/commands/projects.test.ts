@@ -204,6 +204,19 @@ describe('mergeBoundDirs / removeBoundDirs (set --add-dir/--rm-dir)', () => {
       { slug: 'o/mono', path: '~/src/mono', subpath: 'apps/api' },
       { slug: 'o/infra', path: '~/src/infra' },
     ]);
+    // A NON-empty `added` is what actually exercises repoLocationKey. Adding the
+    // path-only binding of a dir already bound under a subpath must APPEND, not
+    // overwrite: under the old path-only key both hashed the same and the
+    // apps/web binding was lost.
+    expect(
+      mergeBoundDirs(
+        [{ slug: 'o/mono', path: '~/src/mono', subpath: 'apps/web' }],
+        [{ slug: 'o/mono', path: '~/src/mono' }],
+      ),
+    ).toEqual([
+      { slug: 'o/mono', path: '~/src/mono', subpath: 'apps/web' },
+      { slug: 'o/mono', path: '~/src/mono' },
+    ]);
   });
 
   it('keeps two path-less (slug-only) entries — they key by slug, not the empty string', () => {
@@ -212,6 +225,14 @@ describe('mergeBoundDirs / removeBoundDirs (set --add-dir/--rm-dir)', () => {
     expect(mergeBoundDirs([{ slug: 'o/one' }, { slug: 'o/two' }], [])).toEqual([
       { slug: 'o/one' },
       { slug: 'o/two' },
+    ]);
+    // With a real `added` entry the key is actually computed: three distinct
+    // path-less slugs stay three. Under the '' key the added one matched the
+    // first existing entry and overwrote it, leaving two.
+    expect(mergeBoundDirs([{ slug: 'o/one' }, { slug: 'o/two' }], [{ slug: 'o/three' }])).toEqual([
+      { slug: 'o/one' },
+      { slug: 'o/two' },
+      { slug: 'o/three' },
     ]);
   });
 
@@ -236,7 +257,31 @@ describe('mergeBoundDirs / removeBoundDirs (set --add-dir/--rm-dir)', () => {
         ],
         ['~/src/mono'],
       ),
-    ).toEqual([{ slug: 'o/infra', path: '~/src/infra' }]);
+    ).toEqual({ kept: [{ slug: 'o/infra', path: '~/src/infra' }], unmatched: [] });
+  });
+
+  it('removeBoundDirs matches a trailing slash and an absolute form of a bound dir', () => {
+    // normDirKey used toHomeRelative, which passes a path outside $HOME through
+    // unchanged — so no normalization happened and `--rm-dir <dir>/` removed
+    // nothing while still printing "Updated <name>".
+    const outside = path.join(path.sep, 'Volumes', 'ext', 'src', 'a');
+    expect(removeBoundDirs([{ slug: 'o/a', path: outside }], [`${outside}/`])).toEqual({
+      kept: [],
+      unmatched: [],
+    });
+    // Home-relative stored form vs shell-expanded absolute argument.
+    expect(
+      removeBoundDirs([{ slug: 'o/x', path: '~/src/x' }], [path.join(os.homedir(), 'src', 'x')]),
+    ).toEqual({ kept: [], unmatched: [] });
+  });
+
+  it('removeBoundDirs reports a --rm-dir value that matches nothing', () => {
+    // The unmatched list is what makes `set --rm-dir` exit non-zero instead of
+    // writing the def back untouched and printing success.
+    expect(removeBoundDirs([{ slug: 'o/x', path: '~/src/x' }], ['~/src/typo'])).toEqual({
+      kept: [{ slug: 'o/x', path: '~/src/x' }],
+      unmatched: ['~/src/typo'],
+    });
   });
 });
 

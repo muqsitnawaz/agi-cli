@@ -356,9 +356,17 @@ export function projectBasePath(def: ProjectDef, forRemote: boolean): string | u
 }
 
 /**
- * The ONE canonical ordered directory list a project binds — the single
- * resolver every consumer reads so they cannot drift. It has two shapes of the
- * same list, chosen by `checkoutRoots`:
+ * The canonical ordered directory list a project binds, and the resolver every
+ * CLI-side consumer is meant to read. Today the workspace probe
+ * ({@link project-probe.workspaceTargetsForDef}) reads it; the AGI EXT extension
+ * still builds its own list independently and with the OPPOSITE primary
+ * precedence (`root ?? defaultPath` in `apps/ext/src/core/managedProjects.ts:55`,
+ * versus `defaultPath ?? root` here), so the two disagree on the first entry for
+ * a def that sets both. Converging the extension onto this resolver is a
+ * companion RUSH-2487 track — until it lands, this is not yet the single list
+ * every consumer reads.
+ *
+ * It has two shapes of the same list, chosen by `checkoutRoots`:
  *
  * - **Working dirs (default).** The cwd an agent lands in (`defaultPath ??
  *   root`, the same base as {@link projectBasePath}) first, then each bound
