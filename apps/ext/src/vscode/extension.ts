@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { BUILT_IN_AGENTS, getBuiltInByKey, getBuiltInDefByTitle, getBuiltInByPrefix, isAgentRunner, usesManagedAgentLaunch, modeFlagForAgent, AgentLaunchMode, RunStrategy, buildAgentLaunchCommand, wrapNativeAgentCommand, shquote } from '../core/agents';
+import { loadAutoLaunchPreferences, isAutoLaunchEnabled, isAutoLaunchPreferred, readDeviceMaxConcurrent } from '../core/deviceAutoLaunch';
 import { resolveProjectForCwd } from '../core/managedProjects';
 import { parseSpawnRequest, resolveSpawnSurface, SpawnRequest } from '../core/spawn';
 import {
@@ -13,8 +14,17 @@ import { AgentsMarkdownEditorProvider, swarmCurrentDocument } from './customEdit
 import { AgentsHtmlReaderProvider } from './htmlReader';
 import * as git from './git.vscode';
 import { AgentSettings, hasLoginEnabled, PromptEntry, QUICK_LAUNCH_SLOT_KEYS, getQuickLaunchSlot, QuickLaunchSlot, QuickLaunchSlotKey } from '../core/settings';
-import { listRegisteredDevices } from './deviceHealth.vscode';
+import { listRegisteredDevices, countRunningAgents, fetchDeviceStats, probeReachable } from './deviceHealth.vscode';
 import { normalizeHost } from '../core/remoteSessions';
+import { pickBestHost, cappedOutDevices, noHostReason, deviceHasUsableVersion, resolveBalancePool, DeviceLoad, VersionHealth, parseAgentVersionsByAgent, computeUsableAgents } from '../core/launchHost';
+import {
+  LAUNCH_HEALTH_KEY,
+  LAUNCH_HISTORY_KEY,
+  LaunchHealthCache,
+  LaunchHistory,
+  LaunchHistoryRecorder,
+  pickCachedLaunchHost,
+} from '../core/launchHistory';
 import * as settings from './settings.vscode';
 import * as swarm from './swarm.vscode';
 import {
@@ -25,8 +35,8 @@ import { startWatchdogBridge } from '../mcp/watchdog-bridge';
 import { ensureWatchdogMcpInstalled } from '../mcp/watchdogInstall';
 import * as notifications from './notifications.vscode';
 import * as terminals from './terminals.vscode';
-import { fetchRemoteSessionLabelSource, fetchSessionIdentity, fetchRecapSessions, LOCAL_LABEL, LOCAL_MACHINE_ID, mapWithConcurrency } from './remoteSessions.vscode';
-import { sessionPresentationStore } from '../core/sessionPresentationStore';
+import { fetchLocalSessions, fetchRemoteSessionLabelSource, fetchSessionIdentity, fetchRecapSessions, LOCAL_LABEL, LOCAL_MACHINE_ID, mapWithConcurrency } from './remoteSessions.vscode';
+import * as sessionTracker from './sessionTracker';
 import { runRecapHeadless, isRecapSupported } from './recap.vscode';
 import { buildAgentTerminalEnv } from '../core/terminals';
 import {
@@ -74,6 +84,17 @@ import { spawn } from 'child_process';
 import { DEFAULT_DISPLAY_PREFERENCES } from '../core/settings';
 import * as readiness from './terminalReadiness';
 import { resolveAlias, isAgentInstalled, checkInstalledAgentsViaCli } from '../core/agentModels';
+import { pickAgentByUsage, rankHostsByUsage, HostUsageScore } from '../core/agentUsage';
+import {
+  HOST_PICKER_CACHE_KEY,
+  freshnessSuffix,
+  isHostPickerStale,
+  mergeHostPickerSnapshot,
+  parseHostPickerCache,
+  serializeUsage,
+  sortHostPickerDevices,
+  type HostPickerCache,
+} from '../core/hostPickerCache';
 import { buildForkSessionRequest, type ForkSessionIntent } from '../core/forkSession';
 import { handleForkPickHost, registerForkPickHostCommand, remoteForkSessionId, resolveForkSessionId } from './forkCommands.vscode';
 import { FORK_LINEAGE_KEY, recordForkEdge, type ForkEdge } from '../core/forkLineage';
@@ -90,15 +111,19 @@ import {
   registerForkPickSessionCommand,
   runSessionBrowserPicker,
 } from './sessionBrowser.vscode';
-import type { RemoteSession } from '../core/remoteSessions';
+import type { RemoteSession, RawActiveSession } from '../core/remoteSessions';
 import {
   abandonedCandidates,
+  buildResumeCandidates,
   defaultPickedIds,
   distinctiveTopic,
   nextPreselection,
   sharedTopicPrefixes,
+  RESUME_PICKER_CACHE_KEY,
   STATE_HEADINGS,
+  type RecentSessionRow,
   type ResumeCandidate,
+  type ResumePickerCache,
   type ResumeState,
 } from '../core/resumePicker';
 import { buildHarnessOptions, type HarnessOption } from '../core/resumeTarget';
@@ -220,7 +245,7 @@ function agentsSpawnEnv(): NodeJS.ProcessEnv {
 // Dispatch an agent HEADLESS: `agents run <agent> --mode <m> --headless -p <prompt>`
 // spawned DETACHED with no terminal tab. The run outlives this call (`unref`) and
 // shows in `agents sessions --active` under this machine as context:'headless', so it
-// can be focused/resumed later via `agents sessions focus`. No shell: args go straight
+// can be focused/resumed later via `agents sessions resume`. No shell: args go straight
 // to the binary (prompt stays a single arg, no quoting hazard).
 export function runHeadlessAgent(
   agentKey: string,
@@ -240,7 +265,7 @@ export function runHeadlessAgent(
   child.unref();
 }
 
-// Focus a session: `agents sessions focus <id>` opens/attaches a real terminal on it (a
+// Focus a session: `agents sessions resume <id>` opens/attaches a real terminal on it (a
 // background/headless run reopens in a new tab and resumes; a live terminal session is
 // attached). It auto-resolves the surface (no interactive picker), so it's safe to run
 // detached from the extension host.
@@ -292,10 +317,9 @@ async function detachAgentToBackground(): Promise<void> {
 
 // Bring a backgrounded/parked agent to the foreground: pick from the CLI's
 // active-session list (presence background/parked) and open a terminal running
-// `agents sessions attach <id>`, which resumes the session interactively in that tab.
+// `agents sessions resume <id>`, which resumes the session interactively in that tab.
 async function attachAgentFromBackground(): Promise<void> {
-  const sessions = sessionPresentationStore.presentedSessions(LOCAL_MACHINE_ID, LOCAL_LABEL)
-    .filter((session) => session.host === LOCAL_LABEL);
+  const { sessions } = await fetchLocalSessions();
   const backgrounded = sessions.filter((s) => s.presence === 'background' || s.presence === 'parked');
   if (backgrounded.length === 0) {
     void vscode.window.showInformationMessage('No backgrounded agents to bring forward. Send one back with “Agents: Detach”.');
@@ -313,7 +337,7 @@ async function attachAgentFromBackground(): Promise<void> {
   if (!pick?.sessionId) return;
   const term = vscode.window.createTerminal({ name: `attach ${pick.sessionId.slice(0, 8)}`, env: agentsSpawnEnv() });
   term.show();
-  term.sendText(`agents sessions attach ${pick.sessionId}`);
+  term.sendText(`agents sessions resume ${pick.sessionId}`);
 }
 
 export function focusSessionInTerminal(sessionId: string): void {
@@ -339,37 +363,416 @@ function buildClaudeLaunchCommand(
   return buildAgentLaunchCommand('claude', sessionId, defaultModel, additionalFlags, undefined, undefined, mode);
 }
 
-// --- Fleet-aware launch: routing belongs to agents-cli -----------------------
+// --- Fleet-aware launch: host targeting -----------------------------------
+// Sentinel a QuickPick/slot uses to mean "auto-pick the least-busy device".
 const BALANCED_HOST = 'balanced';
+const AUTO_HOST_AGENT_KEYS = new Set(
+  BUILT_IN_AGENTS.filter((agent) => agent.key !== 'shell' && agent.key !== 'droid').map((agent) => agent.key),
+);
 
+// Cap concurrent per-device probes in the launch-health sweep. Before this fix
+// each online device fired 2 + one-per-agent shell-outs (stats + running + one
+// `view <agent> --host` per AUTO_HOST_AGENT_KEYS), so a ~12-device fleet ran ~120
+// concurrent node+SSH processes at once — the unbounded fan-out that pinned CPU
+// (phnx-labs/agents-cli#2469). Batching (below) drops each device to 3 shell-outs,
+// and this pool caps how many devices probe at once, so the sweep's peak process
+// count stays flat regardless of fleet size.
+const LAUNCH_HEALTH_PROBE_CONCURRENCY = 4;
+
+// Fetch EVERY installed agent's version health from a host in ONE
+// `agents view --host <host> --json` call (the whole-host form returns an array
+// of { agent, versions }). This is the remote analog of fetchAgentInventories'
+// local batching: the launch-health sweep needs the usable-version flag for all
+// AUTO_HOST_AGENT_KEYS on each host, and one call answers for every agent instead
+// of spawning one `view <agent> --host` subprocess per agent — the per-(agent,host)
+// fan-out that pinned CPU (phnx-labs/agents-cli#2469). Tradeoff of the single call:
+// a failed/timed-out probe marks EVERY agent on that host unusable for the tick
+// (vs the old per-agent isolation), but that self-heals — a host with a stale/empty
+// read just drops out of the auto-pick pool until the next successful sweep
+// (LAUNCH_HEALTH_MAX_AGE_MS), never a stuck state.
+async function fetchHostAgentVersions(host: string): Promise<Record<string, VersionHealth[]>> {
+  const { runAgents } = await import('../core/agentsBin');
+  try {
+    const { stdout } = await runAgents(`view --host ${shquote(host)} --json`, {
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 15_000,
+    });
+    return parseAgentVersionsByAgent(stdout);
+  } catch {
+    return {};
+  }
+}
+
+async function refreshLaunchHealthCache(context: vscode.ExtensionContext): Promise<void> {
+  const devices = await listRegisteredDevices();
+  const localName = normalizeHost(os.hostname());
+  const targets = devices.filter((device) => normalizeHost(device.name) !== localName);
+  // Bounded fan-out: at most LAUNCH_HEALTH_PROBE_CONCURRENCY devices probed at once
+  // (each is 3 shell-outs) so the sweep can't spawn a fleet-sized process storm.
+  const health = await mapWithConcurrency(targets, LAUNCH_HEALTH_PROBE_CONCURRENCY, async (device) => {
+      if (!device.online) {
+        return {
+          name: device.name,
+          online: false,
+          sshReachable: false,
+          running: 0,
+          usableAgents: {},
+          fetchedAt: Date.now(),
+        };
+      }
+      const [stats, running, hostAgents] = await Promise.all([
+        fetchDeviceStats(device.host, { isLocal: false }),
+        countRunningAgents(device.name, { isLocal: false }),
+        // ONE `view --host` call answers the usable-version question for every
+        // agent, replacing the per-(agent,host) subprocess fan-out (#2469).
+        fetchHostAgentVersions(device.name),
+      ]);
+      return {
+        name: device.name,
+        online: true,
+        sshReachable: stats.reachable,
+        // null means SSH-unreachable; sshReachable already captures the truth.
+        // Display 0 so the floor card shows something renderable (RUSH-2054).
+        running: running ?? 0,
+        loadAvg1: stats.loadAvg1,
+        memPercent: stats.memPercent,
+        usableAgents: computeUsableAgents(hostAgents, [...AUTO_HOST_AGENT_KEYS]),
+        fetchedAt: stats.fetchedAt,
+      };
+    });
+  await context.globalState.update(LAUNCH_HEALTH_KEY, { devices: health, refreshedAt: Date.now() } satisfies LaunchHealthCache);
+}
+
+// Singleflight guard: only one fleet sweep may run at a time. The 60s timer,
+// startup warm-up, and the cold-cache pre-launch warm all call this; without the
+// guard an overdue sweep (slow SSH on an already-loaded box) got a fresh full sweep
+// piled on top every tick, compounding to runaway load (phnx-labs/agents-cli#2469).
+// Overlapping callers are dropped — the in-flight sweep updates the cache shortly.
+let launchHealthInflight: Promise<void> | null = null;
+function refreshLaunchHealthCacheInBackground(context: vscode.ExtensionContext): void {
+  if (launchHealthInflight) return;
+  launchHealthInflight = refreshLaunchHealthCache(context)
+    .catch((err) => console.error('[launchAgent] health-cache refresh failed:', err))
+    .finally(() => { launchHealthInflight = null; });
+}
+
+function resolveCachedAutoHost(context: vscode.ExtensionContext, agentKey: string): string | undefined {
+  const startedAt = performance.now();
+  const cache = context.globalState.get<LaunchHealthCache>(LAUNCH_HEALTH_KEY);
+  const history = context.globalState.get<LaunchHistory>(LAUNCH_HISTORY_KEY, {});
+  const preferences = loadAutoLaunchPreferences();
+  const host = pickCachedLaunchHost(agentKey, cache, history, preferences) ?? undefined;
+  console.log(`[launchAgent] cached ${agentKey} host pick took ${(performance.now() - startedAt).toFixed(1)}ms`);
+  return host;
+}
+
+const launchHistoryRecorders = new WeakMap<vscode.ExtensionContext, LaunchHistoryRecorder>();
+
+async function saveLaunchHistory(context: vscode.ExtensionContext, device: string, success: boolean): Promise<void> {
+  let recorder = launchHistoryRecorders.get(context);
+  if (!recorder) {
+    recorder = new LaunchHistoryRecorder(
+      () => context.globalState.get<LaunchHistory>(LAUNCH_HISTORY_KEY, {}),
+      (history) => context.globalState.update(LAUNCH_HISTORY_KEY, history),
+    );
+    launchHistoryRecorders.set(context, recorder);
+  }
+  await recorder.record(device, success);
+}
+
+// Resolve the best online device for a balanced launch. `pool` restricts the
+// candidate set (undefined/empty = every online device except this machine).
+// `agentKey` (RUSH-2025) makes the pick AGENT-AWARE: it additionally probes each
+// candidate's hardware load/memory and whether that agent has a signed-in,
+// non-throttled version there, then ranks via the composite pickBestHost and
+// DROPS devices with no usable version — so the launch never lands on a host
+// where the user would hit a login/limit wall. Without `agentKey` it degrades to
+// the running-agent-count ranking (unchanged legacy behavior). Returns undefined
+// when no device is eligible, so the caller falls back to the local machine.
+async function resolveBalancedHost(pool?: string[], agentKey?: string): Promise<string | undefined> {
+  const localName = normalizeHost(os.hostname());
+  const devices = await listRegisteredDevices();
+  const preferences = loadAutoLaunchPreferences();
+  const fleet = devices
+    .filter(d => isAutoLaunchEnabled(preferences, d.name))
+    .map(d => ({
+      name: d.name,
+      online: !!d.online,
+      running: 0,
+      preferred: isAutoLaunchPreferred(preferences, d.name),
+      // Operator cap from the central fleet.devices.<name>.config block
+      // (agents devices config <name> agents.max-concurrent N) — local read, no SSH.
+      maxConcurrent: readDeviceMaxConcurrent(d.name),
+    }));
+  const eligible = resolveBalancePool(fleet, { localName, pool }).filter(c => c.online);
+  if (eligible.length === 0) {
+    vscode.window.showInformationMessage('Balanced launch: no online device available — running locally.');
+    return undefined;
+  }
+  // Look up each eligible device's registry entry for its SSH address so
+  // the hardware probe can reach it (mirrors the Fleet device-health
+  // fetch in settings.vscode.ts).
+  const byName = new Map(devices.map(d => [normalizeHost(d.name), d]));
+  const loaded: DeviceLoad[] = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Window, title: agentKey ? `Picking best host for ${agentKey}…` : 'Picking least-busy host…' },
+    () => Promise.all(eligible.map(async (c): Promise<DeviceLoad> => {
+      const dev = byName.get(normalizeHost(c.name));
+      const host = dev?.host ?? c.name;
+      // Pre-filter: confirm SSH is up before spending the session-count round-trip.
+      // A Tailscale-online device that refuses SSH looks idle (running=0) to
+      // countRunningAgents, making it win least-busy unfairly. Mark it
+      // online:false so pickBestHost excludes it entirely (RUSH-2054).
+      const reachable = await probeReachable(host);
+      if (!reachable) return { ...c, online: false, running: 0 };
+      const running = await countRunningAgents(c.name, { isLocal: false });
+      // null means the session count failed even after SSH was confirmed — treat
+      // the device as unreachable rather than as idle (RUSH-2054).
+      if (running === null) return { ...c, online: false, running: 0 };
+      if (!agentKey) return { ...c, running };
+      // Agent-aware: probe hardware health + usable-version in parallel.
+      // SSH is already proven reachable, so these calls should complete quickly.
+      const [stats, usableVersion] = await Promise.all([
+        fetchDeviceStats(host, { isLocal: false }),
+        hostHasUsableVersion(c.name, agentKey),
+      ]);
+      return {
+        ...c,
+        running,
+        usableVersion,
+        loadAvg1: stats.reachable ? stats.loadAvg1 : undefined,
+        memPercent: stats.reachable ? stats.memPercent : undefined,
+      };
+    })),
+  );
+  const best = pickBestHost(loaded);
+  if (best) return best;
+  // Distinct message when every candidate failed the SSH probe so the operator
+  // knows it's a connectivity gap, not a capacity or version problem (RUSH-2054).
+  if (loaded.length > 0 && loaded.every(d => !d.online)) {
+    vscode.window.showWarningMessage('Balanced launch: all fleet devices are SSH-unreachable (Tailscale online but not accepting connections) — running locally.');
+    return undefined;
+  }
+  // State WHY the pool produced nothing — caps first (an operator boundary to
+  // raise), then agent usability. See noHostReason.
+  const reason = noHostReason(loaded, agentKey);
+  if (reason) {
+    vscode.window.showWarningMessage(`Balanced launch: ${reason} — running locally.`);
+  }
+  return undefined;
+}
+
+// Resolve a Quick Launch slot's Run-on target to a device name (undefined =
+// local). 'balanced' -> least-busy of the pool; a device name -> that host if
+// still online, else local with a nudge.
 async function resolveSlotHost(slot: QuickLaunchSlot): Promise<string | undefined> {
   const target = slot.runOn?.trim();
   if (!target || target === 'local') return undefined;
-  if (target === BALANCED_HOST) return 'auto';
+  if (target === BALANCED_HOST) return resolveBalancedHost(slot.balancePool, slot.agent);
   const devices = await listRegisteredDevices();
-  const device = devices.find(row => normalizeHost(row.name) === normalizeHost(target));
-  if (!device) {
-    vscode.window.showWarningMessage(`Launch host "${target}" is not a registered device.`);
+  const dev = devices.find(d => normalizeHost(d.name) === normalizeHost(target));
+  if (!dev) {
+    vscode.window.showWarningMessage(`Launch host "${target}" is not a registered device — running locally.`);
     return undefined;
   }
-  return device.name;
+  if (!dev.online) {
+    vscode.window.showWarningMessage(`Launch host "${target}" is offline — running locally.`);
+    return undefined;
+  }
+  return dev.name;
 }
 
-async function pickLaunchHost(
-  _context: vscode.ExtensionContext,
-  title = 'Run on…',
-  _agentKey?: string,
-): Promise<{ host?: string; cancelled: boolean }> {
+// --- Host picker cache (stale-while-revalidate) ------------------------------
+// The picker used to block its render on two serial CLI spawns plus a
+// fleet-wide SSH fan-out — 30s+ whenever the old 60s in-memory cache had
+// lapsed. Now it renders instantly from a snapshot persisted in globalState
+// and revalidates in the background, swapping the items in place when fresh
+// data lands (the same reload-in-place flow as pickSessionToFork).
+
+// Recent sessions pulled per host for the usage ranking. Enough to separate the
+// boxes you live on from the ones you touched once; small enough that the sweep
+// stays cheap.
+const HOST_USAGE_SESSION_LIMIT = 50;
+
+// In-memory mirror of the persisted snapshot so repeat opens within a session
+// skip the globalState read. Writes go through refreshHostPickerCache.
+let hostPickerHot: HostPickerCache | null = null;
+
+// Set on first picker open: the 60s health timer also pre-warms the picker
+// cache, but only once the user has actually used a picker this session — no
+// fleet sweep for someone who never opens one.
+let hostPickerUsed = false;
+
+function readHostPickerCache(context: vscode.ExtensionContext): HostPickerCache | null {
+  if (hostPickerHot) return hostPickerHot;
+  const parsed = parseHostPickerCache(context.globalState.get(HOST_PICKER_CACHE_KEY));
+  if (parsed) hostPickerHot = parsed;
+  return parsed ?? null;
+}
+
+async function writeHostPickerCache(context: vscode.ExtensionContext, cache: HostPickerCache): Promise<HostPickerCache> {
+  hostPickerHot = cache;
+  await context.globalState.update(HOST_PICKER_CACHE_KEY, cache);
+  return cache;
+}
+
+/**
+ * Phase 1 (cheap): refresh just the device rows from the registry snapshot —
+ * one `devices list --json`, NO fleet SSH sweep — preserving the prior usage
+ * scores AND their sweep time (`usageFetchedAt`). The device names + reachability
+ * are all the picker needs to render every host, so this runs on its own (warmed
+ * at activation, and as the first half of a stale-open refresh) instead of being
+ * gated behind the usage sweep. An EMPTY fetch is a failed registry read (CLI
+ * timeout on a loaded box), never a real empty fleet — mergeHostPickerSnapshot
+ * keeps the previous rows at their true age, and yields null (persist nothing)
+ * when there is nothing confident yet.
+ */
+async function refreshHostPickerDevices(context: vscode.ExtensionContext): Promise<HostPickerCache | null> {
   const devices = await listRegisteredDevices();
-  const picked = await vscode.window.showQuickPick([
-    { label: '$(vm) This Mac', description: 'Run locally', host: undefined as string | undefined },
-    ...devices.map(device => ({
-      label: `${device.online ? '$(radio-tower)' : '$(circle-slash)'} ${device.name}`,
-      description: device.online ? 'online' : 'offline',
-      host: device.name as string | undefined,
+  const prev = readHostPickerCache(context);
+  const merged = mergeHostPickerSnapshot(prev, devices, prev?.usage ?? {}, Date.now(), prev?.usageFetchedAt ?? 0);
+  return merged ? writeHostPickerCache(context, merged) : null;
+}
+
+/**
+ * Phase 2 (expensive): the fleet usage sweep, layered on top of a device
+ * snapshot. Hosts the launch-health sweep already found unreachable are skipped
+ * instead of dialed into a 10s timeout. Best-effort: a failed sweep keeps the
+ * device rows and leaves the prior usage ordering unchanged.
+ */
+async function sweepHostPickerUsage(context: vscode.ExtensionContext, base: HostPickerCache): Promise<HostPickerCache> {
+  const health = context.globalState.get<LaunchHealthCache>(LAUNCH_HEALTH_KEY);
+  const dead = new Set(
+    (health?.devices ?? []).filter((d) => !d.sshReachable).map((d) => normalizeHost(d.name)),
+  );
+  const sweepable = base.devices.filter((d) => !dead.has(normalizeHost(d.name)));
+  let usage: Record<string, HostUsageScore> = base.usage;
+  try {
+    const sessions = await fetchRecapSessions(HOST_USAGE_SESSION_LIMIT, [], sweepable);
+    usage = serializeUsage(new Map(rankHostsByUsage(sessions, Date.now()).map((s) => [s.host, s])));
+  } catch (err) {
+    console.error('[pickLaunchHost] usage sweep failed:', err);
+  }
+  // base is a confident non-empty snapshot: stamp the usage sweep time now, keep
+  // the device-row age (base.fetchedAt).
+  return writeHostPickerCache(context, { devices: base.devices, usage, fetchedAt: base.fetchedAt, usageFetchedAt: Date.now() });
+}
+
+/** Full refresh: the current device rows, then the usage annotations on top. Null when the registry read found nothing confident. */
+async function refreshHostPickerCache(context: vscode.ExtensionContext): Promise<HostPickerCache | null> {
+  const withDevices = await refreshHostPickerDevices(context);
+  return withDevices ? sweepHostPickerUsage(context, withDevices) : null;
+}
+
+/** Warm just the device rows off the command path — cheap, no fleet sweep. */
+function refreshHostPickerDevicesInBackground(context: vscode.ExtensionContext): void {
+  void refreshHostPickerDevices(context).catch((err) => console.error('[pickLaunchHost] device refresh failed:', err));
+}
+
+function refreshHostPickerCacheInBackground(context: vscode.ExtensionContext): void {
+  void refreshHostPickerCache(context).catch((err) => console.error('[pickLaunchHost] cache refresh failed:', err));
+}
+
+/** The QuickPick sub-label for one host: reachability first, then how much you use it. */
+function describeLaunchHost(online: boolean, score: HostUsageScore | undefined, onlineWord = 'online'): string {
+  const state = online ? onlineWord : 'offline';
+  if (!score || score.sessions === 0) return state;
+  return `${state} · ${score.sessions} recent session${score.sessions === 1 ? '' : 's'}`;
+}
+
+type LaunchHostItem = vscode.QuickPickItem & { hostId?: string };
+const BALANCE_HOST_ID = ' balanced';
+
+function launchHostItems(cache: HostPickerCache | null, now: number): LaunchHostItem[] {
+  const usage = cache?.usage ?? {};
+  const stale = cache ? ` · ${freshnessSuffix(cache.fetchedAt, now)}` : '';
+  const devices = sortHostPickerDevices(cache?.devices ?? [], usage);
+  return [
+    { label: '$(vm) This Mac', description: describeLaunchHost(true, usage[LOCAL_LABEL], 'Run locally'), hostId: undefined },
+    { label: '$(sync) Balanced (least-busy)', description: 'Auto-pick the least-busy online device', hostId: BALANCE_HOST_ID },
+    ...devices.map(d => ({
+      label: `${d.online ? '$(radio-tower)' : '$(circle-slash)'} ${d.name}`,
+      description: describeLaunchHost(!!d.online, usage[normalizeHost(d.name)]) + stale,
+      hostId: d.name,
     })),
-  ], { title, placeHolder: title });
-  return picked ? { host: picked.host, cancelled: false } : { cancelled: true };
+  ];
+}
+
+// Interactive host picker (This Mac / a device / Balanced) for the per-agent
+// "(Pick Host)" commands and the ⌘⌥⇧n override. Returns { cancelled } if the
+// user dismissed it; host === undefined means "this Mac".
+//
+// Opens instantly from the persisted snapshot and revalidates in the
+// background, swapping items in place with the user's highlight preserved. A
+// pick made before the refresh lands is honored as-is; a device that went
+// offline since the snapshot fails at launch via the existing error path.
+async function pickLaunchHost(
+  context: vscode.ExtensionContext,
+  title = 'Run on…',
+  agentKey?: string,
+): Promise<{ host?: string; cancelled: boolean }> {
+  hostPickerUsed = true;
+  const cache = readHostPickerCache(context);
+  const quickPick = vscode.window.createQuickPick<LaunchHostItem>();
+  quickPick.title = title;
+  quickPick.placeholder = title;
+  quickPick.items = launchHostItems(cache, Date.now());
+
+  let disposed = false;
+  const applyItems = (fresh: HostPickerCache) => {
+    if (disposed) return; // user already picked/dismissed — nothing to update
+    const activeHostId = quickPick.activeItems[0]?.hostId;
+    quickPick.items = launchHostItems(fresh, Date.now());
+    const restore = quickPick.items.find((i) => i.hostId === activeHostId);
+    if (restore) quickPick.activeItems = [restore];
+  };
+  if (isHostPickerStale(cache)) {
+    quickPick.busy = true;
+    // Two-phase: swap in the fresh device rows as soon as the cheap registry
+    // read lands (never gated on the fleet sweep), then swap in the usage
+    // annotations once the sweep completes. On a busy box the device rows show
+    // in registry-read time instead of waiting on the whole fleet fan-out. A
+    // null device phase is a failed read with nothing confident — keep what's
+    // already shown.
+    void refreshHostPickerDevices(context)
+      .then((withDevices) => {
+        if (!withDevices) return null;
+        applyItems(withDevices);
+        return sweepHostPickerUsage(context, withDevices);
+      })
+      .then((fresh) => { if (fresh) applyItems(fresh); })
+      .catch((err) => console.error('[pickLaunchHost] refresh failed:', err))
+      .finally(() => { if (!disposed) quickPick.busy = false; });
+  }
+
+  try {
+    return await new Promise<{ host?: string; cancelled: boolean }>((resolve) => {
+      // VS Code fires onDidHide for the hide() on accept too — only the hide
+      // WITHOUT an accept is a cancel.
+      let accepted = false;
+      quickPick.onDidAccept(() => {
+        const pick = quickPick.selectedItems[0];
+        if (!pick) return;
+        accepted = true;
+        quickPick.hide();
+        // Balanced -> agent-aware best host (RUSH-2025). An explicit device
+        // pick is honored as-is; the launch still passes strategy 'balanced'
+        // so the CLI's account rotation routes around a signed-out /
+        // throttled version on it. The catch keeps a resolveBalancedHost
+        // rejection from hanging the launch promise forever.
+        void (async () => ({
+          host: pick.hostId === BALANCE_HOST_ID ? await resolveBalancedHost(undefined, agentKey) : pick.hostId,
+          cancelled: false,
+        }))()
+          .then(resolve)
+          .catch(() => resolve({ cancelled: true }));
+      });
+      quickPick.onDidHide(() => { if (!accepted) resolve({ cancelled: true }); });
+      quickPick.show();
+    });
+  } finally {
+    disposed = true;
+    quickPick.dispose();
+  }
 }
 
 // --- The one launch engine --------------------------------------------------
@@ -392,26 +795,111 @@ interface LaunchAgentOpts {
   autoHost?: boolean;
 }
 
+// Pick the harness automatically. When a host is chosen we only consider harnesses
+// that are actually usable ON THAT HOST (signed in + not rate-limited); otherwise
+// the locally installed + signed-in set. Ranked by recent fleet usage, falling
+// back to the configured default.
+async function resolveAutoAgentKey(
+  context: vscode.ExtensionContext,
+  host: string | undefined,
+): Promise<string | undefined> {
+  const defaultKey = getBuiltInDefByTitle(defaultAgentTitle)?.key ?? 'claude';
+
+  let candidates: string[];
+  if (host) {
+    const all = BUILT_IN_AGENTS.filter(d => d.key !== 'shell').map(d => d.key);
+    const usable = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: `Finding an available agent on ${host}…` },
+      () => Promise.all(all.map(async k => ((await hostHasUsableVersion(host, k)) ? k : null))),
+    );
+    candidates = usable.filter((k): k is string => !!k);
+  } else {
+    const installedMap = await checkInstalledAgentsViaCli();
+    candidates = Object.entries(installedMap).filter(([key, ok]) => ok && key !== 'shell').map(([key]) => key);
+  }
+  if (candidates.length === 0) return undefined;
+
+  // Fleet-wide recent history (local + every online device) — the same sweep the
+  // Recap ledger uses. A failed/empty sweep just yields the default fallback.
+  let sessions: RemoteSession[] = [];
+  try {
+    sessions = await fetchRecapSessions(20, settings.getSettings(context).projectRules ?? []);
+  } catch (err) {
+    console.error('[launchAgent] recap sweep failed:', err);
+  }
+  return pickAgentByUsage(sessions, candidates, defaultKey, Date.now()) ?? undefined;
+}
+
 async function launchAgent(context: vscode.ExtensionContext, opts: LaunchAgentOpts = {}): Promise<void> {
+  // 1. Host. Device-first pick, an explicit host, or (later) auto.
   let host = opts.host;
   if (opts.pickHost) {
     const picked = await pickLaunchHost(context, 'New agent — run on…', opts.agentKey);
     if (picked.cancelled) return;
+    host = picked.host; // undefined here means the user chose "This Mac"
+  }
+
+  // 2. Harness. Explicit, or auto by availability on the chosen host + recent usage.
+  const agentKey = opts.agentKey ?? await resolveAutoAgentKey(context, host);
+  if (!agentKey) {
+    vscode.window.showWarningMessage(
+      host ? `New Agent: no usable agent found on ${host}.` : 'New Agent: no installed agent available to launch.',
+    );
+    return;
+  }
+
+  if (opts.autoHost && !AUTO_HOST_AGENT_KEYS.has(agentKey)) {
+    vscode.window.showInformationMessage(`${getBuiltInByKey(agentKey)?.title ?? agentKey} does not expose account health; pick a host instead.`);
+    const picked = await pickLaunchHost(context, `New ${getBuiltInByKey(agentKey)?.title ?? agentKey} — run on…`, agentKey);
+    if (picked.cancelled) return;
     host = picked.host;
   }
-  const automatic = !opts.agentKey;
-  const agent = opts.agentKey ?? 'auto';
-  let command = `agents run ${agent} --interactive`;
-  if (host) command += ` --device ${shquote(host)}`;
-  else if (automatic && !opts.local) command += ' --device auto';
-  command += ' --strategy balanced --mode auto';
-  const terminal = vscode.window.createTerminal({
-    name: automatic ? 'Agents Auto' : `Agents ${agent}`,
-    location: { viewColumn: vscode.ViewColumn.Active },
-    isTransient: true,
-  });
-  terminal.show(false);
-  await sendCommandWhenReady(terminal, command);
+
+  if (opts.autoHost && AUTO_HOST_AGENT_KEYS.has(agentKey)) {
+    host = resolveCachedAutoHost(context, agentKey);
+    if (!host) {
+      // Cache cold/stale (first launch after activation, >5min idle, or the
+      // background fleet sweep hasn't landed on a loaded box). Don't silently
+      // run local — do the same live, favorites-aware fleet sweep the default
+      // New-agent path uses (honors enable/prefer, drops hosts with no usable
+      // version, ranks by load). It only returns undefined — and we fall back
+      // to local — when no fleet device is genuinely eligible. Also warm the
+      // cache so the NEXT auto launch is instant.
+      refreshLaunchHealthCacheInBackground(context);
+      host = await resolveBalancedHost(undefined, agentKey);
+    }
+  }
+
+  // 3. Auto host (agent-aware least-busy) only when the caller neither pinned a
+  //    host nor asked to pick one nor forced local.
+  if (host === undefined && !opts.pickHost && !opts.local && !opts.autoHost) {
+    host = await resolveBalancedHost(undefined, agentKey);
+  }
+
+  // 4. Config + strategy. Balanced version/account rotation is the default for
+  //    every harness that supports it; there is no pinned-version path here.
+  const def = getBuiltInByKey(agentKey);
+  const agentConfig = def && getBuiltInByTitle(context.extensionPath, def.title);
+  if (!agentConfig) {
+    vscode.window.showWarningMessage(`New Agent: ${agentKey} is not available.`);
+    return;
+  }
+  // Balanced account/version rotation for every agent runner, always — the launch
+  // contract has no per-harness exception (apps/ext/AGENTS.md). Shell is not a
+  // runner, so it carries no strategy (it never routes through `agents run`).
+  const strategy: RunStrategy | undefined = isAgentRunner(agentKey) ? 'balanced' : undefined;
+
+  let launched = false;
+  try {
+    await openSingleAgent(context, agentConfig, undefined, undefined, strategy, host);
+    launched = true;
+  } finally {
+    await saveLaunchHistory(context, host ?? 'local', launched);
+  }
+
+  const hostLabel = host ? ` on ${host}` : '';
+  const stratLabel = strategy === 'balanced' ? ' (balanced)' : '';
+  vscode.window.setStatusBarMessage(`New Agent: ${def!.title}${stratLabel}${hostLabel}`, 4000);
 }
 
 // Terminal readiness detection moved to src/vscode/terminalReadiness.ts.
@@ -814,6 +1302,15 @@ export async function activate(context: vscode.ExtensionContext) {
   // Initialize terminal readiness event tracking (shell integration + close cleanup)
   readiness.initReadiness(context);
 
+  sessionTracker.initSessionTracker(context);
+  context.subscriptions.push(
+    sessionTracker.onSessionChanged((terminal, _oldId, newId) => {
+      terminals.setSessionId(terminal, newId);
+      startAutoLabelPollerForTerminal(terminal, context);
+      updateStatusBarForTerminal(terminal, context.extensionPath);
+    }),
+  );
+
   // Cross-window live-terminal registry: every VS Code window publishes its
   // agent terminals to a shared JSON file so the Foreman (and future tools)
   // can see the factory state across all windows. Keepalive every 15s; also
@@ -1092,6 +1589,23 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Run lightweight first-setup if needed
   await maybeRunFirstSetup(context);
+
+  // Warm the persisted auto-launch cache away from the command path. Refreshes
+  // are deliberately fire-and-forget: opening AGI EXT must not wait on SSH.
+  refreshLaunchHealthCacheInBackground(context);
+  // Warm the host picker's device rows at startup — the cheap registry read
+  // only (no fleet sweep) — so the FIRST "(Pick Host)" open renders every host
+  // instantly instead of showing only This Mac + Balanced while a cold snapshot
+  // loads. The expensive usage sweep stays lazy (below), gated on actual use.
+  refreshHostPickerDevicesInBackground(context);
+  const launchHealthTimer = setInterval(() => {
+    refreshLaunchHealthCacheInBackground(context);
+    // Pre-warm the host picker's snapshot so a stale open usually finds the
+    // cache already fresh — but only once the user has actually opened a
+    // picker this session; no fleet sweep for someone who never uses it.
+    if (hostPickerUsed) refreshHostPickerCacheInBackground(context);
+  }, 60_000);
+  context.subscriptions.push(new vscode.Disposable(() => clearInterval(launchHealthTimer)));
 
   // Open Dashboard on startup if enabled (welcome screen)
   const agentSettings = settings.getSettings(context);
@@ -2265,6 +2779,55 @@ interface CliSessionItem {
   tokenCount?: number;
 }
 
+interface AgentVersionInfo {
+  version: string;
+  isDefault: boolean;
+  signedIn: boolean;
+  email?: string;
+  plan?: string;
+  usageStatus?: 'available' | 'rate_limited' | 'out_of_credits';
+  windows?: Array<{
+    key: string;
+    usedPercent: number;
+    resetsAt: string;
+  }>;
+  lastActive?: string;
+  path?: string;
+}
+
+interface AgentViewResponse {
+  agent: string;
+  versions: AgentVersionInfo[];
+}
+
+// List an agent's installed versions with login/usage health. A `host` targets a
+// remote device via `agents view <agent> --host <device> --json` (RUSH-2025 host
+// health probe); omit it for the local machine. A remote probe gets a longer
+// timeout since it makes an SSH round-trip.
+async function listAgentVersions(agentKey: string, host?: string): Promise<AgentVersionInfo[]> {
+  const { runAgents } = await import('../core/agentsBin');
+  try {
+    const hostFlag = host ? ` --host ${shquote(host)}` : '';
+    const { stdout } = await runAgents(`view ${agentKey}${hostFlag} --json`, {
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: host ? 15_000 : 30_000,
+    });
+    const parsed: AgentViewResponse = JSON.parse(stdout);
+    return parsed.versions || [];
+  } catch {
+    return [];
+  }
+}
+
+// True when `host` has at least one signed-in, non-throttled version of the
+// agent — the RUSH-2025 "usable version" test. A probe failure (offline, no SSH,
+// agent not installed) yields an empty list, so the device is reported unusable
+// and gets filtered out of the balancer rather than launched into blindly.
+async function hostHasUsableVersion(host: string, agentKey: string): Promise<boolean> {
+  const versions = await listAgentVersions(agentKey, host);
+  return deviceHasUsableVersion(versions);
+}
+
 /**
  * The recent-transcript listing. `sessions` takes the query as a positional
  * argument and has no `list` subcommand — passing one made commander treat the
@@ -2273,7 +2836,7 @@ interface CliSessionItem {
  */
 async function listSessionsViaCli(limit = 30): Promise<CliSessionItem[]> {
   const { runAgents } = await import('../core/agentsBin');
-  const { stdout } = await runAgents(`sessions --all --json --no-interactive --limit ${limit}`, {
+  const { stdout } = await runAgents(`sessions --all -n ${limit} --json`, {
     maxBuffer: 10 * 1024 * 1024,
   });
   const parsed = JSON.parse(stdout);
@@ -2287,6 +2850,17 @@ async function listSessionsViaCli(limit = 30): Promise<CliSessionItem[]> {
  * at it. Bare (no `--local`) so a session stranded on another fleet box shows up
  * too; those resume over SSH.
  */
+async function listActiveSessionsViaCli(): Promise<RawActiveSession[]> {
+  const { runAgents } = await import('../core/agentsBin');
+  const { stdout } = await runAgents('sessions --active --json', {
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 45_000,
+  });
+  const parsed = JSON.parse(stdout);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((r) => r && typeof r === 'object') as RawActiveSession[];
+}
+
 // formatSessionWhen and cleanSessionTopic moved to ../core/sessionBrowser (pure,
 // unit-tested) and are imported at the top of this file; the fork picker and the
 // resume picker both call the shared implementations.
@@ -2592,25 +3166,11 @@ function resumeCandidateItems(candidates: ResumeCandidate[], checked: ReadonlySe
 }
 
 async function fetchResumeCandidates(): Promise<ResumeCandidate[]> {
-  // The CLI owns lifecycle classification, cross-device aggregation, ranking,
-  // and deduplication. Opening (or manually refreshing) the picker performs one
-  // bounded read; the extension only adapts those rows for QuickPick.
-  const rows = await listSessionsViaCli(RESUME_PICKER_LIMIT) as Array<CliSessionItem & Partial<ResumeCandidate>>;
-  return rows.map((row) => ({
-    id: row.id,
-    shortId: row.shortId || row.id.slice(0, 8),
-    agent: row.agent || '',
-    version: row.version,
-    account: row.account,
-    project: row.project,
-    cwd: row.cwd,
-    topic: row.topic,
-    state: row.state || 'idle',
-    viewingIn: row.viewingIn || '',
-    host: row.host || '',
-    lastActivityMs: row.lastActivityMs || Date.parse(row.timestamp || '') || 0,
-    pid: row.pid || 0,
-  }));
+  const [recent, live] = await Promise.all([
+    listSessionsViaCli(RESUME_PICKER_LIMIT),
+    listActiveSessionsViaCli(),
+  ]);
+  return buildResumeCandidates(recent as RecentSessionRow[], live, normalizeHost(os.hostname()));
 }
 
 /**
@@ -2634,20 +3194,39 @@ async function resumeSessionsBatch(
   opts: { title?: string; abandonedOnly?: boolean } = {},
 ) {
   const select = (cs: ResumeCandidate[]) => (opts.abandonedOnly ? abandonedCandidates(cs) : cs);
-  let initial: ResumeCandidate[];
-  try {
-    initial = select(await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Window, title: 'Agents: finding resumable sessions…' },
-      fetchResumeCandidates,
-    ));
-  } catch (err: any) {
+  const rawCache = context.globalState.get<ResumePickerCache>(RESUME_PICKER_CACHE_KEY);
+  // Shape-check like the host picker cache: a drifted entry must degrade to
+  // the cold path, not crash item building on a non-array.
+  const cached = rawCache && Array.isArray(rawCache.candidates) ? rawCache : undefined;
+  let initial = select(cached?.candidates ?? []);
+  // Set when the cold path just did a live fleet read — the background
+  // revalidate below must not fire a second, identical sweep right after it.
+  // (Reachable with a warm cache in abandonedOnly mode: the snapshot filters
+  // to empty, so the cold path runs even though `cached` is non-empty.)
+  let coldFetched = false;
+
+  // Cold start (no snapshot yet): the live read fans out across the fleet over
+  // SSH, so it can take seconds — show progress rather than leaving the
+  // palette looking hung. CLI-missing errors surface here, as before.
+  if (initial.length === 0) {
+    let fresh: ResumeCandidate[];
+    try {
+      fresh = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Window, title: 'Agents: finding resumable sessions…' },
+        fetchResumeCandidates,
+      );
+    } catch (err: any) {
       const msg = err?.stderr || err?.message || String(err);
       if (msg.includes('ENOENT') || msg.includes('not found')) {
         vscode.window.showInformationMessage('agents CLI not found. Install with: npm i -g @phnx-labs/agents-cli');
       } else {
         vscode.window.showInformationMessage(`Failed to list sessions: ${msg.slice(0, 160)}`);
       }
-    return;
+      return;
+    }
+    void context.globalState.update(RESUME_PICKER_CACHE_KEY, { candidates: fresh, fetchedAt: Date.now() } satisfies ResumePickerCache);
+    initial = select(fresh);
+    coldFetched = true;
   }
 
   if (initial.length === 0) {
@@ -2683,7 +3262,21 @@ async function resumeSessionsBatch(
   };
   applyItems(initial);
 
+  // The warm path rendered a snapshot — revalidate in the background and swap
+  // the fresh list in when it lands. (The cold path just fetched, so it is
+  // already fresh.)
   let pickerDisposed = false;
+  if (!coldFetched && cached && cached.candidates.length > 0) {
+    quickPick.busy = true;
+    void fetchResumeCandidates()
+      .then((fresh) => {
+        void context.globalState.update(RESUME_PICKER_CACHE_KEY, { candidates: fresh, fetchedAt: Date.now() } satisfies ResumePickerCache);
+        const filtered = select(fresh);
+        if (!pickerDisposed && filtered.length > 0) applyItems(filtered);
+      })
+      .catch((err) => console.error('[resumeSessionsBatch] refresh failed:', err))
+      .finally(() => { if (!pickerDisposed) quickPick.busy = false; });
+  }
 
   let chosen: ResumeCandidate[];
   try {
@@ -3925,9 +4518,9 @@ async function tryHydrateLiveSessionId(
       }
     }
 
-    // (2) Shared CLI stream map joined on this tab's AGENT_TERMINAL_ID.
-    // One elected extension window owns `agents sessions watch --json`; every
-    // window and tab reads its broadcast projection without another subprocess.
+    // (2) Batched CLI active map joined on this tab's AGENT_TERMINAL_ID.
+    // One subprocess per host services every tab on that host (15 remote tabs
+    // on yosemite-s1 → one `agents sessions --active --json --host yosemite-s1`).
     // The one fetch stamps + arms labeling for this tab AND every host sibling
     // it resolves, so focusing a sibling needs no extra round-trip and each tab
     // enters the same auto-label lifecycle as the local watcher (RUSH-2411).
@@ -4525,19 +5118,35 @@ async function forkCurrentSession(
     return;
   }
 
-  // Fork identity/copy semantics belong to agents-cli. Keep only the editor
-  // terminal that presents the command and its result.
-  const terminal = vscode.window.createTerminal({
-    name: `Fork ${shortSessionId(request.sessionId)}`,
-    location: { viewColumn: vscode.ViewColumn.Active },
-    isTransient: true,
+  // Open the fork as a normal full tab in the active group. A fork is a fresh
+  // sibling session, not a pane to wedge beside its parent — a side split
+  // shrinks both terminals and is not what forking asks for.
+  const { terminalId, sessionId } = await openSingleAgentWithQueue(context, entry.agentConfig, [request.prompt], {
+    strategy: request.strategy,
+    host: request.host,
+    local: request.local,
+    viewColumn: vscode.ViewColumn.Active,
   });
-  terminal.show(false);
-  await sendCommandWhenReady(
-    terminal,
-    `agents sessions fork ${shquote(request.sessionId)}${opts.intent === 'recap' ? ' --name recap' : ''}`,
+
+  void recordFork(context, {
+    sourceSessionId: request.sessionId,
+    sourceHost: request.sourceHost ?? LOCAL_MACHINE_ID,
+    forkSessionId: sessionId,
+    forkHost: request.host ?? LOCAL_MACHINE_ID,
+    agentKey: request.agentKey,
+    forkedAt: Date.now(),
+    terminalId,
+  });
+
+  const where = request.host ?? 'this Mac';
+  vscode.window.setStatusBarMessage(
+    opts.intent === 'recap'
+      ? `Started recap from ${shortSessionId(request.sessionId)} on ${where}`
+      : request.moved
+      ? `Forked ${shortSessionId(request.sessionId)} onto ${where} — it reads the transcript from ${request.sourceHost ?? LOCAL_MACHINE_ID}`
+      : `Forked ${shortSessionId(request.sessionId)} on ${where}`,
+    5000,
   );
-  vscode.window.setStatusBarMessage(`Forking ${shortSessionId(request.sessionId)} through agents-cli`, 5000);
 }
 
 function showForkRejection(reason: 'no_session' | 'no_agent'): void {
@@ -4582,7 +5191,7 @@ async function recordFork(
     readRemote: async (host, id) => {
       try {
         const { runAgents } = await import('../core/agentsBin');
-        return remoteForkSessionId(host, id);
+        return remoteForkSessionId(runAgents, host, id, shquote);
       } catch {
         return null;
       }
@@ -4647,8 +5256,15 @@ function toBrowserItems(rows: ReturnType<typeof buildSessionBrowserRows>): Sessi
 
 /** Which machine's sessions the browser is listing. `undefined` = this one. */
 async function pickBrowseDevice(context: vscode.ExtensionContext, current: string | undefined): Promise<{ device?: string; cancelled: boolean }> {
-  void context;
-  const devices = await listRegisteredDevices();
+  hostPickerUsed = true;
+  // Render from the persisted snapshot when one exists; only a cold start
+  // waits on the registry read, and a stale snapshot revalidates in the
+  // background for the next open.
+  const cache = readHostPickerCache(context);
+  const devices = cache?.devices ?? await listRegisteredDevices();
+  // This picker only shows device rows, so revalidate with the cheap device
+  // refresh (no fleet usage sweep) for the next open.
+  if (isHostPickerStale(cache)) refreshHostPickerDevicesInBackground(context);
   const items: (vscode.QuickPickItem & { deviceId?: string })[] = [
     {
       label: '$(vm) This machine',
@@ -4999,13 +5615,16 @@ function initMonitorLeader(context: vscode.ExtensionContext): void {
 function initMonitorHost(context: vscode.ExtensionContext): void {
   const { runOnLeaderOnly } = require('../monitor/gate') as typeof import('../monitor/gate');
   const { MonitorHost } = require('../monitor/host') as typeof import('../monitor/host');
+  const { listTeamsForCwd } = require('./foreman.sources') as typeof import('./foreman.sources');
   const gate = runOnLeaderOnly(() => {
     // detectors enables the centralized readiness probes (#68), the machine-wide
     // session watcher (#69), and the panel/floor
     // snapshot detector (#71) on the leader only. The snapshot detector's teams
     // fetch is vscode-coupled, so it's injected here (host.ts stays vscode-free).
     const host = new MonitorHost({
-      detectors: {},
+      detectors: {
+        snapshotFetchTeams: (cwd) => listTeamsForCwd(cwd) as Promise<unknown[]>,
+      },
     });
     void host.start().catch((err) => console.error('[MONITOR] host start failed:', err));
     return { dispose: () => { void host.stop().catch(() => {}); } };
@@ -5077,10 +5696,15 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
   // probing while connected and fall back when not.
   const connected = () => follower.connected;
   readiness.setMonitorConnectivity(connected);
+  sessionTracker.setMonitorConnectivity(connected);
   readiness.setMonitorArmSink({
     armAgent: (pid, agentKey, sessionId) => { void follower.armAgent(pid, agentKey, sessionId); },
     armShellAdoption: (pid) => { void follower.armShellAdoption(pid); },
   });
+  // Snapshot (#71): the leader computes git/worktrees/usage/teams once and
+  // broadcasts; the panel/floor render from the fact and arm their watch slice.
+  terminals.setSnapshotMonitorConnectivity(connected);
+  terminals.setSnapshotArmSink((watches) => { void follower.setSnapshotWatches(watches); });
 
   const proto = require('../monitor/protocol') as typeof import('../monitor/protocol');
   const factSub = follower.onMonitorEvent((event) => {
@@ -5093,8 +5717,12 @@ function initMonitorFollower(context: vscode.ExtensionContext): void {
         sessionId: p.sessionId,
         childPid: p.childPid,
       });
-    } else if (proto.isSessionCliFact(event)) {
-      if (sessionPresentationStore.apply(event.payload)) void settings.refreshFloorFromSessionStream();
+    } else if (proto.isSessionFact(event)) {
+      sessionTracker.ingestSessionFact(event.payload);
+    } else if (proto.isSessionWarmth(event)) {
+      sessionTracker.ingestSessionWarmth(event.payload.filePath);
+    } else if (proto.isPanelSnapshot(event)) {
+      terminals.ingestPanelSnapshotFact(event.payload);
     }
   });
   context.subscriptions.push({ dispose: factSub });

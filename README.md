@@ -54,8 +54,6 @@ agents run claude "explain this repo"  # run any agent on your existing subscrip
 
 Full path -- installing harnesses, logging in, smoke-testing `agents teams`, and setting up your own fleet: [`apps/cli/docs/QUICKSTART.md`](apps/cli/docs/QUICKSTART.md).
 
-**Learn (concepts):** [Loop + graph engineering](https://agents-cli.sh/learn/loop-and-graph-engineering) · [Teams as graph engineering](https://agents-cli.sh/learn/teams-graph-engineering) · [Sessions · index + cross-device](https://agents-cli.sh/learn/sessions-index) · [Distributed fleet execution](https://agents-cli.sh/learn/distributed-fleet). Also: [harness engineering](https://agents-cli.sh/learn/harness-engineering) · [visual longform](https://share.agents-cli.sh/muqsitnawaz/agents-loop-and-graph-engineering).
-
 Already installed? `agents upgrade` updates agents-cli itself to the latest version (`agents upgrade 1.2.3` for a specific version or dist-tag, `-y` to skip the confirm prompt). The command is `upgrade` on every platform -- do not reach for `agents update`, which updates an installed **agent harness**, not agents-cli (and on macOS, `agents helper update` is a third thing: it reinstalls the keychain helper).
 
 Source: [github.com/phnx-labs/agents-cli](https://github.com/phnx-labs/agents-cli)
@@ -315,7 +313,7 @@ agents sessions insights --agent claude --agent codex --json
 agents insights --since 7d
 ```
 
-`sessions insights` is deterministic and offline by default. It caches per-session facets, compares harnesses, and emits an actions table with evidence counts plus shortened sample session ids. `--narrative` is opt-in and receives aggregates only, never raw transcripts.
+`sessions insights` is deterministic and offline by default. It caches per-session facets, compares harnesses, and emits an actions table with evidence counts plus shortened sample session ids. `--narrative` is opt-in and receives aggregates only, never raw transcripts. The installed `/sessions-insights` slash command invokes the same CLI source of truth.
 
 Interactive picker when you're in a terminal. Structured output (`--json`, `--markdown`, filtered by role or turn count) when piped.
 
@@ -331,8 +329,8 @@ agents sessions --working           # actively producing work (fleet-wide)
 agents sessions --idle              # stopped between turns (fleet-wide)
 agents sessions --orphan            # agent outlived its terminal client
 agents sessions --crashed           # terminal and agent disappeared uncleanly
-agents sessions focus a1b2c3d4      # jump back into one — attach in place, or resume
-agents sessions focus claude@latest --device yosemite-s0  # pick latest there
+agents sessions resume a1b2c3d4     # jump back into one — attach in place, or recover
+agents sessions resume ag-claude-a1b2c3d4  # or by its tmux alias
 ```
 
 On a terminal, `agents sessions --active` (and a bare `agents sessions`) open the **interactive session browser** — one filter you drive with single keys, re-pulled live across the fleet:
@@ -343,7 +341,7 @@ On a terminal, `agents sessions --active` (and a bare `agents sessions`) open th
 | `r` | running only | `--active` |
 | `b` | bookmarks only | `--bookmarks` |
 | `*` | bookmark / unbookmark the highlighted session | `agents sessions bookmark <id>` |
-| `f` | focus the highlighted session | `agents sessions focus <id>` |
+| `f` | focus the highlighted session | `agents sessions resume <id>` |
 | `c` | team sessions | `--team` (alias: `--teams`) |
 | `a` | agent (cycles) | `-a` |
 | `d` | device (cycles) | `--device` |
@@ -353,7 +351,7 @@ On a terminal, `agents sessions --active` (and a bare `agents sessions`) open th
 | `⏎` | resume / attach | `resume` / `focus` |
 | `y` | copy the equivalent command | `--print-cmd` |
 
-**Bookmark the sessions you keep coming back to.** `*` marks the highlighted row (a `★` shows in the listing), `b` narrows to bookmarks, and `agents sessions bookmark <id>` / `--bookmarks` do the same outside a TTY. Press `f` to focus the highlighted row through the same attach-or-recover flow as `agents sessions focus <id>`; Enter keeps its existing resume behavior. Bookmarks live in `~/.agents/.history/bookmarks.json` keyed by session id, so they survive a reindex of the session cache. They're per-machine — session sync carries transcripts, not this file.
+**Bookmark the sessions you keep coming back to.** `*` marks the highlighted row (a `★` shows in the listing), `b` narrows to bookmarks, and `agents sessions bookmark <id>` / `--bookmarks` do the same outside a TTY. Press `f` to focus the highlighted row through the same attach-or-recover flow as `agents sessions resume <id>`; Enter keeps its existing resume behavior. Bookmarks live in `~/.agents/.history/bookmarks.json` keyed by session id, so they survive a reindex of the session cache. They're per-machine — session sync carries transcripts, not this file.
 
 **A session that lost its host says so.** When an editor window or an SSH connection goes down hard, the agent it owned used to simply disappear from `--active`; when an agent outlived its window in tmux, it reported a plain `idle`. Both now carry their own status: `✗ crashed` (the host went down and took the agent with it) and `◍ orphan` (still alive, but no client is attached — nothing is showing it). Read from tmux's attached-client count and the editor window's registry heartbeat, so a deliberate `agents sessions detach` is never mistaken for one, and a session that is still *working* headlessly is left alone.
 
@@ -363,7 +361,7 @@ Filters **stack** (they AND together), the active set shows in the header, and t
 | --- | --- |
 | ![sessions browser, preview hidden](assets/demos/sessions-preview-before.png) | ![sessions browser, preview open with a links line](assets/demos/sessions-preview-after.png) |
 
-Each live session resolves to `working`, `waiting_input` (with why -- a question, a plan review, or a permission prompt), `idle`, or a lifecycle state such as `orphaned`, `crashed`, `closed`, `abandoned`, `queued`, or `unknown`. Pass the matching flag (`--working`, `--idle`, `--waiting`, `--orphan`, `--crashed`, `--closed`, `--abandoned`, `--queued`, `--unknown`) directly; each implies `--active`, and several flags form a union. The fleet fan-out is already the default; `--local` opts out. `--all` instead widens historical directory and time scope. Rows also carry badges for the PR, worktree, and ticket. `agents sessions focus [selector]` accepts the same agent/version, device, time, team, project, skill/plugin, bookmark, and live-state filters as the session browser. A unique id focuses directly; an agent/version or text selector always opens the preview picker. Immediately before attach it checks the tmux pane process: a living pane is joined in place, while a dead/missing pane enters recovery instead of showing tmux's `Pane is dead` screen.
+Each live session resolves to `working`, `waiting_input` (with why -- a question, a plan review, or a permission prompt), `idle`, or a lifecycle state such as `orphaned`, `crashed`, `closed`, `abandoned`, `queued`, or `unknown`. Pass the matching flag (`--working`, `--idle`, `--waiting`, `--orphan`, `--crashed`, `--closed`, `--abandoned`, `--queued`, `--unknown`) directly; each implies `--active`, and several flags form a union. The fleet fan-out is already the default; `--local` opts out. `--all` instead widens historical directory and time scope. Rows also carry badges for the PR, worktree, and ticket. `agents sessions resume [selector]` accepts the same agent/version, device, time, team, project, skill/plugin, bookmark, and live-state filters as the session browser. A unique id or `ag-<agent>-<shortid>` tmux alias resolves directly; an agent/version or text selector always opens the preview picker. Immediately before attach it checks the tmux pane process: a living pane is joined in place, while a dead/missing pane enters recovery instead of showing tmux's `Pane is dead` screen.
 
 Landing on a session cold? `agents sessions <id>` prints a catch-up digest: an inferred title, files changed grouped by directory (created / modified / deleted), a histogram of which tools did the work (including parsed Bash commands -- `git`, `npm`, `ffmpeg`, `ssh`, and so on), and the last test verdict -- the signals to reload a task in seconds.
 
@@ -386,11 +384,11 @@ agents run auto --resume 019fd0c8-b3e9-77a2-a1a4-444698c4d897  # adapt if its ac
 
 ### Send an agent to the background — and bring it back
 
-Running 30 agents and drowning in terminal tabs? `agents sessions detach <id>` stops a session's interactive process and keeps it working **headless** in the background -- it drives its task to done unattended, no tab, lower cost. `agents sessions attach <id>` brings it back through the same origin-device recovery decision: native resume in the exact healthy origin home, or same-harness `/continue` when that home is unavailable, with the full indexed history (including whatever it did while backgrounded).
+Running 30 agents and drowning in terminal tabs? `agents sessions detach <id>` stops a session's interactive process and keeps it working **headless** in the background -- it drives its task to done unattended, no tab, lower cost. `agents sessions resume <id>` brings it back through the same origin-device recovery decision: native resume in the exact healthy origin home, or same-harness `/continue` when that home is unavailable, with the full indexed history (including whatever it did while backgrounded).
 
 ```
 agents sessions detach a1b2c3d4     # go headless in the background, keep working
-agents sessions attach a1b2c3d4     # resume it interactively, right here
+agents sessions resume a1b2c3d4     # bring it back interactively, right here
 ```
 
 Both are agent-agnostic -- they route through the same `agents run --resume` path (native resume for Claude/Codex, `/continue` replay for the rest). `agents sessions --active` shows each session's **owner** (the human who launched it, resolved from the tailnet identity, or `-` for an unresolved local run) and its `presence` -- `attached` (you're watching it), `background` (running headless), or `parked` (its background run finished) -- so the menu bar and AGI EXT show who is running what, and where. In AGI EXT, **Agents: Detach** (`Cmd/Ctrl+K B`) and **Agents: Attach** (`Cmd/Ctrl+K A`) do the same over the focused terminal.
@@ -1096,22 +1094,11 @@ agents daemon restart        # stop then start
 agents daemon disable        # persist daemon.enabled: false -- nothing auto-starts it
 agents daemon enable         # clear the kill switch
 
-agents daemon reload                        # SIGHUP -- reload jobs, re-evaluate scheduler.enabled, no restart
-agents daemon services                      # health of the two hosted services (secrets broker, browser IPC)
-agents daemon services list                 # every toggleable service and its current on/off state
-agents daemon services enable secrets-broker
-agents daemon services disable browser-ipc  # stop hosting browser IPC without stopping the daemon
+agents daemon reload         # SIGHUP -- reload jobs, re-evaluate scheduler.enabled, no restart
+agents daemon services       # just the two hosted services (secrets broker, browser IPC)
 agents daemon logs -f --level warn --since 1h
-agents daemon doctor                        # one-shot health check; non-zero exit on problems
+agents daemon doctor         # one-shot health check; non-zero exit on problems
 ```
-
-Each hosted responsibility (secrets broker, browser IPC, scheduler, monitors,
-watchdog, device probe, self-heal, keychain reap, account-state refresh,
-state-dir checks) is an independent toggle in `~/.agents/daemon/services.yaml`.
-`agents daemon services list` shows every service; `enable|disable <id>` flips
-one. Missing keys default to enabled, so upgrades are no-ops. Most services take
-effect on the next daemon start; scheduler and monitor engine also re-evaluate
-on `SIGHUP reload`.
 
 There is no `agents daemon jobs` -- scheduled work is always `agents routines`
 (see `agents routines stats` for per-routine failure detail). `disable` is a
@@ -1411,7 +1398,7 @@ Which DotAgents resources each agent CLI can load. Source of truth: [src/lib/age
 
 Codex `0.117.0+` no longer reads `.codex/prompts/`; agents-cli converts slash commands into skills so they stay invocable as `$name`. OpenCode's plugin-based hook system is on the roadmap; hooks stay `no` until a writer ships.
 
-Slash commands can declare per-agent/version targeting in frontmatter (`agents:`, `since:`, `until:`). Gating applies when syncing from `~/.agents/commands/` (user/system) into version homes — project `.agents/commands/` files are read in place and are not filtered by `agents:`.
+Slash commands can declare per-agent/version targeting in frontmatter (`agents:`, `since:`, `until:`). Gating applies when syncing from `~/.agents/commands/` (user/system) into version homes — project `.agents/commands/` files are read in place and are not filtered by `agents:`. This repo ships `.agents/commands/version.md` as `/version` for Claude, Codex, Cursor, OpenCode, Copilot, and Grok; Antigravity excluded until verified.
 
 ## FAQ
 
