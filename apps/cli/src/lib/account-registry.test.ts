@@ -3,7 +3,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as yaml from 'yaml';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { setKeychainBackendForTest, setKeychainToken, type KeychainBackend } from './secrets/index.js';
+import { secretsKeychainItem, setKeychainBackendForTest, setKeychainToken, type KeychainBackend } from './secrets/index.js';
+import { writeBundleWithItems } from './secrets/bundles.js';
 import { addAccount, inspectAccount, readAccountRegistry, removeAccount, renameAccount, resolveAccountSelection, resolveCredentialAccount, setAccountSecret } from './account-registry.js';
 import { buildAccountBundle } from './account-schema.js';
 
@@ -41,6 +42,13 @@ describe('credential account registry (bundle-canonical)', () => {
     expect(meta.vars.API_KEY).toBe('keychain:API_KEY');
     expect(typeof meta.vars.ACCOUNT_ID).toBe('string');
     expect(blobs[0]).not.toContain('sk-or-secret'); // secret bytes never in metadata
+  });
+
+  it('refuses to overwrite an ordinary secrets bundle with the same name', () => {
+    const otherItem = secretsKeychainItem('prod', 'OTHER');
+    writeBundleWithItems({ name: 'prod', vars: { OTHER: 'keychain:OTHER' } }, new Map([[otherItem, 'keep-me']]));
+    expect(() => addAccount('prod', 'openrouter', 'api-key', 'sk-new', root)).toThrow("Secrets bundle 'prod' already exists");
+    expect(keychain.values.has(otherItem)).toBe(true);
   });
 
   it('resolves one account across compatible hosts', () => {
@@ -175,5 +183,28 @@ describe('legacy accounts.yaml migration', () => {
     expect(readAccountRegistry(root)).toEqual({ version: 2, accounts: {} });
     expect(fs.existsSync(path.join(root, 'accounts.legacy-labels.yaml'))).toBe(true);
     expect(fs.existsSync(path.join(root, 'accounts.yaml'))).toBe(false);
+  });
+
+  it('does not archive or delete a legacy account when its name collides with an unrelated bundle', () => {
+    const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const legacyItem = `agents-cli.accounts.${id}.credential`;
+    setKeychainToken(legacyItem, 'sk-or-legacy');
+    const otherItem = secretsKeychainItem('work', 'OTHER');
+    writeBundleWithItems({ name: 'work', vars: { OTHER: 'keychain:OTHER' } }, new Map([[otherItem, 'keep-me']]));
+    fs.writeFileSync(path.join(root, 'accounts.yaml'), [
+      'version: 2',
+      'accounts:',
+      `  ${id}:`,
+      `    id: ${id}`,
+      '    name: work',
+      '    provider: openrouter',
+      '    auth: api-key',
+      `    secretRef: ${legacyItem}`,
+      '',
+    ].join('\n'));
+
+    expect(() => readAccountRegistry(root)).toThrow("a different secrets bundle already uses that name");
+    expect(fs.existsSync(path.join(root, 'accounts.yaml'))).toBe(true);
+    expect(keychain.has(legacyItem)).toBe(true);
   });
 });
