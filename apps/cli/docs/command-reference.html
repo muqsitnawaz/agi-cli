@@ -1167,7 +1167,7 @@ Use `agents devices accounts` for the same data grouped by account.</p></article
 <article id="profiles-view" data-search="view profiles view show show a profile (env, host, auth source, preset link) name  -h, --help show help  "><div class="command-head"><h3><code>agents profiles view &lt;name&gt;</code></h3><span class="meta">Aliases: show</span></div><p>Show a profile (env, host, auth source, preset link)</p><h4>Arguments</h4><table><thead><tr><th>Argument</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>&lt;name&gt;</code></td><td>—</td><td></td><td></td></tr></tbody></table><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table></article>
 <article id="projects" data-search="projects projects  named multi-repo projects with a progress rollup. -h, --help show help agents projects import --from-linear  # the projects you actually track
       agents projects add rush --repo phnx-labs/rush --path apps/web
-      agents projects add rush --dir ~/src/rush --dir ~/src/rush-infra  # several dirs
+      agents projects add rush --root ~/src/rush --dir ~/src/rush-infra  # bind another dir
       agents projects set rush --add-dir ~/.agents/.system  # bind one more
       agents projects set rush --rm-dir ~/src/rush-infra    # unbind it again
       agents projects list                 # definitions only (no session scan)
@@ -1190,7 +1190,7 @@ Use `agents devices accounts` for the same data grouped by account.</p></article
       not with --dir. every bound directory other than that cwd rides along as
       an --add-dir grant, which only claude and codex consume."><div class="command-head"><h3><code>agents projects</code></h3></div><p>Named multi-repo projects with a progress rollup.</p><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table><h4>Examples</h4><pre><code>agents projects import --from-linear  # the projects you actually track
       agents projects add rush --repo phnx-labs/rush --path apps/web
-      agents projects add rush --dir ~/src/rush --dir ~/src/rush-infra  # several dirs
+      agents projects add rush --root ~/src/rush --dir ~/src/rush-infra  # bind another dir
       agents projects set rush --add-dir ~/.agents/.system  # bind one more
       agents projects set rush --rm-dir ~/src/rush-infra    # unbind it again
       agents projects list                 # definitions only (no session scan)

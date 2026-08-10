@@ -1575,7 +1575,10 @@ async function resolveTeammateGrants(
     const { resolveProjectDirs } = await import('../project-root.js');
     const { extraDirs } = await resolveProjectDirs(agent.project, opts);
     return extraDirs;
-  } catch {
+  } catch (err) {
+    // Degrading is deliberate, but silently degrading is not: a teammate that
+    // lost its grants to a renamed or deleted definition should leave a trace.
+    debug(`teammate ${agent.agentId}: project '${agent.project}' did not resolve, no grants: ${(err as Error).message}`);
     return [];
   }
 }

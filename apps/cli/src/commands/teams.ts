@@ -783,6 +783,14 @@ async function reactWithTeammate(
       null,
       worktreeName,
       worktreePath,
+      null, // profileName
+      null, // hostName
+      null, // hostTarget
+      null, // repoPath
+      // A pr-watch fixer belongs to the same team, so it gets the same project
+      // grants as any other teammate. Wiring `--project` into only the
+      // `teams add` caller would have left this one silently without them.
+      (await getTeam(team))?.project ?? null,
     );
   } catch (err) {
     // The spawn failed after we created this fixer's worktree — tear it down so

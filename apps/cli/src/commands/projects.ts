@@ -529,7 +529,7 @@ export function registerProjectsCommands(program: Command): void {
     examples: `
       agents projects import --from-linear  # the projects you actually track
       agents projects add rush --repo phnx-labs/rush --path apps/web
-      agents projects add rush --dir ~/src/rush --dir ~/src/rush-infra  # several dirs
+      agents projects add rush --root ~/src/rush --dir ~/src/rush-infra  # bind another dir
       agents projects set rush --add-dir ~/.agents/.system  # bind one more
       agents projects set rush --rm-dir ~/src/rush-infra    # unbind it again
       agents projects list                 # definitions only (no session scan)
