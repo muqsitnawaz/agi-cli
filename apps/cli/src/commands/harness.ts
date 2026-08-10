@@ -365,17 +365,6 @@ async function runEditWizard(name: string, cliOpts: EditOptions): Promise<void> 
   console.log(chalk.gray(`Model:  ${profileModelLabel(edited)}`));
 }
 
-/** Canonical native harness catalog for JSON consumers. */
-export function nativeHarnessCatalog() {
-  return ALL_AGENT_IDS.map((id) => ({
-    id,
-    name: AGENTS[id].name,
-    cliCommand: AGENTS[id].cliCommand,
-    modes: AGENTS[id].capabilities.modes,
-    capabilities: AGENTS[id].capabilities,
-  }));
-}
-
 export function registerHarnessCommands(program: Command): void {
   const cmd = program
     .command('harness')
@@ -595,9 +584,7 @@ Examples:
     .action((opts: { json?: boolean }) => {
       const custom = listProfiles();
       const presets = listPresets();
-      // This is the canonical machine-readable native harness catalog. UI
-      // consumers must read it instead of checking in a mirror of AGENTS.
-      const native = nativeHarnessCatalog();
+      const native = ALL_AGENT_IDS.map((id) => ({ id, name: AGENTS[id].name, modes: nativeModes(id) }));
 
       if (opts.json) {
         console.log(

@@ -1,7 +1,8 @@
 /**
  * `agents snapshot` — one-process consumer snapshot for pollers.
  *
- * Replaces the N× `view --json` + `sessions --active --json` (+ optional feed)
+ * Replaces device/config/inventory joins + N× `view --json` +
+ * `sessions --active --json` (+ optional feed)
  * fork storm with a single command. Does NOT replace `agents status`, which
  * remains the UnifiedSyncStatus sync contract for menubar / Agency drift.
  *
@@ -97,7 +98,7 @@ export function registerSnapshotCommand(program: Command): void {
     program
       .command('snapshot')
       .description(
-        'One-process poll snapshot: install inventory + active sessions (optional feed/sync). Not the sync-status command — use `agents status` for drift.',
+        'One-process poll snapshot: harness capabilities + per-device account eligibility + active sessions (optional feed/sync). Not the sync-status command — use `agents status` for drift.',
       ),
   )
     .option('--json', 'Emit the machine-readable FleetSnapshot contract (version 1)')
@@ -117,7 +118,7 @@ export function registerSnapshotCommand(program: Command): void {
       # Same, plus open feed blocks for needs-you polls
       agents snapshot --json --with-feed
 
-      # Fleet-wide active sessions (matches sessions --active scope)
+      # Fleet-wide device eligibility + active sessions
       agents snapshot --json --all-hosts
 
       # Inventory for one harness only (Factory-style usage poll)

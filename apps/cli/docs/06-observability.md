@@ -466,10 +466,11 @@ Three diagnostics with distinct scopes (RUSH-2027):
   peers' rows on demand, cache-first, ssh-reading a stale/missing peer via
   `agents fleet status --local --json` through a bounded, kill-on-timeout fan-out.
 
-- `agents snapshot` — **one-process consumer poll** for install inventory + active sessions
+- `agents snapshot` — **one-process consumer poll** for native harness capabilities,
+  per-device effective config + installed account/quota eligibility, and active sessions
   (optional feed / sync). Replaces the N× `view --json` + `sessions --active --json` fork
   storm. Default sessions scope is this machine; `--all-hosts` matches full active fan-out.
-  JSON contract: `FleetSnapshot` version 1 (`inventory`, `sessions`, `agents`, optional
+  JSON contract: `FleetSnapshot` version 1 (`harnesses`, `devices`, `inventory`, `sessions`, `agents`, optional
   `feed` / `sync`). Does **not** replace `agents status` (UnifiedSyncStatus / drift).
 
   The daemon no longer force-probes every device every 3 minutes (the old N² ssh

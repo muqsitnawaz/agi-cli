@@ -821,7 +821,7 @@ async function runFleetPing(opts: { json?: boolean; local?: boolean; verbose?: b
 // process, then SSH each peer's `devices harnesses --local --json` worker.
 // ---------------------------------------------------------------------------
 
-interface HarnessInventoryOpts {
+export interface HarnessInventoryOpts {
   agents?: AgentId[];
   devices?: string[];
   refresh?: boolean;
@@ -854,7 +854,7 @@ async function probeRemoteHarnesses(
  * the local and remote rows. Bounded by the same per-device + overall deadlines
  * as `fleet ping`, so one unreachable box can never stall the glance.
  */
-async function collectFleetHarnesses(opts: HarnessInventoryOpts): Promise<HostHarnessResult[]> {
+export async function collectFleetHarnesses(opts: HarnessInventoryOpts): Promise<HostHarnessResult[]> {
   const self = machineId();
   const want = opts.devices?.length ? new Set(opts.devices) : null;
   const results: HostHarnessResult[] = [];

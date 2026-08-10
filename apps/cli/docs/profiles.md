@@ -28,7 +28,7 @@ agents harness add corp --host claude --model gpt-x --base-url https://gw.corp/v
 
 The model is written to the host's model env var — `OPENCODE_MODEL` for opencode, `ANTHROPIC_MODEL` for claude, `GROK_MODEL` for grok, `GEMINI_MODEL` for gemini. Native OAuth remains harness-managed; omit `--account` to use that login.
 
-`agents harness list` shows three groups: your custom harnesses, the addable built-in presets, and the native harness registry. `agents harness list --json` is also the canonical client contract for native harness identity: each native row includes its id, display name, launch command, run modes, and capability declaration. UI clients read this output instead of maintaining a second registry. `agents harness view <name>` and `agents harness remove <name>` round it out.
+`agents harness list` shows three groups: your custom harnesses, the addable built-in presets, and the native harness registry. `agents harness view <name>` and `agents harness remove <name>` round it out.
 
 A harness *is* a profile — same `~/.agents/profiles/<name>.yml`, same `agents run` resolution, same device sync via `agents repo push user`. The difference from `agents profiles add`: `harness add` takes the host+model one-shot (no preset needed) and owns its own `--host` flag, whereas `agents profiles --host <device>` is reserved for running the profiles command on a remote device.
 

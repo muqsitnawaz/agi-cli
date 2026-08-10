@@ -75,6 +75,11 @@ describe('assembleSnapshot', () => {
     expect(snap.version).toBe(1);
     expect(snap.host).toBe('zion');
     expect(snap.inventory).toBe(inventory);
+    expect(snap.harnesses.find((h) => h.id === 'claude')).toMatchObject({
+      cliCommand: 'claude',
+      modes: ['plan', 'edit', 'auto', 'skip'],
+    });
+    expect(snap.devices).toEqual([]);
     expect(snap.sessions).toHaveLength(2);
     expect(snap.agents).toEqual({
       running: 1,
@@ -84,6 +89,34 @@ describe('assembleSnapshot', () => {
     });
     expect(snap.feed).toBeUndefined();
     expect(snap.sync).toBeUndefined();
+  });
+
+  it('carries canonical per-device profile, config, eligibility, and freshness', () => {
+    const snap = assembleSnapshot({
+      host: 'zion',
+      capturedAt: '2026-08-10T09:00:00.000Z',
+      inventory: [],
+      sessions: [],
+      remoteDeviceCount: 0,
+      devices: [{
+        name: 'zion',
+        profile: { name: 'zion', platform: 'darwin' },
+        config: { maxAgents: 4 },
+        harnesses: [{
+          agent: 'claude', version: '2.1.186', account: 'acct', signedIn: true,
+          quota: { status: 'out_of_credits', usedPercent: null, stale: false, capturedAt: null, unavailableReason: null },
+          ready: false, reason: 'out of credits', capturedAt: 1_786_355_169_244,
+        }],
+        capturedAt: '2026-08-10T09:46:09.244Z',
+        freshness: { status: 'fresh', ageMs: 100, unavailableReason: null },
+      }],
+    });
+    expect(snap.devices[0]).toMatchObject({
+      name: 'zion',
+      config: { maxAgents: 4 },
+      harnesses: [{ ready: false, reason: 'out of credits', quota: { status: 'out_of_credits' } }],
+      freshness: { status: 'fresh', unavailableReason: null },
+    });
   });
 
   it('includes feed and sync only when provided', () => {

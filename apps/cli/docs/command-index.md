@@ -928,10 +928,10 @@ agents skills remove [name]  Delete a skill from central storage (interactive pi
 agents skills view [name]    Read skill metadata (name, description, rules count)
 ```
 
-## snapshot — One-process poll snapshot: install inventory + active sessions (optional feed/sync). Not the sync-status command — use `agents status` for drift.
+## snapshot — One-process poll snapshot: harness capabilities + per-device account eligibility + active sessions (optional feed/sync). Not the sync-status command — use `agents status` for drift.
 
 ```
-agents snapshot  One-process poll snapshot: install inventory + active sessions (optional feed/sync). Not the sync-status command — use `agents status` for drift.
+agents snapshot  One-process poll snapshot: harness capabilities + per-device account eligibility + active sessions (optional feed/sync). Not the sync-status command — use `agents status` for drift.
 ```
 
 ## ssh — Connect to a registered device. Preflights reachability, picks the right shell, and authenticates (key or password-from-bundle).
