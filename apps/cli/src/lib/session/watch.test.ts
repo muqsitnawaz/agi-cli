@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { ActiveSession } from './active.js';
 import { SessionWatchState, sessionWatchRowKey, watchLocalSessions } from './watch.js';
 
@@ -23,20 +26,30 @@ describe('session watch protocol', () => {
     expect(state.update('box', [row('retained', 'crashed')])).toEqual([]);
   });
 
-  it('uses one live-state loader and never invokes a history listing', async () => {
+  it('reads one reset then consumes multiple writer ticks with zero repeated gathers', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-watch-'));
+    const journalPath = path.join(dir, 'active.jsonl');
     const controller = new AbortController();
-    let calls = 0;
-    const events: unknown[] = [];
-    await watchLocalSessions({
-      scope: 'local', signal: controller.signal, refreshMs: 5, heartbeatMs: 50,
-      load: async () => {
-        calls++;
-        if (calls === 2) controller.abort();
-        return { sessions: [row('a')], servedFromCache: calls === 1, capturedAt: Date.now() };
+    let snapshotReads = 0;
+    const events: Array<{ type: string }> = [];
+    const watching = watchLocalSessions({
+      scope: 'local', signal: controller.signal, journalPath, journalPollMs: 5, heartbeatMs: 1_000,
+      readCache: () => {
+        snapshotReads++;
+        return { version: 1, scope: 'local', capturedAt: 1, sessions: [row('a')] };
       },
-      emit: (event) => events.push(event),
+      emit: (event) => {
+        events.push(event);
+        if (events.filter((candidate) => candidate.type === 'upsert').length === 2) controller.abort();
+      },
     });
-    expect(calls).toBe(2);
-    expect(events).toContainEqual(expect.objectContaining({ type: 'reset' }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    fs.appendFileSync(journalPath, `${JSON.stringify({ version: 1, scope: 'local', capturedAt: 2, upserts: [row('a', 'idle')], removes: [] })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    fs.appendFileSync(journalPath, `${JSON.stringify({ version: 1, scope: 'local', capturedAt: 3, upserts: [row('a', 'running'), row('b')], removes: [] })}\n`);
+    await watching;
+    expect(snapshotReads).toBe(1);
+    expect(events.filter((event) => event.type === 'upsert')).toHaveLength(3);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

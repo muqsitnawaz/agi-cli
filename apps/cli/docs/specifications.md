@@ -547,9 +547,11 @@ SSH access (§7); rendering sessions that no harness produced.
   (`lib/session/watch.ts:40-56,75-102,171-225`; `lib/session/watch.test.ts:20-26`).
 - **SES-43 (MUST).** The default stream MUST hold one long-lived local subscription
   and one long-lived SSH subscription per dialable compute device. `--local` MUST
-  suppress peer subscriptions. Neither path may poll transcript history; the local
-  stream refreshes through the shared live cache/state path
-  (`lib/session/watch.ts:118-155,164-225`; `commands/sessions-watch.ts:27-43`).
+  suppress peer subscriptions. Neither path may poll transcript history or invoke
+  repeated live gathers: startup reads one reset snapshot, then steady state tails
+  row deltas from the canonical snapshot writer's journal
+  (`lib/session/session-cache.ts:190-230`; `lib/session/watch.ts:141-211`;
+  `lib/session/watch.test.ts:30-61`; `commands/sessions-watch.ts:27-43`).
 - **SES-44 (MUST).** A one-shot `agents sessions ... --json` listing is distinct
   from the incremental stream, but MUST expose the same picker-facing lifecycle,
   device, viewing, and recovery metadata in each durable row. Consumers MUST NOT

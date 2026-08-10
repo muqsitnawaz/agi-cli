@@ -53,11 +53,11 @@ count — and those facts are lost the moment the process exits unless we persis
 ### Cross-surface active-session cache (RUSH-2062)
 
 `session-cache.ts` is the daemon-warmed shared snapshot menubar / Factory /
-watchdog / CLI read so they do not each re-fan-out a full gather. The daemon
-publishes **this host only** every ~15s (`publishLocalActiveSessions` from
-`daemon.ts`); `gatherActiveSessions` is cache-first for unscoped local/fleet
-loads. Live status fields (`status`, `activity`, `preview`, …) only ride that
-short snapshot — never the immutable memo. Immutable identity fields (topic,
+watchdog / CLI read so they do not each re-fan-out a full gather. Each canonical
+snapshot write also appends only changed rows/removals to the active-session
+journal. `agents sessions watch --json` reads one startup snapshot and then tails
+that journal; watcher heartbeats never invoke another gather. Live status fields
+(`status`, `activity`, `preview`, …) only ride the snapshot/journal — never the immutable memo. Immutable identity fields (topic,
 label, cwd, …) are memoized by `(sessionId, transcriptMtimeMs)` so a transcript
 rewrite invalidates them. `remote.ts` is also cache-first: a reachable host
 skips SSH while its cache is fresh (it used to replay only on unreachable).

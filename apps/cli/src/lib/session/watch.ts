@@ -1,16 +1,22 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { loadDevices, isControlDevice, isDialableDevice } from '../devices/registry.js';
 import { deviceIdentityArgs, sshTargetFor } from '../devices/connect.js';
 import { machineId, normalizeHost } from '../machine-id.js';
 import { SSH_OPTS, controlOpts, shellQuote } from '../ssh-exec.js';
 import { buildWindowsAgentsCommand, remoteShellFor } from '../hosts/remote-cmd.js';
 import type { ActiveSession } from './active.js';
-import { loadLocalActiveSessions } from './session-cache.js';
+import {
+  activeSessionsJournalPath,
+  activeSessionJournalIdentity,
+  readActiveSessionsCache,
+  type ActiveSessionsJournalRecord,
+} from './session-cache.js';
 
 export const SESSION_WATCH_VERSION = 1 as const;
-export const SESSION_WATCH_REFRESH_MS = 10_000;
 export const SESSION_WATCH_HEARTBEAT_MS = 15_000;
 
 export type SessionWatchScopeStatus = 'available' | 'unavailable';
@@ -33,7 +39,7 @@ export interface SessionWatchRow extends Omit<ActiveSession, 'viewingIn'> {
 
 /** Stable, opaque identity for one row within one device scope. */
 export function sessionWatchRowKey(scope: string, row: ActiveSession): string {
-  const identity = row.sessionId ?? `${row.context}:${row.kind}:${row.pid ?? ''}:${row.startedAtMs ?? ''}`;
+  const identity = activeSessionJournalIdentity(row);
   return createHash('sha256').update(`${scope}\0${identity}`).digest('base64url').slice(0, 22);
 }
 
@@ -95,6 +101,24 @@ export class SessionWatchState {
     return events;
   }
 
+  patch(scope: string, upserts: ActiveSession[], removes: string[]): SessionWatchEnvelope[] {
+    const current = new Map(this.rows.get(scope) ?? []);
+    const events: SessionWatchEnvelope[] = [];
+    for (const source of upserts) {
+      const row = toSessionWatchRow(scope, source);
+      if (!current.has(row.rowKey) || !sameRow(current.get(row.rowKey)!, row)) {
+        current.set(row.rowKey, row);
+        events.push({ ...this.base('upsert'), scope, rowKey: row.rowKey, row });
+      }
+    }
+    for (const identity of removes) {
+      const rowKey = createHash('sha256').update(`${scope}\0${identity}`).digest('base64url').slice(0, 22);
+      if (current.delete(rowKey)) events.push({ ...this.base('remove'), scope, rowKey });
+    }
+    this.rows.set(scope, current);
+    return events;
+  }
+
   scope(scope: string, status: SessionWatchScopeStatus, reason?: string): SessionWatchEnvelope {
     // Deliberately retain rows while unavailable. A reconnecting scope replaces
     // them with a reset; transient fleet loss must not look like session death.
@@ -112,45 +136,61 @@ export interface WatchLocalOptions {
   emit: (event: SessionWatchEnvelope) => void;
   refreshMs?: number;
   heartbeatMs?: number;
-  load?: typeof loadLocalActiveSessions;
+  readCache?: typeof readActiveSessionsCache;
+  journalPath?: string;
+  journalPollMs?: number;
 }
 
 /**
- * Keep one local subscription alive. This reads only the live cache/state path,
- * never transcript history. The 10-second refresh also closes the old gap where
- * the 15-second cache could outlive the daemon's three-minute warm routine.
+ * Keep one local subscription alive. Startup reads one canonical reset snapshot;
+ * steady state tails the canonical writer journal and never invokes a gather.
  */
 export async function watchLocalSessions(options: WatchLocalOptions): Promise<void> {
   const state = new SessionWatchState();
-  const load = options.load ?? loadLocalActiveSessions;
-  const refreshMs = options.refreshMs ?? SESSION_WATCH_REFRESH_MS;
+  const readCache = options.readCache ?? readActiveSessionsCache;
+  const journal = options.journalPath ?? activeSessionsJournalPath();
   const heartbeatMs = options.heartbeatMs ?? SESSION_WATCH_HEARTBEAT_MS;
-  let first = true;
-  let refreshing = false;
-  const refresh = async () => {
-    if (refreshing || options.signal.aborted) return;
-    refreshing = true;
-    try {
-      const result = await load();
-      if (first) {
-        options.emit(state.reset(options.scope, result.sessions));
-        options.emit(state.scope(options.scope, 'available'));
-        first = false;
-      } else {
-        for (const event of state.update(options.scope, result.sessions)) options.emit(event);
-      }
-    } catch (error) {
-      options.emit(state.scope(options.scope, 'unavailable', error instanceof Error ? error.message : String(error)));
-    } finally {
-      refreshing = false;
-    }
-  };
-  await refresh();
+  let offset = 0;
+  try { offset = fs.statSync(journal).size; } catch { /* first publication */ }
+  const initial = readCache('local');
+  options.emit(state.reset(options.scope, initial?.sessions ?? []));
+  options.emit(state.scope(options.scope, initial ? 'available' : 'unavailable', initial ? undefined : 'awaiting publisher'));
   if (options.signal.aborted) return;
   await new Promise<void>((resolve) => {
-    const refreshTimer = setInterval(() => void refresh(), refreshMs);
+    let partial = '';
+    let reading = false;
+    const readAppended = () => {
+      if (reading || options.signal.aborted) return;
+      reading = true;
+      try {
+        const size = fs.statSync(journal).size;
+        if (size < offset) { offset = 0; partial = ''; }
+        if (size === offset) return;
+        const fd = fs.openSync(journal, 'r');
+        try {
+          const buffer = Buffer.alloc(size - offset);
+          fs.readSync(fd, buffer, 0, buffer.length, offset);
+          offset = size;
+          const lines = (partial + buffer.toString('utf8')).split('\n');
+          partial = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line) continue;
+            try {
+              const record = JSON.parse(line) as ActiveSessionsJournalRecord;
+              if (record.version !== 1 || record.scope !== 'local' || !Array.isArray(record.upserts) || !Array.isArray(record.removes)) continue;
+              for (const event of state.patch(options.scope, record.upserts, record.removes)) options.emit(event);
+              options.emit(state.scope(options.scope, 'available'));
+            } catch { /* partial/corrupt journal lines are not state */ }
+          }
+        } finally { fs.closeSync(fd); }
+      } catch { /* journal may not exist until the first publisher write */ }
+      finally { reading = false; }
+    };
+    fs.mkdirSync(path.dirname(journal), { recursive: true });
+    const journalListener = () => readAppended();
+    fs.watchFile(journal, { interval: options.journalPollMs ?? 250 }, journalListener);
     const heartbeatTimer = setInterval(() => options.emit(state.heartbeat(options.scope)), heartbeatMs);
-    const stop = () => { clearInterval(refreshTimer); clearInterval(heartbeatTimer); resolve(); };
+    const stop = () => { fs.unwatchFile(journal, journalListener); clearInterval(heartbeatTimer); resolve(); };
     options.signal.addEventListener('abort', stop, { once: true });
   });
 }
