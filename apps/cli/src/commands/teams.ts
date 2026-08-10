@@ -2069,14 +2069,16 @@ export function registerTeamsCommands(program: Command): void {
       //
       // Grants are attached even when a worktree or --cwd owns the cwd — the
       // sibling repos are what the project binds, not where the teammate sits.
+      // Only the base cwd is resolved here — a LOCAL teammate needs a concrete
+      // directory to start in. The GRANTS are deliberately not resolved now:
+      // an unpinned teammate on a --devices pool is placed at launch, so its
+      // shape (absolute vs ~/…) is not yet knowable. The project name rides on
+      // the record and resolveTeammateGrants resolves it per launch.
       let projectCwd: string | undefined;
-      let projectGrants: string[] = [];
-      if (teamMeta?.project) {
-        const { resolveProjectDirs } = await import('../lib/project-root.js');
+      if (teamMeta?.project && !hostName) {
+        const { resolveProjectRef } = await import('../lib/project-root.js');
         try {
-          const resolved = await resolveProjectDirs(teamMeta.project, { forRemote: !!hostName });
-          projectCwd = resolved.cwd;
-          projectGrants = resolved.extraDirs;
+          projectCwd = await resolveProjectRef(teamMeta.project, { forRemote: false });
         } catch (err) {
           dieFriction('teams', 'project-unresolved', (err as Error).message);
         }
@@ -2173,7 +2175,7 @@ export function registerTeamsCommands(program: Command): void {
           hostName,
           hostTarget,
           hostRepoPath,
-          projectGrants,
+          teamMeta?.project ?? null,
         );
 
         emit('teams.add', { module: 'teams', team, agent, name: result.name, agent_id: result.agent_id, status: result.status });
