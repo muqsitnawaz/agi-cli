@@ -56,11 +56,19 @@ export const KEYCHAIN_BOUND_ON_MAC: ReadonlySet<string> = new Set(['claude', 'an
  */
 export const SINGLE_USE_ROTATING_REFRESH_AGENTS: ReadonlySet<string> = new Set(['droid']);
 
-/** True when `agent`'s portable credential file(s) are safe to copy between
- *  machines. Single-use rotating refresh tokens are never safe; keychain-bound
- *  tokens are handled separately by the caller via {@link KEYCHAIN_BOUND_ON_MAC}. */
-export function isCredentialSafeToPropagate(agent: string): boolean {
-  return !SINGLE_USE_ROTATING_REFRESH_AGENTS.has(agent);
+/**
+ * Whether `agent`'s login may be copied between machines by `apply`. Always
+ * **false** now (RUSH-2527): every `FLEET_AUTH_FILES` entry is a native,
+ * rotating OAuth / session login, and the fleet-auth contract forbids copying any
+ * of them between devices (`docs/specifications.md` SING-1b) — not just the
+ * single-use-rotating subset (`SINGLE_USE_ROTATING_REFRESH_AGENTS`) that first
+ * motivated this gate. `apply` therefore never propagates a login; it surfaces
+ * per-box login / portable-account guidance instead. `snapshotAuth` reads no
+ * credential file as a result, so a native login never leaves its origin box.
+ * The `agent` parameter is retained for the stable call signature.
+ */
+export function isCredentialSafeToPropagate(_agent: string): boolean {
+  return false;
 }
 
 /** True when the agent stores credentials in portable files we can read. This

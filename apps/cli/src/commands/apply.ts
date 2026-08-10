@@ -19,7 +19,7 @@ import { loadDevices, isControlDevice, type DeviceProfile } from '../lib/devices
 import { isHostPinned, managedKnownHostsPath } from '../lib/devices/known-hosts.js';
 import { ensureDevicesRegistered } from '../lib/devices/sync.js';
 import { readFleetFile, resolveDesired } from '../lib/fleet/manifest.js';
-import { snapshotAuth, materializeAuth, parseAuthBundle, KEYCHAIN_BOUND_ON_MAC, isCredentialSafeToPropagate } from '../lib/fleet/auth-sync.js';
+import { snapshotAuth, materializeAuth, parseAuthBundle } from '../lib/fleet/auth-sync.js';
 import {
   agentIdOf,
   diffFleet,
@@ -160,28 +160,18 @@ function renderPlan(plan: FleetPlan): void {
     console.log(chalk.gray('  secrets: not pushed. `--provision-secrets` pushes declared bundles to devices whose host key is pinned.'));
   }
 
-  // Distinguish *why* a login can't be propagated: macOS keychain-bound,
-  // single-use rotating refresh token (never copied), or the source simply not
-  // being signed in to that agent (no portable file).
-  const bound: string[] = [];
-  const rotating: string[] = [];
-  const noToken: string[] = [];
-  for (const r of rows) {
-    for (const a of r.loginBlocked) {
-      const tag = `${a}@${r.device}`;
-      if (!isCredentialSafeToPropagate(a)) rotating.push(tag);
-      else if (r.probe.platform === 'macos' && KEYCHAIN_BOUND_ON_MAC.has(a)) bound.push(tag);
-      else noToken.push(tag);
-    }
-  }
-  if (rotating.length > 0) {
-    console.log(chalk.yellow(`  manual login needed (single-use rotating refresh token): ${rotating.join(', ')}`));
-  }
-  if (bound.length > 0) {
-    console.log(chalk.yellow(`  manual login needed (macOS keychain-bound): ${bound.join(', ')}`));
-  }
-  if (noToken.length > 0) {
-    console.log(chalk.yellow(`  manual login needed (no portable token on source): ${noToken.join(', ')}`));
+  // `apply` no longer propagates ANY login (SING-1b: a native OAuth / session
+  // login is never copied between devices). Every login:sync agent that has a
+  // login to establish is surfaced here with the one honest reason + the portable
+  // alternative — never a silent skip.
+  const needsLogin = [...new Set(rows.flatMap((r) => r.loginBlocked.map((a) => `${a}@${r.device}`)))];
+  if (needsLogin.length > 0) {
+    console.log(
+      chalk.yellow(
+        `  manual login needed — a native OAuth login is never copied between devices (SING-1b); ` +
+        `log in on the box itself, or sync a portable provider account (\`agents accounts sync\`): ${needsLogin.join(', ')}`,
+      ),
+    );
   }
   // Secrets bundles are declared once for the fleet; surface the distinct set the
   // gate did NOT push, so a refusal is never silent. "never pushed" used to be
