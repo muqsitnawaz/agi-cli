@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { parseElapsedSeconds, recordPredatesProcess, recordPredatesTerminal, type SessionStateRecord } from './liveSession';
 
-// The real defect this guards: a AGI EXT tab opened on 2026-08-02 displayed the
+// The real defect this guards: an AGI EXT tab opened on 2026-08-02 displayed the
 // session id and version of a synthetic watchdog run from 20 days earlier,
 // because the hook's `<pid>.json` outlived its agent and the OS handed that pid
 // to the local process backing the new tab. Dating the record against the tab is

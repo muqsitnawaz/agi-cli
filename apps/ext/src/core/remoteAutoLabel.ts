@@ -20,7 +20,7 @@
  * the real stamp / arm / label hooks.
  */
 
-/** Minimal view of a AGI EXT tab needed to resolve + label it. */
+/** Minimal view of an AGI EXT tab needed to resolve + label it. */
 export interface RemoteAutoLabelTab {
   /** AGENT_TERMINAL_ID — the join key against the active map. */
   id: string;

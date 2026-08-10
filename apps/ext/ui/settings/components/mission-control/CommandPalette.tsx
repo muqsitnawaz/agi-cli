@@ -82,7 +82,7 @@ export function CommandPalette({
     }
 
     const tabActions: Array<{ key: 'floor' | 'bench' | 'panel'; label: string }> = [
-      { key: 'floor', label: 'Go to Floor' },
+      { key: 'floor', label: 'Go to Fleet' },
       { key: 'bench', label: 'Go to Bench' },
       { key: 'panel', label: 'Go to Panel' },
     ]

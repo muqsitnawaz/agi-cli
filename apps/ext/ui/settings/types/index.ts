@@ -314,7 +314,7 @@ export interface AgentDetail {
   branch?: string | null
   linear_issue?: string | null
   attachments?: SessionAttachment[]
-  // AGI EXT metadata (Step 2: teams add --task-type flag).
+  // Fleet label metadata (Step 2: teams add --task-type flag).
   // When set, the UI shows a task-type badge and can group DAG waves.
   task_type?: 'plan' | 'implement' | 'test' | 'review' | 'bugfix' | 'docs' | null
   name?: string | null

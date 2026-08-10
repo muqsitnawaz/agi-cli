@@ -1,5 +1,5 @@
 /**
- * Join a AGI EXT tab to a CLI-authoritative session id via AGENT_TERMINAL_ID.
+ * Join an AGI EXT tab to a CLI-authoritative session id via AGENT_TERMINAL_ID.
  *
  * The CLI surfaces `terminalId` on `agents sessions --active --json` when the
  * launch inherited AGENT_TERMINAL_ID (AGI EXT stamps it on every agent tab and

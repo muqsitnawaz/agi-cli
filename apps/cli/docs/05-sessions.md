@@ -1237,7 +1237,7 @@ The two signals behind them:
   provably cannot occur in the one free-text field that is not last;
   `pane_current_path` (which may contain `:`) is queried last and its tail rejoined.
 - **The IDE window heartbeat** — the `at` stamp on each window's slice of
-  `live-terminals.json`. The AGI EXT force-republishes every 4 minutes, so a
+  `live-terminals.json`. AGI EXT force-republishes every 4 minutes, so a
   slice older than `HOST_HEARTBEAT_STALE_MS` (10 minutes, the same window the extension
   uses to GC a dead peer) means that window is gone.
 

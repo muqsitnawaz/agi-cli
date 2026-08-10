@@ -1,10 +1,21 @@
 # Changelog
 
-All notable changes to the Factory extension are documented here. Format follows
+All notable changes to AGI EXT (the VS Code extension) are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); `scripts/release.sh` requires a
 `## [<version>]` section for the version being published.
 
 ## [Unreleased]
+
+- **Renamed to AGI EXT; the dashboard is now Fleet.** The editor tab and the navbar
+  wordmark read **AGI EXT**, and the agent-status view formerly called "Factory Floor"
+  is **Fleet** (the tab label, the command-palette entry "Go to Fleet", and the page
+  title). A dashboard tab restored from a pre-rename build is reclaimed rather than left
+  open beside the new one. Marketplace identity is unchanged (publisher `swarmify`, name
+  `swarm-ext`), so existing installs and the `swarm-ext://` URI keep working. The
+  extension's source also moved from `apps/factory` to `apps/ext` in the monorepo.
+  Unrelated surfaces that share the word keep their names: the Factory.ai/`droid`
+  integration, the `factory` cloud provider, and the beta-gated `agents factory`
+  Software Factory command.
 
 - **New Sessions tab — see and recover every session you own.** A dense, virtualized
   Sessions surface is now the first subtab on the Floor (before Agents). It lists every

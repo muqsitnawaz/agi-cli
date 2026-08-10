@@ -17,7 +17,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { withFileLock, atomicWriteFileSync, ensureLockTarget } from '../fs-atomic.js';
 
-/** Same path the Factory reader pulls (apps/ext/src/core/watchdogLog.ts). */
+/** Same path the Fleet reader pulls (apps/ext/src/core/watchdogLog.ts). */
 export const WATCHDOG_LOG_PATH = path.join(os.homedir(), '.agents', '.cache', 'logs', 'watchdog.log');
 
 /** Kinds the Factory reader accepts. Keep in lockstep with watchdogLog.ts. */

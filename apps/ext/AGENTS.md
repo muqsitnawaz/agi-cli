@@ -92,7 +92,7 @@ Rules for this package:
   spawns, injects, kills, or fires is a double-fire bug in waiting and does not
   merge. The deleted watchdog rotate loop (2026-08-03 incident, PR #1914) is the
   canonical violation.
-- **Controls call the CLI.** A AGI EXT control that changes a fleet-affecting
+- **Controls call the CLI.** An AGI EXT control that changes a fleet-affecting
   capability flips CLI state (`agents watchdog enable|disable|rotate`,
   `agents routines …`) via execFile argv — never a UI-local setting that gates only
   the UI's view of the action.
@@ -106,7 +106,7 @@ The Fleet feed + Dispatch panel are a React webview (`ui/settings`, top componen
 
 ```
 cd apps/ext/ui && bun run dev
-# open http://localhost:5173/settings/preview/?view=feed   (or ?view=dispatch)
+# open http://localhost:5173/settings/preview/?view=feed   (or ?view=dispatch, ?view=topbar)
 #   add &theme=dark  or  &theme=light
 ```
 

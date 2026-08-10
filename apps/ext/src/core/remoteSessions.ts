@@ -151,7 +151,7 @@ export interface RemoteSession {
   host: string;
   sessionId: string;
   /**
-   * `AGENT_TERMINAL_ID` from the CLI active payload when present — how a AGI EXT
+   * `AGENT_TERMINAL_ID` from the CLI active payload when present — how an AGI EXT
    * tab re-identifies its own session on a remote device without inventing ids.
    * '' when the launch did not inherit a terminal id.
    */

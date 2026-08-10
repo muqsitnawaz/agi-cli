@@ -1478,7 +1478,7 @@ Agents are defined in [src/lib/agents.ts](apps/cli/src/lib/agents.ts) -- each is
 | [`apps/cli`](apps/cli) | **The CLI** (this README) — version management, config sync, sessions, teams, cloud, browser, computer, secrets. |
 | [`apps/ext`](apps/ext) | **AGI EXT** — a VS Code extension that spawns agent terminals as tabs and adds the Fleet dashboard. A separate product with its own publish identity. |
 | [`native/computer-mac`](native/computer-mac) · [`native/computer-win`](native/computer-win) | Native backends behind `agents computer` — Swift (macOS Accessibility + screen capture) and C#/.NET (Windows UI Automation). |
-| [`packages/session-tracker`](packages/session-tracker) | The `SessionStart` hook that writes live-session state the **AGI EXT** reads back (`apps/ext/src/core/liveSession.ts`) — not the CLI, which reads transcripts. |
+| [`packages/session-tracker`](packages/session-tracker) | The `SessionStart` hook that writes live-session state **AGI EXT** reads back (`apps/ext/src/core/liveSession.ts`) — not the CLI, which reads transcripts. |
 
 ## Contributing
 

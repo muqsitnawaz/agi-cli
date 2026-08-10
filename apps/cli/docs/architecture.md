@@ -40,7 +40,7 @@ The important consequence: **the CLI is where the mechanisms live**, so a change
 how live state is computed (or cached) benefits every consumer — a terminal, the
 extension, another machine — at once. The extension is a thin reshaping layer.
 
-> The AGI EXT is a **separate product** with its own publish identity
+> AGI EXT is a **separate product** with its own publish identity
 > (publisher `swarmify`, name `swarm-ext`). See [`apps/ext/AGENTS.md`](../../ext/AGENTS.md).
 
 ---
