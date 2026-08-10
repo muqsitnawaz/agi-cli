@@ -40,6 +40,7 @@ import {
   projectDefPath,
   isSafeProjectName,
   validateProjectDef,
+  projectNameForCwd,
   type ProjectDef,
   type ProjectContext,
   type ProjectGoal,
@@ -76,6 +77,18 @@ export const PROJECTS_NO_FANOUT_ENV = 'AGENTS_PROJECTS_LOCAL';
 
 /** Max peers named in the skipped note before the rest collapse to `+N`. */
 const SKIPPED_NAME_LIMIT = 4;
+
+/**
+ * Render `agents projects for-cwd`'s output for a resolved (or absent)
+ * project name — `--json` always prints `{"name": ...}` even on no match, so
+ * a scripted caller can distinguish "ran and found nothing" from a crash;
+ * the plain-text form prints nothing on no match. Returns '' when nothing
+ * should be printed.
+ */
+export function formatForCwdOutput(name: string | undefined, json: boolean): string {
+  if (json) return JSON.stringify({ name: name ?? null });
+  return name ?? '';
+}
 
 /**
  * One compact trailing note for peers that didn't answer the `--fleet`
@@ -521,7 +534,7 @@ export function registerProjectsCommands(program: Command): void {
       agents projects set rush --rm-dir ~/src/rush-infra    # unbind it again
       agents projects list                 # definitions only (no session scan)
       agents projects list --with-agents   # opt-in local active counts
-      agents projects list --json          # machine-readable defs (Factory uses this)
+      agents projects list --json          # machine-readable defs (AGI EXT uses this)
       echo '{...}' | agents projects save --json  # create/update one def from stdin
       agents projects rm rush --json       # machine-readable delete
       agents projects status              # every project, across the whole fleet
@@ -533,7 +546,7 @@ export function registerProjectsCommands(program: Command): void {
     `,
     notes: `
       Definitions are hand-editable YAML in ~/.agents/projects/ and sync across
-      machines with 'agents repo push user' / 'agents repo pull user'. Factory
+      machines with 'agents repo push user' / 'agents repo pull user'. AGI EXT
       reads and writes only through these commands — never
       ~/.agents/factory/projects.json.
 
@@ -588,6 +601,17 @@ export function registerProjectsCommands(program: Command): void {
           `  ${chalk.bold(row.name.padEnd(w.name))} ${chalk.dim(row.path.padEnd(w.path))} ${chalk.cyan(row.repo.padEnd(w.repo))}${agentsSuffix}`,
         );
       }
+    });
+
+  // ---- for-cwd ----
+  projects
+    .command('for-cwd [cwd]')
+    .description('Resolve a directory to its defined project name (root or a repos[].path/subpath match). Defaults to the current directory.')
+    .option('--json', 'Machine-readable output: {"name": string | null}')
+    .action((cwdArg: string | undefined, opts: { json?: boolean }) => {
+      const name = projectNameForCwd(cwdArg ?? process.cwd(), listProjectDefs());
+      const out = formatForCwdOutput(name, !!opts.json);
+      if (out) console.log(out);
     });
 
   // ---- add ----

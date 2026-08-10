@@ -136,7 +136,10 @@ agents sessions preview <uuid-or-8-char-id> [--json] [--local|--device <name>]
 
 `sessions preview` performs an indexed ID lookup instead of scanning recent
 history. Full UUIDs may stop on an exact local/remote hit; short prefixes wait
-for every selected peer so collisions are reported. The owning peer renders a
+for every selected peer, so a collision between peers that answered is reported
+as an ambiguity. Once the sweep is over, a selector that is a complete id or at
+least 8 hex characters wide still resolves from a single reachable match even if
+a peer never answered (SES-9a); a keyword or label does not. The owning peer renders a
 remote card. Transcript-derived details are stored as normalized JSON in
 `session_preview_cache`, keyed by the source file's mtime and size; live status
 is fetched separately with a 15-second maximum age, so the durable cache cannot
@@ -898,6 +901,16 @@ host recorded at dispatch (`lib/hosts/session-index.ts`) and marks it
 `--device <peer>`, **not** under `--device <dispatcher>` (RUSH-2479, contract
 SES-23a).
 
+A **remote teams teammate** (`agents teams add … --device <peer>`) is attributed
+the same way, even though it has no host-dispatch index row: `listTeamsActive`
+folds the teammate record's own `hostName` into `machine` + `offloadedFrom`
+directly, so a `--device`-pinned teammate lists under the box it runs on, not the
+orchestrator that spawned it (RUSH-2486, closing SES-GAP-10). The pool listing
+agrees: `queryIndexedSessions` keeps the execution host an offloaded run recorded
+on its empty-file row instead of re-deriving this box from the (empty) path, so
+`agents sessions <id>` on a live offloaded run resolves to one row rather than
+reading as "ambiguous (2 sessions)" (RUSH-2486, RUSH-2479 criterion 2).
+
 `machine` answers "where does the agent execute" — which is what the scope,
 preview routing, and resume ownership need. It is not "where is the process I
 would attach to": for an offloaded run the shim's pid, tmux pane, and terminal
@@ -906,7 +919,7 @@ window asks `sessionProcessIsLocal(s, self)` instead of comparing `machine`.
 
 **Cross-surface cache (RUSH-2062).** The default path is cache-first against a
 daemon-warmed snapshot (`src/lib/session/session-cache.ts`, ~15s freshness). The
-daemon publishes this host's local active set on a short tick; menubar, Factory,
+daemon publishes this host's local active set on a short tick; menubar, the ext,
 watchdog, and CLI share it instead of each re-running the full gather. Live status
 stays inside that short window (`forceRefresh` / `AGENTS_SESSIONS_FORCE_REFRESH=1`
 re-gathers). Immutable identity fields are memoized by transcript mtime and never
@@ -1075,8 +1088,10 @@ owning machine. A missing/empty selector or ambiguous ID prefix/keyword query ex
 Fleet peers receive a versioned, metadata-only `--resolve-safe-v1` request, so a peer
 carrying an older unsafe resolver rejects the request before serializing a row. If any
 selected peer is unreachable, returns malformed JSON, cannot list devices, times out, or rejects the protocol because it runs
-an older CLI, the command emits no JSON, names the peer(s), and exits 2; it never makes
-a unique/no-match decision from partial fleet state.
+an older CLI, the command emits no JSON, names the peer(s), and exits 2 — unless the
+selector is a complete id or at least 8 hex characters wide and exactly one session on
+the reachable fleet matches it, which resolves (SES-9a). A keyword or label is still
+never decided from partial fleet state.
 `--local` keeps the metadata lookup on this machine.
 `--agent <agent[@version]>` and `--project <name>` narrow the lookup on every peer;
 `--all` is implicit because historical resolution must not inherit the SSH login
@@ -1122,7 +1137,7 @@ agents sessions d3470b57-2af6-4c11-b1de-3fab94f43603
     device registered with `address.via: "manual"` never gets a Tailscale peer entry, so
     its `online` is permanently `undefined`; the old strict `online === true` test
     skipped it forever and made every session on that box unresolvable from elsewhere.
-    This matches `ssh.ts` `renderDeviceTable` and Factory's `isDeviceOnline`, so the
+    This matches `ssh.ts` `renderDeviceTable` and the ext's `isDeviceOnline`, so the
     picker and the sweep agree on who exists.
   - A **positive** live SSH probe (`DeviceProfile.reachability`, RUSH-1965) additionally
     rescues a device whose snapshot says offline.
@@ -1176,7 +1191,7 @@ fails loud and names the manual branch — start a fresh agent and seed it with
 `focus`/`resume` — the session-lifecycle axis — and route through the same
 version-pinned `agents run --resume` path everything else uses, so they are
 agent-agnostic (native resume for Claude/Codex, `/continue` replay for the rest),
-not a per-agent special case. (In the Factory extension: **Agents: Detach**
+not a per-agent special case. (In AGI EXT: **Agents: Detach**
 `Cmd/Ctrl+K B`, **Agents: Attach** `Cmd/Ctrl+K A`.)
 
 - **detach**: stop the interactive process (kill the tmux session when tmux-hosted,
@@ -1252,7 +1267,7 @@ The two signals behind them:
   provably cannot occur in the one free-text field that is not last;
   `pane_current_path` (which may contain `:`) is queried last and its tail rejoined.
 - **The IDE window heartbeat** — the `at` stamp on each window's slice of
-  `live-terminals.json`. The Factory extension force-republishes every 4 minutes, so a
+  `live-terminals.json`. AGI EXT force-republishes every 4 minutes, so a
   slice older than `HOST_HEARTBEAT_STALE_MS` (10 minutes, the same window the extension
   uses to GC a dead peer) means that window is gone.
 

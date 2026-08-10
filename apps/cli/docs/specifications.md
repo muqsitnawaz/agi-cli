@@ -218,10 +218,31 @@ SSH access (§7); rendering sessions that no harness produced.
 
 - **SES-9a (MUST).** `sessions preview <id-or-prefix>` MUST resolve ID-shaped
   selectors through the SQLite ID index across the selected fleet. A full UUID
-  MAY return on its first exact hit; a short prefix MUST wait for all selected
-  peers and fail closed when any peer is unavailable. Durable preview data MUST
-  be invalidated by the transcript's actual mtime + size. Live status MUST NOT
-  be stored in that durable digest and MUST expire within 15 seconds.
+  MAY return on its first exact hit. When the sweep has completed and some peer
+  did not answer, a selector that is a complete id, or at least 8 hex characters
+  wide (`SHORT_SESSION_ID_WIDTH`, the printed `shortId` width), MUST resolve if
+  exactly one session on the reachable fleet matches it; a shorter or
+  non-ID-shaped selector, and any label, MUST fail closed. Durable preview data
+  MUST be invalidated by the transcript's actual mtime + size. Live status MUST
+  NOT be stored in that durable digest and MUST expire within 15 seconds.
+
+  *Accepted risk, amended 2026-08-10.* This requirement previously made every
+  short prefix fail closed whenever any peer was unavailable. On a fleet with a
+  permanently offline registered device that voids 100% of short-id lookups —
+  measured at 9 offline devices — to guard a collision that must ALSO land
+  specifically on a peer that did not answer. The collision rate is **not**
+  uniform across id types, and the difference matters: a random UUIDv4 short id
+  is unique in practice, but the first 48 bits of a **time-ordered** id
+  (UUIDv7/ULID) are a millisecond timestamp, so sessions minted in one tight
+  window — a `teams` fan-out, a swarm — share an 8-hex prefix far more readily.
+  `session/db.ts` (`deriveShortId`, "only time-ordered ids ever collide") already
+  treats that as expected and resolves it by most-recently-active. Collisions
+  among peers that DID answer are still reported: they produce two candidates and
+  surface through the `ambiguous` outcome, which is unchanged, so the residual
+  risk is confined to a time-ordered collision hiding on the unanswered peer.
+  RUSH-2203's early-exit rule is also unchanged and stays full-UUID-only
+  (`isDefinitiveMatch`), because that cancels a sweep still in flight, where a
+  silent peer is still expected to answer.
 - **SES-10 (MUST).** A preview string MUST be cleaned of terminal/harness noise
   (OSC titles, CSI/SGR, harness tags, collapsed whitespace) before display
   (`cleanPreview`, `commands/sessions.ts:329-337`), and truncated width-aware
@@ -458,12 +479,25 @@ SSH access (§7); rendering sessions that no harness produced.
     fan-out preserves their foreign `machine`), so a THIRD box sees a shim that
     is not its own. The box to reach for the process is `sessionProcessHost`
     (`offloadedFrom ?? machine`), never `machine` alone.
-  - **Scope: host-dispatched runs only.** The correction is driven by the index
-    row `agents run --host/--device` writes (`lib/hosts/session-index.ts`).
-    Remote **teams teammates** are not covered — `listTeamsActive` sets no
-    `machine` and nothing registers an index row for them — so a
-    `--device`-pinned teammate is still attributed to the orchestrator. Named as
-    SES-GAP-10 rather than silently claimed.
+  - **Remote teams teammates are covered too.** A `teams add --device <peer>`
+    teammate executes on `<peer>` but gets no host-dispatch index row, so the
+    fold above cannot reach it. `listTeamsActive` (`lib/session/active.ts`)
+    instead folds the teammate record's own `AgentProcess.hostName` into
+    `machine = normalizeHost(hostName)` and `offloadedFrom = <orchestrator>`
+    whenever the teammate runs on a box other than this one — the same shape a
+    `run --device` row gets, so `--device <orchestrator>` no longer lists a
+    teammate executing on a peer (was SES-GAP-10, RUSH-2486). A teammate pinned
+    to this box (or an unpinned local one) is left unattributed for the
+    self-stamp.
+  - **The pool listing agrees with the live view.** `queryIndexedSessions`
+    (`lib/session/discover.ts`) MUST keep the machine an offloaded run recorded
+    on its empty-file index row (`registerHostSession`) rather than re-deriving
+    it from the transcript path — `machineForSessionFile('')` falls back to THIS
+    box, which re-attributed the dispatcher's own pool row to itself and split it
+    from the executing peer's fan-out row, so `agents sessions <id>` read as
+    "ambiguous (2 sessions)" for a live offloaded run (RUSH-2486 / criterion 2 of
+    RUSH-2479). The path derivation still owns live-home files and synced
+    mirrors, whose recorded machine already equals it.
 - **SES-24 (MUST).** `agents sessions export --encrypt` MUST seal each
   transcript body client-side with AES-256-GCM (fresh IV) before it leaves the
   machine, and `agents sessions import` MUST decrypt before writing it to the
@@ -781,7 +815,10 @@ The command surface (bare `sessions [query]`, `preview`, `tail`, `sync`, `resume
   peer sweep (including malformed successful output, device-registry failure, or an
   older peer rejecting that protocol) MUST emit no JSON, MUST NOT decide
   unique/no-match from partial rows, and MUST exit 2 with the failed source(s) on
-  stderr
+  stderr — **except** for the SES-9a case, where a selector that is a complete id
+  or at least 8 hex characters wide and matches exactly one session on the
+  reachable fleet MUST resolve and emit its row; a keyword, a shorter selector, or
+  a label still MUST NOT be decided from partial rows
   (`commands/sessions.ts` `serializeResolvedSessionsJson`, `resolveSessionMetadata`,
   `metadataResolveOutcome`, `fleetCandidatesByQuery`,
   `metadataResolveForwardedArgs`; tests
@@ -960,15 +997,16 @@ normative — a change that widens/narrows a cell is a spec change.
   evidence when its source file is gone mid-backfill (`tool-index.ts`
   `ensureToolIndex` on a `statSync` throw, reached via `agents sessions backfill`);
   SES-40 removed the purge only from the `querySessions` read path.
-- **SES-GAP-10.** SES-23a's execution-host attribution covers only
-  **host-dispatched runs** (`agents run --host/--device`), because it is driven by
-  the index row `registerHostSession` / `registerInteractiveHostSession` write
-  (`lib/hosts/session-index.ts:55,134`). A **remote teams teammate**
-  (`agents teams add … --device <peer>`) gets no such row and `listTeamsActive`
-  (`lib/session/active.ts`) never sets `machine`, so the orchestrator's
-  self-stamp claims it: `--device <orchestrator>` still lists a teammate
-  executing on the peer. Closing it means folding `AgentProcess`'s host
-  placement in `listTeamsActive` the same way.
+- **SES-GAP-10 (resolved, RUSH-2486).** SES-23a's execution-host attribution now
+  covers **remote teams teammates** as well as host-dispatched runs. A
+  `agents teams add … --device <peer>` teammate still gets no index row, so
+  `listTeamsActive` (`lib/session/active.ts`) folds the teammate record's own
+  `AgentProcess.hostName` into `machine` + `offloadedFrom` directly — the same
+  shape `foldExecutionMachine` gives a `run --device` row — so the orchestrator's
+  self-stamp no longer claims a teammate executing on a peer. The sibling
+  false-ambiguous resume (the empty-file index row's recorded machine being
+  clobbered by the path derivation in `queryIndexedSessions`) is fixed in the
+  same change; see the SES-23a "pool listing agrees with the live view" bullet.
 ---
 
 ### 8. Given/When/Then scenarios
@@ -1771,13 +1809,18 @@ Credential account selection adds three requirements to that funnel:
   (`lib/account-registry.ts`).
 - **EXEC-ACCOUNT-2 (MUST).** Accounts MUST be created from durable API keys,
   setup tokens, or bearer tokens. A harness version's native OAuth login MUST
-  NOT define account identity (`commands/accounts.ts`).
+  NOT be converted into a provider account or copied between devices; it remains
+  a distinct, device-local native identity (`commands/accounts.ts`).
 - **EXEC-ACCOUNT-3 (MUST).** `agents run --account <name>`, profile `account:`,
-  and routine `account:` MUST use the same provider adapter and fail before spawn
-  when the provider cannot authenticate the host or the credential is absent on
-  the execution device (`lib/account-registry.ts`; `commands/exec.ts`;
-  `lib/profiles.ts`; `lib/runner.ts`). Explicit `--env` remains the final env
-  override. Cloud and lease placement MUST reject device-local accounts.
+  and a routine `account:` that names a provider bundle MUST use the same provider
+  adapter and fail before spawn when the provider cannot authenticate the host or
+  the credential is absent on the execution device. A routine `account:` that
+  names a harness-native identity MUST instead pin the installed version home that
+  owns it and fail before spawn when that identity is unavailable; it MUST NOT
+  rotate or forward the native identity through the provider-account path
+  (`lib/account-registry.ts`; `commands/exec.ts`; `lib/profiles.ts`;
+  `lib/runner.ts`). Explicit `--env` remains the final env override. Cloud and
+  lease placement MUST reject device-local accounts.
 
 Requirement keywords **MUST / MUST NOT / SHOULD / MAY** are used per
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119). Every requirement cites the
@@ -2456,7 +2499,7 @@ nothing but its own view cache.
 - **Executor** — whatever performs the action once decided.
 - **Thin wrapper** — a UI surface whose only relationships to a fleet-affecting
   capability are (a) rendering its state, and (b) invoking the CLI command that
-  controls it (`apps/factory/AGENTS.md`, the root `AGENTS.md` §Core concepts).
+  controls it (`apps/ext/AGENTS.md`, the root `AGENTS.md` §Core concepts).
 
 ### 3. Requirements
 
@@ -2496,11 +2539,11 @@ nothing but its own view cache.
   cross-device state is limited to safe account labels, auth verdicts, and usage
   snapshots. Named API-key/setup-token/bearer accounts retain device-local secret
   material and synchronized metadata.
-- **SING-2 (MUST NOT).** A UI surface (apps/factory, the menubar app, the iOS app)
+- **SING-2 (MUST NOT).** A UI surface (apps/ext, the menubar app, the iOS app)
   MUST NOT own a timer, watcher, or loop that detects a condition and performs a
   fleet-affecting action. Detection and decision MUST live in the CLI, which holds
   the first-party state (sessions.db, usage snapshots, the device registry).
-  Canonical violation: the Factory watchdog rotate loop (2026-08-03) racing the
+  Canonical violation: the ext watchdog rotate loop (2026-08-03) racing the
   daemon's view of account health; canonical fix: PR #1914, which deleted it.
 - **SING-3 (MUST).** Where an action needs a UI-owned surface (typing into an editor
   tab, opening a tab), the UI MUST expose a narrow endpoint the CLI drives — the
@@ -2562,7 +2605,7 @@ nothing but its own view cache.
 - **SING-7 (SHOULD).** Multi-instance safety SHOULD be structural, not by
   convention: pid-claimed singletons for daemon loops (the daemon's claim), leader
   election with lease handoff for any remaining UI-side coordination protocol
-  (apps/factory `src/monitor/leader.ts` — presence fan-out only, not task
+  (apps/ext `src/monitor/leader.ts` — presence fan-out only, not task
   execution), and idempotent effects so a redelivery is a no-op.
 - **SING-11 (MUST).** A single scheduled fire MUST launch a routine at most once,
   even when the same UTC occurrence is evaluated by more than one timer callback,
@@ -2753,10 +2796,10 @@ a machine-wide process sweep.)
   **WHEN** the command completes, **THEN** the CLI's config is the state that
   changed (`agents watchdog rotate off`), and the daemon, the menubar, and every
   other surface observe the same off state.
-- **GIVEN** a limited session lives in a Factory editor tab, **WHEN** the daemon
+- **GIVEN** a limited session lives in an AGI EXT editor tab, **WHEN** the daemon
   rotates it, **THEN** the daemon drives the extension's `/inject` endpoint to act
   in that tab — the extension performs no detection or decision of its own.
-- **GIVEN** a contributor adds a `setInterval` in apps/factory, **WHEN** the
+- **GIVEN** a contributor adds a `setInterval` in apps/ext, **WHEN** the
   callback performs anything beyond read-only rendering, **THEN** code review MUST
   flag it under the root `AGENTS.md` §Code review conventions ("No second
   scheduler") and the action MUST move to the CLI before merge.
@@ -2780,8 +2823,8 @@ a machine-wide process sweep.)
   the same ticket. It is now the shipped `auto-dispatch` system routine, which
   satisfies SING-9(a) via an owner pin: `agents routines devices auto-dispatch --set
   <device>`.
-- **SING-GAP-1.** The Factory monitor leader/follower protocol
-  (apps/factory `src/monitor/`) still coordinates presence fan-out inside the
+- **SING-GAP-1.** The AGI EXT monitor leader/follower protocol
+  (apps/ext `src/monitor/`) still coordinates presence fan-out inside the
   extension with its own election. It performs no fleet-affecting action today
   (post-#1914 it broadcasts read-side snapshots only), so it satisfies SING-2, but
   it is a second coordination fabric where the daemon's presence tracking
