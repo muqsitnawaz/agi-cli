@@ -2770,7 +2770,11 @@ export class AgentManager {
    * (`teams create --project`), this returns `projectDirsAbs` minus the primary
    * (the teammate's cwd), resolved locally (absolute, missing dirs dropped),
    * deduped against the cwd. A distributed teammate (`hostName` set → `cwd` null)
-   * resolves its dirs on the host, so it gets none here. No project → `[]`.
+   * is OUT OF SCOPE: it launches via `launchRemoteProcess`/`buildRunArgv`, not
+   * `buildCommand`, and gets its code from `--repo`/its remote worktree — no
+   * project add-dirs are forwarded to it (a team is single-repo; `create
+   * --project` grants only LOCAL teammates). Returns `[]` when `cwd` is null or
+   * the team has no project.
    */
   private async resolveProjectAddDirs(agent: AgentProcess): Promise<string[]> {
     if (!agent.cwd) return [];
