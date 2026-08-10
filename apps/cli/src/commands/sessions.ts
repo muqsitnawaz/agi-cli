@@ -95,6 +95,7 @@ import { registerSessionsBackfillCommand } from './sessions-backfill.js';
 import { registerSessionsStatsCommand } from './sessions-stats.js';
 import { registerSessionsInsightsCommand } from './insights.js';
 import { registerSessionsOptimizeCommand } from './sessions-optimize.js';
+import { registerSessionsWatchCommand } from './sessions-watch.js';
 import { runBrowserSessionsCommand } from './browser-sessions-picker.js';
 import { runComputerSessionsCommand } from './computer-sessions-picker.js';
 import { buildComputerSessionRows, type ComputerRunRow } from '../lib/computer/sessions-list.js';
@@ -5808,6 +5809,7 @@ export function registerSessionsCommands(program: Command): void {
   registerSessionsStatsCommand(sessionsCmd);
   registerSessionsInsightsCommand(sessionsCmd);
   registerSessionsOptimizeCommand(sessionsCmd);
+  registerSessionsWatchCommand(sessionsCmd);
 
   // Observe-umbrella alias (Phase 3): roster → sessions --active.
   registerSessionsObserveAliases(program);
