@@ -19,6 +19,7 @@ import chalk from 'chalk';
 import { confirm } from '@inquirer/prompts';
 import { gatherLiveTargets, pickLiveTarget, pickLiveTargets, jumpTo, probeAttachRail, refuseFallback, type AttachRailLiveness, type UnreachableFallback } from './go.js';
 import { sessionProcessIsLocal, sessionProcessHost, type ActiveSession } from '../lib/session/active.js';
+import { attachTmux, getDefaultSocketPath, hasSession, runTmux } from '../lib/tmux/index.js';
 import { SESSION_AGENTS, type SessionMeta, type SessionAgentId } from '../lib/session/types.js';
 import {
   buildSessionRecoveryCommand,
@@ -276,6 +277,12 @@ export async function focusAction(id: string | undefined, opts: FocusOptions): P
     let exact = textSelector && looksLikeIdSelector(textSelector)
       ? sessions.filter((session) => session.id.toLowerCase().startsWith(textSelector.toLowerCase()))
       : [];
+    // A tmux alias naming a LIVE local session attaches directly. This must run
+    // before the metadata resolver: that resolver treats an unmatched alias as a
+    // keyword query, so `ag-kimi-632c1fbc` came back as 13 unrelated text hits
+    // while the pane was alive and attachable the whole time.
+    if (exact.length === 0 && textSelector && !hosts.length && await attachLiveTmuxAlias(textSelector)) return;
+
     if (exact.length === 0 && textSelector && looksLikeIdentitySelector(textSelector)) {
       const outcome = await resolveSessionMetadataValue(textSelector, { local, hosts });
       if (outcome.kind === 'partial') {
@@ -397,6 +404,66 @@ function looksLikeIdentitySelector(selector: string | undefined): selector is st
     /^[0-9a-f][0-9a-f-]{5,}$/i.test(selector) ||
     /^ag-[a-z][a-z0-9-]*-[0-9a-f]{8}$/i.test(selector)
   );
+}
+
+/**
+ * Attach a live tmux session named exactly as the selector, without needing the
+ * session index to know anything about it.
+ *
+ * SES-41 requires a `ag-<agent>-<8hex>` tmux alias to resolve, but the alias's
+ * hex is the LAUNCH id, not the harness session id, and for a harness that
+ * writes no `state/sessions/<pid>.json` record there is no mapping back to a
+ * SessionMeta at all. Measured on yosemite-s0: `--resolve ag-kimi-632c1fbc`
+ * fell through to a keyword search and returned 13 unrelated rows, while the
+ * pane itself was alive (`%124`, `kimi-code`). The pane is the thing the user
+ * asked for, and its NAME is sufficient to attach it — so an unattributable
+ * session is still reachable instead of being a dead end that forces raw
+ * `tmux -S … attach`.
+ *
+ * Returns false when this is not an alias, the server/session is absent, or
+ * every pane is dead — the caller then continues to normal id resolution.
+ * SES-39's "re-read `pane_dead` immediately before attach" is honoured here:
+ * liveness is queried at attach time, not read from the roster.
+ */
+export type TmuxAliasState = 'not-an-alias' | 'no-server' | 'absent' | 'dead' | 'live';
+
+/** Shape of the tmux alias the CLI mints for an agent session: `ag-<agent>-<hex>`. */
+export function looksLikeTmuxAlias(selector: string): boolean {
+  return /^ag-[a-z][a-z0-9-]*-[0-9a-f]{6,}$/i.test(selector);
+}
+
+/**
+ * Classify a selector against the live tmux server. Split from the attach so the
+ * decision is testable against a real tmux server without replacing the caller's
+ * shell (attaching is not something a test can undo).
+ */
+export async function resolveTmuxAliasState(selector: string, socket?: string): Promise<TmuxAliasState> {
+  if (!looksLikeTmuxAlias(selector)) return 'not-an-alias';
+  const sock = socket ?? getDefaultSocketPath();
+  if (!fs.existsSync(sock)) return 'no-server';
+  if (!(await hasSession(selector, sock).catch(() => false))) return 'absent';
+
+  const panes = await runTmux({
+    socket: sock,
+    args: ['list-panes', '-t', `=${selector}`, '-F', '#{pane_dead}'],
+  }).catch(() => undefined);
+  const states = (panes?.stdout ?? '').split('\n').map(s => s.trim()).filter(Boolean);
+  return states.some(d => d === '0') ? 'live' : 'dead';
+}
+
+async function attachLiveTmuxAlias(selector: string): Promise<boolean> {
+  const socket = getDefaultSocketPath();
+  if (await resolveTmuxAliasState(selector, socket) !== 'live') return false;
+
+  if (!process.stdout.isTTY) {
+    console.error(chalk.red(`"${selector}" is a live tmux session, but attaching needs a TTY.`));
+    console.error(chalk.gray(`  Run it from a terminal, or: agents tmux attach ${selector}`));
+    process.exitCode = 1;
+    return true;
+  }
+  const code = await attachTmux({ socket, args: ['attach-session', '-t', `=${selector}`] });
+  process.exitCode = code;
+  return true;
 }
 
 function hasFocusFilters(opts: FocusOptions, statuses: LiveStatusFilter[]): boolean {
