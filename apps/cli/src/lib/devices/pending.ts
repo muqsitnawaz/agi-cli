@@ -16,7 +16,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getDevicesPendingDir } from '../state.js';
-import { loadIgnored } from './registry.js';
+import { loadDevices, loadIgnored } from './registry.js';
 
 export interface PendingDevice {
   name: string;
@@ -38,23 +38,37 @@ function isSafeName(name: string): boolean {
  *
  * The sentinel writer is the single authoritative choke point every discovery
  * path flows through (the daemon device-probe timer and `agents sync`), so it
- * re-subtracts the persisted ignore-list here rather than trusting the caller's
- * `pending` set. This closes the probe/ignore race (RUSH-2495): a probe that
- * computed `pending` BEFORE the user pressed "Ignore" (which persists the
- * dismissal via `addIgnored`) would otherwise re-create the just-dismissed
- * device's sentinel and the menu bar would re-surface it. A device on the
- * ignore-list is never written, regardless of what the caller passed.
+ * re-subtracts both the persisted ignore-list AND the device registry here
+ * rather than trusting the caller's `pending` set:
+ *
+ *   - Ignore (RUSH-2495): a probe that computed `pending` BEFORE the user
+ *     pressed "Ignore" would otherwise re-create the just-dismissed device's
+ *     sentinel and the menu bar would re-surface it.
+ *   - Registered: stale or polluted sentinels for already-registered machines
+ *     (test leaks, a soft-failed probe that never cleaned, a registry write
+ *     that raced the probe) would otherwise keep showing as "NEW DEVICES"
+ *     forever. The menu bar's Register/Ignore gate is only for newcomers.
+ *
+ * A device that is ignored or already registered is never written, regardless
+ * of what the caller passed.
  */
 export async function reconcilePendingSentinels(pending: PendingDevice[]): Promise<void> {
   const dir = getDevicesPendingDir();
-  // Best-effort: a corrupted ignore-list (loadIgnored throws by design) must not
-  // crash the daemon loop — treat it as "nothing ignored" and let the next probe
-  // recover once the file is fixed, rather than failing the whole reconcile.
+  // Best-effort: a corrupted ignore-list / registry (both throw by design) must
+  // not crash the daemon loop — treat the broken side as empty and let the next
+  // probe recover once the file is fixed, rather than failing the whole reconcile.
   let ignored: Set<string>;
   try { ignored = await loadIgnored(); } catch { ignored = new Set(); }
+  let registered: Set<string>;
+  try {
+    const reg = await loadDevices();
+    registered = new Set(Object.keys(reg));
+  } catch {
+    registered = new Set();
+  }
   const want = new Map(
     pending
-      .filter((p) => isSafeName(p.name) && !ignored.has(p.name))
+      .filter((p) => isSafeName(p.name) && !ignored.has(p.name) && !registered.has(p.name))
       .map((p) => [p.name, p.platform]),
   );
 

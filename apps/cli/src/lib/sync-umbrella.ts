@@ -158,10 +158,13 @@ export async function runUmbrellaSync(args: RunUmbrellaArgs): Promise<UmbrellaRe
     // tailscale is a clean no-op, never a sync failure. First-run population is
     // `agents setup` / manual `agents devices sync` (bootstrap).
     const { runDeviceSync } = await import('./devices/sync.js');
-    const { reconcilePendingSentinels } = await import('./devices/pending.js');
+    const { reconcilePendingSentinels, readPendingSentinels } = await import('./devices/pending.js');
     const dev = await runDeviceSync({ soft: true, mode: 'refresh' });
-    if (dev.ok) await reconcilePendingSentinels(dev.pending);
-    result.devices = { synced: dev.synced, pending: dev.pending.length, skipped: !dev.ok };
+    // Soft-fail still re-prunes registered/ignored phantoms from the on-disk set.
+    const pendingIn = dev.ok ? dev.pending : readPendingSentinels();
+    await reconcilePendingSentinels(pendingIn);
+    const pendingAfter = readPendingSentinels().length;
+    result.devices = { synced: dev.synced, pending: pendingAfter, skipped: !dev.ok };
     if (dev.ok) {
       log(`devices: ${dev.synced} refreshed${dev.pending.length ? `, ${dev.pending.length} new pending` : ''}`);
     }

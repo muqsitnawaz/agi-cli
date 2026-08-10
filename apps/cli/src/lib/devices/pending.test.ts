@@ -12,6 +12,9 @@
  *   5. a device the user has ignored is never written as a sentinel, even when
  *      the caller passes it in a stale `pending` set (the probe/ignore race,
  *      RUSH-2495) — the writer re-subtracts the persisted ignore-list.
+ *   6. a device already in the registry is never written as a sentinel either
+ *      (stale/polluted sentinels for registered machines must not keep the
+ *      menu bar "NEW DEVICES" section lit).
  */
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
@@ -23,7 +26,7 @@ const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-devices-pending-
 process.env.HOME = TEST_HOME;
 
 const { reconcilePendingSentinels, clearPendingSentinel, readPendingSentinels } = await import('./pending.js');
-const { addIgnored, removeIgnored } = await import('./registry.js');
+const { addIgnored, removeIgnored, removeDevice, upsertDevice } = await import('./registry.js');
 
 function pendingDir(): string {
   return path.join(TEST_HOME, '.agents', '.cache', 'state', 'devices-pending');
@@ -91,6 +94,29 @@ describe('pending-device sentinels', () => {
       expect(readPendingSentinels()).toEqual([]);
     } finally {
       await removeIgnored('ghost');
+    }
+  });
+
+  it('never re-surfaces an already-registered device, even in a stale pending set', async () => {
+    // Registry already has mac-mini. A polluted/stale pending list still names
+    // it — the writer must drop it and remove any leftover sentinel.
+    await upsertDevice('mac-mini', { platform: 'macos' });
+    try {
+      // Seed a phantom sentinel as if a prior probe/test wrote it.
+      fs.mkdirSync(pendingDir(), { recursive: true });
+      fs.writeFileSync(path.join(pendingDir(), 'mac-mini'), 'macos\n');
+      await reconcilePendingSentinels([
+        { name: 'mac-mini', platform: 'macos' },
+        { name: 'new-box', platform: 'linux' },
+      ]);
+      expect(readPendingSentinels().map((p) => p.name)).toEqual(['new-box']);
+      // Soft-fail prune path: re-running the on-disk set through the writer
+      // must still drop the registered phantom without inventing newcomers.
+      fs.writeFileSync(path.join(pendingDir(), 'mac-mini'), 'macos\n');
+      await reconcilePendingSentinels(readPendingSentinels());
+      expect(readPendingSentinels().map((p) => p.name).sort()).toEqual(['new-box']);
+    } finally {
+      await removeDevice('mac-mini');
     }
   });
 });

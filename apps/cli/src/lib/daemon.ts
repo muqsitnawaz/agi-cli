@@ -1050,8 +1050,10 @@ export async function runDaemon(): Promise<void> {
   // appeared tailnet nodes, dropping a sentinel per pending device so the
   // menu-bar helper can surface "NEW DEVICES → Register / Ignore". Refresh mode
   // never auto-registers a newcomer; a machine without tailscale is a clean
-  // no-op. `reconcilePendingSentinels` re-subtracts the ignore-list itself, so a
-  // device the user dismissed is never re-surfaced (RUSH-2495).
+  // no-op. `reconcilePendingSentinels` re-subtracts ignore-list + registry, so a
+  // dismissed or already-registered device is never re-surfaced (RUSH-2495 +
+  // stale-sentinel defense). Soft-fail still re-prunes via the on-disk set so a
+  // tailscale blip cannot leave registered/ignored phantoms in the menu bar.
   let deviceProbeInterval: NodeJS.Timeout | undefined;
   if (isEnabled('device-probe')) {
     let deviceProbeInFlight = false;
@@ -1060,12 +1062,15 @@ export async function runDaemon(): Promise<void> {
       deviceProbeInFlight = true;
       try {
         const { runDeviceSync } = await import('./devices/sync.js');
-        const { reconcilePendingSentinels } = await import('./devices/pending.js');
+        const { reconcilePendingSentinels, readPendingSentinels } = await import('./devices/pending.js');
         const dev = await runDeviceSync({ soft: true, mode: 'refresh' });
-        if (!dev.ok) return;
-        await reconcilePendingSentinels(dev.pending);
-        if (dev.pending.length) {
+        // Soft-fail: re-run the on-disk set through the writer so registered /
+        // ignored sentinels still get pruned; do not invent a full clear.
+        await reconcilePendingSentinels(dev.ok ? dev.pending : readPendingSentinels());
+        if (dev.ok && dev.pending.length) {
           log('INFO', `devices: ${dev.pending.length} new pending (${dev.pending.map((p) => p.name).join(', ')})`);
+        } else if (!dev.ok) {
+          log('WARN', `device probe soft-fail (pruned known non-pending): ${dev.reason ?? 'unknown'}`);
         }
       } catch (err) {
         log('WARN', `device probe tick failed: ${(err as Error).message}`);
