@@ -41,6 +41,19 @@ export async function attachAction(id: string): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  if (outcome.kind === 'resolved-unconfirmed') {
+    // ACT path: a short prefix could match a different session on an offline peer,
+    // and attaching the wrong conversation is unrecoverable — fail closed. (A READ
+    // like `sessions preview` renders the match instead.)
+    console.error(chalk.red(`Could not confirm "${id}" is unique while these devices were unavailable: ${outcome.unconfirmedPeers.join(', ')}`));
+    console.error(chalk.gray('  Pass the full session id, or reconnect the offline device, then retry.'));
+    process.exitCode = 2;
+    return;
+  }
+  if (outcome.kind !== 'resolved') {
+    const _exhaustive: never = outcome;
+    throw new Error(`unhandled resolve outcome: ${JSON.stringify(_exhaustive)}`);
+  }
   const meta = outcome.session;
 
   // Route the WHOLE attach operation to the origin, not just its eventual

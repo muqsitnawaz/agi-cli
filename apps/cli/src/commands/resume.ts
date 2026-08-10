@@ -85,6 +85,21 @@ export function registerResumeCommand(program: Command): void {
         process.exitCode = 1;
         return;
       }
+      if (outcome.kind === 'resolved-unconfirmed') {
+        // ACT path: a short prefix resolves to one match among the REACHABLE fleet,
+        // but a dark peer could hold a distinct same-prefix session, and resuming
+        // the wrong conversation is unrecoverable — fail closed. A full UUID (which
+        // is globally unique) resolves normally; a READ like `sessions preview`
+        // renders the match with a note instead of refusing.
+        console.error(chalk.red(`Could not confirm "${sessionId}" is unique while these devices were unavailable: ${outcome.unconfirmedPeers.join(', ')}`));
+        console.error(chalk.gray('  Pass the full session id, or reconnect the offline device, then retry.'));
+        process.exitCode = 2;
+        return;
+      }
+      if (outcome.kind !== 'resolved') {
+        const _exhaustive: never = outcome;
+        throw new Error(`unhandled resolve outcome: ${JSON.stringify(_exhaustive)}`);
+      }
 
       // The harness keeps its conversation state on the machine that produced
       // the session, so a peer-owned session MUST resume there. Running it here

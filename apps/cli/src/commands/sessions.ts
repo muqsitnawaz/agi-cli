@@ -2256,7 +2256,7 @@ export async function renderSessionPreview(
   // A just-created transcript may not have reached the incremental index yet.
   // Keep the indexed path hot, but repair a local cold miss once before saying
   // it does not exist. This also preserves Claude history-alias discovery.
-  if (outcome.kind !== 'resolved'
+  if (outcome.kind !== 'resolved' && outcome.kind !== 'resolved-unconfirmed'
     && (!scope.hosts?.length || shouldIncludeLocal(scope.hosts, machineId()))) {
     const discovered = applyScopeFilters(
       await discoverSessions({ all: true, cwd: process.cwd(), limit: 5000 }),
@@ -2292,6 +2292,17 @@ export async function renderSessionPreview(
     console.error(chalk.gray('Pass the full session ID to narrow it down.'));
     process.exitCode = 1;
     return;
+  }
+  if (outcome.kind === 'resolved-unconfirmed') {
+    // A READ (preview) renders the unique reachable match. Name the dark peers so
+    // the user knows uniqueness was not confirmed fleet-wide. When the owner ITSELF
+    // is dark, say so — a live row then hits the "not reachable" branch below, while
+    // a synced mirror still renders locally (reading follows the file).
+    const owner = sessionOwnerDevice(outcome.session);
+    const ownerDark = owner ? outcome.unconfirmedPeers.some(peer => hostToken(peer) === hostToken(owner)) : false;
+    console.error(ownerDark
+      ? chalk.gray(`note: owner ${owner} is offline — showing a local mirror if present; not resumable until ${owner} is back.`)
+      : chalk.gray(`note: ${outcome.unconfirmedPeers.join(', ')} offline — showing the unique match from the reachable fleet; couldn't confirm no same-prefix session lives there.`));
   }
 
   const session = outcome.session;
@@ -4986,7 +4997,11 @@ async function renderOneSession(
       process.exit(1);
     }
 
-    if (outcome.kind === 'resolved') {
+    if (outcome.kind === 'resolved' || outcome.kind === 'resolved-unconfirmed') {
+      if (outcome.kind === 'resolved-unconfirmed') {
+        // READ path: render the unique reachable match, name the dark peers.
+        console.error(chalk.gray(`note: ${outcome.unconfirmedPeers.join(', ')} offline — showing the unique match from the reachable fleet; couldn't confirm no same-prefix session lives there.`));
+      }
       const resolved = outcome.session;
       if (resolved._remote && resolved.machine && resolved.machine !== machineId()) {
       const args = ['sessions', resolved.id, '--local'];
@@ -5167,6 +5182,12 @@ export interface FleetSessionCandidate {
 
 export type MetadataResolveOutcome =
   | { kind: 'resolved'; session: SessionMeta }
+  // An ID-shaped prefix that resolves to exactly one session across the REACHABLE
+  // fleet, while one or more registered peers stayed dark. The match is owned by a
+  // known device (`session.machine`), so a READ may render it; an ACT path must
+  // fail closed, because a dark peer can hide a distinct session sharing the prefix
+  // (`fleetCandidatesByQuery` groups by full id, so that collision is invisible).
+  | { kind: 'resolved-unconfirmed'; session: SessionMeta; unconfirmedPeers: string[] }
   | { kind: 'not-found' }
   | { kind: 'ambiguous'; candidates: FleetSessionCandidate[] }
   | { kind: 'partial'; failedPeers: string[] };
@@ -5294,15 +5315,29 @@ export function metadataResolveOutcome(
   // UUID intentionally has a different prefix.
   const candidates = fleetCandidatesByQuery([...localMatches, ...remote.sessions], selector, true);
   // A full UUID is globally unique, so one exact hit resolves even when an
-  // unrelated registered device is offline. A label is NOT globally unique — a
-  // distinct session may carry the same label on an unreachable peer — so it
-  // stays fail-closed: a unique label auto-resumes only once every peer has
-  // answered (candidates.length === 1 below), and an unreachable peer forces
-  // `partial` rather than guessing. (RUSH-2203: early-exit is UUID-only for the
-  // same reason — see isDefinitiveMatch.)
+  // unrelated registered device is offline. (RUSH-2203: early-exit is UUID-only
+  // for the same reason — see isDefinitiveMatch.)
   if (FULL_SESSION_ID_RE.test(selector) && candidates.length === 1 && candidates[0].id.toLowerCase() === selector.toLowerCase()) {
     return { kind: 'resolved', session: candidates[0].hits[0].session };
   }
+  // An ID-shaped prefix (not a label) that resolves to exactly one session across
+  // the reachable fleet is owned by a known device (`session.machine`). Resolution
+  // keys on OWNER reachability, not on "did every registered device answer": an
+  // unreachable UNRELATED peer must not discard a unique match. Surface the dark
+  // peers as `unconfirmedPeers` and let the caller decide — a READ renders with a
+  // note; an ACT path fails closed (a dark peer could hold a distinct same-prefix
+  // session). A LABEL is deliberately excluded (`looksLikeSessionId` is false for
+  // it) and stays fail-closed below: labels genuinely collide across boxes, so a
+  // unique local label with a dark peer is `partial`, not a confident match.
+  if (candidates.length === 1 && looksLikeSessionId(selector)) {
+    const session = candidates[0].hits[0].session;
+    return remote.unreachable.length > 0
+      ? { kind: 'resolved-unconfirmed', session, unconfirmedPeers: remote.unreachable }
+      : { kind: 'resolved', session };
+  }
+  // Labels, no-match, and multi-match keep the original fail-closed order: an
+  // unreachable peer may hold the answer (a same-label session, or the one this
+  // selector names) so we cannot commit.
   if (remote.unreachable.length > 0) return { kind: 'partial', failedPeers: remote.unreachable };
   if (candidates.length === 0) return { kind: 'not-found' };
   if (candidates.length > 1) return { kind: 'ambiguous', candidates };
@@ -5394,6 +5429,11 @@ async function resolveSessionMetadata(
     }
     console.error(chalk.gray(looksLikeSessionId(selector) ? 'Pass a longer ID to narrow it down.' : 'Narrow the keywords to one session.'));
     process.exit(1);
+  }
+  if (outcome.kind === 'resolved-unconfirmed') {
+    // READ path: emit the unique reachable match; name the dark peers on stderr so
+    // the JSON on stdout stays the stable resolve contract.
+    console.error(chalk.gray(`Resolved from the reachable fleet; ${outcome.unconfirmedPeers.join(', ')} did not answer, so uniqueness is unconfirmed there.`));
   }
 
   process.stdout.write(serializeResolvedSessionsJson([outcome.session]));

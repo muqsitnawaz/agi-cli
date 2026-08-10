@@ -1188,6 +1188,18 @@ export function registerRunCommand(program: Command): void {
           console.error(chalk.red(`"${selector}" matches ${outcome.candidates.length} sessions. Pass the full session id.`));
           process.exit(1);
         }
+        if (outcome.kind === 'resolved-unconfirmed') {
+          // ACT path (headless `exec --resume`): never auto-resume a short prefix
+          // that only resolved among the reachable fleet — a dark peer could hold a
+          // distinct same-prefix session, and resuming the wrong one is unrecoverable.
+          console.error(chalk.red(`Could not confirm "${selector}" is unique while these devices were unavailable: ${outcome.unconfirmedPeers.join(', ')}`));
+          console.error(chalk.gray('  Pass the full session id, or reconnect the offline device, then retry.'));
+          process.exit(2);
+        }
+        if (outcome.kind !== 'resolved') {
+          const _exhaustive: never = outcome;
+          throw new Error(`unhandled resolve outcome: ${JSON.stringify(_exhaustive)}`);
+        }
         resolvedResumeSource = outcome.session;
 
         const [requestedAgent, requestedVersion] = normalizedAgentSpec.split('@');
