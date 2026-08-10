@@ -76,7 +76,6 @@ export const loadProfiles: ModuleLoader = async () => (await import('../../comma
 export const loadHarness: ModuleLoader = async () => (await import('../../commands/harness.js')).registerHarnessCommands;
 export const loadSecrets: ModuleLoader = async () => (await import('../../commands/secrets.js')).registerSecretsCommands;
 export const loadLogin: ModuleLoader = async () => (await import('../../commands/login.js')).registerLoginCommands;
-export const loadWallet: ModuleLoader = async () => (await import('../../commands/wallet.js')).registerWalletCommands;
 export const loadHelper: ModuleLoader = async () => (await import('../../commands/helper.js')).registerHelperCommand;
 export const loadMenubar: ModuleLoader = async () => (await import('../../commands/menubar.js')).registerMenubarCommands;
 export const loadBeta: ModuleLoader = async () => (await import('../../commands/beta.js')).registerBetaCommands;
@@ -223,7 +222,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   login: [loadLogin],
   logout: [loadLogin],
   whoami: [loadLogin],
-  wallet: [loadWallet],
   helper: [loadHelper],
   menubar: [loadMenubar],
   beta: [loadBeta],

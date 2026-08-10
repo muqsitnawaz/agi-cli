@@ -375,7 +375,7 @@ variable is a scripting mistake, not a request for the whole stream.
   `secrets view --reveal`, the raw `secrets get <item>`, `secrets push` (which
   reads the whole bundle to upload it), and remote `bundle@host` resolves. (Value
   reads in adjacent subsystems that don't go through the bundle resolver — e.g.
-  `wallet`, profile auth tokens — are not part of this `secrets.*` stream.)
+  profile auth tokens — are not part of this `secrets.*` stream.)
 - **`secrets.unlocked`** — `agents secrets unlock <bundle>` granted the bundle into
   the secrets broker (and the durable session), so it then reads prompt-free for
   the grant TTL. This records the longer-lived grant a per-read `secrets.get` does

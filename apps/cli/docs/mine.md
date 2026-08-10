@@ -60,7 +60,7 @@ agents mine init jack --disable teams cloud
 agents mine toggle jack --disable-plugin rush
 
 # A second, fully independent brand.
-agents mine init pranjal --disable wallet
+agents mine init pranjal --disable cloud
 
 jack --help          # lists neither teams nor cloud
 agents --help        # unchanged — every command still there

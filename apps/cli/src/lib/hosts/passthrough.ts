@@ -125,7 +125,6 @@ export const REMOTE_PASSTHROUGH: Record<string, RemoteSpec> = {
   audit: {},
   lock: {},
   feedback: {},
-  wallet: {},
   pty: {},
   tmux: {},
   watchdog: {},

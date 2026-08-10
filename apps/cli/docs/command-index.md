@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_103 command groups · 584 commands._
+_102 command groups · 578 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -1062,17 +1062,6 @@ agents use <agent> [version]  Switch the active version for an agent. This is th
 
 ```
 agents view [agent]  Show what agent CLIs are installed and which versions you have. Inspect resources when you pass agent@version.
-```
-
-## wallet — Device-local credit-card vault backed by macOS Keychain (Touch ID required to reveal). Encrypted at rest, never leaves your device. Not Apple Pay — stores real PANs, no tokenization.
-
-```
-agents wallet                             Device-local credit-card vault backed by macOS Keychain (Touch ID required to reveal). Encrypted at rest, never leaves your device. Not Apple Pay — stores real PANs, no tokenization.
-agents wallet add                         Add a card to the vault. Interactive prompt for PAN, CVC, expiry, cardholder, nickname.
-agents wallet list                        List stored cards (metadata only — last 4, brand, expiry). No biometric prompt.
-agents wallet remove <id>                 Remove a card from the vault. Argument is a card id or nickname.
-agents wallet rename <id> <new-nickname>  Rename a card. Argument is the current id or nickname.
-agents wallet show <id>                   Reveal a card. Touch ID required. Argument is a card id or nickname.
 ```
 
 ## watchdog — Auto-nudge stalled agent terminals: detect stalls, resolve the exact split, inject "Continue." — no menu-bar needed.
