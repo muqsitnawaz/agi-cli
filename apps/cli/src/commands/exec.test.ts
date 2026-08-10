@@ -72,8 +72,29 @@ describe('degraded run governance mode', () => {
         },
       );
       expect(result.status, result.stderr).toBe(0);
-      const lines = fs.readFileSync(path.join(root, '.agents', '.history', 'audit', 'log.jsonl'), 'utf8').trim().split('\n');
-      expect(JSON.parse(lines.at(-1)!)).toMatchObject({ agent: 'antigravity', mode: 'edit', outcome: 'ok', exit: 0 });
+      // New runs record as run.dispatched on the unified events stream (not the
+      // legacy hash-chained audit/log.jsonl). Mode plan degrades to edit for
+      // antigravity — that resolved mode must appear on the event.
+      const eventsRoot = path.join(root, '.agents', '.history', 'events');
+      const dayDirs = fs.existsSync(eventsRoot) ? fs.readdirSync(eventsRoot) : [];
+      const rows: Array<Record<string, unknown>> = [];
+      for (const day of dayDirs) {
+        const file = path.join(eventsRoot, day, 'events.jsonl');
+        if (!fs.existsSync(file)) continue;
+        for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          rows.push(JSON.parse(trimmed) as Record<string, unknown>);
+        }
+      }
+      const dispatched = rows.filter((r) => r.event === 'run.dispatched' && r.agent === 'antigravity');
+      expect(dispatched.length, `events under ${eventsRoot}: ${JSON.stringify(rows.slice(-5))}`).toBeGreaterThanOrEqual(1);
+      expect(dispatched.at(-1)).toMatchObject({
+        agent: 'antigravity',
+        mode: 'edit',
+        outcome: 'ok',
+        exitCode: 0,
+      });
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
