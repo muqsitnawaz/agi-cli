@@ -1,12 +1,20 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { execFileSync } from 'child_process';
 import {
   computeProjectListWidths,
   formatFleetSkippedNote,
   formatMilestoneDue,
   formatMilestoneLines,
   formatNextMilestone,
+  mergeBoundDirs,
+  removeBoundDirs,
+  repoForDir,
   type ProjectListRow,
 } from './projects.js';
+import type { ProjectRepo } from '../lib/projects.js';
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
@@ -179,5 +187,63 @@ describe('formatMilestoneLines', () => {
     const out = formatMilestoneLines([], ms[0], now, 1).map(stripAnsi);
     expect(out).toHaveLength(1);
     expect(out[0]).toContain('Factory converts strategy');
+  });
+});
+
+describe('mergeBoundDirs / removeBoundDirs (set --add-dir/--rm-dir)', () => {
+  it('preserves a same-path binding under a different subpath — no silent collapse', () => {
+    // Two distinct bindings of one checkout (a monorepo binding apps/web AND
+    // apps/api). An unrelated --add-dir must not drop either — the old
+    // path-only key collapsed them, losing a binding on disk.
+    const existing: ProjectRepo[] = [
+      { slug: 'o/mono', path: '~/src/mono', subpath: 'apps/web' },
+      { slug: 'o/mono', path: '~/src/mono', subpath: 'apps/api' },
+    ];
+    expect(mergeBoundDirs(existing, [{ slug: 'o/infra', path: '~/src/infra' }])).toEqual([
+      { slug: 'o/mono', path: '~/src/mono', subpath: 'apps/web' },
+      { slug: 'o/mono', path: '~/src/mono', subpath: 'apps/api' },
+      { slug: 'o/infra', path: '~/src/infra' },
+    ]);
+  });
+
+  it('refreshes an exact (path, subpath) match in place, and appends a genuinely new one', () => {
+    expect(
+      mergeBoundDirs([{ slug: 'old/x', path: '~/src/x' }], [{ slug: 'new/x', path: '~/src/x' }]),
+    ).toEqual([{ slug: 'new/x', path: '~/src/x' }]);
+    // Absolute-under-home and home-relative forms of the same dir are one key.
+    const abs = path.join(os.homedir(), 'src', 'x');
+    expect(
+      mergeBoundDirs([{ slug: 'old/x', path: '~/src/x' }], [{ slug: 'new/x', path: abs }]),
+    ).toEqual([{ slug: 'new/x', path: abs }]);
+  });
+
+  it('removeBoundDirs drops every binding under a path, any subpath', () => {
+    expect(
+      removeBoundDirs(
+        [
+          { slug: 'o/mono', path: '~/src/mono', subpath: 'apps/web' },
+          { slug: 'o/mono', path: '~/src/mono', subpath: 'apps/api' },
+          { slug: 'o/infra', path: '~/src/infra' },
+        ],
+        ['~/src/mono'],
+      ),
+    ).toEqual([{ slug: 'o/infra', path: '~/src/infra' }]);
+  });
+});
+
+describe('repoForDir origin diagnosis', () => {
+  it('diagnoses a git repo whose origin is not a GitHub owner/repo precisely', () => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'proj-nongh-'));
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: d });
+      execFileSync('git', ['remote', 'add', 'origin', 'https://gitlab.com/o/r.git'], { cwd: d });
+      // It IS a git repo with an origin — the message must not claim otherwise.
+      expect(() => repoForDir(d)).toThrow(/not a GitHub owner\/repo/);
+      expect(() => repoForDir(d)).not.toThrow(/not a git repo/);
+      // --slug override still resolves it.
+      expect(repoForDir(d, 'o/r')).toEqual({ slug: 'o/r', path: path.resolve(d) });
+    } finally {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
   });
 });

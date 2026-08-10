@@ -255,6 +255,19 @@ describe('projectDirsAbs', () => {
     expect(projectDirsAbs(def, { forRemote: true })).toEqual(['~/src/rush']);
   });
 
+  it('checkoutRoots returns the repo ROOTS — root (not defaultPath) and repos[].path (not subpath)', () => {
+    const def: ProjectDef = {
+      name: 'x',
+      root: '~/src/rush',
+      defaultPath: '~/src/rush/apps/web',
+      repos: [{ slug: 'o/infra', path: '~/src/infra', subpath: 'deploy' }],
+    };
+    // Working-dir shape (spawn) leads with defaultPath and joins the subpath...
+    expect(projectDirsAbs(def, { forRemote: true })).toEqual(['~/src/rush/apps/web', '~/src/infra/deploy']);
+    // ...checkout-root shape (probe) is the enclosing git checkouts instead.
+    expect(projectDirsAbs(def, { forRemote: true, checkoutRoots: true })).toEqual(['~/src/rush', '~/src/infra']);
+  });
+
   it('local drops a non-existent dir but forRemote keeps every one', () => {
     // A fleet box missing a checkout must not yield a bogus LOCAL path, yet the
     // remote/probe form keeps it so the peer can report `✗ missing`.

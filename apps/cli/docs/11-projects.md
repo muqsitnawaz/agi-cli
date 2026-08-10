@@ -300,16 +300,26 @@ is stored as a `repos[]` entry (`{slug, path}`, `path` home-relative via
 `writeProjectDef`), so `agents projects view` shows every bound repo with its
 own path.
 
-**One resolver — `projectDirsAbs`.** `projectDirsAbs(def, { forRemote })`
-(`lib/projects.ts`) is the single source of the project's ordered directory
-list: the primary working dir first (`defaultPath ?? root`), then each
-`repos[].path` (joined with `repos[].subpath` when set), deduped. `forRemote:
-false` expands against the local home and drops any directory that does not
-exist (a fleet box missing a checkout never yields a bogus path); `forRemote:
-true` keeps each entry home-relative (`~/…`) for the remote shell to re-root and
-keeps every entry (the missing one surfaces in the workspace probe as `✗
-missing`). The workspace probe (`workspaceTargetsForDef`) and every spawn path
-read this one list.
+**One resolver — `projectDirsAbs`.** `projectDirsAbs(def, { forRemote,
+checkoutRoots })` (`lib/projects.ts`) is the single source of the project's
+ordered directory list, in two shapes of the same list:
+
+- **Working dirs (default)** — the primary working dir first (`defaultPath ??
+  root`), then each `repos[].path` (joined with `repos[].subpath` when set).
+  This is what a spawn grants an agent access to.
+- **Checkout roots (`checkoutRoots: true`)** — the enclosing git checkout of each
+  (`root`, never the `defaultPath` subdir; each `repos[].path`, never its
+  subpath). This is what the workspace probe (`workspaceTargetsForDef`) reads: it
+  resolves `.git` at the exact path, so probing a monorepo `defaultPath` subdir
+  (no `.git` of its own) would report a healthy project `✗ missing`, and walking
+  up to find one would report an empty dir under a tracked `$HOME` falsely
+  present — probing the repo root sidesteps both.
+
+`forRemote: false` expands against the local home and drops any directory that
+does not exist (a fleet box missing a checkout never yields a bogus path);
+`forRemote: true` keeps each entry home-relative (`~/…`) for the remote shell to
+re-root and keeps every entry (the missing one surfaces in the workspace probe
+as `✗ missing`). Both the probe and every spawn path read this one resolver.
 
 **At spawn, the bound dirs become `--add-dir` grants — for Claude and Codex
 only.** The directory grants are wired in the companion tracks of RUSH-2487,

@@ -66,25 +66,21 @@ function git(absPath: string, args: string[]): string | undefined {
 }
 
 /**
- * Probe one workspace repo. A path with no `.git` of its own is checked once
- * with `git rev-parse` (a monorepo subdir is inside a work tree); a path that
- * is neither yields `{present: false}`. On a present repo every signal is
- * best-effort: whatever succeeded is reported, and a repo whose `.git` exists
- * yet every git call failed surfaces as present-with-error rather than silently
- * clean.
+ * Probe one workspace repo. A missing path yields `{present: false}` and no
+ * git call is made. On a present repo every signal is best-effort: whatever
+ * succeeded is reported, and a repo whose `.git` exists yet every git call
+ * failed surfaces as present-with-error rather than silently clean.
+ *
+ * Presence is `.git` at THIS exact path (a dir, or the FILE a linked worktree
+ * uses) — deliberately not a walk up the tree. The probe targets git checkout
+ * ROOTS ({@link workspaceTargetsForDef} passes `checkoutRoots`), so a `.git`
+ * here is the honest signal; a walk-up would report an empty dir nested under a
+ * tracked `$HOME` as falsely present, breaking the very missing-checkout signal
+ * `projects status` exists to give.
  */
 export function probeRepoWorkspace(absPath: string): RepoWorkspaceStatus {
   const status: RepoWorkspaceStatus = { path: toHomeRelative(absPath), present: false };
-  // A `.git` at this exact path (a dir, or the FILE a linked worktree uses) is
-  // the fast, offline presence signal. But a project narrowed with `defaultPath`
-  // (`agents projects add rush --path apps/web`) probes a monorepo SUBDIR that
-  // owns no `.git` of its own yet sits inside a checked-out work tree — asking
-  // git resolves it so a healthy project is not falsely reported `✗ missing`
-  // (the canonical dir list now leads with `defaultPath ?? root`). A bare `.git`
-  // short-circuits the git call and keeps the broken-`.git` case present-with-error.
-  if (!fs.existsSync(path.join(absPath, '.git'))) {
-    if (git(absPath, ['rev-parse', '--is-inside-work-tree']) !== 'true') return status;
-  }
+  if (!fs.existsSync(path.join(absPath, '.git'))) return status;
   status.present = true;
 
   const branch = git(absPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
@@ -121,17 +117,18 @@ export function probeProjectWorkspaces(paths: string[]): RepoWorkspaceStatus[] {
 }
 
 /**
- * The home-relative paths to probe for a project definition — the project's
- * canonical bound directories from {@link projectDirsAbs}: the primary working
- * dir (`defaultPath ?? root`) plus each bound repo's checkout (`repos[].path`,
- * subpath-joined), deduped. `forRemote: true` keeps every target home-relative
+ * The home-relative paths to probe for a project definition — the CHECKOUT-ROOT
+ * shape of {@link projectDirsAbs} (`root` + each `repos[].path`, deduped), never
+ * the `defaultPath` working subdir or a repo's subpath. The probe resolves
+ * `.git` at the exact path, so it must target a real repo root, not a subdir
+ * that owns no `.git`. `forRemote: true` keeps every target home-relative
  * (`~/…`, the form the probe echoes) and never drops a missing one — a box
  * without a checkout must still surface as `✗ missing`, not silently vanish.
  * Sharing {@link projectDirsAbs} keeps the probe's dir list and every spawn
  * path's dir list from drifting.
  */
 export function workspaceTargetsForDef(def: ProjectDef): string[] {
-  return projectDirsAbs(def, { forRemote: true });
+  return projectDirsAbs(def, { forRemote: true, checkoutRoots: true });
 }
 
 /**
