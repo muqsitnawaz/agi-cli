@@ -159,14 +159,25 @@ export function listNativeAccounts(meta: Pick<Meta, 'accounts'>): NativeAccount[
   return Object.values(meta.accounts?.native ?? {}).map(account => ({ ...account, kind: 'native' as const }));
 }
 
-export function findUnifiedAccount(nameOrId: string, meta: Pick<Meta, 'accounts'>, doc = readAccountRegistry()): UnifiedAccount | null {
+/**
+ * Resolve one account by name or id across both stores, native first.
+ *
+ * `doc` is optional and read LAZILY: a native match returns without ever reading
+ * the provider bundle registry — so a native view/attach/run never triggers a
+ * bundle read, legacy-`accounts.yaml` migration, or a keychain decrypt (which
+ * would surface a Touch ID prompt or crash on an undecryptable legacy item). A
+ * default-evaluated `doc = readAccountRegistry()` argument would defeat this by
+ * running before the body, so callers that only need a native lookup must be
+ * able to omit it.
+ */
+export function findUnifiedAccount(nameOrId: string, meta: Pick<Meta, 'accounts'>, doc?: AccountRegistryDocument): UnifiedAccount | null {
   const native = listNativeAccounts(meta).find(account => account.id === nameOrId || account.name === nameOrId);
   if (native) return native;
-  const provider = findAccount(nameOrId, doc);
+  const provider = findAccount(nameOrId, doc ?? readAccountRegistry());
   return provider ? { ...provider, kind: 'provider' } : null;
 }
 
-function assertUniqueUnifiedName(name: string, meta: Pick<Meta, 'accounts'>, doc = readAccountRegistry()): void {
+function assertUniqueUnifiedName(name: string, meta: Pick<Meta, 'accounts'>, doc?: AccountRegistryDocument): void {
   if (findUnifiedAccount(name, meta, doc)) throw new Error(`Account '${name}' already exists.`);
 }
 

@@ -5,7 +5,27 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { secretsKeychainItem, setKeychainBackendForTest, setKeychainToken, type KeychainBackend } from './secrets/index.js';
 import { writeBundleWithItems } from './secrets/bundles.js';
 import { _resetFileStoreForTest } from './secrets/filestore.js';
-import { addAccount, inspectAccount, readAccountRegistry, removeAccount, renameAccount, resolveAccountSelection, resolveCredentialAccount, setAccountSecret } from './account-registry.js';
+import { addAccount, findUnifiedAccount, inspectAccount, readAccountRegistry, removeAccount, renameAccount, resolveAccountSelection, resolveCredentialAccount, setAccountSecret, type AccountRegistryDocument } from './account-registry.js';
+
+describe('findUnifiedAccount does not touch the provider store for a native lookup', () => {
+  // A registry whose every access throws — stands in for a device whose provider
+  // bundle read / legacy migration / keychain decrypt would fail (the real crash).
+  const poisoned = new Proxy({} as AccountRegistryDocument, {
+    get() { throw new Error('provider registry accessed'); },
+  });
+  const meta = {
+    accounts: { native: { 'id-1': { id: 'id-1', name: 'work', agent: 'claude' as const, identityKey: 'claude:user=1', scope: 'version' as const } } },
+  };
+
+  it('returns a native account without reading the provider registry', () => {
+    expect(findUnifiedAccount('work', meta, poisoned)).toMatchObject({ kind: 'native', name: 'work', agent: 'claude' });
+    expect(findUnifiedAccount('id-1', meta, poisoned)).toMatchObject({ kind: 'native', id: 'id-1' });
+  });
+
+  it('reaches the provider registry only when the name is not a native account', () => {
+    expect(() => findUnifiedAccount('not-native', meta, poisoned)).toThrow('provider registry accessed');
+  });
+});
 
 class MemoryKeychain implements KeychainBackend {
   values = new Map<string, string>();
