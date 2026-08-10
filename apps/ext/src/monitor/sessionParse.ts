@@ -12,7 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as readline from 'readline';
 import { createHash } from 'crypto';
-import { SessionAgentKind } from './protocol';
+export type SessionAgentKind = 'claude' | 'codex' | 'gemini' | 'opencode';
 import { runAgents } from '../core/agentsBin';
 
 const LINE_CAP = 100;
