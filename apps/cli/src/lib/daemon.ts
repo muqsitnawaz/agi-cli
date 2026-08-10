@@ -31,7 +31,7 @@ import { isSchedulerEnabled, assertSchedulerEnabled, isDaemonEnabled, getConfigV
 import { reapTerminalRoutineProcesses } from './routine-process-cleanup.js';
 import { recordSubsystemOk, recordSubsystemError, recordSubsystemErrorReason, readSubsystemHealth, SUBSYSTEM_SECRETS_BROKER, SUBSYSTEM_BROWSER_IPC, SUBSYSTEM_DAEMON_START } from './daemon-health.js';
 import { startAccountStateService } from './account-state-service.js';
-import { runFleetCacheWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
+import { runActiveSessionsWarmTick, runFleetCacheWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
 import { emit } from './events.js';
 
 const PID_FILE = 'daemon.pid';
@@ -82,6 +82,10 @@ const STATE_DIR_CHECK_TICK_MS = 60_000;
 // in-process intervals the daemon holds directly, same cadence the old timers ran.
 const WATCHDOG_TICK_MS = 3 * 60_000;
 const DEVICE_PROBE_TICK_MS = 3 * 60_000;
+// Keep the active-session cache/journal fresh for sessions watch + Factory.
+// Matches DEFAULT_ACTIVE_CACHE_MAX_AGE_MS (15s) so long-lived watchers never
+// outlive the publisher (RUSH-2484 — CLI-owned continuous publish).
+const ACTIVE_SESSIONS_WARM_TICK_MS = 15_000;
 const WEDGE_THRESHOLD_TICKS = 3;
 
 /**
@@ -954,6 +958,24 @@ export async function runDaemon(): Promise<void> {
     onError: (area, error) => log('WARN', `${area} state refresh failed: ${(error as Error).message}`),
   });
 
+  // Active-sessions publish-own: continuous journal writer for `sessions watch`.
+  // Fire once immediately so a cold daemon does not leave watchers on
+  // "awaiting publisher" for a full tick (RUSH-2484).
+  let activeSessionsWarmInFlight = false;
+  const runActiveSessionsWarm = async (): Promise<void> => {
+    if (activeSessionsWarmInFlight) return;
+    activeSessionsWarmInFlight = true;
+    try {
+      await runActiveSessionsWarmTick();
+    } catch (err) {
+      log('WARN', `active-sessions warm failed: ${(err as Error).message}`);
+    } finally {
+      activeSessionsWarmInFlight = false;
+    }
+  };
+  void runActiveSessionsWarm();
+  const activeSessionsWarmInterval = setInterval(() => { void runActiveSessionsWarm(); }, ACTIVE_SESSIONS_WARM_TICK_MS);
+
   // Watchdog: nudge this host's own stalled agent sessions. Gated on the
   // `watchdog.enabled` device-config flag (`agents watchdog enable`), so the
   // timer always fires but only does work when the user opted in. Overlap-safe
@@ -1247,6 +1269,7 @@ export async function runDaemon(): Promise<void> {
   const handleShutdown = singleShot(async () => {
     log('INFO', 'Daemon shutting down');
     accountStateService.stop();
+    clearInterval(activeSessionsWarmInterval);
     clearInterval(watchdogInterval);
     clearInterval(deviceProbeInterval);
     stopScheduler();

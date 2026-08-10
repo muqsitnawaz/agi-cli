@@ -9,6 +9,8 @@ export interface SessionCliStreamOptions {
   emit: (event: SessionCliEvent) => void;
   onError?: (message: string) => void;
   spawnWatch?: () => ChildProcessWithoutNullStreams;
+  /** Delay before an automatic restart after the child exits (default 1s). */
+  restartMs?: number;
 }
 
 /** Current CLI-owned rows retained only so a late follower can receive a reset. */
@@ -66,32 +68,39 @@ export class SessionCliReplay {
 /** Owns the single long-lived CLI session stream for the elected monitor. */
 export class SessionCliStream {
   private child?: ChildProcessWithoutNullStreams;
-  private running = false;
+  /** Intentionally started (not stopped by the host). Exit restarts while true. */
+  private wantRunning = false;
+  private restartTimer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly options: SessionCliStreamOptions) {}
 
   start(): void {
-    if (this.child || this.running) return;
-    this.running = true;
+    if (this.wantRunning) return;
+    this.wantRunning = true;
+    this.spawnChild();
+  }
+
+  private spawnChild(): void {
+    if (!this.wantRunning || this.child) return;
     if (this.options.spawnWatch) {
       this.attach(this.options.spawnWatch());
       return;
     }
     void resolveAgentsBin().then((bin) => {
-      if (!this.running) return;
+      if (!this.wantRunning || this.child) return;
       const augmented = bootstrapPath(bin);
       this.attach(spawn(bin, ['sessions', 'watch', '--json'], {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, PATH: `${augmented}:${process.env.PATH ?? ''}` },
       }));
     }).catch((error) => {
-      this.running = false;
       this.options.onError?.(error instanceof Error ? error.message : String(error));
+      this.scheduleRestart();
     });
   }
 
   private attach(child: ChildProcessWithoutNullStreams): void {
-    if (!this.running) { child.kill(); return; }
+    if (!this.wantRunning) { child.kill(); return; }
     this.child = child;
     const lines = createInterface({ input: child.stdout });
     lines.on('line', (line) => {
@@ -109,17 +118,32 @@ export class SessionCliStream {
     child.stderr.on('data', (chunk) => { stderr += String(chunk); });
     child.once('exit', (code) => {
       this.child = undefined;
-      this.running = false;
+      try { lines.close(); } catch { /* already closed */ }
+      if (!this.wantRunning) return;
       if (code !== 0) {
         this.options.onError?.(
-          stderr.trim() || 'This version of agents-cli does not support sessions watch --json. Upgrade agents-cli.',
+          stderr.trim() || 'agents sessions watch exited; restarting stream',
         );
       }
+      this.scheduleRestart();
     });
   }
 
+  private scheduleRestart(): void {
+    if (!this.wantRunning || this.restartTimer) return;
+    const ms = this.options.restartMs ?? 1_000;
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = undefined;
+      this.spawnChild();
+    }, ms);
+  }
+
   stop(): void {
-    this.running = false;
+    this.wantRunning = false;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = undefined;
+    }
     this.child?.kill();
     this.child = undefined;
   }

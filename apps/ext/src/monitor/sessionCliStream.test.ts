@@ -42,3 +42,34 @@ test('SessionCliReplay gives a late window the current rows without another CLI 
   ]);
   expect(replay.envelopes('late-window')[0].streamId).not.toBe(first[0].streamId);
 });
+
+test('SessionCliStream restarts after the CLI child exits unexpectedly', async () => {
+  let spawns = 0;
+  const event: SessionCliEvent = {
+    version: 1,
+    type: 'heartbeat',
+    streamId: 'stream-restart',
+    sequence: 1,
+    capturedAt: 20,
+    scope: 'local',
+  };
+  const received = await new Promise<SessionCliEvent>((resolve, reject) => {
+    const stream = new SessionCliStream({
+      restartMs: 20,
+      emit: (ev) => { stream.stop(); resolve(ev); },
+      onError: () => { /* exit of first child is expected */ },
+      spawnWatch: () => {
+        spawns += 1;
+        if (spawns === 1) {
+          // Exit immediately without output — stream must restart.
+          return spawn(process.execPath, ['-e', 'process.exit(0)']);
+        }
+        return spawn(process.execPath, ['-e', `process.stdout.write(${JSON.stringify(`${JSON.stringify(event)}\n`)})`]);
+      },
+    });
+    stream.start();
+    setTimeout(() => reject(new Error('stream did not restart with an event')), 2_000);
+  });
+  expect(spawns).toBeGreaterThanOrEqual(2);
+  expect(received).toEqual(event);
+});
