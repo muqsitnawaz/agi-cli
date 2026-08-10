@@ -13,6 +13,13 @@
   validates the live identity before binding and injects no secret or env;
   `resolveAccountSelection` resolves explicit → exact-target binding →
   device-scoped binding → per-harness default. `remove` refuses while a binding, a
-  default, or a harness profile still references the account. Source:
+  default, or a harness profile still references the account. Bindings are honored
+  end-to-end: `agents run` and routines select the bound account at spawn — a
+  provider account injects its env, a native account is validated live and pins
+  the installed version that holds it (never forwarded/injected, fails closed for
+  a remote/cloud target or a cross-harness login) — and `agents view` plus the
+  fleet/harness inventories render the durable account name. Source:
   `apps/cli/src/lib/account-registry.ts`, `apps/cli/src/lib/account-capabilities.ts`,
-  `apps/cli/src/commands/accounts.ts`, `apps/cli/src/lib/types.ts`.
+  `apps/cli/src/commands/accounts.ts`, `apps/cli/src/commands/exec.ts`,
+  `apps/cli/src/lib/runner.ts`, `apps/cli/src/commands/view.ts`,
+  `apps/cli/src/lib/devices/{fleet,harness}-inventory.ts`, `apps/cli/src/lib/types.ts`.
