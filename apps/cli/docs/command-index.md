@@ -342,6 +342,19 @@ agents hooks remove [name]  Delete a hook from agents (interactive picker if no 
 agents hooks view [name]    Read the shell script content for a hook
 ```
 
+## hosts — Register and inspect agent hosts (machines you offload runs to with `agents run --device <name>`).
+
+```
+agents hosts                      Register and inspect agent hosts (machines you offload runs to with `agents run --device <name>`).
+agents hosts add [name] [target]  Enroll a host. With no args, pick from ~/.ssh/config + known_hosts. `target` is user@host for hosts not in ssh config.
+agents hosts check <name>         Probe one host: reachable? agents-cli version?
+agents hosts list                 List enrolled + ssh-config hosts (metadata only, no probing).
+agents hosts logs <id>            Show a host task’s concise summary; --full for the raw log, -f to follow a running one.
+agents hosts ps                   List dispatched host tasks.
+agents hosts remove <name>        Remove a host from the registry (does not touch ~/.ssh/config).
+agents hosts stop <id>            Terminate a running host task from this machine (SIGTERM process group; marks failed/143).
+```
+
 ## humans — Inspect owner identity and notification channel config (humans.yaml)
 
 ```

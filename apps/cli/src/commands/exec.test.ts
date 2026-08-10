@@ -126,7 +126,7 @@ describe('trailing-@ account picker request', () => {
       lease: true,
       box: 'warm-one',
       device: 'yosemite-s0',
-    })).toEqual(['--resume', '--strategy', '--balanced', '--lease', '--box', '--host/--device']);
+    })).toEqual(['--resume', '--strategy', '--balanced', '--lease', '--box', '--device']);
     expect(runAccountPickerConflicts({})).toEqual([]);
   });
 });
