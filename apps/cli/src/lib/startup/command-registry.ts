@@ -100,7 +100,6 @@ export const loadTmux: ModuleLoader = async () => (await import('../../commands/
 export const loadWatchdog: ModuleLoader = async () => (await import('../../commands/watchdog.js')).registerWatchdogCommand;
 export const loadBrowser: ModuleLoader = async () => (await import('../../commands/browser.js')).registerBrowserCommand;
 export const loadComputer: ModuleLoader = async () => (await import('../../commands/computer.js')).registerComputerCommand;
-export const loadHosts: ModuleLoader = async () => (await import('../../commands/hosts.js')).registerHostsCommand;
 export const loadLease: ModuleLoader = async () => (await import('../../commands/lease.js')).registerLeaseCommand;
 export const loadLogs: ModuleLoader = async () => (await import('../../commands/logs.js')).registerLogsCommand;
 export const loadEvents: ModuleLoader = async () => (await import('../../commands/events.js')).registerEventsCommand;
@@ -247,7 +246,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   watchdog: [loadWatchdog],
   browser: [loadBrowser],
   computer: [loadComputer],
-  hosts: [loadHosts],
   lease: [loadLease],
   logs: [loadLogs],
   events: [loadEvents],

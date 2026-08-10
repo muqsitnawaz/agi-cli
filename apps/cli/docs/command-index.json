@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "command": "agents",
-  "groups": 104,
-  "commands": 584,
+  "groups": 103,
+  "commands": 578,
   "root": {
     "name": "agents",
     "path": "",
@@ -5809,7 +5809,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -7125,6 +7125,35 @@
           "subcommands": []
         },
         {
+          "name": "ps",
+          "path": "devices ps",
+          "aliases": [],
+          "description": "List agent tasks dispatched to devices with `agents run --device <name> --no-follow`. Reconciles each still-`running` record against the remote before listing. View a log with `agents logs <id>`.",
+          "args": [],
+          "options": [
+            {
+              "flags": "--json",
+              "description": "Output JSON",
+              "long": "--json",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
+        {
           "name": "register",
           "path": "devices register",
           "aliases": [],
@@ -7347,6 +7376,35 @@
           "subcommands": []
         },
         {
+          "name": "stop",
+          "path": "devices stop",
+          "aliases": [
+            "kill"
+          ],
+          "description": "Terminate a running dispatched task from this machine (SIGTERM the remote process group; marks it failed/143).",
+          "args": [
+            {
+              "name": "id",
+              "required": true,
+              "variadic": false,
+              "description": ""
+            }
+          ],
+          "options": [
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        },
+        {
           "name": "sync",
           "path": "devices sync",
           "aliases": [],
@@ -7447,7 +7505,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -9138,279 +9196,6 @@
       ]
     },
     {
-      "name": "hosts",
-      "path": "hosts",
-      "aliases": [],
-      "description": "Register and inspect agent hosts (machines you offload runs to with `agents run --host <name>`).",
-      "args": [],
-      "options": [
-        {
-          "flags": "-h, --help",
-          "description": "Show help",
-          "short": "-h",
-          "long": "--help",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        }
-      ],
-      "subcommands": [
-        {
-          "name": "add",
-          "path": "hosts add",
-          "aliases": [],
-          "description": "Enroll a host. With no args, pick from ~/.ssh/config + known_hosts. `target` is user@host for hosts not in ssh config.",
-          "args": [
-            {
-              "name": "name",
-              "required": false,
-              "variadic": false,
-              "description": ""
-            },
-            {
-              "name": "target",
-              "required": false,
-              "variadic": false,
-              "description": ""
-            }
-          ],
-          "options": [
-            {
-              "flags": "--cap <cap...>",
-              "description": "Capability tag(s) for routing (e.g. --cap gpu)",
-              "long": "--cap",
-              "required": true,
-              "optional": false,
-              "variadic": true,
-              "negate": false
-            },
-            {
-              "flags": "--os <os>",
-              "description": "Override detected OS label",
-              "long": "--os",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--no-enroll",
-              "description": "Register only — skip the remote agents-cli bootstrap/version check",
-              "long": "--no-enroll",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": true
-            },
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
-          "name": "check",
-          "path": "hosts check",
-          "aliases": [],
-          "description": "Probe one host: reachable? agents-cli version?",
-          "args": [
-            {
-              "name": "name",
-              "required": true,
-              "variadic": false,
-              "description": ""
-            }
-          ],
-          "options": [
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
-          "name": "list",
-          "path": "hosts list",
-          "aliases": [
-            "ls"
-          ],
-          "description": "List enrolled + ssh-config hosts (metadata only, no probing).",
-          "args": [],
-          "options": [
-            {
-              "flags": "--json",
-              "description": "Output JSON",
-              "long": "--json",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
-          "name": "logs",
-          "path": "hosts logs",
-          "aliases": [],
-          "description": "Show a host task’s concise summary; --full for the raw log, -f to follow a running one.",
-          "args": [
-            {
-              "name": "id",
-              "required": true,
-              "variadic": false,
-              "description": ""
-            }
-          ],
-          "options": [
-            {
-              "flags": "-f, --follow",
-              "description": "Follow live output",
-              "short": "-f",
-              "long": "--follow",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "-m, --full",
-              "description": "Show the full raw combined-stdout log instead of the concise summary",
-              "short": "-m",
-              "long": "--full",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
-          "name": "ps",
-          "path": "hosts ps",
-          "aliases": [],
-          "description": "List dispatched host tasks.",
-          "args": [],
-          "options": [
-            {
-              "flags": "--json",
-              "description": "Output JSON",
-              "long": "--json",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
-          "name": "remove",
-          "path": "hosts remove",
-          "aliases": [
-            "rm"
-          ],
-          "description": "Remove a host from the registry (does not touch ~/.ssh/config).",
-          "args": [
-            {
-              "name": "name",
-              "required": true,
-              "variadic": false,
-              "description": ""
-            }
-          ],
-          "options": [
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
-          "name": "stop",
-          "path": "hosts stop",
-          "aliases": [
-            "kill"
-          ],
-          "description": "Terminate a running host task from this machine (SIGTERM process group; marks failed/143).",
-          "args": [
-            {
-              "name": "id",
-              "required": true,
-              "variadic": false,
-              "description": ""
-            }
-          ],
-          "options": [
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        }
-      ]
-    },
-    {
       "name": "humans",
       "path": "humans",
       "aliases": [],
@@ -9595,7 +9380,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -10211,7 +9996,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -10689,7 +10474,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -13207,7 +12992,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -16247,7 +16032,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -16856,7 +16641,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -17219,7 +17004,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -17294,7 +17079,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -17369,7 +17154,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -17460,7 +17245,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -17551,7 +17336,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -17651,7 +17436,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -17751,7 +17536,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -17842,7 +17627,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -17936,7 +17721,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18029,7 +17814,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18102,7 +17887,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18177,7 +17962,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18250,7 +18035,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18333,7 +18118,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18406,7 +18191,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18488,7 +18273,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18570,7 +18355,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18657,7 +18442,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18723,7 +18508,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18805,7 +18590,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18871,7 +18656,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -18937,7 +18722,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -19019,7 +18804,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -19092,7 +18877,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -19195,7 +18980,7 @@
             },
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -19665,7 +19450,7 @@
         },
         {
           "flags": "--name <slug>",
-          "description": "Name the run — seeds the session label so it shows up as `<name>` in `agents sessions` and resolves by it (and `agents hosts logs <name>` for --host runs) instead of an opaque id. An agent-generated title later refines the label; your name shows until then. Optional.",
+          "description": "Name the run — seeds the session label so it shows up as `<name>` in `agents sessions` and resolves by it (and `agents logs <name>` for --host runs) instead of an opaque id. An agent-generated title later refines the label; your name shows until then. Optional.",
           "long": "--name",
           "required": true,
           "optional": false,
@@ -19884,7 +19669,7 @@
         },
         {
           "flags": "--no-follow",
-          "description": "With --host, dispatch detached and return immediately (track via `agents hosts ps/logs`).",
+          "description": "With --host, dispatch detached and return immediately (track via `agents devices ps` and `agents logs`).",
           "long": "--no-follow",
           "required": false,
           "optional": false,
@@ -23643,7 +23428,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -25941,7 +25726,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -26317,7 +26102,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -26709,7 +26494,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -26926,7 +26711,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -27152,7 +26937,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -27361,7 +27146,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -27452,7 +27237,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -27638,7 +27423,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -27729,7 +27514,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -27853,7 +27638,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -27990,7 +27775,7 @@
           "options": [
             {
               "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
               "short": "-H",
               "long": "--host",
               "required": true,
@@ -29492,7 +29277,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,
@@ -29639,7 +29424,7 @@
       "options": [
         {
           "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, a registered host, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
           "short": "-H",
           "long": "--host",
           "required": true,

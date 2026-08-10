@@ -239,7 +239,7 @@ watchdog, and preferences. Selecting preferences runs the skippable questions
 sync, and `agents setup browser` highlights the auto-detect winner in its
 picker. `agents setup status --json` exposes the same probes to automation.
 
-**Hosts** — machines you dispatch agent work to. `agents hosts add` enrolls a
+**Hosts** — machines you dispatch agent work to. `agents devices add` enrolls a
 target either from an existing `~/.ssh/config` stanza (connection details stay in
 ssh config; agents-cli stores only a caps/os overlay) or *inline* (with its own
 `user@address`). The host registry lives in `agents.yaml` under `hosts:` and **is**
@@ -265,16 +265,16 @@ The two registries feed **one host pool** behind the `HostProvider` seam:
 `local` (agents.yaml overlay ∪ ssh-config) registers first, `devices` (the
 Tailscale registry) second, so an enrolled host shadows a same-name device.
 A device registered once with `agents devices sync` therefore shows up in
-`agents hosts list` (SOURCE `devices`), resolves as a `--host` target, and
+`agents devices list` (SOURCE `devices`), resolves as a `--host` target, and
 participates in capability routing — password-auth devices are listed but
-marked non-dispatchable (offload rides `BatchMode=yes` ssh). To tag a device
-with capabilities, `agents hosts add <device> --cap gpu` enrolls it inline,
-sourcing the address from its device profile. `agents devices render --write`
-still bridges to plain `ssh`/`scp` via ssh_config.
+marked non-dispatchable (offload rides `BatchMode=yes` ssh). Capability tags
+come only from a pre-existing overlay entry in `agents.yaml` (`Meta.hosts`) —
+there's no CLI flag to tag a device with a capability inline. `agents devices
+render --write` still bridges to plain `ssh`/`scp` via ssh_config.
 
 Hosts are execution targets everywhere runs and tasks dispatch: `agents run
 --host`, `agents teams` placement, `agents cloud run --host <name>` (the `host`
-cloud provider — tasks visible in both `agents cloud ps` and `agents hosts
+cloud provider — tasks visible in both `agents cloud ps` and `agents devices
 ps`), and routines placement (`agents routines add … --run-on <name>`). See
 [hosts.md](hosts.md) for the `--host` execution model and the option-forwarding
 contract.

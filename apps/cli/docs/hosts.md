@@ -1,6 +1,6 @@
 # Hosts — dispatch agents to your own machines
 
-> **Status:** Implemented. `agents hosts` and the `-H, --host` / `--device` flags
+> **Status:** Implemented. `agents devices` and the `-H, --host` / `--device` flags
 > ship today across virtually every first-class group (`repos`, `view`, `inspect`,
 > `usage`, `cost`, `doctor`, `list`, `sync`, `plugins`, `skills`, `status`,
 > `teams`, `routines`, …), on `agents run`, and on multi-host aggregators
@@ -14,7 +14,7 @@
 > `agents devices` registry, and [ssh-transport.md](ssh-transport.md) for
 > the shared, multiplexed SSH transport every `--host` command rides.
 
-`agents hosts` lets you run any agent (`claude`, `codex`, `droid`, …) on any of
+`agents run --host`/`--device` lets you run any agent (`claude`, `codex`, `droid`, …) on any of
 *your* machines — a Mac mini, a Windows mini, a couple of DGX Sparks — addressed
 by name from a small local registry, over plain SSH, with no central service to
 run or pay for.
@@ -206,7 +206,7 @@ will **not** call `tailscale status`, enumerate peers, or connect to nodes you
 didn't name. Treating "the tailnet" as the fleet is the wrong default: it pulls in
 machines you don't want to dispatch to and assumes a VPN that not every host needs.
 The registry is the source of truth; Tailscale is one optional way an `address`
-becomes reachable. (A convenience importer — `agents hosts import --from-tailscale`
+becomes reachable. (A convenience importer — `agents devices sync`
 — can *prefill* registry entries from `tailscale status` on request; it reads names
 and connects to nothing.)
 
@@ -322,7 +322,7 @@ agents run <agent> ["<task>"] --host <host>
 
 > Shipped surface: dispatch is `agents run <agent> ["<task>"] --host <name>`.
 > With a prompt, the run is headless, follows live by default, and `--no-follow`
-> detaches; track with `agents hosts ps` and `agents hosts logs <id>`. With no
+> detaches; track with `agents devices ps` and `agents logs <id>`. With no
 > prompt (and a local TTY), the local TTY is forwarded over SSH and the agent runs
 > interactively on the remote host (`ssh -tt`), using the remote machine's normal
 > tmux wrapper.
@@ -375,21 +375,21 @@ agents run <agent> ["<task>"] --host <host>
 > you back into the agent.
 >
 > Pass `--name <slug>` at dispatch to give the run a durable handle instead of an
-> opaque id: `agents hosts ps` shows it under a **NAME** column, and
-> `agents hosts logs <name>` resolves by name (case-insensitive, newest-wins). The
+> opaque id: `agents devices ps` shows it under a **NAME** column, and
+> `agents logs <name>` resolves by name (case-insensitive, newest-wins). The
 > name also seeds the run's **session label**, so it shows up as `<name>` in
 > `agents sessions` and `agents sessions <name>` resolves it. Omitting `--name` is
 > a no-op — unnamed runs stay id-only, render `-` in the NAME column, and show the
 > `[host/<name>]` tag as their session label.
 >
-> `agents hosts ps` re-probes each still-`running` task against the remote `.exit`
+> `agents devices ps` re-probes each still-`running` task against the remote `.exit`
 > marker so a finished (or crashed) run does not stay stuck at `running` after the
-> local follower dies. `agents hosts stop <id>` (alias `kill`) terminates the
+> local follower dies. `agents devices stop <id>` (alias `kill`) terminates the
 > remote process group from this machine, writes exit `143`, and keeps the log
-> for `agents hosts logs <id>`.
+> for `agents logs <id>`.
 >
 > **Steering a detached dispatch.** `agents message <id|name> "<text>"` resolves a
-> `--no-follow` dispatch the same way `agents hosts ps`/`logs` do (dispatch id,
+> `--no-follow` dispatch the same way `agents devices ps`/`agents logs` do (dispatch id,
 > `--name` handle, or the remote agent's own session id) and reroutes the message
 > over `--host` to the box that actually owns the live process — no need to know
 > which host it landed on. A task that already finished fails loud naming its
@@ -454,17 +454,19 @@ or public host. agents-cli does not care how it's reachable; it just runs SSH.
 `caps`/`os` are free-form metadata for capability-based selection (e.g. a driver
 agent routing a GPU eval to a host tagged `gpu`).
 
-`agents hosts` is a thin layer over this map, stored via the existing atomic+locked
+`agents devices` is a thin layer over this map, stored via the existing atomic+locked
 `readMeta`/`updateMeta` (`Meta` gains a `hosts?: Record<string, HostSpec>` field):
 
-- `agents hosts add <name> <user@address> [--cap gpu] [--os linux]` — write an entry.
-- `agents hosts list [--json]` — print the registry (name · address · os · caps).
+- `agents devices add <name> <user@address> [--os linux]` — write an entry.
+  Capability tags come only from a pre-existing overlay entry in `agents.yaml`
+  (`Meta.hosts`), not from a CLI flag.
+- `agents devices list [--json]` — print the registry (name · address · os · caps).
   **No probing** — pure metadata, instant, machine-readable for the driver agent.
-- `agents hosts check <name>` — the *only* command that touches the network: one
+- `agents devices status <name>` — the *only* command that touches the network: one
   SSH probe to that host → reachable? remote `agents --version` + `agents list`
   (which agents are installed). This is also what `ensureHostReady` calls before
   dispatch (lazy, single-host — never a fleet poll).
-- `agents hosts remove <name>` / `agents hosts import --from-tailscale` (opt-in:
+- `agents devices rm <name>` / `agents devices sync` (opt-in:
   prefill entries from `tailscale status` names; reads only, connects to nothing).
 
 Resolution for an address goes through **one** resolver,
@@ -548,8 +550,8 @@ Host dispatch has two shapes, chosen by whether a prompt is present:
 
 Headless dispatch supports Linux, macOS, and Windows OpenSSH hosts. Windows uses
 a hidden detached PowerShell process plus the same durable per-task log and exit
-sentinel as POSIX hosts; follow, reconnect, `hosts logs`, `hosts ps`, and
-`hosts stop` select the matching remote protocol from the task record.
+sentinel as POSIX hosts; follow, reconnect, `agents logs`, `devices ps`, and
+`devices stop` select the matching remote protocol from the task record.
 
 (`--json`/`--quiet`/`--mode`/`--model` are real flags on `agents run`, registered in
 `src/commands/exec.ts`; there is no user-facing `--print` — the per-harness
@@ -557,7 +559,7 @@ headless/`--print` mapping is internal to `buildExecCommand`.) `agents run` alre
 produces the right headless or interactive argv per harness via
 `buildExecCommand` (`src/lib/exec.ts`), so **every harness, mode, and
 secret-injection path works remotely for free** — provided agents-cli + that agent
-are installed and authed on the box, which `ensureHostReady` / `agents hosts check`
+are installed and authed on the box, which `ensureHostReady` / `agents devices status`
 guarantee (see Context, below).
 
 **Working directory on the host.** The remote command is prefixed with a
@@ -648,7 +650,7 @@ mechanism that **already exists** — there is no new "sync engine":
 
 | Layer | How it gets there | Mechanism (today) |
 |---|---|---|
-| **`~/.agents` config** (commands, skills, hooks, memory) | The DotAgents user repo is git-backed — the box runs `agents pull` (or `git pull`). One-time/idempotent bootstrap, **not** a per-dispatch push. | `agents pull` / `agents repo pull`; bootstrapped + verified by `ensureHostReady` / `hosts check` |
+| **`~/.agents` config** (commands, skills, hooks, memory) | The DotAgents user repo is git-backed — the box runs `agents pull` (or `git pull`). One-time/idempotent bootstrap, **not** a per-dispatch push. | `agents pull` / `agents repo pull`; bootstrapped + verified by `ensureHostReady` / `agents devices status` |
 | **Working codebase** | Phase 1: committed branch → `git fetch` + checkout on the box (per-repo, caller's `--remote-cwd`/`--branch`). Phase 2: uncommitted working tree → `rsync` over SSH (the differentiator). | per-repo git; rsync (Phase 2) |
 | **Secrets** | Persistent boxes self-auth once via `agents secrets` (keychain). Blank/leased boxes get an on-demand, never-on-disk injection. | `agents secrets export <bundle> --to-ssh --host <t>` (`secrets.ts:1089-1097`, env over ssh stdin) |
 | **Sessions / `.history`** | **Not bulk-copied.** Recall is exposed as a *remote command*, not a file sync (below). | the routines daemon + `agents sessions`; selective `session/sync/` for the rare "make this transcript present" case |
@@ -659,7 +661,7 @@ Before dispatch, ensure the box can actually run the agent. This replaces the
 heavier "syncContext" idea — most of it is already solved by git + the existing
 sync substrate, so the precondition is thin and mostly one-time/cached:
 
-1. **agents-cli present** — `hosts check` already probes `agents --version`; if
+1. **agents-cli present** — `devices status` already probes `agents --version`; if
    absent, bootstrap (mirror `scripts/sandbox.sh:218-239`).
 2. **Config current** — `agents pull` on the box so `~/.agents` matches (git-backed;
    cheap, idempotent).
@@ -698,7 +700,7 @@ you want to *query* it. The routines daemon can already run commands on a host, 
 recall becomes a remote call:
 
 ```
-agents hosts sessions <box> --search "<topic>"   # runs `agents sessions` ON the box, returns hits
+agents ssh <box> 'agents sessions --search "<topic>"'   # runs `agents sessions` ON the box, returns hits
 ```
 
 The agent on box A searches box B's history without ever copying it — the same
@@ -789,11 +791,11 @@ just relocates the storm):
   v1 dependency — it's a future `HostProvider`, and an opt-in `import
   --from-tailscale` can prefill `local` entries.
 - **Driver-agent first.** The primary caller is a conversational driver agent that
-  reads the registry metadata (`agents hosts list --json`), picks a host by
+  reads the registry metadata (`agents devices list --json`), picks a host by
   task/capability, and dispatches (`agents run --on <name> --json`). The VS Code
   extension is a second front-end onto the same commands. So Phase 1 prioritizes
-  clean, deterministic, machine-readable `--json` on `hosts list` and `run --on`.
-- **Naming** — `agents hosts` (list/check/add/remove) + `agents run --on <host>`.
+  clean, deterministic, machine-readable `--json` on `devices list` and `run --on`.
+- **Naming** — `agents devices` (list/status/add/rm) + `agents run --on <host>`.
   (The singular `agents computer` macOS-accessibility command is unrelated, stays.)
 - **Provider model** — keep named-SSH dispatch as its own clean path; fold *tracked*
   host runs into the existing cloud store as a `host` provider so `agents cloud
@@ -822,7 +824,7 @@ just relocates the storm):
 ## Phasing & verification
 
 - **Phase 1 (v1, no Rush)**: the `HostProvider` seam + the **`local`** provider only.
-  `agents hosts add/list/check/remove` (registry in `Meta.hosts`; `add` scans SSH
+  `agents devices add/list/status/rm` (registry in `Meta.hosts`; `add` scans SSH
   sources + `checkbox` multi-select enroll, ensures key auth, bootstraps/upgrades
   agents-cli to match the local version) + `agents run --on <host>` →
   `ensureHostReady` (lazy SSH probe + config/agent/branch) → remote `agents run
@@ -833,7 +835,7 @@ just relocates the storm):
 - **Phase 1.5 (fast-follows, behind the seam)**: the `rush` provider (account-keyed
   `computers` registry + presence + relay-exec, opt-in when `rush login` exists),
   the `tailscale` provider (presence/reachability without an account), and recall-as-
-  RPC (`agents hosts sessions <name>`).
+  RPC (`agents ssh <name> 'agents sessions'`).
 - **Phase 2**: the `crabbox` provider (lease → register → run → idle-release) and
   `--resume … --on` handoff (branch + working-tree rsync + transcript sync + resume)
   + attach/relay mode on the existing daemon.

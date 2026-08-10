@@ -105,7 +105,7 @@ natively via the surface configuration; iTerm/tmux `cd` inside the wrapped shell
 through [`sshExec`](../src/lib/ssh-exec.ts) — the same hardened primitive
 `agents sessions --host` and the browser driver use (target-injection guard,
 connection multiplexing). Host aliases resolve via the `~/.ssh/config.d/agents`
-include that `agents devices` / `agents hosts` maintain, so `--host zion` "just
+include that `agents devices` maintains, so `--host zion` "just
 works".
 
 Caveat: driving a GUI app (iTerm/Ghostty) over SSH needs the remote user logged

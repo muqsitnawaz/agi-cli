@@ -126,7 +126,7 @@
     },
     "hosts": {
       "type": "object",
-      "description": "Agent-host registry (`agents hosts`) keyed by host name."
+      "description": "Agent-host registry (the `--host`/`--device` dispatch overlay) keyed by host name."
     },
     "fleet": {
       "type": "object",

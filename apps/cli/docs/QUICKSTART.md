@@ -128,7 +128,7 @@ this:
   reads `tailscale status --json` and records a profile (platform, user,
   address, online status) for each one.
 - **Hosts** — dispatch targets for agent work. Every registered device is
-  automatically also a host; `agents hosts add` can additionally enroll a
+  automatically also a host; `agents devices add` can additionally enroll a
   machine from an existing `~/.ssh/config` entry.
 
 See [`concepts.md`](concepts.md#devices--hosts) for the full model,

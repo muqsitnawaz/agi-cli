@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_104 command groups · 584 commands._
+_103 command groups · 578 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -255,12 +255,14 @@ agents devices list                            List registered devices with plat
 agents devices login                           Log agent CLIs into fleet boxes over SSH: drive each box's device-code OAuth, scrape the URL + code, and surface every pending login in one local browser page. Default drives all codes at once; --interactive walks one box at a time (codes requested just-in-time so they don't expire).
 agents devices pair-ios [name]                 Pair an iPhone/iPad cockpit (RUSH-1733): mint a control token for `agents serve --control` and mark the device control-only. The token is shown ONCE — enter it in the app. Run this on the anchor.
 agents devices ping                            Live auth health: complete a real request for every agent account across the fleet (unlike the cached "signed in" flag). Writes the shared auth-health cache read by `agents view` and `fleet status`.
+agents devices ps                              List agent tasks dispatched to devices with `agents run --device <name> --no-follow`. Reconciles each still-`running` record against the remote before listing. View a log with `agents logs <id>`.
 agents devices register <name>                 Register a discovered (pending) node by name — used by the menu-bar "NEW DEVICES → Register" action.
 agents devices render                          Render the registry to ssh_config. Prints to stdout, or use --write to update ~/.ssh/config.d/agents.
 agents devices rm <name>                       Remove a device from the registry.
 agents devices run <cmd...>                    Run a command on every online registered device. Offline devices are skipped. Alias surface: agents fleet run …
 agents devices show <name>                     Show the full profile for one device.
 agents devices status                          Fleet health at a glance: online/offline rollup, a NEEDS ATTENTION list (each with its fix command), and quiet per-device rows grouped by OS. Use --verbose for the full auth/CLI/sync grid.
+agents devices stop <id>                       Terminate a running dispatched task from this machine (SIGTERM the remote process group; marks it failed/143).
 agents devices sync                            Ingest `tailscale status --json` into device profiles. In a terminal, opens a checkbox to register/unregister nodes; with --yes, registers every non-ignored node.
 agents devices unignore <name>                 Undo `ignore`: allow a node to be discovered and registered again.
 agents devices update [version]                Roll out agents-cli to every online registered device (`agents upgrade --yes` on each), then verify each box actually runs the new version. Offline devices are skipped.
@@ -340,19 +342,6 @@ agents hooks list [agent]   Show which hooks are installed and which events they
 agents hooks profile        Per-hook timing + cache stats from recent invocations
 agents hooks remove [name]  Delete a hook from agents (interactive picker if no name given)
 agents hooks view [name]    Read the shell script content for a hook
-```
-
-## hosts — Register and inspect agent hosts (machines you offload runs to with `agents run --host <name>`).
-
-```
-agents hosts                      Register and inspect agent hosts (machines you offload runs to with `agents run --host <name>`).
-agents hosts add [name] [target]  Enroll a host. With no args, pick from ~/.ssh/config + known_hosts. `target` is user@host for hosts not in ssh config.
-agents hosts check <name>         Probe one host: reachable? agents-cli version?
-agents hosts list                 List enrolled + ssh-config hosts (metadata only, no probing).
-agents hosts logs <id>            Show a host task’s concise summary; --full for the raw log, -f to follow a running one.
-agents hosts ps                   List dispatched host tasks.
-agents hosts remove <name>        Remove a host from the registry (does not touch ~/.ssh/config).
-agents hosts stop <id>            Terminate a running host task from this machine (SIGTERM process group; marks failed/143).
 ```
 
 ## humans — Inspect owner identity and notification channel config (humans.yaml)

@@ -550,16 +550,16 @@ Profile YAML has no secrets -- safe to `agents repo push` to a shared repo. `age
 ## Run on your own machines
 
 <p align="center">
-  <img src="assets/hosts.svg" alt="agents hosts: dispatch agents run and config commands to another machine over plain SSH (no daemon); the Tailscale fleet is auto-discovered." width="100%" />
+  <img src="assets/hosts.svg" alt="agents run --host: dispatch agents run and config commands to another machine over plain SSH (no daemon); the Tailscale fleet is auto-discovered." width="100%" />
 </p>
 
 
 Dispatch any read-only or config command -- and `agents run` itself -- to another machine over SSH. No daemon.
 
 ```bash
-# Enroll a machine (from ~/.ssh/config, or inline with user@address)
-agents hosts add gpu-box
-agents hosts check gpu-box              # reachable? which agents-cli version?
+# Enroll a machine
+agents devices add gpu-box gpu-box.local
+agents devices status                   # reachable? which agents-cli version?
 
 # Run there instead of locally
 agents run claude --host gpu-box "profile this build"   # headless: follows live by default
@@ -570,8 +570,8 @@ agents run claude --host auto "…"                        # same — auto is a 
 agents view kimi --device all                            # fan out across every registered device (grouped-by-OS roster)
 agents output --device all                               # per-device burn vs shipped output across the fleet
 agents view --device all --json                          # machine-readable fleet inventory
-agents hosts ps                         # list dispatched runs + terminal status
-agents hosts stop <id>                  # terminate a hung/detached run (alias: kill)
+agents devices ps                       # list dispatched runs + terminal status
+agents devices stop <id>                # terminate a hung/detached run (alias: kill)
 agents logs --host gpu-box              # pick a dispatched run — concise summary by default
 agents logs <id> --full                 # the full raw transcript / stdout (token-heavy)
 agents logs <id> -f                     # re-attach to a running one and follow
@@ -612,11 +612,12 @@ agents ssh mac-mini                     # hardened SSH: fails fast if offline,
                                         # backspace, colors & clear work on the remote
 agents cp mac-mini:/abs/log.json /tmp/  # fleet file transfer; host:path or abs local
 agents cp -r /tmp/src/ yosemite-s0:~/dst/  # ~ and $HOME expand on the REMOTE, never locally
-agents hosts list                       # devices show up here too (one host pool)
-agents hosts add mac-mini --cap gpu     # tag a device for capability routing (--host gpu)
+agents devices list                     # one host pool -- every registered device dispatches
+# Capability tags (e.g. gpu) come from a host entry already enrolled in
+# agents.yaml (Meta.hosts) -- there's no CLI flag to tag a device inline.
 
 # Hosts as a task backend + scheduled placement
-agents cloud run "nightly benchmark" --host gpu-box --agent claude   # task in cloud ps AND hosts ps
+agents cloud run "nightly benchmark" --host gpu-box --agent claude   # task in cloud ps AND devices ps
 agents routines add nightly -s "0 2 * * *" -a claude -p "run the sweep" --run-on gpu-box
 ```
 
@@ -657,7 +658,7 @@ email) and naming which harnesses use it — the fast way to see which accounts 
 and healthy across every machine. Scope either with `--agents <csv>` / `--device <csv>`, and
 add `--json` for the machine-readable per-host rows.
 
-**Hosts** (`agents hosts`) are git-synced dispatch targets in `agents.yaml`; **devices** (`agents devices`) are your Tailscale machines in a local registry. Both ride SSH and feed one host pool: devices appear in `agents hosts list` and capability routing without a second enrollment. On `--host` runs every `agents run` option is either forwarded (`--effort --env --timeout --loop …`), rejected loud (`--secrets` never crosses SSH implicitly), or consumed locally — nothing silently drops. See [docs/concepts.md](apps/cli/docs/concepts.md#devices--hosts).
+**Hosts** are git-synced dispatch targets in `agents.yaml`; **devices** (`agents devices`) are your Tailscale machines in a local registry. Both ride SSH and feed one host pool: devices are the dispatch pool for `agents run --host`/`--device` and capability routing without a second enrollment. On `--host` runs every `agents run` option is either forwarded (`--effort --env --timeout --loop …`), rejected loud (`--secrets` never crosses SSH implicitly), or consumed locally — nothing silently drops. See [docs/concepts.md](apps/cli/docs/concepts.md#devices--hosts).
 
 Every `--host` command rides one multiplexed SSH engine, tuned for driving a fleet from a small laptop: the first call to a machine opens a control socket and every later call reuses it (no repeat TCP+auth handshake), connections carry keepalive so a dropped link dies in ~45 s instead of zombying, and following a remote run polls in a single round-trip per cycle. Measured against a Tailscale-relayed host: repeated calls **~6–7× faster**, dispatch readiness **~2×**, and the follow loop **~21× faster with 50% fewer local ssh spawns**. Design: [docs/ssh-transport.md](apps/cli/docs/ssh-transport.md) · reproduce: `node scripts/bench-ssh.mjs <host>`.
 
@@ -690,7 +691,7 @@ Team state is observable via `agents teams list --json` / `agents teams status -
 
 ## Cloud
 
-Some work shouldn't tie up your laptop. `agents cloud run` hands a task to a managed provider that clones the repo, plans, implements, tests, and opens a PR -- while your terminal stays free. The `host` provider dispatches the same way onto machines you own: `agents cloud run "…" --host gpu-box` (tasks track in `agents cloud ps` and `agents hosts ps` alike).
+Some work shouldn't tie up your laptop. `agents cloud run` hands a task to a managed provider that clones the repo, plans, implements, tests, and opens a PR -- while your terminal stays free. The `host` provider dispatches the same way onto machines you own: `agents cloud run "…" --host gpu-box` (tasks track in `agents cloud ps` and `agents devices ps` alike).
 
 <p align="center">
   <img src="assets/cloud.svg" alt="agents cloud run dispatches one prompt to a managed provider (Rush, Codex, Cursor, Factory, or Antigravity) that runs while you keep working" width="100%" />

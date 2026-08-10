@@ -713,7 +713,7 @@ export function streamAgentsOnHost(
   if (code === 255) {
     console.error(
       chalk.red(`${host.name}: unreachable over SSH (asleep, offline, or host key changed?).`) +
-        chalk.gray(' Check: agents hosts check ' + host.name),
+        chalk.gray(' Check: agents devices status'),
     );
   }
   return code;
