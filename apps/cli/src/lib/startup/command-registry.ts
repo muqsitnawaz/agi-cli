@@ -50,7 +50,6 @@ export const loadWorktree: ModuleLoader = async () => (await import('../../comma
 export const loadVersions: ModuleLoader = async () => (await import('../../commands/versions.js')).registerVersionsCommands;
 export const loadUpdate: ModuleLoader = async () => (await import('../../commands/update.js')).registerUpdateCommand;
 export const loadImport: ModuleLoader = async () => (await import('../../commands/import.js')).registerImportCommand;
-export const loadExport: ModuleLoader = async () => (await import('../../commands/export.js')).registerExportCommand;
 export const loadPackages: ModuleLoader = async () => (await import('../../commands/packages.js')).registerPackagesCommands;
 export const loadRoutines: ModuleLoader = async () => (await import('../../commands/routines.js')).registerRoutinesCommands;
 export const loadMonitors: ModuleLoader = async () => (await import('../../commands/monitors.js')).registerMonitorsCommands;
@@ -60,7 +59,6 @@ export const loadResume: ModuleLoader = async () => (await import('../../command
 export const loadOpen: ModuleLoader = async () => (await import('../../commands/open.js')).registerOpenCommand;
 export const loadReconnect: ModuleLoader = async () => (await import('../../commands/reconnect.js')).registerReconnectCommand;
 export const loadFork: ModuleLoader = async () => (await import('../../commands/fork.js')).registerForkCommand;
-export const loadDefaults: ModuleLoader = async () => (await import('../../commands/defaults.js')).registerDefaultsCommands;
 export const loadConfig: ModuleLoader = async () => (await import('../../commands/config.js')).registerConfigCommand;
 export const loadSet: ModuleLoader = async () => (await import('../../commands/set.js')).registerSetCommand;
 export const loadModels: ModuleLoader = async () => (await import('../../commands/models.js')).registerModelsCommand;
@@ -101,12 +99,9 @@ export const loadWatchdog: ModuleLoader = async () => (await import('../../comma
 export const loadBrowser: ModuleLoader = async () => (await import('../../commands/browser.js')).registerBrowserCommand;
 export const loadComputer: ModuleLoader = async () => (await import('../../commands/computer.js')).registerComputerCommand;
 export const loadHosts: ModuleLoader = async () => (await import('../../commands/hosts.js')).registerHostsCommand;
-export const loadLease: ModuleLoader = async () => (await import('../../commands/lease.js')).registerLeaseCommand;
 export const loadLogs: ModuleLoader = async () => (await import('../../commands/logs.js')).registerLogsCommand;
 export const loadEvents: ModuleLoader = async () => (await import('../../commands/events.js')).registerEventsCommand;
 export const loadSsh: ModuleLoader = async () => (await import('../../commands/ssh.js')).registerSshCommands;
-export const loadPull: ModuleLoader = async () => (await import('../../commands/pull.js')).registerPullCommand;
-export const loadPush: ModuleLoader = async () => (await import('../../commands/push.js')).registerPushCommand;
 export const loadRepo: ModuleLoader = async () => (await import('../../commands/repo.js')).registerRepoCommands;
 export const loadSetup: ModuleLoader = async () => (await import('../../commands/setup.js')).registerSetupCommand;
 export const loadUninstall: ModuleLoader = async () => (await import('../../commands/uninstall.js')).registerUninstallCommands;
@@ -123,7 +118,6 @@ export const loadServe: ModuleLoader = async () => (await import('../../commands
 export const loadShare: ModuleLoader = async () => (await import('../../commands/share.js')).registerShareCommands;
 export const loadAudit: ModuleLoader = async () => (await import('../../commands/audit.js')).registerAuditCommands;
 export const loadWebhook: ModuleLoader = async () => (await import('../../commands/webhook.js')).registerWebhookCommand;
-export const loadFunnel: ModuleLoader = async () => (await import('../../commands/funnel.js')).registerFunnelCommand;
 export const loadHumans: ModuleLoader = async () => (await import('../../commands/humans.js')).registerHumansCommands;
 export const loadAccounts: ModuleLoader = async () => (await import('../../commands/accounts.js')).registerAccountsCommand;
 export const loadDaemon: ModuleLoader = async () => (await import('../../commands/daemon.js')).registerDaemonCommand;
@@ -189,7 +183,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   update: [loadUpdate],
   prune: [loadVersions, loadPrune],
   import: [loadImport],
-  export: [loadExport],
   registry: [loadPackages],
   search: [loadPackages],
   install: [loadPackages],
@@ -206,7 +199,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   open: [loadOpen],
   reconnect: [loadReconnect],
   fork: [loadFork],
-  defaults: [loadDefaults],
   config: [loadConfig],
   set: [loadSet],
   models: [loadModels],
@@ -217,7 +209,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   apply: [loadApply],
   status: [loadStatus],
   snapshot: [loadSnapshot],
-  profile: [loadProfiles],
   profiles: [loadProfiles],
   harness: [loadHarness],
   harnesses: [loadHarness],
@@ -249,7 +240,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   browser: [loadBrowser],
   computer: [loadComputer],
   hosts: [loadHosts],
-  lease: [loadLease],
   logs: [loadLogs],
   events: [loadEvents],
   ssh: [loadSsh],
@@ -257,8 +247,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   // `fleet` is a commander alias of `devices` (see commands/ssh.ts); list it so
   // lazy registration loads the devices tree when the user types `agents fleet`.
   fleet: [loadSsh],
-  pull: [loadPull],
-  push: [loadPush],
   // `repos` is the canonical command name; `repo` remains a convenience alias
   // (see commands/repo.ts). List both so lazy registration loads the tree
   // whichever the user types.
@@ -289,7 +277,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   unshare: [loadShare],
   audit: [loadAudit],
   webhook: [loadWebhook],
-  funnel: [loadFunnel],
   humans: [loadHumans],
   daemon: [loadDaemon],
   cp: [loadCp],
