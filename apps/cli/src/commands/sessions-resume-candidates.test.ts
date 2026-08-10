@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it } from 'vitest';
 import { Command } from 'commander';
 import type { ActiveSession } from '../lib/session/active.js';
 import type { SessionMeta } from '../lib/session/types.js';
