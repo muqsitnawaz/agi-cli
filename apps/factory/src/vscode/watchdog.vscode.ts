@@ -1,7 +1,4 @@
 import * as vscode from 'vscode';
-import * as fsSync from 'fs';
-import * as path from 'path';
-import * as os from 'os';
 import { execFile } from 'child_process';
 import { bootstrapPath, resolveAgentsBin } from '../core/agentsBin';
 
@@ -22,37 +19,7 @@ import { bootstrapPath, resolveAgentsBin } from '../core/agentsBin';
 
 // --- Playbook scaffold (surfaced by the settings panel) ---------------------
 
-export const WATCHDOG_PLAYBOOK_PATH = path.join(
-  os.homedir(),
-  '.agents',
-  'playbooks',
-  'watchdog.md'
-);
-
-const WATCHDOG_PLAYBOOK_TEMPLATE = `# Watchdog Playbook
-
-House rules for the Watchdog. Add patterns you've observed. One rule per bullet.
-Be specific.
-
-## Nudge recipes
-
-- When the agent says "I'll write/create/run X" with no matching tool call
-  in the next 30 seconds, nudge: "Do it now."
-
-## Skip rules
-
-- Skip if the last assistant message ends with a question mark — user input expected.
-
-## Project-specific
-
-- (Add rules tied to your repos here.)
-`;
-
-export function ensureWatchdogPlaybookScaffold(): void {
-  if (fsSync.existsSync(WATCHDOG_PLAYBOOK_PATH)) return;
-  fsSync.mkdirSync(path.dirname(WATCHDOG_PLAYBOOK_PATH), { recursive: true });
-  fsSync.writeFileSync(WATCHDOG_PLAYBOOK_PATH, WATCHDOG_PLAYBOOK_TEMPLATE, 'utf8');
-}
+export let WATCHDOG_PLAYBOOK_PATH = '';
 
 export interface WatchdogPlaybookStatus {
   exists: boolean;
@@ -60,18 +27,19 @@ export interface WatchdogPlaybookStatus {
   mtimeMs: number;
 }
 
-export function getWatchdogPlaybookStatus(): WatchdogPlaybookStatus {
-  try {
-    const stat = fsSync.statSync(WATCHDOG_PLAYBOOK_PATH);
-    const content = fsSync.readFileSync(WATCHDOG_PLAYBOOK_PATH, 'utf8');
-    return {
-      exists: true,
-      lines: content.split('\n').filter((l) => l.trim().length > 0).length,
-      mtimeMs: stat.mtimeMs,
-    };
-  } catch {
-    return { exists: false, lines: 0, mtimeMs: 0 };
-  }
+let playbookStatus: WatchdogPlaybookStatus = { exists: false, lines: 0, mtimeMs: 0 };
+
+export async function ensureWatchdogPlaybookScaffold(): Promise<void> {
+  const result = await runWatchdogCliJson<{ path: string } & WatchdogPlaybookStatus>(['playbook', '--ensure', '--json']);
+  WATCHDOG_PLAYBOOK_PATH = result.path;
+  playbookStatus = { exists: result.exists, lines: result.lines, mtimeMs: result.mtimeMs };
+}
+
+export async function getWatchdogPlaybookStatus(): Promise<WatchdogPlaybookStatus> {
+  const result = await runWatchdogCliJson<{ path: string } & WatchdogPlaybookStatus>(['playbook', '--json']);
+  WATCHDOG_PLAYBOOK_PATH = result.path;
+  playbookStatus = { exists: result.exists, lines: result.lines, mtimeMs: result.mtimeMs };
+  return playbookStatus;
 }
 
 // --- CLI-backed enable/disable ----------------------------------------------
@@ -125,6 +93,13 @@ export async function runWatchdogCli(
     const stderr = (err as { stderr?: string }).stderr?.trim();
     throw new Error(stderr || (err instanceof Error ? err.message : String(err)));
   }
+}
+
+async function runWatchdogCliJson<T>(args: string[], deps: WatchdogCliDeps = {}): Promise<T> {
+  const bin = await (deps.resolveBin ?? resolveAgentsBin)();
+  const env = { ...process.env, PATH: `${bootstrapPath(bin)}:${process.env.PATH ?? ''}` };
+  const { stdout } = await (deps.execFileAsync ?? defaultExecFileAsync)(bin, ['watchdog', ...args], { env });
+  return JSON.parse(stdout) as T;
 }
 
 /**

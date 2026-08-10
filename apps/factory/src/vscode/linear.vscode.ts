@@ -3,9 +3,7 @@ import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
-import { UnifiedTask, CycleInfo, linearToUnifiedTask, extractRepoNameFromLabels } from '../core/tasks';
 import type { LinearProjectLite } from '../core/linearProjects';
-import { getSettings, resolveGithubOwner } from './settings.vscode';
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -37,62 +35,6 @@ export async function isLinearAvailable(_context: vscode.ExtensionContext): Prom
     return true;
   } catch {
     return false;
-  }
-}
-
-export interface LinearFetchResult {
-  tasks: UnifiedTask[];
-  cycleInfo: CycleInfo | null;
-}
-
-export async function fetchLinearTasks(context: vscode.ExtensionContext): Promise<LinearFetchResult> {
-  if (!(await isLinearAvailable(context))) return { tasks: [], cycleInfo: null };
-
-  try {
-    const linearPath = await findLinearCli();
-    if (!linearPath) return { tasks: [], cycleInfo: null };
-    const { stdout } = await execFileAsync(linearPath, ['tasks', '--json'], {
-      timeout: 15000,
-    });
-
-    const data = JSON.parse(stdout);
-    const issues: any[] = data.issues || [];
-    const cycle = data.cycle || null;
-
-    const cycleInfo: CycleInfo | null = cycle && cycle.startsAt && cycle.endsAt
-      ? { name: cycle.name, startsAt: cycle.startsAt, endsAt: cycle.endsAt }
-      : null;
-
-    // Resolve owner once so we can render "owner/repo" chips on each card.
-    // Falls through to null if no owner is configured — card just won't show a repo chip.
-    const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const owner = await resolveGithubOwner(workspacePath, getSettings(context));
-
-    const tasks = issues.map(issue => {
-      const labels: string[] = (issue.labels?.nodes || []).map((n: any) => n.name);
-      const repoName = extractRepoNameFromLabels(labels);
-      const repo = repoName && owner ? `${owner}/${repoName}` : null;
-      return linearToUnifiedTask({
-        id: issue.identifier,
-        identifier: issue.identifier,
-        title: issue.title,
-        description: issue.description,
-        state: issue.state,
-        priority: issue.priority,
-        url: issue.url || `https://linear.app/issue/${issue.identifier}`,
-        labels: issue.labels,
-        assignee: issue.assignee,
-        project: issue.project,
-        dueDate: issue.dueDate,
-        createdAt: issue.createdAt,
-        comments: issue.comments,
-      }, repo);
-    });
-
-    return { tasks, cycleInfo };
-  } catch (err) {
-    console.error('[LINEAR] Error fetching tasks:', err);
-    return { tasks: [], cycleInfo: null };
   }
 }
 

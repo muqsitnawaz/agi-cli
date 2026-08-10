@@ -555,3 +555,8 @@ budget:
 - [docs/00-concepts.md](./00-concepts.md) — DotAgents repos, resource resolution model
 - [docs/06-observability.md](./06-observability.md) — `agents teams list --json` as a fleet observability source
 - [docs/cloud.md](./cloud.md) — cloud dispatch (`--cloud rush|codex|factory` on `teams add`)
+
+Machine consumers receive each team's canonical `agents` array in the same
+`--json` response. `--cwd <path>` filters to workspaces equal to, above, or below
+that path, so UI consumers do not re-read team storage or reproduce workspace
+matching and per-team status joins.

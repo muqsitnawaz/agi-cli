@@ -14,6 +14,7 @@ import { betaEnableHint, isBetaEnabled } from '../lib/beta.js';
 import { insertTask } from '../lib/cloud/store.js';
 import { emit } from '../lib/events.js';
 import { buildFactorySnapshot, type FactorySnapshot } from '../lib/factory/snapshot.js';
+import { listFactoryTasks } from '../lib/factory/tasks.js';
 
 
 function requireFactoryUrl(): string {
@@ -76,7 +77,7 @@ Examples:
 
   factory.hook('preAction', (_thisCommand, actionCommand) => {
     // Foreman must be able to read its tick input before any beta-gated action.
-    if (enabled || actionCommand.name() === 'snapshot') return;
+    if (enabled || actionCommand.name() === 'snapshot' || actionCommand.name() === 'tasks') return;
     console.error(chalk.red('agents factory is in beta.'));
     console.error(chalk.gray(betaEnableHint('factory')));
     process.exit(1);
@@ -93,6 +94,19 @@ Examples:
         return;
       }
       renderSnapshot(snapshot);
+    });
+
+  factory.command('tasks')
+    .description('List workspace Linear and GitHub tasks through one stable JSON surface.')
+    .option('--cwd <path>', 'Workspace used to resolve the GitHub repository', process.cwd())
+    .option('--no-linear', 'Exclude Linear tasks')
+    .option('--no-github', 'Exclude GitHub issues')
+    .option('--github-assigned-only', 'Only include GitHub issues assigned to the current user')
+    .option('--json', 'Output machine-readable tasks and source availability')
+    .action(async (opts: { cwd: string; linear: boolean; github: boolean; githubAssignedOnly?: boolean; json?: boolean }) => {
+      const result = await listFactoryTasks({ cwd: opts.cwd, linear: opts.linear, github: opts.github, assignedOnly: opts.githubAssignedOnly === true });
+      if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`${result.tasks.length} task${result.tasks.length === 1 ? '' : 's'}`);
     });
 
   factory

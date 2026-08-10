@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { Command } from 'commander';
-import { formatWatchdogTickLines, registerWatchdogCommand } from './watchdog.js';
+import { formatWatchdogTickLines, registerWatchdogCommand, watchdogPlaybookStatus } from './watchdog.js';
 import type { WatchdogTickResult } from '../lib/watchdog/runner.js';
 
 /** Run `agents watchdog <args...>`, capturing stdout lines the action prints. */
@@ -50,6 +50,17 @@ describe('watchdog status --json', () => {
     // The human path is two lines starting with the enable-state label.
     expect(lines[0]).toContain('always-on watchdog');
     expect(() => JSON.parse(lines[0])).toThrow();
+  });
+});
+
+describe('watchdog playbook', () => {
+  it('reports the canonical playbook through the command JSON surface', async () => {
+    const lines = await runWatchdog(['playbook', '--json']);
+    const parsed = JSON.parse(lines[0]) as ReturnType<typeof watchdogPlaybookStatus>;
+    expect(parsed.path).toMatch(/\.agents[/\\]playbooks[/\\]watchdog\.md$/);
+    expect(typeof parsed.exists).toBe('boolean');
+    expect(typeof parsed.lines).toBe('number');
+    expect(typeof parsed.mtimeMs).toBe('number');
   });
 });
 

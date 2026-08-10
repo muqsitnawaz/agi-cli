@@ -1,76 +1,42 @@
-// VS Code integration for unified task management
-// Aggregates tasks from Linear + GitHub.
-
 import * as vscode from 'vscode';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { TaskSource, TaskSourceSettings } from '../core/settings';
 import { UnifiedTask, CycleInfo, groupTasksBySource } from '../core/tasks';
-import { fetchLinearTasks, isLinearAvailable } from './linear.vscode';
-import { fetchGitHubTasks, isGitHubAvailable } from './github.vscode';
+import { bootstrapPath, resolveAgentsBin } from '../core/agentsBin';
 
-export interface TaskFetchResult {
+const execFileAsync = promisify(execFile);
+
+interface CliTaskResult {
   tasks: UnifiedTask[];
   cycleInfo: CycleInfo | null;
+  sources: { linear: boolean; github: boolean };
 }
 
-// Detect which task sources are available based on MCP configuration
-export async function detectAvailableSources(context: vscode.ExtensionContext): Promise<{
-  linear: boolean;
-  github: boolean;
-}> {
-  const [linear, github] = await Promise.all([
-    isLinearAvailable(context),
-    isGitHubAvailable(context)
-  ]);
-
-  return { linear, github };
+async function fetchCliTasks(enabledSources: TaskSourceSettings): Promise<CliTaskResult> {
+  const bin = await resolveAgentsBin();
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+  const args = ['factory', 'tasks', '--json', '--cwd', cwd];
+  if (!enabledSources.linear) args.push('--no-linear');
+  if (!enabledSources.github) args.push('--no-github');
+  if (enabledSources.githubAssignedOnly) args.push('--github-assigned-only');
+  const { stdout } = await execFileAsync(bin, args, {
+    timeout: 20_000,
+    env: { ...process.env, PATH: `${bootstrapPath(bin)}:${process.env.PATH ?? ''}` },
+  });
+  return JSON.parse(stdout) as CliTaskResult;
 }
 
-// Fetch tasks from each source that is both (a) available (CLI installed)
-// and (b) enabled by the user in settings.
-export async function fetchAllTasks(
-  context: vscode.ExtensionContext,
-  enabledSources: TaskSourceSettings
-): Promise<TaskFetchResult> {
-  const tasks: UnifiedTask[] = [];
-  let cycleInfo: CycleInfo | null = null;
-  const [linearOk, githubOk] = await Promise.all([
-    isLinearAvailable(context),
-    isGitHubAvailable(context),
-  ]);
-
-  const fetchPromises: Promise<void>[] = [];
-
-  if (enabledSources.linear && linearOk) {
-    fetchPromises.push(
-      fetchLinearTasks(context).then(result => {
-        tasks.push(...result.tasks);
-        if (result.cycleInfo) cycleInfo = result.cycleInfo;
-      }).catch(err => {
-        console.error('[TASKS] Error fetching Linear tasks:', err);
-      })
-    );
-  }
-
-  if (enabledSources.github && githubOk) {
-    fetchPromises.push(
-      fetchGitHubTasks(context, { assignedOnly: enabledSources.githubAssignedOnly }).then(ghTasks => {
-        tasks.push(...ghTasks);
-      }).catch(err => {
-        console.error('[TASKS] Error fetching GitHub tasks:', err);
-      })
-    );
-  }
-
-  await Promise.all(fetchPromises);
-
-  return { tasks, cycleInfo };
+export async function detectAvailableSources(_context: vscode.ExtensionContext): Promise<{ linear: boolean; github: boolean }> {
+  return (await fetchCliTasks({ linear: true, github: true, githubAssignedOnly: false })).sources;
 }
 
-// Get tasks grouped by source for UI display
-export async function fetchTasksGrouped(
-  context: vscode.ExtensionContext,
-  enabledSources: TaskSourceSettings
-): Promise<Map<TaskSource, UnifiedTask[]>> {
+export async function fetchAllTasks(_context: vscode.ExtensionContext, enabledSources: TaskSourceSettings): Promise<{ tasks: UnifiedTask[]; cycleInfo: CycleInfo | null }> {
+  const result = await fetchCliTasks(enabledSources);
+  return { tasks: result.tasks, cycleInfo: result.cycleInfo };
+}
+
+export async function fetchTasksGrouped(context: vscode.ExtensionContext, enabledSources: TaskSourceSettings): Promise<Map<TaskSource, UnifiedTask[]>> {
   const { tasks } = await fetchAllTasks(context, enabledSources);
   return groupTasksBySource(tasks);
 }

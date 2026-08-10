@@ -3215,12 +3215,12 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
       case 'getWatchdogPlaybookStatus': {
         settingsPanel?.webview.postMessage({
           type: 'watchdogPlaybookStatus',
-          status: getWatchdogPlaybookStatus(),
+          status: await getWatchdogPlaybookStatus(),
         });
         break;
       }
       case 'openWatchdogPlaybook': {
-        ensureWatchdogPlaybookScaffold();
+        await ensureWatchdogPlaybookScaffold();
         const uri = vscode.Uri.file(WATCHDOG_PLAYBOOK_PATH);
         // Open in the TipTap markdown editor when the user has it enabled
         // (matches openGuide); fall back to the plain text editor otherwise.
@@ -3233,7 +3233,7 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
         }
         settingsPanel?.webview.postMessage({
           type: 'watchdogPlaybookStatus',
-          status: getWatchdogPlaybookStatus(),
+          status: await getWatchdogPlaybookStatus(),
         });
         break;
       }
@@ -3567,11 +3567,11 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
 
   // Push a fresh playbook status whenever the user saves the watchdog playbook
   // so the Panel card's "edited Xs ago" stays accurate without manual refresh.
-  const playbookSaveListener = vscode.workspace.onDidSaveTextDocument((doc) => {
+  const playbookSaveListener = vscode.workspace.onDidSaveTextDocument(async (doc) => {
     if (doc.uri.fsPath === WATCHDOG_PLAYBOOK_PATH) {
       settingsPanel?.webview.postMessage({
         type: 'watchdogPlaybookStatus',
-        status: getWatchdogPlaybookStatus(),
+        status: await getWatchdogPlaybookStatus(),
       });
     }
   });

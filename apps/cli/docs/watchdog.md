@@ -182,3 +182,6 @@ resolution, the unified inject resolver, and the context-carrying/tool-pointing 
 prompt. Planned: seeding the brain with the full fleet snapshot as its starting context; a
 distinct `done` state (so a finished session is never confused with idle); status coverage
 for non-Claude/Codex harnesses; and the shipped default `watchdog/WORKFLOW.md` decider.
+managed through `agents watchdog playbook`. Use `--ensure --json` when a UI needs
+to create the scaffold and receive its canonical path and status; consumers must
+not create or inspect the file directly.

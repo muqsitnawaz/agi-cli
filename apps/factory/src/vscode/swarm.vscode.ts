@@ -3,9 +3,8 @@
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as fsp from 'fs/promises';
 import * as vscode from 'vscode';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { readTailLines } from './sessions.vscode';
 import {
@@ -28,6 +27,7 @@ export type { PromptPackAgent } from '../core/swarm.detect';
 import { readRushTokenCached } from '../core/rushToken';
 import { parseGhChecks, type CiStatus } from '../core/prChecks';
 import { mapCloudStatus } from '../core/cloudStatus';
+import { bootstrapPath, resolveAgentsBin } from '../core/agentsBin';
 
 const execAsync = promisify(exec);
 
@@ -60,13 +60,6 @@ function getPrCiCached(prUrl: string | null | undefined): CiStatus {
   if (!cached || Date.now() - cached.at > CI_TTL_MS) refreshPrCi(prUrl);
   return cached ? cached.status : null;
 }
-
-// Agent data directories
-// agents-cli teams writes to ~/.agents/teams/agents/
-// Legacy ~/.agents/swarm/agents/ kept as a read source for older installs.
-const AGENT_SWARM_DIR = path.join(os.homedir(), '.agents', 'swarm', 'agents');
-const AGENT_TEAMS_DIR = path.join(os.homedir(), '.agents', 'teams', 'agents');
-
 
 export interface AgentInstallStatus {
   installed: boolean;
@@ -923,110 +916,39 @@ export async function fetchTasksBySession(sessionId: string): Promise<TaskSummar
 
 // Fetch all tasks from both agent directories (swarm + teams)
 export async function fetchTasks(limit?: number, filterCwd?: string): Promise<TaskSummary[]> {
-  const agentDirs: Array<{ dir: string; agentId: string }> = [];
-
-  for (const baseDir of [AGENT_SWARM_DIR, AGENT_TEAMS_DIR]) {
-    let agentIds: string[];
-    try {
-      agentIds = await fsp.readdir(baseDir);
-    } catch {
-      continue; // directory missing or unreadable
-    }
-    for (const agentId of agentIds) {
-      agentDirs.push({ dir: baseDir, agentId });
-    }
-  }
-
-  if (agentDirs.length === 0) return [];
-
-  const taskMap = new Map<string, AgentDetail[]>();
-  const taskTimes = new Map<string, Date>();
-
-  for (const { dir, agentId } of agentDirs) {
-    const agentDir = path.join(dir, agentId);
-    const metaPath = path.join(agentDir, 'meta.json');
-    const logPath = path.join(agentDir, 'stdout.log');
-
-    try {
-      let metaContent: string;
-      try {
-        metaContent = await fsp.readFile(metaPath, 'utf-8');
-      } catch {
-        continue; // meta.json missing or unreadable
-      }
-      const meta: AgentMeta = JSON.parse(metaContent);
-
-      // Filter by workspace cwd if specified (allow null cwd through)
-      if (filterCwd && meta.cwd && meta.cwd !== filterCwd) continue;
-
-      const startedAt = new Date(meta.started_at);
-      const completedAt = meta.completed_at ? new Date(meta.completed_at) : null;
-      const logData = await parseAgentLog(logPath);
-
-      const detail: AgentDetail = {
-        agent_id: meta.agent_id,
-        agent_type: meta.agent_type,
-        status: meta.status,
-        duration: calcDuration(startedAt, completedAt, meta.status),
-        started_at: meta.started_at,
-        completed_at: meta.completed_at,
-        prompt: meta.prompt.length > 150 ? meta.prompt.substring(0, 147) + '...' : meta.prompt,
-        cwd: meta.cwd,
-        mode: meta.mode,
-        files_created: [...new Set(logData.filesCreated)],
-        files_modified: [...new Set(logData.filesModified)],
-        files_deleted: [...new Set(logData.filesDeleted)],
-        bash_commands: logData.bashCommands.slice(-10),
-        last_messages: logData.lastMessages,
-        cloud_session_id: meta.cloud_session_id || null,
-        cloud_provider: meta.cloud_provider || null,
-        pr_url: meta.pr_url || null,
-        ci_status: getPrCiCached(meta.pr_url),
-        task_type: (meta as { task_type?: AgentDetail['task_type'] }).task_type ?? null,
-        name: (meta as { name?: string | null }).name ?? null,
-        after: Array.isArray((meta as { after?: string[] }).after) ? (meta as { after?: string[] }).after : [],
-      };
-
-      const existing = taskMap.get(meta.task_name) || [];
-      existing.push(detail);
-      taskMap.set(meta.task_name, existing);
-
-      // Track latest activity time for task
-      const activityTime = completedAt || startedAt;
-      const currentLatest = taskTimes.get(meta.task_name);
-      if (!currentLatest || activityTime > currentLatest) {
-        taskTimes.set(meta.task_name, activityTime);
-      }
-    } catch {
-      // Skip invalid entries
-    }
-  }
-
-  // Build task summaries
-  const tasks: TaskSummary[] = [];
-  for (const [taskName, agents] of taskMap) {
-    const statusCounts = { running: 0, completed: 0, failed: 0, stopped: 0 };
-    for (const agent of agents) {
-      if (agent.status === 'running') statusCounts.running++;
-      else if (agent.status === 'completed') statusCounts.completed++;
-      else if (agent.status === 'failed') statusCounts.failed++;
-      else if (agent.status === 'stopped') statusCounts.stopped++;
-    }
-
-    // Sort agents by started_at (most recent first)
-    agents.sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime());
-
-    tasks.push({
-      task_name: taskName,
-      agent_count: agents.length,
-      status_counts: statusCounts,
-      latest_activity: (taskTimes.get(taskName) || new Date()).toISOString(),
-      agents,
+  const bin = await resolveAgentsBin();
+  const args = ['teams', 'list', '--json', '--limit', String(limit ?? 20)];
+  if (filterCwd) args.push('--cwd', filterCwd);
+  const { stdout } = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    execFile(bin, args, { env: { ...process.env, PATH: `${bootstrapPath(bin)}:${process.env.PATH ?? ''}` } }, (error, out, err) => {
+      if (error) reject(error);
+      else resolve({ stdout: out, stderr: err });
     });
-  }
-
-  // Sort tasks by latest activity (most recent first)
-  tasks.sort((a, b) => new Date(b.latest_activity).getTime() - new Date(a.latest_activity).getTime());
+  });
+  const rows = (JSON.parse(stdout) as { teams?: Array<Record<string, any>> }).teams ?? [];
+  const tasks: TaskSummary[] = rows.map((team) => ({
+    task_name: String(team.task_name),
+    agent_count: Number(team.agent_count ?? 0),
+    status_counts: {
+      running: Number(team.running ?? 0),
+      completed: Number(team.completed ?? 0),
+      failed: Number(team.failed ?? 0),
+      stopped: Number(team.stopped ?? 0),
+    },
+    latest_activity: String(team.modified_at),
+    agents: (Array.isArray(team.agents) ? team.agents : []).map((agent: Record<string, any>) => ({
+      ...agent,
+      duration: agent.duration ?? null,
+      cwd: agent.cwd ?? null,
+      completed_at: agent.completed_at ?? null,
+      files_created: agent.files_created ?? [],
+      files_modified: agent.files_modified ?? [],
+      files_deleted: agent.files_deleted ?? [],
+      bash_commands: agent.bash_commands ?? [],
+      last_messages: agent.last_messages ?? [],
+      ci_status: getPrCiCached(agent.pr_url),
+    })) as AgentDetail[],
+  }));
 
   // Merge cloud runs from Prix API
   try {
@@ -1037,7 +959,7 @@ export async function fetchTasks(limit?: number, filterCwd?: string): Promise<Ta
     // Cloud runs unavailable — continue with local data only
   }
 
-  return limit ? tasks.slice(0, limit) : tasks;
+  return tasks;
 }
 
 // Rush Cloud runs from Prix API

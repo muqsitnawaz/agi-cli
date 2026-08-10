@@ -137,6 +137,7 @@ export interface CloudTaskLite {
 
 export interface TeamLite {
   task_name: string;
+  agents?: TeammateLite[];
   agent_count: number;
   pending: number;
   running: number;
@@ -416,12 +417,9 @@ export interface TeamWithMates extends TeamLite {
 // keep the panel responsive.
 export async function listTeamsForCwd(cwd: string | undefined): Promise<TeamWithMates[]> {
   if (!cwd) return [];
-  const teams = await listAllTeams();
-  const matched = teams.filter((t) => pathsRelated(t.workspace_dir, cwd)).slice(0, 6);
-  const withMates = await Promise.all(
-    matched.map(async (t) => ({ ...t, teammates: await getTeamStatus(t.task_name) }))
-  );
-  return withMates;
+  const raw = await runJson<any>(['teams', 'list', '--cwd', cwd, '--limit', '6', '--json'], { teams: [] });
+  const teams = (Array.isArray(raw) ? raw : Array.isArray(raw?.teams) ? raw.teams : []) as TeamLite[];
+  return teams.map((team) => ({ ...team, teammates: team.agents ?? [] }));
 }
 
 // Collect live session ids from the VS Code terminal environment so we can

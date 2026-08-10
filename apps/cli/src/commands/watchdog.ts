@@ -20,6 +20,8 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 import * as path from 'path';
+import * as fs from 'fs';
+import { homedir } from 'os';
 import { setHelpSections } from '../lib/help.js';
 import { parseDuration } from '../lib/hooks/cache.js';
 import { getRuntimeStateDir } from '../lib/state.js';
@@ -41,6 +43,44 @@ import { selectWatchdogHistory } from '../lib/watchdog/history.js';
 /** Default state dir the runner and these subcommands share. */
 function stateDir(): string {
   return path.join(getRuntimeStateDir(), 'watchdog');
+}
+
+export const WATCHDOG_PLAYBOOK_TEMPLATE = `# Watchdog Playbook
+
+House rules for the Watchdog. Add patterns you've observed. One rule per bullet.
+Be specific.
+
+## Nudge recipes
+
+- When the agent says "I'll write/create/run X" with no matching tool call
+  in the next 30 seconds, nudge: "Do it now."
+
+## Skip rules
+
+- Skip if the last assistant message ends with a question mark — user input expected.
+
+## Project-specific
+
+- (Add rules tied to your repos here.)
+`;
+
+export function watchdogPlaybookPath(): string {
+  return path.join(homedir(), '.agents', 'playbooks', 'watchdog.md');
+}
+
+export function watchdogPlaybookStatus(ensure = false): { path: string; exists: boolean; lines: number; mtimeMs: number } {
+  const playbookPath = watchdogPlaybookPath();
+  if (ensure && !fs.existsSync(playbookPath)) {
+    fs.mkdirSync(path.dirname(playbookPath), { recursive: true });
+    fs.writeFileSync(playbookPath, WATCHDOG_PLAYBOOK_TEMPLATE, 'utf8');
+  }
+  try {
+    const stat = fs.statSync(playbookPath);
+    const content = fs.readFileSync(playbookPath, 'utf8');
+    return { path: playbookPath, exists: true, lines: content.split('\n').filter((line) => line.trim()).length, mtimeMs: stat.mtimeMs };
+  } catch {
+    return { path: playbookPath, exists: false, lines: 0, mtimeMs: 0 };
+  }
 }
 
 /**
@@ -248,6 +288,9 @@ export function registerWatchdogCommand(program: Command): void {
 
       # Opt out of in-place rotate only (nudging stays on)
       agents watchdog rotate off
+
+      # Create the user playbook if absent and return its path/status
+      agents watchdog playbook --ensure --json
     `,
     notes: `
       Decision path: a cheap deterministic pre-filter resolves the obvious cases
@@ -376,6 +419,19 @@ export function registerWatchdogCommand(program: Command): void {
       }
       console.log(`state dir: ${chalk.dim(stateDir())}`);
       console.log(`history: ${chalk.dim('agents watchdog history')}`);
+    });
+
+  cmd.command('playbook')
+    .description('Show the canonical Watchdog playbook path and status.')
+    .option('--ensure', 'Create the canonical playbook scaffold when it is absent')
+    .option('--json', 'Emit machine-readable status')
+    .action((opts: { ensure?: boolean; json?: boolean }, command) => {
+      const status = watchdogPlaybookStatus(opts.ensure === true);
+      if (command.optsWithGlobals().json === true) {
+        console.log(JSON.stringify(status));
+        return;
+      }
+      console.log(`${status.exists ? 'watchdog playbook' : 'watchdog playbook missing'}: ${status.path}`);
     });
 
   cmd.command('history [sessionId]')

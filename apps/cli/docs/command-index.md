@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_105 command groups · 583 commands._
+_105 command groups · 584 commands._
 
 ## accounts — Manage durable provider credentials
 
@@ -1091,6 +1091,7 @@ agents watchdog                              Auto-nudge stalled agent terminals:
 agents watchdog history [sessionId]          Show persisted Watchdog decisions and actions, newest first.
 agents watchdog off                          Disable the daemon watchdog pass on this device.
 agents watchdog on                           Enable the daemon watchdog pass on this device.
+agents watchdog playbook                     Show the canonical Watchdog playbook path and status.
 agents watchdog policy <sessionId> <policy>  Set per-session policy: off (ignore) | keep (default) | handsoff (detect + flag, never inject).
 agents watchdog rotate <state>               Turn in-place rotate of rate-limited sessions on|off (watchdog.rotate in agents.yaml). Rotate-only: nudging stays on — unlike `watchdog off`, which disables the whole watchdog on this device.
 agents watchdog status                       Show whether the daemon watchdog pass is enabled and where state is written.

@@ -1244,6 +1244,13 @@ export function buildTeamRowsFromSnapshots(
   };
 }
 
+export function teamPathRelated(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const left = path.resolve(a).replace(/[\\/]+$/, '');
+  const right = path.resolve(b).replace(/[\\/]+$/, '');
+  return left === right || left.startsWith(right + path.sep) || right.startsWith(left + path.sep);
+}
+
 function snapshotFromMeta(meta: any): TeamListAgentSnapshot | null {
   if (!meta || typeof meta !== 'object') return null;
   const agentId = typeof meta.agent_id === 'string' ? meta.agent_id : '';
@@ -1479,10 +1486,11 @@ export function registerTeamsCommands(program: Command): void {
     .option('--status <status>', 'Filter: only teams with this status (working, done, failed, or empty)')
     .option('--since <time>', 'Filter: teams active after this time (e.g. "2h", "7d", or ISO date)')
     .option('--until <time>', 'Filter: teams active before this time (e.g. "30d", or ISO date)')
+    .option('--cwd <path>', 'Filter: teams whose workspace is this path, a parent, or a descendant')
     .option('-n, --limit <n>', 'Show at most this many teams (default: 20)', '20')
     .option('--json', 'Output machine-readable JSON instead of formatted table')
     .action(async (query: string | undefined, opts: {
-      agent?: string; status?: string; since?: string; until?: string;
+      agent?: string; status?: string; since?: string; until?: string; cwd?: string;
       limit: string; json?: boolean;
     }) => {
       const limit = Math.max(1, parseInt(opts.limit, 10) || 20);
@@ -1550,11 +1558,14 @@ export function registerTeamsCommands(program: Command): void {
         if (!cutoff) dieFriction('teams', 'invalid-until-filter', `Could not parse --until '${opts.until}'`);
         rows = rows.filter((row) => new Date(row.team.modified_at).getTime() <= cutoff);
       }
+      if (opts.cwd) {
+        rows = rows.filter((row) => teamPathRelated(row.team.workspace_dir, opts.cwd));
+      }
 
       rows = rows.slice(0, limit);
 
       if (isJsonMode(opts)) {
-        console.log(JSON.stringify({ teams: rows.map((row) => row.team) }, null, 2));
+        console.log(JSON.stringify({ teams: rows.map((row) => ({ ...row.team, agents: row.agents })) }, null, 2));
         return;
       }
 

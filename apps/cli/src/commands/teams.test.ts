@@ -129,6 +129,13 @@ describe('teams list output modes', () => {
     expect(JSON.parse(stdout)).toEqual({ teams: [] });
   });
 
+  it('emits teammate details in the aggregate JSON list', () => {
+    const { stdout, status } = run(['teams', 'list', '--json'], (home) => seedTeam(home, 'detail-team', [remoteSnapshot()]));
+    expect(status).toBe(0);
+    const parsed = JSON.parse(stdout);
+    expect(parsed.teams[0].agents[0]).toMatchObject({ agent_id: 'agent-remote-1', agent_type: 'codex' });
+  });
+
   it('builds list rows from cached teammate metadata', () => {
     const result = buildTeamRowsFromSnapshots(
       { 'remote-lag': { created_at: '2026-08-01T12:00:00.000Z', description: 'remote work' } },
