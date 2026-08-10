@@ -41,6 +41,7 @@ import {
   getUserAgentsDir,
   readMeta,
   updateMeta,
+  withMetaLock,
 } from '../state.js';
 import { atomicWriteFileSync } from '../fs-atomic.js';
 import { machineId } from '../machine-id.js';
@@ -159,90 +160,57 @@ export function migrateDeviceConfigStores(): void {
     selfPins = (JSON.parse(fs.readFileSync(pinsPath, 'utf-8')) as typeof selfPins) || {};
   } catch { /* absent or malformed — the fold below recreates it */ }
 
-  // Anything to do?
-  const docsNeedingWork = docs.filter(
-    ({ doc }) =>
-      doc.config !== undefined ||
-      typeof doc.defaultBrowserProfile === 'string' ||
-      doc.agents !== undefined ||
-      doc.isolatedAgents !== undefined,
-  );
-  const autoLaunchPending = fs.existsSync(autoLaunchPath) && Object.keys(autoLaunchFlags).length > 0;
-  if (!centralHasConfig && !autoLaunchPending && docsNeedingWork.length === 0 && !fs.existsSync(autoLaunchPath)) {
-    return;
+  // ── 1b. Plan (pure) — so a converged install never takes the meta lock or
+  //    rewrites a byte-identical doc on every boot.
+  const plans: Array<{ name: string; path: string; next: Record<string, unknown> }> = [];
+  for (const { name, path: docPath, doc } of docs) {
+    const plan = planDeviceDocFold(name, docPath, doc, centralDevices[name]?.config, autoLaunchFlags[name]);
+    if (plan) plans.push(plan);
   }
-
-  // ── 2. Destination writes FIRST (crash-safe) ─────────────────────────────
-  // 2a. THIS machine's pins: doc pins merge INTO the pins file (pins file
-  //     wins — it is the destination, and a re-fold after a crash must not
-  //     clobber pins the new CLI already wrote).
+  const docNames = new Set(docs.map((d) => d.name));
+  const newDocs: Array<{ path: string; doc: Record<string, unknown> }> = [];
+  for (const [name, ov] of Object.entries(centralDevices)) {
+    if (docNames.has(name) || !isConfigMap(ov?.config)) continue;
+    newDocs.push({ path: path.join(devicesRoot, name, 'agents.yaml'), doc: { config: { ...autoLaunchFlags[name], ...ov.config } } });
+  }
+  for (const [name, flags] of Object.entries(autoLaunchFlags)) {
+    if (docNames.has(name) || isConfigMap(centralDevices[name]?.config)) continue;
+    newDocs.push({ path: path.join(devicesRoot, name, 'agents.yaml'), doc: { config: { ...flags } } });
+  }
   const selfDoc = docs.find((d) => d.name === self);
   const docAgents = isConfigMap(selfDoc?.doc.agents) ? (selfDoc!.doc.agents as Record<string, string>) : undefined;
   const docIsolated = isConfigMap(selfDoc?.doc.isolatedAgents)
     ? (selfDoc!.doc.isolatedAgents as Record<string, string>)
     : undefined;
-  if (docAgents || docIsolated) {
-    const pins: typeof selfPins = { ...selfPins };
-    if (docAgents) pins.agents = { ...docAgents, ...selfPins.agents };
-    if (docIsolated) pins.isolatedAgents = { ...docIsolated, ...selfPins.isolatedAgents };
-    try {
-      fs.mkdirSync(path.dirname(pinsPath), { recursive: true });
-      atomicWriteFileSync(pinsPath, JSON.stringify(pins, null, 2) + '\n');
-    } catch (err) {
-      console.error(`device config migration: could not write ${pinsPath} (${(err as Error).message}); a later run retries`);
-    }
-  }
+  const hasDestinationWork = plans.length > 0 || newDocs.length > 0 || docAgents !== undefined || docIsolated !== undefined;
 
-  // 2b. Each device doc: merge config layers (auto-launch flags < existing doc
-  //     config < central #2458 config — newest wins), fold the top-level
-  //     defaultBrowserProfile, and strip pins from the tracked file.
-  for (const { name, path: docPath, doc } of docs) {
-    const config: Record<string, unknown> = {};
-    // Oldest layer first: auto-launch.json flags.
-    Object.assign(config, autoLaunchFlags[name]);
-    // The doc's own config: block.
-    if (doc.config !== undefined) {
-      if (!isConfigMap(doc.config)) {
-        console.error(`device config migration: ${docPath} has a non-map config: block; leaving it for manual repair`);
-        continue;
+  const autoLaunchPending = fs.existsSync(autoLaunchPath);
+  if (!centralHasConfig && !hasDestinationWork && !autoLaunchPending) return;
+
+  // ── 2. Destination writes FIRST (crash-safe), under the meta lock so they
+  //    serialize against writeMetaUnlocked's own read-merge-write of the doc.
+  //    Only taken when there IS a write — a converged install never locks
+  //    (taking it would create a default central agents.yaml as a side effect).
+  if (hasDestinationWork) {
+    withMetaLock(() => {
+      // 2a. THIS machine's pins: doc pins merge INTO the pins file (pins file
+      //     wins — it is the destination, and a re-fold after a crash must not
+      //     clobber pins the new CLI already wrote).
+      if (docAgents || docIsolated) {
+        const pins: typeof selfPins = { ...selfPins };
+        if (docAgents) pins.agents = { ...docAgents, ...selfPins.agents };
+        if (docIsolated) pins.isolatedAgents = { ...docIsolated, ...selfPins.isolatedAgents };
+        try {
+          fs.mkdirSync(path.dirname(pinsPath), { recursive: true });
+          atomicWriteFileSync(pinsPath, JSON.stringify(pins, null, 2) + '\n');
+        } catch (err) {
+          console.error(`device config migration: could not write ${pinsPath} (${(err as Error).message}); a later run retries`);
+        }
       }
-      Object.assign(config, doc.config);
-    }
-    if (typeof doc.defaultBrowserProfile === 'string' && config.defaultBrowserProfile === undefined) {
-      config.defaultBrowserProfile = doc.defaultBrowserProfile;
-    }
-    // Newest layer: the central #2458 block for this device.
-    const centralConfig = centralDevices[name]?.config;
-    if (isConfigMap(centralConfig)) Object.assign(config, centralConfig);
-
-    const next: Record<string, unknown> = {};
-    // Preserve fields the migration does not own (routines:, anything else).
-    for (const [k, v] of Object.entries(doc)) {
-      if (k === 'config' || k === 'defaultBrowserProfile' || k === 'agents' || k === 'isolatedAgents') continue;
-      next[k] = v;
-    }
-    if (Object.keys(config).length > 0) next.config = config;
-
-    const changed =
-      doc.config !== undefined ||
-      typeof doc.defaultBrowserProfile === 'string' ||
-      doc.agents !== undefined ||
-      doc.isolatedAgents !== undefined ||
-      isConfigMap(centralConfig) ||
-      autoLaunchFlags[name] !== undefined;
-    if (changed) writeDeviceDoc(docPath, next);
-  }
-
-  // A device that has central/auto-launch config but NO doc yet gets one.
-  const docNames = new Set(docs.map((d) => d.name));
-  for (const [name, centralOv] of Object.entries(centralDevices)) {
-    if (docNames.has(name) || !isConfigMap(centralOv?.config)) continue;
-    const config = { ...autoLaunchFlags[name], ...centralOv.config };
-    writeDeviceDoc(path.join(devicesRoot, name, 'agents.yaml'), { config });
-  }
-  for (const [name, flags] of Object.entries(autoLaunchFlags)) {
-    if (docNames.has(name) || (centralDevices[name]?.config && isConfigMap(centralDevices[name].config))) continue;
-    writeDeviceDoc(path.join(devicesRoot, name, 'agents.yaml'), { config: { ...flags } });
+      // 2b/2c. The planned doc rewrites + creations.
+      for (const plan of plans) writeDeviceDoc(plan.path, plan.next);
+      for (const nd of newDocs) writeDeviceDoc(nd.path, nd.doc);
+    });
   }
 
   // ── 3. Source strips LAST ────────────────────────────────────────────────
@@ -270,11 +238,58 @@ export function migrateDeviceConfigStores(): void {
   }
 
   // 3b. The legacy auto-launch.json.
-  if (fs.existsSync(autoLaunchPath)) {
+  if (autoLaunchPending) {
     try {
       fs.rmSync(autoLaunchPath, { force: true });
     } catch (err) {
       console.error(`device config migration: could not remove ${autoLaunchPath} (${(err as Error).message}); a later run retries`);
     }
   }
+}
+
+/** Shallow-set equality for folded doc content (values compared deep via JSON). */
+function sameDocContent(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const ak = Object.keys(a);
+  const bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  return ak.every((k) => k in b && JSON.stringify(a[k]) === JSON.stringify(b[k]));
+}
+
+/**
+ * Compute a device doc's post-fold content: merge the config layers (oldest
+ * auto-launch.json flags < the doc's own config: < the central #2458 block —
+ * newest wins), fold a top-level defaultBrowserProfile into config:, and strip
+ * pins from the tracked file. Returns null when the doc is corrupt (loudly —
+ * left for manual repair) or the fold would not change its content.
+ */
+function planDeviceDocFold(
+  name: string,
+  docPath: string,
+  doc: Record<string, unknown>,
+  centralConfig: unknown,
+  autoFlags: Record<string, unknown> | undefined,
+): { name: string; path: string; next: Record<string, unknown> } | null {
+  const config: Record<string, unknown> = {};
+  Object.assign(config, autoFlags);
+  if (doc.config !== undefined) {
+    if (!isConfigMap(doc.config)) {
+      console.error(`device config migration: ${docPath} has a non-map config: block; leaving it for manual repair`);
+      return null;
+    }
+    Object.assign(config, doc.config);
+  }
+  if (typeof doc.defaultBrowserProfile === 'string' && config.defaultBrowserProfile === undefined) {
+    config.defaultBrowserProfile = doc.defaultBrowserProfile;
+  }
+  if (isConfigMap(centralConfig)) Object.assign(config, centralConfig);
+
+  const next: Record<string, unknown> = {};
+  // Preserve fields the migration does not own (routines:, anything else).
+  for (const [k, v] of Object.entries(doc)) {
+    if (k === 'config' || k === 'defaultBrowserProfile' || k === 'agents' || k === 'isolatedAgents') continue;
+    next[k] = v;
+  }
+  if (Object.keys(config).length > 0) next.config = config;
+
+  return sameDocContent(next, doc) ? null : { name, path: docPath, next };
 }

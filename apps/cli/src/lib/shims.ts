@@ -551,10 +551,15 @@ parse_agents_default() {
 parse_pins_default() {
   local pins="$1"
   [ -f "$pins" ] || return 0
+  # Scope carefully: enter ONLY on a line that opens the agents block
+  # (  "agents": {) — an inline-empty map ("agents": {}) must NOT enter,
+  # or the needle would leak into a following "isolatedAgents" block and an
+  # isolated pin would masquerade as the global default. Exit at the block's
+  # closing brace (a trailing comma is fine). Entries sit at exactly 4 spaces.
   awk -v agent="$AGENT" '
-    /^  "agents":/ { in_agents=1; next }
+    /^  "agents": [{]$/ { in_agents=1; next }
     in_agents && /^  }/ { exit }
-    in_agents {
+    in_agents && /^    "/ {
       needle = "\\"" agent "\\":"
       if (index($0, needle) > 0) {
         line = substr($0, index($0, needle) + length(needle))

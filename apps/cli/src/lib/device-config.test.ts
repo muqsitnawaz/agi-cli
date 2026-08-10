@@ -418,4 +418,21 @@ describe('auto-launch accessors', () => {
     expect(loadAutoLaunchPreferences()).toEqual({});
     expect(readDoc('zion')).not.toContain('autoLaunch');
   });
+
+  it('layers the fleet default under device flags, reaching doc-less devices via the roster', async () => {
+    const { setConfigValue, loadAutoLaunchPreferences } = await freshModules();
+
+    setConfigValue('auto-launch.preferred', true, { fleet: true });
+    // A doc-less device only appears when the caller passes the roster.
+    expect(loadAutoLaunchPreferences()).toEqual({});
+    expect(loadAutoLaunchPreferences(['zion'])).toEqual({ zion: { preferred: true } });
+
+    // A device entry wins over the fleet default.
+    setConfigValue('auto-launch.enabled', false, { fleet: true });
+    setConfigValue('auto-launch.enabled', true, { device: 'mac-mini' });
+    const prefs = loadAutoLaunchPreferences(['zion', 'mac-mini']);
+    expect(prefs.zion).toEqual({ preferred: true, enabled: false });
+    expect(prefs['mac-mini'].enabled).toBeUndefined(); // explicit device true wins → not disabled
+    expect(prefs['mac-mini'].preferred).toBe(true); // fleet default still inherits
+  });
 });

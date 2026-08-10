@@ -59,6 +59,13 @@ async function runCapture(opts: CaptureOptions): Promise<void> {
   if (opts.device) {
     names = names.filter((n) => n === opts.device);
     if (names.length === 0) throw new Error(`Device '${opts.device}' is not a registered device.`);
+    // --from-pins reads the LOCAL pins file only (peer pins are machine-local
+    // runtime state and never sync), so targeting a peer would record nothing.
+    if (opts.fromPins && opts.device !== machineId()) {
+      throw new Error(
+        `--from-pins can only read THIS machine's pins ('${machineId()}') — peer pins are machine-local and never sync. Run it on '${opts.device}' itself, or drop --device.`,
+      );
+    }
   }
 
   // Defaults seeded from the source machine's own installed agents.

@@ -34,7 +34,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
-import { META_HEADER, getUserAgentsDir, readMeta, updateMeta } from './state.js';
+import { META_HEADER, getUserAgentsDir, readMeta, updateMeta, withMetaLock } from './state.js';
 import { atomicWriteFileSync } from './fs-atomic.js';
 import { machineId } from './machine-id.js';
 import { assertValidDeviceName } from './devices/registry.js';
@@ -448,20 +448,27 @@ function unsetInFleetDefaults(spec: ConfigKeySpec): void {
 }
 
 function setInDeviceDoc(device: string, spec: ConfigKeySpec, value: unknown): void {
-  const doc = readDeviceDoc(device) ?? {};
-  doc.config = { ...(doc.config as Record<string, unknown> | undefined), [spec.yamlKey]: value };
-  writeDeviceDoc(device, doc);
+  // The doc is shared with writeMetaUnlocked (which owns routines:) — the
+  // read-modify-write runs under the meta lock so the two writers can't lose
+  // each other's update across processes.
+  withMetaLock(() => {
+    const doc = readDeviceDoc(device) ?? {};
+    doc.config = { ...(doc.config as Record<string, unknown> | undefined), [spec.yamlKey]: value };
+    writeDeviceDoc(device, doc);
+  });
 }
 
 function unsetInDeviceDoc(device: string, spec: ConfigKeySpec): void {
-  const doc = readDeviceDoc(device);
-  if (!doc) return; // nothing stored — unset is a no-op
-  const config = doc.config as Record<string, unknown> | undefined;
-  if (!config || !(spec.yamlKey in config)) return; // key not present — no write needed
-  delete config[spec.yamlKey];
-  if (Object.keys(config).length > 0) doc.config = config;
-  else delete doc.config;
-  writeDeviceDoc(device, doc);
+  withMetaLock(() => {
+    const doc = readDeviceDoc(device);
+    if (!doc) return; // nothing stored — unset is a no-op
+    const config = doc.config as Record<string, unknown> | undefined;
+    if (!config || !(spec.yamlKey in config)) return; // key not present — no write needed
+    delete config[spec.yamlKey];
+    if (Object.keys(config).length > 0) doc.config = config;
+    else delete doc.config;
+    writeDeviceDoc(device, doc);
+  });
 }
 
 /**
@@ -547,25 +554,35 @@ export function setAutoLaunchPreferred(name: string, preferred: boolean): void {
   else unsetConfigValue('auto-launch.preferred', { device: name });
 }
 
-/** Every device's auto-launch flags, keyed by device name (device-layer set
- * flags only) — the shape the menu-bar snapshot consumes. */
-export function loadAutoLaunchPreferences(): Record<string, AutoLaunchPreference> {
+/**
+ * Every device's effective auto-launch flags, keyed by device name — the shape
+ * the menu-bar snapshot consumes. Layers like every other device-scope key: the
+ * fleet default (central fleet.defaults.config) applies fleet-wide and the
+ * per-device doc wins on conflict. `roster` (the registered device names) lets
+ * a fleet default reach devices that have no doc of their own; without it only
+ * devices with docs are listed.
+ */
+export function loadAutoLaunchPreferences(roster?: string[]): Record<string, AutoLaunchPreference> {
   ensureDeviceConfigMigrated();
-  const out: Record<string, AutoLaunchPreference> = {};
-  const devicesRoot = path.join(getUserAgentsDir(), 'devices');
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(devicesRoot, { withFileTypes: true });
-  } catch {
-    return out; // no devices/ tree — no flags
+  const fleet = readFleetConfigDefaults();
+  const names = new Set(roster ?? []);
+  if (!roster) {
+    const devicesRoot = path.join(getUserAgentsDir(), 'devices');
+    try {
+      for (const entry of fs.readdirSync(devicesRoot, { withFileTypes: true })) {
+        if (entry.isDirectory()) names.add(entry.name);
+      }
+    } catch { /* no devices/ tree — roster stays empty */ }
   }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const config = readDeviceDocConfig(entry.name);
+  const out: Record<string, AutoLaunchPreference> = {};
+  for (const name of names) {
+    const doc = readDeviceDocConfig(name);
+    const enabled = (doc.autoLaunchEnabled ?? fleet.autoLaunchEnabled) as boolean | undefined;
+    const preferred = (doc.autoLaunchPreferred ?? fleet.autoLaunchPreferred) as boolean | undefined;
     const pref: AutoLaunchPreference = {};
-    if (config.autoLaunchEnabled === false) pref.enabled = false;
-    if (config.autoLaunchPreferred === true) pref.preferred = true;
-    if (pref.enabled !== undefined || pref.preferred !== undefined) out[entry.name] = pref;
+    if (enabled === false) pref.enabled = false;
+    if (preferred === true) pref.preferred = true;
+    if (pref.enabled !== undefined || pref.preferred !== undefined) out[name] = pref;
   }
   return out;
 }

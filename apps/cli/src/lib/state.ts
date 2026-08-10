@@ -857,7 +857,13 @@ function rememberMeta(meta: Meta): Meta {
   return meta;
 }
 
-function withMetaLock<T>(fn: () => T): T {
+/**
+ * Run `fn` while holding the meta file lock (reentrant in-process). Exported
+ * so the OTHER writer of the tracked per-device doc — lib/device-config.ts —
+ * serializes against writeMetaUnlocked's read-merge-write of the same file;
+ * without it a config write racing a meta write loses one side's update.
+ */
+export function withMetaLock<T>(fn: () => T): T {
   ensureAgentsDir();
   if (metaLockDepth > 0) {
     metaLockDepth++;
