@@ -1117,11 +1117,9 @@ export function registerSecretsCommands(program: Command): void {
   const listCmd = cmd
     .command('list [query]')
     .alias('ls')
-    .description('List configured secrets bundles, optionally filtered (use --host/--hosts for other machines over SSH)')
-    .option('--host <target>', 'List bundles on a remote host over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)')
-    .option('--hosts <list>', 'Comma-separated hosts to list in one shot, e.g. yosemite-s0,yosemite-s1')
-    .option('--device <target>', 'Alias for --host')
-    .option('--devices <list>', 'Alias for --hosts')
+    .description('List configured secrets bundles, optionally filtered (use --device/--devices for other machines over SSH)')
+    .option('--device <target>', 'List bundles on a remote device over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)')
+    .option('--devices <list>', 'Comma-separated devices to list in one shot, e.g. yosemite-s0,yosemite-s1')
     .option('--json', 'Emit machine-readable JSON (bundle metadata only — never secret values) instead of the table')
     .option('--policy <list>', "Only these prompt policies (comma-separated): hold, always, never. '--policy never' is the audit for bundles that read with no Touch ID at all")
     .option('--backend <list>', 'Only these backends (comma-separated): keychain, file, vault')
@@ -1135,10 +1133,10 @@ export function registerSecretsCommands(program: Command): void {
     .addOption(new Option('--sort <field>', 'Sort by: name (default), used (most recently used), uses (most frequently accessed), created, updated, expiry').choices([...SORT_FIELDS]))
     .option('-n, --limit <n>', 'Show at most this many bundles (after filtering and sorting)')
     .action(async (query: string | undefined, opts: SecretsListFilterOpts & {
-      host?: string; hosts?: string; device?: string; devices?: string;
+      device?: string; devices?: string;
       json?: boolean; sort?: string; limit?: string;
     }) => {
-      const targets = parseHostsOption(opts);
+      const targets = parseHostsOption({ device: opts.device, devices: opts.devices });
       if (targets.length > 0) {
         // Forward the filters — browseRemote sends this argv verbatim, so a
         // dropped flag would make the remote silently list everything.
@@ -1357,13 +1355,11 @@ export function registerSecretsCommands(program: Command): void {
     .option('--reveal', 'Print keychain-backed values in the clear (TTY only unless --plaintext)')
     .option('--plaintext', 'Allow --reveal in non-interactive shells (use with care)')
     .option('--json', 'Emit machine-readable JSON (values masked unless --reveal) instead of the human view')
-    .option('--host <target>', 'Show a bundle on a remote host over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)')
-    .option('--hosts <list>', 'Comma-separated hosts to show in one shot, e.g. yosemite-s0,yosemite-s1')
-    .option('--device <target>', 'Alias for --host')
-    .option('--devices <list>', 'Alias for --hosts')
-    .action(async (name: string | undefined, opts: { reveal?: boolean; plaintext?: boolean; json?: boolean; host?: string; hosts?: string; device?: string; devices?: string }) => {
+    .option('--device <target>', 'Show a bundle on a remote device over SSH (enrolled `agents hosts` name, ssh-config alias, or user@host)')
+    .option('--devices <list>', 'Comma-separated devices to show in one shot, e.g. yosemite-s0,yosemite-s1')
+    .action(async (name: string | undefined, opts: { reveal?: boolean; plaintext?: boolean; json?: boolean; device?: string; devices?: string }) => {
       try {
-        const targets = parseHostsOption(opts);
+        const targets = parseHostsOption({ device: opts.device, devices: opts.devices });
         if (targets.length > 0) {
           if (!name) {
             console.error(chalk.red('A bundle name is required when viewing a remote host (interactive pick needs a local terminal).'));
@@ -2137,8 +2133,8 @@ Examples:
     .option('--force', 'Overwrite an existing key in the bundle')
     .option('--purge', 'With --from icloud: delete the iCloud copies after a successful import (iCloud propagates the deletion to your other devices)')
     .option('--from-file <path>', `Import from an AES-256-GCM encrypted offline bundle file (needs ${SYNC_PASSPHRASE_ENV}; symmetric counterpart of export --to-file)`)
-    .option('--from-ssh', 'Pull the bundle from a fleet peer over SSH and import it locally (requires --host)')
-    .option('--host <peer>', 'SSH peer to pull from when using --from-ssh (host alias or user@host)')
+    .option('--from-ssh', 'Pull the bundle from a fleet peer over SSH and import it locally (requires --device)')
+    .option('--device <peer>', 'SSH peer to pull from when using --from-ssh (device alias or user@host)')
     .action(async (bundleName: string | undefined, opts: {
       from?: string;
       from1password?: boolean;
@@ -2150,7 +2146,7 @@ Examples:
       purge?: boolean;
       fromFile?: string;
       fromSsh?: boolean;
-      host?: string;
+      device?: string;
     }) => {
       try {
         // A single import can name only one source. --from-file / --from-ssh are
@@ -2183,17 +2179,17 @@ Examples:
         }
 
         if (opts.fromSsh) {
-          if (!opts.host) {
-            throw new Error('--from-ssh requires --host <peer>.');
+          if (!opts.device) {
+            throw new Error('--from-ssh requires --device <peer>.');
           }
-          assertValidSshTarget(opts.host);
+          assertValidSshTarget(opts.device);
           const resolvedBundleName = bundleName ?? (await pickBundleName('import into'));
-          const target = await resolveHostSshTarget(opts.host);
-          const env = await remoteResolveEnv(target, resolvedBundleName, { osLookupName: opts.host });
+          const target = await resolveHostSshTarget(opts.device);
+          const env = await remoteResolveEnv(target, resolvedBundleName, { osLookupName: opts.device });
           const bundle = resolveImportBundle(resolvedBundleName, opts.backend, opts.synced, opts.force);
           const { added, skipped } = applyEnvToBundle(bundle, env, opts);
-          emitSecretAudit({ event: 'secrets.import', bundle: bundle.name, operation: 'import --from-ssh', source: 'ssh', host: opts.host, status: 'success', keyCount: added });
-          console.log(chalk.green(`Imported ${added} key(s) from ${opts.host}${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
+          emitSecretAudit({ event: 'secrets.import', bundle: bundle.name, operation: 'import --from-ssh', source: 'ssh', host: opts.device, status: 'success', keyCount: added });
+          console.log(chalk.green(`Imported ${added} key(s) from ${opts.device}${skipped ? `, skipped ${skipped} (already set, pass --force)` : ''}.`));
           return;
         }
 
@@ -2252,21 +2248,19 @@ Examples:
 
   cmd
     .command('export [bundle]')
-    .description('Resolve a bundle and print KEY=VALUE lines, push it to a 1Password vault with --to-1password, or push it to remote machine(s) over SSH with --host.')
+    .description('Resolve a bundle and print KEY=VALUE lines, push it to a 1Password vault with --to-1password, or push it to remote machine(s) over SSH with --device.')
     .option('--plaintext', 'Acknowledge that the resolved values will be printed in the clear (shell export mode)')
     .option('--to-1password', 'Push every key in the bundle as a PASSWORD item in a 1Password vault')
     .option('--vault <name>', '1Password vault name (used with --to-1password)')
-    .option('--host <target...>', 'Push the bundle over SSH to this target (host alias or user@host); repeatable for multiple machines')
-    .option('--device <target...>', 'Alias for --host; repeatable')
-    .option('--remote-backend <backend>', 'Backend for the bundle on the remote (with --host): keychain (default) or file. file is headless-readable via the remote\'s machine-local key; it forwards AGENTS_SECRETS_PASSPHRASE over stdin only if set (opt-in).', 'keychain')
-    .option('--force', 'Overwrite existing keys/items on the target (used with --to-1password and --host)')
+    .option('--device <target...>', 'Push the bundle over SSH to this device (host alias or user@host); repeatable for multiple machines')
+    .option('--remote-backend <backend>', 'Backend for the bundle on the remote device (with --device): keychain (default) or file. file is headless-readable via the remote\'s machine-local key; it forwards AGENTS_SECRETS_PASSPHRASE over stdin only if set (opt-in).', 'keychain')
+    .option('--force', 'Overwrite existing keys/items on the target (used with --to-1password and --device)')
     .option('--format <shell|json>', 'Output for --plaintext export: shell (default) or json (lossless, machine-readable; used by remote resolve)', 'shell')
     .option('--to-file <path>', `Write the bundle as an AES-256-GCM encrypted offline file (needs ${SYNC_PASSPHRASE_ENV}; symmetric counterpart of import --from-file)`)
     .action(async (bundleName: string | undefined, opts: {
       plaintext?: boolean;
       to1password?: boolean;
       vault?: string;
-      host?: string[];
       device?: string[];
       remoteBackend?: string;
       force?: boolean;
@@ -2274,10 +2268,6 @@ Examples:
       toFile?: string;
     }) => {
       try {
-        // `--device` is an alias for `--host` (fleet vocabulary parity with
-        // `agents run --device`); fold it into the host list up front so
-        // every downstream branch sees one resolved target list.
-        if (opts.device?.length) opts.host = [...(opts.host ?? []), ...opts.device];
         const { readAndResolveBundleEnv, bundleToEnvPrefix, isReservedEnvName } = await import('../lib/secrets/bundles.js');
         const resolvedBundleName = bundleName ?? (await pickBundleName('export'));
 
@@ -2297,10 +2287,10 @@ Examples:
           return;
         }
 
-        // The presence of --host selects SSH push: --host is the destination
+        // The presence of --device selects SSH push: --device is the destination
         // and carries the mode (no separate --to-ssh needed — it would be
-        // strictly redundant since SSH always requires at least one host).
-        const hosts = opts.host ?? [];
+        // strictly redundant since SSH always requires at least one device).
+        const hosts = opts.device ?? [];
         if (hosts.length > 0) {
           for (const h of hosts) assertValidSshTarget(h);
           const parsedBackend = parseBackendOpt(opts.remoteBackend);
@@ -2429,12 +2419,12 @@ Examples:
 
   cmd
     .command('exec <bundle> [command...]')
-    .description('Run a command with the bundle\'s secrets injected into the environment (use --host to resolve the bundle from a remote machine, ephemerally)')
-    .option('--host <target>', 'Resolve <bundle> on a remote host over SSH and inject it (ephemeral — never stored on this machine)')
+    .description('Run a command with the bundle\'s secrets injected into the environment (use --device to resolve the bundle from a remote machine, ephemerally)')
+    .option('--device <target>', 'Resolve <bundle> on a remote device over SSH and inject it (ephemeral — never stored on this machine)')
     .option('--keys <keys>', 'Inject only this comma-separated subset of keys (e.g. KEY1,KEY2). Missing keys are an error.')
     .option('--allow-expired', 'Inject keys even if their expiry date has passed (overrides the pre-run expiry abort).')
     .allowUnknownOption()
-    .action(async (bundleName: string, commandParts: string[], execOpts: { host?: string; keys?: string; allowExpired?: boolean }) => {
+    .action(async (bundleName: string, commandParts: string[], execOpts: { device?: string; keys?: string; allowExpired?: boolean }) => {
       try {
         if (commandParts.length === 0) {
           console.error(chalk.red('Usage: agents secrets exec <bundle> -- <command...>'));
@@ -2445,7 +2435,7 @@ Examples:
           ? execOpts.keys.split(',').map((k) => k.trim()).filter(Boolean)
           : undefined;
         let secretEnv: Record<string, string>;
-        if (execOpts.host) {
+        if (execOpts.device) {
           // Least-privilege flags do not yet cross the SSH resolver —
           // silently applying them would inject the full remote env or an
           // expired key. Fail loud so the user can drop the flag or run
@@ -2453,11 +2443,11 @@ Examples:
           const { assertRemoteBundleFlagsUnsupported } = await import('../lib/secrets/bundles.js');
           assertRemoteBundleFlagsUnsupported(
             bundleName,
-            execOpts.host,
+            execOpts.device,
             { keys: keysSubset, allowExpired: execOpts.allowExpired },
             { keysFlag: '--keys', allowExpiredFlag: '--allow-expired' },
           );
-          secretEnv = await remoteResolveEnv(await resolveHostSshTarget(execOpts.host), bundleName, { osLookupName: execOpts.host });
+          secretEnv = await remoteResolveEnv(await resolveHostSshTarget(execOpts.device), bundleName, { osLookupName: execOpts.device });
         } else {
           const { readAndResolveBundleEnv } = await import('../lib/secrets/bundles.js');
           secretEnv = readAndResolveBundleEnv(bundleName, {
@@ -2659,8 +2649,8 @@ Examples:
     .option('--agent <agent>', 'Narrow the unlock to ONE harness type (for example claude, codex, or kimi). Default: the grant is global — every harness and a plain shell can read it, so one Touch ID covers them all.')
     .option('--keys <keys>', 'Hold ONLY this comma-separated subset of the bundle\'s keys instead of the whole bundle. Scopes exactly one bundle; fails closed on an unknown key. `secrets status` shows which keys a scoped hold covers.')
     .option('--all', 'Unlock every configured bundle')
-    .option('--host <target>', 'Unlock the bundle(s) on this remote machine over SSH instead of locally (file-backed bundles only — the remote\'s passphrase prompt surfaces on your terminal over a -tt session). Single-valued (NOT variadic) so it never swallows the bundle name: `unlock <name> --host <machine>`.')
-    .action(async (names: string[], opts: { ttl?: string; until?: string; durable?: boolean; all?: boolean; host?: string; agent?: string; keys?: string }) => {
+    .option('--device <target>', 'Unlock the bundle(s) on this remote device over SSH instead of locally (file-backed bundles only — the remote\'s passphrase prompt surfaces on your terminal over a -tt session). Single-valued (NOT variadic) so it never swallows the bundle name: `unlock <name> --device <machine>`.')
+    .action(async (names: string[], opts: { ttl?: string; until?: string; durable?: boolean; all?: boolean; device?: string; agent?: string; keys?: string }) => {
       if (opts.ttl && opts.until) {
         console.error(chalk.red('--ttl and --until are mutually exclusive.'));
         process.exit(1);
@@ -2669,8 +2659,8 @@ Examples:
         // --keys scopes ONE bundle to an explicit subset. It is local-only (a
         // remote --host unlock holds the whole file-backed bundle) and cannot
         // combine with --all, which would hold every bundle whole.
-        if (opts.host) {
-          console.error(chalk.red('--keys is local-only; a remote (--host) unlock holds the whole file-backed bundle.'));
+        if (opts.device) {
+          console.error(chalk.red('--keys is local-only; a remote (--device) unlock holds the whole file-backed bundle.'));
           process.exit(1);
         }
         if (opts.all || !names || names.length !== 1) {
@@ -2678,10 +2668,10 @@ Examples:
           process.exit(1);
         }
       }
-      // Single-valued (not variadic): a variadic --host greedily consumes the
-      // positional bundle name (`unlock --host mac wztest` -> host=[mac,wztest],
+      // Single-valued (not variadic): a variadic --device greedily consumes the
+      // positional bundle name (`unlock --device mac wztest` -> device=[mac,wztest],
       // names=[]). Unlock targets one remote at a time anyway.
-      const hosts = opts.host ? [opts.host] : [];
+      const hosts = opts.device ? [opts.device] : [];
       if (hosts.length > 0) {
         // Remote unlock: the REMOTE enforces its own platform rules, so the
         // local darwin-only guard below does NOT apply. Only file-backed

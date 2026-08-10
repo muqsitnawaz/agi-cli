@@ -30,7 +30,7 @@ How agents-cli is laid out on disk and how it decides what to load.
 | [**Specifications**](specifications.md) | **The normative contract** (MUST/SHOULD + Given/When/Then, cited to `file:line`) for the major subsystems — [Sessions](specifications.md#sessions), [Secrets](specifications.md#secrets), [Agent execution](specifications.md#agent-execution). Read the spec for the guarantee; the per-feature docs below for the how-to. |
 | [Sessions](05-sessions.md) | Unified transcript and tool-call search across all 12 `SESSION_AGENTS` harnesses; distinct-call queries, fleet fan-out, readable redacted Markdown rendering for Claude, Codex, Kimi, Grok, Cursor, and Droid; resume, export/import, live-session migration, and local/distributed benchmarks. |
 | [Observability](06-observability.md) | The three `--json` sources (sessions / cloud / teams) as a fleet view, plus `agents mailboxes` fleet comms. |
-| [SSH transport](09-ssh-transport.md) | The one multiplexed engine every `--host` command rides — default connection reuse, keepalive, one-round-trip follow. |
+| [SSH transport](09-ssh-transport.md) | The one multiplexed engine every `--device` command rides — default connection reuse, keepalive, one-round-trip follow. |
 | [Optimizations](99-optimizations.md) | Sync manifest, SSH transport, startup profiling, hot-path notes. |
 | [Landscape](04-landscape.md) | Where agents-cli sits next to similar tools. |
 | [Product acceptance](product-acceptance.md) | User stories + Product cards: stop product regressions when agents write the code. |
@@ -54,7 +54,7 @@ How agents-cli is laid out on disk and how it decides what to load.
 | [Fleet profile sync](fleet.md) | `agents apply` — reconcile every device to a declared `fleet:` profile: install agents, sync config, propagate logins so one signed-in host seeds the fleet. |
 | [Teams](teams.md) | Multi-agent DAG teams, boundary contracts, `--watch` supervisor, `--worktree` isolation, `--cloud` dispatch. |
 | [Cloud](cloud.md) | Unified dispatch across Rush Cloud / Codex Cloud / Factory. Multi-repo tasks, balanced routing, SSE streaming. |
-| [Hosts](hosts.md) | Offload `agents run` to your own machines over SSH (`--host`); track with `agents hosts ps` and view/follow with `agents logs`. |
+| [Hosts](hosts.md) | Offload `agents run` to your own machines over SSH (`--device`); track with `agents hosts ps` and view/follow with `agents logs`. |
 | [Share](share.md) | Publish an HTML artifact to a public link on your own Cloudflare R2 (`agents share <file>`) — zero-egress, BYO-Cloudflare, expiry + fleet mode. |
 | [Routines](03-routines.md) | Cron-scheduled and signed-webhook-triggered agent runs with sandboxed permissions and a long-running daemon. |
 | [Monitors](10-monitors.md) | Durable event-triggered watchers: watch a source, detect a change, fire an action. A routine whose trigger is a watched source instead of a clock. |
@@ -80,7 +80,7 @@ How agents-cli is laid out on disk and how it decides what to load.
 | [PTY](pty.md) | Persistent pseudo-terminals for REPLs and TUIs — start, exec, screen-snapshot, signal. |
 | [Computer](computer.md) | macOS Accessibility automation — screenshot the active app, click by label. |
 | [Menu bar](menubar.md) | macOS status item — live sessions, agents awaiting input, routines, + new session. Auto-enabled, always exactly one instance; `agents menubar setup/enable/disable/status`. |
-| [Terminal engine](terminal-engine.md) | Open a command as a tab or split pane in iTerm / Ghostty / tmux, local or over `--host`. Powers `sessions resume`. |
+| [Terminal engine](terminal-engine.md) | Open a command as a tab or split pane in iTerm / Ghostty / tmux, local or over `--device`. Powers `sessions resume`. |
 
 ---
 

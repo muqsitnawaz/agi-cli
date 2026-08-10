@@ -1596,15 +1596,11 @@ export function registerTeamsCommands(program: Command): void {
     .option('--enable-worktrees', 'Each teammate works in its own git worktree (requires --worktree on add)')
     .option('--use-worktree <path>', 'All teammates share this existing worktree path (mutually exclusive with --enable-worktrees)')
     .option('--devices <list>', 'Pool of machines this team may run teammates on (comma-separated). Enables distributed auto-scheduling.')
-    .option('--hosts <list>', 'Alias for --devices.')
     .option('--repo <urlOrPath>', 'How each remote (--device) teammate gets the code — ONE git URL/path for the whole team (existing checkout reused, else cloned). A team is single-repo; for work across repos, make one team per repo. Defaults to this checkout origin.')
     .option('--json', 'Output machine-readable JSON')
-    .action(async (team: string, opts: { description?: string; enableWorktrees?: boolean; useWorktree?: string; devices?: string; hosts?: string; repo?: string; json?: boolean }) => {
+    .action(async (team: string, opts: { description?: string; enableWorktrees?: boolean; useWorktree?: string; devices?: string; repo?: string; json?: boolean }) => {
       try {
-        // --devices / --hosts are aliases; commander can't express a two-name
-        // option that isn't a short flag, so merge them here. Split on comma,
-        // trim, drop blanks, dedupe (preserving first-seen order).
-        const rawPool = [opts.devices, opts.hosts].filter(Boolean).join(',');
+        const rawPool = opts.devices ?? '';
         const devices: string[] = [];
         for (const d of rawPool.split(',').map((s) => s.trim()).filter(Boolean)) {
           if (!devices.includes(d)) devices.push(d);
@@ -1744,17 +1740,9 @@ export function registerTeamsCommands(program: Command): void {
       await ensureTeam(team);
       const teamMeta = await getTeam(team);
 
-      // `--device`/`--host` are aliases (addHostOption registers both). For `teams
-      // add` the passthrough special-cases them as PLACEMENT, not routing, so the
-      // local action reads them here. Reject a conflicting pair.
-      let explicitDevice = (() => {
-        const h = opts.host;
-        const d = opts.device;
-        if (h && d && h !== d) {
-          dieFriction('teams', 'conflicting-host-device', 'Conflicting --host/--device values — pass just one.');
-        }
-        return h ?? d ?? null;
-      })();
+      // For `teams add` the passthrough special-cases --device as PLACEMENT,
+      // not routing, so the local action reads it here.
+      let explicitDevice = opts.device ?? null;
 
       // `auto` is the same live fleet sentinel `agents run --device auto` resolves
       // (RUSH-2185) — pick the concrete device name up front so the local-machine

@@ -1373,7 +1373,7 @@ describe('agents sessions --resolve local-peer critical path', () => {
       peer = await startSessionResolverSshPeer('old-peer', tempHome);
 
       const result = runAgents(
-        ['sessions', '--resolve', 'abcd7777', '--json', '--host', peer.target],
+        ['sessions', '--resolve', 'abcd7777', '--json', '--device', peer.target],
         repoDir,
         tempHome,
       );
@@ -1402,7 +1402,7 @@ describe('agents sessions --resolve local-peer critical path', () => {
       peer = await startSessionResolverSshPeer('malformed', tempHome);
 
       const result = runAgents(
-        ['sessions', '--resolve', 'abcd7777', '--json', '--host', peer.target],
+        ['sessions', '--resolve', 'abcd7777', '--json', '--device', peer.target],
         repoDir,
         tempHome,
       );

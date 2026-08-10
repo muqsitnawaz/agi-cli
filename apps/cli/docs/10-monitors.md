@@ -180,9 +180,9 @@ Emitted event
   Everywhere else the monitor is inert (`monitorRunsOnThisDevice` returns false).
 - `~/.agents/monitors/` rides the user repo, so a monitor syncs to every machine;
   the owner pin is what makes it fire exactly once.
-- **Remote management** (`--host <device>` on a monitors subcommand, like routines)
+- **Remote management** (`--device <device>` on a monitors subcommand, like routines)
   is a follow-up: the top-level `--device` flag names the OWNER here, which
-  collides with the shared `--host`/`--device` routing alias, so monitors
+  collides with the `--device` routing flag, so monitors
   interpret `--device` locally rather than routing.
 
 ## Hygiene

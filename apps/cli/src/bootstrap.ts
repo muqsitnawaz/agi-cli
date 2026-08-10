@@ -954,14 +954,14 @@ program.on('command:*', (operands) => {
   if (minDist === 1 && closest) {
     const args = process.argv.slice(2);
     args[0] = closest;
-    // The typo'd name was unknown, so the top-level --host router (which ran
+    // The typo'd name was unknown, so the top-level --device router (which ran
     // before commander parsing, against the ORIGINAL name) could not have
     // routed it - it correctly fell through to reach this handler at all
     // (that fallthrough is this ticket's own fix). But falling through to a
     // plain local re-parse means a routing flag on a corrected REAL
-    // host-routable command (e.g. `docto --host box`, corrected to `doctor`)
+    // host-routable command (e.g. `docto --device box`, corrected to `doctor`)
     // silently ran LOCALLY instead of remotely, with no error - worse than
-    // the loud "does not support --host" this ticket replaced. Re-run the
+    // the loud "does not support --device" this ticket replaced. Re-run the
     // router with the CORRECTED name before falling through to local parse;
     // it already no-ops when no routing flag is present. RUSH-2022 review r2.
     void (async () => {
@@ -1026,11 +1026,11 @@ const helpOrVersionRequested = passedArgs.some(
 const brandDisabled = disabledCommandsForActiveBrand();
 const requestedIsDisabled = requestedCommand !== undefined && brandDisabled.has(requestedCommand);
 
-// `--host` passthrough: run this invocation on a remote machine over SSH instead
+// `--device` passthrough: run this invocation on a remote machine over SSH instead
 // of locally. Handled before any local command registration / update check /
 // background sync — a remote run needs none of that. Only the allowlisted
 // read-only + config + teams commands route here; `run`/`sessions` are absent
-// from the table and fall through to their own richer `--host` handling below.
+// from the table and fall through to their own richer `--device` handling below.
 // `--help`/`--version` stay local (docs must work without a reachable host).
 //
 // RUSH-2374: gate the dynamic import on a routing flag actually being present.
@@ -1089,7 +1089,7 @@ if (isLazyRequest && !requestedIsDisabled) {
   const { closest, minDist } = closestTopLevelCommand(requestedCommand, candidates);
 
   if (minDist === 1 && closest && !requestedIsDisabled) {
-    // Auto-correct: register ONLY the corrected command, then re-route --host
+    // Auto-correct: register ONLY the corrected command, then re-route --device
     // and reparse under the real name (RUSH-2329 + RUSH-2022 review r2).
     passedArgs[0] = closest;
     // Keep process.argv in sync for the command:* safety-net and any code that
@@ -1287,10 +1287,10 @@ try {
       console.error(err.message);
       process.exit(1);
     }
-    // A --host targeting a password-auth device throws this from resolveHost.
+    // A --device targeting a password-auth device throws this from resolveHost.
     // It carries an actionable message (switch to key auth / enroll as a host);
     // handling it here covers every resolveHost caller (run, hosts check/rm,
-    // secrets --host) at the source instead of a catch at each call site.
+    // secrets --device) at the source instead of a catch at each call site.
     if (err.name === 'DeviceOffloadUnsupportedError') {
       console.error(err.message);
       process.exit(1);

@@ -79,7 +79,7 @@ describe('parseImportSource', () => {
   });
 });
 
-describe('secrets --device alias wiring (resolves identically to --host)', () => {
+describe('secrets --device wiring', () => {
   function secretsSub(name: string): Command {
     const program = new Command();
     registerSecretsCommands(program);
@@ -93,7 +93,6 @@ describe('secrets --device alias wiring (resolves identically to --host)', () =>
   it('registers --device / --devices on export, list, and view', () => {
     for (const name of ['export', 'list', 'view']) {
       const longs = secretsSub(name).options.map((o) => o.long);
-      expect(longs).toContain('--host');
       expect(longs).toContain('--device');
     }
   });
@@ -102,7 +101,6 @@ describe('secrets --device alias wiring (resolves identically to --host)', () =>
     const cmd = secretsSub('export');
     cmd.exitOverride();
     expect(() => cmd.parseOptions(['apple.com', '--device', 'mac-mini'])).not.toThrow();
-    // Variadic --device mirrors the variadic --host it aliases.
     expect(cmd.opts().device).toEqual(['mac-mini']);
     const cmd2 = secretsSub('export');
     cmd2.exitOverride();

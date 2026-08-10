@@ -218,7 +218,7 @@ export const defaultRunner: RunDispatcher = async (req) => {
   const argv = ['run', req.agent, req.prompt, '--json', '--headless', '--quiet', '--name', name];
   if (req.agent === 'claude') argv.push('--session-id', sessionId);
   if (req.mode) argv.push('--mode', req.mode);
-  if (req.host) argv.push('--host', req.host);
+  if (req.host) argv.push('--device', req.host);
   if (req.cwd) argv.push('--cwd', req.cwd);
 
   const inv = getAgentsInvocation(argv);

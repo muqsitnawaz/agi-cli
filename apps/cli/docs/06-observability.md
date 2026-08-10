@@ -863,7 +863,7 @@ agents feed --filter updates --project agents-cli  # project's progress posts on
 `--filter updates` skips the block pipeline (no stall suppression, no dispatch
 policy) but keeps the same SSH fan-out the block view uses — an agent posts on
 whichever box ran it, so the fleet's posts merge into one recency-ordered list.
-`-H/--host` (alias `--device`) scopes it to named machines; `--local` (or
+`-D/--device` scopes it to named machines; `--local` (or
 `AGENTS_FEED_LOCAL=1`) keeps it to this box. Its `--json` emits the raw
 `status.posted` events.
 
@@ -1283,7 +1283,7 @@ logic changes, so a new metric never reports stale numbers beside fresh ones.
 - **`--narrative` is the only path that sends your data to a model.** It pipes the
   *aggregate* (never raw transcripts, unlike `/insights`) through a headless
   `claude -p`, and writes to stderr so `--json` stays parseable. Two other things do
-  reach the network and are not that: `-H/--host` runs the command on a peer over SSH,
+  reach the network and are not that: `-D/--device` runs the command on a peer over SSH,
   and the index refresh resolves Linear project names when a Linear key is configured.
 - **"Lines touched" is not a diffstat.** It sums the before/after line counts of each
   edit, so an `Edit` whose `old_string` includes unchanged context counts those lines on

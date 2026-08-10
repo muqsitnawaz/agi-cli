@@ -744,7 +744,7 @@ export function placementRequiresFiringPin(strategy: HostStrategy): boolean {
 export interface JobEligibilityResult {
   /** Full human message, e.g. "Job 'NAME' can only run on: a, b". */
   message: string;
-  /** One-line copy-paste suggestion, e.g. "agents routines run NAME --host a". */
+  /** One-line copy-paste suggestion, e.g. "agents routines run NAME --device a". */
   suggestion: string;
   /** Comma-separated allowed devices label, e.g. "a, b". */
   allowedLabel: string;
@@ -769,7 +769,7 @@ export function checkJobDeviceEligibility(
   // refuse the run for exactly the same reason.
   const firstHost = routineOwnerDevice(config) ?? allowed[0] ?? 'HOST';
   const message = `Job '${config.name}' can only run on: ${allowedLabel}`;
-  const suggestion = `agents routines run ${config.name} --host ${firstHost}`;
+  const suggestion = `agents routines run ${config.name} --device ${firstHost}`;
   return { message, suggestion, allowedLabel, firstHost };
 }
 

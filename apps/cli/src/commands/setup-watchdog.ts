@@ -28,7 +28,7 @@ export async function runWatchdogSetupWizard(): Promise<void> {
         setConfigValue('watchdog.enabled', on);
         continue;
       }
-      const launch = getCliLaunch(['watchdog', on ? 'on' : 'off', '--host', device]);
+      const launch = getCliLaunch(['watchdog', on ? 'on' : 'off', '--device', device]);
       const result = spawnSync(launch.command, launch.args, { stdio: 'inherit', env: process.env });
       if ((result.status ?? 1) !== 0) throw new Error(`Could not configure watchdog on ${device}`);
     }
