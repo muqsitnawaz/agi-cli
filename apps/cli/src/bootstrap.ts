@@ -81,6 +81,7 @@ import {
   COMMAND_LOADERS,
   LAZY_COMMAND_NAMES,
   KNOWN_TOP_LEVEL_COMMANDS,
+  RETIRED_TOP_LEVEL_COMMANDS,
   type ModuleLoader,
 } from './lib/startup/command-registry.js';
 import { closestTopLevelCommand } from './lib/startup/spellcheck.js';
@@ -951,7 +952,7 @@ program.on('command:*', (operands) => {
   const unknown = operands[0];
   const { closest, minDist } = closestTopLevelCommand(unknown, KNOWN_TOP_LEVEL_COMMANDS);
 
-  if (minDist === 1 && closest) {
+  if (minDist === 1 && closest && !RETIRED_TOP_LEVEL_COMMANDS.has(unknown)) {
     const args = process.argv.slice(2);
     args[0] = closest;
     // The typo'd name was unknown, so the top-level --host router (which ran
@@ -1088,7 +1089,12 @@ if (isLazyRequest && !requestedIsDisabled) {
   const candidates = [...KNOWN_TOP_LEVEL_COMMANDS].filter((name) => !brandDisabled.has(name));
   const { closest, minDist } = closestTopLevelCommand(requestedCommand, candidates);
 
-  if (minDist === 1 && closest && !requestedIsDisabled) {
+  if (
+    minDist === 1 &&
+    closest &&
+    !requestedIsDisabled &&
+    !RETIRED_TOP_LEVEL_COMMANDS.has(requestedCommand)
+  ) {
     // Auto-correct: register ONLY the corrected command, then re-route --host
     // and reparse under the real name (RUSH-2329 + RUSH-2022 review r2).
     passedArgs[0] = closest;
