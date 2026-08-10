@@ -355,6 +355,51 @@ export function projectBasePath(def: ProjectDef, forRemote: boolean): string | u
   return forRemote ? base : expandLocalHome(base);
 }
 
+/**
+ * The ONE canonical ordered directory list a project binds — the primary
+ * working dir first (`defaultPath ?? root`, the same base as
+ * {@link projectBasePath}), then each bound repo's checkout (`repos[].path`,
+ * joined with `repos[].subpath` when set). Deduped, primary always first.
+ *
+ * Every consumer that needs "which local dirs is this project" reads this, so
+ * they can never drift: the workspace probe ({@link
+ * project-probe.workspaceTargetsForDef}) and every spawn path that grants an
+ * agent access to the project's dirs (`agents run --project` / `teams create
+ * --project`, folded into each harness's `--add-dir`).
+ *
+ * `forRemote: true` keeps each entry home-relative (`~/…`) so the REMOTE login
+ * shell re-roots it, and returns EVERY dir — a box missing a checkout is the
+ * remote's concern, surfaced by the probe as `✗ missing` — mirroring the
+ * `forRemote` contract of {@link resolveDefinedProjectPath}. `forRemote: false`
+ * expands against the LOCAL home and DROPS any dir that does not exist, so a
+ * fleet box missing a checkout never yields a bogus path to a local consumer.
+ */
+export function projectDirsAbs(def: ProjectDef, opts: { forRemote: boolean }): string[] {
+  const raw: string[] = [];
+  const base = def.defaultPath ?? def.root;
+  if (base) raw.push(base);
+  for (const r of def.repos ?? []) {
+    if (!r.path) continue;
+    raw.push(r.subpath ? `${r.path.replace(/\/+$/, '')}/${r.subpath.replace(/^\/+/, '')}` : r.path);
+  }
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of raw) {
+    // Remote keeps `~/…` (re-rooted on the peer); local resolves to an absolute
+    // path. Both round-trip through expandLocalHome so a hand-edited absolute-
+    // under-home or trailing-slash path normalizes to the same string a probe
+    // row echoes, and the dedup below is exact.
+    const norm = opts.forRemote
+      ? toHomeRelative(expandLocalHome(entry))
+      : path.resolve(expandLocalHome(entry));
+    if (seen.has(norm)) continue;
+    seen.add(norm);
+    if (!opts.forRemote && !fs.existsSync(norm)) continue;
+    out.push(norm);
+  }
+  return out;
+}
+
 /** A project plus its repo root as an absolute local path, for cwd matching. */
 interface ProjectRootAbs {
   name: string;

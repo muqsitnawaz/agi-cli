@@ -43,6 +43,7 @@ import {
   type ProjectDef,
   type ProjectContext,
   type ProjectGoal,
+  type ProjectRepo,
 } from '../lib/projects.js';
 import {
   rollupSessionsByProject,
@@ -128,6 +129,46 @@ export function originSlug(cwd: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Resolve a LOCAL directory named by `--dir` / `--add-dir` into a bound repo
+ * entry. The slug is read from THAT directory's `origin` remote via
+ * {@link originSlug} — NEVER inferred from the directory name, because a
+ * checkout dir and its GitHub owner routinely differ (`~/src/github.com/<you>/
+ * agents-cli` vs `phnx-labs/agents-cli`). `slugOverride` (`--slug owner/repo`)
+ * covers a directory that has no origin. The `path` is returned as the resolved
+ * absolute dir; {@link writeProjectDef} normalizes it home-relative on write.
+ *
+ * Throws with an actionable message when the dir does not exist, or when it has
+ * no `origin` remote and no `--slug` was given.
+ */
+export function repoForDir(dir: string, slugOverride?: string): ProjectRepo {
+  const abs = path.resolve(expandLocalHome(dir));
+  if (!fs.existsSync(abs)) {
+    throw new Error(`--dir path not found: ${dir}`);
+  }
+  const slug = slugOverride ?? originSlug(abs);
+  if (!slug) {
+    throw new Error(
+      `Cannot resolve a repo slug for "${dir}": it is not a git repo with an 'origin' remote. ` +
+      `Pass --slug owner/repo, or add an origin in that directory.`,
+    );
+  }
+  return { slug, path: abs };
+}
+
+/**
+ * Turn the `--dir`/`--add-dir` values (+ an optional single `--slug`) into repo
+ * entries. A `--slug` override only makes sense for a single directory, so
+ * passing it with several is a loud error rather than silently stamping every
+ * dir with the same slug.
+ */
+function reposFromDirFlags(dirs: string[], slug: string | undefined): ProjectRepo[] {
+  if (slug && dirs.length > 1) {
+    throw new Error('--slug applies to a single --dir; pass one --dir at a time when overriding the slug.');
+  }
+  return dirs.map((d) => repoForDir(d, dirs.length === 1 ? slug : undefined));
 }
 
 /**
@@ -496,9 +537,10 @@ export function registerProjectsCommands(program: Command): void {
       agents run --project rush           # land an agent in the project
     `,
     notes: `
-      Definitions are hand-editable YAML in ~/.agents/projects/ and sync across
-      machines with 'agents push/pull'. Factory reads and writes only through
-      these commands — never ~/.agents/factory/projects.json.
+      Definitions are hand-editable YAML in ~/.agents/projects/, committed and
+      distributed to the fleet with 'agents repo push user' ('agents push' was
+      removed). Factory reads and writes only through these commands — never
+      ~/.agents/factory/projects.json.
     `,
   });
 
@@ -555,6 +597,8 @@ export function registerProjectsCommands(program: Command): void {
     .option('--root <path>', 'Repo / monorepo root (defaults to the current git repo root)')
     .option('--path <subdir>', 'Default cwd for agents (a monorepo subdir)')
     .option('--repo <owner/repo>', 'Primary GitHub slug (defaults to the origin remote)')
+    .option('--dir <path...>', 'Bind another local repo dir; its slug is read from that dir\'s origin. Repeatable')
+    .option('--slug <owner/repo>', 'Slug override for a single --dir with no origin remote')
     .option('--context <path:purpose...>', 'A described starting point; repeatable')
     .option('--goal <objective:measure...>', 'An outcome the project serves; repeatable')
     .option('--linear <url-or-id>', 'Linear project URL or id')
@@ -562,7 +606,7 @@ export function registerProjectsCommands(program: Command): void {
     .action(
       async (
         name: string,
-        opts: { root?: string; path?: string; repo?: string; context?: string[]; goal?: string[]; linear?: string; force?: boolean },
+        opts: { root?: string; path?: string; repo?: string; dir?: string[]; slug?: string; context?: string[]; goal?: string[]; linear?: string; force?: boolean },
       ) => {
         if (!isSafeProjectName(name)) {
           console.error(chalk.red(`Invalid project name: "${name}" (letters, digits, ., _, - only)`));
@@ -586,6 +630,14 @@ export function registerProjectsCommands(program: Command): void {
         const def: ProjectDef = { name, root };
         if (opts.path) def.defaultPath = `${root!.replace(/\/$/, '')}/${opts.path.replace(/^\//, '')}`;
         if (repo) def.repo = repo;
+        if (opts.dir?.length) {
+          try {
+            def.repos = reposFromDirFlags(opts.dir, opts.slug);
+          } catch (e) {
+            console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+            process.exit(1);
+          }
+        }
         if (opts.context?.length) def.contexts = opts.context.map(parseContextFlag);
         if (opts.goal?.length) def.goals = opts.goal.map(parseGoalFlag);
         if (opts.linear) {
@@ -595,6 +647,7 @@ export function registerProjectsCommands(program: Command): void {
         console.log(chalk.green(`Defined project "${name}"`));
         console.log(chalk.gray(`  ${target}`));
         console.log(chalk.gray(`  root ${def.root}${def.repo ? `  ·  repo ${def.repo}` : ''}`));
+        for (const r of def.repos ?? []) console.log(chalk.gray(`  dir  ${r.path}  ·  ${r.slug}`));
       },
     );
 
@@ -870,14 +923,17 @@ export function registerProjectsCommands(program: Command): void {
     .option('--path <subdir>', 'Default cwd for agents (a monorepo subdir)')
     .option('--description <text>', 'One-line description shown on the card')
     .option('--goal <objective:measure...>', 'Replace the goals this project serves; repeatable')
-    .action((name: string, opts: { repo?: string; root?: string; path?: string; description?: string; goal?: string[] }) => {
+    .option('--add-dir <path...>', 'Bind another local repo dir; its slug is read from that dir\'s origin. Repeatable')
+    .option('--rm-dir <path...>', 'Unbind a previously-bound local repo dir. Repeatable')
+    .option('--slug <owner/repo>', 'Slug override for a single --add-dir with no origin remote')
+    .action((name: string, opts: { repo?: string; root?: string; path?: string; description?: string; goal?: string[]; addDir?: string[]; rmDir?: string[]; slug?: string }) => {
       const def = loadProjectDef(name);
       if (!def) {
         console.error(chalk.red(`No project named "${name}". List them: agents projects list`));
         process.exit(1);
       }
       const fields = (['repo', 'root', 'path', 'description'] as const).filter((k) => opts[k] !== undefined);
-      if (fields.length === 0 && !opts.goal?.length) {
+      if (fields.length === 0 && !opts.goal?.length && !opts.addDir?.length && !opts.rmDir?.length) {
         console.error(chalk.red('Nothing to set. Pass a field, e.g. --repo <owner/repo>.'));
         process.exit(1);
       }
@@ -888,6 +944,28 @@ export function registerProjectsCommands(program: Command): void {
       if (opts.root !== undefined) def.root = opts.root;
       if (opts.description !== undefined) def.description = opts.description;
       if (opts.goal?.length) def.goals = opts.goal.map(parseGoalFlag);
+      // Bound-repo dirs: remove first, then add — a normalized-path key dedups,
+      // so re-adding a bound dir refreshes its slug in place rather than
+      // duplicating the entry. def.repos[].path is stored home-relative, so both
+      // sides normalize through the same home-relative form to match.
+      const dirKey = (p: string): string => toHomeRelative(expandLocalHome(p));
+      if (opts.rmDir?.length) {
+        const remove = new Set(opts.rmDir.map(dirKey));
+        const kept = (def.repos ?? []).filter((r) => !(r.path && remove.has(dirKey(r.path))));
+        def.repos = kept.length ? kept : undefined; // drop an empty list so the YAML stays clean
+      }
+      if (opts.addDir?.length) {
+        let entries: ProjectRepo[];
+        try {
+          entries = reposFromDirFlags(opts.addDir, opts.slug);
+        } catch (e) {
+          console.error(chalk.red(e instanceof Error ? e.message : String(e)));
+          process.exit(1);
+        }
+        const byPath = new Map((def.repos ?? []).map((r) => [r.path ? dirKey(r.path) : r.slug, r]));
+        for (const r of entries) byPath.set(dirKey(r.path!), r);
+        def.repos = [...byPath.values()];
+      }
       if (opts.path !== undefined) {
         // `--path` is a subdir OF the root, so without one there is nothing to
         // hang it off. A def imported with `--from-linear` that found no local
@@ -906,6 +984,10 @@ export function registerProjectsCommands(program: Command): void {
       console.log(chalk.green(`Updated ${def.name}`));
       for (const f of fields) console.log(chalk.gray(`  ${f}  ${f === 'path' ? def.defaultPath : def[f as 'repo' | 'root' | 'description']}`));
       if (opts.goal?.length) console.log(chalk.gray(`  goals  ${def.goals?.map((g) => g.objective).join(' · ')}`));
+      if (opts.addDir?.length || opts.rmDir?.length) {
+        const bound = (def.repos ?? []).filter((r) => r.path);
+        console.log(chalk.gray(`  dirs  ${bound.length ? bound.map((r) => `${r.path} (${r.slug})`).join(' · ') : '(none)'}`));
+      }
     });
 
   // ---- link ----

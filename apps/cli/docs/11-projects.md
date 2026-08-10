@@ -260,18 +260,68 @@ A local workspace probe always feeds this footer (cheap, no SSH). The full per-h
 | Command | Does |
 | --- | --- |
 | `agents projects list [--json] [--with-agents]` | All defined projects (root, repo, …). Definitions only by default — zero session scan / SSH. `--with-agents` is an explicit opt-in for **local** active counts only. |
-| `agents projects add <name>` | Scaffold `<name>.yaml`; infers `root` + origin slug from the current repo. Flags: `--root`, `--path`, `--repo`, `--context path:purpose`, `--goal objective:measure`, `--linear`. |
+| `agents projects add <name>` | Scaffold `<name>.yaml`; infers `root` + origin slug from the current repo. Flags: `--root`, `--path`, `--repo`, `--dir path...` (bind another local repo dir; repeatable), `--slug owner/repo` (slug override for a single `--dir` with no origin), `--context path:purpose`, `--goal objective:measure`, `--linear`. |
 | `agents projects save --json` | Create or update one project from a complete `ProjectDef` JSON object on stdin; validates against the canonical schema, writes atomically under `~/.agents/projects/`, prints the saved definition as JSON. Used by Factory (and any other machine client). |
 | `agents projects view <name>` / `show` | Alias of `status <name>`: full card, every milestone, stored definition. |
 | `agents projects edit <name>` | Open the YAML in `$EDITOR`. |
 | `agents projects status [name] [--json] [--window N] [--no-remote] [--device name...] [--devices a,b,c]` (aliases `view`, `show`) | Progress card for every project across the whole fleet (per-device workspace drift over SSH), or one named project. Named form also prints every milestone and the stored definition. `--device`/`--devices` scopes the fan-out to a subset. |
 | `agents projects link <name> --linear [query]` | Bind a Linear project into the def (`linear.projectId` + url). No query → auto-suggests from the def name + repo slug; ambiguous/none lists candidates and exits 1. Powers the `linear` card line. |
 | `agents projects import --from-linear` | Import the workspace's Linear projects (via the `linear` CLI) as definitions. See [Importing](#importing--from-linear). There is no Factory import path — `~/.agents/factory/projects.json` is never read. |
-| `agents projects set <name> [--repo\|--root\|--path\|--description\|--goal objective:measure]` | Change one field, preserving every other. `--goal` (repeatable) replaces the goals list. Use this rather than `add --force`, which rebuilds the definition from flags alone. |
+| `agents projects set <name> [--repo\|--root\|--path\|--description\|--goal objective:measure\|--add-dir path...\|--rm-dir path...\|--slug owner/repo]` | Change one field, preserving every other. `--goal` (repeatable) replaces the goals list. `--add-dir` / `--rm-dir` (repeatable) bind / unbind a local repo dir in `repos[]` — `--add-dir` reads the slug from that dir's `origin` (never the path); `--slug` overrides it for a single dir with no origin. Use this rather than `add --force`, which rebuilds the definition from flags alone. |
 | `agents projects rm <name> [--json]` | Delete the definition (never touches the repo). `--json` prints `{ ok, name, removed }` (or `{ ok: false, name, error }` on failure). |
 
 `agents run --project <name>` is unchanged in spelling — it just resolves richer
 definitions now.
+
+## Binding several directories, and granting them at spawn (RUSH-2487)
+
+A project is rarely one checkout. The app repo, an infra repo, and a shared
+library each live in their own directory with their own GitHub remote, and an
+agent working the project usually needs to *read* across all of them. A
+definition binds them through `repos[]`, and one resolver hands the list to
+every spawn path so the two can never drift.
+
+**Bind a directory — the slug comes from its remote, never its path.**
+
+```bash
+agents projects add rush --root ~/src/github.com/phnx-labs/rush \
+  --dir ~/src/github.com/muqsitnawaz/rush-infra          # slug read from that dir's origin
+agents projects set rush --add-dir ~/work/shared-lib     # add later
+agents projects set rush --rm-dir ~/work/shared-lib      # unbind
+```
+
+`--dir` / `--add-dir` name a **local directory**. The `owner/repo` slug is read
+by running `git remote get-url origin` **inside that directory** and normalizing
+it — it is **never** inferred from the directory path, because the checkout dir
+and the GitHub owner routinely differ (`~/src/github.com/muqsitnawaz/agents-cli`
+is the checkout; `phnx-labs/agents-cli` is the remote). A directory with no
+`origin` needs an explicit `--slug owner/repo`, or the command errors. Each dir
+is stored as a `repos[]` entry (`{slug, path}`, `path` home-relative via
+`writeProjectDef`), so `agents projects view` shows every bound repo with its
+own path.
+
+**One resolver — `projectDirsAbs`.** `projectDirsAbs(def, { forRemote })`
+(`lib/projects.ts`) is the single source of the project's ordered directory
+list: the primary working dir first (`defaultPath ?? root`), then each
+`repos[].path` (joined with `repos[].subpath` when set), deduped. `forRemote:
+false` expands against the local home and drops any directory that does not
+exist (a fleet box missing a checkout never yields a bogus path); `forRemote:
+true` keeps each entry home-relative (`~/…`) for the remote shell to re-root and
+keeps every entry (the missing one surfaces in the workspace probe as `✗
+missing`). The workspace probe (`workspaceTargetsForDef`) and every spawn path
+read this one list.
+
+**At spawn, the bound dirs become `--add-dir` grants — for Claude and Codex
+only.** `agents run --project <name>` and `agents teams create --project
+<name>` resolve the project's `projectDirsAbs` list and fold the non-primary
+directories into the harness's directory grants (the primary is already the
+cwd). This lands only where a harness has a real "additional accessible
+directory" surface: **Claude** receives them as native `--add-dir` flags
+(`lib/exec.ts:1269`, gated on `agent === 'claude'`), and **Codex** folds them
+into its named edit profile's writable `workspace_roots` (`lib/exec.ts:1133`).
+Every other harness has no equivalent, so the grants are **dropped** for it —
+the agent still runs, with its cwd only. The Factory / VS Codium extension
+reads the same resolver so a project opened there binds the same directory set.
 
 ## Importing — from Linear
 

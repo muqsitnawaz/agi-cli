@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **A project definition binds several local directories, each with its own GitHub remote, and every spawn path grants them (RUSH-2487).** `agents projects add --dir` / `projects set --add-dir` / `--rm-dir` bind local repo dirs whose slug is read from each dir's `origin` (never its path); one resolver (`projectDirsAbs`) feeds the workspace probe, `agents run --project`, `agents teams create --project`, and the extension. `--add-dir` grants apply to Claude and Codex only and are dropped for other harnesses. See
+  `apps/cli/.changelog/next/RUSH-2487.md`.
+
 - **`agents open` resumes a session from an `agents://` deep link, and registers the OS URL-scheme handler.** A rendered artifact (plan/report) can now carry an
   `agents://session/<id>` link in its provenance line; clicking it hands off to the
   OS, which runs `agents open <url>`, parses it, and routes the id into the existing

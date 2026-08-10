@@ -17,7 +17,7 @@ import * as path from 'path';
 import { execFileSync } from 'child_process';
 import chalk from 'chalk';
 import { expandLocalHome, toHomeRelative } from './project-root.js';
-import type { ProjectDef } from './projects.js';
+import { projectDirsAbs, type ProjectDef } from './projects.js';
 
 /** Per-call git budget. A read-only git call taking >3s is wedged by any
  * definition (NFS stall, index lock) — and the fleet fan-out SIGKILLs the SSH
@@ -110,18 +110,17 @@ export function probeProjectWorkspaces(paths: string[]): RepoWorkspaceStatus[] {
 }
 
 /**
- * The home-relative paths to probe for a project definition: its `root` plus
- * each `repos[].path` (the opt-in for additional repos), deduped. Every target
- * is normalized through the same `toHomeRelative(expandLocalHome(...))` the
- * probe echoes, so a hand-edited def (absolute path under home, trailing
- * slash) matches its probe rows exactly — `writeProjectDef` normalizes on
- * write, but defs are hand-editable YAML and never silently drop a row.
+ * The home-relative paths to probe for a project definition — the project's
+ * canonical bound directories from {@link projectDirsAbs}: the primary working
+ * dir (`defaultPath ?? root`) plus each bound repo's checkout (`repos[].path`,
+ * subpath-joined), deduped. `forRemote: true` keeps every target home-relative
+ * (`~/…`, the form the probe echoes) and never drops a missing one — a box
+ * without a checkout must still surface as `✗ missing`, not silently vanish.
+ * Sharing {@link projectDirsAbs} keeps the probe's dir list and every spawn
+ * path's dir list from drifting.
  */
 export function workspaceTargetsForDef(def: ProjectDef): string[] {
-  const targets = [def.root, ...(def.repos ?? []).map((r) => r.path)]
-    .filter((p): p is string => typeof p === 'string' && p.length > 0)
-    .map((p) => toHomeRelative(expandLocalHome(p)));
-  return [...new Set(targets)];
+  return projectDirsAbs(def, { forRemote: true });
 }
 
 /**

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import {
   isSafeProjectName,
   loadProjectDef,
@@ -10,11 +11,13 @@ import {
   removeProjectDef,
   validateProjectDef,
   projectBasePath,
+  projectDirsAbs,
   resolveDefinedProjectPath,
   projectNameForCwd,
   resolveProjectNameForCwd,
   type ProjectDef,
 } from './projects.js';
+import { repoForDir } from '../commands/projects.js';
 
 const HOME = process.env.HOME ?? os.homedir();
 let dir: string;
@@ -224,6 +227,83 @@ describe('projectBasePath', () => {
   it('falls back to root, and undefined when neither set', () => {
     expect(projectBasePath({ name: 'x', root: '~/r' }, true)).toBe('~/r');
     expect(projectBasePath({ name: 'x' }, true)).toBeUndefined();
+  });
+});
+
+describe('projectDirsAbs', () => {
+  it('lists the primary working dir (defaultPath ?? root) first', () => {
+    const def: ProjectDef = {
+      name: 'x',
+      root: '~/src/rush',
+      defaultPath: '~/src/rush/apps/web',
+      repos: [{ slug: 'o/infra', path: '~/src/infra' }],
+    };
+    expect(projectDirsAbs(def, { forRemote: true })).toEqual(['~/src/rush/apps/web', '~/src/infra']);
+  });
+
+  it('joins repos[].subpath onto repos[].path', () => {
+    const def: ProjectDef = {
+      name: 'x',
+      root: '~/src/rush',
+      repos: [{ slug: 'o/infra', path: '~/src/rush-infra', subpath: 'deploy' }],
+    };
+    expect(projectDirsAbs(def, { forRemote: true })).toEqual(['~/src/rush', '~/src/rush-infra/deploy']);
+  });
+
+  it('dedupes a bound repo dir that repeats the primary', () => {
+    const def: ProjectDef = { name: 'x', root: '~/src/rush', repos: [{ slug: 'o/rush', path: '~/src/rush' }] };
+    expect(projectDirsAbs(def, { forRemote: true })).toEqual(['~/src/rush']);
+  });
+
+  it('local drops a non-existent dir but forRemote keeps every one', () => {
+    // A fleet box missing a checkout must not yield a bogus LOCAL path, yet the
+    // remote/probe form keeps it so the peer can report `✗ missing`.
+    const real = fs.mkdtempSync(path.join(os.tmpdir(), 'pd-real-'));
+    const ghost = path.join(os.tmpdir(), 'pd-ghost-absent-xyz');
+    try {
+      const def: ProjectDef = { name: 'x', root: real, repos: [{ slug: 'o/ghost', path: ghost }] };
+      // local: absolute paths, the missing one filtered out.
+      expect(projectDirsAbs(def, { forRemote: false })).toEqual([path.resolve(real)]);
+      // remote: both kept (a tmp path outside HOME echoes as itself).
+      expect(projectDirsAbs(def, { forRemote: true })).toEqual([real, ghost]);
+    } finally {
+      fs.rmSync(real, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('repoForDir (--dir slug inference + home-relative storage)', () => {
+  it('reads the slug from origin (not the path) and stores the path home-relative', () => {
+    // A checkout whose dir sits under HOME but whose GitHub owner differs — the
+    // slug MUST come from origin, never from the directory path.
+    const checkout = fs.mkdtempSync(path.join(HOME, '.projtest-'));
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: checkout });
+      execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:phnx-labs/agents-cli.git'], { cwd: checkout });
+      const repo = repoForDir(checkout);
+      expect(repo.slug).toBe('phnx-labs/agents-cli');
+      writeProjectDef({ name: 'p', root: '~/src/x', repos: [repo] });
+      expect(loadProjectDef('p')?.repos).toEqual([
+        { slug: 'phnx-labs/agents-cli', path: `~/${path.basename(checkout)}` },
+      ]);
+    } finally {
+      fs.rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when the dir has no origin and no --slug, but --slug overrides it', () => {
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'projtest-noorigin-'));
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: bare });
+      expect(() => repoForDir(bare)).toThrow(/origin/i);
+      expect(repoForDir(bare, 'phnx-labs/thing')).toEqual({ slug: 'phnx-labs/thing', path: path.resolve(bare) });
+    } finally {
+      fs.rmSync(bare, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when the dir does not exist', () => {
+    expect(() => repoForDir(path.join(os.tmpdir(), 'projtest-absent-xyz-123'))).toThrow(/not found/);
   });
 });
 
