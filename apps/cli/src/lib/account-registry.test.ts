@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setKeychainBackendForTest, setKeychainToken, type KeychainBackend } from './secrets/index.js';
-import { addAccount, inspectAccount, readAccountRegistry, removeAccount, renameAccount, resolveCredentialAccount, setAccountSecret } from './account-registry.js';
+import { addAccount, inspectAccount, readAccountRegistry, removeAccount, renameAccount, resolveAccountSelection, resolveCredentialAccount, setAccountSecret } from './account-registry.js';
 
 class MemoryKeychain implements KeychainBackend {
   values = new Map<string, string>();
@@ -60,6 +60,13 @@ describe('credential account registry (bundle-canonical)', () => {
       ANTHROPIC_BASE_URL: 'https://gateway.internal/api',
       ANTHROPIC_AUTH_TOKEN: 'sk-or-secret',
     });
+  });
+
+  it('prefers explicit selection, then a per-harness default', () => {
+    const meta = { accounts: { defaults: { claude: 'default-work' } } };
+    expect(resolveAccountSelection('one-run', 'claude', meta)).toBe('one-run');
+    expect(resolveAccountSelection(undefined, 'claude', meta)).toBe('default-work');
+    expect(resolveAccountSelection(undefined, 'codex', meta)).toBeUndefined();
   });
 
   it('rotates a credential without changing the stable id or name', () => {
