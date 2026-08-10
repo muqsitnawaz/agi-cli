@@ -15,64 +15,27 @@ This file is a **map**, not the territory. Keep it a short paragraph per area pl
 /tests          Real-service tests (no mocks)
 ```
 
-## Launch contract (normative — the reviewer enforces this)
+## Thin-client contract (normative)
 
-**Every agent runner AGI EXT launches goes through `agents run <agent>
---interactive --strategy balanced --mode auto`. Always. No per-harness exception,
-no bare command.** There is exactly one non-runner (`shell` — a plain terminal, not
-an `agents run` agent) and exactly one legitimate flag omission (a pinned
-`@version`, which the CLI ignores `--strategy` against — and AGI EXT never pins on a
-New launch, so in practice the flags are always present).
+AGI EXT owns editor presentation only: VS Code terminals, tabs, windows,
+QuickPicks, readiness, and the `swarm-ext://` URI endpoint. agents-cli owns all
+session, device, account, team, ticket, watchdog, routine, lifecycle, ranking,
+deduplication, and scheduling behavior.
 
-Two invariants, no exceptions:
-
-- **`--strategy balanced` is always emitted.** Balanced account/version rotation
-  spreads load and never launches into a throttled or arbitrarily-pinned account.
-  A bare, strategy-less launch is never what we want. `--strategy balanced` is a
-  graceful no-op for a runner with no accounts to rotate (e.g. droid) — the CLI
-  falls back to the default, never errors (`apps/cli/src/lib/rotate.ts`
-  `selectBalancedVersion`, `apps/cli/src/commands/exec.ts` strategy block) — so it
-  is always safe to emit.
-- **`--mode auto` is always emitted** for interactive New launches, so the agent
-  starts writable-but-gated and can edit files without stalling on plan approval.
-
-There are exactly three New-agent variants per harness, and **all three emit the
-same flags — only host selection differs** (`launchAgent` in
-`src/vscode/extension.ts`):
-
-| Command | `launchAgent` opts | Host selector | Full command |
-|---|---|---|---|
-| `Agents: New X` | `{ agentKey, local: true }` | *(none — this machine)* | `agents run X --interactive --strategy balanced --mode auto` |
-| `Agents: New X (Auto)` | `{ agentKey, autoHost: true }` | `--host '<device>'` (resolved) | `agents run X --interactive --host '<device>' --strategy balanced --mode auto` |
-| `Agents: New X (Pick Host)` | `{ agentKey, pickHost: true }` | `--host '<device>'` | `agents run X --interactive --host '<device>' --strategy balanced --mode auto` |
-
-`(Auto)` resolves that device itself (it does NOT hand `--device auto` to the
-CLI): first from the warm health-cache snapshot (`resolveCachedAutoHost` →
-`pickCachedLaunchHost`), and — when that cache is cold or >5min stale — it falls
-through to the same live, favorites-aware fleet sweep the default New-agent path
-uses (`resolveBalancedHost`), honoring enable/prefer and dropping hosts with no
-usable version. It runs local only when no fleet device is genuinely eligible; a
-cold cache no longer silently pins the launch to this Mac (`launchAgent`).
-
-Claude alone adds `--session-id <id>` (minted up front for the resume/fork flow);
-that is the only per-agent addition and it never removes a flag. A **fork**
-(`strategyForForkAgent`) starts a fresh sibling session, so it is balanced by the
-same rule.
-
-**Resume is also unified:** every resumed session — local, offloaded, or
-picked-host — goes through `agents run <agent> --interactive --resume <id>`,
-with `--host '<device>'` appended when the transcript lives on another machine.
-`agents run --resume` resumes under the version that started the session, so
-AGI EXT never emits a per-harness raw binary (`claude -r`, `codex resume`,
-`cursor-agent --resume=`, etc.). The single source for resume command
-construction is `buildVersionedResumeCommand` in `src/core/prewarm.ts`.
-
-**There is no allowlist.** The single source of truth is `isAgentRunner(key)`
-(`src/core/agents.ts`) = `key !== 'shell'`, consumed by `usesManagedAgentLaunch`
-(routing), `launchAgent`/`openSingleAgent` (strategy + routing), and
-`strategyForForkAgent`. Do not reintroduce a per-harness set (the retired
-`STRATEGY_LAUNCH_AGENTS` / `LAUNCHABLE` lists disagreed with each other and left
-local grok/kimi/droid launching as raw binaries with no rotation and no mode).
+- Automatic launch emits `agents run auto --interactive --device auto --strategy
+  balanced --mode auto`; the extension does not score a host, harness, version,
+  or account.
+- The elected monitor leader owns one `agents sessions watch --json` child for
+  all editor windows and broadcasts its versioned `reset`, `upsert`, `remove`,
+  `scope`, and `heartbeat` events. Each extension host keeps one presentation
+  store and derives no lifecycle state.
+- Opening or manually refreshing Resume performs one `agents sessions --all
+  --json --no-interactive --limit 60` read. Resume and Fork call `agents sessions
+  resume <id> --vscodium` and `agents sessions fork <id>` respectively.
+- Other data comes from the matching CLI noun: `devices list/status/accounts`,
+  `teams ... --json`, `tickets list --json`, `watchdog status/history`, and
+  `routines ... --json`. An older CLI that lacks a noun fails with an upgrade
+  error; the extension must not add a filesystem or polling fallback.
 Adding a harness that is a real `agents run` agent needs no launch-code change; it
 inherits the contract. Tests pin it in `src/core/agents.test.ts`
 (`describe('launch contract — every runner is balanced')`).

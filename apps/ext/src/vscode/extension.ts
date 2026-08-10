@@ -5104,35 +5104,19 @@ async function forkCurrentSession(
     return;
   }
 
-  // Open the fork as a normal full tab in the active group. A fork is a fresh
-  // sibling session, not a pane to wedge beside its parent — a side split
-  // shrinks both terminals and is not what forking asks for.
-  const { terminalId, sessionId } = await openSingleAgentWithQueue(context, entry.agentConfig, [request.prompt], {
-    strategy: request.strategy,
-    host: request.host,
-    local: request.local,
-    viewColumn: vscode.ViewColumn.Active,
+  // Fork identity/copy semantics belong to agents-cli. Keep only the editor
+  // terminal that presents the command and its result.
+  const terminal = vscode.window.createTerminal({
+    name: `Fork ${shortSessionId(request.sessionId)}`,
+    location: { viewColumn: vscode.ViewColumn.Active },
+    isTransient: true,
   });
-
-  void recordFork(context, {
-    sourceSessionId: request.sessionId,
-    sourceHost: request.sourceHost ?? LOCAL_MACHINE_ID,
-    forkSessionId: sessionId,
-    forkHost: request.host ?? LOCAL_MACHINE_ID,
-    agentKey: request.agentKey,
-    forkedAt: Date.now(),
-    terminalId,
-  });
-
-  const where = request.host ?? 'this Mac';
-  vscode.window.setStatusBarMessage(
-    opts.intent === 'recap'
-      ? `Started recap from ${shortSessionId(request.sessionId)} on ${where}`
-      : request.moved
-      ? `Forked ${shortSessionId(request.sessionId)} onto ${where} — it reads the transcript from ${request.sourceHost ?? LOCAL_MACHINE_ID}`
-      : `Forked ${shortSessionId(request.sessionId)} on ${where}`,
-    5000,
+  terminal.show(false);
+  await sendCommandWhenReady(
+    terminal,
+    `agents sessions fork ${shquote(request.sessionId)}${opts.intent === 'recap' ? ' --name recap' : ''}`,
   );
+  vscode.window.setStatusBarMessage(`Forking ${shortSessionId(request.sessionId)} through agents-cli`, 5000);
 }
 
 function showForkRejection(reason: 'no_session' | 'no_agent'): void {

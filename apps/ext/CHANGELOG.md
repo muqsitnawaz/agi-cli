@@ -12,6 +12,12 @@ All notable changes to AGI EXT (the VS Code extension) are documented here. Form
   --vscodium`. The extension no longer joins a second active-session query or
   maintains a stale resume-candidate cache.
 
+- **Fleet controls now use canonical CLI nouns.** Fork calls `agents sessions
+  fork`, watchdog controls use `watchdog on|off` and `watchdog history --json`,
+  and device reachability/load/session counts use `devices list/status --json`.
+  The extension no longer SSH-probes CPU/memory, counts remote sessions itself,
+  reads the watchdog JSONL/playbook, or maintains those policy implementations.
+
 ## [0.9.315] - 2026-08-10
 
 - **Launch Warp with the right command.** The Warp agent's `cliCommand` was still the

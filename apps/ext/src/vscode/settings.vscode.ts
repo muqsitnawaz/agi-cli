@@ -43,12 +43,6 @@ import { repoSlugFromPath } from '../core/projectIndex';
 import { matchLinearProject } from '../core/linearProjects';
 import { fetchLinearProjects } from './linear.vscode';
 import { resolveForemanTarget, candidateName } from '../core/foreman.target';
-import { parseEvents, WATCHDOG_LOG_PATH } from '../core/watchdogLog';
-import {
-  WATCHDOG_PLAYBOOK_PATH,
-  ensureWatchdogPlaybookScaffold,
-  getWatchdogPlaybookStatus,
-} from './watchdog.vscode';
 import * as workspaceConfig from './swarmifyConfig.vscode';
 import { createSymlinksCodebaseWide } from './agentlinks.vscode';
 import { scanMemoryFiles } from './contextFiles';
@@ -3204,7 +3198,7 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
       case 'setWatchdogEnabled': {
         const next = !!message.value;
         try {
-          await runAgents(`watchdog ${next ? 'enable' : 'disable'}`);
+          await runAgents(`watchdog ${next ? 'on' : 'off'}`);
           settingsPanel?.webview.postMessage({ type: 'watchdogStatus', enabled: next });
         } catch (err) {
           vscode.window.showErrorMessage(
@@ -3215,8 +3209,12 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
       }
       case 'getWatchdogLog': {
         try {
-          const text = fs.readFileSync(WATCHDOG_LOG_PATH, 'utf8');
-          settingsPanel?.webview.postMessage({ type: 'watchdogLogData', events: parseEvents(text) });
+          const { stdout } = await runAgents('watchdog history --since 24h --json');
+          const parsed = JSON.parse(stdout);
+          settingsPanel?.webview.postMessage({
+            type: 'watchdogLogData',
+            events: Array.isArray(parsed) ? parsed : parsed.events ?? [],
+          });
         } catch {
           settingsPanel?.webview.postMessage({ type: 'watchdogLogData', events: [] });
         }
@@ -3225,26 +3223,12 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
       case 'getWatchdogPlaybookStatus': {
         settingsPanel?.webview.postMessage({
           type: 'watchdogPlaybookStatus',
-          status: getWatchdogPlaybookStatus(),
+          status: { exists: false, lines: 0, mtimeMs: 0 },
         });
         break;
       }
       case 'openWatchdogPlaybook': {
-        ensureWatchdogPlaybookScaffold();
-        const uri = vscode.Uri.file(WATCHDOG_PLAYBOOK_PATH);
-        // Open in the TipTap markdown editor when the user has it enabled
-        // (matches openGuide); fall back to the plain text editor otherwise.
-        const markdownViewerEnabled =
-          getSettings(context).editor?.markdownViewerEnabled ?? true;
-        if (markdownViewerEnabled) {
-          await vscode.commands.executeCommand('vscode.openWith', uri, 'agents.markdownEditor');
-        } else {
-          await vscode.window.showTextDocument(uri, { preview: false });
-        }
-        settingsPanel?.webview.postMessage({
-          type: 'watchdogPlaybookStatus',
-          status: getWatchdogPlaybookStatus(),
-        });
+        vscode.window.showErrorMessage('Watchdog workflows are managed by agents-cli. Upgrade agents-cli to edit them.');
         break;
       }
       case 'retrySwarm':
@@ -3575,17 +3559,6 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
   const terminalListener = vscode.window.onDidOpenTerminal(debouncedTerminalUpdate);
   const terminalCloseListener = vscode.window.onDidCloseTerminal(debouncedTerminalUpdate);
 
-  // Push a fresh playbook status whenever the user saves the watchdog playbook
-  // so the Panel card's "edited Xs ago" stays accurate without manual refresh.
-  const playbookSaveListener = vscode.workspace.onDidSaveTextDocument((doc) => {
-    if (doc.uri.fsPath === WATCHDOG_PLAYBOOK_PATH) {
-      settingsPanel?.webview.postMessage({
-        type: 'watchdogPlaybookStatus',
-        status: getWatchdogPlaybookStatus(),
-      });
-    }
-  });
-
   // Pause webview polling when the panel is hidden behind another tab.
   // retainContextWhenHidden keeps the React tree alive so it can re-render
   // instantly on focus, but its setInterval-driven fetches don't need to
@@ -3601,7 +3574,6 @@ function wirePanel(panel: vscode.WebviewPanel, context: vscode.ExtensionContext)
     settingsPanel = undefined;
     terminalListener.dispose();
     terminalCloseListener.dispose();
-    playbookSaveListener.dispose();
     visibilityListener.dispose();
     if (terminalUpdateTimeout) clearTimeout(terminalUpdateTimeout);
     cleanupSessionWatchers();
