@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -93,5 +94,95 @@ describeDeviceResolution('release.sh --device resolution', () => {
   it('accepts the --device=<name> glued form', () => {
     const { out } = runRelease('1.2.3', '--device=zion', '--home-base-phase');
     expect(out).toContain('home base (zion) must be macOS');
+  });
+});
+
+// RUSH-2541: home_base_wt_snippet's provisionprofile seed used to copy ONLY from
+// REPO_ROOT's on-disk working tree, so a legitimately new home base -- whose own
+// checkout has simply never been git-pulled past commit 2567004b4 (which
+// committed the profile) -- died "absent on the home base" even though `git
+// fetch origin` (which the snippet already runs) had the blob all along. These
+// tests extract and RUN the real function body against synthetic git repos, the
+// same split stuck-release.sh/signing-home-base-probe.sh already use for
+// testability (see the docblock on home_base_wt_snippet in release.sh).
+describe('release.sh: home-base provisionprofile seed recovers from origin (RUSH-2541)', () => {
+  const FUNC_SRC = RELEASE_SH.match(/home_base_wt_snippet\(\) \{[\s\S]*?\n\}/)?.[0];
+
+  function git(cwd: string, ...args: string[]): string {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf-8' });
+    if (r.status !== 0) throw new Error(`git ${args.join(' ')} in ${cwd} failed: ${r.stderr}`);
+    return r.stdout;
+  }
+
+  it('the function is present to extract', () => {
+    expect(FUNC_SRC).toBeDefined();
+  });
+
+  it('recovers embedded.provisionprofile from origin/<default> when the tag predates it and the home base checkout is stale', () => {
+    // origin: a v1.2.3 tag with NO profile (the tagged tree, like the real
+    // stuck v1.22.36), then a later commit that adds the profile to main.
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'rel-snippet-origin-'));
+    git(remote, 'init', '--quiet', '-b', 'main');
+    git(remote, 'config', 'user.email', 'test@example.com');
+    git(remote, 'config', 'user.name', 'test');
+    fs.mkdirSync(path.join(remote, 'apps/cli'), { recursive: true });
+    fs.writeFileSync(path.join(remote, 'apps/cli/package.json'), JSON.stringify({ version: '1.2.3' }));
+    git(remote, 'add', '-A');
+    git(remote, 'commit', '--quiet', '-m', 'v1.2.3 tree, no profile yet');
+    git(remote, 'tag', 'v1.2.3');
+
+    // REPO_ROOT: the home base's own checkout, cloned BEFORE the profile commit
+    // lands on origin and never advanced since -- a stale local branch/working
+    // tree even though origin (fetched below) is current.
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rel-snippet-homebase-'));
+    git(repoRoot, 'clone', '--quiet', remote, '.');
+    expect(fs.existsSync(path.join(repoRoot, 'apps/cli/bin/embedded.provisionprofile'))).toBe(false);
+
+    fs.mkdirSync(path.join(remote, 'apps/cli/bin'), { recursive: true });
+    fs.writeFileSync(path.join(remote, 'apps/cli/bin/embedded.provisionprofile'), 'PROFILE-BYTES');
+    git(remote, 'add', '-A');
+    git(remote, 'commit', '--quiet', '-m', 'commit embedded.provisionprofile (2567004b4)');
+
+    const gen = spawnSync('bash', ['-c', `${FUNC_SRC}\nhome_base_wt_snippet "1.2.3"`], {
+      encoding: 'utf-8',
+      env: { ...process.env, RELEASE_HOME_BASE: 'test-home-base' },
+    });
+    expect(gen.status, gen.stderr).toBe(0);
+
+    // Run just the seeding portion of the generated snippet (stop short of
+    // `cd "$WT/apps/cli"; scripts/release.sh ...`, which needs the real CLI
+    // installed) and cat the recovered file back out BEFORE the snippet's own
+    // EXIT trap removes the worktree.
+    const seedOnly = `${gen.stdout.split('cd "$WT/apps/cli"')[0]}\ncat "$WT/apps/cli/bin/embedded.provisionprofile"`;
+    const run = spawnSync('bash', ['-c', seedOnly], { cwd: repoRoot, encoding: 'utf-8' });
+    expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+    expect(run.stdout).toContain('PROFILE-BYTES');
+  });
+
+  it('fails loudly, not a warning, when the profile is absent everywhere', () => {
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'rel-snippet-origin-empty-'));
+    git(remote, 'init', '--quiet', '-b', 'main');
+    git(remote, 'config', 'user.email', 'test@example.com');
+    git(remote, 'config', 'user.name', 'test');
+    fs.mkdirSync(path.join(remote, 'apps/cli'), { recursive: true });
+    fs.writeFileSync(path.join(remote, 'apps/cli/package.json'), JSON.stringify({ version: '1.2.3' }));
+    git(remote, 'add', '-A');
+    git(remote, 'commit', '--quiet', '-m', 'v1.2.3 tree, profile never committed');
+    git(remote, 'tag', 'v1.2.3');
+
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rel-snippet-homebase-empty-'));
+    git(repoRoot, 'clone', '--quiet', remote, '.');
+
+    const gen = spawnSync('bash', ['-c', `${FUNC_SRC}\nhome_base_wt_snippet "1.2.3"`], {
+      encoding: 'utf-8',
+      env: { ...process.env, RELEASE_HOME_BASE: 'test-home-base' },
+    });
+    expect(gen.status, gen.stderr).toBe(0);
+
+    const seedOnly = gen.stdout.split('cd "$WT/apps/cli"')[0];
+    const run = spawnSync('bash', ['-c', seedOnly], { cwd: repoRoot, encoding: 'utf-8' });
+    expect(run.status).not.toBe(0); // fails fast, not a "warning" that limps forward
+    expect(run.stderr).toContain('embedded.provisionprofile not found');
+    expect(run.stderr).not.toContain('Generate at developer.apple.com'); // the old, misleading advice
   });
 });

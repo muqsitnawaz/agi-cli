@@ -7,7 +7,8 @@
 # that carries ALL of:
 #   - the Apple provisioning profile the signed helpers embed
 #     (apps/cli/bin/embedded.provisionprofile -- a committed input, negated out of
-#     .gitignore, so a valid checkout always has it);
+#     .gitignore as of commit 2567004b4, and recoverable from a freshly fetched
+#     origin/<default> ref even when the box's own on-disk checkout predates it);
 #   - a `Developer ID Application` codesigning identity reachable in a
 #     headless-unlockable keychain (rush-signing.keychain-db + signing.kcpass);
 #   - the `apple.com` secrets bundle (notarytool creds) and the `npmjs.com`
@@ -26,8 +27,12 @@
 #
 # The readiness logic lives here rather than inline in release.sh so it can be
 # tested directly (scripts/signing-home-base-probe.test.ts) -- same split as
-# stuck-release.sh / validate-bump.sh. It is READ-ONLY: it never runs git, gh, or
-# npm mutations, so invoking it can never advance the release.
+# stuck-release.sh / validate-bump.sh. It is READ-ONLY: it never runs git tag,
+# push, commit, merge, worktree, checkout, switch, or reset, nor a gh/npm
+# mutation, so invoking it can never advance the release. It DOES run a plain
+# `git fetch` when the provisionprofile is absent locally (RUSH-2541, below) --
+# that only refreshes a remote-tracking ref, mutates no local branch/tag, and
+# stays within this contract.
 #
 # Usage:  scripts/signing-home-base-probe.sh
 #   Optional env SIGNING_PROBE_REPO_ROOT overrides the checkout root the
@@ -57,11 +62,25 @@ else
 fi
 
 # 2) The Apple provisioning profile the signed helpers embed. It is a committed
-#    input (negated out of .gitignore), so a valid checkout always has it; its
-#    absence means a cleaned or broken bin/, which the home-base phase would only
-#    discover mid-build. Cheap to assert up front.
+#    input (negated out of .gitignore, commit 2567004b4), so a checkout on or
+#    after that commit always has it on disk. A home base whose own on-disk
+#    checkout has simply never been git-pulled past that commit -- a newly
+#    registered box, or one that has gone stale -- still lacks it on disk even
+#    though origin does not (RUSH-2541: "any Mac that has not previously been
+#    home base"). release.sh's home-base phase recovers from exactly this by
+#    reading the blob straight off a freshly fetched origin/<default> ref
+#    (home_base_wt_snippet in release.sh) rather than trusting the working
+#    tree, so probe the same way -- otherwise this over-reports "unprovisioned"
+#    on a box that would actually build fine. `git fetch` only refreshes a
+#    remote-tracking ref; it mutates no local branch/tag, so it stays within
+#    this probe's read-only contract.
 if [[ -n "$REPO_ROOT" && -f "$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" ]]; then
   :
+elif [[ -n "$REPO_ROOT" ]] && git -C "$REPO_ROOT" fetch --quiet origin 2>/dev/null; then
+  PROBE_DEFAULT_BRANCH="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')"
+  [[ -n "$PROBE_DEFAULT_BRANCH" ]] || PROBE_DEFAULT_BRANCH="main"
+  git -C "$REPO_ROOT" cat-file -e "origin/$PROBE_DEFAULT_BRANCH:apps/cli/bin/embedded.provisionprofile" 2>/dev/null \
+    || missing+=("apps/cli/bin/embedded.provisionprofile absent from the checkout and from origin/$PROBE_DEFAULT_BRANCH -- the signed helpers embed it")
 else
   missing+=("apps/cli/bin/embedded.provisionprofile absent from the checkout -- the signed helpers embed it")
 fi
