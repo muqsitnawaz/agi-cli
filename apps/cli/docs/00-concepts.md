@@ -95,8 +95,8 @@ See [01-version-management.md](01-version-management.md) for install and switchi
 agents-cli is two application-layer surfaces over one shared set of on-disk state.
 **`apps/cli`** (the `agents` / `ag` CLI) is the framework: it owns the SQLite session
 index, `sessions` / `teams` / `run` / `cloud`, the pid→id registry, the audit log,
-and the SSH fan-out to peers. **`apps/factory`** (the Factory VS Code extension) is a
-consumer: it spawns agent terminals and renders the Factory Floor, but for live state
+and the SSH fan-out to peers. **`apps/ext`** (AGI EXT, the VS Code extension) is a
+consumer: it spawns agent terminals and renders the Fleet, but for live state
 it shells out to `agents sessions --active --json` and reshapes the JSON — it holds no
 data models of its own. Fix a mechanism in the CLI and every consumer benefits. Full
 detail in [architecture.md](architecture.md).
@@ -116,26 +116,49 @@ two `pid → id` writers (the CLI's registry vs the SessionStart hook).
 
 ### Credential accounts
 
-An account is a named, durable provider credential. It is independent of agent
-versions: one OpenRouter account can authenticate multiple compatible harnesses,
-and rotating its key does not change its stable id or name.
+`agents accounts` shows two kinds of identity together. Harness-native auth stays in the
+harness version home where its normal login flow created it. A provider account is
+one `agents secrets` bundle that can authenticate every compatible harness; the
+bundle name is the account label and rotating its key does not change `ACCOUNT_ID`.
 
 ```bash
 agents accounts
 agents accounts add work --provider anthropic --auth setup-token
 agents accounts add gateway --provider openrouter --auth api-key \
   --from-secrets openrouter.ai:OPENROUTER_API_KEY
+agents accounts set-default claude gateway
+agents accounts sync gateway --device yosemite-s0
 agents run claude --account work
 ```
 
-`~/.agents/accounts.yaml` stores the stable id, name, provider, authentication
-kind, and a device-local secret reference. Raw credentials remain in the OS
-credential store. Supported credential kinds are API keys, long-lived Claude
-setup tokens, and bearer tokens. Native OAuth login remains owned by the harness;
-agents-cli does not turn a login discovered in an agent version home into a named
-account. A custom harness can set `account: <name>`, and a per-run `--account`
-overrides that default. An incompatible provider/host pair or a missing secret
-fails before the agent process starts.
+The account bundle has a fixed shape: `ACCOUNT_ID`, `PROVIDER`, `AUTH_TYPE`,
+optional `BASE_URL`, and either `API_KEY` or `TOKEN`. It always uses secrets policy
+`never`, so a background agent launch cannot raise Touch ID. On Linux workers,
+`accounts sync` writes the bundle to the encrypted file backend using a
+machine-local key; Windows uses Credential Manager. Values cross SSH on stdin,
+never argv. Sync is explicit and copies provider bundles only. It never copies
+harness-native auth files.
+
+Resolution order is explicit `--account`, then the compatible account selected by
+`accounts set-default`, then the harness's native/balanced behavior. An incompatible
+provider/host pair or a bundle absent from the destination fails before the agent
+process starts. A migrated v2 `accounts.yaml` becomes these bundles transactionally;
+the old registry is archived only after every bundle was written successfully.
+
+Usage and authentication health are device-local read models owned by the
+agents-cli daemon. Every ordinary consumer (`agents run`, `view`, `versions`,
+`teams`, device inventory, and Factory) reads the same persisted snapshots and
+never calls a provider or scans usage logs on its render path. The daemon
+considers usage every 60 seconds (each account retains its provider-aware due
+time and backoff) and authentication every three minutes. `agents usage
+<agent> --refresh`, `agents view --refresh`, and inventory refreshes request an
+explicit collection through the same per-account cross-process lease; concurrent
+CLI processes wait for and reuse the first published result.
+
+Only safe metadata crosses devices: account identity, quota snapshots, and auth
+verdicts. Raw API keys remain in each device's credential store. OAuth remains
+per-device and harness-managed; use the harness's interactive login on the
+interactive device rather than copying its OAuth files to another machine.
 
 agents-cli can run commands on **other machines**, not just the local one. Two
 independent registries back this, both using SSH as the only transport (no daemon).
@@ -182,7 +205,7 @@ routines scheduler from starting on that device — `routines add` skips the
 auto-start with the reason, `routines start` refuses, and a running daemon
 re-evaluates the gate on every SIGHUP reload, so flipping the key never needs a
 daemon restart. `agents.max-concurrent` feeds host ranking, and what counts
-toward it depends on the consumer: Factory auto-launch counts device-wide
+toward it depends on the consumer: AGI EXT auto-launch counts device-wide
 running agents, while teams placement counts the team's own roster on the
 device (local teammates included); a capped device is excluded from auto-pick
 with a stated reason, and an all-capped pool fails loud. Setup asks instead of

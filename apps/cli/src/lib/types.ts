@@ -849,6 +849,10 @@ export interface ActorConfig {
 
 /** Top-level structure of ~/.agents/.system/agents.yaml -- the CLI's persistent state. */
 export interface Meta {
+  /** Preferred provider account per harness. Explicit --account wins. */
+  accounts?: {
+    defaults?: Partial<Record<AgentId, string>>;
+  };
   agents?: Partial<Record<AgentId, string>>;
   /**
    * Per-agent preferred ISOLATED version — which copy a bare `agents run <agent>`

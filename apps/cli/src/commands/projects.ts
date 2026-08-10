@@ -584,7 +584,7 @@ export function registerProjectsCommands(program: Command): void {
       agents projects add rush --repo phnx-labs/rush --path apps/web
       agents projects list                 # definitions only (no session scan)
       agents projects list --with-agents   # opt-in local active counts
-      agents projects list --json          # machine-readable defs (Factory uses this)
+      agents projects list --json          # machine-readable defs (AGI EXT uses this)
       echo '{...}' | agents projects save --json  # create/update one def from stdin
       agents projects rm rush --json       # machine-readable delete
       agents projects status              # every project, across the whole fleet
@@ -597,7 +597,7 @@ export function registerProjectsCommands(program: Command): void {
     notes: `
       Definitions are hand-editable YAML in ~/.agents/projects/, committed and
       distributed to the fleet with 'agents repo push user' ('agents push' was
-      removed). Factory reads and writes only through these commands — never
+      removed). AGI EXT reads and writes only through these commands — never
       ~/.agents/factory/projects.json.
     `,
   });

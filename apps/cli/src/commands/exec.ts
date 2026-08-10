@@ -16,7 +16,7 @@ import type { DetectedRuntime } from '../lib/crabbox/runtimes.js';
 import type { ResolvedRunDefaults } from '../lib/run-defaults.js';
 import { setHelpSections } from '../lib/help.js';
 import { isInteractiveTerminal, isPromptCancelled, requireInteractiveSelection } from './utils.js';
-import { getUserAgentsDir } from '../lib/state.js';
+import { getUserAgentsDir, readMeta } from '../lib/state.js';
 import type { CrabboxBox } from '../lib/crabbox/cli.js';
 import { parseLoopInterval } from '../lib/loop.js';
 import type { RotateResult } from '../lib/rotate.js';
@@ -2167,7 +2167,7 @@ export function registerRunCommand(program: Command): void {
           exitCode: resumeExit,
         });
         // A resumed loop is always headless; surface any commits it left unpushed
-        // and any open PR it left without a durable lander (RUSH-2394).
+        // and any open PR it left unattended (RUSH-2394).
         if (shouldWarnUnpushed(resumeExec.mode ?? 'auto', false)) {
           const resumeCwd = resumeExec.cwd ?? process.cwd();
           await warnUnpushedWork(resumeCwd);
@@ -2566,13 +2566,15 @@ export function registerRunCommand(program: Command): void {
 
       version = resolveVersionAlias(agent, version);
 
-      if (options.account) {
+      const { resolveAccountSelection } = await import('../lib/account-registry.js');
+      const configuredAccount = resolveAccountSelection(options.account, agent, readMeta(), { useDefault: !fromProfile });
+      if (configuredAccount) {
         if (options.cloud || options.provider || options.lease) {
           console.error(chalk.red('--account selects a device-local credential and cannot be combined with cloud or lease placement.'));
           process.exit(1);
         }
         const { resolveCredentialAccount } = await import('../lib/account-registry.js');
-        try { accountEnv = resolveCredentialAccount(options.account, agent, profileProvider).env; }
+        try { accountEnv = resolveCredentialAccount(configuredAccount, agent, profileProvider).env; }
         catch (err) { console.error(chalk.red((err as Error).message)); process.exit(1); }
       }
 
@@ -2746,7 +2748,7 @@ export function registerRunCommand(program: Command): void {
       // the bare primary still resolves through the strategy — otherwise every
       // `agents run claude --fallback codex` run lands on the pinned default
       // account and account rotation silently stops (the gh-monitor heal bug).
-      if (!accountPickerRequested && !options.account && (strategy !== 'pinned' || options.balanced || explicitStrategy)) {
+      if (!accountPickerRequested && !configuredAccount && (strategy !== 'pinned' || options.balanced || explicitStrategy)) {
         if (version) {
           process.stderr.write(chalk.yellow(`[agents] strategy ${strategy} ignored: version ${version} is pinned\n`));
         } else if (fromProfile) {
@@ -3276,7 +3278,7 @@ export function registerRunCommand(program: Command): void {
           // the normal finalize below — record its one audit entry.
           recordDispatchedRun({ agent, version: defaultVersion ?? 'unknown', mode, cwd, exitCode });
           // ACP headless run always has a prompt; surface any unpushed commits
-          // and any open PR left without a durable lander (RUSH-2394).
+          // and any open PR left unattended (RUSH-2394).
           if (shouldWarnUnpushed(mode, false)) {
             await warnUnpushedWork(cwd);
             await warnOrphanedOpenPr(cwd);
@@ -3488,8 +3490,8 @@ export function registerRunCommand(program: Command): void {
         cleanupWorkflowSubagents();
         // Surface committed-but-unpushed work a headless writable run left
         // behind, so it isn't silently stranded in a worktree. Also warn when
-        // the branch has an OPEN PR with no durable lander (RUSH-2394) — a
-        // background `gh pr checks --watch` dies with the agent. Advisory only,
+        // the branch still has an OPEN PR (RUSH-2394) — a background
+        // `gh pr checks --watch` dies with the agent. Advisory only,
         // never throws; skipped for interactive runs (the human sees the shell)
         // and read-only plan mode (can't commit).
         if (shouldWarnUnpushed(mode, resolveInteractive(execOptions))) {
