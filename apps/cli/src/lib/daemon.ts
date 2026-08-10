@@ -24,6 +24,7 @@ import { notifyRoutineStart, notifyRoutineFinish, notifyRoutineStartFailed } fro
 import { notifyOwnerRoutineFinish, notifyOwnerRoutineStartFailed } from './routine-notify-owner.js';
 import { BrowserService } from './browser/service.js';
 import { BrowserIPCServer, getSocketPath as getBrowserIpcSocketPath } from './browser/ipc.js';
+import { startHostedWebhookReceivers, type HostedWebhookReceivers } from './daemon-webhooks.js';
 import { secretsBrokerSocketPath, brokerPidAlive } from './secrets/agent.js';
 import { redactSecrets } from './redact.js';
 import { getAgentsBinPath, getCliLaunch, BUN_VIRTUAL_ROOT } from './cli-entry.js';
@@ -1207,6 +1208,27 @@ export async function runDaemon(): Promise<void> {
     log('INFO', 'Browser IPC service disabled');
   }
 
+  // 5th hosted service: signed webhook receiver(s) + their funnel (RUSH-2548).
+  // Started after the broker (above) so it resolves each receiver's signing
+  // secret headlessly — no AGENTS_SECRETS_PASSPHRASE, no nohup. Binds nothing
+  // unless daemon/webhooks.yaml declares a receiver, so an unconfigured box no-ops.
+  let webhookReceivers: HostedWebhookReceivers | null = null;
+  if (isEnabled('webhook-receiver')) {
+    try {
+      webhookReceivers = startHostedWebhookReceivers({ log });
+      log(
+        'INFO',
+        webhookReceivers.count > 0
+          ? `Webhook receiver hosting ${webhookReceivers.count} receiver(s)`
+          : 'Webhook receiver service enabled; no receivers declared in daemon/webhooks.yaml',
+      );
+    } catch (err) {
+      log('WARN', `Webhook receiver host skipped: ${(err as Error).message}`);
+    }
+  } else {
+    log('INFO', 'Webhook receiver service disabled');
+  }
+
   runMonitorTick();
   const monitorInterval = setInterval(runMonitorTick, MONITOR_TICK_MS);
 
@@ -1403,6 +1425,7 @@ export async function runDaemon(): Promise<void> {
     stopScheduler();
     monitorEngine?.stop();
     await browserIPC?.stop();
+    await webhookReceivers?.close();
     clearInterval(monitorInterval);
     if (healInterval) clearInterval(healInterval);
     if (healKickoff) clearTimeout(healKickoff);
