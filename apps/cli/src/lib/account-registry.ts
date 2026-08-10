@@ -414,6 +414,12 @@ export function resolveSpawnAccount(
     if (unified.agent !== agent) {
       throw new Error(`Account '${unified.name}' is a ${unified.agent} login and cannot authenticate the ${agent} harness.`);
     }
+    // A provider-backed custom harness still injects its provider auth env, so a
+    // native identity claim over it is incoherent — reject before spawn even when
+    // the account is chosen explicitly with --account (which bypasses `attach`).
+    if (opts.provider) {
+      throw new Error(`Account '${unified.name}' is a native ${unified.agent} login and cannot run under a provider-backed harness (${opts.provider}); the harness's ${opts.provider} credentials would still be injected. Use a matching provider account.`);
+    }
     return { kind: 'native', id: unified.id, name: unified.name, agent, identityKey: unified.identityKey, scope: unified.scope };
   }
   const resolved = resolveCredentialAccount(unified.name, agent, opts.provider, opts.base ?? getUserAgentsDir());

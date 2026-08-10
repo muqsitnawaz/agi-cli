@@ -176,6 +176,19 @@ describe('credential account registry (bundle-canonical)', () => {
     expect(resolveSpawnAccount(undefined, 'claude', '2.1.220', meta, { base: root })).toBeNull();
   });
 
+  it('resolveSpawnAccount refuses a native account on a provider-backed harness (explicit --account override)', () => {
+    // `agents run deepseek --account work`: deepseek hosts on claude with an
+    // OpenRouter provider, so a native claude login must be rejected before spawn
+    // — otherwise the provider env would still be injected under a native claim.
+    const meta = {
+      accounts: { native: { n1: { id: 'n1', name: 'work', agent: 'claude' as const, identityKey: 'claude:user=1', scope: 'version' as const } } },
+    };
+    expect(() => resolveSpawnAccount('work', 'claude', '2.1.220', meta, { base: root, provider: 'openrouter' }))
+      .toThrow('cannot run under a provider-backed harness (openrouter)');
+    // Without a provider (a bare native run) the same account resolves fine.
+    expect(resolveSpawnAccount('work', 'claude', '2.1.220', meta, { base: root })).toMatchObject({ kind: 'native', name: 'work' });
+  });
+
   it('resolveSpawnAccount refuses a native account bound to a different harness', () => {
     const meta = {
       accounts: {
