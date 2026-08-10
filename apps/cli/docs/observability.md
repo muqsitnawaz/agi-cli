@@ -1600,3 +1600,4 @@ running process owns this session?" without re-parsing state.
 - [Sessions](./sessions.md) — the `sessions` subsystem in depth
 - Cloud dispatch (`agents cloud --help`)
 - Team DAGs (`agents teams --help`)
+
