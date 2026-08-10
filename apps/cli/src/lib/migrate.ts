@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as yaml from 'yaml';
+import { stringifyDoc } from './yaml-io.js';
 import { execSync } from 'child_process';
 import { atomicWriteFileSync } from './fs-atomic.js';
 import type { AgentId } from './types.js';
@@ -2013,7 +2014,7 @@ function migrateHumans(): void {
         notifyNode.delete('owner');
         if (notifyNode.items.length === 0) doc.delete('notify');
       }
-      fs.writeFileSync(agentsYamlPath, String(doc), 'utf-8');
+      fs.writeFileSync(agentsYamlPath, stringifyDoc(doc), 'utf-8');
     } catch { /* best-effort — leave the old key if we can't rewrite */ }
   }
 }

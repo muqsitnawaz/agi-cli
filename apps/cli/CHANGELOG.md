@@ -1,22 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- **In-place YAML writers no longer churn synced config files (RUSH-2505).** Every
-  writer that edits a shared, committed YAML document in place now serializes
-  through `stringifyDoc()`, which pins `flowCollectionPadding: false`. The `yaml`
-  emitter pads flow collections by default, so the format-preserving round trip
-  `parseDocument(src)` -> `String(doc)` rewrote `command: [agents, notify, "{message}"]`
-  as `command: [ agents, notify, "{message}" ]`. That diff is semantically a no-op,
-  which is what made it dangerous: the first time the CLI touched a synced file the
-  working tree went permanently dirty, `agents repo pull` refused with "Blocked by
-  local changes", `git merge --ff-only` refused, and the box silently stopped
-  receiving fleet config. Seven boxes fell 37-52 commits behind this way with nothing
-  reporting it. Affected writers: `apps/cli/src/lib/feed.ts`,
-  `apps/cli/src/lib/activity.ts` (both write `agents.yaml` when installing hooks),
-  `apps/cli/src/lib/routines.ts`, `apps/cli/src/lib/manifest.ts`, and
-  `apps/cli/src/lib/state.ts`. Source: `apps/cli/src/lib/yaml-io.ts`.
-
 ## 1.22.36
 
 - **`agents cp <src> <dst>` — first-class fleet file transfer (RUSH-2297).** New
