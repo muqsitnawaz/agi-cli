@@ -50,7 +50,6 @@ export const loadWorktree: ModuleLoader = async () => (await import('../../comma
 export const loadVersions: ModuleLoader = async () => (await import('../../commands/versions.js')).registerVersionsCommands;
 export const loadUpdate: ModuleLoader = async () => (await import('../../commands/update.js')).registerUpdateCommand;
 export const loadImport: ModuleLoader = async () => (await import('../../commands/import.js')).registerImportCommand;
-export const loadExport: ModuleLoader = async () => (await import('../../commands/export.js')).registerExportCommand;
 export const loadPackages: ModuleLoader = async () => (await import('../../commands/packages.js')).registerPackagesCommands;
 export const loadRoutines: ModuleLoader = async () => (await import('../../commands/routines.js')).registerRoutinesCommands;
 export const loadMonitors: ModuleLoader = async () => (await import('../../commands/monitors.js')).registerMonitorsCommands;
@@ -60,7 +59,6 @@ export const loadResume: ModuleLoader = async () => (await import('../../command
 export const loadOpen: ModuleLoader = async () => (await import('../../commands/open.js')).registerOpenCommand;
 export const loadReconnect: ModuleLoader = async () => (await import('../../commands/reconnect.js')).registerReconnectCommand;
 export const loadFork: ModuleLoader = async () => (await import('../../commands/fork.js')).registerForkCommand;
-export const loadDefaults: ModuleLoader = async () => (await import('../../commands/defaults.js')).registerDefaultsCommands;
 export const loadConfig: ModuleLoader = async () => (await import('../../commands/config.js')).registerConfigCommand;
 export const loadSet: ModuleLoader = async () => (await import('../../commands/set.js')).registerSetCommand;
 export const loadModels: ModuleLoader = async () => (await import('../../commands/models.js')).registerModelsCommand;
@@ -104,8 +102,6 @@ export const loadHosts: ModuleLoader = async () => (await import('../../commands
 export const loadLogs: ModuleLoader = async () => (await import('../../commands/logs.js')).registerLogsCommand;
 export const loadEvents: ModuleLoader = async () => (await import('../../commands/events.js')).registerEventsCommand;
 export const loadSsh: ModuleLoader = async () => (await import('../../commands/ssh.js')).registerSshCommands;
-export const loadPull: ModuleLoader = async () => (await import('../../commands/pull.js')).registerPullCommand;
-export const loadPush: ModuleLoader = async () => (await import('../../commands/push.js')).registerPushCommand;
 export const loadRepo: ModuleLoader = async () => (await import('../../commands/repo.js')).registerRepoCommands;
 export const loadSetup: ModuleLoader = async () => (await import('../../commands/setup.js')).registerSetupCommand;
 export const loadUninstall: ModuleLoader = async () => (await import('../../commands/uninstall.js')).registerUninstallCommands;
@@ -187,7 +183,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   update: [loadUpdate],
   prune: [loadVersions, loadPrune],
   import: [loadImport],
-  export: [loadExport],
   registry: [loadPackages],
   search: [loadPackages],
   install: [loadPackages],
@@ -204,7 +199,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   open: [loadOpen],
   reconnect: [loadReconnect],
   fork: [loadFork],
-  defaults: [loadDefaults],
   config: [loadConfig],
   set: [loadSet],
   models: [loadModels],
@@ -253,8 +247,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   // `fleet` is a commander alias of `devices` (see commands/ssh.ts); list it so
   // lazy registration loads the devices tree when the user types `agents fleet`.
   fleet: [loadSsh],
-  pull: [loadPull],
-  push: [loadPush],
   // `repos` is the canonical command name; `repo` remains a convenience alias
   // (see commands/repo.ts). List both so lazy registration loads the tree
   // whichever the user types.

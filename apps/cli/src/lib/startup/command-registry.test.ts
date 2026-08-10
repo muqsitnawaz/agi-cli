@@ -53,4 +53,9 @@ describe('KNOWN_TOP_LEVEL_COMMANDS', () => {
     expect(profiles!.commands.map((command) => command.name())).not.toContain('use');
     expect(profiles!.commands.map((command) => command.name())).not.toContain('status');
   });
+
+  it('does not recognize the removed defaults and export commands', () => {
+    expect(isKnownTopLevelCommand('defaults')).toBe(false);
+    expect(isKnownTopLevelCommand('export')).toBe(false);
+  });
 });
