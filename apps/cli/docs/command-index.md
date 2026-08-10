@@ -710,7 +710,7 @@ agents repos disable <alias>     Stop merging this repo during sync without dele
 agents repos enable <alias>      Re-enable a previously disabled extra repo
 agents repos init [target]       Create a user-owned repo from a template and register it as an extra
 agents repos list [alias]        Show all repos with resource-level sync (skills/commands/plugins to pull or push) and local changes.
-agents repos pull [alias] [url]  Pull updates. Aliases: "system" (~/.agents/.system/), "user" (~/.agents/), or any registered extra. No arg pulls all. Pass a git URL to git-back a not-yet-cloned user repo: "agents repo pull user <url>".
+agents repos pull [alias] [url]  Pull updates and reconcile synced device decisions. Aliases: "system" (~/.agents/.system/), "user" (~/.agents/), or any registered extra. No arg pulls all. Pass a git URL to git-back a not-yet-cloned user repo: "agents repo pull user <url>".
 agents repos push [alias]        Commit and push the user repo or a user-owned extra. Refuses to push the system repo.
 agents repos remove <alias>      Unregister an extra repo. Managed clones are deleted; external paths are kept.
 agents repos sync <alias>        Git-sync a repo: pull (and push for user/extras). Aliases: "system", "user", or a registered extra.

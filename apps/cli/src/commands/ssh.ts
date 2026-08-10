@@ -50,6 +50,7 @@ import { defaultPickerChecked, localLoginUser, planDeviceReconciliation, runDevi
 import { resolveDeviceTarget, splitUserHost } from '../lib/devices/resolve-target.js';
 import { deriveMirroredCwd } from '../lib/project-root.js';
 import { clearPendingSentinel } from '../lib/devices/pending.js';
+import { getDeviceDiscoveryStatus, setDeviceDiscoveryStatus } from '../lib/devices/discovery-policy.js';
 import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
 import { hostNameFor, renderSshConfig } from '../lib/devices/ssh-config.js';
 import {
@@ -397,10 +398,14 @@ async function runInteractiveDeviceSync(): Promise<void> {
   for (const name of plan.toRegister) {
     const input = withDefaultUser(nodeToDeviceInput(byName.get(name)!), reg[name]?.user, localUser);
     await upsertDevice(name, input);
+    setDeviceDiscoveryStatus(name, 'approved');
   }
   for (const name of plan.toUnignore) await removeIgnored(name);
   for (const name of plan.toRemove) await removeDevice(name);
-  for (const name of plan.toIgnore) await addIgnored(name);
+  for (const name of plan.toIgnore) {
+    await addIgnored(name);
+    setDeviceDiscoveryStatus(name, 'ignored');
+  }
 
   const parts = [
     chalk.green(`${plan.toRegister.length} registered`),
@@ -1098,6 +1103,7 @@ function registerDevicesCommands(program: Command): void {
       const spinner = ora('Reading tailscale status...').start();
       try {
         const res = await runDeviceSync();
+        for (const name of res.syncedNames) setDeviceDiscoveryStatus(name, 'approved');
         const extra = res.pending.length ? chalk.gray(` (${res.pending.length} new)`) : '';
         spinner.succeed(`Synced ${res.synced} device${res.synced === 1 ? '' : 's'} from Tailscale${extra}`);
       } catch (err: any) {
@@ -1115,7 +1121,7 @@ function registerDevicesCommands(program: Command): void {
 
   devicesCmd
     .command('register <name>')
-    .description('Register a discovered (pending) node by name — used by the menu-bar "NEW DEVICES → Register" action.')
+    .description('Register a discovered node and sync the approval through devices/<name>/agents.yaml.')
     .action(async (name: string) => {
       try {
         const nodes = parseTailscaleStatus(tailscaleStatusJson());
@@ -1126,6 +1132,7 @@ function registerDevicesCommands(program: Command): void {
         }
         await removeIgnored(name); // a re-registered node is no longer dismissed
         const d = await upsertDevice(name, nodeToDeviceInput(node));
+        setDeviceDiscoveryStatus(name, 'approved');
         clearPendingSentinel(name); // drop the notification immediately
         console.log(chalk.green(`Registered '${name}'`) + chalk.gray(` (${d.platform})`));
       } catch (err: any) {
@@ -1136,11 +1143,12 @@ function registerDevicesCommands(program: Command): void {
 
   devicesCmd
     .command('ignore <name>')
-    .description('Dismiss a node from auto-discovery so it is never re-suggested (and remove it from the registry if present).')
+    .description('Dismiss a node and sync the decision through devices/<name>/agents.yaml (also removes it locally).')
     .action(async (name: string) => {
       try {
         await removeDevice(name);
         await addIgnored(name);
+        setDeviceDiscoveryStatus(name, 'ignored');
         clearPendingSentinel(name); // drop the notification immediately
         console.log(chalk.green(`Ignored '${name}'`) + chalk.gray(" — it won't be suggested again. Undo with `agents devices unignore`."));
       } catch (err: any) {
@@ -1153,11 +1161,13 @@ function registerDevicesCommands(program: Command): void {
     .command('unignore <name>')
     .description('Undo `ignore`: allow a node to be discovered and registered again.')
     .action(async (name: string) => {
+      const portableWasIgnored = getDeviceDiscoveryStatus(name) === 'ignored';
       const ok = await removeIgnored(name);
-      if (!ok) {
+      if (!ok && !portableWasIgnored) {
         console.error(chalk.gray(`'${name}' was not ignored.`));
         return;
       }
+      setDeviceDiscoveryStatus(name, undefined);
       console.log(chalk.green(`No longer ignoring '${name}'`) + chalk.gray(' — run `agents devices sync` to register it.'));
     });
 
@@ -1794,6 +1804,7 @@ email) into a single row. Use \`agents devices harnesses\` for the per-install v
           user,
           address: { via: 'manual', dnsName: isIp ? undefined : host, ip: isIp ? host : undefined },
         });
+        setDeviceDiscoveryStatus(name, 'approved');
         console.log(chalk.green(`Added device '${name}'`) + chalk.gray(` (${d.platform}, ${user ? user + '@' : ''}${host})`));
       } catch (err: any) {
         console.error(chalk.red(err.message));
@@ -1894,6 +1905,7 @@ email) into a single row. Use \`agents devices harnesses\` for the per-install v
         console.error(chalk.red(`Unknown device '${name}'.`));
         process.exit(1);
       }
+      setDeviceDiscoveryStatus(name, undefined);
       console.log(chalk.green(`Removed device '${name}'`));
     });
 

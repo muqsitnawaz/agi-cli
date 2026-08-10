@@ -1105,9 +1105,9 @@ function writeMetaUnlocked(meta: Meta): void {
 function overlayMachineLocal(meta: Meta): Meta {
   const devicePath = getDeviceMetaPath();
   if (fs.existsSync(devicePath)) {
-    let dm: (Meta & { routines?: unknown }) | null = null;
+    let dm: (Meta & { routines?: unknown; discovery?: unknown }) | null = null;
     try {
-      dm = yaml.parse(fs.readFileSync(devicePath, 'utf-8')) as Meta & { routines?: unknown };
+      dm = yaml.parse(fs.readFileSync(devicePath, 'utf-8')) as Meta & { routines?: unknown; discovery?: unknown };
     } catch { /* preserve the existing tolerance for malformed legacy device YAML */ }
     if (dm) {
       if (dm?.agents) meta.agents = { ...meta.agents, ...dm.agents };
@@ -1124,6 +1124,13 @@ function overlayMachineLocal(meta: Meta): Meta {
           throw new Error(`Device config corrupted at ${devicePath}: routines must be a string list.`);
         }
         meta.deviceRoutines = dm.routines;
+      }
+      if (dm && Object.prototype.hasOwnProperty.call(dm, 'discovery')) {
+        const discovery = dm.discovery as { status?: unknown } | null;
+        if (!discovery || (discovery.status !== 'approved' && discovery.status !== 'ignored')) {
+          throw new Error(`Device config corrupted at ${devicePath}: discovery.status must be approved or ignored.`);
+        }
+        meta.deviceDiscovery = { status: discovery.status };
       }
     }
   }
