@@ -132,10 +132,7 @@ describe('live --session-id recovery (RUSH-2384 real process)', () => {
     const child = spawnHoldingSessionId(UUID, { cwd: wt });
     const pid = child.pid!;
 
-    // Wait for the OS to report the process as `claude` (comm basename) — that
-    // is the precondition the scan reads, so asserting before it holds tests
-    // the scheduler, not the scan.
-    const comm = await waitFor(() => {
+    const commOf = (): string | undefined => {
       try {
         return execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
           encoding: 'utf-8',
@@ -144,27 +141,52 @@ describe('live --session-id recovery (RUSH-2384 real process)', () => {
       } catch {
         return undefined;
       }
-    });
-    // RUSH-2508: on some platforms this holder is unclassifiable by the time we
-    // can observe it. `ps -o comm=` on Linux reports the THREAD name, and node
-    // renames its main thread shortly after boot — measured on Node 24, comm
-    // flips to `MainThread` within a second, while Node 22 keeps `claude`. The
-    // scan then correctly stops treating the process as an agent, so there is
-    // nothing left for this case to assert. Gate on the observed comm rather
-    // than on the platform: an environment where comm stays usable (macOS,
-    // Windows, Linux on an older node) keeps full coverage, and only the
-    // environment that cannot support the case skips, naming why.
-    if (!comm || !/^claude/.test(path.basename(comm))) {
-      ctx.skip(`ps reports comm='${comm ?? '<unreadable>'}' for the holder, not an agent name — see RUSH-2508`);
-      return;
-    }
+    };
+    const classifiable = (comm: string | undefined): boolean =>
+      !!comm && /^claude/.test(path.basename(comm));
 
+    // RUSH-2508: sample the holder's comm in LOCKSTEP with each scan attempt, and
+    // only skip when no attempt ever ran against a classifiable holder.
+    //
+    // `ps -o comm=` on Linux reports the THREAD name, and node renames its main
+    // thread a beat after boot — measured on Node 24 it flips to `MainThread`
+    // within a second, while Node 22 keeps `claude`. That rules out both simpler
+    // gates: sampling BEFORE the scan proves nothing (the value can flip before
+    // the scan reads it), and sampling AFTER `waitFor` exhausts its deadline
+    // proves less than nothing — the poll always burns its full 10s on a miss, by
+    // which point comm has flipped whatever the cause, so a REAL regression in the
+    // RUSH-2384 recovery path would report `skipped` instead of failing. A test
+    // that cannot fail is worse than a deleted one.
+    //
+    // Bracketing each attempt is what recovers the distinction WHERE COMM STAYS
+    // USABLE: if the holder was classifiable both immediately before and
+    // immediately after a scan that still missed it, the scan owed us that row
+    // and the failure is real. Verified by sabotaging the row predicate — Node 22
+    // fails, as it must.
+    //
+    // It does NOT recover the distinction on Node 24, where comm has already
+    // flipped before any scan can run: a correct implementation and a completely
+    // broken one both produce `1 skipped` there, byte-identical. So this case
+    // carries real Node-24 coverage only once RUSH-2508 gives the holder a name
+    // the scan can rely on; until then it is honest about skipping rather than
+    // failing a leg it cannot judge.
     let rows: Awaited<ReturnType<typeof listUnattributedActive>> = [];
+    let lastComm: string | undefined;
+    let missedWhileClassifiable = false;
     const hit = await waitFor(async () => {
+      const before = commOf();
       clearActiveScanCachesForTest();
       rows = await listUnattributedActive(new Set());
-      return rows.find((r) => r.sessionId === UUID || r.pid === pid);
+      const found = rows.find((r) => r.sessionId === UUID || r.pid === pid);
+      lastComm = commOf();
+      if (!found && classifiable(before) && classifiable(lastComm)) missedWhileClassifiable = true;
+      return found;
     });
+
+    if (!hit && !missedWhileClassifiable) {
+      ctx.skip(`ps reports comm='${lastComm ?? '<unreadable>'}' for the holder, not an agent name — see RUSH-2508`);
+      return;
+    }
     expect(hit, `expected active row for ${UUID} / pid ${pid}; got ${rows.map((r) => `${r.pid}:${r.sessionId}`).join(', ')}`).toBeDefined();
     expect(hit!.sessionId).toBe(UUID);
     // cwd should be the worktree path (lsof) when recoverable.

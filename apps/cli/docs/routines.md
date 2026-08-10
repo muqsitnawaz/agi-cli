@@ -102,6 +102,8 @@ What happens on enable/sync:
 
 `agents routines list` groups terminal output by effective device/host scope so it is clear what runs on the current machine, the fleet, cloud, named devices, and named hosts. Use `agents routines list --flat` for the legacy single table, or `--json` for the flat machine-readable payload. Project-sourced routines still show the source repo (and `@branch` when known) in the Repo column; `--json` includes `source`, `sourceRepo`, `sourceBranch`, `hostStrategy`, `oneShot`, and `expired`.
 
+The bare `agents routines` command (no subcommand) opens an **interactive browser** on a terminal — a filterable, grouped picker (built on the same picker primitive as `agents sessions`). The project/device group headers render as inline dividers, typing filters the rows (keeping only groups with a match), and the detail pane / drilling into a routine shows four blocks: Definition, Next fire, Recent runs, and Stats. It falls back to the static `agents routines list` output — byte-for-byte — under `--json` or in any non-interactive shell (a pipe, the menu bar, CI), and `--flat` keeps the legacy table. Separately, `agents inspect <target> --routines` lists routine *definitions* (name, last run, devices, schedule) through the inspect resource view; add a name to drill into one.
+
 A project may also declare `routines: { enable: true }` in its own `agents.yaml` as a documentation signal; daemon firing still requires the explicit `enable-project` allowlist step so consent is materialised into the user layer.
 
 ### Host placement strategy
@@ -1380,7 +1382,7 @@ agents routines report <name>         # Show report from latest run
 agents routines report <name> --run <id>  # Show specific run report
 agents sessions <run-id>              # Show the archived agent transcript summary
 
-# Scheduler (auto-starts on first `routines add`; these are manual controls)
+# Scheduler (install/upgrade/setup start the daemon when enabled; these are manual controls)
 agents routines start                 # Start the background scheduler
 agents routines stop                  # Stop the scheduler
 agents routines status                # Show scheduler status + upcoming runs
@@ -1416,13 +1418,19 @@ agents routines report morning-briefing
 A background scheduler (historically called "the daemon" internally) watches for cron-triggered jobs. It persists across CLI invocations and auto-reloads when job configs change.
 
 ```bash
-agents routines start     # Start manually (usually unnecessary)
+agents routines start     # Start manually (usually unnecessary after install)
 agents routines stop      # Stop
 agents routines status    # Check health, PID, binary, heartbeat, and upcoming runs
 ```
 
-The scheduler **auto-starts on the first `agents routines add`**, so in most cases you never invoke `start` manually. When you `add`, `remove`, `pause`, or `resume` a job, it auto-reloads -- no manual restart needed.
-
+The daemon **starts at install/upgrade** (`postinstall` on darwin/linux) and on
+first `agents setup` / `agents setup --force` (when `daemon.enabled` is not
+false), so launchd/systemd KeepAlive keep it up. `agents routines add`
+still ensures the scheduler is running and reloads it — you rarely need
+`routines start` manually. When you `add`, `remove`, `pause`, or `resume` a job,
+it auto-reloads. `daemon.enabled=false` suppresses cold starts at install and
+setup, and still gates `ensureDaemonStarted`; deliberate `agents daemon start`
+remains the operator override.
 Scheduled fires use two independent guards. An atomic slot claim keyed by routine
 name and the intended UTC schedule time ensures a delivered slot launches once,
 including across daemon reloads. A separate active-run claim prevents a routine

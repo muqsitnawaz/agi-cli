@@ -54,6 +54,110 @@ interface DaemonProcess {
   entry: string | null;
   /** Resolved package version for `entry`, or null if it couldn't be found. */
   version: string | null;
+  /**
+   * Whether `entry` is provably ABSENT (`ENOENT`). Null when we cannot tell —
+   * a permission error on a parent directory, or any other stat failure. See
+   * {@link entryIsGone}: "we cannot see it" must never be reported as "deleted".
+   */
+  entryMissing: boolean | null;
+  /** Owning uid from `ps`, or null when unavailable. */
+  uid: number | null;
+}
+
+/**
+ * Provably absent, or null when unknowable.
+ *
+ * `fs.existsSync` cannot express the difference: it returns false for ANY failed
+ * stat, so `EACCES` on a parent directory is indistinguishable from deletion.
+ * The feeding scan is box-wide `ps` with no uid filter, so that gap is reachable
+ * on any shared box — `/root` is mode 700, and a stat of a root-owned daemon's
+ * entry from an ordinary uid returns false while the file is perfectly present.
+ * Reporting that would tell the user to `kill` a healthy daemon they do not own,
+ * with a command that would `EPERM` anyway.
+ *
+ * `statSync(p, { throwIfNoEntry: false })` returns `undefined` only for `ENOENT`
+ * and throws for everything else, which is exactly the distinction needed.
+ */
+function entryAbsent(p: string): boolean | null {
+  try {
+    return fs.statSync(p, { throwIfNoEntry: false }) === undefined;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A daemon whose launch entry is provably gone from disk (RUSH-2493).
+ *
+ * This predicate answers only "is this one's code gone?". WHO may be told about
+ * it, and whether that report is actionable, is {@link staleDaemons}'s job — a
+ * separation reached the hard way: an early revision reported every box-wide
+ * `ps` match as actionable (re-opening RUSH-2368), and the correction then
+ * over-swung to registry-only, which silently excluded the very incident below.
+ *
+ * Observed 2026-08-10 on yosemite-s0: a daemon ran for 4h14m from
+ * `.agents/worktrees/rush-2431-binary-shadow/apps/cli/dist/index.js` after that
+ * worktree was deleted. `systemctl --user is-active` said `active`,
+ * `agents daemon status` reported healthy, and nothing anywhere named it —
+ * while it held a second routine scheduler, the double-fire class the
+ * one-scheduler-one-executor rule exists to prevent. A restart would also have
+ * failed, since the manifest pointed at the same missing path.
+ *
+ * ABSOLUTE PATHS ONLY. `entryFromTokens` returns the second-to-last argv token,
+ * which is the entry for a real daemon (`getDaemonLaunch` always spawns an
+ * absolute one) but is arbitrary text for anything else — `node -e '<code>'
+ * __daemon-run` yields the code blob, which of course does not exist on disk.
+ * Requiring absoluteness keeps a non-path token from being reported as deleted
+ * code, the same false-positive class RUSH-2368 had to correct for duplicates.
+ *
+ * That guard also covers an entry path containing SPACES, which `ps` renders
+ * unquoted and the tokenizer therefore splits: `/tmp/ghost space/sub/index.js`
+ * yields `space/sub/index.js`, not absolute, so a healthy daemon on such a path
+ * is never accused (verified live). The cost is a false NEGATIVE — a genuinely
+ * deleted entry containing a space is not reported either. That is the safe
+ * direction to fail: missing one detection is a silence we already lived with,
+ * whereas telling someone to `kill` a healthy shared daemon is a new harm.
+ */
+function entryIsGone(p: DaemonProcess): boolean {
+  return p.entry !== null && path.isAbsolute(p.entry) && p.entryMissing === true;
+}
+
+/**
+ * Stale daemons split into two tiers, because DETECTION and ACCUSATION are
+ * different acts with different blast radii.
+ *
+ * RUSH-2368's harm was the accusation, not the sighting: a leaked fixture "was
+ * reported as a stray to `kill`". So the narrow registry scope is what gates
+ * anything actionable — a `doctor` problem, a non-zero exit, a `kill` — while a
+ * same-uid sighting is merely shown.
+ *
+ * That split is not academic. The incident this feature exists to catch was
+ * neither the tracked pid nor in the registry: it ran under an ephemeral `/tmp`
+ * cwd from a deleted worktree, and `lib/daemon.ts` documents that such a process
+ * "registers under its own state dir and is invisible here" BY DESIGN. Gating
+ * the display on the registry too would have made this command silent on the
+ * exact 4h14m ghost that motivated it.
+ *
+ *   `actionable` — this device's daemon, or this install's registry. Drives
+ *                  `doctor` problems and the `kill`/`restart` remediation.
+ *   `visible`    — additionally any daemon running as THIS uid. Shown in
+ *                  `status`, never exits non-zero, never told to kill.
+ *
+ * A different uid is never named at all: we cannot reliably stat its entry
+ * ({@link entryAbsent}), and we could not signal it if we tried.
+ */
+function staleDaemons(
+  processes: DaemonProcess[],
+  ownerPid: number | null,
+  registered: Set<number>,
+): { actionable: DaemonProcess[]; visible: DaemonProcess[] } {
+  const isOurs = (p: DaemonProcess) => p.pid === ownerPid || registered.has(p.pid);
+  const myUid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const gone = processes.filter(entryIsGone);
+  return {
+    actionable: gone.filter(isOurs),
+    visible: gone.filter((p) => isOurs(p) || (myUid !== null && p.uid === myUid)),
+  };
 }
 
 /**
@@ -137,22 +241,27 @@ function scanDaemonProcesses(): DaemonProcess[] {
   if (process.platform === 'win32') return [];
   let out: string;
   try {
-    out = execFileSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+    out = execFileSync('ps', ['-eo', 'pid=,uid=,args='], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
   } catch {
     return [];
   }
   const found: DaemonProcess[] = [];
   for (const line of out.split('\n')) {
-    const m = line.trim().match(/^(\d+)\s+(.*)$/);
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
     if (!m) continue;
-    const args = m[2].trim();
+    const args = m[3].trim();
     const tokens = args.split(/\s+/);
     if (tokens.length === 0 || tokens[tokens.length - 1] !== '__daemon-run') continue;
     const pid = parseInt(m[1], 10);
     if (isNaN(pid)) continue;
+    const uidParsed = parseInt(m[2], 10);
+    const uid = isNaN(uidParsed) ? null : uidParsed;
     const entry = entryFromTokens(tokens);
     const version = entry ? resolveVersionNear(entry, pid) : null;
-    found.push({ pid, entry, version });
+    // Asks whether the code is on disk for the NEXT launch -- what a restart and
+    // every other reader will see -- not what this pid currently has mapped.
+    const entryMissing = entry ? entryAbsent(entry) : false;
+    found.push({ pid, entry, version, entryMissing, uid });
   }
   return found;
 }
@@ -296,6 +405,17 @@ async function runStatus(opts: { json?: boolean }): Promise<void> {
   const processes = scanDaemonProcesses();
   const owner = pid ? processes.find((p) => p.pid === pid) : undefined;
   const duplicates = registryScopedDuplicates(processes, pid ?? null);
+  // Every daemon whose code is gone from disk, including this device's own if
+  // it is one. Not filtered by the duplicate scope — see entryIsGone.
+  // Deliberately its own read, NOT shared with registryScopedDuplicates above.
+  // That one passes `exclude` INTO findSurvivingStateDirDaemons to drop the
+  // owner, so handing it a shared empty-exclude snapshot would put ownerPid back
+  // in the set and report this device's daemon as its own duplicate. The saving
+  // would be one `ps` spawn per registered pid, at the 1-3 that actually run.
+  const registeredPids = new Set(findSurvivingStateDirDaemons(new Set()));
+  const staleTiers = staleDaemons(processes, pid ?? null, registeredPids);
+  const stale = staleTiers.visible;
+  const ownerEntryGone = owner ? entryIsGone(owner) : false;
 
   const [secrets, browserIpc] = await Promise.all([probeSecretsBroker(), probeBrowserIPC()]);
   const scheduler = schedulerSummary();
@@ -309,7 +429,18 @@ async function runStatus(opts: { json?: boolean }): Promise<void> {
       logPath: status.logPath,
       binaryPath: owner?.entry ?? status.binaryPath,
       binaryVersion: owner?.version ?? null,
+      binaryMissing: ownerEntryGone,
       duplicates: duplicates.map((d) => ({ pid: d.pid, entry: d.entry, version: d.version })),
+      // `actionable` is part of the contract, not decoration: a routine or
+      // monitor reading this must be able to tell a ghost it may act on from one
+      // that is merely visible. Without it the machine surface re-opens exactly
+      // what the two-tier split closed for the text surface.
+      staleBinaries: stale.map((d) => ({
+        pid: d.pid,
+        entry: d.entry,
+        version: d.version,
+        actionable: staleTiers.actionable.some((a) => a.pid === d.pid),
+      })),
       daemonEnabled: enabled,
       services: {
         secretsBroker: {
@@ -347,10 +478,35 @@ async function runStatus(opts: { json?: boolean }): Promise<void> {
   if (pid) console.log(`  PID:        ${pid}`);
   if (uptime !== null) console.log(`  Uptime:     ${humanDuration(uptime)}`);
   if (heartbeatAgeMs !== null) console.log(`  Heartbeat:  ${Math.round(heartbeatAgeMs / 1000)}s ago`);
-  console.log(`  Binary:     ${chalk.gray(owner?.entry ?? status.binaryPath ?? 'unknown')}`);
+  const binaryLabel = owner?.entry ?? status.binaryPath ?? 'unknown';
+  console.log(`  Binary:     ${ownerEntryGone ? chalk.red(`${binaryLabel}  (MISSING from disk)`) : chalk.gray(binaryLabel)}`);
   console.log(`  Version:    ${chalk.gray(owner?.version ?? 'unknown')}`);
   console.log(`  Log:        ${chalk.gray(status.logPath)}`);
   if (!enabled) console.log(chalk.yellow(`  daemon.enabled is false — nothing auto-starts it. Explicit start: agents daemon start`));
+
+  if (stale.length > 0) {
+    console.log(chalk.red(`\nStale code (${stale.length})\n`));
+    const actionablePids = new Set(staleTiers.actionable.map((d) => d.pid));
+    for (const d of stale) {
+      const mine = pid !== null && d.pid === pid ? ' — this is the daemon above' : '';
+      const note = mine || (actionablePids.has(d.pid) ? '' : ' — not this install; shown for visibility');
+      console.log(`  PID ${d.pid}  ${chalk.gray(d.entry ?? 'unknown entry')}${chalk.red('  (deleted)')}${chalk.gray(note)}`);
+    }
+    const advice = [
+      '\n  These run code that no longer exists on disk, so a restart fails and their',
+      '  behaviour is whatever was loaded when the file was deleted.',
+    ];
+    // Only offer a remedy when a row here is one we may act on. Printing
+    // `kill <pid>` under a section whose only rows are visibility-tier is
+    // RUSH-2368's harm re-entering through the render layer after the data
+    // layer stopped producing it.
+    if (staleTiers.actionable.length > 0) {
+      advice.push(`  Yours: ${chalk.white('agents daemon restart')}   A stray this install owns: ${chalk.white('kill <pid>')}`);
+    } else {
+      advice.push('  None belong to this install — nothing for you to stop here.');
+    }
+    console.log(chalk.gray(advice.join('\n')));
+  }
 
   if (duplicates.length > 0) {
     console.log(chalk.red(`\nDuplicates (${duplicates.length})\n`));
@@ -491,9 +647,21 @@ async function runDoctor(opts: { json?: boolean }): Promise<void> {
     problems.push(`Daemon start has ${startHealth.consecutiveFailures} consecutive failure(s): ${startHealth.lastError}`);
   }
 
-  const duplicates = registryScopedDuplicates(scanDaemonProcesses(), status.pid);
+  const healthProcesses = scanDaemonProcesses();
+  const duplicates = registryScopedDuplicates(healthProcesses, status.pid);
   if (duplicates.length > 0) {
     problems.push(`${duplicates.length} duplicate daemon process(es) running: ${duplicates.map((d) => d.pid).join(', ')}. Stop the stray(s).`);
+  }
+
+  // A daemon whose entry is gone from disk is a problem even when it answers
+  // every probe: it cannot restart, and it is running whatever was loaded
+  // before the file was deleted (RUSH-2493).
+  for (const p of staleDaemons(healthProcesses, status.pid, new Set(findSurvivingStateDirDaemons(new Set()))).actionable) {
+    const own = status.pid !== null && p.pid === status.pid;
+    problems.push(
+      `Daemon pid ${p.pid} runs code deleted from disk (${p.entry}). ` +
+      (own ? 'Restart it: agents daemon restart' : 'Stray from a removed install/worktree. Stop it: kill ' + p.pid),
+    );
   }
 
   const secrets = await probeSecretsBroker();
@@ -581,7 +749,7 @@ export function registerDaemonCommand(program: Command): void {
   });
 
   cmd.command('status')
-    .description('Identity (state/pid/uptime/binary), duplicate daemon processes, and per-service health.')
+    .description('Identity (state/pid/uptime/binary), duplicate daemons, daemons running deleted code, and per-service health.')
     .option('--json', 'Emit as JSON')
     .action(async (opts, command) => {
       await runStatus({ json: command.optsWithGlobals().json === true });

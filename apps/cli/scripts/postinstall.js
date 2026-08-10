@@ -375,49 +375,52 @@ function retargetManagedLinksToNativeBin() {
 }
 
 /**
- * Self-heal long-running processes onto the just-installed code (macOS).
+ * Self-heal long-running processes onto the just-installed code (darwin + linux).
  *
  * The root cause behind stale-behavior bugs is a daemon/broker that keeps
  * running pre-upgrade code for days. An in-place `npm i -g` swaps the files but
  * not the running processes — so we bounce them here, the one moment we know the
- * code just changed. Best-effort and non-fatal: a failure must never break the
- * install. Skipped in CI and when AGENTS_NO_HEAL=1.
+ * code just changed. Always start (or restart) the supervised daemon so a fresh
+ * install gets launchd/systemd KeepAlive without waiting for routines add.
+ * Best-effort and non-fatal: a failure must never break the install. Skipped in
+ * CI and when AGENTS_NO_HEAL=1. Windows is out of scope (detached-only, no KeepAlive).
  */
 async function healLongRunningProcesses() {
-  if (process.platform !== 'darwin') return;
+  if (process.platform !== 'darwin' && process.platform !== 'linux') return;
   if (process.env.CI || process.env.AGENTS_NO_HEAL === '1') return;
 
   // Retire the legacy standalone secrets-agent service FIRST (#416 step 2) so
   // that when the daemon (re)starts below its coexistence guard sees no
   // standalone broker and hosts the broker socket itself. No-op if no legacy
-  // plist is present; never blocks.
-  let retiredLegacyBroker = false;
+  // plist is present; never blocks. Darwin-only in practice (launchd service).
   try {
     const a = await import('../dist/lib/secrets/agent.js');
     if (a.secretsAgentServiceInstalled?.()) {
       a.retireLegacySecretsAgentService?.();
-      retiredLegacyBroker = true;
       console.log('  Retired the standalone secrets-agent service — the daemon now hosts the broker.');
     }
   } catch { /* best effort */ }
 
-  // Routines daemon: restart so it reloads new code (e.g. picks up keychain
-  // read-memoization / broker fast-path that a stale daemon wouldn't have) and
-  // (re)hosts the broker socket now the legacy service is gone. If it wasn't
-  // running but we just retired a broker the user relied on, start it so the
-  // socket has a host.
+  // Always (re)start so first install writes the LaunchAgent/systemd unit and
+  // upgrades bounce onto the new binary — but honor daemon.enabled for cold
+  // starts (SING-4a). If it was already running under a disable, stop and leave
+  // it down so upgrade does not resurrect a killed switch.
   try {
     const d = await import('../dist/lib/daemon.js');
-    if (d.isDaemonRunning?.()) {
+    const { isDaemonEnabled } = await import('../dist/lib/device-config.js');
+    const wasRunning = Boolean(d.isDaemonRunning?.());
+    const enabled = typeof isDaemonEnabled === 'function' ? isDaemonEnabled() : true;
+    if (wasRunning) {
       d.stopDaemon?.();
-      // This lifecycle script is process.argv[1] while npm is installing. Pin
-      // the restart to the installed CLI entrypoint so the service manifest
-      // never records scripts/postinstall.js as the daemon command.
+      if (enabled) {
+        d.startDaemon?.(AGENTS_BIN);
+        console.log('  Restarted the routines daemon onto this version.');
+      } else {
+        console.log('  Stopped the routines daemon (daemon.enabled=false — not restarted).');
+      }
+    } else if (enabled) {
       d.startDaemon?.(AGENTS_BIN);
-      console.log('  Restarted the routines daemon onto this version.');
-    } else if (retiredLegacyBroker) {
-      d.startDaemon?.(AGENTS_BIN);
-      console.log('  Started the daemon to host the secrets broker.');
+      console.log('  Started the always-on agents daemon.');
     }
   } catch { /* best effort */ }
 }

@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   getByokUsageForHarness,
+  renderByokBar,
   setByokFetchForTest,
   resetByokCacheForTest,
   setByokCachePathForTest,
@@ -12,6 +13,8 @@ import {
 } from './byok-usage.js';
 import { setKeychainBackendForTest, type KeychainBackend } from './secrets/index.js';
 import type { Profile } from './profiles.js';
+import * as state from './state.js';
+import { addAccount } from './account-registry.js';
 
 // Keychain item for 'openrouter' provider: agents-cli.openrouter.token
 const KEYCHAIN_ITEM = 'agents-cli.openrouter.token';
@@ -68,11 +71,13 @@ beforeEach(() => {
   prevBackend = setKeychainBackendForTest(keychain);
   resetByokCacheForTest();
   setByokFetchForTest(globalThis.fetch);
+  vi.spyOn(state, 'getUserAgentsDir').mockReturnValue(cacheDir);
 });
 
 afterEach(() => {
   setKeychainBackendForTest(prevBackend);
   setByokFetchForTest(globalThis.fetch);
+  vi.restoreAllMocks();
 });
 
 const OR_SUCCESS = {
@@ -116,6 +121,57 @@ describe('getByokUsageForHarness', () => {
       usedPercent: 25,
     });
     expect(result?.budget?.fetchedAt).toBeInstanceOf(Date);
+  });
+
+  it('maps DeepInfra checklist usage from a durable account', async () => {
+    addAccount('deepinfra-test', 'deepinfra', 'api-key', 'di-test', cacheDir);
+    let request: { url: string; authorization: string | null } | null = null;
+    setByokFetchForTest(async (input, init) => {
+      request = {
+        url: String(input),
+        authorization: new Headers(init?.headers).get('Authorization'),
+      };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ stripe_balance: -12, recent: 3, limit: 10 }),
+      } as Response;
+    });
+    const profile = makeProfile({
+      host: { agent: 'codex' },
+      provider: 'deepinfra',
+      account: 'deepinfra-test',
+      auth: undefined,
+    });
+    const result = await getByokUsageForHarness(profile, { forceRefresh: true });
+    expect(request).toEqual({
+      url: 'https://api.deepinfra.com/payment/checklist',
+      authorization: 'Bearer di-test',
+    });
+    expect(result?.budget).toMatchObject({
+      limitUsd: 10,
+      remainingUsd: 7,
+      usedUsd: 3,
+      usedPercent: 30,
+    });
+  });
+
+  it('renders DeepInfra prepaid credit when no spending limit is configured', async () => {
+    addAccount('deepinfra-prepaid', 'deepinfra', 'api-key', 'di-prepaid', cacheDir);
+    setByokFetchForTest(makeFetch({ stripe_balance: -12, recent: 3, limit: null }));
+    const result = await getByokUsageForHarness(makeProfile({
+      host: { agent: 'codex' },
+      provider: 'deepinfra',
+      account: 'deepinfra-prepaid',
+      auth: undefined,
+    }), { forceRefresh: true });
+    expect(result?.budget).toMatchObject({
+      limitUsd: null,
+      remainingUsd: 12,
+      usedUsd: 3,
+      usedPercent: null,
+    });
+    expect(renderByokBar(result!)).toContain('$12.00 credit, $3.00 used (no spending limit)');
   });
 
   it('treats limit:null as an unlimited key', async () => {
