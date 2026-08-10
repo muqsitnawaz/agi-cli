@@ -292,6 +292,7 @@ describe('resolveRoutineLaunch (RUSH-1016 — pin + failover chain)', () => {
         findCredentialAccount: () => false,
         resolveCredentialAccount: () => { throw new Error('provider default must not preflight'); },
         resolveAccountVersion: async () => '2.1.9',
+        readMeta: () => ({ accounts: { defaults: { claude: 'unavailable-provider-default' } } }),
       },
     );
     expect(plan).toEqual({
