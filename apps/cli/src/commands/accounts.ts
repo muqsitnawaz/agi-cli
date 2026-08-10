@@ -7,11 +7,50 @@ import type { AgentId } from '../lib/types.js';
 import { ALL_AGENT_IDS } from '../lib/agents.js';
 import { pushBundleToHost } from '../lib/secrets/push.js';
 import { resolveRemoteOsSync } from '../lib/hosts/remote-os.js';
+import { buildRemoteAgentsInvocation } from '../lib/hosts/remote-cmd.js';
+import { sshExec } from '../lib/ssh-exec.js';
 import { runDevicesAccounts } from './ssh.js';
 import { discoverNativeAccounts } from '../lib/account-catalog.js';
 import { readAndResolveBundleEnv } from '../lib/secrets/bundles.js';
 import { getAccountProvider, listAccountProviders, type AccountAuthKind } from '../lib/account-provider-registry.js';
 import { addAccount, findAccount, inspectAccount, readAccountRegistry, removeAccount, renameAccount, setAccountSecret } from '../lib/account-registry.js';
+
+interface SyncCatalogAccount { kind?: string; id?: string; name?: string }
+interface SyncCatalogBundle { name?: string }
+
+export function planAccountSyncDestination(
+  account: { id: string; name: string },
+  remoteAccounts: SyncCatalogAccount[],
+  remoteBundles: SyncCatalogBundle[],
+): { deleteRenamedBundle?: string } {
+  const providerAccounts = remoteAccounts.filter(candidate => candidate.kind === 'provider');
+  const sameId = providerAccounts.filter(candidate => candidate.id === account.id);
+  if (sameId.length > 1) {
+    throw new Error(`Device has multiple account bundles with ACCOUNT_ID '${account.id}': ${sameId.map(candidate => candidate.name).join(', ')}.`);
+  }
+  const sameName = providerAccounts.find(candidate => candidate.name === account.name);
+  if (sameName && sameName.id !== account.id) {
+    throw new Error(`Device account '${account.name}' has a different ACCOUNT_ID; refusing to overwrite it.`);
+  }
+  if (remoteBundles.some(bundle => bundle.name === account.name) && !sameName) {
+    throw new Error(`Device secrets bundle '${account.name}' is not this account; refusing to change its keys or prompt policy.`);
+  }
+  const renamed = sameId[0];
+  return renamed?.name && renamed.name !== account.name ? { deleteRenamedBundle: renamed.name } : {};
+}
+
+function remoteJson(device: string, remoteOs: ReturnType<typeof resolveRemoteOsSync>, args: string[]): unknown {
+  const result = sshExec(device, buildRemoteAgentsInvocation(args, undefined, remoteOs), { timeoutMs: 30_000 });
+  if (result.code !== 0) {
+    const detail = (result.stderr || result.stdout || '').trim();
+    throw new Error(`Could not inspect ${device} before account sync${detail ? `: ${detail}` : '.'}`);
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    throw new Error(`Could not inspect ${device} before account sync: remote CLI returned invalid JSON.`);
+  }
+}
 
 export function parseBundleKey(raw: string): { bundle: string; key: string } {
   const colon = raw.indexOf(':');
@@ -55,7 +94,7 @@ function parseAuth(raw: string): AccountAuthKind {
 export function registerAccountsCommand(program: Command): void {
   const accounts = program.command('accounts').description('Browse native logins and manage provider account bundles')
     .option('--json', 'Machine-readable account metadata')
-    .option('--fleet', 'Show native OAuth identities across reachable devices')
+    .option('--fleet', 'Show harness-native signed-in identities across reachable devices')
     .action((o: { json?: boolean; fleet?: boolean }) => printAccounts(!!o.json, !!o.fleet));
   accounts.command('list').description('List credential accounts').option('--json', 'Machine-readable account metadata').action((o: { json?: boolean }, command: Command) => printAccounts(!!(o.json || command.optsWithGlobals().json)));
 
@@ -131,13 +170,38 @@ export function registerAccountsCommand(program: Command): void {
     .action((name: string, o: { device: string; force?: boolean }) => {
       const account = findAccount(name);
       if (!account) throw new Error(`Unknown provider account '${name}'.`);
-      const remoteBackend = resolveRemoteOsSync(o.device) === 'win32' ? 'keychain' : 'file';
+      const remoteOs = resolveRemoteOsSync(o.device);
+      const remoteBackend = remoteOs === 'win32' ? 'keychain' : 'file';
+      const remoteAccounts = remoteJson(o.device, remoteOs, ['accounts', '--json']) as SyncCatalogAccount[];
+      const remoteBundles = remoteJson(o.device, remoteOs, ['secrets', 'list', '--json']) as SyncCatalogBundle[];
+      if (!Array.isArray(remoteAccounts) || !Array.isArray(remoteBundles)) {
+        throw new Error(`Could not inspect ${o.device} before account sync: expected JSON arrays.`);
+      }
+      const plan = planAccountSyncDestination(account, remoteAccounts, remoteBundles);
+      if (plan.deleteRenamedBundle) {
+        const removed = sshExec(
+          o.device,
+          buildRemoteAgentsInvocation(['secrets', 'delete', plan.deleteRenamedBundle, '--yes'], undefined, remoteOs),
+          { timeoutMs: 30_000 },
+        );
+        if (removed.code !== 0) {
+          const detail = (removed.stderr || removed.stdout || '').trim();
+          throw new Error(`Could not reconcile renamed account '${plan.deleteRenamedBundle}' on ${o.device}${detail ? `: ${detail}` : '.'}`);
+        }
+      }
+      const literalValues = {
+        ACCOUNT_ID: account.id,
+        PROVIDER: account.provider,
+        AUTH_TYPE: account.auth,
+        ...(account.baseUrl ? { BASE_URL: account.baseUrl } : {}),
+      };
       const result = pushBundleToHost(account.name, o.device, {
         remoteBackend,
         force: o.force,
         operation: 'accounts sync',
         policyNever: true,
         agentOnly: false,
+        literalValues,
       });
       if (!result.ok) throw new Error(`${result.message}\nRetry: agents accounts sync ${account.name} --device ${o.device}${o.force ? ' --force' : ''}`);
       console.log(chalk.green(`${account.name} synced to ${o.device} (${result.keyCount} keys, ${remoteBackend} backend, policy never).`));
@@ -151,6 +215,6 @@ agents accounts inspect work --json
 agents accounts set-default claude work
 agents accounts sync work --device yosemite-s0
 agents run claude --account work`,
-    notes: 'Accounts are durable credentials, independent of agent versions. Native OAuth login remains managed by the harness and is not copied or renamed by agents-cli.',
+    notes: 'Provider accounts are durable credentials independent of agent versions. Harness-native auth remains managed by each harness and is not copied or renamed by agents-cli.',
   });
 }

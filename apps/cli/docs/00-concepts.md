@@ -116,7 +116,7 @@ two `pid → id` writers (the CLI's registry vs the SessionStart hook).
 
 ### Credential accounts
 
-`agents accounts` shows two kinds of identity together. Native OAuth stays in the
+`agents accounts` shows two kinds of identity together. Harness-native auth stays in the
 harness version home where its normal login flow created it. A provider account is
 one `agents secrets` bundle that can authenticate every compatible harness; the
 bundle name is the account label and rotating its key does not change `ACCOUNT_ID`.
@@ -137,7 +137,7 @@ optional `BASE_URL`, and either `API_KEY` or `TOKEN`. It always uses secrets pol
 `accounts sync` writes the bundle to the encrypted file backend using a
 machine-local key; Windows uses Credential Manager. Values cross SSH on stdin,
 never argv. Sync is explicit and copies provider bundles only. It never copies
-native OAuth files.
+harness-native auth files.
 
 Resolution order is explicit `--account`, then the compatible account selected by
 `accounts set-default`, then the harness's native/balanced behavior. An incompatible

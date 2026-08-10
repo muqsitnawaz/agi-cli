@@ -155,8 +155,14 @@ export function findAccount(name: string, doc = readAccountRegistry()): Credenti
 }
 
 /** Explicit selection wins over a configured per-harness default. */
-export function resolveAccountSelection(explicit: string | undefined, agent: AgentId, meta: Pick<Meta, 'accounts'>): string | undefined {
-  return explicit ?? meta.accounts?.defaults?.[agent];
+export function resolveAccountSelection(
+  explicit: string | undefined,
+  agent: AgentId,
+  meta: Pick<Meta, 'accounts'>,
+  opts: { useDefault?: boolean } = {},
+): string | undefined {
+  if (explicit) return explicit;
+  return opts.useDefault === false ? undefined : meta.accounts?.defaults?.[agent];
 }
 
 function profileConsumers(name: string, base: string): string[] {
