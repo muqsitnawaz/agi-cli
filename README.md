@@ -972,15 +972,18 @@ agents accounts add gateway --provider openrouter --auth api-key \
   --from-secrets openrouter.ai:OPENROUTER_API_KEY  # import from an existing secrets bundle
 agents accounts add deepinfra --provider deepinfra --auth api-key
 
-agents accounts set-default claude work   # claude uses `work` when --account is omitted
-agents accounts sync work --device yosemite-s0   # explicitly copy the bundle to a worker device
+agents accounts name claude@2.1.220 work       # name harness-owned OAuth metadata
+agents accounts attach work claude@2.1.225     # validate and bind the same native identity
+agents accounts attach gateway deepseek       # bind a provider bundle to a custom harness
+agents accounts set-default claude gateway     # claude uses `gateway` when --account is omitted
+agents accounts sync gateway yosemite-s0       # explicitly copy only the portable bundle
 agents run claude --account work
 agents profiles add deepinfra --account deepinfra
 ```
 
-One provider account **is** one `agents secrets` bundle -- `agents accounts add` creates it with secrets policy `never`, so a background agent launch on that account never raises Touch ID. `agents accounts` (no subcommand) lists provider bundles next to harness-native signed-in identities so you see both kinds of credential together; `accounts list` / `inspect <name>` / `set-key <name>` (rotate) / `rename` / `remove` manage a bundle by its stable id, independent of its current label.
+One provider account **is** one `agents secrets` bundle -- `agents accounts add` creates it with secrets policy `never`, so a background agent launch on that account never raises Touch ID. A named native account is metadata only: its OAuth token remains owned by Claude, Codex, Cursor, or the other harness. `agents accounts` lists both kinds; `name <source> <name>`, `attach <account> <target>`, `detach`, `view`, `set-key`, `rename`, and `remove` use stable account ids behind their human names.
 
-Harness-native OAuth logins (Claude Code's own `/login`, `codex login`, and so on) stay exactly where the harness put them -- agents-cli discovers and displays them but never copies, renames, or converts them into a provider bundle. `accounts sync <name> --device <device>` is the only way a provider account crosses machines, and it's explicit: nothing syncs automatically. Selection order for a run is explicit `--account`, then `accounts set-default` for that harness, then the harness's native/balanced account behavior.
+Harness-native OAuth logins (Claude Code's own `/login`, `codex login`, and so on) stay exactly where the harness put them -- agents-cli discovers and displays them but never copies or converts them into a provider bundle. `accounts sync <name> <device>` is the only way a provider account crosses machines, and it's explicit: nothing syncs automatically. Selection order for a run is explicit `--account`, then an exact installation/custom-harness attachment, then `accounts set-default`, then the harness's native/balanced account behavior.
 
 ---
 

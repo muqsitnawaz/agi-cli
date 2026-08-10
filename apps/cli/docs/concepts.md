@@ -141,7 +141,7 @@ agents accounts add work --provider anthropic --auth setup-token
 agents accounts add gateway --provider openrouter --auth api-key \
   --from-secrets openrouter.ai:OPENROUTER_API_KEY
 agents accounts set-default claude gateway
-agents accounts sync gateway --device yosemite-s0
+agents accounts sync gateway yosemite-s0
 agents run claude --account work
 ```
 

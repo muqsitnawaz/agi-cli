@@ -2199,7 +2199,7 @@ export function registerRunCommand(program: Command): void {
 
       const [
         { buildExecCommand, parseExecEnv, execAgent, runWithFallback, normalizeMode, resolveMode, implicitModeFor, headlessPlanStallCommand, nativeResume, resolveInteractive, inferredInteractiveWithoutTty },
-        { ALL_AGENT_IDS, ACCOUNT_INSPECTION_AGENT_IDS, agentLabel, supportsAccountInspection },
+        { ALL_AGENT_IDS, ACCOUNT_INSPECTION_AGENT_IDS, agentLabel, getAccountInfo, supportsAccountInspection },
         { profileExists, readProfile, resolveProfileForRun },
         { readAndResolveBundleEnv, describeBundle, assertRemoteBundleFlagsUnsupported },
         { splitBundleRef, resolveHostSshTarget, remoteResolveEnv },
@@ -2587,16 +2587,42 @@ export function registerRunCommand(program: Command): void {
 
       version = resolveVersionAlias(agent, version);
 
-      const { resolveAccountSelection } = await import('../lib/account-registry.js');
-      const configuredAccount = resolveAccountSelection(options.account, agent, readMeta(), { useDefault: !fromProfile });
+      const { findUnifiedAccount, resolveAccountSelection } = await import('../lib/account-registry.js');
+      const accountTarget = fromProfile ? rawAgent : (version ? `${agent}@${version}` : agent);
+      const configuredAccount = resolveAccountSelection(options.account, agent, readMeta(), { useDefault: !fromProfile, target: accountTarget });
       if (configuredAccount) {
-        if (options.cloud || options.provider || options.lease) {
-          console.error(chalk.red('--account selects a device-local credential and cannot be combined with cloud or lease placement.'));
+        const meta = readMeta();
+        const account = findUnifiedAccount(configuredAccount, meta);
+        if (!account) {
+          console.error(chalk.red(`Unknown account '${configuredAccount}'.`));
           process.exit(1);
         }
-        const { resolveCredentialAccount } = await import('../lib/account-registry.js');
-        try { accountEnv = resolveCredentialAccount(configuredAccount, agent, profileProvider).env; }
-        catch (err) { console.error(chalk.red((err as Error).message)); process.exit(1); }
+        if (account.kind === 'native') {
+          if (options.cloud || options.provider || options.lease) {
+            console.error(chalk.red(`Native account '${account.name}' is device-local and cannot be used with cloud or lease placement.`));
+            process.exit(1);
+          }
+          if (account.agent !== agent) {
+            console.error(chalk.red(`Native account '${account.name}' belongs to ${account.agent}, not ${agent}.`));
+            process.exit(1);
+          }
+          if (version) {
+            const info = await getAccountInfo(agent, getVersionHomePath(agent, version));
+            const identityKey = info.accountKey ?? info.email?.toLowerCase();
+            if (!info.signedIn || identityKey !== account.identityKey) {
+              console.error(chalk.red(`${agent}@${version} is not signed in as native account '${account.name}'.`));
+              process.exit(1);
+            }
+          }
+        } else {
+          if (options.cloud || options.provider || options.lease) {
+            console.error(chalk.red('--account selects a device-local credential and cannot be combined with cloud or lease placement.'));
+            process.exit(1);
+          }
+          const { resolveCredentialAccount } = await import('../lib/account-registry.js');
+          try { accountEnv = resolveCredentialAccount(account.id, agent, profileProvider).env; }
+          catch (err) { console.error(chalk.red((err as Error).message)); process.exit(1); }
+        }
       }
 
       // --resume: resolve a prior conversation and rewrite the run target to

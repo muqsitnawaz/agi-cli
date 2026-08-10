@@ -51,7 +51,7 @@ Both come from the same mistake: **agents-cli touching the interactive login.**
    `never` set unconditionally — never the OS keychain's biometry ACL, so reading
    it raises no Touch ID prompt. There is no shared "auth" bundle name; a user can
    hold as many named accounts as they need, and only the accounts they explicitly
-   `agents accounts sync <name> --device <device>` cross the fleet.
+   `agents accounts sync <name> <device>` cross the fleet.
 
 5. **Usage and account views read the setup-token**, not the interactive login —
    and never a prompting keychain read. Caveat (RUSH-2392): Anthropic's
@@ -76,7 +76,10 @@ Both come from the same mistake: **agents-cli touching the interactive login.**
 
 The only thing that crosses the fleet is a provider account bundle the user
 deliberately created with `agents accounts add` and explicitly pushed with
-`agents accounts sync <name> --device <device>`. Nothing rotating is ever copied.
+`agents accounts sync <name> <device>`. Nothing rotating is ever copied. Native
+OAuth identities may be named and attached with `agents accounts name
+<agent@version> <name>` and `agents accounts attach <name> <target>`, but those
+records contain identity metadata only and never enter the agents-cli keychain.
 
 ## How each surface changes
 
@@ -160,9 +163,10 @@ endpoint takes any `sk-ant-oat01-` bearer, `usage.ts:624,957`):
    (benign for rotation) and shows "usage pending"; seed a setup-token to
    restore usage.
 3. `apply` stops copying rotating login files (Gap B).
-4. **Shipped (RUSH-2470):** `agents accounts add <name>` creates a named,
-   policy-`never` bundle per account; `agents accounts sync <name> --device
+4. **Shipped (RUSH-2470, RUSH-2527):** `agents accounts add <name>` creates a named,
+   policy-`never` bundle per provider account; `agents accounts sync <name>
    <device>` copies it explicitly to a worker device (encrypted file backend on
    Linux, Credential Manager on Windows). No reserved bundle name — every
-   account the user creates is independently named and independently synced.
+   provider account the user creates is independently named and independently
+   synced. Native aliases and attachments carry identity metadata only.
 5. Fleet upgrade + verify **zero Touch ID** on a real macOS box (the proof).

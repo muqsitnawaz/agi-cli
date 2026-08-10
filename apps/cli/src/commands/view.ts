@@ -71,7 +71,8 @@ import { resolveVersionFilter, AgentSpecError } from '../lib/agent-spec/index.js
 import { listCliStatus } from '../lib/cli-resources.js';
 import { isCapable } from '../lib/capabilities.js';
 import { discoverPlugins, pluginSupportsAgent } from '../lib/plugins.js';
-import { getAgentsDir, getUserAgentsDir, getEffectivePromptcutsPath, readMergedPromptcuts } from '../lib/state.js';
+import { getAgentsDir, getUserAgentsDir, getEffectivePromptcutsPath, readMergedPromptcuts, readMeta } from '../lib/state.js';
+import { listNativeAccounts } from '../lib/account-registry.js';
 import { isGitRepo, getGitSyncStatus } from '../lib/git.js';
 import { getCentralRulesFileName } from '../lib/rules/rules.js';
 import { composeRulesFromState, type ComposedSubrule } from '../lib/rules/compose.js';
@@ -87,6 +88,14 @@ import { terminalWidth, truncateToWidth, stringWidth, padToWidth } from '../lib/
 
 /** Shared account identity formatter, re-exported for the view-specific tests. */
 export const accountColumnLabel = accountDisplayLabel;
+
+function namedAccountColumnLabel(agent: AgentId, info: AccountInfo | undefined): string {
+  const display = accountColumnLabel(info);
+  const identityKey = info?.accountKey ?? info?.email?.toLowerCase();
+  if (!identityKey) return display;
+  const saved = listNativeAccounts(readMeta()).find(account => account.agent === agent && account.identityKey === identityKey);
+  return saved ? `${saved.name} · ${display || saved.identityLabel || identityKey}` : display;
+}
 
 export interface AccountOrderedVersion {
   version: string;
@@ -616,7 +625,7 @@ async function showInstalledVersions(
         maxVerLabel = Math.max(maxVerLabel, versionRowLabel(agentId, v, globalDefault).length);
         const rawInfo = infoMap.get(`${agentId}:${v}`);
         const info = rawInfo ? mergeCanonical(rawInfo) : undefined;
-        const accountLabel = accountColumnLabel(info);
+        const accountLabel = namedAccountColumnLabel(agentId, info);
         if (accountLabel) maxEmail = Math.max(maxEmail, accountLabel.length);
         if (info?.plan) maxPlanWidth = Math.max(maxPlanWidth, info.plan.length);
         const model = resolveConfiguredModel(agentId, v)?.model;
@@ -748,7 +757,7 @@ async function showInstalledVersions(
           // Always emit account / usage / status / lastActive columns once any
           // signed-in row exists in the table (widths are global). Empty cells
           // are space-padded so later columns do not drift left.
-          const display = accountColumnLabel(vInfo);
+          const display = namedAccountColumnLabel(agentId, vInfo);
           parts.push(display ? chalk.cyan(padToWidth(display, maxEmail)) : ' '.repeat(maxEmail));
           if (maxUsageWidth > 0) {
             parts.push(padToWidth(usageStr, maxUsageWidth));
@@ -841,7 +850,7 @@ async function showInstalledVersions(
         maxWindows: usageWindowCap,
       });
       gMaxUsageWidth = Math.max(gMaxUsageWidth, stringWidth(gUsageStr));
-      const gDisplay = accountColumnLabel(gInfo);
+      const gDisplay = namedAccountColumnLabel(agentId, gInfo);
       if (gDisplay) gMaxEmail = Math.max(gMaxEmail, gDisplay.length);
     }
 
@@ -866,7 +875,7 @@ async function showInstalledVersions(
       });
       const gActiveStr = gInfo ? formatLastActive(gInfo.lastActive) : '';
       if (gInfo?.email || gUsageStr || gActiveStr || gInfo?.signedIn) {
-        const gDisplay = accountColumnLabel(gInfo);
+        const gDisplay = namedAccountColumnLabel(agentId, gInfo);
         parts.push(gDisplay ? chalk.cyan(padToWidth(gDisplay, gMaxEmail)) : ' '.repeat(gMaxEmail));
       }
       if (gMaxUsageWidth > 0) parts.push(padToWidth(gUsageStr, gMaxUsageWidth));
@@ -1105,7 +1114,7 @@ async function showAgentResources(
       cliVersion: version,
       info: accountInfo,
     });
-    const accountLabel = accountColumnLabel(accountInfo);
+    const accountLabel = namedAccountColumnLabel(agentId, accountInfo);
     const emailStr = accountLabel ? chalk.cyan(`  ${accountLabel}`) : '';
     const status = chalk.green(version);
     // Configured model sits right beside the version, same priority (no label).

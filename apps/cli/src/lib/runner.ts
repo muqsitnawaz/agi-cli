@@ -892,15 +892,26 @@ export async function resolveRoutineLaunch(
   // resolveRoutineLaunch is only called for agent jobs (workflow returns above;
   // command jobs branch out of execute*Job before reaching this).
   const agent = config.agent!;
-  const { findAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+  const { findAccount, findUnifiedAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+  const meta = (deps.readMeta ?? readMeta)();
   const explicitCredential = config.account
     ? (deps.findCredentialAccount?.(config.account) ?? (deps.resolveCredentialAccount !== undefined || findAccount(config.account) !== null))
     : false;
   const selectedCredential = config.account
     ? (explicitCredential ? config.account : undefined)
-    : resolveAccountSelection(undefined, agent, (deps.readMeta ?? readMeta)());
+    : resolveAccountSelection(undefined, agent, meta, { target: config.version ? `${agent}@${config.version}` : agent });
   if (selectedCredential) {
-    (deps.resolveCredentialAccount ?? resolveCredentialAccount)(selectedCredential, agent);
+    if (deps.resolveCredentialAccount) {
+      deps.resolveCredentialAccount(selectedCredential, agent);
+    }
+    const unified = deps.resolveCredentialAccount ? null : findUnifiedAccount(selectedCredential, meta);
+    if (unified?.kind === 'provider') resolveCredentialAccount(selectedCredential, agent);
+    if (unified?.kind === 'native') {
+      const accountVersion = await (deps.resolveAccountVersion ?? resolveAccountVersion)(agent, unified.identityLabel ?? unified.identityKey);
+      if (!accountVersion) throw new Error(`Routine '${config.name}' native account '${unified.name}' is not signed in for ${agent}.`);
+      if (config.version && config.version !== accountVersion) throw new Error(`Routine '${config.name}' native account '${unified.name}' is signed in at ${agent}@${accountVersion}, not pinned ${agent}@${config.version}.`);
+      return { chain: [{ agent, version: config.version ?? accountVersion }], rotation: null, pinned: true, forwardAccount: false };
+    }
   }
   if (config.account && !explicitCredential) {
     const accountVersion = await (deps.resolveAccountVersion ?? resolveAccountVersion)(agent, config.account);
@@ -1291,11 +1302,11 @@ async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undefined, a
   // (command jobs branched out earlier, so config.agent is set on the non-workflow path.)
   const effectiveAgent: AgentId = config.workflow ? 'claude' : config.agent!;
   if (!dispatchesViaAgentsRun(config)) {
-    const { findAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+    const { findAccount, findUnifiedAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
     const selectedAccount = config.account && !findAccount(config.account)
       ? undefined
-      : resolveAccountSelection(config.account, effectiveAgent, readMeta());
-    if (selectedAccount) Object.assign(baseEnv, resolveCredentialAccount(selectedAccount, effectiveAgent).env);
+      : resolveAccountSelection(config.account, effectiveAgent, readMeta(), { target: primaryVersion ? `${effectiveAgent}@${primaryVersion}` : effectiveAgent });
+    if (selectedAccount && findUnifiedAccount(selectedAccount, readMeta())?.kind !== 'native') Object.assign(baseEnv, resolveCredentialAccount(selectedAccount, effectiveAgent).env);
   }
 
   const meta: RunMeta = {
@@ -1889,11 +1900,11 @@ async function executeJobDetachedClaimed(config: JobConfig, attempt: RoutineAtte
     config,
   );
   if (!dispatchesViaAgentsRun(config)) {
-    const { findAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
+    const { findAccount, findUnifiedAccount, resolveAccountSelection, resolveCredentialAccount } = await import('./account-registry.js');
     const selectedAccount = config.account && !findAccount(config.account)
       ? undefined
-      : resolveAccountSelection(config.account, config.agent!, readMeta());
-    if (selectedAccount) Object.assign(baseEnv, resolveCredentialAccount(selectedAccount, config.agent!).env);
+      : resolveAccountSelection(config.account, config.agent!, readMeta(), { target: version ? `${config.agent!}@${version}` : config.agent! });
+    if (selectedAccount && findUnifiedAccount(selectedAccount, readMeta())?.kind !== 'native') Object.assign(baseEnv, resolveCredentialAccount(selectedAccount, config.agent!).env);
   }
   const spawnEnv = dispatchesViaAgentsRun(config)
     ? (() => {
