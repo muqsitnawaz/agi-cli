@@ -57,25 +57,30 @@ bold()   { printf '\033[1m%s\033[0m\n'  "$*"; }
 
 die() { red "error: $*"; exit 1; }
 
-# ----- Home base: the one hardcoded machine name (owner-endorsed) -----
-# The build/sign/notarize/publish/computer-helper phase MUST run here: it is the
-# only box that holds the Developer ID cert + npm publish rights + the headless
-# signing/secrets context. This is a constant, NOT an env var -- nobody sets
-# anything to release. Everything else self-selects (crabbox for tests; the
-# invoking box for git+gh orchestration).
-readonly RELEASE_HOME_BASE="mac-mini"
+# ----- Home base: the default machine name (owner-endorsed) -----
+# The build/sign/notarize/publish/computer-helper phase MUST run on a box that
+# holds the Developer ID cert + npm publish rights + the headless signing/secrets
+# context. mac-mini is that box, and it stays the DEFAULT: releasing is still
+# zero-config -- nobody sets anything, and no env var is read. Everything else
+# self-selects (crabbox for tests; the invoking box for git+gh orchestration).
+#
+# `--home-base <host>` is the explicit failover for when that box is unreachable
+# (asleep, offline, rebuilt). It is deliberately a per-invocation FLAG, not an env
+# var and not config: the box that signs a release is an operator decision that
+# should be visible in the command that made it, never ambient state that silently
+# redirects a publish. The override is validated below (must be a known macOS box
+# reachable over ssh) rather than trusted.
+readonly RELEASE_HOME_BASE_DEFAULT="mac-mini"
 
-# Detect the short hostname of the box we are on, portably (macOS + Linux), and
-# compute whether we are already on the home base. `scutil --get LocalHostName`
-# is the macOS name that matches the ssh/Tailscale name; `hostname -s` is the
-# Linux short name.
+# Detect the short hostname of the box we are on, portably (macOS + Linux).
+# `scutil --get LocalHostName` is the macOS name that matches the ssh/Tailscale
+# name; `hostname -s` is the Linux short name. RELEASE_HOME_BASE and
+# ON_HOME_BASE are resolved AFTER arg parsing, since --home-base can change both.
 if [[ "$(uname)" == "Darwin" ]]; then
   THIS_HOST="$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
 else
   THIS_HOST="$(hostname -s 2>/dev/null || hostname)"
 fi
-ON_HOME_BASE=false
-[[ "$THIS_HOST" == "$RELEASE_HOME_BASE" ]] && ON_HOME_BASE=true
 
 # ----- Phase tracker -----
 # A running [n/N] progress line the operator can follow: each phase names the box
@@ -97,6 +102,10 @@ phase_fail() {
 }
 
 # ----- Parse args -----
+# Parsing consumes "$@" (--home-base takes a value, so the loop shifts), but the
+# release-worktree re-exec below has to replay the operator's ORIGINAL argv
+# verbatim. Capture it first.
+RELEASE_ARGV=("$@")
 APPLY=false
 SKIP_TESTS=false
 YES=false
@@ -108,24 +117,44 @@ HOME_BASE_PHASE=false
 # --orchestration-phase is an INTERNAL marker added only by release-worktree.sh.
 # It prevents the release-owned checkout from recursively creating another one.
 ORCHESTRATION_PHASE=false
+# --home-base <host> overrides the box that builds/signs/notarizes/publishes.
+# Empty means "use RELEASE_HOME_BASE_DEFAULT".
+HOME_BASE_OVERRIDE=""
 TARGET=""
-for arg in "$@"; do
-  case "$arg" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --apply) APPLY=true ;;
     --skip-tests) SKIP_TESTS=true ;;
     --yes|-y) YES=true ;;
     --home-base-phase) HOME_BASE_PHASE=true ;;
     --orchestration-phase) ORCHESTRATION_PHASE=true ;;
-    -h|--help) printf '%s\n' "usage: scripts/release.sh <version> [--apply] [--skip-tests] [--yes]"; exit 0 ;;
-    --*) die "unknown flag: $arg" ;;
+    --home-base)
+      [[ -n "${2:-}" ]] || die "--home-base needs a host name (e.g. --home-base zion)"
+      HOME_BASE_OVERRIDE="$2"
+      shift
+      ;;
+    --home-base=*) HOME_BASE_OVERRIDE="${1#*=}"
+      [[ -n "$HOME_BASE_OVERRIDE" ]] || die "--home-base needs a host name (e.g. --home-base zion)"
+      ;;
+    -h|--help) printf '%s\n' "usage: scripts/release.sh <version> [--apply] [--skip-tests] [--yes] [--home-base <host>]"; exit 0 ;;
+    --*) die "unknown flag: $1" ;;
     *)
-      [[ -z "$TARGET" ]] || die "unexpected argument: $arg"
-      TARGET="$arg"
+      [[ -z "$TARGET" ]] || die "unexpected argument: $1"
+      TARGET="$1"
       ;;
   esac
+  shift
 done
 [[ -n "$TARGET" ]] || die "usage: scripts/release.sh <version> [--apply]  (e.g. 1.14.2 --apply)"
 [[ "$TARGET" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "version must be MAJOR.MINOR.PATCH (no pre-release tags)"
+
+# ----- Resolve the home base (default, or the --home-base override) -----
+# Resolved here, after parsing, because --home-base changes both the target box
+# and whether THIS box is it.
+RELEASE_HOME_BASE="${HOME_BASE_OVERRIDE:-$RELEASE_HOME_BASE_DEFAULT}"
+readonly RELEASE_HOME_BASE
+ON_HOME_BASE=false
+[[ "$THIS_HOST" == "$RELEASE_HOME_BASE" ]] && ON_HOME_BASE=true
 
 # The caller's checkout is never the orchestration workspace. It may be a dirty
 # shared main checkout or an agent's feature worktree; either way, release-owned
@@ -136,7 +165,7 @@ if ! $HOME_BASE_PHASE && ! $ORCHESTRATION_PHASE; then
   CALLER_GIT_COMMON_DIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
     || die "release.sh must run from an agents-cli git checkout"
   CALLER_REPO_ROOT="$(dirname "$CALLER_GIT_COMMON_DIR")"
-  exec scripts/release-worktree.sh "$CALLER_REPO_ROOT" "$@"
+  exec scripts/release-worktree.sh "$CALLER_REPO_ROOT" "${RELEASE_ARGV[@]}"
 fi
 
 if $APPLY; then
@@ -145,9 +174,29 @@ else
   yellow "Mode: DRY-RUN (no branch, PR, merge, tag, publish, or push -- pass --apply to actually release)"
 fi
 gray "  this box:   $THIS_HOST$($ON_HOME_BASE && echo '  (home base)' || echo '')"
-gray "  home base:  $RELEASE_HOME_BASE  (build + sign + notarize + npm publish + computer-helper)"
+gray "  home base:  $RELEASE_HOME_BASE  (build + sign + notarize + npm publish + computer-helper)$([[ "$RELEASE_HOME_BASE" != "$RELEASE_HOME_BASE_DEFAULT" ]] && echo "  [--home-base override; default is $RELEASE_HOME_BASE_DEFAULT]" || echo '')"
 gray "  tests:      a crabbox (dynamic Hetzner Linux VM, selected at run time)"
 echo
+
+# ----- Validate an overridden home base BEFORE anything irreversible -----
+# The default box is known-good; an override is not. Prove it is reachable and
+# macOS now, rather than discovering it after the release has already merged and
+# tagged (the publish is the LAST phase, so a bad override otherwise fails at the
+# most expensive possible moment). Skipped when we are already on it, and in the
+# --home-base-phase entrypoint, which by definition runs on the box itself.
+if [[ -n "$HOME_BASE_OVERRIDE" ]] && ! $ON_HOME_BASE && ! $HOME_BASE_PHASE; then
+  yellow "Home base set explicitly to '$RELEASE_HOME_BASE' -- probing it before starting..."
+  if command -v agents >/dev/null 2>&1; then
+    hb_probe="$(agents ssh "$RELEASE_HOME_BASE" -- 'uname' 2>&1 || true)"
+  else
+    hb_probe="$(ssh "$RELEASE_HOME_BASE" 'uname' 2>&1 || true)"
+  fi
+  grep -q 'Darwin' <<<"$hb_probe" \
+    || die "--home-base '$RELEASE_HOME_BASE' is not a reachable macOS box (probe returned: $(tr '\n' ' ' <<<"$hb_probe" | tail -c 200)).
+    The home base must build, sign, notarize and publish, so it has to be a Mac this box can ssh into."
+  green "  ✓ $RELEASE_HOME_BASE reachable and macOS"
+  echo
+fi
 
 # ----- Privileged phase on the home base (internal --home-base-phase entrypoint) -----
 # This runs the TAGGED release.sh (route_home_base_phase checks out the tag into a
@@ -398,8 +447,11 @@ run_crabbox_tests() {
 # apps/cli/scripts/release.sh $TARGET --home-base-phase. The worktree is removed on
 # exit whether the phase succeeds or fails (BLOCKER 3), via a scoped EXIT trap.
 home_base_wt_snippet() {
-  # $1 = version. Emits a self-contained bash program (no outer-shell expansion of
-  # runtime values beyond the version, which is validated MAJOR.MINOR.PATCH).
+  # $1 = version, $2 = resolved home-base host name. Emits a self-contained bash
+  # program (no outer-shell expansion of runtime values beyond those two: the
+  # version is validated MAJOR.MINOR.PATCH, and the host was probed reachable).
+  # $2 rides along as --home-base so the remote phase's messages name the box it
+  # is actually running on rather than the compiled-in default.
   cat <<SNIPPET
 set -euo pipefail
 REPO_ROOT="\$(git rev-parse --show-toplevel)"
@@ -429,12 +481,12 @@ else
   echo "warning: \$REPO_ROOT/apps/cli/bin/embedded.provisionprofile absent on the home base; the signed helper build will fail" >&2
 fi
 cd "\$WT/apps/cli"
-scripts/release.sh $1 --home-base-phase
+scripts/release.sh $1 --home-base-phase --home-base $2
 SNIPPET
 }
 route_home_base_phase() {
   local snippet
-  snippet="$(home_base_wt_snippet "$TARGET")"
+  snippet="$(home_base_wt_snippet "$TARGET" "$RELEASE_HOME_BASE")"
   if $ON_HOME_BASE; then
     bold "Building + signing + publishing on the home base ($RELEASE_HOME_BASE, this box) from the tagged tree..."
     # cwd is this repo's apps/cli (ROOT), so the snippet's `git rev-parse

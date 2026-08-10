@@ -559,6 +559,7 @@ that the caller be on a clean `main`:
 ```bash
 scripts/release.sh <version>          # dry-run: bump, type-check, tarball preview, detected state
 scripts/release.sh <version> --apply  # tests on a crabbox -> PR + CI -> merge + tag -> build/sign/publish on the home base
+scripts/release.sh <version> --apply --home-base zion   # same, but sign + publish on another Mac
 ```
 
 The release has **three self-selected homes** and prints a `[n/6]` phase tracker,
@@ -568,10 +569,35 @@ each phase labeled with the box it runs on and a ✓/✗ result:
 |---|---|---|
 | Orchestrate: bump, changelog, PR, tag | a detached worktree on the box you invoked it on | fresh `origin/<default>` under `.agents/worktrees/release-v<version>-<pid>` |
 | CI / tests (Linux) | a **crabbox** workspace (Hetzner Linux VM) | [`scripts/sandbox.sh`](scripts/sandbox.sh) reclaims an available warm box and syncs into `~/workspaces/<repo>-<task>`; it warms capacity only when the shared pool has none — **dynamic, never a hardcoded or release-exclusive instance** |
-| Build, sign+notarize, npm publish, computer-helper | the **home base** | one hardcoded constant `RELEASE_HOME_BASE="mac-mini"` in `release.sh`; the script detects if it's already there (`scutil --get LocalHostName` / `hostname -s`), else reaches it over `ssh` |
+| Build, sign+notarize, npm publish, computer-helper | the **home base** | `RELEASE_HOME_BASE_DEFAULT="mac-mini"` in `release.sh`, overridable per run with `--home-base <host>`; the script detects if it's already there (`scutil --get LocalHostName` / `hostname -s`), else reaches it over `ssh` |
 
 `mac-mini` is the only hardcoded machine name (it holds the Developer ID cert +
 npm publish rights). The crabbox is **not** hardcoded.
+
+**`--home-base <host>` is the failover, and it is a flag on purpose.** The default
+box holds the signing keychain and the publish token, so it is the right answer
+almost always — but "almost" is not "always": it sleeps, goes offline, gets
+rebuilt, and the publish is the **last** phase, so a run against an unreachable
+home base merges and tags before dying at the ssh hop. The override exists so that
+is a one-flag recovery rather than an edited constant.
+
+It is deliberately **not** an env var and **not** a config key. Which machine
+signed a release is an operator decision that must be legible in the command that
+made it; ambient state that silently redirects a publish to another box is exactly
+the kind of invisible configuration the rest of this repo bans. Consequences:
+
+- An overridden host is **probed before the first mutation** — reachable, and
+  `uname` says Darwin — and refuses loudly otherwise. Validating after the merge
+  would fail at the most expensive possible moment.
+- The resolved name is passed through to the remote `--home-base-phase`, so that
+  phase's errors name the box actually running rather than the compiled-in default.
+- The override box needs the same context the default has: the Developer ID
+  identity usable **non-interactively** (a locked login keychain makes `codesign`
+  fail `errSecInternalComponent` under ssh), an unlocked `apple.com` bundle for
+  notarization, the `npmjs.com` bundle, and a gitignored
+  `apps/cli/bin/embedded.provisionprofile` in its checkout. `headless-sign-context.sh`
+  supplies the first two from on-disk pass files when they exist; a box without them
+  can only sign from a GUI session that can answer the prompts.
 
 **The caller checkout is never mutated or gated.** `release.sh` immediately
 fetches origin and re-enters the release from a detached, release-owned worktree
@@ -662,7 +688,8 @@ next run validating its bump against a registry that was behind, so it cut the
 **The privileged phase runs on the home base, always — from the TAGGED script.**
 After the invoking box merges + tags (git + gh, which need that box's auth),
 `release.sh` routes build + sign + notarize + `npm publish` + computer-helper to
-`mac-mini`. Whether inline (you invoked it there) or over ssh, it first checks out
+the resolved home base — `mac-mini` unless `--home-base <host>` named another Mac.
+Whether inline (you invoked it there) or over ssh, it first checks out
 `v<version>` into a throwaway worktree under `.agents/worktrees/`, then runs **that
 worktree's** `apps/cli/scripts/release.sh <version> --home-base-phase` — so the
 script that publishes is the one carried by the release tag (with
@@ -696,8 +723,10 @@ already-versioned package.
 **`scripts/remote-sign-mac.sh` is no longer on the release path.** The privileged
 phase builds signed artifacts directly on the home base. The script remains only
 for the narrow case of building + pulling back JUST the signed macOS artifacts from
-another Mac (no publish); it too is zero-config, targeting the same hardcoded
-`RELEASE_HOME_BASE` with no env knobs or fleet discovery.
+another Mac (no publish); it too is zero-config, targeting the same default
+`RELEASE_HOME_BASE_DEFAULT` with no env knobs or fleet discovery. It has no
+`--home-base` equivalent — it is off the release path, so add one there only if a
+second caller actually needs it.
 
 **Provisioning the `apple.com` bundle on a headless sign host.** A Linux-driven
 release offloads macOS signing to a sign host over SSH, which needs the `apple.com`

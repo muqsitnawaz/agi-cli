@@ -8,9 +8,18 @@ set -euo pipefail
 REPO_ROOT="$1"
 shift
 RELEASE_ARGS=("$@")
+# The version is the first NON-flag argument. `--home-base <host>` takes a value,
+# so that value has to be skipped -- otherwise `--home-base zion 1.22.36` names the
+# worktree after "zion" and the release proceeds against the wrong TARGET.
 TARGET=""
+skip_next=false
 for arg in "${RELEASE_ARGS[@]}"; do
-  [[ "$arg" == --* ]] || { TARGET="$arg"; break; }
+  if $skip_next; then skip_next=false; continue; fi
+  case "$arg" in
+    --home-base) skip_next=true; continue ;;
+    --*) continue ;;
+    *) TARGET="$arg"; break ;;
+  esac
 done
 [[ -n "$TARGET" ]] || { echo "error: release version is required" >&2; exit 2; }
 
