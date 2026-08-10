@@ -322,6 +322,8 @@ export async function handleSpawn(
   hostName: string | null = null,
   hostTarget: string | null = null,
   repoPath: string | null = null,
+  /** Directories outside `cwd` this teammate may reach (the team's project). */
+  addDirs: string[] = [],
 ): Promise<SpawnResult> {
   const defaultMode = manager.getDefaultMode();
   const resolvedMode = resolveMode(mode, defaultMode);
@@ -377,6 +379,7 @@ export async function handleSpawn(
     hostName,
     hostTarget,
     repoPath,
+    addDirs,
   );
 
   debug(`[spawn] Spawned ${agentType} agent ${agent.agentId} for task "${taskName}"`);

@@ -634,6 +634,10 @@ export class AgentProcess {
   // Worktree isolation: when non-null, this teammate runs in its own git worktree.
   worktreeName: string | null = null;
   worktreePath: string | null = null;
+  // Directories outside `cwd` this teammate may reach, from the team's
+  // `--project`. Set post-construction at add time (like hostName), forwarded as
+  // `--add-dir` at launch. Only Claude and Codex consume them.
+  addDirs: string[] = [];
   // Distributed teams: when hostName is non-null, this teammate runs on another
   // machine over SSH (the "remote-host" backend), not as a local process. These
   // are set post-construction (like startTime/pid) — placement config at add
@@ -1143,6 +1147,7 @@ export class AgentProcess {
       cloud_branch: this.cloudBranch,
       worktree_name: this.worktreeName,
       worktree_path: this.worktreePath,
+      add_dirs: this.addDirs,
       host_name: this.hostName,
       host_target: this.hostTarget,
       host_identity_file: this.hostIdentityFile,
@@ -1284,6 +1289,10 @@ export class AgentProcess {
       agent.remoteLog = meta.remote_log || null;
       agent.remoteExit = meta.remote_exit || null;
       agent.remoteLogOffset = typeof meta.remote_log_offset === 'number' ? meta.remote_log_offset : 0;
+      // Project grants. Absent on every teammate added before `--project`.
+      agent.addDirs = Array.isArray(meta.add_dirs)
+        ? meta.add_dirs.filter((d: unknown): d is string => typeof d === 'string')
+        : [];
       return agent;
     } catch (err) {
       // The file exists but is not valid JSON (or fails a constructor
@@ -1948,6 +1957,7 @@ export class AgentManager {
     hostName: string | null = null,
     hostTarget: string | null = null,
     repoPath: string | null = null,
+    addDirs: string[] = [],
   ): Promise<AgentProcess> {
     await this.initialize();
     const resolvedMode = resolveMode(mode, this.defaultMode);
@@ -2044,6 +2054,10 @@ export class AgentManager {
     agent.hostName = hostName;
     agent.hostTarget = hostTarget;
     agent.repoPath = repoPath;
+    // Must be set BEFORE the launch below — this method launches inline for a
+    // teammate with no unmet --after deps, so assigning grants after spawn()
+    // returns would miss the only launch that matters.
+    agent.addDirs = addDirs;
 
     const agentDir = await agent.getAgentDir();
     try {
@@ -2222,6 +2236,7 @@ export class AgentManager {
       agent.version,
       agent.profileName,
       resume,
+      agent.addDirs,
     );
 
     debug(`Launching ${agent.agentType} agent ${agent.agentId} [${agent.mode}]${resume ? ' (resume)' : ''}: ${cmd.slice(0, 3).join(' ')}...`);
@@ -2370,6 +2385,12 @@ export class AgentManager {
       agent.profileName,
       resume,
     );
+    // Project grants for a remote teammate. `addDirs` was resolved home-relative
+    // at add time (`forRemote: true`), so `~/…` re-roots at the host's own HOME
+    // rather than pointing at the orchestrator's paths.
+    for (const dir of new Set(agent.addDirs)) {
+      if (dir !== remoteCwd) forwardedArgs.push('--add-dir', dir);
+    }
 
     let dispatchedTask: Awaited<ReturnType<typeof dispatchAgentsCommand>>['task'] | null = null;
     let resumeLog: ResumeLogTransaction | null = null;
@@ -2758,6 +2779,7 @@ export class AgentManager {
     version: string | null = null,
     profileName: string | null = null,
     resume?: { id: string; message: string },
+    addDirs: string[] = [],
   ): string[] {
     // Route through getAgentsInvocation so a teammate launched by the compiled
     // standalone binary (#315) doesn't relaunch as `agents /$bunfs/root/agents …`
@@ -2782,6 +2804,14 @@ export class AgentManager {
     // Claude: grant access to the teammate's working directory.
     if (agentType === 'claude' && cwd) {
       cmd.push('--add-dir', cwd);
+    }
+
+    // The team's project directories, beyond the one the teammate sits in.
+    // `agents run` re-dedupes, but skipping cwd here keeps the launch line
+    // readable. Codex folds these into its workspace_roots; other harnesses
+    // ignore --add-dir entirely.
+    for (const dir of new Set(addDirs)) {
+      if (dir !== cwd) cmd.push('--add-dir', dir);
     }
 
     // Codex's workspace-write sandbox blocks writes outside cwd. Factory
