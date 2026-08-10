@@ -108,7 +108,7 @@ export function buildSessionResumeCandidates(
     const state = STATE_RANK[a.state] - STATE_RANK[b.state];
     if (state !== 0) return state;
     if (a.lastActivityMs !== b.lastActivityMs) return b.lastActivityMs - a.lastActivityMs;
-    return a.shortId.localeCompare(b.shortId);
+    return a.id.localeCompare(b.id);
   });
 }
 

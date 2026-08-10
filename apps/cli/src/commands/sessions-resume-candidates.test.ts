@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'bun:test';
+import { Command } from 'commander';
 import type { ActiveSession } from '../lib/session/active.js';
 import type { SessionMeta } from '../lib/session/types.js';
 import { buildSessionResumeCandidates, resumeCandidateState } from './sessions-resume-candidates.js';
+import { registerSessionsResumeCommand } from './sessions-resume.js';
 
 function session(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -68,6 +70,20 @@ describe('buildSessionResumeCandidates', () => {
       .toEqual(['detached', 'background', 'parked', 'inactive', 'watched']);
   });
 
+  it('orders equal-state rows by newest activity and then the full stable id', () => {
+    const timestamp = '2026-08-03T06:20:08.089Z';
+    const rows = [
+      session({ id: 'deadbeef-ffff-4000-8000-000000000000', shortId: 'deadbeef', lastActivity: timestamp }),
+      session({ id: 'newer', shortId: 'newer', lastActivity: '2026-08-04T06:20:08.089Z' }),
+      session({ id: 'deadbeef-0000-4000-8000-000000000000', shortId: 'deadbeef', lastActivity: timestamp }),
+    ];
+    expect(buildSessionResumeCandidates(rows, new Map(), 'zion').map((row) => row.id)).toEqual([
+      'newer',
+      'deadbeef-0000-4000-8000-000000000000',
+      'deadbeef-ffff-4000-8000-000000000000',
+    ]);
+  });
+
   it('emits source placement and one CLI-owned recovery invocation', () => {
     const candidate = buildSessionResumeCandidates(
       [session({ machine: 'Yosemite-S0.local' })],
@@ -121,5 +137,16 @@ describe('buildSessionResumeCandidates', () => {
       new Map([['p:74893', live({ sessionId: undefined })]]),
       'zion',
     )).toEqual([]);
+  });
+});
+
+describe('sessions resume --candidates command', () => {
+  it('rejects the real command path when the required --json flag is absent', async () => {
+    const program = new Command();
+    const sessions = program.command('sessions');
+    registerSessionsResumeCommand(sessions);
+    await expect(program.parseAsync([
+      'node', 'agents', 'sessions', 'resume', '--candidates', '--local', '--limit', '1',
+    ])).rejects.toThrow('--candidates requires --json.');
   });
 });

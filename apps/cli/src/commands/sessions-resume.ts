@@ -130,6 +130,7 @@ export function registerSessionsResumeCommand(sessionsCmd: Command): void {
 
 async function sessionsResumeAction(query: string | undefined, options: ResumeOptions): Promise<void> {
   if (options.candidates) {
+    if (!options.json) throw new Error('--candidates requires --json.');
     if (query) throw new Error('--candidates does not accept a query.');
     const limit = parseInt(options.limit || '200', 10);
     const result = await collectSessionResumeCandidates({
