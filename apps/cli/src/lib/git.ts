@@ -991,7 +991,9 @@ export function displayHomePath(dir: string): string {
 
 /**
  * Pull changes in an existing repo.
- * Refuses to pull if the working tree is dirty -- user must commit or discard changes first.
+ * A dirty working tree no longer refuses outright: a fast-forward that touches
+ * no uncommitted path still runs (see `dirtyTreeRefusal`). It refuses when the
+ * branch has local commits to rebase, or when an incoming path is also dirty.
  *
  * Strategy (RUSH-2282):
  *   1. Fetch, then compare HEAD to the resolved tracking ref.
@@ -1045,12 +1047,18 @@ export async function pullRepo(
     }
 
     const status = await git.status();
-
-    if (!status.isClean()) {
+    // A dirty tree is not decided here: whether a fast-forward is safe depends
+    // on what is actually incoming, and that needs a fetched upstream ref. The
+    // gate therefore sits just before the integrate step below. The exception is
+    // a repo with no remote at all — there is nothing to fast-forward from, so
+    // the dirt is the whole answer and the resolution below would only fail
+    // with a less useful message.
+    const isDirty = !status.isClean();
+    if (isDirty && (await git.getRemotes()).length === 0) {
       return {
         success: false,
         commit: '',
-        error: `Blocked by local changes. Commit or discard them before pulling.\n\n  cd ${displayHomePath(dir)} && git status`,
+        error: `Blocked by local changes: the repo has no remote to pull from. Commit or discard them before pulling.\n\n  cd ${displayHomePath(dir)} && git status`,
       };
     }
 
@@ -1124,6 +1132,21 @@ export async function pullRepo(
       aheadCount === 0 &&
       behindCount > 0;
 
+    // Dirty tree: same rule `syncRepoGit` applies, from the same function — a
+    // fast-forward that touches nothing the author is holding may proceed; a
+    // rebase or a colliding path may not. Refusing on any dirt at all is what
+    // used to strand merged changes on every box that had an unrelated edit.
+    if (isDirty) {
+      const refusal = await dirtyTreeRefusal(git, status, tracking);
+      if (refusal) {
+        return {
+          success: false,
+          commit: '',
+          error: `Blocked by local changes: ${refusal}. Commit or discard them before pulling.\n\n  cd ${displayHomePath(dir)} && git status`,
+        };
+      }
+    }
+
     try {
       if (canFastForward) {
         // Integrate the already-fetched tracking ref. No network, no FETCH_HEAD.
@@ -1164,18 +1187,98 @@ export async function pullRepo(
 }
 
 /**
+ * Every repo-relative path a status reports as locally touched, in one set.
+ *
+ * Reads `status.files`, which `simple-git` documents as "all files" and which is
+ * the same source `isClean()` is computed from — so this set and the decision to
+ * treat the tree as dirty can never disagree. The per-category arrays
+ * (`modified`, `staged`, `not_added`, …) are projections of that list; unioning
+ * them by hand means a category nobody thought of contributes nothing. `from`
+ * carries a rename's original path, and the incoming side may collide with
+ * either end.
+ */
+function dirtyPathSet(status: { files: Array<{ path: string; from?: string }> }): Set<string> {
+  const out = new Set<string>();
+  for (const f of status.files || []) {
+    if (f?.path) out.add(f.path);
+    if (f?.from) out.add(f.from);
+  }
+  return out;
+}
+
+/**
+ * Why a dirty working tree must NOT fast-forward to `upstreamRef` — or `null`
+ * when it safely can.
+ *
+ * The single home for that decision: `syncRepoGit` and `pullRepo` both integrate
+ * upstream and both meet dirty trees, and two copies of this rule would drift
+ * into two different answers for one question. Refusing outright is the thing
+ * being replaced — it strands merged changes behind unrelated local files —
+ * so the rule is narrow and stated once:
+ *
+ *   - local commits ahead of upstream → refuse (they need a rebase, which
+ *     requires a clean tree);
+ *   - an incoming path that is also dirty → refuse, and name it;
+ *   - otherwise the fast-forward touches nothing the author is holding.
+ *
+ * `-z` on the diff because `git diff --name-only` C-quotes paths containing
+ * unicode or control characters — `café.txt` comes back as `"caf\303\251.txt"`,
+ * while `status.files` reports it raw. Without `-z` the two sides are in
+ * different encodings and a collision on such a path silently misses. (A plain
+ * space does NOT trigger quoting; `my file.txt` is emitted as-is either way.)
+ */
+async function dirtyTreeRefusal(
+  git: SimpleGit,
+  status: { files: Array<{ path: string; from?: string }> },
+  upstreamRef: string,
+): Promise<string | null> {
+  const ahead = parseInt(
+    (await git.raw(['rev-list', '--count', `${upstreamRef}..HEAD`])).trim(),
+    10,
+  );
+  if (Number.isNaN(ahead)) return 'the upstream ref could not be compared with HEAD';
+  if (ahead > 0) {
+    return `the branch has ${ahead} local commit(s) to rebase, which needs a clean tree`;
+  }
+
+  const dirty = dirtyPathSet(status);
+  const incoming = (await git.raw(['diff', '--name-only', '-z', `HEAD..${upstreamRef}`]))
+    .split('\0')
+    .filter(Boolean);
+  const collisions = incoming.filter((p) => dirty.has(p));
+  if (collisions.length > 0) {
+    const shown = collisions.slice(0, 5).join(', ');
+    const more = collisions.length > 5 ? ` (+${collisions.length - 5} more)` : '';
+    return `incoming changes touch uncommitted paths: ${shown}${more}`;
+  }
+  return null;
+}
+
+/**
  * Rebase a repo onto its remote, optionally pushing local commits back up.
  *
  * The one-repo counterpart to `pullRepo` used by `agents sync <repo>`:
- *   1. Refuse if the working tree is dirty (commit or discard first).
- *   2. `git fetch origin` then `git pull --rebase origin <branch>` — rebase, not
- *      merge, so a local commit lands cleanly on top of upstream with no merge
- *      bubble.
- *   3. When `push` is set, `git push origin <branch>` to send local commits up.
+ *   1. `git fetch origin`.
+ *   2. Clean tree → `git pull --rebase origin <branch>`: rebase, not merge, so a
+ *      local commit lands cleanly on top of upstream with no merge bubble.
+ *   3. Dirty tree → fast-forward instead, but only when that is provably safe:
+ *      no local commits ahead of upstream, and no incoming path collides with a
+ *      dirty one. Otherwise refuse, naming the paths that collided.
+ *   4. When `push` is set, `git push origin <branch>` to send local commits up.
  *
  * The branch is read from the repo's current HEAD (falls back to `main`) rather
  * than hardcoded. System repos pass `push: false` — they are pull-only mirrors
  * of the npm-shipped upstream.
+ *
+ * Why step 3 exists: refusing on *any* dirt strands merged changes indefinitely.
+ * A DotAgents repo accumulates unrelated local state — a modified `agents.yaml`,
+ * a session's scratch file, a machine-local dotfile — and under the old rule one
+ * such file froze that box's layer forever, silently. Measured 2026-08-10: a
+ * merged fix could not reach three of three boxes, each blocked by files the
+ * incoming commits never touched. A `--ff-only` merge is the safe primitive
+ * here: it cannot rewrite local commits, and git itself aborts rather than
+ * overwrite a modified file, so the path check is belt-and-braces, not the only
+ * guard.
  */
 export async function syncRepoGit(
   dir: string,
@@ -1188,19 +1291,26 @@ export async function syncRepoGit(
     const git = simpleGit(dir);
     const status = await git.status();
 
-    if (!status.isClean()) {
-      return {
-        success: false,
-        commit: '',
-        pushed: false,
-        error: `Working tree has uncommitted changes. Commit or discard them first.\n\n  cd ${dir} && git status`,
-      };
-    }
-
     const branch = status.current || 'main';
     assertValidBranchName(branch);
     await git.fetch('origin');
-    await git.pull('origin', branch, { '--rebase': 'true' });
+
+    if (status.isClean()) {
+      await git.pull('origin', branch, { '--rebase': 'true' });
+    } else {
+      // Dirty tree: a rebase would refuse outright, so fast-forward instead —
+      // but only when nothing local can be lost. One shared rule, see above.
+      const refusal = await dirtyTreeRefusal(git, status, `origin/${branch}`);
+      if (refusal) {
+        return {
+          success: false,
+          commit: '',
+          pushed: false,
+          error: `Working tree has uncommitted changes and ${refusal}. Commit or discard them first.\n\n  cd ${dir} && git status`,
+        };
+      }
+      await git.raw(['merge', '--ff-only', `origin/${branch}`]);
+    }
 
     installGithooksSymlinks(dir);
 

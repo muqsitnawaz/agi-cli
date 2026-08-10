@@ -178,11 +178,146 @@ describe('syncRepoGit', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it('refuses to sync when the working tree is dirty', async () => {
+  // A dirty tree used to fail the sync outright, which stranded merged upstream
+  // changes behind unrelated local files — a modified agents.yaml, a session's
+  // scratch file — indefinitely and silently. The contract is now: fast-forward
+  // past dirt the incoming commits do not touch, refuse when they do.
+
+  it('fast-forwards past dirt the incoming changes do not touch, preserving it', async () => {
+    await commitFile(author, 'README.md', 'v2\n', 'upstream change');
+    await simpleGit(author).push('origin', 'main');
     fs.writeFileSync(path.join(local, 'dirty.txt'), 'uncommitted\n');
+
     const res = await syncRepoGit(local, { push: false });
+
+    expect(res.success).toBe(true);
+    // Upstream content arrived...
+    expect(fs.readFileSync(path.join(local, 'README.md'), 'utf8')).toBe('v2\n');
+    // ...and the unrelated local work is untouched.
+    expect(fs.readFileSync(path.join(local, 'dirty.txt'), 'utf8')).toBe('uncommitted\n');
+  });
+
+  it('refuses when an incoming change touches an uncommitted path, and names it', async () => {
+    await commitFile(author, 'README.md', 'v2\n', 'upstream change');
+    await simpleGit(author).push('origin', 'main');
+    // The same file the upstream commit edits.
+    fs.writeFileSync(path.join(local, 'README.md'), 'local edit\n');
+
+    const res = await syncRepoGit(local, { push: false });
+
     expect(res.success).toBe(false);
     expect(res.error).toMatch(/uncommitted changes/);
+    expect(res.error).toMatch(/README\.md/);
+    // The local edit survives the refusal.
+    expect(fs.readFileSync(path.join(local, 'README.md'), 'utf8')).toBe('local edit\n');
+  });
+
+  it('refuses on a dirty tree when local commits still need rebasing', async () => {
+    await commitFile(author, 'README.md', 'v2\n', 'upstream change');
+    await simpleGit(author).push('origin', 'main');
+    // A local commit to replay, plus unrelated dirt: a rebase needs a clean tree.
+    await commitFile(local, 'local-only.txt', 'mine\n', 'local work');
+    fs.writeFileSync(path.join(local, 'dirty.txt'), 'uncommitted\n');
+
+    const res = await syncRepoGit(local, { push: false });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/local commit/);
+  });
+
+  // The collision guard reads status.files, not the per-category arrays. These
+  // pin the dirty states a hand-rolled union kept missing: a staged deletion, a
+  // staged rename (both ends), and a C-quoted path.
+  //
+  // Honest about their strength: they assert `success:false` plus the path, and
+  // `merge --ff-only` supplies that on its own by aborting, so gutting
+  // dirtyPathSet leaves them GREEN. The two that genuinely go red on that
+  // mutation are the ones asserting the refusal wording only dirtyTreeRefusal
+  // emits ("incoming changes touch uncommitted paths", "Blocked by local
+  // changes"). These three pin the user-visible outcome; those two pin the
+  // function.
+
+  it('treats a staged deletion as dirty and refuses when it collides', async () => {
+    await commitFile(author, 'doomed.txt', 'v1\n', 'add doomed');
+    await simpleGit(author).push('origin', 'main');
+    await syncRepoGit(local, { push: false });
+    // Upstream edits the same file the local tree has staged for deletion.
+    await commitFile(author, 'doomed.txt', 'v2\n', 'upstream edits doomed');
+    await simpleGit(author).push('origin', 'main');
+    await simpleGit(local).rm('doomed.txt');
+
+    const res = await syncRepoGit(local, { push: false });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/doomed\.txt/);
+  });
+
+  it('treats both ends of a staged rename as dirty', async () => {
+    await commitFile(author, 'before.txt', 'v1\n', 'add before');
+    await simpleGit(author).push('origin', 'main');
+    await syncRepoGit(local, { push: false });
+    await commitFile(author, 'before.txt', 'v2\n', 'upstream edits before');
+    await simpleGit(author).push('origin', 'main');
+    // Rename locally: `from` is the path upstream touches, `to` is not.
+    await simpleGit(local).raw(['mv', 'before.txt', 'after.txt']);
+
+    const res = await syncRepoGit(local, { push: false });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/before\.txt/);
+  });
+
+  it('refuses when a C-quoted unicode path collides — the case -z exists for', async () => {
+    // `git diff --name-only` emits this as "caf\303\251.txt" while status.files
+    // reports it raw, so without -z the two sides never string-match and the
+    // collision is missed. A space does NOT trigger quoting, so a spaced path
+    // would pass with or without the fix and prove nothing.
+    await commitFile(author, 'caf\u00e9.txt', 'v1\n', 'add unicode');
+    await simpleGit(author).push('origin', 'main');
+    await syncRepoGit(local, { push: false });
+    await commitFile(author, 'caf\u00e9.txt', 'v2\n', 'upstream edits unicode');
+    await simpleGit(author).push('origin', 'main');
+    fs.writeFileSync(path.join(local, 'caf\u00e9.txt'), 'local edit\n');
+
+    const res = await syncRepoGit(local, { push: false });
+
+    expect(res.success).toBe(false);
+    // Assert OUR refusal wording, not just failure: git's own ff-only abort also
+    // fails and also names the path, so `success:false` alone passes with -z
+    // removed and proves nothing. This phrase only dirtyTreeRefusal emits.
+    expect(res.error).toMatch(/incoming changes touch uncommitted paths/);
+    expect(res.error).toMatch(/caf/);
+    expect(fs.readFileSync(path.join(local, 'caf\u00e9.txt'), 'utf8')).toBe('local edit\n');
+  });
+
+  // pullRepo is the sibling entry point — `agents sync` with no repo argument
+  // reaches it, not syncRepoGit. It shares the same rule via dirtyTreeRefusal;
+  // without these, the umbrella path could regress to refusing on any dirt and
+  // the suite would stay green.
+
+  it('pullRepo also fast-forwards past unrelated dirt', async () => {
+    await commitFile(author, 'README.md', 'v2\n', 'upstream change');
+    await simpleGit(author).push('origin', 'main');
+    fs.writeFileSync(path.join(local, 'dirty.txt'), 'uncommitted\n');
+
+    const res = await pullRepo(local);
+
+    expect(res.success).toBe(true);
+    expect(fs.readFileSync(path.join(local, 'README.md'), 'utf8')).toBe('v2\n');
+    expect(fs.readFileSync(path.join(local, 'dirty.txt'), 'utf8')).toBe('uncommitted\n');
+  });
+
+  it('pullRepo refuses when an incoming change touches an uncommitted path', async () => {
+    await commitFile(author, 'README.md', 'v2\n', 'upstream change');
+    await simpleGit(author).push('origin', 'main');
+    fs.writeFileSync(path.join(local, 'README.md'), 'local edit\n');
+
+    const res = await pullRepo(local);
+
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/Blocked by local changes/);
+    expect(res.error).toMatch(/README\.md/);
+    expect(fs.readFileSync(path.join(local, 'README.md'), 'utf8')).toBe('local edit\n');
   });
 
   it('rebases local onto new upstream commits (pull-only)', async () => {
