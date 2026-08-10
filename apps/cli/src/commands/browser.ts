@@ -15,7 +15,6 @@ import {
   getEndpointPresets,
   type BrowserProfile,
 } from '../lib/browser/profiles.js';
-import { readMeta, updateMeta } from '../lib/state.js';
 import { resolveActor } from '../lib/actor.js';
 import {
   loginsForProfile,
@@ -45,7 +44,7 @@ import {
 } from '../lib/browser/ipc.js';
 import { browserTaskPicker, type BrowserTask } from './browser-picker.js';
 import { assertRemoteControlAllowed } from '../lib/browser/remote-control.js';
-import { getConfigValue, setConfigValue } from '../lib/device-config.js';
+import { getConfigValue, setConfigValue, unsetConfigValue } from '../lib/device-config.js';
 import { isInteractiveTerminal } from './utils.js';
 import { registerCommandGroups, setHelpSections } from '../lib/help.js';
 import { buildHar } from '../lib/browser/har.js';
@@ -232,11 +231,7 @@ function registerProfilesCommands(browser: Command): void {
     .option('--unset', 'Clear the configured default (revert to auto-detecting an installed browser)')
     .action(async (name: string | undefined, opts: { unset?: boolean }) => {
       if (opts.unset) {
-        updateMeta((m) => {
-          const { defaultBrowserProfile, ...rest } = m;
-          void defaultBrowserProfile;
-          return rest;
-        });
+        unsetConfigValue('browser.profile');
         console.log('Default browser profile cleared. `agents browser start` will auto-detect an installed Chromium-family browser.');
         return;
       }
@@ -257,7 +252,7 @@ function registerProfilesCommands(browser: Command): void {
         if (all.length > 0) console.error(`Available profiles: ${all.map((p) => p.name).join(', ')}`);
         process.exit(1);
       }
-      updateMeta((m) => ({ ...m, defaultBrowserProfile: name }));
+      setConfigValue('browser.profile', name);
       const eps = getEndpointPresets(target);
       const epStr = Object.values(eps)[0]?.target ?? '';
       console.log(`Default browser profile (this machine) is now "${name}" (${target.browser}${epStr ? `, ${epStr}` : ''}).`);

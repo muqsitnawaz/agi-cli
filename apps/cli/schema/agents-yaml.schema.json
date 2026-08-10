@@ -144,7 +144,7 @@
     },
     "fleet": {
       "type": "object",
-      "description": "Declarative fleet profile (`agents apply`). Shape: lib/fleet/types.ts FleetManifest."
+      "description": "Declarative fleet profile (`agents apply`). Shape: lib/fleet/types.ts FleetManifest. `fleet.devices.<name>.config` is also the central store for per-device operator config (`agents devices config <name>`) — names and non-secret values only."
     },
     "share": {
       "type": "object",
