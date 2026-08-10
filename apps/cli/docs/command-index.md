@@ -14,25 +14,24 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_104 command groups · 588 commands._
+_104 command groups · 587 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
 ```
 agents accounts                             Browse native logins and manage provider account bundles
 agents accounts add <name>                  Add a durable API key, setup token, or bearer token
-agents accounts attach <account> <target>   Use a credential account as a harness default (until --account overrides it)
-agents accounts clear-default <agent>       Return a harness to native login or balanced account selection (alias of detach)
-agents accounts detach <account> <target>   Stop using a credential account as a harness default
-agents accounts inspect <name>              Show safe account metadata
-agents accounts list                        List credential accounts and named native logins
-agents accounts name <source> <name>        Give a durable name to a signed-in native harness login
-agents accounts remove <name>               Remove a provider account or a named native login
-agents accounts rename <old> <new>          Rename an account or named native login without changing its stable id
-agents accounts set-default <agent> <name>  Use a provider account for a harness when --account is omitted (alias of attach)
+agents accounts attach <account> <target>   Attach a named account to a native installation or custom harness
+agents accounts clear-default <agent>       Return a harness to native login or balanced account selection
+agents accounts detach <account> <target>   Remove one account attachment
+agents accounts list                        List credential accounts
+agents accounts name <source> <name>        Name a signed-in native installation without copying its OAuth credentials
+agents accounts remove <name>               Remove an account and its device-local credential
+agents accounts rename <old> <new>          Rename an account without changing its stable id
+agents accounts set-default <agent> <name>  Use a provider account for a harness when --account is omitted
 agents accounts set-key <name>              Rotate an account credential without changing its identity
-agents accounts sync <account> [device]     Copy one provider account bundle to a worker device
-agents accounts view <account>              Show one account: a provider credential or a named native login
+agents accounts sync <name> [device]        Copy one provider account bundle to a worker device
+agents accounts view <name>                 Show safe account metadata, custody, and attachments
 ```
 
 ## add — Download and install agent CLI versions. Enables subsidized API usage through managed binaries.

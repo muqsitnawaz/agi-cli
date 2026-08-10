@@ -14,79 +14,83 @@ ticket: RUSH-2527
 ## Focus for review
 
 - **One account namespace, two kinds.** A provider credential account
-  (`accounts add`) and a named native login (`accounts name`) now share one name
-  namespace, one lookup, and one renderer. Is the boundary between "credential we
-  store" and "native login we only name" clear at every command?
-- **Native aliases are metadata only.** An alias stores a stable id + the identity
-  fingerprint `sha256(agent\0identity)` — never a token, OAuth payload, or raw
-  email. Confirm no native auth bytes are ever copied or synced.
-- **Positional grammar.** `name <source> <name>`, `view <account>`,
-  `attach/detach <account> <harness>`, `sync <account> <device>`; `set-default` /
-  `clear-default` retained as aliases. Reads object-first — right shape?
-- **Migration.** Retired version-bound labels are recovered into aliases by their
-  preserved fingerprint, once, then archived `.migrated`.
-- **Runtime seam is untouched.** This track is the account *model + command*
-  surface. Runtime/profile/fleet-auth wiring is a separate track; `attach` writes
-  only the existing `meta.accounts.defaults` (provider accounts), so no run path
-  changes here.
+  (`accounts add`, a policy-`never` secrets bundle) and a native account record
+  (`accounts name`, metadata only in `meta.accounts.native`) share one name
+  namespace, one lookup (`findUnifiedAccount`), and one renderer.
+- **Native records copy no OAuth.** A native account stores a stable id + identity
+  key + label + scope — never the harness's credential. A native lookup reads only
+  `meta`, never the provider bundle store or the keychain.
+- **Attachment scope is harness-derived.** `account-capabilities.ts` decides
+  version-scoped (attach to `agent@version`) vs device-scoped (attach to the bare
+  `agent`). `attach` validates the live identity before binding and injects nothing.
+- **Resolution order.** `resolveAccountSelection`: explicit → exact-target binding
+  → device-scoped binding → per-harness default.
+- **Seam.** This track is the account model + command surface + the resolution
+  contract. Runtime injection (validate live fingerprint / inject provider env),
+  profile/routine consumption, and fleet/harness inventory labels are wired by the
+  runtime/fleet-auth track; fleet credential transport is owned by the
+  credential-transport track — this PR does not duplicate them.
 
 ## What the user experiences
 
-- **Before.** A signed-in native login had no durable name — `agents view claude`
-  showed a bare email, and the retired `labels:` design was never launched.
-  Provider keys existed (`accounts add`), but the two lived in separate mental
-  models with `--from`/`--to`-shaped flags.
+- **Before.** A native login had no durable name; the account surface only held
+  provider keys, and there was no way to bind a specific identity to a specific
+  installation.
 - **After.**
-  - `agents accounts name claude@2.1.220 work` → the `claude` login is named
-    `work`; the name follows the identity fingerprint, so it survives version
-    changes and shows in `agents accounts`.
-  - `agents accounts` lists provider account bundles **and** named native logins
-    in one view (text and `--json` share one renderer).
-  - `agents accounts view work` shows either kind; `agents accounts attach
-    openrouter-work deepseek` binds a credential account as a harness default;
-    `agents accounts sync openrouter-work yosemite-s0` copies a bundle (a native
-    alias reports it has nothing to copy — native logins are per-device).
-  - `agents accounts remove <name>` refuses while a harness profile or a default
-    binding still references the account.
+  - `agents accounts name claude@2.1.220 work` names the signed-in Claude login;
+    the record is metadata only.
+  - `agents accounts attach work claude@2.1.225` binds it to another installation
+    once that install is signed in to the same identity; for a device-scoped
+    harness, `agents accounts attach cursor-work cursor`.
+  - `agents accounts` lists provider bundles and named native logins together;
+    `agents accounts view work` shows kind, custody, and attachments (text/JSON).
+  - `agents accounts remove <name>` refuses while a binding, default, or harness
+    profile still references it.
 
-## Current architecture (before)
+## Current architecture
 
-- `account-registry.ts` — provider credential accounts as `agents secrets`
-  bundles (RUSH-2470); CRUD + resolution + legacy `accounts.yaml` migration.
-- `account-catalog.ts` — live discovery of native logins (`discoverNativeAccounts`).
-- `account-provider-registry.ts` — per-provider injection adapters.
-- `commands/accounts.ts` — `add / set-key / inspect / rename / remove /
-  set-default / clear-default / sync`. Native logins had **no durable name**, and
-  the label archive was discarded, not recovered.
+| Concern | File |
+|---|---|
+| Provider credential accounts (bundles) + native records + bindings + unified resolution | `src/lib/account-registry.ts` |
+| Per-harness native capability (inspection / scope / status) | `src/lib/account-capabilities.ts` (new) |
+| Native-login discovery | `src/lib/account-catalog.ts` |
+| Provider injection adapters | `src/lib/account-provider-registry.ts` |
+| Command surface (positional grammar, unified renderer) | `src/commands/accounts.ts` |
+| `meta.accounts.native` / `bindings` shape | `src/lib/types.ts` |
 
 ## Implementation (what changed)
 
-| Change | File |
-|---|---|
-| Native-login alias store (fingerprint-keyed, metadata only) + legacy-label recovery | `src/lib/account-aliases.ts` (new) + `account-aliases.test.ts` |
-| Shared name validator for the one namespace | `src/lib/account-schema.ts` (`ACCOUNT_NAME_RE`, `assertAccountName`) |
-| Discovery stitches aliases onto live logins (`applyNativeAliases`) | `src/lib/account-catalog.ts` |
-| Legacy `labels:` fold into aliases, archive `.migrated` | `src/lib/account-registry.ts` |
-| Positional grammar, shared renderer, unified `view`, safe remove/reference checks, `attach`/`detach`, positional `sync` | `src/commands/accounts.ts` + `accounts.test.ts` |
+- `account-registry.ts`: `NativeAccount` / `UnifiedAccount`, `listNativeAccounts`,
+  `findUnifiedAccount`, `addNativeAccount`, `bindAccount` / `unbindAccount` /
+  `accountBindings`, and `resolveAccountSelection` extended to consult bindings.
+  `add` / `rename` / `remove` enforce the unified namespace and reference-safety.
+- `account-capabilities.ts`: `NATIVE_ACCOUNT_CAPABILITIES` — every harness
+  classified exactly once; a `supported` harness must have inspectable identity.
+- `accounts.ts`: positional `name` / `attach` / `detach`, unified `view` (alias
+  `inspect`), positional `sync <account> <device>`, and a merged native+provider
+  list renderer.
+- `types.ts`: `meta.accounts.native` (records) + `meta.accounts.bindings`
+  (target → account id).
 
 ```bash
 agents accounts name claude@2.1.220 work
-agents accounts view work
-agents accounts attach openrouter-work deepseek
+agents accounts attach work claude@2.1.225
+agents accounts view work --json
 agents accounts sync openrouter-work yosemite-s0
 ```
 
 ## Validation
 
-- Real-path unit tests against temp homes: alias CRUD + fingerprint match + legacy
-  recovery (`account-aliases.test.ts`), discovery merge (`account-catalog.test.ts`),
-  registry label-fold (`account-registry.test.ts`), positional-grammar parsing
-  (`accounts.test.ts`). `./scripts/build.sh --skip-tests` passes; account +
-  adjacent (harness/profiles/byok) suites green.
-- Built-binary evidence: `agents accounts --help` renders the workflow-first
-  examples and full positional command tree.
+- Real-path unit tests: registry binding resolution + reference-safe remove
+  (`account-registry.test.ts`), capability completeness
+  (`account-capabilities.test.ts`), discovery grouping (`account-catalog.test.ts`).
+  `./scripts/build.sh --skip-tests` green; account + adjacent (harness/profiles)
+  suites green.
+- Built-binary evidence: `agents accounts --help` renders the positional grammar
+  and workflow-first examples.
 
 ## Tracking
 
 - RUSH-2527 — Unify native and provider accounts across installations, profiles,
-  and fleet auth (this track: account core).
+  and fleet auth. This PR: account core (model + command + resolution contract).
+  Runtime/fleet-auth wiring and credential transport are sibling tracks.

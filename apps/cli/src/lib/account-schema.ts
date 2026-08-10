@@ -24,21 +24,6 @@ import { parseBundleValue, secretsKeychainItem, type BundleValue } from './secre
 import type { SecretsBundle } from './secrets/bundles.js';
 import type { AccountAuthKind } from './account-provider-registry.js';
 
-/**
- * The one account name grammar, shared by provider-credential accounts and
- * native-login aliases so the account namespace has a single rule. A name
- * starts with a letter or number and then allows letters, numbers, dot,
- * underscore, or dash.
- */
-export const ACCOUNT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
-
-/** Throw a user-facing error when `name` is not a legal account name. */
-export function assertAccountName(name: string): void {
-  if (!ACCOUNT_NAME_RE.test(name)) {
-    throw new Error('Account name must start with a letter or number and contain only letters, numbers, dot, underscore, or dash.');
-  }
-}
-
 /** Canonical bundle variable names for a provider-account bundle. */
 export const ACCOUNT_VARS = {
   id: 'ACCOUNT_ID',

@@ -69,38 +69,47 @@ Both come from the same mistake: **agents-cli touching the interactive login.**
 ## One account namespace: provider credentials and named native logins (RUSH-2527)
 
 An **account** is one authorization identity, and it comes in two kinds that share
-a single name namespace:
+a single name namespace (`meta.accounts`):
 
 - **Provider credential accounts** — a durable API key, setup token, or bearer
   token the CLI stores as a policy-`never` secrets bundle (invariant 4 above).
-  Created with `agents accounts add`.
-- **Native login aliases** — a durable *name* for a harness's own signed-in
-  identity. `agents accounts name <source> <name>` (e.g.
-  `agents accounts name claude@2.1.220 work`) records metadata only — a stable id,
-  the harness, and the identity **fingerprint** (`sha256(agent\0identity)`), never
-  a token or the raw email. The name follows the identity fingerprint, not a
-  version, so it survives version churn and shows in `agents accounts` /
-  `agents view`. agents-cli never copies a native login's auth bytes and cannot
-  `sync` it — native logins are per-device by design.
+  Created with `agents accounts add`; portable, so `accounts sync` copies it.
+- **Native account records** — a durable *name* for a harness's own signed-in
+  login. `agents accounts name <source> <name>` (e.g.
+  `agents accounts name claude@2.1.220 work`) records **metadata only** — a stable
+  id, the harness, the identity key, and a friendly label — in `meta.accounts.native`.
+  The harness-owned OAuth/session credential is **never copied**, so a native
+  account cannot be `sync`ed. A native lookup reads only `meta`, never the provider
+  bundle store or the keychain.
+
+**Attachment scope comes from the harness.** `account-capabilities.ts` classifies
+each harness: a `version`-scoped harness (Claude, Codex, Grok, Muse) authenticates
+per installed version, so a native account attaches to an exact `agent@version`; a
+`device`-scoped harness (Cursor, OpenCode, Antigravity, Kimi, Droid) authenticates
+once per device, so it attaches to the bare `agent`. `attach` validates the live
+identity of the target before binding — a version-scoped target must currently be
+signed in to the same identity — and injects no secret or env.
 
 The commands read like the task, object first:
 
 | Command | Behavior |
 |---|---|
 | `agents accounts` / `list` | Unified list: provider account bundles + named native logins |
-| `agents accounts name <agent[@version]> <name>` | Name a signed-in native login |
+| `agents accounts name <agent@version> <name>` | Name a signed-in native installation |
 | `agents accounts add <name> --provider <p> --auth <t>` | Store a provider credential account |
-| `agents accounts view <account>` | Show one account (provider credential or native login) |
-| `agents accounts attach <account> <harness>` | Use a credential account as a harness default (positional `set-default`) |
-| `agents accounts detach <account> <harness>` | Stop using it as that harness's default |
-| `agents accounts rename <old> <new>` / `remove <name>` | Rename or remove either kind; `remove` refuses while a harness profile or a default binding still references the account |
-| `agents accounts sync <account> <device>` | Copy a provider account bundle to a worker (native aliases have nothing to copy) |
+| `agents accounts view <account>` (alias `inspect`) | Show one account — kind, custody, and its attachments |
+| `agents accounts attach <account> <target>` | Bind a native or provider account to an installation / custom harness (`target` is `agent@version` for version-scoped, `agent` for device-scoped) |
+| `agents accounts detach <account> <target>` | Remove one attachment |
+| `agents accounts rename <old> <new>` / `remove <name>` | Rename or remove either kind; `remove` refuses while a binding, a per-harness default, or a harness profile still references the account |
+| `agents accounts sync <account> <device>` | Copy a provider account bundle to a worker (native records have no bytes to copy) |
 
-`set-default` / `clear-default` remain as the harness-first spelling of
-`attach` / `detach`. Legacy version-bound native labels (the retired
-`accounts.yaml` `labels:` map, and any `accounts.legacy-labels.yaml` an older CLI
-archived) are recovered into aliases on first read by their preserved fingerprint,
-then archived as `.migrated` so the recovery runs once.
+`set-default` / `clear-default` remain the per-harness-default spelling and are
+consulted after an exact `agent@version` or device-scoped binding.
+`resolveAccountSelection` orders resolution: explicit `--account` → exact target
+binding → device-scoped binding → per-harness default. Runtime injection of the
+resolved account (live-fingerprint validation for native, env for provider) and
+the fleet inventory labels are wired by the runtime/fleet-auth track; fleet
+credential transport is owned by the credential-transport track.
 
 ## What is "held" and shared (the ingredients)
 

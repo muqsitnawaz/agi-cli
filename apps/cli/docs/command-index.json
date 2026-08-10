@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "command": "agents",
   "groups": 104,
-  "commands": 588,
+  "commands": 587,
   "root": {
     "name": "agents",
     "path": "",
@@ -79,8 +79,8 @@
           "negate": false
         }
       ],
-      "examples": "agents accounts name claude@2.1.220 work\nagents accounts add openrouter-work --provider openrouter --auth api-key --from-secrets openrouter.ai:OPENROUTER_API_KEY\nagents accounts attach openrouter-work deepseek\nagents accounts view work\nagents accounts set-key openrouter-work\nagents accounts sync openrouter-work yosemite-s0\nagents run deepseek --account openrouter-work",
-      "notes": "An account is one authorization identity. `name` labels a harness-native login (metadata only); `add` stores a durable provider credential. Native logins stay owned by each harness — agents-cli never copies their tokens and cannot sync them across devices.",
+      "examples": "agents accounts add work --provider anthropic --auth setup-token\nagents accounts add openrouter-work --provider openrouter --auth api-key --from-secrets openrouter.ai:OPENROUTER_API_KEY\nagents accounts set-key work\nagents accounts name claude@2.1.220 work\nagents accounts attach work claude@2.1.225\nagents accounts view work --json\nagents accounts set-default claude work\nagents accounts sync openrouter-work yosemite-s0\nagents run claude --account work",
+      "notes": "Native account records contain metadata only; harness-owned OAuth credentials are never copied. Provider accounts are explicit portable bundles with policy never.",
       "subcommands": [
         {
           "name": "add",
@@ -149,7 +149,7 @@
           "name": "attach",
           "path": "accounts attach",
           "aliases": [],
-          "description": "Use a credential account as a harness default (until --account overrides it)",
+          "description": "Attach a named account to a native installation or custom harness",
           "args": [
             {
               "name": "account",
@@ -182,7 +182,7 @@
           "name": "clear-default",
           "path": "accounts clear-default",
           "aliases": [],
-          "description": "Return a harness to native login or balanced account selection (alias of detach)",
+          "description": "Return a harness to native login or balanced account selection",
           "args": [
             {
               "name": "agent",
@@ -209,7 +209,7 @@
           "name": "detach",
           "path": "accounts detach",
           "aliases": [],
-          "description": "Stop using a credential account as a harness default",
+          "description": "Remove one account attachment",
           "args": [
             {
               "name": "account",
@@ -239,46 +239,10 @@
           "subcommands": []
         },
         {
-          "name": "inspect",
-          "path": "accounts inspect",
-          "aliases": [],
-          "description": "Show safe account metadata",
-          "args": [
-            {
-              "name": "name",
-              "required": true,
-              "variadic": false,
-              "description": ""
-            }
-          ],
-          "options": [
-            {
-              "flags": "--json",
-              "description": "Machine-readable output",
-              "long": "--json",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "-h, --help",
-              "description": "Show help",
-              "short": "-h",
-              "long": "--help",
-              "required": false,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            }
-          ],
-          "subcommands": []
-        },
-        {
           "name": "list",
           "path": "accounts list",
           "aliases": [],
-          "description": "List credential accounts and named native logins",
+          "description": "List credential accounts",
           "args": [],
           "options": [
             {
@@ -307,7 +271,7 @@
           "name": "name",
           "path": "accounts name",
           "aliases": [],
-          "description": "Give a durable name to a signed-in native harness login",
+          "description": "Name a signed-in native installation without copying its OAuth credentials",
           "args": [
             {
               "name": "source",
@@ -340,7 +304,7 @@
           "name": "remove",
           "path": "accounts remove",
           "aliases": [],
-          "description": "Remove a provider account or a named native login",
+          "description": "Remove an account and its device-local credential",
           "args": [
             {
               "name": "name",
@@ -367,7 +331,7 @@
           "name": "rename",
           "path": "accounts rename",
           "aliases": [],
-          "description": "Rename an account or named native login without changing its stable id",
+          "description": "Rename an account without changing its stable id",
           "args": [
             {
               "name": "old",
@@ -400,7 +364,7 @@
           "name": "set-default",
           "path": "accounts set-default",
           "aliases": [],
-          "description": "Use a provider account for a harness when --account is omitted (alias of attach)",
+          "description": "Use a provider account for a harness when --account is omitted",
           "args": [
             {
               "name": "agent",
@@ -472,7 +436,7 @@
           "description": "Copy one provider account bundle to a worker device",
           "args": [
             {
-              "name": "account",
+              "name": "name",
               "required": true,
               "variadic": false,
               "description": ""
@@ -487,7 +451,7 @@
           "options": [
             {
               "flags": "--device <device>",
-              "description": "Destination device or SSH host (or pass it positionally)",
+              "description": "Deprecated destination form; use the positional device",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -519,11 +483,13 @@
         {
           "name": "view",
           "path": "accounts view",
-          "aliases": [],
-          "description": "Show one account: a provider credential or a named native login",
+          "aliases": [
+            "inspect"
+          ],
+          "description": "Show safe account metadata, custody, and attachments",
           "args": [
             {
-              "name": "account",
+              "name": "name",
               "required": true,
               "variadic": false,
               "description": ""
