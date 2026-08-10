@@ -1701,11 +1701,6 @@ function extractPrUrls(lines: string[]): PullRequestRef[] {
 /** Build presentation rows from the canonical session stream plus the workspace root. */
 type UsageStatus = 'available' | 'rate_limited' | 'out_of_credits' | null;
 
-/**
- * Pick the throttle state for `version` from a parsed `agents view --json` view.
- * Prefers the exact version match, then the default row, then the first. Shared
- * by the local fetch and the broadcast-snapshot path so selection is identical.
- */
 async function getWorktreesRouted(
   workspaceRoot: string,
   activeCwd: string | undefined,
@@ -1736,6 +1731,7 @@ async function getWorktreesRouted(
   return [...byPath.values()];
 }
 
+/** Read the session's CLI-provided throttle state without probing account state. */
 function getUsageStatusFromCli(sessionId: string | undefined): UsageStatus {
   if (!sessionId) return null;
   const row = sessionPresentationStore.sessions().find((value) => {
