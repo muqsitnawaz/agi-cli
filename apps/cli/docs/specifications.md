@@ -218,10 +218,29 @@ SSH access (§7); rendering sessions that no harness produced.
 
 - **SES-9a (MUST).** `sessions preview <id-or-prefix>` MUST resolve ID-shaped
   selectors through the SQLite ID index across the selected fleet. A full UUID
-  MAY return on its first exact hit; a short prefix MUST wait for all selected
-  peers and fail closed when any peer is unavailable. Durable preview data MUST
-  be invalidated by the transcript's actual mtime + size. Live status MUST NOT
-  be stored in that durable digest and MUST expire within 15 seconds.
+  MAY return on its first exact hit. A short ID prefix resolves to a **unique
+  match among the REACHABLE fleet**: resolution keys on the owner device
+  (`session.machine`), not on whether every registered device answered, so an
+  unreachable **unrelated** peer MUST NOT discard that match. When a peer stayed
+  dark, the match is surfaced as `resolved-unconfirmed` carrying `unconfirmedPeers`
+  (`commands/sessions.ts` `metadataResolveOutcome`). A **READ** path (`preview`,
+  `--resolve`) MUST render the unconfirmed match and name the dark peers; an
+  **ACT** path (`resume`, `attach`, `focus`, `exec --resume`) MUST fail closed on
+  `resolved-unconfirmed` for a non-UUID selector, because a dark peer can hold a
+  distinct session sharing the prefix and `fleetCandidatesByQuery` groups by full
+  id, so that collision is invisible — resuming the wrong conversation is
+  unrecoverable. `partial` is reserved for **no reachable device holding the match
+  while a peer is unreachable** (the session may live on the dark box). A **label**
+  is not ID-shaped and stays fail-closed: a unique label with a dark peer is
+  `partial`, because labels genuinely collide across boxes. Durable preview data
+  MUST be invalidated by the transcript's actual mtime + size. Live status MUST
+  NOT be stored in that durable digest and MUST expire within 15 seconds.
+  **Given** a session owned by a reachable box and one unrelated registered device
+  offline; **When** `sessions preview <its-short-id>` runs; **Then** the card
+  renders with a note naming the offline device, while `resume <its-short-id>`
+  fails closed until the prefix is disambiguated or every peer answers. (RUSH-2479
+  follow-up; superseded the earlier "a short prefix MUST fail closed when any peer
+  is unavailable".)
 - **SES-10 (MUST).** A preview string MUST be cleaned of terminal/harness noise
   (OSC titles, CSI/SGR, harness tags, collapsed whitespace) before display
   (`cleanPreview`, `commands/sessions.ts:329-337`), and truncated width-aware

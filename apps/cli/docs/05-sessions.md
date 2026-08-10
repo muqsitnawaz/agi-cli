@@ -64,7 +64,15 @@ version that created the session with its recorded cwd and launch mode. An exact
 **label** always consults the fleet (labels are not globally unique, so a same-label
 session could live on another peer): a unique match auto-resumes, a cross-machine
 collision surfaces as an ambiguity, and an ambiguous short-id prefix still surfaces
-every candidate. `agents run auto --resume <id>` is the adaptive form: on the
+every candidate. A short-id prefix that is **unique across the reachable fleet**
+resolves even when an *unrelated* device is offline: resolution keys on the owner
+device (`session.machine`), not on whether every registered peer answered.
+`sessions preview` / `--resolve` (READ) render the match and note the offline
+device, so `--local` is an optimization, not a requirement, for a peek; `resume` /
+`attach` / `focus` / `exec --resume` (ACT) still fail closed on such an unconfirmed
+prefix, because an offline peer could hold a distinct session sharing the prefix and
+resuming the wrong one is unrecoverable — pass the full UUID to resume regardless.
+`agents run auto --resume <id>` is the adaptive form: on the
 origin device it prefers native resume only when the original harness/version is
 installed, healthy, and still owns the indexed transcript in its active isolated
 home. Claude resumes from the earliest recorded cwd, the directory that selected
