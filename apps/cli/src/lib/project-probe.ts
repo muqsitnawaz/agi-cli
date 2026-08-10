@@ -66,10 +66,12 @@ function git(absPath: string, args: string[]): string | undefined {
 }
 
 /**
- * Probe one workspace repo. A missing path yields `{present: false}` and no
- * git call is made. On a present repo every signal is best-effort: whatever
- * succeeded is reported, and a repo whose `.git` exists yet every git call
- * failed surfaces as present-with-error rather than silently clean.
+ * Probe one workspace repo. A path with no `.git` of its own is checked once
+ * with `git rev-parse` (a monorepo subdir is inside a work tree); a path that
+ * is neither yields `{present: false}`. On a present repo every signal is
+ * best-effort: whatever succeeded is reported, and a repo whose `.git` exists
+ * yet every git call failed surfaces as present-with-error rather than silently
+ * clean.
  */
 export function probeRepoWorkspace(absPath: string): RepoWorkspaceStatus {
   const status: RepoWorkspaceStatus = { path: toHomeRelative(absPath), present: false };
