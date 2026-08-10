@@ -154,3 +154,4 @@ function applyExclude(q: UnifiedQuery, families: EventFamily[]): UnifiedQuery {
     ...(excludeLevel ? { excludeLevel } : {}),
   };
 }
+
