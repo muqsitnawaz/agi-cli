@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "command": "agents",
   "groups": 96,
-  "commands": 565,
+  "commands": 568,
   "root": {
     "name": "agents",
     "path": "",
@@ -5771,7 +5771,7 @@
           "negate": false
         }
       ],
-      "examples": "agents config set run.claude@*.model best\n      agents config set run.claude@*.tier.best claude-opus-4-8\n      agents config set run.claude@2.1.45.model claude-opus-4-8\n      agents config set run.claude@*.mode auto\n      agents config set interactive.host zion\n      agents config set browser.profile work\n      agents config set project.root ~/src/github.com/<you>\n      agents config set devices.mac-mini.max-agents 4\n      agents config get run.claude@*.model\n      agents config unset run.claude@*.tier.best\n      agents config list",
+      "examples": "agents config set run.claude@*.model best\n      agents config set run.claude@*.tier.best claude-opus-4-8\n      agents config set run.claude@2.1.45.model claude-opus-4-8\n      agents config set run.claude@*.mode auto\n      agents config set interactive.host zion\n      agents config set usage.primary-host zion\n      agents config set browser.profile work\n      agents config set project.root ~/src/github.com/<you>\n      agents config set devices.mac-mini.max-agents 4\n      agents config get run.claude@*.model\n      agents config get usage.primary-host\n      agents config unset run.claude@*.tier.best\n      agents config unset usage.primary-host\n      agents config list",
       "notes": "Every agent/harness reference uses agent@version. Use * for all versions.\n      Tier overrides are part of the run namespace: run.<agent@version>.tier.<tier>.\n      Project root is auto-inferred from the current Git repository when unset.",
       "subcommands": [
         {
@@ -6390,7 +6390,7 @@
           "name": "services",
           "path": "daemon services",
           "aliases": [],
-          "description": "The two hosted services (secrets broker, browser IPC): bound state, socket path, and health. See sibling `daemon funnel` for public ingress.",
+          "description": "The hosted services: health, bound state, socket path, and per-service toggles.",
           "args": [],
           "options": [
             {
@@ -6413,7 +6413,91 @@
               "negate": false
             }
           ],
-          "subcommands": []
+          "subcommands": [
+            {
+              "name": "disable",
+              "path": "daemon services disable",
+              "aliases": [],
+              "description": "Disable a daemon service.",
+              "args": [
+                {
+                  "name": "service",
+                  "required": true,
+                  "variadic": false,
+                  "description": ""
+                }
+              ],
+              "options": [
+                {
+                  "flags": "-h, --help",
+                  "description": "Show help",
+                  "short": "-h",
+                  "long": "--help",
+                  "required": false,
+                  "optional": false,
+                  "variadic": false,
+                  "negate": false
+                }
+              ],
+              "subcommands": []
+            },
+            {
+              "name": "enable",
+              "path": "daemon services enable",
+              "aliases": [],
+              "description": "Enable a daemon service.",
+              "args": [
+                {
+                  "name": "service",
+                  "required": true,
+                  "variadic": false,
+                  "description": ""
+                }
+              ],
+              "options": [
+                {
+                  "flags": "-h, --help",
+                  "description": "Show help",
+                  "short": "-h",
+                  "long": "--help",
+                  "required": false,
+                  "optional": false,
+                  "variadic": false,
+                  "negate": false
+                }
+              ],
+              "subcommands": []
+            },
+            {
+              "name": "list",
+              "path": "daemon services list",
+              "aliases": [],
+              "description": "List every daemon service and whether it is enabled.",
+              "args": [],
+              "options": [
+                {
+                  "flags": "--json",
+                  "description": "Emit as JSON",
+                  "long": "--json",
+                  "required": false,
+                  "optional": false,
+                  "variadic": false,
+                  "negate": false
+                },
+                {
+                  "flags": "-h, --help",
+                  "description": "Show help",
+                  "short": "-h",
+                  "long": "--help",
+                  "required": false,
+                  "optional": false,
+                  "variadic": false,
+                  "negate": false
+                }
+              ],
+              "subcommands": []
+            }
+          ]
         },
         {
           "name": "start",
@@ -24197,13 +24281,22 @@
           "name": "reap",
           "path": "sessions reap",
           "aliases": [],
-          "description": "Kill tmux sessions whose panes are all dead.",
+          "description": "Kill tmux sessions whose panes are all dead, and the helper processes their agents left behind.",
           "args": [],
           "options": [
             {
               "flags": "--json",
               "description": "Emit a JSON result object instead of human output.",
               "long": "--json",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--dry-run",
+              "description": "List what would be reaped without killing anything.",
+              "long": "--dry-run",
               "required": false,
               "optional": false,
               "variadic": false,
@@ -24229,8 +24322,8 @@
               "negate": false
             }
           ],
-          "examples": "# Reap dead sessions interactively\nagents sessions reap\n\n# JSON output (for scripts)\nagents sessions reap --json",
-          "notes": "Sessions stay open after their process exits because `remain-on-exit on` is set\nso the harness can inspect exit status. This command cleans them up on demand.\n\nSafety: sessions with at least one live pane are never touched.",
+          "examples": "# Reap dead sessions and orphaned helper processes\nagents sessions reap\n\n# See what would be reaped, without killing anything\nagents sessions reap --dry-run\n\n# JSON output (for scripts)\nagents sessions reap --json",
+          "notes": "Sessions stay open after their process exits because `remain-on-exit on` is set\nso the harness can inspect exit status. Killing the pane only SIGHUPs its\nforeground process group, so MCP servers and harness background daemons that\nmoved out of that group outlive the agent. This command collects both.\n\nSafety: sessions with at least one live pane are never touched, and a helper\nprocess is killed only when its owning tmux session is gone, or that session\nhas no attached client AND its agent process has exited.\n\nThe routines daemon runs the same sweep every 5 minutes.",
           "subcommands": []
         },
         {

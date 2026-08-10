@@ -27,6 +27,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as yaml from 'yaml';
+import { stringifyDoc } from './yaml-io.js';
 import { execFileSync } from 'child_process';
 import { ensureLockTarget, atomicWriteFileSync, withFileLock } from './fs-atomic.js';
 import type { Meta, RegistryType } from './types.js';
@@ -120,6 +121,9 @@ const TEAMS_DIR = path.join(USER_AGENTS_DIR, 'teams');
 // Named project definitions (the layer above the --project convention). Sibling
 // of ROUTINES_DIR/TEAMS_DIR: hand-editable YAML, synced across machines by push/pull.
 const PROJECTS_DIR = path.join(USER_AGENTS_DIR, 'projects');
+// Daemon service toggles and persistent daemon config. Top-level config/definitions
+// dir like routines/webhooks; runtime state (pid/heartbeat/logs) stays in .cache.
+const DAEMON_CONFIG_DIR = path.join(USER_AGENTS_DIR, 'daemon');
 
 // History bucket (durable).
 const SESSIONS_DIR = path.join(HISTORY_DIR, 'sessions');
@@ -465,6 +469,9 @@ export function getRoutinesDir(): string { return process.env.AGENTS_ROUTINES_DI
 
 /** Path to named project definitions (~/.agents/projects/). */
 export function getProjectsDir(): string { return process.env.AGENTS_PROJECTS_DIR ?? PROJECTS_DIR; }
+
+/** Path to daemon config directory (~/.agents/daemon/). Holds service toggles. */
+export function getDaemonConfigDir(): string { return process.env.AGENTS_DAEMON_CONFIG_DIR ?? DAEMON_CONFIG_DIR; }
 
 /**
  * Path to webhook handler YAML definitions (~/.agents/webhooks/). Handlers are
@@ -1028,11 +1035,13 @@ function serializeCentral(central: Record<string, unknown>): string {
   // writeIfChanged skips it and the churn loop never starts.
   if (!changed) return existing;
   // Everything cleared → header only (never leave a flow `{}` behind).
-  // Otherwise force BLOCK style: an existing flow root (e.g. a legacy `{}`) would
-  // otherwise make the edited nodes render flow (`disabledCommands: [ teams ]`
-  // instead of a `- teams` block list). collectionStyle pins the whole doc block
-  // while parseDocument still preserves comments + key ordering.
-  return isEmpty ? META_HEADER : doc.toString({ collectionStyle: 'block' });
+  // Otherwise stringifyDoc: it still normalizes a legacy flow root (`{}`) to
+  // block, so edited nodes do not render flow (`disabledCommands: [ teams ]`
+  // instead of a `- teams` block list), but it no longer forces block on a
+  // normal document — that flattened committed flow sequences and made this
+  // writer disagree with feed.ts/activity.ts/migrate.ts on the same file
+  // (RUSH-2505). parseDocument still preserves comments + key ordering.
+  return isEmpty ? META_HEADER : stringifyDoc(doc);
 }
 
 function writeMetaUnlocked(meta: Meta): void {

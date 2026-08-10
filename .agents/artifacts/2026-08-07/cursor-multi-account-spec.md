@@ -7,14 +7,14 @@ header: 'Spec · RUSH-2400'
 footer: 'agents-cli · Phoenix Labs'
 project: 'Agents CLI'
 context: 'apps/cli — Cursor harness account model'
-repository: 'muqsitnawaz/agents-cli'
+repository: 'owner/agents-cli'
 branch: 'spec-cursor-multi-account'
 tracking: 'RUSH-2400'
 status: draft
 harness: 'claude'
 agent: 'claude · opus-4-8'
-human: 'Muqsit'
-host: 'yosemite-s0'
+human: 'Owner'
+host: 'worker-s0'
 session: 'e67573e5'
 date: '2026-08-07'
 facts:
@@ -34,7 +34,7 @@ Today it prints two accounts:
 
 ```
 Cursor (balanced)
-  2026.08.04 (default)  user@example.com   (signed in)
+  2026.08.04 (default)  [account-redacted]   (signed in)
   2026.07.23            (logged out — log in with: cursor-agent)
 ```
 
@@ -44,7 +44,7 @@ That display is cosmetic. Cursor is a single self-updating binary with one confi
 
 **Before (today).** All three paths silently collapse to the one live login:
 
-- `agents run cursor@2026.07.23` → you expect the logged-out home; you get the **default** account (`user@example.com`), because the spawned `cursor-agent` reads `~/.cursor`, a symlink to whichever version is the current default.
+- `agents run cursor@2026.07.23` → you expect the logged-out home; you get the **default** account (`[account-redacted]`), because the spawned `cursor-agent` reads `~/.cursor`, a symlink to whichever version is the current default.
 - `agents run auto` with balanced rotation "picks" a Cursor account → same single login runs regardless of the pick.
 - Two Cursor runs on two accounts at once → both authenticate as the same account; the "second account" is a display artifact, not a session.
 

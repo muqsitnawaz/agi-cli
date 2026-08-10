@@ -54,6 +54,8 @@ agents run claude "explain this repo"  # run any agent on your existing subscrip
 
 Full path -- installing harnesses, logging in, smoke-testing `agents teams`, and setting up your own fleet: [`apps/cli/docs/QUICKSTART.md`](apps/cli/docs/QUICKSTART.md).
 
+**Learn (concepts):** [Loop + graph engineering](https://agents-cli.sh/learn/loop-and-graph-engineering) · [Teams as graph engineering](https://agents-cli.sh/learn/teams-graph-engineering) · [Sessions · index + cross-device](https://agents-cli.sh/learn/sessions-index) · [Distributed fleet execution](https://agents-cli.sh/learn/distributed-fleet). Also: [harness engineering](https://agents-cli.sh/learn/harness-engineering) · [visual longform](https://share.agents-cli.sh/muqsitnawaz/agents-loop-and-graph-engineering).
+
 Already installed? `agents upgrade` updates agents-cli itself to the latest version (`agents upgrade 1.2.3` for a specific version or dist-tag, `-y` to skip the confirm prompt). The command is `upgrade` on every platform -- do not reach for `agents update`, which updates an installed **agent harness**, not agents-cli (and on macOS, `agents helper update` is a third thing: it reinstalls the keychain helper).
 
 Source: [github.com/phnx-labs/agents-cli](https://github.com/phnx-labs/agents-cli)
@@ -313,7 +315,7 @@ agents sessions insights --agent claude --agent codex --json
 agents insights --since 7d
 ```
 
-`sessions insights` is deterministic and offline by default. It caches per-session facets, compares harnesses, and emits an actions table with evidence counts plus shortened sample session ids. `--narrative` is opt-in and receives aggregates only, never raw transcripts. The installed `/sessions-insights` slash command invokes the same CLI source of truth.
+`sessions insights` is deterministic and offline by default. It caches per-session facets, compares harnesses, and emits an actions table with evidence counts plus shortened sample session ids. `--narrative` is opt-in and receives aggregates only, never raw transcripts.
 
 Interactive picker when you're in a terminal. Structured output (`--json`, `--markdown`, filtered by role or turn count) when piped.
 
@@ -1094,11 +1096,22 @@ agents daemon restart        # stop then start
 agents daemon disable        # persist daemon.enabled: false -- nothing auto-starts it
 agents daemon enable         # clear the kill switch
 
-agents daemon reload         # SIGHUP -- reload jobs, re-evaluate scheduler.enabled, no restart
-agents daemon services       # just the two hosted services (secrets broker, browser IPC)
+agents daemon reload                        # SIGHUP -- reload jobs, re-evaluate scheduler.enabled, no restart
+agents daemon services                      # health of the two hosted services (secrets broker, browser IPC)
+agents daemon services list                 # every toggleable service and its current on/off state
+agents daemon services enable secrets-broker
+agents daemon services disable browser-ipc  # stop hosting browser IPC without stopping the daemon
 agents daemon logs -f --level warn --since 1h
-agents daemon doctor         # one-shot health check; non-zero exit on problems
+agents daemon doctor                        # one-shot health check; non-zero exit on problems
 ```
+
+Each hosted responsibility (secrets broker, browser IPC, scheduler, monitors,
+watchdog, device probe, self-heal, keychain reap, account-state refresh,
+state-dir checks) is an independent toggle in `~/.agents/daemon/services.yaml`.
+`agents daemon services list` shows every service; `enable|disable <id>` flips
+one. Missing keys default to enabled, so upgrades are no-ops. Most services take
+effect on the next daemon start; scheduler and monitor engine also re-evaluate
+on `SIGHUP reload`.
 
 There is no `agents daemon jobs` -- scheduled work is always `agents routines`
 (see `agents routines stats` for per-routine failure detail). `disable` is a
@@ -1398,7 +1411,7 @@ Which DotAgents resources each agent CLI can load. Source of truth: [src/lib/age
 
 Codex `0.117.0+` no longer reads `.codex/prompts/`; agents-cli converts slash commands into skills so they stay invocable as `$name`. OpenCode's plugin-based hook system is on the roadmap; hooks stay `no` until a writer ships.
 
-Slash commands can declare per-agent/version targeting in frontmatter (`agents:`, `since:`, `until:`). Gating applies when syncing from `~/.agents/commands/` (user/system) into version homes — project `.agents/commands/` files are read in place and are not filtered by `agents:`. This repo ships `.agents/commands/version.md` as `/version` for Claude, Codex, Cursor, OpenCode, Copilot, and Grok; Antigravity excluded until verified.
+Slash commands can declare per-agent/version targeting in frontmatter (`agents:`, `since:`, `until:`). Gating applies when syncing from `~/.agents/commands/` (user/system) into version homes — project `.agents/commands/` files are read in place and are not filtered by `agents:`.
 
 ## FAQ
 
