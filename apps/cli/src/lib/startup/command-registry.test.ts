@@ -50,15 +50,14 @@ describe('KNOWN_TOP_LEVEL_COMMANDS', () => {
     expect(isKnownTopLevelCommand('')).toBe(false);
   });
 
-  it('keeps provider profiles while removing the resource-profile tree', async () => {
+  it('keeps harness (provider profiles) and does not revive the old profiles tree', async () => {
     const program = await buildFullCommandTree();
     expect(program.commands.some((command) => command.name() === 'profile')).toBe(false);
+    expect(program.commands.some((command) => command.name() === 'profiles')).toBe(false);
 
-    const profiles = program.commands.find((command) => command.name() === 'profiles');
-    expect(profiles).toBeDefined();
-    expect(profiles!.commands.map((command) => command.name())).toContain('list');
-    expect(profiles!.commands.map((command) => command.name())).not.toContain('use');
-    expect(profiles!.commands.map((command) => command.name())).not.toContain('status');
+    const harness = program.commands.find((command) => command.name() === 'harness');
+    expect(harness).toBeDefined();
+    expect(harness!.commands.map((command) => command.name())).toContain('list');
   });
 
   it('does not recognize the removed defaults and export commands', () => {

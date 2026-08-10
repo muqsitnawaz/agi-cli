@@ -34,6 +34,7 @@ import { spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { isSessionTrackedAgent } from '../lib/session/types.js';
 import { applyActiveRulesPresetAtRun } from '../lib/rules/run-sync.js';
+import { handleBroadcast } from './run-broadcast.js';
 
 interface ExecCommandActionOptions {
   mode: ExecMode;
@@ -118,6 +119,16 @@ interface ExecCommandActionOptions {
   secretsKeys?: string; // --secrets-keys: comma-separated key subset for --secrets bundles
   allowExpired?: boolean; // --allow-expired: skip expiry pre-run abort for secrets
   emitSessionId?: boolean; // internal: forwarded by --host dispatch so the remote run prints its session id (hosts/session-marker.ts)
+  /** --broadcast: matrix-run the same prompt/task across agents × models. */
+  broadcast?: boolean;
+  /** --task <id>: house broadcast task (with --broadcast). */
+  task?: string;
+  /** --list-tasks: list broadcast tasks. */
+  listTasks?: boolean;
+  /** --results [run-id]: show saved broadcast runs. */
+  results?: string | true;
+  /** --concurrency <n>: broadcast cell parallelism. */
+  concurrency?: string;
 }
 
 export interface RunAccountPickerRequest {
@@ -734,8 +745,8 @@ async function handleTerminalHandoff(
 /** Register the `agents run <agent> [prompt]` command. */
 export function registerRunCommand(program: Command): void {
   const runCmd = program
-    .command('run <agent> [prompt]')
-    .description('Execute an agent. Pass a prompt for headless runs; omit it to launch the agent interactively.')
+    .command('run [agent] [prompt]')
+    .description('Execute an agent. Pass a prompt for headless runs; omit it to launch the agent interactively. With --broadcast, run the same prompt/task across an agent × model matrix.')
     .option('-m, --mode <mode>', 'How much the agent can do: plan (read-only), edit (can write files), auto (smart classifier auto-approves safe ops, prompts for risky), skip (bypass all permission prompts). Omitted Codex mode defaults to safe writable edit; other harnesses default to plan. \'full\' accepted as alias for skip.', 'plan')
     .option('-e, --effort <effort>', 'Reasoning effort: low | medium | high | xhigh | max | auto (claude and codex only)', 'auto')
     .option('--model <model>', 'Cost tier (cheap|default|best|ultra) or a concrete model id; tiers resolve per harness+version to a supported model')
@@ -776,6 +787,11 @@ export function registerRunCommand(program: Command): void {
     .option('--headless', 'Force headless mode. Auto-enabled when a prompt is provided; pass explicitly to stay headless with no prompt (reads the prompt from stdin).', false)
     .option('--no-auth-check', 'Skip the pre-launch "looks logged out" warning on an interactive run (advisory; never blocks anyway). Also silenced by AGENTS_NO_AUTH_CHECK=1.')
     .option('-i, --interactive', 'Force interactive mode even when a prompt is provided. Mutually exclusive with --headless.')
+    .option('--broadcast', 'Run the same prompt or --task across multiple agents (comma-separated [agent]) × --model cells. Replaces the former `agents bench` group.')
+    .option('--task <id>', 'With --broadcast: house benchmark task id under apps/cli/bench/tasks/')
+    .option('--list-tasks', 'With --broadcast: list available broadcast task ids')
+    .option('--results [run-id]', 'With --broadcast: show one saved matrix run, or list saved runs newest first')
+    .option('--concurrency <n>', 'With --broadcast: maximum cells running at once', '3')
     .option('--resume [id]', 'Recover a previous conversation on its origin device. The exact healthy origin uses native resume; otherwise a healthy version of the same harness replays via /continue. Pair with a prompt to continue headlessly.')
     .option('--session-id <id>', 'Force a NEW conversation to use this exact session UUID (Claude only). This CREATES a session — to resume an existing one, use --resume.')
     .option('--name <slug>', 'Name the run — seeds the session label so it shows up as `<name>` in `agents sessions` and resolves by it (and `agents logs <name>` for --host runs) instead of an opaque id. An agent-generated title later refines the label; your name shows until then. Optional.')
@@ -963,6 +979,12 @@ export function registerRunCommand(program: Command): void {
       agents run claude "fix the failing tests" --lease --fresh
       agents run claude "fix the failing tests" --box warm-one
 
+      # Broadcast one prompt (or --task) across agents × models
+      agents run --broadcast claude,codex "say hello" --model cheap,default
+      agents run --broadcast --task hello-repo --model cheap
+      agents run --broadcast --list-tasks
+      agents run --broadcast --results --json
+
       # Pass arbitrary native flags to the underlying CLI via -- separator
       agents run kimi -- --plan --some-kimi-option value
       agents run claude "fix the bug" -- --custom-flag
@@ -1019,7 +1041,7 @@ export function registerRunCommand(program: Command): void {
     `,
   });
 
-  runCmd.action(async (agentSpec: string, prompt: string | undefined, options: ExecCommandActionOptions, command: Command) => {
+  runCmd.action(async (agentSpec: string | undefined, prompt: string | undefined, options: ExecCommandActionOptions, command: Command) => {
       // Capture everything after -- as passthrough args forwarded verbatim to the
       // underlying CLI. Commander strips the literal `--` and folds what follows
       // into the positional operands (so `agents run codex -- --yolo` would parse
@@ -1040,6 +1062,32 @@ export function registerRunCommand(program: Command): void {
         // The token commander assigned to [prompt] came from behind `--` — it is
         // a native flag, not a prompt. Run interactively.
         prompt = undefined;
+      }
+
+      // Broadcast matrix (formerly `agents bench`): list/results/run cells, then exit.
+      if (options.broadcast || options.listTasks || options.results !== undefined) {
+        try {
+          await handleBroadcast({
+            listTasks: options.listTasks === true,
+            results: options.results,
+            task: options.task,
+            model: options.model,
+            concurrency: options.concurrency,
+            json: options.json,
+            agentsCsv: agentSpec,
+            prompt,
+            requireRun: options.broadcast === true && !options.listTasks && options.results === undefined,
+          });
+        } catch (err) {
+          console.error(chalk.red((err as Error).message));
+          process.exit(1);
+        }
+        return;
+      }
+
+      if (!agentSpec) {
+        console.error(chalk.red("Missing required argument 'agent'. Example: agents run claude \"hello\"."));
+        process.exit(1);
       }
 
       // --cloud: vendor cloud placement. Validate BEFORE the terminal handoff

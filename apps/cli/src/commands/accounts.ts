@@ -126,6 +126,42 @@ export function registerAccountsCommand(program: Command): void {
       console.log(chalk.green(`Cleared the default account for ${agentRaw}.`));
     });
 
+  accounts.command('logout <target>')
+    .description('Sign out a harness-native OAuth login. API-key / setup-token / bearer accounts use `accounts remove` instead.')
+    .action(async (target: string) => {
+      const provider = findAccount(target);
+      if (provider) {
+        throw new Error(
+          `Account '${provider.name}' uses ${provider.auth}, not OAuth. Remove it with: agents accounts remove ${provider.name}`,
+        );
+      }
+      const agentRaw = target.split('@')[0];
+      if (!ALL_AGENT_IDS.includes(agentRaw as AgentId)) {
+        throw new Error(
+          `Unknown target '${target}'. Pass a native harness (claude, codex, …) or a provider account name. Provider API-key accounts use \`agents accounts remove\`.`,
+        );
+      }
+      const agent = agentRaw as AgentId;
+      const { spawnSync } = await import('child_process');
+      const { getBinaryPath, getGlobalDefault, getVersionHomePath, listInstalledVersions } = await import('../lib/versions.js');
+      const installed = listInstalledVersions(agent);
+      const version = getGlobalDefault(agent) ?? installed[installed.length - 1];
+      if (!version) throw new Error(`No installed version of ${agent}. Install one with: agents add ${agent}`);
+      const bin = getBinaryPath(agent, version);
+      const home = getVersionHomePath(agent, version);
+      const result = spawnSync(bin, ['logout'], {
+        env: { ...process.env, HOME: home },
+        stdio: 'inherit',
+      });
+      if (result.error) throw result.error;
+      if ((result.status ?? 1) !== 0) {
+        throw new Error(
+          `${agent} logout exited ${result.status ?? 'null'}. If this harness has no logout verb, sign out from its own UI.`,
+        );
+      }
+      console.log(chalk.green(`Signed out native ${agent} login (${version}).`));
+    });
+
   accounts.command('sync <name>')
     .description('Copy one provider account bundle to a worker device')
     .requiredOption('--device <device>', 'Destination device or SSH host')
@@ -159,7 +195,8 @@ agents accounts set-key work
 agents accounts inspect work --json
 agents accounts set-default claude work
 agents accounts sync work --device yosemite-s0
-agents run claude --account work`,
-    notes: 'Provider accounts are durable credentials independent of agent versions. Harness-native auth remains managed by each harness and is not copied or renamed by agents-cli.',
+agents run claude --account work
+agents accounts logout claude`,
+    notes: 'Provider accounts are durable credentials independent of agent versions. Harness-native OAuth sign-out is `agents accounts logout <harness>` (API-key accounts use `accounts remove`). Synced vault unlock is `agents secrets vault unlock`.',
   });
 }

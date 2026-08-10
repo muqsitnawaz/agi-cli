@@ -1,1 +1,1 @@
-Removed the top-level `agents whoami` command. Use `agents login` and `agents logout` to manage synced-secrets access.
+Removed the top-level `agents whoami` command. Synced-secrets access is `agents secrets vault unlock|lock`.

@@ -68,27 +68,19 @@ export const loadRestore: ModuleLoader = async () => (await import('../../comman
 export const loadDoctor: ModuleLoader = async () => (await import('../../commands/doctor.js')).registerDoctorCommand;
 export const loadApply: ModuleLoader = async () => (await import('../../commands/apply.js')).registerApplyCommand;
 export const loadStatus: ModuleLoader = async () => (await import('../../commands/status.js')).registerStatusCommand;
-export const loadSnapshot: ModuleLoader = async () => (await import('../../commands/snapshot.js')).registerSnapshotCommand;
-export const loadProfiles: ModuleLoader = async () => (await import('../../commands/profiles.js')).registerProfilesCommands;
 export const loadHarness: ModuleLoader = async () => (await import('../../commands/harness.js')).registerHarnessCommands;
 export const loadSecrets: ModuleLoader = async () => (await import('../../commands/secrets.js')).registerSecretsCommands;
-export const loadLogin: ModuleLoader = async () => (await import('../../commands/login.js')).registerLoginCommands;
 export const loadMenubar: ModuleLoader = async () => (await import('../../commands/menubar.js')).registerMenubarCommands;
 export const loadBeta: ModuleLoader = async () => (await import('../../commands/beta.js')).registerBetaCommands;
 export const loadSync: ModuleLoader = async () => (await import('../../commands/sync.js')).registerSyncCommand;
 export const loadRefreshRules: ModuleLoader = async () => (await import('../../commands/refresh-rules.js')).registerRefreshRulesCommand;
 export const loadFactory: ModuleLoader = async () => (await import('../../commands/factory.js')).registerFactoryCommands;
 export const loadUsage: ModuleLoader = async () => (await import('../../commands/usage.js')).registerUsageCommand;
-export const loadCost: ModuleLoader = async () => (await import('../../commands/cost.js')).registerCostCommand;
 export const loadInsights: ModuleLoader = async () => (await import('../../commands/insights.js')).registerInsightsCommand;
 export const loadPerf: ModuleLoader = async () => (await import('../../commands/perf.js')).registerPerfCommand;
-export const loadBench: ModuleLoader = async () => (await import('../../commands/bench.js')).registerBenchCommand;
 // Thin deprecated alias of `agents insights mix` — no second mix implementation.
 export const loadTrends: ModuleLoader = async () => (await import('../../commands/trends.js')).registerTrendsCommand;
-export const loadOutput: ModuleLoader = async () => (await import('../../commands/output.js')).registerOutputCommand;
-export const loadBudget: ModuleLoader = async () => (await import('../../commands/budget.js')).registerBudgetCommand;
 export const loadAlias: ModuleLoader = async () => (await import('../../commands/alias.js')).registerAliasCommand;
-export const loadMine: ModuleLoader = async () => (await import('../../commands/mine.js')).registerMineCommand;
 export const loadPty: ModuleLoader = async () => (await import('../../commands/pty.js')).registerPtyCommands;
 export const loadTmux: ModuleLoader = async () => (await import('../../commands/tmux.js')).registerTmuxCommands;
 export const loadWatchdog: ModuleLoader = async () => (await import('../../commands/watchdog.js')).registerWatchdogCommand;
@@ -197,28 +189,19 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   doctor: [loadDoctor],
   apply: [loadApply],
   status: [loadStatus],
-  snapshot: [loadSnapshot],
-  profiles: [loadProfiles],
   harness: [loadHarness],
   harnesses: [loadHarness],
   secrets: [loadSecrets],
-  login: [loadLogin],
-  logout: [loadLogin],
   menubar: [loadMenubar],
   beta: [loadBeta],
   sync: [loadSync],
   'refresh-rules': [loadRefreshRules],
   factory: [loadFactory],
   usage: [loadUsage],
-  cost: [loadCost],
   insights: [loadInsights],
   perf: [loadPerf],
-  bench: [loadBench],
   trends: [loadTrends],
-  output: [loadOutput],
-  budget: [loadBudget],
   alias: [loadAlias],
-  mine: [loadMine],
   pty: [loadPty],
   tmux: [loadTmux],
   watchdog: [loadWatchdog],

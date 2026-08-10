@@ -29,6 +29,7 @@ import {
   type ParsedRunConfigKey,
   type ParsedDeviceConfigKey,
 } from '../lib/config-keys.js';
+import { registerBudgetCommand } from './budget.js';
 import {
   resolveRunDefaults,
   setRunDefaultModel,
@@ -322,7 +323,7 @@ function* listDeviceConfigEntries(device: string): Generator<{ key: string; valu
 export function registerConfigCommand(program: Command): void {
   const config = program
     .command('config')
-    .description('Get, set, list, and unset run defaults, tier overrides, the projects root, and device options.');
+    .description('Get, set, list, and unset run defaults, tier overrides, the projects root, device options, and spend caps.');
 
   setHelpSections(config, {
     examples: `
@@ -340,11 +341,14 @@ export function registerConfigCommand(program: Command): void {
       agents config unset run.claude@*.tier.best
       agents config unset usage.primary-host
       agents config list
+      agents config budget
+      agents config budget set per_day 50
     `,
     notes: `
       Every agent/harness reference uses agent@version. Use * for all versions.
       Tier overrides are part of the run namespace: run.<agent@version>.tier.<tier>.
       Project root is auto-inferred from the current Git repository when unset.
+      Spend caps live under \`agents config budget\` (not a top-level command).
     `,
   });
 
@@ -440,4 +444,6 @@ export function registerConfigCommand(program: Command): void {
         process.exit(1);
       }
     });
+
+  registerBudgetCommand(config);
 }
