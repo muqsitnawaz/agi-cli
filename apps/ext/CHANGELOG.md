@@ -6,6 +6,16 @@ All notable changes to AGI EXT (the VS Code extension) are documented here. Form
 
 ## [Unreleased]
 
+- **Tab icons + status bar for Grok/Kimi/Droid/Antigravity and resumed sessions.**
+  Shell-adoption only recognised the original five harnesses (`claude`/`codex`/
+  `gemini`/`cursor`/`opencode`), so a New Grok tab (or any focus/resume that
+  landed via the `/spawn` URI) stayed a generic terminal: wrong icon and status
+  bar stuck on `Agents: Terminal`. The detector now covers every built-in runner
+  (including `agy` for Antigravity). The `/spawn` payload also carries
+  `agent`/`sessionId`/`title` so remote `ssh … tmux attach` resumes set the chip
+  without process-tree sniffing (#2478). Process-title forms like `Agents grok`
+  are parsed so a reloaded window rebinds the tab.
+
 ## [0.9.315] - 2026-08-10
 
 - **Launch Warp with the right command.** The Warp agent's `cliCommand` was still the
