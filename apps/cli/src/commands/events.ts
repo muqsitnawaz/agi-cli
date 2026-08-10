@@ -103,6 +103,11 @@ function detailFor(r: EventRecord): string {
   if (typeof r.bundle === 'string') bits.push(`bundle=${r.bundle}`);
   if (typeof r.skill === 'string') bits.push(`skill=${r.skill}`);
   if (typeof r.version === 'string') bits.push(`v=${r.version}`);
+  // run.dispatched (and similar) — mode / outcome / exit / repo are the audit line.
+  if (typeof r.mode === 'string') bits.push(`mode=${r.mode}`);
+  if (typeof r.outcome === 'string') bits.push(`outcome=${r.outcome}`);
+  if (typeof r.exitCode === 'number') bits.push(`exit=${r.exitCode}`);
+  if (typeof r.repo === 'string') bits.push(chalk.gray(r.repo));
   if (typeof r.profile === 'string') bits.push(`profile=${r.profile}`);
   if (typeof r.error === 'string') bits.push(chalk.red(r.error));
   return bits.join(' ');

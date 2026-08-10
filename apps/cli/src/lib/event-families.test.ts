@@ -137,4 +137,79 @@ describe('applyFamilies / readUnifiedEvents', () => {
     });
     expect(rows.length).toBe(0);
   });
+
+  it('--include security,runs is a union (does not shrink to runs-only)', () => {
+    setup();
+    emit('run.dispatched', { module: 'run', agent: 'claude', version: '1', mode: 'plan', outcome: 'ok', exitCode: 0 });
+    emit('secrets.get', { module: 'secrets' });
+    emit('browser.navigate', { module: 'browser', url: 'https://example.com' }); // info — not audit
+    const securityOnly = readUnifiedEvents({
+      includeFamilies: ['security'],
+      limit: 50,
+    });
+    const securityAndRuns = readUnifiedEvents({
+      includeFamilies: ['security', 'runs'],
+      limit: 50,
+    });
+    // security alone keeps audit-level rows (secrets.get + run.dispatched)
+    expect(securityOnly.some((r) => r.event === 'secrets.get')).toBe(true);
+    expect(securityOnly.some((r) => r.event === 'run.dispatched')).toBe(true);
+    // adding runs must not erase security matches (the bug: runs type-filter ate secrets)
+    expect(securityAndRuns.some((r) => r.event === 'secrets.get')).toBe(true);
+    expect(securityAndRuns.some((r) => r.event === 'run.dispatched')).toBe(true);
+    // info browser.navigate is not in security family
+    expect(securityAndRuns.some((r) => r.event === 'browser.navigate')).toBe(false);
+  });
+
+  it('--include ops,runs stays full ops (runs is a subset of the ops stream)', () => {
+    setup();
+    emit('run.dispatched', { module: 'run', agent: 'claude', version: '1', mode: 'plan', outcome: 'ok', exitCode: 0 });
+    emit('secrets.get', { module: 'secrets' });
+    emit('command.end', { module: 'run', command: 'run claude' });
+    const rows = readUnifiedEvents({
+      includeFamilies: ['ops', 'runs'],
+      limit: 50,
+    });
+    expect(rows.some((r) => r.event === 'secrets.get')).toBe(true);
+    expect(rows.some((r) => r.event === 'run.dispatched')).toBe(true);
+    expect(rows.some((r) => r.event === 'command.end')).toBe(true);
+  });
+
+  it('--include commands,runs is the type-set union', () => {
+    setup();
+    emit('run.dispatched', { module: 'run', agent: 'claude', version: '1', mode: 'plan', outcome: 'ok', exitCode: 0 });
+    emit('command.end', { module: 'run', command: 'run claude' });
+    emit('secrets.get', { module: 'secrets' });
+    const rows = readUnifiedEvents({
+      includeFamilies: ['commands', 'runs'],
+      limit: 50,
+    });
+    expect(rows.some((r) => r.event === 'run.dispatched')).toBe(true);
+    expect(rows.some((r) => r.event === 'command.end')).toBe(true);
+    expect(rows.some((r) => r.event === 'secrets.get')).toBe(false);
+  });
+
+  it('--exclude ops,activity does not re-open activity', () => {
+    const { activityRoot } = setup();
+    emit('secrets.get', { module: 'secrets' });
+    appendActivityEvent(
+      {
+        ts: new Date().toISOString(),
+        event: 'pr.opened',
+        sessionId: 's1',
+        mailboxId: 's1',
+        host: 'zion',
+        runtime: 'headless',
+        agent: 'claude',
+        detail: 'pr',
+      },
+      activityRoot,
+    );
+    const rows = readUnifiedEvents({
+      excludeFamilies: ['ops', 'activity'],
+      activityRoot,
+      limit: 50,
+    });
+    expect(rows.length).toBe(0);
+  });
 });

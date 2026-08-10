@@ -74,16 +74,16 @@ function applyInclude(q: UnifiedQuery, families: EventFamily[]): UnifiedQuery {
   let includeActivity = false;
   let forceModule: string | undefined;
 
-  // Source selection
+  // Source selection — multi-family include is a UNION of each family's rows.
   if (has('activity')) includeActivity = true;
   if (has('ops') || has('commands') || has('runs') || has('security')) {
-    // keep ops path open (includeActivity may still be true if activity also listed)
+    // ops path open (includeActivity stays true when activity is also listed)
   } else if (has('activity')) {
     // activity-only
     forceModule = q.module ?? 'activity';
     includeActivity = true;
   }
-  // Default when include lists only type-scoping families: ops path on, activity off
+  // Default when include lists only type-scoping / ops / security: activity off
   // unless activity is listed.
   if (!has('activity') && (has('ops') || has('commands') || has('runs') || has('security'))) {
     includeActivity = false;
@@ -99,8 +99,13 @@ function applyInclude(q: UnifiedQuery, families: EventFamily[]): UnifiedQuery {
     if (!has('activity')) includeActivity = false;
   }
 
+  // Type-scoped families (commands / runs) only restrict eventTypes when no
+  // broader ops-side family is in the include list. ops and security already
+  // cover those kinds; AND-ing a type filter would shrink the union (e.g.
+  // --include security,runs would drop secrets.get and keep only run.dispatched).
+  const broadOps = has('ops') || has('security');
   let eventTypes = q.eventTypes ? [...q.eventTypes] : undefined;
-  if (typeSets.length > 0) {
+  if (typeSets.length > 0 && !broadOps) {
     const union = new Set<EventType>();
     for (const set of typeSets) for (const t of set) union.add(t);
     if (eventTypes?.length) {
@@ -128,12 +133,13 @@ function applyExclude(q: UnifiedQuery, families: EventFamily[]): UnifiedQuery {
   let excludeLevel: EventLevel | undefined = q.excludeLevel;
   let forceModule: string | undefined;
 
-  if (has('activity')) includeActivity = false;
+  // Exclude ops first (→ activity-only), then activity (may clear the reopen).
+  // --exclude ops,activity must not re-open activity after both sources are out.
   if (has('ops')) {
-    // Exclude ops → activity only.
     forceModule = q.module ?? 'activity';
     includeActivity = true;
   }
+  if (has('activity')) includeActivity = false;
   if (has('commands')) {
     for (const t of COMMAND_EVENT_TYPES) {
       if (!excludeEventTypes.includes(t)) excludeEventTypes.push(t);
