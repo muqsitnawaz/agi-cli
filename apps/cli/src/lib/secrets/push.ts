@@ -247,6 +247,11 @@ export function pushResolvedBundleToHost(
   }
 
   for (const [key, value] of Object.entries(opts.literalValues ?? {})) {
+    const removed = remoteSecretsRaw(host, ['remove', bundle, key, '--yes'], { osLookupName: host });
+    if (removed.code !== 0) {
+      const msg = (removed.stderr || removed.stdout || '').trim();
+      return fail(`pushed '${bundle}' but could not replace transported ${key}${msg ? `: ${msg}` : ''}`);
+    }
     const literal = remoteSecretsRaw(host, ['add', bundle, key, '--value', value], { osLookupName: host });
     if (literal.code !== 0) {
       const msg = (literal.stderr || literal.stdout || '').trim();
