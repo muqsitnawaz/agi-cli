@@ -283,7 +283,8 @@ export function resolveCredentialAccount(name: string, host: AgentId, expectedPr
   const connectionEnv = { ...adapter.connectionEnvFor(host) };
   if (account.baseUrl) {
     const baseUrlEnv = adapter.baseUrlEnvFor(host);
-    if (baseUrlEnv) connectionEnv[baseUrlEnv] = account.baseUrl;
+    if (!baseUrlEnv) throw new Error(`Account '${account.name}' has a base URL override, but provider '${account.provider}' cannot apply it to the ${host} harness.`);
+    connectionEnv[baseUrlEnv] = account.baseUrl;
   }
   return {
     id: account.id,

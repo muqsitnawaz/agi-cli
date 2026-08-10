@@ -87,6 +87,21 @@ describe('credential account registry (bundle-canonical)', () => {
     });
   });
 
+  it('injects an OpenAI BASE_URL override into Codex', () => {
+    addAccount('openai-proxy', 'openai', 'api-key', 'sk-secret', root, { baseUrl: 'https://gateway.internal/v1' });
+    expect(resolveCredentialAccount('openai-proxy', 'codex', undefined, root).env).toEqual({
+      OPENAI_BASE_URL: 'https://gateway.internal/v1',
+      OPENAI_API_KEY: 'sk-secret',
+    });
+  });
+
+  it('fails loud when a host cannot apply the stored BASE_URL override', () => {
+    addAccount('google-proxy', 'google', 'api-key', 'secret', root, { baseUrl: 'https://gateway.internal/v1' });
+    expect(() => resolveCredentialAccount('google-proxy', 'gemini', undefined, root)).toThrow(
+      "provider 'google' cannot apply it to the gemini harness",
+    );
+  });
+
   it('prefers explicit selection, then a per-harness default', () => {
     const meta = { accounts: { defaults: { claude: 'default-work' } } };
     expect(resolveAccountSelection('one-run', 'claude', meta)).toBe('one-run');
