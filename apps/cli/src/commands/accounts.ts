@@ -18,7 +18,7 @@ function secretFromBundle(raw: string): string {
 }
 
 function publicAccount(account: ReturnType<typeof inspectAccount>) {
-  return { id: account.id, name: account.name, provider: account.provider, auth: account.auth, secretPresent: account.secretPresent };
+  return { id: account.id, name: account.name, provider: account.provider, auth: account.auth, baseUrl: account.baseUrl, secretPresent: account.secretPresent };
 }
 
 function printAccounts(json: boolean): void {
@@ -51,13 +51,14 @@ export function registerAccountsCommand(program: Command): void {
     .description('Add a durable API key, setup token, or bearer token')
     .requiredOption('--provider <provider>', `Credential provider (${listAccountProviders().join(', ')})`)
     .requiredOption('--auth <type>', 'Credential type: api-key | setup-token | bearer-token')
+    .option('--base-url <url>', 'Optional endpoint override stored with the account')
     .option('--from-secrets <bundle:key>', 'Import from an existing agents secrets entry')
-    .action(async (name: string, o: { provider: string; auth: string; fromSecrets?: string }) => {
+    .action(async (name: string, o: { provider: string; auth: string; baseUrl?: string; fromSecrets?: string }) => {
       const auth = parseAuth(o.auth);
       const provider = getAccountProvider(o.provider);
       if (!provider.authKinds.includes(auth)) throw new Error(`Provider '${provider.provider}' does not support ${auth}. Supported: ${provider.authKinds.join(', ')}.`);
       const secret = o.fromSecrets ? secretFromBundle(o.fromSecrets) : await password({ message: `Enter ${provider.provider} ${auth} for '${name}':` });
-      const account = addAccount(name, provider.provider, auth, secret);
+      const account = addAccount(name, provider.provider, auth, secret, undefined, { baseUrl: o.baseUrl });
       console.log(chalk.green(`Added ${account.provider} ${account.auth} account '${account.name}'.`));
       console.log(chalk.gray('The credential is stored in the device keychain; accounts.yaml contains metadata only.'));
     });
@@ -79,6 +80,7 @@ export function registerAccountsCommand(program: Command): void {
     console.log(`${chalk.bold(account.name)}  ${account.provider}`);
     console.log(`  auth: ${account.auth}`);
     console.log(`  id: ${account.id}`);
+    if (account.baseUrl) console.log(`  base url: ${account.baseUrl}`);
     console.log(`  credential: ${account.secretPresent ? 'present on this device' : 'missing on this device'}`);
   });
 
