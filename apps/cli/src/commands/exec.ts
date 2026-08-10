@@ -2557,7 +2557,7 @@ export function registerRunCommand(program: Command): void {
       version = resolveVersionAlias(agent, version);
 
       const { resolveAccountSelection } = await import('../lib/account-registry.js');
-      const configuredAccount = resolveAccountSelection(options.account, agent, readMeta());
+      const configuredAccount = resolveAccountSelection(options.account, agent, readMeta(), { useDefault: !fromProfile });
       if (configuredAccount) {
         if (options.cloud || options.provider || options.lease) {
           console.error(chalk.red('--account selects a device-local credential and cannot be combined with cloud or lease placement.'));

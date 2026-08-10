@@ -61,7 +61,7 @@
         },
         {
           "flags": "--fleet",
-          "description": "Show native OAuth identities across reachable devices",
+          "description": "Show harness-native signed-in identities across reachable devices",
           "long": "--fleet",
           "required": false,
           "optional": false,
@@ -80,7 +80,7 @@
         }
       ],
       "examples": "agents accounts add work --provider anthropic --auth setup-token\nagents accounts add openrouter-work --provider openrouter --auth api-key --from-secrets openrouter.ai:OPENROUTER_API_KEY\nagents accounts set-key work\nagents accounts inspect work --json\nagents accounts set-default claude work\nagents accounts sync work --device yosemite-s0\nagents run claude --account work",
-      "notes": "Accounts are durable credentials, independent of agent versions. Native OAuth login remains managed by the harness and is not copied or renamed by agents-cli.",
+      "notes": "Provider accounts are durable credentials independent of agent versions. Harness-native auth remains managed by each harness and is not copied or renamed by agents-cli.",
       "subcommands": [
         {
           "name": "add",
