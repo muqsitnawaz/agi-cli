@@ -17,6 +17,9 @@ process.env.AGENTS_SKIP_MIGRATION = '1';
 
 const dirs: string[] = [];
 afterEach(() => {
+  // Drop any open sessions.db handle before rmSync — Windows refuses to unlink
+  // a better-sqlite3 file while the connection is live (EBUSY).
+  closeDB();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -46,18 +49,20 @@ describe('menubar snapshot', () => {
     // state.ts captures at import time: fresh modules, dynamic import.
     //
     // computeMenubarSnapshot also opens the sessions index (querySessions). On
-    // Windows the better-sqlite3 handle keeps sessions.db locked, so afterEach's
-    // rmSync of the temp HOME fails with EBUSY unless we pin AGENTS_SESSIONS_DB
-    // and closeDB() — same pattern as the RUSH-2336 suite below.
+    // Windows better-sqlite3 keeps sessions.db locked across rmSync. Pin the
+    // DB outside the HOME we delete, and close BOTH the static-import singleton
+    // and the post-resetModules singleton (vi.resetModules() creates a fresh
+    // db.js instance that the static closeDB() cannot see).
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'menubar-snapshot-home-'));
-    dirs.push(home);
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'menubar-snapshot-db-'));
+    dirs.push(home, dbDir);
     const prevHome = process.env.HOME;
     const previousDevicesDir = process.env.AGENTS_DEVICES_DIR;
     const prevSessionsDb = process.env.AGENTS_SESSIONS_DB;
     process.env.HOME = home;
     const devicesDir = path.join(home, '.agents', '.history', 'devices');
     process.env.AGENTS_DEVICES_DIR = devicesDir;
-    process.env.AGENTS_SESSIONS_DB = path.join(home, 'sessions.db');
+    process.env.AGENTS_SESSIONS_DB = path.join(dbDir, 'sessions.db');
     closeDB();
     vi.resetModules();
 
@@ -90,6 +95,9 @@ describe('menubar snapshot', () => {
         { name: 'zion', preferred: true },
       ]);
     } finally {
+      // Close the post-resetModules db singleton first (the one compute opened).
+      const { closeDB: closeFresh } = await import('../session/db.js');
+      closeFresh();
       closeDB();
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
