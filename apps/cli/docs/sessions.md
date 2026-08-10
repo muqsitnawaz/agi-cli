@@ -35,9 +35,17 @@ retained dead pane is diagnostic state, not an attach target.
 | Retired | Use instead |
 | --- | --- |
 | `agents sessions attach <id>` | `agents sessions resume <id>` |
-| `agents reconnect [id]` | `agents sessions resume` |
+| `agents reconnect [id]` | `agents sessions resume` (see the note below for bare `reconnect`) |
 | `agents sessions go <id>` | `agents sessions resume <id> --attach-only` |
 | `agents sessions focus` | `agents sessions resume` (focus remains the internal dispatcher) |
+
+**One behaviour is being dropped, deliberately.** Bare `agents reconnect` (no id)
+auto-targeted the most recently active session started in the *current directory* —
+"the terminal that most likely just dropped" — and attached it with no prompt. Bare
+`agents sessions resume` always opens the multi-select picker instead. The zero-typing
+recovery path therefore goes away when `reconnect` is removed after its one-release
+deprecation window. If that workflow matters, it should land on `resume` (as a flag or
+a no-id default) before `reconnect` is deleted — tracked on RUSH-2498.
 
 `resume` is the one “take me there” action. With an id or tmux alias it resolves
 the canonical session across the fleet, rechecks liveness, and attaches only when

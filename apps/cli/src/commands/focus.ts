@@ -521,6 +521,16 @@ async function attachLiveTmuxAlias(selector: string): Promise<boolean> {
     process.exitCode = 1;
     return true;
   }
+  // Already inside a tmux client on this socket — which is the normal state for
+  // an interactive agent session here — MOVE that client instead of nesting a
+  // second one. jumpTo (go.ts) does the same; attaching from inside tmux
+  // otherwise stacks clients rather than taking you to the session.
+  if (process.env.TMUX) {
+    await runTmux({ socket, args: ['switch-client', '-t', `=${selector}`], throwOnError: false }).catch(() => {});
+    console.log(chalk.gray(`Switched this tmux client to ${selector}.`));
+    return true;
+  }
+  console.log(chalk.gray(`Attaching ${selector} — Ctrl-b d to detach.`));
   const code = await attachTmux({ socket, args: ['attach-session', '-t', `=${selector}`] });
   process.exitCode = code;
   return true;
