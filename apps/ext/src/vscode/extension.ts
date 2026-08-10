@@ -704,73 +704,20 @@ function launchHostItems(cache: HostPickerCache | null, now: number): LaunchHost
 // pick made before the refresh lands is honored as-is; a device that went
 // offline since the snapshot fails at launch via the existing error path.
 async function pickLaunchHost(
-  context: vscode.ExtensionContext,
+  _context: vscode.ExtensionContext,
   title = 'Run on…',
-  agentKey?: string,
+  _agentKey?: string,
 ): Promise<{ host?: string; cancelled: boolean }> {
-  hostPickerUsed = true;
-  const cache = readHostPickerCache(context);
-  const quickPick = vscode.window.createQuickPick<LaunchHostItem>();
-  quickPick.title = title;
-  quickPick.placeholder = title;
-  quickPick.items = launchHostItems(cache, Date.now());
-
-  let disposed = false;
-  const applyItems = (fresh: HostPickerCache) => {
-    if (disposed) return; // user already picked/dismissed — nothing to update
-    const activeHostId = quickPick.activeItems[0]?.hostId;
-    quickPick.items = launchHostItems(fresh, Date.now());
-    const restore = quickPick.items.find((i) => i.hostId === activeHostId);
-    if (restore) quickPick.activeItems = [restore];
-  };
-  if (isHostPickerStale(cache)) {
-    quickPick.busy = true;
-    // Two-phase: swap in the fresh device rows as soon as the cheap registry
-    // read lands (never gated on the fleet sweep), then swap in the usage
-    // annotations once the sweep completes. On a busy box the device rows show
-    // in registry-read time instead of waiting on the whole fleet fan-out. A
-    // null device phase is a failed read with nothing confident — keep what's
-    // already shown.
-    void refreshHostPickerDevices(context)
-      .then((withDevices) => {
-        if (!withDevices) return null;
-        applyItems(withDevices);
-        return sweepHostPickerUsage(context, withDevices);
-      })
-      .then((fresh) => { if (fresh) applyItems(fresh); })
-      .catch((err) => console.error('[pickLaunchHost] refresh failed:', err))
-      .finally(() => { if (!disposed) quickPick.busy = false; });
-  }
-
-  try {
-    return await new Promise<{ host?: string; cancelled: boolean }>((resolve) => {
-      // VS Code fires onDidHide for the hide() on accept too — only the hide
-      // WITHOUT an accept is a cancel.
-      let accepted = false;
-      quickPick.onDidAccept(() => {
-        const pick = quickPick.selectedItems[0];
-        if (!pick) return;
-        accepted = true;
-        quickPick.hide();
-        // Balanced -> agent-aware best host (RUSH-2025). An explicit device
-        // pick is honored as-is; the launch still passes strategy 'balanced'
-        // so the CLI's account rotation routes around a signed-out /
-        // throttled version on it. The catch keeps a resolveBalancedHost
-        // rejection from hanging the launch promise forever.
-        void (async () => ({
-          host: pick.hostId === BALANCE_HOST_ID ? await resolveBalancedHost(undefined, agentKey) : pick.hostId,
-          cancelled: false,
-        }))()
-          .then(resolve)
-          .catch(() => resolve({ cancelled: true }));
-      });
-      quickPick.onDidHide(() => { if (!accepted) resolve({ cancelled: true }); });
-      quickPick.show();
-    });
-  } finally {
-    disposed = true;
-    quickPick.dispose();
-  }
+  const devices = await listRegisteredDevices();
+  const picked = await vscode.window.showQuickPick([
+    { label: '$(vm) This Mac', description: 'Run locally', host: undefined as string | undefined },
+    ...devices.map((device) => ({
+      label: `${device.online ? '$(radio-tower)' : '$(circle-slash)'} ${device.name}`,
+      description: device.online ? 'online' : 'offline',
+      host: device.name as string | undefined,
+    })),
+  ], { title, placeHolder: title });
+  return picked ? { host: picked.host, cancelled: false } : { cancelled: true };
 }
 
 // --- The one launch engine --------------------------------------------------
@@ -829,6 +776,22 @@ async function resolveAutoAgentKey(
 }
 
 async function launchAgent(context: vscode.ExtensionContext, opts: LaunchAgentOpts = {}): Promise<void> {
+  // Automatic launch is a thin CLI request. The CLI owns harness, device,
+  // account, quota, and health selection; the extension only hosts the terminal.
+  if (!opts.pickHost && !opts.host && !opts.local) {
+    const terminal = vscode.window.createTerminal({
+      name: 'Agents Auto',
+      location: { viewColumn: vscode.ViewColumn.Active },
+      isTransient: true,
+    });
+    terminal.show(false);
+    await sendCommandWhenReady(
+      terminal,
+      'agents run auto --interactive --device auto --strategy balanced --mode auto',
+    );
+    return;
+  }
+
   // 1. Host. Device-first pick, an explicit host, or (later) auto.
   let host = opts.host;
   if (opts.pickHost) {
