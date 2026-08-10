@@ -1,5 +1,5 @@
 /**
- * Pure argv helpers for `--host` passthrough — build the remote `agents …`
+ * Pure argv helpers for `--device` passthrough — build the remote `agents …`
  * invocation and strip the local-only routing flags before forwarding.
  *
  * Kept free of any SSH/process side effects so the two-layer quoting and the
@@ -16,7 +16,7 @@ export interface StripSpec {
   long: string;
   /** Optional single-letter short form without the dash, e.g. `H`. */
   short?: string;
-  /** True when the flag takes a following value token (`--host <name>`). */
+  /** True when the flag takes a following value token (`--device <name>`). */
   takesValue: boolean;
 }
 
@@ -142,7 +142,7 @@ export const RUN_OPTION_FORWARDING: Record<string, RunOptionForwarding> = {
   tailscale: 'local-only', // --tailscale/--no-tailscale gate the lease net mode; never forwarded
   copyCreds: 'local-only', // copies creds TO the host before dispatch — local concern only
   // Cloud placement: chosen and dispatched from THIS machine via the provider
-  // registry; mutually exclusive with --host (placement conflict dies before
+  // registry; mutually exclusive with --device (placement conflict dies before
   // dispatch), so these never have a remote argv to ride.
   cloud: 'local-only',
   provider: 'local-only',
@@ -167,7 +167,7 @@ export const RUN_OPTION_REJECT_MESSAGES: Record<string, string> = {
     'To watch a remote run in a terminal, dispatch it and follow with `agents sessions focus <id>`.',
   secrets:
     '--secrets cannot cross the SSH boundary — Keychain values are never sent to a host implicitly. ' +
-    'Provision the bundle on the host first (agents secrets export --host <name>), then run without --secrets; ' +
+    'Provision the bundle on the host first (agents secrets export --device <name>), then run without --secrets; ' +
     'workflow frontmatter secrets resolve from the HOST\'s own keychain.',
   secretsKeys: '--secrets-keys applies to --secrets bundles, which cannot cross the SSH boundary (see --secrets).',
   allowExpired: '--allow-expired applies to --secrets bundles, which cannot cross the SSH boundary (see --secrets).',
@@ -354,7 +354,7 @@ export function windowsAgentsScript(cmd: WindowsAgentsCommand): string {
 /**
  * Build the `ssh <target> <cmd>` string for one `agents …` invocation on a
  * Windows remote: a `powershell -NoProfile -EncodedCommand <base64>` call. The
- * Windows counterpart of `bash -lc '<...>'`, shared by every `--host` site.
+ * Windows counterpart of `bash -lc '<...>'`, shared by every `--device` site.
  */
 export function buildWindowsAgentsCommand(cmd: WindowsAgentsCommand): string {
   return `powershell -NoProfile -EncodedCommand ${encodePowershell(windowsAgentsScript(cmd))}`;
@@ -382,7 +382,7 @@ export function buildWindowsStdinImportCommand(bundle: string, opts: { force?: b
   // starts null so a GetTempFileName that itself throws leaves nothing to remove.
   const script = [
     // Same CLIXML guard as windowsAgentsScript — this builder also runs `& agents …`
-    // and its raw stderr is printed to the user on failure (secrets export --host <win>).
+    // and its raw stderr is printed to the user on failure (secrets export --device <win>).
     POWERSHELL_PROGRESS_SILENCE,
     '$in = [Console]::In.ReadToEnd()',
     '$tmp = $null',

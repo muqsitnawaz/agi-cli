@@ -1,5 +1,5 @@
 /**
- * Benchmark for the `--host`/`--device` dispatch hot path: host resolution
+ * Benchmark for the `--device`/`--device` dispatch hot path: host resolution
  * (registry.ts:196 matchHost, registry.ts:296 resolveHost) and the pure SSH
  * command-building functions (dispatch.ts, remote-cmd.ts) every offload
  * caller (`run --host`, `agents ssh`, `agents teams start --host`) runs

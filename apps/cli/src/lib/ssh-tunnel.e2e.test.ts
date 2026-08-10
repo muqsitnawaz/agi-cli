@@ -68,7 +68,7 @@ suite('computer --host live remote (AGENTS_TEST_WIN_HOST)', () => {
   beforeAll(async () => {
     ({ target } = await resolveRemoteDevice(HOST));
 
-    // Scenario 1: `computer setup --host` — push the exe + register/start the
+    // Scenario 1: `computer setup --device` — push the exe + register/start the
     // LOGON task. Throws with remote stderr on any hop failure.
     await setupRemoteHelper(HOST);
 
@@ -78,7 +78,7 @@ suite('computer --host live remote (AGENTS_TEST_WIN_HOST)', () => {
     state = await startRemoteTunnel(HOST);
 
     // Point this process's RPC client at the recorded tunnel, exactly as every
-    // `--host` verb does, then hold one shared TCP client for the round-trips.
+    // `--device` verb does, then hold one shared TCP client for the round-trips.
     hydrateRemoteEnvFromState(HOST);
     client = openComputerClient();
   }, SETUP_TIMEOUT);

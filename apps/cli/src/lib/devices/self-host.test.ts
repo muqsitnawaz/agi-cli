@@ -1,5 +1,5 @@
 /**
- * isSelfHost — the self-identity check that gates `--host` dispatch and the
+ * isSelfHost — the self-identity check that gates `--device` dispatch and the
  * fleet fan-out (RUSH-2114). The old check compared only machineId() (short
  * hostname), so a target referenced by its tailscale dnsName self-SSH'd to the
  * local box and orphaned. These tests pin the fix through the REAL device

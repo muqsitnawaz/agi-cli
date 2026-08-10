@@ -1,5 +1,5 @@
 /**
- * The `agents run --host` forwarding contract (RUN_OPTION_FORWARDING).
+ * The `agents run --device` forwarding contract (RUN_OPTION_FORWARDING).
  *
  * The real bug this guards against: a new `agents run` option silently
  * vanishing at the SSH boundary. Historically --secrets/--effort/--env/

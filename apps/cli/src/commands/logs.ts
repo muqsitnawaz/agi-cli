@@ -2,7 +2,7 @@
  * `agents logs` — unified, discoverable run-log viewer + audit trail.
  *
  * Resolves a run across two substrates and shows (or `-f` follows) its log:
- *  - host-dispatch tasks (`agents run --host`) → combined-stdout log, offset-tailed
+ *  - host-dispatch tasks (`agents run --device`) → combined-stdout log, offset-tailed
  *  - sessions (the local index) → transcript, tailed via the sessions tailer
  *
  * Subcommands:
@@ -14,7 +14,7 @@
  * transcript / raw stdout is opt-in behind `--full` (alias `-m/--markdown`).
  *
  * `[id]`/`--session` load directly (host task tried first, then session). With no
- * id, `--host`/`--agent`/`--version` filter a merged candidate list; one match is
+ * id, `--device`/`--agent`/`--version` filter a merged candidate list; one match is
  * shown, several open the fuzzy picker (or, non-TTY, print the list).
  *
  * Additive: `agents devices ps`/`stop` and `agents sessions tail` are unchanged and
@@ -157,7 +157,7 @@ async function runLogs(id: string | undefined, opts: LogsOptions): Promise<void>
   }
 
   if (candidates.length === 0) {
-    console.error(chalk.yellow('No matching runs. Dispatch one: agents run <agent> "<task>" [--host <name>]'));
+    console.error(chalk.yellow('No matching runs. Dispatch one: agents run <agent> "<task>" [--device <name>]'));
     process.exit(1);
   }
 

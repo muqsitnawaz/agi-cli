@@ -1323,7 +1323,7 @@ export interface ResourceItemJson {
   name: string;
   scope?: 'user' | 'project';
   /** Git sync-state vs ~/.agents. Omitted for project-scoped resources or when
-   *  ~/.agents isn't a git repo. When queried via --host it reflects the
+   *  ~/.agents isn't a git repo. When queried via --device it reflects the
    *  remote's ~/.agents — i.e. per-host resource drift. */
   syncState?: SyncState;
   description?: string;

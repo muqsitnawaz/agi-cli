@@ -598,8 +598,8 @@ export async function startRemoteTunnel(name: string): Promise<RemoteTunnelState
   if (!ok) {
     try { if (tunnelPid) process.kill(tunnelPid); } catch { /* gone */ }
     const hint = token
-      ? `Is it installed? Run: agents computer setup --host ${name}`
-      : `No auth token on record for '${name}' — re-run: agents computer setup --host ${name}`;
+      ? `Is it installed? Run: agents computer setup --device ${name}`
+      : `No auth token on record for '${name}' — re-run: agents computer setup --device ${name}`;
     throw new Error(
       `tunnel to '${name}' opened but the daemon did not answer (${probeErr}). ${hint}`,
     );

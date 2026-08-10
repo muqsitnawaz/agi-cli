@@ -1268,7 +1268,7 @@ export function filterAgentHitBySubsetAndExpiry(
 }
 
 /**
- * Guard for remote-bundle callers (`bundle@host` / `--host`) — the SSH
+ * Guard for remote-bundle callers (`bundle@host` / `--device`) — the SSH
  * resolver in `remoteResolveEnv` does not thread --keys or --allow-expired
  * yet. Silently applying them would inject the full remote env or an expired
  * value, defeating the least-privilege intent, so we fail loud.

@@ -289,8 +289,8 @@ const INLINE_COMMAND_NAMES = [
  * Every top-level command name the CLI answers to — the loader table plus the
  * inline aliases/tombstones above. This is the "does this command exist?"
  * predicate for code that runs BEFORE commander parses, most importantly the
- * `--host`/`--device` router (lib/hosts/passthrough.ts): without it a typo'd
- * command carrying `--host` reported a flag-support error instead of
+ * `--device`/`--device` router (lib/hosts/passthrough.ts): without it a typo'd
+ * command carrying `--device` reported a flag-support error instead of
  * `unknown command` (RUSH-2022).
  *
  * Commander sub-aliases (`sessions ls`, `teams rm`, …) are deliberately absent —

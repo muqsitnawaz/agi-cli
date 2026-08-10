@@ -244,7 +244,7 @@ async function resolveVault(vaultOpt: string | undefined): Promise<string> {
 
 /**
  * Read the raw `.env` text for `import --from <path|->`. A `-` reads the .env
- * from stdin (the SSH push path: `export --host` pipes the resolved dotenv over
+ * from stdin (the SSH push path: `export --device` pipes the resolved dotenv over
  * ssh stdin, which has no `/dev/stdin` on a Windows remote); any other value is
  * a filesystem path.
  */
@@ -378,7 +378,7 @@ function maybePrintSyncedHint(name: string, stillPresent: boolean): void {
 }
 
 /**
- * Build the remote `agents secrets unlock` argv for `unlock --host`. `--all`
+ * Build the remote `agents secrets unlock` argv for `unlock --device`. `--all`
  * forwards verbatim; otherwise the explicit bundle names. A `--ttl` is passed
  * through as-is so the REMOTE parses its own duration (its platform rules, its
  * defaults). Shared with the command action so the wiring is unit-testable
@@ -444,10 +444,10 @@ export function buildRemoteUnlockArgs(names: string[], opts: { all?: boolean; tt
 }
 
 /**
- * Build the remote `agents secrets list` argv for `list --host`. Every filter
+ * Build the remote `agents secrets list` argv for `list --device`. Every filter
  * must be forwarded: `browseRemote` sends this argv verbatim, so a flag left out
  * here is not an error — the remote just lists everything, and
- * `secrets list --host zion --expired` reports every bundle on zion as expired.
+ * `secrets list --device zion --expired` reports every bundle on zion as expired.
  * Silent and wrong beats loud and wrong only for the person who wrote the bug.
  *
  * Values pass through unparsed so the REMOTE validates them under its own rules,
@@ -1062,7 +1062,7 @@ export function registerSecretsCommands(program: Command): void {
       eval "$(agents secrets export prod --plaintext)"
 
       # Push the bundle to remote machine(s) over SSH (lands as a native bundle there)
-      agents secrets export prod --host yosemite-s0 --host yosemite-s1 --force
+      agents secrets export prod --device yosemite-s0 --host yosemite-s1 --force
 
       # Run a one-off command with secrets injected
       agents secrets exec prod -- ./deploy.sh
@@ -1166,7 +1166,7 @@ export function registerSecretsCommands(program: Command): void {
         // hold-state filter would answer from no data — every bundle would look
         // not-held. Refuse rather than return a confidently wrong list.
         if (filter.held !== undefined && process.platform !== 'darwin') {
-          throw new Error('--held/--not-held need the secrets-agent, which is macOS-only. Run it on a Mac, or with --host <mac>.');
+          throw new Error('--held/--not-held need the secrets-agent, which is macOS-only. Run it on a Mac, or with --device <mac>.');
         }
       } catch (err) {
         console.error(chalk.red((err as Error).message));
@@ -1295,16 +1295,16 @@ export function registerSecretsCommands(program: Command): void {
       agents secrets list --policy hold --backend file --expiring
 
       # Same filters, on another machine, machine-readable
-      agents secrets list --expired --host mac-mini --json
+      agents secrets list --expired --device mac-mini --json
     `,
     notes: `
       - Filters compose: every flag you add narrows the list further.
       - An unknown value is an error, not an empty list — '--policy hodl' names the valid set.
-      - --held/--not-held read live broker state, so they need macOS. Use --host <mac> from elsewhere.
+      - --held/--not-held read live broker state, so they need macOS. Use --device <mac> from elsewhere.
       - --expired and --expiring are different questions: already lapsed vs coming due. The EXPIRING column counts both and turns red once anything has lapsed.
       - --unused matches bundles never read at all, not just old ones.
       - Filters apply before --json, so the JSON is the exact twin of the table.
-      - Filters are forwarded over --host, so a remote list narrows the same way.
+      - Filters are forwarded over --device, so a remote list narrows the same way.
       - --sort used|uses read the value-free usage read-model (~/.agents/secrets/secrets.db); see 'agents secrets activity'.
     `,
   });
@@ -2225,7 +2225,7 @@ Examples:
         const resolvedBundleName = bundleName ?? (await pickBundleName('import into'));
         // resolveImportBundle inherits an existing bundle's backend (and refuses
         // to downgrade keychain -> file) or creates it with the requested backend
-        // so a single `import --backend file` works (what `export --host ...
+        // so a single `import --backend file` works (what `export --device ...
         // --remote-backend file` drives on the remote).
         const bundle = resolveImportBundle(resolvedBundleName, opts.backend, opts.synced, opts.force);
 
@@ -2349,7 +2349,7 @@ Examples:
             }
             console.log(chalk.green(`${host} -> '${resolvedBundleName}': ${out.message}`));
           }
-          emitSecretAudit({ event: 'secrets.export', bundle: resolvedBundleName, operation: `export --host ${hosts.join(',')}`, source: 'ssh', host: hosts.join(','), status: failures > 0 ? 'error' : 'success', keyCount });
+          emitSecretAudit({ event: 'secrets.export', bundle: resolvedBundleName, operation: `export --device ${hosts.join(',')}`, source: 'ssh', host: hosts.join(','), status: failures > 0 ? 'error' : 'success', keyCount });
           if (failures > 0) process.exit(1);
           return;
         }
@@ -2652,7 +2652,7 @@ Examples:
 
   cmd
     .command('unlock [names...]')
-    .description('Hold a bundle in the secrets-agent after one Touch ID, so concurrent runs read it without re-prompting (macOS). With --host, unlock FILE-backed bundle(s) on a remote (the passphrase prompt surfaces over the SSH TTY); keychain/biometry bundles are GUI-only and can\'t be remote-unlocked.')
+    .description('Hold a bundle in the secrets-agent after one Touch ID, so concurrent runs read it without re-prompting (macOS). With --device, unlock FILE-backed bundle(s) on a remote (the passphrase prompt surfaces over the SSH TTY); keychain/biometry bundles are GUI-only and can\'t be remote-unlocked.')
     .option('--ttl <duration>', 'How long to hold it (e.g. 30m, 8h, 3d). Default 7d.')
     .option('--until <date>', 'Hold until this absolute date or timestamp (for example 2026-08-06T12:00:00Z). Mutually exclusive with --ttl.')
     .option('--durable', 'Keep the unlock across sleep + reboot too (default: survives upgrade/restart but re-locks on sleep). Set secrets.agent.durable in agents.yaml to make this the default.')
@@ -2667,7 +2667,7 @@ Examples:
       }
       if (opts.keys !== undefined) {
         // --keys scopes ONE bundle to an explicit subset. It is local-only (a
-        // remote --host unlock holds the whole file-backed bundle) and cannot
+        // remote --device unlock holds the whole file-backed bundle) and cannot
         // combine with --all, which would hold every bundle whole.
         if (opts.device) {
           console.error(chalk.red('--keys is local-only; a remote (--device) unlock holds the whole file-backed bundle.'));

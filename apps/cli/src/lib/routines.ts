@@ -46,7 +46,7 @@ export interface JobAllowConfig {
 
 /**
  * Where a routine's job body executes when the daemon fires it.
- * Distinct from `devices` (which daemon may *fire*) and from the CLI `--host`
+ * Distinct from `devices` (which daemon may *fire*) and from the CLI `--device`
  * remote-management passthrough (manage routines *on* another machine).
  */
 export type HostStrategy = 'local' | 'host' | 'fleet' | 'cloud';
@@ -250,7 +250,7 @@ export interface JobConfig {
    * registered host, device, capability tag, or user@host) instead of locally.
    * Distinct from `devices`: `devices` says which daemon may FIRE the job,
    * `host` says where the dispatched run EXECUTES. CLI flag: `--run-on`
-   * (`--host` on routines commands already means "manage routines on that
+   * (`--device` on routines commands already means "manage routines on that
    * machine" via the remote passthrough).
    *
    * When `hostStrategy` is set, it owns placement semantics; `host` is then
@@ -266,7 +266,7 @@ export interface JobConfig {
    *              double-fire; the firing pin stays on `devices`)
    * - `cloud`  — dispatch via the agent's native cloud provider
    *
-   * CLI flag: `--placement` (not `--host`, which is the remote-management
+   * CLI flag: `--placement` (not `--device`, which is the remote-management
    * passthrough). Omitted strategy falls back to `host` when `host:` is set,
    * otherwise `local`.
    */

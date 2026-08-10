@@ -1,5 +1,5 @@
 /**
- * Credential provisioning for `agents run --host --copy-creds`.
+ * Credential provisioning for `agents run --device --copy-creds`.
  *
  * Reuses the lease flow's runtime detection + credential-script builder so a
  * persistent host can boot logged-in the same way an ephemeral leased box does.

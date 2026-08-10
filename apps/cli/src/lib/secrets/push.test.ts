@@ -1,5 +1,5 @@
 /**
- * Real-path coverage for the push primitive extracted from `secrets export --host`.
+ * Real-path coverage for the push primitive extracted from `secrets export --device`.
  *
  * No mocking (repo rule): the transport really is `spawnSync('ssh', …)`, and the
  * OS lookup really reads a device registry off disk. Both are driven with real

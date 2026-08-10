@@ -1,9 +1,9 @@
 /**
- * resolveHost fall-through: the unified `--host` / `--device` resolution.
+ * resolveHost fall-through: the unified `--device` / `--device` resolution.
  *
  * The real bugs this guards against:
  *   1. A machine registered ONLY via `agents devices sync` must be reachable by
- *      `--host <name>` — the whole point of unifying devices and hosts. Before
+ *      `--device <name>` — the whole point of unifying devices and hosts. Before
  *      this, resolveHost consulted only the hosts registry and errored.
  *   2. The device's ssh target must be `user@dnsName` (dnsName preferred over ip).
  *   3. An ad-hoc `user@host` must resolve without any registration.

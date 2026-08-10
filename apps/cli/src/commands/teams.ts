@@ -1396,8 +1396,8 @@ async function pickTeamOr(
 
 /**
  * `teams add --remote-cwd` is a no-op trap. `--remote-cwd` comes from the shared
- * `--host` option family (option.ts) and is meaningful for commands that *route*
- * to a host, but `teams add` special-cases `--host`/`--device` as PLACEMENT, so
+ * `--device` option family (option.ts) and is meaningful for commands that *route*
+ * to a host, but `teams add` special-cases `--device`/`--device` as PLACEMENT, so
  * the flag is never read — a teammate's directory is the team's repo plus its
  * `--worktree`, not a path passed here. Silently ignoring it misleads you into
  * thinking it set the teammate's repo path (the exact wrong model that turns one

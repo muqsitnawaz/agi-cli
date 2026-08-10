@@ -1,6 +1,6 @@
 /**
  * Multi-device session transfer over the EXISTING SSH fleet transport
- * (RUSH-1712) — no R2, no daemon. `agents sessions export --host <h>` and
+ * (RUSH-1712) — no R2, no daemon. `agents sessions export --device <h>` and
  * `agents sessions import --from-host <h>` both run `agents sessions export
  * … --stdout` ON the peer and stream the bundle back over the same SSH path the
  * cross-machine listing already uses (resolveExplicitTargets + ssh-exec), then

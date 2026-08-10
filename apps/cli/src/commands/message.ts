@@ -183,8 +183,8 @@ async function deliverViaResume(route: AnswerRoute, mailboxId: string): Promise<
  * pid — the only recovery was kill-and-redispatch, losing all context.
  *
  * Re-spawns `agents message <remoteRef> <text> --host <host>` through
- * `getAgentsInvocation`, so it re-enters via the SAME `--host` REMOTE_PASSTHROUGH
- * choke point (`lib/hosts/passthrough.ts`) any explicit `--host` caller uses,
+ * `getAgentsInvocation`, so it re-enters via the SAME `--device` REMOTE_PASSTHROUGH
+ * choke point (`lib/hosts/passthrough.ts`) any explicit `--device` caller uses,
  * and resolves against the remote box's own active sessions.
  */
 async function deliverViaHostReroute(

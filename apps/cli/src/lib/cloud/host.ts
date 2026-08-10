@@ -2,8 +2,8 @@
  * Host cloud provider — your own machines as a task-execution backend.
  *
  * A thin adapter over the hosts subsystem (lib/hosts/*): `agents cloud run
- * --provider host --host <name>` dispatches through the SAME detached-SSH
- * launch as `agents run --host`, and the resulting task shows up in BOTH
+ * --provider host --device <name>` dispatches through the SAME detached-SSH
+ * launch as `agents run --device`, and the resulting task shows up in BOTH
  * `agents cloud ps` and `agents devices ps` — one store (the host-task sidecars
  * under ~/.agents/.cache/hosts/), two views. No new transport, no relay: SSH
  * is the only wire, exactly like the rest of the hosts design (docs/hosts.md).
@@ -96,7 +96,7 @@ export class HostCloudProvider implements CloudProvider {
     if (!hostName) {
       throw new MissingTargetError(
         'host',
-        'No host given. Pass --host <name> (a registered host, a device, a capability tag, or user@host).',
+        'No host given. Pass --device <name> (a registered host, a device, a capability tag, or user@host).',
         'List your machines: agents devices list  ·  register more: agents devices sync',
       );
     }

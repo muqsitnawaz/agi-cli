@@ -268,7 +268,7 @@ describe('doctor target + qualifier survives --device forwarding (issue #2058)',
   });
 
   it('strips legacy --host (backwards-compat strip, no longer a user-facing flag)', () => {
-    const forwarded = stripRoutingFlags(['codex@0.117.0', '--host', 'yosemite-s0'], HOST_ROUTING_SPECS);
+    const forwarded = stripRoutingFlags(['codex@0.117.0', '--device', 'yosemite-s0'], HOST_ROUTING_SPECS);
     expect(forwarded).toEqual(['codex@0.117.0']);
   });
 

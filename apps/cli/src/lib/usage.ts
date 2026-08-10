@@ -1694,7 +1694,7 @@ function deleteCachedClaudeOauth(service: string): void {
  *     Mirrors `readClaudeCredentialsBlob` (cloud/rush.ts), the proven pattern.
  *
  * Without step 2 the live usage fetch got no token on Linux, so `agents view`
- * (run remotely over SSH by `--host`) rendered no usage bars even though the
+ * (run remotely over SSH by `--device`) rendered no usage bars even though the
  * account + plan — read from the plaintext `.claude.json` — showed fine.
  *
  * `opts.accessTokenCache` marks a read-only, access-token-only consumer (the

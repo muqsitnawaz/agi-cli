@@ -98,7 +98,7 @@ function decodeRemoteArgv(forwarded: string[], remoteCwd?: string): string[] {
 
 describe('stripRoutingFlags', () => {
   it('keeps the command name and drops --host with a separate value', () => {
-    expect(stripRoutingFlags(['view', '--host', 'mac', 'claude'], SPECS)).toEqual(['view', 'claude']);
+    expect(stripRoutingFlags(['view', '--device', 'mac', 'claude'], SPECS)).toEqual(['view', 'claude']);
   });
 
   it('drops the --host=value glued form', () => {
@@ -143,7 +143,7 @@ describe('stripRoutingFlags', () => {
   });
 
   it('does not mistake a positional that merely contains "host" for the flag', () => {
-    expect(stripRoutingFlags(['teams', 'add', 't', 'claude', 'fix the host header', '--host', 'mac'], SPECS)).toEqual([
+    expect(stripRoutingFlags(['teams', 'add', 't', 'claude', 'fix the host header', '--device', 'mac'], SPECS)).toEqual([
       'teams',
       'add',
       't',

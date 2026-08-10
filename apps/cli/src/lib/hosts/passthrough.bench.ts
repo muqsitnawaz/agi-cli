@@ -1,5 +1,5 @@
 /**
- * Benchmark for the `--host` passthrough bootstrap — the cost every named CLI
+ * Benchmark for the `--device` passthrough bootstrap — the cost every named CLI
  * invocation used to pay before RUSH-2374, and the residual cost of the routed
  * path after it.
  *

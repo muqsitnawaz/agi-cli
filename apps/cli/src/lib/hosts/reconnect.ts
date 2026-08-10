@@ -209,7 +209,7 @@ export function remoteExitNotice(sessionId: string, host: string): string {
  * {@link REMOTE_EXIT_255_REMAPPED} before the wrapper exits — see the file
  * header for why. Every other code (0, 1, …) passes through unchanged. This
  * carries no PATH bootstrap of its own — `ensureHostReady`/`readyProbe` already
- * gates every `--host` dispatch on `bash -lc 'agents --version'` succeeding
+ * gates every `--device` dispatch on `bash -lc 'agents --version'` succeeding
  * before a run is attempted at all, so the peer's login shell resolving `agents`
  * is an established precondition here too. Pure string-building, so it is
  * unit-tested without SSH (and, since the constructed script is ordinary POSIX,

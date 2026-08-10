@@ -12,7 +12,7 @@ export async function runWatchdogSetupWizard(): Promise<void> {
   const devices = [...new Set([...Object.keys(registry), machineId()].map(normalizeHost))].sort();
   const enabled = new Set(devices.filter((device) => getConfigValue('watchdog.enabled', { device }).value === true));
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    requireInteractiveSelection('watchdog devices', ['agents watchdog on', 'agents watchdog on --host <device>']);
+    requireInteractiveSelection('watchdog devices', ['agents watchdog on', 'agents watchdog on --device <device>']);
   }
 
   try {

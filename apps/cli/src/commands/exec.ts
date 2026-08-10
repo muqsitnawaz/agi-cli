@@ -989,7 +989,7 @@ agents run auto --device yosemite-s0 "fix the flaky test"   # pin the device
         excluded account and the earliest window reset — use --strategy pinned to force.
 
       'auto' harness (agents run auto): picks the host (14d usage affinity,
-      unless --host is given), the harness (installed CLIs weighted by
+      unless --device is given), the harness (installed CLIs weighted by
       best-account headroom), and the account (the strategy above). Zero
       healthy accounts on any harness exits nonzero with the earliest reset.
 
@@ -1701,7 +1701,7 @@ agents run auto --device yosemite-s0 "fix the flaky test"   # pin the device
         }
       }
 
-      // --host/--on/--computer: offload this run onto a registered agent host
+      // --device/--on/--computer: offload this run onto a registered agent host
       // over SSH instead of running locally. The three flags are aliases.
       const hostGiven = hostTargetGiven(options);
 
@@ -1715,7 +1715,7 @@ agents run auto --device yosemite-s0 "fix the flaky test"   # pin the device
 
       if (hostGiven.length > 0) {
         if (new Set(hostGiven).size > 1) {
-          console.error(chalk.red('Conflicting --host/--device values — pass just one.'));
+          console.error(chalk.red('Conflicting --device values values — pass just one.'));
           process.exit(1);
         }
         const hostName = hostGiven[0];
@@ -2026,7 +2026,7 @@ agents run auto --device yosemite-s0 "fix the flaky test"   # pin the device
           // Headless host run: launch detached, tail the remote log, and follow
           // until the remote process exits.
           if (prompt === undefined) {
-            console.error(chalk.red('A prompt is required for headless host runs: agents run <agent> "<task>" --host <name>'));
+            console.error(chalk.red('A prompt is required for headless host runs: agents run <agent> "<task>" --device <name>'));
             process.exit(1);
           }
           // Session-id mint, detached dispatch, and local session-index
@@ -2927,7 +2927,7 @@ agents run auto --device yosemite-s0 "fix the flaky test"   # pin the device
       // home would false-negative. It can still false-negative for opaque
       // credentials, so this NEVER blocks — it warns and launches anyway. Skipped
       // for --json/--quiet, when a rotation already picked a signed-in account,
-      // and via --no-auth-check / AGENTS_NO_AUTH_CHECK=1. (--host/--lease return
+      // and via --no-auth-check / AGENTS_NO_AUTH_CHECK=1. (--device/--lease return
       // earlier.)
       {
         const { shouldCheckLoginBeforeLaunch, loginHint } = await import('../lib/signin-badge.js');
@@ -3156,7 +3156,7 @@ agents run auto --device yosemite-s0 "fix the flaky test"   # pin the device
         toolsRestrict: workflowToolsRestrict,
         mcpConfigPath: workflowMcpConfigPath,
         passthroughArgs,
-        // Set only on the REMOTE side of a `--host` dispatch (the launcher
+        // Set only on the REMOTE side of a `--device` dispatch (the launcher
         // forwards `--emit-session-id`): print the resolved session id as a
         // stdout sentinel so the launcher captures the id this run coined.
         emitSessionId: options.emitSessionId === true,

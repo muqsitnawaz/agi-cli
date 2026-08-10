@@ -2,7 +2,7 @@
  * `agents feed` -- operator inbox + agent status posts.
  *
  * Default (`agents feed`): list open blocks (decisions agents are waiting on).
- * Aggregates block records from the local feed store and, with --host, from
+ * Aggregates block records from the local feed store and, with --device, from
  * reachable remote hosts via SSH passthrough. Each block carries enough
  * identity for `agents message` to route a reply back to the right agent.
  *

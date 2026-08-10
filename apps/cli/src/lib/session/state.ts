@@ -433,11 +433,11 @@ export function detectSpawnedTeam(command?: string): string | undefined {
   const m = command.match(TEAMS_SPAWN_RE);
   if (!m) return undefined;
   const name = m[1];
-  // A single character is a doc placeholder (`agents teams create t --host <box>`)
+  // A single character is a doc placeholder (`agents teams create t --device <box>`)
   // far more often than a real team, and an English article is prose. Both used to
   // land in the index as a team name, and now that the name is rendered on the row
   // a wrong one is worse than none.
-  // A single character is a doc placeholder (`agents teams create t --host <name>`)
+  // A single character is a doc placeholder (`agents teams create t --device <name>`)
   // far more often than a real team; an all-digits token is a flag value or a list
   // index that leaked through, never a name someone typed. Both had reached the
   // index, and now that the name is rendered a wrong one is worse than none.

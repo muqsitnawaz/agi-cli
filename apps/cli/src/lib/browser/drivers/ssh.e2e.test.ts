@@ -1,5 +1,5 @@
 /**
- * Opt-in end-to-end coverage for the `agents browser --host <win>` SSH driver.
+ * Opt-in end-to-end coverage for the `agents browser --device <win>` SSH driver.
  *
  * Unlike ssh.test.ts (script-builder units + spawn-stubbed transport tests),
  * this suite drives the REAL remote browser against a live Windows box: it
@@ -52,7 +52,7 @@ async function remotePortFree(target: string, port: number, tries = 30): Promise
   return false;
 }
 
-suite('browser --host live remote (AGENTS_TEST_WIN_HOST)', () => {
+suite('browser --device live remote (AGENTS_TEST_WIN_HOST)', () => {
   let conn: SSHConnection | null = null;
   let target = '';
   let user = '';

@@ -6,7 +6,7 @@
  * one session in place), this opens a checkbox picker, then asks where the
  * chosen sessions should resume. By default each session opens in its own tab in
  * the terminal you're in — iTerm / Ghostty / tmux, locally or on a remote host
- * via --host. `--splits` opts into packing two sessions side by side per tab.
+ * via --device. `--splits` opts into packing two sessions side by side per tab.
  */
 import * as fs from 'fs';
 import chalk from 'chalk';
