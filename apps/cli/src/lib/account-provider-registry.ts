@@ -7,6 +7,13 @@ export interface AccountProviderAdapter {
   authKinds: readonly AccountAuthKind[];
   envFor(host: AgentId, kind: AccountAuthKind): string;
   connectionEnvFor(host: AgentId): Record<string, string>;
+  /**
+   * The env var a per-account BASE_URL override should be written to for this
+   * host, or null when the provider has no endpoint env on that host. Derived
+   * from the provider's own connection env so the base-url key lives in one
+   * place instead of being re-guessed by callers.
+   */
+  baseUrlEnvFor(host: AgentId): string | null;
   validate(kind: AccountAuthKind, value: string): void;
 }
 
@@ -32,6 +39,10 @@ function fixed(
     },
     connectionEnvFor(host) {
       return connectionEnvByHost[host] ?? {};
+    },
+    baseUrlEnvFor(host) {
+      const connection = connectionEnvByHost[host] ?? {};
+      return Object.keys(connection).find(key => key.endsWith('_BASE_URL')) ?? null;
     },
     validate(kind, value) {
       nonEmpty(provider, kind, value);
