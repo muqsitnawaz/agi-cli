@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "command": "agents",
-  "groups": 105,
-  "commands": 584,
+  "groups": 106,
+  "commands": 586,
   "root": {
     "name": "agents",
     "path": "",
@@ -27877,6 +27877,94 @@
             {
               "flags": "--json",
               "description": "Output machine-readable JSON",
+              "long": "--json",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "subcommands": []
+        }
+      ]
+    },
+    {
+      "name": "tickets",
+      "path": "tickets",
+      "aliases": [],
+      "description": "Read work items from linked issue trackers.",
+      "args": [],
+      "options": [
+        {
+          "flags": "-h, --help",
+          "description": "Show help",
+          "short": "-h",
+          "long": "--help",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        }
+      ],
+      "examples": "agents tickets list --json\n      agents tickets list --github-assigned-only --json",
+      "subcommands": [
+        {
+          "name": "list",
+          "path": "tickets list",
+          "aliases": [],
+          "description": "List workspace tickets from available trackers.",
+          "args": [],
+          "options": [
+            {
+              "flags": "--cwd <path>",
+              "description": "Workspace used to resolve tracker context",
+              "long": "--cwd",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false,
+              "defaultValue": "/home/muqsit/src/github.com/muqsitnawaz/agents-cli/.agents/worktrees/rush-2484-thin/apps/cli"
+            },
+            {
+              "flags": "--no-linear",
+              "description": "Exclude Linear tickets",
+              "long": "--no-linear",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": true
+            },
+            {
+              "flags": "--no-github",
+              "description": "Exclude GitHub issues",
+              "long": "--no-github",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": true
+            },
+            {
+              "flags": "--github-assigned-only",
+              "description": "Only include GitHub issues assigned to the current user",
+              "long": "--github-assigned-only",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--json",
+              "description": "Output machine-readable tickets and source availability",
               "long": "--json",
               "required": false,
               "optional": false,

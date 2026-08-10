@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_105 command groups · 584 commands._
+_106 command groups · 586 commands._
 
 ## accounts — Manage durable provider credentials
 
@@ -980,6 +980,13 @@ agents teams resume <team> <teammate> [message]   Resume a stopped teammate (com
 agents teams start [team]                         Launch any pending teammates whose --after dependencies are satisfied. Use --watch to keep draining the DAG as teammates finish and as new tasks are added mid-flight.
 agents teams status [team]                        Check in on a team: status, files touched, recent commands, last messages. Pass --verbose for the full per-teammate dump; --since for delta polling.
 agents teams stop [team] [teammate]               Stop a running teammate. Resume it later with `agents teams resume`. Cleans up worktree if no uncommitted changes.
+```
+
+## tickets — Read work items from linked issue trackers.
+
+```
+agents tickets       Read work items from linked issue trackers.
+agents tickets list  List workspace tickets from available trackers.
 ```
 
 ## timeline — Agent progress stream (alias of `agents feed --filter updates`). What agents posted recently.

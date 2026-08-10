@@ -3,7 +3,7 @@ import { promisify } from 'util';
 
 const run = promisify(execFile);
 
-export interface FactoryTaskResult { tasks: Record<string, unknown>[]; cycleInfo: Record<string, unknown> | null; sources: { linear: boolean; github: boolean } }
+export interface TicketListResult { tickets: Record<string, unknown>[]; cycleInfo: Record<string, unknown> | null; sources: { linear: boolean; github: boolean } }
 
 function images(...bodies: unknown[]): string[] {
   const urls = new Set<string>();
@@ -16,8 +16,8 @@ function images(...bodies: unknown[]): string[] {
   return [...urls];
 }
 
-export async function listFactoryTasks(options: { cwd: string; linear: boolean; github: boolean; assignedOnly: boolean }): Promise<FactoryTaskResult> {
-  const tasks: Record<string, unknown>[] = [];
+export async function listTickets(options: { cwd: string; linear: boolean; github: boolean; assignedOnly: boolean }): Promise<TicketListResult> {
+  const tickets: Record<string, unknown>[] = [];
   let cycleInfo: Record<string, unknown> | null = null;
   let linearAvailable = false;
   let githubAvailable = false;
@@ -33,7 +33,7 @@ export async function listFactoryTasks(options: { cwd: string; linear: boolean; 
         const comments = (issue.comments?.nodes ?? []).map((comment: any) => ({ body: comment.body, createdAt: comment.createdAt, author: comment.user?.name }));
         const priority = ({ 1: 'urgent', 2: 'high', 3: 'medium', 4: 'low' } as Record<number, string>)[issue.priority];
         const status = ['started'].includes(issue.state?.type) ? 'in_progress' : ['completed', 'canceled'].includes(issue.state?.type) ? 'done' : 'todo';
-        tasks.push({ id: `linear:${issue.identifier}`, source: 'linear', title: issue.title, description: issue.description, status, priority, metadata: { identifier: issue.identifier, url: issue.url, labels, assignee: issue.assignee?.name, assigneeKind: /^(claude|codex|gemini|cursor|opencode)$/i.test(issue.assignee?.name ?? '') ? 'agent' : issue.assignee?.name ? 'user' : undefined, state: issue.state?.name, createdAt: issue.createdAt, dueDate: issue.dueDate, project: issue.project?.name, comments, images: images(issue.description, ...comments.map((comment: any) => comment.body)) } });
+        tickets.push({ id: `linear:${issue.identifier}`, source: 'linear', title: issue.title, description: issue.description, status, priority, metadata: { identifier: issue.identifier, url: issue.url, labels, assignee: issue.assignee?.name, assigneeKind: /^(claude|codex|gemini|cursor|opencode)$/i.test(issue.assignee?.name ?? '') ? 'agent' : issue.assignee?.name ? 'user' : undefined, state: issue.state?.name, createdAt: issue.createdAt, dueDate: issue.dueDate, project: issue.project?.name, comments, images: images(issue.description, ...comments.map((comment: any) => comment.body)) } });
       }
     } catch { /* source availability is explicit in the response */ }
   }
@@ -45,8 +45,8 @@ export async function listFactoryTasks(options: { cwd: string; linear: boolean; 
       if (options.assignedOnly) args.push('--assignee', '@me');
       const issues = JSON.parse((await run('gh', args, { cwd: options.cwd, timeout: 15_000 })).stdout);
       githubAvailable = true;
-      for (const issue of issues) tasks.push({ id: `github:${issue.number}`, source: 'github', title: issue.title, description: issue.body, status: issue.state?.toLowerCase() === 'closed' ? 'done' : 'todo', metadata: { identifier: `#${issue.number}`, url: issue.url, labels: (issue.labels ?? []).map((label: { name: string }) => label.name), assignee: issue.assignees?.[0]?.login, assigneeKind: issue.assignees?.[0]?.login ? 'user' : undefined, state: issue.state?.toLowerCase(), createdAt: issue.createdAt, repo, images: images(issue.body) } });
+      for (const issue of issues) tickets.push({ id: `github:${issue.number}`, source: 'github', title: issue.title, description: issue.body, status: issue.state?.toLowerCase() === 'closed' ? 'done' : 'todo', metadata: { identifier: `#${issue.number}`, url: issue.url, labels: (issue.labels ?? []).map((label: { name: string }) => label.name), assignee: issue.assignees?.[0]?.login, assigneeKind: issue.assignees?.[0]?.login ? 'user' : undefined, state: issue.state?.toLowerCase(), createdAt: issue.createdAt, repo, images: images(issue.body) } });
     } catch { /* source availability is explicit in the response */ }
   }
-  return { tasks, cycleInfo, sources: { linear: linearAvailable, github: githubAvailable } };
+  return { tickets, cycleInfo, sources: { linear: linearAvailable, github: githubAvailable } };
 }
