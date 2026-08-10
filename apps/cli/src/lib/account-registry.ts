@@ -107,7 +107,13 @@ function migrateLegacyRegistryFile(base: string): void {
     const provider = String(item.provider ?? '');
     const legacySecretRef = String(item.secretRef ?? `agents-cli.accounts.${id}.credential`);
     retiredSecretItems.push(legacySecretRef);
-    if (bundleExists(name)) continue; // already migrated on an earlier, interrupted run
+    if (bundleExists(name)) {
+      const existing = parseAccountBundle(readBundle(name));
+      if (!existing || existing.id !== id) {
+        throw new Error(`Cannot migrate account '${name}': a different secrets bundle already uses that name.`);
+      }
+      continue; // already migrated on an earlier, interrupted run
+    }
     const baseUrl = item.baseUrl ? String(item.baseUrl) : undefined;
     const record: AccountSchemaRecord = { id, name, provider, auth, baseUrl };
     const secret = hasKeychainToken(legacySecretRef) ? getKeychainToken(legacySecretRef) : '';
@@ -172,6 +178,7 @@ export function addAccount(name: string, provider: string, auth: AccountAuthKind
   assertName(name);
   const adapter = getAccountProvider(provider);
   adapter.validate(auth, secret);
+  if (bundleExists(name)) throw new Error(`Secrets bundle '${name}' already exists. Choose a different account name.`);
   if (findAccount(name, readAccountRegistry(base))) throw new Error(`Account '${name}' already exists.`);
   const record: AccountSchemaRecord = { id: crypto.randomUUID(), name, provider: adapter.provider, auth, baseUrl: opts.baseUrl };
   const { bundle, items } = buildAccountBundle(record, secret);
