@@ -97,6 +97,21 @@ export interface PushBundleResult {
   message: string;
 }
 
+export interface LiteralRestorePlan {
+  key: string;
+  removeArgs: string[];
+  addArgs: string[];
+}
+
+/** Preserve the literal-vs-secret schema that dotenv transport cannot encode. */
+export function planLiteralRestoration(bundle: string, literalValues: Record<string, string> = {}): LiteralRestorePlan[] {
+  return Object.entries(literalValues).map(([key, value]) => ({
+    key,
+    removeArgs: ['remove', bundle, key, '--yes'],
+    addArgs: ['add', bundle, key, '--value', value],
+  }));
+}
+
 /**
  * Read and resolve a bundle once, for pushing to one or more hosts.
  *
@@ -246,16 +261,16 @@ export function pushResolvedBundleToHost(
     }
   }
 
-  for (const [key, value] of Object.entries(opts.literalValues ?? {})) {
-    const removed = remoteSecretsRaw(host, ['remove', bundle, key, '--yes'], { osLookupName: host });
+  for (const step of planLiteralRestoration(bundle, opts.literalValues)) {
+    const removed = remoteSecretsRaw(host, step.removeArgs, { osLookupName: host });
     if (removed.code !== 0) {
       const msg = (removed.stderr || removed.stdout || '').trim();
-      return fail(`pushed '${bundle}' but could not replace transported ${key}${msg ? `: ${msg}` : ''}`);
+      return fail(`pushed '${bundle}' but could not replace transported ${step.key}${msg ? `: ${msg}` : ''}`);
     }
-    const literal = remoteSecretsRaw(host, ['add', bundle, key, '--value', value], { osLookupName: host });
+    const literal = remoteSecretsRaw(host, step.addArgs, { osLookupName: host });
     if (literal.code !== 0) {
       const msg = (literal.stderr || literal.stdout || '').trim();
-      return fail(`pushed '${bundle}' but could not preserve literal ${key}${msg ? `: ${msg}` : ''}`);
+      return fail(`pushed '${bundle}' but could not preserve literal ${step.key}${msg ? `: ${msg}` : ''}`);
     }
   }
 
