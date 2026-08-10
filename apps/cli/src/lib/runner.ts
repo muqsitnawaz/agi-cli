@@ -1079,6 +1079,24 @@ export async function assertRoutineAccountLocalForPlacement(
   }
 }
 
+export async function dispatchPlacedJob(
+  config: JobConfig,
+  target: import('./routines-placement.js').PlacementTarget,
+  attempt: RoutineAttempt,
+  deps: {
+    account?: import('./account-registry.js').UnifiedAccount | null;
+    host?: typeof executeJobOnHost;
+    cloud?: typeof executeJobOnCloud;
+  } = {},
+): Promise<RunResult | undefined> {
+  if (target.mode !== 'host' && target.mode !== 'cloud') return undefined;
+  await assertRoutineAccountLocalForPlacement(config, target.mode, { account: deps.account });
+  if (target.mode === 'host') {
+    return (deps.host ?? executeJobOnHost)({ ...config, host: target.host }, { detached: false }, attempt);
+  }
+  return (deps.cloud ?? executeJobOnCloud)(config, { detached: false }, attempt);
+}
+
 /**
  * Build the options passed to `dispatchPromptToHost` for a host routine. Split
  * out so the execution boundary is unit-testable: it MUST forward the routine's
@@ -1302,7 +1320,7 @@ export async function executeJob(
   );
 }
 
-export async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undefined, attempt: RoutineAttempt): Promise<RunResult> {
+async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undefined, attempt: RoutineAttempt): Promise<RunResult> {
   // Placement (hostStrategy / bare host:) — body may run on another machine
   // over SSH or in the cloud; local version selection / sandbox / spawn then
   // do not apply. Sync callers (manual `routines run`, catchup) follow the
@@ -1310,15 +1328,8 @@ export async function executeJobPlaced(config: JobConfig, deps: LoopDeps | undef
   {
     const { resolvePlacementTarget } = await import('./routines-placement.js');
     const target = resolvePlacementTarget(config);
-    if (target.mode === 'host' || target.mode === 'cloud') {
-      await assertRoutineAccountLocalForPlacement(config, target.mode);
-    }
-    if (target.mode === 'host') {
-      return executeJobOnHost({ ...config, host: target.host }, { detached: false }, attempt);
-    }
-    if (target.mode === 'cloud') {
-      return executeJobOnCloud(config, { detached: false }, attempt);
-    }
+    const placed = await dispatchPlacedJob(config, target, attempt);
+    if (placed) return placed;
   }
 
   // Command-mode: run a plain shell command directly (no agent, no rotation,

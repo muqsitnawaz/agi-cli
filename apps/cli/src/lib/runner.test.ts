@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
-import { archiveRoutineTranscripts, assertRoutineAccountLocalForPlacement, buildHostDispatchOptions, buildJobCommand, executeJob, executeJobDetached, monitorRunningJobs, resolveRoutineLaunch, RoutineAlreadyRunningError, routineSpawnCwd, snapshotRoutineTranscriptBase } from './runner.js';
+import { archiveRoutineTranscripts, assertRoutineAccountLocalForPlacement, buildHostDispatchOptions, buildJobCommand, dispatchPlacedJob, executeJob, executeJobDetached, monitorRunningJobs, resolveRoutineLaunch, RoutineAlreadyRunningError, routineSpawnCwd, snapshotRoutineTranscriptBase } from './runner.js';
 import { getRunDir, readRunMeta, writeRunMeta } from './routines.js';
 import { getVersionHomePath } from './versions.js';
 import type { JobConfig, RunMeta } from './routines.js';
@@ -806,6 +806,24 @@ describe('assertRoutineAccountLocalForPlacement — native accounts never dispat
     const bare = buildHostDispatchOptions({ name: 'r', agent: 'claude', prompt: 'x', mode: 'auto' } as never, { remoteCwd: '/w', runDir: '/run', detached: true });
     expect(bare.account).toBeUndefined();
     expect(bare.follow).toBe(false);
+  });
+
+  it('fails a provider cloud placement before calling the cloud dispatcher', async () => {
+    const provider = { kind: 'provider' as const, id: 'p', name: 'prov', provider: 'openrouter', auth: 'api-key' as const, secretRef: 'r' };
+    let cloudDispatches = 0;
+    await expect(dispatchPlacedJob(
+      baseConfig({ name: 'provider-cloud', account: 'prov', hostStrategy: 'cloud' }),
+      { mode: 'cloud' },
+      { runId: 'provider-cloud-run', stamp: {} } as never,
+      {
+        account: provider,
+        cloud: async () => {
+          cloudDispatches += 1;
+          throw new Error('cloud dispatch must not run');
+        },
+      },
+    )).rejects.toThrow('cloud placement cannot securely inject it');
+    expect(cloudDispatches).toBe(0);
   });
 
   it('allows a provider account on host (forwarded by name), rejects it on cloud, no-ops without an account', async () => {
