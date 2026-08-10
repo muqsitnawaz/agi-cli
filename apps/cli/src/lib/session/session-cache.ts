@@ -8,8 +8,9 @@
  *
  * Pattern mirrors {@link ../devices/stats-cache.ts} / {@link ../fleet-status.ts}:
  *
- * - **Daemon warm:** each daemon publishes THIS host's local active sessions
- *   on a short tick (`publishLocalActiveSessions`). Publish-own only — no
+ * - **Daemon publish:** each daemon publishes THIS host's local active sessions
+ *   (`publishLocalActiveSessions`). Each write appends row deltas to the journal
+ *   consumed by long-lived watchers. Publish-own only — no
  *   cross-host SSH from the daemon (avoids the N² fan-out of RUSH-2061).
  * - **Readers** (`loadLocalActiveSessions`, fleet path in `gatherActiveSessions`)
  *   serve the warm snapshot when it is within {@link DEFAULT_ACTIVE_CACHE_MAX_AGE_MS};
@@ -33,20 +34,15 @@ import { sessionProcessIsLocal, type ActiveSession } from './active.js';
 const SNAPSHOT_FILE = '.active-sessions.json';
 /** Immutable-field memo file (keyed by sessionId + transcript mtime). */
 const IMMUTABLE_FILE = '.active-session-immutable.json';
+const JOURNAL_FILE = '.active-sessions.journal.jsonl';
 
 /**
  * How long a snapshot may be served before a reader re-gathers.
  * Short on purpose: live status (running/idle/waiting) must not go stale.
- * The daemon warms more frequently than this ceiling so normal readers hit a
- * fresh snapshot while expiry still forces a live gather after a missed tick.
+ * One-shot readers may re-gather after this ceiling. Long-lived watchers never
+ * do: they read one reset then tail the canonical writer journal.
  */
 export const DEFAULT_ACTIVE_CACHE_MAX_AGE_MS = 15_000;
-
-/** Daemon warm interval — below the freshness ceiling to avoid an expiry gap. */
-export const SESSION_CACHE_WARM_INTERVAL_MS = 10_000;
-
-/** Kick off the first warm shortly after daemon start, staggered off bootstrap. */
-export const SESSION_CACHE_WARM_KICKOFF_MS = 5_000;
 
 /** Snapshot scope: this host only, or a fleet-wide merge written by a reader. */
 export type ActiveCacheScope = 'local' | 'fleet';
@@ -64,6 +60,18 @@ export interface ActiveSessionsSnapshot {
 interface SnapshotFile {
   version: 1;
   entries: Partial<Record<ActiveCacheScope, ActiveSessionsSnapshot>>;
+}
+
+export interface ActiveSessionsJournalRecord {
+  version: 1;
+  scope: ActiveCacheScope;
+  capturedAt: number;
+  upserts: ActiveSession[];
+  removes: string[];
+}
+
+export function activeSessionJournalIdentity(row: ActiveSession): string {
+  return row.sessionId ?? `${row.context}:${row.kind}:${row.pid ?? ''}:${row.startedAtMs ?? ''}`;
 }
 
 /** Process-local L1. The atomic snapshot remains the cross-process source. */
@@ -163,6 +171,7 @@ interface ImmutableMemoFile {
 
 let snapshotPathOverride: string | null = null;
 let immutablePathOverride: string | null = null;
+let journalPathOverride: string | null = null;
 
 /** Test seam: redirect the snapshot file. Returns the previous override. */
 export function setActiveSessionsSnapshotPathForTest(p: string | null): string | null {
@@ -184,12 +193,24 @@ export function setImmutableMemoPathForTest(p: string | null): string | null {
   return prev;
 }
 
+/** Test seam: redirect the append-only live-state journal. */
+export function setActiveSessionsJournalPathForTest(p: string | null): string | null {
+  const prev = journalPathOverride;
+  journalPathOverride = p;
+  return prev;
+}
+
 function snapshotPath(): string {
   return snapshotPathOverride ?? path.join(getCacheDir(), SNAPSHOT_FILE);
 }
 
 function immutablePath(): string {
   return immutablePathOverride ?? path.join(getCacheDir(), IMMUTABLE_FILE);
+}
+
+export function activeSessionsJournalPath(): string {
+  return journalPathOverride
+    ?? (snapshotPathOverride ? `${snapshotPathOverride}.journal.jsonl` : path.join(getCacheDir(), JOURNAL_FILE));
 }
 
 // ── snapshot read / write ──────────────────────────────────────────────────
@@ -236,12 +257,32 @@ export function writeActiveSessionsCache(
     } catch {
       // empty
     }
+    const previousSessions = entries[scope]?.sessions ?? [];
     entries[scope] = snap;
     const body: SnapshotFile = { version: 1, entries };
     // Atomic replace so a concurrent reader never sees a partial write.
     const tmp = `${snapshotPath()}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(body));
     fs.renameSync(tmp, snapshotPath());
+    // The snapshot writer is the canonical publisher. Watchers tail this
+    // append-only journal and compute stream deltas; they never trigger their
+    // own full active-session gather on a timer.
+    const previous = new Map(previousSessions.map((row) => [activeSessionJournalIdentity(row), row]));
+    const next = new Map(sessions.map((row) => [activeSessionJournalIdentity(row), row]));
+    const upserts = sessions.filter((row) => {
+      const before = previous.get(activeSessionJournalIdentity(row));
+      return !before || JSON.stringify(before) !== JSON.stringify(row);
+    });
+    const removes = [...previous.keys()].filter((key) => !next.has(key));
+    try {
+      if (upserts.length > 0 || removes.length > 0) {
+        fs.appendFileSync(activeSessionsJournalPath(), `${JSON.stringify({
+          version: 1, scope, capturedAt: snap.capturedAt, upserts, removes,
+        } satisfies ActiveSessionsJournalRecord)}\n`);
+      }
+    } catch {
+      // Journal delivery is best-effort; the canonical snapshot remains valid.
+    }
     activeSnapshotMemory.set(scope, snap);
   } catch {
     // best-effort

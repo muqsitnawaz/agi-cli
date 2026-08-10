@@ -234,17 +234,26 @@ export function missingPinnedVersionMessage(
   );
 }
 
-/** Read the requested harness's sign-in verdict from `agents view --json`. */
+/**
+ * Read whether the requested harness has at least one launch-eligible account
+ * from `agents view --json`. Signed-in accounts that are rate-limited or out of
+ * credits are deliberately false so automatic placement cannot select them.
+ */
 export function viewAgentSignedIn(view: string, agent: string): boolean | undefined {
   try {
     const rows = JSON.parse(view) as Array<{
       agent?: string;
-      versions?: Array<{ signedIn?: boolean }>;
+      versions?: Array<{
+        signedIn?: boolean;
+        usageStatus?: 'available' | 'rate_limited' | 'out_of_credits' | null;
+      }>;
     }>;
     const row = rows.find((candidate) => candidate.agent?.toLowerCase() === agent.toLowerCase());
     if (!row) return undefined;
     const verdicts = (row.versions ?? [])
-      .map((version) => version.signedIn)
+      .map((version) => typeof version.signedIn === 'boolean'
+        ? version.signedIn && version.usageStatus !== 'rate_limited' && version.usageStatus !== 'out_of_credits'
+        : undefined)
       .filter((value): value is boolean => typeof value === 'boolean');
     return verdicts.length === 0 ? undefined : verdicts.some(Boolean);
   } catch {

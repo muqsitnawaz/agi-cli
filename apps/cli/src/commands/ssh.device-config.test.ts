@@ -300,11 +300,13 @@ describe('devices list surfaces the config', () => {
 
     const json = run(['devices', 'list', '--json']);
     expect(json.status).toBe(0);
-    const rows = JSON.parse(json.stdout) as Array<{ name: string; interactive: boolean; config?: Record<string, unknown> }>;
+    const rows = JSON.parse(json.stdout) as Array<{ name: string; interactive: boolean; config?: Record<string, unknown>; health?: { reachable: boolean; fetchedAt: number; headroom: string } }>;
     const zion = rows.find((r) => r.name === 'zion');
     const macMini = rows.find((r) => r.name === 'mac-mini');
     expect(zion?.interactive).toBe(true);
     expect(macMini?.interactive).toBe(false);
     expect(macMini?.config).toMatchObject({ maxAgents: 4 });
+    expect(macMini?.health).toMatchObject({ reachable: false, headroom: 'unknown' });
+    expect(macMini?.health?.fetchedAt).toEqual(expect.any(Number));
   });
 });

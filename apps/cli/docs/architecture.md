@@ -19,16 +19,18 @@ writing; treat them as pointers, not guarantees.
   `run` / `cloud`, the CLI-side pid→id registry, the audit log, and the SSH fan-out
   to peer machines.
 - **`apps/ext` — AGI EXT, the VS Code extension. A consumer.** It spawns agent
-  terminals as tabs and renders the Fleet dashboard, but it holds **no data
-  models of its own** beyond the live-session state file. For "what's running", it
-  shells out to the CLI (`agents sessions --active --json`) and reshapes the JSON.
+  terminals as tabs and renders the Fleet dashboard. Its state layer is a
+  presentation projection of CLI JSON: one elected monitor owns
+  `agents sessions watch --json`, while one-shot pickers and controls invoke the
+  owning CLI noun. It does not scan transcript, team, tracker, watchdog, device,
+  account, or quota stores itself.
 
 ```mermaid
 flowchart LR
   subgraph machine["one machine"]
     CLI["apps/cli — the agents CLI<br/><b>the framework</b><br/>sessions index · teams · run · cloud<br/>pid-registry · events.jsonl · SSH fan-out"]
-    FAC["apps/ext — AGI EXT<br/><b>a consumer</b><br/>terminal tabs · Fleet<br/>file-watcher · watchdog socket"]
-    CLI -- "exposes: agents sessions --active --json" --> FAC
+    FAC["apps/ext — AGI EXT<br/><b>a consumer</b><br/>terminal tabs · Fleet<br/>presentation stores"]
+    CLI -- "streams: agents sessions watch --json<br/>commands: sessions · devices · teams · tickets · watchdog" --> FAC
   end
   CLI --> DB[("sessions.db<br/>SQLite + FTS5")]
   CLI --> BYPID["terminals/by-pid/&lt;pid&gt;.json<br/>CLI pid→id"]
@@ -238,15 +240,15 @@ are minted and refreshed by the harness on each device; agents-cli publishes onl
 the resulting safe health/account metadata. Durable API keys, setup tokens, and
 bearer tokens use the named account registry and each device's credential store.
 
-### Session detail remains computed on demand
+### Live state is published once and streamed
 
-`agents sessions --active` re-derives state on every call — it re-reads the **tail**
-of each live transcript, infers `working` / `waiting_input` / `idle`, and computes
-tokens/sec ([`src/lib/session/active.ts`](../src/lib/session/active.ts),
-`readSessionTailWithRaw` → `inferSessionState` → `computeTokPerSec`). There is no
-resident cache: each call pays the recompute, and AGI EXT polls it
-(local sessions ~3s, remote peers ~45s, `apps/ext/ui/.../UnifiedAgentsPane.tsx`).
-Other machines are reached by running the same command over SSH per peer.
+The CLI daemon publishes the local active-session snapshot used by all readers.
+`agents sessions watch --json` emits a versioned reset followed by ordered
+upsert/remove/scope/heartbeat envelopes. Its fleet mode holds one long-lived local
+subscription plus one persistent SSH stream per peer. A peer outage marks that scope
+unavailable and retains its last rows; it never turns an outage into mass removals.
+Transcript history remains a separate, one-shot `agents sessions --all --json` query
+for Resume and Fork pickers.
 
 ### Coarse status is honest, not guessed
 

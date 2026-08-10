@@ -14,9 +14,7 @@ import { MonitorHost } from './host';
 import { MonitorFollower } from './follower';
 import {
   isReadinessFact,
-  isSessionFact,
   ReadinessFactPayload,
-  SessionFactPayload,
   TerminalTuple,
 } from './protocol';
 import { MonitorEvent } from './broadcastTypes';
@@ -63,8 +61,6 @@ function waitFor(predicate: () => boolean, timeoutMs: number, label: string): Pr
   });
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 afterEach(() => {
   for (const child of spawned.splice(0)) {
     try {
@@ -86,7 +82,7 @@ describe('readiness broadcast round-trip', () => {
   test('leader probes a reported pid once and the follower receives agentReady', async () => {
     const socketPath = tempSocketPath();
     const pid = spawnShellWithChild();
-    const host = new MonitorHost({ socketPath, detectors: { session: false } });
+    const host = new MonitorHost({ socketPath, detectors: { sessionCli: false } });
     await host.start();
 
     const readinessFacts: ReadinessFactPayload[] = [];
@@ -127,56 +123,4 @@ describe('readiness broadcast round-trip', () => {
       await host.stop();
     }
   }, 25000);
-
-  test('the single machine-wide session watcher broadcasts a session fact to the follower', async () => {
-    const socketPath = tempSocketPath();
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'rb-session-'));
-    tmpPaths.push(root);
-    const host = new MonitorHost({
-      socketPath,
-      detectors: {
-        readiness: false,
-        sessionRoots: [{ root, agentType: 'gemini' }],
-        sessionDebounceMs: 30,
-      },
-    });
-    await host.start();
-    expect(host.watchedRootCount).toBe(1);
-
-    const sessionFacts: SessionFactPayload[] = [];
-    const follower = new MonitorFollower<string>({
-      windowId: 'winB',
-      socketPath,
-      clientOptions: { minReconnectDelayMs: 25, maxReconnectDelayMs: 100 },
-      resolver: () => undefined,
-    });
-    const sub = follower.onMonitorEvent((e: MonitorEvent) => {
-      if (isSessionFact(e)) sessionFacts.push(e.payload);
-    });
-
-    try {
-      follower.start();
-      await waitFor(() => follower.connected, 5000, 'connected');
-      await sleep(250); // let the recursive fs.watch arm
-
-      const sessionId = '6f8f7c61-8b95-4d84-bf52-7ed8a29f33d3';
-      fs.writeFileSync(
-        path.join(root, 'session-a.json'),
-        JSON.stringify({ sessionId, projectHash: 'hashX', messages: [] }) + '\n',
-      );
-
-      await waitFor(
-        () => sessionFacts.some((f) => f.geminiSessionId === sessionId),
-        5000,
-        'session fact broadcast',
-      );
-      const fact = sessionFacts.find((f) => f.geminiSessionId === sessionId)!;
-      expect(fact.agentType).toBe('gemini');
-      expect(fact.geminiProjectHash).toBe('hashX');
-    } finally {
-      sub();
-      follower.stop();
-      await host.stop();
-    }
-  }, 15000);
 });

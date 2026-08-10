@@ -103,7 +103,7 @@ describe('registerWatchdogPaletteCommands', () => {
     ]);
   });
 
-  test('enable shells out to `agents watchdog enable` (argv, no shell string) and confirms', async () => {
+  test('enable shells out to `agents watchdog on` (argv, no shell string) and confirms', async () => {
     const registered = new Map<string, () => Promise<void>>();
     const { calls, deps } = makeDeps();
     watchdog.registerWatchdogPaletteCommands(
@@ -114,12 +114,12 @@ describe('registerWatchdogPaletteCommands', () => {
       deps,
     );
     await registered.get('agents.watchdogEnable')!();
-    expect(calls).toEqual([{ file: '/fake/bin/agents', args: ['watchdog', 'enable'] }]);
-    expect(statusMessages.some((m) => m.includes('Watchdog enabled'))).toBe(true);
+    expect(calls).toEqual([{ file: '/fake/bin/agents', args: ['watchdog', 'on'] }]);
+    expect(statusMessages.some((m) => m.includes('Watchdog turned on'))).toBe(true);
     expect(errorMessages).toHaveLength(0);
   });
 
-  test('disable shells out to `agents watchdog disable` and confirms', async () => {
+  test('disable shells out to `agents watchdog off` and confirms', async () => {
     const registered = new Map<string, () => Promise<void>>();
     const { calls, deps } = makeDeps();
     watchdog.registerWatchdogPaletteCommands(
@@ -130,8 +130,8 @@ describe('registerWatchdogPaletteCommands', () => {
       deps,
     );
     await registered.get('agents.watchdogDisable')!();
-    expect(calls).toEqual([{ file: '/fake/bin/agents', args: ['watchdog', 'disable'] }]);
-    expect(statusMessages.some((m) => m.includes('Watchdog disabled'))).toBe(true);
+    expect(calls).toEqual([{ file: '/fake/bin/agents', args: ['watchdog', 'off'] }]);
+    expect(statusMessages.some((m) => m.includes('Watchdog turned off'))).toBe(true);
   });
 
   test('a nonzero CLI exit surfaces an error toast quoting stderr', async () => {
@@ -146,7 +146,7 @@ describe('registerWatchdogPaletteCommands', () => {
     );
     await registered.get('agents.watchdogEnable')!();
     expect(errorMessages).toHaveLength(1);
-    expect(errorMessages[0]).toContain('agents watchdog enable failed');
+    expect(errorMessages[0]).toContain('agents watchdog on failed');
     expect(errorMessages[0]).toContain('daemon is not running');
     expect(statusMessages).toHaveLength(0);
   });
