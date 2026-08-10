@@ -29,8 +29,16 @@ export function registerSessionsWatchCommand(parent: Command): void {
     if (!options.json) invoked.error('error: required option \'--json\' not specified');
     const controller = new AbortController();
     const stop = () => controller.abort();
+    const stopOnClosedConsumer = (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EPIPE') controller.abort();
+      else {
+        process.exitCode = 1;
+        controller.abort(error);
+      }
+    };
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
+    process.stdout.on('error', stopOnClosedConsumer);
     try {
       const emit = (event: Parameters<Parameters<typeof watchFleetSessions>[0]['emit']>[0]) =>
         process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -39,6 +47,7 @@ export function registerSessionsWatchCommand(parent: Command): void {
     } finally {
       process.off('SIGINT', stop);
       process.off('SIGTERM', stop);
+      process.stdout.off('error', stopOnClosedConsumer);
     }
   });
 }
