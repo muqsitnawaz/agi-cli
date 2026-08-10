@@ -4430,7 +4430,7 @@ export async function handlePickedSession(picked: PickedSession): Promise<void> 
   if (isIdlessLiveRow(picked.session)) {
     const where = picked.session.machine ? ` on ${picked.session.machine}` : '';
     console.log(chalk.yellow(`This session hasn't reported a session id yet — nothing to open${where}.`));
-    console.log(chalk.gray(`Watch for it with: agents sessions --active${picked.session.machine ? ` --host ${picked.session.machine}` : ''}`));
+    console.log(chalk.gray(`Watch for it with: agents sessions --active${picked.session.machine ? ` --device ${picked.session.machine}` : ''}`));
     return;
   }
   // Reading and resuming are on DIFFERENT machines' terms, and conflating them
@@ -5860,10 +5860,10 @@ export function registerSessionsCommands(program: Command): void {
       agents sessions --resolve d3470b57 --json
 
       # Search another machine's sessions live over SSH (no sync needed)
-      agents sessions "auth bug" --last 3 --host yosemite-s1
+      agents sessions "auth bug" --last 3 --device yosemite-s1
 
       # Fan the same query out across several machines
-      agents sessions --all "deploy script" --host box-a --host box-b
+      agents sessions --all "deploy script" --device box-a --device box-b
     `,
     notes: `
       Session lifecycle — ONE verb gets you back in, it detects the state:
@@ -5875,7 +5875,7 @@ export function registerSessionsCommands(program: Command): void {
       - The interactive listing and every live-status flag fold in your other online machines automatically (live over SSH, no sync) — each row is labelled by host, this machine first. Use --local to skip the fan-out; single-id lookups stay local.
       - --all is not a device flag: it widens historical directory and time filters. Fleet collection is already the default. A status flag (--working/--idle/--waiting/--orphan/--crashed/--closed/--abandoned/--queued/--unknown) implies --active; combine status flags for a union.
       - --version <version> requires --agent and is equivalent to --agent <agent@version>.
-      - --host runs the query on the remote's own index over SSH (host alias or user@host); repeat or pass several to fan out. SSH access is the only auth.
+      - --device runs the query on the remote's own index over SSH (host alias or user@host); repeat or pass several to fan out. SSH access is the only auth.
       - --in-team matches both ends of the lineage: the session that ran 'agents teams create/add', and (with --teams) that team's teammates. In the interactive list, 't' cycles the same filter over the teams in view.
       - --include and --exclude are mutually exclusive.
       - With --include tools, repeat --query for same-session AND across distinct calls. Fields: tool, program, input, output, status, exit, error.

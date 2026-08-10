@@ -41,7 +41,7 @@ export interface Host extends HostEntry {
 export class DeviceOffloadUnsupportedError extends Error {
   constructor(name: string) {
     super(
-      `Device "${name}" uses password auth, which --host offload can't use yet ` +
+      `Device "${name}" uses password auth, which --device offload can't use yet ` +
         `(runs go over ssh with BatchMode=yes). Switch it to key auth with ` +
         `\`agents devices config ${name} ssh.auth key\`.`,
     );

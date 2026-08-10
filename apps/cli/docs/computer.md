@@ -275,7 +275,7 @@ the full text.
 
 ## Remote Windows (`--host`)
 
-Every verb takes `--host <device>` to drive a Windows machine registered with
+Every verb takes `--device <device>` to drive a Windows machine registered with
 `agents devices`: `setup --host` pushes the C# daemon
 (`computer-helper-win.exe`) and registers a LOGON scheduled task,
 `start --host` opens an `ssh -L` tunnel to its loopback port, and every other
@@ -287,8 +287,8 @@ contract, with these Windows specifics:
   `raise --window-id` takes), the default capture crops to the pid's largest
   on-screen window, `--window-id` shoots one window, `--display` the whole
   display the app is on. `--quality` is ignored (lossless PNG).
-- **Lifecycle:** `status --host <device>` reports the recorded tunnel and a
-  live daemon probe; `reload --host <device>` restarts the daemon's scheduled
+- **Lifecycle:** `status --device <device>` reports the recorded tunnel and a
+  live daemon probe; `reload --device <device>` restarts the daemon's scheduled
   task (the way to pick up a freshly pushed exe) and confirms it answers.
   There is no allow-list policy on Windows — the daemon is tunnel-gated.
 - **`--require-frontmost` is enforced:** Windows synthetic input lands in the
@@ -301,12 +301,12 @@ contract, with these Windows specifics:
   extraction (default 20k).
 
 ```bash
-agents computer setup --host win-mini      # push exe + register LOGON task
-agents computer start --host win-mini      # open the tunnel
-agents computer status --host win-mini     # tunnel + daemon liveness
-agents computer screenshot --host win-mini --pid 27180 --list
-agents computer reload --host win-mini     # restart the remote daemon
-agents computer stop --host win-mini       # tear down tunnel + task
+agents computer setup --device win-mini      # push exe + register LOGON task
+agents computer start --device win-mini      # open the tunnel
+agents computer status --device win-mini     # tunnel + daemon liveness
+agents computer screenshot --device win-mini --pid 27180 --list
+agents computer reload --device win-mini     # restart the remote daemon
+agents computer stop --device win-mini       # tear down tunnel + task
 ```
 
 ## Recipes

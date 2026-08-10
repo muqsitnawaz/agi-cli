@@ -697,6 +697,135 @@
       "args": [],
       "options": [
         {
+          "flags": "--include <families>",
+          "description": "Only these families (comma-sep): ops, activity, commands, runs, security",
+          "long": "--include",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--exclude <families>",
+          "description": "Drop these families (comma-sep): ops, activity, commands, runs, security",
+          "long": "--exclude",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--module <name>",
+          "description": "Only events from this group (e.g. teams, secrets, activity, daemon, routine, watchdog, browser)",
+          "long": "--module",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--command <path>",
+          "description": "Only this command path — prefix match (e.g. \"teams create\")",
+          "long": "--command",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--event <type>",
+          "description": "Only this typed event (repeatable, e.g. secrets.get, run.dispatched, pr.opened)",
+          "long": "--event",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false,
+          "defaultValue": []
+        },
+        {
+          "flags": "--agent <name>",
+          "description": "Only events tagged with this agent",
+          "long": "--agent",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--caller <kind>",
+          "description": "Only this caller kind (claude-code, codex, gemini, cursor, terminal, script)",
+          "long": "--caller",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--level <level>",
+          "description": "Only this level: audit, warn, info, debug",
+          "long": "--level",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--session <id>",
+          "description": "Only events from this session (the provenance sessionId) — e.g. trace which session read a secret",
+          "long": "--session",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--bundle <name>",
+          "description": "Only events carrying this bundle in their payload — e.g. `--module secrets --bundle share` for every read of the share bundle",
+          "long": "--bundle",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--since <time>",
+          "description": "Only events newer than this (e.g. 2h, 7d, or ISO date)",
+          "long": "--since",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--limit <n>",
+          "description": "Max records to show; 0 for no cap (default 50)",
+          "long": "--limit",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false,
+          "defaultValue": "50"
+        },
+        {
+          "flags": "--json",
+          "description": "Output raw records as JSON",
+          "long": "--json",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "-f, --follow",
+          "description": "Tail today's operational log live",
+          "short": "-f",
+          "long": "--follow",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
           "flags": "-h, --help",
           "description": "Show help",
           "short": "-h",
@@ -2862,7 +2991,7 @@
           "name": "remote-control",
           "path": "browser remote-control",
           "aliases": [],
-          "description": "Allow or deny other fleet machines driving THIS machine's browser over `browser --host`. `on`/`off` to set (device-local, never synced); no argument prints the current value. Default off.",
+          "description": "Allow or deny other fleet machines driving THIS machine's browser over `browser --device`. `on`/`off` to set (device-local, never synced); no argument prints the current value. Default off.",
           "args": [
             {
               "name": "state",
@@ -9319,7 +9448,7 @@
             },
             {
               "flags": "--model <id>",
-              "description": "Model id to pin on the host (e.g., meta/muse-spark-1.1) — pair with --host",
+              "description": "Model id to pin on the host (e.g., meta/muse-spark-1.1) — pair with --device",
               "long": "--model",
               "required": true,
               "optional": false,
@@ -20235,7 +20364,7 @@
           "negate": false
         }
       ],
-      "examples": "# Create a bundle\n      agents secrets create prod --description \"Production keys for the api stack\"\n\n      # Add a keychain-backed secret (prompts for the value)\n      agents secrets add prod STRIPE_API_KEY\n\n      # Add a non-sensitive literal\n      agents secrets add prod LOG_LEVEL --value info\n\n      # Inject the bundle into an agent run\n      agents run claude \"deploy the worker\" --secrets prod\n\n      # See what's in the bundle (values masked); shows its policy, held state, and usage\n      agents secrets view prod\n\n      # Order the list by how recently / how often each bundle is used\n      agents secrets list --sort used\n      agents secrets list --sort uses\n\n      # Stop a noisy automation bundle from prompting every run: ask once a week\n      agents secrets policy prod hold\n\n      # Eval the bundle into your current shell\n      eval \"$(agents secrets export prod --plaintext)\"\n\n      # Push the bundle to remote machine(s) over SSH (lands as a native bundle there)\n      agents secrets export prod --host yosemite-s0 --host yosemite-s1 --force\n\n      # Run a one-off command with secrets injected\n      agents secrets exec prod -- ./deploy.sh",
+      "examples": "# Create a bundle\n      agents secrets create prod --description \"Production keys for the api stack\"\n\n      # Add a keychain-backed secret (prompts for the value)\n      agents secrets add prod STRIPE_API_KEY\n\n      # Add a non-sensitive literal\n      agents secrets add prod LOG_LEVEL --value info\n\n      # Inject the bundle into an agent run\n      agents run claude \"deploy the worker\" --secrets prod\n\n      # See what's in the bundle (values masked); shows its policy, held state, and usage\n      agents secrets view prod\n\n      # Order the list by how recently / how often each bundle is used\n      agents secrets list --sort used\n      agents secrets list --sort uses\n\n      # Stop a noisy automation bundle from prompting every run: ask once a week\n      agents secrets policy prod hold\n\n      # Eval the bundle into your current shell\n      eval \"$(agents secrets export prod --plaintext)\"\n\n      # Push the bundle to remote machine(s) over SSH (lands as a native bundle there)\n      agents secrets export prod --device yosemite-s0 --device yosemite-s1 --force\n\n      # Run a one-off command with secrets injected\n      agents secrets exec prod -- ./deploy.sh",
       "notes": "Bundles are containers; secrets are the variables inside them. Keychain values\n      never touch disk in plaintext. Every item is device-local and gated by Touch ID\n      or device passcode; cross-machine sync is handled by 'agents secrets push/pull'.\n\n      Naming: name a bundle after the thing it holds credentials for, so an agent can\n      guess it without listing. For a website, use its domain WITH the real suffix —\n      'stripe.com', 'openai.ai', 'github.com'. For a desktop app, use the app's binary\n      suffix — 'slack.app' (macOS) or 'photoshop.exe' (Windows). Always pass\n      '--description' so 'list' / 'view' explain the bundle without opening it; an\n      undescribed bundle prints a \"No description found\" nudge. 'view' also shows\n      whether the bundle is currently unlocked (held by the agent) and how often / how\n      recently it has been created, imported, exported, viewed, and accessed;\n      'list --sort used|uses' orders by recency / frequency, and\n      'agents secrets activity [bundle]' prints the recent value-free event timeline.\n\n      Touch ID noise: macOS pops a prompt per bundle per process. Each bundle has\n      a prompt policy, shown in the POLICY column of 'agents secrets list':\n        hold (default)    ask once, then serve it silently from the local agent\n                          for the hold window ('secrets.agent.holdMs', 7d by\n                          default), until sleep / logout or 'lock' (a bare\n                          screen-lock does NOT drop it). Accepts the older names\n                          'daily' and 'session'.\n        always            ask for Touch ID every time — never auto-held.\n        never             no biometry ACL at all — reads are silent forever, even\n                          if the agent is down. Automation credentials only.\n      The default is 'hold' (one Touch ID per hold window); change it globally with\n      'secrets.policy' in agents.yaml, or per bundle with 'agents secrets policy\n      <bundle> always'. 'agents secrets unlock <bundle>' holds any bundle after one\n      prompt regardless of policy. Nothing on disk.\n\n      See also:\n        agents secrets policy <bundle> hold            ask once per hold window (7d by default), not every run\n        agents secrets unlock <bundle>                 hold a bundle after one Touch ID\n        agents secrets lock                            wipe held bundles (re-prompt next read)\n        agents secrets status                          show held bundles + when they lock\n        agents secrets rotate <bundle> <key>           rotate value, preserve metadata\n        agents secrets import <bundle> --from .env     bulk import from .env\n        agents secrets import <bundle> --from 1password:<vault>\n        agents secrets import --from icloud            recover legacy iCloud Keychain bundles\n        agents secrets generate [length]               generate a random password / PIN / hex\n        agents secrets migrate-acl                     upgrade legacy items to the biometry ACL",
       "subcommands": [
         {
@@ -21211,8 +21340,8 @@
               "negate": false
             }
           ],
-          "examples": "# Everything, newest-used first\n      agents secrets list --sort used\n\n      # Order by how often each bundle is read (most-accessed first)\n      agents secrets list --sort uses\n\n      # Find one by name or description\n      agents secrets list github\n\n      # The security audit: which bundles read with NO Touch ID at all?\n      agents secrets list --policy never\n\n      # Which still store a raw value inline, or can shell out?\n      agents secrets list --kind literal\n      agents secrets list --kind exec\n\n      # What has already lapsed, and what is about to\n      agents secrets list --expired\n      agents secrets list --expiring 7 --sort expiry\n\n      # What can I delete? Untouched in three months\n      agents secrets list --unused 3mo --sort used\n\n      # Which bundles will prompt me on the next read (macOS)\n      agents secrets list --not-held\n\n      # Combine axes — every filter narrows further\n      agents secrets list --policy hold --backend file --expiring\n\n      # Same filters, on another machine, machine-readable\n      agents secrets list --expired --host mac-mini --json",
-          "notes": "- Filters compose: every flag you add narrows the list further.\n      - An unknown value is an error, not an empty list — '--policy hodl' names the valid set.\n      - --held/--not-held read live broker state, so they need macOS. Use --host <mac> from elsewhere.\n      - --expired and --expiring are different questions: already lapsed vs coming due. The EXPIRING column counts both and turns red once anything has lapsed.\n      - --unused matches bundles never read at all, not just old ones.\n      - Filters apply before --json, so the JSON is the exact twin of the table.\n      - Filters are forwarded over --host, so a remote list narrows the same way.\n      - --sort used|uses read the value-free usage read-model (~/.agents/secrets/secrets.db); see 'agents secrets activity'.",
+          "examples": "# Everything, newest-used first\n      agents secrets list --sort used\n\n      # Order by how often each bundle is read (most-accessed first)\n      agents secrets list --sort uses\n\n      # Find one by name or description\n      agents secrets list github\n\n      # The security audit: which bundles read with NO Touch ID at all?\n      agents secrets list --policy never\n\n      # Which still store a raw value inline, or can shell out?\n      agents secrets list --kind literal\n      agents secrets list --kind exec\n\n      # What has already lapsed, and what is about to\n      agents secrets list --expired\n      agents secrets list --expiring 7 --sort expiry\n\n      # What can I delete? Untouched in three months\n      agents secrets list --unused 3mo --sort used\n\n      # Which bundles will prompt me on the next read (macOS)\n      agents secrets list --not-held\n\n      # Combine axes — every filter narrows further\n      agents secrets list --policy hold --backend file --expiring\n\n      # Same filters, on another machine, machine-readable\n      agents secrets list --expired --device mac-mini --json",
+          "notes": "- Filters compose: every flag you add narrows the list further.\n      - An unknown value is an error, not an empty list — '--policy hodl' names the valid set.\n      - --held/--not-held read live broker state, so they need macOS. Use --device <mac> from elsewhere.\n      - --expired and --expiring are different questions: already lapsed vs coming due. The EXPIRING column counts both and turns red once anything has lapsed.\n      - --unused matches bundles never read at all, not just old ones.\n      - Filters apply before --json, so the JSON is the exact twin of the table.\n      - Filters are forwarded over --device, so a remote list narrows the same way.\n      - --sort used|uses read the value-free usage read-model (~/.agents/secrets/secrets.db); see 'agents secrets activity'.",
           "subcommands": []
         },
         {
@@ -21969,7 +22098,7 @@
           "name": "unlock",
           "path": "secrets unlock",
           "aliases": [],
-          "description": "Hold a bundle in the secrets-agent after one Touch ID, so concurrent runs read it without re-prompting (macOS). With --host, unlock FILE-backed bundle(s) on a remote (the passphrase prompt surfaces over the SSH TTY); keychain/biometry bundles are GUI-only and can't be remote-unlocked.",
+          "description": "Hold a bundle in the secrets-agent after one Touch ID, so concurrent runs read it without re-prompting (macOS). With --device, unlock FILE-backed bundle(s) on a remote (the passphrase prompt surfaces over the SSH TTY); keychain/biometry bundles are GUI-only and can't be remote-unlocked.",
           "args": [
             {
               "name": "names",

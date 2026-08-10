@@ -1062,7 +1062,7 @@ export function registerSecretsCommands(program: Command): void {
       eval "$(agents secrets export prod --plaintext)"
 
       # Push the bundle to remote machine(s) over SSH (lands as a native bundle there)
-      agents secrets export prod --device yosemite-s0 --host yosemite-s1 --force
+      agents secrets export prod --device yosemite-s0 --device yosemite-s1 --force
 
       # Run a one-off command with secrets injected
       agents secrets exec prod -- ./deploy.sh

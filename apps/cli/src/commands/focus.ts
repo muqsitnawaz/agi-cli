@@ -206,7 +206,7 @@ export function registerFocusCommand(program: Command): void {
       - With no selector/filter, the picker shows the live fleet. An id focuses directly; agent@version and text selectors always show the preview picker.
       - A living tmux pane is JOINED (a second client, no fork). Dead/missing panes recover on the origin device: exact healthy origin uses native resume; otherwise a healthy version of the same harness receives /continue <id>.
       - An id/identity selector resolves across the whole reachable fleet on its own — you do NOT need --device to focus a session that lives on another box (same as resume/preview). --device only narrows the browsable picker and the agent/version resolution.
-      - --host/--device and the sessions-browser filters compose. latest/oldest resolve against each selected device's installed versions.
+      - --device and the sessions-browser filters compose. latest/oldest resolve against each selected device's installed versions.
       Lifecycle siblings (not synonyms):
         focus              attach if alive, otherwise recover (default "take me there")
         focus --attach-only  attach only; never fork (replaces go)

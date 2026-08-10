@@ -852,7 +852,7 @@ keychain backend: a
 macOS login keychain is locked under headless SSH, so a keychain-backed push lands
 the bundle metadata but no readable secret items (`secrets export --host` now
 read-back-verifies a keychain push and fails loudly if it didn't persist, pointing
-at this fix). `--device` is accepted as an alias for `--host` on the secrets remote
+at this fix). `--device` / `-D` is the fleet routing flag (legacy `--host` is stripped but not registered) on the secrets remote
 commands. See [`docs/secrets.md`](docs/secrets.md) → *Pushing to a headless sign host*.
 
 **Why not CI?** The tarball bundles `dist/lib/secrets/Agents CLI.app` — a native
