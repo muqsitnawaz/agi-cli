@@ -188,7 +188,10 @@ export function groupByAccount(rows: HarnessRow[]): AccountGroup[] {
   const order: string[] = [];
   const groups = new Map<string, HarnessRow[]>();
   for (const row of rows) {
-    const key = row.account ?? 'signed-out';
+    // Signed-out rows share one bucket under a sentinel key. Use the NUL-prefixed
+    // literal (a TS `\0` escape, NOT a raw NUL byte in the source) so the key can
+    // never collide with a real account label named literally "signed-out".
+    const key = row.account ?? '\0signed-out';
     if (!groups.has(key)) {
       groups.set(key, []);
       order.push(key);

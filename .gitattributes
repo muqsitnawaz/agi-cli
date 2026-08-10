@@ -1,3 +1,0 @@
-# harness-inventory.ts carried a stray NUL byte in history (removed in RUSH-2527);
-# force a readable text diff so the change is reviewable rather than "binary".
-apps/cli/src/lib/devices/harness-inventory.ts diff
