@@ -101,9 +101,10 @@ DotAgents repo it ships resources into. Each `repos[]` entry with a `path` is on
 of those directories, and everything that starts an agent resolves all of them:
 
 ```bash
-# bind them; the slug is read from EACH directory's own origin remote
+# --root sets where agents start; --dir binds the directories they may reach.
+# The slug is read from EACH directory's own origin remote.
 agents projects add agents-cli \
-  --dir ~/src/github.com/muqsitnawaz/agents-cli \
+  --root ~/src/github.com/muqsitnawaz/agents-cli \
   --dir ~/src/github.com/muqsitnawaz/agents-cli-web \
   --dir ~/.agents/.system
 
@@ -117,8 +118,9 @@ agents projects set agents-cli --add-dir ./vendor/thing --slug o/thing  # no ori
 records the remote it actually pushes to. `--slug` names it explicitly for a
 directory with no origin; it applies to a single `--add-dir`.
 
-**What a spawn does with them.** The **first** directory — `defaultPath ?? root` —
-is the cwd. Every other one is attached as an `--add-dir` access grant:
+**Which one is the cwd.** `defaultPath ?? root` — set by `--root` / `--path`, and
+**not** by `--dir`. `--dir` binds a directory; it never moves where an agent starts.
+Every bound directory other than that cwd is attached as an `--add-dir` grant:
 
 ```bash
 agents run claude --project agents-cli
@@ -142,7 +144,12 @@ configuration mistake.
 **A directory missing on this box is skipped, not an error.** A definition binding
 a checkout that only exists on some machines still loads, and the primary cwd still
 resolves. For a `--host` run the paths stay `~/…` and are **not** filtered against
-this machine's filesystem — the target host has its own checkouts.
+this machine's filesystem — the target host has its own checkouts, and the `agents
+run` on that host expands `~` against its own `$HOME` before the harness sees it.
+
+For a team, the grants are resolved **at launch**, not when you run `teams add`. On
+a `--devices` pool an unpinned teammate has no host until the scheduler places it,
+so freezing directories at add time would hand it this machine's absolute paths.
 
 Definitions are syncable, not synced: after binding directories, push them with
 `agents repo push user` and `agents repo pull user` on the other boxes.

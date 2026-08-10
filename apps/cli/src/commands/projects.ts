@@ -537,9 +537,10 @@ export function registerProjectsCommands(program: Command): void {
       reads and writes only through these commands — never
       ~/.agents/factory/projects.json.
 
-      A project may bind several directories ('--dir' / '--add-dir'). The first
-      is the cwd an agent lands in; the rest ride along as --add-dir grants,
-      which only Claude and Codex consume.
+      A project may bind several directories ('--dir' / '--add-dir'). The cwd an
+      agent lands in is 'defaultPath' (else 'root') — set it with --root/--path,
+      not with --dir. Every bound directory other than that cwd rides along as
+      an --add-dir grant, which only Claude and Codex consume.
     `,
   });
 

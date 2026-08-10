@@ -16,15 +16,20 @@
 
   **Spawning.** `agents run --project` keeps returning the primary directory as cwd — unchanged —
   and merges the project's other directories into `--add-dir`, deduped against anything passed
-  explicitly, locally and over `--host` (forwarded `~/…` so they re-root at the host's own `$HOME`).
+  explicitly, locally and over `--host` (forwarded `~/…`, which the receiving `agents run` expands
+  against the host's own `$HOME`).
   `agents teams create` gains `--project <slug>`: it is validated at create time rather than at the
   first `teams add`, the project's primary directory becomes a local teammate's base cwd, and the
-  sibling directories are attached as grants. The team cwd precedence is now
+  sibling directories are attached as grants. The teammate record stores the project **name**, not
+  a frozen list of directories, and the grants resolve per launch — an unpinned teammate on a
+  `--devices` pool only learns its host from the scheduler at launch time, so add-time resolution
+  would have handed it this box's absolute paths (and already dropped any directory that exists
+  only on the host it landed on). The team cwd precedence is now
   `worktree → --cwd → project directory → process.cwd()`, so an explicit `--cwd` still wins; the
   grants are attached either way, since the siblings are what the project binds rather than where
   the teammate sits. A `--project slug@worktree` run keeps the worktree as cwd and grants the main
-  checkout alongside the siblings. Grants are persisted on the teammate record, so a teammate
-  staged behind `--after` still launches with them after a supervisor restart.
+  checkout alongside the siblings. A teammate staged behind `--after` resolves its grants when the
+  supervisor finally launches it, so a restart in between changes nothing.
 
   **Two honest limits, stated rather than papered over.** Only Claude and Codex consume
   `--add-dir` (Claude takes the native flag, Codex folds the paths into `workspace_roots`); every
@@ -32,6 +37,12 @@
   from the current box is skipped for a local spawn rather than erroring — but is **kept** for a
   `--host` run, because the target machine has its own checkouts and this box's filesystem must not
   decide what exists there.
+
+  **`--add-dir` values are now `~`-expanded at the consumer** (`buildExecCommand`, for both the
+  Claude flag and Codex's `workspace_roots`). Nothing was doing it: a forwarded grant crosses the
+  SSH boundary single-quoted, so the remote login shell left `~/…` literal and the harness resolved
+  it as a directory actually named `~` — a silent no-op. This also fixes the pre-existing case of a
+  user typing `--add-dir '~/x'` on a `--host` run.
 
   The `repos[]` walk is now one function shared by the spawn path and the fleet workspace probe
   (`projects status`), which previously had its own copy. The probe keeps its own primary (`root`,
