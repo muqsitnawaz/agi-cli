@@ -24,6 +24,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
+import { stringifyDoc } from './yaml-io.js';
 import { getFeedDir, getUserAgentsDir } from './state.js';
 import { isAdmin, isHighConsequenceAllowed, isKnownOperator } from './operator.js';
 import { projectKeyFromCwd } from './project-key.js';
@@ -1048,7 +1049,7 @@ export function ensureFeedPublishHook(userAgentsDir: string = getUserAgentsDir()
       // behind fleet-wide (RUSH-2505). Preserve each node's committed block/flow
       // style — do NOT force `collectionStyle`, which would flatten a committed
       // flow hook to a block list and reintroduce a diff.
-      fs.writeFileSync(tmpYaml, yamlDoc.toString({ flowCollectionPadding: false }));
+      fs.writeFileSync(tmpYaml, stringifyDoc(yamlDoc));
       fs.renameSync(tmpYaml, agentsYamlPath);
     }
 

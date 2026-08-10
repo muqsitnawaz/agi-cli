@@ -20,6 +20,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
+import { stringifyDoc } from './yaml-io.js';
 import chalk from 'chalk';
 import { relTime, truncate } from './format.js';
 import { getActivityDir, getUserAgentsDir } from './state.js';
@@ -1806,7 +1807,7 @@ export function ensureActivityLogHook(userAgentsDir: string = getUserAgentsDir()
       // `~/.agents` tree permanently dirty and blocks `agents repo pull`
       // fleet-wide (RUSH-2505). This writer runs back-to-back with the feed one
       // on the `agents feed` path, so both must round-trip cleanly.
-      fs.writeFileSync(tmpYaml, yamlDoc.toString({ flowCollectionPadding: false }));
+      fs.writeFileSync(tmpYaml, stringifyDoc(yamlDoc));
       fs.renameSync(tmpYaml, agentsYamlPath);
     }
 
