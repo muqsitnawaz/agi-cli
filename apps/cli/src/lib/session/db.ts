@@ -14,7 +14,7 @@ import type { SessionAgentId, SessionEvent, SessionMeta, SessionRunMode } from '
 import { parseSession, sessionFilePathContainer } from './parse.js';
 import { extractRecentDirectoriesTouched, extractTodoProgressFromEvents } from './state.js';
 import { getSessionsDir, getSessionsDbPath } from '../state.js';
-import { query as queryEvents, queryToolUsageForSessions } from '../events.js';
+import { query as queryEvents, queryToolUsageForSessions } from '../feed/events.js';
 import { machineForSessionFile } from './origin-machine.js';
 import { loadSessionActorIndex, readSessionActorRecord } from './actor-sidecar.js';
 import { toolCallsFromEvents, type IndexedToolCall } from './tool-calls.js';
@@ -22,7 +22,7 @@ import { persistToolCalls, toolEvidenceSourcePath } from './tool-store.js';
 import { buildClaudeAccountIndex, resolveClaudeAccount } from './claude-accounts.js';
 import { extractSkills, extractSlashCommands } from './highlights.js';
 import { resolveResource } from '../resources.js';
-import { discoverPlugins } from '../plugins.js';
+import { discoverPlugins } from '../plugins/plugins.js';
 import { machineId } from '../machine-id.js';
 import type { DiscoveredPlugin } from '../types.js';
 
