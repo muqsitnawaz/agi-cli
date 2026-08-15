@@ -2935,6 +2935,15 @@ a machine-wide process sweep.)
   post-ack failure, one MUST be surfaced — `webhook.failed` plus the
   `onDeliveryError` hook the daemon host and `agents webhooks serve` both log
   (RUSH-2548).
+  **A post-ack dispatch failure is terminal until a manual redelivery**, and the
+  ack is what makes it so: the receiver used to answer 4xx on a dispatch failure,
+  which is what made GitHub/Linear retry and let the per-job ledger finish the
+  matches that failed. A sender does not retry a 202, so the ledger is intact but
+  nothing triggers it on its own. This is the accepted cost of not timing out
+  every delivery; the failure is loud in the log and the delivery stays unmarked,
+  so re-sending it from the provider's UI still completes only what did not run.
+  Closing this gap with an in-process retry of the unmarked jobs is
+  **WEBHOOK-GAP-1**, below.
 
 ### 4. Given/When/Then scenarios
 
@@ -3071,6 +3080,17 @@ a machine-wide process sweep.)
   `agents daemon doctor`/`status`. `index.ts:255-256` adds top-level
   `uncaughtException`/`unhandledRejection` handlers so a crash during startup always
   exits deterministically into the now-throttled supervisor instead of hanging.
+- **WEBHOOK-GAP-1 (RUSH-2548).** SING-18's ack-before-dispatch removed the 4xx that
+  used to make a sender retry a failed dispatch, and nothing replaced it. The
+  per-delivery ledger still records exactly which matched jobs completed
+  (`markJob`, `lib/triggers/webhook.ts`) and a failed settle leaves the delivery
+  unmarked, so a retry would still finish only what did not run — but a sender does
+  not retry a 202, so only a manual redelivery from the provider's UI reaches it. A
+  routine whose `executeJobDetached` fails (missing agent binary, full disk) is
+  therefore logged (`webhook.failed` + the host's WARN) and then simply does not
+  run. Closing this needs an in-process retry of the unmarked jobs on the receiver
+  side; the trade was taken deliberately because the alternative — holding the
+  socket for the whole agent run — timed out every real delivery.
 
 ---
 

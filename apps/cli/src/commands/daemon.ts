@@ -814,11 +814,19 @@ function registerWebhooksSubcommand(parent: Command): void {
     .description('Stop hosting the receiver bound to this port.')
     .action((portArg: string) => {
       const port = requirePositiveInt(portArg, 'port');
-      if (!removeHostedReceiver(port)) {
+      const removed = removeHostedReceiver(port);
+      if (!removed) {
         console.error(chalk.red(`No receiver declared on port ${port}. Run 'agents daemon webhooks list'.`));
         process.exit(1);
       }
       console.log(chalk.green(`Removed the webhook receiver on port ${port}.`));
+      if (removed.funnel) {
+        // Leaving the Funnel up would keep a public HTTPS route pointed at a port
+        // nothing serves, so say what to run — this box may not be the tailnet
+        // node, and `funnel down` names the host explicitly.
+        console.log(chalk.yellow(`  public ingress is still up on :${removed.funnel.publicPort} — take it down:`));
+        console.log(chalk.gray(`    agents daemon funnel down <host> --port ${removed.funnel.publicPort}`));
+      }
       if (isDaemonRunning()) console.log(chalk.gray('  run `agents daemon restart` to release the port'));
     });
 }

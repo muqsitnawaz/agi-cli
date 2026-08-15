@@ -399,6 +399,13 @@ routines appear in `agents daemon logs` (or the foreground receiver's stdout)
 and in the `webhook.fired` event; a failure after the ack is logged and emitted
 as `webhook.failed`.
 
+**A dispatch that fails after the ack does not retry itself.** The 4xx was what
+made GitHub and Linear re-send a delivery, and a sender does not retry a 202. The
+per-job ledger still records exactly which matches completed and the delivery
+stays unmarked, so re-sending it from the provider's UI runs only what did not —
+but nothing triggers that automatically. Watch `agents daemon logs` for
+`dispatch failed after ack`.
+
 Dedup is unchanged. `<source>:<delivery-id>` is still the key, a retry of a
 settled delivery is still answered `200 {"duplicate":true}`, and per-job marking
 still means a retry finishes only the matches that failed. A retry that arrives

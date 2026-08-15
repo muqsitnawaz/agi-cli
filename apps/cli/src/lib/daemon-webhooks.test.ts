@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
+import * as http from 'http';
 import * as os from 'os';
 import * as path from 'path';
 import * as yaml from 'yaml';
+import type { AddressInfo } from 'net';
 import {
   DEFAULT_WEBHOOK_PORT,
   addHostedReceiver,
@@ -91,10 +93,17 @@ describe('daemon webhooks config', () => {
 
   it('removes by port and reports when nothing was declared there', () => {
     addHostedReceiver({ bundle: 'first' });
-    expect(removeHostedReceiver(9999)).toBe(false);
+    expect(removeHostedReceiver(9999)).toBeNull();
     expect(readDaemonWebhooksConfig().receivers).toHaveLength(1);
-    expect(removeHostedReceiver(DEFAULT_WEBHOOK_PORT)).toBe(true);
+    expect(removeHostedReceiver(DEFAULT_WEBHOOK_PORT)).toEqual({ bundle: 'first' });
     expect(readDaemonWebhooksConfig().receivers).toEqual([]);
+  });
+
+  it('returns the removed entry so the caller can take its public Funnel down', () => {
+    // The Funnel is brought up per receiver; dropping the receiver without
+    // dropping the Funnel leaves a public HTTPS route pointed at a dead port.
+    addHostedReceiver({ bundle: 'gh', port: 8790, funnel: { publicPort: 8443 } });
+    expect(removeHostedReceiver(8790)).toEqual({ bundle: 'gh', port: 8790, funnel: { publicPort: 8443 } });
   });
 });
 
@@ -110,12 +119,60 @@ describe('webhook-receiver daemon service', () => {
 describe('startHostedWebhookReceivers', () => {
   it('binds nothing when no receiver is declared', async () => {
     const logs: string[] = [];
-    const hosted = startHostedWebhookReceivers({ log: (level, msg) => logs.push(`${level} ${msg}`) });
+    const hosted = await startHostedWebhookReceivers({ log: (level, msg) => logs.push(`${level} ${msg}`) });
     try {
       expect(hosted.count).toBe(0);
       expect(logs).toEqual([]);
     } finally {
       await hosted.close();
+    }
+  });
+
+  it('survives a bind failure: the conflicting receiver is skipped, the rest still bind', async () => {
+    // A REAL occupied port. `server.listen()` reports EADDRINUSE as an async
+    // 'error' event, not a throw — so before this was awaited, the event reached
+    // the process-level uncaughtException handler and killed the whole daemon
+    // (with it: the secrets broker, scheduler, monitors, browser IPC, self-heal).
+    // Nothing here is mocked: the squatter is an actual listening HTTP server.
+    const squatter = http.createServer(() => {});
+    await new Promise<void>((resolve) => squatter.listen(0, '127.0.0.1', resolve));
+    const takenPort = (squatter.address() as AddressInfo).port;
+    const freePort = takenPort + 1;
+
+    // Two receivers whose secrets DO resolve, so the only difference between
+    // them is the bind: one port is taken, the other is not.
+    const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'daemon-webhooks-secrets-'));
+    const previousStateDir = process.env.AGENTS_STATE_DIR;
+    process.env.AGENTS_STATE_DIR = bundleDir;
+    writeDaemonWebhooksConfig({
+      receivers: [{ bundle: 'conflicting', port: takenPort }, { bundle: 'healthy', port: freePort }],
+    });
+
+    const logs: { level: string; message: string }[] = [];
+    const uncaught: Error[] = [];
+    const onUncaught = (err: Error) => uncaught.push(err);
+    process.on('uncaughtException', onUncaught);
+
+    // Resolve both bundles to a fixed secret without touching the real keychain.
+    const hosted = await startHostedWebhookReceivers({
+      log: (level, message) => logs.push({ level, message }),
+      resolveSecrets: () => ({ linear: 'test-secret' }),
+    });
+    try {
+      // One bound, one skipped — and the process is still alive to assert it.
+      expect(hosted.count).toBe(1);
+      const warn = logs.find((l) => l.level === 'WARN');
+      expect(warn?.message).toContain(`:${takenPort} failed to bind`);
+      expect(warn?.message).toMatch(/EADDRINUSE|address already in use/i);
+      expect(logs.some((l) => l.level === 'INFO' && l.message.includes(`127.0.0.1:${freePort}`))).toBe(true);
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      await hosted.close();
+      await new Promise<void>((resolve) => squatter.close(() => resolve()));
+      if (previousStateDir === undefined) delete process.env.AGENTS_STATE_DIR;
+      else process.env.AGENTS_STATE_DIR = previousStateDir;
+      fs.rmSync(bundleDir, { recursive: true, force: true });
     }
   });
 
@@ -125,7 +182,7 @@ describe('startHostedWebhookReceivers', () => {
     // and the reason must reach the daemon log rather than being swallowed.
     addHostedReceiver({ bundle: 'daemon-webhooks-test-absent-bundle', port: 8791 });
     const logs: { level: string; message: string }[] = [];
-    const hosted = startHostedWebhookReceivers({ log: (level, message) => logs.push({ level, message }) });
+    const hosted = await startHostedWebhookReceivers({ log: (level, message) => logs.push({ level, message }) });
     try {
       expect(hosted.count).toBe(0);
       expect(logs).toHaveLength(1);

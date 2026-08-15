@@ -10,7 +10,7 @@ import type { Server } from 'http';
 import * as path from 'path';
 import chalk from 'chalk';
 import { readAndResolveBundleEnv } from '../lib/secrets/bundles.js';
-import { createFileDeliveryStore, startWebhookServer, type WebhookSecrets } from '../lib/triggers/webhook.js';
+import { createFileDeliveryStore, startWebhookServer, waitForListening, type WebhookSecrets } from '../lib/triggers/webhook.js';
 import type { FiredHandler } from '../lib/triggers/handlers.js';
 import { getRuntimeStateDir } from '../lib/state.js';
 
@@ -42,26 +42,6 @@ function readWebhookSecrets(bundleName: string): WebhookSecrets {
     );
   }
   return secrets;
-}
-
-function waitForListening(server: Server): Promise<void> {
-  if (server.listening) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      server.off('listening', onListening);
-      server.off('error', onError);
-    };
-    const onListening = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (err: Error) => {
-      cleanup();
-      reject(err);
-    };
-    server.once('listening', onListening);
-    server.once('error', onError);
-  });
 }
 
 export function registerWebhooksCommand(program: Command): void {

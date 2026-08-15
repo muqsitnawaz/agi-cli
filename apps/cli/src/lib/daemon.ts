@@ -1284,7 +1284,7 @@ export async function runDaemon(): Promise<void> {
   let webhookReceivers: HostedWebhookReceivers | null = null;
   if (isEnabled('webhook-receiver')) {
     try {
-      webhookReceivers = startHostedWebhookReceivers({ log });
+      webhookReceivers = await startHostedWebhookReceivers({ log });
       log(
         'INFO',
         webhookReceivers.count > 0

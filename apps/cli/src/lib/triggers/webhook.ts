@@ -515,6 +515,28 @@ async function readRawBody(req: http.IncomingMessage, maxBytes: number): Promise
   return Buffer.concat(chunks);
 }
 
+/**
+ * Resolve once a receiver is actually accepting connections, REJECT if the bind
+ * failed. `server.listen()` reports a bind failure (EADDRINUSE, EACCES) as an
+ * asynchronous `'error'` event, never a throw — so a `try/catch` around
+ * `startWebhookServer` cannot see it, and without this the event reaches Node's
+ * default handler and takes the whole process down. Every caller that hosts a
+ * receiver MUST await this rather than assuming the return means "bound".
+ */
+export function waitForListening(server: http.Server): Promise<void> {
+  if (server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      server.off('listening', onListening);
+      server.off('error', onError);
+    };
+    const onListening = () => { cleanup(); resolve(); };
+    const onError = (err: Error) => { cleanup(); reject(err); };
+    server.once('listening', onListening);
+    server.once('error', onError);
+  });
+}
+
 /** Options for the local webhook http listener. */
 export interface WebhookServerOptions {
   port?: number;

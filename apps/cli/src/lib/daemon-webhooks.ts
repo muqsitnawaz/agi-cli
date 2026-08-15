@@ -21,7 +21,7 @@ import type { Server } from 'http';
 import { getDaemonConfigDir, getRuntimeStateDir } from './state.js';
 import { atomicWriteFileSync } from './fs-atomic.js';
 import { readAndResolveBundleEnv } from './secrets/bundles.js';
-import { startWebhookServer, createFileDeliveryStore, type WebhookSecrets } from './triggers/webhook.js';
+import { startWebhookServer, createFileDeliveryStore, waitForListening, type WebhookSecrets } from './triggers/webhook.js';
 import { buildFunnelUpCommand, FUNNEL_PORTS, type FunnelPort } from './funnel.js';
 
 export const DEFAULT_WEBHOOK_PORT = 8787;
@@ -111,13 +111,18 @@ export function addHostedReceiver(receiver: HostedReceiverConfig): DaemonWebhook
   return next;
 }
 
-/** Drop the receiver bound to `port`. Returns false when nothing was declared there. */
-export function removeHostedReceiver(port: number): boolean {
+/**
+ * Drop the receiver bound to `port`. Returns the removed entry, or null when
+ * nothing was declared there. The caller is responsible for taking down any
+ * public Funnel the removed entry declared — leaving it up would keep a public
+ * `https://<host>.ts.net` route pointed at a port nothing serves.
+ */
+export function removeHostedReceiver(port: number): HostedReceiverConfig | null {
   const { receivers } = readDaemonWebhooksConfig();
-  const kept = receivers.filter((r) => hostedReceiverPort(r) !== port);
-  if (kept.length === receivers.length) return false;
-  writeDaemonWebhooksConfig({ receivers: kept });
-  return true;
+  const removed = receivers.find((r) => hostedReceiverPort(r) === port);
+  if (!removed) return null;
+  writeDaemonWebhooksConfig({ receivers: receivers.filter((r) => hostedReceiverPort(r) !== port) });
+  return removed;
 }
 
 /**
@@ -166,12 +171,32 @@ function reconcileFunnel(publicPort: FunnelPort, localPort: number, log: Logger)
 }
 
 /**
- * Start every receiver declared in `webhooks.yaml`. A receiver whose secret is
- * unreadable (locked bundle, no webhook secret) is skipped with a loud WARN and
- * does not take the others down. Returns a handle that stops them all.
+ * Start every receiver declared in `webhooks.yaml`. A receiver that cannot start
+ * — an unreadable secret (locked bundle, no webhook secret) or a failed bind
+ * (the port is already taken by a foreground `agents webhooks serve`, another
+ * daemon, or anything else) — is skipped with a loud WARN and does NOT take the
+ * others, or the daemon, down. Returns a handle that stops them all.
+ *
+ * This is async because a bind failure is only observable asynchronously:
+ * `server.listen()` surfaces EADDRINUSE as an `'error'` event, so a `try/catch`
+ * around the start call never sees it and the event reaches the process-level
+ * `uncaughtException` handler (`index.ts`), which exits 1 for the supervisor to
+ * restart — a crash loop that would take the secrets broker, scheduler,
+ * monitors, browser IPC, and self-heal down with it. `waitForListening` is what
+ * turns that into one skipped receiver.
  */
-export function startHostedWebhookReceivers(opts: { log: Logger }): HostedWebhookReceivers {
+export async function startHostedWebhookReceivers(opts: {
+  log: Logger;
+  /**
+   * How a receiver's signing secrets are resolved. Defaults to
+   * `resolveReceiverSecrets` (the real broker read). Injectable for the same
+   * reason `FireWebhookOptions.dispatch` is — so a test can exercise the bind
+   * path against real sockets without a machine-local secrets bundle.
+   */
+  resolveSecrets?: (bundle: string) => WebhookSecrets;
+}): Promise<HostedWebhookReceivers> {
   const { log } = opts;
+  const resolveSecrets = opts.resolveSecrets ?? resolveReceiverSecrets;
   const { receivers } = readDaemonWebhooksConfig();
   const servers: Server[] = [];
 
@@ -179,13 +204,14 @@ export function startHostedWebhookReceivers(opts: { log: Logger }): HostedWebhoo
     const port = receiver.port ?? DEFAULT_WEBHOOK_PORT;
     let secrets: WebhookSecrets;
     try {
-      secrets = resolveReceiverSecrets(receiver.bundle);
+      secrets = resolveSecrets(receiver.bundle);
     } catch (err) {
       log('WARN', `webhook receiver on :${port} skipped: ${(err as Error).message}`);
       continue;
     }
+    let server: Server | null = null;
     try {
-      const server = startWebhookServer({
+      server = startWebhookServer({
         host: '127.0.0.1',
         port,
         secrets,
@@ -207,10 +233,14 @@ export function startHostedWebhookReceivers(opts: { log: Logger }): HostedWebhoo
           log('WARN', `webhook ${webhook.source}:${webhook.event} dispatch failed after ack: ${err.message}`);
         },
       });
+      await waitForListening(server);
       servers.push(server);
       log('INFO', `webhook receiver bound on 127.0.0.1:${port} (bundle ${receiver.bundle})`);
       if (receiver.funnel) reconcileFunnel(receiver.funnel.publicPort, port, log);
     } catch (err) {
+      // Close the half-started server so a failed bind leaks no handle, and keep
+      // going: one unusable receiver must not cost the others their ingress.
+      server?.close(() => {});
       log('WARN', `webhook receiver on :${port} failed to bind: ${(err as Error).message}`);
     }
   }
