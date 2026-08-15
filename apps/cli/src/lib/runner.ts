@@ -19,7 +19,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { getCliLaunch, getAgentsBinDir } from './cli-entry.js';
-import type { JobConfig, RunMeta } from './routines.js';
+import type { JobConfig, RunMeta } from './scheduling/routines.js';
 import {
   resolveJobPrompt,
   parseTimeout,
@@ -35,7 +35,7 @@ import {
   claimRunSlot,
   readRunMeta,
   resolveHostStrategy,
-} from './routines.js';
+} from './scheduling/routines.js';
 import type { ResolvedExecutionContext, PlacementMode } from './routine-context.js';
 import { getRunsDir, getUserAgentsDir, readMeta, getDaemonDir } from './state.js';
 import type { AgentId } from './types.js';
@@ -65,7 +65,7 @@ import { backgroundSpawnOptions, killTree } from './platform/process.js';
 import lockfile from 'proper-lockfile';
 import { ensureLockTarget } from './fs-atomic.js';
 import { walkForFiles } from './fs-walk.js';
-import { getBinaryPath, isVersionInstalled, resolveVersion, getVersionHomePath } from './versions.js';
+import { getBinaryPath, isVersionInstalled, resolveVersion, getVersionHomePath } from './installations/versions.js';
 import { resolveClaudeSetupToken } from './claude-account-token.js';
 import {
   getConfiguredRunStrategy,

@@ -75,7 +75,7 @@ import type { AgentId, ExtraRepoConfig } from '../lib/types.js';
 import { ALL_AGENT_IDS, isAgentName, resolveAgentName } from '../lib/agents.js';
 import { refresh } from '../lib/refresh.js';
 import { capableAgents } from '../lib/capabilities.js';
-import { getGlobalDefault, getVersionHomePath, listInstalledVersions } from '../lib/versions.js';
+import { getGlobalDefault, getVersionHomePath, listInstalledVersions } from '../lib/installations/versions.js';
 import { syncAllMarketplaces } from '../lib/plugins/plugin-marketplace.js';
 import { gatherRemoteAgentsJson } from '../lib/remote-agents-json.js';
 import { machineId, normalizeHost } from '../lib/machine-id.js';
@@ -1207,7 +1207,7 @@ export function registerRepoCommands(program: Command): void {
       // so scheduler.reloadAll() re-reads the synced YAML and device pins refresh.
       // No-op when the daemon isn't running (or on Windows, which has no SIGHUP).
       if (anyPulled) {
-        const { isDaemonRunning, signalDaemonReload } = await import('../lib/daemon.js');
+        const { isDaemonRunning, signalDaemonReload } = await import('../lib/daemon/daemon.js');
         if (isDaemonRunning() && signalDaemonReload()) {
           console.log(chalk.gray('Reloaded the routines daemon (device pins refreshed).'));
         }

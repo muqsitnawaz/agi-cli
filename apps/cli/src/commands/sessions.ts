@@ -59,13 +59,13 @@ import { sessionOwnerDevice, RESUME_PINNED_ENV } from '../lib/session/resume-own
 import { renderMarkdown } from '../lib/markdown.js';
 import { AGENTS, colorAgent, resolveAgentName } from '../lib/agents.js';
 import { getShimsDir } from '../lib/state.js';
-import { listJobs, listJobsWithRuns, listRuns, getRunDir, type RunMeta } from '../lib/routines.js';
+import { listJobs, listJobsWithRuns, listRuns, getRunDir, type RunMeta } from '../lib/scheduling/routines.js';
 import { formatUsd } from '../lib/pricing/cost.js';
 import { fuzzyMatch, FUZZY_PRESETS } from '../lib/fuzzy.js';
 import { itemPicker } from '../lib/picker.js';
 import { resolveSessionAlias } from '../lib/session/actor-sidecar.js';
-import { listInstalledVersions, resolveVersionAliasLoose } from '../lib/versions.js';
-import { getAgentsInvocation } from '../lib/daemon.js';
+import { listInstalledVersions, resolveVersionAliasLoose } from '../lib/installations/versions.js';
+import { getAgentsInvocation } from '../lib/daemon/daemon.js';
 import { sessionRecoveryRunArgs } from '../lib/session/recovery.js';
 import { isInteractiveTerminal, isPromptCancelled } from './utils.js';
 import {
