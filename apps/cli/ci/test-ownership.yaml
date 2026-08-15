@@ -24,6 +24,7 @@ areas:
     companion: true
     related: true
   - prefix: apps/ext/
+    companion: true
     checks: [ext]
   - prefix: packages/session-tracker/
     checks: [session-tracker]
@@ -65,13 +66,12 @@ groups:
     when:
       - apps/cli/docs/**
       - apps/cli/AGENTS.md
-      - apps/cli/README.md
       - apps/cli/CHANGELOG.md
     checks: [docs]
 
   - id: sessions
     when:
-      - apps/cli/src/lib/sessions/**
+      - apps/cli/src/lib/session/**
       - apps/cli/src/commands/sessions.ts
       - apps/cli/bench/sessions-active-perf.ts
     checks: [typecheck, sessions-bench]

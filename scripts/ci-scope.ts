@@ -250,15 +250,22 @@ export function isClassified(file: string, manifest: OwnershipManifest): boolean
 export function validateOwnershipManifest(
   manifest: OwnershipManifest,
   repoRoot: string,
-): { unmapped: string[]; missingTests: string[] } {
-  const unmapped = trackedFiles(repoRoot).filter((file) => !isClassified(file, manifest));
+): { unmapped: string[]; missingTests: string[]; deadGlobs: string[] } {
+  const tracked = trackedFiles(repoRoot);
+  const unmapped = tracked.filter((file) => !isClassified(file, manifest));
   const missingTests: string[] = [];
+  const deadGlobs: string[] = [];
   for (const group of manifest.groups) {
     for (const test of group.tests ?? []) {
       if (!existsSync(join(repoRoot, test))) missingTests.push(`${group.id}:${test}`);
     }
+    for (const glob of group.when) {
+      if (!tracked.some((file) => matchGlob(glob, file))) {
+        deadGlobs.push(`${group.id}:${glob}`);
+      }
+    }
   }
-  return { unmapped, missingTests };
+  return { unmapped, missingTests, deadGlobs };
 }
 
 const IMPORT_RE = /(?:from\s+|import\s*\()\s*['"](\.[^'"]+)['"]/g;
@@ -536,6 +543,29 @@ export interface RunCommand {
   cmd: string[];
 }
 
+export function commandForTestFile(file: string, repoRoot: string): RunCommand {
+  const f = posix(file);
+  if (f.endsWith('.test.sh')) {
+    return { cwd: join(repoRoot, dirname(f)), cmd: ['bash', f.split('/').pop()!] };
+  }
+  if (f.startsWith('apps/cli/') && f.endsWith('.test.ts')) {
+    return {
+      cwd: join(repoRoot, 'apps/cli'),
+      cmd: ['node', './node_modules/vitest/vitest.mjs', 'run', '--', f.slice('apps/cli/'.length)],
+    };
+  }
+  if (f.startsWith('packages/session-tracker/') && f.endsWith('.test.ts')) {
+    return {
+      cwd: join(repoRoot, 'packages/session-tracker'),
+      cmd: ['bun', 'run', 'test', '--', f.slice('packages/session-tracker/'.length)],
+    };
+  }
+  if (f.endsWith('.test.ts')) {
+    return { cwd: repoRoot, cmd: ['bun', 'test', f] };
+  }
+  throw new Error(`no runner for selected test: ${f}`);
+}
+
 export function commandsForPlan(plan: ImpactPlan, repoRoot: string): RunCommand[] {
   const out: RunCommand[] = [];
   const cli = join(repoRoot, 'apps/cli');
@@ -544,13 +574,17 @@ export function commandsForPlan(plan: ImpactPlan, repoRoot: string): RunCommand[
   } else {
     const cliTests = plan.tests
       .map((t) => t.file)
-      .filter((f) => f.startsWith('apps/cli/'))
+      .filter((f) => f.startsWith('apps/cli/') && f.endsWith('.test.ts'))
       .map((f) => f.slice('apps/cli/'.length));
     if (cliTests.length) {
       out.push({
         cwd: cli,
         cmd: ['node', './node_modules/vitest/vitest.mjs', 'run', '--', ...cliTests],
       });
+    }
+    for (const test of plan.tests) {
+      if (test.file.startsWith('apps/cli/') && test.file.endsWith('.test.ts')) continue;
+      out.push(commandForTestFile(test.file, repoRoot));
     }
   }
   for (const check of plan.checks) {
@@ -573,6 +607,10 @@ export function commandsForPlan(plan: ImpactPlan, repoRoot: string): RunCommand[
         break;
       case 'ext':
         out.push({ cwd: join(repoRoot, 'apps/ext'), cmd: ['bun', 'run', 'compile'] });
+        out.push({
+          cwd: join(repoRoot, 'apps/ext'),
+          cmd: ['bash', '-lc', 'for t in scripts/*.test.sh; do echo "== $t"; bash "$t"; done'],
+        });
         break;
       case 'session-tracker':
         out.push({
@@ -680,10 +718,11 @@ function main(): void {
 
   if (args.validate) {
     const result = validateOwnershipManifest(manifest, repoRoot);
-    if (result.unmapped.length || result.missingTests.length) {
+    if (result.unmapped.length || result.missingTests.length || result.deadGlobs.length) {
       process.stderr.write(
         `unmapped (${result.unmapped.length}):\n${result.unmapped.map((f) => `  ${f}`).join('\n')}\n`
-        + `missing tests:\n${result.missingTests.map((f) => `  ${f}`).join('\n')}\n`,
+        + `missing tests:\n${result.missingTests.map((f) => `  ${f}`).join('\n')}\n`
+        + `dead when-globs:\n${result.deadGlobs.map((f) => `  ${f}`).join('\n')}\n`,
       );
       process.exit(1);
     }

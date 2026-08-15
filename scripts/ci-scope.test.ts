@@ -83,7 +83,7 @@ describe('classifyCiScope', () => {
   test('runs each affected component for a mixed change', () => {
     expect(classifyCiScope([
       'apps/cli/src/index.ts',
-      'apps/cli/README.md',
+      'apps/cli/AGENTS.md',
       'apps/ext/src/extension.ts',
       'packages/session-tracker/src/index.ts',
     ], REPO)).toEqual({
@@ -292,6 +292,31 @@ describe('exact-tree proof reuse', () => {
 });
 
 describe('commandsForPlan', () => {
+  test('a changed root script test is executed, not dropped', () => {
+    const plan = selectImpact({
+      files: ['scripts/bottle.test.sh'],
+      repoRoot: REPO,
+      related: false,
+    });
+    expect(plan.tests.some((t) => t.file === 'scripts/bottle.test.sh')).toBe(true);
+    const cmds = commandsForPlan(plan, REPO);
+    expect(cmds.some((c) => c.cmd[0] === 'bash' && c.cmd[1] === 'bottle.test.sh')).toBe(true);
+  });
+
+  test('a session library change selects the session bench', () => {
+    const plan = selectImpact({
+      files: ['apps/cli/src/lib/session/db.ts'],
+      repoRoot: REPO,
+      related: false,
+    });
+    expect(plan.checks).toContain('sessions-bench');
+  });
+
+  test('the reviewed manifest has no dead owner globs', () => {
+    const result = validateOwnershipManifest(MANIFEST, REPO);
+    expect(result.deadGlobs).toEqual([]);
+  });
+
   test('selected CLI tests invoke vitest with those files only', () => {
     const cmds = commandsForPlan({
       ...selectImpact({ files: ['apps/cli/src/lib/state.ts'], repoRoot: REPO, related: false }),
