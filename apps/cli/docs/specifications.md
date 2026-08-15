@@ -2295,7 +2295,7 @@ schema (`--json` passes through each agent's native stream format).
 - **EXEC-34 (MUST NOT).** `--copy-creds` and lease placement MUST NOT resolve,
   serialize, or transfer native OAuth/session credentials. `--copy-creds` is a
   deprecated fail-loud flag. Portable provider credentials move only through
-  explicit `agents accounts sync <account> <device>`, which requires an already
+  explicit `agents accounts sync <account> --device <device>`, which requires an already
   pinned managed SSH host key and disables SSH multiplexing.
 - **EXEC-35 (MUST).** A `~`/`$HOME`-anchored `--cwd` MUST be re-rooted onto
   the REMOTE user's home via an unquoted `"$HOME"` shell expansion

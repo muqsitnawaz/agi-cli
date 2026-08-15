@@ -7,7 +7,6 @@
   every `login: sync` agent that needs a login is surfaced as **needs-login** with
   the honest reason and the portable alternative — log in on the box itself, or
   `agents accounts sync <name> --device <host>` a policy-`never` provider account.
-  The internal `apply --recv-auth` receive path is now inert (nothing sends it) and
-  is slated for removal. Sources: `apps/cli/src/lib/fleet/auth-sync.ts`
+  The internal `apply --recv-auth` receive path is gone. Sources: `apps/cli/src/lib/fleet/auth-sync.ts`
   (`isCredentialSafeToPropagate`), `apps/cli/src/lib/fleet/apply.ts`,
   `apps/cli/src/commands/apply.ts`.

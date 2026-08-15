@@ -108,7 +108,7 @@ the managed store) and verifies it with `StrictHostKeyChecking=yes` on every
 subsequent connect — a later key swap is refused, not re-accepted. Native OAuth
 and session credentials never cross this transport: `run --host --copy-creds`
 is retained only as a fail-loud deprecated flag. Explicit portable provider
-account sync (`agents accounts sync <account> <device>`) requires the destination
+account sync (`agents accounts sync <account> --device <device>`) requires the destination
 to already be present in the managed store and uses a fresh, non-multiplexed SSH
 connection. A registered device earns its pin by connecting once with
 `agents ssh <device>` and verifying the host before syncing an account.

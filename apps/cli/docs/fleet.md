@@ -164,7 +164,7 @@ device that lacks a requested native login, but it never reads or copies a nativ
 OAuth/session file. Fleet apply has no native-auth materialization receiver.
 Complete an interactive login on that device, or create
 a portable provider account and copy it explicitly with
-`agents accounts sync <account> <device>`.
+`agents accounts sync <account> --device <device>`.
 
 The custody decision is centralized in `src/lib/fleet/auth-sync.ts`:
 `isCredentialSafeToPropagate` returns false for every native harness login.

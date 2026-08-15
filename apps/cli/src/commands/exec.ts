@@ -775,7 +775,7 @@ export function registerRunCommand(program: Command): void {
     .option('--any', 'With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.')
     .option(
       '--copy-creds',
-      'Deprecated refusal: native OAuth/session credentials cannot be copied between devices. Use `agents accounts sync <account> <device>` for a portable provider credential.',
+      'Deprecated refusal: native OAuth/session credentials cannot be copied between devices. Use `agents accounts sync <account> --device <device>` for a portable provider credential.',
     )
     .option(
       '--lease [backend]',
@@ -1639,7 +1639,7 @@ export function registerRunCommand(program: Command): void {
         if (options.copyCreds) {
           console.error(chalk.red(
             'Refusing --copy-creds: native OAuth/session credentials are device-local and cannot be copied. ' +
-            'Create a portable provider account and run `agents accounts sync <account> <device>` instead.',
+            'Create a portable provider account and run `agents accounts sync <account> --device <device>` instead.',
           ));
           process.exit(1);
           return;

@@ -20055,7 +20055,7 @@
         },
         {
           "flags": "--copy-creds",
-          "description": "Deprecated refusal: native OAuth/session credentials cannot be copied between devices. Use `agents accounts sync <account> <device>` for a portable provider credential.",
+          "description": "Deprecated refusal: native OAuth/session credentials cannot be copied between devices. Use `agents accounts sync <account> --device <device>` for a portable provider credential.",
           "long": "--copy-creds",
           "required": false,
           "optional": false,
