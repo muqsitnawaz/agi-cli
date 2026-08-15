@@ -18,9 +18,9 @@ whose *consumer* and *axis* match your question, not whichever you remember firs
 | **`insights`** | **How work looks — one verb, two engines.** Bare = behavioural report (transcript content, account split). `insights mix` / recipes = cheap counters (harness/model/token/secrets). Former top-level `agents trends` is a deprecated alias of the mix tree only. | behaviour: `sessions.db` + `session_insights`; mix: `sessions.db` + `usage.db` | Human + `--json` |
 | **`feed`** / **`inbox`** | **Needs-you inbox + status posts.** Open blocks (decisions agents are waiting on) + `feed post` milestones. `inbox` ≡ `feed`. Scope with `--project`. | `.history/feed/*` + active sessions | Humans (operator inbox) + agents (progress) |
 | **`timeline`** | **Progress stream only.** Alias of `feed --filter updates` — deliberate posts, not tool noise. | same as feed updates lane | Humans + `--json` |
-| **`insights output`** | **Productivity accounting.** Token burn vs shipped output (PRs, commits) across agents — the "was it worth it" axis. (`agents insights cost` is the pure $-and-duration sibling.) | `sessions.db` + git/gh | Human + `--json` |
-| **`sessions`** | **Live agent roster + transcripts.** Live roster is `sessions --active`. Browse/read past transcripts under `sessions`. `sessions stats` = skill/slash invocation leaderboard. | live pid/transcript probe + `sessions.db` | Human + `--json` |
-| **`devices snapshot`** | **One-process poll.** Inventory + active sessions (+ optional feed/sync). Not `status` (sync-only). | view + active + optional feed | Machines / the ext |
+| **`output`** | **Productivity accounting.** Token burn vs shipped output (PRs, commits) across agents — the "was it worth it" axis. (`agents cost` is the pure $-and-duration sibling.) | `sessions.db` + git/gh | Human + `--json` |
+| **`sessions`** / **`roster`** | **Live agent roster + transcripts.** `roster` ≡ `sessions --active`. Browse/read past transcripts under `sessions`. `sessions stats` = skill/slash invocation leaderboard. | live pid/transcript probe + `sessions.db` | Human + `--json` |
+| **`snapshot`** | **One-process poll.** Inventory + active sessions (+ optional feed/sync). Not `status` (sync-only). | view + active + optional feed | Machines / the ext |
 
 ### Why `insights` owns mix (and `trends` does not)
 
@@ -49,7 +49,7 @@ Thin second names for the product jobs — **no store merge**:
 |---|---|---|
 | What needs me? | `agents inbox` | `agents feed` |
 | What did agents post? | `agents timeline` | `agents feed --filter updates` |
-| Who is live? | `agents sessions --active` | `agents sessions --active` |
+| Who is live? | `agents roster` | `agents sessions --active` |
 
 `agents audit` and `agents logs` **are** aliases of `events` (with default family filters). Do not re-introduce a second store or query path.
 
@@ -425,7 +425,7 @@ The `query()` API reads every dated active JSONL file and numbered gzip segment
 transparently.
 
 External tools (dashboards, voice assistants, CI runners, monitoring) can read
-fleet state via canonical `--json` sources. Prefer **`agents devices snapshot --json`** when
+fleet state via canonical `--json` sources. Prefer **`agents snapshot --json`** when
 you need inventory + active sessions in one process; keep `agents status --json` for
 sync drift only. No direct DB access, no re-parsing of agent-specific formats, no auth
 to manage.
@@ -444,7 +444,7 @@ Three diagnostics with distinct scopes (RUSH-2027):
   peers' rows on demand, cache-first, ssh-reading a stale/missing peer via
   `agents fleet status --local --json` through a bounded, kill-on-timeout fan-out.
 
-- `agents devices snapshot` — **one-process consumer poll** for install inventory + active sessions
+- `agents snapshot` — **one-process consumer poll** for install inventory + active sessions
   (optional feed / sync). Replaces the N× `view --json` + `sessions --active --json` fork
   storm. Default sessions scope is this machine; `--all-hosts` matches full active fan-out.
   JSON contract: `FleetSnapshot` version 1 (`inventory`, `sessions`, `agents`, optional
@@ -1177,14 +1177,14 @@ dumps the edge list, and `--watch` streams NDJSON.
 
 ## Behavioural report (`agents insights`, bare)
 
-`agents insights cost` answers what you spent and `agents insights output` answers what shipped.
+`agents cost` answers what you spent and `agents output` answers what shipped.
 Bare `agents insights` answers **how you work**, and is the only surface that splits any of
 it by the account that did the work. Counter recipes share the same verb as
 `agents insights mix` (see [Counter mix](#counter-mix-agents-insights-mix) above) —
 do not invent a second top-level analytics command.
 
 That account split is the reason the behavioural path exists. `getConfiguredRunStrategy`
-defaults to `balanced` (`lib/rotate.ts`), so sessions are sprayed across every signed-in
+defaults to `balanced` (`lib/accounting/rotate.ts`), so sessions are sprayed across every signed-in
 Claude account. A report that reads one account's directory — which is what Claude Code's
 own `/insights` does — describes a fraction of the work and attributes all of it to one org.
 
@@ -1266,13 +1266,13 @@ logic changes, so a new metric never reports stale numbers beside fresh ones.
 - **"Lines touched" is not a diffstat.** It sums the before/after line counts of each
   edit, so an `Edit` whose `old_string` includes unchanged context counts those lines on
   both sides. Measured against a real commit the written figure ran ~19% high and the
-  replaced figure ~475% high versus `git --numstat`. Use `agents insights output` for real
+  replaced figure ~475% high versus `git --numstat`. Use `agents output` for real
   shipped-code numbers; this one is about editing behaviour.
 - **Facet coverage is per harness.** Line counts come from structured edit arguments, so
   they work for Claude and droid but not codex, which patches through shell `exec`.
   Unmeasurable is rendered as "not measurable", never as `0`.
 - **Commits and pushes are substring-matched from shell command text**, so they
-  disagree with `agents insights output`, which counts real commits by deduped SHA from
+  disagree with `agents output`, which counts real commits by deduped SHA from
   `git log`. Labelled "seen in shell commands" for that reason. Coverage also varies by
   harness: the codex parser exposes a command string for `exec_command` but not plain
   `exec`, its dominant tool, so on a measured run only 92 of its 5,197 calls were
@@ -1282,7 +1282,7 @@ logic changes, so a new metric never reports stale numbers beside fresh ones.
   sub-2-second replies, which censors ~28% of the sample and inflates the median by
   ~63%.
 
-## Cost & Duration Rollup (`agents insights cost`)
+## Cost & Duration Rollup (`agents cost`)
 
 Every session is priced at scan time: `cost_usd = Σ tokens × per-model price`
 and `duration_ms = lastTs − firstTs` are persisted on the session row (schema
@@ -1290,17 +1290,17 @@ v13). The price table is offline and versioned — no API calls, no telemetry �
 covering current Claude, OpenAI, and Gemini models. Unknown/unpriced models
 contribute `$0`, never `NaN`.
 
-`agents insights cost` rolls those figures up across the local, cross-agent index:
+`agents cost` rolls those figures up across the local, cross-agent index:
 
 ```bash
 # Daily $ histogram + top-10 sessions by cost + per-agent breakdown
-agents insights cost
+agents cost
 
 # Last 30 days, grouped by project instead of agent
-agents insights cost --since 30d --by project
+agents cost --since 30d --by project
 
 # Machine-readable daily rollup for a dashboard
-agents insights cost --by day --json
+agents cost --by day --json
 ```
 
 Output sections:
@@ -1312,7 +1312,7 @@ Output sections:
 - **By agent / project / day** — grouped totals (`--by`), summed cost,
   session count, and total duration.
 
-`agents insights cost` is distinct from [`agents usage`](#), which reports live
+`agents cost` is distinct from [`agents usage`](#), which reports live
 rate-limit / quota status per agent — different question, different command.
 
 For per-session figures, `agents sessions --json` now carries `costUsd` and
@@ -1325,9 +1325,9 @@ agents sessions --all --sort cost --limit 10 --json | \
   jq '.[] | {shortId, agent, costUsd, durationMs, topic}'
 ```
 
-## Productivity Rollup (`agents insights output`)
+## Productivity Rollup (`agents output`)
 
-`agents insights cost` answers *what you spent*; `agents insights output` joins that burn to *what
+`agents cost` answers *what you spent*; `agents output` joins that burn to *what
 shipped* (real generated output tokens, plus PRs and commits) — the "was it worth
 it" axis. It leads with `output_tokens` (real generation), not the cache-inflated
 `token_count`.
@@ -1350,14 +1350,14 @@ this have cost with caching off?" scenario.
 
 ```bash
 # Actual (cache-discounted) burn, with a caching-savings comparison line
-agents insights output
+agents output
 
 # Lead the burn with the no-cache figure (breakdown column becomes burn(nc))
-agents insights output --pricing no-cache
+agents output --pricing no-cache
 
 # Both costs + the split, machine-readable (JSON is scenario-agnostic —
 # it always carries burn.costUsd AND burn.costUsdNoCache plus the split)
-agents insights output --json | jq '.burn | {costUsd, costUsdNoCache, inputTokens, cacheReadTokens, cacheWriteTokens}'
+agents output --json | jq '.burn | {costUsd, costUsdNoCache, inputTokens, cacheReadTokens, cacheWriteTokens}'
 ```
 
 `--pricing` only chooses which cost the **text** report leads with; the `--json`
@@ -1378,7 +1378,7 @@ a stable per-account key:
   is **local-only, no network**. It reads each agent's on-disk credential and
   surfaces an email when one is readable, else a stable account id, else a bare
   `signed in`.
-- **Usage bars** — a separate network pass ([`src/lib/usage.ts`](../src/lib/usage.ts))
+- **Usage bars** — a separate network pass ([`src/lib/usage.ts`](../src/lib/accounting/usage.ts))
   fetches live quota and renders `S:`/`W:`/`M:` bars + plan, according to each
   provider's reported window duration. It's **stale-while-revalidate**
   (on-disk cache under `~/.agents/.cache/`, keyed per account: 2-min fresh, 24-h
@@ -1387,7 +1387,7 @@ a stable per-account key:
   (RUSH-2061).** Displaying a slightly old bar costs nothing; *choosing an account*
   from one must not cost a network round trip on `agents run` cold-start.
   `collectRunCandidates` reads the cache with `readOnly`
-  ([`src/lib/rotate.ts`](../src/lib/rotate.ts), [`src/lib/usage.ts`](../src/lib/usage.ts))
+  ([`src/lib/rotate.ts`](../src/lib/accounting/rotate.ts), [`src/lib/usage.ts`](../src/lib/accounting/usage.ts))
   and never blocks on a live fetch. A snapshot older than **5 minutes**
   (`USAGE_DECISION_MAX_AGE_MS`) is still not trusted for the pick — but the guard
   is `isUsageVerified`, which routes around an unconfirmable number and reports
@@ -1420,7 +1420,7 @@ a stable per-account key:
   credential, a locally-expired one, a rejected request, and a request that threw
   are distinct errors (`usageNoCredentialError` / `usageExpiredCredentialError` /
   `usageRejectedError` / `usageUnreachableError`,
-  [`src/lib/usage.ts`](../src/lib/usage.ts)), not a silent
+  [`src/lib/usage.ts`](../src/lib/accounting/usage.ts)), not a silent
   null. All four networked providers — Claude, Kimi, Droid, Cursor — share them,
   because they share one cache fallback: a silent null in any of them presents a
   stale reading as confirmed. Because a usage read never refreshes a token,
@@ -1472,9 +1472,9 @@ Two deliberate boundaries worth knowing:
 The same fields are exposed programmatically via `agents view --json`
 (`email`, `accountId`, `plan`, `usageStatus`, `windows`).
 
-## Budget Guardrails (`agents config budget`)
+## Budget Guardrails (`agents budget`)
 
-`agents insights cost` is the observability half — it tells you what you already spent.
+`agents cost` is the observability half — it tells you what you already spent.
 **Budget guardrails are the enforcement half**: they estimate a run's cost
 *before* it starts and can block it, and — for local headless `agents run` —
 attribute live spend and **hard-kill the running agent the moment a cap is
@@ -1555,19 +1555,19 @@ mid-run kill for teams/cloud is a planned follow-up.
 Every run that produces token usage appends to an append-only JSONL ledger at
 `~/.agents/.history/spend/ledger.jsonl`. Each line attributes one usage
 observation to `{ runId, agent, project, day, model, tokens, costUsd, source }`.
-This is the shared artifact `agents insights cost` can read for $ rollups.
+This is the shared artifact `agents cost` can read for $ rollups.
 
 ### View and set caps
 
 ```bash
-agents config budget                      # caps + spend-to-cap bars (today + project)
-agents config budget --json               # machine-readable snapshot
-agents config budget set per_run 5        # write a user-global cap
-agents config budget set per_agent.claude 30
-agents config budget set on_exceed warn   # switch to warn-only (do not block)
+agents budget                      # caps + spend-to-cap bars (today + project)
+agents budget --json               # machine-readable snapshot
+agents budget set per_run 5        # write a user-global cap
+agents budget set per_agent.claude 30
+agents budget set on_exceed warn   # switch to warn-only (do not block)
 ```
 
-`agents config budget` reports the **effective merged** config for the current
+`agents budget` reports the **effective merged** config for the current
 directory. `set` writes the user-global layer; project caps are hand-edited in
 the repo's `agents.yaml`.
 
