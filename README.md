@@ -445,11 +445,11 @@ A stalled session whose tail shows a hard account limit ("You've hit your weekly
 ## Sync the fleet
 
 <p align="center">
-  <img src="assets/fleet-sync.svg" alt="agents apply: reconcile every device to one profile from agents.yaml — install missing agents, sync config, and propagate logins across the fleet." width="100%" />
+  <img src="assets/fleet-sync.svg" alt="agents apply: reconcile every device to one profile from agents.yaml — install missing agents and sync config. Native logins stay on the machine that minted them." width="100%" />
 </p>
 
 
-One machine is set up the way you like it. Make every other machine match -- same agents installed, same config, logins seeded -- in one command.
+One machine is set up the way you like it. Make every other machine match -- same agents installed, same config -- in one command. Native OAuth logins stay on the box that minted them; portable provider accounts move only via `agents accounts sync`.
 
 ```yaml
 # agents.yaml -- add a fleet: block
@@ -458,7 +458,7 @@ fleet:
   defaults:
     agents: [claude@latest, codex@latest, antigravity@latest]
     sync: [user]            # config scopes to reconcile
-    login: sync             # propagate logins where the token is portable
+    login: sync             # surface needs-login; never copies native OAuth
 ```
 
 ```bash
