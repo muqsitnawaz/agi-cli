@@ -339,7 +339,7 @@ coverage is `ALL_AGENT_IDS`-driven, so a new harness is included automatically.
 ### 11. Session recovery is one decision on the origin device
 
 `resolveSessionRecovery` in `src/lib/session/recovery.ts` is the only place that
-chooses native resume versus `/continue`. `sessions resume`, `agents resume`, and
+chooses native resume versus `/continue`. `sessions resume` and
 `run --resume` route through it — as do the retired `focus`/`attach`/`reconnect`
 spellings, which are hidden aliases that still run the same bodies. Native resume is valid only for the exact healthy
 origin version when that active isolated home still owns the indexed transcript;
@@ -566,12 +566,12 @@ fallback then quietly resumed in `process.cwd()` (RUSH-2022).
 `sessionOwnerDevice`
 ([`src/lib/session/resume-owner.ts`](src/lib/session/resume-owner.ts)) is the one
 answer to "may this resume run here?". Every path that starts a harness from a picked
-row consults it first: `agents resume` and the `agents sessions` picker hop to the
-owner, and the attach path hops as an **attach** (its detach record and the
+row consults it first: `agents sessions resume` and the `agents sessions` picker hop to the
+owner, and `sessions attach` hops as an **attach** (its detach record and the
 headless process it stops are both on the owner — hopping as a bare resume would
 skip the stop and leave two processes on one transcript). The batch
 `sessions resume` mostly inherits it for free: every TAB it opens runs the
-canonical `agents resume <id>` (`lib/session/resume-command.ts`), whose docblock
+canonical `agents sessions resume <id>` (`lib/session/resume-command.ts`), whose docblock
 already promised source-device routing — this is what makes that true. Its
 no-tab-backend path (`inplace`, which any Linux box in a plain ssh shell lands on)
 never runs that command, so it routes explicitly via `resumeOnOwnerIfRemote`.
