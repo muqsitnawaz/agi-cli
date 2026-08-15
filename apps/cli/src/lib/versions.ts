@@ -2269,52 +2269,86 @@ export function removeAllVersions(agent: AgentId): number {
   return removed;
 }
 
+export interface HealedVersionPointers {
+  /** Global default reassigned off a not-installed version (`to: null` = cleared). */
+  globalDefault?: { from: string; to: string | null };
+  /** Isolated default (bare `agents run <agent>`) reassigned off a not-installed version. */
+  isolatedDefault?: { from: string; to: string | null };
+  /** `~/.<agent>` config symlink repointed off a not-installed version. */
+  configSymlink?: { from: string; to: string };
+}
+
 /**
- * Repoint `~/.<agent>` when it symlinks into a version that is no longer
- * installed, so the conventional-path home never resolves to a dead version
- * (RUSH-2471).
+ * Repoint an agent's version pointers — the global/isolated default and the
+ * `~/.<agent>` config symlink — off any version that is no longer installed, so
+ * neither `agents sync`/`agents run` resolution nor the conventional-path home
+ * can land on a dead version (RUSH-2471).
  *
- * How a dangling symlink arises: {@link removeVersion} clears the config symlink
- * only when IT removes the symlinked version. A version-home whose launch binary
- * disappears by any other route — grok self-updated its per-version binary out
- * from under the old dir, a manual delete, a half-finished install that seeded
- * the home but never landed the binary — leaves the version dir (and its
- * `~/.<agent>` symlink) pointing at something {@link isVersionInstalled} reports
- * as gone. Every resource sync then lands in an installed version while
- * `~/.<agent>` still resolves to the dead one (the reported yosemite-s0 state:
- * `~/.grok -> grok/1.0.0` while only 0.2.82 / 0.2.91 are installed).
+ * How a pointer goes dangling: {@link removeVersion} reassigns the defaults and
+ * clears the config symlink only when IT removes the pointed-at version. A
+ * version-home whose launch binary disappears by any other route — grok
+ * self-updated its per-version binary out from under the old dir, a manual
+ * delete, a half-finished install that seeded the home but never landed the
+ * binary — leaves the default and/or the symlink pointing at something
+ * {@link isVersionInstalled} reports as gone. `agents use <agent>@<v>` sets the
+ * global default AND the symlink together, so both dangle in lockstep once that
+ * `<v>`'s binary vanishes: `agents sync <agent>` then repoints the symlink but
+ * would still resolve the version via {@link resolveVersion} (the raw global
+ * default, no installed check) and fail `<v> is not installed`. Healing every
+ * pointer here keeps the two in sync (observed in the field: `~/.grok ->
+ * grok/1.0.0` while only 0.2.82 / 0.2.91 were installed).
  *
  * Called from the sync resolve path — the routine that runs regularly — so the
- * invariant self-heals: the config symlink can never point at a version that is
- * not installed. Narrow by design:
- *   - a symlink already pointing at an installed version is the user's
- *     `agents use` choice and is left untouched;
- *   - a real (non-symlink) config dir, or none at all, is never adopted here
- *     (that is `agents use`'s job);
- *   - an isolated-only agent is protected exactly as {@link switchConfigSymlink}
- *     would refuse, so its real config is never hijacked.
- * Repoints at the resolved default (project pin / global default) when that is
- * installed, else the newest installed version.
+ * invariant self-heals. Mirrors {@link removeVersion}'s reassignment exactly:
+ * the global default prefers the newest NON-isolated survivor (never
+ * auto-promotes an isolated install) else clears; the isolated default prefers
+ * the newest remaining isolated copy else clears. The symlink is repointed at
+ * the now-healed resolved default, else the newest installed version — but a
+ * symlink already on an installed version (a deliberate `agents use` choice), a
+ * real (non-symlink) config dir, and an isolated-only agent (which
+ * {@link switchConfigSymlink} would refuse) are all left untouched.
  *
- * @returns the `{ from, to }` versions when a repoint happened, else `null`.
+ * @returns which pointers were healed (empty object when nothing was dangling).
  */
-export async function healDanglingConfigSymlink(
+export async function healDanglingVersionPointers(
   agent: AgentId,
   cwd: string,
-): Promise<{ from: string; to: string } | null> {
-  const current = getConfigSymlinkVersion(agent);
-  if (current === null) return null; // no owned symlink to heal (real dir / none / foreign)
-  if (isVersionInstalled(agent, current)) return null; // already points at an installed version
-  if (isIsolationProtected(agent)) return null; // don't repoint an isolated-only agent's real config
-
+): Promise<HealedVersionPointers> {
+  const healed: HealedVersionPointers = {};
   const installed = listInstalledVersions(agent);
-  if (installed.length === 0) return null; // nothing installed to repoint to
 
-  const pinned = resolveVersion(agent, cwd);
-  const target = pinned && isVersionInstalled(agent, pinned) ? pinned : installed[installed.length - 1];
+  // Heal the defaults BEFORE the symlink so its resolveVersion target picks up
+  // the reassigned default rather than the dead one.
+  const globalDefault = getGlobalDefault(agent);
+  if (globalDefault !== null && !isVersionInstalled(agent, globalDefault)) {
+    const promotable = installed.filter((v) => !isVersionIsolated(agent, v));
+    const to = promotable.length > 0 ? promotable[promotable.length - 1] : undefined;
+    setGlobalDefault(agent, to);
+    healed.globalDefault = { from: globalDefault, to: to ?? null };
+  }
 
-  const result = await switchConfigSymlink(agent, target);
-  return result.success ? { from: current, to: target } : null;
+  const isolatedDefault = getIsolatedDefault(agent);
+  if (isolatedDefault !== null && !isVersionInstalled(agent, isolatedDefault)) {
+    const survivors = installed.filter((v) => isVersionIsolated(agent, v));
+    const to = survivors.length > 0 ? survivors[survivors.length - 1] : undefined;
+    setIsolatedDefault(agent, to);
+    healed.isolatedDefault = { from: isolatedDefault, to: to ?? null };
+  }
+
+  const current = getConfigSymlinkVersion(agent);
+  if (
+    current !== null && // no owned symlink to heal (real dir / none / foreign)
+    !isVersionInstalled(agent, current) && // already points at an installed version
+    !isIsolationProtected(agent) && // don't repoint an isolated-only agent's real config
+    installed.length > 0 // nothing installed to repoint to
+  ) {
+    const pinned = resolveVersion(agent, cwd);
+    const target = pinned && isVersionInstalled(agent, pinned) ? pinned : installed[installed.length - 1];
+    const result = await switchConfigSymlink(agent, target);
+    if (result.success) healed.configSymlink = { from: current, to: target };
+  }
+
+  return healed;
 }
 
 /**

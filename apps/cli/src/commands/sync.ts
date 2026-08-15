@@ -43,7 +43,7 @@ import {
   resolveVersion,
   resolveVersionAlias,
   listInstalledVersions,
-  healDanglingConfigSymlink,
+  healDanglingVersionPointers,
   getAvailableResources,
   getActuallySyncedResources,
   getProjectOnlyResources,
@@ -614,16 +614,22 @@ async function runSync(agentSpec: string | undefined, repoArg: string | undefine
   const cwd = opts.cwd || process.cwd();
   const force = !!opts.force;
 
-  // RUSH-2471: self-heal a ~/.<agent> symlink left pointing at a version that is
-  // no longer installed BEFORE resolving/syncing, so the conventional-path home
-  // and the installed set never diverge (every sync landing in an installed
-  // version while ~/.<agent> still resolves to a dead one). Runs once here so it
-  // covers both the @all and single-version branches below; skipped on --dry-run
-  // since it mutates the symlink.
+  // RUSH-2471: self-heal any version pointer (global/isolated default, ~/.<agent>
+  // symlink) left aimed at a version that is no longer installed BEFORE resolving
+  // the version to sync — otherwise resolveVersion below returns the dead default
+  // and the sync fails `not installed`, or the symlinked home diverges from the
+  // installed set. Runs once here so it covers both the @all and single-version
+  // branches; skipped on --dry-run since it mutates on-disk pointers.
   if (!opts.dryRun) {
-    const healed = await healDanglingConfigSymlink(agentId, cwd);
-    if (healed && !quiet && !json) {
-      outLog(chalk.yellow(`Repointed ${agentLabel(agentId)} config symlink from @${healed.from} (not installed) to @${healed.to}.`));
+    const healed = await healDanglingVersionPointers(agentId, cwd);
+    if (!quiet && !json) {
+      if (healed.globalDefault) {
+        const to = healed.globalDefault.to ? `@${healed.globalDefault.to}` : 'none';
+        outLog(chalk.yellow(`Reassigned ${agentLabel(agentId)} default from @${healed.globalDefault.from} (not installed) to ${to}.`));
+      }
+      if (healed.configSymlink) {
+        outLog(chalk.yellow(`Repointed ${agentLabel(agentId)} config symlink from @${healed.configSymlink.from} (not installed) to @${healed.configSymlink.to}.`));
+      }
     }
   }
 
