@@ -697,135 +697,6 @@
       "args": [],
       "options": [
         {
-          "flags": "--include <families>",
-          "description": "Only these families (comma-sep): ops, activity, commands, runs, security",
-          "long": "--include",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--exclude <families>",
-          "description": "Drop these families (comma-sep): ops, activity, commands, runs, security",
-          "long": "--exclude",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--module <name>",
-          "description": "Only events from this group (e.g. teams, secrets, activity, daemon, routine, watchdog, browser)",
-          "long": "--module",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--command <path>",
-          "description": "Only this command path — prefix match (e.g. \"teams create\")",
-          "long": "--command",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--event <type>",
-          "description": "Only this typed event (repeatable, e.g. secrets.get, run.dispatched, pr.opened)",
-          "long": "--event",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false,
-          "defaultValue": []
-        },
-        {
-          "flags": "--agent <name>",
-          "description": "Only events tagged with this agent",
-          "long": "--agent",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--caller <kind>",
-          "description": "Only this caller kind (claude-code, codex, gemini, cursor, terminal, script)",
-          "long": "--caller",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--level <level>",
-          "description": "Only this level: audit, warn, info, debug",
-          "long": "--level",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--session <id>",
-          "description": "Only events from this session (the provenance sessionId) — e.g. trace which session read a secret",
-          "long": "--session",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--bundle <name>",
-          "description": "Only events carrying this bundle in their payload — e.g. `--module secrets --bundle share` for every read of the share bundle",
-          "long": "--bundle",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--since <time>",
-          "description": "Only events newer than this (e.g. 2h, 7d, or ISO date)",
-          "long": "--since",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--limit <n>",
-          "description": "Max records to show; 0 for no cap (default 50)",
-          "long": "--limit",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false,
-          "defaultValue": "50"
-        },
-        {
-          "flags": "--json",
-          "description": "Output raw records as JSON",
-          "long": "--json",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "-f, --follow",
-          "description": "Tail today's operational log live",
-          "short": "-f",
-          "long": "--follow",
-          "required": false,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
           "flags": "-h, --help",
           "description": "Show help",
           "short": "-h",
@@ -1760,7 +1631,7 @@
           "negate": false
         }
       ],
-      "examples": "# List configured browser profiles\n      agents browser profiles list\n\n      # Create a Chrome profile pointed at a CDP endpoint\n      agents browser profiles create work --browser chrome --endpoint http://localhost:9222\n\n      # Start a session — auto-picks the first installed Chromium-family browser\n      agents browser start\n\n      # Or pin to a specific profile\n      agents browser start --profile work\n\n      # Drive the page\n      agents browser navigate https://example.com\n      agents browser screenshot\n\n      # Keep one process and daemon socket warm for repeated actions\n      agents browser stream --task \"$AGENTS_BROWSER_TASK\"\n\n      # Drive another machine's browser (needs its consent — see remote-control)\n      agents browser start --host zion\n\n      # Browse a task-heavy profile's captures: one row per task, not per file\n      agents browser sessions\n\n      # Allow / deny other fleet machines driving THIS machine's browser\n      agents browser remote-control on\n\n      # End the session when done\n      agents browser done\n\n      # Close tabs the daemon's own reaper would have caught on its next 5-min tick\n      agents browser gc --dry-run",
+      "examples": "# List configured browser profiles\n      agents browser profiles list\n\n      # Create a Chrome profile pointed at a CDP endpoint\n      agents browser profiles create work --browser chrome --endpoint http://localhost:9222\n\n      # Start a session — auto-picks the first installed Chromium-family browser\n      agents browser start\n\n      # Or pin to a specific profile\n      agents browser start --profile work\n\n      # Drive the page\n      agents browser navigate https://example.com\n      agents browser screenshot\n\n      # Keep one process and daemon socket warm for repeated actions\n      agents browser stream --task \"$AGENTS_BROWSER_TASK\"\n\n      # Drive another machine's browser (needs its consent — see remote-control)\n      agents browser start --device zion\n\n      # Browse a task-heavy profile's captures: one row per task, not per file\n      agents browser sessions\n\n      # Allow / deny other fleet machines driving THIS machine's browser\n      agents browser remote-control on\n\n      # End the session when done\n      agents browser done\n\n      # Close tabs the daemon's own reaper would have caught on its next 5-min tick\n      agents browser gc --dry-run",
       "notes": "Most agent workflows should use the 'browser' skill instead of raw subcommands.\n      The skill wraps profile selection, snapshotting, and tunneling.\n\n      Browser support: Chromium-family only (Chrome, Comet, Chromium, Brave, Edge).\n      Safari and Firefox are not supported — they don't speak the Chrome DevTools\n      Protocol the way agents browser expects. On Windows, Edge is the default\n      because it's preinstalled. On macOS and Linux, Chrome is preferred when\n      installed; otherwise the first Chromium-family binary on disk wins.",
       "subcommands": [
         {
@@ -6572,18 +6443,9 @@
       "args": [],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -8669,18 +8531,9 @@
       ],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -10317,18 +10170,9 @@
       "args": [],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -10933,18 +10777,9 @@
       ],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -11251,18 +11086,9 @@
       ],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -13804,18 +13630,9 @@
       "args": [],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -16455,18 +16272,9 @@
       "args": [],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -17336,18 +17144,9 @@
       "args": [],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -17392,7 +17191,7 @@
           "negate": false
         }
       ],
-      "examples": "# Cron routine: Claude every weekday at 9 AM (scheduler auto-starts)\n      agents routines add daily-standup --schedule \"0 9 * * 1-5\" --agent claude --prompt \"Draft standup from git log\"\n\n      # One-shot: Codex tomorrow at 2:30 PM, then never again\n      agents routines add hotfix-review --at \"14:30\" --agent codex --prompt \"Review hotfix PR #42\"\n\n      # Create from YAML (for complex routines with multiple settings)\n      agents routines add weekly-report.yml\n\n      # Place the job body on a fleet device / cloud / named host (not --host)\n      agents routines add drain --schedule \"0 3 * * *\" --agent claude --placement fleet --prompt \"Drain queue\"\n      agents routines add review --schedule \"0 9 * * 1\" --agent claude --placement cloud --prompt \"Review open PRs\"\n\n      # Enable a routine (materialises a project routine on first enable)\n      agents routines enable security-sweep\n      agents routines disable security-sweep\n\n      # List all routines and their next run times\n      agents routines list\n\n      # List routines on a specific device\n      agents routines list --host yosemite-s0\n\n      # Create a routine restricted to specific devices\n      agents routines add nightly --schedule \"0 2 * * *\" --agent claude --prompt \"Summarize today's commits\" --devices yosemite-s0,mac-mini\n\n      # Interactively manage which devices may run a routine\n      agents routines devices nightly\n\n      # Run a routine right now in the foreground (ignores schedule)\n      agents routines run daily-standup\n\n      # Check whether the scheduler is running\n      agents routines status",
+      "examples": "# Cron routine: Claude every weekday at 9 AM (scheduler auto-starts)\n      agents routines add daily-standup --schedule \"0 9 * * 1-5\" --agent claude --prompt \"Draft standup from git log\"\n\n      # One-shot: Codex tomorrow at 2:30 PM, then never again\n      agents routines add hotfix-review --at \"14:30\" --agent codex --prompt \"Review hotfix PR #42\"\n\n      # Create from YAML (for complex routines with multiple settings)\n      agents routines add weekly-report.yml\n\n      # Place the job body on a fleet device / cloud / named host (not --host)\n      agents routines add drain --schedule \"0 3 * * *\" --agent claude --placement fleet --prompt \"Drain queue\"\n      agents routines add review --schedule \"0 9 * * 1\" --agent claude --placement cloud --prompt \"Review open PRs\"\n\n      # Enable a routine (materialises a project routine on first enable)\n      agents routines enable security-sweep\n      agents routines disable security-sweep\n\n      # List all routines and their next run times\n      agents routines list\n\n      # List routines on a specific device\n      agents routines list --device yosemite-s0\n\n      # Create a routine restricted to specific devices\n      agents routines add nightly --schedule \"0 2 * * *\" --agent claude --prompt \"Summarize today's commits\" --devices yosemite-s0,mac-mini\n\n      # Interactively manage which devices may run a routine\n      agents routines devices nightly\n\n      # Run a routine right now in the foreground (ignores schedule)\n      agents routines run daily-standup\n\n      # Check whether the scheduler is running\n      agents routines status",
       "notes": "A routine is a YAML file that schedules an agent invocation. It specifies:\n        - which agent to run (claude, codex, antigravity, ...)\n        - when to run (cron schedule or one-shot time)\n        - what task to give the agent (the prompt)\n        - execution constraints (mode, effort, timeout)\n\n      The always-on agents daemon starts at install/upgrade and on setup (when\n      daemon.enabled is not false). Adding a routine also ensures it is running.\n      Manage it with 'agents routines start|stop|status'.\n\n      Version / credit failover (same semantics as 'agents run'):\n        - Omit 'version:' to let the configured run strategy (default: balanced)\n          pick a healthy install and skip accounts that are out of credits or\n          rate-limited. Pin with 'version: 2.1.x' when you want one install only.\n        - Foreground 'agents routines run' re-dispatches to the next healthy\n          same-agent account when a mid-run rate/usage limit is detected.\n        - Detached/daemon fires use the pre-flight pick only (next tick re-selects).\n        - Diagnostic lines log which account was picked, which were skipped, and\n          each failover hop: look for \"[agents] routine <name>:\" in the run log.\n        - Claude auth: a routine authenticates through the pinned account's own\n          on-disk login (the same one 'agents run claude' uses on this device).\n          The daemon injects no token; if that account's login has expired the\n          run is skipped up front with a re-login hint.",
       "subcommands": [
         {
@@ -17510,7 +17309,7 @@
             },
             {
               "flags": "--run-on <name>",
-              "description": "BODY placement: execute the job body on this machine over SSH (registered host, device, capability tag, or user@host). Sets hostStrategy=host. Same model as agents run --where device:<name> (docs/concepts.md#placement).",
+              "description": "BODY placement: execute the job body on this machine over SSH (registered host, device, capability tag, or user@host). Sets hostStrategy=host. Same model as agents run --where device:<name> (docs/00-concepts.md#placement).",
               "long": "--run-on",
               "required": true,
               "optional": false,
@@ -17699,18 +17498,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -17774,18 +17564,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -17849,18 +17630,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -17940,18 +17712,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18015,18 +17778,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18115,18 +17869,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18233,18 +17978,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18308,18 +18044,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18402,18 +18129,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18495,18 +18213,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18568,18 +18277,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18651,18 +18351,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18733,18 +18424,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18815,18 +18497,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18902,18 +18575,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -18968,18 +18632,9 @@
           "args": [],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -19050,18 +18705,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -19116,18 +18762,9 @@
           "args": [],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -19182,18 +18819,9 @@
           "args": [],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -19264,18 +18892,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -19337,18 +18956,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -19440,18 +19050,9 @@
               "negate": false
             },
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -19911,7 +19512,7 @@
         },
         {
           "flags": "--name <slug>",
-          "description": "Name the run — seeds the session label so it shows up as `<name>` in `agents sessions` and resolves by it (and `agents logs <name>` for --host runs) instead of an opaque id. An agent-generated title later refines the label; your name shows until then. Optional.",
+          "description": "Name the run — seeds the session label so it shows up as `<name>` in `agents sessions` and resolves by it (and `agents hosts logs <name>` for --device runs) instead of an opaque id. An agent-generated title later refines the label; your name shows until then. Optional.",
           "long": "--name",
           "required": true,
           "optional": false,
@@ -20094,7 +19695,7 @@
         },
         {
           "flags": "--where <spec>",
-          "description": "Where this run's body executes (one placement door): local | device:<name> | auto | lease[:backend] | cloud[:provider]. Expands to --host/--lease/--cloud. Do not combine with those flags. See docs/concepts.md#placement.",
+          "description": "Where this run's body executes (one placement door): local | device:<name> | auto | lease[:backend] | cloud[:provider]. Expands to --device/--lease/--cloud. Do not combine with those flags. See docs/00-concepts.md#placement.",
           "long": "--where",
           "required": true,
           "optional": false,
@@ -20102,17 +19703,9 @@
           "negate": false
         },
         {
-          "flags": "--host <name>",
-          "description": "Offload this run onto another machine over SSH — a device name, registered host, or user@host. Pass \"auto\" to pick the least-loaded reachable device with an eligible account; an unavailable or capped pool fails loud. Same as --where device:<name>. See `agents devices`.",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host. Pass \"auto\" for live health/account-aware device placement.",
+          "flags": "-D, --device <name>",
+          "description": "Offload this run onto another machine over SSH — a registered device, or user@host. Pass \"auto\" to pick the least-loaded reachable device where the requested agent is installed and signed in, keeping the run local when no remote is better. Same as --where device:<name>. See `agents devices`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -20130,7 +19723,7 @@
         },
         {
           "flags": "--no-follow",
-          "description": "With --host, dispatch detached and return immediately (track via `agents devices ps` and `agents logs`).",
+          "description": "With --device, dispatch detached and return immediately (track via `agents hosts ps/logs`).",
           "long": "--no-follow",
           "required": false,
           "optional": false,
@@ -20284,8 +19877,8 @@
           "negate": false
         }
       ],
-      "examples": "# Headless, read-only: investigate or summarize without writing files\n      agents run claude \"summarize recent git commits\" --mode plan\n\n      # Headless, can edit: have the agent make changes\n      agents run claude \"fix lint errors in src/\" --mode edit\n\n      # Interactive (TUI) with the pinned default version\n      agents run claude\n\n      # Pick a signed-in account/version for only this run\n      agents run claude@\n\n      # Full-auto: affinity-pick the host, then the harness with the most\n      # account headroom, then a balanced account on it\n      agents run auto \"fix the flaky test\" --mode edit\n      agents run auto --host yosemite-s0 \"fix the flaky test\"   # pin the host\n      agents run auto --interactive --device auto --strategy balanced --mode auto\n\n      # Placement (one door — where the body runs). Old flags still work.\n      agents run claude \"…\" --where device:yosemite-s0   # = --host yosemite-s0\n      agents run claude \"…\" --where auto                 # = --device auto\n      agents run claude \"fix CI\" --where lease --mode edit\n\n      # Vendor cloud placement — the agent's own cloud runs the task and\n      # agents cloud list/status/logs tracks it. Fire-and-forget: --no-follow\n      agents run claude \"fix the flaky e2e\" --cloud --repo acme/example\n      agents run codex \"add parser tests\" --cloud --cloud-env env_a1b2c3\n      agents run droid \"QA the onboarding flow\" --cloud --no-follow\n      agents run claude \"…\" --where cloud          # same as --cloud\n\n      # Open the session in a terminal tab — detected from where your sessions\n      # already run (Ghostty / iTerm / Terminal.app); force one with a value\n      agents run claude --terminal\n      agents run claude --terminal ghostty\n\n      # Pipe JSON events to a parser (--quiet drops the preamble)\n      agents run claude \"...\" --json --quiet | jq\n\n      # Bounded run — kill the agent after 30 minutes\n      agents run claude \"generate sales report for yesterday\" --mode plan --timeout 30m\n\n      # Inject a keychain-backed secrets bundle\n      agents run claude \"deploy the worker\" --secrets prod --mode edit\n\n      # Run on a cloud box — reuses a warm box from the repo's profile pool when\n      # one is ready (kept after the run), else leases a fresh box, torn down after\n      agents run claude \"fix the failing tests\" --lease\n\n      # Force a brand-new box (destroyed after), or target a warm box by slug\n      agents run claude \"fix the failing tests\" --lease --fresh\n      agents run claude \"fix the failing tests\" --box warm-one\n\n      # Pass arbitrary native flags to the underlying CLI via -- separator\n      agents run kimi -- --plan --some-kimi-option value\n      agents run claude \"fix the bug\" -- --custom-flag",
-      "notes": "Modes (not every agent supports every mode — run `agents modes <agent>`):\n        plan  read-only investigation; no writes, no shell side-effects\n        edit  may edit files; prompts for shell / risky operations\n        auto  smart classifier auto-approves safe ops, prompts for risky (claude, copilot)\n        skip  bypass every permission prompt (dangerously-skip-permissions)\n        Legacy 'full' is silently rewritten to 'skip'.\n        List per-harness support + native flags: agents modes · agents modes claude\n        Models (cheap|default|best|ultra): agents models <agent[@version]>\n\n      Headless plan support (a prompt makes the run headless):\n        plan works headless on claude, codex, cursor, droid, opencode.\n        kimi, grok, antigravity have no headless plan mode — a headless\n        --mode plan auto-downgrades to --mode auto (with a stderr warning).\n        Interactive plan (omit the prompt) works everywhere it is listed.\n\n      Run strategy (set via --strategy or run.<agent>.strategy in agents.yaml):\n        pinned     use the workspace/global pinned version\n        available  use pinned if it can run right now; otherwise switch to another signed-in version\n        balanced   distribute load across healthy accounts by remaining capacity (default)\n        A version/account is skipped when it is rate-limited right now — any usage window (incl. the 5-hour session window) at 100%, matching the 'agents view' badge.\n        --balanced is shorthand for --strategy balanced. Ignored when @version is pinned, when a profile is used, or with --fallback.\n        Zero healthy accounts under balanced/available exits nonzero naming each\n        excluded account and the earliest window reset — use --strategy pinned to force.\n\n      'auto' harness (agents run auto): picks the host (14d usage affinity,\n      unless --host is given), the harness (installed CLIs weighted by\n      best-account headroom), and the account (the strategy above). Zero\n      healthy accounts on any harness exits nonzero with the earliest reset.\n\n      Account picker: append @ with no version (agents run claude@) to choose one\n        installed account for this run. Rows show identity, login state, plan,\n        and available limits; unsafe accounts stay visible but disabled.\n\n      Fallback: --fallback codex,antigravity retries on rate-limit failure via /continue handoff. Each entry accepts @version.\n\n      Cloud placement: --cloud sends the run to the agent's native vendor cloud\n        (claude→rush, codex→codex, droid→factory, antigravity→antigravity) — the\n        same dispatch as agents cloud run --agent <agent>, tracked by agents\n        cloud list/status/logs/cancel/message. --provider overrides the routing;\n        --repo/--branch/--cloud-env refine the task. Agents without a native\n        cloud (kimi, grok, cursor, opencode, …) fail loud unless --provider is\n        given. --cloud is mutually exclusive with --host/--lease and with\n        local-run flags (--loop, --resume, --secrets, --terminal, …).\n\n      Resume: --resume <id> resolves full IDs locally first, then fleet-wide, and recovers on the source device with its cwd/mode. The exact healthy origin version uses native resume; otherwise a healthy version of the same harness replays via /continue. agents resume <id> infers the harness too.\n\n      Passthrough: everything after -- is forwarded verbatim to the underlying agent CLI.\n        agents run kimi -- --plan --some-native-flag value",
+      "examples": "# Headless, read-only: investigate or summarize without writing files\n      agents run claude \"summarize recent git commits\" --mode plan\n\n      # Headless, can edit: have the agent make changes\n      agents run claude \"fix lint errors in src/\" --mode edit\n\n      # Interactive (TUI) with the pinned default version\n      agents run claude\n\n      # Pick a signed-in account/version for only this run\n      agents run claude@\n\n      # Full-auto: affinity-pick the host, then the harness with the most\n      # account headroom, then a balanced account on it\n      agents run auto \"fix the flaky test\" --mode edit\nagents run auto --device yosemite-s0 \"fix the flaky test\"   # pin the device\n      agents run auto --interactive --device auto --strategy balanced --mode auto\n\n      # Placement (one door — where the body runs). Old flags still work.\n      agents run claude \"…\" --where device:yosemite-s0   # = --device yosemite-s0\n      agents run claude \"…\" --where auto                 # = --device auto\n      agents run claude \"fix CI\" --where lease --mode edit\n\n      # Vendor cloud placement — the agent's own cloud runs the task and\n      # agents cloud list/status/logs tracks it. Fire-and-forget: --no-follow\n      agents run claude \"fix the flaky e2e\" --cloud --repo acme/example\n      agents run codex \"add parser tests\" --cloud --cloud-env env_a1b2c3\n      agents run droid \"QA the onboarding flow\" --cloud --no-follow\n      agents run claude \"…\" --where cloud          # same as --cloud\n\n      # Open the session in a terminal tab — detected from where your sessions\n      # already run (Ghostty / iTerm / Terminal.app); force one with a value\n      agents run claude --terminal\n      agents run claude --terminal ghostty\n\n      # Pipe JSON events to a parser (--quiet drops the preamble)\n      agents run claude \"...\" --json --quiet | jq\n\n      # Bounded run — kill the agent after 30 minutes\n      agents run claude \"generate sales report for yesterday\" --mode plan --timeout 30m\n\n      # Inject a keychain-backed secrets bundle\n      agents run claude \"deploy the worker\" --secrets prod --mode edit\n\n      # Run on a cloud box — reuses a warm box from the repo's profile pool when\n      # one is ready (kept after the run), else leases a fresh box, torn down after\n      agents run claude \"fix the failing tests\" --lease\n\n      # Force a brand-new box (destroyed after), or target a warm box by slug\n      agents run claude \"fix the failing tests\" --lease --fresh\n      agents run claude \"fix the failing tests\" --box warm-one\n\n      # Pass arbitrary native flags to the underlying CLI via -- separator\n      agents run kimi -- --plan --some-kimi-option value\n      agents run claude \"fix the bug\" -- --custom-flag",
+      "notes": "Modes (not every agent supports every mode — run `agents modes <agent>`):\n        plan  read-only investigation; no writes, no shell side-effects\n        edit  may edit files; prompts for shell / risky operations\n        auto  smart classifier auto-approves safe ops, prompts for risky (claude, copilot)\n        skip  bypass every permission prompt (dangerously-skip-permissions)\n        Legacy 'full' is silently rewritten to 'skip'.\n        List per-harness support + native flags: agents modes · agents modes claude\n        Models (cheap|default|best|ultra): agents models <agent[@version]>\n\n      Headless plan support (a prompt makes the run headless):\n        plan works headless on claude, codex, cursor, droid, opencode.\n        kimi, grok, antigravity have no headless plan mode — a headless\n        --mode plan auto-downgrades to --mode auto (with a stderr warning).\n        Interactive plan (omit the prompt) works everywhere it is listed.\n\n      Run strategy (set via --strategy or run.<agent>.strategy in agents.yaml):\n        pinned     use the workspace/global pinned version\n        available  use pinned if it can run right now; otherwise switch to another signed-in version\n        balanced   distribute load across healthy accounts by remaining capacity (default)\n        A version/account is skipped when it is rate-limited right now — any usage window (incl. the 5-hour session window) at 100%, matching the 'agents view' badge.\n        --balanced is shorthand for --strategy balanced. Ignored when @version is pinned, when a profile is used, or with --fallback.\n        Zero healthy accounts under balanced/available exits nonzero naming each\n        excluded account and the earliest window reset — use --strategy pinned to force.\n\n      'auto' harness (agents run auto): picks the host (14d usage affinity,\n      unless --device is given), the harness (installed CLIs weighted by\n      best-account headroom), and the account (the strategy above). Zero\n      healthy accounts on any harness exits nonzero with the earliest reset.\n\n      Account picker: append @ with no version (agents run claude@) to choose one\n        installed account for this run. Rows show identity, login state, plan,\n        and available limits; unsafe accounts stay visible but disabled.\n\n      Fallback: --fallback codex,antigravity retries on rate-limit failure via /continue handoff. Each entry accepts @version.\n\n      Cloud placement: --cloud sends the run to the agent's native vendor cloud\n        (claude→rush, codex→codex, droid→factory, antigravity→antigravity) — the\n        same dispatch as agents cloud run --agent <agent>, tracked by agents\n        cloud list/status/logs/cancel/message. --provider overrides the routing;\n        --repo/--branch/--cloud-env refine the task. Agents without a native\n        cloud (kimi, grok, cursor, opencode, …) fail loud unless --provider is\n        given. --cloud is mutually exclusive with --device/--lease and with\n        local-run flags (--loop, --resume, --secrets, --terminal, …).\n\n      Resume: --resume <id> resolves full IDs locally first, then fleet-wide, and recovers on the source device with its cwd/mode. The exact healthy origin version uses native resume; otherwise a healthy version of the same harness replays via /continue. agents resume <id> infers the harness too.\n\n      Passthrough: everything after -- is forwarded verbatim to the underlying agent CLI.\n        agents run kimi -- --plan --some-native-flag value",
       "subcommands": []
     },
     {
@@ -22977,8 +22570,8 @@
           "negate": false
         }
       ],
-      "examples": "# Search prior sessions in this project by topic, file path, or command\n      agents sessions \"add auth middleware\"\n\n      # Read a session as markdown (user + assistant + thinking + tools)\n      agents sessions a1b2c3d4 --markdown\n\n      # Just the user turns — useful for recalling intent\n      agents sessions a1b2c3d4 --include user\n\n      # Show only what's running right now (terminals, teams, cloud, headless)\n      agents sessions --active\n\n      # Filter the live fleet by the status word shown in the roster\n      agents sessions --working\n      agents sessions --idle\n      agents sessions --orphan\n      agents sessions --crashed\n\n      # --- Session lifecycle ---\n      # Get back into a session — attaches a live pane, or recovers an ended one\n      agents sessions resume a1b2c3d4\n      # Same, by the tmux name shown in: agents tmux ls\n      agents sessions resume ag-claude-a1b2c3d4\n      # Attach only — never fork a copy\n      agents sessions resume a1b2c3d4 --attach-only\n      # Multi-select history and open each in a tab\n      agents sessions resume\n      # The other direction: interactive → headless (keep working unattended)\n      agents sessions detach a1b2c3d4\n\n      # The interactive list folds in other online machines automatically,\n      # labelled by host with this machine first. Stay local with --local:\n      agents sessions --local\n\n      # Search across every directory, not just this project\n      agents sessions \"topic\" --all\n\n      # Filter one installed harness version (equivalent forms)\n      agents sessions claude@2.1.181\n      agents sessions --agent claude --version 2.1.181\n\n      # Team-spawned sessions, grouped by team (spawner + spawn time per team,\n      # teammate mode/handle per row; team-flagged spawns with no team record\n      # in a trailing (no team) bucket)\n      agents sessions --teams\n\n      # Who spawned which team: an orchestrator row carries team:<name>, and a\n      # teammate row [<team>/<handle>]. --in-team narrows to one team's lineage.\n      agents sessions --in-team redesign --teams\n\n      # Pick a routine across every directory, then open one of its run sessions\n      agents sessions --routine\n      agents sessions --routine nightly-review\n      agents sessions 2026-07-21T10-30-00-000Z\n\n      # Export for analysis\n      agents sessions --since 30d --limit 200 --json > sessions.json\n\n      # List indexed tool calls in recent Codex sessions on one device\n      agents sessions --include tools --agent codex --device mac-mini --since 7d\n\n      # Each repeated clause must match a different call in the same session\n      agents sessions --include tools --query 'program:git input:merge' --query 'program:gh output:CONFLICT' --fleet --json\n\n      # Count every pre-indexed static git site without reparsing transcripts\n      agents sessions --include tools --query 'program:git' --count --fleet --json\n\n      # Explicitly populate historical tool rows once on every device\n      agents sessions backfill tools --fleet\n\n      # Resolve one historical selector to metadata only, across the fleet\n      agents sessions --resolve d3470b57 --json\n\n      # Search another machine's sessions live over SSH (no sync needed)\n      agents sessions \"auth bug\" --last 3 --host yosemite-s1\n\n      # Fan the same query out across several machines\n      agents sessions --all \"deploy script\" --host box-a --host box-b",
-      "notes": "Session lifecycle — ONE verb gets you back in, it detects the state:\n        resume <id|alias>       live pane -> attach; headless -> foreground; ended -> recover\n        resume <id> --attach-only  attach only; never fork a copy\n        resume                  multi-select history -> open tabs\n        detach <id>             the other direction: interactive -> headless\n        (retired, still working for one release: sessions attach, sessions go, reconnect)\n      - The interactive listing and every live-status flag fold in your other online machines automatically (live over SSH, no sync) — each row is labelled by host, this machine first. Use --local to skip the fan-out; single-id lookups stay local.\n      - --all is not a device flag: it widens historical directory and time filters. Fleet collection is already the default. A status flag (--working/--idle/--waiting/--orphan/--crashed/--closed/--abandoned/--queued/--unknown) implies --active; combine status flags for a union.\n      - --version <version> requires --agent and is equivalent to --agent <agent@version>.\n      - --host runs the query on the remote's own index over SSH (host alias or user@host); repeat or pass several to fan out. SSH access is the only auth.\n      - --in-team matches both ends of the lineage: the session that ran 'agents teams create/add', and (with --teams) that team's teammates. In the interactive list, 't' cycles the same filter over the teams in view.\n      - --include and --exclude are mutually exclusive.\n      - With --include tools, repeat --query for same-session AND across distinct calls. Fields: tool, program, input, output, status, exit, error.\n      - --count accepts exactly one program:<name> clause and reports static source occurrences, containing tool calls, and sessions.\n      - Tool queries read SQLite only. Run 'agents sessions backfill tools' once for historical transcripts; normal scans index new and changed sessions.\n      - Tool evidence is redacted and bounded before it reaches SQLite. --markdown and --no-redact conflict with --include tools.\n      - Tool queries accept 32 clauses (4 KiB each), --limit 1–1,000, and at most 8 MiB of materialized evidence.\n      - --first and --last are mutually exclusive.\n      - A filter flag (--include/--exclude/--first/--last) without --markdown/--json defaults to --markdown output.\n      - --cloud sources from Rush Cloud captured runs instead of local disk.\n      - --routine [name] spans every directory and shows transcripts archived from routine runs. On a TTY, omit the name to pick a routine; a name accepts exact, substring, or unambiguous typo matches. --routines is an alias. Routine rows also resolve by run id.\n      - Without --teams, team-spawned sessions are hidden by default.",
+      "examples": "# Search prior sessions in this project by topic, file path, or command\n      agents sessions \"add auth middleware\"\n\n      # Read a session as markdown (user + assistant + thinking + tools)\n      agents sessions a1b2c3d4 --markdown\n\n      # Just the user turns — useful for recalling intent\n      agents sessions a1b2c3d4 --include user\n\n      # Show only what's running right now (terminals, teams, cloud, headless)\n      agents sessions --active\n\n      # Filter the live fleet by the status word shown in the roster\n      agents sessions --working\n      agents sessions --idle\n      agents sessions --orphan\n      agents sessions --crashed\n\n      # --- Session lifecycle ---\n      # Get back into a session — attaches a live pane, or recovers an ended one\n      agents sessions resume a1b2c3d4\n      # Same, by the tmux name shown in: agents tmux ls\n      agents sessions resume ag-claude-a1b2c3d4\n      # Attach only — never fork a copy\n      agents sessions resume a1b2c3d4 --attach-only\n      # Multi-select history and open each in a tab\n      agents sessions resume\n      # The other direction: interactive → headless (keep working unattended)\n      agents sessions detach a1b2c3d4\n\n      # The interactive list folds in other online machines automatically,\n      # labelled by host with this machine first. Stay local with --local:\n      agents sessions --local\n\n      # Search across every directory, not just this project\n      agents sessions \"topic\" --all\n\n      # Filter one installed harness version (equivalent forms)\n      agents sessions claude@2.1.181\n      agents sessions --agent claude --version 2.1.181\n\n      # Team-spawned sessions, grouped by team (spawner + spawn time per team,\n      # teammate mode/handle per row; team-flagged spawns with no team record\n      # in a trailing (no team) bucket)\n      agents sessions --teams\n\n      # Who spawned which team: an orchestrator row carries team:<name>, and a\n      # teammate row [<team>/<handle>]. --in-team narrows to one team's lineage.\n      agents sessions --in-team redesign --teams\n\n      # Pick a routine across every directory, then open one of its run sessions\n      agents sessions --routine\n      agents sessions --routine nightly-review\n      agents sessions 2026-07-21T10-30-00-000Z\n\n      # Export for analysis\n      agents sessions --since 30d --limit 200 --json > sessions.json\n\n      # List indexed tool calls in recent Codex sessions on one device\n      agents sessions --include tools --agent codex --device mac-mini --since 7d\n\n      # Each repeated clause must match a different call in the same session\n      agents sessions --include tools --query 'program:git input:merge' --query 'program:gh output:CONFLICT' --fleet --json\n\n      # Count every pre-indexed static git site without reparsing transcripts\n      agents sessions --include tools --query 'program:git' --count --fleet --json\n\n      # Explicitly populate historical tool rows once on every device\n      agents sessions backfill tools --fleet\n\n      # Resolve one historical selector to metadata only, across the fleet\n      agents sessions --resolve d3470b57 --json\n\n      # Search another machine's sessions live over SSH (no sync needed)\n      agents sessions \"auth bug\" --last 3 --device yosemite-s1\n\n      # Fan the same query out across several machines\n      agents sessions --all \"deploy script\" --device box-a --device box-b",
+      "notes": "Session lifecycle — ONE verb gets you back in, it detects the state:\n        resume <id|alias>       live pane -> attach; headless -> foreground; ended -> recover\n        resume <id> --attach-only  attach only; never fork a copy\n        resume                  multi-select history -> open tabs\n        detach <id>             the other direction: interactive -> headless\n        (retired, still working for one release: sessions attach, sessions go, reconnect)\n      - The interactive listing and every live-status flag fold in your other online machines automatically (live over SSH, no sync) — each row is labelled by host, this machine first. Use --local to skip the fan-out; single-id lookups stay local.\n      - --all is not a device flag: it widens historical directory and time filters. Fleet collection is already the default. A status flag (--working/--idle/--waiting/--orphan/--crashed/--closed/--abandoned/--queued/--unknown) implies --active; combine status flags for a union.\n      - --version <version> requires --agent and is equivalent to --agent <agent@version>.\n      - --device runs the query on the remote's own index over SSH (host alias or user@host); repeat or pass several to fan out. SSH access is the only auth.\n      - --in-team matches both ends of the lineage: the session that ran 'agents teams create/add', and (with --teams) that team's teammates. In the interactive list, 't' cycles the same filter over the teams in view.\n      - --include and --exclude are mutually exclusive.\n      - With --include tools, repeat --query for same-session AND across distinct calls. Fields: tool, program, input, output, status, exit, error.\n      - --count accepts exactly one program:<name> clause and reports static source occurrences, containing tool calls, and sessions.\n      - Tool queries read SQLite only. Run 'agents sessions backfill tools' once for historical transcripts; normal scans index new and changed sessions.\n      - Tool evidence is redacted and bounded before it reaches SQLite. --markdown and --no-redact conflict with --include tools.\n      - Tool queries accept 32 clauses (4 KiB each), --limit 1–1,000, and at most 8 MiB of materialized evidence.\n      - --first and --last are mutually exclusive.\n      - A filter flag (--include/--exclude/--first/--last) without --markdown/--json defaults to --markdown output.\n      - --cloud sources from Rush Cloud captured runs instead of local disk.\n      - --routine [name] spans every directory and shows transcripts archived from routine runs. On a TTY, omit the name to pick a routine; a name accepts exact, substring, or unambiguous typo matches. --routines is an alias. Routine rows also resolve by run id.\n      - Without --teams, team-spawned sessions are hidden by default.",
       "subcommands": [
         {
           "name": "backfill",
@@ -23421,18 +23014,9 @@
           "args": [],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -24467,8 +24051,8 @@
               "negate": false
             }
           ],
-          "examples": "# Pick several sessions; each opens in its own tab\n      agents sessions resume\n\n      # Pre-filter the pool before selecting (space in the filter → use [query])\n      agents sessions resume \"auth middleware\"\n\n      # Reopen one session from any device by UUID prefix or tmux alias\n      agents sessions resume 019fd114\n      agents sessions resume ag-codex-c1f3d813\n\n      # Attach a living pane only — never resume a copy (the old go)\n      agents sessions resume 019fd114 --attach-only\n\n      # Force a backend / side-by-side splits / a remote host\n      agents sessions resume --ghostty\n      agents sessions resume --vscodium\n      agents sessions resume --splits\n      agents sessions resume --host zion --tmux",
-          "notes": "- This is the ONE verb for getting back in. It detects the state: a live tmux pane is attached, a headless session comes to the foreground, an ended one recovers on its owning device.\n      - A UUID/prefix or ag-<agent>-<suffix> alias bypasses the picker. A live alias attaches by name even when the session index cannot attribute it.\n      - Retired spellings still work for one release and print the replacement: sessions attach, sessions go, reconnect.\n      - Going the other way (foreground -> background) is 'agents sessions detach <id>'.\n      - With no identity selector, space toggles a session, enter confirms, and tab toggles the preview pane.\n      - Layout: one tab per session by default. --splits packs session pairs side by side in each tab.\n      - Backend: auto-detected from the terminal you're in (iTerm / Ghostty / tmux); override with --iterm/--ghostty/--tmux/--vscodium.\n      - --vscodium opens each session as an agent terminal tab in VSCodium via the swarm-ext extension (works with --host too).\n      - --host <alias> opens the terminal surface on that host only when it is the selected sessions' origin; recovery never migrates a session to another device.\n      - Recovery runs on the session's origin device: exact healthy origin uses native resume; otherwise a healthy version of the same harness receives /continue <id>.",
+          "examples": "# Pick several sessions; each opens in its own tab\n      agents sessions resume\n\n      # Pre-filter the pool before selecting (space in the filter → use [query])\n      agents sessions resume \"auth middleware\"\n\n      # Reopen one session from any device by UUID prefix or tmux alias\n      agents sessions resume 019fd114\n      agents sessions resume ag-codex-c1f3d813\n\n      # Attach a living pane only — never resume a copy (the old go)\n      agents sessions resume 019fd114 --attach-only\n\n      # Force a backend / side-by-side splits / a remote host\n      agents sessions resume --ghostty\n      agents sessions resume --vscodium\n      agents sessions resume --splits\n      agents sessions resume --device zion --tmux",
+          "notes": "- This is the ONE verb for getting back in. It detects the state: a live tmux pane is attached, a headless session comes to the foreground, an ended one recovers on its owning device.\n      - A UUID/prefix or ag-<agent>-<suffix> alias bypasses the picker. A live alias attaches by name even when the session index cannot attribute it.\n      - Retired spellings still work for one release and print the replacement: sessions attach, sessions go, reconnect.\n      - Going the other way (foreground -> background) is 'agents sessions detach <id>'.\n      - With no identity selector, space toggles a session, enter confirms, and tab toggles the preview pane.\n      - Layout: one tab per session by default. --splits packs session pairs side by side in each tab.\n      - Backend: auto-detected from the terminal you're in (iTerm / Ghostty / tmux); override with --iterm/--ghostty/--tmux/--vscodium.\n      - --vscodium opens each session as an agent terminal tab in VSCodium via the swarm-ext extension (works with --device too).\n      - --device <alias> opens the terminal surface on that device only when it is the selected sessions' origin; recovery never migrates a session to another device.\n      - Recovery runs on the session's origin device: exact healthy origin uses native resume; otherwise a healthy version of the same harness receives /continue <id>.",
           "subcommands": []
         },
         {
@@ -25186,18 +24770,9 @@
       "args": [],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -25562,18 +25137,9 @@
       ],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -25954,18 +25520,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -26171,18 +25728,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -26388,18 +25936,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -26597,18 +26136,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -26688,18 +26218,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -26874,18 +26395,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -26965,18 +26477,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -27089,18 +26592,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -27226,18 +26720,9 @@
           ],
           "options": [
             {
-              "flags": "-H, --host <name>",
-              "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-              "short": "-H",
-              "long": "--host",
-              "required": true,
-              "optional": false,
-              "variadic": false,
-              "negate": false
-            },
-            {
-              "flags": "--device <name>",
-              "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+              "flags": "-D, --device <name>",
+              "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+              "short": "-D",
               "long": "--device",
               "required": true,
               "optional": false,
@@ -28816,18 +28301,9 @@
       ],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,
@@ -28963,18 +28439,9 @@
       ],
       "options": [
         {
-          "flags": "-H, --host <name>",
-          "description": "Run this command on another machine over SSH instead of locally — a device, an ssh-config host, user@host, or `all` to fan out across every registered device. See `agents devices`.",
-          "short": "-H",
-          "long": "--host",
-          "required": true,
-          "optional": false,
-          "variadic": false,
-          "negate": false
-        },
-        {
-          "flags": "--device <name>",
-          "description": "Alias of --host: run this command on a registered device (from `agents devices`), or `all` to run it across the whole fleet.",
+          "flags": "-D, --device <name>",
+          "description": "Run this command on another machine over SSH instead of locally — a registered device, user@host, or `all` to fan out across every registered device. See `agents devices` / `agents hosts`.",
+          "short": "-D",
           "long": "--device",
           "required": true,
           "optional": false,

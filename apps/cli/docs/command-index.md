@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_91 command groups · 548 commands._
+_90 command groups · 553 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -50,6 +50,20 @@ agents alias remove <name>              Delete an alias shim
 
 ```
 agents apply  Reconcile the fleet to a declared profile: install agents, sync config, propagate login.
+```
+
+## artifacts — Publish agent-made artifacts (plans, reports, visuals) to your own Cloudflare R2 and get a shareable link (~$0).
+
+```
+agents artifacts                            Publish agent-made artifacts (plans, reports, visuals) to your own Cloudflare R2 and get a shareable link (~$0).
+agents artifacts setup                      Provision (or join) the Cloudflare R2 + Worker endpoint that backs `agents artifacts share`.
+agents artifacts share [file]               Publish an HTML file to your own Cloudflare R2 and get a shareable link (~$0).
+agents artifacts share analytics            Show the Cloudflare Web Analytics status for this share endpoint.
+agents artifacts share delete <targets...>  Take down a published page (and by default its OG cover). Verifies the page 404s before reporting success. Top-level alias: agents unshare.
+agents artifacts share join [baseUrl]       Use an existing synced share endpoint and write token (no provisioning).
+agents artifacts share list                 List the pages you've published to your share namespace (human table; --json for scripts).
+agents artifacts share status               Show the configured share endpoint and namespace.
+agents artifacts share update               Re-deploy the Worker script to the current template on an already-provisioned endpoint (idempotent).
 ```
 
 ## audit — Alias of `agents events --include runs` — dispatched-run outcomes
@@ -262,7 +276,7 @@ agents devices login                           Log agent CLIs into fleet boxes o
 agents devices pair-ios [name]                 Pair an iPhone/iPad cockpit (RUSH-1733): mint a control token for `agents serve --control` and mark the device control-only. The token is shown ONCE — enter it in the app. Run this on the anchor.
 agents devices ping                            Live auth health: complete a real request for every agent account across the fleet (unlike the cached "signed in" flag). Writes the shared auth-health cache read by `agents view` and `fleet status`.
 agents devices ps                              List agent tasks dispatched to devices with `agents run --device <name> --no-follow`. Reconciles each still-`running` record against the remote before listing. View a log with `agents logs <id>`.
-agents devices register <name>                 Register a discovered (pending) node by name — used by the menu-bar "NEW DEVICES → Register" action.
+agents devices register <name>                 Register a discovered node and sync the approval through agents.yaml fleet.discovery.
 agents devices render                          Render the registry to ssh_config. Prints to stdout, or use --write to update ~/.ssh/config.d/agents.
 agents devices rm <name>                       Remove a device from the registry.
 agents devices role [name] [role]              Show or set what a device is for: worker (agents run here) or personal (you sit here — never picked automatically). Marking any device worker makes `--device auto` an allowlist over the marked workers.
@@ -610,12 +624,6 @@ agents pty stop <id>             Stop a PTY session and clean up. The session ID
 agents pty write <id> <input>    Send keystrokes to the PTY (like typing into the terminal). Processes escape sequences by default.
 ```
 
-## reconnect — Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
-
-```
-agents reconnect [session-id]  Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
-```
-
 ## registry — Manage package registries
 
 ```
@@ -808,19 +816,11 @@ agents sessions migrate [session-id]        Relocate a running session onto anot
 agents sessions migrations                  Show the migration ledger — sessions handed off to/from other machines.
 agents sessions optimize                    Compact the session search index (FTS5), reclaiming bloat from repeated re-indexing
 agents sessions preview <id>                Show one rich session card without rendering the full transcript
-agents sessions reap                        Kill tmux sessions whose panes are all dead, and the helper processes their agents left behind.
-agents sessions reconnect [session-id]      Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
 agents sessions render <selectors...>       Render one or more sessions as readable, redacted Markdown for review or sharing.
 agents sessions resume [query]              Reopen one session by canonical identity, or multi-select history into terminal tabs/splits.
 agents sessions stats                       Which skills/commands you actually invoke, and which installed ones are dead weight.
 agents sessions tail [sessionId]            Stream compact live lines from a session file as events are written. Long-running: Ctrl+C to stop. Claude and Codex only.
 agents sessions watch                       Stream canonical live and recoverable session row changes as NDJSON
-```
-
-## set — Set the default model/mode an agent version uses for `agents run`
-
-```
-agents set [selector]  Set the default model/mode an agent version uses for `agents run`
 ```
 
 ## setup — Set up agents-cli, or re-open the capability onboarding hub.
