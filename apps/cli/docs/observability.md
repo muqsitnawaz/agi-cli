@@ -257,7 +257,7 @@ everyone. The **actor** layer ([`src/lib/actor.ts`](../src/lib/actor.ts)) answer
 - **Inherited** — a child spawn trusts the `AGENTS_ACTOR*` env its parent stamped
   instead of re-resolving, so the whole spawn tree shares one actor.
 - **Dispatched over SSH (outbound)** — when the CLI runs an agent on another host
-  (`agents run --device`, `agents ssh <host>`, or a remote teammate), the resolved actor is
+  (`agents run --host`, `agents ssh <host>`, or a remote teammate), the resolved actor is
   forwarded into the remote invocation's env, so the remote box inherits it instead of
   re-resolving. Without this the actor is dropped at the SSH hop and the remote
   `tailscale whois`es the *originating* box's IP — mis-crediting the shared fleet account
@@ -841,7 +841,7 @@ agents feed --filter updates --project agents-cli  # project's progress posts on
 `--filter updates` skips the block pipeline (no stall suppression, no dispatch
 policy) but keeps the same SSH fan-out the block view uses — an agent posts on
 whichever box ran it, so the fleet's posts merge into one recency-ordered list.
-`-D/--device` scopes it to named machines; `--local` (or
+`-H/--host` (alias `--device`) scopes it to named machines; `--local` (or
 `AGENTS_FEED_LOCAL=1`) keeps it to this box. Its `--json` emits the raw
 `status.posted` events.
 
@@ -1184,7 +1184,7 @@ it by the account that did the work. Counter recipes share the same verb as
 do not invent a second top-level analytics command.
 
 That account split is the reason the behavioural path exists. `getConfiguredRunStrategy`
-defaults to `balanced` (`lib/rotate.ts`), so sessions are sprayed across every signed-in
+defaults to `balanced` (`lib/accounting/rotate.ts`), so sessions are sprayed across every signed-in
 Claude account. A report that reads one account's directory — which is what Claude Code's
 own `/insights` does — describes a fraction of the work and attributes all of it to one org.
 
@@ -1261,7 +1261,7 @@ logic changes, so a new metric never reports stale numbers beside fresh ones.
 - **`--narrative` is the only path that sends your data to a model.** It pipes the
   *aggregate* (never raw transcripts, unlike `/insights`) through a headless
   `claude -p`, and writes to stderr so `--json` stays parseable. Two other things do
-  reach the network and are not that: `-D/--device` runs the command on a peer over SSH,
+  reach the network and are not that: `-H/--host` runs the command on a peer over SSH,
   and the index refresh resolves Linear project names when a Linear key is configured.
 - **"Lines touched" is not a diffstat.** It sums the before/after line counts of each
   edit, so an `Edit` whose `old_string` includes unchanged context counts those lines on
@@ -1378,7 +1378,7 @@ a stable per-account key:
   is **local-only, no network**. It reads each agent's on-disk credential and
   surfaces an email when one is readable, else a stable account id, else a bare
   `signed in`.
-- **Usage bars** — a separate network pass ([`src/lib/usage.ts`](../src/lib/usage.ts))
+- **Usage bars** — a separate network pass ([`src/lib/usage.ts`](../src/lib/accounting/usage.ts))
   fetches live quota and renders `S:`/`W:`/`M:` bars + plan, according to each
   provider's reported window duration. It's **stale-while-revalidate**
   (on-disk cache under `~/.agents/.cache/`, keyed per account: 2-min fresh, 24-h
@@ -1387,7 +1387,7 @@ a stable per-account key:
   (RUSH-2061).** Displaying a slightly old bar costs nothing; *choosing an account*
   from one must not cost a network round trip on `agents run` cold-start.
   `collectRunCandidates` reads the cache with `readOnly`
-  ([`src/lib/rotate.ts`](../src/lib/rotate.ts), [`src/lib/usage.ts`](../src/lib/usage.ts))
+  ([`src/lib/rotate.ts`](../src/lib/accounting/rotate.ts), [`src/lib/usage.ts`](../src/lib/accounting/usage.ts))
   and never blocks on a live fetch. A snapshot older than **5 minutes**
   (`USAGE_DECISION_MAX_AGE_MS`) is still not trusted for the pick — but the guard
   is `isUsageVerified`, which routes around an unconfirmable number and reports
@@ -1420,7 +1420,7 @@ a stable per-account key:
   credential, a locally-expired one, a rejected request, and a request that threw
   are distinct errors (`usageNoCredentialError` / `usageExpiredCredentialError` /
   `usageRejectedError` / `usageUnreachableError`,
-  [`src/lib/usage.ts`](../src/lib/usage.ts)), not a silent
+  [`src/lib/usage.ts`](../src/lib/accounting/usage.ts)), not a silent
   null. All four networked providers — Claude, Kimi, Droid, Cursor — share them,
   because they share one cache fallback: a silent null in any of them presents a
   stale reading as confirmed. Because a usage read never refreshes a token,
