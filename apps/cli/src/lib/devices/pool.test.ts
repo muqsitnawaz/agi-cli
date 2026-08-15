@@ -138,6 +138,18 @@ describe('roles read from the per-device docs', () => {
     expect(mod.filterAutoPool(FLEET)).toEqual(FLEET);
   });
 
+  it('describeAutoPool and listWorkerDevices reach a doc-less device via an explicit roster', async () => {
+    const mod = await freshPool();
+    mod.setConfigValue('role', 'worker', { fleet: true });
+    // No device has ever had a doc written — the bare (no-roster) reads must
+    // stay blind to the fleet default, mirroring filterAutoPool's own gap.
+    expect(mod.describeAutoPool()).toBe('');
+    expect(mod.listWorkerDevices()).toEqual([]);
+    // Callers with a real candidate list (formatNoHealthyDeviceError has its
+    // own `pool` param) pass it as the roster and the fleet default resolves.
+    expect(mod.describeAutoPool({ roster: FLEET })).toBe(`workers: ${FLEET.join(', ')}`);
+  });
+
   it('auto.pool=all widens past the worker marks', async () => {
     const mod = await freshPool();
     mod.setConfiguredDeviceRole('yosemite-s0', 'worker');

@@ -1485,12 +1485,17 @@ function registerDevicesCommands(program: Command): void {
     // configuredDeviceRole's key spec validates the value; a bad one throws with
     // the accepted list, which the command's catch turns into exit 1.
     setConfiguredDeviceRole(name, role as ConfiguredDeviceRole);
+    // Full registered roster, mirroring the bare-listing branch above — a
+    // fleet-wide `role` default must reach a doc-less registered device here
+    // too, or `autoPoolWorkers` under-reports the allowlist right after this
+    // write changed it.
+    const roles = listConfiguredDeviceRoles(Object.keys(await loadDevices()));
     if (opts.json) {
-      writeJson({ device: name, role, autoPoolWorkers: listWorkerDevices() });
+      writeJson({ device: name, role, autoPoolWorkers: listWorkerDevices({ roles }) });
       return;
     }
     console.log(chalk.green(`Marked '${name}' role=${role}.`));
-    const workers = listWorkerDevices();
+    const workers = listWorkerDevices({ roles });
     if (workers.length > 0) {
       console.log(chalk.gray(`\`--device auto\` now picks only from: ${workers.join(', ')}`));
     } else {
