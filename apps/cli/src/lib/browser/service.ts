@@ -16,6 +16,7 @@ import {
   listProfiles,
   extractConfiguredPort,
   resolveEndpoint,
+  parseEndpointUrl,
 } from './profiles.js';
 import { killChrome, getRunningChromeInfo, launchBrowser, allocatePort } from './chrome.js';
 import { connectLocal } from './drivers/local.js';
@@ -2854,6 +2855,70 @@ export class BrowserService {
   }
 
   /**
+   * Soft-attach to an already-running browser for a runtime dir.
+   *
+   * Never launches a browser and never clears pid/port files on failure —
+   * `connectProfile` does both, which made `status()` wipe disk state when
+   * CDP was unreachable (CI / post-reaper) and then return an empty list.
+   * Returns null when nothing is speaking CDP so callers can fall through
+   * to disk reconcile.
+   */
+  private async attachRunningProfile(
+    dirName: string,
+    diskTasks: Map<string, Task>,
+  ): Promise<ProfileConnection | null> {
+    const bare = dirName.includes('@') ? dirName.split('@')[0]! : dirName;
+    const endpointFromKey = dirName.includes('@')
+      ? dirName.slice(dirName.indexOf('@') + 1).split('.')[0]
+      : undefined;
+    const profile = await getProfile(bare);
+    if (!profile) return null;
+
+    let resolved;
+    try {
+      resolved = resolveEndpoint(profile, endpointFromKey);
+    } catch {
+      return null;
+    }
+
+    const existingInfo = getRunningChromeInfo(dirName);
+    const parsed = parseEndpointUrl(resolved.target);
+    const port = existingInfo?.port ?? parsed?.port;
+    if (port === undefined) return null;
+    const host = parsed?.host && parsed.host !== 'localhost' ? parsed.host : 'localhost';
+    // ssh:// endpoints need a tunnel; soft rehydrate only handles local CDP.
+    if (resolved.target.startsWith('ssh:')) return null;
+
+    try {
+      const { wsUrl, browser } = await discoverBrowserWsUrl(port, host, dirName);
+      verifyBrowserIdentity(browser, profile.browser, port, host);
+      const cdp = new CDPClient();
+      await cdp.connect(wsUrl);
+      await this.enableDomains(cdp);
+
+      const tasks = this.loadTaskState(dirName);
+      for (const [k, t] of diskTasks) {
+        if (!tasks.has(k)) tasks.set(k, t);
+      }
+
+      const conn: ProfileConnection = {
+        cdp,
+        port,
+        pid: existingInfo?.pid ?? 0,
+        electron: profile.electron,
+        targetFilter: resolved.targetFilter ?? profile.targetFilter,
+        profileName: dirName,
+        bareName: bare,
+        tasks,
+        sessionCache: new Map(),
+      };
+      return conn;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Reconnect every profile runtime dir that still has a live browser and
    * tasks.json entries. Used before identity-based resolution so a daemon
    * restart does not make the caller's tasks invisible.
@@ -2875,46 +2940,26 @@ export class BrowserService {
 
     for (const dirName of dirNames) {
       if (this.connections.has(dirName)) continue;
+      // Skip non-runtime dirs (e.g. profiles/)
+      if (dirName === 'profiles' || dirName === 'sessions' || dirName === 'exports') continue;
       const tasks = this.loadTaskState(dirName);
       if (tasks.size === 0) continue;
-      // A daemon restart often clears pid/port/meta (orphan reaper keyed on
-      // daemonPid) while leaving tasks.json and the live browser. Connect via
-      // the profile's configured endpoint — connectProfile also reloads tasks.
-      const bare = dirName.includes('@') ? dirName.split('@')[0]! : dirName;
-      // Composite key is `<profile>@<endpointName>` — pin the endpoint that
-      // actually owns this runtime dir, not the profile default.
-      const endpointFromKey = dirName.includes('@')
-        ? dirName.slice(dirName.indexOf('@') + 1).split('.')[0]
-        : undefined;
-      const profile = await getProfile(bare);
-      if (!profile) continue;
+      // Soft attach only — never launch / never clear pid files.
+      const conn = await this.attachRunningProfile(dirName, tasks);
+      if (!conn) continue;
+      this.connections.set(dirName, conn);
       try {
-        const resolved = resolveEndpoint(profile, endpointFromKey);
-        const effectiveProfile: BrowserProfile = {
-          ...profile,
-          name: dirName,
-          binary: resolved.binary,
-          targetFilter: resolved.targetFilter,
-        };
-        const conn = await this.connectProfile(effectiveProfile, resolved.target);
-        conn.profileName = dirName;
-        conn.bareName = bare;
-        // Merge: connectProfile may load an empty map if pid was 0 attach path.
-        for (const [k, t] of tasks) {
-          if (!conn.tasks.has(k)) conn.tasks.set(k, t);
-        }
-        this.connections.set(dirName, conn);
         await this.applyDefaultDownloadBehavior(conn, dirName);
       } catch {
-        // Browser not speaking CDP anymore — leave on disk for status reconcile.
+        // Non-fatal for rehydrate.
       }
     }
   }
 
   /**
    * On a RAM miss, scan profile runtime dirs for a tasks.json entry matching
-   * `taskId`, reconnect via the same path `connectProfile` uses when a browser
-   * is already running, and register the connection.
+   * `taskId`, soft-attach when CDP is still up, and register the connection.
+   * Does not launch browsers or clear runtime files.
    */
   private async rehydrateTaskFromDisk(
     taskId: string,
@@ -2941,6 +2986,7 @@ export class BrowserService {
     }
 
     for (const dirName of dirNames) {
+      if (dirName === 'profiles' || dirName === 'sessions' || dirName === 'exports') continue;
       const tasks = this.loadTaskState(dirName);
       let found: Task | undefined;
       for (const task of tasks.values()) {
@@ -2956,31 +3002,17 @@ export class BrowserService {
       // Already connected under this key?
       let conn = this.connections.get(dirName);
       if (!conn) {
-        const bare = dirName.includes('@') ? dirName.split('@')[0]! : dirName;
-        const endpointFromKey = dirName.includes('@')
-          ? dirName.slice(dirName.indexOf('@') + 1).split('.')[0]
-          : undefined;
-        const profile = await getProfile(bare);
-        if (!profile) continue;
+        const attached = await this.attachRunningProfile(dirName, tasks);
+        if (!attached) {
+          // CDP down — cannot rehydrate a live connection; caller will error.
+          continue;
+        }
+        conn = attached;
+        this.connections.set(dirName, conn);
         try {
-          const resolved = resolveEndpoint(profile, endpointFromKey);
-          const effectiveProfile: BrowserProfile = {
-            ...profile,
-            name: dirName,
-            binary: resolved.binary,
-            targetFilter: resolved.targetFilter,
-          };
-          // connectProfile uses pid files when present, else the profile endpoint.
-          conn = await this.connectProfile(effectiveProfile, resolved.target);
-          conn.profileName = dirName;
-          conn.bareName = bare;
-          for (const [k, t] of tasks) {
-            if (!conn.tasks.has(k)) conn.tasks.set(k, t);
-          }
-          this.connections.set(dirName, conn);
           await this.applyDefaultDownloadBehavior(conn, dirName);
         } catch {
-          continue;
+          // Non-fatal.
         }
       }
 
