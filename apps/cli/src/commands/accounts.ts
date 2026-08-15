@@ -258,7 +258,7 @@ export function registerAccountsCommand(program: Command): void {
       }
       const agent = agentRaw as AgentId;
       const { spawnSync } = await import('child_process');
-      const { getBinaryPath, getGlobalDefault, getVersionHomePath, listInstalledVersions } = await import('../lib/versions.js');
+      const { getBinaryPath, getGlobalDefault, getVersionHomePath, listInstalledVersions } = await import('../lib/installations/versions.js');
       const installed = listInstalledVersions(agent);
       const version = getGlobalDefault(agent) ?? installed[installed.length - 1];
       if (!version) throw new Error(`No installed version of ${agent}. Install one with: agents add ${agent}`);
