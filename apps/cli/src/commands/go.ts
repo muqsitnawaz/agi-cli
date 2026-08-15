@@ -40,7 +40,7 @@ import { isPromptCancelled } from './utils.js';
 import { focusAction } from './focus.js';
 import { machineId } from '../lib/session/sync/config.js';
 import { attachTmux, runTmux } from '../lib/tmux/binary.js';
-import { paneExitStatus } from '../lib/tmux/session.js';
+import { ensureSessionHookRepaired, paneExitStatus } from '../lib/tmux/session.js';
 import { getDefaultSocketPath } from '../lib/tmux/paths.js';
 import { sshExec, sshStream, assertValidSshTarget, shellQuote } from '../lib/ssh-exec.js';
 import { enumerateGhosttyTabs, assignGhosttyTabs } from '../lib/session/ghostty-tabs.js';
@@ -49,12 +49,13 @@ const execFileAsync = promisify(execFile);
 
 export function registerGoCommand(program: Command): void {
   program
-    .command('go')
+    .command('go', { hidden: true })
     .argument('[id]', 'Short/full session id to jump to; omit for an interactive picker')
     .option('--local', 'Only this machine (skip the cross-host sweep)')
-    .description('Deprecated alias for `sessions focus --attach-only`')
+    .description('Deprecated — use `agents sessions resume --attach-only` instead.')
     .action(async (id: string | undefined, opts: { local?: boolean }) => {
-      console.error(chalk.yellow('`sessions go` is deprecated — use `sessions focus --attach-only`'));
+      console.warn(chalk.yellow('`agents sessions go` is deprecated — use `agents sessions resume --attach-only` instead:'));
+      console.warn(chalk.gray(`  agents sessions resume ${id ?? '<id>'} --attach-only`));
       await focusAction(id, { local: opts.local, attachOnly: true });
     });
 }
@@ -340,6 +341,10 @@ export async function jumpTo(s: ActiveSession, self: string, fallback: Unreachab
       return;
     }
     console.log(chalk.gray(`Attaching ${shortId(s)} (tmux ${tgt}) — Ctrl-b d to detach.`));
+    // Repair a legacy/stale pane-died hook before the attach client takes over
+    // — the 5-min daemon reconcile that used to cover this was deleted;
+    // attach-time repair is what closes the gap now (RUSH-2435).
+    if (session) await ensureSessionHookRepaired(session, socket);
     process.exit(await attachTmux({ socket, args: ['attach-session', '-t', tgt] }));
   }
 

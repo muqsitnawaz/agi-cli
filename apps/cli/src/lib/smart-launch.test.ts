@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   affinityWeights,
   sampleWeighted,
@@ -274,5 +277,97 @@ describe('applyDeviceAutoToOptions', () => {
     expect(options.strategy).toBe('round-robin');
     expect(options.balanced).toBeUndefined();
     expect(result.banner?.acctNote).toBe('accounts=picker');
+  });
+});
+
+describe('device roles narrow automatic placement', () => {
+  // A real agents.yaml under a throwaway HOME — the same store `agents devices
+  // role` writes, read back through the placement engine. No mocks.
+  let TMP = '';
+
+  beforeEach(() => {
+    TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-smart-launch-roles-'));
+    process.env.HOME = TMP;
+    process.env.AGENTS_SYNC_MACHINE_ID = 'zion';
+  });
+  afterEach(() => {
+    delete process.env.AGENTS_SYNC_MACHINE_ID;
+    try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  async function fresh() {
+    vi.resetModules();
+    const deviceConfig = await import('./device-config.js');
+    const smartLaunch = await import('./smart-launch.js');
+    return { ...deviceConfig, ...smartLaunch };
+  }
+
+  it('listOnlineDeviceNames drops a local machine marked personal', async () => {
+    const mod = await fresh();
+    mod.setConfiguredDeviceRole('zion', 'personal');
+    expect(mod.listOnlineDeviceNames('zion')).toEqual([]);
+  });
+
+  it('resolveDeviceAuto does not re-add a personal local machine to the pool', async () => {
+    const mod = await fresh();
+    mod.setConfiguredDeviceRole('zion', 'personal');
+    mod.setConfiguredDeviceRole('yosemite-s0', 'worker');
+    const seen: string[][] = [];
+    const plan = await mod.resolveDeviceAuto('claude', {
+      localMachine: 'zion',
+      eligibleHosts: ['yosemite-s0'],
+      probe: async (pool) => {
+        seen.push([...pool]);
+        return new Map([['yosemite-s0', { reachable: true, loadPercent: 5, memPercent: 5, headroom: 'idle', installed: true, signedIn: true }]]);
+      },
+    });
+    expect(seen[0]).toEqual(['yosemite-s0']);
+    expect(plan.host).toBe('yosemite-s0');
+  });
+
+  it('resolveDeviceAffinity fails loud instead of degrading to a personal local box', async () => {
+    // The generic `auto` sentinel (agents ssh auto, the --host auto passthrough,
+    // matchHost) resolves through resolveDeviceAffinity, and a null host there
+    // means "run locally" — on the very box the personal mark exists to protect.
+    const mod = await fresh();
+    mod.setConfiguredDeviceRole('zion', 'personal');
+    expect(() => mod.resolveDeviceAffinity({ localMachine: 'zion' }))
+      .toThrow(/no device is eligible for automatic placement/);
+  });
+
+  it('resolveDeviceAffinity keeps the historical degrade when the CALLER hands it an empty list', async () => {
+    const mod = await fresh();
+    const plan = mod.resolveDeviceAffinity({ localMachine: 'zion', eligibleHosts: [], deviceAffinity: [] });
+    expect(plan.host).toBeNull();
+  });
+
+  it('resolveDeviceAffinity picks a marked worker over the local personal box', async () => {
+    const mod = await fresh();
+    mod.setConfiguredDeviceRole('zion', 'personal');
+    mod.setConfiguredDeviceRole('yosemite-s0', 'worker');
+    const plan = mod.resolveDeviceAffinity({
+      localMachine: 'zion',
+      eligibleHosts: ['yosemite-s0'],
+      deviceAffinity: [{ key: 'yosemite-s0', launches: 3, durationMs: 0, tokenCount: 0, costUsd: 0 }],
+      rng: () => 0.5,
+    });
+    expect(plan.host).toBe('yosemite-s0');
+  });
+
+  it('fails loud, naming the fix, when roles leave no eligible device', async () => {
+    const mod = await fresh();
+    mod.setConfiguredDeviceRole('zion', 'personal');
+    await expect(mod.resolveDeviceAuto('claude', { localMachine: 'zion' }))
+      .rejects.toThrow(/no device is eligible for automatic placement/);
+  });
+
+  it('the no-healthy-device error names the worker pool that narrowed it', async () => {
+    const mod = await fresh();
+    mod.setConfiguredDeviceRole('yosemite-s0', 'worker');
+    await expect(mod.resolveDeviceAuto('claude', {
+      localMachine: 'zion',
+      eligibleHosts: ['yosemite-s0'],
+      probe: async () => new Map([['yosemite-s0', { reachable: true, headroom: 'idle', installed: true, signedIn: false }]]),
+    })).rejects.toThrow(/pool: workers: yosemite-s0/);
   });
 });

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { BUILT_IN_AGENTS, getBuiltInByKey, getBuiltInDefByTitle, getBuiltInByPrefix, isAgentRunner, usesManagedAgentLaunch, modeFlagForAgent, AgentLaunchMode, RunStrategy, buildAgentLaunchCommand, wrapNativeAgentCommand, shquote } from '../core/agents';
 import { resolveProjectForCwd } from '../core/managedProjects';
 import { parseSpawnRequest, resolveSpawnSurface, SpawnRequest } from '../core/spawn';
+import { launchOptsForTarget, resolveLaunchTarget } from '../core/launchTarget';
 import {
   AgentConfig,
   buildIconPath,
@@ -34,6 +35,7 @@ import {
   buildAutoRunLaunchCommand,
   buildResumeInput,
 } from '../core/resumeInBest';
+import { runStaggered, RESTORE_MAX_CONCURRENCY, RESTORE_STAGGER_MS } from '../core/restoreThrottle';
 import * as os from 'os';
 import * as fsSync from 'fs';
 import { randomUUID } from 'crypto';
@@ -392,6 +394,57 @@ interface LaunchAgentOpts {
   autoHost?: boolean;
 }
 
+/**
+ * Everything a freshly created agent terminal needs beyond `createTerminal`.
+ *
+ * This is the half that #2534 dropped from `launchAgent`: registration is what
+ * makes a tab visible to Copy Session ID / Resume / Handoff / Fork, and what
+ * schedules the persistence that restores it after a window reload. It lives in
+ * one place so the two creation paths cannot drift again.
+ */
+async function registerAgentTerminal(
+  terminal: vscode.Terminal,
+  context: vscode.ExtensionContext,
+  args: {
+    terminalId: string;
+    agentConfig: Omit<AgentConfig, 'count'>;
+    agentKey?: string;
+    sessionId?: string | null;
+    host?: string | null;
+    pinnedVersion?: string | null;
+  }
+): Promise<void> {
+  const { terminalId, agentConfig, agentKey, sessionId, host, pinnedVersion } = args;
+  const pid = await terminal.processId;
+  terminals.register(terminal, terminalId, agentConfig, pid, context);
+  readiness.registerTerminal(terminal);
+
+  const resumeKey = agentKey ? agentKeyFromSession(agentKey) : null;
+  if (resumeKey) {
+    terminals.setAgentType(terminal, resumeKey);
+  }
+  // Stamp the host BEFORE the label poller starts: the poller reads the entry
+  // to decide whether to look the session up locally or over `--host`.
+  if (host) {
+    terminals.setHost(terminal, host);
+  }
+  if (sessionId) {
+    terminals.setSessionId(terminal, sessionId);
+    if (resumeKey) {
+      startAutoLabelPollerForTerminal(terminal, context);
+    }
+  } else if (host && resumeKey) {
+    // Idless remote runner: only Claude's id is minted up front, so a
+    // picked-host Codex launches with none and the local SessionStart watcher
+    // never fires for it. The poller resolves the canonical id from the shared
+    // per-host active map instead (RUSH-2411).
+    startAutoLabelPollerForTerminal(terminal, context, { fast: true });
+  }
+  if (pinnedVersion) {
+    terminals.setVersion(terminal, pinnedVersion);
+  }
+}
+
 async function launchAgent(context: vscode.ExtensionContext, opts: LaunchAgentOpts = {}): Promise<void> {
   let host = opts.host;
   if (opts.pickHost) {
@@ -401,17 +454,85 @@ async function launchAgent(context: vscode.ExtensionContext, opts: LaunchAgentOp
   }
   const automatic = !opts.agentKey;
   const agent = opts.agentKey ?? 'auto';
-  let command = `agents run ${agent} --interactive`;
-  if (host) command += ` --device ${shquote(host)}`;
-  else if (automatic && !opts.local) command += ' --device auto';
-  command += ' --strategy balanced --mode auto';
+  const cwd = getActiveWorkspaceFolder()?.uri.fsPath;
+  const builtIn = opts.agentKey ? getBuiltInByKey(opts.agentKey) : undefined;
+
+  // An automatic launch has no harness yet — the CLI picks it — but the tab must
+  // still be a tracked terminal, so it registers against the `shell` def and
+  // shell adoption upgrades the entry once the runner announces itself. That is
+  // the same fallback spawnCommandTerminal uses. Registering only when the agent
+  // is known would leave `agents.newAgent` (the flagship command) unregistered
+  // and, worse, silently unreadied: sendCommandWhenReady rejects without a
+  // readiness registration and the launch line gets typed into a prompt-less
+  // shell.
+  const def = builtIn ?? getBuiltInByKey('shell');
+  if (!def) return;
+  const agentConfig = createAgentConfig(
+    context.extensionPath, def.title, def.command, def.icon, def.prefix,
+  );
+
+  const defaultModel = builtIn
+    ? settings.getDefaultModel(context, builtIn.key as Parameters<typeof settings.getDefaultModel>[1])
+    : undefined;
+  // `--project` owns the working directory end-to-end, so it and cwd are
+  // mutually exclusive (buildAgentLaunchCommand throws if both are passed).
+  const projectSlug = cwd ? await resolveProjectForCwd(cwd) : undefined;
+  // "Local" must cover BOTH an explicit `local: true` (the per-harness New X
+  // commands) and a Pick Host prompt the user answered with "This Mac", which
+  // returns no host. Passing plain `opts.local` there leaves it undefined, the
+  // builder's `local = false` default fires `--device auto`, and a deliberate
+  // This-Mac pick silently dispatches to another box.
+  //
+  // Everything else — an automatic launch, and `opts.autoHost` (the `(Auto)`
+  // commands) — means "choose a machine for me", which is what `--device auto`
+  // is for, so it must NOT be treated as local. NOTE this changes `(Auto)`:
+  // `opts.autoHost` has never been read (it is declared and passed but dead on
+  // main too), and because those commands DO set an agentKey the old
+  // `automatic && !opts.local` test was false, so `(Auto)` emitted no device
+  // flag at all and silently ran on this Mac. Device choice stays with the CLI
+  // rather than being scored here, per the thin-client contract.
+  const isLocal = opts.local === true || (opts.pickHost === true && !host);
+  const command = buildAgentLaunchCommand(
+    agent, null, defaultModel, undefined, undefined, 'balanced', 'auto',
+    { host, local: isLocal, project: projectSlug, cwd: projectSlug ? undefined : cwd },
+  );
+
+  // Tab identity must be established AT createTerminal: iconPath and name are
+  // frozen there (no setter), and AGENT_TERMINAL_ID is the join key the CLI's
+  // `sessions --active` rows carry back — without it the status bar can never
+  // resolve a session id. Shell adoption cannot repair any of it later; it only
+  // rewrites the internal registry, never the live terminal.
+  const terminalId = terminals.nextId(agentConfig.prefix);
+  // Registering an automatic launch under the `shell` def is a REGISTRY choice
+  // (adoption re-keys it later); it does not make the tab a user shell. Only a
+  // real `New Shell` is one. Conflating the two would declare
+  // `scrubSensitive: false` / `kind: 'shell'` on a tab that is about to run an
+  // agent, which is the opposite of the policy in core/terminals.ts.
+  const isUserShell = opts.agentKey === 'shell';
   const terminal = vscode.window.createTerminal({
-    name: automatic ? 'Agents Auto' : `Agents ${agent}`,
+    name: automatic ? 'Agents Auto' : buildTerminalTitle(agentConfig.title, undefined, context, null),
+    iconPath: agentConfig.iconPath,
     location: { viewColumn: vscode.ViewColumn.Active },
+    env: buildAgentTerminalEnv(terminalId, undefined, cwd, undefined, {
+      scrubSensitive: !isUserShell,
+      kind: isUserShell ? 'shell' : 'agent',
+    }),
     isTransient: true,
   });
   terminal.show(false);
+  await registerAgentTerminal(terminal, context, {
+    terminalId,
+    agentConfig,
+    agentKey: opts.agentKey,
+    host,
+  });
+  // The harness is unknown until the runner starts, so let adoption re-key the
+  // entry to the real agent the CLI picked.
+  if (automatic) armShellAdoptionForTerminal(terminal, context);
   await sendCommandWhenReady(terminal, command);
+  if (opts.agentKey) {
+    readiness.armAgentReady(terminal, {});
+  }
 }
 
 // Terminal readiness detection moved to src/vscode/terminalReadiness.ts.
@@ -1388,9 +1509,13 @@ export async function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  /** The configured default target for the bare `New <Harness>` commands. */
+  const defaultLaunchTarget = () =>
+    resolveLaunchTarget(vscode.workspace.getConfiguration('agents').get<string>('launch.defaultTarget'));
+
   // Per-harness launch commands — every one is a thin route into launchAgent.
   // For each non-shell agent:
-  //   New <Harness>              -> balanced version, this Mac
+  //   New <Harness>              -> balanced version, on agents.launch.defaultTarget
   //   New <Harness> (Pick Host)  -> pick a device first, then balanced version
   //   New <Harness> (Auto)       -> instant cached device pick, balanced version
   // There is no version picker, no pinned/latest variant, no per-strategy trio:
@@ -1412,7 +1537,12 @@ export async function activate(context: vscode.ExtensionContext) {
       continue;
     }
     context.subscriptions.push(
-      vscode.commands.registerCommand(def.commandId, () => launchAgent(context, { agentKey: def.key, local: true }))
+      // Where a bare `New <Harness>` runs is the user's setting, read at press
+      // time so a change takes effect without reloading the window. The default
+      // (`auto`) hands placement to the CLI, which rotates over the devices
+      // marked `agents devices role <name> worker`.
+      vscode.commands.registerCommand(def.commandId, () =>
+        launchAgent(context, { agentKey: def.key, ...launchOptsForTarget(defaultLaunchTarget()) }))
     );
     context.subscriptions.push(
       vscode.commands.registerCommand(`${def.commandId}PickHost`, () => launchAgent(context, { agentKey: def.key, pickHost: true }))
@@ -1822,44 +1952,20 @@ async function openSingleAgent(
     isTransient: true
   });
 
-  const pid = await terminal.processId;
-  terminals.register(terminal, terminalId, agentConfig, pid, context);
-  readiness.registerTerminal(terminal);
-
   // Track + poll any known harness, not just the prewarm five (#1747).
-  const resumeKey = agentKey ? agentKeyFromSession(agentKey) : null;
-  if (resumeKey) {
-    terminals.setAgentType(terminal, resumeKey);
-  }
-  // Stamp the host BEFORE the label poller starts: the poller reads the entry
-  // to decide whether to look the session up locally or over `--host`.
-  if (targetHost) {
-    terminals.setHost(terminal, targetHost);
-  }
-  if (sessionId) {
-    terminals.setSessionId(terminal, sessionId);
-    if (resumeKey) {
-      startAutoLabelPollerForTerminal(terminal, context);
-    }
-  } else if (targetHost && resumeKey) {
-    // Idless remote runner (e.g. New Codex (Pick Host)): only Claude's id is
-    // minted up front, so a picked-host Codex launches with no session id and
-    // the local SessionStart watcher never fires for it (the agent runs on
-    // <targetHost>). Arm the auto-label lifecycle now anyway: the poller resolves
-    // the canonical id from the shared per-host active map — surviving the
-    // post-launch indexing race via its bounded backoff — then labels, so the tab
-    // goes bare CX -> canonical UUID -> topic title without a refocus (RUSH-2411).
-    startAutoLabelPollerForTerminal(terminal, context, { fast: true });
-  }
-  if (pinnedVersion) {
-    terminals.setVersion(terminal, pinnedVersion);
-  }
+  await registerAgentTerminal(terminal, context, {
+    terminalId,
+    agentConfig,
+    agentKey,
+    sessionId,
+    host: targetHost,
+    pinnedVersion,
+  });
 
   if (command) {
-    // Prefix the launch command with `exec` so the shell replaces itself with
-    // the agent runner. When the agent exits the terminal process exits too,
-    // which causes VS Code to close the tab automatically.
-    // wrapNativeAgentCommand is a no-op for shell tabs.
+    // wrapNativeAgentCommand exits the shell (closing the tab) on a clean exit
+    // but leaves it open with a readable status line on a launch failure
+    // (RUSH-2593). No-op for shell tabs.
     await sendCommandWhenReady(terminal, wrapNativeAgentCommand(command, agentKey === 'shell'));
     readiness.armAgentReady(terminal, agentKey && sessionId
       ? { agentKey, sessionId, cwd }
@@ -3269,9 +3375,9 @@ export async function openSingleAgentWithQueue(
   }
 
   if (command) {
-    // Always an agent-terminal here, never a shell tab. Apply exec so the shell
-    // replaces itself with the runner and VS Code closes the tab when the agent
-    // exits. isShell is always false here.
+    // Always an agent-terminal here, never a shell tab (isShell is always
+    // false). wrapNativeAgentCommand closes the tab on a clean exit but keeps
+    // it open with a readable status line on a launch failure (RUSH-2593).
     await sendCommandWhenReady(terminal, wrapNativeAgentCommand(command, false));
   }
 
@@ -4808,10 +4914,17 @@ async function restoreAgentTerminals(context: vscode.ExtensionContext): Promise<
     return;
   }
 
-  // Recreate terminals with proper properties
+  // Recreate terminals with proper properties.
   // Note: With isTransient: true, VS Code won't auto-restore terminals,
-  // so we don't need to close "broken" restores - we're the only restore path
-  for (const session of toRestore) {
+  // so we don't need to close "broken" restores - we're the only restore path.
+  //
+  // RUSH-2477: bound the restore. A crash-restart reopens every persisted tab at
+  // once, and firing one resume per tab with no cap or stagger is a thundering
+  // herd — N tabs became N near-simultaneous resume processes within seconds of
+  // boot, which is what overwhelmed the resume path (DB-lock crash, boot-time
+  // fleet fan-out). `runStaggered` restores at most RESTORE_MAX_CONCURRENCY at a
+  // time, each start after the first spaced by RESTORE_STAGGER_MS.
+  const restoreOne = async (session: typeof toRestore[number]): Promise<void> => {
     // Handle shell separately (no built-in def)
     let agentConfig: Omit<import('./agents.vscode').AgentConfig, 'count'>;
     let displayTitle: string;
@@ -4823,7 +4936,7 @@ async function restoreAgentTerminals(context: vscode.ExtensionContext): Promise<
       const def = getBuiltInByPrefix(session.prefix);
       if (!def) {
         console.log(`[RESTORE] Unknown prefix: ${session.prefix}, skipping`);
-        continue;
+        return;
       }
       agentConfig = createAgentConfig(context.extensionPath, def.title, def.command, def.icon, def.prefix);
       displayTitle = def.title;
@@ -4895,7 +5008,12 @@ async function restoreAgentTerminals(context: vscode.ExtensionContext): Promise<
         });
       }
     }
-  }
+  };
+
+  await runStaggered(toRestore, restoreOne, {
+    concurrency: RESTORE_MAX_CONCURRENCY,
+    staggerMs: RESTORE_STAGGER_MS,
+  });
 
   terminals.clearPersistedSessions(workspacePath);
   console.log(`[RESTORE] Restored ${toRestore.length} agent terminal(s)`);

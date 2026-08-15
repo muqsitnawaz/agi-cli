@@ -17,6 +17,7 @@ A **DotAgents repo** is a directory with a canonical layout that defines resourc
   mcp/             # MCP server definitions (YAML, one file per server)
   permissions/     # Permission groups (YAML)
   profiles/        # Model/endpoint bundles (YAML)
+  routers/         # Named router allowlists: harnesses x models/tiers x accounts (YAML)
   subagents/       # Subagent definitions (Markdown)
   agents.yaml      # Version pins and repo metadata
 ```
@@ -47,11 +48,12 @@ A **resource** is any named item inside a DotAgents repo. Resources are typed by
 | `mcp` | MCP server definitions (transport, command, args, env) | Merged into each agent's settings file |
 | `permissions` | Allow/deny tool permission groups | Converted to each agent's native format |
 | `profiles` | Model + endpoint + auth bundles | YAML, consumed by `agents run` and shims |
+| `routers` | Named, task-typed allowlists of harnesses x models/tiers x linked accounts (a router is a generalization of a profile) | YAML, consumed by the Agent Router |
 | `subagents` | Subagent workflow definitions | `.md` files |
 
 Resources are installed once in `~/.agents/` and synced to every supported agent's native format automatically. Sync happens when you run `agents use`, `agents repos pull`, or explicitly via `agents sync`.
 
-To inspect what's installed, use the per-kind listers — `agents commands list`, `agents skills list`, `agents hooks list`, `agents mcp list`, `agents permissions list`, `agents subagents list`, `agents harness list`. For a single merged cross-kind table — every resource with its winning layer resolved across project → user → extras → system — run `agents view --merged`.
+To inspect what's installed, use the per-kind listers — `agents commands list`, `agents skills list`, `agents hooks list`, `agents mcp list`, `agents permissions list`, `agents subagents list`, `agents harness list`, `agents route list`. For a single merged cross-kind table — every resource with its winning layer resolved across project → user → extras → system — run `agents view --merged`.
 
 To inspect a single repo on its own — its git state plus per-kind resource counts — use `agents repos view <repo>` (`system`, `user`, `project`, or an extra-repo alias). Omit the name for an interactive picker. It renders without opening anything; add `--brief` for the header only or `--json` for machine-readable output.
 
@@ -203,13 +205,17 @@ command owns them: `agents devices config <name> [key] [value] [--unset]
 [--json]` — bare opens an interactive settings menu on a TTY (and prints the
 resolved config when piped), `key` reads one value back, `key value` sets it
 with validation, `key --unset` restores the default, and `notes <text>`
-appends a free-form operator note. Device-scope keys (`agents.max-concurrent`,
-`scheduler.enabled`, `daemon.enabled`, `watchdog.enabled`,
-`browser.remote-control`, `browser.profile`, `notes`, the `ssh.*` profile
-overrides, `platform`, `auto-launch.*`) land in `fleet.devices.<name>.config`
-in `~/.agents/agents.yaml` — central, so any box can configure any device and
-the settings sync + back up with the repo (a `fleet.devices: all` declaration
-upgrades to an explicit roster map on the first config write). The device
+appends a free-form operator note. Device-scope keys split by **who reads
+them**. The ones a PEER reads (`agents.max-concurrent`, `watchdog.enabled`,
+`notes`, the `ssh.*` profile overrides, `platform`, `auto-launch.*`) land in
+`fleet.devices.<name>.config` in `~/.agents/agents.yaml` — central, so any box
+can configure any device and the settings sync + back up with the repo (a
+`fleet.devices: all` declaration upgrades to an explicit roster map on the
+first config write). The ones only the OWNING box reads (`scheduler.enabled`,
+`daemon.enabled`, `tmux.enabled`, `browser.remote-control`, `browser.profile`)
+stay in that machine's own doc, never sync, and are refused for a peer —
+`browser.remote-control` is a consent flag, and a broken tmux or a paused
+daemon is one machine's state, not fleet policy. The device
 registry stays the **discovery cache** (address, tailscale snapshot,
 reachability); the config's `ssh.*` / `platform` / user values overlay the
 registry profile at dial time (`src/lib/devices/resolve-profile.ts`), so

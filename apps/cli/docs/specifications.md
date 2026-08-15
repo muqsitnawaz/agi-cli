@@ -1,10 +1,10 @@
-# agents-cli — Specifications
+# agi-cli — Specifications
 
 > Status: **accepted** · Kind: **normative spec** · Scope: the top-level
-> behavioral contracts for the agents-cli subsystems listed in the
+> behavioral contracts for the agi-cli subsystems listed in the
 > [coverage inventory](#coverage-inventory) — not every command group.
 
-This is the **source-of-truth contract** for agents-cli: what a human, an agent,
+This is the **source-of-truth contract** for agi-cli: what a human, an agent,
 or a downstream tool is entitled to rely on, stated as testable requirements —
 one section per major functionality. It exists because features have regressed by
 quietly deviating from an unwritten contract (a harness parser that throws on a
@@ -160,9 +160,9 @@ SSH access (§7); rendering sessions that no harness produced.
 #### 3.1 Discovery & harness parsing
 
 - **SES-1 (MUST).** The canonical session-capable harness set is
-  `SESSION_AGENTS` — exactly these 12, in display order: `claude, codex, gemini,
-  antigravity, opencode, openclaw, rush, hermes, grok, kimi, droid, cursor`
-  (`lib/session/types.ts:14`). Adding harness discovery MUST extend this set (and
+  `SESSION_AGENTS` — exactly these 13, in display order: `claude, codex, gemini,
+  antigravity, opencode, openclaw, rush, hermes, grok, kimi, droid, cursor, muse`
+  (`lib/session/types.ts:17`). Adding harness discovery MUST extend this set (and
   its parser + `dispatchAgentScan` arm), not special-case a caller.
 - **SES-2 (MUST).** Each harness's transcript location + on-disk format is fixed
   and MUST be parsed from its native shape (JSONL / single-JSON / SQLite / CLI
@@ -406,6 +406,14 @@ SSH access (§7); rendering sessions that no harness produced.
   semantics), leaving the original untouched, and MUST refuse harnesses it can't
   yet handle with a clear message (Claude-only in v1)
   (`lib/session/fork.ts:1-16,84-86`).
+- **SES-21a (MUST).** The tmux helper-process reaper MUST fail closed. A process
+  carrying `AGENT_TMUX_SESSION_NAME` MAY be selected only when the corresponding
+  tmux owner is present, its pane process is confirmed dead, and it has no
+  attached client. An absent owner, including a reliable empty answer after a
+  tmux server restart, MUST be treated as unknown and MUST NOT select the
+  process. A harness-specific detached-helper rule MAY select a process only
+  when its declared spawner pid is confirmed dead. (`lib/tmux/orphan-reap.ts`;
+  regression tests in `lib/tmux/orphan-reap.test.ts`, RUSH-2603.)
 - **SES-41 (MUST).** A direct lifecycle selector (full session id, unique id
   prefix, full `ag-<agent>-<8hex>` tmux alias, or unique alias prefix/suffix of at
   least six characters) MUST resolve to one canonical harness-native session id
@@ -806,9 +814,10 @@ SSH access (§7); rendering sessions that no harness produced.
 
 #### 4.1 Command surface
 
-The command surface (bare `sessions [query]`, `preview`, `tail`, `sync`, `resume`, `focus`,
-`detach`, `attach`, `inject`, `export`, `import`, `migrate`/`relocate`,
-`migrations`, `backfill tools`, `fork`) with flags is the reference in
+The command surface (bare `sessions [query]`, `preview`, `tail`, `resume`, `detach`,
+`inject`, `export`, `render`, `import`, `migrate`/`relocate`, `migrations`,
+`backfill tools`/`backfill resources`, `fork`, `bookmark`, `stats`, `insights`,
+`optimize`, `watch`) with flags is the reference in
 [sessions.md](sessions.md); this spec governs the guarantees behind it.
 
 #### 4.2 Machine-readable output (STABLE — agents depend on these)
@@ -823,8 +832,8 @@ The command surface (bare `sessions [query]`, `preview`, `tail`, `sync`, `resume
 - **SES-IF-2 (MUST).** `sessions --active --json` MUST emit `ActiveSession[]` with
   `ticketId`/`project`/`prLink` always present as keys (test
   `sessions.serialize.test.ts:76-115`); `tail --json` MUST pass raw JSONL through
-  one event per line (`commands/sessions-tail.ts:229-232`); `sync --json`,
-  `inject --json`, `migrations --json` emit their documented shapes.
+  one event per line (`commands/sessions-tail.ts:229-232`); `inject --json` and
+  `migrations --json` emit their documented shapes.
 - **SES-IF-2a (MUST).** `sessions --resolve <selector> --json` MUST resolve a full
   id, unique id prefix, or keyword query from indexed `SessionMeta` rows without
   parsing or rendering transcript events. It MUST search the online fleet unless
@@ -1318,7 +1327,7 @@ access control (that is 1Password/Vault; this tool is device-local first).
   prompt for a `hold` bundle and pile up helper sheets. **Given** an interactive
   `agents run --secrets <hold-bundle>` whose bundle is not broker-held **When** it
   launches **Then** it fails fast naming `agents secrets unlock <bundle>`, no sheet.
-  This does NOT cover the explicit `agents share` / `agents share setup` commands —
+  This does NOT cover the explicit `agents artifacts share` / `agents artifacts setup` commands —
   those are user-initiated, not launches, and keep the `isHeadlessSecretsContext()`
   gate (`readWriteTokenFromBundle`, `readCloudflareCreds`).
 - **SEC-13b (MUST).** A **deliberate human reveal/run** at a real interactive
@@ -1491,7 +1500,7 @@ access control (that is 1Password/Vault; this tool is device-local first).
 - **SEC-29 (MUST).** **Unlock once, stays unlocked — the durability contract.** A
   bundle on the `never` tier MUST read silently *forever* once set: through process
   death, system sleep, a full power-off/reboot, an arbitrarily long gap (30+ days),
-  an agents-cli upgrade, **and a macOS upgrade** — with **no Touch ID, no
+  an agi-cli upgrade, **and a macOS upgrade** — with **no Touch ID, no
   passphrase, and no environment variable** — until the value is rotated, the tier
   is changed, or the bundle is deleted. This is achievable only because a `never`
   item carries no biometric ACL (`set-no-acl`,
@@ -1504,7 +1513,7 @@ access control (that is 1Password/Vault; this tool is device-local first).
   locked-screen reads — so "never re-prompts across an OS upgrade" and
   "biometry-gated per read" are mutually exclusive by construction. The `hold` tier
   gives the weaker durability: one prompt, then held silently for the hold window,
-  surviving a broker restart / agents-cli upgrade via the durable no-ACL session
+  surviving a broker restart / agi-cli upgrade via the durable no-ACL session
   store (`lib/secrets/session-store.ts:1-26`) but re-prompting once after the window
   expires or biometrics are re-enrolled.
 - **SEC-29a (MUST NOT).** The default keychain flow MUST NOT require a passphrase or
@@ -1820,7 +1829,7 @@ Given `share:` is configured and the `share` bundle is biometry-gated and not
 broker-held; When a human runs `agents run <agent>` in an interactive terminal;
 Then `shareRuntimeEnv` resolves the token `agentOnly` and returns undefined without
 a Touch ID sheet (`lib/share/config.ts`), so the launch is silent — and a `share`
-bundle created by `agents share setup` is `never`-tier (no-ACL), so the token is
+bundle created by `agents artifacts setup` is `never`-tier (no-ACL), so the token is
 injected silently with no unlock at all.
 
 ---
@@ -2143,6 +2152,57 @@ schema (`--json` passes through each agent's native stream format).
     `isPaneKnownAliveFromQueryResult(code, stdout)` encodes the positive-proof
     test (`lib/exec.ts: isPaneKnownAliveFromQueryResult`).  An ambiguous
     result MUST `killSession` rather than keep the orphan.
+- **EXEC-23b (MUST).** A tmux-wrapped run MUST resolve exit code `0` only for
+  an outcome tmux actually reported: a pane confirmed alive (a clean user
+  detach) or a dead pane whose `#{pane_dead_status}` tmux read as `0`. Every
+  other case is UNKNOWN — the pane is unreadable because the server or session
+  went away, or it is dead with no reported status — and MUST resolve to
+  `UNKNOWN_OUTCOME_EXIT_CODE` (1) with a stderr banner, never silently.
+  `tmuxRunExitCode(pane, knownAlive)` is the single decision
+  (`lib/exec.ts: tmuxRunExitCode`); **every** `runInTmux` return path routes
+  through it, so the banner and the returned code can never disagree.
+
+  Two banners serve the two UNKNOWN causes, because they are not the same
+  event and one message cannot honestly describe both. A pane tmux **cannot
+  read at all** gets the dedicated `outcome unknown` banner naming the cause —
+  the session went away, or the run never had a readable pane id
+  (`lib/exec.ts: resolveAfterAttach`). A pane tmux **reports dead with no
+  status** gets `surfacePaneFailure`'s recap (`agents: <agent> exited (exit
+  1)`) plus the pane tail, which is the more useful output when there is a
+  pane to quote; that recap is gated on `shouldRecapDeadPane` (F2), so a
+  headless run keeps its quiet path.
+
+  **A resume-attach is an attach and is bound by this too.** `runInTmux`'s
+  native-resume branch re-attaches an existing live session
+  (`prepareSessionForResume` → `attach`); it MUST resolve its outcome the same
+  way rather than returning a literal `0`. `prepareSessionForResume` therefore
+  returns the pane it positively resolved (`ResumePreparation`,
+  `lib/tmux/session.ts`) — without that handle the caller has nothing to ask
+  tmux about and can only assume success.
+
+  This closes a drift, not a hypothetical: every path previously returned
+  `status ?? 0` or a literal `0`, so an interactive run whose tmux server died
+  mid-work (`[server exited unexpectedly]`, the agent stranded at an approval
+  prompt) printed a failure banner reading `exit 1` and handed its caller `0`.
+  The rule matches the `--host` follow path in the exit-code table below —
+  "the remote's own exit code, or 1 if unknown".
+
+  **Known cost (accepted).** The daemon reaps any session whose panes are all
+  dead every `DEAD_PANE_REAP_TICK_MS` (5 min, `lib/daemon.ts`). A cleanly
+  exited run is in that state between its pane dying and `paneExitStatus`
+  reading it, so a tick landing inside that one-tmux-round-trip window leaves
+  the pane unreadable and a genuinely successful run resolves `1`. Once the
+  pane is gone the CLI has no other evidence of the outcome, so this direction
+  of error is deliberate: EXEC-23b prefers a false unknown over a false
+  success.
+
+  **GWT-E9 — a tmux server that dies under an interactive run is not success.**
+  Given an `agents run --interactive` wrapped in tmux; When the tmux server or
+  session goes away before `paneExitStatus` can read the agent pane (so it
+  returns `{found: false, dead: false}`); Then the run MUST tear the session
+  down, print the unknown-outcome banner, and resolve `1` — never `0`
+  (`lib/exec.test.ts`: "tmuxRunExitCode — an unknown outcome is never success",
+  "paneExitStatus against a real tmux server that went away").
 - **EXEC-24 (MUST).** A slash-command prompt run headless under the
   implicit default `plan` mode MUST be refused before spawn — it would hang
   forever at `ExitPlanMode` with no TTY to approve it
@@ -2338,7 +2398,8 @@ and host/lease dispatch (`--host`/`--device`/`--remote-cwd`/`--no-follow`/
 
 | Path | Exit code | Evidence |
 |---|---|---|
-| Plain run / fallback chain | the child's own exit code, verbatim | `commands/exec.ts:2687` |
+| Plain run / fallback chain (no tmux wrapper) | the child's own exit code, verbatim | `commands/exec.ts:2687` |
+| tmux-wrapped run (incl. `--interactive`, `--resume` attach) | the pane's exit status when tmux reported one; `0` for a confirmed-alive pane (clean detach); otherwise **1 if unknown** — there is no child exit code to read once the pane is unreadable (EXEC-23b) | `lib/exec.ts: tmuxRunExitCode`, `runInTmux` |
 | `--acp` | `runAcpHeadless`'s own exit code, verbatim | `commands/exec.ts:2473` |
 | `--loop` | `loopExitCode(stoppedBy)`: `condition-met`/`max`→0, `budget`→7, `signal`→130, `stalled`/`error`→1 | `commands/exec.ts:373-387` |
 | Live budget hard-cap kill (non-loop) | 7 (`BUDGET_KILL_EXIT_CODE`) | `lib/exec.ts:2061,2048` |
@@ -2540,7 +2601,7 @@ nothing but its own view cache.
 ### 3. Requirements
 
 - **SING-1 (MUST).** Every fleet-affecting capability MUST have exactly one scheduler
-  and one executor: the agents-cli daemon (`agents __daemon-run`,
+  and one executor: the agi-cli daemon (`agents __daemon-run`,
   `apps/cli/src/lib/daemon.ts`) or a CLI command the daemon or the user drives.
   Status: **Current** for routines (`lib/scheduler.ts`) and rotate
   (`lib/watchdog/rotate.ts`). `agents daemon` is the user-facing runtime
@@ -2550,20 +2611,27 @@ nothing but its own view cache.
   authentication health are first-party account state and run as one in-process
   daemon service (`lib/account-state-service.ts`); explicit CLI refreshes enter
   the same cross-process per-account lease (`lib/refresh-coordinator.ts`). The
-  watchdog, device-probe, tmux-reconcile, launch-health, session-cache-warm, and
-  auto-dispatch ticks (RUSH-2353) were
-  formerly hardcoded `setInterval`s inside `runDaemon()` — a second, unowned
-  scheduling path duplicating what routines already provide (declaration, run
-  history, pause, device pin). They are now **daemon-owned built-in routines**
-  (`lib/builtin-routines.ts`, RUSH-2465): the definitions live in daemon code and
-  are injected as the lowest layer of `listJobs()`, below project > user > system,
-  so a same-named on-disk file (a `~/.agents/routines/` override) still shadows
-  them. Each `command:` invokes the migrated tick body (`lib/daemon-ticks.ts`) via
-  `agents __daemon-tick <name>`, fired by the same pid-claimed `JobScheduler` as
-  every other routine — one scheduler, one executor, still declared/listed/
-  run-tracked/pausable/device-pinnable, but no longer shipped from the
-  `gh:phnx-labs/.agents-system` config repo every install pulls (only
-  `check-updates` remains a system routine there).
+  watchdog, device-probe, session-cache-warm, and auto-dispatch ticks
+  (RUSH-2353) were briefly promoted to **daemon-owned built-in routines**
+  (`lib/builtin-routines.ts`, RUSH-2465) — declarations injected as the lowest
+  layer of `listJobs()` so `agents routines list`/`pause`/`devices` could manage
+  them like any other routine, each `command:` invoking the migrated tick body
+  via `agents __daemon-tick <name>`. That registry was **reverted** (RUSH-2495):
+  `builtin-routines.ts`, the `__daemon-tick` entrypoint, and `JobConfig.builtin`
+  are gone. `watchdog`, `device-probe`, and `session-cache-warm` are again plain
+  hardcoded `setInterval`s inside `runDaemon()` (`runWatchdogTick`,
+  `runDeviceProbeTick`, `runActiveSessionsWarm`) — invisible to `agents
+  routines`, but still the single daemon-owned scheduler/executor SING-1
+  requires, since nothing else calls them. `auto-dispatch` and `launch-health`
+  were deleted outright with no replacement. **`tmux-reconcile`** (the 5-minute
+  poll that retrofitted a stale `pane-died` hook onto managed tmux sessions) was
+  also deleted, but — unlike `auto-dispatch`/`launch-health` — its job is
+  covered without a poll (RUSH-2435): the daemon repairs every managed session's
+  hook once at startup, `ensureSessionHookRepaired` (`lib/tmux/session.ts`)
+  repairs a single session right before each of `agents run
+  --resume`/`focus`/`go`/`tmux attach` attaches to it, and `runMigration`
+  (`lib/migrate.ts`) repairs the fleet again at upgrade time as the
+  version-skew one-shot.
 - **SING-1a (MUST).** Ordinary usage/auth consumers MUST be cache-only. This
   includes routing (`agents run` and teams), `view`, `versions`, `usage`, device
   inventory, and UI consumers. A missing snapshot MUST render as stale or

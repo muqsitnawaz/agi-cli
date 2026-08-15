@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_79 command groups · 535 commands._
+_78 command groups · 539 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -51,6 +51,20 @@ agents alias remove <name>              Delete an alias shim
 
 ```
 agents apply  Reconcile the fleet to a declared profile: install agents, sync config, propagate login.
+```
+
+## artifacts — Publish agent-made artifacts (plans, reports, visuals) to your own Cloudflare R2 and get a shareable link (~$0).
+
+```
+agents artifacts                            Publish agent-made artifacts (plans, reports, visuals) to your own Cloudflare R2 and get a shareable link (~$0).
+agents artifacts setup                      Provision (or join) the Cloudflare R2 + Worker endpoint that backs `agents artifacts share`.
+agents artifacts share [file]               Publish an HTML file to your own Cloudflare R2 and get a shareable link (~$0).
+agents artifacts share analytics            Show the Cloudflare Web Analytics status for this share endpoint.
+agents artifacts share delete <targets...>  Take down a published page (and by default its OG cover). Verifies the page 404s before reporting success. Top-level alias: agents unshare.
+agents artifacts share join [baseUrl]       Use an existing synced share endpoint and write token (no provisioning).
+agents artifacts share list                 List the pages you've published to your share namespace (human table; --json for scripts).
+agents artifacts share status               Show the configured share endpoint and namespace.
+agents artifacts share update               Re-deploy the Worker script to the current template on an already-provisioned endpoint (idempotent).
 ```
 
 ## audit — Alias of `agents events --include runs` — dispatched-run outcomes
@@ -235,6 +249,7 @@ agents devices ps                              List agent tasks dispatched to de
 agents devices register <name>                 Register a discovered (pending) node by name — used by the menu-bar "NEW DEVICES → Register" action.
 agents devices render                          Render the registry to ssh_config. Prints to stdout, or use --write to update ~/.ssh/config.d/agents.
 agents devices rm <name>                       Remove a device from the registry.
+agents devices role [name] [role]              Show or set what a device is for: worker (agents run here) or personal (you sit here — never picked automatically). Marking any device worker makes `--device auto` an allowlist over the marked workers.
 agents devices run <cmd...>                    Run a command on every online registered device. Offline devices are skipped. Alias surface: agents fleet run …
 agents devices show <name>                     Show the full profile for one device.
 agents devices snapshot                        One-process poll snapshot: install inventory + active sessions (optional feed/sync). Not the sync-status command — use `agents status` for drift.
@@ -416,6 +431,7 @@ agents message <target> <text>  Send a message to a running or parked agent (mai
 
 ```
 agents models [agentSpec]                         Show the cost-tier map (cheap|default|best|ultra) for installed harnesses; pin overrides with `tier set`.
+agents models set [selector]                      Set the default model/mode an agent version uses for `agents run`
 agents models tier                                Override which model a cost tier resolves to (per harness, or per agent@version).
 agents models tier clear <selector> [tier]        Clear one tier (or all tiers) back to the auto guess.
 agents models tier list                           List all configured tier overrides.
@@ -508,6 +524,7 @@ agents projects for-cwd [cwd]  Resolve a directory to its defined project name (
 agents projects import         Import project definitions from Linear (via the `linear` CLI).
 agents projects link <name>    Attach an external tracker to a project definition (writes linear.projectId into the YAML).
 agents projects list           List defined projects (definitions only by default; no session scan).
+agents projects pull <name>    Fast-forward every fleet checkout of a named project to its remote default branch.
 agents projects rm <name>      Delete a project definition. Never touches the repo.
 agents projects save           Create or update one project from a complete ProjectDef JSON object on stdin.
 agents projects set <name>     Change one field on a project definition, preserving everything else.
@@ -538,12 +555,6 @@ agents pty signal <id> [signal]  Send a POSIX signal to the running process. Def
 agents pty start                 Start a new PTY session and return its ID. The session persists until you stop it.
 agents pty stop <id>             Stop a PTY session and clean up. The session ID becomes invalid.
 agents pty write <id> <input>    Send keystrokes to the PTY (like typing into the terminal). Processes escape sequences by default.
-```
-
-## reconnect — Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
-
-```
-agents reconnect [session-id]  Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
 ```
 
 ## registry — Manage package registries
@@ -579,6 +590,19 @@ agents repos view [name]         Show one repo's contents: git state and per-kin
 
 ```
 agents restore <target>  Restore a soft-deleted agent version (e.g. "codex@0.141.0") removed via prune/remove
+```
+
+## route — Named routers -- reusable, task-typed allowlists of harnesses x models/tiers x linked accounts.
+
+```
+agents route                                            Named routers -- reusable, task-typed allowlists of harnesses x models/tiers x linked accounts.
+agents route allow <name> <harness> <models...>         Set (replace) a harness's eligible model/tier allowlist under a router.
+agents route create <name>                              Create a named router with an initial harness + tier allowlist.
+agents route link-account <name> <harness> <account>    Link a durable credential account to a harness under a router.
+agents route list                                       List every configured router.
+agents route rm <name>                                  Delete a router.
+agents route show <name>                                Show a router's harness/model/account allowlist, weights, and hijack flag.
+agents route unlink-account <name> <harness> <account>  Unlink a durable credential account from a harness under a router.
 ```
 
 ## routines — Schedule agents to run on a cron schedule or at a specific time. The daemon starts at install/upgrade and on setup when daemon.enabled is not false; routines add also ensures it is running.
@@ -691,16 +715,13 @@ agents serve  Read-only local web companion: team diffs, routines, and cloud sta
 
 ```
 agents sessions [query]                     Find, browse, and read agent conversation transcripts. Live roster: `agents sessions --active`.
-agents sessions attach <id>                 Bring a backgrounded agent to the foreground — resume it interactively here
 agents sessions backfill                    Populate derived session data explicitly.
 agents sessions backfill resources          Derive historical skill/slash-command usage once into the local SQLite index.
 agents sessions backfill tools              Parse historical tool calls once into the local SQLite index.
 agents sessions bookmark [ids...]           Bookmark sessions so they are easy to find again — list them with --bookmarks, or `b` in the browser.
 agents sessions detach <id>                 Send a live agent to the background — stop its terminal, keep it working headless
 agents sessions export [selectors...]       Bundle sessions (by id, query, or the parent selection flags like --since/-a) into a portable archive.
-agents sessions focus [selector]            Focus sessions by id, harness/version, topic, device, or live state; attach living panes and recover ended ones
 agents sessions fork <session>              Branch a session into a new, independent copy you can continue separately. The original is untouched.
-agents sessions go [id]                     Deprecated alias for `sessions focus --attach-only`
 agents sessions import [bundle]             Restore an export bundle (file, - for stdin, or --from-host <h>) into the local session store, deduping against what you already have.
 agents sessions inject <sessionId> <text>   Deliver text (+ Enter) into the terminal a running session lives in — nudge a stalled agent.
 agents sessions insights                    How work looks — behavioural report (default) or counter mix (`mix`, recipes)
@@ -719,19 +740,11 @@ agents sessions migrate [session-id]        Relocate a running session onto anot
 agents sessions migrations                  Show the migration ledger — sessions handed off to/from other machines.
 agents sessions optimize                    Compact the session search index (FTS5), reclaiming bloat from repeated re-indexing
 agents sessions preview <id>                Show one rich session card without rendering the full transcript
-agents sessions reap                        Kill tmux sessions whose panes are all dead, and the helper processes their agents left behind.
-agents sessions reconnect [session-id]      Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
 agents sessions render <selectors...>       Render one or more sessions as readable, redacted Markdown for review or sharing.
 agents sessions resume [query] [prompt]     Resume a session by id (strict), or multi-select history into terminal tabs/splits.
 agents sessions stats                       Which skills/commands you actually invoke, and which installed ones are dead weight.
 agents sessions tail [sessionId]            Stream compact live lines from a session file as events are written. Long-running: Ctrl+C to stop. Claude and Codex only.
 agents sessions watch                       Stream canonical live and recoverable session row changes as NDJSON
-```
-
-## set — Set the default model/mode an agent version uses for `agents run`
-
-```
-agents set [selector]  Set the default model/mode an agent version uses for `agents run`
 ```
 
 ## setup — Set up agents-cli, or re-open the capability onboarding hub.
@@ -747,22 +760,8 @@ agents setup mine list           Show your brands and what each has turned off
 agents setup mine remove <name>  Remove a brand (its shim + config)
 agents setup mine toggle <name>  Enable/disable features for a brand
 agents setup secrets             Configure `agents secrets` defaults and optionally import existing secrets.
-agents setup share               Configure the `agents share` endpoint (Cloudflare R2 + Worker) — provision your own or join one.
 agents setup status              Show setup readiness for core, browser, computer, secrets, fleet, share, watchdog, and preferences.
 agents setup watchdog            Choose the devices where the daemon watchdog pass runs.
-```
-
-## share — Publish an HTML file to your own Cloudflare R2 and get a shareable link (~$0).
-
-```
-agents share [file]               Publish an HTML file to your own Cloudflare R2 and get a shareable link (~$0).
-agents share analytics            Show the Cloudflare Web Analytics status for this share endpoint.
-agents share delete <targets...>  Take down a published page (and by default its OG cover). Verifies the page 404s before reporting success. Top-level alias: agents unshare.
-agents share join [baseUrl]       Use an existing synced share endpoint and write token (no provisioning).
-agents share list                 List the pages you've published to your share namespace (human table; --json for scripts).
-agents share setup                One-time: provision an R2 bucket + Worker on your Cloudflare and save the config.
-agents share status               Show the configured share endpoint and namespace.
-agents share update               Re-deploy the Worker script to the current template on an already-provisioned endpoint (idempotent).
 ```
 
 ## skills — Add domain-specific capabilities to agents via packaged SKILL.md files
@@ -884,10 +883,10 @@ agents trends tools-per-session  Mix recipe: tools-per-session
 agents uninstall  Completely remove agents-cli and restore your original agent configs. Reverses `agents setup`.
 ```
 
-## unshare — Alias of `agents share delete` — take down a published page (and by default its OG cover).
+## unshare — Alias of `agents artifacts share delete` — take down a published page (and by default its OG cover).
 
 ```
-agents unshare <targets...>  Alias of `agents share delete` — take down a published page (and by default its OG cover).
+agents unshare <targets...>  Alias of `agents artifacts share delete` — take down a published page (and by default its OG cover).
 ```
 
 ## update — Move a frozen agent installation to a new release, keeping its name and every reference to it

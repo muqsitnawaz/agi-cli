@@ -58,12 +58,10 @@
  * - the reaping process itself, its ancestors, pid 1, and every long-lived
  *   agents-cli service ({@link isProtectedAgentsService}) are never candidates.
  * - an UNRELIABLE read of tmux's session state (the query threw, timed out, or
- *   tmux itself never answered) disables tier 1 for that sweep entirely — an
- *   absent map entry proves a session is gone only when the map is known-good.
- *   Distinguishing "tmux answered: no such session" (a completed, if nonzero,
- *   exit — genuinely nothing there) from "tmux did not answer" (a thrown
- *   error/timeout — unknown) is exactly this: a completed process is a real
- *   answer, a rejected promise is not one at all.
+ *   tmux itself never answered) disables tier 1 for that sweep entirely;
+ * - an absent session entry is unknown, even after a reliable read. A tmux
+ *   server restart can produce the same empty snapshot while marked agents
+ *   remain alive, so tier 1 requires a present owner with positive death proof.
  * - tier 2 is anchored on the actual claude EXECUTABLE (argv[0]'s basename),
  *   never a substring match anywhere in the command line, and excludes any
  *   process still structurally part of a LIVE pane leaf's process tree right
@@ -144,7 +142,7 @@ export interface PaneOwner {
 }
 
 /** Why a process was selected, for human output and tests. */
-export type OrphanReason = 'tmux-session-gone' | 'tmux-agent-exited' | 'detached-helper';
+export type OrphanReason = 'tmux-agent-exited' | 'detached-helper';
 
 export interface OrphanCandidate {
   pid: number;
@@ -258,16 +256,14 @@ function livePid(pid: number): boolean {
 /**
  * Pure. Select the processes whose owning agent is provably gone.
  *
- * `owners` maps a tmux session name to its liveness; a name ABSENT from the map
- * is a session tmux no longer has, which is the strongest orphan signal there is
- * — but ONLY when `owners` is itself known-complete. `opts.ownersReliable`
- * (default `true`, so existing direct callers/tests keep their prior meaning)
- * says whether the caller actually got a real answer from tmux for every
- * socket it queried. When it is `false` — a query threw, timed out, or tmux
- * itself never answered — tier 1 is skipped entirely for this call: an absent
- * map entry proves nothing when the map itself might be missing entries for
- * sessions tmux never got asked about (RUSH-2521 review — a flaky tick must
- * never fall back to "treat every marked process as orphaned").
+ * `owners` maps a tmux session name to its liveness. An ABSENT name is never
+ * proof that the marked process is orphaned: the tmux server can restart or its
+ * socket can disappear while the pane's process tree is still alive. That exact
+ * state made the daemon classify every live agent as `tmux-session-gone` and
+ * SIGTERM it on startup (RUSH-2603). Tier 1 therefore requires a PRESENT owner
+ * whose pane process is confirmed dead and has no attached client. A reliable
+ * empty map means "nothing proven dead", not "every marked process is dead".
+ * `opts.ownersReliable` still disables tier 1 when any query failed to answer.
  */
 export function selectOrphanProcesses(
   procs: AgentProcess[],
@@ -341,10 +337,7 @@ export function selectOrphanProcesses(
     for (const p of procs) {
       if (!p.tmuxSession || !eligible(p)) continue;
       const owner = owners.get(p.tmuxSession);
-      if (!owner) {
-        push(p, 'tmux-session-gone');
-        continue;
-      }
+      if (!owner) continue;
       // An attached client or a live agent pane process is a hard exclusion.
       if (owner.attached || owner.agentAlive) continue;
       push(p, 'tmux-agent-exited');
@@ -642,8 +635,8 @@ function describe(c: OrphanCandidate): string {
  * Reap every helper process whose owning agent has exited.
  *
  * Called from the daemon's periodic tick and from `agents sessions reap`. Panes
- * are read BEFORE processes so a session that disappears mid-scan is treated as
- * gone (reapable) rather than as a live owner.
+ * are read before processes to take one ownership snapshot. A session absent
+ * from that snapshot is unknown and is never sufficient proof for tier 1.
  *
  * `opts.pids` is the test-only process-table scope described on
  * {@link readAgentProcesses} — never set by production callers.

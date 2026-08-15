@@ -18,8 +18,9 @@ import fs from 'node:fs';
 import chalk from 'chalk';
 import { confirm } from '@inquirer/prompts';
 import { gatherLiveTargets, pickLiveTarget, pickLiveTargets, jumpTo, probeAttachRail, refuseFallback, type AttachRailLiveness, type UnreachableFallback } from './go.js';
-import { sessionProcessIsLocal, sessionProcessHost, type ActiveSession } from '../lib/session/active.js';
-import { SESSION_AGENTS, type SessionMeta, type SessionAgentId } from '../lib/session/types.js';
+import { sessionProcessIsLocal, sessionProcessHost, shortIdFromName, type ActiveSession } from '../lib/session/active.js';
+import { attachTmux, ensureSessionHookRepaired, getDefaultSocketPath, hasSession, runTmux } from '../lib/tmux/index.js';
+import { SESSION_AGENTS, isAgentTmuxAlias, type SessionMeta, type SessionAgentId } from '../lib/session/types.js';
 import {
   buildSessionRecoveryCommand,
   filterSessionsByQuery,
@@ -35,7 +36,8 @@ import {
 } from './sessions.js';
 import { resolveBackend, CONFIRM_THRESHOLD } from './sessions-resume.js';
 import { runOnPeer } from '../lib/session/remote-list.js';
-import { discoverSessions } from '../lib/session/discover.js';
+import { discoverSessions, resolveIndexedSessionById } from '../lib/session/discover.js';
+import { machineId } from '../lib/session/sync/config.js';
 import { collectSessionCandidates, normalizeDeviceSeed } from './sessions-browser.js';
 import { buildPreview } from './sessions-picker.js';
 import { multiItemPicker } from '../lib/picker.js';
@@ -134,7 +136,12 @@ function statusWord(status: LiveStatusFilter): string {
 
 export function registerFocusCommand(program: Command): void {
   const cmd = program
-    .command('focus')
+    // Hidden, but deliberately NOT warned. `sessions resume <id>` dispatches by
+    // spawning `agents sessions focus <id>` (buildSessionLifecycleArgs), so a
+    // deprecation notice here would print on every ordinary resume. focus is now
+    // the internal lifecycle dispatcher; `resume` is the surface. Do not add a
+    // console.warn here without first removing that delegation.
+    .command('focus', { hidden: true })
     .argument('[selector]', 'Session id/prefix, agent@version, or topic/path search')
     .option('--local', 'Only this machine (skip the cross-host sweep)')
     .option('--attach-only', 'Attach only — never open a new tab / resume a copy (the old `go` behavior)')
@@ -229,7 +236,7 @@ export async function focusAction(id: string | undefined, opts: FocusOptions): P
   const fallback = selectFallback(opts.attachOnly);
 
   const agentSelector = focusAgentSelector(id, opts);
-  const textSelector = id && !agentSelector ? id : undefined;
+  let textSelector = id && !agentSelector ? id : undefined;
   const filtered = !!id || hasFocusFilters(opts, statuses);
 
   // Preserve the fast live multi-picker for an unqualified `focus`. Every
@@ -249,6 +256,32 @@ export async function focusAction(id: string | undefined, opts: FocusOptions): P
       process.exitCode = 1;
       return;
     }
+
+    // RUSH-2477: an id selector for a LOCAL indexed session resolves against the
+    // WAL index alone — a plain read, no write-heavy discovery scan (none of
+    // `tryClaimScan`/`releaseScan`'s `BEGIN IMMEDIATE` writer lock) and no
+    // boot-time fleet SSH fan-out. This is the crash-restart storm path: dozens
+    // of `sessions resume <id>` at once must not each take the writer lock or
+    // dial the not-yet-up tailnet. A genuine miss, an ambiguous prefix, or a
+    // peer-owned row falls through to the fleet resolver below unchanged — the
+    // narrow win is the exact case the storm hits, with no behaviour change for
+    // a session that lives on another box.
+    if (idLookup && hosts.length === 0 && looksLikeIdSelector(textSelector)) {
+      const self = machineId();
+      const localMatch = dedupeSessionsByLogicalId(
+        await resolveIndexedSessionById(textSelector),
+        self,
+      );
+      if (localMatch.length === 1 && !sessionProcessHost(localMatch[0], self)) {
+        // Local live index only (ps/tmux, no fleet sweep) so a still-live pane is
+        // still joined instead of resumed as a copy; a crashed session has no live
+        // row and recovers in place.
+        const { activeById } = await gatherLiveTargets(true, { statuses: [] });
+        await focusResolvedSession(localMatch[0], activeById, self, fallback, opts.attachOnly === true);
+        return;
+      }
+    }
+
     const { sessions, liveById, self, unreachable } = await collectSessionCandidates({
       running: opts.active === true || statuses.length > 0,
       statuses,
@@ -273,9 +306,36 @@ export async function focusAction(id: string | undefined, opts: FocusOptions): P
       console.error(chalk.yellow(`Unavailable devices: ${unreachable.join(', ')}`));
     }
 
-    let exact = textSelector && looksLikeIdSelector(textSelector)
-      ? sessions.filter((session) => session.id.toLowerCase().startsWith(textSelector.toLowerCase()))
+    const idSelector = textSelector && looksLikeIdSelector(textSelector) ? textSelector.toLowerCase() : undefined;
+    let exact = idSelector
+      ? dedupeSessionsByLogicalId(
+          sessions.filter((session) => session.id.toLowerCase().startsWith(idSelector)),
+          self,
+        )
       : [];
+    // A tmux alias naming a LIVE local session attaches directly. This must run
+    // before the metadata resolver: that resolver treats an unmatched alias as a
+    // keyword query, so `ag-kimi-632c1fbc` came back as 13 unrelated text hits
+    // while the pane was alive and attachable the whole time.
+    if (exact.length === 0 && textSelector && !hosts.length && await attachLiveTmuxAlias(textSelector)) return;
+
+    // Not live (or remote-scoped): an alias still carries the session's shortid,
+    // so resolve by THAT rather than handing the whole `ag-<agent>-<shortid>`
+    // string to the resolver — which treats an unmatched alias as a keyword
+    // query and answered `"ag-claude-dead5678" matches 200 sessions` for a pane
+    // whose process had simply exited. SES-41 requires an alias to resolve to one
+    // canonical session id.
+    if (textSelector && isAgentTmuxAlias(textSelector)) {
+      const short = shortIdFromName(textSelector);
+      if (short) {
+        textSelector = short;
+        exact = dedupeSessionsByLogicalId(
+          sessions.filter((session) => session.id.toLowerCase().startsWith(short)),
+          self,
+        );
+      }
+    }
+
     if (exact.length === 0 && textSelector && looksLikeIdentitySelector(textSelector)) {
       const outcome = await resolveSessionMetadataValue(textSelector, { local, hosts });
       if (outcome.kind === 'partial') {
@@ -395,8 +455,116 @@ function looksLikeIdSelector(selector: string | undefined): selector is string {
 function looksLikeIdentitySelector(selector: string | undefined): selector is string {
   return !!selector && (
     /^[0-9a-f][0-9a-f-]{5,}$/i.test(selector) ||
-    /^ag-[a-z][a-z0-9-]*-[0-9a-f]{8}$/i.test(selector)
+    isAgentTmuxAlias(selector)
   );
+}
+
+/**
+ * Attach a live tmux session named exactly as the selector, without needing the
+ * session index to know anything about it.
+ *
+ * SES-41 requires a `ag-<agent>-<8hex>` tmux alias to resolve, but the alias's
+ * hex is the LAUNCH id, not the harness session id, and for a harness that
+ * writes no `state/sessions/<pid>.json` record there is no mapping back to a
+ * SessionMeta at all. Measured on yosemite-s0: `--resolve ag-kimi-632c1fbc`
+ * fell through to a keyword search and returned 13 unrelated rows, while the
+ * pane itself was alive (`%124`, `kimi-code`). The pane is the thing the user
+ * asked for, and its NAME is sufficient to attach it — so an unattributable
+ * session is still reachable instead of being a dead end that forces raw
+ * `tmux -S … attach`.
+ *
+ * Returns false when this is not an alias, the server/session is absent, or
+ * every pane is dead — the caller then continues to normal id resolution.
+ * SES-39's "re-read `pane_dead` immediately before attach" is honoured here:
+ * liveness is queried at attach time, not read from the roster.
+ */
+/**
+ * Rank two rows that are the same logical session, best first.
+ *
+ * Prefer the row that can actually be acted on: a real transcript over a
+ * phantom index entry (a purged copy indexes with an empty `filePath`), then
+ * this machine's copy over a peer mirror — resuming is machine-bound, so the
+ * local row is the one whose harness state exists here.
+ */
+function sessionRowRank(s: SessionMeta, self?: string): number {
+  return (s.filePath ? 4 : 0) + (self && s.machine === self ? 2 : 0) + (s._remote ? 0 : 1);
+}
+
+/**
+ * Collapse rows that are the SAME logical session.
+ *
+ * A transcript syncs across the fleet, so one session appears once per machine
+ * holding a copy. SES-IF-2a: "Synced copies sharing the same full id MUST count
+ * as one logical session." `fleetCandidatesByQuery` already groups this way, but
+ * this path filtered raw rows instead — so `focus <full-uuid>` answered
+ * "is ambiguous (2 sessions). Use more of the id." with no longer id to give.
+ * Measured on zion: one of the two rows had no transcript at all
+ * ("Session transcript not available (file no longer exists). Path: ").
+ */
+export function dedupeSessionsByLogicalId(rows: SessionMeta[], self?: string): SessionMeta[] {
+  const byId = new Map<string, SessionMeta>();
+  for (const row of rows) {
+    const key = row.id.toLowerCase();
+    const held = byId.get(key);
+    if (!held || sessionRowRank(row, self) > sessionRowRank(held, self)) byId.set(key, row);
+  }
+  return [...byId.values()];
+}
+
+export type TmuxAliasState = 'not-an-alias' | 'no-server' | 'absent' | 'dead' | 'live';
+
+/** Shape of the tmux alias the CLI mints for an agent session: `ag-<agent>-<shortid>`.
+ * Delegates to the one canonical matcher beside the name parsers in active.ts. */
+export function looksLikeTmuxAlias(selector: string): boolean {
+  return isAgentTmuxAlias(selector);
+}
+
+/**
+ * Classify a selector against the live tmux server. Split from the attach so the
+ * decision is testable against a real tmux server without replacing the caller's
+ * shell (attaching is not something a test can undo).
+ */
+export async function resolveTmuxAliasState(selector: string, socket?: string): Promise<TmuxAliasState> {
+  if (!looksLikeTmuxAlias(selector)) return 'not-an-alias';
+  const sock = socket ?? getDefaultSocketPath();
+  if (!fs.existsSync(sock)) return 'no-server';
+  if (!(await hasSession(selector, sock).catch(() => false))) return 'absent';
+
+  const panes = await runTmux({
+    socket: sock,
+    args: ['list-panes', '-t', `=${selector}`, '-F', '#{pane_dead}'],
+  }).catch(() => undefined);
+  const states = (panes?.stdout ?? '').split('\n').map(s => s.trim()).filter(Boolean);
+  return states.some(d => d === '0') ? 'live' : 'dead';
+}
+
+async function attachLiveTmuxAlias(selector: string): Promise<boolean> {
+  const socket = getDefaultSocketPath();
+  if (await resolveTmuxAliasState(selector, socket) !== 'live') return false;
+
+  if (!process.stdout.isTTY) {
+    console.error(chalk.red(`"${selector}" is a live tmux session, but attaching needs a TTY.`));
+    console.error(chalk.gray(`  Run it from a terminal, or: agents tmux attach ${selector}`));
+    process.exitCode = 1;
+    return true;
+  }
+  // Already inside a tmux client on this socket — which is the normal state for
+  // an interactive agent session here — MOVE that client instead of nesting a
+  // second one. jumpTo (go.ts) does the same; attaching from inside tmux
+  // otherwise stacks clients rather than taking you to the session.
+  if (process.env.TMUX) {
+    await runTmux({ socket, args: ['switch-client', '-t', `=${selector}`], throwOnError: false }).catch(() => {});
+    console.log(chalk.gray(`Switched this tmux client to ${selector}.`));
+    return true;
+  }
+  console.log(chalk.gray(`Attaching ${selector} — Ctrl-b d to detach.`));
+  // Repair a legacy/stale pane-died hook before handing the session to an
+  // attach client — the 5-min daemon reconcile that used to cover this was
+  // deleted; attach-time repair is what closes the gap now (RUSH-2435).
+  await ensureSessionHookRepaired(selector, socket);
+  const code = await attachTmux({ socket, args: ['attach-session', '-t', `=${selector}`] });
+  process.exitCode = code;
+  return true;
 }
 
 function hasFocusFilters(opts: FocusOptions, statuses: LiveStatusFilter[]): boolean {

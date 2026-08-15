@@ -702,6 +702,17 @@ cross-machine rows (interactive, headless, teams, and sub-agent sessions share
 the same path). The picker preview also shows the originating user prompt and a
 width-capped `Dirs:` line of directories touched.
 
+A row another device owns (`_remote` — its transcript is on the peer's disk)
+gets the same full pane, not a metadata stub: the picker fetches that peer's
+already-computed digest over SSH (`fetchPeerPreviewDigest` in
+`src/lib/session/remote-list.ts` runs the peer's own `sessions preview <id>
+--local --json`) the first time the row is previewed and repaints the pane in
+place when it lands. While the fetch is in flight the pane shows the metadata
+card plus a `fetching preview from <device> over SSH…` note; a peer that cannot
+answer (asleep, unregistered, version-skewed) leaves the metadata card, cached
+so arrowing over the row does not re-dial it. Peer-supplied digest strings are
+scrubbed of terminal escapes before rendering (`sanitizeRemoteDigest`).
+
 Both renders of a session — the picker quick preview and the full summary —
 share one extraction module (`src/lib/session/highlights.ts`) for the "what did
 this session use and produce" lines, so they never disagree:
@@ -1284,22 +1295,23 @@ replaced by init, the controlling terminal is disassociated from the whole POSIX
 session when its leader exits, and the surviving helpers are precisely the ones
 that left the pane's process group. What does survive is the environment: the pane
 exports `AGENT_TMUX_SESSION_NAME` and every descendant inherits it, reparented or
-not. A process carrying that marker is reaped when its tmux session no longer
-exists, or when that session has **no attached client AND** its agent pane process
-has exited. A live agent or an attached client protects everything it owns, and the
-routines daemon, the secrets broker, and the reaping process's own ancestry are
-never candidates. Reading that marker needs another process's environment, which is
+not. A process carrying that marker is reaped only when tmux still reports its
+session and that session has **no attached client AND** its agent pane process has
+exited. An absent session is not proof: a tmux server can restart while its pane's
+process tree is still alive. A live agent, an attached client, or an absent owner
+protects everything it owns. The routines daemon, the secrets broker, and the
+reaping process's own ancestry are never candidates. Reading that marker needs
+another process's environment, which is
 a plain `/proc/<pid>/environ` file read on Linux but has no working equivalent on
 macOS: modern `ps -E` no longer prints another process's environment at all
 (verified on macOS Sequoia), so `readAgentProcesses()` returns every macOS process
 with no marker and tier 1 correctly finds nothing to do there — safe, not
 effective. Only tier 2 (below) reaps anything on macOS today.
 
-**When tmux itself can't be asked.** Tier 1 only trusts an ABSENT session as proof
-of "gone" when the tmux query that built that answer actually completed — a query
-that threw (tmux missing/unsupported version, a spawn failure, or a timed-out
-server) skips tier 1 entirely for that tick rather than treating "we don't know" as
-"there's nothing here". `agents sessions reap --json`'s `warnings` array (and a
+**When tmux itself can't be asked.** A query that threw (tmux
+missing/unsupported version, a spawn failure, or a timed-out server) skips tier 1
+entirely for that tick. A completed empty answer also reaps nothing: absence is not
+positive liveness evidence. `agents sessions reap --json`'s `warnings` array (and a
 `WARN`-level daemon log line) says so when it happens; tier 2 is unaffected, since
 it never consults tmux at all.
 
