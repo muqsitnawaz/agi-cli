@@ -582,10 +582,10 @@ export function commandsForPlan(plan: ImpactPlan, repoRoot: string): RunCommand[
         cmd: ['node', './node_modules/vitest/vitest.mjs', 'run', '--', ...cliTests],
       });
     }
-    for (const test of plan.tests) {
-      if (test.file.startsWith('apps/cli/') && test.file.endsWith('.test.ts')) continue;
-      out.push(commandForTestFile(test.file, repoRoot));
-    }
+  }
+  for (const test of plan.tests) {
+    if (test.file.startsWith('apps/cli/') && test.file.endsWith('.test.ts')) continue;
+    out.push(commandForTestFile(test.file, repoRoot));
   }
   for (const check of plan.checks) {
     switch (check) {
