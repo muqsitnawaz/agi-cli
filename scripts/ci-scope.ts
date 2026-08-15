@@ -713,32 +713,15 @@ export function isVitestWorkerCrashWithZeroFailures(output: string): boolean {
   return /\bpassed\b/.test(testsLine);
 }
 
-function isVitestCmd(cmd: string[]): boolean {
-  return cmd.some((c) => c.includes('vitest'));
-}
-
 function runCmd(spec: RunCommand): void {
-  const capture = isVitestCmd(spec.cmd);
   const proc = Bun.spawnSync({
     cmd: spec.cmd,
     cwd: spec.cwd,
-    stdout: capture ? 'pipe' : 'inherit',
-    stderr: capture ? 'pipe' : 'inherit',
+    stdout: 'inherit',
+    stderr: 'inherit',
     env: process.env,
   });
-  const stdout = capture ? Buffer.from(proc.stdout).toString('utf8') : '';
-  const stderr = capture ? Buffer.from(proc.stderr).toString('utf8') : '';
-  if (capture) {
-    process.stdout.write(stdout);
-    process.stderr.write(stderr);
-  }
   if (proc.exitCode !== 0) {
-    if (capture && isVitestWorkerCrashWithZeroFailures(`${stdout}\n${stderr}`)) {
-      process.stderr.write(
-        '::warning::vitest worker exited after zero test failures; treating as pass\n',
-      );
-      return;
-    }
     throw new Error(`command failed (${proc.exitCode}): ${spec.cmd.join(' ')}`);
   }
 }
