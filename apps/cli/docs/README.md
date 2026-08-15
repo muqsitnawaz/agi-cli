@@ -28,11 +28,11 @@ How agi-cli is laid out on disk and how it decides what to load.
 | [Self-healing installs](self-healing.md) | Detect, surface, and repair a broken agent binary (gutted install / `ENOENT`) instead of dying cryptically. |
 | [Resource sync](resource-sync.md) | How rules, commands, skills, hooks, etc. land in each version home. |
 | [**Specifications**](specifications.md) | **The normative contract** (MUST/SHOULD + Given/When/Then, cited to `file:line`) for the major subsystems — [Sessions](specifications.md#sessions), [Secrets](specifications.md#secrets), [Agent execution](specifications.md#agent-execution). Read the spec for the guarantee; the per-feature docs below for the how-to. |
-| [Sessions](05-sessions.md) | Unified transcript and tool-call search across all 12 `SESSION_AGENTS` harnesses; distinct-call queries, fleet fan-out, readable redacted Markdown rendering for Claude, Codex, Kimi, Grok, Cursor, and Droid; resume, export/import, live-session migration, and local/distributed benchmarks. |
-| [Observability](06-observability.md) | The three `--json` sources (sessions / cloud / teams) as a fleet view, plus `agents mailboxes` fleet comms. |
-| [SSH transport](09-ssh-transport.md) | The one multiplexed engine every `--device` command rides — default connection reuse, keepalive, one-round-trip follow. |
-| [Optimizations](99-optimizations.md) | Sync manifest, SSH transport, startup profiling, hot-path notes. |
-| [Landscape](04-landscape.md) | Where agents-cli sits next to similar tools. |
+| [Sessions](sessions.md) | Unified transcript and tool-call search across all 12 `SESSION_AGENTS` harnesses; distinct-call queries, fleet fan-out, readable redacted Markdown rendering for Claude, Codex, Kimi, Grok, Cursor, and Droid; resume, export/import, live-session migration, and local/distributed benchmarks. |
+| [Observability](observability.md) | The three `--json` sources (sessions / cloud / teams) as a fleet view, plus `agents mailboxes` fleet comms. |
+| [SSH transport](ssh-transport.md) | The one multiplexed engine every `--device` command rides — default connection reuse, keepalive, one-round-trip follow. |
+| [Optimizations](optimizations.md) | Sync manifest, SSH transport, startup profiling, hot-path notes. |
+| [Landscape](landscape.md) | Where agents-cli sits next to similar tools. |
 | [Product acceptance](product-acceptance.md) | User stories + Product cards: stop product regressions when agents write the code. |
 | [vs Gas Town](vs-gastown.md) | How agi-cli differs from Gas Town (multi-agent factory): parallels, glossary, what users like/dislike. |
 
@@ -57,9 +57,9 @@ How agi-cli is laid out on disk and how it decides what to load.
 | [Cloud](cloud.md) | Unified dispatch across Rush Cloud / Codex Cloud / Factory. Multi-repo tasks, balanced routing, SSE streaming. |
 | [Hosts](hosts.md) | Offload `agents run` to your own machines over SSH (`--device`); track with `agents hosts ps` and view/follow with `agents logs`. |
 | [Share](share.md) | Publish an HTML artifact to a public link on your own Cloudflare R2 (`agents share <file>`) — zero-egress, BYO-Cloudflare, expiry + fleet mode. |
-| [Routines](03-routines.md) | Cron-scheduled and signed-webhook-triggered agent runs with sandboxed permissions and a long-running daemon. |
-| [Monitors](10-monitors.md) | Durable event-triggered watchers: watch a source, detect a change, fire an action. A routine whose trigger is a watched source instead of a clock. |
-| [Projects](11-projects.md) | Named multi-repo projects layered over the `--project` convention, plus the progress rollup — one card per project instead of a per-agent activity line. Beta. |
+| [Routines](routines.md) | Cron-scheduled and signed-webhook-triggered agent runs with sandboxed permissions and a long-running daemon. |
+| [Monitors](monitors.md) | Durable event-triggered watchers: watch a source, detect a change, fire an action. A routine whose trigger is a watched source instead of a clock. |
+| [Projects](projects.md) | Named multi-repo projects layered over the `--project` convention, plus the progress rollup — one card per project instead of a per-agent activity line. Beta. |
 | [Watchdog](watchdog.md) | Detect **idle** agents across the fleet and steer them to completion — one device-local daemon pass every three minutes analyzes stalled sessions and nudges them with the concrete next step (idle is its job; `waiting` belongs to the feed). |
 
 ## Extensibility

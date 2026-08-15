@@ -9301,7 +9301,7 @@
             },
             {
               "flags": "--model <id>",
-              "description": "Model id to pin on the host (e.g., meta/muse-spark-1.1) — pair with --device",
+              "description": "Model id to pin on the host (e.g., meta/muse-spark-1.1) — pair with --host",
               "long": "--model",
               "required": true,
               "optional": false,

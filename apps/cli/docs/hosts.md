@@ -11,7 +11,7 @@
 > nothing silently drops at the SSH boundary. This document is
 > the design rationale; see [concepts.md](concepts.md#devices--hosts) for
 > the concept overview and how hosts relate to the Tailscale-backed
-> `agents devices` registry, and [09-ssh-transport.md](09-ssh-transport.md) for
+> `agents devices` registry, and [ssh-transport.md](ssh-transport.md) for
 > the shared, multiplexed SSH transport every `--device` command rides.
 
 `agents hosts` lets you run any agent (`claude`, `codex`, `droid`, …) on any of

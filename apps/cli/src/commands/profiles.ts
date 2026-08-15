@@ -554,7 +554,7 @@ Examples:
     .action(async (name: string, opts: AddProfileOptions) => {
       // Preset-only surface here — `--device` on `profiles` is reserved for remote
       // device routing (see lib/hosts/passthrough.ts). The host+model one-shot
-      // lives on `agents harness add`, which owns its own `--device`.
+      // lives on `agents harness add`, which owns its own `--host`.
       try {
         await addProfile(name, { preset: opts.preset, version: opts.version, account: opts.account, keyStdin: opts.keyStdin, force: opts.force }, 'Profile');
       } catch (err) {

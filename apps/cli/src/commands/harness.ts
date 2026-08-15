@@ -413,7 +413,7 @@ Examples:
     .command('add [name]')
     .description('Create a custom harness from a host + model (or apply a built-in preset). Omit flags in a terminal for the interactive wizard.')
     .option('--host <agent>', 'Host CLI to run under (opencode, claude, codex, grok, antigravity, ...) — pair with --model')
-    .option('--model <id>', 'Model id to pin on the host (e.g., meta/muse-spark-1.1) — pair with --device')
+    .option('--model <id>', 'Model id to pin on the host (e.g., meta/muse-spark-1.1) — pair with --host')
     .option('--base-url <url>', 'Custom endpoint base URL (claude/codex hosts)')
     .option('--account <name>', 'Default durable credential account')
     .option('--auth-provider <provider>', 'Removed: use agents accounts add, then --account')

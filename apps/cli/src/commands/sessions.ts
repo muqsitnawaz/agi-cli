@@ -1230,7 +1230,7 @@ export function dedupeByMachineSession(sessions: ActiveSession[]): ActiveSession
 }
 
 /**
- * Narrow a gathered live set to the machines an explicit `--device`/`--device`
+ * Narrow a gathered live set to the machines an explicit `--device`
  * scope named. The gather picks which boxes to ASK; this asserts what the answer
  * may contain, and the two are not the same question: a host-dispatched run is
  * reported by the box that dispatched it while executing somewhere else, so
@@ -1516,7 +1516,7 @@ async function enrichTmuxLocators(local: ActiveSession[], surfaces: GhosttySurfa
   } catch { /* non-fatal */ }
 }
 
-/** Normalize a `--device`/`--device` token (`alias`, `user@host`, `host.domain`)
+/** Normalize a `--device` token (`alias`, `user@host`, `host.domain`)
  * to the machine id the fan-out and registry key off. */
 function hostToken(h: string): string {
   return normalizeHost(h.split('@').pop() || h);
@@ -1524,7 +1524,7 @@ function hostToken(h: string): string {
 
 /**
  * Whether the local machine's sessions belong in an `--active` view. Local is
- * included by default; an explicit `--device`/`--device` list scopes the view to
+ * included by default; an explicit `--device` list scopes the view to
  * exactly those machines, so local is dropped unless it is itself named (by
  * alias or `user@host`, matched on the normalized machine id). Exported for
  * unit testing without touching SSH or the live process table.
@@ -1551,7 +1551,7 @@ export function remoteHostsToDial(hosts: string[] | undefined, self: string): st
 /**
  * The fleet-wide live-session set behind every `--active` surface. Local sessions
  * come from `getActiveSessions()` and (unless `--local`) the registered online
- * devices from `ag devices` are folded in over SSH. An explicit `--device`/`--device`
+ * devices from `ag devices` are folded in over SSH. An explicit `--device`
  * list SCOPES the sweep to exactly those machines — the local machine is included
  * only when it is itself named — so `--device` is a filter, not an addition.
  *
@@ -1858,7 +1858,7 @@ function useInteractiveBrowser(options: SessionsOptions): boolean {
  * A bare interactive fleet listing — no query, no render/filter flag — that the
  * `runSessionBrowser` picker can represent. The single predicate shared by the
  * bare-browser branch and the `--device` early-return guard so they can't drift:
- * when this holds, an explicit `--device`/`--device` scope is folded into the
+ * when this holds, an explicit `--device` scope is folded into the
  * browser (preview-rich, selectable) instead of the legacy per-host raw stream.
  */
 export function isBareBrowserListing(options: SessionsOptions, query: string | undefined): boolean {
