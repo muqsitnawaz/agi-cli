@@ -154,8 +154,15 @@ async function sessionsResumeAction(
   };
 
   // Direct id/alias (or label with prompt/strict flags) → strict resume
-  // (former top-level `agents sessions resume`). Live-pane attach is `sessions focus`.
+  // (former top-level `agents sessions resume`). `--attach-only` / `--local`
+  // must go through sessions focus so they cannot silently fork a copy
+  // (AGI EXT still shells `sessions resume <id> --local`).
   if (query && (isDirectResumeSelector(query) || wantsStrictResume(prompt, strictOpts))) {
+    if (resumeUsesLifecycleDispatch(query, prompt, options)) {
+      const hosts = options.host ? [options.host] : [];
+      await dispatchSessionLifecycleInPlace(query.trim(), hosts, !!options.attachOnly, !!options.local);
+      return;
+    }
     await runStrictResume(query.trim(), prompt, strictOpts);
     return;
   }
@@ -310,6 +317,23 @@ export async function resumeSelectorInPlace(selector: string): Promise<void> {
 /** Direct identities use focus as the lifecycle dispatcher: it rechecks the
  * live fleet, attaches a healthy pane, and falls through to `agents resume`
  * only when the process is no longer attachable. */
+/** True when `sessions resume <id> --attach-only|--local` must go through
+ *  `sessions focus` instead of `runStrictResume` (which can fork a copy). */
+export function resumeUsesLifecycleDispatch(
+  query: string | undefined,
+  prompt: string | undefined,
+  options: Pick<ResumeOptions, 'attachOnly' | 'local' | 'mode' | 'interactive' | 'headless' | 'here'>,
+): boolean {
+  if (!query || !isDirectResumeSelector(query)) return false;
+  if (!options.attachOnly && !options.local) return false;
+  return !wantsStrictResume(prompt, {
+    mode: options.mode,
+    interactive: options.interactive,
+    headless: options.headless,
+    here: options.here,
+  });
+}
+
 export async function dispatchSessionLifecycleInPlace(
   selector: string,
   hosts: string[] = [],

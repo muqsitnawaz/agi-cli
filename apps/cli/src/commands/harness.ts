@@ -407,7 +407,7 @@ Examples:
   # Private OpenAI/Anthropic-compatible endpoint using an existing account
   agents harness add corp --host claude --model gpt-x --base-url https://gw.corp/v1 --account corp
 
-  # Custom harnesses are just profiles — this also works via 'agents profiles'
+  # Custom harnesses are named host+model pins — manage them with `agents harness`
 `,
     );
 

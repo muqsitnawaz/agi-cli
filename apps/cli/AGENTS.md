@@ -339,7 +339,7 @@ coverage is `ALL_AGENT_IDS`-driven, so a new harness is included automatically.
 ### 11. Session recovery is one decision on the origin device
 
 `resolveSessionRecovery` in `src/lib/session/recovery.ts` is the only place that
-chooses native resume versus `/continue`. `sessions resume`, `agents resume`, and
+chooses native resume versus `/continue`. `sessions resume` and
 `run --resume` route through it — as do the retired `focus`/`attach`/`reconnect`
 spellings, which are hidden aliases that still run the same bodies. Native resume is valid only for the exact healthy
 origin version when that active isolated home still owns the indexed transcript;

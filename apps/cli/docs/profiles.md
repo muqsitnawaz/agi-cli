@@ -138,7 +138,7 @@ Profile YAML `host.agent` selects which binary is spawned. Env vars override def
 | Command | Description | Example |
 |---------|-------------|---------|
 | `harness list` / `ls` | List configured profiles (name, host, provider, model) | `agents harness list` |
-| `harness list` (presets section) | List built-in presets with descriptions | `agents harness presets` |
+| `harness list` | List custom harnesses and the built-in presets | `agents harness list` |
 | `harness view <name>` / `show` | Inspect a profile (env vars, auth status, preset link) | `agents harness view kimi` |
 | `harness add <name>` | Add a profile from a preset. Prompts for API key once per provider. | `agents harness add kimi` |
 | `harness add <name> --preset <preset>` | Add a profile using an explicit preset name | `agents harness add k2 --preset kimi` |
@@ -362,7 +362,7 @@ tears it down after the run.
 
 ## Per-provider guides
 
-For non-preset providers (gateways, self-hosted), the wizard at `agents harness create` walks you through the env vars. Per-provider gotchas are in:
+For non-preset providers (gateways, self-hosted), the wizard at `agents harness add` walks you through the env vars. Per-provider gotchas are in:
 
 - [TrueFoundry](profiles/truefoundry.md) — LLM Gateway, Bedrock-backed
 - [AWS Bedrock](profiles/bedrock.md) — direct

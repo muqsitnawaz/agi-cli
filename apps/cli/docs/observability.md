@@ -18,9 +18,9 @@ whose *consumer* and *axis* match your question, not whichever you remember firs
 | **`insights`** | **How work looks — one verb, two engines.** Bare = behavioural report (transcript content, account split). `insights mix` / recipes = cheap counters (harness/model/token/secrets). Former top-level `agents trends` is a deprecated alias of the mix tree only. | behaviour: `sessions.db` + `session_insights`; mix: `sessions.db` + `usage.db` | Human + `--json` |
 | **`feed`** / **`inbox`** | **Needs-you inbox + status posts.** Open blocks (decisions agents are waiting on) + `feed post` milestones. `inbox` ≡ `feed`. Scope with `--project`. | `.history/feed/*` + active sessions | Humans (operator inbox) + agents (progress) |
 | **`timeline`** | **Progress stream only.** Alias of `feed --filter updates` — deliberate posts, not tool noise. | same as feed updates lane | Humans + `--json` |
-| **`output`** | **Productivity accounting.** Token burn vs shipped output (PRs, commits) across agents — the "was it worth it" axis. (`agents insights cost` is the pure $-and-duration sibling.) | `sessions.db` + git/gh | Human + `--json` |
-| **`sessions`** / **`roster`** | **Live agent roster + transcripts.** `roster` ≡ `sessions --active`. Browse/read past transcripts under `sessions`. `sessions stats` = skill/slash invocation leaderboard. | live pid/transcript probe + `sessions.db` | Human + `--json` |
-| **`snapshot`** | **One-process poll.** Inventory + active sessions (+ optional feed/sync). Not `status` (sync-only). | view + active + optional feed | Machines / the ext |
+| **`insights output`** | **Productivity accounting.** Token burn vs shipped output (PRs, commits) across agents — the "was it worth it" axis. (`agents insights cost` is the pure $-and-duration sibling.) | `sessions.db` + git/gh | Human + `--json` |
+| **`sessions`** | **Live agent roster + transcripts.** Live roster is `sessions --active`. Browse/read past transcripts under `sessions`. `sessions stats` = skill/slash invocation leaderboard. | live pid/transcript probe + `sessions.db` | Human + `--json` |
+| **`devices snapshot`** | **One-process poll.** Inventory + active sessions (+ optional feed/sync). Not `status` (sync-only). | view + active + optional feed | Machines / the ext |
 
 ### Why `insights` owns mix (and `trends` does not)
 
@@ -444,7 +444,7 @@ Three diagnostics with distinct scopes (RUSH-2027):
   peers' rows on demand, cache-first, ssh-reading a stale/missing peer via
   `agents fleet status --local --json` through a bounded, kill-on-timeout fan-out.
 
-- `agents snapshot` — **one-process consumer poll** for install inventory + active sessions
+- `agents devices snapshot` — **one-process consumer poll** for install inventory + active sessions
   (optional feed / sync). Replaces the N× `view --json` + `sessions --active --json` fork
   storm. Default sessions scope is this machine; `--all-hosts` matches full active fan-out.
   JSON contract: `FleetSnapshot` version 1 (`inventory`, `sessions`, `agents`, optional
