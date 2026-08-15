@@ -161,7 +161,7 @@ writer gates on.
 
 ### Across the SSH hop: `AGENT_LAUNCH_ID` is the one correlation key
 
-`agents run --host` runs `agents run` on a remote box, so the "who names the session"
+`agents run --device` runs `agents run` on a remote box, so the "who names the session"
 split above still holds — Claude forwards a `--session-id` the launcher controls, every
 other agent coins its own id on the peer. The launcher recovers that remote-coined id
 through **one stable correlation key it controls end-to-end**: `AGENT_LAUNCH_ID`.

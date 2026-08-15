@@ -124,7 +124,7 @@ export function registerSnapshotCommand(devicesCmd: Command): void {
       agents devices snapshot --json --agent claude
 
       # Run the whole snapshot on another device
-      agents devices snapshot --json --host yosemite-s0
+      agents devices snapshot --json --device yosemite-s0
     `,
   });
 
