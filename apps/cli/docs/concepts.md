@@ -43,7 +43,7 @@ A **resource** is any named item inside a DotAgents repo. Resources are typed by
 |------|-----------|--------------|
 | `commands` | Slash commands and prompt shortcuts | `.md` (most agents), `.toml` only for legacy Gemini reads |
 | `skills` | Knowledge packs injected into the agent's context | Directory with `SKILL.md` |
-| `hooks` | Shell scripts that fire on agent lifecycle events | `.sh` scripts + `hooks.yaml` manifest |
+| `hooks` | Shell scripts that fire on agent lifecycle events | `.sh` scripts + `hooks.yaml` manifest. One **built-in** hook ships inside the CLI itself rather than any repo: `session-tracker` (the SessionStart live-session state writer, `builtinHookManifest()` in `src/lib/hooks.ts`), seeded below every repo layer so a same-name entry can override it, and disableable with `session-tracker: { enabled: false }` |
 | `rules` | Persistent memory / instructions for the agent | `AGENTS.md` → `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, … |
 | `mcp` | MCP server definitions (transport, command, args, env) | Merged into each agent's settings file |
 | `permissions` | Allow/deny tool permission groups | Converted to each agent's native format |

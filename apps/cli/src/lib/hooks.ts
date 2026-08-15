@@ -12,6 +12,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import * as yaml from 'yaml';
 import * as TOML from 'smol-toml';
 import { AGENTS, ALL_AGENT_IDS, agentConfigDirName, isAgentHardDeprecated } from './agents.js';
@@ -1748,10 +1749,109 @@ export function normalizeHookTimeoutSeconds(value: unknown): number | null {
  * `timeout` written as a duration string (`5s`, `2m`) is normalized to a
  * seconds number here, so every downstream serializer keeps reading a number.
  */
+/**
+ * Built-in hooks — infrastructure hooks that ship inside the agents-cli package
+ * itself rather than any DotAgents repo. Today that is exactly one: the
+ * `@agents/session-tracker` SessionStart state writer
+ * (packages/session-tracker/src/hook.sh), which records
+ * `~/.agents/.cache/terminals/sessions/<pid>.json` so live-session consumers
+ * (AGI EXT's liveSession reader, `sessions --active` via
+ * session/hook-sessions.ts, the browser task reaper) can resolve a harness pid
+ * to its real session id on EVERY launch path — a bare `claude`/`codex`/`kimi`
+ * typed in a terminal included, which `buildExecEnv`'s AGENT_SESSION_ID can
+ * never cover because it only runs under `agents run` (exec.ts).
+ *
+ * The script is materialized (write-if-changed, 0755) into a managed dir under
+ * the shims root so the registered command survives CLI relocations/upgrades
+ * and stale entries are GC-able through managedPrefixes. It is declared as an
+ * ordinary ManifestHook so every existing registration path — `agents sync` →
+ * registerHooksToSettings per hooks-capable agent × version, plus doctor's
+ * checkVersionHookWiring — carries it with no parallel mechanism. The manifest
+ * command carries no argument, so hook.sh self-identifies the harness from its
+ * parent process. A user can still disable it from the user agents.yaml with
+ * `session-tracker: { enabled: false }` (same-name layering wins).
+ *
+ * Deliberately NOT in this hook's reach: gemini (hard-deprecated —
+ * registerHooksToSettings returns early via isAgentHardDeprecated) and
+ * antigravity (ANTIGRAVITY_EVENT_MAP has no SessionStart event, so the
+ * registrar skips the entry for it).
+ */
+export const BUILTIN_HOOK_NAMES: readonly string[] = ['session-tracker'];
+
+function builtinHooksDir(): string {
+  // Sibling of the generated-shim dir (…/.cache/shims/builtin-hooks) — NOT the
+  // shim dir itself: resolveHookCommand calls removeHookShim(name) for any
+  // cache-less hook, which would delete a same-named file living there.
+  return path.join(path.dirname(getHookShimsDir()), 'builtin-hooks');
+}
+
+function sessionTrackerHookSource(): string | null {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    // Shipped asset: copied next to the compiled module by the build
+    // (apps/cli/package.json `build` → dist/lib/session-tracker-hook.sh).
+    path.join(here, 'session-tracker-hook.sh'),
+    // Repo checkout: src/lib and dist/lib are both four hops above the repo
+    // root (same depth math as the native-helper resolvers).
+    path.resolve(here, '..', '..', '..', '..', 'packages', 'session-tracker', 'src', 'hook.sh'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      /* keep looking */
+    }
+  }
+  return null;
+}
+
+// Materialization memo: parseHookManifest runs often (daemon ticks, doctor,
+// sync); skip the target read/compare once a (source → target) pair is known
+// to be current in this process.
+const materializedBuiltinHooks = new Set<string>();
+
+export function builtinHookManifest(): Record<string, ManifestHook> {
+  const source = sessionTrackerHookSource();
+  if (!source) return {};
+  const target = path.join(builtinHooksDir(), 'session-tracker.sh');
+  const memoKey = `${source}\n${target}`;
+  if (!materializedBuiltinHooks.has(memoKey)) {
+    try {
+      const content = fs.readFileSync(source, 'utf-8');
+      let existing: string | null = null;
+      try {
+        existing = fs.readFileSync(target, 'utf-8');
+      } catch {
+        existing = null;
+      }
+      if (existing !== content) {
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        const tmp = `${target}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, content, { mode: 0o755 });
+        fs.renameSync(tmp, target);
+      }
+      ensureExecutable(target);
+      materializedBuiltinHooks.add(memoKey);
+    } catch {
+      // Never let a materialization failure break hook parsing/sync — the
+      // built-in simply stays unregistered until the next attempt.
+      return {};
+    }
+  }
+  return {
+    'session-tracker': { script: target, events: ['SessionStart'], timeout: 5 },
+  };
+}
+
 export function parseHookManifest(opts: { warn?: boolean } = {}): Record<string, ManifestHook> {
   const warn = opts.warn !== false;
   const merged: Record<string, ManifestHook> = {};
   const systemHooks: Record<string, ManifestHook> = {};
+
+  // Base layer: built-in hooks shipped with the CLI itself. Seeded before every
+  // repo layer so a same-name entry from a subrule, the system repo, or the
+  // user agents.yaml can override or disable them.
+  for (const [name, def] of Object.entries(builtinHookManifest())) merged[name] = def;
 
   // Lowest-precedence layer: hooks declared inside active subrule directories.
   // Seeded first so any same-key entry from system/user agents.yaml wins.
@@ -1841,6 +1941,11 @@ export function selectHookManifest(
   const selectedHooks = new Set(selected);
   return Object.fromEntries(
     Object.entries(manifest).filter(([name, hook]) =>
+      // Built-ins are CLI infrastructure, not selectable resources: they are
+      // never in a central hooks dir, so a selection derived from
+      // available.hooks (versions.ts) would silently drop them — and the
+      // opencode registrar would then regenerate its plugin without them.
+      BUILTIN_HOOK_NAMES.includes(name) ||
       selectedHooks.has(name) || selectedHooks.has(path.basename(hook.script))
     )
   );
@@ -2050,6 +2155,9 @@ export function registerHooksToSettings(
         // GC'd its stale shim-path entry (only reachable via a caller that
         // passes agentsDirOverride; no production call site does today).
         getHookShimsDir() + path.sep,
+        // Built-in hooks are materialized here regardless of hooks source, so
+        // their stale entries need GC coverage in every managedPrefixes shape.
+        builtinHooksDir() + path.sep,
       ]
     : [
         ...getManagedHookPrefixes(),
@@ -2058,6 +2166,9 @@ export function registerHooksToSettings(
         // hook whose `cache:` field is removed gets its stale shim path purged
         // from the agent's settings file (see resolveHookCommand).
         getHookShimsDir() + path.sep,
+        // Materialized built-in hooks (builtinHookManifest) — GC coverage so a
+        // disabled/renamed built-in's settings entry is purged on re-register.
+        builtinHooksDir() + path.sep,
       ];
 
   if (agentId === 'claude') {

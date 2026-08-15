@@ -1,27 +1,31 @@
 #!/usr/bin/env bash
 # Polyglot SessionStart hook.
 #
-# Registered as a SessionStart hook in each agent's native config file.
+# Registered in each agent's native config file — either by this package's
+# install-hook.ts (dev/standalone, passes the agent as $1) or by agents-cli's
+# built-in hook registration (apps/cli/src/lib/hooks.ts, which registers the
+# script bare: manifest hook commands carry no arguments, so the script
+# self-identifies the harness from its parent process).
+#
 # Each agent passes the hook payload differently:
 #   - claude/codex/cursor: JSON on stdin with session_id (+conversation_id for cursor)
 #   - grok: GROK_SESSION_ID and GROK_WORKSPACE_ROOT env vars
 #   - hermes: JSON on stdin (on_session_start payload); best-effort field probe
-#   - gemini/antigravity: TBD — add branches below as upstream payloads land
+#   - anything else: best-effort stdin probe (a miss writes nothing, never wrong)
 #
 # Writes ~/.agents/.cache/terminals/sessions/<PPID>.json with the canonical
-# SessionState schema from src/types.ts. Atomic via mktemp + mv.
+# SessionState schema from src/types.ts. Atomic via mktemp + mv; a temp that
+# never reaches mv is removed by the EXIT trap. After a successful write it
+# prunes the state dir: dead-pid state files and orphaned atomic-write temps.
 #
 # Invocation:
-#   hook.sh <agent>            # required; selects which payload format to parse
+#   hook.sh [<agent>]          # optional; selects which payload format to parse
 #
 # Silent on success (SessionStart stdout leaks into the model context).
 
 set -euo pipefail
 
 AGENT="${1:-${AGENT_HINT:-}}"
-if [ -z "$AGENT" ]; then
-  exit 0
-fi
 
 # Read stdin if any (don't block forever).
 # Use `cat` only when stdin is not a TTY — and rely on hosts (claude, codex,
@@ -30,6 +34,43 @@ fi
 STDIN_JSON=""
 if [ ! -t 0 ]; then
   STDIN_JSON="$(cat || true)"
+fi
+
+# Self-identify when invoked bare: the hook process's parent IS the harness
+# ($PPID — same invariant the state file's key relies on below). Prefer the
+# grok env marker, then map the parent's command line to a known harness id,
+# skipping one interpreter frame (node/bun/python shebang launchers).
+if [ -z "$AGENT" ]; then
+  if [ -n "${GROK_SESSION_ID:-}" ]; then
+    AGENT="grok"
+  else
+    PARENT_CMD="$(ps -o command= -p "$PPID" 2>/dev/null || true)"
+    ARG0="${PARENT_CMD%% *}"
+    BASE="${ARG0##*/}"
+    case "$BASE" in
+      node*|bun*|python*|deno*)
+        REST="${PARENT_CMD#* }"
+        ARG1="${REST%% *}"
+        BASE="${ARG1##*/}"
+        ;;
+    esac
+    case "$BASE" in
+      claude*)   AGENT="claude" ;;
+      codex*)    AGENT="codex" ;;
+      cursor*)   AGENT="cursor" ;;
+      kimi*)     AGENT="kimi" ;;
+      droid*)    AGENT="droid" ;;
+      grok*)     AGENT="grok" ;;
+      hermes*)   AGENT="hermes" ;;
+      gemini*)   AGENT="gemini" ;;
+      opencode*) AGENT="opencode" ;;
+      goose*)    AGENT="goose" ;;
+      kiro*)     AGENT="kiro" ;;
+      copilot*)  AGENT="copilot" ;;
+      muse*)     AGENT="muse" ;;
+      *)         AGENT="unknown" ;;
+    esac
+  fi
 fi
 
 SID=""
@@ -67,14 +108,12 @@ case "$AGENT" in
     CWD="${GROK_WORKSPACE_ROOT:-$PWD}"
     METHOD="hook-env"
     ;;
-  hermes|gemini|antigravity)
-    # Best-effort stdin-JSON probe across the field names these harnesses use.
-    # A miss exits 0 below (no state file) — never a wrong write.
+  *)
+    # hermes/gemini/antigravity/unknown/future harnesses: best-effort stdin-JSON
+    # probe across the field names these harnesses use. A miss exits 0 below
+    # (no state file) — never a wrong write.
     SID="$(printf '%s' "$STDIN_JSON" | extract_stdin_json 'session_id conversation_id sessionId')"
     CWD="$(printf '%s' "$STDIN_JSON" | extract_stdin_json 'cwd workspace_roots')"
-    ;;
-  *)
-    exit 0
     ;;
 esac
 
@@ -96,6 +135,12 @@ mkdir -p "$STATE_DIR"
 TID="${AGENT_TERMINAL_ID:-}"
 LID="${AGENT_LAUNCH_ID:-}"
 
+# Under `set -e` a failed writer aborts the script between mktemp and mv,
+# stranding the temp (the .<pid>.XXXXXX orphans this trap exists to prevent).
+TMP=""
+SID_TMP=""
+trap 'rm -f ${TMP:+"$TMP"} ${SID_TMP:+"$SID_TMP"} 2>/dev/null || true' EXIT
+
 TMP="$(mktemp "$STATE_DIR/.${PPID}.XXXXXX")"
 python3 - "$SID" "$CWD" "$PPID" "$AGENT" "$TID" "$LID" "$METHOD" > "$TMP" <<'PY'
 import json, sys, time
@@ -115,7 +160,46 @@ if lid:
 json.dump(out, sys.stdout)
 PY
 
+# A zero-byte temp means the writer produced nothing — never promote it to a
+# state file the readers would have to reject.
+[ -s "$TMP" ] || exit 0
+
 mv -f "$TMP" "$STATE_DIR/$PPID.json"
+TMP=""
+
+# Prune the state dir: state files whose pid is gone (ESRCH only — an EPERM
+# pid exists under another uid and is left alone, mirroring
+# pruneStaleSessionState in src/reader.ts) and dot-prefixed atomic-write temps
+# older than an hour (orphans from a writer that died before mv).
+python3 - "$STATE_DIR" <<'PY' 2>/dev/null || true
+import os, re, sys, time
+state_dir = sys.argv[1]
+now = time.time()
+try:
+    names = os.listdir(state_dir)
+except OSError:
+    sys.exit(0)
+for name in names:
+    p = os.path.join(state_dir, name)
+    m = re.fullmatch(r'(\d+)\.json', name)
+    if m:
+        try:
+            os.kill(int(m.group(1)), 0)
+        except ProcessLookupError:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        except (PermissionError, OverflowError, ValueError):
+            pass
+        continue
+    if name.startswith('.'):
+        try:
+            if now - os.stat(p).st_mtime > 3600:
+                os.unlink(p)
+        except OSError:
+            pass
+PY
 
 # Persist launch metadata under the harness's real session id. `agents run`
 # exports the EFFECTIVE mode after capability/headless resolution, plus the
@@ -156,6 +240,8 @@ if re.fullmatch(r'ag-[a-z][a-z0-9-]*-[0-9a-f]{8}', tmux_name, re.I):
     out['aliases'] = list(dict.fromkeys(aliases))
 json.dump(out, sys.stdout)
 PY
+  [ -s "$SID_TMP" ] || exit 0
   mv -f "$SID_TMP" "$BY_SESSION_DIR/$SID.json"
+  SID_TMP=""
 fi
 exit 0

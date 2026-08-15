@@ -56,6 +56,13 @@ export async function writeStateAtomic(state: SessionState): Promise<void> {
   await fs.promises.mkdir(STATE_DIR, { recursive: true });
   const finalPath = stateFilePath(state.pid);
   const tmpPath = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
-  await fs.promises.writeFile(tmpPath, serializeState(state), 'utf8');
-  await fs.promises.rename(tmpPath, finalPath);
+  try {
+    await fs.promises.writeFile(tmpPath, serializeState(state), 'utf8');
+    await fs.promises.rename(tmpPath, finalPath);
+  } catch (err) {
+    // A failed write or rename must not strand the temp — the state dir is
+    // long-lived and orphaned temps accumulate (measured: 20 on one machine).
+    await fs.promises.unlink(tmpPath).catch(() => undefined);
+    throw err;
+  }
 }

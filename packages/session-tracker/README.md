@@ -59,6 +59,14 @@ state-file helpers (`serializeState`, `parseState`, `writeStateAtomic`).
 
 ## Installing the hook
 
+**The production path is agents-cli's built-in manifest hook** — the CLI ships
+`src/hook.sh` inside its own package (`dist/lib/session-tracker-hook.sh`) and
+`agents sync` registers it into every hooks-capable harness's native config as
+the base-layer `session-tracker` hook (`builtinHookManifest()` in
+`apps/cli/src/lib/hooks.ts`), invoked with no agent argument (the script
+self-identifies from its parent process). The commands below are the
+standalone/dev installer:
+
 ```bash
 bun run install-hook claude            # register the hook in ~/.claude/settings.json
 bun run install-hook claude codex cursor grok

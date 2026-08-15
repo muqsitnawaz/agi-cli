@@ -62,6 +62,66 @@ describe('SessionStart hook launch metadata', () => {
     });
   });
 
+  it('writes the state file when invoked with no agent argument (the agents-cli managed registration)', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-tracker-hook-'));
+    dirs.push(root);
+    const home = path.join(root, 'home');
+    fs.mkdirSync(home);
+    const sessionId = '019fd200-0000-7000-8000-000000000001';
+
+    // Manifest hook commands carry no argument; the hook must self-identify
+    // (parent-process probe) and still record the session via the generic
+    // stdin parse. The hook's $PPID is this test process.
+    const result = spawnSync(hookPath, [], {
+      input: JSON.stringify({ session_id: sessionId, cwd: '/repo' }),
+      encoding: 'utf8',
+      env: { ...process.env, HOME: home },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(''); // SessionStart stdout leaks into model context
+    const stateFile = path.join(home, '.agents', '.cache', 'terminals', 'sessions', `${process.pid}.json`);
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    expect(state).toMatchObject({ session_id: sessionId, cwd: '/repo', pid: process.pid });
+    expect(typeof state.agent).toBe('string');
+    expect(state.agent.length).toBeGreaterThan(0);
+  });
+
+  it('prunes dead-pid state files and hour-old temps after a successful write', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-tracker-hook-'));
+    dirs.push(root);
+    const home = path.join(root, 'home');
+    const stateDir = path.join(home, '.agents', '.cache', 'terminals', 'sessions');
+    fs.mkdirSync(stateDir, { recursive: true });
+
+    // A pid that has provably exited.
+    const deadPid = Number(spawnSync('sh', ['-c', 'echo $$'], { encoding: 'utf8' }).stdout.trim());
+    fs.writeFileSync(path.join(stateDir, `${deadPid}.json`), '{"session_id":"x","cwd":"/","pid":1,"ts":1}');
+    // Pid 1 (launchd/init) is alive but not ours — EPERM must be left alone.
+    fs.writeFileSync(path.join(stateDir, '1.json'), '{"session_id":"x","cwd":"/","pid":1,"ts":1}');
+    // Orphaned atomic-write temps: an hour-old one goes, a fresh one stays.
+    const oldTemp = path.join(stateDir, '.12345.abcdef');
+    const freshTemp = path.join(stateDir, '.12345.fresh0');
+    fs.writeFileSync(oldTemp, '');
+    fs.writeFileSync(freshTemp, '');
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    fs.utimesSync(oldTemp, twoHoursAgo, twoHoursAgo);
+
+    const result = spawnSync(hookPath, ['codex'], {
+      input: JSON.stringify({ session_id: '019fd200-0000-7000-8000-000000000002', cwd: '/repo' }),
+      encoding: 'utf8',
+      env: { ...process.env, HOME: home },
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(fs.existsSync(path.join(stateDir, `${deadPid}.json`))).toBe(false);
+    expect(fs.existsSync(path.join(stateDir, '1.json'))).toBe(true);
+    expect(fs.existsSync(oldTemp)).toBe(false);
+    expect(fs.existsSync(freshTemp)).toBe(true);
+    // The write this run performed is intact.
+    expect(fs.existsSync(path.join(stateDir, `${process.pid}.json`))).toBe(true);
+  });
+
   it('rejects a traversal session id before creating a temporary sidecar', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'session-tracker-hook-'));
     dirs.push(root);

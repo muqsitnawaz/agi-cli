@@ -23,7 +23,7 @@ package.
 ## Layout
 
 ```
-src/hook.sh          Polyglot SessionStart hook — parses each harness's payload, writes the state file
+src/hook.sh          Polyglot SessionStart hook — parses each harness's payload, writes the state file, then prunes dead-pid state files + stale temps; the agent argument is optional (it self-identifies from its parent process when registered bare)
 src/index.ts         Entry — re-exports all modules + trackSpawn() / getLiveSession()
 src/types.ts         SessionState, AgentId, DetectionMethod, LookupInput
 src/state-file.ts    STATE_DIR (canonical path), stateFilePath(), writeStateAtomic(), parseState()
@@ -55,3 +55,13 @@ tests/scenarios/     cold-spawn (50×, ≥99%) + kill-restart (20×, stale-entry
   cached spawn-time id.
 - **`install-hook.ts` is idempotent** — it strips prior `session-tracker/src/hook.sh`
   registrations before adding, so re-running never duplicates the hook.
+- **Production registration is agents-cli's built-in manifest hook, not
+  `install-hook.ts`.** The CLI build copies `src/hook.sh` into its tarball
+  (`apps/cli` `build` script → `dist/lib/session-tracker-hook.sh`), and
+  `builtinHookManifest()` in `apps/cli/src/lib/hooks.ts` materializes it into
+  `~/.agents/.cache/shims/builtin-hooks/session-tracker.sh` and declares it as a
+  base-layer `session-tracker` ManifestHook — so `agents sync` registers it into
+  every hooks-capable harness's native config on every launch path (bare
+  launches included) and invokes it with NO agent argument (the script
+  self-identifies). `install-hook.ts` remains the standalone/dev installer; the
+  CLI still never imports this package's TS.

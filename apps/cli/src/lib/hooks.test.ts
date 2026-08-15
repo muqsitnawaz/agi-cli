@@ -202,8 +202,11 @@ describe('checkVersionHookWiring', () => {
     const report = runWiring('claude', '2.0.0');
     expect(report.supported).toBe(true);
     expect(report.settingsMissing).toBeFalsy();
-    expect(report.unwired).toHaveLength(1);
-    expect(report.unwired[0]).toMatchObject({ name: 'demo-guard', event: 'PreToolUse' });
+    // The built-in session-tracker hook is also expected (and equally unwired
+    // in this hand-written settings.json) — filter to the seeded hook.
+    expect(report.unwired.filter((u) => u.name === 'demo-guard')).toHaveLength(1);
+    expect(report.unwired.find((u) => u.name === 'demo-guard')).toMatchObject({ name: 'demo-guard', event: 'PreToolUse' });
+    expect(report.unwired.filter((u) => u.name === 'session-tracker')).toHaveLength(1);
   });
 
   it('reports no unwired hooks once the real registrar has wired settings.json', () => {
@@ -221,7 +224,8 @@ describe('checkVersionHookWiring', () => {
     const report = runWiring('claude', '2.0.0');
     expect(report.supported).toBe(true);
     expect(report.settingsMissing).toBe(true);
-    expect(report.expected).toBe(1);
+    // demo-guard + the built-in session-tracker SessionStart hook.
+    expect(report.expected).toBe(2);
   });
 
   it('reports unsupported for an agent outside the settings.json family (codex)', () => {
@@ -626,5 +630,58 @@ describe('repairManagedHookRuntimeArtifacts', () => {
 
     expect(r.isolated.attempts).toEqual([]);
     expect(r.tooOld.attempts).toEqual([]);
+  });
+});
+
+describe('built-in session-tracker hook', () => {
+  it('parseHookManifest declares it and materializes the script into the managed builtin-hooks dir', () => {
+    const out = runRuntime(`
+      const manifest = mod.parseHookManifest({ warn: false });
+      const entry = manifest['session-tracker'] ?? null;
+      const fs = await import('fs');
+      console.log(JSON.stringify({
+        entry,
+        exists: entry ? fs.existsSync(entry.script) : false,
+        executable: entry ? (fs.statSync(entry.script).mode & 0o111) !== 0 : false,
+      }));
+    `);
+    const r = JSON.parse(out) as {
+      entry: { script: string; events: string[]; timeout?: number } | null;
+      exists: boolean;
+      executable: boolean;
+    };
+    expect(r.entry).not.toBeNull();
+    expect(r.entry!.events).toEqual(['SessionStart']);
+    // Materialized under the shims root's sibling builtin-hooks dir — NOT the
+    // generated-shim dir (resolveHookCommand's removeHookShim would delete a
+    // same-named file there).
+    expect(r.entry!.script).toBe(path.join(testHome, 'builtin-hooks', 'session-tracker.sh'));
+    expect(r.exists).toBe(true);
+    expect(r.executable).toBe(true);
+    // Byte-identical to the canonical package script.
+    const canonical = path.resolve(process.cwd(), '..', '..', 'packages', 'session-tracker', 'src', 'hook.sh');
+    expect(fs.readFileSync(path.join(testHome, 'builtin-hooks', 'session-tracker.sh'), 'utf-8'))
+      .toBe(fs.readFileSync(canonical, 'utf-8'));
+  });
+
+  it('a user-layer enabled:false disables it', () => {
+    fs.writeFileSync(
+      path.join(userDir, 'agents.yaml'),
+      'agents:\n  claude: "2.0.0"\nhooks:\n  session-tracker:\n    script: ignored.sh\n    events: [SessionStart]\n    enabled: false\n    override: true\n',
+    );
+    const out = runRuntime(`
+      const manifest = mod.parseHookManifest({ warn: false });
+      console.log(JSON.stringify({ present: 'session-tracker' in manifest }));
+    `);
+    expect(JSON.parse(out)).toEqual({ present: false });
+  });
+
+  it('selectHookManifest retains it even when the selection does not name it', () => {
+    const out = runRuntime(`
+      const manifest = mod.parseHookManifest({ warn: false });
+      const selected = mod.selectHookManifest(manifest, []);
+      console.log(JSON.stringify({ retained: 'session-tracker' in selected }));
+    `);
+    expect(JSON.parse(out)).toEqual({ retained: true });
   });
 });

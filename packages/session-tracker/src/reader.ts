@@ -110,6 +110,11 @@ export async function findStateByLaunchId(launchId: string): Promise<SessionStat
   return best;
 }
 
+/** Orphaned atomic-write temps: hook.sh's `.<pid>.XXXXXX` mktemp names and
+ *  writeStateAtomic's `<pid>.json.<pid>.<ts>.tmp` names. */
+const TEMP_FILE_RE = /(^\.\d+\.)|(\.tmp$)/;
+const TEMP_MAX_AGE_MS = 60 * 60 * 1000;
+
 export async function pruneStaleSessionState(): Promise<number> {
   let names: string[];
   try {
@@ -118,8 +123,23 @@ export async function pruneStaleSessionState(): Promise<number> {
     return 0;
   }
   let removed = 0;
+  const now = Date.now();
   for (const name of names) {
-    if (!name.endsWith('.json')) continue;
+    const filePath = path.join(STATE_DIR, name);
+    if (!name.endsWith('.json') || name.startsWith('.')) {
+      // A temp that outlived its writer by an hour never reached mv — orphaned.
+      if (!TEMP_FILE_RE.test(name)) continue;
+      try {
+        const st = await fs.promises.stat(filePath);
+        if (now - st.mtimeMs > TEMP_MAX_AGE_MS) {
+          await fs.promises.unlink(filePath);
+          removed++;
+        }
+      } catch {
+        /* best-effort */
+      }
+      continue;
+    }
     const pid = Number(name.slice(0, -5));
     if (!Number.isFinite(pid) || pid <= 0) continue;
     try {
@@ -127,7 +147,7 @@ export async function pruneStaleSessionState(): Promise<number> {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ESRCH') {
         try {
-          await fs.promises.unlink(path.join(STATE_DIR, name));
+          await fs.promises.unlink(filePath);
           removed++;
         } catch {
           /* best-effort */
