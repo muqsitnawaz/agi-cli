@@ -582,7 +582,9 @@ function unsetInFleetDefaults(spec: ConfigKeySpec): void {
     else delete fleet.defaults;
     // Drop the fleet block entirely when the unset emptied a block that holds
     // nothing else — don't leave a vestigial `fleet: {devices: {}}` behind.
-    const devicesEmpty = fleet.devices !== 'all' && Object.keys(fleet.devices).length === 0;
+    const devicesEmpty = fleet.devices == null || fleet.devices === 'all'
+      ? false
+      : Object.keys(fleet.devices).length === 0;
     if (devicesEmpty && !fleet.defaults && !fleet.secrets && !fleet.routines) {
       const { fleet: _, ...rest } = m;
       void _;
