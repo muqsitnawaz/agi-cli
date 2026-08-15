@@ -157,6 +157,28 @@ describe('healDanglingVersionPointers (RUSH-2471)', () => {
     expect(res.symlinkNow).toBe('0.2.91');
   });
 
+  it('does not crash (or repoint at an isolated install) when no non-isolated version survives', () => {
+    const res = runInHome(`
+      installGrok('0.3.0'); isolateGrok('0.3.0');  // the only install, isolated
+      setGlobalDefault('grok', '1.0.0');           // dead non-isolated default (binary gone)
+      leftoverGrok('1.0.0');
+      pointConfigAt('1.0.0');                       // dangling symlink, no non-isolated survivor
+
+      let error = null, healed = null, symlinkNow = null;
+      try {
+        healed = await healDanglingVersionPointers('grok', process.cwd());
+        symlinkNow = configSymlinkTargetVersion();
+      } catch (e) { error = String((e && e.message) || e); }
+      console.log(JSON.stringify({ error, healed, symlinkNow }));
+    `);
+    // switchConfigSymlink(agent, undefined) used to throw here. The heal must
+    // skip the symlink (no safe non-isolated target) rather than crash or point
+    // the real config at the isolated install; the dead default still clears.
+    expect(res.error).toBeNull();
+    expect(res.healed).toEqual({ globalDefault: { from: '1.0.0', to: null } });
+    expect(res.symlinkNow).toBe('1.0.0');
+  });
+
   it('leaves installed pointers untouched (a deliberate agents-use choice)', () => {
     const res = runInHome(`
       installGrok('0.2.82');

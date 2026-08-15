@@ -2336,19 +2336,24 @@ export async function healDanglingVersionPointers(
   }
 
   const current = getConfigSymlinkVersion(agent);
+  // The adopted `~/.<agent>` symlink is the user's REAL config, so it must never
+  // be repointed at an isolated install — the same rule removeVersion's default
+  // reassignment follows — which means we can only heal it when a NON-isolated
+  // version survives. isIsolationProtected can't stand in for that check: it only
+  // counts a version dir as installed when it has node_modules/package.json, so
+  // for install-script agents (grok has `npmPackage: ''`) it stays false even
+  // when every install is isolated. Guard on the non-isolated survivor set
+  // directly, and skip the heal (leave the real config as-is) when it is empty
+  // rather than repointing at an isolated install or crashing on `undefined`.
+  const nonIsolated = installed.filter((v) => !isVersionIsolated(agent, v));
   if (
     current !== null && // no owned symlink to heal (real dir / none / foreign)
     !isVersionInstalled(agent, current) && // already points at an installed version
     !isIsolationProtected(agent) && // don't repoint an isolated-only agent's real config
-    installed.length > 0 // nothing installed to repoint to
+    nonIsolated.length > 0 // no non-isolated version to safely repoint the real config at
   ) {
-    // The adopted `~/.<agent>` symlink is the user's REAL config, so it must
-    // never be repointed at an isolated install — the same rule removeVersion's
-    // default reassignment follows. resolveVersion can hand back an isolated
-    // version (its last-resort isolated-default fallback), so exclude that too;
-    // reaching here means the agent is not isolation-protected, i.e. at least
-    // one non-isolated version is installed.
-    const nonIsolated = installed.filter((v) => !isVersionIsolated(agent, v));
+    // resolveVersion can hand back an isolated version (its last-resort
+    // isolated-default fallback), so exclude that too before using the pin.
     const pinned = resolveVersion(agent, cwd);
     const target =
       pinned && isVersionInstalled(agent, pinned) && !isVersionIsolated(agent, pinned)
