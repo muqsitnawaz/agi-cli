@@ -2342,8 +2342,18 @@ export async function healDanglingVersionPointers(
     !isIsolationProtected(agent) && // don't repoint an isolated-only agent's real config
     installed.length > 0 // nothing installed to repoint to
   ) {
+    // The adopted `~/.<agent>` symlink is the user's REAL config, so it must
+    // never be repointed at an isolated install — the same rule removeVersion's
+    // default reassignment follows. resolveVersion can hand back an isolated
+    // version (its last-resort isolated-default fallback), so exclude that too;
+    // reaching here means the agent is not isolation-protected, i.e. at least
+    // one non-isolated version is installed.
+    const nonIsolated = installed.filter((v) => !isVersionIsolated(agent, v));
     const pinned = resolveVersion(agent, cwd);
-    const target = pinned && isVersionInstalled(agent, pinned) ? pinned : installed[installed.length - 1];
+    const target =
+      pinned && isVersionInstalled(agent, pinned) && !isVersionIsolated(agent, pinned)
+        ? pinned
+        : nonIsolated[nonIsolated.length - 1];
     const result = await switchConfigSymlink(agent, target);
     if (result.success) healed.configSymlink = { from: current, to: target };
   }

@@ -160,9 +160,10 @@ Key behaviors:
   symlink would still leave `agents sync` resolving the dead default and failing
   `not installed`. The default goes to the newest non-isolated installed version
   (never auto-promoting an isolated install), the symlink to the resolved default
-  else the newest installed version (`healDanglingVersionPointers`, RUSH-2471). A
-  pointer already on an installed version, a real config directory, and
-  isolated-only agents are left untouched.
+  else the newest non-isolated installed version — the user's real `~/.<agent>`
+  is never repointed at an isolated install (`healDanglingVersionPointers`,
+  RUSH-2471). A pointer already on an installed version, a real config directory,
+  and isolated-only agents are left untouched.
 
 ## Uninstalling (reversing adoption)
 

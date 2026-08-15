@@ -41,6 +41,7 @@ function runInHome(body: string): Record<string, unknown> {
       healDanglingVersionPointers,
       setGlobalDefault,
       getGlobalDefault,
+      setIsolatedDefault,
       resolveVersion,
       isVersionInstalled,
     } from './src/lib/versions.ts';
@@ -60,6 +61,11 @@ function runInHome(body: string): Record<string, unknown> {
     // A home-only leftover: config home exists, no downloads binary -> NOT installed.
     function leftoverGrok(version) {
       fs.mkdirSync(grokHome(version), { recursive: true });
+    }
+    // Mark an installed version as an isolated install (agents add --isolated):
+    // a .isolated marker at the version dir, which isVersionIsolated checks.
+    function isolateGrok(version) {
+      fs.writeFileSync(path.join(versionsRoot, 'grok', version, '.isolated'), '');
     }
     function pointConfigAt(version) {
       const link = path.join(home, '.grok');
@@ -129,6 +135,24 @@ describe('healDanglingVersionPointers (RUSH-2471)', () => {
       const healed = await healDanglingVersionPointers('grok', process.cwd());
       console.log(JSON.stringify({ healed, symlinkNow: configSymlinkTargetVersion() }));
     `);
+    expect(res.healed).toEqual({ configSymlink: { from: '1.0.0', to: '0.2.91' } });
+    expect(res.symlinkNow).toBe('0.2.91');
+  });
+
+  it('never repoints the real symlink at an isolated version (resolveVersion isolated fallback)', () => {
+    const res = runInHome(`
+      installGrok('0.2.91');                    // non-isolated
+      installGrok('0.3.0'); isolateGrok('0.3.0'); // isolated install
+      setIsolatedDefault('grok', '0.3.0');      // no global default -> resolveVersion falls back to this
+      leftoverGrok('1.0.0');
+      pointConfigAt('1.0.0');
+
+      const healed = await healDanglingVersionPointers('grok', process.cwd());
+      console.log(JSON.stringify({ healed, symlinkNow: configSymlinkTargetVersion() }));
+    `);
+    // Must land on the non-isolated 0.2.91, NOT the isolated 0.3.0 that
+    // resolveVersion's isolated fallback returns — repointing the user's real
+    // ~/.<agent> at an isolated install is the anti-pattern removeVersion warns of.
     expect(res.healed).toEqual({ configSymlink: { from: '1.0.0', to: '0.2.91' } });
     expect(res.symlinkNow).toBe('0.2.91');
   });

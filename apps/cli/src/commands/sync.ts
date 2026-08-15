@@ -58,6 +58,7 @@ import {
   getVersionHomePath,
   type ResourceSelection,
   type SyncResult,
+  type HealedVersionPointers,
   type AvailableResources,
 } from '../lib/versions.js';
 import { capableAgents } from '../lib/capabilities.js';
@@ -620,18 +621,26 @@ async function runSync(agentSpec: string | undefined, repoArg: string | undefine
   // and the sync fails `not installed`, or the symlinked home diverges from the
   // installed set. Runs once here so it covers both the @all and single-version
   // branches; skipped on --dry-run since it mutates on-disk pointers.
+  let healed: HealedVersionPointers = {};
   if (!opts.dryRun) {
-    const healed = await healDanglingVersionPointers(agentId, cwd);
+    healed = await healDanglingVersionPointers(agentId, cwd);
     if (!quiet && !json) {
       if (healed.globalDefault) {
         const to = healed.globalDefault.to ? `@${healed.globalDefault.to}` : 'none';
         outLog(chalk.yellow(`Reassigned ${agentLabel(agentId)} default from @${healed.globalDefault.from} (not installed) to ${to}.`));
+      }
+      if (healed.isolatedDefault) {
+        const to = healed.isolatedDefault.to ? `@${healed.isolatedDefault.to}` : 'none';
+        outLog(chalk.yellow(`Reassigned ${agentLabel(agentId)} isolated default from @${healed.isolatedDefault.from} (not installed) to ${to}.`));
       }
       if (healed.configSymlink) {
         outLog(chalk.yellow(`Repointed ${agentLabel(agentId)} config symlink from @${healed.configSymlink.from} (not installed) to @${healed.configSymlink.to}.`));
       }
     }
   }
+  // `--json` consumers (fleet fan-out) observe the mutation via `healedPointers`
+  // on the success payloads below; omitted when nothing was healed.
+  const healedPointers = Object.keys(healed).length > 0 ? { healedPointers: healed } : {};
 
   // Promote to @all when no version can be resolved and multiple are installed.
   // Replaces the old "no default version pinned" error: bare `agents sync claude`
@@ -701,6 +710,7 @@ async function runSync(agentSpec: string | undefined, repoArg: string | undefine
         mode: 'agent-all',
         agent: agentId,
         repo: repoScope,
+        ...healedPointers,
         versions: versions.map(({ version: v, result }) => ({
           version: v,
           commands: !!result.commands,
@@ -906,6 +916,7 @@ async function runSync(agentSpec: string | undefined, repoArg: string | undefine
   if (json) {
     emitJson({
       ...agentSyncJson(agentId, version, result),
+      ...healedPointers,
       projectCompile: projectCompile
         ? {
             compiled: !!projectCompile.compiled,
