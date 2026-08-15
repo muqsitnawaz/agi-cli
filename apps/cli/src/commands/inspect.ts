@@ -37,7 +37,7 @@ import {
 import { getVersionHomePath,
   isVersionIsolated,
   getIsolatedDefault,
-} from '../lib/versions.js';
+} from '../lib/installations/versions.js';
 import { getShimsDir, getVersionedAliasPath } from '../lib/shims.js';
 import {
   getAgentResources,
@@ -66,7 +66,7 @@ import {
   listJobs,
   type JobConfig,
   type RunMeta,
-} from '../lib/routines.js';
+} from '../lib/scheduling/routines.js';
 import {
   routineDeviceIndex,
   currentRoutineDevice,

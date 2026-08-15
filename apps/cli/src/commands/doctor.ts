@@ -49,7 +49,7 @@ import { sshExecAsync } from '../lib/ssh-exec.js';
 import { hostIdentityArgs, sshTargetFor } from '../lib/hosts/types.js';
 import { deviceIdentityArgs } from '../lib/devices/connect.js';
 import { machineId, normalizeHost } from '../lib/session/sync/config.js';
-import { findAmbiguousDevicePins } from '../lib/routines.js';
+import { findAmbiguousDevicePins } from '../lib/scheduling/routines.js';
 import chalk from 'chalk';
 import { checkAllClis, collectTeamsDoctorData, type TeamsDoctorEntry } from '../lib/teams/agents.js';
 import { AGENTS, ALL_AGENT_IDS, resolveAgentName, formatAgentError, getAccountInfo, type AccountInfo } from '../lib/agents.js';
@@ -57,7 +57,7 @@ import type { AgentId } from '../lib/types.js';
 import {
   getVersionHomePath,
   listInstalledVersions,
-} from '../lib/versions.js';
+} from '../lib/installations/versions.js';
 import { resolveAgentTargets, AgentSpecError } from '../lib/agent-spec/index.js';
 import { loadManifest, isStale } from '../lib/staleness/index.js';
 import {
@@ -68,7 +68,7 @@ import {
   type VersionResourceReport,
 } from '../lib/doctor-diff.js';
 import { checkVersionHookWiring, inspectDuplicateVersionHooks, registerHooksToSettings, repairManagedHookRuntimeArtifacts, type DuplicateVersionHook, type HookRuntimeRepairReport, type HookWiringReport } from '../lib/hooks.js';
-import { isVersionIsolated } from '../lib/versions.js';
+import { isVersionIsolated } from '../lib/installations/versions.js';
 import { computeDrift, checkSyncStatus, countOrphans, computeSourceBehind, type SyncStatusRow, type OrphanRow } from '../lib/drift.js';
 import { readAuthHealthCache, summarizeHostAuth } from '../lib/auth-health.js';
 import { readMeta } from '../lib/state.js';
