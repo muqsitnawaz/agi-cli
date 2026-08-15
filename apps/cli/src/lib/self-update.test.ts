@@ -594,7 +594,12 @@ describe('buildMultiInstallInventory', () => {
 });
 
 describe('manualUninstallCommand (RUSH-2705)', () => {
-  it('pins the peer npm prefix for a POSIX global layout (the nvm duplicate case)', () => {
+  // POSIX-only by construction: the fixture is a hardcoded POSIX nvm path and
+  // the expectation is POSIX shell syntax. On win32 `manualUninstallCommand`
+  // resolves a Windows layout and quotes for PowerShell, so this asserts a
+  // platform it never runs on — the RUSH-2215 quarantine pattern used
+  // throughout this file.
+  it.skipIf(process.platform === 'win32')('pins the peer npm prefix for a POSIX global layout (the nvm duplicate case)', () => {
     const root = '/home/u/.nvm/versions/node/v24.15.0/lib/node_modules/@phnx-labs/agents-cli';
     expect(manualUninstallCommand(root)).toBe(
       "npm uninstall -g --prefix '/home/u/.nvm/versions/node/v24.15.0' @phnx-labs/agents-cli",
@@ -606,7 +611,8 @@ describe('manualUninstallCommand (RUSH-2705)', () => {
     expect(manualUninstallCommand(root)).toBe('bun remove -g @phnx-labs/agents-cli');
   });
 
-  it('falls back to deleting the directory when no npm prefix owns the tree', () => {
+  // POSIX-only: asserts `rm -rf '<path>'`, which win32 never produces.
+  it.skipIf(process.platform === 'win32')('falls back to deleting the directory when no npm prefix owns the tree', () => {
     const root = '/srv/checkouts/agents-cli';
     expect(manualUninstallCommand(root)).toBe(`rm -rf '${root}'`);
   });
