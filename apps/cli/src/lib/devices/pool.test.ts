@@ -110,6 +110,19 @@ describe('roles read from the per-device docs', () => {
     expect(mod.filterAutoPool(FLEET)).toEqual(FLEET);
   });
 
+  it('a fleet-default role applies to a device that has a doc but no own mark', async () => {
+    const mod = await freshPool();
+    // A write creates the peer doc; keep another key so unsetting the
+    // device-layer role does not delete the folder.
+    mod.setConfiguredDeviceRole('yosemite-s0', 'worker');
+    mod.setConfigValue('notes', ['keep the doc'], { device: 'yosemite-s0' });
+    mod.unsetConfigValue('role', { device: 'yosemite-s0' });
+    mod.setConfigValue('role', 'personal', { fleet: true });
+    expect(mod.listConfiguredDeviceRoles()).toEqual({ 'yosemite-s0': 'personal' });
+    // No worker is marked, so the pool is everyone except the personal box.
+    expect(mod.filterAutoPool(FLEET)).toEqual(['zion', 'yosemite-s1', 'mac-mini', 'iphone']);
+  });
+
   it('auto.pool=all widens past the worker marks', async () => {
     const mod = await freshPool();
     mod.setConfiguredDeviceRole('yosemite-s0', 'worker');

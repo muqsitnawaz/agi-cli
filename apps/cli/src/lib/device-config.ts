@@ -686,18 +686,19 @@ export function setConfiguredDeviceRole(name: string, role: ConfiguredDeviceRole
 export function listConfiguredDeviceRoles(): Record<string, ConfiguredDeviceRole> {
   ensureDeviceConfigMigrated();
   const out: Record<string, ConfiguredDeviceRole> = {};
+  const fleetRole = readFleetConfigDefaults().role;
   const devicesRoot = path.join(getUserAgentsDir(), 'devices');
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(devicesRoot, { withFileTypes: true });
   } catch {
-    return out;
+    entries = [];
   }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const role = readDeviceDocConfig(entry.name).role;
+  const names = new Set(entries.filter((e) => e.isDirectory()).map((e) => e.name));
+  for (const name of names) {
+    const role = readDeviceDocConfig(name).role ?? fleetRole;
     if (typeof role === 'string' && (DEVICE_ROLES as readonly string[]).includes(role)) {
-      out[entry.name] = role as ConfiguredDeviceRole;
+      out[name] = role as ConfiguredDeviceRole;
     }
   }
   return out;

@@ -1606,7 +1606,8 @@ function registerDevicesCommands(program: Command): void {
       profile at dial time. scheduler.enabled / daemon.enabled take effect
       when the daemon reloads or restarts on that device. Machine-local keys
       (scheduler.enabled, daemon.enabled, tmux.enabled, browser.remote-control,
-      browser.profile) can only be read or set on the device itself.
+      browser.profile) can only be read or set on the device itself; --fleet
+      still writes a fleet-wide default those boxes inherit until they override.
 
       The retired subcommands still work and forward here: configure, note,
       set, set-interactive, enable, disable, prefer, unprefer.
