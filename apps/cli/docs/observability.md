@@ -1184,7 +1184,7 @@ it by the account that did the work. Counter recipes share the same verb as
 do not invent a second top-level analytics command.
 
 That account split is the reason the behavioural path exists. `getConfiguredRunStrategy`
-defaults to `balanced` (`lib/rotate.ts`), so sessions are sprayed across every signed-in
+defaults to `balanced` (`lib/accounting/rotate.ts`), so sessions are sprayed across every signed-in
 Claude account. A report that reads one account's directory — which is what Claude Code's
 own `/insights` does — describes a fraction of the work and attributes all of it to one org.
 
@@ -1378,7 +1378,7 @@ a stable per-account key:
   is **local-only, no network**. It reads each agent's on-disk credential and
   surfaces an email when one is readable, else a stable account id, else a bare
   `signed in`.
-- **Usage bars** — a separate network pass ([`src/lib/usage.ts`](../src/lib/usage.ts))
+- **Usage bars** — a separate network pass ([`src/lib/accounting/usage.ts`](../src/lib/accounting/usage.ts))
   fetches live quota and renders `S:`/`W:`/`M:` bars + plan, according to each
   provider's reported window duration. It's **stale-while-revalidate**
   (on-disk cache under `~/.agents/.cache/`, keyed per account: 2-min fresh, 24-h
@@ -1387,7 +1387,7 @@ a stable per-account key:
   (RUSH-2061).** Displaying a slightly old bar costs nothing; *choosing an account*
   from one must not cost a network round trip on `agents run` cold-start.
   `collectRunCandidates` reads the cache with `readOnly`
-  ([`src/lib/rotate.ts`](../src/lib/rotate.ts), [`src/lib/usage.ts`](../src/lib/usage.ts))
+  ([`src/lib/accounting/rotate.ts`](../src/lib/accounting/rotate.ts), [`src/lib/accounting/usage.ts`](../src/lib/accounting/usage.ts))
   and never blocks on a live fetch. A snapshot older than **5 minutes**
   (`USAGE_DECISION_MAX_AGE_MS`) is still not trusted for the pick — but the guard
   is `isUsageVerified`, which routes around an unconfirmable number and reports
@@ -1420,7 +1420,7 @@ a stable per-account key:
   credential, a locally-expired one, a rejected request, and a request that threw
   are distinct errors (`usageNoCredentialError` / `usageExpiredCredentialError` /
   `usageRejectedError` / `usageUnreachableError`,
-  [`src/lib/usage.ts`](../src/lib/usage.ts)), not a silent
+  [`src/lib/accounting/usage.ts`](../src/lib/accounting/usage.ts)), not a silent
   null. All four networked providers — Claude, Kimi, Droid, Cursor — share them,
   because they share one cache fallback: a silent null in any of them presents a
   stale reading as confirmed. Because a usage read never refreshes a token,

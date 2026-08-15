@@ -102,15 +102,15 @@ agents browser                                Launch and drive browser profiles 
 agents browser click [ref]                    Click an element by ref, or raw coordinates with --at X,Y
 agents browser console                        Read console logs from a tab
 agents browser devices                        List available device presets
-agents browser done                           Complete a task and close its tabs
+agents browser done                           Complete a task and close its tabs (resolves from caller identity when --task is omitted)
 agents browser download                       Set the download directory for a task (defaults to the profile's downloads dir)
 agents browser errors                         Read page errors from a tab
-agents browser evaluate [expression]          Evaluate JavaScript in current tab (positional or -e; alias eval)
+agents browser evaluate [expression]          Evaluate JavaScript in current tab
 agents browser gc                             Close tabs for abandoned tasks — owning agent session exited, or idle past the window — and mark them done. The same reaper the daemon already runs every 5 minutes; use this to run it now.
 agents browser history                        Show recent browser task history
 agents browser hover <ref>                    Hover over an element by ref
-agents browser logs                           Read merged rush-app + rush-cli JSONL logs for a task (--task or caller identity)
-agents browser navigate [url]                 Navigate current tab to URL (positional or --url; alias goto; creates task if none)
+agents browser logs                           Read merged rush-app + rush-cli JSONL logs for a task
+agents browser navigate [url]                 Navigate current tab to URL (creates a task and tab when none exist)
 agents browser pdf [output]                   Export the current tab as PDF via CDP Page.printToPDF — auto-saved under sessions/<task>/ when [output] is omitted
 agents browser press <key>                    Press a key (Enter, Tab, Escape, etc)
 agents browser profiles                       Manage browser profiles
@@ -135,7 +135,7 @@ agents browser sessions                       Browse a profile's captured screen
 agents browser set                            Set browser emulation options
 agents browser set device <device-name>       Emulate a device (iPhone 14, iPad, MacBook Pro)
 agents browser set viewport <width> <height>  Set viewport size
-agents browser start                          Start a browser task. Pass --profile <name>; omit to use your configured default (`agents config set browser.profile <name>`), else auto-pick an installed Chromium-family browser.
+agents browser start                          Start a browser task. Pass --profile <name>; omit to use your configured default (`agents config set browser.profile <name>`), else auto-pick an installed Chromium-family browser. Page verbs (navigate/screenshot/…) create a task implicitly when none exists — start is for --profile/--url/--record/--title.
 agents browser status                         Show running browser tasks
 agents browser stop                           Stop a browser task and close its tabs; with --profile, detach the whole profile (close browser + drop cached connection)
 agents browser stream                         Keep one process and daemon IPC socket open; read NDJSON requests from stdin and write NDJSON responses
