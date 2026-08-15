@@ -37,6 +37,13 @@ export interface AutoPoolOptions {
   mode?: AutoPoolMode;
   /** Configured roles by device name; defaults to the fleet-shared block. */
   roles?: Record<string, ConfiguredDeviceRole>;
+  /**
+   * Device names to resolve roles for when `roles` is not given directly —
+   * so a fleet-wide role default reaches a device with no per-device doc of
+   * its own. Ignored once `roles` is supplied. See
+   * {@link listConfiguredDeviceRoles}.
+   */
+  roster?: string[];
 }
 
 /**
@@ -48,7 +55,7 @@ export interface AutoPoolOptions {
  * quietly widening back to the full fleet.
  */
 export function filterAutoPool(pool: string[], opts: AutoPoolOptions = {}): string[] {
-  const roles = opts.roles ?? listConfiguredDeviceRoles(pool);
+  const roles = opts.roles ?? listConfiguredDeviceRoles(opts.roster ?? pool);
   const byHost = new Map(Object.entries(roles).map(([name, role]) => [normalizeHost(name), role]));
   const roleOf = (host: string) => byHost.get(normalizeHost(host));
   const eligible = pool.filter((host) => {
@@ -81,7 +88,7 @@ export function listWorkerDevices(opts: Pick<AutoPoolOptions, 'roles'> = {}): st
  * callers can append it unconditionally.
  */
 export function describeAutoPool(opts: AutoPoolOptions = {}): string {
-  const roles = opts.roles ?? listConfiguredDeviceRoles();
+  const roles = opts.roles ?? listConfiguredDeviceRoles(opts.roster);
   const mode = opts.mode ?? autoPoolMode();
   const workers = listWorkerDevices({ roles });
   if (mode === 'all') {

@@ -384,3 +384,28 @@ describe('devices list surfaces the config', () => {
     expect(macMini?.config).toMatchObject({ maxAgents: 4 });
   });
 });
+
+describe('devices role', () => {
+  it('a fleet-default worker role reaches a doc-less device in autoPoolWorkers', () => {
+    guardedHome();
+    addDevice('mac-mini', 'muqsit@192.0.2.2');
+    addDevice('yosemite-s0', 'muqsit@192.0.2.3');
+
+    // Fleet-wide default: every registered device is a worker.
+    expect(run(['devices', 'config', '--fleet', 'role', 'worker']).status).toBe(0);
+
+    // Marking yosemite-s0's own role creates ITS per-device doc; mac-mini
+    // never gets one and must still resolve to 'worker' through the fleet
+    // default — the exact gap #2622's non-author review flagged.
+    const setRole = run(['devices', 'role', 'yosemite-s0', 'worker', '--json']);
+    expect(setRole.status, setRole.stderr).toBe(0);
+    const parsed = JSON.parse(setRole.stdout) as { autoPoolWorkers: string[] };
+    expect(parsed.autoPoolWorkers).toContain('yosemite-s0');
+    expect(parsed.autoPoolWorkers).toContain('mac-mini');
+
+    // The human-readable path names it too.
+    const text = run(['devices', 'role', 'yosemite-s0', 'worker']);
+    expect(text.status, text.stderr).toBe(0);
+    expect(text.stdout).toContain('mac-mini');
+  });
+});
