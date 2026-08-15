@@ -183,7 +183,7 @@ interface SessionsOptions extends SessionFilterOptions {
   /** Force local-only: skip the cross-machine SSH fan-out (both the default
    * listing and --active). */
   local?: boolean;
-  /** --device <target...> — alias for --device; resolves against the device registry. */
+  /** --device <target...> — values from the `--device` flag; resolves against the device registry. */
   device?: string[];
   /** --devices <target...> — plural alias for --device; a bare `all`/`fleet` value
    * means "search the whole fleet" (already the default), so it never errors. */
@@ -2713,7 +2713,7 @@ async function sessionsAction(
   }
 
   // Normalize convenience flags before any routing reads them: per-agent
-  // shorthands fold into --agent, and --device is an alias for --device (both
+  // shorthands fold into --agent; --device and --devices (both
   // resolve against the same device registry).
   applyAgentShorthands(options);
   try {
@@ -2723,7 +2723,7 @@ async function sessionsAction(
     process.exitCode = 1;
     return;
   }
-  // --device / --devices both alias --host. A bare `all` / `fleet` sentinel means
+  // --device / --devices values are merged into options.host for internal routing. A bare `all` / `fleet` sentinel means
   // "search every peer" — which is already the default — so it resolves to no
   // explicit host set rather than erroring on a device literally named "all".
   const deviceTargets = [...(options.device ?? []), ...(options.devices ?? [])]
