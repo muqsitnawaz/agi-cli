@@ -1,5 +1,5 @@
 /**
- * Auto-reconnect for an interactive `agents run --device/--host` session whose
+ * Auto-reconnect for an interactive `agents run --device` session whose
  * SSH link dropped.
  *
  * A remote interactive agent runs in a DETACHED tmux session on the peer (see

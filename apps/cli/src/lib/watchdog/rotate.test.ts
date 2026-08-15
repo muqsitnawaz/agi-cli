@@ -210,7 +210,7 @@ describe('exitSequenceFor (per-harness table)', () => {
 // --- pure: launch command + replay text ---------------------------------------
 
 describe('buildRotateLaunchCommand', () => {
-  it('local terminal: run auto + session id, no --host', () => {
+  it('local terminal: run auto + session id, no --device', () => {
     expect(buildRotateLaunchCommand({ sessionId: 'abc' }))
       .toBe('agents run auto --interactive --session-id abc');
   });

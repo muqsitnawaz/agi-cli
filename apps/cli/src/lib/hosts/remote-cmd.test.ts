@@ -97,7 +97,7 @@ function decodeRemoteArgv(forwarded: string[], remoteCwd?: string): string[] {
 }
 
 describe('stripRoutingFlags', () => {
-  it('keeps the command name and drops --host with a separate value', () => {
+  it('keeps the command name and drops --device with a separate value', () => {
     expect(stripRoutingFlags(['view', '--device', 'mac', 'claude'], SPECS)).toEqual(['view', 'claude']);
   });
 

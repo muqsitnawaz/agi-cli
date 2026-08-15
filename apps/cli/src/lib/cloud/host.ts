@@ -155,7 +155,7 @@ export class HostCloudProvider implements CloudProvider {
   }
 
   /**
-   * Offset-tail the remote log (the same one-round-trip fetch the `run --host`
+   * Offset-tail the remote log (the same one-round-trip fetch the `run --device`
    * follow uses) and yield it as `text` events until the `.exit` file lands.
    */
   async *stream(taskId: string): AsyncIterable<CloudEvent> {
@@ -217,7 +217,7 @@ export class HostCloudProvider implements CloudProvider {
     if (!task.sessionId) {
       throw new Error(
         `Host task ${taskId} has no session id to resume (only Claude runs capture one). ` +
-          `Start a follow-up run instead: agents run ${task.agent} "<prompt>" --host ${task.host}`,
+          `Start a follow-up run instead: agents run ${task.agent} "<prompt>" --device ${task.host}`,
       );
     }
     const host = await resolveHostRunTarget(task.host);

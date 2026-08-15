@@ -302,7 +302,7 @@ sourcing the address from its device profile. `agents devices render --write`
 still bridges to plain `ssh`/`scp` via ssh_config.
 
 Hosts are execution targets everywhere runs and tasks dispatch: `agents run
---device`, `agents teams` placement, `agents cloud run --host <name>` (the `host`
+--device`, `agents teams` placement, `agents cloud run --device <name>` (the `host`
 cloud provider — tasks visible in both `agents cloud ps` and `agents hosts
 ps`), and routines placement (`agents routines add … --run-on <name>`). See
 [hosts.md](hosts.md) for the `--device` execution model and the option-forwarding

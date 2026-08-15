@@ -25287,7 +25287,7 @@
           "negate": false
         }
       ],
-      "examples": "# One-shot inventory + local active sessions (JSON)\n      agents snapshot --json\n\n      # Same, plus open feed blocks for needs-you polls\n      agents snapshot --json --with-feed\n\n      # Fleet-wide active sessions (matches sessions --active scope)\n      agents snapshot --json --all-hosts\n\n      # Inventory for one harness only (an AGI EXT-style usage poll)\n      agents snapshot --json --agent claude\n\n      # Run the whole snapshot on another device\n      agents snapshot --json --host yosemite-s0",
+      "examples": "# One-shot inventory + local active sessions (JSON)\n      agents snapshot --json\n\n      # Same, plus open feed blocks for needs-you polls\n      agents snapshot --json --with-feed\n\n      # Fleet-wide active sessions (matches sessions --active scope)\n      agents snapshot --json --all-hosts\n\n      # Inventory for one harness only (an AGI EXT-style usage poll)\n      agents snapshot --json --agent claude\n\n      # Run the whole snapshot on another device\n      agents snapshot --json --device yosemite-s0",
       "subcommands": []
     },
     {

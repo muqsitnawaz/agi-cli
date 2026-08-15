@@ -8,7 +8,7 @@
  *   2. The device's ssh target must be `user@dnsName` (dnsName preferred over ip).
  *   3. An ad-hoc `user@host` must resolve without any registration.
  *   4. A bare unknown name must return null (NOT be misread as an ad-hoc target)
- *      so capability-tag routing (`resolveHostByCap`, e.g. `--host gpu`) stays
+ *      so capability-tag routing (`resolveHostByCap`, e.g. `--device gpu`) stays
  *      reachable.
  *   5. A password-auth device can't offload over BatchMode ssh — it must throw a
  *      typed, actionable error rather than dispatch a run that would hang.

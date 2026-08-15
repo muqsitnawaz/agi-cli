@@ -117,7 +117,7 @@ interface ExecCommandActionOptions {
   cloudEnv?: string; // --cloud-env <id>: Codex Cloud environment id (--env is taken by KEY=VAL passthrough)
   secretsKeys?: string; // --secrets-keys: comma-separated key subset for --secrets bundles
   allowExpired?: boolean; // --allow-expired: skip expiry pre-run abort for secrets
-  emitSessionId?: boolean; // internal: forwarded by --host dispatch so the remote run prints its session id (hosts/session-marker.ts)
+  emitSessionId?: boolean; // internal: forwarded by --device dispatch so the remote run prints its session id (hosts/session-marker.ts)
 }
 
 export interface RunAccountPickerRequest {

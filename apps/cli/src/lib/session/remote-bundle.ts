@@ -39,7 +39,7 @@ export interface RemotePullResult {
  * Run `agents sessions export …exportArgs --stdout` on each host and parse the
  * streamed bundle. A host that fails (unreachable, remote error, bad output) is
  * collected in `errors` and skipped — one asleep peer never aborts the pull.
- * `exportArgs` must NOT contain --host (the remote export runs for itself only).
+ * `exportArgs` must NOT contain --device (the remote export runs for itself only).
  */
 export async function pullBundlesFromHosts(hosts: string[], exportArgs: string[]): Promise<RemotePullResult> {
   const targets = await resolveExplicitTargets(hosts);

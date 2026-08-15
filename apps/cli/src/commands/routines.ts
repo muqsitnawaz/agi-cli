@@ -2413,7 +2413,7 @@ export function registerRoutinesCommands(program: Command): void {
       }
     });
 
-  // Every direct routines subcommand accepts the shared --host family so remote
+  // Every direct routines subcommand accepts the shared --device family so remote
   // fall-through works and each subcommand's --help documents the flags.
   for (const sub of routinesCmd.commands) {
     addHostOption(sub);

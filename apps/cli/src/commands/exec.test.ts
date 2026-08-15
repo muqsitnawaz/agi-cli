@@ -343,12 +343,12 @@ describe('always-fresh repo set (F3 picker "remember for this repo")', () => {
   });
 });
 
-describe('hostTargetGiven — the --host alias family (the --terminal reject guard)', () => {
-  // Regression: the --terminal handoff guard checked only `options.host`, so
+describe('hostTargetGiven — the --device routing flag family (the --terminal reject guard)', () => {
+  // Regression: the --terminal handoff guard checked only `options.device`, so
   // `agents run <agent> --terminal --device box` (or --on/--computer) silently
   // opened a LOCAL tab and dropped the remote target instead of rejecting the
   // combination. Every alias must count as a host target.
-  it('detects each --host alias, not just --host', () => {
+  it('detects each --device alias, not just --device', () => {
     expect(hostTargetGiven({ host: 'box' })).toEqual(['box']);
     expect(hostTargetGiven({ device: 'box' })).toEqual(['box']);
     expect(hostTargetGiven({ on: 'box' })).toEqual(['box']);

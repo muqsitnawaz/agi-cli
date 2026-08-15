@@ -10,7 +10,7 @@
  *              inject it ephemerally — never written to this machine's keychain.
  *
  * Trust model: relies on the operator's existing SSH access to the host (same
- * boundary as `export --device` / `run --host`). Bundle names are shell-quoted
+ * boundary as `export --device` / `run --device`). Bundle names are shell-quoted
  * into the remote command; resolved VALUES return over ssh stdout; a forwarded
  * file-backend passphrase travels over ssh stdin (first line) so it never lands
  * in argv / `ps` / remote shell history. Nothing is persisted locally.
@@ -90,7 +90,7 @@ function osForTarget(target: string, lookupName?: string): string | undefined {
 /**
  * Resolve a `--device` value to an ssh target STRING for the remote-secrets path.
  * Delegates to the single host/device resolver (`resolveHost`, RUSH-1967) so a
- * name here dials the exact same box `run --host` does; on a miss, treats the
+ * name here dials the exact same box `run --device` does; on a miss, treats the
  * value as a raw ssh target and validates it against injection. Named distinctly
  * from `../devices/resolve-target.ts` (which returns richer shapes) so importing
  * the wrong one can't silently change which machine you dial.
@@ -401,7 +401,7 @@ export function keychainWriteFailureMessage(
     `A macOS login keychain is LOCKED under headless SSH, so a keychain-backed write ` +
     `lands the bundle metadata but no readable secret items, and later reads fail with ` +
     `"stored item '…' not found". Re-run with a headless-readable backend:\n` +
-    `    agents secrets export ${bundle} --host ${host} --remote-backend file\n` +
+    `    agents secrets export ${bundle} --device ${host} --remote-backend file\n` +
     `(needs AGENTS_SECRETS_PASSPHRASE set locally), or unlock the remote keychain first ` +
     `(e.g. an interactive login / \`agents secrets unlock\` on ${host}) and retry.`
   );

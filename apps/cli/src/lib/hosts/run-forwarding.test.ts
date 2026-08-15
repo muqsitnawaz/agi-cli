@@ -3,7 +3,7 @@
  *
  * The real bug this guards against: a new `agents run` option silently
  * vanishing at the SSH boundary. Historically --secrets/--effort/--env/
- * --timeout/--loop were all dropped on --host runs with no error — the worst
+ * --timeout/--loop were all dropped on --device runs with no error — the worst
  * being --secrets, where a user believed a Keychain bundle was injected and it
  * silently wasn't. The introspection test enumerates the REAL commander
  * definition of `run`, so adding an option without classifying it fails CI.

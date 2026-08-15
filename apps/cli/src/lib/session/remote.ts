@@ -83,7 +83,7 @@ export function buildForwardedArgs(argv: string[], hosts: Set<string> = new Set(
  * Force a forwarded `agents sessions` listing to span the peer's WHOLE index.
  *
  * A remote listing runs in the peer's SSH-login cwd — its home dir — and the
- * default listing is silently cwd-scoped, so `sessions --host box` reads as
+ * default listing is silently cwd-scoped, so `sessions --device box` reads as
  * empty even when the box's index is full (`No sessions found for /home/<user>`).
  * Across SSH a peer's cwd is meaningless, so `--device` defaults to `--all`
  * (whole-index) scope. This only drops the *cwd* narrowing — an explicit path

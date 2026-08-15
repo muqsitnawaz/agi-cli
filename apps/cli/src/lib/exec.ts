@@ -1495,7 +1495,7 @@ export function shouldRecapDeadPane(status: number | undefined, interactive: boo
  * Why this is not `status ?? 0`: an interactive run whose tmux server died mid-
  * work landed on exactly those unknown branches and returned 0, so `agents run`
  * printed a failure banner while handing its caller a success code. The same
- * "1 if unknown" rule already governs the `--host` follow path
+ * "1 if unknown" rule already governs the `--device` follow path
  * (`docs/specifications.md` §Agent execution, exit-code table).
  *
  * @param pane       What `paneExitStatus` read back for the agent pane.
@@ -1757,7 +1757,7 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
     // agent finished or was killed. MUST NOT be reported as success: a caller
     // scripting `agents run` would count a run killed mid-work as a clean
     // finish. Tear down so no orphan session is left, say so, and exit non-zero
-    // — the same "1 if unknown" rule the `--host` follow path already uses.
+    // — the same "1 if unknown" rule the `--device` follow path already uses.
     await killSession(name, socket).catch(() => {});
     // One computation feeds both the banner and the return value — printing a
     // code the caller does not receive is the same defect in miniature.

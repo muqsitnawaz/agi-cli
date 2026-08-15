@@ -75,7 +75,7 @@ describe('command:* auto-correct re-checks --device routing (RUSH-2022 review r2
   it('a typo with no routing flag still auto-corrects and runs locally as before', () => {
     const testHome = seedHome();
     try {
-      // `vew` (typo of `view`) with NO --host must behave exactly as the
+      // `vew` (typo of `view`) with NO --device must behave exactly as the
       // pre-existing auto-correct did: run locally, no SSH attempt.
       const r = run(testHome, 'vew', '--help');
       expect(r.stderr).not.toContain("unknown command 'vew'");

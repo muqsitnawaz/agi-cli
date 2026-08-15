@@ -131,8 +131,8 @@ Verbs are grouped the way `agents computer --help` groups them.
 | `setup` (alias `install-helper`) | Copy helper to /Applications/, write LaunchAgent plist |
 | `start` | Write policy + peers, load the LaunchAgent, start the daemon |
 | `stop` | Unload the LaunchAgent, remove the socket |
-| `reload` | Reload the allow-list policy from ~/.agents/permissions/groups/ (SIGHUP the daemon); with `--host`, restart the remote Windows daemon |
-| `status` | Report install state, daemon state, TCC trust, policy, and peer list; with `--host`, tunnel + liveness of the remote Windows daemon |
+| `reload` | Reload the allow-list policy from ~/.agents/permissions/groups/ (SIGHUP the daemon); with `--device`, restart the remote Windows daemon |
+| `status` | Report install state, daemon state, TCC trust, policy, and peer list; with `--device`, tunnel + liveness of the remote Windows daemon |
 
 ### Observe
 
@@ -224,7 +224,7 @@ agents computer type-text --bundle <id> --text "..." --require-frontmost
 | `agents computer sessions` | Browse computer-driving history, grouped by run. `agents sessions --computer` is the same view. |
 
 `agents computer sessions` flags: `--machine <name>` (only rows on/driving a
-matching hostname, machineId, or `--host` device), `--limit <n>` (cap the flat
+matching hostname, machineId, or `--device` name), `--limit <n>` (cap the flat
 table at this many rows — default 50; the interactive picker and `--json` are
 unbounded), `--json`, `--no-interactive`.
 
@@ -273,12 +273,12 @@ never the text; a `run --task` description is the agent's own instruction
 prompt), kept but bounded to 200 characters before it is ever written — never
 the full text.
 
-## Remote Windows (`--host`)
+## Remote Windows (`--device`)
 
 Every verb takes `--device <device>` to drive a Windows machine registered with
-`agents devices`: `setup --host` pushes the C# daemon
+`agents devices`: `setup --device` pushes the C# daemon
 (`computer-helper-win.exe`) and registers a LOGON scheduled task,
-`start --host` opens an `ssh -L` tunnel to its loopback port, and every other
+`start --device` opens an `ssh -L` tunnel to its loopback port, and every other
 verb reconnects through that tunnel. The daemon mirrors the macOS wire
 contract, with these Windows specifics:
 

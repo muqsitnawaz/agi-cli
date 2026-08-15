@@ -1274,7 +1274,7 @@ export function filterAgentHitBySubsetAndExpiry(
  * value, defeating the least-privilege intent, so we fail loud.
  *
  * Exported so `agents run --secrets bundle@host` and `agents secrets exec
- * --host` share the exact same error text; the tests exercise this helper
+ * --device` share the exact same error text; the tests exercise this helper
  * directly instead of driving the whole CLI.
  */
 export function assertRemoteBundleFlagsUnsupported(

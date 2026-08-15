@@ -71,7 +71,7 @@ either.
 An empty pool is an error, not a shrug: with workers marked and none of them
 reachable, `--device auto` fails loud naming the fix rather than quietly running
 on the machine you are sitting at — including through `agents ssh auto` and the
-generic `--host auto` passthrough, which resolve `auto` via the same pool.
+generic `--device auto` passthrough, which resolve `auto` via the same pool.
 
 Roles live in the fleet-**shared** `fleet.devices.<name>.config.role` block of
 `~/.agents/agents.yaml` and travel with `agents repo push` / `pull`; the

@@ -257,7 +257,7 @@ everyone. The **actor** layer ([`src/lib/actor.ts`](../src/lib/actor.ts)) answer
 - **Inherited** — a child spawn trusts the `AGENTS_ACTOR*` env its parent stamped
   instead of re-resolving, so the whole spawn tree shares one actor.
 - **Dispatched over SSH (outbound)** — when the CLI runs an agent on another host
-  (`agents run --host`, `agents ssh <host>`, or a remote teammate), the resolved actor is
+  (`agents run --device`, `agents ssh <host>`, or a remote teammate), the resolved actor is
   forwarded into the remote invocation's env, so the remote box inherits it instead of
   re-resolving. Without this the actor is dropped at the SSH hop and the remote
   `tailscale whois`es the *originating* box's IP — mis-crediting the shared fleet account

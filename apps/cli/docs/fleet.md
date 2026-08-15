@@ -7,7 +7,7 @@ host set up the way you like it becomes the template for the whole fleet.
 `agents apply` (alias `ag apply`) is the fleet-wide counterpart to
 [resource sync](resource-sync.md): resource sync reconciles resources within
 one machine's version homes; `apply` reconciles *machines* against a profile,
-over the same [SSH transport](ssh-transport.md) every `--host` command uses.
+over the same [SSH transport](ssh-transport.md) every `--device` command uses.
 
 Source: `src/commands/apply.ts` (command + plan render),
 `src/lib/fleet/{types,manifest,apply,auth-sync}.ts` (schema, reconcile engine,

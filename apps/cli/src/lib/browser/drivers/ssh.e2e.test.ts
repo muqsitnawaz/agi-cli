@@ -87,7 +87,7 @@ suite('browser --device live remote (AGENTS_TEST_WIN_HOST)', () => {
         viewport: { width: 1280, height: 800 },
       };
 
-      // Scenario 4: `browser start --host` — scheduled-task-launch Edge on the remote, open
+      // Scenario 4: `browser start --device` — scheduled-task-launch Edge on the remote, open
       // the ssh -L CDP tunnel, and connect over CDP. connectSSH throws on any hop
       // failure (missing exe, tunnel timeout, wrong browser identity).
       //

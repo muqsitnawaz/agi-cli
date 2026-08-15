@@ -61,7 +61,7 @@ describe('buildSessionLifecycleArgs', () => {
 
   it('keeps both the host scope and the flag together', () => {
     expect(buildSessionLifecycleArgs('019fd114', ['zion'], true)).toEqual([
-      'sessions', 'focus', '019fd114', '--host', 'zion', '--attach-only',
+      'sessions', 'focus', '019fd114', '--device', 'zion', '--attach-only',
     ]);
   });
 });

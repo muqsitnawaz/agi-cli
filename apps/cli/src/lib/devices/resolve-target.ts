@@ -7,8 +7,8 @@
  * module is only the two thin adapters the fan-out and interactive-ssh paths
  * need on top of that core:
  *   - {@link resolveExplicitTargets} — a token list → dialable `{target, machine,
- *     name, os}` rows, so `sessions --host` / session bundles / remote agents-json
- *     dial the exact same address (and machine id) `run --host` does.
+ *     name, os}` rows, so `sessions --device` / session bundles / remote agents-json
+ *     dial the exact same address (and machine id) `run --device` does.
  *   - {@link resolveDeviceTarget} — a token → the full {@link DeviceProfile}
  *     `agents ssh` needs (auth, shell, tailscale metadata), with the same
  *     grammar; a bare unregistered alias returns undefined ("Unknown device").

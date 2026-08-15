@@ -3372,7 +3372,7 @@ with an explicit note. Use --no-redact only for local output that will not be sh
       agents snapshot --json --agent claude
 
       # Run the whole snapshot on another device
-      agents snapshot --json --host yosemite-s0</code></pre></article>
+      agents snapshot --json --device yosemite-s0</code></pre></article>
 <article id="ssh" data-search="ssh ssh  connect to a registered device. preflights reachability, picks the right shell, and authenticates (key or password-from-bundle). name  cmd  -h, --help show help  "><div class="command-head"><h3><code>agents ssh &lt;name&gt; [cmd...]</code></h3></div><p>Connect to a registered device. Preflights reachability, picks the right shell, and authenticates (key or password-from-bundle).</p><h4>Arguments</h4><table><thead><tr><th>Argument</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>&lt;name&gt;</code></td><td>—</td><td></td><td></td></tr><tr><td><code>[cmd...]</code></td><td>—</td><td></td><td></td></tr></tbody></table><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table></article>
 <article id="status" data-search="status status  unified sync status across the fleet — what is drifted, missing, or behind, with an option to sync it. --json output the machine-readable unifiedsyncstatus contract --yes reconcile everything detected (pull .system if behind + sync drifted/missing resources) without prompting --cwd &lt;path&gt; resolution cwd for project layer detection (default: process.cwd()) -h, --help show help # show what&#39;s out of sync; offer to fix it (interactive)
       agents status
