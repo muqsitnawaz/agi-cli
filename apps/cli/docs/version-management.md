@@ -150,6 +150,14 @@ Key behaviors:
 - Real directories are backed up before being replaced with symlinks
 - Subsequent switches just update the symlink target (no new backups)
 - Each version has isolated auth in its `home/` directory
+- `agents sync <agent>` self-heals a **dangling** symlink: if `~/.<agent>` points
+  at a version that is no longer installed (a home-only leftover, e.g. grok
+  self-updated its per-version binary out from under the old dir, or an install
+  seeded the home but never landed the binary), the sync repoints it at the
+  resolved default (else the newest installed version) before syncing, so the
+  symlinked home and the installed set never diverge (`healDanglingConfigSymlink`,
+  RUSH-2471). A symlink already pointing at an installed version, a real config
+  directory, and isolated-only agents are left untouched.
 
 ## Uninstalling (reversing adoption)
 
