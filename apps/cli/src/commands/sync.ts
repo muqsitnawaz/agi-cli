@@ -43,6 +43,7 @@ import {
   resolveVersion,
   resolveVersionAlias,
   listInstalledVersions,
+  healDanglingConfigSymlink,
   getAvailableResources,
   getActuallySyncedResources,
   getProjectOnlyResources,
@@ -612,6 +613,19 @@ async function runSync(agentSpec: string | undefined, repoArg: string | undefine
   const projectDir = opts.projectDir;
   const cwd = opts.cwd || process.cwd();
   const force = !!opts.force;
+
+  // RUSH-2471: self-heal a ~/.<agent> symlink left pointing at a version that is
+  // no longer installed BEFORE resolving/syncing, so the conventional-path home
+  // and the installed set never diverge (every sync landing in an installed
+  // version while ~/.<agent> still resolves to a dead one). Runs once here so it
+  // covers both the @all and single-version branches below; skipped on --dry-run
+  // since it mutates the symlink.
+  if (!opts.dryRun) {
+    const healed = await healDanglingConfigSymlink(agentId, cwd);
+    if (healed && !quiet && !json) {
+      outLog(chalk.yellow(`Repointed ${agentLabel(agentId)} config symlink from @${healed.from} (not installed) to @${healed.to}.`));
+    }
+  }
 
   // Promote to @all when no version can be resolved and multiple are installed.
   // Replaces the old "no default version pinned" error: bare `agents sync claude`

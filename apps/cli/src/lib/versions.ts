@@ -43,6 +43,7 @@ import {
   getConfigSymlinkVersion,
   ensureClaudeInsideSymlink,
   assertIsolationBoundary,
+  isIsolationProtected,
 } from './shims.js';
 import { importInstallScriptBinary } from './import.js';
 import { createInstallation } from './installations/store.js';
@@ -2266,6 +2267,54 @@ export function removeAllVersions(agent: AgentId): number {
   }
 
   return removed;
+}
+
+/**
+ * Repoint `~/.<agent>` when it symlinks into a version that is no longer
+ * installed, so the conventional-path home never resolves to a dead version
+ * (RUSH-2471).
+ *
+ * How a dangling symlink arises: {@link removeVersion} clears the config symlink
+ * only when IT removes the symlinked version. A version-home whose launch binary
+ * disappears by any other route — grok self-updated its per-version binary out
+ * from under the old dir, a manual delete, a half-finished install that seeded
+ * the home but never landed the binary — leaves the version dir (and its
+ * `~/.<agent>` symlink) pointing at something {@link isVersionInstalled} reports
+ * as gone. Every resource sync then lands in an installed version while
+ * `~/.<agent>` still resolves to the dead one (the reported yosemite-s0 state:
+ * `~/.grok -> grok/1.0.0` while only 0.2.82 / 0.2.91 are installed).
+ *
+ * Called from the sync resolve path — the routine that runs regularly — so the
+ * invariant self-heals: the config symlink can never point at a version that is
+ * not installed. Narrow by design:
+ *   - a symlink already pointing at an installed version is the user's
+ *     `agents use` choice and is left untouched;
+ *   - a real (non-symlink) config dir, or none at all, is never adopted here
+ *     (that is `agents use`'s job);
+ *   - an isolated-only agent is protected exactly as {@link switchConfigSymlink}
+ *     would refuse, so its real config is never hijacked.
+ * Repoints at the resolved default (project pin / global default) when that is
+ * installed, else the newest installed version.
+ *
+ * @returns the `{ from, to }` versions when a repoint happened, else `null`.
+ */
+export async function healDanglingConfigSymlink(
+  agent: AgentId,
+  cwd: string,
+): Promise<{ from: string; to: string } | null> {
+  const current = getConfigSymlinkVersion(agent);
+  if (current === null) return null; // no owned symlink to heal (real dir / none / foreign)
+  if (isVersionInstalled(agent, current)) return null; // already points at an installed version
+  if (isIsolationProtected(agent)) return null; // don't repoint an isolated-only agent's real config
+
+  const installed = listInstalledVersions(agent);
+  if (installed.length === 0) return null; // nothing installed to repoint to
+
+  const pinned = resolveVersion(agent, cwd);
+  const target = pinned && isVersionInstalled(agent, pinned) ? pinned : installed[installed.length - 1];
+
+  const result = await switchConfigSymlink(agent, target);
+  return result.success ? { from: current, to: target } : null;
 }
 
 /**
