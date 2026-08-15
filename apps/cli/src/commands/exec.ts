@@ -1067,8 +1067,10 @@ export function registerRunCommand(program: Command): void {
       // Broadcast matrix (formerly `agents bench`): list/results/run cells, then exit.
       // --broadcast is local-only fan-out — it is mutually exclusive with --host/--device.
       if (options.broadcast || options.listTasks || options.results !== undefined) {
-        if (hostTargetGiven(options).length > 0) {
-          console.error(chalk.red('--broadcast is local-only and cannot be combined with --host/--device.'));
+        const whereIsRemote =
+          typeof options.where === 'string' && options.where.trim().toLowerCase() !== 'local';
+        if (hostTargetGiven(options).length > 0 || whereIsRemote) {
+          console.error(chalk.red('--broadcast is local-only and cannot be combined with --host/--device/--where.'));
           process.exit(1);
         }
         try {
