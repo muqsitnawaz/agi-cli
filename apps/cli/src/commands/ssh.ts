@@ -1598,7 +1598,8 @@ function registerDevicesCommands(program: Command): void {
     notes: `
       Keys: role (worker|personal), see 'agents devices role',
       agents.max-concurrent, scheduler.enabled, daemon.enabled,
-      watchdog.enabled, tmux.enabled, browser.remote-control, browser.profile,
+      watchdog.enabled, tmux.enabled, browser.remote-control,
+      browser.task-idle-minutes, browser.profile,
       notes, ssh.user, ssh.auth (key|password), ssh.bundle, ssh.bundle-key,
       ssh.identity-file, platform (windows|linux|macos|unknown),
       auto-launch.enabled, auto-launch.preferred — plus the user-scope
@@ -1616,8 +1617,9 @@ function registerDevicesCommands(program: Command): void {
       profile at dial time. scheduler.enabled / daemon.enabled take effect
       when the daemon reloads or restarts on that device. Machine-local keys
       (scheduler.enabled, daemon.enabled, tmux.enabled, browser.remote-control,
-      browser.profile) can only be read or set on the device itself; --fleet
-      still writes a fleet-wide default those boxes inherit until they override.
+      browser.task-idle-minutes, browser.profile) can only be read or set on
+      the device itself; --fleet still writes a fleet-wide default those boxes
+      inherit until they override.
 
       The retired subcommands still work and forward here: configure, note,
       set, set-interactive, enable, disable, prefer, unprefer.

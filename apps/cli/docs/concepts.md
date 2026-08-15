@@ -233,8 +233,8 @@ fleet-wide defaults layer. `--json` reports each key's `source` (`device` |
 `browser.remote-control`, `browser.profile`, `notes`, the `ssh.*` profile
 overrides, `platform`, `auto-launch.*`. Keys only the owning box reads
 (`scheduler.enabled`, `daemon.enabled`, `tmux.enabled`,
-`browser.remote-control`, `browser.profile`) are refused for a peer — run
-them on that box. The device registry stays the **discovery cache** (address,
+`browser.remote-control`, `browser.task-idle-minutes`, `browser.profile`) are
+refused for a peer — run them on that box. The device registry stays the **discovery cache** (address,
 tailscale snapshot, reachability); the config's `ssh.*` / `platform` / user
 values overlay the registry profile at dial time
 (`src/lib/devices/resolve-profile.ts`), so `agents ssh`, the ssh_config

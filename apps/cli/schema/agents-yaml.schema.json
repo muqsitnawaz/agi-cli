@@ -69,6 +69,11 @@
           "type": "string",
           "description": "Device scope. Browser profile `agents browser start` resolves to without --profile on this device (browser.profile)."
         },
+        "browserTaskIdleMinutes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Device scope. Minutes a browser task may sit with no IPC action before the daemon's abandoned-task reaper closes its tabs (browser.task-idle-minutes). Default 30; 0 disables idle reaping (a task whose owning agent session exited is still closed)."
+        },
         "notes": {
           "type": "array",
           "items": { "type": "string" },
@@ -216,7 +221,7 @@
           "properties": {
             "config": {
               "type": "object",
-              "description": "Fleet-wide config defaults (`agents devices config --fleet <key> <value>`). Every device inherits these unless its own devices/<name>/agents.yaml config: overrides the key. Inert to `agents apply` (the reconcile engine never pushes it). Keys: the device-scope entries of the top-level config property (maxAgents, schedulerEnabled, daemonEnabled, watchdogEnabled, tmuxEnabled, browserRemoteControl, defaultBrowserProfile, notes, sshUser, sshAuth, sshBundle, sshBundleKey, sshIdentityFile, platform, role, autoLaunchEnabled, autoLaunchPreferred).",
+              "description": "Fleet-wide config defaults (`agents devices config --fleet <key> <value>`). Every device inherits these unless its own devices/<name>/agents.yaml config: overrides the key. Inert to `agents apply` (the reconcile engine never pushes it). Keys: the device-scope entries of the top-level config property (maxAgents, schedulerEnabled, daemonEnabled, watchdogEnabled, tmuxEnabled, browserRemoteControl, defaultBrowserProfile, browserTaskIdleMinutes, notes, sshUser, sshAuth, sshBundle, sshBundleKey, sshIdentityFile, platform, role, autoLaunchEnabled, autoLaunchPreferred).",
               "additionalProperties": true
             }
           }
