@@ -10,6 +10,12 @@ name: Tests
 on:
   pull_request:
     branches: ['main', 'release/**']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or SHA to test'
+        required: false
+        default: ''
 
 concurrency:
   group: tests-${{ github.ref }}
