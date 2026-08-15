@@ -71,7 +71,7 @@ export type RunOptionForwarding =
   | 'local-only';
 
 /**
- * The forwarding contract for `agents run … --host`: every option of the `run`
+ * The forwarding contract for `agents run … --device`: every option of the `run`
  * command is classified here, keyed by its commander attribute name. A
  * commander-introspection test (run-forwarding.test.ts) fails when a run
  * option is missing from this table, so a new option can never silently drop
@@ -126,7 +126,6 @@ export const RUN_OPTION_FORWARDING: Record<string, RunOptionForwarding> = {
   raw: 'local-only', // interactive builder forwards --raw itself
   tmux: 'local-only',
   disableTmux: 'local-only',
-  host: 'local-only',
   device: 'local-only',
   where: 'local-only', // expands into host/lease before dispatch; never re-forwarded
   on: 'local-only',
