@@ -1173,7 +1173,8 @@ export async function assertRoutineAccountLocalForPlacement(
     throw new Error(`Routine '${config.name}' account '${config.account}' is a device-local ${account.agent} login and cannot run on a ${mode} placement. Use a provider account, or place this routine on the device that holds the login.`);
   }
   if (mode === 'cloud' && account?.kind === 'provider') {
-    throw new Error(`Routine '${config.name}' account '${config.account}' is a provider credential; cloud placement cannot securely inject it yet. Run this routine locally or on a host that holds the bundle.`);
+    // RUSH-2689: cloud+provider injection not yet implemented.
+    throw new Error(`Routine '${config.name}' account '${config.account}' is a provider credential; cloud placement cannot securely inject it (RUSH-2689). Run this routine locally or on a host that holds the bundle.`);
   }
 }
 
