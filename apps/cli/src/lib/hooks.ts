@@ -2808,6 +2808,21 @@ function registerHooksForCodex(
         : {};
     const hookState: Record<string, { enabled?: boolean; trusted_hash?: string }> = {};
 
+    // Codex keys [hooks.state] by the hooks.json path under the CODEX_HOME it
+    // actually resolves. On macOS the versioned `.codex` dir is a SYMLINK into
+    // the short `~/.agents/.codex-homes/<version>/.codex` (the SUN_LEN
+    // migration in codex-home.ts), and both the shim and exec.ts export that
+    // short REAL path as CODEX_HOME — so trust entries keyed by the unresolved
+    // versioned path never match, and codex silently drops the hook as
+    // Untrusted in `codex exec`. Key by the resolved real path (identical to
+    // hooksPath when no migration happened).
+    let trustKeyHooksPath = hooksPath;
+    try {
+      trustKeyHooksPath = fs.realpathSync(hooksPath);
+    } catch {
+      /* keep the unresolved path */
+    }
+
     for (const [event, eventGroups] of Object.entries(hooksFile.hooks)) {
       const eventKeyLabel = CODEX_EVENT_KEY_LABELS[event];
       if (!eventKeyLabel) continue;
@@ -2815,7 +2830,7 @@ function registerHooksForCodex(
         if (!group.hooks) return;
         group.hooks.forEach((handler, handlerIdx) => {
           if (handler.type !== 'command') return;
-          const key = `${hooksPath}:${eventKeyLabel}:${groupIdx}:${handlerIdx}`;
+          const key = `${trustKeyHooksPath}:${eventKeyLabel}:${groupIdx}:${handlerIdx}`;
           const trustedHash = computeCodexHookTrustHash(
             eventKeyLabel,
             handler.command,

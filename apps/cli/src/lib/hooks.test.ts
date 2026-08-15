@@ -676,6 +676,32 @@ describe('built-in session-tracker hook', () => {
     expect(JSON.parse(out)).toEqual({ present: false });
   });
 
+  it('codex trust-state keys use the RESOLVED hooks.json path when .codex is a symlink (SUN_LEN migration)', () => {
+    // On macOS the versioned `.codex` dir is a symlink into the short
+    // `~/.agents/.codex-homes/<version>/.codex`, and codex keys [hooks.state]
+    // by the CODEX_HOME it resolves — the short REAL path. A trust hash keyed
+    // by the unresolved versioned path never matches, so codex silently drops
+    // the hook as Untrusted in `codex exec` (measured live: 6 of 7 SessionStart
+    // hooks ran; the newly registered one was skipped).
+    plantCodexBinary('0.130.0');
+    const versionHome = path.join(userDir, '.history', 'versions', 'codex', '0.130.0', 'home');
+    const realCodexDir = path.join(testHome, 'short-codex-home', '.codex');
+    fs.mkdirSync(realCodexDir, { recursive: true });
+    fs.mkdirSync(versionHome, { recursive: true });
+    fs.symlinkSync(realCodexDir, path.join(versionHome, '.codex'));
+
+    runRuntime(`
+      const { getVersionHomePath } = await import(${JSON.stringify(path.resolve(process.cwd(), 'src/lib/versions.ts'))});
+      const r = mod.registerHooksToSettings('codex', getVersionHomePath('codex', '0.130.0'));
+      if (r.errors.length > 0) throw new Error(r.errors.join('; '));
+    `);
+
+    const configToml = fs.readFileSync(path.join(realCodexDir, 'config.toml'), 'utf-8');
+    const resolvedReal = fs.realpathSync(realCodexDir);
+    expect(configToml).toContain(`${path.join(resolvedReal, 'hooks.json')}:session_start:0:0`);
+    expect(configToml).not.toContain(path.join(versionHome, '.codex', 'hooks.json') + ':');
+  });
+
   it('selectHookManifest retains it even when the selection does not name it', () => {
     const out = runRuntime(`
       const manifest = mod.parseHookManifest({ warn: false });
