@@ -30,9 +30,9 @@ export interface RunStaggeredOptions {
 /**
  * Run `worker` over `items` with a concurrency cap and a per-start stagger.
  *
- * A worker that throws does not abort the batch — its rejection is swallowed so
- * one un-resumable tab never strands the rest (the restore loop already logs and
- * continues on a per-tab failure). Resolves once every item has been processed.
+ * A worker that throws does not abort the batch — the error is logged (with the
+ * item index) and swallowed so one un-resumable tab never strands the rest.
+ * Resolves once every item has been processed.
  */
 export async function runStaggered<T>(
   items: readonly T[],
@@ -54,8 +54,11 @@ export async function runStaggered<T>(
       if (index > 0 && staggerMs > 0) await sleep(staggerMs);
       try {
         await worker(items[index], index);
-      } catch {
-        // One un-resumable tab must not strand the batch; the caller logs per-tab.
+      } catch (err) {
+        // One un-resumable tab must not strand the batch — but a silent drop is
+        // undiagnosable, and clearPersistedSessions runs right after, so the tab
+        // is gone for good. Log which item failed and why, then continue.
+        console.error(`[RESTORE] item ${index} failed to restore, continuing: ${err}`);
       }
     }
   };

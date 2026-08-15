@@ -421,18 +421,28 @@ export async function queryIndexedSessions(
  * not-yet-up tailnet. Exact id first, then prefix (matching `findSessionsById`),
  * so a complete id never also drags in its prefix siblings. Returns `[]` on a
  * genuine local miss, leaving the caller to fall back to the fleet resolver.
+ *
+ * The existence check is left ON (`skipExistenceCheck: false`), exactly as the old
+ * `discoverSessions` path and `findSessionsById` do (RUSH-2436): it KEEPS a
+ * file-gone session whose user turns still live in `session_text` (flagged
+ * archived) and SUPPRESSES a contentless phantom — so a phantom id misses here and
+ * falls through to the fleet resolver, instead of resolving to a row with no real
+ * transcript to resume. For a present transcript — the storm's actual case, since
+ * the crashed tabs' files are on disk — the check does no writes, so the lock-free
+ * guarantee holds; it only writes to (un)archive a genuinely missing or resurrected
+ * file, which is not the 20-at-once resume path.
  */
 export async function resolveIndexedSessionById(idQuery: string): Promise<SessionMeta[]> {
   const q = idQuery.trim();
   if (!q) return [];
   const exact = await queryIndexedSessions(
     { all: true, unbounded: true, idExact: q },
-    { resolveLinear: false },
+    { resolveLinear: false, skipExistenceCheck: false },
   );
   if (exact.length > 0) return exact;
   return queryIndexedSessions(
     { all: true, unbounded: true, idPrefix: q },
-    { resolveLinear: false },
+    { resolveLinear: false, skipExistenceCheck: false },
   );
 }
 

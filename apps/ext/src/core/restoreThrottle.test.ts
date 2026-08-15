@@ -1,4 +1,4 @@
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, spyOn } from 'bun:test';
 import { runStaggered, RESTORE_MAX_CONCURRENCY } from './restoreThrottle';
 
 /** Deterministic yield so overlapping workers actually interleave. */
@@ -56,18 +56,30 @@ describe('runStaggered', () => {
     expect(delays.every((d) => d === 250)).toBe(true);
   });
 
-  test('a throwing worker does not strand the rest of the batch', async () => {
+  test('a throwing worker does not strand the rest of the batch, and is logged', async () => {
     const items = [0, 1, 2, 3];
     const done: number[] = [];
-    await runStaggered(
-      items,
-      async (item) => {
-        if (item === 1) throw new Error('un-resumable tab');
-        done.push(item);
-      },
-      { concurrency: 1, staggerMs: 0 },
-    );
+    const logged: string[] = [];
+    const errSpy = spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      logged.push(args.map(String).join(' '));
+    });
+    try {
+      await runStaggered(
+        items,
+        async (item) => {
+          if (item === 1) throw new Error('un-resumable tab');
+          done.push(item);
+        },
+        { concurrency: 1, staggerMs: 0 },
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
     expect(done.sort((a, b) => a - b)).toEqual([0, 2, 3]);
+    // The failure is not swallowed silently — it is logged so a permanently
+    // dropped (clearPersistedSessions) tab is diagnosable.
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toContain('un-resumable tab');
   });
 
   test('empty input is a no-op', async () => {

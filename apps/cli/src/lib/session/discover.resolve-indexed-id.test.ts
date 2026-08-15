@@ -11,7 +11,10 @@
  *      "unreachable ... skipped" list.
  *
  * The concurrency test is the acceptance criterion: >= 20 simultaneous
- * indexed-id resolutions complete with zero throws.
+ * indexed-id resolutions of present-transcript sessions complete with zero
+ * throws. It MUST also keep the existence check ON so a contentless phantom row
+ * (file gone, no cached content) is rejected exactly as the fleet resolver would
+ * — never resolved into a resume of a session with no real transcript.
  */
 
 import { describe, it, expect, afterAll, vi } from 'vitest';
@@ -37,16 +40,32 @@ afterAll(() => {
   delete process.env.AGENTS_SYNC_MACHINE_ID;
 });
 
+function transcriptPath(id: string): string {
+  return path.join(TEST_HOME, '.claude', 'projects', 'p', `${id}.jsonl`);
+}
+
 function meta(id: string, extra: Partial<SessionMeta> = {}): SessionMeta {
   return {
     id,
     shortId: id.slice(0, 8),
     agent: 'claude',
     timestamp: new Date().toISOString(),
-    filePath: path.join(TEST_HOME, '.claude', 'projects', 'p', `${id}.jsonl`),
+    filePath: transcriptPath(id),
     machine: 'this-box',
     ...extra,
   };
+}
+
+/**
+ * Seed a resumable session: an index row AND its transcript on disk, so the
+ * existence check (left ON, RUSH-2436) sees a present file and stays read-only —
+ * the real crash-restart case, where the crashed tabs' transcripts are on disk.
+ */
+function seed(id: string): void {
+  const file = transcriptPath(id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '{}\n');
+  upsertSession(meta(id), '{}\n');
 }
 
 const IDS = Array.from({ length: 24 }, (_, i) =>
@@ -55,7 +74,7 @@ const IDS = Array.from({ length: 24 }, (_, i) =>
 
 describe('resolveIndexedSessionById', () => {
   it('resolves an exact full id from the index', async () => {
-    upsertSession(meta(IDS[0]), '{}\n');
+    seed(IDS[0]);
     const rows = await resolveIndexedSessionById(IDS[0]);
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe(IDS[0]);
@@ -65,8 +84,8 @@ describe('resolveIndexedSessionById', () => {
     // Two ids sharing an 8-char prefix; the full id must not also match its sibling.
     const a = 'abcd1234-0000-0000-0000-000000000001';
     const b = 'abcd1234-0000-0000-0000-000000000002';
-    upsertSession(meta(a), '{}\n');
-    upsertSession(meta(b), '{}\n');
+    seed(a);
+    seed(b);
     const exact = await resolveIndexedSessionById(a);
     expect(exact.map((r) => r.id)).toEqual([a]);
     const prefix = await resolveIndexedSessionById('abcd1234');
@@ -78,8 +97,29 @@ describe('resolveIndexedSessionById', () => {
     expect(await resolveIndexedSessionById('   ')).toEqual([]);
   });
 
+  it('rejects a contentless phantom row exactly as the fleet resolver would', async () => {
+    // A row whose transcript file is gone and whose session_text is empty is a
+    // phantom (db.ts existence check). The old discoverSessions path filtered it
+    // and printed "not found"; the fast path MUST too, never resolving it into a
+    // resume of a session with no real transcript. The file is deliberately NOT
+    // created, and the content is empty.
+    const phantom = 'aaaaffff-1111-2222-3333-444455556666';
+    upsertSession(meta(phantom), '');
+    expect(await resolveIndexedSessionById(phantom)).toEqual([]);
+  });
+
+  it('keeps a file-gone but content-bearing (archived) session resolvable', async () => {
+    // The other half of the RUSH-2436 rule: a session whose file is gone but whose
+    // user turns still live in session_text is archived, not phantom — it must
+    // still resolve so it can recover from the DB.
+    const archived = 'bbbbcccc-1111-2222-3333-444455556666';
+    upsertSession(meta(archived), 'user: do the thing\nassistant: done\n');
+    const rows = await resolveIndexedSessionById(archived);
+    expect(rows.map((r) => r.id)).toEqual([archived]);
+  });
+
   it('takes no scan claim — a resolve leaves the scan slot free for the real scanner', async () => {
-    upsertSession(meta(IDS[1]), '{}\n');
+    seed(IDS[1]);
     await resolveIndexedSessionById(IDS[1]);
     await resolveIndexedSessionById('nope-not-here');
     // The write-heavy path claims the scan slot (BEGIN IMMEDIATE) before scanning;
@@ -89,11 +129,13 @@ describe('resolveIndexedSessionById', () => {
     dbModule.releaseScan(process.pid);
   });
 
-  it('resolves >= 20 ids concurrently with zero SQLITE_BUSY / database-is-locked', async () => {
-    for (const id of IDS) upsertSession(meta(id), '{}\n');
+  it('resolves >= 20 present-transcript ids concurrently with zero SQLITE_BUSY / database-is-locked', async () => {
+    for (const id of IDS) seed(id);
     // Fire every resolve at once — the crash-restart storm. Before the fast path,
     // each resume ran discoverSessions -> tryClaimScan (BEGIN IMMEDIATE), and 20+
     // concurrent writers exhausted busy_timeout and threw unhandled SQLITE_BUSY.
+    // With present transcripts the existence check does no writes, so the fast
+    // path stays a pure read at any concurrency.
     const results = await Promise.allSettled(IDS.map((id) => resolveIndexedSessionById(id)));
     const rejected = results.filter((r) => r.status === 'rejected');
     expect(rejected).toEqual([]);
@@ -111,7 +153,7 @@ describe('resolveIndexedSessionById', () => {
     const remote = await import('./remote-list.js');
     const fanOut = vi.spyOn(remote, 'gatherRemoteList');
     const peerHop = vi.spyOn(remote, 'runOnPeer');
-    upsertSession(meta(IDS[2]), '{}\n');
+    seed(IDS[2]);
     await resolveIndexedSessionById(IDS[2]);
     await resolveIndexedSessionById('ffffffff-0000-0000-0000-000000000000'); // a miss
     expect(fanOut).not.toHaveBeenCalled();
