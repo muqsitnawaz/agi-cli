@@ -131,6 +131,19 @@ export type EventType =
   | 'agent.run.end'
   | 'agent.spawn.start'
   | 'agent.spawn.end'
+  // Run-dispatch outcome (single chokepoint in exec — replaces the separate
+  // hash-chained audit/log.jsonl product; readable via --include runs)
+  | 'run.dispatched'
+  // Daemon lifecycle (always-on process: secrets broker, browser IPC, scheduler)
+  | 'daemon.start'
+  | 'daemon.stop'
+  | 'daemon.error'
+  | 'daemon.info'
+  // Routines (scheduler fires from the daemon — first-class, not log-mirror)
+  | 'routine.start'
+  | 'routine.end'
+  // Watchdog (stalled-session nudge pass; structured counts)
+  | 'watchdog.action'
   // Version management
   | 'version.install'
   | 'version.switch'
@@ -238,6 +251,10 @@ export type EventType =
  */
 const EVENT_TYPE_TABLE: Record<EventType, true> = {
   'agent.run.start': true, 'agent.run.end': true, 'agent.spawn.start': true, 'agent.spawn.end': true,
+  'run.dispatched': true,
+  'daemon.start': true, 'daemon.stop': true, 'daemon.error': true, 'daemon.info': true,
+  'routine.start': true, 'routine.end': true,
+  'watchdog.action': true,
   'version.install': true, 'version.switch': true, 'version.remove': true,
   'skill.install': true, 'skill.remove': true,
   'browser.launch': true, 'browser.close': true, 'browser.navigate': true, 'browser.screenshot': true,
@@ -274,6 +291,7 @@ export function isEventType(value: string): value is EventType {
 
 const AUDIT_EVENTS: ReadonlySet<string> = new Set([
   'command.start', 'command.end',
+  'run.dispatched',
   'secrets.get', 'secrets.unlocked', 'secrets.create', 'secrets.import', 'secrets.export', 'secrets.view', 'secrets.lease-denied', 'secrets.lease-expire',
   'secrets.set', 'secrets.delete', 'secrets.rename',
   'teams.create', 'teams.add', 'teams.start', 'teams.complete', 'teams.disband',
@@ -283,6 +301,10 @@ const AUDIT_EVENTS: ReadonlySet<string> = new Set([
   'mcp.add', 'mcp.remove', 'mcp.register',
   'rotation.resolved',
   'session.start', 'session.end',
+  // Daemon lifecycle (always-on process start/stop/error is audit-relevant).
+  // browser.* / computer.action stay info — they are already on the event stream;
+  // elevating them to audit would flood the security lane (see events.test.ts).
+  'daemon.start', 'daemon.stop', 'daemon.error',
   // An external process reaching into the user's editor (the CLI's
   // vscodium-agent backend driving `/spawn` / `/inject` / `/focus`) is a
   // "who reached in from outside" fact, which is what the audit lane answers.
@@ -762,15 +784,31 @@ export function emitStart(
   const startTime = Date.now();
   emit(startEvent, payload);
 
-  const endEvent = startEvent.replace('.start', '.end') as EventType;
-
   return (endPayload: EventPayload = {}) => {
-    emit(endEvent, {
-      ...payload,
-      ...endPayload,
-      durationMs: Date.now() - startTime,
-    });
+    emit(
+      startEvent.replace('.start', '.end') as EventType,
+      { ...payload, ...endPayload, durationMs: Date.now() - startTime }
+    );
   };
+}
+
+export function emitRoutineEnd(meta: {
+  jobName: string;
+  runId?: string;
+  status: string;
+  duration?: number;
+  exitCode?: number | null;
+  detail?: string;
+}): void {
+  emit('routine.end', {
+    module: 'routine',
+    name: meta.jobName,
+    status: meta.status,
+    ...(meta.runId ? { runId: meta.runId } : {}),
+    ...(meta.duration != null ? { durationMs: meta.duration } : {}),
+    ...(meta.exitCode != null ? { exitCode: meta.exitCode } : {}),
+    ...(meta.detail ? { detail: meta.detail } : {}),
+  });
 }
 
 // ─── Timing Utilities ─────────────────────────────────────────────────────────

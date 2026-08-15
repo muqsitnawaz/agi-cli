@@ -41,9 +41,7 @@ import {
   type PullRequestRef as SharedPullRequestRef,
   type WorktreeRef as SharedWorktreeRef,
 } from '../core/panel.helpers';
-import { fetchUsage, fetchWorktrees } from '../monitor/snapshotDetector';
-import type { AgentsViewJsonAgent } from '../core/resumeInBest';
-import type { SnapshotWatch } from '../monitor/protocol';
+import { sessionPresentationStore } from '../core/sessionPresentationStore';
 
 export const AGENT_PANEL_VIEW_ID = 'agentsPanel.terminal';
 
@@ -505,15 +503,6 @@ class AgentPanelProvider implements vscode.WebviewViewProvider {
       } catch { /* best-effort */ }
     }
 
-    // Arm the monitor with what this window's panel + floor need so the leader
-    // computes git/worktrees (workspace root) + teams/usage (active tuple) once
-    // machine-wide (#71). Replaces this window's whole slice each refresh.
-    if (workspaceRoot) {
-      const watches: SnapshotWatch[] = [{ workspaceRoot }];
-      watches.push({ workspaceRoot, cwd: cwd ?? workspaceRoot, agentType: entry.agentType });
-      terminals.armSnapshotWatches(watches);
-    }
-
     snapshot.git = cwd ? await readGitInfo(cwd) : undefined;
 
     // Worktrees attached to this workspace — `git worktree list --porcelain`
@@ -531,7 +520,7 @@ class AgentPanelProvider implements vscode.WebviewViewProvider {
     // version. Rendered from the broadcast snapshot when connected (#71).
     if (entry.agentType) {
       try {
-        snapshot.usageStatus = await getUsageStatusRouted(entry.agentType, entry.statusVersion || entry.version);
+        snapshot.usageStatus = getUsageStatusFromCli(sessionId);
       } catch { /* best-effort */ }
     }
 
@@ -1709,77 +1698,53 @@ function extractPrUrls(lines: string[]): PullRequestRef[] {
   return extractPrUrlsHelper(lines);
 }
 
-/**
- * Enumerate every worktree attached to `workspaceRoot` via
- * `git worktree list --porcelain`. Delegates to the canonical `fetchWorktrees`
- * (snapshotDetector) the leader runs, so the local fallback and the broadcast
- * path share one implementation. Returns [] when the directory isn't a git repo
- * or git isn't available.
- */
-async function listWorktrees(workspaceRoot: string, activeCwd: string | undefined): Promise<WorktreeRef[]> {
-  return fetchWorktrees(workspaceRoot, activeCwd);
-}
-
+/** Build presentation rows from the canonical session stream plus the workspace root. */
 type UsageStatus = 'available' | 'rate_limited' | 'out_of_credits' | null;
-
-/**
- * Pick the throttle state for `version` from a parsed `agents view --json` view.
- * Prefers the exact version match, then the default row, then the first. Shared
- * by the local fetch and the broadcast-snapshot path so selection is identical.
- */
-function selectUsageStatus(view: AgentsViewJsonAgent, version: string | undefined): UsageStatus {
-  const rows = view.versions || [];
-  const match = (version && rows.find((r) => r.version === version))
-    || rows.find((r) => r.isDefault)
-    || rows[0];
-  return match?.usageStatus ?? null;
-}
-
-/**
- * Read the throttle state for `agentType@version` from `agents view --json`.
- * Returns null when the binary isn't on PATH, when the JSON doesn't include a
- * matching version row, or when the field is missing — never throws. The fetch
- * reuses the canonical `fetchUsage` (snapshotDetector) the leader runs.
- */
-async function readUsageStatus(
-  agentType: string,
-  version: string | undefined,
-): Promise<UsageStatus> {
-  const view = await fetchUsage(agentType);
-  return view ? selectUsageStatus(view, version) : null;
-}
-
-// --- Monitor follower routing (#71) ---------------------------------------
-// Prefer the leader's broadcast panel-snapshot (computed once machine-wide);
-// fall back to a local compute only while disconnected from the monitor.
 
 async function getWorktreesRouted(
   workspaceRoot: string,
   activeCwd: string | undefined,
 ): Promise<WorktreeRef[]> {
-  if (terminals.isSnapshotMonitorConnected()) {
-    const broadcast = terminals.getLatestPanelSnapshot()?.worktreesByRoot[workspaceRoot];
-    if (broadcast) return broadcast;
+  const byPath = new Map<string, WorktreeRef>();
+  byPath.set(workspaceRoot, {
+    path: workspaceRoot,
+    name: path.basename(workspaceRoot),
+    isActive: activeCwd ? path.resolve(activeCwd) === path.resolve(workspaceRoot) : false,
+    isMain: true,
+  });
+  for (const value of sessionPresentationStore.sessions()) {
+    const row = value as { cwd?: unknown; branch?: unknown; worktree?: { path?: unknown; branch?: unknown } };
+    const worktreePath = typeof row.worktree?.path === 'string'
+      ? row.worktree.path
+      : typeof row.cwd === 'string' && row.cwd.includes(`${path.sep}.agents${path.sep}worktrees${path.sep}`)
+        ? row.cwd
+        : undefined;
+    if (!worktreePath || !path.resolve(worktreePath).startsWith(`${path.resolve(workspaceRoot)}${path.sep}`)) continue;
+    byPath.set(worktreePath, {
+      path: worktreePath,
+      name: path.basename(worktreePath),
+      branch: typeof row.worktree?.branch === 'string' ? row.worktree.branch : typeof row.branch === 'string' ? row.branch : undefined,
+      isActive: activeCwd ? path.resolve(activeCwd) === path.resolve(worktreePath) : false,
+      isMain: false,
+    });
   }
-  return listWorktrees(workspaceRoot, activeCwd);
+  return [...byPath.values()];
 }
 
-async function getUsageStatusRouted(
-  agentType: string,
-  version: string | undefined,
-): Promise<UsageStatus> {
-  if (terminals.isSnapshotMonitorConnected()) {
-    const view = terminals.getLatestPanelSnapshot()?.usageByAgent[agentType];
-    if (view) return selectUsageStatus(view, version);
+/** Read the session's CLI-provided throttle state without probing account state. */
+function getUsageStatusFromCli(sessionId: string | undefined): UsageStatus {
+  if (!sessionId) return null;
+  const row = sessionPresentationStore.sessions().find((value) => {
+    const candidate = value as { id?: unknown; sessionId?: unknown };
+    return candidate.id === sessionId || candidate.sessionId === sessionId;
+  }) as { rateLimited?: unknown; usageStatus?: unknown } | undefined;
+  if (row?.usageStatus === 'available' || row?.usageStatus === 'rate_limited' || row?.usageStatus === 'out_of_credits') {
+    return row.usageStatus;
   }
-  return readUsageStatus(agentType, version);
+  return row?.rateLimited === true ? 'rate_limited' : null;
 }
 
 async function getTeamsRouted(cwd: string | undefined): Promise<TeamWithMates[]> {
-  if (cwd && terminals.isSnapshotMonitorConnected()) {
-    const broadcast = terminals.getLatestPanelSnapshot()?.teamsByCwd[cwd];
-    if (broadcast) return broadcast as TeamWithMates[];
-  }
   return listTeamsForCwd(cwd);
 }
 

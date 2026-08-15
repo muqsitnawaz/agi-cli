@@ -12,7 +12,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as readline from 'readline';
 import { createHash } from 'crypto';
-import { SessionAgentKind } from './protocol';
+export type SessionAgentKind = 'claude' | 'codex' | 'gemini' | 'opencode';
 import { runAgents } from '../core/agentsBin';
 
 const LINE_CAP = 100;
@@ -127,7 +127,7 @@ export async function parseSessionHead(
 
 // --- Session roots (machine-wide, not workspace-keyed) --------------------
 
-export type AgentRootKind = SessionAgentKind | 'cursor';
+export type AgentRootKind = SessionAgentKind | 'cursor' | 'antigravity' | 'grok' | 'kimi' | 'droid';
 
 let cachedClaudeRoots: string[] | undefined;
 
@@ -165,6 +165,13 @@ export function agentSessionRoots(agentKey: AgentRootKind): string[] {
       return [path.join(home, '.local', 'share', 'opencode', 'storage', 'message')];
     case 'cursor':
       return [path.join(home, '.cursor', 'chats')];
+    // Monitor cannot parse these transcripts yet (see watcherRootsFromCli).
+    // Return empty so locate/fast-path no-ops rather than type-error.
+    case 'antigravity':
+    case 'grok':
+    case 'kimi':
+    case 'droid':
+      return [];
   }
 }
 

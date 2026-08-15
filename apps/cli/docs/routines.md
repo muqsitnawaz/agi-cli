@@ -71,40 +71,37 @@ start`, the watchdog) stop relaunching a daemon that never lives, and point at
 already-running daemon is still reported, and `agents daemon start` — the
 explicit override — is never gated.
 
-### Project routines (opt-in daemon firing)
+### Project routines (one enabled/disabled flag)
 
-`agents routines list` and `agents routines view <name>` also discover routines in `<project>/.agents/routines/` when invoked from inside a project — project routines shadow user routines of the same name in those views.
+A routine has exactly one state: **enabled** or **disabled**. Project routines in `<project>/.agents/routines/` are surfaced in `agents routines list` (discovered from your registered projects, `agents projects`) as **disabled** rows until you turn one on — there is no separate project-level opt-in.
 
-**Daemon firing is opt-in.** A cloned public repo's `.agents/routines/*.yml` never auto-executes. To schedule project routines:
+**A cloned repo never auto-fires.** Enablement lives solely in this device's `meta.deviceRoutines`; a project YAML's own `enabled:` field is never trusted for firing. So a discovered routine stays inert until you enable it locally.
 
 ```bash
-# From inside the project (or pass the path). Confirms interactively unless --yes.
-agents routines enable-project
-agents routines enable-project /path/to/repo --yes
+# Enable a routine. If it is a project routine not yet materialised (from the
+# current project or a registered one), enable materialises it first — one step.
+agents routines enable security-sweep
 
-# Refresh user-layer copies after editing project YAML
+# Disable it again (definition stays; only firing stops)
+agents routines disable security-sweep
+
+# Refresh materialised project routines from their source YAML (definition-only,
+# never changes what is enabled). Runs automatically on daemon reload (SIGHUP).
 agents routines sync
 agents routines sync /path/to/repo
-
-# See which projects are on the allowlist
-agents routines projects
-
-# Reverse
-agents routines disable-project --remove-synced
 ```
 
-What happens on enable/sync:
+What `enable` does for a project routine:
 
-1. The project root is recorded in `~/.agents/agents.yaml` under `routines.projects`.
-2. Each `.agents/routines/*.yml` is materialised into `~/.agents/routines/<name>.yml` with a `source:` block (`kind: project`, `projectPath`, and git `repo`/`branch`/`commit` when known).
-3. The daemon (which only loads user + system layers) can now fire them. Reload (`SIGHUP` / `agents routines` mutations) re-syncs opted-in projects automatically.
-4. Hand-authored user routines of the same name are never overwritten.
+1. Materialises `<project>/.agents/routines/<name>.yml` into `~/.agents/routines/<name>.yml` with a `source:` block (`kind: project`, `projectPath`, and git `repo`/`branch`/`commit` when known) — **without** enabling it.
+2. Turns on the device flag (`meta.deviceRoutines`), which is the only thing that makes the daemon (user + system layers) fire it.
+3. Hand-authored user routines of the same name are never overwritten — `enable` refuses with an error if the name collides with a foreign-source routine.
 
 `agents routines list` groups terminal output by effective device/host scope so it is clear what runs on the current machine, the fleet, cloud, named devices, and named hosts. Use `agents routines list --flat` for the legacy single table, or `--json` for the flat machine-readable payload. Project-sourced routines still show the source repo (and `@branch` when known) in the Repo column; `--json` includes `source`, `sourceRepo`, `sourceBranch`, `hostStrategy`, `oneShot`, and `expired`.
 
 The bare `agents routines` command (no subcommand) opens an **interactive browser** on a terminal — a filterable, grouped picker (built on the same picker primitive as `agents sessions`). The project/device group headers render as inline dividers, typing filters the rows (keeping only groups with a match), and the detail pane / drilling into a routine shows four blocks: Definition, Next fire, Recent runs, and Stats. It falls back to the static `agents routines list` output — byte-for-byte — under `--json` or in any non-interactive shell (a pipe, the menu bar, CI), and `--flat` keeps the legacy table. Separately, `agents inspect <target> --routines` lists routine *definitions* (name, last run, devices, schedule) through the inspect resource view; add a name to drill into one.
 
-A project may also declare `routines: { enable: true }` in its own `agents.yaml` as a documentation signal; daemon firing still requires the explicit `enable-project` allowlist step so consent is materialised into the user layer.
+A project routine's own `enabled:` field in its YAML is a documentation signal only — daemon firing is governed solely by this device's enable state (`agents routines enable <name>`), so a cloned repo can never turn itself on.
 
 ### Host placement strategy
 
@@ -175,7 +172,7 @@ projects:                     # optional: organises the routine under a project 
   - myapp                     # single name → "myapp" group; ["*"] → All projects
 project: myapp                # optional: singular execution anchor from `agents projects`
 cwd: apps/api                 # optional: portable execution directory (see below)
-# source:                     # set by `agents routines enable-project` / sync
+# source:                     # set by `agents routines enable <name>` / sync
 #   kind: project
 #   projectPath: /path/to/repo
 #   repo: owner/name
@@ -458,8 +455,11 @@ Handlers support the same filters as routine triggers:
 - Linear: `teamKey`, `label`, `stateTo`, `stateFrom`.
 - GitHub: `repo`, `branch`, `label`.
 
-`stateTo` matches the current Linear state name (`payload.data.state.name`);
-`stateFrom` matches the previous state (`payload.updatedFrom.state.name`).
+`stateTo` matches a **transition into** that state, not merely sitting in it: the
+current state (`payload.data.state.name`) must equal the value AND this delivery's
+`updatedFrom` must record a state change (`payload.updatedFrom.state` or
+`payload.updatedFrom.stateId`), so a later edit that leaves the state unchanged does
+not re-fire. `stateFrom` matches the previous state (`payload.updatedFrom.state.name`).
 
 #### Actions
 
@@ -583,35 +583,30 @@ On upgrade, explicit legacy `enabled:` and `devices:` values are materialized
 once into the current host's routine membership. Subsequent toggles edit only the
 device manifest.
 
-### Built-in daemon routines
+### Daemon-core housekeeping (not a routine you manage)
 
-Six routines are **daemon-owned built-ins** — their definitions live in the CLI
-itself (`lib/builtin-routines.ts`), not in a `~/.agents/routines/` file:
-`session-cache-warm`, `device-probe`, `auto-dispatch`, `watchdog`,
-`tmux-reconcile`, and `launch-health`. They are the
-daemon's own housekeeping (cache warming, the watchdog, self-heal), fired by the
-same scheduler via `agents __daemon-tick <name>`. `agents routines list` shows them
-with a `(built-in)` tag, and `--json` carries `builtin: true`.
+The daemon's own housekeeping — session-cache warming, device probing, and the
+watchdog — runs as plain `setInterval` timers in `lib/daemon.ts`
+(`runActiveSessionsWarm`, `runDeviceProbeTick`, `runWatchdogTick`), not as
+entries under `agents routines`. This replaced an earlier `builtin-routines.ts`
+registry that surfaced them as `(built-in)`-tagged routines with
+`agents routines pause`/`devices` support; that registry, the
+`__daemon-tick <name>` entrypoint, and the `JobConfig.builtin` field were torn
+out (RUSH-2495) because they doubled a scheduling layer the plain timers already
+covered. `agents routines list` no longer shows them — housekeeping is invisible
+to that command, not degraded.
 
-Usage and authentication health are first-party account state rather than
-schedulable work. One in-process daemon service owns those refresh timers, so
-they cannot drift from the running daemon or be duplicated by routine catch-up.
-
-They behave like any other routine — enable/disable and pin them by name:
-
-```bash
-agents routines list                          # shows the 6, tagged (built-in)
-agents routines pause watchdog                # device-activation manifest, by name
-agents routines devices auto-dispatch --set yosemite-s0   # owner-pin a shared-input job
-```
-
-They are the **lowest** definition layer, so a same-named file always wins:
-dropping `~/.agents/routines/watchdog.yml` overrides the built-in entirely. Running
-`agents routines edit <name>` on a built-in **materializes** a real file from the
-built-in definition (the `(built-in)` tag then disappears, because it is now a
-normal file-backed routine you own). Built-ins are excluded from missed-fire
-catch-up (a missed 3–6 min housekeeping tick is redone by the next tick, not
-replayed).
+The `auto-dispatch` and `launch-health` routines, and the **5-minute
+`tmux-reconcile` poll** that used to retrofit a stale `pane-died` hook onto
+managed tmux sessions, were deleted in the same pass and have **no** daemon-core
+replacement timer. `tmux-reconcile`'s job is instead covered by two
+lifecycle-enforcement points that don't need a poll (RUSH-2435): the daemon
+repairs every managed session's hook once at startup, and `agents run
+--resume`/`agents focus`/`agents go`/`agents tmux attach` each repair the ONE
+session they're about to attach to right before attaching
+(`ensureSessionHookRepaired`, `lib/tmux/session.ts`). A version-skew one-shot at
+upgrade time (`runMigration`, `lib/migrate.ts`) covers a machine that upgrades
+without immediately restarting its daemon.
 
 ### Legacy device allowlists
 

@@ -437,17 +437,37 @@ git -C "\$REPO_ROOT" worktree add --quiet --detach "\$WT" "v$1" \\
   || { echo "could not create home-base publish worktree at \$WT" >&2; exit 1; }
 [ -z "\$(git -C "\$WT" status --short | grep '^ D')" ] \\
   || { echo "home-base publish worktree \$WT is incomplete -- refusing to build" >&2; exit 1; }
-# The signed keychain + menu-bar helpers need bin/embedded.provisionprofile — an
-# Apple provisioning profile that is gitignored (never committed, /apps/cli/bin/
-# is ignored wholesale), so the tag worktree has no bin/ at all. Seed it from the
-# home base's own checkout (REPO_ROOT has it) before the helper build reads it;
-# without this the home-base phase dies "Missing .../bin/embedded.provisionprofile"
-# on every release, regardless of which box triggered it.
+# The signed keychain + menu-bar helpers need bin/embedded.provisionprofile -- an
+# Apple provisioning profile that is a COMMITTED input as of commit 2567004b4
+# (negated out of .gitignore: /apps/cli/bin/* + !/apps/cli/bin/embedded.provisionprofile),
+# so any tag cut after that commit already carries it in the checked-out \$WT
+# tree, with nothing left to seed. Two cases still need recovery: an OLDER tag
+# cut before 2567004b4 (e.g. the stuck v1.22.36) genuinely lacks it in its own
+# tree, and a home base whose own on-disk checkout (REPO_ROOT) has simply never
+# been git-pulled past that commit -- "any Mac that has not previously been home
+# base" (RUSH-2541) -- lacks it on disk even though origin does not. The fetch
+# above always refreshes origin/\$DEFAULT_BRANCH's remote-tracking ref regardless
+# of REPO_ROOT's local working-tree state, so recover the blob from THAT ref
+# rather than trusting whatever happens to be checked out on REPO_ROOT's disk.
 mkdir -p "\$WT/apps/cli/bin"
-if [ -f "\$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" ]; then
+# Guarded with \`|| true\`, NOT a bare assignment: under this snippet's own
+# \`set -euo pipefail\` (top of this heredoc), symbolic-ref returning non-zero --
+# the normal state of a checkout bootstrapped via \`init && remote add && fetch\`
+# rather than \`clone\`, i.e. plausibly a brand-new fleet home base -- trips
+# errexit on the assignment itself and kills the phase silently, before the
+# very next line's "main" fallback ever runs. Same anti-pattern, same fix
+# assert_signing_home_base above already uses for this reason.
+DEFAULT_BRANCH="\$(git -C "\$REPO_ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')" || true
+[ -n "\$DEFAULT_BRANCH" ] || DEFAULT_BRANCH="main"
+if [ -f "\$WT/apps/cli/bin/embedded.provisionprofile" ]; then
+  : # already in the tagged tree -- nothing to seed
+elif git -C "\$REPO_ROOT" show "origin/\$DEFAULT_BRANCH:apps/cli/bin/embedded.provisionprofile" > "\$WT/apps/cli/bin/embedded.provisionprofile" 2>/dev/null; then
+  : # recovered from the freshly-fetched origin/\$DEFAULT_BRANCH ref
+elif [ -f "\$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" ]; then
   cp "\$REPO_ROOT/apps/cli/bin/embedded.provisionprofile" "\$WT/apps/cli/bin/embedded.provisionprofile"
 else
-  echo "warning: \$REPO_ROOT/apps/cli/bin/embedded.provisionprofile absent on the home base; the signed helper build will fail" >&2
+  echo "error: apps/cli/bin/embedded.provisionprofile not found on the tagged tree, on origin/\$DEFAULT_BRANCH, or on this home base's disk. It is a committed file (see commit 2567004b4) -- recover it from git history and verify apps/cli/bin/embedded.provisionprofile is tracked on origin/\$DEFAULT_BRANCH, then retry. Do NOT regenerate it at developer.apple.com; the existing profile is valid until 2044." >&2
+  exit 1
 fi
 cd "\$WT/apps/cli"
 scripts/release.sh $1 --home-base-phase --device "$RELEASE_HOME_BASE"
@@ -484,6 +504,46 @@ route_home_base_phase() {
     ssh "$RELEASE_HOME_BASE" 'cd $HOME/src/github.com/muqsitnawaz/agents-cli && bash -s' <<<"$snippet" \
       || return 1
   fi
+}
+
+# ----- Signing home-base preflight (fail fast BEFORE any mutation) -----
+# The privileged phase above (build + sign + notarize + npm publish) only runs at
+# the very END of the release, AFTER the PR is merged and the tag pushed. If the
+# resolved home base cannot sign -- the documented "mac-mini is down, use
+# --device zion" fallback on a box that was never provisioned as a signing home
+# base -- that failure lands after the two irreversible acts, leaving a
+# tagged-but-UNPUBLISHED release (RUSH-2535: npm stuck at 1.22.35 with v1.22.36
+# tagged). This runs the readiness probe ON the home base (inline if we ARE it,
+# else the same `agents ssh` hop route_home_base_phase uses) and aborts here --
+# before the crabbox/PR/merge/tag phases -- when the box is not provisioned. The
+# probe is read-only (scripts/signing-home-base-probe.sh: no git/gh/npm
+# mutations), so this hop can never itself advance the release.
+assert_signing_home_base() {
+  local out rc probe="scripts/signing-home-base-probe.sh"
+  bold "Preflight: verifying $RELEASE_HOME_BASE is a provisioned signing home base..."
+  # Capture rc with `&& rc=0 || rc=$?`, NOT `out="$(cmd)"; rc=$?`: under this
+  # script's `set -euo pipefail`, a bare failing assignment trips errexit and
+  # kills the script AT that line, before `rc=$?` runs -- so the diagnostic dump
+  # and the die() below would be dead code and the release would abort with no
+  # stated reason (the very "fail loud at boundaries" the preflight exists for).
+  # The && / || tested context suppresses errexit and preserves the probe's rc.
+  if $ON_HOME_BASE; then
+    out="$(bash "$probe" 2>&1)" && rc=0 || rc=$?
+  elif command -v agents >/dev/null 2>&1; then
+    # Ship THIS worktree's fresh probe over stdin and run it in the home base's
+    # own checkout dir, so its git rev-parse resolves that box's provisionprofile.
+    # Piping (bash -s) -- not invoking a remote path -- because the home base's
+    # on-disk checkout may predate this script (route_home_base_phase makes the
+    # same choice for the same reason). Snippet on stdin; $HOME expands remotely.
+    out="$(agents ssh "$RELEASE_HOME_BASE" -- 'cd $HOME/src/github.com/muqsitnawaz/agents-cli && bash -s' < "$probe" 2>&1)" && rc=0 || rc=$?
+  else
+    out="$(ssh "$RELEASE_HOME_BASE" 'cd $HOME/src/github.com/muqsitnawaz/agents-cli && bash -s' < "$probe" 2>&1)" && rc=0 || rc=$?
+  fi
+  if [[ "$rc" != "0" ]]; then
+    printf '%s\n' "$out" | sed 's/^/  /' >&2
+    die "device $RELEASE_HOME_BASE is not a provisioned signing home base (missing provisionprofile/cert/notarytool creds) -- releases can only sign on a provisioned Mac; pass --device <provisioned-mac> or bring mac-mini online. Provisioning a new home base is RUSH-2541."
+  fi
+  phase_ok "$RELEASE_HOME_BASE is a provisioned signing home base"
 }
 
 # ----- Validate version bump -----
@@ -573,7 +633,9 @@ while read -r _sha _ref; do
   fi
 done <<< "$REMOTE_TAG_LINES"
 
-UNPUBLISHED_TAG="$(printf '%s' "$TAG_FACTS" | scripts/stuck-release.sh "$PHNX_LATEST" || true)"
+# $BUMP + $PKG_JSON_VERSION let stuck-release.sh exempt the one deadlock case:
+# patch-from-main stepping over main's own unpublishable version (see its header).
+UNPUBLISHED_TAG="$(printf '%s' "$TAG_FACTS" | scripts/stuck-release.sh "$PHNX_LATEST" "$BUMP" "$PKG_JSON_VERSION" || true)"
 
 if [[ -n "$UNPUBLISHED_TAG" && "$UNPUBLISHED_TAG" != "$TARGET" ]]; then
   red "v$UNPUBLISHED_TAG is tagged but was never published -- finish that release first."
@@ -804,11 +866,11 @@ cat > "$SHIM_TMP/package.json" <<EOF
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/phnx-labs/agents-cli.git"
+    "url": "git+https://github.com/phnx-labs/agi-cli.git"
   },
   "homepage": "https://agents-cli.sh",
   "bugs": {
-    "url": "https://github.com/phnx-labs/agents-cli/issues"
+    "url": "https://github.com/phnx-labs/agi-cli/issues"
   }
 }
 EOF
@@ -996,6 +1058,14 @@ wait_for_ci_green() {
   (( problem == 0 )) || die "CI not all-green on PR #$pr -- PR left OPEN. Fix on a normal PR to $DEFAULT_BRANCH, then re-run this script."
   green "CI all-green on PR #$pr."
 }
+
+# Verify the home base can actually sign BEFORE any mutation. Reached only past
+# the already-published short-circuit (that path just tags a shipped version and
+# never signs), so both remaining paths -- a catch-up publish and a brand-new
+# release -- are gated here, before the crabbox tests, the PR, the merge, or the
+# tag. Without this an unprovisioned --device fallback merges + tags and then dies
+# at the sign step, exactly the RUSH-2535 tagged-but-unpublished trap.
+assert_signing_home_base
 
 # A prior normal release run can merge its PR and then fail before publishing.
 # Re-running must reuse the exact CI-tested release tree — never treat a manual

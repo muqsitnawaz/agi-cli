@@ -17,8 +17,8 @@
  * id, `--host`/`--agent`/`--version` filter a merged candidate list; one match is
  * shown, several open the fuzzy picker (or, non-TTY, print the list).
  *
- * Additive: `agents hosts logs` and `agents sessions tail` are unchanged and share
- * the same underlying helpers (showHostTaskLog / streamSessionTail).
+ * Additive: `agents devices ps`/`stop` and `agents sessions tail` are unchanged and
+ * share the same underlying helpers (showHostTaskLog / streamSessionTail).
  */
 
 import type { Command } from 'commander';

@@ -31,7 +31,9 @@ import { isSchedulerEnabled, assertSchedulerEnabled, isDaemonEnabled, getConfigV
 import { reapTerminalRoutineProcesses } from './routine-process-cleanup.js';
 import { recordSubsystemOk, recordSubsystemError, recordSubsystemErrorReason, readSubsystemHealth, SUBSYSTEM_SECRETS_BROKER, SUBSYSTEM_BROWSER_IPC, SUBSYSTEM_DAEMON_START } from './daemon-health.js';
 import { startAccountStateService } from './account-state-service.js';
-import { runFleetCacheWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
+import { runActiveSessionsWarmTick, runFleetCacheWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
+import { emit, emitRoutineEnd } from './events.js';
+import { readDaemonServicesConfig, isDaemonServiceEnabled, type DaemonServiceId } from './daemon-services.js';
 
 const PID_FILE = 'daemon.pid';
 const LIFETIME_FILE = 'daemon.lifetime';
@@ -81,6 +83,10 @@ const STATE_DIR_CHECK_TICK_MS = 60_000;
 // in-process intervals the daemon holds directly, same cadence the old timers ran.
 const WATCHDOG_TICK_MS = 3 * 60_000;
 const DEVICE_PROBE_TICK_MS = 3 * 60_000;
+// Keep the active-session cache/journal fresh for sessions watch + Factory.
+// Matches DEFAULT_ACTIVE_CACHE_MAX_AGE_MS (15s) so long-lived watchers never
+// outlive the publisher (RUSH-2484 — CLI-owned continuous publish).
+const ACTIVE_SESSIONS_WARM_TICK_MS = 15_000;
 const WEDGE_THRESHOLD_TICKS = 3;
 
 /**
@@ -568,6 +574,22 @@ export function log(level: string, message: string): void {
   const entry = { ts: new Date().toISOString(), level: level.toUpperCase(), message: redactSecrets(message) };
   fs.appendFileSync(logPath, JSON.stringify(entry) + '\n', 'utf-8');
   try { fs.chmodSync(logPath, 0o600); } catch { /* best effort */ }
+  // Mirror into the unified event stream so `agents events --module daemon` sees
+  // always-on process lifecycle the same way secrets/browser/computer do.
+  // Fail soft — the daemon log file remains the primary sink for `daemon logs`.
+  try {
+    const lvl = level.toUpperCase();
+    const event =
+      lvl === 'ERROR' || lvl === 'FATAL' ? 'daemon.error' as const
+      : lvl === 'START' || /starting|started/i.test(message) ? 'daemon.start' as const
+      : lvl === 'STOP' || /stopping|stopped|shutting down/i.test(message) ? 'daemon.stop' as const
+      : 'daemon.info' as const;
+    emit(event, {
+      module: 'daemon',
+      detail: redactSecrets(message).slice(0, 500),
+      status: lvl,
+    });
+  } catch { /* never crash the daemon on event-log failure */ }
 }
 
 /** Main daemon loop: load jobs, schedule crons, monitor runs, and handle signals. */
@@ -705,6 +727,10 @@ async function runKeychainReap(): Promise<void> {
 
 /**
  * RUSH-2501: kill tmux sessions on the helper socket whose panes are ALL dead.
+ * RUSH-2521: and terminate the helper processes (MCP servers, harness background
+ * daemons) whose owning agent has exited — killing the pane only SIGHUPs its
+ * foreground process group, so anything that left that group outlives it.
+ *
  * Runs every DEAD_PANE_REAP_TICK_MS (5 min). The daemon is the single executor
  * so no UI surface can race it.
  */
@@ -715,9 +741,14 @@ async function runDeadPaneReap(): Promise<void> {
     const { reapDeadTmuxPanes } = await import('./tmux/session.js');
     const { getDefaultSocketPath } = await import('./tmux/paths.js');
     const result = await reapDeadTmuxPanes(getDefaultSocketPath());
+    for (const w of result.warnings) log('WARN', `Dead-pane reaper: ${w}`);
+    if (result.processes > 0) {
+      log('INFO', `Dead-pane reaper: terminated ${result.processes} orphaned helper process(es)`);
+      for (const d of result.processDetails) log('INFO', `  ${d}`);
+    }
     if (result.reaped > 0) {
       log('INFO', `Dead-pane reaper: reaped ${result.reaped} session(s)`);
-      for (const d of result.details) log('INFO', `  ${d}`);
+      for (const d of result.details) log('INFO', `  killed ${d}`);
     }
   } catch (err) {
     log('ERROR', `Dead-pane reaper failed: ${(err as Error).message}`);
@@ -772,6 +803,28 @@ export async function runDaemon(): Promise<void> {
     log('WARN', `device config migration failed: ${(err as Error).message}`);
   }
 
+  // Version-skew one-shot (RUSH-2435): retrofit the current pane-died hook onto
+  // any managed tmux session a pre-fix binary left with a stale one. The 5-min
+  // `tmux-reconcile` routine that used to run this on a poll was deleted
+  // (RUSH-2495) — startup + `ensureSessionHookRepaired` at attach time
+  // (tmux/session.ts) now cover what that poll used to. Idempotent and
+  // non-destructive: a session already at the current schema is a no-op.
+  try {
+    const { reconcileSessionHooks } = await import('./tmux/session.js');
+    const { isTmuxInstalled } = await import('./tmux/binary.js');
+    if (isTmuxInstalled()) {
+      const r = await reconcileSessionHooks();
+      if (r.reconciled > 0) log('INFO', `tmux: retrofitted pane-died hook on ${r.reconciled}/${r.scanned} session(s)`);
+    }
+  } catch (err) {
+    log('WARN', `tmux hook reconcile failed: ${(err as Error).message}`);
+  }
+
+  // Per-service toggles live outside device-config so they can be checked by
+  // service clients (e.g. secrets) without loading the whole config stack.
+  let servicesConfig = readDaemonServicesConfig();
+  const isEnabled = (id: DaemonServiceId): boolean => servicesConfig.services[id] !== false;
+
   // The daemon holds NO Claude credential of its own. Routine runs authenticate
   // exactly like an interactive `agents run`: through the per-account
   // CLAUDE_CONFIG_DIR login on this device (its own auto-refreshing
@@ -803,19 +856,23 @@ export async function runDaemon(): Promise<void> {
   // here must not stop the daemon. Retiring the standalone launchd service is
   // the follow-on (#416 step 2 / #417).
   let hostedBroker: { close(): void } | null = null;
-  try {
-    const { agentPing, startHostedBroker } = await import('./secrets/agent.js');
-    if ((await agentPing()).reachable) {
-      log('INFO', 'Secrets broker already running (standalone); daemon not hosting it');
-    } else {
-      hostedBroker = await startHostedBroker();
-      if (hostedBroker) log('INFO', 'Secrets broker hosted in daemon (socket-first)');
+  if (isEnabled('secrets-broker')) {
+    try {
+      const { agentPing, startHostedBroker } = await import('./secrets/agent.js');
+      if ((await agentPing()).reachable) {
+        log('INFO', 'Secrets broker already running (standalone); daemon not hosting it');
+      } else {
+        hostedBroker = await startHostedBroker();
+        if (hostedBroker) log('INFO', 'Secrets broker hosted in daemon (socket-first)');
+      }
+      recordSubsystemOk(SUBSYSTEM_SECRETS_BROKER);
+    } catch (err) {
+      const message = (err as Error).message;
+      log('WARN', `Secrets broker host skipped: ${message}`);
+      recordSubsystemError(SUBSYSTEM_SECRETS_BROKER, message);
     }
-    recordSubsystemOk(SUBSYSTEM_SECRETS_BROKER);
-  } catch (err) {
-    const message = (err as Error).message;
-    log('WARN', `Secrets broker host skipped: ${message}`);
-    recordSubsystemError(SUBSYSTEM_SECRETS_BROKER, message);
+  } else {
+    log('INFO', 'Secrets broker service disabled; daemon not hosting it');
   }
 
   // scheduler.enabled=false in this machine's device doc means NO routines fire
@@ -825,13 +882,16 @@ export async function runDaemon(): Promise<void> {
   // (`routines add` auto-start, manual `routines start`) raise. The gate is
   // re-evaluated on every SIGHUP reload (handleReload below) via
   // schedulerGateTransition, so flipping the key never needs a daemon restart.
-  const schedulerEnabledAtBoot = isSchedulerEnabled();
+  // Also honour the daemon-services toggle so `agents daemon services disable scheduler`
+  // has a single, obvious effect.
+  const schedulerEnabledAtBoot = isSchedulerEnabled() && isEnabled('scheduler');
   if (!schedulerEnabledAtBoot) {
     try {
       assertSchedulerEnabled();
     } catch (err) {
       log('WARN', (err as Error).message);
     }
+    if (!isEnabled('scheduler')) log('INFO', 'Scheduler service disabled; no routines will fire');
   }
 
   const triggerJob = async (config: JobConfig, ctx?: { scheduledFor?: Date }) => {
@@ -841,6 +901,13 @@ export async function runDaemon(): Promise<void> {
         ? `workflow: ${config.workflow}`
         : `agent: ${config.agent}`;
     log('INFO', `Triggering job '${config.name}' (${jobLabel})`);
+    emit('routine.start', {
+      module: 'routine',
+      name: config.name,
+      kind: config.command ? 'command' : config.workflow ? 'workflow' : 'agent',
+      ...(config.agent ? { agent: config.agent } : {}),
+      ...(config.workflow ? { workflow: config.workflow } : {}),
+    });
     // RUSH-2030: branded desktop notification on start (agent/workflow routines;
     // suppressed for command housekeeping). Finish/output is fired from the
     // onFinish hook below — executeJobDetached finalizes the run in-process, so
@@ -850,6 +917,7 @@ export async function runDaemon(): Promise<void> {
     try {
       const meta = await executeJobDetached(config, {
         onFinish: (final) => {
+          emitRoutineEnd(final);
           try { notifyRoutineFinish(final); } catch { /* best-effort */ }
           // RUSH-2288: a failed/timed-out routine also reaches the OWNER's phone
           // (in-process owner channel stack), not just the local desktop. Green
@@ -867,6 +935,11 @@ export async function runDaemon(): Promise<void> {
     } catch (err) {
       const message = (err as Error).message;
       log('ERROR', `Job '${config.name}' failed to spawn: ${message}`);
+      emitRoutineEnd({
+        jobName: config.name,
+        status: 'failed',
+        detail: redactSecrets(message).slice(0, 500),
+      });
       // RUSH-2030: the START ping already fired unconditionally above. A pre-spawn
       // failure produces no run record and thus no onFinish, so send a synthetic
       // "failed to start" finish here — otherwise the user is left with an orphaned
@@ -931,68 +1004,125 @@ export async function runDaemon(): Promise<void> {
   // Usage and authentication are first-party device state, so the daemon owns
   // their timers directly rather than scheduling them as built-in routines.
   // Explicit CLI refreshes converge on the same cross-process refresh leases.
-  const accountStateService = startAccountStateService({
-    refreshUsage: runUsageRefreshTick,
-    refreshAuth: runFleetCacheWarmTick,
-    onError: (area, error) => log('WARN', `${area} state refresh failed: ${(error as Error).message}`),
-  });
+  const accountStateService = isEnabled('account-state')
+    ? startAccountStateService({
+        refreshUsage: runUsageRefreshTick,
+        refreshAuth: runFleetCacheWarmTick,
+        onError: (area, error) => log('WARN', `${area} state refresh failed: ${(error as Error).message}`),
+      })
+    : null;
+  if (!accountStateService) log('INFO', 'Account-state service disabled');
+
+  // Active-sessions publish-own: continuous journal writer for `sessions watch`.
+  // Fire once immediately so a cold daemon does not leave watchers on
+  // "awaiting publisher" for a full tick (RUSH-2484).
+  let activeSessionsWarmInFlight = false;
+  const runActiveSessionsWarm = async (): Promise<void> => {
+    if (activeSessionsWarmInFlight) return;
+    activeSessionsWarmInFlight = true;
+    try {
+      await runActiveSessionsWarmTick();
+    } catch (err) {
+      log('WARN', `active-sessions warm failed: ${(err as Error).message}`);
+    } finally {
+      activeSessionsWarmInFlight = false;
+    }
+  };
+  void runActiveSessionsWarm();
+  const activeSessionsWarmInterval = setInterval(() => { void runActiveSessionsWarm(); }, ACTIVE_SESSIONS_WARM_TICK_MS);
 
   // Watchdog: nudge this host's own stalled agent sessions. Gated on the
   // `watchdog.enabled` device-config flag (`agents watchdog enable`), so the
   // timer always fires but only does work when the user opted in. Overlap-safe
   // via the in-flight guard (a slow pass never overlaps the next tick).
-  let watchdogInFlight = false;
-  const runWatchdogTick = async (): Promise<void> => {
-    if (watchdogInFlight) return;
-    watchdogInFlight = true;
-    try {
-      if (getConfigValue('watchdog.enabled').value !== true) return;
-      const { runWatchdogPass } = await import('./watchdog/service.js');
-      const result = await runWatchdogPass({ nudge: true });
-      log('INFO', `watchdog: ${result.counts.total} live, ${result.counts.stalled} stalled, ${result.counts.nudged} nudged`);
-    } catch (err) {
-      log('WARN', `watchdog tick failed: ${(err as Error).message}`);
-    } finally {
-      watchdogInFlight = false;
-    }
-  };
-  const watchdogInterval = setInterval(() => { void runWatchdogTick(); }, WATCHDOG_TICK_MS);
+  let watchdogInterval: NodeJS.Timeout | undefined;
+  if (isEnabled('watchdog')) {
+    let watchdogInFlight = false;
+    const runWatchdogTick = async (): Promise<void> => {
+      if (watchdogInFlight) return;
+      watchdogInFlight = true;
+      try {
+        if (getConfigValue('watchdog.enabled').value !== true) return;
+        const { runWatchdogPass } = await import('./watchdog/service.js');
+        const result = await runWatchdogPass({ nudge: true });
+        log('INFO', `watchdog: ${result.counts.total} live, ${result.counts.stalled} stalled, ${result.counts.nudged} nudged`);
+        emit('watchdog.action', {
+          module: 'watchdog',
+          total: result.counts.total,
+          stalled: result.counts.stalled,
+          nudged: result.counts.nudged,
+        });
+      } catch (err) {
+        log('WARN', `watchdog tick failed: ${(err as Error).message}`);
+      } finally {
+        watchdogInFlight = false;
+      }
+    };
+    watchdogInterval = setInterval(() => { void runWatchdogTick(); }, WATCHDOG_TICK_MS);
+  } else {
+    log('INFO', 'Watchdog service disabled');
+  }
 
   // Device probe: refresh registered devices' reachability and detect newly
   // appeared tailnet nodes, dropping a sentinel per pending device so the
   // menu-bar helper can surface "NEW DEVICES → Register / Ignore". Refresh mode
   // never auto-registers a newcomer; a machine without tailscale is a clean
-  // no-op. `reconcilePendingSentinels` re-subtracts the ignore-list itself, so a
-  // device the user dismissed is never re-surfaced (RUSH-2495).
-  let deviceProbeInFlight = false;
-  const runDeviceProbeTick = async (): Promise<void> => {
-    if (deviceProbeInFlight) return;
-    deviceProbeInFlight = true;
-    try {
-      const { runDeviceSync } = await import('./devices/sync.js');
-      const { reconcilePendingSentinels } = await import('./devices/pending.js');
-      const dev = await runDeviceSync({ soft: true, mode: 'refresh' });
-      if (!dev.ok) return;
-      await reconcilePendingSentinels(dev.pending);
-      if (dev.pending.length) {
-        log('INFO', `devices: ${dev.pending.length} new pending (${dev.pending.map((p) => p.name).join(', ')})`);
+  // no-op. `reconcilePendingSentinels` re-subtracts the ignore-list AND the
+  // registered roster, so a dismissed or already-known device is never
+  // re-surfaced (RUSH-2495 + registry-empty pollution). On soft-fail (no
+  // tailscale) we still prune registered/ignored sentinels so a hermetic test
+  // leak cannot leave fleet boxes in NEW DEVICES forever.
+  let deviceProbeInterval: NodeJS.Timeout | undefined;
+  if (isEnabled('device-probe')) {
+    let deviceProbeInFlight = false;
+    const runDeviceProbeTick = async (): Promise<void> => {
+      if (deviceProbeInFlight) return;
+      deviceProbeInFlight = true;
+      try {
+        const { runDeviceSync } = await import('./devices/sync.js');
+        const {
+          reconcilePendingSentinels,
+          pruneDismissedPendingSentinels,
+        } = await import('./devices/pending.js');
+        const dev = await runDeviceSync({ soft: true, mode: 'refresh' });
+        if (!dev.ok) {
+          await pruneDismissedPendingSentinels();
+          if (dev.reason) log('WARN', `device probe soft-fail: ${dev.reason}`);
+          return;
+        }
+        await reconcilePendingSentinels(dev.pending);
+        if (dev.pending.length) {
+          log('INFO', `devices: ${dev.pending.length} new pending (${dev.pending.map((p) => p.name).join(', ')})`);
+        }
+      } catch (err) {
+        log('WARN', `device probe tick failed: ${(err as Error).message}`);
+      } finally {
+        deviceProbeInFlight = false;
       }
-    } catch (err) {
-      log('WARN', `device probe tick failed: ${(err as Error).message}`);
-    } finally {
-      deviceProbeInFlight = false;
-    }
-  };
-  const deviceProbeInterval = setInterval(() => { void runDeviceProbeTick(); }, DEVICE_PROBE_TICK_MS);
+    };
+    // Fire once on start so a leftover pollution set is cleared without waiting
+    // for the first interval tick (the 3-minute lag is how the menubar sat on
+    // 20 phantom NEW DEVICES after a hermetic leak).
+    void runDeviceProbeTick();
+    deviceProbeInterval = setInterval(() => { void runDeviceProbeTick(); }, DEVICE_PROBE_TICK_MS);
+  } else {
+    log('INFO', 'Device-probe service disabled');
+  }
 
   // Monitor engine: event-triggered watchers, beside the cron scheduler. Same
   // daemon, same dispatch seam — a monitor is a routine whose trigger is a
   // watched source instead of a clock. Reloads on SIGHUP alongside the scheduler.
-  const monitorEngine = new MonitorEngine((level, message) => log(level, message));
-  try {
-    monitorEngine.start();
-  } catch (err) {
-    log('ERROR', `Monitor engine failed to start: ${(err as Error).message}`);
+  const monitorEngine = isEnabled('monitors')
+    ? new MonitorEngine((level, message) => log(level, message))
+    : null;
+  if (monitorEngine) {
+    try {
+      monitorEngine.start();
+    } catch (err) {
+      log('ERROR', `Monitor engine failed to start: ${(err as Error).message}`);
+    }
+  } else {
+    log('INFO', 'Monitor engine disabled');
   }
 
   // Backlog recovery: any enabled recurring job whose most-recent expected fire
@@ -1078,16 +1208,20 @@ export async function runDaemon(): Promise<void> {
     log('ERROR', `Orphan reaper failed: ${(err as Error).message}`);
   }
 
-  const browserService = new BrowserService();
-  const browserIPC = new BrowserIPCServer(browserService);
-  try {
-    await browserIPC.start();
-    log('INFO', 'Browser IPC server started');
-    recordSubsystemOk(SUBSYSTEM_BROWSER_IPC);
-  } catch (err) {
-    const message = (err as Error).message;
-    log('ERROR', `Browser IPC failed to start: ${message}`);
-    recordSubsystemError(SUBSYSTEM_BROWSER_IPC, message);
+  const browserService = isEnabled('browser-ipc') ? new BrowserService() : null;
+  const browserIPC = browserService ? new BrowserIPCServer(browserService) : null;
+  if (browserIPC) {
+    try {
+      await browserIPC.start();
+      log('INFO', 'Browser IPC server started');
+      recordSubsystemOk(SUBSYSTEM_BROWSER_IPC);
+    } catch (err) {
+      const message = (err as Error).message;
+      log('ERROR', `Browser IPC failed to start: ${message}`);
+      recordSubsystemError(SUBSYSTEM_BROWSER_IPC, message);
+    }
+  } else {
+    log('INFO', 'Browser IPC service disabled');
   }
 
   runMonitorTick();
@@ -1095,8 +1229,14 @@ export async function runDaemon(): Promise<void> {
 
   // Resource safety check: see runHealCheck above. Runs ~every 6h plus once
   // ~30s after startup so shims/PATH settle shortly after the daemon starts.
-  const healInterval = setInterval(() => { void runHealCheck(); }, SELF_HEAL_TICK_MS);
-  const healKickoff = setTimeout(() => { void runHealCheck(); }, SELF_HEAL_KICKOFF_MS);
+  let healInterval: NodeJS.Timeout | undefined;
+  let healKickoff: NodeJS.Timeout | undefined;
+  if (isEnabled('self-heal')) {
+    healInterval = setInterval(() => { void runHealCheck(); }, SELF_HEAL_TICK_MS);
+    healKickoff = setTimeout(() => { void runHealCheck(); }, SELF_HEAL_KICKOFF_MS);
+  } else {
+    log('INFO', 'Self-heal service disabled');
+  }
 
   // RUSH-1817: the startup host decision above is one-shot. If a standalone
   // broker answered agentPing() at daemon start, the daemon declined to host —
@@ -1109,30 +1249,38 @@ export async function runDaemon(): Promise<void> {
   // Inline (not module-level): closes over `hostedBroker`, a mutable runDaemon-
   // local var also closed over by handleShutdown. Lifting it would require
   // hostedBroker to be module-level state too — wider than this refactor's scope.
-  let selfHealingBroker = false;
-  const runBrokerSelfHeal = async () => {
-    if (selfHealingBroker) return;
-    selfHealingBroker = true;
-    try {
-      const { agentPing, startHostedBroker } = await import('./secrets/agent.js');
-      const reachable = (await agentPing()).reachable;
-      if (!shouldTakeOverBroker(hostedBroker != null, reachable)) return;
-      hostedBroker = await startHostedBroker();
-      if (hostedBroker) {
-        log('WARN', 'Secrets broker was unreachable; daemon took over hosting (self-heal)');
+  let brokerSelfHealInterval: NodeJS.Timeout | undefined;
+  if (isEnabled('secrets-broker')) {
+    let selfHealingBroker = false;
+    const runBrokerSelfHeal = async () => {
+      if (selfHealingBroker) return;
+      selfHealingBroker = true;
+      try {
+        const { agentPing, startHostedBroker } = await import('./secrets/agent.js');
+        const reachable = (await agentPing()).reachable;
+        if (!shouldTakeOverBroker(hostedBroker != null, reachable)) return;
+        hostedBroker = await startHostedBroker();
+        if (hostedBroker) {
+          log('WARN', 'Secrets broker was unreachable; daemon took over hosting (self-heal)');
+        }
+      } catch (err) {
+        log('WARN', `Secrets broker self-heal skipped: ${(err as Error).message}`);
+      } finally {
+        selfHealingBroker = false;
       }
-    } catch (err) {
-      log('WARN', `Secrets broker self-heal skipped: ${(err as Error).message}`);
-    } finally {
-      selfHealingBroker = false;
-    }
-  };
-  const brokerSelfHealInterval = setInterval(() => { void runBrokerSelfHeal(); }, BROKER_SELF_HEAL_TICK_MS);
+    };
+    brokerSelfHealInterval = setInterval(() => { void runBrokerSelfHeal(); }, BROKER_SELF_HEAL_TICK_MS);
+  }
 
   // RUSH-2232: reap orphaned keychain helpers and `agents` processes stuck on a
   // keychain call. Runs as a 5-min interval in the daemon (the single executor)
   // so no UI surface can race it. See runKeychainReap above.
-  const keychainReapInterval = setInterval(() => { void runKeychainReap(); }, KEYCHAIN_REAP_TICK_MS);
+  let keychainReapInterval: NodeJS.Timeout | undefined;
+  if (isEnabled('keychain-reap')) {
+    keychainReapInterval = setInterval(() => { void runKeychainReap(); }, KEYCHAIN_REAP_TICK_MS);
+  } else {
+    log('INFO', 'Keychain-reap service disabled');
+  }
 
   // RUSH-2501: reap tmux sessions whose panes are all dead. Runs on the same
   // 5-min cadence as the keychain reaper. Daemon-only (single executor).
@@ -1154,27 +1302,32 @@ export async function runDaemon(): Promise<void> {
   // Inline (not module-level): closes over `lifetimePath` and `lifetimeToken`,
   // per-boot constants computed once at runDaemon() start that cannot be
   // pre-computed at module load time.
-  let checkingStateDir = false;
-  const runStateDirSelfCheck = (): void => {
-    if (checkingStateDir) return;
-    checkingStateDir = true;
-    try {
-      let markerMatches = false;
+  let stateDirCheckInterval: NodeJS.Timeout | undefined;
+  if (isEnabled('state-dir-check')) {
+    let checkingStateDir = false;
+    const runStateDirSelfCheck = (): void => {
+      if (checkingStateDir) return;
+      checkingStateDir = true;
       try {
-        markerMatches = fs.readFileSync(lifetimePath, 'utf-8') === lifetimeToken;
-      } catch {
-        // A missing state dir or marker is the condition this guard detects.
+        let markerMatches = false;
+        try {
+          markerMatches = fs.readFileSync(lifetimePath, 'utf-8') === lifetimeToken;
+        } catch {
+          // A missing state dir or marker is the condition this guard detects.
+        }
+        if (!markerMatches) {
+          log('WARN', `Daemon state dir ${getDaemonDir()} no longer exists; exiting (self-terminate guard)`);
+          void handleShutdown();
+        }
+      } finally {
+        checkingStateDir = false;
       }
-      if (!markerMatches) {
-        log('WARN', `Daemon state dir ${getDaemonDir()} no longer exists; exiting (self-terminate guard)`);
-        void handleShutdown();
-      }
-    } finally {
-      checkingStateDir = false;
-    }
-  };
-  const stateDirCheckMs = Number(process.env.AGENTS_DAEMON_STATE_DIR_CHECK_MS) || STATE_DIR_CHECK_TICK_MS;
-  const stateDirCheckInterval = setInterval(runStateDirSelfCheck, stateDirCheckMs);
+    };
+    const stateDirCheckMs = Number(process.env.AGENTS_DAEMON_STATE_DIR_CHECK_MS) || STATE_DIR_CHECK_TICK_MS;
+    stateDirCheckInterval = setInterval(runStateDirSelfCheck, stateDirCheckMs);
+  } else {
+    log('INFO', 'State-dir self-check disabled');
+  }
 
   // RUSH-2418: startup is over — the scheduler, browser IPC, broker decision,
   // monitor engine and every background tick are up. Only NOW does this daemon
@@ -1185,6 +1338,26 @@ export async function runDaemon(): Promise<void> {
 
   const handleReload = () => {
     log('INFO', 'Reloading jobs (SIGHUP)');
+    // Re-read per-service toggles so `agents daemon services enable|disable`
+    // followed by `agents daemon reload` is truthful. Most services require a
+    // restart to start/stop safely; log those instead of pretending they applied.
+    const reloadedConfig = readDaemonServicesConfig();
+    const reloadedEnabled = (id: DaemonServiceId): boolean => reloadedConfig.services[id] !== false;
+    for (const id of Object.keys(servicesConfig.services) as DaemonServiceId[]) {
+      const was = servicesConfig.services[id] !== false;
+      const now = reloadedEnabled(id);
+      if (was !== now) {
+        // scheduler and monitors are re-evaluated live later in this handler,
+        // so don't tell the user they need a restart for those.
+        if (id === 'scheduler' || (id === 'monitors' && !now)) {
+          continue;
+        }
+        log('INFO', `Service '${id}' toggled ${now ? 'on' : 'off'} — restart daemon to apply`);
+      }
+    }
+    // Remember the reloaded state so subsequent reloads log transitions truthfully.
+    servicesConfig = reloadedConfig;
+
     // Refresh user-layer copies of opted-in project routines BEFORE the
     // scheduler reloads, so YAML edits under `<project>/.agents/routines/`
     // take effect on the next fire without a manual `routines sync`.
@@ -1201,7 +1374,9 @@ export async function runDaemon(): Promise<void> {
     // this reload, no daemon restart needed. A `routines add` on a re-enabled
     // box signals exactly this reload, which boots the scheduler — the
     // "Scheduler reloaded" it prints is then truthful, not a dead-end.
-    const transition = schedulerGateTransition(scheduler !== null, isSchedulerEnabled());
+    // Also honour the daemon-services toggle.
+    const schedulerEnabledNow = isSchedulerEnabled() && reloadedEnabled('scheduler');
+    const transition = schedulerGateTransition(scheduler !== null, schedulerEnabledNow);
     if (transition === 'boot') {
       log('INFO', 'scheduler.enabled is now on — booting the scheduler');
       bootScheduler();
@@ -1213,10 +1388,19 @@ export async function runDaemon(): Promise<void> {
       const reloaded = scheduler!.listScheduled();
       log('INFO', `Reloaded ${reloaded.length} jobs`);
     }
-    try {
-      monitorEngine.reload();
-    } catch (err) {
-      log('ERROR', `Monitor engine reload failed: ${(err as Error).message}`);
+    // Monitor engine can be stopped on reload if disabled; starting it requires
+    // a restart, so we only handle the off transition here.
+    if (monitorEngine) {
+      if (!reloadedEnabled('monitors')) {
+        log('WARN', 'monitors service is now disabled — stopping monitor engine; restart daemon to re-enable');
+        try { monitorEngine.stop(); } catch { /* best-effort */ }
+      } else {
+        try {
+          monitorEngine.reload();
+        } catch (err) {
+          log('ERROR', `Monitor engine reload failed: ${(err as Error).message}`);
+        }
+      }
     }
   };
 
@@ -1229,19 +1413,20 @@ export async function runDaemon(): Promise<void> {
   // added later has to re-earn.
   const handleShutdown = singleShot(async () => {
     log('INFO', 'Daemon shutting down');
-    accountStateService.stop();
-    clearInterval(watchdogInterval);
-    clearInterval(deviceProbeInterval);
+    accountStateService?.stop();
+    clearInterval(activeSessionsWarmInterval);
+    if (watchdogInterval) clearInterval(watchdogInterval);
+    if (deviceProbeInterval) clearInterval(deviceProbeInterval);
     stopScheduler();
-    monitorEngine.stop();
-    await browserIPC.stop();
+    monitorEngine?.stop();
+    await browserIPC?.stop();
     clearInterval(monitorInterval);
-    clearInterval(healInterval);
-    clearTimeout(healKickoff);
-    clearInterval(brokerSelfHealInterval);
-    clearInterval(keychainReapInterval);
+    if (healInterval) clearInterval(healInterval);
+    if (healKickoff) clearTimeout(healKickoff);
+    if (brokerSelfHealInterval) clearInterval(brokerSelfHealInterval);
+    if (keychainReapInterval) clearInterval(keychainReapInterval);
     clearInterval(deadPaneReapInterval);
-    clearInterval(stateDirCheckInterval);
+    if (stateDirCheckInterval) clearInterval(stateDirCheckInterval);
     try {
       if (fs.readFileSync(lifetimePath, 'utf-8') === lifetimeToken) fs.unlinkSync(lifetimePath);
     } catch {

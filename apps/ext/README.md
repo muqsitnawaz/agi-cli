@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/phnx-labs/agents-cli/main/scripts/i
 
 | Shortcut | Action |
 | --- | --- |
-| `Cmd+Shift+A` | Spawn new agent — smart pick: agent type by recent/frequent usage, version balanced, least-busy host |
+| `Cmd+Shift+A` | Spawn a new agent through agi-cli automatic routing |
 | `Cmd+Shift+L` | Label agent by task |
 | `Cmd+Shift+C` | Clear and restart agent |
 | `Cmd+Shift+D` | Open Dashboard |
@@ -59,6 +59,8 @@ curl -fsSL https://raw.githubusercontent.com/phnx-labs/agents-cli/main/scripts/i
 
 Spawn any agent as a full-screen editor tab. Built-in support for Claude Code, Codex, Antigravity, OpenCode, and Cursor. Add custom agents through settings.
 
+**Where a new agent runs** is `agents.launch.defaultTarget`: `auto` (default — the CLI picks the device), `local` (this machine), or `ask` (prompt every time). Under `auto`, mark your compute boxes once with `agents devices role <name> worker` and every `Agents: New <Harness>` rotates over those workers instead of the machine you are sitting at. `Agents: New <Harness> (Pick Host)` and `(Auto)` are unaffected.
+
 ### Session Persistence
 
 Every open agent terminal is fully restorable. Session ID, icon, and custom labels are saved to disk in real-time. VS Code crashes? Restart? All your agent tabs come back exactly as they were.
@@ -66,11 +68,11 @@ Every open agent terminal is fully restorable. Session ID, icon, and custom labe
 ### Task Management
 
 - **Labels** - Tag agents by task (`Cmd+Shift+L`). Status bar shows active agent and label.
-- **TODO.md parsing** - Discovers TODO.md files in your workspace. Spawn agents directly from task items.
-- **Session history** - Browse recent sessions from the dashboard. Resume any previous conversation.
-- **Fork a session** - `Agents: Fork` starts a sibling agent on the active tab's session, leaving the original running. `Agents: Fork (Pick Host)` forks that same session onto a device you choose — same harness, same balanced account rotation, only the machine changes; the sibling opens beside the tab it came from and reads the transcript back from wherever it lives. `Agents: Fork (Pick Session)` opens a session browser first — recent sessions grouped by the machine they live on, with a title-bar button to browse any registered device. The fork runs where the session lives, so picking a session from a fleet box starts the sibling agent on that box. `Agents: Fork (Recap)` immediately starts a new sibling from the active tab's exact host and harness with `/recap <full-id>` queued; it never opens the session browser. The public system command supplies context only: it does not resume, attach to, or inherit the source session.
+- **Tasks** - Renders tasks returned by agi-cli; the extension does not parse task files or query trackers itself.
+- **Session history** - Browse CLI-provided sessions from the dashboard and resume through `agents sessions resume`.
+- **Fork a session** - `Agents: Fork` delegates the copy and identity semantics to `agents sessions fork <id>` and leaves the original untouched.
 - **Fork pairs in the Recap ledger** - a fork and the session it came from finish as two rows that share no id. AGI EXT remembers the edge and reunites them: one side-by-side row in Recap, parent on the left, fork on the right, each stamped with the machine it ran on and its own duration/cost/PR.
-- **Agents: Resume** - Pick one or several sessions; each reopens in its own tab with its agent's icon. Detached live sessions still sort first, but nothing is pre-selected. AGI EXT sends only the canonical session ID to the CLI, which attaches a live pane or resumes an inactive conversation on its owning device.
+- **Agents: Resume** - The picker performs one bounded CLI listing when opened, then sends only the chosen canonical IDs to `agents sessions resume <id> --vscodium`.
 - **Resume variants** - `Agents: Resume (Pick Session)` lists only abandoned sessions — detached, backgrounded, parked, or idle, nothing currently open anywhere — and resumes each on the device it was created on. `Agents: Resume (Pick Host)` reopens the active tab's session on a device you pick (same harness, same version). `Agents: Resume (Pick Harness)` continues the active tab's session in a different harness on the same device, replaying the transcript through the universal `/continue` flow. `Agents: Resume (Best Profile)` rotates the active tab to the signed-in account with the most usage headroom (`Cmd+Shift+J`).
 
 ### Fleet

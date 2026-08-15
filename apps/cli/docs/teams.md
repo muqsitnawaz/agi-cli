@@ -102,7 +102,7 @@ a team or running `agents teams status <team>` performs the full status read.
 the sibling ones ride along as access grants. A teammate's cwd resolves
 `worktree → --cwd → the project's primary directory → the current directory`, so an
 explicit `--cwd` or `--worktree` still wins; the grants are attached either way.
-Only Claude and Codex consume `--add-dir` — other harnesses see the cwd alone. Full
+Claude, Codex, Cursor, Kimi, and Grok consume `--add-dir` — other harnesses see the cwd alone. Full
 detail: [Projects](projects.md#a-project-is-a-set-of-directories).
 
 ### Placement and repos
@@ -526,7 +526,7 @@ agents teams status my-team --json
 # Full status as JSON (legacy shape — prompt, all paths, all messages)
 agents teams status my-team --json --verbose
 
-# All teams as JSON (used by agents-cli observability layer)
+# All teams as JSON (used by agi-cli observability layer)
 agents teams list --json
 ```
 

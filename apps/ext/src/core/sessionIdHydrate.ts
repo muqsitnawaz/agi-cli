@@ -1,25 +1,18 @@
 /**
  * Batched session-id discovery for AGI EXT tabs.
  *
- * One `agents sessions --active --json` (optionally `--host <device>`) per host,
- * shared across every tab on that host via {@link cachedInFlight}. Hard timeouts
- * so a hung SSH never blocks the status bar. No per-tab subprocess thrash when
- * the user has ~15 remote sessions.
+ * Reads the shared `agents sessions watch --json` projection for every tab.
+ * No per-tab subprocesses or extension-owned freshness cache.
  *
  * Placement flags: uses `--host` / local only — never `--where`.
  */
 
 import * as os from 'os';
-import { cachedInFlight, createTimedCache, type TimedCache } from './cachedInFlight';
-import { runAgents } from './agentsBin';
 import { normalizeHost } from './remoteSessions';
-import {
-  parseActiveSessionJoinRows,
-  terminalIdToSessionIdMap,
-} from './sessionIdJoin';
 import { canonicalSessionId, isRolloutSessionStem } from './canonicalSessionId';
+import { sessionPresentationStore } from './sessionPresentationStore';
 
-/** Local active feed TTL — short enough to pick up a new Grok SessionStart. */
+/** Legacy exported timing constants retained for pure caller compatibility. */
 export const ACTIVE_MAP_TTL_LOCAL_MS = 3_000;
 /** Remote active feed TTL — one poll services all tabs on that host. */
 export const ACTIVE_MAP_TTL_REMOTE_MS = 8_000;
@@ -32,11 +25,9 @@ const LOCAL_CACHE_KEY = '__local__';
 
 export type TerminalIdSessionMap = Map<string, string>;
 
-let mapCache: TimedCache<TerminalIdSessionMap> = createTimedCache();
-
 /** Test-only: reset the shared cache between unit tests. */
 export function resetSessionIdHydrateCacheForTests(): void {
-  mapCache = createTimedCache();
+  // The canonical stream store owns freshness; there is no extension cache.
 }
 
 /**
@@ -61,42 +52,18 @@ export function isLocalActiveMapKey(key: string): boolean {
   return key === LOCAL_CACHE_KEY;
 }
 
-function shellQuote(arg: string): string {
-  return `'${arg.replace(/'/g, `'\\''`)}'`;
-}
-
 /**
- * Fetch terminalId → sessionId for one host (or local). Coalesced + TTL'd.
- * On timeout / CLI failure returns an empty map (leave unmapped, never wrong).
+ * Read terminalId → sessionId for one host (or local) from the shared stream.
  */
 export async function fetchTerminalIdSessionMap(
   host: string | undefined,
   deps: {
-    runAgents?: typeof runAgents;
     now?: number;
     localHostname?: string;
   } = {},
 ): Promise<TerminalIdSessionMap> {
-  const run = deps.runAgents ?? runAgents;
-  const now = deps.now ?? Date.now();
   const key = activeMapCacheKey(host, deps.localHostname);
-  const isLocal = isLocalActiveMapKey(key);
-  const ttl = isLocal ? ACTIVE_MAP_TTL_LOCAL_MS : ACTIVE_MAP_TTL_REMOTE_MS;
-  const timeout = isLocal ? ACTIVE_MAP_TIMEOUT_LOCAL_MS : ACTIVE_MAP_TIMEOUT_REMOTE_MS;
-
-  return cachedInFlight(mapCache, key, ttl, async () => {
-    // `--local` for this machine; `--host <device>` for a real offload.
-    // Never `--where`.
-    const args = isLocal
-      ? 'sessions --active --local --json'
-      : `sessions --active --json --host ${shellQuote(host!.trim())}`;
-    try {
-      const { stdout } = await run(args, { timeout });
-      return terminalIdToSessionIdMap(parseActiveSessionJoinRows(stdout));
-    } catch {
-      return new Map();
-    }
-  }, now);
+  return sessionPresentationStore.terminalSessionMap(isLocalActiveMapKey(key) ? undefined : host);
 }
 
 /**

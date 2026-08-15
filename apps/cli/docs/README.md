@@ -1,4 +1,4 @@
-# agents-cli docs
+# agi-cli docs
 
 Reference documentation for every feature `agents` ships.
 
@@ -6,7 +6,7 @@ Reference documentation for every feature `agents` ships.
 
 | Doc | Why read it |
 |---|---|
-| **[`QUICKSTART.md`](QUICKSTART.md)** | New to agents-cli? Install, add harnesses, smoke-test a team, and set up a fleet — start here if you are a human getting set up. |
+| **[`QUICKSTART.md`](QUICKSTART.md)** | New to agi-cli? Install, add harnesses, smoke-test a team, and set up a fleet — start here if you are a human getting set up. |
 | **[`AGENT-CHEATSHEET.md`](AGENT-CHEATSHEET.md)** | The dozen concepts agents repeatedly need, on one page. Start here if you are an agent touching the codebase. |
 | [`concepts.md`](concepts.md) | DotAgents repos, resource kinds, and the layered resolution model that everything else builds on. |
 | [`architecture.md`](architecture.md) | How the CLI and AGI EXT layer, and the two meanings of "session". |
@@ -19,7 +19,7 @@ Source-grounded: every command, flag, and YAML field is sourced from `src/`. If 
 
 ## Core
 
-How agents-cli is laid out on disk and how it decides what to load.
+How agi-cli is laid out on disk and how it decides what to load.
 
 | Doc | What it covers |
 |---|---|
@@ -32,10 +32,10 @@ How agents-cli is laid out on disk and how it decides what to load.
 | [Observability](observability.md) | The three `--json` sources (sessions / cloud / teams) as a fleet view, plus `agents mailboxes` fleet comms. |
 | [SSH transport](ssh-transport.md) | The one multiplexed engine every `--host` command rides — default connection reuse, keepalive, one-round-trip follow. |
 | [Optimizations](optimizations.md) | Sync manifest, SSH transport, startup profiling, hot-path notes. |
-| [Landscape](landscape.md) | Where agents-cli sits next to similar tools. |
-| [Toolchain thesis](toolchain-thesis.md) | Research synthesis: the nine-layer CLI-agent toolchain, the ranked pain points behind it, and how agents-cli maps onto each. |
+| [Landscape](landscape.md) | Where agi-cli sits next to similar tools. |
+| [Toolchain thesis](toolchain-thesis.md) | Research synthesis: the nine-layer CLI-agent toolchain, the ranked pain points behind it, and how agi-cli maps onto each. |
 | [Product acceptance](product-acceptance.md) | User stories + Product cards: stop product regressions when agents write the code. |
-| [vs Gas Town](vs-gastown.md) | How agents-cli differs from Gas Town (multi-agent factory): parallels, glossary, what users like/dislike. |
+| [vs Gas Town](vs-gastown.md) | How agi-cli differs from Gas Town (multi-agent factory): parallels, glossary, what users like/dislike. |
 
 ## Credentials and model routing
 
@@ -54,9 +54,10 @@ How agents-cli is laid out on disk and how it decides what to load.
 |---|---|
 | [Fleet profile sync](fleet.md) | `agents apply` — reconcile every device to a declared `fleet:` profile: install agents and sync config. Native logins stay device-local; provider accounts sync explicitly. |
 | [Teams](teams.md) | Multi-agent DAG teams, boundary contracts, `--watch` supervisor, `--worktree` isolation, `--cloud` dispatch. |
+| Tickets | `agents tickets list --json` — one Linear/GitHub backlog shape with cycle metadata and explicit per-source availability for UI and automation consumers. |
 | [Cloud](cloud.md) | Unified dispatch across Rush Cloud / Codex Cloud / Factory. Multi-repo tasks, balanced routing, SSE streaming. |
-| [Hosts](hosts.md) | Offload `agents run` to your own machines over SSH (`--host`); track with `agents hosts ps` and view/follow with `agents logs`. |
-| [Share](share.md) | Publish an HTML artifact to a public link on your own Cloudflare R2 (`agents share <file>`) — zero-egress, BYO-Cloudflare, expiry + fleet mode. |
+| [Hosts](hosts.md) | Offload `agents run` to your own machines over SSH (`--host`); track with `agents hosts ps` and view/follow with `agents hosts logs`. |
+| [Share](share.md) | Publish an HTML artifact to a public link on your own Cloudflare R2 (`agents artifacts share <file>`) — zero-egress, BYO-Cloudflare, expiry + fleet mode. |
 | [Routines](routines.md) | Cron-scheduled and signed-webhook-triggered agent runs with sandboxed permissions and a long-running daemon. |
 | [Monitors](monitors.md) | Durable event-triggered watchers: watch a source, detect a change, fire an action. A routine whose trigger is a watched source instead of a clock. |
 | [Projects](projects.md) | Named multi-repo projects layered over the `--project` convention, plus the progress rollup — one card per project instead of a per-agent activity line. Beta. |
@@ -95,7 +96,7 @@ How agents-cli is laid out on disk and how it decides what to load.
 
 ## Contributing
 
-Docs live as plain Markdown so they can be edited by anyone and rendered anywhere (GitHub, VS Code preview, future MDX wrapper for agents-cli.sh). When you add or rename a command, update the matching doc in the same PR. The verification loop:
+Docs live as plain Markdown so they can be edited by anyone and rendered anywhere (GitHub, VS Code preview, future MDX wrapper for agi-cli.sh). When you add or rename a command, update the matching doc in the same PR. The verification loop:
 
 ```bash
 agents <cmd> --help                    # confirm every flag mentioned in the doc still prints

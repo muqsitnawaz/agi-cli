@@ -186,8 +186,22 @@ export async function createSession(opts: CreateSessionOptions): Promise<Session
   return meta;
 }
 
-/** Kill one named session. Idempotent — killing a non-existent session is a no-op. */
-export async function killSession(name: string, socket?: string): Promise<boolean> {
+/**
+ * Kill one named session. Idempotent — killing a non-existent session is a no-op.
+ *
+ * Destroying the tmux session only SIGHUPs each pane's FOREGROUND process group,
+ * so a helper the agent put in its own process group (an MCP server, a harness
+ * background daemon) survives and reparents to init. `reapOrphans` therefore
+ * defaults ON: the session's leftover helpers are terminated with it rather than
+ * waiting for the daemon's next sweep (RUSH-2521). {@link reapDeadTmuxPanes}
+ * passes `false` because it sweeps every session's leftovers in one pass instead
+ * of re-snapshotting the process table per session.
+ */
+export async function killSession(
+  name: string,
+  socket?: string,
+  opts: { reapOrphans?: boolean } = {},
+): Promise<boolean> {
   assertValidSessionName(name);
   const sock = socket ?? getDefaultSocketPath();
   const existed = await hasSession(name, sock);
@@ -203,6 +217,10 @@ export async function killSession(name: string, socket?: string): Promise<boolea
     } else {
       throw err;
     }
+  }
+  if (opts.reapOrphans !== false) {
+    const { reapProcessesForTmuxSession } = await import('./orphan-reap.js');
+    await reapProcessesForTmuxSession(name, sock).catch(() => ({ killed: 0, details: [], candidates: [], warnings: [] }));
   }
   removeSessionMeta(name);
   return true;
@@ -242,22 +260,55 @@ export interface ReapDeadPanesResult {
   sessions: string[];
   /** Human-readable lines describing each reap, for log output. */
   details: string[];
+  /** Orphaned helper processes terminated (MCP servers, harness background daemons). */
+  processes: number;
+  /** One human-readable line per terminated helper process. */
+  processDetails: string[];
+  /** Non-fatal observations worth logging — e.g. a tier-1 sweep skipped this tick because a tmux query failed. */
+  warnings: string[];
 }
 
 /**
- * Kill every tmux session whose panes are ALL dead (`pane_dead=1`).
+ * Kill every tmux session whose panes are ALL dead (`pane_dead=1`), and
+ * terminate the helper processes whose owning agent has exited.
  *
  * Dead panes accumulate because `remain-on-exit on` is intentionally set
  * per-pane so the harness can inspect exit status. Without a periodic sweep
  * they pile up indefinitely — e.g. 48 of 127 sessions dead on yosemite-s0
  * (RUSH-2501).
  *
+ * Killing the pane is not enough on its own: it SIGHUPs only the pane's
+ * FOREGROUND process group, so an MCP server or harness background daemon that
+ * moved itself out of that group survives the session that spawned it and keeps
+ * its memory forever (RUSH-2521). The process sweep runs FIRST, while the dead
+ * sessions still exist, so every leftover is attributed to a named session
+ * rather than to a session tmux has already forgotten.
+ *
  * Safety invariant: a session with ANY live pane (`pane_dead=0`) is never
- * touched. Only all-dead sessions are reaped.
+ * touched, and neither are the processes belonging to a session whose agent is
+ * still running or that has a client attached.
+ *
+ * `dryRun` reports both halves without killing anything.
  */
-export async function reapDeadTmuxPanes(socket?: string): Promise<ReapDeadPanesResult> {
+export async function reapDeadTmuxPanes(
+  socket?: string,
+  opts: { dryRun?: boolean; pids?: number[] } = {},
+): Promise<ReapDeadPanesResult> {
   const sock = socket ?? getDefaultSocketPath();
-  const result: ReapDeadPanesResult = { reaped: 0, sessions: [], details: [] };
+  const result: ReapDeadPanesResult = { reaped: 0, sessions: [], details: [], processes: 0, processDetails: [], warnings: [] };
+
+  // The process sweep may run with no server, but an absent session is not
+  // evidence that a still-live marked process is orphaned. Tier 1 only acts on
+  // a present pane owner confirmed dead; tier 2 independently verifies its
+  // declared spawner pid (RUSH-2603).
+  // `opts.pids` is a test-only process-table scope (see `readAgentProcesses`)
+  // — production callers never set it.
+  const { reapOrphanAgentProcesses } = await import('./orphan-reap.js');
+  const orphans = await reapOrphanAgentProcesses({ socket: sock, dryRun: opts.dryRun, pids: opts.pids });
+  result.warnings = orphans.warnings;
+  result.processes = opts.dryRun ? orphans.candidates.length : orphans.killed;
+  result.processDetails = orphans.details;
+
   if (!fs.existsSync(sock)) return result;
 
   const res = await runTmux({
@@ -283,10 +334,12 @@ export async function reapDeadTmuxPanes(socket?: string): Promise<ReapDeadPanesR
   for (const [name, flags] of sessionFlags) {
     if (flags.length === 0 || !flags.every(d => d)) continue;
     try {
-      await killSession(name, sock);
+      // The one process-table sweep above already collected this session's
+      // leftovers; a per-session reap here would re-snapshot `ps` N times.
+      if (!opts.dryRun) await killSession(name, sock, { reapOrphans: false });
       result.reaped++;
       result.sessions.push(name);
-      result.details.push(`killed ${name} (${flags.length} dead pane${flags.length === 1 ? '' : 's'})`);
+      result.details.push(`${name} (${flags.length} dead pane${flags.length === 1 ? '' : 's'})`);
     } catch {
       // Best-effort: session may already be gone by the time we hit it.
     }
@@ -410,13 +463,14 @@ export async function paneExitStatus(pane: string, socket?: string): Promise<Pan
  * Best-effort — returns false when tmux rejects the hook so callers do not
  * stamp a schema marker and daemon reconciliation can retry later.
  */
-export async function setSessionHook(name: string, hook: string, command: string, socket?: string): Promise<boolean> {
+export async function setSessionHook(name: string, hook: string, command: string, socket?: string, timeoutMs?: number): Promise<boolean> {
   assertValidSessionName(name);
   const sock = socket ?? getDefaultSocketPath();
   const result = await runTmux({
     socket: sock,
     args: ['set-hook', '-t', name, hook, command],
     throwOnError: false,
+    timeoutMs,
   }).catch(() => null);
   return result?.code === 0;
 }
@@ -451,6 +505,16 @@ export const AGENT_HOOK_SCHEMA = 5;
 const HOOK_SCHEMA_OPTION = '@ag_hook_schema';
 
 /**
+ * Bound on every tmux call made by the hook-repair path (daemon startup,
+ * upgrade migration, and single-session repair-before-attach). A wedged tmux
+ * server would otherwise hang the caller indefinitely — exactly the class of
+ * bug RUSH-2507 fixed for `listTmuxAgentSessions`'s `list-panes` call, applied
+ * here to `reconcileSessionHooks`/`repairSessionHookIfStale`'s calls so a
+ * wedged shared socket can no longer wedge daemon startup (RUSH-2435 review).
+ */
+const TMUX_HOOK_REPAIR_TIMEOUT_MS = 5_000;
+
+/**
  * The guarded `pane-died` hook. Detach the client ONLY when the agent pane dies
  * (so the blocking attach in runInTmux returns and the exit status can be read);
  * a user split's death runs the else-branch, closing just that split. The
@@ -469,14 +533,14 @@ export function agentPaneDiedHook(sessionName: string, agentPane: string): strin
 }
 
 /** Stamp a session's hook-schema marker to the current version. */
-export async function markSessionHookSchema(name: string, socket?: string): Promise<void> {
+export async function markSessionHookSchema(name: string, socket?: string, timeoutMs?: number): Promise<void> {
   const sock = socket ?? getDefaultSocketPath();
-  await runTmux({ socket: sock, args: ['set-option', '-t', name, HOOK_SCHEMA_OPTION, String(AGENT_HOOK_SCHEMA)], throwOnError: false }).catch(() => {});
+  await runTmux({ socket: sock, args: ['set-option', '-t', name, HOOK_SCHEMA_OPTION, String(AGENT_HOOK_SCHEMA)], throwOnError: false, timeoutMs }).catch(() => {});
 }
 
 /** Read a session's hook-schema marker; undefined when unset (pre-marker sessions). */
-async function readHookSchema(name: string, socket: string): Promise<string | undefined> {
-  const res = await runTmux({ socket, args: ['show-options', '-v', '-t', name, HOOK_SCHEMA_OPTION], throwOnError: false }).catch(() => null);
+async function readHookSchema(name: string, socket: string, timeoutMs?: number): Promise<string | undefined> {
+  const res = await runTmux({ socket, args: ['show-options', '-v', '-t', name, HOOK_SCHEMA_OPTION], throwOnError: false, timeoutMs }).catch(() => null);
   if (!res || res.code !== 0) return undefined;
   const v = res.stdout.trim();
   return v === '' ? undefined : v;
@@ -488,13 +552,23 @@ async function readHookSchema(name: string, socket: string): Promise<string | un
  * for sessions whose SessionMeta (which records the agent pane) predates meta
  * persistence. Undefined when the session has no panes (already torn down).
  */
-async function lowestPaneId(name: string, socket: string): Promise<string | undefined> {
-  const res = await runTmux({ socket, args: ['list-panes', '-t', name, '-F', '#{pane_id}'], throwOnError: false }).catch(() => null);
+async function lowestPaneId(name: string, socket: string, timeoutMs?: number): Promise<string | undefined> {
+  const res = await runTmux({ socket, args: ['list-panes', '-t', name, '-F', '#{pane_id}'], throwOnError: false, timeoutMs }).catch(() => null);
   if (!res || res.code !== 0) return undefined;
   const ids = res.stdout.split('\n').map(l => l.trim()).filter(id => /^%\d+$/.test(id));
   if (!ids.length) return undefined;
   return ids.reduce((lo, id) => (parseInt(id.slice(1), 10) < parseInt(lo.slice(1), 10) ? id : lo));
 }
+
+/**
+ * The outcome of {@link prepareSessionForResume}. `attach` carries the pane it
+ * positively resolved so the caller can read that pane's exit status back after
+ * its attach client returns — without that, a resume-attach has no handle to ask
+ * tmux what happened and can only assume success (EXEC-23b).
+ */
+export type ResumePreparation =
+  | { decision: 'attach'; pane: string }
+  | { decision: 'create' };
 
 /**
  * Decide whether a native resume may attach an existing managed tmux session.
@@ -506,9 +580,9 @@ async function lowestPaneId(name: string, socket: string): Promise<string | unde
 export async function prepareSessionForResume(
   name: string,
   socket?: string,
-): Promise<'attach' | 'create'> {
+): Promise<ResumePreparation> {
   const sock = socket ?? getDefaultSocketPath();
-  if (!(await hasSession(name, sock))) return 'create';
+  if (!(await hasSession(name, sock))) return { decision: 'create' };
 
   const recordedPane = readSessionMeta(name)?.pane;
   const recordedState = recordedPane ? await paneExitStatus(recordedPane, sock) : undefined;
@@ -516,10 +590,33 @@ export async function prepareSessionForResume(
     ? recordedPane
     : await lowestPaneId(name, sock);
   const state = pane ? await paneExitStatus(pane, sock) : undefined;
-  if (pane && state?.found && !state.dead) return 'attach';
+  if (pane && state?.found && !state.dead) {
+    // Self-heal a legacy/stale hook right before handing the session back to
+    // an attach client — the steady-state repair point between the daemon's
+    // startup and upgrade one-shots (RUSH-2435).
+    await ensureSessionHookRepaired(name, sock);
+    return { decision: 'attach', pane };
+  }
 
   await killSession(name, sock);
-  return 'create';
+  return { decision: 'create' };
+}
+
+/**
+ * Repair ONE session's `pane-died` hook if it predates AGENT_HOOK_SCHEMA.
+ * Idempotent and NON-DESTRUCTIVE — only `set-hook`s, never kills a pane or
+ * detaches a client. Shared by {@link reconcileSessionHooks} (full sweep) and
+ * {@link ensureSessionHookRepaired} (single session, called before attach) so
+ * the two can never drift on what counts as "repaired" (RUSH-2435).
+ */
+async function repairSessionHookIfStale(name: string, sock: string, meta: SessionMeta | undefined, timeoutMs: number = TMUX_HOOK_REPAIR_TIMEOUT_MS): Promise<boolean> {
+  if (await readHookSchema(name, sock, timeoutMs) === String(AGENT_HOOK_SCHEMA)) return false;
+  const agentPane = meta?.pane ?? await lowestPaneId(name, sock, timeoutMs);
+  if (!agentPane) return false;
+  const installed = await setSessionHook(name, 'pane-died', agentPaneDiedHook(name, agentPane), sock, timeoutMs);
+  if (!installed) return false;
+  await markSessionHookSchema(name, sock, timeoutMs);
+  return true;
 }
 
 /**
@@ -531,9 +628,15 @@ export async function prepareSessionForResume(
  * exited a split — self-heals in place, without waiting for those agents to exit
  * or for the server to be recycled.
  *
- * The daemon calls this on a light interval. The per-session `@ag_hook_schema`
- * marker makes steady-state a cheap no-op: a session already at the current
- * schema is skipped. Only run-wrapped sessions (`ag-` prefix) are touched — an
+ * NOT a daemon poll — the 5-minute `tmux-reconcile` routine that used to call this
+ * was deleted (RUSH-2495). It survives as the version-skew ONE-SHOT: the daemon
+ * calls it once at startup (`runDaemon` in `../daemon.js`) and once from the
+ * upgrade-time migration (`runMigration` in `../migrate.js`), so a session a
+ * pre-fix binary left with a stale hook still self-heals without a live poller.
+ * `ensureSessionHookRepaired` covers the steady-state gap between those two
+ * points by repairing a single session right before it's attached to. The
+ * per-session `@ag_hook_schema` marker makes both paths a cheap no-op once a
+ * session is current. Only run-wrapped sessions (`ag-` prefix) are touched — an
  * externally-created session on the socket keeps whatever hook it set.
  */
 export async function reconcileSessionHooks(socket?: string): Promise<{ scanned: number; reconciled: number }> {
@@ -541,22 +644,35 @@ export async function reconcileSessionHooks(socket?: string): Promise<{ scanned:
   if (!fs.existsSync(sock)) return { scanned: 0, reconciled: 0 };
   let sessions: ListedSession[];
   try {
-    sessions = await listSessions({ socket: sock });
+    sessions = await listSessions({ socket: sock, timeoutMs: TMUX_HOOK_REPAIR_TIMEOUT_MS });
   } catch {
     return { scanned: 0, reconciled: 0 };
   }
   let reconciled = 0;
   for (const s of sessions) {
     if (!s.name.startsWith('ag-')) continue; // only run-wrapped sessions
-    if (await readHookSchema(s.name, sock) === String(AGENT_HOOK_SCHEMA)) continue;
-    const agentPane = s.meta?.pane ?? await lowestPaneId(s.name, sock);
-    if (!agentPane) continue;
-    const installed = await setSessionHook(s.name, 'pane-died', agentPaneDiedHook(s.name, agentPane), sock);
-    if (!installed) continue;
-    await markSessionHookSchema(s.name, sock);
-    reconciled++;
+    if (await repairSessionHookIfStale(s.name, sock, s.meta)) reconciled++;
   }
   return { scanned: sessions.length, reconciled };
+}
+
+/**
+ * Repair a single managed session's `pane-died` hook right before it is
+ * attached to, so a legacy session left by a pre-fix binary self-heals on the
+ * next touch instead of waiting for the next daemon-startup/upgrade one-shot
+ * (RUSH-2435). Only `ag-`-prefixed (run-wrapped) sessions are touched; a no-op
+ * for anything else. Best-effort — never throws, so a repair failure can never
+ * block the attach it is protecting.
+ */
+export async function ensureSessionHookRepaired(name: string, socket?: string): Promise<void> {
+  if (!name.startsWith('ag-')) return;
+  const sock = socket ?? getDefaultSocketPath();
+  if (!fs.existsSync(sock)) return;
+  try {
+    await repairSessionHookIfStale(name, sock, readSessionMeta(name) ?? undefined);
+  } catch {
+    // best-effort — an attach must never fail because a repair attempt did
+  }
 }
 
 /**
@@ -564,7 +680,7 @@ export async function reconcileSessionHooks(socket?: string): Promise<{ scanned:
  *  - tmux session with no meta → returned without `meta` (external session)
  *  - meta file with no tmux session → meta deleted (stale)
  */
-export async function listSessions(opts: { socket?: string } = {}): Promise<ListedSession[]> {
+export async function listSessions(opts: { socket?: string; timeoutMs?: number } = {}): Promise<ListedSession[]> {
   const socket = opts.socket ?? getDefaultSocketPath();
   if (!fs.existsSync(socket)) {
     // No server has ever run — clean orphan metas defensively.
@@ -578,6 +694,7 @@ export async function listSessions(opts: { socket?: string } = {}): Promise<List
     socket,
     args: ['list-sessions', '-F', fmt],
     throwOnError: false,
+    timeoutMs: opts.timeoutMs,
   });
 
   // tmux returns nonzero with "no server running" or "no sessions" — both mean empty.

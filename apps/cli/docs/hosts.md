@@ -40,6 +40,48 @@ affinity (weighted by launch counts on `sessions.db` `machine`; most-used online
 device has highest probability). Harness stays the agent you typed — never
 auto-picked. Affinity failure degrades to local rather than aborting the run.
 
+### Which devices `auto` may pick — device roles
+
+Automatic placement draws from a **pool**, not from every online box. Mark what a
+device is for, once, from any machine:
+
+```
+agents devices role yosemite-s0 worker    # agents run here
+agents devices role yosemite-s1 worker    # …and here
+agents devices role zion personal         # your laptop — keep agents off it
+agents devices role                       # who is marked what, and what auto would pick
+```
+
+| Fleet state | `--device auto` picks from |
+|---|---|
+| nothing marked | every online device (the historical behavior) |
+| any device marked `worker` | ONLY the marked workers |
+| a device marked `personal` | never, under either state |
+
+Marking a worker is what turns the pool into an **allowlist** — that is the whole
+opt-in: two marks and every automatic launch lands on those two boxes. The rule
+lives in one place (`src/lib/devices/pool.ts`) and every automatic-placement
+caller reads it, so `agents run --device auto`, `agents teams add --device auto`,
+`agents ssh auto`, and the AGI EXT `New <Harness>` commands agree. Widen it back
+with `agents config set auto.pool all`; a `personal` box stays excluded, since
+that is what the mark is for. A paired cockpit (iPhone/iPad) is a separate,
+pre-existing role — `agents devices pair-ios` marks it `control` in that box's
+device registry and the fleet never dials it, so it is not a placement candidate
+either.
+
+An empty pool is an error, not a shrug: with workers marked and none of them
+reachable, `--device auto` fails loud naming the fix rather than quietly running
+on the machine you are sitting at — including through `agents ssh auto` and the
+generic `--host auto` passthrough, which resolve `auto` via the same pool.
+
+Roles live in the fleet-**shared** `fleet.devices.<name>.config.role` block of
+`~/.agents/agents.yaml` and travel with `agents repo push` / `pull`; the
+per-device files under `~/.agents/devices/` are written only by the machine they
+name — that is what keeps them conflict-free — so they could never hold a
+fleet-wide answer about a *different* box. `agents devices list` tags marked rows, and
+`agents devices list --json` carries `role` plus an `autoPool` boolean per
+device.
+
 ### `agents run auto` — all three routing layers
 
 `auto` as the AGENT name (`agents run auto "…"`, distinct from `--host auto`)

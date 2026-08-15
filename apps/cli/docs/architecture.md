@@ -19,16 +19,18 @@ writing; treat them as pointers, not guarantees.
   `run` / `cloud`, the CLI-side pid→id registry, the audit log, and the SSH fan-out
   to peer machines.
 - **`apps/ext` — AGI EXT, the VS Code extension. A consumer.** It spawns agent
-  terminals as tabs and renders the Fleet dashboard, but it holds **no data
-  models of its own** beyond the live-session state file. For "what's running", it
-  shells out to the CLI (`agents sessions --active --json`) and reshapes the JSON.
+  terminals as tabs and renders the Fleet dashboard. Its state layer is a
+  presentation projection of CLI JSON: one elected monitor owns
+  `agents sessions watch --json`, while one-shot pickers and controls invoke the
+  owning CLI noun. It does not scan transcript, team, tracker, watchdog, device,
+  account, or quota stores itself.
 
 ```mermaid
 flowchart LR
   subgraph machine["one machine"]
     CLI["apps/cli — the agents CLI<br/><b>the framework</b><br/>sessions index · teams · run · cloud<br/>pid-registry · events.jsonl · SSH fan-out"]
-    FAC["apps/ext — AGI EXT<br/><b>a consumer</b><br/>terminal tabs · Fleet<br/>file-watcher · watchdog socket"]
-    CLI -- "exposes: agents sessions --active --json" --> FAC
+    FAC["apps/ext — AGI EXT<br/><b>a consumer</b><br/>terminal tabs · Fleet<br/>presentation stores"]
+    CLI -- "streams: agents sessions watch --json<br/>commands: sessions · devices · teams · tickets · watchdog" --> FAC
   end
   CLI --> DB[("sessions.db<br/>SQLite + FTS5")]
   CLI --> BYPID["terminals/by-pid/&lt;pid&gt;.json<br/>CLI pid→id"]
@@ -153,7 +155,7 @@ Two formats trip people up (both handled in [`src/lib/session/discover.ts`](../s
 the **session-discoverable** set is `SESSION_AGENTS`
 ([`src/lib/session/types.ts`](../src/lib/session/types.ts)): `claude`, `codex`,
 `gemini`, `antigravity`, `opencode`, `openclaw`, `rush`, `hermes`, `grok`, `kimi`,
-`droid`, `cursor`. `copilot` is runnable but not session-discoverable.
+`droid`, `cursor`, `muse`. `copilot` is runnable but not session-discoverable.
 `isSessionTrackedAgent()` in the same file is the single predicate every session-index
 writer gates on.
 
@@ -190,7 +192,7 @@ long it must live and how it's read back:
 | Transcripts | `~/.claude/projects/…`, `~/.codex/sessions/…`, … | agent-native files (read-only) | the raw truth; parsed on demand |
 | CLI pid-registry | `~/.agents/.cache/terminals/by-pid/<pid>.json` | ephemeral file | `ag run`/shim write; CLI reads (§3) |
 | Live-session state | `~/.agents/.cache/terminals/sessions/<pid>.json` | ephemeral file | hook writes; extension reads (§3) |
-| Audit log | `~/.agents/.history/events/YYYY-MM-DD/events.jsonl` | dated, locked shared log | `emit()` in [`src/lib/events.ts`](../src/lib/events.ts); `agents events` reads; `agents logs audit` aliases it |
+| Audit log | `~/.agents/.history/events/YYYY-MM-DD/events.jsonl` | dated, locked shared log | `emit()` in [`src/lib/events.ts`](../src/lib/events.ts); `agents events` reads; `agents audit` / `agents logs` are aliases |
 | Teams sentinels | `…/agents/<uuid>/exit_code`, `hosts/<id>.log` + `.exit` | ephemeral files | teammate writes exit code; supervisor reads (§6) |
 | Mailbox spool | `~/.agents/.history/mailbox/<id>/…` | append-only dirs | `agents message` / feed; `agents mailboxes` reads |
 
@@ -227,9 +229,14 @@ Detail in [teams.md](teams.md); the SSH transport is [ssh-transport.md](ssh-tran
 Usage and auth health are exceptions to on-demand computation. The daemon starts
 one `account-state-service` per state directory: it refreshes persisted usage
 snapshots and authentication verdicts, while command and UI readers only render
-those files. Explicit `--refresh` calls use the same device-wide lease keyed by
-provider account, so separate `agents` processes cannot duplicate a provider
-request. The lease owner atomically publishes the snapshot; waiters re-read it.
+those files. When `usage.primary-host` is configured, only that host's usage tick
+calls providers. It publishes a schema-limited envelope containing usage windows
+and routing headroom; peer ticks fetch it over the registered SSH path and merge
+it into their local caches. Tokens and credentials are never exported. Without a
+pin, the prior per-host refresh behavior remains active. Explicit `--refresh`
+calls use the same device-wide lease keyed by provider account, so separate
+`agents` processes cannot duplicate a provider request. The lease owner atomically
+publishes the snapshot; waiters re-read it.
 Local-log sources such as Codex and Grok follow the same rule because a render
 loop repeatedly scanning transcripts is still duplicate collection.
 
@@ -238,15 +245,15 @@ are minted and refreshed by the harness on each device; agents-cli publishes onl
 the resulting safe health/account metadata. Durable API keys, setup tokens, and
 bearer tokens use the named account registry and each device's credential store.
 
-### Session detail remains computed on demand
+### Live state is published once and streamed
 
-`agents sessions --active` re-derives state on every call — it re-reads the **tail**
-of each live transcript, infers `working` / `waiting_input` / `idle`, and computes
-tokens/sec ([`src/lib/session/active.ts`](../src/lib/session/active.ts),
-`readSessionTailWithRaw` → `inferSessionState` → `computeTokPerSec`). There is no
-resident cache: each call pays the recompute, and AGI EXT polls it
-(local sessions ~3s, remote peers ~45s, `apps/ext/ui/.../UnifiedAgentsPane.tsx`).
-Other machines are reached by running the same command over SSH per peer.
+The CLI daemon publishes the local active-session snapshot used by all readers.
+`agents sessions watch --json` emits a versioned reset followed by ordered
+upsert/remove/scope/heartbeat envelopes. Its fleet mode holds one long-lived local
+subscription plus one persistent SSH stream per peer. A peer outage marks that scope
+unavailable and retains its last rows; it never turns an outage into mass removals.
+Transcript history remains a separate, one-shot `agents sessions --all --json` query
+for Resume and Fork pickers.
 
 ### Coarse status is honest, not guessed
 

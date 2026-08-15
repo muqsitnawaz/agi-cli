@@ -102,6 +102,10 @@ export interface ConfigTarget {
 
 const DEVICE_PLATFORMS = ['windows', 'linux', 'macos', 'unknown'] as const;
 const SSH_AUTH_METHODS = ['key', 'password'] as const;
+/** Roles a device can be marked with — see the `role` key below. */
+const DEVICE_ROLES = ['worker', 'personal'] as const;
+/** Which devices automatic placement may pick — see the `auto.pool` key below. */
+const AUTO_POOL_MODES = ['workers', 'all'] as const;
 
 export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
   {
@@ -119,6 +123,36 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
         return err?.message ?? String(err);
       }
     },
+  },
+  {
+    name: 'usage.primary-host',
+    yamlKey: 'usagePrimaryHost',
+    scope: 'user',
+    type: 'string',
+    description: 'Device whose usage snapshots are authoritative for fleet-wide usage reporting.',
+    validate: (v) => {
+      try {
+        assertValidDeviceName(v as string);
+        return null;
+      } catch (err: any) {
+        return err?.message ?? String(err);
+      }
+    },
+  },
+  {
+    name: 'auto.pool',
+    yamlKey: 'autoPool',
+    scope: 'user',
+    type: 'string',
+    description:
+      "Which devices automatic placement (`--device auto`) may pick: 'workers' (default — only devices marked role=worker, " +
+      "once at least one is marked) or 'all' (every online device, ignoring worker marks). A device marked personal is " +
+      'never picked automatically under either mode.',
+    defaultValue: 'workers',
+    validate: (v) =>
+      (AUTO_POOL_MODES as readonly string[]).includes(v as string)
+        ? null
+        : `auto.pool must be one of ${AUTO_POOL_MODES.join(' | ')}.`,
   },
   {
     name: 'browser.profile',
@@ -170,6 +204,19 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     type: 'bool',
     defaultValue: false,
     description: 'Whether the daemon runs the watchdog pass on this device.',
+  },
+  {
+    name: 'tmux.enabled',
+    yamlKey: 'tmuxEnabled',
+    scope: 'device',
+    visibility: 'machine',
+    type: 'bool',
+    defaultValue: true,
+    description:
+      'Whether an interactive `agents run` on this device is wrapped in the shared-socket tmux session. ' +
+      'On gives every agent an addressable pane (`agents sessions --active` tells co-located agents apart, ' +
+      '`agents focus` re-attaches without forking). Off spawns the agent directly on this box — the durable ' +
+      'form of `--no-tmux`, for a machine whose tmux is broken or unwanted.',
   },
   {
     name: 'browser.remote-control',
@@ -245,6 +292,22 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
       (DEVICE_PLATFORMS as readonly string[]).includes(v as string)
         ? null
         : `platform must be one of ${DEVICE_PLATFORMS.join(' | ')}.`,
+  },
+  {
+    name: 'role',
+    yamlKey: 'role',
+    scope: 'device',
+    visibility: 'shared',
+    type: 'string',
+    description:
+      "What this device is for, fleet-wide: 'worker' (a box agents run on) or 'personal' (a machine you sit at — never " +
+      'picked automatically). Marking ANY device worker turns automatic placement into an allowlist: `--device auto` then ' +
+      'picks only from the marked workers. (A paired iPhone/iPad cockpit is marked control by `agents devices pair-ios` ' +
+      'and is excluded from placement by that role, not this key.)',
+    validate: (v) =>
+      (DEVICE_ROLES as readonly string[]).includes(v as string)
+        ? null
+        : `role must be one of ${DEVICE_ROLES.join(' | ')}.`,
   },
   {
     name: 'auto-launch.enabled',
@@ -416,6 +479,13 @@ export function listUserConfig(): ConfigEntry[] {
   return CONFIG_KEYS.filter((spec) => spec.scope === 'user').map((spec) => getConfigValue(spec.name));
 }
 
+/** Resolve the explicit usage host, falling back to the user's interactive host. */
+export function resolveUsagePrimaryHost(): string | null {
+  return (getConfigValue('usage.primary-host').value as string | undefined)
+    ?? (getConfigValue('interactive.host').value as string | undefined)
+    ?? null;
+}
+
 // ─── Writes ───────────────────────────────────────────────────────────────────
 
 function setInCentralBlock(device: string, spec: ConfigKeySpec, value: unknown): void {
@@ -499,6 +569,57 @@ export function unsetConfigValue(name: string, opts?: ConfigTarget): void {
   unsetInCentralBlock(device, spec);
 }
 
+// ─── Device roles + the automatic-placement pool ──────────────────────────────
+
+/** A role an operator marked a device with (`agents devices role <name> <role>`). */
+export type ConfiguredDeviceRole = (typeof DEVICE_ROLES)[number];
+
+/** Which devices automatic placement may pick (`auto.pool`). */
+export type AutoPoolMode = (typeof AUTO_POOL_MODES)[number];
+
+/**
+ * The role marked on one device, or undefined when the operator never marked it.
+ *
+ * Undefined is meaningful and is NOT the same as `worker`: an unmarked device is
+ * eligible for automatic placement only while no device anywhere carries an
+ * explicit `worker` mark (see {@link listConfiguredDeviceRoles}).
+ */
+export function configuredDeviceRole(name: string): ConfiguredDeviceRole | undefined {
+  assertValidDeviceName(name);
+  return getConfigValue('role', { device: name }).value as ConfiguredDeviceRole | undefined;
+}
+
+/** Mark a device's role fleet-wide; `undefined` clears the mark. */
+export function setConfiguredDeviceRole(name: string, role: ConfiguredDeviceRole | undefined): void {
+  assertValidDeviceName(name);
+  if (role === undefined) unsetConfigValue('role', { device: name });
+  else setConfigValue('role', role, { device: name });
+}
+
+/**
+ * Every device an operator has marked, keyed by device name. Devices with no
+ * mark are absent — that absence is what makes the worker allowlist opt-in.
+ */
+export function listConfiguredDeviceRoles(): Record<string, ConfiguredDeviceRole> {
+  ensureDeviceConfigMigrated();
+  const devices = readMeta().fleet?.devices;
+  const out: Record<string, ConfiguredDeviceRole> = {};
+  if (!devices || devices === 'all') return out;
+  for (const [name, override] of Object.entries(devices)) {
+    const role = override?.config?.role;
+    if (typeof role === 'string' && (DEVICE_ROLES as readonly string[]).includes(role)) {
+      out[name] = role as ConfiguredDeviceRole;
+    }
+  }
+  return out;
+}
+
+/** The configured automatic-placement pool mode. Unset means `workers`. */
+export function autoPoolMode(): AutoPoolMode {
+  const value = getConfigValue('auto.pool').value;
+  return value === 'all' ? 'all' : 'workers';
+}
+
 // ─── Auto-launch preferences (Factory auto-host selection) ────────────────────
 
 /** A device's auto-launch flags, as read by the ext's launch ranking. */
@@ -572,6 +693,18 @@ export function assertSchedulerEnabled(): void {
     `The routines scheduler is disabled on this device (scheduler.enabled=false in ~/.agents/agents.yaml fleet.devices.${machineId()}.config). ` +
       `Re-enable with: agents devices config ${machineId()} scheduler.enabled on`,
   );
+}
+
+/**
+ * True unless this machine's config turns off the managed tmux wrap for
+ * interactive `agents run` launches (`tmux.enabled=false`).
+ *
+ * Read as one of the guards in `shouldWrapInTmux` (lib/exec.ts) — the durable,
+ * per-machine form of `--no-tmux` / `AGENTS_NO_TMUX=1`, for a box whose tmux is
+ * broken or unwanted. Unset means today's behavior: wrap.
+ */
+export function isTmuxEnabled(): boolean {
+  return getConfigValue('tmux.enabled').value !== false;
 }
 
 /** True unless this machine's config disables the daemon outright (top-level kill switch). */

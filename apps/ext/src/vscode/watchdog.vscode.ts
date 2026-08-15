@@ -1,7 +1,4 @@
 import * as vscode from 'vscode';
-import * as fsSync from 'fs';
-import * as path from 'path';
-import * as os from 'os';
 import { execFile } from 'child_process';
 import { bootstrapPath, resolveAgentsBin } from '../core/agentsBin';
 
@@ -20,63 +17,9 @@ import { bootstrapPath, resolveAgentsBin } from '../core/agentsBin';
 //      now, so this file drives no in-extension behavior; the helpers stay
 //      because the Fleet settings panel still surfaces it for editing.
 
-// --- Playbook scaffold (surfaced by the settings panel) ---------------------
-
-export const WATCHDOG_PLAYBOOK_PATH = path.join(
-  os.homedir(),
-  '.agents',
-  'playbooks',
-  'watchdog.md'
-);
-
-const WATCHDOG_PLAYBOOK_TEMPLATE = `# Watchdog Playbook
-
-House rules for the Watchdog. Add patterns you've observed. One rule per bullet.
-Be specific.
-
-## Nudge recipes
-
-- When the agent says "I'll write/create/run X" with no matching tool call
-  in the next 30 seconds, nudge: "Do it now."
-
-## Skip rules
-
-- Skip if the last assistant message ends with a question mark — user input expected.
-
-## Project-specific
-
-- (Add rules tied to your repos here.)
-`;
-
-export function ensureWatchdogPlaybookScaffold(): void {
-  if (fsSync.existsSync(WATCHDOG_PLAYBOOK_PATH)) return;
-  fsSync.mkdirSync(path.dirname(WATCHDOG_PLAYBOOK_PATH), { recursive: true });
-  fsSync.writeFileSync(WATCHDOG_PLAYBOOK_PATH, WATCHDOG_PLAYBOOK_TEMPLATE, 'utf8');
-}
-
-export interface WatchdogPlaybookStatus {
-  exists: boolean;
-  lines: number;
-  mtimeMs: number;
-}
-
-export function getWatchdogPlaybookStatus(): WatchdogPlaybookStatus {
-  try {
-    const stat = fsSync.statSync(WATCHDOG_PLAYBOOK_PATH);
-    const content = fsSync.readFileSync(WATCHDOG_PLAYBOOK_PATH, 'utf8');
-    return {
-      exists: true,
-      lines: content.split('\n').filter((l) => l.trim().length > 0).length,
-      mtimeMs: stat.mtimeMs,
-    };
-  } catch {
-    return { exists: false, lines: 0, mtimeMs: 0 };
-  }
-}
-
 // --- CLI-backed enable/disable ----------------------------------------------
 
-export type WatchdogCliAction = 'enable' | 'disable';
+export type WatchdogCliAction = 'on' | 'off';
 
 /**
  * The exec seam (injected by tests): a promisified `child_process.execFile` —
@@ -139,7 +82,7 @@ export function registerWatchdogPaletteCommands(
   const handler = (action: WatchdogCliAction) => async () => {
     try {
       await runWatchdogCli([action], deps);
-      vscode.window.setStatusBarMessage(`Watchdog ${action}d (CLI daemon)`, 4000);
+      vscode.window.setStatusBarMessage(`Watchdog turned ${action} (CLI daemon)`, 4000);
     } catch (err) {
       vscode.window.showErrorMessage(
         `agents watchdog ${action} failed: ${err instanceof Error ? err.message : String(err)}`
@@ -147,8 +90,8 @@ export function registerWatchdogPaletteCommands(
     }
   };
   return [
-    registerCommand('agents.watchdogEnable', handler('enable')),
-    registerCommand('agents.watchdogDisable', handler('disable')),
+    registerCommand('agents.watchdogEnable', handler('on')),
+    registerCommand('agents.watchdogDisable', handler('off')),
   ];
 }
 

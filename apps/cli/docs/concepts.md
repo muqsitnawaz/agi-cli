@@ -17,6 +17,7 @@ A **DotAgents repo** is a directory with a canonical layout that defines resourc
   mcp/             # MCP server definitions (YAML, one file per server)
   permissions/     # Permission groups (YAML)
   profiles/        # Model/endpoint bundles (YAML)
+  routers/         # Named router allowlists: harnesses x models/tiers x accounts (YAML)
   subagents/       # Subagent definitions (Markdown)
   agents.yaml      # Version pins and repo metadata
 ```
@@ -47,11 +48,12 @@ A **resource** is any named item inside a DotAgents repo. Resources are typed by
 | `mcp` | MCP server definitions (transport, command, args, env) | Merged into each agent's settings file |
 | `permissions` | Allow/deny tool permission groups | Converted to each agent's native format |
 | `profiles` | Model + endpoint + auth bundles | YAML, consumed by `agents run` and shims |
+| `routers` | Named, task-typed allowlists of harnesses x models/tiers x linked accounts (a router is a generalization of a profile) | YAML, consumed by the Agent Router |
 | `subagents` | Subagent workflow definitions | `.md` files |
 
 Resources are installed once in `~/.agents/` and synced to every supported agent's native format automatically. Sync happens when you run `agents use`, `agents repos pull`, or explicitly via `agents sync`.
 
-To inspect what's installed, use the per-kind listers — `agents commands list`, `agents skills list`, `agents hooks list`, `agents mcp list`, `agents permissions list`, `agents subagents list`, `agents profiles list`. For a single merged cross-kind table — every resource with its winning layer resolved across project → user → extras → system — run `agents view --merged`.
+To inspect what's installed, use the per-kind listers — `agents commands list`, `agents skills list`, `agents hooks list`, `agents mcp list`, `agents permissions list`, `agents subagents list`, `agents profiles list`, `agents route list`. For a single merged cross-kind table — every resource with its winning layer resolved across project → user → extras → system — run `agents view --merged`.
 
 To inspect a single repo on its own — its git state plus per-kind resource counts — use `agents repos view <repo>` (`system`, `user`, `project`, or an extra-repo alias). Omit the name for an interactive picker. It renders without opening anything; add `--brief` for the header only or `--json` for machine-readable output.
 
@@ -110,10 +112,12 @@ agents-cli is two application-layer surfaces over one shared set of on-disk stat
 **`apps/cli`** (the `agents` / `ag` CLI) is the framework: it owns the SQLite session
 index, `sessions` / `teams` / `run` / `cloud`, the pid→id registry, the audit log,
 and the SSH fan-out to peers. **`apps/ext`** (AGI EXT, the VS Code extension) is a
-consumer: it spawns agent terminals and renders the Fleet, but for live state
-it shells out to `agents sessions --active --json` and reshapes the JSON — it holds no
-data models of its own. Fix a mechanism in the CLI and every consumer benefits. Full
-detail in [architecture.md](architecture.md).
+consumer: it spawns agent terminals, renders CLI-owned state, and sends controls back
+through CLI commands. One elected extension monitor owns a long-lived
+`agents sessions watch --json` stream; Resume and Fork query transcript history only
+when their pickers open. The extension does not discover sessions, rank launch targets,
+or read tracker/watchdog state itself. Fix a mechanism in the CLI and every consumer
+benefits. Full detail in [architecture.md](architecture.md).
 
 ## Two kinds of "session"
 
@@ -201,20 +205,29 @@ command owns them: `agents devices config <name> [key] [value] [--unset]
 [--json]` — bare opens an interactive settings menu on a TTY (and prints the
 resolved config when piped), `key` reads one value back, `key value` sets it
 with validation, `key --unset` restores the default, and `notes <text>`
-appends a free-form operator note. Device-scope keys (`agents.max-concurrent`,
-`scheduler.enabled`, `daemon.enabled`, `watchdog.enabled`,
-`browser.remote-control`, `browser.profile`, `notes`, the `ssh.*` profile
-overrides, `platform`, `auto-launch.*`) land in `fleet.devices.<name>.config`
-in `~/.agents/agents.yaml` — central, so any box can configure any device and
-the settings sync + back up with the repo (a `fleet.devices: all` declaration
-upgrades to an explicit roster map on the first config write). The device
+appends a free-form operator note. Device-scope keys split by **who reads
+them**. The ones a PEER reads (`agents.max-concurrent`, `watchdog.enabled`,
+`notes`, the `ssh.*` profile overrides, `platform`, `auto-launch.*`) land in
+`fleet.devices.<name>.config` in `~/.agents/agents.yaml` — central, so any box
+can configure any device and the settings sync + back up with the repo (a
+`fleet.devices: all` declaration upgrades to an explicit roster map on the
+first config write). The ones only the OWNING box reads (`scheduler.enabled`,
+`daemon.enabled`, `tmux.enabled`, `browser.remote-control`, `browser.profile`)
+stay in that machine's own doc, never sync, and are refused for a peer —
+`browser.remote-control` is a consent flag, and a broken tmux or a paused
+daemon is one machine's state, not fleet policy. The device
 registry stays the **discovery cache** (address, tailscale snapshot,
 reachability); the config's `ssh.*` / `platform` / user values overlay the
 registry profile at dial time (`src/lib/devices/resolve-profile.ts`), so
 `agents ssh`, the ssh_config render, host dispatch, and the `devices list`
-table all honor them. The one user-scope key, `interactive.host`
+table all honor them. The user-scope key `interactive.host`
 (`config.interactiveHost`), names the device agents show YOU artifacts on
 (browser opens, dashboards), so skills stop guessing "the online macOS box".
+Usage collection has a separate user-scope pin, `usage.primary-host`
+(`config.usagePrimaryHost`), operated only through `agents config set|get|unset|list`.
+`resolveUsagePrimaryHost()` resolves the explicit usage pin first, then falls back to
+`interactive.host`, then to no primary host. The interactive host answers where the
+user sees artifacts; it does not by itself declare that device authoritative for usage.
 The interactive host is marked `★ interactive` in `agents devices list`;
 `list --json` carries each row's effective profile plus its `config` block and
 an `interactive` flag. The retired subcommands (`configure`, `note`, `set`,
@@ -253,13 +266,21 @@ no remote semantics reject the flag with a clear message rather than commander's
 raw `unknown option`. The target may be a registered host name, a capability tag
 (`--host gpu --any`), a raw `user@host`, or the special value `auto`
 (`--device auto` / `--host auto`) to pick the least-loaded reachable host where
-the requested agent is installed and signed in, keeping execution local when no
-remote is better. `agents run` and `agents teams add` use this live harness-aware
+the requested agent has an eligible account. The local device is evaluated by
+the same rule; an unreachable, overloaded, signed-out, rate-limited, or
+out-of-credits pool fails loud instead of silently launching locally. `agents run` and `agents teams add` use this live harness-aware
 pick. Generic host-only callers such as `agents ssh auto`, which have no requested
 harness to validate, retain the 14-day `sessions.db` affinity resolver; `agents
 ssh` also refuses a pick that lands on the current machine because its purpose is
 to dial out. Harness is always the agent you type, never auto-picked. Probe
-failure degrades to local.
+failure aborts automatic placement.
+
+UI clients read the owning JSON surfaces: `agents devices list --json` for the
+effective profile/config and resource health, `agents devices status --json` for
+the fleet health report, and `agents devices accounts --json` for account quota
+verdicts and timestamps. These reads are advisory; launch remains one CLI-owned
+transaction, for example `agents run auto --interactive --device auto --strategy
+balanced --mode auto`.
 
 The two registries feed **one host pool** behind the `HostProvider` seam:
 `local` (agents.yaml overlay ∪ ssh-config) registers first, `devices` (the
@@ -399,5 +420,3 @@ aliases: [deploy, ship]           # alternate names this command also resolves u
 ```
 
 `commandAppliesTo()` in `src/lib/commands.ts` evaluates these fields after the agent-level `commands` / commands-as-skills gate. The check runs on central sync (`~/.agents/commands/` user/system → version home) and on `agents commands install`; project `.agents/commands/` files are discovered in place and are not filtered by `agents:`.
-
-Example: `.agents/commands/version.md` targets Claude, Codex, Cursor, OpenCode, Copilot, and Grok. Cursor receives both an IDE command file and an Agent Skill because cursor-agent does not load the IDE's `.cursor/commands/` files; Antigravity is excluded until harness support is verified.

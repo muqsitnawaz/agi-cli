@@ -7,7 +7,7 @@ import * as path from 'path';
 const repoRoot = process.cwd();
 const entrypoint = path.join(repoRoot, 'src/index.ts');
 
-function runAgents(home: string, args: string[]): string {
+function runAgents(home: string, args: string[], extraEnv: Record<string, string> = {}): string {
   return execFileSync('bun', [entrypoint, ...args], {
     cwd: repoRoot,
     env: {
@@ -16,6 +16,7 @@ function runAgents(home: string, args: string[]): string {
       AGENTS_NO_AUTOPULL: '1',
       AGENTS_SKIP_MIGRATION: '1',
       AGENTS_CLI_DISABLE_AUTO_UPDATE: '1',
+      ...extraEnv,
     },
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -74,6 +75,16 @@ describe('config command', () => {
     expect(getOut).toContain('zion');
   });
 
+  it('round-trips and lists the usage primary host', () => {
+    runAgents(home, ['config', 'set', 'usage.primary-host', 'zion']);
+    expect(runAgents(home, ['config', 'get', 'usage.primary-host'])).toContain('zion');
+    expect(runAgents(home, ['config', 'list'])).toContain('usage.primary-host');
+
+    runAgents(home, ['config', 'unset', 'usage.primary-host']);
+    expect(runAgents(home, ['config', 'get', 'usage.primary-host'])).toContain('(unset)');
+    expect(runAgents(home, ['config', 'list'])).not.toContain('usage.primary-host');
+  });
+
   it('sets, gets, and unsets the projects root', () => {
     const root = path.join(home, 'src', 'github.com', 'example');
     runAgents(home, ['config', 'set', 'project.root', root]);
@@ -113,6 +124,20 @@ describe('config command', () => {
 
     const getOut = runAgents(home, ['config', 'get', 'run.claude@*.model']);
     expect(getOut).toContain('(unset)');
+  });
+
+  it('lists a device-scope tmux.enabled after it is set', () => {
+    // tmux.enabled is machine-local, so it can only be written for THIS
+    // machine — pin the self id so the set and the list agree deterministically.
+    const env = { AGENTS_SYNC_MACHINE_ID: 'testbox' };
+    runAgents(home, ['config', 'set', 'devices.testbox.tmux', 'off'], env);
+
+    const listOut = runAgents(home, ['config', 'list'], env);
+    expect(listOut).toContain('devices.testbox.tmux');
+    expect(listOut).toContain('false');
+
+    const jsonOut = runAgents(home, ['config', 'list', '--json'], env);
+    expect(jsonOut).toContain('devices.testbox.tmux');
   });
 
   it('lists browser.profile once for this machine', () => {

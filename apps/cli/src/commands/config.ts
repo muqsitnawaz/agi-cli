@@ -5,6 +5,7 @@
  *   - run defaults (model, mode, effort)
  *   - tier overrides (folded into the run namespace)
  *   - interactive host
+ *   - usage primary host
  *   - browser profile
  *   - local projects root
  *   - per-device config keys
@@ -70,12 +71,19 @@ function parseValue(key: string, parsed: ParsedConfigKey, raw: string): unknown 
       return raw.trim();
     case 'interactive':
       return raw.trim();
+    case 'usage':
+      return raw.trim();
+    case 'auto':
+      return raw.trim();
     case 'browser':
       return raw.trim();
     case 'project':
       return raw.trim();
     case 'device': {
-      switch (parsed.property) {
+      const property = parsed.property;
+      switch (property) {
+        case 'role':
+          return raw.trim();
         case 'max-agents':
           if (!/^\d+$/.test(raw.trim())) {
             throw new Error(`Config key '${key}' expects an integer, got '${raw}'.`);
@@ -84,6 +92,7 @@ function parseValue(key: string, parsed: ParsedConfigKey, raw: string): unknown 
         case 'scheduler':
         case 'daemon':
         case 'watchdog':
+        case 'tmux':
         case 'browser.remote-control':
           return parseBool(raw, key);
         case 'notes':
@@ -91,6 +100,13 @@ function parseValue(key: string, parsed: ParsedConfigKey, raw: string): unknown 
         case 'browser.profile':
           return raw.trim();
       }
+      // A device property with no arm above used to fall out of the switch and
+      // return `undefined`, so the write failed downstream with "expects a
+      // boolean, got undefined" instead of naming the real gap. The `never`
+      // binding makes adding a DeviceConfigProperty without a parse rule a
+      // compile error rather than a runtime mystery.
+      const unhandled: never = property;
+      throw new Error(`Config key '${key}' has no parse rule for device property '${String(unhandled)}'.`);
     }
   }
 }
@@ -115,6 +131,14 @@ function setConfig(parsed: ParsedConfigKey, value: unknown): void {
     }
     case 'interactive': {
       setConfigValue('interactive.host', value as string);
+      return;
+    }
+    case 'usage': {
+      setConfigValue('usage.primary-host', value as string);
+      return;
+    }
+    case 'auto': {
+      setConfigValue('auto.pool', value as string);
       return;
     }
     case 'browser': {
@@ -160,6 +184,16 @@ function unsetConfig(parsed: ParsedConfigKey): boolean {
       unsetConfigValue('interactive.host');
       return had;
     }
+    case 'usage': {
+      const had = getConfigValue('usage.primary-host').value !== undefined;
+      unsetConfigValue('usage.primary-host');
+      return had;
+    }
+    case 'auto': {
+      const had = getConfigValue('auto.pool').value !== undefined;
+      unsetConfigValue('auto.pool');
+      return had;
+    }
     case 'browser': {
       const target = parsed.device ? { device: parsed.device } : undefined;
       const had = getConfigValue('browser.profile', target).value !== undefined;
@@ -195,6 +229,10 @@ function getConfig(parsed: ParsedConfigKey): unknown {
     }
     case 'interactive':
       return getConfigValue('interactive.host').value;
+    case 'usage':
+      return getConfigValue('usage.primary-host').value;
+    case 'auto':
+      return getConfigValue('auto.pool').value;
     case 'browser': {
       return getConfigValue(
         'browser.profile',
@@ -252,6 +290,12 @@ function* listCentralConfigEntries(): Generator<{ key: string; value: unknown; h
   if (meta.config?.interactiveHost !== undefined) {
     yield { key: 'interactive.host', value: meta.config.interactiveHost, hint: 'config.interactiveHost' };
   }
+  if (meta.config?.usagePrimaryHost !== undefined) {
+    yield { key: 'usage.primary-host', value: meta.config.usagePrimaryHost, hint: 'config.usagePrimaryHost' };
+  }
+  if (meta.config?.autoPool !== undefined) {
+    yield { key: 'auto.pool', value: meta.config.autoPool, hint: 'config.autoPool' };
+  }
   if (meta.projectRoot !== undefined) {
     yield { key: 'project.root', value: meta.projectRoot, hint: 'devices.<self>.projectRoot' };
   }
@@ -282,6 +326,9 @@ function* listDeviceConfigEntries(device: string): Generator<{ key: string; valu
         break;
       case 'watchdog.enabled':
         key = `${prefix}watchdog`;
+        break;
+      case 'tmux.enabled':
+        key = `${prefix}tmux`;
         break;
       case 'browser.remote-control':
         key = `${prefix}browser.remote-control`;
@@ -314,11 +361,14 @@ export function registerConfigCommand(program: Command): void {
       agents config set run.claude@2.1.45.model claude-opus-4-8
       agents config set run.claude@*.mode auto
       agents config set interactive.host zion
+      agents config set usage.primary-host zion
       agents config set browser.profile work
       agents config set project.root ~/src/github.com/<you>
       agents config set devices.mac-mini.max-agents 4
       agents config get run.claude@*.model
+      agents config get usage.primary-host
       agents config unset run.claude@*.tier.best
+      agents config unset usage.primary-host
       agents config list
     `,
     notes: `
