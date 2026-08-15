@@ -13,7 +13,7 @@ import * as path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
 import { Option, type Command } from 'commander';
 import chalk from 'chalk';
-import { truncate, padRight, humanDuration } from '../lib/format.js';
+import { truncate, padRight, humanDuration, formatBytes } from '../lib/format.js';
 import { sanitizeForTerminal, redactSecrets } from '../lib/redact.js';
 import { resolveProjectKey } from '../lib/project-key.js';
 import { listProjectDefs, resolveProjectNameForCwd, type ProjectDef } from '../lib/projects.js';
@@ -23,7 +23,7 @@ import type { SessionAgentId, SessionMeta, ViewMode } from '../lib/session/types
 import { SESSION_AGENTS } from '../lib/session/types.js';
 import { discoverArtifacts, readArtifact, resolveArtifact } from '../lib/session/artifacts.js';
 import { looksLikePath, toComparablePath, homeDir, needsWindowsShell, composeWin32CommandLine } from '../lib/platform/index.js';
-import { getActiveSessions, sessionProcessIsLocal, type ActiveSession } from '../lib/session/active.js';
+import { getActiveSessions, describeActiveDiscoveryHealth, sessionProcessIsLocal, type ActiveSession } from '../lib/session/active.js';
 import { enumerateGhosttyTabs, assignGhosttyTabs, type GhosttySurface } from '../lib/session/ghostty-tabs.js';
 import { mapPanesToTargets, listClients } from '../lib/tmux/session.js';
 import { resolveViewingIn, viewingInLabel } from '../lib/session/viewing-in.js';
@@ -40,6 +40,7 @@ import type { SessionActivity, AwaitingReason } from '../lib/session/state.js';
 import { inferSessionState } from '../lib/session/state.js';
 import { discoverSessions, queryIndexedSessions, countSessionsInScope, resolveSessionById, isCompleteSessionId, looksLikeSessionId, searchContentIndex, parseTimeFilter, getSessionRoots, scopeToManaged, type DiscoverOptions, type ScanProgress } from '../lib/session/discover.js';
 import { findSessionsById, querySessions, getSessionById, readSessionContent, readArchivedSessionPreview } from '../lib/session/db.js';
+import { liveSessionMetas } from '../lib/session/live-metadata.js';
 import {
   filterTeamSessions,
   shouldShowTeamSessions,
@@ -92,7 +93,6 @@ import { registerSessionsRenderCommand } from './sessions-render.js';
 import { registerSessionsImportCommand } from './sessions-import.js';
 import { registerSessionsMigrateCommand, registerSessionsMigrationsCommand } from './sessions-migrate.js';
 import { registerSessionsBackfillCommand } from './sessions-backfill.js';
-import { registerSessionsReapCommand } from './sessions-reap.js';
 import { registerSessionsStatsCommand } from './sessions-stats.js';
 import { registerSessionsInsightsCommand } from './insights.js';
 import { registerSessionsOptimizeCommand } from './sessions-optimize.js';
@@ -369,12 +369,6 @@ function resolvePathFilter(query: string): string {
     ? path.join(os.homedir(), query.slice(1))
     : query;
   return path.resolve(expanded);
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 async function renderArtifactsForSession(
@@ -1574,7 +1568,13 @@ export function remoteHostsToDial(hosts: string[] | undefined, self: string): st
  */
 export async function gatherActiveSessions(
   opts: { local?: boolean; hosts?: string[]; forceRefresh?: boolean } = {},
-): Promise<{ sessions: ActiveSession[]; remoteDeviceCount: number }> {
+): Promise<{
+  sessions: ActiveSession[];
+  remoteDeviceCount: number;
+  /** Peer names that went unheard on this gather (RUSH-2507). Undefined when unknown (e.g. a cache hit). */
+  remoteSkipped?: string[];
+  remoteDiscoveryFailed?: boolean;
+}> {
   const forceRefresh = opts.forceRefresh === true
     || process.env.AGENTS_SESSIONS_FORCE_REFRESH === '1';
   // Scoped host lists are not represented in the unscoped fleet/local snapshot
@@ -1599,7 +1599,12 @@ export async function gatherActiveSessions(
       forceRefresh,
       gather: () => gatherActiveSessionsLive({ local: false }),
     });
-    return { sessions: loaded.sessions, remoteDeviceCount: loaded.remoteDeviceCount };
+    return {
+      sessions: loaded.sessions,
+      remoteDeviceCount: loaded.remoteDeviceCount,
+      remoteSkipped: loaded.remoteSkipped,
+      remoteDiscoveryFailed: loaded.remoteDiscoveryFailed,
+    };
   }
 
   return gatherActiveSessionsLive(opts);
@@ -1612,7 +1617,12 @@ export async function gatherActiveSessions(
  */
 async function gatherActiveSessionsLive(
   opts: { local?: boolean; hosts?: string[] } = {},
-): Promise<{ sessions: ActiveSession[]; remoteDeviceCount: number }> {
+): Promise<{
+  sessions: ActiveSession[];
+  remoteDeviceCount: number;
+  remoteSkipped: string[];
+  remoteDiscoveryFailed: boolean;
+}> {
   const self = machineId();
   // An explicit --host/--device list scopes the view: seed local sessions only
   // when no hosts are named, or when this machine is one of the named targets.
@@ -1626,6 +1636,8 @@ async function gatherActiveSessionsLive(
   for (const s of local) if (!s.machine) s.machine = self;
 
   let remoteDeviceCount = 0;
+  let remoteSkipped: string[] = [];
+  let remoteDiscoveryFailed = false;
   let merged = local;
   if (!opts.local) {
     const remoteHosts = remoteHostsToDial(opts.hosts, self);
@@ -1634,6 +1646,8 @@ async function gatherActiveSessionsLive(
     if (!opts.hosts?.length || (remoteHosts && remoteHosts.length > 0)) {
       const remote = await gatherRemoteActive(remoteHosts);
       remoteDeviceCount = remote.deviceCount;
+      remoteSkipped = remote.skipped;
+      remoteDiscoveryFailed = remote.discoveryFailed;
       merged = dedupeByMachineSession([...local, ...remote.sessions]);
     }
   }
@@ -1645,7 +1659,38 @@ async function gatherActiveSessionsLive(
   return {
     sessions: filterActiveSessionsByHostScope(merged, opts.hosts, self),
     remoteDeviceCount,
+    remoteSkipped,
+    remoteDiscoveryFailed,
   };
+}
+
+/**
+ * Explain an empty `--active` result instead of the old flat
+ * "No active agent sessions." either way (RUSH-2507: a live fleet sweep found
+ * ~41 running agents while this printed the same line as a genuinely idle
+ * fleet). Re-probes local tmux health only now, on the empty path, and names
+ * any remote peer that went unheard rather than silently folding it into
+ * "nothing running".
+ */
+async function describeEmptyActiveDiscovery(
+  opts: { local?: boolean; hosts?: string[] },
+  remoteSkipped: string[] | undefined,
+  remoteDiscoveryFailed: boolean | undefined,
+): Promise<string> {
+  const parts: string[] = [];
+  if (!opts.hosts?.length || opts.local) {
+    const health = await describeActiveDiscoveryHealth();
+    if (health.degradedSources.length > 0) {
+      parts.push(`local discovery is degraded (${health.degradedSources.join(', ')} unreachable) — sessions may be hidden, run \`agents doctor\` to diagnose`);
+    }
+  }
+  if (remoteDiscoveryFailed) {
+    parts.push('the device list could not be loaded — no peer was reachable to sweep');
+  } else if (remoteSkipped && remoteSkipped.length > 0) {
+    parts.push(`${remoteSkipped.length} peer(s) went unheard (${remoteSkipped.join(', ')}) — sessions there may be hidden`);
+  }
+  if (parts.length === 0) return 'No active agent sessions.';
+  return `No active agent sessions found, but discovery was degraded: ${parts.join('; ')}.`;
 }
 
 /**
@@ -1667,7 +1712,7 @@ async function renderActiveSessions(
 ): Promise<void> {
   const self = machineId();
   const gathered = await gatherActiveSessions(opts);
-  const { remoteDeviceCount } = gathered;
+  const { remoteDeviceCount, remoteSkipped, remoteDiscoveryFailed } = gathered;
   // Backfill agent version, refs, created time, and routine provenance from the
   // historical index. Routine filtering needs that provenance before it narrows
   // the live pool; doing it here also enriches both JSON and human output.
@@ -1701,7 +1746,11 @@ async function renderActiveSessions(
   }
 
   if (sessions.length === 0) {
-    console.log(chalk.gray(waitingOnly ? 'No sessions waiting on input.' : 'No active agent sessions.'));
+    if (waitingOnly) {
+      console.log(chalk.gray('No sessions waiting on input.'));
+      return;
+    }
+    console.log(chalk.gray(await describeEmptyActiveDiscovery(opts, remoteSkipped, remoteDiscoveryFailed)));
     if (!opts.local && !opts.hosts?.length && remoteDeviceCount === 0) printCrossMachineTip();
     return;
   }
@@ -2294,13 +2343,17 @@ export async function renderSessionPreview(
   scope: { agent?: string; project?: string; local?: boolean; hosts?: string[]; json?: boolean },
 ): Promise<void> {
   let outcome = await resolveSessionMetadataValue(query, scope);
-  // A just-created transcript may not have reached the incremental index yet.
-  // Keep the indexed path hot, but repair a local cold miss once before saying
-  // it does not exist. This also preserves Claude history-alias discovery.
+  // resolveSessionMetadataValue already consults the live registry for a running
+  // session with no transcript row (RUSH-2682), so a live session resolves above.
+  // This block still repairs the residual case — a session whose transcript is on
+  // disk but not yet indexed (e.g. one that just ended). `waitForScan` makes the
+  // repair honest: when another process holds the scan claim it waits for that
+  // scan instead of returning the stale read. Also preserves Claude history-alias
+  // discovery.
   if (outcome.kind !== 'resolved'
     && (!scope.hosts?.length || shouldIncludeLocal(scope.hosts, machineId()))) {
     const discovered = applyScopeFilters(
-      await discoverSessions({ all: true, cwd: process.cwd(), limit: 5000 }),
+      await discoverSessions({ all: true, cwd: process.cwd(), limit: 5000, waitForScan: true }),
       scope,
     );
     const localMatches = resolveSessionQuery(discovered, query, { indexFallback: false }).matches
@@ -5407,18 +5460,78 @@ export function metadataResolveOutcome(
   return { kind: 'resolved', session: candidates[0].hits[0].session };
 }
 
+/** Injectable dependency for the live-registry cold-miss fallback (RUSH-2682). */
+export type LiveMetadataDeps = { loadActive?: typeof loadLocalActiveSessions };
+
+/**
+ * Local metadata candidates for a selector: the indexed SQLite rows, plus — when
+ * an id-shaped selector misses the index entirely — the live-session registry
+ * (RUSH-2682).
+ *
+ * Indexing is lazy (it only runs inside `discoverSessions`), so a session THIS
+ * box just started is "running" in `agents sessions --active` minutes before its
+ * transcript reaches the local index. Every id resolver (`preview`, `resume`,
+ * `focus`, and the fan-out peer that answers `--resolve-safe-v1`) therefore
+ * consults the SAME live registry `--active` reads before declaring a running
+ * session non-existent. It reshapes process state the registry already computed;
+ * it parses no transcript and renders nothing. The live path is entered ONLY on a
+ * cold id miss, so an indexed hit keeps its richer row and keyword resolution is
+ * unchanged.
+ */
+export async function computeLocalMetadataMatches(
+  selector: string,
+  scope: { agent?: string; project?: string; local?: boolean; hosts?: string[] },
+  deps: LiveMetadataDeps = {},
+): Promise<SessionMeta[]> {
+  const localMachine = machineId();
+  const includeLocal = !scope.hosts?.length || shouldIncludeLocal(scope.hosts, localMachine);
+  if (!includeLocal) return [];
+
+  const indexed = resolveIndexedMetadataRows(indexedRowsForSelector(selector, scope), selector);
+  if (indexed.length > 0 || !looksLikeSessionId(selector)) {
+    return indexed.map(session => ({ ...session, machine: session.machine || localMachine }));
+  }
+
+  const live = await liveMetadataMatches(selector, scope, localMachine, deps);
+  return live.map(session => ({ ...session, machine: session.machine || localMachine }));
+}
+
+/**
+ * Resolve an id-shaped selector against the local live-session registry
+ * (RUSH-2682). Reads the daemon-warmed active snapshot first (cheap); if that
+ * snapshot predates a just-started session and misses, it forces ONE fresh
+ * gather before conceding, so a session started seconds ago resolves
+ * synchronously. Never throws — a degraded registry read yields no candidates,
+ * so the caller falls through to the ordinary not-found path.
+ */
+export async function liveMetadataMatches(
+  selector: string,
+  scope: { agent?: string; project?: string },
+  self: string,
+  deps: LiveMetadataDeps = {},
+): Promise<SessionMeta[]> {
+  const load = deps.loadActive ?? loadLocalActiveSessions;
+  const match = (metas: SessionMeta[]): SessionMeta[] =>
+    resolveIndexedMetadataRows(applyScopeFilters(metas, scope), selector);
+  try {
+    const cached = liveSessionMetas((await load()).sessions, self, Date.now());
+    const hit = match(cached);
+    if (hit.length > 0) return hit;
+    const fresh = liveSessionMetas((await load({ forceRefresh: true })).sessions, self, Date.now());
+    return match(fresh);
+  } catch {
+    return [];
+  }
+}
+
 /** Reusable local-first resolver for `agents run --resume` and `agents resume`.
  * Full UUIDs hit the local SQLite index without any SSH fan-out. */
 export async function resolveSessionMetadataValue(
   selector: string,
   scope: { agent?: string; project?: string; local?: boolean; hosts?: string[] } = {},
-  deps: Pick<FleetResolveDeps, 'gatherRemoteList'> = { gatherRemoteList },
+  deps: Pick<FleetResolveDeps, 'gatherRemoteList'> & LiveMetadataDeps = { gatherRemoteList },
 ): Promise<MetadataResolveOutcome> {
-  const localMachine = machineId();
-  const includeLocal = !scope.hosts?.length || shouldIncludeLocal(scope.hosts, localMachine);
-  const indexed = includeLocal ? indexedRowsForSelector(selector, scope) : [];
-  const localMatches = resolveIndexedMetadataRows(indexed, selector)
-    .map(session => ({ ...session, machine: session.machine || localMachine }));
+  const localMatches = await computeLocalMetadataMatches(selector, scope, deps);
 
   // A full-UUID local hit resolves with ZERO SSH: a UUID is globally unique, so
   // finding it locally is the whole answer and no peer is dialed. (A label is
@@ -5461,13 +5574,13 @@ export async function resolveSessionMetadataValue(
 export async function resolveSessionMetadata(
   selector: string,
   scope: { agent?: string; project?: string; local?: boolean; hosts?: string[] },
-  deps: Pick<FleetResolveDeps, 'gatherRemoteList'> = { gatherRemoteList },
+  deps: Pick<FleetResolveDeps, 'gatherRemoteList'> & LiveMetadataDeps = { gatherRemoteList },
 ): Promise<void> {
-  const localMachine = machineId();
-  const includeLocal = !scope.hosts?.length || shouldIncludeLocal(scope.hosts, localMachine);
-  const indexed = includeLocal ? indexedRowsForSelector(selector, scope) : [];
-  const localMatches = resolveIndexedMetadataRows(indexed, selector)
-    .map(session => ({ ...session, machine: session.machine || localMachine }));
+  // Same local candidate set as resolveSessionMetadataValue, so the peer
+  // answering a fan-out (`--resolve-safe-v1`, NO_FANOUT) surfaces a running
+  // session its own index has not caught yet — the cross-device half of the
+  // RUSH-2682 fix, since the parent's fan-out reads this box's answer.
+  const localMatches = await computeLocalMetadataMatches(selector, scope, deps);
 
   // A peer is already inside gatherRemoteList. Return all local candidates so
   // the parent can distinguish a fleet-wide unique match from an ambiguity.
@@ -5692,17 +5805,17 @@ export function registerSessionsCommands(program: Command): void {
       agents sessions --orphan
       agents sessions --crashed
 
-      # --- Session lifecycle (one verb per intent) ---
-      # Focus a session (attach its living terminal, or recover an ended one)
-      agents sessions focus a1b2c3d4
-      # Attach only — never fork a copy (old: sessions go)
-      agents sessions focus a1b2c3d4 --attach-only
-      # Interactive → headless (keep working unattended)
-      agents sessions detach a1b2c3d4
-      # Headless → interactive in this terminal
-      agents sessions attach a1b2c3d4
+      # --- Session lifecycle ---
+      # Get back into a session — attaches a live pane, or recovers an ended one
+      agents sessions resume a1b2c3d4
+      # Same, by the tmux name shown in: agents tmux ls
+      agents sessions resume ag-claude-a1b2c3d4
+      # Attach only — never fork a copy
+      agents sessions resume a1b2c3d4 --attach-only
       # Multi-select history and open each in a tab
       agents sessions resume
+      # The other direction: interactive → headless (keep working unattended)
+      agents sessions detach a1b2c3d4
 
       # The interactive list folds in other online machines automatically,
       # labelled by host with this machine first. Stay local with --local:
@@ -5754,12 +5867,12 @@ export function registerSessionsCommands(program: Command): void {
       agents sessions --all "deploy script" --host box-a --host box-b
     `,
     notes: `
-      Session lifecycle (pick one verb — they are not synonyms):
-        focus [selector]        attach a living pane, or recover on the origin device
-        focus [id] --attach-only  attach only; never fork (replaces sessions go)
-        detach <id>             interactive → headless continuation
-        attach <id>             headless → interactive in this terminal
-        resume [query]          multi-select history → open tabs (or run --resume <id>)
+      Session lifecycle — ONE verb gets you back in, it detects the state:
+        resume <id|alias>       live pane -> attach; headless -> foreground; ended -> recover
+        resume <id> --attach-only  attach only; never fork a copy
+        resume                  multi-select history -> open tabs
+        detach <id>             the other direction: interactive -> headless
+        (retired, still working for one release: sessions attach, sessions go, reconnect)
       - The interactive listing and every live-status flag fold in your other online machines automatically (live over SSH, no sync) — each row is labelled by host, this machine first. Use --local to skip the fan-out; single-id lookups stay local.
       - --all is not a device flag: it widens historical directory and time filters. Fleet collection is already the default. A status flag (--working/--idle/--waiting/--orphan/--crashed/--closed/--abandoned/--queued/--unknown) implies --active; combine status flags for a union.
       - --version <version> requires --agent and is equivalent to --agent <agent@version>.
@@ -5875,7 +5988,6 @@ export function registerSessionsCommands(program: Command): void {
   registerSessionsMigrateCommand(sessionsCmd);
   registerSessionsMigrationsCommand(sessionsCmd);
   registerSessionsBackfillCommand(sessionsCmd);
-  registerSessionsReapCommand(sessionsCmd);
   registerSessionsStatsCommand(sessionsCmd);
   registerSessionsInsightsCommand(sessionsCmd);
   registerSessionsOptimizeCommand(sessionsCmd);

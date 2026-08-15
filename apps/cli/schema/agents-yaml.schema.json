@@ -34,6 +34,11 @@
         "interactiveHost": {
           "type": "string",
           "description": "User scope. Device that shows the user artifacts (browser opens, dashboards). Set via `agents devices config <name> interactive.host <name>`."
+        },
+        "autoPool": {
+          "type": "string",
+          "enum": ["workers", "all"],
+          "description": "User scope. Which devices automatic placement (`--device auto`) may pick: 'workers' (default — only devices marked role=worker, once any is marked) or 'all'. A device marked personal is never picked under either mode. Set via `agents config set auto.pool <mode>`."
         }
       }
     },
@@ -142,6 +147,11 @@
                 "description": "Device-scope operator config for this device (central, synced). Unset keys keep default behavior.",
                 "additionalProperties": true,
                 "properties": {
+                  "role": {
+                    "type": "string",
+                    "enum": ["worker", "personal"],
+                    "description": "What this device is for, fleet-wide (`agents devices role <name> <role>`). Marking any device 'worker' makes `--device auto` an allowlist over the marked workers; a 'personal' device is never picked automatically. A paired cockpit's 'control' role lives in that box's own device registry (agents devices pair-ios), not here."
+                  },
                   "maxAgents": {
                     "type": "integer",
                     "minimum": 1,
@@ -223,7 +233,7 @@
     },
     "share": {
       "type": "object",
-      "description": "`agents share` endpoint (Cloudflare R2 + Worker).",
+      "description": "`agents artifacts share` endpoint (Cloudflare R2 + Worker).",
       "properties": {
         "baseUrl": { "type": "string" },
         "accountId": { "type": "string" },

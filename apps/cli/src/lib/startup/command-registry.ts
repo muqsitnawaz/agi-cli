@@ -59,7 +59,6 @@ export const loadOpen: ModuleLoader = async () => (await import('../../commands/
 export const loadReconnect: ModuleLoader = async () => (await import('../../commands/reconnect.js')).registerReconnectCommand;
 export const loadFork: ModuleLoader = async () => (await import('../../commands/fork.js')).registerForkCommand;
 export const loadConfig: ModuleLoader = async () => (await import('../../commands/config.js')).registerConfigCommand;
-export const loadSet: ModuleLoader = async () => (await import('../../commands/set.js')).registerSetCommand;
 export const loadModels: ModuleLoader = async () => (await import('../../commands/models.js')).registerModelsCommand;
 export const loadModes: ModuleLoader = async () => (await import('../../commands/modes.js')).registerModesCommand;
 export const loadPrune: ModuleLoader = async () => (await import('../../commands/prune.js')).registerPruneCommand;
@@ -70,6 +69,7 @@ export const loadApply: ModuleLoader = async () => (await import('../../commands
 export const loadStatus: ModuleLoader = async () => (await import('../../commands/status.js')).registerStatusCommand;
 export const loadSnapshot: ModuleLoader = async () => (await import('../../commands/snapshot.js')).registerSnapshotCommand;
 export const loadProfiles: ModuleLoader = async () => (await import('../../commands/profiles.js')).registerProfilesCommands;
+export const loadRoute: ModuleLoader = async () => (await import('../../commands/route.js')).registerRouteCommands;
 export const loadHarness: ModuleLoader = async () => (await import('../../commands/harness.js')).registerHarnessCommands;
 export const loadSecrets: ModuleLoader = async () => (await import('../../commands/secrets.js')).registerSecretsCommands;
 export const loadLogin: ModuleLoader = async () => (await import('../../commands/login.js')).registerLoginCommands;
@@ -110,7 +110,9 @@ export const loadSend: ModuleLoader = async () => (await import('../../commands/
 export const loadFeed: ModuleLoader = async () => (await import('../../commands/feed.js')).registerFeedCommand;
 export const loadMailboxes: ModuleLoader = async () => (await import('../../commands/mailboxes.js')).registerMailboxesCommand;
 export const loadServe: ModuleLoader = async () => (await import('../../commands/serve.js')).registerServeCommand;
-export const loadShare: ModuleLoader = async () => (await import('../../commands/share.js')).registerShareCommands;
+// Registers the `artifacts` group (with `share` + `setup` under it) AND the
+// top-level `unshare` alias — see commands/artifacts.ts.
+export const loadArtifacts: ModuleLoader = async () => (await import('../../commands/artifacts.js')).registerArtifactsCommands;
 export const loadAudit: ModuleLoader = async () => (await import('../../commands/audit.js')).registerAuditCommands;
 export const loadWebhooks: ModuleLoader = async () => (await import('../../commands/webhook.js')).registerWebhooksCommand;
 export const loadHumans: ModuleLoader = async () => (await import('../../commands/humans.js')).registerHumansCommands;
@@ -189,7 +191,6 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   reconnect: [loadReconnect],
   fork: [loadFork],
   config: [loadConfig],
-  set: [loadSet],
   models: [loadModels],
   modes: [loadModes],
   trash: [loadTrash],
@@ -199,6 +200,7 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   status: [loadStatus],
   snapshot: [loadSnapshot],
   profiles: [loadProfiles],
+  route: [loadRoute],
   harness: [loadHarness],
   harnesses: [loadHarness],
   secrets: [loadSecrets],
@@ -255,10 +257,10 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   mailboxes: [loadMailboxes],
   mailbox: [loadMailboxes],
   serve: [loadServe],
-  share: [loadShare],
-  // `unshare` is a top-level convenience alias of `share delete` (see
+  artifacts: [loadArtifacts],
+  // `unshare` is a top-level convenience alias of `artifacts share delete` (see
   // commands/share.ts) — same module, registered as its own program.command().
-  unshare: [loadShare],
+  unshare: [loadArtifacts],
   audit: [loadAudit],
   webhooks: [loadWebhooks],
   humans: [loadHumans],
@@ -300,7 +302,16 @@ export const KNOWN_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set<string>([
   ...INLINE_COMMAND_NAMES,
 ]);
 
-export const RETIRED_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set(['webhook']);
+/**
+ * Former top-level names that must NOT auto-correct (edit-distance 1) into a
+ * live command. Without this a pruned surface silently misroutes: the typed
+ * name is gone, the spellchecker finds a neighbour, and the CLI runs something
+ * the user never asked for instead of saying the command is gone.
+ *
+ * `set` moved under `agents models`/`agents config` (RUSH-2579); `share` moved
+ * under `agents artifacts share` (RUSH-2580).
+ */
+export const RETIRED_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set(['webhook', 'set', 'share']);
 
 
 /** Whether `name` is a top-level command this CLI registers. See {@link KNOWN_TOP_LEVEL_COMMANDS}. */

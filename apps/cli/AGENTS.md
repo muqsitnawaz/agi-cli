@@ -339,8 +339,9 @@ coverage is `ALL_AGENT_IDS`-driven, so a new harness is included automatically.
 ### 11. Session recovery is one decision on the origin device
 
 `resolveSessionRecovery` in `src/lib/session/recovery.ts` is the only place that
-chooses native resume versus `/continue`. Focus, resume, attach, and
-`run --resume` route through it. Native resume is valid only for the exact healthy
+chooses native resume versus `/continue`. `sessions resume`, `agents resume`, and
+`run --resume` route through it — as do the retired `focus`/`attach`/`reconnect`
+spellings, which are hidden aliases that still run the same bodies. Native resume is valid only for the exact healthy
 origin version when that active isolated home still owns the indexed transcript;
 a removed, signed-out, revoked, exhausted, trashed, backup-only, or same-number
 reinstalled origin uses a healthy version of the same harness and reads the
@@ -373,13 +374,51 @@ agents config set run.claude@*.mode auto
 agents config set run.claude@*.effort high
 agents config set interactive.host zion
 agents config set browser.profile work
+agents config set auto.pool workers
+agents config set devices.mac-mini.role worker
 agents config set devices.mac-mini.max-agents 4
 agents config set devices.mac-mini.scheduler off
+agents config set devices.mac-mini.tmux off
 ```
 
 The new command is a **facade over the existing YAML storage**
 (`run.defaults`, `model.tiers`, `config.interactiveHost`,
 `defaultBrowserProfile`, and `deviceConfig`). Fleet sync behavior is unchanged.
+
+`devices.<name>.tmux` (stored as `tmux.enabled`) is the durable form of
+`--no-tmux` / `AGENTS_NO_TMUX=1`: off makes every interactive `agents run` on that
+box spawn the agent directly instead of wrapping it in the shared-socket tmux
+session. It is machine-local by design — a broken or unwanted tmux is a property
+of one machine, so the value never enters the fleet-shared file and cannot be set
+for a peer. Off costs that box `%pane` addressing, so `agents sessions --active`
+can no longer tell co-located agents apart there and `agents focus` cannot
+re-attach its sessions. The gate is `shouldWrapInTmux`
+([`src/lib/exec.ts`](src/lib/exec.ts)), reading `isTmuxEnabled()`.
+
+`devices.<name>.role` (stored as `role`) says what a device is for fleet-wide —
+`worker` (agents run here) or `personal` (a machine you sit at).
+`agents devices role <name> <role>` is the task-shaped spelling. Marking any
+device `worker` turns automatic placement into an allowlist: `--device auto` then
+picks only from the marked workers, in every caller (`run`, `teams`, `ssh auto`,
+the generic `--host auto` passthrough, and the AGI EXT launch commands, which
+resolve placement through the CLI rather than scoring devices themselves); a
+`personal` box is never picked automatically. The rule is one function —
+`filterAutoPool` in [`src/lib/devices/pool.ts`](src/lib/devices/pool.ts) — read by
+`listOnlineDeviceNames`, and `auto.pool` (`workers` by default, or `all`) turns
+the allowlist off. When roles leave the pool empty, **both** resolvers throw
+(`formatEmptyAutoPoolError`): a `null` host means "run locally", which on a
+`personal` box is the outcome the mark exists to prevent. Unlike the machine-local
+keys, `role` is **shared**: it lives in the central `fleet.devices.<name>.config`
+block and syncs, because every box has to agree on where agents may land.
+
+The vocabulary stops at `worker | personal` on purpose. A paired cockpit's
+`control` role is the pre-existing `DeviceRole` in
+[`src/lib/devices/registry.ts`](src/lib/devices/registry.ts), written by
+`agents devices pair-ios` into that box's own registry and read by the
+`isControlDevice()` dial filters. Those filters read each machine's LOCAL
+registry, so accepting `control` in the shared key would promise a fleet-wide
+dial exclusion it cannot deliver — placement simply skips control devices where
+it already reads the registry (`listOnlineDeviceNames`).
 
 `interactive.host` is a **user-level** preference: it lives in central
 `~/.agents/agents.yaml` under `config.interactiveHost`, syncs fleet-wide via
@@ -458,6 +497,7 @@ src/
     browser/           # browser daemon service + existing CDP connection pool; ipc.ts owns one-shot and persistent socket clients, stream.ts owns the NDJSON action loop
     monitors/          # `agents monitors` — event-triggered watchers (source→condition→action); native state-diff store; MonitorEngine runs in the daemon beside the cron scheduler. See docs/monitors.md
     projects.ts        # `agents projects` — named multi-repo project defs (~/.agents/projects/*.yaml) layered above the --project convention (resolveProjectRef in project-root.ts); project-status.ts rolls live sessions + merged PRs + artifacts into the progress card. Beta-gated. See docs/projects.md
+    project-pull.ts    # `agents projects pull` — fleet fan-out logic: pullProjectTargets (sequential local fast-forward + per-target repo-slug verification), pullLocalArgs/encodePullTargets/decodePullTargets (the {path, expectedSlug} CLI-arg hop to each peer's hidden `pull-local` — bare paths would disable slug verification remotely AND break the fingerprint), buildPullEnvelope/parseProjectPullEnvelope (fail-closed AND fail-loud: a rejected envelope returns valid:false so the peer lands in parseFailed and exits non-zero, never a silent empty result set), printProjectPullSummary. Strict safe contract: dirty trees and non-default branches are blocked; missing checkouts are skipped, never cloned. See docs/projects.md §Pulling every reachable checkout
     migrate.ts         # One-shot idempotent migrations
     session/           # `agents sessions` READER — discovery/parse/render of agent transcripts; also `migrate-targets.ts` (the `sessions migrate` target scorer); `db.ts` `queryResourceUsageStats`/`backfillResourceUsage` back `agents sessions stats` + `sessions backfill resources` (skill/command usage rollup, session_resource_usage + resource_scan_ledger); `claude-accounts.ts` attributes each Claude transcript to the account that produced it (account_key) and `insights.ts` extracts the cached multi-harness friction/correction/automation facets behind `agents sessions insights` (`agents insights` alias)
     terminal/          # Terminal launch engine — tab/split in iTerm/Ghostty/tmux/Terminal.app, local or --host;
@@ -488,6 +528,17 @@ their owning peer, and the normalized digest is cached in SQLite against the
 transcript's actual mtime + size. Live status is deliberately outside that durable
 digest and expires after 15 seconds through `session-cache.ts`.
 
+Indexing is lazy — only `discoverSessions` writes the index — so a session THIS
+box just started is "running" in `--active` before it is indexed. The id resolver
+(`computeLocalMetadataMatches` in `sessions.ts`) therefore unions the indexed
+rows with the LIVE registry on a cold id miss, so `preview`/`resume`/`focus`
+resolve a running session with no transcript row yet (the fan-out peer answers
+from the same union, so it works cross-device too — SES-9b). The daemon keeps the
+index current within seconds via `runSessionIndexWarmTick`, and the cold-miss
+repair waits for a concurrent scan rather than returning a stale read
+(`discoverSessions({ waitForScan })` — SES-9c). This is why a running session no
+longer reads "No session matching" during the index-lag window (RUSH-2682).
+
 Routing lives in `src/commands/sessions.ts`: `isBareBrowserListing`
 (+`hasNoBrowserDisqualifyingFlags`) gates the bare fleet-wide listing to the rich
 `runSessionBrowser` ([`src/commands/sessions-browser.ts`](src/commands/sessions-browser.ts));
@@ -516,7 +567,7 @@ fallback then quietly resumed in `process.cwd()` (RUSH-2022).
 ([`src/lib/session/resume-owner.ts`](src/lib/session/resume-owner.ts)) is the one
 answer to "may this resume run here?". Every path that starts a harness from a picked
 row consults it first: `agents resume` and the `agents sessions` picker hop to the
-owner, and `sessions attach` hops as an **attach** (its detach record and the
+owner, and the attach path hops as an **attach** (its detach record and the
 headless process it stops are both on the owner — hopping as a bare resume would
 skip the stop and leave two processes on one transcript). The batch
 `sessions resume` mostly inherits it for free: every TAB it opens runs the
@@ -613,7 +664,7 @@ that the caller be on a clean `main`:
 ```bash
 scripts/release.sh <version>                      # dry-run: bump, type-check, tarball preview, detected state
 scripts/release.sh <version> --apply              # tests on a crabbox -> PR + CI -> merge + tag -> build/sign/publish on the home base (mac-mini)
-scripts/release.sh <version> --apply --device zion  # same, but sign/publish on zion (use when mac-mini is offline)
+scripts/release.sh <version> --apply --device <mac>  # sign/publish on <mac> when mac-mini is down -- <mac> must ALREADY be a provisioned signing home base (see below)
 ```
 
 The release has **three self-selected homes** and prints a `[n/6]` phase tracker,
@@ -627,11 +678,34 @@ each phase labeled with the box it runs on and a ✓/✗ result:
 
 The home base is a Mac that holds the Developer ID cert + npm publish rights.
 It defaults to `mac-mini` and is overridable with **`--device <name>`** (alias
-`--host`) — pass `--device zion` to drive the release from another capable Mac
-when mac-mini is down. Not an env var: a flag with a default. The macOS-only
-sign/notarize + the npm tarball's signed binaries mean the home base must be a
-Mac; a Linux worker can *drive* the release but not be the home base. The
-crabbox is **not** hardcoded.
+`--host`) to drive the release from another Mac when mac-mini is down. Not an env
+var: a flag with a default. The macOS-only sign/notarize + the npm tarball's
+signed binaries mean the home base must be a Mac; a Linux worker can *drive* the
+release but not be the home base. The crabbox is **not** hardcoded.
+
+**A `--device` fallback must ALREADY be a provisioned signing home base — it is
+not turnkey.** Signing + notarizing + publishing needs, on that box: the
+`Developer ID Application` identity in a *headless-unlockable* keychain
+(`rush-signing.keychain-db` + `~/Library/Application Support/rush/signing.kcpass`,
+the pass file that lets a headless SSH release unlock it — a cert that only appears
+after an interactive login does **not** count), and the `apple.com` (notarytool)
+and `npmjs.com` (publish token) secrets bundles. A box like `zion` typically has a
+Developer ID cert in its *login* keychain but none of the headless plumbing, so it
+cannot sign a release. Passing `--device zion` there used to run the whole flow —
+merge the PR, push the tag — and only fail at the sign step, leaving a
+tagged-but-**unpublished** release (RUSH-2535; npm stuck at 1.22.35 with `v1.22.36`
+tagged). `release.sh` now **preflights the resolved home base BEFORE any mutation**
+([`scripts/signing-home-base-probe.sh`](scripts/signing-home-base-probe.sh), run on
+that box over `agents ssh`): an unprovisioned `--device` aborts at the preflight,
+before the crabbox/PR/merge/tag phases, naming the exact gap, so a mac-mini outage
+no longer risks a half-finished release. `apps/cli/bin/embedded.provisionprofile` is a
+committed input (commit 2567004b4) that self-heals — the preflight and the
+home-base phase both recover it from a freshly fetched `origin/<default>` ref when
+the box's own on-disk checkout predates that commit, so a brand-new home base
+never needs the profile hand-copied over (RUSH-2541). The keychain (Developer ID
+identity in a headless-unlockable keychain) and the `apple.com`/`npmjs.com`
+secrets bundles remain genuinely manual, per-machine provisioning steps — seed
+those first, then `--device <that-mac>` works.
 
 **The caller checkout is never mutated or gated.** `release.sh` immediately
 fetches origin and re-enters the release from a detached, release-owned worktree
@@ -712,9 +786,17 @@ the operator's unwedge path, since `release` only drops a lease *this checkout*
 claimed. It shares one predicate with `claim`, so it can never take a live holder's
 lease either.
 
-**Finish a stuck release before cutting a new one.** `release.sh` refuses to start
-when an older `v*` tag exists that npm never received, and prints the re-run that
-finishes it. Without this, a release that died between tag and publish left the
+**Finish a stuck release before cutting a new one — with one exemption.** `release.sh`
+refuses to start when an older `v*` tag exists that npm never received, and prints
+the re-run that finishes it. The single carve-out is a **`patch-from-main` bump
+stepping over main's own version**, because that stuck release cannot be finished
+at all: `release.sh`'s catch-up guard rejects it and points at "cut the next patch",
+so without the exemption the two guards deadlock and *nothing* publishes (2026-08-10,
+npm at 1.22.35 with `v1.22.36` tagged — its CI-tested tree predated the prepack
+version-gate fix, so its own `npm publish` rejected a correct binary). Only main's
+own version is dropped from the candidate set, and `stuck-release.sh` says so on
+stderr; any other stuck tag still blocks, under every bump kind. Without the guard,
+a release that died between tag and publish left the
 next run validating its bump against a registry that was behind, so it cut the
 *next* version and the gap widened by one every time — that is how npm sat at
 1.20.78 while `main` carried 1.20.81.

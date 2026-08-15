@@ -72,6 +72,20 @@ export interface Task {
   tabs: Record<string, string>; // shortId (8 chars) -> CDP targetId
   currentTabId?: string; // shortId of current tab
   createdAt: number;
+  /**
+   * When this task last did anything. Stamped at creation (equal to
+   * `createdAt`) and refreshed by every task-scoped action, because every one
+   * of them resolves the task through `BrowserService.findTask`.
+   *
+   * Read by the idle half of the abandoned-task reaper (`hygiene.ts`): a task
+   * nobody has driven for `idleMs` is stopped so its tabs stop piling up in the
+   * profile window (RUSH-2622).
+   *
+   * Persisted in tasks.json. Tasks written before RUSH-2622 carry none;
+   * `loadTaskState` normalizes those to `createdAt` on read, so every task in
+   * memory has one and the reaper never has to guess.
+   */
+  lastActionAt: number;
   pid: number;
   /**
    * Resolved actor id (`resolveActor().id`) stamped at task start — WHO launched
@@ -88,6 +102,13 @@ export interface Task {
    * from the caller over IPC. Optional: tasks from before this shipped carry none.
    */
   launchId?: string;
+  /**
+   * The agent session that started this task (`$AGENT_SESSION_ID`), forwarded
+   * from the caller at `start`. The durable copy lives in the `browser_sessions`
+   * table, which survives `stop`; this in-memory/tasks.json copy is the live one
+   * (RUSH-2549).
+   */
+  sessionId?: string;
   /**
    * Per-tab snapshot of the last ref listing captured for that tab
    * (shortId -> {descriptors, opts}). Persisted to tasks.json so a later
@@ -139,8 +160,29 @@ export interface HistoricalTask {
   owner?: string;
 }
 
+/**
+ * Why the reaper stopped a task. `session-dead` — the agent session (or run)
+ * that started it is provably gone; `idle` — nothing has driven it for the
+ * idle window. See `hygiene.ts`.
+ */
+export type ReapReason = 'session-dead' | 'idle';
+
+/** One task the reaper stopped (or, under `dryRun`, would have stopped). */
+export interface ReapedTask {
+  task: string;
+  profile: string;
+  reason: ReapReason;
+}
+
+export interface ReapResult {
+  closed: ReapedTask[];
+  /** Tasks left alone this pass: still live, still inside the idle window, or recording. */
+  skipped: number;
+}
+
 export type IPCAction =
   | 'start'
+  | 'gc'
   | 'record-start'
   | 'record-stop'
   | 'done'
@@ -235,6 +277,17 @@ export interface IPCRequest {
   appLevel?: string;
   // Browser start: opt out of domain-skill discovery.
   skipDomainSkill?: boolean;
+  /**
+   * Browser start: always open a new tab. Without it, `start --url` reclaims a
+   * tab that an ABANDONED task is still holding on this exact URL rather than
+   * opening a duplicate (RUSH-2622). A tab held by a live task, or one nobody's
+   * task owns (the user's own), is never taken either way — set this when the
+   * caller wants its own tab regardless.
+   */
+  fresh?: boolean;
+  // `gc`: override the idle window (default 30) and preview without closing.
+  idleMinutes?: number;
+  dryRun?: boolean;
   // Caller identity, forwarded from the CLI process. The browser daemon is
   // shared and long-lived, so it cannot resolve the caller's actor/run itself
   // (resolveActor() there yields the daemon's identity, not the caller's).
@@ -242,6 +295,18 @@ export interface IPCRequest {
   // on `status`, scopes the listing to the caller's run.
   actor?: string;
   launchId?: string;
+  /**
+   * The calling agent session (`$AGENT_SESSION_ID` / `$AGENTS_SESSION_ID`) —
+   * the id that answers "which agent drove this task" and the one persisted to
+   * `browser_sessions` (RUSH-2549).
+   *
+   * This is the primary identity, not a spare: `launchId` alone was the join
+   * key, and a fleet measurement found it present on only 2 of 5 live agent
+   * processes while a session id was on 5 of 5 — every agent reaching the
+   * browser carries one. It is the same env `stampProvenance()` already reads
+   * for `computer.action` events, so both tool surfaces key on one signal.
+   */
+  sessionId?: string;
 }
 
 /** Subset of IPCResponse describing a recording start result. */
@@ -266,6 +331,8 @@ export interface IPCResponse {
   tabs?: TabInfo[];
   profiles?: ProfileStatus[];
   history?: HistoricalTask[];
+  /** `gc`: what the abandoned-task reaper closed (or would close under dryRun). */
+  reaped?: ReapResult;
   result?: unknown;
   path?: string;
   bytes?: number;

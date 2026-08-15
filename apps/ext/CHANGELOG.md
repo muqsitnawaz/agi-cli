@@ -6,6 +6,100 @@ All notable changes to AGI EXT (the VS Code extension) are documented here. Form
 
 ## [Unreleased]
 
+## [0.9.321] - 2026-08-14
+
+- **`Agents: Attach` finds your backgrounded agents again (RUSH-2670).** A
+  detached session's stream row names its terminal app in `host` — for a
+  backgrounded agent that is the bare tmux server, so the presentation store
+  (which fell back to `host` when the row had no `machine`) presented it as
+  living on a machine called "tmux". The Attach command's this-machine filter
+  then never matched, and `Agents: Attach` always reported "No backgrounded
+  agents to bring forward" even seconds after a successful Detach. The store
+  now takes device identity from `machine` (offloaded rows) or `sourceDevice`
+  (everything else) and never from the terminal-app `host`. Source:
+  `apps/ext/src/core/sessionPresentationStore.ts`.
+
+## [0.9.320] - 2026-08-14
+
+- **Crash-restart no longer reopens every tab in a thundering herd (RUSH-2477).**
+  `restoreAgentTerminals` reopened each persisted tab and fired its resume with no
+  cap or stagger, so N crashed tabs became N near-simultaneous resume processes
+  within seconds of boot — the trigger that overwhelmed the resume path (DB-lock
+  crashes, boot-time fleet fan-out). Restore is now bounded and staggered through a
+  new pure `runStaggered` helper (`src/core/restoreThrottle.ts`): at most
+  `RESTORE_MAX_CONCURRENCY` (2) tabs restore at once, and each start after the first
+  is spaced by `RESTORE_STAGGER_MS` (300ms). A tab that fails to restore no longer
+  strands the rest of the batch. Source: `apps/ext/src/core/restoreThrottle.ts`,
+  `apps/ext/src/vscode/extension.ts`.
+
+- **A failed agent launch no longer closes the terminal before you can read
+  why (RUSH-2593).** Native-mode tabs prefixed the launch command with `exec`
+  (RUSH-2026) so the shell process was replaced by the agent runner — closing
+  the tab automatically once the runner exited. That was right for a clean
+  exit, but a *launch failure* (an unreachable `--host`, an `agents run`
+  rejection) killed the exec'd process just as fast, and the tab closed before
+  the error text on screen could be read. `wrapNativeAgentCommand` now runs the
+  launch command normally and checks its exit status: 0 still closes the tab
+  (unchanged clean-exit behavior); nonzero prints
+  `Agent exited with status <n> — terminal kept open so you can read the error
+  above.` and leaves the interactive shell running instead of exiting. Source:
+  `apps/ext/src/core/agents.ts` (`wrapNativeAgentCommand`).
+
+- **`Agents: New <Harness>` runs where you say — and defaults to the fleet's worker
+  boxes.** The per-harness New commands were hardcoded to this machine. New setting
+  `agents.launch.defaultTarget`: `auto` (the default — the CLI picks a device), `local`
+  (previous behavior), or `ask` (prompt for the host each time). Device choice stays with
+  the CLI, so `auto` emits `--device auto` and lands on whatever the fleet's
+  automatic-placement pool allows: mark boxes with `agents devices role <name> worker` and
+  new agents rotate over those only. The `(Pick Host)` and `(Auto)` command variants are
+  unchanged.
+
+## [0.9.319] - 2026-08-10
+
+- **Marketplace icon is now the agents-cli brand mark.** The listing used a
+  pink/orange gradient "A" on white, which matched nothing on
+  [agents-cli.sh](https://agents-cli.sh). It is now the site's own mark — the
+  lime `#a3e635` tile with the near-black lowercase `a`, rendered from the same
+  `favicon.svg` the website ships — as `assets/logo.png`. `assets/agents.png` is
+  unchanged and still backs the shell/custom-agent tab chips, so no in-editor
+  icon moved.
+
+- **`New <Agent>` tabs get their identity back — logo, chip, session id, labels,
+  and the commands that depend on them.** `launchAgent` had been rewritten to a
+  bare `createTerminal`, which dropped the whole post-create sequence: every
+  New-Agent tab showed the generic terminal glyph labelled `Agents claude`, the
+  status bar read `Agents: Terminal`, auto-labels never armed, and the tab was
+  never registered — so Copy Session ID, Copy Session Trace, Resume, Resume in
+  Best Profile, Handoff, Continue in New Session and Fork all answered *"Active
+  terminal is not an agent terminal"*, and a window reload lost the tab entirely
+  because nothing scheduled its persistence. The per-agent Default Model
+  (`--model`) and a workspace's bound project (`--project`) were silently
+  dropped from the launch command too. Registration now lives in one
+  `registerAgentTerminal` that both creation paths call, and the command is
+  built by the existing `buildAgentLaunchCommand` rather than a second
+  hand-rolled string. `Agents: New Agent` (the automatic launch, which has no
+  harness until the CLI picks one) registers against the `shell` def and lets
+  adoption re-key it, so it is a tracked tab from the first frame.
+
+- **`New <Agent> (Auto)` now actually offloads.** Behavior change, surfaced by
+  the above: `autoHost` has never been read — it is declared and passed by every
+  `…Auto` command but nothing consumed it — and because those commands set an
+  agent key, the old local/device test was false, so `(Auto)` emitted no device
+  flag and quietly ran on this machine. It now emits `--device auto` and lets
+  the CLI pick, which is what the command name promises. Device selection stays
+  in the CLI rather than being scored in the extension. `New <Agent> (Pick Host)`
+  answered with **This Mac** stays local, as it always should have.
+
+- **Tab icons + status bar for Grok/Kimi/Droid/Antigravity and resumed sessions.**
+  Shell-adoption only recognised the original five harnesses (`claude`/`codex`/
+  `gemini`/`cursor`/`opencode`), so a New Grok tab (or any focus/resume that
+  landed via the `/spawn` URI) stayed a generic terminal: wrong icon and status
+  bar stuck on `Agents: Terminal`. The detector now covers every built-in runner
+  (including `agy` for Antigravity). The `/spawn` payload also carries
+  `agent`/`sessionId`/`title` so remote `ssh … tmux attach` resumes set the chip
+  without process-tree sniffing (#2478). Process-title forms like `Agents grok`
+  are parsed so a reloaded window rebinds the tab.
+
 - **AGI EXT now delegates session recovery to agents-cli.** Opening the Resume
   picker performs one bounded `agents sessions --all --json --no-interactive
   --limit 60` read, and selected sessions execute `agents sessions resume <id>

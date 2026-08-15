@@ -23,6 +23,7 @@ import { buildClaudeAccountIndex, resolveClaudeAccount } from './claude-accounts
 import { extractSkills, extractSlashCommands } from './highlights.js';
 import { resolveResource } from '../resources.js';
 import { discoverPlugins } from '../plugins.js';
+import { machineId } from '../machine-id.js';
 import type { DiscoveredPlugin } from '../types.js';
 
 const SESSIONS_DIR = getSessionsDir();
@@ -31,7 +32,7 @@ const DB_PATH = getSessionsDbPath();
 /** Current schema version; bumped when migrations are added. Exported so tests
  * assert against the constant instead of hardcoding a number that every bump
  * then has to chase (docs/sessions.md calls the constant the source of truth). */
-export const SCHEMA_VERSION = 38;
+export const SCHEMA_VERSION = 39;
 
 /**
  * Bump to force `agents sessions backfill resources` to re-derive every
@@ -331,6 +332,69 @@ CREATE TABLE IF NOT EXISTS session_preview_cache (
   computed_at INTEGER NOT NULL,
   preview_json TEXT NOT NULL
 );
+
+-- Durable metadata for one browser task (RUSH-2549). The browser daemon's
+-- tasks.json is LIVE state: saveTaskState writes the in-memory task map, so
+-- stopping a task drops its entry and a daemon restart empties the file. That is
+-- correct for live state and useless as history, which is why every finished task
+-- listed as "unlinked". This row is written once at task start and is never
+-- deleted, so the link from a capture back to the agent session that drove it
+-- survives the task, the daemon, and a reboot.
+--
+-- METADATA ONLY: capture bytes are never stored here. capture_dir points at the
+-- on-disk directory (.cache/browser/<profile>/sessions/<task>/) that already holds
+-- them, and the per-kind counts are what a listing needs to render a row without
+-- walking that tree. captures_remote is set only when the optional offload has
+-- copied them through the existing encrypted r2.backups sync.
+--
+-- session_id is the agent session (AGENT_SESSION_ID, which every agent carries);
+-- launch_id stays as the secondary join key for a caller that has only that. actor
+-- is the HUMAN/tailnet identity and is deliberately NOT an agent id -- resolveActor
+-- answers UNRESOLVED@<host> for any local run by design (lib/actor.ts).
+CREATE TABLE IF NOT EXISTS browser_sessions (
+  task TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  session_id TEXT,
+  launch_id TEXT,
+  actor TEXT,
+  machine TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  last_activity INTEGER,
+  screenshot_count INTEGER NOT NULL DEFAULT 0,
+  pdf_count INTEGER NOT NULL DEFAULT 0,
+  recording_count INTEGER NOT NULL DEFAULT 0,
+  download_count INTEGER NOT NULL DEFAULT 0,
+  capture_dir TEXT,
+  captures_remote TEXT,
+  PRIMARY KEY (profile, task)
+);
+CREATE INDEX IF NOT EXISTS idx_browser_sessions_session ON browser_sessions(session_id);
+CREATE INDEX IF NOT EXISTS idx_browser_sessions_started ON browser_sessions(started_at DESC);
+
+-- Durable metadata for one "agents computer" invocation (RUSH-2549). Computer-use
+-- already resolves identity correctly -- stampProvenance stamps AGENT_SESSION_ID
+-- straight onto each computer.action event -- but those events live in the bounded
+-- audit ledger, which prunes at 7 days / 50 MiB (events.ts). So a run's history
+-- silently vanished on day 8. This row carries the same identity into the durable
+-- store; the ledger is untouched and remains the audit log, with no second pruner.
+--
+-- Keyed on invocation_id, the id emitComputerAction stamps once per emitting CLI
+-- process: one explicit verb is one row, and a whole "computer run" observe/act
+-- loop is also one row. task_preview is already bounded by events.ts truncate()
+-- before it is ever written, and typed-text content is never captured at all.
+CREATE TABLE IF NOT EXISTS computer_sessions (
+  invocation_id TEXT PRIMARY KEY,
+  session_id TEXT,
+  launch_id TEXT,
+  actor TEXT,
+  machine TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  last_activity INTEGER,
+  action_count INTEGER NOT NULL DEFAULT 0,
+  task_preview TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_computer_sessions_session ON computer_sessions(session_id);
+CREATE INDEX IF NOT EXISTS idx_computer_sessions_started ON computer_sessions(started_at DESC);
 `;
 
 /**
@@ -1053,6 +1117,51 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
     const cols = db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === 'archived_at')) db.exec(`ALTER TABLE sessions ADD COLUMN archived_at INTEGER`);
   }
+
+  if (fromVersion < 39) {
+    // v38 -> v39: durable tool-session metadata (RUSH-2549). Browser task identity
+    // lived only in the daemon's tasks.json, which is rewritten from the live task
+    // map -- so stopping a task erased the link to the agent session that drove it
+    // and every finished task listed as "unlinked". Computer-use had the identity
+    // right but wrote it to the 7-day event ledger, so its history expired instead.
+    // Both now persist metadata here. Pure additions, so no ledger flush: nothing
+    // already indexed is invalidated, and the tables populate going forward.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS browser_sessions (
+        task TEXT NOT NULL,
+        profile TEXT NOT NULL,
+        session_id TEXT,
+        launch_id TEXT,
+        actor TEXT,
+        machine TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        last_activity INTEGER,
+        screenshot_count INTEGER NOT NULL DEFAULT 0,
+        pdf_count INTEGER NOT NULL DEFAULT 0,
+        recording_count INTEGER NOT NULL DEFAULT 0,
+        download_count INTEGER NOT NULL DEFAULT 0,
+        capture_dir TEXT,
+        captures_remote TEXT,
+        PRIMARY KEY (profile, task)
+      );
+      CREATE INDEX IF NOT EXISTS idx_browser_sessions_session ON browser_sessions(session_id);
+      CREATE INDEX IF NOT EXISTS idx_browser_sessions_started ON browser_sessions(started_at DESC);
+
+      CREATE TABLE IF NOT EXISTS computer_sessions (
+        invocation_id TEXT PRIMARY KEY,
+        session_id TEXT,
+        launch_id TEXT,
+        actor TEXT,
+        machine TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        last_activity INTEGER,
+        action_count INTEGER NOT NULL DEFAULT 0,
+        task_preview TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_computer_sessions_session ON computer_sessions(session_id);
+      CREATE INDEX IF NOT EXISTS idx_computer_sessions_started ON computer_sessions(started_at DESC);
+    `);
+  }
 }
 
 /**
@@ -1352,6 +1461,25 @@ export function tryClaimScan(pid: number): boolean {
   });
 
   return txn();
+}
+
+/**
+ * Read-only probe: is a scan in progress right now, held by a LIVE process
+ * within the TTL? (RUSH-2682). Unlike {@link tryClaimScan} it never writes, so a
+ * caller that lost the claim can wait for the in-flight scan to finish rather
+ * than returning the pre-scan DB snapshot as if it were the answer. Returns
+ * false for a dead-PID or expired claim — that scan is not actually running.
+ */
+export function scanInProgressByLivePid(): boolean {
+  const db = getDB();
+  const existing = db
+    .prepare(`SELECT value FROM meta WHERE key = 'scan_in_progress'`)
+    .get() as { value: string } | undefined;
+  if (!existing) return false;
+  const parts = existing.value.split(':');
+  const pid = parseInt(parts[0], 10);
+  const ts = parseInt(parts[1], 10);
+  return isProcessAlive(pid) && Date.now() - ts < SCAN_CLAIM_TTL_MS;
 }
 
 /**
@@ -3744,4 +3872,324 @@ export function updateSessionFilePaths(oldPrefix: string, newPrefix: string): nu
   });
   txn();
   return rows.length;
+}
+
+// ─── Tool sessions: durable browser / computer-use metadata (RUSH-2549) ──────
+
+/** Per-kind capture tallies for a browser task. Counts only -- never the bytes. */
+export interface BrowserCaptureCounts {
+  screenshot: number;
+  pdf: number;
+  recording: number;
+  download: number;
+}
+
+/** One durable browser-task row. `machine` defaults to this device. */
+export interface BrowserSessionRecord {
+  task: string;
+  profile: string;
+  sessionId?: string;
+  launchId?: string;
+  actor?: string;
+  machine?: string;
+  startedAt?: number;
+  lastActivity?: number;
+  counts?: Partial<BrowserCaptureCounts>;
+  captureDir?: string;
+  capturesRemote?: string;
+}
+
+/** One durable computer-use invocation row. `machine` defaults to this device. */
+export interface ComputerSessionRecord {
+  invocationId: string;
+  sessionId?: string;
+  launchId?: string;
+  actor?: string;
+  machine?: string;
+  startedAt?: number;
+  lastActivity?: number;
+  actionCount?: number;
+  taskPreview?: string;
+}
+
+/**
+ * Upsert one browser task's durable metadata.
+ *
+ * Called at task START. This executes INSIDE the browser daemon (daemon.ts
+ * constructs BrowserService; ipc.ts dispatches `start` to it), which makes the
+ * shared daemon a writer of this DB — but the identity it writes is RESOLVED IN
+ * THE CALLING CLI PROCESS and forwarded over IPC, never resolved here. That
+ * distinction is the whole fix: resolving it daemon-side would attribute every
+ * task to the daemon's own actor (the RUSH-2020 bug).
+ *
+ * `agents browser stop` deliberately does NOT delete this row: the whole point
+ * is that the link outlives the task.
+ *
+ * Identity fields are only ever widened, never blanked. A later capture-count
+ * update carries no session id, and `COALESCE(excluded.…, browser_sessions.…)`
+ * keeps the one recorded at start rather than overwriting it with NULL --
+ * otherwise the second write would undo exactly what the first was for.
+ */
+export function recordBrowserSession(record: BrowserSessionRecord): void {
+  const db = getDB();
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO browser_sessions (
+      task, profile, session_id, launch_id, actor, machine,
+      started_at, last_activity,
+      screenshot_count, pdf_count, recording_count, download_count,
+      capture_dir, captures_remote
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(profile, task) DO UPDATE SET
+      session_id       = COALESCE(excluded.session_id, browser_sessions.session_id),
+      launch_id        = COALESCE(excluded.launch_id, browser_sessions.launch_id),
+      actor            = COALESCE(excluded.actor, browser_sessions.actor),
+      last_activity    = excluded.last_activity,
+      screenshot_count = excluded.screenshot_count,
+      pdf_count        = excluded.pdf_count,
+      recording_count  = excluded.recording_count,
+      download_count   = excluded.download_count,
+      capture_dir      = COALESCE(excluded.capture_dir, browser_sessions.capture_dir),
+      captures_remote  = COALESCE(excluded.captures_remote, browser_sessions.captures_remote)
+  `).run(
+    record.task,
+    record.profile,
+    record.sessionId ?? null,
+    record.launchId ?? null,
+    record.actor ?? null,
+    record.machine ?? machineId(),
+    record.startedAt ?? now,
+    record.lastActivity ?? now,
+    record.counts?.screenshot ?? 0,
+    record.counts?.pdf ?? 0,
+    record.counts?.recording ?? 0,
+    record.counts?.download ?? 0,
+    record.captureDir ?? null,
+    record.capturesRemote ?? null,
+  );
+}
+
+/**
+ * Upsert one computer-use invocation's durable metadata.
+ *
+ * `action_count` accumulates: a `computer run` loop emits many actions under one
+ * invocation id, and each arrives as its own call, so the count is incremented
+ * rather than replaced. Identity is widened-only, for the same reason as above.
+ */
+export function recordComputerSession(record: ComputerSessionRecord): void {
+  const db = getDB();
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO computer_sessions (
+      invocation_id, session_id, launch_id, actor, machine,
+      started_at, last_activity, action_count, task_preview
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(invocation_id) DO UPDATE SET
+      session_id    = COALESCE(excluded.session_id, computer_sessions.session_id),
+      launch_id     = COALESCE(excluded.launch_id, computer_sessions.launch_id),
+      actor         = COALESCE(excluded.actor, computer_sessions.actor),
+      last_activity = excluded.last_activity,
+      action_count  = computer_sessions.action_count + excluded.action_count,
+      task_preview  = COALESCE(excluded.task_preview, computer_sessions.task_preview)
+  `).run(
+    record.invocationId,
+    record.sessionId ?? null,
+    record.launchId ?? null,
+    record.actor ?? null,
+    record.machine ?? machineId(),
+    record.startedAt ?? now,
+    record.lastActivity ?? now,
+    record.actionCount ?? 1,
+    record.taskPreview ?? null,
+  );
+}
+
+/** A stored browser row as read back, with counts rehydrated. */
+export interface StoredBrowserSession extends Required<Pick<BrowserSessionRecord, 'task' | 'profile'>> {
+  sessionId?: string;
+  launchId?: string;
+  actor?: string;
+  machine: string;
+  startedAt: number;
+  lastActivity?: number;
+  counts: BrowserCaptureCounts;
+  captureDir?: string;
+  capturesRemote?: string;
+}
+
+interface BrowserSessionRow {
+  task: string;
+  profile: string;
+  session_id: string | null;
+  launch_id: string | null;
+  actor: string | null;
+  machine: string;
+  started_at: number;
+  last_activity: number | null;
+  screenshot_count: number;
+  pdf_count: number;
+  recording_count: number;
+  download_count: number;
+  capture_dir: string | null;
+  captures_remote: string | null;
+}
+
+function toStoredBrowserSession(row: BrowserSessionRow): StoredBrowserSession {
+  return {
+    task: row.task,
+    profile: row.profile,
+    sessionId: row.session_id ?? undefined,
+    launchId: row.launch_id ?? undefined,
+    actor: row.actor ?? undefined,
+    machine: row.machine,
+    startedAt: row.started_at,
+    lastActivity: row.last_activity ?? undefined,
+    counts: {
+      screenshot: row.screenshot_count,
+      pdf: row.pdf_count,
+      recording: row.recording_count,
+      download: row.download_count,
+    },
+    captureDir: row.capture_dir ?? undefined,
+    capturesRemote: row.captures_remote ?? undefined,
+  };
+}
+
+/**
+ * Stored browser tasks, newest first; optionally scoped to one profile.
+ *
+ * A PROFILE-SCOPED read is deliberately unbounded. These rows are the identity
+ * for capture dirs that still exist on disk, and dropping the oldest ones would
+ * silently regress exactly those tasks to `unlinked` — the symptom this whole
+ * change removes, reappearing at a higher threshold. The row count is already
+ * bounded by the tasks that profile has ever run, and each row is a short
+ * metadata record. Only the unscoped read (every profile, used for overviews)
+ * takes a ceiling, since that one has no natural bound.
+ */
+export function listBrowserSessionRecords(
+  profile?: string,
+  opts: { limit?: number } = {},
+): StoredBrowserSession[] {
+  const db = getDB();
+  const rows = (profile
+    ? db.prepare(`SELECT * FROM browser_sessions WHERE profile = ? ORDER BY started_at DESC`).all(profile)
+    : db.prepare(`SELECT * FROM browser_sessions ORDER BY started_at DESC LIMIT ?`)
+      .all(opts.limit ?? TOOL_SESSION_LIST_LIMIT)) as BrowserSessionRow[];
+  return rows.map(toStoredBrowserSession);
+}
+
+/** One stored browser task by its (profile, task) key, or null. */
+export function getBrowserSessionRecord(profile: string, task: string): StoredBrowserSession | null {
+  const db = getDB();
+  const row = db
+    .prepare(`SELECT * FROM browser_sessions WHERE profile = ? AND task = ?`)
+    .get(profile, task) as BrowserSessionRow | undefined;
+  return row ? toStoredBrowserSession(row) : null;
+}
+
+/** A stored computer-use invocation as read back. */
+export interface StoredComputerSession {
+  invocationId: string;
+  sessionId?: string;
+  launchId?: string;
+  actor?: string;
+  machine: string;
+  startedAt: number;
+  lastActivity?: number;
+  actionCount: number;
+  taskPreview?: string;
+}
+
+interface ComputerSessionRow {
+  invocation_id: string;
+  session_id: string | null;
+  launch_id: string | null;
+  actor: string | null;
+  machine: string;
+  started_at: number;
+  last_activity: number | null;
+  action_count: number;
+  task_preview: string | null;
+}
+
+/**
+ * Retention for the tool-session tables.
+ *
+ * These are the durable answer to a ledger that prunes at 7 days, so they are
+ * deliberately long-lived — but "durable" is not "unbounded". `computer_sessions`
+ * takes one row per `agents computer` CLI PROCESS (`COMPUTER_INVOCATION_ID` is
+ * minted per process), and an agent driving a desktop invokes that hundreds of
+ * times a day, so an unbounded table would grow without limit and be read in
+ * full on every listing.
+ */
+export const TOOL_SESSION_MAX_AGE_DAYS = 365;
+/** Default ceiling on rows one listing will read. */
+export const TOOL_SESSION_LIST_LIMIT = 2000;
+
+/**
+ * Drop tool-session rows past {@link TOOL_SESSION_MAX_AGE_DAYS}.
+ *
+ * Called from the listing path, never from the write hot path: an
+ * `agents computer` action must not pay for a table sweep (see the fail-soft
+ * note on `recordComputerSession`'s caller). Returns rows deleted.
+ */
+export function pruneToolSessions(maxAgeDays: number = TOOL_SESSION_MAX_AGE_DAYS): number {
+  const db = getDB();
+  const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
+
+  // Cheap indexed guard first, so the common case is one lookup rather than a
+  // write transaction (the same shape as the account repair below). Every
+  // listing calls this, and on any table younger than the retention window
+  // there is nothing to delete — but a bare DELETE still opens a write
+  // transaction, which under `busy_timeout = 30000` can make a read-only
+  // listing wait on the session indexer for no reason at all.
+  const stale = db.prepare(`
+    SELECT 1 FROM computer_sessions WHERE started_at < ?
+    UNION ALL
+    SELECT 1 FROM browser_sessions WHERE started_at < ?
+    LIMIT 1
+  `).get(cutoff, cutoff);
+  if (!stale) return 0;
+
+  const computer = db.prepare(`DELETE FROM computer_sessions WHERE started_at < ?`).run(cutoff);
+  const browser = db.prepare(`DELETE FROM browser_sessions WHERE started_at < ?`).run(cutoff);
+  return Number(computer.changes ?? 0) + Number(browser.changes ?? 0);
+}
+
+/**
+ * Stored computer-use invocations, newest first, bounded.
+ *
+ * The limit is a real ceiling, not a nicety: `--json` serializes whatever this
+ * returns, so an unbounded read would dump the entire table on every call.
+ */
+export function listComputerSessionRecords(
+  opts: { limit?: number; startedBeforeMs?: number } = {},
+): StoredComputerSession[] {
+  const db = getDB();
+  const limit = opts.limit ?? TOOL_SESSION_LIST_LIMIT;
+  // `startedBeforeMs` selects the COMPLEMENT of the caller's other source
+  // rather than the newest N. The caller that recovers pruned runs already
+  // holds every recent invocation from the event ledger and discards any row
+  // it has seen — so a bare newest-N read hands it 2000 rows it is guaranteed
+  // to throw away, and returns nothing at all once the table passes that size.
+  // Bounding by "older than the ledger reaches" truncates the TAIL of
+  // recoverable history instead of deleting all of it.
+  const rows = (opts.startedBeforeMs === undefined
+    ? db
+      .prepare(`SELECT * FROM computer_sessions ORDER BY started_at DESC LIMIT ?`)
+      .all(limit)
+    : db
+      .prepare(`SELECT * FROM computer_sessions WHERE started_at < ? ORDER BY started_at DESC LIMIT ?`)
+      .all(opts.startedBeforeMs, limit)) as ComputerSessionRow[];
+  return rows.map((row) => ({
+    invocationId: row.invocation_id,
+    sessionId: row.session_id ?? undefined,
+    launchId: row.launch_id ?? undefined,
+    actor: row.actor ?? undefined,
+    machine: row.machine,
+    startedAt: row.started_at,
+    lastActivity: row.last_activity ?? undefined,
+    actionCount: row.action_count,
+    taskPreview: row.task_preview ?? undefined,
+  }));
 }

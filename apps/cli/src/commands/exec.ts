@@ -786,7 +786,7 @@ export function registerRunCommand(program: Command): void {
     )
     .option('--verbose', 'Show detailed execution logs')
     .option('--raw', 'Interactive runs on macOS/Linux launch inside a shared tmux session (for %pane addressing + re-attach). Pass --raw to spawn the agent directly instead. Also disabled by AGENTS_NO_TMUX=1.')
-    .option('--no-tmux', 'Spawn the agent directly instead of wrapping it in the shared tmux session. Same effect as --raw / AGENTS_NO_TMUX=1. Use this to see the agent\'s full startup output when a launch is failing.')
+    .option('--no-tmux', 'Spawn the agent directly instead of wrapping it in the shared tmux session. Same effect as --raw / AGENTS_NO_TMUX=1. Use this to see the agent\'s full startup output when a launch is failing; to turn the wrap off for every run on this machine, set `agents config set devices.<name>.tmux off`.')
     .option('--disable-tmux', 'Alias for --no-tmux.')
     .option('--timeout <duration>', 'Kill the agent after this duration (e.g., 30m, 1h, 2h30m)')
     .option(
@@ -3109,7 +3109,7 @@ export function registerRunCommand(program: Command): void {
       // Profile carries provider auth; secrets bundles carry user-defined
       // values; --env is the per-invocation override. The share token is
       // best-effort: if it is not already in env or an unlocked bundle, unrelated
-      // runs keep working, and `agents share` itself still fails loudly on use.
+      // runs keep working, and `agents artifacts share` itself still fails loudly on use.
       const hasOverrides = profileEnv || accountEnv || autoShareEnv || options.secrets.length > 0 || userEnv;
       const env: Record<string, string> | undefined = hasOverrides
         ? { ...(profileEnv ?? {}), ...(accountEnv ?? {}), ...(autoShareEnv ?? {}), ...secretsEnv, ...(userEnv ?? {}) }

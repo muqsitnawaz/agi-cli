@@ -31,7 +31,7 @@ import { isSchedulerEnabled, assertSchedulerEnabled, isDaemonEnabled, getConfigV
 import { reapTerminalRoutineProcesses } from './routine-process-cleanup.js';
 import { recordSubsystemOk, recordSubsystemError, recordSubsystemErrorReason, readSubsystemHealth, SUBSYSTEM_SECRETS_BROKER, SUBSYSTEM_BROWSER_IPC, SUBSYSTEM_DAEMON_START } from './daemon-health.js';
 import { startAccountStateService } from './account-state-service.js';
-import { runActiveSessionsWarmTick, runFleetCacheWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
+import { runActiveSessionsWarmTick, runFleetCacheWarmTick, runSessionIndexWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
 import { emit, emitRoutineEnd } from './events.js';
 import { readDaemonServicesConfig, isDaemonServiceEnabled, type DaemonServiceId } from './daemon-services.js';
 
@@ -87,6 +87,10 @@ const DEVICE_PROBE_TICK_MS = 3 * 60_000;
 // Matches DEFAULT_ACTIVE_CACHE_MAX_AGE_MS (15s) so long-lived watchers never
 // outlive the publisher (RUSH-2484 — CLI-owned continuous publish).
 const ACTIVE_SESSIONS_WARM_TICK_MS = 15_000;
+// Incrementally scan this host's transcript dirs into the local index so a
+// locally-started session is indexed within seconds, not on the next unrelated
+// `agents sessions*` call (RUSH-2682 — indexing was lazy, nothing scheduled it).
+const SESSION_INDEX_WARM_TICK_MS = 20_000;
 const WEDGE_THRESHOLD_TICKS = 3;
 
 /**
@@ -803,6 +807,23 @@ export async function runDaemon(): Promise<void> {
     log('WARN', `device config migration failed: ${(err as Error).message}`);
   }
 
+  // Version-skew one-shot (RUSH-2435): retrofit the current pane-died hook onto
+  // any managed tmux session a pre-fix binary left with a stale one. The 5-min
+  // `tmux-reconcile` routine that used to run this on a poll was deleted
+  // (RUSH-2495) — startup + `ensureSessionHookRepaired` at attach time
+  // (tmux/session.ts) now cover what that poll used to. Idempotent and
+  // non-destructive: a session already at the current schema is a no-op.
+  try {
+    const { reconcileSessionHooks } = await import('./tmux/session.js');
+    const { isTmuxInstalled } = await import('./tmux/binary.js');
+    if (isTmuxInstalled()) {
+      const r = await reconcileSessionHooks();
+      if (r.reconciled > 0) log('INFO', `tmux: retrofitted pane-died hook on ${r.reconciled}/${r.scanned} session(s)`);
+    }
+  } catch (err) {
+    log('WARN', `tmux hook reconcile failed: ${(err as Error).message}`);
+  }
+
   // Per-service toggles live outside device-config so they can be checked by
   // service clients (e.g. secrets) without loading the whole config stack.
   let servicesConfig = readDaemonServicesConfig();
@@ -1014,6 +1035,25 @@ export async function runDaemon(): Promise<void> {
   void runActiveSessionsWarm();
   const activeSessionsWarmInterval = setInterval(() => { void runActiveSessionsWarm(); }, ACTIVE_SESSIONS_WARM_TICK_MS);
 
+  // Session-index warm (RUSH-2682): keep THIS host's transcript index current so
+  // a locally-started session is discoverable within seconds. Incremental +
+  // single-flight (the DB scan claim), overlap-guarded so a slow scan never
+  // stacks on the next tick.
+  let sessionIndexWarmInFlight = false;
+  const runSessionIndexWarm = async (): Promise<void> => {
+    if (sessionIndexWarmInFlight) return;
+    sessionIndexWarmInFlight = true;
+    try {
+      await runSessionIndexWarmTick();
+    } catch (err) {
+      log('WARN', `session-index warm failed: ${(err as Error).message}`);
+    } finally {
+      sessionIndexWarmInFlight = false;
+    }
+  };
+  void runSessionIndexWarm();
+  const sessionIndexWarmInterval = setInterval(() => { void runSessionIndexWarm(); }, SESSION_INDEX_WARM_TICK_MS);
+
   // Watchdog: nudge this host's own stalled agent sessions. Gated on the
   // `watchdog.enabled` device-config flag (`agents watchdog enable`), so the
   // timer always fires but only does work when the user opted in. Overlap-safe
@@ -1050,8 +1090,11 @@ export async function runDaemon(): Promise<void> {
   // appeared tailnet nodes, dropping a sentinel per pending device so the
   // menu-bar helper can surface "NEW DEVICES → Register / Ignore". Refresh mode
   // never auto-registers a newcomer; a machine without tailscale is a clean
-  // no-op. `reconcilePendingSentinels` re-subtracts the ignore-list itself, so a
-  // device the user dismissed is never re-surfaced (RUSH-2495).
+  // no-op. `reconcilePendingSentinels` re-subtracts the ignore-list AND the
+  // registered roster, so a dismissed or already-known device is never
+  // re-surfaced (RUSH-2495 + registry-empty pollution). On soft-fail (no
+  // tailscale) we still prune registered/ignored sentinels so a hermetic test
+  // leak cannot leave fleet boxes in NEW DEVICES forever.
   let deviceProbeInterval: NodeJS.Timeout | undefined;
   if (isEnabled('device-probe')) {
     let deviceProbeInFlight = false;
@@ -1060,9 +1103,16 @@ export async function runDaemon(): Promise<void> {
       deviceProbeInFlight = true;
       try {
         const { runDeviceSync } = await import('./devices/sync.js');
-        const { reconcilePendingSentinels } = await import('./devices/pending.js');
+        const {
+          reconcilePendingSentinels,
+          pruneDismissedPendingSentinels,
+        } = await import('./devices/pending.js');
         const dev = await runDeviceSync({ soft: true, mode: 'refresh' });
-        if (!dev.ok) return;
+        if (!dev.ok) {
+          await pruneDismissedPendingSentinels();
+          if (dev.reason) log('WARN', `device probe soft-fail: ${dev.reason}`);
+          return;
+        }
         await reconcilePendingSentinels(dev.pending);
         if (dev.pending.length) {
           log('INFO', `devices: ${dev.pending.length} new pending (${dev.pending.map((p) => p.name).join(', ')})`);
@@ -1073,6 +1123,10 @@ export async function runDaemon(): Promise<void> {
         deviceProbeInFlight = false;
       }
     };
+    // Fire once on start so a leftover pollution set is cleared without waiting
+    // for the first interval tick (the 3-minute lag is how the menubar sat on
+    // 20 phantom NEW DEVICES after a hermetic leak).
+    void runDeviceProbeTick();
     deviceProbeInterval = setInterval(() => { void runDeviceProbeTick(); }, DEVICE_PROBE_TICK_MS);
   } else {
     log('INFO', 'Device-probe service disabled');
@@ -1384,6 +1438,7 @@ export async function runDaemon(): Promise<void> {
     log('INFO', 'Daemon shutting down');
     accountStateService?.stop();
     clearInterval(activeSessionsWarmInterval);
+    clearInterval(sessionIndexWarmInterval);
     if (watchdogInterval) clearInterval(watchdogInterval);
     if (deviceProbeInterval) clearInterval(deviceProbeInterval);
     stopScheduler();
