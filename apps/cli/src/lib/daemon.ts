@@ -31,8 +31,8 @@ import { isSchedulerEnabled, assertSchedulerEnabled, isDaemonEnabled, getConfigV
 import { reapTerminalRoutineProcesses } from './routine-process-cleanup.js';
 import { recordSubsystemOk, recordSubsystemError, recordSubsystemErrorReason, readSubsystemHealth, SUBSYSTEM_SECRETS_BROKER, SUBSYSTEM_BROWSER_IPC, SUBSYSTEM_DAEMON_START } from './daemon-health.js';
 import { startAccountStateService } from './account-state-service.js';
-import { runFleetCacheWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
-import { emit } from './events.js';
+import { runActiveSessionsWarmTick, runFleetCacheWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
+import { emit, emitRoutineEnd } from './events.js';
 import { readDaemonServicesConfig, isDaemonServiceEnabled, type DaemonServiceId } from './daemon-services.js';
 
 const PID_FILE = 'daemon.pid';
@@ -83,6 +83,10 @@ const STATE_DIR_CHECK_TICK_MS = 60_000;
 // in-process intervals the daemon holds directly, same cadence the old timers ran.
 const WATCHDOG_TICK_MS = 3 * 60_000;
 const DEVICE_PROBE_TICK_MS = 3 * 60_000;
+// Keep the active-session cache/journal fresh for sessions watch + Factory.
+// Matches DEFAULT_ACTIVE_CACHE_MAX_AGE_MS (15s) so long-lived watchers never
+// outlive the publisher (RUSH-2484 — CLI-owned continuous publish).
+const ACTIVE_SESSIONS_WARM_TICK_MS = 15_000;
 const WEDGE_THRESHOLD_TICKS = 3;
 
 /**
@@ -737,6 +741,7 @@ async function runDeadPaneReap(): Promise<void> {
     const { reapDeadTmuxPanes } = await import('./tmux/session.js');
     const { getDefaultSocketPath } = await import('./tmux/paths.js');
     const result = await reapDeadTmuxPanes(getDefaultSocketPath());
+    for (const w of result.warnings) log('WARN', `Dead-pane reaper: ${w}`);
     if (result.processes > 0) {
       log('INFO', `Dead-pane reaper: terminated ${result.processes} orphaned helper process(es)`);
       for (const d of result.processDetails) log('INFO', `  ${d}`);
@@ -796,6 +801,23 @@ export async function runDaemon(): Promise<void> {
     migrateDeviceConfigToCentral();
   } catch (err) {
     log('WARN', `device config migration failed: ${(err as Error).message}`);
+  }
+
+  // Version-skew one-shot (RUSH-2435): retrofit the current pane-died hook onto
+  // any managed tmux session a pre-fix binary left with a stale one. The 5-min
+  // `tmux-reconcile` routine that used to run this on a poll was deleted
+  // (RUSH-2495) — startup + `ensureSessionHookRepaired` at attach time
+  // (tmux/session.ts) now cover what that poll used to. Idempotent and
+  // non-destructive: a session already at the current schema is a no-op.
+  try {
+    const { reconcileSessionHooks } = await import('./tmux/session.js');
+    const { isTmuxInstalled } = await import('./tmux/binary.js');
+    if (isTmuxInstalled()) {
+      const r = await reconcileSessionHooks();
+      if (r.reconciled > 0) log('INFO', `tmux: retrofitted pane-died hook on ${r.reconciled}/${r.scanned} session(s)`);
+    }
+  } catch (err) {
+    log('WARN', `tmux hook reconcile failed: ${(err as Error).message}`);
   }
 
   // Per-service toggles live outside device-config so they can be checked by
@@ -879,6 +901,13 @@ export async function runDaemon(): Promise<void> {
         ? `workflow: ${config.workflow}`
         : `agent: ${config.agent}`;
     log('INFO', `Triggering job '${config.name}' (${jobLabel})`);
+    emit('routine.start', {
+      module: 'routine',
+      name: config.name,
+      kind: config.command ? 'command' : config.workflow ? 'workflow' : 'agent',
+      ...(config.agent ? { agent: config.agent } : {}),
+      ...(config.workflow ? { workflow: config.workflow } : {}),
+    });
     // RUSH-2030: branded desktop notification on start (agent/workflow routines;
     // suppressed for command housekeeping). Finish/output is fired from the
     // onFinish hook below — executeJobDetached finalizes the run in-process, so
@@ -888,6 +917,7 @@ export async function runDaemon(): Promise<void> {
     try {
       const meta = await executeJobDetached(config, {
         onFinish: (final) => {
+          emitRoutineEnd(final);
           try { notifyRoutineFinish(final); } catch { /* best-effort */ }
           // RUSH-2288: a failed/timed-out routine also reaches the OWNER's phone
           // (in-process owner channel stack), not just the local desktop. Green
@@ -905,6 +935,11 @@ export async function runDaemon(): Promise<void> {
     } catch (err) {
       const message = (err as Error).message;
       log('ERROR', `Job '${config.name}' failed to spawn: ${message}`);
+      emitRoutineEnd({
+        jobName: config.name,
+        status: 'failed',
+        detail: redactSecrets(message).slice(0, 500),
+      });
       // RUSH-2030: the START ping already fired unconditionally above. A pre-spawn
       // failure produces no run record and thus no onFinish, so send a synthetic
       // "failed to start" finish here — otherwise the user is left with an orphaned
@@ -978,6 +1013,24 @@ export async function runDaemon(): Promise<void> {
     : null;
   if (!accountStateService) log('INFO', 'Account-state service disabled');
 
+  // Active-sessions publish-own: continuous journal writer for `sessions watch`.
+  // Fire once immediately so a cold daemon does not leave watchers on
+  // "awaiting publisher" for a full tick (RUSH-2484).
+  let activeSessionsWarmInFlight = false;
+  const runActiveSessionsWarm = async (): Promise<void> => {
+    if (activeSessionsWarmInFlight) return;
+    activeSessionsWarmInFlight = true;
+    try {
+      await runActiveSessionsWarmTick();
+    } catch (err) {
+      log('WARN', `active-sessions warm failed: ${(err as Error).message}`);
+    } finally {
+      activeSessionsWarmInFlight = false;
+    }
+  };
+  void runActiveSessionsWarm();
+  const activeSessionsWarmInterval = setInterval(() => { void runActiveSessionsWarm(); }, ACTIVE_SESSIONS_WARM_TICK_MS);
+
   // Watchdog: nudge this host's own stalled agent sessions. Gated on the
   // `watchdog.enabled` device-config flag (`agents watchdog enable`), so the
   // timer always fires but only does work when the user opted in. Overlap-safe
@@ -993,6 +1046,12 @@ export async function runDaemon(): Promise<void> {
         const { runWatchdogPass } = await import('./watchdog/service.js');
         const result = await runWatchdogPass({ nudge: true });
         log('INFO', `watchdog: ${result.counts.total} live, ${result.counts.stalled} stalled, ${result.counts.nudged} nudged`);
+        emit('watchdog.action', {
+          module: 'watchdog',
+          total: result.counts.total,
+          stalled: result.counts.stalled,
+          nudged: result.counts.nudged,
+        });
       } catch (err) {
         log('WARN', `watchdog tick failed: ${(err as Error).message}`);
       } finally {
@@ -1008,8 +1067,11 @@ export async function runDaemon(): Promise<void> {
   // appeared tailnet nodes, dropping a sentinel per pending device so the
   // menu-bar helper can surface "NEW DEVICES → Register / Ignore". Refresh mode
   // never auto-registers a newcomer; a machine without tailscale is a clean
-  // no-op. `reconcilePendingSentinels` re-subtracts the ignore-list itself, so a
-  // device the user dismissed is never re-surfaced (RUSH-2495).
+  // no-op. `reconcilePendingSentinels` re-subtracts the ignore-list AND the
+  // registered roster, so a dismissed or already-known device is never
+  // re-surfaced (RUSH-2495 + registry-empty pollution). On soft-fail (no
+  // tailscale) we still prune registered/ignored sentinels so a hermetic test
+  // leak cannot leave fleet boxes in NEW DEVICES forever.
   let deviceProbeInterval: NodeJS.Timeout | undefined;
   if (isEnabled('device-probe')) {
     let deviceProbeInFlight = false;
@@ -1018,9 +1080,16 @@ export async function runDaemon(): Promise<void> {
       deviceProbeInFlight = true;
       try {
         const { runDeviceSync } = await import('./devices/sync.js');
-        const { reconcilePendingSentinels } = await import('./devices/pending.js');
+        const {
+          reconcilePendingSentinels,
+          pruneDismissedPendingSentinels,
+        } = await import('./devices/pending.js');
         const dev = await runDeviceSync({ soft: true, mode: 'refresh' });
-        if (!dev.ok) return;
+        if (!dev.ok) {
+          await pruneDismissedPendingSentinels();
+          if (dev.reason) log('WARN', `device probe soft-fail: ${dev.reason}`);
+          return;
+        }
         await reconcilePendingSentinels(dev.pending);
         if (dev.pending.length) {
           log('INFO', `devices: ${dev.pending.length} new pending (${dev.pending.map((p) => p.name).join(', ')})`);
@@ -1031,6 +1100,10 @@ export async function runDaemon(): Promise<void> {
         deviceProbeInFlight = false;
       }
     };
+    // Fire once on start so a leftover pollution set is cleared without waiting
+    // for the first interval tick (the 3-minute lag is how the menubar sat on
+    // 20 phantom NEW DEVICES after a hermetic leak).
+    void runDeviceProbeTick();
     deviceProbeInterval = setInterval(() => { void runDeviceProbeTick(); }, DEVICE_PROBE_TICK_MS);
   } else {
     log('INFO', 'Device-probe service disabled');
@@ -1341,6 +1414,7 @@ export async function runDaemon(): Promise<void> {
   const handleShutdown = singleShot(async () => {
     log('INFO', 'Daemon shutting down');
     accountStateService?.stop();
+    clearInterval(activeSessionsWarmInterval);
     if (watchdogInterval) clearInterval(watchdogInterval);
     if (deviceProbeInterval) clearInterval(deviceProbeInterval);
     stopScheduler();

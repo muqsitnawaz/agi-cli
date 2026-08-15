@@ -2,7 +2,7 @@
 //
 // This module has NO VS Code imports so it is unit-testable in isolation. The
 // SSH fan-out + host discovery live in src/vscode/remoteSessions.vscode.ts;
-// this file only turns the raw `agents sessions --active --json` payload into a
+// this file only turns rows from `agents sessions watch --json` into a
 // normalized RemoteSession and groups records by host.
 //
 // A RemoteSession is the cross-host analog of a local agent, shaped so the
@@ -21,16 +21,16 @@ export type { ProjectRule } from '../shared/project';
 
 /**
  * Build the command that opens/attaches a session living on a REMOTE device.
- * We `ssh -t` into the peer and let its own `agents sessions focus <id> --local`
+ * We `ssh -t` into the peer and let its own `agents sessions resume <id> --local`
  * resolve the session in-place — attach its live tmux pane, or resume it in the
  * ssh TTY when it's headless. `--local` is correct because the caller already
  * knows the session is on `host`, so a cross-host sweep from the peer is wasted
  * work. The local (this-mac) path does NOT use this — it spawns
- * `agents sessions focus` detached so it opens a native terminal tab.
+ * `agents sessions resume` detached so it opens a native terminal tab.
  */
 export function buildRemoteFocusCommand(sessionId: string, host: string): string {
   const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-  const remote = `agents sessions focus ${shq(sessionId)} --local`;
+  const remote = `agents sessions resume ${shq(sessionId)} --local`;
   return `ssh -t ${shq(host)} ${shq(remote)}`;
 }
 
@@ -50,7 +50,7 @@ export interface RemoteQuestionOption {
 
 /**
  * The structured decision an agent is waiting on, carried verbatim from the CLI
- * state engine (`agents sessions --active --json` → ActiveSession.question). This
+ * state engine (`agents sessions watch --json` → ActiveSession.question). This
  * is the load-bearing "what does it want from me" signal the NEEDS-YOU card renders
  * — the UI no longer has to regex it back out of a truncated preview line.
  */
@@ -285,12 +285,12 @@ export interface HostGroup {
 
 /** Live load bucket for a host. Mirrors dispatch.types.ts HostLoad (webview
  *  contract) — kept in sync by hand; the two are NOT shared across the boundary. */
-export type HostLoad = 'idle' | 'free' | 'busy' | 'hot' | 'off';
+export type HostLoad = 'idle' | 'free' | 'busy' | 'hot' | 'off' | 'unavailable';
 
 /** Reachability + live load of a discovered host. `agents`/`load`/`uses` are the
  *  live-load fields the Dispatch panel reads; they ride the existing hostSessions
  *  message. During discovery (before the host is probed) they hold their pre-probe
- *  values (agents 0, load idle/off, uses 0); fetchHostSessions overwrites them with
+ *  values (agents 0, load idle/off, uses 0); the presentation store supplies
  *  measured values before the payload leaves the extension host. */
 export interface HostInfo {
   name: string;
@@ -304,7 +304,7 @@ export interface HostInfo {
 }
 
 /**
- * The subset of `agents sessions --active --json` records we consume. Every
+ * The subset of `agents sessions watch --json` upsert records we consume. Every
  * field is optional because the payload shape varies by context (terminal /
  * teams / cloud). Unknown fields are ignored.
  */
@@ -337,7 +337,7 @@ export interface RawActiveSession {
   /** Where the session is being viewed right now, pre-formatted by the CLI's
    *  client resolver (e.g. "Codium tab 3", "Ghostty tab 2", "detached"). */
   viewingIn?: string;
-  /** The CLI emits these NESTED objects on `sessions --active --json` (agents-cli
+  /** The CLI emits these NESTED objects on `sessions watch --json` (agents-cli
    *  ActiveSession: preview / pr / worktree / ticket). Earlier this shape declared
    *  none of them, so normalizeActiveSession silently dropped the worktree slug, the
    *  live preview (activity line), the structured ticket id, and the real branch —
@@ -379,7 +379,7 @@ export interface RawActiveSession {
   rateLimited?: boolean;
   /** Normalized device id the CLI attributes this session to (machineId() form,
    *  e.g. 'zion', 'yosemite-s0'). Present on every row of a fanned-out
-   *  `sessions --active --json` — the load-bearing signal for which physical
+   *  `sessions watch --json` — the load-bearing signal for which physical
    *  machine a session runs on. Absent for cloud rows (attributed to the querier). */
   machine?: string;
   /**
@@ -852,7 +852,7 @@ export function filterStaleSessions(
 }
 
 /**
- * Parse a full `agents sessions --active --json` payload (string or array) into
+ * Parse session rows from the CLI payload (string or array) into
  * RemoteSessions for one host. Malformed input yields an empty array rather than
  * throwing, so one bad host never sinks the whole fan-out.
  */

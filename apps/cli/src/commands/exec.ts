@@ -591,8 +591,10 @@ export async function runWorkflowForEach(
  *
  * A project that binds several directories also contributes the ones it is not
  * landing in as `--add-dir` grants, so an agent on a multi-repo project can
- * actually reach the sibling checkouts. Only Claude and Codex consume those
- * grants; other harnesses ignore them.
+ * actually reach the sibling checkouts. Claude / Cursor / Kimi take the native
+ * flag; Codex folds them into workspace_roots; Grok widens its sandbox profile
+ * (and always injects a rules note). Other harnesses have no multi-root surface
+ * and ignore the grants (cwd only).
  */
 async function resolveRunCwd(
   options: Pick<ExecCommandActionOptions, 'cwd' | 'project' | 'remoteCwd' | 'addDir'>,
@@ -765,7 +767,7 @@ export function registerRunCommand(program: Command): void {
     )
     .option(
       '--add-dir <dir>',
-      'Grant access to an additional directory outside the project (Claude and Codex, repeatable)',
+      'Grant access to an additional directory outside the project (Claude, Codex, Cursor, Kimi, Grok; repeatable)',
       (val: string, prev: string[]) => [...prev, val],
       []
     )
@@ -776,7 +778,7 @@ export function registerRunCommand(program: Command): void {
     .option('-i, --interactive', 'Force interactive mode even when a prompt is provided. Mutually exclusive with --headless.')
     .option('--resume [id]', 'Recover a previous conversation on its origin device. The exact healthy origin uses native resume; otherwise a healthy version of the same harness replays via /continue. Pair with a prompt to continue headlessly.')
     .option('--session-id <id>', 'Force a NEW conversation to use this exact session UUID (Claude only). This CREATES a session — to resume an existing one, use --resume.')
-    .option('--name <slug>', 'Name the run — seeds the session label so it shows up as `<name>` in `agents sessions` and resolves by it (and `agents hosts logs <name>` for --host runs) instead of an opaque id. An agent-generated title later refines the label; your name shows until then. Optional.')
+    .option('--name <slug>', 'Name the run — seeds the session label so it shows up as `<name>` in `agents sessions` and resolves by it (and `agents logs <name>` for --host runs) instead of an opaque id. An agent-generated title later refines the label; your name shows until then. Optional.')
     .option('--notify', 'Post a desktop notification when a headless run finishes. Fired by this process on exit, so it survives whatever launched the run (the menu bar dispatching it, a terminal you closed).')
     .option(
       '--terminal [backend]',
@@ -784,7 +786,7 @@ export function registerRunCommand(program: Command): void {
     )
     .option('--verbose', 'Show detailed execution logs')
     .option('--raw', 'Interactive runs on macOS/Linux launch inside a shared tmux session (for %pane addressing + re-attach). Pass --raw to spawn the agent directly instead. Also disabled by AGENTS_NO_TMUX=1.')
-    .option('--no-tmux', 'Spawn the agent directly instead of wrapping it in the shared tmux session. Same effect as --raw / AGENTS_NO_TMUX=1. Use this to see the agent\'s full startup output when a launch is failing.')
+    .option('--no-tmux', 'Spawn the agent directly instead of wrapping it in the shared tmux session. Same effect as --raw / AGENTS_NO_TMUX=1. Use this to see the agent\'s full startup output when a launch is failing; to turn the wrap off for every run on this machine, set `agents config set devices.<name>.tmux off`.')
     .option('--disable-tmux', 'Alias for --no-tmux.')
     .option('--timeout <duration>', 'Kill the agent after this duration (e.g., 30m, 1h, 2h30m)')
     .option(
@@ -839,14 +841,14 @@ export function registerRunCommand(program: Command): void {
     )
     .option(
       '--host <name>',
-      'Offload this run onto another machine over SSH — a device name, registered host, or user@host. Pass "auto" to pick the least-loaded reachable device where the requested agent is installed and signed in, keeping the run local when no remote is better. Same as --where device:<name>. See `agents devices`.',
+      'Offload this run onto another machine over SSH — a device name, registered host, or user@host. Pass "auto" to pick the least-loaded reachable device with an eligible account; an unavailable or capped pool fails loud. Same as --where device:<name>. See `agents devices`.',
     )
     .option(
       '--device <name>',
-      'Alias of --host. Pass "auto" for affinity-based device pick (same as --where auto).',
+      'Alias of --host. Pass "auto" for live health/account-aware device placement.',
     )
     .option('--remote-cwd <dir>', "Explicit host working directory for --host runs, used VERBATIM (overrides --cwd; usually --cwd suffices — it re-roots a local-home path onto the remote home). Pass a single-quoted '$HOME/…' or a valid remote absolute path; a local ~ expands here and won't exist there (/Users/you vs /home/you).")
-    .option('--no-follow', 'With --host, dispatch detached and return immediately (track via `agents hosts ps/logs`).')
+    .option('--no-follow', 'With --host, dispatch detached and return immediately (track via `agents devices ps` and `agents logs`).')
     .option('--any', 'With --host <cap> (a capability tag), pick any matching host instead of erroring when several match.')
     .option(
       '--copy-creds',
@@ -925,6 +927,7 @@ export function registerRunCommand(program: Command): void {
       # account headroom, then a balanced account on it
       agents run auto "fix the flaky test" --mode edit
       agents run auto --host yosemite-s0 "fix the flaky test"   # pin the host
+      agents run auto --interactive --device auto --strategy balanced --mode auto
 
       # Placement (one door — where the body runs). Old flags still work.
       agents run claude "…" --where device:yosemite-s0   # = --host yosemite-s0
@@ -1306,7 +1309,7 @@ export function registerRunCommand(program: Command): void {
 
       // --device auto / --host auto (and deprecated --smart): live fleet pick.
       // Harness is always the agent the user typed — never auto-picked.
-      // Affinity failure degrades to local (does not kill the run).
+      // Placement failure propagates; an automatic request never becomes local.
       {
         const { applyDeviceAutoToOptions } = await import('../lib/smart-launch.js');
         const result = await applyDeviceAutoToOptions(options, {
@@ -1320,13 +1323,6 @@ export function registerRunCommand(program: Command): void {
         if (!options.quiet && result.deprecationSmart) {
           process.stderr.write(
             chalk.yellow('[agents] --smart is deprecated; use --device auto\n'),
-          );
-        }
-        if (!options.quiet && result.skipped) {
-          process.stderr.write(
-            chalk.yellow(
-              `[agents] device=auto skipped: ${result.skipped} (running local)\n`,
-            ),
           );
         }
         if (!options.quiet && result.banner) {
@@ -2086,7 +2082,7 @@ export function registerRunCommand(program: Command): void {
             console.log(
               chalk.green(`Dispatched to ${host.name}${task.name ? ` as "${task.name}"` : ''}.`) + '\n' +
               chalk.gray(`  Status:  agents sessions ${handle}`) + chalk.gray('   (compact digest — use this)') + '\n' +
-              chalk.gray(`  Raw log: agents hosts logs ${handle} -f`) + chalk.gray('   (heavy, only if needed)'),
+              chalk.gray(`  Raw log: agents logs ${handle} -f`) + chalk.gray('   (heavy, only if needed)'),
             );
             process.exit(0);
           }
@@ -3156,7 +3152,7 @@ export function registerRunCommand(program: Command): void {
       // Profile carries provider auth; secrets bundles carry user-defined
       // values; --env is the per-invocation override. The share token is
       // best-effort: if it is not already in env or an unlocked bundle, unrelated
-      // runs keep working, and `agents share` itself still fails loudly on use.
+      // runs keep working, and `agents artifacts share` itself still fails loudly on use.
       const hasOverrides = profileEnv || accountEnv || autoShareEnv || options.secrets.length > 0 || userEnv;
       const env: Record<string, string> | undefined = hasOverrides
         ? { ...(profileEnv ?? {}), ...(accountEnv ?? {}), ...(autoShareEnv ?? {}), ...secretsEnv, ...(userEnv ?? {}) }

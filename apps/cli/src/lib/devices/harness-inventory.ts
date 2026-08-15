@@ -39,11 +39,19 @@ export interface QuotaSummary {
    * `available` / `rate_limited` from the live usage windows, or `null` when
    * there is no snapshot at all (no data yet, or the agent has no usage source).
    */
-  status: 'available' | 'rate_limited' | null;
+  status: 'available' | 'rate_limited' | 'out_of_credits' | null;
+  /** Canonical launch verdict. Kept separate from utilization for JSON clients. */
+  verdict: 'available' | 'rate_limited' | 'out_of_credits' | 'unavailable';
   /** Max utilization across blocking windows (0-100, rounded), or null when unknown. */
   usedPercent: number | null;
   /** True when the snapshot is a cached `last_seen`, not a fresh `live` read. */
   stale: boolean;
+  /** ISO-8601 timestamp for the underlying usage observation. */
+  capturedAt: string | null;
+  /** Earliest reset across blocking windows, ISO-8601. */
+  resetsAt: string | null;
+  /** Why quota could not be evaluated; null when a verdict is available. */
+  unavailableReason: string | null;
 }
 
 /** One installed (agent, version) on a host, fully resolved. */
@@ -92,13 +100,27 @@ export interface AccountGroup {
  * `sonnet_week` sub-limit is excluded so hitting it doesn't read as a throttled
  * account) and takes the highest utilization across those windows. Pure.
  */
-export function summarizeQuota(snapshot: UsageSnapshot | null | undefined): QuotaSummary {
+export function summarizeQuota(
+  snapshot: UsageSnapshot | null | undefined,
+  unavailableReason: string | null = null,
+  accountStatus: AccountInfo['usageStatus'] = null,
+): QuotaSummary {
   if (!snapshot || snapshot.windows.length === 0) {
-    return { status: null, usedPercent: null, stale: false };
+    const status = accountStatus;
+    return {
+      status,
+      verdict: status ?? 'unavailable',
+      usedPercent: null,
+      stale: false,
+      capturedAt: snapshot?.capturedAt?.toISOString() ?? null,
+      resetsAt: null,
+      unavailableReason: status ? null : (unavailableReason ?? 'usage unavailable'),
+    };
   }
   const blocking = snapshot.windows.filter((w) => w.key !== 'sonnet_week');
   const windows = blocking.length > 0 ? blocking : snapshot.windows;
-  const status = deriveUsageStatusFromSnapshot(snapshot);
+  const derived = deriveUsageStatusFromSnapshot(snapshot);
+  const status = accountStatus === 'out_of_credits' ? accountStatus : derived;
   let usedPercent = Math.round(Math.max(...windows.map((w) => w.usedPercent)));
   // Never show 100% for an account that isn't actually capped: a genuinely-100
   // blocking window makes the status `rate_limited` (rendered "limited"), so a
@@ -107,8 +129,15 @@ export function summarizeQuota(snapshot: UsageSnapshot | null | undefined): Quot
   if (status !== 'rate_limited' && usedPercent >= 100) usedPercent = 99;
   return {
     status,
+    verdict: status ?? 'unavailable',
     usedPercent,
     stale: snapshot.source !== 'live',
+    capturedAt: snapshot.capturedAt?.toISOString() ?? null,
+    resetsAt: windows
+      .map((window) => window.resetsAt)
+      .filter((value): value is Date => value instanceof Date)
+      .sort((a, b) => a.getTime() - b.getTime())[0]?.toISOString() ?? null,
+    unavailableReason: null,
   };
 }
 
@@ -123,6 +152,7 @@ export function computeReady(
 ): { ready: boolean; reason?: string } {
   if (!signedIn) return { ready: false, reason: 'signed out' };
   if (quota.status === 'rate_limited') return { ready: false, reason: 'rate-limited' };
+  if (quota.status === 'out_of_credits') return { ready: false, reason: 'out of credits' };
   return { ready: true };
 }
 
@@ -165,8 +195,9 @@ export async function collectLocalHarnessInventory(opts?: {
   const savedNative = listNativeAccounts(readMeta());
   return pending.map(({ agent, version, info }) => {
     const key = getUsageLookupKey(info);
-    const snapshot = key ? usageByKey.get(key)?.snapshot ?? null : null;
-    const quota = summarizeQuota(snapshot);
+    const usage = key ? usageByKey.get(key) : undefined;
+    const snapshot = usage?.snapshot ?? null;
+    const quota = summarizeQuota(snapshot, usage?.error ?? null, info?.usageStatus ?? null);
     const signedIn = !!info?.signedIn;
     const { ready, reason } = computeReady(signedIn, quota);
     const display = info ? accountDisplayLabel(info) || null : null;
@@ -208,6 +239,7 @@ export function groupByAccount(rows: HarnessRow[]): AccountGroup[] {
     // miss), else the first member with any real usage data, else the first row.
     const withData = members.filter((m) => m.quota.status !== null);
     const rep =
+      withData.find((m) => m.quota.status === 'out_of_credits') ??
       withData.find((m) => m.quota.status === 'rate_limited') ?? withData[0] ?? members[0];
     const quota = rep.quota;
     const { ready, reason } = computeReady(signedIn, quota);
@@ -225,6 +257,7 @@ export function groupByAccount(rows: HarnessRow[]): AccountGroup[] {
 
 /** Short human quota cell: "12%", "limited", or "—" when no data. */
 export function formatQuota(quota: QuotaSummary): string {
+  if (quota.status === 'out_of_credits') return 'no credits';
   if (quota.status === 'rate_limited') return 'limited';
   if (quota.usedPercent === null) return '—';
   return `${quota.usedPercent}%${quota.stale ? '*' : ''}`;

@@ -545,9 +545,9 @@ export interface SkillEntry {
   /** Registry-specific trust signal (e.g. 'builtin', 'trusted', 'community'). */
   trustLevel?: string;
   /**
-   * Lowercase hex sha256 of the skill's SKILL.md, as recorded by
-   * `agents publish`. When present, install verifies the cloned SKILL.md
-   * against it and aborts on mismatch.
+   * Lowercase hex sha256 of the skill's SKILL.md, as recorded by the registry
+   * index. When present, install verifies the cloned SKILL.md against it and
+   * aborts on mismatch.
    */
   sha256?: string;
 }
@@ -1056,7 +1056,7 @@ export interface Meta {
    */
   deviceConfig?: Record<string, unknown>;
   /**
-   * Agent-host registry keyed by host name (`agents hosts`). Portable user
+   * Agent-host registry keyed by host name (the `--host`/`--device` dispatch overlay). Portable user
    * config synced with `agents repo push/pull`. For `ssh-config` hosts this is
    * just an overlay (caps/os) — the connection details stay in ~/.ssh/config and
    * are never copied. `inline` hosts carry their own address/user.
@@ -1072,7 +1072,7 @@ export interface Meta {
    * Full shape in `lib/fleet/types.ts` (FleetManifest).
    */
   fleet?: import('./fleet/types.js').FleetManifest;
-  /** `agents share` endpoint (Cloudflare R2 + Worker). Set by `agents share
+  /** Artifact share endpoint (Cloudflare R2 + Worker). Set by `agents artifacts
    * setup`/`join`; syncs fleet-wide via `agents repo push/pull`. The write token
    * lives in the `share` secrets bundle, not here. */
   share?: {
@@ -1084,7 +1084,7 @@ export interface Meta {
     /** Cloudflare Web Analytics token injected into published HTML pages. */
     analyticsToken?: string;
     /** sha256 of the Worker script deployed at the last provision/update, so
-     * `agents share status` can tell current vs outdated vs unknown (a config
+     * `agents artifacts share status` can tell current vs outdated vs unknown (a config
      * from before this field existed has no hash — always "unknown"). */
     templateHash?: string;
   };
@@ -1099,16 +1099,6 @@ export interface Meta {
   notify?: {
     owner?: { channel: string; to: string };
     transports?: Record<string, string>;
-  };
-  /**
-   * Routines daemon settings. `projects` is the allowlist of project roots
-   * whose `.agents/routines/*.yml` may be synced into `~/.agents/routines/`
-   * and fired by the daemon — never auto-discovered from a cloned public
-   * repo without an explicit opt-in (`agents routines enable-project`).
-   * Paths are stored absolute (or home-relative `~/…`).
-   */
-  routines?: {
-    projects?: string[];
   };
 }
 

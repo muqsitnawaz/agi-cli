@@ -11,6 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -22,8 +23,11 @@ import {
   descendantsOf,
   isProtectedAgentsService,
   parsePaneOwners,
+  parsePanePids,
   parseProcessRows,
   parseTmuxSessionMarker,
+  readPaneOwners,
+  reapOrphanAgentProcesses,
   selectOrphanProcesses,
   type AgentProcess,
   type PaneOwner,
@@ -31,6 +35,9 @@ import {
 
 const posix = process.platform !== 'win32';
 const skipReason = !posix ? 'POSIX-only' : (isTmuxInstalled() ? null : 'tmux not installed');
+const tier1SkipReason = !fs.existsSync('/proc/self/environ')
+  ? 'tier 1 requires Linux /proc environment reads'
+  : skipReason;
 
 const proc = (pid: number, ppid: number, args: string, tmuxSession?: string): AgentProcess =>
   ({ pid, ppid, args, tmuxSession });
@@ -87,11 +94,22 @@ describe('parsePaneOwners', () => {
   });
 });
 
+describe('parsePanePids', () => {
+  it('collects every pane_pid regardless of session or attached state', () => {
+    const pids = parsePanePids(['ag-claude-aaaa\t100\t0', 'ag-claude-bbbb\t200\t1', 'ag-claude-aaaa\t101\t0'].join('\n'));
+    expect([...pids].sort((a, b) => a - b)).toEqual([100, 101, 200]);
+  });
+
+  it('is empty for empty input', () => {
+    expect(parsePanePids('').size).toBe(0);
+  });
+});
+
 describe('selectOrphanProcesses', () => {
-  it('reaps a helper whose tmux session no longer exists', () => {
+  it('NEVER treats an absent tmux session as proof that a live marked process is orphaned', () => {
     const table = [proc(500, 1, 'cgraph-mcp --daemon', 'ag-codex-ff55f79f')];
     const picked = selectOrphanProcesses(table, owners([]), noneProtected);
-    expect(picked).toEqual([{ pid: 500, args: 'cgraph-mcp --daemon', reason: 'tmux-session-gone', tmuxSession: 'ag-codex-ff55f79f' }]);
+    expect(picked).toEqual([]);
   });
 
   it('reaps a helper whose session exists but whose agent pane process has exited', () => {
@@ -157,6 +175,137 @@ describe('selectOrphanProcesses', () => {
     expect(rule.spawnerPid('/home/me/.../.bin/claude --permission-mode plan --session-id 978673a2')).toBeUndefined();
     expect(rule.spawnerPid('claude.exe daemon run --spawned-by {"pid":42}')).toBe(42);
   });
+
+  // RUSH-2603: neither a failed query nor a reliable empty answer proves the
+  // marked process itself is dead. Only a present owner with a dead pane does.
+  it('NEVER runs tier 1 when the owners read is unreliable — even a process with no matching session survives', () => {
+    const table = [proc(500, 1, 'cgraph-mcp --daemon', 'ag-codex-ff55f79f')];
+    const reliable = selectOrphanProcesses(table, owners([]), { ...noneProtected, ownersReliable: true });
+    const unreliable = selectOrphanProcesses(table, owners([]), { ...noneProtected, ownersReliable: false });
+    expect(reliable).toEqual([]);
+    expect(unreliable).toEqual([]);
+  });
+
+  it('an unreliable owners read does not block tier 2 (the detached-helper registry is independent of tmux)', () => {
+    const daemonArgs = 'claude.exe daemon run --origin transient --spawned-by {"label":"claude","pid":3834601}';
+    const table = [proc(3868250, 1, daemonArgs)];
+    const picked = selectOrphanProcesses(table, owners([]), { ...noneProtected, ownersReliable: false, isAlive: () => false });
+    expect(picked.map(c => c.pid)).toEqual([3868250]);
+  });
+
+  it('ownersReliable defaults to true and still requires a present, dead owner', () => {
+    const table = [proc(500, 1, 'cgraph-mcp --daemon', 'ag-codex-dead')];
+    const picked = selectOrphanProcesses(table, owners([['ag-codex-dead', { agentAlive: false, attached: false }]]), noneProtected);
+    expect(picked.map(c => c.reason)).toEqual(['tmux-agent-exited']);
+  });
+
+  // Blocker 4 (RUSH-2521 review): tier 2 must not fire on a substring match
+  // anywhere in argv — only the REAL executable, and never a process still
+  // owned by a live/attached pane.
+  it('NEVER seeds tier 2 from a process whose argv merely QUOTES the daemon-run pattern (as this file\'s own docblock does)', () => {
+    // The exact shape this file's docblock and test fixtures contain — a real
+    // `cat`/`grep`/pager viewing this source, or a coding agent's own tool-call
+    // argv, could carry this verbatim text without being the daemon at all.
+    const quotedText = 'daemon run --origin transient --spawned-by {"label":"claude","cwd":"/home/me/src/agents-cli","pid":3834601}';
+    const table = [
+      proc(9001, 1, `/usr/bin/cat orphan-reap.ts ${quotedText}`),
+      proc(9002, 1, `/usr/bin/grep -n "${quotedText}" orphan-reap.ts`),
+    ];
+    const picked = selectOrphanProcesses(table, owners([]), { ...noneProtected, isAlive: () => false });
+    expect(picked).toEqual([]);
+  });
+
+  it('NEVER seeds tier 2 from a process still owned by a LIVE or attached pane, whatever its argv says', () => {
+    // A live interactive claude process whose own prompt/tool-args happen to
+    // contain the daemon-run + dead-pid shape (e.g. discussing THIS bug) must
+    // never become a kill seed for its own subtree.
+    const daemonShapedPrompt = 'claude --print "please fix daemon run --spawned-by handling for pid 3834601"';
+    const table = [proc(4200, 1, daemonShapedPrompt, 'ag-claude-live')];
+    const live = owners([['ag-claude-live', { agentAlive: true, attached: false }]]);
+    const picked = selectOrphanProcesses(table, live, { ...noneProtected, isAlive: () => false });
+    expect(picked).toEqual([]);
+  });
+
+  // Round-2 finding from non-author review of PR #2596: the marker-based
+  // ownedByLivePane check above only protects a process whose environment WAS
+  // readable — but tier 1's own env-marker attribution is dead on macOS by
+  // design (see the docblock), and a bare `claude` invocation started outside
+  // an agents-cli-managed pane never carries the marker on any platform. So a
+  // LIVE interactive claude process with NO marker, whose own argv happens to
+  // match the tier-2 pattern, was still selectable as a kill seed.
+  it('REGRESSION (round 2): a live claude pane leaf with NO env marker still seeds a kill without the pane-pid check', () => {
+    // Reproduces the exact gap: no tmuxSession (macOS, or launched outside
+    // agents-cli), argv quotes the daemon-run + dead-pid shape.
+    const daemonShapedPrompt = 'claude --print "please fix daemon run --spawned-by {\"label\":\"claude\",\"pid\":99999999} handling"';
+    const table = [proc(55555, 1, daemonShapedPrompt)]; // tmuxSession intentionally undefined
+    const picked = selectOrphanProcesses(table, owners([]), { ...noneProtected, isAlive: pid => pid !== 99999999 });
+    // Without livePanePids, this is the vulnerability: the live process gets killed.
+    expect(picked.map(c => c.pid)).toEqual([55555]);
+  });
+
+  it('NEVER seeds tier 2 from a LIVE pane leaf pid, even with no env marker at all (the round-2 fix)', () => {
+    const daemonShapedPrompt = 'claude --print "please fix daemon run --spawned-by {\"label\":\"claude\",\"pid\":99999999} handling"';
+    const table = [proc(55555, 1, daemonShapedPrompt)]; // tmuxSession intentionally undefined
+    const picked = selectOrphanProcesses(table, owners([]), {
+      ...noneProtected,
+      isAlive: pid => pid !== 99999999,
+      livePanePids: new Set([55555]), // tmux itself says this IS a pane's live leaf pid
+    });
+    expect(picked).toEqual([]);
+  });
+
+  it('livePanePids does not protect an unrelated pid that merely shares no session data', () => {
+    const daemonArgs = 'claude.exe daemon run --origin transient --spawned-by {"label":"claude","pid":3834601}';
+    const table = [proc(3868250, 1, daemonArgs)];
+    const picked = selectOrphanProcesses(table, owners([]), {
+      ...noneProtected,
+      isAlive: () => false,
+      livePanePids: new Set([424242]), // some OTHER pane's leaf pid — irrelevant here
+    });
+    expect(picked.map(c => c.pid)).toEqual([3868250]);
+  });
+
+  // Round-3 finding (non-author review of the round-2 fix): livePanePids only
+  // ever contains a pane LEAF's own pid — a live agent's own CHILD process
+  // (e.g. its Bash tool spawning `claude --print "…daemon run…"` as a
+  // sub-invocation, which the threat model in this file's docblock names
+  // explicitly) has no marker on macOS AND is not itself a pane_pid, so it
+  // was still an unprotected kill seed even after the round-2 fix.
+  it('NEVER seeds tier 2 from a LIVE CHILD of a pane leaf, even with no env marker and no pane_pid of its own', () => {
+    const daemonShapedPrompt = 'claude --print "please fix daemon run --spawned-by {\"label\":\"claude\",\"pid\":99999999} handling"';
+    const paneLeaf = proc(100, 1, 'claude'); // the interactive agent tmux itself tracks
+    const child = proc(55555, 100, daemonShapedPrompt); // its own Bash-tool sub-invocation, ppid=100, no marker
+    const picked = selectOrphanProcesses([paneLeaf, child], owners([]), {
+      ...noneProtected,
+      isAlive: pid => pid !== 99999999,
+      livePanePids: new Set([100]), // tmux only ever reports the LEAF's pid
+    });
+    expect(picked).toEqual([]);
+  });
+
+  it('a process that has genuinely reparented away from a live pane leaf remains reapable', () => {
+    // ppid 1 (init) — NOT a descendant of the live leaf's current tree, even
+    // though some other unrelated live agent happens to be running. This is
+    // the actual detached-daemon shape tier 2 exists to catch.
+    const daemonArgs = 'claude.exe daemon run --origin transient --spawned-by {"label":"claude","pid":3834601}';
+    const reparentedDaemon = proc(3868250, 1, daemonArgs);
+    const paneLeaf = proc(100, 1, 'claude');
+    const picked = selectOrphanProcesses([paneLeaf, reparentedDaemon], owners([]), {
+      ...noneProtected,
+      isAlive: pid => pid !== 3834601,
+      livePanePids: new Set([100]),
+    });
+    expect(picked.map(c => c.pid)).toEqual([3868250]);
+  });
+
+  it('argv0Basename anchor: a real claude daemon nested deep in a quoting process is still reaped', () => {
+    // Sanity check the anchor doesn't over-correct: the ACTUAL daemon (argv[0]
+    // really is claude/claude.exe) is unaffected.
+    const daemonArgs = 'claude.exe daemon run --origin transient --spawned-by {"label":"claude","pid":3834601}';
+    const table = [proc(3868250, 1, daemonArgs)];
+    const picked = selectOrphanProcesses(table, owners([]), { ...noneProtected, isAlive: () => false });
+    expect(picked.map(c => c.pid)).toEqual([3868250]);
+  });
 });
 
 describe('descendantsOf', () => {
@@ -171,7 +320,61 @@ describe('descendantsOf', () => {
   });
 });
 
-describe.skipIf(skipReason)('reaping a real leaked helper', () => {
+describe('readPaneOwners', () => {
+  it('a socket that was never created is a reliable, confident EMPTY read (tmux unlinks its own socket on exit)', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-orphan-reap-owners-'));
+    try {
+      const neverCreated = path.join(tempDir, 'never-existed.sock');
+      const read = await readPaneOwners(neverCreated);
+      expect(read).toEqual({ ok: true, owners: new Map(), panePids: new Set() });
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(skipReason)('a socket file that exists but answers with a real, completed nonzero exit is still a reliable EMPTY read', async () => {
+    // A stale/garbage file at the socket path is NOT a listening tmux server —
+    // real tmux connects, fails, and EXITS (a completed process, not a thrown
+    // error). That is tmux itself answering "nothing here", which must stay
+    // distinct from "tmux never answered at all" (a thrown/rejected query).
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-orphan-reap-owners-'));
+    try {
+      const garbage = path.join(tempDir, 'not-a-socket.sock');
+      fs.writeFileSync(garbage, 'not a unix socket');
+      const read = await readPaneOwners(garbage);
+      expect(read.ok).toBe(true);
+      expect(read.owners.size).toBe(0);
+      expect(read.panePids.size).toBe(0);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.skipIf(!fs.existsSync('/proc/self/environ'))('daemon-start regression (RUSH-2603)', () => {
+  it('keeps a real live marked agent alive when its tmux server is absent', async () => {
+    const missingSocket = path.join(os.tmpdir(), `agents-rush-2603-${process.pid}`, 'server.sock');
+    const child = spawn('sleep', ['120'], {
+      env: { ...process.env, [TMUX_SESSION_ENV]: `ag-claude-rush2603-${process.pid}` },
+      stdio: 'ignore',
+    });
+    expect(child.pid).toBeTypeOf('number');
+    try {
+      const result = await reapOrphanAgentProcesses({
+        socket: missingSocket,
+        pids: [child.pid!],
+        graceMs: 10,
+      });
+      expect(result.candidates).toEqual([]);
+      expect(alive(child.pid!)).toBe(true);
+    } finally {
+      child.kill('SIGKILL');
+      await new Promise<void>(resolve => child.once('exit', () => resolve()));
+    }
+  });
+});
+
+describe.skipIf(tier1SkipReason)('reaping a real leaked helper', () => {
   let socket: string;
   let tempDir: string;
   const spawned: number[] = [];
@@ -214,7 +417,11 @@ describe.skipIf(skipReason)('reaping a real leaked helper', () => {
     expect(alive(helper)).toBe(true);
     expect(markerOf(helper)).toBe(name);
 
-    const result = await reapDeadTmuxPanes(socket);
+    // `pids` scopes the reap's process-table read to JUST the fixture's own
+    // helper — never the machine-wide `-A` a bare call would use — so this
+    // test can never select or signal a real, unrelated process on a shared
+    // box (RUSH-2521 review).
+    const result = await reapDeadTmuxPanes(socket, { pids: [helper] });
 
     expect(result.processes).toBeGreaterThanOrEqual(1);
     expect(result.processDetails.join('\n')).toContain(String(helper));
@@ -226,7 +433,7 @@ describe.skipIf(skipReason)('reaping a real leaked helper', () => {
     const name = `orph-live-${process.pid}`;
     const helper = await launchLeakingSession(name, 'exec sleep 120');
 
-    const result = await reapDeadTmuxPanes(socket);
+    const result = await reapDeadTmuxPanes(socket, { pids: [helper] });
 
     expect(result.processDetails.join('\n')).not.toContain(String(helper));
     expect(alive(helper)).toBe(true);

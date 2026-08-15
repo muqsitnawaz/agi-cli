@@ -11,6 +11,22 @@ OpenClaw, Rush, Hermes, Grok, Kimi, Droid, and Cursor (the `SESSION_AGENTS` set 
 
 ## Session lifecycle verbs
 
+### Incremental session state for UI consumers
+
+Long-lived consumers subscribe to the CLI-owned session state instead of
+reimplementing discovery or polling session history:
+
+```bash
+agents sessions watch --json
+agents sessions watch --json --local
+```
+
+The command writes NDJSON envelopes. Version 1 defines `reset`, `upsert`,
+`remove`, `scope`, and `heartbeat` events. Consumers treat `rowKey` as opaque
+and order events by `(streamId, sequence)`. When a device scope becomes
+unavailable, its last rows remain recovery entries until that scope sends a new
+reset; unavailability is not interpreted as session removal.
+
 These subcommands sit on one axis (get back into a conversation). They are **not**
 interchangeable — pick the verb for the intent:
 
@@ -686,6 +702,17 @@ cross-machine rows (interactive, headless, teams, and sub-agent sessions share
 the same path). The picker preview also shows the originating user prompt and a
 width-capped `Dirs:` line of directories touched.
 
+A row another device owns (`_remote` — its transcript is on the peer's disk)
+gets the same full pane, not a metadata stub: the picker fetches that peer's
+already-computed digest over SSH (`fetchPeerPreviewDigest` in
+`src/lib/session/remote-list.ts` runs the peer's own `sessions preview <id>
+--local --json`) the first time the row is previewed and repaints the pane in
+place when it lands. While the fetch is in flight the pane shows the metadata
+card plus a `fetching preview from <device> over SSH…` note; a peer that cannot
+answer (asleep, unregistered, version-skewed) leaves the metadata card, cached
+so arrowing over the row does not re-dial it. Peer-supplied digest strings are
+scrubbed of terminal escapes before rendering (`sanitizeRemoteDigest`).
+
 Both renders of a session — the picker quick preview and the full summary —
 share one extraction module (`src/lib/session/highlights.ts`) for the "what did
 this session use and produce" lines, so they never disagree:
@@ -1254,7 +1281,7 @@ capture its final output. Two things then accumulate:
 ```bash
 agents sessions reap             # collect both
 agents sessions reap --dry-run   # list what would be collected, kill nothing
-agents sessions reap --json      # { reaped, sessions, details, processes, processDetails }
+agents sessions reap --json      # { reaped, sessions, details, processes, processDetails, warnings }
 ```
 
 The routines daemon runs the same sweep every 5 minutes
@@ -1262,24 +1289,54 @@ The routines daemon runs the same sweep every 5 minutes
 collects a session's helpers as it tears that session down, so an agent that exits
 normally leaves nothing behind without waiting for a tick.
 
-**How a helper is attributed to its session.** Every OS handle that names the pane
-is destroyed by the exit itself — ppid ancestry is replaced by init, the
-controlling terminal is disassociated from the whole POSIX session when its leader
-exits, and the surviving helpers are precisely the ones that left the pane's
-process group. What does survive is the environment: the pane exports
-`AGENT_TMUX_SESSION_NAME` and every descendant inherits it, reparented or not. A
-process carrying that marker is reaped when its tmux session no longer exists, or
-when that session has **no attached client AND** its agent pane process has exited.
-A live agent or an attached client protects everything it owns, and the routines
-daemon, the secrets broker, and the reaping process's own ancestry are never
-candidates.
+**How a helper is attributed to its session (tier 1 — Linux only today).** Every
+OS handle that names the pane is destroyed by the exit itself — ppid ancestry is
+replaced by init, the controlling terminal is disassociated from the whole POSIX
+session when its leader exits, and the surviving helpers are precisely the ones
+that left the pane's process group. What does survive is the environment: the pane
+exports `AGENT_TMUX_SESSION_NAME` and every descendant inherits it, reparented or
+not. A process carrying that marker is reaped only when tmux still reports its
+session and that session has **no attached client AND** its agent pane process has
+exited. An absent session is not proof: a tmux server can restart while its pane's
+process tree is still alive. A live agent, an attached client, or an absent owner
+protects everything it owns. The routines daemon, the secrets broker, and the
+reaping process's own ancestry are never candidates. Reading that marker needs
+another process's environment, which is
+a plain `/proc/<pid>/environ` file read on Linux but has no working equivalent on
+macOS: modern `ps -E` no longer prints another process's environment at all
+(verified on macOS Sequoia), so `readAgentProcesses()` returns every macOS process
+with no marker and tier 1 correctly finds nothing to do there — safe, not
+effective. Only tier 2 (below) reaps anything on macOS today.
+
+**When tmux itself can't be asked.** A query that threw (tmux
+missing/unsupported version, a spawn failure, or a timed-out server) skips tier 1
+entirely for that tick. A completed empty answer also reaps nothing: absence is not
+positive liveness evidence. `agents sessions reap --json`'s `warnings` array (and a
+`WARN`-level daemon log line) says so when it happens; tier 2 is unaffected, since
+it never consults tmux at all.
 
 A harness that starts its background daemons with a scrubbed environment is matched
-on the owner it declares in its own argv instead — Claude Code's
+on the owner it declares in its own argv instead (tier 2) — Claude Code's
 `daemon run --spawned-by {…,"pid":N}` pool is reaped, with its `bg-pty-host` /
 `bg-spare` workers, once pid `N` is dead. Those rules live in
 `DETACHED_HELPER_RULES` ([`src/lib/tmux/orphan-reap.ts`](../src/lib/tmux/orphan-reap.ts)),
-one entry per harness.
+one entry per harness, and are anchored on the process's REAL executable (argv[0]'s
+basename) rather than a substring match anywhere in its command line — a `grep`,
+`cat`, or pager viewing this rule's own source, or an agent whose prompt happens to
+quote it — including a subprocess it spawns, e.g. its own Bash tool invoking
+`claude --print "…"` as a sub-task — must never become a kill seed. A process
+is excluded from seeding tier 2, whatever its own argv says, when EITHER of
+two independent signals says it is still owned: tmux's own `#{pane_pid}`,
+expanded to that pane leaf's current process-tree descendants, says the pid
+is still structurally part of a live agent's tree right now — no environment
+marker needed anywhere in that tree, so this holds even where tier 1's
+attribution is dead (macOS, or a `claude` invocation started outside an
+agents-cli pane) — or the process carries a marker whose session is
+live/attached. A process that has genuinely reparented away (a real detached
+daemon, no longer chained to any live pane leaf) is deliberately excluded
+from that tree and remains reapable. Leaning on the marker alone, and later
+on the pane leaf's own pid alone, each left a narrower slice of this open —
+see the file's docblock for both review rounds that found the gaps.
 
 Note that this collects **everything** a session's agent spawned, not only MCP
 servers — a server the agent deliberately backgrounded inside its pane is torn down
@@ -1522,7 +1579,11 @@ The flow reuses existing primitives rather than reinventing transport or resume:
    starts the server a fresh worker/box lacks — the generic `new-window` backend needs a
    live server), then confirm the pane is *live* (not merely created) before proceeding.
    For an ephemeral box, migrate git-clones the repo and checks out the (WIP) branch first
-   so the cwd resolves.
+   so the cwd resolves. The session is created on the target's **agents socket** — the
+   same one its own reaper queries (`readAllPaneOwners`, see "Reaping what an exited
+   agent left behind" above) — not tmux's bare default OS socket; landing on the wrong
+   socket made the migrated agent invisible to its own reaper, which killed it as
+   `tmux-session-gone` on the next tick (RUSH-2521).
 7. **Stop the source** (`killSession`) — but only after the target session is confirmed
    live. `--keep` skips this (copy, not move).
 

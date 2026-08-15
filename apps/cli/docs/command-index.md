@@ -55,6 +55,20 @@ agents alias remove <name>              Delete an alias shim
 agents apply  Reconcile the fleet to a declared profile: install agents, sync config, propagate login.
 ```
 
+## artifacts — Publish agent-made artifacts (plans, reports, visuals) to your own Cloudflare R2 and get a shareable link (~$0).
+
+```
+agents artifacts                            Publish agent-made artifacts (plans, reports, visuals) to your own Cloudflare R2 and get a shareable link (~$0).
+agents artifacts setup                      Provision (or join) the Cloudflare R2 + Worker endpoint that backs `agents artifacts share`.
+agents artifacts share [file]               Publish an HTML file to your own Cloudflare R2 and get a shareable link (~$0).
+agents artifacts share analytics            Show the Cloudflare Web Analytics status for this share endpoint.
+agents artifacts share delete <targets...>  Take down a published page (and by default its OG cover). Verifies the page 404s before reporting success. Top-level alias: agents unshare.
+agents artifacts share join [baseUrl]       Use an existing synced share endpoint and write token (no provisioning).
+agents artifacts share list                 List the pages you've published to your share namespace (human table; --json for scripts).
+agents artifacts share status               Show the configured share endpoint and namespace.
+agents artifacts share update               Re-deploy the Worker script to the current template on an already-provisioned endpoint (idempotent).
+```
+
 ## audit — Alias of `agents events --include runs` — dispatched-run outcomes
 
 ```
@@ -259,12 +273,15 @@ agents devices list                            List registered devices with plat
 agents devices login                           Log agent CLIs into fleet boxes over SSH: drive each box's device-code OAuth, scrape the URL + code, and surface every pending login in one local browser page. Default drives all codes at once; --interactive walks one box at a time (codes requested just-in-time so they don't expire).
 agents devices pair-ios [name]                 Pair an iPhone/iPad cockpit (RUSH-1733): mint a control token for `agents serve --control` and mark the device control-only. The token is shown ONCE — enter it in the app. Run this on the anchor.
 agents devices ping                            Live auth health: complete a real request for every agent account across the fleet (unlike the cached "signed in" flag). Writes the shared auth-health cache read by `agents view` and `fleet status`.
+agents devices ps                              List agent tasks dispatched to devices with `agents run --device <name> --no-follow`. Reconciles each still-`running` record against the remote before listing. View a log with `agents logs <id>`.
 agents devices register <name>                 Register a discovered (pending) node by name — used by the menu-bar "NEW DEVICES → Register" action.
 agents devices render                          Render the registry to ssh_config. Prints to stdout, or use --write to update ~/.ssh/config.d/agents.
 agents devices rm <name>                       Remove a device from the registry.
+agents devices role [name] [role]              Show or set what a device is for: worker (agents run here) or personal (you sit here — never picked automatically). Marking any device worker makes `--device auto` an allowlist over the marked workers.
 agents devices run <cmd...>                    Run a command on every online registered device. Offline devices are skipped. Alias surface: agents fleet run …
 agents devices show <name>                     Show the full profile for one device.
 agents devices status                          Fleet health at a glance: online/offline rollup, a NEEDS ATTENTION list (each with its fix command), and quiet per-device rows grouped by OS. Use --verbose for the full auth/CLI/sync grid.
+agents devices stop <id>                       Terminate a running dispatched task from this machine (SIGTERM the remote process group; marks it failed/143).
 agents devices sync                            Ingest `tailscale status --json` into device profiles. In a terminal, opens a checkbox to register/unregister nodes; with --yes, registers every non-ignored node.
 agents devices unignore <name>                 Undo `ignore`: allow a node to be discovered and registered again.
 agents devices update [version]                Roll out agents-cli to every online registered device (`agents upgrade --yes` on each), then verify each box actually runs the new version. Offline devices are skipped.
@@ -312,16 +329,6 @@ agents harness rename <old-name> <new-name>  Rename a custom harness (updates fo
 agents harness view <name>                   Show one custom harness (host, model, provider, auth, path).
 ```
 
-## helper — Manage the signed macOS Keychain helper (.app) install
-
-```
-agents helper          Manage the signed macOS Keychain helper (.app) install
-agents helper install  Copy the bundled .app to ~/Library/Application Support/agents-cli/
-agents helper status   Show source, destination, codesign and notarization status
-agents helper update   Reinstall the .app, overwriting any existing copy (alias of install)
-agents helper where    Print the absolute path to the installed helper executable
-```
-
 ## hooks — Automate workflows by running shell scripts in response to agent events
 
 ```
@@ -331,19 +338,6 @@ agents hooks list [agent]   Show which hooks are installed and which events they
 agents hooks profile        Per-hook timing + cache stats from recent invocations
 agents hooks remove [name]  Delete a hook from agents (interactive picker if no name given)
 agents hooks view [name]    Read the shell script content for a hook
-```
-
-## hosts — Register and inspect agent hosts (machines you offload runs to with `agents run --host <name>`).
-
-```
-agents hosts                      Register and inspect agent hosts (machines you offload runs to with `agents run --host <name>`).
-agents hosts add [name] [target]  Enroll a host. With no args, pick from ~/.ssh/config + known_hosts. `target` is user@host for hosts not in ssh config.
-agents hosts check <name>         Probe one host: reachable? agents-cli version?
-agents hosts list                 List enrolled + ssh-config hosts (metadata only, no probing).
-agents hosts logs <id>            Show a host task’s concise summary; --full for the raw log, -f to follow a running one.
-agents hosts ps                   List dispatched host tasks.
-agents hosts remove <name>        Remove a host from the registry (does not touch ~/.ssh/config).
-agents hosts stop <id>            Terminate a running host task from this machine (SIGTERM process group; marks failed/143).
 ```
 
 ## humans — Inspect owner identity and notification channel config (humans.yaml)
@@ -401,12 +395,6 @@ agents install <identifier>  Install a package: mcp:, skill:, plugin:, or GitHub
 agents list [agent]  List installed agent CLI versions
 ```
 
-## lock — Write or verify agents.lock — a SHA-256 manifest of resolved resources
-
-```
-agents lock  Write or verify agents.lock — a SHA-256 manifest of resolved resources
-```
-
 ## login — Unlock synced secrets for this shell session
 
 ```
@@ -419,13 +407,13 @@ agents login  Unlock synced secrets for this shell session
 agents logout  Forget the cached synced-secrets key
 ```
 
-## logs — Alias of `agents events`. Pass an id to see the content redirect.
+## logs — Show a run log, audit trail, or stats. Subcommands: audit, stats, rotate.
 
 ```
-agents logs [id]    Alias of `agents events`. Pass an id to see the content redirect.
-agents logs audit   Alias of `agents events --include ops`
-agents logs rotate  Alias of `agents events rotate`
-agents logs stats   Alias of `agents events stats`
+agents logs [id]    Show a run log, audit trail, or stats. Subcommands: audit, stats, rotate.
+agents logs audit   Alias for `agents events --audit`
+agents logs rotate  Apply event retention and the storage ceiling immediately
+agents logs stats   Show aggregate audit statistics
 ```
 
 ## mailboxes — Fleet comms — boxes, live cross-box traffic, threads, and routes across the agent mailbox spool
@@ -488,6 +476,7 @@ agents mine toggle <name>  Enable/disable features for a brand
 
 ```
 agents models [agentSpec]                         Show the cost-tier map (cheap|default|best|ultra) for installed harnesses; pin overrides with `tier set`.
+agents models set [selector]                      Set the default model/mode an agent version uses for `agents run`
 agents models tier                                Override which model a cost tier resolves to (per harness, or per agent@version).
 agents models tier clear <selector> [tier]        Clear one tier (or all tiers) back to the auto guess.
 agents models tier list                           List all configured tier overrides.
@@ -600,6 +589,7 @@ agents projects for-cwd [cwd]  Resolve a directory to its defined project name (
 agents projects import         Import project definitions from Linear (via the `linear` CLI).
 agents projects link <name>    Attach an external tracker to a project definition (writes linear.projectId into the YAML).
 agents projects list           List defined projects (definitions only by default; no session scan).
+agents projects pull <name>    Fast-forward every fleet checkout of a named project to its remote default branch.
 agents projects rm <name>      Delete a project definition. Never touches the repo.
 agents projects save           Create or update one project from a complete ProjectDef JSON object on stdin.
 agents projects set <name>     Change one field on a project definition, preserving everything else.
@@ -630,18 +620,6 @@ agents pty signal <id> [signal]  Send a POSIX signal to the running process. Def
 agents pty start                 Start a new PTY session and return its ID. The session persists until you stop it.
 agents pty stop <id>             Stop a PTY session and clean up. The session ID becomes invalid.
 agents pty write <id> <input>    Send keystrokes to the PTY (like typing into the terminal). Processes escape sequences by default.
-```
-
-## publish — Generate a skills-index.json for a git repo and push it, making its skills discoverable via agents search/install
-
-```
-agents publish  Generate a skills-index.json for a git repo and push it, making its skills discoverable via agents search/install
-```
-
-## reconnect — Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
-
-```
-agents reconnect [session-id]  Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
 ```
 
 ## registry — Manage package registries
@@ -691,35 +669,45 @@ agents resume <session> [prompt]  Resume a session by id, tmux alias, or exact l
 agents roster  Live agent roster (alias of `agents sessions --active`). Who is running right now.
 ```
 
+## route — Named routers -- reusable, task-typed allowlists of harnesses x models/tiers x linked accounts.
+
+```
+agents route                                            Named routers -- reusable, task-typed allowlists of harnesses x models/tiers x linked accounts.
+agents route allow <name> <harness> <models...>         Set (replace) a harness's eligible model/tier allowlist under a router.
+agents route create <name>                              Create a named router with an initial harness + tier allowlist.
+agents route link-account <name> <harness> <account>    Link a durable credential account to a harness under a router.
+agents route list                                       List every configured router.
+agents route rm <name>                                  Delete a router.
+agents route show <name>                                Show a router's harness/model/account allowlist, weights, and hijack flag.
+agents route unlink-account <name> <harness> <account>  Unlink a durable credential account from a harness under a router.
+```
+
 ## routines — Schedule agents to run on a cron schedule or at a specific time. The daemon starts at install/upgrade and on setup when daemon.enabled is not false; routines add also ensures it is running.
 
 ```
-agents routines                         Schedule agents to run on a cron schedule or at a specific time. The daemon starts at install/upgrade and on setup when daemon.enabled is not false; routines add also ensures it is running.
-agents routines add [nameOrPath]        Create a new routine from a YAML file or inline flags. Starts the scheduler automatically if it is not already running.
-agents routines catchup                 Run any routines that missed their last scheduled fire on demand. The daemon already does this every 5 minutes — use this to force a pass now. Detached: runs in the background under the scheduler.
-agents routines cleanup                 Remove expired one-shot routines that already fired and still have a user-layer YAML file.
-agents routines devices [name]          View or change the devices where a routine is enabled. Without flags, opens an interactive picker (requires a TTY).
-agents routines disable-project [path]  Remove a project from the project-routines allowlist. Use --remove-synced to also delete the user-layer copies.
-agents routines doctor [name]           Check a routine's execution-context and harness readiness. Bare or --all checks every routine; --fix applies safe activation repairs (activate a now-ready paused routine; pause a broken active one).
-agents routines edit [name]             Edit a prefilled routine transactionally; invalid YAML never replaces the live definition.
-agents routines enable-project [path]   Opt a project's .agents/routines/*.yml into daemon firing. Requires explicit approval — project routines never auto-fire from a cloned repo. Materialises copies into ~/.agents/routines/ with source provenance.
-agents routines list                    See all scheduled jobs, when they run next, and their last execution status
-agents routines logs [name]             Show a run’s concise summary — status + extracted report. --full for the raw stdout stream; --run for a specific past run.
-agents routines pause [name]            Temporarily disable a routine. Stops scheduling future runs; enable again with resume.
-agents routines projects                List project roots opted into daemon-fired project routines
-agents routines remove [name]           Delete a routine. Stops scheduling future runs; past execution logs remain on disk.
-agents routines report [name]           Show the extracted report from the most recent execution. Reports are parsed from agent output on completion.
-agents routines resume [name]           Re-enable a paused routine so the daemon schedules it again
-agents routines run [name]              Execute a routine right now in the foreground. Ignores the schedule; useful for testing before enabling.
-agents routines runs [name]             See execution history: run IDs, completion status, and start times (up to last 10 runs)
-agents routines scheduler-logs          Read scheduler log output (for debugging why a routine did not fire). Use --follow to stream.
-agents routines start                   Start the background scheduler. Usually unnecessary — it auto-starts when you add your first routine.
-agents routines stats [name]            Duration + outcome rollup per job: run count, failed, missed, avg/p50/p95 duration
-agents routines status                  Show scheduler status, enabled routines, and when each one fires next.
-agents routines stop                    Stop the background scheduler. Routines will not fire until you start it again.
-agents routines sync [path]             Refresh user-layer copies of opted-in project routines from their .agents/routines/*.yml sources. With no path, syncs every enabled project. Also runs automatically on daemon reload (SIGHUP).
-agents routines view [name]             Show the full YAML configuration for a routine
-agents routines webhook                 Fire trigger-based routines from a single webhook payload (read from --file or stdin). One-shot: matches and fires, then exits.
+agents routines                   Schedule agents to run on a cron schedule or at a specific time. The daemon starts at install/upgrade and on setup when daemon.enabled is not false; routines add also ensures it is running.
+agents routines add [nameOrPath]  Create a new routine from a YAML file or inline flags. Starts the scheduler automatically if it is not already running.
+agents routines catchup           Run any routines that missed their last scheduled fire on demand. The daemon already does this every 5 minutes — use this to force a pass now. Detached: runs in the background under the scheduler.
+agents routines cleanup           Remove expired one-shot routines that already fired and still have a user-layer YAML file.
+agents routines devices [name]    View or change the devices where a routine is enabled. Without flags, opens an interactive picker (requires a TTY).
+agents routines disable [name]    Disable a routine. Stops scheduling future runs; turn it back on with: agents routines enable <name>.
+agents routines doctor [name]     Check a routine's execution-context and harness readiness. Bare or --all checks every routine; --fix applies safe activation repairs (activate a now-ready paused routine; pause a broken active one).
+agents routines edit [name]       Edit a prefilled routine transactionally; invalid YAML never replaces the live definition.
+agents routines enable [name]     Enable a routine so the daemon schedules it. Also materialises a project routine (from the current project or a registered one) on first enable — one step, no separate opt-in.
+agents routines list              See all scheduled jobs, when they run next, and their last execution status
+agents routines logs [name]       Show a run’s concise summary — status + extracted report. --full for the raw stdout stream; --run for a specific past run.
+agents routines remove [name]     Delete a routine. Stops scheduling future runs; past execution logs remain on disk.
+agents routines report [name]     Show the extracted report from the most recent execution. Reports are parsed from agent output on completion.
+agents routines run [name]        Execute a routine right now in the foreground. Ignores the schedule; useful for testing before enabling.
+agents routines runs [name]       See execution history: run IDs, completion status, and start times (up to last 10 runs)
+agents routines scheduler-logs    Read scheduler log output (for debugging why a routine did not fire). Use --follow to stream.
+agents routines start             Start the background scheduler. Usually unnecessary — it auto-starts when you add your first routine.
+agents routines stats [name]      Duration + outcome rollup per job: run count, failed, missed, avg/p50/p95 duration
+agents routines status            Show scheduler status, enabled routines, and when each one fires next.
+agents routines stop              Stop the background scheduler. Routines will not fire until you start it again.
+agents routines sync [path]       Refresh materialised project routines from their .agents/routines/*.yml sources. Definition-only — never changes what is enabled. With no path, refreshes every project you have enabled a routine from. Also runs automatically on daemon reload (SIGHUP).
+agents routines view [name]       Show the full YAML configuration for a routine
+agents routines webhook           Fire trigger-based routines from a single webhook payload (read from --file or stdin). One-shot: matches and fires, then exits.
 ```
 
 ## rules — Control agent behavior by installing persistent instructions and rules
@@ -801,16 +789,13 @@ agents serve  Read-only local web companion: team diffs, routines, and cloud sta
 
 ```
 agents sessions [query]                     Find, browse, and read agent conversation transcripts. Live roster: `agents sessions --active` (alias: `agents roster`).
-agents sessions attach <id>                 Bring a backgrounded agent to the foreground — resume it interactively here
 agents sessions backfill                    Populate derived session data explicitly.
 agents sessions backfill resources          Derive historical skill/slash-command usage once into the local SQLite index.
 agents sessions backfill tools              Parse historical tool calls once into the local SQLite index.
 agents sessions bookmark [ids...]           Bookmark sessions so they are easy to find again — list them with --bookmarks, or `b` in the browser.
 agents sessions detach <id>                 Send a live agent to the background — stop its terminal, keep it working headless
 agents sessions export [selectors...]       Bundle sessions (by id, query, or the parent selection flags like --since/-a) into a portable archive.
-agents sessions focus [selector]            Focus sessions by id, harness/version, topic, device, or live state; attach living panes and recover ended ones
 agents sessions fork <session>              Branch a session into a new, independent copy you can continue separately. The original is untouched.
-agents sessions go [id]                     Deprecated alias for `sessions focus --attach-only`
 agents sessions import [bundle]             Restore an export bundle (file, - for stdin, or --from-host <h>) into the local session store, deduping against what you already have.
 agents sessions inject <sessionId> <text>   Deliver text (+ Enter) into the terminal a running session lives in — nudge a stalled agent.
 agents sessions insights                    How work looks — behavioural report (default) or counter mix (`mix`, recipes)
@@ -829,18 +814,11 @@ agents sessions migrate [session-id]        Relocate a running session onto anot
 agents sessions migrations                  Show the migration ledger — sessions handed off to/from other machines.
 agents sessions optimize                    Compact the session search index (FTS5), reclaiming bloat from repeated re-indexing
 agents sessions preview <id>                Show one rich session card without rendering the full transcript
-agents sessions reap                        Kill tmux sessions whose panes are all dead, and the helper processes their agents left behind.
-agents sessions reconnect [session-id]      Re-enter a dropped agent terminal: attach the live pane if it survived, else resume the session
 agents sessions render <selectors...>       Render one or more sessions as readable, redacted Markdown for review or sharing.
 agents sessions resume [query]              Reopen one session by canonical identity, or multi-select history into terminal tabs/splits.
 agents sessions stats                       Which skills/commands you actually invoke, and which installed ones are dead weight.
 agents sessions tail [sessionId]            Stream compact live lines from a session file as events are written. Long-running: Ctrl+C to stop. Claude and Codex only.
-```
-
-## set — Set the default model/mode an agent version uses for `agents run`
-
-```
-agents set [selector]  Set the default model/mode an agent version uses for `agents run`
+agents sessions watch                       Stream canonical live and recoverable session row changes as NDJSON
 ```
 
 ## setup — Set up agents-cli, or re-open the capability onboarding hub.
@@ -852,22 +830,8 @@ agents setup computer  Set up `agents computer` (macOS) — install the signed h
 agents setup fleet     Set up `agents fleet` — discover Tailscale devices, choose auth, render SSH config, and test connectivity.
 agents setup mine      White-label the CLI — mint your own personally-named binary (e.g. `jack`).
 agents setup secrets   Configure `agents secrets` defaults and optionally import existing secrets.
-agents setup share     Configure the `agents share` endpoint (Cloudflare R2 + Worker) — provision your own or join one.
 agents setup status    Show setup readiness for core, browser, computer, secrets, fleet, share, watchdog, and preferences.
 agents setup watchdog  Choose the devices where the daemon watchdog pass runs.
-```
-
-## share — Publish an HTML file to your own Cloudflare R2 and get a shareable link (~$0).
-
-```
-agents share [file]               Publish an HTML file to your own Cloudflare R2 and get a shareable link (~$0).
-agents share analytics            Show the Cloudflare Web Analytics status for this share endpoint.
-agents share delete <targets...>  Take down a published page (and by default its OG cover). Verifies the page 404s before reporting success. Top-level alias: agents unshare.
-agents share join [baseUrl]       Use an existing synced share endpoint and write token (no provisioning).
-agents share list                 List the pages you've published to your share namespace (human table; --json for scripts).
-agents share setup                One-time: provision an R2 bucket + Worker on your Cloudflare and save the config.
-agents share status               Show the configured share endpoint and namespace.
-agents share update               Re-deploy the Worker script to the current template on an already-provisioned endpoint (idempotent).
 ```
 
 ## skills — Add domain-specific capabilities to agents via packaged SKILL.md files
@@ -934,6 +898,13 @@ agents teams status [team]                        Check in on a team: status, fi
 agents teams stop [team] [teammate]               Stop a running teammate. Resume it later with `agents teams resume`. Cleans up worktree if no uncommitted changes.
 ```
 
+## tickets — Read work items from the trackers linked to this workspace.
+
+```
+agents tickets       Read work items from the trackers linked to this workspace.
+agents tickets list  List workspace tickets from Linear and GitHub.
+```
+
 ## timeline — Agent progress stream (alias of `agents feed --filter updates`). What agents posted recently.
 
 ```
@@ -988,10 +959,10 @@ agents trends tools-per-session  Mix recipe: tools-per-session
 agents uninstall  Completely remove agents-cli and restore your original agent configs. Reverses `agents setup`.
 ```
 
-## unshare — Alias of `agents share delete` — take down a published page (and by default its OG cover).
+## unshare — Alias of `agents artifacts share delete` — take down a published page (and by default its OG cover).
 
 ```
-agents unshare <targets...>  Alias of `agents share delete` — take down a published page (and by default its OG cover).
+agents unshare <targets...>  Alias of `agents artifacts share delete` — take down a published page (and by default its OG cover).
 ```
 
 ## update — Move a frozen agent installation to a new release, keeping its name and every reference to it
@@ -1025,17 +996,6 @@ agents use <agent> [version]  Switch the active version for an agent. This is th
 agents view [agent]  Show what agent CLIs are installed and which versions you have. Inspect resources when you pass agent@version.
 ```
 
-## wallet — Device-local credit-card vault backed by macOS Keychain (Touch ID required to reveal). Encrypted at rest, never leaves your device. Not Apple Pay — stores real PANs, no tokenization.
-
-```
-agents wallet                             Device-local credit-card vault backed by macOS Keychain (Touch ID required to reveal). Encrypted at rest, never leaves your device. Not Apple Pay — stores real PANs, no tokenization.
-agents wallet add                         Add a card to the vault. Interactive prompt for PAN, CVC, expiry, cardholder, nickname.
-agents wallet list                        List stored cards (metadata only — last 4, brand, expiry). No biometric prompt.
-agents wallet remove <id>                 Remove a card from the vault. Argument is a card id or nickname.
-agents wallet rename <id> <new-nickname>  Rename a card. Argument is the current id or nickname.
-agents wallet show <id>                   Reveal a card. Touch ID required. Argument is a card id or nickname.
-```
-
 ## watchdog — Auto-nudge stalled agent terminals: detect stalls, resolve the exact split, inject "Continue." — no menu-bar needed.
 
 ```
@@ -1048,17 +1008,11 @@ agents watchdog rotate <state>               Turn in-place rotate of rate-limite
 agents watchdog status                       Show whether the daemon watchdog pass is enabled and where state is written.
 ```
 
-## webhook — Run a localhost signed webhook receiver for routine triggers.
+## webhooks — Run a localhost signed webhook receiver for routine triggers.
 
 ```
-agents webhook        Run a localhost signed webhook receiver for routine triggers.
-agents webhook serve  Receive signed GitHub/Linear webhooks on /hooks/<source> and fire matching routines.
-```
-
-## whoami — Show synced-secrets login status
-
-```
-agents whoami  Show synced-secrets login status
+agents webhooks        Run a localhost signed webhook receiver for routine triggers.
+agents webhooks serve  Receive signed GitHub/Linear webhooks on /hooks/<source> and fire matching routines.
 ```
 
 ## workflows — Manage multi-agent pipeline workflows (WORKFLOW.md bundles)

@@ -98,6 +98,10 @@ import { collectLocalFleetInventory } from '../lib/devices/fleet-inventory.js';
 import { checkSyncStatus, countOrphans } from '../lib/drift.js';
 import { checkAllClis } from '../lib/teams/agents.js';
 import { buildRemoteAgentsInvocation } from '../lib/hosts/remote-cmd.js';
+import { listTasks, resolveTaskRef } from '../lib/hosts/tasks.js';
+import { reconcileRunningTasks } from '../lib/hosts/reconcile.js';
+import { stopDispatchedTask } from '../lib/hosts/dispatch.js';
+import { terminalWidth, truncateToWidth } from '../lib/session/width.js';
 import { sshExec, sshExecAsync, SSH_OPTS } from '../lib/ssh-exec.js';
 import { ALL_AGENT_IDS } from '../lib/agents.js';
 import type { AgentId } from '../lib/types.js';
@@ -126,7 +130,20 @@ import {
   type VerdictSummary,
 } from '../lib/auth-health.js';
 import { runFleetLogin, type LoginStatus } from '../lib/fleet/remote-login.js';
-import { getConfigValue, listConfig, setConfigValue, unsetConfigValue, configKeySpec, type ConfigKeySpec } from '../lib/device-config.js';
+import {
+  getConfigValue,
+  listConfig,
+  setConfigValue,
+  unsetConfigValue,
+  configKeySpec,
+  autoPoolMode,
+  configuredDeviceRole,
+  listConfiguredDeviceRoles,
+  setConfiguredDeviceRole,
+  type ConfigKeySpec,
+  type ConfiguredDeviceRole,
+} from '../lib/device-config.js';
+import { filterAutoPool, listWorkerDevices } from '../lib/devices/pool.js';
 import { registerCommandGroups, setHelpSections } from '../lib/help.js';
 
 /** One-line summary of a device for `list`. `isSelf` marks the machine this
@@ -149,7 +166,18 @@ function deviceSummary(d: DeviceProfile, isSelf = false, stats?: DeviceStats, is
   const name = isSelf ? chalk.bold.cyan(d.name.padEnd(16)) : chalk.bold(d.name.padEnd(16));
   const here = isSelf ? chalk.cyan('  ← this machine') : '';
   const interactive = isInteractive ? chalk.yellow('  ★ interactive') : '';
-  return `${marker}${name} ${String(d.platform).padEnd(8)} ${(d.user ? d.user + '@' : '') + addr}  ${online}${reach}${here}${interactive}`;
+  const role = roleTag(d.name, listConfiguredDeviceRoles());
+  return `${marker}${name} ${String(d.platform).padEnd(8)} ${(d.user ? d.user + '@' : '') + addr}  ${online}${reach}${here}${interactive}${role}`;
+}
+
+/** The fleet-wide role mark, rendered for a device row. Empty when unmarked —
+ * an unmarked device is the common case and must not add a column of noise. */
+function roleTag(name: string, roles: Record<string, ConfiguredDeviceRole>): string {
+  const role = roles[name];
+  if (!role) return '';
+  if (role === 'worker') return chalk.green('  worker');
+  if (role === 'personal') return chalk.yellow('  personal');
+  return chalk.gray('  control');
 }
 
 const HEADROOM_BADGE: Record<Headroom, string> = {
@@ -186,6 +214,7 @@ function renderDeviceTable(
 ): string[] {
   if (!statsMap) return names.map((n) => deviceSummary(reg[n], n === self, undefined, n === interactiveHost));
 
+  const deviceRoles = listConfiguredDeviceRoles();
   const lines: string[] = [];
   const head =
     '  ' +
@@ -230,7 +259,7 @@ function renderDeviceTable(
     const badge = HEADROOM_BADGE[headroom(stats)];
     const here = isSelf ? chalk.cyan('  ← this machine') : '';
     const interactive = name === interactiveHost ? chalk.yellow('  ★ interactive') : '';
-    lines.push(`${marker}${label}${plat} ${cores}${load}${mem}${freeTotal}  ${badge}${relay}${here}${interactive}`);
+    lines.push(`${marker}${label}${plat} ${cores}${load}${mem}${freeTotal}  ${badge}${relay}${here}${interactive}${roleTag(name, deviceRoles)}`);
   }
 
   // Fleet capacity summary — total cores + how much RAM is free right now.
@@ -542,6 +571,16 @@ async function probeRemoteHealth(target: FleetStatusTarget): Promise<Omit<FleetH
   };
 }
 
+/** Effective device-scoped config, keyed by the canonical YAML key. */
+function deviceConfigJson(name: string): Record<string, unknown> | undefined {
+  const config: Record<string, unknown> = {};
+  for (const entry of listConfig({ device: name })) {
+    if (entry.spec.scope !== 'device' || entry.value === undefined) continue;
+    config[entry.spec.yamlKey] = entry.value;
+  }
+  return Object.keys(config).length > 0 ? config : undefined;
+}
+
 async function runFleetStatus(opts: { json?: boolean; strict?: boolean; stats?: boolean; refresh?: boolean; live?: boolean; local?: boolean; verbose?: boolean }): Promise<void> {
   const reg = await loadDevices();
   const self = machineId();
@@ -665,7 +704,20 @@ async function runFleetStatus(opts: { json?: boolean; strict?: boolean; stats?: 
 
   const report = buildFleetHealthReport(rows, new Date(), { self });
   if (opts.json) {
-    console.log(JSON.stringify(report, null, 2));
+    const interactiveHost = getConfigValue('interactive.host').value as string | undefined;
+    console.log(JSON.stringify({
+      ...report,
+      devices: report.devices.map((row) => {
+        const registered = reg[row.name];
+        const config = deviceConfigJson(row.name);
+        return {
+          ...row,
+          profile: registered ? resolveDeviceProfile(registered) : { name: row.name },
+          interactive: row.name === interactiveHost,
+          ...(config ? { config } : {}),
+        };
+      }),
+    }, null, 2));
   } else if (opts.verbose) {
     // Full grid: the auth/CLI/sync/version columns and the warnings rollup.
     for (const line of renderFleetWarnings(report)) console.log(line);
@@ -851,7 +903,7 @@ async function probeRemoteHarnesses(
  * the local and remote rows. Bounded by the same per-device + overall deadlines
  * as `fleet ping`, so one unreachable box can never stall the glance.
  */
-async function collectFleetHarnesses(opts: HarnessInventoryOpts): Promise<HostHarnessResult[]> {
+export async function collectFleetHarnesses(opts: HarnessInventoryOpts): Promise<HostHarnessResult[]> {
   const self = machineId();
   const want = opts.devices?.length ? new Set(opts.devices) : null;
   const results: HostHarnessResult[] = [];
@@ -1279,6 +1331,85 @@ function registerDevicesCommands(program: Command): void {
     await runDevicesConfigMenu(name);
   };
 
+  /**
+   * The `devices role` engine — read or write the fleet-wide role mark, and say
+   * what it does to automatic placement.
+   *
+   * A role written here lands in the SHARED block (`fleet.devices.<name>.config.role`)
+   * because every box has to agree on it. The vocabulary is deliberately
+   * `worker | personal` only: a paired cockpit's `control` role lives in the
+   * per-machine device registry, is written by `agents devices pair-ios`, and is
+   * what the existing dial-exclusion filters (`isControlDevice`) read. Accepting
+   * `control` here too would promise a fleet-wide dial exclusion this key cannot
+   * deliver — those filters read each box's own registry, so the mark would only
+   * hold on the machine that ran the command.
+   */
+  const runDevicesRole = async (
+    name: string | undefined,
+    role: string | undefined,
+    opts: { clear?: boolean; json?: boolean },
+  ): Promise<void> => {
+    if (!name) {
+      if (role) throw new Error('Name a device: agents devices role <name> <worker|personal>');
+      const roles = listConfiguredDeviceRoles();
+      const mode = autoPoolMode();
+      const reg = await loadDevices();
+      const online = Object.entries(reg)
+        .filter(([, d]) => d?.tailscale?.online !== false)
+        .map(([n]) => n);
+      const pool = filterAutoPool(online, { mode, roles });
+      if (opts.json) {
+        writeJson({ mode, roles, autoPool: pool });
+        return;
+      }
+      const marked = Object.entries(roles);
+      if (marked.length === 0) {
+        console.log(chalk.gray('No device is marked. `--device auto` considers every online device.'));
+      } else {
+        for (const [device, r] of marked) {
+          const tint = r === 'worker' ? chalk.green : r === 'personal' ? chalk.yellow : chalk.gray;
+          console.log(`  ${device.padEnd(20)} ${tint(r)}`);
+        }
+      }
+      console.log();
+      console.log(chalk.bold('--device auto picks from: ') + (pool.length > 0 ? pool.join(', ') : chalk.red('nothing — no eligible device')));
+      if (mode === 'all') console.log(chalk.gray('auto.pool=all — worker marks are ignored (a personal device is still excluded).'));
+      return;
+    }
+
+    await mustGetDevice(name);
+
+    if (opts.clear || role === 'none') {
+      setConfiguredDeviceRole(name, undefined);
+      if (opts.json) writeJson({ device: name, role: null });
+      else console.log(chalk.green(`Cleared the role on '${name}'.`));
+      return;
+    }
+
+    if (!role) {
+      const current = configuredDeviceRole(name);
+      if (opts.json) writeJson({ device: name, role: current ?? null });
+      else console.log(`  ${name.padEnd(20)} ${current ? chalk.cyan(current) : chalk.gray('— (unmarked)')}`);
+      return;
+    }
+
+    // configuredDeviceRole's key spec validates the value; a bad one throws with
+    // the accepted list, which the command's catch turns into exit 1.
+    setConfiguredDeviceRole(name, role as ConfiguredDeviceRole);
+    if (opts.json) {
+      writeJson({ device: name, role, autoPoolWorkers: listWorkerDevices() });
+      return;
+    }
+    console.log(chalk.green(`Marked '${name}' role=${role}.`));
+    const workers = listWorkerDevices();
+    if (workers.length > 0) {
+      console.log(chalk.gray(`\`--device auto\` now picks only from: ${workers.join(', ')}`));
+    } else {
+      console.log(chalk.gray('No device is marked worker, so `--device auto` still considers every online device.'));
+    }
+    console.log(chalk.gray('Sync it to the fleet with `agents repo push`.'));
+  };
+
   /** The interactive settings menu: pick a key, edit it, repeat. TTY-only. */
   const runDevicesConfigMenu = async (name: string): Promise<void> => {
     const { select, input, confirm } = await import('@inquirer/prompts');
@@ -1367,28 +1498,78 @@ function registerDevicesCommands(program: Command): void {
       agents devices config win-mini ssh.auth password          # password auth…
       agents devices config win-mini ssh.bundle muqsit          # …from this secrets bundle
       agents devices config worker ssh.identity-file ~/.ssh/worker_ed25519
+      agents devices config mac-mini role worker                 # same as \`agents devices role mac-mini worker\`
       agents devices config mac-mini auto-launch.enabled off    # exclude from AGI EXT auto-launch
       agents devices config mac-mini auto-launch.preferred on   # boost in auto-launch ranking
       agents devices config zion interactive.host zion          # user scope: where agents show YOU artifacts
       agents devices config mac-mini --json                     # machine-readable
     `,
     notes: `
-      Keys: agents.max-concurrent, scheduler.enabled, daemon.enabled,
-      watchdog.enabled, browser.remote-control, browser.profile, notes,
-      ssh.user, ssh.auth (key|password), ssh.bundle, ssh.bundle-key,
+      Keys: role (worker|personal), see 'agents devices role',
+      agents.max-concurrent, scheduler.enabled, daemon.enabled,
+      watchdog.enabled, tmux.enabled, browser.remote-control, browser.profile,
+      notes, ssh.user, ssh.auth (key|password), ssh.bundle, ssh.bundle-key,
       ssh.identity-file, platform (windows|linux|macos|unknown),
       auto-launch.enabled, auto-launch.preferred — plus the user-scope
       interactive.host (stored centrally; the device name is syntax only).
 
       Booleans take on/off (or true/false). 'notes' appends one entry per
-      invocation. Values land in ~/.agents/agents.yaml under
-      fleet.devices.<name>.config and sync with 'agents repo push/pull'.
+      invocation. Values a PEER reads land in ~/.agents/agents.yaml under
+      fleet.devices.<name>.config and sync with 'agents repo push/pull'. The
+      keys only the owning box reads — scheduler.enabled, daemon.enabled,
+      tmux.enabled, browser.remote-control, browser.profile — stay in that
+      machine's own doc, never sync, and can only be set on the device itself.
       ssh.* / platform / user overlay the discovered registry profile at dial
       time. scheduler.enabled / daemon.enabled take effect when the daemon
       reloads or restarts on that device.
 
       The retired subcommands still work and forward here: configure, note,
       set, set-interactive, enable, disable, prefer, unprefer.
+    `,
+  });
+
+  const roleCmd = devicesCmd
+    .command('role [name] [role]')
+    .description(
+      'Show or set what a device is for: worker (agents run here) or personal (you sit here — never picked automatically). ' +
+        'Marking any device worker makes `--device auto` an allowlist over the marked workers.',
+    )
+    .option('--clear', 'remove the mark, returning the device to unmarked')
+    .option('--json', 'output machine-readable JSON')
+    .action(async (name: string | undefined, role: string | undefined, opts: { clear?: boolean; json?: boolean }) => {
+      try {
+        await runDevicesRole(name, role, opts);
+      } catch (err: any) {
+        console.error(chalk.red(err.message));
+        process.exit(1);
+      }
+    });
+  setHelpSections(roleCmd, {
+    examples: `
+      agents devices role                          # who is marked what, and what --device auto would pick
+      agents devices role yosemite-s0 worker       # agents spin up here
+      agents devices role yosemite-s1 worker       # …and here; auto now rotates over these two only
+      agents devices role zion personal            # your laptop — keep automatic placement off it
+      agents devices role yosemite-s0 --clear      # unmark
+      agents devices role --json                   # machine-readable
+    `,
+    notes: `
+      Roles are stored fleet-wide in ~/.agents/agents.yaml under
+      fleet.devices.<name>.config.role and travel with 'agents repo push/pull',
+      so a mark set on one box is the whole fleet's answer.
+
+      Effect on '--device auto' (agents run, teams, agents ssh auto, and the AGI
+      EXT launch commands, which all resolve placement through the CLI):
+        no device marked  -> every online device, as before
+        any worker marked -> ONLY the marked workers
+        personal          -> never picked, under either state
+
+      Turn the allowlist off with 'agents config set auto.pool all'; a personal
+      box stays excluded, since that is what the mark is for.
+
+      A paired iPhone/iPad cockpit is a separate role: 'agents devices pair-ios'
+      marks it control in that box's device registry, and the fleet never dials
+      it — including for placement. This command does not set that role.
     `,
   });
 
@@ -1553,40 +1734,15 @@ function registerDevicesCommands(program: Command): void {
       }
     });
 
-  /** Device-scope config block for `list --json`, keyed by yamlKey (set keys only). */
-  const deviceConfigJson = (name: string): Record<string, unknown> | undefined => {
-    const config: Record<string, unknown> = {};
-    for (const entry of listConfig({ device: name })) {
-      if (entry.spec.scope !== 'device' || entry.value === undefined) continue;
-      config[entry.spec.yamlKey] = entry.value;
-    }
-    return Object.keys(config).length > 0 ? config : undefined;
-  };
-
   const runList = async (opts: { json?: boolean; stats?: boolean; full?: boolean; refresh?: boolean; live?: boolean; all?: boolean } = {}) => {
     const reg = await loadDevices();
     const names = Object.keys(reg).sort();
     const interactiveHost = getConfigValue('interactive.host').value as string | undefined;
-    if (opts.json) {
-      // Registry + central config block, always fast — AGI EXT
-      // polls this path. Each row is the EFFECTIVE profile (registry overlaid
-      // with the central ssh.*/platform/user config) and carries its
-      // device-scope `config` (maxAgents, schedulerEnabled, notes, ssh*,
-      // autoLaunch* — set keys only) plus an `interactive` flag for the
-      // configured interactive host.
-      process.stdout.write(
-        JSON.stringify(
-          names.map((n) => {
-            const config = deviceConfigJson(n);
-            return { ...resolveDeviceProfile(reg[n]), interactive: n === interactiveHost, ...(config ? { config } : {}) };
-          }),
-          null,
-          2,
-        ) + '\n',
-      );
-      return;
-    }
     if (names.length === 0) {
+      if (opts.json) {
+        process.stdout.write('[]\n');
+        return;
+      }
       console.log(chalk.gray("No devices. Run 'agents devices sync' or 'agents devices add <name> <user@host>'."));
       return;
     }
@@ -1620,6 +1776,27 @@ function registerDevicesCommands(program: Command): void {
       if (statsMap) await writeReachability(collectReachabilityWriteBacks(reg, statsMap)).catch(() => {});
     }
 
+    if (opts.json) {
+      const jsonRoles = listConfiguredDeviceRoles();
+      const autoPool = new Set(filterAutoPool(names, { roles: jsonRoles }));
+      process.stdout.write(JSON.stringify(names.map((name) => {
+        const config = deviceConfigJson(name);
+        const health = statsMap?.get(name);
+        return {
+          ...resolveDeviceProfile(reg[name]),
+          interactive: name === interactiveHost,
+          // Roles as machine-readable fields: `role` is what the operator
+          // marked (absent when unmarked), `autoPool` is the answer that
+          // matters to a caller — may `--device auto` pick this box.
+          ...(jsonRoles[name] ? { role: jsonRoles[name] } : {}),
+          autoPool: autoPool.has(name),
+          ...(config ? { config } : {}),
+          ...(health ? { health: { ...health, headroom: headroom(health) } } : {}),
+        };
+      }), null, 2) + '\n');
+      return;
+    }
+
     console.log(chalk.bold(`Devices (${names.length})`));
     for (const line of renderDeviceTable(reg, names, self, statsMap, opts.full, interactiveHost)) console.log(line);
     if (freshness?.servedFromCache && freshness.oldestFetchedAt != null) {
@@ -1643,7 +1820,7 @@ function registerDevicesCommands(program: Command): void {
     .command('list')
     .alias('ls')
     .description('List registered devices with platform, address, reachability, and live resource headroom.')
-    .option('--json', 'output the registry as a JSON array (for scripts and hooks)')
+    .option('--json', 'output effective device profiles, config, and health as a JSON array')
     .option('--no-stats', 'skip the live resource probe (instant; names/addresses only)')
     .option('--refresh', 'force a live probe of every device, bypassing the cache')
     .option('--live', 'alias of --refresh (shorter to type)')
@@ -1984,6 +2161,80 @@ A box whose probe cannot answer (no POSIX shell, e.g. Windows) is reported
       const results = runFleet(targets, cmd, { self: machineId() });
       printFleetResults(results);
     });
+
+  devicesCmd
+    .command('ps')
+    .description('List agent tasks dispatched to devices with `agents run --device <name> --no-follow`. Reconciles each still-`running` record against the remote before listing. View a log with `agents logs <id>`.')
+    .option('--json', 'Output JSON')
+    .action((opts: { json?: boolean }) => doDeviceTaskPs(!!opts.json));
+
+  devicesCmd
+    .command('stop <id>')
+    .alias('kill')
+    .description('Terminate a running dispatched task from this machine (SIGTERM the remote process group; marks it failed/143).')
+    .action((id: string) => doDeviceTaskStop(id));
+}
+
+/**
+ * `agents devices ps` — list tasks dispatched to devices (`agents run --device
+ * <name> --no-follow`). Heals any 'running' record whose local follower died
+ * (dropped connection, laptop sleep) against the remote `.exit` before listing,
+ * so a finished run never shows stuck at 'running'.
+ */
+async function doDeviceTaskPs(json: boolean): Promise<void> {
+  const tasks = reconcileRunningTasks(listTasks());
+  if (json) {
+    console.log(JSON.stringify(tasks, null, 2));
+    return;
+  }
+  if (tasks.length === 0) {
+    console.log(chalk.gray('No dispatched tasks yet. Dispatch one: agents run <agent> "<task>" --device <name> --no-follow'));
+    return;
+  }
+  const cols = terminalWidth();
+  console.log(chalk.bold('ID').padEnd(11) + chalk.bold('NAME').padEnd(16) + chalk.bold('DEVICE').padEnd(16) + chalk.bold('AGENT').padEnd(10) + chalk.bold('STATUS').padEnd(11) + chalk.bold('PROMPT'));
+  for (const t of tasks) {
+    const status = t.status === 'completed' ? chalk.green(t.status) : t.status === 'failed' ? chalk.red(t.status) : chalk.yellow(t.status);
+    const nameCol = truncateToWidth(t.name ?? chalk.gray('-'), 15).padEnd(16);
+    const promptCol = truncateToWidth(t.prompt, Math.max(12, cols - (11 + 16 + 16 + 10 + 11)));
+    console.log(t.id.padEnd(11) + nameCol + t.host.padEnd(16) + t.agent.padEnd(10) + status.padEnd(11) + promptCol);
+  }
+}
+
+/** `agents devices stop <id>` — terminate a running dispatched task from the origin machine. */
+async function doDeviceTaskStop(ref: string): Promise<void> {
+  // Heal first so we don't try to kill a process that already exited.
+  const current = resolveTaskRef(ref);
+  if (!current) {
+    console.log(chalk.red(`Unknown task "${ref}".`));
+    process.exitCode = 1;
+    return;
+  }
+  const task = reconcileRunningTasks([current])[0] ?? current;
+  if (task.status !== 'running') {
+    console.log(chalk.gray(`Task ${task.id} is already ${task.status}` + (task.exitCode !== undefined ? ` (exit ${task.exitCode})` : '') + '.'));
+    return;
+  }
+  try {
+    const stopped = stopDispatchedTask(task);
+    const statusColor = stopped.status === 'completed' ? chalk.green : chalk.yellow;
+    const exitNote =
+      stopped.exitCode === 143
+        ? 'exit 143 / SIGTERM'
+        : stopped.exitCode !== undefined
+          ? `exit ${stopped.exitCode}`
+          : stopped.status;
+    console.log(
+      chalk.green(`Stopped ${stopped.id}`) +
+        chalk.gray(` on ${stopped.host}`) +
+        '  ' + statusColor(stopped.status) +
+        chalk.gray(` (${exitNote})`),
+    );
+    console.log(chalk.gray(`Logs: agents logs ${stopped.id}`));
+  } catch (err: any) {
+    console.error(chalk.red(err?.message ?? err));
+    process.exitCode = 1;
+  }
 }
 
 /** Register the `agents ssh` smart wrapper. */

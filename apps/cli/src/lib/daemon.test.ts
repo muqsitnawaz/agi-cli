@@ -583,7 +583,17 @@ describe('startDetached (integration: daemon stays alive)', () => {
       expect(logText).toContain('Browser IPC server started');
       expect(logText).not.toContain('Daemon shutting down');
     } finally {
-      try { if (pid) process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+      try {
+        if (pid && process.platform === 'win32') {
+          execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+        } else if (pid) {
+          process.kill(pid, 'SIGKILL');
+        }
+      } catch { /* already gone */ }
+      for (let i = 0; i < 100 && alive(); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(alive()).toBe(false);
       fs.rmSync(tmpHome, { recursive: true, force: true });
     }
   }, 30_000);

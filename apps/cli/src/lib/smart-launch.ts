@@ -8,11 +8,13 @@
 
 import { queryAffinityRollup, type AffinityRow } from './session/db.js';
 import { localMachineId } from './session/origin-machine.js';
-import { loadDevicesSync } from './devices/registry.js';
+import { isControlDevice, loadDevicesSync } from './devices/registry.js';
+import { describeAutoPool, filterAutoPool, isAutoPoolMember } from './devices/pool.js';
 import { normalizeHost } from './machine-id.js';
 import { probePoolSignals } from './teams/placement-probe.js';
 import { pickBestDevice, type DevicePlacementSignal } from './teams/scheduler.js';
 import type { AgentType } from './teams/agents.js';
+import { getAccountInfo } from './agents.js';
 
 /** Peakiness of usage weights; >1 amplifies the most-used option. */
 export const DEFAULT_AFFINITY_ALPHA = 1.3;
@@ -59,7 +61,23 @@ export function sampleWeighted(
   return candidates[candidates.length - 1].key;
 }
 
-/** Online device names from the local registry (+ always include local). */
+/**
+ * Online device names from the local registry (+ local), narrowed to the
+ * automatic-placement pool.
+ *
+ * The pool rule lives in `devices/pool.ts` and is an allowlist once any device
+ * is marked `role=worker`: this is the single place both automatic-placement
+ * paths (`resolveDeviceAuto`, `resolveDeviceAffinity`) get their candidates, so
+ * marking workers moves every `--device auto` at once instead of one surface.
+ *
+ * Paired cockpits (`role: control` in the device registry) are dropped here,
+ * where the registry is already being read — they are control surfaces, not
+ * compute. It CAN return an empty list — a fleet where every marked worker is
+ * offline, or where this box is the only candidate and is marked `personal`. That is a
+ * real answer, and both callers fail loud on it rather than falling back to the
+ * local machine (which would be the exact box the operator marked personal to
+ * keep agents off).
+ */
 export function listOnlineDeviceNames(localName: string = localMachineId()): string[] {
   const names = new Set<string>([normalizeHost(localName)]);
   try {
@@ -69,20 +87,25 @@ export function listOnlineDeviceNames(localName: string = localMachineId()): str
       const online = d.tailscale?.online;
       // No tailscale snapshot → treat as candidate (registry-only box).
       if (online === false) continue;
+      // A paired cockpit (iPhone/iPad) is a control surface, not compute — it
+      // is never dialed for a session, so it is never a placement candidate.
+      if (isControlDevice(d)) continue;
       names.add(normalizeHost(name));
     }
   } catch {
     /* registry missing — local only */
   }
-  return [...names];
+  return filterAutoPool([...names]);
 }
 
 export interface DeviceAffinityOptions {
   sinceDays?: number;
   alpha?: number;
   /**
-   * Eligible hosts (normalized). Defaults to online devices + local.
-   * Empty after filter → fall back to local.
+   * Eligible hosts (normalized). Defaults to the automatic-placement pool
+   * (online devices + local, narrowed by device roles). An explicitly empty
+   * list falls back to local — the caller supplied it; an empty DEFAULT pool
+   * throws, because roles emptied it on purpose.
    */
   eligibleHosts?: string[];
   localMachine?: string;
@@ -108,10 +131,48 @@ export interface DeviceAutoPlan {
 }
 
 /**
+ * The error both automatic-placement resolvers raise when device roles leave no
+ * candidate at all. Fail loud: the alternative — quietly running on the local
+ * machine — puts the agent on the box the operator marked `personal`.
+ */
+export function formatEmptyAutoPoolError(): string {
+  const marked = describeAutoPool();
+  return (
+    `agents: no device is eligible for automatic placement${marked ? ` (${marked})` : ''} — ` +
+    'mark one with `agents devices role <name> worker`, or widen the pool with `agents config set auto.pool all`.'
+  );
+}
+
+export function formatNoHealthyDeviceError(
+  pool: string[],
+  signals: Map<string, DevicePlacementSignal>,
+  agent?: string,
+): string {
+  const excluded = pool.map((key) => {
+    const signal = signals.get(key);
+    const reason = signal?.reachable !== true
+      ? 'unreachable'
+      : signal.headroom === 'loaded'
+        ? 'overloaded'
+        : signal.installed !== true || signal.signedIn !== true
+          ? 'no ready harness account'
+          : 'ineligible';
+    return `${key} (${reason})`;
+  }).join(', ');
+  const target = agent ? `can run ${agent}` : "for 'run auto'";
+  // Name the role narrowing when there is one: a fleet where every box but two
+  // is filtered out by a worker mark reads as "the fleet is down" without it.
+  const marked = describeAutoPool();
+  const poolNote = marked ? ` [pool: ${marked}]` : '';
+  return `agents: no healthy device ${target}${poolNote} — excluded: ${excluded}; earliest window resets unknown`;
+}
+
+/**
  * Pick the least-loaded healthy device that can run `agent` when the harness is
- * known. `run auto` omits the agent and ranks the same live health/load signals
- * without an installed-harness filter. The local machine participates in the
- * same probe; a fully unusable fleet degrades to local instead of stranding a run.
+ * known. `run auto` omits the agent and treats any ready account on the device
+ * as eligible. The local machine participates in the
+ * same probe and must pass the same eligibility checks. An empty eligible pool
+ * fails loud; automatic placement never silently becomes a local launch.
  */
 export async function resolveDeviceAuto(
   agent?: string,
@@ -123,32 +184,59 @@ export async function resolveDeviceAuto(
 ): Promise<DeviceAutoPlan> {
   const local = normalizeHost(opts.localMachine ?? localMachineId());
   const pool = [...new Set((opts.eligibleHosts ?? listOnlineDeviceNames(local)).map(normalizeHost))];
-  if (!pool.includes(local)) pool.push(local);
+  // The local machine participates in the same probe as every peer — unless a
+  // role excludes it. Adding it unconditionally would put agents back on the box
+  // the operator marked `personal` precisely to keep them off it.
+  if (!pool.includes(local) && isAutoPoolMember(local)) pool.push(local);
+  if (pool.length === 0) throw new Error(formatEmptyAutoPoolError());
 
-  try {
-    const signals = await (opts.probe ?? probePoolSignals)(pool, agent as AgentType | undefined);
-    const picked = pickBestDevice(pool, [], { signals, agentLabel: agent });
-    return {
-      host: picked === local ? null : picked,
-      pickedDeviceKey: picked,
-      candidates: pool.map((key) => ({
-        key,
-        loadPercent: signals.get(key)?.loadPercent,
-        installed: signals.get(key)?.installed,
-        signedIn: signals.get(key)?.signedIn,
-      })),
-    };
-  } catch {
-    return {
-      host: null,
-      pickedDeviceKey: local,
-      candidates: [{ key: local }],
-    };
+  const signals = await (opts.probe ?? probePoolSignals)(pool, agent as AgentType | undefined);
+  if (!agent && !opts.probe) {
+    const { collectFleetHarnesses } = await import('../commands/ssh.js');
+    const inventory = await collectFleetHarnesses({ devices: pool });
+    const byHost = new Map(inventory.map((result) => [normalizeHost(result.host), result]));
+    for (const key of pool) {
+      const result = byHost.get(key);
+      const accountEligible = !!result && !result.error && !result.skipped && result.rows.some((row) => row.ready);
+      const current = signals.get(key);
+      if (current) signals.set(key, { ...current, installed: accountEligible, signedIn: accountEligible });
+    }
   }
+  if (agent && !opts.probe && signals.has(local)) {
+    const info = await getAccountInfo(agent as import('./types.js').AgentId).catch(() => null);
+    const eligible = !!info?.signedIn && info.usageStatus !== 'rate_limited' && info.usageStatus !== 'out_of_credits';
+    signals.set(local, { ...signals.get(local)!, signedIn: eligible });
+  }
+  const eligiblePool = pool.filter((key) => {
+    const signal = signals.get(key);
+    if (signal?.reachable !== true || signal.headroom === 'loaded') return false;
+    if (!agent) return opts.probe ? true : signal.installed === true && signal.signedIn === true;
+    return signal.installed === true && signal.signedIn === true;
+  });
+  if (eligiblePool.length === 0) {
+    throw new Error(formatNoHealthyDeviceError(pool, signals, agent));
+  }
+  const picked = pickBestDevice(eligiblePool, [], { signals, agentLabel: agent });
+  return {
+    host: picked === local ? null : picked,
+    pickedDeviceKey: picked,
+    candidates: pool.map((key) => ({
+      key,
+      loadPercent: signals.get(key)?.loadPercent,
+      installed: signals.get(key)?.installed,
+      signedIn: signals.get(key)?.signedIn,
+    })),
+  };
 }
 
 /**
  * Resolve host for `--device auto`. Does NOT pick harness or accounts.
+ *
+ * Draws from the same automatic-placement pool as {@link resolveDeviceAuto}, so
+ * `agents ssh auto`, the generic `--host auto` passthrough, and `matchHost`'s
+ * `auto` sentinel honour device roles too. Throws when roles leave the pool
+ * empty — a `null` host here means "run locally", which for a box marked
+ * `personal` is the outcome the mark exists to prevent.
  */
 export function resolveDeviceAffinity(opts: DeviceAffinityOptions = {}): DeviceAffinityPlan {
   const local = normalizeHost(opts.localMachine ?? localMachineId());
@@ -157,10 +245,19 @@ export function resolveDeviceAffinity(opts: DeviceAffinityOptions = {}): DeviceA
   const sinceDays = opts.sinceDays ?? 14;
   const sinceMs = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
 
+  // `listOnlineDeviceNames` always contained the local machine before device
+  // roles existed, so an empty default list can only mean roles excluded
+  // everything — fail loud, exactly as resolveDeviceAuto does. An explicitly
+  // empty `eligibleHosts` is the caller's own list and keeps the historical
+  // degrade-to-local behavior.
+  const usingDefaultPool = opts.eligibleHosts === undefined;
   const eligible = new Set(
     (opts.eligibleHosts ?? listOnlineDeviceNames(local)).map(normalizeHost),
   );
-  if (eligible.size === 0) eligible.add(local);
+  if (eligible.size === 0) {
+    if (usingDefaultPool) throw new Error(formatEmptyAutoPoolError());
+    eligible.add(local);
+  }
 
   const deviceRows =
     opts.deviceAffinity ??
@@ -221,12 +318,10 @@ export type DeviceAutoHostOptions = {
 };
 
 export type DeviceAutoApplyResult = {
-  /** True when affinity ran (success or degrade-to-local). */
+  /** True when automatic placement ran successfully. */
   attempted: boolean;
   /** True when deprecated `--smart` was seen. */
   deprecationSmart: boolean;
-  /** Affinity threw: host slots cleared → local; message for stderr. */
-  skipped?: string;
   /** Present when affinity resolved without error. */
   banner?: {
     hostLabel: string;
@@ -237,8 +332,8 @@ export type DeviceAutoApplyResult = {
 
 /**
  * Apply `--device auto` / `--host auto` (and deprecated `--smart`) onto run options.
- * Mutates `options` in place. On affinity failure, clears auto slots (local) and
- * returns `skipped` — never throws; callers must not hard-exit.
+ * Mutates `options` in place. Placement failures propagate without rewriting
+ * `auto`, so callers fail loud instead of silently launching locally.
  */
 export async function applyDeviceAutoToOptions(
   options: DeviceAutoHostOptions,
@@ -263,42 +358,28 @@ export async function applyDeviceAutoToOptions(
     return { attempted: false, deprecationSmart };
   }
 
-  try {
-    const resolve: () => DeviceAutoPlan | Promise<DeviceAutoPlan> =
-      deps.resolve ?? (() => resolveDeviceAuto(deps.agent));
-    const plan = await resolve();
-    const concrete = plan.host; // null = local
-    for (const k of HOST_SLOTS) {
-      if (isDeviceAuto(options[k])) {
-        options[k] = concrete ?? undefined;
-      }
+  const resolve: () => DeviceAutoPlan | Promise<DeviceAutoPlan> =
+    deps.resolve ?? (() => resolveDeviceAuto(deps.agent));
+  const plan = await resolve();
+  const concrete = plan.host; // null = local
+  for (const k of HOST_SLOTS) {
+    if (isDeviceAuto(options[k])) {
+      options[k] = concrete ?? undefined;
     }
-    const accountPickerRequested = deps.accountPickerRequested ?? false;
-    if (!accountPickerRequested && !options.strategy && !options.balanced) {
-      options.balanced = true;
-    }
-    const hostLabel = concrete ?? 'local';
-    const deviceHint = plan.candidates
-      .slice(0, 4)
-      .map((c) => `${c.key}:${c.loadPercent === undefined ? '?' : `${Math.round(c.loadPercent)}%`}`)
-      .join(', ');
-    const acctNote = accountPickerRequested ? 'accounts=picker' : 'accounts=balanced';
-    return {
-      attempted: true,
-      deprecationSmart,
-      banner: { hostLabel, deviceHint, acctNote },
-    };
-  } catch (err) {
-    // Graceful degrade: clear auto slots so the run continues locally.
-    for (const k of HOST_SLOTS) {
-      if (isDeviceAuto(options[k])) {
-        options[k] = undefined;
-      }
-    }
-    return {
-      attempted: true,
-      deprecationSmart,
-      skipped: (err as Error).message,
-    };
   }
+  const accountPickerRequested = deps.accountPickerRequested ?? false;
+  if (!accountPickerRequested && !options.strategy && !options.balanced) {
+    options.balanced = true;
+  }
+  const hostLabel = concrete ?? 'local';
+  const deviceHint = plan.candidates
+    .slice(0, 4)
+    .map((c) => `${c.key}:${c.loadPercent === undefined ? '?' : `${Math.round(c.loadPercent)}%`}`)
+    .join(', ');
+  const acctNote = accountPickerRequested ? 'accounts=picker' : 'accounts=balanced';
+  return {
+    attempted: true,
+    deprecationSmart,
+    banner: { hostLabel, deviceHint, acctNote },
+  };
 }
