@@ -121,6 +121,8 @@ function runAgents(home: string, args: string[], extraEnv: Record<string, string
     env: {
       ...process.env,
       HOME: home,
+      USERPROFILE: home,
+      AGENTS_REAL_HOME: home,
       SHELL: '/bin/zsh',
       AGENTS_SYNC_MACHINE_ID: DEVICE_ID,
       // Own pins dir — vitest setup.ts pins AGENTS_DEVICES_DIR fork-wide.
@@ -137,6 +139,8 @@ function runSessionDbScript(home: string, body: string): string {
     env: {
       ...process.env,
       HOME: home,
+      USERPROFILE: home,
+      AGENTS_REAL_HOME: home,
       SHELL: '/bin/zsh',
     },
     encoding: 'utf-8',

@@ -44,16 +44,27 @@ import type { FleetManifest } from './fleet/types.js';
 /** Which tier of the agents.yaml store a key lives in. */
 export type ConfigScope = 'user' | 'device';
 
+/**
+ * For a device-scope key: WHO READS IT. Storage is still the three-layer
+ * store (per-device doc / fleet.defaults.config); visibility only gates
+ * whether a PEER may read or write the key.
+ *
+ * - `shared`  — a peer reads it (ssh.*, platform, role, caps), so any box
+ *   may set it for any device. Lands in that device's tracked doc.
+ * - `machine` — only the owning box ever reads it (scheduler, daemon, tmux,
+ *   browser consent). Refused for a peer — run it on that box instead.
+ */
+export type ConfigVisibility = 'shared' | 'machine';
+
 /** Value type of a config key — drives validation and `--json` rendering. */
 export type ConfigType = 'string' | 'int' | 'bool' | 'string-list';
 
-/** One known config key. */
-export interface ConfigKeySpec {
+/** Fields every key carries, regardless of scope. */
+interface ConfigKeySpecBase {
   /** CLI dotted name, e.g. `interactive.host`. */
   name: string;
   /** camelCase key under the YAML config block. */
   yamlKey: string;
-  scope: ConfigScope;
   type: ConfigType;
   /** One-line description for help/list output. */
   description: string;
@@ -62,6 +73,14 @@ export interface ConfigKeySpec {
   /** Extra validation beyond the type check; return an error string or null. */
   validate?: (value: unknown) => string | null;
 }
+
+/**
+ * One known config key. A device-scope key MUST declare its `visibility`; a
+ * user-scope key has none (it is fleet-wide by definition).
+ */
+export type ConfigKeySpec =
+  | (ConfigKeySpecBase & { scope: 'user'; visibility?: never })
+  | (ConfigKeySpecBase & { scope: 'device'; visibility: ConfigVisibility });
 
 /** Which layer set a key's effective value (`default` = unset, built-in behavior). */
 export type ConfigSource = 'user' | 'device' | 'fleet' | 'default';
@@ -84,6 +103,10 @@ export interface ConfigTarget {
 
 const DEVICE_PLATFORMS = ['windows', 'linux', 'macos', 'unknown'] as const;
 const SSH_AUTH_METHODS = ['key', 'password'] as const;
+/** Roles a device can be marked with — see the `role` key below. */
+const DEVICE_ROLES = ['worker', 'personal'] as const;
+/** Which devices automatic placement may pick — see the `auto.pool` key below. */
+const AUTO_POOL_MODES = ['workers', 'all'] as const;
 
 export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
   {
@@ -118,9 +141,25 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     },
   },
   {
+    name: 'auto.pool',
+    yamlKey: 'autoPool',
+    scope: 'user',
+    type: 'string',
+    description:
+      "Which devices automatic placement (`--device auto`) may pick: 'workers' (default — only devices marked role=worker, " +
+      "once at least one is marked) or 'all' (every online device, ignoring worker marks). A device marked personal is " +
+      'never picked automatically under either mode.',
+    defaultValue: 'workers',
+    validate: (v) =>
+      (AUTO_POOL_MODES as readonly string[]).includes(v as string)
+        ? null
+        : `auto.pool must be one of ${AUTO_POOL_MODES.join(' | ')}.`,
+  },
+  {
     name: 'browser.profile',
     yamlKey: 'defaultBrowserProfile',
     scope: 'device',
+    visibility: 'machine',
     type: 'string',
     description:
       'Browser profile `agents browser start` resolves to without --profile (set via `agents browser profiles set-default`).',
@@ -129,6 +168,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'agents.max-concurrent',
     yamlKey: 'maxAgents',
     scope: 'device',
+    visibility: 'shared',
     type: 'int',
     description:
       'Cap on concurrent agents on this device. What counts toward it depends on the consumer: ' +
@@ -139,6 +179,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'scheduler.enabled',
     yamlKey: 'schedulerEnabled',
     scope: 'device',
+    visibility: 'machine',
     type: 'bool',
     defaultValue: true,
     description: 'Whether the routines scheduler (daemon) may fire on this device.',
@@ -147,6 +188,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'daemon.enabled',
     yamlKey: 'daemonEnabled',
     scope: 'device',
+    visibility: 'machine',
     type: 'bool',
     defaultValue: true,
     description:
@@ -159,14 +201,29 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'watchdog.enabled',
     yamlKey: 'watchdogEnabled',
     scope: 'device',
+    visibility: 'shared',
     type: 'bool',
     defaultValue: false,
     description: 'Whether the daemon runs the watchdog pass on this device.',
   },
   {
+    name: 'tmux.enabled',
+    yamlKey: 'tmuxEnabled',
+    scope: 'device',
+    visibility: 'machine',
+    type: 'bool',
+    defaultValue: true,
+    description:
+      'Whether an interactive `agents run` on this device is wrapped in the shared-socket tmux session. ' +
+      'On gives every agent an addressable pane (`agents sessions --active` tells co-located agents apart, ' +
+      '`agents focus` re-attaches without forking). Off spawns the agent directly on this box — the durable ' +
+      'form of `--no-tmux`, for a machine whose tmux is broken or unwanted.',
+  },
+  {
     name: 'browser.remote-control',
     yamlKey: 'browserRemoteControl',
     scope: 'device',
+    visibility: 'machine',
     type: 'bool',
     defaultValue: false,
     description:
@@ -177,6 +234,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'notes',
     yamlKey: 'notes',
     scope: 'device',
+    visibility: 'shared',
     type: 'string-list',
     description: 'Free-form operator notes about this device (one entry per `agents devices config <name> notes <text>`).',
   },
@@ -184,6 +242,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'ssh.user',
     yamlKey: 'sshUser',
     scope: 'device',
+    visibility: 'shared',
     type: 'string',
     description: 'SSH login user for the device — overrides the registry profile’s user at dial time.',
   },
@@ -191,6 +250,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'ssh.auth',
     yamlKey: 'sshAuth',
     scope: 'device',
+    visibility: 'shared',
     type: 'string',
     description: 'SSH auth method: `key` (ssh agent / on-disk keys) or `password` (pulled from a secrets bundle).',
     validate: (v) =>
@@ -202,6 +262,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'ssh.bundle',
     yamlKey: 'sshBundle',
     scope: 'device',
+    visibility: 'shared',
     type: 'string',
     description: 'Secrets bundle holding the SSH password (for ssh.auth=password). A bundle NAME — never a secret value.',
   },
@@ -209,6 +270,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'ssh.bundle-key',
     yamlKey: 'sshBundleKey',
     scope: 'device',
+    visibility: 'shared',
     type: 'string',
     description: "Key within the bundle whose value is the password (default 'password').",
   },
@@ -216,6 +278,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'ssh.identity-file',
     yamlKey: 'sshIdentityFile',
     scope: 'device',
+    visibility: 'shared',
     type: 'string',
     description: 'Explicit private-key path for key auth (passed to OpenSSH with IdentitiesOnly=yes).',
   },
@@ -223,6 +286,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'platform',
     yamlKey: 'platform',
     scope: 'device',
+    visibility: 'shared',
     type: 'string',
     description: 'OS family of the device — picks PowerShell vs POSIX on the remote end. Overrides the discovered platform.',
     validate: (v) =>
@@ -231,9 +295,26 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
         : `platform must be one of ${DEVICE_PLATFORMS.join(' | ')}.`,
   },
   {
+    name: 'role',
+    yamlKey: 'role',
+    scope: 'device',
+    visibility: 'shared',
+    type: 'string',
+    description:
+      "What this device is for, fleet-wide: 'worker' (a box agents run on) or 'personal' (a machine you sit at — never " +
+      'picked automatically). Marking ANY device worker turns automatic placement into an allowlist: `--device auto` then ' +
+      'picks only from the marked workers. (A paired iPhone/iPad cockpit is marked control by `agents devices pair-ios` ' +
+      'and is excluded from placement by that role, not this key.)',
+    validate: (v) =>
+      (DEVICE_ROLES as readonly string[]).includes(v as string)
+        ? null
+        : `role must be one of ${DEVICE_ROLES.join(' | ')}.`,
+  },
+  {
     name: 'auto-launch.enabled',
     yamlKey: 'autoLaunchEnabled',
     scope: 'device',
+    visibility: 'shared',
     type: 'bool',
     defaultValue: true,
     description: 'Whether AGI EXT auto-launch may pick this device (default on).',
@@ -242,6 +323,7 @@ export const CONFIG_KEYS: readonly ConfigKeySpec[] = [
     name: 'auto-launch.preferred',
     yamlKey: 'autoLaunchPreferred',
     scope: 'device',
+    visibility: 'shared',
     type: 'bool',
     defaultValue: false,
     description: 'Boost this device in AGI EXT auto-launch ranking (default off).',
@@ -391,6 +473,20 @@ function targetDevice(opts?: ConfigTarget): string {
   return opts?.device ?? machineId();
 }
 
+/**
+ * A machine-visibility key is only ever readable for THIS box. Asking for a
+ * peer's value is a mistake with a concrete fix, so say so rather than
+ * silently returning this machine's answer for another machine.
+ */
+function assertLocalTarget(spec: ConfigKeySpec, device: string): void {
+  if (spec.scope !== 'device' || spec.visibility !== 'machine') return;
+  if (device === machineId()) return;
+  throw new Error(
+    `${spec.name} is machine-local, so it can only be read or set on the device itself.\n` +
+    `Run it on ${device}, e.g.: agents ssh ${device} 'agents devices config ${device} ${spec.name} <value>'`,
+  );
+}
+
 /** Get one config key's effective value and the layer that set it. */
 export function getConfigValue(name: string, opts?: ConfigTarget): ConfigEntry {
   ensureDeviceConfigMigrated();
@@ -403,16 +499,28 @@ export function getConfigValue(name: string, opts?: ConfigTarget): ConfigEntry {
     const value = readFleetConfigDefaults()[spec.yamlKey];
     return { spec, value, source: value !== undefined ? 'fleet' : 'default' };
   }
-  const docConfig = readDeviceDocConfig(targetDevice(opts));
+  const device = targetDevice(opts);
+  assertLocalTarget(spec, device);
+  const docConfig = readDeviceDocConfig(device);
   if (spec.yamlKey in docConfig) return { spec, value: docConfig[spec.yamlKey], source: 'device' };
   const fleetConfig = readFleetConfigDefaults();
   if (spec.yamlKey in fleetConfig) return { spec, value: fleetConfig[spec.yamlKey], source: 'fleet' };
   return { spec, value: undefined, source: 'default' };
 }
 
-/** List every known key with its effective value and the layer that set it. */
+/**
+ * List every known key with its effective value and the layer that set it.
+ *
+ * Listing a PEER omits its machine-local keys rather than throwing — those
+ * values live on that box and are unknowable from here, but a bulk listing
+ * must not hard-fail. Asking for such a key by name still errors.
+ */
 export function listConfig(opts?: ConfigTarget): ConfigEntry[] {
-  return CONFIG_KEYS.map((spec) => getConfigValue(spec.name, opts));
+  const isPeer = !opts?.fleet && targetDevice(opts) !== machineId();
+  const visible = isPeer
+    ? CONFIG_KEYS.filter((spec) => spec.scope !== 'device' || spec.visibility !== 'machine')
+    : CONFIG_KEYS;
+  return visible.map((spec) => getConfigValue(spec.name, opts));
 }
 
 /** List user-scope config keys with their values. Used to show inherited settings
@@ -513,7 +621,9 @@ export function setConfigValue(name: string, value: unknown, opts?: ConfigTarget
     setInFleetDefaults(spec, value);
     return;
   }
-  setInDeviceDoc(targetDevice(opts), spec, value);
+  const device = targetDevice(opts);
+  assertLocalTarget(spec, device);
+  setInDeviceDoc(device, spec, value);
 }
 
 /** Unset a config key — restores the next layer down (fleet default, then the
@@ -537,7 +647,66 @@ export function unsetConfigValue(name: string, opts?: ConfigTarget): void {
     unsetInFleetDefaults(spec);
     return;
   }
-  unsetInDeviceDoc(targetDevice(opts), spec);
+  const device = targetDevice(opts);
+  assertLocalTarget(spec, device);
+  unsetInDeviceDoc(device, spec);
+}
+
+// ─── Device roles + the automatic-placement pool ──────────────────────────────
+
+/** A role an operator marked a device with (`agents devices role <name> <role>`). */
+export type ConfiguredDeviceRole = (typeof DEVICE_ROLES)[number];
+
+/** Which devices automatic placement may pick (`auto.pool`). */
+export type AutoPoolMode = (typeof AUTO_POOL_MODES)[number];
+
+/**
+ * The role marked on one device, or undefined when the operator never marked it.
+ *
+ * Undefined is meaningful and is NOT the same as `worker`: an unmarked device is
+ * eligible for automatic placement only while no device anywhere carries an
+ * explicit `worker` mark (see {@link listConfiguredDeviceRoles}).
+ */
+export function configuredDeviceRole(name: string): ConfiguredDeviceRole | undefined {
+  assertValidDeviceName(name);
+  return getConfigValue('role', { device: name }).value as ConfiguredDeviceRole | undefined;
+}
+
+/** Mark a device's role fleet-wide; `undefined` clears the mark. */
+export function setConfiguredDeviceRole(name: string, role: ConfiguredDeviceRole | undefined): void {
+  assertValidDeviceName(name);
+  if (role === undefined) unsetConfigValue('role', { device: name });
+  else setConfigValue('role', role, { device: name });
+}
+
+/**
+ * Every device an operator has marked, keyed by device name. Devices with no
+ * mark are absent — that absence is what makes the worker allowlist opt-in.
+ */
+export function listConfiguredDeviceRoles(): Record<string, ConfiguredDeviceRole> {
+  ensureDeviceConfigMigrated();
+  const out: Record<string, ConfiguredDeviceRole> = {};
+  const devicesRoot = path.join(getUserAgentsDir(), 'devices');
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(devicesRoot, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const role = readDeviceDocConfig(entry.name).role;
+    if (typeof role === 'string' && (DEVICE_ROLES as readonly string[]).includes(role)) {
+      out[entry.name] = role as ConfiguredDeviceRole;
+    }
+  }
+  return out;
+}
+
+/** The configured automatic-placement pool mode. Unset means `workers`. */
+export function autoPoolMode(): AutoPoolMode {
+  const value = getConfigValue('auto.pool').value;
+  return value === 'all' ? 'all' : 'workers';
 }
 
 // ─── Auto-launch preferences (Factory auto-host selection) ────────────────────
@@ -628,6 +797,18 @@ export function assertSchedulerEnabled(): void {
     `The routines scheduler is disabled on this device (scheduler.enabled=false in ~/.agents/devices/${machineId()}/agents.yaml). ` +
       `Re-enable with: agents devices config ${machineId()} scheduler.enabled on`,
   );
+}
+
+/**
+ * True unless this machine's config turns off the managed tmux wrap for
+ * interactive `agents run` launches (`tmux.enabled=false`).
+ *
+ * Read as one of the guards in `shouldWrapInTmux` (lib/exec.ts) — the durable,
+ * per-machine form of `--no-tmux` / `AGENTS_NO_TMUX=1`, for a box whose tmux is
+ * broken or unwanted. Unset means today's behavior: wrap.
+ */
+export function isTmuxEnabled(): boolean {
+  return getConfigValue('tmux.enabled').value !== false;
 }
 
 /** True unless this machine's config disables the daemon outright (top-level kill switch). */

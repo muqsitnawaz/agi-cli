@@ -24,6 +24,8 @@ import {
   formatComputerPermissionGrantHint,
 } from '../lib/permissions.js';
 import { emit as emitEvent } from '../lib/events.js';
+import { recordComputerSession } from '../lib/session/db.js';
+import { resolveActor } from '../lib/actor.js';
 
 export interface AppInfo {
   pid: number;
@@ -463,6 +465,34 @@ export function emitComputerAction(
     host: opts.host,
     ...extra,
   });
+
+  // Mirror the invocation's IDENTITY into the durable store (RUSH-2549). The
+  // event above stays the audit record, but the event ledger is bounded and
+  // prunes at 7 days / 50 MiB (events.ts), so a run's history used to vanish on
+  // day 8. This row is metadata only -- no screenshots, no typed text -- and
+  // `action_count` accumulates across the many calls one invocation makes.
+  //
+  // Identity is read from this process's own env, exactly as stampProvenance()
+  // does for the event: `agents computer` runs IN the caller's process, so there
+  // is no shared daemon to mis-attribute it to (the browser problem).
+  //
+  // Guarded for the same reason `emit` above guards itself ("logging should
+  // never break the CLI", events.ts): this is a RECORD of the action, not the
+  // action. An unwritable or locked session DB must not stop `agents computer
+  // click` from clicking. The action still happened and its event still landed;
+  // only this row is missed, and the next call re-records the identity.
+  try {
+    recordComputerSession({
+      invocationId: COMPUTER_INVOCATION_ID,
+      sessionId: process.env.AGENT_SESSION_ID || process.env.AGENTS_SESSION_ID,
+      launchId: process.env.AGENT_LAUNCH_ID,
+      actor: resolveActor().id,
+      actionCount: 1,
+      taskPreview: typeof extra.task === 'string' ? extra.task : undefined,
+    });
+  } catch {
+    // Recording is best-effort; the action and its event are already done.
+  }
 }
 
 // Add the shared --pid/--bundle/--host target options to a verb. `--host` routes

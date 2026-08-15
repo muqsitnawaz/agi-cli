@@ -35,10 +35,15 @@
           "type": "string",
           "description": "User scope (central only). Device that shows the user artifacts (browser opens, dashboards). Set via `agents devices config <name> interactive.host <name>`."
         },
+        "autoPool": {
+          "type": "string",
+          "enum": ["workers", "all"],
+          "description": "User scope. Which devices automatic placement (`--device auto`) may pick: 'workers' (default — only devices marked role=worker, once any is marked) or 'all'. A device marked personal is never picked under either mode. Set via `agents config set auto.pool <mode>`."
+        },
         "maxAgents": {
           "type": "integer",
           "minimum": 1,
-          "description": "Device scope. Cap on concurrent agents (agents.max-concurrent). Factory auto-launch counts device-wide running agents; teams placement counts the team's roster on the device."
+          "description": "Device scope. Cap on concurrent agents (agents.max-concurrent). AGI EXT auto-launch counts device-wide running agents; teams placement counts the team's roster on the device."
         },
         "schedulerEnabled": {
           "type": "boolean",
@@ -51,6 +56,10 @@
         "watchdogEnabled": {
           "type": "boolean",
           "description": "Device scope. Whether the daemon runs the watchdog pass on this device (watchdog.enabled)."
+        },
+        "tmuxEnabled": {
+          "type": "boolean",
+          "description": "Device scope, machine-local. Whether an interactive `agents run` on this device is wrapped in tmux (tmux.enabled)."
         },
         "browserRemoteControl": {
           "type": "boolean",
@@ -91,13 +100,18 @@
           "enum": ["windows", "linux", "macos", "unknown"],
           "description": "Device scope. OS family of the device (platform) — picks PowerShell vs POSIX remotely. Overrides the discovered platform."
         },
+        "role": {
+          "type": "string",
+          "enum": ["worker", "personal"],
+          "description": "Device scope. What this device is for, fleet-wide (`agents devices role <name> <role>`). Marking any device 'worker' makes `--device auto` an allowlist over the marked workers; a 'personal' device is never picked automatically. A paired cockpit's 'control' role lives in that box's own device registry (agents devices pair-ios), not here."
+        },
         "autoLaunchEnabled": {
           "type": "boolean",
-          "description": "Device scope. Whether Factory auto-launch may pick this device (auto-launch.enabled; default on)."
+          "description": "Device scope. Whether AGI EXT auto-launch may pick this device (auto-launch.enabled; default on)."
         },
         "autoLaunchPreferred": {
           "type": "boolean",
-          "description": "Device scope. Boost this device in Factory auto-launch ranking (auto-launch.preferred; default off)."
+          "description": "Device scope. Boost this device in AGI EXT auto-launch ranking (auto-launch.preferred; default off)."
         }
       }
     },
@@ -202,7 +216,7 @@
           "properties": {
             "config": {
               "type": "object",
-              "description": "Fleet-wide config defaults (`agents devices config --fleet <key> <value>`). Every device inherits these unless its own devices/<name>/agents.yaml config: overrides the key. Inert to `agents apply` (the reconcile engine never pushes it). Keys: the device-scope entries of the top-level config property (maxAgents, schedulerEnabled, daemonEnabled, watchdogEnabled, browserRemoteControl, defaultBrowserProfile, notes, sshUser, sshAuth, sshBundle, sshBundleKey, sshIdentityFile, platform, autoLaunchEnabled, autoLaunchPreferred).",
+              "description": "Fleet-wide config defaults (`agents devices config --fleet <key> <value>`). Every device inherits these unless its own devices/<name>/agents.yaml config: overrides the key. Inert to `agents apply` (the reconcile engine never pushes it). Keys: the device-scope entries of the top-level config property (maxAgents, schedulerEnabled, daemonEnabled, watchdogEnabled, tmuxEnabled, browserRemoteControl, defaultBrowserProfile, notes, sshUser, sshAuth, sshBundle, sshBundleKey, sshIdentityFile, platform, role, autoLaunchEnabled, autoLaunchPreferred).",
               "additionalProperties": true
             }
           }
@@ -217,7 +231,7 @@
     },
     "share": {
       "type": "object",
-      "description": "`agents share` endpoint (Cloudflare R2 + Worker).",
+      "description": "`agents artifacts share` endpoint (Cloudflare R2 + Worker).",
       "properties": {
         "baseUrl": { "type": "string" },
         "accountId": { "type": "string" },

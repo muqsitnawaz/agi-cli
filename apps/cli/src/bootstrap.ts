@@ -283,6 +283,7 @@ Run and dispatch:
   logs [id]                       Show a run's log — host-dispatch task or session; -f to follow
   browser                         Automate a browser — navigate, click, screenshot, console, network
   pty                             Drive interactive terminal programs (REPLs, TUIs) via a persistent PTY session
+  artifacts                       Publish what an agent made (plans, reports, visuals) to a shareable link
 
 Observe (read the fleet — no store merge; aliases point at the real readers):
   feed / inbox                    Needs-you inbox (open blocks waiting on you)
@@ -1185,7 +1186,7 @@ const SETUP_EXEMPT_COMMANDS = new Set(['setup', 'help', 'uninstall']);
 //
 // Skipped for --help/--version (RUSH-2454): pure documentation paths must not
 // load any migration graph. Loaded from migrate-fold.js (leaf: fs + createLink),
-// not migrate.js, so a real command pays only the fold hop unless the v19
+// not migrate.js, so a real command pays only the fold hop unless the v20
 // sentinel is missing and runMigration() is required below.
 if (process.env.AGENTS_SKIP_MIGRATION !== '1' && !helpOrVersionRequested) {
   try {
@@ -1223,7 +1224,7 @@ if (process.env.AGENTS_SKIP_MIGRATION !== '1' && !helpOrVersionRequested) {
     // Bumping the suffix re-runs migrations for every user; binary releases that
     // don't change the schema must NOT re-run (they would destroy user content
     // when migration steps overlap with user-authored paths). See issue #20.
-    const sentinelValue = 'v19';
+    const sentinelValue = 'v20';
     let needRun = true;
     try {
       if (fs.existsSync(sentinel) && fs.readFileSync(sentinel, 'utf-8').trim() === sentinelValue) {

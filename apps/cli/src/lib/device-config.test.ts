@@ -120,7 +120,7 @@ describe('device-scope keys (per-device doc config:)', () => {
     // Unsetting the last key removes the doc entirely (no empty tracked file).
     expect(fs.existsSync(deviceDocPath('mac-mini'))).toBe(false);
     // Unsetting a key that was never set is a no-op — no doc created.
-    unsetConfigValue('scheduler.enabled', { device: 'ghost' });
+    unsetConfigValue('watchdog.enabled', { device: 'ghost' });
     expect(fs.existsSync(deviceDocPath('ghost'))).toBe(false);
   });
 
@@ -128,11 +128,11 @@ describe('device-scope keys (per-device doc config:)', () => {
     const { setConfigValue } = await freshModules();
     writeDoc('mac-mini', 'routines:\n  - watchdog\n');
 
-    setConfigValue('scheduler.enabled', false, { device: 'mac-mini' });
+    setConfigValue('watchdog.enabled', false, { device: 'mac-mini' });
 
     const doc = readDoc('mac-mini');
     expect(doc).toContain('- watchdog');
-    expect(doc).toContain('schedulerEnabled: false');
+    expect(doc).toContain('watchdogEnabled: false');
   });
 });
 
@@ -163,21 +163,21 @@ describe('fleet-defaults layer (central fleet.defaults.config)', () => {
     const { setConfigValue, getConfigValue, unsetConfigValue } = await freshModules();
 
     // Unset everywhere → built-in default.
-    expect(getConfigValue('scheduler.enabled')).toMatchObject({ value: undefined, source: 'default' });
+    expect(getConfigValue('watchdog.enabled')).toMatchObject({ value: undefined, source: 'default' });
 
     // Fleet default applies to every device.
-    setConfigValue('scheduler.enabled', false, { fleet: true });
-    expect(getConfigValue('scheduler.enabled', { device: 'mac-mini' })).toMatchObject({ value: false, source: 'fleet' });
+    setConfigValue('watchdog.enabled', false, { fleet: true });
+    expect(getConfigValue('watchdog.enabled', { device: 'mac-mini' })).toMatchObject({ value: false, source: 'fleet' });
 
     // A device value wins over the fleet default.
-    setConfigValue('scheduler.enabled', true, { device: 'mac-mini' });
-    expect(getConfigValue('scheduler.enabled', { device: 'mac-mini' })).toMatchObject({ value: true, source: 'device' });
+    setConfigValue('watchdog.enabled', true, { device: 'mac-mini' });
+    expect(getConfigValue('watchdog.enabled', { device: 'mac-mini' })).toMatchObject({ value: true, source: 'device' });
     // …only on that device.
-    expect(getConfigValue('scheduler.enabled', { device: 'zion' })).toMatchObject({ value: false, source: 'fleet' });
+    expect(getConfigValue('watchdog.enabled', { device: 'zion' })).toMatchObject({ value: false, source: 'fleet' });
 
     // Unsetting the device key falls back to the fleet default.
-    unsetConfigValue('scheduler.enabled', { device: 'mac-mini' });
-    expect(getConfigValue('scheduler.enabled', { device: 'mac-mini' })).toMatchObject({ value: false, source: 'fleet' });
+    unsetConfigValue('watchdog.enabled', { device: 'mac-mini' });
+    expect(getConfigValue('watchdog.enabled', { device: 'mac-mini' })).toMatchObject({ value: false, source: 'fleet' });
   });
 
   it('a pre-existing fleet.devices map survives a --fleet defaults write', async () => {
@@ -292,18 +292,21 @@ describe('listConfig', () => {
       'agents.max-concurrent',
       'auto-launch.enabled',
       'auto-launch.preferred',
+      'auto.pool',
       'browser.profile',
       'browser.remote-control',
       'daemon.enabled',
       'interactive.host',
       'notes',
       'platform',
+      'role',
       'scheduler.enabled',
       'ssh.auth',
       'ssh.bundle',
       'ssh.bundle-key',
       'ssh.identity-file',
       'ssh.user',
+      'tmux.enabled',
       'usage.primary-host',
       'watchdog.enabled',
     ]);
@@ -344,10 +347,39 @@ describe('scheduler gate (scheduler.enabled=false on this device)', () => {
     );
   });
 
-  it('a peer device’s scheduler.enabled does not gate this machine', async () => {
+  it('a peer’s scheduler.enabled cannot be written — it is machine-local', async () => {
     const { isSchedulerEnabled, setConfigValue } = await freshModules();
-    setConfigValue('scheduler.enabled', false, { device: 'mac-mini' });
+    expect(() => setConfigValue('scheduler.enabled', false, { device: 'mac-mini' }))
+      .toThrow(/machine-local/);
     expect(isSchedulerEnabled()).toBe(true);
+  });
+});
+
+describe('tmux gate (tmux.enabled=false on this device)', () => {
+  it('defaults to enabled when unset (unset = today’s behavior: wrap)', async () => {
+    const { isTmuxEnabled } = await freshModules();
+    expect(isTmuxEnabled()).toBe(true);
+  });
+
+  it('isTmuxEnabled reflects the stored value', async () => {
+    const { isTmuxEnabled, setConfigValue } = await freshModules();
+    setConfigValue('tmux.enabled', false);
+    expect(isTmuxEnabled()).toBe(false);
+    setConfigValue('tmux.enabled', true);
+    expect(isTmuxEnabled()).toBe(true);
+  });
+
+  it('persists to this box’s own doc, never the fleet-shared file', async () => {
+    const { setConfigValue } = await freshModules();
+    setConfigValue('tmux.enabled', false);
+    expect(readCentral()).not.toMatch(/tmuxEnabled/);
+  });
+
+  it('cannot be set for a peer at all — it is machine-local', async () => {
+    const { isTmuxEnabled, setConfigValue } = await freshModules();
+    expect(() => setConfigValue('tmux.enabled', false, { device: 'mac-mini' }))
+      .toThrow(/machine-local/);
+    expect(isTmuxEnabled()).toBe(true);
   });
 });
 

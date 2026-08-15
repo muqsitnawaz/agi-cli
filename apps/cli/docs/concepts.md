@@ -217,18 +217,29 @@ reads the effective value back, `key value` sets it with validation,
 `key --unset` removes the device value so the fleet default applies, `notes
 <text>` appends a free-form operator note, and `--fleet` targets the
 fleet-wide defaults layer. `--json` reports each key's `source` (`device` |
-`fleet` | `default`). Device-scope keys: `agents.max-concurrent`,
-`scheduler.enabled`, `daemon.enabled`, `watchdog.enabled`,
+`fleet` | `default`). Device-scope keys: `role` (`worker` \| `personal`; also
+`agents devices role`), `agents.max-concurrent`, `scheduler.enabled`,
+`daemon.enabled`, `watchdog.enabled`, `tmux.enabled`,
 `browser.remote-control`, `browser.profile`, `notes`, the `ssh.*` profile
-overrides, `platform`, `auto-launch.*`. The device registry stays the
-**discovery cache** (address, tailscale snapshot, reachability); the config's
-`ssh.*` / `platform` / user values overlay the registry profile at dial time
+overrides, `platform`, `auto-launch.*`. Keys only the owning box reads
+(`scheduler.enabled`, `daemon.enabled`, `tmux.enabled`,
+`browser.remote-control`, `browser.profile`) are refused for a peer — run
+them on that box. The device registry stays the **discovery cache** (address,
+tailscale snapshot, reachability); the config's `ssh.*` / `platform` / user
+values overlay the registry profile at dial time
 (`src/lib/devices/resolve-profile.ts`), so `agents ssh`, the ssh_config
-render, host dispatch, and the `devices list` table all honor them. The one
-user-scope key, `interactive.host` (`config.interactiveHost`), names the
-device agents show YOU artifacts on (browser opens, dashboards), so skills
-stop guessing "the online macOS box". Usage collection has a separate user-scope pin, `usage.primary-host` (`config.usagePrimaryHost`), operated only through `agents config set|get|unset|list`. `resolveUsagePrimaryHost()` resolves the explicit usage pin first, then falls back to `interactive.host`, then to no primary host. The interactive host answers where the user sees artifacts; it does not by itself declare that device authoritative for usage. The interactive host is marked `★
-interactive` in `agents devices list`; `list --json` carries each row's
+render, host dispatch, and the `devices list` table all honor them. User-scope
+keys live in the central file: `interactive.host` (`config.interactiveHost`)
+names the device agents show YOU artifacts on (browser opens, dashboards), so
+skills stop guessing "the online macOS box"; `auto.pool` (`config.autoPool`)
+selects which devices `--device auto` may pick (`workers` or `all`). Usage
+collection has a separate user-scope pin, `usage.primary-host`
+(`config.usagePrimaryHost`), operated only through `agents config
+set|get|unset|list`. `resolveUsagePrimaryHost()` resolves the explicit usage
+pin first, then falls back to `interactive.host`, then to no primary host. The
+interactive host answers where the user sees artifacts; it does not by itself
+declare that device authoritative for usage. The interactive host is marked
+`★ interactive` in `agents devices list`; `list --json` carries each row's
 effective profile plus its device-layer `config` block and an `interactive`
 flag. The retired subcommands (`configure`, `note`, `set`, `set-interactive`,
 `enable`/`disable`/`prefer`/`unprefer`) still work as hidden tombstones that

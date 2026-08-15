@@ -191,7 +191,8 @@ the same device-local `browser remote-control` consent gate as the ordinary
 | `-p, --profile <name>` | Profile to use (auto-picks if omitted) |
 | `--task <name>` | Override auto-generated task name |
 | `-e, --endpoint <name>` | Endpoint preset within the profile |
-| `-u, --url <url>` | Open URL in first tab |
+| `-u, --url <url>` | Open URL in first tab. If an abandoned task on this profile already holds a tab showing that exact URL, the tab is reclaimed instead of a duplicate being opened (RUSH-2622) — a tab held by a live task, or one you opened yourself, is never taken |
+| `--fresh` | Always open a new tab, skipping the reclaim above |
 | `--no-skills` | Skip domain-skill auto-discovery |
 | `--record` | Start recording immediately after tab opens |
 | `--fps <n>` | Recording frames per second (1–30, default 5) |
@@ -303,14 +304,33 @@ default app), `--json`, `--no-interactive`.
 
 On a real terminal (no `--json`/`--open`/`--no-interactive`), `sessions` opens an
 interactive, **task-first** browser: one row per browser task, newest first —
-not one row per screenshot. A task started with a caller identity (`owner`,
-`launchId` — see `--task`/`AGENT_LAUNCH_ID`) links to the agent session that ran
-it while that task is still live in `tasks.json`; the preview pane then shows
+not one row per screenshot. Each task records the agent session that started it
+(`AGENT_SESSION_ID`, resolved in the calling CLI process — the shared browser
+daemon cannot know it), plus `owner` and `launchId`. That identity is written
+once at task start to a durable `browser_sessions` row in the local session DB
+and is **never deleted**, so a task still links to its session after
+`agents browser stop` and after a daemon restart. The preview pane then shows
 the same digest as `agents sessions` (prompt, changes, tests, last response),
-followed by that task's captures newest-first with filename/age/size. A task
-whose owning run already stopped shows as **unlinked** — its captures are still
-listed and openable, there's just no session to attribute them to. Downloads sit
-in their own row, separate from any task. Search matches task name, profile, the
+followed by that task's captures newest-first with filename/age/size.
+
+A row shows **unresolved** when it recorded an identity this machine cannot
+index (a rotated or peer-owned session), and **unlinked** when no identity was
+recorded at all — captures taken before this shipped, whose identity was
+discarded at stop and cannot be recovered. Either way the captures are still
+listed and openable. Downloads sit in their own row, separate from any task.
+
+The DB row is **metadata only** — task, profile, identity, timing, and the
+capture directory path. The screenshots, PDFs and recordings themselves stay on
+disk under `~/.agents/.cache/browser/<profile>/sessions/<task>/`; nothing copies
+them into the database, and the listing counts captures by reading that
+directory rather than trusting a stored tally.
+
+**Known gap — `--host` drives record no session.** `agents browser start --host
+<device>` runs the CLI on the remote box, and the SSH dispatch forwards only
+`AGENTS_ACTOR*` and `AGENT_TERMINAL_ID` — not `AGENT_SESSION_ID`. A task started
+that way therefore records no session and lists as `unlinked`. Local drives are
+unaffected. Forwarding session identity across the SSH hop is tracked on
+RUSH-2549 and is not fixed here. Search matches task name, profile, the
 linked session's agent/topic, or an artifact filename; `enter` opens the
 highlighted capture directly (or drills into a capture list first when a task
 holds more than one). `--no-interactive` prints the flat per-artifact table

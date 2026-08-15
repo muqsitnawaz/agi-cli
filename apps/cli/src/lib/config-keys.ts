@@ -13,7 +13,7 @@ import { MODEL_TIERS, type ModelTier } from './model-tiers.js';
 import { VERSION_RE } from './run-defaults.js';
 
 /** The top-level scope of a unified config key. */
-export type ConfigScope = 'run' | 'interactive' | 'usage' | 'browser' | 'project' | 'device';
+export type ConfigScope = 'run' | 'interactive' | 'usage' | 'auto' | 'browser' | 'project' | 'device';
 
 /** A run-time default key: model, mode, effort, or tier override. */
 export interface ParsedRunConfigKey {
@@ -34,6 +34,12 @@ export interface ParsedInteractiveConfigKey {
 export interface ParsedUsageConfigKey {
   scope: 'usage';
   property: 'primary-host';
+}
+
+/** Which devices automatic placement (`--device auto`) may pick. */
+export interface ParsedAutoConfigKey {
+  scope: 'auto';
+  property: 'pool';
 }
 
 /** The default browser profile (device-scope, self or peer). */
@@ -59,24 +65,29 @@ export type ParsedConfigKey =
   | ParsedRunConfigKey
   | ParsedInteractiveConfigKey
   | ParsedUsageConfigKey
+  | ParsedAutoConfigKey
   | ParsedBrowserConfigKey
   | ParsedProjectConfigKey
   | ParsedDeviceConfigKey;
 
 export type DeviceConfigProperty =
+  | 'role'
   | 'max-agents'
   | 'scheduler'
   | 'daemon'
   | 'watchdog'
+  | 'tmux'
   | 'browser.remote-control'
   | 'notes'
   | 'browser.profile';
 
 const DEVICE_CONFIG_PROPERTIES: DeviceConfigProperty[] = [
+  'role',
   'max-agents',
   'scheduler',
   'daemon',
   'watchdog',
+  'tmux',
   'browser.remote-control',
   'notes',
   'browser.profile',
@@ -115,12 +126,15 @@ export function formatAgentVersion(agent: AgentId, version: string): string {
  *   run.<agent@version>.tier.<cheap|default|best|ultra>
  *   interactive.host
  *   usage.primary-host
+ *   auto.pool
  *   browser.profile
  *   project.root
+ *   devices.<name>.role
  *   devices.<name>.max-agents
  *   devices.<name>.scheduler
  *   devices.<name>.daemon
  *   devices.<name>.watchdog
+ *   devices.<name>.tmux
  *   devices.<name>.browser.remote-control
  *   devices.<name>.notes
  *   devices.<name>.browser.profile
@@ -149,6 +163,10 @@ export function parseConfigKey(key: string): ParsedConfigKey {
     return { scope: 'usage', property: 'primary-host' };
   }
 
+  if (raw === 'auto.pool') {
+    return { scope: 'auto', property: 'pool' };
+  }
+
   if (raw === 'browser.profile') {
     return { scope: 'browser', property: 'profile' };
   }
@@ -158,7 +176,7 @@ export function parseConfigKey(key: string): ParsedConfigKey {
   }
 
   const deviceMatch = raw.match(
-    /^devices\.(.+)\.(max-agents|scheduler|daemon|watchdog|notes|browser\.remote-control|browser\.profile)$/,
+    /^devices\.(.+)\.(role|max-agents|scheduler|daemon|watchdog|tmux|notes|browser\.remote-control|browser\.profile)$/,
   );
   if (deviceMatch) {
     return {
@@ -180,6 +198,9 @@ export function parseConfigKey(key: string): ParsedConfigKey {
   if (raw.startsWith('usage.')) {
     throw new Error(`Invalid usage config key '${key}'. Use usage.primary-host.`);
   }
+  if (raw.startsWith('auto.')) {
+    throw new Error(`Invalid auto config key '${key}'. Use auto.pool.`);
+  }
   if (raw.startsWith('browser.')) {
     throw new Error(`Invalid browser config key '${key}'. Use browser.profile.`);
   }
@@ -193,7 +214,7 @@ export function parseConfigKey(key: string): ParsedConfigKey {
   }
 
   throw new Error(
-    `Unknown config scope in '${key}'. Use one of: run, interactive, usage, browser, project, devices.`,
+    `Unknown config scope in '${key}'. Use one of: run, interactive, usage, auto, browser, project, devices.`,
   );
 }
 
@@ -209,6 +230,8 @@ export function formatConfigKey(parsed: ParsedConfigKey): string {
       return 'interactive.host';
     case 'usage':
       return 'usage.primary-host';
+    case 'auto':
+      return 'auto.pool';
     case 'browser':
       return parsed.device ? `devices.${parsed.device}.browser.profile` : 'browser.profile';
     case 'project':
@@ -229,7 +252,7 @@ export function listKnownConfigKeys(): string[] {
   for (const tier of MODEL_TIERS) {
     keys.push(`run.<agent@version>.tier.${tier}`);
   }
-  keys.push('interactive.host', 'usage.primary-host', 'browser.profile', 'project.root');
+  keys.push('interactive.host', 'usage.primary-host', 'auto.pool', 'browser.profile', 'project.root');
   for (const prop of DEVICE_CONFIG_PROPERTIES) {
     keys.push(`devices.<name>.${prop}`);
   }
@@ -243,6 +266,8 @@ export function listKnownConfigKeys(): string[] {
  */
 export function devicePropertyToConfigName(property: DeviceConfigProperty): string {
   switch (property) {
+    case 'role':
+      return 'role';
     case 'max-agents':
       return 'agents.max-concurrent';
     case 'scheduler':
@@ -251,6 +276,8 @@ export function devicePropertyToConfigName(property: DeviceConfigProperty): stri
       return 'daemon.enabled';
     case 'watchdog':
       return 'watchdog.enabled';
+    case 'tmux':
+      return 'tmux.enabled';
     case 'browser.remote-control':
       return 'browser.remote-control';
     case 'notes':
@@ -275,6 +302,8 @@ export function configKeyStorageHint(parsed: ParsedConfigKey): string {
       return 'config.interactiveHost';
     case 'usage':
       return 'config.usagePrimaryHost';
+    case 'auto':
+      return 'config.autoPool';
     case 'browser':
       return parsed.device
         ? `devices/${parsed.device}/agents.yaml config.defaultBrowserProfile`

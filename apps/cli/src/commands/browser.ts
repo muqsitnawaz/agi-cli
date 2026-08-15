@@ -729,6 +729,7 @@ function registerTaskCommands(browser: Command): void {
         task: opts.task ?? process.env.AGENTS_BROWSER_TASK,
         actor: resolveActor().id,
         launchId: process.env.AGENT_LAUNCH_ID,
+        sessionId: process.env.AGENT_SESSION_ID || process.env.AGENTS_SESSION_ID,
       });
     });
 
@@ -757,6 +758,7 @@ function registerTaskCommands(browser: Command): void {
     .option(TASK_OPTION_FLAG, 'Task name (auto-generated if omitted)')
     .option('-e, --endpoint <name>', 'Endpoint preset (defaults to the profile\'s default)')
     .option('-u, --url <url>', 'Open URL in first tab')
+    .option('--fresh', 'Always open a new tab, skipping the reclaim of a tab an abandoned task is holding on that URL')
     .option('--no-skills', 'Skip auto-discovery of site-specific SKILL.md from ~/.agents/skills/browser/domain-skills/')
     .option('--record', 'Start recording right after the tab opens (shorthand for `agents browser record start` as a follow-up)')
     .option('--fps <n>', 'Recording frames per second (with --record; 1–30, default 5)', (v) => parseInt(v, 10))
@@ -855,12 +857,18 @@ function registerTaskCommands(browser: Command): void {
         url: opts.url,
         endpoint: opts.endpoint,
         skipDomainSkill: opts.skills === false,
+        fresh: opts.fresh === true,
         // Forward the caller's identity: the browser daemon is shared, so it
         // cannot resolve who/which-run called `start`. `resolveActor()` runs
         // here in the CLI (the caller's process); `$AGENT_LAUNCH_ID` is the
         // per-run id exec.ts injects for every harness.
         actor: resolveActor().id,
         launchId: process.env.AGENT_LAUNCH_ID,
+        // The agent session that drove this task — what makes the capture
+        // traceable back to a conversation (RUSH-2549). Sent alongside, not
+        // instead of, launchId: a launch id is absent on most agent processes,
+        // a session id is not.
+        sessionId: process.env.AGENT_SESSION_ID || process.env.AGENTS_SESSION_ID,
       });
 
       if (!response.ok) {

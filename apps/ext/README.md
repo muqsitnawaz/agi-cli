@@ -45,7 +45,7 @@ curl -fsSL https://raw.githubusercontent.com/phnx-labs/agents-cli/main/scripts/i
 
 | Shortcut | Action |
 | --- | --- |
-| `Cmd+Shift+A` | Spawn a new agent through agents-cli automatic routing |
+| `Cmd+Shift+A` | Spawn a new agent through agi-cli automatic routing |
 | `Cmd+Shift+L` | Label agent by task |
 | `Cmd+Shift+C` | Clear and restart agent |
 | `Cmd+Shift+D` | Open Dashboard |
@@ -59,6 +59,8 @@ curl -fsSL https://raw.githubusercontent.com/phnx-labs/agents-cli/main/scripts/i
 
 Spawn any agent as a full-screen editor tab. Built-in support for Claude Code, Codex, Antigravity, OpenCode, and Cursor. Add custom agents through settings.
 
+**Where a new agent runs** is `agents.launch.defaultTarget`: `auto` (default — the CLI picks the device), `local` (this machine), or `ask` (prompt every time). Under `auto`, mark your compute boxes once with `agents devices role <name> worker` and every `Agents: New <Harness>` rotates over those workers instead of the machine you are sitting at. `Agents: New <Harness> (Pick Host)` and `(Auto)` are unaffected.
+
 ### Session Persistence
 
 Every open agent terminal is fully restorable. Session ID, icon, and custom labels are saved to disk in real-time. VS Code crashes? Restart? All your agent tabs come back exactly as they were.
@@ -66,7 +68,7 @@ Every open agent terminal is fully restorable. Session ID, icon, and custom labe
 ### Task Management
 
 - **Labels** - Tag agents by task (`Cmd+Shift+L`). Status bar shows active agent and label.
-- **Tasks** - Renders tasks returned by agents-cli; the extension does not parse task files or query trackers itself.
+- **Tasks** - Renders tasks returned by agi-cli; the extension does not parse task files or query trackers itself.
 - **Session history** - Browse CLI-provided sessions from the dashboard and resume through `agents sessions resume`.
 - **Fork a session** - `Agents: Fork` delegates the copy and identity semantics to `agents sessions fork <id>` and leaves the original untouched.
 - **Fork pairs in the Recap ledger** - a fork and the session it came from finish as two rows that share no id. AGI EXT remembers the edge and reunites them: one side-by-side row in Recap, parent on the left, fork on the right, each stamped with the machine it ran on and its own duration/cost/PR.

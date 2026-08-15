@@ -14,10 +14,15 @@
  * computer counterpart of `../browser/sessions-list.ts`'s RUSH-2407
  * task-first grouping).
  *
- * Retention/privacy: `events.ts` already bounds and prunes this log
+ * Retention/privacy: `events.ts` bounds and prunes the LEDGER
  * (`DEFAULT_RETENTION_DAYS` / `DEFAULT_MAX_STORAGE_BYTES` — 7 days / 50 MiB
- * by default, gzip-rotated at 10 MiB) — nothing here adds a second retention
- * policy or a second pruner. Nothing sensitive is persisted: `type` /
+ * by default, gzip-rotated at 10 MiB) and nothing here changes that policy or
+ * re-prunes that log. The durable `computer_sessions` table added in RUSH-2549
+ * is a SECOND store with its OWN, much longer bound
+ * (`TOOL_SESSION_MAX_AGE_DAYS`, swept by `pruneToolSessions` from the listing
+ * path below) — that is deliberate, since the table exists precisely to outlive
+ * the ledger's 7 days, and one row per CLI process would otherwise grow without
+ * limit. It is metadata only. Nothing sensitive is persisted: `type` /
  * `type-text` events already carry only `textLength`, never the typed text
  * (see `commands/computer-actions.ts` `emitComputerAction` call sites) — the
  * mission this module fulfils changes NONE of that. A `run --task`
@@ -56,7 +61,7 @@
 import { query, truncate, type EventRecord } from '../events.js';
 import { formatRelativeTime } from '../session/relative-time.js';
 import type { SessionMeta } from '../session/types.js';
-import { getSessionById } from '../session/db.js';
+import { getSessionById, listComputerSessionRecords, pruneToolSessions } from '../session/db.js';
 import {
   buildLaunchSessionIndex,
   resolveLaunchSession,
@@ -143,8 +148,18 @@ export type ComputerRunLinkStatus = 'linked' | 'unresolved' | 'unlinked';
  *  (see the module docblock's "Grouping key" note), plus the agent session
  *  it links to when resolvable. */
 export interface ComputerRunRow {
-  pid: number;
+  /** Invoking CLI process's pid. Absent on a run recovered from the DB after
+   *  the ledger pruned — that process is long gone and its pid unknowable. */
+  pid?: number;
   invocationId?: string;
+  /**
+   * Total actions for a run recovered from the DB after the event ledger
+   * pruned its individual actions. Set ONLY on such rows: when it is present,
+   * `actions`/`counts` are empty because the per-verb detail is genuinely gone,
+   * and this total is all that survived. Live ledger rows leave it undefined
+   * and report real per-verb `counts` instead.
+   */
+  recoveredActionCount?: number;
   /** Truncated task description — present only for a `computer run --task`
    *  invocation; a bare verb call has none. */
   task?: string;
@@ -237,6 +252,75 @@ export function groupIntoComputerRuns(
   return rows;
 }
 
+/**
+ * Add runs the event ledger no longer holds, from the durable
+ * `computer_sessions` table (RUSH-2549).
+ *
+ * The ledger is deliberately bounded — it prunes at 7 days / 50 MiB — so before
+ * this, a run simply disappeared from `agents sessions --computer` on day 8 even
+ * though it had happened and its identity was known. The DB row is metadata
+ * only, so a recovered row carries its identity, timing and action COUNT but no
+ * per-verb breakdown: those individual actions lived in the pruned ledger and
+ * are genuinely gone. It is listed as a real run with an empty `actions` list
+ * rather than silently omitted, and never fabricated back.
+ *
+ * Ledger rows win on collision: while both exist the ledger is richer.
+ */
+function appendPrunedRunsFromDb(rows: ComputerRunRow[], limit?: number): void {
+  const seen = new Set(rows.map((r) => r.invocationId));
+  // Ask the DB for what the ledger CANNOT still hold — everything older than
+  // the oldest action the ledger returned. Reading the newest N instead is
+  // self-defeating: those are precisely the rows `seen` discards, so once the
+  // table exceeds the read limit the recovery returns nothing and history
+  // disappears past the ledger window again — the exact bug this recovery
+  // exists to prevent. With no ledger rows at all there is nothing to exclude,
+  // so every stored row is recoverable.
+  const startedBeforeMs = rows.length > 0
+    ? Math.min(...rows.map((r) => r.startMs))
+    : undefined;
+  for (const record of listComputerSessionRecords({ limit, startedBeforeMs })) {
+    // The dedup is LOAD-BEARING — do not delete it as redundant with the WHERE
+    // clause above. A run's DB `started_at` is its TRUE start and is never
+    // updated, while the ledger row's `startMs` is only its oldest RETAINED
+    // action. So a long `computer run` that began before the ledger window but
+    // kept acting inside it sits below the cutoff, is selected by the SQL, and
+    // is already present as a ledger row. This is what drops the duplicate.
+    if (seen.has(record.invocationId)) continue;
+    const linked = record.sessionId ? getSessionById(record.sessionId) : null;
+    rows.push({
+      // No pid: the process is long gone and the ledger entry that knew it has
+      // been pruned. Fabricating `0` rendered rows labelled "pid 0" (see the
+      // label fallbacks in this file and computer-sessions-picker.ts).
+      pid: undefined,
+      invocationId: record.invocationId,
+      task: record.taskPreview,
+      // machineId() form ("zion"), the same normalized id the DB stored; the
+      // ledger path records the raw os.hostname() ("Zion.local") in `machine`.
+      // Setting BOTH from the one value we have keeps `--machine` substring
+      // filtering working on either spelling instead of silently missing
+      // recovered rows (events.ts documents the hostname/machineId split).
+      machine: record.machine,
+      machineId: record.machine,
+      bundle: undefined,
+      remoteHost: undefined,
+      agent: undefined,
+      sessionId: record.sessionId,
+      launchId: record.launchId,
+      linkStatus: linked ? 'linked' : (record.sessionId || record.launchId) ? 'unresolved' : 'unlinked',
+      linkedSession: linked ?? undefined,
+      // The per-verb breakdown lived in the pruned ledger and is genuinely gone
+      // — it is never reconstructed. The TOTAL survives in the row, so report
+      // it as an explicit total rather than dropping it: a 40-action run must
+      // not render identically to one that did nothing.
+      actions: [],
+      counts: {},
+      recoveredActionCount: record.actionCount,
+      startMs: record.startedAt,
+      endMs: record.lastActivity ?? record.startedAt,
+    });
+  }
+}
+
 /** Build task-first rows from the real ledger, resolving each row's owning
  *  session against the live indexes. The interactive picker's (and the
  *  flat/`--json` printer's) data source. `machine` narrows to rows whose
@@ -249,6 +333,12 @@ export function buildComputerSessionRows(opts: { limit?: number; machine?: strin
     (sessionId) => getSessionById(sessionId),
     (launchId) => resolveLaunchSession(index, launchId),
   );
+  // Retention runs here, on the listing path, never on the action hot path:
+  // one row per `agents computer` CLI process means the table would otherwise
+  // grow without bound. Best-effort — a read-only DB must not break a listing.
+  try { pruneToolSessions(); } catch { /* listing must not fail on retention */ }
+  appendPrunedRunsFromDb(rows, opts.limit);
+  rows.sort((a, b) => b.endMs - a.endMs);
   if (!opts.machine) return rows;
   const q = opts.machine.toLowerCase();
   return rows.filter(
@@ -280,6 +370,23 @@ export function matchesComputerSessionRow(row: ComputerRunRow, queryText: string
 
 /** Human one-line summary of a row's per-verb action counts, most frequent
  *  first — shared by the flat table and the interactive picker's label. */
+/**
+ * One row's action summary — the single renderer every surface should use.
+ *
+ * A run recovered from the DB after the ledger pruned has no per-verb detail,
+ * only a total. Rendering it through the per-verb formatter printed
+ * "(no actions)", which is indistinguishable from a run that did nothing — so a
+ * 40-action run read as empty. Report the surviving total, and say plainly that
+ * the breakdown is gone rather than implying we still have it.
+ */
+export function formatRowActions(row: ComputerRunRow): string {
+  if (row.recoveredActionCount !== undefined) {
+    const n = row.recoveredActionCount;
+    return `${n} action${n === 1 ? '' : 's'} (per-verb detail pruned from the event log)`;
+  }
+  return formatActionCounts(row.counts);
+}
+
 export function formatActionCounts(counts: Record<string, number>): string {
   const parts = Object.entries(counts)
     .sort((a, b) => b[1] - a[1])
@@ -302,7 +409,7 @@ export function renderComputerSessionRows(rows: ComputerRunRow[]): string {
           ? 'unresolved (session not indexed here)'
           : 'unlinked';
     lines.push(`${when.padEnd(12)}  ${where.padEnd(24)}  ${String(label ?? '').padEnd(40)}  ${link}`);
-    lines.push(`  ${formatActionCounts(r.counts)}`);
+    lines.push(`  ${formatRowActions(r)}`);
   }
   return lines.join('\n');
 }

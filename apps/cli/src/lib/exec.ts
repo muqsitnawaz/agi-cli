@@ -30,6 +30,8 @@ import { recordRunName } from './session/run-names.js';
 import { mailboxDir, isValidMailboxId } from './mailbox.js';
 import { composeWin32CommandLine } from './platform/index.js';
 import { isTmuxInstalled } from './tmux/binary.js';
+import { isTmuxEnabled } from './device-config.js';
+import { machineId } from './machine-id.js';
 import { shellQuote } from './ssh-exec.js';
 import { resolveClaudeSetupToken } from './claude-account-token.js';
 import { codexEditWritableRoots, codexPolicyArgs } from './codex-policy.js';
@@ -1482,6 +1484,34 @@ export function shouldRecapDeadPane(status: number | undefined, interactive: boo
 }
 
 /**
+ * The exit code a tmux-wrapped run resolves with (RUSH-2185 / EXEC-23b).
+ *
+ * Three inputs, one rule: report success ONLY for an outcome tmux actually told
+ * us about. A clean user detach (`knownAlive`) is 0; a dead pane reports the
+ * status tmux read off it; everything else — pane unreadable because the server
+ * or session went away, or dead with no status — is UNKNOWN and resolves to
+ * {@link UNKNOWN_OUTCOME_EXIT_CODE}, never 0.
+ *
+ * Why this is not `status ?? 0`: an interactive run whose tmux server died mid-
+ * work landed on exactly those unknown branches and returned 0, so `agents run`
+ * printed a failure banner while handing its caller a success code. The same
+ * "1 if unknown" rule already governs the `--host` follow path
+ * (`docs/specifications.md` §Agent execution, exit-code table).
+ *
+ * @param pane       What `paneExitStatus` read back for the agent pane.
+ * @param knownAlive Positive proof the pane is still alive (see
+ *                   {@link isPaneKnownAliveFromQueryResult}) — a clean detach.
+ */
+export function tmuxRunExitCode(
+  pane: { dead: boolean; status?: number },
+  knownAlive: boolean,
+): number {
+  if (knownAlive) return 0;
+  if (pane.dead && pane.status !== undefined) return pane.status;
+  return UNKNOWN_OUTCOME_EXIT_CODE;
+}
+
+/**
  * True only when a `display-message #{pane_dead}` tmux query explicitly returned
  * "0" (pane alive). Used to distinguish "pane alive" from "query failed" in
  * situations where `paneExitStatus` conservatively returns `{dead: false}` for
@@ -1506,6 +1536,8 @@ export interface TmuxWrapContext {
   raw: boolean;
   /** The AGENTS_NO_TMUX=1 escape hatch. */
   noTmuxEnv: boolean;
+  /** This device's `tmux.enabled` config — false turns the wrap off for every launch on this box. */
+  configEnabled: boolean;
   /** Whether a tmux binary is on PATH. */
   tmuxAvailable: boolean;
 }
@@ -1519,12 +1551,13 @@ export interface TmuxWrapContext {
  * focus` re-attach a live session without forking it. Pure so the gate is unit-
  * tested independently of the (side-effecting) spawn.
  *
- * All five guards must pass:
+ * All seven guards must pass:
  *   - interactive     — a headless `-p` run has no TTY to attach; keep bare spawn.
  *   - not Windows     — no tmux path on win32.
  *   - not already in tmux — nesting tmux-in-tmux is pointless and confusing.
  *   - not --raw       — explicit opt-out.
  *   - not AGENTS_NO_TMUX=1 — env opt-out (CI, scripts, the shim passthrough path).
+ *   - tmux.enabled    — this device's durable opt-out, for a box whose tmux is broken.
  *   - tmux installed  — otherwise there is nothing to wrap with.
  */
 export function shouldWrapInTmux(ctx: TmuxWrapContext): boolean {
@@ -1533,6 +1566,7 @@ export function shouldWrapInTmux(ctx: TmuxWrapContext): boolean {
   if (ctx.inTmux) return false;
   if (ctx.raw) return false;
   if (ctx.noTmuxEnv) return false;
+  if (!ctx.configEnabled) return false;
   if (!ctx.tmuxAvailable) return false;
   return true;
 }
@@ -1654,12 +1688,104 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
   const idSeed = (options.sessionId ?? randomUUID()).slice(0, 8);
   const name = slugifyName(`ag-${options.agent}-${idSeed}`);
 
+  const RED = '\x1b[31m', GRAY = '\x1b[90m', OFF = '\x1b[0m';
+  const NO_TMUX_TIP = `${GRAY}  Tip: re-run with --no-tmux to launch the agent directly and see its full output.\n  If tmux is broken on this machine, turn the wrap off for good: agents config set devices.${machineId()}.tmux off${OFF}\n\n`;
+
+  // Recap a dead pane's tail into THIS shell's stderr. The pane-died hook
+  // detaches the client the instant the agent exits, so a fast failure (a
+  // gutted install that dies with ENOENT, a bad flag, a crash on startup) would
+  // otherwise leave only a bare `[detached]` with no clue why. Must run BEFORE
+  // killSession — capture-pane needs the session still alive (remain-on-exit
+  // keeps the dead pane readable until we tear it down). Best-effort throughout.
+  const surfacePaneFailure = async (pane: string | undefined, status: number | undefined, headline: string): Promise<void> => {
+    if (!pane) return;
+    let tail = '';
+    try {
+      const r = await runTmux({ socket, args: ['capture-pane', '-p', '-t', pane, '-S', '-200'], throwOnError: false });
+      if (r.code === 0) tail = formatPaneTail(r.stdout);
+    } catch { /* best-effort — a missing pane just means no recap */ }
+    process.stderr.write(`\n${RED}agents: ${headline} (exit ${status ?? UNKNOWN_OUTCOME_EXIT_CODE}).${OFF}\n`);
+    if (tail) {
+      process.stderr.write(`${GRAY}  ── last output from ${options.agent} ──${OFF}\n`);
+      process.stderr.write(tail.replace(/^/gm, '  ') + '\n');
+      process.stderr.write(`${GRAY}  ${'─'.repeat(30)}${OFF}\n`);
+    }
+    process.stderr.write(NO_TMUX_TIP);
+  };
+
+  // F3 (RUSH-2185 / EXEC-23a): paneExitStatus returns {dead:false} for BOTH
+  // "pane is alive" and "tmux query failed (race / pane already gone)". Require
+  // POSITIVE proof before taking the keep-session path — a separate direct query
+  // that only returns true when tmux explicitly confirms pane_dead=0.
+  const checkPaneKnownAlive = async (p: string): Promise<boolean> => {
+    try {
+      const r = await runTmux({ socket, args: ['display-message', '-pt', p, '-p', '#{pane_dead}'], throwOnError: false });
+      return isPaneKnownAliveFromQueryResult(r.code, r.stdout);
+    } catch { return false; }
+  };
+
+  /**
+   * Resolve what an attach client's return actually means, for EVERY path that
+   * attaches (the fresh wrapper below AND the resume-attach above). Asking tmux
+   * is the only way to tell "the user detached" from "the agent exited" from
+   * "the session went away underneath us", so an attach that skips this cannot
+   * do better than assume success — which is exactly the defect EXEC-23b fixes.
+   */
+  const resolveAfterAttach = async (pane: string | undefined): Promise<{ exitCode: number; stderr: string; stdout: string }> => {
+    const after = pane ? await paneExitStatus(pane, socket) : { found: false, dead: false, status: undefined };
+    if (after.dead) {
+      // Nonzero exit after attach → the agent crashed rather than the user
+      // detaching cleanly (a clean detach leaves the pane ALIVE, handled below).
+      // F2: for interactive runs, also recap a clean exit-0 — the harness exited
+      // without error but without starting a REPL, which is still a failure.
+      if (shouldRecapDeadPane(after.status, resolveInteractive(options))) {
+        await surfacePaneFailure(pane, after.status, `${options.agent} exited`);
+      }
+      await killSession(name, socket).catch(() => {});
+      // A dead pane whose status tmux never reported is UNKNOWN, not success —
+      // and surfacePaneFailure already printed `exit 1` for it, so the old
+      // `?? 0` made the message and the returned code disagree (EXEC-23b).
+      return { exitCode: tmuxRunExitCode(after, false), stderr: '', stdout: '' };
+    }
+    // after.dead===false, but that could be a stale/unreadable-pane result.
+    // Require positive proof before keeping the session as "user detached".
+    if (pane && await checkPaneKnownAlive(pane)) {
+      // Confirmed alive: the user pressed Ctrl-b d; keep the session for `agents focus`.
+      return { exitCode: tmuxRunExitCode(after, true), stderr: '', stdout: '' };
+    }
+    // F4 (EXEC-23b): the outcome is UNKNOWN — tmux could not tell us whether the
+    // agent finished or was killed. MUST NOT be reported as success: a caller
+    // scripting `agents run` would count a run killed mid-work as a clean
+    // finish. Tear down so no orphan session is left, say so, and exit non-zero
+    // — the same "1 if unknown" rule the `--host` follow path already uses.
+    await killSession(name, socket).catch(() => {});
+    // One computation feeds both the banner and the return value — printing a
+    // code the caller does not receive is the same defect in miniature.
+    const exitCode = tmuxRunExitCode(after, false);
+    // Two distinct causes reach here, and the banner must not assert the wrong
+    // one: a pane we HAD (the session went away under it) versus a run whose
+    // pane id tmux never reported at creation, which had nothing to read from.
+    const cause = pane
+      ? 'The tmux session went away before its exit status could be read, so this run may have been killed mid-work.'
+      : 'This run had no readable tmux pane, so its exit status could never be read.';
+    process.stderr.write(
+      `\n${RED}agents: ${options.agent} outcome unknown (exit ${exitCode}).${OFF}\n` +
+      `${GRAY}  ${cause}${OFF}\n` + NO_TMUX_TIP,
+    );
+    return { exitCode, stderr: '', stdout: '' };
+  };
+
   // A native resume must not create a competing wrapper for a live session.
   // A retained dead pane is reaped before the harness resumes normally.
-  if (options.resume && await prepareSessionForResume(name, socket) === 'attach') {
+  const resumePrep = options.resume ? await prepareSessionForResume(name, socket) : { decision: 'create' as const };
+  if (resumePrep.decision === 'attach') {
     if (options.sessionId) writeSessionAliasRecord(options.sessionId, name);
     await attachTmux({ socket, args: ['attach-session', '-t', name] });
-    return { exitCode: 0, stderr: '', stdout: '' };
+    // EXEC-23b: a resume-attach is an attach like any other — it must ask tmux
+    // what happened rather than assume 0. Before this it returned a hardcoded
+    // success, so a resumed run whose server died under it reported a clean
+    // finish, the identical defect on the identical shape.
+    return resolveAfterAttach(resumePrep.pane);
   }
 
   // SessionStart learns some harness IDs only after launch. Carry the wrapper
@@ -1741,29 +1867,6 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
     }
   }
 
-  // Recap a dead pane's tail into THIS shell's stderr. The pane-died hook
-  // detaches the client the instant the agent exits, so a fast failure (a
-  // gutted install that dies with ENOENT, a bad flag, a crash on startup) would
-  // otherwise leave only a bare `[detached]` with no clue why. Must run BEFORE
-  // killSession — capture-pane needs the session still alive (remain-on-exit
-  // keeps the dead pane readable until we tear it down). Best-effort throughout.
-  const surfacePaneFailure = async (status: number | undefined, headline: string): Promise<void> => {
-    if (!pane) return;
-    let tail = '';
-    try {
-      const r = await runTmux({ socket, args: ['capture-pane', '-p', '-t', pane, '-S', '-200'], throwOnError: false });
-      if (r.code === 0) tail = formatPaneTail(r.stdout);
-    } catch { /* best-effort — a missing pane just means no recap */ }
-    const RED = '\x1b[31m', GRAY = '\x1b[90m', OFF = '\x1b[0m';
-    process.stderr.write(`\n${RED}agents: ${headline} (exit ${status ?? 1}).${OFF}\n`);
-    if (tail) {
-      process.stderr.write(`${GRAY}  ── last output from ${options.agent} ──${OFF}\n`);
-      process.stderr.write(tail.replace(/^/gm, '  ') + '\n');
-      process.stderr.write(`${GRAY}  ${'─'.repeat(30)}${OFF}\n`);
-    }
-    process.stderr.write(`${GRAY}  Tip: re-run with --no-tmux to launch the agent directly and see its full output.${OFF}\n\n`);
-  };
-
   // The agent could exit before we attach (fast failure). Don't attach to an
   // already-dead pane — surface its output + status directly and tear down.
   const before = pane ? await paneExitStatus(pane, socket) : { found: false, dead: false, status: undefined };
@@ -1773,47 +1876,17 @@ async function runInTmux(options: ExecOptions, executable: string, args: string[
     // user would see only a bare `[detached]` with no clue why. For headless
     // runs the old quiet behaviour stands: exit-0 is a successful quick run.
     if (shouldRecapDeadPane(before.status, resolveInteractive(options))) {
-      await surfacePaneFailure(before.status, `${options.agent} exited before it could start`);
+      await surfacePaneFailure(pane, before.status, `${options.agent} exited before it could start`);
     }
     await killSession(name, socket).catch(() => {});
-    return { exitCode: before.status ?? 0, stderr: '', stdout: '' };
+    // A dead pane whose status tmux never reported is an UNKNOWN outcome, not a
+    // success — and the banner one line up already printed `exit 1` for it, so
+    // the old `?? 0` also made the message and the returned code disagree.
+    return { exitCode: tmuxRunExitCode(before, false), stderr: '', stdout: '' };
   }
 
   await attachTmux({ socket, args: ['attach-session', '-t', name] });
-
-  // F3 (RUSH-2185 / EXEC-23a): paneExitStatus returns {dead:false} for BOTH
-  // "pane is alive" and "tmux query failed (race / pane already gone)". Require
-  // POSITIVE proof before taking the keep-session path — a separate direct query
-  // that only returns true when tmux explicitly confirms pane_dead=0.
-  const checkPaneKnownAlive = async (p: string): Promise<boolean> => {
-    try {
-      const r = await runTmux({ socket, args: ['display-message', '-pt', p, '-p', '#{pane_dead}'], throwOnError: false });
-      return isPaneKnownAliveFromQueryResult(r.code, r.stdout);
-    } catch { return false; }
-  };
-
-  const after = pane ? await paneExitStatus(pane, socket) : { found: false, dead: false, status: undefined };
-  if (after.dead) {
-    // Nonzero exit after attach → the agent crashed rather than the user
-    // detaching cleanly (a clean detach leaves the pane ALIVE, handled below).
-    // F2: for interactive runs, also recap a clean exit-0 — the harness exited
-    // without error but without starting a REPL, which is still a failure.
-    if (shouldRecapDeadPane(after.status, resolveInteractive(options))) {
-      await surfacePaneFailure(after.status, `${options.agent} exited`);
-    }
-    await killSession(name, socket).catch(() => {});
-    return { exitCode: after.status ?? 0, stderr: '', stdout: '' };
-  }
-  // after.dead===false, but that could be a stale/unreadable-pane result.
-  // Require positive proof before keeping the session as "user detached".
-  if (pane && await checkPaneKnownAlive(pane)) {
-    // Confirmed alive: the user pressed Ctrl-b d; keep the session for `agents focus`.
-    return { exitCode: 0, stderr: '', stdout: '' };
-  }
-  // Ambiguous or unreadable pane (race between pane-died hook and our query) —
-  // tear down rather than leave an orphan session.
-  await killSession(name, socket).catch(() => {});
-  return { exitCode: 0, stderr: '', stdout: '' };
+  return resolveAfterAttach(pane);
 }
 
 /**
@@ -1928,6 +2001,7 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
     inTmux: !!process.env.TMUX,
     raw: options.raw === true,
     noTmuxEnv: process.env.AGENTS_NO_TMUX === '1',
+    configEnabled: isTmuxEnabled(),
     tmuxAvailable: isTmuxInstalled(),
   })) {
     timer.mark('startup');
@@ -2087,6 +2161,14 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
 
 /** Exit code spawnAgent resolves with when a run is killed for crossing a budget cap. */
 export const BUDGET_KILL_EXIT_CODE = 7;
+
+/**
+ * Exit code a tmux-wrapped run resolves with when tmux cannot tell us how the
+ * agent finished — the pane is unreadable, or it is dead with no reported status
+ * (EXEC-23b). Never 0: an unknown outcome reported as success is how a run killed
+ * mid-work gets counted as a clean finish by whatever scripted it.
+ */
+export const UNKNOWN_OUTCOME_EXIT_CODE = 1;
 
 /**
  * Resolve the budget watcher for a run. Returns null (watcher dormant) when no

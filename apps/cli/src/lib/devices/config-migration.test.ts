@@ -75,7 +75,9 @@ describe('migrateDeviceConfigStores', () => {
     migrateDeviceConfigStores();
 
     expect(getConfigValue('agents.max-concurrent', { device: 'mac-mini' }).value).toBe(8);
-    expect(getConfigValue('scheduler.enabled', { device: 'mac-mini' }).value).toBe(false);
+    // scheduler.enabled is machine-local — a peer read is refused, so assert
+    // the fold via the doc itself.
+    expect(readDoc('mac-mini')).toContain('schedulerEnabled: false');
     expect(getConfigValue('notes', { device: 'mac-mini' }).value).toEqual(['runs the releases']);
 
     // The doc keeps routines: and gains the merged config:.
