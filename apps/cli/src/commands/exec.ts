@@ -2024,7 +2024,7 @@ agents run auto --device yosemite-s0 "fix the flaky test"   # pin the device
         import('../lib/secrets/remote.js'),
         import('../lib/accounting/rotate.js'),
         import('../lib/versions.js'),
-        import('../lib/plugins.js'),
+        import('../lib/plugins/plugins.js'),
         import('../lib/workflows.js'),
         import('../lib/run-defaults.js'),
         import('../lib/mcp.js'),

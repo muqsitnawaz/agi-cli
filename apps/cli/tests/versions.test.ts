@@ -104,7 +104,7 @@ vi.mock('../src/lib/state.js', () => {
 });
 
 // Mock external dependencies that syncResourcesToVersion calls
-vi.mock('../src/lib/plugins.js', () => ({
+vi.mock('../src/lib/plugins/plugins.js', () => ({
   discoverPlugins: () => [],
   syncPluginToVersion: () => ({ success: false }),
   isPluginSynced: () => false,
@@ -135,6 +135,8 @@ vi.mock('../src/lib/hooks.js', () => ({
   parseHookManifest: () => ({}),
   selectHookManifest: (manifest: object) => manifest,
   registerHooksToSettings: () => {},
+  installSessionTrackerHookSync: () => ({ installed: true }),
+  installSessionTrackerHook: async () => ({ installed: true }),
 }));
 
 vi.mock('../src/lib/permissions.js', () => ({
