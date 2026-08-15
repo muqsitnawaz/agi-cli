@@ -173,7 +173,8 @@ describe('BrowserService.status — disk reconciliation (Issue #6)', () => {
     expect(result[0].tasks[0]).toMatchObject({ id: 'work', tabCount: 2, createdAt: 100 });
   });
 
-  it('status still reconciles from disk when CDP is unreachable (no clear of pid files)', async () => {
+  it('status still reconciles from disk when CDP is unreachable (no clear of pid files)
+    // Regression: soft rehydrate must not clearProfileRuntime (CI shard 2)', async () => {
     // Port with nothing listening — soft rehydrate must not clear pid/port
     // (connectProfile used to, which made status return [] on CI).
     const deadPort = 19_987;
