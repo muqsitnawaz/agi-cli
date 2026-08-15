@@ -7506,7 +7506,7 @@
           "name": "ignore",
           "path": "devices ignore",
           "aliases": [],
-          "description": "Dismiss a node from auto-discovery so it is never re-suggested (and remove it from the registry if present).",
+          "description": "Dismiss a node and sync the decision through agents.yaml fleet.discovery (also removes it locally).",
           "args": [
             {
               "name": "name",
@@ -7957,7 +7957,7 @@
           "name": "register",
           "path": "devices register",
           "aliases": [],
-          "description": "Register a discovered (pending) node by name — used by the menu-bar \"NEW DEVICES → Register\" action.",
+          "description": "Register a discovered node and sync the approval through agents.yaml fleet.discovery.",
           "args": [
             {
               "name": "name",
@@ -16444,7 +16444,7 @@
           "name": "pull",
           "path": "repos pull",
           "aliases": [],
-          "description": "Pull updates. Aliases: \"system\" (~/.agents/.system/), \"user\" (~/.agents/), or any registered extra. No arg pulls all. Pass a git URL to git-back a not-yet-cloned user repo: \"agents repo pull user <url>\".",
+          "description": "Pull updates and reconcile synced device decisions. Aliases: \"system\" (~/.agents/.system/), \"user\" (~/.agents/), or any registered extra. No arg pulls all. Pass a git URL to git-back a not-yet-cloned user repo: \"agents repo pull user <url>\".",
           "args": [
             {
               "name": "alias",

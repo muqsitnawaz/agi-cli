@@ -102,6 +102,7 @@ describe('pins route to the untracked pins file; the tracked doc is operator-onl
     expect(readMeta().agents?.claude).toBeUndefined();
     expect(JSON.parse(fs.readFileSync(pinsPath(), 'utf-8'))).toEqual({});
   });
+
 });
 
 describe('reading state never writes a tracked agents.yaml (RUSH-1925)', () => {

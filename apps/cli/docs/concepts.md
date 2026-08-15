@@ -200,6 +200,14 @@ password from a Keychain bundle via an askpass shim. `agents devices render --wr
 emits a `~/.ssh/config.d/agents` include so plain `ssh`/`scp`/`rsync` resolve the
 same logical names.
 
+Approval is portable even though connection metadata is not. Registering or
+ignoring a device records `approved` or `ignored` under `fleet.discovery` in
+the central `~/.agents/agents.yaml`; no entry means the device is still pending.
+`agents repo push user` carries those decisions, and `agents repo pull user`
+reconciles them into each machine's local registry and ignore-list. Approved
+devices resolve their address live from Tailscale; addresses, SSH auth, and
+reachability never enter Git.
+
 **Per-device and fleet-wide settings** live in a three-layer store, read in
 order — built-in default < fleet default < per-device value:
 

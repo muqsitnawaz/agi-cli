@@ -226,6 +226,14 @@
           "additionalProperties": {
             "type": "object"
           }
+        },
+        "discovery": {
+          "type": "object",
+          "description": "Portable device discovery decisions. Approved devices are registered when reachable; ignored devices remain hidden on every machine after user-repo sync.",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["approved", "ignored"]
+          }
         }
       }
     },
