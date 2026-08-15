@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_78 command groups · 548 commands._
+_78 command groups · 549 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -66,6 +66,7 @@ agents artifacts share analytics            Show the Cloudflare Web Analytics st
 agents artifacts share delete <targets...>  Take down a published page (and by default its OG cover). Verifies the page 404s before reporting success. Top-level alias: agents unshare.
 agents artifacts share join [baseUrl]       Use an existing synced share endpoint and write token (no provisioning).
 agents artifacts share list                 List the pages you've published to your share namespace (human table; --json for scripts).
+agents artifacts share revisions <target>   Show the retained prior versions of a published slug, newest first (human table; --revisions-json for scripts).
 agents artifacts share status               Show the configured share endpoint and namespace.
 agents artifacts share update               Re-deploy the Worker script to the current template on an already-provisioned endpoint (idempotent).
 ```
@@ -94,15 +95,15 @@ agents browser                                Launch and drive browser profiles 
 agents browser click [ref]                    Click an element by ref, or raw coordinates with --at X,Y
 agents browser console                        Read console logs from a tab
 agents browser devices                        List available device presets
-agents browser done                           Complete a task and close its tabs
+agents browser done                           Complete a task and close its tabs (resolves from caller identity when --task is omitted)
 agents browser download                       Set the download directory for a task (defaults to the profile's downloads dir)
 agents browser errors                         Read page errors from a tab
-agents browser evaluate                       Evaluate JavaScript in current tab
+agents browser evaluate [expression]          Evaluate JavaScript in current tab
 agents browser gc                             Close tabs for abandoned tasks — owning agent session exited, or idle past the window — and mark them done. The same reaper the daemon already runs every 5 minutes; use this to run it now.
 agents browser history                        Show recent browser task history
 agents browser hover <ref>                    Hover over an element by ref
-agents browser logs <task>                    Read merged rush-app + rush-cli JSONL logs for a task
-agents browser navigate                       Navigate current tab to URL (creates tab if none exist)
+agents browser logs                           Read merged rush-app + rush-cli JSONL logs for a task
+agents browser navigate [url]                 Navigate current tab to URL (creates a task and tab when none exist)
 agents browser pdf [output]                   Export the current tab as PDF via CDP Page.printToPDF — auto-saved under sessions/<task>/ when [output] is omitted
 agents browser press <key>                    Press a key (Enter, Tab, Escape, etc)
 agents browser profiles                       Manage browser profiles
@@ -128,7 +129,7 @@ agents browser sessions                       Browse a profile's captured screen
 agents browser set                            Set browser emulation options
 agents browser set device <device-name>       Emulate a device (iPhone 14, iPad, MacBook Pro)
 agents browser set viewport <width> <height>  Set viewport size
-agents browser start                          Start a browser task. Pass --profile <name>; omit to use your configured default (`agents config set browser.profile <name>`), else auto-pick an installed Chromium-family browser.
+agents browser start                          Start a browser task. Pass --profile <name>; omit to use your configured default (`agents config set browser.profile <name>`), else auto-pick an installed Chromium-family browser. Page verbs (navigate/screenshot/…) create a task implicitly when none exists — start is for --profile/--url/--record/--title.
 agents browser status                         Show running browser tasks
 agents browser stop                           Stop a browser task and close its tabs; with --profile, detach the whole profile (close browser + drop cached connection)
 agents browser stream                         Keep one process and daemon IPC socket open; read NDJSON requests from stdin and write NDJSON responses
