@@ -25,7 +25,6 @@ import { resolveDomainSkill, type ResolvedDomainSkill } from './domain-skills.js
 import {
   generateTaskId,
   generateShortId,
-  generateTaskName,
   isValidTaskId,
   type Task,
   type TabInfo,
@@ -41,6 +40,7 @@ import {
   taskOwnerIsGone,
   type ReapOptions,
 } from './hygiene.js';
+import { taskMatchesCaller } from './caller-identity.js';
 import { getRefs, resolveRefToCoords, describeRefs, healRef, type RefOpts, type RefNode, type RefSnapshot } from './refs.js';
 import { clickAtCoords, hoverAtCoords, scrollAtCoords, typeText, pressKey, focusNode } from './input.js';
 import { typeEditorText } from './editor.js';
@@ -299,6 +299,12 @@ interface ProfileConnection {
    * captures land under `.cache/browser/<profileName>/`. Set at registration.
    */
   profileName?: string;
+  /**
+   * Bare YAML profile name without the `@<endpoint>` suffix. Kept so
+   * `status --profile comet-local` matches the composite connection key
+   * `comet-local@endpoint-0` without prefix-matching wrong browsers.
+   */
+  bareName?: string;
   forkedFrom?: string;
   tasks: Map<string, Task>;
   windowId?: string; // single window shared by all tasks
@@ -311,6 +317,35 @@ interface ProfileConnection {
    * and hijacks future `cdp://127.0.0.1:N` profiles on the same local port.
    */
   cleanup?: () => void;
+}
+
+/** Join error lines so callers get a next command, not a dead-end message. */
+export function actionable(...lines: string[]): string {
+  return lines.filter((l) => l != null && l !== '').join('\n');
+}
+
+/** Derive a human label from an explicit title or a navigated URL. */
+export function deriveTaskLabel(opts: { title?: string; url?: string; existing?: string }): string {
+  if (opts.title?.trim()) return opts.title.trim();
+  if (opts.existing && opts.existing !== 'untitled') return opts.existing;
+  if (opts.url) {
+    try {
+      const host = new URL(opts.url).hostname.replace(/^www\./, '');
+      if (host) return host;
+    } catch {
+      /* unparseable */
+    }
+  }
+  return opts.existing ?? 'untitled';
+}
+
+/**
+ * True when `key` is the bare profile name or one of its composite endpoint
+ * keys (`name@endpoint`). Used by status/stop so `comet-local` matches
+ * `comet-local@endpoint-0`.
+ */
+export function connectionKeyMatchesProfile(key: string, profileName: string): boolean {
+  return key === profileName || key.startsWith(`${profileName}@`) || key.startsWith(`${profileName}.`);
 }
 
 type TargetInfo = {
@@ -382,6 +417,8 @@ export class BrowserService {
       launchId?: string;
       /** Calling agent session, forwarded from the CLI (see IPCRequest.sessionId). */
       sessionId?: string;
+      /** Explicit human label (`--title`). */
+      title?: string;
     } = {}
   ): Promise<{ task: string; name: string; tabId?: string; windowId?: string; profile: string; skill?: ResolvedDomainSkill }> {
     const profile = await getProfile(profileName);
@@ -393,15 +430,21 @@ export class BrowserService {
     // passed an unknown name. The composite identifier `<profile>@<endpoint>`
     // is what the connection map + per-profile runtime dirs are keyed on, so
     // a single YAML profile can run at multiple endpoints concurrently.
+    //
+    // The YAML profile's bare `name` stays on `profile.name` for status
+    // matching; only the connection/runtime key uses the composite.
     const resolved = resolveEndpoint(profile, opts.endpointName);
     const composite = `${profileName}@${resolved.name}`;
     const effectiveProfile: BrowserProfile = {
       ...profile,
+      // Runtime/connect path key — NOT the bare YAML name. Connections and
+      // tasks.json live under this composite so multi-endpoint is safe.
       name: composite,
       binary: resolved.binary,
       targetFilter: resolved.targetFilter,
     };
 
+    const taskId = generateTaskId();
     let taskName: string;
     if (opts.taskName) {
       if (this.hasTaskNamed(opts.taskName)) {
@@ -411,9 +454,10 @@ export class BrowserService {
       }
       taskName = opts.taskName;
     } else {
-      taskName = this.generateUniqueTaskName();
+      // Address by the short machine id — no word-salad. Status shows `label`.
+      taskName = taskId;
     }
-    const taskId = generateTaskId();
+    const taskLabel = deriveTaskLabel({ title: opts.title, url: opts.url });
 
     let conn = this.connections.get(composite);
     let effectiveProfileName = composite;
@@ -455,9 +499,11 @@ export class BrowserService {
     } else if (!conn) {
       conn = await this.connectProfile(effectiveProfile, resolved.target);
       conn.profileName = composite;
+      conn.bareName = profileName;
       this.connections.set(composite, conn);
       await this.applyDefaultDownloadBehavior(conn, composite);
     }
+    if (conn && !conn.bareName) conn.bareName = profileName;
 
     // Browsers launch with --no-startup-window (session-cookie persistence,
     // see launchBrowser), so a bare `start` with no --url would otherwise
@@ -489,6 +535,7 @@ export class BrowserService {
     const task: Task = {
       id: taskId,
       name: taskName,
+      label: taskLabel,
       profile: effectiveProfileName,
       tabs: {},
       currentTabId: undefined,
@@ -710,9 +757,17 @@ export class BrowserService {
   }
 
   async stop(taskName: string): Promise<{ ok: boolean; profile?: string }> {
+    // Rehydrate from tasks.json when the daemon restarted and lost RAM state.
+    try {
+      await this.findTask(taskName);
+    } catch {
+      // findTask throws when truly gone; fall through to the miss return.
+    }
     for (const [profileName, conn] of this.connections) {
-      const task = conn.tasks.get(taskName);
+      const task = this.lookupTaskOnConn(conn, taskName);
       if (task) {
+        // Map key may be task.name, not the caller-supplied handle.
+        const mapKey = this.taskMapKey(conn, task) ?? taskName;
         // Get domains from tabs before closing (for history)
         const domains = new Set<string>();
         try {
@@ -750,17 +805,17 @@ export class BrowserService {
         }
         this.invalidateTargetCache(conn);
 
-        conn.tasks.delete(taskName);
+        conn.tasks.delete(mapKey);
         await this.saveTaskState(profileName, conn.tasks);
 
-        emit('browser.close', { profile: profileName, task: taskName });
+        emit('browser.close', { profile: profileName, task: task.name });
         void import('../analytics/usage-db.js').then(({ recordUsage }) => {
           recordUsage({
             kind: 'browser',
             name: profileName,
             event: 'close',
             source: 'browser',
-            meta: { task: taskName },
+            meta: { task: task.name },
           });
         }).catch(() => { /* fail soft */ });
 
@@ -824,6 +879,7 @@ export class BrowserService {
     profileName?: string
   ): Promise<{ tabId: string; url: string; created: boolean }> {
     const { conn, task } = await this.findTask(taskId, profileName);
+    this.maybeUpdateLabelFromUrl(conn, task, url);
 
     // If we have a current tab, navigate in it (reuse)
     const currentShortId = task.currentTabId;
@@ -1692,15 +1748,30 @@ export class BrowserService {
   }
 
   async status(profileName?: string): Promise<ProfileStatus[]> {
+    // Reconnect live browsers after a daemon restart so status is not empty
+    // while tasks.json still holds open work.
+    await this.rehydrateAllFromDisk();
+
     const seen = new Set<string>();
     const statuses: ProfileStatus[] = [];
 
-    const candidates = profileName ? [profileName] : Array.from(this.connections.keys());
+    // Connections are keyed by composite `<profile>@<endpoint>`. A bare
+    // `--profile comet-local` must still list those tasks (same rule as
+    // stopProfile). Match exact key, bareName, and composite/fork prefixes.
+    const candidates = profileName
+      ? [...this.connections.keys()].filter(
+          (k) =>
+            connectionKeyMatchesProfile(k, profileName) ||
+            this.connections.get(k)?.bareName === profileName,
+        )
+      : Array.from(this.connections.keys());
+
     for (const name of candidates) {
       const status = await this.getProfileStatus(name);
       if (status) {
         statuses.push(status);
         seen.add(name);
+        if (status.name) seen.add(status.name);
       }
     }
 
@@ -1708,10 +1779,11 @@ export class BrowserService {
       const profiles = await listProfiles();
       for (const profile of profiles) {
         if (seen.has(profile.name)) continue;
+        if ([...seen].some((s) => connectionKeyMatchesProfile(s, profile.name))) continue;
         const reconciled = await this.reconcileFromDisk(profile.name);
         if (reconciled) statuses.push(reconciled);
       }
-    } else if (!seen.has(profileName)) {
+    } else if (statuses.length === 0) {
       const reconciled = await this.reconcileFromDisk(profileName);
       if (reconciled) statuses.push(reconciled);
     }
@@ -1720,30 +1792,54 @@ export class BrowserService {
   }
 
   private async reconcileFromDisk(profileName: string): Promise<ProfileStatus | null> {
-    const info = getRunningChromeInfo(profileName);
-    if (!info) return null;
+    // Runtime dirs live under the composite (`comet-local@endpoint-0`), not the
+    // bare YAML name. Walk every matching cache dir so bare `status --profile`
+    // sees the same tasks as unscoped `status`.
+    const dirs = listProfileCacheDirs(profileName);
+    if (dirs.length === 0) {
+      // Legacy: non-composite dir named exactly the bare profile.
+      const info = getRunningChromeInfo(profileName);
+      if (!info) return null;
+      return this.profileStatusFromDisk(profileName, profileName, info.port, info.pid);
+    }
 
-    const profile = await getProfile(profileName);
-    const tasks = this.loadTaskState(profileName);
+    // Prefer a dir that still has a live browser; fall back to the first.
+    for (const dir of dirs) {
+      const dirName = path.basename(dir);
+      const info = getRunningChromeInfo(dirName);
+      if (!info) continue;
+      return this.profileStatusFromDisk(profileName, dirName, info.port, info.pid);
+    }
+    return null;
+  }
+
+  private async profileStatusFromDisk(
+    displayName: string,
+    runtimeKey: string,
+    port: number,
+    pid: number,
+  ): Promise<ProfileStatus> {
+    const bare = displayName.includes('@') ? displayName.split('@')[0]! : displayName;
+    const profile = await getProfile(bare);
+    const tasks = this.loadTaskState(runtimeKey);
     const taskStatuses: TaskStatus[] = [];
     for (const [, task] of tasks) {
       taskStatuses.push({
         id: task.id,
         name: task.name,
+        label: task.label ?? task.name,
         tabCount: Object.keys(task.tabs).length,
         currentTabId: task.currentTabId,
         createdAt: task.createdAt,
       });
     }
-
     const configuredPort = profile ? extractConfiguredPort(profile) : undefined;
-
     return {
-      name: profileName,
+      name: runtimeKey,
       running: true,
-      port: info.port,
-      pid: info.pid,
-      configuredPort: configuredPort !== info.port ? configuredPort : undefined,
+      port,
+      pid,
+      configuredPort: configuredPort !== port ? configuredPort : undefined,
       tasks: taskStatuses,
     };
   }
@@ -2494,17 +2590,166 @@ export class BrowserService {
 
   private hasTaskNamed(name: string): boolean {
     for (const conn of this.connections.values()) {
-      if (conn.tasks.has(name)) return true;
+      if (this.lookupTaskOnConn(conn, name)) return true;
     }
     return false;
   }
 
-  private generateUniqueTaskName(): string {
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const candidate = generateTaskName();
-      if (!this.hasTaskNamed(candidate)) return candidate;
+  /** Map key for a task on a connection (tasks are keyed by `name`). */
+  private taskMapKey(conn: ProfileConnection, task: Task): string | undefined {
+    for (const [key, t] of conn.tasks) {
+      if (t === task || t.id === task.id || t.name === task.name) return key;
     }
-    throw new Error('Could not generate unique task name after 8 attempts');
+    return undefined;
+  }
+
+  /** Find a task by map key, id, or name on one connection. */
+  private lookupTaskOnConn(conn: ProfileConnection, handle: string): Task | undefined {
+    const direct = conn.tasks.get(handle);
+    if (direct) return direct;
+    for (const task of conn.tasks.values()) {
+      if (task.id === handle || task.name === handle) return task;
+    }
+    return undefined;
+  }
+
+  private maybeUpdateLabelFromUrl(conn: ProfileConnection, task: Task, url: string): void {
+    if (task.label && task.label !== 'untitled') return;
+    const next = deriveTaskLabel({ url, existing: task.label });
+    if (next === task.label) return;
+    task.label = next;
+    void this.saveTaskState(task.profile, conn.tasks).catch(() => { /* best-effort */ });
+  }
+
+  /**
+   * Resolve a task for a page/close verb.
+   *
+   *   - explicit `task` handle → look up (with disk rehydrate on RAM miss)
+   *   - no handle, exactly one live task for this caller → use it
+   *   - no handle, multiple for this caller → error listing them + `--task`
+   *   - no handle, zero for this caller, createIfMissing → start a new task
+   *   - no handle, zero, !createIfMissing → return null (caller reports "nothing to close")
+   */
+  async resolveOrCreateTask(opts: {
+    task?: string;
+    profile?: string;
+    actor?: string;
+    launchId?: string;
+    sessionId?: string;
+    createIfMissing: boolean;
+    title?: string;
+    url?: string;
+  }): Promise<{ conn: ProfileConnection; task: Task; profileName: string; created: boolean } | null> {
+    if (opts.task) {
+      const found = await this.findTask(opts.task, opts.profile);
+      return { ...found, created: false };
+    }
+
+    // After a daemon restart the connections map is empty while tasks.json still
+    // holds live tasks. Rehydrate before identity matching so done/screenshot
+    // without --task still find the caller's task.
+    await this.rehydrateAllFromDisk();
+
+    const caller = {
+      sessionId: opts.sessionId,
+      launchId: opts.launchId,
+    };
+    const matches = this.listTasksForCaller(caller);
+
+    if (matches.length === 1) {
+      const m = matches[0]!;
+      await this.touchTask(m.conn, m.task);
+      return { conn: m.conn, task: m.task, profileName: m.profileName, created: false };
+    }
+
+    if (matches.length > 1) {
+      const lines = matches.map((m) => {
+        const ageMs = Date.now() - m.task.createdAt;
+        const age =
+          ageMs < 60_000
+            ? `${Math.round(ageMs / 1000)}s`
+            : `${Math.round(ageMs / 60_000)}m`;
+        const label = m.task.label ?? m.task.name;
+        const url = this.currentUrlHint(m.conn, m.task) ?? '-';
+        return `  ${label}  id=${m.task.name}  url=${url}  age=${age}`;
+      });
+      throw new Error(
+        actionable(
+          `Multiple browser tasks for this session — pass --task <name>:`,
+          ...lines,
+          `Next: agents browser status`,
+        ),
+      );
+    }
+
+    // Zero matches for this caller.
+    if (!opts.createIfMissing) return null;
+
+    // Implicit start on the default / named profile.
+    let profileName = opts.profile;
+    if (!profileName) {
+      const { ensureDefaultBrowserProfile } = await import('./profiles.js');
+      const detected = await ensureDefaultBrowserProfile();
+      profileName = detected.name;
+    }
+    const started = await this.start(profileName, {
+      url: opts.url,
+      actor: opts.actor,
+      launchId: opts.launchId,
+      sessionId: opts.sessionId,
+      title: opts.title,
+    });
+    return { ...(await this.findTask(started.name, started.profile)), created: true };
+  }
+
+  private listTasksForCaller(caller: {
+    sessionId?: string;
+    launchId?: string;
+  }): Array<{ conn: ProfileConnection; task: Task; profileName: string }> {
+    const out: Array<{ conn: ProfileConnection; task: Task; profileName: string }> = [];
+    const hasIdentity = !!(caller.sessionId || caller.launchId);
+
+    for (const [key, conn] of this.connections) {
+      for (const task of conn.tasks.values()) {
+        if (hasIdentity) {
+          if (taskMatchesCaller(task, caller)) {
+            out.push({ conn, task, profileName: conn.profileName ?? key });
+          }
+        } else {
+          // No caller identity: only match tasks that also lack identity
+          // (a human-driven shell). If there is exactly one live task total,
+          // the single-task path still needs that listed — fall through below.
+          if (!task.sessionId && !task.launchId) {
+            out.push({ conn, task, profileName: conn.profileName ?? key });
+          }
+        }
+      }
+    }
+
+    // No-identity caller with zero unscoped matches: if the daemon holds
+    // exactly one live task, use it (common interactive shell case).
+    if (!hasIdentity && out.length === 0) {
+      const all = this.listTasks();
+      if (all.length === 1) {
+        const only = all[0]!;
+        const conn = this.connections.get(only.profile) ??
+          [...this.connections.entries()].find(([, c]) => c.tasks.has(only.task.name) || [...c.tasks.values()].includes(only.task))?.[1];
+        if (conn) {
+          out.push({ conn, task: only.task, profileName: only.profile });
+        }
+      }
+    }
+
+    return out;
+  }
+
+  private currentUrlHint(conn: ProfileConnection, task: Task): string | undefined {
+    const shortId = task.currentTabId;
+    if (!shortId) return undefined;
+    const cdpId = task.tabs[shortId];
+    if (!cdpId) return undefined;
+    const cached = conn.targetCache?.targets.find((t) => t.targetId === cdpId);
+    return cached?.url;
   }
 
   /**
@@ -2547,27 +2792,195 @@ export class BrowserService {
     profileName?: string
   ): Promise<{ conn: ProfileConnection; task: Task; profileName: string }> {
     if (profileName) {
-      const conn = this.connections.get(profileName);
-      if (!conn) {
-        throw new Error(`Profile "${profileName}" not connected`);
+      // Accept bare profile names against composite connection keys.
+      const keys = [...this.connections.keys()].filter(
+        (k) =>
+          k === profileName ||
+          connectionKeyMatchesProfile(k, profileName) ||
+          this.connections.get(k)?.bareName === profileName,
+      );
+      for (const key of keys) {
+        const conn = this.connections.get(key)!;
+        const task = this.lookupTaskOnConn(conn, taskId);
+        if (task) {
+          await this.touchTask(conn, task);
+          return { conn, task, profileName: conn.profileName ?? key };
+        }
       }
-      const task = conn.tasks.get(taskId);
-      if (!task) {
-        throw new Error(`Task "${taskId}" not found on profile "${profileName}"`);
+      // RAM miss → rehydrate from disk for this profile.
+      const rehydrated = await this.rehydrateTaskFromDisk(taskId, profileName);
+      if (rehydrated) {
+        await this.touchTask(rehydrated.conn, rehydrated.task);
+        return rehydrated;
       }
-      await this.touchTask(conn, task);
-      return { conn, task, profileName };
+      throw new Error(
+        actionable(
+          `Task "${taskId}" not found on profile "${profileName}".`,
+          `Next: agents browser status --profile ${profileName}`,
+        ),
+      );
     }
 
     for (const [key, conn] of this.connections) {
-      const task = conn.tasks.get(taskId);
+      const task = this.lookupTaskOnConn(conn, taskId);
       if (task) {
         await this.touchTask(conn, task);
         return { conn, task, profileName: conn.profileName ?? key };
       }
     }
 
-    throw new Error(`Task "${taskId}" not found`);
+    // RAM miss after a daemon restart: tasks.json still has the task and
+    // meta.json still has the browser pid/port. Reconnect and adopt.
+    const rehydrated = await this.rehydrateTaskFromDisk(taskId);
+    if (rehydrated) {
+      await this.touchTask(rehydrated.conn, rehydrated.task);
+      return rehydrated;
+    }
+
+    const live = this.listTasks()
+      .map(({ task }) => task.label ?? task.name)
+      .join(', ');
+    throw new Error(
+      actionable(
+        `Task "${taskId}" not found.`,
+        `Active tasks: ${live || 'none'}`,
+        `It may have been closed by the idle reaper (30 min).`,
+        `Next: agents browser status  |  agents browser navigate <url>`,
+      ),
+    );
+  }
+
+  /**
+   * Reconnect every profile runtime dir that still has a live browser and
+   * tasks.json entries. Used before identity-based resolution so a daemon
+   * restart does not make the caller's tasks invisible.
+   */
+  private async rehydrateAllFromDisk(): Promise<void> {
+    const runtimeRoot = getBrowserRuntimeDir();
+    let dirNames: string[] = [];
+    try {
+      dirNames = fs.readdirSync(runtimeRoot).filter((d) => {
+        try {
+          return fs.statSync(path.join(runtimeRoot, d)).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      return;
+    }
+
+    for (const dirName of dirNames) {
+      if (this.connections.has(dirName)) continue;
+      const tasks = this.loadTaskState(dirName);
+      if (tasks.size === 0) continue;
+      // A daemon restart often clears pid/port/meta (orphan reaper keyed on
+      // daemonPid) while leaving tasks.json and the live browser. Connect via
+      // the profile's configured endpoint — connectProfile also reloads tasks.
+      const bare = dirName.includes('@') ? dirName.split('@')[0]! : dirName;
+      const profile = await getProfile(bare);
+      if (!profile) continue;
+      try {
+        const resolved = resolveEndpoint(profile);
+        const effectiveProfile: BrowserProfile = {
+          ...profile,
+          name: dirName,
+          binary: resolved.binary,
+          targetFilter: resolved.targetFilter,
+        };
+        const conn = await this.connectProfile(effectiveProfile, resolved.target);
+        conn.profileName = dirName;
+        conn.bareName = bare;
+        // Merge: connectProfile may load an empty map if pid was 0 attach path.
+        for (const [k, t] of tasks) {
+          if (!conn.tasks.has(k)) conn.tasks.set(k, t);
+        }
+        this.connections.set(dirName, conn);
+        await this.applyDefaultDownloadBehavior(conn, dirName);
+      } catch {
+        // Browser not speaking CDP anymore — leave on disk for status reconcile.
+      }
+    }
+  }
+
+  /**
+   * On a RAM miss, scan profile runtime dirs for a tasks.json entry matching
+   * `taskId`, reconnect via the same path `connectProfile` uses when a browser
+   * is already running, and register the connection.
+   */
+  private async rehydrateTaskFromDisk(
+    taskId: string,
+    profileHint?: string,
+  ): Promise<{ conn: ProfileConnection; task: Task; profileName: string } | null> {
+    const runtimeRoot = getBrowserRuntimeDir();
+    let dirNames: string[] = [];
+    try {
+      dirNames = fs.readdirSync(runtimeRoot).filter((d) => {
+        try {
+          return fs.statSync(path.join(runtimeRoot, d)).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      return null;
+    }
+
+    if (profileHint) {
+      dirNames = dirNames.filter(
+        (d) => d === profileHint || connectionKeyMatchesProfile(d, profileHint),
+      );
+    }
+
+    for (const dirName of dirNames) {
+      const tasks = this.loadTaskState(dirName);
+      let found: Task | undefined;
+      for (const task of tasks.values()) {
+        if (task.id === taskId || task.name === taskId) {
+          found = task;
+          break;
+        }
+      }
+      // Also allow map-key match
+      if (!found) found = tasks.get(taskId);
+      if (!found) continue;
+
+      // Already connected under this key?
+      let conn = this.connections.get(dirName);
+      if (!conn) {
+        const bare = dirName.includes('@') ? dirName.split('@')[0]! : dirName;
+        const profile = await getProfile(bare);
+        if (!profile) continue;
+        try {
+          const resolved = resolveEndpoint(profile);
+          const effectiveProfile: BrowserProfile = {
+            ...profile,
+            name: dirName,
+            binary: resolved.binary,
+            targetFilter: resolved.targetFilter,
+          };
+          // connectProfile uses pid files when present, else the profile endpoint.
+          conn = await this.connectProfile(effectiveProfile, resolved.target);
+          conn.profileName = dirName;
+          conn.bareName = bare;
+          for (const [k, t] of tasks) {
+            if (!conn.tasks.has(k)) conn.tasks.set(k, t);
+          }
+          this.connections.set(dirName, conn);
+          await this.applyDefaultDownloadBehavior(conn, dirName);
+        } catch {
+          continue;
+        }
+      }
+
+      const task = this.lookupTaskOnConn(conn, taskId) ?? found;
+      // Ensure the rehydrated task is on the connection map.
+      if (!this.lookupTaskOnConn(conn, task.name)) {
+        conn.tasks.set(task.name, task);
+      }
+      return { conn, task, profileName: conn.profileName ?? dirName };
+    }
+    return null;
   }
 
   private async getTabsForTask(cdp: CDPClient, task: Task): Promise<TabInfo[]> {
@@ -2591,7 +3004,21 @@ export class BrowserService {
   }
 
   private async getProfileStatus(profileName: string): Promise<ProfileStatus | null> {
-    const conn = this.connections.get(profileName);
+    // Exact composite key first; bare name falls through connectionKeyMatches.
+    let conn = this.connections.get(profileName);
+    let resolvedKey = profileName;
+    if (!conn) {
+      for (const [key, c] of this.connections) {
+        if (
+          connectionKeyMatchesProfile(key, profileName) ||
+          c.bareName === profileName
+        ) {
+          conn = c;
+          resolvedKey = key;
+          break;
+        }
+      }
+    }
     if (!conn) return null;
 
     // Fetch all targets once for efficiency
@@ -2631,6 +3058,7 @@ export class BrowserService {
       tasks.push({
         id: task.id,
         name: task.name,
+        label: task.label ?? task.name,
         tabCount: Object.keys(task.tabs).length,
         currentTabId: task.currentTabId,
         createdAt: task.createdAt,
@@ -2639,11 +3067,12 @@ export class BrowserService {
       });
     }
 
-    const profile = await getProfile(profileName);
+    const bare = conn.bareName ?? (resolvedKey.includes('@') ? resolvedKey.split('@')[0]! : resolvedKey);
+    const profile = await getProfile(bare);
     const configuredPort = profile ? extractConfiguredPort(profile) : undefined;
 
     return {
-      name: profileName,
+      name: resolvedKey,
       running: true,
       port: conn.port,
       pid: conn.pid,
