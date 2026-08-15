@@ -123,8 +123,9 @@ describe('getResourceInventory (hooks)', () => {
     const inv = runInventory(agent, '1.0.0', { register: true });
 
     expect(inv.wiringSupported).toBe(true);
-    expect(inv.wired.map((r) => r.name)).toEqual(['guard']);
-    expect(inv.wired[0].detail).toBe('PreToolUse');
+    // The built-in session-tracker SessionStart hook registers alongside.
+    expect(inv.wired.map((r) => r.name)).toEqual(['guard', 'session-tracker']);
+    expect(inv.wired.find((r) => r.name === 'guard')?.detail).toBe('PreToolUse');
   });
 
   it('does not report unmanaged Grok hook commands as inventory wiring', () => {
@@ -156,8 +157,9 @@ describe('getResourceInventory (hooks)', () => {
     const inv = runInventory('grok', '1.0.0', { register: true });
 
     expect(inv.wiringSupported).toBe(true);
-    expect(inv.wired).toHaveLength(38);
-    expect(inv.wired.map((r) => r.name)).toEqual([...names].sort());
+    // 38 managed + the built-in session-tracker hook.
+    expect(inv.wired).toHaveLength(39);
+    expect(inv.wired.map((r) => r.name)).toEqual([...names, 'session-tracker'].sort());
   });
 
   it('computes unmanaged as onDisk minus declared', () => {
@@ -181,8 +183,9 @@ describe('getResourceInventory (hooks)', () => {
 
     expect(inv.capable).toBe(true);
     expect(inv.wiringSupported).toBe(true);
-    expect(inv.wired.map((r) => r.name)).toEqual(['demo-guard']);
-    expect(inv.wired[0].detail).toBe('PreToolUse');
+    // The built-in session-tracker SessionStart hook registers alongside.
+    expect(inv.wired.map((r) => r.name)).toEqual(['demo-guard', 'session-tracker']);
+    expect(inv.wired.find((r) => r.name === 'demo-guard')?.detail).toBe('PreToolUse');
     expect(inv.unmanaged).toEqual([]);
   });
 

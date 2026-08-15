@@ -1811,12 +1811,16 @@ function sessionTrackerHookSource(): string | null {
 const materializedBuiltinHooks = new Set<string>();
 
 export function builtinHookManifest(): Record<string, ManifestHook> {
-  const source = sessionTrackerHookSource();
-  if (!source) return {};
-  const target = path.join(builtinHooksDir(), 'session-tracker.sh');
-  const memoKey = `${source}\n${target}`;
-  if (!materializedBuiltinHooks.has(memoKey)) {
-    try {
+  // The whole resolution is guarded: a failure to resolve the shipped source
+  // or materialize the script must never break hook parsing/sync — the
+  // built-in simply stays unregistered until the next attempt. (This also
+  // covers unit tests that mock state.js without the shims-dir getter.)
+  try {
+    const source = sessionTrackerHookSource();
+    if (!source) return {};
+    const target = path.join(builtinHooksDir(), 'session-tracker.sh');
+    const memoKey = `${source}\n${target}`;
+    if (!materializedBuiltinHooks.has(memoKey)) {
       const content = fs.readFileSync(source, 'utf-8');
       let existing: string | null = null;
       try {
@@ -1832,15 +1836,13 @@ export function builtinHookManifest(): Record<string, ManifestHook> {
       }
       ensureExecutable(target);
       materializedBuiltinHooks.add(memoKey);
-    } catch {
-      // Never let a materialization failure break hook parsing/sync — the
-      // built-in simply stays unregistered until the next attempt.
-      return {};
     }
+    return {
+      'session-tracker': { script: target, events: ['SessionStart'], timeout: 5 },
+    };
+  } catch {
+    return {};
   }
-  return {
-    'session-tracker': { script: target, events: ['SessionStart'], timeout: 5 },
-  };
 }
 
 export function parseHookManifest(opts: { warn?: boolean } = {}): Record<string, ManifestHook> {

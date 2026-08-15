@@ -458,7 +458,9 @@ describe('registerHooksToSettings - Codex', () => {
       { trusted_hash?: string; enabled?: boolean }
     >;
 
-    const key = `${hooksJsonPath}:pre_tool_use:0:0`;
+    // Trust keys use the RESOLVED hooks.json path (codex keys [hooks.state] by
+    // the CODEX_HOME it resolves; on macOS the tmpdir itself is a symlink).
+    const key = `${fs.realpathSync(hooksJsonPath)}:pre_tool_use:0:0`;
     expect(state[key]).toBeDefined();
     // The persisted hash must equal what Codex recomputes for this exact hook.
     // The registrar hashes the portable command it wrote into hooks.json, so
@@ -485,7 +487,8 @@ describe('registerHooksToSettings - Codex', () => {
     registerHooksToSettings('codex', versionHome, manifest, agentsDir);
     const configPath = path.join(versionHome, '.codex', 'config.toml');
     const hooksJsonPath = path.join(versionHome, '.codex', 'hooks.json');
-    const key = `${hooksJsonPath}:user_prompt_submit:0:0`;
+    // Resolved path — see the trusted_hash test above.
+    const key = `${fs.realpathSync(hooksJsonPath)}:user_prompt_submit:0:0`;
 
     // User disables the hook from their side.
     const config = TOML.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
