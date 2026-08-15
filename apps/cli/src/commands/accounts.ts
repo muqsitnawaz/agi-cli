@@ -139,7 +139,7 @@ export function registerAccountsCommand(program: Command): void {
     .option('--from-secrets <bundle:key>', 'Import from an existing agents secrets entry')
     .action(async (name: string, o: { fromSecrets?: string }) => {
       const account = findAccount(name);
-      if (!account) throw new Error(`Unknown account '${name}'.`);
+      if (!account) throw new Error(`Unknown provider account '${name}'.`);
       const secret = o.fromSecrets ? secretFromBundle(o.fromSecrets) : await password({ message: `Enter new ${account.provider} ${account.auth} for '${name}':` });
       setAccountSecret(name, secret);
       console.log(chalk.green(`Updated credential for account '${name}'.`));
