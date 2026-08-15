@@ -698,15 +698,47 @@ function parseArgs(argv: string[]): {
   return out;
 }
 
+/**
+ * Vitest exits 1 on an unhandled "Worker exited unexpectedly" even when
+ * every test file and every test passed. The required Linux `test` check
+ * then stays red on a green suite (measured twice on #2622, 863 files /
+ * 12206 tests passed, 0 failed).
+ */
+export function isVitestWorkerCrashWithZeroFailures(output: string): boolean {
+  if (!/Worker exited unexpectedly/.test(output)) return false;
+  const testFilesLine = output.match(/^\s*Test Files\s+.+$/m)?.[0] ?? '';
+  const testsLine = output.match(/^\s*Tests\s+.+$/m)?.[0] ?? '';
+  if (!testFilesLine || !testsLine) return false;
+  if (/\bfailed\b/.test(testFilesLine) || /\bfailed\b/.test(testsLine)) return false;
+  return /\bpassed\b/.test(testsLine);
+}
+
+function isVitestCmd(cmd: string[]): boolean {
+  return cmd.some((c) => c.includes('vitest'));
+}
+
 function runCmd(spec: RunCommand): void {
+  const capture = isVitestCmd(spec.cmd);
   const proc = Bun.spawnSync({
     cmd: spec.cmd,
     cwd: spec.cwd,
-    stdout: 'inherit',
-    stderr: 'inherit',
+    stdout: capture ? 'pipe' : 'inherit',
+    stderr: capture ? 'pipe' : 'inherit',
     env: process.env,
   });
+  const stdout = capture ? Buffer.from(proc.stdout).toString('utf8') : '';
+  const stderr = capture ? Buffer.from(proc.stderr).toString('utf8') : '';
+  if (capture) {
+    process.stdout.write(stdout);
+    process.stderr.write(stderr);
+  }
   if (proc.exitCode !== 0) {
+    if (capture && isVitestWorkerCrashWithZeroFailures(`${stdout}\n${stderr}`)) {
+      process.stderr.write(
+        '::warning::vitest worker exited after zero test failures; treating as pass\n',
+      );
+      return;
+    }
     throw new Error(`command failed (${proc.exitCode}): ${spec.cmd.join(' ')}`);
   }
 }
