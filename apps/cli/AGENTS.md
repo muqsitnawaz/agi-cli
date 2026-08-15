@@ -460,7 +460,7 @@ Antigravity CLI, Grok CLI, OpenCode — features target these six first.
 | Copilot | `copilot` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ≥0.0.353 | — |
 | Amp | `amp` | — | ✓ | — | ✓ | ✓ | — | — | — |
 | Kiro | `kiro` | ≥0.10 | ✓ | ≥2.8 | ✓ | ✓ | — | ≥1.23 | — |
-| Goose | `goose` | ≥1.34 | ✓ | ✓ | ≥1.25 | — | ✓ | — | ✓ |
+| Goose | `goose` | ≥1.34 | ✓ | — | ≥1.25 | — | ✓ | — | ✓ |
 | Droid | `droid` | ✓ | ✓ | ≥0.57.5 | ≥0.26 | ✓ | ✓ | ✓ | — |
 | Hermes | `hermes` | ≥0.11 | ✓ | — | ✓ | — | — | — | — |
 | Muse Code | `muse` | ✓ | ✓ | — | ✓ | — | ✓ | — | — |
@@ -471,7 +471,7 @@ Antigravity CLI, Grok CLI, OpenCode — features target these six first.
 skipped silently). [`src/lib/agents.ts`](src/lib/agents.ts) is canonical — keep this
 snapshot in sync. `workflows` is `claude`/`kimi`/`goose`/`antigravity` (≥1.0.6, written to the
 shared HOME-global `~/.gemini/config/global_workflows/`, not a per-version home), `openclaw` (Lobster `.lobster` files under `.openclaw/workflows/`), and `grok` (≥0.2.111, native Rhai under `.grok/workflows/`); `mcp` is universal; `allowlist` is
-`claude`/`cursor`/`opencode`/`antigravity`/`grok`/`kimi`/`kiro`/`droid`/`goose`/`openclaw`/`copilot` (Copilot writes per-location approvals to `~/.copilot/permissions-config.json`; OpenClaw is tool-level only —
+`claude`/`cursor`/`opencode`/`antigravity`/`grok`/`kimi`/`kiro`/`droid`/`openclaw`/`copilot` (Copilot writes per-location approvals to `~/.copilot/permissions-config.json`; **Goose is deliberately NOT allowlist-capable** — its `permission.yaml` gates whole tools (`developer__shell`, `developer__text_editor`), so a canonical rule set could not be expressed or read back faithfully; OpenClaw is tool-level only —
 blanket rules map to `~/.openclaw/openclaw.json` `tools.alsoAllow`/`tools.deny`, sub-command patterns skipped); `subagents` is `claude`/`codex`/`kiro`/`kimi` (≥0.29.0, Claude-shaped `<name>.md` in `~/.kimi-code/agents/`; older kimi-code compiles its agent profiles into the bundle with no filesystem loader)/`grok`/`openclaw`/`droid`/`copilot`/`antigravity`/`cursor` (≥2026.1.22)/`pi`. **Pi (Oh My Pi, `omp`)** is Claude-compatible: it natively reads `.claude/commands`, `.mcp.json`, and Claude-shaped subagents, and keeps its own native resources under `~/.omp/agent/` (skills, commands, subagents `agents/`, `AGENTS.md` context, `.mcp.json`). `mcp` covers stdio + http + headers. `hooks`/`allowlist`/`plugins` are OFF: omp hooks are per-tool JS/TS extension modules (not event->shell-command registrations), approval is per-TOOL only (`tools.approval`, no command/path patterns), and plugins are npm/TS modules (not the Claude marketplace manifest). Its cross-provider model catalog (OpenRouter/OpenAI/Anthropic/xAI/DeepSeek/…) surfaces in `agents view` / `agents models pi` via `omp models --json`. **Warp Agent CLI (`oz`)** is the coding-agent CLI on Warp's Oz platform (the shared Warp binary invoked via the `oz` symlink). Install is self-updating via `brew install --cask oz` (macOS) / the `oz-stable` apt|yum|pacman package (Linux); config lives under `~/.warp/`, the rules/context file is `AGENTS.md`, and auth is `oz login` (browser OAuth) or a `WARP_API_KEY` token for headless/CI (`oz api-key create`). Headless run is `oz agent run --prompt "<task>" [--model <id>]`; autonomy is governed by the selected agent profile (`--profile`), not a per-run permission flag, so the single `edit` mode maps to no flags (mirrors Hermes). `mcp` covers stdio + http + headers via the Claude `.mcp.json` schema at `~/.warp/.mcp.json` (project `<root>/.warp/.mcp.json`); `skills` come from `--skill` + `oz agent skills`. `hooks`/`allowlist`/`commands`/`plugins`/`subagents`/`workflows`/`memory` are OFF: Oz has no event→shell hook registration, its permissions are profile-based (not a Claude tool allow/deny list), slash-commands are native/server-managed, and cloud agents/profiles are server-side (no installable subagent dir). Warp is intentionally **absent from `SESSION_AGENTS`** — Oz stores conversations server-side (retrieved with auth via `oz run conversation get <id>`), so there is no local transcript for `agents sessions` to index — and it exposes no usage/limits endpoint, so `agents view` shows no usage bar for it.
 **Gemini is hard-deprecated.** Keep the legacy `gemini` id only for parsing old
 sessions/config; `agents add gemini`, `agents import gemini`, and
@@ -494,7 +494,7 @@ src/
     shims.ts           # Shim generation, config symlink switching
     hooks.ts           # hooks.yaml parser + per-agent registrar
     hooks/match.ts     # `matches:` predicate evaluator
-    browser/           # browser daemon service + existing CDP connection pool; ipc.ts owns one-shot and persistent socket clients, stream.ts owns the NDJSON action loop
+    browser/           # browser daemon service + existing CDP connection pool; ipc.ts owns one-shot and persistent socket clients, stream.ts owns the NDJSON action loop; hygiene.ts is the abandoned-task reaper (session-dead + idle, RUSH-2622) the daemon's 5-min tick and `agents browser gc` both call
     monitors/          # `agents monitors` — event-triggered watchers (source→condition→action); native state-diff store; MonitorEngine runs in the daemon beside the cron scheduler. See docs/monitors.md
     projects.ts        # `agents projects` — named multi-repo project defs (~/.agents/projects/*.yaml) layered above the --project convention (resolveProjectRef in project-root.ts); project-status.ts rolls live sessions + merged PRs + artifacts into the progress card. Beta-gated. See docs/projects.md
     project-pull.ts    # `agents projects pull` — fleet fan-out logic: pullProjectTargets (sequential local fast-forward + per-target repo-slug verification), pullLocalArgs/encodePullTargets/decodePullTargets (the {path, expectedSlug} CLI-arg hop to each peer's hidden `pull-local` — bare paths would disable slug verification remotely AND break the fingerprint), buildPullEnvelope/parseProjectPullEnvelope (fail-closed AND fail-loud: a rejected envelope returns valid:false so the peer lands in parseFailed and exits non-zero, never a silent empty result set), printProjectPullSummary. Strict safe contract: dirty trees and non-default branches are blocked; missing checkouts are skipped, never cloned. See docs/projects.md §Pulling every reachable checkout
@@ -527,6 +527,17 @@ ID-shaped selectors go through the indexed fleet resolver, remote cards render o
 their owning peer, and the normalized digest is cached in SQLite against the
 transcript's actual mtime + size. Live status is deliberately outside that durable
 digest and expires after 15 seconds through `session-cache.ts`.
+
+Indexing is lazy — only `discoverSessions` writes the index — so a session THIS
+box just started is "running" in `--active` before it is indexed. The id resolver
+(`computeLocalMetadataMatches` in `sessions.ts`) therefore unions the indexed
+rows with the LIVE registry on a cold id miss, so `preview`/`resume`/`focus`
+resolve a running session with no transcript row yet (the fan-out peer answers
+from the same union, so it works cross-device too — SES-9b). The daemon keeps the
+index current within seconds via `runSessionIndexWarmTick`, and the cold-miss
+repair waits for a concurrent scan rather than returning a stale read
+(`discoverSessions({ waitForScan })` — SES-9c). This is why a running session no
+longer reads "No session matching" during the index-lag window (RUSH-2682).
 
 Routing lives in `src/commands/sessions.ts`: `isBareBrowserListing`
 (+`hasNoBrowserDisqualifyingFlags`) gates the bare fleet-wide listing to the rich

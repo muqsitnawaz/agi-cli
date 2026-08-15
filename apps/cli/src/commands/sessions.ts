@@ -40,6 +40,7 @@ import type { SessionActivity, AwaitingReason } from '../lib/session/state.js';
 import { inferSessionState } from '../lib/session/state.js';
 import { discoverSessions, queryIndexedSessions, countSessionsInScope, resolveSessionById, isCompleteSessionId, looksLikeSessionId, searchContentIndex, parseTimeFilter, getSessionRoots, scopeToManaged, type DiscoverOptions, type ScanProgress } from '../lib/session/discover.js';
 import { findSessionsById, querySessions, getSessionById, readSessionContent, readArchivedSessionPreview } from '../lib/session/db.js';
+import { liveSessionMetas } from '../lib/session/live-metadata.js';
 import {
   filterTeamSessions,
   shouldShowTeamSessions,
@@ -808,13 +809,34 @@ function modelLabel(model?: string): string {
 }
 
 /**
+ * The single project/group key for an active session row (RUSH-2688). It is the
+ * ONE derivation every project-grouped consumer of `--active`/the menubar snapshot
+ * shares, so a session is bucketed the same way everywhere:
+ *
+ *   - A real working dir → its `basename` — the same key SessionMeta derives (see
+ *     discover.ts), so the active view and the history view join identically on
+ *     (ticketId + project).
+ *   - A row with NO local cwd (a cloud task, a provider-run job) → an explicit
+ *     bucket keyed by context: `cloud` for a cloud row, else `other`.
+ *
+ * It never falls back to `kind` (the harness — 'codex', 'claude') or `machine`
+ * (the box it runs on): neither is a project, and letting either stand in for the
+ * key is exactly what leaked a Codex cloud task under a 'codex' group and a bogus
+ * machine label in the menubar. No fallback chain — one explicit bucket.
+ */
+export function activeSessionProjectKey(s: Pick<ActiveSession, 'cwd' | 'context'>): string {
+  if (s.cwd) return path.basename(s.cwd);
+  return s.context === 'cloud' ? 'cloud' : 'other';
+}
+
+/**
  * The row shape `agents sessions --active --json` emits. RUSH-1981: a watcher
  * joins active sessions on ticketId + project, but the raw ActiveSession nests
  * the ticket (`ticket.id`) and carries no `project` at all — so a naive join
  * silently drops every row. Emit both as flat, always-present top-level keys
- * (null when unknown) alongside the raw fields, so every active row is joinable.
- * `project` uses the same derivation SessionMeta does — basename(cwd) (see
- * discover.ts) — so the active view and the history view join identically.
+ * alongside the raw fields, so every active row is joinable. `project` is the
+ * canonical {@link activeSessionProjectKey} — basename(cwd), or an explicit
+ * `cloud`/`other` bucket for a row with no local cwd, never the harness/machine.
  *
  * `viewingIn` flattens to the same display string the row renderer prints —
  * `'codium tab 3'` / `'detached'` / null — so a consumer can tell a watched
@@ -825,14 +847,14 @@ export function serializeActiveSessionsForJson(
   sessions: ActiveSession[],
 ): Array<Omit<ActiveSession, 'viewingIn'> & {
   ticketId: string | null;
-  project: string | null;
+  project: string;
   prLink: string | null;
   viewingIn: string | null;
 }> {
   return sessions.map((s) => ({
     ...s,
     ticketId: s.ticket?.id ?? null,
-    project: s.cwd ? path.basename(s.cwd) : null,
+    project: activeSessionProjectKey(s),
     prLink: s.pr?.url ?? null,
     viewingIn: viewingInLabel(s) ?? null,
   }));
@@ -2342,13 +2364,17 @@ export async function renderSessionPreview(
   scope: { agent?: string; project?: string; local?: boolean; hosts?: string[]; json?: boolean },
 ): Promise<void> {
   let outcome = await resolveSessionMetadataValue(query, scope);
-  // A just-created transcript may not have reached the incremental index yet.
-  // Keep the indexed path hot, but repair a local cold miss once before saying
-  // it does not exist. This also preserves Claude history-alias discovery.
+  // resolveSessionMetadataValue already consults the live registry for a running
+  // session with no transcript row (RUSH-2682), so a live session resolves above.
+  // This block still repairs the residual case — a session whose transcript is on
+  // disk but not yet indexed (e.g. one that just ended). `waitForScan` makes the
+  // repair honest: when another process holds the scan claim it waits for that
+  // scan instead of returning the stale read. Also preserves Claude history-alias
+  // discovery.
   if (outcome.kind !== 'resolved'
     && (!scope.hosts?.length || shouldIncludeLocal(scope.hosts, machineId()))) {
     const discovered = applyScopeFilters(
-      await discoverSessions({ all: true, cwd: process.cwd(), limit: 5000 }),
+      await discoverSessions({ all: true, cwd: process.cwd(), limit: 5000, waitForScan: true }),
       scope,
     );
     const localMatches = resolveSessionQuery(discovered, query, { indexFallback: false }).matches
@@ -5455,18 +5481,78 @@ export function metadataResolveOutcome(
   return { kind: 'resolved', session: candidates[0].hits[0].session };
 }
 
+/** Injectable dependency for the live-registry cold-miss fallback (RUSH-2682). */
+export type LiveMetadataDeps = { loadActive?: typeof loadLocalActiveSessions };
+
+/**
+ * Local metadata candidates for a selector: the indexed SQLite rows, plus — when
+ * an id-shaped selector misses the index entirely — the live-session registry
+ * (RUSH-2682).
+ *
+ * Indexing is lazy (it only runs inside `discoverSessions`), so a session THIS
+ * box just started is "running" in `agents sessions --active` minutes before its
+ * transcript reaches the local index. Every id resolver (`preview`, `resume`,
+ * `focus`, and the fan-out peer that answers `--resolve-safe-v1`) therefore
+ * consults the SAME live registry `--active` reads before declaring a running
+ * session non-existent. It reshapes process state the registry already computed;
+ * it parses no transcript and renders nothing. The live path is entered ONLY on a
+ * cold id miss, so an indexed hit keeps its richer row and keyword resolution is
+ * unchanged.
+ */
+export async function computeLocalMetadataMatches(
+  selector: string,
+  scope: { agent?: string; project?: string; local?: boolean; hosts?: string[] },
+  deps: LiveMetadataDeps = {},
+): Promise<SessionMeta[]> {
+  const localMachine = machineId();
+  const includeLocal = !scope.hosts?.length || shouldIncludeLocal(scope.hosts, localMachine);
+  if (!includeLocal) return [];
+
+  const indexed = resolveIndexedMetadataRows(indexedRowsForSelector(selector, scope), selector);
+  if (indexed.length > 0 || !looksLikeSessionId(selector)) {
+    return indexed.map(session => ({ ...session, machine: session.machine || localMachine }));
+  }
+
+  const live = await liveMetadataMatches(selector, scope, localMachine, deps);
+  return live.map(session => ({ ...session, machine: session.machine || localMachine }));
+}
+
+/**
+ * Resolve an id-shaped selector against the local live-session registry
+ * (RUSH-2682). Reads the daemon-warmed active snapshot first (cheap); if that
+ * snapshot predates a just-started session and misses, it forces ONE fresh
+ * gather before conceding, so a session started seconds ago resolves
+ * synchronously. Never throws — a degraded registry read yields no candidates,
+ * so the caller falls through to the ordinary not-found path.
+ */
+export async function liveMetadataMatches(
+  selector: string,
+  scope: { agent?: string; project?: string },
+  self: string,
+  deps: LiveMetadataDeps = {},
+): Promise<SessionMeta[]> {
+  const load = deps.loadActive ?? loadLocalActiveSessions;
+  const match = (metas: SessionMeta[]): SessionMeta[] =>
+    resolveIndexedMetadataRows(applyScopeFilters(metas, scope), selector);
+  try {
+    const cached = liveSessionMetas((await load()).sessions, self, Date.now());
+    const hit = match(cached);
+    if (hit.length > 0) return hit;
+    const fresh = liveSessionMetas((await load({ forceRefresh: true })).sessions, self, Date.now());
+    return match(fresh);
+  } catch {
+    return [];
+  }
+}
+
 /** Reusable local-first resolver for `agents run --resume` and `agents resume`.
  * Full UUIDs hit the local SQLite index without any SSH fan-out. */
 export async function resolveSessionMetadataValue(
   selector: string,
   scope: { agent?: string; project?: string; local?: boolean; hosts?: string[] } = {},
-  deps: Pick<FleetResolveDeps, 'gatherRemoteList'> = { gatherRemoteList },
+  deps: Pick<FleetResolveDeps, 'gatherRemoteList'> & LiveMetadataDeps = { gatherRemoteList },
 ): Promise<MetadataResolveOutcome> {
-  const localMachine = machineId();
-  const includeLocal = !scope.hosts?.length || shouldIncludeLocal(scope.hosts, localMachine);
-  const indexed = includeLocal ? indexedRowsForSelector(selector, scope) : [];
-  const localMatches = resolveIndexedMetadataRows(indexed, selector)
-    .map(session => ({ ...session, machine: session.machine || localMachine }));
+  const localMatches = await computeLocalMetadataMatches(selector, scope, deps);
 
   // A full-UUID local hit resolves with ZERO SSH: a UUID is globally unique, so
   // finding it locally is the whole answer and no peer is dialed. (A label is
@@ -5509,13 +5595,13 @@ export async function resolveSessionMetadataValue(
 export async function resolveSessionMetadata(
   selector: string,
   scope: { agent?: string; project?: string; local?: boolean; hosts?: string[] },
-  deps: Pick<FleetResolveDeps, 'gatherRemoteList'> = { gatherRemoteList },
+  deps: Pick<FleetResolveDeps, 'gatherRemoteList'> & LiveMetadataDeps = { gatherRemoteList },
 ): Promise<void> {
-  const localMachine = machineId();
-  const includeLocal = !scope.hosts?.length || shouldIncludeLocal(scope.hosts, localMachine);
-  const indexed = includeLocal ? indexedRowsForSelector(selector, scope) : [];
-  const localMatches = resolveIndexedMetadataRows(indexed, selector)
-    .map(session => ({ ...session, machine: session.machine || localMachine }));
+  // Same local candidate set as resolveSessionMetadataValue, so the peer
+  // answering a fan-out (`--resolve-safe-v1`, NO_FANOUT) surfaces a running
+  // session its own index has not caught yet — the cross-device half of the
+  // RUSH-2682 fix, since the parent's fan-out reads this box's answer.
+  const localMatches = await computeLocalMetadataMatches(selector, scope, deps);
 
   // A peer is already inside gatherRemoteList. Return all local candidates so
   // the parent can distinguish a fleet-wide unique match from an ambiguity.

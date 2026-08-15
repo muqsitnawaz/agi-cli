@@ -24,14 +24,15 @@ import { notifyRoutineStart, notifyRoutineFinish, notifyRoutineStartFailed } fro
 import { notifyOwnerRoutineFinish, notifyOwnerRoutineStartFailed } from './routine-notify-owner.js';
 import { BrowserService } from './browser/service.js';
 import { BrowserIPCServer, getSocketPath as getBrowserIpcSocketPath } from './browser/ipc.js';
+import { startHostedWebhookReceivers, type HostedWebhookReceivers } from './daemon-webhooks.js';
 import { secretsBrokerSocketPath, brokerPidAlive } from './secrets/agent.js';
 import { redactSecrets } from './redact.js';
 import { getAgentsBinPath, getCliLaunch, BUN_VIRTUAL_ROOT } from './cli-entry.js';
-import { isSchedulerEnabled, assertSchedulerEnabled, isDaemonEnabled, getConfigValue } from './device-config.js';
+import { isSchedulerEnabled, assertSchedulerEnabled, isDaemonEnabled, getConfigValue, resolveBrowserTaskIdleMs } from './device-config.js';
 import { reapTerminalRoutineProcesses } from './routine-process-cleanup.js';
 import { recordSubsystemOk, recordSubsystemError, recordSubsystemErrorReason, readSubsystemHealth, SUBSYSTEM_SECRETS_BROKER, SUBSYSTEM_BROWSER_IPC, SUBSYSTEM_DAEMON_START } from './daemon-health.js';
 import { startAccountStateService } from './account-state-service.js';
-import { runActiveSessionsWarmTick, runFleetCacheWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
+import { runActiveSessionsWarmTick, runFleetCacheWarmTick, runSessionIndexWarmTick, runUsageRefreshTick } from './daemon-ticks.js';
 import { emit, emitRoutineEnd } from './events.js';
 import { readDaemonServicesConfig, isDaemonServiceEnabled, type DaemonServiceId } from './daemon-services.js';
 
@@ -76,6 +77,8 @@ const BROKER_SELF_HEAL_TICK_MS = 60_000;
 const KEYCHAIN_REAP_TICK_MS = 5 * 60_000;
 // RUSH-2501: reap tmux sessions whose panes are all dead every 5 minutes.
 const DEAD_PANE_REAP_TICK_MS = 5 * 60_000;
+// RUSH-2622: close abandoned browser-task tabs every 5 minutes.
+const BROWSER_TASK_REAP_TICK_MS = 5 * 60_000;
 const STATE_DIR_CHECK_TICK_MS = 60_000;
 // Watchdog nudges this host's own stalled sessions; device-probe refreshes
 // registered devices' reachability and surfaces newly appeared tailnet nodes.
@@ -87,6 +90,10 @@ const DEVICE_PROBE_TICK_MS = 3 * 60_000;
 // Matches DEFAULT_ACTIVE_CACHE_MAX_AGE_MS (15s) so long-lived watchers never
 // outlive the publisher (RUSH-2484 — CLI-owned continuous publish).
 const ACTIVE_SESSIONS_WARM_TICK_MS = 15_000;
+// Incrementally scan this host's transcript dirs into the local index so a
+// locally-started session is indexed within seconds, not on the next unrelated
+// `agents sessions*` call (RUSH-2682 — indexing was lazy, nothing scheduled it).
+const SESSION_INDEX_WARM_TICK_MS = 20_000;
 const WEDGE_THRESHOLD_TICKS = 3;
 
 /**
@@ -674,6 +681,7 @@ export function warnEphemeralDaemonRoot(resolveBin: () => string = getAgentsBinP
 let healing = false;
 let reapingKeychain = false;
 let reapingDeadPanes = false;
+let reapingBrowserTasks = false;
 
 /**
  * Resource self-heal: fill missing resources, repair invalid manifests, and
@@ -754,6 +762,32 @@ async function runDeadPaneReap(): Promise<void> {
     log('ERROR', `Dead-pane reaper failed: ${(err as Error).message}`);
   } finally {
     reapingDeadPanes = false;
+  }
+}
+
+/**
+ * RUSH-2622: close abandoned browser-task tabs — a task whose owning agent
+ * session has exited, or one idle past `browser.task-idle-minutes` (default 30,
+ * 0 disables idle reaping only). Same policy `agents browser gc` triggers on
+ * demand; this is the periodic side, and the daemon is the single executor so
+ * no UI surface can race it. `service` is the daemon's own long-lived
+ * BrowserService — the browser IPC server it started earlier in `runDaemon()`.
+ *
+ * Runs every BROWSER_TASK_REAP_TICK_MS (5 min).
+ */
+async function runBrowserTaskReap(service: BrowserService): Promise<void> {
+  if (reapingBrowserTasks) return;
+  reapingBrowserTasks = true;
+  try {
+    const result = await service.reapAbandoned({ idleMs: resolveBrowserTaskIdleMs() });
+    if (result.closed.length > 0) {
+      log('INFO', `Browser-task reaper: closed ${result.closed.length} task(s)`);
+      for (const c of result.closed) log('INFO', `  ${c.task} (${c.reason}, profile ${c.profile})`);
+    }
+  } catch (err) {
+    log('ERROR', `Browser-task reaper failed: ${(err as Error).message}`);
+  } finally {
+    reapingBrowserTasks = false;
   }
 }
 
@@ -1031,6 +1065,25 @@ export async function runDaemon(): Promise<void> {
   void runActiveSessionsWarm();
   const activeSessionsWarmInterval = setInterval(() => { void runActiveSessionsWarm(); }, ACTIVE_SESSIONS_WARM_TICK_MS);
 
+  // Session-index warm (RUSH-2682): keep THIS host's transcript index current so
+  // a locally-started session is discoverable within seconds. Incremental +
+  // single-flight (the DB scan claim), overlap-guarded so a slow scan never
+  // stacks on the next tick.
+  let sessionIndexWarmInFlight = false;
+  const runSessionIndexWarm = async (): Promise<void> => {
+    if (sessionIndexWarmInFlight) return;
+    sessionIndexWarmInFlight = true;
+    try {
+      await runSessionIndexWarmTick();
+    } catch (err) {
+      log('WARN', `session-index warm failed: ${(err as Error).message}`);
+    } finally {
+      sessionIndexWarmInFlight = false;
+    }
+  };
+  void runSessionIndexWarm();
+  const sessionIndexWarmInterval = setInterval(() => { void runSessionIndexWarm(); }, SESSION_INDEX_WARM_TICK_MS);
+
   // Watchdog: nudge this host's own stalled agent sessions. Gated on the
   // `watchdog.enabled` device-config flag (`agents watchdog enable`), so the
   // timer always fires but only does work when the user opted in. Overlap-safe
@@ -1224,6 +1277,27 @@ export async function runDaemon(): Promise<void> {
     log('INFO', 'Browser IPC service disabled');
   }
 
+  // 5th hosted service: signed webhook receiver(s) + their funnel (RUSH-2548).
+  // Started after the broker (above) so it resolves each receiver's signing
+  // secret headlessly — no AGENTS_SECRETS_PASSPHRASE, no nohup. Binds nothing
+  // unless daemon/webhooks.yaml declares a receiver, so an unconfigured box no-ops.
+  let webhookReceivers: HostedWebhookReceivers | null = null;
+  if (isEnabled('webhook-receiver')) {
+    try {
+      webhookReceivers = await startHostedWebhookReceivers({ log });
+      log(
+        'INFO',
+        webhookReceivers.count > 0
+          ? `Webhook receiver hosting ${webhookReceivers.count} receiver(s)`
+          : 'Webhook receiver service enabled; no receivers declared in daemon/webhooks.yaml',
+      );
+    } catch (err) {
+      log('WARN', `Webhook receiver host skipped: ${(err as Error).message}`);
+    }
+  } else {
+    log('INFO', 'Webhook receiver service disabled');
+  }
+
   runMonitorTick();
   const monitorInterval = setInterval(runMonitorTick, MONITOR_TICK_MS);
 
@@ -1286,6 +1360,16 @@ export async function runDaemon(): Promise<void> {
   // 5-min cadence as the keychain reaper. Daemon-only (single executor).
   void runDeadPaneReap(); // kick-off on startup so the backlog clears immediately
   const deadPaneReapInterval = setInterval(() => { void runDeadPaneReap(); }, DEAD_PANE_REAP_TICK_MS);
+
+  // RUSH-2622: close abandoned browser-task tabs on the same 5-min cadence,
+  // reusing the daemon's own long-lived BrowserService instead of a second
+  // one. Only when browser IPC is actually up — there is no service to reap
+  // through otherwise.
+  let browserTaskReapInterval: NodeJS.Timeout | undefined;
+  if (browserService) {
+    void runBrowserTaskReap(browserService); // kick-off on startup
+    browserTaskReapInterval = setInterval(() => { void runBrowserTaskReap(browserService); }, BROWSER_TASK_REAP_TICK_MS);
+  }
 
   // RUSH-2367: self-terminate if this daemon's own state dir has been removed
   // out from under it — the shape of a leaked test-fixture daemon whose /tmp
@@ -1415,17 +1499,20 @@ export async function runDaemon(): Promise<void> {
     log('INFO', 'Daemon shutting down');
     accountStateService?.stop();
     clearInterval(activeSessionsWarmInterval);
+    clearInterval(sessionIndexWarmInterval);
     if (watchdogInterval) clearInterval(watchdogInterval);
     if (deviceProbeInterval) clearInterval(deviceProbeInterval);
     stopScheduler();
     monitorEngine?.stop();
     await browserIPC?.stop();
+    await webhookReceivers?.close();
     clearInterval(monitorInterval);
     if (healInterval) clearInterval(healInterval);
     if (healKickoff) clearTimeout(healKickoff);
     if (brokerSelfHealInterval) clearInterval(brokerSelfHealInterval);
     if (keychainReapInterval) clearInterval(keychainReapInterval);
     clearInterval(deadPaneReapInterval);
+    if (browserTaskReapInterval) clearInterval(browserTaskReapInterval);
     if (stateDirCheckInterval) clearInterval(stateDirCheckInterval);
     try {
       if (fs.readFileSync(lifetimePath, 'utf-8') === lifetimeToken) fs.unlinkSync(lifetimePath);
@@ -1479,12 +1566,29 @@ export function writeOwnerOnlyServiceManifest(filePath: string, content: string)
  * credential at all. Routine runs authenticate through the per-account
  * CLAUDE_CONFIG_DIR login on this device, exactly like an interactive
  * `agents run`, so no credential ever touches the service manifest.
+ *
+ * RUSH-2639: launchd does NOT inherit `launchctl load`'s caller's process
+ * environment — a spawned daemon only ever sees the login session's default
+ * env plus whatever this dict adds/overrides. Before this fix the dict carried
+ * only PATH, so HOME resolved to the launchd session's own value regardless of
+ * what HOME the process that generated (and loaded) the plist was running
+ * under. In production that's a no-op (the login session's HOME already is the
+ * real HOME), but under a hermetic test harness that redirects HOME to a
+ * fork-private sandbox, a launchd-started daemon silently escaped the sandbox
+ * and bootstrapped `~/.agents` (.cache/.history/.system/routines) in the
+ * developer's/runner's REAL home. Baking HOME (and the AGENTS_REAL_HOME seam
+ * every version-home consumer honors, see tests/setup.ts) into the plist at
+ * generation time makes the launchd child inherit the SAME home the caller
+ * resolved, exactly like the plain detached-spawn path already does via
+ * `env: {...process.env}`.
  */
 export function generateLaunchdPlist(
   agentsBin: string = getAgentsBinPath(),
 ): string {
   const launch = getDaemonLaunch(agentsBin);
   const logPath = getDaemonLogPath();
+  const home = process.env.HOME || os.homedir();
+  const realHome = process.env.AGENTS_REAL_HOME || home;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1510,6 +1614,10 @@ ${[launch.command, ...launch.args].map((arg) => `    <string>${xmlEscape(arg)}</
   <dict>
     <key>PATH</key>
     <string>${daemonPathValue(agentsBin, ['/usr/local/bin', '/usr/bin', '/bin', '/opt/homebrew/bin', `${os.homedir()}/.bun/bin`])}</string>
+    <key>HOME</key>
+    <string>${xmlEscape(home)}</string>
+    <key>AGENTS_REAL_HOME</key>
+    <string>${xmlEscape(realHome)}</string>
   </dict>
 </dict>
 </plist>`;
@@ -1527,12 +1635,21 @@ function systemdExecArg(value: string): string {
  * credential at all. Routine runs authenticate through the per-account
  * CLAUDE_CONFIG_DIR login on this device, exactly like an interactive
  * `agents run`, so no credential ever touches the unit file.
+ *
+ * RUSH-2639: same seam as `generateLaunchdPlist` — a systemd --user unit is
+ * started by the user's systemd instance, not the process that generated the
+ * unit, so HOME is whatever that session provides unless this file pins it.
+ * Baking HOME (and AGENTS_REAL_HOME) in at generation time keeps a
+ * hermetic-test-started unit inside its sandbox instead of resolving against
+ * the real account home.
  */
 export function generateSystemdUnit(
   agentsBin: string = getAgentsBinPath(),
 ): string {
   const launch = getDaemonLaunch(agentsBin);
   const execStart = [launch.command, ...launch.args].map(systemdExecArg).join(' ');
+  const home = process.env.HOME || os.homedir();
+  const realHome = process.env.AGENTS_REAL_HOME || home;
 
   return `[Unit]
 Description=Agents Daemon - Scheduled Job Runner
@@ -1546,6 +1663,8 @@ ExecStart=${execStart}
 Restart=always
 RestartSec=${DAEMON_THROTTLE_SECONDS}
 Environment=PATH=${daemonPathValue(agentsBin, ['/usr/local/bin', '/usr/bin', '/bin'])}
+Environment=HOME=${home}
+Environment=AGENTS_REAL_HOME=${realHome}
 
 [Install]
 WantedBy=default.target`;

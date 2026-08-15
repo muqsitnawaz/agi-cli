@@ -200,6 +200,14 @@ password from a Keychain bundle via an askpass shim. `agents devices render --wr
 emits a `~/.ssh/config.d/agents` include so plain `ssh`/`scp`/`rsync` resolve the
 same logical names.
 
+Approval is portable even though connection metadata is not. Registering or
+ignoring a device records `approved` or `ignored` under `fleet.discovery` in
+the central `~/.agents/agents.yaml`; no entry means the device is still pending.
+`agents repo push user` carries those decisions, and `agents repo pull user`
+reconciles them into each machine's local registry and ignore-list. Approved
+devices resolve their address live from Tailscale; addresses, SSH auth, and
+reachability never enter Git.
+
 **Per-device and fleet-wide settings** live in the central agents.yaml. ONE
 command owns them: `agents devices config <name> [key] [value] [--unset]
 [--json]` — bare opens an interactive settings menu on a TTY (and prints the
@@ -212,7 +220,8 @@ them**. The ones a PEER reads (`agents.max-concurrent`, `watchdog.enabled`,
 can configure any device and the settings sync + back up with the repo (a
 `fleet.devices: all` declaration upgrades to an explicit roster map on the
 first config write). The ones only the OWNING box reads (`scheduler.enabled`,
-`daemon.enabled`, `tmux.enabled`, `browser.remote-control`, `browser.profile`)
+`daemon.enabled`, `tmux.enabled`, `browser.remote-control`,
+`browser.task-idle-minutes`, `browser.profile`)
 stay in that machine's own doc, never sync, and are refused for a peer —
 `browser.remote-control` is a consent flag, and a broken tmux or a paused
 daemon is one machine's state, not fleet policy. The device
@@ -361,7 +370,7 @@ of truth: [`src/lib/placement.ts`](../src/lib/placement.ts).
 | Copilot | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
 | Amp | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
 | Kiro | no | yes | >= 2.8.0 | yes | yes | no | >= 1.23.0 | `AGENTS.md` | no |
-| Goose | >= 1.34.0 | yes | yes | >= 1.25.0 | yes | yes | yes | `AGENTS.md` | yes |
+| Goose | >= 1.34.0 | yes | no | >= 1.25.0 | yes | yes | yes | `AGENTS.md` | yes |
 | Roo Code | no | yes | no | yes | yes | no | no | `AGENTS.md` | no |
 | Antigravity | yes | yes | yes | yes | yes | yes | >= 1.0.16 | `AGENTS.md` | >= 1.0.6 |
 | Grok | yes | yes | yes | yes | skills ($name) | yes | no | `AGENTS.md` | >= 0.2.111 |
@@ -399,7 +408,7 @@ tiers on June 18, 2026 (announced at Google I/O 2026); Antigravity CLI
 for old sessions/config, and blocks `agents add gemini`, `agents import gemini`,
 and `agents sync gemini`.
 
-Permissions sync is gated on the `allowlist` capability (Claude, Codex >= 0.138.0, Cursor, OpenCode >= 1.1.1, Antigravity, Grok, Kimi, Kiro 2.8.0+, Goose, Droid >= 0.57.5, OpenClaw, Copilot, and Hermes). Workflow sync writes Claude workflow bundles, Kimi `type: flow` skills with an `agents_workflow` ownership marker, Goose recipe YAML, Antigravity workflow markdown (since 1.0.6), and OpenClaw Lobster `.lobster` files under `.openclaw/workflows/` with an `AGENTS_CLI_WORKFLOW` ownership marker. Antigravity workflows are the one non-version-isolated target: `agy` scans a single shared `~/.gemini/config/global_workflows/` at startup (a real HOME directory, never symlinked per version), so agents-cli writes there once for all installed antigravity versions and reads it back the same way — the `agents_workflow` marker guards user-authored files from being overwritten or removed. **Host CLIs** (`agents clis`) are agent-agnostic PATH binaries — not in this matrix. Install paths call `supports(agent, cap, version)` before writing; gated capabilities skip with a clear reason instead of silently ignored config.
+Permissions sync is gated on the `allowlist` capability (Claude, Codex >= 0.138.0, Cursor, OpenCode >= 1.1.1, Antigravity, Grok, Kimi, Kiro 2.8.0+, Droid >= 0.57.5, OpenClaw, Copilot, and Hermes). Goose is deliberately excluded: its `permission.yaml` gates whole tools (`developer__shell`, `developer__text_editor`), so distinct canonical rules collapse onto one entry and cannot be read back faithfully. Workflow sync writes Claude workflow bundles, Kimi `type: flow` skills with an `agents_workflow` ownership marker, Goose recipe YAML, Antigravity workflow markdown (since 1.0.6), and OpenClaw Lobster `.lobster` files under `.openclaw/workflows/` with an `AGENTS_CLI_WORKFLOW` ownership marker. Antigravity workflows are the one non-version-isolated target: `agy` scans a single shared `~/.gemini/config/global_workflows/` at startup (a real HOME directory, never symlinked per version), so agents-cli writes there once for all installed antigravity versions and reads it back the same way — the `agents_workflow` marker guards user-authored files from being overwritten or removed. **Host CLIs** (`agents clis`) are agent-agnostic PATH binaries — not in this matrix. Install paths call `supports(agent, cap, version)` before writing; gated capabilities skip with a clear reason instead of silently ignored config.
 
 OpenClaw gates at tool granularity only, so permission sync maps just **blanket** (whole-tool) rules to `~/.openclaw/openclaw.json` `tools.alsoAllow` (allow) / `tools.deny` (deny): `bash → exec`, `read → read`, `write`/`edit → write`, `webfetch → web_fetch`, `websearch → web_search`. Sub-command/path/domain rules (`Bash(git:*)`, `Write(secrets/**)`, `WebFetch(domain:x)`) have no tool-level equivalent and are skipped. The absolute `tools.allow` list is never touched.
 
