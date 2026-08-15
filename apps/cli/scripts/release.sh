@@ -952,7 +952,7 @@ if $PHNX_TARGET_PUBLISHED; then
 fi
 
 # ----- Exact-tree attestation (ordinary release proof) -----
-# Bound to 90s so the whole ordinary release stays inside the 180s P99.
+# Bound to 90 seconds so the whole ordinary release stays inside the 180s P99.
 # --skip-tests does not skip this: there is no fallback rebuild or parent-commit
 # evidence. Sign/notarize is not invoked here.
 attestation_store_dir() {
