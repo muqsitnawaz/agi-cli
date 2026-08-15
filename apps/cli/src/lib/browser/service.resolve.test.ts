@@ -235,20 +235,12 @@ describe('status — bare profile name', () => {
   });
 });
 
-describe('findTask rehydrate from tasks.json', () => {
-  it('reconnects a task that lives only on disk after a RAM miss', async () => {
+describe('disk task state + identity', () => {
+  it('loadTaskState preserves sessionId so identity match works after rehydrate', async () => {
     writeProfile('work');
     const runtimeKey = 'work@endpoint-0';
     const runtimeDir = path.join(TEST_BROWSER_DIR, runtimeKey);
     fs.mkdirSync(runtimeDir, { recursive: true });
-    // Alive pid = this test process so isProcessAlive succeeds without a command check.
-    fs.writeFileSync(path.join(runtimeDir, 'pid'), String(process.pid));
-    fs.writeFileSync(path.join(runtimeDir, 'port'), '9333');
-    fs.writeFileSync(path.join(runtimeDir, 'command'), path.basename(process.execPath));
-    fs.writeFileSync(
-      path.join(runtimeDir, 'meta.json'),
-      JSON.stringify({ pid: process.pid, port: 9333, command: path.basename(process.execPath) }),
-    );
     const taskName = 'rehydrate-me';
     fs.writeFileSync(
       path.join(runtimeDir, 'tasks.json'),
@@ -256,26 +248,47 @@ describe('findTask rehydrate from tasks.json', () => {
         [taskName]: {
           id: 'rh01',
           name: taskName,
-          label: 'untitled',
+          label: 'example.com',
           profile: runtimeKey,
           tabs: { tab1: 'cdp-target-1' },
           currentTabId: 'tab1',
           createdAt: Date.now(),
           lastActionAt: Date.now(),
-          pid: process.pid,
+          pid: 0,
           sessionId: 'sess-rh',
+          launchId: 'launch-rh',
         },
       }),
     );
 
     const service = new BrowserService();
-    // No in-memory connections — pure disk rehydrate path.
-    // connectProfile will try CDP; stub by pre-seeding is hard. Instead exercise
-    // load + lookup via status reconcile which reads tasks.json without CDP.
-    const statuses = await service.status('work');
-    // reconcileFromDisk should surface the on-disk task even without a live CDP conn
-    // when getRunningChromeInfo reports the pid alive.
-    const names = statuses.flatMap((p) => p.tasks.map((t) => t.name));
-    expect(names).toContain(taskName);
+    // Simulate post-rehydrate: connection holds the tasks that were on disk.
+    const loaded = (
+      service as unknown as { loadTaskState: (n: string) => Map<string, Record<string, unknown>> }
+    ).loadTaskState(runtimeKey);
+    expect(loaded.get(taskName)?.sessionId).toBe('sess-rh');
+
+    stubConn(
+      service,
+      runtimeKey,
+      [
+        {
+          id: 'rh01',
+          name: taskName,
+          label: 'example.com',
+          sessionId: 'sess-rh',
+          launchId: 'launch-rh',
+          tabs: { tab1: 'cdp-1' },
+        },
+      ],
+      'work',
+    );
+
+    const resolved = await service.resolveOrCreateTask({
+      sessionId: 'sess-rh',
+      createIfMissing: false,
+    });
+    expect(resolved?.task.name).toBe(taskName);
+    expect(resolved?.created).toBe(false);
   });
 });
