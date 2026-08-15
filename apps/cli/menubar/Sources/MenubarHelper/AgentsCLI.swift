@@ -63,6 +63,13 @@ enum AgentsCLI {
         return kill(pid_t(pid), 0) == 0 ? pid : nil
     }
 
+    static func daemonLiveness() -> DaemonLiveness {
+        let pid = daemonPid()
+        let path = "\(home)/.agents/.cache/helpers/daemon/heartbeat.json"
+        let heartbeat = FileManager.default.contents(atPath: path)
+        return DaemonLiveness.classify(pid: pid, heartbeatData: heartbeat)
+    }
+
     // Routines are secondary and fetched only when the menu opens. This shells
     // the CLI, but `routines list` does NOT trigger the sessions re-index — it
     // only computes cron next-run, which is cheap. Session data never comes from
@@ -174,6 +181,7 @@ enum AgentsCLI {
 
     static func startScheduler() { runDetached(argv(["routines", "start"])) }
     static func stopDaemon() { runDetached(argv(["routines", "stop"])) }
+    static func restartDaemon() { runDetached(argv(["daemon", "restart"])) }
 
     // NEW DEVICES actions. `register` adds the pending node to the registry;
     // `ignore` dismisses it for good. Both clear the pending sentinel CLI-side,
