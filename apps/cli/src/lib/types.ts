@@ -1045,7 +1045,19 @@ export interface Meta {
    */
   deviceRoutines?: string[];
   /**
-   * Agent-host registry keyed by host name (the `--host`/`--device` dispatch overlay). Portable user
+   * Machine-local operator config — the device-scope keys whose `visibility` is
+   * `machine` (see lib/device-config.ts). state.ts writes it as `config:` inside
+   * `~/.agents/devices/<machine>/agents.yaml`, which is gitignored, so it never
+   * reaches the fleet-shared agents.yaml.
+   *
+   * These are the keys nothing off-box reads. Keeping them out of the shared file
+   * is both a churn fix (13 machines were writing one tracked path) and a
+   * security one: `browser.remote-control` gates whether OTHER machines may drive
+   * this box's browser, so syncing one box's opt-in to the rest was wrong.
+   */
+  deviceConfig?: Record<string, unknown>;
+  /**
+   * Agent-host registry keyed by host name (the `--device` dispatch overlay). Portable user
    * config synced with `agents repo push/pull`. For `ssh-config` hosts this is
    * just an overlay (caps/os) — the connection details stay in ~/.ssh/config and
    * are never copied. `inline` hosts carry their own address/user.

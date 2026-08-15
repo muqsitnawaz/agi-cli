@@ -954,6 +954,7 @@ const META_KEY_SCOPE: Record<keyof Meta, 'central' | 'device'> = {
   isolatedAgents: 'device',
   versions: 'device',
   deviceRoutines: 'device',
+  deviceConfig: 'device',
   deviceBrowser: 'device',
   // Central — synced via agents.yaml.
   accounts: 'central',
@@ -1055,7 +1056,7 @@ function serializeCentral(central: Record<string, unknown>): string {
 }
 
 function writeMetaUnlocked(meta: Meta): void {
-  const { agents, isolatedAgents, versions, deviceRoutines, deviceBrowser, projectRoot, ...central } = meta;
+  const { agents, isolatedAgents, versions, deviceRoutines, deviceConfig, deviceBrowser, projectRoot, ...central } = meta;
 
   // Write the machine-local files FIRST, then strip central — so a crash mid-write
   // never removes pins/versions from central before they're persisted elsewhere.
@@ -1104,6 +1105,9 @@ function writeMetaUnlocked(meta: Meta): void {
   delete doc.isolatedAgents;
   if (Array.isArray(deviceRoutines)) doc.routines = deviceRoutines;
   else delete doc.routines;
+  const hasDeviceConfig = !!deviceConfig && Object.keys(deviceConfig).length > 0;
+  if (hasDeviceConfig) doc.config = deviceConfig;
+  else delete doc.config;
   const hasDeviceBrowser = !!deviceBrowser && Object.keys(deviceBrowser).length > 0;
   if (hasDeviceBrowser) doc.browser = deviceBrowser;
   else delete doc.browser;
@@ -1170,6 +1174,9 @@ function overlayMachineLocal(meta: Meta): Meta {
       if (typeof dm?.projectRoot === 'string') meta.projectRoot = dm.projectRoot;
       if (dm?.browser && typeof dm.browser === 'object' && !Array.isArray(dm.browser)) {
         meta.deviceBrowser = { ...meta.deviceBrowser, ...(dm.browser as Record<string, never>) };
+      }
+      if (dm?.config && typeof dm.config === 'object' && !Array.isArray(dm.config)) {
+        meta.deviceConfig = { ...meta.deviceConfig, ...(dm.config as Record<string, unknown>) };
       }
       if (Object.prototype.hasOwnProperty.call(dm, 'routines')) {
         if (!Array.isArray(dm.routines) || dm.routines.some((name) => typeof name !== 'string')) {
