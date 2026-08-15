@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
         --confirm)     CONFIRM=1; shift ;;
         --skip-build)  SKIP_BUILD=1; shift ;;
         --skip-tests)  SKIP_TESTS=1; shift ;;
-        --device|--host)
+        --device)
             PUBLISH_HOST="${2:-}"
             if [ -z "$PUBLISH_HOST" ]; then echo "Error: --device requires a device name" >&2; exit 1; fi
             shift 2
