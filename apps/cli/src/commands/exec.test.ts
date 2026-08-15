@@ -528,3 +528,40 @@ describe.skipIf(process.platform === 'win32')('agents run — harness not instal
     }
   });
 });
+
+/**
+ * RUSH-2527 — `--copy-creds` must refuse immediately with exit 1.
+ *
+ * The flag was a credential-copy feature; it is now a deprecated refusal. Any
+ * invocation that passes --copy-creds must print a clear error and exit 1
+ * without launching an agent or copying anything.
+ */
+describe.skipIf(process.platform === 'win32')('--copy-creds refusal (RUSH-2527)', () => {
+  const bunBin = () => execFileSync('sh', ['-c', 'command -v bun'], { encoding: 'utf-8' }).trim();
+  const appRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+
+  it('exits 1 and prints the refusal message — no agent launched', () => {
+    // --copy-creds is only evaluated when a --host target is given (it was a
+    // host-transfer feature). Pass --host with a dummy device name; the refusal
+    // must fire before any SSH or agent launch attempt.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-creds-'));
+    try {
+      fs.mkdirSync(path.join(root, '.agents', '.system', '.git'), { recursive: true });
+      fs.writeFileSync(path.join(root, '.agents', 'agents.yaml'), 'agents: {}\n');
+      const result = spawnSync(
+        bunBin(),
+        [path.join(appRoot, 'src', 'index.ts'), 'run', 'claude', '--host', 'dummy-device', '--copy-creds', '--mode', 'plan', 'probe'],
+        {
+          cwd: appRoot,
+          env: { ...process.env, HOME: root },
+          encoding: 'utf8',
+        },
+      );
+      expect(result.status).toBe(1);
+      expect(`${result.stdout}${result.stderr}`).toContain('Refusing --copy-creds');
+      expect(`${result.stdout}${result.stderr}`).toContain('agents accounts sync');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

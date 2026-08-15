@@ -1636,6 +1636,14 @@ export function registerRunCommand(program: Command): void {
           for (const msg of hostRejects) console.error(chalk.red(msg));
           process.exit(1);
         }
+        if (options.copyCreds) {
+          console.error(chalk.red(
+            'Refusing --copy-creds: native OAuth/session credentials are device-local and cannot be copied. ' +
+            'Create a portable provider account and run `agents accounts sync <account> <device>` instead.',
+          ));
+          process.exit(1);
+          return;
+        }
         // Shared resolution (name → capability tag → error). A password-auth
         // device throws DeviceOffloadUnsupportedError inside the helper and
         // propagates untouched — it's printed cleanly by the top-level catch in
@@ -1695,14 +1703,6 @@ export function registerRunCommand(program: Command): void {
           const resumeId = typeof options.resume === 'string' ? options.resume : undefined;
 
           let hostCopyCreds: undefined;
-          if (options.copyCreds) {
-            console.error(chalk.red(
-              'Refusing --copy-creds: native OAuth/session credentials are device-local and cannot be copied. ' +
-              'Create a portable provider account and run `agents accounts sync <account> <device>` instead.',
-            ));
-            process.exit(1);
-            return;
-          }
 
           // Decide whether this host run is interactive. No prompt always means
           // interactive (matching local resolveInteractive); --interactive forces
