@@ -545,7 +545,7 @@ auth:
   keychainItem: agents-cli.ollama.token
 ```
 
-Profile YAML has no secrets -- safe to `agents repo push` to a shared repo. `agents profiles presets` lists the full catalog.
+Profile YAML has no secrets -- safe to `agents repo push` to a shared repo. `agents harness list` lists the full catalog.
 
 ---
 
@@ -1262,7 +1262,7 @@ Two repos with the same shape, different roles:
 
 See [docs/concepts.md](apps/cli/docs/concepts.md) for the full mental model: DotAgents repos, resource kinds, and how resolution works end-to-end.
 
-Other useful commands: `agents doctor` checks CLI availability and resource sync drift, `agents usage` shows available quota/rate-limit data for installed agents, `agents budget` shows cross-vendor spend caps and current spend-to-cap (and enforces pre-flight estimates + a hard-cap kill-switch on every run — see [docs/observability.md](apps/cli/docs/observability.md#budget-guardrails-agents-budget)), `agents import` adopts an existing unmanaged install, `agents trash` lists and restores soft-deleted version directories, and `agents subagents` installs reusable subagent definitions for parent-agent workflows.
+Other useful commands: `agents doctor` checks CLI availability and resource sync drift, `agents usage` shows available quota/rate-limit data for installed agents, `agents config budget` shows cross-vendor spend caps and current spend-to-cap (and enforces pre-flight estimates + a hard-cap kill-switch on every run — see [docs/observability.md](apps/cli/docs/observability.md#budget-guardrails-agents-budget)), `agents import` adopts an existing unmanaged install, `agents trash` lists and restores soft-deleted version directories, and `agents subagents` installs reusable subagent definitions for parent-agent workflows.
 
 ---
 
@@ -1479,7 +1479,7 @@ For full transparency: `agi-cli` keeps a local event log at `~/.agents/.cache/lo
 
 macOS and Linux. Windows via WSL works but isn't first-class yet.
 
-**macOS-only features:** Keychain-based secrets (`agents secrets`, `agents profiles login`) require macOS. Default iCloud sync for bundles requires macOS + iCloud Keychain enabled; use `--no-icloud-sync` for device-local bundles. On Linux, use environment variables or `.env` files for API keys. Native Linux credential store support is planned.
+**macOS-only features:** Keychain-based secrets (`agents secrets`, `agents harness login`) require macOS. Default iCloud sync for bundles requires macOS + iCloud Keychain enabled; use `--no-icloud-sync` for device-local bundles. On Linux, use environment variables or `.env` files for API keys. Native Linux credential store support is planned.
 
 Interactive tmux-backed runs require tmux 3.2 or newer.
 
