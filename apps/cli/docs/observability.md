@@ -1184,7 +1184,7 @@ it by the account that did the work. Counter recipes share the same verb as
 do not invent a second top-level analytics command.
 
 That account split is the reason the behavioural path exists. `getConfiguredRunStrategy`
-defaults to `balanced` (`lib/rotate.ts`), so sessions are sprayed across every signed-in
+defaults to `balanced` (`lib/accounting/rotate.ts`), so sessions are sprayed across every signed-in
 Claude account. A report that reads one account's directory — which is what Claude Code's
 own `/insights` does — describes a fraction of the work and attributes all of it to one org.
 

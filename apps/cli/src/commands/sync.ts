@@ -406,7 +406,12 @@ async function runInteractiveReconcile(
     if (!version) continue;
     const result = syncResourcesToVersion(agentId, version, selection, { cwd, prune: true });
     printSyncDetail(result, agentId, version, cwd);
-    if (result.hooks && hookCapable.has(agentId) && Object.keys(hookManifest).length > 0) {
+    // Register on a non-empty manifest, not on `result.hooks`: the manifest
+    // always carries the CLI's built-in hooks (builtinHookManifest), which
+    // must register even on a box whose repos ship zero central hook files —
+    // gating on synced hook FILES left the built-in declared-but-unwired
+    // forever there (doctor --check then reports permanent drift).
+    if (hookCapable.has(agentId) && Object.keys(hookManifest).length > 0) {
       registerHooksToSettings(agentId, getVersionHomePath(agentId, version), hookManifest);
     }
   }

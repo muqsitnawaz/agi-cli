@@ -214,7 +214,9 @@ describe('agents doctor --check — CI drift gate exit code', () => {
     expect(parsed.unwiredHookVersions).toBe(1);
     const claude = parsed.versions.find((v: any) => v.agent === 'claude');
     expect(claude.status).toBe('fresh');
-    expect(claude.unwiredHooks).toBe(1);
+    // demo-guard + the built-in session-tracker hook, both stripped by the
+    // cfg.hooks = {} wipe above.
+    expect(claude.unwiredHooks).toBe(2);
   });
 
   it('exits non-zero when a source layer is behind origin (repo pull heals it, not --fix)', () => {

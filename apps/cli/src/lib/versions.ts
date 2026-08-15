@@ -3230,7 +3230,12 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
         ? resolveSelection(selection.hooks, available.hooks)
         : available.hooks;
 
-      let hookManifest: ReturnType<typeof parseHookManifest> = {};
+      // Selected outside the file-sync gate below: selectHookManifest always
+      // retains the CLI's built-in hooks (builtinHookManifest), which have no
+      // central hook FILE to sync — computing this only when hooksToSync is
+      // non-empty would hand opencode's registrar an empty manifest on a box
+      // with zero central hooks and strip the built-ins from its plugin.
+      const hookManifest = selectHookManifest(parseHookManifest(), hooksToSync);
       if (hooksToSync.length > 0) {
         const r = hooksWriter.write({ version, versionHome, selection: hooksToSync, cwd });
         // Remove orphan files from version home. The trusted set is the
@@ -3248,10 +3253,16 @@ export function syncResourcesToVersion(agent: AgentId, version: string, selectio
           }
         }
         result.hooks = r.synced.length > 0;
-        hookManifest = selectHookManifest(parseHookManifest(), hooksToSync);
       }
       const hooksInScope = !userPassedSelection || selection?.hooks !== undefined;
-      if (agent === 'opencode' && hooksInScope) {
+      if (hooksInScope) {
+        // Register for EVERY hooks-capable agent, not just opencode: the
+        // per-agent sync paths (`agents sync <agent>@<version>` / `@all`) call
+        // only this function, so wiring done solely in the umbrella/refresh
+        // flows left those spellings syncing hook FILES without ever
+        // registering them — and the CLI's built-in session-tracker hook
+        // (builtinHookManifest) must reach native configs on every sync path.
+        // Idempotent: the registrar GCs and rewrites managed entries.
         registerHooksToSettings(agent, versionHome, hookManifest);
       }
     }

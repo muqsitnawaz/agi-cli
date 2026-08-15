@@ -391,7 +391,9 @@ describe('doctor generated hook runtime integration (RUSH-2382)', () => {
     expect(payload.brokenHookRuntimeVersions).toBe(1);
     expect(payload.versions).toContainEqual({
       agent: 'claude', version: '2.0.0', status: 'never-synced', isDefault: true,
-      unwiredHooks: 1, brokenHookRuntime: 1, divergence: expect.any(Array),
+      // runtime-guard + the built-in session-tracker hook, both unwired on a
+      // never-synced home.
+      unwiredHooks: 2, brokenHookRuntime: 1, divergence: expect.any(Array),
     });
   });
 
@@ -432,7 +434,9 @@ describe('doctor generated hook runtime integration (RUSH-2382)', () => {
       hookRuntimeRepair: { attempts: Array<{ attempted: boolean; repaired: boolean }>; needsAttention: string[] };
     };
     expect(payload.hookRewire).toEqual([{
-      agent: 'claude', version: '2.0.0', rewired: 0, remaining: 1, failure: 'register-failed',
+      // runtime-guard + the built-in session-tracker hook both remain unwired
+      // when the rewire fails.
+      agent: 'claude', version: '2.0.0', rewired: 0, remaining: 2, failure: 'register-failed',
     }]);
     expect(JSON.stringify(payload.hookRewire)).not.toContain('.tmp.');
     expect(payload.hookRuntimeRepair.attempts).toHaveLength(1);
