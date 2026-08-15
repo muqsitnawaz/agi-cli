@@ -29,7 +29,8 @@ agents daemon status --json  # same, machine-readable
 agents daemon start | stop | restart
 agents daemon enable | disable   # persisted device kill switch — see below
 agents daemon reload             # SIGHUP: reload routines + re-evaluate scheduler.enabled
-agents daemon services           # secrets broker + browser IPC only
+agents daemon services           # every hosted service + per-service toggles
+agents daemon webhooks list      # the signed webhook receivers this box hosts
 agents daemon logs -f --level warn --since 1h
 agents daemon doctor             # one-shot check, non-zero exit on problems
 ```

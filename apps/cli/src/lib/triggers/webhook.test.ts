@@ -407,6 +407,7 @@ describe('startWebhookServer', () => {
     let releaseDispatch!: () => void;
     const dispatchDone = new Promise<void>((resolve) => { releaseDispatch = resolve; });
     const waiter = settleWaiter();
+    let dispatches = 0;
     const server = startWebhookServer({
       secrets: { linear: secret },
       onDelivery: waiter.hit,
@@ -414,6 +415,7 @@ describe('startWebhookServer', () => {
       fire: {
         jobs,
         dispatch: async (config: JobConfig): Promise<RunMeta> => {
+          dispatches += 1;
           signalDispatchStarted();
           await dispatchDone;
           return {
@@ -435,7 +437,7 @@ describe('startWebhookServer', () => {
     try {
       const payload = Buffer.from(JSON.stringify(linearIssueWebhook(['agent']).payload));
       const sig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
-      const response = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const send = () => new Promise<{ status: number; body: string }>((resolve, reject) => {
         const req = http.request({
           host: '127.0.0.1',
           port: address.port,
@@ -456,13 +458,25 @@ describe('startWebhookServer', () => {
         req.end(payload);
       });
 
+      const response = await send();
+
       // The ack arrived while dispatch is provably still in flight.
       await dispatchStarted;
       expect(response.status).toBe(202);
       expect(JSON.parse(response.body)).toMatchObject({ ok: true, accepted: true, deliveryId: 'linear:delivery-async' });
 
+      // The async window is exactly where dedup can regress: `deliveryStore.seen`
+      // reports only COMPLETED deliveries, so between the ack and the settle it
+      // says false and only the in-flight set stops a retry re-firing the job.
+      // Retry the SAME delivery id here, while dispatch is still held open.
+      const midFlightRetry = await send();
+      expect(midFlightRetry.status).toBe(200);
+      expect(JSON.parse(midFlightRetry.body)).toMatchObject({ ok: true, duplicate: true });
+
       releaseDispatch();
       await waiter.until(1);
+      // One dispatch, not two — the retry above was absorbed, not queued behind it.
+      expect(dispatches).toBe(1);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
