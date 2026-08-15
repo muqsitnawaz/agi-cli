@@ -2050,6 +2050,7 @@ email) into a single row. Use \`agents devices harnesses\` for the per-install v
         const existing = await getDevice(name);
         if (existing) {
           await upsertDevice(name, { role: 'control' });
+          setDeviceDiscoveryStatus(name, 'approved');
           marked = true;
         } else {
           unknownName = true;

@@ -4,7 +4,6 @@ import {
   addIgnored,
   assertValidDeviceName,
   loadDevices,
-  loadIgnored,
   removeDevice,
   removeIgnored,
   upsertDevice,
@@ -63,6 +62,15 @@ export function loadDeviceDiscoveryPolicies(): Map<string, DeviceDiscoveryStatus
  * Apply synced intent to this machine's local registry. Approval resolves live
  * Tailscale metadata; ignore never needs the network. Missing approved peers are
  * reported as unresolved rather than written with invented connection details.
+ *
+ * Only devices with an EXPLICIT entry in the synced policy are touched. A
+ * device absent from the map is left alone, whether or not the map itself is
+ * defined — the map is not treated as authoritative-by-omission, because not
+ * every local registration path writes a policy entry (pair-ios control
+ * devices, daemon/umbrella auto-refresh, and any device registered before this
+ * feature shipped). Wiping those on the next `agents repo pull user` would be
+ * silent, fleet-wide data loss for a decision (e.g. "ignore this one iPad")
+ * that never meant to touch them.
  */
 export async function reconcileDeviceDiscoveryPolicies(): Promise<DeviceDiscoveryReconcileResult> {
   const configured = readMeta().fleet?.discovery;
@@ -72,14 +80,6 @@ export async function reconcileDeviceDiscoveryPolicies(): Promise<DeviceDiscover
   const policies = loadDeviceDiscoveryPolicies();
   const approved = [...policies].filter(([, s]) => s === 'approved').map(([n]) => n).sort();
   const ignored = [...policies].filter(([, s]) => s === 'ignored').map(([n]) => n).sort();
-
-  const registry = await loadDevices();
-  const localIgnored = await loadIgnored();
-  const pending = new Set([...Object.keys(registry), ...localIgnored].filter((name) => !policies.has(name)));
-  for (const name of pending) {
-    await removeDevice(name);
-    await removeIgnored(name);
-  }
 
   for (const name of ignored) {
     await removeDevice(name);

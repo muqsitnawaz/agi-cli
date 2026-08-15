@@ -82,7 +82,30 @@ describe('synced device discovery policy', () => {
     expect(await getDevice('zion')).toMatchObject({ user: 'operator', address: { dnsName: 'zion.internal' } });
   });
 
-  it('propagates pending by clearing stale local registry and ignore state', async () => {
+  it('leaves a locally-registered device untouched when it has no policy entry at all, even while other entries exist (RUSH-2377 regression)', async () => {
+    // The concrete failure this guards: registering 12 devices on machine B,
+    // then approving/ignoring just ONE device on machine A and syncing. Every
+    // device absent from the synced policy — including ones registered by a
+    // path that never writes a policy entry (pair-ios, daemon/umbrella
+    // auto-refresh, pre-existing registrations) — must survive reconcile.
+    const { getDevice, isIgnored, reconcileDeviceDiscoveryPolicies, setDeviceDiscoveryStatus, upsertDevice } = await freshModules();
+    await upsertDevice('never-in-policy', {
+      platform: 'linux',
+      address: { via: 'manual', dnsName: 'never-in-policy.internal' },
+    });
+    // A sibling device DOES have an explicit policy entry, so the discovery
+    // map is non-empty/defined — the exact condition that used to treat
+    // absence as "pending removal".
+    setDeviceDiscoveryStatus('mac-mini', 'ignored');
+
+    const result = await reconcileDeviceDiscoveryPolicies();
+
+    expect(result).toMatchObject({ ignored: ['mac-mini'] });
+    expect(await getDevice('never-in-policy')).not.toBeNull();
+    expect(await isIgnored('never-in-policy')).toBe(false);
+  });
+
+  it('leaves a locally-registered device untouched when its policy entry was removed (unset), not just absent', async () => {
     const { addIgnored, getDevice, isIgnored, reconcileDeviceDiscoveryPolicies, setDeviceDiscoveryStatus, upsertDevice } = await freshModules();
     await upsertDevice('old-laptop', {
       platform: 'linux',
@@ -96,8 +119,8 @@ describe('synced device discovery policy', () => {
 
     await reconcileDeviceDiscoveryPolicies();
 
-    expect(await getDevice('old-laptop')).toBeNull();
-    expect(await isIgnored('ipad')).toBe(false);
+    expect(await getDevice('old-laptop')).not.toBeNull();
+    expect(await isIgnored('ipad')).toBe(true);
   });
 
   it('registers an approved device from real Tailscale JSON parsing', async () => {
