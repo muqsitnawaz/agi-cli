@@ -541,8 +541,8 @@ describe.skipIf(process.platform === 'win32')('--copy-creds refusal (RUSH-2527)'
   const appRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 
   it('exits 1 and prints the refusal message — no agent launched', () => {
-    // --copy-creds is only evaluated when a --host target is given (it was a
-    // host-transfer feature). Pass --host with a dummy device name; the refusal
+    // --copy-creds is only evaluated when a --device target is given (it was a
+    // host-transfer feature). Pass --device with a dummy name; the refusal
     // must fire before any SSH or agent launch attempt.
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'copy-creds-'));
     try {
@@ -550,7 +550,7 @@ describe.skipIf(process.platform === 'win32')('--copy-creds refusal (RUSH-2527)'
       fs.writeFileSync(path.join(root, '.agents', 'agents.yaml'), 'agents: {}\n');
       const result = spawnSync(
         bunBin(),
-        [path.join(appRoot, 'src', 'index.ts'), 'run', 'claude', '--host', 'dummy-device', '--copy-creds', '--mode', 'plan', 'probe'],
+        [path.join(appRoot, 'src', 'index.ts'), 'run', 'claude', '--device', 'dummy-device', '--copy-creds', '--mode', 'plan', 'probe'],
         {
           cwd: appRoot,
           env: { ...process.env, HOME: root },
