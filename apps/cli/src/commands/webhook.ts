@@ -108,12 +108,20 @@ export function registerWebhooksCommand(program: Command): void {
               (parts.length ? `fired ${parts.join('; ')}` : 'no match'),
             );
           },
+          // The delivery is acked 202 before dispatch (RUSH-2548), so a dispatch
+          // failure has no HTTP status left to ride — print it instead.
+          onDeliveryError: (webhook, err) => {
+            console.error(chalk.red(
+              `${new Date().toISOString()} ${webhook.source}:${webhook.event} dispatch failed after ack: ${err.message}`,
+            ));
+          },
         });
         await waitForListening(server);
         const address = server.address();
         const bound = typeof address === 'object' && address ? address.port : port;
         console.log(`${chalk.green('agents webhooks')} ${chalk.dim('→')} ${chalk.cyan(`http://${opts.host ?? DEFAULT_HOST}:${bound}`)}`);
-        console.log(chalk.dim('signed · localhost by default · endpoints: /hooks/github, /hooks/linear · Ctrl-C to stop'));
+        console.log(chalk.dim('signed · localhost by default · endpoints: /hooks/github, /hooks/linear · acks 202 then dispatches · Ctrl-C to stop'));
+        console.log(chalk.dim('for a supervised receiver that survives reboot: agents daemon webhooks add --secrets-bundle <name>'));
 
         const shutdown = () => {
           server.close(() => process.exit(0));
