@@ -507,3 +507,25 @@ describe('auto-launch accessors', () => {
     expect(prefs['mac-mini'].preferred).toBe(true); // fleet default still inherits
   });
 });
+
+describe('listConfiguredDeviceRoles (roster reaches doc-less devices)', () => {
+  it('a fleet-default role only reaches a device with no per-device doc when the caller passes the roster', async () => {
+    const { setConfigValue, listConfiguredDeviceRoles } = await freshModules();
+
+    setConfigValue('role', 'worker', { fleet: true });
+
+    // 'zion' has never had a per-device doc written — the bare, doc-scan-only
+    // call (no roster) must not see it. This is the gap #2622's non-author
+    // review flagged: a fleet-wide `role` default silently dropped a doc-less
+    // device from the `--device auto` worker allowlist.
+    expect(listConfiguredDeviceRoles()).toEqual({});
+    expect(listConfiguredDeviceRoles(['zion'])).toEqual({ zion: 'worker' });
+
+    // A device's own mark still wins over the fleet default, roster or not.
+    setConfigValue('role', 'personal', { device: 'mac-mini' });
+    expect(listConfiguredDeviceRoles(['zion', 'mac-mini'])).toEqual({
+      zion: 'worker',
+      'mac-mini': 'personal',
+    });
+  });
+});

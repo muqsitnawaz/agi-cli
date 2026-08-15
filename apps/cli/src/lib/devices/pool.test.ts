@@ -110,7 +110,7 @@ describe('roles read from the per-device docs', () => {
     expect(mod.filterAutoPool(FLEET)).toEqual(FLEET);
   });
 
-  it('a fleet-default role applies to a device that has a doc but no own mark', async () => {
+  it('a fleet-default role reaches every device in the pool, doc-less devices included', async () => {
     const mod = await freshPool();
     // A write creates the peer doc; keep another key so unsetting the
     // device-layer role does not delete the folder.
@@ -118,9 +118,24 @@ describe('roles read from the per-device docs', () => {
     mod.setConfigValue('notes', ['keep the doc'], { device: 'yosemite-s0' });
     mod.unsetConfigValue('role', { device: 'yosemite-s0' });
     mod.setConfigValue('role', 'personal', { fleet: true });
+    // The bare, doc-scan-only read still sees only the device with a doc.
     expect(mod.listConfiguredDeviceRoles()).toEqual({ 'yosemite-s0': 'personal' });
-    // No worker is marked, so the pool is everyone except the personal box.
-    expect(mod.filterAutoPool(FLEET)).toEqual(['zion', 'yosemite-s1', 'mac-mini', 'iphone']);
+    // filterAutoPool passes its own candidate pool as the roster, so the
+    // fleet default reaches every device in FLEET — including 'zion',
+    // 'yosemite-s1', 'mac-mini', 'iphone', none of which have a doc — and
+    // the whole fleet is excluded as personal.
+    expect(mod.filterAutoPool(FLEET)).toEqual([]);
+  });
+
+  it('a fleet-default worker role reaches a device with no per-device doc at all', async () => {
+    const mod = await freshPool();
+    mod.setConfigValue('role', 'worker', { fleet: true });
+    // No device in FLEET has ever had a doc written.
+    expect(mod.listConfiguredDeviceRoles()).toEqual({});
+    // filterAutoPool must still narrow to the whole fleet as workers — the
+    // exact gap #2622's non-author review flagged as a blocker: a fleet-wide
+    // worker default silently dropped a doc-less device from the allowlist.
+    expect(mod.filterAutoPool(FLEET)).toEqual(FLEET);
   });
 
   it('auto.pool=all widens past the worker marks', async () => {

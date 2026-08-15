@@ -151,7 +151,13 @@ import { registerCommandGroups, setHelpSections } from '../lib/help.js';
 /** One-line summary of a device for `list`. `isSelf` marks the machine this
  * command is running on so it stands out from the rest of the tailnet.
  * `isInteractive` marks the configured interactive host (`devices config <name> interactive.host`). */
-function deviceSummary(d: DeviceProfile, isSelf = false, stats?: DeviceStats, isInteractive = false): string {
+function deviceSummary(
+  d: DeviceProfile,
+  isSelf = false,
+  stats?: DeviceStats,
+  isInteractive = false,
+  roles?: Record<string, ConfiguredDeviceRole>,
+): string {
   d = resolveDeviceProfile(d);
   const addr = hostNameFor(d) ?? chalk.gray('no address');
   // Prefer a fresh live verdict (this run's probe, else the written-back
@@ -168,7 +174,9 @@ function deviceSummary(d: DeviceProfile, isSelf = false, stats?: DeviceStats, is
   const name = isSelf ? chalk.bold.cyan(d.name.padEnd(16)) : chalk.bold(d.name.padEnd(16));
   const here = isSelf ? chalk.cyan('  ← this machine') : '';
   const interactive = isInteractive ? chalk.yellow('  ★ interactive') : '';
-  const role = roleTag(d.name, listConfiguredDeviceRoles());
+  // `roles` defaults to a single-device roster so a fleet-wide `role` default
+  // still reaches this device even when it has no per-device doc of its own.
+  const role = roleTag(d.name, roles ?? listConfiguredDeviceRoles([d.name]));
   return `${marker}${name} ${String(d.platform).padEnd(8)} ${(d.user ? d.user + '@' : '') + addr}  ${online}${reach}${here}${interactive}${role}`;
 }
 
@@ -214,9 +222,12 @@ function renderDeviceTable(
   full = false,
   interactiveHost?: string,
 ): string[] {
-  if (!statsMap) return names.map((n) => deviceSummary(reg[n], n === self, undefined, n === interactiveHost));
+  if (!statsMap) {
+    const roles = listConfiguredDeviceRoles(names);
+    return names.map((n) => deviceSummary(reg[n], n === self, undefined, n === interactiveHost, roles));
+  }
 
-  const deviceRoles = listConfiguredDeviceRoles();
+  const deviceRoles = listConfiguredDeviceRoles(names);
   const lines: string[] = [];
   const head =
     '  ' +
@@ -1426,9 +1437,12 @@ function registerDevicesCommands(program: Command): void {
   ): Promise<void> => {
     if (!name) {
       if (role) throw new Error('Name a device: agents devices role <name> <worker|personal>');
-      const roles = listConfiguredDeviceRoles();
-      const mode = autoPoolMode();
       const reg = await loadDevices();
+      // The full registered roster, not just online — a fleet-wide `role`
+      // default must reach a registered device even when it has no per-device
+      // doc of its own, or it silently falls out of the worker allowlist.
+      const roles = listConfiguredDeviceRoles(Object.keys(reg));
+      const mode = autoPoolMode();
       const online = Object.entries(reg)
         .filter(([, d]) => d?.tailscale?.online !== false)
         .map(([n]) => n);
@@ -1876,7 +1890,7 @@ function registerDevicesCommands(program: Command): void {
     }
 
     if (opts.json) {
-      const jsonRoles = listConfiguredDeviceRoles();
+      const jsonRoles = listConfiguredDeviceRoles(names);
       const autoPool = new Set(filterAutoPool(names, { roles: jsonRoles }));
       process.stdout.write(JSON.stringify(names.map((name) => {
         const config = deviceConfigJson(name);
