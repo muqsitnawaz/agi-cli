@@ -6,10 +6,11 @@
   namespace and one `accounts` / `accounts view` renderer (text + `--json`). New
   positional grammar: `accounts name <source> <name>`,
   `accounts attach <account> <target>` / `detach <account> <target>`, and
-  `accounts sync <account> <device>`. Attachment scope is harness-derived
-  (`account-capabilities.ts`): a version-scoped harness (Claude/Codex/Grok/Muse)
-  attaches to an exact `agent@version`; a device-scoped harness
-  (Cursor/OpenCode/Antigravity/Kimi/Droid) attaches to the bare agent. `attach`
+  `accounts sync <account> <device>`. Only version-scoped nameable harnesses
+  (Claude/Codex/Grok, plus Muse when a live email is present) can be named
+  or attached, always to an exact `agent@version`. Device-scoped harnesses
+  (Cursor/OpenCode/Antigravity/Kimi/Droid) are unsupported for native
+  naming — their API-key path is a provider account. `attach`
   validates the live identity before binding and injects no secret or env;
   `resolveAccountSelection` resolves explicit → exact-target binding →
   device-scoped binding → per-harness default. `remove` refuses while a binding, a

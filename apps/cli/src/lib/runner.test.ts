@@ -944,6 +944,15 @@ describe('assertRoutineAccountLocalForPlacement — native accounts never dispat
     ).rejects.toThrow('cannot run on a cloud placement');
   });
 
+  it('rejects an unknown routine account before host or cloud dispatch', async () => {
+    await expect(
+      assertRoutineAccountLocalForPlacement({ name: 'r', account: 'typo' }, 'host', { account: null }),
+    ).rejects.toThrow("account 'typo' is unknown");
+    await expect(
+      assertRoutineAccountLocalForPlacement({ name: 'r', account: 'typo' }, 'cloud', { account: null }),
+    ).rejects.toThrow("account 'typo' is unknown");
+  });
+
   it('the host dispatch boundary forwards the provider account by name (not dropped)', () => {
     // executeJobOnHost builds its dispatch options here; the account MUST ride
     // along or the remote runs under the wrong identity (the review regression).

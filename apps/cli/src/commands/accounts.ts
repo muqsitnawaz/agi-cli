@@ -6,7 +6,7 @@ import { readMeta, updateMeta } from '../lib/state.js';
 import type { AgentId } from '../lib/types.js';
 import { ALL_AGENT_IDS, getAccountInfo, resolveAgentName } from '../lib/agents.js';
 import { getVersionHomePath, listInstalledVersions } from '../lib/versions.js';
-import { nativeAccountCapability, nativeAccountNameable } from '../lib/account-capabilities.js';
+import { nativeAccountCapability, nativeAccountNameable, nativeIdentityKey } from '../lib/account-capabilities.js';
 import { profileExists, readProfile, type Profile } from '../lib/profiles.js';
 import { pushBundleToHost } from '../lib/secrets/push.js';
 import { resolveRemoteOsSync } from '../lib/hosts/remote-os.js';
@@ -32,12 +32,8 @@ async function nativeIdentityFromSource(raw: string): Promise<{ agent: AgentId; 
   }
   if (!listInstalledVersions(parsed.agent).includes(parsed.version)) throw new Error(`${raw} is not installed.`);
   const info = await getAccountInfo(parsed.agent, getVersionHomePath(parsed.agent, parsed.version));
-  // A `conditional` (email-only) harness such as Muse needs a live email; a
-  // `strong`/`opaque` harness uses its stable account key. No identity → reject.
-  const identityKey = capability.inspection === 'email'
-    ? info.email?.toLowerCase()
-    : info.accountKey ?? info.email?.toLowerCase();
-  if (!info.signedIn || !identityKey) throw new Error(`${raw} has no stable signed-in identity. Run it and complete its normal login first.`);
+  const identityKey = nativeIdentityKey(info, capability);
+  if (!identityKey) throw new Error(`${raw} has no stable signed-in identity. Run it and complete its normal login first.`);
   return { agent: parsed.agent, version: parsed.version, identityKey, identityLabel: info.email ?? undefined, scope: capability.scope as 'version' | 'device' };
 }
 

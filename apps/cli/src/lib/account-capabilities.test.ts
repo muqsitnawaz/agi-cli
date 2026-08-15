@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ALL_AGENT_IDS } from './agents.js';
-import { NATIVE_ACCOUNT_CAPABILITIES, nativeAccountNameable } from './account-capabilities.js';
+import { NATIVE_ACCOUNT_CAPABILITIES, nativeAccountNameable, nativeIdentityKey } from './account-capabilities.js';
 
 describe('native account capability registry', () => {
   it('classifies every harness exactly once', () => {
@@ -53,5 +53,26 @@ describe('native account capability registry', () => {
     expect(nativeAccountNameable('muse')).toBe(true); // conditional
     expect(nativeAccountNameable('gemini')).toBe(false); // discovery-only
     expect(nativeAccountNameable('copilot')).toBe(false); // unsupported
+  });
+
+  it('stores Muse (email-inspection) as accountKey, never the bare email', () => {
+    // getAccountInfo('muse') sets accountKey to muse:email=<addr>. If name
+    // stored the bare email, run/view would compare liveKey !== identityKey
+    // and reject a correctly signed-in install.
+    const muse = NATIVE_ACCOUNT_CAPABILITIES.muse;
+    expect(nativeIdentityKey(
+      { signedIn: true, email: 'user@x.com', accountKey: 'muse:email=user@x.com' },
+      muse,
+    )).toBe('muse:email=user@x.com');
+    expect(nativeIdentityKey({ signedIn: true, email: 'user@x.com', accountKey: null }, muse)).toBe('user@x.com');
+    expect(nativeIdentityKey({ signedIn: true, email: null, accountKey: 'muse:email=x' }, muse)).toBeNull();
+    expect(nativeIdentityKey({ signedIn: false, email: 'user@x.com', accountKey: 'muse:email=user@x.com' }, muse)).toBeNull();
+  });
+
+  it('stores a strong harness as accountKey', () => {
+    expect(nativeIdentityKey(
+      { signedIn: true, email: 'a@b.com', accountKey: 'claude:user=abc' },
+      NATIVE_ACCOUNT_CAPABILITIES.claude,
+    )).toBe('claude:user=abc');
   });
 });

@@ -1169,6 +1169,9 @@ export async function assertRoutineAccountLocalForPlacement(
     const { findUnifiedAccount } = await import('./account-registry.js');
     account = findUnifiedAccount(config.account, (deps.readMeta ?? readMeta)());
   }
+  if (!account) {
+    throw new Error(`Routine '${config.name}' account '${config.account}' is unknown.`);
+  }
   if (account?.kind === 'native') {
     throw new Error(`Routine '${config.name}' account '${config.account}' is a device-local ${account.agent} login and cannot run on a ${mode} placement. Use a provider account, or place this routine on the device that holds the login.`);
   }

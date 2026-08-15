@@ -67,3 +67,20 @@ export function nativeAccountNameable(agent: AgentId): boolean {
   const cap = NATIVE_ACCOUNT_CAPABILITIES[agent];
   return (cap.status === 'supported' || cap.status === 'conditional') && cap.scope !== 'unsupported';
 }
+
+/**
+ * The single identity key used at `accounts name`, attach, exec validation,
+ * view, and inventory. Prefer the harness's stable `accountKey`. For an
+ * email-only (`conditional`) harness, email is a presence gate — the stored
+ * key is still `accountKey` (e.g. `muse:email=user@x.com`), never the bare
+ * address, so `run`/`view` compare against the same value `getAccountInfo`
+ * returns.
+ */
+export function nativeIdentityKey(
+  info: { signedIn?: boolean; email?: string | null; accountKey?: string | null },
+  capability: NativeAccountCapability,
+): string | null {
+  if (!info.signedIn) return null;
+  if (capability.inspection === 'email' && !info.email) return null;
+  return info.accountKey ?? info.email?.toLowerCase() ?? null;
+}
