@@ -62,3 +62,5 @@ export {
   type InjectRail,
   type ResolveOptions,
 } from './resolve.js';
+export { iLoginShell } from './shell.js';
+export { shellQuote } from './quote.js';
