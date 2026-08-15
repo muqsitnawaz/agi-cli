@@ -48,7 +48,7 @@ export interface AutoPoolOptions {
  * quietly widening back to the full fleet.
  */
 export function filterAutoPool(pool: string[], opts: AutoPoolOptions = {}): string[] {
-  const roles = opts.roles ?? listConfiguredDeviceRoles();
+  const roles = opts.roles ?? listConfiguredDeviceRoles(pool);
   const byHost = new Map(Object.entries(roles).map(([name, role]) => [normalizeHost(name), role]));
   const roleOf = (host: string) => byHost.get(normalizeHost(host));
   const eligible = pool.filter((host) => {
