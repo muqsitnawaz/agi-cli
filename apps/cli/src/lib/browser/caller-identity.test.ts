@@ -54,4 +54,16 @@ describe('resolveCallerIdentity', () => {
     } as NodeJS.ProcessEnv);
     expect(id.sessionId).toBe('plural-session');
   });
+
+  it('never puts a synthetic agent-pid anchor into sessionId', () => {
+    // When neither env is set, any process-table fallback must land in
+    // launchId (hygiene never session-reaps launchId-only tasks).
+    const id = resolveCallerIdentity({} as NodeJS.ProcessEnv);
+    if (id.sessionId) {
+      expect(id.sessionId.startsWith('agent-pid:')).toBe(false);
+    }
+    if (id.launchId?.startsWith('agent-pid:')) {
+      expect(id.sessionId).toBeUndefined();
+    }
+  });
 });

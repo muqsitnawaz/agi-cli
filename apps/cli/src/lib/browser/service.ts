@@ -2727,13 +2727,16 @@ export class BrowserService {
     }
 
     // No-identity caller with zero unscoped matches: if the daemon holds
-    // exactly one live task, use it (common interactive shell case).
+    // exactly one live task that ALSO has no identity (a human-started one),
+    // use it. Never steal a task stamped with another caller's session/launch.
     if (!hasIdentity && out.length === 0) {
-      const all = this.listTasks();
-      if (all.length === 1) {
-        const only = all[0]!;
+      const unowned = this.listTasks().filter((t) => !t.task.sessionId && !t.task.launchId);
+      if (unowned.length === 1) {
+        const only = unowned[0]!;
         const conn = this.connections.get(only.profile) ??
-          [...this.connections.entries()].find(([, c]) => c.tasks.has(only.task.name) || [...c.tasks.values()].includes(only.task))?.[1];
+          [...this.connections.entries()].find(([, c]) =>
+            c.tasks.has(only.task.name) || [...c.tasks.values()].includes(only.task),
+          )?.[1];
         if (conn) {
           out.push({ conn, task: only.task, profileName: only.profile });
         }
@@ -2878,10 +2881,15 @@ export class BrowserService {
       // daemonPid) while leaving tasks.json and the live browser. Connect via
       // the profile's configured endpoint — connectProfile also reloads tasks.
       const bare = dirName.includes('@') ? dirName.split('@')[0]! : dirName;
+      // Composite key is `<profile>@<endpointName>` — pin the endpoint that
+      // actually owns this runtime dir, not the profile default.
+      const endpointFromKey = dirName.includes('@')
+        ? dirName.slice(dirName.indexOf('@') + 1).split('.')[0]
+        : undefined;
       const profile = await getProfile(bare);
       if (!profile) continue;
       try {
-        const resolved = resolveEndpoint(profile);
+        const resolved = resolveEndpoint(profile, endpointFromKey);
         const effectiveProfile: BrowserProfile = {
           ...profile,
           name: dirName,
@@ -2949,10 +2957,13 @@ export class BrowserService {
       let conn = this.connections.get(dirName);
       if (!conn) {
         const bare = dirName.includes('@') ? dirName.split('@')[0]! : dirName;
+        const endpointFromKey = dirName.includes('@')
+          ? dirName.slice(dirName.indexOf('@') + 1).split('.')[0]
+          : undefined;
         const profile = await getProfile(bare);
         if (!profile) continue;
         try {
-          const resolved = resolveEndpoint(profile);
+          const resolved = resolveEndpoint(profile, endpointFromKey);
           const effectiveProfile: BrowserProfile = {
             ...profile,
             name: dirName,

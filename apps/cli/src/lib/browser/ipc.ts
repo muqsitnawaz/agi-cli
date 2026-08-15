@@ -13,13 +13,14 @@ import { resolveCallerIdentity } from './caller-identity.js';
 import { actionable } from './service.js';
 import type { IPCRequest, IPCResponse, RefNodeJson } from './types.js';
 
-/** Page verbs that may create a task when none resolves for the caller. */
-const PAGE_VERBS = new Set<IPCRequest['action']>([
+/**
+ * Verbs that imply a page and may CREATE a task when none resolves.
+ * Observation-only verbs (console/logs/…) resolve but never create — an
+ * empty `agents browser logs` must not open a browser just to return [].
+ */
+const PAGE_CREATE_VERBS = new Set<IPCRequest['action']>([
   'navigate',
   'tab-add',
-  'tab-focus',
-  'tab-close',
-  'tab-list',
   'evaluate',
   'screenshot',
   'pdf',
@@ -31,16 +32,24 @@ const PAGE_VERBS = new Set<IPCRequest['action']>([
   'scroll',
   'set-viewport',
   'set-device',
-  'console',
-  'errors',
-  'requests',
-  'response-body',
   'wait',
   'set-download-path',
   'wait-download',
   'upload',
-  'getAppLogs',
   'record-start',
+]);
+
+/** Task-scoped verbs that resolve identity but never create. */
+const PAGE_RESOLVE_VERBS = new Set<IPCRequest['action']>([
+  ...PAGE_CREATE_VERBS,
+  'tab-focus',
+  'tab-close',
+  'tab-list',
+  'console',
+  'errors',
+  'requests',
+  'response-body',
+  'getAppLogs',
   'record-stop',
 ]);
 
@@ -397,10 +406,9 @@ export class BrowserIPCServer {
   private async bindTask(
     request: IPCRequest,
   ): Promise<IPCResponse | undefined> {
-    const createIfMissing = PAGE_VERBS.has(request.action);
+    const createIfMissing = PAGE_CREATE_VERBS.has(request.action);
     const isClose = CLOSE_VERBS.has(request.action);
 
-    if (request.task && !isClose && !createIfMissing) return undefined;
     // stop with --profile only (no task) is handled by the stop case itself.
     if (request.action === 'stop' && request.profile && !request.task) return undefined;
 
@@ -428,10 +436,6 @@ export class BrowserIPCServer {
         };
       }
       request.task = resolved.task.name;
-      if (resolved.created) {
-        // Surface the new task on the response of the page verb that created it.
-        (request as IPCRequest & { _createdTask?: string })._createdTask = resolved.task.name;
-      }
       return undefined;
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -449,7 +453,7 @@ export class BrowserIPCServer {
     }
 
     // Task-scoped actions: resolve identity / create / refuse once here.
-    if (PAGE_VERBS.has(request.action) || CLOSE_VERBS.has(request.action)) {
+    if (PAGE_RESOLVE_VERBS.has(request.action) || CLOSE_VERBS.has(request.action)) {
       const early = await this.bindTask(request);
       if (early) return early;
     }

@@ -132,15 +132,20 @@ export function resolveCallerIdentity(env: NodeJS.ProcessEnv = process.env): Cal
 
     // Process-table anchor: nearest ancestor whose comm is a known harness.
     // Covers harnesses with no SessionStart hook (and sessions the hook missed).
-    if (!sessionId) {
+    //
+    // IMPORTANT: stamp as launchId, NEVER as sessionId. A synthetic
+    // `agent-pid:<n>` is not a real agent session UUID — if it lands in
+    // sessionId, hygiene.taskOwnerIsGone treats it as a dead session (the
+    // process-table session probe rejects non-UUID shapes) and reaps the
+    // task mid-run. launchId-only tasks are never session-reaped
+    // (hygiene.ts: launchId alone is not proof of death).
+    if (!sessionId && !launchId) {
       for (const pid of ancestorPids(startPid)) {
         const proc = readProc(pid);
         if (!proc) continue;
         const kind = agentKindFromComm(proc.comm);
         if (kind) {
-          // Stable per-process identity so consecutive browser verbs from the
-          // same agent resolve to the same task without a state file.
-          sessionId = `agent-pid:${pid}`;
+          launchId = `agent-pid:${pid}`;
           agentPid = pid;
           break;
         }

@@ -105,12 +105,12 @@ agents browser devices                        List available device presets
 agents browser done                           Complete a task and close its tabs
 agents browser download                       Set the download directory for a task (defaults to the profile's downloads dir)
 agents browser errors                         Read page errors from a tab
-agents browser evaluate                       Evaluate JavaScript in current tab
+agents browser evaluate [expression]          Evaluate JavaScript in current tab (positional or -e; alias eval)
 agents browser gc                             Close tabs for abandoned tasks — owning agent session exited, or idle past the window — and mark them done. The same reaper the daemon already runs every 5 minutes; use this to run it now.
 agents browser history                        Show recent browser task history
 agents browser hover <ref>                    Hover over an element by ref
-agents browser logs <task>                    Read merged rush-app + rush-cli JSONL logs for a task
-agents browser navigate                       Navigate current tab to URL (creates tab if none exist)
+agents browser logs                           Read merged rush-app + rush-cli JSONL logs for a task (--task or caller identity)
+agents browser navigate [url]                 Navigate current tab to URL (positional or --url; alias goto; creates task if none)
 agents browser pdf [output]                   Export the current tab as PDF via CDP Page.printToPDF — auto-saved under sessions/<task>/ when [output] is omitted
 agents browser press <key>                    Press a key (Enter, Tab, Escape, etc)
 agents browser profiles                       Manage browser profiles
