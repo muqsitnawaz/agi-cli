@@ -16,6 +16,7 @@
 #   release-manifest.sh resolve --file MANIFEST.json --helper NAME
 #   release-manifest.sh reuse --file MANIFEST.json --helper NAME --input-digest D
 #   release-manifest.sh require --file MANIFEST.json --repo-root DIR [--helper NAME]
+#   release-manifest.sh copy-asset --file MANIFEST.json --helper NAME --asset-path DESTDIR
 #
 set -euo pipefail
 
@@ -263,6 +264,39 @@ require_helpers() {
   printf '%s\n' "$FILE"
 }
 
+# Copy verified helper bytes into DEST without rebuilding. Used to keep the
+# per-CLI-version ComputerHelper.app.zip on v<new> while the downloader still
+# resolves that URL (N/N+1).
+copy_asset() {
+  [[ -n "$FILE" ]] || die "copy-asset needs --file"
+  [[ -n "$HELPER" ]] || die "copy-asset needs --helper"
+  [[ -n "$ASSET_PATH" ]] || die "copy-asset needs --asset-path (destination directory)"
+  local rec digest src dest name
+  rec="$(resolve_helper)"
+  digest="$(jq -r '.assetDigest' <<<"$rec")"
+  src="$(jq -r '.assetPath // empty' <<<"$rec")"
+  name="$(jq -r --arg n "$HELPER" '
+      if $n == "computer-mac" then "ComputerHelper.app.zip"
+      elif $n == "keychain" then "Agents CLI.app"
+      elif $n == "menubar" then "MenubarHelper.app"
+      else $n end' <<<"$rec")"
+  if [[ -z "$src" || ! -f "$src" ]]; then
+    die "helper $HELPER asset is not on disk -- no fallback rebuild"
+  fi
+  local got
+  got="sha256:$(file_sha256 "$src")"
+  [[ "$got" == "$digest" ]] || die "helper $HELPER asset digest $got != $digest -- refusing to attach the wrong bytes"
+  mkdir -p "$ASSET_PATH"
+  dest="$ASSET_PATH/$name"
+  cp -a "$src" "$dest"
+  if [[ -f "$src.sha256" ]]; then
+    cp -a "$src.sha256" "$dest.sha256"
+  else
+    printf '%s  %s\n' "${digest#sha256:}" "$name" > "$dest.sha256"
+  fi
+  printf '%s\n' "$dest"
+}
+
 case "$CMD" in
   new) new_manifest ;;
   input-digest)
@@ -278,5 +312,6 @@ case "$CMD" in
   resolve) resolve_helper ;;
   reuse) reuse_helper ;;
   require) require_helpers ;;
+  copy-asset) copy_asset ;;
   *) die "unknown command: $CMD" ;;
 esac

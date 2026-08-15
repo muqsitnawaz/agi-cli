@@ -162,6 +162,26 @@ describeUnix('release-attestation.sh', () => {
     const child = git(root, 'rev-parse', 'HEAD^{tree}');
     expect(child).not.toBe(tree);
 
+    const otherHost = sh(
+      [
+        'require',
+        '--dir',
+        store,
+        '--tree',
+        tree,
+        '--lock',
+        id.lockfileDigest,
+        '--policy',
+        id.policyVersion,
+        '--suite',
+        'selected',
+        '--repo-root',
+        root,
+      ],
+      root,
+    );
+    expect(otherHost.status, otherHost.out).toBe(0);
+
     const parent = sh(
       [
         'require',

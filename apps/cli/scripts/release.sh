@@ -170,12 +170,12 @@ echo
 # script executing here is guaranteed to carry --home-base-phase and
 # headless-sign-context.sh. It therefore assumes it is ALREADY inside the tagged
 # worktree ($ROOT = <tag-worktree>/apps/cli, cwd set by the caller): it verifies
-# the checked-out version == $TARGET, then builds the signed macOS artifacts
-# fresh (the home base is the sign host), publishes to npm with the token resolved
-# HERE, and pushes the computer-helper asset. It does NOT create its own worktree.
+# the checked-out version == $TARGET, downloads the attested tarball + manifest
+# from the tag (the throwaway worktree has no store), publishes those bytes, and
+# re-attaches the verified helper zip. It does NOT create its own worktree.
 run_home_base_phase() {
   [[ "$(uname)" == "Darwin" ]] \
-    || die "the home base ($RELEASE_HOME_BASE) must be macOS to build + sign + notarize + publish"
+    || die "the home base ($RELEASE_HOME_BASE) must be macOS (npm token + helper-asset attach)"
   command -v npm >/dev/null  || die "npm not found on $RELEASE_HOME_BASE"
   command -v node >/dev/null || die "node not found on $RELEASE_HOME_BASE"
   command -v git >/dev/null  || die "git not found on $RELEASE_HOME_BASE"
@@ -209,7 +209,15 @@ run_home_base_phase() {
   local repo_root tree attest_dir attest tgz_json tgz manifest
   repo_root="$(git rev-parse --show-toplevel)"
   tree="$(git rev-parse "HEAD^{tree}")"
-  attest_dir="${RELEASE_ATTESTATION_DIR:-$repo_root/.release-attestations}"
+  # The tagged worktree is throwaway and has no store. Pull the files the
+  # trigger uploaded to v$TARGET (stable names) into a temp dir.
+  attest_dir="$(mktemp -d "${TMPDIR:-/tmp}/agents-cli-release-attest.XXXXXX")"
+  gh release download "v$TARGET" --dir "$attest_dir" \
+    --pattern 'release-attestation.json' \
+    --pattern 'release-manifest.json' \
+    --pattern 'phnx-labs-agents-cli-*.tgz' \
+    --pattern 'ComputerHelper.app.zip*' \
+    || die "could not download attested artifacts from GitHub release v$TARGET -- the trigger must upload them before this phase"
   bold "Requiring exact-tree attestation for ${tree:0:12} (no parent/nearby fallback)..."
   attest="$(scripts/release-attestation.sh require --dir "$attest_dir" --tree "$tree" --repo-root "$repo_root")" \
     || die "no passing attestation for tagged tree $tree -- refusing parent/nearby evidence"
@@ -218,7 +226,7 @@ run_home_base_phase() {
   scripts/release-attestation.sh promote --file "$attest" --tarball "$tgz" >/dev/null \
     || die "pretested tarball failed digest bind -- refusing to rebuild"
 
-  manifest="${RELEASE_MANIFEST:-$attest_dir/release-manifest.json}"
+  manifest="$attest_dir/release-manifest.json"
   [[ -f "$manifest" ]] || die "release manifest missing at $manifest -- no fallback rebuild"
   scripts/release-manifest.sh require --file "$manifest" --repo-root "$repo_root" \
     || die "helper manifest failed -- rebuild/notarization is outside the ordinary release path"
@@ -239,13 +247,8 @@ run_home_base_phase() {
   fi
   green "Published $PHNX_PKG@$TARGET from attested $tgz"
 
-  if gh release view "v$TARGET" >/dev/null 2>&1; then
-    gh release upload "v$TARGET" "$manifest" --clobber \
-      || die "failed to attach release manifest to v$TARGET"
-  else
-    gh release create "v$TARGET" "$manifest" --verify-tag --title "v$TARGET" --notes "release manifest for $TARGET" \
-      || die "failed to record release manifest on v$TARGET"
-  fi
+  gh release view "v$TARGET" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx 'ComputerHelper.app.zip' \
+    || die "v$TARGET is missing ComputerHelper.app.zip -- the client still downloads the per-CLI-version URL; reuse the prior zip (no rebuild)"
 }
 
 # Resolve the npm publish token from the local `npmjs.com` secrets bundle and
@@ -915,7 +918,10 @@ if $PHNX_TARGET_PUBLISHED; then
     if [[ -n "$MERGED_RELEASE_PR" && -n "$MERGED_RELEASE_SHA" ]]; then
       git fetch --quiet origin "pull/$MERGED_RELEASE_PR/head" \
         || die "could not fetch the CI-tested head for merged release PR #$MERGED_RELEASE_PR"
-      TAG_TARGET="$(scripts/select-publish-commit.sh "$MERGED_RELEASE_SHA" "$(git rev-parse FETCH_HEAD)")"
+      if [[ "$(git rev-parse "$MERGED_RELEASE_SHA^{tree}")" != "$(git rev-parse "FETCH_HEAD^{tree}")" ]]; then
+        die "already-published $TARGET: $DEFAULT_BRANCH tree $(git rev-parse "$MERGED_RELEASE_SHA^{tree}") != attested candidate $(git rev-parse "FETCH_HEAD^{tree}") -- refusing parent/nearby evidence"
+      fi
+      TAG_TARGET="$MERGED_RELEASE_SHA"
     else
       TAG_TARGET="origin/$DEFAULT_BRANCH"
     fi
@@ -949,9 +955,45 @@ fi
 # Bound to 90s so the whole ordinary release stays inside the 180s P99.
 # --skip-tests does not skip this: there is no fallback rebuild or parent-commit
 # evidence. Sign/notarize is not invoked here.
+attestation_store_dir() {
+  printf '%s\n' "${RELEASE_ATTESTATION_DIR:-$REPO_ROOT/.release-attestations}"
+}
+
+# Stage the attested json + tgz + manifest + reused helper zip onto v$TARGET so
+# the throwaway home-base worktree can download them. Never rebuilds a helper.
+upload_release_proof() {
+  local tree="$1"
+  local store attest tgz_json tgz dest
+  store="$(attestation_store_dir)"
+  attest="$(scripts/release-attestation.sh require --dir "$store" --tree "$tree" --repo-root "$REPO_ROOT")" \
+    || die "cannot upload proof: no attestation for $tree"
+  dest="$(mktemp -d "${TMPDIR:-/tmp}/agents-cli-release-proof.XXXXXX")"
+  cp "$attest" "$dest/release-attestation.json"
+  tgz_json="$(scripts/release-attestation.sh tarball --file "$attest" --require-file)"
+  tgz="$(jq -r .path <<<"$tgz_json")"
+  [[ -n "$tgz" && -f "$tgz" ]] || die "pretested tarball missing -- refusing to rebuild"
+  cp "$tgz" "$dest/$(basename "$tgz")"
+  [[ -f "$store/release-manifest.json" ]] \
+    || die "release manifest missing at $store/release-manifest.json -- no fallback rebuild"
+  cp "$store/release-manifest.json" "$dest/release-manifest.json"
+  if ! scripts/release-manifest.sh copy-asset --file "$store/release-manifest.json" --helper computer-mac --asset-path "$dest"; then
+    gh release download "v$PHNX_LATEST" --dir "$dest" --pattern 'ComputerHelper.app.zip*' \
+      || die "could not reuse ComputerHelper.app.zip from v$PHNX_LATEST -- no fallback rebuild"
+  fi
+  if gh release view "v$TARGET" >/dev/null 2>&1; then
+    gh release upload "v$TARGET" "$dest"/* --clobber \
+      || die "failed to upload attested artifacts to v$TARGET"
+  else
+    gh release create "v$TARGET" "$dest"/* --verify-tag --title "v$TARGET" \
+      --notes "attested tarball + reused helper for $TARGET" \
+      || die "failed to create GitHub release v$TARGET with attested artifacts"
+  fi
+}
+
 wait_for_attestation() {
   local tree="$1"
-  local attest_dir="${RELEASE_ATTESTATION_DIR:-$REPO_ROOT/.release-attestations}"
+  local attest_dir
+  attest_dir="$(attestation_store_dir)"
   local deadline=$(( $(date +%s) + 90 ))
   local out
   [[ -n "$tree" ]] || die "missing tree digest for attestation"
@@ -1146,7 +1188,8 @@ fi
 # and falls straight through to here.
 require_lease "pushing tag v$TARGET"
 git push origin "v$TARGET"
-phase_ok "attested tree verified; tag v$TARGET at ${PUBLISH_SHA:0:9} pushed"
+upload_release_proof "$MERGED_TREE"
+phase_ok "attested tree verified; tag v$TARGET at ${PUBLISH_SHA:0:9} pushed; proof uploaded"
 
 # Restore the working tree to clean now that the tag is durable; the privileged
 # phase below builds from a fresh checkout of the tag (locally on the home base,

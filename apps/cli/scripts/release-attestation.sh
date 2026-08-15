@@ -223,42 +223,43 @@ missing_key_msg() {
     "${TREE:-?}" "${LOCK_DIGEST:-?}" "${POLICY:-?}" "${BUN_VER:-?}" "${NODE_VER:-?}" "${PLATFORM:-?}" "${SUITE:-selected}"
 }
 
-bind_from_repo_if_needed() {
-  [[ -n "$REPO_ROOT" || -z "$LOCK_DIGEST" || -z "$POLICY" || -z "$BUN_VER" || -z "$NODE_VER" || -z "$PLATFORM" ]] || return 0
-  local root id
-  root="$(resolve_repo_root)"
-  id="$(REPO_ROOT="$root" COMMIT="${COMMIT}" emit_identity)"
-  [[ -n "$LOCK_DIGEST" ]] || LOCK_DIGEST="$(jq -r .lockfileDigest <<<"$id")"
-  [[ -n "$POLICY" ]] || POLICY="$(jq -r .policyVersion <<<"$id")"
-  [[ -n "$BUN_VER" ]] || BUN_VER="$(jq -r .toolchain.bun <<<"$id")"
-  [[ -n "$NODE_VER" ]] || NODE_VER="$(jq -r .toolchain.node <<<"$id")"
-  [[ -n "$PLATFORM" ]] || PLATFORM="$(jq -r .platform <<<"$id")"
+# Lookup binds the *tree under test* (and lock/policy hashed from that tree).
+# Toolchain/platform stay on the record as the tester's identity; they are NOT
+# re-keyed from the releaser's PATH, or Linux orchestration and a Darwin home
+# base could never share one attestation.
+bind_tree_lock_policy() {
+  if [[ -z "$LOCK_DIGEST" || -z "$POLICY" ]]; then
+    local root
+    root="$(resolve_repo_root)"
+    [[ -n "$LOCK_DIGEST" ]] || LOCK_DIGEST="$(lockfile_digest_of "$root")"
+    [[ -n "$POLICY" ]] || POLICY="$(policy_version_of "$root")"
+  fi
+  [[ -n "$SUITE" ]] || SUITE="selected"
 }
 
 require_from_dir() {
   [[ -n "$DIR" ]] || die "require needs --dir"
   [[ -n "$TREE" ]] || die "require needs --tree"
   [[ -d "$DIR" ]] || die "$(missing_key_msg)"
-  bind_from_repo_if_needed
-  [[ -n "$SUITE" ]] || SUITE="selected"
+  bind_tree_lock_policy
 
-  local f key want
-  want="$(attestation_key_from_fields "$TREE" "$LOCK_DIGEST" "$POLICY" "$BUN_VER" "$NODE_VER" "$PLATFORM" "$SUITE")"
-  # Exact filename first (content-addressed store).
-  if [[ -f "$DIR/$want.json" ]]; then
-    verify_file "$DIR/$want.json"
-    printf '%s\n' "$DIR/$want.json"
-    return 0
-  fi
-  # Scan: still require an exact key match, never a parent tree.
+  local f got_tree got_lock got_policy got_suite
   shopt -s nullglob
-  for f in "$DIR"/*.json; do
-    key="$(key_from_file "$f")"
-    if [[ "$key" == "$want" ]]; then
-      verify_file "$f"
-      printf '%s\n' "$f"
-      return 0
-    fi
+  for f in "$DIR"/*.json "$DIR"/release-attestation.json; do
+    [[ -f "$f" ]] || continue
+    got_tree="$(jq -r '.candidateTree // empty' "$f")"
+    [[ "$got_tree" == "$TREE" ]] || continue
+    # verify_file checks schema + pass + tarball. Do not pass --bun/--node/--platform
+    # so a Darwin home base can consume a Linux-tested record for the same tree.
+    BUN_VER="" NODE_VER="" PLATFORM="" verify_file "$f"
+    got_lock="$(jq -r '.lockfileDigest' "$f")"
+    got_policy="$(jq -r '.policyVersion' "$f")"
+    got_suite="$(jq -r '.suite' "$f")"
+    [[ "$got_lock" == "$LOCK_DIGEST" ]] || continue
+    [[ "$got_policy" == "$POLICY" ]] || continue
+    [[ -z "$SUITE" || "$got_suite" == "$SUITE" ]] || continue
+    printf '%s\n' "$f"
+    return 0
   done
   die "$(missing_key_msg)"
 }

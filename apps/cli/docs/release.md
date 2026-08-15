@@ -15,9 +15,14 @@ are unchanged.
 | Pretested `.tgz` | `tarball.digest` + filename | Digest mismatch. The script never packs a replacement. |
 | Release manifest | per-helper `inputDigest` + `assetDigest` | Missing helper or changed inputs. Rebuild/notarize is outside this path. |
 
-Attestations live in `RELEASE_ATTESTATION_DIR` (default
-`<repo>/.release-attestations`). The store is content-addressed:
-`<dir>/<key>.json` plus the tarball named in the record.
+Attestations live in `<repo>/.release-attestations` on the trigger box (or
+`RELEASE_ATTESTATION_DIR`). After the tag is pushed, `release.sh` uploads
+`release-attestation.json`, the `.tgz`, `release-manifest.json`, and the
+reused `ComputerHelper.app.zip` to `v<version>`. The home-base worktree is
+throwaway and has no store — it downloads those assets from the tag.
+`require` matches the candidate tree plus lock/policy from that tree; it does
+not re-key bun/node/`uname` from the releaser PATH, so a Linux-tested record
+is valid on the Darwin home base.
 
 ```bash
 apps/cli/scripts/release-attestation.sh identity --repo-root .

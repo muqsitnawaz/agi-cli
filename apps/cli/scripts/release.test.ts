@@ -44,6 +44,9 @@ describeRelease('release.sh attestation promotion (RUSH-2666)', () => {
     expect(RELEASE_SH).toContain('release-install-smoke.sh');
     expect(RELEASE_SH).toContain('release-manifest.sh require');
     expect(RELEASE_SH).toContain('npm publish "$tgz"');
+    expect(RELEASE_SH).toContain('upload_release_proof');
+    expect(RELEASE_SH).toContain('gh release download "v$TARGET"');
+    expect(RELEASE_SH).toContain('ComputerHelper.app.zip');
     expect(RELEASE_SH).not.toContain('sign-cli-binary.sh');
     expect(RELEASE_SH).not.toContain('publish-computer-helper-mac.sh');
     expect(RELEASE_SH).not.toContain('menubar/scripts/build.sh release');

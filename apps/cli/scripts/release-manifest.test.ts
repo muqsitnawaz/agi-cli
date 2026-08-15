@@ -136,4 +136,37 @@ describeUnix('release-manifest.sh', () => {
     expect(stale.status).not.toBe(0);
     expect(stale.out).toContain('outside the ordinary release path');
   });
+
+  it('copy-asset writes the verified helper bytes and refuses a missing asset', () => {
+    const dir = tmp('rel-manifest-copy-');
+    const file = path.join(dir, 'manifest.json');
+    fs.writeFileSync(file, sh(['new', '--cli-version', '1.22.40', '--cli-tree', 'abc']).out);
+    const digest = sh(['input-digest', '--repo-root', REPO, '--helper', 'keychain']).out.trim();
+    const asset = path.join(dir, 'keychain-src.bin');
+    fs.writeFileSync(asset, 'signed-helper-bytes');
+    const sum = spawnSync(process.platform === 'linux' ? 'sha256sum' : 'shasum',
+      process.platform === 'linux' ? [asset] : ['-a', '256', asset], { encoding: 'utf-8' });
+    const assetDigest = `sha256:${sum.stdout.trim().split(/\s+/)[0]}`;
+    expect(
+      sh([
+        'put',
+        '--file',
+        file,
+        '--helper',
+        'keychain',
+        '--helper-version',
+        '3.0.0',
+        '--input-digest',
+        digest,
+        '--asset-digest',
+        assetDigest,
+        '--asset-path',
+        asset,
+      ]).status,
+    ).toBe(0);
+    const dest = path.join(dir, 'out');
+    const copied = sh(['copy-asset', '--file', file, '--helper', 'keychain', '--asset-path', dest]);
+    expect(copied.status, copied.out).toBe(0);
+    expect(fs.readFileSync(copied.out.trim())).toEqual(fs.readFileSync(asset));
+  });
 });
