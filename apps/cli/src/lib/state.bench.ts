@@ -54,7 +54,7 @@ const DIST_ROOT = path.resolve(__dirname, '../../dist');
 const distUrl = (rel: string): string => pathToFileURL(path.join(DIST_ROOT, rel)).href;
 
 const STATE_SPEC = distUrl('lib/state.js');
-const EVENTS_SPEC = distUrl('lib/events.js');
+const EVENTS_SPEC = distUrl('lib/feed/events.js');
 const PROVENANCE_SPEC = distUrl('lib/event-provenance.js');
 
 /**

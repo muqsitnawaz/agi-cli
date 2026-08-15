@@ -2802,7 +2802,7 @@ is not two daemons existing — it is two daemons consuming the **same** input.
   is a misconfiguration that fires only on the owner with a fix hint,
   `lib/scheduler.ts`); or (b) **atomic claim** — each item is claimed with an
   atomic primitive before work begins (precedent: the feed's `O_EXCL` block claim,
-  `lib/feed.ts` — two concurrent claimers cannot both succeed); or
+  `lib/feed/feed.ts` — two concurrent claimers cannot both succeed); or
   (c) **idempotency** — a concurrent second execution of the same item is a
   verified no-op. `dispatch: fleet` (one online device picked per run,
   `lib/routines.ts`) satisfies (a) for dispatch targets.

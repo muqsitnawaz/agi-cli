@@ -98,7 +98,7 @@ import {
   readMeta,
 } from './state.js';
 import { isGitRepo } from './git.js';
-import { emit, redactArgs, _resetForTest } from './events.js';
+import { emit, redactArgs, _resetForTest } from './feed/events.js';
 import { stampProvenance } from './event-provenance.js';
 import { installMenubarLaunchAgentOnUpgrade } from './menubar/install-menubar.js';
 import {
@@ -479,7 +479,7 @@ const HELP_SPEC = distUrl('lib/help.js');
 const WHATS_NEW_SPEC = distUrl('lib/whats-new.js');
 const PLATFORM_SPEC = distUrl('lib/platform/index.js');
 const CLI_ENTRY_SPEC = distUrl('lib/cli-entry.js');
-const EVENTS_SPEC = distUrl('lib/events.js');
+const EVENTS_SPEC = distUrl('lib/feed/events.js');
 const EVENT_PROVENANCE_SPEC = distUrl('lib/event-provenance.js');
 const FORMAT_SPEC = distUrl('lib/format.js');
 const VIEW_COMMAND_SPEC = distUrl('commands/view.js');

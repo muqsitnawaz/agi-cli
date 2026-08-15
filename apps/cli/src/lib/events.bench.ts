@@ -2,7 +2,7 @@
  * Benchmark: the event-emission + provenance bootstrap that index.ts pays.
  *
  * `index.ts:213-214` imports `{ emit, emitFriction, redactArgs }` from
- * `./lib/events.js` and `{ stampProvenance }` from `./lib/event-provenance.js`
+ * `./lib/feed/events.js` and `{ stampProvenance }` from `./lib/event-provenance.js`
  * EAGERLY — top-level, before commander parses argv (`program.parseAsync()` at
  * index.ts:1440 is reached only after all module evaluation; index.ts:71 is the
  * separate `__secrets-ping`/`__secrets-get` fast-path intercept). Every `agents`
@@ -39,7 +39,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { emit, emitFriction, redactArgs, _resetForTest } from './events.js';
+import { emit, emitFriction, redactArgs, _resetForTest } from './feed/events.js';
 import { stampProvenance, resetEventProvenanceForTest } from './event-provenance.js';
 import { resetActorCache } from './actor.js';
 
@@ -69,7 +69,7 @@ function coldEval(specs: string[]): void {
   }
 }
 
-const EVENTS_SPEC = distUrl('lib/events.js');
+const EVENTS_SPEC = distUrl('lib/feed/events.js');
 const PROVENANCE_SPEC = distUrl('lib/event-provenance.js');
 /**
  * state.js is ALREADY eager via index.ts:513, and it is the source of the two
@@ -105,7 +105,7 @@ describe('cold module-graph evaluation — index.ts:213-214 eager imports, paid 
     coldEval([PROVENANCE_SPEC]);
   }, COLD_OPTS);
 
-  bench('lib/events.js alone (index.ts:213). Heavier graph: fs-atomic.js (proper-lockfile), state.js (yaml), event-provenance.js, actor.js (events.ts:15-23)', () => {
+  bench('lib/feed/events.js alone (index.ts:213). Heavier graph: fs-atomic.js (proper-lockfile), state.js (yaml), event-provenance.js, actor.js (events.ts:15-23)', () => {
     coldEval([EVENTS_SPEC]);
   }, COLD_OPTS);
 
