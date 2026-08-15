@@ -222,6 +222,10 @@ export interface DiscoverOptions {
   skill?: string;
   /** Only sessions that used a skill/command owned by this plugin (#12) — see QueryOptions.plugin. */
   plugin?: string;
+  /** Exact session id — a targeted indexed lookup with no scan (RUSH-2477). */
+  idExact?: string;
+  /** Session id prefix — a targeted indexed lookup with no scan (RUSH-2477). */
+  idPrefix?: string;
 }
 
 /** Progress report emitted during incremental scanning. */
@@ -403,6 +407,33 @@ export async function queryIndexedSessions(
     if (s.filePath || !s.machine?.trim()) s.machine = machineForSessionFile(s.filePath, s.agent);
   }
   return scopeToManaged(sessions, agents, options);
+}
+
+/**
+ * Resolve a full-or-partial session id against the LOCAL SQLite index only.
+ *
+ * A plain WAL read through `queryIndexedSessions` — same origin-machine
+ * attribution and managed scoping every indexed read gets — with NO incremental
+ * discovery scan (so none of `tryClaimScan`/`releaseScan`'s `BEGIN IMMEDIATE`
+ * writer lock) and NO fleet SSH fan-out. This is the crash-restart storm path
+ * (RUSH-2477): dozens of `sessions resume <id>` at once for a known local id must
+ * each be a cheap read, never a writer-lock contender or a dial into the
+ * not-yet-up tailnet. Exact id first, then prefix (matching `findSessionsById`),
+ * so a complete id never also drags in its prefix siblings. Returns `[]` on a
+ * genuine local miss, leaving the caller to fall back to the fleet resolver.
+ */
+export async function resolveIndexedSessionById(idQuery: string): Promise<SessionMeta[]> {
+  const q = idQuery.trim();
+  if (!q) return [];
+  const exact = await queryIndexedSessions(
+    { all: true, unbounded: true, idExact: q },
+    { resolveLinear: false },
+  );
+  if (exact.length > 0) return exact;
+  return queryIndexedSessions(
+    { all: true, unbounded: true, idPrefix: q },
+    { resolveLinear: false },
+  );
 }
 
 const linearProjectCache = new Map<string, { name: string; url: string } | null>();
@@ -635,6 +666,8 @@ function buildQueryOptions(
     skipExistenceCheck: options?.skipExistenceCheck,
     skill: options?.skill,
     plugin: options?.plugin,
+    idExact: options?.idExact,
+    idPrefix: options?.idPrefix,
   };
 }
 
