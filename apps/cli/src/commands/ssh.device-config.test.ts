@@ -43,6 +43,10 @@ function run(args: string[], extraEnv: Record<string, string> = {}): { stdout: s
       USERPROFILE: testHome,
       AGENTS_NO_UPDATE_CHECK: '1',
       AGENTS_NO_USAGE_TRACK: '1',
+      // Default identity is mac-mini so machine-local keys (scheduler, tmux,
+      // browser consent) can be set in these tests. Override per-call to act
+      // as a different box.
+      AGENTS_SYNC_MACHINE_ID: 'mac-mini',
       ...extraEnv,
     },
   });
@@ -172,11 +176,13 @@ describe('devices config --fleet (fleet-wide defaults layer)', () => {
     // No device doc is written for a fleet default.
     expect(deviceDoc('mac-mini')).not.toContain('schedulerEnabled');
 
-    // Both devices report the fleet-sourced effective value.
-    for (const name of ['mac-mini', 'zion']) {
-      const got = JSON.parse(run(['devices', 'config', name, 'scheduler.enabled', '--json']).stdout);
-      expect(got).toEqual({ device: name, key: 'scheduler.enabled', value: false, source: 'fleet' });
-    }
+    // This box can read the fleet-sourced effective value.
+    const self = JSON.parse(run(['devices', 'config', 'mac-mini', 'scheduler.enabled', '--json']).stdout);
+    expect(self).toEqual({ device: 'mac-mini', key: 'scheduler.enabled', value: false, source: 'fleet' });
+    // A peer cannot read a machine-local key, even when the value is a fleet default.
+    const peer = run(['devices', 'config', 'zion', 'scheduler.enabled', '--json']);
+    expect(peer.status).toBe(1);
+    expect(peer.stderr).toContain('machine-local');
   });
 
   it('a device value wins over the fleet default; unsetting falls back to it', () => {
