@@ -89,7 +89,7 @@ describe('maybeRunOnHost — local short-circuits (no SSH attempted)', () => {
     process.env.AGENTS_SYNC_MACHINE_ID = 'mybox';
     // The unknown-command gate above must not weaken this: `menubar` exists, so
     // the flag-support error is the correct, honest answer.
-    expect(await maybeRunOnHost('login', ['login', '--device', 'mac'])).toBe(true);
+    expect(await maybeRunOnHost('menubar', ['menubar', '--device', 'mac'])).toBe(true);
     expect(process.exitCode).toBe(1);
   });
 
