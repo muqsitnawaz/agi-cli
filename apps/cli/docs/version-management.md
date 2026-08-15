@@ -150,14 +150,19 @@ Key behaviors:
 - Real directories are backed up before being replaced with symlinks
 - Subsequent switches just update the symlink target (no new backups)
 - Each version has isolated auth in its `home/` directory
-- `agents sync <agent>` self-heals a **dangling** symlink: if `~/.<agent>` points
-  at a version that is no longer installed (a home-only leftover, e.g. grok
-  self-updated its per-version binary out from under the old dir, or an install
-  seeded the home but never landed the binary), the sync repoints it at the
-  resolved default (else the newest installed version) before syncing, so the
-  symlinked home and the installed set never diverge (`healDanglingConfigSymlink`,
-  RUSH-2471). A symlink already pointing at an installed version, a real config
-  directory, and isolated-only agents are left untouched.
+- `agents sync <agent>` self-heals **dangling version pointers**: the global
+  default, the isolated default, and the `~/.<agent>` config symlink are each
+  repointed off any version that is no longer installed before the sync resolves
+  a version (a home-only leftover, e.g. grok self-updated its per-version binary
+  out from under the old dir, or an install seeded the home but never landed the
+  binary). `agents use <agent>@<v>` sets the default and the symlink together, so
+  both dangle in lockstep once `<v>`'s binary vanishes — repointing only the
+  symlink would still leave `agents sync` resolving the dead default and failing
+  `not installed`. The default goes to the newest non-isolated installed version
+  (never auto-promoting an isolated install), the symlink to the resolved default
+  else the newest installed version (`healDanglingVersionPointers`, RUSH-2471). A
+  pointer already on an installed version, a real config directory, and
+  isolated-only agents are left untouched.
 
 ## Uninstalling (reversing adoption)
 
