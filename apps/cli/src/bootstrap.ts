@@ -287,7 +287,6 @@ Run and dispatch:
 
 Observe (read the fleet — no store merge; aliases point at the real readers):
   feed / inbox                    Needs-you inbox (open blocks waiting on you)
-  timeline                        Agent progress stream (= feed --filter updates)
   sessions --active               Live agents (who is running right now)
   events                          Unified ops + activity event trail
   audit                           Tamper-evident run-dispatch log (not events)

@@ -19,23 +19,13 @@ describe('expandObserveAlias', () => {
     });
   });
 
-  it('maps timeline → feed --filter updates unless filter already set', () => {
-    expect(expandObserveAlias('timeline', ['--json'])).toEqual({
-      argv: ['feed', '--filter', 'updates', '--json'],
-      note: expect.stringContaining('updates'),
-    });
-    expect(expandObserveAlias('timeline', ['--filter', 'all', '--json'])).toEqual({
-      argv: ['feed', '--filter', 'all', '--json'],
-      note: expect.stringContaining('timeline'),
-    });
-    expect(expandObserveAlias('timeline', ['--filter=needs'])).toEqual({
-      argv: ['feed', '--filter=needs'],
-      note: expect.stringContaining('timeline'),
-    });
-  });
-
   it('does not expand retired roster (use sessions --active)', () => {
     expect(expandObserveAlias('roster')).toBeNull();
+  });
+
+  it('does not expand the retired timeline alias (use feed --filter updates, RUSH-2692)', () => {
+    expect(expandObserveAlias('timeline')).toBeNull();
+    expect(expandObserveAlias('timeline', ['--json'])).toBeNull();
   });
 
   it('returns null for unknown names', () => {
@@ -54,7 +44,7 @@ describe('flag helpers / alias list', () => {
     expect(hasActiveFlag(['--json'])).toBe(false);
   });
 
-  it('lists the public observe aliases (roster retired)', () => {
-    expect([...OBSERVE_ALIASES].sort()).toEqual(['inbox', 'timeline']);
+  it('lists the public observe aliases (roster + timeline retired)', () => {
+    expect([...OBSERVE_ALIASES].sort()).toEqual(['inbox']);
   });
 });

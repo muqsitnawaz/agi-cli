@@ -5,16 +5,16 @@
  * remain the stores; these are doors that point at the right reader.
  *
  *   inbox    → feed                  (needs-you default)
- *   timeline → feed --filter updates (agent progress stream)
  *
  * `roster` was removed — use `agents sessions --active`.
+ * `timeline` was removed — use `agents feed --filter updates` (RUSH-2692).
  * `audit` is NOT an alias here — `agents audit` is already the tamper-evident
  * run-dispatch log. Ops trail = `agents events` (optionally `--audit`).
  */
 
-export type ObserveAlias = 'inbox' | 'timeline';
+export type ObserveAlias = 'inbox';
 
-export const OBSERVE_ALIASES: readonly ObserveAlias[] = ['inbox', 'timeline'] as const;
+export const OBSERVE_ALIASES: readonly ObserveAlias[] = ['inbox'] as const;
 
 export interface ObserveExpandResult {
   /** argv for the real command (no program name): e.g. ['feed', '--filter', 'updates'] */
@@ -48,15 +48,6 @@ export function expandObserveAlias(
         argv: ['feed', ...tail],
         note: 'agents inbox → agents feed (needs-you inbox)',
       };
-    case 'timeline': {
-      const argv = hasFilterFlag(tail)
-        ? ['feed', ...tail]
-        : ['feed', '--filter', 'updates', ...tail];
-      return {
-        argv,
-        note: 'agents timeline → agents feed --filter updates',
-      };
-    }
     default:
       return null;
   }

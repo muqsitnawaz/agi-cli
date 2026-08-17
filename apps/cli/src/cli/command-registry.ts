@@ -228,9 +228,8 @@ export const COMMAND_LOADERS: Record<string, ModuleLoader[]> = {
   send: [loadSend],
   notify: [loadSend],
   feed: [loadFeed],
-  // Observe-umbrella aliases of feed / feed --filter updates.
+  // Observe-umbrella alias of feed (the `timeline` alias was removed in RUSH-2692).
   inbox: [loadFeed],
-  timeline: [loadFeed],
   mailboxes: [loadMailboxes],
   mailbox: [loadMailboxes],
   serve: [loadServe],
