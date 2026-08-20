@@ -15,11 +15,17 @@ name: Windows-host e2e (tailnet)
 # resolveRemoteDevice can dial. The pool is an org runner group restricted to
 # agents-cli + agi-cli.
 #
-# LABEL RULE: `crabbox-ci` may only appear in workflows with trusted triggers
-# (push to main / schedule / workflow_dispatch). Never on pull_request — this
-# repo is public and the runner is self-hosted, so fork PRs must never execute
-# code on it. This workflow deliberately has NO pull_request trigger. Keep it
-# that way.
+# LABEL RULE: `crabbox-ci` may appear on a trusted trigger (push to main /
+# schedule / workflow_dispatch) with a bare `runs-on: [self-hosted, crabbox-ci,
+# tailnet]`, as this workflow does. On a `pull_request` trigger it may ONLY
+# appear inside a provenance-guarded `runs-on` expression that resolves fork PRs
+# to a GitHub-hosted runner — because this repo is public and the runner is
+# self-hosted, so fork code must never execute on it. tests.yml's required
+# `test` job is the one sanctioned pull_request user of the label (RUSH-2773):
+# `runs-on: ${{ (head.repo.full_name == github.repository) && fromJSON(...) ||
+# 'ubuntu-latest' }}`. This workflow deliberately has NO pull_request trigger, so
+# it keeps the bare array. Never put a bare `runs-on: [self-hosted, crabbox-ci]`
+# on a pull_request job — that is what would let fork code onto the host.
 #
 # Tool versions are NOT pinned here — setup-bun reads from package.json; dotnet
 # matches computer-helper-win.yml (build-win.sh cross-publishes the win-x64

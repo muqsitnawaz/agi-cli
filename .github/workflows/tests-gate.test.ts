@@ -39,8 +39,21 @@ describe('tests.yml required Linux gate', () => {
     expect(TESTS_YML).not.toContain('--deadline-sec');
   });
 
-  test('fork code stays on GitHub-hosted runners', () => {
-    expect(TESTS_YML).toMatch(/runs-on: ubuntu-latest/);
+  test('the required test job routes by PR provenance, forks stay GitHub-hosted', () => {
+    // Two lanes, one required `test` context (RUSH-2773): same-repo PRs run on
+    // the warm crabbox-ci pool, fork PRs fall back to ubuntu-latest and never
+    // reach the self-hosted host. The routing is a single `runs-on` expression
+    // keyed on GitHub-populated context a fork cannot forge.
+    expect(TESTS_YML).toContain(
+      'github.event.pull_request.head.repo.full_name == github.repository',
+    );
+    expect(TESTS_YML).toContain(
+      `fromJSON('["self-hosted", "crabbox-ci", "tailnet"]')`,
+    );
+    // The fork lane is the GitHub-hosted runner.
+    expect(TESTS_YML).toContain("|| 'ubuntu-latest'");
+    // crabbox-ci must never appear as a bare/static runs-on a fork PR could land
+    // on — only inside the provenance-guarded expression above.
     expect(TESTS_YML).not.toMatch(/runs-on: \[self-hosted/);
     expect(TESTS_YML).not.toMatch(/phnx-trusted/);
   });

@@ -19,7 +19,19 @@ concurrency:
 jobs:
   test:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    # Two lanes, ONE required-check context named `test` (RUSH-2773). Same-repo
+    # PRs run on the warm `crabbox-ci` org pool (ci-runner-fsn1, Hetzner) — bun
+    # is tool-cached and the microVM is already online, so the 16-19s
+    # checkout+setup-bun cold-start tax on ubuntu-latest disappears (RUSH-2788).
+    # Fork PRs stay on GitHub-hosted ubuntu-latest and NEVER touch the
+    # self-hosted host. The routing IS the `runs-on` expression:
+    # `github.repository` and `head.repo.full_name` are GitHub-populated context
+    # a fork cannot forge, so a fork PR always resolves to ubuntu-latest. The
+    # residual "fork rewrites this file to hardcode the label" vector is bounded
+    # by the repo's fork-PR approval policy (outside contributors gated); see the
+    # PR body. Keeping a single job preserves the `Tests / test` context that
+    # branch protection and release.sh depend on.
+    runs-on: ${{ (github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "crabbox-ci", "tailnet"]') || 'ubuntu-latest' }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
