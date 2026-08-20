@@ -42,7 +42,7 @@ import { AGENTS, ALL_AGENT_IDS, supportsAccountInspection } from '../agents.js';
 import { blocksLocalScripts } from '../platform/winpath.js';
 import { loginHint } from '../signin-badge.js';
 import { CONFIG_ENV_ISOLATED_AGENTS } from '../shims.js';
-import { padToWidth, stringWidth } from '../session/width.js';
+import { padToWidth, stringWidth } from '../text/width.js';
 import type { AgentId } from '../types.js';
 import type { DuplicateVersionHook } from '../hooks.js';
 import type { AgentsBinaryShadow } from '../binary-shadow.js';
