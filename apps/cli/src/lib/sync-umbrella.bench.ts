@@ -110,7 +110,7 @@ import { listResources } from './resources.js';
 import { buildManifest, isStale, loadManifest } from './staleness/index.js';
 import { getDetector } from './staleness/registry.js';
 import { clearLayerCache } from './staleness/layers.js';
-import { parseHookManifest, registerHooksToSettings } from './hooks.js';
+import { parseHookManifest, registerHooksToSettings } from './hooks/install.js';
 
 const cwd = process.cwd();
 

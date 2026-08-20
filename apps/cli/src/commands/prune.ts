@@ -41,7 +41,7 @@ import {
   listUnmanagedHooksInVersionHome,
   iterHooksCapableVersions,
   removeHookFromVersion,
-} from '../lib/hooks.js';
+} from '../lib/hooks/install.js';
 import {
   diffVersionPlugins,
   iterPluginsCapableVersions,

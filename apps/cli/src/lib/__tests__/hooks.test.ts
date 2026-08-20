@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { execFileSync } from 'child_process';
 
-import { deduplicateVersionHookCommands, registerHooksToSettings, selectHookManifest, unmanagedHookNames, computeCodexHookTrustHash, toPortableCommand, pruneVersionHomeHookEntriesFromSettings } from '../hooks.js';
+import { deduplicateVersionHookCommands, registerHooksToSettings, selectHookManifest, unmanagedHookNames, computeCodexHookTrustHash, toPortableCommand, pruneVersionHomeHookEntriesFromSettings } from '../hooks/install.js';
 import { getHookShimPath } from '../hooks/cache.js';
 import * as TOML from 'smol-toml';
 import * as yaml from 'yaml';

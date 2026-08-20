@@ -14,7 +14,7 @@ import { loadManifest, isStale } from './staleness/index.js';
 import { diffVersionResources, type VersionResourceReport, type SourceLayerBehind } from './doctor-diff.js';
 import { diffVersionCommands, iterCommandsCapableVersions } from './commands.js';
 import { diffVersionSkills, iterSkillsCapableVersions } from './plugins/skills.js';
-import { iterHooksCapableVersions, listUnmanagedHooksInVersionHome, checkVersionHookWiring } from './hooks.js';
+import { iterHooksCapableVersions, listUnmanagedHooksInVersionHome, checkVersionHookWiring } from './hooks/install.js';
 import { commitsBehindUpstream } from './git.js';
 import { getUserAgentsDir, getSystemAgentsDir, getEnabledExtraRepos } from './state.js';
 

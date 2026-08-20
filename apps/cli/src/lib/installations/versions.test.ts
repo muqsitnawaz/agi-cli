@@ -45,7 +45,7 @@ function runVersionSync(home: string, expression: string): unknown {
   const tsxBin = path.resolve('node_modules/tsx/dist/cli.mjs');
   const child = spawnSync(nodeExecPath(), [tsxBin, '-e', `
     import { listInstalledVersions, syncResourcesToVersion, buildRepoScopedSelection, getVersionHomePath, getBinaryPath } from ${JSON.stringify(moduleUrl)};
-    import { registerHooksToSettings } from ${JSON.stringify(pathToFileURL(path.resolve('src/lib/hooks.ts')).href)};
+    import { registerHooksToSettings } from ${JSON.stringify(pathToFileURL(path.resolve('src/lib/hooks/install.ts')).href)};
     const home = ${JSON.stringify(home)};
     const result = ${expression};
     console.log(JSON.stringify(result));

@@ -17,10 +17,10 @@ import * as TOML from 'smol-toml';
 import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { fileURLToPath } from 'url';
-import { AGENTS, ALL_AGENT_IDS, agentConfigDirName, isAgentHardDeprecated } from './agents.js';
-import { supports, explainSkip, capableAgents } from './capabilities.js';
-import { getAgentsDir, getHooksDir as getSystemHooksDir, getUserHooksDir, getUserAgentsDir, getSystemAgentsDir, getProjectAgentsDir, getTrashHooksDir, getEnabledExtraRepos, getResolvedRulesDir, getUserRulesDir, getPerfDir } from './state.js';
-import { collectSubruleHooksFromState } from './rules/compose.js';
+import { AGENTS, ALL_AGENT_IDS, agentConfigDirName, isAgentHardDeprecated } from '../agents.js';
+import { supports, explainSkip, capableAgents } from '../capabilities.js';
+import { getAgentsDir, getHooksDir as getSystemHooksDir, getUserHooksDir, getUserAgentsDir, getSystemAgentsDir, getProjectAgentsDir, getTrashHooksDir, getEnabledExtraRepos, getResolvedRulesDir, getUserRulesDir, getPerfDir } from '../state.js';
+import { collectSubruleHooksFromState } from '../rules/compose.js';
 
 function getCentralHooksDir(): string { return getUserHooksDir(); }
 
@@ -278,10 +278,10 @@ import {
   isVersionIsolated,
   listInstalledVersions,
   resolveVersion,
-} from './installations/versions.js';
-import type { AgentId, HookCacheConfig, HookMatches, InstalledHook, ManifestHook } from './types.js';
-import { generateHookShim, getHookShimPath, isValidHookShimName, parseCacheConfig, removeHookShim } from './hooks/cache.js';
-import { getHookShimsDir } from './state.js';
+} from '../installations/versions.js';
+import type { AgentId, HookCacheConfig, HookMatches, InstalledHook, ManifestHook } from '../types.js';
+import { generateHookShim, getHookShimPath, isValidHookShimName, parseCacheConfig, removeHookShim } from './cache.js';
+import { getHookShimsDir } from '../state.js';
 
 export type HookEntry = { name: string; scriptPath: string; dataFile?: string };
 
@@ -3779,13 +3779,13 @@ export interface InstallSessionTrackerHookResult {
 
 function resolveSessionTrackerRoot(): string | null {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  // Built/installed layout: dist/lib/ -> dist/session-tracker
-  const built = path.resolve(here, '..', 'session-tracker');
+  // Built/installed layout: dist/lib/hooks/ -> dist/session-tracker
+  const built = path.resolve(here, '..', '..', 'session-tracker');
   if (fs.existsSync(path.join(built, 'dist', 'hook.sh'))) {
     return built;
   }
-  // Source layout: apps/cli/src/lib/ -> repo root -> packages/session-tracker
-  const source = path.resolve(here, '..', '..', '..', '..', 'packages', 'session-tracker');
+  // Source layout: apps/cli/src/lib/hooks/ -> repo root -> packages/session-tracker
+  const source = path.resolve(here, '..', '..', '..', '..', '..', 'packages', 'session-tracker');
   if (fs.existsSync(path.join(source, 'src', 'hook.sh'))) {
     return source;
   }

@@ -11,7 +11,7 @@
 
 import { getAvailableResources, getVersionHomePath, isVersionIsolated, listInstalledVersions } from '../installations/versions.js';
 import { supports } from '../capabilities.js';
-import { checkVersionHookWiring } from '../hooks.js';
+import { checkVersionHookWiring } from '../hooks/install.js';
 import { getUserAgentsDir, getSystemAgentsDir, readMeta } from '../state.js';
 import { listNativeAccounts } from '../account-registry.js';
 import { readRepoState } from '../git.js';

@@ -67,7 +67,7 @@ import {
   type ResourceDiff,
   type VersionResourceReport,
 } from '../lib/doctor-diff.js';
-import { checkVersionHookWiring, inspectDuplicateVersionHooks, registerHooksToSettings, repairManagedHookRuntimeArtifacts, type DuplicateVersionHook, type HookRuntimeRepairReport, type HookWiringReport } from '../lib/hooks.js';
+import { checkVersionHookWiring, inspectDuplicateVersionHooks, registerHooksToSettings, repairManagedHookRuntimeArtifacts, type DuplicateVersionHook, type HookRuntimeRepairReport, type HookWiringReport } from '../lib/hooks/install.js';
 import { isVersionIsolated } from '../lib/installations/versions.js';
 import { computeDrift, checkSyncStatus, countOrphans, computeSourceBehind, type SyncStatusRow, type OrphanRow } from '../lib/drift.js';
 import { readAuthHealthCache, summarizeHostAuth } from '../lib/auth-health.js';

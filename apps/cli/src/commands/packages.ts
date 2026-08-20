@@ -45,7 +45,7 @@ import {
   discoverHooksFromRepo,
   installHooks,
   installHooksCentrally,
-} from '../lib/hooks.js';
+} from '../lib/hooks/install.js';
 import {
   discoverWorkflowsFromRepo,
   installWorkflowCentrally,

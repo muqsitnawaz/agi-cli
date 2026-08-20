@@ -44,7 +44,7 @@ vi.mock('../installations/versions.js', () => ({
   listInstalledVersions: () => [],
 }));
 
-import { normalizeHookTimeoutSeconds, parseHookManifest } from '../hooks.js';
+import { normalizeHookTimeoutSeconds, parseHookManifest } from '../hooks/install.js';
 
 describe('parseHookManifest layering', () => {
   beforeEach(() => {

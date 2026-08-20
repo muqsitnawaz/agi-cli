@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { listHookEntriesFromDir } from '../src/lib/hooks.js';
+import { listHookEntriesFromDir } from '../src/lib/hooks/install.js';
 
 let TMP: string;
 beforeEach(() => { TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'hook-sidecar-')); });

@@ -131,7 +131,7 @@ vi.mock('../src/lib/subagents.js', () => ({
   syncSubagentToOpenclaw: () => ({ success: false }),
 }));
 
-vi.mock('../src/lib/hooks.js', () => ({
+vi.mock('../src/lib/hooks/install.js', () => ({
   parseHookManifest: () => ({}),
   selectHookManifest: (manifest: object) => manifest,
   registerHooksToSettings: () => {},

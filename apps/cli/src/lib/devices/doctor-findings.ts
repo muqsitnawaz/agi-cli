@@ -44,7 +44,7 @@ import { loginHint } from '../signin-badge.js';
 import { CONFIG_ENV_ISOLATED_AGENTS } from '../shims.js';
 import { padToWidth, stringWidth } from '../session/width.js';
 import type { AgentId } from '../types.js';
-import type { DuplicateVersionHook } from '../hooks.js';
+import type { DuplicateVersionHook } from '../hooks/install.js';
 import type { AgentsBinaryShadow } from '../binary-shadow.js';
 import type { RcSecretFinding } from '../secrets/rc-hygiene.js';
 import type { OwnerSinkStatus } from '../channels/owner-sink.js';

@@ -167,7 +167,7 @@ describe.skipIf(process.platform === 'win32')('runSelfHeal — generated hook ru
 
   it('repairs a missing wrapper once per shared path, post-verifies it, then becomes a no-op', () => {
     const registryPath = path.resolve(process.cwd(), 'src/lib/self-heal/registry.ts');
-    const hooksPath = path.resolve(process.cwd(), 'src/lib/hooks.ts');
+    const hooksPath = path.resolve(process.cwd(), 'src/lib/hooks/install.ts');
     const hookCachePath = path.resolve(process.cwd(), 'src/lib/hooks/cache.ts');
     const versionsPath = path.resolve(process.cwd(), 'src/lib/installations/versions.ts');
     const script = `
@@ -212,7 +212,7 @@ describe.skipIf(process.platform === 'win32')('runSelfHeal — generated hook ru
 
   it('surfaces one stable failure for an unusable destination without retrying in-pass', () => {
     const registryPath = path.resolve(process.cwd(), 'src/lib/self-heal/registry.ts');
-    const hooksPath = path.resolve(process.cwd(), 'src/lib/hooks.ts');
+    const hooksPath = path.resolve(process.cwd(), 'src/lib/hooks/install.ts');
     const hookCachePath = path.resolve(process.cwd(), 'src/lib/hooks/cache.ts');
     const script = `
       import { runSelfHeal } from ${JSON.stringify(registryPath)};

@@ -27,7 +27,7 @@ import {
   listHooksInVersionHome,
   listInstalledHooksWithScope,
   type HookWiringReport,
-} from './hooks.js';
+} from './hooks/install.js';
 
 /** Resource kinds the inventory can report. Only 'hooks' is implemented so far
  *  (RUSH-2238); the remaining kinds land with their follow-up tickets. */

@@ -223,7 +223,7 @@ summary (`commands`, `run`, multi-section default).
 | `Notification` | Agent sends a notification | Claude, Grok, Copilot (`notification`) |
 | `OnError` | Agent encounters an error | Antigravity (`on_error`), Copilot (`errorOccurred`) |
 
-Event name mapping across agents is handled in `src/lib/hooks.ts`: `GEMINI_EVENT_MAP`, `ANTIGRAVITY_EVENT_MAP`, Grok's `eventMap`, `COPILOT_EVENT_MAP`, `KIRO_EVENT_MAP`, `GOOSE_EVENT_MAP`, `CURSOR_EVENT_MAP`, and `HERMES_EVENT_MAP`.
+Event name mapping across agents is handled in `src/lib/hooks/install.ts`: `GEMINI_EVENT_MAP`, `ANTIGRAVITY_EVENT_MAP`, Grok's `eventMap`, `COPILOT_EVENT_MAP`, `KIRO_EVENT_MAP`, `GOOSE_EVENT_MAP`, `CURSOR_EVENT_MAP`, and `HERMES_EVENT_MAP`.
 
 ## Version-home deduplication
 
@@ -273,7 +273,7 @@ All predicates live in `matches:`. They AND together — every declared predicat
 
 ## Script Resolution
 
-`resolveHookScriptPath(script)` in `src/lib/hooks.ts:35` resolves a script filename by checking, in order:
+`resolveHookScriptPath(script)` in `src/lib/hooks/install.ts` resolves a script filename by checking, in order:
 
 1. `~/.agents/hooks/<script>` (user dir)
 2. Each enabled extra repo's `hooks/` directory (insertion order)
@@ -294,7 +294,7 @@ hooks:
     enabled: false          # Disables the system-shipped hook
 ```
 
-`parseHookManifest()` in `src/lib/hooks.ts:704` strips entries where `enabled === false` from the returned map before the registrar sees them.
+`parseHookManifest()` in `src/lib/hooks/install.ts` strips entries where `enabled === false` from the returned map before the registrar sees them.
 
 ## Recipes
 

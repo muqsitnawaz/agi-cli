@@ -44,7 +44,7 @@ import { getWriter, getDetector } from './registry.js';
  *   - hooks — a version-home hook script is coupled to a settings.json /
  *     hooks.json REGISTRATION. Pruning the last hook to zero would delete the
  *     script but must also GC its registration in the same pass, and that lands
- *     in `src/lib/hooks.ts` — a Windows-portable-path surface the CI windows leg
+ *     in `src/lib/hooks/install.ts` — a Windows-portable-path surface the CI windows leg
  *     gates on. Split to RUSH-2456 so this PR stays Linux-only-green; hook FILES
  *     are still reconciled by the in-write orphan sweep (versions.ts, gated on
  *     `hooksToSync > 0`).

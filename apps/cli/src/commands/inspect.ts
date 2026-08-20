@@ -46,7 +46,7 @@ import {
   type ResourceEntry,
   type SkillResourceEntry,
 } from '../lib/resources.js';
-import { listHookEntriesFromDir } from '../lib/hooks.js';
+import { listHookEntriesFromDir } from '../lib/hooks/install.js';
 import { getResourceInventory, type ResourceInventory } from '../lib/resource-inventory.js';
 import { listMcpServerConfigs, discoverMcpConfigsFromRepo, type McpYamlConfig } from '../lib/mcp.js';
 import { discoverPlugins, discoverPluginsInDir, pluginResourceGroups, inspectPluginCapabilities, pluginCapabilityLabels, type PluginResourceGroup } from '../lib/plugins/plugins.js';

@@ -21,7 +21,7 @@ import { capableAgents } from './capabilities.js';
 
 describe('hooks capability <-> registrar completeness', () => {
   it('every hooks-capable agent has a branch in registerHooksToSettings', () => {
-    const hooksSource = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/hooks.ts'), 'utf-8');
+    const hooksSource = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/hooks/install.ts'), 'utf-8');
     const start = hooksSource.indexOf('export function registerHooksToSettings');
     expect(start).toBeGreaterThan(-1);
     // The function's final `return { registered: [], errors: [] };` (the

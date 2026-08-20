@@ -25,7 +25,7 @@ vi.mock('../state.js', async (importOriginal) => {
   };
 });
 
-import { listHookEntriesFromDir, resolveHookScriptPath, registerHooksToSettings } from '../hooks.js';
+import { listHookEntriesFromDir, resolveHookScriptPath, registerHooksToSettings } from '../hooks/install.js';
 import { resolveHookSource } from '../staleness/writers/sources.js';
 import type { ManifestHook } from '../types.js';
 
