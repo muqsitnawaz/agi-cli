@@ -10,7 +10,7 @@ import * as path from 'path';
 import type { AgentId } from '../../types.js';
 import { capableAgents } from '../../capabilities.js';
 import { safeJoin } from '../../paths.js';
-import { registerHooksToSettings } from '../../hooks.js';
+import { registerHooksToSettings } from '../../hooks/install.js';
 import type { ResourceWriter, WriteArgs, WriteResult, RemoveArgs, RemoveResult } from './types.js';
 import { resolveHookSource } from './sources.js';
 import { lazyAgentMap } from './lazy-map.js';

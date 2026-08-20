@@ -60,7 +60,7 @@ import {
   type AvailableResources,
 } from '../lib/installations/versions.js';
 import { capableAgents } from '../lib/capabilities.js';
-import { parseHookManifest, registerHooksToSettings } from '../lib/hooks.js';
+import { parseHookManifest, registerHooksToSettings } from '../lib/hooks/install.js';
 import { compileRulesForProject } from '../lib/rules/compile.js';
 import { runLaunchSync } from '../lib/project-launch.js';
 import { formatKeptProjectResources } from '../lib/project-resources.js';

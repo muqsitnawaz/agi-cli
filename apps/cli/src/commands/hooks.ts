@@ -34,7 +34,7 @@ import {
   diffVersionHooks,
   iterHooksCapableVersions,
   removeHookFromVersion,
-} from '../lib/hooks.js';
+} from '../lib/hooks/install.js';
 import {
   listInstalledVersions,
   getGlobalDefault,

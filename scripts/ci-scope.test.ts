@@ -99,7 +99,7 @@ describe('classifyCiScope', () => {
   });
 
   test.each([
-    'apps/cli/src/lib/hooks.ts',
+    'apps/cli/src/lib/hooks/install.ts',
     'apps/cli/src/lib/hooks/loader.ts',
     'apps/cli/src/lib/platform/paths.ts',
     'apps/cli/src/lib/shims-windows.ts',

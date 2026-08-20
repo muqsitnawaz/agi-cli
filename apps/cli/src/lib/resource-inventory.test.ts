@@ -46,7 +46,7 @@ interface InventoryReport {
 function runInventory(agent: string, version: string, opts: { register?: boolean } = {}): InventoryReport {
   const modulePath = path.resolve(process.cwd(), 'src/lib/resource-inventory.ts');
   const versionsPath = path.resolve(process.cwd(), 'src/lib/installations/versions.ts');
-  const hooksPath = path.resolve(process.cwd(), 'src/lib/hooks.ts');
+  const hooksPath = path.resolve(process.cwd(), 'src/lib/hooks/install.ts');
   const register = opts.register
     ? `
       const { getVersionHomePath } = await import(${JSON.stringify(versionsPath)});

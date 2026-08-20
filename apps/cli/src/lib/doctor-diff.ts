@@ -51,7 +51,7 @@ import { shouldInstallCommandAsSkill, commandSkillMatches, commandSkillName } fr
 import { gooseCommandMatches, gooseCommandsDir } from './goose-commands.js';
 import { supports } from './capabilities.js';
 import { listSkillsInVersionHome, getVersionSkillsDir } from './plugins/skills.js';
-import { listHookEntriesFromDir, type HookWiringReport } from './hooks.js';
+import { listHookEntriesFromDir, type HookWiringReport } from './hooks/install.js';
 import { getResourceInventory, type ResourceInventory } from './resource-inventory.js';
 
 const RULES_DOC_FILENAME = 'README.md';

@@ -60,7 +60,7 @@ import {
   switchConfigSymlink,
   switchHomeFileSymlinks,
 } from './shims.js';
-import { parseHookManifest, registerHooksToSettings } from './hooks.js';
+import { parseHookManifest, registerHooksToSettings } from './hooks/install.js';
 import { isPromptCancelled } from './format.js';
 
 export interface RefreshOptions {

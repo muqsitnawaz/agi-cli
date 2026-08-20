@@ -6,7 +6,7 @@
 
 import type { HealCheck, HealCtx, CheckResult } from '../types.js';
 import { resultOf } from '../types.js';
-import { repairManagedHookRuntimeArtifacts } from '../../hooks.js';
+import { repairManagedHookRuntimeArtifacts } from '../../hooks/install.js';
 
 export const hookRuntimeCheck: HealCheck = {
   id: 'hook-runtime',

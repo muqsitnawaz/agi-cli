@@ -26,7 +26,7 @@ import {
   type RoutineLiveState,
 } from './inspect.js';
 import { stripAnsi } from '../lib/session/width.js';
-import { listHookEntriesFromDir } from '../lib/hooks.js';
+import { listHookEntriesFromDir } from '../lib/hooks/install.js';
 import type { ManifestHook } from '../lib/types.js';
 import { getUserAgentsDir, getSystemAgentsDir } from '../lib/state.js';
 import { stringWidth } from '../lib/session/width.js';

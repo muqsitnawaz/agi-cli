@@ -37,7 +37,7 @@ import {
   diffVersionHooks,
   getVersionHooksDir,
   listHooksInVersionHome,
-} from '../src/lib/hooks.js';
+} from '../src/lib/hooks/install.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

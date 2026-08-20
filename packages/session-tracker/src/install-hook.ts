@@ -195,7 +195,7 @@ async function installHermes(opts: InstallOptions): Promise<InstallResult> {
   if (opts.dryRun) return { agent: 'hermes', installed: false, configPath };
   // Read-modify-write the YAML, preserving every sibling key (mcp_servers, …) —
   // mirrors the CLI's registerHooksForHermes. Hermes maps SessionStart to the
-  // `on_session_start` event (HERMES_EVENT_MAP in apps/cli/src/lib/hooks.ts).
+  // `on_session_start` event (HERMES_EVENT_MAP in apps/cli/src/lib/hooks/install.ts).
   let cfg: Record<string, unknown> = {};
   try {
     const parsed = YAML.parse(await fs.promises.readFile(configPath, 'utf8'));
