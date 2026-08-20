@@ -74,11 +74,10 @@ interface RemoteSpec {
  * `add`/`use`/`list`, and none) and were removed.
  */
 export const REMOTE_PASSTHROUGH: Record<string, RemoteSpec> = {
-  // status / inspect
+  // inspect
   view: {},
   inspect: {},
   doctor: {},
-  status: {},
   check: {},
   list: {},
   usage: {},

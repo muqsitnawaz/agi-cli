@@ -425,7 +425,7 @@ transparently.
 
 External tools (dashboards, voice assistants, CI runners, monitoring) can read
 fleet state via canonical `--json` sources. Prefer **`agents snapshot --json`** when
-you need inventory + active sessions in one process; keep `agents status --json` for
+you need inventory + active sessions in one process; keep `agents sync status --json` for
 sync drift only. No direct DB access, no re-parsing of agent-specific formats, no auth
 to manage.
 
@@ -447,7 +447,7 @@ Three diagnostics with distinct scopes (RUSH-2027):
   (optional feed / sync). Replaces the N× `view --json` + `sessions --active --json` fork
   storm. Default sessions scope is this machine; `--all-hosts` matches full active fan-out.
   JSON contract: `FleetSnapshot` version 1 (`inventory`, `sessions`, `agents`, optional
-  `feed` / `sync`). Does **not** replace `agents status` (UnifiedSyncStatus / drift).
+  `feed` / `sync`). Does **not** replace `agents sync status` (UnifiedSyncStatus / drift).
 
   The daemon no longer force-probes every device every 3 minutes (the old N² ssh
   fan-out and orphaned-probe pile-up, RUSH-2114).
