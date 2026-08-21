@@ -11,6 +11,7 @@ import * as path from 'path';
 import * as crypto from 'node:crypto';
 import * as yaml from 'yaml';
 import type { AgentId } from './types.js';
+import { ALL_AGENT_IDS } from './agents.js';
 import { getUserAgentsDir } from './state.js';
 import { deleteKeychainToken, getKeychainToken, hasKeychainToken, keychainItemName } from './secrets/profiles.js';
 import { getPreset, type Preset } from './profiles-presets.js';
@@ -130,6 +131,17 @@ export function profileExists(name: string): boolean {
   return fs.existsSync(profilePath(name));
 }
 
+/**
+ * True when `name` is a custom harness (a profile that is not shadowing a
+ * native agent id) — the predicate routines/monitors use to accept an
+ * `agent:` value that `agents run` will resolve as a profile. A native id
+ * always reads as native, matching exec's resolution order.
+ */
+export function isCustomHarnessName(name: string): boolean {
+  if (!PROFILE_NAME_PATTERN.test(name)) return false;
+  return !(ALL_AGENT_IDS as readonly string[]).includes(name) && profileExists(name);
+}
+
 /** Read and parse a profile from disk. Throws if not found or malformed. */
 export function readProfile(name: string): Profile {
   validateProfileName(name);
@@ -167,7 +179,11 @@ function migrateLegacyProfileAuth(profile: Profile, file: string): void {
   }
   const migratedAccount = findAccount(accountName)!;
   const oldItem = profile.auth.keychainItem;
-  profile.account = migratedAccount.id;
+  // Reference by NAME, not id: profiles sync fleet-wide with `agents repo push`
+  // while account ids are minted per-device, so an id ref breaks on every other
+  // machine ("Unknown account '<uuid>'"). Names are the portable handle — the
+  // registry resolves both, and `accounts rename` already rewrites name refs.
+  profile.account = migratedAccount.name;
   profile.provider = provider;
   delete profile.auth;
   delete profile.authOptional;
@@ -609,6 +625,17 @@ export function renameProfile(oldName: string, newName: string): void {
 export function resolveProfileEnv(profile: Profile): Record<string, string> {
   const env: Record<string, string> = { ...profile.env };
   if (profile.account) {
+    if (!findAccount(profile.account)) {
+      // The commonest cause: the profile synced here via `agents repo push/pull`
+      // but its account ref was minted on another device (legacy id refs), so
+      // the bare "Unknown account" from the registry gives the user nothing to
+      // act on. Name the harness and the repair.
+      throw new Error(
+        `Harness '${profile.name}' references account '${profile.account}', which does not exist on this device. ` +
+        `Accounts are per-machine; pick one from 'agents accounts list' and repoint with ` +
+        `'agents harness edit ${profile.name} --account <name>', or add it with 'agents accounts add'.`,
+      );
+    }
     const account = resolveCredentialAccount(profile.account, profile.host.agent, profile.provider);
     Object.assign(env, account.env);
   }
