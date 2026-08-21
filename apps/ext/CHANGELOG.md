@@ -6,6 +6,13 @@ All notable changes to AGI EXT (the VS Code extension) are documented here. Form
 
 ## [0.9.328] - 2026-08-20
 
+- **New Agent separates placement from account choice (RUSH-2961).**
+  `Agents: New <Harness>` lets agents-cli resolve the configured device target,
+  then opens the version/account picker populated by that device. `(Pick Host)`
+  asks for the device and then the account; `(Auto)` keeps choosing both.
+  Source: `src/core/launchTarget.ts`, `src/core/agents.ts`,
+  `src/vscode/extension.ts`.
+
 - **The Fleet panel stops burying idle-but-unfinished work below running work
   (RUSH-2838).** The root `AGENTS.md` "Purpose" section makes idle-but-unfinished
   the highest-risk state — the one most likely to be silently abandoned — and says
