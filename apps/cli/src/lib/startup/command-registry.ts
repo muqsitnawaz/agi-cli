@@ -3,8 +3,8 @@ const LOADED_COMMAND_NAMES = [
   'permissions', 'mcp', 'clis', 'subagents', 'plugins', 'workflows', 'add', 'use', 'list',
   'remove', 'rm', 'purge', 'update', 'prune', 'import', 'registry', 'search', 'install',
   'routines', 'monitors', 'projects', 'run', 'open', 'reconnect', 'fork', 'config',
-  'models', 'modes', 'trash', 'restore', 'doctor', 'apply',
-  'route', 'harness', 'harnesses', 'secrets', 'menubar', 'beta', 'sync',
+  'models', 'modes', 'trash', 'restore', 'doctor',
+  'route', 'harness', 'harnesses', 'secrets', 'menubar', 'sync',
   'refresh-rules', 'factory', 'usage', 'insights', 'perf', 'trends',
   'pty', 'tmux', 'watchdog', 'browser', 'computer', 'logs', 'events',
   'ssh', 'devices', 'fleet', 'repos', 'repo', 'setup', 'uninstall', 'upgrade', 'sessions',
@@ -47,7 +47,9 @@ export const KNOWN_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set<string>([
  * use `agents feed --filter updates` (RUSH-2692). `status` moved under
  * `agents sync status` (RUSH-2864). `tickets` was removed — use `linear`
  * (linear-cli) (RUSH-2932). `alias` moved under `agents setup alias` (RUSH-2965).
- * `inbox` was a pure alias of `agents feed` (RUSH-2984).
+ * `inbox` was a pure alias of `agents feed` (RUSH-2984). `apply` nested under
+ * `agents fleet apply` / `agents devices apply`. `beta` nested under
+ * `agents setup beta` (RUSH-2981).
  */
 export const RETIRED_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set([
   'webhook',
@@ -70,6 +72,8 @@ export const RETIRED_TOP_LEVEL_COMMANDS: ReadonlySet<string> = new Set([
   'tickets',
   'alias',
   'inbox',
+  'apply',
+  'beta',
 ]);
 
 export function isKnownTopLevelCommand(name: string): boolean {
