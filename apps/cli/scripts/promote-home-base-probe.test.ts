@@ -29,13 +29,17 @@ function stubBin(names: string[], overrides: Record<string, string> = {}): strin
   // The probe judges the box by what is on PATH, so the child PATH is the stub
   // dir ONLY — a real /usr/bin on it leaked the host's own jq into the
   // "missing tool" case. bash/env come in as symlinks so the stubs' shebangs
-  // and the probe itself still resolve.
-  for (const [name, target] of [
-    ['bash', '/usr/bin/bash'],
-    ['env', '/usr/bin/env'],
-    ['sh', '/bin/sh'],
+  // and the probe itself still resolve. Each has per-OS location candidates:
+  // macOS ships bash at /bin/bash (there is no /usr/bin/bash), while Linux has
+  // /usr/bin/bash — hardcoding one made this whole file ENOENT on macOS.
+  for (const [name, targets] of [
+    ['bash', ['/usr/bin/bash', '/bin/bash']],
+    ['env', ['/usr/bin/env', '/bin/env']],
+    ['sh', ['/bin/sh', '/usr/bin/sh']],
   ] as const) {
-    if (!names.includes(name) && fs.existsSync(target)) fs.symlinkSync(target, path.join(dir, name));
+    if (names.includes(name)) continue;
+    const target = targets.find((t) => fs.existsSync(t));
+    if (target) fs.symlinkSync(target, path.join(dir, name));
   }
   return dir;
 }
