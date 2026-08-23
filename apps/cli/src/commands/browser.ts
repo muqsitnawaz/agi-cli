@@ -14,14 +14,11 @@ import {
   extractConfiguredPort,
   findFreeProfilePort,
   getEndpointPresets,
-  listProfilesWithScope,
   formatProfilesTable,
   type BrowserProfile,
   editProfile,
-  moveProfileScope,
   renameProfile,
   assertRegistrableProfileName,
-  misfiledFleetProfile,
   type EditableProfileFields,
 } from '../lib/browser/profiles.js';
 import { resolveActor } from '../lib/actor.js';
@@ -44,6 +41,7 @@ import {
   buildProfilePrunePlan,
   pruneProfiles,
   PRUNE_REASON_TEXT,
+  identityLoopbackMismatch,
 } from '../lib/browser/runtime-state.js';
 import { DEFAULT_VIEWPORT, parseWindowSize, parseWindowPosition } from '../lib/browser/devices.js';
 import { runBrowserSessionsCommand } from './browser-sessions-picker.js';
@@ -62,6 +60,7 @@ import { registerCommandGroups, setHelpSections } from '../lib/help.js';
 import { buildHar } from '../lib/browser/har.js';
 import { getCliVersion } from '../lib/version.js';
 import { runBrowserIPCStream } from '../lib/browser/stream.js';
+import { machineId } from '../lib/machine-id.js';
 
 /**
  * Resolve which browser task a command targets. Order:
@@ -301,17 +300,16 @@ function registerProfilesCommands(browser: Command): void {
   profiles
     .command('list')
     .alias('ls')
-    .description('List all browser profiles, with the store each lives in (local / fleet)')
+    .description('List all browser profiles and the devices declaring each one')
     .option('--json', 'Output machine-readable JSON')
     .action(async (opts: { json?: boolean }) => {
-      const scoped = await listProfilesWithScope();
+      const allProfiles = await listProfiles();
       const configuredDefault = getConfiguredDefaultProfileName();
 
       if (opts.json) {
         console.log(JSON.stringify(
-          scoped.map(({ profile, scope }) => ({
+          allProfiles.map((profile) => ({
             ...profile,
-            scope,
             isConfiguredDefault: profile.name === configuredDefault,
           })),
           null,
@@ -320,7 +318,7 @@ function registerProfilesCommands(browser: Command): void {
         return;
       }
 
-      if (scoped.length === 0) {
+      if (allProfiles.length === 0) {
         console.log('No browser profiles configured.');
         console.log('Create one with: agents browser profiles create <name> --browser chrome');
         return;
@@ -328,7 +326,7 @@ function registerProfilesCommands(browser: Command): void {
 
       // Rendering lives in lib/browser/profiles.ts so the column widths and the
       // default-marking rules are unit-tested rather than eyeballed (RUSH-2710).
-      for (const line of formatProfilesTable(scoped, configuredDefault)) console.log(line);
+      for (const line of formatProfilesTable(allProfiles, configuredDefault)) console.log(line);
     });
 
   profiles
@@ -398,12 +396,8 @@ function registerProfilesCommands(browser: Command): void {
 
   profiles
     .command('create <name>')
-    .description('Create a new browser profile (machine-local unless --fleet)')
+    .description('Create a new browser profile on this device')
     .requiredOption('-b, --browser <type>', `Browser type: ${VALID_BROWSERS.join(', ')}`)
-    .option(
-      '--fleet',
-      'Store in the synced agents.yaml so every machine sees it. Default is machine-local: a profile pins an OS-specific binary path and a locally chosen port, so a synced copy is wrong on every other box.'
-    )
     .option('-e, --endpoint <url>', 'CDP endpoint URL (repeatable; auto-assigned if omitted)', collect, [])
     .option('-s, --secrets <bundle>', 'Secrets bundle to inject')
     .option('-d, --description <text>', 'Profile description')
@@ -498,10 +492,8 @@ function registerProfilesCommands(browser: Command): void {
         viewport,
       };
 
-      await createProfile(profile, { fleet: !!opts.fleet });
-      console.log(
-        `Created profile: ${name} (${opts.fleet ? 'fleet-synced — visible on every machine' : 'machine-local'})`
-      );
+      await createProfile(profile);
+      console.log(`Created profile: ${name} on ${machineId()}`);
       // Warn (don't fail) if the declared secrets bundle doesn't exist yet — it
       // may be created later, but a typo should surface now.
       if (opts.secrets && !bundleExists(opts.secrets)) {
@@ -613,18 +605,11 @@ function registerProfilesCommands(browser: Command): void {
       }
 
       if (opts.json) {
-        console.log(JSON.stringify({ ...result.profile, scope: result.scope, changed: result.changed }, null, 2));
+        console.log(JSON.stringify({ ...result.profile, devices: result.devices, changed: result.changed }, null, 2));
       } else if (result.changed.length === 0) {
         console.log(`No change: ${name} already had those values.`);
       } else {
-        console.log(`Updated ${name} (${result.scope}): ${result.changed.join(', ')}`);
-      }
-
-      if (result.fleetCopyLeftStale) {
-        console.error(
-          `warning: "${name}" is machine-local by rule, so the edit was written to this machine only. ` +
-            `The fleet-synced copy still holds the old values on every other box.`
-        );
+        console.log(`Updated ${name} on ${machineId()}: ${result.changed.join(', ')}`);
       }
       if (patch.secrets && !bundleExists(patch.secrets)) {
         console.error(
@@ -649,7 +634,7 @@ function registerProfilesCommands(browser: Command): void {
         console.log(JSON.stringify({ from, to, ...res }, null, 2));
         return;
       }
-      console.log(`Renamed ${from} -> ${to} (${res.scope})`);
+      console.log(`Renamed ${from} -> ${to} on ${machineId()}`);
       if (res.movedDirs.length > 0) {
         console.log(`  moved ${res.movedDirs.length} browser data dir${res.movedDirs.length === 1 ? '' : 's'} — logins preserved`);
       }
@@ -669,39 +654,6 @@ function registerProfilesCommands(browser: Command): void {
         for (const pin of res.stalePins) {
           console.error(`  agents config set ${pin.key} ${to} --device ${pin.device}`);
         }
-      }
-    });
-
-  profiles
-    .command('scope <name> <scope>')
-    .description('Move a profile between the fleet-synced store and this machine (local|fleet)')
-    .option('--json', 'Output machine-readable JSON')
-    .action(async (name: string, scope: string, opts: { json?: boolean }) => {
-      if (scope !== 'local' && scope !== 'fleet') {
-        console.error('scope must be `local` or `fleet`');
-        process.exit(1);
-      }
-      let moved;
-      try {
-        moved = await moveProfileScope(name, scope);
-      } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
-      if (opts.json) {
-        console.log(JSON.stringify({ profile: name, ...moved }, null, 2));
-        return;
-      }
-      if (moved.from === moved.to) {
-        console.log(`${name} is already ${scope}.`);
-        return;
-      }
-      console.log(`Moved ${name}: ${moved.from} -> ${moved.to}`);
-      if (scope === 'local') {
-        console.error(
-          `note: ${name} is no longer visible on any other machine. ` +
-            `Run this ON the machine that owns the browser — the surviving copy is this one.`
-        );
       }
     });
 
@@ -913,16 +865,14 @@ function registerProfilesCommands(browser: Command): void {
 
       const checks: Array<{ label: string; ok: boolean; detail: string }> = [];
 
-      // 0. Store scope. A fleet-synced profile whose endpoint is loopback cdp://
-      //    means a DIFFERENT browser on every machine — the name lies everywhere
-      //    but here. Checked first because it invalidates the reading of every
-      //    check below on any other box.
-      const scoped = (await listProfilesWithScope()).find((p) => p.profile.name === name);
-      const misfiled = scoped ? misfiledFleetProfile(profile, scoped.scope) : { misfiled: false as const };
+      // 0. Declaration topology. An identity-bearing profile declared by a
+      //    different device cannot be reached through a loopback CDP endpoint
+      //    on this one. Checked first because it invalidates every local check.
+      const misfiled = identityLoopbackMismatch(profile);
       checks.push(
         misfiled.misfiled
           ? { label: 'scope', ok: false, detail: misfiled.why }
-          : { label: 'scope', ok: true, detail: scoped ? `stored ${scoped.scope}` : 'stored local' }
+          : { label: 'scope', ok: true, detail: `declared on ${profile.devices.join(', ')}` }
       );
 
       // 1. Binary exists for declared browser type, and is a real executable we

@@ -4,16 +4,58 @@ import { execFileSync } from 'child_process';
 import {
   getProfileRuntimeDir,
   getBrowserRuntimeDir,
-  listProfilesWithScope,
+  getEndpointPresets,
+  listProfiles,
   getConfiguredDefaultProfileName,
   isProfileLaunchableHere,
   deleteProfile,
   DEFAULT_BROWSER_PROFILE_NAME,
   LEGACY_DEFAULT_BROWSER_PROFILE_NAME,
-  type ProfileScope,
-  misfiledFleetProfile,
+  type BrowserProfileWithDeclarations,
 } from './profiles.js';
 import { keyBelongsToProfile, type ProfileName } from './types.js';
+import { profileKind } from './registry.js';
+import { machineId } from '../machine-id.js';
+
+type PruneProfileClass = 'local' | 'fleet';
+
+/**
+ * Detect an identity-bearing profile that resolves to another device's
+ * loopback endpoint from this machine.
+ */
+export function identityLoopbackMismatch(
+  profile: BrowserProfileWithDeclarations,
+): { misfiled: false } | { misfiled: true; why: string } {
+  if (profileKind(profile.name) !== 'identity') return { misfiled: false };
+  const declaringDevice = profile.devices[0];
+  if (declaringDevice === machineId()) return { misfiled: false };
+
+  const presets = getEndpointPresets(profile);
+  const chosen =
+    profile.defaultEndpoint && presets[profile.defaultEndpoint]
+      ? profile.defaultEndpoint
+      : Object.keys(presets)[0];
+  if (!chosen) return { misfiled: false };
+
+  const target = presets[chosen].target;
+  if (!target.startsWith('cdp://')) return { misfiled: false };
+  let host: string;
+  try {
+    host = new URL(target).hostname;
+  } catch {
+    return { misfiled: false };
+  }
+  if (host !== 'localhost' && host !== '127.0.0.1' && host !== '::1') {
+    return { misfiled: false };
+  }
+
+  return {
+    misfiled: true,
+    why:
+      `identity-bearing profile declared on ${declaringDevice}, but "${target}" is a loopback endpoint — ` +
+      `on ${machineId()} it resolves to this device's own browser, not the declaring device's browser`,
+  };
+}
 
 /**
  * Per-profile runtime files we persist under
@@ -333,7 +375,7 @@ export type PruneReason = 'binary-missing' | 'never-used';
 
 export interface PruneCandidate {
   name: string;
-  scope: ProfileScope;
+  scope: PruneProfileClass;
   reason: PruneReason;
   /** Cache dirs that would be removed along with the config entry. */
   cacheDirs: string[];
@@ -345,7 +387,7 @@ export interface PrunePlan {
   /** Profiles deliberately left alone, with the guard that kept them. */
   kept: Array<{
     name: string;
-    scope: ProfileScope;
+    scope: PruneProfileClass;
     why: string;
     /**
      * True for a fleet profile whose endpoint only makes sense on one machine.
@@ -392,7 +434,7 @@ export const PRUNE_REASON_TEXT: Record<PruneReason, string> = {
 export function planProfilePrune(
   profiles: Array<{
     name: string;
-    scope: ProfileScope;
+    scope: PruneProfileClass;
     launchableHere: boolean;
     /** Set when this fleet profile's endpoint only makes sense on one machine. */
     misfiledWhy?: string;
@@ -456,10 +498,11 @@ export function planProfilePrune(
 export async function buildProfilePrunePlan(
   opts: { includeFleet?: boolean } = {}
 ): Promise<PrunePlan> {
-  const scoped = await listProfilesWithScope();
+  const profiles = await listProfiles();
   return planProfilePrune(
-    scoped.map(({ profile, scope }) => {
-      const misfiled = misfiledFleetProfile(profile, scope);
+    profiles.map((profile) => {
+      const scope: PruneProfileClass = profile.devices.length > 1 ? 'fleet' : 'local';
+      const misfiled = identityLoopbackMismatch(profile);
       return {
         name: profile.name,
         scope,
