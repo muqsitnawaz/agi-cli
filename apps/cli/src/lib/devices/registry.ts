@@ -17,8 +17,11 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import lockfile from 'proper-lockfile';
-import { getDevicesRegistryPath, getDevicesIgnoredPath } from '../state.js';
+import { getDevicesRegistryPath, readMeta, updateMeta } from '../state.js';
 import { atomicWriteJsonSync } from '../fs-atomic.js';
+import { machineId } from '../machine-id.js';
+import type { Meta } from '../types.js';
+import type { FleetManifest } from '../fleet/types.js';
 
 /** Operating-system family of a device, used to pick the remote shell. */
 export type DevicePlatform = 'windows' | 'linux' | 'macos' | 'unknown';
@@ -358,41 +361,64 @@ export async function removeDevice(name: string): Promise<boolean> {
 
 /**
  * The ignore-list: tailscale node names the user explicitly dismissed from
- * auto-discovery. A dismissed node is NOT a device (it never enters the
- * registry), so it lives in a sibling file. Auto-discovery (`runDeviceSync`'s
+ * auto-discovery. A dismissed node is deliberately NOT a device (it never
+ * enters the registry), so it has no per-device doc — its home is the central,
+ * TRACKED `~/.agents/agents.yaml` under a `fleet.ignored` list, which syncs
+ * fleet-wide via `agents repo push/pull`: a dismissal on one box stops the
+ * suggestion on every box (RUSH-3062). Auto-discovery (`runDeviceSync`'s
  * pending diff) subtracts this set, so an ignored node never re-surfaces as a
- * suggestion. Stored under the same devices/ dir, guarded by the same lock and
- * atomic-write plumbing as the registry.
+ * suggestion. Writes go through `updateMeta` — the central-config write path
+ * (withMetaLock + atomic write) — so two agents writing concurrently cannot
+ * corrupt it, and no second lock is hand-rolled here.
  */
-interface IgnoredFile {
-  ignored: string[];
-  updatedAt: string;
+
+/** One dismissal record, so `agents devices ignored` can render WHO dismissed
+ * a node and WHEN. */
+export interface IgnoredDeviceEntry {
+  /** Tailscale node name the user dismissed. */
+  name: string;
+  /** ISO-8601 timestamp of the dismissal. */
+  ignoredAt: string;
+  /** machineId() of the box the dismissal was made on. */
+  ignoredOn: string;
 }
 
-function ignoredPath(): string {
-  return getDevicesIgnoredPath();
-}
+/** The central fleet block plus the `ignored` list this module owns. The field
+ * is additive to FleetManifest; older CLIs preserve it verbatim on rewrite
+ * (serializeCentral compares/deletes only the top-level keys it models, and
+ * `fleet` passes through as one opaque value). */
+type FleetWithIgnored = FleetManifest & { ignored?: IgnoredDeviceEntry[] };
 
-/** Load the set of ignored node names. Missing file => empty set. A malformed
- * file is a hard error for the same reason the registry is: silently returning
- * [] would let the next write wipe the user's dismissals. */
-export async function loadIgnored(): Promise<Set<string>> {
-  const p = ignoredPath();
-  let raw: string;
-  try {
-    raw = await fs.readFile(p, 'utf-8');
-  } catch (err: any) {
-    if (err && err.code === 'ENOENT') return new Set();
-    throw err;
-  }
-  try {
-    const parsed = JSON.parse(raw) as IgnoredFile;
-    return new Set(Array.isArray(parsed.ignored) ? parsed.ignored : []);
-  } catch (err: any) {
+/**
+ * The full ignore-list entries — who dismissed a node, when, and on which box —
+ * the typed read side for `agents devices ignored`. Absent `fleet.ignored` =>
+ * []. A malformed block is a hard error for the same reason the registry is:
+ * silently returning [] would let the next write wipe the user's dismissals.
+ */
+export function loadIgnoredEntries(meta: Meta = readMeta()): IgnoredDeviceEntry[] {
+  const raw = (meta.fleet as FleetWithIgnored | undefined)?.ignored;
+  if (raw === undefined) return [];
+  if (
+    !Array.isArray(raw) ||
+    raw.some(
+      (e) =>
+        !e ||
+        typeof e.name !== 'string' ||
+        typeof e.ignoredAt !== 'string' ||
+        typeof e.ignoredOn !== 'string',
+    )
+  ) {
     throw new Error(
-      `Device ignore-list corrupted at ${p}: ${err?.message ?? err}. Inspect and restore from backup.`,
+      `Device ignore-list corrupted in agents.yaml (fleet.ignored): expected a list of { name, ignoredAt, ignoredOn } entries. Inspect and repair ~/.agents/agents.yaml.`,
     );
   }
+  return raw;
+}
+
+/** Load the set of ignored node names. Same corruption contract as
+ * {@link loadIgnoredEntries}. */
+export async function loadIgnored(): Promise<Set<string>> {
+  return new Set(loadIgnoredEntries().map((e) => e.name));
 }
 
 /** True if `name` is on the ignore-list. */
@@ -400,26 +426,47 @@ export async function isIgnored(name: string): Promise<boolean> {
   return (await loadIgnored()).has(name);
 }
 
+/**
+ * Union `names` into the meta's ignore-list, stamping new entries with
+ * `ignoredAt` and THIS machine's id. Existing entries keep their original
+ * who/when, so re-adding a name is a true no-op. Returns the input unchanged
+ * when no name is new. Exported for the one-shot legacy-store migration in
+ * lib/devices/config-migration.ts.
+ */
+export function withIgnoredAdded(meta: Meta, names: string[], ignoredAt: string): Meta {
+  const entries = loadIgnoredEntries(meta); // throws on a corrupted block — never wipe it
+  const have = new Set(entries.map((e) => e.name));
+  const fresh = names.filter((n) => !have.has(n));
+  if (fresh.length === 0) return meta;
+  const fleet = (meta.fleet ?? { devices: {} }) as FleetWithIgnored;
+  const ignored: IgnoredDeviceEntry[] = [
+    ...entries,
+    ...fresh.map((name) => ({ name, ignoredAt, ignoredOn: machineId() })),
+  ].sort((a, b) => a.name.localeCompare(b.name));
+  const nextFleet: FleetWithIgnored = { ...fleet, ignored };
+  return { ...meta, fleet: nextFleet };
+}
+
 /** Add a node name to the ignore-list. Idempotent. Returns the resulting set. */
 export async function addIgnored(name: string): Promise<Set<string>> {
   assertValidDeviceName(name);
-  const p = ignoredPath();
-  return withRegistryLock(p, async () => {
-    const set = await loadIgnored();
-    set.add(name);
-    atomicWriteJsonSync(p, { ignored: [...set].sort(), updatedAt: new Date().toISOString() });
-    return set;
-  });
+  const meta = updateMeta((m) => withIgnoredAdded(m, [name], new Date().toISOString()));
+  return new Set(loadIgnoredEntries(meta).map((e) => e.name));
 }
 
 /** Remove a node name from the ignore-list (un-ignore). Returns false if it was
  * not ignored. */
 export async function removeIgnored(name: string): Promise<boolean> {
-  const p = ignoredPath();
-  return withRegistryLock(p, async () => {
-    const set = await loadIgnored();
-    if (!set.delete(name)) return false;
-    atomicWriteJsonSync(p, { ignored: [...set].sort(), updatedAt: new Date().toISOString() });
-    return true;
+  let removed = false;
+  updateMeta((m) => {
+    const fleet = m.fleet as FleetWithIgnored | undefined;
+    if (!fleet?.ignored) return m;
+    const entries = loadIgnoredEntries(m);
+    const next = entries.filter((e) => e.name !== name);
+    if (next.length === entries.length) return m;
+    removed = true;
+    const nextFleet: FleetWithIgnored = { ...fleet, ignored: next };
+    return { ...m, fleet: nextFleet };
   });
+  return removed;
 }
