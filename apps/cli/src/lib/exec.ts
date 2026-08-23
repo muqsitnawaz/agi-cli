@@ -1877,7 +1877,7 @@ async function spawnAgent(options: ExecOptions): Promise<SpawnResult> {
       host: await hostFromPid(process.pid),
       status: 'running',
       provenance: deriveProvenance(process.env as Record<string, string>, machineId()),
-    }, machineId());
+    }, options.sessionId, machineId());
     if (notice) process.stderr.write(`${notice}\n`);
   }
 
