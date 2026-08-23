@@ -80,6 +80,12 @@ export function captureFleet(prev: FleetManifest | undefined, inputs: CaptureInp
     manifest.discovery = { ...prev.discovery };
   }
 
+  // The ignore-list is operator intent, not live state — a capture must carry
+  // it forward verbatim or it would wipe every dismissal fleet-wide.
+  if (prev?.ignored && prev.ignored.length > 0) {
+    manifest.ignored = prev.ignored.map((e) => ({ ...e }));
+  }
+
   const bundles = inputs.secretsBundles ?? prev?.secrets?.bundles;
   if (bundles && bundles.length > 0) manifest.secrets = { bundles: [...bundles].sort() };
 
