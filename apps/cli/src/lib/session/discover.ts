@@ -31,7 +31,7 @@ import { SESSION_AGENTS } from './types.js';
 import { deriveShortId } from './short-id.js';
 import { buildClaudeAccountIndex, resolveClaudeAccount, type ClaudeAccountIndex } from './claude-accounts.js';
 import { extractSessionTopic, extractSlashCommandName, extractSlashCommandFromToolInput } from './prompt.js';
-import { isSkillInvocation, extractSkills, extractSlashCommands } from './highlights.js';
+import { isBackgroundShellStart, isSkillInvocation, extractSkills, extractSlashCommands, isSubAgentTool } from './highlights.js';
 import { parseAntigravity, parseCursor, splitSessionFilePath } from './parse.js';
 import { extractPrUrl, detectWorktree, detectTicket, isPrCreateCommand, detectSpawnedTeam, isTicketCreateTool, extractCreatedTicket, extractRecentDirectoriesTouched, extractTodoProgressFromEvents } from './state.js';
 import { costOfUsage, costOfUsageNoCache } from '../pricing/index.js';
@@ -302,6 +302,9 @@ interface ClaudeSessionScan {
   recentDirectoriesTouched?: string[];
   /** Skills invoked (#12) — see SessionMeta.skillsUsed. */
   skillsUsed?: Array<{ name: string; count: number }>;
+  /** Fan-out left behind (RUSH-3091/3095) — see SessionMeta.subAgentCount. */
+  subAgentCount?: number;
+  backgroundShellCount?: number;
   /** Slash commands invoked (#12) — see SessionMeta.slashCommandsUsed. */
   slashCommandsUsed?: Array<{ name: string; count: number }>;
 }
@@ -1620,6 +1623,8 @@ async function readClaudeMeta(
       todos: scan.todos,
       recentDirectoriesTouched: scan.recentDirectoriesTouched,
       skillsUsed: scan.skillsUsed,
+      subAgentCount: scan.subAgentCount,
+      backgroundShellCount: scan.backgroundShellCount,
       slashCommandsUsed: scan.slashCommandsUsed,
     };
   } else {
@@ -1660,6 +1665,8 @@ async function readClaudeMeta(
       todos: scan.todos,
       recentDirectoriesTouched: scan.recentDirectoriesTouched,
       skillsUsed: scan.skillsUsed,
+      subAgentCount: scan.subAgentCount,
+      backgroundShellCount: scan.backgroundShellCount,
       slashCommandsUsed: scan.slashCommandsUsed,
     };
   }
@@ -3585,11 +3592,21 @@ interface ClaudeParseState {
   /** Slash-command events (user-typed <command-name> wrapper OR a SlashCommand
    *  tool_use), held for extractSlashCommands() at finalize (#12). */
   slashCommandEvents: SessionEvent[];
+  /**
+   * Fan-out tallies (RUSH-3091/3095). Counted as we stream rather than held as
+   * events — unlike skills we need only the count, and a busy session can spawn
+   * hundreds. `backgroundShells` stays undefined for a harness with no
+   * background-shell concept, which must render as absence, never as 0.
+   */
+  subAgents: number;
+  backgroundShells: number | undefined;
 }
 
 /** Zero-value accumulator for a fresh (from-byte-0) Claude parse. */
 export function initClaudeParseState(): ClaudeParseState {
   return {
+    subAgents: 0,
+    backgroundShells: 0,
     timestamp: undefined,
     cwd: undefined,
     gitBranch: undefined,
@@ -3638,6 +3655,8 @@ function foldDerivedToolState(
     recentDirectoriesTouched: string[];
     skillEvents: SessionEvent[];
     slashCommandEvents: SessionEvent[];
+    subAgents?: number;
+    backgroundShells?: number;
     cwd?: string;
   },
   event: SessionEvent,
@@ -3647,6 +3666,14 @@ function foldDerivedToolState(
   // same reason checklistEvents is folded incrementally rather than recomputed
   // from a full re-parse (see session/db.ts's writeResourceUsage doc comment).
   if (isSkillInvocation(event)) state.skillEvents.push(event);
+  // Fan-out tallies (RUSH-3091/3095): counted, not held — we need the number,
+  // and a heavy orchestrator session can spawn hundreds of each.
+  if (state.subAgents !== undefined && isSubAgentTool(event.tool ?? '', event.command ?? '')) {
+    state.subAgents += 1;
+  }
+  if (state.backgroundShells !== undefined && isBackgroundShellStart(event)) {
+    state.backgroundShells += 1;
+  }
   if (event.tool === 'SlashCommand') {
     const slashCommand = extractSlashCommandFromToolInput(event.args);
     if (slashCommand) state.slashCommandEvents.push({ ...event, slashCommand });
@@ -3881,6 +3908,8 @@ export function finalizeClaudeScan(state: ClaudeParseState): ClaudeSessionScan {
     recentDirectoriesTouched: state.recentDirectoriesTouched.length ? state.recentDirectoriesTouched : undefined,
     skillsUsed: state.skillEvents.length ? extractSkills(state.skillEvents) : undefined,
     slashCommandsUsed: state.slashCommandEvents.length ? extractSlashCommands(state.slashCommandEvents) : undefined,
+    subAgentCount: state.subAgents,
+    backgroundShellCount: state.backgroundShells,
   };
 }
 
@@ -3927,7 +3956,16 @@ export interface ClaudeParserState {
   // v3 (RUSH-2287): added the burn-split accumulators + no-cache cost. A stale v2
   // blob is rejected by the `!== 3` guard and the session is re-parsed from byte 0,
   // which populates the new split correctly rather than resuming without it.
-  v: 3;
+  v: 4;
+  /**
+   * Fan-out tallies carried across a RESUMED parse (RUSH-3091/3095). They must
+   * live in the durable blob: the resumable parser reads only new bytes, so
+   * re-initialising them on hydrate would report a session's tail, not its
+   * total. Adding them is why `v` moved 3 -> 4 — an older blob is rejected and
+   * the session re-parses from byte 0 with correct totals.
+   */
+  subAgents: number;
+  backgroundShells: number | undefined;
   offset: number;
   jsonlDroppingOversizedLine?: boolean;
   timestamp?: string;
@@ -3990,7 +4028,9 @@ export function serializeClaudeParserState(
     : allIds;
   const ticket = detectTicket(state.userTexts.join('\n') || undefined, state.gitBranch);
   return {
-    v: 3,
+    v: 4,
+    subAgents: state.subAgents,
+    backgroundShells: state.backgroundShells,
     offset,
     jsonlDroppingOversizedLine: jsonlDroppingOversizedLine || undefined,
     timestamp: state.timestamp,
@@ -4063,6 +4103,8 @@ export function hydrateClaudeParseState(prior: ClaudeParserState): ClaudeParseSt
     seen.add(` pad:${pad++}`);
   }
   return {
+    subAgents: prior.subAgents,
+    backgroundShells: prior.backgroundShells,
     timestamp: prior.timestamp,
     cwd: prior.cwd,
     gitBranch: prior.gitBranch,
@@ -4250,7 +4292,7 @@ function parsePriorClaudeState(row: { parserState: string | null } | undefined):
   if (!row?.parserState) return null;
   try {
     const parsed = JSON.parse(row.parserState) as ClaudeParserState;
-    if (parsed?.v !== 3 || typeof parsed.offset !== 'number' || parsed.toolCalls?.v !== 1) return null;
+    if (parsed?.v !== 4 || typeof parsed.offset !== 'number' || parsed.toolCalls?.v !== 1) return null;
     return parsed;
   } catch {
     return null;

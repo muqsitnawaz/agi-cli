@@ -94,7 +94,7 @@ with what, and how big it got.** The nine fields below are that contract.
 | 6 | duration | how long it ran | yes — `sessions-picker.ts:194` ("lasted") | `SessionMeta.durationMs` (`types.ts:133`) |
 | 7 | device it ran ON | the machine executing it | partial — remote-only note (`sessions-picker.ts:126`); not shown for local | `SessionMeta.machine` (`types.ts:205`); `ActiveSession.machine` (`active.ts:168`) |
 | 8 | device STARTED FROM | ssh/origin device that launched it | **no** — not in the preview panel (it is in the list row via `sshOriginTagFor`, `sessions-browser.ts:367`) | **not persisted** — live-only `ActiveSession.provenance.origin.device` (`provenance.ts:79`) |
-| 9 | sub-agents spawned | how many child agents/forks | **no** in the preview panel | **not persisted** as a count — live `ActiveSession.pidCount` (`active.ts:153`); the full summary recomputes it (`render.ts:660`) |
+| 9 | fan-out left behind | sub-agents spawned + shells backgrounded | **yes** — both, on BOTH body paths (`sessions-picker.ts` `formatFanOut`) | `SessionMeta.subAgentCount` / `backgroundShellCount`, persisted as `sessions.sub_agent_count` / `background_shell_count` at scan time (schema v40) so a remote/unindexed row can render them |
 
 `*` model silently disappears for remote/unindexed rows: `formatMetaOnlyBody`
 (`sessions-picker.ts:233`) renders a `SessionMeta` with no events, and `model` is
@@ -142,9 +142,17 @@ the one lossy field:
   the process exits. To show it in the preview of a past session it must be captured at
   session start and stored on `SessionMeta`/`SessionRow` (a new `originDevice` /
   `startedFrom` column). Coordinate with the sessions.db `machine` work.
-- **sub-agent count (#9).** Persist the count (or a lightweight roster) at index time,
-  the same number the full summary computes at `render.ts:660`, so the preview can show
-  it without reparsing.
+- ~~**sub-agent count (#9).**~~ **Closed** (RUSH-3091/3095). `sub_agent_count` and
+  `background_shell_count` are persisted at scan time and rendered by `formatFanOut` on
+  both body paths, so a remote row shows the same fan-out a local one does. Two
+  invariants that keep it honest: the counts mean "started / left behind", never "still
+  running" (a transcript records a start and never a death — the same trap
+  `agents devices ps` documents); and `undefined` (not scanned / harness cannot report
+  it) is distinct from `0` (scanned, none found), with the segment omitted for both, so
+  the line can never assert "nothing is running". Background shells are per-harness —
+  claude/kimi flag `Bash` with `run_in_background`, grok flags `run_terminal_command`
+  with `background`; codex/droid record no such concept and cursor persists no tool
+  calls locally, so all three render absence rather than a zero.
 
 ### On the "the rework dropped preview fields" report
 

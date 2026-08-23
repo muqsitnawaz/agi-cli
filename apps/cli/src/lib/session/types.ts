@@ -269,6 +269,21 @@ export interface SessionMeta {
    */
   spawnedTeam?: string;
   /**
+   * Fan-out this session left behind, captured at scan time so the preview can
+   * show it WITHOUT re-parsing the transcript — which is the only way a remote
+   * or unindexed row (rendered from `SessionMeta` alone) can show it at all.
+   *
+   * `undefined` and `0` are different claims and must render the same way (the
+   * segment omitted): `undefined` means the row predates the field or the
+   * harness cannot report it, `0` means scanned and none found. Rendering a
+   * literal "0 background shells" for a harness that cannot report them would
+   * assert "none running" where the truth is "unknown".
+   *
+   * Counts are "started", never "still running" — see `extractBackgroundShells`.
+   */
+  subAgentCount?: number;
+  backgroundShellCount?: number;
+  /**
    * The plan markdown from the LAST `ExitPlanMode` tool call in the transcript
    * (Claude sessions only), captured at scan time. Present whenever the session
    * ever entered plan-review; consumers can pair it with a live

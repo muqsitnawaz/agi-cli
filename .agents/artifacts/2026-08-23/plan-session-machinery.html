@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Session preview: show the machinery a session left running</title>
+<style>
+:root{--font-body:Inter,Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--font-display:Inter,Inter,system-ui,sans-serif;--font-mono:"JetBrains Mono","JetBrains Mono","SFMono-Regular",Consolas,monospace;}
+@page{margin:20px}
+:root{color-scheme:light;--bg:#fafafa;--surface:#ffffff;--surface-alt:#f4f4f5;--line:#e4e4e7;--text:#18181b;--muted:#71717a;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;--artifact-fg:#18181b;--artifact-muted:#71717a;--artifact-accent:#4d7c0f;--content-width:920px;--page-padding:20px;--mobile-page-padding:14px;--hero-top:28px;--hero-bottom:20px;--section-spacing:28px;--figure-spacing:16px;--panel-padding:14px;--footer-spacing:48px;--print-margin:20px;--code:#0c0f0d;--code-text:#e7ece8;--radius:8px}
+@media(prefers-color-scheme:dark){:root:not([data-theme]){color-scheme:dark;--bg:#0a0a0a;--surface:#141414;--surface-alt:#0f0f0f;--line:#333333;--text:#e8e8e8;--muted:#888888;--accent:#a3e635;--accent-alt:#22d3ee;--warn:#facc15;--danger:#f87171;--artifact-fg:#e8e8e8;--artifact-muted:#888888;--artifact-accent:#a3e635;}}
+:root[data-theme="light"]{color-scheme:light;--bg:#fafafa;--surface:#ffffff;--surface-alt:#f4f4f5;--line:#e4e4e7;--text:#18181b;--muted:#71717a;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;--artifact-fg:#18181b;--artifact-muted:#71717a;--artifact-accent:#4d7c0f;}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#0a0a0a;--surface:#141414;--surface-alt:#0f0f0f;--line:#333333;--text:#e8e8e8;--muted:#888888;--accent:#a3e635;--accent-alt:#22d3ee;--warn:#facc15;--danger:#f87171;--artifact-fg:#e8e8e8;--artifact-muted:#888888;--artifact-accent:#a3e635;}
+@media print{:root,:root[data-theme="light"],:root[data-theme="dark"]{color-scheme:light;--bg:#fafafa;--surface:#ffffff;--surface-alt:#f4f4f5;--line:#e4e4e7;--text:#18181b;--muted:#71717a;--accent:#4d7c0f;--accent-alt:#0e7490;--warn:#b45309;--danger:#dc2626;--artifact-fg:#18181b;--artifact-muted:#71717a;--artifact-accent:#4d7c0f;}}
+.reader-highlight{background:color-mix(in srgb,var(--warn) 38%,var(--bg));color:inherit;border-radius:2px;box-decoration-break:clone;-webkit-box-decoration-break:clone;cursor:pointer}.reader-highlight:hover{background:color-mix(in srgb,var(--warn) 55%,var(--bg))}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-body);line-height:1.6;-webkit-font-smoothing:antialiased;transition:background-color .15s ease,color .15s ease}main{width:100%;max-width:var(--content-width);min-width:0;margin:0 auto;padding:24px var(--page-padding) 80px}.document-header{display:flex;align-items:center;justify-content:flex-end;min-height:42px;border-bottom:1px solid var(--line);color:var(--muted);font-family:var(--font-mono);font-size:12px}.header-label{min-width:0;margin-right:auto;padding-right:12px;overflow-wrap:anywhere;color:var(--text);font-weight:650}.theme-toggle{display:inline-flex;flex:0 0 auto;align-items:center;gap:6px;height:30px;padding:0 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--muted);font:500 12px/1 var(--font-mono);cursor:pointer}.theme-toggle:hover{color:var(--accent);border-color:var(--accent)}.theme-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.hero{padding:var(--hero-top) 0 var(--hero-bottom);border-bottom:1px solid var(--line)}.kicker{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;font-family:var(--font-mono);font-size:12px;text-transform:uppercase;letter-spacing:.14em;color:var(--accent);font-weight:500}.kicker-part{color:var(--accent)}.kicker-separator{color:var(--muted);padding:0 2px}.status-badge{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:999px;border:1px solid color-mix(in srgb,var(--warn) 40%,var(--line));background:color-mix(in srgb,var(--warn) 14%,transparent);color:var(--warn);font-family:var(--font-mono);font-size:10.5px;font-weight:650;letter-spacing:.1em;text-transform:uppercase;line-height:1}.status-badge.status-implementing,.status-badge.status-in-progress,.status-badge.status-review,.status-badge.status-done,.status-badge.status-complete{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--accent)}.hero h1{font-family:var(--font-display);font-size:clamp(30px,4vw,44px);line-height:1.1;margin:12px 0 14px;letter-spacing:-.01em}.summary{max-width:760px;color:var(--muted);font-size:17px;margin:0}.meta{display:grid;gap:14px;margin-top:20px}.facts-line{margin:0;color:var(--muted);font-family:var(--font-mono);font-size:12.5px;line-height:1.7}.meta-block{display:grid;gap:8px}.meta-label{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:500}.meta-row{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0;padding:0}.chip{display:inline-flex;align-items:center;gap:4px;max-width:100%;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:4px 11px;color:var(--muted);font-family:var(--font-mono);font-size:11.5px;line-height:1.5}.chip-value{color:var(--text);overflow-wrap:anywhere}.chip-icon{display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1.5px;fill:currentColor;flex:0 0 auto}.chip-favicon{display:inline-block;width:12px;height:12px;margin-right:5px;vertical-align:-1.5px;border-radius:2px;object-fit:contain;flex:0 0 auto}.chip-value a{color:inherit;text-decoration:none}.chip-value a:hover{text-decoration:underline}.provenance-line{margin:0;color:var(--muted);font-family:var(--font-mono);font-size:12.5px;line-height:1.7}.provenance-line a{color:var(--accent-alt);text-decoration:none}.provenance-line a:hover{text-decoration:underline}.provenance-part{color:var(--muted)}.meta-sep{margin:0 7px;opacity:.45}.toc{display:grid;gap:4px;margin:24px 0 8px;font-family:var(--font-mono);font-size:13px}.toc-item{display:block;padding:2px 0 2px 10px;border-left:2px solid transparent;color:var(--muted);text-decoration:none;overflow-wrap:anywhere}.toc-item.toc-sub{padding-left:24px;font-size:.92em;opacity:.85}.toc-item:hover{color:var(--accent)}.toc-item.is-active{color:var(--accent);border-left-color:var(--accent)}.toc-item.is-active .toc-index{opacity:1}@media (min-width:1380px){.toc{position:fixed;top:88px;left:max(20px,calc(50% - var(--content-width)/2 - 236px));width:212px;max-height:calc(100vh - 132px);overflow-y:auto;margin:0;z-index:5;scrollbar-width:thin}.toc::-webkit-scrollbar{width:6px}.toc::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}}@media (max-width:1379px){.toc-item.toc-sub{display:none}}.code-diff{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--code)}.code-diff-pre{margin:0;padding:10px 0;background:none;border:none;border-radius:0;overflow-x:auto;font-family:var(--font-mono);font-size:12.5px;line-height:1.55;color:var(--code-text)}.cd-line{display:block;white-space:pre;padding:0 14px}.cd-sign{display:inline-block;width:1.4ch;color:var(--muted);user-select:none}.cd-add{background:color-mix(in srgb,var(--accent) 15%,transparent)}.cd-add .cd-sign{color:var(--accent)}.cd-del{background:color-mix(in srgb,var(--danger) 15%,transparent)}.cd-del .cd-sign{color:var(--danger)}.cd-hunk,.cd-meta{color:var(--muted);opacity:.8}.code-diff>summary{list-style:none;cursor:pointer;padding:8px 14px;font-family:var(--font-mono);font-size:12px;color:var(--code-text);background:color-mix(in srgb,var(--code-text) 8%,var(--code));border-bottom:1px solid transparent;user-select:none}.code-diff[open]>summary{border-bottom-color:color-mix(in srgb,var(--code-text) 15%,transparent)}.code-diff>summary::-webkit-details-marker{display:none}.code-diff>summary::before{content:"\25B8";display:inline-block;margin-right:7px;color:color-mix(in srgb,var(--code-text) 55%,transparent);font-size:10px;transition:transform .12s ease}.code-diff[open]>summary::before{transform:rotate(90deg)}.checklist{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding)}.checklist-head{font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:10px}.checklist-items{list-style:none;margin:0;padding:0;display:grid;gap:7px}.cl-item{display:flex;align-items:baseline;gap:9px}.cl-box{flex:0 0 auto;font-family:var(--font-mono);font-size:.95em}.cl-done .cl-box{color:var(--accent)}.cl-todo .cl-box{color:var(--muted)}.cl-doing .cl-box{color:var(--warn)}.cl-done .cl-text{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--line)}.toc a{color:var(--muted);text-decoration:none}.toc a:hover{color:var(--accent)}.toc a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.toc-index{color:var(--accent);font-family:var(--font-mono);font-size:.9em}.artifact-body{min-width:0;padding-top:18px;counter-reset:section}h2{font-size:24px;margin:var(--section-spacing) 0 12px;line-height:1.2;letter-spacing:-.01em}.artifact-body>h2{counter-increment:section}.artifact-body>h2::before{content:counter(section,decimal-leading-zero);font-family:var(--font-mono);font-size:.62em;color:var(--accent);margin-right:10px;opacity:.85}h3{font-size:17px;margin:calc(var(--section-spacing) * .78) 0 10px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.link-pill{display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:0 6px;border:1px solid var(--line);border-radius:6px;background:var(--surface-alt);color:var(--text);font-size:.92em;line-height:1.35;text-decoration:none;vertical-align:baseline;transition:border-color .12s ease,color .12s ease,background-color .12s ease}.link-pill:hover{border-color:var(--accent);color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,var(--surface-alt));text-decoration:none}.link-pill:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.link-pill-icon{width:12px;height:12px;flex:0 0 auto;fill:currentColor;opacity:.9}.link-pill-favicon{display:inline-block;width:12px;height:12px;flex:0 0 auto;border-radius:3px;object-fit:contain}.link-pill-text{min-width:0;overflow-wrap:anywhere}.link-pill code{background:none;border:none;padding:0;color:inherit}td .link-pill,li .link-pill{vertical-align:-1px}p,li,dd,figcaption{overflow-wrap:anywhere}pre{background:var(--code);color:var(--code-text);padding:var(--panel-padding);border-radius:12px;overflow:auto;border:1px solid var(--line)}code{font-family:var(--font-mono);font-size:.88em;background:var(--surface-alt);border:1px solid var(--line);border-radius:5px;padding:1.5px 6px;color:var(--accent-alt)}pre code{background:none;border:none;padding:0;color:inherit}table{width:100%;border-collapse:collapse;margin:18px 0}th,td{border-bottom:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}th{font-family:var(--font-mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);font-weight:500}blockquote{border-left:3px solid var(--accent);padding-left:var(--panel-padding);color:var(--muted);margin-left:0}img{display:block;max-width:100%;height:auto}svg{max-width:100%;height:auto}.artifact-body>p>img{margin:var(--figure-spacing) auto}.artifact-grid{display:grid;gap:var(--panel-padding);margin:var(--figure-spacing) 0}.artifact-grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}.artifact-grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}.artifact-panel,.artifact-stat{min-width:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding)}.artifact-panel h3{margin:10px 0 8px;font-size:16px}.artifact-stat-value,.artifact-stat-label{display:block}.artifact-stat-value{color:var(--text);font-family:var(--font-display);font-size:24px;line-height:1.15}.artifact-stat-label{margin-top:6px;color:var(--muted);font-size:13px}.artifact-tag{display:inline-block;--tag-color:var(--muted);background:color-mix(in srgb,var(--tag-color) 12%,transparent);border:1px solid color-mix(in srgb,var(--tag-color) 30%,transparent);border-radius:6px;padding:2px 8px;color:var(--tag-color);font-family:var(--font-mono);font-size:11px;font-weight:600;text-transform:uppercase}.artifact-tag-accent{--tag-color:var(--accent)}.artifact-callout{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0;background:var(--surface-alt);padding:var(--panel-padding)}.artifact-callout-warn{border-left-color:var(--warn)}.artifact-callout-danger{border-left-color:var(--danger)}.artifact-callout strong{color:var(--text)}.artifact-figure{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:var(--panel-padding);overflow-x:auto}.artifact-figure>img,.artifact-image{width:auto;max-width:100%;height:auto;margin:0 auto}.artifact-figure-diagram{background:#0e120f;border-color:#26302a}.artifact-diagram{display:block;width:100%;height:auto;margin:0 auto}.artifact-figure-tall{width:100%;max-width:394px;margin-left:auto;margin-right:auto}.artifact-figure figcaption{margin-top:12px;color:var(--muted);font-family:var(--font-mono);font-size:12px;text-align:center}.artifact-figure.artifact-figure-diagram figcaption{color:#8b938c}.artifact-legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:12px 0;color:var(--muted);font-family:var(--font-mono);font-size:11.5px}.artifact-behavior{margin:var(--figure-spacing) 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;display:grid;grid-template-columns:1fr 1fr}.artifact-behavior-panel{padding:var(--panel-padding);background:var(--surface)}.artifact-behavior-panel+.artifact-behavior-panel{border-left:1px solid var(--line)}.artifact-behavior-panel::before{display:block;font-family:var(--font-mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);font-weight:500;margin-bottom:8px;content:""}.artifact-behavior-panel[data-state="current"]::before{content:"Current"}.artifact-behavior-panel[data-state="proposed"]{background:color-mix(in srgb,var(--accent) 6%,var(--surface))}.artifact-behavior-panel[data-state="proposed"]::before{content:"Proposed";color:var(--accent)}.document-footer{margin-top:var(--footer-spacing);padding-top:18px;border-top:1px solid var(--line);color:var(--muted);font-family:var(--font-mono);font-size:12px}.references-list{margin:0;padding-left:1.6em;display:grid;gap:7px}.reference-item{color:var(--muted)}.reference-item::marker{font-family:var(--font-mono);font-size:.86em;color:var(--muted)}.reference-link{display:inline-flex;align-items:center;gap:7px;max-width:100%;color:var(--text);text-decoration:none;overflow-wrap:anywhere}.reference-link:hover{color:var(--accent);text-decoration:none}.reference-link:hover .reference-text{text-decoration:underline}.reference-host{color:var(--muted);font-family:var(--font-mono);font-size:.82em}.view-count{color:var(--muted);font-family:var(--font-mono);font-size:11.5px;margin-right:12px;white-space:nowrap}
+.artifact-figure-diagram{--artifact-fg:#e7ece8;--artifact-muted:#b7c0b8;--artifact-accent:#a3e635}.artifact-figure.artifact-figure-diagram figcaption{color:var(--artifact-muted)}
+@media(max-width:720px){main{padding:32px var(--mobile-page-padding) 64px}.artifact-grid-2,.artifact-grid-3{grid-template-columns:1fr}.artifact-figure{padding:min(12px,var(--panel-padding))}.artifact-figure-wide .artifact-diagram{min-width:640px}.artifact-behavior{grid-template-columns:1fr}.artifact-behavior-panel+.artifact-behavior-panel{border-left:none;border-top:1px solid var(--line)}table{display:block;max-width:100%;overflow-x:auto}th,td{min-width:140px;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere}}
+@media print{body{transition:none;-webkit-print-color-adjust:exact;print-color-adjust:exact}.toc,.theme-toggle,.view-count{display:none}.document-header-empty{display:none}main{max-width:none;padding:0}:root[data-pdf-layout="poster"] main{max-width:var(--content-width);margin:0 auto;padding:var(--print-margin)}.chip{background:var(--surface)}.chip-value{color:var(--text)}.provenance-line,.provenance-line a,.facts-line{color:var(--text)}.status-badge{color:var(--text);border-color:var(--line)}h2,h3{break-after:avoid-page}.artifact-figure,.artifact-grid,.artifact-panel,.artifact-stat,.artifact-callout,.artifact-behavior,pre,table,blockquote,.meta{break-inside:avoid}.artifact-figure-wide .artifact-diagram{min-width:0}.artifact-figure-tall{max-width:330px}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:var(--text);text-decoration:underline}.link-pill{color:var(--text);text-decoration:none;background:var(--surface);border-color:var(--line);break-inside:avoid}}
+</style>
+</head>
+<body>
+<main>
+<header class="document-header document-header-empty"><span class="view-count" hidden></span><button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false" title="Toggle color theme"><span aria-hidden="true">&#9680;</span> theme</button></header>
+<section class="hero">
+<div class="kicker"><span class="kicker-part">agents-cli</span><span class="kicker-separator" aria-hidden="true">&middot;</span><span class="kicker-part">plan</span><span class="status-badge status-awaiting-go">awaiting-go</span></div>
+<h1>Session preview: show the machinery a session left running</h1>
+<p class="summary">A session that spawns sub-agents, backgrounds shells, or arms monitors leaves machinery behind, and the preview under-reports all three. Sub-agent fan-out is shown locally but vanishes on remote rows; background shells are never shown; monitors cannot be attributed to a session at all. One extractor, two persisted columns, and both render paths fix it. Combines RUSH-3091 and RUSH-3095.
+</p>
+<div class="meta" aria-label="Artifact metadata"><p class="facts-line">sub_agent_count is recomputed per render, never persisted<span class="meta-sep" aria-hidden="true">·</span>tool_calls already holds 3,099 Agent + 14 Task rows fleet-wide<span class="meta-sep" aria-hidden="true">·</span>formatMetaOnlyBody omits subAgentCount entirely — remote rows lose it<span class="meta-sep" aria-hidden="true">·</span>subagent.spawned is declared, counted, and rendered — and never once written<span class="meta-sep" aria-hidden="true">·</span>Codex 0/176 and Droid 0/126 session files carry any background marker</p><div class="meta-block meta-links"><div class="meta-label">Related</div><ul class="meta-row meta-row-links"><li class="chip"><span class="chip-value"><svg class="chip-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><a href="https://linear.app/getrush/issue/RUSH-3091" target="_blank" rel="noopener">RUSH-3091 background shells + monitors</a></span></li><li class="chip"><span class="chip-value"><svg class="chip-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><a href="https://linear.app/getrush/issue/RUSH-3095" target="_blank" rel="noopener">RUSH-3095 sub-agent fan-out</a></span></li></ul></div><p class="provenance-line" aria-label="Provenance"><span class="provenance-part"><a href="https://github.com/phnx-labs/agents-cli" target="_blank" rel="noopener">phnx-labs/agents-cli</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">claude-2026-08-23-1310-3f841f16</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Claude</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Muqsit</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">yosemite-s1</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part"><a href="agents://session/3f841f16-85bf-48dd-8d17-426784c35ed1">3f841f16</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">2026-08-23</span></p></div>
+</section>
+<nav class="toc" aria-label="Artifact sections"><a class="toc-item" href="#focus-for-review" data-toc-for="focus-for-review"><span class="toc-index">01&nbsp;&middot;&nbsp;</span>Focus for review</a><a class="toc-item" href="#intent" data-toc-for="intent"><span class="toc-index">02&nbsp;&middot;&nbsp;</span>Intent</a><a class="toc-item" href="#what-you-see-when-x" data-toc-for="what-you-see-when-x"><span class="toc-index">03&nbsp;&middot;&nbsp;</span>What you see when X</a><a class="toc-item" href="#why-remote-rows-lose-it" data-toc-for="why-remote-rows-lose-it"><span class="toc-index">04&nbsp;&middot;&nbsp;</span>Why remote rows lose it</a><a class="toc-item" href="#purpose" data-toc-for="purpose"><span class="toc-index">05&nbsp;&middot;&nbsp;</span>Purpose</a><a class="toc-item" href="#harness-support-probed-not-assumed" data-toc-for="harness-support-probed-not-assumed"><span class="toc-index">06&nbsp;&middot;&nbsp;</span>Harness support — probed, not assumed</a><a class="toc-item" href="#proposed-changes" data-toc-for="proposed-changes"><span class="toc-index">07&nbsp;&middot;&nbsp;</span>Proposed Changes</a><a class="toc-item toc-sub" href="#1-one-extractor-lib-session-highlights-ts" data-toc-for="1-one-extractor-lib-session-highlights-ts">1. One extractor — lib/session/highlights.ts</a><a class="toc-item toc-sub" href="#2-persist-at-index-time-lib-session-db-ts" data-toc-for="2-persist-at-index-time-lib-session-db-ts">2. Persist at index time — lib/session/db.ts</a><a class="toc-item toc-sub" href="#3-render-on-both-paths-commands-sessions-picker-ts" data-toc-for="3-render-on-both-paths-commands-sessions-picker-ts">3. Render on both paths — commands/sessions-picker.ts</a><a class="toc-item toc-sub" href="#4-delete-the-dead-subagent-spawned-event" data-toc-for="4-delete-the-dead-subagent-spawned-event">4. Delete the dead subagent.spawned event</a><a class="toc-item toc-sub" href="#5-monitors-needs-a-schema-field-first" data-toc-for="5-monitors-needs-a-schema-field-first">5. Monitors — needs a schema field first</a><a class="toc-item" href="#files" data-toc-for="files"><span class="toc-index">08&nbsp;&middot;&nbsp;</span>Files</a><a class="toc-item" href="#public-interface" data-toc-for="public-interface"><span class="toc-index">09&nbsp;&middot;&nbsp;</span>Public Interface</a><a class="toc-item" href="#liveness-out-of-scope-for-v1" data-toc-for="liveness-out-of-scope-for-v1"><span class="toc-index">10&nbsp;&middot;&nbsp;</span>Liveness — out of scope for v1</a><a class="toc-item" href="#validation" data-toc-for="validation"><span class="toc-index">11&nbsp;&middot;&nbsp;</span>Validation</a><a class="toc-item" href="#risks" data-toc-for="risks"><span class="toc-index">12&nbsp;&middot;&nbsp;</span>Risks</a><a class="toc-item" href="#tracking" data-toc-for="tracking"><span class="toc-index">13&nbsp;&middot;&nbsp;</span>Tracking</a><a class="toc-item" href="#references" data-toc-for="references"><span class="toc-index">14&nbsp;&middot;&nbsp;</span>References</a></nav><article class="artifact-body"><h2 id="focus-for-review">Focus for review</h2><ul>
+<li><strong>Scope</strong>: RUSH-3091 and RUSH-3095 planned as one change, because they share the Doing line, the remote-row blind spot, and the same index-time fix.</li>
+<li><strong>Counts mean "started / left behind", not "running now"</strong> — liveness is deliberately out of scope for v1. Push back if you want live status instead.</li>
+<li><strong>Codex and Cursor render nothing rather than <code>0</code></strong> — absence, not a lying zero.</li>
+<li><strong><code>subagent.spawned</code> gets deleted, not an emitter</strong> — a second counting mechanism would disagree with the first.</li>
+<li><strong>Monitors need a new schema field</strong> and could ship as a second PR.</li>
+</ul>
+<h2 id="intent">Intent</h2><blockquote>
+<p>"when an agent spins up like an agent team or its own subagents internally — do we parse it and store it in the database, and do we also store it in the session preview? because if we don't then we should."</p>
+</blockquote>
+<p>Teams already are first-class. Sub-agents are half-done. Shells and monitors are not done.</p>
+<h2 id="what-you-see-when-x">What you see when X</h2><figure class="artifact-behavior">
+  <div data-state="current" data-evidence="capture">
+    <svg viewBox="0 0 760 300" role="img" aria-label="Current: agents sessions preview shows 53 sub-agents locally, but the same session viewed remotely shows no fan-out and no shells" xmlns="http://www.w3.org/2000/svg">
+      <rect width="760" height="300" rx="8" fill="#0a0a0a"></rect>
+      <text x="20" y="28" font-family="JetBrains Mono, monospace" font-size="12" fill="#a3e635">$ agents sessions preview f045b577          # local, indexed</text>
+      <text x="20" y="56" font-family="JetBrains Mono, monospace" font-size="11" fill="#8a8a8a">  Asked     "[Image: original 3396x1614…"</text>
+      <text x="20" y="76" font-family="JetBrains Mono, monospace" font-size="11" fill="#c8c8c8">  Doing     ✓9/9 · 53 sub-agents</text>
+      <text x="20" y="96" font-family="JetBrains Mono, monospace" font-size="11" fill="#f59e0b">                              ↑ no background shells, no monitors</text>
+      <text x="20" y="136" font-family="JetBrains Mono, monospace" font-size="12" fill="#a3e635">$ agents sessions preview f045b577 --device zion   # remote row</text>
+      <text x="20" y="164" font-family="JetBrains Mono, monospace" font-size="11" fill="#8a8a8a">  Asked     "[Image: original 3396x1614…"</text>
+      <text x="20" y="184" font-family="JetBrains Mono, monospace" font-size="11" fill="#c8c8c8">  Doing     ✓9/9</text>
+      <text x="20" y="204" font-family="JetBrains Mono, monospace" font-size="11" fill="#f87171">                 ↑ fan-out gone entirely — formatMetaOnlyBody</text>
+      <text x="20" y="244" font-family="JetBrains Mono, monospace" font-size="11" fill="#8a8a8a">The local line is a verbatim capture. 53 = 23 Agent calls + 30 shell spawns,</text>
+      <text x="20" y="262" font-family="JetBrains Mono, monospace" font-size="11" fill="#8a8a8a">confirmed by transcript parse and by sqlite3 against sessions.db.</text>
+    </svg>
+  </div>
+  <div data-state="proposed" data-evidence="mockup">
+    <svg viewBox="0 0 760 300" role="img" aria-label="Proposed: both local and remote previews show sub-agents, background shells and armed monitors identically" xmlns="http://www.w3.org/2000/svg">
+      <rect width="760" height="300" rx="8" fill="#0a0a0a"></rect>
+      <text x="20" y="28" font-family="JetBrains Mono, monospace" font-size="12" fill="#a3e635">$ agents sessions preview f045b577          # local, indexed</text>
+      <text x="20" y="56" font-family="JetBrains Mono, monospace" font-size="11" fill="#8a8a8a">  Asked     "[Image: original 3396x1614…"</text>
+      <text x="20" y="76" font-family="JetBrains Mono, monospace" font-size="11" fill="#c8c8c8">  Doing     ✓9/9 · 53 sub-agents · 3 background shells · 2 monitors armed</text>
+      <text x="20" y="116" font-family="JetBrains Mono, monospace" font-size="12" fill="#a3e635">$ agents sessions preview f045b577 --device zion   # remote row</text>
+      <text x="20" y="144" font-family="JetBrains Mono, monospace" font-size="11" fill="#8a8a8a">  Asked     "[Image: original 3396x1614…"</text>
+      <text x="20" y="164" font-family="JetBrains Mono, monospace" font-size="11" fill="#c8c8c8">  Doing     ✓9/9 · 53 sub-agents · 3 background shells · 2 monitors armed</text>
+      <text x="20" y="184" font-family="JetBrains Mono, monospace" font-size="11" fill="#a3e635">                 ↑ identical — counts come from persisted columns</text>
+      <text x="20" y="224" font-family="JetBrains Mono, monospace" font-size="12" fill="#a3e635">$ agents sessions preview &lt;codex-id&gt;              # unsupported harness</text>
+      <text x="20" y="252" font-family="JetBrains Mono, monospace" font-size="11" fill="#c8c8c8">  Doing     ✓4/6 · 2 sub-agents</text>
+      <text x="20" y="272" font-family="JetBrains Mono, monospace" font-size="11" fill="#8a8a8a">                 ↑ no shells segment at all — absence, never "0 shells"</text>
+    </svg>
+  </div>
+</figure><h2 id="why-remote-rows-lose-it">Why remote rows lose it</h2><p>Two render paths exist. Only one of them parses events, and only that one can derive a
+count. Everything the preview derives from events is invisible to the other.</p>
+<figure>
+  <svg viewBox="0 0 780 340" role="img" aria-label="Data flow: transcript to two render paths, showing the derived path works and the meta-only path has no source" xmlns="http://www.w3.org/2000/svg">
+    <rect width="780" height="340" rx="8" fill="#0a0a0a"></rect>
+
+    <rect x="24" y="40" width="150" height="66" rx="6" fill="#14210a" stroke="#a3e635" stroke-width="1"></rect>
+    <text x="99" y="66" text-anchor="middle" font-family="Inter, sans-serif" font-size="12" fill="#a3e635">transcript</text>
+    <text x="99" y="86" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#8a8a8a">.jsonl on disk</text>
+
+    <rect x="24" y="150" width="150" height="66" rx="6" fill="#0f1a24" stroke="#38bdf8" stroke-width="1"></rect>
+    <text x="99" y="176" text-anchor="middle" font-family="Inter, sans-serif" font-size="12" fill="#38bdf8">sessions.db</text>
+    <text x="99" y="196" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#8a8a8a">columns + tool_calls</text>
+
+    <rect x="300" y="40" width="180" height="66" rx="6" fill="#1a1a1a" stroke="#666" stroke-width="1"></rect>
+    <text x="390" y="66" text-anchor="middle" font-family="Inter, sans-serif" font-size="12" fill="#e8e8e8">digest body</text>
+    <text x="390" y="86" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#8a8a8a">parses events</text>
+
+    <rect x="300" y="150" width="180" height="66" rx="6" fill="#1a1a1a" stroke="#666" stroke-width="1"></rect>
+    <text x="390" y="176" text-anchor="middle" font-family="Inter, sans-serif" font-size="12" fill="#e8e8e8">formatMetaOnlyBody</text>
+    <text x="390" y="196" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#8a8a8a">SessionMeta only</text>
+
+    <rect x="600" y="40" width="150" height="66" rx="6" fill="#14210a" stroke="#a3e635" stroke-width="1"></rect>
+    <text x="675" y="66" text-anchor="middle" font-family="Inter, sans-serif" font-size="12" fill="#a3e635">53 sub-agents</text>
+    <text x="675" y="86" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#8a8a8a">shown today</text>
+
+    <rect x="600" y="150" width="150" height="66" rx="6" fill="#241012" stroke="#f87171" stroke-width="1"></rect>
+    <text x="675" y="176" text-anchor="middle" font-family="Inter, sans-serif" font-size="12" fill="#f87171">nothing</text>
+    <text x="675" y="196" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#8a8a8a">remote rows</text>
+
+    <line x1="174" y1="73" x2="298" y2="73" stroke="#a3e635" stroke-width="1.5" marker-end="url(#a)"></line>
+    <line x1="480" y1="73" x2="598" y2="73" stroke="#a3e635" stroke-width="1.5" marker-end="url(#a)"></line>
+    <line x1="174" y1="183" x2="298" y2="183" stroke="#38bdf8" stroke-width="1.5" marker-end="url(#b)"></line>
+    <line x1="480" y1="183" x2="598" y2="183" stroke="#f87171" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#c)"></line>
+
+    <rect x="300" y="258" width="180" height="52" rx="6" fill="#14210a" stroke="#a3e635" stroke-width="1" stroke-dasharray="4 3"></rect>
+    <text x="390" y="280" text-anchor="middle" font-family="Inter, sans-serif" font-size="11" fill="#a3e635">NEW: persisted columns</text>
+    <text x="390" y="298" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="10" fill="#8a8a8a">sub_agent_count, bg_shells</text>
+    <line x1="99" y1="216" x2="99" y2="284" stroke="#a3e635" stroke-width="1.5" stroke-dasharray="4 3"></line>
+    <line x1="99" y1="284" x2="298" y2="284" stroke="#a3e635" stroke-width="1.5" marker-end="url(#a)"></line>
+    <line x1="390" y1="256" x2="390" y2="220" stroke="#a3e635" stroke-width="1.5" marker-end="url(#a)"></line>
+
+    <defs>
+      <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#a3e635"></path></marker>
+      <marker id="b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#38bdf8"></path></marker>
+      <marker id="c" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#f87171"></path></marker>
+    </defs>
+  </svg>
+  <figcaption>Read top row first: transcript → digest body → the count you see today. Bottom row is the same session on another machine — no events, so nothing to derive. The dashed path is the fix: persist at index time so both paths read the same number.</figcaption>
+</figure><h2 id="purpose">Purpose</h2><p>Surface work that has <strong>stopped progressing</strong> — the ranking principle the root <code>AGENTS.md</code>
+states for every attention surface. An idle session that left two shells running and armed a
+monitor is the highest-risk state: not advancing, but still holding machinery that nobody is
+watching. Today none of that is visible in the preview, and on remote rows even the sub-agent
+count disappears. The preview is what a human reads to decide "is this the session I mean?"
+before resuming; it should answer "and what did it leave running?".</p>
+<h2 id="harness-support-probed-not-assumed">Harness support — probed, not assumed</h2><table>
+<thead>
+<tr>
+<th>Harness</th>
+<th>Background shells</th>
+<th>Evidence</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Claude, Kimi</td>
+<td><code>Bash</code> + <code>run_in_background: true</code></td>
+<td>live transcripts; Kimi 7/85 files</td>
+</tr>
+<tr>
+<td>Grok</td>
+<td><code>run_terminal_command</code> + <code>background: true</code></td>
+<td>8/400 files; also <code>kill_command_or_subagent</code></td>
+</tr>
+<tr>
+<td>Codex</td>
+<td>none</td>
+<td>0/176 files; <code>exec_command</code> records only <code>cmd</code> + <code>workdir</code></td>
+</tr>
+<tr>
+<td>Cursor</td>
+<td>not possible</td>
+<td>stores only <code>meta.json</code> + <code>prompt_history.json</code>; tool calls are server-side</td>
+</tr>
+<tr>
+<td>Droid</td>
+<td>none</td>
+<td>0/126 files</td>
+</tr>
+</tbody></table>
+<div class="artifact-callout">
+Codex and Cursor must render <strong>no shells segment at all</strong>, never <code>0 background shells</code>. Zero reads as "none running" when the truth is "we cannot know". Precedent in this module: the Hooks line is Claude-only and simply does not render for other harnesses.
+</div><h2 id="proposed-changes">Proposed Changes</h2><h3 id="1-one-extractor-lib-session-highlights-ts">1. One extractor — <code>lib/session/highlights.ts</code></h3><p><code>SessionEvent.args</code> already carries tool input, so both shapes are directly reachable.</p>
+<pre><code>export function extractBackgroundShells(events: SessionEvent[]): BackgroundShell[] {
+  const out: BackgroundShell[] = [];
+  for (const e of events) {
+    if (e.type !== 'tool_use') continue;
+    const bg =
+      (e.tool === 'Bash' &amp;&amp; e.args?.run_in_background === true) ||          // claude, kimi
+      (e.tool === 'run_terminal_command' &amp;&amp; e.args?.background === true);   // grok
+    if (bg) out.push({ command: String(e.args?.command ?? ''), ts: e.timestamp });
+  }
+  return out;
+}
+</code></pre>
+<p>Also <strong>move <code>isSubAgentTool</code> out of <code>sessions-picker.ts</code> into <code>highlights.ts</code></strong> so both renders
+share one definition — cross-cutting logic at the source, per the repo's review conventions.
+Keep its semantics exactly: in-process <code>Agent</code>/<code>Task</code> calls <strong>plus</strong> shell-spawned
+<code>agents run</code> / <code>teams add</code>.</p>
+<h3 id="2-persist-at-index-time-lib-session-db-ts">2. Persist at index time — <code>lib/session/db.ts</code></h3><p>The module README's own "Gaps to close" already prescribes this for sub-agent count (#9).
+Follow the established guarded-migration pattern (<code>spawned_team</code>, <code>db.ts:768</code>):</p>
+<pre><code>ALTER TABLE sessions ADD COLUMN sub_agent_count INTEGER;
+ALTER TABLE sessions ADD COLUMN background_shell_count INTEGER;
+</code></pre>
+<p>Write them in the same scan path that already writes <code>is_team_origin</code> / <code>spawned_team</code>
+(<code>db.ts:1746</code>). <strong>This is the part that fixes remote rows.</strong></p>
+<h3 id="3-render-on-both-paths-commands-sessions-picker-ts">3. Render on both paths — <code>commands/sessions-picker.ts</code></h3><pre><code>formatMetaOnlyBody (555-568)   add both counts, read from persisted columns
+digest body        (837-845)   prefer persisted, fall back to derived
+</code></pre>
+<p>The prefer-persisted/fall-back shape mirrors <code>recentDirectoriesTouched</code>, already documented
+in the module README.</p>
+<h3 id="4-delete-the-dead-subagent-spawned-event">4. Delete the dead <code>subagent.spawned</code> event</h3><p>Declared (<code>event-stream.ts:48</code>, <code>:118</code>), counted (<code>feed/activity.ts:409</code>), given a glyph
+(<code>activity.ts:480</code>) — and never written once:</p>
+<pre><code>grep -rh "subagent.spawned" ~/.agents/.history/events | wc -l
+# 0
+</code></pre>
+<p>Delete rather than add an emitter: an emitter creates a second counting mechanism that can
+disagree with the tool-call derivation. That divergence is already observable on <code>f045b577</code> —
+23 tool calls, 46 sub-agent transcript files on disk, 53 reported. One derivation only.</p>
+<h3 id="5-monitors-needs-a-schema-field-first">5. Monitors — needs a schema field first</h3><p><code>~/.agents/monitors/*.yml</code> carries interval, last check, fire count and action, but <strong>no
+session attribution</strong>. Stamp the arming session id at <code>agents monitors add</code> time, then join.
+Do not backfill by scraping prompt prose. This is the natural second PR.</p>
+<h2 id="files">Files</h2><table>
+<thead>
+<tr>
+<th>File</th>
+<th>Change</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>apps/cli/src/lib/session/highlights.ts</code></td>
+<td>new <code>extractBackgroundShells</code>; receives <code>isSubAgentTool</code></td>
+</tr>
+<tr>
+<td><code>apps/cli/src/lib/session/db.ts</code></td>
+<td>two guarded <code>ALTER TABLE</code>s + write in the scan path</td>
+</tr>
+<tr>
+<td><code>apps/cli/src/commands/sessions-picker.ts</code></td>
+<td>render both counts on <strong>both</strong> body paths</td>
+</tr>
+<tr>
+<td><code>apps/cli/src/lib/event-stream.ts</code>, <code>lib/feed/activity.ts</code></td>
+<td>delete <code>subagent.spawned</code>, <code>subagentCount</code></td>
+</tr>
+<tr>
+<td><code>apps/cli/src/lib/session/README.md</code></td>
+<td>correct row #9 — the count IS derivable from <code>tool_calls</code></td>
+</tr>
+<tr>
+<td><code>apps/cli/docs/</code>, <code>CHANGELOG.md</code></td>
+<td>user-visible preview change</td>
+</tr>
+</tbody></table>
+<h2 id="public-interface">Public Interface</h2><p>Two new persisted columns on <code>sessions</code>, and one new Doing-line segment. No new command, no
+new flag.</p>
+<pre><code>sessions.sub_agent_count         INTEGER   nullable — NULL means "not yet scanned",
+sessions.background_shell_count  INTEGER   distinct from 0 meaning "none found"
+</code></pre>
+<p>The rendered contract, in the order segments appear on the Doing line:</p>
+<pre><code>Doing     ✓9/9 · &lt;team lineage&gt; · N sub-agents · N background shells · N monitors armed
+</code></pre>
+<p>Each segment is omitted entirely when its count is zero <strong>or</strong> when the harness cannot report
+it. <code>--json</code> consumers gain the two fields with the same nullable semantics; an absent field
+means unknown, never zero.</p>
+<h2 id="liveness-out-of-scope-for-v1">Liveness — out of scope for v1</h2><p>A transcript records that a shell was <em>started</em>, never that it is still alive. Inferring
+liveness from transcript presence is the trap <code>agents devices ps</code> already documents: a killed
+process never writes its <code>.exit</code> file, so a naive reader reports "running" forever. Task
+output files also live under <code>/tmp</code> and are wiped, so they prove nothing historically.</p>
+<p>v1 reports <strong>"left N background shells"</strong>. Live reconciliation belongs in <code>sessions --active</code>,
+where real pids are already resolved.</p>
+<h2 id="validation">Validation</h2><table>
+<thead>
+<tr>
+<th>Check</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Extractor, per harness</td>
+<td>Unit tests over committed fixtures: Claude <code>run_in_background</code>, Grok <code>background</code>, plus a <strong>Codex fixture asserting the field is absent, not zero</strong></td>
+</tr>
+<tr>
+<td>No regression on the known session</td>
+<td><code>f045b577</code> still reports 53 after <code>isSubAgentTool</code> moves</td>
+</tr>
+<tr>
+<td>The actual bug</td>
+<td>Render that session through <code>formatMetaOnlyBody</code> and assert both counts appear — <strong>this test fails on today's code</strong></td>
+</tr>
+<tr>
+<td>Migration idempotent</td>
+<td>Scan twice against a copy of the real 2.3 GB <code>sessions.db</code>; second run is a no-op</td>
+</tr>
+<tr>
+<td>Remote parity</td>
+<td>Compare local and <code>--device</code> preview of the same id; they must agree</td>
+</tr>
+<tr>
+<td>Dead event gone</td>
+<td><code>grep -r subagent.spawned</code> returns nothing outside the CHANGELOG</td>
+</tr>
+</tbody></table>
+<pre><code>cd apps/cli &amp;&amp; bun run test
+agents-dev sessions preview f045b577
+agents-dev sessions preview f045b577 --device zion    # must match
+</code></pre>
+<h2 id="risks">Risks</h2><table>
+<thead>
+<tr>
+<th>Risk</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Migration touches a 2.3 GB live DB</td>
+<td>Guarded <code>ALTER TABLE</code> following the exact <code>spawned_team</code> precedent; nullable columns, no rewrite of existing rows; idempotency asserted against a copy before it runs for real</td>
+</tr>
+<tr>
+<td><code>NULL</code> read as <code>0</code>, so "not scanned" renders as "no shells"</td>
+<td>Nullable is load-bearing: the render omits the segment on <code>NULL</code> and on <code>0</code> alike, so neither can produce a false "none running" claim</td>
+</tr>
+<tr>
+<td>Moving <code>isSubAgentTool</code> silently changes the count</td>
+<td>Pinned by a regression test on <code>f045b577</code> — must still be 53 (23 <code>Agent</code> + 30 shell spawns), verified two independent ways before the move</td>
+</tr>
+<tr>
+<td>Deleting <code>subagent.spawned</code> breaks a consumer</td>
+<td>It has none: zero events ever written, and <code>CollapsedActivity.subagentCount</code> is therefore always 0 for every caller. Grep-verified across the whole event store</td>
+</tr>
+<tr>
+<td>Counts read as live status</td>
+<td>Wording is "left N background shells", never "running"; liveness explicitly deferred rather than guessed</td>
+</tr>
+</tbody></table>
+<h2 id="tracking">Tracking</h2><ul>
+<li><a class="link-pill" href="https://linear.app/getrush/issue/RUSH-3091" title="https://linear.app/getrush/issue/RUSH-3091" target="_blank" rel="noopener noreferrer"><svg class="link-pill-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><span class="link-pill-text">RUSH-3091</span></a> — background shells + armed monitors</li>
+<li><a class="link-pill" href="https://linear.app/getrush/issue/RUSH-3095" title="https://linear.app/getrush/issue/RUSH-3095" target="_blank" rel="noopener noreferrer"><svg class="link-pill-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><span class="link-pill-text">RUSH-3095</span></a> — sub-agent fan-out, remote rows, dead event</li>
+</ul>
+<h2 id="references">References</h2><ol class="references-list"><li class="reference-item"><a class="reference-link" href="https://linear.app/getrush/issue/RUSH-3091" target="_blank" rel="noopener noreferrer"><svg class="link-pill-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><span class="reference-text">RUSH-3091</span><span class="reference-host">linear.app</span></a></li><li class="reference-item"><a class="reference-link" href="https://linear.app/getrush/issue/RUSH-3095" target="_blank" rel="noopener noreferrer"><svg class="link-pill-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><span class="reference-text">RUSH-3095</span><span class="reference-host">linear.app</span></a></li></ol></article>
+
+</main>
+<script type="application/json" id="artifacts-source">{"encoding":"base64","markdown":"LS0tCmtpbmQ6IHBsYW4Kc3VyZmFjZTogY2xpCnRpdGxlOiAiU2Vzc2lvbiBwcmV2aWV3OiBzaG93IHRoZSBtYWNoaW5lcnkgYSBzZXNzaW9uIGxlZnQgcnVubmluZyIKc3VtbWFyeTogPgogIEEgc2Vzc2lvbiB0aGF0IHNwYXducyBzdWItYWdlbnRzLCBiYWNrZ3JvdW5kcyBzaGVsbHMsIG9yIGFybXMgbW9uaXRvcnMgbGVhdmVzCiAgbWFjaGluZXJ5IGJlaGluZCwgYW5kIHRoZSBwcmV2aWV3IHVuZGVyLXJlcG9ydHMgYWxsIHRocmVlLiBTdWItYWdlbnQgZmFuLW91dCBpcwogIHNob3duIGxvY2FsbHkgYnV0IHZhbmlzaGVzIG9uIHJlbW90ZSByb3dzOyBiYWNrZ3JvdW5kIHNoZWxscyBhcmUgbmV2ZXIgc2hvd247CiAgbW9uaXRvcnMgY2Fubm90IGJlIGF0dHJpYnV0ZWQgdG8gYSBzZXNzaW9uIGF0IGFsbC4gT25lIGV4dHJhY3RvciwgdHdvIHBlcnNpc3RlZAogIGNvbHVtbnMsIGFuZCBib3RoIHJlbmRlciBwYXRocyBmaXggaXQuIENvbWJpbmVzIFJVU0gtMzA5MSBhbmQgUlVTSC0zMDk1LgpzdGF0dXM6IGF3YWl0aW5nLWdvCmZhY3RzOgogIC0gInN1Yl9hZ2VudF9jb3VudCBpcyByZWNvbXB1dGVkIHBlciByZW5kZXIsIG5ldmVyIHBlcnNpc3RlZCIKICAtICJ0b29sX2NhbGxzIGFscmVhZHkgaG9sZHMgMywwOTkgQWdlbnQgKyAxNCBUYXNrIHJvd3MgZmxlZXQtd2lkZSIKICAtICJmb3JtYXRNZXRhT25seUJvZHkgb21pdHMgc3ViQWdlbnRDb3VudCBlbnRpcmVseSDigJQgcmVtb3RlIHJvd3MgbG9zZSBpdCIKICAtICJzdWJhZ2VudC5zcGF3bmVkIGlzIGRlY2xhcmVkLCBjb3VudGVkLCBhbmQgcmVuZGVyZWQg4oCUIGFuZCBuZXZlciBvbmNlIHdyaXR0ZW4iCiAgLSAiQ29kZXggMC8xNzYgYW5kIERyb2lkIDAvMTI2IHNlc3Npb24gZmlsZXMgY2FycnkgYW55IGJhY2tncm91bmQgbWFya2VyIgpsaW5rczoKICAtIHVybDogaHR0cHM6Ly9saW5lYXIuYXBwL2dldHJ1c2gvaXNzdWUvUlVTSC0zMDkxCiAgICBsYWJlbDogIlJVU0gtMzA5MSBiYWNrZ3JvdW5kIHNoZWxscyArIG1vbml0b3JzIgogIC0gdXJsOiBodHRwczovL2xpbmVhci5hcHAvZ2V0cnVzaC9pc3N1ZS9SVVNILTMwOTUKICAgIGxhYmVsOiAiUlVTSC0zMDk1IHN1Yi1hZ2VudCBmYW4tb3V0IgotLS0KCiMjIEZvY3VzIGZvciByZXZpZXcKCi0gKipTY29wZSoqOiBSVVNILTMwOTEgYW5kIFJVU0gtMzA5NSBwbGFubmVkIGFzIG9uZSBjaGFuZ2UsIGJlY2F1c2UgdGhleSBzaGFyZSB0aGUgRG9pbmcgbGluZSwgdGhlIHJlbW90ZS1yb3cgYmxpbmQgc3BvdCwgYW5kIHRoZSBzYW1lIGluZGV4LXRpbWUgZml4LgotICoqQ291bnRzIG1lYW4gInN0YXJ0ZWQgLyBsZWZ0IGJlaGluZCIsIG5vdCAicnVubmluZyBub3ciKiog4oCUIGxpdmVuZXNzIGlzIGRlbGliZXJhdGVseSBvdXQgb2Ygc2NvcGUgZm9yIHYxLiBQdXNoIGJhY2sgaWYgeW91IHdhbnQgbGl2ZSBzdGF0dXMgaW5zdGVhZC4KLSAqKkNvZGV4IGFuZCBDdXJzb3IgcmVuZGVyIG5vdGhpbmcgcmF0aGVyIHRoYW4gYDBgKiog4oCUIGFic2VuY2UsIG5vdCBhIGx5aW5nIHplcm8uCi0gKipgc3ViYWdlbnQuc3Bhd25lZGAgZ2V0cyBkZWxldGVkLCBub3QgYW4gZW1pdHRlcioqIOKAlCBhIHNlY29uZCBjb3VudGluZyBtZWNoYW5pc20gd291bGQgZGlzYWdyZWUgd2l0aCB0aGUgZmlyc3QuCi0gKipNb25pdG9ycyBuZWVkIGEgbmV3IHNjaGVtYSBmaWVsZCoqIGFuZCBjb3VsZCBzaGlwIGFzIGEgc2Vjb25kIFBSLgoKIyMgSW50ZW50Cgo+ICJ3aGVuIGFuIGFnZW50IHNwaW5zIHVwIGxpa2UgYW4gYWdlbnQgdGVhbSBvciBpdHMgb3duIHN1YmFnZW50cyBpbnRlcm5hbGx5IOKAlCBkbyB3ZSBwYXJzZSBpdCBhbmQgc3RvcmUgaXQgaW4gdGhlIGRhdGFiYXNlLCBhbmQgZG8gd2UgYWxzbyBzdG9yZSBpdCBpbiB0aGUgc2Vzc2lvbiBwcmV2aWV3PyBiZWNhdXNlIGlmIHdlIGRvbid0IHRoZW4gd2Ugc2hvdWxkLiIKClRlYW1zIGFscmVhZHkgYXJlIGZpcnN0LWNsYXNzLiBTdWItYWdlbnRzIGFyZSBoYWxmLWRvbmUuIFNoZWxscyBhbmQgbW9uaXRvcnMgYXJlIG5vdCBkb25lLgoKIyMgV2hhdCB5b3Ugc2VlIHdoZW4gWAoKPGZpZ3VyZSBjbGFzcz0iYXJ0aWZhY3QtYmVoYXZpb3IiPgogIDxkaXYgZGF0YS1zdGF0ZT0iY3VycmVudCIgZGF0YS1ldmlkZW5jZT0iY2FwdHVyZSI+CiAgICA8c3ZnIHZpZXdCb3g9IjAgMCA3NjAgMzAwIiByb2xlPSJpbWciIGFyaWEtbGFiZWw9IkN1cnJlbnQ6IGFnZW50cyBzZXNzaW9ucyBwcmV2aWV3IHNob3dzIDUzIHN1Yi1hZ2VudHMgbG9jYWxseSwgYnV0IHRoZSBzYW1lIHNlc3Npb24gdmlld2VkIHJlbW90ZWx5IHNob3dzIG5vIGZhbi1vdXQgYW5kIG5vIHNoZWxscyIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICAgICAgPHJlY3Qgd2lkdGg9Ijc2MCIgaGVpZ2h0PSIzMDAiIHJ4PSI4IiBmaWxsPSIjMGEwYTBhIi8+CiAgICAgIDx0ZXh0IHg9IjIwIiB5PSIyOCIgZm9udC1mYW1pbHk9IkpldEJyYWlucyBNb25vLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiNhM2U2MzUiPiQgYWdlbnRzIHNlc3Npb25zIHByZXZpZXcgZjA0NWI1NzcgICAgICAgICAgIyBsb2NhbCwgaW5kZXhlZDwvdGV4dD4KICAgICAgPHRleHQgeD0iMjAiIHk9IjU2IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzhhOGE4YSI+ICBBc2tlZCAgICAgIltJbWFnZTogb3JpZ2luYWwgMzM5NngxNjE04oCmIjwvdGV4dD4KICAgICAgPHRleHQgeD0iMjAiIHk9Ijc2IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iI2M4YzhjOCI+ICBEb2luZyAgICAg4pyTOS85IMK3IDUzIHN1Yi1hZ2VudHM8L3RleHQ+CiAgICAgIDx0ZXh0IHg9IjIwIiB5PSI5NiIgZm9udC1mYW1pbHk9IkpldEJyYWlucyBNb25vLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNmNTllMGIiPiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIOKGkSBubyBiYWNrZ3JvdW5kIHNoZWxscywgbm8gbW9uaXRvcnM8L3RleHQ+CiAgICAgIDx0ZXh0IHg9IjIwIiB5PSIxMzYiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjEyIiBmaWxsPSIjYTNlNjM1Ij4kIGFnZW50cyBzZXNzaW9ucyBwcmV2aWV3IGYwNDViNTc3IC0tZGV2aWNlIHppb24gICAjIHJlbW90ZSByb3c8L3RleHQ+CiAgICAgIDx0ZXh0IHg9IjIwIiB5PSIxNjQiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjOGE4YThhIj4gIEFza2VkICAgICAiW0ltYWdlOiBvcmlnaW5hbCAzMzk2eDE2MTTigKYiPC90ZXh0PgogICAgICA8dGV4dCB4PSIyMCIgeT0iMTg0IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iI2M4YzhjOCI+ICBEb2luZyAgICAg4pyTOS85PC90ZXh0PgogICAgICA8dGV4dCB4PSIyMCIgeT0iMjA0IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iI2Y4NzE3MSI+ICAgICAgICAgICAgICAgICDihpEgZmFuLW91dCBnb25lIGVudGlyZWx5IOKAlCBmb3JtYXRNZXRhT25seUJvZHk8L3RleHQ+CiAgICAgIDx0ZXh0IHg9IjIwIiB5PSIyNDQiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjOGE4YThhIj5UaGUgbG9jYWwgbGluZSBpcyBhIHZlcmJhdGltIGNhcHR1cmUuIDUzID0gMjMgQWdlbnQgY2FsbHMgKyAzMCBzaGVsbCBzcGF3bnMsPC90ZXh0PgogICAgICA8dGV4dCB4PSIyMCIgeT0iMjYyIiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzhhOGE4YSI+Y29uZmlybWVkIGJ5IHRyYW5zY3JpcHQgcGFyc2UgYW5kIGJ5IHNxbGl0ZTMgYWdhaW5zdCBzZXNzaW9ucy5kYi48L3RleHQ+CiAgICA8L3N2Zz4KICA8L2Rpdj4KICA8ZGl2IGRhdGEtc3RhdGU9InByb3Bvc2VkIiBkYXRhLWV2aWRlbmNlPSJtb2NrdXAiPgogICAgPHN2ZyB2aWV3Qm94PSIwIDAgNzYwIDMwMCIgcm9sZT0iaW1nIiBhcmlhLWxhYmVsPSJQcm9wb3NlZDogYm90aCBsb2NhbCBhbmQgcmVtb3RlIHByZXZpZXdzIHNob3cgc3ViLWFnZW50cywgYmFja2dyb3VuZCBzaGVsbHMgYW5kIGFybWVkIG1vbml0b3JzIGlkZW50aWNhbGx5IiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogICAgICA8cmVjdCB3aWR0aD0iNzYwIiBoZWlnaHQ9IjMwMCIgcng9IjgiIGZpbGw9IiMwYTBhMGEiLz4KICAgICAgPHRleHQgeD0iMjAiIHk9IjI4IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZmlsbD0iI2EzZTYzNSI+JCBhZ2VudHMgc2Vzc2lvbnMgcHJldmlldyBmMDQ1YjU3NyAgICAgICAgICAjIGxvY2FsLCBpbmRleGVkPC90ZXh0PgogICAgICA8dGV4dCB4PSIyMCIgeT0iNTYiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjOGE4YThhIj4gIEFza2VkICAgICAiW0ltYWdlOiBvcmlnaW5hbCAzMzk2eDE2MTTigKYiPC90ZXh0PgogICAgICA8dGV4dCB4PSIyMCIgeT0iNzYiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjYzhjOGM4Ij4gIERvaW5nICAgICDinJM5LzkgwrcgNTMgc3ViLWFnZW50cyDCtyAzIGJhY2tncm91bmQgc2hlbGxzIMK3IDIgbW9uaXRvcnMgYXJtZWQ8L3RleHQ+CiAgICAgIDx0ZXh0IHg9IjIwIiB5PSIxMTYiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjEyIiBmaWxsPSIjYTNlNjM1Ij4kIGFnZW50cyBzZXNzaW9ucyBwcmV2aWV3IGYwNDViNTc3IC0tZGV2aWNlIHppb24gICAjIHJlbW90ZSByb3c8L3RleHQ+CiAgICAgIDx0ZXh0IHg9IjIwIiB5PSIxNDQiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjOGE4YThhIj4gIEFza2VkICAgICAiW0ltYWdlOiBvcmlnaW5hbCAzMzk2eDE2MTTigKYiPC90ZXh0PgogICAgICA8dGV4dCB4PSIyMCIgeT0iMTY0IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iI2M4YzhjOCI+ICBEb2luZyAgICAg4pyTOS85IMK3IDUzIHN1Yi1hZ2VudHMgwrcgMyBiYWNrZ3JvdW5kIHNoZWxscyDCtyAyIG1vbml0b3JzIGFybWVkPC90ZXh0PgogICAgICA8dGV4dCB4PSIyMCIgeT0iMTg0IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iI2EzZTYzNSI+ICAgICAgICAgICAgICAgICDihpEgaWRlbnRpY2FsIOKAlCBjb3VudHMgY29tZSBmcm9tIHBlcnNpc3RlZCBjb2x1bW5zPC90ZXh0PgogICAgICA8dGV4dCB4PSIyMCIgeT0iMjI0IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZmlsbD0iI2EzZTYzNSI+JCBhZ2VudHMgc2Vzc2lvbnMgcHJldmlldyAmbHQ7Y29kZXgtaWQmZ3Q7ICAgICAgICAgICAgICAjIHVuc3VwcG9ydGVkIGhhcm5lc3M8L3RleHQ+CiAgICAgIDx0ZXh0IHg9IjIwIiB5PSIyNTIiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjExIiBmaWxsPSIjYzhjOGM4Ij4gIERvaW5nICAgICDinJM0LzYgwrcgMiBzdWItYWdlbnRzPC90ZXh0PgogICAgICA8dGV4dCB4PSIyMCIgeT0iMjcyIiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzhhOGE4YSI+ICAgICAgICAgICAgICAgICDihpEgbm8gc2hlbGxzIHNlZ21lbnQgYXQgYWxsIOKAlCBhYnNlbmNlLCBuZXZlciAiMCBzaGVsbHMiPC90ZXh0PgogICAgPC9zdmc+CiAgPC9kaXY+CjwvZmlndXJlPgoKIyMgV2h5IHJlbW90ZSByb3dzIGxvc2UgaXQKClR3byByZW5kZXIgcGF0aHMgZXhpc3QuIE9ubHkgb25lIG9mIHRoZW0gcGFyc2VzIGV2ZW50cywgYW5kIG9ubHkgdGhhdCBvbmUgY2FuIGRlcml2ZSBhCmNvdW50LiBFdmVyeXRoaW5nIHRoZSBwcmV2aWV3IGRlcml2ZXMgZnJvbSBldmVudHMgaXMgaW52aXNpYmxlIHRvIHRoZSBvdGhlci4KCjxmaWd1cmU+CiAgPHN2ZyB2aWV3Qm94PSIwIDAgNzgwIDM0MCIgcm9sZT0iaW1nIiBhcmlhLWxhYmVsPSJEYXRhIGZsb3c6IHRyYW5zY3JpcHQgdG8gdHdvIHJlbmRlciBwYXRocywgc2hvd2luZyB0aGUgZGVyaXZlZCBwYXRoIHdvcmtzIGFuZCB0aGUgbWV0YS1vbmx5IHBhdGggaGFzIG5vIHNvdXJjZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KICAgIDxyZWN0IHdpZHRoPSI3ODAiIGhlaWdodD0iMzQwIiByeD0iOCIgZmlsbD0iIzBhMGEwYSIvPgoKICAgIDxyZWN0IHg9IjI0IiB5PSI0MCIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI2NiIgcng9IjYiIGZpbGw9IiMxNDIxMGEiIHN0cm9rZT0iI2EzZTYzNSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgICA8dGV4dCB4PSI5OSIgeT0iNjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJJbnRlciwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMiIgZmlsbD0iI2EzZTYzNSI+dHJhbnNjcmlwdDwvdGV4dD4KICAgIDx0ZXh0IHg9Ijk5IiB5PSI4NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkpldEJyYWlucyBNb25vLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4YThhOGEiPi5qc29ubCBvbiBkaXNrPC90ZXh0PgoKICAgIDxyZWN0IHg9IjI0IiB5PSIxNTAiIHdpZHRoPSIxNTAiIGhlaWdodD0iNjYiIHJ4PSI2IiBmaWxsPSIjMGYxYTI0IiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMSIvPgogICAgPHRleHQgeD0iOTkiIHk9IjE3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkludGVyLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyIiBmaWxsPSIjMzhiZGY4Ij5zZXNzaW9ucy5kYjwvdGV4dD4KICAgIDx0ZXh0IHg9Ijk5IiB5PSIxOTYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjEwIiBmaWxsPSIjOGE4YThhIj5jb2x1bW5zICsgdG9vbF9jYWxsczwvdGV4dD4KCiAgICA8cmVjdCB4PSIzMDAiIHk9IjQwIiB3aWR0aD0iMTgwIiBoZWlnaHQ9IjY2IiByeD0iNiIgZmlsbD0iIzFhMWExYSIgc3Ryb2tlPSIjNjY2IiBzdHJva2Utd2lkdGg9IjEiLz4KICAgIDx0ZXh0IHg9IjM5MCIgeT0iNjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJJbnRlciwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMiIgZmlsbD0iI2U4ZThlOCI+ZGlnZXN0IGJvZHk8L3RleHQ+CiAgICA8dGV4dCB4PSIzOTAiIHk9Ijg2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzhhOGE4YSI+cGFyc2VzIGV2ZW50czwvdGV4dD4KCiAgICA8cmVjdCB4PSIzMDAiIHk9IjE1MCIgd2lkdGg9IjE4MCIgaGVpZ2h0PSI2NiIgcng9IjYiIGZpbGw9IiMxYTFhMWEiIHN0cm9rZT0iIzY2NiIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgICA8dGV4dCB4PSIzOTAiIHk9IjE3NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkludGVyLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjEyIiBmaWxsPSIjZThlOGU4Ij5mb3JtYXRNZXRhT25seUJvZHk8L3RleHQ+CiAgICA8dGV4dCB4PSIzOTAiIHk9IjE5NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkpldEJyYWlucyBNb25vLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4YThhOGEiPlNlc3Npb25NZXRhIG9ubHk8L3RleHQ+CgogICAgPHJlY3QgeD0iNjAwIiB5PSI0MCIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI2NiIgcng9IjYiIGZpbGw9IiMxNDIxMGEiIHN0cm9rZT0iI2EzZTYzNSIgc3Ryb2tlLXdpZHRoPSIxIi8+CiAgICA8dGV4dCB4PSI2NzUiIHk9IjY2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiNhM2U2MzUiPjUzIHN1Yi1hZ2VudHM8L3RleHQ+CiAgICA8dGV4dCB4PSI2NzUiIHk9Ijg2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzhhOGE4YSI+c2hvd24gdG9kYXk8L3RleHQ+CgogICAgPHJlY3QgeD0iNjAwIiB5PSIxNTAiIHdpZHRoPSIxNTAiIGhlaWdodD0iNjYiIHJ4PSI2IiBmaWxsPSIjMjQxMDEyIiBzdHJva2U9IiNmODcxNzEiIHN0cm9rZS13aWR0aD0iMSIvPgogICAgPHRleHQgeD0iNjc1IiB5PSIxNzYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGZvbnQtZmFtaWx5PSJJbnRlciwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMiIgZmlsbD0iI2Y4NzE3MSI+bm90aGluZzwvdGV4dD4KICAgIDx0ZXh0IHg9IjY3NSIgeT0iMTk2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCIgZmlsbD0iIzhhOGE4YSI+cmVtb3RlIHJvd3M8L3RleHQ+CgogICAgPGxpbmUgeDE9IjE3NCIgeTE9IjczIiB4Mj0iMjk4IiB5Mj0iNzMiIHN0cm9rZT0iI2EzZTYzNSIgc3Ryb2tlLXdpZHRoPSIxLjUiIG1hcmtlci1lbmQ9InVybCgjYSkiLz4KICAgIDxsaW5lIHgxPSI0ODAiIHkxPSI3MyIgeDI9IjU5OCIgeTI9IjczIiBzdHJva2U9IiNhM2U2MzUiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2EpIi8+CiAgICA8bGluZSB4MT0iMTc0IiB5MT0iMTgzIiB4Mj0iMjk4IiB5Mj0iMTgzIiBzdHJva2U9IiMzOGJkZjgiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2IpIi8+CiAgICA8bGluZSB4MT0iNDgwIiB5MT0iMTgzIiB4Mj0iNTk4IiB5Mj0iMTgzIiBzdHJva2U9IiNmODcxNzEiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtZGFzaGFycmF5PSI0IDMiIG1hcmtlci1lbmQ9InVybCgjYykiLz4KCiAgICA8cmVjdCB4PSIzMDAiIHk9IjI1OCIgd2lkdGg9IjE4MCIgaGVpZ2h0PSI1MiIgcng9IjYiIGZpbGw9IiMxNDIxMGEiIHN0cm9rZT0iI2EzZTYzNSIgc3Ryb2tlLXdpZHRoPSIxIiBzdHJva2UtZGFzaGFycmF5PSI0IDMiLz4KICAgIDx0ZXh0IHg9IjM5MCIgeT0iMjgwIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LWZhbWlseT0iSW50ZXIsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiNhM2U2MzUiPk5FVzogcGVyc2lzdGVkIGNvbHVtbnM8L3RleHQ+CiAgICA8dGV4dCB4PSIzOTAiIHk9IjI5OCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZm9udC1mYW1pbHk9IkpldEJyYWlucyBNb25vLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiIGZpbGw9IiM4YThhOGEiPnN1Yl9hZ2VudF9jb3VudCwgYmdfc2hlbGxzPC90ZXh0PgogICAgPGxpbmUgeDE9Ijk5IiB5MT0iMjE2IiB4Mj0iOTkiIHkyPSIyODQiIHN0cm9rZT0iI2EzZTYzNSIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1kYXNoYXJyYXk9IjQgMyIvPgogICAgPGxpbmUgeDE9Ijk5IiB5MT0iMjg0IiB4Mj0iMjk4IiB5Mj0iMjg0IiBzdHJva2U9IiNhM2U2MzUiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2EpIi8+CiAgICA8bGluZSB4MT0iMzkwIiB5MT0iMjU2IiB4Mj0iMzkwIiB5Mj0iMjIwIiBzdHJva2U9IiNhM2U2MzUiIHN0cm9rZS13aWR0aD0iMS41IiBtYXJrZXItZW5kPSJ1cmwoI2EpIi8+CgogICAgPGRlZnM+CiAgICAgIDxtYXJrZXIgaWQ9ImEiIG1hcmtlcldpZHRoPSI4IiBtYXJrZXJIZWlnaHQ9IjgiIHJlZlg9IjciIHJlZlk9IjQiIG9yaWVudD0iYXV0byI+PHBhdGggZD0iTTAsMCBMOCw0IEwwLDggeiIgZmlsbD0iI2EzZTYzNSIvPjwvbWFya2VyPgogICAgICA8bWFya2VyIGlkPSJiIiBtYXJrZXJXaWR0aD0iOCIgbWFya2VySGVpZ2h0PSI4IiByZWZYPSI3IiByZWZZPSI0IiBvcmllbnQ9ImF1dG8iPjxwYXRoIGQ9Ik0wLDAgTDgsNCBMMCw4IHoiIGZpbGw9IiMzOGJkZjgiLz48L21hcmtlcj4KICAgICAgPG1hcmtlciBpZD0iYyIgbWFya2VyV2lkdGg9IjgiIG1hcmtlckhlaWdodD0iOCIgcmVmWD0iNyIgcmVmWT0iNCIgb3JpZW50PSJhdXRvIj48cGF0aCBkPSJNMCwwIEw4LDQgTDAsOCB6IiBmaWxsPSIjZjg3MTcxIi8+PC9tYXJrZXI+CiAgICA8L2RlZnM+CiAgPC9zdmc+CiAgPGZpZ2NhcHRpb24+UmVhZCB0b3Agcm93IGZpcnN0OiB0cmFuc2NyaXB0IOKGkiBkaWdlc3QgYm9keSDihpIgdGhlIGNvdW50IHlvdSBzZWUgdG9kYXkuIEJvdHRvbSByb3cgaXMgdGhlIHNhbWUgc2Vzc2lvbiBvbiBhbm90aGVyIG1hY2hpbmUg4oCUIG5vIGV2ZW50cywgc28gbm90aGluZyB0byBkZXJpdmUuIFRoZSBkYXNoZWQgcGF0aCBpcyB0aGUgZml4OiBwZXJzaXN0IGF0IGluZGV4IHRpbWUgc28gYm90aCBwYXRocyByZWFkIHRoZSBzYW1lIG51bWJlci48L2ZpZ2NhcHRpb24+CjwvZmlndXJlPgoKIyMgUHVycG9zZQoKU3VyZmFjZSB3b3JrIHRoYXQgaGFzICoqc3RvcHBlZCBwcm9ncmVzc2luZyoqIOKAlCB0aGUgcmFua2luZyBwcmluY2lwbGUgdGhlIHJvb3QgYEFHRU5UUy5tZGAKc3RhdGVzIGZvciBldmVyeSBhdHRlbnRpb24gc3VyZmFjZS4gQW4gaWRsZSBzZXNzaW9uIHRoYXQgbGVmdCB0d28gc2hlbGxzIHJ1bm5pbmcgYW5kIGFybWVkIGEKbW9uaXRvciBpcyB0aGUgaGlnaGVzdC1yaXNrIHN0YXRlOiBub3QgYWR2YW5jaW5nLCBidXQgc3RpbGwgaG9sZGluZyBtYWNoaW5lcnkgdGhhdCBub2JvZHkgaXMKd2F0Y2hpbmcuIFRvZGF5IG5vbmUgb2YgdGhhdCBpcyB2aXNpYmxlIGluIHRoZSBwcmV2aWV3LCBhbmQgb24gcmVtb3RlIHJvd3MgZXZlbiB0aGUgc3ViLWFnZW50CmNvdW50IGRpc2FwcGVhcnMuIFRoZSBwcmV2aWV3IGlzIHdoYXQgYSBodW1hbiByZWFkcyB0byBkZWNpZGUgImlzIHRoaXMgdGhlIHNlc3Npb24gSSBtZWFuPyIKYmVmb3JlIHJlc3VtaW5nOyBpdCBzaG91bGQgYW5zd2VyICJhbmQgd2hhdCBkaWQgaXQgbGVhdmUgcnVubmluZz8iLgoKIyMgSGFybmVzcyBzdXBwb3J0IOKAlCBwcm9iZWQsIG5vdCBhc3N1bWVkCgp8IEhhcm5lc3MgfCBCYWNrZ3JvdW5kIHNoZWxscyB8IEV2aWRlbmNlIHwKfC0tLXwtLS18LS0tfAp8IENsYXVkZSwgS2ltaSB8IGBCYXNoYCArIGBydW5faW5fYmFja2dyb3VuZDogdHJ1ZWAgfCBsaXZlIHRyYW5zY3JpcHRzOyBLaW1pIDcvODUgZmlsZXMgfAp8IEdyb2sgfCBgcnVuX3Rlcm1pbmFsX2NvbW1hbmRgICsgYGJhY2tncm91bmQ6IHRydWVgIHwgOC80MDAgZmlsZXM7IGFsc28gYGtpbGxfY29tbWFuZF9vcl9zdWJhZ2VudGAgfAp8IENvZGV4IHwgbm9uZSB8IDAvMTc2IGZpbGVzOyBgZXhlY19jb21tYW5kYCByZWNvcmRzIG9ubHkgYGNtZGAgKyBgd29ya2RpcmAgfAp8IEN1cnNvciB8IG5vdCBwb3NzaWJsZSB8IHN0b3JlcyBvbmx5IGBtZXRhLmpzb25gICsgYHByb21wdF9oaXN0b3J5Lmpzb25gOyB0b29sIGNhbGxzIGFyZSBzZXJ2ZXItc2lkZSB8CnwgRHJvaWQgfCBub25lIHwgMC8xMjYgZmlsZXMgfAoKPGRpdiBjbGFzcz0iYXJ0aWZhY3QtY2FsbG91dCI+CkNvZGV4IGFuZCBDdXJzb3IgbXVzdCByZW5kZXIgPHN0cm9uZz5ubyBzaGVsbHMgc2VnbWVudCBhdCBhbGw8L3N0cm9uZz4sIG5ldmVyIDxjb2RlPjAgYmFja2dyb3VuZCBzaGVsbHM8L2NvZGU+LiBaZXJvIHJlYWRzIGFzICJub25lIHJ1bm5pbmciIHdoZW4gdGhlIHRydXRoIGlzICJ3ZSBjYW5ub3Qga25vdyIuIFByZWNlZGVudCBpbiB0aGlzIG1vZHVsZTogdGhlIEhvb2tzIGxpbmUgaXMgQ2xhdWRlLW9ubHkgYW5kIHNpbXBseSBkb2VzIG5vdCByZW5kZXIgZm9yIG90aGVyIGhhcm5lc3Nlcy4KPC9kaXY+CgojIyBQcm9wb3NlZCBDaGFuZ2VzCgojIyMgMS4gT25lIGV4dHJhY3RvciDigJQgYGxpYi9zZXNzaW9uL2hpZ2hsaWdodHMudHNgCgpgU2Vzc2lvbkV2ZW50LmFyZ3NgIGFscmVhZHkgY2FycmllcyB0b29sIGlucHV0LCBzbyBib3RoIHNoYXBlcyBhcmUgZGlyZWN0bHkgcmVhY2hhYmxlLgoKYGBgdHMKZXhwb3J0IGZ1bmN0aW9uIGV4dHJhY3RCYWNrZ3JvdW5kU2hlbGxzKGV2ZW50czogU2Vzc2lvbkV2ZW50W10pOiBCYWNrZ3JvdW5kU2hlbGxbXSB7CiAgY29uc3Qgb3V0OiBCYWNrZ3JvdW5kU2hlbGxbXSA9IFtdOwogIGZvciAoY29uc3QgZSBvZiBldmVudHMpIHsKICAgIGlmIChlLnR5cGUgIT09ICd0b29sX3VzZScpIGNvbnRpbnVlOwogICAgY29uc3QgYmcgPQogICAgICAoZS50b29sID09PSAnQmFzaCcgJiYgZS5hcmdzPy5ydW5faW5fYmFja2dyb3VuZCA9PT0gdHJ1ZSkgfHwgICAgICAgICAgLy8gY2xhdWRlLCBraW1pCiAgICAgIChlLnRvb2wgPT09ICdydW5fdGVybWluYWxfY29tbWFuZCcgJiYgZS5hcmdzPy5iYWNrZ3JvdW5kID09PSB0cnVlKTsgICAvLyBncm9rCiAgICBpZiAoYmcpIG91dC5wdXNoKHsgY29tbWFuZDogU3RyaW5nKGUuYXJncz8uY29tbWFuZCA/PyAnJyksIHRzOiBlLnRpbWVzdGFtcCB9KTsKICB9CiAgcmV0dXJuIG91dDsKfQpgYGAKCkFsc28gKiptb3ZlIGBpc1N1YkFnZW50VG9vbGAgb3V0IG9mIGBzZXNzaW9ucy1waWNrZXIudHNgIGludG8gYGhpZ2hsaWdodHMudHNgKiogc28gYm90aCByZW5kZXJzCnNoYXJlIG9uZSBkZWZpbml0aW9uIOKAlCBjcm9zcy1jdXR0aW5nIGxvZ2ljIGF0IHRoZSBzb3VyY2UsIHBlciB0aGUgcmVwbydzIHJldmlldyBjb252ZW50aW9ucy4KS2VlcCBpdHMgc2VtYW50aWNzIGV4YWN0bHk6IGluLXByb2Nlc3MgYEFnZW50YC9gVGFza2AgY2FsbHMgKipwbHVzKiogc2hlbGwtc3Bhd25lZApgYWdlbnRzIHJ1bmAgLyBgdGVhbXMgYWRkYC4KCiMjIyAyLiBQZXJzaXN0IGF0IGluZGV4IHRpbWUg4oCUIGBsaWIvc2Vzc2lvbi9kYi50c2AKClRoZSBtb2R1bGUgUkVBRE1FJ3Mgb3duICJHYXBzIHRvIGNsb3NlIiBhbHJlYWR5IHByZXNjcmliZXMgdGhpcyBmb3Igc3ViLWFnZW50IGNvdW50ICgjOSkuCkZvbGxvdyB0aGUgZXN0YWJsaXNoZWQgZ3VhcmRlZC1taWdyYXRpb24gcGF0dGVybiAoYHNwYXduZWRfdGVhbWAsIGBkYi50czo3NjhgKToKCmBgYHNxbApBTFRFUiBUQUJMRSBzZXNzaW9ucyBBREQgQ09MVU1OIHN1Yl9hZ2VudF9jb3VudCBJTlRFR0VSOwpBTFRFUiBUQUJMRSBzZXNzaW9ucyBBREQgQ09MVU1OIGJhY2tncm91bmRfc2hlbGxfY291bnQgSU5URUdFUjsKYGBgCgpXcml0ZSB0aGVtIGluIHRoZSBzYW1lIHNjYW4gcGF0aCB0aGF0IGFscmVhZHkgd3JpdGVzIGBpc190ZWFtX29yaWdpbmAgLyBgc3Bhd25lZF90ZWFtYAooYGRiLnRzOjE3NDZgKS4gKipUaGlzIGlzIHRoZSBwYXJ0IHRoYXQgZml4ZXMgcmVtb3RlIHJvd3MuKioKCiMjIyAzLiBSZW5kZXIgb24gYm90aCBwYXRocyDigJQgYGNvbW1hbmRzL3Nlc3Npb25zLXBpY2tlci50c2AKCmBgYApmb3JtYXRNZXRhT25seUJvZHkgKDU1NS01NjgpICAgYWRkIGJvdGggY291bnRzLCByZWFkIGZyb20gcGVyc2lzdGVkIGNvbHVtbnMKZGlnZXN0IGJvZHkgICAgICAgICg4MzctODQ1KSAgIHByZWZlciBwZXJzaXN0ZWQsIGZhbGwgYmFjayB0byBkZXJpdmVkCmBgYAoKVGhlIHByZWZlci1wZXJzaXN0ZWQvZmFsbC1iYWNrIHNoYXBlIG1pcnJvcnMgYHJlY2VudERpcmVjdG9yaWVzVG91Y2hlZGAsIGFscmVhZHkgZG9jdW1lbnRlZAppbiB0aGUgbW9kdWxlIFJFQURNRS4KCiMjIyA0LiBEZWxldGUgdGhlIGRlYWQgYHN1YmFnZW50LnNwYXduZWRgIGV2ZW50CgpEZWNsYXJlZCAoYGV2ZW50LXN0cmVhbS50czo0OGAsIGA6MTE4YCksIGNvdW50ZWQgKGBmZWVkL2FjdGl2aXR5LnRzOjQwOWApLCBnaXZlbiBhIGdseXBoCihgYWN0aXZpdHkudHM6NDgwYCkg4oCUIGFuZCBuZXZlciB3cml0dGVuIG9uY2U6CgpgYGBiYXNoCmdyZXAgLXJoICJzdWJhZ2VudC5zcGF3bmVkIiB+Ly5hZ2VudHMvLmhpc3RvcnkvZXZlbnRzIHwgd2MgLWwKIyAwCmBgYAoKRGVsZXRlIHJhdGhlciB0aGFuIGFkZCBhbiBlbWl0dGVyOiBhbiBlbWl0dGVyIGNyZWF0ZXMgYSBzZWNvbmQgY291bnRpbmcgbWVjaGFuaXNtIHRoYXQgY2FuCmRpc2FncmVlIHdpdGggdGhlIHRvb2wtY2FsbCBkZXJpdmF0aW9uLiBUaGF0IGRpdmVyZ2VuY2UgaXMgYWxyZWFkeSBvYnNlcnZhYmxlIG9uIGBmMDQ1YjU3N2Ag4oCUCjIzIHRvb2wgY2FsbHMsIDQ2IHN1Yi1hZ2VudCB0cmFuc2NyaXB0IGZpbGVzIG9uIGRpc2ssIDUzIHJlcG9ydGVkLiBPbmUgZGVyaXZhdGlvbiBvbmx5LgoKIyMjIDUuIE1vbml0b3JzIOKAlCBuZWVkcyBhIHNjaGVtYSBmaWVsZCBmaXJzdAoKYH4vLmFnZW50cy9tb25pdG9ycy8qLnltbGAgY2FycmllcyBpbnRlcnZhbCwgbGFzdCBjaGVjaywgZmlyZSBjb3VudCBhbmQgYWN0aW9uLCBidXQgKipubwpzZXNzaW9uIGF0dHJpYnV0aW9uKiouIFN0YW1wIHRoZSBhcm1pbmcgc2Vzc2lvbiBpZCBhdCBgYWdlbnRzIG1vbml0b3JzIGFkZGAgdGltZSwgdGhlbiBqb2luLgpEbyBub3QgYmFja2ZpbGwgYnkgc2NyYXBpbmcgcHJvbXB0IHByb3NlLiBUaGlzIGlzIHRoZSBuYXR1cmFsIHNlY29uZCBQUi4KCiMjIEZpbGVzCgp8IEZpbGUgfCBDaGFuZ2UgfAp8LS0tfC0tLXwKfCBgYXBwcy9jbGkvc3JjL2xpYi9zZXNzaW9uL2hpZ2hsaWdodHMudHNgIHwgbmV3IGBleHRyYWN0QmFja2dyb3VuZFNoZWxsc2A7IHJlY2VpdmVzIGBpc1N1YkFnZW50VG9vbGAgfAp8IGBhcHBzL2NsaS9zcmMvbGliL3Nlc3Npb24vZGIudHNgIHwgdHdvIGd1YXJkZWQgYEFMVEVSIFRBQkxFYHMgKyB3cml0ZSBpbiB0aGUgc2NhbiBwYXRoIHwKfCBgYXBwcy9jbGkvc3JjL2NvbW1hbmRzL3Nlc3Npb25zLXBpY2tlci50c2AgfCByZW5kZXIgYm90aCBjb3VudHMgb24gKipib3RoKiogYm9keSBwYXRocyB8CnwgYGFwcHMvY2xpL3NyYy9saWIvZXZlbnQtc3RyZWFtLnRzYCwgYGxpYi9mZWVkL2FjdGl2aXR5LnRzYCB8IGRlbGV0ZSBgc3ViYWdlbnQuc3Bhd25lZGAsIGBzdWJhZ2VudENvdW50YCB8CnwgYGFwcHMvY2xpL3NyYy9saWIvc2Vzc2lvbi9SRUFETUUubWRgIHwgY29ycmVjdCByb3cgIzkg4oCUIHRoZSBjb3VudCBJUyBkZXJpdmFibGUgZnJvbSBgdG9vbF9jYWxsc2AgfAp8IGBhcHBzL2NsaS9kb2NzL2AsIGBDSEFOR0VMT0cubWRgIHwgdXNlci12aXNpYmxlIHByZXZpZXcgY2hhbmdlIHwKCiMjIFB1YmxpYyBJbnRlcmZhY2UKClR3byBuZXcgcGVyc2lzdGVkIGNvbHVtbnMgb24gYHNlc3Npb25zYCwgYW5kIG9uZSBuZXcgRG9pbmctbGluZSBzZWdtZW50LiBObyBuZXcgY29tbWFuZCwgbm8KbmV3IGZsYWcuCgpgYGB0ZXh0CnNlc3Npb25zLnN1Yl9hZ2VudF9jb3VudCAgICAgICAgIElOVEVHRVIgICBudWxsYWJsZSDigJQgTlVMTCBtZWFucyAibm90IHlldCBzY2FubmVkIiwKc2Vzc2lvbnMuYmFja2dyb3VuZF9zaGVsbF9jb3VudCAgSU5URUdFUiAgIGRpc3RpbmN0IGZyb20gMCBtZWFuaW5nICJub25lIGZvdW5kIgpgYGAKClRoZSByZW5kZXJlZCBjb250cmFjdCwgaW4gdGhlIG9yZGVyIHNlZ21lbnRzIGFwcGVhciBvbiB0aGUgRG9pbmcgbGluZToKCmBgYHRleHQKRG9pbmcgICAgIOKckzkvOSDCtyA8dGVhbSBsaW5lYWdlPiDCtyBOIHN1Yi1hZ2VudHMgwrcgTiBiYWNrZ3JvdW5kIHNoZWxscyDCtyBOIG1vbml0b3JzIGFybWVkCmBgYAoKRWFjaCBzZWdtZW50IGlzIG9taXR0ZWQgZW50aXJlbHkgd2hlbiBpdHMgY291bnQgaXMgemVybyAqKm9yKiogd2hlbiB0aGUgaGFybmVzcyBjYW5ub3QgcmVwb3J0Cml0LiBgLS1qc29uYCBjb25zdW1lcnMgZ2FpbiB0aGUgdHdvIGZpZWxkcyB3aXRoIHRoZSBzYW1lIG51bGxhYmxlIHNlbWFudGljczsgYW4gYWJzZW50IGZpZWxkCm1lYW5zIHVua25vd24sIG5ldmVyIHplcm8uCgojIyBMaXZlbmVzcyDigJQgb3V0IG9mIHNjb3BlIGZvciB2MQoKQSB0cmFuc2NyaXB0IHJlY29yZHMgdGhhdCBhIHNoZWxsIHdhcyAqc3RhcnRlZCosIG5ldmVyIHRoYXQgaXQgaXMgc3RpbGwgYWxpdmUuIEluZmVycmluZwpsaXZlbmVzcyBmcm9tIHRyYW5zY3JpcHQgcHJlc2VuY2UgaXMgdGhlIHRyYXAgYGFnZW50cyBkZXZpY2VzIHBzYCBhbHJlYWR5IGRvY3VtZW50czogYSBraWxsZWQKcHJvY2VzcyBuZXZlciB3cml0ZXMgaXRzIGAuZXhpdGAgZmlsZSwgc28gYSBuYWl2ZSByZWFkZXIgcmVwb3J0cyAicnVubmluZyIgZm9yZXZlci4gVGFzawpvdXRwdXQgZmlsZXMgYWxzbyBsaXZlIHVuZGVyIGAvdG1wYCBhbmQgYXJlIHdpcGVkLCBzbyB0aGV5IHByb3ZlIG5vdGhpbmcgaGlzdG9yaWNhbGx5LgoKdjEgcmVwb3J0cyAqKiJsZWZ0IE4gYmFja2dyb3VuZCBzaGVsbHMiKiouIExpdmUgcmVjb25jaWxpYXRpb24gYmVsb25ncyBpbiBgc2Vzc2lvbnMgLS1hY3RpdmVgLAp3aGVyZSByZWFsIHBpZHMgYXJlIGFscmVhZHkgcmVzb2x2ZWQuCgojIyBWYWxpZGF0aW9uCgp8IENoZWNrIHwgSG93IHwKfC0tLXwtLS18CnwgRXh0cmFjdG9yLCBwZXIgaGFybmVzcyB8IFVuaXQgdGVzdHMgb3ZlciBjb21taXR0ZWQgZml4dHVyZXM6IENsYXVkZSBgcnVuX2luX2JhY2tncm91bmRgLCBHcm9rIGBiYWNrZ3JvdW5kYCwgcGx1cyBhICoqQ29kZXggZml4dHVyZSBhc3NlcnRpbmcgdGhlIGZpZWxkIGlzIGFic2VudCwgbm90IHplcm8qKiB8CnwgTm8gcmVncmVzc2lvbiBvbiB0aGUga25vd24gc2Vzc2lvbiB8IGBmMDQ1YjU3N2Agc3RpbGwgcmVwb3J0cyA1MyBhZnRlciBgaXNTdWJBZ2VudFRvb2xgIG1vdmVzIHwKfCBUaGUgYWN0dWFsIGJ1ZyB8IFJlbmRlciB0aGF0IHNlc3Npb24gdGhyb3VnaCBgZm9ybWF0TWV0YU9ubHlCb2R5YCBhbmQgYXNzZXJ0IGJvdGggY291bnRzIGFwcGVhciDigJQgKip0aGlzIHRlc3QgZmFpbHMgb24gdG9kYXkncyBjb2RlKiogfAp8IE1pZ3JhdGlvbiBpZGVtcG90ZW50IHwgU2NhbiB0d2ljZSBhZ2FpbnN0IGEgY29weSBvZiB0aGUgcmVhbCAyLjMgR0IgYHNlc3Npb25zLmRiYDsgc2Vjb25kIHJ1biBpcyBhIG5vLW9wIHwKfCBSZW1vdGUgcGFyaXR5IHwgQ29tcGFyZSBsb2NhbCBhbmQgYC0tZGV2aWNlYCBwcmV2aWV3IG9mIHRoZSBzYW1lIGlkOyB0aGV5IG11c3QgYWdyZWUgfAp8IERlYWQgZXZlbnQgZ29uZSB8IGBncmVwIC1yIHN1YmFnZW50LnNwYXduZWRgIHJldHVybnMgbm90aGluZyBvdXRzaWRlIHRoZSBDSEFOR0VMT0cgfAoKYGBgYmFzaApjZCBhcHBzL2NsaSAmJiBidW4gcnVuIHRlc3QKYWdlbnRzLWRldiBzZXNzaW9ucyBwcmV2aWV3IGYwNDViNTc3CmFnZW50cy1kZXYgc2Vzc2lvbnMgcHJldmlldyBmMDQ1YjU3NyAtLWRldmljZSB6aW9uICAgICMgbXVzdCBtYXRjaApgYGAKCiMjIFJpc2tzCgp8IFJpc2sgfCBNaXRpZ2F0aW9uIHwKfC0tLXwtLS18CnwgTWlncmF0aW9uIHRvdWNoZXMgYSAyLjMgR0IgbGl2ZSBEQiB8IEd1YXJkZWQgYEFMVEVSIFRBQkxFYCBmb2xsb3dpbmcgdGhlIGV4YWN0IGBzcGF3bmVkX3RlYW1gIHByZWNlZGVudDsgbnVsbGFibGUgY29sdW1ucywgbm8gcmV3cml0ZSBvZiBleGlzdGluZyByb3dzOyBpZGVtcG90ZW5jeSBhc3NlcnRlZCBhZ2FpbnN0IGEgY29weSBiZWZvcmUgaXQgcnVucyBmb3IgcmVhbCB8CnwgYE5VTExgIHJlYWQgYXMgYDBgLCBzbyAibm90IHNjYW5uZWQiIHJlbmRlcnMgYXMgIm5vIHNoZWxscyIgfCBOdWxsYWJsZSBpcyBsb2FkLWJlYXJpbmc6IHRoZSByZW5kZXIgb21pdHMgdGhlIHNlZ21lbnQgb24gYE5VTExgIGFuZCBvbiBgMGAgYWxpa2UsIHNvIG5laXRoZXIgY2FuIHByb2R1Y2UgYSBmYWxzZSAibm9uZSBydW5uaW5nIiBjbGFpbSB8CnwgTW92aW5nIGBpc1N1YkFnZW50VG9vbGAgc2lsZW50bHkgY2hhbmdlcyB0aGUgY291bnQgfCBQaW5uZWQgYnkgYSByZWdyZXNzaW9uIHRlc3Qgb24gYGYwNDViNTc3YCDigJQgbXVzdCBzdGlsbCBiZSA1MyAoMjMgYEFnZW50YCArIDMwIHNoZWxsIHNwYXducyksIHZlcmlmaWVkIHR3byBpbmRlcGVuZGVudCB3YXlzIGJlZm9yZSB0aGUgbW92ZSB8CnwgRGVsZXRpbmcgYHN1YmFnZW50LnNwYXduZWRgIGJyZWFrcyBhIGNvbnN1bWVyIHwgSXQgaGFzIG5vbmU6IHplcm8gZXZlbnRzIGV2ZXIgd3JpdHRlbiwgYW5kIGBDb2xsYXBzZWRBY3Rpdml0eS5zdWJhZ2VudENvdW50YCBpcyB0aGVyZWZvcmUgYWx3YXlzIDAgZm9yIGV2ZXJ5IGNhbGxlci4gR3JlcC12ZXJpZmllZCBhY3Jvc3MgdGhlIHdob2xlIGV2ZW50IHN0b3JlIHwKfCBDb3VudHMgcmVhZCBhcyBsaXZlIHN0YXR1cyB8IFdvcmRpbmcgaXMgImxlZnQgTiBiYWNrZ3JvdW5kIHNoZWxscyIsIG5ldmVyICJydW5uaW5nIjsgbGl2ZW5lc3MgZXhwbGljaXRseSBkZWZlcnJlZCByYXRoZXIgdGhhbiBndWVzc2VkIHwKCiMjIFRyYWNraW5nCgotIFtSVVNILTMwOTFdKGh0dHBzOi8vbGluZWFyLmFwcC9nZXRydXNoL2lzc3VlL1JVU0gtMzA5MSkg4oCUIGJhY2tncm91bmQgc2hlbGxzICsgYXJtZWQgbW9uaXRvcnMKLSBbUlVTSC0zMDk1XShodHRwczovL2xpbmVhci5hcHAvZ2V0cnVzaC9pc3N1ZS9SVVNILTMwOTUpIOKAlCBzdWItYWdlbnQgZmFuLW91dCwgcmVtb3RlIHJvd3MsIGRlYWQgZXZlbnQK"}</script>
+<script>
+(() => {
+  const root = document.documentElement;
+  const button = document.querySelector('.theme-toggle');
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
+  const configured = "system";
+  const stored = () => { try { const value = localStorage.getItem('artifacts-theme'); return value === 'light' || value === 'dark' ? value : null; } catch { return null; } };
+  const preferred = () => stored() || (configured === 'system' ? (media.matches ? 'dark' : 'light') : configured);
+  const apply = (theme, persist) => {
+    root.dataset.theme = theme;
+    root.style.colorScheme = theme;
+    const next = theme === 'dark' ? 'light' : 'dark';
+    button.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+    button.setAttribute('title', 'Switch to ' + next + ' theme');
+    button.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+    if (persist) { try { localStorage.setItem('artifacts-theme', theme); } catch {} }
+  };
+  apply(preferred(), false);
+  button.addEventListener('click', () => apply(root.dataset.theme === 'dark' ? 'light' : 'dark', true));
+  media.addEventListener('change', () => { if (configured === 'system' && !stored()) apply(media.matches ? 'dark' : 'light', false); });
+})();
+</script><script>
+(() => {
+  // Scroll-spy: mark the section the reader is currently in. The active heading
+  // is the last one whose top has passed the reading line, so a heading is
+  // "current" from the moment it reaches the top, not when it leaves.
+  const links = [...document.querySelectorAll('.toc-item')];
+  if (links.length) {
+    const targets = links
+      .map((link) => ({ link, heading: document.getElementById(link.dataset.tocFor) }))
+      .filter((entry) => entry.heading);
+    let active = null;
+    let queued = false;
+    const sync = () => {
+      queued = false;
+      const line = 120;
+      let current = targets[0];
+      for (const entry of targets) {
+        if (entry.heading.getBoundingClientRect().top <= line) current = entry;
+        else break;
+      }
+      // Past the end of the document the last section is the one being read.
+      if (window.innerHeight + window.scrollY >= document.body.scrollHeight - 4) current = targets[targets.length - 1];
+      if (!current || current.link === active) return;
+      if (active) active.classList.remove('is-active');
+      active = current.link;
+      active.classList.add('is-active');
+      const rail = active.closest('.toc');
+      if (rail && rail.scrollHeight > rail.clientHeight) {
+        const top = active.offsetTop - rail.clientHeight / 2;
+        rail.scrollTo({ top, behavior: 'smooth' });
+      }
+    };
+    const onScroll = () => { if (!queued) { queued = true; requestAnimationFrame(sync); } };
+    addEventListener('scroll', onScroll, { passive: true });
+    addEventListener('resize', onScroll, { passive: true });
+    sync();
+  }
+
+  // Local read count. Per-browser, keyed by this artifact's own identity, so a
+  // shared link counts each reader's own visits rather than a global total.
+  try {
+    const key = 'artifacts-views:' + location.origin + location.pathname + ':' + (document.title || '');
+    const count = (parseInt(localStorage.getItem(key) || '0', 10) || 0) + 1;
+    localStorage.setItem(key, String(count));
+    const label = document.querySelector('.view-count');
+    if (label) {
+      label.textContent = count === 1 ? 'first read' : count + ' reads';
+      label.hidden = false;
+    }
+  } catch {}
+})();
+</script><script>
+(() => {
+  const root = document.querySelector('.artifact-body');
+  if (!root) return;
+
+  const storageKey = 'artifacts-highlights:' + location.origin + location.pathname + ':' + (document.title || '');
+  const selector = 'h2,h3,p,li,blockquote,pre,figcaption,td,th,dd';
+  const hash = (value) => {
+    let result = 2166136261;
+    for (let index = 0; index < value.length; index += 1) {
+      result ^= value.charCodeAt(index);
+      result = Math.imul(result, 16777619);
+    }
+    return (result >>> 0).toString(36);
+  };
+  const anchors = [...root.querySelectorAll(selector)].filter((element) => !element.parentElement.closest(selector));
+  const bases = [];
+  let section = 'document';
+  for (const anchor of anchors) {
+    if ((anchor.tagName === 'H2' || anchor.tagName === 'H3') && anchor.id) section = anchor.id;
+    const text = (anchor.textContent || '').replace(/\s+/g, ' ').trim();
+    const base = anchor.id ? 'id:' + anchor.id : section + ':' + anchor.tagName.toLowerCase() + ':' + hash(text);
+    bases.push(base);
+  }
+  const totals = new Map();
+  for (const base of bases) totals.set(base, (totals.get(base) || 0) + 1);
+  const occurrences = new Map();
+  for (let index = 0; index < anchors.length; index += 1) {
+    const anchor = anchors[index];
+    const base = bases[index];
+    const occurrence = (occurrences.get(base) || 0) + 1;
+    occurrences.set(base, occurrence);
+    anchor.dataset.readerAnchor = base.startsWith('id:') ? base : base + ':count:' + totals.get(base) + ':occurrence:' + occurrence;
+  }
+  const byId = new Map(anchors.map((anchor) => [anchor.dataset.readerAnchor, anchor]));
+
+  const read = () => {
+    try {
+      const value = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      return Array.isArray(value) ? value.filter((item) => item && item.id && item.start && item.end) : [];
+    } catch { return []; }
+  };
+  let highlights = read();
+  const write = () => { try { localStorage.setItem(storageKey, JSON.stringify(highlights)); } catch {} };
+  const textLength = (anchor) => (anchor.textContent || '').length;
+  const offsetAt = (anchor, node, offset) => {
+    const range = document.createRange();
+    range.selectNodeContents(anchor);
+    try { range.setEnd(node, offset); } catch { return null; }
+    return range.toString().length;
+  };
+  const wrap = (anchor, start, end, id) => {
+    if (end <= start) return;
+    const nodes = [];
+    const walker = document.createTreeWalker(anchor, NodeFilter.SHOW_TEXT);
+    let cursor = 0;
+    let node = walker.nextNode();
+    while (node) {
+      const nodeStart = cursor;
+      const nodeEnd = cursor + node.data.length;
+      if (nodeEnd > start && nodeStart < end) nodes.push([node, Math.max(0, start - nodeStart), Math.min(node.data.length, end - nodeStart)]);
+      cursor = nodeEnd;
+      node = walker.nextNode();
+    }
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {
+      const [textNode, from, to] = nodes[index];
+      if (to <= from) continue;
+      const range = document.createRange();
+      range.setStart(textNode, from);
+      range.setEnd(textNode, to);
+      const mark = document.createElement('mark');
+      mark.className = 'reader-highlight';
+      mark.dataset.highlightId = id;
+      mark.title = 'Click to remove highlight';
+      range.surroundContents(mark);
+    }
+  };
+  const clearMarks = () => {
+    for (const mark of root.querySelectorAll('mark[data-highlight-id]')) mark.replaceWith(...mark.childNodes);
+    for (const anchor of anchors) anchor.normalize();
+  };
+  const render = () => {
+    clearMarks();
+    for (const highlight of highlights) {
+      const first = byId.get(highlight.start.anchor);
+      const last = byId.get(highlight.end.anchor);
+      const firstIndex = anchors.indexOf(first);
+      const lastIndex = anchors.indexOf(last);
+      if (!first || !last || firstIndex < 0 || lastIndex < firstIndex) continue;
+      for (let index = firstIndex; index <= lastIndex; index += 1) {
+        const anchor = anchors[index];
+        wrap(anchor, index === firstIndex ? highlight.start.offset : 0, index === lastIndex ? highlight.end.offset : textLength(anchor), highlight.id);
+      }
+    }
+  };
+
+  root.addEventListener('mouseup', () => {
+    const selection = getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    const startAnchor = range.startContainer.parentElement?.closest('[data-reader-anchor]');
+    const endAnchor = range.endContainer.parentElement?.closest('[data-reader-anchor]');
+    if (!startAnchor || !endAnchor || !root.contains(startAnchor) || !root.contains(endAnchor)) return;
+    const startOffset = offsetAt(startAnchor, range.startContainer, range.startOffset);
+    const endOffset = offsetAt(endAnchor, range.endContainer, range.endOffset);
+    if (startOffset === null || endOffset === null) return;
+    const startIndex = anchors.indexOf(startAnchor);
+    const endIndex = anchors.indexOf(endAnchor);
+    if (startIndex > endIndex || (startIndex === endIndex && startOffset >= endOffset)) return;
+    const candidate = { start: { anchor: startAnchor.dataset.readerAnchor, offset: startOffset }, end: { anchor: endAnchor.dataset.readerAnchor, offset: endOffset } };
+    if (highlights.some((item) => item.start.anchor === candidate.start.anchor && item.start.offset === candidate.start.offset && item.end.anchor === candidate.end.anchor && item.end.offset === candidate.end.offset)) return;
+    highlights.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2), ...candidate });
+    write();
+    selection.removeAllRanges();
+    render();
+  });
+  root.addEventListener('click', (event) => {
+    const mark = event.target.closest('mark[data-highlight-id]');
+    if (!mark || !root.contains(mark)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    highlights = highlights.filter((item) => item.id !== mark.dataset.highlightId);
+    write();
+    render();
+  });
+  render();
+})();
+</script>
+</body>
+</html>
