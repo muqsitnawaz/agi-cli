@@ -7,6 +7,7 @@ import * as yaml from 'yaml';
 import * as state from '../state.js';
 import * as profiles from './profiles.js';
 import { query, _resetForTest } from '../feed/events.js';
+import { machineId } from '../machine-id.js';
 
 const TEST_HOME = path.join(tmpdir(), 'agents-cli-browser-service-test');
 const TEST_AGENTS_DIR = path.join(TEST_HOME, '.agents');
@@ -58,11 +59,29 @@ function reset() {
   fs.mkdirSync(path.join(TEST_AGENTS_DIR, 'browser', 'profiles'), { recursive: true });
 }
 
-function writeProfile(name: string, endpoints: string[], browserType = 'chrome'): void {
+function writeProfile(
+  name: string,
+  endpoints: string[],
+  browserType = 'chrome',
+  device = machineId(),
+): void {
   const profile = { name, browser: browserType, endpoints };
   fs.writeFileSync(
     path.join(TEST_AGENTS_DIR, 'browser', 'profiles', `${name}.yaml`),
     yaml.stringify(profile)
+  );
+  const file = path.join(TEST_AGENTS_DIR, 'devices', device, 'agents.yaml');
+  let doc: { browser?: Record<string, { browser: string; endpoints: string[] }> } = {};
+  if (fs.existsSync(file)) {
+    doc = (yaml.parse(fs.readFileSync(file, 'utf8')) as typeof doc) ?? {};
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(
+    file,
+    yaml.stringify({
+      ...doc,
+      browser: { ...doc.browser, [name]: { browser: browserType, endpoints } },
+    }),
   );
 }
 
@@ -837,8 +856,8 @@ function makeTargetedConn(
 }
 
 /** Seed a live connection so `start` reuses it instead of launching a browser. */
-function attach(service: any, profile: string, conn: unknown): void {
-  (service as { connections: Map<string, unknown> }).connections.set(`${profile}@endpoint-0`, conn);
+function attach(service: any, profile: string, conn: unknown, key = `${profile}@endpoint-0`): void {
+  (service as { connections: Map<string, unknown> }).connections.set(key, conn);
 }
 
 function createTargetCount(calls: Array<{ method: string }>): number {
@@ -1541,5 +1560,89 @@ describe('BrowserService.reapAbandoned — abandoned-task reaper (RUSH-2622)', (
     expect(result.closed).toEqual([]);
     expect(result.skipped).toBe(1);
     expect(targets).toHaveLength(1);
+  });
+});
+
+describe('BrowserService.start — registry resolution', () => {
+  it('fails loud when nobody declares the name, and launches no browser', async () => {
+    writeProfile('comet-local', ['cdp://localhost:9333']);
+    const service = new BrowserService();
+    const before = fs.existsSync(TEST_BROWSER_DIR)
+      ? fs.readdirSync(TEST_BROWSER_DIR)
+      : [];
+
+    await expect(service.start('comet-locl')).rejects.toThrow(/comet-local/);
+    await expect(service.start('comet-locl')).rejects.toThrow(/not declared by any device/);
+
+    const after = fs.existsSync(TEST_BROWSER_DIR) ? fs.readdirSync(TEST_BROWSER_DIR) : [];
+    expect(after.filter((entry) => entry.includes('comet-locl'))).toEqual([]);
+    expect(after.filter((entry) => entry.includes('chrome-data'))).toEqual(
+      before.filter((entry) => entry.includes('chrome-data')),
+    );
+  });
+
+  it('fails loud when the only declaring device is unreachable, and launches no browser', async () => {
+    writeProfile('comet-local', ['cdp://localhost:9333'], 'comet', 'zion');
+    const service = new BrowserService();
+
+    await expect(
+      service.start('comet-local', {
+        probe: () => ({ reachable: false, reason: 'No route to host' }),
+      }),
+    ).rejects.toThrow(/zion/);
+    await expect(
+      service.start('comet-local', {
+        probe: () => ({ reachable: false, reason: 'No route to host' }),
+      }),
+    ).rejects.toThrow(/will not be launched/);
+
+    expect(
+      fs.existsSync(TEST_BROWSER_DIR)
+        ? fs.readdirSync(TEST_BROWSER_DIR).filter((entry) => entry.startsWith('comet-local'))
+        : [],
+    ).toEqual([]);
+  });
+
+  it('two concurrent callers of an identity-bearing profile share one connection and one chrome-data dir', async () => {
+    writeProfile('signed-in', ['cdp://localhost:9333'], 'comet');
+    const service = new BrowserService();
+    const { conn } = makeTargetedConn('signed-in@endpoint-0', {
+      browser: 'comet',
+      pages: [{ targetId: 'win', url: 'https://github.com' }],
+    });
+    (conn as { electron: boolean }).electron = true;
+    (conn as { tasks: Map<string, unknown> }).tasks.set('seed', {
+      id: 'seed',
+      name: 'seed',
+      profile: 'signed-in@endpoint-0',
+      tabs: { t1: 'win' },
+      currentTabId: 't1',
+      createdAt: Date.now(),
+      lastActionAt: Date.now(),
+      pid: 4242,
+    });
+    attach(service, 'signed-in', conn);
+
+    const chromeData = path.join(TEST_BROWSER_DIR, 'signed-in@endpoint-0', 'chrome-data');
+    fs.mkdirSync(chromeData, { recursive: true });
+    fs.writeFileSync(path.join(chromeData, 'Cookies'), 'identity');
+
+    await Promise.all([
+      service.start('signed-in'),
+      service.start('signed-in'),
+    ]);
+
+    const map = (service as unknown as { connections: Map<string, unknown> }).connections;
+    expect(map.size).toBe(1);
+
+    const chromeDataDirs = fs.readdirSync(TEST_BROWSER_DIR).filter((entry) => {
+      try {
+        return fs.statSync(path.join(TEST_BROWSER_DIR, entry, 'chrome-data')).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+    expect(chromeDataDirs).toEqual(['signed-in@endpoint-0']);
+    expect(fs.readFileSync(path.join(chromeData, 'Cookies'), 'utf8')).toBe('identity');
   });
 });

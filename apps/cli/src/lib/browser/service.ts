@@ -22,6 +22,13 @@ import { killChrome, getRunningChromeInfo, launchBrowser, allocatePort } from '.
 import { assertRemoteControlAllowedForRequest } from './remote-control.js';
 import { connectLocal } from './drivers/local.js';
 import { connectSSH, shellQuote } from './drivers/ssh.js';
+import {
+  isLegacyEndpointKey,
+  migrateLegacyRuntimeDir,
+  resolveBrowserTarget,
+  shouldForkProfile,
+  type DeviceProbe,
+} from './resolve-target.js';
 import { clearProfileRuntime, listProfileCacheDirs, readProfileRuntimeMeta, isProcessAlive } from './runtime-state.js';
 import { resolveDomainSkill, type ResolvedDomainSkill } from './domain-skills.js';
 import {
@@ -38,7 +45,6 @@ import {
   type ReapResult,
   type ProfileName,
   type ConnectionKey,
-  connectionKey,
   asConnectionKey,
   parseConnectionKey,
   keyBelongsToProfile,
@@ -414,7 +420,8 @@ export class BrowserService {
    * Live browsers, keyed by {@link ConnectionKey} — NOT by profile name. The
    * branded key type is what makes `connections.get(someProfileName)` (the
    * RUSH-2709 miss that made `status --profile <name>` return empty for a
-   * running `<name>@endpoint-0`) fail to compile.
+   * running `<name>@<device>`) fail to compile. Keys are `<profile>@<device>`
+   * (legacy leftover `<profile>@endpoint-N` dirs are still recognized).
    */
   private connections = new Map<ConnectionKey, ProfileConnection>();
   private forkingProfiles = new Set<string>();
@@ -449,6 +456,8 @@ export class BrowserService {
       fleetRemote?: boolean;
       /** Explicit human label (`--title`). */
       title?: string;
+      /** Injected reachability probe — production uses ssh; tests pass a fake. */
+      probe?: DeviceProbe;
     } = {}
   ): Promise<{
     task: string;
@@ -457,8 +466,12 @@ export class BrowserService {
     windowId?: string;
     /** BARE profile name — what the caller asked for, never the runtime key. */
     profile: ProfileName;
-    /** Runtime key the task actually landed on (`<profile>@<endpoint>`). */
+    /** Runtime key the task actually landed on (`<profile>@<device>`). */
     key: ConnectionKey;
+    /** Device the daemon connected to. */
+    device: string;
+    /** Set when the daemon picked a remote declaring device. */
+    picked?: string;
     skill?: ResolvedDomainSkill;
   }> {
     // Consent gate, before anything is resolved or launched. This is the
@@ -467,27 +480,16 @@ export class BrowserService {
     // …) able to open a browser on a machine whose owner never opted in.
     assertRemoteControlAllowedForRequest(opts.fleetRemote, { actor: opts.actor });
 
-    const profile = await getProfile(profileName);
-    if (!profile) {
-      throw new Error(`Profile "${profileName}" not found`);
-    }
-
-    // Pick the endpoint preset. Throws with the candidate list if the user
-    // passed an unknown name. The runtime key `<profile>@<endpoint>` is what
-    // the connection map + per-profile runtime dirs are keyed on, so a single
-    // YAML profile can run at multiple endpoints concurrently.
-    //
-    // `effectiveProfile.name` stays BARE. Overwriting it with the runtime key
-    // here (pre-RUSH-2709) is what leaked `comet-local@endpoint-0` into every
-    // listing and made `status --profile comet-local` miss its own browser.
-    // The key travels as its own argument instead.
-    const resolved = resolveEndpoint(profile, opts.endpointName);
-    const composite = connectionKey(profileName, resolved.name);
-    const effectiveProfile: BrowserProfile = {
-      ...profile,
-      binary: resolved.binary,
-      targetFilter: resolved.targetFilter,
-    };
+    // Registry decides WHERE. Three outcomes, no fourth: local if this
+    // device declares the name; tunnel to a declaring device otherwise;
+    // fail loud if nobody does. Never auto-create a local browser under a
+    // name that means a logged-in browser somewhere else.
+    const routed = resolveBrowserTarget(profileName, {
+      endpointName: opts.endpointName,
+      probe: opts.probe,
+    });
+    const composite = routed.key;
+    const effectiveProfile: BrowserProfile = routed.profile;
 
     const taskId = generateTaskId();
     let taskName: string;
@@ -504,10 +506,11 @@ export class BrowserService {
     }
     const taskLabel = deriveTaskLabel({ title: opts.title, url: opts.url });
 
-    let conn = await this.reuseHealthyConnection(composite);
-    let effectiveKey: ConnectionKey = composite;
+    const reused = await this.reuseProfileConnection(profileName, composite);
+    let conn = reused?.conn;
+    let effectiveKey: ConnectionKey = reused?.key ?? composite;
 
-    if (conn && conn.electron && conn.tasks.size > 0) {
+    if (conn && shouldForkProfile(routed.kind, conn)) {
       if (this.forkingProfiles.has(composite)) {
         while (this.forkingProfiles.has(composite)) {
           await new Promise((r) => setTimeout(r, 50));
@@ -530,9 +533,20 @@ export class BrowserService {
         }
       }
     } else if (!conn) {
-      conn = await this.openConnection(effectiveProfile, resolved.target, composite, profileName);
+      migrateLegacyRuntimeDir(profileName, composite, getBrowserRuntimeDir());
+      conn = await this.openConnection(
+        effectiveProfile,
+        routed.target,
+        composite,
+        profileName,
+        { persistRemote: !routed.local },
+      );
+      effectiveKey = composite;
     }
-    if (conn && !conn.profile) conn.profile = profileName;
+    if (!conn) {
+      throw new Error(`Could not connect to profile "${profileName}"`);
+    }
+    if (!conn.profile) conn.profile = profileName;
 
     // Browsers launch with --no-startup-window (session-cookie persistence,
     // see launchBrowser), so a bare `start` with no --url would otherwise
@@ -665,7 +679,16 @@ export class BrowserService {
       if (resolved) skill = resolved;
     }
 
-    return { task: taskId, name: taskName, tabId, profile: profileName, key: effectiveKey, skill };
+    return {
+      task: taskId,
+      name: taskName,
+      tabId,
+      profile: profileName,
+      key: effectiveKey,
+      device: routed.device,
+      picked: routed.picked,
+      skill,
+    };
   }
 
   /**
@@ -923,7 +946,7 @@ export class BrowserService {
   }
 
   async stopProfile(profileRef: ProfileName | ConnectionKey): Promise<void> {
-    // Connections are keyed by the runtime key `<profile>@<endpoint>` (see
+    // Connections are keyed by the runtime key `<profile>@<device>` (see
     // start()) while callers pass the bare profile name (or, occasionally, an
     // exact key). A plain `connections.get(profileRef)` therefore missed every
     // real remote connection, so `cleanup()` never ran — leaving the SSH tunnel
@@ -1890,8 +1913,9 @@ export class BrowserService {
    * `profileName` is a {@link ProfileName} — a BARE name, never a runtime key.
    * Every candidate is selected by the one rule ({@link keyBelongsToProfile}),
    * and a scoped query that finds no live connection falls through to disk, so
-   * `status --profile comet-local` reports the LIVE `comet-local@endpoint-0`
-   * instead of the empty list it used to return (RUSH-2709).
+   * `status --profile comet-local` reports the LIVE `comet-local@<device>`
+   * (and leftover `comet-local@endpoint-0` dirs) instead of the empty list
+   * it used to return (RUSH-2709).
    */
   async status(profileRef?: ProfileName | ConnectionKey): Promise<ProfileStatus[]> {
     // Reconnect live browsers after a daemon restart so status is not empty
@@ -2552,15 +2576,15 @@ export class BrowserService {
    * already resolved the endpoint and built the `effectiveProfile` with
    * the per-endpoint binary/targetFilter overrides applied; we just use it.
    *
-   * `key` is the runtime key (`<profile>@<endpoint>`) and is what every on-disk
-   * lookup uses, so per-endpoint pid/port files don't collide when the same app
-   * runs locally and remotely at the same time. It is a SEPARATE argument
-   * because `effectiveProfile.name` stays the bare, user-facing name (RUSH-2709).
+   * `key` is the runtime key (`<profile>@<device>`) and is what every on-disk
+   * lookup uses. It is a SEPARATE argument because `effectiveProfile.name`
+   * stays the bare, user-facing name (RUSH-2709).
    */
   private async connectProfile(
     effectiveProfile: BrowserProfile,
     target: string,
     key: ConnectionKey,
+    opts: { persistRemote?: boolean } = {},
   ): Promise<ProfileConnection> {
     const existingInfo = getRunningChromeInfo(key);
 
@@ -2599,7 +2623,7 @@ export class BrowserService {
       }
     }
 
-    const conn = await this.connectEndpoint(effectiveProfile, target, key);
+    const conn = await this.connectEndpoint(effectiveProfile, target, key, opts);
     if (!conn) {
       throw new Error(`Could not connect to endpoint ${target} for profile "${effectiveProfile.name}"`);
     }
@@ -2610,6 +2634,7 @@ export class BrowserService {
     profile: BrowserProfile,
     endpoint: string,
     key: ConnectionKey,
+    opts: { persistRemote?: boolean } = {},
   ): Promise<ProfileConnection | null> {
     const url = new URL(endpoint);
 
@@ -2629,7 +2654,9 @@ export class BrowserService {
     }
 
     if (url.protocol === 'ssh:') {
-      const conn = await connectSSH(endpoint, profile, key);
+      const conn = await connectSSH(endpoint, profile, key, {
+        persistRemote: opts.persistRemote,
+      });
       await this.enableDomains(conn.cdp);
       return {
         cdp: conn.cdp,
@@ -2809,7 +2836,14 @@ export class BrowserService {
     createIfMissing: boolean;
     title?: string;
     url?: string;
-  }): Promise<{ conn: ProfileConnection; task: Task; key: ConnectionKey; created: boolean } | null> {
+  }): Promise<{
+    conn: ProfileConnection;
+    task: Task;
+    key: ConnectionKey;
+    created: boolean;
+    picked?: string;
+    device?: string;
+  } | null> {
     if (opts.task) {
       const found = await this.findTask(opts.task, opts.profile);
       return { ...found, created: false };
@@ -2875,7 +2909,12 @@ export class BrowserService {
       sessionId: opts.sessionId,
       title: opts.title,
     });
-    return { ...(await this.findTask(started.name, started.profile)), created: true };
+    return {
+      ...(await this.findTask(started.name, started.profile)),
+      created: true,
+      picked: started.picked,
+      device: started.device,
+    };
   }
 
   private listTasksForCaller(caller: {
@@ -3048,7 +3087,14 @@ export class BrowserService {
 
     let resolved;
     try {
-      resolved = resolveEndpoint(profile, endpointFromKey);
+      // Legacy keys encode the preset (`endpoint-0`). New keys encode the
+      // declaring device, which is not a preset name — resolve via registry.
+      if (endpointFromKey && /^endpoint-\d+$/.test(endpointFromKey)) {
+        resolved = resolveEndpoint(profile, endpointFromKey);
+      } else {
+        const routed = resolveBrowserTarget(bare);
+        resolved = { name: routed.device, target: routed.target };
+      }
     } catch {
       return null;
     }
@@ -3470,14 +3516,37 @@ export class BrowserService {
     return undefined;
   }
 
+  /**
+   * Reuse a live connection for this profile: the new `<name>@<device>` key
+   * first, then any leftover `<name>@endpoint-N` key still in the map so a
+   * browser started before the key collapse is not abandoned.
+   */
+  private async reuseProfileConnection(
+    profileName: ProfileName,
+    preferred: ConnectionKey,
+  ): Promise<{ conn: ProfileConnection; key: ConnectionKey } | undefined> {
+    const preferredConn = await this.reuseHealthyConnection(preferred);
+    if (preferredConn) return { conn: preferredConn, key: preferred };
+
+    for (const key of [...this.connections.keys()]) {
+      if (key === preferred) continue;
+      if (!isLegacyEndpointKey(key, profileName)) continue;
+      if (parseConnectionKey(key).fork !== undefined) continue;
+      const conn = await this.reuseHealthyConnection(key);
+      if (conn) return { conn, key };
+    }
+    return undefined;
+  }
+
   /** Connect a profile at `target`, register it under `key`, and arm downloads. */
   private async openConnection(
     profile: BrowserProfile,
     target: string,
     key: ConnectionKey,
     profileName: ProfileName,
+    opts: { persistRemote?: boolean } = {},
   ): Promise<ProfileConnection> {
-    const conn = await this.connectProfile(profile, target, key);
+    const conn = await this.connectProfile(profile, target, key, opts);
     conn.key = key;
     conn.profile = profileName;
     this.connections.set(key, conn);
@@ -3500,31 +3569,43 @@ export class BrowserService {
   async showUrl(
     profileName: ProfileName,
     url: string,
-    opts: { endpointName?: string; fleetRemote?: boolean; actor?: string } = {},
-  ): Promise<{ profile: ProfileName; key: ConnectionKey; tabId: string }> {
+    opts: { endpointName?: string; fleetRemote?: boolean; actor?: string; probe?: DeviceProbe } = {},
+  ): Promise<{ profile: ProfileName; key: ConnectionKey; tabId: string; device: string; picked?: string }> {
     // Same consent gate as start(): this opens a browser, so a fleet-remote
     // caller needs the target machine's opt-in.
     assertRemoteControlAllowedForRequest(opts.fleetRemote, { actor: opts.actor });
 
-    const profile = await getProfile(profileName);
-    if (!profile) throw new Error(`Profile "${profileName}" not found`);
+    const routed = resolveBrowserTarget(profileName, {
+      endpointName: opts.endpointName,
+      probe: opts.probe,
+    });
+    const key = routed.key;
+    const effectiveProfile: BrowserProfile = routed.profile;
 
-    const resolved = resolveEndpoint(profile, opts.endpointName);
-    const key = connectionKey(profileName, resolved.name);
-    const effectiveProfile: BrowserProfile = {
-      ...profile,
-      binary: resolved.binary,
-      targetFilter: resolved.targetFilter,
-    };
-
-    const conn =
-      (await this.reuseHealthyConnection(key)) ??
-      (await this.openConnection(effectiveProfile, resolved.target, key, profileName));
+    const reused = await this.reuseProfileConnection(profileName, key);
+    let conn = reused?.conn;
+    const effectiveKey = reused?.key ?? key;
+    if (!conn) {
+      migrateLegacyRuntimeDir(profileName, key, getBrowserRuntimeDir());
+      conn = await this.openConnection(
+        effectiveProfile,
+        routed.target,
+        key,
+        profileName,
+        { persistRemote: !routed.local },
+      );
+    }
 
     // createPageTarget refuses Arc with an actionable error rather than crashing it.
     const created = await this.createPageTarget(conn, { url });
     this.invalidateTargetCache(conn);
-    return { profile: profileName, key, tabId: created.targetId };
+    return {
+      profile: profileName,
+      key: effectiveKey,
+      tabId: created.targetId,
+      device: routed.device,
+      picked: routed.picked,
+    };
   }
 
   async getHistory(limit = 10): Promise<HistoricalTask[]> {
