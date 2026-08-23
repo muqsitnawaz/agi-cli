@@ -137,7 +137,7 @@ describe('agents browser profiles edit', () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining('Nothing to edit'));
   });
 
-  it("edit's surface is create's minus --fleet, and adds no flag create lacks", async () => {
+  it("edit's surface is create's, and adds no flag create lacks", async () => {
     const { registerBrowserCommand } = await freshBrowserModules();
     const program = new Command();
     program.exitOverride();
@@ -158,7 +158,6 @@ describe('agents browser profiles edit', () => {
     // Everything create teaches, edit accepts — so an agent that learned create
     // can edit with zero new tokens.
     for (const flag of create) {
-      if (flag === '--fleet') continue;
       expect(edit.has(flag), `edit is missing ${flag}`).toBe(true);
     }
     expect(edit.has('--fleet')).toBe(false);
@@ -171,37 +170,22 @@ describe('agents browser profiles edit', () => {
   });
 });
 
-describe('agents browser profiles scope', () => {
-  it('moves a fleet profile to this machine and drops the fleet copy', async () => {
-    const { createProfile, listProfilesWithScope } = await freshBrowserModules();
-    await createProfile(TEST_PROFILE, { fleet: true });
-    expect((await listProfilesWithScope()).find((p) => p.profile.name === 'work')?.scope).toBe('fleet');
-    vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+describe('agents browser profiles command surface', () => {
+  it('does not register a scope subcommand — the concept is gone, not deprecated', async () => {
+    // `scope` described where a profile's CONFIG was stored. Storage is no longer
+    // a user-visible concept: a device declares its own browsers in its own file,
+    // and how many devices declare a name IS the kind. A no-op or deprecation
+    // stub would be a stub, which the repo's review conventions block.
+    const { registerBrowserCommand } = await freshBrowserModules();
+    const program = new Command();
+    registerBrowserCommand(program);
+    const profiles = program.commands
+      .find((command) => command.name() === 'browser')!
+      .commands.find((command) => command.name() === 'profiles')!;
 
-    await run(['profiles', 'scope', 'work', 'local']);
-
-    const { listProfilesWithScope: read } = await freshBrowserModules();
-    const { readMeta } = await import('../lib/state.js');
-    expect((await read()).find((p) => p.profile.name === 'work')?.scope).toBe('local');
-    // listProfilesWithScope reports `local` whenever a local entry exists, because
-    // local wins the collision — so it passes even if the fleet copy was never
-    // dropped. Assert the source store directly, which is the actual contract.
-    const meta = readMeta();
-    expect(meta.deviceBrowser?.work).toBeDefined();
-    expect(meta.browser?.work).toBeUndefined();
-  });
-
-  it('rejects a scope that is neither local nor fleet', async () => {
-    const { createProfile } = await freshBrowserModules();
-    await createProfile(TEST_PROFILE);
-    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    vi.spyOn(process, 'exit').mockImplementation((() => {
-      throw new Error('exited');
-    }) as never);
-
-    await expect(run(['profiles', 'scope', 'work', 'global'])).rejects.toThrow();
-    expect(error).toHaveBeenCalledWith('scope must be `local` or `fleet`');
+    const names = profiles.commands.map((command) => command.name());
+    expect(names).not.toContain('scope');
+    expect(names).toContain('claim');
   });
 });
 
@@ -210,58 +194,75 @@ describe('agents browser profiles prune — misfiled reporting', () => {
   // is never a prune candidate, and the `kept` loop only prints when there is
   // nothing to prune at all.
   //
-  // The subtlety these assertions are built around: misfiledFleetProfile's `why`
-  // ALREADY ends with "…agents browser profiles scope <name> local", and that
-  // `why` is echoed by the kept loop. So a bare `toContain(<repair command>)`
-  // passes off the kept reason even when reportMisfiled is gutted, and a
-  // `/misfiled/i` match passes off the fixture's own name. Hence: a fixture name
-  // with no "misfiled" in it, and a line-anchored match on reportMisfiled's own
-  // two-space-indented format, which the kept line ("  kept <name> …") cannot
-  // satisfy.
-  const FLEET_MISFILED = {
-    name: 'work-fleet',
-    browser: 'custom' as const,
-    binary: process.execPath,
-    endpoints: ['cdp://localhost:9401'],
-  };
+  // "Misfiled" now means: exactly one device declares the name (so it is
+  // identity-bearing), that device is NOT this one, and the endpoint is loopback
+  // — so here the name resolves to this box's own browser instead of the
+  // declaring device's. That is the `comet-local` bug in miniature.
+  //
+  // The subtlety these assertions are built around: the `why` string is echoed by
+  // the kept loop too, so a bare toContain() would pass off the kept reason even
+  // with reportMisfiled gutted, and a /misfiled/i match would pass off the
+  // fixture's own name. Hence a fixture name containing no "misfiled", and a
+  // line-anchored match on reportMisfiled's own two-space-indented format, which
+  // the kept line ("  kept <name> …") cannot satisfy.
+  const PEER = 'peerbox';
+
+  function declareOnPeer(name: string, endpoints: string[]): void {
+    const file = path.join(testHome, '.agents', 'devices', PEER, 'agents.yaml');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      `browser:\n  ${name}:\n    browser: custom\n    binary: ${process.execPath}\n` +
+        `    endpoints:\n${endpoints.map((e) => `      - ${e}`).join('\n')}\n`
+    );
+  }
 
   it('names each misfiled profile with its repair, in reportMisfiled own format', async () => {
-    const { createProfile } = await freshBrowserModules();
-    await createProfile(FLEET_MISFILED, { fleet: true });
+    declareOnPeer('work-peer', ['cdp://localhost:9401']);
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
     await run(['profiles', 'prune', '--dry-run']);
 
     const out = log.mock.calls.map((c) => String(c[0])).join('\n');
-    expect(out).toMatch(/^1 fleet profile is misfiled —/m);
-    expect(out).toMatch(/^ {2}work-fleet — agents browser profiles scope work-fleet local$/m);
+    expect(out).toMatch(/^1 profile is misfiled —/m);
+    expect(out).toMatch(/^ {2}work-peer — .*declared on peerbox/m);
     expect(out).toMatch(/never deletes these/i);
   });
 
-  it('offers no misfiled profile for deletion, even with --fleet', async () => {
-    // --fleet is the path that used to reach `binary-missing` and delete it
-    // fleet-wide. Asserting it without --fleet would be trivially true.
-    const { createProfile } = await freshBrowserModules();
-    await createProfile(FLEET_MISFILED, { fleet: true });
-    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-
-    await run(['profiles', 'prune', '--dry-run', '--fleet']);
-
-    const out = log.mock.calls.map((c) => String(c[0])).join('\n');
-    expect(out).not.toMatch(/Would remove[\s\S]*work-fleet/);
-    expect(out).toMatch(/^ {2}work-fleet — agents browser profiles scope work-fleet local$/m);
-  });
-
-  it('says nothing about misfiling when every fleet profile is correctly scoped', async () => {
-    const { createProfile } = await freshBrowserModules();
-    await createProfile(
-      { name: 'remote-ok', browser: 'custom', binary: process.execPath, endpoints: ['ssh://muqsit@mac-mini?port=9300'] },
-      { fleet: true },
-    );
+  it('offers no misfiled profile for deletion', async () => {
+    declareOnPeer('work-peer', ['cdp://localhost:9401']);
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
     await run(['profiles', 'prune', '--dry-run']);
 
-    expect(log.mock.calls.map((c) => String(c[0])).join('\n')).not.toMatch(/misfiled/i);
+    const out = log.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).not.toMatch(/Would remove[\s\S]*work-peer/);
+    expect(out).toMatch(/^ {2}work-peer — .*declared on peerbox/m);
+  });
+
+  it('does not prune a peer ssh profile, and does not call it misfiled', async () => {
+    // An ssh:// endpoint names the machine it means. It is not misfiled, and
+    // prune must not offer it for deletion — deleteProfile would throw
+    // "not declared on this device".
+    declareOnPeer('remote-ok', ['ssh://muqsit@mac-mini?port=9300']);
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    await run(['profiles', 'prune', '--dry-run']);
+
+    const out = log.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).not.toMatch(/misfiled/i);
+    expect(out).not.toMatch(/Would remove[\s\S]*remote-ok/);
+    expect(out).toMatch(/remote-ok/);
+  });
+
+  it('does not register prune --fleet — deleteProfile cannot remove another device\'s declaration', async () => {
+    const { registerBrowserCommand } = await freshBrowserModules();
+    const program = new Command();
+    registerBrowserCommand(program);
+    const prune = program.commands
+      .find((command) => command.name() === 'browser')!
+      .commands.find((command) => command.name() === 'profiles')!
+      .commands.find((command) => command.name() === 'prune')!;
+    expect(prune.options.map((option) => option.long)).not.toContain('--fleet');
   });
 });

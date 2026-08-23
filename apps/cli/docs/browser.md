@@ -64,30 +64,28 @@ sees it. That is the right default because a profile pins an OS-specific
 other box — and because agents create throwaway profiles freely, syncing each one
 filled the shared file with junk.
 
-Pass `--fleet` for a profile that really is fleet config — a remote `ssh://`
-endpoint, or a shape you want on every machine. That writes it to the central
-`~/.agents/agents.yaml` `browser:` map, which syncs with `agents repo push/pull`
-so the same name resolves everywhere.
+A name declared by exactly one device is identity-bearing (the daemon tunnels
+to that device). A name declared by several devices is fungible (use the local
+one). Leftover central `browser:` entries are claimed with
+`agents browser profiles claim` on the machine that hosts the browser.
 
 Runtime state — the Chrome `chrome-data` cookie jar — lives separately under
 `~/.agents/.cache/browser/<profile>@<endpoint>/`, which is gitignored and
 per-machine, so each machine logs in once.
 
 ```bash
-# Minimal: let agents pick a free port and auto-detect the binary (machine-local)
+# Minimal: let agents pick a free port and auto-detect the binary (this device)
 agents browser profiles create work --browser chrome
 
 # Pin an endpoint explicitly
 agents browser profiles create work --browser chrome --endpoint "cdp://127.0.0.1:9222"
 
-# Remote host via SSH, shared with every machine
-agents browser profiles create staging --browser chrome --fleet \
+# Remote host via SSH — declare it on the machine that should own the name
+agents browser profiles create staging --browser chrome \
   --endpoint "ssh://deploy@staging.example.com?port=9222"
 ```
 
-Existing profiles are **not** migrated: `--fleet` only decides where a NEW entry
-is written, so a profile created before this change keeps syncing. `agents
-browser profiles list` shows a `SCOPE` column (`local` / `fleet`) for each one.
+`agents browser profiles list` shows a `WHERE` column of declaring devices.
 
 If you skip `--profile`, or pass the reserved name `--profile default`, the
 profile is resolved in this order — the same order in **every** command
@@ -202,25 +200,24 @@ the same device-local `browser remote-control` consent gate as the ordinary
 | Command | Description |
 |---------|-------------|
 | `agents browser use [name]` | Pick this machine's default profile. No name opens a picker on a TTY or prints the current default headlessly; `--unset` or `auto` restores auto-detect. |
-| `agents browser profiles list` | List all configured profiles with their `SCOPE` (`local` / `fleet`). A `*` marks this machine's configured default — which is NOT the same thing as the profile named `default`. `--json` adds `scope` + `isConfiguredDefault` |
-| `agents browser profiles create <name>` | Create a new profile, machine-local unless `--fleet` (see flags below) |
+| `agents browser profiles list` | List all configured profiles and the devices declaring each one. A `*` marks this machine's configured default — which is NOT the same thing as the profile named `default`. `--json` adds `devices` + `isConfiguredDefault` |
+| `agents browser profiles create <name>` | Create a new profile on this device |
 | `agents browser profiles seed` | Create a machine-local profile for each installed browser (named `<browser>-local`), so you can `browser use` one instead of hand-crafting each. Idempotent — existing profiles are left untouched |
-| `agents browser profiles prune` | Remove dead machine-local profiles — browser not installed here, or never started (see below) |
+| `agents browser profiles prune` | Remove dead profiles this device declares — browser not installed here, or never started (see below) |
 | `agents browser profiles edit <name>` | Edit an existing profile in place — description, endpoints, secrets, viewport, binary. Stays in the store it already lives in. The browser type and the name are NOT editable: both key the on-disk profile cache (and its logins), so changing either orphans it — delete and recreate instead |
 | `agents browser profiles rename <from> <to>` | Rename a profile and move its browser data with it, so logins survive. Refuses while the profile is in use. The one safe way to change a name: `edit` refuses it, and delete-and-recreate abandons the `--user-data-dir` |
-| `agents browser profiles scope <name> <local\|fleet>` | Move a profile between the fleet-synced store and this machine. `fleet -> local` is the repair for a profile whose endpoint is machine-bound — run it ON the machine that owns the browser |
+| `agents browser profiles claim [name]` | Move leftover central `browser:` entries into this device's declaration file. Only profiles this machine can host are claimed. Run on the machine that actually has the browser. |
 | `agents browser profiles show <name>` | Show profile details |
 | `agents browser profiles use <name>` | Compatibility spelling for `agents browser use <name>` |
 | `agents browser profiles logins` | Per profile: `SERVICE \| ACCOUNT \| CREDS` — live session, the signed-in account (plaintext username, never decrypts), and whether login creds are in the profile's secrets bundle |
 | `agents browser profiles delete <name>` | Delete profile config and chrome-data cache |
-| `agents browser profiles doctor <name>` | Diagnose scope, binary, port, user-data-dir, onboarding state |
+| `agents browser profiles doctor <name>` | Diagnose binary, port, user-data-dir, onboarding state |
 
 `profiles create` flags:
 
 | Flag | Description |
 |------|-------------|
 | `-b, --browser <type>` | Required. One of: `chrome`, `comet`, `chromium`, `brave`, `edge`, `arc`, `custom`. `arc` is recognized but NOT drivable — Arc exposes no CDP page targets and crashes on tab creation, so `agents browser` refuses it with a clear error; pick a Chromium-family browser to automate |
-| `--fleet` | Store in the synced `agents.yaml` so every machine sees it. Default is machine-local |
 | `-e, --endpoint <url>` | CDP endpoint URL (repeatable). Auto-assigned if omitted |
 | `-s, --secrets <bundle>` | Secrets bundle for this profile: injected as env vars at launch, AND the credential store for `browser type --secret` (keys `<PREFIX>_USERNAME`/`<PREFIX>_PASSWORD`). Warns if the bundle doesn't exist yet |
 | `-d, --description <text>` | Human-readable description |
@@ -268,25 +265,25 @@ If the viewer cannot be reached — profile missing, Arc (which exposes no CDP p
 targets), not launchable here — the call falls back to the OS handler and prints
 one line saying why. It never silently ignores your configuration.
 
-### Fleet scope is for a profile that means the same thing everywhere
+### Identity-bearing names vs loopback endpoints
 
-`--fleet` stores a profile in the synced `agents.yaml`, so every machine sees the
-name. That is only correct when the endpoint addresses **one specific machine**:
+A name declared by exactly one device is identity-bearing. That is only correct
+when the endpoint addresses **one specific machine**:
 
 - `ssh://muqsit@mac-mini?port=9300` names its host, so it resolves to the same
-  browser from anywhere. Fleet scope is right.
+  browser from anywhere. Identity-bearing is right.
 - `cdp://localhost:9333` is evaluated **on the machine running the command** —
-  `cdp:` always connects locally. Fleet-synced, that name means "port 9333 on
-  whichever box you happen to be on", so it silently resolves to a different,
-  usually logged-out browser on every other machine.
+  `cdp:` always connects locally. Declared on one device but used from another,
+  that name means "port 9333 on whichever box you happen to be on", so it
+  silently resolves to a different, usually logged-out browser.
 
 The second case is the dangerous one for a profile that carries live logins: an
 agent asks for the credentialed browser by name and gets a stranger. `profiles
-doctor` flags it as a failing `scope` check, `profiles prune` notes it
-in the `kept` reason, and the repair is one command on the owning machine:
+doctor` flags it, `profiles prune` notes it in the `kept` reason, and the
+repair is one command on the owning machine:
 
 ```bash
-agents browser profiles scope comet-local local
+agents browser profiles claim comet-local
 ```
 
 Neither surface repairs it for you. Rewriting the synced `agents.yaml` from a
@@ -327,8 +324,9 @@ Four guards, each because removing that profile would be wrong rather than untid
   to it.
 - **The auto-detected profile** (`auto-chrome`, or a legacy `default`) —
   regenerated on demand, so pruning it is pure churn.
-- **Fleet-synced profiles** — skipped unless you pass `--fleet`, because deleting
-  one removes it from **every** machine.
+
+`prune` only considers profiles this device declares. A name declared only on
+another device is left alone (and reported if it is misfiled).
 
 Removing a profile drops its config entry and wipes its cache dirs, exactly like
 `profiles delete`.
@@ -566,12 +564,11 @@ instead — the stable, scriptable surface `--json` also uses.
 
 ## Profile Schema
 
-Profiles are stored in the agents metadata layer, not as standalone YAML files —
-in the `browser:` map of either this machine's `~/.agents/devices/<machine>/agents.yaml`
-(the default) or the fleet-synced `~/.agents/agents.yaml` (`--fleet`). Both maps
-use the identical schema below, and a machine-local entry wins a name collision.
-Use `agents browser profiles show <name> --json` to inspect the full config, or
-`agents browser profiles list --json` to see which store each one is in.
+Profiles are stored in the `browser:` map of each declaring machine's
+`~/.agents/devices/<machine>/agents.yaml`. The fleet registry is the read-time
+union of those files. Use `agents browser profiles show <name> --json` to
+inspect the full config, or `agents browser profiles list --json` to see which
+devices declare each name.
 The fields map to:
 
 | Field | Type | Description |

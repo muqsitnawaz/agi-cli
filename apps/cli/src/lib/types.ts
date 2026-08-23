@@ -1024,23 +1024,9 @@ export interface Meta {
    */
   hooks?: Record<string, ManifestHook>;
   /**
-   * Browser profile definitions keyed by profile name. Portable user config
-   * that syncs with `agents repo push/pull`. Runtime state (chrome-data, pids)
-   * lives separately in ~/.agents/.cache/browser/<profile>/.
-   */
-  browser?: Record<string, BrowserProfileConfig>;
-  /**
-   * Machine-local browser profiles — written to `config:`-adjacent
-   * `browser:` in `~/.agents/devices/<machine>/agents.yaml`, never the synced
-   * file.
-   *
-   * The auto-detected `default` profile lives here because it is inherently
-   * machine-specific: it carries an absolute `binary:` path and a port chosen by
-   * scanning THIS machine. Sharing it fleet-wide meant a macOS box wrote
-   * `/Applications/...`, a Linux box found it unlaunchable and rewrote
-   * `/usr/bin/chromium-browser`, and the two flipped the tracked agents.yaml back
-   * and forth on every `agents browser start` — the single largest source of
-   * churn on that file. User-created named profiles stay central and still sync.
+   * Browser profiles declared by this machine. Written as `browser:` in
+   * `~/.agents/devices/<machine>/agents.yaml`. The fleet registry is the union
+   * of every device file; central `agents.yaml` is not a browser-profile store.
    */
   deviceBrowser?: Record<string, BrowserProfileConfig>;
   /**

@@ -14,16 +14,16 @@ import {
   extractConfiguredPort,
   findFreeProfilePort,
   getEndpointPresets,
-  listProfilesWithScope,
   formatProfilesTable,
   type BrowserProfile,
   editProfile,
-  moveProfileScope,
   renameProfile,
   assertRegistrableProfileName,
-  misfiledFleetProfile,
+  isProfileLaunchableHere,
   type EditableProfileFields,
 } from '../lib/browser/profiles.js';
+import { migrateCentralBrowserProfiles } from '../lib/browser/registry.js';
+import type { BrowserProfileConfig } from '../lib/types.js';
 import { resolveActor } from '../lib/actor.js';
 import {
   loginsForProfile,
@@ -44,6 +44,7 @@ import {
   buildProfilePrunePlan,
   pruneProfiles,
   PRUNE_REASON_TEXT,
+  identityLoopbackMismatch,
 } from '../lib/browser/runtime-state.js';
 import { DEFAULT_VIEWPORT, parseWindowSize, parseWindowPosition } from '../lib/browser/devices.js';
 import { runBrowserSessionsCommand } from './browser-sessions-picker.js';
@@ -62,6 +63,7 @@ import { registerCommandGroups, setHelpSections } from '../lib/help.js';
 import { buildHar } from '../lib/browser/har.js';
 import { getCliVersion } from '../lib/version.js';
 import { runBrowserIPCStream } from '../lib/browser/stream.js';
+import { machineId } from '../lib/machine-id.js';
 
 /**
  * Resolve which browser task a command targets. Order:
@@ -301,17 +303,16 @@ function registerProfilesCommands(browser: Command): void {
   profiles
     .command('list')
     .alias('ls')
-    .description('List all browser profiles, with the store each lives in (local / fleet)')
+    .description('List all browser profiles and the devices declaring each one')
     .option('--json', 'Output machine-readable JSON')
     .action(async (opts: { json?: boolean }) => {
-      const scoped = await listProfilesWithScope();
+      const allProfiles = await listProfiles();
       const configuredDefault = getConfiguredDefaultProfileName();
 
       if (opts.json) {
         console.log(JSON.stringify(
-          scoped.map(({ profile, scope }) => ({
+          allProfiles.map((profile) => ({
             ...profile,
-            scope,
             isConfiguredDefault: profile.name === configuredDefault,
           })),
           null,
@@ -320,7 +321,7 @@ function registerProfilesCommands(browser: Command): void {
         return;
       }
 
-      if (scoped.length === 0) {
+      if (allProfiles.length === 0) {
         console.log('No browser profiles configured.');
         console.log('Create one with: agents browser profiles create <name> --browser chrome');
         return;
@@ -328,7 +329,7 @@ function registerProfilesCommands(browser: Command): void {
 
       // Rendering lives in lib/browser/profiles.ts so the column widths and the
       // default-marking rules are unit-tested rather than eyeballed (RUSH-2710).
-      for (const line of formatProfilesTable(scoped, configuredDefault)) console.log(line);
+      for (const line of formatProfilesTable(allProfiles, configuredDefault)) console.log(line);
     });
 
   profiles
@@ -358,6 +359,52 @@ function registerProfilesCommands(browser: Command): void {
         console.log(`+ ${name} (${browserType})`);
       }
       console.log('Pick your default with: agents browser use <name>');
+    });
+
+  profiles
+    .command('claim [name]')
+    .description(
+      'Move leftover central browser: profiles into this device\'s declaration file. Only profiles this machine can host are claimed; the rest stay central. Run on the machine that actually has the browser.',
+    )
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (name: string | undefined, opts: { json?: boolean }) => {
+      const canHostHere = (config: BrowserProfileConfig): boolean =>
+        isProfileLaunchableHere({
+          name: '_',
+          browser: config.browser,
+          binary: config.binary,
+          endpoints: config.endpoints,
+        });
+
+      let result;
+      try {
+        result = migrateCentralBrowserProfiles(canHostHere, name);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify({ ...result, device: machineId() }, null, 2));
+        return;
+      }
+
+      if (result.claimed.length === 0 && result.skipped.length === 0) {
+        console.log('No leftover central browser profiles to claim.');
+        return;
+      }
+      for (const claimed of result.claimed) {
+        console.log(`Claimed ${claimed} on ${machineId()}`);
+      }
+      for (const skipped of result.skipped) {
+        console.log(
+          `Skipped ${skipped}: this machine cannot host it (browser/binary isn't installed here). ` +
+            `Run \`agents browser profiles claim ${skipped}\` on the machine that has that browser.`,
+        );
+      }
+      if (result.claimed.length === 0) {
+        console.log('No leftover central profiles this machine can host.');
+      }
     });
 
   configureBrowserUseCommand(profiles.command('use [name]'));
@@ -398,12 +445,8 @@ function registerProfilesCommands(browser: Command): void {
 
   profiles
     .command('create <name>')
-    .description('Create a new browser profile (machine-local unless --fleet)')
+    .description('Create a new browser profile on this device')
     .requiredOption('-b, --browser <type>', `Browser type: ${VALID_BROWSERS.join(', ')}`)
-    .option(
-      '--fleet',
-      'Store in the synced agents.yaml so every machine sees it. Default is machine-local: a profile pins an OS-specific binary path and a locally chosen port, so a synced copy is wrong on every other box.'
-    )
     .option('-e, --endpoint <url>', 'CDP endpoint URL (repeatable; auto-assigned if omitted)', collect, [])
     .option('-s, --secrets <bundle>', 'Secrets bundle to inject')
     .option('-d, --description <text>', 'Profile description')
@@ -498,10 +541,8 @@ function registerProfilesCommands(browser: Command): void {
         viewport,
       };
 
-      await createProfile(profile, { fleet: !!opts.fleet });
-      console.log(
-        `Created profile: ${name} (${opts.fleet ? 'fleet-synced — visible on every machine' : 'machine-local'})`
-      );
+      await createProfile(profile);
+      console.log(`Created profile: ${name} on ${machineId()}`);
       // Warn (don't fail) if the declared secrets bundle doesn't exist yet — it
       // may be created later, but a typo should surface now.
       if (opts.secrets && !bundleExists(opts.secrets)) {
@@ -613,18 +654,11 @@ function registerProfilesCommands(browser: Command): void {
       }
 
       if (opts.json) {
-        console.log(JSON.stringify({ ...result.profile, scope: result.scope, changed: result.changed }, null, 2));
+        console.log(JSON.stringify({ ...result.profile, devices: result.devices, changed: result.changed }, null, 2));
       } else if (result.changed.length === 0) {
         console.log(`No change: ${name} already had those values.`);
       } else {
-        console.log(`Updated ${name} (${result.scope}): ${result.changed.join(', ')}`);
-      }
-
-      if (result.fleetCopyLeftStale) {
-        console.error(
-          `warning: "${name}" is machine-local by rule, so the edit was written to this machine only. ` +
-            `The fleet-synced copy still holds the old values on every other box.`
-        );
+        console.log(`Updated ${name} on ${machineId()}: ${result.changed.join(', ')}`);
       }
       if (patch.secrets && !bundleExists(patch.secrets)) {
         console.error(
@@ -649,7 +683,7 @@ function registerProfilesCommands(browser: Command): void {
         console.log(JSON.stringify({ from, to, ...res }, null, 2));
         return;
       }
-      console.log(`Renamed ${from} -> ${to} (${res.scope})`);
+      console.log(`Renamed ${from} -> ${to} on ${machineId()}`);
       if (res.movedDirs.length > 0) {
         console.log(`  moved ${res.movedDirs.length} browser data dir${res.movedDirs.length === 1 ? '' : 's'} — logins preserved`);
       }
@@ -669,39 +703,6 @@ function registerProfilesCommands(browser: Command): void {
         for (const pin of res.stalePins) {
           console.error(`  agents config set ${pin.key} ${to} --device ${pin.device}`);
         }
-      }
-    });
-
-  profiles
-    .command('scope <name> <scope>')
-    .description('Move a profile between the fleet-synced store and this machine (local|fleet)')
-    .option('--json', 'Output machine-readable JSON')
-    .action(async (name: string, scope: string, opts: { json?: boolean }) => {
-      if (scope !== 'local' && scope !== 'fleet') {
-        console.error('scope must be `local` or `fleet`');
-        process.exit(1);
-      }
-      let moved;
-      try {
-        moved = await moveProfileScope(name, scope);
-      } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
-      if (opts.json) {
-        console.log(JSON.stringify({ profile: name, ...moved }, null, 2));
-        return;
-      }
-      if (moved.from === moved.to) {
-        console.log(`${name} is already ${scope}.`);
-        return;
-      }
-      console.log(`Moved ${name}: ${moved.from} -> ${moved.to}`);
-      if (scope === 'local') {
-        console.error(
-          `note: ${name} is no longer visible on any other machine. ` +
-            `Run this ON the machine that owns the browser — the surviving copy is this one.`
-        );
       }
     });
 
@@ -812,12 +813,11 @@ function registerProfilesCommands(browser: Command): void {
 
   profiles
     .command('prune')
-    .description('Remove dead machine-local profiles: browser not installed here, or never started')
+    .description('Remove dead profiles this device declares: browser not installed here, or never started')
     .option('-n, --dry-run', 'Print what would be removed and exit without changing anything')
-    .option('--fleet', 'Also consider fleet-synced profiles (removing one removes it from EVERY machine)')
     .option('--json', 'Output machine-readable JSON')
-    .action(async (opts: { dryRun?: boolean; fleet?: boolean; json?: boolean }) => {
-      const plan = await buildProfilePrunePlan({ includeFleet: opts.fleet });
+    .action(async (opts: { dryRun?: boolean; json?: boolean }) => {
+      const plan = await buildProfilePrunePlan();
 
       if (!opts.dryRun) await pruneProfiles(plan);
 
@@ -826,22 +826,25 @@ function registerProfilesCommands(browser: Command): void {
         return;
       }
 
-      // A misfiled fleet profile is never a prune candidate (deleting a fleet
-      // entry deletes it everywhere), so without this it would only ever surface
-      // in --json. It is the one kept-reason a user has to act on.
+      // A misfiled profile is never a prune candidate — the entry belongs to the
+      // device that declared it, not to this one — so without this it would only
+      // ever surface in --json. It is the one kept-reason a user has to act on.
       const misfiled = plan.kept.filter((k) => k.misfiled);
       const reportMisfiled = (): void => {
         if (misfiled.length === 0) return;
         console.log('');
         console.log(
-          `${misfiled.length} fleet profile${misfiled.length === 1 ? '' : 's'} ${misfiled.length === 1 ? 'is' : 'are'} misfiled — ` +
-            `fleet-synced but bound to a local port, so the name means a different browser on every machine:`
+          `${misfiled.length} profile${misfiled.length === 1 ? '' : 's'} ${misfiled.length === 1 ? 'is' : 'are'} misfiled — ` +
+            `declared on another device but bound to a loopback port, so the name resolves to ` +
+            `this machine's own browser rather than the declaring device's:`
         );
         for (const k of misfiled) {
-          console.log(`  ${k.name} — agents browser profiles scope ${k.name} local`);
+          console.log(`  ${k.name} — ${k.why}`);
         }
-        console.log('Run that on the machine that owns each browser. Nothing was moved for you.');
-        console.log('(Prune never deletes these — removing a fleet entry removes it everywhere.)');
+        console.log(
+          'Re-declare each on the machine that owns the browser. Nothing was moved for you.'
+        );
+        console.log('(Prune never deletes these — the declaring device owns the entry.)');
       };
 
       if (plan.candidates.length === 0) {
@@ -873,13 +876,14 @@ function registerProfilesCommands(browser: Command): void {
       # What exists here, and whether each is this machine's or the whole fleet's
       agents browser profiles list
 
-      # Create one — machine-local by default
+      # Create one on this device
       agents browser profiles create work --browser chrome
 
-      # Create one every machine should see (e.g. a remote ssh:// endpoint)
-      agents browser profiles create shared-remote --browser chrome --fleet
+      # Claim leftover central profiles on the machine that hosts the browser
+      agents browser profiles claim
+      agents browser profiles claim comet-local
 
-      # Clean up dead ones: check first, then apply
+      # Clean up dead ones this device declares: check first, then apply
       agents browser profiles prune --dry-run
       agents browser profiles prune
 
@@ -887,17 +891,19 @@ function registerProfilesCommands(browser: Command): void {
       agents browser use work
     `,
     notes: `
-      Profiles are machine-local by default. A profile pins an OS-specific binary
-      path and a locally chosen CDP port, so a fleet-synced copy is wrong on every
-      other machine — pass --fleet only when the profile really is fleet config.
+      A device declares its own browsers in its own \`devices/<machine>/agents.yaml\`.
+      A name declared by exactly one device is identity-bearing; a name declared
+      by several is fungible. Leftover central \`browser:\` entries are claimed
+      with \`agents browser profiles claim\` on the machine that hosts the browser.
 
       In \`list\`, the \`*\` marker means "this machine's configured default"
       (\`agents browser start\` with no --profile). The auto-detected profile is
       named \`auto-chrome\`; \`default\` is only an ALIAS for whichever profile
       this machine is configured to use, resolved the same way by every command.
 
-      \`prune\` never removes a profile that is in use, the configured default, the
-      auto-detected \`auto-chrome\`, or (without --fleet) a fleet-synced one.
+      \`prune\` only considers profiles this device declares. It never removes a
+      profile that is in use, the configured default, or the auto-detected
+      \`auto-chrome\`.
     `,
   });
 
@@ -913,16 +919,14 @@ function registerProfilesCommands(browser: Command): void {
 
       const checks: Array<{ label: string; ok: boolean; detail: string }> = [];
 
-      // 0. Store scope. A fleet-synced profile whose endpoint is loopback cdp://
-      //    means a DIFFERENT browser on every machine — the name lies everywhere
-      //    but here. Checked first because it invalidates the reading of every
-      //    check below on any other box.
-      const scoped = (await listProfilesWithScope()).find((p) => p.profile.name === name);
-      const misfiled = scoped ? misfiledFleetProfile(profile, scoped.scope) : { misfiled: false as const };
+      // 0. Declaration topology. An identity-bearing profile declared by a
+      //    different device cannot be reached through a loopback CDP endpoint
+      //    on this one. Checked first because it invalidates every local check.
+      const misfiled = identityLoopbackMismatch(profile);
       checks.push(
         misfiled.misfiled
           ? { label: 'scope', ok: false, detail: misfiled.why }
-          : { label: 'scope', ok: true, detail: scoped ? `stored ${scoped.scope}` : 'stored local' }
+          : { label: 'scope', ok: true, detail: `declared on ${profile.devices.join(', ')}` }
       );
 
       // 1. Binary exists for declared browser type, and is a real executable we
