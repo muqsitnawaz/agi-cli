@@ -62,6 +62,29 @@ function shareLine(model: SessionTrajectory): string | undefined {
   return entries.length > 0 ? `where the time went: ${entries.join('  ')}` : undefined;
 }
 
+/** The display tag for a step — the effective program for a shell call, else the tool. */
+function stepTag(step: TrajectoryStep): string {
+  return step.program ?? step.tool ?? step.kind;
+}
+
+/**
+ * Break the tool mix down BY PROGRAM — a Bash-heavy session reads as
+ * `git 92  agents 80  gh 69` instead of a single "Bash". Count-based.
+ */
+function programMixLine(model: SessionTrajectory): string | undefined {
+  const counts = new Map<string, number>();
+  for (const step of model.steps) {
+    if (step.kind !== 'tool') continue;
+    const tag = stepTag(step);
+    counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  }
+  const entries = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([tag, n]) => `${tag} ${n}`);
+  return entries.length > 0 ? `commands: ${entries.join('  ')}` : undefined;
+}
+
 /** Select the steps to print: all of them, or (errorsOnly) errors + neighbours. */
 function selectSteps(steps: TrajectoryStep[], errorsOnly: boolean): Array<TrajectoryStep | 'gap'> {
   if (!errorsOnly) return steps;
@@ -122,10 +145,11 @@ export function renderTrajectoryText(
     if (entry === 'gap') { lines.push('  …'); continue; }
     if (printed >= maxSteps) { omitted++; continue; }
     const ord = pad(String(entry.ordinal).padStart(2, '0'), 3);
-    const tool = pad(entry.tool ?? entry.kind, 6);
+    const tag = pad(stepTag(entry), 8);
     const label = pad(clipLabel(entry.label), LABEL_COL);
     const mark = outcomeMark(entry);
-    lines.push(`${ord} ${tool} ${label} ${dur(entry.durationMs, entry.durationEstimated)}${mark ? ' ' + mark : ''}`.trimEnd());
+    const exit = entry.exitCode !== undefined && entry.exitCode !== 0 ? ` exit ${entry.exitCode}` : '';
+    lines.push(`${ord} ${tag} ${label} ${dur(entry.durationMs, entry.durationEstimated)}${exit}${mark ? ' ' + mark : ''}`.trimEnd());
     // A short, indented evidence line for an error step.
     if (entry.outcome === 'error' && entry.detail) {
       lines.push(`     ${clipLabel(entry.detail)}`);
@@ -135,9 +159,11 @@ export function renderTrajectoryText(
   if (omitted > 0) lines.push(`  … ${omitted} more step${omitted === 1 ? '' : 's'} (raise --json for the full model)`);
   if (model.truncatedSteps > 0) lines.push(`  … ${model.truncatedSteps} step${model.truncatedSteps === 1 ? '' : 's'} collapsed by the render cap`);
 
-  // Where the time went.
+  // Where the time went, then the command/program mix.
   const share = shareLine(model);
   if (share) lines.push(share);
+  const mix = programMixLine(model);
+  if (mix) lines.push(mix);
 
   return lines.join('\n') + '\n';
 }
@@ -166,7 +192,7 @@ function diffColumn(heading: string, steps: TrajectoryStep[], maxLines: number):
   const shown = steps.slice(0, maxLines);
   for (const step of shown) {
     const mark = outcomeMark(step);
-    lines.push(`  ${pad(step.tool ?? step.kind, 6)} ${pad(clipLabel(step.label), LABEL_COL)} ${dur(step.durationMs, step.durationEstimated)}${mark ? ' ' + mark : ''}`.trimEnd());
+    lines.push(`  ${pad(stepTag(step), 8)} ${pad(clipLabel(step.label), LABEL_COL)} ${dur(step.durationMs, step.durationEstimated)}${mark ? ' ' + mark : ''}`.trimEnd());
   }
   const omitted = steps.length - shown.length;
   if (omitted > 0) lines.push(`  … ${omitted} more`);

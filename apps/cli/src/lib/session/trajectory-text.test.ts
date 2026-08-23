@@ -35,7 +35,8 @@ describe('renderTrajectoryText', () => {
 
   it('lists steps with tool, label, duration, and marks the error', () => {
     const text = renderTrajectoryText(buildTrajectory(events, meta()));
-    expect(text).toMatch(/Bash\s+bun test exec\.test\.ts\s+8m04s ✗/);
+    // Bash steps read by their effective program, with the exit code surfaced.
+    expect(text).toMatch(/bun\s+bun test exec\.test\.ts\s+8m04s exit 1 ✗/);
     expect(text).toContain('exit 1 · 2 failing'); // error evidence line
   });
 

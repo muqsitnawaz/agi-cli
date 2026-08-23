@@ -22,6 +22,7 @@
  */
 import { redactSecrets } from '../redact.js';
 import { computeSummaryStats, type SessionStats } from './render.js';
+import { extractShellPrograms } from './shell-programs.js';
 import type { SessionEvent, SessionMeta } from './types.js';
 
 /** One drawable step on a session's trajectory — a tool call or a thinking block. */
@@ -55,6 +56,16 @@ export interface TrajectoryStep {
   outputTokens?: number;
   /** Harness-native call identity, when present. */
   callId?: string;
+  /**
+   * For a shell tool call (`Bash`), the effective program the command actually
+   * ran — `git`, `gh`, `agents`, `bun`, `sed`… — extracted by the shared shell
+   * parser (`extractShellPrograms`, wrappers like `timeout`/`sudo`/`agents ssh`
+   * unwrapped). Lets a Bash-dominated trajectory read by what it DID, not a wall
+   * of "Bash". Undefined for non-shell tools or an unparseable command.
+   */
+  program?: string;
+  /** Process exit code from the paired result (or the tool_use event), when the harness recorded one. */
+  exitCode?: number;
 }
 
 /** An idle stall between two events — a candidate "where did it hang" marker. */
@@ -109,6 +120,31 @@ const DETAIL_MAX = 400;
 
 /** Tools that spawn an inline sub-agent inside THIS transcript (a `tool_use` row). */
 const INLINE_TASK_TOOLS = new Set(['Task', 'Agent']);
+
+/** Shell tools whose command is worth resolving to an effective program. */
+const SHELL_TOOLS = new Set(['Bash', 'BashOutput', 'Shell', 'run_terminal_cmd']);
+
+/**
+ * Shell builtins/assignments that are rarely the POINT of a command — the action
+ * is whatever runs after them (`export X=Y; git push` → `git`, `cd dir && bun test`
+ * → `bun`). Skipped when a real program follows so a Bash row reads by what it did.
+ */
+const SHELL_NOISE_PROGRAMS = new Set(['export', 'cd', 'set', 'source', '.', 'unset', 'local', 'eval']);
+
+/**
+ * The effective program a shell command ran, via the shared shell parser — the
+ * primary `effective`-role program (wrappers unwrapped), skipping bare shell
+ * builtins/assignments when a real program follows. Undefined when nothing static
+ * is identifiable. Never executes anything.
+ */
+function effectiveProgram(command: string | undefined): string | undefined {
+  if (!command) return undefined;
+  const { occurrences, programs } = extractShellPrograms(command);
+  const effective = occurrences.filter((o) => o.role === 'effective').map((o) => o.program);
+  const meaningful = effective.find((p) => !SHELL_NOISE_PROGRAMS.has(p))
+    ?? programs.find((p) => !SHELL_NOISE_PROGRAMS.has(p));
+  return meaningful ?? effective[0] ?? programs[0];
+}
 
 function toMs(timestamp: string): number {
   const ms = new Date(timestamp).getTime();
@@ -264,6 +300,8 @@ export function buildTrajectory(
           label: toolLabel(tool, e.args, e.command, redact, knownSecrets),
           delegation: INLINE_TASK_TOOLS.has(tool) ? 'inline-task' : undefined,
           callId: e.callId,
+          program: SHELL_TOOLS.has(tool) ? effectiveProgram(e.command ?? (typeof e.args?.command === 'string' ? e.args.command : undefined)) : undefined,
+          exitCode: typeof e.exitCode === 'number' ? e.exitCode : undefined,
         },
         eventIndex: i,
         callId: e.callId,
@@ -295,6 +333,9 @@ export function buildTrajectory(
         step.durationEstimated = false;
       }
       step.outcome = resultOutcome(resultEvent);
+      // Prefer the exit code recorded on the paired result; keep the tool_use
+      // event's code (set at draft time) only when the result carries none.
+      if (typeof resultEvent.exitCode === 'number') step.exitCode = resultEvent.exitCode;
       const detail = resultDetail(resultEvent, redact, knownSecrets);
       if (detail) step.detail = detail;
     } else {
