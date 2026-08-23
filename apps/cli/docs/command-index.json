@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "command": "agents",
-  "groups": 68,
-  "commands": 546,
+  "groups": 69,
+  "commands": 548,
   "root": {
     "name": "agents",
     "path": "",
@@ -24343,6 +24343,136 @@
           "subcommands": []
         },
         {
+          "name": "trace",
+          "path": "sessions trace",
+          "aliases": [],
+          "description": "Visualize a session as a trajectory — a tool-call timeline you can read at a glance. Opens a visual for a person; prints a compact trajectory for an agent.",
+          "args": [
+            {
+              "name": "selectors",
+              "required": true,
+              "variadic": true,
+              "description": ""
+            }
+          ],
+          "options": [
+            {
+              "flags": "--html",
+              "description": "Force the HTML rendering (opens in a browser)",
+              "long": "--html",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--text",
+              "description": "Force the compact text trajectory",
+              "long": "--text",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--json",
+              "description": "Emit the versioned sessions-trace JSON envelope",
+              "long": "--json",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-o, --output <path>",
+              "description": "Write the rendering to a path instead of opening/printing",
+              "short": "-o",
+              "long": "--output",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--no-open",
+              "description": "Do not open the HTML; print its path instead",
+              "long": "--no-open",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": true
+            },
+            {
+              "flags": "--errors-only",
+              "description": "Collapse the text trajectory to error steps and their neighbours",
+              "long": "--errors-only",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--no-redact",
+              "description": "Local-only: skip secret redaction of derived labels (never for a shared file)",
+              "long": "--no-redact",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": true
+            },
+            {
+              "flags": "--all",
+              "description": "Search every directory and all time, not just this project",
+              "long": "--all",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--since <time>",
+              "description": "Only sessions newer than this (7d, 4w, an ISO date)",
+              "long": "--since",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "--limit <n>",
+              "description": "Max sessions to scan when resolving the selector (default 100)",
+              "long": "--limit",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-a, --agent <agent>",
+              "description": "Filter by agent type (e.g. claude, codex)",
+              "short": "-a",
+              "long": "--agent",
+              "required": true,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            },
+            {
+              "flags": "-h, --help",
+              "description": "Show help",
+              "short": "-h",
+              "long": "--help",
+              "required": false,
+              "optional": false,
+              "variadic": false,
+              "negate": false
+            }
+          ],
+          "examples": "# Open one session's trajectory in a browser (a person at a terminal)\nagents sessions trace a1b2c3d4\n\n# The compact text trajectory an agent reads in-context\nagents sessions trace a1b2c3d4 --text\n\n# Just the failures and their neighbours — for a triaging agent\nagents sessions trace a1b2c3d4 --text --errors-only\n\n# The stable JSON envelope for the AGI EXT Fleet panel or a tool\nagents sessions trace a1b2c3d4 --json\n\n# Write the self-contained HTML to a file without opening it\nagents sessions trace a1b2c3d4 --html -o trace.html --no-open",
+          "notes": "Audience auto-select: with no --html/--text/--json, HTML opens on a TTY (a person) and\nthe compact text trajectory prints when piped or headless (an agent). The HTML is self-contained\n(no CDN, no external asset) and redacted by default, as safe to share as an 'agents sessions share' page.\n\n--json emits { schemaVersion, kind: 'sessions-trace', layout: 'single', sessions: [SessionTrajectory] } —\nthe contract consumers read so nothing re-parses a transcript.\n\nThis release renders ONE session. Passing several selectors is an error: compare (several sessions)\nand lineage (a parent + its team) land in a follow-up PR.",
+          "subcommands": []
+        },
+        {
           "name": "watch",
           "path": "sessions watch",
           "aliases": [],
@@ -27809,6 +27939,136 @@
           "subcommands": []
         }
       ]
+    },
+    {
+      "name": "trace",
+      "path": "trace",
+      "aliases": [],
+      "description": "Visualize a session as a trajectory — a tool-call timeline you can read at a glance. Opens a visual for a person; prints a compact trajectory for an agent.",
+      "args": [
+        {
+          "name": "selectors",
+          "required": true,
+          "variadic": true,
+          "description": ""
+        }
+      ],
+      "options": [
+        {
+          "flags": "--html",
+          "description": "Force the HTML rendering (opens in a browser)",
+          "long": "--html",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--text",
+          "description": "Force the compact text trajectory",
+          "long": "--text",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--json",
+          "description": "Emit the versioned sessions-trace JSON envelope",
+          "long": "--json",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "-o, --output <path>",
+          "description": "Write the rendering to a path instead of opening/printing",
+          "short": "-o",
+          "long": "--output",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--no-open",
+          "description": "Do not open the HTML; print its path instead",
+          "long": "--no-open",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": true
+        },
+        {
+          "flags": "--errors-only",
+          "description": "Collapse the text trajectory to error steps and their neighbours",
+          "long": "--errors-only",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--no-redact",
+          "description": "Local-only: skip secret redaction of derived labels (never for a shared file)",
+          "long": "--no-redact",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": true
+        },
+        {
+          "flags": "--all",
+          "description": "Search every directory and all time, not just this project",
+          "long": "--all",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--since <time>",
+          "description": "Only sessions newer than this (7d, 4w, an ISO date)",
+          "long": "--since",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "--limit <n>",
+          "description": "Max sessions to scan when resolving the selector (default 100)",
+          "long": "--limit",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "-a, --agent <agent>",
+          "description": "Filter by agent type (e.g. claude, codex)",
+          "short": "-a",
+          "long": "--agent",
+          "required": true,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        },
+        {
+          "flags": "-h, --help",
+          "description": "Show help",
+          "short": "-h",
+          "long": "--help",
+          "required": false,
+          "optional": false,
+          "variadic": false,
+          "negate": false
+        }
+      ],
+      "examples": "# Open one session's trajectory in a browser (a person at a terminal)\nagents sessions trace a1b2c3d4\n\n# The compact text trajectory an agent reads in-context\nagents sessions trace a1b2c3d4 --text\n\n# Just the failures and their neighbours — for a triaging agent\nagents sessions trace a1b2c3d4 --text --errors-only\n\n# The stable JSON envelope for the AGI EXT Fleet panel or a tool\nagents sessions trace a1b2c3d4 --json\n\n# Write the self-contained HTML to a file without opening it\nagents sessions trace a1b2c3d4 --html -o trace.html --no-open",
+      "notes": "Audience auto-select: with no --html/--text/--json, HTML opens on a TTY (a person) and\nthe compact text trajectory prints when piped or headless (an agent). The HTML is self-contained\n(no CDN, no external asset) and redacted by default, as safe to share as an 'agents sessions share' page.\n\n--json emits { schemaVersion, kind: 'sessions-trace', layout: 'single', sessions: [SessionTrajectory] } —\nthe contract consumers read so nothing re-parses a transcript.\n\nThis release renders ONE session. Passing several selectors is an error: compare (several sessions)\nand lineage (a parent + its team) land in a follow-up PR.",
+      "subcommands": []
     },
     {
       "name": "trash",
