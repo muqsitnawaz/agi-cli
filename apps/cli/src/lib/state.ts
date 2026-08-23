@@ -991,7 +991,6 @@ const META_KEY_SCOPE: Record<keyof Meta, 'central' | 'device'> = {
   actors: 'central',
   seededPresets: 'central',
   hooks: 'central',
-  browser: 'central',
   config: 'central',
   hosts: 'central',
   fleet: 'central',
@@ -1007,7 +1006,12 @@ const META_KEY_SCOPE: Record<keyof Meta, 'central' | 'device'> = {
  * in central is stale and must be migrated out). A key NOT listed here — e.g. one
  * a newer CLI version added — is preserved verbatim, never dropped + synced away.
  */
-const KNOWN_META_KEYS: ReadonlySet<string> = new Set(Object.keys(META_KEY_SCOPE));
+const KNOWN_META_KEYS: ReadonlySet<string> = new Set([
+  ...Object.keys(META_KEY_SCOPE),
+  // Removed browser-profile store. Kept only as a serializer tombstone so the
+  // first registry read can migrate it into this device's file and delete it.
+  'browser',
+]);
 
 /**
  * Serialize the central (synced) meta to `agents.yaml` WITHOUT destroying the
@@ -1183,9 +1187,12 @@ function overlayMachineLocal(meta: Meta): Meta {
   }
   const devicePath = getDeviceMetaPath();
   if (fs.existsSync(devicePath)) {
-    let dm: (Meta & { routines?: unknown }) | null = null;
+    let dm: (Meta & { routines?: unknown; browser?: unknown }) | null = null;
     try {
-      dm = yaml.parse(fs.readFileSync(devicePath, 'utf-8')) as Meta & { routines?: unknown };
+      dm = yaml.parse(fs.readFileSync(devicePath, 'utf-8')) as Meta & {
+        routines?: unknown;
+        browser?: unknown;
+      };
     } catch { /* preserve the existing tolerance for malformed legacy device YAML */ }
     if (dm) {
       // Pre-migration pins may still live in the tracked doc — honor them until
