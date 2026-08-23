@@ -23,7 +23,17 @@ import { terminalWidth, stringWidth } from '../lib/session/width.js';
 import { itemPicker } from '../lib/picker.js';
 import { createMemoryCache } from '../lib/memory-cache.js';
 import { classifyFileChanges, changeCounts, toolHistogram, detectTestResult } from '../lib/session/digest.js';
-import { extractArtifacts, extractHooks, extractLinks, extractRepos, extractSkills } from '../lib/session/highlights.js';
+import {
+  extractArtifacts,
+  extractBackgroundShells,
+  extractHooks,
+  extractLinks,
+  extractRepos,
+  extractSkills,
+  harnessTracksBackgroundShells,
+  isBackgroundShellStart,
+  isSubAgentTool,
+} from '../lib/session/highlights.js';
 import { getSessionPlugins, readSessionPreviewCache, writeSessionPreviewCache, readSessionContent, readArchivedSessionPreview } from '../lib/session/db.js';
 /** A session whose transcript FILE is on another machine (folded in over the
  * live cross-machine fan-out): its `filePath` is on that peer's disk, so the
@@ -266,6 +276,7 @@ export function sanitizeRemoteDigest(raw: unknown): SessionPreviewDigest | undef
     planFile: str(d.planFile),
     todos,
     subAgentCount: num(d.subAgentCount),
+    backgroundShellCount: d.backgroundShellCount === undefined ? undefined : num(d.backgroundShellCount),
     toolTags: strList(d.toolTags),
     changes,
     dirs: strList(d.dirs),
@@ -526,6 +537,39 @@ function formatHeader(session: SessionMeta, events: SessionEvent[]): string {
  * machine — far too much for a pane that repaints as the cursor moves. The line
  * names the command that does report them instead.
  */
+/**
+ * The "what did this session leave running" segments of the Doing line.
+ *
+ * Prefers a DERIVED count (fresh, from the transcript the caller just parsed)
+ * and falls back to the PERSISTED column, which is what lets a remote/unindexed
+ * row — rendered from `SessionMeta` alone, with no events — show fan-out at all.
+ * That fallback is the whole reason the counts are columns (RUSH-3091/3095).
+ *
+ * A count of 0 or undefined renders NOTHING. Both are real states — "scanned,
+ * none found" and "this harness cannot report it" — and a literal "0 background
+ * shells" would assert "nothing is running" for a harness that simply does not
+ * record them.
+ *
+ * Wording is "left behind", not "running": a transcript records a start and
+ * never a death (see extractBackgroundShells).
+ */
+export function formatFanOut(
+  session: SessionMeta,
+  derived?: { subAgentCount?: number; backgroundShellCount?: number },
+): string[] {
+  // DERIVED wins when the caller has one. It is computed from the transcript as
+  // it stands right now, whereas the persisted column is only as fresh as the
+  // last scan — for a live session those disagree within seconds. The persisted
+  // value is the fallback that makes a remote/unindexed row (no events, so no
+  // derived value) render at all, which is the whole reason it is a column.
+  const subAgents = derived?.subAgentCount ?? session.subAgentCount ?? 0;
+  const shells = derived?.backgroundShellCount ?? session.backgroundShellCount ?? 0;
+  const out: string[] = [];
+  if (subAgents > 0) out.push(chalk.gray(`${subAgents} sub-agent${subAgents === 1 ? '' : 's'}`));
+  if (shells > 0) out.push(chalk.gray(`${shells} background shell${shells === 1 ? '' : 's'}`));
+  return out;
+}
+
 export function formatTeamLineage(session: SessionMeta): string {
   const origin = session.teamOrigin;
   if (origin) {
@@ -563,7 +607,7 @@ function formatMetaOnlyBody(session: SessionMeta): string {
   }
   const compact = formatTodoCompact(session.todos);
   const teamLine = formatTeamLineage(session);
-  const doing = [compact ? chalk.white(compact) : '', teamLine].filter(Boolean);
+  const doing = [compact ? chalk.white(compact) : '', teamLine, ...formatFanOut(session)].filter(Boolean);
   if (doing.length) {
     lines.push(verbLabel('Doing') + doing.join(DOT));
   }
@@ -696,6 +740,8 @@ export interface SessionPreviewDigest {
   planFile: string;
   todos?: TodoProgress;
   subAgentCount: number;
+  /** undefined when the harness records no background-shell concept. */
+  backgroundShellCount?: number;
   toolTags: string[];
   changes: ReturnType<typeof changeCounts>;
   dirs: string[];
@@ -722,6 +768,12 @@ export function buildSessionPreviewDigest(events: SessionEvent[], session: Sessi
   /** Latest checklist from the transcript (Claude TodoWrite / Codex update_plan). */
   let latestTodos: TodoProgress | undefined;
   let subAgentCount = 0;
+  // undefined, not 0, when the harness records no background-shell concept —
+  // formatFanOut renders absence for both, but conflating them here would let a
+  // later consumer read "0 shells" as a positive "none running" claim.
+  let backgroundShellCount: number | undefined = harnessTracksBackgroundShells(session.agent)
+    ? 0
+    : undefined;
   const toolTags = new Set<string>();
   // usedBrowser/usedComputer are computed at scan time from a sessionId-scoped
   // events-log read (session/db.ts detectToolUsage), NOT a transcript regex —
@@ -748,6 +800,7 @@ export function buildSessionPreviewDigest(events: SessionEvent[], session: Sessi
         for (const tag of classifySessionTool(tool, command)) toolTags.add(tag);
       }
       if (isSubAgentTool(tool, command)) subAgentCount++;
+      if (backgroundShellCount !== undefined && isBackgroundShellStart(event)) backgroundShellCount++;
       const p = event.path || event.args?.file_path || event.args?.path || '';
       if (['Read', 'read_file', 'view_file', 'cat_file', 'get_file'].includes(tool) && p) {
         filesRead.add(p);
@@ -790,6 +843,7 @@ export function buildSessionPreviewDigest(events: SessionEvent[], session: Sessi
     planFile,
     todos,
     subAgentCount,
+    backgroundShellCount,
     toolTags: [...toolTags],
     changes: chg,
     dirs: directoriesTouched(session, events, changes),
@@ -816,7 +870,7 @@ function verbLabel(v: string): string {
 function formatCompactPreview(digest: SessionPreviewDigest, session: SessionMeta, events?: SessionEvent[]): string {
   const {
     firstUser, lastAssistant, filesRead, toolCalls, planFile, todos,
-    subAgentCount, toolTags, changes: chg, dirs, repos, artifacts, skills, plugins,
+    subAgentCount, backgroundShellCount, toolTags, changes: chg, dirs, repos, artifacts, skills, plugins,
     hooks, links, errorCount, firstError, toolHistogram: hist, test,
   } = digest;
 
@@ -839,7 +893,7 @@ function formatCompactPreview(digest: SessionPreviewDigest, session: SessionMeta
   const doing = [
     compact ? chalk.white(compact) : '',
     teamLine,
-    subAgentCount ? chalk.gray(`${subAgentCount} sub-agent${subAgentCount === 1 ? '' : 's'}`) : '',
+    ...formatFanOut(session, { subAgentCount, backgroundShellCount }),
   ].filter(Boolean);
   if (doing.length) {
     lines.push(verbLabel('Doing') + doing.join(DOT));
@@ -955,11 +1009,6 @@ function classifySessionTool(tool: string, command: string): string[] {
   if (/browser|webfetch|websearch/.test(toolName) || commandUses('browser')) tags.push('browser');
   if (/computer/.test(toolName) || commandUses('computer')) tags.push('computer');
   return tags;
-}
-
-function isSubAgentTool(tool: string, command: string): boolean {
-  if (/^(Agent|Task)$/i.test(tool)) return true;
-  return /\b(?:agents|ag)\b[^\n;&|]*\b(?:run|cloud\s+run|teams\s+(?:add|start))\b/.test(command);
 }
 
 /**

@@ -20,7 +20,13 @@ import { loadSessionActorIndex, readSessionActorRecord } from './actor-sidecar.j
 import { toolCallsFromEvents, type IndexedToolCall } from './tool-calls.js';
 import { persistToolCalls, toolEvidenceSourcePath } from './tool-store.js';
 import { buildClaudeAccountIndex, resolveClaudeAccount } from './claude-accounts.js';
-import { extractSkills, extractSlashCommands } from './highlights.js';
+import {
+  extractBackgroundShells,
+  extractSkills,
+  extractSlashCommands,
+  harnessTracksBackgroundShells,
+  isSubAgentTool,
+} from './highlights.js';
 import { resolveResource } from '../resources.js';
 import { discoverPlugins } from '../plugins/plugins.js';
 import { machineId } from '../machine-id.js';
@@ -32,7 +38,7 @@ const DB_PATH = getSessionsDbPath();
 /** Current schema version; bumped when migrations are added. Exported so tests
  * assert against the constant instead of hardcoding a number that every bump
  * then has to chase (docs/sessions.md calls the constant the source of truth). */
-export const SCHEMA_VERSION = 39;
+export const SCHEMA_VERSION = 40;
 
 /**
  * Bump to force `agents sessions backfill resources` to re-derive every
@@ -107,6 +113,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   worktree_slug TEXT,
   ticket_id TEXT,
   spawned_team TEXT,
+  sub_agent_count INTEGER,
+  background_shell_count INTEGER,
   plan TEXT,
   machine TEXT,
   todos TEXT,
@@ -448,6 +456,14 @@ interface SessionRow {
   worktree_slug: string | null;
   ticket_id: string | null;
   spawned_team: string | null;
+  /**
+   * Fan-out the session left behind. NULL is load-bearing and distinct from 0:
+   * NULL means "this row predates the column / the harness cannot report it",
+   * 0 means "scanned, found none". Renders omit the segment for both, so
+   * neither can be mistaken for a truthful "nothing is running".
+   */
+  sub_agent_count: number | null;
+  background_shell_count: number | null;
   plan: string | null;
   machine: string | null;
   todos: string | null;
@@ -1162,6 +1178,30 @@ function migrateSchema(db: Database.Database, fromVersion: number): void {
       CREATE INDEX IF NOT EXISTS idx_computer_sessions_started ON computer_sessions(started_at DESC);
     `);
   }
+
+  if (fromVersion < 40) {
+    // v39 -> v40: persist the fan-out a session left behind — sub-agents spawned
+    // and shells backgrounded (RUSH-3091/3095). Both were recomputed per render
+    // from the transcript, so a REMOTE or unindexed row (rendered from
+    // SessionMeta alone by sessions-picker's formatMetaOnlyBody, which has no
+    // events to derive from) showed neither. Columns are what make them
+    // renderable there.
+    //
+    // New nullable columns, so no ledger flush — the v33->v34 contract that
+    // adding a column keeps warm session ledgers warm. Pre-upgrade rows stay
+    // NULL until re-scanned, and NULL is deliberately distinct from 0: NULL is
+    // "not computed / harness cannot report it", 0 is "scanned, none found".
+    // The renders omit the segment for both, so neither can be misread as a
+    // positive "nothing is running" claim.
+    const cols = new Set(
+      (db.prepare(`PRAGMA table_info(sessions)`).all() as Array<{ name: string }>).map((c) => c.name),
+    );
+    if (!cols.has('sub_agent_count')) db.exec(`ALTER TABLE sessions ADD COLUMN sub_agent_count INTEGER`);
+    if (!cols.has('background_shell_count')) {
+      db.exec(`ALTER TABLE sessions ADD COLUMN background_shell_count INTEGER`);
+    }
+  }
+
 }
 
 /**
@@ -1744,7 +1784,8 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     output_tokens, input_tokens, cache_read_tokens, cache_write_tokens,
     cost_usd, cost_usd_nocache, duration_ms, model, tool_call_count,
     file_path, file_mtime_ms, file_size, scanned_at, is_team_origin,
-    pr_url, pr_number, worktree_slug, ticket_id, spawned_team, plan, todos,
+    pr_url, pr_number, worktree_slug, ticket_id, spawned_team,
+    sub_agent_count, background_shell_count, plan, todos,
     recent_directories_touched, linear_project, linear_project_url, machine,
     actor, initiated_by, used_browser, used_computer
   ) VALUES (
@@ -1754,7 +1795,8 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     @output_tokens, @input_tokens, @cache_read_tokens, @cache_write_tokens,
     @cost_usd, @cost_usd_nocache, @duration_ms, @model, @tool_call_count,
     @file_path, @file_mtime_ms, @file_size, @scanned_at, @is_team_origin,
-    @pr_url, @pr_number, @worktree_slug, @ticket_id, @spawned_team, @plan, @todos,
+    @pr_url, @pr_number, @worktree_slug, @ticket_id, @spawned_team,
+    @sub_agent_count, @background_shell_count, @plan, @todos,
     @recent_directories_touched, @linear_project, @linear_project_url, @machine,
     @actor, @initiated_by, @used_browser, @used_computer
   )
@@ -1805,6 +1847,8 @@ const upsertSessionStmt = (db: Database.Database) => db.prepare(`
     worktree_slug = excluded.worktree_slug,
     ticket_id = excluded.ticket_id,
     spawned_team = excluded.spawned_team,
+    sub_agent_count = COALESCE(excluded.sub_agent_count, sessions.sub_agent_count),
+    background_shell_count = COALESCE(excluded.background_shell_count, sessions.background_shell_count),
     plan = excluded.plan,
     todos = excluded.todos,
     recent_directories_touched = excluded.recent_directories_touched,
@@ -1972,6 +2016,32 @@ function writeResourceUsage(sessionId: string, events: SessionEvent[], cwd: stri
   writeResourceUsageFromTallies(sessionId, extractSkills(events), extractSlashCommands(events), cwd);
 }
 
+/**
+ * Fan-out the session left behind, from an ALREADY-parsed transcript (never a
+ * re-parse — every caller here has `events` in hand).
+ *
+ * `backgroundShellCount` is `undefined`, not 0, for a harness that cannot report
+ * backgrounded shells. That distinction is the whole point: 0 asserts "none were
+ * started", while undefined says "this harness does not record it" — and the
+ * renders omit the segment for both, so neither can read as "nothing is running".
+ */
+function fanOutCounts(
+  events: SessionEvent[],
+  agent: SessionAgentId,
+): { subAgentCount: number; backgroundShellCount: number | undefined } {
+  let subAgentCount = 0;
+  for (const e of events) {
+    if (e.type !== 'tool_use' || e._local) continue;
+    if (isSubAgentTool(e.tool || '', e.command || '')) subAgentCount++;
+  }
+  return {
+    subAgentCount,
+    backgroundShellCount: harnessTracksBackgroundShells(agent)
+      ? extractBackgroundShells(events).length
+      : undefined,
+  };
+}
+
 function enrichCachedSessionMeta(meta: SessionMeta): SessionMeta {
   if (!meta.filePath) return meta;
   try {
@@ -1981,6 +2051,7 @@ function enrichCachedSessionMeta(meta: SessionMeta): SessionMeta {
       ...meta,
       todos: extractTodoProgressFromEvents(events),
       recentDirectoriesTouched: extractRecentDirectoriesTouched(events, meta.cwd),
+      ...fanOutCounts(events, meta.agent),
     };
   } catch {
     // Synthetic/cloud rows can intentionally name a transcript that is not local.
@@ -2089,6 +2160,8 @@ export function upsertSession(meta: SessionMeta, content: string, scan?: ScanSta
     worktree_slug: meta.worktreeSlug ?? null,
     ticket_id: meta.ticketId ?? null,
     spawned_team: meta.spawnedTeam ?? null,
+    sub_agent_count: meta.subAgentCount ?? null,
+    background_shell_count: meta.backgroundShellCount ?? null,
     plan: meta.plan ?? null,
     todos: meta.todos ? JSON.stringify(meta.todos) : null,
     recent_directories_touched: meta.recentDirectoriesTouched ? JSON.stringify(meta.recentDirectoriesTouched) : null,
@@ -2169,7 +2242,16 @@ export function upsertSessionsBatch(
       .map(e => [canonicalLedgerKey(e.meta.filePath), e]),
   );
   const enrichedEntries = entries.map(entry => {
-    if (entry.meta.agent === 'claude' || entry.meta.agent === 'codex' || !entry.meta.filePath) return entry;
+    if (entry.meta.agent === 'claude' || entry.meta.agent === 'codex' || !entry.meta.filePath) {
+      // claude/codex keep their resumable-parse optimization (no transcript read
+      // here). When their scanner already handed us normalized events, the counts
+      // are free — take them. Otherwise leave them undefined, which persists NULL
+      // and means "not computed yet", and the next scan that carries events fills
+      // it. Never collapse that to 0: see fanOutCounts.
+      return entry.events
+        ? { ...entry, meta: { ...entry.meta, ...fanOutCounts(entry.events, entry.meta.agent) } }
+        : entry;
+    }
     try {
       const toolSourcePath = toolEvidenceSourcePath(entry.meta.filePath, entry.meta.agent);
       const toolScan = toolSourcePath === entry.meta.filePath
@@ -2189,6 +2271,7 @@ export function upsertSessionsBatch(
           ...entry.meta,
           todos: extractTodoProgressFromEvents(events),
           recentDirectoriesTouched: extractRecentDirectoriesTouched(events, entry.meta.cwd),
+          ...fanOutCounts(events, entry.meta.agent),
         },
         toolCalls: toolCallsFromEvents(events),
         toolScan,
@@ -2296,6 +2379,8 @@ export function upsertSessionsBatch(
         worktree_slug: meta.worktreeSlug ?? null,
         ticket_id: meta.ticketId ?? null,
         spawned_team: meta.spawnedTeam ?? null,
+        sub_agent_count: meta.subAgentCount ?? null,
+        background_shell_count: meta.backgroundShellCount ?? null,
         plan: meta.plan ?? null,
         todos: meta.todos ? JSON.stringify(meta.todos) : null,
         recent_directories_touched: meta.recentDirectoriesTouched ? JSON.stringify(meta.recentDirectoriesTouched) : null,
@@ -2534,6 +2619,8 @@ function rowToMeta(row: SessionRow): SessionMeta {
     worktreeSlug: row.worktree_slug ?? undefined,
     ticketId: row.ticket_id ?? undefined,
     spawnedTeam: row.spawned_team ?? undefined,
+    subAgentCount: row.sub_agent_count ?? undefined,
+    backgroundShellCount: row.background_shell_count ?? undefined,
     plan: row.plan ?? undefined,
     todos: parseJsonColumn(row.todos),
     recentDirectoriesTouched: parseJsonColumn(row.recent_directories_touched),

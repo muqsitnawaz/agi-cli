@@ -332,3 +332,94 @@ export function extractRepos(events: SessionEvent[], cwd?: string): string[] {
   }
   return repos;
 }
+
+// ── Background shells ─────────────────────────────────────────────────────────
+
+/**
+ * Per-harness shape of "start this shell command in the background", keyed the
+ * same way {@link SKILL_TOOL_NAME_BY_AGENT} is: one table entry per harness that
+ * has the capability, so adding a harness is a row and never another `else if`.
+ *
+ * Absent on purpose, verified against real transcripts on this fleet rather than
+ * assumed — an absent entry means "this harness cannot report it", which the
+ * renders must show as ABSENCE, never as a count of zero:
+ *
+ *   codex   0 of 176 session files carry any background marker; its `exec` /
+ *           `exec_command` record only `cmd` + `workdir`, with no shell handle.
+ *   droid   0 of 126 session files.
+ *   cursor  stores no tool calls locally at all — only `meta.json` and
+ *           `prompt_history.json`; the calls live server-side.
+ */
+const BACKGROUND_SHELL_BY_AGENT: Partial<Record<SessionAgentId, { tool: string; flag: string }>> = {
+  claude: { tool: 'Bash', flag: 'run_in_background' },
+  kimi: { tool: 'Bash', flag: 'run_in_background' },
+  grok: { tool: 'run_terminal_command', flag: 'background' },
+};
+
+/**
+ * True when this harness records backgrounded shells at all. Callers MUST gate
+ * on this before rendering a count: for a harness that cannot report it, "0" is
+ * a lie ("none running") where the truth is "unknown", so the segment is omitted
+ * entirely — the same way the Hooks line renders for Claude only.
+ */
+export function harnessTracksBackgroundShells(agent: SessionAgentId): boolean {
+  return BACKGROUND_SHELL_BY_AGENT[agent] !== undefined;
+}
+
+/**
+ * True for a tool_use event that starts a background shell. Exported for the
+ * same reason {@link isSkillInvocation} is: the incremental parser can select
+ * matching events while streaming instead of re-reading the transcript.
+ */
+export function isBackgroundShellStart(e: SessionEvent): boolean {
+  if (e.type !== 'tool_use' || e._local) return false;
+  const spec = BACKGROUND_SHELL_BY_AGENT[e.agent];
+  return !!spec && e.tool === spec.tool && e.args?.[spec.flag] === true;
+}
+
+export interface BackgroundShell {
+  /** The command line as invoked, trimmed for display. */
+  command: string;
+  timestamp: string;
+}
+
+/**
+ * Shells the session started in the background, oldest first.
+ *
+ * This is "started", NOT "still running". A transcript records the start and
+ * never the death, and inferring liveness from its absence is the same trap
+ * `agents devices ps` documents — a killed process leaves no marker, so a naive
+ * reader reports "running" forever. Live status belongs to `sessions --active`,
+ * which resolves real pids.
+ */
+export function extractBackgroundShells(events: SessionEvent[]): BackgroundShell[] {
+  const out: BackgroundShell[] = [];
+  for (const e of events) {
+    if (!isBackgroundShellStart(e)) continue;
+    const raw = e.command ?? e.args?.command;
+    out.push({
+      command: typeof raw === 'string' ? raw.trim() : '',
+      timestamp: e.timestamp,
+    });
+  }
+  return out;
+}
+
+// ── Sub-agents ────────────────────────────────────────────────────────────────
+
+/**
+ * True for a tool call that spawns another agent. Deliberately counts BOTH
+ * shapes, because both are fan-out the operator needs to see:
+ *
+ *   in-process   an `Agent` / `Task` tool call inside this transcript
+ *   shelled-out  a Bash command that invokes `agents run`, `agents cloud run`,
+ *                or `agents teams add|start`
+ *
+ * Moved here from `commands/sessions-picker.ts` so the quick preview and the
+ * full summary share one definition instead of drifting apart. Semantics are
+ * unchanged: session f045b577 counts 23 in-process + 30 shelled-out = 53.
+ */
+export function isSubAgentTool(tool: string, command: string): boolean {
+  if (/^(Agent|Task)$/i.test(tool)) return true;
+  return /\b(?:agents|ag)\b[^\n;&|]*\b(?:run|cloud\s+run|teams\s+(?:add|start))\b/.test(command);
+}
