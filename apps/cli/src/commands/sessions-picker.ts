@@ -276,7 +276,10 @@ export function sanitizeRemoteDigest(raw: unknown): SessionPreviewDigest | undef
     planFile: str(d.planFile),
     todos,
     subAgentCount: num(d.subAgentCount),
-    backgroundShellCount: d.backgroundShellCount === undefined ? undefined : num(d.backgroundShellCount),
+    // optNum, not num: a peer's JSON is untrusted, and the undefined-vs-0
+    // distinction is load-bearing here — num() would coerce a malformed value
+    // to 0, which reads as "scanned, none running".
+    backgroundShellCount: optNum(d.backgroundShellCount),
     toolTags: strList(d.toolTags),
     changes,
     dirs: strList(d.dirs),

@@ -340,15 +340,22 @@ export function extractRepos(events: SessionEvent[], cwd?: string): string[] {
  * same way {@link SKILL_TOOL_NAME_BY_AGENT} is: one table entry per harness that
  * has the capability, so adding a harness is a row and never another `else if`.
  *
- * Absent on purpose, verified against real transcripts on this fleet rather than
- * assumed — an absent entry means "this harness cannot report it", which the
- * renders must show as ABSENCE, never as a count of zero:
+ * An absent entry means "this harness cannot report it", which the renders must
+ * show as ABSENCE, never as a count of zero. Every absence below was probed
+ * against that harness's real transcripts on this fleet rather than assumed:
  *
- *   codex   0 of 176 session files carry any background marker; its `exec` /
- *           `exec_command` record only `cmd` + `workdir`, with no shell handle.
- *   droid   0 of 126 session files.
- *   cursor  stores no tool calls locally at all — only `meta.json` and
- *           `prompt_history.json`; the calls live server-side.
+ *   codex        0 of 176 session files carry any background marker; its `exec` /
+ *                `exec_command` record only `cmd` + `workdir`, no shell handle.
+ *   droid        0 of 126 session files.
+ *   antigravity  0 of 54 session files.
+ *   opencode     0 of 79 session files.
+ *   cursor       stores no tool calls locally at all — only `meta.json` and
+ *                `prompt_history.json`; the calls live server-side.
+ *
+ * Not probed, because no version home is installed on this fleet to probe:
+ * `muse`, `rush`, `hermes`, `openclaw`, `gemini`. They are absent for lack of
+ * evidence, NOT on a verified negative — add a row once one is confirmed, and
+ * until then absence renders as "unknown", which is the safe direction.
  */
 const BACKGROUND_SHELL_BY_AGENT: Partial<Record<SessionAgentId, { tool: string; flag: string }>> = {
   claude: { tool: 'Bash', flag: 'run_in_background' },
@@ -415,9 +422,16 @@ export function extractBackgroundShells(events: SessionEvent[]): BackgroundShell
  *   shelled-out  a Bash command that invokes `agents run`, `agents cloud run`,
  *                or `agents teams add|start`
  *
- * Moved here from `commands/sessions-picker.ts` so the quick preview and the
- * full summary share one definition instead of drifting apart. Semantics are
- * unchanged: session f045b577 counts 23 in-process + 30 shelled-out = 53.
+ * Moved here from `commands/sessions-picker.ts` so BOTH preview body paths (the
+ * digest body and `formatMetaOnlyBody`) share one definition instead of
+ * drifting apart. Semantics are unchanged: session f045b577 counts 23
+ * in-process + 30 shelled-out = 53.
+ *
+ * The full summary's `Subagents (N)` section (`render.ts`) deliberately does NOT
+ * use this. It builds a described ROSTER, so it needs `args.description` /
+ * `args.prompt` and is necessarily limited to in-process `Agent`/`Task` calls —
+ * a shelled-out `agents run` carries no such description. Different question,
+ * different answer; do not "unify" them.
  */
 export function isSubAgentTool(tool: string, command: string): boolean {
   if (/^(Agent|Task)$/i.test(tool)) return true;
