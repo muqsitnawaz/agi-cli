@@ -87,6 +87,12 @@ const PARITY_FIELDS = [
   'topic', 'messageCount', 'tokenCount', 'outputTokens', 'costUsd', 'durationMs',
   'isTeamOrigin', 'prUrl', 'prNumber', 'worktreeSlug', 'ticketId', 'createdTickets',
   'spawnedTeam', 'plan',
+  // RUSH-3091/3095: these are accumulated across a RESUMED parse (the tallies
+  // live in the durable ClaudeParserState, which is why it went v3 -> v4). If
+  // hydrate ever stops restoring them, a resumed scan reports the transcript's
+  // TAIL instead of its total — and this parity check is the thing that catches
+  // it, so they belong here rather than only in a unit test.
+  'subAgentCount', 'backgroundShellCount',
 ] as const;
 
 function assertRowParity(incId: string, fullId: string): void {
@@ -178,6 +184,40 @@ describe('B-2 live incremental scan parity', () => {
     expect(inc.messageCount).toBe(5);
     // outputTokens = 20 + 10 + 40 across all three assistant events.
     expect(inc.outputTokens).toBe(70);
+  });
+
+  it('STRADDLED FAN-OUT: sub-agents and background shells on both sides of a scan boundary accumulate (RUSH-3091/3095)', async () => {
+    // The resumable parser reads only the appended bytes, so the tallies must
+    // carry in the durable ClaudeParserState (v4). If hydrate ever stops
+    // restoring them this reports the TAIL (1 and 1) instead of the total.
+    const id = 'straddle-fanout';
+    writeTranscript(id, [
+      { type: 'user', timestamp: '2026-06-28T01:00:00.000Z', cwd: '/home/u/repo', message: { role: 'user', content: 'fan out' } },
+      { type: 'assistant', timestamp: '2026-06-28T01:01:00.000Z', uuid: `${id}-a1`, message: { id: `${id}-m1`, model: 'claude-sonnet-4-5', content: [
+        { type: 'tool_use', id: `${id}-t1`, name: 'Agent', input: { description: 'first subagent', prompt: 'go' } },
+        { type: 'tool_use', id: `${id}-t2`, name: 'Bash', input: { command: 'sleep 60', run_in_background: true } },
+      ], usage: { input_tokens: 10, output_tokens: 5 } } },
+    ]);
+    await runScan();
+    expect(db.getSessionById(id)!.subAgentCount).toBe(1);
+    expect(db.getSessionById(id)!.backgroundShellCount).toBe(1);
+
+    // Second half lands in the appended chunk, parsed incrementally.
+    appendTranscript(id, [
+      { type: 'assistant', timestamp: '2026-06-28T01:02:00.000Z', uuid: `${id}-a2`, message: { id: `${id}-m2`, model: 'claude-sonnet-4-5', content: [
+        { type: 'tool_use', id: `${id}-t3`, name: 'Task', input: { description: 'second subagent', prompt: 'go' } },
+        { type: 'tool_use', id: `${id}-t4`, name: 'Bash', input: { command: 'agents run claude "third"' } },
+        { type: 'tool_use', id: `${id}-t5`, name: 'Bash', input: { command: 'tail -f log', run_in_background: true } },
+      ], usage: { input_tokens: 8, output_tokens: 4 } } },
+    ]);
+    bumpMtimeToNow(sessionFile(id), 1);
+    await runScan();
+    expect(discover.__claudeScanBranchCountsForTest().incremental).toBeGreaterThanOrEqual(1);
+
+    // Totals across BOTH halves: 1 Agent + 1 Task + 1 shelled-out spawn = 3.
+    expect(db.getSessionById(id)!.subAgentCount).toBe(3);
+    // 2 backgrounded shells; the `agents run` one is a spawn, not a shell.
+    expect(db.getSessionById(id)!.backgroundShellCount).toBe(2);
   });
 
   it('STRADDLED PR: gh pr create tool_use in the first write, its URL in the append → correct prUrl/prNumber', async () => {
