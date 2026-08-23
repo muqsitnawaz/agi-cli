@@ -14,7 +14,7 @@ Excluded (same as `agents --help`): commands Commander marks hidden (e.g. `remov
 and internal subcommands), plus the deprecated aliases and tombstones registered inline in
 src/index.ts (`perms`, `exec`, `jobs`, `cron`, `check`, `resources`, `hq`, `_internal`).
 
-_68 command groups · 546 commands._
+_69 command groups · 548 commands._
 
 ## accounts — Browse native logins and manage provider account bundles
 
@@ -734,6 +734,7 @@ agents sessions resume [query] [prompt]     Resume a session by id (strict), or 
 agents sessions share <session>             Publish one session as a redacted, self-contained web page and print the link.
 agents sessions stats                       Which skills/commands you actually invoke, and which installed ones are dead weight.
 agents sessions tail [sessionId]            Stream compact live lines from a session file as events are written. Long-running: Ctrl+C to stop. Claude and Codex only.
+agents sessions trace <selectors...>        Visualize a session as a trajectory — a tool-call timeline you can read at a glance. Opens a visual for a person; prints a compact trajectory for an agent.
 agents sessions watch                       Stream canonical live and recoverable session row changes as NDJSON
 ```
 
@@ -830,6 +831,12 @@ agents tmux list                      List live tmux sessions on the shared serv
 agents tmux new <name>                Start a detached tmux session running a command. The session persists until killed.
 agents tmux send <target> <keys>      Send keystrokes to a session. Target is "name" or "name:pane" (e.g. team:%2 or team:1).
 agents tmux split <name> <direction>  Split the active pane of a session. Direction: h (left/right) or v (top/bottom).
+```
+
+## trace — Visualize a session as a trajectory — a tool-call timeline you can read at a glance. Opens a visual for a person; prints a compact trajectory for an agent.
+
+```
+agents trace <selectors...>  Visualize a session as a trajectory — a tool-call timeline you can read at a glance. Opens a visual for a person; prints a compact trajectory for an agent.
 ```
 
 ## trash — Inspect and restore soft-deleted agent version directories
