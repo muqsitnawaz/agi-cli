@@ -135,3 +135,32 @@ describe('device declaration lifecycle', () => {
     ).rejects.toThrow(/not declared on .*; declared on peer/);
   });
 });
+
+describe('profileRegistry does not claim central declarations', () => {
+  it('leaves a legacy central profile undeclared instead of claiming it for this device', async () => {
+    // The regression this guards: profileRegistry() used to call
+    // migrateCentralBrowserProfiles() on every read, on every box. Every device
+    // can read the central map, so whichever box read first CLAIMED the name --
+    // profileKind() then reported `identity` and the daemon tunnelled to THAT
+    // box. For `comet-local` at cdp://localhost:9333 that is a logged-out
+    // headless chromium on a Linux worker answering to the name of the browser
+    // holding five real logins, recorded as a stored fact. Resolution must fail
+    // loudly instead, and the central entry must survive for the machine that
+    // actually owns the browser to claim explicitly.
+    const centralFile = path.join(root, '.agents', 'agents.yaml');
+    const config = { browser: 'comet', endpoints: ['cdp://localhost:9333'] };
+    writeYaml(centralFile, { browser: { 'comet-local': config } });
+
+    const { machineId } = await import('../machine-id.js');
+    const { profileRegistry, declaringDevices, profileKind } = await import('./registry.js');
+
+    profileRegistry();
+
+    expect(declaringDevices('comet-local')).toEqual([]);
+    expect(profileKind('comet-local')).toBeNull();
+    expect(fs.existsSync(deviceFile(machineId()))).toBe(false);
+    expect(yaml.parse(fs.readFileSync(centralFile, 'utf8')).browser).toEqual({
+      'comet-local': config,
+    });
+  });
+});

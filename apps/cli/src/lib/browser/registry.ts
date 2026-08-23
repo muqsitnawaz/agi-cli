@@ -17,9 +17,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Fold the removed central `browser:` map into this device's declaration file.
- * One `updateMeta` call writes the destination before removing the source, and
- * an existing unequal declaration fails loudly rather than losing either copy.
+ * Fold the legacy central `browser:` map into THIS device's declaration file.
+ *
+ * Never called implicitly, and that is the point. Every device can read the
+ * central map, so an implicit claim races: whichever box happens to read first
+ * claims the name, {@link profileKind} then reports it `identity`, and the
+ * daemon tunnels to that box — which for a fleet-wide `cdp://localhost:*`
+ * profile is a logged-out headless browser wearing a credentialed browser's
+ * name. That is the exact bug this module exists to remove, and an implicit
+ * migration would write it to disk as a stored fact.
+ *
+ * So the claim is an explicit operator action, run on the machine that actually
+ * owns the browser. Until then the name is declared by nobody and resolution
+ * fails loudly, which is the designed behavior: a clear error beats silently
+ * resolving to the wrong browser.
  */
 export function migrateCentralBrowserProfiles(): boolean {
   const meta = readMeta() as LegacyBrowserMeta;
@@ -53,8 +64,6 @@ export function migrateCentralBrowserProfiles(): boolean {
  * Reads every `devices/<name>/agents.yaml`; declarations never overwrite.
  */
 export function profileRegistry(): Map<string, ProfileDeclaration[]> {
-  migrateCentralBrowserProfiles();
-
   const registry = new Map<string, ProfileDeclaration[]>();
   const devicesDir = path.join(getUserAgentsDir(), 'devices');
   if (!fs.existsSync(devicesDir)) return registry;
