@@ -778,22 +778,25 @@ function registerProfilesCommands(browser: Command): void {
         return;
       }
 
-      // A misfiled fleet profile is never a prune candidate (deleting a fleet
-      // entry deletes it everywhere), so without this it would only ever surface
-      // in --json. It is the one kept-reason a user has to act on.
+      // A misfiled profile is never a prune candidate — the entry belongs to the
+      // device that declared it, not to this one — so without this it would only
+      // ever surface in --json. It is the one kept-reason a user has to act on.
       const misfiled = plan.kept.filter((k) => k.misfiled);
       const reportMisfiled = (): void => {
         if (misfiled.length === 0) return;
         console.log('');
         console.log(
-          `${misfiled.length} fleet profile${misfiled.length === 1 ? '' : 's'} ${misfiled.length === 1 ? 'is' : 'are'} misfiled — ` +
-            `fleet-synced but bound to a local port, so the name means a different browser on every machine:`
+          `${misfiled.length} profile${misfiled.length === 1 ? '' : 's'} ${misfiled.length === 1 ? 'is' : 'are'} misfiled — ` +
+            `declared on another device but bound to a loopback port, so the name resolves to ` +
+            `this machine's own browser rather than the declaring device's:`
         );
         for (const k of misfiled) {
-          console.log(`  ${k.name} — agents browser profiles scope ${k.name} local`);
+          console.log(`  ${k.name} — ${k.why}`);
         }
-        console.log('Run that on the machine that owns each browser. Nothing was moved for you.');
-        console.log('(Prune never deletes these — removing a fleet entry removes it everywhere.)');
+        console.log(
+          'Re-declare each on the machine that owns the browser. Nothing was moved for you.'
+        );
+        console.log('(Prune never deletes these — the declaring device owns the entry.)');
       };
 
       if (plan.candidates.length === 0) {
