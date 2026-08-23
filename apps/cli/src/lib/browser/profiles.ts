@@ -2,6 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import {
   getBrowserRuntimeDir as getBrowserRuntimeDirRoot,
+  readMeta,
   updateMeta,
 } from '../state.js';
 import { getConfigValue } from '../device-config.js';
@@ -182,26 +183,6 @@ export function isProfileLaunchableHere(profile: BrowserProfile): boolean {
 }
 
 /**
- * Resolve the profile `agents browser start` uses when no `--profile` is given.
- *
- * Order: (1) the device-local configured default (`agents browser profiles
- * set-default <name>`) when it names an existing profile that can launch here;
- * (2) an existing `default` profile that can launch here; (3) auto-pick the
- * first installed Chromium-family browser per the platform priority list in
- * chrome.ts (macOS: chrome > brave > edge > chromium > comet > arc; Linux: chrome >
- * chromium > brave > edge; Windows: edge > chrome > brave > comet) and pin a
- * `default` profile to it. Throws an actionable error if none of those binaries
- * are installed.
- *
- * "Can launch here" matters because `agents.yaml` syncs across the fleet: a
- * `default` auto-created on macOS carries a `/Applications/...` binary path that
- * doesn't exist on a Linux box. Rather than hand that broken profile back (the
- * top browser roadblock — "Custom binary not found"), we re-detect and
- * regenerate the `default` for this machine. A configured or existing default
- * that no longer exists, or can't launch here, warns and falls through — never a
- * hard fail.
- */
-/**
  * The auto-detected profile this machine already carries, under either name —
  * the current `auto-chrome` or the `default` an older build wrote. Callers that
  * ask "is a default profile set up here?" MUST use this rather than probing one
@@ -267,15 +248,16 @@ export async function resolveProfileRef(ref?: string): Promise<string | undefine
  * `start`'s resolver. Same order as {@link resolveProfileRef} for an explicit
  * name, but the IMPLICIT path (no `--profile`, or the bare `default` alias with
  * no profile of that name) goes through {@link ensureDefaultBrowserProfile} —
- * which additionally verifies the resolved default can launch on THIS machine,
- * warns and falls through when it can't, and regenerates or creates one.
+ * which additionally verifies the resolved default can launch on THIS machine.
+ * An undeclared configured default is an error. A declared default whose
+ * browser isn't installed here warns and falls through to auto-detect.
  *
  * `start` is the only command that launches a browser, so it is the only one
  * that may do those things; routing a filter-only command through this would
  * warn about, and rewrite, config the user never asked it to touch.
  *
- * Throws when no profile exists and no supported browser is installed —
- * `ensureDefaultBrowserProfile`'s actionable "install one of …" error.
+ * Throws when the configured default is undeclared, or when no profile exists
+ * and no supported browser is installed.
  */
 export async function resolveProfileRefForStart(ref?: string): Promise<string> {
   if (ref && ref !== DEFAULT_PROFILE_ALIAS) return ref;
@@ -284,18 +266,49 @@ export async function resolveProfileRefForStart(ref?: string): Promise<string> {
   return (await ensureDefaultBrowserProfile()).name;
 }
 
+/**
+ * Resolve the profile a bare `agents browser start` uses.
+ *
+ * Order: (1) the device-local configured default (`agents browser use <name>`)
+ * when it names a profile that exists and can launch here; (2) an existing
+ * auto-detected profile that can launch here; (3) auto-pick the first installed
+ * Chromium-family browser and pin `auto-chrome` (or repair a stale legacy
+ * `default`) to it.
+ *
+ * Two failure modes at the configured-default step are not the same:
+ *   - No device declares the name (including a leftover central `browser:`
+ *     entry that was never claimed) → throw. Auto-creating `auto-chrome` would
+ *     hand the agent a logged-out browser while `browser.profile` still names
+ *     the credentialed one.
+ *   - The name is declared, but its browser/binary is not installed HERE →
+ *     warn and fall through. That is a missing binary on this box, not a
+ *     missing identity; auto-detect is the existing repair.
+ */
 export async function ensureDefaultBrowserProfile(): Promise<BrowserProfile> {
   const configured = getConfiguredDefaultProfileName();
   if (configured && configured !== DEFAULT_PROFILE_ALIAS) {
     const chosen = await getProfile(configured);
     if (chosen && isProfileLaunchableHere(chosen)) return chosen;
+    if (!chosen) {
+      const central = (readMeta() as { browser?: Record<string, BrowserProfileConfig> }).browser ?? {};
+      if (central[configured]) {
+        throw new Error(
+          `configured default browser profile "${configured}" is not declared by any device. ` +
+            `It still lives in the central agents.yaml browser: map. ` +
+            `Claim it on the machine that hosts that browser with: agents browser profiles claim ${configured}`,
+        );
+      }
+      throw new Error(
+        `configured default browser profile "${configured}" is not declared by any device. ` +
+          `Create it with: agents browser profiles create ${configured} --browser <chrome|comet|chromium|brave|edge|arc|custom> ` +
+          `(or, if it is a leftover central profile, claim it with: agents browser profiles claim ${configured}). ` +
+          `Or unset the default with: agents browser use --unset`,
+      );
+    }
     console.warn(
-      chosen
-        ? `warning: configured default browser profile "${configured}" can't launch on this ` +
-          `machine (its browser/binary isn't installed here); falling back to auto-detect. ` +
-          `Fix with: agents browser use <name>  (or --unset)`
-        : `warning: configured default browser profile "${configured}" no longer exists; ` +
-          `falling back to auto-detect. Fix with: agents browser use <name>  (or --unset)`
+      `warning: configured default browser profile "${configured}" can't launch on this ` +
+        `machine (its browser/binary isn't installed here); falling back to auto-detect. ` +
+        `Fix with: agents browser use <name>  (or --unset)`,
     );
   }
 

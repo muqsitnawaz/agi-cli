@@ -16,8 +16,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+/** Leftover central `browser:` map from before per-device declarations. Empty when none remain. */
+export function centralBrowserProfiles(): Record<string, BrowserProfileConfig> {
+  const central = (readMeta() as LegacyBrowserMeta).browser;
+  if (!central || Object.keys(central).length === 0) return {};
+  return { ...central };
+}
+
+export interface CentralClaimResult {
+  claimed: string[];
+  skipped: string[];
+}
+
 /**
- * Fold the legacy central `browser:` map into THIS device's declaration file.
+ * Fold leftover central `browser:` entries into THIS device's declaration file.
  *
  * Never called implicitly, and that is the point. Every device can read the
  * central map, so an implicit claim races: whichever box happens to read first
@@ -27,36 +39,83 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * name. That is the exact bug this module exists to remove, and an implicit
  * migration would write it to disk as a stored fact.
  *
- * So the claim is an explicit operator action, run on the machine that actually
- * owns the browser. Until then the name is declared by nobody and resolution
- * fails loudly, which is the designed behavior: a clear error beats silently
- * resolving to the wrong browser.
+ * The claim is an explicit operator action (`agents browser profiles claim`),
+ * run on the machine that actually owns the browser. `canHostHere` is supplied
+ * by the command layer so this module stays a leaf — it must not import
+ * `isProfileLaunchableHere` (that would cycle through chrome.ts → profiles.ts).
+ * Only profiles this machine can host are claimed; the rest stay central,
+ * undeclared, and fail loudly on resolve.
  */
-export function migrateCentralBrowserProfiles(): boolean {
+export function migrateCentralBrowserProfiles(
+  canHostHere: (config: BrowserProfileConfig) => boolean,
+  name?: string,
+): CentralClaimResult {
   const meta = readMeta() as LegacyBrowserMeta;
   const central = meta.browser;
-  if (!central || Object.keys(central).length === 0) return false;
+  if (!central || Object.keys(central).length === 0) {
+    if (name) {
+      throw new Error(`No leftover central browser profile named "${name}".`);
+    }
+    return { claimed: [], skipped: [] };
+  }
 
   const local = meta.deviceBrowser ?? {};
-  for (const [name, config] of Object.entries(central)) {
-    const existing = local[name];
-    if (existing && !isDeepStrictEqual(existing, config)) {
+  if (name) {
+    const config = central[name];
+    if (!config) {
       throw new Error(
-        `Cannot migrate browser profile "${name}": central agents.yaml and this device's ` +
-          `agents.yaml declare different configurations. Resolve the duplicate before retrying.`,
+        local[name]
+          ? `Browser profile "${name}" is already declared on this device.`
+          : `No leftover central browser profile named "${name}".`,
+      );
+    }
+    if (!canHostHere(config)) {
+      throw new Error(
+        `Cannot claim browser profile "${name}": this machine cannot host it ` +
+          `(its browser/binary isn't installed here). Run this command on the machine that has that browser.`,
       );
     }
   }
 
+  const toClaim: Record<string, BrowserProfileConfig> = {};
+  const skipped: string[] = [];
+  for (const [profileName, config] of Object.entries(central)) {
+    if (name && profileName !== name) {
+      skipped.push(profileName);
+      continue;
+    }
+    if (!canHostHere(config)) {
+      skipped.push(profileName);
+      continue;
+    }
+    const existing = local[profileName];
+    if (existing && !isDeepStrictEqual(existing, config)) {
+      throw new Error(
+        `Cannot migrate browser profile "${profileName}": central agents.yaml and this device's ` +
+          `agents.yaml declare different configurations. Resolve the duplicate before retrying.`,
+      );
+    }
+    toClaim[profileName] = config;
+  }
+
+  const claimed = Object.keys(toClaim).sort();
+  skipped.sort();
+  if (claimed.length === 0) return { claimed, skipped };
+
   updateMeta((current) => {
     const legacy = current as LegacyBrowserMeta;
+    const remaining: Record<string, BrowserProfileConfig> = {};
+    for (const [profileName, config] of Object.entries(legacy.browser ?? {})) {
+      if (!(profileName in toClaim)) remaining[profileName] = config;
+    }
     const { browser: _removed, ...withoutCentralBrowser } = legacy;
     return {
       ...withoutCentralBrowser,
-      deviceBrowser: { ...central, ...current.deviceBrowser },
+      ...(Object.keys(remaining).length > 0 ? { browser: remaining } : {}),
+      deviceBrowser: { ...current.deviceBrowser, ...toClaim },
     } as Meta;
   });
-  return true;
+  return { claimed, skipped };
 }
 
 /**

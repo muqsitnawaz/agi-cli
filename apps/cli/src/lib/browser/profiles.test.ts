@@ -624,23 +624,16 @@ describe('ensureDefaultBrowserProfile', () => {
     expect(profile.browser).toBe('comet');
   });
 
-  it('warns and falls back to auto-detect when the configured default is missing', async () => {
+  it('throws rather than creating auto-chrome when the configured default is undeclared', async () => {
     const store = withDefaultProfile({ browser: {} }, 'ghost');
     vi.mocked(readMeta).mockImplementation(() => store as any);
-    vi.mocked(writeMeta).mockImplementation((meta: any) => {
-      store.browser = (meta.browser ?? {}) as Record<string, BrowserProfileConfig>;
-      store.deviceBrowser = (meta.deviceBrowser ?? {}) as Record<string, BrowserProfileConfig>;
-    });
-    vi.mocked(isPortInUse).mockReturnValue(false);
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const writeSpy = vi.mocked(writeMeta);
 
-    const profile = await ensureDefaultBrowserProfile();
-
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('ghost'));
-    // Fell through to the installed-browser auto-detect (Chrome in this mock).
-    expect(profile.name).toBe('auto-chrome');
-    expect(profile.browser).toBe('chrome');
-    warnSpy.mockRestore();
+    await expect(ensureDefaultBrowserProfile()).rejects.toThrow(
+      /configured default browser profile "ghost" is not declared by any device/,
+    );
+    expect(writeSpy).not.toHaveBeenCalled();
+    expect(findFirstInstalledBrowser).not.toHaveBeenCalled();
   });
 });
 

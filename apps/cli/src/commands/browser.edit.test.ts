@@ -184,7 +184,9 @@ describe('agents browser profiles command surface', () => {
       .find((command) => command.name() === 'browser')!
       .commands.find((command) => command.name() === 'profiles')!;
 
-    expect(profiles.commands.map((command) => command.name())).not.toContain('scope');
+    const names = profiles.commands.map((command) => command.name());
+    expect(names).not.toContain('scope');
+    expect(names).toContain('claim');
   });
 });
 

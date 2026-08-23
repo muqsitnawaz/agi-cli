@@ -19,8 +19,11 @@ import {
   editProfile,
   renameProfile,
   assertRegistrableProfileName,
+  isProfileLaunchableHere,
   type EditableProfileFields,
 } from '../lib/browser/profiles.js';
+import { migrateCentralBrowserProfiles } from '../lib/browser/registry.js';
+import type { BrowserProfileConfig } from '../lib/types.js';
 import { resolveActor } from '../lib/actor.js';
 import {
   loginsForProfile,
@@ -356,6 +359,52 @@ function registerProfilesCommands(browser: Command): void {
         console.log(`+ ${name} (${browserType})`);
       }
       console.log('Pick your default with: agents browser use <name>');
+    });
+
+  profiles
+    .command('claim [name]')
+    .description(
+      'Move leftover central browser: profiles into this device\'s declaration file. Only profiles this machine can host are claimed; the rest stay central. Run on the machine that actually has the browser.',
+    )
+    .option('--json', 'Output machine-readable JSON')
+    .action(async (name: string | undefined, opts: { json?: boolean }) => {
+      const canHostHere = (config: BrowserProfileConfig): boolean =>
+        isProfileLaunchableHere({
+          name: '_',
+          browser: config.browser,
+          binary: config.binary,
+          endpoints: config.endpoints,
+        });
+
+      let result;
+      try {
+        result = migrateCentralBrowserProfiles(canHostHere, name);
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify({ ...result, device: machineId() }, null, 2));
+        return;
+      }
+
+      if (result.claimed.length === 0 && result.skipped.length === 0) {
+        console.log('No leftover central browser profiles to claim.');
+        return;
+      }
+      for (const claimed of result.claimed) {
+        console.log(`Claimed ${claimed} on ${machineId()}`);
+      }
+      for (const skipped of result.skipped) {
+        console.log(
+          `Skipped ${skipped}: this machine cannot host it (browser/binary isn't installed here). ` +
+            `Run \`agents browser profiles claim ${skipped}\` on the machine that has that browser.`,
+        );
+      }
+      if (result.claimed.length === 0) {
+        console.log('No leftover central profiles this machine can host.');
+      }
     });
 
   configureBrowserUseCommand(profiles.command('use [name]'));
@@ -830,6 +879,10 @@ function registerProfilesCommands(browser: Command): void {
 
       # Create one — machine-local by default
       agents browser profiles create work --browser chrome
+
+      # Claim leftover central profiles on the machine that hosts the browser
+      agents browser profiles claim
+      agents browser profiles claim comet-local
 
       # Create one every machine should see (e.g. a remote ssh:// endpoint)
       agents browser profiles create shared-remote --browser chrome --fleet

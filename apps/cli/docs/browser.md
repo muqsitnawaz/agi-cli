@@ -208,7 +208,7 @@ the same device-local `browser remote-control` consent gate as the ordinary
 | `agents browser profiles prune` | Remove dead machine-local profiles — browser not installed here, or never started (see below) |
 | `agents browser profiles edit <name>` | Edit an existing profile in place — description, endpoints, secrets, viewport, binary. Stays in the store it already lives in. The browser type and the name are NOT editable: both key the on-disk profile cache (and its logins), so changing either orphans it — delete and recreate instead |
 | `agents browser profiles rename <from> <to>` | Rename a profile and move its browser data with it, so logins survive. Refuses while the profile is in use. The one safe way to change a name: `edit` refuses it, and delete-and-recreate abandons the `--user-data-dir` |
-| `agents browser profiles scope <name> <local\|fleet>` | Move a profile between the fleet-synced store and this machine. `fleet -> local` is the repair for a profile whose endpoint is machine-bound — run it ON the machine that owns the browser |
+| `agents browser profiles claim [name]` | Move leftover central `browser:` entries into this device's declaration file. Only profiles this machine can host are claimed. Run on the machine that actually has the browser. |
 | `agents browser profiles show <name>` | Show profile details |
 | `agents browser profiles use <name>` | Compatibility spelling for `agents browser use <name>` |
 | `agents browser profiles logins` | Per profile: `SERVICE \| ACCOUNT \| CREDS` — live session, the signed-in account (plaintext username, never decrypts), and whether login creds are in the profile's secrets bundle |
@@ -286,7 +286,7 @@ doctor` flags it as a failing `scope` check, `profiles prune` notes it
 in the `kept` reason, and the repair is one command on the owning machine:
 
 ```bash
-agents browser profiles scope comet-local local
+agents browser profiles claim comet-local
 ```
 
 Neither surface repairs it for you. Rewriting the synced `agents.yaml` from a

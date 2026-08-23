@@ -63,7 +63,10 @@ describe('central browser migration', () => {
 
     const { machineId } = await import('../machine-id.js');
     const { migrateCentralBrowserProfiles, profileRegistry } = await import('./registry.js');
-    expect(migrateCentralBrowserProfiles()).toBe(true);
+    expect(migrateCentralBrowserProfiles(() => true)).toEqual({
+      claimed: ['comet-local'],
+      skipped: [],
+    });
 
     const ownFile = deviceFile(machineId());
     expect(yaml.parse(fs.readFileSync(centralFile, 'utf8'))).toEqual({ model: { claude: 'opus' } });
@@ -72,7 +75,7 @@ describe('central browser migration', () => {
 
     const centralAfterFirstRead = fs.readFileSync(centralFile, 'utf8');
     const deviceAfterFirstRead = fs.readFileSync(ownFile, 'utf8');
-    expect(migrateCentralBrowserProfiles()).toBe(false);
+    expect(migrateCentralBrowserProfiles(() => true)).toEqual({ claimed: [], skipped: [] });
     expect(profileRegistry().get('comet-local')?.map((entry) => entry.device)).toEqual([machineId()]);
     expect(fs.readFileSync(centralFile, 'utf8')).toBe(centralAfterFirstRead);
     expect(fs.readFileSync(ownFile, 'utf8')).toBe(deviceAfterFirstRead);
@@ -93,9 +96,88 @@ describe('central browser migration', () => {
     const beforeDevice = fs.readFileSync(ownFile, 'utf8');
     const { migrateCentralBrowserProfiles } = await import('./registry.js');
 
-    expect(() => migrateCentralBrowserProfiles()).toThrow(/different configurations/);
+    expect(() => migrateCentralBrowserProfiles(() => true)).toThrow(/different configurations/);
     expect(fs.readFileSync(centralFile, 'utf8')).toBe(beforeCentral);
     expect(fs.readFileSync(ownFile, 'utf8')).toBe(beforeDevice);
+  });
+
+  it('does not claim a central profile this machine cannot host', async () => {
+    const centralFile = path.join(root, '.agents', 'agents.yaml');
+    const config = { browser: 'comet', endpoints: ['cdp://localhost:9333'] };
+    writeYaml(centralFile, { browser: { 'comet-local': config } });
+
+    const { machineId } = await import('../machine-id.js');
+    const { migrateCentralBrowserProfiles, declaringDevices, profileKind } = await import('./registry.js');
+
+    expect(migrateCentralBrowserProfiles(() => false)).toEqual({
+      claimed: [],
+      skipped: ['comet-local'],
+    });
+    expect(declaringDevices('comet-local')).toEqual([]);
+    expect(profileKind('comet-local')).toBeNull();
+    expect(fs.existsSync(deviceFile(machineId()))).toBe(false);
+    expect(yaml.parse(fs.readFileSync(centralFile, 'utf8')).browser).toEqual({
+      'comet-local': config,
+    });
+  });
+
+  it('claims a central profile this machine can host', async () => {
+    const centralFile = path.join(root, '.agents', 'agents.yaml');
+    const config = {
+      browser: 'custom',
+      binary: process.execPath,
+      endpoints: ['cdp://127.0.0.1:9222'],
+    };
+    writeYaml(centralFile, { browser: { work: config } });
+
+    const { machineId } = await import('../machine-id.js');
+    const { migrateCentralBrowserProfiles, declaringDevices, profileKind } = await import('./registry.js');
+
+    expect(migrateCentralBrowserProfiles(() => true)).toEqual({
+      claimed: ['work'],
+      skipped: [],
+    });
+    expect(declaringDevices('work')).toEqual([machineId()]);
+    expect(profileKind('work')).toBe('identity');
+    expect(yaml.parse(fs.readFileSync(deviceFile(machineId()), 'utf8')).browser).toEqual({
+      work: config,
+    });
+    expect(yaml.parse(fs.readFileSync(centralFile, 'utf8'))?.browser).toBeUndefined();
+  });
+
+  it('claims only the hostable names and leaves the rest central', async () => {
+    const centralFile = path.join(root, '.agents', 'agents.yaml');
+    const hostable = {
+      browser: 'custom',
+      binary: process.execPath,
+      endpoints: ['cdp://127.0.0.1:9222'],
+    };
+    const unhostable = { browser: 'comet', endpoints: ['cdp://localhost:9333'] };
+    writeYaml(centralFile, { browser: { work: hostable, 'comet-local': unhostable } });
+
+    const { machineId } = await import('../machine-id.js');
+    const { migrateCentralBrowserProfiles, declaringDevices } = await import('./registry.js');
+
+    expect(
+      migrateCentralBrowserProfiles((config) => config.browser === 'custom'),
+    ).toEqual({ claimed: ['work'], skipped: ['comet-local'] });
+    expect(declaringDevices('work')).toEqual([machineId()]);
+    expect(declaringDevices('comet-local')).toEqual([]);
+    expect(yaml.parse(fs.readFileSync(centralFile, 'utf8')).browser).toEqual({
+      'comet-local': unhostable,
+    });
+  });
+
+  it('fails loud when a named claim cannot be hosted here', async () => {
+    const centralFile = path.join(root, '.agents', 'agents.yaml');
+    writeYaml(centralFile, {
+      browser: { 'comet-local': { browser: 'comet', endpoints: ['cdp://localhost:9333'] } },
+    });
+    const { migrateCentralBrowserProfiles } = await import('./registry.js');
+    expect(() => migrateCentralBrowserProfiles(() => false, 'comet-local')).toThrow(
+      /Cannot claim browser profile "comet-local"/,
+    );
+    expect(yaml.parse(fs.readFileSync(centralFile, 'utf8')).browser['comet-local']).toBeDefined();
   });
 });
 
@@ -159,6 +241,38 @@ describe('profileRegistry does not claim central declarations', () => {
     expect(declaringDevices('comet-local')).toEqual([]);
     expect(profileKind('comet-local')).toBeNull();
     expect(fs.existsSync(deviceFile(machineId()))).toBe(false);
+    expect(yaml.parse(fs.readFileSync(centralFile, 'utf8')).browser).toEqual({
+      'comet-local': config,
+    });
+  });
+});
+
+describe('ensureDefaultBrowserProfile with undeclared configured default', () => {
+  it('throws rather than creating auto-chrome when no device declares the configured default', async () => {
+    const { machineId } = await import('../machine-id.js');
+    writeYaml(deviceFile(machineId()), { config: { defaultBrowserProfile: 'ghost' } });
+
+    const { ensureDefaultBrowserProfile } = await import('./profiles.js');
+    const { profileRegistry } = await import('./registry.js');
+
+    await expect(ensureDefaultBrowserProfile()).rejects.toThrow(/not declared by any device/);
+    expect(profileRegistry().has('auto-chrome')).toBe(false);
+  });
+
+  it('names the claim command when the configured default is a leftover central profile', async () => {
+    const centralFile = path.join(root, '.agents', 'agents.yaml');
+    const config = { browser: 'comet', endpoints: ['cdp://localhost:9333'] };
+    writeYaml(centralFile, { browser: { 'comet-local': config } });
+    const { machineId } = await import('../machine-id.js');
+    writeYaml(deviceFile(machineId()), { config: { defaultBrowserProfile: 'comet-local' } });
+
+    const { ensureDefaultBrowserProfile } = await import('./profiles.js');
+    const { profileRegistry } = await import('./registry.js');
+
+    await expect(ensureDefaultBrowserProfile()).rejects.toThrow(
+      /agents browser profiles claim comet-local/,
+    );
+    expect(profileRegistry().has('auto-chrome')).toBe(false);
     expect(yaml.parse(fs.readFileSync(centralFile, 'utf8')).browser).toEqual({
       'comet-local': config,
     });
