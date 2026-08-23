@@ -308,7 +308,7 @@ export function renderTrajectoryHtml(model: SessionTrajectory): string {
   </div>
 </main>
 <footer>
-  ${model.truncatedSteps > 0 ? 'Truncated · ' : ''}Secret-redacted trajectory rendered by agents-cli &middot; <code>agents sessions trace</code>
+  ${model.truncatedSteps > 0 ? 'Truncated · ' : ''}${model.redacted ? 'Secret-redacted' : 'Unredacted (local only)'} trajectory rendered by agents-cli &middot; <code>agents sessions trace</code>
 </footer>
 <script>
   (function () {
