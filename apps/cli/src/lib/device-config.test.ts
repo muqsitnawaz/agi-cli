@@ -348,6 +348,7 @@ describe('listConfig', () => {
       'auto-launch.preferred',
       'auto.pool',
       'browser.profile',
+      'browser.viewer',
       'browser.remote-control',
       'browser.task-idle-minutes',
       'daemon.enabled',
