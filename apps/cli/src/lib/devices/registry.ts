@@ -157,11 +157,49 @@ function registryPath(): string {
  * unambiguous `Host` stanza and is safe as an ssh target. */
 const DEVICE_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
-/** Throw if `name` is not usable as an ssh alias (no spaces, quotes, etc.). */
+/**
+ * `--device` values that mean "resolve me", not "connect to a box with this
+ * name". A real device registered under one of these would be unreachable,
+ * and pinning `interactive.host` to one is a misconfiguration that has to fail
+ * at WRITE time — otherwise the read side can only report "none is set", which
+ * tells the user to run the command they just ran.
+ */
+export const RESERVED_DEVICE_NAMES = new Set(['auto', 'interactive', 'all']);
+
+/**
+ * Throw if `name` is not usable as an ssh alias (no spaces, quotes, etc.).
+ *
+ * SHAPE ONLY. Safe on read paths, which must keep working for a name that is
+ * already registered — including one this version would refuse to create.
+ */
 export function assertValidDeviceName(name: string): void {
   if (!DEVICE_NAME_RE.test(name)) {
     throw new Error(
       `Invalid device name ${JSON.stringify(name)}. Use letters, digits, '.', '_', '-' (no spaces) — e.g. 'win-mini'.`,
+    );
+  }
+}
+
+/**
+ * Throw if `name` cannot be used for a NEW device: bad shape, or a reserved
+ * routing sentinel.
+ *
+ * Deliberately separate from {@link assertValidDeviceName}, and called from
+ * exactly two kinds of place: `agents devices add <name>`, and the config keys
+ * that point AT a device (`interactive.host`, `usage.primary-host`).
+ *
+ * Not from `upsertDevice`, `addIgnored` or the discovery writers. Those all
+ * receive tailnet node names the user never typed — `devices sync` upserts every
+ * observed node in a loop with no per-node catch, so one node named `auto` would
+ * abort the entire sync and register nothing after it. A name the fleet OBSERVES
+ * is not a name anyone CHOSE; only the second kind is policy's business.
+ */
+export function assertRegistrableDeviceName(name: string): void {
+  assertValidDeviceName(name);
+  if (RESERVED_DEVICE_NAMES.has(name.trim().toLowerCase())) {
+    throw new Error(
+      `${JSON.stringify(name)} is a reserved --device value, not a device name. ` +
+        `Reserved: ${[...RESERVED_DEVICE_NAMES].join(', ')}.`,
     );
   }
 }

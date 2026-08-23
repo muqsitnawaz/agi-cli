@@ -72,6 +72,11 @@ import {
   worktreeExists,
 } from '../lib/teams/worktree.js';
 import { resolveHost } from '../lib/hosts/registry.js';
+import {
+  isDeviceInteractive,
+  resolveInteractiveDevice,
+  interactiveUnsetError,
+} from '../lib/devices/interactive-host.js';
 import { isDeviceAuto, resolveDeviceAuto } from '../lib/smart-launch.js';
 import { sshTargetFor } from '../lib/hosts/types.js';
 import { ensureHostReady } from '../lib/hosts/ready.js';
@@ -1625,7 +1630,22 @@ export function registerTeamsCommands(program: Command): void {
         // trim, drop blanks, dedupe (preserving first-seen order).
         const rawPool = [opts.devices, opts.hosts].filter(Boolean).join(',');
         const devices: string[] = [];
-        for (const d of rawPool.split(',').map((s) => s.trim()).filter(Boolean)) {
+        for (const raw of rawPool.split(',').map((s) => s.trim()).filter(Boolean)) {
+          // Resolve `interactive` to the concrete device HERE, the same way the
+          // single `--device` pin does. A pool is a set of specific machines the
+          // scheduler picks between, so persisting the sentinel would let the
+          // pool's membership change silently the next time `interactive.host`
+          // is re-pinned — and every later friction message would quote
+          // "interactive" instead of a box the user can act on.
+          let d = raw;
+          if (isDeviceInteractive(d)) {
+            const pinned = resolveInteractiveDevice();
+            if (!pinned) {
+              dieFriction('teams', 'pool-device-interactive-unset', interactiveUnsetError());
+            }
+            process.stderr.write(chalk.gray(`[teams] pool device=interactive → ${pinned}\n`));
+            d = pinned;
+          }
           if (!devices.includes(d)) devices.push(d);
         }
 
@@ -1778,6 +1798,25 @@ export function registerTeamsCommands(program: Command): void {
         const picked = plan.host ?? machineId();
         process.stderr.write(chalk.gray(`[teams] device=auto → ${picked === machineId() ? 'local' : picked}\n`));
         explicitDevice = picked;
+      }
+
+      // `interactive` needs the same up-front resolution, and for a sharper
+      // reason: `teams add`/`create` bail out of the fleet passthrough
+      // (passthrough.ts, the teams subcommand guard), so the sentinel block
+      // there never runs and this is the only resolver. Left literal, the
+      // local-machine check below compares 'interactive' against the machine id,
+      // takes the remote branch on the pinned box itself, and pins the teammate
+      // to an SSH hop into this same machine — skipping three local preflights
+      // on the way.
+      if (explicitDevice && isDeviceInteractive(explicitDevice)) {
+        const pinned = resolveInteractiveDevice();
+        if (!pinned) {
+          dieFriction('teams', 'device-interactive-unset', interactiveUnsetError());
+        }
+        process.stderr.write(
+          chalk.gray(`[teams] device=interactive → ${pinned === machineId() ? 'local' : pinned}\n`),
+        );
+        explicitDevice = pinned;
       }
 
       // Distributed teams: --device <name> PINS this teammate to a machine over
