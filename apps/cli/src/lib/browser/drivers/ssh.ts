@@ -31,15 +31,26 @@ export interface SSHConnection {
  */
 export type RemoteOs = 'windows' | 'posix';
 
+export interface SSHConnectOptions {
+  /**
+   * Attach to a browser another device already declared (identity-bearing or
+   * a fungible name we don't declare here). Do not launch a fresh remote
+   * chrome-data, and do not kill that browser when the tunnel closes — it
+   * holds the logins the caller is trying to reach.
+   */
+  persistRemote?: boolean;
+}
+
 export async function connectSSH(
   endpoint: string,
   profile: BrowserProfile,
   /**
-   * Runtime key (`<profile>@<endpoint>`) this connection is stored under. It
+   * Runtime key (`<profile>@<device>`) this connection is stored under. It
    * keys the tunnel's runtime record; `profile.name` is the bare, user-facing
    * name and appears only in messages (RUSH-2709).
    */
   key: ConnectionKey,
+  opts: SSHConnectOptions = {},
 ): Promise<SSHConnection> {
   const url = new URL(endpoint);
 
@@ -89,7 +100,13 @@ export async function connectSSH(
   // (the launch backgrounds/WMI-spawns regardless), so this does not spuriously
   // fail the reconnect path — only genuine launch failures reach the caller
   // instead of being swallowed and mis-reported later as a tunnel timeout.
-  await ensureRemoteBrowser(user, host, profile.browser, remotePort, remoteOs, profile.binary);
+  //
+  // persistRemote skips the launch: launching would mint a logged-out
+  // `--user-data-dir=/tmp/agents-browser-N` under a name that means a
+  // credentialed browser on the declaring device.
+  if (!opts.persistRemote) {
+    await ensureRemoteBrowser(user, host, profile.browser, remotePort, remoteOs, profile.binary);
+  }
 
   let tunnel: ChildProcess;
   if (occupant) {
@@ -106,7 +123,20 @@ export async function connectSSH(
     throw new Error(`SSH tunnel failed to establish to ${host}`);
   }
 
-  const { wsUrl, browser } = await discoverBrowserWsUrl(localPort, 'localhost', profile.name);
+  let wsUrl: string;
+  let browser: string;
+  try {
+    ({ wsUrl, browser } = await discoverBrowserWsUrl(localPort, 'localhost', profile.name));
+  } catch (err) {
+    tunnel.kill();
+    if (opts.persistRemote) {
+      const why = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Browser profile "${profile.name}" is declared on ${host}, but nothing is speaking CDP on port ${remotePort}: ${why}`,
+      );
+    }
+    throw err;
+  }
   try {
     verifyBrowserIdentity(browser, profile.browser, remotePort, host);
   } catch (err) {
@@ -137,11 +167,13 @@ export async function connectSSH(
     pid: tunnelPid,
     cleanup: () => {
       cdp.close();
-      // Kill the remote browser BEFORE tearing down the tunnel. It runs on a
-      // separate ssh connection (independent of the tunnel we're about to
-      // kill), so tunnel teardown can't cut it off. Fire-and-forget — cleanup
-      // stays synchronous, and killRemoteBrowser never rejects.
-      killRemoteBrowser(user, host, remoteOs, remotePort).catch(() => {});
+      // Kill the remote browser BEFORE tearing down the tunnel — but only
+      // when we launched it. persistRemote is an attach to someone else's
+      // declared browser; killing it would drop the logins the caller came
+      // for. Fire-and-forget — cleanup stays synchronous.
+      if (!opts.persistRemote) {
+        killRemoteBrowser(user, host, remoteOs, remotePort).catch(() => {});
+      }
       tunnel.kill();
       clearProfileRuntime(key);
     },
