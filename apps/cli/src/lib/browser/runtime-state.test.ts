@@ -346,12 +346,12 @@ describe('isProfileInUse', () => {
 
 describe('planProfilePrune', () => {
   const local = (name: string, launchableHere: boolean) =>
-    ({ name, scope: 'local' as const, launchableHere });
+    ({ name, scope: 'identity' as const, launchableHere });
 
   it('never prunes a misfiled profile even when the binary is missing', () => {
     const name = uniq('misfiled-binary');
     const plan = planProfilePrune(
-      [{ name, scope: 'fleet' as const, launchableHere: false, misfiledWhy: 'loopback endpoint' }],
+      [{ name, scope: 'fungible' as const, launchableHere: false, misfiledWhy: 'loopback endpoint' }],
     );
     expect(plan.candidates).toEqual([]);
     expect(plan.kept[0].misfiled).toBe(true);
@@ -360,12 +360,12 @@ describe('planProfilePrune', () => {
   it('marks a misfiled profile with a structured flag, not a substring of the reason', () => {
     const name = uniq('misfiled-structured');
     const plan = planProfilePrune([
-      { name, scope: 'fleet' as const, launchableHere: true, misfiledWhy: 'loopback endpoint' },
+      { name, scope: 'fungible' as const, launchableHere: true, misfiledWhy: 'loopback endpoint' },
     ]);
     expect(plan.kept[0].misfiled).toBe(true);
     const cleanName = uniq('clean');
     writeProfileRuntime(cleanName, { pid: 999999, port: 9222, command: 'chrome' });
-    const clean = planProfilePrune([{ name: cleanName, scope: 'fleet' as const, launchableHere: true }]);
+    const clean = planProfilePrune([{ name: cleanName, scope: 'fungible' as const, launchableHere: true }]);
     expect(clean.kept[0].misfiled).toBeUndefined();
   });
 
@@ -374,7 +374,7 @@ describe('planProfilePrune', () => {
     // is a scope-move, not a prune. A dry run still has to surface it.
     const name = uniq('misfiled');
     const plan = planProfilePrune([
-      { name, scope: 'fleet' as const, launchableHere: true, misfiledWhy: 'loopback endpoint' },
+      { name, scope: 'fungible' as const, launchableHere: true, misfiledWhy: 'loopback endpoint' },
     ]);
     expect(plan.candidates).toEqual([]);
     expect(plan.kept[0].why).toContain('MISFILED');
@@ -383,7 +383,7 @@ describe('planProfilePrune', () => {
 
   it('prunes a dead locally-declared profile even when other devices also declare the name', () => {
     const name = uniq('shared');
-    const plan = planProfilePrune([{ name, scope: 'fleet' as const, launchableHere: true }]);
+    const plan = planProfilePrune([{ name, scope: 'fungible' as const, launchableHere: true }]);
     expect(plan.candidates.map((c) => c.name)).toEqual([name]);
     expect(plan.candidates[0].reason).toBe('never-used');
   });

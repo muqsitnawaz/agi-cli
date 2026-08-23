@@ -17,7 +17,16 @@ import { keyBelongsToProfile, type ProfileName } from './types.js';
 import { profileKind } from './registry.js';
 import { machineId } from '../machine-id.js';
 
-type PruneProfileClass = 'local' | 'fleet';
+/**
+ * How many devices declare this profile — the shipped model's two kinds.
+ *
+ * NOT the deleted `scope: local | fleet`, which described where the config was
+ * stored. `fungible` means several devices declare the name and each uses its
+ * own browser; `identity` means exactly one does, so the name is a singular
+ * browser. Prune only ever sees profiles THIS device declares, so `fungible`
+ * here means "declared here and elsewhere too".
+ */
+type PruneProfileClass = 'identity' | 'fungible';
 
 /**
  * Detect an identity-bearing profile that resolves to another device's
@@ -500,7 +509,7 @@ export async function buildProfilePrunePlan(): Promise<PrunePlan> {
   const peerKept: PrunePlan['kept'] = [];
 
   for (const profile of profiles) {
-    const scope: PruneProfileClass = profile.devices.length > 1 ? 'fleet' : 'local';
+    const scope: PruneProfileClass = profile.devices.length > 1 ? 'fungible' : 'identity';
     const misfiled = identityLoopbackMismatch(profile);
     if (profile.devices.includes(current)) {
       declaredHere.push({
