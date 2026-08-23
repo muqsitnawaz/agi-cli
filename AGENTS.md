@@ -109,10 +109,14 @@ and [`architecture.md`](apps/cli/docs/architecture.md).
   cross-device fabric under sessions, teams, run, and cloud.
 - **One engine, many consumers.** `apps/cli` owns the state — the session index, the
   pid→id registry, `sessions`/`teams`/`run`/`cloud`, and the SSH fan-out. `apps/ext`
-  is a **consumer**: the VS Code UI layer projects `agents sessions watch --json` and
-  invokes the owning CLI nouns for one-shot reads and actions. It holds presentation
-  state, not duplicate session/device/team/ticket/watchdog mechanisms. Fix a mechanism
-  in the CLI and every consumer benefits.
+  is a **consumer**: the VS Code UI layer projects the CLI's watch stream (`agents
+  feed watch --json` — the reconciled agents + Needs-You + activity projection, the
+  joined superset of `agents sessions watch --json`) and invokes the owning CLI nouns
+  for one-shot reads and actions. It holds presentation state, not duplicate
+  session/device/team/ticket/watchdog mechanisms — and it never re-derives Needs-You
+  or sources PR status itself; both are reconciled in the CLI (see
+  [`apps/cli/docs/specifications.md` §3.6.1](apps/cli/docs/specifications.md)). Fix a
+  mechanism in the CLI and every consumer benefits.
 - **One scheduler, one executor — fleet-affecting features never run twice.** Anything
   that can *act* on this machine or another fleet device — launch/resume/kill a session,
   fire a routine or monitor, inject into a terminal, rotate an account — has exactly ONE

@@ -1,0 +1,5 @@
+---
+type: feat
+---
+
+`agents feed watch --json` streams one reconciled operator projection — agents, attention (Needs-You), activity, and scope/heartbeat — as versioned NDJSON, composing the existing session watcher with the feed block ledger and `reconcileAttention` (no second lifecycle detector or scheduler). It reuses the same fleet coordinator as `agents sessions watch`, forwarding each peer's envelopes verbatim and retaining an unavailable scope's last rows until it reconnects; `agents sessions watch --json` stays compatible for session-only consumers. `agents feed answer <attention-key> (--choice <id> | --text <answer>)` atomically claims the first answer and routes it over the waiting agent's live rail (mailbox / tmux / iterm / pty / resume) — a losing concurrent caller gets `already_answered` and injects nothing. PR status (`number,title,state,isDraft,reviewDecision,mergeable,statusCheckRollup`) is now sourced in the CLI on a bounded TTL and supplied to both feed attention and a PR-board projection.

@@ -39,6 +39,9 @@ import {
 } from '../lib/feed/activity.js';
 import { projectKeyFromCwd } from '../lib/project-key.js';
 import { postFeedStatus } from '../lib/feed-post.js';
+import { setHelpSections } from '../lib/help.js';
+import { registerFeedWatchCommand } from './feed-watch.js';
+import { claimAndRouteAttentionAnswer, verifiedOperatorFromId } from '../lib/feed/answer.js';
 import {
   parseFeedPostLevel,
   planFeedBroadcast,
@@ -556,6 +559,58 @@ export function registerFeedCommand(program: Command): void {
         process.exitCode = 1;
       }
     });
+
+  // `agents feed watch --json` — the reconciled operator projection stream.
+  registerFeedWatchCommand(feed);
+
+  // `agents feed answer <attention-key>` — claim + route a reply in one op.
+  const answerCmd = feed
+    .command('answer <attention-key>')
+    .description('Answer an open attention item — atomically claim it and route the reply to the waiting agent')
+    .option('--choice <id>', "Select a choice by its id (from the attention item's choices)")
+    .option('--text <answer>', 'A free-text answer (when the ask is not a pick-one)')
+    .option('--as <operator>', 'Verified operator id answering a high-consequence block')
+    .option('--json', 'Emit the delivery result as JSON');
+  setHelpSections(answerCmd, {
+    examples: `
+      # Pick a choice on an attention item (key comes from \`agents feed watch --json\`)
+      agents feed answer zion/abc123/t1699999999999 --choice 0
+
+      # Free-text answer for an open-ended ask
+      agents feed answer zion/abc123/t1699999999999 --text "ship it"
+
+      # Answer a high-consequence block as a verified operator
+      agents feed answer zion/abc123/t1699999999999 --choice 0 --as muqsit
+    `,
+    notes: `
+      - The FIRST answer wins atomically: a concurrent caller gets "already answered" and injects nothing.
+      - The reply routes over the agent's live rail (mailbox / tmux / iterm / pty / resume) — the same rail \`agents message\` uses.
+      - High-consequence blocks require --as plus an env-proven identity (AGENTS_OPERATOR_ID).
+    `,
+  });
+  answerCmd.action(async (attentionKey: string, opts: { choice?: string; text?: string; as?: string; json?: boolean }) => {
+    try {
+      if (opts.choice == null && (opts.text == null || !opts.text.trim())) {
+        throw new Error('Provide an answer: --choice <choice-id> or --text <answer>.');
+      }
+      const result = await claimAndRouteAttentionAnswer({
+        attentionKey,
+        choiceId: opts.choice,
+        text: opts.text,
+        operator: verifiedOperatorFromId(opts.as),
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else if (result.status === 'already_answered') {
+        console.log(chalk.yellow(`Already answered by ${result.receipt.from ?? 'another surface'} — nothing was sent.`));
+      } else {
+        console.log(chalk.green(`Answered ${attentionKey} — delivered (${result.receipt.status}).`));
+      }
+    } catch (err) {
+      console.error(chalk.red((err as Error).message));
+      process.exitCode = 1;
+    }
+  });
 
   feed.action(async (opts: {
       json?: boolean;

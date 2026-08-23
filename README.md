@@ -442,6 +442,8 @@ agents feed --device mac-mini         # scope the view to one or more hosts
 agents feed --local                 # skip the SSH fan-out
 agents feed --json                  # blocks stamped with their outcome key
 agents feed post --title "Halfway done" "CI green, watching merge"  # title + body
+agents feed watch --json            # stream the reconciled operator projection (agents + Needs-You + activity) as NDJSON
+agents feed answer <attention-key> --choice 0   # claim + route an answer to a Needs-You item in one op
 ```
 
 Top-level questions and waiting notifications publish one atomic open-block record per session, including the mailbox id, host, runtime, and every answer option. The default view collapses agents under the **outcome** they serve (Linear ticket, PR, worktree slug, or Unassigned) so a 1,100-agent fleet reads as dozens of deliverables. Answered, resumed, and stopped blocks clear automatically; Task subagents are excluded. The rendered reply command uses the same mailbox id with `agents message`, so the decision routes back to the agent that asked it.

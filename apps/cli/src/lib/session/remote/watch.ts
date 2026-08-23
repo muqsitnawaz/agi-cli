@@ -208,20 +208,52 @@ export interface WatchFleetOptions {
   reconnectMs?: number;
 }
 
-function remoteWatchCommand(os: string): string {
-  const args = ['sessions', 'watch', '--json', '--local'];
+/**
+ * Build the `agents <noun> watch --json --local` command dialed on a peer over
+ * SSH, quoting per the peer's shell. Generic over the trailing args so the
+ * session and feed coordinators share one spawn recipe (the feed watch dials
+ * `feed watch --json --local`, the session watch `sessions watch --json --local`).
+ */
+export function remoteAgentsCommand(os: string, args: string[]): string {
   return remoteShellFor(os) === 'powershell'
     ? buildWindowsAgentsCommand({ args })
     : `bash -lc ${shellQuote(`agents ${args.map(shellQuote).join(' ')}`)}`;
 }
 
+/** Emits coordinator-side scope transitions for one peer, in the coordinator's own envelope shape. */
+export interface PeerScoper<E> {
+  scope(status: SessionWatchScopeStatus, reason?: string): E;
+}
+
+/**
+ * Options for the generic fleet coordinator. It owns the peer spawn / reconnect /
+ * scope-retention state machine ONCE; each consumer supplies its own local-scope
+ * generator, remote command args, envelope acceptance predicate, and per-peer
+ * scoper so `sessions watch` and `feed watch` never re-implement the loop.
+ */
+export interface WatchFleetGenericOptions<E> {
+  signal: AbortSignal;
+  emit: (event: E) => void;
+  reconnectMs?: number;
+  /** Local-scope generator for this machine (its own reset/patch/heartbeat stream). */
+  runLocal: (opts: { scope: string; signal: AbortSignal; emit: (event: E) => void }) => Promise<void>;
+  /** Trailing `agents <...>` args dialed on each peer over SSH. */
+  remoteArgs: string[];
+  /** Parse + accept a peer NDJSON line as a forwardable envelope (verbatim, peer's own streamId + sequence). */
+  acceptPeerEnvelope: (parsed: unknown) => E | undefined;
+  /** Fresh per-peer scoper the coordinator uses to emit unavailable/available transitions. */
+  makePeerScoper: (scope: string) => PeerScoper<E>;
+}
+
 /**
  * Subscribe to every dialable compute device with one persistent SSH process.
- * A peer disconnect emits `scope: unavailable` but no removes; reconnecting
+ * A peer disconnect emits `scope: unavailable` but no removes; a reconnecting
  * peer resets only its own scope. There is no recurring fleet list command.
+ * Forwarded peer envelopes ride through VERBATIM — the coordinator never
+ * re-sequences them, so ordering is per-peer `streamId + sequence`.
  */
-export async function watchFleetSessions(options: WatchFleetOptions): Promise<void> {
-  const local = watchLocalSessions({ scope: machineId(), signal: options.signal, emit: options.emit });
+export async function watchFleetGeneric<E>(options: WatchFleetGenericOptions<E>): Promise<void> {
+  const local = options.runLocal({ scope: machineId(), signal: options.signal, emit: options.emit });
   let devices: Awaited<ReturnType<typeof loadDevices>>;
   try { devices = await loadDevices(); }
   catch { await local; return; }
@@ -234,24 +266,24 @@ export async function watchFleetSessions(options: WatchFleetOptions): Promise<vo
   const reconnectMs = options.reconnectMs ?? 2_000;
   const peerTasks = peers.map(async (device) => {
     const scope = normalizeHost(device.name);
-    const state = new SessionWatchState();
+    const scoper = options.makePeerScoper(scope);
     while (!options.signal.aborted) {
       let target: string;
       try { target = sshTargetFor(device); }
       catch (error) {
-        options.emit(state.scope(scope, 'unavailable', error instanceof Error ? error.message : String(error)));
+        options.emit(scoper.scope('unavailable', error instanceof Error ? error.message : String(error)));
         break;
       }
       const child = spawn('ssh', [
-        ...SSH_OPTS, ...controlOpts(), ...deviceIdentityArgs(device), target, remoteWatchCommand(device.platform),
+        ...SSH_OPTS, ...controlOpts(), ...deviceIdentityArgs(device), target, remoteAgentsCommand(device.platform, options.remoteArgs),
       ], { stdio: ['ignore', 'pipe', 'ignore'] });
       const stop = () => child.kill('SIGTERM');
       options.signal.addEventListener('abort', stop, { once: true });
       const reader = createInterface({ input: child.stdout! });
       reader.on('line', (line) => {
         try {
-          const event = JSON.parse(line) as SessionWatchEnvelope;
-          if (event.version === SESSION_WATCH_VERSION && typeof event.sequence === 'number') options.emit(event);
+          const event = options.acceptPeerEnvelope(JSON.parse(line));
+          if (event !== undefined) options.emit(event);
         } catch { /* incomplete/non-protocol peer output is not state */ }
       });
       const code = await new Promise<number | null>((resolve) => {
@@ -261,7 +293,7 @@ export async function watchFleetSessions(options: WatchFleetOptions): Promise<vo
       reader.close();
       options.signal.removeEventListener('abort', stop);
       if (options.signal.aborted) break;
-      options.emit(state.scope(scope, 'unavailable', code === null ? 'ssh failed' : `ssh exited ${code}`));
+      options.emit(scoper.scope('unavailable', code === null ? 'ssh failed' : `ssh exited ${code}`));
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, reconnectMs);
         options.signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
@@ -269,4 +301,29 @@ export async function watchFleetSessions(options: WatchFleetOptions): Promise<vo
     }
   });
   await Promise.all([local, ...peerTasks]);
+}
+
+/**
+ * Subscribe to every dialable compute device with one persistent SSH process.
+ * A peer disconnect emits `scope: unavailable` but no removes; reconnecting
+ * peer resets only its own scope. There is no recurring fleet list command.
+ */
+export async function watchFleetSessions(options: WatchFleetOptions): Promise<void> {
+  await watchFleetGeneric<SessionWatchEnvelope>({
+    signal: options.signal,
+    emit: options.emit,
+    reconnectMs: options.reconnectMs,
+    runLocal: (opts) => watchLocalSessions(opts),
+    remoteArgs: ['sessions', 'watch', '--json', '--local'],
+    acceptPeerEnvelope: (parsed) => {
+      const event = parsed as SessionWatchEnvelope;
+      return (event && event.version === SESSION_WATCH_VERSION && typeof event.sequence === 'number')
+        ? event
+        : undefined;
+    },
+    makePeerScoper: (scope) => {
+      const state = new SessionWatchState();
+      return { scope: (status, reason) => state.scope(scope, status, reason) };
+    },
+  });
 }

@@ -60,7 +60,8 @@ Outbound names that look interchangeable are three different planes:
 | **Deliver** | `agents send` / `agents notify` | Put a message in front of a recipient (`--to`, `--text`, `--channel`, `--attach`, `--url`). `notify` ≡ `send --to owner`; the owner destination is selected from `humans.yaml`. |
 | **Record** | `agents feed post` | Append a status/milestone (and optional OpenBlock). May **forward** via `feed.broadcast` sinks that call `send`/`notify`. |
 | **Observe** | `agents feed --filter updates` / `agents feed --filter all` | **Read** the activity stream — not a send path. |
-| **Control** | `agents message` / `agents sessions inject` | Act on a running agent (mailbox answer vs terminal keystroke). Stay separate from `send`. |
+| **Stream** | `agents feed watch --json` | The reconciled operator projection (agents + attention + activity) as versioned NDJSON — the joined superset of `agents sessions watch --json`. What AGI EXT's elected monitor consumes. See below. |
+| **Control** | `agents message` / `agents sessions inject` / `agents feed answer` | Act on a running agent (mailbox answer vs terminal keystroke). `feed answer <attention-key>` claims + routes an answer to a Needs-You item in one op. Stay separate from `send`. |
 
 ```bash
 # Deliver (flag-first envelope)
@@ -71,6 +72,36 @@ agents notify --text "same as send --to owner"
 # Record (not deliver by itself) — title (subject) + body required
 agents feed post --title "CHANGELOG pushed" "Watching CI and mac-mini E2E"
 ```
+
+### Feed watch — the reconciled operator projection stream
+
+`agents feed watch --json` streams one joined projection so a UI (AGI EXT's
+elected monitor) never re-derives Needs-You from raw session state. It COMPOSES the
+existing session watcher (`agents sessions watch`) with the feed block ledger and
+the pure `reconcileAttention` merge — no second lifecycle detector, no second
+scheduler. `--local` streams only this machine; the default reuses the same fleet
+coordinator as `sessions watch`, dialing `feed watch --json --local` on each peer.
+
+Every line is one versioned NDJSON envelope: `{ v: 1, streamId, sequence,
+capturedAt, scope, type, ... }`, ordered by `streamId + sequence` (forwarded peer
+envelopes keep the peer's own stream identity). The `type` variants:
+
+| `type` | Payload | Meaning |
+|---|---|---|
+| `reset` | `agents[]`, `attention[]` | The full current projection for a scope. |
+| `agent.upsert` | `rowKey`, `agent` | One agent row changed (agent rows are upsert-only; a removal forces a fresh `reset`). |
+| `attention.upsert` | `rowKey`, `attention` | A Needs-You item opened or changed. |
+| `attention.remove` | `rowKey`, `resolution` | A Needs-You item left, with the resolution tombstone that closed it. |
+| `activity.append` | `event` | A new chronological activity event. |
+| `scope` | `status`, `reason?` | A device scope went `available`/`unavailable`; an unavailable scope retains its last rows until it reconnects. |
+| `heartbeat` | — | Liveness. |
+
+Each `agent` row is the canonical session row plus its reconciled `attention`
+(joined inline) and CLI-sourced `pullRequest` status. Answer a Needs-You item with
+`agents feed answer <attention-key> (--choice <id> | --text <answer>)`: it
+atomically claims the first answer and routes it over the agent's live rail — a
+losing concurrent caller gets `already_answered` and injects nothing. Normative
+contract: [`specifications.md` §3.6.1 (FEED-1..7)](specifications.md#361-feed-watch--answer-feed-driven-needs-you).
 
 The write-stores: `~/.agents/.history/events/YYYY-MM-DD/events.jsonl`
 (operational audit), per-session

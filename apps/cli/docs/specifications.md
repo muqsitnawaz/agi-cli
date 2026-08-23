@@ -72,10 +72,10 @@ row its surface sits in.
 
 | Coverage | Surfaces | What that means |
 |---|---|---|
-| **Specified here** | `sessions`, `secrets`, `run`, the scheduling/executor singularity, **routine execution & readiness**, `watchdog` | RFC-2119 requirements + Given/When/Then. A change that deviates is a bug in the code or in this doc. |
+| **Specified here** | `sessions`, `secrets`, `run`, the scheduling/executor singularity, **routine execution & readiness**, `watchdog`, **`feed watch` / `feed answer`** (FEED-1..7, §3.6.1) | RFC-2119 requirements + Given/When/Then. A change that deviates is a bug in the code or in this doc. |
 | **Governed in part** | `monitors`, `doctor`, `daemon` | One requirement reaches them, no command contract does. `monitors` is bound by [§Scheduling & execution singularity](#scheduling--execution-singularity) (SING-5, SING-8, SING-9) — who may schedule and execute it. `doctor` is bound by SEC-17 for one behavior only: warning on a credential-shaped var in a shell rc file. `daemon` is bound by SING-1 (it IS the singular scheduler/executor) and SING-4a (the `daemon.enabled` kill switch); per-service toggles (`agents daemon services enable|disable`) are an operational convenience with no normative contract. The daemon's status/health rendering (`agents daemon status`/`services`/`doctor`) carries no requirement of its own. Everything else these commands do is unspecified. |
 | **Documented, not specified** | `hosts`, `teams`, `cloud`, `browser`, `computer`, `plugins`, `subagents`, `workflows`, `profiles`, `share`, `pty`, `menubar`, resource sync (`skills`/`rules`/`commands`/`hooks`/`mcp`/`permissions`), version management (`add`/`use`/`prune`/`import`/`export`) | A design doc describes the mechanism — [hosts.md](hosts.md), [teams.md](teams.md), [cloud.md](cloud.md), [resource-sync.md](resource-sync.md), [version-management.md](version-management.md), … — but states **no** requirements. Verified: `hosts.md`, `teams.md` and `cloud.md` contain **zero capitalized RFC-2119 keywords**. `hosts.md` and `teams.md` do use lowercase "must" in prose ("the remote run must be bounded", `hosts.md:124`; "you must declare what each one owns", `teams.md:207`) — which reads normative but is not, per this document's own capitalization rule. That is exactly the trap: treat those docs as explanation, never as a contract. |
-| **Unspecified** | `wallet`, `helper`, `sync`/`apply`/`status`, `worktree`, `webhook`, `daemon funnel`, `mailboxes`, `feed`, `message`/`send`, `budget`, `audit`, and the remaining groups | Neither a spec nor a design doc. Behavior is whatever the code does today; nothing here entitles a caller to it. |
+| **Unspecified** | `wallet`, `helper`, `sync`/`apply`/`status`, `worktree`, `webhook`, `daemon funnel`, `mailboxes`, the rest of `feed` (`feed`/`feed post`/`feed --dispatch`), `message`/`send`, `budget`, `audit`, and the remaining groups | Neither a spec nor a design doc. Behavior is whatever the code does today; nothing here entitles a caller to it. |
 
 **Where the absence bites hardest.** These act on other machines, hold durable
 state, or sit next to credentials, and have no normative contract today:
@@ -617,6 +617,61 @@ SSH access (§7); rendering sessions that no harness produced.
   device, viewing, and recovery metadata in each durable row. Consumers MUST NOT
   need a second live-session join (`commands/sessions.ts:847-884,3168-3191`;
   `commands/sessions.test.ts:45-64`).
+
+#### 3.6.1 Feed watch & answer (feed-driven Needs-You)
+
+`agents feed watch --json` is the joined operator projection AGI EXT consumes —
+agents, attention (Needs-You), and activity in one stream — and `agents feed
+answer` is its write path. It is the superset of `agents sessions watch`, not a
+replacement: `sessions watch` stays compatible for session-only consumers (SES-41).
+
+- **FEED-1 (MUST).** `agents feed watch --json` MUST emit newline-delimited,
+  versioned envelopes carrying `v: 1`, `streamId`, a strictly increasing
+  `sequence`, `capturedAt`, and `scope`. Version 1 defines `reset`, `agent.upsert`,
+  `attention.upsert`, `attention.remove`, `activity.append`, `scope`, and
+  `heartbeat`. `rowKey` MUST be opaque; consumers order by `streamId + sequence`
+  (`lib/feed/watch.ts:FeedWatchEnvelope,FeedWatchState`;
+  `lib/feed/watch.test.ts` §FeedWatchState). This is the shape AGI EXT's
+  `SessionCliFactPayload` (`apps/ext/src/monitor/protocol.ts`) parses.
+- **FEED-2 (MUST).** The projection MUST be a reconciliation of existing producers —
+  the session watcher's lifecycle output plus the feed block ledger plus a
+  CLI-supplied PR signal — via the pure `reconcileAttention` (SES §Attention,
+  Track A). It MUST NOT add a second lifecycle detector, transcript parser, or
+  scheduler: session rows come from the composed `watchLocalSessions`, and attention
+  is `reconcileScopeAttention` over those rows and the block ledger
+  (`lib/feed/watch.ts:reconcileScopeAttention,watchLocalFeed`).
+- **FEED-3 (MUST).** An agent row is upsert-only within one stream (there is no
+  `agent.remove`); a removed agent MUST force a fresh `reset`, and an open attention
+  item that leaves the set MUST emit `attention.remove` carrying the resolution
+  tombstone that closed it. An open block whose session is no longer live MUST still
+  surface as an attention item, so a declared block persists in Needs-You after the
+  turn ends (`lib/feed/watch.ts:FeedWatchState.update,reconcileScopeAttention`;
+  `lib/feed/watch.test.ts`).
+- **FEED-4 (MUST).** Fleet mode MUST reuse the shared fleet coordinator
+  (`watchFleetGeneric`), dialing `agents feed watch --json --local` on each peer,
+  forwarding each peer's envelopes VERBATIM (peer's own `streamId + sequence`, never
+  re-sequenced) and emitting a coordinator-side `scope: unavailable` with last-rows
+  retention until the peer reconnects — the same contract as SES-42/SES-43
+  (`lib/session/remote/watch.ts:watchFleetGeneric`;
+  `lib/feed/watch.ts:watchFleetFeed,acceptFeedPeerEnvelope`;
+  `lib/feed/watch.test.ts` §acceptFeedPeerEnvelope).
+- **FEED-5 (MUST).** `agents feed answer <attention-key>` MUST resolve the reply
+  rail, then ATOMICALLY claim the first answer through `recordAnswer` (the `O_EXCL`
+  marker), then route, then advance the receipt — in that order. A losing concurrent
+  caller MUST receive `already_answered` and route NOTHING; a late caller whose block
+  is already answered MUST also receive `already_answered`, never an error
+  (`lib/feed/answer.ts:claimAndRouteAttentionAnswer`;
+  `lib/feed/answer.test.ts`).
+- **FEED-6 (MUST).** A high-consequence answer MUST require a verified operator
+  (`--as` plus env-proven `AGENTS_OPERATOR_ID`); an unauthorized answer MUST be
+  refused before any delivery (`lib/feed/answer.ts`; `lib/operator.ts:verifyOperatorIdentity`;
+  `lib/feed/answer.test.ts`).
+- **FEED-7 (MUST).** PR status MUST be sourced in the CLI on a bounded TTL —
+  `number,title,state,isDraft,reviewDecision,mergeable,statusCheckRollup` via
+  `gh pr view` — and supplied to both feed attention (as `PullRequestAttentionSignal`)
+  and a PR-board row; a `gh` failure MUST cache a null row for the TTL rather than
+  refetch every emit (`lib/feed/pr-status.ts:PrStatusSource,parsePrStatus`;
+  `lib/feed/pr-status.test.ts`).
 
 #### 3.7 Index / DB
 
