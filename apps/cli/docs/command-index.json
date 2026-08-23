@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "command": "agents",
   "groups": 68,
-  "commands": 557,
+  "commands": 556,
   "root": {
     "name": "agents",
     "path": "",
@@ -2486,7 +2486,7 @@
               "name": "create",
               "path": "browser profiles create",
               "aliases": [],
-              "description": "Create a new browser profile (machine-local unless --fleet)",
+              "description": "Create a new browser profile on this device",
               "args": [
                 {
                   "name": "name",
@@ -2502,15 +2502,6 @@
                   "short": "-b",
                   "long": "--browser",
                   "required": true,
-                  "optional": false,
-                  "variadic": false,
-                  "negate": false
-                },
-                {
-                  "flags": "--fleet",
-                  "description": "Store in the synced agents.yaml so every machine sees it. Default is machine-local: a profile pins an OS-specific binary path and a locally chosen port, so a synced copy is wrong on every other box.",
-                  "long": "--fleet",
-                  "required": false,
                   "optional": false,
                   "variadic": false,
                   "negate": false
@@ -2831,7 +2822,7 @@
               "aliases": [
                 "ls"
               ],
-              "description": "List all browser profiles, with the store each lives in (local / fleet)",
+              "description": "List all browser profiles and the devices declaring each one",
               "args": [],
               "options": [
                 {
@@ -2938,48 +2929,6 @@
                 },
                 {
                   "name": "to",
-                  "required": true,
-                  "variadic": false,
-                  "description": ""
-                }
-              ],
-              "options": [
-                {
-                  "flags": "--json",
-                  "description": "Output machine-readable JSON",
-                  "long": "--json",
-                  "required": false,
-                  "optional": false,
-                  "variadic": false,
-                  "negate": false
-                },
-                {
-                  "flags": "-h, --help",
-                  "description": "Show help",
-                  "short": "-h",
-                  "long": "--help",
-                  "required": false,
-                  "optional": false,
-                  "variadic": false,
-                  "negate": false
-                }
-              ],
-              "subcommands": []
-            },
-            {
-              "name": "scope",
-              "path": "browser profiles scope",
-              "aliases": [],
-              "description": "Move a profile between the fleet-synced store and this machine (local|fleet)",
-              "args": [
-                {
-                  "name": "name",
-                  "required": true,
-                  "variadic": false,
-                  "description": ""
-                },
-                {
-                  "name": "scope",
                   "required": true,
                   "variadic": false,
                   "description": ""
