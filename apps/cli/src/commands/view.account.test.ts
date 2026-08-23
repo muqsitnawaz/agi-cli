@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import {
   accountColumnLabel,
   compareAccountOrderedVersions,
@@ -7,7 +10,14 @@ import {
   viewUsageSummaryOptions,
   type AccountOrderedVersion,
 } from './view.js';
-import { formatUsageSummary, USAGE_BENIGN_STATE, type UsageInfo } from '../lib/accounting/usage.js';
+import {
+  formatUsageSummary,
+  readClaudeUsageCache,
+  setClaudeUsageCachePathForTest,
+  writeClaudeUsageCache,
+  USAGE_BENIGN_STATE,
+  type UsageInfo,
+} from '../lib/accounting/usage.js';
 import { padToWidth, stringWidth } from '../lib/session/width.js';
 
 describe('joinViewColumns — fixed multi-agent layout', () => {
@@ -113,6 +123,35 @@ describe('viewUsageSummaryOptions — truthful unavailable states', () => {
 
     expect(opts.unavailable).toBe(false);
     expect(formatUsageSummary(null, null, 3, opts)).toBe('');
+  });
+
+  it('renders the cached plan for a meterless harness instead of "usage unavailable"', () => {
+    // Drives the REAL read path the plain, non-refreshing `agents view` uses:
+    // the row `--refresh` wrote goes through readClaudeUsageCache and into the
+    // renderer. Before the deserializer kept plan-only rows this read returned
+    // null and the row rendered "usage unavailable" — the reported bug.
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-cli-view-planonly-'));
+    const prevPath = setClaudeUsageCachePathForTest(path.join(cacheDir, 'claude-usage.json'));
+    try {
+      const usageKey = 'grok:user=view-plan-only-test:org=view-plan-only-org';
+      writeClaudeUsageCache(usageKey, {
+        source: 'live',
+        sourceLabel: 'live',
+        capturedAt: new Date(),
+        plan: 'SuperGrok Heavy',
+        windows: [],
+      });
+
+      const usageInfo: UsageInfo = { snapshot: readClaudeUsageCache(usageKey), error: null };
+      const opts = viewUsageSummaryOptions('grok', true, usageInfo, 2);
+
+      expect(opts.unavailable).toBe(false);
+      expect(formatUsageSummary(usageInfo.snapshot?.plan ?? null, usageInfo.snapshot, 3, opts))
+        .toBe('SuperGrok Heavy');
+    } finally {
+      setClaudeUsageCachePathForTest(prevPath);
+      fs.rmSync(cacheDir, { recursive: true, force: true });
+    }
   });
 });
 
