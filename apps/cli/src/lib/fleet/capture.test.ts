@@ -103,4 +103,15 @@ describe('captureFleet', () => {
 
     expect(m.discovery).toEqual({ 'mac-mini': 'approved', 'old-laptop': 'ignored' });
   });
+
+  it('carries the ignore-list forward verbatim (a capture must not wipe dismissals)', () => {
+    const prev: FleetManifest = {
+      devices: {},
+      ignored: [{ name: 'old-laptop', ignoredAt: '2026-01-15T10:00:00.000Z', ignoredOn: 'zion' }],
+    };
+
+    const m = captureFleet(prev, { devices: ['yosemite-s0'] });
+
+    expect(m.ignored).toEqual([{ name: 'old-laptop', ignoredAt: '2026-01-15T10:00:00.000Z', ignoredOn: 'zion' }]);
+  });
 });

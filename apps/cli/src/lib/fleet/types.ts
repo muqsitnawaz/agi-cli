@@ -54,6 +54,20 @@ export interface FleetDeviceOverride {
 }
 
 /**
+ * One dismissed tailscale node, as stored in central `fleet.ignored`
+ * (`agents devices ignore`). The provenance (`ignoredAt` / `ignoredOn`) is
+ * what `agents devices ignored` renders.
+ */
+export interface FleetIgnoredEntry {
+  /** Tailscale node name that was dismissed. */
+  name: string;
+  /** ISO-8601 timestamp of the dismissal. */
+  ignoredAt: string;
+  /** Machine id (hostname) that dismissed it. */
+  ignoredOn: string;
+}
+
+/**
  * The `fleet:` block as it appears in `agents.yaml` (or any `-f` file). `devices`
  * is either the literal string `'all'` (every online registered device minus the
  * source machine) or an explicit map of device-name -> override.
@@ -82,6 +96,16 @@ export interface FleetManifest {
    * machine's local device registry and is never committed.
    */
   discovery?: Record<string, 'approved' | 'ignored'>;
+  /**
+   * Nodes the user dismissed from auto-discovery, WITH provenance. Central
+   * (not a per-device doc) on purpose: an ignored node is deliberately NOT a
+   * device — it never enters the registry — so it has no per-device folder to
+   * live in. The tracked central file syncs fleet-wide, so a dismissal on one
+   * machine stops the suggestion on every machine. Read/written by
+   * `lib/devices/registry.ts`; folded from the legacy untracked
+   * `.history/devices/ignored.json` by `lib/devices/config-migration.ts`.
+   */
+  ignored?: FleetIgnoredEntry[];
 }
 
 /**

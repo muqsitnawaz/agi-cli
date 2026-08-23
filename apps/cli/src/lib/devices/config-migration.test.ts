@@ -46,6 +46,13 @@ function readDoc(host: string): string {
 function autoLaunchPath() {
   return path.join(TMP, '.agents', '.history', 'devices', 'auto-launch.json');
 }
+function ignoredJsonPath() {
+  return path.join(TMP, '.agents', '.history', 'devices', 'ignored.json');
+}
+function writeIgnoredJson(body: string) {
+  fs.mkdirSync(path.dirname(ignoredJsonPath()), { recursive: true });
+  fs.writeFileSync(ignoredJsonPath(), body);
+}
 function pinsPath(host = 'testbox') {
   return path.join(TMP, '.agents', '.history', 'devices', `pins-${host}.json`);
 }
@@ -217,5 +224,74 @@ describe('migrateDeviceConfigStores', () => {
     migrateDeviceConfigStores();
     expect(readCentral()).toBe('');
     expect(readDoc('mac-mini')).toContain('maxAgents: 4');
+  });
+
+  it('folds a legacy ignored.json into central fleet.ignored (with provenance) and removes the file', async () => {
+    writeIgnoredJson(JSON.stringify({ ignored: ['old-laptop', 'ipad165'], updatedAt: '2026-01-15T10:00:00.000Z' }));
+
+    const { migrateDeviceConfigStores, readMeta } = await freshModules();
+    migrateDeviceConfigStores();
+
+    // Entries preserved — sorted, stamped with the legacy file's updatedAt and
+    // THIS machine's id (the file being local means this machine dismissed them).
+    expect(readMeta().fleet?.ignored).toEqual([
+      { name: 'ipad165', ignoredAt: '2026-01-15T10:00:00.000Z', ignoredOn: 'testbox' },
+      { name: 'old-laptop', ignoredAt: '2026-01-15T10:00:00.000Z', ignoredOn: 'testbox' },
+    ]);
+    expect(fs.existsSync(ignoredJsonPath())).toBe(false);
+    // And it landed in the TRACKED central file, not another untracked store.
+    expect(readCentral()).toContain('ignored:');
+  });
+
+  it('unions legacy names with existing central entries — central (destination) wins a name conflict', async () => {
+    writeCentral(
+      'fleet:\n  devices: {}\n  ignored:\n    - name: ipad165\n      ignoredAt: "2026-02-02T00:00:00.000Z"\n      ignoredOn: peer-box\n',
+    );
+    writeIgnoredJson(JSON.stringify({ ignored: ['ipad165', 'zion-old'], updatedAt: '2026-01-15T10:00:00.000Z' }));
+
+    const { migrateDeviceConfigStores, readMeta } = await freshModules();
+    migrateDeviceConfigStores();
+
+    expect(readMeta().fleet?.ignored).toEqual([
+      { name: 'ipad165', ignoredAt: '2026-02-02T00:00:00.000Z', ignoredOn: 'peer-box' }, // central kept
+      { name: 'zion-old', ignoredAt: '2026-01-15T10:00:00.000Z', ignoredOn: 'testbox' }, // legacy folded
+    ]);
+    expect(fs.existsSync(ignoredJsonPath())).toBe(false);
+  });
+
+  it('ignore-list fold is idempotent — a second run is a no-op', async () => {
+    writeIgnoredJson(JSON.stringify({ ignored: ['ipad165'], updatedAt: '2026-01-15T10:00:00.000Z' }));
+
+    const { migrateDeviceConfigStores } = await freshModules();
+    migrateDeviceConfigStores();
+    const afterFirst = readCentral();
+    migrateDeviceConfigStores();
+    expect(readCentral()).toBe(afterFirst);
+  });
+
+  it('leaves a malformed legacy ignored.json in place and says so loudly (no dismissals lost)', async () => {
+    writeIgnoredJson('{ this is not json');
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { migrateDeviceConfigStores, readMeta } = await freshModules();
+    try {
+      migrateDeviceConfigStores();
+
+      expect(fs.existsSync(ignoredJsonPath())).toBe(true); // left for a later retry
+      expect(readMeta().fleet?.ignored).toBeUndefined(); // nothing half-written
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('ignored.json'));
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it('retires an empty legacy ignored.json without creating a fleet block', async () => {
+    writeIgnoredJson(JSON.stringify({ ignored: [], updatedAt: '2026-01-15T10:00:00.000Z' }));
+
+    const { migrateDeviceConfigStores, readMeta } = await freshModules();
+    migrateDeviceConfigStores();
+
+    expect(fs.existsSync(ignoredJsonPath())).toBe(false);
+    expect(readMeta().fleet).toBeUndefined();
   });
 });

@@ -12,7 +12,14 @@
  *       per-device docs: THIS machine's pins move to the untracked
  *       `.history/devices/pins-<host>.json` (pins file wins on conflict — it
  *       is the destination); peers' pins are simply dropped from the tracked
- *       file (each peer owns/rewrites its own pins locally).
+ *       file (each peer owns/rewrites its own pins locally);
+ *   (e) legacy `.history/devices/ignored.json` (the untracked per-machine
+ *       ignore-list, so a dismissal never reached another box) folds into
+ *       central `fleet.ignored` — `{ name, ignoredAt, ignoredOn }` entries,
+ *       central wins on a name conflict — and the legacy file is removed only
+ *       after that write lands. The legacy file recorded no per-entry
+ *       provenance: its `updatedAt` is the best available dismissal time, and
+ *       the file being machine-local means THIS machine dismissed the node.
  *
  * What stays put: a device doc's existing `config:` (already the right home)
  * and its `routines:` list (operator-owned, read cross-device by
@@ -37,6 +44,7 @@ import * as yaml from 'yaml';
 import {
   META_HEADER,
   getDevicesAutoLaunchPath,
+  getDevicesIgnoredPath,
   getDevicePinsPath,
   getUserAgentsDir,
   readMeta,
@@ -133,6 +141,31 @@ function isConfigMap(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/** The legacy ignored.json names + file-level timestamp (null when absent). A
+ * malformed file is loudly skipped — left in place for a later retry, never
+ * treated as empty (the same corruption contract the ignore-list itself keeps:
+ * a silent [] would let the next write wipe the user's dismissals). */
+function readLegacyIgnored(ignoredJsonPath: string): { names: string[]; updatedAt?: string } | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(ignoredJsonPath, 'utf-8');
+  } catch {
+    return null; // absent — nothing to fold
+  }
+  let parsed: { ignored?: unknown; updatedAt?: unknown };
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    console.error(`device config migration: could not parse ${ignoredJsonPath} (${(err as Error).message}); leaving it for a later retry`);
+    return null;
+  }
+  const names = Array.isArray(parsed.ignored) ? parsed.ignored : [];
+  return {
+    names: names.filter((n): n is string => typeof n === 'string'),
+    updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : undefined,
+  };
+}
+
 /**
  * Fold every legacy device-config/pins location into the current layout. Safe
  * to call on every boot / config access: cheap no-op once folded.
@@ -140,6 +173,7 @@ function isConfigMap(v: unknown): v is Record<string, unknown> {
 export function migrateDeviceConfigStores(): void {
   const devicesRoot = path.join(getUserAgentsDir(), 'devices');
   const autoLaunchPath = getDevicesAutoLaunchPath();
+  const ignoredJsonPath = getDevicesIgnoredPath();
   const self = machineId();
 
   // ── 1. Gather ────────────────────────────────────────────────────────────
@@ -185,7 +219,9 @@ export function migrateDeviceConfigStores(): void {
   const hasDestinationWork = plans.length > 0 || newDocs.length > 0 || docAgents !== undefined || docIsolated !== undefined;
 
   const autoLaunchPending = fs.existsSync(autoLaunchPath);
-  if (!centralHasConfig && !hasDestinationWork && !autoLaunchPending) return;
+  const legacyIgnored = readLegacyIgnored(ignoredJsonPath);
+  const ignoredJsonPending = fs.existsSync(ignoredJsonPath);
+  if (!centralHasConfig && !hasDestinationWork && !autoLaunchPending && !ignoredJsonPending) return;
 
   // ── 2. Destination writes FIRST (crash-safe), under the meta lock so they
   //    serialize against writeMetaUnlocked's own read-merge-write of the doc.
@@ -211,6 +247,35 @@ export function migrateDeviceConfigStores(): void {
       for (const plan of plans) writeDeviceDoc(plan.path, plan.next);
       for (const nd of newDocs) writeDeviceDoc(nd.path, nd.doc);
     });
+  }
+
+  // ── 2d. The legacy ignore-list folds into central fleet.ignored — the
+  //    central entries win a name conflict (they are the destination), so a
+  //    crash between this write and the legacy-file removal re-folds as a
+  //    no-op. updateMeta takes the meta lock itself.
+  let ignoredJsonFolded = false;
+  if (legacyIgnored) {
+    if (legacyIgnored.names.length === 0) {
+      ignoredJsonFolded = true; // nothing to fold — just retire the file below
+    } else {
+      try {
+        updateMeta((m) => {
+          const existing = m.fleet?.ignored ?? [];
+          const known = new Set(existing.map((e) => e.name));
+          const merged = [...existing];
+          for (const name of legacyIgnored.names) {
+            if (known.has(name)) continue;
+            merged.push({ name, ignoredAt: legacyIgnored.updatedAt ?? new Date().toISOString(), ignoredOn: self });
+          }
+          merged.sort((a, b) => a.name.localeCompare(b.name));
+          const fleet: FleetManifest = { ...m.fleet, devices: m.fleet?.devices ?? {}, ignored: merged };
+          return { ...m, fleet };
+        });
+        ignoredJsonFolded = true;
+      } catch (err) {
+        console.error(`device config migration: could not fold ${ignoredJsonPath} into fleet.ignored (${(err as Error).message}); leaving it for a later retry`);
+      }
+    }
   }
 
   // ── 3. Source strips LAST ────────────────────────────────────────────────
@@ -243,6 +308,17 @@ export function migrateDeviceConfigStores(): void {
       fs.rmSync(autoLaunchPath, { force: true });
     } catch (err) {
       console.error(`device config migration: could not remove ${autoLaunchPath} (${(err as Error).message}); a later run retries`);
+    }
+  }
+
+  // 3c. The legacy ignored.json — only after its entries landed in central
+  //     (or there was nothing to fold). A parse/fold failure leaves it for a
+  //     later retry rather than losing the dismissals.
+  if (ignoredJsonPending && ignoredJsonFolded) {
+    try {
+      fs.rmSync(ignoredJsonPath, { force: true });
+    } catch (err) {
+      console.error(`device config migration: could not remove ${ignoredJsonPath} (${(err as Error).message}); a later run retries`);
     }
   }
 }
