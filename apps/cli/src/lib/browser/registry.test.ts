@@ -168,6 +168,23 @@ describe('central browser migration', () => {
     });
   });
 
+  it('does not report unrequested leftovers as unhostable on a named claim', async () => {
+    const centralFile = path.join(root, '.agents', 'agents.yaml');
+    const hostable = {
+      browser: 'custom',
+      binary: process.execPath,
+      endpoints: ['cdp://127.0.0.1:9222'],
+    };
+    writeYaml(centralFile, {
+      browser: { work: hostable, other: { ...hostable, endpoints: ['cdp://127.0.0.1:9223'] } },
+    });
+    const { migrateCentralBrowserProfiles } = await import('./registry.js');
+    expect(migrateCentralBrowserProfiles(() => true, 'work')).toEqual({
+      claimed: ['work'],
+      skipped: [],
+    });
+  });
+
   it('fails loud when a named claim cannot be hosted here', async () => {
     const centralFile = path.join(root, '.agents', 'agents.yaml');
     writeYaml(centralFile, {

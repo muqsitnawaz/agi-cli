@@ -137,7 +137,7 @@ describe('agents browser profiles edit', () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining('Nothing to edit'));
   });
 
-  it("edit's surface is create's minus --fleet, and adds no flag create lacks", async () => {
+  it("edit's surface is create's, and adds no flag create lacks", async () => {
     const { registerBrowserCommand } = await freshBrowserModules();
     const program = new Command();
     program.exitOverride();
@@ -158,7 +158,6 @@ describe('agents browser profiles edit', () => {
     // Everything create teaches, edit accepts — so an agent that learned create
     // can edit with zero new tokens.
     for (const flag of create) {
-      if (flag === '--fleet') continue;
       expect(edit.has(flag), `edit is missing ${flag}`).toBe(true);
     }
     expect(edit.has('--fleet')).toBe(false);
@@ -230,27 +229,40 @@ describe('agents browser profiles prune — misfiled reporting', () => {
     expect(out).toMatch(/never deletes these/i);
   });
 
-  it('offers no misfiled profile for deletion, even with --fleet', async () => {
-    // --fleet is the path that used to reach `binary-missing` and delete it
-    // fleet-wide. Asserting it without --fleet would be trivially true.
+  it('offers no misfiled profile for deletion', async () => {
     declareOnPeer('work-peer', ['cdp://localhost:9401']);
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
-    await run(['profiles', 'prune', '--dry-run', '--fleet']);
+    await run(['profiles', 'prune', '--dry-run']);
 
     const out = log.mock.calls.map((c) => String(c[0])).join('\n');
     expect(out).not.toMatch(/Would remove[\s\S]*work-peer/);
     expect(out).toMatch(/^ {2}work-peer — .*declared on peerbox/m);
   });
 
-  it('says nothing about misfiling when the peer profile names its own host', async () => {
-    // An ssh:// endpoint names the machine it means, so it resolves to the same
-    // browser from anywhere. That is not misfiled.
+  it('does not prune a peer ssh profile, and does not call it misfiled', async () => {
+    // An ssh:// endpoint names the machine it means. It is not misfiled, and
+    // prune must not offer it for deletion — deleteProfile would throw
+    // "not declared on this device".
     declareOnPeer('remote-ok', ['ssh://muqsit@mac-mini?port=9300']);
     const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
     await run(['profiles', 'prune', '--dry-run']);
 
-    expect(log.mock.calls.map((c) => String(c[0])).join('\n')).not.toMatch(/misfiled/i);
+    const out = log.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).not.toMatch(/misfiled/i);
+    expect(out).not.toMatch(/Would remove[\s\S]*remote-ok/);
+    expect(out).toMatch(/remote-ok/);
+  });
+
+  it('does not register prune --fleet — deleteProfile cannot remove another device\'s declaration', async () => {
+    const { registerBrowserCommand } = await freshBrowserModules();
+    const program = new Command();
+    registerBrowserCommand(program);
+    const prune = program.commands
+      .find((command) => command.name() === 'browser')!
+      .commands.find((command) => command.name() === 'profiles')!
+      .commands.find((command) => command.name() === 'prune')!;
+    expect(prune.options.map((option) => option.long)).not.toContain('--fleet');
   });
 });

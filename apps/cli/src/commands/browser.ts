@@ -813,12 +813,11 @@ function registerProfilesCommands(browser: Command): void {
 
   profiles
     .command('prune')
-    .description('Remove dead machine-local profiles: browser not installed here, or never started')
+    .description('Remove dead profiles this device declares: browser not installed here, or never started')
     .option('-n, --dry-run', 'Print what would be removed and exit without changing anything')
-    .option('--fleet', 'Also consider fleet-synced profiles (removing one removes it from EVERY machine)')
     .option('--json', 'Output machine-readable JSON')
-    .action(async (opts: { dryRun?: boolean; fleet?: boolean; json?: boolean }) => {
-      const plan = await buildProfilePrunePlan({ includeFleet: opts.fleet });
+    .action(async (opts: { dryRun?: boolean; json?: boolean }) => {
+      const plan = await buildProfilePrunePlan();
 
       if (!opts.dryRun) await pruneProfiles(plan);
 
@@ -877,17 +876,14 @@ function registerProfilesCommands(browser: Command): void {
       # What exists here, and whether each is this machine's or the whole fleet's
       agents browser profiles list
 
-      # Create one — machine-local by default
+      # Create one on this device
       agents browser profiles create work --browser chrome
 
       # Claim leftover central profiles on the machine that hosts the browser
       agents browser profiles claim
       agents browser profiles claim comet-local
 
-      # Create one every machine should see (e.g. a remote ssh:// endpoint)
-      agents browser profiles create shared-remote --browser chrome --fleet
-
-      # Clean up dead ones: check first, then apply
+      # Clean up dead ones this device declares: check first, then apply
       agents browser profiles prune --dry-run
       agents browser profiles prune
 
@@ -895,17 +891,19 @@ function registerProfilesCommands(browser: Command): void {
       agents browser use work
     `,
     notes: `
-      Profiles are machine-local by default. A profile pins an OS-specific binary
-      path and a locally chosen CDP port, so a fleet-synced copy is wrong on every
-      other machine — pass --fleet only when the profile really is fleet config.
+      A device declares its own browsers in its own \`devices/<machine>/agents.yaml\`.
+      A name declared by exactly one device is identity-bearing; a name declared
+      by several is fungible. Leftover central \`browser:\` entries are claimed
+      with \`agents browser profiles claim\` on the machine that hosts the browser.
 
       In \`list\`, the \`*\` marker means "this machine's configured default"
       (\`agents browser start\` with no --profile). The auto-detected profile is
       named \`auto-chrome\`; \`default\` is only an ALIAS for whichever profile
       this machine is configured to use, resolved the same way by every command.
 
-      \`prune\` never removes a profile that is in use, the configured default, the
-      auto-detected \`auto-chrome\`, or (without --fleet) a fleet-synced one.
+      \`prune\` only considers profiles this device declares. It never removes a
+      profile that is in use, the configured default, or the auto-detected
+      \`auto-chrome\`.
     `,
   });
 

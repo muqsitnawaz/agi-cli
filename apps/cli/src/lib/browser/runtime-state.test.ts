@@ -348,15 +348,10 @@ describe('planProfilePrune', () => {
   const local = (name: string, launchableHere: boolean) =>
     ({ name, scope: 'local' as const, launchableHere });
 
-  it('never prunes a misfiled fleet profile even with --fleet and the binary missing', () => {
-    // The regression: `misfiledWhy` used to be read only inside the
-    // `scope === 'fleet' && !includeFleet` branch, so `prune --fleet` on a box
-    // where the browser is absent — a misfiled profile's DEFINING symptom —
-    // read `binary-missing` and deleted it fleet-wide, the opposite of the fix.
-    const name = uniq('misfiled-fleetflag');
+  it('never prunes a misfiled profile even when the binary is missing', () => {
+    const name = uniq('misfiled-binary');
     const plan = planProfilePrune(
       [{ name, scope: 'fleet' as const, launchableHere: false, misfiledWhy: 'loopback endpoint' }],
-      { includeFleet: true }
     );
     expect(plan.candidates).toEqual([]);
     expect(plan.kept[0].misfiled).toBe(true);
@@ -368,8 +363,9 @@ describe('planProfilePrune', () => {
       { name, scope: 'fleet' as const, launchableHere: true, misfiledWhy: 'loopback endpoint' },
     ]);
     expect(plan.kept[0].misfiled).toBe(true);
-    // A clean fleet profile must NOT carry the flag at all.
-    const clean = planProfilePrune([{ name: uniq('clean'), scope: 'fleet' as const, launchableHere: true }]);
+    const cleanName = uniq('clean');
+    writeProfileRuntime(cleanName, { pid: 999999, port: 9222, command: 'chrome' });
+    const clean = planProfilePrune([{ name: cleanName, scope: 'fleet' as const, launchableHere: true }]);
     expect(clean.kept[0].misfiled).toBeUndefined();
   });
 
@@ -385,10 +381,11 @@ describe('planProfilePrune', () => {
     expect(plan.kept[0].why).toContain('loopback endpoint');
   });
 
-  it('keeps the plain fleet reason when the profile is not misfiled', () => {
-    const name = uniq('cleanfleet');
+  it('prunes a dead locally-declared profile even when other devices also declare the name', () => {
+    const name = uniq('shared');
     const plan = planProfilePrune([{ name, scope: 'fleet' as const, launchableHere: true }]);
-    expect(plan.kept[0].why).toBe('fleet-synced (pass --fleet to include it)');
+    expect(plan.candidates.map((c) => c.name)).toEqual([name]);
+    expect(plan.candidates[0].reason).toBe('never-used');
   });
 
   it('removes a local profile whose browser is not installed here', () => {
@@ -436,18 +433,7 @@ describe('planProfilePrune', () => {
     expect(plan.kept[0].why).toMatch(/configured default/);
   });
 
-  it('leaves fleet-synced profiles alone unless includeFleet is set', () => {
-    const name = uniq('shared');
-    const fleet = [{ name, scope: 'fleet' as const, launchableHere: false }];
 
-    const guarded = planProfilePrune(fleet);
-    expect(guarded.candidates).toEqual([]);
-    expect(guarded.kept[0].why).toMatch(/fleet-synced/);
-
-    const optedIn = planProfilePrune(fleet, { includeFleet: true });
-    expect(optedIn.candidates.map((c) => c.name)).toEqual([name]);
-    expect(optedIn.candidates[0].scope).toBe('fleet');
-  });
 
   it('reports the cache dirs it would remove, composites included', () => {
     const name = uniq('withcache');

@@ -80,10 +80,7 @@ export function migrateCentralBrowserProfiles(
   const toClaim: Record<string, BrowserProfileConfig> = {};
   const skipped: string[] = [];
   for (const [profileName, config] of Object.entries(central)) {
-    if (name && profileName !== name) {
-      skipped.push(profileName);
-      continue;
-    }
+    if (name && profileName !== name) continue;
     if (!canHostHere(config)) {
       skipped.push(profileName);
       continue;
