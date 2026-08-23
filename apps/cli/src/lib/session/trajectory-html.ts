@@ -379,16 +379,7 @@ const BASE_STYLE = `
   svg .axis { stroke: var(--border); stroke-width: 1; }
   svg .tick { fill: var(--dim); font-size: 8px; }
   svg .lane { fill: var(--dim); font-size: 9px; }
-  svg .bar-label { fill: var(--dim); font-size: 8.5px; }
-  svg .bar-dur { fill: var(--fg); }
-  svg .gap { fill: #7a3030; fill-opacity: 0.12; }
-  svg .gap-label { fill: #c06a6a; font-size: 8px; }
   svg a { cursor: pointer; }
-  .share-row { display: flex; align-items: center; gap: 10px; margin: 5px 0; font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 12px; }
-  .share-name { width: 120px; color: var(--fg); }
-  .share-bar { flex: 1; height: 9px; background: var(--panel); border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
-  .share-fill { display: block; height: 100%; }
-  .share-pct { width: 44px; text-align: right; color: var(--dim); }
   .dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
   footer {
     max-width: 960px; margin: 0 auto; padding: 0 20px 48px;

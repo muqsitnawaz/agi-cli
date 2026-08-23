@@ -84,6 +84,25 @@ describe('renderTrajectoryText', () => {
     expect(text).toMatch(/···\s+idle 3m10s\s+···/);
   });
 
+  it('renders a gap that falls BEFORE the first step (afterOrdinal: 0), not just between steps', () => {
+    // A regression test for the divider loop starting `prevMs` at `null` instead
+    // of the session origin — that silently dropped a leading stall (the gap
+    // record's `afterOrdinal` is 0, since no step precedes it).
+    const leadingGap: SessionEvent[] = [
+      { type: 'message', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', role: 'user', content: 'go' },
+      { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:03:20Z', tool: 'Bash', callId: 'c1', command: 'ls' },
+      { type: 'tool_result', agent: 'claude', timestamp: '2026-08-01T00:03:21Z', tool: 'Bash', callId: 'c1', outcome: 'ok' },
+    ];
+    const traj = buildTrajectory(leadingGap, meta(), { idleThresholdMs: 120_000 });
+    expect(traj.gaps).toEqual([{ startMs: 0, durationMs: 200_000, afterOrdinal: 0 }]);
+    const text = renderTrajectoryText(traj);
+    const lines = text.split('\n');
+    const gapLine = lines.findIndex((l) => l.includes('idle'));
+    const stepLine = lines.findIndex((l) => l.startsWith('01 '));
+    expect(gapLine).toBeGreaterThanOrEqual(0);
+    expect(gapLine).toBeLessThan(stepLine);
+  });
+
   it('breaks the tool mix down by effective program, and reports an analysis summary line', () => {
     const text = renderTrajectoryText(buildTrajectory(events, meta()));
     expect(text).toContain('analysis: 1 error');

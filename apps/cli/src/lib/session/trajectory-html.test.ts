@@ -101,6 +101,22 @@ describe('renderTrajectoryHtml — self-contained and safe', () => {
     expect(html).toContain('<div class="detail">');
   });
 
+  it('renders a gap that falls BEFORE the first step (afterOrdinal: 0), not just between steps', () => {
+    // A regression test for the divider loop starting `prevMs` at `null` instead
+    // of the session origin — that silently dropped a leading stall (the gap
+    // record's `afterOrdinal` is 0, since no step precedes it).
+    const leadingGap: SessionEvent[] = [
+      { type: 'message', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', role: 'user', content: 'go' },
+      { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:03:20Z', tool: 'Bash', callId: 'c1', command: 'ls' },
+      { type: 'tool_result', agent: 'claude', timestamp: '2026-08-01T00:03:21Z', tool: 'Bash', callId: 'c1', outcome: 'ok' },
+    ];
+    const traj = buildTrajectory(leadingGap, meta(), { idleThresholdMs: 120_000 });
+    expect(traj.gaps).toEqual([{ startMs: 0, durationMs: 200_000, afterOrdinal: 0 }]);
+    const html = renderTrajectoryHtml(traj);
+    expect(html).toContain('class="gap"');
+    expect(html).toContain('idle 3m20s');
+  });
+
   it('an empty trajectory still renders a valid page (no crash)', () => {
     const html = renderTrajectoryHtml(buildTrajectory([], meta({ agent: 'openclaw' })));
     expect(html).toContain('<!DOCTYPE html>');
