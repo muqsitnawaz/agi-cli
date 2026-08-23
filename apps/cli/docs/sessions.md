@@ -922,6 +922,45 @@ escaped** so a session that printed a `<script>` tag does not ship an executable
 `sessions render` is unaffected by all three. Full detail:
 [`share.md` §Sharing a session](share.md#sharing-a-session).
 
+### Trajectory (`sessions trace`)
+
+`agents sessions trace <selector>` (top-level alias: `agents trace <selector>`) turns
+one session into a derived **trajectory** — a tool-call timeline you read at a glance
+instead of scrolling the Markdown wall. Where `render` is a linear transcript, `trace`
+answers "what ran, in what order, how long each step took, where it errored, and where
+it stalled." It consumes the same normalized `SessionEvent[]` model and computes one
+thing nothing else does: a **per-step duration**, by pairing each `tool_use` with its
+`tool_result` on `callId` (a step falls back to the next-event delta and is marked
+`durationEstimated` when a harness omits the result, so measured and inferred are never
+conflated). It also flags idle gaps (stalls), a per-tool "where the time went" share,
+and tags inline `Task`/`Agent` sub-agents.
+
+One model renders three ways, **auto-selected by audience**:
+
+- **HTML** (default on a TTY — a person): a self-contained page (inline CSS/SVG, no
+  CDN, no external asset, redacted by default — as safe to share as a `sessions share`
+  page) with a tool-call waterfall over a time axis, a "where the time went" bar list,
+  and a per-step detail panel. Opens in your browser; `--no-open` prints the path.
+- **Text** (default when piped/headless — an agent): a compact, ANSI-free,
+  token-bounded trajectory an agent reads in-context. `--errors-only` collapses it to
+  the failures and their neighbours.
+- **`--json`**: the versioned envelope `{ schemaVersion, kind: 'sessions-trace',
+  layout: 'single', sessions: [SessionTrajectory] }` — the stable contract consumers
+  read so nothing re-parses a transcript.
+
+```bash
+agents sessions trace a1b2c3d4                       # open the HTML (a person at a terminal)
+agents sessions trace a1b2c3d4 --text                # compact trajectory (an agent)
+agents sessions trace a1b2c3d4 --text --errors-only  # just the failures + neighbours
+agents sessions trace a1b2c3d4 --json                # the versioned envelope
+agents sessions trace a1b2c3d4 --html -o trace.html --no-open
+```
+
+This release renders **one** session. Passing several selectors fails loud: compare
+(several sessions on a shared axis) and lineage (a parent + its team) land in a
+follow-up PR — never a silent single-session fallback. Everything is derived from the
+event stream; nothing is persisted onto `SessionEvent` or the `tool_calls` index.
+
 ## Live sessions (`--active`) and the interactive browser
 
 **`--browser` switches to a different pool entirely.** `agents sessions --browser`

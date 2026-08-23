@@ -971,6 +971,23 @@ The command surface (bare `sessions [query]`, `preview`, `tail`, `resume`, `deta
   evidence-backed actions, and MUST NOT emit raw transcript text or full local paths.
   `--agent` MUST be repeatable. `--narrative` MAY call a coach only with aggregate
   report data (`commands/insights.ts`; `lib/session/insights.ts`).
+- **SES-IF-4d (MUST).** `sessions trace` and its top-level alias `trace` MUST invoke
+  the same implementation (`commands/sessions-trace.ts` `configureTraceCommand`), and
+  `--json` MUST emit its own versioned envelope
+  (`{ schemaVersion, kind: 'sessions-trace', layout: 'single', sessions: SessionTrajectory[] }`),
+  never the `SessionMeta[]` list or the `{ session, events }` render detail shape. A
+  `SessionTrajectory` MUST carry `spanMs`, `steps[]`, `gaps[]`, `toolTimeShare`,
+  `errorCount`, and `stats`; each `TrajectoryStep` MUST carry `startMs`, `durationMs`,
+  and `durationEstimated`, where per-step `durationMs` is **derived** by pairing a
+  `tool_use` with its `tool_result`/`error` on `callId` (never persisted onto
+  `SessionEvent` or the `tool_calls` index), and `durationEstimated` MUST be `true`
+  whenever the value is the next-event fallback rather than a measured pairing.
+  Concurrent same-tool calls MUST correlate strictly by `callId`, never by arrival
+  order (matching `ToolCallCollector.takePending`). With no `--html/--text/--json`,
+  the rendering MUST be audience-selected: HTML on a TTY, compact text otherwise; the
+  HTML MUST be self-contained (no external asset) and redacted by default. This
+  release renders exactly one session; >1 resolved selector MUST fail loud, never
+  silently trace the first (`commands/sessions-trace.ts`; `lib/session/trajectory.ts`).
 
 #### 4.3 stdout / stderr / exit discipline
 
