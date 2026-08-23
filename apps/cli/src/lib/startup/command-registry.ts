@@ -5,7 +5,7 @@ const LOADED_COMMAND_NAMES = [
   'routines', 'monitors', 'projects', 'run', 'open', 'reconnect', 'fork', 'config',
   'models', 'modes', 'trash', 'restore', 'doctor',
   'route', 'harness', 'harnesses', 'secrets', 'menubar', 'sync',
-  'refresh-rules', 'factory', 'usage', 'insights', 'perf',
+  'refresh-rules', 'factory', 'usage', 'insights', 'trace', 'perf',
   'pty', 'tmux', 'watchdog', 'browser', 'computer', 'logs', 'events',
   'ssh', 'devices', 'fleet', 'repos', 'repo', 'setup', 'uninstall', 'upgrade', 'sessions',
   'teams', 'cloud', 'message', 'send', 'notify', 'feed',

@@ -1,0 +1,331 @@
+/**
+ * Render a {@link SessionTrajectory} as ONE self-contained HTML page for
+ * `agents sessions trace` (single-session layout).
+ *
+ * Self-contained on purpose, exactly like `share-html.ts`: an inline `<style>`,
+ * an inline SVG waterfall, no external asset, no CDN, no web font, no
+ * `artifacts-cli` dependency. The page is safe to open on any box or hand to a
+ * person. All transcript-derived text is escaped with `escapeHtml`, and the
+ * labels are already secret-redacted upstream in `buildTrajectory`.
+ *
+ * Terminal-coded per the agents-cli brand (#0a0a0a bg, #a3e635 lime accent,
+ * JetBrains Mono), light theme under `prefers-color-scheme: light`, with an
+ * in-page toggle — the same shell `share-html.ts` ships.
+ */
+import { formatDuration, formatTokenCount } from './render.js';
+import { escapeHtml } from './share-html.js';
+import type { SessionTrajectory, TrajectoryStep } from './trajectory.js';
+
+/** Color a tool bar by family; an error outcome overrides to red. */
+function toolColor(step: TrajectoryStep): string {
+  if (step.outcome === 'error') return '#f87171';
+  if (step.kind === 'thinking') return '#3a3a55';
+  const tool = (step.tool ?? '').toLowerCase();
+  if (tool === 'bash' || tool === 'shell' || tool.includes('exec') || tool === 'run_command') return '#e0b341';
+  if (tool === 'read' || tool === 'grep' || tool === 'glob' || tool === 'search' || tool === 'codebase_search') return '#4a9eff';
+  if (tool === 'edit' || tool === 'write' || tool === 'notebookedit' || tool === 'multiedit') return '#7ee787';
+  if (tool === 'task' || tool === 'agent') return '#b98cff';
+  return '#8b98a5';
+}
+
+/** Precise per-step duration for the waterfall: "8m04s", "1.6s", "320ms". */
+function formatStepDuration(ms: number): string {
+  if (ms <= 0) return '0s';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+  const totalSec = Math.round(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}m${String(s).padStart(2, '0')}s`;
+}
+
+/** Axis tick labels in minutes across the span. */
+function axisTicks(spanMs: number, count = 4): Array<{ frac: number; label: string }> {
+  if (spanMs <= 0) return [{ frac: 0, label: '0m' }];
+  const ticks: Array<{ frac: number; label: string }> = [];
+  for (let i = 0; i <= count; i++) {
+    const frac = i / count;
+    const min = (spanMs * frac) / 60_000;
+    ticks.push({ frac, label: min >= 1 ? `${Math.round(min)}m` : `${Math.round(spanMs * frac / 1000)}s` });
+  }
+  return ticks;
+}
+
+interface WaterfallGeometry {
+  labelW: number;
+  chartW: number;
+  rowH: number;
+  top: number;
+}
+
+const GEO: WaterfallGeometry = { labelW: 84, chartW: 620, rowH: 20, top: 34 };
+
+function xForMs(startMs: number, spanMs: number): number {
+  const frac = spanMs > 0 ? Math.min(1, Math.max(0, startMs / spanMs)) : 0;
+  return GEO.labelW + frac * GEO.chartW;
+}
+
+function widthForMs(durationMs: number, spanMs: number): number {
+  if (spanMs <= 0) return 3;
+  return Math.max(3, (durationMs / spanMs) * GEO.chartW);
+}
+
+function renderWaterfallSvg(model: SessionTrajectory): string {
+  const { steps, gaps, spanMs } = model;
+  const height = GEO.top + steps.length * GEO.rowH + 16;
+  const width = GEO.labelW + GEO.chartW + 40;
+  const parts: string[] = [];
+  parts.push(`<svg viewBox="0 0 ${width} ${height}" width="100%" role="img" aria-label="Session tool-call waterfall over time" xmlns="http://www.w3.org/2000/svg">`);
+
+  // Axis line + minute ticks.
+  const axisY = GEO.top - 10;
+  parts.push(`<line x1="${GEO.labelW}" y1="${axisY}" x2="${GEO.labelW + GEO.chartW}" y2="${axisY}" class="axis" />`);
+  for (const tick of axisTicks(spanMs)) {
+    const x = GEO.labelW + tick.frac * GEO.chartW;
+    parts.push(`<text x="${x.toFixed(1)}" y="${axisY - 3}" class="tick">${escapeHtml(tick.label)}</text>`);
+  }
+
+  // Idle-gap bands behind the rows.
+  for (const gap of gaps) {
+    const gx = xForMs(gap.startMs, spanMs);
+    const gw = widthForMs(gap.durationMs, spanMs);
+    parts.push(`<rect x="${gx.toFixed(1)}" y="${GEO.top}" width="${gw.toFixed(1)}" height="${steps.length * GEO.rowH}" class="gap" />`);
+    parts.push(`<text x="${(gx + 3).toFixed(1)}" y="${GEO.top + 11}" class="gap-label">idle ${escapeHtml(formatStepDuration(gap.durationMs))}</text>`);
+  }
+
+  // One row per step.
+  steps.forEach((step, i) => {
+    const y = GEO.top + i * GEO.rowH;
+    const barY = y + 3;
+    const barH = GEO.rowH - 8;
+    const x = xForMs(step.startMs, spanMs);
+    const w = widthForMs(step.durationMs, spanMs);
+    const color = toolColor(step);
+    const laneLabel = escapeHtml(step.lane);
+    const dur = formatStepDuration(step.durationMs);
+    const estimatedAttrs = step.durationEstimated ? ' stroke-dasharray="3 2" stroke="' + color + '" fill-opacity="0.35"' : '';
+    parts.push(`<a href="#step-${step.ordinal}">`);
+    parts.push(`<text x="${GEO.labelW - 6}" y="${y + 13}" class="lane" text-anchor="end">${laneLabel}</text>`);
+    parts.push(`<rect x="${x.toFixed(1)}" y="${barY}" width="${w.toFixed(1)}" height="${barH}" rx="2" fill="${color}"${estimatedAttrs}><title>step ${step.ordinal} · ${escapeHtml(step.tool ?? step.kind)} · ${escapeHtml(dur)}${step.durationEstimated ? ' (est)' : ''}</title></rect>`);
+    const textX = x + w + 4;
+    if (textX < width - 30) {
+      parts.push(`<text x="${textX.toFixed(1)}" y="${y + 13}" class="bar-label">${escapeHtml(clipLabel(step.label))} <tspan class="bar-dur">${escapeHtml(dur)}${step.outcome === 'error' ? ' ✗' : ''}</tspan></text>`);
+    }
+    parts.push(`</a>`);
+  });
+
+  parts.push('</svg>');
+  return parts.join('\n');
+}
+
+function clipLabel(label: string): string {
+  return label.length <= 46 ? label : `${label.slice(0, 45)}…`;
+}
+
+function renderTimeShare(model: SessionTrajectory): string {
+  const entries = Object.entries(model.toolTimeShare).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return '<p class="muted">No measured tool time.</p>';
+  const rows = entries.map(([tool, share]) => {
+    const pct = Math.round(share * 100);
+    const color = toolColor({ ordinal: 0, kind: 'tool', tool, lane: tool, startMs: 0, durationMs: 0, durationEstimated: false, label: tool });
+    return `<div class="share-row"><span class="share-name">${escapeHtml(tool)}</span>` +
+      `<span class="share-bar"><span class="share-fill" style="width:${pct}%;background:${color}"></span></span>` +
+      `<span class="share-pct">${pct}%</span></div>`;
+  }).join('\n');
+  return rows;
+}
+
+function renderStepDetail(model: SessionTrajectory): string {
+  return model.steps.map((step) => {
+    const color = toolColor(step);
+    const outcome = step.outcome && step.outcome !== 'unknown'
+      ? `<span class="outcome ${step.outcome}">${step.outcome}</span>` : '';
+    const est = step.durationEstimated ? '<span class="est">estimated</span>' : '';
+    const delegation = step.delegation ? `<span class="tag">${escapeHtml(step.delegation)}</span>` : '';
+    const tokens = step.outputTokens ? `<span class="muted">${formatTokenCount(step.outputTokens)} out</span>` : '';
+    const detail = step.detail ? `<pre class="detail">${escapeHtml(step.detail)}</pre>` : '';
+    return `<div class="step" id="step-${step.ordinal}">
+  <div class="step-head">
+    <span class="dot" style="background:${color}"></span>
+    <span class="step-ord">${step.ordinal}</span>
+    <span class="step-tool">${escapeHtml(step.tool ?? step.kind)}</span>
+    <span class="step-dur">${escapeHtml(formatStepDuration(step.durationMs))}</span>
+    ${outcome} ${est} ${delegation} ${tokens}
+  </div>
+  <div class="step-label">${escapeHtml(step.label)}</div>
+  ${detail}
+</div>`;
+  }).join('\n');
+}
+
+/** Render one session's trajectory as a self-contained HTML page. */
+export function renderTrajectoryHtml(model: SessionTrajectory): string {
+  const { session, stats } = model;
+  const title = `${session.agent} · ${session.shortId || session.id}`;
+  const model2 = session.model ? escapeHtml(session.model) : '';
+  const turns = stats.userTurns + stats.assistantTurns;
+  const metrics: string[] = [];
+  metrics.push(`${formatDuration(model.spanMs)}`);
+  metrics.push(`${stats.toolCount} tool${stats.toolCount === 1 ? '' : 's'}`);
+  if (model.errorCount > 0) metrics.push(`${model.errorCount} error${model.errorCount === 1 ? '' : 's'}`);
+  if (stats.outputTokens > 0) metrics.push(`${formatTokenCount(stats.outputTokens)} out`);
+  if (session.costUsd) metrics.push(`$${session.costUsd.toFixed(2)}`);
+  metrics.push(`${turns} turn${turns === 1 ? '' : 's'}`);
+  const metricLine = metrics.map((m) => escapeHtml(m)).join(' · ');
+
+  const chips: string[] = [];
+  if (session.project) chips.push(`<span class="chip"><span class="k">project</span>${escapeHtml(session.project)}</span>`);
+  if (session.mode) chips.push(`<span class="chip"><span class="k">mode</span>${escapeHtml(session.mode)}</span>`);
+  if (session.gitBranch) chips.push(`<span class="chip"><span class="k">branch</span>${escapeHtml(session.gitBranch)}</span>`);
+  if (session.ticketId) chips.push(`<span class="chip"><span class="k">ticket</span>${escapeHtml(session.ticketId)}</span>`);
+  const date = (session.timestamp || '').slice(0, 10);
+  if (date) chips.push(`<span class="chip"><span class="k">date</span>${escapeHtml(date)}</span>`);
+
+  const gapNote = model.gaps.length > 0
+    ? `<p class="stall">${model.gaps.length} idle gap${model.gaps.length === 1 ? '' : 's'} — longest ${escapeHtml(formatStepDuration(Math.max(...model.gaps.map((g) => g.durationMs))))}.</p>`
+    : '';
+  const truncNote = model.truncatedSteps > 0
+    ? `<p class="stall">Showing the first ${model.steps.length} steps; ${model.truncatedSteps} later step${model.truncatedSteps === 1 ? '' : 's'} collapsed.</p>`
+    : '';
+
+  return `<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>${escapeHtml(title)} — trajectory</title>
+<style>
+  :root {
+    --bg: #0a0a0a; --panel: #121212; --border: #262626; --fg: #e5e5e5;
+    --dim: #737373; --accent: #a3e635; --quote: #1a1a1a;
+  }
+  html[data-theme="light"] {
+    --bg: #fafafa; --panel: #ffffff; --border: #e5e5e5; --fg: #171717;
+    --dim: #737373; --accent: #4d7c0f; --quote: #f5f5f5;
+  }
+  @media (prefers-color-scheme: light) {
+    html[data-theme="auto"] {
+      --bg: #fafafa; --panel: #ffffff; --border: #e5e5e5; --fg: #171717;
+      --dim: #737373; --accent: #4d7c0f; --quote: #f5f5f5;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+    font-size: 14px; line-height: 1.6;
+  }
+  header { border-bottom: 1px solid var(--border); padding: 24px 20px 18px; }
+  header .inner, main { max-width: 960px; margin: 0 auto; }
+  header .mark {
+    color: var(--accent); font-weight: 700; letter-spacing: .5px; font-size: 12px;
+    text-transform: uppercase; font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  }
+  header h1 { font-size: 20px; line-height: 1.3; margin: 8px 0 8px; font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; }
+  .metrics { color: var(--dim); font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 13px; margin-bottom: 12px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 11px;
+    color: var(--fg); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 2px 9px;
+  }
+  .chip .k { color: var(--dim); margin-right: 6px; }
+  .toggle {
+    float: right; cursor: pointer; background: none; border: 1px solid var(--border);
+    color: var(--dim); border-radius: 6px; padding: 2px 8px; font-size: 14px;
+  }
+  main { padding: 20px 20px 64px; }
+  h2 {
+    font-size: 12px; color: var(--accent); border-bottom: 1px solid var(--border);
+    padding-bottom: 6px; margin: 32px 0 14px; text-transform: uppercase;
+    letter-spacing: 1px; font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  }
+  .stall { color: #e0b341; font-size: 12.5px; margin: 6px 0; }
+  .muted { color: var(--dim); }
+  svg text { font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; }
+  svg .axis { stroke: var(--border); stroke-width: 1; }
+  svg .tick { fill: var(--dim); font-size: 8px; }
+  svg .lane { fill: var(--dim); font-size: 9px; }
+  svg .bar-label { fill: var(--dim); font-size: 8.5px; }
+  svg .bar-dur { fill: var(--fg); }
+  svg .gap { fill: #7a3030; fill-opacity: 0.12; }
+  svg .gap-label { fill: #c06a6a; font-size: 8px; }
+  svg a { cursor: pointer; }
+  .share-row { display: flex; align-items: center; gap: 10px; margin: 5px 0; font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 12px; }
+  .share-name { width: 120px; color: var(--fg); }
+  .share-bar { flex: 1; height: 9px; background: var(--panel); border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+  .share-fill { display: block; height: 100%; }
+  .share-pct { width: 44px; text-align: right; color: var(--dim); }
+  .steps { display: flex; flex-direction: column; gap: 4px; }
+  .step { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: var(--panel); scroll-margin-top: 16px; }
+  .step:target { border-color: var(--accent); }
+  .step-head { display: flex; align-items: center; gap: 8px; font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 12px; flex-wrap: wrap; }
+  .dot { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  .step-ord { color: var(--dim); width: 28px; }
+  .step-tool { color: var(--fg); font-weight: 600; }
+  .step-dur { color: var(--dim); }
+  .outcome { font-size: 11px; padding: 0 6px; border-radius: 8px; }
+  .outcome.ok { color: #7ee787; }
+  .outcome.error { color: #f87171; }
+  .est { color: #e0b341; font-size: 11px; }
+  .tag { color: #b98cff; font-size: 11px; }
+  .step-label { margin-top: 4px; font-family: ui-monospace, "JetBrains Mono", Menlo, monospace; font-size: 12px; color: var(--fg); word-break: break-word; }
+  pre.detail {
+    margin: 6px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; overflow-x: auto; font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+    font-size: 11.5px; color: var(--dim); white-space: pre-wrap; word-break: break-word;
+  }
+  footer {
+    max-width: 960px; margin: 0 auto; padding: 0 20px 48px;
+    color: var(--dim); font-size: 12px;
+    font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="inner">
+    <button class="toggle" id="theme" title="Toggle light and dark">&#9689;</button>
+    <div class="mark">agents session trace</div>
+    <h1>${escapeHtml(title)}${model2 ? ` <span class="muted">${model2}</span>` : ''}</h1>
+    <div class="metrics">${metricLine}</div>
+    <div class="chips">
+      ${chips.join('\n      ')}
+    </div>
+  </div>
+</header>
+<main>
+  <h2>Trajectory</h2>
+  ${gapNote}
+  ${truncNote}
+  ${renderWaterfallSvg(model)}
+  <h2>Where the time went</h2>
+  ${renderTimeShare(model)}
+  <h2>Steps</h2>
+  <div class="steps">
+    ${renderStepDetail(model)}
+  </div>
+</main>
+<footer>
+  ${model.truncatedSteps > 0 ? 'Truncated · ' : ''}Secret-redacted trajectory rendered by agents-cli &middot; <code>agents sessions trace</code>
+</footer>
+<script>
+  (function () {
+    var root = document.documentElement;
+    var saved = null;
+    try { saved = localStorage.getItem('agents-share-theme'); } catch (e) {}
+    if (saved) root.setAttribute('data-theme', saved);
+    var toggle = document.getElementById('theme');
+    if (toggle) toggle.addEventListener('click', function () {
+      var dark = getComputedStyle(root).getPropertyValue('--bg').trim() === '#0a0a0a';
+      var next = dark ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem('agents-share-theme', next); } catch (e) {}
+    });
+  })();
+</script>
+</body>
+</html>
+`;
+}

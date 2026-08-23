@@ -297,6 +297,11 @@ agents sessions render a1b2c3d4 -o session.md
 # Or publish it as a link in one step (unlisted + redacted by default)
 agents sessions share a1b2c3d4
 
+# Visualize a session as a trajectory -- tool-call waterfall, timing, stalls, errors
+agents trace a1b2c3d4                    # opens the HTML (a person at a terminal)
+agents trace a1b2c3d4 --text --errors-only   # compact text an agent reads in-context
+agents sessions trace a1b2c3d4 --json    # the versioned sessions-trace envelope
+
 # Just the last 3 turns, user messages only
 agents sessions a1b2c3d4 --last 3 --include user
 
