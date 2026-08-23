@@ -31,6 +31,28 @@ describe('buildTrajectory — durations by callId pairing', () => {
     expect(step.durationEstimated).toBe(false);
     expect(step.outcome).toBe('error');
     expect(step.startMs).toBe(2_000); // 2s after the first event
+    expect(step.program).toBe('bun'); // effective program from the shell parser
+    expect(step.exitCode).toBe(1); // carried from the paired result
+  });
+
+  it('labels a Bash step by its effective program, unwrapping/skipping shell noise', () => {
+    const cmd = (command: string, callId: string): SessionEvent[] => [
+      { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', tool: 'Bash', callId, command },
+      { type: 'tool_result', agent: 'claude', timestamp: '2026-08-01T00:00:01Z', tool: 'Bash', callId, outcome: 'ok' },
+    ];
+    const prog = (command: string) => buildTrajectory(cmd(command, 'x'), meta()).steps[0].program;
+    expect(prog('git -C /repo push origin HEAD:main')).toBe('git');
+    expect(prog('export FOO=bar; gh pr create --base main')).toBe('gh'); // export skipped
+    expect(prog('cd apps/cli && bun test')).toBe('bun'); // cd skipped
+    expect(prog('cat file.txt')).toBe('cat');
+  });
+
+  it('leaves non-shell tools without a program', () => {
+    const events: SessionEvent[] = [
+      { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', tool: 'Read', callId: 'r', args: { file_path: 'a.ts' } },
+      { type: 'tool_result', agent: 'claude', timestamp: '2026-08-01T00:00:01Z', tool: 'Read', callId: 'r', outcome: 'ok' },
+    ];
+    expect(buildTrajectory(events, meta()).steps[0].program).toBeUndefined();
   });
 
   it('falls back to next-event delta with durationEstimated when no result is paired', () => {
