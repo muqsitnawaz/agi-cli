@@ -138,6 +138,37 @@ describe('buildTrajectory — gaps, tokens, delegation, shares', () => {
   });
 });
 
+describe('buildTrajectory — program + exit code (reused from tool-calls.ts)', () => {
+  it('extracts the effective program from a shell step, not the wrapper', () => {
+    const events: SessionEvent[] = [
+      { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', tool: 'Bash', callId: 'c1', command: 'git push && gh pr create' },
+      { type: 'tool_result', agent: 'claude', timestamp: '2026-08-01T00:00:01Z', tool: 'Bash', callId: 'c1', outcome: 'ok' },
+    ];
+    const step = buildTrajectory(events, meta()).steps[0];
+    expect(step.program).toBe('git');
+  });
+
+  it('carries the exit code from a failing command onto the step', () => {
+    const events: SessionEvent[] = [
+      { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', tool: 'Bash', callId: 'c1', command: 'bun test' },
+      { type: 'tool_result', agent: 'claude', timestamp: '2026-08-01T00:00:01Z', tool: 'Bash', callId: 'c1', outcome: 'error', exitCode: 1, output: 'failing' },
+    ];
+    const step = buildTrajectory(events, meta()).steps[0];
+    expect(step.exitCode).toBe(1);
+    expect(step.program).toBe('bun');
+  });
+
+  it('leaves program undefined for a non-shell tool', () => {
+    const events: SessionEvent[] = [
+      { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', tool: 'Read', callId: 'r1', args: { file_path: 'a.ts' } },
+      { type: 'tool_result', agent: 'claude', timestamp: '2026-08-01T00:00:01Z', tool: 'Read', callId: 'r1', outcome: 'ok' },
+    ];
+    const step = buildTrajectory(events, meta()).steps[0];
+    expect(step.program).toBeUndefined();
+    expect(step.exitCode).toBeUndefined();
+  });
+});
+
 describe('buildTrajectory — redaction and safety', () => {
   it('redacts a secret in a derived label by default, and passes it through with redact:false', () => {
     const secret = 'sk-supersecrettoken1234567890';

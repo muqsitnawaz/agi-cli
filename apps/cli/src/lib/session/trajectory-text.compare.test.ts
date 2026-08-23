@@ -52,6 +52,22 @@ describe('renderTrajectoryCompareText', () => {
     expect(text).toContain('only in claude sess0001 (0): none');
   });
 
+  it('badges a shell step in the diff by its effective program, and shows the exit code', () => {
+    const a = buildTrajectory(eventsA, meta({ id: 'a', agent: 'claude' }));
+    // b keeps the matching `git fetch` Bash step (aligns as "same") plus a
+    // second, unmatched, FAILING `bun test` Bash step — so it lands in `added`.
+    const bEvents: SessionEvent[] = [
+      { type: 'tool_use', agent: 'codex', timestamp: '2026-08-01T00:00:00Z', tool: 'Bash', callId: 'b1', command: 'git fetch' },
+      { type: 'tool_result', agent: 'codex', timestamp: '2026-08-01T00:00:02Z', tool: 'Bash', callId: 'b1', outcome: 'ok' },
+      { type: 'tool_use', agent: 'codex', timestamp: '2026-08-01T00:00:03Z', tool: 'Bash', callId: 'x1', command: 'bun test' },
+      { type: 'tool_result', agent: 'codex', timestamp: '2026-08-01T00:00:04Z', tool: 'Bash', callId: 'x1', outcome: 'error', exitCode: 1 },
+    ];
+    const b = buildTrajectory(bEvents, meta({ id: 'b', agent: 'codex' }));
+    const text = renderTrajectoryCompareText(diffTrajectories(a, b));
+    expect(text).toMatch(/\bbun\b.*exit 1/);
+    expect(text).not.toContain('Bash   bun test');
+  });
+
   it('caps the diff lines with maxDiffLines and counts the rest', () => {
     const manyEvents: SessionEvent[] = [];
     for (let i = 0; i < 20; i++) {

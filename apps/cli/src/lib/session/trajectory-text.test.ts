@@ -33,9 +33,10 @@ describe('renderTrajectoryText', () => {
     expect(text).toContain('1✗');
   });
 
-  it('lists steps with tool, label, duration, and marks the error', () => {
+  it('lists steps with the effective PROGRAM (not the raw tool), duration, and exit code', () => {
     const text = renderTrajectoryText(buildTrajectory(events, meta()));
-    expect(text).toMatch(/Bash\s+bun test exec\.test\.ts\s+8m04s ✗/);
+    // "bun" is the effective program of `bun test exec.test.ts` — never the naive "Bash".
+    expect(text).toMatch(/bun\s+bun test exec\.test\.ts\s+8m04s exit 1 ✗/);
     expect(text).toContain('exit 1 · 2 failing'); // error evidence line
   });
 
@@ -71,6 +72,22 @@ describe('renderTrajectoryText', () => {
     const text = renderTrajectoryText(buildTrajectory(many, meta()), { maxSteps: 50 });
     expect(text.split('\n').length).toBeLessThan(70); // bounded, not 300 lines
     expect(text).toMatch(/… \d+ more steps/);
+  });
+
+  it('renders an idle gap as a divider between the steps it falls between, not a wall-clock axis', () => {
+    const withGap: SessionEvent[] = [
+      { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', tool: 'Bash', callId: 'c1', command: 'ls' },
+      { type: 'tool_result', agent: 'claude', timestamp: '2026-08-01T00:00:01Z', tool: 'Bash', callId: 'c1', outcome: 'ok' },
+      { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:03:11Z', tool: 'Read', callId: 'r1', args: { file_path: 'a' } },
+    ];
+    const text = renderTrajectoryText(buildTrajectory(withGap, meta(), { idleThresholdMs: 120_000 }));
+    expect(text).toMatch(/···\s+idle 3m10s\s+···/);
+  });
+
+  it('breaks the tool mix down by effective program, and reports an analysis summary line', () => {
+    const text = renderTrajectoryText(buildTrajectory(events, meta()));
+    expect(text).toContain('analysis: 1 error');
+    expect(text).toMatch(/tool mix: .*\bbun 1\b/);
   });
 
   it('redacts a secret in a step label', () => {

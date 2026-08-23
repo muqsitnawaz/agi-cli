@@ -56,16 +56,49 @@ describe('renderTrajectoryHtml — self-contained and safe', () => {
     expect(html).not.toContain('Secret-redacted trajectory');
   });
 
-  it('renders the waterfall, time-share, and per-step detail sections', () => {
+  it('renders the analysis hero and the step-ordered trajectory', () => {
     const html = renderTrajectoryHtml(buildTrajectory(events, meta()));
-    expect(html).toContain('<svg');
     expect(html).toContain('Where the time went');
-    expect(html).toContain('id="step-1"');
+    expect(html).toContain('Slowest steps');
+    expect(html).toContain('Tool mix');
     expect(html).toContain('exec.ts');
-    // An error outcome shows as a red-classed outcome badge.
-    expect(html).toContain('outcome error');
-    // The Bash step dominates the time share.
-    expect(html).toMatch(/share-fill/);
+    // The failing Bash step shows its exit code, and the error styling.
+    expect(html).toContain('exit 1');
+    expect(html).toContain('class="step error"');
+    // The Bash step's effective program (bun) badges the row, not the raw tool name.
+    expect(html).toContain('>bun<');
+  });
+
+  it('renders program badges, breaking a Bash step down by its effective program', () => {
+    const gitAndGh: SessionEvent[] = [
+      { type: 'tool_use', agent: 'claude', timestamp: '2026-08-01T00:00:00Z', tool: 'Bash', callId: 'c1', command: 'git push && gh pr create' },
+      { type: 'tool_result', agent: 'claude', timestamp: '2026-08-01T00:00:01Z', tool: 'Bash', callId: 'c1', outcome: 'ok' },
+    ];
+    const html = renderTrajectoryHtml(buildTrajectory(gitAndGh, meta()));
+    expect(html).toContain('>git<');
+    // Never the naive "Bash 100%" — program-aware, not tool-lumped.
+    expect(html).not.toMatch(/>Bash<\/span>/);
+  });
+
+  it('folds a run of ≥3 consecutive fast same-program calls into one expander', () => {
+    const events3: SessionEvent[] = [];
+    for (let i = 0; i < 4; i++) {
+      events3.push({ type: 'tool_use', agent: 'claude', timestamp: `2026-08-01T00:00:0${i}Z`, tool: 'Bash', callId: `c${i}`, command: 'ls' });
+      events3.push({ type: 'tool_result', agent: 'claude', timestamp: `2026-08-01T00:00:0${i}Z`, tool: 'Bash', callId: `c${i}`, outcome: 'ok' });
+    }
+    const html = renderTrajectoryHtml(buildTrajectory(events3, meta()));
+    expect(html).toContain('class="grp"');
+    expect(html).toContain('&#215;4'); // ×4
+  });
+
+  it('the expanded detail renders as a full-width BLOCK sibling of summary, never inside a grid container', () => {
+    const html = renderTrajectoryHtml(buildTrajectory(events, meta()));
+    // The bug this design fixes: grid on <details> collapses .detail into a
+    // narrow column. The container rule must be display:block, and the grid
+    // must apply only to the row (.norow / > summary), never to .step itself.
+    expect(html).toMatch(/\.step,\s*details\.grp\s*\{\s*display:\s*block;\s*\}/);
+    expect(html).not.toMatch(/details\.step\s*\{[^}]*display:\s*grid/);
+    expect(html).toContain('<div class="detail">');
   });
 
   it('an empty trajectory still renders a valid page (no crash)', () => {

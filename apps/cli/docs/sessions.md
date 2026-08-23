@@ -957,18 +957,30 @@ normalized `SessionEvent[]` model and computes one thing nothing else does: a
 **per-step duration**, by pairing each `tool_use` with its `tool_result` on `callId` (a
 step falls back to the next-event delta and is marked `durationEstimated` when a
 harness omits the result, so measured and inferred are never conflated). It also flags
-idle gaps (stalls), a per-tool "where the time went" share, and tags inline
-`Task`/`Agent` sub-agents.
+idle gaps (stalls), a per-tool "where the time went" share, tags inline `Task`/`Agent`
+sub-agents, and — reusing the real bash parser behind `sessions-tool-index`
+(`shell-programs.ts` via `tool-calls.ts`) — attributes each shell step to its
+**effective program** (`git`, `gh`, `bun`, …) plus the process **exit code**, so a
+step never reads as an undifferentiated "Bash".
 
 One model renders three ways, **auto-selected by audience**:
 
-- **HTML** (default on a TTY — a person): a self-contained page (inline CSS/SVG, no
+- **HTML** (default on a TTY — a person): a self-contained page (inline CSS, no
   CDN, no external asset, redacted by default — as safe to share as a `sessions share`
-  page) with a tool-call waterfall over a time axis, a "where the time went" bar list,
-  and a per-step detail panel. Opens in your browser; `--no-open` prints the path.
+  page), led by an **analysis hero** — a "where the time went" stacked bar, the
+  slowest steps, a tool-mix histogram broken down by effective program (never
+  lumped as "Bash"), and headline KPIs (errors, idle total, longest gap) — followed
+  by the **trajectory itself in execution order** (never a wall-clock axis): one row
+  per step badged by its program/tool, duration heat-colored (grey/amber/red),
+  the exit code shown on a failing step, a run of ≥3 fast same-program calls folded
+  into one `×N` expander, and idle gaps rendered as centered `··· idle 3m ···`
+  dividers. Any row carrying redacted output expands inline. Opens in your browser;
+  `--no-open` prints the path.
 - **Text** (default when piped/headless — an agent): a compact, ANSI-free,
-  token-bounded trajectory an agent reads in-context. `--errors-only` collapses it to
-  the failures and their neighbours.
+  token-bounded trajectory an agent reads in-context — one line per step (program
+  badge, label, duration, exit code), idle gaps as inline dividers, and an analysis
+  summary (errors, idle total, longest gap, tool mix by program). `--errors-only`
+  collapses it to the failures and their neighbours.
 - **`--json`**: the versioned envelope `{ schemaVersion, kind: 'sessions-trace',
   layout: 'single' | 'compare' | 'lineage', sessions: [SessionTrajectory], diff?,
   lineage? }` — the stable contract consumers read so nothing re-parses a transcript.
@@ -999,9 +1011,12 @@ Useful for "the same ticket run by Claude and Codex — where did they diverge?"
 passing run vs. a failing retry — what did the failing one do extra?"
 
 - **HTML**: two stacked lanes on one time axis, a dashed divergence marker, a summary
-  table, and the "only in the first" / "only in the second" step lists.
+  table, and the "only in the first" / "only in the second" step lists — each entry
+  badged by its effective program (not the raw tool) and carrying its exit code on
+  a failing step, the same design language as the single-session view.
 - **Text**: both sessions' headline stats, the divergence line, and the capped diff
-  lists — token-bounded the same way the single-session text trajectory is.
+  lists — token-bounded the same way the single-session text trajectory is, and
+  program/exit-code labeled the same way too.
 - **`--json`**: `layout: 'compare'`, `sessions: [a, b]` (the two full
   `SessionTrajectory` models — nothing re-parses either transcript), and `diff:
   { divergence?, added, removed, summaryA, summaryB, truncatedA, truncatedB }`.

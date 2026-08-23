@@ -39,9 +39,16 @@ function dur(ms: number, estimated: boolean): string {
 }
 
 function outcomeMark(step: TrajectoryStep): string {
-  if (step.outcome === 'error') return '✗';
+  if (step.outcome === 'error') {
+    return typeof step.exitCode === 'number' ? `exit ${step.exitCode} ✗` : '✗';
+  }
   if (step.outcome === 'ok') return 'ok';
   return '';
+}
+
+/** The label a row leads with — the effective shell program for a Bash-family step, else the tool/kind. */
+function stepBadgeLabel(step: TrajectoryStep): string {
+  return step.program ?? step.tool ?? step.kind;
 }
 
 function pad(text: string, width: number): string {
@@ -60,6 +67,29 @@ function shareLine(model: SessionTrajectory): string | undefined {
     .slice(0, 5)
     .map(([tool, share]) => `${tool} ${Math.round(share * 100)}%`);
   return entries.length > 0 ? `where the time went: ${entries.join('  ')}` : undefined;
+}
+
+/** Tool mix broken down by EFFECTIVE PROGRAM for a shell step, never lumped as "Bash". */
+function toolMixLine(model: SessionTrajectory): string | undefined {
+  const counts = new Map<string, number>();
+  for (const step of model.steps) {
+    if (step.kind !== 'tool') continue;
+    const label = stepBadgeLabel(step);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const entries = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6);
+  return entries.length > 0 ? `tool mix: ${entries.map(([tool, count]) => `${tool} ${count}`).join('  ')}` : undefined;
+}
+
+/** One-line analysis summary: error count, idle total, longest gap. */
+function analysisLine(model: SessionTrajectory): string | undefined {
+  const idleTotal = model.gaps.reduce((n, g) => n + g.durationMs, 0);
+  const longestGap = model.gaps.reduce((m, g) => Math.max(m, g.durationMs), 0);
+  const bits: string[] = [];
+  if (model.errorCount > 0) bits.push(`${model.errorCount} error${model.errorCount === 1 ? '' : 's'}`);
+  if (idleTotal > 0) bits.push(`idle ${dur(idleTotal, false)} total`);
+  if (longestGap > 0) bits.push(`longest gap ${dur(longestGap, false)}`);
+  return bits.length > 0 ? `analysis: ${bits.join(' · ')}` : undefined;
 }
 
 /** Select the steps to print: all of them, or (errorsOnly) errors + neighbours. */
@@ -109,35 +139,64 @@ export function renderTrajectoryText(
     return lines.join('\n') + '\n';
   }
 
-  // Idle stalls, most notable first.
-  for (const gap of [...model.gaps].sort((a, b) => b.durationMs - a.durationMs).slice(0, 4)) {
-    lines.push(`idle ${dur(gap.durationMs, false)} after step ${gap.afterOrdinal} (stall)`);
-  }
+  // Analysis summary — errors, idle total, longest gap.
+  const analysis = analysisLine(model);
+  if (analysis) lines.push(analysis);
 
-  // Steps.
-  const selected = selectSteps(model.steps, errorsOnly);
-  let printed = 0;
+  const stepLine = (step: TrajectoryStep): string => {
+    const ord = pad(String(step.ordinal).padStart(2, '0'), 3);
+    const tool = pad(stepBadgeLabel(step), 6);
+    const label = pad(clipLabel(step.label), LABEL_COL);
+    const mark = outcomeMark(step);
+    return `${ord} ${tool} ${label} ${dur(step.durationMs, step.durationEstimated)}${mark ? ' ' + mark : ''}`.trimEnd();
+  };
+
   let omitted = 0;
-  for (const entry of selected) {
-    if (entry === 'gap') { lines.push('  …'); continue; }
-    if (printed >= maxSteps) { omitted++; continue; }
-    const ord = pad(String(entry.ordinal).padStart(2, '0'), 3);
-    const tool = pad(entry.tool ?? entry.kind, 6);
-    const label = pad(clipLabel(entry.label), LABEL_COL);
-    const mark = outcomeMark(entry);
-    lines.push(`${ord} ${tool} ${label} ${dur(entry.durationMs, entry.durationEstimated)}${mark ? ' ' + mark : ''}`.trimEnd());
-    // A short, indented evidence line for an error step.
-    if (entry.outcome === 'error' && entry.detail) {
-      lines.push(`     ${clipLabel(entry.detail)}`);
+  if (errorsOnly) {
+    // Collapsed to error steps and their neighbours — omitted ranges shown as '  …'.
+    const selected = selectSteps(model.steps, true);
+    let printed = 0;
+    for (const entry of selected) {
+      if (entry === 'gap') { lines.push('  …'); continue; }
+      if (printed >= maxSteps) { omitted++; continue; }
+      lines.push(stepLine(entry));
+      if (entry.outcome === 'error' && entry.detail) lines.push(`     ${clipLabel(entry.detail)}`);
+      printed++;
     }
-    printed++;
+  } else {
+    // Full run, step-ordered, with idle gaps rendered as dividers between the
+    // steps they actually fall between — never a wall-clock axis.
+    const gapsSorted = [...model.gaps].sort((a, b) => a.startMs - b.startMs);
+    let gapIdx = 0;
+    // A gap may fall BEFORE the first step (`afterOrdinal: 0`), so start
+    // `prevMs` at the session origin, not `null` — else a leading stall is
+    // silently dropped.
+    let prevMs = 0;
+    let printed = 0;
+    const emitGapsBefore = (curMs: number): void => {
+      while (gapIdx < gapsSorted.length && gapsSorted[gapIdx].startMs >= prevMs && gapsSorted[gapIdx].startMs < curMs) {
+        lines.push(`  ···  idle ${dur(gapsSorted[gapIdx].durationMs, false)}  ···`);
+        gapIdx++;
+      }
+    };
+    for (const step of model.steps) {
+      emitGapsBefore(step.startMs);
+      if (printed >= maxSteps) { omitted++; prevMs = step.startMs; continue; }
+      lines.push(stepLine(step));
+      if (step.outcome === 'error' && step.detail) lines.push(`     ${clipLabel(step.detail)}`);
+      printed++;
+      prevMs = step.startMs;
+    }
+    emitGapsBefore(Number.POSITIVE_INFINITY);
   }
   if (omitted > 0) lines.push(`  … ${omitted} more step${omitted === 1 ? '' : 's'} (raise --json for the full model)`);
   if (model.truncatedSteps > 0) lines.push(`  … ${model.truncatedSteps} step${model.truncatedSteps === 1 ? '' : 's'} collapsed by the render cap`);
 
-  // Where the time went.
+  // Where the time went / tool mix.
   const share = shareLine(model);
   if (share) lines.push(share);
+  const mix = toolMixLine(model);
+  if (mix) lines.push(mix);
 
   return lines.join('\n') + '\n';
 }
@@ -166,7 +225,7 @@ function diffColumn(heading: string, steps: TrajectoryStep[], maxLines: number):
   const shown = steps.slice(0, maxLines);
   for (const step of shown) {
     const mark = outcomeMark(step);
-    lines.push(`  ${pad(step.tool ?? step.kind, 6)} ${pad(clipLabel(step.label), LABEL_COL)} ${dur(step.durationMs, step.durationEstimated)}${mark ? ' ' + mark : ''}`.trimEnd());
+    lines.push(`  ${pad(stepBadgeLabel(step), 6)} ${pad(clipLabel(step.label), LABEL_COL)} ${dur(step.durationMs, step.durationEstimated)}${mark ? ' ' + mark : ''}`.trimEnd());
   }
   const omitted = steps.length - shown.length;
   if (omitted > 0) lines.push(`  … ${omitted} more`);

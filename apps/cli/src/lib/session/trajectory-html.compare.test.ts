@@ -66,6 +66,22 @@ describe('renderTrajectoryCompareHtml — self-contained and safe', () => {
     expect(html).toContain('Only in codex');
   });
 
+  it('badges a shell step by its effective program and shows an exit code in the diff list', () => {
+    const a = buildTrajectory(eventsA, meta({ id: 'a', agent: 'claude' }));
+    // b keeps the matching `git fetch` Bash step (aligns as "same") plus a
+    // second, unmatched, FAILING `bun test` Bash step — so it lands in `added`.
+    const bEvents: SessionEvent[] = [
+      { type: 'tool_use', agent: 'codex', timestamp: '2026-08-01T00:00:00Z', tool: 'Bash', callId: 'b1', command: 'git fetch' },
+      { type: 'tool_result', agent: 'codex', timestamp: '2026-08-01T00:00:02Z', tool: 'Bash', callId: 'b1', outcome: 'ok' },
+      { type: 'tool_use', agent: 'codex', timestamp: '2026-08-01T00:00:03Z', tool: 'Bash', callId: 'x1', command: 'bun test' },
+      { type: 'tool_result', agent: 'codex', timestamp: '2026-08-01T00:00:04Z', tool: 'Bash', callId: 'x1', outcome: 'error', exitCode: 1 },
+    ];
+    const b = buildTrajectory(bEvents, meta({ id: 'b', agent: 'codex' }));
+    const html = renderTrajectoryCompareHtml(diffTrajectories(a, b));
+    expect(html).toContain('>bun<');
+    expect(html).toContain('exit 1');
+  });
+
   it('an identical pair still renders and states there is no divergence', () => {
     const a = buildTrajectory(eventsA, meta({ id: 'a' }));
     const b = buildTrajectory(eventsA, meta({ id: 'b' }));

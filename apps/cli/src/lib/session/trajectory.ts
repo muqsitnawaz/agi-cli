@@ -22,6 +22,7 @@
  */
 import { redactSecrets } from '../redact.js';
 import { computeSummaryStats, type SessionStats } from './render.js';
+import { toolCallsFromEvents, type IndexedToolCall } from './tool-calls.js';
 import type { SessionEvent, SessionMeta } from './types.js';
 
 /** One drawable step on a session's trajectory — a tool call or a thinking block. */
@@ -55,6 +56,14 @@ export interface TrajectoryStep {
   outputTokens?: number;
   /** Harness-native call identity, when present. */
   callId?: string;
+  /**
+   * The effective shell program for a shell-tool step (`git`, `gh`, `bun`, …),
+   * from the real bash parser behind `tool-calls.ts` — never a naive prefix
+   * split. Undefined for a non-shell tool or an unparseable command.
+   */
+  program?: string;
+  /** Process exit code from the paired result, when the harness reported one. */
+  exitCode?: number;
 }
 
 /** An idle stall between two events — a candidate "where did it hang" marker. */
@@ -218,6 +227,25 @@ export function buildTrajectory(
   const firstTs = stats.firstTs;
   const spanMs = stats.lastTs > stats.firstTs ? stats.lastTs - stats.firstTs : 0;
 
+  // Reuse the real bash parser behind `tool-calls.ts` — never reimplement shell
+  // parsing here. Correlate its `IndexedToolCall`s back to this module's own
+  // tool_use drafts by (tool, timestamp) in FIFO order: both walk the same
+  // `events` array in the same order, so encounter order is a reliable join key
+  // even where a harness omits `callId`.
+  const indexedCalls = toolCallsFromEvents(events);
+  const callsByKey = new Map<string, IndexedToolCall[]>();
+  for (const call of indexedCalls) {
+    const key = `${call.tool} ${call.timestamp}`;
+    const queue = callsByKey.get(key);
+    if (queue) queue.push(call);
+    else callsByKey.set(key, [call]);
+  }
+  const takeIndexedCall = (tool: string, timestamp: string): IndexedToolCall | undefined => {
+    const key = `${tool} ${timestamp}`;
+    const queue = callsByKey.get(key);
+    return queue && queue.length > 0 ? queue.shift() : undefined;
+  };
+
   // Absolute ms per event index (NaN when the timestamp is unparseable).
   const eventMs = events.map((e) => toMs(e.timestamp));
   // The next event index (after i) that carries a valid timestamp — the anchor
@@ -251,6 +279,8 @@ export function buildTrajectory(
     } else if (e.type === 'tool_use' && !e._local) {
       const tool = e.tool || 'unknown';
       const draftIndex = drafts.length;
+      const indexedCall = takeIndexedCall(tool, e.timestamp);
+      const effectiveProgram = indexedCall?.programOccurrences.find((o) => o.role === 'effective')?.program;
       drafts.push({
         step: {
           ordinal: 0,
@@ -264,6 +294,8 @@ export function buildTrajectory(
           label: toolLabel(tool, e.args, e.command, redact, knownSecrets),
           delegation: INLINE_TASK_TOOLS.has(tool) ? 'inline-task' : undefined,
           callId: e.callId,
+          program: effectiveProgram ?? indexedCall?.programs[0],
+          exitCode: indexedCall?.exitCode,
         },
         eventIndex: i,
         callId: e.callId,
