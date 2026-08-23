@@ -11,6 +11,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { parseCodex, parseCodexContent, summarizeToolUse, applyPatchTargetPaths } from '../parse.js';
+import { commandsFromCodexExec } from '../tool-calls.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixture = path.join(here, '..', 'testdata', 'codex-custom-tools.jsonl');
@@ -72,6 +73,82 @@ describe('parseCodex apply_patch (custom_tool_call)', () => {
       '/tmp/proj/b.ts',
       '/tmp/proj/c.ts',
     ]);
+  });
+});
+
+describe('newer Codex exec cell (custom_tool_call name=exec)', () => {
+  // gpt-5.6-sol wraps every shell command in a JS cell: name="exec",
+  // input=`await tools.exec_command({cmd:"…"})`. Without unwrapping, the whole
+  // trajectory reads as an opaque wall of "exec" (the bug this fixes).
+  // The canonical acorn-based extractor (shared with the tool-call index) is what
+  // parse.ts reuses — it walks the whole AST, so it captures EVERY command in a
+  // multi-exec cell and never mistakes a comment/string for an invocation.
+  test('commandsFromCodexExec captures every command, including parallel ones, and ignores comments', () => {
+    expect(commandsFromCodexExec('const r = await tools.exec_command({cmd:"git status --short","workdir":"/x"});'))
+      .toEqual(['git status --short']);
+    // Nested escaped quotes (codex quotes ssh payloads) survive.
+    expect(commandsFromCodexExec('await tools.exec_command({cmd:"agents ssh zion \\"hostname\\""})'))
+      .toEqual(['agents ssh zion "hostname"']);
+    // Promise.all of several exec calls — ALL commands, not just the first (~1.6% of real cells).
+    expect(commandsFromCodexExec('await Promise.all([tools.exec_command({cmd:"bun test a"}), tools.exec_command({cmd:"bun test b"})]);'))
+      .toEqual(['bun test a', 'bun test b']);
+    // A shell-shaped string only in a comment is NOT an invocation.
+    expect(commandsFromCodexExec('// call tools.exec_command({cmd:"rm -rf /"}) if needed\nconst x = 1;'))
+      .toEqual([]);
+    // Non-shell cells (image view, raw JS computation) yield no shell command.
+    expect(commandsFromCodexExec('const r = await tools.view_image({path:"/tmp/a.png"});')).toEqual([]);
+    expect(commandsFromCodexExec('const meta = ALL_TOOLS.filter(x => x.name);')).toEqual([]);
+    expect(commandsFromCodexExec('')).toEqual([]);
+  });
+
+  test('parseCodexContent sets command on the exec tool_use so it reads by program', () => {
+    const content = JSON.stringify({
+      type: 'response_item',
+      timestamp: '2026-08-23T00:00:00Z',
+      payload: {
+        type: 'custom_tool_call',
+        id: 'ctc_exec',
+        call_id: 'call_exec',
+        name: 'exec',
+        input: 'const r = await tools.exec_command({cmd:"git fetch origin && git rebase","workdir":"/x"});',
+      },
+    });
+    const events = parseCodexContent(content);
+    const exec = events.find((e) => e.type === 'tool_use' && e.tool === 'exec')!;
+    expect(exec).toBeDefined();
+    expect(exec.command).toBe('git fetch origin && git rebase');
+    expect(exec.args?.command).toBe('git fetch origin && git rebase');
+  });
+
+  test('parseCodexContent keeps EVERY command from a parallel exec cell (not just the first)', () => {
+    const content = JSON.stringify({
+      type: 'response_item',
+      timestamp: '2026-08-23T00:00:00Z',
+      payload: {
+        type: 'custom_tool_call', id: 'ctc_par', call_id: 'call_par', name: 'exec',
+        input: 'await Promise.all([tools.exec_command({cmd:"bun run verify"}), tools.exec_command({cmd:"bun run compile"})]);',
+      },
+    });
+    const exec = parseCodexContent(content).find((e) => e.type === 'tool_use' && e.tool === 'exec')!;
+    expect(exec.command).toContain('bun run verify');
+    expect(exec.command).toContain('bun run compile');
+  });
+
+  test('a raw-JS exec cell keeps no command (it genuinely is not shell)', () => {
+    const content = JSON.stringify({
+      type: 'response_item',
+      timestamp: '2026-08-23T00:00:00Z',
+      payload: { type: 'custom_tool_call', id: 'ctc_js', call_id: 'call_js', name: 'exec', input: 'text(ALL_TOOLS.length);' },
+    });
+    const exec = parseCodexContent(content).find((e) => e.type === 'tool_use' && e.tool === 'exec')!;
+    expect(exec.command).toBeUndefined();
+  });
+
+  test('summarizeToolUse labels an exec cell by its unwrapped command', () => {
+    expect(summarizeToolUse('exec', { command: 'git push origin head', input: 'await tools.exec_command({cmd:"git push origin head"})' }))
+      .toBe('Bash: git push origin head');
+    // Falls back to extracting from raw input when command was not pre-set.
+    expect(summarizeToolUse('exec', { input: 'await tools.exec_command({cmd:"ls -la"})' })).toBe('Bash: ls -la');
   });
 });
 

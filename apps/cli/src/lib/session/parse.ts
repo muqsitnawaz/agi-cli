@@ -13,7 +13,7 @@ import * as path from 'path';
 import Database from '../sqlite.js';
 import { isSyntheticUserMessage, extractSlashCommandName, extractSlashCommandFromToolInput } from './prompt.js';
 import type { SessionAgentId, SessionEvent } from './types.js';
-import { structuredToolResult } from './tool-calls.js';
+import { structuredToolResult, commandsFromCodexExec } from './tool-calls.js';
 
 /**
  * Largest session file we will load into memory. Above this we throw a clean
@@ -320,6 +320,14 @@ export function summarizeToolUse(tool: string, args?: Record<string, any>): stri
     // Codex tools
     case 'exec_command':
       return `Bash: ${truncate(String(args.command || args.cmd || '').replace(/\n/g, ' ').trim(), 120)}`;
+    // Newer Codex JS-cell shell wrapper: prefer the unwrapped command (set at parse
+    // time), else the extracted command, else the raw cell code.
+    case 'exec': {
+      const cmd = args.command || codexExecCommand(String(args.input || ''));
+      if (cmd) return `Bash: ${truncate(String(cmd).replace(/\n/g, ' ').trim(), 120)}`;
+      const code = String(args.input || '').replace(/\n/g, ' ').trim();
+      return code ? `exec: ${truncate(code, 100)}` : 'exec';
+    }
     case 'read_file':
       return `Read ${shortenPath(args.file_path || args.path || '')}`;
     case 'write_file':
@@ -627,6 +635,24 @@ function applyPatchTargetPath(input: string): string | undefined {
 }
 
 /**
+ * Newer Codex (gpt-5.6-sol / codex >=~0.145) runs every shell command inside a JS
+ * cell: a `custom_tool_call` named `exec` whose `input` is code like
+ * `const r = await tools.exec_command({cmd:"git status", "workdir":"…"});`. The real
+ * shell command(s) are buried in those `cmd:"…"` literals. Reuse the canonical
+ * acorn-based extractor (`commandsFromCodexExec` in `tool-calls.ts`, already used by
+ * the tool-call index): it walks the whole AST — so a cell that runs several via
+ * `Promise.all([tools.exec_command(...), tools.exec_command(...)])` yields every
+ * command, not just the first — and matches only real `tools.exec_command` calls,
+ * so a `cmd:"…"` string mentioned in a comment or docstring is never mistaken for an
+ * invocation. Returns `undefined` for a non-shell cell (`tools.view_image(...)`, a
+ * raw JS computation) so it stays labeled by its code, not faked into a shell step.
+ */
+function codexExecCommand(input: string): string | undefined {
+  const commands = commandsFromCodexExec(input);
+  return commands.length > 0 ? commands.join('\n') : undefined;
+}
+
+/**
  * Parse Codex JSONL *content* (already read into a string) into normalized
  * events. Split from `parseCodex` so the tail reader can parse just the last
  * chunk without re-reading the whole file.
@@ -764,6 +790,9 @@ export function parseCodexContent(content: string): SessionEvent[] {
         const rawName = payload.name || 'unknown';
         const input = typeof payload.input === 'string' ? payload.input : '';
         const isApplyPatch = rawName === 'apply_patch';
+        // Newer Codex wraps shell in a JS `exec` cell — unwrap the real command so
+        // the step reads by its program instead of a bare "exec" (see extractor).
+        const execCommand = rawName === 'exec' ? codexExecCommand(input) : undefined;
         // Multi-file patches: one tool_use per file so artifact discovery sees
         // every path (RUSH-1410). Single-file / non-patch keep one event.
         const patchPaths = isApplyPatch ? applyPatchTargetPaths(input) : [];
@@ -773,6 +802,7 @@ export function parseCodexContent(content: string): SessionEvent[] {
         const emitOne = (patchPath: string | undefined) => {
           const args: any = { input: truncatedInput };
           if (patchPath) args.file_path = patchPath;
+          if (execCommand) args.command = execCommand;
           const callId = payload.call_id || payload.id;
           if (callId) callMap.set(callId, { name: tool, args });
           events.push({
@@ -782,6 +812,7 @@ export function parseCodexContent(content: string): SessionEvent[] {
             tool,
             callId,
             args,
+            command: execCommand,
             path: patchPath,
           });
         };
