@@ -21,7 +21,7 @@ import { getDevicesRegistryPath, readMeta, updateMeta } from '../state.js';
 import { atomicWriteJsonSync } from '../fs-atomic.js';
 import { machineId } from '../machine-id.js';
 import type { Meta } from '../types.js';
-import type { FleetManifest } from '../fleet/types.js';
+import type { FleetManifest, IgnoredDeviceEntry } from '../fleet/types.js';
 
 /** Operating-system family of a device, used to pick the remote shell. */
 export type DevicePlatform = 'windows' | 'linux' | 'macos' | 'unknown';
@@ -372,22 +372,13 @@ export async function removeDevice(name: string): Promise<boolean> {
  * corrupt it, and no second lock is hand-rolled here.
  */
 
-/** One dismissal record, so `agents devices ignored` can render WHO dismissed
- * a node and WHEN. */
-export interface IgnoredDeviceEntry {
-  /** Tailscale node name the user dismissed. */
-  name: string;
-  /** ISO-8601 timestamp of the dismissal. */
-  ignoredAt: string;
-  /** machineId() of the box the dismissal was made on. */
-  ignoredOn: string;
-}
-
-/** The central fleet block plus the `ignored` list this module owns. The field
- * is additive to FleetManifest; older CLIs preserve it verbatim on rewrite
- * (serializeCentral compares/deletes only the top-level keys it models, and
- * `fleet` passes through as one opaque value). */
-type FleetWithIgnored = FleetManifest & { ignored?: IgnoredDeviceEntry[] };
+// The dismissal record and the `fleet.ignored` field are declared on
+// FleetManifest itself (lib/fleet/types.ts) rather than as a local intersection
+// here: an intersection kept the field invisible to every OTHER consumer of the
+// manifest — which is exactly how the migration's emptied-block guard came to
+// omit it and would have deleted the user's dismissals fleet-wide. Re-exported
+// so importers of this module keep the name they already use.
+export type { IgnoredDeviceEntry } from '../fleet/types.js';
 
 /**
  * The full ignore-list entries — who dismissed a node, when, and on which box —
@@ -396,7 +387,7 @@ type FleetWithIgnored = FleetManifest & { ignored?: IgnoredDeviceEntry[] };
  * silently returning [] would let the next write wipe the user's dismissals.
  */
 export function loadIgnoredEntries(meta: Meta = readMeta()): IgnoredDeviceEntry[] {
-  const raw = (meta.fleet as FleetWithIgnored | undefined)?.ignored;
+  const raw = meta.fleet?.ignored;
   if (raw === undefined) return [];
   if (
     !Array.isArray(raw) ||
@@ -438,12 +429,12 @@ export function withIgnoredAdded(meta: Meta, names: string[], ignoredAt: string)
   const have = new Set(entries.map((e) => e.name));
   const fresh = names.filter((n) => !have.has(n));
   if (fresh.length === 0) return meta;
-  const fleet = (meta.fleet ?? { devices: {} }) as FleetWithIgnored;
+  const fleet = (meta.fleet ?? { devices: {} }) ;
   const ignored: IgnoredDeviceEntry[] = [
     ...entries,
     ...fresh.map((name) => ({ name, ignoredAt, ignoredOn: machineId() })),
   ].sort((a, b) => a.name.localeCompare(b.name));
-  const nextFleet: FleetWithIgnored = { ...fleet, ignored };
+  const nextFleet: FleetManifest = { ...fleet, ignored };
   return { ...meta, fleet: nextFleet };
 }
 
@@ -459,13 +450,13 @@ export async function addIgnored(name: string): Promise<Set<string>> {
 export async function removeIgnored(name: string): Promise<boolean> {
   let removed = false;
   updateMeta((m) => {
-    const fleet = m.fleet as FleetWithIgnored | undefined;
+    const fleet = m.fleet;
     if (!fleet?.ignored) return m;
     const entries = loadIgnoredEntries(m);
     const next = entries.filter((e) => e.name !== name);
     if (next.length === entries.length) return m;
     removed = true;
-    const nextFleet: FleetWithIgnored = { ...fleet, ignored: next };
+    const nextFleet: FleetManifest = { ...fleet, ignored: next };
     return { ...m, fleet: nextFleet };
   });
   return removed;

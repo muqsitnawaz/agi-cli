@@ -286,4 +286,24 @@ describe('migrateDeviceConfigStores', () => {
       errSpy.mockRestore();
     }
   });
+
+  it('never drops a populated fleet.ignored when the #2458 strip empties the rest of the fleet block', async () => {
+    // A box carrying BOTH legacy central per-device config AND dismissals: the
+    // strip must not delete the whole fleet block — the deletion would sync
+    // fleet-wide via `agents repo push`.
+    writeCentral(
+      'fleet:\n  devices:\n    mac-mini:\n      config:\n        maxAgents: 8\n  ignored:\n    - name: ipad165\n      ignoredAt: "2026-08-20T09:15:00.000Z"\n      ignoredOn: zion\n',
+    );
+
+    const { migrateDeviceConfigStores, readMeta } = await freshModules();
+    migrateDeviceConfigStores();
+
+    const fleet = readMeta().fleet as unknown as { devices: Record<string, unknown>; ignored: Array<Record<string, string>> };
+    expect(fleet).toBeDefined();
+    expect(fleet.ignored).toEqual([
+      { name: 'ipad165', ignoredAt: '2026-08-20T09:15:00.000Z', ignoredOn: 'zion' },
+    ]);
+    expect(fleet.devices).toEqual({}); // config stripped, block kept
+    expect(readDoc('mac-mini')).toContain('maxAgents: 8');
+  });
 });

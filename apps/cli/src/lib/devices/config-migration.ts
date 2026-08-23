@@ -266,7 +266,19 @@ export function migrateDeviceConfigStores(): void {
         if (Object.keys(rest).length > 0) nextDevices[name] = rest;
       }
       const fleet: FleetManifest = { ...m.fleet, devices: nextDevices };
-      if (Object.keys(nextDevices).length === 0 && !fleet.defaults && !fleet.secrets && !fleet.routines) {
+      // Drop the whole `fleet` block only when NOTHING else lives in it. Every
+      // resident must be named here: `ignored` holds the user's dismissals and
+      // `discovery` their discovery policy, and deleting the block would not
+      // just lose them locally — `agents repo push` would sync the deletion
+      // fleet-wide. Add any new fleet.* key to this guard.
+      const fleetIsEmpty =
+        Object.keys(nextDevices).length === 0 &&
+        !fleet.defaults &&
+        !fleet.secrets &&
+        !fleet.routines &&
+        !fleet.discovery &&
+        !(fleet.ignored && fleet.ignored.length > 0);
+      if (fleetIsEmpty) {
         const { fleet: _, ...rest } = m;
         void _;
         return rest;
