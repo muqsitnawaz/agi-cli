@@ -480,12 +480,12 @@ describe('usage formatting', () => {
     }
   });
 
-  it('returns a benign no-recent-usage marker (not null) when the log is absent (RUSH-3040)', async () => {
+  it('returns a benign no-recent-usage state when the log is absent (RUSH-3040)', async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-grok-nolog-'));
     try {
       const { snapshot, error } = await getUsageInfo('grok', { home });
       expect(snapshot).toBeNull();
-      expect(error).toContain('no usage recorded yet');
+      expect(error).toBeNull();
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
