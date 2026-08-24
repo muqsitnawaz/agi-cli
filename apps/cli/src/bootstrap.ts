@@ -85,7 +85,7 @@ import {
   type ModuleLoader,
 } from './cli/command-registry.js';
 import { closestTopLevelCommand } from './lib/startup/spellcheck.js';
-import { applyGlobalHelpConventions } from './lib/help.js';
+import { applyGlobalHelpConventions, installBareGroupGuards } from './lib/help.js';
 import { renderWhatsNew } from './lib/whats-new.js';
 import { IS_WINDOWS } from './lib/platform/index.js';
 import { getCliLaunch } from './lib/cli-entry.js';
@@ -1311,6 +1311,12 @@ if (passedArgs.length === 0) {
   program.outputHelp();
   process.exit(0);
 }
+
+// Lazy commands (browser/computer/monitors/…) register AFTER the eager
+// applyGlobalHelpConventions pass, so re-run the bare-group guard here to cover
+// the tree just loaded for this invocation. Idempotent — eager groups already
+// guarded are skipped (RUSH-3104).
+installBareGroupGuards(program);
 
 try {
   await maybeBootstrapShimIntegration(requestedCommand, helpOrVersionRequested, verboseStartup);

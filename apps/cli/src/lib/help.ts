@@ -199,6 +199,64 @@ function formatHelpCommandsFirst(cmd: Command, helper: Help): string {
   return output.join('\n');
 }
 
+/** Full invocation path for a command, e.g. `agents browser profiles`. */
+function fullCommandPath(cmd: Command): string {
+  const names: string[] = [cmd.name()];
+  for (let p = cmd.parent; p; p = p.parent) names.unshift(p.name());
+  return names.join(' ');
+}
+
+/** The single-line hint a bare command group emits to a captured stream. */
+export function bareGroupHint(cmd: Command): string {
+  const cmdPath = fullCommandPath(cmd);
+  return `${cmdPath}: missing subcommand. Run \`${cmdPath} --help\` for the options.`;
+}
+
+/** Commands already given the bare-group guard, so re-runs stay idempotent. */
+const bareGroupGuarded = new WeakSet<Command>();
+
+/**
+ * Give every subcommand *group* — a command that owns subcommands but has no
+ * action of its own — an explicit no-subcommand handler.
+ *
+ * Why (RUSH-3104): hooks and other automation run `agents <group>` (e.g.
+ * `agents browser`, `agents computer`, `agents monitors`) as a subprocess and
+ * capture its output. Commander's default for a group invoked with no
+ * subcommand is to dump the full ~60-line help to stderr and exit 1 — and that
+ * dump then leaks verbatim into injected hook feedback (the UserPromptSubmit
+ * bang-command expander runs a bare `!agents browser`, captures its stderr, and
+ * splices the whole help block into the model's context). A bare group in a
+ * captured (non-TTY) stream now emits a single usage line; an interactive TTY
+ * still gets the full help. Groups that already declare their own default
+ * action (e.g. `agents sessions`) are left untouched.
+ */
+export function installBareGroupGuards(root: Command): void {
+  const visit = (cmd: Command): void => {
+    for (const sub of cmd.commands) visit(sub);
+    // The root (`agents` bare) shows full help on its own path — never guard it.
+    if (cmd.parent == null) return;
+    // Leaves have nothing to guard; a group with its own action already decides
+    // what a bare invocation does, so never override it.
+    if (cmd.commands.length === 0) return;
+    if ((cmd as unknown as { _actionHandler?: unknown })._actionHandler) return;
+    if (bareGroupGuarded.has(cmd)) return;
+    bareGroupGuarded.add(cmd);
+    cmd.action(function (this: Command) {
+      if (process.stderr.isTTY) {
+        // Interactive: keep the full help a human at a terminal expects.
+        this.outputHelp({ error: true });
+        process.exit(1);
+      }
+      // Captured/piped: one line, so the ~60-line help can never ride into an
+      // injected hook message (RUSH-3104). `error()` routes through commander's
+      // configured writeErr + exit callback (no showHelpAfterError is set
+      // anywhere, so it stays a single line).
+      this.error(bareGroupHint(this), { exitCode: 1 });
+    });
+  };
+  visit(root);
+}
+
 /** Recursively apply help conventions (-h flag, no help subcommand, custom formatter). */
 function applyHelpConventionsRecursive(cmd: Command): void {
   cmd
@@ -216,4 +274,5 @@ function applyHelpConventionsRecursive(cmd: Command): void {
 /** Apply standardized help formatting to the root command and all subcommands. */
 export function applyGlobalHelpConventions(root: Command): void {
   applyHelpConventionsRecursive(root);
+  installBareGroupGuards(root);
 }

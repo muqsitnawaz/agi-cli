@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
-import { applyGlobalHelpConventions, registerCommandGroups, setHelpSections } from './help.js';
+import { applyGlobalHelpConventions, bareGroupHint, installBareGroupGuards, registerCommandGroups, setHelpSections } from './help.js';
 
 function buildTestCommand(opts: { examples?: string; notes?: string } = {}): Command {
   const root = new Command('agents');
@@ -140,5 +140,65 @@ describe('registerCommandGroups', () => {
     expect(help).not.toContain('Ghost group:');
     expect(help).toContain('Inspect:');
     expect(help).not.toContain('Commands:');
+  });
+});
+
+describe('installBareGroupGuards (RUSH-3104)', () => {
+  // A hook that runs `agents <group>` as a subprocess captures its output; the
+  // pre-fix default dumped commander's full ~60-line help to stderr, which then
+  // leaked verbatim into injected hook feedback. A bare group in a captured
+  // (non-TTY) stream must now emit exactly one usage line.
+  function buildGuarded(): { root: Command; browser: Command; errBuf: string[] } {
+    const root = new Command('agents');
+    const browser = root.command('browser').description('Drive browsers.');
+    browser.command('start').description('Start a task.').action(() => {});
+    browser.command('status').description('Show tasks.').action(() => {});
+    applyGlobalHelpConventions(root);
+    const errBuf: string[] = [];
+    root.exitOverride();
+    browser.exitOverride();
+    browser.configureOutput({ writeErr: (s) => errBuf.push(s), writeOut: (s) => errBuf.push(s) });
+    return { root, browser, errBuf };
+  }
+
+  it('a bare group emits ONE usage line, not the multi-section help dump', () => {
+    const { root, errBuf } = buildGuarded();
+    // vitest's process.stderr.isTTY is falsy, so the captured-stream branch runs.
+    expect(() => root.parse(['browser'], { from: 'user' })).toThrow();
+    const out = errBuf.join('');
+    expect(out).toBe('agents browser: missing subcommand. Run `agents browser --help` for the options.\n');
+    // The tell of the leak: none of the help sections may appear.
+    expect(out).not.toContain('Usage: agents browser');
+    expect(out).not.toContain('Commands:');
+    expect(out).not.toContain('Options:');
+  });
+
+  it('does not steal a valid subcommand — dispatch still works', () => {
+    const { root, browser } = buildGuarded();
+    let started = false;
+    browser.commands.find((c) => c.name() === 'start')!.action(() => { started = true; });
+    root.parse(['browser', 'start'], { from: 'user' });
+    expect(started).toBe(true);
+  });
+
+  it('leaves a group that declares its own default action untouched', () => {
+    const root = new Command('agents');
+    let ran = false;
+    const grp = root.command('sessions').description('Sessions.').action(() => { ran = true; });
+    grp.command('list').description('List.').action(() => {});
+    installBareGroupGuards(root);
+    root.parse(['sessions'], { from: 'user' });
+    // The group's own action fired — the guard did not replace it.
+    expect(ran).toBe(true);
+  });
+
+  it('bareGroupHint names the full command path for a nested group', () => {
+    const root = new Command('agents');
+    const browser = root.command('browser');
+    const profiles = browser.command('profiles');
+    profiles.command('list').action(() => {});
+    expect(bareGroupHint(profiles)).toBe(
+      'agents browser profiles: missing subcommand. Run `agents browser profiles --help` for the options.',
+    );
   });
 });
