@@ -27,7 +27,7 @@ session: e9b853bc
 date: '2026-08-25'
 facts:
   - 'account-state-service.ts is documented device-local: every daemon refreshes usage every 60s'
-  - 'withRefreshLease locks under getCacheDir() — same-device, cross-process only; nothing spans the fleet'
+  - 'withRefreshLease is a thundering-herd guard with the right shape — it just has no fleet-reachable lock backend'
   - '11 devices × 8 accounts = 88 provider refreshes/minute where 8 would do'
   - 'The repo already has a real quorum-free fleet lease: release-lease.sh, holder + pid + liveness on a git ref'
   - 'Raft/quorum is wrong here — most devices sleep, so a majority is rarely online'
@@ -74,9 +74,27 @@ export const USAGE_STATE_TICK_MS = 60_000;
 Every device's daemon runs it, every 60 seconds, against
 `https://api.anthropic.com/api/oauth/usage` (`lib/accounting/usage.ts`).
 
-There *is* a lease — `withRefreshLease` in `lib/refresh-coordinator.ts` — but it locks
-under `getCacheDir()`, a **local filesystem path**. It coordinates the daemon against an
-explicit CLI refresh *on the same machine*. It has never spanned the fleet.
+There *is* a lease — `withRefreshLease` in `lib/refresh-coordinator.ts` — and it is worth
+being precise about what it is for, because it is **not** a half-built election. Its own
+docblock:
+
+> **Serialize refresh work across every agents-cli process on this device.** In-process
+> promise maps only protect one Node process. Factory, the daemon, and `agents view` are
+> separate processes, so they need an OS-visible lease. The result is re-read after lock
+> acquisition: a waiter consumes the winner's publication and never calls the provider a
+> second time.
+
+It is a **thundering-herd guard**: on one machine the daemon tick, a typed `agents view`,
+the ext and a routine can all want fresh usage at the same instant, and without it each
+would call the provider. It solves that correctly — including the load-bearing part, the
+`readCompleted()` re-check that lets waiters consume the winner's result for free.
+
+Its scope is the device, because `lockTarget()` builds the path under `getCacheDir()`.
+
+**So the fleet problem is the same problem one scope up**, and the primitive already has
+the right shape — it takes a `scope` and a `key`, acquires, re-reads, fetches only if
+nobody else did, publishes, releases. What it lacks is a lock substrate reachable from
+more than one machine. That is the actual gap: not a missing concept, a missing backend.
 
 **So your arithmetic is the real arithmetic:**
 
