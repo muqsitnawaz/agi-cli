@@ -40,8 +40,10 @@ at a lifecycle boundary: `stage`, stable `code`, sanitized `message`, `exit_code
 `agents teams status` includes this evidence in both its default text and additive JSON
 shape, so a new CLI invocation sees the same failure as the supervisor that observed it.
 
-Placement and launch failures are handled per runnable node. One unplaceable root becomes
-failed with evidence while other ready roots still launch. A pending node whose explicit
+Placement and launch failures are handled per runnable node. A root with a durable
+placement failure becomes failed with evidence while other ready roots still launch.
+Pool-capacity and load exclusions are transient: the node stays pending with retryable
+evidence and the next supervisor wave evaluates placement again. A pending node whose explicit
 `--after` dependency failed, stopped, or is missing becomes failed with a
 `dependency-failed` record naming every blocker; it does not remain pending until
 `--max-waves`. The existing Teams supervisor remains the only graph owner and dispatcher.

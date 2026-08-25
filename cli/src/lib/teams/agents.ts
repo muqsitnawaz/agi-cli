@@ -36,7 +36,12 @@ import { pullRemoteLogDelta, REMOTE_MIRROR_MAX_BYTES } from '../hosts/progress.j
 import { createRemoteWorktree, ensureRemoteRepo } from './remoteWorktree.js';
 import { getTeam, isTeamDisbanded } from './registry.js';
 import { atomicWriteJsonSync } from '../fs-atomic.js';
-import { resolvePlacement, classifyExclusions, NoViableDeviceError } from './scheduler.js';
+import {
+  resolvePlacement,
+  classifyExclusions,
+  isTransientPlacementBlock,
+  NoViableDeviceError,
+} from './scheduler.js';
 import { probePoolSignals } from './placement-probe.js';
 import { readMaxConcurrentCaps } from '../device-config.js';
 import { redactSecrets, sanitizeForTerminal } from '../redact.js';
@@ -1793,6 +1798,20 @@ export class AgentManager {
     await agent.saveMeta();
   }
 
+  private async deferAgent(
+    agent: AgentProcess,
+    failure: Omit<TeammateFailure, 'message' | 'observed_at'> & { message: string },
+  ): Promise<void> {
+    agent.failure = {
+      ...failure,
+      message: safeFailureMessage(failure.message),
+      observed_at: new Date().toISOString(),
+    };
+    agent.status = AgentStatus.PENDING;
+    agent.completedAt = null;
+    await agent.saveMeta();
+  }
+
   /**
    * Scan the agents dir for meta.json files not already in the in-memory
    * cache and load them. Needed when another process (e.g. a Planner
@@ -2212,6 +2231,14 @@ export class AgentManager {
       try {
         await this.maybeSchedulePlacement(agent, taskName);
       } catch (err) {
+        if (isTransientPlacementBlock(err)) {
+          await this.deferAgent(agent, {
+            stage: 'placement', code: 'placement-capacity-wait', message: err.message,
+            exit_code: null, retryable: true,
+          });
+          await this.cleanupOldAgents();
+          return agent;
+        }
         await this.failAgent(agent, {
           stage: 'placement',
           code: err instanceof NoViableDeviceError ? 'no-viable-device' : 'placement-failed',
@@ -2785,6 +2812,14 @@ export class AgentManager {
       try {
         await this.maybeSchedulePlacement(agent, taskName, { probe: true });
       } catch (err) {
+        if (isTransientPlacementBlock(err)) {
+          await this.deferAgent(agent, {
+            stage: 'placement', code: 'placement-capacity-wait', message: err.message,
+            exit_code: null, retryable: true,
+          });
+          console.error(`Placement deferred for ${agent.agentId}; the pool may free up on a later wave:`, err);
+          continue;
+        }
         await this.failAgent(agent, {
           stage: 'placement',
           code: err instanceof NoViableDeviceError ? 'no-viable-device' : 'placement-failed',

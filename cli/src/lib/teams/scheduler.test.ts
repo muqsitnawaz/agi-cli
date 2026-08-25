@@ -14,6 +14,7 @@ import {
   cappedDevices,
   classifyExclusions,
   NoViableDeviceError,
+  isTransientPlacementBlock,
   formatNoViableMessage,
   type RosterEntry,
   type DevicePlacementSignal,
@@ -102,6 +103,16 @@ describe('agents.max-concurrent caps (auto-pick only)', () => {
       .toThrow(/agents\.max-concurrent cap: box-a \(2\/2\), box-b \(1\/1\)/);
     expect(() => pickLeastLoaded(['box-a', 'box-b'], roster, { 'box-a': 2, 'box-b': 1 }))
       .toThrow(/agents devices config <name> agents\.max-concurrent N/);
+  });
+
+  it('classifies capacity and load blocks as retryable but install failures as durable', () => {
+    expect(isTransientPlacementBlock(new NoViableDeviceError([
+      { device: 'box-a', reason: 'capped', detail: '1/1' },
+      { device: 'box-b', reason: 'not-installed' },
+    ]))).toBe(true);
+    expect(isTransientPlacementBlock(new NoViableDeviceError([
+      { device: 'box-a', reason: 'not-installed' },
+    ]))).toBe(false);
   });
 
   it('cappedDevices reports the exclusion reason with live counts', () => {
