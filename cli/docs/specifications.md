@@ -2877,11 +2877,14 @@ nothing but its own view cache.
   them like any other routine, each `command:` invoking the migrated tick body
   via `agents __daemon-tick <name>`. That registry was **reverted** (RUSH-2495):
   `builtin-routines.ts`, the `__daemon-tick` entrypoint, and `JobConfig.builtin`
-  are gone. `watchdog`, `device-probe`, and `session-cache-warm` are again plain
-  hardcoded `setInterval`s inside `runDaemon()` (`runWatchdogTick`,
-  `runDeviceProbeTick`, `runActiveSessionsWarm`) — invisible to `agents
-  routines`, but still the single daemon-owned scheduler/executor SING-1
-  requires, since nothing else calls them. `auto-dispatch` and `launch-health`
+  are gone. `watchdog` and `device-probe` reverted to plain hardcoded
+  `setInterval`s inside `runDaemon()` at the time, then moved onto
+  `ServiceSupervisor` as `WatchdogService`/`DeviceProbeService`
+  (`lib/daemon/watchdog-service.ts`, `device-probe-service.ts`, RUSH-3193 P3);
+  `session-cache-warm` (`runActiveSessionsWarm`) remains a bare
+  `setInterval`. All three are invisible to `agents routines`, but still the
+  single daemon-owned scheduler/executor SING-1 requires, since nothing else
+  calls them. `auto-dispatch` and `launch-health`
   were deleted outright with no replacement. **`tmux-reconcile`** (the 5-minute
   poll that retrofitted a stale `pane-died` hook onto managed tmux sessions) was
   also deleted, but — unlike `auto-dispatch`/`launch-health` — its job is
@@ -3530,9 +3533,12 @@ not the watchdog's.
 - **WD-1 (MUST).** The agents daemon MUST be the sole automatic watchdog scheduler and
   executor. When device-local `watchdog.enabled` is true it MUST run one bounded,
   non-overlapping pass every three minutes. UI surfaces MUST only render persisted state.
-  The daemon fires this pass from a `setInterval(WATCHDOG_TICK_MS)` with an in-flight
-  guard (`daemon.ts`), re-checking `watchdog.enabled` inside each tick — the daemon
-  remains the sole scheduler/executor.
+  The daemon fires this pass from `WatchdogService`, a `PeriodicService` registered on
+  `ServiceSupervisor` (`lib/daemon/watchdog-service.ts`, RUSH-3193 P3 — previously a bare
+  `setInterval(WATCHDOG_TICK_MS)` with a hand-rolled in-flight guard directly in
+  `daemon.ts`), re-checking `watchdog.enabled` inside each tick — the daemon remains the
+  sole scheduler/executor; the supervisor now also owns the per-tick deadline, error
+  boundary, and park/backoff circuit breaker for this pass.
 - **WD-2 (MUST).** Delivery MUST occur only when `--nudge` is set; without it a tick is a
   dry run that reports "would nudge" and delivers nothing (`lib/watchdog/runner.ts`).
 - **WD-3 (MUST).** `on`/`off` MUST write the typed device-local `watchdog.enabled`

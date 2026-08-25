@@ -815,7 +815,8 @@ Point at a different backend with PHOENIX_ID_BASE (defaults to the production se
 
       # toggle or restart a service live — applies without a daemon restart
       # for supervisor-managed services (secrets-broker, browser-ipc,
-      # account-state, session-index, monitors&#39; off-transition)
+      # account-state, session-index, monitors&#39; off-transition, watchdog,
+      # device-probe, self-heal, keychain-reap, state-dir-check)
       agents daemon services disable secrets-broker
       agents daemon services enable secrets-broker
       agents daemon services restart secrets-broker
@@ -842,12 +843,12 @@ Point at a different backend with PHOENIX_ID_BASE (defaults to the production se
       &#39;systemctl start&#39; on a disabled unit.
 
       &#39;agents daemon services enable|disable|restart &lt;id&gt;&#39; applies live (no
-      daemon restart) for the 5 supervisor-managed services: secrets-broker,
-      browser-ipc, account-state, session-index, and monitors (off only —
-      turning monitors back on still needs a restart). the other 7 services
-      (scheduler, webhook-receiver, self-heal, keychain-reap, watchdog,
-      device-probe, state-dir-check) are still bare interval loops with no
-      live start/stop hook, so a toggle there — and &#39;enable&#39; on any service
+      daemon restart) for the 10 supervisor-managed services: secrets-broker,
+      browser-ipc, account-state, session-index, monitors (off only — turning
+      monitors back on still needs a restart), watchdog, device-probe,
+      self-heal, keychain-reap, and state-dir-check. the other 2 services
+      (scheduler, webhook-receiver) are still bare interval/socket setups with
+      no live start/stop hook, so a toggle there — and &#39;enable&#39; on any service
       that was disabled at daemon boot — still needs &#39;agents daemon restart&#39;.
       &#39;agents daemon services&#39; names which case you&#39;re in per row."><div class="command-head"><h3><code>agents daemon</code></h3></div><p>The always-on daemon: secrets broker, browser IPC, watchdog, and the routines scheduler. Bare `agents daemon` shows status.</p><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>--json</code></td><td>Emit as JSON</td><td></td><td></td></tr><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table><h4>Examples</h4><pre><code># Identity, duplicates, and per-service health in one view
       agents daemon status
@@ -872,7 +873,8 @@ Point at a different backend with PHOENIX_ID_BASE (defaults to the production se
 
       # Toggle or restart a service live — applies without a daemon restart
       # for supervisor-managed services (secrets-broker, browser-ipc,
-      # account-state, session-index, monitors&#39; off-transition)
+      # account-state, session-index, monitors&#39; off-transition, watchdog,
+      # device-probe, self-heal, keychain-reap, state-dir-check)
       agents daemon services disable secrets-broker
       agents daemon services enable secrets-broker
       agents daemon services restart secrets-broker
@@ -899,12 +901,12 @@ Point at a different backend with PHOENIX_ID_BASE (defaults to the production se
       &#39;systemctl start&#39; on a disabled unit.
 
       &#39;agents daemon services enable|disable|restart &lt;id&gt;&#39; applies live (no
-      daemon restart) for the 5 supervisor-managed services: secrets-broker,
-      browser-ipc, account-state, session-index, and monitors (off only —
-      turning monitors back on still needs a restart). The other 7 services
-      (scheduler, webhook-receiver, self-heal, keychain-reap, watchdog,
-      device-probe, state-dir-check) are still bare interval loops with no
-      live start/stop hook, so a toggle there — and &#39;enable&#39; on any service
+      daemon restart) for the 10 supervisor-managed services: secrets-broker,
+      browser-ipc, account-state, session-index, monitors (off only — turning
+      monitors back on still needs a restart), watchdog, device-probe,
+      self-heal, keychain-reap, and state-dir-check. The other 2 services
+      (scheduler, webhook-receiver) are still bare interval/socket setups with
+      no live start/stop hook, so a toggle there — and &#39;enable&#39; on any service
       that was disabled at daemon boot — still needs &#39;agents daemon restart&#39;.
       &#39;agents daemon services&#39; names which case you&#39;re in per row.</p></article>
 <article id="daemon-disable" data-search="disable daemon disable  persist daemon.enabled: false — nothing auto-starts the daemon until re-enabled. does not stop a running daemon. -h, --help show help  "><div class="command-head"><h3><code>agents daemon disable</code></h3></div><p>Persist daemon.enabled: false — nothing auto-starts the daemon until re-enabled. Does not stop a running daemon.</p><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table></article>
@@ -932,10 +934,11 @@ Point at a different backend with PHOENIX_ID_BASE (defaults to the production se
       agents daemon services disable secrets-broker
       agents daemon services enable secrets-broker
       agents daemon services restart secrets-broker a service disabled at daemon boot was never registered on the
-      supervisor, so &#39;enable&#39; on it — and any toggle/restart on the 7
-      services the supervisor doesn&#39;t manage yet — falls back to &#39;restart the
-      daemon to apply&#39;. each row in the plain-text view names which case it
-      is; &#39;supervised: true/false&#39; does the same in --json."><div class="command-head"><h3><code>agents daemon services</code></h3></div><p>Every registered daemon service: live health, enabled state, and live enable/disable/restart.</p><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>--json</code></td><td>Emit as JSON</td><td></td><td></td></tr><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table><h4>Examples</h4><pre><code># State, enabled, consecutive failures, last error for every service
+      supervisor, so &#39;enable&#39; on it — and any toggle/restart on the 2
+      services the supervisor doesn&#39;t manage yet (scheduler,
+      webhook-receiver) — falls back to &#39;restart the daemon to apply&#39;. each
+      row in the plain-text view names which case it is; &#39;supervised:
+      true/false&#39; does the same in --json."><div class="command-head"><h3><code>agents daemon services</code></h3></div><p>Every registered daemon service: live health, enabled state, and live enable/disable/restart.</p><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>--json</code></td><td>Emit as JSON</td><td></td><td></td></tr><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table><h4>Examples</h4><pre><code># State, enabled, consecutive failures, last error for every service
       agents daemon services
 
       # Machine-readable — additive: also carries the pre-existing
@@ -950,10 +953,11 @@ Point at a different backend with PHOENIX_ID_BASE (defaults to the production se
       agents daemon services disable secrets-broker
       agents daemon services enable secrets-broker
       agents daemon services restart secrets-broker</code></pre><h4>Notes</h4><p class="notes">A service disabled at daemon boot was never registered on the
-      supervisor, so &#39;enable&#39; on it — and any toggle/restart on the 7
-      services the supervisor doesn&#39;t manage yet — falls back to &#39;restart the
-      daemon to apply&#39;. Each row in the plain-text view names which case it
-      is; &#39;supervised: true/false&#39; does the same in --json.</p></article>
+      supervisor, so &#39;enable&#39; on it — and any toggle/restart on the 2
+      services the supervisor doesn&#39;t manage yet (scheduler,
+      webhook-receiver) — falls back to &#39;restart the daemon to apply&#39;. Each
+      row in the plain-text view names which case it is; &#39;supervised:
+      true/false&#39; does the same in --json.</p></article>
 <article id="daemon-services-disable" data-search="disable daemon services disable  disable a daemon service. applies live for supervised services; a legacy service needs a restart. service  -h, --help show help  "><div class="command-head"><h3><code>agents daemon services disable &lt;service&gt;</code></h3></div><p>Disable a daemon service. Applies live for supervised services; a legacy service needs a restart.</p><h4>Arguments</h4><table><thead><tr><th>Argument</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>&lt;service&gt;</code></td><td>—</td><td></td><td></td></tr></tbody></table><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table></article>
 <article id="daemon-services-enable" data-search="enable daemon services enable  enable a daemon service. applies live for supervised services; a legacy service needs a restart. service  -h, --help show help  "><div class="command-head"><h3><code>agents daemon services enable &lt;service&gt;</code></h3></div><p>Enable a daemon service. Applies live for supervised services; a legacy service needs a restart.</p><h4>Arguments</h4><table><thead><tr><th>Argument</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>&lt;service&gt;</code></td><td>—</td><td></td><td></td></tr></tbody></table><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table></article>
 <article id="daemon-services-list" data-search="list daemon services list  list every daemon service and whether it is enabled. --json emit as json -h, --help show help  "><div class="command-head"><h3><code>agents daemon services list</code></h3></div><p>List every daemon service and whether it is enabled.</p><h4>Options</h4><table><thead><tr><th>Flags</th><th>Description</th><th>Choices</th><th>Default</th></tr></thead><tbody><tr><td><code>--json</code></td><td>Emit as JSON</td><td></td><td></td></tr><tr><td><code>-h, --help</code></td><td>Show help</td><td></td><td></td></tr></tbody></table></article>

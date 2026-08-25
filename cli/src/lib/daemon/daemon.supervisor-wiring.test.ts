@@ -1,11 +1,13 @@
 /**
- * runDaemon() migration wiring (RUSH-3193 P1): the session-index warm service
- * is registered on `ServiceSupervisor` (gated by the `session-index`
- * `isEnabled()` toggle) instead of a bare `setInterval`, and the supervisor is
- * torn down on shutdown. Drives the REAL compiled daemon as a subprocess, like
- * the other `daemon.*.test.ts` integration slices — the wiring lives inside
- * `runDaemon()`, which cannot be unit-tested in isolation (single-instance
- * guard, subsystem boot order, an infinite `await new Promise(() => {})`).
+ * runDaemon() migration wiring (RUSH-3193 P1/P3): the session-index warm
+ * service (P1) and watchdog/device-probe/self-heal/keychain-reap/
+ * state-dir-check (P3) are all registered on `ServiceSupervisor` (each gated
+ * by its own `isEnabled()` toggle) instead of a bare `setInterval`, and the
+ * supervisor is torn down on shutdown. Drives the REAL compiled daemon as a
+ * subprocess, like the other `daemon.*.test.ts` integration slices — the
+ * wiring lives inside `runDaemon()`, which cannot be unit-tested in isolation
+ * (single-instance guard, subsystem boot order, an infinite `await new
+ * Promise(() => {})`).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -115,4 +117,91 @@ describe('runDaemon() supervisor wiring (integration: real daemon subprocess)', 
       fs.rmSync(tmpHome, { recursive: true, force: true });
     }
   }, 20_000);
+
+  // RUSH-3193 P3: watchdog, device-probe, self-heal, keychain-reap, and
+  // state-dir-check moved off bare inline `setInterval`s onto the same
+  // supervisor. One boot checks all five together rather than five separate
+  // subprocess boots.
+  const P3_SERVICE_IDS = ['watchdog', 'device-probe', 'self-heal', 'keychain-reap', 'state-dir-check'] as const;
+
+  it('registers watchdog/device-probe/self-heal/keychain-reap/state-dir-check on the supervisor and each reports healthy shortly after boot', async () => {
+    if (!fs.existsSync(DIST_ENTRY)) execFileSync('npm', ['run', 'build'], { cwd: REPO_ROOT, stdio: 'ignore' });
+
+    const tmpHome = freshHome();
+    const logPath = path.join(tmpHome, 'daemon-stdio.log');
+    const healthPath = path.join(tmpHome, '.agents', '.cache', 'helpers', 'daemon', 'health.json');
+    const childEnv = { ...process.env, HOME: tmpHome };
+    delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
+
+    const { pid } = startDetached({ agentsBin: DIST_ENTRY, logPath, env: childEnv });
+    expect(pid).toBeTruthy();
+
+    try {
+      const readHealth = (): Record<string, { consecutiveFailures?: number }> => {
+        try { return JSON.parse(fs.readFileSync(healthPath, 'utf-8')); } catch { return {}; }
+      };
+
+      let all: Record<string, { consecutiveFailures?: number }> = {};
+      for (let i = 0; i < 200 && P3_SERVICE_IDS.some((id) => !all[id]); i++) {
+        all = readHealth();
+        if (P3_SERVICE_IDS.some((id) => !all[id])) await new Promise((r) => setTimeout(r, 100));
+      }
+
+      for (const id of P3_SERVICE_IDS) {
+        expect(all[id], `expected a health record for '${id}'`).toBeDefined();
+        expect(all[id]?.consecutiveFailures).toBe(0);
+      }
+    } finally {
+      if (pid) await killAndWait(pid);
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('disabling all five P3 services means none of them register, so none report a health record', async () => {
+    if (!fs.existsSync(DIST_ENTRY)) execFileSync('npm', ['run', 'build'], { cwd: REPO_ROOT, stdio: 'ignore' });
+
+    const tmpHome = freshHome();
+    const servicesConfigDir = path.join(tmpHome, '.agents', 'daemon');
+    fs.mkdirSync(servicesConfigDir, { recursive: true });
+    const disabledYaml = `services:\n${P3_SERVICE_IDS.map((id) => `  ${id}: false`).join('\n')}\n`;
+    fs.writeFileSync(path.join(servicesConfigDir, 'services.yaml'), disabledYaml, 'utf-8');
+
+    const runtimeDir = path.join(tmpHome, '.agents', '.cache', 'helpers', 'daemon');
+    const logPath = path.join(tmpHome, 'daemon-stdio.log');
+    const daemonLog = path.join(runtimeDir, 'logs.jsonl');
+    const healthPath = path.join(runtimeDir, 'health.json');
+    const childEnv = { ...process.env, HOME: tmpHome };
+    delete childEnv.CLAUDE_CODE_OAUTH_TOKEN;
+
+    const { pid } = startDetached({ agentsBin: DIST_ENTRY, logPath, env: childEnv });
+    expect(pid).toBeTruthy();
+
+    try {
+      const expectedDisabledLines = [
+        'Watchdog service disabled',
+        'Device-probe service disabled',
+        'Self-heal service disabled',
+        'Keychain-reap service disabled',
+        'State-dir self-check disabled',
+      ];
+      let sawAll = false;
+      for (let i = 0; i < 100 && !sawAll; i++) {
+        if (fs.existsSync(daemonLog)) {
+          const log = fs.readFileSync(daemonLog, 'utf-8');
+          sawAll = expectedDisabledLines.every((line) => log.includes(line));
+        }
+        if (!sawAll) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(sawAll).toBe(true);
+
+      // Give a would-be tick a moment to fire if a gate were broken, then
+      // confirm no health record was ever written for any of the five.
+      await new Promise((r) => setTimeout(r, 500));
+      const all = fs.existsSync(healthPath) ? JSON.parse(fs.readFileSync(healthPath, 'utf-8')) : {};
+      for (const id of P3_SERVICE_IDS) expect(all[id]).toBeUndefined();
+    } finally {
+      if (pid) await killAndWait(pid);
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

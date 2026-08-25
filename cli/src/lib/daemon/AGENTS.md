@@ -17,8 +17,8 @@ sessions (`cli/src/lib/session/remote/watch.ts:245`). This means every
 cross-device feature in this repo is built on top of one primitive (ssh +
 CLI verb), not a shared daemon protocol.
 
-**Two runtime models coexist today (RUSH-3193 P1/P2 migrated 5 of 12
-services; the rest are still inline).** `cli/src/lib/daemon-services.ts`
+**Two runtime models coexist today (RUSH-3193 P1/P2/P3 migrated 10 of 12
+services; 2 remain inline).** `cli/src/lib/daemon-services.ts`
 defines `DaemonServiceId` (`daemon-services.ts:17-29`, 12 ids:
 `secrets-broker`, `scheduler`, `monitors`, `browser-ipc`,
 `webhook-receiver`, `self-heal`, `keychain-reap`, `account-state`,
@@ -26,44 +26,48 @@ defines `DaemonServiceId` (`daemon-services.ts:17-29`, 12 ids:
 catalog every id in `runDaemon()` is expected to register under, whichever
 model it uses.
 
-- **Supervised (`ServiceSupervisor`, `supervisor.ts`), 5 services:**
+- **Supervised (`ServiceSupervisor`, `supervisor.ts`), 10 services:**
   `secrets-broker` (`secrets-broker-service.ts`), `browser-ipc`
   (`browser-ipc-service.ts`), `account-state`
   (`account-state-daemon-service.ts`), `session-index`
-  (`session-index-service.ts`), and `monitors`
-  (`monitor-engine-service.ts`). Each implements the `DaemonService`
-  contract (`service.ts`) — `id`, `start`/`stop`/`restart`/`health()`, plus
-  `intervalMs`/`deadlineMs`/`tick()` for the periodic ones — and is
-  `supervisor.register()`ed in `runDaemon()` (`daemon.ts:956-976`) only when
-  `isDaemonServiceEnabled(id)` is true at boot. The supervisor gives each one
-  a per-tick deadline race, a per-service try/catch that never escapes to the
-  process-wide crash handler, and a park/backoff circuit breaker
-  (`parkAfterFailures`, default 3) that retries independently of every
-  sibling service. `getServiceSupervisorHealth()` (`daemon.ts:60`) exposes
-  the live in-process `supervisor.health()` map for a future same-process
-  reader; a cross-process reader (`agents daemon services`, a separate CLI
-  invocation) instead reads the persisted mirror below.
-- **Inline `setInterval` closures, 7 services:** `scheduler` (the routine
-  `JobScheduler`, handled on its own live-reload path, not the supervisor),
-  `webhook-receiver`, `self-heal`, `keychain-reap`, `watchdog`,
-  `device-probe`, and `state-dir-check` are each still a bare
-  `setInterval`/`setTimeout` closure directly in `runDaemon()`, guarded only
-  by a local in-flight boolean and a try/catch that logs and returns — the
-  pre-P1 shape, e.g. the active-sessions-warm tick (`daemon.ts:1101-1110`):
-
-  ```ts
-  if (activeSessionsWarmInFlight) return;
-  activeSessionsWarmInFlight = true;
-  try { await runActiveSessionsWarmTick(); }
-  catch (err) { log('WARN', ...) }
-  finally { activeSessionsWarmInFlight = false; }
-  ```
-
-  These 7 have no per-service circuit breaker and no state persisted to
-  `health.json` — `agents daemon services` infers a coarse `running`/`stopped`
-  label for them from the enable toggle plus whether the daemon process is up
-  (see below), never a measured value. Migrating each onto the supervisor is
-  the RUSH-3193 P3 follow-up this doc's Target section still describes.
+  (`session-index-service.ts`), `monitors` (`monitor-engine-service.ts`)
+  (all P1/P2), and — since P3 — `watchdog` (`watchdog-service.ts`),
+  `device-probe` (`device-probe-service.ts`), `self-heal`
+  (`self-heal-service.ts`), `keychain-reap` (`keychain-reap-service.ts`), and
+  `state-dir-check` (`state-dir-check-service.ts`). Each implements the
+  `DaemonService` contract (`service.ts`) — `id`,
+  `start`/`stop`/`restart`/`health()`, plus `intervalMs`/`deadlineMs`/`tick()`
+  for the periodic ones — and is `supervisor.register()`ed in `runDaemon()`
+  only when `isDaemonServiceEnabled(id)` is true at boot. Every P3 service
+  registers alongside the P1/P2 batch before `supervisor.startAll()` except
+  `state-dir-check`, which registers (and starts) separately, right after
+  `handleShutdown` is declared later in `runDaemon()` — the supervisor fires
+  an immediate first tick on registration, and `state-dir-check`'s tick calls
+  `handleShutdown` on a marker mismatch, so registering it before that const
+  exists would reference it in its temporal dead zone. The supervisor gives
+  each service a per-tick deadline race, a per-service try/catch that never
+  escapes to the process-wide crash handler, and a park/backoff circuit
+  breaker (`parkAfterFailures`, default 3) that retries independently of
+  every sibling service. `getServiceSupervisorHealth()` (`daemon.ts:60`)
+  exposes the live in-process `supervisor.health()` map for a future
+  same-process reader; a cross-process reader (`agents daemon services`, a
+  separate CLI invocation) instead reads the persisted mirror below.
+- **Inline `setInterval`/socket setups, 2 services:** `scheduler` (the
+  routine `JobScheduler`) and `webhook-receiver` remain outside the
+  supervisor, deliberately — neither fits the `PeriodicService` shape.
+  `scheduler` is croner-driven (fires at each job's own cron schedule, not a
+  fixed interval) and already has its own live-reload path
+  (`schedulerGateTransition`, `bootScheduler`/`stopScheduler`) predating the
+  supervisor; folding it in without regressing that reload semantics is
+  future work, not part of RUSH-3193 P3. `webhook-receiver` is a socket
+  listener (`startHostedWebhookReceivers`) started once at boot, not ticked
+  on an interval at all — closer in shape to `browser-ipc`/`secrets-broker`
+  than to a `PeriodicService`; migrating it to `BaseDaemonService` is a
+  reasonable follow-up but was left inline here since P3's scope was the
+  interval-driven services. Neither has a per-service circuit breaker or
+  state persisted to `health.json` — `agents daemon services` infers a
+  coarse `running`/`stopped` label for them from the enable toggle plus
+  whether the daemon process is up (see below), never a measured value.
 
 Enabled/disabled state lives separately in a `DaemonServicesConfig`, read
 and written via `isDaemonServiceEnabled` (`daemon-services.ts`),
@@ -79,13 +83,13 @@ one health mirror both the daemon (writer) and `agents daemon` /
 error/timestamp) and, since RUSH-3193 P4, `recordSubsystemState` (the
 supervisor's `idle`/`running`/`parked`/`stopped` lifecycle state, written on
 every transition in `supervisor.ts`'s `startOne`/`stopOne`/`park`/
-`attemptRestart`). Only the 5 supervised services ever call
+`attemptRestart`). Only the 10 supervised services ever call
 `recordSubsystemState`, so a `SubsystemHealth` record's `state` field being
 present is itself the signal `agents daemon services` uses to render
 "measured" vs "inferred" (`commands/daemon.ts`'s `buildServiceRows`).
 
 **Crash model: any uncaught error in the process kills and restarts the
-whole daemon, not just the failing service — except for the 5 supervised
+whole daemon, not just the failing service — except for the 10 supervised
 services above, which the supervisor's own try/catch + deadline race now
 isolate.** A throw that escapes an INLINE service's local try/catch is still
 uncaught at the process level. `cli/src/index.ts:96-102` installs the
@@ -99,8 +103,9 @@ process.on('unhandledRejection', crash('unhandledRejection'));
 `crash()` logs and then calls `process.exit(1)` (`index.ts:100`), relying on
 the OS supervisor (launchd `KeepAlive` on macOS, `systemd Restart=always` on
 Linux) to relaunch the whole process — every INLINE service restarts
-together, not just the one that threw. The 7 inline services still have no
-recorded health signal beyond their own log lines.
+together, not just the one that threw. The 2 remaining inline services
+(`scheduler`, `webhook-receiver`) still have no recorded health signal beyond
+their own log lines.
 
 **Live enable/disable/restart (RUSH-3193 P4).** `agents daemon services
 enable|disable|restart <id>` persists the toggle (or, for `restart`, queues
@@ -170,26 +175,30 @@ most daemon-adjacent caching has no shared eviction policy today.
 
 **Shipped:** the `DaemonService`/`PeriodicService` contract and
 `ServiceSupervisor` (P1); 5 of 12 services migrated onto it — secrets-broker,
-browser-ipc, account-state, session-index, monitors (P2); and the operator
+browser-ipc, account-state, session-index, monitors (P2); the operator
 surface — `agents daemon services` reporting every registered service's
-health (measured for the 5 supervised, inferred for the other 7) plus live
-`enable`/`disable`/`restart` for the supervised set over the existing SIGHUP
-reload path (P4, this doc's Current architecture section above is the
-source of truth for all three).
+health plus live `enable`/`disable`/`restart` for the supervised set over the
+existing SIGHUP reload path (P4); and the remaining 5 interval-driven
+services — `watchdog`, `device-probe`, `self-heal`, `keychain-reap`,
+`state-dir-check` — migrated onto the supervisor too (P3), bringing the
+supervised total to 10 of 12. `agents daemon services` now reports health as
+measured for those 10 and inferred only for the 2 that remain inline
+(`scheduler`, `webhook-receiver` — see Current architecture above for why
+each doesn't fit `PeriodicService`). This doc's Current architecture section
+above is the source of truth for all of it.
 
 **Still open:**
 
-- **P3 — migrate the remaining 7 inline services** (`scheduler`,
-  `webhook-receiver`, `self-heal`, `keychain-reap`, `watchdog`,
-  `device-probe`, `state-dir-check`) onto the supervisor, so every service
-  gets the per-service error boundary, deadline, circuit breaker, and
-  `recordSubsystemState` mirror the 5 supervised ones already have — and so
-  `agents daemon services enable <id>` can start a service that was disabled
-  at daemon boot (today the supervisor's registry is fixed at construction,
-  so that case still needs a restart). `scheduler` in particular already has
-  its own live-reload path (`schedulerGateTransition`) that predates the
-  supervisor; folding it in needs care not to regress that.
-- **Interactive `agents daemon services` browser** — a TTY-only view reusing
+- **`scheduler` / `webhook-receiver` supervision.** `scheduler` is
+  croner-driven (fires on each job's own cron schedule, not a fixed
+  interval) and already has its own live-reload path
+  (`schedulerGateTransition`) that predates the supervisor — folding it in
+  needs a `DaemonService` shape that isn't just `PeriodicService`, or a
+  dedicated adapter, without regressing that reload semantics.
+  `webhook-receiver` is a socket listener started once at boot — a
+  `BaseDaemonService` wrapper (mirroring `browser-ipc`/`secrets-broker`) is
+  the natural next step, deferred out of P3's interval-focused scope.
+- **Interactive `agents daemon services` browser** (RUSH-3210) — a TTY-only view reusing
   `dynamicPicker` (`lib/picker.ts`), one row per service with a live-updating
   preview pane (log tail, last error, config) and inline
   enable/disable/restart keybindings, mirroring the `agents sessions`

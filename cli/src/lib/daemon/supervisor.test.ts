@@ -278,6 +278,66 @@ describe('ServiceSupervisor', () => {
     expect(svc.stopCalls).toBe(stopCallsAfterRestart + 1);
   });
 
+  // RUSH-3193 P3 migrated watchdog, device-probe, self-heal, keychain-reap,
+  // and state-dir-check onto the supervisor. The throw/hang mechanics above
+  // already exercise 'watchdog' (ThrowingService) and 'device-probe'
+  // (HangingService) by id; this closes the same two guarantees explicitly
+  // for every id P3 migrated, proving the mechanism the concrete
+  // `*-service.ts` wrappers rely on is id-agnostic.
+  describe('RUSH-3193 P3 migrated ids: throw parks, hang hits deadline', () => {
+    const P3_IDS: DaemonServiceId[] = ['watchdog', 'device-probe', 'self-heal', 'keychain-reap', 'state-dir-check'];
+
+    it.each(P3_IDS)('%s: a throwing tick parks the service after parkAfterFailures, without crashing a healthy sibling', async (id) => {
+      const supervisor = new ServiceSupervisor({ parkAfterFailures: 3, backoffBaseMs: 5_000, backoffMaxMs: 20_000 });
+      class NamedThrowingService extends ThrowingService {
+        readonly id = id;
+      }
+      const bad = new NamedThrowingService();
+      const good = new HealthyService('scheduler');
+      supervisor.register(bad);
+      supervisor.register(good);
+
+      await supervisor.startAll(makeCtx());
+      await vi.advanceTimersByTimeAsync(0); // tick #1
+      await vi.advanceTimersByTimeAsync(1_000); // tick #2
+      await vi.advanceTimersByTimeAsync(1_000); // tick #3 -> parks
+
+      const health = supervisor.health();
+      expect(health[id].state).toBe('parked');
+      expect(health[id].consecutiveFailures).toBeGreaterThanOrEqual(3);
+      expect(health['scheduler'].state).toBe('running');
+      expect(good.ticks).toBeGreaterThanOrEqual(3);
+
+      await supervisor.stopAll();
+    });
+
+    it.each(P3_IDS)('%s: a hanging tick is abandoned at the deadline, releasing the in-flight guard for the next tick', async (id) => {
+      const supervisor = new ServiceSupervisor({ parkAfterFailures: 100 });
+      class NamedHangingService extends HangingService {
+        readonly id = id;
+      }
+      const hanging = new NamedHangingService();
+      const good = new HealthyService('scheduler');
+      supervisor.register(hanging);
+      supervisor.register(good);
+
+      await supervisor.startAll(makeCtx());
+      await vi.advanceTimersByTimeAsync(0); // first immediate tick starts, then hangs
+      expect(hanging.ticksStarted).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(500); // past the 500ms deadline
+      const health = supervisor.health();
+      expect(health[id].consecutiveFailures).toBe(1);
+      expect(health[id].lastError).toMatch(/deadline/);
+
+      await vi.advanceTimersByTimeAsync(500); // next scheduled tick — proves the guard released
+      expect(hanging.ticksStarted).toBe(2);
+      expect(good.ticks).toBeGreaterThanOrEqual(1);
+
+      await supervisor.stopAll();
+    });
+  });
+
   // Review finding on PR #3037: recordSubsystemOk/Error (daemon-health.ts) are
   // called from inside runTick's own catch block. Before the fix, a health-file
   // write failure there (disk full, permission, or — as simulated here — the
