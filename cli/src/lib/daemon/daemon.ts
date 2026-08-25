@@ -29,7 +29,7 @@ import { startHostedWebhookReceivers, type HostedWebhookReceivers } from '../dae
 import { secretsBrokerSocketPath, brokerPidAlive } from '../secrets/agent.js';
 import { redactSecrets } from '../redact.js';
 import { getAgentsBinPath, getCliLaunch, BUN_VIRTUAL_ROOT } from '../cli-entry.js';
-import { isSchedulerEnabled, assertSchedulerEnabled, isDaemonEnabled, getConfigValue, resolveBrowserTaskIdleMs } from '../device-config.js';
+import { isSchedulerEnabled, assertSchedulerEnabled, isDaemonEnabled, resolveBrowserTaskIdleMs } from '../device-config.js';
 import { reapTerminalRoutineProcesses } from '../routine-process-cleanup.js';
 import { recordSubsystemOk, recordSubsystemError, recordSubsystemErrorReason, readSubsystemHealth, SUBSYSTEM_DAEMON_START } from '../daemon-health.js';
 import { runActiveSessionsWarmTick } from '../daemon-ticks.js';
@@ -40,6 +40,11 @@ import { SecretsBrokerService } from './secrets-broker-service.js';
 import { MonitorEngineService } from './monitor-engine-service.js';
 import { AccountStateDaemonService } from './account-state-daemon-service.js';
 import { BrowserIPCService } from './browser-ipc-service.js';
+import { WatchdogService } from './watchdog-service.js';
+import { DeviceProbeService } from './device-probe-service.js';
+import { SelfHealService } from './self-heal-service.js';
+import { KeychainReapService } from './keychain-reap-service.js';
+import { StateDirCheckService } from './state-dir-check-service.js';
 import type { ServiceHealth } from './service.js';
 import { emit, emitRoutineEnd } from '../feed/events.js';
 import { readDaemonServicesConfig, isDaemonServiceEnabled, drainDaemonServiceRestartQueue, type DaemonServiceId } from '../daemon-services.js';
@@ -127,34 +132,22 @@ const CATCHUP_TICK_MS = 5 * 60_000;
 /**
  * Cadences for the in-process background ticks, named here beside the other
  * tick constants rather than left as inline literals at their `setInterval`
- * (RUSH-2423). Each is a deliberate trade, not a round number:
+ * (RUSH-2423). Self-heal, keychain-reap, state-dir-check, watchdog, and
+ * device-probe cadences moved to their own `*-service.ts` files (RUSH-3193
+ * P3, alongside session-index/account-state/etc.) — see those files for the
+ * per-service trade-offs (self-heal's 6h/cheap-to-be-late repair cadence,
+ * keychain-reap's 5min `ps`-shell cost bound, state-dir-check's env override
+ * for tests, watchdog/device-probe's shared 3min in-process housekeeping
+ * cadence, NOT a routine — RUSH-2495).
  *
- * - **Self-heal** repairs slow rot (a stale non-default version, an invalid
- *   plugin manifest), so it is cheap to be late and expensive to run often —
- *   hence 6h, plus one staggered kickoff shortly after start so shims and PATH
- *   settle without making launch itself busy.
  * - **Broker self-heal** is a bare `agentPing`, and the failure it recovers
  *   from wedges every keychain-backed secret on the box, so it runs minutely.
- * - **Keychain reap** shells `ps` once per pass; 5 min bounds that cost while
- *   still clearing orphans well inside a human's attention span.
- * - **State-dir self-check** is two `fs` reads. Its env override exists for
- *   tests, which cannot wait a minute to observe the self-terminate guard.
  */
-const SELF_HEAL_TICK_MS = 6 * 60 * 60_000;
-const SELF_HEAL_KICKOFF_MS = 30_000;
 // BROKER_SELF_HEAL_TICK_MS moved to secrets-broker-service.ts (RUSH-3193 P2).
-const KEYCHAIN_REAP_TICK_MS = 5 * 60_000;
 // RUSH-2501: reap tmux sessions whose panes are all dead every 5 minutes.
 const DEAD_PANE_REAP_TICK_MS = 5 * 60_000;
 // RUSH-2622: close abandoned browser-task tabs every 5 minutes.
 const BROWSER_TASK_REAP_TICK_MS = 5 * 60_000;
-const STATE_DIR_CHECK_TICK_MS = 60_000;
-// Watchdog nudges this host's own stalled sessions; device-probe refreshes
-// registered devices' reachability and surfaces newly appeared tailnet nodes.
-// Both are daemon-owned housekeeping timers, NOT routines (RUSH-2495) — plain
-// in-process intervals the daemon holds directly, same cadence the old timers ran.
-const WATCHDOG_TICK_MS = 3 * 60_000;
-const DEVICE_PROBE_TICK_MS = 3 * 60_000;
 // Keep the active-session cache/journal fresh for sessions watch + Factory.
 // Matches DEFAULT_ACTIVE_CACHE_MAX_AGE_MS (15s) so long-lived watchers never
 // outlive the publisher (RUSH-2484 — CLI-owned continuous publish).
@@ -735,68 +728,18 @@ export function warnEphemeralDaemonRoot(resolveBin: () => string = getAgentsBinP
 // named in stack traces, readable without scrolling through runDaemon's
 // 500-line body, and not recreated on every function invocation.
 //
-// One function (runStateDirSelfCheck) remains inline:
-//   • It closes over `lifetimePath` and `lifetimeToken` — per-boot constants
-//     that cannot be pre-computed at module load time.
-// runBrokerSelfHeal was moved into SecretsBrokerService (RUSH-3193 P2).
+// self-heal and keychain-reap moved to SelfHealService / KeychainReapService
+// on the ServiceSupervisor (RUSH-3193 P3) — the supervisor's own per-tick
+// deadline + inFlight guard replaces their local `healing`/`reapingKeychain`
+// flags. state-dir-check moved to StateDirCheckService (RUSH-3193 P3),
+// registered after `handleShutdown` is declared — see its registration site
+// below. runBrokerSelfHeal was moved into SecretsBrokerService (RUSH-3193 P2).
 // ---------------------------------------------------------------------------
 
 // In-flight guards: each flag prevents a slow tick from being re-entered
 // by the next timer fire before the previous one finishes.
-let healing = false;
-let reapingKeychain = false;
 let reapingDeadPanes = false;
 let reapingBrowserTasks = false;
-
-/**
- * Resource self-heal: fill missing resources, repair invalid manifests, and
- * fast-forward pristine stale plugins. Conservative 'safe' mode: never
- * overwrites hand-edited content. Runs ~every 6h plus once ~30s after startup.
- *
- * Does not run when the daemon's state directory no longer exists — that is the
- * self-terminate guard's signal to shut down; background maintenance must not
- * recreate the tree while it is mid-exit.
- */
-async function runHealCheck(): Promise<void> {
-  if (healing) return;
-  if (!fs.existsSync(getDaemonDir())) return;
-  healing = true;
-  try {
-    const { runSelfHeal, selfHealChangedAnything, selfHealNeedsAttention, summarizeSelfHeal } =
-      await import('../self-heal/registry.js');
-    if (!fs.existsSync(getDaemonDir())) return;
-    const report = await runSelfHeal({ mode: 'safe' });
-    if (selfHealChangedAnything(report) || selfHealNeedsAttention(report)) {
-      log('INFO', `self-heal: ${summarizeSelfHeal(report)}`);
-    }
-  } catch (err) {
-    log('ERROR', `self-heal check failed: ${(err as Error).message}`);
-  } finally {
-    healing = false;
-  }
-}
-
-/**
- * Keychain orphan reaper: kill stuck keychain helper and `agents` processes
- * whose keychain call never returned. Runs every 5 min. Single-executor: only
- * the daemon runs this, so no cross-device race.
- */
-async function runKeychainReap(): Promise<void> {
-  if (reapingKeychain) return;
-  reapingKeychain = true;
-  try {
-    const { reapOrphanedKeychainProcesses } = await import('../secrets/reaper.js');
-    const result = reapOrphanedKeychainProcesses();
-    if (result.reaped > 0) {
-      log('WARN', `Reaped ${result.reaped} keychain orphan/stuck process(es)`);
-      for (const d of result.details) log('WARN', `  ${d}`);
-    }
-  } catch (err) {
-    log('ERROR', `Keychain reaper failed: ${(err as Error).message}`);
-  } finally {
-    reapingKeychain = false;
-  }
-}
 
 /**
  * RUSH-2501: kill tmux sessions on the helper socket whose panes are ALL dead.
@@ -975,6 +918,22 @@ export async function runDaemon(): Promise<void> {
   if (isEnabled('session-index')) supervisor.register(new SessionIndexService());
   else log('INFO', 'Session-index warm service disabled');
 
+  // Watchdog, device-probe, self-heal, and keychain-reap are all periodic
+  // services managed by the ServiceSupervisor (RUSH-3193 P3). Each is gated
+  // the same way as the socket services above; state-dir-check is registered
+  // separately, later, after `handleShutdown` exists (see below).
+  if (isEnabled('watchdog')) supervisor.register(new WatchdogService());
+  else log('INFO', 'Watchdog service disabled');
+
+  if (isEnabled('device-probe')) supervisor.register(new DeviceProbeService());
+  else log('INFO', 'Device-probe service disabled');
+
+  if (isEnabled('self-heal')) supervisor.register(new SelfHealService());
+  else log('INFO', 'Self-heal service disabled');
+
+  if (isEnabled('keychain-reap')) supervisor.register(new KeychainReapService());
+  else log('INFO', 'Keychain-reap service disabled');
+
   await supervisor.startAll({ log });
   activeServiceSupervisor = supervisor;
 
@@ -1135,83 +1094,12 @@ export async function runDaemon(): Promise<void> {
   // Session-index warm (RUSH-2682) is registered on the supervisor above
   // (RUSH-3193 P2) alongside the socket services.
 
-  // Watchdog: nudge this host's own stalled agent sessions. Gated on the
-  // `watchdog.enabled` device-config flag (`agents watchdog enable`), so the
-  // timer always fires but only does work when the user opted in. Overlap-safe
-  // via the in-flight guard (a slow pass never overlaps the next tick).
-  let watchdogInterval: NodeJS.Timeout | undefined;
-  if (isEnabled('watchdog')) {
-    let watchdogInFlight = false;
-    const runWatchdogTick = async (): Promise<void> => {
-      if (watchdogInFlight) return;
-      watchdogInFlight = true;
-      try {
-        if (getConfigValue('watchdog.enabled').value !== true) return;
-        const { runWatchdogPass } = await import('../watchdog/service.js');
-        const result = await runWatchdogPass({ nudge: true });
-        log('INFO', `watchdog: ${result.counts.total} live, ${result.counts.stalled} stalled, ${result.counts.nudged} nudged`);
-        emit('watchdog.action', {
-          module: 'watchdog',
-          total: result.counts.total,
-          stalled: result.counts.stalled,
-          nudged: result.counts.nudged,
-        });
-      } catch (err) {
-        log('WARN', `watchdog tick failed: ${(err as Error).message}`);
-      } finally {
-        watchdogInFlight = false;
-      }
-    };
-    watchdogInterval = setInterval(() => { void runWatchdogTick(); }, WATCHDOG_TICK_MS);
-  } else {
-    log('INFO', 'Watchdog service disabled');
-  }
-
-  // Device probe: refresh registered devices' reachability and detect newly
-  // appeared tailnet nodes, dropping a sentinel per pending device so the
-  // menu-bar helper can surface "NEW DEVICES → Register / Ignore". Refresh mode
-  // never auto-registers a newcomer; a machine without tailscale is a clean
-  // no-op. `reconcilePendingSentinels` re-subtracts the ignore-list AND the
-  // registered roster, so a dismissed or already-known device is never
-  // re-surfaced (RUSH-2495 + registry-empty pollution). On soft-fail (no
-  // tailscale) we still prune registered/ignored sentinels so a hermetic test
-  // leak cannot leave fleet boxes in NEW DEVICES forever.
-  let deviceProbeInterval: NodeJS.Timeout | undefined;
-  if (isEnabled('device-probe')) {
-    let deviceProbeInFlight = false;
-    const runDeviceProbeTick = async (): Promise<void> => {
-      if (deviceProbeInFlight) return;
-      deviceProbeInFlight = true;
-      try {
-        const { runDeviceSync } = await import('../devices/sync.js');
-        const {
-          reconcilePendingSentinels,
-          pruneDismissedPendingSentinels,
-        } = await import('../devices/pending.js');
-        const dev = await runDeviceSync({ soft: true, mode: 'refresh' });
-        if (!dev.ok) {
-          await pruneDismissedPendingSentinels();
-          if (dev.reason) log('WARN', `device probe soft-fail: ${dev.reason}`);
-          return;
-        }
-        await reconcilePendingSentinels(dev.pending);
-        if (dev.pending.length) {
-          log('INFO', `devices: ${dev.pending.length} new pending (${dev.pending.map((p) => p.name).join(', ')})`);
-        }
-      } catch (err) {
-        log('WARN', `device probe tick failed: ${(err as Error).message}`);
-      } finally {
-        deviceProbeInFlight = false;
-      }
-    };
-    // Fire once on start so a leftover pollution set is cleared without waiting
-    // for the first interval tick (the 3-minute lag is how the menubar sat on
-    // 20 phantom NEW DEVICES after a hermetic leak).
-    void runDeviceProbeTick();
-    deviceProbeInterval = setInterval(() => { void runDeviceProbeTick(); }, DEVICE_PROBE_TICK_MS);
-  } else {
-    log('INFO', 'Device-probe service disabled');
-  }
+  // Watchdog and device-probe are now managed by WatchdogService /
+  // DeviceProbeService on the supervisor (RUSH-3193 P3), registered above
+  // alongside the socket services. The supervisor fires an immediate first
+  // tick on start, which replaces device-probe's old `void
+  // runDeviceProbeTick()` kick-off (the 3-minute lag that used to leave the
+  // menubar showing 20 phantom NEW DEVICES after a hermetic leak).
 
   // Monitor engine is now managed by MonitorEngineService on the supervisor
   // (RUSH-3193 P2). Access it via monitorEngineSvc.getEngine() in handleReload.
@@ -1225,7 +1113,7 @@ export async function runDaemon(): Promise<void> {
   // `catchup: false`, RUN late. Runs on a timer as well as at startup: a startup
   // pass alone misses a fire lost while the daemon stayed up but its event loop
   // was wedged, or one lost across an OS suspend that the process survived.
-  // Overlap guard, same shape as runHealCheck (above). A pass
+  // Overlap guard, same shape as SelfHealService's supervisor-owned inFlight guard. A pass
   // awaits executeJobDetached per job and an off-box (host/cloud) dispatch can
   // block for a while, so a slow pass could still be working when the next tick
   // fires. Both passes would then see a job the first has not yet reached as
@@ -1309,29 +1197,16 @@ export async function runDaemon(): Promise<void> {
   runMonitorTick();
   const monitorInterval = setInterval(runMonitorTick, MONITOR_TICK_MS);
 
-  // Resource safety check: see runHealCheck above. Runs ~every 6h plus once
-  // ~30s after startup so shims/PATH settle shortly after the daemon starts.
-  let healInterval: NodeJS.Timeout | undefined;
-  let healKickoff: NodeJS.Timeout | undefined;
-  if (isEnabled('self-heal')) {
-    healInterval = setInterval(() => { void runHealCheck(); }, SELF_HEAL_TICK_MS);
-    healKickoff = setTimeout(() => { void runHealCheck(); }, SELF_HEAL_KICKOFF_MS);
-  } else {
-    log('INFO', 'Self-heal service disabled');
-  }
+  // Resource self-heal is now managed by SelfHealService on the supervisor
+  // (RUSH-3193 P3), registered above alongside the socket services. The
+  // supervisor's immediate first tick on start replaces the old
+  // SELF_HEAL_KICKOFF_MS (30s) delayed kickoff timer — see self-heal-service.ts.
 
   // Broker self-heal (RUSH-1817) is now encapsulated in SecretsBrokerService
   // (RUSH-3193 P2). The interval fires inside onStart() and is stopped in onStop().
 
-  // RUSH-2232: reap orphaned keychain helpers and `agents` processes stuck on a
-  // keychain call. Runs as a 5-min interval in the daemon (the single executor)
-  // so no UI surface can race it. See runKeychainReap above.
-  let keychainReapInterval: NodeJS.Timeout | undefined;
-  if (isEnabled('keychain-reap')) {
-    keychainReapInterval = setInterval(() => { void runKeychainReap(); }, KEYCHAIN_REAP_TICK_MS);
-  } else {
-    log('INFO', 'Keychain-reap service disabled');
-  }
+  // RUSH-2232: keychain-reap is now managed by KeychainReapService on the
+  // supervisor (RUSH-3193 P3), registered above alongside the socket services.
 
   // RUSH-2501: reap tmux sessions whose panes are all dead. Runs on the same
   // 5-min cadence as the keychain reaper. Daemon-only (single executor).
@@ -1347,47 +1222,9 @@ export async function runDaemon(): Promise<void> {
     browserTaskReapInterval = setInterval(() => { void runBrowserTaskReap(browserSvcForReap!); }, BROWSER_TASK_REAP_TICK_MS);
   }
 
-  // RUSH-2367: self-terminate if this daemon's own state dir has been removed
-  // out from under it — the shape of a leaked test-fixture daemon whose /tmp
-  // HOME was deleted by its test's own cleanup while the process itself
-  // somehow survived (lost the SIGTERM/SIGKILL race, or outlived a killed
-  // test runner before its `finally` ever ran). Nothing else can reach a
-  // daemon in that state: no `agents daemon` command targets it, since a
-  // different HOME resolves a different ensureDaemonDir() and therefore a
-  // different instance registry — without this it runs forever. Reads
-  // the lifetime marker directly, never the local ensureDaemonDir() wrapper,
-  // which recreates the directory as a side effect and would defeat the check.
-  // Heartbeat/status paths may recreate the directory and pid file after a
-  // deletion; they never recreate this per-lifetime token.
-  // Inline (not module-level): closes over `lifetimePath` and `lifetimeToken`,
-  // per-boot constants computed once at runDaemon() start that cannot be
-  // pre-computed at module load time.
-  let stateDirCheckInterval: NodeJS.Timeout | undefined;
-  if (isEnabled('state-dir-check')) {
-    let checkingStateDir = false;
-    const runStateDirSelfCheck = (): void => {
-      if (checkingStateDir) return;
-      checkingStateDir = true;
-      try {
-        let markerMatches = false;
-        try {
-          markerMatches = fs.readFileSync(lifetimePath, 'utf-8') === lifetimeToken;
-        } catch {
-          // A missing state dir or marker is the condition this guard detects.
-        }
-        if (!markerMatches) {
-          log('WARN', `Daemon state dir ${getDaemonDir()} no longer exists; exiting (self-terminate guard)`);
-          void handleShutdown();
-        }
-      } finally {
-        checkingStateDir = false;
-      }
-    };
-    const stateDirCheckMs = Number(process.env.AGENTS_DAEMON_STATE_DIR_CHECK_MS) || STATE_DIR_CHECK_TICK_MS;
-    stateDirCheckInterval = setInterval(runStateDirSelfCheck, stateDirCheckMs);
-  } else {
-    log('INFO', 'State-dir self-check disabled');
-  }
+  // RUSH-2367 / RUSH-3193 P3: state-dir-check (self-terminate guard) is
+  // registered on the supervisor further below, once `handleShutdown` exists
+  // — see the registration site after its declaration for why.
 
   // RUSH-2418: startup is over — the scheduler, browser IPC, broker decision,
   // monitor engine and every background tick are up. Only NOW does this daemon
@@ -1495,31 +1332,27 @@ export async function runDaemon(): Promise<void> {
   };
 
   // Structurally single-shot (RUSH-2423). Shutdown is reachable from SIGTERM,
-  // SIGINT, and the state-dir self-check's independent `void handleShutdown()`,
-  // and two of those can arrive together — a service manager that SIGTERMs a
-  // daemon whose state dir was just removed. It was only INCIDENTALLY safe
-  // before (every step inside happens to be idempotent); the guard makes
-  // single-shot a property of the function rather than one that every step
-  // added later has to re-earn.
+  // SIGINT, and StateDirCheckService's independent `onMissing` callback (which
+  // calls this same handler), and two of those can arrive together — a
+  // service manager that SIGTERMs a daemon whose state dir was just removed.
+  // It was only INCIDENTALLY safe before (every step inside happens to be
+  // idempotent); the guard makes single-shot a property of the function
+  // rather than one that every step added later has to re-earn.
   const handleShutdown = singleShot(async () => {
     log('INFO', 'Daemon shutting down');
     clearInterval(activeSessionsWarmInterval);
     stopActiveSessionsReaderWatch();
-    // supervisor.stopAll() stops: secrets-broker (closes hostedBroker + self-heal
-    // timer), monitor engine, account-state, browser IPC, and session-index.
+    // supervisor.stopAll() stops every registered service: secrets-broker
+    // (closes hostedBroker + self-heal timer), monitor engine, account-state,
+    // browser IPC, session-index, watchdog, device-probe, self-heal,
+    // keychain-reap, and (once registered just below) state-dir-check.
     await supervisor.stopAll();
     activeServiceSupervisor = null;
-    if (watchdogInterval) clearInterval(watchdogInterval);
-    if (deviceProbeInterval) clearInterval(deviceProbeInterval);
     stopScheduler();
     await webhookReceivers?.close();
     clearInterval(monitorInterval);
-    if (healInterval) clearInterval(healInterval);
-    if (healKickoff) clearTimeout(healKickoff);
-    if (keychainReapInterval) clearInterval(keychainReapInterval);
     clearInterval(deadPaneReapInterval);
     if (browserTaskReapInterval) clearInterval(browserTaskReapInterval);
-    if (stateDirCheckInterval) clearInterval(stateDirCheckInterval);
     try {
       if (fs.readFileSync(lifetimePath, 'utf-8') === lifetimeToken) fs.unlinkSync(lifetimePath);
     } catch {
@@ -1530,6 +1363,25 @@ export async function runDaemon(): Promise<void> {
     unregisterDaemonInstance();
     process.exit(0);
   });
+
+  // State-dir self-check (RUSH-2367 self-terminate guard) is registered on
+  // the supervisor here — AFTER `handleShutdown` above — rather than
+  // alongside watchdog/device-probe/self-heal/keychain-reap earlier. The
+  // supervisor fires an immediate first tick on `register()`+`start()`; doing
+  // that before `handleShutdown` exists would reference the const in its
+  // temporal dead zone the moment a mismatch is ever detected. Registering it
+  // here, once `handleShutdown` is a real function, removes that risk
+  // entirely rather than relying on the marker always matching on tick one.
+  if (isEnabled('state-dir-check')) {
+    supervisor.register(new StateDirCheckService({
+      lifetimePath,
+      lifetimeToken,
+      onMissing: () => { void handleShutdown(); },
+    }));
+    await supervisor.start('state-dir-check');
+  } else {
+    log('INFO', 'State-dir self-check disabled');
+  }
 
   process.on('SIGHUP', handleReload);
   process.on('SIGTERM', () => handleShutdown());
