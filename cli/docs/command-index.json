@@ -27933,7 +27933,7 @@
           "name": "start",
           "path": "teams start",
           "aliases": [],
-          "description": "Launch any pending teammates whose --after dependencies are satisfied. Use --watch to keep draining the DAG as teammates finish and as new tasks are added mid-flight.",
+          "description": "Launch ready teammates independently. Failed launch/placement and blocked --after dependencies persist in status; --watch keeps draining viable DAG branches.",
           "args": [
             {
               "name": "team",

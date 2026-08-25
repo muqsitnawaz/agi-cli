@@ -39,6 +39,7 @@ import { atomicWriteJsonSync } from '../fs-atomic.js';
 import { resolvePlacement, classifyExclusions, NoViableDeviceError } from './scheduler.js';
 import { probePoolSignals } from './placement-probe.js';
 import { readMaxConcurrentCaps } from '../device-config.js';
+import { redactSecrets, sanitizeForTerminal } from '../redact.js';
 import chalk from 'chalk';
 
 let lastMemoryWarnAt = 0;
@@ -152,6 +153,22 @@ export const TERMINAL_STATUSES: ReadonlySet<AgentStatus> = new Set([
 /** True when a teammate has reached a terminal (completed/failed/stopped) status. */
 export function isTerminalStatus(status: AgentStatus): boolean {
   return TERMINAL_STATUSES.has(status);
+}
+
+export type TeammateFailureStage = 'placement' | 'spawn' | 'execution' | 'dependency' | 'cloud';
+
+/** Durable evidence observed at a concrete teammate lifecycle boundary. */
+export interface TeammateFailure {
+  stage: TeammateFailureStage;
+  code: string;
+  message: string;
+  exit_code: number | null;
+  retryable: boolean;
+  observed_at: string;
+}
+
+function safeFailureMessage(message: string): string {
+  return redactSecrets(sanitizeForTerminal(message)).replace(/\s+/g, ' ').trim().slice(0, 500);
 }
 
 /**
@@ -636,6 +653,7 @@ export class AgentProcess {
   remotePid: number | null = null;
   remoteLog: string | null = null;
   remoteExit: string | null = null;
+  failure: TeammateFailure | null = null;
   // Offset-tail cursor into the REMOTE log (bytes already pulled). Distinct from
   // lastReadPos, which tracks the LOCAL mirror the parser consumes.
   remoteLogOffset: number = 0;
@@ -744,6 +762,7 @@ export class AgentProcess {
     cloud_session_id: string | null;
     cloud_repo: string | null;
     cloud_branch: string | null;
+    failure: TeammateFailure | null;
     agent_dir: string;
     cwd: string | null;
   }> {
@@ -761,6 +780,7 @@ export class AgentProcess {
       cloud_session_id: this.cloudSessionId,
       cloud_repo: this.cloudRepo,
       cloud_branch: this.cloudBranch,
+      failure: this.failure,
       agent_dir: await this.getAgentDir(),
       cwd: this.cwd,
     };
@@ -812,6 +832,7 @@ export class AgentProcess {
       task_type: this.taskType,
       cloud_repo: this.cloudRepo,
       cloud_branch: this.cloudBranch,
+      failure: this.failure,
     };
   }
 
@@ -913,6 +934,13 @@ export class AgentProcess {
       const code = Number.parseInt(snap.exit.trim(), 10);
       if (Number.isFinite(code)) {
         this.status = code === 0 ? AgentStatus.COMPLETED : AgentStatus.FAILED;
+        if (code !== 0) {
+          this.failure = {
+            stage: 'execution', code: 'remote-process-exit-nonzero',
+            message: `Remote teammate process exited with code ${code}.`, exit_code: code,
+            retryable: false, observed_at: new Date().toISOString(),
+          };
+        }
         if (!this.completedAt) this.completedAt = new Date();
         return;
       }
@@ -926,6 +954,11 @@ export class AgentProcess {
     // RUNNING above precisely so this branch does not misfire on that race.
     if (this.status === AgentStatus.RUNNING && !snap.alive && !snap.exitFilePresent) {
       this.status = AgentStatus.FAILED;
+      this.failure = {
+        stage: 'execution', code: 'remote-process-gone',
+        message: 'Remote teammate process disappeared before recording an exit code.', exit_code: null,
+        retryable: true, observed_at: new Date().toISOString(),
+      };
       if (!this.completedAt) this.completedAt = this.getLatestEventTime() || this.startedAt || new Date();
     }
   }
@@ -1017,6 +1050,11 @@ export class AgentProcess {
                 this.completedAt = event.timestamp ? new Date(event.timestamp) : new Date();
               } else if (event.status === 'error') {
                 this.status = AgentStatus.FAILED;
+                this.failure = {
+                  stage: 'execution', code: 'harness-reported-error',
+                  message: 'The harness reported a terminal error.', exit_code: null,
+                  retryable: false, observed_at: new Date().toISOString(),
+                };
                 this.completedAt = event.timestamp ? new Date(event.timestamp) : new Date();
               }
             }
@@ -1142,6 +1180,7 @@ export class AgentProcess {
       remote_log: this.remoteLog,
       remote_exit: this.remoteExit,
       remote_log_offset: this.remoteLogOffset,
+      failure: this.failure,
     };
     const metaPath = await this.getMetaPath();
     atomicWriteJsonSync(metaPath, meta);
@@ -1275,6 +1314,16 @@ export class AgentProcess {
       agent.remoteLog = meta.remote_log || null;
       agent.remoteExit = meta.remote_exit || null;
       agent.remoteLogOffset = typeof meta.remote_log_offset === 'number' ? meta.remote_log_offset : 0;
+      agent.failure = meta.failure && typeof meta.failure === 'object'
+        ? {
+            stage: meta.failure.stage,
+            code: String(meta.failure.code),
+            message: safeFailureMessage(String(meta.failure.message ?? '')),
+            exit_code: typeof meta.failure.exit_code === 'number' ? meta.failure.exit_code : null,
+            retryable: Boolean(meta.failure.retryable),
+            observed_at: String(meta.failure.observed_at),
+          }
+        : null;
       // The team's project. Absent on every teammate added before `--project`.
       agent.project = typeof meta.project === 'string' ? meta.project : null;
       return agent;
@@ -1444,6 +1493,11 @@ export class AgentProcess {
           this.getLatestEventTime() || this.startedAt || new Date();
         if (this.status === AgentStatus.RUNNING) {
           this.status = AgentStatus.FAILED;
+          this.failure = {
+            stage: 'spawn', code: 'process-identity-missing',
+            message: 'The teammate was marked running without a process identity.', exit_code: null,
+            retryable: true, observed_at: new Date().toISOString(),
+          };
           this.completedAt = fallbackCompletion;
         }
         await this.saveMeta();
@@ -1465,14 +1519,24 @@ export class AgentProcess {
     }
 
     if (this.status === AgentStatus.RUNNING) {
-      const exitCode = await this.reapProcess();
+      const exit = await this.reapProcess();
       await this.readNewEvents();
 
       if (this.status === AgentStatus.RUNNING) {
         const fallbackCompletion =
           this.getLatestEventTime() || this.startedAt || new Date();
-        if (exitCode !== null && exitCode !== 0) {
+        if (exit !== null && exit.code !== 0) {
           this.status = AgentStatus.FAILED;
+          this.failure = {
+            stage: 'execution',
+            code: exit.sentinelPresent ? 'process-exit-nonzero' : 'process-exit-unrecorded',
+            message: exit.sentinelPresent
+              ? `Teammate process exited with code ${exit.code}.`
+              : 'Teammate process disappeared before recording an exit code.',
+            exit_code: exit.sentinelPresent ? exit.code : null,
+            retryable: !exit.sentinelPresent,
+            observed_at: new Date().toISOString(),
+          };
         } else {
           this.status = AgentStatus.COMPLETED;
         }
@@ -1505,7 +1569,7 @@ export class AgentProcess {
    * never emits a parsed terminal event — kimi, antigravity, droid — be marked
    * completed on success instead of falsely failed.
    */
-  private async reapProcess(): Promise<number | null> {
+  private async reapProcess(): Promise<{ code: number; sentinelPresent: boolean } | null> {
     if (!this.pid) return null;
     // isProcessAlive() applies the start-time guard, so a recycled PID now
     // owned by an unrelated process doesn't read as still-alive.
@@ -1514,10 +1578,10 @@ export class AgentProcess {
     try {
       const raw = (await fs.readFile(await this.getExitCodePath(), 'utf-8')).trim();
       const code = Number.parseInt(raw, 10);
-      return Number.isNaN(code) ? 1 : code;
+      return { code: Number.isNaN(code) ? 1 : code, sentinelPresent: true };
     } catch {
       // No sentinel: the shell died before recording $? (killed mid-run).
-      return 1;
+      return { code: 1, sentinelPresent: false };
     }
   }
 }
@@ -1713,6 +1777,20 @@ export class AgentManager {
 
   registerAgent(agent: AgentProcess): void {
     this.agents.set(agent.agentId, agent);
+  }
+
+  private async failAgent(
+    agent: AgentProcess,
+    failure: Omit<TeammateFailure, 'message' | 'observed_at'> & { message: string },
+  ): Promise<void> {
+    agent.failure = {
+      ...failure,
+      message: safeFailureMessage(failure.message),
+      observed_at: new Date().toISOString(),
+    };
+    agent.status = AgentStatus.FAILED;
+    agent.completedAt = new Date();
+    await agent.saveMeta();
   }
 
   /**
@@ -2035,7 +2113,7 @@ export class AgentManager {
     const agentId = randomUUID();
     const isStaged = cleanAfter.length > 0;
 
-    const initialStatus = isStaged || !isCloudBacked
+    const initialStatus = isStaged || !isCloudBacked || !cloudSessionId
       ? AgentStatus.PENDING
       : AgentStatus.RUNNING;
 
@@ -2103,10 +2181,26 @@ export class AgentManager {
       await agent.saveMeta();
       debug(`Staged ${agentType} teammate '${name}' in team '${taskName}' (after: ${cleanAfter.join(', ')})`);
     } else if (isCloudBacked) {
-      // Cloud-backed teammate: the provider already dispatched a remote task.
-      // No local process to launch; status polling walks the provider instead.
-      await agent.saveMeta();
-      debug(`Cloud-backed ${agentType} teammate via ${cloudProvider} (session=${cloudSessionId})`);
+      if (cloudSessionId) {
+        // Compatibility path for API callers that already dispatched remotely.
+        await agent.saveMeta();
+        debug(`Cloud-backed ${agentType} teammate via ${cloudProvider} (session=${cloudSessionId})`);
+      } else {
+        try {
+          if (!this.cloudDispatcher) throw new Error('No cloud dispatcher registered.');
+          const dispatched = await this.cloudDispatcher(agent);
+          agent.cloudSessionId = dispatched.cloudSessionId;
+          agent.status = AgentStatus.RUNNING;
+          agent.startedAt = new Date();
+          await agent.saveMeta();
+        } catch (err) {
+          await this.failAgent(agent, {
+            stage: 'cloud', code: 'cloud-dispatch-failed', message: (err as Error).message,
+            exit_code: null, retryable: true,
+          });
+          throw err;
+        }
+      }
     } else if (isRemoteBacked) {
       // Distributed teammate that can run now (no unmet --after deps): dispatch
       // it onto its host over SSH instead of a local spawn.
@@ -2115,7 +2209,18 @@ export class AgentManager {
       // Unpinned + launching now: consult the pool scheduler before defaulting to
       // local, so an unpinned teammate on a --devices team auto-schedules even when
       // added without --after (it wouldn't pass through startReady otherwise).
-      await this.maybeSchedulePlacement(agent, taskName);
+      try {
+        await this.maybeSchedulePlacement(agent, taskName);
+      } catch (err) {
+        await this.failAgent(agent, {
+          stage: 'placement',
+          code: err instanceof NoViableDeviceError ? 'no-viable-device' : 'placement-failed',
+          message: (err as Error).message,
+          exit_code: null,
+          retryable: !(err instanceof NoViableDeviceError),
+        });
+        throw err;
+      }
       if (agent.hostName) await this.launchRemoteProcess(agent);
       else await this.launchProcess(agent);
     }
@@ -2326,10 +2431,15 @@ export class AgentManager {
       if (stdoutFile) await stdoutFile.close().catch(() => {});
       if (childProcess?.pid) await terminateSpawnedProcess(childProcess.pid);
       if (resumeLog) await rollbackResumeLogTransaction(resumeLog);
-      // Fresh spawns own a newly-created directory, so a failed launch removes
-      // that partial record. A resume reuses an existing teammate: its caller
-      // restores the prior terminal state and preserves the directory for retry.
-      if (!resume) await this.cleanupPartialAgent(agent);
+      if (!resume) {
+        await this.failAgent(agent, {
+          stage: 'spawn',
+          code: 'local-spawn-failed',
+          message: err.message,
+          exit_code: null,
+          retryable: true,
+        });
+      }
       console.error(`Failed to spawn agent ${agent.agentId}:`, err);
       throw new Error(`Failed to spawn agent: ${err.message}`);
     }
@@ -2459,6 +2569,15 @@ export class AgentManager {
         }
       }
       console.error(`Failed to launch remote teammate ${agent.agentId} on ${agent.hostName}:`, err);
+      if (!resume) {
+        await this.failAgent(agent, {
+          stage: 'spawn',
+          code: 'remote-launch-failed',
+          message: err.message,
+          exit_code: null,
+          retryable: true,
+        });
+      }
       if (cleanupError) {
         throw new Error(
           `Failed to launch remote teammate: ${err.message}; cleanup failed: ${cleanupError.message}`,
@@ -2559,46 +2678,6 @@ export class AgentManager {
   }
 
   /**
-   * Pre-flight the team pool at `teams start` (RUSH-2002): probe the pool and
-   * confirm each distinct agent among the pending, unpinned, pooled teammates
-   * has at least one viable device. Returns the first {@link NoViableDeviceError}
-   * so the command can fail loud BEFORE launching a wave, rather than silently
-   * leaving teammates stranded pending. A poolless team (no `--devices`) or a
-   * probe that could not gather positive evidence returns null — fail-loud fires
-   * only on proof that no device can run the agent, never on a probe miss.
-   */
-  async preflightPlacement(taskName: string): Promise<NoViableDeviceError | null> {
-    await this.initialize();
-    const teamMeta = await getTeam(taskName);
-    const pool = teamMeta?.devices ?? [];
-    if (!teamMeta || pool.length === 0) return null;
-    const roster = await this.listByTask(taskName);
-    const pending = roster.filter(
-      (a) => a.status === AgentStatus.PENDING && !a.hostName && !a.cloudProvider,
-    );
-    if (pending.length === 0) return null;
-    const maxConcurrent = pool.length > 1 ? readMaxConcurrentCaps(pool) : undefined;
-    // One representative teammate per distinct agent type — the signal + gate is
-    // per harness, not per teammate.
-    const byAgent = new Map<string, AgentProcess>();
-    for (const a of pending) if (!byAgent.has(a.agentType)) byAgent.set(a.agentType, a);
-    for (const [, rep] of byAgent) {
-      const signals = await probePoolSignals(pool, rep.agentType, { now: Date.now() });
-      try {
-        resolvePlacement(teamMeta, null, roster, {
-          maxConcurrent,
-          signals,
-          agentLabel: this.placementAgentLabel(rep),
-        });
-      } catch (err) {
-        if (err instanceof NoViableDeviceError) return err;
-        throw err;
-      }
-    }
-    return null;
-  }
-
-  /**
    * One-ssh-per-host batched liveness/exit pre-pass for a team's remote teammates.
    * The supervisor calls this each wave BEFORE listByTask() so the per-teammate
    * isProcessAlive()/readNewEvents() consume a cached snapshot instead of each
@@ -2679,6 +2758,20 @@ export class AgentManager {
     const launched: AgentProcess[] = [];
     for (const agent of teammates) {
       if (agent.status !== AgentStatus.PENDING) continue;
+      const blockers = agent.after
+        .map((depName) => ({ depName, dep: byName.get(depName) }))
+        .filter(({ dep }) => !dep || (isTerminalStatus(dep.status) && dep.status !== AgentStatus.COMPLETED));
+      if (blockers.length > 0) {
+        const names = blockers.map(({ depName, dep }) => `${depName} (${dep?.status ?? 'missing'})`);
+        await this.failAgent(agent, {
+          stage: 'dependency',
+          code: 'dependency-failed',
+          message: `Blocked by dependency: ${names.join(', ')}.`,
+          exit_code: null,
+          retryable: false,
+        });
+        continue;
+      }
       const depsReady = agent.after.every((depName) => {
         const dep = byName.get(depName);
         return dep && dep.status === AgentStatus.COMPLETED;
@@ -2692,9 +2785,13 @@ export class AgentManager {
       try {
         await this.maybeSchedulePlacement(agent, taskName, { probe: true });
       } catch (err) {
-        // A NoViableDeviceError means the pool cannot host this teammate right
-        // now — leave it PENDING (never a silent local fallback) and surface the
-        // reason; a transient device loss is retried next wave.
+        await this.failAgent(agent, {
+          stage: 'placement',
+          code: err instanceof NoViableDeviceError ? 'no-viable-device' : 'placement-failed',
+          message: (err as Error).message,
+          exit_code: null,
+          retryable: !(err instanceof NoViableDeviceError),
+        });
         console.error(`Could not schedule ${agent.agentId} onto the team pool:`, err);
         continue;
       }
@@ -2706,9 +2803,12 @@ export class AgentManager {
           launched.push(agent);
         } else if (agent.cloudProvider) {
           if (!this.cloudDispatcher) {
-            console.error(
-              `Cannot start cloud-backed teammate ${agent.agentId}: no dispatcher registered.`
-            );
+            const message = `Cannot start cloud-backed teammate ${agent.agentId}: no dispatcher registered.`;
+            await this.failAgent(agent, {
+              stage: 'cloud', code: 'cloud-dispatcher-missing', message,
+              exit_code: null, retryable: false,
+            });
+            console.error(message);
             continue;
           }
           const { cloudSessionId } = await this.cloudDispatcher(agent);
@@ -2722,6 +2822,13 @@ export class AgentManager {
           launched.push(agent);
         }
       } catch (err) {
+        await this.failAgent(agent, {
+          stage: agent.cloudProvider ? 'cloud' : 'spawn',
+          code: agent.cloudProvider ? 'cloud-dispatch-failed' : agent.hostName ? 'remote-launch-failed' : 'local-spawn-failed',
+          message: (err as Error).message,
+          exit_code: null,
+          retryable: true,
+        });
         console.error(`Could not launch ${agent.agentId}:`, err);
       }
     }

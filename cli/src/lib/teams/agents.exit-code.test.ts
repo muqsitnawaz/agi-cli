@@ -106,6 +106,9 @@ describe.skipIf(IS_WINDOWS)('teams exit-code sentinel', () => {
 
     expect(fs.readFileSync(path.join(agentDir, 'exit_code'), 'utf-8').trim()).toBe('3');
     expect(agent.status).toBe(AgentStatus.FAILED);
+    expect(agent.failure).toMatchObject({
+      stage: 'execution', code: 'process-exit-nonzero', exit_code: 3, retryable: false,
+    });
   });
 
   it('marks a process killed before writing the sentinel FAILED', async () => {
@@ -119,6 +122,9 @@ describe.skipIf(IS_WINDOWS)('teams exit-code sentinel', () => {
     await agent.updateStatusFromProcess();
 
     expect(agent.status).toBe(AgentStatus.FAILED);
+    expect(agent.failure).toMatchObject({
+      stage: 'execution', code: 'process-exit-unrecorded', exit_code: null, retryable: true,
+    });
   });
 });
 
