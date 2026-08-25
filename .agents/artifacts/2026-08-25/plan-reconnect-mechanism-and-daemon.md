@@ -1,17 +1,16 @@
 ---
 kind: plan
 template: plan.v1
-title: How reconnection actually works, which cases it covers, and the move into the daemon
+title: The fix plan — what we change, in what order, to stop losing agents
 summary: >-
-  The loop is proven to fire and reach the peer — a killed client produced a /continue on
-  the far side 12s later. It covers exactly one trigger: ssh exiting 255. Three real cases
-  fire nothing at all, and every one of them is the daemon gap.
-header: AGI CLI · reconnect mechanism
+  Eight fixes ordered by what they buy you. Six are merged and unshipped, so fix zero is
+  shipping them. Everything after is concrete code in named files, no new tickets.
+header: AGI CLI · the fix plan
 footer: Phoenix Labs
 project: agents-cli
 context: >-
-  Owner doubts the implementation is correct and wants the mechanism shown plainly, the
-  case coverage stated, and the plan for moving session handling into the daemon.
+  Consolidates every requirement from this session into one ordered plan of actual code
+  changes. Supersedes the separate surveys and design notes.
 repository: phnx-labs/agents-cli
 branch: plan/reconnect-architecture
 surface: cli
@@ -24,11 +23,11 @@ host: zion
 session: e9b853bc
 date: '2026-08-25'
 facts:
-  - 'Proven: killing the ssh client produced a /continue of that session id on the peer 12s later'
-  - 'The only trigger is exitCode === 255 — every other exit path skips reconnect entirely'
-  - 'Nothing fires when the agents run process itself dies: closed tab, crash, reboot'
-  - 'Detection of a silent drop takes up to ~45s (ServerAliveInterval 15 x CountMax 3)'
-  - 'The end-to-end path with the tmux wrap engaged has still never been run'
+  - 'Six fixes are merged as ede398c48 and on zero machines — npm is still 1.22.47'
+  - 'Reconnect fires only on ssh exiting 255; a closed tab, a crash or a reboot fires nothing'
+  - 'classifyHostLink returns connected when it has no signal at all'
+  - 'lastActivity ?? timestamp is re-implemented in 7 places, and groups already disagree with the rows inside them'
+  - 'Usage is fetched by all 11 devices — 88 provider calls a minute where 8 would do'
 links:
   - title: RUSH-3125
     url: https://linear.app/prix/issue/RUSH-3125
@@ -37,180 +36,212 @@ assets: []
 
 ## Purpose
 
-You doubt the implementation. Here is the mechanism with nothing hand-waved, what I have
-actually proven about it, and the honest list of what it does not cover.
+### What you asked for, from the top
 
-### It does fire, and I have better evidence than I have been citing
+> *"I run agents in VS Codium full-size agent terminals. If there is some slight internet
+> disruption then all of my agents basically just exit or timeout. How can we prevent this,
+> or have a much nicer reconnection?"*
 
-In the `yosemite-m1` test I killed the local ssh client. Twelve seconds later a **new**
-process existed on the peer:
+Everything since has added constraints to that one goal:
 
-```
-1841903  claude --session-id 40569293-5104-4eab-b309-86551870b26e /continue 81da4f0f-…
-```
+| # | Requirement | Where it came from |
+| --- | --- | --- |
+| R1 | An agent survives a network blink and I get back into **the same agent**, not a replay | the original ask |
+| R2 | It is **verified in real VS Codium**, not just unit tests | *"spin up VS Code on zion and actually test it"* |
+| R3 | Recovery lives in the **CLI/daemon**, never the extension | *"the daemon is the single point of truth"* |
+| R4 | tmux must not break people who already use it, nor confuse people who don't | *"they're gonna have a really hard time using it"* |
+| R5 | The daemon owns **all** session management — creation, orphan detection, metadata, `sessions.db` | *"that logic is not very well implemented"* |
+| R6 | Device-local jobs and fleet-singleton jobs are **different kinds of job** | *"we need to handle these two different types"* |
+| R7 | Usage is fetched **once**, on a stable device, and broadcast | *"we're DDoSing the API"* |
+| R8 | Don't change ordering nobody asked for. Status is a **label**; default order is **last activity**, merged across devices | *"why are you changing the order?"* |
+| R9 | Ordering must be **trustworthy** — what if last-activity is missing, or the row is remote? | *"what is the guarantee?"* |
+| R10 | **Fix things.** Stop producing tickets | *"we just produce slop tickets"* |
 
-Nothing else in the system starts a `/continue` of that session id. That is
-`agents sessions focus 81da4f0f… --local` running **on the peer**, finding no live pane,
-and falling through to resume.
-
-So: **the trigger fired, the loop ran, it reached the far machine, and it executed the
-recovery verb there.** The mechanism works. What was missing was a *pane to attach to* —
-which is the separate bug (F1). I had been reporting this as "never tested end to end",
-which undersold it.
-
-<aside class="artifact-callout"><strong>Load-bearing takeaway:</strong> the loop is not the
-weak part. The weak part is that it hangs off <em>one</em> trigger — ssh returning 255 —
-and that it lives inside the process the drop is most likely to kill.</aside>
+<aside class="artifact-callout"><strong>Load-bearing takeaway:</strong> six fixes for R1 are
+already written, reviewed and merged — and running on <strong>zero</strong> machines. Until
+1.22.48 publishes, every one of them is inert and R2 cannot even be attempted. That is fix
+zero, and it is the only one that needs your hands.</aside>
 
 ## Proposed Changes
 
-### The mechanism, step by step
+### Fix 0 — ship what is already built · unblocks R1, R2
 
-<figure class="artifact-figure artifact-figure-diagram artifact-figure-wide">
-  <svg class="artifact-diagram" viewBox="0 0 940 470" role="img" aria-label="Reconnect sequence from launch to reattach">
-    <defs>
-      <marker id="rm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b8b8b" />
-      </marker>
-    </defs>
-    <text x="20" y="24" fill="#8b8b8b" font-family="JetBrains Mono, monospace" font-size="11">zion — agents run (foreground)</text>
-    <line x1="620" y1="10" x2="620" y2="460" stroke="#3a3a3a" stroke-dasharray="4 4" />
-    <text x="640" y="24" fill="#8b8b8b" font-family="JetBrains Mono, monospace" font-size="11">yosemite-s0</text>
+`ede398c48` is on `main`, CI green, review approved. npm is still **1.22.47**, and
+`resolveTmuxWrap` has **0 occurrences** in your installed CLI. It contains:
 
-    <rect x="20" y="38" width="330" height="40" rx="5" fill="#141414" stroke="#4a4a4a" />
-    <text x="34" y="63" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="11">runInteractiveOnHost → sshStream(-tt)</text>
-    <line x1="352" y1="58" x2="700" y2="58" stroke="#8b8b8b" stroke-width="1.4" marker-end="url(#rm)" />
-    <rect x="700" y="38" width="210" height="40" rx="5" fill="#101a0a" stroke="#a3e635" />
-    <text x="805" y="63" text-anchor="middle" fill="#a3e635" font-family="JetBrains Mono, monospace" font-size="11">agent runs (in a pane)</text>
-
-    <text x="34" y="100" fill="#8b8b8b" font-family="Inter, system-ui, sans-serif" font-size="11">spawnSync blocks here for the whole session</text>
-
-    <path d="M 600 44 L 640 76 M 640 44 L 600 76" stroke="#f87171" stroke-width="2.5" />
-    <text x="620" y="96" text-anchor="middle" fill="#f87171" font-family="JetBrains Mono, monospace" font-size="10">link drops</text>
-
-    <rect x="20" y="118" width="330" height="46" rx="5" fill="#1a1206" stroke="#f59e0b" />
-    <text x="34" y="139" fill="#f59e0b" font-family="JetBrains Mono, monospace" font-size="11">ssh exits 255 → sshStream returns 255</text>
-    <text x="34" y="156" fill="#c8c8c8" font-family="Inter, system-ui, sans-serif" font-size="10">the ONLY trigger. any other code → no reconnect</text>
-
-    <rect x="20" y="180" width="330" height="40" rx="5" fill="#141414" stroke="#4a4a4a" />
-    <text x="34" y="205" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="11">pickReconnectTarget → session id | launch id</text>
-
-    <rect x="20" y="236" width="330" height="176" rx="6" fill="#0a1520" stroke="#38bdf8" />
-    <text x="34" y="258" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="11">reconnectInteractiveSession — loop</text>
-    <text x="34" y="280" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">1 reconnectStep → retry | stop  (pure)</text>
-    <text x="34" y="298" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">2 print notice + countdown</text>
-    <text x="34" y="316" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">3 waitOrInterrupt(backoff) ← Ctrl-C exits 130</text>
-    <text x="34" y="334" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">4a preflight  ssh … true   (is the host up?)</text>
-    <text x="34" y="352" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">4b sshStream → focus --local  (blocks)</text>
-    <text x="34" y="370" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">5 classify outcome, loop</text>
-    <text x="34" y="396" fill="#f59e0b" font-family="JetBrains Mono, monospace" font-size="10">window: 15 min of unproductive retrying</text>
-
-    <line x1="352" y1="352" x2="700" y2="352" stroke="#8b8b8b" stroke-width="1.4" marker-end="url(#rm)" />
-    <rect x="700" y="300" width="220" height="104" rx="6" fill="#101a0a" stroke="#a3e635" />
-    <text x="810" y="322" text-anchor="middle" fill="#a3e635" font-family="JetBrains Mono, monospace" font-size="11">agents sessions focus --local</text>
-    <text x="810" y="344" text-anchor="middle" fill="#c8c8c8" font-family="Inter, system-ui, sans-serif" font-size="11">pane alive → ATTACH (no loss)</text>
-    <text x="810" y="364" text-anchor="middle" fill="#f59e0b" font-family="Inter, system-ui, sans-serif" font-size="11">pane gone → RESUME a copy</text>
-    <text x="810" y="386" text-anchor="middle" fill="#8b8b8b" font-family="JetBrains Mono, monospace" font-size="10">← observed: pid 1841903, /continue</text>
-
-    <rect x="20" y="428" width="900" height="32" rx="5" fill="#1a0d0d" stroke="#f87171" />
-    <text x="34" y="449" fill="#f87171" font-family="Inter, system-ui, sans-serif" font-size="12">Everything in the blue box dies if the `agents run` process dies — closed tab, crash, reboot. Then nothing reconnects.</text>
-  </svg>
-  <figcaption><b>Figure 1.</b> The loop is sound. Its two weaknesses are structural: one
-  trigger, and it lives inside the process most likely to be killed.</figcaption>
-</figure>
-
-### Which cases it handles — and which it does not
-
-| Case | Does reconnect fire? | Outcome |
+| | | Verified by |
 | --- | --- | --- |
-| Link drops, ssh exits 255 | **yes** | attach if the pane lives, else resume a copy |
-| ssh killed by a signal (`status === null` → 255) | **yes** | same — this is the case I proved |
-| Wi-Fi drops silently (half-open TCP) | **yes, after ~45s** | `ServerAliveInterval 15 × CountMax 3` before ssh gives up |
-| Host unreachable for a while | **yes** | preflight fails, retries for 15 min, then a clear give-up notice |
-| Link flaps — reconnects then drops instantly | **yes** | `MIN_HOLD_MS` stops it spinning forever |
-| Remote command exits non-255 | no, by design | the agent spoke for itself; that code is surfaced |
-| Remote exits 255 for its own reasons | no — remapped to 254 | distinct notice, not mistaken for a drop |
-| `--raw` / `--no-tmux` | **no** — `!isRaw` guard | plain exit |
-| No reconnect target resolvable | **no** | plain exit *(this was the Grok bug; fixed by F2)* |
-| **You close the VS Codium tab** | **no — the loop dies with it** | agent orphaned on the peer, nothing notices |
-| **VS Codium crashes** | **no** | same |
-| **Your laptop reboots** | **no** | same, and the daemon is the only thing that survives to notice |
+| F1 | remote `--device` agents detach on the peer, so a blink cannot SIGHUP them | pids gone pre-fix; pane survived post-fix |
+| F2 | reconnect keyed off `AGENT_LAUNCH_ID` — every harness, not just Claude | live launch-id resolution |
+| F3 | interactive streams off the shared ControlMaster — one blip stops killing every tab | 6 tabs on one socket, observed |
+| F4 | 15-minute retry window (was ~90s), countdown, working Ctrl-C | unit |
+| F5 | termios + DEC restore, drain gated on abnormal exit | real pty |
+| F7 | notices name `agents sessions resume`, not a dead command | unit |
 
-The last three are one defect, and it is not fixable inside the loop: the loop cannot
-outlive its own process.
+```bash
+apps/cli/scripts/release.sh 1.22.48 --apply     # answer the [y/N]
+```
 
-### What I still have not proven
+Backgrounding it exits 0 publishing nothing (the prompt reads EOF); `--yes` is refused by
+the sandbox as an irreversible public publish. **This one is yours.**
 
-Being explicit, because you asked whether it is even correct:
+Then R2 becomes possible: real VS Codium tab, cut the link for real, watch it rejoin a
+**live** pane. That is the one branch still unproven — everything observed so far landed on
+*resume*, because there was no pane to attach to.
 
-- **The attach path.** Everything I proved landed on the *resume* branch, because there was
-  no pane. I have never watched it rejoin a **live** pane and preserve an in-flight turn.
-  That needs the tmux wrap shipped (1.22.48) on both ends.
-- **Anything through VS Codium.** Zero of my testing went through the extension.
-- **The countdown, the Ctrl-C path, the 15-minute window** in a real terminal.
-- **A non-Claude harness reconnecting** — F2's whole purpose, covered only by unit tests.
+### Fix 1 — stop reporting "fine" when we know nothing · R5, R9
 
-### The plan for moving session handling into the daemon
+`lib/session/host-link.ts` falls through to a **blind default**:
 
-Sequenced so each step is useful alone and reversible.
+```ts
+if (input.tmuxClients === 0) return 'no-client';   // authoritative ✓
+if (windowGone)              return 'no-client';
+return 'connected';                                 // ← no signal at all reads as healthy
+```
 
-**Step 1 — publish, don't derive.** The daemon computes what consumers currently re-derive
-— starting with the session display name — and publishes it on the session row. The ext
-renders it when present. Purely additive; nothing breaks if it is absent.
+And `lib/session/active.ts` only promotes it when the session is *already idle*:
 
-**Step 2 — fix the liveness signal.** `classifyHostLink` returns `unknown` instead of
-defaulting to `connected` when it has no signal, and `orphaned` stops being gated on
-`idle || input_required` so a *running* agent with no client can be surfaced. (RUSH-3183.)
+```ts
+else if (link === 'no-client' && (s.status === 'idle' || s.status === 'input_required')) {
+  s.status = 'orphaned';
+}
+```
 
-**Step 3 — the daemon owns the orphan.** A `detached` state written by the daemon that owns
-the pane, including a **boot sweep** so a post-reboot survivor is found. Re-attach stays a
-human action; the daemon surfaces and offers, never reopens. (RUSH-3180.)
+**Change:** add `'unknown'` to `HostLink`, returned when there is no usable signal. Drop the
+`idle || input_required` gate so a **running** agent with no client is surfaced — that is
+the expensive case, still burning tokens. Keep `deliberatelyDetached` first and
+`tmuxClients` authoritative; both are correct.
 
-**Step 4 — peers answer for themselves.** A remote session's liveness is classified by the
-peer that owns the pane and reported over the existing feed, instead of being guessed from
-the launching box, where the signals do not exist.
+~20 lines across two files. Tests: no-signal → `unknown`; running + no-client → `orphaned`;
+detached → `connected` regardless of everything else.
 
-**Step 5 — the daemon hosts the coordinator.** Move `watchFleetFeed` out of the extension.
-This is what structurally ends the per-tab spawn loop (agi-cli#3019) rather than throttling
-it. Last, because it removes a subprocess the ext currently depends on.
+### Fix 2 — one recency function · R8, R9
 
-**Step 6 — one `createSession`.** Three registrars (hosts / cloud / fork) collapse to one
-entry point so new-row invariants are enforced once.
+`lastActivity ?? timestamp` is re-implemented **seven times**, and the duplication has
+already shipped a visible bug in `commands/sessions.ts`:
 
-Steps 1–2 are small and independent. Step 3 is where the reconnect story actually completes,
-because it covers the three cases the in-process loop structurally cannot.
+```ts
+maxTs: rows[0].lastActivity ?? rows[0].timestamp                      // group: by activity
+sessions: rows.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1))   // rows: by CREATION
+```
+
+Groups ordered by activity, rows inside them ordered by creation — same command, same
+screen.
+
+**Change:** one `lib/session/recency.ts` exporting `recencyOf(session)` implementing the
+documented chain — last message ts → file mtime → creation — returning a comparable number,
+unparseable sorting last. Delete both private `rowTs()` helpers (`team-filter.ts`,
+`trajectory-lineage.ts`), `sessionRecency()` in `commands/reconnect.ts`, and the four inline
+occurrences in `commands/sessions.ts`.
+
+**Ordering itself does not change:** last activity, newest first, merged across devices
+unless scoped. Status stays a label.
+
+**Remote rows:** the peer computes its own value and ships an ISO string, which
+`parseRemoteList` spreads verbatim. ISO is absolute so there is no timezone problem, but
+**clock skew is uncorrected** and nothing detects it. `recencyOf` marks a value as
+derived-not-measured (mtime or creation, rather than a real message timestamp) so a listing
+can show `~` instead of implying precision it does not have.
+
+### Fix 3 — the daemon publishes the name · R3, R5
+
+Tab naming is **~215 references across 12 extension files** and **zero** in the CLI. The ext
+derives a provisional label then reconciles against a harness-owned one — two
+implementations racing, which is why a tab and `agents sessions` can disagree.
+
+**Change:** the daemon computes `displayName` onto the session row; the ext renders it when
+present. Additive — nothing breaks if absent. Then delete the ext derivation, keeping one
+rule: a manual rename wins.
+
+### Fix 4 — the daemon owns the orphan, including at boot · R1, R3, R5
+
+This is where R1 actually completes. The reconnect loop fires on **one** trigger — ssh
+exiting 255 — and lives **inside** the `agents run` process, so a closed tab, a crash or a
+reboot fires nothing. The loop cannot outlive its own process.
+
+**Change:** the daemon writes a `detached` state for a session alive with no client, derived
+from a real probe of the pane — never inferred from a missing local client. Plus a **boot
+sweep**, because a laptop reboot does not touch a peer's tmux: those agents are still alive
+and still attachable, and the daemon is the only component that survives to notice.
+
+Re-attach stays user-initiated. The daemon surfaces and offers; it never reopens a tab.
+
+### Fix 5 — a peer answers for its own sessions · R3, R5
+
+Both host-link signals are local — this box's window registry, this box's tmux. A
+`--device` session's pane is on the peer, so the classification is *structurally*
+unavailable here. Today that silently becomes `connected`.
+
+**Change:** the peer classifies its own panes and reports it over the existing feed. Not a
+local patch — the question was being asked of the wrong machine.
+
+### Fix 6 — usage fetched once · R6, R7
+
+`lib/account-state-service.ts` is documented **"Device-local owner for usage snapshots"**
+and every daemon runs it every 60s. 11 devices × 8 accounts = **88 provider calls a minute**
+where 8 would do.
+
+`withRefreshLease` already has the right shape — scope, key, acquire, re-read, fetch only if
+nobody did, publish, release — including the `readCompleted()` re-check that lets waiters
+consume the winner's result for free. What it lacks is a lock reachable from more than one
+machine.
+
+**Change:** a fleet-scoped backend for that lease, with acquisition **weighted by device
+stability** so an always-on Mac Mini beats a laptop that goes in a backpack, an equal class
+never preempts, and the interactive device is the last resort. Snapshots publish with
+`fetchedAt` / `fetchedBy` so a follower shows *"usage as of 18s ago, from mac-mini"* rather
+than lying or blocking.
+
+### Fix 7 — the coordinator moves into the daemon · R3
+
+`watchFleetFeed` is called from exactly one place, and `apps/ext/AGENTS.md` assigns that
+subprocess to *"the elected extension monitor"*. Close VS Codium and nothing unions the
+fleet.
+
+**Change:** the daemon hosts it and exposes the union over its socket; the ext subscribes.
+This ends the per-tab spawn loop (agi-cli#3019) structurally instead of throttling it.
+**Last**, because it removes a subprocess the ext currently depends on.
+
+### On R4 — tmux, and what we are *not* changing
+
+Already correct, verified in `lib/tmux/session.ts`: a **separate socket**, so your own tmux
+server and sessions are untouched; and `writeStartupConfig` writes our defaults first then
+sources **every** config tmux itself would load, so your bindings win. The one real gap is
+that a non-tmux user sees a status bar and a `C-b` they never opted into — a one-line
+`status off` default, restorable by anyone who wants it.
 
 ## Public Interface
 
 ```bash
 agents run <agent> --interactive --device <host>   # unchanged
-agents sessions                                     # gains a `detached` label. Order unchanged.
-agents sessions resume <id>                         # says whether it attached or replayed
+agents sessions                                     # unchanged ORDER; gains a `detached` label
+agents sessions --device <name>                     # scope to one device
+agents view                                         # never calls the provider on a follower
 ```
 
 <div class="artifact-behavior">
   <div class="artifact-behavior-panel" data-state="current" data-evidence="capture">
-    <strong>Current — one trigger, and it dies with the tab</strong>
-<pre><code>link drops  →  ssh 255  →  loop runs  →  focus --local  →  ✓ handled
-
-tab closed  →  (the loop was in that process)  →  nothing
-crash       →  nothing
-reboot      →  nothing
-
-observed on yosemite-m1 after killing the client:
-  1841903  claude --session-id 40569293-… /continue 81da4f0f-…
-  ↑ the loop DID reach the peer — but found no pane, so it replayed</code></pre>
+    <strong>Current — on your machines right now (1.22.47)</strong>
+<pre><code>blink        → agent SIGHUPed on the peer, work lost
+grok tab     → no reconnect at all, drops to a shell
+6 tabs       → one ControlMaster, all die together
+close tab    → agent orphaned, nothing notices
+usage        → 88 provider calls/minute
+sessions     → groups by activity, rows inside by creation</code></pre>
   </div>
   <div class="artifact-behavior-panel" data-state="proposed" data-evidence="mockup">
-    <strong>Proposed — the daemon covers what the loop cannot</strong>
-<pre><code>$ agents sessions
-  claude  yosemite-s0  2m ago   running            Reconnect r…
-  grok    yosemite-s0  4m ago   detached           Market
-  codex   yosemite-m4  11m ago  running            Dispatch
-  claude  zion         1h ago   idle               Prix Cloud
+    <strong>After fix 0 (today) and fixes 1–7</strong>
+<pre><code>blink        → detached pane survives; reconnect rejoins it
+any harness  → reconnects via launch id
+6 tabs       → independent connections
+close tab    → daemon marks it detached, offers resume
+usage        → 8 provider calls/minute, broadcast
+sessions     → one recency rule everywhere
 
-  default order: last activity, newest first, merged across devices
-  `detached` is a label, not a sort key</code></pre>
+$ agents sessions
+  claude  yosemite-s0  2m ago   running    Reconnect r…
+  grok    yosemite-s0  4m ago   detached   Market
+  codex   yosemite-m4  11m ago  running    Dispatch</code></pre>
   </div>
 </div>
 
@@ -218,34 +249,37 @@ observed on yosemite-m1 after killing the client:
 
 | Check | Expected |
 | --- | --- |
-| Cut the link mid-turn, new build both ends | Countdown, then **attach** — same session id, in-flight turn intact |
-| Same with Grok | Identical; proves F2 outside unit tests |
-| Close the tab mid-run | Daemon marks it `detached` within a tick |
-| Reboot zion with a remote agent alive | Boot sweep surfaces it |
-| `--raw` run, link drops | No reconnect — documented, not a surprise |
-| Kill ssh with `-9` | Reconnect fires (already proven) |
+| Cut the link in a real VS Codium tab, 1.22.48 both ends | **Attach** — same session id, in-flight turn intact (R1, R2) |
+| Same with Grok | Identical (R1) |
+| Close the tab mid-run | `detached` within one daemon tick (R5) |
+| Reboot zion, agent alive on a peer | Boot sweep surfaces it (R5) |
+| Session with no window and no tmux | `unknown`, never `connected` (R9) |
+| Group vs rows in `agents sessions` | Same ordering rule for both (R8) |
+| Count provider calls fleet-wide, 5 min | 8/min (R7) |
+| Existing tmux user's bindings | Unchanged (R4) |
 
 ## Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| Step 5 breaks ext startup | It goes last, only after the data it needs is provably on the stream |
-| `detached` lies | Derived from a real probe of the peer's pane, never from a missing local client |
-| The 45s silent-drop detection feels slow | It is `ServerAliveInterval` — tunable, but shortening it costs false positives on a busy link |
-| Daemon becomes a single point of failure | Consumers keep the direct CLI path as a degraded fallback |
+| Dropping the idle gate creates false orphans | `deliberatelyDetached` stays first; `tmuxClients` authoritative; no-signal becomes `unknown`, not `orphaned` |
+| `recencyOf` changes visible order | It implements the *documented* chain; the group-vs-row divergence is the bug being removed, not new behaviour |
+| Clock skew across devices | Surface derived values as approximate rather than silently sorting on them |
+| Fix 7 breaks ext startup | Goes last, only after the data is provably on the stream |
 
 ## Checklist
 
-- [x] Trace the mechanism end to end from source
-- [x] Establish that the loop fires and reaches the peer (pid 1841903 evidence)
-- [x] Enumerate covered and uncovered cases
-- [ ] Ship 1.22.48, then prove the **attach** branch with a live pane
-- [ ] Step 1 — daemon publishes the display name
-- [ ] Step 2 — `unknown` + running-can-be-orphaned (RUSH-3183)
-- [ ] Step 3 — daemon owns `detached` + boot sweep (RUSH-3180)
-- [ ] Steps 4–6 — peer-answers, coordinator move, one `createSession`
+- [ ] **Fix 0 — publish 1.22.48** ← yours; everything below is inert until this lands
+- [ ] Fix 1 — `unknown` + running-can-be-orphaned (`host-link.ts`, `active.ts`)
+- [ ] Fix 2 — one `recencyOf()`; delete 7 duplicates; fix the group/row divergence
+- [ ] Fix 3 — daemon publishes `displayName`; ext stops deriving
+- [ ] Fix 4 — daemon owns `detached` + boot sweep
+- [ ] Fix 5 — peers classify their own sessions
+- [ ] Fix 6 — fleet-scoped lease for usage; publish with `fetchedAt`/`fetchedBy`
+- [ ] Fix 7 — coordinator into the daemon (ends agi-cli#3019)
+- [ ] R4 — `status off` default for tmux
 
 ## Tracking
 
-- [RUSH-3125](https://linear.app/prix/issue/RUSH-3125) · RUSH-3183 · RUSH-3180 · RUSH-3175 · RUSH-3139
-- agi-cli#3019 — the spawn loop step 5 ends structurally
+- [RUSH-3125](https://linear.app/prix/issue/RUSH-3125) — the umbrella; fixes 1–7 land against it
+- Fixes 1 and 2 are independent of the release and can start immediately

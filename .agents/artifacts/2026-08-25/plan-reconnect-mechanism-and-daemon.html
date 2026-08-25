@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>How reconnection actually works, which cases it covers, and the move into the daemon</title>
+<title>The fix plan — what we change, in what order, to stop losing agents</title>
 <style>
 :root{--font-body:Inter,Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--font-display:Inter,Inter,system-ui,sans-serif;--font-mono:"JetBrains Mono","JetBrains Mono","SFMono-Regular",Consolas,monospace;}
 @page{margin:24px}
@@ -20,214 +20,247 @@
 </head>
 <body>
 <main>
-<header class="document-header"><div class="header-label">AGI CLI · reconnect mechanism</div><button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false" title="Toggle color theme"><span aria-hidden="true">&#9680;</span> theme</button></header>
+<header class="document-header"><div class="header-label">AGI CLI · the fix plan</div><button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false" title="Toggle color theme"><span aria-hidden="true">&#9680;</span> theme</button></header>
 <section class="hero">
 <div class="kicker"><span class="kicker-part">agents-cli</span><span class="kicker-separator" aria-hidden="true">&middot;</span><span class="kicker-part">plan</span><span class="status-badge status-draft">draft</span></div>
-<h1>How reconnection actually works, which cases it covers, and the move into the daemon</h1>
-<p class="summary">The loop is proven to fire and reach the peer — a killed client produced a /continue on the far side 12s later. It covers exactly one trigger: ssh exiting 255. Three real cases fire nothing at all, and every one of them is the daemon gap.</p>
-<div class="meta" aria-label="Artifact metadata"><p class="facts-line">Proven: killing the ssh client produced a /continue of that session id on the peer 12s later<span class="meta-sep" aria-hidden="true">·</span>The only trigger is exitCode === 255 — every other exit path skips reconnect entirely<span class="meta-sep" aria-hidden="true">·</span>Nothing fires when the agents run process itself dies: closed tab, crash, reboot<span class="meta-sep" aria-hidden="true">·</span>Detection of a silent drop takes up to ~45s (ServerAliveInterval 15 x CountMax 3)<span class="meta-sep" aria-hidden="true">·</span>The end-to-end path with the tmux wrap engaged has still never been run</p><div class="meta-block meta-links"><div class="meta-label">Related</div><ul class="meta-row meta-row-links"><li class="chip"><span class="chip-value"><svg class="chip-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><a href="https://linear.app/prix/issue/RUSH-3125" target="_blank" rel="noopener">RUSH-3125</a></span></li></ul></div><p class="provenance-line" aria-label="Provenance"><span class="provenance-part"><a href="https://github.com/phnx-labs/agents-cli" target="_blank" rel="noopener">phnx-labs/agents-cli</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">plan/reconnect-architecture</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">RUSH-3125</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Claude</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Muqsit</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">zion</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part"><a href="agents://session/e9b853bc">e9b853bc</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">2026-08-25</span></p></div>
+<h1>The fix plan — what we change, in what order, to stop losing agents</h1>
+<p class="summary">Eight fixes ordered by what they buy you. Six are merged and unshipped, so fix zero is shipping them. Everything after is concrete code in named files, no new tickets.</p>
+<div class="meta" aria-label="Artifact metadata"><p class="facts-line">Six fixes are merged as ede398c48 and on zero machines — npm is still 1.22.47<span class="meta-sep" aria-hidden="true">·</span>Reconnect fires only on ssh exiting 255; a closed tab, a crash or a reboot fires nothing<span class="meta-sep" aria-hidden="true">·</span>classifyHostLink returns connected when it has no signal at all<span class="meta-sep" aria-hidden="true">·</span>lastActivity ?? timestamp is re-implemented in 7 places, and groups already disagree with the rows inside them<span class="meta-sep" aria-hidden="true">·</span>Usage is fetched by all 11 devices — 88 provider calls a minute where 8 would do</p><div class="meta-block meta-links"><div class="meta-label">Related</div><ul class="meta-row meta-row-links"><li class="chip"><span class="chip-value"><svg class="chip-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.886 4.18A11.982 11.982 0 0 1 11.99 0C18.624 0 24 5.376 24 12.009c0 3.64-1.62 6.903-4.18 9.105L2.887 4.18ZM1.817 5.626l16.556 16.556c-.524.33-1.075.62-1.65.866L.951 7.277c.247-.575.537-1.126.866-1.65ZM.322 9.163l14.515 14.515c-.71.172-1.443.282-2.195.322L0 11.358a12 12 0 0 1 .322-2.195Zm-.17 4.862 9.823 9.824a12.02 12.02 0 0 1-9.824-9.824Z"/></svg><a href="https://linear.app/prix/issue/RUSH-3125" target="_blank" rel="noopener">RUSH-3125</a></span></li></ul></div><p class="provenance-line" aria-label="Provenance"><span class="provenance-part"><a href="https://github.com/phnx-labs/agents-cli" target="_blank" rel="noopener">phnx-labs/agents-cli</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">plan/reconnect-architecture</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">RUSH-3125</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Claude</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">Muqsit</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">zion</span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part"><a href="agents://session/e9b853bc">e9b853bc</a></span><span class="meta-sep" aria-hidden="true">·</span><span class="provenance-part">2026-08-25</span></p></div>
 </section>
 <nav class="toc" aria-label="Artifact sections"><a href="#purpose"><span class="toc-index">01&nbsp;&middot;&nbsp;</span>Purpose</a><a href="#proposed-changes"><span class="toc-index">02&nbsp;&middot;&nbsp;</span>Proposed Changes</a><a href="#public-interface"><span class="toc-index">03&nbsp;&middot;&nbsp;</span>Public Interface</a><a href="#validation"><span class="toc-index">04&nbsp;&middot;&nbsp;</span>Validation</a><a href="#risks"><span class="toc-index">05&nbsp;&middot;&nbsp;</span>Risks</a><a href="#checklist"><span class="toc-index">06&nbsp;&middot;&nbsp;</span>Checklist</a><a href="#tracking"><span class="toc-index">07&nbsp;&middot;&nbsp;</span>Tracking</a></nav><article class="artifact-body"><h2 id="purpose">Purpose</h2>
-<p>You doubt the implementation. Here is the mechanism with nothing hand-waved, what I have
-actually proven about it, and the honest list of what it does not cover.</p>
-<h3>It does fire, and I have better evidence than I have been citing</h3>
-<p>In the <code>yosemite-m1</code> test I killed the local ssh client. Twelve seconds later a <strong>new</strong>
-process existed on the peer:</p>
-<pre><code>1841903  claude --session-id 40569293-5104-4eab-b309-86551870b26e /continue 81da4f0f-…
-</code></pre>
-<p>Nothing else in the system starts a <code>/continue</code> of that session id. That is
-<code>agents sessions focus 81da4f0f… --local</code> running <strong>on the peer</strong>, finding no live pane,
-and falling through to resume.</p>
-<p>So: <strong>the trigger fired, the loop ran, it reached the far machine, and it executed the
-recovery verb there.</strong> The mechanism works. What was missing was a <em>pane to attach to</em> —
-which is the separate bug (F1). I had been reporting this as "never tested end to end",
-which undersold it.</p>
-<aside class="artifact-callout"><strong>Load-bearing takeaway:</strong> the loop is not the
-weak part. The weak part is that it hangs off <em>one</em> trigger — ssh returning 255 —
-and that it lives inside the process the drop is most likely to kill.</aside><h2 id="proposed-changes">Proposed Changes</h2>
-<h3>The mechanism, step by step</h3>
-<figure class="artifact-figure artifact-figure-diagram artifact-figure-wide">
-  <svg class="artifact-diagram" viewBox="0 0 940 470" role="img" aria-label="Reconnect sequence from launch to reattach">
-    <defs>
-      <marker id="rm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b8b8b"></path>
-      </marker>
-    </defs>
-    <text x="20" y="24" fill="#8b8b8b" font-family="JetBrains Mono, monospace" font-size="11">zion — agents run (foreground)</text>
-    <line x1="620" y1="10" x2="620" y2="460" stroke="#3a3a3a" stroke-dasharray="4 4"></line>
-    <text x="640" y="24" fill="#8b8b8b" font-family="JetBrains Mono, monospace" font-size="11">yosemite-s0</text>
-
-    <rect x="20" y="38" width="330" height="40" rx="5" fill="#141414" stroke="#4a4a4a"></rect>
-    <text x="34" y="63" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="11">runInteractiveOnHost → sshStream(-tt)</text>
-    <line x1="352" y1="58" x2="700" y2="58" stroke="#8b8b8b" stroke-width="1.4" marker-end="url(#rm)"></line>
-    <rect x="700" y="38" width="210" height="40" rx="5" fill="#101a0a" stroke="#a3e635"></rect>
-    <text x="805" y="63" text-anchor="middle" fill="#a3e635" font-family="JetBrains Mono, monospace" font-size="11">agent runs (in a pane)</text>
-
-    <text x="34" y="100" fill="#8b8b8b" font-family="Inter, system-ui, sans-serif" font-size="11">spawnSync blocks here for the whole session</text>
-
-    <path d="M 600 44 L 640 76 M 640 44 L 600 76" stroke="#f87171" stroke-width="2.5"></path>
-    <text x="620" y="96" text-anchor="middle" fill="#f87171" font-family="JetBrains Mono, monospace" font-size="10">link drops</text>
-
-    <rect x="20" y="118" width="330" height="46" rx="5" fill="#1a1206" stroke="#f59e0b"></rect>
-    <text x="34" y="139" fill="#f59e0b" font-family="JetBrains Mono, monospace" font-size="11">ssh exits 255 → sshStream returns 255</text>
-    <text x="34" y="156" fill="#c8c8c8" font-family="Inter, system-ui, sans-serif" font-size="10">the ONLY trigger. any other code → no reconnect</text>
-
-    <rect x="20" y="180" width="330" height="40" rx="5" fill="#141414" stroke="#4a4a4a"></rect>
-    <text x="34" y="205" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="11">pickReconnectTarget → session id | launch id</text>
-
-    <rect x="20" y="236" width="330" height="176" rx="6" fill="#0a1520" stroke="#38bdf8"></rect>
-    <text x="34" y="258" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="11">reconnectInteractiveSession — loop</text>
-    <text x="34" y="280" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">1 reconnectStep → retry | stop  (pure)</text>
-    <text x="34" y="298" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">2 print notice + countdown</text>
-    <text x="34" y="316" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">3 waitOrInterrupt(backoff) ← Ctrl-C exits 130</text>
-    <text x="34" y="334" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">4a preflight  ssh … true   (is the host up?)</text>
-    <text x="34" y="352" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">4b sshStream → focus --local  (blocks)</text>
-    <text x="34" y="370" fill="#c8c8c8" font-family="JetBrains Mono, monospace" font-size="10">5 classify outcome, loop</text>
-    <text x="34" y="396" fill="#f59e0b" font-family="JetBrains Mono, monospace" font-size="10">window: 15 min of unproductive retrying</text>
-
-    <line x1="352" y1="352" x2="700" y2="352" stroke="#8b8b8b" stroke-width="1.4" marker-end="url(#rm)"></line>
-    <rect x="700" y="300" width="220" height="104" rx="6" fill="#101a0a" stroke="#a3e635"></rect>
-    <text x="810" y="322" text-anchor="middle" fill="#a3e635" font-family="JetBrains Mono, monospace" font-size="11">agents sessions focus --local</text>
-    <text x="810" y="344" text-anchor="middle" fill="#c8c8c8" font-family="Inter, system-ui, sans-serif" font-size="11">pane alive → ATTACH (no loss)</text>
-    <text x="810" y="364" text-anchor="middle" fill="#f59e0b" font-family="Inter, system-ui, sans-serif" font-size="11">pane gone → RESUME a copy</text>
-    <text x="810" y="386" text-anchor="middle" fill="#8b8b8b" font-family="JetBrains Mono, monospace" font-size="10">← observed: pid 1841903, /continue</text>
-
-    <rect x="20" y="428" width="900" height="32" rx="5" fill="#1a0d0d" stroke="#f87171"></rect>
-    <text x="34" y="449" fill="#f87171" font-family="Inter, system-ui, sans-serif" font-size="12">Everything in the blue box dies if the `agents run` process dies — closed tab, crash, reboot. Then nothing reconnects.</text>
-  </svg>
-  <figcaption><b>Figure 1.</b> The loop is sound. Its two weaknesses are structural: one
-  trigger, and it lives inside the process most likely to be killed.</figcaption>
-</figure><h3>Which cases it handles — and which it does not</h3>
+<h3>What you asked for, from the top</h3>
+<blockquote>
+<p><em>"I run agents in VS Codium full-size agent terminals. If there is some slight internet
+disruption then all of my agents basically just exit or timeout. How can we prevent this,
+or have a much nicer reconnection?"</em></p>
+</blockquote>
+<p>Everything since has added constraints to that one goal:</p>
 <table>
 <thead>
 <tr>
-<th>Case</th>
-<th>Does reconnect fire?</th>
-<th>Outcome</th>
+<th>#</th>
+<th>Requirement</th>
+<th>Where it came from</th>
 </tr>
 </thead>
 <tbody><tr>
-<td>Link drops, ssh exits 255</td>
-<td><strong>yes</strong></td>
-<td>attach if the pane lives, else resume a copy</td>
+<td>R1</td>
+<td>An agent survives a network blink and I get back into <strong>the same agent</strong>, not a replay</td>
+<td>the original ask</td>
 </tr>
 <tr>
-<td>ssh killed by a signal (<code>status === null</code> → 255)</td>
-<td><strong>yes</strong></td>
-<td>same — this is the case I proved</td>
+<td>R2</td>
+<td>It is <strong>verified in real VS Codium</strong>, not just unit tests</td>
+<td><em>"spin up VS Code on zion and actually test it"</em></td>
 </tr>
 <tr>
-<td>Wi-Fi drops silently (half-open TCP)</td>
-<td><strong>yes, after ~45s</strong></td>
-<td><code>ServerAliveInterval 15 × CountMax 3</code> before ssh gives up</td>
+<td>R3</td>
+<td>Recovery lives in the <strong>CLI/daemon</strong>, never the extension</td>
+<td><em>"the daemon is the single point of truth"</em></td>
 </tr>
 <tr>
-<td>Host unreachable for a while</td>
-<td><strong>yes</strong></td>
-<td>preflight fails, retries for 15 min, then a clear give-up notice</td>
+<td>R4</td>
+<td>tmux must not break people who already use it, nor confuse people who don't</td>
+<td><em>"they're gonna have a really hard time using it"</em></td>
 </tr>
 <tr>
-<td>Link flaps — reconnects then drops instantly</td>
-<td><strong>yes</strong></td>
-<td><code>MIN_HOLD_MS</code> stops it spinning forever</td>
+<td>R5</td>
+<td>The daemon owns <strong>all</strong> session management — creation, orphan detection, metadata, <code>sessions.db</code></td>
+<td><em>"that logic is not very well implemented"</em></td>
 </tr>
 <tr>
-<td>Remote command exits non-255</td>
-<td>no, by design</td>
-<td>the agent spoke for itself; that code is surfaced</td>
+<td>R6</td>
+<td>Device-local jobs and fleet-singleton jobs are <strong>different kinds of job</strong></td>
+<td><em>"we need to handle these two different types"</em></td>
 </tr>
 <tr>
-<td>Remote exits 255 for its own reasons</td>
-<td>no — remapped to 254</td>
-<td>distinct notice, not mistaken for a drop</td>
+<td>R7</td>
+<td>Usage is fetched <strong>once</strong>, on a stable device, and broadcast</td>
+<td><em>"we're DDoSing the API"</em></td>
 </tr>
 <tr>
-<td><code>--raw</code> / <code>--no-tmux</code></td>
-<td><strong>no</strong> — <code>!isRaw</code> guard</td>
-<td>plain exit</td>
+<td>R8</td>
+<td>Don't change ordering nobody asked for. Status is a <strong>label</strong>; default order is <strong>last activity</strong>, merged across devices</td>
+<td><em>"why are you changing the order?"</em></td>
 </tr>
 <tr>
-<td>No reconnect target resolvable</td>
-<td><strong>no</strong></td>
-<td>plain exit <em>(this was the Grok bug; fixed by F2)</em></td>
+<td>R9</td>
+<td>Ordering must be <strong>trustworthy</strong> — what if last-activity is missing, or the row is remote?</td>
+<td><em>"what is the guarantee?"</em></td>
 </tr>
 <tr>
-<td><strong>You close the VS Codium tab</strong></td>
-<td><strong>no — the loop dies with it</strong></td>
-<td>agent orphaned on the peer, nothing notices</td>
-</tr>
-<tr>
-<td><strong>VS Codium crashes</strong></td>
-<td><strong>no</strong></td>
-<td>same</td>
-</tr>
-<tr>
-<td><strong>Your laptop reboots</strong></td>
-<td><strong>no</strong></td>
-<td>same, and the daemon is the only thing that survives to notice</td>
+<td>R10</td>
+<td><strong>Fix things.</strong> Stop producing tickets</td>
+<td><em>"we just produce slop tickets"</em></td>
 </tr>
 </tbody></table>
-<p>The last three are one defect, and it is not fixable inside the loop: the loop cannot
-outlive its own process.</p>
-<h3>What I still have not proven</h3>
-<p>Being explicit, because you asked whether it is even correct:</p>
-<ul>
-<li><strong>The attach path.</strong> Everything I proved landed on the <em>resume</em> branch, because there was
-no pane. I have never watched it rejoin a <strong>live</strong> pane and preserve an in-flight turn.
-That needs the tmux wrap shipped (1.22.48) on both ends.</li>
-<li><strong>Anything through VS Codium.</strong> Zero of my testing went through the extension.</li>
-<li><strong>The countdown, the Ctrl-C path, the 15-minute window</strong> in a real terminal.</li>
-<li><strong>A non-Claude harness reconnecting</strong> — F2's whole purpose, covered only by unit tests.</li>
-</ul>
-<h3>The plan for moving session handling into the daemon</h3>
-<p>Sequenced so each step is useful alone and reversible.</p>
-<p><strong>Step 1 — publish, don't derive.</strong> The daemon computes what consumers currently re-derive
-— starting with the session display name — and publishes it on the session row. The ext
-renders it when present. Purely additive; nothing breaks if it is absent.</p>
-<p><strong>Step 2 — fix the liveness signal.</strong> <code>classifyHostLink</code> returns <code>unknown</code> instead of
-defaulting to <code>connected</code> when it has no signal, and <code>orphaned</code> stops being gated on
-<code>idle || input_required</code> so a <em>running</em> agent with no client can be surfaced. (RUSH-3183.)</p>
-<p><strong>Step 3 — the daemon owns the orphan.</strong> A <code>detached</code> state written by the daemon that owns
-the pane, including a <strong>boot sweep</strong> so a post-reboot survivor is found. Re-attach stays a
-human action; the daemon surfaces and offers, never reopens. (RUSH-3180.)</p>
-<p><strong>Step 4 — peers answer for themselves.</strong> A remote session's liveness is classified by the
-peer that owns the pane and reported over the existing feed, instead of being guessed from
-the launching box, where the signals do not exist.</p>
-<p><strong>Step 5 — the daemon hosts the coordinator.</strong> Move <code>watchFleetFeed</code> out of the extension.
-This is what structurally ends the per-tab spawn loop (agi-cli#3019) rather than throttling
-it. Last, because it removes a subprocess the ext currently depends on.</p>
-<p><strong>Step 6 — one <code>createSession</code>.</strong> Three registrars (hosts / cloud / fork) collapse to one
-entry point so new-row invariants are enforced once.</p>
-<p>Steps 1–2 are small and independent. Step 3 is where the reconnect story actually completes,
-because it covers the three cases the in-process loop structurally cannot.</p>
+<aside class="artifact-callout"><strong>Load-bearing takeaway:</strong> six fixes for R1 are
+already written, reviewed and merged — and running on <strong>zero</strong> machines. Until
+1.22.48 publishes, every one of them is inert and R2 cannot even be attempted. That is fix
+zero, and it is the only one that needs your hands.</aside><h2 id="proposed-changes">Proposed Changes</h2>
+<h3>Fix 0 — ship what is already built · unblocks R1, R2</h3>
+<p><code>ede398c48</code> is on <code>main</code>, CI green, review approved. npm is still <strong>1.22.47</strong>, and
+<code>resolveTmuxWrap</code> has <strong>0 occurrences</strong> in your installed CLI. It contains:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+<th>Verified by</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>F1</td>
+<td>remote <code>--device</code> agents detach on the peer, so a blink cannot SIGHUP them</td>
+<td>pids gone pre-fix; pane survived post-fix</td>
+</tr>
+<tr>
+<td>F2</td>
+<td>reconnect keyed off <code>AGENT_LAUNCH_ID</code> — every harness, not just Claude</td>
+<td>live launch-id resolution</td>
+</tr>
+<tr>
+<td>F3</td>
+<td>interactive streams off the shared ControlMaster — one blip stops killing every tab</td>
+<td>6 tabs on one socket, observed</td>
+</tr>
+<tr>
+<td>F4</td>
+<td>15-minute retry window (was ~90s), countdown, working Ctrl-C</td>
+<td>unit</td>
+</tr>
+<tr>
+<td>F5</td>
+<td>termios + DEC restore, drain gated on abnormal exit</td>
+<td>real pty</td>
+</tr>
+<tr>
+<td>F7</td>
+<td>notices name <code>agents sessions resume</code>, not a dead command</td>
+<td>unit</td>
+</tr>
+</tbody></table>
+<pre><code>apps/cli/scripts/release.sh 1.22.48 --apply     # answer the [y/N]
+</code></pre>
+<p>Backgrounding it exits 0 publishing nothing (the prompt reads EOF); <code>--yes</code> is refused by
+the sandbox as an irreversible public publish. <strong>This one is yours.</strong></p>
+<p>Then R2 becomes possible: real VS Codium tab, cut the link for real, watch it rejoin a
+<strong>live</strong> pane. That is the one branch still unproven — everything observed so far landed on
+<em>resume</em>, because there was no pane to attach to.</p>
+<h3>Fix 1 — stop reporting "fine" when we know nothing · R5, R9</h3>
+<p><code>lib/session/host-link.ts</code> falls through to a <strong>blind default</strong>:</p>
+<pre><code>if (input.tmuxClients === 0) return 'no-client';   // authoritative ✓
+if (windowGone)              return 'no-client';
+return 'connected';                                 // ← no signal at all reads as healthy
+</code></pre>
+<p>And <code>lib/session/active.ts</code> only promotes it when the session is <em>already idle</em>:</p>
+<pre><code>else if (link === 'no-client' &amp;&amp; (s.status === 'idle' || s.status === 'input_required')) {
+  s.status = 'orphaned';
+}
+</code></pre>
+<p><strong>Change:</strong> add <code>'unknown'</code> to <code>HostLink</code>, returned when there is no usable signal. Drop the
+<code>idle || input_required</code> gate so a <strong>running</strong> agent with no client is surfaced — that is
+the expensive case, still burning tokens. Keep <code>deliberatelyDetached</code> first and
+<code>tmuxClients</code> authoritative; both are correct.</p>
+<p>~20 lines across two files. Tests: no-signal → <code>unknown</code>; running + no-client → <code>orphaned</code>;
+detached → <code>connected</code> regardless of everything else.</p>
+<h3>Fix 2 — one recency function · R8, R9</h3>
+<p><code>lastActivity ?? timestamp</code> is re-implemented <strong>seven times</strong>, and the duplication has
+already shipped a visible bug in <code>commands/sessions.ts</code>:</p>
+<pre><code>maxTs: rows[0].lastActivity ?? rows[0].timestamp                      // group: by activity
+sessions: rows.sort((a, b) =&gt; (a.timestamp &lt; b.timestamp ? 1 : -1))   // rows: by CREATION
+</code></pre>
+<p>Groups ordered by activity, rows inside them ordered by creation — same command, same
+screen.</p>
+<p><strong>Change:</strong> one <code>lib/session/recency.ts</code> exporting <code>recencyOf(session)</code> implementing the
+documented chain — last message ts → file mtime → creation — returning a comparable number,
+unparseable sorting last. Delete both private <code>rowTs()</code> helpers (<code>team-filter.ts</code>,
+<code>trajectory-lineage.ts</code>), <code>sessionRecency()</code> in <code>commands/reconnect.ts</code>, and the four inline
+occurrences in <code>commands/sessions.ts</code>.</p>
+<p><strong>Ordering itself does not change:</strong> last activity, newest first, merged across devices
+unless scoped. Status stays a label.</p>
+<p><strong>Remote rows:</strong> the peer computes its own value and ships an ISO string, which
+<code>parseRemoteList</code> spreads verbatim. ISO is absolute so there is no timezone problem, but
+<strong>clock skew is uncorrected</strong> and nothing detects it. <code>recencyOf</code> marks a value as
+derived-not-measured (mtime or creation, rather than a real message timestamp) so a listing
+can show <code>~</code> instead of implying precision it does not have.</p>
+<h3>Fix 3 — the daemon publishes the name · R3, R5</h3>
+<p>Tab naming is <strong>~215 references across 12 extension files</strong> and <strong>zero</strong> in the CLI. The ext
+derives a provisional label then reconciles against a harness-owned one — two
+implementations racing, which is why a tab and <code>agents sessions</code> can disagree.</p>
+<p><strong>Change:</strong> the daemon computes <code>displayName</code> onto the session row; the ext renders it when
+present. Additive — nothing breaks if absent. Then delete the ext derivation, keeping one
+rule: a manual rename wins.</p>
+<h3>Fix 4 — the daemon owns the orphan, including at boot · R1, R3, R5</h3>
+<p>This is where R1 actually completes. The reconnect loop fires on <strong>one</strong> trigger — ssh
+exiting 255 — and lives <strong>inside</strong> the <code>agents run</code> process, so a closed tab, a crash or a
+reboot fires nothing. The loop cannot outlive its own process.</p>
+<p><strong>Change:</strong> the daemon writes a <code>detached</code> state for a session alive with no client, derived
+from a real probe of the pane — never inferred from a missing local client. Plus a <strong>boot
+sweep</strong>, because a laptop reboot does not touch a peer's tmux: those agents are still alive
+and still attachable, and the daemon is the only component that survives to notice.</p>
+<p>Re-attach stays user-initiated. The daemon surfaces and offers; it never reopens a tab.</p>
+<h3>Fix 5 — a peer answers for its own sessions · R3, R5</h3>
+<p>Both host-link signals are local — this box's window registry, this box's tmux. A
+<code>--device</code> session's pane is on the peer, so the classification is <em>structurally</em>
+unavailable here. Today that silently becomes <code>connected</code>.</p>
+<p><strong>Change:</strong> the peer classifies its own panes and reports it over the existing feed. Not a
+local patch — the question was being asked of the wrong machine.</p>
+<h3>Fix 6 — usage fetched once · R6, R7</h3>
+<p><code>lib/account-state-service.ts</code> is documented <strong>"Device-local owner for usage snapshots"</strong>
+and every daemon runs it every 60s. 11 devices × 8 accounts = <strong>88 provider calls a minute</strong>
+where 8 would do.</p>
+<p><code>withRefreshLease</code> already has the right shape — scope, key, acquire, re-read, fetch only if
+nobody did, publish, release — including the <code>readCompleted()</code> re-check that lets waiters
+consume the winner's result for free. What it lacks is a lock reachable from more than one
+machine.</p>
+<p><strong>Change:</strong> a fleet-scoped backend for that lease, with acquisition <strong>weighted by device
+stability</strong> so an always-on Mac Mini beats a laptop that goes in a backpack, an equal class
+never preempts, and the interactive device is the last resort. Snapshots publish with
+<code>fetchedAt</code> / <code>fetchedBy</code> so a follower shows <em>"usage as of 18s ago, from mac-mini"</em> rather
+than lying or blocking.</p>
+<h3>Fix 7 — the coordinator moves into the daemon · R3</h3>
+<p><code>watchFleetFeed</code> is called from exactly one place, and <code>apps/ext/AGENTS.md</code> assigns that
+subprocess to <em>"the elected extension monitor"</em>. Close VS Codium and nothing unions the
+fleet.</p>
+<p><strong>Change:</strong> the daemon hosts it and exposes the union over its socket; the ext subscribes.
+This ends the per-tab spawn loop (agi-cli#3019) structurally instead of throttling it.
+<strong>Last</strong>, because it removes a subprocess the ext currently depends on.</p>
+<h3>On R4 — tmux, and what we are <em>not</em> changing</h3>
+<p>Already correct, verified in <code>lib/tmux/session.ts</code>: a <strong>separate socket</strong>, so your own tmux
+server and sessions are untouched; and <code>writeStartupConfig</code> writes our defaults first then
+sources <strong>every</strong> config tmux itself would load, so your bindings win. The one real gap is
+that a non-tmux user sees a status bar and a <code>C-b</code> they never opted into — a one-line
+<code>status off</code> default, restorable by anyone who wants it.</p>
 <h2 id="public-interface">Public Interface</h2>
 <pre><code>agents run &lt;agent&gt; --interactive --device &lt;host&gt;   # unchanged
-agents sessions                                     # gains a `detached` label. Order unchanged.
-agents sessions resume &lt;id&gt;                         # says whether it attached or replayed
+agents sessions                                     # unchanged ORDER; gains a `detached` label
+agents sessions --device &lt;name&gt;                     # scope to one device
+agents view                                         # never calls the provider on a follower
 </code></pre>
 <div class="artifact-behavior">
   <div class="artifact-behavior-panel" data-state="current" data-evidence="capture">
-    <strong>Current — one trigger, and it dies with the tab</strong>
-<pre><code>link drops  →  ssh 255  →  loop runs  →  focus --local  →  ✓ handled
-
-tab closed  →  (the loop was in that process)  →  nothing
-crash       →  nothing
-reboot      →  nothing
-
-observed on yosemite-m1 after killing the client:
-  1841903  claude --session-id 40569293-… /continue 81da4f0f-…
-  ↑ the loop DID reach the peer — but found no pane, so it replayed</code></pre>
+    <strong>Current — on your machines right now (1.22.47)</strong>
+<pre><code>blink        → agent SIGHUPed on the peer, work lost
+grok tab     → no reconnect at all, drops to a shell
+6 tabs       → one ControlMaster, all die together
+close tab    → agent orphaned, nothing notices
+usage        → 88 provider calls/minute
+sessions     → groups by activity, rows inside by creation</code></pre>
   </div>
   <div class="artifact-behavior-panel" data-state="proposed" data-evidence="mockup">
-    <strong>Proposed — the daemon covers what the loop cannot</strong>
-<pre><code>$ agents sessions
-  claude  yosemite-s0  2m ago   running            Reconnect r…
-  grok    yosemite-s0  4m ago   detached           Market
-  codex   yosemite-m4  11m ago  running            Dispatch
-  claude  zion         1h ago   idle               Prix Cloud
+    <strong>After fix 0 (today) and fixes 1–7</strong>
+<pre><code>blink        → detached pane survives; reconnect rejoins it
+any harness  → reconnects via launch id
+6 tabs       → independent connections
+close tab    → daemon marks it detached, offers resume
+usage        → 8 provider calls/minute, broadcast
+sessions     → one recency rule everywhere
 
-  default order: last activity, newest first, merged across devices
-  `detached` is a label, not a sort key</code></pre>
+$ agents sessions
+  claude  yosemite-s0  2m ago   running    Reconnect r…
+  grok    yosemite-s0  4m ago   detached   Market
+  codex   yosemite-m4  11m ago  running    Dispatch</code></pre>
   </div>
 </div><h2 id="validation">Validation</h2>
 <table>
@@ -238,28 +271,36 @@ observed on yosemite-m1 after killing the client:
 </tr>
 </thead>
 <tbody><tr>
-<td>Cut the link mid-turn, new build both ends</td>
-<td>Countdown, then <strong>attach</strong> — same session id, in-flight turn intact</td>
+<td>Cut the link in a real VS Codium tab, 1.22.48 both ends</td>
+<td><strong>Attach</strong> — same session id, in-flight turn intact (R1, R2)</td>
 </tr>
 <tr>
 <td>Same with Grok</td>
-<td>Identical; proves F2 outside unit tests</td>
+<td>Identical (R1)</td>
 </tr>
 <tr>
 <td>Close the tab mid-run</td>
-<td>Daemon marks it <code>detached</code> within a tick</td>
+<td><code>detached</code> within one daemon tick (R5)</td>
 </tr>
 <tr>
-<td>Reboot zion with a remote agent alive</td>
-<td>Boot sweep surfaces it</td>
+<td>Reboot zion, agent alive on a peer</td>
+<td>Boot sweep surfaces it (R5)</td>
 </tr>
 <tr>
-<td><code>--raw</code> run, link drops</td>
-<td>No reconnect — documented, not a surprise</td>
+<td>Session with no window and no tmux</td>
+<td><code>unknown</code>, never <code>connected</code> (R9)</td>
 </tr>
 <tr>
-<td>Kill ssh with <code>-9</code></td>
-<td>Reconnect fires (already proven)</td>
+<td>Group vs rows in <code>agents sessions</code></td>
+<td>Same ordering rule for both (R8)</td>
+</tr>
+<tr>
+<td>Count provider calls fleet-wide, 5 min</td>
+<td>8/min (R7)</td>
+</tr>
+<tr>
+<td>Existing tmux user's bindings</td>
+<td>Unchanged (R4)</td>
 </tr>
 </tbody></table>
 <h2 id="risks">Risks</h2>
@@ -271,33 +312,33 @@ observed on yosemite-m1 after killing the client:
 </tr>
 </thead>
 <tbody><tr>
-<td>Step 5 breaks ext startup</td>
-<td>It goes last, only after the data it needs is provably on the stream</td>
+<td>Dropping the idle gate creates false orphans</td>
+<td><code>deliberatelyDetached</code> stays first; <code>tmuxClients</code> authoritative; no-signal becomes <code>unknown</code>, not <code>orphaned</code></td>
 </tr>
 <tr>
-<td><code>detached</code> lies</td>
-<td>Derived from a real probe of the peer's pane, never from a missing local client</td>
+<td><code>recencyOf</code> changes visible order</td>
+<td>It implements the <em>documented</em> chain; the group-vs-row divergence is the bug being removed, not new behaviour</td>
 </tr>
 <tr>
-<td>The 45s silent-drop detection feels slow</td>
-<td>It is <code>ServerAliveInterval</code> — tunable, but shortening it costs false positives on a busy link</td>
+<td>Clock skew across devices</td>
+<td>Surface derived values as approximate rather than silently sorting on them</td>
 </tr>
 <tr>
-<td>Daemon becomes a single point of failure</td>
-<td>Consumers keep the direct CLI path as a degraded fallback</td>
+<td>Fix 7 breaks ext startup</td>
+<td>Goes last, only after the data is provably on the stream</td>
 </tr>
 </tbody></table>
 <h2 id="checklist">Checklist</h2>
-<div class="checklist"><div class="checklist-head">3 / 8 done</div><ul class="checklist-items"><li class="cl-item cl-done"><span class="cl-box">✓</span><span class="cl-text">Trace the mechanism end to end from source</span></li><li class="cl-item cl-done"><span class="cl-box">✓</span><span class="cl-text">Establish that the loop fires and reaches the peer (pid 1841903 evidence)</span></li><li class="cl-item cl-done"><span class="cl-box">✓</span><span class="cl-text">Enumerate covered and uncovered cases</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Ship 1.22.48, then prove the <strong>attach</strong> branch with a live pane</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Step 1 — daemon publishes the display name</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Step 2 — <code>unknown</code> + running-can-be-orphaned (RUSH-3183)</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Step 3 — daemon owns <code>detached</code> + boot sweep (RUSH-3180)</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Steps 4–6 — peer-answers, coordinator move, one <code>createSession</code></span></li></ul></div>
+<div class="checklist"><div class="checklist-head">0 / 9 done</div><ul class="checklist-items"><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text"><strong>Fix 0 — publish 1.22.48</strong> ← yours; everything below is inert until this lands</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Fix 1 — <code>unknown</code> + running-can-be-orphaned (<code>host-link.ts</code>, <code>active.ts</code>)</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Fix 2 — one <code>recencyOf()</code>; delete 7 duplicates; fix the group/row divergence</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Fix 3 — daemon publishes <code>displayName</code>; ext stops deriving</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Fix 4 — daemon owns <code>detached</code> + boot sweep</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Fix 5 — peers classify their own sessions</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Fix 6 — fleet-scoped lease for usage; publish with <code>fetchedAt</code>/<code>fetchedBy</code></span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">Fix 7 — coordinator into the daemon (ends agi-cli#3019)</span></li><li class="cl-item cl-todo"><span class="cl-box">○</span><span class="cl-text">R4 — <code>status off</code> default for tmux</span></li></ul></div>
 <h2 id="tracking">Tracking</h2>
 <ul>
-<li><a href="https://linear.app/prix/issue/RUSH-3125">RUSH-3125</a> · RUSH-3183 · RUSH-3180 · RUSH-3175 · RUSH-3139</li>
-<li>agi-cli#3019 — the spawn loop step 5 ends structurally</li>
+<li><a href="https://linear.app/prix/issue/RUSH-3125">RUSH-3125</a> — the umbrella; fixes 1–7 land against it</li>
+<li>Fixes 1 and 2 are independent of the release and can start immediately</li>
 </ul>
 </article>
 <footer class="document-footer">Phoenix Labs</footer>
 </main>
-<script type="application/json" id="artifacts-source">{"encoding":"base64","markdown":"LS0tCmtpbmQ6IHBsYW4KdGVtcGxhdGU6IHBsYW4udjEKdGl0bGU6IEhvdyByZWNvbm5lY3Rpb24gYWN0dWFsbHkgd29ya3MsIHdoaWNoIGNhc2VzIGl0IGNvdmVycywgYW5kIHRoZSBtb3ZlIGludG8gdGhlIGRhZW1vbgpzdW1tYXJ5OiA+LQogIFRoZSBsb29wIGlzIHByb3ZlbiB0byBmaXJlIGFuZCByZWFjaCB0aGUgcGVlciDigJQgYSBraWxsZWQgY2xpZW50IHByb2R1Y2VkIGEgL2NvbnRpbnVlIG9uCiAgdGhlIGZhciBzaWRlIDEycyBsYXRlci4gSXQgY292ZXJzIGV4YWN0bHkgb25lIHRyaWdnZXI6IHNzaCBleGl0aW5nIDI1NS4gVGhyZWUgcmVhbCBjYXNlcwogIGZpcmUgbm90aGluZyBhdCBhbGwsIGFuZCBldmVyeSBvbmUgb2YgdGhlbSBpcyB0aGUgZGFlbW9uIGdhcC4KaGVhZGVyOiBBR0kgQ0xJIMK3IHJlY29ubmVjdCBtZWNoYW5pc20KZm9vdGVyOiBQaG9lbml4IExhYnMKcHJvamVjdDogYWdlbnRzLWNsaQpjb250ZXh0OiA+LQogIE93bmVyIGRvdWJ0cyB0aGUgaW1wbGVtZW50YXRpb24gaXMgY29ycmVjdCBhbmQgd2FudHMgdGhlIG1lY2hhbmlzbSBzaG93biBwbGFpbmx5LCB0aGUKICBjYXNlIGNvdmVyYWdlIHN0YXRlZCwgYW5kIHRoZSBwbGFuIGZvciBtb3Zpbmcgc2Vzc2lvbiBoYW5kbGluZyBpbnRvIHRoZSBkYWVtb24uCnJlcG9zaXRvcnk6IHBobngtbGFicy9hZ2VudHMtY2xpCmJyYW5jaDogcGxhbi9yZWNvbm5lY3QtYXJjaGl0ZWN0dXJlCnN1cmZhY2U6IGNsaQp0cmFja2luZzogUlVTSC0zMTI1CnN0YXR1czogZHJhZnQKaGFybmVzczogY2xhdWRlCmFnZW50OiBjbGF1ZGUKaHVtYW46IE11cXNpdApob3N0OiB6aW9uCnNlc3Npb246IGU5Yjg1M2JjCmRhdGU6ICcyMDI2LTA4LTI1JwpmYWN0czoKICAtICdQcm92ZW46IGtpbGxpbmcgdGhlIHNzaCBjbGllbnQgcHJvZHVjZWQgYSAvY29udGludWUgb2YgdGhhdCBzZXNzaW9uIGlkIG9uIHRoZSBwZWVyIDEycyBsYXRlcicKICAtICdUaGUgb25seSB0cmlnZ2VyIGlzIGV4aXRDb2RlID09PSAyNTUg4oCUIGV2ZXJ5IG90aGVyIGV4aXQgcGF0aCBza2lwcyByZWNvbm5lY3QgZW50aXJlbHknCiAgLSAnTm90aGluZyBmaXJlcyB3aGVuIHRoZSBhZ2VudHMgcnVuIHByb2Nlc3MgaXRzZWxmIGRpZXM6IGNsb3NlZCB0YWIsIGNyYXNoLCByZWJvb3QnCiAgLSAnRGV0ZWN0aW9uIG9mIGEgc2lsZW50IGRyb3AgdGFrZXMgdXAgdG8gfjQ1cyAoU2VydmVyQWxpdmVJbnRlcnZhbCAxNSB4IENvdW50TWF4IDMpJwogIC0gJ1RoZSBlbmQtdG8tZW5kIHBhdGggd2l0aCB0aGUgdG11eCB3cmFwIGVuZ2FnZWQgaGFzIHN0aWxsIG5ldmVyIGJlZW4gcnVuJwpsaW5rczoKICAtIHRpdGxlOiBSVVNILTMxMjUKICAgIHVybDogaHR0cHM6Ly9saW5lYXIuYXBwL3ByaXgvaXNzdWUvUlVTSC0zMTI1CmFzc2V0czogW10KLS0tCgojIyBQdXJwb3NlCgpZb3UgZG91YnQgdGhlIGltcGxlbWVudGF0aW9uLiBIZXJlIGlzIHRoZSBtZWNoYW5pc20gd2l0aCBub3RoaW5nIGhhbmQtd2F2ZWQsIHdoYXQgSSBoYXZlCmFjdHVhbGx5IHByb3ZlbiBhYm91dCBpdCwgYW5kIHRoZSBob25lc3QgbGlzdCBvZiB3aGF0IGl0IGRvZXMgbm90IGNvdmVyLgoKIyMjIEl0IGRvZXMgZmlyZSwgYW5kIEkgaGF2ZSBiZXR0ZXIgZXZpZGVuY2UgdGhhbiBJIGhhdmUgYmVlbiBjaXRpbmcKCkluIHRoZSBgeW9zZW1pdGUtbTFgIHRlc3QgSSBraWxsZWQgdGhlIGxvY2FsIHNzaCBjbGllbnQuIFR3ZWx2ZSBzZWNvbmRzIGxhdGVyIGEgKipuZXcqKgpwcm9jZXNzIGV4aXN0ZWQgb24gdGhlIHBlZXI6CgpgYGAKMTg0MTkwMyAgY2xhdWRlIC0tc2Vzc2lvbi1pZCA0MDU2OTI5My01MTA0LTRlYWItYjMwOS04NjU1MTg3MGIyNmUgL2NvbnRpbnVlIDgxZGE0ZjBmLeKApgpgYGAKCk5vdGhpbmcgZWxzZSBpbiB0aGUgc3lzdGVtIHN0YXJ0cyBhIGAvY29udGludWVgIG9mIHRoYXQgc2Vzc2lvbiBpZC4gVGhhdCBpcwpgYWdlbnRzIHNlc3Npb25zIGZvY3VzIDgxZGE0ZjBm4oCmIC0tbG9jYWxgIHJ1bm5pbmcgKipvbiB0aGUgcGVlcioqLCBmaW5kaW5nIG5vIGxpdmUgcGFuZSwKYW5kIGZhbGxpbmcgdGhyb3VnaCB0byByZXN1bWUuCgpTbzogKip0aGUgdHJpZ2dlciBmaXJlZCwgdGhlIGxvb3AgcmFuLCBpdCByZWFjaGVkIHRoZSBmYXIgbWFjaGluZSwgYW5kIGl0IGV4ZWN1dGVkIHRoZQpyZWNvdmVyeSB2ZXJiIHRoZXJlLioqIFRoZSBtZWNoYW5pc20gd29ya3MuIFdoYXQgd2FzIG1pc3Npbmcgd2FzIGEgKnBhbmUgdG8gYXR0YWNoIHRvKiDigJQKd2hpY2ggaXMgdGhlIHNlcGFyYXRlIGJ1ZyAoRjEpLiBJIGhhZCBiZWVuIHJlcG9ydGluZyB0aGlzIGFzICJuZXZlciB0ZXN0ZWQgZW5kIHRvIGVuZCIsCndoaWNoIHVuZGVyc29sZCBpdC4KCjxhc2lkZSBjbGFzcz0iYXJ0aWZhY3QtY2FsbG91dCI+PHN0cm9uZz5Mb2FkLWJlYXJpbmcgdGFrZWF3YXk6PC9zdHJvbmc+IHRoZSBsb29wIGlzIG5vdCB0aGUKd2VhayBwYXJ0LiBUaGUgd2VhayBwYXJ0IGlzIHRoYXQgaXQgaGFuZ3Mgb2ZmIDxlbT5vbmU8L2VtPiB0cmlnZ2VyIOKAlCBzc2ggcmV0dXJuaW5nIDI1NSDigJQKYW5kIHRoYXQgaXQgbGl2ZXMgaW5zaWRlIHRoZSBwcm9jZXNzIHRoZSBkcm9wIGlzIG1vc3QgbGlrZWx5IHRvIGtpbGwuPC9hc2lkZT4KCiMjIFByb3Bvc2VkIENoYW5nZXMKCiMjIyBUaGUgbWVjaGFuaXNtLCBzdGVwIGJ5IHN0ZXAKCjxmaWd1cmUgY2xhc3M9ImFydGlmYWN0LWZpZ3VyZSBhcnRpZmFjdC1maWd1cmUtZGlhZ3JhbSBhcnRpZmFjdC1maWd1cmUtd2lkZSI+CiAgPHN2ZyBjbGFzcz0iYXJ0aWZhY3QtZGlhZ3JhbSIgdmlld0JveD0iMCAwIDk0MCA0NzAiIHJvbGU9ImltZyIgYXJpYS1sYWJlbD0iUmVjb25uZWN0IHNlcXVlbmNlIGZyb20gbGF1bmNoIHRvIHJlYXR0YWNoIj4KICAgIDxkZWZzPgogICAgICA8bWFya2VyIGlkPSJybSIgdmlld0JveD0iMCAwIDEwIDEwIiByZWZYPSI5IiByZWZZPSI1IiBtYXJrZXJXaWR0aD0iNyIgbWFya2VySGVpZ2h0PSI3IiBvcmllbnQ9ImF1dG8tc3RhcnQtcmV2ZXJzZSI+CiAgICAgICAgPHBhdGggZD0iTSAwIDAgTCAxMCA1IEwgMCAxMCB6IiBmaWxsPSIjOGI4YjhiIiAvPgogICAgICA8L21hcmtlcj4KICAgIDwvZGVmcz4KICAgIDx0ZXh0IHg9IjIwIiB5PSIyNCIgZmlsbD0iIzhiOGI4YiIgZm9udC1mYW1pbHk9IkpldEJyYWlucyBNb25vLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiPnppb24g4oCUIGFnZW50cyBydW4gKGZvcmVncm91bmQpPC90ZXh0PgogICAgPGxpbmUgeDE9IjYyMCIgeTE9IjEwIiB4Mj0iNjIwIiB5Mj0iNDYwIiBzdHJva2U9IiMzYTNhM2EiIHN0cm9rZS1kYXNoYXJyYXk9IjQgNCIgLz4KICAgIDx0ZXh0IHg9IjY0MCIgeT0iMjQiIGZpbGw9IiM4YjhiOGIiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjExIj55b3NlbWl0ZS1zMDwvdGV4dD4KCiAgICA8cmVjdCB4PSIyMCIgeT0iMzgiIHdpZHRoPSIzMzAiIGhlaWdodD0iNDAiIHJ4PSI1IiBmaWxsPSIjMTQxNDE0IiBzdHJva2U9IiM0YTRhNGEiIC8+CiAgICA8dGV4dCB4PSIzNCIgeT0iNjMiIGZpbGw9IiNjOGM4YzgiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjExIj5ydW5JbnRlcmFjdGl2ZU9uSG9zdCDihpIgc3NoU3RyZWFtKC10dCk8L3RleHQ+CiAgICA8bGluZSB4MT0iMzUyIiB5MT0iNTgiIHgyPSI3MDAiIHkyPSI1OCIgc3Ryb2tlPSIjOGI4YjhiIiBzdHJva2Utd2lkdGg9IjEuNCIgbWFya2VyLWVuZD0idXJsKCNybSkiIC8+CiAgICA8cmVjdCB4PSI3MDAiIHk9IjM4IiB3aWR0aD0iMjEwIiBoZWlnaHQ9IjQwIiByeD0iNSIgZmlsbD0iIzEwMWEwYSIgc3Ryb2tlPSIjYTNlNjM1IiAvPgogICAgPHRleHQgeD0iODA1IiB5PSI2MyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2EzZTYzNSIgZm9udC1mYW1pbHk9IkpldEJyYWlucyBNb25vLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiPmFnZW50IHJ1bnMgKGluIGEgcGFuZSk8L3RleHQ+CgogICAgPHRleHQgeD0iMzQiIHk9IjEwMCIgZmlsbD0iIzhiOGI4YiIgZm9udC1mYW1pbHk9IkludGVyLCBzeXN0ZW0tdWksIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiPnNwYXduU3luYyBibG9ja3MgaGVyZSBmb3IgdGhlIHdob2xlIHNlc3Npb248L3RleHQ+CgogICAgPHBhdGggZD0iTSA2MDAgNDQgTCA2NDAgNzYgTSA2NDAgNDQgTCA2MDAgNzYiIHN0cm9rZT0iI2Y4NzE3MSIgc3Ryb2tlLXdpZHRoPSIyLjUiIC8+CiAgICA8dGV4dCB4PSI2MjAiIHk9Ijk2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjZjg3MTcxIiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCI+bGluayBkcm9wczwvdGV4dD4KCiAgICA8cmVjdCB4PSIyMCIgeT0iMTE4IiB3aWR0aD0iMzMwIiBoZWlnaHQ9IjQ2IiByeD0iNSIgZmlsbD0iIzFhMTIwNiIgc3Ryb2tlPSIjZjU5ZTBiIiAvPgogICAgPHRleHQgeD0iMzQiIHk9IjEzOSIgZmlsbD0iI2Y1OWUwYiIgZm9udC1mYW1pbHk9IkpldEJyYWlucyBNb25vLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTEiPnNzaCBleGl0cyAyNTUg4oaSIHNzaFN0cmVhbSByZXR1cm5zIDI1NTwvdGV4dD4KICAgIDx0ZXh0IHg9IjM0IiB5PSIxNTYiIGZpbGw9IiNjOGM4YzgiIGZvbnQtZmFtaWx5PSJJbnRlciwgc3lzdGVtLXVpLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjEwIj50aGUgT05MWSB0cmlnZ2VyLiBhbnkgb3RoZXIgY29kZSDihpIgbm8gcmVjb25uZWN0PC90ZXh0PgoKICAgIDxyZWN0IHg9IjIwIiB5PSIxODAiIHdpZHRoPSIzMzAiIGhlaWdodD0iNDAiIHJ4PSI1IiBmaWxsPSIjMTQxNDE0IiBzdHJva2U9IiM0YTRhNGEiIC8+CiAgICA8dGV4dCB4PSIzNCIgeT0iMjA1IiBmaWxsPSIjYzhjOGM4IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSI+cGlja1JlY29ubmVjdFRhcmdldCDihpIgc2Vzc2lvbiBpZCB8IGxhdW5jaCBpZDwvdGV4dD4KCiAgICA8cmVjdCB4PSIyMCIgeT0iMjM2IiB3aWR0aD0iMzMwIiBoZWlnaHQ9IjE3NiIgcng9IjYiIGZpbGw9IiMwYTE1MjAiIHN0cm9rZT0iIzM4YmRmOCIgLz4KICAgIDx0ZXh0IHg9IjM0IiB5PSIyNTgiIGZpbGw9IiMzOGJkZjgiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjExIj5yZWNvbm5lY3RJbnRlcmFjdGl2ZVNlc3Npb24g4oCUIGxvb3A8L3RleHQ+CiAgICA8dGV4dCB4PSIzNCIgeT0iMjgwIiBmaWxsPSIjYzhjOGM4IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCI+MSByZWNvbm5lY3RTdGVwIOKGkiByZXRyeSB8IHN0b3AgIChwdXJlKTwvdGV4dD4KICAgIDx0ZXh0IHg9IjM0IiB5PSIyOTgiIGZpbGw9IiNjOGM4YzgiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjEwIj4yIHByaW50IG5vdGljZSArIGNvdW50ZG93bjwvdGV4dD4KICAgIDx0ZXh0IHg9IjM0IiB5PSIzMTYiIGZpbGw9IiNjOGM4YzgiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjEwIj4zIHdhaXRPckludGVycnVwdChiYWNrb2ZmKSDihpAgQ3RybC1DIGV4aXRzIDEzMDwvdGV4dD4KICAgIDx0ZXh0IHg9IjM0IiB5PSIzMzQiIGZpbGw9IiNjOGM4YzgiIGZvbnQtZmFtaWx5PSJKZXRCcmFpbnMgTW9ubywgbW9ub3NwYWNlIiBmb250LXNpemU9IjEwIj40YSBwcmVmbGlnaHQgIHNzaCDigKYgdHJ1ZSAgIChpcyB0aGUgaG9zdCB1cD8pPC90ZXh0PgogICAgPHRleHQgeD0iMzQiIHk9IjM1MiIgZmlsbD0iI2M4YzhjOCIgZm9udC1mYW1pbHk9IkpldEJyYWlucyBNb25vLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiPjRiIHNzaFN0cmVhbSDihpIgZm9jdXMgLS1sb2NhbCAgKGJsb2Nrcyk8L3RleHQ+CiAgICA8dGV4dCB4PSIzNCIgeT0iMzcwIiBmaWxsPSIjYzhjOGM4IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCI+NSBjbGFzc2lmeSBvdXRjb21lLCBsb29wPC90ZXh0PgogICAgPHRleHQgeD0iMzQiIHk9IjM5NiIgZmlsbD0iI2Y1OWUwYiIgZm9udC1mYW1pbHk9IkpldEJyYWlucyBNb25vLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTAiPndpbmRvdzogMTUgbWluIG9mIHVucHJvZHVjdGl2ZSByZXRyeWluZzwvdGV4dD4KCiAgICA8bGluZSB4MT0iMzUyIiB5MT0iMzUyIiB4Mj0iNzAwIiB5Mj0iMzUyIiBzdHJva2U9IiM4YjhiOGIiIHN0cm9rZS13aWR0aD0iMS40IiBtYXJrZXItZW5kPSJ1cmwoI3JtKSIgLz4KICAgIDxyZWN0IHg9IjcwMCIgeT0iMzAwIiB3aWR0aD0iMjIwIiBoZWlnaHQ9IjEwNCIgcng9IjYiIGZpbGw9IiMxMDFhMGEiIHN0cm9rZT0iI2EzZTYzNSIgLz4KICAgIDx0ZXh0IHg9IjgxMCIgeT0iMzIyIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjYTNlNjM1IiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMSI+YWdlbnRzIHNlc3Npb25zIGZvY3VzIC0tbG9jYWw8L3RleHQ+CiAgICA8dGV4dCB4PSI4MTAiIHk9IjM0NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2M4YzhjOCIgZm9udC1mYW1pbHk9IkludGVyLCBzeXN0ZW0tdWksIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiPnBhbmUgYWxpdmUg4oaSIEFUVEFDSCAobm8gbG9zcyk8L3RleHQ+CiAgICA8dGV4dCB4PSI4MTAiIHk9IjM2NCIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZmlsbD0iI2Y1OWUwYiIgZm9udC1mYW1pbHk9IkludGVyLCBzeXN0ZW0tdWksIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTEiPnBhbmUgZ29uZSDihpIgUkVTVU1FIGEgY29weTwvdGV4dD4KICAgIDx0ZXh0IHg9IjgxMCIgeT0iMzg2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjOGI4YjhiIiBmb250LWZhbWlseT0iSmV0QnJhaW5zIE1vbm8sIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMCI+4oaQIG9ic2VydmVkOiBwaWQgMTg0MTkwMywgL2NvbnRpbnVlPC90ZXh0PgoKICAgIDxyZWN0IHg9IjIwIiB5PSI0MjgiIHdpZHRoPSI5MDAiIGhlaWdodD0iMzIiIHJ4PSI1IiBmaWxsPSIjMWEwZDBkIiBzdHJva2U9IiNmODcxNzEiIC8+CiAgICA8dGV4dCB4PSIzNCIgeT0iNDQ5IiBmaWxsPSIjZjg3MTcxIiBmb250LWZhbWlseT0iSW50ZXIsIHN5c3RlbS11aSwgc2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMiI+RXZlcnl0aGluZyBpbiB0aGUgYmx1ZSBib3ggZGllcyBpZiB0aGUgYGFnZW50cyBydW5gIHByb2Nlc3MgZGllcyDigJQgY2xvc2VkIHRhYiwgY3Jhc2gsIHJlYm9vdC4gVGhlbiBub3RoaW5nIHJlY29ubmVjdHMuPC90ZXh0PgogIDwvc3ZnPgogIDxmaWdjYXB0aW9uPjxiPkZpZ3VyZSAxLjwvYj4gVGhlIGxvb3AgaXMgc291bmQuIEl0cyB0d28gd2Vha25lc3NlcyBhcmUgc3RydWN0dXJhbDogb25lCiAgdHJpZ2dlciwgYW5kIGl0IGxpdmVzIGluc2lkZSB0aGUgcHJvY2VzcyBtb3N0IGxpa2VseSB0byBiZSBraWxsZWQuPC9maWdjYXB0aW9uPgo8L2ZpZ3VyZT4KCiMjIyBXaGljaCBjYXNlcyBpdCBoYW5kbGVzIOKAlCBhbmQgd2hpY2ggaXQgZG9lcyBub3QKCnwgQ2FzZSB8IERvZXMgcmVjb25uZWN0IGZpcmU/IHwgT3V0Y29tZSB8CnwgLS0tIHwgLS0tIHwgLS0tIHwKfCBMaW5rIGRyb3BzLCBzc2ggZXhpdHMgMjU1IHwgKip5ZXMqKiB8IGF0dGFjaCBpZiB0aGUgcGFuZSBsaXZlcywgZWxzZSByZXN1bWUgYSBjb3B5IHwKfCBzc2gga2lsbGVkIGJ5IGEgc2lnbmFsIChgc3RhdHVzID09PSBudWxsYCDihpIgMjU1KSB8ICoqeWVzKiogfCBzYW1lIOKAlCB0aGlzIGlzIHRoZSBjYXNlIEkgcHJvdmVkIHwKfCBXaS1GaSBkcm9wcyBzaWxlbnRseSAoaGFsZi1vcGVuIFRDUCkgfCAqKnllcywgYWZ0ZXIgfjQ1cyoqIHwgYFNlcnZlckFsaXZlSW50ZXJ2YWwgMTUgw5cgQ291bnRNYXggM2AgYmVmb3JlIHNzaCBnaXZlcyB1cCB8CnwgSG9zdCB1bnJlYWNoYWJsZSBmb3IgYSB3aGlsZSB8ICoqeWVzKiogfCBwcmVmbGlnaHQgZmFpbHMsIHJldHJpZXMgZm9yIDE1IG1pbiwgdGhlbiBhIGNsZWFyIGdpdmUtdXAgbm90aWNlIHwKfCBMaW5rIGZsYXBzIOKAlCByZWNvbm5lY3RzIHRoZW4gZHJvcHMgaW5zdGFudGx5IHwgKip5ZXMqKiB8IGBNSU5fSE9MRF9NU2Agc3RvcHMgaXQgc3Bpbm5pbmcgZm9yZXZlciB8CnwgUmVtb3RlIGNvbW1hbmQgZXhpdHMgbm9uLTI1NSB8IG5vLCBieSBkZXNpZ24gfCB0aGUgYWdlbnQgc3Bva2UgZm9yIGl0c2VsZjsgdGhhdCBjb2RlIGlzIHN1cmZhY2VkIHwKfCBSZW1vdGUgZXhpdHMgMjU1IGZvciBpdHMgb3duIHJlYXNvbnMgfCBubyDigJQgcmVtYXBwZWQgdG8gMjU0IHwgZGlzdGluY3Qgbm90aWNlLCBub3QgbWlzdGFrZW4gZm9yIGEgZHJvcCB8CnwgYC0tcmF3YCAvIGAtLW5vLXRtdXhgIHwgKipubyoqIOKAlCBgIWlzUmF3YCBndWFyZCB8IHBsYWluIGV4aXQgfAp8IE5vIHJlY29ubmVjdCB0YXJnZXQgcmVzb2x2YWJsZSB8ICoqbm8qKiB8IHBsYWluIGV4aXQgKih0aGlzIHdhcyB0aGUgR3JvayBidWc7IGZpeGVkIGJ5IEYyKSogfAp8ICoqWW91IGNsb3NlIHRoZSBWUyBDb2RpdW0gdGFiKiogfCAqKm5vIOKAlCB0aGUgbG9vcCBkaWVzIHdpdGggaXQqKiB8IGFnZW50IG9ycGhhbmVkIG9uIHRoZSBwZWVyLCBub3RoaW5nIG5vdGljZXMgfAp8ICoqVlMgQ29kaXVtIGNyYXNoZXMqKiB8ICoqbm8qKiB8IHNhbWUgfAp8ICoqWW91ciBsYXB0b3AgcmVib290cyoqIHwgKipubyoqIHwgc2FtZSwgYW5kIHRoZSBkYWVtb24gaXMgdGhlIG9ubHkgdGhpbmcgdGhhdCBzdXJ2aXZlcyB0byBub3RpY2UgfAoKVGhlIGxhc3QgdGhyZWUgYXJlIG9uZSBkZWZlY3QsIGFuZCBpdCBpcyBub3QgZml4YWJsZSBpbnNpZGUgdGhlIGxvb3A6IHRoZSBsb29wIGNhbm5vdApvdXRsaXZlIGl0cyBvd24gcHJvY2Vzcy4KCiMjIyBXaGF0IEkgc3RpbGwgaGF2ZSBub3QgcHJvdmVuCgpCZWluZyBleHBsaWNpdCwgYmVjYXVzZSB5b3UgYXNrZWQgd2hldGhlciBpdCBpcyBldmVuIGNvcnJlY3Q6CgotICoqVGhlIGF0dGFjaCBwYXRoLioqIEV2ZXJ5dGhpbmcgSSBwcm92ZWQgbGFuZGVkIG9uIHRoZSAqcmVzdW1lKiBicmFuY2gsIGJlY2F1c2UgdGhlcmUgd2FzCiAgbm8gcGFuZS4gSSBoYXZlIG5ldmVyIHdhdGNoZWQgaXQgcmVqb2luIGEgKipsaXZlKiogcGFuZSBhbmQgcHJlc2VydmUgYW4gaW4tZmxpZ2h0IHR1cm4uCiAgVGhhdCBuZWVkcyB0aGUgdG11eCB3cmFwIHNoaXBwZWQgKDEuMjIuNDgpIG9uIGJvdGggZW5kcy4KLSAqKkFueXRoaW5nIHRocm91Z2ggVlMgQ29kaXVtLioqIFplcm8gb2YgbXkgdGVzdGluZyB3ZW50IHRocm91Z2ggdGhlIGV4dGVuc2lvbi4KLSAqKlRoZSBjb3VudGRvd24sIHRoZSBDdHJsLUMgcGF0aCwgdGhlIDE1LW1pbnV0ZSB3aW5kb3cqKiBpbiBhIHJlYWwgdGVybWluYWwuCi0gKipBIG5vbi1DbGF1ZGUgaGFybmVzcyByZWNvbm5lY3RpbmcqKiDigJQgRjIncyB3aG9sZSBwdXJwb3NlLCBjb3ZlcmVkIG9ubHkgYnkgdW5pdCB0ZXN0cy4KCiMjIyBUaGUgcGxhbiBmb3IgbW92aW5nIHNlc3Npb24gaGFuZGxpbmcgaW50byB0aGUgZGFlbW9uCgpTZXF1ZW5jZWQgc28gZWFjaCBzdGVwIGlzIHVzZWZ1bCBhbG9uZSBhbmQgcmV2ZXJzaWJsZS4KCioqU3RlcCAxIOKAlCBwdWJsaXNoLCBkb24ndCBkZXJpdmUuKiogVGhlIGRhZW1vbiBjb21wdXRlcyB3aGF0IGNvbnN1bWVycyBjdXJyZW50bHkgcmUtZGVyaXZlCuKAlCBzdGFydGluZyB3aXRoIHRoZSBzZXNzaW9uIGRpc3BsYXkgbmFtZSDigJQgYW5kIHB1Ymxpc2hlcyBpdCBvbiB0aGUgc2Vzc2lvbiByb3cuIFRoZSBleHQKcmVuZGVycyBpdCB3aGVuIHByZXNlbnQuIFB1cmVseSBhZGRpdGl2ZTsgbm90aGluZyBicmVha3MgaWYgaXQgaXMgYWJzZW50LgoKKipTdGVwIDIg4oCUIGZpeCB0aGUgbGl2ZW5lc3Mgc2lnbmFsLioqIGBjbGFzc2lmeUhvc3RMaW5rYCByZXR1cm5zIGB1bmtub3duYCBpbnN0ZWFkIG9mCmRlZmF1bHRpbmcgdG8gYGNvbm5lY3RlZGAgd2hlbiBpdCBoYXMgbm8gc2lnbmFsLCBhbmQgYG9ycGhhbmVkYCBzdG9wcyBiZWluZyBnYXRlZCBvbgpgaWRsZSB8fCBpbnB1dF9yZXF1aXJlZGAgc28gYSAqcnVubmluZyogYWdlbnQgd2l0aCBubyBjbGllbnQgY2FuIGJlIHN1cmZhY2VkLiAoUlVTSC0zMTgzLikKCioqU3RlcCAzIOKAlCB0aGUgZGFlbW9uIG93bnMgdGhlIG9ycGhhbi4qKiBBIGBkZXRhY2hlZGAgc3RhdGUgd3JpdHRlbiBieSB0aGUgZGFlbW9uIHRoYXQgb3ducwp0aGUgcGFuZSwgaW5jbHVkaW5nIGEgKipib290IHN3ZWVwKiogc28gYSBwb3N0LXJlYm9vdCBzdXJ2aXZvciBpcyBmb3VuZC4gUmUtYXR0YWNoIHN0YXlzIGEKaHVtYW4gYWN0aW9uOyB0aGUgZGFlbW9uIHN1cmZhY2VzIGFuZCBvZmZlcnMsIG5ldmVyIHJlb3BlbnMuIChSVVNILTMxODAuKQoKKipTdGVwIDQg4oCUIHBlZXJzIGFuc3dlciBmb3IgdGhlbXNlbHZlcy4qKiBBIHJlbW90ZSBzZXNzaW9uJ3MgbGl2ZW5lc3MgaXMgY2xhc3NpZmllZCBieSB0aGUKcGVlciB0aGF0IG93bnMgdGhlIHBhbmUgYW5kIHJlcG9ydGVkIG92ZXIgdGhlIGV4aXN0aW5nIGZlZWQsIGluc3RlYWQgb2YgYmVpbmcgZ3Vlc3NlZCBmcm9tCnRoZSBsYXVuY2hpbmcgYm94LCB3aGVyZSB0aGUgc2lnbmFscyBkbyBub3QgZXhpc3QuCgoqKlN0ZXAgNSDigJQgdGhlIGRhZW1vbiBob3N0cyB0aGUgY29vcmRpbmF0b3IuKiogTW92ZSBgd2F0Y2hGbGVldEZlZWRgIG91dCBvZiB0aGUgZXh0ZW5zaW9uLgpUaGlzIGlzIHdoYXQgc3RydWN0dXJhbGx5IGVuZHMgdGhlIHBlci10YWIgc3Bhd24gbG9vcCAoYWdpLWNsaSMzMDE5KSByYXRoZXIgdGhhbiB0aHJvdHRsaW5nCml0LiBMYXN0LCBiZWNhdXNlIGl0IHJlbW92ZXMgYSBzdWJwcm9jZXNzIHRoZSBleHQgY3VycmVudGx5IGRlcGVuZHMgb24uCgoqKlN0ZXAgNiDigJQgb25lIGBjcmVhdGVTZXNzaW9uYC4qKiBUaHJlZSByZWdpc3RyYXJzIChob3N0cyAvIGNsb3VkIC8gZm9yaykgY29sbGFwc2UgdG8gb25lCmVudHJ5IHBvaW50IHNvIG5ldy1yb3cgaW52YXJpYW50cyBhcmUgZW5mb3JjZWQgb25jZS4KClN0ZXBzIDHigJMyIGFyZSBzbWFsbCBhbmQgaW5kZXBlbmRlbnQuIFN0ZXAgMyBpcyB3aGVyZSB0aGUgcmVjb25uZWN0IHN0b3J5IGFjdHVhbGx5IGNvbXBsZXRlcywKYmVjYXVzZSBpdCBjb3ZlcnMgdGhlIHRocmVlIGNhc2VzIHRoZSBpbi1wcm9jZXNzIGxvb3Agc3RydWN0dXJhbGx5IGNhbm5vdC4KCiMjIFB1YmxpYyBJbnRlcmZhY2UKCmBgYGJhc2gKYWdlbnRzIHJ1biA8YWdlbnQ+IC0taW50ZXJhY3RpdmUgLS1kZXZpY2UgPGhvc3Q+ICAgIyB1bmNoYW5nZWQKYWdlbnRzIHNlc3Npb25zICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICMgZ2FpbnMgYSBgZGV0YWNoZWRgIGxhYmVsLiBPcmRlciB1bmNoYW5nZWQuCmFnZW50cyBzZXNzaW9ucyByZXN1bWUgPGlkPiAgICAgICAgICAgICAgICAgICAgICAgICAjIHNheXMgd2hldGhlciBpdCBhdHRhY2hlZCBvciByZXBsYXllZApgYGAKCjxkaXYgY2xhc3M9ImFydGlmYWN0LWJlaGF2aW9yIj4KICA8ZGl2IGNsYXNzPSJhcnRpZmFjdC1iZWhhdmlvci1wYW5lbCIgZGF0YS1zdGF0ZT0iY3VycmVudCIgZGF0YS1ldmlkZW5jZT0iY2FwdHVyZSI+CiAgICA8c3Ryb25nPkN1cnJlbnQg4oCUIG9uZSB0cmlnZ2VyLCBhbmQgaXQgZGllcyB3aXRoIHRoZSB0YWI8L3N0cm9uZz4KPHByZT48Y29kZT5saW5rIGRyb3BzICDihpIgIHNzaCAyNTUgIOKGkiAgbG9vcCBydW5zICDihpIgIGZvY3VzIC0tbG9jYWwgIOKGkiAg4pyTIGhhbmRsZWQKCnRhYiBjbG9zZWQgIOKGkiAgKHRoZSBsb29wIHdhcyBpbiB0aGF0IHByb2Nlc3MpICDihpIgIG5vdGhpbmcKY3Jhc2ggICAgICAg4oaSICBub3RoaW5nCnJlYm9vdCAgICAgIOKGkiAgbm90aGluZwoKb2JzZXJ2ZWQgb24geW9zZW1pdGUtbTEgYWZ0ZXIga2lsbGluZyB0aGUgY2xpZW50OgogIDE4NDE5MDMgIGNsYXVkZSAtLXNlc3Npb24taWQgNDA1NjkyOTMt4oCmIC9jb250aW51ZSA4MWRhNGYwZi3igKYKICDihpEgdGhlIGxvb3AgRElEIHJlYWNoIHRoZSBwZWVyIOKAlCBidXQgZm91bmQgbm8gcGFuZSwgc28gaXQgcmVwbGF5ZWQ8L2NvZGU+PC9wcmU+CiAgPC9kaXY+CiAgPGRpdiBjbGFzcz0iYXJ0aWZhY3QtYmVoYXZpb3ItcGFuZWwiIGRhdGEtc3RhdGU9InByb3Bvc2VkIiBkYXRhLWV2aWRlbmNlPSJtb2NrdXAiPgogICAgPHN0cm9uZz5Qcm9wb3NlZCDigJQgdGhlIGRhZW1vbiBjb3ZlcnMgd2hhdCB0aGUgbG9vcCBjYW5ub3Q8L3N0cm9uZz4KPHByZT48Y29kZT4kIGFnZW50cyBzZXNzaW9ucwogIGNsYXVkZSAgeW9zZW1pdGUtczAgIDJtIGFnbyAgIHJ1bm5pbmcgICAgICAgICAgICBSZWNvbm5lY3QgcuKApgogIGdyb2sgICAgeW9zZW1pdGUtczAgIDRtIGFnbyAgIGRldGFjaGVkICAgICAgICAgICBNYXJrZXQKICBjb2RleCAgIHlvc2VtaXRlLW00ICAxMW0gYWdvICBydW5uaW5nICAgICAgICAgICAgRGlzcGF0Y2gKICBjbGF1ZGUgIHppb24gICAgICAgICAxaCBhZ28gICBpZGxlICAgICAgICAgICAgICAgUHJpeCBDbG91ZAoKICBkZWZhdWx0IG9yZGVyOiBsYXN0IGFjdGl2aXR5LCBuZXdlc3QgZmlyc3QsIG1lcmdlZCBhY3Jvc3MgZGV2aWNlcwogIGBkZXRhY2hlZGAgaXMgYSBsYWJlbCwgbm90IGEgc29ydCBrZXk8L2NvZGU+PC9wcmU+CiAgPC9kaXY+CjwvZGl2PgoKIyMgVmFsaWRhdGlvbgoKfCBDaGVjayB8IEV4cGVjdGVkIHwKfCAtLS0gfCAtLS0gfAp8IEN1dCB0aGUgbGluayBtaWQtdHVybiwgbmV3IGJ1aWxkIGJvdGggZW5kcyB8IENvdW50ZG93biwgdGhlbiAqKmF0dGFjaCoqIOKAlCBzYW1lIHNlc3Npb24gaWQsIGluLWZsaWdodCB0dXJuIGludGFjdCB8CnwgU2FtZSB3aXRoIEdyb2sgfCBJZGVudGljYWw7IHByb3ZlcyBGMiBvdXRzaWRlIHVuaXQgdGVzdHMgfAp8IENsb3NlIHRoZSB0YWIgbWlkLXJ1biB8IERhZW1vbiBtYXJrcyBpdCBgZGV0YWNoZWRgIHdpdGhpbiBhIHRpY2sgfAp8IFJlYm9vdCB6aW9uIHdpdGggYSByZW1vdGUgYWdlbnQgYWxpdmUgfCBCb290IHN3ZWVwIHN1cmZhY2VzIGl0IHwKfCBgLS1yYXdgIHJ1biwgbGluayBkcm9wcyB8IE5vIHJlY29ubmVjdCDigJQgZG9jdW1lbnRlZCwgbm90IGEgc3VycHJpc2UgfAp8IEtpbGwgc3NoIHdpdGggYC05YCB8IFJlY29ubmVjdCBmaXJlcyAoYWxyZWFkeSBwcm92ZW4pIHwKCiMjIFJpc2tzCgp8IFJpc2sgfCBNaXRpZ2F0aW9uIHwKfCAtLS0gfCAtLS0gfAp8IFN0ZXAgNSBicmVha3MgZXh0IHN0YXJ0dXAgfCBJdCBnb2VzIGxhc3QsIG9ubHkgYWZ0ZXIgdGhlIGRhdGEgaXQgbmVlZHMgaXMgcHJvdmFibHkgb24gdGhlIHN0cmVhbSB8CnwgYGRldGFjaGVkYCBsaWVzIHwgRGVyaXZlZCBmcm9tIGEgcmVhbCBwcm9iZSBvZiB0aGUgcGVlcidzIHBhbmUsIG5ldmVyIGZyb20gYSBtaXNzaW5nIGxvY2FsIGNsaWVudCB8CnwgVGhlIDQ1cyBzaWxlbnQtZHJvcCBkZXRlY3Rpb24gZmVlbHMgc2xvdyB8IEl0IGlzIGBTZXJ2ZXJBbGl2ZUludGVydmFsYCDigJQgdHVuYWJsZSwgYnV0IHNob3J0ZW5pbmcgaXQgY29zdHMgZmFsc2UgcG9zaXRpdmVzIG9uIGEgYnVzeSBsaW5rIHwKfCBEYWVtb24gYmVjb21lcyBhIHNpbmdsZSBwb2ludCBvZiBmYWlsdXJlIHwgQ29uc3VtZXJzIGtlZXAgdGhlIGRpcmVjdCBDTEkgcGF0aCBhcyBhIGRlZ3JhZGVkIGZhbGxiYWNrIHwKCiMjIENoZWNrbGlzdAoKLSBbeF0gVHJhY2UgdGhlIG1lY2hhbmlzbSBlbmQgdG8gZW5kIGZyb20gc291cmNlCi0gW3hdIEVzdGFibGlzaCB0aGF0IHRoZSBsb29wIGZpcmVzIGFuZCByZWFjaGVzIHRoZSBwZWVyIChwaWQgMTg0MTkwMyBldmlkZW5jZSkKLSBbeF0gRW51bWVyYXRlIGNvdmVyZWQgYW5kIHVuY292ZXJlZCBjYXNlcwotIFsgXSBTaGlwIDEuMjIuNDgsIHRoZW4gcHJvdmUgdGhlICoqYXR0YWNoKiogYnJhbmNoIHdpdGggYSBsaXZlIHBhbmUKLSBbIF0gU3RlcCAxIOKAlCBkYWVtb24gcHVibGlzaGVzIHRoZSBkaXNwbGF5IG5hbWUKLSBbIF0gU3RlcCAyIOKAlCBgdW5rbm93bmAgKyBydW5uaW5nLWNhbi1iZS1vcnBoYW5lZCAoUlVTSC0zMTgzKQotIFsgXSBTdGVwIDMg4oCUIGRhZW1vbiBvd25zIGBkZXRhY2hlZGAgKyBib290IHN3ZWVwIChSVVNILTMxODApCi0gWyBdIFN0ZXBzIDTigJM2IOKAlCBwZWVyLWFuc3dlcnMsIGNvb3JkaW5hdG9yIG1vdmUsIG9uZSBgY3JlYXRlU2Vzc2lvbmAKCiMjIFRyYWNraW5nCgotIFtSVVNILTMxMjVdKGh0dHBzOi8vbGluZWFyLmFwcC9wcml4L2lzc3VlL1JVU0gtMzEyNSkgwrcgUlVTSC0zMTgzIMK3IFJVU0gtMzE4MCDCtyBSVVNILTMxNzUgwrcgUlVTSC0zMTM5Ci0gYWdpLWNsaSMzMDE5IOKAlCB0aGUgc3Bhd24gbG9vcCBzdGVwIDUgZW5kcyBzdHJ1Y3R1cmFsbHkK"}</script>
+<script type="application/json" id="artifacts-source">{"encoding":"base64","markdown":"LS0tCmtpbmQ6IHBsYW4KdGVtcGxhdGU6IHBsYW4udjEKdGl0bGU6IFRoZSBmaXggcGxhbiDigJQgd2hhdCB3ZSBjaGFuZ2UsIGluIHdoYXQgb3JkZXIsIHRvIHN0b3AgbG9zaW5nIGFnZW50cwpzdW1tYXJ5OiA+LQogIEVpZ2h0IGZpeGVzIG9yZGVyZWQgYnkgd2hhdCB0aGV5IGJ1eSB5b3UuIFNpeCBhcmUgbWVyZ2VkIGFuZCB1bnNoaXBwZWQsIHNvIGZpeCB6ZXJvIGlzCiAgc2hpcHBpbmcgdGhlbS4gRXZlcnl0aGluZyBhZnRlciBpcyBjb25jcmV0ZSBjb2RlIGluIG5hbWVkIGZpbGVzLCBubyBuZXcgdGlja2V0cy4KaGVhZGVyOiBBR0kgQ0xJIMK3IHRoZSBmaXggcGxhbgpmb290ZXI6IFBob2VuaXggTGFicwpwcm9qZWN0OiBhZ2VudHMtY2xpCmNvbnRleHQ6ID4tCiAgQ29uc29saWRhdGVzIGV2ZXJ5IHJlcXVpcmVtZW50IGZyb20gdGhpcyBzZXNzaW9uIGludG8gb25lIG9yZGVyZWQgcGxhbiBvZiBhY3R1YWwgY29kZQogIGNoYW5nZXMuIFN1cGVyc2VkZXMgdGhlIHNlcGFyYXRlIHN1cnZleXMgYW5kIGRlc2lnbiBub3Rlcy4KcmVwb3NpdG9yeTogcGhueC1sYWJzL2FnZW50cy1jbGkKYnJhbmNoOiBwbGFuL3JlY29ubmVjdC1hcmNoaXRlY3R1cmUKc3VyZmFjZTogY2xpCnRyYWNraW5nOiBSVVNILTMxMjUKc3RhdHVzOiBkcmFmdApoYXJuZXNzOiBjbGF1ZGUKYWdlbnQ6IGNsYXVkZQpodW1hbjogTXVxc2l0Cmhvc3Q6IHppb24Kc2Vzc2lvbjogZTliODUzYmMKZGF0ZTogJzIwMjYtMDgtMjUnCmZhY3RzOgogIC0gJ1NpeCBmaXhlcyBhcmUgbWVyZ2VkIGFzIGVkZTM5OGM0OCBhbmQgb24gemVybyBtYWNoaW5lcyDigJQgbnBtIGlzIHN0aWxsIDEuMjIuNDcnCiAgLSAnUmVjb25uZWN0IGZpcmVzIG9ubHkgb24gc3NoIGV4aXRpbmcgMjU1OyBhIGNsb3NlZCB0YWIsIGEgY3Jhc2ggb3IgYSByZWJvb3QgZmlyZXMgbm90aGluZycKICAtICdjbGFzc2lmeUhvc3RMaW5rIHJldHVybnMgY29ubmVjdGVkIHdoZW4gaXQgaGFzIG5vIHNpZ25hbCBhdCBhbGwnCiAgLSAnbGFzdEFjdGl2aXR5ID8/IHRpbWVzdGFtcCBpcyByZS1pbXBsZW1lbnRlZCBpbiA3IHBsYWNlcywgYW5kIGdyb3VwcyBhbHJlYWR5IGRpc2FncmVlIHdpdGggdGhlIHJvd3MgaW5zaWRlIHRoZW0nCiAgLSAnVXNhZ2UgaXMgZmV0Y2hlZCBieSBhbGwgMTEgZGV2aWNlcyDigJQgODggcHJvdmlkZXIgY2FsbHMgYSBtaW51dGUgd2hlcmUgOCB3b3VsZCBkbycKbGlua3M6CiAgLSB0aXRsZTogUlVTSC0zMTI1CiAgICB1cmw6IGh0dHBzOi8vbGluZWFyLmFwcC9wcml4L2lzc3VlL1JVU0gtMzEyNQphc3NldHM6IFtdCi0tLQoKIyMgUHVycG9zZQoKIyMjIFdoYXQgeW91IGFza2VkIGZvciwgZnJvbSB0aGUgdG9wCgo+ICoiSSBydW4gYWdlbnRzIGluIFZTIENvZGl1bSBmdWxsLXNpemUgYWdlbnQgdGVybWluYWxzLiBJZiB0aGVyZSBpcyBzb21lIHNsaWdodCBpbnRlcm5ldAo+IGRpc3J1cHRpb24gdGhlbiBhbGwgb2YgbXkgYWdlbnRzIGJhc2ljYWxseSBqdXN0IGV4aXQgb3IgdGltZW91dC4gSG93IGNhbiB3ZSBwcmV2ZW50IHRoaXMsCj4gb3IgaGF2ZSBhIG11Y2ggbmljZXIgcmVjb25uZWN0aW9uPyIqCgpFdmVyeXRoaW5nIHNpbmNlIGhhcyBhZGRlZCBjb25zdHJhaW50cyB0byB0aGF0IG9uZSBnb2FsOgoKfCAjIHwgUmVxdWlyZW1lbnQgfCBXaGVyZSBpdCBjYW1lIGZyb20gfAp8IC0tLSB8IC0tLSB8IC0tLSB8CnwgUjEgfCBBbiBhZ2VudCBzdXJ2aXZlcyBhIG5ldHdvcmsgYmxpbmsgYW5kIEkgZ2V0IGJhY2sgaW50byAqKnRoZSBzYW1lIGFnZW50KiosIG5vdCBhIHJlcGxheSB8IHRoZSBvcmlnaW5hbCBhc2sgfAp8IFIyIHwgSXQgaXMgKip2ZXJpZmllZCBpbiByZWFsIFZTIENvZGl1bSoqLCBub3QganVzdCB1bml0IHRlc3RzIHwgKiJzcGluIHVwIFZTIENvZGUgb24gemlvbiBhbmQgYWN0dWFsbHkgdGVzdCBpdCIqIHwKfCBSMyB8IFJlY292ZXJ5IGxpdmVzIGluIHRoZSAqKkNMSS9kYWVtb24qKiwgbmV2ZXIgdGhlIGV4dGVuc2lvbiB8ICoidGhlIGRhZW1vbiBpcyB0aGUgc2luZ2xlIHBvaW50IG9mIHRydXRoIiogfAp8IFI0IHwgdG11eCBtdXN0IG5vdCBicmVhayBwZW9wbGUgd2hvIGFscmVhZHkgdXNlIGl0LCBub3IgY29uZnVzZSBwZW9wbGUgd2hvIGRvbid0IHwgKiJ0aGV5J3JlIGdvbm5hIGhhdmUgYSByZWFsbHkgaGFyZCB0aW1lIHVzaW5nIGl0IiogfAp8IFI1IHwgVGhlIGRhZW1vbiBvd25zICoqYWxsKiogc2Vzc2lvbiBtYW5hZ2VtZW50IOKAlCBjcmVhdGlvbiwgb3JwaGFuIGRldGVjdGlvbiwgbWV0YWRhdGEsIGBzZXNzaW9ucy5kYmAgfCAqInRoYXQgbG9naWMgaXMgbm90IHZlcnkgd2VsbCBpbXBsZW1lbnRlZCIqIHwKfCBSNiB8IERldmljZS1sb2NhbCBqb2JzIGFuZCBmbGVldC1zaW5nbGV0b24gam9icyBhcmUgKipkaWZmZXJlbnQga2luZHMgb2Ygam9iKiogfCAqIndlIG5lZWQgdG8gaGFuZGxlIHRoZXNlIHR3byBkaWZmZXJlbnQgdHlwZXMiKiB8CnwgUjcgfCBVc2FnZSBpcyBmZXRjaGVkICoqb25jZSoqLCBvbiBhIHN0YWJsZSBkZXZpY2UsIGFuZCBicm9hZGNhc3QgfCAqIndlJ3JlIEREb1NpbmcgdGhlIEFQSSIqIHwKfCBSOCB8IERvbid0IGNoYW5nZSBvcmRlcmluZyBub2JvZHkgYXNrZWQgZm9yLiBTdGF0dXMgaXMgYSAqKmxhYmVsKio7IGRlZmF1bHQgb3JkZXIgaXMgKipsYXN0IGFjdGl2aXR5KiosIG1lcmdlZCBhY3Jvc3MgZGV2aWNlcyB8ICoid2h5IGFyZSB5b3UgY2hhbmdpbmcgdGhlIG9yZGVyPyIqIHwKfCBSOSB8IE9yZGVyaW5nIG11c3QgYmUgKip0cnVzdHdvcnRoeSoqIOKAlCB3aGF0IGlmIGxhc3QtYWN0aXZpdHkgaXMgbWlzc2luZywgb3IgdGhlIHJvdyBpcyByZW1vdGU/IHwgKiJ3aGF0IGlzIHRoZSBndWFyYW50ZWU/IiogfAp8IFIxMCB8ICoqRml4IHRoaW5ncy4qKiBTdG9wIHByb2R1Y2luZyB0aWNrZXRzIHwgKiJ3ZSBqdXN0IHByb2R1Y2Ugc2xvcCB0aWNrZXRzIiogfAoKPGFzaWRlIGNsYXNzPSJhcnRpZmFjdC1jYWxsb3V0Ij48c3Ryb25nPkxvYWQtYmVhcmluZyB0YWtlYXdheTo8L3N0cm9uZz4gc2l4IGZpeGVzIGZvciBSMSBhcmUKYWxyZWFkeSB3cml0dGVuLCByZXZpZXdlZCBhbmQgbWVyZ2VkIOKAlCBhbmQgcnVubmluZyBvbiA8c3Ryb25nPnplcm88L3N0cm9uZz4gbWFjaGluZXMuIFVudGlsCjEuMjIuNDggcHVibGlzaGVzLCBldmVyeSBvbmUgb2YgdGhlbSBpcyBpbmVydCBhbmQgUjIgY2Fubm90IGV2ZW4gYmUgYXR0ZW1wdGVkLiBUaGF0IGlzIGZpeAp6ZXJvLCBhbmQgaXQgaXMgdGhlIG9ubHkgb25lIHRoYXQgbmVlZHMgeW91ciBoYW5kcy48L2FzaWRlPgoKIyMgUHJvcG9zZWQgQ2hhbmdlcwoKIyMjIEZpeCAwIOKAlCBzaGlwIHdoYXQgaXMgYWxyZWFkeSBidWlsdCDCtyB1bmJsb2NrcyBSMSwgUjIKCmBlZGUzOThjNDhgIGlzIG9uIGBtYWluYCwgQ0kgZ3JlZW4sIHJldmlldyBhcHByb3ZlZC4gbnBtIGlzIHN0aWxsICoqMS4yMi40NyoqLCBhbmQKYHJlc29sdmVUbXV4V3JhcGAgaGFzICoqMCBvY2N1cnJlbmNlcyoqIGluIHlvdXIgaW5zdGFsbGVkIENMSS4gSXQgY29udGFpbnM6Cgp8IHwgfCBWZXJpZmllZCBieSB8CnwgLS0tIHwgLS0tIHwgLS0tIHwKfCBGMSB8IHJlbW90ZSBgLS1kZXZpY2VgIGFnZW50cyBkZXRhY2ggb24gdGhlIHBlZXIsIHNvIGEgYmxpbmsgY2Fubm90IFNJR0hVUCB0aGVtIHwgcGlkcyBnb25lIHByZS1maXg7IHBhbmUgc3Vydml2ZWQgcG9zdC1maXggfAp8IEYyIHwgcmVjb25uZWN0IGtleWVkIG9mZiBgQUdFTlRfTEFVTkNIX0lEYCDigJQgZXZlcnkgaGFybmVzcywgbm90IGp1c3QgQ2xhdWRlIHwgbGl2ZSBsYXVuY2gtaWQgcmVzb2x1dGlvbiB8CnwgRjMgfCBpbnRlcmFjdGl2ZSBzdHJlYW1zIG9mZiB0aGUgc2hhcmVkIENvbnRyb2xNYXN0ZXIg4oCUIG9uZSBibGlwIHN0b3BzIGtpbGxpbmcgZXZlcnkgdGFiIHwgNiB0YWJzIG9uIG9uZSBzb2NrZXQsIG9ic2VydmVkIHwKfCBGNCB8IDE1LW1pbnV0ZSByZXRyeSB3aW5kb3cgKHdhcyB+OTBzKSwgY291bnRkb3duLCB3b3JraW5nIEN0cmwtQyB8IHVuaXQgfAp8IEY1IHwgdGVybWlvcyArIERFQyByZXN0b3JlLCBkcmFpbiBnYXRlZCBvbiBhYm5vcm1hbCBleGl0IHwgcmVhbCBwdHkgfAp8IEY3IHwgbm90aWNlcyBuYW1lIGBhZ2VudHMgc2Vzc2lvbnMgcmVzdW1lYCwgbm90IGEgZGVhZCBjb21tYW5kIHwgdW5pdCB8CgpgYGBiYXNoCmFwcHMvY2xpL3NjcmlwdHMvcmVsZWFzZS5zaCAxLjIyLjQ4IC0tYXBwbHkgICAgICMgYW5zd2VyIHRoZSBbeS9OXQpgYGAKCkJhY2tncm91bmRpbmcgaXQgZXhpdHMgMCBwdWJsaXNoaW5nIG5vdGhpbmcgKHRoZSBwcm9tcHQgcmVhZHMgRU9GKTsgYC0teWVzYCBpcyByZWZ1c2VkIGJ5CnRoZSBzYW5kYm94IGFzIGFuIGlycmV2ZXJzaWJsZSBwdWJsaWMgcHVibGlzaC4gKipUaGlzIG9uZSBpcyB5b3Vycy4qKgoKVGhlbiBSMiBiZWNvbWVzIHBvc3NpYmxlOiByZWFsIFZTIENvZGl1bSB0YWIsIGN1dCB0aGUgbGluayBmb3IgcmVhbCwgd2F0Y2ggaXQgcmVqb2luIGEKKipsaXZlKiogcGFuZS4gVGhhdCBpcyB0aGUgb25lIGJyYW5jaCBzdGlsbCB1bnByb3ZlbiDigJQgZXZlcnl0aGluZyBvYnNlcnZlZCBzbyBmYXIgbGFuZGVkIG9uCipyZXN1bWUqLCBiZWNhdXNlIHRoZXJlIHdhcyBubyBwYW5lIHRvIGF0dGFjaCB0by4KCiMjIyBGaXggMSDigJQgc3RvcCByZXBvcnRpbmcgImZpbmUiIHdoZW4gd2Uga25vdyBub3RoaW5nIMK3IFI1LCBSOQoKYGxpYi9zZXNzaW9uL2hvc3QtbGluay50c2AgZmFsbHMgdGhyb3VnaCB0byBhICoqYmxpbmQgZGVmYXVsdCoqOgoKYGBgdHMKaWYgKGlucHV0LnRtdXhDbGllbnRzID09PSAwKSByZXR1cm4gJ25vLWNsaWVudCc7ICAgLy8gYXV0aG9yaXRhdGl2ZSDinJMKaWYgKHdpbmRvd0dvbmUpICAgICAgICAgICAgICByZXR1cm4gJ25vLWNsaWVudCc7CnJldHVybiAnY29ubmVjdGVkJzsgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAvLyDihpAgbm8gc2lnbmFsIGF0IGFsbCByZWFkcyBhcyBoZWFsdGh5CmBgYAoKQW5kIGBsaWIvc2Vzc2lvbi9hY3RpdmUudHNgIG9ubHkgcHJvbW90ZXMgaXQgd2hlbiB0aGUgc2Vzc2lvbiBpcyAqYWxyZWFkeSBpZGxlKjoKCmBgYHRzCmVsc2UgaWYgKGxpbmsgPT09ICduby1jbGllbnQnICYmIChzLnN0YXR1cyA9PT0gJ2lkbGUnIHx8IHMuc3RhdHVzID09PSAnaW5wdXRfcmVxdWlyZWQnKSkgewogIHMuc3RhdHVzID0gJ29ycGhhbmVkJzsKfQpgYGAKCioqQ2hhbmdlOioqIGFkZCBgJ3Vua25vd24nYCB0byBgSG9zdExpbmtgLCByZXR1cm5lZCB3aGVuIHRoZXJlIGlzIG5vIHVzYWJsZSBzaWduYWwuIERyb3AgdGhlCmBpZGxlIHx8IGlucHV0X3JlcXVpcmVkYCBnYXRlIHNvIGEgKipydW5uaW5nKiogYWdlbnQgd2l0aCBubyBjbGllbnQgaXMgc3VyZmFjZWQg4oCUIHRoYXQgaXMKdGhlIGV4cGVuc2l2ZSBjYXNlLCBzdGlsbCBidXJuaW5nIHRva2Vucy4gS2VlcCBgZGVsaWJlcmF0ZWx5RGV0YWNoZWRgIGZpcnN0IGFuZApgdG11eENsaWVudHNgIGF1dGhvcml0YXRpdmU7IGJvdGggYXJlIGNvcnJlY3QuCgp+MjAgbGluZXMgYWNyb3NzIHR3byBmaWxlcy4gVGVzdHM6IG5vLXNpZ25hbCDihpIgYHVua25vd25gOyBydW5uaW5nICsgbm8tY2xpZW50IOKGkiBgb3JwaGFuZWRgOwpkZXRhY2hlZCDihpIgYGNvbm5lY3RlZGAgcmVnYXJkbGVzcyBvZiBldmVyeXRoaW5nIGVsc2UuCgojIyMgRml4IDIg4oCUIG9uZSByZWNlbmN5IGZ1bmN0aW9uIMK3IFI4LCBSOQoKYGxhc3RBY3Rpdml0eSA/PyB0aW1lc3RhbXBgIGlzIHJlLWltcGxlbWVudGVkICoqc2V2ZW4gdGltZXMqKiwgYW5kIHRoZSBkdXBsaWNhdGlvbiBoYXMKYWxyZWFkeSBzaGlwcGVkIGEgdmlzaWJsZSBidWcgaW4gYGNvbW1hbmRzL3Nlc3Npb25zLnRzYDoKCmBgYHRzCm1heFRzOiByb3dzWzBdLmxhc3RBY3Rpdml0eSA/PyByb3dzWzBdLnRpbWVzdGFtcCAgICAgICAgICAgICAgICAgICAgICAvLyBncm91cDogYnkgYWN0aXZpdHkKc2Vzc2lvbnM6IHJvd3Muc29ydCgoYSwgYikgPT4gKGEudGltZXN0YW1wIDwgYi50aW1lc3RhbXAgPyAxIDogLTEpKSAgIC8vIHJvd3M6IGJ5IENSRUFUSU9OCmBgYAoKR3JvdXBzIG9yZGVyZWQgYnkgYWN0aXZpdHksIHJvd3MgaW5zaWRlIHRoZW0gb3JkZXJlZCBieSBjcmVhdGlvbiDigJQgc2FtZSBjb21tYW5kLCBzYW1lCnNjcmVlbi4KCioqQ2hhbmdlOioqIG9uZSBgbGliL3Nlc3Npb24vcmVjZW5jeS50c2AgZXhwb3J0aW5nIGByZWNlbmN5T2Yoc2Vzc2lvbilgIGltcGxlbWVudGluZyB0aGUKZG9jdW1lbnRlZCBjaGFpbiDigJQgbGFzdCBtZXNzYWdlIHRzIOKGkiBmaWxlIG10aW1lIOKGkiBjcmVhdGlvbiDigJQgcmV0dXJuaW5nIGEgY29tcGFyYWJsZSBudW1iZXIsCnVucGFyc2VhYmxlIHNvcnRpbmcgbGFzdC4gRGVsZXRlIGJvdGggcHJpdmF0ZSBgcm93VHMoKWAgaGVscGVycyAoYHRlYW0tZmlsdGVyLnRzYCwKYHRyYWplY3RvcnktbGluZWFnZS50c2ApLCBgc2Vzc2lvblJlY2VuY3koKWAgaW4gYGNvbW1hbmRzL3JlY29ubmVjdC50c2AsIGFuZCB0aGUgZm91ciBpbmxpbmUKb2NjdXJyZW5jZXMgaW4gYGNvbW1hbmRzL3Nlc3Npb25zLnRzYC4KCioqT3JkZXJpbmcgaXRzZWxmIGRvZXMgbm90IGNoYW5nZToqKiBsYXN0IGFjdGl2aXR5LCBuZXdlc3QgZmlyc3QsIG1lcmdlZCBhY3Jvc3MgZGV2aWNlcwp1bmxlc3Mgc2NvcGVkLiBTdGF0dXMgc3RheXMgYSBsYWJlbC4KCioqUmVtb3RlIHJvd3M6KiogdGhlIHBlZXIgY29tcHV0ZXMgaXRzIG93biB2YWx1ZSBhbmQgc2hpcHMgYW4gSVNPIHN0cmluZywgd2hpY2gKYHBhcnNlUmVtb3RlTGlzdGAgc3ByZWFkcyB2ZXJiYXRpbS4gSVNPIGlzIGFic29sdXRlIHNvIHRoZXJlIGlzIG5vIHRpbWV6b25lIHByb2JsZW0sIGJ1dAoqKmNsb2NrIHNrZXcgaXMgdW5jb3JyZWN0ZWQqKiBhbmQgbm90aGluZyBkZXRlY3RzIGl0LiBgcmVjZW5jeU9mYCBtYXJrcyBhIHZhbHVlIGFzCmRlcml2ZWQtbm90LW1lYXN1cmVkIChtdGltZSBvciBjcmVhdGlvbiwgcmF0aGVyIHRoYW4gYSByZWFsIG1lc3NhZ2UgdGltZXN0YW1wKSBzbyBhIGxpc3RpbmcKY2FuIHNob3cgYH5gIGluc3RlYWQgb2YgaW1wbHlpbmcgcHJlY2lzaW9uIGl0IGRvZXMgbm90IGhhdmUuCgojIyMgRml4IDMg4oCUIHRoZSBkYWVtb24gcHVibGlzaGVzIHRoZSBuYW1lIMK3IFIzLCBSNQoKVGFiIG5hbWluZyBpcyAqKn4yMTUgcmVmZXJlbmNlcyBhY3Jvc3MgMTIgZXh0ZW5zaW9uIGZpbGVzKiogYW5kICoqemVybyoqIGluIHRoZSBDTEkuIFRoZSBleHQKZGVyaXZlcyBhIHByb3Zpc2lvbmFsIGxhYmVsIHRoZW4gcmVjb25jaWxlcyBhZ2FpbnN0IGEgaGFybmVzcy1vd25lZCBvbmUg4oCUIHR3bwppbXBsZW1lbnRhdGlvbnMgcmFjaW5nLCB3aGljaCBpcyB3aHkgYSB0YWIgYW5kIGBhZ2VudHMgc2Vzc2lvbnNgIGNhbiBkaXNhZ3JlZS4KCioqQ2hhbmdlOioqIHRoZSBkYWVtb24gY29tcHV0ZXMgYGRpc3BsYXlOYW1lYCBvbnRvIHRoZSBzZXNzaW9uIHJvdzsgdGhlIGV4dCByZW5kZXJzIGl0IHdoZW4KcHJlc2VudC4gQWRkaXRpdmUg4oCUIG5vdGhpbmcgYnJlYWtzIGlmIGFic2VudC4gVGhlbiBkZWxldGUgdGhlIGV4dCBkZXJpdmF0aW9uLCBrZWVwaW5nIG9uZQpydWxlOiBhIG1hbnVhbCByZW5hbWUgd2lucy4KCiMjIyBGaXggNCDigJQgdGhlIGRhZW1vbiBvd25zIHRoZSBvcnBoYW4sIGluY2x1ZGluZyBhdCBib290IMK3IFIxLCBSMywgUjUKClRoaXMgaXMgd2hlcmUgUjEgYWN0dWFsbHkgY29tcGxldGVzLiBUaGUgcmVjb25uZWN0IGxvb3AgZmlyZXMgb24gKipvbmUqKiB0cmlnZ2VyIOKAlCBzc2gKZXhpdGluZyAyNTUg4oCUIGFuZCBsaXZlcyAqKmluc2lkZSoqIHRoZSBgYWdlbnRzIHJ1bmAgcHJvY2Vzcywgc28gYSBjbG9zZWQgdGFiLCBhIGNyYXNoIG9yIGEKcmVib290IGZpcmVzIG5vdGhpbmcuIFRoZSBsb29wIGNhbm5vdCBvdXRsaXZlIGl0cyBvd24gcHJvY2Vzcy4KCioqQ2hhbmdlOioqIHRoZSBkYWVtb24gd3JpdGVzIGEgYGRldGFjaGVkYCBzdGF0ZSBmb3IgYSBzZXNzaW9uIGFsaXZlIHdpdGggbm8gY2xpZW50LCBkZXJpdmVkCmZyb20gYSByZWFsIHByb2JlIG9mIHRoZSBwYW5lIOKAlCBuZXZlciBpbmZlcnJlZCBmcm9tIGEgbWlzc2luZyBsb2NhbCBjbGllbnQuIFBsdXMgYSAqKmJvb3QKc3dlZXAqKiwgYmVjYXVzZSBhIGxhcHRvcCByZWJvb3QgZG9lcyBub3QgdG91Y2ggYSBwZWVyJ3MgdG11eDogdGhvc2UgYWdlbnRzIGFyZSBzdGlsbCBhbGl2ZQphbmQgc3RpbGwgYXR0YWNoYWJsZSwgYW5kIHRoZSBkYWVtb24gaXMgdGhlIG9ubHkgY29tcG9uZW50IHRoYXQgc3Vydml2ZXMgdG8gbm90aWNlLgoKUmUtYXR0YWNoIHN0YXlzIHVzZXItaW5pdGlhdGVkLiBUaGUgZGFlbW9uIHN1cmZhY2VzIGFuZCBvZmZlcnM7IGl0IG5ldmVyIHJlb3BlbnMgYSB0YWIuCgojIyMgRml4IDUg4oCUIGEgcGVlciBhbnN3ZXJzIGZvciBpdHMgb3duIHNlc3Npb25zIMK3IFIzLCBSNQoKQm90aCBob3N0LWxpbmsgc2lnbmFscyBhcmUgbG9jYWwg4oCUIHRoaXMgYm94J3Mgd2luZG93IHJlZ2lzdHJ5LCB0aGlzIGJveCdzIHRtdXguIEEKYC0tZGV2aWNlYCBzZXNzaW9uJ3MgcGFuZSBpcyBvbiB0aGUgcGVlciwgc28gdGhlIGNsYXNzaWZpY2F0aW9uIGlzICpzdHJ1Y3R1cmFsbHkqCnVuYXZhaWxhYmxlIGhlcmUuIFRvZGF5IHRoYXQgc2lsZW50bHkgYmVjb21lcyBgY29ubmVjdGVkYC4KCioqQ2hhbmdlOioqIHRoZSBwZWVyIGNsYXNzaWZpZXMgaXRzIG93biBwYW5lcyBhbmQgcmVwb3J0cyBpdCBvdmVyIHRoZSBleGlzdGluZyBmZWVkLiBOb3QgYQpsb2NhbCBwYXRjaCDigJQgdGhlIHF1ZXN0aW9uIHdhcyBiZWluZyBhc2tlZCBvZiB0aGUgd3JvbmcgbWFjaGluZS4KCiMjIyBGaXggNiDigJQgdXNhZ2UgZmV0Y2hlZCBvbmNlIMK3IFI2LCBSNwoKYGxpYi9hY2NvdW50LXN0YXRlLXNlcnZpY2UudHNgIGlzIGRvY3VtZW50ZWQgKioiRGV2aWNlLWxvY2FsIG93bmVyIGZvciB1c2FnZSBzbmFwc2hvdHMiKioKYW5kIGV2ZXJ5IGRhZW1vbiBydW5zIGl0IGV2ZXJ5IDYwcy4gMTEgZGV2aWNlcyDDlyA4IGFjY291bnRzID0gKio4OCBwcm92aWRlciBjYWxscyBhIG1pbnV0ZSoqCndoZXJlIDggd291bGQgZG8uCgpgd2l0aFJlZnJlc2hMZWFzZWAgYWxyZWFkeSBoYXMgdGhlIHJpZ2h0IHNoYXBlIOKAlCBzY29wZSwga2V5LCBhY3F1aXJlLCByZS1yZWFkLCBmZXRjaCBvbmx5IGlmCm5vYm9keSBkaWQsIHB1Ymxpc2gsIHJlbGVhc2Ug4oCUIGluY2x1ZGluZyB0aGUgYHJlYWRDb21wbGV0ZWQoKWAgcmUtY2hlY2sgdGhhdCBsZXRzIHdhaXRlcnMKY29uc3VtZSB0aGUgd2lubmVyJ3MgcmVzdWx0IGZvciBmcmVlLiBXaGF0IGl0IGxhY2tzIGlzIGEgbG9jayByZWFjaGFibGUgZnJvbSBtb3JlIHRoYW4gb25lCm1hY2hpbmUuCgoqKkNoYW5nZToqKiBhIGZsZWV0LXNjb3BlZCBiYWNrZW5kIGZvciB0aGF0IGxlYXNlLCB3aXRoIGFjcXVpc2l0aW9uICoqd2VpZ2h0ZWQgYnkgZGV2aWNlCnN0YWJpbGl0eSoqIHNvIGFuIGFsd2F5cy1vbiBNYWMgTWluaSBiZWF0cyBhIGxhcHRvcCB0aGF0IGdvZXMgaW4gYSBiYWNrcGFjaywgYW4gZXF1YWwgY2xhc3MKbmV2ZXIgcHJlZW1wdHMsIGFuZCB0aGUgaW50ZXJhY3RpdmUgZGV2aWNlIGlzIHRoZSBsYXN0IHJlc29ydC4gU25hcHNob3RzIHB1Ymxpc2ggd2l0aApgZmV0Y2hlZEF0YCAvIGBmZXRjaGVkQnlgIHNvIGEgZm9sbG93ZXIgc2hvd3MgKiJ1c2FnZSBhcyBvZiAxOHMgYWdvLCBmcm9tIG1hYy1taW5pIiogcmF0aGVyCnRoYW4gbHlpbmcgb3IgYmxvY2tpbmcuCgojIyMgRml4IDcg4oCUIHRoZSBjb29yZGluYXRvciBtb3ZlcyBpbnRvIHRoZSBkYWVtb24gwrcgUjMKCmB3YXRjaEZsZWV0RmVlZGAgaXMgY2FsbGVkIGZyb20gZXhhY3RseSBvbmUgcGxhY2UsIGFuZCBgYXBwcy9leHQvQUdFTlRTLm1kYCBhc3NpZ25zIHRoYXQKc3VicHJvY2VzcyB0byAqInRoZSBlbGVjdGVkIGV4dGVuc2lvbiBtb25pdG9yIiouIENsb3NlIFZTIENvZGl1bSBhbmQgbm90aGluZyB1bmlvbnMgdGhlCmZsZWV0LgoKKipDaGFuZ2U6KiogdGhlIGRhZW1vbiBob3N0cyBpdCBhbmQgZXhwb3NlcyB0aGUgdW5pb24gb3ZlciBpdHMgc29ja2V0OyB0aGUgZXh0IHN1YnNjcmliZXMuClRoaXMgZW5kcyB0aGUgcGVyLXRhYiBzcGF3biBsb29wIChhZ2ktY2xpIzMwMTkpIHN0cnVjdHVyYWxseSBpbnN0ZWFkIG9mIHRocm90dGxpbmcgaXQuCioqTGFzdCoqLCBiZWNhdXNlIGl0IHJlbW92ZXMgYSBzdWJwcm9jZXNzIHRoZSBleHQgY3VycmVudGx5IGRlcGVuZHMgb24uCgojIyMgT24gUjQg4oCUIHRtdXgsIGFuZCB3aGF0IHdlIGFyZSAqbm90KiBjaGFuZ2luZwoKQWxyZWFkeSBjb3JyZWN0LCB2ZXJpZmllZCBpbiBgbGliL3RtdXgvc2Vzc2lvbi50c2A6IGEgKipzZXBhcmF0ZSBzb2NrZXQqKiwgc28geW91ciBvd24gdG11eApzZXJ2ZXIgYW5kIHNlc3Npb25zIGFyZSB1bnRvdWNoZWQ7IGFuZCBgd3JpdGVTdGFydHVwQ29uZmlnYCB3cml0ZXMgb3VyIGRlZmF1bHRzIGZpcnN0IHRoZW4Kc291cmNlcyAqKmV2ZXJ5KiogY29uZmlnIHRtdXggaXRzZWxmIHdvdWxkIGxvYWQsIHNvIHlvdXIgYmluZGluZ3Mgd2luLiBUaGUgb25lIHJlYWwgZ2FwIGlzCnRoYXQgYSBub24tdG11eCB1c2VyIHNlZXMgYSBzdGF0dXMgYmFyIGFuZCBhIGBDLWJgIHRoZXkgbmV2ZXIgb3B0ZWQgaW50byDigJQgYSBvbmUtbGluZQpgc3RhdHVzIG9mZmAgZGVmYXVsdCwgcmVzdG9yYWJsZSBieSBhbnlvbmUgd2hvIHdhbnRzIGl0LgoKIyMgUHVibGljIEludGVyZmFjZQoKYGBgYmFzaAphZ2VudHMgcnVuIDxhZ2VudD4gLS1pbnRlcmFjdGl2ZSAtLWRldmljZSA8aG9zdD4gICAjIHVuY2hhbmdlZAphZ2VudHMgc2Vzc2lvbnMgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIyB1bmNoYW5nZWQgT1JERVI7IGdhaW5zIGEgYGRldGFjaGVkYCBsYWJlbAphZ2VudHMgc2Vzc2lvbnMgLS1kZXZpY2UgPG5hbWU+ICAgICAgICAgICAgICAgICAgICAgIyBzY29wZSB0byBvbmUgZGV2aWNlCmFnZW50cyB2aWV3ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAjIG5ldmVyIGNhbGxzIHRoZSBwcm92aWRlciBvbiBhIGZvbGxvd2VyCmBgYAoKPGRpdiBjbGFzcz0iYXJ0aWZhY3QtYmVoYXZpb3IiPgogIDxkaXYgY2xhc3M9ImFydGlmYWN0LWJlaGF2aW9yLXBhbmVsIiBkYXRhLXN0YXRlPSJjdXJyZW50IiBkYXRhLWV2aWRlbmNlPSJjYXB0dXJlIj4KICAgIDxzdHJvbmc+Q3VycmVudCDigJQgb24geW91ciBtYWNoaW5lcyByaWdodCBub3cgKDEuMjIuNDcpPC9zdHJvbmc+CjxwcmU+PGNvZGU+YmxpbmsgICAgICAgIOKGkiBhZ2VudCBTSUdIVVBlZCBvbiB0aGUgcGVlciwgd29yayBsb3N0Cmdyb2sgdGFiICAgICDihpIgbm8gcmVjb25uZWN0IGF0IGFsbCwgZHJvcHMgdG8gYSBzaGVsbAo2IHRhYnMgICAgICAg4oaSIG9uZSBDb250cm9sTWFzdGVyLCBhbGwgZGllIHRvZ2V0aGVyCmNsb3NlIHRhYiAgICDihpIgYWdlbnQgb3JwaGFuZWQsIG5vdGhpbmcgbm90aWNlcwp1c2FnZSAgICAgICAg4oaSIDg4IHByb3ZpZGVyIGNhbGxzL21pbnV0ZQpzZXNzaW9ucyAgICAg4oaSIGdyb3VwcyBieSBhY3Rpdml0eSwgcm93cyBpbnNpZGUgYnkgY3JlYXRpb248L2NvZGU+PC9wcmU+CiAgPC9kaXY+CiAgPGRpdiBjbGFzcz0iYXJ0aWZhY3QtYmVoYXZpb3ItcGFuZWwiIGRhdGEtc3RhdGU9InByb3Bvc2VkIiBkYXRhLWV2aWRlbmNlPSJtb2NrdXAiPgogICAgPHN0cm9uZz5BZnRlciBmaXggMCAodG9kYXkpIGFuZCBmaXhlcyAx4oCTNzwvc3Ryb25nPgo8cHJlPjxjb2RlPmJsaW5rICAgICAgICDihpIgZGV0YWNoZWQgcGFuZSBzdXJ2aXZlczsgcmVjb25uZWN0IHJlam9pbnMgaXQKYW55IGhhcm5lc3MgIOKGkiByZWNvbm5lY3RzIHZpYSBsYXVuY2ggaWQKNiB0YWJzICAgICAgIOKGkiBpbmRlcGVuZGVudCBjb25uZWN0aW9ucwpjbG9zZSB0YWIgICAg4oaSIGRhZW1vbiBtYXJrcyBpdCBkZXRhY2hlZCwgb2ZmZXJzIHJlc3VtZQp1c2FnZSAgICAgICAg4oaSIDggcHJvdmlkZXIgY2FsbHMvbWludXRlLCBicm9hZGNhc3QKc2Vzc2lvbnMgICAgIOKGkiBvbmUgcmVjZW5jeSBydWxlIGV2ZXJ5d2hlcmUKCiQgYWdlbnRzIHNlc3Npb25zCiAgY2xhdWRlICB5b3NlbWl0ZS1zMCAgMm0gYWdvICAgcnVubmluZyAgICBSZWNvbm5lY3QgcuKApgogIGdyb2sgICAgeW9zZW1pdGUtczAgIDRtIGFnbyAgIGRldGFjaGVkICAgTWFya2V0CiAgY29kZXggICB5b3NlbWl0ZS1tNCAgMTFtIGFnbyAgcnVubmluZyAgICBEaXNwYXRjaDwvY29kZT48L3ByZT4KICA8L2Rpdj4KPC9kaXY+CgojIyBWYWxpZGF0aW9uCgp8IENoZWNrIHwgRXhwZWN0ZWQgfAp8IC0tLSB8IC0tLSB8CnwgQ3V0IHRoZSBsaW5rIGluIGEgcmVhbCBWUyBDb2RpdW0gdGFiLCAxLjIyLjQ4IGJvdGggZW5kcyB8ICoqQXR0YWNoKiog4oCUIHNhbWUgc2Vzc2lvbiBpZCwgaW4tZmxpZ2h0IHR1cm4gaW50YWN0IChSMSwgUjIpIHwKfCBTYW1lIHdpdGggR3JvayB8IElkZW50aWNhbCAoUjEpIHwKfCBDbG9zZSB0aGUgdGFiIG1pZC1ydW4gfCBgZGV0YWNoZWRgIHdpdGhpbiBvbmUgZGFlbW9uIHRpY2sgKFI1KSB8CnwgUmVib290IHppb24sIGFnZW50IGFsaXZlIG9uIGEgcGVlciB8IEJvb3Qgc3dlZXAgc3VyZmFjZXMgaXQgKFI1KSB8CnwgU2Vzc2lvbiB3aXRoIG5vIHdpbmRvdyBhbmQgbm8gdG11eCB8IGB1bmtub3duYCwgbmV2ZXIgYGNvbm5lY3RlZGAgKFI5KSB8CnwgR3JvdXAgdnMgcm93cyBpbiBgYWdlbnRzIHNlc3Npb25zYCB8IFNhbWUgb3JkZXJpbmcgcnVsZSBmb3IgYm90aCAoUjgpIHwKfCBDb3VudCBwcm92aWRlciBjYWxscyBmbGVldC13aWRlLCA1IG1pbiB8IDgvbWluIChSNykgfAp8IEV4aXN0aW5nIHRtdXggdXNlcidzIGJpbmRpbmdzIHwgVW5jaGFuZ2VkIChSNCkgfAoKIyMgUmlza3MKCnwgUmlzayB8IE1pdGlnYXRpb24gfAp8IC0tLSB8IC0tLSB8CnwgRHJvcHBpbmcgdGhlIGlkbGUgZ2F0ZSBjcmVhdGVzIGZhbHNlIG9ycGhhbnMgfCBgZGVsaWJlcmF0ZWx5RGV0YWNoZWRgIHN0YXlzIGZpcnN0OyBgdG11eENsaWVudHNgIGF1dGhvcml0YXRpdmU7IG5vLXNpZ25hbCBiZWNvbWVzIGB1bmtub3duYCwgbm90IGBvcnBoYW5lZGAgfAp8IGByZWNlbmN5T2ZgIGNoYW5nZXMgdmlzaWJsZSBvcmRlciB8IEl0IGltcGxlbWVudHMgdGhlICpkb2N1bWVudGVkKiBjaGFpbjsgdGhlIGdyb3VwLXZzLXJvdyBkaXZlcmdlbmNlIGlzIHRoZSBidWcgYmVpbmcgcmVtb3ZlZCwgbm90IG5ldyBiZWhhdmlvdXIgfAp8IENsb2NrIHNrZXcgYWNyb3NzIGRldmljZXMgfCBTdXJmYWNlIGRlcml2ZWQgdmFsdWVzIGFzIGFwcHJveGltYXRlIHJhdGhlciB0aGFuIHNpbGVudGx5IHNvcnRpbmcgb24gdGhlbSB8CnwgRml4IDcgYnJlYWtzIGV4dCBzdGFydHVwIHwgR29lcyBsYXN0LCBvbmx5IGFmdGVyIHRoZSBkYXRhIGlzIHByb3ZhYmx5IG9uIHRoZSBzdHJlYW0gfAoKIyMgQ2hlY2tsaXN0CgotIFsgXSAqKkZpeCAwIOKAlCBwdWJsaXNoIDEuMjIuNDgqKiDihpAgeW91cnM7IGV2ZXJ5dGhpbmcgYmVsb3cgaXMgaW5lcnQgdW50aWwgdGhpcyBsYW5kcwotIFsgXSBGaXggMSDigJQgYHVua25vd25gICsgcnVubmluZy1jYW4tYmUtb3JwaGFuZWQgKGBob3N0LWxpbmsudHNgLCBgYWN0aXZlLnRzYCkKLSBbIF0gRml4IDIg4oCUIG9uZSBgcmVjZW5jeU9mKClgOyBkZWxldGUgNyBkdXBsaWNhdGVzOyBmaXggdGhlIGdyb3VwL3JvdyBkaXZlcmdlbmNlCi0gWyBdIEZpeCAzIOKAlCBkYWVtb24gcHVibGlzaGVzIGBkaXNwbGF5TmFtZWA7IGV4dCBzdG9wcyBkZXJpdmluZwotIFsgXSBGaXggNCDigJQgZGFlbW9uIG93bnMgYGRldGFjaGVkYCArIGJvb3Qgc3dlZXAKLSBbIF0gRml4IDUg4oCUIHBlZXJzIGNsYXNzaWZ5IHRoZWlyIG93biBzZXNzaW9ucwotIFsgXSBGaXggNiDigJQgZmxlZXQtc2NvcGVkIGxlYXNlIGZvciB1c2FnZTsgcHVibGlzaCB3aXRoIGBmZXRjaGVkQXRgL2BmZXRjaGVkQnlgCi0gWyBdIEZpeCA3IOKAlCBjb29yZGluYXRvciBpbnRvIHRoZSBkYWVtb24gKGVuZHMgYWdpLWNsaSMzMDE5KQotIFsgXSBSNCDigJQgYHN0YXR1cyBvZmZgIGRlZmF1bHQgZm9yIHRtdXgKCiMjIFRyYWNraW5nCgotIFtSVVNILTMxMjVdKGh0dHBzOi8vbGluZWFyLmFwcC9wcml4L2lzc3VlL1JVU0gtMzEyNSkg4oCUIHRoZSB1bWJyZWxsYTsgZml4ZXMgMeKAkzcgbGFuZCBhZ2FpbnN0IGl0Ci0gRml4ZXMgMSBhbmQgMiBhcmUgaW5kZXBlbmRlbnQgb2YgdGhlIHJlbGVhc2UgYW5kIGNhbiBzdGFydCBpbW1lZGlhdGVseQo="}</script>
 <script>
 (() => {
   const root = document.documentElement;
